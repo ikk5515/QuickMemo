@@ -46,7 +46,7 @@ VITE_USE_FIREBASE_EMULATORS=false
 ```
 
 4. Build > Firestore Database에서 데이터베이스를 만들고 production mode로 시작합니다.
-5. Build > Authentication > Sign-in method에서 Email/Password를 활성화합니다.
+5. Build > Authentication에서 시작하기를 누른 뒤 Sign-in method에서 Email/Password를 활성화하고 저장합니다.
 6. `.firebaserc.example`을 `.firebaserc`로 복사하고 프로젝트 ID를 넣습니다.
 
 ```bash
@@ -57,7 +57,30 @@ npx firebase-tools deploy --only firestore:rules,firestore:indexes
 
 이 앱은 `src/lib/firebase.ts`에서 `.env.local` 값을 읽어 Firebase 앱, Auth, Firestore를 초기화합니다. Firestore 컬렉션은 앱 사용 중 클라이언트와 Firestore Rules 검증으로 생성됩니다.
 
-Functions 없이 동작하도록 구성되어 있으므로 Blaze 요금제가 없어도 Firestore Rules/Indexes 배포와 Vercel 프론트엔드 배포로 사용할 수 있습니다. 단, Firebase Auth 제한 때문에 관리자가 다른 사용자의 비밀번호를 강제로 변경하는 기능은 제공하지 않습니다.
+Functions 없이 동작하도록 구성되어 있으므로 Blaze 요금제가 없어도 Firestore Rules/Indexes 배포와 Vercel 프론트엔드 배포로 사용할 수 있습니다. 단, Firebase Auth 제한 때문에 관리자가 다른 사용자의 비밀번호를 강제로 변경하려면 Admin SDK가 실행되는 신뢰할 수 있는 서버가 필요합니다.
+
+### Auth 설정 오류 해결
+
+첫 관리자 생성 중 `Firebase: Error (auth/configuration-not-found)`가 나오면 Firebase Auth가 아직 초기화되지 않은 상태입니다.
+
+1. Firebase Console > Build > Authentication으로 이동합니다.
+2. `시작하기`가 보이면 먼저 클릭합니다.
+3. Sign-in method 탭에서 Email/Password 제공업체를 열고 첫 번째 Email/Password 토글을 활성화한 뒤 저장합니다.
+4. Project settings > General > Your apps의 Web app config가 `.env.local`의 `VITE_FIREBASE_*` 값과 같은 프로젝트인지 확인합니다.
+5. 로컬 서버를 재시작한 뒤 `/setup`에서 첫 관리자를 다시 생성합니다.
+
+이 오류는 Firestore Rules나 DB 연결 문제가 아니라 `accounts:signUp` 요청을 처리할 Firebase Authentication 설정이 프로젝트에 없을 때 발생합니다.
+
+### 관리자 비밀번호 강제 변경
+
+다른 사용자의 Firebase Auth 비밀번호를 관리자가 강제로 변경하는 기능은 브라우저나 Firestore Rules만으로 안전하게 구현할 수 없습니다. 사용자의 현재 비밀번호 없이 Auth 계정을 수정하려면 Firebase Admin SDK의 관리자 권한이 필요하고, 이 SDK는 서비스 계정 권한을 쓰기 때문에 클라이언트 앱이나 Firestore 문서에 둘 수 없습니다.
+
+선택지는 두 가지입니다.
+
+- Spark/무료 유지: 관리자가 새 사용자의 초기 비밀번호만 설정하고, 기존 사용자는 본인 비밀번호로 로그인합니다. 비밀번호를 잊은 경우에는 관리자가 계정을 새로 만들거나 별도 복구 절차를 둡니다.
+- 강제 변경 유지: Firebase Cloud Functions, Cloud Run, 자체 서버 같은 신뢰할 수 있는 백엔드에 Admin SDK를 두고 관리자 권한을 검증한 뒤 `updateUser(uid, { password })`를 호출합니다. Cloud Functions 배포는 Blaze 요금제가 필요합니다.
+
+Firestore DB에 새 비밀번호를 저장해서 우회하는 방식은 권장하지 않습니다. Firebase Auth의 세션/해시/토큰 시스템과 분리되어 실제 로그인 비밀번호가 바뀌지 않고, 평문 또는 복호화 가능한 비밀번호를 DB에 두게 되어 보안 위험이 커집니다.
 
 ### Firebase App Check
 

@@ -3,6 +3,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, Navigate, useNavigate } from "react-router-dom";
 import { AvatarButton } from "../components/AvatarButton";
 import { useAuth } from "../context/AuthContext";
+import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { findRosterByShortcut } from "../lib/roster";
 import { subscribeRoster } from "../services/users";
 import type { PublicRosterUser } from "../types";
@@ -54,8 +55,8 @@ export default function LoginPage() {
     try {
       const nextProfile = await loginRosterUser(selectedUser, password);
       navigate(nextProfile.isAdmin ? "/admin" : "/app", { replace: true });
-    } catch {
-      setError("비밀번호를 확인해주세요.");
+    } catch (loginError) {
+      setError(firebaseAuthErrorMessage(loginError, "비밀번호를 확인해주세요."));
     } finally {
       setPending(false);
     }
