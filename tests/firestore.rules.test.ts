@@ -260,6 +260,48 @@ describeRules("firestore security rules", () => {
     );
   });
 
+  it("allows participants to update note deadlines and blocks outsiders", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-a"
+      });
+    });
+
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+    const outsiderDb = testEnv.authenticatedContext("user-c").firestore();
+
+    await assertSucceeds(
+      updateDoc(doc(participantDb, "notes/note-a"), {
+        dueAt: new Date("2026-05-20T10:00:00.000Z"),
+        updatedBy: "user-b"
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(participantDb, "notes/note-a"), {
+        dueAt: null,
+        updatedBy: "user-b"
+      })
+    );
+    await assertFails(
+      updateDoc(doc(outsiderDb, "notes/note-a"), {
+        dueAt: new Date("2026-05-21T10:00:00.000Z"),
+        updatedBy: "user-c"
+      })
+    );
+  });
+
   it("allows users to publish only their own active accessible note", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));

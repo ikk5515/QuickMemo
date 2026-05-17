@@ -7,6 +7,7 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  Timestamp,
   updateDoc,
   where
 } from "firebase/firestore";
@@ -24,6 +25,7 @@ export interface SaveNoteInput {
   encryptedTitle: EncryptedPayload;
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
+  dueAt?: Timestamp | null;
 }
 
 export function subscribeVisibleNotes(
@@ -51,6 +53,7 @@ export async function createEncryptedNote(input: SaveNoteInput) {
     ...input,
     participantUids: Array.from(new Set(input.participantUids)),
     createdAt: serverTimestamp(),
+    dueAt: input.dueAt ?? null,
     updatedAt: serverTimestamp(),
     savedAt: serverTimestamp(),
     updatedBy: input.ownerUid
@@ -82,6 +85,14 @@ export async function updateNoteAccess(
     type,
     participantUids: Array.from(new Set(participantUids)),
     wrappedKeys,
+    updatedAt: serverTimestamp(),
+    updatedBy: uid
+  });
+}
+
+export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Timestamp | null) {
+  await updateDoc(doc(db, "notes", noteId), {
+    dueAt,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
