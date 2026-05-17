@@ -2124,7 +2124,13 @@ function PdfPreviewModal({
             </button>
           </div>
         </header>
-        <iframe className="pdf-preview-frame" referrerPolicy="no-referrer" src={url} title={`${fileName} 미리보기`} />
+        <iframe
+          className="pdf-preview-frame"
+          referrerPolicy="no-referrer"
+          sandbox=""
+          src={url}
+          title={`${fileName} 미리보기`}
+        />
       </section>
     </div>
   );
