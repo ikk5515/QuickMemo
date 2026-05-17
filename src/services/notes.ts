@@ -30,22 +30,64 @@ export interface SaveNoteInput {
 
 export function subscribeVisibleNotes(
   uid: string,
+  ownerUids: string[] | null,
   callback: (notes: NoteSnapshot[]) => void,
   onError?: (error: Error) => void
 ) {
-  const notesQuery = query(
-    collection(db, "notes"),
-    where("participantUids", "array-contains", uid),
-    orderBy("updatedAt", "desc")
-  );
+  if (ownerUids === null) {
+    const notesQuery = query(
+      collection(db, "notes"),
+      where("participantUids", "array-contains", uid),
+      orderBy("updatedAt", "desc")
+    );
 
-  return onSnapshot(
-    notesQuery,
-    (snapshot) => {
-      callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })));
-    },
-    (error) => onError?.(error)
-  );
+    return onSnapshot(
+      notesQuery,
+      (snapshot) => {
+        callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })));
+      },
+      (error) => onError?.(error)
+    );
+  }
+
+  const normalizedOwnerUids = Array.from(new Set([uid, ...ownerUids])).filter(Boolean);
+  const notesByOwner = new Map<string, NoteSnapshot[]>();
+  let closed = false;
+
+  const emitNotes = () => {
+    if (closed) {
+      return;
+    }
+
+    callback(
+      Array.from(notesByOwner.values())
+        .flat()
+        .sort((left, right) => (right.updatedAt?.toMillis() ?? 0) - (left.updatedAt?.toMillis() ?? 0))
+    );
+  };
+
+  const unsubscribes = normalizedOwnerUids.map((ownerUid) => {
+    const notesQuery = query(
+      collection(db, "notes"),
+      where("ownerUid", "==", ownerUid),
+      where("participantUids", "array-contains", uid),
+      orderBy("updatedAt", "desc")
+    );
+
+    return onSnapshot(
+      notesQuery,
+      (snapshot) => {
+        notesByOwner.set(ownerUid, snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })));
+        emitNotes();
+      },
+      (error) => onError?.(error)
+    );
+  });
+
+  return () => {
+    closed = true;
+    unsubscribes.forEach((unsubscribe) => unsubscribe());
+  };
 }
 
 export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => void, onError?: (error: Error) => void) {

@@ -6,7 +6,7 @@ import {
   assertSucceeds,
   initializeTestEnvironment
 } from "@firebase/rules-unit-testing";
-import { collection, deleteDoc, doc, getDoc, getDocs, orderBy, query, setDoc, updateDoc, writeBatch } from "firebase/firestore";
+import { collection, deleteDoc, doc, getDoc, getDocs, orderBy, query, setDoc, updateDoc, where, writeBatch } from "firebase/firestore";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const describeRules = process.env.FIRESTORE_EMULATOR_HOST ? describe : describe.skip;
@@ -173,7 +173,7 @@ describeRules("firestore security rules", () => {
 
   it("allows participants to read notes and blocks outsiders", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
       await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
       await setDoc(doc(context.firestore(), "notes/note-a"), {
@@ -186,12 +186,60 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
         updatedBy: "user-a"
       });
     });
 
-    await assertSucceeds(getDoc(doc(testEnv.authenticatedContext("user-b").firestore(), "notes/note-a")));
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(getDoc(doc(participantDb, "notes/note-a")));
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(participantDb, "notes"),
+          where("ownerUid", "==", "user-a"),
+          where("participantUids", "array-contains", "user-b"),
+          orderBy("updatedAt", "desc")
+        )
+      )
+    );
     await assertFails(getDoc(doc(testEnv.authenticatedContext("user-c").firestore(), "notes/note-a")));
+  });
+
+  it("blocks revoked participants from reading existing shared notes", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/revoked-share"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a"
+      });
+    });
+
+    await assertSucceeds(getDoc(doc(testEnv.authenticatedContext("user-a").firestore(), "notes/revoked-share")));
+    const revokedParticipantDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertFails(getDoc(doc(revokedParticipantDb, "notes/revoked-share")));
+    await assertFails(
+      getDocs(
+        query(
+          collection(revokedParticipantDb, "notes"),
+          where("ownerUid", "==", "user-a"),
+          where("participantUids", "array-contains", "user-b"),
+          orderBy("updatedAt", "desc")
+        )
+      )
+    );
   });
 
   it("allows note owners to update sharing and blocks non-owners", async () => {
@@ -258,6 +306,46 @@ describeRules("firestore security rules", () => {
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
         updatedBy: "user-b"
+      })
+    );
+  });
+
+  it("blocks content updates until revoked participants are removed", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/revoked-share"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+
+    await assertFails(
+      updateDoc(doc(ownerDb, "notes/revoked-share"), {
+        encryptedBody: { ...encryptedPayload, cipherText: "changed" },
+        updatedBy: "user-a"
+      })
+    );
+
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "notes/revoked-share"), {
+        type: "personal",
+        participantUids: ["user-a"],
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        updatedBy: "user-a"
       })
     );
   });
@@ -358,7 +446,7 @@ describeRules("firestore security rules", () => {
 
   it("allows participants to update note deadlines and blocks outsiders", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
       await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
       await setDoc(doc(context.firestore(), "notes/note-a"), {
