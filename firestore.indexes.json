@@ -9,6 +9,10 @@
           "order": "ASCENDING"
         },
         {
+          "fieldPath": "isDeleted",
+          "order": "ASCENDING"
+        },
+        {
           "fieldPath": "participantUids",
           "arrayConfig": "CONTAINS"
         },
@@ -23,8 +27,26 @@
       "queryScope": "COLLECTION",
       "fields": [
         {
+          "fieldPath": "isDeleted",
+          "order": "ASCENDING"
+        },
+        {
           "fieldPath": "participantUids",
           "arrayConfig": "CONTAINS"
+        },
+        {
+          "fieldPath": "updatedAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "notes",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "isDeleted",
+          "order": "ASCENDING"
         },
         {
           "fieldPath": "updatedAt",

@@ -125,7 +125,7 @@ function softDeleteFields(uid: string) {
 
 function restoreFields(uid: string) {
   return {
-    isDeleted: deleteField(),
+    isDeleted: false,
     deletedAt: deleteField(),
     deletedBy: deleteField(),
     updatedAt: new Date("2026-05-18T11:00:00.000Z"),
@@ -298,6 +298,7 @@ describeRules("firestore security rules", () => {
         wrappedKeys: {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       })
     );
@@ -319,6 +320,7 @@ describeRules("firestore security rules", () => {
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
         updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -331,6 +333,7 @@ describeRules("firestore security rules", () => {
         query(
           collection(participantDb, "notes"),
           where("ownerUid", "==", "user-a"),
+          where("isDeleted", "==", false),
           where("participantUids", "array-contains", "user-b"),
           orderBy("updatedAt", "desc")
         )
@@ -354,6 +357,7 @@ describeRules("firestore security rules", () => {
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
         updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -367,6 +371,7 @@ describeRules("firestore security rules", () => {
         query(
           collection(revokedParticipantDb, "notes"),
           where("ownerUid", "==", "user-a"),
+          where("isDeleted", "==", false),
           where("participantUids", "array-contains", "user-b"),
           orderBy("updatedAt", "desc")
         )
@@ -392,6 +397,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       })
     );
@@ -407,6 +413,7 @@ describeRules("firestore security rules", () => {
         wrappedKeys: {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       })
     );
@@ -422,6 +429,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       })
     );
@@ -437,6 +445,7 @@ describeRules("firestore security rules", () => {
         wrappedKeys: {
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-b"
       })
     );
@@ -457,6 +466,7 @@ describeRules("firestore security rules", () => {
         createdAt: new Date("2026-05-18T08:00:00.000Z"),
         updatedAt: new Date("2026-05-18T09:00:00.000Z"),
         savedAt: new Date("2026-05-18T09:00:00.000Z"),
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -471,6 +481,7 @@ describeRules("firestore security rules", () => {
       wrappedKeys: {
         "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
       },
+      isDeleted: false,
       updatedBy: "user-a"
     };
 
@@ -505,6 +516,7 @@ describeRules("firestore security rules", () => {
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
         updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -550,6 +562,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       })
     );
@@ -565,6 +578,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-c": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "c" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       })
     );
@@ -592,6 +606,7 @@ describeRules("firestore security rules", () => {
           "admin-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "admin" },
           "user-c": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "c" }
         },
+        isDeleted: false,
         updatedBy: "admin-a"
       })
     );
@@ -619,6 +634,7 @@ describeRules("firestore security rules", () => {
           "admin-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "admin" },
           "user-c": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "c" }
         },
+        isDeleted: false,
         updatedBy: "admin-a"
       })
     );
@@ -639,6 +655,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -682,6 +699,7 @@ describeRules("firestore security rules", () => {
         },
         createdAt: new Date("2026-05-18T08:00:00.000Z"),
         updatedAt: new Date("2026-05-18T09:00:00.000Z"),
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -690,7 +708,7 @@ describeRules("firestore security rules", () => {
     const outsiderDb = testEnv.authenticatedContext("user-c").firestore();
 
     await assertSucceeds(getDoc(doc(adminDb, "notes/note-personal")));
-    await assertSucceeds(getDocs(query(collection(adminDb, "notes"), orderBy("updatedAt", "desc"))));
+    await assertSucceeds(getDocs(query(collection(adminDb, "notes"), where("isDeleted", "==", false), orderBy("updatedAt", "desc"))));
     await assertFails(getDoc(doc(outsiderDb, "notes/note-personal")));
     await assertFails(deleteDoc(doc(adminDb, "notes/note-personal")));
     await assertSucceeds(updateDoc(doc(adminDb, "notes/note-personal"), softDeleteFields("admin-a")));
@@ -713,6 +731,7 @@ describeRules("firestore security rules", () => {
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" },
           "admin-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "admin-a" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
       await setDoc(doc(context.firestore(), "notes/note-user-shared"), {
@@ -725,6 +744,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -753,6 +773,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -778,15 +799,42 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
       await setDoc(doc(context.firestore(), "notes/note-a/attachments/attachment-a"), attachmentDocument("note-a"));
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a")));
     await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), softDeleteFields("user-a")));
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a")));
+    await assertFails(getDoc(doc(participantDb, "notes/note-a")));
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(ownerDb, "notes"),
+          where("ownerUid", "==", "user-a"),
+          where("isDeleted", "==", true),
+          where("participantUids", "array-contains", "user-a"),
+          orderBy("updatedAt", "desc")
+        )
+      )
+    );
+    await assertFails(
+      getDocs(
+        query(
+          collection(participantDb, "notes"),
+          where("ownerUid", "==", "user-a"),
+          where("participantUids", "array-contains", "user-b"),
+          orderBy("updatedAt", "desc")
+        )
+      )
+    );
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
+    await assertFails(getDoc(doc(participantDb, "notes/note-a/attachments/attachment-a")));
     await assertFails(setDoc(doc(ownerDb, "notes/note-a/attachments/attachment-b"), attachmentDocument("note-a")));
     await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
   });
@@ -861,6 +909,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -906,6 +955,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -927,6 +977,7 @@ describeRules("firestore security rules", () => {
       },
       createdAt: serverTimestamp(),
       dueAt: null,
+      isDeleted: false,
       updatedAt: serverTimestamp(),
       savedAt: serverTimestamp(),
       updatedBy: "user-a"
@@ -994,6 +1045,7 @@ describeRules("firestore security rules", () => {
         wrappedKeys: {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
     });
@@ -1048,6 +1100,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-a"
       });
       await setDoc(doc(context.firestore(), "notes/note-b"), {
@@ -1059,6 +1112,7 @@ describeRules("firestore security rules", () => {
         wrappedKeys: {
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        isDeleted: false,
         updatedBy: "user-b"
       });
     });

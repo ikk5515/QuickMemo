@@ -105,6 +105,7 @@ function subscribeNotesByDeletedState(
   if (ownerUids === null) {
     const notesQuery = query(
       collection(db, "notes"),
+      where("isDeleted", "==", deleted),
       where("participantUids", "array-contains", uid),
       orderBy("updatedAt", "desc")
     );
@@ -118,7 +119,7 @@ function subscribeNotesByDeletedState(
     );
   }
 
-  const normalizedOwnerUids = Array.from(new Set([uid, ...ownerUids])).filter(Boolean);
+  const normalizedOwnerUids = Array.from(new Set(deleted ? [uid] : [uid, ...ownerUids])).filter(Boolean);
   const notesByOwner = new Map<string, NoteSnapshot[]>();
   let closed = false;
 
@@ -138,6 +139,7 @@ function subscribeNotesByDeletedState(
     const notesQuery = query(
       collection(db, "notes"),
       where("ownerUid", "==", ownerUid),
+      where("isDeleted", "==", deleted),
       where("participantUids", "array-contains", uid),
       orderBy("updatedAt", "desc")
     );
@@ -180,7 +182,7 @@ export function subscribeDeletedNotes(
 }
 
 export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => void, onError?: (error: Error) => void) {
-  const notesQuery = query(collection(db, "notes"), orderBy("updatedAt", "desc"));
+  const notesQuery = query(collection(db, "notes"), where("isDeleted", "==", false), orderBy("updatedAt", "desc"));
 
   return onSnapshot(
     notesQuery,
@@ -303,6 +305,7 @@ export async function createEncryptedNote(input: SaveNoteInput) {
     participantUids: Array.from(new Set(input.participantUids)),
     createdAt: serverTimestamp(),
     dueAt: input.dueAt ?? null,
+    isDeleted: false,
     updatedAt: serverTimestamp(),
     savedAt: serverTimestamp(),
     updatedBy: input.ownerUid
@@ -527,7 +530,7 @@ export async function restoreNote(noteId: string, uid: string) {
   const noteRef = doc(db, "notes", noteId);
 
   batch.update(noteRef, {
-    isDeleted: deleteField(),
+    isDeleted: false,
     deletedAt: deleteField(),
     deletedBy: deleteField(),
     updatedAt: serverTimestamp(),
