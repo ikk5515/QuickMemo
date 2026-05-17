@@ -114,6 +114,7 @@ export default function LoginPage() {
                 key={user.uid}
                 user={user}
                 selected={selectedUser?.uid === user.uid}
+                showRole={false}
                 onClick={() => {
                   setSelectedUser(user);
                   setPassword("");
