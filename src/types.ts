@@ -1,0 +1,83 @@
+import type { Timestamp } from "firebase/firestore";
+
+export type UserRole = "admin" | "user";
+
+export interface PublicRosterUser {
+  uid: string;
+  displayName: string;
+  avatarText: string;
+  color: string;
+  order: number;
+  quickKey: number;
+  loginEmail: string;
+  isActive: boolean;
+  isAdmin: boolean;
+}
+
+export interface UserProfile extends PublicRosterUser {
+  role: UserRole;
+  publicKeyJwk: JsonWebKey;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+  needsKeyRecovery?: boolean;
+}
+
+export interface EncryptedPayload {
+  version: 1;
+  algorithm: "AES-GCM";
+  cipherText: string;
+  iv: string;
+}
+
+export interface WrappedNoteKey {
+  version: 1;
+  algorithm: "RSA-OAEP";
+  wrappedKey: string;
+}
+
+export interface UserKeyDocument {
+  uid: string;
+  publicKeyJwk: JsonWebKey;
+  encryptedPrivateKeyJwk: EncryptedPayload;
+  kdfSalt: string;
+  kdfIterations: number;
+  updatedAt?: Timestamp;
+}
+
+export type NoteKind = "personal" | "shared";
+
+export interface NoteDocument {
+  type: NoteKind;
+  ownerUid: string;
+  participantUids: string[];
+  encryptedTitle: EncryptedPayload;
+  encryptedBody: EncryptedPayload;
+  wrappedKeys: Record<string, WrappedNoteKey>;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+  updatedBy: string;
+  savedAt?: Timestamp;
+}
+
+export interface DecryptedNote extends NoteDocument {
+  id: string;
+  title: string;
+  body: string;
+}
+
+export interface UserKeyBundle {
+  publicKeyJwk: JsonWebKey;
+  encryptedPrivateKeyJwk: EncryptedPayload;
+  kdfSalt: string;
+  kdfIterations: number;
+}
+
+export interface NewUserPayload {
+  displayName: string;
+  avatarText: string;
+  color: string;
+  quickKey: number;
+  password: string;
+  isAdmin: boolean;
+  keyBundle: UserKeyBundle;
+}
