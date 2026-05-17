@@ -6,7 +6,20 @@ import {
   assertSucceeds,
   initializeTestEnvironment
 } from "@firebase/rules-unit-testing";
-import { collection, deleteDoc, doc, getDoc, getDocs, orderBy, query, setDoc, updateDoc, where, writeBatch } from "firebase/firestore";
+import {
+  Bytes,
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  orderBy,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+  writeBatch
+} from "firebase/firestore";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const describeRules = process.env.FIRESTORE_EMULATOR_HOST ? describe : describe.skip;
@@ -76,6 +89,25 @@ function quickLoginKey(uid: string, quickKey: number) {
   return {
     uid,
     quickKey
+  };
+}
+
+function attachmentDocument(noteId: string, overrides: Record<string, unknown> = {}) {
+  const originalSize = typeof overrides.originalSize === "number" ? overrides.originalSize : 4;
+
+  return {
+    noteId,
+    version: 1,
+    algorithm: "AES-GCM",
+    fileName: "report",
+    extension: "pdf",
+    mimeType: "application/pdf",
+    originalSize,
+    encryptedData: Bytes.fromUint8Array(new Uint8Array(originalSize + 16)),
+    iv: Bytes.fromUint8Array(new Uint8Array(12)),
+    uploadedBy: "user-a",
+    createdAt: new Date("2026-05-18T08:00:00.000Z"),
+    ...overrides
   };
 }
 
@@ -632,6 +664,84 @@ describeRules("firestore security rules", () => {
     await assertFails(deleteDoc(doc(testEnv.authenticatedContext("user-b").firestore(), "notes/note-user-shared")));
     await assertSucceeds(deleteDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-user-shared")));
     await assertSucceeds(deleteDoc(doc(testEnv.authenticatedContext("admin-a").firestore(), "notes/note-admin-shared")));
+  });
+
+  it("allows note participants to create and read encrypted attachments", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(setDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a"), attachmentDocument("note-a")));
+    await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/attachments/attachment-a")));
+  });
+
+  it("blocks unsafe attachment writes", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const outsiderDb = testEnv.authenticatedContext("user-c").firestore();
+
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "notes/note-a/attachments/bad-extension"),
+        attachmentDocument("note-a", { extension: "exe" })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "notes/note-a/attachments/bad-size"),
+        attachmentDocument("note-a", {
+          originalSize: 1_000_001,
+          encryptedData: Bytes.fromUint8Array(new Uint8Array(1_000_017))
+        })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "notes/note-a/attachments/mismatched-cipher-size"),
+        attachmentDocument("note-a", {
+          originalSize: 4,
+          encryptedData: Bytes.fromUint8Array(new Uint8Array(18))
+        })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(outsiderDb, "notes/note-a/attachments/outsider"),
+        attachmentDocument("note-a", { uploadedBy: "user-c" })
+      )
+    );
+    await assertFails(getDoc(doc(outsiderDb, "notes/note-a/attachments/outsider")));
   });
 
   it("allows users to publish only their own active accessible note", async () => {

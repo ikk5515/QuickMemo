@@ -33,5 +33,11 @@
       ]
     }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    {
+      "collectionGroup": "attachments",
+      "fieldPath": "encryptedData",
+      "indexes": []
+    }
+  ]
 }

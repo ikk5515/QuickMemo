@@ -1,20 +1,27 @@
 import {
   addDoc,
+  Bytes,
   collection,
   deleteDoc,
   doc,
+  getDocs,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   Timestamp,
   updateDoc,
-  where
+  where,
+  writeBatch
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import type { EncryptedPayload, NoteDocument, NoteKind, WrappedNoteKey } from "../types";
+import type { EncryptedPayload, NoteAttachmentDocument, NoteDocument, NoteKind, WrappedNoteKey } from "../types";
 
 export interface NoteSnapshot extends NoteDocument {
+  id: string;
+}
+
+export interface NoteAttachmentSnapshot extends NoteAttachmentDocument {
   id: string;
 }
 
@@ -26,6 +33,17 @@ export interface SaveNoteInput {
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
   dueAt?: Timestamp | null;
+}
+
+export interface SaveNoteAttachmentInput {
+  noteId: string;
+  fileName: string;
+  extension: string;
+  mimeType: string;
+  originalSize: number;
+  encryptedData: Uint8Array;
+  iv: Uint8Array;
+  uploadedBy: string;
 }
 
 function timestampMillis(value: NoteDocument["updatedAt"]) {
@@ -106,6 +124,27 @@ export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => v
   );
 }
 
+export function subscribeNoteAttachments(
+  noteId: string,
+  callback: (attachments: NoteAttachmentSnapshot[]) => void,
+  onError?: (error: Error) => void
+) {
+  const attachmentsQuery = query(collection(db, "notes", noteId, "attachments"), orderBy("createdAt", "desc"));
+
+  return onSnapshot(
+    attachmentsQuery,
+    (snapshot) => {
+      callback(
+        snapshot.docs.map((document) => ({
+          id: document.id,
+          ...(document.data() as NoteAttachmentDocument)
+        }))
+      );
+    },
+    (error) => onError?.(error)
+  );
+}
+
 export async function createEncryptedNote(input: SaveNoteInput) {
   return addDoc(collection(db, "notes"), {
     ...input,
@@ -156,6 +195,36 @@ export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Tim
   });
 }
 
+export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
+  return addDoc(collection(db, "notes", input.noteId, "attachments"), {
+    noteId: input.noteId,
+    version: 1,
+    algorithm: "AES-GCM",
+    fileName: input.fileName,
+    extension: input.extension,
+    mimeType: input.mimeType,
+    originalSize: input.originalSize,
+    encryptedData: Bytes.fromUint8Array(input.encryptedData),
+    iv: Bytes.fromUint8Array(input.iv),
+    uploadedBy: input.uploadedBy,
+    createdAt: serverTimestamp()
+  } satisfies Omit<NoteAttachmentDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> });
+}
+
+export async function deleteNoteAttachment(noteId: string, attachmentId: string) {
+  await deleteDoc(doc(db, "notes", noteId, "attachments", attachmentId));
+}
+
 export async function deleteNote(noteId: string) {
-  await deleteDoc(doc(db, "notes", noteId));
+  const attachmentsSnapshot = await getDocs(collection(db, "notes", noteId, "attachments"));
+  const refsToDelete = [...attachmentsSnapshot.docs.map((attachmentDocument) => attachmentDocument.ref), doc(db, "notes", noteId)];
+  const chunkSize = 450;
+
+  for (let index = 0; index < refsToDelete.length; index += chunkSize) {
+    const batch = writeBatch(db);
+    refsToDelete.slice(index, index + chunkSize).forEach((documentRef) => {
+      batch.delete(documentRef);
+    });
+    await batch.commit();
+  }
 }

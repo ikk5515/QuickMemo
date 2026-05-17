@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  decryptBytes,
   decryptText,
+  encryptBytes,
   encryptText,
   generateNoteKey,
   generateUserKeyBundle,
@@ -16,6 +18,15 @@ describe("client encryption", () => {
     const encrypted = await encryptText("실시간 개인 메모", noteKey);
 
     await expect(decryptText(encrypted, noteKey)).resolves.toBe("실시간 개인 메모");
+  });
+
+  it("encrypts and decrypts binary attachments with AES-GCM", async () => {
+    const noteKey = await generateNoteKey();
+    const fileBytes = new Uint8Array([1, 2, 3, 4, 5]);
+    const encrypted = await encryptBytes(fileBytes, noteKey);
+
+    expect(encrypted.cipherBytes.byteLength).toBe(fileBytes.byteLength + 16);
+    await expect(decryptBytes(encrypted, noteKey)).resolves.toEqual(fileBytes);
   });
 
   it("locks a private key with a password and unwraps note keys", async () => {

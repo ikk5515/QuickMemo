@@ -195,6 +195,61 @@ service cloud.firestore {
         && data.updatedByClientId.size() <= 80;
     }
 
+    function validAttachment(data, noteId) {
+      return data.keys().hasOnly([
+        "noteId",
+        "version",
+        "algorithm",
+        "fileName",
+        "extension",
+        "mimeType",
+        "originalSize",
+        "encryptedData",
+        "iv",
+        "uploadedBy",
+        "createdAt"
+      ])
+      && data.noteId == noteId
+      && data.version == 1
+      && data.algorithm == "AES-GCM"
+      && data.fileName is string
+      && data.fileName.size() > 0
+      && data.fileName.size() <= 100
+      && data.extension in [
+        "pdf",
+        "txt",
+        "md",
+        "csv",
+        "json",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "hwp",
+        "hwpx",
+        "png",
+        "jpg",
+        "jpeg",
+        "webp",
+        "gif"
+      ]
+      && data.mimeType is string
+      && data.mimeType.size() <= 120
+      && data.originalSize is int
+      && data.originalSize > 0
+      && data.originalSize <= 1000000
+      && data.encryptedData is bytes
+      && data.encryptedData.size() == data.originalSize + 16
+      && data.encryptedData.size() <= 1000016
+      && data.iv is bytes
+      && data.iv.size() == 12
+      && data.uploadedBy is string
+      && data.uploadedBy.size() > 0
+      && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
+    }
+
     function rosterMatchesUser(data, uid) {
       return getAfter(userPath(uid)).data.displayName == data.displayName
         && getAfter(userPath(uid)).data.avatarText == data.avatarText
@@ -296,6 +351,14 @@ service cloud.firestore {
         || adminUser();
     }
 
+    function canDeleteAttachment(noteData, attachmentData) {
+      return adminUser()
+        || (
+          noteParticipant(noteData)
+          && (noteData.ownerUid == request.auth.uid || attachmentData.uploadedBy == request.auth.uid)
+        );
+    }
+
     match /publicLoginRoster/{uid} {
       allow read: if true;
       allow create: if validRoster(request.resource.data, uid)
@@ -375,6 +438,18 @@ service cloud.firestore {
           || (ownerAccessUpdate(request.resource.data) && allowedShareTargets(request.resource.data))
         );
       allow delete: if canDeleteNote(resource.data);
+
+      match /attachments/{attachmentId} {
+        allow read: if exists(notePath(noteId))
+          && canReadNote(get(notePath(noteId)).data);
+        allow create: if exists(notePath(noteId))
+          && noteParticipant(get(notePath(noteId)).data)
+          && validAttachment(request.resource.data, noteId)
+          && request.resource.data.uploadedBy == request.auth.uid;
+        allow update: if false;
+        allow delete: if exists(notePath(noteId))
+          && canDeleteAttachment(get(notePath(noteId)).data, resource.data);
+      }
     }
 
     match /activeNotes/{uid} {
