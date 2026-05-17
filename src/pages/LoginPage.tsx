@@ -1,6 +1,6 @@
-import { LockKeyhole, Settings } from "lucide-react";
+import { LockKeyhole } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Navigate, useNavigate } from "react-router-dom";
 import { AvatarButton } from "../components/AvatarButton";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
@@ -23,9 +23,14 @@ export default function LoginPage() {
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
+      if (selectedUser || event.altKey || event.ctrlKey || event.metaKey || isEditableTarget(event.target)) {
+        return;
+      }
+
       const shortcutUser = findRosterByShortcut(roster, event.key);
 
       if (shortcutUser) {
+        event.preventDefault();
         setSelectedUser(shortcutUser);
         setPassword("");
         setError(null);
@@ -34,7 +39,7 @@ export default function LoginPage() {
 
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [roster]);
+  }, [roster, selectedUser]);
 
   const sortedRoster = useMemo(() => roster.filter((user) => user.isActive), [roster]);
 
@@ -71,10 +76,6 @@ export default function LoginPage() {
         </div>
         <h1>사용자를 선택하고 바로 메모하세요</h1>
         <p>원형 사용자 버튼을 클릭하거나 숫자 키를 눌러 비밀번호 창을 열 수 있습니다.</p>
-        <Link className="text-link" to="/setup">
-          <Settings size={16} />
-          첫 관리자 설정
-        </Link>
       </section>
       <section className="auth-panel roster-panel">
         <div className="section-kicker">
@@ -84,7 +85,6 @@ export default function LoginPage() {
         {sortedRoster.length === 0 ? (
           <div className="empty-state">
             <p>{error || "아직 로그인 가능한 사용자가 없습니다."}</p>
-            <Link to="/setup">초기 설정으로 이동</Link>
           </div>
         ) : (
           <div className="roster-grid">
@@ -136,4 +136,12 @@ export default function LoginPage() {
       )}
     </main>
   );
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
 }
