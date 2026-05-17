@@ -578,6 +578,7 @@ textarea {
   font-size: 13px;
   font-weight: 900;
   line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .deadline-control {
@@ -595,7 +596,7 @@ textarea {
   gap: 2px;
   justify-items: start;
   min-height: 52px;
-  min-width: 220px;
+  min-width: min(220px, 100%);
   padding: 7px 12px 7px 10px;
   text-align: left;
 }
@@ -649,10 +650,11 @@ textarea {
   display: grid;
   gap: 10px;
   left: 0;
-  min-width: min(330px, calc(100vw - 48px));
+  min-width: 0;
   padding: 12px;
   position: absolute;
   top: calc(100% + 8px);
+  width: min(330px, calc(100vw - 48px));
   z-index: 9;
 }
 
@@ -663,6 +665,7 @@ textarea {
 
 .deadline-picker input {
   min-height: 38px;
+  min-width: 0;
 }
 
 .font-size-control {
@@ -1907,8 +1910,13 @@ textarea {
   }
 
   .deadline-picker {
+    box-shadow: none;
     left: auto;
-    right: 0;
+    margin-top: 8px;
+    max-width: 100%;
+    position: static;
+    right: auto;
+    width: 100%;
   }
 
   .toolbar-actions .sync-status,
