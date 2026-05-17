@@ -1,0 +1,84 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isActive == true;
+    }
+
+    function noteParticipant(data) {
+      return signedIn() && request.auth.uid in data.participantUids;
+    }
+
+    function encryptedPayload(payload) {
+      return payload is map
+        && payload.version == 1
+        && payload.algorithm == "AES-GCM"
+        && payload.cipherText is string
+        && payload.iv is string;
+    }
+
+    function validNote(data) {
+      return data.keys().hasOnly([
+        "type",
+        "ownerUid",
+        "participantUids",
+        "encryptedTitle",
+        "encryptedBody",
+        "wrappedKeys",
+        "createdAt",
+        "updatedAt",
+        "updatedBy",
+        "savedAt"
+      ])
+      && data.type in ["personal", "shared"]
+      && data.ownerUid is string
+      && data.participantUids is list
+      && data.participantUids.size() > 0
+      && encryptedPayload(data.encryptedTitle)
+      && encryptedPayload(data.encryptedBody)
+      && data.wrappedKeys is map
+      && data.updatedBy is string;
+    }
+
+    match /publicLoginRoster/{uid} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /userKeys/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /notes/{noteId} {
+      allow read: if noteParticipant(resource.data);
+      allow create: if validNote(request.resource.data)
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.auth.uid in request.resource.data.participantUids;
+      allow update: if noteParticipant(resource.data)
+        && noteParticipant(request.resource.data)
+        && validNote(request.resource.data)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.participantUids == resource.data.participantUids
+        && request.resource.data.wrappedKeys == resource.data.wrappedKeys;
+      allow delete: if noteParticipant(resource.data) && resource.data.ownerUid == request.auth.uid;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
