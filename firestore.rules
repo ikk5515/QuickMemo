@@ -75,7 +75,10 @@ service cloud.firestore {
       && encryptedPayload(data.encryptedTitle)
       && encryptedPayload(data.encryptedBody)
       && data.wrappedKeys is map
+      && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
       && (!data.keys().hasAny(["dueAt"]) || data.dueAt == null || data.dueAt is timestamp)
+      && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp)
+      && (!data.keys().hasAny(["savedAt"]) || data.savedAt is timestamp)
       && data.updatedBy is string;
     }
 

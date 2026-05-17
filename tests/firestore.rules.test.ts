@@ -310,6 +310,54 @@ describeRules("firestore security rules", () => {
     );
   });
 
+  it("rejects malformed note timestamp fields", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "notes/valid-note"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T09:00:00.000Z"),
+        savedAt: new Date("2026-05-18T09:00:00.000Z"),
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const baseNote = {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+      },
+      updatedBy: "user-a"
+    };
+
+    for (const field of ["createdAt", "updatedAt", "savedAt"] as const) {
+      await assertFails(
+        setDoc(doc(ownerDb, `notes/malformed-${field}`), {
+          ...baseNote,
+          [field]: "not-a-timestamp"
+        })
+      );
+    }
+
+    await assertFails(
+      updateDoc(doc(ownerDb, "notes/valid-note"), {
+        updatedAt: "not-a-timestamp"
+      })
+    );
+  });
+
   it("blocks content updates until revoked participants are removed", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a"] }));
