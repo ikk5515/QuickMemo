@@ -68,7 +68,10 @@ service cloud.firestore {
         "savedAt",
         "isDeleted",
         "deletedAt",
-        "deletedBy"
+        "deletedBy",
+        "isPurged",
+        "purgedAt",
+        "purgedBy"
       ])
       && data.type in ["personal", "shared"]
       && data.ownerUid is string
@@ -83,7 +86,8 @@ service cloud.firestore {
       && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp)
       && (!data.keys().hasAny(["savedAt"]) || data.savedAt is timestamp)
       && data.updatedBy is string
-      && validDeleteMetadata(data);
+      && validDeleteMetadata(data)
+      && validPurgeMetadata(data);
     }
 
     function validDeleteMetadata(data) {
@@ -99,6 +103,19 @@ service cloud.firestore {
 
     function noteDeleted(data) {
       return data.keys().hasAny(["isDeleted"]) && data.isDeleted == true;
+    }
+
+    function validPurgeMetadata(data) {
+      return !data.keys().hasAny(["isPurged", "purgedAt", "purgedBy"])
+        || (
+          data.keys().hasAll(["isPurged", "purgedAt", "purgedBy"])
+          && data.keys().hasAll(["isDeleted", "deletedAt", "deletedBy"])
+          && data.isDeleted == true
+          && data.isPurged == true
+          && data.purgedAt is timestamp
+          && data.purgedBy is string
+          && data.purgedBy.size() > 0
+        );
     }
 
     function validRoster(data, uid) {
@@ -249,7 +266,7 @@ service cloud.firestore {
 
     function validNoteHistory(data, noteId) {
       return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields"])
-        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "createdAt"])
+        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "encryptedSummary", "createdAt"])
         && data.noteId == noteId
         && data.actorUid == request.auth.uid
         && data.action in ["create", "content", "deadline", "share", "delete", "restore"]
@@ -257,6 +274,7 @@ service cloud.firestore {
         && data.changedFields.size() > 0
         && data.changedFields.size() <= 8
         && data.changedFields.hasOnly(["title", "body", "dueAt", "participants", "deleted", "restored"])
+        && (!data.keys().hasAny(["encryptedSummary"]) || encryptedPayload(data.encryptedSummary))
         && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
     }
 
@@ -415,6 +433,31 @@ service cloud.firestore {
         ]);
     }
 
+    function notePurgeUpdate(data) {
+      return noteDeleted(resource.data)
+        && canDeleteNote(resource.data)
+        && data.isDeleted == true
+        && data.isPurged == true
+        && data.purgedBy == request.auth.uid
+        && data.updatedBy == request.auth.uid
+        && data.type == "personal"
+        && data.participantUids == [request.auth.uid]
+        && data.wrappedKeys.keys().hasOnly([request.auth.uid])
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "type",
+          "participantUids",
+          "wrappedKeys",
+          "encryptedTitle",
+          "encryptedBody",
+          "isPurged",
+          "purgedAt",
+          "purgedBy",
+          "updatedAt",
+          "savedAt",
+          "updatedBy"
+        ]);
+    }
+
     function allowedShareTargets(data) {
       return data.participantUids.hasOnly([data.ownerUid])
         || (
@@ -536,6 +579,7 @@ service cloud.firestore {
           || (ownerAccessUpdate(request.resource.data) && allowedShareTargets(request.resource.data))
           || noteSoftDeleteUpdate(request.resource.data)
           || noteRestoreUpdate(request.resource.data)
+          || notePurgeUpdate(request.resource.data)
         );
       allow delete: if false;
 
@@ -555,7 +599,16 @@ service cloud.firestore {
               && request.resource.data.action == "delete"
             )
           );
-        allow update, delete: if false;
+        allow update: if exists(notePath(noteId))
+          && !noteDeleted(get(notePath(noteId)).data)
+          && validNoteHistory(request.resource.data, noteId)
+          && resource.data.actorUid == request.auth.uid
+          && resource.data.action == "content"
+          && request.resource.data.action == "content"
+          && (noteParticipant(get(notePath(noteId)).data) || adminUser());
+        allow delete: if exists(notePath(noteId))
+          && noteDeleted(get(notePath(noteId)).data)
+          && canDeleteNote(get(notePath(noteId)).data);
       }
 
       match /attachments/{attachmentId} {

@@ -548,6 +548,7 @@ textarea {
   align-items: start;
   display: grid;
   gap: 6px;
+  grid-auto-flow: row;
 }
 
 .star-button {
@@ -1564,7 +1565,7 @@ textarea {
   border-radius: 8px;
   display: grid;
   gap: 8px;
-  grid-template-columns: 92px minmax(0, 1fr) minmax(120px, auto);
+  grid-template-columns: 86px minmax(0, 1fr);
   padding: 8px 10px;
 }
 
@@ -1576,14 +1577,23 @@ textarea {
 
 .history-item strong {
   font-size: 13px;
+  line-height: 1.35;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: pre-line;
 }
 
 .history-item em {
   color: var(--muted);
   font-size: 12px;
+  grid-column: 2;
   font-style: normal;
   font-weight: 800;
-  text-align: right;
+  overflow: visible;
+  text-align: left;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .admin-grid {
@@ -2476,6 +2486,7 @@ textarea {
   }
 
   .history-item em {
+    grid-column: auto;
     text-align: left;
   }
 

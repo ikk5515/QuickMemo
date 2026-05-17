@@ -27,6 +27,7 @@ import {
   type FormEvent,
   type MouseEvent,
   type RefObject,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -69,6 +70,7 @@ import {
   createEncryptedNote,
   deleteNote,
   markNoteRead,
+  purgeNote,
   publishNoteCursor,
   restoreNote,
   setNotePinned,
@@ -163,6 +165,7 @@ const imageWidthOptions = [25, 50, 75, 100];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 450;
 const deletedNoteRetentionDays = 30;
+const historySummaryMaxLength = 420;
 const cursorPublishDelayMs = 220;
 const remoteCursorFreshMs = 15_000;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
@@ -188,6 +191,31 @@ async function encryptNoteDraft(draft: NoteDraft, noteKey: CryptoKey) {
   ]);
 
   return { encryptedTitle, encryptedBody };
+}
+
+function clippedText(value: string, maxLength = historySummaryMaxLength) {
+  const normalizedValue = value.replace(/\s+/g, " ").trim();
+
+  if (normalizedValue.length <= maxLength) {
+    return normalizedValue;
+  }
+
+  return `${normalizedValue.slice(0, maxLength - 1).trim()}...`;
+}
+
+function historySummaryFromDraft(draft: NoteDraft) {
+  const title = clippedText(draft.title || "제목 없음", 120);
+  const body = clippedText(previewTextFromHtml(draft.body) || (/<img\b/i.test(draft.body) ? "이미지 포함" : "내용 없음"));
+
+  return `제목: ${title}\n내용: ${body}`;
+}
+
+function purgedDraft(): NoteDraft {
+  return {
+    title: "완전 삭제된 노트",
+    body: "<p>완전 삭제되어 내용을 볼 수 없습니다.</p>",
+    fontSize: 17
+  };
 }
 
 function draftHasContent(draft: NoteDraft) {
@@ -891,6 +919,27 @@ export default function NotesPage() {
     () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
     [decryptedNotes, editor.noteId]
   );
+  const resolveNoteKey = useCallback(
+    async (noteId: string) => {
+      if (!profile || !privateKey) {
+        throw new Error("노트 키를 열 수 없습니다.");
+      }
+
+      if (editor.noteId === noteId && editor.noteKey) {
+        return editor.noteKey;
+      }
+
+      const rawNote = [...notes, ...deletedNotes].find((note) => note.id === noteId);
+      const wrappedKey = rawNote?.wrappedKeys[profile.uid];
+
+      if (!wrappedKey) {
+        throw new Error("노트 복호화 키를 찾을 수 없습니다.");
+      }
+
+      return unwrapNoteKey(wrappedKey, privateKey);
+    },
+    [deletedNotes, editor.noteId, editor.noteKey, notes, privateKey, profile]
+  );
   const activeCursorNoteId = activeRemoteNote?.type === "shared" ? activeRemoteNote.id : null;
   const remoteEditorCursors = useMemo(() => {
     if (!profile || !activeRemoteNote || activeRemoteNote.type !== "shared") {
@@ -1413,12 +1462,14 @@ export default function NotesPage() {
     try {
       if (editor.noteId && editor.noteKey) {
         const payload = await encryptNoteDraft(draft, editor.noteKey);
+        const historySummary = await encryptText(historySummaryFromDraft(draft), editor.noteKey);
         await updateEncryptedNote(
           editor.noteId,
           unlockedProfile.uid,
           payload.encryptedTitle,
           payload.encryptedBody,
-          changedDraftFields(activeRemoteNote ? draftFromNote(activeRemoteNote) : null, draft)
+          changedDraftFields(activeRemoteNote ? draftFromNote(activeRemoteNote) : null, draft),
+          historySummary
         );
         pendingLocalEcho.current = { noteId: editor.noteId, draft, createdAt: Date.now() };
         announceActiveNote(editor.noteId);
@@ -1429,6 +1480,7 @@ export default function NotesPage() {
 
       const noteKey = await generateNoteKey();
       const payload = await encryptNoteDraft(draft, noteKey);
+      const historySummary = await encryptText(historySummaryFromDraft(draft), noteKey);
       const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids])).filter(
         (uid) => uid === unlockedProfile.uid || canShareWithUser(uid)
       );
@@ -1442,7 +1494,8 @@ export default function NotesPage() {
         encryptedTitle: payload.encryptedTitle,
         encryptedBody: payload.encryptedBody,
         wrappedKeys,
-        dueAt: editor.dueAt ? Timestamp.fromDate(editor.dueAt) : null
+        dueAt: editor.dueAt ? Timestamp.fromDate(editor.dueAt) : null,
+        historySummary
       });
       pendingLocalEcho.current = { noteId: created.id, draft, createdAt: Date.now() };
 
@@ -1557,18 +1610,7 @@ export default function NotesPage() {
   }
 
   async function noteKeyForDownload(noteId: string) {
-    if (editor.noteId === noteId && editor.noteKey) {
-      return editor.noteKey;
-    }
-
-    const rawNote = notes.find((note) => note.id === noteId);
-    const wrappedKey = rawNote?.wrappedKeys[unlockedProfile.uid];
-
-    if (!wrappedKey) {
-      throw new Error("첨부파일 복호화 키를 찾을 수 없습니다.");
-    }
-
-    return unwrapNoteKey(wrappedKey, unlockedPrivateKey);
+    return resolveNoteKey(noteId);
   }
 
   async function decryptAttachmentFile(noteId: string, attachment: NoteAttachmentSnapshot) {
@@ -1746,6 +1788,57 @@ export default function NotesPage() {
     }
   }
 
+  async function purgePreviewNote(note: DecryptedNote) {
+    if (!note.isDeleted || !canDeleteNote(note)) {
+      setError("복구함의 노트 소유자 또는 참여 중인 관리자만 즉시 삭제할 수 있습니다.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `"${note.title || "제목 없음"}" 노트를 즉시 삭제할까요?\n첨부파일과 수정 이력을 정리하고, 노트 내용은 복구할 수 없도록 지웁니다.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    const rawNote = [...notes, ...deletedNotes].find((current) => current.id === note.id);
+    const wrappedKey = rawNote?.wrappedKeys[unlockedProfile.uid];
+
+    if (!wrappedKey) {
+      setError("즉시 삭제에 필요한 노트 키를 찾지 못했습니다.");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      const noteKey = await resolveNoteKey(note.id);
+      const redactedPayload = await encryptNoteDraft(purgedDraft(), noteKey);
+
+      await purgeNote({
+        noteId: note.id,
+        uid: unlockedProfile.uid,
+        encryptedTitle: redactedPayload.encryptedTitle,
+        encryptedBody: redactedPayload.encryptedBody,
+        wrappedKey
+      });
+
+      setPreviewNoteId(null);
+
+      if (editor.noteId === note.id) {
+        startNewNote();
+      }
+
+      setStatus("노트를 즉시 삭제했습니다.");
+    } catch {
+      setError("노트를 즉시 삭제하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function savePreviewNote(note: DecryptedNote, draft: NoteDraft) {
     if (saving) {
       return false;
@@ -1764,13 +1857,15 @@ export default function NotesPage() {
     try {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
       const payload = await encryptNoteDraft(draft, noteKey);
+      const historySummary = await encryptText(historySummaryFromDraft(draft), noteKey);
 
       await updateEncryptedNote(
         note.id,
         unlockedProfile.uid,
         payload.encryptedTitle,
         payload.encryptedBody,
-        changedDraftFields(draftFromNote(note), draft)
+        changedDraftFields(draftFromNote(note), draft),
+        historySummary
       );
       pendingLocalEcho.current = { noteId: note.id, draft, createdAt: Date.now() };
       announceActiveNote(note.id);
@@ -1981,6 +2076,7 @@ export default function NotesPage() {
           onFilterChange={updateNoteFilter}
           onNew={startNewNote}
           onPreview={previewStoredNote}
+          onPurge={(note) => void purgePreviewNote(note)}
           onRestore={(note) => void restorePreviewNote(note)}
           onSortChange={updateSortSetting}
           onTogglePin={(note) => void togglePinnedNote(note)}
@@ -2001,7 +2097,9 @@ export default function NotesPage() {
             onDeleteAttachment={(note, attachment) => void removeAttachment(note, attachment)}
             onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
             onPreviewAttachment={(note, attachment) => void previewPdfAttachment(note.id, attachment)}
+            onPurge={(note) => void purgePreviewNote(note)}
             onLoad={(note, draft) => void openNote(note, draft)}
+            onResolveNoteKey={resolveNoteKey}
             onRestore={(note) => void restorePreviewNote(note)}
             onSave={(note, draft) => savePreviewNote(note, draft)}
             onTogglePin={(note) => void togglePinnedNote(note)}
@@ -2457,6 +2555,7 @@ function NoteDrawer({
   onFilterChange,
   onNew,
   onPreview,
+  onPurge,
   onRestore,
   onSortChange,
   onTogglePin,
@@ -2474,6 +2573,7 @@ function NoteDrawer({
   onFilterChange: (filter: NoteListFilter) => void;
   onNew: () => void;
   onPreview: (note: DecryptedNote) => void;
+  onPurge: (note: DecryptedNote) => void;
   onRestore: (note: DecryptedNote) => void;
   onSortChange: (setting: NoteSortSetting) => void;
   onTogglePin: (note: DecryptedNote) => void;
@@ -2590,6 +2690,7 @@ function NoteDrawer({
         noteStates={noteStates}
         notes={listedNotes}
         onPreview={onPreview}
+        onPurge={onPurge}
         onRestore={onRestore}
         onTogglePin={onTogglePin}
       />
@@ -2632,6 +2733,7 @@ function NoteList({
   noteStates,
   notes,
   onPreview,
+  onPurge,
   onRestore,
   onTogglePin
 }: {
@@ -2642,6 +2744,7 @@ function NoteList({
   noteStates: NoteStateByNoteId;
   notes: DecryptedNote[];
   onPreview: (note: DecryptedNote) => void;
+  onPurge: (note: DecryptedNote) => void;
   onRestore: (note: DecryptedNote) => void;
   onTogglePin: (note: DecryptedNote) => void;
 }) {
@@ -2707,16 +2810,28 @@ function NoteList({
                 </button>
               )}
               {deleted && (
-                <button
-                  aria-label="노트 복구"
-                  className="icon-button restore"
-                  disabled={!canRestore}
-                  onClick={() => onRestore(note)}
-                  title={canRestore ? "노트 복구" : "소유자 또는 관리자만 복구할 수 있습니다."}
-                  type="button"
-                >
-                  <RotateCcw size={17} />
-                </button>
+                <>
+                  <button
+                    aria-label="노트 복구"
+                    className="icon-button restore"
+                    disabled={!canRestore}
+                    onClick={() => onRestore(note)}
+                    title={canRestore ? "노트 복구" : "소유자 또는 관리자만 복구할 수 있습니다."}
+                    type="button"
+                  >
+                    <RotateCcw size={17} />
+                  </button>
+                  <button
+                    aria-label="노트 즉시 삭제"
+                    className="icon-button danger"
+                    disabled={!canRestore}
+                    onClick={() => onPurge(note)}
+                    title={canRestore ? "즉시 삭제" : "소유자 또는 관리자만 즉시 삭제할 수 있습니다."}
+                    type="button"
+                  >
+                    <Trash2 size={17} />
+                  </button>
+                </>
               )}
             </div>
           </article>
@@ -2869,7 +2984,9 @@ function NotePreviewModal({
   onDeleteAttachment,
   onDownloadAttachment,
   onPreviewAttachment,
+  onPurge,
   onLoad,
+  onResolveNoteKey,
   onRestore,
   onSave,
   onTogglePin,
@@ -2890,7 +3007,9 @@ function NotePreviewModal({
   onDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onDownloadAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onPreviewAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
+  onPurge: (note: DecryptedNote) => void;
   onLoad: (note: DecryptedNote, draft: NoteDraft) => void;
+  onResolveNoteKey: (noteId: string) => Promise<CryptoKey>;
   onRestore: (note: DecryptedNote) => void;
   onSave: (note: DecryptedNote, draft: NoteDraft) => Promise<boolean>;
   onTogglePin: (note: DecryptedNote) => void;
@@ -2904,6 +3023,7 @@ function NotePreviewModal({
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [readStates, setReadStates] = useState<NoteUserStateSnapshot[]>([]);
   const [history, setHistory] = useState<NoteHistorySnapshot[]>([]);
+  const [historySummaries, setHistorySummaries] = useState<Record<string, string>>({});
   const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
   const latestDraftRef = useRef(draft);
@@ -2923,6 +3043,47 @@ function NotePreviewModal({
   useEffect(() => {
     return subscribeNoteHistory(note.id, setHistory, () => setModalError("수정 이력을 불러오지 못했습니다."));
   }, [note.id]);
+
+  useEffect(() => {
+    const entriesWithSummary = history.filter((entry) => entry.encryptedSummary);
+
+    if (!entriesWithSummary.length) {
+      setHistorySummaries({});
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function decryptSummaries() {
+      try {
+        const noteKey = await onResolveNoteKey(note.id);
+        const nextSummaries = Object.fromEntries(
+          await Promise.all(
+            entriesWithSummary.map(async (entry) => {
+              try {
+                return [entry.id, await decryptText(entry.encryptedSummary!, noteKey)] as const;
+              } catch {
+                return [entry.id, "내용 요약을 열 수 없습니다."] as const;
+              }
+            })
+          )
+        );
+
+        if (!cancelled) {
+          setHistorySummaries(nextSummaries);
+        }
+      } catch {
+        if (!cancelled) {
+          setHistorySummaries({});
+        }
+      }
+    }
+
+    void decryptSummaries();
+    return () => {
+      cancelled = true;
+    };
+  }, [history, note.id, onResolveNoteKey]);
 
   useEffect(() => {
     const remoteDraft = draftFromNote(note);
@@ -3104,15 +3265,26 @@ function NotePreviewModal({
             ) : (
               <>
                 {note.isDeleted ? (
-                  <button
-                    className="secondary-button note-preview-action"
-                    disabled={saving || !canRestore}
-                    type="button"
-                    onClick={() => onRestore(note)}
-                  >
-                    <RotateCcw size={14} />
-                    복구
-                  </button>
+                  <>
+                    <button
+                      className="secondary-button note-preview-action"
+                      disabled={saving || !canRestore}
+                      type="button"
+                      onClick={() => onRestore(note)}
+                    >
+                      <RotateCcw size={14} />
+                      복구
+                    </button>
+                    <button
+                      className="secondary-button danger note-preview-action"
+                      disabled={saving || !canDelete}
+                      type="button"
+                      onClick={() => onPurge(note)}
+                    >
+                      <Trash2 size={14} />
+                      즉시 삭제
+                    </button>
+                  </>
                 ) : (
                   <>
                     <button className="secondary-button note-preview-action" type="button" onClick={beginEdit}>
@@ -3179,6 +3351,7 @@ function NotePreviewModal({
         <NoteInsightPanel
           currentUid={currentUid}
           history={history}
+          historySummaries={historySummaries}
           note={note}
           onConfirm={onConfirm}
           readStates={readStates}
@@ -3201,6 +3374,7 @@ function NotePreviewModal({
 function NoteInsightPanel({
   currentUid,
   history,
+  historySummaries,
   note,
   onConfirm,
   readStates,
@@ -3208,6 +3382,7 @@ function NoteInsightPanel({
 }: {
   currentUid: string;
   history: NoteHistorySnapshot[];
+  historySummaries: Record<string, string>;
   note: DecryptedNote;
   onConfirm: (note: DecryptedNote) => void;
   readStates: NoteUserStateSnapshot[];
@@ -3273,11 +3448,12 @@ function NoteInsightPanel({
             {history.slice(0, 8).map((entry) => {
               const actor = usersByUid.get(entry.actorUid);
               const createdAt = dateFromTimestamp(entry.createdAt);
+              const summary = historySummaries[entry.id] ?? entry.changedFields.map(historyFieldLabel).join(", ");
 
               return (
                 <article className="history-item" key={entry.id}>
                   <span>{historyActionLabel(entry.action)}</span>
-                  <strong>{entry.changedFields.map(historyFieldLabel).join(", ")}</strong>
+                  <strong>{summary}</strong>
                   <em>
                     {actor?.displayName ?? entry.actorUid} · {formatCompactDateTime(createdAt)}
                   </em>
