@@ -62,6 +62,7 @@ service cloud.firestore {
         "encryptedBody",
         "wrappedKeys",
         "createdAt",
+        "dueAt",
         "updatedAt",
         "updatedBy",
         "savedAt"
@@ -70,9 +71,11 @@ service cloud.firestore {
       && data.ownerUid is string
       && data.participantUids is list
       && data.participantUids.size() > 0
+      && ((data.type == "personal" && data.participantUids.size() == 1) || (data.type == "shared" && data.participantUids.size() > 1))
       && encryptedPayload(data.encryptedTitle)
       && encryptedPayload(data.encryptedBody)
       && data.wrappedKeys is map
+      && (!data.keys().hasAny(["dueAt"]) || data.dueAt == null || data.dueAt is timestamp)
       && data.updatedBy is string;
     }
 
@@ -227,6 +230,7 @@ service cloud.firestore {
 
     function noteContentUpdate(data) {
       return noteParticipant(data)
+        && data.type == resource.data.type
         && data.participantUids == resource.data.participantUids
         && data.wrappedKeys == resource.data.wrappedKeys;
     }

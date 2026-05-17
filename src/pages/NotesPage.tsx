@@ -1,4 +1,6 @@
 import {
+  ArrowUpDown,
+  CalendarClock,
   FilePlus2,
   FolderOpen,
   ListChecks,
@@ -20,6 +22,7 @@ import {
   useRef,
   useState
 } from "react";
+import { Timestamp } from "firebase/firestore";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
@@ -44,6 +47,7 @@ import {
   subscribeVisibleNotes,
   updateEncryptedNote,
   updateNoteAccess,
+  updateNoteDeadline,
   type NoteSnapshot
 } from "../services/notes";
 import { subscribeUsers } from "../services/users";
@@ -57,6 +61,7 @@ interface EditorState {
   participantUids: string[];
   noteKey: CryptoKey | null;
   fontSize: number;
+  dueAt: Date | null;
   dirty: boolean;
 }
 
@@ -74,14 +79,25 @@ const blankEditor = (uid: string): EditorState => ({
   participantUids: [uid],
   noteKey: null,
   fontSize: 17,
+  dueAt: null,
   dirty: false
 });
+
+type NoteSortField = "createdAt" | "dueAt";
+type NoteSortDirection = "asc" | "desc";
+
+interface NoteSortSetting {
+  field: NoteSortField;
+  direction: NoteSortDirection;
+}
 
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 450;
 const localEchoGraceMs = 5000;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
+const noteSortStoragePrefix = "quickmemo-note-sort:";
+const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -118,12 +134,85 @@ function noteTypeFromParticipants(participantUids: string[]): NoteKind {
   return participantUids.length > 1 ? "shared" : "personal";
 }
 
+function dateFromTimestamp(timestamp: Timestamp | null | undefined) {
+  return timestamp ? timestamp.toDate() : null;
+}
+
+function timestampsEqual(left: Date | null, right: Date | null) {
+  return (left?.getTime() ?? null) === (right?.getTime() ?? null);
+}
+
 function nextParticipantList(currentParticipantUids: string[], selectedUid: string, checked: boolean, ownerUid: string) {
   const participantUids = checked
     ? Array.from(new Set([...currentParticipantUids, selectedUid, ownerUid]))
     : currentParticipantUids.filter((participantUid) => participantUid !== selectedUid || participantUid === ownerUid);
 
   return Array.from(new Set([ownerUid, ...participantUids]));
+}
+
+function noteTimestampMillis(note: DecryptedNote, field: NoteSortField) {
+  const timestamp = field === "createdAt" ? note.createdAt : note.dueAt;
+  return timestamp?.toMillis() ?? null;
+}
+
+function sortNotes(notes: DecryptedNote[], setting: NoteSortSetting) {
+  return [...notes].sort((left, right) => {
+    const leftValue = noteTimestampMillis(left, setting.field);
+    const rightValue = noteTimestampMillis(right, setting.field);
+
+    if (leftValue === null && rightValue === null) {
+      return (left.title || "제목 없음").localeCompare(right.title || "제목 없음", "ko");
+    }
+
+    if (leftValue === null) {
+      return 1;
+    }
+
+    if (rightValue === null) {
+      return -1;
+    }
+
+    return setting.direction === "asc" ? leftValue - rightValue : rightValue - leftValue;
+  });
+}
+
+function readNoteSortSetting(uid: string): NoteSortSetting {
+  if (typeof window === "undefined") {
+    return defaultNoteSort;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(`${noteSortStoragePrefix}${uid}`);
+
+    if (!rawValue) {
+      return defaultNoteSort;
+    }
+
+    const parsed = JSON.parse(rawValue) as Partial<NoteSortSetting>;
+
+    if (
+      (parsed.field === "createdAt" || parsed.field === "dueAt") &&
+      (parsed.direction === "asc" || parsed.direction === "desc")
+    ) {
+      return { field: parsed.field, direction: parsed.direction };
+    }
+  } catch {
+    return defaultNoteSort;
+  }
+
+  return defaultNoteSort;
+}
+
+function writeNoteSortSetting(uid: string, setting: NoteSortSetting) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(`${noteSortStoragePrefix}${uid}`, JSON.stringify(setting));
+  } catch {
+    // Sorting still works for the current session if storage is unavailable.
+  }
 }
 
 function noteSyncSignature(note: DecryptedNote) {
@@ -165,6 +254,63 @@ function getActiveNoteClientId() {
   }
 }
 
+function formatDateTime(date: Date | null) {
+  if (!date) {
+    return "없음";
+  }
+
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function formatFullDateTime(date: Date | null) {
+  if (!date) {
+    return "입력 전";
+  }
+
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function startOfLocalDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+function deadlineDDay(date: Date | null) {
+  if (!date) {
+    return null;
+  }
+
+  const dayMs = 24 * 60 * 60 * 1000;
+  const diffDays = Math.round((startOfLocalDay(date) - startOfLocalDay(new Date())) / dayMs);
+
+  if (diffDays === 0) {
+    return "D-Day";
+  }
+
+  return diffDays > 0 ? `D-${diffDays}` : `D+${Math.abs(diffDays)}`;
+}
+
+function toDateTimeLocalValue(date: Date | null) {
+  if (!date) {
+    return "";
+  }
+
+  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return offsetDate.toISOString().slice(0, 16);
+}
+
 export default function NotesPage() {
   const { profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
@@ -178,6 +324,8 @@ export default function NotesPage() {
   const [listOpen, setListOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
+  const [deadlineOpen, setDeadlineOpen] = useState(false);
+  const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
   const autosaveTimer = useRef<number | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
@@ -204,6 +352,15 @@ export default function NotesPage() {
   useEffect(() => {
     return subscribeUsers(setUsers, () => setError("사용자 목록을 불러오지 못했습니다."));
   }, []);
+
+  useEffect(() => {
+    if (!profile) {
+      setNoteSort(defaultNoteSort);
+      return;
+    }
+
+    setNoteSort(readNoteSortSetting(profile.uid));
+  }, [profile]);
 
   useEffect(() => {
     const currentProfile = profile;
@@ -285,6 +442,7 @@ export default function NotesPage() {
     editor.title,
     editor.body,
     editor.fontSize,
+    editor.dueAt,
     editor.participantUids,
     editor.dirty,
     editor.noteId,
@@ -301,6 +459,7 @@ export default function NotesPage() {
     () => decryptedNotes.find((note) => note.id === previewNoteId) ?? null,
     [decryptedNotes, previewNoteId]
   );
+  const sortedNotes = useMemo(() => sortNotes(decryptedNotes, noteSort), [decryptedNotes, noteSort]);
   const activeRemoteNote = useMemo(
     () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
     [decryptedNotes, editor.noteId]
@@ -312,6 +471,7 @@ export default function NotesPage() {
     }
 
     const remoteDraft = draftFromNote(activeRemoteNote);
+    const remoteDueAt = dateFromTimestamp(activeRemoteNote.dueAt);
     const remoteSignature = noteSyncSignature(activeRemoteNote);
     const pendingEcho = pendingLocalEcho.current;
     const currentDraft = {
@@ -324,7 +484,13 @@ export default function NotesPage() {
       return;
     }
 
-    if (draftsMatch(editor, remoteDraft)) {
+    const contentMatches = draftsMatch(editor, remoteDraft);
+    const metadataMatches =
+      timestampsEqual(editor.dueAt, remoteDueAt) &&
+      editor.type === activeRemoteNote.type &&
+      editor.participantUids.join("|") === activeRemoteNote.participantUids.join("|");
+
+    if (contentMatches && metadataMatches) {
       if (pendingEcho?.noteId === activeRemoteNote.id && noteDraftsMatch(remoteDraft, pendingEcho.draft)) {
         pendingLocalEcho.current = null;
       }
@@ -356,16 +522,20 @@ export default function NotesPage() {
       type: activeRemoteNote.type,
       participantUids: activeRemoteNote.participantUids,
       fontSize: remoteDraft.fontSize,
-      dirty: false
+      dueAt: remoteDueAt,
+      dirty: contentMatches ? current.dirty : false
     }));
     setStatus(activeRemoteNote.type === "shared" ? "공유 노트 변경 사항을 반영했습니다." : "다른 기기 변경 사항을 반영했습니다.");
   }, [
     activeRemoteNote,
     editor,
     editor.body,
+    editor.dueAt,
     editor.fontSize,
     editor.noteId,
+    editor.participantUids,
     editor.title,
+    editor.type,
     profile
   ]);
 
@@ -450,6 +620,8 @@ export default function NotesPage() {
   const unlockedPrivateKey = privateKey;
   const currentType = noteTypeFromParticipants(editor.participantUids);
   const canEditShareTargets = !editor.noteId || activeRemoteNote?.ownerUid === unlockedProfile.uid;
+  const createdDate = dateFromTimestamp(activeRemoteNote?.createdAt);
+  const deadlineLabel = editor.dueAt ? `${formatDateTime(editor.dueAt)} ${deadlineDDay(editor.dueAt)}` : "없음";
 
   function announceActiveNote(noteId: string | null) {
     void publishActiveNote(unlockedProfile.uid, noteId, activeNoteClientId.current).catch(() => {
@@ -463,6 +635,43 @@ export default function NotesPage() {
 
   function updateFontSize(fontSize: number) {
     setEditor((current) => ({ ...current, fontSize, dirty: true }));
+  }
+
+  function updateSortSetting(nextSetting: NoteSortSetting) {
+    setNoteSort(nextSetting);
+    writeNoteSortSetting(unlockedProfile.uid, nextSetting);
+  }
+
+  function updateDeadline(value: string) {
+    const dueAt = value ? new Date(value) : null;
+    const noteId = editor.noteId;
+
+    setEditor((current) => ({
+      ...current,
+      dueAt,
+      dirty: current.noteId ? current.dirty : true
+    }));
+
+    if (!noteId) {
+      setStatus(dueAt ? "마감일을 선택했습니다." : "마감일을 해제했습니다.");
+      return;
+    }
+
+    void saveDeadline(noteId, dueAt);
+  }
+
+  async function saveDeadline(noteId: string, dueAt: Date | null) {
+    setSaving(true);
+    setError(null);
+
+    try {
+      await updateNoteDeadline(noteId, unlockedProfile.uid, dueAt ? Timestamp.fromDate(dueAt) : null);
+      setStatus(dueAt ? "마감일을 저장했습니다." : "마감일을 해제했습니다.");
+    } catch {
+      setError("마감일을 저장하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function openNote(note: DecryptedNote, draftOverride?: NoteDraft, shouldAnnounce = true) {
@@ -485,6 +694,7 @@ export default function NotesPage() {
         participantUids: note.participantUids,
         noteKey,
         fontSize: nextDraft.fontSize,
+        dueAt: dateFromTimestamp(note.dueAt),
         dirty: false
       });
       setListOpen(false);
@@ -504,6 +714,7 @@ export default function NotesPage() {
   function startNewNote() {
     setEditor(blankEditor(unlockedProfile.uid));
     setShareOpen(false);
+    setDeadlineOpen(false);
     setStatus("새 노트 작성 중");
     setError(null);
     announceActiveNote(null);
@@ -618,7 +829,8 @@ export default function NotesPage() {
         participantUids,
         encryptedTitle: payload.encryptedTitle,
         encryptedBody: payload.encryptedBody,
-        wrappedKeys
+        wrappedKeys,
+        dueAt: editor.dueAt ? Timestamp.fromDate(editor.dueAt) : null
       });
       pendingLocalEcho.current = { noteId: created.id, draft, createdAt: Date.now() };
 
@@ -754,6 +966,26 @@ export default function NotesPage() {
                 <UsersRound size={18} />
                 공유 대상
               </button>
+              <span className="note-meta-chip">생성 {formatFullDateTime(createdDate)}</span>
+              <div className="deadline-control">
+                <button className="secondary-button" type="button" onClick={() => setDeadlineOpen((current) => !current)}>
+                  <CalendarClock size={18} />
+                  마감일 {deadlineLabel}
+                </button>
+                {deadlineOpen && (
+                  <div className="deadline-picker">
+                    <input
+                      aria-label="마감일 날짜와 시간"
+                      onChange={(event) => updateDeadline(event.target.value)}
+                      type="datetime-local"
+                      value={toDateTimeLocalValue(editor.dueAt)}
+                    />
+                    <button className="secondary-button" type="button" onClick={() => updateDeadline("")}>
+                      해제
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
             <div className="toolbar-actions">
               <label className="font-size-control">
@@ -834,11 +1066,13 @@ export default function NotesPage() {
         </section>
         <NoteDrawer
           activeNoteId={editor.noteId}
-          notes={decryptedNotes}
+          notes={sortedNotes}
           onClose={() => setListOpen(false)}
           onNew={startNewNote}
           onPreview={(note) => setPreviewNoteId(note.id)}
+          onSortChange={updateSortSetting}
           open={listOpen}
+          sortSetting={noteSort}
         />
         {previewNote && (
           <NotePreviewModal
@@ -939,14 +1173,18 @@ function NoteDrawer({
   onClose,
   onNew,
   onPreview,
-  open
+  onSortChange,
+  open,
+  sortSetting
 }: {
   activeNoteId: string | null;
   notes: DecryptedNote[];
   onClose: () => void;
   onNew: () => void;
   onPreview: (note: DecryptedNote) => void;
+  onSortChange: (setting: NoteSortSetting) => void;
   open: boolean;
+  sortSetting: NoteSortSetting;
 }) {
   if (!open) {
     return null;
@@ -974,6 +1212,32 @@ function NoteDrawer({
         <FilePlus2 size={18} />
         새 메모
       </button>
+      <div className="note-sort-controls">
+        <label className="font-size-control">
+          정렬
+          <select
+            aria-label="노트 목록 정렬 기준"
+            onChange={(event) => onSortChange({ ...sortSetting, field: event.target.value as NoteSortField })}
+            value={sortSetting.field}
+          >
+            <option value="createdAt">생성일</option>
+            <option value="dueAt">마감일</option>
+          </select>
+        </label>
+        <button
+          className="secondary-button note-sort-direction"
+          type="button"
+          onClick={() =>
+            onSortChange({
+              ...sortSetting,
+              direction: sortSetting.direction === "asc" ? "desc" : "asc"
+            })
+          }
+        >
+          <ArrowUpDown size={16} />
+          {sortSetting.direction === "asc" ? "오름차순" : "내림차순"}
+        </button>
+      </div>
       <NoteList activeNoteId={activeNoteId} notes={notes} onPreview={onPreview} />
     </aside>
   );
@@ -1009,6 +1273,14 @@ function NoteList({
             </span>
           </header>
           <span className="note-snippet">{previewTextFromHtml(note.body) || "내용 없음"}</span>
+          <footer className="note-list-meta">
+            <span>생성 {formatFullDateTime(dateFromTimestamp(note.createdAt))}</span>
+            {note.dueAt && (
+              <span>
+                마감 {formatDateTime(dateFromTimestamp(note.dueAt))} <strong>{deadlineDDay(dateFromTimestamp(note.dueAt))}</strong>
+              </span>
+            )}
+          </footer>
         </button>
       ))}
     </div>

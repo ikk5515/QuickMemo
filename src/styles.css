@@ -536,6 +536,44 @@ textarea {
   margin-left: auto;
 }
 
+.note-meta-chip {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 850;
+  min-height: 38px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.deadline-control {
+  position: relative;
+}
+
+.deadline-picker {
+  align-items: center;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  gap: 8px;
+  left: 0;
+  min-width: min(360px, calc(100vw - 48px));
+  padding: 10px;
+  position: absolute;
+  top: calc(100% + 8px);
+  z-index: 9;
+}
+
+.deadline-picker input {
+  min-height: 38px;
+}
+
 .font-size-control {
   align-items: center;
   color: var(--muted);
@@ -693,6 +731,41 @@ textarea {
 .drawer-new-button {
   margin-bottom: 12px;
   width: 100%;
+}
+
+.note-sort-controls {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.note-sort-controls .font-size-control {
+  flex: 1 1 auto;
+}
+
+.note-sort-controls select {
+  width: 100%;
+}
+
+.note-sort-direction {
+  flex: 0 0 auto;
+  font-size: 12px;
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.note-list-meta {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  gap: 3px;
+  line-height: 1.35;
+}
+
+.note-list-meta strong {
+  color: var(--red);
+  font-weight: 900;
 }
 
 .note-preview-modal {

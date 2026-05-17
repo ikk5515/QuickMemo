@@ -54,6 +54,7 @@ export interface NoteDocument {
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
   createdAt?: Timestamp;
+  dueAt?: Timestamp | null;
   updatedAt?: Timestamp;
   updatedBy: string;
   savedAt?: Timestamp;
