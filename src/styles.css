@@ -202,6 +202,15 @@ textarea {
   grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
 }
 
+.google-login-button {
+  margin: 16px 0;
+  width: 100%;
+}
+
+.login-error {
+  margin-bottom: 14px;
+}
+
 .avatar-button {
   background: #ffffff;
   border: 1px solid var(--line);
@@ -399,6 +408,29 @@ textarea {
   margin-left: auto;
 }
 
+.topbar-google-button {
+  min-height: 38px;
+  padding: 0 12px;
+  white-space: nowrap;
+}
+
+.topbar-error {
+  background: #fff;
+  border: 1px solid #f0c8c4;
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgb(20 33 31 / 12%);
+  color: var(--coral);
+  font-size: 13px;
+  font-weight: 800;
+  margin: 0;
+  max-width: min(420px, calc(100vw - 28px));
+  padding: 10px 12px;
+  position: absolute;
+  right: 22px;
+  top: calc(100% + 8px);
+  z-index: 7;
+}
+
 .mini-avatar {
   border-radius: 999px;
   font-size: 12px;
@@ -491,9 +523,9 @@ textarea {
   -webkit-line-clamp: 2;
 }
 
-.editor-panel {
-  display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
+.full-editor-panel {
+  display: flex;
+  flex-direction: column;
 }
 
 .editor-toolbar {
@@ -579,6 +611,7 @@ textarea {
   border: 0;
   border-radius: 0;
   box-shadow: none !important;
+  flex: 1 1 auto;
   line-height: 1.75;
   min-height: 430px;
   outline: none;
@@ -614,6 +647,7 @@ textarea {
   align-items: center;
   border-top: 1px solid var(--line);
   display: flex;
+  flex: 0 0 auto;
   gap: 12px;
   min-height: 48px;
   padding-top: 12px;
