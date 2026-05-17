@@ -48,6 +48,18 @@ export function subscribeVisibleNotes(
   );
 }
 
+export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => void, onError?: (error: Error) => void) {
+  const notesQuery = query(collection(db, "notes"), orderBy("updatedAt", "desc"));
+
+  return onSnapshot(
+    notesQuery,
+    (snapshot) => {
+      callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })));
+    },
+    (error) => onError?.(error)
+  );
+}
+
 export async function createEncryptedNote(input: SaveNoteInput) {
   return addDoc(collection(db, "notes"), {
     ...input,

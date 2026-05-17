@@ -6,7 +6,7 @@ import {
   assertSucceeds,
   initializeTestEnvironment
 } from "@firebase/rules-unit-testing";
-import { deleteDoc, doc, getDoc, setDoc, updateDoc, writeBatch } from "firebase/firestore";
+import { collection, deleteDoc, doc, getDoc, getDocs, orderBy, query, setDoc, updateDoc, writeBatch } from "firebase/firestore";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const describeRules = process.env.FIRESTORE_EMULATOR_HOST ? describe : describe.skip;
@@ -302,7 +302,36 @@ describeRules("firestore security rules", () => {
     );
   });
 
-  it("allows participating admins to delete shared notes and blocks other participants", async () => {
+  it("allows admins to inspect and delete all notes while blocking non-admin outsiders", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
+      await setDoc(doc(context.firestore(), "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(context.firestore(), "notes/note-personal"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T09:00:00.000Z"),
+        updatedBy: "user-a"
+      });
+    });
+
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const outsiderDb = testEnv.authenticatedContext("user-c").firestore();
+
+    await assertSucceeds(getDoc(doc(adminDb, "notes/note-personal")));
+    await assertSucceeds(getDocs(query(collection(adminDb, "notes"), orderBy("updatedAt", "desc"))));
+    await assertFails(getDoc(doc(outsiderDb, "notes/note-personal")));
+    await assertSucceeds(deleteDoc(doc(adminDb, "notes/note-personal")));
+  });
+
+  it("allows admins to delete shared notes and blocks other non-owner participants", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
@@ -336,7 +365,7 @@ describeRules("firestore security rules", () => {
     });
 
     await assertFails(deleteDoc(doc(testEnv.authenticatedContext("user-b").firestore(), "notes/note-user-shared")));
-    await assertFails(deleteDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-admin-shared")));
+    await assertSucceeds(deleteDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-user-shared")));
     await assertSucceeds(deleteDoc(doc(testEnv.authenticatedContext("admin-a").firestore(), "notes/note-admin-shared")));
   });
 
