@@ -6,8 +6,39 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function bootstrapPath() {
+      return /databases/$(database)/documents/system/bootstrap;
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function rosterPath(uid) {
+      return /databases/$(database)/documents/publicLoginRoster/$(uid);
+    }
+
+    function userKeyPath(uid) {
+      return /databases/$(database)/documents/userKeys/$(uid);
+    }
+
+    function quickLoginKeyPath(quickKey) {
+      return /databases/$(database)/documents/quickLoginKeys/$(quickKey);
+    }
+
+    function activeSignedInUser() {
+      return signedIn()
+        && exists(userPath(request.auth.uid))
+        && get(userPath(request.auth.uid)).data.isActive == true;
+    }
+
+    function adminUser() {
+      return activeSignedInUser()
+        && get(userPath(request.auth.uid)).data.isAdmin == true;
+    }
+
     function noteParticipant(data) {
-      return signedIn() && request.auth.uid in data.participantUids;
+      return activeSignedInUser() && request.auth.uid in data.participantUids;
     }
 
     function encryptedPayload(payload) {
@@ -41,19 +72,206 @@ service cloud.firestore {
       && data.updatedBy is string;
     }
 
+    function validRoster(data, uid) {
+      return data.keys().hasOnly([
+        "uid",
+        "displayName",
+        "avatarText",
+        "color",
+        "order",
+        "quickKey",
+        "loginEmail",
+        "isActive",
+        "isAdmin"
+      ])
+      && data.uid == uid
+      && data.displayName is string
+      && data.displayName.size() > 0
+      && data.displayName.size() <= 40
+      && data.avatarText is string
+      && data.avatarText.size() > 0
+      && data.avatarText.size() <= 4
+      && data.color is string
+      && data.order is int
+      && data.order >= 1
+      && data.quickKey is int
+      && data.quickKey >= 1
+      && data.quickKey <= 99
+      && data.loginEmail is string
+      && data.isActive is bool
+      && data.isAdmin is bool;
+    }
+
+    function validUserProfile(data, uid) {
+      return data.keys().hasOnly([
+        "uid",
+        "displayName",
+        "avatarText",
+        "color",
+        "order",
+        "quickKey",
+        "loginEmail",
+        "isActive",
+        "isAdmin",
+        "role",
+        "publicKeyJwk",
+        "createdAt",
+        "updatedAt",
+        "needsKeyRecovery"
+      ])
+      && data.uid == uid
+      && data.displayName is string
+      && data.displayName.size() > 0
+      && data.displayName.size() <= 40
+      && data.avatarText is string
+      && data.avatarText.size() > 0
+      && data.avatarText.size() <= 4
+      && data.color is string
+      && data.order is int
+      && data.order >= 1
+      && data.quickKey is int
+      && data.quickKey >= 1
+      && data.quickKey <= 99
+      && data.loginEmail is string
+      && data.isActive is bool
+      && data.isAdmin is bool
+      && data.role in ["admin", "user"]
+      && ((data.isAdmin == true && data.role == "admin") || (data.isAdmin == false && data.role == "user"))
+      && data.publicKeyJwk is map
+      && data.needsKeyRecovery is bool;
+    }
+
+    function validUserKey(data, uid) {
+      return data.keys().hasOnly([
+        "uid",
+        "publicKeyJwk",
+        "encryptedPrivateKeyJwk",
+        "kdfSalt",
+        "kdfIterations",
+        "updatedAt"
+      ])
+      && data.uid == uid
+      && data.publicKeyJwk is map
+      && encryptedPayload(data.encryptedPrivateKeyJwk)
+      && data.kdfSalt is string
+      && data.kdfIterations is int
+      && data.kdfIterations >= 100000;
+    }
+
+    function validQuickLoginKey(data, uid) {
+      return data.keys().hasOnly(["uid", "quickKey", "createdAt", "updatedAt"])
+      && data.uid == uid
+      && data.quickKey is int
+      && data.quickKey >= 1
+      && data.quickKey <= 99;
+    }
+
+    function rosterMatchesUser(data, uid) {
+      return getAfter(userPath(uid)).data.displayName == data.displayName
+        && getAfter(userPath(uid)).data.avatarText == data.avatarText
+        && getAfter(userPath(uid)).data.color == data.color
+        && getAfter(userPath(uid)).data.order == data.order
+        && getAfter(userPath(uid)).data.quickKey == data.quickKey
+        && getAfter(userPath(uid)).data.loginEmail == data.loginEmail
+        && getAfter(userPath(uid)).data.isActive == data.isActive
+        && getAfter(userPath(uid)).data.isAdmin == data.isAdmin;
+    }
+
+    function userMatchesRoster(data, uid) {
+      return getAfter(rosterPath(uid)).data.displayName == data.displayName
+        && getAfter(rosterPath(uid)).data.avatarText == data.avatarText
+        && getAfter(rosterPath(uid)).data.color == data.color
+        && getAfter(rosterPath(uid)).data.order == data.order
+        && getAfter(rosterPath(uid)).data.quickKey == data.quickKey
+        && getAfter(rosterPath(uid)).data.loginEmail == data.loginEmail
+        && getAfter(rosterPath(uid)).data.isActive == data.isActive
+        && getAfter(rosterPath(uid)).data.isAdmin == data.isAdmin;
+    }
+
+    function bootstrapCreatesAdmin(uid) {
+      return signedIn()
+        && request.auth.uid == uid
+        && !exists(bootstrapPath())
+        && getAfter(bootstrapPath()).data.adminUid == uid;
+    }
+
+    function firstAdminCreate(uid) {
+      return bootstrapCreatesAdmin(uid)
+        && getAfter(userPath(uid)).data.isAdmin == true
+        && getAfter(userPath(uid)).data.isActive == true
+        && getAfter(rosterPath(uid)).data.isAdmin == true
+        && getAfter(userKeyPath(uid)).data.uid == uid
+        && getAfter(quickLoginKeyPath(getAfter(userPath(uid)).data.quickKey)).data.uid == uid;
+    }
+
+    function adminCreatesUser(uid) {
+      return adminUser()
+        && getAfter(rosterPath(uid)).data.uid == uid
+        && getAfter(userKeyPath(uid)).data.uid == uid
+        && getAfter(quickLoginKeyPath(getAfter(userPath(uid)).data.quickKey)).data.uid == uid;
+    }
+
     match /publicLoginRoster/{uid} {
       allow read: if true;
-      allow write: if false;
+      allow create: if validRoster(request.resource.data, uid)
+        && (firstAdminCreate(uid) || adminCreatesUser(uid));
+      allow update: if adminUser()
+        && validRoster(request.resource.data, uid)
+        && rosterMatchesUser(request.resource.data, uid)
+        && getAfter(userPath(uid)).data.quickKey == request.resource.data.quickKey
+        && getAfter(quickLoginKeyPath(request.resource.data.quickKey)).data.uid == uid;
+      allow delete: if false;
     }
 
     match /users/{uid} {
       allow read: if signedIn();
-      allow write: if false;
+      allow create: if validUserProfile(request.resource.data, uid)
+        && (firstAdminCreate(uid) || adminCreatesUser(uid));
+      allow update: if adminUser()
+        && validUserProfile(request.resource.data, uid)
+        && userMatchesRoster(request.resource.data, uid)
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "displayName",
+          "avatarText",
+          "color",
+          "quickKey",
+          "order",
+          "isActive",
+          "isAdmin",
+          "role",
+          "updatedAt"
+        ])
+        && getAfter(rosterPath(uid)).data.quickKey == request.resource.data.quickKey
+        && getAfter(quickLoginKeyPath(request.resource.data.quickKey)).data.uid == uid;
+      allow delete: if false;
     }
 
     match /userKeys/{uid} {
       allow read: if signedIn() && request.auth.uid == uid;
-      allow write: if false;
+      allow create: if validUserKey(request.resource.data, uid)
+        && (firstAdminCreate(uid) || adminCreatesUser(uid));
+      allow update, delete: if false;
+    }
+
+    match /quickLoginKeys/{quickKey} {
+      allow read: if adminUser();
+      allow create: if validQuickLoginKey(request.resource.data, request.resource.data.uid)
+        && (firstAdminCreate(request.resource.data.uid) || adminCreatesUser(request.resource.data.uid));
+      allow update: if adminUser()
+        && validQuickLoginKey(request.resource.data, request.resource.data.uid)
+        && resource.data.uid == request.resource.data.uid;
+      allow delete: if adminUser();
+    }
+
+    match /system/bootstrap {
+      allow read: if true;
+      allow create: if signedIn()
+        && !exists(bootstrapPath())
+        && request.resource.data.keys().hasOnly(["adminUid", "createdAt"])
+        && request.resource.data.adminUid == request.auth.uid
+        && getAfter(userPath(request.auth.uid)).data.isAdmin == true
+        && getAfter(userPath(request.auth.uid)).data.isActive == true;
+      allow update, delete: if false;
     }
 
     match /notes/{noteId} {

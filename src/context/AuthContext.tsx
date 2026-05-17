@@ -40,6 +40,16 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
 
     const nextProfile = await getUserProfile(user.uid);
+
+    if (nextProfile && !nextProfile.isActive) {
+      await firebaseSignOut(auth);
+      setFirebaseUser(null);
+      setProfile(null);
+      setPrivateKey(null);
+      setLoading(false);
+      return null;
+    }
+
     setFirebaseUser(user);
     setProfile(nextProfile);
     setLoading(false);
