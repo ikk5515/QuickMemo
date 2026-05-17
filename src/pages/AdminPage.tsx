@@ -2,6 +2,7 @@ import { ArrowDown, ArrowUp, Plus, Save, ShieldCheck, UserRoundCog } from "lucid
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import { generateUserKeyBundle } from "../lib/crypto";
+import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { initialsFromName } from "../lib/roster";
 import { createUser, updateUser } from "../services/adminFunctions";
 import { subscribeUsers } from "../services/users";
@@ -74,7 +75,7 @@ export default function AdminPage() {
       setDraft({ ...initialDraft, quickKey: nextQuickKey + 1, color: palette[users.length % palette.length] });
       setNotice("사용자를 만들었습니다.");
     } catch (createError) {
-      setError(createError instanceof Error ? createError.message : "사용자를 만들지 못했습니다.");
+      setError(firebaseAuthErrorMessage(createError, "사용자를 만들지 못했습니다."));
     } finally {
       setPending(false);
     }
@@ -331,7 +332,7 @@ function EditableUserRow({
         </button>
       </div>
       <p className="reset-hint">
-        Functions 없는 구성에서는 관리자가 다른 사용자의 Firebase Auth 비밀번호를 직접 변경할 수 없습니다.
+        비밀번호 강제 변경은 Admin SDK가 있는 서버를 연결하면 다시 활성화할 수 있습니다.
       </p>
       {message && <p className="row-message">{message}</p>}
     </article>

@@ -4,6 +4,7 @@ import { Navigate, useNavigate } from "react-router-dom";
 import { AvatarButton } from "../components/AvatarButton";
 import { useAuth } from "../context/AuthContext";
 import { generateUserKeyBundle } from "../lib/crypto";
+import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { createFirstAdmin, getBootstrapState } from "../services/adminFunctions";
 import type { PublicRosterUser } from "../types";
 
@@ -76,7 +77,7 @@ export default function SetupPage() {
       );
       navigate("/admin", { replace: true });
     } catch (setupError) {
-      setError(setupError instanceof Error ? setupError.message : "첫 관리자를 만들지 못했습니다.");
+      setError(firebaseAuthErrorMessage(setupError, "첫 관리자를 만들지 못했습니다."));
     } finally {
       setPending(false);
     }
