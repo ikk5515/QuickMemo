@@ -3,18 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "workspaces": [
-    "functions"
-  ],
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "npm run functions:build && tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit && npm run functions:build",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
     "test:rules": "npx firebase-tools emulators:exec --project quickmemo-rules-test --only firestore \"vitest run --config vitest.rules.config.ts\"",
-    "functions:build": "npm --workspace functions run build",
-    "emulators": "npx firebase-tools emulators:start --only auth,firestore,functions,hosting"
+    "emulators": "npx firebase-tools emulators:start --only auth,firestore,hosting"
   },
   "dependencies": {
     "firebase": "^12.6.0",

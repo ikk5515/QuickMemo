@@ -1,9 +1,9 @@
-import { ArrowDown, ArrowUp, KeyRound, Plus, Save, ShieldCheck, UserRoundCog } from "lucide-react";
+import { ArrowDown, ArrowUp, Plus, Save, ShieldCheck, UserRoundCog } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AppShell } from "../components/AppShell";
 import { generateUserKeyBundle } from "../lib/crypto";
 import { initialsFromName } from "../lib/roster";
-import { createUser, resetUserPassword, updateUser } from "../services/adminFunctions";
+import { createUser, updateUser } from "../services/adminFunctions";
 import { subscribeUsers } from "../services/users";
 import type { UserProfile } from "../types";
 
@@ -196,7 +196,6 @@ function EditableUserRow({
   total: number;
 }) {
   const [draft, setDraft] = useState(user);
-  const [resetPasswordValue, setResetPasswordValue] = useState("");
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -259,27 +258,6 @@ function EditableUserRow({
       setMessage("순서 저장됨");
     } catch {
       setMessage("순서 변경 실패");
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function handlePasswordReset() {
-    if (resetPasswordValue.length < 6) {
-      setMessage("비밀번호는 6자 이상이어야 합니다.");
-      return;
-    }
-
-    setPending(true);
-    setMessage(null);
-
-    try {
-      const keyBundle = await generateUserKeyBundle(resetPasswordValue);
-      await resetUserPassword({ uid: user.uid, password: resetPasswordValue, keyBundle });
-      setResetPasswordValue("");
-      setMessage("비밀번호와 키를 초기화했습니다.");
-    } catch {
-      setMessage("비밀번호 초기화 실패");
     } finally {
       setPending(false);
     }
@@ -352,21 +330,9 @@ function EditableUserRow({
           <Save size={16} />
         </button>
       </div>
-      <div className="reset-row">
-        <input
-          aria-label="새 비밀번호"
-          minLength={6}
-          onChange={(event) => setResetPasswordValue(event.target.value)}
-          placeholder="새 비밀번호"
-          type="password"
-          value={resetPasswordValue}
-        />
-        <button className="secondary-button" disabled={pending} onClick={() => void handlePasswordReset()} type="button">
-          <KeyRound size={16} />
-          초기화
-        </button>
-      </div>
-      <p className="reset-hint">클라이언트 암호화 때문에 초기화 후 기존 노트는 이전 키 없이는 열 수 없습니다.</p>
+      <p className="reset-hint">
+        Functions 없는 구성에서는 관리자가 다른 사용자의 Firebase Auth 비밀번호를 직접 변경할 수 없습니다.
+      </p>
       {message && <p className="row-message">{message}</p>}
     </article>
   );
