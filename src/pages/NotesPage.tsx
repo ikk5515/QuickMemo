@@ -705,6 +705,7 @@ export default function NotesPage() {
   const unlockedPrivateKey = privateKey;
   const currentType = noteTypeFromParticipants(editor.participantUids);
   const canEditShareTargets = !editor.noteId || activeRemoteNote?.ownerUid === unlockedProfile.uid;
+  const canDeleteCurrentNote = !editor.noteId || (activeRemoteNote ? canDeleteNote(activeRemoteNote) : false);
   const createdDate = dateFromTimestamp(activeRemoteNote?.createdAt);
   const deadlineLabel = editor.dueAt ? formatFullDateTime(editor.dueAt) : "마감일 없음";
   const deadlineDday = deadlineDDay(editor.dueAt);
@@ -732,6 +733,13 @@ export default function NotesPage() {
   function updateNoteFilter(nextFilter: NoteListFilter) {
     setNoteFilter(nextFilter);
     writeNoteFilter(unlockedProfile.uid, nextFilter);
+  }
+
+  function canDeleteNote(note: DecryptedNote) {
+    return (
+      note.ownerUid === unlockedProfile.uid ||
+      (unlockedProfile.isAdmin && note.type === "shared" && note.participantUids.includes(unlockedProfile.uid))
+    );
   }
 
   function updateDeadline(value: string) {
@@ -948,6 +956,11 @@ export default function NotesPage() {
       return;
     }
 
+    if (!activeRemoteNote || !canDeleteNote(activeRemoteNote)) {
+      setError("노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다.");
+      return;
+    }
+
     setSaving(true);
 
     try {
@@ -962,8 +975,8 @@ export default function NotesPage() {
   }
 
   async function removePreviewNote(note: DecryptedNote) {
-    if (note.ownerUid !== unlockedProfile.uid) {
-      setError("노트 소유자만 삭제할 수 있습니다.");
+    if (!canDeleteNote(note)) {
+      setError("노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다.");
       return;
     }
 
@@ -1124,8 +1137,9 @@ export default function NotesPage() {
               <button
                 aria-label="노트 삭제"
                 className="icon-button danger"
-                disabled={saving}
+                disabled={saving || !canDeleteCurrentNote}
                 onClick={() => void removeCurrentNote()}
+                title={canDeleteCurrentNote ? "노트 삭제" : "노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다."}
                 type="button"
               >
                 <Trash2 size={18} />
@@ -1185,7 +1199,7 @@ export default function NotesPage() {
         />
         {previewNote && (
           <NotePreviewModal
-            canDelete={previewNote.ownerUid === unlockedProfile.uid}
+            canDelete={canDeleteNote(previewNote)}
             note={previewNote}
             onClose={() => setPreviewNoteId(null)}
             onDelete={(note) => void removePreviewNote(note)}
@@ -1658,7 +1672,7 @@ function NotePreviewModal({
             <button
               className="secondary-button danger note-preview-action"
               disabled={saving || !canDelete}
-              title={canDelete ? "노트 삭제" : "노트 소유자만 삭제할 수 있습니다."}
+              title={canDelete ? "노트 삭제" : "노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다."}
               type="button"
               onClick={() => onDelete(note)}
             >
