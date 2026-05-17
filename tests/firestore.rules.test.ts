@@ -6,7 +6,7 @@ import {
   assertSucceeds,
   initializeTestEnvironment
 } from "@firebase/rules-unit-testing";
-import { doc, getDoc, setDoc, updateDoc, writeBatch } from "firebase/firestore";
+import { deleteDoc, doc, getDoc, setDoc, updateDoc, writeBatch } from "firebase/firestore";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const describeRules = process.env.FIRESTORE_EMULATOR_HOST ? describe : describe.skip;
@@ -300,6 +300,44 @@ describeRules("firestore security rules", () => {
         updatedBy: "user-c"
       })
     );
+  });
+
+  it("allows participating admins to delete shared notes and blocks other participants", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(context.firestore(), "users/admin-b"), userProfile("admin-b", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(context.firestore(), "notes/note-admin-shared"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b", "admin-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" },
+          "admin-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "admin-a" }
+        },
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(context.firestore(), "notes/note-user-shared"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-a"
+      });
+    });
+
+    await assertFails(deleteDoc(doc(testEnv.authenticatedContext("user-b").firestore(), "notes/note-user-shared")));
+    await assertFails(deleteDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-admin-shared")));
+    await assertSucceeds(deleteDoc(doc(testEnv.authenticatedContext("admin-a").firestore(), "notes/note-admin-shared")));
   });
 
   it("allows users to publish only their own active accessible note", async () => {

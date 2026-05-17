@@ -249,6 +249,14 @@ service cloud.firestore {
         ]);
     }
 
+    function canDeleteNote(data) {
+      return noteParticipant(data)
+        && (
+          data.ownerUid == request.auth.uid
+          || (adminUser() && data.type == "shared")
+        );
+    }
+
     match /publicLoginRoster/{uid} {
       allow read: if true;
       allow create: if validRoster(request.resource.data, uid)
@@ -324,7 +332,7 @@ service cloud.firestore {
           noteContentUpdate(request.resource.data)
           || ownerAccessUpdate(request.resource.data)
         );
-      allow delete: if noteParticipant(resource.data) && resource.data.ownerUid == request.auth.uid;
+      allow delete: if canDeleteNote(resource.data);
     }
 
     match /activeNotes/{uid} {
