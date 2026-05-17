@@ -524,6 +524,21 @@ export default function NotesPage() {
     () => users.filter((user) => user.isActive && user.publicKeyJwk),
     [users]
   );
+  const allowedShareTargetSet = useMemo(() => {
+    if (!profile) {
+      return new Set<string>();
+    }
+
+    return new Set([profile.uid, ...(profile.allowedShareTargetUids ?? [])]);
+  }, [profile]);
+  const sharePanelUsers = useMemo(
+    () =>
+      activeUsers.filter(
+        (user) =>
+          user.uid === profile?.uid || allowedShareTargetSet.has(user.uid) || editor.participantUids.includes(user.uid)
+      ),
+    [activeUsers, allowedShareTargetSet, editor.participantUids, profile?.uid]
+  );
   const previewNote = useMemo(
     () => decryptedNotes.find((note) => note.id === previewNoteId) ?? null,
     [decryptedNotes, previewNoteId]
@@ -742,6 +757,10 @@ export default function NotesPage() {
     );
   }
 
+  function canShareWithUser(uid: string) {
+    return uid === unlockedProfile.uid || allowedShareTargetSet.has(uid);
+  }
+
   function updateDeadline(value: string) {
     const dueAt = value ? new Date(value) : null;
     const noteId = editor.noteId;
@@ -823,6 +842,12 @@ export default function NotesPage() {
   function toggleParticipant(event: ChangeEvent<HTMLInputElement>) {
     const uid = event.currentTarget.value;
     const checked = event.currentTarget.checked;
+
+    if (checked && !canShareWithUser(uid)) {
+      setError("관리자가 허용한 사용자에게만 공유할 수 있습니다.");
+      return;
+    }
+
     const previousParticipantUids = editor.participantUids;
     const participantUids = nextParticipantList(previousParticipantUids, uid, checked, unlockedProfile.uid);
     const type = noteTypeFromParticipants(participantUids);
@@ -919,7 +944,9 @@ export default function NotesPage() {
 
       const noteKey = await generateNoteKey();
       const payload = await encryptNoteDraft(draft, noteKey);
-      const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids]));
+      const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids])).filter(
+        (uid) => uid === unlockedProfile.uid || canShareWithUser(uid)
+      );
       const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
       const type = noteTypeFromParticipants(participantUids);
 
@@ -1148,22 +1175,31 @@ export default function NotesPage() {
           </div>
           {shareOpen && (
             <div className="share-strip">
-              {activeUsers.map((user) => (
-                <label key={user.uid} className="share-user">
-                  <input
-                    checked={editor.participantUids.includes(user.uid)}
-                    disabled={saving || user.uid === unlockedProfile.uid || !canEditShareTargets}
-                    onChange={toggleParticipant}
-                    type="checkbox"
-                    value={user.uid}
-                  />
-                  <span className="mini-avatar" style={{ background: user.color }}>
-                    {user.avatarText}
-                  </span>
-                  {user.displayName}
-                </label>
-              ))}
+              {sharePanelUsers.map((user) => {
+                const checked = editor.participantUids.includes(user.uid);
+                const allowed = canShareWithUser(user.uid);
+
+                return (
+                  <label key={user.uid} className={`share-user ${!allowed ? "restricted" : ""}`}>
+                    <input
+                      checked={checked}
+                      disabled={saving || user.uid === unlockedProfile.uid || !canEditShareTargets || (!allowed && !checked)}
+                      onChange={toggleParticipant}
+                      type="checkbox"
+                      value={user.uid}
+                    />
+                    <span className="mini-avatar" style={{ background: user.color }}>
+                      {user.avatarText}
+                    </span>
+                    {user.displayName}
+                    {!allowed && <em>권한 제거됨</em>}
+                  </label>
+                );
+              })}
               {!canEditShareTargets && <p className="muted share-hint">노트 소유자만 공유 대상을 변경할 수 있습니다.</p>}
+              {canEditShareTargets && sharePanelUsers.length <= 1 && (
+                <p className="muted share-hint">관리자 페이지에서 허용된 공유 대상이 없습니다.</p>
+              )}
             </div>
           )}
           <input

@@ -17,6 +17,7 @@ export interface PublicRosterUser {
 export interface UserProfile extends PublicRosterUser {
   role: UserRole;
   publicKeyJwk: JsonWebKey;
+  allowedShareTargetUids?: string[];
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
   needsKeyRecovery?: boolean;
@@ -87,5 +88,6 @@ export interface NewUserPayload {
   quickKey: number;
   password: string;
   isAdmin: boolean;
+  allowedShareTargetUids?: string[];
   keyBundle: UserKeyBundle;
 }

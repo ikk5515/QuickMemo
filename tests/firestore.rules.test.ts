@@ -40,6 +40,7 @@ function userProfile(uid: string, overrides: Record<string, unknown> = {}) {
     isAdmin,
     role: isAdmin ? "admin" : "user",
     publicKeyJwk: { kty: "RSA", kid: uid },
+    allowedShareTargetUids: [uid],
     needsKeyRecovery: false,
     ...overrides
   };
@@ -166,6 +167,7 @@ describeRules("firestore security rules", () => {
 
     const adminDb = testEnv.authenticatedContext("admin-a").firestore();
 
+    await assertSucceeds(updateDoc(doc(adminDb, "users/user-b"), { allowedShareTargetUids: ["user-b", "admin-a"] }));
     await assertFails(updateDoc(doc(adminDb, "users/user-b"), { loginEmail: "changed@quickmemo.local" }));
   });
 
@@ -194,7 +196,7 @@ describeRules("firestore security rules", () => {
 
   it("allows note owners to update sharing and blocks non-owners", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
     });
 
@@ -256,6 +258,46 @@ describeRules("firestore security rules", () => {
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
         updatedBy: "user-b"
+      })
+    );
+  });
+
+  it("allows users to share only with admin-approved targets", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "notes/approved-share"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-a"
+      })
+    );
+
+    await assertFails(
+      setDoc(doc(ownerDb, "notes/blocked-share"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-c"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-c": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "c" }
+        },
+        updatedBy: "user-a"
       })
     );
   });

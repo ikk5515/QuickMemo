@@ -40,6 +40,7 @@ export interface UpdateUserPayload {
   order: number;
   isActive: boolean;
   isAdmin: boolean;
+  allowedShareTargetUids: string[];
 }
 
 export interface ResetPasswordPayload {
@@ -74,6 +75,7 @@ function profileDocument(uid: string, loginEmail: string, payload: NewUserPayloa
     isAdmin: payload.isAdmin,
     role: payload.isAdmin ? "admin" : "user",
     publicKeyJwk: payload.keyBundle.publicKeyJwk,
+    allowedShareTargetUids: Array.from(new Set([uid, ...(payload.allowedShareTargetUids ?? [])])),
     createdAt: now,
     updatedAt: now,
     needsKeyRecovery: false
@@ -221,6 +223,7 @@ export async function updateUser(payload: UpdateUserPayload) {
       isActive: payload.isActive,
       isAdmin: payload.isAdmin,
       role: payload.isAdmin ? "admin" : "user",
+      allowedShareTargetUids: Array.from(new Set([payload.uid, ...payload.allowedShareTargetUids])),
       updatedAt: serverTimestamp()
     };
 
