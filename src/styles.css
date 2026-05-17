@@ -21,10 +21,18 @@
   box-sizing: border-box;
 }
 
+html {
+  background: #f7f8f5;
+}
+
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  min-height: 100svh;
+}
+
+#root {
+  min-height: 100svh;
 }
 
 button,
@@ -32,6 +40,7 @@ input,
 select,
 textarea {
   font: inherit;
+  max-width: 100%;
 }
 
 button {
@@ -84,7 +93,7 @@ textarea {
 
 .page-center {
   display: grid;
-  min-height: 100vh;
+  min-height: 100svh;
   place-items: center;
 }
 
@@ -104,8 +113,9 @@ textarea {
     linear-gradient(35deg, rgb(199 81 70 / 9%), transparent 46%),
     #f7f8f5;
   display: grid;
-  min-height: 100vh;
-  padding: 32px;
+  min-height: 100svh;
+  padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
 }
 
 .login-layout {
@@ -199,7 +209,7 @@ textarea {
 .roster-grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(132px, 100%), 1fr));
 }
 
 .google-login-button {
@@ -364,7 +374,7 @@ textarea {
 }
 
 .app-frame {
-  min-height: 100vh;
+  min-height: 100svh;
 }
 
 .topbar {
@@ -374,7 +384,7 @@ textarea {
   display: flex;
   gap: 18px;
   min-height: 72px;
-  padding: 0 22px;
+  padding: 0 clamp(14px, 2vw, 22px);
   position: sticky;
   top: 0;
   z-index: 5;
@@ -442,7 +452,7 @@ textarea {
 .workspace {
   display: grid;
   gap: 18px;
-  padding: 22px;
+  padding: clamp(14px, 2vw, 22px);
 }
 
 .workspace-heading {
@@ -462,7 +472,7 @@ textarea {
 }
 
 .editor-panel {
-  min-height: calc(100vh - 116px);
+  min-height: calc(100svh - 116px);
   padding: 18px;
 }
 
@@ -673,7 +683,7 @@ textarea {
 }
 
 .note-drawer {
-  max-height: calc(100vh - 110px);
+  max-height: calc(100svh - 110px);
   overflow: auto;
   padding: 16px;
   position: fixed;
@@ -815,8 +825,89 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .editor-panel {
+  .login-layout {
+    align-items: start;
+  }
+
+  .login-copy {
+    max-width: 680px;
+  }
+
+  .auth-panel {
+    max-width: 100%;
+  }
+
+  .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     min-height: auto;
+    padding-bottom: 12px;
+    padding-top: 12px;
+  }
+
+  .brand {
+    min-width: 0;
+  }
+
+  .nav-links {
+    grid-column: 1 / -1;
+    overflow-x: auto;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .nav-links::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-links a {
+    flex: 1 0 max-content;
+    justify-content: center;
+  }
+
+  .topbar-user {
+    margin-left: 0;
+  }
+
+  .editor-panel {
+    min-height: calc(100svh - 148px);
+  }
+
+  .editor-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .editor-primary-actions,
+  .toolbar-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    width: 100%;
+  }
+
+  .toolbar-actions {
+    margin-left: 0;
+  }
+
+  .font-size-control {
+    background: var(--surface);
+    border-radius: 8px;
+    justify-content: space-between;
+    min-height: 42px;
+    padding: 0 12px;
+  }
+
+  .sync-status {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+    min-height: 42px;
+  }
+
+  .note-drawer {
+    right: 18px;
+    top: 118px;
+    width: min(420px, calc(100vw - 36px));
   }
 
   .user-row {
@@ -833,25 +924,49 @@ textarea {
   }
 }
 
+@media (max-width: 820px) {
+  .workspace-heading {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .workspace-heading h1 {
+    font-size: 32px;
+  }
+
+  .rich-body-input {
+    min-height: 360px;
+  }
+
+  .user-row-fields {
+    grid-template-columns: minmax(140px, 1fr) 72px 92px 54px;
+  }
+}
+
 @media (max-width: 680px) {
   .auth-page,
   .workspace {
-    padding: 14px;
+    padding: max(14px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right))
+      max(14px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
   }
 
   .topbar {
-    flex-wrap: wrap;
     gap: 10px;
     padding: 12px 14px;
   }
 
-  .nav-links {
-    order: 3;
-    width: 100%;
+  .topbar-error {
+    left: 14px;
+    right: 14px;
+    top: calc(100% + 6px);
   }
 
-  .nav-links a {
-    flex: 1;
+  .login-copy h1,
+  .auth-panel h1,
+  .workspace-heading h1 {
+    font-size: 30px;
+    line-height: 1.05;
   }
 
   .auth-panel,
@@ -861,6 +976,37 @@ textarea {
     padding: 14px;
   }
 
+  .roster-grid {
+    gap: 10px;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  }
+
+  .avatar-button {
+    min-height: 138px;
+    padding: 14px 10px;
+  }
+
+  .avatar-circle {
+    font-size: 24px;
+    height: 64px;
+    width: 64px;
+  }
+
+  .modal-backdrop {
+    align-items: end;
+    padding: 14px;
+  }
+
+  .password-modal {
+    max-width: none;
+    padding: 22px;
+    width: 100%;
+  }
+
+  .editor-panel {
+    min-height: auto;
+  }
+
   .editor-toolbar {
     align-items: stretch;
     flex-direction: column;
@@ -868,13 +1014,43 @@ textarea {
     padding: 14px;
   }
 
+  .editor-primary-actions,
   .toolbar-actions {
-    margin-left: 0;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .toolbar-actions .sync-status,
+  .toolbar-actions .font-size-control {
+    grid-column: 1 / -1;
+  }
+
+  .toolbar-actions .icon-button {
+    justify-self: stretch;
+    width: 100%;
+  }
+
+  .title-input {
+    font-size: 28px;
+    min-height: 64px;
+  }
+
+  .rich-body-input {
+    min-height: 52svh;
   }
 
   .note-drawer {
-    right: 14px;
-    top: 124px;
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    border-left: 0;
+    border-right: 0;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    bottom: 0;
+    left: 0;
+    max-height: min(72svh, 640px);
+    right: 0;
+    top: auto;
+    width: 100%;
   }
 
   .inline-form,
@@ -882,7 +1058,75 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .title-input {
-    font-size: 28px;
+  .user-row {
+    align-items: start;
+    padding: 12px;
+  }
+
+  .user-row-toggles,
+  .row-actions,
+  .reset-row {
+    flex-wrap: wrap;
+  }
+
+  .row-actions {
+    justify-content: stretch;
+  }
+
+  .row-actions .icon-button {
+    flex: 1 1 44px;
+    min-height: 44px;
+    width: auto;
+  }
+
+  .reset-row input {
+    max-width: none;
+  }
+}
+
+@media (max-width: 460px) {
+  button {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .topbar {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar-user {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .topbar-google-button {
+    flex: 1;
+  }
+
+  .nav-links a {
+    flex-basis: 0;
+    min-width: 0;
+  }
+
+  .editor-primary-actions,
+  .toolbar-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace {
+    gap: 12px;
+  }
+
+  .editor-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) {
+  button,
+  input,
+  select {
+    min-height: 44px;
   }
 }
