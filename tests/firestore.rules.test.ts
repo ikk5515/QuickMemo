@@ -111,6 +111,16 @@ function attachmentDocument(noteId: string, overrides: Record<string, unknown> =
   };
 }
 
+function softDeleteFields(uid: string) {
+  return {
+    isDeleted: true,
+    deletedAt: new Date("2026-05-18T10:00:00.000Z"),
+    deletedBy: uid,
+    updatedAt: new Date("2026-05-18T10:00:00.000Z"),
+    updatedBy: uid
+  };
+}
+
 describeRules("firestore security rules", () => {
   let testEnv: RulesTestEnvironment;
 
@@ -599,7 +609,7 @@ describeRules("firestore security rules", () => {
     );
   });
 
-  it("allows admins to inspect and delete all notes while blocking non-admin outsiders", async () => {
+  it("allows admins to inspect and soft-delete all notes while blocking non-admin outsiders", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
       await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
@@ -625,10 +635,11 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDoc(doc(adminDb, "notes/note-personal")));
     await assertSucceeds(getDocs(query(collection(adminDb, "notes"), orderBy("updatedAt", "desc"))));
     await assertFails(getDoc(doc(outsiderDb, "notes/note-personal")));
-    await assertSucceeds(deleteDoc(doc(adminDb, "notes/note-personal")));
+    await assertFails(deleteDoc(doc(adminDb, "notes/note-personal")));
+    await assertSucceeds(updateDoc(doc(adminDb, "notes/note-personal"), softDeleteFields("admin-a")));
   });
 
-  it("allows admins to delete shared notes and blocks other non-owner participants", async () => {
+  it("allows admins to soft-delete shared notes and blocks other non-owner participants", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
@@ -661,9 +672,14 @@ describeRules("firestore security rules", () => {
       });
     });
 
-    await assertFails(deleteDoc(doc(testEnv.authenticatedContext("user-b").firestore(), "notes/note-user-shared")));
-    await assertSucceeds(deleteDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-user-shared")));
-    await assertSucceeds(deleteDoc(doc(testEnv.authenticatedContext("admin-a").firestore(), "notes/note-admin-shared")));
+    await assertFails(updateDoc(doc(testEnv.authenticatedContext("user-b").firestore(), "notes/note-user-shared"), softDeleteFields("user-b")));
+    await assertFails(deleteDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-user-shared")));
+    await assertSucceeds(
+      updateDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-user-shared"), softDeleteFields("admin-b"))
+    );
+    await assertSucceeds(
+      updateDoc(doc(testEnv.authenticatedContext("admin-a").firestore(), "notes/note-admin-shared"), softDeleteFields("admin-a"))
+    );
   });
 
   it("allows note participants to create and read encrypted attachments", async () => {
@@ -689,6 +705,33 @@ describeRules("firestore security rules", () => {
 
     await assertSucceeds(setDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a"), attachmentDocument("note-a")));
     await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/attachments/attachment-a")));
+  });
+
+  it("blocks direct note deletes and keeps attachments deletable after soft delete", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(context.firestore(), "notes/note-a/attachments/attachment-a"), attachmentDocument("note-a"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+
+    await assertFails(deleteDoc(doc(ownerDb, "notes/note-a")));
+    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), softDeleteFields("user-a")));
+    await assertFails(setDoc(doc(ownerDb, "notes/note-a/attachments/attachment-b"), attachmentDocument("note-a")));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
   });
 
   it("blocks unsafe attachment writes", async () => {
