@@ -216,12 +216,34 @@ service cloud.firestore {
 
     function validNoteUserState(data, noteId, uid) {
       return data.keys().hasAll(["uid", "noteId"])
-        && data.keys().hasOnly(["uid", "noteId", "isPinned", "readAt", "confirmedAt", "updatedAt"])
+        && data.keys().hasOnly([
+          "uid",
+          "noteId",
+          "isPinned",
+          "readAt",
+          "confirmedAt",
+          "cursorOffset",
+          "cursorVisible",
+          "cursorClientId",
+          "cursorUpdatedAt",
+          "updatedAt"
+        ])
         && data.uid == uid
         && data.noteId == noteId
         && (!data.keys().hasAny(["isPinned"]) || data.isPinned is bool)
         && (!data.keys().hasAny(["readAt"]) || data.readAt is timestamp)
         && (!data.keys().hasAny(["confirmedAt"]) || data.confirmedAt is timestamp)
+        && (
+          !data.keys().hasAny(["cursorOffset"])
+          || data.cursorOffset == null
+          || (data.cursorOffset is int && data.cursorOffset >= 0 && data.cursorOffset <= 500000)
+        )
+        && (!data.keys().hasAny(["cursorVisible"]) || data.cursorVisible is bool)
+        && (
+          !data.keys().hasAny(["cursorClientId"])
+          || (data.cursorClientId is string && data.cursorClientId.size() > 0 && data.cursorClientId.size() <= 80)
+        )
+        && (!data.keys().hasAny(["cursorUpdatedAt"]) || data.cursorUpdatedAt is timestamp)
         && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
     }
 

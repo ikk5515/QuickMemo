@@ -375,6 +375,28 @@ export async function confirmNoteRead(noteId: string, uid: string) {
   );
 }
 
+export async function publishNoteCursor(
+  noteId: string,
+  uid: string,
+  clientId: string,
+  cursorOffset: number | null,
+  cursorVisible: boolean
+) {
+  await setDoc(
+    doc(db, "noteUserStates", noteId, "users", uid),
+    {
+      uid,
+      noteId,
+      cursorOffset,
+      cursorVisible,
+      cursorClientId: clientId,
+      cursorUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    },
+    { merge: true }
+  );
+}
+
 export async function createNoteHistory(
   noteId: string,
   uid: string,

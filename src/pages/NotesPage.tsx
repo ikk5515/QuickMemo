@@ -23,6 +23,7 @@ import {
 import {
   type ChangeEvent,
   type ClipboardEvent,
+  type CSSProperties,
   type FormEvent,
   type MouseEvent,
   type RefObject,
@@ -68,6 +69,7 @@ import {
   createEncryptedNote,
   deleteNote,
   markNoteRead,
+  publishNoteCursor,
   restoreNote,
   setNotePinned,
   subscribeNoteAttachments,
@@ -140,11 +142,29 @@ interface NoteListCounts {
 type NoteStateByNoteId = Record<string, NoteUserStateSnapshot | undefined>;
 type DrawerMode = "notes" | "trash";
 
+interface RemoteCursorView {
+  uid: string;
+  displayName: string;
+  color: string;
+  cursorOffset: number;
+}
+
+interface CursorClientRect {
+  bottom: number;
+  height: number;
+  left: number;
+  right: number;
+  top: number;
+  width: number;
+}
+
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const imageWidthOptions = [25, 50, 75, 100];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 450;
 const deletedNoteRetentionDays = 30;
+const cursorPublishDelayMs = 220;
+const remoteCursorFreshMs = 15_000;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
 const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
@@ -595,6 +615,8 @@ export default function NotesPage() {
   const [decryptedNotes, setDecryptedNotes] = useState<DecryptedNote[]>([]);
   const [decryptedDeletedNotes, setDecryptedDeletedNotes] = useState<DecryptedNote[]>([]);
   const [noteStateMap, setNoteStateMap] = useState<NoteStateByNoteId>({});
+  const [activeCursorStates, setActiveCursorStates] = useState<NoteUserStateSnapshot[]>([]);
+  const [cursorClock, setCursorClock] = useState(() => Date.now());
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [activeNote, setActiveNote] = useState<ActiveNoteDocument | null>(null);
   const [editor, setEditor] = useState<EditorState>(() => blankEditor(profile?.uid ?? ""));
@@ -611,6 +633,8 @@ export default function NotesPage() {
   const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
   const [noteFilter, setNoteFilter] = useState<NoteListFilter>(defaultNoteFilter);
   const autosaveTimer = useRef<number | null>(null);
+  const cursorPublishTimer = useRef<number | null>(null);
+  const lastPublishedCursor = useRef<string | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
@@ -680,6 +704,14 @@ export default function NotesPage() {
       if (pdfPreviewUrl.current) {
         URL.revokeObjectURL(pdfPreviewUrl.current);
         pdfPreviewUrl.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (cursorPublishTimer.current) {
+        window.clearTimeout(cursorPublishTimer.current);
       }
     };
   }, []);
@@ -859,6 +891,59 @@ export default function NotesPage() {
     () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
     [decryptedNotes, editor.noteId]
   );
+  const activeCursorNoteId = activeRemoteNote?.type === "shared" ? activeRemoteNote.id : null;
+  const remoteEditorCursors = useMemo(() => {
+    if (!profile || !activeRemoteNote || activeRemoteNote.type !== "shared") {
+      return [];
+    }
+
+    const usersByUid = new Map(users.map((user) => [user.uid, user]));
+    return activeCursorStates
+      .filter((state) => {
+        if (
+          state.uid === profile.uid ||
+          state.cursorVisible !== true ||
+          typeof state.cursorOffset !== "number" ||
+          state.cursorOffset < 0 ||
+          state.cursorClientId === activeNoteClientId.current
+        ) {
+          return false;
+        }
+
+        const cursorUpdatedAt = dateFromTimestamp(state.cursorUpdatedAt);
+        return Boolean(cursorUpdatedAt && cursorClock - cursorUpdatedAt.getTime() <= remoteCursorFreshMs);
+      })
+      .map((state) => {
+        const user = usersByUid.get(state.uid);
+
+        return {
+          uid: state.uid,
+          displayName: user?.displayName ?? "사용자",
+          color: user?.color ?? "#2f7d70",
+          cursorOffset: state.cursorOffset ?? 0
+        } satisfies RemoteCursorView;
+      });
+  }, [activeCursorStates, activeRemoteNote, cursorClock, profile, users]);
+
+  useEffect(() => {
+    if (!activeCursorNoteId) {
+      setActiveCursorStates([]);
+      return undefined;
+    }
+
+    return subscribeNoteUserStates(activeCursorNoteId, setActiveCursorStates, () =>
+      setError("공유 노트 커서 상태를 불러오지 못했습니다.")
+    );
+  }, [activeCursorNoteId]);
+
+  useEffect(() => {
+    if (!activeCursorNoteId) {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => setCursorClock(Date.now()), 5000);
+    return () => window.clearInterval(intervalId);
+  }, [activeCursorNoteId]);
 
   useEffect(() => {
     if (!activeRemoteNote || !profile) {
@@ -1038,6 +1123,51 @@ export default function NotesPage() {
     setEditor((current) => ({ ...current, [field]: value, dirty: true }));
   }
 
+  function publishEditorCursor(cursorOffset: number | null, cursorVisible: boolean) {
+    const noteId = editor.noteId;
+
+    if (!noteId || activeRemoteNote?.type !== "shared" || activeRemoteNote.isDeleted) {
+      return;
+    }
+
+    const normalizedOffset =
+      cursorVisible && typeof cursorOffset === "number" ? Math.min(Math.max(cursorOffset, 0), 500000) : null;
+    const signature = `${noteId}:${normalizedOffset ?? "none"}:${cursorVisible ? "visible" : "hidden"}`;
+
+    if (lastPublishedCursor.current === signature) {
+      return;
+    }
+
+    if (cursorPublishTimer.current) {
+      window.clearTimeout(cursorPublishTimer.current);
+      cursorPublishTimer.current = null;
+    }
+
+    const publish = () => {
+      lastPublishedCursor.current = signature;
+      void publishNoteCursor(
+        noteId,
+        unlockedProfile.uid,
+        activeNoteClientId.current,
+        normalizedOffset,
+        cursorVisible && normalizedOffset !== null
+      ).catch(() => {
+        setError("공유 노트 커서 위치를 저장하지 못했습니다.");
+      });
+    };
+
+    if (!cursorVisible) {
+      publish();
+      return;
+    }
+
+    cursorPublishTimer.current = window.setTimeout(publish, cursorPublishDelayMs);
+  }
+
+  function clearEditorCursor() {
+    publishEditorCursor(null, false);
+  }
+
   function updateFontSize(fontSize: number) {
     setEditor((current) => ({ ...current, fontSize, dirty: true }));
   }
@@ -1147,6 +1277,10 @@ export default function NotesPage() {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
       const nextDraft = draftOverride ?? draftFromNote(note);
 
+      if (editor.noteId && editor.noteId !== note.id) {
+        clearEditorCursor();
+      }
+
       appliedRemoteRevision.current = { noteId: note.id, signature: noteSyncSignature(note) };
       setEditor({
         noteId: note.id,
@@ -1175,6 +1309,7 @@ export default function NotesPage() {
   }
 
   function startNewNote() {
+    clearEditorCursor();
     setEditor(blankEditor(unlockedProfile.uid));
     setShareOpen(false);
     setDeadlineOpen(false);
@@ -1813,8 +1948,10 @@ export default function NotesPage() {
           <RichMemoEditor
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
+            onCursorChange={publishEditorCursor}
             onFilesPaste={(files, range) => void insertPastedFiles(files, range)}
             onChange={(value) => updateEditor("body", value)}
+            remoteCursors={remoteEditorCursors}
             value={editor.body}
           />
           {editor.noteId && activeRemoteNote && (
@@ -1883,14 +2020,18 @@ export default function NotesPage() {
 function RichMemoEditor({
   editorRef,
   fontSize,
+  onCursorChange,
   onFilesPaste,
   onChange,
+  remoteCursors = [],
   value
 }: {
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
+  onCursorChange?: (cursorOffset: number | null, cursorVisible: boolean) => void;
   onFilesPaste: (files: File[], range: Range | null) => void;
   onChange: (value: string) => void;
+  remoteCursors?: RemoteCursorView[];
   value: string;
 }) {
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
@@ -1922,6 +2063,7 @@ function RichMemoEditor({
       inputEvent.inputType === "insertParagraph" || inputEvent.inputType === "insertLineBreak" || inputEvent.data === " ";
 
     onChange(shouldLinkify ? linkifyEditableElement(editorRef.current) : editorRef.current?.innerHTML ?? "");
+    emitCursorPosition(true);
   }
 
   function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
@@ -1942,10 +2084,12 @@ function RichMemoEditor({
     event.preventDefault();
     document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
     onChange(linkifyEditableElement(editorRef.current));
+    emitCursorPosition(true);
   }
 
   function handleBlur() {
     onChange(linkifyEditableElement(editorRef.current));
+    emitCursorPosition(false);
   }
 
   function handleClick(event: MouseEvent<HTMLDivElement>) {
@@ -1956,6 +2100,7 @@ function RichMemoEditor({
     if (image instanceof HTMLImageElement && editorRef.current?.contains(image)) {
       selectedImageRef.current = image;
       setSelectedImageWidth(readImageWidth(image));
+      emitCursorPosition(true);
       return;
     }
 
@@ -1968,6 +2113,15 @@ function RichMemoEditor({
     event.preventDefault();
     clearImageSelection();
     window.open(anchor.href, "_blank", "noopener,noreferrer");
+  }
+
+  function emitCursorPosition(cursorVisible: boolean) {
+    if (!onCursorChange) {
+      return;
+    }
+
+    const cursorOffset = cursorVisible ? getCaretCharacterOffset(editorRef.current) : null;
+    onCursorChange(cursorOffset, cursorVisible && cursorOffset !== null);
   }
 
   function updateSelectedImageWidth(width: number) {
@@ -2005,21 +2159,205 @@ function RichMemoEditor({
           ))}
         </div>
       )}
-      <div
-        ref={editorRef}
-        className="rich-body-input"
-        contentEditable
-        data-placeholder="메모를 입력하세요..."
-        onBlur={handleBlur}
-        onClick={handleClick}
-        onInput={handleInput}
-        onPaste={handlePaste}
-        role="textbox"
-        style={{ fontSize }}
-        suppressContentEditableWarning
-      />
+      <div className="rich-editor-frame">
+        <div
+          ref={editorRef}
+          className="rich-body-input"
+          contentEditable
+          data-placeholder="메모를 입력하세요..."
+          onBlur={handleBlur}
+          onClick={handleClick}
+          onFocus={() => emitCursorPosition(true)}
+          onInput={handleInput}
+          onKeyUp={() => emitCursorPosition(true)}
+          onMouseUp={() => emitCursorPosition(true)}
+          onPaste={handlePaste}
+          role="textbox"
+          style={{ fontSize }}
+          suppressContentEditableWarning
+        />
+        <RemoteCursorLayer cursors={remoteCursors} editorRef={editorRef} />
+      </div>
     </>
   );
+}
+
+function RemoteCursorLayer({
+  cursors,
+  editorRef
+}: {
+  cursors: RemoteCursorView[];
+  editorRef: RefObject<HTMLDivElement | null>;
+}) {
+  const [positions, setPositions] = useState<Array<RemoteCursorView & { left: number; top: number; height: number }>>([]);
+
+  useEffect(() => {
+    const editorElement = editorRef.current;
+
+    if (!editorElement || !cursors.length) {
+      setPositions([]);
+      return undefined;
+    }
+
+    let animationFrame = 0;
+
+    const measure = () => {
+      const nextPositions = cursors
+        .map((cursor) => {
+          const position = cursorPositionFromOffset(editorElement, cursor.cursorOffset);
+          return position ? { ...cursor, ...position } : null;
+        })
+        .filter((cursor): cursor is RemoteCursorView & { left: number; top: number; height: number } => Boolean(cursor));
+
+      setPositions(nextPositions);
+    };
+
+    const scheduleMeasure = () => {
+      window.cancelAnimationFrame(animationFrame);
+      animationFrame = window.requestAnimationFrame(measure);
+    };
+
+    scheduleMeasure();
+    editorElement.addEventListener("scroll", scheduleMeasure, { passive: true });
+    window.addEventListener("resize", scheduleMeasure);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      editorElement.removeEventListener("scroll", scheduleMeasure);
+      window.removeEventListener("resize", scheduleMeasure);
+    };
+  }, [cursors, editorRef]);
+
+  if (!positions.length) {
+    return null;
+  }
+
+  return (
+    <div className="remote-cursor-layer" aria-hidden="true">
+      {positions.map((cursor) => (
+        <span
+          className="remote-cursor"
+          key={cursor.uid}
+          style={{
+            "--cursor-color": cursor.color,
+            height: Math.max(cursor.height, 18),
+            left: cursor.left,
+            top: cursor.top
+          } as CSSProperties}
+        >
+          <span>{cursor.displayName}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function cursorPositionFromOffset(element: HTMLElement, offset: number) {
+  const frame = element.parentElement;
+
+  if (!frame) {
+    return null;
+  }
+
+  const frameRect = frame.getBoundingClientRect();
+  const editorRect = element.getBoundingClientRect();
+  const textLength = element.textContent?.length ?? 0;
+
+  if (textLength === 0) {
+    return {
+      left: editorRect.left - frameRect.left + 14,
+      top: editorRect.top - frameRect.top + 14,
+      height: 20
+    };
+  }
+
+  const safeOffset = Math.min(Math.max(Math.round(offset), 0), textLength);
+  const range = rangeFromCharacterOffset(element, safeOffset);
+
+  if (!range) {
+    return null;
+  }
+
+  const rect = readableCursorRect(range, element, safeOffset);
+
+  if (!rect || rect.bottom < editorRect.top || rect.top > editorRect.bottom) {
+    return null;
+  }
+
+  return {
+    left: Math.min(Math.max(rect.left - frameRect.left, 0), editorRect.right - frameRect.left),
+    top: Math.min(Math.max(rect.top - frameRect.top, 0), editorRect.bottom - frameRect.top),
+    height: rect.height || 20
+  };
+}
+
+function readableCursorRect(range: Range, element: HTMLElement, offset: number): CursorClientRect | null {
+  const directRect = range.getClientRects()[0] ?? range.getBoundingClientRect();
+
+  if (directRect && (directRect.height > 0 || directRect.width > 0)) {
+    return directRect;
+  }
+
+  if (offset <= 0) {
+    return element.getBoundingClientRect();
+  }
+
+  const previousRange = rangeFromCharacterSpan(element, offset - 1, offset);
+  const previousRect = previousRange?.getClientRects()[0] ?? previousRange?.getBoundingClientRect();
+
+  if (!previousRect) {
+    return null;
+  }
+
+  return {
+    bottom: previousRect.bottom,
+    height: previousRect.height,
+    left: previousRect.right,
+    right: previousRect.right,
+    top: previousRect.top,
+    width: 0
+  };
+}
+
+function rangeFromCharacterOffset(element: HTMLElement, offset: number) {
+  const range = rangeFromCharacterSpan(element, offset, offset);
+
+  if (range) {
+    return range;
+  }
+
+  const fallbackRange = document.createRange();
+  fallbackRange.selectNodeContents(element);
+  fallbackRange.collapse(false);
+  return fallbackRange;
+}
+
+function rangeFromCharacterSpan(element: HTMLElement, startOffset: number, endOffset: number) {
+  const range = document.createRange();
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let currentOffset = 0;
+  let currentNode = walker.nextNode();
+  let rangeStarted = false;
+
+  while (currentNode) {
+    const textLength = currentNode.textContent?.length ?? 0;
+    const nextOffset = currentOffset + textLength;
+
+    if (!rangeStarted && startOffset <= nextOffset) {
+      range.setStart(currentNode, Math.max(0, startOffset - currentOffset));
+      rangeStarted = true;
+    }
+
+    if (rangeStarted && endOffset <= nextOffset) {
+      range.setEnd(currentNode, Math.max(0, endOffset - currentOffset));
+      return range;
+    }
+
+    currentOffset = nextOffset;
+    currentNode = walker.nextNode();
+  }
+
+  return null;
 }
 
 function readImageWidth(image: HTMLImageElement) {
@@ -2055,7 +2393,11 @@ function linkifyEditableElement(element: HTMLDivElement | null) {
   return element.innerHTML;
 }
 
-function getCaretCharacterOffset(element: HTMLElement) {
+function getCaretCharacterOffset(element: HTMLElement | null) {
+  if (!element) {
+    return null;
+  }
+
   const selection = window.getSelection();
 
   if (!selection?.rangeCount) {
