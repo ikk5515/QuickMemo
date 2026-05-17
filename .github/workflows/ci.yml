@@ -35,6 +35,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Functions-free security guard
+        run: npm run security:functions-guard
+
       - name: Unit tests
         run: npm test
 
