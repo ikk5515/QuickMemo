@@ -3,17 +3,22 @@ import {
   ArrowUp,
   Eye,
   FileText,
+  KeyRound,
   LockKeyhole,
   Plus,
   Save,
   Search,
   ShieldCheck,
   Trash2,
+  UserCheck,
   UserRoundCog,
+  UsersRound,
+  UserX,
   X
 } from "lucide-react";
 import type { Timestamp } from "firebase/firestore";
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { AppShell } from "../components/AppShell";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, generateUserKeyBundle, unwrapNoteKey } from "../lib/crypto";
@@ -34,6 +39,7 @@ interface DraftUser {
   quickKey: number;
   password: string;
   isAdmin: boolean;
+  allowedShareTargetUids: string[];
 }
 
 const initialDraft: DraftUser = {
@@ -42,10 +48,12 @@ const initialDraft: DraftUser = {
   color: palette[0],
   quickKey: 0,
   password: "",
-  isAdmin: false
+  isAdmin: false,
+  allowedShareTargetUids: []
 };
 
 type AdminNoteTypeFilter = "all" | NoteKind;
+type UserStatusFilter = "all" | "active" | "inactive" | "admin";
 
 interface AdminNoteView extends NoteSnapshot {
   title: string;
@@ -94,6 +102,14 @@ function deadlineDDay(timestamp: Timestamp | null | undefined) {
   return diffDays > 0 ? `D-${diffDays}` : `D+${Math.abs(diffDays)}`;
 }
 
+function normalizedShareTargets(ownerUid: string, targetUids: string[] = []) {
+  return Array.from(new Set([ownerUid, ...targetUids.filter(Boolean)]));
+}
+
+function shareTargetsOf(user: Pick<UserProfile, "uid" | "allowedShareTargetUids">) {
+  return normalizedShareTargets(user.uid, user.allowedShareTargetUids ?? []);
+}
+
 export default function AdminPage() {
   const { profile, privateKey } = useAuth();
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -102,6 +118,8 @@ export default function AdminPage() {
   const [noteOwnerFilter, setNoteOwnerFilter] = useState("all");
   const [noteTypeFilter, setNoteTypeFilter] = useState<AdminNoteTypeFilter>("all");
   const [noteSearch, setNoteSearch] = useState("");
+  const [userSearch, setUserSearch] = useState("");
+  const [userStatusFilter, setUserStatusFilter] = useState<UserStatusFilter>("all");
   const [noteNotice, setNoteNotice] = useState<string | null>(null);
   const [noteError, setNoteError] = useState<string | null>(null);
   const [deletingNoteId, setDeletingNoteId] = useState<string | null>(null);
@@ -211,6 +229,7 @@ export default function AdminPage() {
   }, [users]);
 
   const userMap = useMemo(() => new Map(users.map((user) => [user.uid, user])), [users]);
+  const activeUsers = useMemo(() => users.filter((user) => user.isActive), [users]);
 
   const adminNoteCounts = useMemo(
     () =>
@@ -224,6 +243,40 @@ export default function AdminPage() {
       ),
     [adminNoteViews]
   );
+
+  const adminStats = useMemo(
+    () => ({
+      totalUsers: users.length,
+      activeUsers: users.filter((user) => user.isActive).length,
+      admins: users.filter((user) => user.isAdmin).length,
+      shareLinks: users.reduce((count, user) => count + Math.max(shareTargetsOf(user).length - 1, 0), 0)
+    }),
+    [users]
+  );
+
+  const filteredUsers = useMemo(() => {
+    const searchText = userSearch.trim().toLowerCase();
+
+    return users.filter((user) => {
+      if (userStatusFilter === "active" && !user.isActive) {
+        return false;
+      }
+
+      if (userStatusFilter === "inactive" && user.isActive) {
+        return false;
+      }
+
+      if (userStatusFilter === "admin" && !user.isAdmin) {
+        return false;
+      }
+
+      if (!searchText) {
+        return true;
+      }
+
+      return [user.displayName, user.avatarText, String(user.quickKey)].join(" ").toLowerCase().includes(searchText);
+    });
+  }, [userSearch, userStatusFilter, users]);
 
   const filteredAdminNotes = useMemo(() => {
     const searchText = noteSearch.trim().toLowerCase();
@@ -276,9 +329,14 @@ export default function AdminPage() {
         quickKey: Number(draft.quickKey || nextQuickKey),
         password: draft.password,
         isAdmin: draft.isAdmin,
+        allowedShareTargetUids: draft.allowedShareTargetUids,
         keyBundle
       });
-      setDraft({ ...initialDraft, quickKey: nextQuickKey + 1, color: palette[users.length % palette.length] });
+      setDraft({
+        ...initialDraft,
+        quickKey: nextQuickKey + 1,
+        color: palette[users.length % palette.length]
+      });
       setNotice("사용자를 만들었습니다.");
     } catch (createError) {
       setError(firebaseAuthErrorMessage(createError, "사용자를 만들지 못했습니다."));
@@ -297,6 +355,15 @@ export default function AdminPage() {
     }
 
     return note.participantUids.map(userName).join(", ");
+  }
+
+  function toggleDraftShareTarget(uid: string, checked: boolean) {
+    setDraft((current) => ({
+      ...current,
+      allowedShareTargetUids: checked
+        ? Array.from(new Set([...current.allowedShareTargetUids, uid]))
+        : current.allowedShareTargetUids.filter((targetUid) => targetUid !== uid)
+    }));
   }
 
   async function handleDeleteManagedNote(note: AdminNoteView) {
@@ -333,16 +400,29 @@ export default function AdminPage() {
               <ShieldCheck size={18} />
               관리자 페이지
             </div>
-            <h1>사용자와 로그인 순서를 관리합니다</h1>
+            <h1>사용자, 공유 권한, 노트를 관리합니다</h1>
           </div>
         </div>
-        <div className="admin-grid">
-          <section className="panel">
-            <h2>
-              <Plus size={20} />
-              사용자 추가
-            </h2>
-            <form className="form-grid" onSubmit={handleCreateUser}>
+
+        <section className="admin-stats-grid" aria-label="관리 현황">
+          <AdminStat icon={<UsersRound size={18} />} label="전체 사용자" value={adminStats.totalUsers} />
+          <AdminStat icon={<UserCheck size={18} />} label="활성 사용자" value={adminStats.activeUsers} />
+          <AdminStat icon={<ShieldCheck size={18} />} label="관리자" value={adminStats.admins} />
+          <AdminStat icon={<KeyRound size={18} />} label="공유 허용" value={adminStats.shareLinks} />
+        </section>
+
+        <div className="admin-management-grid">
+          <section className="panel admin-create-panel">
+            <div className="admin-section-header">
+              <h2>
+                <Plus size={20} />
+                사용자 추가
+              </h2>
+              <div className="admin-avatar-preview" style={{ background: draft.color }}>
+                {draft.avatarText || initialsFromName(draft.displayName) || "?"}
+              </div>
+            </div>
+            <form className="form-grid admin-create-form" onSubmit={handleCreateUser}>
               <label>
                 이름
                 <input
@@ -385,7 +465,7 @@ export default function AdminPage() {
                   value={draft.color}
                 />
               </label>
-              <label>
+              <label className="admin-create-password">
                 초기 비밀번호
                 <input
                   autoComplete="new-password"
@@ -402,8 +482,34 @@ export default function AdminPage() {
                   onChange={(event) => setDraft((current) => ({ ...current, isAdmin: event.target.checked }))}
                   type="checkbox"
                 />
-                관리자 권한 부여
+                관리자 권한
               </label>
+              {activeUsers.length > 0 && (
+                <div className="permission-editor create-permission-editor">
+                  <div className="permission-editor-header">
+                    <span>
+                      <UsersRound size={16} />
+                      공유 허용 대상
+                    </span>
+                    <strong>{draft.allowedShareTargetUids.length}</strong>
+                  </div>
+                  <div className="permission-chip-grid">
+                    {activeUsers.map((user) => (
+                      <label key={user.uid} className="permission-chip">
+                        <input
+                          checked={draft.allowedShareTargetUids.includes(user.uid)}
+                          onChange={(event) => toggleDraftShareTarget(user.uid, event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span className="mini-avatar" style={{ background: user.color }}>
+                          {user.avatarText}
+                        </span>
+                        {user.displayName}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
               {notice && <p className="form-success">{notice}</p>}
               {error && <p className="form-error">{error}</p>}
               <button disabled={pending} type="submit">
@@ -411,20 +517,64 @@ export default function AdminPage() {
               </button>
             </form>
           </section>
-          <section className="panel wide-panel">
-            <h2>
-              <UserRoundCog size={20} />
-              사용자 목록
-            </h2>
-            <div className="user-table">
-              {users.map((user, index) => (
-                <EditableUserRow key={user.uid} index={index} total={users.length} user={user} users={users} />
-              ))}
+
+          <section className="panel admin-users-panel">
+            <div className="admin-section-header">
+              <h2>
+                <UserRoundCog size={20} />
+                사용자 목록
+              </h2>
+              <span className="admin-section-count">{filteredUsers.length}명</span>
+            </div>
+            <div className="admin-user-toolbar">
+              <label className="admin-search-field">
+                검색
+                <span>
+                  <Search size={16} />
+                  <input
+                    onChange={(event) => setUserSearch(event.target.value)}
+                    placeholder="이름, 원 글자, 번호"
+                    value={userSearch}
+                  />
+                </span>
+              </label>
+              <label>
+                상태
+                <select
+                  onChange={(event) => setUserStatusFilter(event.target.value as UserStatusFilter)}
+                  value={userStatusFilter}
+                >
+                  <option value="all">전체</option>
+                  <option value="active">활성</option>
+                  <option value="inactive">비활성</option>
+                  <option value="admin">관리자</option>
+                </select>
+              </label>
+            </div>
+            <div className="admin-user-card-list">
+              {filteredUsers.length ? (
+                filteredUsers.map((user, index) => {
+                  const orderIndex = users.findIndex((currentUser) => currentUser.uid === user.uid);
+
+                  return (
+                    <EditableUserCard
+                      key={user.uid}
+                      index={orderIndex >= 0 ? orderIndex : index}
+                      total={users.length}
+                      user={user}
+                      users={users}
+                    />
+                  );
+                })
+              ) : (
+                <div className="empty-state">조건에 맞는 사용자가 없습니다.</div>
+              )}
             </div>
           </section>
         </div>
+
         <section className="panel wide-panel admin-note-panel">
-          <div className="admin-note-heading">
+          <div className="admin-section-header">
             <h2>
               <FileText size={20} />
               노트 관리
@@ -458,7 +608,7 @@ export default function AdminPage() {
                 <option value="shared">공유 노트</option>
               </select>
             </label>
-            <label className="admin-note-search">
+            <label className="admin-search-field">
               검색
               <span>
                 <Search size={16} />
@@ -594,7 +744,19 @@ export default function AdminPage() {
   );
 }
 
-function EditableUserRow({
+function AdminStat({ icon, label, value }: { icon: ReactNode; label: string; value: number }) {
+  return (
+    <article className="admin-stat-card">
+      <span>{icon}</span>
+      <div>
+        <strong>{value}</strong>
+        <em>{label}</em>
+      </div>
+    </article>
+  );
+}
+
+function EditableUserCard({
   user,
   users,
   index,
@@ -605,13 +767,20 @@ function EditableUserRow({
   index: number;
   total: number;
 }) {
-  const [draft, setDraft] = useState(user);
+  const [draft, setDraft] = useState<UserProfile>(() => ({
+    ...user,
+    allowedShareTargetUids: shareTargetsOf(user)
+  }));
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    setDraft(user);
+    setDraft({ ...user, allowedShareTargetUids: shareTargetsOf(user) });
   }, [user]);
+
+  const targetUids = shareTargetsOf(draft);
+  const targetUsers = users.filter((targetUser) => targetUser.uid !== user.uid);
+  const selectedTargetUsers = targetUsers.filter((targetUser) => targetUids.includes(targetUser.uid));
 
   async function handleSave() {
     setPending(true);
@@ -626,7 +795,8 @@ function EditableUserRow({
         quickKey: Number(draft.quickKey),
         order: Number(draft.order),
         isActive: draft.isActive,
-        isAdmin: draft.isAdmin
+        isAdmin: draft.isAdmin,
+        allowedShareTargetUids: targetUids
       });
       setMessage("저장됨");
     } catch {
@@ -661,7 +831,8 @@ function EditableUserRow({
             quickKey: orderedUser.quickKey,
             order: orderIndex + 1,
             isActive: orderedUser.isActive,
-            isAdmin: orderedUser.isAdmin
+            isAdmin: orderedUser.isAdmin,
+            allowedShareTargetUids: shareTargetsOf(orderedUser)
           })
         )
       );
@@ -673,39 +844,77 @@ function EditableUserRow({
     }
   }
 
+  function toggleShareTarget(uid: string, checked: boolean) {
+    setDraft((current) => {
+      const currentTargets = shareTargetsOf(current);
+      const nextTargets = checked
+        ? Array.from(new Set([...currentTargets, uid]))
+        : currentTargets.filter((targetUid) => targetUid !== uid && targetUid !== user.uid);
+
+      return {
+        ...current,
+        allowedShareTargetUids: normalizedShareTargets(user.uid, nextTargets)
+      };
+    });
+  }
+
   return (
-    <article className="user-row">
-      <div className="user-row-avatar" style={{ background: draft.color }}>
-        {draft.avatarText}
+    <article className={`admin-user-card ${draft.isActive ? "" : "inactive"}`}>
+      <header className="admin-user-card-header">
+        <div className="user-row-avatar" style={{ background: draft.color }}>
+          {draft.avatarText}
+        </div>
+        <div>
+          <h3>{draft.displayName || "이름 없음"}</h3>
+          <div className="admin-user-badges">
+            <span>#{draft.quickKey}</span>
+            <span>{draft.isAdmin ? "관리자" : "사용자"}</span>
+            <span>{draft.isActive ? "활성" : "비활성"}</span>
+          </div>
+        </div>
+      </header>
+
+      <div className="admin-user-fields">
+        <label>
+          이름
+          <input
+            aria-label="사용자 이름"
+            maxLength={24}
+            onChange={(event) => setDraft((current) => ({ ...current, displayName: event.target.value }))}
+            value={draft.displayName}
+          />
+        </label>
+        <label>
+          원 글자
+          <input
+            aria-label="원 안 글자"
+            maxLength={3}
+            onChange={(event) => setDraft((current) => ({ ...current, avatarText: event.target.value.toUpperCase() }))}
+            value={draft.avatarText}
+          />
+        </label>
+        <label>
+          번호
+          <input
+            aria-label="빠른 로그인 번호"
+            min={1}
+            onChange={(event) => setDraft((current) => ({ ...current, quickKey: Number(event.target.value) }))}
+            type="number"
+            value={draft.quickKey}
+          />
+        </label>
+        <label>
+          색상
+          <input
+            aria-label="원 색상"
+            onChange={(event) => setDraft((current) => ({ ...current, color: event.target.value }))}
+            type="color"
+            value={draft.color}
+          />
+        </label>
       </div>
-      <div className="user-row-fields">
-        <input
-          aria-label="사용자 이름"
-          maxLength={24}
-          onChange={(event) => setDraft((current) => ({ ...current, displayName: event.target.value }))}
-          value={draft.displayName}
-        />
-        <input
-          aria-label="원 안 글자"
-          maxLength={3}
-          onChange={(event) => setDraft((current) => ({ ...current, avatarText: event.target.value.toUpperCase() }))}
-          value={draft.avatarText}
-        />
-        <input
-          aria-label="빠른 로그인 번호"
-          min={1}
-          onChange={(event) => setDraft((current) => ({ ...current, quickKey: Number(event.target.value) }))}
-          type="number"
-          value={draft.quickKey}
-        />
-        <input
-          aria-label="원 색상"
-          onChange={(event) => setDraft((current) => ({ ...current, color: event.target.value }))}
-          type="color"
-          value={draft.color}
-        />
-      </div>
-      <div className="user-row-toggles">
+
+      <div className="admin-user-switches">
         <label className="checkbox-row">
           <input
             checked={draft.isAdmin}
@@ -723,27 +932,57 @@ function EditableUserRow({
           활성
         </label>
       </div>
-      <div className="row-actions">
-        <button className="icon-button" disabled={pending || index === 0} onClick={() => void move(-1)} type="button" aria-label="위로">
-          <ArrowUp size={16} />
-        </button>
-        <button
-          className="icon-button"
-          disabled={pending || index === total - 1}
-          onClick={() => void move(1)}
-          type="button"
-          aria-label="아래로"
-        >
-          <ArrowDown size={16} />
-        </button>
-        <button className="icon-button" disabled={pending} onClick={() => void handleSave()} type="button" aria-label="저장">
-          <Save size={16} />
-        </button>
+
+      <div className="permission-editor">
+        <div className="permission-editor-header">
+          <span>
+            <UsersRound size={16} />
+            공유 허용 대상
+          </span>
+          <strong>{selectedTargetUsers.length}</strong>
+        </div>
+        <div className="permission-chip-grid">
+          {targetUsers.map((targetUser) => (
+            <label key={targetUser.uid} className="permission-chip">
+              <input
+                checked={targetUids.includes(targetUser.uid)}
+                onChange={(event) => toggleShareTarget(targetUser.uid, event.target.checked)}
+                type="checkbox"
+              />
+              <span className="mini-avatar" style={{ background: targetUser.color }}>
+                {targetUser.avatarText}
+              </span>
+              {targetUser.displayName}
+            </label>
+          ))}
+          {targetUsers.length === 0 && <p className="muted">선택할 사용자가 없습니다.</p>}
+        </div>
       </div>
-      <p className="reset-hint">
-        비밀번호 강제 변경은 Admin SDK가 있는 서버를 연결하면 다시 활성화할 수 있습니다.
-      </p>
-      {message && <p className="row-message">{message}</p>}
+
+      <footer className="admin-user-card-footer">
+        <div className="row-actions">
+          <button className="icon-button" disabled={pending || index === 0} onClick={() => void move(-1)} type="button" aria-label="위로">
+            <ArrowUp size={16} />
+          </button>
+          <button
+            className="icon-button"
+            disabled={pending || index === total - 1}
+            onClick={() => void move(1)}
+            type="button"
+            aria-label="아래로"
+          >
+            <ArrowDown size={16} />
+          </button>
+          <button className="icon-button" disabled={pending} onClick={() => void handleSave()} type="button" aria-label="저장">
+            <Save size={16} />
+          </button>
+        </div>
+        <p className="reset-hint">
+          <UserX size={13} />
+          비밀번호 강제 변경은 Admin SDK가 있는 서버를 연결하면 다시 활성화할 수 있습니다.
+        </p>
+        {message && <p className="row-message">{message}</p>}
+      </footer>
     </article>
   );
 }
