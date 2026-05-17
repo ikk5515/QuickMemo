@@ -97,6 +97,10 @@ export interface NoteUserStateDocument {
   isPinned?: boolean;
   readAt?: Timestamp;
   confirmedAt?: Timestamp;
+  cursorOffset?: number | null;
+  cursorVisible?: boolean;
+  cursorClientId?: string;
+  cursorUpdatedAt?: Timestamp;
   updatedAt?: Timestamp;
 }
 

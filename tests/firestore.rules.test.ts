@@ -138,6 +138,10 @@ function noteUserState(noteId: string, uid: string, overrides: Record<string, un
     noteId,
     isPinned: true,
     readAt: new Date("2026-05-18T09:00:00.000Z"),
+    cursorOffset: 4,
+    cursorVisible: true,
+    cursorClientId: "client-a",
+    cursorUpdatedAt: new Date("2026-05-18T09:00:00.000Z"),
     updatedAt: new Date("2026-05-18T09:00:00.000Z"),
     ...overrides
   };
@@ -816,8 +820,26 @@ describeRules("firestore security rules", () => {
 
     await assertSucceeds(setDoc(doc(participantDb, "noteUserStates/note-a/users/user-b"), noteUserState("note-a", "user-b")));
     await assertSucceeds(getDoc(doc(participantDb, "noteUserStates/note-a/users/user-b")));
+    await assertSucceeds(
+      setDoc(
+        doc(participantDb, "noteUserStates/note-a/users/user-b"),
+        noteUserState("note-a", "user-b", {
+          cursorOffset: null,
+          cursorVisible: false,
+          cursorClientId: "client-a"
+        })
+      )
+    );
     await assertFails(setDoc(doc(participantDb, "noteUserStates/note-a/users/user-a"), noteUserState("note-a", "user-a")));
     await assertFails(setDoc(doc(outsiderDb, "noteUserStates/note-a/users/user-c"), noteUserState("note-a", "user-c")));
+    await assertFails(
+      setDoc(
+        doc(participantDb, "noteUserStates/note-a/users/user-b"),
+        noteUserState("note-a", "user-b", {
+          cursorOffset: -1
+        })
+      )
+    );
   });
 
   it("allows participants to write bounded note history and blocks forged actors", async () => {
