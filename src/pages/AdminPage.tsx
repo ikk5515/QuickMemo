@@ -21,7 +21,7 @@ import type { ReactNode } from "react";
 import { AppShell } from "../components/AppShell";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, generateUserKeyBundle, unwrapNoteKey } from "../lib/crypto";
-import { parseEditorContent, previewTextFromHtml } from "../lib/editorContent";
+import { linkifyEditorHtml, parseEditorContent, previewTextFromHtml } from "../lib/editorContent";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { initialsFromName } from "../lib/roster";
 import { createUser, updateUser } from "../services/adminFunctions";
@@ -808,7 +808,7 @@ export default function AdminPage() {
                     className="admin-note-view-body"
                     style={{ fontSize: selectedAdminNote.fontSize }}
                     dangerouslySetInnerHTML={{
-                      __html: selectedAdminNote.bodyHtml || "<p>본문 없음</p>"
+                      __html: linkifyEditorHtml(selectedAdminNote.bodyHtml || "<p>본문 없음</p>")
                     }}
                   />
                 ) : (

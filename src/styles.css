@@ -789,6 +789,22 @@ textarea {
   object-fit: contain;
 }
 
+.rich-body-input a,
+.note-preview-body a,
+.admin-note-view-body a {
+  color: #2563eb;
+  font-weight: 750;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.rich-body-input a:hover,
+.note-preview-body a:hover,
+.admin-note-view-body a:hover {
+  color: #1d4ed8;
+}
+
 .editor-footer {
   align-items: center;
   border-top: 1px solid var(--line);

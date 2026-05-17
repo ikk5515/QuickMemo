@@ -1,6 +1,9 @@
 const fontSizePattern = /^<!--qm-font-size:(\d+)-->/;
-const htmlTagPattern = /<(p|div|br|strong|b|em|i|u|span|img|figure|ul|ol|li|blockquote|pre|code)\b/i;
+const htmlTagPattern = /<(a|p|div|br|strong|b|em|i|u|span|img|figure|ul|ol|li|blockquote|pre|code)\b/i;
+const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
+const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const allowedTags = new Set([
+  "A",
   "B",
   "BLOCKQUOTE",
   "BR",
@@ -82,6 +85,45 @@ export function sanitizeEditorHtml(html: string) {
   return container.innerHTML;
 }
 
+export function linkifyEditorHtml(html: string) {
+  if (typeof document === "undefined") {
+    return html;
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = sanitizeEditorHtml(html);
+
+  const textNodes: Text[] = [];
+  const walker = document.createTreeWalker(
+    template.content,
+    4,
+    {
+      acceptNode(node) {
+        const parent = node.parentElement;
+
+        if (parent?.closest("a")) {
+          return 2;
+        }
+
+        return 1;
+      }
+    }
+  );
+
+  let currentNode = walker.nextNode();
+
+  while (currentNode) {
+    textNodes.push(currentNode as Text);
+    currentNode = walker.nextNode();
+  }
+
+  textNodes.forEach(linkifyTextNode);
+
+  const container = document.createElement("div");
+  container.appendChild(template.content);
+  return container.innerHTML;
+}
+
 export function imageHtml(src: string, alt: string) {
   const image = document.createElement("img");
   image.src = src;
@@ -120,6 +162,10 @@ function sanitizeNode(node: Node): Node | null {
     return image;
   }
 
+  if (node.tagName === "A") {
+    return sanitizeAnchor(node);
+  }
+
   const element = document.createElement(node.tagName.toLowerCase());
 
   node.childNodes.forEach((childNode) => {
@@ -131,6 +177,112 @@ function sanitizeNode(node: Node): Node | null {
   });
 
   return element;
+}
+
+function sanitizeAnchor(node: HTMLElement): Node {
+  const href = normalizedHttpHref(node.getAttribute("href") ?? "");
+  const fragment = document.createDocumentFragment();
+
+  node.childNodes.forEach((childNode) => {
+    const sanitizedChild = sanitizeNode(childNode);
+
+    if (sanitizedChild) {
+      fragment.appendChild(sanitizedChild);
+    }
+  });
+
+  if (!href) {
+    return fragment;
+  }
+
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+
+  if (fragment.textContent || fragment.childNodes.length) {
+    anchor.appendChild(fragment);
+  } else {
+    anchor.textContent = href;
+  }
+
+  return anchor;
+}
+
+function linkifyTextNode(node: Text) {
+  const text = node.textContent ?? "";
+  const fragment = document.createDocumentFragment();
+  let lastIndex = 0;
+  let changed = false;
+
+  for (const match of text.matchAll(linkableUrlPattern)) {
+    const rawText = match[0];
+    const startIndex = match.index ?? 0;
+    const { linkText, suffix } = splitUrlToken(rawText);
+    const href = normalizedHttpHref(linkText);
+
+    if (!href) {
+      continue;
+    }
+
+    fragment.appendChild(document.createTextNode(text.slice(lastIndex, startIndex)));
+
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.target = "_blank";
+    anchor.rel = "noopener noreferrer";
+    anchor.textContent = linkText;
+    fragment.appendChild(anchor);
+
+    if (suffix) {
+      fragment.appendChild(document.createTextNode(suffix));
+    }
+
+    lastIndex = startIndex + rawText.length;
+    changed = true;
+  }
+
+  if (!changed) {
+    return;
+  }
+
+  fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+  node.replaceWith(fragment);
+}
+
+function splitUrlToken(value: string) {
+  const suffix = value.match(trailingUrlPunctuationPattern)?.[0] ?? "";
+
+  return {
+    linkText: suffix ? value.slice(0, -suffix.length) : value,
+    suffix
+  };
+}
+
+function normalizedHttpHref(value: string) {
+  const rawValue = value.trim();
+
+  if (!rawValue) {
+    return null;
+  }
+
+  const normalizedValue = /^www\./i.test(rawValue) ? `https://${rawValue}` : rawValue;
+
+  try {
+    const url = new URL(normalizedValue);
+
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return null;
+    }
+
+    if (!url.hostname) {
+      return null;
+    }
+
+    return url.href;
+  } catch {
+    return null;
+  }
 }
 
 function plainTextToHtml(value: string) {

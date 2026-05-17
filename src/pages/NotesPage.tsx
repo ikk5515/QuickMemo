@@ -16,6 +16,8 @@ import {
 import {
   type ChangeEvent,
   type ClipboardEvent,
+  type FormEvent,
+  type MouseEvent,
   type RefObject,
   useEffect,
   useMemo,
@@ -35,6 +37,7 @@ import {
 } from "../lib/crypto";
 import {
   imageHtml,
+  linkifyEditorHtml,
   parseEditorContent,
   previewTextFromHtml,
   sanitizeEditorHtml,
@@ -1339,8 +1342,12 @@ function RichMemoEditor({
     }
   }, [editorRef, value]);
 
-  function handleInput() {
-    onChange(editorRef.current?.innerHTML ?? "");
+  function handleInput(event: FormEvent<HTMLDivElement>) {
+    const inputEvent = event.nativeEvent as InputEvent;
+    const shouldLinkify =
+      inputEvent.inputType === "insertParagraph" || inputEvent.inputType === "insertLineBreak" || inputEvent.data === " ";
+
+    onChange(shouldLinkify ? linkifyEditableElement(editorRef.current) : editorRef.current?.innerHTML ?? "");
   }
 
   function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
@@ -1358,7 +1365,23 @@ function RichMemoEditor({
 
     event.preventDefault();
     document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
-    handleInput();
+    onChange(linkifyEditableElement(editorRef.current));
+  }
+
+  function handleBlur() {
+    onChange(linkifyEditableElement(editorRef.current));
+  }
+
+  function handleClick(event: MouseEvent<HTMLDivElement>) {
+    const target = event.target;
+    const anchor = target instanceof HTMLElement ? target.closest("a[href]") : null;
+
+    if (!(anchor instanceof HTMLAnchorElement) || !editorRef.current?.contains(anchor)) {
+      return;
+    }
+
+    event.preventDefault();
+    window.open(anchor.href, "_blank", "noopener,noreferrer");
   }
 
   return (
@@ -1367,6 +1390,8 @@ function RichMemoEditor({
       className="rich-body-input"
       contentEditable
       data-placeholder="메모를 입력하세요..."
+      onBlur={handleBlur}
+      onClick={handleClick}
       onInput={handleInput}
       onPaste={handlePaste}
       role="textbox"
@@ -1386,6 +1411,70 @@ function placeCaretAtEnd(element: HTMLElement) {
   const selection = window.getSelection();
   selection?.removeAllRanges();
   selection?.addRange(range);
+}
+
+function linkifyEditableElement(element: HTMLDivElement | null) {
+  if (!element) {
+    return "";
+  }
+
+  const caretOffset = getCaretCharacterOffset(element);
+  const linkedHtml = linkifyEditorHtml(element.innerHTML);
+
+  if (linkedHtml !== element.innerHTML) {
+    element.innerHTML = linkedHtml;
+    restoreCaretByCharacterOffset(element, caretOffset);
+  }
+
+  return element.innerHTML;
+}
+
+function getCaretCharacterOffset(element: HTMLElement) {
+  const selection = window.getSelection();
+
+  if (!selection?.rangeCount) {
+    return null;
+  }
+
+  const range = selection.getRangeAt(0);
+
+  if (!element.contains(range.startContainer)) {
+    return null;
+  }
+
+  const preCaretRange = range.cloneRange();
+  preCaretRange.selectNodeContents(element);
+  preCaretRange.setEnd(range.startContainer, range.startOffset);
+  return preCaretRange.toString().length;
+}
+
+function restoreCaretByCharacterOffset(element: HTMLElement, offset: number | null) {
+  if (offset === null) {
+    return;
+  }
+
+  const selection = window.getSelection();
+  const range = document.createRange();
+  const walker = document.createTreeWalker(element, 4);
+  let remainingOffset = offset;
+  let currentNode = walker.nextNode();
+
+  while (currentNode) {
+    const textLength = currentNode.textContent?.length ?? 0;
+
+    if (remainingOffset <= textLength) {
+      range.setStart(currentNode, remainingOffset);
+      range.collapse(true);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return;
+    }
+
+    remainingOffset -= textLength;
+    currentNode = walker.nextNode();
+  }
+
+  placeCaretAtEnd(element);
 }
 
 function NoteDrawer({
@@ -1811,7 +1900,7 @@ function NotePreviewModal({
           <div
             className="note-preview-body"
             style={{ fontSize: draft.fontSize }}
-            dangerouslySetInnerHTML={{ __html: sanitizeEditorHtml(bodyHtml) }}
+            dangerouslySetInnerHTML={{ __html: linkifyEditorHtml(sanitizeEditorHtml(bodyHtml)) }}
           />
         )}
       </section>
