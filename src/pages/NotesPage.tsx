@@ -360,10 +360,6 @@ export default function NotesPage() {
         <section className="editor-panel full-editor-panel">
           <div className="editor-toolbar">
             <div className="editor-primary-actions">
-              <button type="button" onClick={() => startNewNote()}>
-                <FilePlus2 size={18} />
-                새 메모
-              </button>
               <button className="secondary-button" type="button" onClick={() => setShareOpen((current) => !current)}>
                 <UsersRound size={18} />
                 공유 대상
@@ -387,6 +383,10 @@ export default function NotesPage() {
               <button className="secondary-button" type="button" onClick={() => setListOpen((current) => !current)}>
                 <PanelRightOpen size={18} />
                 노트 목록
+              </button>
+              <button type="button" onClick={() => startNewNote()}>
+                <FilePlus2 size={18} />
+                새 노트
               </button>
               <span className="sync-status">{saving ? "저장 중..." : status}</span>
               <button disabled={saving} onClick={() => void saveCurrentNote(true)} type="button">
