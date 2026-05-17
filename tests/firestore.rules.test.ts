@@ -192,14 +192,15 @@ describeRules("firestore security rules", () => {
     await assertFails(getDoc(doc(testEnv.authenticatedContext("user-c").firestore(), "notes/note-a")));
   });
 
-  it("prevents participants from changing access lists during content edits", async () => {
+  it("allows note owners to update sharing and blocks non-owners", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
     });
 
-    const userDb = testEnv.authenticatedContext("user-a").firestore();
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     await assertSucceeds(
-      setDoc(doc(userDb, "notes/note-a"), {
+      setDoc(doc(ownerDb, "notes/note-a"), {
         type: "shared",
         ownerUid: "user-a",
         participantUids: ["user-a", "user-b"],
@@ -213,10 +214,10 @@ describeRules("firestore security rules", () => {
       })
     );
 
-    await expect(getDoc(doc(userDb, "notes/note-a"))).resolves.toBeTruthy();
-    await assertFails(
-      setDoc(doc(userDb, "notes/note-a"), {
-        type: "shared",
+    await expect(getDoc(doc(ownerDb, "notes/note-a"))).resolves.toBeTruthy();
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "notes/note-a"), {
+        type: "personal",
         ownerUid: "user-a",
         participantUids: ["user-a"],
         encryptedTitle: encryptedPayload,
@@ -225,6 +226,36 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
         },
         updatedBy: "user-a"
+      })
+    );
+
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-a"
+      })
+    );
+
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+    await assertFails(
+      setDoc(doc(participantDb, "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-b"
       })
     );
   });
