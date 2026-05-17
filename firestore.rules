@@ -6,13 +6,6 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isAdmin() {
-      return signedIn()
-        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
-        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true
-        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isActive == true;
-    }
-
     function noteParticipant(data) {
       return signedIn() && request.auth.uid in data.participantUids;
     }
