@@ -77,6 +77,8 @@ const blankEditor = (uid: string): EditorState => ({
 
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const maxImageDataUrlLength = 760_000;
+const autosaveDelayMs = 450;
+const localEchoGraceMs = 5000;
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -97,6 +99,18 @@ async function encryptNoteDraft(draft: NoteDraft, noteKey: CryptoKey) {
   return { encryptedTitle, encryptedBody };
 }
 
+function draftHasContent(draft: NoteDraft) {
+  return Boolean(draft.title.trim() || previewTextFromHtml(draft.body) || /<img\b/i.test(draft.body));
+}
+
+function draftsMatch(editor: EditorState, draft: NoteDraft) {
+  return editor.title === draft.title && editor.body === draft.body && editor.fontSize === draft.fontSize;
+}
+
+function noteDraftsMatch(left: NoteDraft, right: NoteDraft) {
+  return left.title === right.title && left.body === right.body && left.fontSize === right.fontSize;
+}
+
 export default function NotesPage() {
   const { profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
@@ -111,6 +125,7 @@ export default function NotesPage() {
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const autosaveTimer = useRef<number | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
+  const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
 
   useEffect(() => {
     if (!profile) {
@@ -175,7 +190,13 @@ export default function NotesPage() {
   }, [notes, privateKey, profile]);
 
   useEffect(() => {
-    if (!editor.noteId || !editor.noteKey || !editor.dirty || !profile) {
+    const draft = {
+      title: editor.title,
+      body: editor.body,
+      fontSize: editor.fontSize
+    };
+
+    if (!editor.dirty || !profile || saving || !draftHasContent(draft)) {
       return undefined;
     }
 
@@ -185,7 +206,7 @@ export default function NotesPage() {
 
     autosaveTimer.current = window.setTimeout(() => {
       void saveCurrentNote(false);
-    }, 900);
+    }, autosaveDelayMs);
 
     return () => {
       if (autosaveTimer.current) {
@@ -194,7 +215,17 @@ export default function NotesPage() {
     };
     // saveCurrentNote reads the current render state; adding it here restarts the debounce on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor.title, editor.body, editor.fontSize, editor.dirty, editor.noteId, editor.noteKey, profile]);
+  }, [
+    editor.title,
+    editor.body,
+    editor.fontSize,
+    editor.participantUids,
+    editor.dirty,
+    editor.noteId,
+    editor.noteKey,
+    profile,
+    saving
+  ]);
 
   const activeUsers = useMemo(
     () => users.filter((user) => user.isActive && user.publicKeyJwk),
@@ -204,6 +235,56 @@ export default function NotesPage() {
     () => decryptedNotes.find((note) => note.id === previewNoteId) ?? null,
     [decryptedNotes, previewNoteId]
   );
+  const activeRemoteNote = useMemo(
+    () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
+    [decryptedNotes, editor.noteId]
+  );
+
+  useEffect(() => {
+    if (!activeRemoteNote || !profile) {
+      return;
+    }
+
+    const remoteDraft = draftFromNote(activeRemoteNote);
+    const pendingEcho = pendingLocalEcho.current;
+    const currentDraft = {
+      title: editor.title,
+      body: editor.body,
+      fontSize: editor.fontSize
+    };
+
+    if (pendingEcho?.noteId === activeRemoteNote.id && noteDraftsMatch(currentDraft, pendingEcho.draft)) {
+      if (noteDraftsMatch(remoteDraft, pendingEcho.draft)) {
+        pendingLocalEcho.current = null;
+      } else if (Date.now() - pendingEcho.createdAt < localEchoGraceMs) {
+        return;
+      }
+    }
+
+    if (editor.noteId !== activeRemoteNote.id || editor.dirty || draftsMatch(editor, remoteDraft)) {
+      return;
+    }
+
+    setEditor((current) => ({
+      ...current,
+      title: remoteDraft.title,
+      body: remoteDraft.body,
+      type: activeRemoteNote.type,
+      participantUids: activeRemoteNote.participantUids,
+      fontSize: remoteDraft.fontSize,
+      dirty: false
+    }));
+    setStatus("다른 기기 변경 사항을 반영했습니다.");
+  }, [
+    activeRemoteNote,
+    editor,
+    editor.body,
+    editor.dirty,
+    editor.fontSize,
+    editor.noteId,
+    editor.title,
+    profile
+  ]);
 
   useEffect(() => {
     if (!previewNoteId) {
@@ -304,36 +385,32 @@ export default function NotesPage() {
     });
   }
 
-  async function buildEncryptedPayload(noteKey: CryptoKey) {
-    return encryptNoteDraft(
-      {
-        title: editor.title,
-        body: editor.body,
-        fontSize: editor.fontSize
-      },
-      noteKey
-    );
-  }
-
   async function saveCurrentNote(showSavedMessage = true) {
     if (saving) {
       return;
     }
+
+    const draft = {
+      title: editor.title,
+      body: editor.body,
+      fontSize: editor.fontSize
+    };
 
     setSaving(true);
     setError(null);
 
     try {
       if (editor.noteId && editor.noteKey) {
-        const payload = await buildEncryptedPayload(editor.noteKey);
+        const payload = await encryptNoteDraft(draft, editor.noteKey);
         await updateEncryptedNote(editor.noteId, unlockedProfile.uid, payload.encryptedTitle, payload.encryptedBody);
-        setEditor((current) => ({ ...current, dirty: false }));
+        pendingLocalEcho.current = { noteId: editor.noteId, draft, createdAt: Date.now() };
+        setEditor((current) => (draftsMatch(current, draft) ? { ...current, dirty: false } : current));
         setStatus(showSavedMessage ? "변경 사항을 저장했습니다." : "자동 저장됨");
         return;
       }
 
       const noteKey = await generateNoteKey();
-      const payload = await buildEncryptedPayload(noteKey);
+      const payload = await encryptNoteDraft(draft, noteKey);
       const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids]));
       const participantProfiles = activeUsers.filter((user) => participantUids.includes(user.uid));
       const wrappedKeys = Object.fromEntries(
@@ -354,15 +431,16 @@ export default function NotesPage() {
         encryptedBody: payload.encryptedBody,
         wrappedKeys
       });
+      pendingLocalEcho.current = { noteId: created.id, draft, createdAt: Date.now() };
 
       setEditor((current) => ({
         ...current,
         noteId: created.id,
         noteKey,
         type: participantUids.length > 1 ? "shared" : "personal",
-        dirty: false
+        dirty: !draftsMatch(current, draft)
       }));
-      setStatus("노트를 저장 목록에 추가했습니다.");
+      setStatus(showSavedMessage ? "노트를 저장 목록에 추가했습니다." : "자동 저장됨");
     } catch {
       setError("노트를 저장하지 못했습니다.");
     } finally {
@@ -434,6 +512,7 @@ export default function NotesPage() {
       const payload = await encryptNoteDraft(draft, noteKey);
 
       await updateEncryptedNote(note.id, unlockedProfile.uid, payload.encryptedTitle, payload.encryptedBody);
+      pendingLocalEcho.current = { noteId: note.id, draft, createdAt: Date.now() };
 
       if (editor.noteId === note.id) {
         setEditor((current) => ({
@@ -601,7 +680,7 @@ function RichMemoEditor({
   useEffect(() => {
     const element = editorRef.current;
 
-    if (!element || document.activeElement === element || element.innerHTML === value) {
+    if (!element || element.innerHTML === value) {
       return;
     }
 
@@ -748,7 +827,13 @@ function NotePreviewModal({
   const [draft, setDraft] = useState<NoteDraft>(() => draftFromNote(note));
   const [draftDirty, setDraftDirty] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
+  const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
+  const latestDraftRef = useRef(draft);
+
+  useEffect(() => {
+    latestDraftRef.current = draft;
+  }, [draft]);
 
   useEffect(() => {
     if (isEditing) {
@@ -759,6 +844,28 @@ function NotePreviewModal({
     setDraftDirty(false);
     setModalError(null);
   }, [isEditing, note]);
+
+  useEffect(() => {
+    if (!isEditing || !draftDirty || saving) {
+      return undefined;
+    }
+
+    if (previewAutosaveTimer.current) {
+      window.clearTimeout(previewAutosaveTimer.current);
+    }
+
+    previewAutosaveTimer.current = window.setTimeout(() => {
+      void saveDraft(false);
+    }, autosaveDelayMs);
+
+    return () => {
+      if (previewAutosaveTimer.current) {
+        window.clearTimeout(previewAutosaveTimer.current);
+      }
+    };
+    // saveDraft reads the current modal state; adding it here restarts the debounce on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.title, draft.body, draft.fontSize, draftDirty, isEditing, saving]);
 
   function beginEdit() {
     setDraft(draftFromNote(note));
@@ -784,18 +891,24 @@ function NotePreviewModal({
     setDraftDirty(true);
   }
 
-  async function saveDraft() {
+  async function saveDraft(exitEdit = true) {
     setModalError(null);
 
-    const saved = await onSave(note, draft);
+    const savedDraft = draft;
+    const saved = await onSave(note, savedDraft);
 
     if (!saved) {
       setModalError("노트를 저장하지 못했습니다.");
       return;
     }
 
-    setDraftDirty(false);
-    setIsEditing(false);
+    if (noteDraftsMatch(latestDraftRef.current, savedDraft)) {
+      setDraftDirty(false);
+
+      if (exitEdit) {
+        setIsEditing(false);
+      }
+    }
   }
 
   async function insertPreviewImageFile(file: File, range: Range | null = null) {
