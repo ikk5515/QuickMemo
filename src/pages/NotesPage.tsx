@@ -533,11 +533,13 @@ export default function NotesPage() {
   }, [profile]);
   const sharePanelUsers = useMemo(
     () =>
-      activeUsers.filter(
-        (user) =>
-          user.uid === profile?.uid || allowedShareTargetSet.has(user.uid) || editor.participantUids.includes(user.uid)
-      ),
-    [activeUsers, allowedShareTargetSet, editor.participantUids, profile?.uid]
+      profile?.isAdmin
+        ? activeUsers
+        : activeUsers.filter(
+            (user) =>
+              user.uid === profile?.uid || allowedShareTargetSet.has(user.uid) || editor.participantUids.includes(user.uid)
+          ),
+    [activeUsers, allowedShareTargetSet, editor.participantUids, profile?.isAdmin, profile?.uid]
   );
   const previewNote = useMemo(
     () => decryptedNotes.find((note) => note.id === previewNoteId) ?? null,
@@ -758,7 +760,7 @@ export default function NotesPage() {
   }
 
   function canShareWithUser(uid: string) {
-    return uid === unlockedProfile.uid || allowedShareTargetSet.has(uid);
+    return unlockedProfile.isAdmin || uid === unlockedProfile.uid || allowedShareTargetSet.has(uid);
   }
 
   function updateDeadline(value: string) {
@@ -1197,7 +1199,7 @@ export default function NotesPage() {
                 );
               })}
               {!canEditShareTargets && <p className="muted share-hint">노트 소유자만 공유 대상을 변경할 수 있습니다.</p>}
-              {canEditShareTargets && sharePanelUsers.length <= 1 && (
+              {canEditShareTargets && !unlockedProfile.isAdmin && sharePanelUsers.length <= 1 && (
                 <p className="muted share-hint">관리자 페이지에서 허용된 공유 대상이 없습니다.</p>
               )}
             </div>

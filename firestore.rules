@@ -260,6 +260,7 @@ service cloud.firestore {
 
     function allowedShareTargets(data) {
       return data.participantUids.hasOnly([data.ownerUid])
+        || get(userPath(data.ownerUid)).data.isAdmin == true
         || (
           get(userPath(data.ownerUid)).data.keys().hasAny(["allowedShareTargetUids"])
           && data.participantUids.hasOnly(get(userPath(data.ownerUid)).data.allowedShareTargetUids)

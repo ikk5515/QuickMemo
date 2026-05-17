@@ -1399,6 +1399,19 @@ textarea {
   width: auto;
 }
 
+.admin-share-note {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  grid-column: 1 / -1;
+  line-height: 1.45;
+  margin: 0;
+  padding: 12px;
+}
+
 .admin-user-card-footer {
   align-items: center;
   border-top: 1px solid var(--line);

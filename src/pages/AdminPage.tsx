@@ -249,7 +249,7 @@ export default function AdminPage() {
       totalUsers: users.length,
       activeUsers: users.filter((user) => user.isActive).length,
       admins: users.filter((user) => user.isAdmin).length,
-      shareLinks: users.reduce((count, user) => count + Math.max(shareTargetsOf(user).length - 1, 0), 0)
+      shareLinks: users.reduce((count, user) => count + (user.isAdmin ? 0 : Math.max(shareTargetsOf(user).length - 1, 0)), 0)
     }),
     [users]
   );
@@ -329,7 +329,7 @@ export default function AdminPage() {
         quickKey: Number(draft.quickKey || nextQuickKey),
         password: draft.password,
         isAdmin: draft.isAdmin,
-        allowedShareTargetUids: draft.allowedShareTargetUids,
+        allowedShareTargetUids: draft.isAdmin ? [] : draft.allowedShareTargetUids,
         keyBundle
       });
       setDraft({
@@ -484,7 +484,7 @@ export default function AdminPage() {
                 />
                 관리자 권한
               </label>
-              {activeUsers.length > 0 && (
+              {!draft.isAdmin && activeUsers.length > 0 && (
                 <div className="permission-editor create-permission-editor">
                   <div className="permission-editor-header">
                     <span>
@@ -510,6 +510,7 @@ export default function AdminPage() {
                   </div>
                 </div>
               )}
+              {draft.isAdmin && <p className="admin-share-note">관리자는 모든 사용자에게 공유할 수 있습니다.</p>}
               {notice && <p className="form-success">{notice}</p>}
               {error && <p className="form-error">{error}</p>}
               <button disabled={pending} type="submit">
@@ -796,7 +797,7 @@ function EditableUserCard({
         order: Number(draft.order),
         isActive: draft.isActive,
         isAdmin: draft.isAdmin,
-        allowedShareTargetUids: targetUids
+        allowedShareTargetUids: draft.isAdmin ? [user.uid] : targetUids
       });
       setMessage("저장됨");
     } catch {
@@ -832,7 +833,7 @@ function EditableUserCard({
             order: orderIndex + 1,
             isActive: orderedUser.isActive,
             isAdmin: orderedUser.isAdmin,
-            allowedShareTargetUids: shareTargetsOf(orderedUser)
+            allowedShareTargetUids: orderedUser.isAdmin ? [orderedUser.uid] : shareTargetsOf(orderedUser)
           })
         )
       );
@@ -933,31 +934,35 @@ function EditableUserCard({
         </label>
       </div>
 
-      <div className="permission-editor">
-        <div className="permission-editor-header">
-          <span>
-            <UsersRound size={16} />
-            공유 허용 대상
-          </span>
-          <strong>{selectedTargetUsers.length}</strong>
+      {draft.isAdmin ? (
+        <p className="admin-share-note">관리자는 공유 허용 대상 설정 없이 모든 사용자에게 공유할 수 있습니다.</p>
+      ) : (
+        <div className="permission-editor">
+          <div className="permission-editor-header">
+            <span>
+              <UsersRound size={16} />
+              공유 허용 대상
+            </span>
+            <strong>{selectedTargetUsers.length}</strong>
+          </div>
+          <div className="permission-chip-grid">
+            {targetUsers.map((targetUser) => (
+              <label key={targetUser.uid} className="permission-chip">
+                <input
+                  checked={targetUids.includes(targetUser.uid)}
+                  onChange={(event) => toggleShareTarget(targetUser.uid, event.target.checked)}
+                  type="checkbox"
+                />
+                <span className="mini-avatar" style={{ background: targetUser.color }}>
+                  {targetUser.avatarText}
+                </span>
+                {targetUser.displayName}
+              </label>
+            ))}
+            {targetUsers.length === 0 && <p className="muted">선택할 사용자가 없습니다.</p>}
+          </div>
         </div>
-        <div className="permission-chip-grid">
-          {targetUsers.map((targetUser) => (
-            <label key={targetUser.uid} className="permission-chip">
-              <input
-                checked={targetUids.includes(targetUser.uid)}
-                onChange={(event) => toggleShareTarget(targetUser.uid, event.target.checked)}
-                type="checkbox"
-              />
-              <span className="mini-avatar" style={{ background: targetUser.color }}>
-                {targetUser.avatarText}
-              </span>
-              {targetUser.displayName}
-            </label>
-          ))}
-          {targetUsers.length === 0 && <p className="muted">선택할 사용자가 없습니다.</p>}
-        </div>
-      </div>
+      )}
 
       <footer className="admin-user-card-footer">
         <div className="row-actions">
