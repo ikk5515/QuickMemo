@@ -65,6 +65,13 @@ export interface DecryptedNote extends NoteDocument {
   body: string;
 }
 
+export interface ActiveNoteDocument {
+  uid: string;
+  noteId: string | null;
+  updatedByClientId: string;
+  updatedAt?: Timestamp;
+}
+
 export interface UserKeyBundle {
   publicKeyJwk: JsonWebKey;
   encryptedPrivateKeyJwk: EncryptedPayload;

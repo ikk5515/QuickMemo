@@ -37,6 +37,7 @@ import {
   sanitizeEditorHtml,
   serializeEditorContent
 } from "../lib/editorContent";
+import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
   createEncryptedNote,
   deleteNote,
@@ -45,7 +46,7 @@ import {
   type NoteSnapshot
 } from "../services/notes";
 import { subscribeUsers } from "../services/users";
-import type { DecryptedNote, NoteKind, UserProfile } from "../types";
+import type { ActiveNoteDocument, DecryptedNote, NoteKind, UserProfile } from "../types";
 
 interface EditorState {
   noteId: string | null;
@@ -79,6 +80,7 @@ const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 450;
 const localEchoGraceMs = 5000;
+const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -111,11 +113,37 @@ function noteDraftsMatch(left: NoteDraft, right: NoteDraft) {
   return left.title === right.title && left.body === right.body && left.fontSize === right.fontSize;
 }
 
+function getActiveNoteClientId() {
+  const fallbackId = () =>
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  if (typeof window === "undefined") {
+    return fallbackId();
+  }
+
+  try {
+    const storedId = window.sessionStorage.getItem(activeNoteClientStorageKey);
+
+    if (storedId) {
+      return storedId;
+    }
+
+    const nextId = fallbackId();
+    window.sessionStorage.setItem(activeNoteClientStorageKey, nextId);
+    return nextId;
+  } catch {
+    return fallbackId();
+  }
+}
+
 export default function NotesPage() {
   const { profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [decryptedNotes, setDecryptedNotes] = useState<DecryptedNote[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
+  const [activeNote, setActiveNote] = useState<ActiveNoteDocument | null>(null);
   const [editor, setEditor] = useState<EditorState>(() => blankEditor(profile?.uid ?? ""));
   const [status, setStatus] = useState("준비됨");
   const [error, setError] = useState<string | null>(null);
@@ -126,6 +154,7 @@ export default function NotesPage() {
   const autosaveTimer = useRef<number | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
+  const activeNoteClientId = useRef(getActiveNoteClientId());
 
   useEffect(() => {
     if (!profile) {
@@ -133,6 +162,15 @@ export default function NotesPage() {
     }
 
     return subscribeVisibleNotes(profile.uid, setNotes, () => setError("노트 목록을 불러오지 못했습니다."));
+  }, [profile]);
+
+  useEffect(() => {
+    if (!profile) {
+      setActiveNote(null);
+      return undefined;
+    }
+
+    return subscribeActiveNote(profile.uid, setActiveNote, () => setError("활성 노트 상태를 불러오지 못했습니다."));
   }, [profile]);
 
   useEffect(() => {
@@ -261,7 +299,7 @@ export default function NotesPage() {
       }
     }
 
-    if (editor.noteId !== activeRemoteNote.id || editor.dirty || draftsMatch(editor, remoteDraft)) {
+    if (editor.noteId !== activeRemoteNote.id || draftsMatch(editor, remoteDraft)) {
       return;
     }
 
@@ -274,15 +312,61 @@ export default function NotesPage() {
       fontSize: remoteDraft.fontSize,
       dirty: false
     }));
-    setStatus("다른 기기 변경 사항을 반영했습니다.");
+    setStatus(activeRemoteNote.type === "shared" ? "공유 노트 변경 사항을 반영했습니다." : "다른 기기 변경 사항을 반영했습니다.");
   }, [
     activeRemoteNote,
     editor,
+    editor.body,
+    editor.fontSize,
+    editor.noteId,
+    editor.title,
+    profile
+  ]);
+
+  useEffect(() => {
+    if (!activeNote || !profile || !privateKey || activeNote.updatedByClientId === activeNoteClientId.current) {
+      return;
+    }
+
+    const currentDraft = {
+      title: editor.title,
+      body: editor.body,
+      fontSize: editor.fontSize
+    };
+    const canReplaceEditor = !editor.dirty || !draftHasContent(currentDraft);
+
+    if (!activeNote.noteId) {
+      if (canReplaceEditor && (editor.noteId || draftHasContent(currentDraft))) {
+        setEditor(blankEditor(profile.uid));
+        setStatus("다른 기기에서 새 노트 작성을 시작했습니다.");
+      }
+
+      return;
+    }
+
+    if (editor.noteId === activeNote.noteId || !canReplaceEditor) {
+      return;
+    }
+
+    const noteToOpen = decryptedNotes.find((note) => note.id === activeNote.noteId);
+
+    if (!noteToOpen) {
+      return;
+    }
+
+    void openNote(noteToOpen, undefined, false);
+    setStatus("다른 기기에서 열린 노트를 표시했습니다.");
+    // openNote reads the latest unlocked key material; the guards above prevent repeated remote adoption.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeNote,
+    decryptedNotes,
     editor.body,
     editor.dirty,
     editor.fontSize,
     editor.noteId,
     editor.title,
+    privateKey,
     profile
   ]);
 
@@ -320,6 +404,12 @@ export default function NotesPage() {
   const unlockedPrivateKey = privateKey;
   const currentType: NoteKind = editor.participantUids.length > 1 ? "shared" : "personal";
 
+  function announceActiveNote(noteId: string | null) {
+    void publishActiveNote(unlockedProfile.uid, noteId, activeNoteClientId.current).catch(() => {
+      setError("현재 노트 상태를 다른 기기에 알리지 못했습니다.");
+    });
+  }
+
   function updateEditor(field: "title" | "body", value: string) {
     setEditor((current) => ({ ...current, [field]: value, dirty: true }));
   }
@@ -328,7 +418,7 @@ export default function NotesPage() {
     setEditor((current) => ({ ...current, fontSize, dirty: true }));
   }
 
-  async function openNote(note: DecryptedNote, draftOverride?: NoteDraft) {
+  async function openNote(note: DecryptedNote, draftOverride?: NoteDraft, shouldAnnounce = true) {
     const rawNote = notes.find((current) => current.id === note.id);
 
     if (!rawNote) {
@@ -354,6 +444,10 @@ export default function NotesPage() {
       setPreviewNoteId(null);
       setStatus("노트를 열었습니다.");
       setError(null);
+
+      if (shouldAnnounce) {
+        announceActiveNote(note.id);
+      }
     } catch {
       setError("이 노트를 열 수 없습니다.");
     }
@@ -364,6 +458,7 @@ export default function NotesPage() {
     setShareOpen(false);
     setStatus("새 노트 작성 중");
     setError(null);
+    announceActiveNote(null);
   }
 
   function toggleParticipant(event: ChangeEvent<HTMLInputElement>) {
@@ -404,6 +499,7 @@ export default function NotesPage() {
         const payload = await encryptNoteDraft(draft, editor.noteKey);
         await updateEncryptedNote(editor.noteId, unlockedProfile.uid, payload.encryptedTitle, payload.encryptedBody);
         pendingLocalEcho.current = { noteId: editor.noteId, draft, createdAt: Date.now() };
+        announceActiveNote(editor.noteId);
         setEditor((current) => (draftsMatch(current, draft) ? { ...current, dirty: false } : current));
         setStatus(showSavedMessage ? "변경 사항을 저장했습니다." : "자동 저장됨");
         return;
@@ -440,6 +536,7 @@ export default function NotesPage() {
         type: participantUids.length > 1 ? "shared" : "personal",
         dirty: !draftsMatch(current, draft)
       }));
+      announceActiveNote(created.id);
       setStatus(showSavedMessage ? "노트를 저장 목록에 추가했습니다." : "자동 저장됨");
     } catch {
       setError("노트를 저장하지 못했습니다.");
@@ -513,6 +610,7 @@ export default function NotesPage() {
 
       await updateEncryptedNote(note.id, unlockedProfile.uid, payload.encryptedTitle, payload.encryptedBody);
       pendingLocalEcho.current = { noteId: note.id, draft, createdAt: Date.now() };
+      announceActiveNote(note.id);
 
       if (editor.noteId === note.id) {
         setEditor((current) => ({
@@ -836,13 +934,15 @@ function NotePreviewModal({
   }, [draft]);
 
   useEffect(() => {
-    if (isEditing) {
+    const remoteDraft = draftFromNote(note);
+
+    if (noteDraftsMatch(latestDraftRef.current, remoteDraft)) {
       return;
     }
 
-    setDraft(draftFromNote(note));
+    setDraft(remoteDraft);
     setDraftDirty(false);
-    setModalError(null);
+    setModalError(isEditing ? "다른 기기 변경 사항을 반영했습니다." : null);
   }, [isEditing, note]);
 
   useEffect(() => {
