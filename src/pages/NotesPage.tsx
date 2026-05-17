@@ -143,8 +143,22 @@ function noteTypeFromParticipants(participantUids: string[]): NoteKind {
   return participantUids.length > 1 ? "shared" : "personal";
 }
 
-function dateFromTimestamp(timestamp: Timestamp | null | undefined) {
-  return timestamp ? timestamp.toDate() : null;
+function dateFromTimestamp(timestamp: unknown) {
+  if (timestamp instanceof Date) {
+    return Number.isNaN(timestamp.getTime()) ? null : timestamp;
+  }
+
+  if (
+    timestamp &&
+    typeof timestamp === "object" &&
+    "toDate" in timestamp &&
+    typeof timestamp.toDate === "function"
+  ) {
+    const date = timestamp.toDate();
+    return date instanceof Date && !Number.isNaN(date.getTime()) ? date : null;
+  }
+
+  return null;
 }
 
 function timestampsEqual(left: Date | null, right: Date | null) {
@@ -161,7 +175,22 @@ function nextParticipantList(currentParticipantUids: string[], selectedUid: stri
 
 function noteTimestampMillis(note: DecryptedNote, field: NoteSortField) {
   const timestamp = field === "createdAt" ? note.createdAt : note.dueAt;
-  return timestamp?.toMillis() ?? null;
+
+  if (timestamp instanceof Date) {
+    return Number.isNaN(timestamp.getTime()) ? null : timestamp.getTime();
+  }
+
+  if (
+    timestamp &&
+    typeof timestamp === "object" &&
+    "toMillis" in timestamp &&
+    typeof timestamp.toMillis === "function"
+  ) {
+    const millis = timestamp.toMillis();
+    return Number.isFinite(millis) ? millis : null;
+  }
+
+  return null;
 }
 
 function sortNotes(notes: DecryptedNote[], setting: NoteSortSetting) {
