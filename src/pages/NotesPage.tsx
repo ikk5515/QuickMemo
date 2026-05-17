@@ -1,5 +1,6 @@
 import {
   FilePlus2,
+  FolderOpen,
   ListChecks,
   Loader2,
   PanelRightOpen,
@@ -57,6 +58,12 @@ interface EditorState {
   dirty: boolean;
 }
 
+interface NoteDraft {
+  title: string;
+  body: string;
+  fontSize: number;
+}
+
 const blankEditor = (uid: string): EditorState => ({
   noteId: null,
   title: "",
@@ -70,6 +77,25 @@ const blankEditor = (uid: string): EditorState => ({
 
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const maxImageDataUrlLength = 760_000;
+
+function draftFromNote(note: DecryptedNote): NoteDraft {
+  const parsedBody = parseEditorContent(note.body);
+
+  return {
+    title: note.title,
+    body: parsedBody.html,
+    fontSize: parsedBody.fontSize
+  };
+}
+
+async function encryptNoteDraft(draft: NoteDraft, noteKey: CryptoKey) {
+  const [encryptedTitle, encryptedBody] = await Promise.all([
+    encryptText(draft.title.trim() || "제목 없음", noteKey),
+    encryptText(serializeEditorContent(draft.body, draft.fontSize), noteKey)
+  ]);
+
+  return { encryptedTitle, encryptedBody };
+}
 
 export default function NotesPage() {
   const { profile, privateKey } = useAuth();
@@ -221,7 +247,7 @@ export default function NotesPage() {
     setEditor((current) => ({ ...current, fontSize, dirty: true }));
   }
 
-  async function openNote(note: DecryptedNote) {
+  async function openNote(note: DecryptedNote, draftOverride?: NoteDraft) {
     const rawNote = notes.find((current) => current.id === note.id);
 
     if (!rawNote) {
@@ -230,16 +256,16 @@ export default function NotesPage() {
 
     try {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
-      const parsedBody = parseEditorContent(note.body);
+      const nextDraft = draftOverride ?? draftFromNote(note);
 
       setEditor({
         noteId: note.id,
-        title: note.title,
-        body: parsedBody.html,
+        title: nextDraft.title,
+        body: nextDraft.body,
         type: note.type,
         participantUids: note.participantUids,
         noteKey,
-        fontSize: parsedBody.fontSize,
+        fontSize: nextDraft.fontSize,
         dirty: false
       });
       setListOpen(false);
@@ -279,12 +305,14 @@ export default function NotesPage() {
   }
 
   async function buildEncryptedPayload(noteKey: CryptoKey) {
-    const [encryptedTitle, encryptedBody] = await Promise.all([
-      encryptText(editor.title.trim() || "제목 없음", noteKey),
-      encryptText(serializeEditorContent(editor.body, editor.fontSize), noteKey)
-    ]);
-
-    return { encryptedTitle, encryptedBody };
+    return encryptNoteDraft(
+      {
+        title: editor.title,
+        body: editor.body,
+        fontSize: editor.fontSize
+      },
+      noteKey
+    );
   }
 
   async function saveCurrentNote(showSavedMessage = true) {
@@ -381,6 +409,48 @@ export default function NotesPage() {
       setStatus("노트를 삭제했습니다.");
     } catch {
       setError("노트를 삭제하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function savePreviewNote(note: DecryptedNote, draft: NoteDraft) {
+    if (saving) {
+      return false;
+    }
+
+    const rawNote = notes.find((current) => current.id === note.id);
+
+    if (!rawNote) {
+      setError("이 노트를 저장할 수 없습니다.");
+      return false;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
+      const payload = await encryptNoteDraft(draft, noteKey);
+
+      await updateEncryptedNote(note.id, unlockedProfile.uid, payload.encryptedTitle, payload.encryptedBody);
+
+      if (editor.noteId === note.id) {
+        setEditor((current) => ({
+          ...current,
+          title: draft.title,
+          body: draft.body,
+          fontSize: draft.fontSize,
+          noteKey,
+          dirty: false
+        }));
+      }
+
+      setStatus("팝업에서 변경 사항을 저장했습니다.");
+      return true;
+    } catch {
+      setError("노트를 저장하지 못했습니다.");
+      return false;
     } finally {
       setSaving(false);
     }
@@ -505,7 +575,8 @@ export default function NotesPage() {
             note={previewNote}
             onClose={() => setPreviewNoteId(null)}
             onDelete={(note) => void removePreviewNote(note)}
-            onEdit={(note) => void openNote(note)}
+            onLoad={(note, draft) => void openNote(note, draft)}
+            onSave={(note, draft) => savePreviewNote(note, draft)}
             saving={saving}
           />
         )}
@@ -661,18 +732,93 @@ function NotePreviewModal({
   note,
   onClose,
   onDelete,
-  onEdit,
+  onLoad,
+  onSave,
   saving
 }: {
   canDelete: boolean;
   note: DecryptedNote;
   onClose: () => void;
   onDelete: (note: DecryptedNote) => void;
-  onEdit: (note: DecryptedNote) => void;
+  onLoad: (note: DecryptedNote, draft: NoteDraft) => void;
+  onSave: (note: DecryptedNote, draft: NoteDraft) => Promise<boolean>;
   saving: boolean;
 }) {
-  const parsedBody = parseEditorContent(note.body);
-  const bodyHtml = parsedBody.html || "<p>내용 없음</p>";
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState<NoteDraft>(() => draftFromNote(note));
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const previewEditorRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (isEditing) {
+      return;
+    }
+
+    setDraft(draftFromNote(note));
+    setDraftDirty(false);
+    setModalError(null);
+  }, [isEditing, note]);
+
+  function beginEdit() {
+    setDraft(draftFromNote(note));
+    setDraftDirty(false);
+    setModalError(null);
+    setIsEditing(true);
+  }
+
+  function cancelEdit() {
+    setDraft(draftFromNote(note));
+    setDraftDirty(false);
+    setModalError(null);
+    setIsEditing(false);
+  }
+
+  function updateDraft(field: "title" | "body", value: string) {
+    setDraft((current) => ({ ...current, [field]: value }));
+    setDraftDirty(true);
+  }
+
+  function updateDraftFontSize(fontSize: number) {
+    setDraft((current) => ({ ...current, fontSize }));
+    setDraftDirty(true);
+  }
+
+  async function saveDraft() {
+    setModalError(null);
+
+    const saved = await onSave(note, draft);
+
+    if (!saved) {
+      setModalError("노트를 저장하지 못했습니다.");
+      return;
+    }
+
+    setDraftDirty(false);
+    setIsEditing(false);
+  }
+
+  async function insertPreviewImageFile(file: File, range: Range | null = null) {
+    try {
+      const dataUrl = await imageFileToResizedDataUrl(file);
+
+      if (dataUrl.length > maxImageDataUrlLength) {
+        setModalError("이미지 용량이 큽니다. 더 작은 이미지를 선택해주세요.");
+        return;
+      }
+
+      const html = imageHtml(dataUrl, file.name);
+      const nextHtml = insertHtmlAtSelection(previewEditorRef.current, html, range);
+
+      setDraft((current) => ({ ...current, body: nextHtml ?? `${current.body}${html}` }));
+      setDraftDirty(true);
+      setModalError(null);
+    } catch {
+      setModalError("붙여넣은 이미지를 넣지 못했습니다.");
+    }
+  }
+
+  const bodyHtml = draft.body || "<p>내용 없음</p>";
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
@@ -689,13 +835,47 @@ function NotePreviewModal({
               {note.type === "shared" ? <Share2 size={12} /> : null}
               {note.type === "shared" ? "공유" : "개인"}
             </span>
-            <h2 id="note-preview-title">{note.title || "제목 없음"}</h2>
+            {isEditing ? (
+              <input
+                aria-label="팝업 노트 제목"
+                className="note-preview-title-input"
+                id="note-preview-title"
+                onChange={(event) => updateDraft("title", event.target.value)}
+                placeholder="노트 제목"
+                value={draft.title}
+              />
+            ) : (
+              <h2 id="note-preview-title">{draft.title || "제목 없음"}</h2>
+            )}
           </div>
           <div className="note-preview-actions">
-            <button className="secondary-button note-preview-action" type="button" onClick={() => onEdit(note)}>
-              <Pencil size={14} />
-              수정
-            </button>
+            {isEditing ? (
+              <>
+                <button
+                  className="secondary-button note-preview-action"
+                  disabled={saving || !draftDirty}
+                  type="button"
+                  onClick={() => void saveDraft()}
+                >
+                  {saving ? <Loader2 className="spin" size={14} /> : <Save size={14} />}
+                  저장
+                </button>
+                <button className="secondary-button note-preview-action" disabled={saving} type="button" onClick={cancelEdit}>
+                  취소
+                </button>
+              </>
+            ) : (
+              <>
+                <button className="secondary-button note-preview-action" type="button" onClick={beginEdit}>
+                  <Pencil size={14} />
+                  수정
+                </button>
+                <button className="secondary-button note-preview-action" type="button" onClick={() => onLoad(note, draft)}>
+                  <FolderOpen size={14} />
+                  불러오기
+                </button>
+              </>
+            )}
             <button
               className="secondary-button danger note-preview-action"
               disabled={saving || !canDelete}
@@ -711,11 +891,38 @@ function NotePreviewModal({
             </button>
           </div>
         </header>
-        <div
-          className="note-preview-body"
-          style={{ fontSize: parsedBody.fontSize }}
-          dangerouslySetInnerHTML={{ __html: sanitizeEditorHtml(bodyHtml) }}
-        />
+        {isEditing ? (
+          <div className="note-preview-editor">
+            <label className="font-size-control note-preview-font-control">
+              글자
+              <select
+                aria-label="팝업 메모 글자 크기"
+                onChange={(event) => updateDraftFontSize(Number(event.target.value))}
+                value={draft.fontSize}
+              >
+                {fontSizes.map((fontSize) => (
+                  <option key={fontSize} value={fontSize}>
+                    {fontSize}px
+                  </option>
+                ))}
+              </select>
+            </label>
+            <RichMemoEditor
+              editorRef={previewEditorRef}
+              fontSize={draft.fontSize}
+              onImagePaste={(file, range) => void insertPreviewImageFile(file, range)}
+              onChange={(value) => updateDraft("body", value)}
+              value={draft.body}
+            />
+            {modalError && <p className="form-error">{modalError}</p>}
+          </div>
+        ) : (
+          <div
+            className="note-preview-body"
+            style={{ fontSize: draft.fontSize }}
+            dangerouslySetInnerHTML={{ __html: sanitizeEditorHtml(bodyHtml) }}
+          />
+        )}
       </section>
     </div>
   );
