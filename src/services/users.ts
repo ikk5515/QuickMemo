@@ -30,6 +30,20 @@ export function subscribeUsers(callback: (users: UserProfile[]) => void, onError
   );
 }
 
+export function subscribeUserProfile(
+  uid: string,
+  callback: (profile: UserProfile | null) => void,
+  onError?: (error: Error) => void
+) {
+  return onSnapshot(
+    doc(db, "users", uid),
+    (snapshot) => {
+      callback(snapshot.exists() ? (snapshot.data() as UserProfile) : null);
+    },
+    (error) => onError?.(error)
+  );
+}
+
 export async function getUserProfile(uid: string) {
   const snapshot = await getDoc(doc(db, "users", uid));
   return snapshot.exists() ? (snapshot.data() as UserProfile) : null;

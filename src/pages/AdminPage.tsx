@@ -6,7 +6,6 @@ import {
   KeyRound,
   LockKeyhole,
   Plus,
-  Save,
   Search,
   ShieldCheck,
   Trash2,
@@ -17,7 +16,7 @@ import {
   X
 } from "lucide-react";
 import type { Timestamp } from "firebase/firestore";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AppShell } from "../components/AppShell";
 import { useAuth } from "../context/AuthContext";
@@ -31,6 +30,7 @@ import { subscribeUsers } from "../services/users";
 import type { NoteKind, UserProfile } from "../types";
 
 const palette = ["#2f7d70", "#c75146", "#7c5b9e", "#b9822f", "#3f6fb5", "#65707a"];
+const AUTO_SAVE_DELAY_MS = 550;
 
 interface DraftUser {
   displayName: string;
@@ -108,6 +108,74 @@ function normalizedShareTargets(ownerUid: string, targetUids: string[] = []) {
 
 function shareTargetsOf(user: Pick<UserProfile, "uid" | "allowedShareTargetUids">) {
   return normalizedShareTargets(user.uid, user.allowedShareTargetUids ?? []);
+}
+
+function persistedShareTargetsOf(user: Pick<UserProfile, "uid" | "isAdmin" | "allowedShareTargetUids">) {
+  return user.isAdmin ? [user.uid] : shareTargetsOf(user);
+}
+
+function editableUserDraft(user: UserProfile) {
+  return {
+    ...user,
+    role: user.isAdmin ? ("admin" as const) : ("user" as const),
+    allowedShareTargetUids: persistedShareTargetsOf(user)
+  };
+}
+
+function stableEditableSignature(user: UserProfile) {
+  const shareTargets = persistedShareTargetsOf(user);
+  const sortedTargets = [
+    user.uid,
+    ...shareTargets.filter((targetUid) => targetUid !== user.uid).sort((left, right) => left.localeCompare(right))
+  ];
+
+  return JSON.stringify({
+    uid: user.uid,
+    displayName: user.displayName.trim(),
+    avatarText: user.avatarText.trim().toUpperCase(),
+    color: user.color,
+    quickKey: Number(user.quickKey),
+    order: Number(user.order),
+    isActive: user.isActive,
+    isAdmin: user.isAdmin,
+    allowedShareTargetUids: sortedTargets
+  });
+}
+
+function editableUserValidationError(user: UserProfile, users: UserProfile[]) {
+  const quickKey = Number(user.quickKey);
+
+  if (!user.displayName.trim()) {
+    return "이름을 입력하면 자동 저장됩니다.";
+  }
+
+  if (!user.avatarText.trim()) {
+    return "원 글자를 입력하면 자동 저장됩니다.";
+  }
+
+  if (!Number.isInteger(quickKey) || quickKey < 1 || quickKey > 99) {
+    return "번호는 1부터 99까지 입력해주세요.";
+  }
+
+  if (users.some((targetUser) => targetUser.uid !== user.uid && targetUser.quickKey === quickKey)) {
+    return "이미 사용 중인 번호입니다.";
+  }
+
+  return null;
+}
+
+function updatePayloadFromDraft(user: UserProfile) {
+  return {
+    uid: user.uid,
+    displayName: user.displayName,
+    avatarText: user.avatarText,
+    color: user.color,
+    quickKey: Number(user.quickKey),
+    order: Number(user.order),
+    isActive: user.isActive,
+    isAdmin: user.isAdmin,
+    allowedShareTargetUids: persistedShareTargetsOf(user)
+  };
 }
 
 export default function AdminPage() {
@@ -768,42 +836,122 @@ function EditableUserCard({
   index: number;
   total: number;
 }) {
-  const [draft, setDraft] = useState<UserProfile>(() => ({
-    ...user,
-    allowedShareTargetUids: shareTargetsOf(user)
-  }));
+  const initialUserDraft = editableUserDraft(user);
+  const [draft, setDraft] = useState<UserProfile>(() => initialUserDraft);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-
-  useEffect(() => {
-    setDraft({ ...user, allowedShareTargetUids: shareTargetsOf(user) });
-  }, [user]);
+  const [dirty, setDirty] = useState(false);
+  const draftRef = useRef(initialUserDraft);
+  const confirmedSignatureRef = useRef(stableEditableSignature(initialUserDraft));
+  const latestSaveDraftRef = useRef<UserProfile | null>(null);
+  const lastSubmittedSignatureRef = useRef<string | null>(null);
+  const savingRef = useRef(false);
+  const dirtyRef = useRef(false);
 
   const targetUids = shareTargetsOf(draft);
   const targetUsers = users.filter((targetUser) => targetUser.uid !== user.uid);
   const selectedTargetUsers = targetUsers.filter((targetUser) => targetUids.includes(targetUser.uid));
 
-  async function handleSave() {
-    setPending(true);
-    setMessage(null);
+  const persistDraft = useCallback(
+    async (requestedDraft: UserProfile) => {
+      latestSaveDraftRef.current = requestedDraft;
 
-    try {
-      await updateUser({
-        uid: user.uid,
-        displayName: draft.displayName,
-        avatarText: draft.avatarText,
-        color: draft.color,
-        quickKey: Number(draft.quickKey),
-        order: Number(draft.order),
-        isActive: draft.isActive,
-        isAdmin: draft.isAdmin,
-        allowedShareTargetUids: draft.isAdmin ? [user.uid] : targetUids
-      });
-      setMessage("저장됨");
-    } catch {
-      setMessage("저장 실패");
-    } finally {
-      setPending(false);
+      if (savingRef.current) {
+        return;
+      }
+
+      savingRef.current = true;
+      setPending(true);
+
+      try {
+        while (latestSaveDraftRef.current) {
+          const draftToSave = latestSaveDraftRef.current;
+          const validationError = editableUserValidationError(draftToSave, users);
+          latestSaveDraftRef.current = null;
+
+          if (validationError) {
+            setMessage(validationError);
+            continue;
+          }
+
+          const draftSignature = stableEditableSignature(draftToSave);
+
+          if (
+            draftSignature === confirmedSignatureRef.current ||
+            draftSignature === lastSubmittedSignatureRef.current
+          ) {
+            setMessage("저장됨");
+            continue;
+          }
+
+          setMessage("저장 중...");
+          await updateUser(updatePayloadFromDraft(draftToSave));
+          lastSubmittedSignatureRef.current = draftSignature;
+
+          if (stableEditableSignature(draftRef.current) === draftSignature) {
+            setMessage("저장됨");
+          }
+        }
+      } catch {
+        setMessage("저장 실패");
+      } finally {
+        savingRef.current = false;
+        setPending(false);
+
+        const isDirty = stableEditableSignature(draftRef.current) !== confirmedSignatureRef.current;
+        dirtyRef.current = isDirty;
+        setDirty(isDirty);
+      }
+    },
+    [users]
+  );
+
+  useEffect(() => {
+    const incomingDraft = editableUserDraft(user);
+    const incomingSignature = stableEditableSignature(incomingDraft);
+    const currentSignature = stableEditableSignature(draftRef.current);
+
+    confirmedSignatureRef.current = incomingSignature;
+
+    if (!dirtyRef.current || currentSignature === incomingSignature) {
+      draftRef.current = incomingDraft;
+      dirtyRef.current = false;
+      setDraft(incomingDraft);
+      setDirty(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (!dirty) {
+      return undefined;
+    }
+
+    const validationError = editableUserValidationError(draft, users);
+
+    if (validationError) {
+      setMessage(validationError);
+      return undefined;
+    }
+
+    setMessage("자동 저장 대기");
+    const timer = window.setTimeout(() => void persistDraft(draft), AUTO_SAVE_DELAY_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [dirty, draft, persistDraft, users]);
+
+  function updateDraft(updater: (current: UserProfile) => UserProfile, saveMode: "debounced" | "immediate" = "debounced") {
+    const nextDraft = editableUserDraft(updater(draftRef.current));
+    const nextSignature = stableEditableSignature(nextDraft);
+    const isDirty = nextSignature !== confirmedSignatureRef.current;
+
+    draftRef.current = nextDraft;
+    dirtyRef.current = isDirty;
+    setDraft(nextDraft);
+    setDirty(isDirty);
+    setMessage(isDirty ? (saveMode === "immediate" ? "저장 중..." : "자동 저장 대기") : "저장됨");
+
+    if (saveMode === "immediate" && isDirty) {
+      void persistDraft(nextDraft);
     }
   }
 
@@ -824,17 +972,7 @@ function EditableUserCard({
     try {
       await Promise.all(
         ordered.map((orderedUser, orderIndex) =>
-          updateUser({
-            uid: orderedUser.uid,
-            displayName: orderedUser.displayName,
-            avatarText: orderedUser.avatarText,
-            color: orderedUser.color,
-            quickKey: orderedUser.quickKey,
-            order: orderIndex + 1,
-            isActive: orderedUser.isActive,
-            isAdmin: orderedUser.isAdmin,
-            allowedShareTargetUids: orderedUser.isAdmin ? [orderedUser.uid] : shareTargetsOf(orderedUser)
-          })
+          updateUser(updatePayloadFromDraft(editableUserDraft({ ...orderedUser, order: orderIndex + 1 })))
         )
       );
       setMessage("순서 저장됨");
@@ -846,7 +984,7 @@ function EditableUserCard({
   }
 
   function toggleShareTarget(uid: string, checked: boolean) {
-    setDraft((current) => {
+    updateDraft((current) => {
       const currentTargets = shareTargetsOf(current);
       const nextTargets = checked
         ? Array.from(new Set([...currentTargets, uid]))
@@ -856,7 +994,7 @@ function EditableUserCard({
         ...current,
         allowedShareTargetUids: normalizedShareTargets(user.uid, nextTargets)
       };
-    });
+    }, "immediate");
   }
 
   return (
@@ -881,7 +1019,7 @@ function EditableUserCard({
           <input
             aria-label="사용자 이름"
             maxLength={24}
-            onChange={(event) => setDraft((current) => ({ ...current, displayName: event.target.value }))}
+            onChange={(event) => updateDraft((current) => ({ ...current, displayName: event.target.value }))}
             value={draft.displayName}
           />
         </label>
@@ -890,7 +1028,7 @@ function EditableUserCard({
           <input
             aria-label="원 안 글자"
             maxLength={3}
-            onChange={(event) => setDraft((current) => ({ ...current, avatarText: event.target.value.toUpperCase() }))}
+            onChange={(event) => updateDraft((current) => ({ ...current, avatarText: event.target.value.toUpperCase() }))}
             value={draft.avatarText}
           />
         </label>
@@ -899,7 +1037,7 @@ function EditableUserCard({
           <input
             aria-label="빠른 로그인 번호"
             min={1}
-            onChange={(event) => setDraft((current) => ({ ...current, quickKey: Number(event.target.value) }))}
+            onChange={(event) => updateDraft((current) => ({ ...current, quickKey: Number(event.target.value) }))}
             type="number"
             value={draft.quickKey}
           />
@@ -908,7 +1046,7 @@ function EditableUserCard({
           색상
           <input
             aria-label="원 색상"
-            onChange={(event) => setDraft((current) => ({ ...current, color: event.target.value }))}
+            onChange={(event) => updateDraft((current) => ({ ...current, color: event.target.value }))}
             type="color"
             value={draft.color}
           />
@@ -919,7 +1057,17 @@ function EditableUserCard({
         <label className="checkbox-row">
           <input
             checked={draft.isAdmin}
-            onChange={(event) => setDraft((current) => ({ ...current, isAdmin: event.target.checked }))}
+            onChange={(event) =>
+              updateDraft(
+                (current) => ({
+                  ...current,
+                  isAdmin: event.target.checked,
+                  role: event.target.checked ? "admin" : "user",
+                  allowedShareTargetUids: event.target.checked ? [user.uid] : shareTargetsOf(current)
+                }),
+                "immediate"
+              )
+            }
             type="checkbox"
           />
           관리자
@@ -927,7 +1075,7 @@ function EditableUserCard({
         <label className="checkbox-row">
           <input
             checked={draft.isActive}
-            onChange={(event) => setDraft((current) => ({ ...current, isActive: event.target.checked }))}
+            onChange={(event) => updateDraft((current) => ({ ...current, isActive: event.target.checked }), "immediate")}
             type="checkbox"
           />
           활성
@@ -978,15 +1126,12 @@ function EditableUserCard({
           >
             <ArrowDown size={16} />
           </button>
-          <button className="icon-button" disabled={pending} onClick={() => void handleSave()} type="button" aria-label="저장">
-            <Save size={16} />
-          </button>
         </div>
         <p className="reset-hint">
           <UserX size={13} />
           비밀번호 강제 변경은 Admin SDK가 있는 서버를 연결하면 다시 활성화할 수 있습니다.
         </p>
-        {message && <p className="row-message">{message}</p>}
+        <p className="row-message">{message ?? (pending ? "저장 중..." : dirty ? "자동 저장 대기" : "자동 저장")}</p>
       </footer>
     </article>
   );

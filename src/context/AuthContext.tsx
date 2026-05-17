@@ -7,7 +7,7 @@ import {
 import { PropsWithChildren, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { auth } from "../lib/firebase";
 import { unlockPrivateKey as unlockStoredPrivateKey } from "../lib/crypto";
-import { getUserKeyDocument, getUserProfile } from "../services/users";
+import { getUserKeyDocument, getUserProfile, subscribeUserProfile } from "../services/users";
 import type { PublicRosterUser, UserProfile } from "../types";
 
 interface AuthContextValue {
@@ -29,6 +29,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [privateKey, setPrivateKey] = useState<CryptoKey | null>(null);
   const [loading, setLoading] = useState(true);
   const [keyError, setKeyError] = useState<string | null>(null);
+  const firebaseUserUid = firebaseUser?.uid ?? null;
 
   const loadProfile = useCallback(async (user: User | null) => {
     if (!user) {
@@ -66,6 +67,42 @@ export function AuthProvider({ children }: PropsWithChildren) {
       });
     });
   }, [loadProfile]);
+
+  useEffect(() => {
+    if (!firebaseUserUid) {
+      return undefined;
+    }
+
+    let active = true;
+
+    const unsubscribe = subscribeUserProfile(
+      firebaseUserUid,
+      (nextProfile) => {
+        if (!active) {
+          return;
+        }
+
+        if (nextProfile && !nextProfile.isActive) {
+          setPrivateKey(null);
+          setProfile(null);
+          void firebaseSignOut(auth);
+          return;
+        }
+
+        setProfile(nextProfile);
+      },
+      () => {
+        if (active) {
+          setProfile(null);
+        }
+      }
+    );
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [firebaseUserUid]);
 
   const unlockPrivateKey = useCallback(
     async (password: string) => {
