@@ -2,6 +2,7 @@ import {
   ArrowUpDown,
   CalendarClock,
   Download,
+  Eye,
   File,
   FilePlus2,
   FolderOpen,
@@ -88,6 +89,11 @@ interface NoteDraft {
   title: string;
   body: string;
   fontSize: number;
+}
+
+interface PdfPreviewState {
+  fileName: string;
+  url: string;
 }
 
 const blankEditor = (uid: string): EditorState => ({
@@ -436,6 +442,7 @@ export default function NotesPage() {
   const [saving, setSaving] = useState(false);
   const [attachmentBusyId, setAttachmentBusyId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
+  const [pdfPreview, setPdfPreview] = useState<PdfPreviewState | null>(null);
   const [listOpen, setListOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
@@ -447,6 +454,7 @@ export default function NotesPage() {
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
+  const pdfPreviewUrl = useRef<string | null>(null);
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -493,6 +501,15 @@ export default function NotesPage() {
 
   useEffect(() => {
     return subscribeUsers(setUsers, () => setError("사용자 목록을 불러오지 못했습니다."));
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pdfPreviewUrl.current) {
+        URL.revokeObjectURL(pdfPreviewUrl.current);
+        pdfPreviewUrl.current = null;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -1178,21 +1195,62 @@ export default function NotesPage() {
     return unwrapNoteKey(wrappedKey, unlockedPrivateKey);
   }
 
+  async function decryptAttachmentFile(noteId: string, attachment: NoteAttachmentSnapshot) {
+    const noteKey = await noteKeyForDownload(noteId);
+    return decryptBytes(
+      {
+        version: 1,
+        algorithm: "AES-GCM",
+        cipherBytes: attachment.encryptedData.toUint8Array(),
+        iv: attachment.iv.toUint8Array()
+      },
+      noteKey
+    );
+  }
+
+  function closePdfPreview() {
+    if (pdfPreviewUrl.current) {
+      URL.revokeObjectURL(pdfPreviewUrl.current);
+      pdfPreviewUrl.current = null;
+    }
+
+    setPdfPreview(null);
+  }
+
+  async function previewPdfAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
+    if (attachment.extension !== "pdf") {
+      setError("PDF 파일만 미리보기할 수 있습니다.");
+      return;
+    }
+
+    setAttachmentBusyId(attachment.id);
+    setError(null);
+
+    try {
+      const plainBytes = await decryptAttachmentFile(noteId, attachment);
+      const blob = new Blob([plainBytes], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+
+      if (pdfPreviewUrl.current) {
+        URL.revokeObjectURL(pdfPreviewUrl.current);
+      }
+
+      pdfPreviewUrl.current = url;
+      setPdfPreview({ fileName: attachmentDownloadName(attachment), url });
+      setStatus("PDF 미리보기를 열었습니다.");
+    } catch {
+      setError("PDF 미리보기를 열지 못했습니다.");
+    } finally {
+      setAttachmentBusyId(null);
+    }
+  }
+
   async function downloadAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
     setAttachmentBusyId(attachment.id);
     setError(null);
 
     try {
-      const noteKey = await noteKeyForDownload(noteId);
-      const plainBytes = await decryptBytes(
-        {
-          version: 1,
-          algorithm: "AES-GCM",
-          cipherBytes: attachment.encryptedData.toUint8Array(),
-          iv: attachment.iv.toUint8Array()
-        },
-        noteKey
-      );
+      const plainBytes = await decryptAttachmentFile(noteId, attachment);
       const blob = new Blob([plainBytes], { type: "application/octet-stream" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -1488,6 +1546,7 @@ export default function NotesPage() {
               canDelete={(attachment) => canDeleteAttachmentForNote(activeRemoteNote, attachment)}
               onDelete={(attachment) => void removeAttachment(activeRemoteNote, attachment)}
               onDownload={(attachment) => void downloadAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
+              onPreview={(attachment) => void previewPdfAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
             />
           )}
           <div className="editor-footer">
@@ -1516,6 +1575,7 @@ export default function NotesPage() {
             onDelete={(note) => void removePreviewNote(note)}
             onDeleteAttachment={(note, attachment) => void removeAttachment(note, attachment)}
             onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
+            onPreviewAttachment={(note, attachment) => void previewPdfAttachment(note.id, attachment)}
             onLoad={(note, draft) => void openNote(note, draft)}
             onSave={(note, draft) => savePreviewNote(note, draft)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
@@ -1524,6 +1584,7 @@ export default function NotesPage() {
             canDeleteAttachment={canDeleteAttachmentForNote}
           />
         )}
+        {pdfPreview && <PdfPreviewModal fileName={pdfPreview.fileName} onClose={closePdfPreview} url={pdfPreview.url} />}
       </section>
     </AppShell>
   );
@@ -1894,7 +1955,8 @@ function AttachmentList({
   canDelete,
   compact = false,
   onDelete,
-  onDownload
+  onDownload,
+  onPreview
 }: {
   attachments: NoteAttachmentSnapshot[];
   busyId: string | null;
@@ -1902,6 +1964,7 @@ function AttachmentList({
   compact?: boolean;
   onDelete: (attachment: NoteAttachmentSnapshot) => void;
   onDownload: (attachment: NoteAttachmentSnapshot) => void;
+  onPreview?: (attachment: NoteAttachmentSnapshot) => void;
 }) {
   if (!attachments.length) {
     return null;
@@ -1929,6 +1992,17 @@ function AttachmentList({
                 </span>
               </div>
               <div className="attachment-actions">
+                {attachment.extension === "pdf" && onPreview && (
+                  <button
+                    aria-label={`${attachmentDownloadName(attachment)} 미리보기`}
+                    className="icon-button"
+                    disabled={Boolean(busyId)}
+                    onClick={() => onPreview(attachment)}
+                    type="button"
+                  >
+                    <Eye size={16} />
+                  </button>
+                )}
                 <button
                   aria-label={`${attachmentDownloadName(attachment)} 다운로드`}
                   className="icon-button"
@@ -1956,6 +2030,45 @@ function AttachmentList({
   );
 }
 
+function PdfPreviewModal({
+  fileName,
+  onClose,
+  url
+}: {
+  fileName: string;
+  onClose: () => void;
+  url: string;
+}) {
+  return (
+    <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-labelledby="pdf-preview-title"
+        aria-modal="true"
+        className="pdf-preview-modal"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="note-preview-header">
+          <div className="note-preview-title">
+            <span className="note-kind-pill personal">PDF</span>
+            <h2 id="pdf-preview-title">{fileName}</h2>
+          </div>
+          <div className="note-preview-actions">
+            <a className="secondary-button note-preview-action" download={fileName} href={url}>
+              <Download size={14} />
+              다운로드
+            </a>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="PDF 미리보기 닫기">
+              <X size={16} />
+            </button>
+          </div>
+        </header>
+        <iframe className="pdf-preview-frame" referrerPolicy="no-referrer" src={url} title={`${fileName} 미리보기`} />
+      </section>
+    </div>
+  );
+}
+
 function NotePreviewModal({
   attachmentBusyId,
   canDeleteAttachment,
@@ -1965,6 +2078,7 @@ function NotePreviewModal({
   onDelete,
   onDeleteAttachment,
   onDownloadAttachment,
+  onPreviewAttachment,
   onLoad,
   onSave,
   onUploadAttachments,
@@ -1978,6 +2092,7 @@ function NotePreviewModal({
   onDelete: (note: DecryptedNote) => void;
   onDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onDownloadAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
+  onPreviewAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onLoad: (note: DecryptedNote, draft: NoteDraft) => void;
   onSave: (note: DecryptedNote, draft: NoteDraft) => Promise<boolean>;
   onUploadAttachments: (note: DecryptedNote, files: File[]) => void;
@@ -2228,6 +2343,7 @@ function NotePreviewModal({
           compact
           onDelete={(attachment) => onDeleteAttachment(note, attachment)}
           onDownload={(attachment) => onDownloadAttachment(note, attachment)}
+          onPreview={(attachment) => onPreviewAttachment(note, attachment)}
         />
       </section>
     </div>
