@@ -355,6 +355,11 @@ textarea {
   color: var(--ink);
 }
 
+.secondary-button.danger {
+  background: #fbe7e5;
+  color: var(--coral);
+}
+
 .icon-button {
   background: var(--surface);
   color: var(--ink);
@@ -685,6 +690,78 @@ textarea {
   width: 100%;
 }
 
+.note-preview-modal {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  max-height: min(82svh, 760px);
+  overflow: hidden;
+  width: min(720px, calc(100vw - 40px));
+}
+
+.note-preview-header {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  padding: 16px 18px;
+}
+
+.note-preview-title {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+.note-preview-title h2 {
+  font-size: 22px;
+  line-height: 1.2;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.note-preview-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.note-preview-action {
+  font-size: 12px;
+  font-weight: 900;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.note-preview-body {
+  flex: 1 1 auto;
+  line-height: 1.75;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 18px;
+}
+
+.note-preview-body p,
+.note-preview-body figure {
+  margin: 0 0 16px;
+}
+
+.note-preview-body img {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: block;
+  height: auto;
+  max-height: 520px;
+  max-width: 100%;
+  object-fit: contain;
+}
+
 .admin-grid {
   display: grid;
   gap: 18px;
@@ -967,6 +1044,34 @@ textarea {
     max-width: none;
     padding: 22px;
     width: 100%;
+  }
+
+  .note-preview-modal {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    max-height: min(82svh, 720px);
+    width: 100%;
+  }
+
+  .note-preview-header {
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .note-preview-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr 44px;
+    width: 100%;
+  }
+
+  .note-preview-actions .icon-button {
+    min-height: 38px;
+    width: 100%;
+  }
+
+  .note-preview-body {
+    padding: 14px;
   }
 
   .editor-panel {

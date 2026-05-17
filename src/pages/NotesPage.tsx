@@ -3,6 +3,7 @@ import {
   ListChecks,
   Loader2,
   PanelRightOpen,
+  Pencil,
   Save,
   Share2,
   Trash2,
@@ -81,6 +82,7 @@ export default function NotesPage() {
   const [saving, setSaving] = useState(false);
   const [listOpen, setListOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const autosaveTimer = useRef<number | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
 
@@ -172,6 +174,28 @@ export default function NotesPage() {
     () => users.filter((user) => user.isActive && user.publicKeyJwk),
     [users]
   );
+  const previewNote = useMemo(
+    () => decryptedNotes.find((note) => note.id === previewNoteId) ?? null,
+    [decryptedNotes, previewNoteId]
+  );
+
+  useEffect(() => {
+    if (!previewNoteId) {
+      return undefined;
+    }
+
+    function handlePreviewCancel(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+      setPreviewNoteId(null);
+    }
+
+    window.addEventListener("keydown", handlePreviewCancel);
+    return () => window.removeEventListener("keydown", handlePreviewCancel);
+  }, [previewNoteId]);
 
   if (!profile) {
     return null;
@@ -220,6 +244,7 @@ export default function NotesPage() {
       });
       setListOpen(false);
       setShareOpen(false);
+      setPreviewNoteId(null);
       setStatus("노트를 열었습니다.");
       setError(null);
     } catch {
@@ -328,6 +353,31 @@ export default function NotesPage() {
     try {
       await deleteNote(editor.noteId);
       startNewNote();
+      setStatus("노트를 삭제했습니다.");
+    } catch {
+      setError("노트를 삭제하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removePreviewNote(note: DecryptedNote) {
+    if (note.ownerUid !== unlockedProfile.uid) {
+      setError("노트 소유자만 삭제할 수 있습니다.");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      await deleteNote(note.id);
+      setPreviewNoteId(null);
+
+      if (editor.noteId === note.id) {
+        startNewNote();
+      }
+
       setStatus("노트를 삭제했습니다.");
     } catch {
       setError("노트를 삭제하지 못했습니다.");
@@ -446,9 +496,19 @@ export default function NotesPage() {
           notes={decryptedNotes}
           onClose={() => setListOpen(false)}
           onNew={startNewNote}
-          onOpen={openNote}
+          onPreview={(note) => setPreviewNoteId(note.id)}
           open={listOpen}
         />
+        {previewNote && (
+          <NotePreviewModal
+            canDelete={previewNote.ownerUid === unlockedProfile.uid}
+            note={previewNote}
+            onClose={() => setPreviewNoteId(null)}
+            onDelete={(note) => void removePreviewNote(note)}
+            onEdit={(note) => void openNote(note)}
+            saving={saving}
+          />
+        )}
       </section>
     </AppShell>
   );
@@ -519,14 +579,14 @@ function NoteDrawer({
   notes,
   onClose,
   onNew,
-  onOpen,
+  onPreview,
   open
 }: {
   activeNoteId: string | null;
   notes: DecryptedNote[];
   onClose: () => void;
   onNew: () => void;
-  onOpen: (note: DecryptedNote) => Promise<void>;
+  onPreview: (note: DecryptedNote) => void;
   open: boolean;
 }) {
   if (!open) {
@@ -555,7 +615,7 @@ function NoteDrawer({
         <FilePlus2 size={18} />
         새 메모
       </button>
-      <NoteList activeNoteId={activeNoteId} notes={notes} onOpen={onOpen} />
+      <NoteList activeNoteId={activeNoteId} notes={notes} onPreview={onPreview} />
     </aside>
   );
 }
@@ -563,11 +623,11 @@ function NoteDrawer({
 function NoteList({
   activeNoteId,
   notes,
-  onOpen
+  onPreview
 }: {
   activeNoteId: string | null;
   notes: DecryptedNote[];
-  onOpen: (note: DecryptedNote) => Promise<void>;
+  onPreview: (note: DecryptedNote) => void;
 }) {
   if (notes.length === 0) {
     return <p className="muted">아직 저장된 노트가 없습니다.</p>;
@@ -580,7 +640,7 @@ function NoteList({
           key={note.id}
           className={`note-list-item ${activeNoteId === note.id ? "active" : ""}`}
           type="button"
-          onClick={() => void onOpen(note)}
+          onClick={() => onPreview(note)}
         >
           <header>
             <strong>{note.title || "제목 없음"}</strong>
@@ -592,6 +652,71 @@ function NoteList({
           <span className="note-snippet">{previewTextFromHtml(note.body) || "내용 없음"}</span>
         </button>
       ))}
+    </div>
+  );
+}
+
+function NotePreviewModal({
+  canDelete,
+  note,
+  onClose,
+  onDelete,
+  onEdit,
+  saving
+}: {
+  canDelete: boolean;
+  note: DecryptedNote;
+  onClose: () => void;
+  onDelete: (note: DecryptedNote) => void;
+  onEdit: (note: DecryptedNote) => void;
+  saving: boolean;
+}) {
+  const parsedBody = parseEditorContent(note.body);
+  const bodyHtml = parsedBody.html || "<p>내용 없음</p>";
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="note-preview-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="note-preview-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="note-preview-header">
+          <div className="note-preview-title">
+            <span className={`note-kind-pill ${note.type}`}>
+              {note.type === "shared" ? <Share2 size={12} /> : null}
+              {note.type === "shared" ? "공유" : "개인"}
+            </span>
+            <h2 id="note-preview-title">{note.title || "제목 없음"}</h2>
+          </div>
+          <div className="note-preview-actions">
+            <button className="secondary-button note-preview-action" type="button" onClick={() => onEdit(note)}>
+              <Pencil size={14} />
+              수정
+            </button>
+            <button
+              className="secondary-button danger note-preview-action"
+              disabled={saving || !canDelete}
+              title={canDelete ? "노트 삭제" : "노트 소유자만 삭제할 수 있습니다."}
+              type="button"
+              onClick={() => onDelete(note)}
+            >
+              <Trash2 size={14} />
+              삭제
+            </button>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="노트 조회 닫기">
+              <X size={16} />
+            </button>
+          </div>
+        </header>
+        <div
+          className="note-preview-body"
+          style={{ fontSize: parsedBody.fontSize }}
+          dangerouslySetInnerHTML={{ __html: sanitizeEditorHtml(bodyHtml) }}
+        />
+      </section>
     </div>
   );
 }
