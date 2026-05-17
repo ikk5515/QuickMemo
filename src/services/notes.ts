@@ -295,7 +295,10 @@ export function subscribeNoteAttachments(
 
 export async function createEncryptedNote(input: SaveNoteInput) {
   const { historySummary, ...noteInput } = input;
-  const created = await addDoc(collection(db, "notes"), {
+  const noteRef = doc(collection(db, "notes"));
+  const batch = writeBatch(db);
+
+  batch.set(noteRef, {
     ...noteInput,
     participantUids: Array.from(new Set(input.participantUids)),
     createdAt: serverTimestamp(),
@@ -304,11 +307,10 @@ export async function createEncryptedNote(input: SaveNoteInput) {
     savedAt: serverTimestamp(),
     updatedBy: input.ownerUid
   });
+  setNoteHistory(batch, noteRef.id, input.ownerUid, "create", ["title", "body", "dueAt"], historySummary);
 
-  await createNoteHistory(created.id, input.ownerUid, "create", ["title", "body", "dueAt"], historySummary).catch(
-    () => undefined
-  );
-  return created;
+  await batch.commit();
+  return noteRef;
 }
 
 export async function updateEncryptedNote(
@@ -319,13 +321,17 @@ export async function updateEncryptedNote(
   changedFields: string[] = ["title", "body"],
   historySummary?: EncryptedPayload
 ) {
-  await updateDoc(doc(db, "notes", noteId), {
+  const batch = writeBatch(db);
+  const noteRef = doc(db, "notes", noteId);
+
+  batch.update(noteRef, {
     encryptedTitle,
     encryptedBody,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  await createNoteHistory(noteId, uid, "content", changedFields, historySummary).catch(() => undefined);
+  setNoteHistory(batch, noteId, uid, "content", changedFields, historySummary);
+  await batch.commit();
 }
 
 export async function updateNoteAccess(
@@ -335,23 +341,31 @@ export async function updateNoteAccess(
   participantUids: string[],
   wrappedKeys: Record<string, WrappedNoteKey>
 ) {
-  await updateDoc(doc(db, "notes", noteId), {
+  const batch = writeBatch(db);
+  const noteRef = doc(db, "notes", noteId);
+
+  batch.update(noteRef, {
     type,
     participantUids: Array.from(new Set(participantUids)),
     wrappedKeys,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  await createNoteHistory(noteId, uid, "share", ["participants"]).catch(() => undefined);
+  setNoteHistory(batch, noteId, uid, "share", ["participants"]);
+  await batch.commit();
 }
 
 export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Timestamp | null) {
-  await updateDoc(doc(db, "notes", noteId), {
+  const batch = writeBatch(db);
+  const noteRef = doc(db, "notes", noteId);
+
+  batch.update(noteRef, {
     dueAt,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  await createNoteHistory(noteId, uid, "deadline", ["dueAt"]).catch(() => undefined);
+  setNoteHistory(batch, noteId, uid, "deadline", ["dueAt"]);
+  await batch.commit();
 }
 
 export async function setNotePinned(noteId: string, uid: string, isPinned: boolean) {
@@ -416,7 +430,17 @@ export async function publishNoteCursor(
   );
 }
 
-export async function createNoteHistory(
+function noteHistoryRef(noteId: string, uid: string, action: NoteHistoryAction, encryptedSummary?: EncryptedPayload) {
+  if (action === "content" && encryptedSummary) {
+    const bucket = Math.floor(Date.now() / contentHistoryBucketMs);
+    return doc(db, "notes", noteId, "history", `content_${uid}_${bucket}`);
+  }
+
+  return doc(collection(db, "notes", noteId, "history"));
+}
+
+function setNoteHistory(
+  batch: ReturnType<typeof writeBatch>,
   noteId: string,
   uid: string,
   action: NoteHistoryAction,
@@ -426,7 +450,7 @@ export async function createNoteHistory(
   const normalizedFields = Array.from(new Set(changedFields)).filter(Boolean);
 
   if (!normalizedFields.length) {
-    return null;
+    return;
   }
 
   const historyDocument = {
@@ -438,12 +462,7 @@ export async function createNoteHistory(
     createdAt: serverTimestamp()
   } satisfies Omit<NoteHistoryDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> };
 
-  if (action === "content" && encryptedSummary) {
-    const bucket = Math.floor(Date.now() / contentHistoryBucketMs);
-    return setDoc(doc(db, "notes", noteId, "history", `content_${uid}_${bucket}`), historyDocument);
-  }
-
-  return addDoc(collection(db, "notes", noteId, "history"), historyDocument);
+  batch.set(noteHistoryRef(noteId, uid, action, encryptedSummary), historyDocument);
 }
 
 export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
@@ -487,27 +506,35 @@ async function deleteCollectionDocuments(pathSegments: string[]) {
 }
 
 export async function deleteNote(noteId: string, uid: string) {
-  await updateDoc(doc(db, "notes", noteId), {
+  const batch = writeBatch(db);
+  const noteRef = doc(db, "notes", noteId);
+
+  batch.update(noteRef, {
     isDeleted: true,
     deletedAt: serverTimestamp(),
     deletedBy: uid,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  await createNoteHistory(noteId, uid, "delete", ["deleted"]).catch(() => undefined);
+  setNoteHistory(batch, noteId, uid, "delete", ["deleted"]);
+  await batch.commit();
 
   await deleteCollectionDocuments(["notes", noteId, "attachments"]);
 }
 
 export async function restoreNote(noteId: string, uid: string) {
-  await updateDoc(doc(db, "notes", noteId), {
+  const batch = writeBatch(db);
+  const noteRef = doc(db, "notes", noteId);
+
+  batch.update(noteRef, {
     isDeleted: deleteField(),
     deletedAt: deleteField(),
     deletedBy: deleteField(),
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  await createNoteHistory(noteId, uid, "restore", ["restored"]).catch(() => undefined);
+  setNoteHistory(batch, noteId, uid, "restore", ["restored"]);
+  await batch.commit();
 }
 
 export async function purgeNote(input: PurgeNoteInput) {
