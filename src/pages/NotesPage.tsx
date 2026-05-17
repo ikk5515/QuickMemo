@@ -1,6 +1,5 @@
 import {
   FilePlus2,
-  ImagePlus,
   ListChecks,
   Loader2,
   PanelRightOpen,
@@ -83,7 +82,6 @@ export default function NotesPage() {
   const [listOpen, setListOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const autosaveTimer = useRef<number | null>(null);
-  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -338,27 +336,21 @@ export default function NotesPage() {
     }
   }
 
-  async function handleImageUpload(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-
-    if (!file) {
-      return;
-    }
-
+  async function insertImageFile(file: File, range: Range | null = null) {
     try {
-      const dataUrl = await fileToResizedImageDataUrl(file);
+      const dataUrl = await imageFileToResizedDataUrl(file);
 
       if (dataUrl.length > maxImageDataUrlLength) {
         setError("이미지 용량이 큽니다. 더 작은 이미지를 선택해주세요.");
         return;
       }
 
-      const nextHtml = insertHtmlAtSelection(memoEditorRef.current, imageHtml(dataUrl, file.name));
-      setEditor((current) => ({ ...current, body: nextHtml ?? `${current.body}${imageHtml(dataUrl, file.name)}`, dirty: true }));
+      const html = imageHtml(dataUrl, file.name);
+      const nextHtml = insertHtmlAtSelection(memoEditorRef.current, html, range);
+      setEditor((current) => ({ ...current, body: nextHtml ?? `${current.body}${html}`, dirty: true }));
       setError(null);
     } catch {
-      setError("이미지를 넣지 못했습니다.");
+      setError("붙여넣은 이미지를 넣지 못했습니다.");
     }
   }
 
@@ -392,21 +384,6 @@ export default function NotesPage() {
                   ))}
                 </select>
               </label>
-              <button
-                className="secondary-button"
-                onClick={() => imageInputRef.current?.click()}
-                type="button"
-              >
-                <ImagePlus size={18} />
-                사진
-              </button>
-              <input
-                ref={imageInputRef}
-                accept="image/png,image/jpeg,image/webp,image/gif"
-                hidden
-                onChange={(event) => void handleImageUpload(event)}
-                type="file"
-              />
               <button className="secondary-button" type="button" onClick={() => setListOpen((current) => !current)}>
                 <PanelRightOpen size={18} />
                 노트 목록
@@ -455,6 +432,7 @@ export default function NotesPage() {
           <RichMemoEditor
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
+            onImagePaste={(file, range) => void insertImageFile(file, range)}
             onChange={(value) => updateEditor("body", value)}
             value={editor.body}
           />
@@ -479,11 +457,13 @@ export default function NotesPage() {
 function RichMemoEditor({
   editorRef,
   fontSize,
+  onImagePaste,
   onChange,
   value
 }: {
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
+  onImagePaste: (file: File, range: Range | null) => void;
   onChange: (value: string) => void;
   value: string;
 }) {
@@ -502,6 +482,18 @@ function RichMemoEditor({
   }
 
   function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
+    const imageFile = Array.from(event.clipboardData.items)
+      .find((item) => item.type.startsWith("image/"))
+      ?.getAsFile();
+
+    if (imageFile) {
+      const selection = window.getSelection();
+      const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+      event.preventDefault();
+      onImagePaste(imageFile, range);
+      return;
+    }
+
     event.preventDefault();
     document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
     handleInput();
@@ -604,7 +596,7 @@ function NoteList({
   );
 }
 
-function insertHtmlAtSelection(container: HTMLDivElement | null, html: string) {
+function insertHtmlAtSelection(container: HTMLDivElement | null, html: string, savedRange: Range | null = null) {
   if (!container) {
     return null;
   }
@@ -612,9 +604,15 @@ function insertHtmlAtSelection(container: HTMLDivElement | null, html: string) {
   container.focus();
 
   const selection = window.getSelection();
+  const currentRange =
+    selection?.rangeCount && selection.anchorNode && container.contains(selection.anchorNode)
+      ? selection.getRangeAt(0)
+      : null;
+  const range = savedRange && container.contains(savedRange.commonAncestorContainer) ? savedRange : currentRange;
 
-  if (selection?.rangeCount && selection.anchorNode && container.contains(selection.anchorNode)) {
-    const range = selection.getRangeAt(0);
+  if (range) {
+    selection?.removeAllRanges();
+    selection?.addRange(range);
     const template = document.createElement("template");
     template.innerHTML = sanitizeEditorHtml(html);
     const lastNode = template.content.lastChild;
@@ -624,8 +622,8 @@ function insertHtmlAtSelection(container: HTMLDivElement | null, html: string) {
     if (lastNode) {
       range.setStartAfter(lastNode);
       range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
     }
   } else {
     container.insertAdjacentHTML("beforeend", sanitizeEditorHtml(html));
@@ -634,7 +632,7 @@ function insertHtmlAtSelection(container: HTMLDivElement | null, html: string) {
   return container.innerHTML;
 }
 
-async function fileToResizedImageDataUrl(file: File) {
+async function imageFileToResizedDataUrl(file: File) {
   if (!file.type.startsWith("image/")) {
     throw new Error("이미지 파일이 아닙니다.");
   }

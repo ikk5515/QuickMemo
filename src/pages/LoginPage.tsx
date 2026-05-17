@@ -41,10 +41,30 @@ export default function LoginPage() {
     return () => window.removeEventListener("keydown", handleShortcut);
   }, [roster, selectedUser]);
 
+  useEffect(() => {
+    if (!selectedUser) {
+      return undefined;
+    }
+
+    function handleCancel(event: KeyboardEvent) {
+      if (event.key !== "Escape" || pending) {
+        return;
+      }
+
+      event.preventDefault();
+      setSelectedUser(null);
+      setPassword("");
+      setError(null);
+    }
+
+    window.addEventListener("keydown", handleCancel);
+    return () => window.removeEventListener("keydown", handleCancel);
+  }, [pending, selectedUser]);
+
   const sortedRoster = useMemo(() => roster.filter((user) => user.isActive), [roster]);
 
   if (firebaseUser && profile) {
-    return <Navigate to={profile.isAdmin ? "/admin" : "/app"} replace />;
+    return <Navigate to="/app" replace />;
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -58,8 +78,8 @@ export default function LoginPage() {
     setError(null);
 
     try {
-      const nextProfile = await loginRosterUser(selectedUser, password);
-      navigate(nextProfile.isAdmin ? "/admin" : "/app", { replace: true });
+      await loginRosterUser(selectedUser, password);
+      navigate("/app", { replace: true });
     } catch (loginError) {
       setError(firebaseAuthErrorMessage(loginError, "비밀번호를 확인해주세요."));
     } finally {
