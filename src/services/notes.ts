@@ -28,6 +28,10 @@ export interface SaveNoteInput {
   dueAt?: Timestamp | null;
 }
 
+function timestampMillis(value: NoteDocument["updatedAt"]) {
+  return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
+}
+
 export function subscribeVisibleNotes(
   uid: string,
   ownerUids: string[] | null,
@@ -62,7 +66,7 @@ export function subscribeVisibleNotes(
     callback(
       Array.from(notesByOwner.values())
         .flat()
-        .sort((left, right) => (right.updatedAt?.toMillis() ?? 0) - (left.updatedAt?.toMillis() ?? 0))
+        .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt))
     );
   };
 

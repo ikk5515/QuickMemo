@@ -64,8 +64,21 @@ interface AdminNoteView extends NoteSnapshot {
   unavailableReason: string | null;
 }
 
-function formatAdminDate(timestamp: Timestamp | null | undefined, emptyText = "없음") {
-  const date = timestamp?.toDate();
+function timestampToDate(value: Timestamp | Date | null | undefined) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
+  if (value && typeof value.toDate === "function") {
+    const date = value.toDate();
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  return null;
+}
+
+function formatAdminDate(timestamp: Timestamp | Date | null | undefined, emptyText = "없음") {
+  const date = timestampToDate(timestamp);
 
   if (!date) {
     return emptyText;
@@ -85,8 +98,8 @@ function startOfLocalDay(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
 
-function deadlineDDay(timestamp: Timestamp | null | undefined) {
-  const date = timestamp?.toDate();
+function deadlineDDay(timestamp: Timestamp | Date | null | undefined) {
+  const date = timestampToDate(timestamp);
 
   if (!date) {
     return null;
