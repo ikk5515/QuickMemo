@@ -228,4 +228,65 @@ describeRules("firestore security rules", () => {
       })
     );
   });
+
+  it("allows users to publish only their own active accessible note", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(context.firestore(), "notes/note-b"), {
+        type: "personal",
+        ownerUid: "user-b",
+        participantUids: ["user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedBy: "user-b"
+      });
+    });
+
+    const userDb = testEnv.authenticatedContext("user-a").firestore();
+
+    await assertSucceeds(
+      setDoc(doc(userDb, "activeNotes/user-a"), {
+        uid: "user-a",
+        noteId: "note-a",
+        updatedByClientId: "client-a"
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(userDb, "activeNotes/user-a"), {
+        uid: "user-a",
+        noteId: null,
+        updatedByClientId: "client-a"
+      })
+    );
+    await assertFails(
+      setDoc(doc(userDb, "activeNotes/user-b"), {
+        uid: "user-b",
+        noteId: "note-a",
+        updatedByClientId: "client-a"
+      })
+    );
+    await assertFails(
+      setDoc(doc(userDb, "activeNotes/user-a"), {
+        uid: "user-a",
+        noteId: "note-b",
+        updatedByClientId: "client-a"
+      })
+    );
+  });
 });

@@ -26,6 +26,10 @@ service cloud.firestore {
       return /databases/$(database)/documents/quickLoginKeys/$(quickKey);
     }
 
+    function notePath(noteId) {
+      return /databases/$(database)/documents/notes/$(noteId);
+    }
+
     function activeSignedInUser() {
       return signedIn()
         && exists(userPath(request.auth.uid))
@@ -166,6 +170,16 @@ service cloud.firestore {
       && data.quickKey <= 99;
     }
 
+    function validActiveNote(data, uid) {
+      return data.keys().hasAll(["uid", "noteId", "updatedByClientId"])
+        && data.keys().hasOnly(["uid", "noteId", "updatedAt", "updatedByClientId"])
+        && data.uid == uid
+        && (data.noteId == null || data.noteId is string)
+        && data.updatedByClientId is string
+        && data.updatedByClientId.size() > 0
+        && data.updatedByClientId.size() <= 80;
+    }
+
     function rosterMatchesUser(data, uid) {
       return getAfter(userPath(uid)).data.displayName == data.displayName
         && getAfter(userPath(uid)).data.avatarText == data.avatarText
@@ -286,6 +300,21 @@ service cloud.firestore {
         && request.resource.data.participantUids == resource.data.participantUids
         && request.resource.data.wrappedKeys == resource.data.wrappedKeys;
       allow delete: if noteParticipant(resource.data) && resource.data.ownerUid == request.auth.uid;
+    }
+
+    match /activeNotes/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create, update: if activeSignedInUser()
+        && request.auth.uid == uid
+        && validActiveNote(request.resource.data, uid)
+        && (
+          request.resource.data.noteId == null
+          || (
+            exists(notePath(request.resource.data.noteId))
+            && noteParticipant(get(notePath(request.resource.data.noteId)).data)
+          )
+        );
+      allow delete: if false;
     }
 
     match /{document=**} {
