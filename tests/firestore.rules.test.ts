@@ -329,6 +329,33 @@ describeRules("firestore security rules", () => {
     );
   });
 
+  it("blocks inactive admin note owners from broad sharing", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "users/admin-a"),
+        userProfile("admin-a", { isActive: false, isAdmin: true, role: "admin", allowedShareTargetUids: ["admin-a"] })
+      );
+      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
+    });
+
+    const inactiveAdminDb = testEnv.authenticatedContext("admin-a").firestore();
+
+    await assertFails(
+      setDoc(doc(inactiveAdminDb, "notes/inactive-admin-share"), {
+        type: "shared",
+        ownerUid: "admin-a",
+        participantUids: ["admin-a", "user-c"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "admin-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "admin" },
+          "user-c": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "c" }
+        },
+        updatedBy: "admin-a"
+      })
+    );
+  });
+
   it("allows participants to update note deadlines and blocks outsiders", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
