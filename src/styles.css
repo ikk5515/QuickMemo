@@ -492,10 +492,15 @@ textarea {
   color: var(--ink);
   display: grid;
   gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
   justify-content: stretch;
   min-height: 112px;
   padding: 13px;
   text-align: left;
+}
+
+.note-list-item.deleted {
+  background: rgb(248 250 252);
 }
 
 .note-list-item.active {
@@ -504,10 +509,24 @@ textarea {
   box-shadow: 0 0 0 3px rgb(47 125 112 / 12%);
 }
 
+.note-list-open {
+  align-items: stretch;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: grid;
+  gap: 8px;
+  justify-content: stretch;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
 .note-list-item header {
   align-items: center;
   display: flex;
   gap: 8px;
+  min-width: 0;
 }
 
 .note-list-item strong {
@@ -523,6 +542,26 @@ textarea {
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.note-list-quick-actions {
+  align-items: start;
+  display: grid;
+  gap: 6px;
+}
+
+.star-button {
+  color: #94a3b8;
+}
+
+.star-button.active {
+  background: rgb(185 130 47 / 14%);
+  border-color: rgb(185 130 47 / 30%);
+  color: #b9822f;
+}
+
+.icon-button.restore {
+  color: var(--teal);
 }
 
 .full-editor-panel {
@@ -1023,6 +1062,56 @@ textarea {
   width: 100%;
 }
 
+.drawer-mode-tabs {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 12px;
+  padding: 4px;
+}
+
+.drawer-mode-tabs button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 6px;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 8px;
+}
+
+.drawer-mode-tabs button.active {
+  background: white;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+  color: var(--ink);
+}
+
+.drawer-mode-tabs strong {
+  background: rgb(15 23 42 / 8%);
+  border-radius: 999px;
+  color: inherit;
+  font-size: 11px;
+  min-width: 20px;
+  padding: 2px 6px;
+}
+
+.trash-retention-hint {
+  background: rgb(47 125 112 / 8%);
+  border: 1px solid rgb(47 125 112 / 16%);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  margin: 0 0 10px;
+  padding: 9px 10px;
+}
+
 .note-filter-tabs {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -1340,6 +1429,116 @@ textarea {
 
 .note-preview-editor .form-error {
   margin: 0;
+}
+
+.note-insight-panel {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  padding: 14px 18px;
+}
+
+.note-insight-section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.note-insight-heading {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.note-insight-heading h3 {
+  align-items: center;
+  display: inline-flex;
+  font-size: 14px;
+  gap: 7px;
+  margin: 0;
+}
+
+.receipt-list {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.receipt-item {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 32px minmax(0, 1fr);
+  min-width: 0;
+  padding: 8px;
+}
+
+.receipt-item div,
+.history-item {
+  min-width: 0;
+}
+
+.receipt-item strong,
+.receipt-item span,
+.history-item strong,
+.history-item em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.receipt-item strong {
+  display: block;
+  font-size: 13px;
+}
+
+.receipt-item span {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.receipt-current {
+  margin: 0;
+}
+
+.history-list {
+  display: grid;
+  gap: 7px;
+}
+
+.history-item {
+  align-items: center;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 92px minmax(0, 1fr) minmax(120px, auto);
+  padding: 8px 10px;
+}
+
+.history-item span {
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.history-item strong {
+  font-size: 13px;
+}
+
+.history-item em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+  text-align: right;
 }
 
 .admin-grid {
@@ -2197,7 +2396,7 @@ textarea {
 
   .note-preview-actions {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr)) 44px;
+    grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
     width: 100%;
   }
 
@@ -2212,6 +2411,27 @@ textarea {
 
   .note-preview-editor {
     padding: 14px;
+  }
+
+  .note-insight-panel {
+    padding: 14px;
+  }
+
+  .note-insight-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .receipt-list {
+    grid-template-columns: 1fr;
+  }
+
+  .history-item {
+    grid-template-columns: 1fr;
+  }
+
+  .history-item em {
+    text-align: left;
   }
 
   .editor-panel {

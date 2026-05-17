@@ -1,17 +1,21 @@
 import {
   ArrowUpDown,
   CalendarClock,
+  CheckCircle2,
   Download,
   Eye,
   File,
   FilePlus2,
   FolderOpen,
+  History,
   ListChecks,
   Loader2,
   PanelRightOpen,
   Pencil,
+  RotateCcw,
   Save,
   Share2,
+  Star,
   Trash2,
   UsersRound,
   X
@@ -58,16 +62,26 @@ import {
 } from "../lib/editorContent";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
+  confirmNoteRead,
   createNoteAttachment,
   deleteNoteAttachment,
   createEncryptedNote,
   deleteNote,
+  markNoteRead,
+  restoreNote,
+  setNotePinned,
   subscribeNoteAttachments,
+  subscribeDeletedNotes,
+  subscribeMyNoteStates,
+  subscribeNoteHistory,
+  subscribeNoteUserStates,
   subscribeVisibleNotes,
   updateEncryptedNote,
   updateNoteAccess,
   updateNoteDeadline,
+  type NoteHistorySnapshot,
   type NoteAttachmentSnapshot,
+  type NoteUserStateSnapshot,
   type NoteSnapshot
 } from "../services/notes";
 import { subscribeUsers } from "../services/users";
@@ -123,10 +137,14 @@ interface NoteListCounts {
   shared: number;
 }
 
+type NoteStateByNoteId = Record<string, NoteUserStateSnapshot | undefined>;
+type DrawerMode = "notes" | "trash";
+
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const imageWidthOptions = [25, 50, 75, 100];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 450;
+const deletedNoteRetentionDays = 30;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
 const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
@@ -218,13 +236,46 @@ function noteTimestampMillis(note: DecryptedNote, field: NoteSortField) {
   return null;
 }
 
-function sortNotes(notes: DecryptedNote[], setting: NoteSortSetting) {
+function notePinned(noteId: string, statesByNoteId: NoteStateByNoteId) {
+  return statesByNoteId[noteId]?.isPinned === true;
+}
+
+function timestampMillisValue(timestamp: unknown) {
+  if (timestamp instanceof Date) {
+    return Number.isNaN(timestamp.getTime()) ? null : timestamp.getTime();
+  }
+
+  if (
+    timestamp &&
+    typeof timestamp === "object" &&
+    "toMillis" in timestamp &&
+    typeof timestamp.toMillis === "function"
+  ) {
+    const millis = timestamp.toMillis();
+    return Number.isFinite(millis) ? millis : null;
+  }
+
+  return null;
+}
+
+function compareNoteTitles(left: DecryptedNote, right: DecryptedNote) {
+  return (left.title || "제목 없음").localeCompare(right.title || "제목 없음", "ko");
+}
+
+function sortNotes(notes: DecryptedNote[], setting: NoteSortSetting, statesByNoteId: NoteStateByNoteId = {}) {
   return [...notes].sort((left, right) => {
+    const leftPinned = notePinned(left.id, statesByNoteId);
+    const rightPinned = notePinned(right.id, statesByNoteId);
+
+    if (leftPinned !== rightPinned) {
+      return leftPinned ? -1 : 1;
+    }
+
     const leftValue = noteTimestampMillis(left, setting.field);
     const rightValue = noteTimestampMillis(right, setting.field);
 
     if (leftValue === null && rightValue === null) {
-      return (left.title || "제목 없음").localeCompare(right.title || "제목 없음", "ko");
+      return compareNoteTitles(left, right);
     }
 
     if (leftValue === null) {
@@ -236,6 +287,27 @@ function sortNotes(notes: DecryptedNote[], setting: NoteSortSetting) {
     }
 
     return setting.direction === "asc" ? leftValue - rightValue : rightValue - leftValue;
+  });
+}
+
+function sortDeletedNotes(notes: DecryptedNote[]) {
+  return [...notes].sort((left, right) => {
+    const leftDeletedAt = timestampMillisValue(left.deletedAt);
+    const rightDeletedAt = timestampMillisValue(right.deletedAt);
+
+    if (leftDeletedAt === null && rightDeletedAt === null) {
+      return compareNoteTitles(left, right);
+    }
+
+    if (leftDeletedAt === null) {
+      return 1;
+    }
+
+    if (rightDeletedAt === null) {
+      return -1;
+    }
+
+    return rightDeletedAt - leftDeletedAt;
   });
 }
 
@@ -422,6 +494,62 @@ function deadlineTone(date: Date | null) {
   return "upcoming";
 }
 
+function deletedRetentionLabel(note: DecryptedNote) {
+  const deletedAt = dateFromTimestamp(note.deletedAt);
+
+  if (!deletedAt) {
+    return `${deletedNoteRetentionDays}일 보관`;
+  }
+
+  const elapsedDays = Math.floor((Date.now() - startOfLocalDay(deletedAt)) / (24 * 60 * 60 * 1000));
+  const remainingDays = Math.max(0, deletedNoteRetentionDays - elapsedDays);
+  return remainingDays > 0 ? `${remainingDays}일 후 정리 대상` : "정리 대상";
+}
+
+function changedDraftFields(previousDraft: NoteDraft | null, nextDraft: NoteDraft) {
+  if (!previousDraft) {
+    return ["title", "body"];
+  }
+
+  const fields: string[] = [];
+
+  if (previousDraft.title !== nextDraft.title) {
+    fields.push("title");
+  }
+
+  if (previousDraft.body !== nextDraft.body || previousDraft.fontSize !== nextDraft.fontSize) {
+    fields.push("body");
+  }
+
+  return fields.length ? fields : ["body"];
+}
+
+function historyActionLabel(action: NoteHistorySnapshot["action"]) {
+  const labels: Record<NoteHistorySnapshot["action"], string> = {
+    create: "생성",
+    content: "내용 수정",
+    deadline: "마감일 변경",
+    share: "공유 대상 변경",
+    delete: "삭제",
+    restore: "복구"
+  };
+
+  return labels[action] ?? "변경";
+}
+
+function historyFieldLabel(field: string) {
+  const labels: Record<string, string> = {
+    title: "제목",
+    body: "본문",
+    dueAt: "마감일",
+    participants: "공유 대상",
+    deleted: "삭제 상태",
+    restored: "복구 상태"
+  };
+
+  return labels[field] ?? field;
+}
+
 function toDateTimeLocalValue(date: Date | null) {
   if (!date) {
     return "";
@@ -431,10 +559,42 @@ function toDateTimeLocalValue(date: Date | null) {
   return offsetDate.toISOString().slice(0, 16);
 }
 
+async function decryptNoteSnapshots(notes: NoteSnapshot[], uid: string, privateKey: CryptoKey) {
+  const nextNotes = await Promise.all(
+    notes.map(async (note) => {
+      const wrappedKey = note.wrappedKeys[uid];
+
+      if (!wrappedKey) {
+        return null;
+      }
+
+      try {
+        const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
+        const [title, body] = await Promise.all([
+          decryptText(note.encryptedTitle, noteKey),
+          decryptText(note.encryptedBody, noteKey)
+        ]);
+        return { ...note, title, body } satisfies DecryptedNote;
+      } catch {
+        return {
+          ...note,
+          title: "복호화할 수 없는 노트",
+          body: "비밀번호 초기화 또는 공유 키 변경으로 이 기기에서 열 수 없습니다."
+        } satisfies DecryptedNote;
+      }
+    })
+  );
+
+  return nextNotes.filter((note): note is DecryptedNote => Boolean(note));
+}
+
 export default function NotesPage() {
   const { profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
+  const [deletedNotes, setDeletedNotes] = useState<NoteSnapshot[]>([]);
   const [decryptedNotes, setDecryptedNotes] = useState<DecryptedNote[]>([]);
+  const [decryptedDeletedNotes, setDecryptedDeletedNotes] = useState<DecryptedNote[]>([]);
+  const [noteStateMap, setNoteStateMap] = useState<NoteStateByNoteId>({});
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [activeNote, setActiveNote] = useState<ActiveNoteDocument | null>(null);
   const [editor, setEditor] = useState<EditorState>(() => blankEditor(profile?.uid ?? ""));
@@ -488,6 +648,17 @@ export default function NotesPage() {
 
     return subscribeVisibleNotes(profile.uid, profile.isAdmin ? null : visibleNoteOwnerUids, setNotes, () =>
       setError("노트 목록을 불러오지 못했습니다.")
+    );
+  }, [profile, visibleNoteOwnerUids]);
+
+  useEffect(() => {
+    if (!profile) {
+      setDeletedNotes([]);
+      return undefined;
+    }
+
+    return subscribeDeletedNotes(profile.uid, profile.isAdmin ? null : visibleNoteOwnerUids, setDeletedNotes, () =>
+      setError("복구함을 불러오지 못했습니다.")
     );
   }, [profile, visibleNoteOwnerUids]);
 
@@ -547,33 +718,10 @@ export default function NotesPage() {
     let cancelled = false;
 
     async function decryptNotes() {
-      const nextNotes = await Promise.all(
-        notes.map(async (note) => {
-          const wrappedKey = note.wrappedKeys[safeProfile.uid];
-
-          if (!wrappedKey) {
-            return null;
-          }
-
-          try {
-            const noteKey = await unwrapNoteKey(wrappedKey, safePrivateKey);
-            const [title, body] = await Promise.all([
-              decryptText(note.encryptedTitle, noteKey),
-              decryptText(note.encryptedBody, noteKey)
-            ]);
-            return { ...note, title, body } satisfies DecryptedNote;
-          } catch {
-            return {
-              ...note,
-              title: "복호화할 수 없는 노트",
-              body: "비밀번호 초기화 또는 공유 키 변경으로 이 기기에서 열 수 없습니다."
-            } satisfies DecryptedNote;
-          }
-        })
-      );
+      const nextNotes = await decryptNoteSnapshots(notes, safeProfile.uid, safePrivateKey);
 
       if (!cancelled) {
-        setDecryptedNotes(nextNotes.filter((note): note is DecryptedNote => Boolean(note)));
+        setDecryptedNotes(nextNotes);
       }
     }
 
@@ -582,6 +730,45 @@ export default function NotesPage() {
       cancelled = true;
     };
   }, [notes, privateKey, profile]);
+
+  useEffect(() => {
+    const currentProfile = profile;
+    const currentPrivateKey = privateKey;
+
+    if (!currentProfile || !currentPrivateKey) {
+      setDecryptedDeletedNotes([]);
+      return;
+    }
+
+    const safeProfile = currentProfile;
+    const safePrivateKey = currentPrivateKey;
+    let cancelled = false;
+
+    async function decryptNotes() {
+      const nextNotes = await decryptNoteSnapshots(deletedNotes, safeProfile.uid, safePrivateKey);
+
+      if (!cancelled) {
+        setDecryptedDeletedNotes(nextNotes);
+      }
+    }
+
+    void decryptNotes();
+    return () => {
+      cancelled = true;
+    };
+  }, [deletedNotes, privateKey, profile]);
+
+  useEffect(() => {
+    if (!profile) {
+      setNoteStateMap({});
+      return undefined;
+    }
+
+    const noteIds = [...decryptedNotes, ...decryptedDeletedNotes].map((note) => note.id);
+    return subscribeMyNoteStates(profile.uid, noteIds, setNoteStateMap, () =>
+      setError("노트 개인 상태를 불러오지 못했습니다.")
+    );
+  }, [decryptedDeletedNotes, decryptedNotes, profile]);
 
   useEffect(() => {
     const draft = {
@@ -644,8 +831,8 @@ export default function NotesPage() {
     [activeUsers, allowedShareTargetSet, editor.participantUids, profile?.isAdmin, profile?.uid]
   );
   const previewNote = useMemo(
-    () => decryptedNotes.find((note) => note.id === previewNoteId) ?? null,
-    [decryptedNotes, previewNoteId]
+    () => [...decryptedNotes, ...decryptedDeletedNotes].find((note) => note.id === previewNoteId) ?? null,
+    [decryptedDeletedNotes, decryptedNotes, previewNoteId]
   );
   const noteCounts = useMemo(
     () => {
@@ -661,8 +848,12 @@ export default function NotesPage() {
     [decryptedNotes]
   );
   const visibleNotes = useMemo(
-    () => sortNotes(filterNotes(decryptedNotes, noteFilter), noteSort),
-    [decryptedNotes, noteFilter, noteSort]
+    () => sortNotes(filterNotes(decryptedNotes, noteFilter), noteSort, noteStateMap),
+    [decryptedNotes, noteFilter, noteSort, noteStateMap]
+  );
+  const trashNotes = useMemo(
+    () => sortDeletedNotes(filterNotes(decryptedDeletedNotes, noteFilter)),
+    [decryptedDeletedNotes, noteFilter]
   );
   const activeRemoteNote = useMemo(
     () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
@@ -835,6 +1026,7 @@ export default function NotesPage() {
   const deadlineLabel = editor.dueAt ? formatFullDateTime(editor.dueAt) : "마감일 없음";
   const deadlineDday = deadlineDDay(editor.dueAt);
   const currentDeadlineTone = deadlineTone(editor.dueAt);
+  const activeNotePinned = activeRemoteNote ? notePinned(activeRemoteNote.id, noteStateMap) : false;
 
   function announceActiveNote(noteId: string | null) {
     void publishActiveNote(unlockedProfile.uid, noteId, activeNoteClientId.current).catch(() => {
@@ -860,11 +1052,47 @@ export default function NotesPage() {
     writeNoteFilter(unlockedProfile.uid, nextFilter);
   }
 
+  async function togglePinnedNote(note: DecryptedNote) {
+    const nextPinned = !notePinned(note.id, noteStateMap);
+
+    try {
+      await setNotePinned(note.id, unlockedProfile.uid, nextPinned);
+      setStatus(nextPinned ? "즐겨찾기에 고정했습니다." : "즐겨찾기를 해제했습니다.");
+    } catch {
+      setError("즐겨찾기 상태를 저장하지 못했습니다.");
+    }
+  }
+
+  function previewStoredNote(note: DecryptedNote) {
+    if (!note.isDeleted) {
+      void markNoteRead(note.id, unlockedProfile.uid).catch(() => undefined);
+    }
+
+    setPreviewNoteId(note.id);
+  }
+
+  async function confirmSharedNote(note: DecryptedNote) {
+    if (note.type !== "shared" || note.isDeleted) {
+      return;
+    }
+
+    try {
+      await confirmNoteRead(note.id, unlockedProfile.uid);
+      setStatus("공유 노트를 확인 처리했습니다.");
+    } catch {
+      setError("확인 상태를 저장하지 못했습니다.");
+    }
+  }
+
   function canDeleteNote(note: DecryptedNote) {
     return (
       note.ownerUid === unlockedProfile.uid ||
       (unlockedProfile.isAdmin && note.type === "shared" && note.participantUids.includes(unlockedProfile.uid))
     );
+  }
+
+  function canRestoreNote(note: DecryptedNote) {
+    return note.isDeleted === true && canDeleteNote(note);
   }
 
   function canShareWithUser(uid: string) {
@@ -904,6 +1132,11 @@ export default function NotesPage() {
   }
 
   async function openNote(note: DecryptedNote, draftOverride?: NoteDraft, shouldAnnounce = true) {
+    if (note.isDeleted) {
+      setError("복구함의 노트는 먼저 복구한 뒤 불러올 수 있습니다.");
+      return;
+    }
+
     const rawNote = notes.find((current) => current.id === note.id);
 
     if (!rawNote) {
@@ -931,6 +1164,7 @@ export default function NotesPage() {
       setPreviewNoteId(null);
       setStatus("노트를 열었습니다.");
       setError(null);
+      void markNoteRead(note.id, unlockedProfile.uid).catch(() => undefined);
 
       if (shouldAnnounce) {
         announceActiveNote(note.id);
@@ -1044,7 +1278,13 @@ export default function NotesPage() {
     try {
       if (editor.noteId && editor.noteKey) {
         const payload = await encryptNoteDraft(draft, editor.noteKey);
-        await updateEncryptedNote(editor.noteId, unlockedProfile.uid, payload.encryptedTitle, payload.encryptedBody);
+        await updateEncryptedNote(
+          editor.noteId,
+          unlockedProfile.uid,
+          payload.encryptedTitle,
+          payload.encryptedBody,
+          changedDraftFields(activeRemoteNote ? draftFromNote(activeRemoteNote) : null, draft)
+        );
         pendingLocalEcho.current = { noteId: editor.noteId, draft, createdAt: Date.now() };
         announceActiveNote(editor.noteId);
         setEditor((current) => (draftsMatch(current, draft) ? { ...current, dirty: false } : current));
@@ -1351,6 +1591,26 @@ export default function NotesPage() {
     }
   }
 
+  async function restorePreviewNote(note: DecryptedNote) {
+    if (!canRestoreNote(note)) {
+      setError("노트 소유자 또는 관리자만 복구할 수 있습니다.");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      await restoreNote(note.id, unlockedProfile.uid);
+      setPreviewNoteId(null);
+      setStatus("노트를 복구했습니다.");
+    } catch {
+      setError("노트를 복구하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function savePreviewNote(note: DecryptedNote, draft: NoteDraft) {
     if (saving) {
       return false;
@@ -1370,7 +1630,13 @@ export default function NotesPage() {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
       const payload = await encryptNoteDraft(draft, noteKey);
 
-      await updateEncryptedNote(note.id, unlockedProfile.uid, payload.encryptedTitle, payload.encryptedBody);
+      await updateEncryptedNote(
+        note.id,
+        unlockedProfile.uid,
+        payload.encryptedTitle,
+        payload.encryptedBody,
+        changedDraftFields(draftFromNote(note), draft)
+      );
       pendingLocalEcho.current = { noteId: note.id, draft, createdAt: Date.now() };
       announceActiveNote(note.id);
 
@@ -1477,6 +1743,17 @@ export default function NotesPage() {
                 <PanelRightOpen size={18} />
                 노트 목록
               </button>
+              {activeRemoteNote && (
+                <button
+                  aria-label={activeNotePinned ? "즐겨찾기 해제" : "즐겨찾기"}
+                  className={`icon-button star-button ${activeNotePinned ? "active" : ""}`}
+                  onClick={() => void togglePinnedNote(activeRemoteNote)}
+                  title={activeNotePinned ? "즐겨찾기 해제" : "즐겨찾기"}
+                  type="button"
+                >
+                  <Star fill="currentColor" size={18} />
+                </button>
+              )}
               <button type="button" onClick={() => startNewNote()}>
                 <FilePlus2 size={18} />
                 새 노트
@@ -1557,28 +1834,40 @@ export default function NotesPage() {
         </section>
         <NoteDrawer
           activeNoteId={editor.noteId}
+          canRestoreNote={canRestoreNote}
           counts={noteCounts}
+          deletedNotes={trashNotes}
           filter={noteFilter}
+          noteStates={noteStateMap}
           notes={visibleNotes}
           onClose={() => setListOpen(false)}
           onFilterChange={updateNoteFilter}
           onNew={startNewNote}
-          onPreview={(note) => setPreviewNoteId(note.id)}
+          onPreview={previewStoredNote}
+          onRestore={(note) => void restorePreviewNote(note)}
           onSortChange={updateSortSetting}
+          onTogglePin={(note) => void togglePinnedNote(note)}
           open={listOpen}
           sortSetting={noteSort}
         />
         {previewNote && (
           <NotePreviewModal
             canDelete={canDeleteNote(previewNote)}
+            canRestore={canRestoreNote(previewNote)}
+            currentUid={unlockedProfile.uid}
+            historyUsers={users}
+            isPinned={notePinned(previewNote.id, noteStateMap)}
             note={previewNote}
             onClose={() => setPreviewNoteId(null)}
+            onConfirm={(note) => void confirmSharedNote(note)}
             onDelete={(note) => void removePreviewNote(note)}
             onDeleteAttachment={(note, attachment) => void removeAttachment(note, attachment)}
             onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
             onPreviewAttachment={(note, attachment) => void previewPdfAttachment(note.id, attachment)}
             onLoad={(note, draft) => void openNote(note, draft)}
+            onRestore={(note) => void restorePreviewNote(note)}
             onSave={(note, draft) => savePreviewNote(note, draft)}
+            onTogglePin={(note) => void togglePinnedNote(note)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
             saving={saving}
             attachmentBusyId={attachmentBusyId}
@@ -1816,39 +2105,54 @@ function restoreCaretByCharacterOffset(element: HTMLElement, offset: number | nu
 
 function NoteDrawer({
   activeNoteId,
+  canRestoreNote,
   counts,
+  deletedNotes,
   filter,
+  noteStates,
   notes,
   onClose,
   onFilterChange,
   onNew,
   onPreview,
+  onRestore,
   onSortChange,
+  onTogglePin,
   open,
   sortSetting
 }: {
   activeNoteId: string | null;
+  canRestoreNote: (note: DecryptedNote) => boolean;
   counts: NoteListCounts;
+  deletedNotes: DecryptedNote[];
   filter: NoteListFilter;
+  noteStates: NoteStateByNoteId;
   notes: DecryptedNote[];
   onClose: () => void;
   onFilterChange: (filter: NoteListFilter) => void;
   onNew: () => void;
   onPreview: (note: DecryptedNote) => void;
+  onRestore: (note: DecryptedNote) => void;
   onSortChange: (setting: NoteSortSetting) => void;
+  onTogglePin: (note: DecryptedNote) => void;
   open: boolean;
   sortSetting: NoteSortSetting;
 }) {
+  const [mode, setMode] = useState<DrawerMode>("notes");
+
   if (!open) {
     return null;
   }
+
+  const isTrashMode = mode === "trash";
+  const listedNotes = isTrashMode ? deletedNotes : notes;
 
   return (
     <aside className="note-drawer" aria-label="노트 목록">
       <div className="note-drawer-header">
         <h2>
           <ListChecks size={18} />
-          전체 노트
+          {isTrashMode ? "복구함" : "전체 노트"}
         </h2>
         <button className="icon-button" type="button" onClick={onClose} aria-label="노트 목록 닫기">
           <X size={18} />
@@ -1865,6 +2169,27 @@ function NoteDrawer({
         <FilePlus2 size={18} />
         새 메모
       </button>
+      <div className="drawer-mode-tabs" role="tablist" aria-label="노트 목록 모드">
+        <button
+          aria-selected={!isTrashMode}
+          className={!isTrashMode ? "active" : ""}
+          role="tab"
+          type="button"
+          onClick={() => setMode("notes")}
+        >
+          노트
+        </button>
+        <button
+          aria-selected={isTrashMode}
+          className={isTrashMode ? "active" : ""}
+          role="tab"
+          type="button"
+          onClick={() => setMode("trash")}
+        >
+          복구함
+          <strong>{deletedNotes.length}</strong>
+        </button>
+      </div>
       <div className="note-filter-tabs" role="tablist" aria-label="노트 종류 필터">
         <NoteFilterButton
           count={counts.all}
@@ -1914,7 +2239,18 @@ function NoteDrawer({
           {sortSetting.direction === "asc" ? "오름차순" : "내림차순"}
         </button>
       </div>
-      <NoteList activeNoteId={activeNoteId} filter={filter} notes={notes} onPreview={onPreview} />
+      {isTrashMode && <p className="trash-retention-hint">삭제된 노트는 {deletedNoteRetentionDays}일 보관 기준으로 표시됩니다.</p>}
+      <NoteList
+        activeNoteId={activeNoteId}
+        canRestoreNote={canRestoreNote}
+        deleted={isTrashMode}
+        filter={filter}
+        noteStates={noteStates}
+        notes={listedNotes}
+        onPreview={onPreview}
+        onRestore={onRestore}
+        onTogglePin={onTogglePin}
+      />
     </aside>
   );
 }
@@ -1948,18 +2284,29 @@ function NoteFilterButton({
 
 function NoteList({
   activeNoteId,
+  canRestoreNote,
+  deleted = false,
   filter,
+  noteStates,
   notes,
-  onPreview
+  onPreview,
+  onRestore,
+  onTogglePin
 }: {
   activeNoteId: string | null;
+  canRestoreNote: (note: DecryptedNote) => boolean;
+  deleted?: boolean;
   filter: NoteListFilter;
+  noteStates: NoteStateByNoteId;
   notes: DecryptedNote[];
   onPreview: (note: DecryptedNote) => void;
+  onRestore: (note: DecryptedNote) => void;
+  onTogglePin: (note: DecryptedNote) => void;
 }) {
   if (notes.length === 0) {
-    const emptyMessage =
-      filter === "personal"
+    const emptyMessage = deleted
+      ? "복구함에 노트가 없습니다."
+      : filter === "personal"
         ? "아직 저장된 개인 노트가 없습니다."
         : filter === "shared"
           ? "아직 저장된 공유 노트가 없습니다."
@@ -1973,35 +2320,64 @@ function NoteList({
       {notes.map((note) => {
         const createdAt = dateFromTimestamp(note.createdAt);
         const dueAt = dateFromTimestamp(note.dueAt);
+        const deletedAt = dateFromTimestamp(note.deletedAt);
         const dueTone = deadlineTone(dueAt);
+        const pinned = notePinned(note.id, noteStates);
+        const canRestore = canRestoreNote(note);
 
         return (
-          <button
+          <article
             key={note.id}
-            className={`note-list-item ${activeNoteId === note.id ? "active" : ""}`}
-            type="button"
-            onClick={() => onPreview(note)}
+            className={`note-list-item ${activeNoteId === note.id ? "active" : ""} ${deleted ? "deleted" : ""}`}
           >
-            <header>
-              <span className={`note-kind-pill ${note.type}`}>
-                {note.type === "shared" ? <Share2 size={12} /> : null}
-                {note.type === "shared" ? "공유" : "개인"}
-              </span>
-              <strong>{note.title || "제목 없음"}</strong>
-            </header>
-            <span className="note-snippet">{previewTextFromHtml(note.body) || "내용 없음"}</span>
-            <footer className="note-list-meta">
-              <span className="note-list-date">
-                <span>생성</span>
-                <strong>{formatCompactDateTime(createdAt)}</strong>
-              </span>
-              <span className={`note-list-date deadline ${dueTone}`}>
-                <span>마감</span>
-                <strong>{formatCompactDateTime(dueAt)}</strong>
-                {dueAt && <em>{deadlineDDay(dueAt)}</em>}
-              </span>
-            </footer>
-          </button>
+            <button className="note-list-open" type="button" onClick={() => onPreview(note)}>
+              <header>
+                <span className={`note-kind-pill ${note.type}`}>
+                  {note.type === "shared" ? <Share2 size={12} /> : null}
+                  {note.type === "shared" ? "공유" : "개인"}
+                </span>
+                <strong>{note.title || "제목 없음"}</strong>
+              </header>
+              <span className="note-snippet">{previewTextFromHtml(note.body) || "내용 없음"}</span>
+              <footer className="note-list-meta">
+                <span className="note-list-date">
+                  <span>{deleted ? "삭제" : "생성"}</span>
+                  <strong>{formatCompactDateTime(deleted ? deletedAt : createdAt)}</strong>
+                  {deleted && <em>{deletedRetentionLabel(note)}</em>}
+                </span>
+                <span className={`note-list-date deadline ${dueTone}`}>
+                  <span>마감</span>
+                  <strong>{formatCompactDateTime(dueAt)}</strong>
+                  {dueAt && <em>{deadlineDDay(dueAt)}</em>}
+                </span>
+              </footer>
+            </button>
+            <div className="note-list-quick-actions">
+              {!deleted && (
+                <button
+                  aria-label={pinned ? "즐겨찾기 해제" : "즐겨찾기"}
+                  className={`icon-button star-button ${pinned ? "active" : ""}`}
+                  onClick={() => onTogglePin(note)}
+                  title={pinned ? "즐겨찾기 해제" : "즐겨찾기"}
+                  type="button"
+                >
+                  <Star fill="currentColor" size={17} />
+                </button>
+              )}
+              {deleted && (
+                <button
+                  aria-label="노트 복구"
+                  className="icon-button restore"
+                  disabled={!canRestore}
+                  onClick={() => onRestore(note)}
+                  title={canRestore ? "노트 복구" : "소유자 또는 관리자만 복구할 수 있습니다."}
+                  type="button"
+                >
+                  <RotateCcw size={17} />
+                </button>
+              )}
+            </div>
+          </article>
         );
       })}
     </div>
@@ -2140,28 +2516,42 @@ function NotePreviewModal({
   attachmentBusyId,
   canDeleteAttachment,
   canDelete,
+  canRestore,
+  currentUid,
+  historyUsers,
+  isPinned,
   note,
   onClose,
+  onConfirm,
   onDelete,
   onDeleteAttachment,
   onDownloadAttachment,
   onPreviewAttachment,
   onLoad,
+  onRestore,
   onSave,
+  onTogglePin,
   onUploadAttachments,
   saving
 }: {
   attachmentBusyId: string | null;
   canDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => boolean;
   canDelete: boolean;
+  canRestore: boolean;
+  currentUid: string;
+  historyUsers: UserProfile[];
+  isPinned: boolean;
   note: DecryptedNote;
   onClose: () => void;
+  onConfirm: (note: DecryptedNote) => void;
   onDelete: (note: DecryptedNote) => void;
   onDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onDownloadAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onPreviewAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onLoad: (note: DecryptedNote, draft: NoteDraft) => void;
+  onRestore: (note: DecryptedNote) => void;
   onSave: (note: DecryptedNote, draft: NoteDraft) => Promise<boolean>;
+  onTogglePin: (note: DecryptedNote) => void;
   onUploadAttachments: (note: DecryptedNote, files: File[]) => void;
   saving: boolean;
 }) {
@@ -2170,6 +2560,8 @@ function NotePreviewModal({
   const [draftDirty, setDraftDirty] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
+  const [readStates, setReadStates] = useState<NoteUserStateSnapshot[]>([]);
+  const [history, setHistory] = useState<NoteHistorySnapshot[]>([]);
   const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
   const latestDraftRef = useRef(draft);
@@ -2180,6 +2572,14 @@ function NotePreviewModal({
 
   useEffect(() => {
     return subscribeNoteAttachments(note.id, setAttachments, () => setModalError("첨부파일 목록을 불러오지 못했습니다."));
+  }, [note.id]);
+
+  useEffect(() => {
+    return subscribeNoteUserStates(note.id, setReadStates, () => setModalError("읽음 상태를 불러오지 못했습니다."));
+  }, [note.id]);
+
+  useEffect(() => {
+    return subscribeNoteHistory(note.id, setHistory, () => setModalError("수정 이력을 불러오지 못했습니다."));
   }, [note.id]);
 
   useEffect(() => {
@@ -2217,6 +2617,11 @@ function NotePreviewModal({
   }, [draft.title, draft.body, draft.fontSize, draftDirty, isEditing, saving]);
 
   function beginEdit() {
+    if (note.isDeleted) {
+      setModalError("복구함의 노트는 복구 후 수정할 수 있습니다.");
+      return;
+    }
+
     setDraft(draftFromNote(note));
     setDraftDirty(false);
     setModalError(null);
@@ -2329,6 +2734,16 @@ function NotePreviewModal({
             )}
           </div>
           <div className="note-preview-actions">
+            <button
+              aria-label={isPinned ? "즐겨찾기 해제" : "즐겨찾기"}
+              className={`icon-button star-button ${isPinned ? "active" : ""}`}
+              disabled={note.isDeleted}
+              onClick={() => onTogglePin(note)}
+              title={isPinned ? "즐겨찾기 해제" : "즐겨찾기"}
+              type="button"
+            >
+              <Star fill="currentColor" size={16} />
+            </button>
             {isEditing ? (
               <>
                 <button
@@ -2346,26 +2761,42 @@ function NotePreviewModal({
               </>
             ) : (
               <>
-                <button className="secondary-button note-preview-action" type="button" onClick={beginEdit}>
-                  <Pencil size={14} />
-                  수정
-                </button>
-                <button className="secondary-button note-preview-action" type="button" onClick={() => onLoad(note, draft)}>
-                  <FolderOpen size={14} />
-                  불러오기
-                </button>
+                {note.isDeleted ? (
+                  <button
+                    className="secondary-button note-preview-action"
+                    disabled={saving || !canRestore}
+                    type="button"
+                    onClick={() => onRestore(note)}
+                  >
+                    <RotateCcw size={14} />
+                    복구
+                  </button>
+                ) : (
+                  <>
+                    <button className="secondary-button note-preview-action" type="button" onClick={beginEdit}>
+                      <Pencil size={14} />
+                      수정
+                    </button>
+                    <button className="secondary-button note-preview-action" type="button" onClick={() => onLoad(note, draft)}>
+                      <FolderOpen size={14} />
+                      불러오기
+                    </button>
+                  </>
+                )}
               </>
             )}
-            <button
-              className="secondary-button danger note-preview-action"
-              disabled={saving || !canDelete}
-              title={canDelete ? "노트 삭제" : "노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다."}
-              type="button"
-              onClick={() => onDelete(note)}
-            >
-              <Trash2 size={14} />
-              삭제
-            </button>
+            {!note.isDeleted && (
+              <button
+                className="secondary-button danger note-preview-action"
+                disabled={saving || !canDelete}
+                title={canDelete ? "노트 삭제" : "노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다."}
+                type="button"
+                onClick={() => onDelete(note)}
+              >
+                <Trash2 size={14} />
+                삭제
+              </button>
+            )}
             <button className="icon-button" type="button" onClick={onClose} aria-label="노트 조회 닫기">
               <X size={16} />
             </button>
@@ -2403,6 +2834,14 @@ function NotePreviewModal({
             dangerouslySetInnerHTML={{ __html: linkifyEditorHtml(sanitizeEditorHtml(bodyHtml)) }}
           />
         )}
+        <NoteInsightPanel
+          currentUid={currentUid}
+          history={history}
+          note={note}
+          onConfirm={onConfirm}
+          readStates={readStates}
+          users={historyUsers}
+        />
         <AttachmentList
           attachments={attachments}
           busyId={attachmentBusyId}
@@ -2414,6 +2853,101 @@ function NotePreviewModal({
         />
       </section>
     </div>
+  );
+}
+
+function NoteInsightPanel({
+  currentUid,
+  history,
+  note,
+  onConfirm,
+  readStates,
+  users
+}: {
+  currentUid: string;
+  history: NoteHistorySnapshot[];
+  note: DecryptedNote;
+  onConfirm: (note: DecryptedNote) => void;
+  readStates: NoteUserStateSnapshot[];
+  users: UserProfile[];
+}) {
+  const usersByUid = new Map(users.map((user) => [user.uid, user]));
+  const statesByUid = new Map(readStates.map((state) => [state.uid, state]));
+  const currentState = statesByUid.get(currentUid);
+  const showReceipts = note.type === "shared";
+
+  return (
+    <section className="note-insight-panel" aria-label="노트 활동 정보">
+      {showReceipts && (
+        <div className="note-insight-section">
+          <div className="note-insight-heading">
+            <h3>
+              <CheckCircle2 size={16} />
+              읽음 / 확인
+            </h3>
+            {!note.isDeleted && (
+              <button
+                className="secondary-button note-preview-action"
+                type="button"
+                onClick={() => onConfirm(note)}
+              >
+                <CheckCircle2 size={14} />
+                확인
+              </button>
+            )}
+          </div>
+          <div className="receipt-list">
+            {note.participantUids.map((uid) => {
+              const user = usersByUid.get(uid);
+              const state = statesByUid.get(uid);
+              const readAt = dateFromTimestamp(state?.readAt);
+              const confirmedAt = dateFromTimestamp(state?.confirmedAt);
+
+              return (
+                <article className="receipt-item" key={uid}>
+                  <span className="mini-avatar" style={{ background: user?.color ?? "#64748b" }}>
+                    {user?.avatarText ?? uid.slice(0, 1).toUpperCase()}
+                  </span>
+                  <div>
+                    <strong>{user?.displayName ?? uid}</strong>
+                    <span>{confirmedAt ? `확인 ${formatCompactDateTime(confirmedAt)}` : readAt ? `읽음 ${formatCompactDateTime(readAt)}` : "아직 읽지 않음"}</span>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+          {currentState?.confirmedAt && <p className="muted receipt-current">내 확인: {formatFullDateTime(dateFromTimestamp(currentState.confirmedAt))}</p>}
+        </div>
+      )}
+      <div className="note-insight-section">
+        <div className="note-insight-heading">
+          <h3>
+            <History size={16} />
+            수정 이력
+          </h3>
+        </div>
+        {history.length ? (
+          <div className="history-list">
+            {history.slice(0, 8).map((entry) => {
+              const actor = usersByUid.get(entry.actorUid);
+              const createdAt = dateFromTimestamp(entry.createdAt);
+
+              return (
+                <article className="history-item" key={entry.id}>
+                  <span>{historyActionLabel(entry.action)}</span>
+                  <strong>{entry.changedFields.map(historyFieldLabel).join(", ")}</strong>
+                  <em>
+                    {actor?.displayName ?? entry.actorUid} · {formatCompactDateTime(createdAt)}
+                  </em>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="muted">아직 기록된 수정 이력이 없습니다.</p>
+        )}
+      </div>
+    </section>
   );
 }
 

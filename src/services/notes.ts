@@ -3,25 +3,45 @@ import {
   Bytes,
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   Timestamp,
   updateDoc,
   where,
   writeBatch
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import type { EncryptedPayload, NoteAttachmentDocument, NoteDocument, NoteKind, WrappedNoteKey } from "../types";
+import type {
+  EncryptedPayload,
+  NoteAttachmentDocument,
+  NoteDocument,
+  NoteHistoryAction,
+  NoteHistoryDocument,
+  NoteKind,
+  NoteUserStateDocument,
+  WrappedNoteKey
+} from "../types";
 
 export interface NoteSnapshot extends NoteDocument {
   id: string;
 }
 
 export interface NoteAttachmentSnapshot extends NoteAttachmentDocument {
+  id: string;
+}
+
+export interface NoteUserStateSnapshot extends NoteUserStateDocument {
+  id: string;
+}
+
+export interface NoteHistorySnapshot extends NoteHistoryDocument {
   id: string;
 }
 
@@ -54,12 +74,19 @@ function visibleNote(document: NoteSnapshot) {
   return document.isDeleted !== true;
 }
 
-export function subscribeVisibleNotes(
+function deletedNote(document: NoteSnapshot) {
+  return document.isDeleted === true;
+}
+
+function subscribeNotesByDeletedState(
   uid: string,
   ownerUids: string[] | null,
+  deleted: boolean,
   callback: (notes: NoteSnapshot[]) => void,
   onError?: (error: Error) => void
 ) {
+  const noteFilter = deleted ? deletedNote : visibleNote;
+
   if (ownerUids === null) {
     const notesQuery = query(
       collection(db, "notes"),
@@ -70,7 +97,7 @@ export function subscribeVisibleNotes(
     return onSnapshot(
       notesQuery,
       (snapshot) => {
-        callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(visibleNote));
+        callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(noteFilter));
       },
       (error) => onError?.(error)
     );
@@ -105,7 +132,7 @@ export function subscribeVisibleNotes(
       (snapshot) => {
         notesByOwner.set(
           ownerUid,
-          snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(visibleNote)
+          snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(noteFilter)
         );
         emitNotes();
       },
@@ -119,6 +146,24 @@ export function subscribeVisibleNotes(
   };
 }
 
+export function subscribeVisibleNotes(
+  uid: string,
+  ownerUids: string[] | null,
+  callback: (notes: NoteSnapshot[]) => void,
+  onError?: (error: Error) => void
+) {
+  return subscribeNotesByDeletedState(uid, ownerUids, false, callback, onError);
+}
+
+export function subscribeDeletedNotes(
+  uid: string,
+  ownerUids: string[] | null,
+  callback: (notes: NoteSnapshot[]) => void,
+  onError?: (error: Error) => void
+) {
+  return subscribeNotesByDeletedState(uid, ownerUids, true, callback, onError);
+}
+
 export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => void, onError?: (error: Error) => void) {
   const notesQuery = query(collection(db, "notes"), orderBy("updatedAt", "desc"));
 
@@ -126,6 +171,87 @@ export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => v
     notesQuery,
     (snapshot) => {
       callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(visibleNote));
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export function subscribeNoteUserStates(
+  noteId: string,
+  callback: (states: NoteUserStateSnapshot[]) => void,
+  onError?: (error: Error) => void
+) {
+  return onSnapshot(
+    collection(db, "noteUserStates", noteId, "users"),
+    (snapshot) => {
+      callback(
+        snapshot.docs.map((document) => ({
+          id: document.id,
+          ...(document.data() as NoteUserStateDocument)
+        }))
+      );
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export function subscribeMyNoteStates(
+  uid: string,
+  noteIds: string[],
+  callback: (statesByNoteId: Record<string, NoteUserStateSnapshot | undefined>) => void,
+  onError?: (error: Error) => void
+) {
+  const uniqueNoteIds = Array.from(new Set(noteIds)).filter(Boolean);
+
+  if (!uniqueNoteIds.length) {
+    callback({});
+    return () => undefined;
+  }
+
+  const statesByNoteId: Record<string, NoteUserStateSnapshot | undefined> = {};
+  let closed = false;
+
+  const emitStates = () => {
+    if (!closed) {
+      callback({ ...statesByNoteId });
+    }
+  };
+
+  const unsubscribes = uniqueNoteIds.map((noteId) =>
+    onSnapshot(
+      doc(db, "noteUserStates", noteId, "users", uid),
+      (snapshot) => {
+        statesByNoteId[noteId] = snapshot.exists()
+          ? ({ id: snapshot.id, ...(snapshot.data() as NoteUserStateDocument) } satisfies NoteUserStateSnapshot)
+          : undefined;
+        emitStates();
+      },
+      (error) => onError?.(error)
+    )
+  );
+
+  return () => {
+    closed = true;
+    unsubscribes.forEach((unsubscribe) => unsubscribe());
+  };
+}
+
+export function subscribeNoteHistory(
+  noteId: string,
+  callback: (history: NoteHistorySnapshot[]) => void,
+  onError?: (error: Error) => void
+) {
+  const historyQuery = query(collection(db, "notes", noteId, "history"), orderBy("createdAt", "desc"), limit(80));
+
+  return onSnapshot(
+    historyQuery,
+    (snapshot) => {
+      callback(
+        snapshot.docs.map((document) => ({
+          id: document.id,
+          ...(document.data() as NoteHistoryDocument)
+        }))
+      );
     },
     (error) => onError?.(error)
   );
@@ -153,7 +279,7 @@ export function subscribeNoteAttachments(
 }
 
 export async function createEncryptedNote(input: SaveNoteInput) {
-  return addDoc(collection(db, "notes"), {
+  const created = await addDoc(collection(db, "notes"), {
     ...input,
     participantUids: Array.from(new Set(input.participantUids)),
     createdAt: serverTimestamp(),
@@ -162,13 +288,17 @@ export async function createEncryptedNote(input: SaveNoteInput) {
     savedAt: serverTimestamp(),
     updatedBy: input.ownerUid
   });
+
+  await createNoteHistory(created.id, input.ownerUid, "create", ["title", "body", "dueAt"]).catch(() => undefined);
+  return created;
 }
 
 export async function updateEncryptedNote(
   noteId: string,
   uid: string,
   encryptedTitle: EncryptedPayload,
-  encryptedBody: EncryptedPayload
+  encryptedBody: EncryptedPayload,
+  changedFields: string[] = ["title", "body"]
 ) {
   await updateDoc(doc(db, "notes", noteId), {
     encryptedTitle,
@@ -176,6 +306,7 @@ export async function updateEncryptedNote(
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
+  await createNoteHistory(noteId, uid, "content", changedFields).catch(() => undefined);
 }
 
 export async function updateNoteAccess(
@@ -192,6 +323,7 @@ export async function updateNoteAccess(
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
+  await createNoteHistory(noteId, uid, "share", ["participants"]).catch(() => undefined);
 }
 
 export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Timestamp | null) {
@@ -200,6 +332,68 @@ export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Tim
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
+  await createNoteHistory(noteId, uid, "deadline", ["dueAt"]).catch(() => undefined);
+}
+
+export async function setNotePinned(noteId: string, uid: string, isPinned: boolean) {
+  await setDoc(
+    doc(db, "noteUserStates", noteId, "users", uid),
+    {
+      uid,
+      noteId,
+      isPinned,
+      updatedAt: serverTimestamp()
+    },
+    { merge: true }
+  );
+}
+
+export async function markNoteRead(noteId: string, uid: string) {
+  await setDoc(
+    doc(db, "noteUserStates", noteId, "users", uid),
+    {
+      uid,
+      noteId,
+      readAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    },
+    { merge: true }
+  );
+}
+
+export async function confirmNoteRead(noteId: string, uid: string) {
+  await setDoc(
+    doc(db, "noteUserStates", noteId, "users", uid),
+    {
+      uid,
+      noteId,
+      readAt: serverTimestamp(),
+      confirmedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    },
+    { merge: true }
+  );
+}
+
+export async function createNoteHistory(
+  noteId: string,
+  uid: string,
+  action: NoteHistoryAction,
+  changedFields: string[]
+) {
+  const normalizedFields = Array.from(new Set(changedFields)).filter(Boolean);
+
+  if (!normalizedFields.length) {
+    return null;
+  }
+
+  return addDoc(collection(db, "notes", noteId, "history"), {
+    noteId,
+    actorUid: uid,
+    action,
+    changedFields: normalizedFields,
+    createdAt: serverTimestamp()
+  } satisfies Omit<NoteHistoryDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> });
 }
 
 export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
@@ -230,6 +424,7 @@ export async function deleteNote(noteId: string, uid: string) {
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
+  await createNoteHistory(noteId, uid, "delete", ["deleted"]).catch(() => undefined);
 
   const attachmentsSnapshot = await getDocs(collection(db, "notes", noteId, "attachments"));
   const refsToDelete = attachmentsSnapshot.docs.map((attachmentDocument) => attachmentDocument.ref);
@@ -242,4 +437,15 @@ export async function deleteNote(noteId: string, uid: string) {
     });
     await batch.commit();
   }
+}
+
+export async function restoreNote(noteId: string, uid: string) {
+  await updateDoc(doc(db, "notes", noteId), {
+    isDeleted: deleteField(),
+    deletedAt: deleteField(),
+    deletedBy: deleteField(),
+    updatedAt: serverTimestamp(),
+    updatedBy: uid
+  });
+  await createNoteHistory(noteId, uid, "restore", ["restored"]).catch(() => undefined);
 }

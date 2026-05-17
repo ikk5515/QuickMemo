@@ -214,6 +214,30 @@ service cloud.firestore {
         && data.updatedByClientId.size() <= 80;
     }
 
+    function validNoteUserState(data, noteId, uid) {
+      return data.keys().hasAll(["uid", "noteId"])
+        && data.keys().hasOnly(["uid", "noteId", "isPinned", "readAt", "confirmedAt", "updatedAt"])
+        && data.uid == uid
+        && data.noteId == noteId
+        && (!data.keys().hasAny(["isPinned"]) || data.isPinned is bool)
+        && (!data.keys().hasAny(["readAt"]) || data.readAt is timestamp)
+        && (!data.keys().hasAny(["confirmedAt"]) || data.confirmedAt is timestamp)
+        && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
+    }
+
+    function validNoteHistory(data, noteId) {
+      return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields"])
+        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "createdAt"])
+        && data.noteId == noteId
+        && data.actorUid == request.auth.uid
+        && data.action in ["create", "content", "deadline", "share", "delete", "restore"]
+        && data.changedFields is list
+        && data.changedFields.size() > 0
+        && data.changedFields.size() <= 8
+        && data.changedFields.hasOnly(["title", "body", "dueAt", "participants", "deleted", "restored"])
+        && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
+    }
+
     function validAttachment(data, noteId) {
       return data.keys().hasOnly([
         "noteId",
@@ -355,6 +379,20 @@ service cloud.firestore {
         ]);
     }
 
+    function noteRestoreUpdate(data) {
+      return noteDeleted(resource.data)
+        && canDeleteNote(resource.data)
+        && !data.keys().hasAny(["isDeleted", "deletedAt", "deletedBy"])
+        && data.updatedBy == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "isDeleted",
+          "deletedAt",
+          "deletedBy",
+          "updatedAt",
+          "updatedBy"
+        ]);
+    }
+
     function allowedShareTargets(data) {
       return data.participantUids.hasOnly([data.ownerUid])
         || (
@@ -475,8 +513,28 @@ service cloud.firestore {
           noteContentUpdate(request.resource.data)
           || (ownerAccessUpdate(request.resource.data) && allowedShareTargets(request.resource.data))
           || noteSoftDeleteUpdate(request.resource.data)
+          || noteRestoreUpdate(request.resource.data)
         );
       allow delete: if false;
+
+      match /history/{historyId} {
+        allow read: if exists(notePath(noteId))
+          && canReadNote(get(notePath(noteId)).data);
+        allow create: if exists(notePath(noteId))
+          && validNoteHistory(request.resource.data, noteId)
+          && (
+            (
+              !noteDeleted(get(notePath(noteId)).data)
+              && (noteParticipant(get(notePath(noteId)).data) || adminUser())
+            )
+            || (
+              noteDeleted(get(notePath(noteId)).data)
+              && canDeleteNote(get(notePath(noteId)).data)
+              && request.resource.data.action == "delete"
+            )
+          );
+        allow update, delete: if false;
+      }
 
       match /attachments/{attachmentId} {
         allow read: if exists(notePath(noteId))
@@ -490,6 +548,19 @@ service cloud.firestore {
         allow delete: if exists(notePath(noteId))
           && canDeleteAttachment(get(notePath(noteId)).data, resource.data);
       }
+    }
+
+    match /noteUserStates/{noteId}/users/{uid} {
+      allow read: if exists(notePath(noteId))
+        && canReadNote(get(notePath(noteId)).data);
+      allow create, update: if activeSignedInUser()
+        && request.auth.uid == uid
+        && exists(notePath(noteId))
+        && !noteDeleted(get(notePath(noteId)).data)
+        && noteParticipant(get(notePath(noteId)).data)
+        && ownerAllowsParticipant(get(notePath(noteId)).data, request.auth.uid)
+        && validNoteUserState(request.resource.data, noteId, uid);
+      allow delete: if false;
     }
 
     match /activeNotes/{uid} {

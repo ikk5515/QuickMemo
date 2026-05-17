@@ -91,6 +91,25 @@ export interface NoteAttachmentDocument {
   createdAt?: Timestamp;
 }
 
+export interface NoteUserStateDocument {
+  uid: string;
+  noteId: string;
+  isPinned?: boolean;
+  readAt?: Timestamp;
+  confirmedAt?: Timestamp;
+  updatedAt?: Timestamp;
+}
+
+export type NoteHistoryAction = "create" | "content" | "deadline" | "share" | "delete" | "restore";
+
+export interface NoteHistoryDocument {
+  noteId: string;
+  actorUid: string;
+  action: NoteHistoryAction;
+  changedFields: string[];
+  createdAt?: Timestamp;
+}
+
 export interface ActiveNoteDocument {
   uid: string;
   noteId: string | null;
