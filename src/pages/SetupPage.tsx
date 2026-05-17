@@ -75,7 +75,7 @@ export default function SetupPage() {
         },
         password
       );
-      navigate("/admin", { replace: true });
+      navigate("/app", { replace: true });
     } catch (setupError) {
       setError(firebaseAuthErrorMessage(setupError, "첫 관리자를 만들지 못했습니다."));
     } finally {
