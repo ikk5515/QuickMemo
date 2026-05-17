@@ -29,10 +29,22 @@ export function UnlockPanel() {
       <h1>{profile?.displayName}님의 암호화 키를 열어주세요</h1>
       <p>새로고침하거나 새 기기에서 접속하면 노트 복호화를 위해 비밀번호가 한 번 더 필요합니다.</p>
       <form onSubmit={handleSubmit} className="inline-form">
+        {profile && (
+          <input
+            autoComplete="username"
+            className="sr-only"
+            name="username"
+            readOnly
+            tabIndex={-1}
+            type="email"
+            value={profile.loginEmail}
+          />
+        )}
         <input
           aria-label="비밀번호"
           autoComplete="current-password"
           minLength={6}
+          name="password"
           onChange={(event) => setPassword(event.target.value)}
           placeholder="비밀번호"
           required

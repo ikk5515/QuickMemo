@@ -133,12 +133,22 @@ export default function LoginPage() {
             </span>
             <h2>{selectedUser.displayName}</h2>
             <form onSubmit={handleSubmit} className="form-grid compact">
+              <input
+                autoComplete="username"
+                className="sr-only"
+                name="username"
+                readOnly
+                tabIndex={-1}
+                type="email"
+                value={selectedUser.loginEmail}
+              />
               <label>
                 비밀번호
                 <input
                   autoFocus
                   autoComplete="current-password"
                   minLength={6}
+                  name="password"
                   onChange={(event) => setPassword(event.target.value)}
                   required
                   type="password"
