@@ -398,14 +398,40 @@ export default function NotesPage() {
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
+  const visibleNoteOwnerUids = useMemo(() => {
+    if (!profile || profile.isAdmin) {
+      return [];
+    }
+
+    return Array.from(
+      new Set([
+        profile.uid,
+        ...users
+          .filter((user) => {
+            if (user.uid === profile.uid) {
+              return true;
+            }
+
+            if (user.isAdmin) {
+              return user.isActive;
+            }
+
+            return Boolean(user.allowedShareTargetUids?.includes(profile.uid));
+          })
+          .map((user) => user.uid)
+      ])
+    );
+  }, [profile, users]);
 
   useEffect(() => {
     if (!profile) {
       return undefined;
     }
 
-    return subscribeVisibleNotes(profile.uid, setNotes, () => setError("노트 목록을 불러오지 못했습니다."));
-  }, [profile]);
+    return subscribeVisibleNotes(profile.uid, profile.isAdmin ? null : visibleNoteOwnerUids, setNotes, () =>
+      setError("노트 목록을 불러오지 못했습니다.")
+    );
+  }, [profile, visibleNoteOwnerUids]);
 
   useEffect(() => {
     if (!profile) {

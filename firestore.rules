@@ -241,7 +241,8 @@ service cloud.firestore {
       return noteParticipant(data)
         && data.type == resource.data.type
         && data.participantUids == resource.data.participantUids
-        && data.wrappedKeys == resource.data.wrappedKeys;
+        && data.wrappedKeys == resource.data.wrappedKeys
+        && allowedShareTargets(data);
     }
 
     function ownerAccessUpdate(data) {
@@ -268,6 +269,23 @@ service cloud.firestore {
           get(userPath(data.ownerUid)).data.keys().hasAny(["allowedShareTargetUids"])
           && data.participantUids.hasOnly(get(userPath(data.ownerUid)).data.allowedShareTargetUids)
         );
+    }
+
+    function ownerAllowsParticipant(data, uid) {
+      return uid == data.ownerUid
+        || (
+          get(userPath(data.ownerUid)).data.isActive == true
+          && get(userPath(data.ownerUid)).data.isAdmin == true
+        )
+        || (
+          get(userPath(data.ownerUid)).data.keys().hasAny(["allowedShareTargetUids"])
+          && uid in get(userPath(data.ownerUid)).data.allowedShareTargetUids
+        );
+    }
+
+    function canReadNote(data) {
+      return adminUser()
+        || (noteParticipant(data) && ownerAllowsParticipant(data, request.auth.uid));
     }
 
     function canDeleteNote(data) {
@@ -340,7 +358,7 @@ service cloud.firestore {
     }
 
     match /notes/{noteId} {
-      allow read: if noteParticipant(resource.data) || adminUser();
+      allow read: if canReadNote(resource.data);
       allow create: if activeSignedInUser()
         && validNote(request.resource.data)
         && request.resource.data.ownerUid == request.auth.uid
