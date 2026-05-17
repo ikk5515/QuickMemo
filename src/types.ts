@@ -1,4 +1,4 @@
-import type { Timestamp } from "firebase/firestore";
+import type { Bytes, Timestamp } from "firebase/firestore";
 
 export type UserRole = "admin" | "user";
 
@@ -28,6 +28,13 @@ export interface EncryptedPayload {
   algorithm: "AES-GCM";
   cipherText: string;
   iv: string;
+}
+
+export interface EncryptedBinaryPayload {
+  version: 1;
+  algorithm: "AES-GCM";
+  cipherBytes: Uint8Array;
+  iv: Uint8Array;
 }
 
 export interface WrappedNoteKey {
@@ -65,6 +72,20 @@ export interface DecryptedNote extends NoteDocument {
   id: string;
   title: string;
   body: string;
+}
+
+export interface NoteAttachmentDocument {
+  noteId: string;
+  version: 1;
+  algorithm: "AES-GCM";
+  fileName: string;
+  extension: string;
+  mimeType: string;
+  originalSize: number;
+  encryptedData: Bytes;
+  iv: Bytes;
+  uploadedBy: string;
+  createdAt?: Timestamp;
 }
 
 export interface ActiveNoteDocument {

@@ -805,6 +805,85 @@ textarea {
   color: #1d4ed8;
 }
 
+.attachment-panel {
+  background: color-mix(in srgb, var(--surface) 74%, transparent);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex: 0 0 auto;
+  padding: 12px;
+}
+
+.attachment-panel.compact {
+  margin: 0 18px 18px;
+}
+
+.attachment-panel header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.attachment-panel h3 {
+  align-items: center;
+  display: inline-flex;
+  font-size: 13px;
+  gap: 6px;
+  margin: 0;
+}
+
+.attachment-panel header span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.attachment-list {
+  display: grid;
+  gap: 8px;
+}
+
+.attachment-item {
+  align-items: center;
+  background: var(--background);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 10px;
+}
+
+.attachment-info {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.attachment-info strong,
+.attachment-info span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-info strong {
+  font-size: 13px;
+}
+
+.attachment-info span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.attachment-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
 .editor-footer {
   align-items: center;
   border-top: 1px solid var(--line);

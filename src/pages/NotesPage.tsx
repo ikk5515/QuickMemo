@@ -1,6 +1,8 @@
 import {
   ArrowUpDown,
   CalendarClock,
+  Download,
+  File,
   FilePlus2,
   FolderOpen,
   ListChecks,
@@ -29,7 +31,17 @@ import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import {
+  attachmentDownloadName,
+  attachmentExtension,
+  attachmentValidationError,
+  formatFileSize,
+  maxAttachmentFileBytes,
+  safeAttachmentBaseName
+} from "../lib/attachments";
+import {
+  decryptBytes,
   decryptText,
+  encryptBytes,
   encryptText,
   generateNoteKey,
   unwrapNoteKey,
@@ -45,12 +57,16 @@ import {
 } from "../lib/editorContent";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
+  createNoteAttachment,
+  deleteNoteAttachment,
   createEncryptedNote,
   deleteNote,
+  subscribeNoteAttachments,
   subscribeVisibleNotes,
   updateEncryptedNote,
   updateNoteAccess,
   updateNoteDeadline,
+  type NoteAttachmentSnapshot,
   type NoteSnapshot
 } from "../services/notes";
 import { subscribeUsers } from "../services/users";
@@ -418,6 +434,8 @@ export default function NotesPage() {
   const [status, setStatus] = useState("준비됨");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [attachmentBusyId, setAttachmentBusyId] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [listOpen, setListOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
@@ -476,6 +494,15 @@ export default function NotesPage() {
   useEffect(() => {
     return subscribeUsers(setUsers, () => setError("사용자 목록을 불러오지 못했습니다."));
   }, []);
+
+  useEffect(() => {
+    if (!editor.noteId) {
+      setAttachments([]);
+      return undefined;
+    }
+
+    return subscribeNoteAttachments(editor.noteId, setAttachments, () => setError("첨부파일 목록을 불러오지 못했습니다."));
+  }, [editor.noteId]);
 
   useEffect(() => {
     if (!profile) {
@@ -982,9 +1009,9 @@ export default function NotesPage() {
     }
   }
 
-  async function saveCurrentNote(showSavedMessage = true) {
+  async function persistCurrentNote(showSavedMessage = true): Promise<{ noteId: string; noteKey: CryptoKey } | null> {
     if (saving) {
-      return;
+      return null;
     }
 
     const draft = {
@@ -1004,7 +1031,7 @@ export default function NotesPage() {
         announceActiveNote(editor.noteId);
         setEditor((current) => (draftsMatch(current, draft) ? { ...current, dirty: false } : current));
         setStatus(showSavedMessage ? "변경 사항을 저장했습니다." : "자동 저장됨");
-        return;
+        return { noteId: editor.noteId, noteKey: editor.noteKey };
       }
 
       const noteKey = await generateNoteKey();
@@ -1035,10 +1062,184 @@ export default function NotesPage() {
       }));
       announceActiveNote(created.id);
       setStatus(showSavedMessage ? "노트를 저장 목록에 추가했습니다." : "자동 저장됨");
+      return { noteId: created.id, noteKey };
     } catch {
       setError("노트를 저장하지 못했습니다.");
+      return null;
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveCurrentNote(showSavedMessage = true) {
+    await persistCurrentNote(showSavedMessage);
+  }
+
+  async function ensureCurrentNoteForAttachment() {
+    if (editor.noteId && editor.noteKey) {
+      return { noteId: editor.noteId, noteKey: editor.noteKey };
+    }
+
+    const savedNote = await persistCurrentNote(false);
+
+    if (!savedNote) {
+      throw new Error("노트를 먼저 저장하지 못했습니다.");
+    }
+
+    return savedNote;
+  }
+
+  async function insertPastedFiles(files: File[], range: Range | null = null) {
+    const attachmentFiles: File[] = [];
+    let imageRange = range;
+
+    for (const file of files) {
+      if (file.type.startsWith("image/")) {
+        await insertImageFile(file, imageRange);
+        imageRange = null;
+      } else {
+        attachmentFiles.push(file);
+      }
+    }
+
+    if (attachmentFiles.length) {
+      await uploadAttachmentFiles(attachmentFiles);
+    }
+  }
+
+  async function uploadAttachmentFiles(files: File[], targetNote?: { noteId: string; noteKey: CryptoKey }) {
+    const validFiles: File[] = [];
+    const rejectedFiles: string[] = [];
+
+    files.forEach((file) => {
+      const validationError = attachmentValidationError(file);
+
+      if (validationError) {
+        rejectedFiles.push(`${file.name}: ${validationError}`);
+      } else {
+        validFiles.push(file);
+      }
+    });
+
+    if (!validFiles.length) {
+      setError(rejectedFiles[0] ?? "첨부할 수 있는 파일이 없습니다.");
+      return;
+    }
+
+    setAttachmentBusyId("upload");
+    setError(null);
+
+    try {
+      const noteTarget = targetNote ?? (await ensureCurrentNoteForAttachment());
+
+      for (const file of validFiles) {
+        const fileBytes = new Uint8Array(await file.arrayBuffer());
+        const encryptedFile = await encryptBytes(fileBytes, noteTarget.noteKey);
+        await createNoteAttachment({
+          noteId: noteTarget.noteId,
+          fileName: safeAttachmentBaseName(file.name),
+          extension: attachmentExtension(file.name),
+          mimeType: (file.type || "application/octet-stream").slice(0, 120),
+          originalSize: file.size,
+          encryptedData: encryptedFile.cipherBytes,
+          iv: encryptedFile.iv,
+          uploadedBy: unlockedProfile.uid
+        });
+      }
+
+      setStatus(
+        validFiles.length === 1
+          ? `첨부파일을 업로드했습니다. 최대 ${formatFileSize(maxAttachmentFileBytes)}까지 가능합니다.`
+          : `첨부파일 ${validFiles.length}개를 업로드했습니다.`
+      );
+
+      if (rejectedFiles.length) {
+        setError(`일부 파일은 제외했습니다. ${rejectedFiles[0]}`);
+      }
+    } catch {
+      setError("첨부파일을 업로드하지 못했습니다.");
+    } finally {
+      setAttachmentBusyId(null);
+    }
+  }
+
+  async function noteKeyForDownload(noteId: string) {
+    if (editor.noteId === noteId && editor.noteKey) {
+      return editor.noteKey;
+    }
+
+    const rawNote = notes.find((note) => note.id === noteId);
+    const wrappedKey = rawNote?.wrappedKeys[unlockedProfile.uid];
+
+    if (!wrappedKey) {
+      throw new Error("첨부파일 복호화 키를 찾을 수 없습니다.");
+    }
+
+    return unwrapNoteKey(wrappedKey, unlockedPrivateKey);
+  }
+
+  async function downloadAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
+    setAttachmentBusyId(attachment.id);
+    setError(null);
+
+    try {
+      const noteKey = await noteKeyForDownload(noteId);
+      const plainBytes = await decryptBytes(
+        {
+          version: 1,
+          algorithm: "AES-GCM",
+          cipherBytes: attachment.encryptedData.toUint8Array(),
+          iv: attachment.iv.toUint8Array()
+        },
+        noteKey
+      );
+      const blob = new Blob([plainBytes], { type: "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = attachmentDownloadName(attachment);
+      anchor.rel = "noopener noreferrer";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setStatus("첨부파일 다운로드를 시작했습니다.");
+    } catch {
+      setError("첨부파일을 다운로드하지 못했습니다.");
+    } finally {
+      setAttachmentBusyId(null);
+    }
+  }
+
+  async function uploadPreviewAttachments(note: DecryptedNote, files: File[]) {
+    try {
+      const noteKey = await noteKeyForDownload(note.id);
+      await uploadAttachmentFiles(files, { noteId: note.id, noteKey });
+    } catch {
+      setError("첨부파일을 업로드하지 못했습니다.");
+    }
+  }
+
+  function canDeleteAttachmentForNote(note: DecryptedNote, attachment: NoteAttachmentSnapshot) {
+    return canDeleteNote(note) || attachment.uploadedBy === unlockedProfile.uid;
+  }
+
+  async function removeAttachment(note: DecryptedNote, attachment: NoteAttachmentSnapshot) {
+    if (!canDeleteAttachmentForNote(note, attachment)) {
+      setError("첨부파일 업로드 사용자, 노트 소유자 또는 관리자만 삭제할 수 있습니다.");
+      return;
+    }
+
+    setAttachmentBusyId(attachment.id);
+    setError(null);
+
+    try {
+      await deleteNoteAttachment(note.id, attachment.id);
+      setStatus("첨부파일을 삭제했습니다.");
+    } catch {
+      setError("첨부파일을 삭제하지 못했습니다.");
+    } finally {
+      setAttachmentBusyId(null);
     }
   }
 
@@ -1276,10 +1477,19 @@ export default function NotesPage() {
           <RichMemoEditor
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
-            onImagePaste={(file, range) => void insertImageFile(file, range)}
+            onFilesPaste={(files, range) => void insertPastedFiles(files, range)}
             onChange={(value) => updateEditor("body", value)}
             value={editor.body}
           />
+          {editor.noteId && activeRemoteNote && (
+            <AttachmentList
+              attachments={attachments}
+              busyId={attachmentBusyId}
+              canDelete={(attachment) => canDeleteAttachmentForNote(activeRemoteNote, attachment)}
+              onDelete={(attachment) => void removeAttachment(activeRemoteNote, attachment)}
+              onDownload={(attachment) => void downloadAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
+            />
+          )}
           <div className="editor-footer">
             <span className={`note-kind-pill ${currentType}`}>{currentType === "shared" ? "공유" : "개인"}</span>
             {error && <p className="form-error">{error}</p>}
@@ -1304,9 +1514,14 @@ export default function NotesPage() {
             note={previewNote}
             onClose={() => setPreviewNoteId(null)}
             onDelete={(note) => void removePreviewNote(note)}
+            onDeleteAttachment={(note, attachment) => void removeAttachment(note, attachment)}
+            onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
             onLoad={(note, draft) => void openNote(note, draft)}
             onSave={(note, draft) => savePreviewNote(note, draft)}
+            onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
             saving={saving}
+            attachmentBusyId={attachmentBusyId}
+            canDeleteAttachment={canDeleteAttachmentForNote}
           />
         )}
       </section>
@@ -1317,13 +1532,13 @@ export default function NotesPage() {
 function RichMemoEditor({
   editorRef,
   fontSize,
-  onImagePaste,
+  onFilesPaste,
   onChange,
   value
 }: {
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
-  onImagePaste: (file: File, range: Range | null) => void;
+  onFilesPaste: (files: File[], range: Range | null) => void;
   onChange: (value: string) => void;
   value: string;
 }) {
@@ -1351,15 +1566,17 @@ function RichMemoEditor({
   }
 
   function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
-    const imageFile = Array.from(event.clipboardData.items)
-      .find((item) => item.type.startsWith("image/"))
-      ?.getAsFile();
+    const files = Array.from(event.clipboardData.files);
+    const itemFiles = Array.from(event.clipboardData.items)
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file));
+    const pastedFiles = files.length ? files : itemFiles;
 
-    if (imageFile) {
+    if (pastedFiles.length) {
       const selection = window.getSelection();
       const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
       event.preventDefault();
-      onImagePaste(imageFile, range);
+      onFilesPaste(pastedFiles, range);
       return;
     }
 
@@ -1671,27 +1888,106 @@ function NoteList({
   );
 }
 
+function AttachmentList({
+  attachments,
+  busyId,
+  canDelete,
+  compact = false,
+  onDelete,
+  onDownload
+}: {
+  attachments: NoteAttachmentSnapshot[];
+  busyId: string | null;
+  canDelete: (attachment: NoteAttachmentSnapshot) => boolean;
+  compact?: boolean;
+  onDelete: (attachment: NoteAttachmentSnapshot) => void;
+  onDownload: (attachment: NoteAttachmentSnapshot) => void;
+}) {
+  if (!attachments.length) {
+    return null;
+  }
+
+  return (
+    <section className={`attachment-panel ${compact ? "compact" : ""}`} aria-label="첨부파일">
+      <header>
+        <h3>
+          <File size={16} />
+          첨부파일
+        </h3>
+        <span>{attachments.length}개</span>
+      </header>
+      <div className="attachment-list">
+        {attachments.map((attachment) => {
+          const disabled = busyId === attachment.id;
+
+          return (
+            <article className="attachment-item" key={attachment.id}>
+              <div className="attachment-info">
+                <strong>{attachmentDownloadName(attachment)}</strong>
+                <span>
+                  {attachment.extension.toUpperCase()} · {formatFileSize(attachment.originalSize)}
+                </span>
+              </div>
+              <div className="attachment-actions">
+                <button
+                  aria-label={`${attachmentDownloadName(attachment)} 다운로드`}
+                  className="icon-button"
+                  disabled={Boolean(busyId)}
+                  onClick={() => onDownload(attachment)}
+                  type="button"
+                >
+                  {disabled ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                </button>
+                <button
+                  aria-label={`${attachmentDownloadName(attachment)} 삭제`}
+                  className="icon-button danger"
+                  disabled={Boolean(busyId) || !canDelete(attachment)}
+                  onClick={() => onDelete(attachment)}
+                  type="button"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function NotePreviewModal({
+  attachmentBusyId,
+  canDeleteAttachment,
   canDelete,
   note,
   onClose,
   onDelete,
+  onDeleteAttachment,
+  onDownloadAttachment,
   onLoad,
   onSave,
+  onUploadAttachments,
   saving
 }: {
+  attachmentBusyId: string | null;
+  canDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => boolean;
   canDelete: boolean;
   note: DecryptedNote;
   onClose: () => void;
   onDelete: (note: DecryptedNote) => void;
+  onDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
+  onDownloadAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onLoad: (note: DecryptedNote, draft: NoteDraft) => void;
   onSave: (note: DecryptedNote, draft: NoteDraft) => Promise<boolean>;
+  onUploadAttachments: (note: DecryptedNote, files: File[]) => void;
   saving: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState<NoteDraft>(() => draftFromNote(note));
   const [draftDirty, setDraftDirty] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
   const latestDraftRef = useRef(draft);
@@ -1699,6 +1995,10 @@ function NotePreviewModal({
   useEffect(() => {
     latestDraftRef.current = draft;
   }, [draft]);
+
+  useEffect(() => {
+    return subscribeNoteAttachments(note.id, setAttachments, () => setModalError("첨부파일 목록을 불러오지 못했습니다."));
+  }, [note.id]);
 
   useEffect(() => {
     const remoteDraft = draftFromNote(note);
@@ -1798,6 +2098,24 @@ function NotePreviewModal({
     }
   }
 
+  async function insertPreviewPastedFiles(files: File[], range: Range | null = null) {
+    const attachmentFiles: File[] = [];
+    let imageRange = range;
+
+    for (const file of files) {
+      if (file.type.startsWith("image/")) {
+        await insertPreviewImageFile(file, imageRange);
+        imageRange = null;
+      } else {
+        attachmentFiles.push(file);
+      }
+    }
+
+    if (attachmentFiles.length) {
+      onUploadAttachments(note, attachmentFiles);
+    }
+  }
+
   const bodyHtml = draft.body || "<p>내용 없음</p>";
 
   return (
@@ -1890,7 +2208,7 @@ function NotePreviewModal({
             <RichMemoEditor
               editorRef={previewEditorRef}
               fontSize={draft.fontSize}
-              onImagePaste={(file, range) => void insertPreviewImageFile(file, range)}
+              onFilesPaste={(files, range) => void insertPreviewPastedFiles(files, range)}
               onChange={(value) => updateDraft("body", value)}
               value={draft.body}
             />
@@ -1903,6 +2221,14 @@ function NotePreviewModal({
             dangerouslySetInnerHTML={{ __html: linkifyEditorHtml(sanitizeEditorHtml(bodyHtml)) }}
           />
         )}
+        <AttachmentList
+          attachments={attachments}
+          busyId={attachmentBusyId}
+          canDelete={(attachment) => canDeleteAttachment(note, attachment)}
+          compact
+          onDelete={(attachment) => onDeleteAttachment(note, attachment)}
+          onDownload={(attachment) => onDownloadAttachment(note, attachment)}
+        />
       </section>
     </div>
   );

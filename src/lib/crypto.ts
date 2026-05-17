@@ -1,4 +1,4 @@
-import type { EncryptedPayload, UserKeyBundle, UserKeyDocument, WrappedNoteKey } from "../types";
+import type { EncryptedBinaryPayload, EncryptedPayload, UserKeyBundle, UserKeyDocument, WrappedNoteKey } from "../types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -85,6 +85,32 @@ export async function decryptText(payload: EncryptedPayload, key: CryptoKey) {
   );
 
   return decoder.decode(plainText);
+}
+
+export async function encryptBytes(value: ArrayBuffer | Uint8Array, key: CryptoKey): Promise<EncryptedBinaryPayload> {
+  const iv = randomBytes(12);
+  const cipherBytes = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    key,
+    toArrayBuffer(value instanceof Uint8Array ? value : new Uint8Array(value))
+  );
+
+  return {
+    version: 1,
+    algorithm: "AES-GCM",
+    cipherBytes: new Uint8Array(cipherBytes),
+    iv
+  };
+}
+
+export async function decryptBytes(payload: EncryptedBinaryPayload, key: CryptoKey) {
+  const plainBytes = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(payload.iv) },
+    key,
+    toArrayBuffer(payload.cipherBytes)
+  );
+
+  return new Uint8Array(plainBytes);
 }
 
 export async function generateUserKeyBundle(password: string): Promise<UserKeyBundle> {
