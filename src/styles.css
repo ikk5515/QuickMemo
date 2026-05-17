@@ -29,6 +29,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -59,6 +60,7 @@ a {
 }
 
 input,
+select,
 textarea {
   background: #ffffff;
   border: 1px solid var(--line);
@@ -114,7 +116,7 @@ textarea {
 .auth-panel,
 .panel,
 .editor-panel,
-.note-sidebar,
+.note-drawer,
 .unlock-panel {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -423,32 +425,15 @@ textarea {
 }
 
 .notes-workspace {
-  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  position: relative;
 }
 
-.note-sidebar,
 .editor-panel {
   min-height: calc(100vh - 116px);
   padding: 18px;
 }
 
-.sidebar-actions {
-  display: grid;
-  gap: 10px;
-  grid-template-columns: 1fr 1fr;
-  margin-bottom: 18px;
-}
-
-.note-list-section {
-  border-top: 1px solid var(--line);
-  padding-top: 16px;
-}
-
-.note-list-section + .note-list-section {
-  margin-top: 18px;
-}
-
-.note-list-section h2,
 .panel h2 {
   align-items: center;
   display: flex;
@@ -480,7 +465,23 @@ textarea {
   text-align: left;
 }
 
-.note-list-item span {
+.note-list-item.active {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgb(47 125 112 / 12%);
+}
+
+.note-list-item header {
+  align-items: start;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.note-list-item strong {
+  overflow-wrap: anywhere;
+}
+
+.note-list-item .note-snippet {
   color: var(--muted);
   display: -webkit-box;
   font-size: 13px;
@@ -504,29 +505,30 @@ textarea {
   padding: 14px 18px;
 }
 
-.segmented-control {
-  background: var(--surface);
-  border-radius: 8px;
-  display: inline-flex;
-  padding: 4px;
-}
-
-.segmented-control button {
-  background: transparent;
-  color: var(--muted);
-  min-height: 34px;
-}
-
-.segmented-control button.active {
-  background: white;
-  color: var(--ink);
-}
-
+.editor-primary-actions,
 .toolbar-actions {
   align-items: center;
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
+}
+
+.toolbar-actions {
   margin-left: auto;
+}
+
+.font-size-control {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 8px;
+}
+
+.font-size-control select {
+  min-height: 38px;
+  width: auto;
 }
 
 .sync-status {
@@ -573,14 +575,98 @@ textarea {
   padding: 8px 0 12px;
 }
 
-.body-input {
+.rich-body-input {
   border: 0;
   border-radius: 0;
   box-shadow: none !important;
-  font-size: 17px;
   line-height: 1.75;
   min-height: 430px;
+  outline: none;
+  overflow-wrap: anywhere;
   padding: 18px 0;
+}
+
+.rich-body-input:empty::before {
+  color: var(--muted);
+  content: attr(data-placeholder);
+}
+
+.rich-body-input:focus {
+  box-shadow: none;
+}
+
+.rich-body-input p,
+.rich-body-input figure {
+  margin: 0 0 16px;
+}
+
+.rich-body-input img {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: block;
+  height: auto;
+  max-height: 520px;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.editor-footer {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 12px;
+  min-height: 48px;
+  padding-top: 12px;
+}
+
+.note-kind-pill {
+  align-items: center;
+  background: var(--surface);
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 9px;
+}
+
+.note-kind-pill.shared {
+  background: rgb(63 111 181 / 12%);
+  color: var(--blue);
+}
+
+.note-drawer {
+  max-height: calc(100vh - 110px);
+  overflow: auto;
+  padding: 16px;
+  position: fixed;
+  right: 22px;
+  top: 88px;
+  width: min(390px, calc(100vw - 28px));
+  z-index: 8;
+}
+
+.note-drawer-header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.note-drawer-header h2 {
+  align-items: center;
+  display: inline-flex;
+  font-size: 18px;
+  gap: 8px;
+  margin: 0;
+}
+
+.drawer-new-button {
+  margin-bottom: 12px;
+  width: 100%;
 }
 
 .admin-grid {
@@ -695,7 +781,6 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .note-sidebar,
   .editor-panel {
     min-height: auto;
   }
@@ -737,7 +822,7 @@ textarea {
 
   .auth-panel,
   .panel,
-  .note-sidebar,
+  .note-drawer,
   .editor-panel {
     padding: 14px;
   }
@@ -753,7 +838,11 @@ textarea {
     margin-left: 0;
   }
 
-  .sidebar-actions,
+  .note-drawer {
+    right: 14px;
+    top: 124px;
+  }
+
   .inline-form,
   .user-row-fields {
     grid-template-columns: 1fr;
