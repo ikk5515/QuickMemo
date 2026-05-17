@@ -66,6 +66,9 @@ export interface NoteDocument {
   updatedAt?: Timestamp;
   updatedBy: string;
   savedAt?: Timestamp;
+  isDeleted?: boolean;
+  deletedAt?: Timestamp;
+  deletedBy?: string;
 }
 
 export interface DecryptedNote extends NoteDocument {

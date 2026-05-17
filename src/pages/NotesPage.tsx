@@ -1316,7 +1316,7 @@ export default function NotesPage() {
     setSaving(true);
 
     try {
-      await deleteNote(editor.noteId);
+      await deleteNote(editor.noteId, unlockedProfile.uid);
       startNewNote();
       setStatus("노트를 삭제했습니다.");
     } catch {
@@ -1336,7 +1336,7 @@ export default function NotesPage() {
     setError(null);
 
     try {
-      await deleteNote(note.id);
+      await deleteNote(note.id, unlockedProfile.uid);
       setPreviewNoteId(null);
 
       if (editor.noteId === note.id) {

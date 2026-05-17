@@ -50,6 +50,10 @@ function timestampMillis(value: NoteDocument["updatedAt"]) {
   return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
 }
 
+function visibleNote(document: NoteSnapshot) {
+  return document.isDeleted !== true;
+}
+
 export function subscribeVisibleNotes(
   uid: string,
   ownerUids: string[] | null,
@@ -66,7 +70,7 @@ export function subscribeVisibleNotes(
     return onSnapshot(
       notesQuery,
       (snapshot) => {
-        callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })));
+        callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(visibleNote));
       },
       (error) => onError?.(error)
     );
@@ -99,7 +103,10 @@ export function subscribeVisibleNotes(
     return onSnapshot(
       notesQuery,
       (snapshot) => {
-        notesByOwner.set(ownerUid, snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })));
+        notesByOwner.set(
+          ownerUid,
+          snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(visibleNote)
+        );
         emitNotes();
       },
       (error) => onError?.(error)
@@ -118,7 +125,7 @@ export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => v
   return onSnapshot(
     notesQuery,
     (snapshot) => {
-      callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })));
+      callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(visibleNote));
     },
     (error) => onError?.(error)
   );
@@ -215,9 +222,17 @@ export async function deleteNoteAttachment(noteId: string, attachmentId: string)
   await deleteDoc(doc(db, "notes", noteId, "attachments", attachmentId));
 }
 
-export async function deleteNote(noteId: string) {
+export async function deleteNote(noteId: string, uid: string) {
+  await updateDoc(doc(db, "notes", noteId), {
+    isDeleted: true,
+    deletedAt: serverTimestamp(),
+    deletedBy: uid,
+    updatedAt: serverTimestamp(),
+    updatedBy: uid
+  });
+
   const attachmentsSnapshot = await getDocs(collection(db, "notes", noteId, "attachments"));
-  const refsToDelete = [...attachmentsSnapshot.docs.map((attachmentDocument) => attachmentDocument.ref), doc(db, "notes", noteId)];
+  const refsToDelete = attachmentsSnapshot.docs.map((attachmentDocument) => attachmentDocument.ref);
   const chunkSize = 450;
 
   for (let index = 0; index < refsToDelete.length; index += chunkSize) {

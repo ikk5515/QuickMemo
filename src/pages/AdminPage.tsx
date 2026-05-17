@@ -448,6 +448,12 @@ export default function AdminPage() {
   }
 
   async function handleDeleteManagedNote(note: AdminNoteView) {
+    if (!profile) {
+      setNoteError("관리자 정보를 확인하지 못했습니다.");
+      return;
+    }
+
+    const currentProfile = profile;
     const readableTitle = note.canReadContent ? note.title : "암호화된 노트";
     const confirmed = window.confirm(
       `${userName(note.ownerUid)} 사용자의 "${readableTitle}" 노트를 삭제할까요?\n삭제하면 복구할 수 없습니다.`
@@ -462,7 +468,7 @@ export default function AdminPage() {
     setNoteError(null);
 
     try {
-      await deleteNote(note.id);
+      await deleteNote(note.id, currentProfile.uid);
       setSelectedNoteId(null);
       setNoteNotice("노트를 삭제했습니다.");
     } catch {

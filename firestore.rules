@@ -65,7 +65,10 @@ service cloud.firestore {
         "dueAt",
         "updatedAt",
         "updatedBy",
-        "savedAt"
+        "savedAt",
+        "isDeleted",
+        "deletedAt",
+        "deletedBy"
       ])
       && data.type in ["personal", "shared"]
       && data.ownerUid is string
@@ -79,7 +82,23 @@ service cloud.firestore {
       && (!data.keys().hasAny(["dueAt"]) || data.dueAt == null || data.dueAt is timestamp)
       && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp)
       && (!data.keys().hasAny(["savedAt"]) || data.savedAt is timestamp)
-      && data.updatedBy is string;
+      && data.updatedBy is string
+      && validDeleteMetadata(data);
+    }
+
+    function validDeleteMetadata(data) {
+      return !data.keys().hasAny(["isDeleted", "deletedAt", "deletedBy"])
+        || (
+          data.keys().hasAll(["isDeleted", "deletedAt", "deletedBy"])
+          && data.isDeleted == true
+          && data.deletedAt is timestamp
+          && data.deletedBy is string
+          && data.deletedBy.size() > 0
+        );
+    }
+
+    function noteDeleted(data) {
+      return data.keys().hasAny(["isDeleted"]) && data.isDeleted == true;
     }
 
     function validRoster(data, uid) {
@@ -297,6 +316,8 @@ service cloud.firestore {
 
     function noteContentUpdate(data) {
       return noteParticipant(data)
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
         && data.type == resource.data.type
         && data.participantUids == resource.data.participantUids
         && data.wrappedKeys == resource.data.wrappedKeys
@@ -305,6 +326,8 @@ service cloud.firestore {
 
     function ownerAccessUpdate(data) {
       return request.auth.uid == resource.data.ownerUid
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
         && request.auth.uid in data.participantUids
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
@@ -312,6 +335,21 @@ service cloud.firestore {
           "type",
           "participantUids",
           "wrappedKeys",
+          "updatedAt",
+          "updatedBy"
+        ]);
+    }
+
+    function noteSoftDeleteUpdate(data) {
+      return !noteDeleted(resource.data)
+        && canDeleteNote(resource.data)
+        && data.isDeleted == true
+        && data.deletedBy == request.auth.uid
+        && data.updatedBy == request.auth.uid
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "isDeleted",
+          "deletedAt",
+          "deletedBy",
           "updatedAt",
           "updatedBy"
         ]);
@@ -427,22 +465,24 @@ service cloud.firestore {
       allow read: if canReadNote(resource.data);
       allow create: if activeSignedInUser()
         && validNote(request.resource.data)
+        && !request.resource.data.keys().hasAny(["isDeleted", "deletedAt", "deletedBy"])
         && request.resource.data.ownerUid == request.auth.uid
         && request.auth.uid in request.resource.data.participantUids
         && allowedShareTargets(request.resource.data);
-      allow update: if noteParticipant(resource.data)
-        && validNote(request.resource.data)
+      allow update: if validNote(request.resource.data)
         && request.resource.data.ownerUid == resource.data.ownerUid
         && (
           noteContentUpdate(request.resource.data)
           || (ownerAccessUpdate(request.resource.data) && allowedShareTargets(request.resource.data))
+          || noteSoftDeleteUpdate(request.resource.data)
         );
-      allow delete: if canDeleteNote(resource.data);
+      allow delete: if false;
 
       match /attachments/{attachmentId} {
         allow read: if exists(notePath(noteId))
           && canReadNote(get(notePath(noteId)).data);
         allow create: if exists(notePath(noteId))
+          && !noteDeleted(get(notePath(noteId)).data)
           && noteParticipant(get(notePath(noteId)).data)
           && validAttachment(request.resource.data, noteId)
           && request.resource.data.uploadedBy == request.auth.uid;
