@@ -1,4 +1,4 @@
-import { LockKeyhole } from "lucide-react";
+import { LockKeyhole, LogIn } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { AvatarButton } from "../components/AvatarButton";
@@ -10,7 +10,7 @@ import type { PublicRosterUser } from "../types";
 
 export default function LoginPage() {
   const navigate = useNavigate();
-  const { firebaseUser, profile, loginRosterUser } = useAuth();
+  const { firebaseUser, profile, loginRosterUser, loginWithGoogle } = useAuth();
   const [roster, setRoster] = useState<PublicRosterUser[]>([]);
   const [selectedUser, setSelectedUser] = useState<PublicRosterUser | null>(null);
   const [password, setPassword] = useState("");
@@ -87,6 +87,20 @@ export default function LoginPage() {
     }
   }
 
+  async function handleGoogleLogin() {
+    setPending(true);
+    setError(null);
+
+    try {
+      await loginWithGoogle();
+      navigate("/app", { replace: true });
+    } catch (loginError) {
+      setError(firebaseAuthErrorMessage(loginError, "Google 로그인에 실패했습니다."));
+    } finally {
+      setPending(false);
+    }
+  }
+
   return (
     <main className="auth-page login-layout">
       <section className="login-copy">
@@ -102,9 +116,19 @@ export default function LoginPage() {
           <LockKeyhole size={18} />
           빠른 로그인
         </div>
+        <button
+          className="google-login-button secondary-button"
+          disabled={pending}
+          onClick={() => void handleGoogleLogin()}
+          type="button"
+        >
+          <LogIn size={18} />
+          Google로 로그인
+        </button>
+        {error && !selectedUser && <p className="form-error login-error">{error}</p>}
         {sortedRoster.length === 0 ? (
           <div className="empty-state">
-            <p>{error || "아직 로그인 가능한 사용자가 없습니다."}</p>
+            <p>아직 로그인 가능한 사용자가 없습니다.</p>
           </div>
         ) : (
           <div className="roster-grid">
