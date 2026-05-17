@@ -212,11 +212,6 @@ textarea {
   grid-template-columns: repeat(auto-fit, minmax(min(132px, 100%), 1fr));
 }
 
-.google-login-button {
-  margin: 16px 0;
-  width: 100%;
-}
-
 .login-error {
   margin-bottom: 14px;
 }
@@ -416,29 +411,6 @@ textarea {
   display: flex;
   gap: 10px;
   margin-left: auto;
-}
-
-.topbar-google-button {
-  min-height: 38px;
-  padding: 0 12px;
-  white-space: nowrap;
-}
-
-.topbar-error {
-  background: #fff;
-  border: 1px solid #f0c8c4;
-  border-radius: 8px;
-  box-shadow: 0 10px 30px rgb(20 33 31 / 12%);
-  color: var(--coral);
-  font-size: 13px;
-  font-weight: 800;
-  margin: 0;
-  max-width: min(420px, calc(100vw - 28px));
-  padding: 10px 12px;
-  position: absolute;
-  right: 22px;
-  top: calc(100% + 8px);
-  z-index: 7;
 }
 
 .mini-avatar {
@@ -956,12 +928,6 @@ textarea {
     padding: 12px 14px;
   }
 
-  .topbar-error {
-    left: 14px;
-    right: 14px;
-    top: calc(100% + 6px);
-  }
-
   .login-copy h1,
   .auth-panel h1,
   .workspace-heading h1 {
@@ -1097,10 +1063,6 @@ textarea {
   .topbar-user {
     justify-content: space-between;
     width: 100%;
-  }
-
-  .topbar-google-button {
-    flex: 1;
   }
 
   .nav-links a {

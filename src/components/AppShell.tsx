@@ -1,27 +1,11 @@
-import { Link2, LogOut, NotebookPen, Shield } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { LogOut, NotebookPen, Shield } from "lucide-react";
+import type { ReactNode } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { hasFirebaseConfig } from "../lib/firebase";
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { googleLinked, linkGoogleLogin, profile, signOut } = useAuth();
-  const [linkingGoogle, setLinkingGoogle] = useState(false);
-  const [linkError, setLinkError] = useState<string | null>(null);
-
-  async function handleGoogleLink() {
-    setLinkingGoogle(true);
-    setLinkError(null);
-
-    try {
-      await linkGoogleLogin();
-    } catch (error) {
-      setLinkError(firebaseAuthErrorMessage(error, "Google 계정을 연결하지 못했습니다."));
-    } finally {
-      setLinkingGoogle(false);
-    }
-  }
+  const { profile, signOut } = useAuth();
 
   return (
     <div className="app-frame">
@@ -48,17 +32,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           )}
         </nav>
         <div className="topbar-user">
-          {profile && !googleLinked && (
-            <button
-              className="secondary-button topbar-google-button"
-              disabled={linkingGoogle}
-              onClick={() => void handleGoogleLink()}
-              type="button"
-            >
-              <Link2 size={16} />
-              {linkingGoogle ? "연결 중" : "Google 연결"}
-            </button>
-          )}
           {profile && (
             <span className="mini-avatar" style={{ background: profile.color }}>
               {profile.avatarText}
@@ -68,7 +41,6 @@ export function AppShell({ children }: { children: ReactNode }) {
             <LogOut size={18} />
           </button>
         </div>
-        {linkError && <p className="topbar-error">{linkError}</p>}
       </header>
       <main>{children}</main>
     </div>
