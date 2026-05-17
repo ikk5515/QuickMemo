@@ -265,7 +265,7 @@ service cloud.firestore {
     }
 
     function validNoteHistory(data, noteId) {
-      return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields"])
+      return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields", "createdAt"])
         && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "encryptedSummary", "createdAt"])
         && data.noteId == noteId
         && data.actorUid == request.auth.uid
@@ -275,7 +275,92 @@ service cloud.firestore {
         && data.changedFields.size() <= 8
         && data.changedFields.hasOnly(["title", "body", "dueAt", "participants", "deleted", "restored"])
         && (!data.keys().hasAny(["encryptedSummary"]) || encryptedPayload(data.encryptedSummary))
-        && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
+        && data.createdAt == request.time;
+    }
+
+    function linkedNoteUpdate(noteId) {
+      return exists(notePath(noteId))
+        && existsAfter(notePath(noteId))
+        && getAfter(notePath(noteId)).data.updatedBy == request.auth.uid
+        && getAfter(notePath(noteId)).data.updatedAt == request.time;
+    }
+
+    function createHistoryMatchesNote(data, noteId) {
+      return data.action == "create"
+        && !exists(notePath(noteId))
+        && existsAfter(notePath(noteId))
+        && getAfter(notePath(noteId)).data.ownerUid == request.auth.uid
+        && getAfter(notePath(noteId)).data.updatedBy == request.auth.uid
+        && getAfter(notePath(noteId)).data.createdAt == request.time
+        && getAfter(notePath(noteId)).data.updatedAt == request.time
+        && getAfter(notePath(noteId)).data.savedAt == request.time
+        && data.changedFields.hasOnly(["title", "body", "dueAt"]);
+    }
+
+    function contentHistoryMatchesNote(data, noteId) {
+      return data.action == "content"
+        && linkedNoteUpdate(noteId)
+        && !noteDeleted(get(notePath(noteId)).data)
+        && !noteDeleted(getAfter(notePath(noteId)).data)
+        && data.changedFields.hasOnly(["title", "body"])
+        && getAfter(notePath(noteId)).data.type == get(notePath(noteId)).data.type
+        && getAfter(notePath(noteId)).data.participantUids == get(notePath(noteId)).data.participantUids
+        && getAfter(notePath(noteId)).data.wrappedKeys == get(notePath(noteId)).data.wrappedKeys
+        && (
+          getAfter(notePath(noteId)).data.encryptedTitle != get(notePath(noteId)).data.encryptedTitle
+          || getAfter(notePath(noteId)).data.encryptedBody != get(notePath(noteId)).data.encryptedBody
+        );
+    }
+
+    function shareHistoryMatchesNote(data, noteId) {
+      return data.action == "share"
+        && linkedNoteUpdate(noteId)
+        && request.auth.uid == get(notePath(noteId)).data.ownerUid
+        && !noteDeleted(get(notePath(noteId)).data)
+        && !noteDeleted(getAfter(notePath(noteId)).data)
+        && data.changedFields.hasOnly(["participants"])
+        && getAfter(notePath(noteId)).data.encryptedTitle == get(notePath(noteId)).data.encryptedTitle
+        && getAfter(notePath(noteId)).data.encryptedBody == get(notePath(noteId)).data.encryptedBody
+        && (
+          getAfter(notePath(noteId)).data.type != get(notePath(noteId)).data.type
+          || getAfter(notePath(noteId)).data.participantUids != get(notePath(noteId)).data.participantUids
+          || getAfter(notePath(noteId)).data.wrappedKeys != get(notePath(noteId)).data.wrappedKeys
+        );
+    }
+
+    function deadlineHistoryMatchesNote(data, noteId) {
+      return data.action == "deadline"
+        && linkedNoteUpdate(noteId)
+        && !noteDeleted(get(notePath(noteId)).data)
+        && !noteDeleted(getAfter(notePath(noteId)).data)
+        && data.changedFields.hasOnly(["dueAt"])
+        && getAfter(notePath(noteId)).data.dueAt != get(notePath(noteId)).data.dueAt;
+    }
+
+    function deleteHistoryMatchesNote(data, noteId) {
+      return data.action == "delete"
+        && linkedNoteUpdate(noteId)
+        && !noteDeleted(get(notePath(noteId)).data)
+        && noteDeleted(getAfter(notePath(noteId)).data)
+        && getAfter(notePath(noteId)).data.deletedBy == request.auth.uid
+        && data.changedFields.hasOnly(["deleted"]);
+    }
+
+    function restoreHistoryMatchesNote(data, noteId) {
+      return data.action == "restore"
+        && linkedNoteUpdate(noteId)
+        && noteDeleted(get(notePath(noteId)).data)
+        && !noteDeleted(getAfter(notePath(noteId)).data)
+        && data.changedFields.hasOnly(["restored"]);
+    }
+
+    function historyMatchesNoteMutation(data, noteId) {
+      return createHistoryMatchesNote(data, noteId)
+        || contentHistoryMatchesNote(data, noteId)
+        || shareHistoryMatchesNote(data, noteId)
+        || deadlineHistoryMatchesNote(data, noteId)
+        || deleteHistoryMatchesNote(data, noteId)
+        || restoreHistoryMatchesNote(data, noteId);
     }
 
     function validAttachment(data, noteId) {
@@ -586,26 +671,13 @@ service cloud.firestore {
       match /history/{historyId} {
         allow read: if exists(notePath(noteId))
           && canReadNote(get(notePath(noteId)).data);
-        allow create: if exists(notePath(noteId))
-          && validNoteHistory(request.resource.data, noteId)
-          && (
-            (
-              !noteDeleted(get(notePath(noteId)).data)
-              && (noteParticipant(get(notePath(noteId)).data) || adminUser())
-            )
-            || (
-              noteDeleted(get(notePath(noteId)).data)
-              && canDeleteNote(get(notePath(noteId)).data)
-              && request.resource.data.action == "delete"
-            )
-          );
-        allow update: if exists(notePath(noteId))
-          && !noteDeleted(get(notePath(noteId)).data)
-          && validNoteHistory(request.resource.data, noteId)
+        allow create: if validNoteHistory(request.resource.data, noteId)
+          && historyMatchesNoteMutation(request.resource.data, noteId);
+        allow update: if validNoteHistory(request.resource.data, noteId)
           && resource.data.actorUid == request.auth.uid
           && resource.data.action == "content"
           && request.resource.data.action == "content"
-          && (noteParticipant(get(notePath(noteId)).data) || adminUser());
+          && historyMatchesNoteMutation(request.resource.data, noteId);
         allow delete: if exists(notePath(noteId))
           && noteDeleted(get(notePath(noteId)).data)
           && canDeleteNote(get(notePath(noteId)).data);

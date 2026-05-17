@@ -16,6 +16,7 @@ import {
   getDocs,
   orderBy,
   query,
+  serverTimestamp,
   setDoc,
   updateDoc,
   where,
@@ -172,7 +173,7 @@ function noteHistory(noteId: string, actorUid: string, overrides: Record<string,
     action: "content",
     changedFields: ["title", "body"],
     encryptedSummary: encryptedPayload,
-    createdAt: new Date("2026-05-18T09:00:00.000Z"),
+    createdAt: serverTimestamp(),
     ...overrides
   };
 }
@@ -891,7 +892,7 @@ describeRules("firestore security rules", () => {
     );
   });
 
-  it("allows participants to write bounded note history and blocks forged actors", async () => {
+  it("requires history writes to match same-batch note mutations", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
@@ -910,12 +911,68 @@ describeRules("firestore security rules", () => {
     });
 
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const createdNoteRef = doc(ownerDb, "notes/note-created");
+    const createBatch = writeBatch(ownerDb);
+
+    createBatch.set(createdNoteRef, {
+      type: "shared",
+      ownerUid: "user-a",
+      participantUids: ["user-a", "user-b"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+        "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+      },
+      createdAt: serverTimestamp(),
+      dueAt: null,
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: "user-a"
+    });
+    createBatch.set(
+      doc(ownerDb, "notes/note-created/history/create-a"),
+      noteHistory("note-created", "user-a", { action: "create", changedFields: ["title", "body", "dueAt"] })
+    );
+    await assertSucceeds(createBatch.commit());
+
     const historyRef = doc(participantDb, "notes/note-a/history/history-a");
 
-    await assertSucceeds(setDoc(historyRef, noteHistory("note-a", "user-b")));
-    await assertSucceeds(setDoc(historyRef, noteHistory("note-a", "user-b", { changedFields: ["body"] })));
+    await assertFails(setDoc(historyRef, noteHistory("note-a", "user-b")));
+    await assertFails(
+      setDoc(
+        doc(participantDb, "notes/note-a/history/client-time"),
+        noteHistory("note-a", "user-b", { createdAt: new Date("2026-05-18T09:00:00.000Z") })
+      )
+    );
+
+    const firstBatch = writeBatch(participantDb);
+    firstBatch.update(doc(participantDb, "notes/note-a"), {
+      encryptedBody: { ...encryptedPayload, cipherText: "updated-body" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-b"
+    });
+    firstBatch.set(historyRef, noteHistory("note-a", "user-b", { changedFields: ["body"] }));
+    await assertSucceeds(firstBatch.commit());
+
+    const secondBatch = writeBatch(participantDb);
+    secondBatch.update(doc(participantDb, "notes/note-a"), {
+      encryptedTitle: { ...encryptedPayload, cipherText: "updated-title" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-b"
+    });
+    secondBatch.set(historyRef, noteHistory("note-a", "user-b", { changedFields: ["title"] }));
+    await assertSucceeds(secondBatch.commit());
+
     await assertSucceeds(getDoc(historyRef));
-    await assertFails(setDoc(doc(participantDb, "notes/note-a/history/forged"), noteHistory("note-a", "user-a")));
+    await assertFails(
+      setDoc(
+        doc(participantDb, "notes/note-a/history/forged-share"),
+        noteHistory("note-a", "user-b", { action: "share", changedFields: ["participants"] })
+      )
+    );
+    await assertFails(setDoc(doc(participantDb, "notes/note-a/history/forged-actor"), noteHistory("note-a", "user-a")));
     await assertFails(
       setDoc(
         doc(participantDb, "notes/note-a/history/unsafe-field"),
