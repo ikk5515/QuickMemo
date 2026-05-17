@@ -2,6 +2,7 @@ const fontSizePattern = /^<!--qm-font-size:(\d+)-->/;
 const htmlTagPattern = /<(a|p|div|br|strong|b|em|i|u|span|img|figure|ul|ol|li|blockquote|pre|code)\b/i;
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
+const imageWidthOptions = new Set([25, 50, 75, 100]);
 const allowedTags = new Set([
   "A",
   "B",
@@ -159,6 +160,7 @@ function sanitizeNode(node: Node): Node | null {
     image.src = src;
     image.alt = node.getAttribute("alt")?.slice(0, 120) ?? "첨부 이미지";
     image.loading = "lazy";
+    applySafeImageWidth(image, node);
     return image;
   }
 
@@ -207,6 +209,25 @@ function sanitizeAnchor(node: HTMLElement): Node {
   }
 
   return anchor;
+}
+
+function applySafeImageWidth(image: HTMLImageElement, source: HTMLElement) {
+  const width = safeImageWidth(source.getAttribute("data-qm-width") ?? source.style.width);
+
+  if (!width) {
+    return;
+  }
+
+  image.dataset.qmWidth = String(width);
+  image.style.width = `${width}%`;
+  image.style.maxWidth = "100%";
+  image.style.height = "auto";
+}
+
+function safeImageWidth(value: string | null) {
+  const normalizedValue = Number(String(value ?? "").replace("%", "").trim());
+
+  return imageWidthOptions.has(normalizedValue) ? normalizedValue : null;
 }
 
 function linkifyTextNode(node: Text) {
