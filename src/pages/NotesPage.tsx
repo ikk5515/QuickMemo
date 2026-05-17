@@ -85,10 +85,17 @@ const blankEditor = (uid: string): EditorState => ({
 
 type NoteSortField = "createdAt" | "dueAt";
 type NoteSortDirection = "asc" | "desc";
+type NoteListFilter = "all" | NoteKind;
 
 interface NoteSortSetting {
   field: NoteSortField;
   direction: NoteSortDirection;
+}
+
+interface NoteListCounts {
+  all: number;
+  personal: number;
+  shared: number;
 }
 
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
@@ -97,7 +104,9 @@ const autosaveDelayMs = 450;
 const localEchoGraceMs = 5000;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
 const noteSortStoragePrefix = "quickmemo-note-sort:";
+const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
+const defaultNoteFilter: NoteListFilter = "all";
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -176,6 +185,10 @@ function sortNotes(notes: DecryptedNote[], setting: NoteSortSetting) {
   });
 }
 
+function filterNotes(notes: DecryptedNote[], filter: NoteListFilter) {
+  return filter === "all" ? notes : notes.filter((note) => note.type === filter);
+}
+
 function readNoteSortSetting(uid: string): NoteSortSetting {
   if (typeof window === "undefined") {
     return defaultNoteSort;
@@ -203,6 +216,24 @@ function readNoteSortSetting(uid: string): NoteSortSetting {
   return defaultNoteSort;
 }
 
+function readNoteFilter(uid: string): NoteListFilter {
+  if (typeof window === "undefined") {
+    return defaultNoteFilter;
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(`${noteFilterStoragePrefix}${uid}`);
+
+    if (rawValue === "all" || rawValue === "personal" || rawValue === "shared") {
+      return rawValue;
+    }
+  } catch {
+    return defaultNoteFilter;
+  }
+
+  return defaultNoteFilter;
+}
+
 function writeNoteSortSetting(uid: string, setting: NoteSortSetting) {
   if (typeof window === "undefined") {
     return;
@@ -212,6 +243,18 @@ function writeNoteSortSetting(uid: string, setting: NoteSortSetting) {
     window.localStorage.setItem(`${noteSortStoragePrefix}${uid}`, JSON.stringify(setting));
   } catch {
     // Sorting still works for the current session if storage is unavailable.
+  }
+}
+
+function writeNoteFilter(uid: string, filter: NoteListFilter) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(`${noteFilterStoragePrefix}${uid}`, filter);
+  } catch {
+    // Filtering still works for the current session if storage is unavailable.
   }
 }
 
@@ -326,6 +369,7 @@ export default function NotesPage() {
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [deadlineOpen, setDeadlineOpen] = useState(false);
   const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
+  const [noteFilter, setNoteFilter] = useState<NoteListFilter>(defaultNoteFilter);
   const autosaveTimer = useRef<number | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
@@ -356,10 +400,12 @@ export default function NotesPage() {
   useEffect(() => {
     if (!profile) {
       setNoteSort(defaultNoteSort);
+      setNoteFilter(defaultNoteFilter);
       return;
     }
 
     setNoteSort(readNoteSortSetting(profile.uid));
+    setNoteFilter(readNoteFilter(profile.uid));
   }, [profile]);
 
   useEffect(() => {
@@ -459,7 +505,23 @@ export default function NotesPage() {
     () => decryptedNotes.find((note) => note.id === previewNoteId) ?? null,
     [decryptedNotes, previewNoteId]
   );
-  const sortedNotes = useMemo(() => sortNotes(decryptedNotes, noteSort), [decryptedNotes, noteSort]);
+  const noteCounts = useMemo(
+    () => {
+      const counts: NoteListCounts = { all: 0, personal: 0, shared: 0 };
+
+      decryptedNotes.forEach((note) => {
+        counts.all += 1;
+        counts[note.type] += 1;
+      });
+
+      return counts;
+    },
+    [decryptedNotes]
+  );
+  const visibleNotes = useMemo(
+    () => sortNotes(filterNotes(decryptedNotes, noteFilter), noteSort),
+    [decryptedNotes, noteFilter, noteSort]
+  );
   const activeRemoteNote = useMemo(
     () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
     [decryptedNotes, editor.noteId]
@@ -640,6 +702,11 @@ export default function NotesPage() {
   function updateSortSetting(nextSetting: NoteSortSetting) {
     setNoteSort(nextSetting);
     writeNoteSortSetting(unlockedProfile.uid, nextSetting);
+  }
+
+  function updateNoteFilter(nextFilter: NoteListFilter) {
+    setNoteFilter(nextFilter);
+    writeNoteFilter(unlockedProfile.uid, nextFilter);
   }
 
   function updateDeadline(value: string) {
@@ -1066,8 +1133,11 @@ export default function NotesPage() {
         </section>
         <NoteDrawer
           activeNoteId={editor.noteId}
-          notes={sortedNotes}
+          counts={noteCounts}
+          filter={noteFilter}
+          notes={visibleNotes}
           onClose={() => setListOpen(false)}
+          onFilterChange={updateNoteFilter}
           onNew={startNewNote}
           onPreview={(note) => setPreviewNoteId(note.id)}
           onSortChange={updateSortSetting}
@@ -1169,8 +1239,11 @@ function placeCaretAtEnd(element: HTMLElement) {
 
 function NoteDrawer({
   activeNoteId,
+  counts,
+  filter,
   notes,
   onClose,
+  onFilterChange,
   onNew,
   onPreview,
   onSortChange,
@@ -1178,8 +1251,11 @@ function NoteDrawer({
   sortSetting
 }: {
   activeNoteId: string | null;
+  counts: NoteListCounts;
+  filter: NoteListFilter;
   notes: DecryptedNote[];
   onClose: () => void;
+  onFilterChange: (filter: NoteListFilter) => void;
   onNew: () => void;
   onPreview: (note: DecryptedNote) => void;
   onSortChange: (setting: NoteSortSetting) => void;
@@ -1212,6 +1288,29 @@ function NoteDrawer({
         <FilePlus2 size={18} />
         새 메모
       </button>
+      <div className="note-filter-tabs" role="tablist" aria-label="노트 종류 필터">
+        <NoteFilterButton
+          count={counts.all}
+          filter="all"
+          label="전체"
+          selected={filter === "all"}
+          onSelect={onFilterChange}
+        />
+        <NoteFilterButton
+          count={counts.personal}
+          filter="personal"
+          label="개인"
+          selected={filter === "personal"}
+          onSelect={onFilterChange}
+        />
+        <NoteFilterButton
+          count={counts.shared}
+          filter="shared"
+          label="공유"
+          selected={filter === "shared"}
+          onSelect={onFilterChange}
+        />
+      </div>
       <div className="note-sort-controls">
         <label className="font-size-control">
           정렬
@@ -1238,22 +1337,58 @@ function NoteDrawer({
           {sortSetting.direction === "asc" ? "오름차순" : "내림차순"}
         </button>
       </div>
-      <NoteList activeNoteId={activeNoteId} notes={notes} onPreview={onPreview} />
+      <NoteList activeNoteId={activeNoteId} filter={filter} notes={notes} onPreview={onPreview} />
     </aside>
+  );
+}
+
+function NoteFilterButton({
+  count,
+  filter,
+  label,
+  onSelect,
+  selected
+}: {
+  count: number;
+  filter: NoteListFilter;
+  label: string;
+  onSelect: (filter: NoteListFilter) => void;
+  selected: boolean;
+}) {
+  return (
+    <button
+      aria-selected={selected}
+      className={`note-filter-tab ${selected ? "active" : ""}`}
+      role="tab"
+      type="button"
+      onClick={() => onSelect(filter)}
+    >
+      <span>{label}</span>
+      <strong>{count}</strong>
+    </button>
   );
 }
 
 function NoteList({
   activeNoteId,
+  filter,
   notes,
   onPreview
 }: {
   activeNoteId: string | null;
+  filter: NoteListFilter;
   notes: DecryptedNote[];
   onPreview: (note: DecryptedNote) => void;
 }) {
   if (notes.length === 0) {
-    return <p className="muted">아직 저장된 노트가 없습니다.</p>;
+    const emptyMessage =
+      filter === "personal"
+        ? "아직 저장된 개인 노트가 없습니다."
+        : filter === "shared"
+          ? "아직 저장된 공유 노트가 없습니다."
+          : "아직 저장된 노트가 없습니다.";
+
+    return <p className="muted">{emptyMessage}</p>;
   }
 
   return (
