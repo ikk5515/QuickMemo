@@ -582,6 +582,11 @@ textarea {
   width: auto;
 }
 
+.share-hint {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+}
+
 .title-input {
   border: 0;
   border-bottom: 1px solid var(--line);

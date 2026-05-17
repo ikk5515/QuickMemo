@@ -43,6 +43,7 @@ import {
   deleteNote,
   subscribeVisibleNotes,
   updateEncryptedNote,
+  updateNoteAccess,
   type NoteSnapshot
 } from "../services/notes";
 import { subscribeUsers } from "../services/users";
@@ -111,6 +112,18 @@ function draftsMatch(editor: EditorState, draft: NoteDraft) {
 
 function noteDraftsMatch(left: NoteDraft, right: NoteDraft) {
   return left.title === right.title && left.body === right.body && left.fontSize === right.fontSize;
+}
+
+function noteTypeFromParticipants(participantUids: string[]): NoteKind {
+  return participantUids.length > 1 ? "shared" : "personal";
+}
+
+function nextParticipantList(currentParticipantUids: string[], selectedUid: string, checked: boolean, ownerUid: string) {
+  const participantUids = checked
+    ? Array.from(new Set([...currentParticipantUids, selectedUid, ownerUid]))
+    : currentParticipantUids.filter((participantUid) => participantUid !== selectedUid || participantUid === ownerUid);
+
+  return Array.from(new Set([ownerUid, ...participantUids]));
 }
 
 function noteSyncSignature(note: DecryptedNote) {
@@ -435,7 +448,8 @@ export default function NotesPage() {
 
   const unlockedProfile = profile;
   const unlockedPrivateKey = privateKey;
-  const currentType: NoteKind = editor.participantUids.length > 1 ? "shared" : "personal";
+  const currentType = noteTypeFromParticipants(editor.participantUids);
+  const canEditShareTargets = !editor.noteId || activeRemoteNote?.ownerUid === unlockedProfile.uid;
 
   function announceActiveNote(noteId: string | null) {
     void publishActiveNote(unlockedProfile.uid, noteId, activeNoteClientId.current).catch(() => {
@@ -496,22 +510,75 @@ export default function NotesPage() {
   }
 
   function toggleParticipant(event: ChangeEvent<HTMLInputElement>) {
-    const uid = event.target.value;
+    const uid = event.currentTarget.value;
+    const checked = event.currentTarget.checked;
+    const previousParticipantUids = editor.participantUids;
+    const participantUids = nextParticipantList(previousParticipantUids, uid, checked, unlockedProfile.uid);
+    const type = noteTypeFromParticipants(participantUids);
 
-    setEditor((current) => {
-      const participantUids = event.target.checked
-        ? Array.from(new Set([...current.participantUids, uid, unlockedProfile.uid]))
-        : current.participantUids.filter(
-            (participantUid) => participantUid !== uid || participantUid === unlockedProfile.uid
-          );
+    setEditor((current) => ({
+      ...current,
+      participantUids,
+      type,
+      dirty: current.noteId ? current.dirty : true
+    }));
 
-      return {
-        ...current,
-        participantUids,
-        type: participantUids.length > 1 ? "shared" : "personal",
-        dirty: true
-      };
-    });
+    if (editor.noteId && editor.noteKey) {
+      void updateCurrentNoteAccess(editor.noteId, editor.noteKey, participantUids, previousParticipantUids);
+    }
+  }
+
+  async function wrappedKeysForParticipants(noteKey: CryptoKey, participantUids: string[]) {
+    const usersByUid = new Map(activeUsers.map((user) => [user.uid, user]));
+
+    return Object.fromEntries(
+      await Promise.all(
+        participantUids.map(async (uid) => {
+          const user = uid === unlockedProfile.uid ? unlockedProfile : usersByUid.get(uid);
+
+          if (!user?.publicKeyJwk) {
+            throw new Error("공유 대상의 암호화 키를 찾을 수 없습니다.");
+          }
+
+          return [uid, await wrapNoteKey(noteKey, user.publicKeyJwk)] as const;
+        })
+      )
+    );
+  }
+
+  async function updateCurrentNoteAccess(
+    noteId: string,
+    noteKey: CryptoKey,
+    participantUids: string[],
+    previousParticipantUids: string[]
+  ) {
+    if (!canEditShareTargets) {
+      setError("노트 소유자만 공유 대상을 변경할 수 있습니다.");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
+      const type = noteTypeFromParticipants(participantUids);
+      await updateNoteAccess(noteId, unlockedProfile.uid, type, participantUids, wrappedKeys);
+      setStatus(type === "shared" ? "공유 대상을 저장했습니다." : "개인 노트로 변경했습니다.");
+    } catch {
+      setEditor((current) =>
+        current.noteId === noteId
+          ? {
+              ...current,
+              participantUids: previousParticipantUids,
+              type: noteTypeFromParticipants(previousParticipantUids)
+            }
+          : current
+      );
+      setError("공유 대상을 변경하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function saveCurrentNote(showSavedMessage = true) {
@@ -542,19 +609,11 @@ export default function NotesPage() {
       const noteKey = await generateNoteKey();
       const payload = await encryptNoteDraft(draft, noteKey);
       const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids]));
-      const participantProfiles = activeUsers.filter((user) => participantUids.includes(user.uid));
-      const wrappedKeys = Object.fromEntries(
-        await Promise.all(
-          participantProfiles.map(async (user) => [user.uid, await wrapNoteKey(noteKey, user.publicKeyJwk)] as const)
-        )
-      );
-
-      if (!wrappedKeys[unlockedProfile.uid]) {
-        wrappedKeys[unlockedProfile.uid] = await wrapNoteKey(noteKey, unlockedProfile.publicKeyJwk);
-      }
+      const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
+      const type = noteTypeFromParticipants(participantUids);
 
       const created = await createEncryptedNote({
-        type: participantUids.length > 1 ? "shared" : "personal",
+        type,
         ownerUid: unlockedProfile.uid,
         participantUids,
         encryptedTitle: payload.encryptedTitle,
@@ -567,7 +626,7 @@ export default function NotesPage() {
         ...current,
         noteId: created.id,
         noteKey,
-        type: participantUids.length > 1 ? "shared" : "personal",
+        type,
         dirty: !draftsMatch(current, draft)
       }));
       announceActiveNote(created.id);
@@ -741,7 +800,7 @@ export default function NotesPage() {
                 <label key={user.uid} className="share-user">
                   <input
                     checked={editor.participantUids.includes(user.uid)}
-                    disabled={Boolean(editor.noteId) || user.uid === unlockedProfile.uid}
+                    disabled={saving || user.uid === unlockedProfile.uid || !canEditShareTargets}
                     onChange={toggleParticipant}
                     type="checkbox"
                     value={user.uid}
@@ -752,6 +811,7 @@ export default function NotesPage() {
                   {user.displayName}
                 </label>
               ))}
+              {!canEditShareTargets && <p className="muted share-hint">노트 소유자만 공유 대상을 변경할 수 있습니다.</p>}
             </div>
           )}
           <input

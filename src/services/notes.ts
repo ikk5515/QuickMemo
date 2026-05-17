@@ -71,6 +71,22 @@ export async function updateEncryptedNote(
   });
 }
 
+export async function updateNoteAccess(
+  noteId: string,
+  uid: string,
+  type: NoteKind,
+  participantUids: string[],
+  wrappedKeys: Record<string, WrappedNoteKey>
+) {
+  await updateDoc(doc(db, "notes", noteId), {
+    type,
+    participantUids: Array.from(new Set(participantUids)),
+    wrappedKeys,
+    updatedAt: serverTimestamp(),
+    updatedBy: uid
+  });
+}
+
 export async function deleteNote(noteId: string) {
   await deleteDoc(doc(db, "notes", noteId));
 }
