@@ -661,11 +661,21 @@ textarea {
 .deadline-picker-field {
   display: grid;
   gap: 6px;
+  min-width: 0;
+  width: 100%;
 }
 
 .deadline-picker input {
+  appearance: none;
+  display: block;
+  font-size: 16px;
+  inline-size: 100%;
+  max-inline-size: 100%;
   min-height: 38px;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-appearance: none;
 }
 
 .font-size-control {
@@ -1914,6 +1924,7 @@ textarea {
     left: auto;
     margin-top: 8px;
     max-width: 100%;
+    overflow: hidden;
     position: static;
     right: auto;
     width: 100%;

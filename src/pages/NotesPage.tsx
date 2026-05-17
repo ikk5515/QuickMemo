@@ -101,7 +101,6 @@ interface NoteListCounts {
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 450;
-const localEchoGraceMs = 5000;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
 const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
@@ -543,7 +542,7 @@ export default function NotesPage() {
       fontSize: editor.fontSize
     };
 
-    if (!editor.dirty || !profile || saving || !draftHasContent(draft)) {
+    if (!editor.dirty || !profile || saving || (!editor.noteId && !draftHasContent(draft))) {
       return undefined;
     }
 
@@ -663,12 +662,18 @@ export default function NotesPage() {
       return;
     }
 
-    if (pendingEcho?.noteId === activeRemoteNote.id && noteDraftsMatch(currentDraft, pendingEcho.draft)) {
-      if (noteDraftsMatch(remoteDraft, pendingEcho.draft)) {
+    if (pendingEcho?.noteId === activeRemoteNote.id && noteDraftsMatch(remoteDraft, pendingEcho.draft)) {
+      appliedRemoteRevision.current = { noteId: activeRemoteNote.id, signature: remoteSignature };
+
+      if (noteDraftsMatch(currentDraft, pendingEcho.draft)) {
         pendingLocalEcho.current = null;
-      } else if (Date.now() - pendingEcho.createdAt < localEchoGraceMs) {
-        return;
       }
+
+      return;
+    }
+
+    if (editor.dirty && !contentMatches) {
+      return;
     }
 
     appliedRemoteRevision.current = { noteId: activeRemoteNote.id, signature: remoteSignature };
