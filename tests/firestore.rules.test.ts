@@ -171,6 +171,39 @@ describeRules("firestore security rules", () => {
     await assertFails(updateDoc(doc(adminDb, "users/user-b"), { loginEmail: "changed@quickmemo.local" }));
   });
 
+  it("blocks inactive users from sensitive reads and note creation", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { isActive: false }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "userKeys/user-a"), userKey("user-a"));
+      await setDoc(doc(context.firestore(), "activeNotes/user-a"), {
+        uid: "user-a",
+        noteId: null,
+        updatedByClientId: "client-a"
+      });
+    });
+
+    const inactiveDb = testEnv.authenticatedContext("user-a").firestore();
+
+    await assertSucceeds(getDoc(doc(inactiveDb, "users/user-a")));
+    await assertFails(getDocs(query(collection(inactiveDb, "users"), orderBy("order", "asc"))));
+    await assertFails(getDoc(doc(inactiveDb, "userKeys/user-a")));
+    await assertFails(getDoc(doc(inactiveDb, "activeNotes/user-a")));
+    await assertFails(
+      setDoc(doc(inactiveDb, "notes/inactive-created"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        updatedBy: "user-a"
+      })
+    );
+  });
+
   it("allows participants to read notes and blocks outsiders", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));

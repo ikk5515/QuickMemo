@@ -309,7 +309,7 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
-      allow read: if signedIn();
+      allow read: if activeSignedInUser() || (signedIn() && request.auth.uid == uid);
       allow create: if validUserProfile(request.resource.data, uid)
         && (firstAdminCreate(uid) || adminCreatesUser(uid));
       allow update: if adminUser()
@@ -333,7 +333,7 @@ service cloud.firestore {
     }
 
     match /userKeys/{uid} {
-      allow read: if signedIn() && request.auth.uid == uid;
+      allow read: if activeSignedInUser() && request.auth.uid == uid;
       allow create: if validUserKey(request.resource.data, uid)
         && (firstAdminCreate(uid) || adminCreatesUser(uid));
       allow update, delete: if false;
@@ -378,7 +378,7 @@ service cloud.firestore {
     }
 
     match /activeNotes/{uid} {
-      allow read: if signedIn() && request.auth.uid == uid;
+      allow read: if activeSignedInUser() && request.auth.uid == uid;
       allow create, update: if activeSignedInUser()
         && request.auth.uid == uid
         && validActiveNote(request.resource.data, uid)
