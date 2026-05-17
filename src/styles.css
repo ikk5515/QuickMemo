@@ -1083,6 +1083,30 @@ textarea {
   width: min(820px, calc(100vw - 40px));
 }
 
+.pdf-preview-backdrop {
+  z-index: 12;
+}
+
+.pdf-preview-modal {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  height: min(88svh, 900px);
+  overflow: hidden;
+  width: min(980px, calc(100vw - 32px));
+}
+
+.pdf-preview-frame {
+  background: var(--surface);
+  border: 0;
+  flex: 1 1 auto;
+  min-height: 420px;
+  width: 100%;
+}
+
 .note-preview-header {
   align-items: flex-start;
   border-bottom: 1px solid var(--line);
