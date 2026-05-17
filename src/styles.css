@@ -733,6 +733,45 @@ textarea {
   width: 100%;
 }
 
+.note-filter-tabs {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 12px;
+  padding: 4px;
+}
+
+.note-filter-tab {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 6px;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 8px;
+}
+
+.note-filter-tab.active {
+  background: white;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+  color: var(--ink);
+}
+
+.note-filter-tab strong {
+  background: rgb(15 23 42 / 8%);
+  border-radius: 999px;
+  color: inherit;
+  font-size: 11px;
+  min-width: 20px;
+  padding: 2px 6px;
+}
+
 .note-sort-controls {
   align-items: center;
   display: flex;
