@@ -297,14 +297,14 @@ function getActiveNoteClientId() {
   }
 }
 
-function formatDateTime(date: Date | null) {
+function formatCompactDateTime(date: Date | null) {
   if (!date) {
     return "없음";
   }
 
   return new Intl.DateTimeFormat("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
+    month: "long",
+    day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false
@@ -318,8 +318,8 @@ function formatFullDateTime(date: Date | null) {
 
   return new Intl.DateTimeFormat("ko-KR", {
     year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
+    month: "long",
+    day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false
@@ -343,6 +343,29 @@ function deadlineDDay(date: Date | null) {
   }
 
   return diffDays > 0 ? `D-${diffDays}` : `D+${Math.abs(diffDays)}`;
+}
+
+function deadlineTone(date: Date | null) {
+  if (!date) {
+    return "none";
+  }
+
+  const dayMs = 24 * 60 * 60 * 1000;
+  const diffDays = Math.round((startOfLocalDay(date) - startOfLocalDay(new Date())) / dayMs);
+
+  if (diffDays < 0) {
+    return "overdue";
+  }
+
+  if (diffDays === 0) {
+    return "today";
+  }
+
+  if (diffDays <= 3) {
+    return "soon";
+  }
+
+  return "upcoming";
 }
 
 function toDateTimeLocalValue(date: Date | null) {
@@ -683,7 +706,9 @@ export default function NotesPage() {
   const currentType = noteTypeFromParticipants(editor.participantUids);
   const canEditShareTargets = !editor.noteId || activeRemoteNote?.ownerUid === unlockedProfile.uid;
   const createdDate = dateFromTimestamp(activeRemoteNote?.createdAt);
-  const deadlineLabel = editor.dueAt ? `${formatDateTime(editor.dueAt)} ${deadlineDDay(editor.dueAt)}` : "없음";
+  const deadlineLabel = editor.dueAt ? formatFullDateTime(editor.dueAt) : "마감일 없음";
+  const deadlineDday = deadlineDDay(editor.dueAt);
+  const currentDeadlineTone = deadlineTone(editor.dueAt);
 
   function announceActiveNote(noteId: string | null) {
     void publishActiveNote(unlockedProfile.uid, noteId, activeNoteClientId.current).catch(() => {
@@ -1033,20 +1058,34 @@ export default function NotesPage() {
                 <UsersRound size={18} />
                 공유 대상
               </button>
-              <span className="note-meta-chip">생성 {formatFullDateTime(createdDate)}</span>
+              <span className="note-meta-card">
+                <span>생성일</span>
+                <strong>{formatFullDateTime(createdDate)}</strong>
+              </span>
               <div className="deadline-control">
-                <button className="secondary-button" type="button" onClick={() => setDeadlineOpen((current) => !current)}>
-                  <CalendarClock size={18} />
-                  마감일 {deadlineLabel}
+                <button
+                  className={`deadline-summary ${currentDeadlineTone}`}
+                  type="button"
+                  onClick={() => setDeadlineOpen((current) => !current)}
+                >
+                  <span>
+                    <CalendarClock size={16} />
+                    마감일
+                  </span>
+                  <strong>{deadlineLabel}</strong>
+                  <em>{deadlineDday ?? "설정"}</em>
                 </button>
                 {deadlineOpen && (
                   <div className="deadline-picker">
-                    <input
-                      aria-label="마감일 날짜와 시간"
-                      onChange={(event) => updateDeadline(event.target.value)}
-                      type="datetime-local"
-                      value={toDateTimeLocalValue(editor.dueAt)}
-                    />
+                    <label className="deadline-picker-field">
+                      날짜 및 시간
+                      <input
+                        aria-label="마감일 날짜와 시간"
+                        onChange={(event) => updateDeadline(event.target.value)}
+                        type="datetime-local"
+                        value={toDateTimeLocalValue(editor.dueAt)}
+                      />
+                    </label>
                     <button className="secondary-button" type="button" onClick={() => updateDeadline("")}>
                       해제
                     </button>
@@ -1393,31 +1432,40 @@ function NoteList({
 
   return (
     <div className="note-list">
-      {notes.map((note) => (
-        <button
-          key={note.id}
-          className={`note-list-item ${activeNoteId === note.id ? "active" : ""}`}
-          type="button"
-          onClick={() => onPreview(note)}
-        >
-          <header>
-            <strong>{note.title || "제목 없음"}</strong>
-            <span className={`note-kind-pill ${note.type}`}>
-              {note.type === "shared" ? <Share2 size={12} /> : null}
-              {note.type === "shared" ? "공유" : "개인"}
-            </span>
-          </header>
-          <span className="note-snippet">{previewTextFromHtml(note.body) || "내용 없음"}</span>
-          <footer className="note-list-meta">
-            <span>생성 {formatFullDateTime(dateFromTimestamp(note.createdAt))}</span>
-            {note.dueAt && (
-              <span>
-                마감 {formatDateTime(dateFromTimestamp(note.dueAt))} <strong>{deadlineDDay(dateFromTimestamp(note.dueAt))}</strong>
+      {notes.map((note) => {
+        const createdAt = dateFromTimestamp(note.createdAt);
+        const dueAt = dateFromTimestamp(note.dueAt);
+        const dueTone = deadlineTone(dueAt);
+
+        return (
+          <button
+            key={note.id}
+            className={`note-list-item ${activeNoteId === note.id ? "active" : ""}`}
+            type="button"
+            onClick={() => onPreview(note)}
+          >
+            <header>
+              <span className={`note-kind-pill ${note.type}`}>
+                {note.type === "shared" ? <Share2 size={12} /> : null}
+                {note.type === "shared" ? "공유" : "개인"}
               </span>
-            )}
-          </footer>
-        </button>
-      ))}
+              <strong>{note.title || "제목 없음"}</strong>
+            </header>
+            <span className="note-snippet">{previewTextFromHtml(note.body) || "내용 없음"}</span>
+            <footer className="note-list-meta">
+              <span className="note-list-date">
+                <span>생성</span>
+                <strong>{formatCompactDateTime(createdAt)}</strong>
+              </span>
+              <span className={`note-list-date deadline ${dueTone}`}>
+                <span>마감</span>
+                <strong>{formatCompactDateTime(dueAt)}</strong>
+                {dueAt && <em>{deadlineDDay(dueAt)}</em>}
+              </span>
+            </footer>
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -91,6 +91,18 @@ textarea {
   resize: none;
 }
 
+.sr-only {
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
 .page-center {
   display: grid;
   min-height: 100svh;
@@ -475,28 +487,31 @@ textarea {
   align-items: stretch;
   background: white;
   border: 1px solid var(--line);
+  border-left: 4px solid transparent;
+  border-radius: 8px;
   color: var(--ink);
   display: grid;
-  gap: 5px;
+  gap: 8px;
   justify-content: stretch;
-  min-height: 78px;
-  padding: 12px;
+  min-height: 112px;
+  padding: 13px;
   text-align: left;
 }
 
 .note-list-item.active {
+  border-left-color: var(--teal);
   border-color: var(--teal);
   box-shadow: 0 0 0 3px rgb(47 125 112 / 12%);
 }
 
 .note-list-item header {
-  align-items: start;
+  align-items: center;
   display: flex;
-  gap: 10px;
-  justify-content: space-between;
+  gap: 8px;
 }
 
 .note-list-item strong {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
@@ -536,38 +551,114 @@ textarea {
   margin-left: auto;
 }
 
-.note-meta-chip {
-  align-items: center;
+.note-meta-card {
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  display: inline-flex;
-  font-size: 13px;
-  font-weight: 850;
-  min-height: 38px;
-  padding: 0 12px;
+  border-radius: 8px;
+  display: grid;
+  gap: 2px;
+  min-height: 52px;
+  min-width: 184px;
+  padding: 7px 12px;
   white-space: nowrap;
+}
+
+.note-meta-card span,
+.deadline-summary span,
+.deadline-picker-field {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+}
+
+.note-meta-card strong,
+.deadline-summary strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.25;
 }
 
 .deadline-control {
   position: relative;
 }
 
-.deadline-picker {
+.deadline-summary {
+  align-items: start;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+  min-height: 52px;
+  min-width: 220px;
+  padding: 7px 12px 7px 10px;
+  text-align: left;
+}
+
+.deadline-summary span {
   align-items: center;
+  display: inline-flex;
+  gap: 5px;
+}
+
+.deadline-summary em {
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.deadline-summary.none {
+  border-left-color: var(--line);
+}
+
+.deadline-summary.upcoming {
+  border-left-color: var(--blue);
+}
+
+.deadline-summary.soon,
+.deadline-summary.today {
+  border-left-color: var(--gold);
+}
+
+.deadline-summary.overdue {
+  border-left-color: var(--coral);
+}
+
+.deadline-summary.soon em,
+.deadline-summary.today em {
+  color: var(--gold);
+}
+
+.deadline-summary.overdue em {
+  color: var(--coral);
+}
+
+.deadline-picker {
+  align-items: stretch;
   background: white;
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
-  display: flex;
-  gap: 8px;
+  display: grid;
+  gap: 10px;
   left: 0;
-  min-width: min(360px, calc(100vw - 48px));
-  padding: 10px;
+  min-width: min(330px, calc(100vw - 48px));
+  padding: 12px;
   position: absolute;
   top: calc(100% + 8px);
   z-index: 9;
+}
+
+.deadline-picker-field {
+  display: grid;
+  gap: 6px;
 }
 
 .deadline-picker input {
@@ -795,16 +886,69 @@ textarea {
 }
 
 .note-list-meta {
-  color: var(--muted);
   display: grid;
-  font-size: 12px;
-  gap: 3px;
-  line-height: 1.35;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 2px;
 }
 
-.note-list-meta strong {
-  color: var(--red);
+.note-list-date {
+  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  display: grid;
+  gap: 2px;
+  min-height: 52px;
+  padding: 7px 8px;
+}
+
+.note-list-date span {
+  color: var(--muted);
+  font-size: 11px;
   font-weight: 900;
+}
+
+.note-list-date strong {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.note-list-date em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+}
+
+.note-list-date.deadline.upcoming {
+  background: rgb(63 111 181 / 10%);
+  border-color: rgb(63 111 181 / 20%);
+}
+
+.note-list-date.deadline.soon,
+.note-list-date.deadline.today {
+  background: rgb(185 130 47 / 12%);
+  border-color: rgb(185 130 47 / 22%);
+}
+
+.note-list-date.deadline.overdue {
+  background: rgb(199 81 70 / 10%);
+  border-color: rgb(199 81 70 / 20%);
+}
+
+.note-list-date.deadline.upcoming em {
+  color: var(--blue);
+}
+
+.note-list-date.deadline.soon em,
+.note-list-date.deadline.today em {
+  color: var(--gold);
+}
+
+.note-list-date.deadline.overdue em {
+  color: var(--coral);
 }
 
 .note-preview-modal {
@@ -1087,6 +1231,12 @@ textarea {
     width: 100%;
   }
 
+  .deadline-control,
+  .deadline-summary,
+  .note-meta-card {
+    width: 100%;
+  }
+
   .toolbar-actions {
     margin-left: 0;
   }
@@ -1247,9 +1397,20 @@ textarea {
     grid-template-columns: 1fr 1fr;
   }
 
+  .deadline-picker {
+    left: auto;
+    right: 0;
+  }
+
   .toolbar-actions .sync-status,
-  .toolbar-actions .font-size-control {
+  .toolbar-actions .font-size-control,
+  .editor-primary-actions .note-meta-card,
+  .editor-primary-actions .deadline-control {
     grid-column: 1 / -1;
+  }
+
+  .note-list-meta {
+    grid-template-columns: 1fr;
   }
 
   .toolbar-actions .icon-button {
