@@ -69,6 +69,9 @@ export interface NoteDocument {
   isDeleted?: boolean;
   deletedAt?: Timestamp;
   deletedBy?: string;
+  isPurged?: boolean;
+  purgedAt?: Timestamp;
+  purgedBy?: string;
 }
 
 export interface DecryptedNote extends NoteDocument {
@@ -111,6 +114,7 @@ export interface NoteHistoryDocument {
   actorUid: string;
   action: NoteHistoryAction;
   changedFields: string[];
+  encryptedSummary?: EncryptedPayload;
   createdAt?: Timestamp;
 }
 

@@ -53,6 +53,7 @@ export interface SaveNoteInput {
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
   dueAt?: Timestamp | null;
+  historySummary?: EncryptedPayload;
 }
 
 export interface SaveNoteAttachmentInput {
@@ -66,16 +67,30 @@ export interface SaveNoteAttachmentInput {
   uploadedBy: string;
 }
 
+export interface PurgeNoteInput {
+  noteId: string;
+  uid: string;
+  encryptedTitle: EncryptedPayload;
+  encryptedBody: EncryptedPayload;
+  wrappedKey: WrappedNoteKey;
+}
+
+const contentHistoryBucketMs = 60_000;
+
 function timestampMillis(value: NoteDocument["updatedAt"]) {
   return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
 }
 
+function purgedNote(document: NoteSnapshot) {
+  return document.isPurged === true;
+}
+
 function visibleNote(document: NoteSnapshot) {
-  return document.isDeleted !== true;
+  return document.isDeleted !== true && !purgedNote(document);
 }
 
 function deletedNote(document: NoteSnapshot) {
-  return document.isDeleted === true;
+  return document.isDeleted === true && !purgedNote(document);
 }
 
 function subscribeNotesByDeletedState(
@@ -279,8 +294,9 @@ export function subscribeNoteAttachments(
 }
 
 export async function createEncryptedNote(input: SaveNoteInput) {
+  const { historySummary, ...noteInput } = input;
   const created = await addDoc(collection(db, "notes"), {
-    ...input,
+    ...noteInput,
     participantUids: Array.from(new Set(input.participantUids)),
     createdAt: serverTimestamp(),
     dueAt: input.dueAt ?? null,
@@ -289,7 +305,9 @@ export async function createEncryptedNote(input: SaveNoteInput) {
     updatedBy: input.ownerUid
   });
 
-  await createNoteHistory(created.id, input.ownerUid, "create", ["title", "body", "dueAt"]).catch(() => undefined);
+  await createNoteHistory(created.id, input.ownerUid, "create", ["title", "body", "dueAt"], historySummary).catch(
+    () => undefined
+  );
   return created;
 }
 
@@ -298,7 +316,8 @@ export async function updateEncryptedNote(
   uid: string,
   encryptedTitle: EncryptedPayload,
   encryptedBody: EncryptedPayload,
-  changedFields: string[] = ["title", "body"]
+  changedFields: string[] = ["title", "body"],
+  historySummary?: EncryptedPayload
 ) {
   await updateDoc(doc(db, "notes", noteId), {
     encryptedTitle,
@@ -306,7 +325,7 @@ export async function updateEncryptedNote(
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  await createNoteHistory(noteId, uid, "content", changedFields).catch(() => undefined);
+  await createNoteHistory(noteId, uid, "content", changedFields, historySummary).catch(() => undefined);
 }
 
 export async function updateNoteAccess(
@@ -401,7 +420,8 @@ export async function createNoteHistory(
   noteId: string,
   uid: string,
   action: NoteHistoryAction,
-  changedFields: string[]
+  changedFields: string[],
+  encryptedSummary?: EncryptedPayload
 ) {
   const normalizedFields = Array.from(new Set(changedFields)).filter(Boolean);
 
@@ -409,13 +429,21 @@ export async function createNoteHistory(
     return null;
   }
 
-  return addDoc(collection(db, "notes", noteId, "history"), {
+  const historyDocument = {
     noteId,
     actorUid: uid,
     action,
     changedFields: normalizedFields,
+    ...(encryptedSummary ? { encryptedSummary } : {}),
     createdAt: serverTimestamp()
-  } satisfies Omit<NoteHistoryDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> });
+  } satisfies Omit<NoteHistoryDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> };
+
+  if (action === "content" && encryptedSummary) {
+    const bucket = Math.floor(Date.now() / contentHistoryBucketMs);
+    return setDoc(doc(db, "notes", noteId, "history", `content_${uid}_${bucket}`), historyDocument);
+  }
+
+  return addDoc(collection(db, "notes", noteId, "history"), historyDocument);
 }
 
 export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
@@ -438,18 +466,15 @@ export async function deleteNoteAttachment(noteId: string, attachmentId: string)
   await deleteDoc(doc(db, "notes", noteId, "attachments", attachmentId));
 }
 
-export async function deleteNote(noteId: string, uid: string) {
-  await updateDoc(doc(db, "notes", noteId), {
-    isDeleted: true,
-    deletedAt: serverTimestamp(),
-    deletedBy: uid,
-    updatedAt: serverTimestamp(),
-    updatedBy: uid
-  });
-  await createNoteHistory(noteId, uid, "delete", ["deleted"]).catch(() => undefined);
+async function deleteCollectionDocuments(pathSegments: string[]) {
+  const [headSegment, ...tailSegments] = pathSegments;
 
-  const attachmentsSnapshot = await getDocs(collection(db, "notes", noteId, "attachments"));
-  const refsToDelete = attachmentsSnapshot.docs.map((attachmentDocument) => attachmentDocument.ref);
+  if (!headSegment) {
+    return;
+  }
+
+  const snapshot = await getDocs(collection(db, headSegment, ...tailSegments));
+  const refsToDelete = snapshot.docs.map((documentSnapshot) => documentSnapshot.ref);
   const chunkSize = 450;
 
   for (let index = 0; index < refsToDelete.length; index += chunkSize) {
@@ -461,6 +486,19 @@ export async function deleteNote(noteId: string, uid: string) {
   }
 }
 
+export async function deleteNote(noteId: string, uid: string) {
+  await updateDoc(doc(db, "notes", noteId), {
+    isDeleted: true,
+    deletedAt: serverTimestamp(),
+    deletedBy: uid,
+    updatedAt: serverTimestamp(),
+    updatedBy: uid
+  });
+  await createNoteHistory(noteId, uid, "delete", ["deleted"]).catch(() => undefined);
+
+  await deleteCollectionDocuments(["notes", noteId, "attachments"]);
+}
+
 export async function restoreNote(noteId: string, uid: string) {
   await updateDoc(doc(db, "notes", noteId), {
     isDeleted: deleteField(),
@@ -470,4 +508,26 @@ export async function restoreNote(noteId: string, uid: string) {
     updatedBy: uid
   });
   await createNoteHistory(noteId, uid, "restore", ["restored"]).catch(() => undefined);
+}
+
+export async function purgeNote(input: PurgeNoteInput) {
+  await deleteCollectionDocuments(["notes", input.noteId, "attachments"]);
+  await deleteCollectionDocuments(["notes", input.noteId, "history"]);
+
+  await updateDoc(doc(db, "notes", input.noteId), {
+    type: "personal",
+    participantUids: [input.uid],
+    wrappedKeys: {
+      [input.uid]: input.wrappedKey
+    },
+    encryptedTitle: input.encryptedTitle,
+    encryptedBody: input.encryptedBody,
+    isDeleted: true,
+    isPurged: true,
+    purgedAt: serverTimestamp(),
+    purgedBy: input.uid,
+    updatedAt: serverTimestamp(),
+    savedAt: serverTimestamp(),
+    updatedBy: input.uid
+  });
 }

@@ -132,6 +132,24 @@ function restoreFields(uid: string) {
   };
 }
 
+function purgeFields(uid: string) {
+  return {
+    type: "personal",
+    participantUids: [uid],
+    wrappedKeys: {
+      [uid]: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+    },
+    encryptedTitle: encryptedPayload,
+    encryptedBody: encryptedPayload,
+    isPurged: true,
+    purgedAt: new Date("2026-05-18T12:00:00.000Z"),
+    purgedBy: uid,
+    updatedAt: new Date("2026-05-18T12:00:00.000Z"),
+    savedAt: new Date("2026-05-18T12:00:00.000Z"),
+    updatedBy: uid
+  };
+}
+
 function noteUserState(noteId: string, uid: string, overrides: Record<string, unknown> = {}) {
   return {
     uid,
@@ -153,6 +171,7 @@ function noteHistory(noteId: string, actorUid: string, overrides: Record<string,
     actorUid,
     action: "content",
     changedFields: ["title", "body"],
+    encryptedSummary: encryptedPayload,
     createdAt: new Date("2026-05-18T09:00:00.000Z"),
     ...overrides
   };
@@ -796,6 +815,36 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), restoreFields("user-a")));
   });
 
+  it("allows secure immediate deletion of soft-deleted notes without parent document deletion", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        ...softDeleteFields("user-a")
+      });
+      await setDoc(doc(context.firestore(), "notes/note-a/attachments/attachment-a"), attachmentDocument("note-a"));
+      await setDoc(doc(context.firestore(), "notes/note-a/history/history-a"), noteHistory("note-a", "user-a", { action: "delete", changedFields: ["deleted"] }));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertFails(deleteDoc(doc(ownerDb, "notes/note-a")));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/history/history-a")));
+    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), purgeFields("user-a")));
+    await assertFails(getDoc(doc(participantDb, "notes/note-a")));
+  });
+
   it("allows users to manage only their own note state for accessible notes", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
@@ -861,9 +910,11 @@ describeRules("firestore security rules", () => {
     });
 
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
+    const historyRef = doc(participantDb, "notes/note-a/history/history-a");
 
-    await assertSucceeds(setDoc(doc(participantDb, "notes/note-a/history/history-a"), noteHistory("note-a", "user-b")));
-    await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/history/history-a")));
+    await assertSucceeds(setDoc(historyRef, noteHistory("note-a", "user-b")));
+    await assertSucceeds(setDoc(historyRef, noteHistory("note-a", "user-b", { changedFields: ["body"] })));
+    await assertSucceeds(getDoc(historyRef));
     await assertFails(setDoc(doc(participantDb, "notes/note-a/history/forged"), noteHistory("note-a", "user-a")));
     await assertFails(
       setDoc(
