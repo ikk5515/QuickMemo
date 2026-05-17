@@ -789,6 +789,68 @@ textarea {
   object-fit: contain;
 }
 
+.rich-body-input img[data-qm-width="25"],
+.note-preview-body img[data-qm-width="25"],
+.admin-note-view-body img[data-qm-width="25"] {
+  width: 25%;
+}
+
+.rich-body-input img[data-qm-width="50"],
+.note-preview-body img[data-qm-width="50"],
+.admin-note-view-body img[data-qm-width="50"] {
+  width: 50%;
+}
+
+.rich-body-input img[data-qm-width="75"],
+.note-preview-body img[data-qm-width="75"],
+.admin-note-view-body img[data-qm-width="75"] {
+  width: 75%;
+}
+
+.rich-body-input img[data-qm-width="100"],
+.note-preview-body img[data-qm-width="100"],
+.admin-note-view-body img[data-qm-width="100"] {
+  width: 100%;
+}
+
+.image-size-toolbar {
+  align-items: center;
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px;
+}
+
+.image-size-toolbar span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+  margin-right: 2px;
+}
+
+.image-size-toolbar button {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+  min-height: 30px;
+  padding: 0 10px;
+}
+
+.image-size-toolbar button.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #ffffff;
+}
+
 .rich-body-input a,
 .note-preview-body a,
 .admin-note-view-body a {
@@ -848,9 +910,9 @@ textarea {
   background: var(--background);
   border: 1px solid var(--line);
   border-radius: 8px;
-  display: flex;
+  display: grid;
   gap: 10px;
-  justify-content: space-between;
+  grid-template-columns: minmax(0, 1fr) auto;
   min-width: 0;
   padding: 10px;
 }
@@ -879,9 +941,26 @@ textarea {
 }
 
 .attachment-actions {
-  display: inline-flex;
-  flex: 0 0 auto;
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.attachment-action {
+  font-size: 12px;
+  font-weight: 900;
+  min-height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.attachment-delete-action {
+  flex: 0 0 auto;
+  height: 34px;
+  width: 34px;
 }
 
 .editor-footer {
@@ -1097,6 +1176,54 @@ textarea {
   height: min(88svh, 900px);
   overflow: hidden;
   width: min(980px, calc(100vw - 32px));
+}
+
+.pdf-preview-header {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 14px 16px;
+}
+
+.pdf-preview-title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.pdf-preview-title span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.pdf-preview-title h2 {
+  font-size: 18px;
+  line-height: 1.25;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-preview-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.pdf-preview-download {
+  font-size: 12px;
+  font-weight: 900;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.pdf-preview-close {
+  height: 36px;
+  width: 36px;
 }
 
 .pdf-preview-frame {
@@ -1995,6 +2122,55 @@ textarea {
     border-bottom-right-radius: 0;
     max-height: min(82svh, 720px);
     width: 100%;
+  }
+
+  .pdf-preview-modal {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    height: min(88svh, 760px);
+    width: 100%;
+  }
+
+  .pdf-preview-header {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+    padding: 14px;
+  }
+
+  .pdf-preview-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 42px;
+  }
+
+  .pdf-preview-frame {
+    min-height: 360px;
+  }
+
+  .attachment-panel {
+    padding: 10px;
+  }
+
+  .attachment-panel.compact {
+    margin: 0 14px 14px;
+  }
+
+  .attachment-item {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .attachment-actions {
+    justify-content: stretch;
+  }
+
+  .attachment-action {
+    flex: 1 1 128px;
+    justify-content: center;
+  }
+
+  .attachment-delete-action {
+    height: 36px;
+    width: 36px;
   }
 
   .note-preview-header {

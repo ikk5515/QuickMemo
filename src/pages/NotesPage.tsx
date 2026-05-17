@@ -124,6 +124,7 @@ interface NoteListCounts {
 }
 
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
+const imageWidthOptions = [25, 50, 75, 100];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 450;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
@@ -1603,6 +1604,9 @@ function RichMemoEditor({
   onChange: (value: string) => void;
   value: string;
 }) {
+  const selectedImageRef = useRef<HTMLImageElement | null>(null);
+  const [selectedImageWidth, setSelectedImageWidth] = useState<number | null>(null);
+
   useEffect(() => {
     const element = editorRef.current;
 
@@ -1617,6 +1621,11 @@ function RichMemoEditor({
       placeCaretAtEnd(element);
     }
   }, [editorRef, value]);
+
+  function clearImageSelection() {
+    selectedImageRef.current = null;
+    setSelectedImageWidth(null);
+  }
 
   function handleInput(event: FormEvent<HTMLDivElement>) {
     const inputEvent = event.nativeEvent as InputEvent;
@@ -1652,31 +1661,81 @@ function RichMemoEditor({
 
   function handleClick(event: MouseEvent<HTMLDivElement>) {
     const target = event.target;
+    const image = target instanceof HTMLElement ? target.closest("img") : null;
     const anchor = target instanceof HTMLElement ? target.closest("a[href]") : null;
+
+    if (image instanceof HTMLImageElement && editorRef.current?.contains(image)) {
+      selectedImageRef.current = image;
+      setSelectedImageWidth(readImageWidth(image));
+      return;
+    }
+
+    clearImageSelection();
 
     if (!(anchor instanceof HTMLAnchorElement) || !editorRef.current?.contains(anchor)) {
       return;
     }
 
     event.preventDefault();
+    clearImageSelection();
     window.open(anchor.href, "_blank", "noopener,noreferrer");
   }
 
+  function updateSelectedImageWidth(width: number) {
+    const image = selectedImageRef.current;
+
+    if (!image || !editorRef.current?.contains(image)) {
+      clearImageSelection();
+      return;
+    }
+
+    image.dataset.qmWidth = String(width);
+    image.style.width = `${width}%`;
+    image.style.maxWidth = "100%";
+    image.style.height = "auto";
+    setSelectedImageWidth(width);
+    onChange(editorRef.current.innerHTML);
+  }
+
   return (
-    <div
-      ref={editorRef}
-      className="rich-body-input"
-      contentEditable
-      data-placeholder="메모를 입력하세요..."
-      onBlur={handleBlur}
-      onClick={handleClick}
-      onInput={handleInput}
-      onPaste={handlePaste}
-      role="textbox"
-      style={{ fontSize }}
-      suppressContentEditableWarning
-    />
+    <>
+      {selectedImageWidth && (
+        <div className="image-size-toolbar" aria-label="이미지 크기 조절">
+          <span>이미지 크기</span>
+          {imageWidthOptions.map((width) => (
+            <button
+              aria-pressed={selectedImageWidth === width}
+              className={selectedImageWidth === width ? "active" : ""}
+              key={width}
+              onClick={() => updateSelectedImageWidth(width)}
+              onMouseDown={(event) => event.preventDefault()}
+              type="button"
+            >
+              {width}%
+            </button>
+          ))}
+        </div>
+      )}
+      <div
+        ref={editorRef}
+        className="rich-body-input"
+        contentEditable
+        data-placeholder="메모를 입력하세요..."
+        onBlur={handleBlur}
+        onClick={handleClick}
+        onInput={handleInput}
+        onPaste={handlePaste}
+        role="textbox"
+        style={{ fontSize }}
+        suppressContentEditableWarning
+      />
+    </>
   );
+}
+
+function readImageWidth(image: HTMLImageElement) {
+  const width = Number(image.dataset.qmWidth ?? image.style.width.replace("%", ""));
+  return imageWidthOptions.includes(width) ? width : 100;
 }
 
 function placeCaretAtEnd(element: HTMLElement) {
@@ -1995,26 +2054,28 @@ function AttachmentList({
                 {attachment.extension === "pdf" && onPreview && (
                   <button
                     aria-label={`${attachmentDownloadName(attachment)} 미리보기`}
-                    className="icon-button"
+                    className="secondary-button attachment-action"
                     disabled={Boolean(busyId)}
                     onClick={() => onPreview(attachment)}
                     type="button"
                   >
                     <Eye size={16} />
+                    미리보기
                   </button>
                 )}
                 <button
                   aria-label={`${attachmentDownloadName(attachment)} 다운로드`}
-                  className="icon-button"
+                  className="secondary-button attachment-action"
                   disabled={Boolean(busyId)}
                   onClick={() => onDownload(attachment)}
                   type="button"
                 >
                   {disabled ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                  다운로드
                 </button>
                 <button
                   aria-label={`${attachmentDownloadName(attachment)} 삭제`}
-                  className="icon-button danger"
+                  className="icon-button danger attachment-delete-action"
                   disabled={Boolean(busyId) || !canDelete(attachment)}
                   onClick={() => onDelete(attachment)}
                   type="button"
@@ -2048,17 +2109,17 @@ function PdfPreviewModal({
         role="dialog"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <header className="note-preview-header">
-          <div className="note-preview-title">
-            <span className="note-kind-pill personal">PDF</span>
+        <header className="pdf-preview-header">
+          <div className="pdf-preview-title">
+            <span>PDF 미리보기</span>
             <h2 id="pdf-preview-title">{fileName}</h2>
           </div>
-          <div className="note-preview-actions">
-            <a className="secondary-button note-preview-action" download={fileName} href={url}>
+          <div className="pdf-preview-actions">
+            <a className="secondary-button pdf-preview-download" download={fileName} href={url}>
               <Download size={14} />
               다운로드
             </a>
-            <button className="icon-button" type="button" onClick={onClose} aria-label="PDF 미리보기 닫기">
+            <button className="icon-button pdf-preview-close" type="button" onClick={onClose} aria-label="PDF 미리보기 닫기">
               <X size={16} />
             </button>
           </div>

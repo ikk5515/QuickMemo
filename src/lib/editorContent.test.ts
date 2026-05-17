@@ -27,6 +27,15 @@ describe("editor content helpers", () => {
     expect(parseEditorContent(html).html).toContain("data:image/png;base64,abc");
   });
 
+  it("preserves only safe image width values", () => {
+    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-width="50"></p>').html).toContain(
+      'data-qm-width="50"'
+    );
+    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" style="width:13px"></p>').html).not.toContain(
+      "width:13px"
+    );
+  });
+
   it("turns typed web URLs into safe links", () => {
     const html = linkifyEditorHtml("<p>go https://example.com, www.quickmemo.app</p>");
 
