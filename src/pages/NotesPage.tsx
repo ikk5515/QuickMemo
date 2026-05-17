@@ -113,6 +113,20 @@ function noteDraftsMatch(left: NoteDraft, right: NoteDraft) {
   return left.title === right.title && left.body === right.body && left.fontSize === right.fontSize;
 }
 
+function noteSyncSignature(note: DecryptedNote) {
+  const updatedAt = note.updatedAt ? `${note.updatedAt.seconds}:${note.updatedAt.nanoseconds}` : "pending";
+
+  return [
+    note.id,
+    updatedAt,
+    note.updatedBy,
+    note.encryptedTitle.iv,
+    note.encryptedTitle.cipherText,
+    note.encryptedBody.iv,
+    note.encryptedBody.cipherText
+  ].join(":");
+}
+
 function getActiveNoteClientId() {
   const fallbackId = () =>
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -154,6 +168,7 @@ export default function NotesPage() {
   const autosaveTimer = useRef<number | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
+  const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
 
   useEffect(() => {
@@ -284,12 +299,33 @@ export default function NotesPage() {
     }
 
     const remoteDraft = draftFromNote(activeRemoteNote);
+    const remoteSignature = noteSyncSignature(activeRemoteNote);
     const pendingEcho = pendingLocalEcho.current;
     const currentDraft = {
       title: editor.title,
       body: editor.body,
       fontSize: editor.fontSize
     };
+
+    if (editor.noteId !== activeRemoteNote.id) {
+      return;
+    }
+
+    if (draftsMatch(editor, remoteDraft)) {
+      if (pendingEcho?.noteId === activeRemoteNote.id && noteDraftsMatch(remoteDraft, pendingEcho.draft)) {
+        pendingLocalEcho.current = null;
+      }
+
+      appliedRemoteRevision.current = { noteId: activeRemoteNote.id, signature: remoteSignature };
+      return;
+    }
+
+    if (
+      appliedRemoteRevision.current?.noteId === activeRemoteNote.id &&
+      appliedRemoteRevision.current.signature === remoteSignature
+    ) {
+      return;
+    }
 
     if (pendingEcho?.noteId === activeRemoteNote.id && noteDraftsMatch(currentDraft, pendingEcho.draft)) {
       if (noteDraftsMatch(remoteDraft, pendingEcho.draft)) {
@@ -299,10 +335,7 @@ export default function NotesPage() {
       }
     }
 
-    if (editor.noteId !== activeRemoteNote.id || draftsMatch(editor, remoteDraft)) {
-      return;
-    }
-
+    appliedRemoteRevision.current = { noteId: activeRemoteNote.id, signature: remoteSignature };
     setEditor((current) => ({
       ...current,
       title: remoteDraft.title,
@@ -429,6 +462,7 @@ export default function NotesPage() {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
       const nextDraft = draftOverride ?? draftFromNote(note);
 
+      appliedRemoteRevision.current = { noteId: note.id, signature: noteSyncSignature(note) };
       setEditor({
         noteId: note.id,
         title: nextDraft.title,
@@ -782,7 +816,12 @@ function RichMemoEditor({
       return;
     }
 
+    const wasFocused = document.activeElement === element;
     element.innerHTML = value;
+
+    if (wasFocused) {
+      placeCaretAtEnd(element);
+    }
   }, [editorRef, value]);
 
   function handleInput() {
@@ -820,6 +859,18 @@ function RichMemoEditor({
       suppressContentEditableWarning
     />
   );
+}
+
+function placeCaretAtEnd(element: HTMLElement) {
+  element.focus();
+
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
 }
 
 function NoteDrawer({
