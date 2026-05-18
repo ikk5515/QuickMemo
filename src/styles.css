@@ -2474,6 +2474,26 @@ textarea {
   margin: 0 auto 18px;
 }
 
+.hwp-preview-frame {
+  background: #eef1f3;
+  flex: 1 1 auto;
+  min-height: 420px;
+  overflow: auto;
+  padding: 22px;
+}
+
+.hwp-preview-content {
+  min-height: 520px;
+}
+
+.hwp-preview-content table {
+  border-collapse: collapse;
+}
+
+.hwp-fallback-preview {
+  margin-top: 16px;
+}
+
 .document-preview-frame {
   background: #eef1f3;
   flex: 1 1 auto;
@@ -2512,12 +2532,31 @@ textarea {
   width: 100%;
 }
 
+.document-preview-page .xlsx-preview-table {
+  font-size: 13px;
+  min-width: 100%;
+  table-layout: fixed;
+  width: max-content;
+}
+
 .document-preview-page td,
 .document-preview-page th {
   border: 1px solid #cbd5e1;
   min-width: 64px;
   padding: 8px 10px;
   vertical-align: top;
+}
+
+.document-preview-page .xlsx-preview-table th {
+  background: #f8fafc;
+  color: #475569;
+  font-weight: 800;
+  text-align: center;
+}
+
+.document-preview-page .xlsx-preview-table td {
+  background: #ffffff;
+  white-space: pre-wrap;
 }
 
 .document-preview-muted {

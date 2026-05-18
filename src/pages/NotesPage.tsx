@@ -149,8 +149,9 @@ interface NoteDraft {
 interface AttachmentPreviewState {
   bytes?: Uint8Array;
   fileName: string;
+  fallbackHtml?: string;
   html?: string;
-  kind: "docx" | "html" | "pdf" | "text" | "unsupported";
+  kind: "docx" | "html" | "hwp" | "pdf" | "text" | "unsupported";
   label: string;
   text?: string;
   url?: string;
@@ -2164,16 +2165,16 @@ export default function NotesPage() {
       }
 
       if (attachment.extension === "hwp") {
-        const previewHtml = await extractHwpPreviewHtml(plainBytes);
+        const fallbackHtml = await extractHwpPreviewHtml(plainBytes);
 
         setAttachmentPreview({
+          bytes: plainBytes,
+          fallbackHtml,
           fileName,
-          html: previewHtml,
-          kind: previewHtml ? "html" : "unsupported",
-          label: "HWP 문서 미리보기",
-          text: previewHtml ? undefined : "HWP 문서에서 안전하게 표시할 본문을 찾지 못했습니다. 암호화 또는 배포용 문서는 앱 내부 미리보기를 지원하지 않습니다."
+          kind: "hwp",
+          label: "HWP 문서 미리보기"
         });
-        setStatus(previewHtml ? "HWP 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
+        setStatus("HWP 미리보기를 열었습니다.");
         return;
       }
 
@@ -2683,6 +2684,8 @@ export default function NotesPage() {
             value={editor.title}
           />
           <RichMemoEditor
+            defaultTextColor={currentType === "shared" ? unlockedProfile.color : null}
+            defaultTextColorKey={`${editor.noteId ?? "new"}:${currentType}:${unlockedProfile.uid}`}
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
             onCursorChange={publishEditorCursor}
@@ -2744,6 +2747,8 @@ export default function NotesPage() {
 }
 
 function RichMemoEditor({
+  defaultTextColor,
+  defaultTextColorKey,
   editorRef,
   fontSize,
   onCursorChange,
@@ -2752,6 +2757,8 @@ function RichMemoEditor({
   remoteCursors = [],
   value
 }: {
+  defaultTextColor?: string | null;
+  defaultTextColorKey?: string;
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
   onCursorChange?: (cursorOffset: number | null, cursorVisible: boolean) => void;
@@ -2761,6 +2768,7 @@ function RichMemoEditor({
   value: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const appliedDefaultTextColorKeyRef = useRef<string | null>(null);
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
   const tableResizeCleanupRef = useRef<(() => void) | null>(null);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
@@ -2964,6 +2972,30 @@ function RichMemoEditor({
 
     editor.commands.setContent(value || "", { emitUpdate: false });
   }, [editor, value]);
+
+  useEffect(() => {
+    const safeDefaultTextColor = defaultTextColor ? normalizeCustomHexColor(defaultTextColor, editorTextColors[0]) : null;
+
+    if (!editor || !safeDefaultTextColor) {
+      appliedDefaultTextColorKeyRef.current = null;
+      return;
+    }
+
+    setCustomTextColor(safeDefaultTextColor);
+
+    const key = defaultTextColorKey ?? safeDefaultTextColor;
+
+    if (appliedDefaultTextColorKeyRef.current === key) {
+      return;
+    }
+
+    appliedDefaultTextColorKeyRef.current = key;
+
+    if (editor.state.selection.empty && !editor.getAttributes("textColor").color) {
+      editor.commands.setMark("textColor", { color: safeDefaultTextColor });
+      setToolbarVersion((version) => version + 1);
+    }
+  }, [defaultTextColor, defaultTextColorKey, editor, value]);
 
   function clearImageSelection() {
     selectedImageRef.current = null;
@@ -4565,7 +4597,9 @@ function AttachmentPreviewModal({
   preview: AttachmentPreviewState;
 }) {
   const docxContainerRef = useRef<HTMLDivElement | null>(null);
+  const hwpContainerRef = useRef<HTMLDivElement | null>(null);
   const [docxError, setDocxError] = useState<string | null>(null);
+  const [hwpError, setHwpError] = useState<string | null>(null);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -4629,6 +4663,40 @@ function AttachmentPreviewModal({
     };
   }, [preview.bytes, preview.kind]);
 
+  useEffect(() => {
+    if (preview.kind !== "hwp" || !preview.bytes || !hwpContainerRef.current) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let viewer: { distory?: () => void } | null = null;
+    const container = hwpContainerRef.current;
+    container.innerHTML = "";
+    setHwpError(null);
+
+    async function renderHwpPreview() {
+      const { Viewer } = await import("hwp.js");
+
+      if (cancelled || preview.kind !== "hwp" || !preview.bytes) {
+        return;
+      }
+
+      viewer = new Viewer(container, preview.bytes.slice(), { type: "array" });
+    }
+
+    void renderHwpPreview().catch(() => {
+      if (!cancelled) {
+        setHwpError("HWP 양식 미리보기를 만들지 못해 안전한 본문 미리보기로 전환했습니다.");
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      viewer?.distory?.();
+      container.innerHTML = "";
+    };
+  }, [preview.bytes, preview.kind]);
+
   return (
     <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -4671,6 +4739,17 @@ function AttachmentPreviewModal({
           <div className="docx-preview-frame">
             <div ref={docxContainerRef} className="docx-preview-content" />
             {docxError && <p className="file-preview-error">{docxError}</p>}
+          </div>
+        ) : preview.kind === "hwp" ? (
+          <div className="hwp-preview-frame">
+            <div ref={hwpContainerRef} className="hwp-preview-content" />
+            {hwpError && (
+              preview.fallbackHtml ? (
+                <div className="document-preview-page hwp-fallback-preview" dangerouslySetInnerHTML={{ __html: preview.fallbackHtml }} />
+              ) : (
+                <p className="file-preview-error">{hwpError}</p>
+              )
+            )}
           </div>
         ) : preview.kind === "html" ? (
           <div className="document-preview-frame">
@@ -4998,6 +5077,7 @@ function NotePreviewModal({
   }
 
   const bodyHtml = draft.body || "<p>내용 없음</p>";
+  const currentUserColor = historyUsers.find((user) => user.uid === currentUid)?.color ?? null;
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
@@ -5124,6 +5204,8 @@ function NotePreviewModal({
               </select>
             </label>
             <RichMemoEditor
+              defaultTextColor={note.type === "shared" ? currentUserColor : null}
+              defaultTextColorKey={`${note.id}:preview:${note.type}:${currentUid}`}
               editorRef={previewEditorRef}
               fontSize={draft.fontSize}
               onFilesPaste={(files, insertHtml) => void insertPreviewPastedFiles(files, insertHtml)}
@@ -5559,19 +5641,28 @@ function renderXlsxWorksheet(markup: string, sharedStrings: string[]) {
   }
 
   const rows = descendantsByLocalName(document.documentElement, "row").slice(0, 80);
+  const mergeInfo = xlsxMergeInfo(document);
+  const maxColumnIndex = Math.min(Math.max(xlsxMaxColumnIndex(rows, mergeInfo), 0), 39);
+  const columnWidths = xlsxColumnWidths(document, maxColumnIndex + 1);
+  const colGroup = [
+    '<col style="width:44px">',
+    ...Array.from({ length: maxColumnIndex + 1 }, (_, index) => `<col style="width:${columnWidths[index] ?? 92}px">`)
+  ].join("");
+  const headerHtml = Array.from({ length: maxColumnIndex + 1 }, (_, index) => `<th scope="col">${xlsxColumnName(index)}</th>`).join("");
   const rowHtml = rows
-    .map((row) => renderXlsxRow(row, sharedStrings))
+    .map((row, index) => renderXlsxRow(row, sharedStrings, mergeInfo, maxColumnIndex, index + 1))
     .filter(Boolean)
     .slice(0, 80)
     .join("");
 
-  return rowHtml ? `<table>${rowHtml}</table>` : "";
+  return rowHtml ? `<table class="xlsx-preview-table"><colgroup>${colGroup}</colgroup><thead><tr><th scope="col"></th>${headerHtml}</tr></thead><tbody>${rowHtml}</tbody></table>` : "";
 }
 
-function renderXlsxRow(row: Element, sharedStrings: string[]) {
+function renderXlsxRow(row: Element, sharedStrings: string[], mergeInfo: XlsxMergeInfo, maxColumnIndex: number, fallbackRowNumber: number) {
   const cells = Array.from(row.children).filter((child) => child.localName.toLowerCase() === "c");
   const cellsByIndex = new Map<number, string>();
-  let maxColumnIndex = -1;
+  const rowNumber = safeXlsxRowNumber(row.getAttribute("r"), fallbackRowNumber);
+  let rowMaxColumnIndex = -1;
   let fallbackIndex = 0;
 
   cells.slice(0, 40).forEach((cell) => {
@@ -5585,19 +5676,166 @@ function renderXlsxRow(row: Element, sharedStrings: string[]) {
 
     const value = xlsxCellText(cell, sharedStrings);
     cellsByIndex.set(columnIndex, value);
-    maxColumnIndex = Math.max(maxColumnIndex, columnIndex);
+    rowMaxColumnIndex = Math.max(rowMaxColumnIndex, columnIndex);
   });
 
-  if (maxColumnIndex < 0 || !Array.from(cellsByIndex.values()).some(Boolean)) {
+  if (rowMaxColumnIndex < 0 && !Array.from(mergeInfo.starts.keys()).some((key) => key.startsWith(`${rowNumber}:`))) {
     return "";
   }
 
-  const cellHtml = Array.from({ length: Math.min(maxColumnIndex + 1, 40) }, (_, index) => {
+  const cellHtml = Array.from({ length: maxColumnIndex + 1 }, (_, index) => {
+    const key = xlsxCellKey(rowNumber, index);
+
+    if (mergeInfo.skips.has(key)) {
+      return "";
+    }
+
+    const mergeRange = mergeInfo.starts.get(key);
+    const spanAttributes = xlsxMergeSpanAttributes(mergeRange);
     const value = cellsByIndex.get(index) ?? "";
-    return `<td>${value ? escapeHtml(value) : "&nbsp;"}</td>`;
+    return `<td${spanAttributes}>${value ? escapeHtml(value) : "&nbsp;"}</td>`;
   }).join("");
 
-  return `<tr>${cellHtml}</tr>`;
+  return `<tr><th scope="row">${rowNumber}</th>${cellHtml}</tr>`;
+}
+
+interface XlsxMergeRange {
+  startColumn: number;
+  startRow: number;
+  endColumn: number;
+  endRow: number;
+}
+
+interface XlsxMergeInfo {
+  skips: Set<string>;
+  starts: Map<string, XlsxMergeRange>;
+}
+
+function xlsxMergeInfo(document: Document): XlsxMergeInfo {
+  const starts = new Map<string, XlsxMergeRange>();
+  const skips = new Set<string>();
+
+  descendantsByLocalName(document.documentElement, "mergeCell").forEach((mergeCell) => {
+    const range = xlsxCellRange(mergeCell.getAttribute("ref"));
+
+    if (!range) {
+      return;
+    }
+
+    starts.set(xlsxCellKey(range.startRow, range.startColumn), range);
+
+    for (let row = range.startRow; row <= range.endRow; row += 1) {
+      for (let column = range.startColumn; column <= range.endColumn; column += 1) {
+        if (row !== range.startRow || column !== range.startColumn) {
+          skips.add(xlsxCellKey(row, column));
+        }
+      }
+    }
+  });
+
+  return { skips, starts };
+}
+
+function xlsxMaxColumnIndex(rows: Element[], mergeInfo: XlsxMergeInfo) {
+  const cellMaxColumn = rows.reduce((maxColumn, row) => {
+    const rowCells = Array.from(row.children).filter((child) => child.localName.toLowerCase() === "c");
+    const rowMaxColumn = rowCells.reduce((currentMax, cell, fallbackIndex) => {
+      const columnIndex = xlsxCellColumnIndex(cell.getAttribute("r")) ?? fallbackIndex;
+      return Math.max(currentMax, columnIndex);
+    }, -1);
+
+    return Math.max(maxColumn, rowMaxColumn);
+  }, -1);
+  const mergeMaxColumn = Array.from(mergeInfo.starts.values()).reduce((maxColumn, range) => Math.max(maxColumn, range.endColumn), -1);
+
+  return Math.max(cellMaxColumn, mergeMaxColumn, 0);
+}
+
+function xlsxColumnWidths(document: Document, columnCount: number) {
+  const widths: Array<number | undefined> = Array.from({ length: columnCount });
+
+  descendantsByLocalName(document.documentElement, "col").forEach((column) => {
+    const min = Math.max(1, Number(column.getAttribute("min")) || 1);
+    const max = Math.min(columnCount, Number(column.getAttribute("max")) || min);
+    const width = clampXlsxColumnWidth(Number(column.getAttribute("width")));
+
+    if (!width) {
+      return;
+    }
+
+    for (let index = min - 1; index < max; index += 1) {
+      widths[index] = width;
+    }
+  });
+
+  return widths;
+}
+
+function clampXlsxColumnWidth(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+
+  return Math.min(220, Math.max(56, Math.round(value * 7 + 12)));
+}
+
+function xlsxMergeSpanAttributes(range: XlsxMergeRange | undefined) {
+  if (!range) {
+    return "";
+  }
+
+  const colSpan = Math.min(40, Math.max(1, range.endColumn - range.startColumn + 1));
+  const rowSpan = Math.min(80, Math.max(1, range.endRow - range.startRow + 1));
+  const attributes: string[] = [];
+
+  if (colSpan > 1) {
+    attributes.push(` colspan="${colSpan}"`);
+  }
+
+  if (rowSpan > 1) {
+    attributes.push(` rowspan="${rowSpan}"`);
+  }
+
+  return attributes.join("");
+}
+
+function xlsxCellRange(reference: string | null): XlsxMergeRange | null {
+  const [startReference, endReference = startReference] = String(reference ?? "").split(":");
+  const start = xlsxCellReference(startReference);
+  const end = xlsxCellReference(endReference);
+
+  if (!start || !end) {
+    return null;
+  }
+
+  return {
+    startColumn: Math.min(start.column, end.column),
+    startRow: Math.min(start.row, end.row),
+    endColumn: Math.max(start.column, end.column),
+    endRow: Math.max(start.row, end.row)
+  };
+}
+
+function xlsxCellReference(reference: string) {
+  const match = reference.match(/^([A-Z]+)(\d+)$/i);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    column: xlsxColumnIndexFromLetters(match[1]),
+    row: Math.max(1, Number(match[2]) || 1)
+  };
+}
+
+function safeXlsxRowNumber(value: string | null, fallback: number) {
+  const rowNumber = Number(value);
+  return Number.isInteger(rowNumber) && rowNumber > 0 ? rowNumber : fallback;
+}
+
+function xlsxCellKey(row: number, column: number) {
+  return `${row}:${column}`;
 }
 
 function xlsxCellColumnIndex(reference: string | null) {
@@ -5607,7 +5845,24 @@ function xlsxCellColumnIndex(reference: string | null) {
     return null;
   }
 
+  return xlsxColumnIndexFromLetters(columnLetters);
+}
+
+function xlsxColumnIndexFromLetters(columnLetters: string) {
   return Array.from(columnLetters.toUpperCase()).reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0) - 1;
+}
+
+function xlsxColumnName(index: number) {
+  let value = index + 1;
+  let name = "";
+
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    value = Math.floor((value - 1) / 26);
+  }
+
+  return name;
 }
 
 function xlsxCellText(cell: Element, sharedStrings: string[]) {
@@ -5805,6 +6060,23 @@ function collectHwpxElementBlocks(element: Element, blocks: string[]) {
   }
 
   if (name === "p") {
+    const tables = descendantsByLocalName(element, "tbl").filter((table) => nearestAncestorByLocalName(table, "p") === element);
+
+    if (tables.length) {
+      tables.forEach((table) => {
+        if (blocks.length >= maxDocumentPreviewBlocks) {
+          return;
+        }
+
+        const tableHtml = renderHwpxTable(table);
+
+        if (tableHtml) {
+          blocks.push(tableHtml);
+        }
+      });
+      return;
+    }
+
     const text = normalizePreviewText(element.textContent ?? "");
 
     if (text) {
@@ -5855,8 +6127,13 @@ function nearestAncestorByLocalName(element: Element, name: string) {
 }
 
 function hwpxCellSpanAttributes(cell: Element) {
-  const colSpan = safePreviewSpan(cell.getAttribute("colSpan") ?? cell.getAttribute("colspan"));
-  const rowSpan = safePreviewSpan(cell.getAttribute("rowSpan") ?? cell.getAttribute("rowspan"));
+  const cellProperties = descendantsByLocalName(cell, "tcPr").find((candidate) => nearestAncestorByLocalName(candidate, "tc") === cell);
+  const colSpan = safePreviewSpan(
+    cell.getAttribute("colSpan") ?? cell.getAttribute("colspan") ?? cellProperties?.getAttribute("colSpan") ?? cellProperties?.getAttribute("colspan") ?? null
+  );
+  const rowSpan = safePreviewSpan(
+    cell.getAttribute("rowSpan") ?? cell.getAttribute("rowspan") ?? cellProperties?.getAttribute("rowSpan") ?? cellProperties?.getAttribute("rowspan") ?? null
+  );
   const attributes: string[] = [];
 
   if (colSpan > 1) {
