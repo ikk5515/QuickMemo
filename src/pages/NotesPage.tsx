@@ -1403,17 +1403,32 @@ export default function NotesPage() {
 
     if (!trimmedName) {
       setError("폴더 이름을 입력해주세요.");
-      return false;
+      return null;
     }
 
     try {
-      await createNoteFolder(unlockedProfile.uid, trimmedName, color);
+      const folderRef = await createNoteFolder(unlockedProfile.uid, trimmedName, color);
+      const createdFolder: NoteFolderSnapshot = {
+        id: folderRef.id,
+        ownerUid: unlockedProfile.uid,
+        name: trimmedName,
+        color,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      };
+
+      setFolders((currentFolders) =>
+        currentFolders.some((folder) => folder.id === folderRef.id)
+          ? currentFolders
+          : [...currentFolders, createdFolder].sort((left, right) => left.name.localeCompare(right.name, "ko"))
+      );
+      setOverviewFolderFilter(folderRef.id);
       setStatus("폴더를 만들었습니다.");
       setError(null);
-      return true;
+      return folderRef.id;
     } catch {
       setError("폴더를 만들지 못했습니다.");
-      return false;
+      return null;
     }
   }
 
@@ -2137,6 +2152,8 @@ export default function NotesPage() {
           <PersonalOverview
             activeFolderFilter={overviewFolderFilter}
             folders={folders}
+            feedbackError={error}
+            feedbackStatus={status}
             noteStates={noteStateMap}
             notes={personalOverviewNotes}
             onBack={() => setOverviewOpen(false)}
@@ -3285,6 +3302,8 @@ function NoteList({
 function PersonalOverview({
   activeFolderFilter,
   folders,
+  feedbackError,
+  feedbackStatus,
   noteStates,
   notes,
   onBack,
@@ -3295,10 +3314,12 @@ function PersonalOverview({
 }: {
   activeFolderFilter: OverviewFolderFilter;
   folders: NoteFolderSnapshot[];
+  feedbackError: string | null;
+  feedbackStatus: string;
   noteStates: NoteStateByNoteId;
   notes: DecryptedNote[];
   onBack: () => void;
-  onCreateFolder: (name: string, color: string) => Promise<boolean>;
+  onCreateFolder: (name: string, color: string) => Promise<string | null>;
   onFolderFilterChange: (filter: OverviewFolderFilter) => void;
   onPreview: (note: DecryptedNote) => void;
   onUpdateNoteFolder: (note: DecryptedNote, folderId: string | null) => void;
@@ -3317,6 +3338,11 @@ function PersonalOverview({
 
     return note.folderId === activeFolderFilter;
   });
+  const unfiledCount = notes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length;
+  const activeFolder = typeof activeFolderFilter === "string" ? foldersById.get(activeFolderFilter) : null;
+  const activeFilterLabel =
+    activeFolderFilter === "all" ? "전체 노트" : activeFolderFilter === "unfiled" ? "미분류" : activeFolder?.name ?? "분류";
+  const showFeedback = feedbackError || feedbackStatus.includes("폴더") || feedbackStatus.includes("분류");
 
   async function submitFolder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -3341,108 +3367,125 @@ function PersonalOverview({
           편집으로 돌아가기
         </button>
       </header>
-      <form className="folder-create-form" onSubmit={(event) => void submitFolder(event)}>
-        <label>
-          폴더 이름
-          <input
-            maxLength={40}
-            onChange={(event) => setFolderName(event.target.value)}
-            placeholder="새 그룹"
-            value={folderName}
-          />
-        </label>
-        <div className="folder-color-picker" aria-label="폴더 색상">
-          {folderColorOptions.map((color) => (
+      <div className="personal-overview-layout">
+        <aside className="overview-folder-panel" aria-label="개인 노트 분류">
+          <form className="folder-create-form" onSubmit={(event) => void submitFolder(event)}>
+            <label>
+              폴더 이름
+              <input
+                maxLength={40}
+                onChange={(event) => setFolderName(event.target.value)}
+                placeholder="새 그룹"
+                value={folderName}
+              />
+            </label>
+            <div className="folder-color-picker" aria-label="폴더 색상">
+              {folderColorOptions.map((color) => (
+                <button
+                  aria-label={`${color} 폴더 색상`}
+                  aria-pressed={folderColor === color}
+                  className={folderColor === color ? "active" : ""}
+                  key={color}
+                  onClick={() => setFolderColor(color)}
+                  style={{ backgroundColor: color }}
+                  type="button"
+                />
+              ))}
+            </div>
+            <button type="submit">
+              <FolderPlus size={16} />
+              폴더 생성
+            </button>
+          </form>
+          {showFeedback && (
+            <p className={feedbackError ? "form-error overview-feedback" : "form-success overview-feedback"}>
+              {feedbackError ?? feedbackStatus}
+            </p>
+          )}
+          <div className="folder-filter-chips" role="tablist" aria-label="개인 노트 폴더 필터">
             <button
-              aria-label={`${color} 폴더 색상`}
-              aria-pressed={folderColor === color}
-              className={folderColor === color ? "active" : ""}
-              key={color}
-              onClick={() => setFolderColor(color)}
-              style={{ backgroundColor: color }}
+              aria-selected={activeFolderFilter === "all"}
+              className={activeFolderFilter === "all" ? "active" : ""}
+              onClick={() => onFolderFilterChange("all")}
+              role="tab"
               type="button"
-            />
-          ))}
-        </div>
-        <button type="submit">
-          <FolderPlus size={16} />
-          폴더 생성
-        </button>
-      </form>
-      <div className="folder-filter-chips" role="tablist" aria-label="개인 노트 폴더 필터">
-        <button
-          aria-selected={activeFolderFilter === "all"}
-          className={activeFolderFilter === "all" ? "active" : ""}
-          onClick={() => onFolderFilterChange("all")}
-          role="tab"
-          type="button"
-        >
-          전체
-          <strong>{notes.length}</strong>
-        </button>
-        <button
-          aria-selected={activeFolderFilter === "unfiled"}
-          className={activeFolderFilter === "unfiled" ? "active" : ""}
-          onClick={() => onFolderFilterChange("unfiled")}
-          role="tab"
-          type="button"
-        >
-          미분류
-          <strong>{notes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length}</strong>
-        </button>
-        {folders.map((folder) => (
-          <button
-            aria-selected={activeFolderFilter === folder.id}
-            className={activeFolderFilter === folder.id ? "active" : ""}
-            key={folder.id}
-            onClick={() => onFolderFilterChange(folder.id)}
-            role="tab"
-            style={{ "--folder-color": folder.color } as CSSProperties}
-            type="button"
-          >
-            {folder.name}
-            <strong>{notes.filter((note) => note.folderId === folder.id).length}</strong>
-          </button>
-        ))}
-      </div>
-      {visibleNotes.length ? (
-        <div className="overview-note-grid">
-          {visibleNotes.map((note) => {
-            const folder = note.folderId ? foldersById.get(note.folderId) : null;
-            const createdAt = dateFromTimestamp(note.createdAt);
-            const pinned = notePinned(note.id, noteStates);
+            >
+              <span>전체</span>
+              <strong>{notes.length}</strong>
+            </button>
+            <button
+              aria-selected={activeFolderFilter === "unfiled"}
+              className={activeFolderFilter === "unfiled" ? "active" : ""}
+              onClick={() => onFolderFilterChange("unfiled")}
+              role="tab"
+              type="button"
+            >
+              <span>미분류</span>
+              <strong>{unfiledCount}</strong>
+            </button>
+            {folders.map((folder) => (
+              <button
+                aria-selected={activeFolderFilter === folder.id}
+                className={activeFolderFilter === folder.id ? "active" : ""}
+                key={folder.id}
+                onClick={() => onFolderFilterChange(folder.id)}
+                role="tab"
+                style={{ "--folder-color": folder.color } as CSSProperties}
+                type="button"
+              >
+                <span className="folder-chip-name">{folder.name}</span>
+                <strong>{notes.filter((note) => note.folderId === folder.id).length}</strong>
+              </button>
+            ))}
+          </div>
+        </aside>
+        <section className="overview-note-panel" aria-label={`${activeFilterLabel} 목록`}>
+          <div className="overview-note-panel-header">
+            <div>
+              <span>{activeFilterLabel}</span>
+              <h3>{visibleNotes.length}개 노트</h3>
+            </div>
+          </div>
+          {visibleNotes.length ? (
+            <div className="overview-note-grid">
+              {visibleNotes.map((note) => {
+                const folder = note.folderId ? foldersById.get(note.folderId) : null;
+                const createdAt = dateFromTimestamp(note.createdAt);
+                const pinned = notePinned(note.id, noteStates);
 
-            return (
-              <article className="overview-note-card" key={note.id}>
-                <button className="overview-note-open" type="button" onClick={() => onPreview(note)}>
-                  <span className="overview-note-folder" style={{ backgroundColor: folder?.color ?? "#e2e8f0" }}>
-                    {folder?.name ?? "미분류"}
-                  </span>
-                  <strong>{note.title || "제목 없음"}</strong>
-                  <span>{previewTextFromHtml(note.body) || "내용 없음"}</span>
-                  <em>{pinned ? "즐겨찾기 · " : ""}{formatCompactDateTime(createdAt)}</em>
-                </button>
-                <label className="overview-folder-select">
-                  <span className="sr-only">폴더 지정</span>
-                  <select
-                    onChange={(event) => onUpdateNoteFolder(note, event.target.value || null)}
-                    value={note.folderId && foldersById.has(note.folderId) ? note.folderId : ""}
-                  >
-                    <option value="">미분류</option>
-                    {folders.map((folderOption) => (
-                      <option key={folderOption.id} value={folderOption.id}>
-                        {folderOption.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </article>
-            );
-          })}
-        </div>
-      ) : (
-        <p className="muted">이 폴더에 표시할 개인 노트가 없습니다.</p>
-      )}
+                return (
+                  <article className="overview-note-card" key={note.id}>
+                    <button className="overview-note-open" type="button" onClick={() => onPreview(note)}>
+                      <span className="overview-note-folder" style={{ backgroundColor: folder?.color ?? "#e2e8f0" }}>
+                        {folder?.name ?? "미분류"}
+                      </span>
+                      <strong>{note.title || "제목 없음"}</strong>
+                      <span>{previewTextFromHtml(note.body) || "내용 없음"}</span>
+                      <em>{pinned ? "즐겨찾기 · " : ""}{formatCompactDateTime(createdAt)}</em>
+                    </button>
+                    <label className="overview-folder-select">
+                      <span className="sr-only">폴더 지정</span>
+                      <select
+                        onChange={(event) => onUpdateNoteFolder(note, event.target.value || null)}
+                        value={note.folderId && foldersById.has(note.folderId) ? note.folderId : ""}
+                      >
+                        <option value="">미분류</option>
+                        {folders.map((folderOption) => (
+                          <option key={folderOption.id} value={folderOption.id}>
+                            {folderOption.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="muted empty-state">이 폴더에 표시할 개인 노트가 없습니다.</p>
+          )}
+        </section>
+      </div>
     </section>
   );
 }
