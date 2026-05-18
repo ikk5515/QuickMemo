@@ -524,6 +524,18 @@ textarea {
   padding: 0 12px;
 }
 
+.notes-top-actions .note-nav-button {
+  background: color-mix(in srgb, var(--teal) 13%, #ffffff);
+  border-color: color-mix(in srgb, var(--teal) 34%, var(--line));
+  color: var(--teal);
+  font-weight: 950;
+}
+
+.notes-top-actions .note-nav-button:hover {
+  background: color-mix(in srgb, var(--teal) 18%, #ffffff);
+  border-color: color-mix(in srgb, var(--teal) 48%, var(--line));
+}
+
 .notes-top-status {
   color: var(--muted);
   flex: 0 1 360px;
@@ -569,6 +581,7 @@ textarea {
 }
 
 .personal-overview {
+  align-content: start;
   display: grid;
   gap: 16px;
   min-height: calc(100svh - 116px);
@@ -578,16 +591,19 @@ textarea {
 
 .personal-overview-header {
   align-items: center;
+  align-self: start;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: 0 10px 28px rgb(20 33 31 / 5%);
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  justify-content: space-between;
+  grid-template-columns: minmax(0, max-content) auto;
+  justify-content: start;
   min-width: 0;
   padding: 9px 12px;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .personal-overview-header h2 {
@@ -2406,6 +2422,92 @@ textarea {
   font-weight: 800;
 }
 
+.note-insight-trigger {
+  align-self: flex-start;
+  display: inline-flex;
+  gap: 8px;
+  margin: 0 18px 12px;
+}
+
+.note-insight-trigger span {
+  background: rgb(47 125 112 / 10%);
+  border-radius: 999px;
+  color: var(--teal);
+  font-size: 11px;
+  font-weight: 950;
+  padding: 4px 7px;
+}
+
+.note-insight-backdrop {
+  z-index: 13;
+}
+
+.note-insight-modal {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  max-height: min(78svh, 720px);
+  overflow: hidden;
+  width: min(720px, calc(100vw - 32px));
+}
+
+.note-insight-modal-header {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px 16px;
+}
+
+.note-insight-modal-header > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.note-insight-modal-header span {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 6px;
+}
+
+.note-insight-modal-header h2 {
+  font-size: 18px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.note-insight-modal-actions {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.note-insight-modal-actions em {
+  background: var(--surface);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 900;
+  padding: 7px 9px;
+}
+
+.note-insight-modal-body {
+  display: grid;
+  gap: 16px;
+  overflow: auto;
+  padding: 16px;
+}
+
 .note-insight-section {
   display: grid;
   gap: 10px;
@@ -2639,6 +2741,45 @@ textarea {
   display: grid;
   gap: 18px;
   grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+}
+
+.admin-management-grid.single-panel {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.admin-tabs {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgb(20 33 31 / 5%);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-start;
+  padding: 6px;
+}
+
+.admin-tabs button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+  gap: 7px;
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.admin-tabs button.active,
+.admin-tabs button[aria-selected="true"] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #ffffff;
+}
+
+.admin-tabs button:not(.active):hover {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--ink);
 }
 
 .admin-section-header {
@@ -3441,6 +3582,18 @@ textarea {
     padding: 14px;
   }
 
+  .note-insight-trigger {
+    margin: 0 14px 12px;
+    width: calc(100% - 28px);
+  }
+
+  .note-insight-modal {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    max-height: min(82svh, 680px);
+    width: 100%;
+  }
+
   .note-insight-heading {
     align-items: stretch;
     flex-direction: column;
@@ -3646,7 +3799,9 @@ textarea {
     align-items: center;
     gap: 8px;
     grid-template-columns: minmax(0, 1fr) auto;
+    justify-content: space-between;
     padding: 8px 10px;
+    width: 100%;
   }
 
   .personal-overview-header h2 {

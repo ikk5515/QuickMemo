@@ -1,11 +1,11 @@
 import { KeyRound, LogOut, NotebookPen, Shield, X } from "lucide-react";
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { hasFirebaseConfig } from "../lib/firebase";
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
   const { changePassword, profile, signOut } = useAuth();
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
 
@@ -17,12 +17,12 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
       )}
       <header className="topbar">
-        <Link className="brand" to="/app">
+        <Link className="brand" to="/app" onClick={onNavigateHome}>
           <span className="brand-mark">Q</span>
           <span>QuickMemo</span>
         </Link>
         <nav className="nav-links" aria-label="주요 메뉴">
-          <NavLink to="/app">
+          <NavLink to="/app" onClick={onNavigateHome}>
             <NotebookPen size={18} />
             노트
           </NavLink>
@@ -78,6 +78,17 @@ function PasswordChangeModal({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
 
   async function submitPasswordChange(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

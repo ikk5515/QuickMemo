@@ -1301,22 +1301,19 @@ export default function NotesPage() {
   ]);
 
   useEffect(() => {
-    if (!previewNoteId) {
+    if (!listOpen || previewNoteId || attachmentPreview) {
       return undefined;
     }
 
-    function handlePreviewCancel(event: KeyboardEvent) {
-      if (event.key !== "Escape") {
-        return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setListOpen(false);
       }
-
-      event.preventDefault();
-      setPreviewNoteId(null);
     }
 
-    window.addEventListener("keydown", handlePreviewCancel);
-    return () => window.removeEventListener("keydown", handlePreviewCancel);
-  }, [previewNoteId]);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [attachmentPreview, listOpen, previewNoteId]);
 
   if (!profile) {
     return null;
@@ -1399,6 +1396,11 @@ export default function NotesPage() {
   function openOverview(filter: OverviewFolderFilter = "all") {
     setOverviewFolderFilter(filter);
     setOverviewOpen(true);
+    setListOpen(false);
+  }
+
+  function returnToEditor() {
+    setOverviewOpen(false);
     setListOpen(false);
   }
 
@@ -2229,7 +2231,7 @@ export default function NotesPage() {
   }
 
   return (
-    <AppShell>
+    <AppShell onNavigateHome={returnToEditor}>
       <section className="workspace notes-workspace">
         {overviewOpen ? (
           <PersonalOverview
@@ -2239,7 +2241,7 @@ export default function NotesPage() {
             feedbackStatus={status}
             noteStates={noteStateMap}
             notes={personalOverviewNotes}
-            onBack={() => setOverviewOpen(false)}
+            onBack={returnToEditor}
             onCreateFolder={createFolder}
             onFolderFilterChange={setOverviewFolderFilter}
             onPreview={previewStoredNote}
@@ -2249,11 +2251,11 @@ export default function NotesPage() {
           <>
           <div className="notes-top-actions" aria-label="노트 탐색">
             <div>
-              <button className="secondary-button" type="button" onClick={() => setListOpen((current) => !current)}>
+              <button className="secondary-button note-nav-button" type="button" onClick={() => setListOpen((current) => !current)}>
                 <PanelLeftOpen size={18} />
                 노트 목록
               </button>
-              <button className="secondary-button" type="button" onClick={() => openOverview("all")}>
+              <button className="secondary-button note-nav-button" type="button" onClick={() => openOverview("all")}>
                 <LayoutGrid size={18} />
                 전체 조회
               </button>
@@ -2468,6 +2470,7 @@ export default function NotesPage() {
             onTogglePin={(note) => void togglePinnedNote(note)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
             saving={saving}
+            suppressEscape={Boolean(attachmentPreview)}
             attachmentBusyId={attachmentBusyId}
             canDeleteAttachment={canDeleteAttachmentForNote}
           />
@@ -3901,6 +3904,18 @@ function AttachmentPreviewModal({
   onClose: () => void;
   preview: AttachmentPreviewState;
 }) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   return (
     <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -3969,7 +3984,8 @@ function NotePreviewModal({
   onSave,
   onTogglePin,
   onUploadAttachments,
-  saving
+  saving,
+  suppressEscape
 }: {
   attachmentBusyId: string | null;
   canDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => boolean;
@@ -3993,6 +4009,7 @@ function NotePreviewModal({
   onTogglePin: (note: DecryptedNote) => void;
   onUploadAttachments: (note: DecryptedNote, files: File[]) => void;
   saving: boolean;
+  suppressEscape: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState<NoteDraft>(() => draftFromNote(note));
@@ -4002,6 +4019,7 @@ function NotePreviewModal({
   const [readStates, setReadStates] = useState<NoteUserStateSnapshot[]>([]);
   const [history, setHistory] = useState<NoteHistorySnapshot[]>([]);
   const [historySummaries, setHistorySummaries] = useState<Record<string, string>>({});
+  const [activityOpen, setActivityOpen] = useState(false);
   const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
   const latestDraftRef = useRef(draft);
@@ -4009,6 +4027,30 @@ function NotePreviewModal({
   useEffect(() => {
     latestDraftRef.current = draft;
   }, [draft]);
+
+  useEffect(() => {
+    if (suppressEscape) {
+      return undefined;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (activityOpen) {
+        setActivityOpen(false);
+        return;
+      }
+
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activityOpen, onClose, suppressEscape]);
 
   useEffect(() => {
     return subscribeNoteAttachments(note.id, setAttachments, () => setModalError("첨부파일 목록을 불러오지 못했습니다."));
@@ -4324,15 +4366,23 @@ function NotePreviewModal({
             dangerouslySetInnerHTML={{ __html: linkifyEditorHtml(sanitizeEditorHtml(bodyHtml)) }}
           />
         )}
-        <NoteInsightPanel
-          currentUid={currentUid}
-          history={history}
-          historySummaries={historySummaries}
-          note={note}
-          onConfirm={onConfirm}
-          readStates={readStates}
-          users={historyUsers}
-        />
+        <button className="secondary-button note-insight-trigger" type="button" onClick={() => setActivityOpen(true)}>
+          <History size={16} />
+          활동 / 수정 이력 보기
+          <span>{history.length}개 이력</span>
+        </button>
+        {activityOpen && (
+          <NoteInsightModal
+            currentUid={currentUid}
+            history={history}
+            historySummaries={historySummaries}
+            note={note}
+            onClose={() => setActivityOpen(false)}
+            onConfirm={onConfirm}
+            readStates={readStates}
+            users={historyUsers}
+          />
+        )}
         <AttachmentList
           attachments={attachments}
           busyId={attachmentBusyId}
@@ -4347,11 +4397,12 @@ function NotePreviewModal({
   );
 }
 
-function NoteInsightPanel({
+function NoteInsightModal({
   currentUid,
   history,
   historySummaries,
   note,
+  onClose,
   onConfirm,
   readStates,
   users
@@ -4360,6 +4411,7 @@ function NoteInsightPanel({
   history: NoteHistorySnapshot[];
   historySummaries: Record<string, string>;
   note: DecryptedNote;
+  onClose: () => void;
   onConfirm: (note: DecryptedNote) => void;
   readStates: NoteUserStateSnapshot[];
   users: UserProfile[];
@@ -4370,85 +4422,103 @@ function NoteInsightPanel({
   const showReceipts = note.type === "shared";
 
   return (
-    <details className="note-insight-panel" aria-label="노트 활동 정보">
-      <summary>
-        <span>
-          <History size={16} />
-          활동 / 수정 이력 보기
-        </span>
-        <em>{history.length}개 이력</em>
-      </summary>
-      {showReceipts && (
-        <div className="note-insight-section">
-          <div className="note-insight-heading">
-            <h3>
-              <CheckCircle2 size={16} />
-              읽음 / 확인
-            </h3>
-            {!note.isDeleted && (
-              <button
-                className="secondary-button note-preview-action"
-                type="button"
-                onClick={() => onConfirm(note)}
-              >
-                <CheckCircle2 size={14} />
-                확인
-              </button>
+    <div className="modal-backdrop note-insight-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-label="노트 활동 및 수정 이력"
+        aria-modal="true"
+        className="note-insight-modal"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="note-insight-modal-header">
+          <div>
+            <span>
+              <History size={16} />
+              활동
+            </span>
+            <h2>활동 / 수정 이력</h2>
+          </div>
+          <div className="note-insight-modal-actions">
+            <em>{history.length}개 이력</em>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="활동 및 수정 이력 닫기">
+              <X size={16} />
+            </button>
+          </div>
+        </header>
+        <div className="note-insight-modal-body">
+          {showReceipts && (
+            <div className="note-insight-section">
+              <div className="note-insight-heading">
+                <h3>
+                  <CheckCircle2 size={16} />
+                  읽음 / 확인
+                </h3>
+                {!note.isDeleted && (
+                  <button
+                    className="secondary-button note-preview-action"
+                    type="button"
+                    onClick={() => onConfirm(note)}
+                  >
+                    <CheckCircle2 size={14} />
+                    확인
+                  </button>
+                )}
+              </div>
+              <div className="receipt-list">
+                {note.participantUids.map((uid) => {
+                  const user = usersByUid.get(uid);
+                  const state = statesByUid.get(uid);
+                  const readAt = dateFromTimestamp(state?.readAt);
+                  const confirmedAt = dateFromTimestamp(state?.confirmedAt);
+
+                  return (
+                    <article className="receipt-item" key={uid}>
+                      <span className="mini-avatar" style={{ background: user?.color ?? "#64748b" }}>
+                        {user?.avatarText ?? uid.slice(0, 1).toUpperCase()}
+                      </span>
+                      <div>
+                        <strong>{user?.displayName ?? uid}</strong>
+                        <span>{confirmedAt ? `확인 ${formatCompactDateTime(confirmedAt)}` : readAt ? `읽음 ${formatCompactDateTime(readAt)}` : "아직 읽지 않음"}</span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+              {currentState?.confirmedAt && <p className="muted receipt-current">내 확인: {formatFullDateTime(dateFromTimestamp(currentState.confirmedAt))}</p>}
+            </div>
+          )}
+          <div className="note-insight-section">
+            <div className="note-insight-heading">
+              <h3>
+                <History size={16} />
+                수정 이력
+              </h3>
+            </div>
+            {history.length ? (
+              <div className="history-list">
+                {history.slice(0, 8).map((entry) => {
+                  const actor = usersByUid.get(entry.actorUid);
+                  const createdAt = dateFromTimestamp(entry.createdAt);
+                  const summary = historySummaries[entry.id] ?? entry.changedFields.map(historyFieldLabel).join(", ");
+
+                  return (
+                    <article className="history-item" key={entry.id}>
+                      <span>{historyActionLabel(entry.action)}</span>
+                      <strong>{summary}</strong>
+                      <em>
+                        {actor?.displayName ?? entry.actorUid} · {formatCompactDateTime(createdAt)}
+                      </em>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="muted">아직 기록된 수정 이력이 없습니다.</p>
             )}
           </div>
-          <div className="receipt-list">
-            {note.participantUids.map((uid) => {
-              const user = usersByUid.get(uid);
-              const state = statesByUid.get(uid);
-              const readAt = dateFromTimestamp(state?.readAt);
-              const confirmedAt = dateFromTimestamp(state?.confirmedAt);
-
-              return (
-                <article className="receipt-item" key={uid}>
-                  <span className="mini-avatar" style={{ background: user?.color ?? "#64748b" }}>
-                    {user?.avatarText ?? uid.slice(0, 1).toUpperCase()}
-                  </span>
-                  <div>
-                    <strong>{user?.displayName ?? uid}</strong>
-                    <span>{confirmedAt ? `확인 ${formatCompactDateTime(confirmedAt)}` : readAt ? `읽음 ${formatCompactDateTime(readAt)}` : "아직 읽지 않음"}</span>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-          {currentState?.confirmedAt && <p className="muted receipt-current">내 확인: {formatFullDateTime(dateFromTimestamp(currentState.confirmedAt))}</p>}
         </div>
-      )}
-      <div className="note-insight-section">
-        <div className="note-insight-heading">
-          <h3>
-            <History size={16} />
-            수정 이력
-          </h3>
-        </div>
-        {history.length ? (
-          <div className="history-list">
-            {history.slice(0, 8).map((entry) => {
-              const actor = usersByUid.get(entry.actorUid);
-              const createdAt = dateFromTimestamp(entry.createdAt);
-              const summary = historySummaries[entry.id] ?? entry.changedFields.map(historyFieldLabel).join(", ");
-
-              return (
-                <article className="history-item" key={entry.id}>
-                  <span>{historyActionLabel(entry.action)}</span>
-                  <strong>{summary}</strong>
-                  <em>
-                    {actor?.displayName ?? entry.actorUid} · {formatCompactDateTime(createdAt)}
-                  </em>
-                </article>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="muted">아직 기록된 수정 이력이 없습니다.</p>
-        )}
-      </div>
-    </details>
+      </section>
+    </div>
   );
 }
 

@@ -19,6 +19,7 @@ import type { Timestamp } from "firebase/firestore";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AppShell } from "../components/AppShell";
+import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, generateUserKeyBundle, unwrapNoteKey } from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, previewTextFromHtml } from "../lib/editorContent";
@@ -53,6 +54,7 @@ const initialDraft: DraftUser = {
 };
 
 type AdminNoteTypeFilter = "all" | NoteKind;
+type AdminTab = "create" | "users" | "notes";
 type UserStatusFilter = "all" | "active" | "inactive" | "admin";
 
 interface AdminNoteView extends NoteSnapshot {
@@ -192,10 +194,27 @@ function updatePayloadFromDraft(user: UserProfile) {
 }
 
 export default function AdminPage() {
+  const { privateKey } = useAuth();
+
+  if (!privateKey) {
+    return (
+      <AppShell>
+        <section className="workspace admin-workspace">
+          <UnlockPanel />
+        </section>
+      </AppShell>
+    );
+  }
+
+  return <AdminDashboard />;
+}
+
+function AdminDashboard() {
   const { profile, privateKey } = useAuth();
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [adminNoteViews, setAdminNoteViews] = useState<AdminNoteView[]>([]);
+  const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>("users");
   const [noteOwnerFilter, setNoteOwnerFilter] = useState("all");
   const [noteTypeFilter, setNoteTypeFilter] = useState<AdminNoteTypeFilter>("all");
   const [noteSearch, setNoteSearch] = useState("");
@@ -298,6 +317,22 @@ export default function AdminPage() {
       setSelectedNoteId(null);
     }
   }, [adminNoteViews, selectedNoteId]);
+
+  useEffect(() => {
+    if (!selectedNoteId) {
+      return undefined;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSelectedNoteId(null);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedNoteId]);
 
   const nextQuickKey = useMemo(() => {
     const used = new Set(users.map((user) => user.quickKey));
@@ -498,8 +533,43 @@ export default function AdminPage() {
           <AdminStat icon={<KeyRound size={18} />} label="공유 허용" value={adminStats.shareLinks} />
         </section>
 
-        <div className="admin-management-grid">
-          <section className="panel admin-create-panel">
+        <div className="admin-tabs" role="tablist" aria-label="관리자 기능">
+          <button
+            aria-selected={activeAdminTab === "create"}
+            className={activeAdminTab === "create" ? "active" : ""}
+            onClick={() => setActiveAdminTab("create")}
+            role="tab"
+            type="button"
+          >
+            <Plus size={16} />
+            사용자 추가
+          </button>
+          <button
+            aria-selected={activeAdminTab === "users"}
+            className={activeAdminTab === "users" ? "active" : ""}
+            onClick={() => setActiveAdminTab("users")}
+            role="tab"
+            type="button"
+          >
+            <UserRoundCog size={16} />
+            사용자 목록
+          </button>
+          <button
+            aria-selected={activeAdminTab === "notes"}
+            className={activeAdminTab === "notes" ? "active" : ""}
+            onClick={() => setActiveAdminTab("notes")}
+            role="tab"
+            type="button"
+          >
+            <FileText size={16} />
+            노트 관리
+          </button>
+        </div>
+
+        {activeAdminTab !== "notes" && (
+          <div className={`admin-management-grid ${activeAdminTab === "users" ? "single-panel" : ""}`}>
+            {activeAdminTab === "create" && (
+              <section className="panel admin-create-panel">
             <div className="admin-section-header">
               <h2>
                 <Plus size={20} />
@@ -604,9 +674,11 @@ export default function AdminPage() {
                 {pending ? "생성 중" : "사용자 생성"}
               </button>
             </form>
-          </section>
+              </section>
+            )}
 
-          <section className="panel admin-users-panel">
+            {activeAdminTab === "users" && (
+              <section className="panel admin-users-panel">
             <div className="admin-section-header">
               <h2>
                 <UserRoundCog size={20} />
@@ -658,10 +730,13 @@ export default function AdminPage() {
                 <div className="empty-state">조건에 맞는 사용자가 없습니다.</div>
               )}
             </div>
-          </section>
-        </div>
+              </section>
+            )}
+          </div>
+        )}
 
-        <section className="panel wide-panel admin-note-panel">
+        {activeAdminTab === "notes" && (
+          <section className="panel wide-panel admin-note-panel">
           <div className="admin-section-header">
             <h2>
               <FileText size={20} />
@@ -772,7 +847,8 @@ export default function AdminPage() {
               <div className="empty-state">조건에 맞는 노트가 없습니다.</div>
             )}
           </div>
-        </section>
+          </section>
+        )}
         {selectedAdminNote && (
           <div className="modal-backdrop" role="dialog" aria-modal="true">
             <article className="note-preview-modal admin-note-modal">
