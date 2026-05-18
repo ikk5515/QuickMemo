@@ -86,4 +86,24 @@ describe("NotesPage security controls", () => {
     expect(referenceHelper).toContain("row > xlsxExcelMaxRows");
     expect(referenceHelper).toContain("column >= xlsxExcelMaxColumns");
   });
+
+  it("bounds compressed HWP preview sections before rich rendering", () => {
+    const hwpAttachmentBranch =
+      notesPageSource.match(/if \(attachment\.extension === "hwp"\) \{[\s\S]*?if \(attachment\.extension === "hwpx"\)/)?.[0] ?? "";
+    const hwpExtractor =
+      notesPageSource.match(/async function extractHwpPreviewHtml[\s\S]*?function extractHwpxPreviewHtml/)?.[0] ?? "";
+    const hwpDecompressor =
+      notesPageSource.match(/function decompressHwpSectionBytes[\s\S]*?function appendHwpSectionBlocks/)?.[0] ?? "";
+
+    expect(notesPageSource).toContain("const maxHwpPreviewSectionBytes = 1_500_000");
+    expect(notesPageSource).toContain("const maxHwpPreviewTotalBytes = 4_000_000");
+    expect(hwpAttachmentBranch).toContain("preview.safeForRichPreview");
+    expect(hwpAttachmentBranch).toContain("kind: \"html\"");
+    expect(hwpExtractor).toContain("safeForRichPreview = false");
+    expect(hwpExtractor).toContain("boundedHwpSectionBytes");
+    expect(hwpDecompressor).toContain("new Decompress");
+    expect(hwpDecompressor).toContain("decodedLength > sectionLimit");
+    expect(hwpDecompressor).toContain("hwpPreviewCompressedChunkBytes");
+    expect(hwpDecompressor).not.toContain("decompressSync");
+  });
 });

@@ -56,7 +56,7 @@ import {
   useState
 } from "react";
 import { Timestamp } from "firebase/firestore";
-import { decompressSync, strFromU8, unzipSync } from "fflate";
+import { Decompress, strFromU8, unzipSync } from "fflate";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
@@ -276,6 +276,9 @@ const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 const maxTextPreviewCharacters = 120_000;
 const maxDocumentPreviewBlocks = 320;
 const maxDocxPreviewMarkupCharacters = 1_600_000;
+const maxHwpPreviewSectionBytes = 1_500_000;
+const maxHwpPreviewTotalBytes = 4_000_000;
+const hwpPreviewCompressedChunkBytes = 16_384;
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 const docxPreviewFrameCsp = [
   "default-src 'none'",
@@ -2649,16 +2652,32 @@ export default function NotesPage() {
       }
 
       if (attachment.extension === "hwp") {
-        const fallbackHtml = await extractHwpPreviewHtml(plainBytes);
+        const preview = await extractHwpPreviewHtml(plainBytes);
 
-        setAttachmentPreview({
-          bytes: plainBytes,
-          fallbackHtml,
-          fileName,
-          kind: "hwp",
-          label: "HWP 문서 미리보기"
-        });
-        setStatus("HWP 미리보기를 열었습니다.");
+        setAttachmentPreview(
+          preview.safeForRichPreview
+            ? {
+                bytes: plainBytes,
+                fallbackHtml: preview.html,
+                fileName,
+                kind: "hwp",
+                label: "HWP 문서 미리보기"
+              }
+            : preview.html
+              ? {
+                  fileName,
+                  html: preview.html,
+                  kind: "html",
+                  label: "HWP 안전 본문 미리보기"
+                }
+              : {
+                  fileName,
+                  kind: "unsupported",
+                  label: "HWP 미리보기 안내",
+                  text: "HWP 미리보기가 안전 제한을 초과했거나 지원하지 않는 문서입니다. 원본 파일은 다운로드해서 확인해주세요."
+                }
+        );
+        setStatus(preview.safeForRichPreview ? "HWP 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
         return;
       }
 
@@ -6900,7 +6919,16 @@ function escapeStyleText(value: string) {
   return value.replace(/<\/style/gi, "<\\/style").replace(/<!--/g, "").replace(/-->/g, "");
 }
 
-async function extractHwpPreviewHtml(bytes: Uint8Array) {
+interface HwpPreviewResult {
+  html: string;
+  safeForRichPreview: boolean;
+}
+
+interface HwpPreviewByteBudget {
+  remainingBytes: number;
+}
+
+async function extractHwpPreviewHtml(bytes: Uint8Array): Promise<HwpPreviewResult> {
   try {
     const CFB = await import("cfb");
     const container = CFB.read(bytes, { type: "array" });
@@ -6908,24 +6936,34 @@ async function extractHwpPreviewHtml(bytes: Uint8Array) {
     const headerInfo = hwpHeaderInfo(header);
 
     if (!headerInfo || headerInfo.encrypted || headerInfo.distributed) {
-      return "";
+      return { html: "", safeForRichPreview: false };
     }
 
     const blocks: string[] = [];
+    const budget = { remainingBytes: maxHwpPreviewTotalBytes };
+    let safeForRichPreview = true;
 
-    hwpSectionEntries(container).forEach(({ entry }) => {
+    for (const { entry } of hwpSectionEntries(container)) {
       if (blocks.length >= maxDocumentPreviewBlocks) {
-        return;
+        break;
       }
 
       const sectionBytes = cfbEntryBytes(entry);
-      const decodedBytes = headerInfo.compressed ? decompressHwpSectionBytes(sectionBytes) : sectionBytes;
-      appendHwpSectionBlocks(decodedBytes, blocks);
-    });
+      const decodedBytes = headerInfo.compressed
+        ? decompressHwpSectionBytes(sectionBytes, budget)
+        : boundedHwpSectionBytes(sectionBytes, budget);
 
-    return documentPreviewHtml(blocks);
+      if (!decodedBytes) {
+        safeForRichPreview = false;
+        break;
+      }
+
+      appendHwpSectionBlocks(decodedBytes, blocks);
+    }
+
+    return { html: documentPreviewHtml(blocks), safeForRichPreview };
   } catch {
-    return "";
+    return { html: "", safeForRichPreview: false };
   }
 }
 
@@ -7715,12 +7753,59 @@ function hwpSectionEntries(container: { FileIndex: Array<{ content?: unknown }>;
     .sort((left, right) => left.sectionIndex - right.sectionIndex);
 }
 
-function decompressHwpSectionBytes(bytes: Uint8Array) {
-  try {
-    return decompressSync(bytes);
-  } catch {
-    return bytes;
+function boundedHwpSectionBytes(bytes: Uint8Array, budget: HwpPreviewByteBudget) {
+  const sectionLimit = Math.min(maxHwpPreviewSectionBytes, budget.remainingBytes);
+
+  if (sectionLimit <= 0 || bytes.length > sectionLimit) {
+    return null;
   }
+
+  budget.remainingBytes -= bytes.length;
+  return bytes;
+}
+
+function decompressHwpSectionBytes(bytes: Uint8Array, budget: HwpPreviewByteBudget) {
+  try {
+    const sectionLimit = Math.min(maxHwpPreviewSectionBytes, budget.remainingBytes);
+
+    if (sectionLimit <= 0) {
+      return null;
+    }
+
+    const chunks: Uint8Array[] = [];
+    let decodedLength = 0;
+    const stream = new Decompress((chunk) => {
+      decodedLength += chunk.length;
+
+      if (decodedLength > sectionLimit) {
+        throw new Error("HWP preview decompressed size limit exceeded");
+      }
+
+      chunks.push(chunk.slice());
+    });
+
+    for (let offset = 0; offset < bytes.length; offset += hwpPreviewCompressedChunkBytes) {
+      const nextOffset = Math.min(bytes.length, offset + hwpPreviewCompressedChunkBytes);
+      stream.push(bytes.subarray(offset, nextOffset), nextOffset >= bytes.length);
+    }
+
+    budget.remainingBytes -= decodedLength;
+    return concatPreviewBytes(chunks, decodedLength);
+  } catch {
+    return null;
+  }
+}
+
+function concatPreviewBytes(chunks: Uint8Array[], totalLength: number) {
+  const output = new Uint8Array(totalLength);
+  let offset = 0;
+
+  chunks.forEach((chunk) => {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  });
+
+  return output;
 }
 
 function appendHwpSectionBlocks(bytes: Uint8Array, blocks: string[]) {
