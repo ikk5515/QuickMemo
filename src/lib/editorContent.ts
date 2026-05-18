@@ -16,6 +16,7 @@ const textAlignments = new Set(["left", "center", "right"]);
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
 const safeUidPattern = /^[A-Za-z0-9_:.-]{1,128}$/;
+const attributionLabelMaxLength = 160;
 const lineHeightTags = new Set(["P", "DIV", "LI", "TD", "TH", "SPAN"]);
 const attributionTags = new Set(["P", "DIV", "LI", "TD", "TH"]);
 const allowedTags = new Set([
@@ -361,6 +362,7 @@ function copySharedAttribution(target: HTMLElement, source: HTMLElement) {
   const authorUids = safeUidList(source.getAttribute("data-qm-author-uids"));
   const editorUids = safeUidList(source.getAttribute("data-qm-editor-uids"));
   const lastEditorUid = safeUid(source.getAttribute("data-qm-last-editor-uid"));
+  const attributionLabel = safeAttributionLabel(source.getAttribute("data-qm-attribution-label"));
 
   if (authorUids) {
     target.dataset.qmAuthorUids = authorUids;
@@ -372,6 +374,10 @@ function copySharedAttribution(target: HTMLElement, source: HTMLElement) {
 
   if (lastEditorUid) {
     target.dataset.qmLastEditorUid = lastEditorUid;
+  }
+
+  if (attributionLabel) {
+    target.dataset.qmAttributionLabel = attributionLabel;
   }
 }
 
@@ -616,6 +622,23 @@ function safeUid(value: string | null) {
   const normalizedValue = String(value ?? "").trim();
 
   return safeUidPattern.test(normalizedValue) ? normalizedValue : null;
+}
+
+function safeAttributionLabel(value: string | null) {
+  const normalizedValue = String(value ?? "").replace(/\s+/g, " ").trim();
+
+  if (!normalizedValue || normalizedValue.length > attributionLabelMaxLength || hasUnsafeAttributionLabelCharacter(normalizedValue)) {
+    return null;
+  }
+
+  return normalizedValue;
+}
+
+function hasUnsafeAttributionLabelCharacter(value: string) {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127 || `<>"'\``.includes(character);
+  });
 }
 
 function safePixelWidth(value: string | null) {

@@ -302,18 +302,25 @@ interface SharedBlockMetadata {
   signature: string;
 }
 
-function sharedNoteDraftForSave(previousDraft: NoteDraft | null, draft: NoteDraft, actorUid: string, fallbackAuthorUid: string): NoteDraft {
+function sharedNoteDraftForSave(
+  previousDraft: NoteDraft | null,
+  draft: NoteDraft,
+  actorUid: string,
+  fallbackAuthorUid: string,
+  users: UserProfile[] = []
+): NoteDraft {
   return {
     ...draft,
-    body: annotateSharedNoteBody(previousDraft?.body ?? "", draft.body, actorUid, fallbackAuthorUid)
+    body: annotateSharedNoteBody(previousDraft?.body ?? "", draft.body, actorUid, fallbackAuthorUid, users)
   };
 }
 
-function annotateSharedNoteBody(previousHtml: string, nextHtml: string, actorUid: string, fallbackAuthorUid: string) {
+function annotateSharedNoteBody(previousHtml: string, nextHtml: string, actorUid: string, fallbackAuthorUid: string, users: UserProfile[]) {
   if (typeof document === "undefined") {
     return nextHtml;
   }
 
+  const usersByUid = new Map(users.map((user) => [user.uid, user]));
   const previousBlocks = sharedBlockMetadataFromHtml(previousHtml, fallbackAuthorUid);
   const template = document.createElement("template");
   template.innerHTML = sanitizeEditorHtml(nextHtml);
@@ -337,6 +344,7 @@ function annotateSharedNoteBody(previousHtml: string, nextHtml: string, actorUid
     block.dataset.qmAuthorUids = nextAuthors.join(",");
     block.dataset.qmEditorUids = finalEditors.join(",");
     block.dataset.qmLastEditorUid = finalLastEditorUid;
+    block.dataset.qmAttributionLabel = sharedAttributionLabel(nextAuthors, finalLastEditorUid, usersByUid);
   });
 
   const container = document.createElement("div");
@@ -438,7 +446,7 @@ function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserPro
     const safeAuthors = authors.length ? authors : [note.ownerUid];
     const safeEditors = editors.length ? editors : [note.updatedBy || note.ownerUid];
     const finalLastEditorUid = lastEditorUid ?? safeEditors.at(-1) ?? note.updatedBy ?? note.ownerUid;
-    const label = `작성자: ${uidLabels(safeAuthors, usersByUid)}, 최종 수정자: ${uidLabels([finalLastEditorUid], usersByUid)}`;
+    const label = sharedAttributionLabel(safeAuthors, finalLastEditorUid, usersByUid);
     block.dataset.qmAttributionLabel = label;
     renderSharedAttributionNote(block, label);
   });
@@ -446,33 +454,6 @@ function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserPro
   const container = document.createElement("div");
   container.appendChild(template.content);
   return container.innerHTML;
-}
-
-function applySharedAttributionLabels(root: HTMLElement | null, note: DecryptedNote | null | undefined, users: UserProfile[]) {
-  if (!root) {
-    return;
-  }
-
-  root.querySelectorAll<HTMLElement>("[data-qm-attribution-label]").forEach((element) => {
-    element.removeAttribute("data-qm-attribution-label");
-  });
-
-  if (!note || note.type !== "shared") {
-    return;
-  }
-
-  const usersByUid = new Map(users.map((user) => [user.uid, user]));
-
-  sharedAttributionBlocks(root).forEach((block) => {
-    const authors = parseUidList(block.dataset.qmAuthorUids);
-    const editors = parseUidList(block.dataset.qmEditorUids);
-    const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
-    const safeAuthors = authors.length ? authors : [note.ownerUid];
-    const safeEditors = editors.length ? editors : [note.updatedBy || note.ownerUid];
-    const finalLastEditorUid = lastEditorUid ?? safeEditors.at(-1) ?? note.updatedBy ?? note.ownerUid;
-
-    block.dataset.qmAttributionLabel = `작성자: ${uidLabels(safeAuthors, usersByUid)}, 최종 수정자: ${uidLabels([finalLastEditorUid], usersByUid)}`;
-  });
 }
 
 function renderSharedAttributionNote(block: HTMLElement, label: string) {
@@ -486,6 +467,10 @@ function renderSharedAttributionNote(block: HTMLElement, label: string) {
   }
 
   block.appendChild(noteElement);
+}
+
+function sharedAttributionLabel(authorUids: string[], lastEditorUid: string, usersByUid: Map<string, UserProfile>) {
+  return `작성자: ${uidLabels(authorUids, usersByUid)}, 최종 수정자: ${uidLabels([lastEditorUid], usersByUid)}`;
 }
 
 function uidLabels(uids: string[], usersByUid: Map<string, UserProfile>) {
@@ -2235,7 +2220,7 @@ export default function NotesPage() {
         const previousDraft = activeRemoteNote ? draftFromNote(activeRemoteNote) : null;
         const saveDraft =
           activeRemoteNote?.type === "shared"
-            ? sharedNoteDraftForSave(previousDraft, draft, unlockedProfile.uid, activeRemoteNote.ownerUid)
+            ? sharedNoteDraftForSave(previousDraft, draft, unlockedProfile.uid, activeRemoteNote.ownerUid, users)
             : draft;
         const payload = await encryptNoteDraft(saveDraft, editor.noteKey);
         const [historySummary, historySnapshot] = await Promise.all([
@@ -2265,7 +2250,7 @@ export default function NotesPage() {
         (uid) => uid === unlockedProfile.uid || canShareWithUser(uid)
       );
       const type = noteTypeFromParticipants(participantUids);
-      const saveDraft = type === "shared" ? sharedNoteDraftForSave(null, draft, unlockedProfile.uid, unlockedProfile.uid) : draft;
+      const saveDraft = type === "shared" ? sharedNoteDraftForSave(null, draft, unlockedProfile.uid, unlockedProfile.uid, users) : draft;
       const payload = await encryptNoteDraft(saveDraft, noteKey);
       const [historySummary, historySnapshot] = await Promise.all([
         encryptText(historySummaryFromDraft(null, saveDraft), noteKey),
@@ -2734,7 +2719,7 @@ export default function NotesPage() {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
       const previousDraft = draftFromNote(note);
       const saveDraft =
-        note.type === "shared" ? sharedNoteDraftForSave(previousDraft, draft, unlockedProfile.uid, note.ownerUid) : draft;
+        note.type === "shared" ? sharedNoteDraftForSave(previousDraft, draft, unlockedProfile.uid, note.ownerUid, users) : draft;
       const payload = await encryptNoteDraft(saveDraft, noteKey);
       const [historySummary, historySnapshot] = await Promise.all([
         encryptText(historySummaryFromDraft(previousDraft, saveDraft), noteKey),
@@ -2990,8 +2975,6 @@ export default function NotesPage() {
             value={editor.title}
           />
           <RichMemoEditor
-            attributionNote={activeRemoteNote}
-            attributionUsers={users}
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
             onCursorChange={publishEditorCursor}
@@ -3053,8 +3036,6 @@ export default function NotesPage() {
 }
 
 function RichMemoEditor({
-  attributionNote = null,
-  attributionUsers = [],
   editorRef,
   fontSize,
   onCursorChange,
@@ -3063,8 +3044,6 @@ function RichMemoEditor({
   remoteCursors = [],
   value
 }: {
-  attributionNote?: DecryptedNote | null;
-  attributionUsers?: UserProfile[];
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
   onCursorChange?: (cursorOffset: number | null, cursorVisible: boolean) => void;
@@ -3082,7 +3061,7 @@ function RichMemoEditor({
   const [customCellColor, setCustomCellColor] = useState<string>(editorCellColors[0]);
   const [tableRows, setTableRows] = useState(3);
   const [tableColumns, setTableColumns] = useState(3);
-  const [toolbarVersion, setToolbarVersion] = useState(0);
+  const [, setToolbarVersion] = useState(0);
   const controlIdPrefix = useId();
   const selectionFontSizeListId = `${controlIdPrefix}-selection-font-sizes`;
   const selectionLineHeightListId = `${controlIdPrefix}-selection-line-heights`;
@@ -3288,14 +3267,6 @@ function RichMemoEditor({
 
     editor.commands.setContent(value || "", { emitUpdate: false });
   }, [editor, value]);
-
-  useEffect(() => {
-    if (!editor) {
-      return;
-    }
-
-    applySharedAttributionLabels(editor.view.dom as HTMLElement, attributionNote, attributionUsers);
-  }, [attributionNote, attributionUsers, editor, toolbarVersion, value]);
 
   function clearImageSelection() {
     selectedImageRef.current = null;
@@ -6222,8 +6193,6 @@ function NotePreviewModal({
               />
             </label>
             <RichMemoEditor
-              attributionNote={note}
-              attributionUsers={historyUsers}
               editorRef={previewEditorRef}
               fontSize={draft.fontSize}
               onFilesPaste={(files, insertHtml) => void insertPreviewPastedFiles(files, insertHtml)}

@@ -1662,19 +1662,44 @@ textarea {
   margin: 0 0 16px;
 }
 
+.rich-body-input [data-qm-attribution-label] {
+  position: relative;
+}
+
+.rich-body-input p[data-qm-attribution-label],
+.rich-body-input li[data-qm-attribution-label] {
+  min-height: 1.45em;
+  padding-right: clamp(150px, 30%, 300px);
+}
+
+.rich-body-input td[data-qm-attribution-label],
+.rich-body-input th[data-qm-attribution-label] {
+  padding-right: clamp(84px, 22%, 150px);
+}
+
 .rich-body-input [data-qm-attribution-label]::after {
-  border-top: 1px dashed rgb(148 163 184 / 30%);
   color: #94a3b8;
-  content: attr(data-qm-attribution-label);
+  content: "- " attr(data-qm-attribution-label);
   display: block;
   font-size: 11px;
   font-weight: 850;
   line-height: 1.25;
-  margin: 4px 0 10px;
-  padding-top: 3px;
+  margin: 0;
+  max-width: min(280px, 34%);
+  overflow: hidden;
+  padding-left: 8px;
   pointer-events: none;
+  position: absolute;
+  right: 0;
   text-align: right;
+  text-overflow: ellipsis;
+  top: 0.12em;
   user-select: none;
+  white-space: nowrap;
+}
+
+.rich-body-input li[data-qm-attribution-label]::after {
+  grid-column: 1 / -1;
 }
 
 .rich-body-input .tableWrapper {
@@ -4236,6 +4261,22 @@ textarea {
     max-width: none;
     position: static;
     text-align: left;
+  }
+
+  .rich-body-input p[data-qm-attribution-label],
+  .rich-body-input li[data-qm-attribution-label],
+  .rich-body-input td[data-qm-attribution-label],
+  .rich-body-input th[data-qm-attribution-label] {
+    padding-right: 0;
+  }
+
+  .rich-body-input [data-qm-attribution-label]::after {
+    margin: 3px 0 8px;
+    max-width: none;
+    padding-left: 0;
+    position: static;
+    text-align: right;
+    white-space: normal;
   }
 
   .note-preview-editor {
