@@ -333,8 +333,8 @@ service cloud.firestore {
     }
 
     function validNoteHistory(data, noteId) {
-      return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields", "createdAt"])
-        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "encryptedSummary", "encryptedSnapshot", "createdAt"])
+      return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields", "readerUids", "createdAt"])
+        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "readerUids", "encryptedSummary", "encryptedSnapshot", "createdAt"])
         && data.noteId == noteId
         && data.actorUid == request.auth.uid
         && data.action in ["create", "content", "deadline", "share", "delete", "restore"]
@@ -342,9 +342,20 @@ service cloud.firestore {
         && data.changedFields.size() > 0
         && data.changedFields.size() <= 8
         && data.changedFields.hasOnly(["title", "body", "dueAt", "participants", "deleted", "restored"])
+        && data.readerUids is list
+        && data.readerUids.size() > 0
+        && data.readerUids.size() <= 200
         && (!data.keys().hasAny(["encryptedSummary"]) || encryptedPayload(data.encryptedSummary))
         && (!data.keys().hasAny(["encryptedSnapshot"]) || encryptedPayload(data.encryptedSnapshot))
         && data.createdAt == request.time;
+    }
+
+    function canReadNoteHistory(data, noteData) {
+      return canReadNoteDocument(noteData)
+        && (
+          request.auth.uid == noteData.ownerUid
+          || request.auth.uid in data.readerUids
+        );
     }
 
     function linkedNoteUpdate(noteId) {
@@ -428,12 +439,16 @@ service cloud.firestore {
     }
 
     function historyMatchesNoteMutation(data, noteId) {
-      return createHistoryMatchesNote(data, noteId)
-        || contentHistoryMatchesNote(data, noteId)
-        || shareHistoryMatchesNote(data, noteId)
-        || deadlineHistoryMatchesNote(data, noteId)
-        || deleteHistoryMatchesNote(data, noteId)
-        || restoreHistoryMatchesNote(data, noteId);
+      return existsAfter(notePath(noteId))
+        && data.readerUids == getAfter(notePath(noteId)).data.participantUids
+        && (
+          createHistoryMatchesNote(data, noteId)
+          || contentHistoryMatchesNote(data, noteId)
+          || shareHistoryMatchesNote(data, noteId)
+          || deadlineHistoryMatchesNote(data, noteId)
+          || deleteHistoryMatchesNote(data, noteId)
+          || restoreHistoryMatchesNote(data, noteId)
+        );
     }
 
     function validAttachment(data, noteId) {
@@ -851,7 +866,7 @@ service cloud.firestore {
 
       match /history/{historyId} {
         allow read: if exists(notePath(noteId))
-          && canReadNoteDocument(get(notePath(noteId)).data);
+          && canReadNoteHistory(resource.data, get(notePath(noteId)).data);
         allow create: if validNoteHistory(request.resource.data, noteId)
           && historyMatchesNoteMutation(request.resource.data, noteId);
         allow update: if validNoteHistory(request.resource.data, noteId)

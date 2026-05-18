@@ -2246,7 +2246,12 @@ export default function NotesPage() {
     setError(null);
 
     try {
-      await updateNoteDeadline(noteId, unlockedProfile.uid, dueAt ? Timestamp.fromDate(dueAt) : null);
+      await updateNoteDeadline(
+        noteId,
+        unlockedProfile.uid,
+        dueAt ? Timestamp.fromDate(dueAt) : null,
+        activeRemoteNote?.participantUids ?? editor.participantUids
+      );
       setStatus(dueAt ? "마감일을 저장했습니다." : "마감일을 해제했습니다.");
     } catch {
       setError("마감일을 저장하지 못했습니다.");
@@ -2426,6 +2431,7 @@ export default function NotesPage() {
           payload.encryptedTitle,
           payload.encryptedBody,
           changedDraftFields(previousDraft, saveDraft),
+          activeRemoteNote?.participantUids ?? editor.participantUids,
           historySummary,
           historySnapshot
         );
@@ -2814,7 +2820,7 @@ export default function NotesPage() {
     setSaving(true);
 
     try {
-      await deleteNote(editor.noteId, unlockedProfile.uid);
+      await deleteNote(editor.noteId, unlockedProfile.uid, activeRemoteNote.participantUids);
       startNewNote();
       setStatus("노트를 삭제했습니다.");
     } catch {
@@ -2834,7 +2840,7 @@ export default function NotesPage() {
     setError(null);
 
     try {
-      await deleteNote(note.id, unlockedProfile.uid);
+      await deleteNote(note.id, unlockedProfile.uid, note.participantUids);
       setPreviewNoteId(null);
 
       if (editor.noteId === note.id) {
@@ -2859,7 +2865,7 @@ export default function NotesPage() {
     setError(null);
 
     try {
-      await restoreNote(note.id, unlockedProfile.uid);
+      await restoreNote(note.id, unlockedProfile.uid, note.participantUids);
       setPreviewNoteId(null);
       setStatus("노트를 복구했습니다.");
     } catch {
@@ -2952,6 +2958,7 @@ export default function NotesPage() {
         payload.encryptedTitle,
         payload.encryptedBody,
         changedDraftFields(previousDraft, saveDraft),
+        note.participantUids,
         historySummary,
         historySnapshot
       );
@@ -6030,8 +6037,14 @@ function NotePreviewModal({
   }, [note.id]);
 
   useEffect(() => {
-    return subscribeNoteHistory(note.id, setHistory, () => setModalError("수정 이력을 불러오지 못했습니다."));
-  }, [note.id]);
+    return subscribeNoteHistory(
+      note.id,
+      currentUid,
+      note.ownerUid === currentUid,
+      setHistory,
+      () => setModalError("수정 이력을 불러오지 못했습니다.")
+    );
+  }, [currentUid, note.id, note.ownerUid]);
 
   useEffect(() => {
     const entriesWithSummary = history.filter((entry) => entry.encryptedSummary);

@@ -556,7 +556,7 @@ function AdminDashboard() {
     setNoteError(null);
 
     try {
-      await deleteNote(note.id, currentProfile.uid);
+      await deleteNote(note.id, currentProfile.uid, note.participantUids);
       setSelectedNoteId(null);
       setNoteNotice("노트를 삭제했습니다.");
     } catch {

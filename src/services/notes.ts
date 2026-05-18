@@ -261,19 +261,28 @@ export function subscribeMyNoteStates(
 
 export function subscribeNoteHistory(
   noteId: string,
+  uid: string,
+  includeAllReadableHistory: boolean,
   callback: (history: NoteHistorySnapshot[]) => void,
   onError?: (error: Error) => void
 ) {
-  const historyQuery = query(collection(db, "notes", noteId, "history"), orderBy("createdAt", "desc"), limit(80));
+  const historyCollection = collection(db, "notes", noteId, "history");
+  const historyQuery = includeAllReadableHistory
+    ? query(historyCollection, orderBy("createdAt", "desc"), limit(80))
+    : query(historyCollection, where("readerUids", "array-contains", uid));
 
   return onSnapshot(
     historyQuery,
     (snapshot) => {
-      callback(
-        snapshot.docs.map((document) => ({
+      const history = snapshot.docs.map((document) => ({
           id: document.id,
           ...(document.data() as NoteHistoryDocument)
-        }))
+        }));
+
+      callback(
+        includeAllReadableHistory
+          ? history
+          : history.sort((left, right) => timestampMillis(right.createdAt) - timestampMillis(left.createdAt)).slice(0, 80)
       );
     },
     (error) => onError?.(error)
@@ -305,10 +314,11 @@ export async function createEncryptedNote(input: SaveNoteInput) {
   const { historySnapshot, historySummary, ...noteInput } = input;
   const noteRef = doc(collection(db, "notes"));
   const batch = writeBatch(db);
+  const participantUids = Array.from(new Set(input.participantUids));
 
   batch.set(noteRef, {
     ...noteInput,
-    participantUids: Array.from(new Set(input.participantUids)),
+    participantUids,
     folderId: input.type === "personal" ? input.folderId ?? null : null,
     createdAt: serverTimestamp(),
     dueAt: input.dueAt ?? null,
@@ -317,7 +327,7 @@ export async function createEncryptedNote(input: SaveNoteInput) {
     savedAt: serverTimestamp(),
     updatedBy: input.ownerUid
   });
-  setNoteHistory(batch, noteRef.id, input.ownerUid, "create", ["title", "body", "dueAt"], historySummary, historySnapshot);
+  setNoteHistory(batch, noteRef.id, input.ownerUid, "create", ["title", "body", "dueAt"], participantUids, historySummary, historySnapshot);
 
   await batch.commit();
   return noteRef;
@@ -329,6 +339,7 @@ export async function updateEncryptedNote(
   encryptedTitle: EncryptedPayload,
   encryptedBody: EncryptedPayload,
   changedFields: string[] = ["title", "body"],
+  readerUids: string[],
   historySummary?: EncryptedPayload,
   historySnapshot?: EncryptedPayload
 ) {
@@ -341,7 +352,7 @@ export async function updateEncryptedNote(
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  setNoteHistory(batch, noteId, uid, "content", changedFields, historySummary, historySnapshot);
+  setNoteHistory(batch, noteId, uid, "content", changedFields, readerUids, historySummary, historySnapshot);
   await batch.commit();
 }
 
@@ -355,16 +366,17 @@ export async function updateNoteAccess(
 ) {
   const batch = writeBatch(db);
   const noteRef = doc(db, "notes", noteId);
+  const normalizedParticipantUids = Array.from(new Set(participantUids));
 
   batch.update(noteRef, {
     type,
-    participantUids: Array.from(new Set(participantUids)),
+    participantUids: normalizedParticipantUids,
     wrappedKeys,
     folderId: type === "personal" ? folderId : null,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  setNoteHistory(batch, noteId, uid, "share", ["participants"]);
+  setNoteHistory(batch, noteId, uid, "share", ["participants"], normalizedParticipantUids);
   await batch.commit();
 }
 
@@ -376,7 +388,7 @@ export async function updateNoteFolder(noteId: string, uid: string, folderId: st
   });
 }
 
-export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Timestamp | null) {
+export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Timestamp | null, readerUids: string[]) {
   const batch = writeBatch(db);
   const noteRef = doc(db, "notes", noteId);
 
@@ -385,7 +397,7 @@ export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Tim
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  setNoteHistory(batch, noteId, uid, "deadline", ["dueAt"]);
+  setNoteHistory(batch, noteId, uid, "deadline", ["dueAt"], readerUids);
   await batch.commit();
 }
 
@@ -461,12 +473,14 @@ function setNoteHistory(
   uid: string,
   action: NoteHistoryAction,
   changedFields: string[],
+  readerUids: string[],
   encryptedSummary?: EncryptedPayload,
   encryptedSnapshot?: EncryptedPayload
 ) {
   const normalizedFields = Array.from(new Set(changedFields)).filter(Boolean);
+  const normalizedReaderUids = Array.from(new Set(readerUids)).filter(Boolean);
 
-  if (!normalizedFields.length) {
+  if (!normalizedFields.length || !normalizedReaderUids.length) {
     return;
   }
 
@@ -475,6 +489,7 @@ function setNoteHistory(
     actorUid: uid,
     action,
     changedFields: normalizedFields,
+    readerUids: normalizedReaderUids,
     ...(encryptedSummary ? { encryptedSummary } : {}),
     ...(encryptedSnapshot ? { encryptedSnapshot } : {}),
     createdAt: serverTimestamp()
@@ -586,7 +601,7 @@ async function deleteCollectionDocuments(pathSegments: string[]) {
   }
 }
 
-export async function deleteNote(noteId: string, uid: string) {
+export async function deleteNote(noteId: string, uid: string, readerUids: string[]) {
   const batch = writeBatch(db);
   const noteRef = doc(db, "notes", noteId);
 
@@ -597,13 +612,13 @@ export async function deleteNote(noteId: string, uid: string) {
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  setNoteHistory(batch, noteId, uid, "delete", ["deleted"]);
+  setNoteHistory(batch, noteId, uid, "delete", ["deleted"], readerUids);
   await batch.commit();
 
   await deleteCollectionDocuments(["notes", noteId, "attachments"]);
 }
 
-export async function restoreNote(noteId: string, uid: string) {
+export async function restoreNote(noteId: string, uid: string, readerUids: string[]) {
   const batch = writeBatch(db);
   const noteRef = doc(db, "notes", noteId);
 
@@ -614,7 +629,7 @@ export async function restoreNote(noteId: string, uid: string) {
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  setNoteHistory(batch, noteId, uid, "restore", ["restored"]);
+  setNoteHistory(batch, noteId, uid, "restore", ["restored"], readerUids);
   await batch.commit();
 }
 

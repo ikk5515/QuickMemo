@@ -127,6 +127,7 @@ export interface NoteHistoryDocument {
   actorUid: string;
   action: NoteHistoryAction;
   changedFields: string[];
+  readerUids?: string[];
   encryptedSummary?: EncryptedPayload;
   encryptedSnapshot?: EncryptedPayload;
   createdAt?: Timestamp;
