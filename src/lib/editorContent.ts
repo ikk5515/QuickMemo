@@ -14,6 +14,7 @@ const lineHeightBounds = { min: 1, max: 3 };
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
+const safeBlockIdPattern = /^[A-Za-z0-9_-]{12,64}$/;
 const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
 const safeUidPattern = /^[A-Za-z0-9_:.-]{1,128}$/;
 const attributionLabelMaxLength = 160;
@@ -359,10 +360,15 @@ function copySharedAttribution(target: HTMLElement, source: HTMLElement) {
     return;
   }
 
+  const blockId = safeBlockId(source.getAttribute("data-qm-block-id"));
   const authorUids = safeUidList(source.getAttribute("data-qm-author-uids"));
   const editorUids = safeUidList(source.getAttribute("data-qm-editor-uids"));
   const lastEditorUid = safeUid(source.getAttribute("data-qm-last-editor-uid"));
   const attributionLabel = safeAttributionLabel(source.getAttribute("data-qm-attribution-label"));
+
+  if (blockId) {
+    target.dataset.qmBlockId = blockId;
+  }
 
   if (authorUids) {
     target.dataset.qmAuthorUids = authorUids;
@@ -622,6 +628,12 @@ function safeUid(value: string | null) {
   const normalizedValue = String(value ?? "").trim();
 
   return safeUidPattern.test(normalizedValue) ? normalizedValue : null;
+}
+
+function safeBlockId(value: string | null) {
+  const normalizedValue = String(value ?? "").trim();
+
+  return safeBlockIdPattern.test(normalizedValue) ? normalizedValue : null;
 }
 
 function safeAttributionLabel(value: string | null) {

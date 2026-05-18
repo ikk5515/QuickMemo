@@ -297,7 +297,10 @@ async function encryptNoteDraft(draft: NoteDraft, noteKey: CryptoKey) {
 
 interface SharedBlockMetadata {
   authors: string[];
+  blockId: string | null;
   editors: string[];
+  hasAttribution: boolean;
+  isBlank: boolean;
   lastEditorUid: string | null;
   signature: string;
 }
@@ -322,29 +325,73 @@ function annotateSharedNoteBody(previousHtml: string, nextHtml: string, actorUid
 
   const usersByUid = new Map(users.map((user) => [user.uid, user]));
   const previousBlocks = sharedBlockMetadataFromHtml(previousHtml, fallbackAuthorUid);
+  const usedPreviousBlocks = new Set<SharedBlockMetadata>();
+  const usedNextBlockIds = new Set<string>();
   const template = document.createElement("template");
   template.innerHTML = sanitizeEditorHtml(nextHtml);
   const nextBlocks = sharedAttributionBlocks(template.content);
 
   nextBlocks.forEach((block, index) => {
-    const previousBlock = previousBlocks[index];
+    if (isBlankSharedBlock(block)) {
+      clearSharedAttributionAttributes(block);
+      return;
+    }
+
+    const nextSignature = comparableSharedBlockSignature(block);
+    const requestedBlockId = parseBlockId(block.dataset.qmBlockId);
+    let previousBlock = requestedBlockId ? previousBlocks.find((candidate) => candidate.blockId === requestedBlockId) ?? null : null;
+
+    if (previousBlock && usedPreviousBlocks.has(previousBlock)) {
+      previousBlock = null;
+    }
+
+    if (!previousBlock) {
+      previousBlock = previousBlocks.find((candidate) => !usedPreviousBlocks.has(candidate) && candidate.signature === nextSignature) ?? null;
+    }
+
+    if (!previousBlock) {
+      const indexedPreviousBlock = previousBlocks[index];
+      previousBlock = indexedPreviousBlock && !usedPreviousBlocks.has(indexedPreviousBlock) ? indexedPreviousBlock : null;
+    }
+
+    if (previousBlock) {
+      usedPreviousBlocks.add(previousBlock);
+    }
+
+    let blockId = createSharedBlockId();
+
+    if (requestedBlockId && !usedNextBlockIds.has(requestedBlockId)) {
+      blockId = requestedBlockId;
+    } else if (previousBlock?.blockId && !usedNextBlockIds.has(previousBlock.blockId)) {
+      blockId = previousBlock.blockId;
+    }
     const isNewBlock = !previousBlock;
     const previousAuthors = previousBlock?.authors.length ? previousBlock.authors : [fallbackAuthorUid];
     const previousEditors = previousBlock?.editors.length ? previousBlock.editors : previousAuthors;
     const previousLastEditorUid = previousBlock?.lastEditorUid ?? previousEditors.at(-1) ?? fallbackAuthorUid;
-    const changed = !previousBlock || comparableSharedBlockSignature(block) !== previousBlock.signature;
+    const changed = !previousBlock || nextSignature !== previousBlock.signature;
     const authors = parseUidList(block.dataset.qmAuthorUids);
     const editors = parseUidList(block.dataset.qmEditorUids);
     const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
-    const nextAuthors = authors.length ? authors : isNewBlock ? [actorUid] : previousAuthors;
-    const nextEditors = editors.length ? editors : isNewBlock ? [actorUid] : previousEditors;
+    const shouldTreatAsNewAuthoredBlock = isNewBlock || Boolean(previousBlock?.isBlank);
+    const shouldKeepPreviousAuthor = Boolean(previousBlock && previousBlock.hasAttribution && !previousBlock.isBlank);
+    const isLegacyContent = Boolean(previousBlock && !previousBlock.hasAttribution && !previousBlock.isBlank);
+    const shouldTrustCurrentAttribution = Boolean(previousBlock && !previousBlock.isBlank);
+    const nextAuthors = shouldTrustCurrentAttribution && authors.length
+      ? authors
+      : shouldTreatAsNewAuthoredBlock || (!shouldKeepPreviousAuthor && !isLegacyContent)
+        ? [actorUid]
+        : previousAuthors;
+    const nextEditors = shouldTrustCurrentAttribution && editors.length ? editors : shouldTreatAsNewAuthoredBlock ? [actorUid] : previousEditors;
     const finalEditors = changed ? appendUniqueUid(nextEditors, actorUid) : nextEditors;
     const finalLastEditorUid = changed ? actorUid : lastEditorUid ?? previousLastEditorUid;
 
+    block.dataset.qmBlockId = blockId;
     block.dataset.qmAuthorUids = nextAuthors.join(",");
     block.dataset.qmEditorUids = finalEditors.join(",");
     block.dataset.qmLastEditorUid = finalLastEditorUid;
     block.dataset.qmAttributionLabel = sharedAttributionLabel(nextAuthors, finalLastEditorUid, usersByUid);
+    usedNextBlockIds.add(blockId);
   });
 
   const container = document.createElement("div");
@@ -363,13 +410,17 @@ function sharedBlockMetadataFromHtml(html: string, fallbackAuthorUid: string): S
   return sharedAttributionBlocks(template.content).map((block) => {
     const authors = parseUidList(block.dataset.qmAuthorUids);
     const editors = parseUidList(block.dataset.qmEditorUids);
+    const blockId = parseBlockId(block.dataset.qmBlockId);
     const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
     const safeAuthors = authors.length ? authors : [fallbackAuthorUid];
     const safeEditors = editors.length ? editors : safeAuthors;
 
     return {
       authors: safeAuthors,
+      blockId,
       editors: safeEditors,
+      hasAttribution: Boolean(blockId || authors.length || editors.length || lastEditorUid),
+      isBlank: isBlankSharedBlock(block),
       lastEditorUid: lastEditorUid ?? safeEditors.at(-1) ?? fallbackAuthorUid,
       signature: comparableSharedBlockSignature(block)
     };
@@ -395,13 +446,17 @@ function comparableSharedBlockSignature(block: HTMLElement) {
 
   clone.querySelectorAll<HTMLElement>(".qm-attribution-note").forEach((element) => element.remove());
   clone
-    .querySelectorAll<HTMLElement>("[data-qm-author-uids], [data-qm-editor-uids], [data-qm-last-editor-uid], [data-qm-attribution-label]")
+    .querySelectorAll<HTMLElement>(
+      "[data-qm-block-id], [data-qm-author-uids], [data-qm-editor-uids], [data-qm-last-editor-uid], [data-qm-attribution-label]"
+    )
     .forEach((element) => {
+      element.removeAttribute("data-qm-block-id");
       element.removeAttribute("data-qm-author-uids");
       element.removeAttribute("data-qm-editor-uids");
       element.removeAttribute("data-qm-last-editor-uid");
       element.removeAttribute("data-qm-attribution-label");
     });
+  clone.removeAttribute("data-qm-block-id");
   clone.removeAttribute("data-qm-author-uids");
   clone.removeAttribute("data-qm-editor-uids");
   clone.removeAttribute("data-qm-last-editor-uid");
@@ -426,8 +481,35 @@ function parseUid(value: string | null | undefined) {
   return /^[A-Za-z0-9_:.-]{1,128}$/.test(normalizedUid) ? normalizedUid : null;
 }
 
+function parseBlockId(value: string | null | undefined) {
+  const normalizedBlockId = String(value ?? "").trim();
+  return /^[A-Za-z0-9_-]{12,64}$/.test(normalizedBlockId) ? normalizedBlockId : null;
+}
+
 function appendUniqueUid(values: string[], uid: string) {
   return values.includes(uid) ? values : [...values, uid];
+}
+
+function createSharedBlockId() {
+  const randomValue =
+    typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID().replace(/-/g, "") : Math.random().toString(36).slice(2);
+  return `qm_${randomValue.slice(0, 28)}`;
+}
+
+function clearSharedAttributionAttributes(block: HTMLElement) {
+  block.removeAttribute("data-qm-block-id");
+  block.removeAttribute("data-qm-author-uids");
+  block.removeAttribute("data-qm-editor-uids");
+  block.removeAttribute("data-qm-last-editor-uid");
+  block.removeAttribute("data-qm-attribution-label");
+}
+
+function isBlankSharedBlock(block: HTMLElement) {
+  const clone = block.cloneNode(true) as HTMLElement;
+  clone.querySelectorAll<HTMLElement>(".qm-attribution-note").forEach((element) => element.remove());
+  clearSharedAttributionAttributes(clone);
+  const text = (clone.textContent ?? "").replace(/\u00a0/g, " ").trim();
+  return !text && !clone.querySelector("img, table, input[type='checkbox']");
 }
 
 function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserProfile[]) {
