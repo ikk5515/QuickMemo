@@ -120,6 +120,19 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("trustedSharedBlockMetadataFromHistory(note, history, historySnapshots)");
   });
 
+  it("rejects future remote cursor timestamps when checking collaborator freshness", () => {
+    const cursorFreshnessHelper =
+      notesPageSource.match(/function freshRemoteCursorTimestamp[\s\S]*?function timestampsEqual/)?.[0] ?? "";
+    const cursorFilter =
+      notesPageSource.match(/const remoteEditorCursors = useMemo[\s\S]*?\.map\(\(state\) =>/)?.[0] ?? "";
+
+    expect(cursorFreshnessHelper).toContain("const ageMs = clockMs - updatedAt.getTime()");
+    expect(cursorFreshnessHelper).toContain("ageMs >= 0");
+    expect(cursorFreshnessHelper).toContain("ageMs <= remoteCursorFreshMs");
+    expect(cursorFilter).toContain("freshRemoteCursorTimestamp(cursorUpdatedAt, cursorClock)");
+    expect(cursorFilter).not.toContain("cursorClock - cursorUpdatedAt.getTime() <= remoteCursorFreshMs");
+  });
+
   it("bounds XLSX merge ranges before materializing skipped preview cells", () => {
     const worksheetHelper =
       notesPageSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";

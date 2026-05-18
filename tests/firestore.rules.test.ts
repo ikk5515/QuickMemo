@@ -1201,6 +1201,14 @@ describeRules("firestore security rules", () => {
         })
       )
     );
+    await assertFails(
+      setDoc(
+        doc(participantDb, "noteUserStates/note-a/users/user-b"),
+        noteUserState("note-a", "user-b", {
+          cursorUpdatedAt: new Date("2099-01-01T00:00:00.000Z")
+        })
+      )
+    );
   });
 
   it("requires history writes to match same-batch note mutations", async () => {
