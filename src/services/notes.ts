@@ -99,6 +99,35 @@ function deletedNote(document: NoteSnapshot) {
   return document.isDeleted === true && !purgedNote(document);
 }
 
+const legacyDeletionMetadataRepairs = new Set<string>();
+
+function hasDeletionMetadata(document: NoteSnapshot) {
+  return Object.prototype.hasOwnProperty.call(document, "isDeleted");
+}
+
+function normalizeLegacyDeletionMetadata(notes: NoteSnapshot[]) {
+  notes.forEach((note) => {
+    if (hasDeletionMetadata(note) || !visibleNote(note) || legacyDeletionMetadataRepairs.has(note.id)) {
+      return;
+    }
+
+    legacyDeletionMetadataRepairs.add(note.id);
+    void updateDoc(doc(db, "notes", note.id), { isDeleted: false }).catch(() => {
+      legacyDeletionMetadataRepairs.delete(note.id);
+    });
+  });
+}
+
+function sortedByUpdatedAt(notes: NoteSnapshot[]) {
+  return [...notes].sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt));
+}
+
+function noteSnapshotList(snapshot: { docs: Array<{ id: string; data: () => unknown }> }, noteFilter: (note: NoteSnapshot) => boolean) {
+  const notes = snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(noteFilter);
+  normalizeLegacyDeletionMetadata(notes);
+  return sortedByUpdatedAt(notes);
+}
+
 function subscribeNotesByDeletedState(
   uid: string,
   ownerUids: string[] | null,
@@ -109,17 +138,19 @@ function subscribeNotesByDeletedState(
   const noteFilter = deleted ? deletedNote : visibleNote;
 
   if (ownerUids === null) {
-    const notesQuery = query(
-      collection(db, "notes"),
-      where("isDeleted", "==", deleted),
-      where("participantUids", "array-contains", uid),
-      orderBy("updatedAt", "desc")
-    );
+    const notesQuery = deleted
+      ? query(
+          collection(db, "notes"),
+          where("isDeleted", "==", true),
+          where("participantUids", "array-contains", uid),
+          orderBy("updatedAt", "desc")
+        )
+      : query(collection(db, "notes"), where("participantUids", "array-contains", uid));
 
     return onSnapshot(
       notesQuery,
       (snapshot) => {
-        callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(noteFilter));
+        callback(noteSnapshotList(snapshot, noteFilter));
       },
       (error) => onError?.(error)
     );
@@ -142,21 +173,21 @@ function subscribeNotesByDeletedState(
   };
 
   const unsubscribes = normalizedOwnerUids.map((ownerUid) => {
-    const notesQuery = query(
-      collection(db, "notes"),
-      where("ownerUid", "==", ownerUid),
-      where("isDeleted", "==", deleted),
-      where("participantUids", "array-contains", uid),
-      orderBy("updatedAt", "desc")
-    );
+    const notesQuery =
+      !deleted && ownerUid === uid
+        ? query(collection(db, "notes"), where("ownerUid", "==", ownerUid))
+        : query(
+            collection(db, "notes"),
+            where("ownerUid", "==", ownerUid),
+            where("isDeleted", "==", deleted),
+            where("participantUids", "array-contains", uid),
+            orderBy("updatedAt", "desc")
+          );
 
     return onSnapshot(
       notesQuery,
       (snapshot) => {
-        notesByOwner.set(
-          ownerUid,
-          snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(noteFilter)
-        );
+        notesByOwner.set(ownerUid, noteSnapshotList(snapshot, noteFilter));
         emitNotes();
       },
       (error) => onError?.(error)
@@ -188,12 +219,12 @@ export function subscribeDeletedNotes(
 }
 
 export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => void, onError?: (error: Error) => void) {
-  const notesQuery = query(collection(db, "notes"), where("isDeleted", "==", false), orderBy("updatedAt", "desc"));
+  const notesQuery = query(collection(db, "notes"));
 
   return onSnapshot(
     notesQuery,
     (snapshot) => {
-      callback(snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(visibleNote));
+      callback(noteSnapshotList(snapshot, visibleNote));
     },
     (error) => onError?.(error)
   );
@@ -349,6 +380,7 @@ export async function updateEncryptedNote(
   batch.update(noteRef, {
     encryptedTitle,
     encryptedBody,
+    isDeleted: false,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
@@ -373,6 +405,7 @@ export async function updateNoteAccess(
     participantUids: normalizedParticipantUids,
     wrappedKeys,
     folderId: type === "personal" ? folderId : null,
+    isDeleted: false,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
@@ -383,6 +416,7 @@ export async function updateNoteAccess(
 export async function updateNoteFolder(noteId: string, uid: string, folderId: string | null) {
   await updateDoc(doc(db, "notes", noteId), {
     folderId,
+    isDeleted: false,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
@@ -394,6 +428,7 @@ export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Tim
 
   batch.update(noteRef, {
     dueAt,
+    isDeleted: false,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
