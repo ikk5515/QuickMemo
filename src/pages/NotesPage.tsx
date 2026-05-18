@@ -56,7 +56,7 @@ import {
   useState
 } from "react";
 import { Timestamp } from "firebase/firestore";
-import { Decompress, strFromU8, unzipSync } from "fflate";
+import { Decompress, strFromU8, unzipSync, type UnzipFileInfo } from "fflate";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
@@ -276,6 +276,18 @@ const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 const maxTextPreviewCharacters = 120_000;
 const maxDocumentPreviewBlocks = 320;
 const maxDocxPreviewMarkupCharacters = 1_600_000;
+const maxZipPreviewEntries = 512;
+const maxZipPreviewEntryNameLength = 240;
+const maxZipPreviewCompressionRatio = 120;
+const minZipPreviewRatioCheckBytes = 64_000;
+const maxDocxPreviewUncompressedBytes = 12_000_000;
+const maxDocxPreviewEntryBytes = 6_000_000;
+const maxHwpxPreviewEntries = 80;
+const maxHwpxPreviewUncompressedBytes = 4_000_000;
+const maxHwpxPreviewEntryBytes = 1_500_000;
+const maxXlsxPreviewEntries = 140;
+const maxXlsxPreviewUncompressedBytes = 5_000_000;
+const maxXlsxPreviewEntryBytes = 2_000_000;
 const maxHwpPreviewSectionBytes = 1_500_000;
 const maxHwpPreviewTotalBytes = 4_000_000;
 const hwpPreviewCompressedChunkBytes = 16_384;
@@ -6661,6 +6673,17 @@ async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array) {
   }
 
   try {
+    if (
+      !safeZipPreviewEntries(bytes, {
+        maxEntries: maxZipPreviewEntries,
+        maxEntryUncompressedBytes: maxDocxPreviewEntryBytes,
+        maxSelectedEntries: maxZipPreviewEntries,
+        maxTotalUncompressedBytes: maxDocxPreviewUncompressedBytes
+      })
+    ) {
+      return "";
+    }
+
     const { renderAsync } = await import("docx-preview");
     const previewDocument = document.implementation.createHTMLDocument("DOCX Preview");
     const styleContainer = previewDocument.createElement("div");
@@ -6932,6 +6955,137 @@ function escapeStyleText(value: string) {
   return value.replace(/<\/style/gi, "<\\/style").replace(/<!--/g, "").replace(/-->/g, "");
 }
 
+interface ZipPreviewLimits {
+  includeEntry?: (name: string) => boolean;
+  maxEntries: number;
+  maxEntryUncompressedBytes: number;
+  maxSelectedEntries: number;
+  maxTotalUncompressedBytes: number;
+}
+
+interface ZipPreviewState {
+  entryCount: number;
+  selectedCount: number;
+  selectedNames: Set<string>;
+  totalUncompressedBytes: number;
+}
+
+function safeZipPreviewEntries(bytes: Uint8Array, limits: ZipPreviewLimits) {
+  const state: ZipPreviewState = {
+    entryCount: 0,
+    selectedCount: 0,
+    selectedNames: new Set<string>(),
+    totalUncompressedBytes: 0
+  };
+
+  try {
+    const inflatedEntries = unzipSync(bytes, {
+      filter: (file) => shouldInflateZipPreviewEntry(file, limits, state)
+    });
+
+    if (!state.selectedCount) {
+      return null;
+    }
+
+    const entries: Record<string, Uint8Array> = {};
+    let verifiedTotalBytes = 0;
+
+    Object.entries(inflatedEntries).forEach(([name, entry]) => {
+      const normalizedName = normalizeZipPreviewEntryName(name);
+
+      if (!normalizedName || !state.selectedNames.has(normalizedName)) {
+        return;
+      }
+
+      verifiedTotalBytes += entry.length;
+
+      if (entry.length > limits.maxEntryUncompressedBytes || verifiedTotalBytes > limits.maxTotalUncompressedBytes) {
+        throw new Error("ZIP preview entry exceeded safe inflated limits.");
+      }
+
+      entries[normalizedName] = entry;
+    });
+
+    return entries;
+  } catch {
+    return null;
+  }
+}
+
+function shouldInflateZipPreviewEntry(file: UnzipFileInfo, limits: ZipPreviewLimits, state: ZipPreviewState) {
+  state.entryCount += 1;
+
+  if (state.entryCount > limits.maxEntries) {
+    throw new Error("ZIP preview entry count exceeded safe limits.");
+  }
+
+  const normalizedName = normalizeZipPreviewEntryName(file.name);
+
+  if (!normalizedName) {
+    throw new Error("ZIP preview entry path is unsafe.");
+  }
+
+  const isDirectory = normalizedName.endsWith("/");
+  const selected = !isDirectory && (limits.includeEntry ? limits.includeEntry(normalizedName) : true);
+
+  if (!selected) {
+    return false;
+  }
+
+  if (file.compression !== 0 && file.compression !== 8) {
+    throw new Error("ZIP preview entry uses an unsupported compression method.");
+  }
+
+  if (!safeZipPreviewSize(file.size) || !safeZipPreviewSize(file.originalSize)) {
+    throw new Error("ZIP preview entry has invalid size metadata.");
+  }
+
+  const compressedSize = Math.max(file.size, 1);
+  const compressionRatio = file.originalSize / compressedSize;
+  const nextTotalBytes = state.totalUncompressedBytes + file.originalSize;
+
+  if (
+    file.originalSize > limits.maxEntryUncompressedBytes
+    || nextTotalBytes > limits.maxTotalUncompressedBytes
+    || (
+      file.originalSize >= minZipPreviewRatioCheckBytes
+      && compressionRatio > maxZipPreviewCompressionRatio
+    )
+  ) {
+    throw new Error("ZIP preview entry exceeded safe compression limits.");
+  }
+
+  state.selectedCount += 1;
+
+  if (state.selectedCount > limits.maxSelectedEntries) {
+    throw new Error("ZIP preview selected entry count exceeded safe limits.");
+  }
+
+  state.totalUncompressedBytes = nextTotalBytes;
+  state.selectedNames.add(normalizedName);
+  return true;
+}
+
+function safeZipPreviewSize(value: number) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function normalizeZipPreviewEntryName(name: string) {
+  const normalizedName = name.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
+
+  if (
+    !normalizedName
+    || normalizedName.length > maxZipPreviewEntryNameLength
+    || normalizedName.startsWith("/")
+    || normalizedName.includes("../")
+    || normalizedName.split("/").some((part) => part === "..")
+  ) {
+    return "";
+  }
+
+  return normalizedName;
+}
+
 interface HwpPreviewResult {
   html: string;
   safeForRichPreview: boolean;
@@ -6986,7 +7140,18 @@ function extractHwpxPreviewHtml(bytes: Uint8Array) {
   }
 
   try {
-    const entries = unzipSync(bytes);
+    const entries = safeZipPreviewEntries(bytes, {
+      includeEntry: (name) => hwpxPreviewEntryPriority(name) > 0,
+      maxEntries: maxZipPreviewEntries,
+      maxEntryUncompressedBytes: maxHwpxPreviewEntryBytes,
+      maxSelectedEntries: maxHwpxPreviewEntries,
+      maxTotalUncompressedBytes: maxHwpxPreviewUncompressedBytes
+    });
+
+    if (!entries) {
+      return "";
+    }
+
     const blocks: string[] = [];
 
     Object.entries(entries)
@@ -7013,7 +7178,18 @@ function extractXlsxPreviewHtml(bytes: Uint8Array) {
   }
 
   try {
-    const entries = unzipSync(bytes);
+    const entries = safeZipPreviewEntries(bytes, {
+      includeEntry: xlsxPreviewEntryAllowed,
+      maxEntries: maxZipPreviewEntries,
+      maxEntryUncompressedBytes: maxXlsxPreviewEntryBytes,
+      maxSelectedEntries: maxXlsxPreviewEntries,
+      maxTotalUncompressedBytes: maxXlsxPreviewUncompressedBytes
+    });
+
+    if (!entries) {
+      return "";
+    }
+
     const sharedStrings = xlsxSharedStrings(entries);
     const sheets = xlsxWorkbookSheets(entries);
     const styles = xlsxStyles(entries);
@@ -7024,7 +7200,7 @@ function extractXlsxPreviewHtml(bytes: Uint8Array) {
         return;
       }
 
-      const worksheet = entries[sheet.path];
+      const worksheet = entries[sheet.path.toLowerCase()];
 
       if (!worksheet) {
         return;
@@ -7042,6 +7218,16 @@ function extractXlsxPreviewHtml(bytes: Uint8Array) {
   } catch {
     return "";
   }
+}
+
+function xlsxPreviewEntryAllowed(name: string) {
+  return (
+    name === "xl/workbook.xml"
+    || name === "xl/_rels/workbook.xml.rels"
+    || name === "xl/sharedstrings.xml"
+    || name === "xl/styles.xml"
+    || /^xl\/worksheets\/[^/]+\.xml$/i.test(name)
+  );
 }
 
 function xlsxSharedStrings(entries: Record<string, Uint8Array>) {
@@ -7105,12 +7291,12 @@ function normalizeXlsxTargetPath(target: string | null) {
     return "";
   }
 
-  const trimmedTarget = target.replace(/^\/+/, "");
+  const trimmedTarget = target.replace(/^\/+/, "").toLowerCase();
   return trimmedTarget.startsWith("xl/") ? trimmedTarget : `xl/${trimmedTarget}`;
 }
 
 function xlsxXmlDocument(entries: Record<string, Uint8Array>, path: string) {
-  const entry = entries[path];
+  const entry = entries[path.toLowerCase()];
 
   if (!entry) {
     return null;
