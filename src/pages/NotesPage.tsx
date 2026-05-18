@@ -5898,17 +5898,13 @@ function AttachmentPreviewModal({
           </div>
         </header>
         {preview.kind === "pdf" && preview.url ? (
-          <object
-            aria-label={`${preview.fileName} 미리보기`}
+          <iframe
             className="pdf-preview-frame"
-            data={preview.url}
-            type="application/pdf"
-          >
-            <a className="secondary-button pdf-preview-download" download={preview.fileName} href={preview.url}>
-              <Download size={14} />
-              다운로드
-            </a>
-          </object>
+            referrerPolicy="no-referrer"
+            sandbox=""
+            src={preview.url}
+            title={`${preview.fileName} PDF 미리보기`}
+          />
         ) : preview.kind === "docx" ? (
           <div className="docx-preview-frame">
             <iframe

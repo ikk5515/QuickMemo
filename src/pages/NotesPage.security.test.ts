@@ -5,12 +5,17 @@ import { describe, expect, it } from "vitest";
 const notesPageSource = readFileSync(join(process.cwd(), "src/pages/NotesPage.tsx"), "utf8");
 
 describe("NotesPage security controls", () => {
-  it("renders PDF previews as an object without script or same-origin iframe grants", () => {
-    const pdfObject = notesPageSource.match(/<object[\s\S]*?className="pdf-preview-frame"[\s\S]*?>/)?.[0] ?? "";
+  it("renders PDF previews in a sandboxed iframe without script, same-origin, or referrer grants", () => {
+    const pdfPreviewBranch = notesPageSource.match(/preview\.kind === "pdf" && preview\.url \? \([\s\S]*?\) : preview\.kind === "docx"/)?.[0] ?? "";
 
-    expect(pdfObject).toContain('type="application/pdf"');
-    expect(pdfObject).not.toContain("allow-scripts");
-    expect(pdfObject).not.toContain("allow-same-origin");
+    expect(pdfPreviewBranch).toContain("<iframe");
+    expect(pdfPreviewBranch).toContain('className="pdf-preview-frame"');
+    expect(pdfPreviewBranch).toContain('sandbox=""');
+    expect(pdfPreviewBranch).toContain('referrerPolicy="no-referrer"');
+    expect(pdfPreviewBranch).toContain("src={preview.url}");
+    expect(pdfPreviewBranch).not.toContain("<object");
+    expect(pdfPreviewBranch).not.toContain("allow-scripts");
+    expect(pdfPreviewBranch).not.toContain("allow-same-origin");
     expect(notesPageSource).not.toContain("dangerouslySetInnerHTML={preview");
   });
 
