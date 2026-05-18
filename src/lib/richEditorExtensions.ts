@@ -13,6 +13,7 @@ import StarterKit from "@tiptap/starter-kit";
 
 export const editorCellColors = ["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"] as const;
 export const editorImageWidths = [25, 50, 75, 100] as const;
+export const editorImagePixelWidthBounds = { min: 120, max: 1200, step: 10 } as const;
 export const editorTableWidths = [30, 50, 75, 100] as const;
 export const editorTextSizes = [14, 16, 17, 18, 20, 22, 24, 28] as const;
 
@@ -34,6 +35,12 @@ function normalizedImageWidth(value: unknown) {
   const width = Number(String(value ?? "").replace("%", "").trim());
 
   return editorImageWidthSet.has(width) ? width : null;
+}
+
+function normalizedImagePixelWidth(value: unknown) {
+  const width = Number(String(value ?? "").replace("px", "").trim());
+
+  return Number.isInteger(width) && width >= editorImagePixelWidthBounds.min && width <= editorImagePixelWidthBounds.max ? width : null;
 }
 
 function normalizedTableWidth(value: unknown) {
@@ -135,9 +142,21 @@ const ResizableImage = Image.extend({
       qmWidth: {
         default: null,
         parseHTML: (element: HTMLElement) => normalizedImageWidth(element.getAttribute("data-qm-width") || element.style.width),
-        renderHTML: (attributes: { qmWidth?: number | string | null }) => {
+        renderHTML: (attributes: { qmWidth?: number | string | null; qmWidthPx?: number | string | null }) => {
+          if (normalizedImagePixelWidth(attributes.qmWidthPx)) {
+            return {};
+          }
+
           const width = normalizedImageWidth(attributes.qmWidth);
           return width ? { "data-qm-width": String(width), style: `width: ${width}%; max-width: 100%; height: auto` } : {};
+        }
+      },
+      qmWidthPx: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedImagePixelWidth(element.getAttribute("data-qm-image-width") || element.style.width),
+        renderHTML: (attributes: { qmWidthPx?: number | string | null }) => {
+          const width = normalizedImagePixelWidth(attributes.qmWidthPx);
+          return width ? { "data-qm-image-width": String(width), style: `width: ${width}px; max-width: 100%; height: auto` } : {};
         }
       }
     };
@@ -146,7 +165,11 @@ const ResizableImage = Image.extend({
 
 export const richEditorExtensions = [
   StarterKit.configure({
-    link: false
+    link: false,
+    undoRedo: {
+      depth: 500,
+      newGroupDelay: 0
+    }
   }),
   TextSize,
   Link.configure({

@@ -4,6 +4,7 @@ const htmlTagPattern =
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
+const imagePixelWidthBounds = { min: 120, max: 1200 };
 const textSizeOptions = new Set([14, 16, 17, 18, 20, 22, 24, 28]);
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
@@ -248,6 +249,16 @@ function sanitizeAnchor(node: HTMLElement): Node {
 }
 
 function applySafeImageWidth(image: HTMLImageElement, source: HTMLElement) {
+  const pixelWidth = safeImagePixelWidth(source.getAttribute("data-qm-image-width") ?? source.style.width);
+
+  if (pixelWidth) {
+    image.dataset.qmImageWidth = String(pixelWidth);
+    image.style.width = `${pixelWidth}px`;
+    image.style.maxWidth = "100%";
+    image.style.height = "auto";
+    return;
+  }
+
   const width = safeImageWidth(source.getAttribute("data-qm-width") ?? source.style.width);
 
   if (!width) {
@@ -377,6 +388,20 @@ function safeImageWidth(value: string | null) {
   const normalizedValue = Number(String(value ?? "").replace("%", "").trim());
 
   return imageWidthOptions.has(normalizedValue) ? normalizedValue : null;
+}
+
+function safeImagePixelWidth(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= imagePixelWidthBounds.min && normalizedValue <= imagePixelWidthBounds.max
+    ? normalizedValue
+    : null;
 }
 
 function safeTableWidth(value: string | null) {

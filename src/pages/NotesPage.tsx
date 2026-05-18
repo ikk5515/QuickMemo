@@ -29,6 +29,8 @@ import {
   Star,
   Table2,
   Trash2,
+  Redo2,
+  Undo2,
   Upload,
   UsersRound,
   X
@@ -76,7 +78,13 @@ import {
   sanitizeEditorHtml,
   serializeEditorContent
 } from "../lib/editorContent";
-import { editorCellColors, editorImageWidths, editorTableWidths, editorTextSizes, richEditorExtensions } from "../lib/richEditorExtensions";
+import {
+  editorCellColors,
+  editorImagePixelWidthBounds,
+  editorTableWidths,
+  editorTextSizes,
+  richEditorExtensions
+} from "../lib/richEditorExtensions";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
   confirmNoteRead,
@@ -129,9 +137,12 @@ interface NoteDraft {
   fontSize: number;
 }
 
-interface PdfPreviewState {
+interface AttachmentPreviewState {
   fileName: string;
-  url: string;
+  kind: "pdf" | "text" | "unsupported";
+  label: string;
+  text?: string;
+  url?: string;
 }
 
 const blankEditor = (uid: string): EditorState => ({
@@ -150,6 +161,7 @@ const blankEditor = (uid: string): EditorState => ({
 type NoteSortField = "createdAt" | "dueAt";
 type NoteSortDirection = "asc" | "desc";
 type NoteListFilter = "all" | NoteKind;
+type EditorToolTab = "format" | "table" | "media";
 
 interface NoteSortSetting {
   field: NoteSortField;
@@ -199,6 +211,10 @@ const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
+const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "hwp", "hwpx"]);
+const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
+const hwpPreviewAttachmentExtensions = new Set(["hwp", "hwpx"]);
+const maxTextPreviewCharacters = 120_000;
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -788,7 +804,7 @@ export default function NotesPage() {
   const [saving, setSaving] = useState(false);
   const [attachmentBusyId, setAttachmentBusyId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
-  const [pdfPreview, setPdfPreview] = useState<PdfPreviewState | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
   const [listOpen, setListOpen] = useState(false);
   const [overviewOpen, setOverviewOpen] = useState(false);
   const [overviewFolderFilter, setOverviewFolderFilter] = useState<OverviewFolderFilter>("all");
@@ -804,7 +820,7 @@ export default function NotesPage() {
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
-  const pdfPreviewUrl = useRef<string | null>(null);
+  const attachmentPreviewUrl = useRef<string | null>(null);
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -875,9 +891,9 @@ export default function NotesPage() {
 
   useEffect(() => {
     return () => {
-      if (pdfPreviewUrl.current) {
-        URL.revokeObjectURL(pdfPreviewUrl.current);
-        pdfPreviewUrl.current = null;
+      if (attachmentPreviewUrl.current) {
+        URL.revokeObjectURL(attachmentPreviewUrl.current);
+        attachmentPreviewUrl.current = null;
       }
     };
   }, []);
@@ -1867,18 +1883,18 @@ export default function NotesPage() {
     );
   }
 
-  function closePdfPreview() {
-    if (pdfPreviewUrl.current) {
-      URL.revokeObjectURL(pdfPreviewUrl.current);
-      pdfPreviewUrl.current = null;
+  function closeAttachmentPreview() {
+    if (attachmentPreviewUrl.current) {
+      URL.revokeObjectURL(attachmentPreviewUrl.current);
+      attachmentPreviewUrl.current = null;
     }
 
-    setPdfPreview(null);
+    setAttachmentPreview(null);
   }
 
-  async function previewPdfAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
-    if (attachment.extension !== "pdf") {
-      setError("PDF 파일만 미리보기할 수 있습니다.");
+  async function previewAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
+    if (!previewableAttachmentExtensions.has(attachment.extension)) {
+      setError("이 파일 형식은 미리보기를 지원하지 않습니다.");
       return;
     }
 
@@ -1887,18 +1903,57 @@ export default function NotesPage() {
 
     try {
       const plainBytes = await decryptAttachmentFile(noteId, attachment);
-      const blob = new Blob([plainBytes], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
+      const fileName = attachmentDownloadName(attachment);
 
-      if (pdfPreviewUrl.current) {
-        URL.revokeObjectURL(pdfPreviewUrl.current);
+      if (attachmentPreviewUrl.current) {
+        URL.revokeObjectURL(attachmentPreviewUrl.current);
+        attachmentPreviewUrl.current = null;
       }
 
-      pdfPreviewUrl.current = url;
-      setPdfPreview({ fileName: attachmentDownloadName(attachment), url });
-      setStatus("PDF 미리보기를 열었습니다.");
+      if (attachment.extension === "pdf") {
+        const blob = new Blob([plainBytes], { type: "application/pdf" });
+        const url = URL.createObjectURL(blob);
+
+        attachmentPreviewUrl.current = url;
+        setAttachmentPreview({ fileName, kind: "pdf", label: "PDF 미리보기", url });
+        setStatus("PDF 미리보기를 열었습니다.");
+        return;
+      }
+
+      if (textPreviewAttachmentExtensions.has(attachment.extension)) {
+        setAttachmentPreview({
+          fileName,
+          kind: "text",
+          label: `${attachment.extension.toUpperCase()} 미리보기`,
+          text: decodeTextAttachmentPreview(plainBytes, attachment.extension)
+        });
+        setStatus("파일 미리보기를 열었습니다.");
+        return;
+      }
+
+      if (hwpPreviewAttachmentExtensions.has(attachment.extension)) {
+        const extractedText = extractReadableAttachmentText(plainBytes);
+
+        setAttachmentPreview({
+          fileName,
+          kind: extractedText ? "text" : "unsupported",
+          label: `${attachment.extension.toUpperCase()} 미리보기`,
+          text:
+            extractedText ||
+            "HWP/HWPX 파일은 브라우저가 안전하게 직접 렌더링할 수 없는 형식입니다. 외부 변환 서버로 전송하지 않기 위해 다운로드 확인만 지원합니다."
+        });
+        setStatus(extractedText ? "파일 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
+        return;
+      }
+
+      setAttachmentPreview({
+        fileName,
+        kind: "unsupported",
+        label: "미리보기",
+        text: "이 파일 형식은 앱 내부 미리보기를 지원하지 않습니다."
+      });
     } catch {
-      setError("PDF 미리보기를 열지 못했습니다.");
+      setError("파일 미리보기를 열지 못했습니다.");
     } finally {
       setAttachmentBusyId(null);
     }
@@ -2169,6 +2224,24 @@ export default function NotesPage() {
             onUpdateNoteFolder={(note, folderId) => void updateStoredNoteFolder(note, folderId)}
           />
         ) : (
+          <>
+          <div className="notes-top-actions" aria-label="노트 탐색">
+            <div>
+              <button className="secondary-button" type="button" onClick={() => setListOpen((current) => !current)}>
+                <PanelLeftOpen size={18} />
+                노트 목록
+              </button>
+              <button className="secondary-button" type="button" onClick={() => openOverview("all")}>
+                <LayoutGrid size={18} />
+                전체 조회
+              </button>
+              <button type="button" onClick={() => startNewNote()}>
+                <FilePlus2 size={18} />
+                새 노트
+              </button>
+            </div>
+            <span className="notes-top-status">{saving ? "저장 중..." : status}</span>
+          </div>
           <div className="notes-editor-layout">
             <NoteDrawer
               activeNoteId={editor.noteId}
@@ -2198,10 +2271,6 @@ export default function NotesPage() {
                 <UsersRound size={18} />
                 공유 대상
               </button>
-              <span className="note-meta-card">
-                <span>생성일</span>
-                <strong>{formatFullDateTime(createdDate)}</strong>
-              </span>
               <div className="deadline-control">
                 <button
                   className={`deadline-summary ${currentDeadlineTone}`}
@@ -2248,14 +2317,6 @@ export default function NotesPage() {
                   ))}
                 </select>
               </label>
-              <button className="secondary-button" type="button" onClick={() => setListOpen((current) => !current)}>
-                <PanelLeftOpen size={18} />
-                노트 목록
-              </button>
-              <button className="secondary-button" type="button" onClick={() => openOverview("all")}>
-                <LayoutGrid size={18} />
-                전체 조회
-              </button>
               {currentType === "personal" && (
                 <label className="font-size-control folder-control">
                   폴더
@@ -2284,11 +2345,6 @@ export default function NotesPage() {
                   <Star fill="currentColor" size={18} />
                 </button>
               )}
-              <button type="button" onClick={() => startNewNote()}>
-                <FilePlus2 size={18} />
-                새 노트
-              </button>
-              <span className="sync-status">{saving ? "저장 중..." : status}</span>
               <button disabled={saving} onClick={() => void saveCurrentNote(true)} type="button">
                 {saving ? <Loader2 className="spin" size={18} /> : <Save size={18} />}
                 저장
@@ -2356,15 +2412,17 @@ export default function NotesPage() {
               canDelete={(attachment) => canDeleteAttachmentForNote(activeRemoteNote, attachment)}
               onDelete={(attachment) => void removeAttachment(activeRemoteNote, attachment)}
               onDownload={(attachment) => void downloadAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
-              onPreview={(attachment) => void previewPdfAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
+              onPreview={(attachment) => void previewAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
             />
           )}
           <div className="editor-footer">
             <span className={`note-kind-pill ${currentType}`}>{currentType === "shared" ? "공유" : "개인"}</span>
+            <span className="note-created-inline">생성 {formatFullDateTime(createdDate)}</span>
             {error && <p className="form-error">{error}</p>}
           </div>
             </section>
           </div>
+          </>
         )}
         {previewNote && (
           <NotePreviewModal
@@ -2379,7 +2437,7 @@ export default function NotesPage() {
             onDelete={(note) => void removePreviewNote(note)}
             onDeleteAttachment={(note, attachment) => void removeAttachment(note, attachment)}
             onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
-            onPreviewAttachment={(note, attachment) => void previewPdfAttachment(note.id, attachment)}
+            onPreviewAttachment={(note, attachment) => void previewAttachment(note.id, attachment)}
             onPurge={(note) => void purgePreviewNote(note)}
             onLoad={(note, draft) => void openNote(note, draft)}
             onResolveNoteKey={resolveNoteKey}
@@ -2392,7 +2450,7 @@ export default function NotesPage() {
             canDeleteAttachment={canDeleteAttachmentForNote}
           />
         )}
-        {pdfPreview && <PdfPreviewModal fileName={pdfPreview.fileName} onClose={closePdfPreview} url={pdfPreview.url} />}
+        {attachmentPreview && <AttachmentPreviewModal onClose={closeAttachmentPreview} preview={attachmentPreview} />}
       </section>
     </AppShell>
   );
@@ -2417,7 +2475,8 @@ function RichMemoEditor({
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
-  const [selectedImageWidth, setSelectedImageWidth] = useState<number | null>(null);
+  const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
+  const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
   const [tableRows, setTableRows] = useState(3);
   const [tableColumns, setTableColumns] = useState(3);
   const [, setToolbarVersion] = useState(0);
@@ -2498,7 +2557,7 @@ function RichMemoEditor({
 
   function clearImageSelection() {
     selectedImageRef.current = null;
-    setSelectedImageWidth(null);
+    setSelectedImageWidthPx(null);
   }
 
   function handleEditorClick(event: Event) {
@@ -2508,7 +2567,8 @@ function RichMemoEditor({
 
     if (image instanceof HTMLImageElement && editorRef.current?.contains(image)) {
       selectedImageRef.current = image;
-      setSelectedImageWidth(readImageWidth(image));
+      setSelectedImageWidthPx(readImageWidthPx(image));
+      setActiveToolTab("media");
       emitCursorPosition(true);
       return;
     }
@@ -2556,6 +2616,7 @@ function RichMemoEditor({
     }
 
     const image = selectedImageRef.current;
+    const safeWidth = clampImagePixelWidth(width);
 
     if (!image || !editorRef.current?.contains(image)) {
       clearImageSelection();
@@ -2564,8 +2625,8 @@ function RichMemoEditor({
 
     const position = editor.view.posAtDOM(image, 0);
 
-    editor.chain().focus().setNodeSelection(position).updateAttributes("image", { qmWidth: width }).run();
-    setSelectedImageWidth(width);
+    editor.chain().focus().setNodeSelection(position).updateAttributes("image", { qmWidth: null, qmWidthPx: safeWidth }).run();
+    setSelectedImageWidthPx(safeWidth);
     onChange(editor.getHTML());
   }
 
@@ -2580,6 +2641,14 @@ function RichMemoEditor({
 
   function applySelectionFontSize(size: number) {
     runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textSize", { size }).run());
+  }
+
+  function undoEditorStep() {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().undo().run());
+  }
+
+  function redoEditorStep() {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().redo().run());
   }
 
   function insertTable() {
@@ -2616,10 +2685,53 @@ function RichMemoEditor({
 
   const currentSelectionFontSize = Number(editor?.getAttributes("textSize").size) || fontSize;
   const currentTableWidth = Number(editor?.getAttributes("table").qmWidth) || 100;
+  const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
 
   return (
     <>
       <div className="rich-editor-toolbar" aria-label="편집 도구">
+        <div className="rich-toolbar-tabs" role="tablist" aria-label="편집 도구 탭">
+          {[
+            ["format", "서식"],
+            ["table", "표"],
+            ["media", "파일"]
+          ].map(([tab, label]) => (
+            <button
+              aria-selected={activeToolTab === tab}
+              className={activeToolTab === tab ? "active" : ""}
+              key={tab}
+              onClick={() => setActiveToolTab(tab as EditorToolTab)}
+              type="button"
+              role="tab"
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {activeToolTab === "format" && (
+          <div className="rich-toolbar-panel">
+        <button
+          aria-label="뒤로가기"
+          className="icon-button"
+          disabled={!editor?.can().undo()}
+          onClick={undoEditorStep}
+          onMouseDown={(event) => event.preventDefault()}
+          title="뒤로가기"
+          type="button"
+        >
+          <Undo2 size={16} />
+        </button>
+        <button
+          aria-label="앞으로가기"
+          className="icon-button"
+          disabled={!editor?.can().redo()}
+          onClick={redoEditorStep}
+          onMouseDown={(event) => event.preventDefault()}
+          title="앞으로가기"
+          type="button"
+        >
+          <Redo2 size={16} />
+        </button>
         <button
           aria-label="굵게"
           aria-pressed={editor?.isActive("bold") ?? false}
@@ -2686,6 +2798,10 @@ function RichMemoEditor({
             ))}
           </select>
         </label>
+          </div>
+        )}
+        {activeToolTab === "table" && (
+          <div className="rich-toolbar-panel">
         <span className="table-insert-control">
           <Table2 size={15} />
           <input
@@ -2811,10 +2927,29 @@ function RichMemoEditor({
             <X size={13} />
           </button>
         </div>
+          </div>
+        )}
+        {activeToolTab === "media" && (
+          <div className="rich-toolbar-panel">
         <button className="secondary-button editor-upload-button" onClick={chooseFiles} type="button">
           <Upload size={16} />
           파일
         </button>
+        {selectedImageWidthPx && (
+          <label className="image-width-control">
+            이미지 너비
+            <input
+              aria-label="이미지 너비"
+              max={editorImagePixelWidthBounds.max}
+              min={editorImagePixelWidthBounds.min}
+              onChange={(event) => updateSelectedImageWidth(Number(event.target.value))}
+              step={editorImagePixelWidthBounds.step}
+              type="range"
+              value={currentImageWidthPx}
+            />
+            <output>{currentImageWidthPx}px</output>
+          </label>
+        )}
         <input
           ref={fileInputRef}
           className="sr-only"
@@ -2822,24 +2957,9 @@ function RichMemoEditor({
           onChange={handleFileInputChange}
           type="file"
         />
+          </div>
+        )}
       </div>
-      {selectedImageWidth && (
-        <div className="image-size-toolbar" aria-label="이미지 크기 조절">
-          <span>이미지 크기</span>
-          {editorImageWidths.map((width) => (
-            <button
-              aria-pressed={selectedImageWidth === width}
-              className={selectedImageWidth === width ? "active" : ""}
-              key={width}
-              onClick={() => updateSelectedImageWidth(width)}
-              onMouseDown={(event) => event.preventDefault()}
-              type="button"
-            >
-              {width}%
-            </button>
-          ))}
-        </div>
-      )}
       <div className="rich-editor-frame">
         <EditorContent editor={editor} style={{ "--editor-font-size": `${fontSize}px` } as CSSProperties} />
         <RemoteCursorLayer cursors={remoteCursors} editorRef={editorRef} />
@@ -3034,9 +3154,22 @@ function rangeFromCharacterSpan(element: HTMLElement, startOffset: number, endOf
   return null;
 }
 
-function readImageWidth(image: HTMLImageElement) {
-  const width = Number(image.dataset.qmWidth ?? image.style.width.replace("%", ""));
-  return editorImageWidths.includes(width as (typeof editorImageWidths)[number]) ? width : 100;
+function readImageWidthPx(image: HTMLImageElement) {
+  const explicitWidth = Number(image.dataset.qmImageWidth ?? image.style.width.replace("px", ""));
+
+  if (Number.isFinite(explicitWidth) && image.style.width.endsWith("px")) {
+    return clampImagePixelWidth(explicitWidth);
+  }
+
+  return clampImagePixelWidth(Math.round(image.getBoundingClientRect().width || image.naturalWidth || editorImagePixelWidthBounds.max));
+}
+
+function clampImagePixelWidth(value: number) {
+  if (!Number.isFinite(value)) {
+    return editorImagePixelWidthBounds.max;
+  }
+
+  return Math.min(editorImagePixelWidthBounds.max, Math.max(editorImagePixelWidthBounds.min, Math.round(value)));
 }
 
 function getCaretCharacterOffset(element: HTMLElement | null) {
@@ -3623,7 +3756,7 @@ function AttachmentList({
                 </span>
               </div>
               <div className="attachment-actions">
-                {attachment.extension === "pdf" && onPreview && (
+                {previewableAttachmentExtensions.has(attachment.extension) && onPreview && (
                   <button
                     aria-label={`${attachmentDownloadName(attachment)} 미리보기`}
                     className="secondary-button attachment-action"
@@ -3663,14 +3796,12 @@ function AttachmentList({
   );
 }
 
-function PdfPreviewModal({
-  fileName,
+function AttachmentPreviewModal({
   onClose,
-  url
+  preview
 }: {
-  fileName: string;
   onClose: () => void;
-  url: string;
+  preview: AttachmentPreviewState;
 }) {
   return (
     <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
@@ -3683,26 +3814,36 @@ function PdfPreviewModal({
       >
         <header className="pdf-preview-header">
           <div className="pdf-preview-title">
-            <span>PDF 미리보기</span>
-            <h2 id="pdf-preview-title">{fileName}</h2>
+            <span>{preview.label}</span>
+            <h2 id="pdf-preview-title">{preview.fileName}</h2>
           </div>
           <div className="pdf-preview-actions">
-            <a className="secondary-button pdf-preview-download" download={fileName} href={url}>
-              <Download size={14} />
-              다운로드
-            </a>
-            <button className="icon-button pdf-preview-close" type="button" onClick={onClose} aria-label="PDF 미리보기 닫기">
+            {preview.url && (
+              <a className="secondary-button pdf-preview-download" download={preview.fileName} href={preview.url}>
+                <Download size={14} />
+                다운로드
+              </a>
+            )}
+            <button className="icon-button pdf-preview-close" type="button" onClick={onClose} aria-label="파일 미리보기 닫기">
               <X size={16} />
             </button>
           </div>
         </header>
-        <iframe
-          className="pdf-preview-frame"
-          referrerPolicy="no-referrer"
-          sandbox=""
-          src={url}
-          title={`${fileName} 미리보기`}
-        />
+        {preview.kind === "pdf" && preview.url ? (
+          <object
+            aria-label={`${preview.fileName} 미리보기`}
+            className="pdf-preview-frame"
+            data={preview.url}
+            type="application/pdf"
+          >
+            <a className="secondary-button pdf-preview-download" download={preview.fileName} href={preview.url}>
+              <Download size={14} />
+              다운로드
+            </a>
+          </object>
+        ) : (
+          <pre className={`file-text-preview ${preview.kind === "unsupported" ? "unsupported" : ""}`}>{preview.text}</pre>
+        )}
       </section>
     </div>
   );
@@ -4087,7 +4228,6 @@ function NotePreviewModal({
         )}
         <NoteInsightPanel
           currentUid={currentUid}
-          defaultOpen={!isEditing}
           history={history}
           historySummaries={historySummaries}
           note={note}
@@ -4111,7 +4251,6 @@ function NotePreviewModal({
 
 function NoteInsightPanel({
   currentUid,
-  defaultOpen,
   history,
   historySummaries,
   note,
@@ -4120,7 +4259,6 @@ function NoteInsightPanel({
   users
 }: {
   currentUid: string;
-  defaultOpen: boolean;
   history: NoteHistorySnapshot[];
   historySummaries: Record<string, string>;
   note: DecryptedNote;
@@ -4134,11 +4272,11 @@ function NoteInsightPanel({
   const showReceipts = note.type === "shared";
 
   return (
-    <details className="note-insight-panel" aria-label="노트 활동 정보" open={defaultOpen}>
+    <details className="note-insight-panel" aria-label="노트 활동 정보">
       <summary>
         <span>
           <History size={16} />
-          활동
+          활동 / 수정 이력 보기
         </span>
         <em>{history.length}개 이력</em>
       </summary>
@@ -4223,6 +4361,58 @@ async function imageFileToResizedDataUrl(file: File) {
 
   const dataUrl = await readFileAsDataUrl(file);
   return resizeImageDataUrl(dataUrl);
+}
+
+function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
+  const decodedText = decodeReadableBytes(bytes);
+
+  if (extension === "json") {
+    try {
+      return JSON.stringify(JSON.parse(decodedText), null, 2).slice(0, maxTextPreviewCharacters);
+    } catch {
+      return decodedText.slice(0, maxTextPreviewCharacters);
+    }
+  }
+
+  return decodedText.slice(0, maxTextPreviewCharacters);
+}
+
+function extractReadableAttachmentText(bytes: Uint8Array) {
+  const decodedText = decodeReadableBytes(bytes)
+    .replace(/[^\S\r\n]+/g, " ")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length >= 2)
+    .join("\n")
+    .trim();
+
+  const readableCharacters = decodedText.match(/[가-힣a-zA-Z0-9]/g)?.length ?? 0;
+
+  if (readableCharacters < 40) {
+    return "";
+  }
+
+  return decodedText.slice(0, maxTextPreviewCharacters);
+}
+
+function decodeReadableBytes(bytes: Uint8Array) {
+  const utf8Text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const utf16Text = new TextDecoder("utf-16le", { fatal: false }).decode(bytes);
+  const normalizedUtf8 = normalizeDecodedPreviewText(utf8Text);
+  const normalizedUtf16 = normalizeDecodedPreviewText(utf16Text);
+
+  return normalizedUtf16.length > normalizedUtf8.length * 1.4 ? normalizedUtf16 : normalizedUtf8;
+}
+
+function normalizeDecodedPreviewText(value: string) {
+  return value
+    .split("")
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return code === 9 || code === 10 || code === 13 || (code >= 32 && code !== 127);
+    })
+    .join("")
+    .trim();
 }
 
 function readFileAsDataUrl(file: File) {

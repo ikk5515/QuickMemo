@@ -498,6 +498,44 @@ textarea {
   position: relative;
 }
 
+.notes-top-actions {
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgb(20 33 31 / 5%);
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 10px;
+}
+
+.notes-top-actions > div {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.notes-top-actions button {
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.notes-top-status {
+  color: var(--muted);
+  flex: 0 1 360px;
+  font-size: 13px;
+  font-weight: 800;
+  min-width: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .notes-editor-layout {
   align-items: start;
   display: grid;
@@ -883,8 +921,9 @@ textarea {
 .editor-toolbar {
   align-items: center;
   border-bottom: 1px solid var(--line);
-  display: flex;
+  display: grid;
   gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
   margin: -18px -18px 16px;
   padding: 14px 18px;
 }
@@ -898,6 +937,7 @@ textarea {
 }
 
 .toolbar-actions {
+  justify-content: flex-end;
   margin-left: auto;
 }
 
@@ -1048,6 +1088,12 @@ textarea {
   font-weight: 800;
 }
 
+.note-created-inline {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .share-strip {
   border-bottom: 1px solid var(--line);
   display: flex;
@@ -1136,15 +1182,45 @@ textarea {
 }
 
 .rich-editor-toolbar {
-  align-items: center;
   background: color-mix(in srgb, var(--surface) 82%, transparent);
   border: 1px solid var(--line);
   border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 4px;
+  padding: 8px;
+}
+
+.rich-toolbar-tabs {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: inline-grid;
+  gap: 4px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  justify-self: start;
+  padding: 4px;
+}
+
+.rich-toolbar-tabs button {
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 30px;
+  padding: 0 12px;
+}
+
+.rich-toolbar-tabs button.active {
+  background: var(--ink);
+  color: #ffffff;
+}
+
+.rich-toolbar-panel {
+  align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 10px 0 4px;
-  padding: 8px;
+  min-width: 0;
 }
 
 .rich-editor-toolbar .icon-button {
@@ -1206,6 +1282,32 @@ textarea {
   gap: 5px;
   min-height: 34px;
   padding: 4px 6px;
+}
+
+.image-width-control {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 8px;
+}
+
+.image-width-control input[type="range"] {
+  accent-color: var(--teal);
+  min-height: 24px;
+  width: min(220px, 34vw);
+}
+
+.image-width-control output {
+  color: var(--ink);
+  min-width: 58px;
+  text-align: right;
 }
 
 .table-size-control button {
@@ -1361,12 +1463,90 @@ textarea {
 .admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"] {
   accent-color: var(--teal);
   appearance: auto;
+  block-size: 1em !important;
   flex: 0 0 auto;
-  height: 1em;
+  height: 1em !important;
+  inline-size: 1em !important;
   margin: 0;
-  min-height: 1em;
-  padding: 0;
-  width: 1em;
+  max-height: 1em !important;
+  max-width: 1em !important;
+  min-height: 0 !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  transform: translateY(0.18em);
+  width: 1em !important;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="14"]) > label input[type="checkbox"] {
+  block-size: 14px !important;
+  height: 14px !important;
+  inline-size: 14px !important;
+  max-height: 14px !important;
+  max-width: 14px !important;
+  width: 14px !important;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="16"]) > label input[type="checkbox"] {
+  block-size: 16px !important;
+  height: 16px !important;
+  inline-size: 16px !important;
+  max-height: 16px !important;
+  max-width: 16px !important;
+  width: 16px !important;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="17"]) > label input[type="checkbox"] {
+  block-size: 17px !important;
+  height: 17px !important;
+  inline-size: 17px !important;
+  max-height: 17px !important;
+  max-width: 17px !important;
+  width: 17px !important;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="18"]) > label input[type="checkbox"] {
+  block-size: 18px !important;
+  height: 18px !important;
+  inline-size: 18px !important;
+  max-height: 18px !important;
+  max-width: 18px !important;
+  width: 18px !important;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="20"]) > label input[type="checkbox"] {
+  block-size: 20px !important;
+  height: 20px !important;
+  inline-size: 20px !important;
+  max-height: 20px !important;
+  max-width: 20px !important;
+  width: 20px !important;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="22"]) > label input[type="checkbox"] {
+  block-size: 22px !important;
+  height: 22px !important;
+  inline-size: 22px !important;
+  max-height: 22px !important;
+  max-width: 22px !important;
+  width: 22px !important;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="24"]) > label input[type="checkbox"] {
+  block-size: 24px !important;
+  height: 24px !important;
+  inline-size: 24px !important;
+  max-height: 24px !important;
+  max-width: 24px !important;
+  width: 24px !important;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="28"]) > label input[type="checkbox"] {
+  block-size: 28px !important;
+  height: 28px !important;
+  inline-size: 28px !important;
+  max-height: 28px !important;
+  max-width: 28px !important;
+  width: 28px !important;
 }
 
 .rich-body-input li[data-type="taskItem"] > div,
@@ -2007,6 +2187,30 @@ textarea {
   flex: 1 1 auto;
   min-height: 420px;
   width: 100%;
+}
+
+.file-text-preview {
+  background: #fbfcfb;
+  border: 0;
+  color: var(--ink);
+  flex: 1 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.65;
+  margin: 0;
+  overflow: auto;
+  padding: 18px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.file-text-preview.unsupported {
+  color: var(--muted);
+  display: grid;
+  font-family: inherit;
+  font-weight: 800;
+  place-items: center;
+  text-align: center;
 }
 
 .note-preview-header {
@@ -2931,7 +3135,7 @@ textarea {
 
   .editor-toolbar {
     align-items: stretch;
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
   .editor-primary-actions,
@@ -2948,6 +3152,7 @@ textarea {
   }
 
   .toolbar-actions {
+    justify-content: stretch;
     margin-left: 0;
   }
 
@@ -3439,6 +3644,29 @@ textarea {
     padding-right: 8px;
   }
 
+  .notes-top-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .notes-top-actions > div {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .notes-top-actions button {
+    font-size: 12px;
+    min-width: 0;
+    padding: 0 8px;
+  }
+
+  .notes-top-status {
+    flex-basis: auto;
+    max-width: 100%;
+    text-align: left;
+    width: 100%;
+  }
+
   .editor-primary-actions,
   .toolbar-actions {
     display: flex;
@@ -3507,8 +3735,17 @@ textarea {
   }
 
   .rich-editor-toolbar {
+    overflow: hidden;
+  }
+
+  .rich-toolbar-tabs {
+    justify-self: stretch;
+  }
+
+  .rich-toolbar-panel {
     flex-wrap: nowrap;
     overflow-x: auto;
+    padding-bottom: 2px;
     scrollbar-width: thin;
   }
 
@@ -3516,6 +3753,10 @@ textarea {
   .selection-font-control,
   .table-size-control,
   .cell-color-palette {
+    flex: 0 0 auto;
+  }
+
+  .image-width-control {
     flex: 0 0 auto;
   }
 

@@ -31,8 +31,17 @@ describe("editor content helpers", () => {
     expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-width="50"></p>').html).toContain(
       'data-qm-width="50"'
     );
+    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-image-width="480"></p>').html).toContain(
+      'data-qm-image-width="480"'
+    );
+    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-image-width="480"></p>').html).toContain(
+      "width: 480px"
+    );
     expect(parseEditorContent('<p><img src="data:image/png;base64,abc" style="width:13px"></p>').html).not.toContain(
       "width:13px"
+    );
+    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-image-width="9999"></p>').html).not.toContain(
+      "data-qm-image-width"
     );
   });
 
