@@ -172,6 +172,7 @@ function noteHistory(noteId: string, actorUid: string, overrides: Record<string,
     actorUid,
     action: "content",
     changedFields: ["title", "body"],
+    readerUids: ["user-a", "user-b"],
     encryptedSummary: encryptedPayload,
     encryptedSnapshot: encryptedPayload,
     createdAt: serverTimestamp(),
@@ -1185,6 +1186,77 @@ describeRules("firestore security rules", () => {
         doc(participantDb, "notes/note-a/history/unsafe-snapshot"),
         noteHistory("note-a", "user-b", { encryptedSnapshot: { version: 1, algorithm: "AES-GCM", cipherText: 12, iv: "iv" } })
       )
+    );
+
+    const mismatchedReaderBatch = writeBatch(participantDb);
+    mismatchedReaderBatch.update(doc(participantDb, "notes/note-a"), {
+      encryptedBody: { ...encryptedPayload, cipherText: "reader-mismatch" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-b"
+    });
+    mismatchedReaderBatch.set(
+      doc(participantDb, "notes/note-a/history/reader-mismatch"),
+      noteHistory("note-a", "user-b", { changedFields: ["body"], readerUids: ["user-b"] })
+    );
+    await assertFails(mismatchedReaderBatch.commit());
+  });
+
+  it("limits history snapshot reads to users authorized when the snapshot was created", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(context.firestore(), "notes/note-a/history/legacy-snapshot"), {
+        noteId: "note-a",
+        actorUid: "user-a",
+        action: "content",
+        changedFields: ["body"],
+        encryptedSummary: encryptedPayload,
+        encryptedSnapshot: encryptedPayload,
+        createdAt: new Date("2026-05-18T09:00:00.000Z")
+      });
+      await setDoc(
+        doc(context.firestore(), "notes/note-a/history/pre-share-snapshot"),
+        noteHistory("note-a", "user-a", {
+          changedFields: ["body"],
+          readerUids: ["user-a"],
+          createdAt: new Date("2026-05-18T10:00:00.000Z")
+        })
+      );
+      await setDoc(
+        doc(context.firestore(), "notes/note-a/history/post-share-snapshot"),
+        noteHistory("note-a", "user-a", {
+          changedFields: ["body"],
+          readerUids: ["user-a", "user-b"],
+          createdAt: new Date("2026-05-18T11:00:00.000Z")
+        })
+      );
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a/history/legacy-snapshot")));
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a/history/pre-share-snapshot")));
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a/history/post-share-snapshot")));
+
+    await assertFails(getDoc(doc(participantDb, "notes/note-a/history/legacy-snapshot")));
+    await assertFails(getDoc(doc(participantDb, "notes/note-a/history/pre-share-snapshot")));
+    await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/history/post-share-snapshot")));
+    await assertSucceeds(
+      getDocs(query(collection(participantDb, "notes/note-a/history"), where("readerUids", "array-contains", "user-b")))
     );
   });
 
