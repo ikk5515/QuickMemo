@@ -5,9 +5,11 @@ const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
 const imagePixelWidthBounds = { min: 120, max: 1200 };
+const tablePixelWidthBounds = { min: 280, max: 1800 };
 const textSizeOptions = new Set([14, 16, 17, 18, 20, 22, 24, 28]);
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
+const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 const allowedTags = new Set([
   "A",
   "B",
@@ -275,6 +277,7 @@ function copySafeAttributes(target: HTMLElement, source: HTMLElement) {
   copyTaskAttributes(target, source);
   copyTextAlign(target, source);
   copyTextSize(target, source);
+  copyTextColor(target, source);
   copyTableAttributes(target, source);
 }
 
@@ -315,6 +318,17 @@ function copyTextSize(target: HTMLElement, source: HTMLElement) {
   target.style.fontSize = `${size}px`;
 }
 
+function copyTextColor(target: HTMLElement, source: HTMLElement) {
+  const color = safeColor(source.getAttribute("data-qm-text-color") || source.style.color);
+
+  if (!color || target.tagName !== "SPAN") {
+    return;
+  }
+
+  target.dataset.qmTextColor = color;
+  target.style.color = color;
+}
+
 function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
   if (target.tagName === "TABLE") {
     copyTableWidthAttribute(target, source);
@@ -337,6 +351,15 @@ function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
 }
 
 function copyTableWidthAttribute(target: HTMLElement, source: HTMLElement) {
+  const pixelWidth = safeTablePixelWidth(source.getAttribute("data-qm-table-width-px") ?? source.style.width);
+
+  if (pixelWidth) {
+    target.dataset.qmTableWidthPx = String(pixelWidth);
+    target.style.width = `${pixelWidth}px`;
+    target.style.maxWidth = "100%";
+    return;
+  }
+
   const width = safeTableWidth(source.getAttribute("data-qm-table-width") ?? source.style.width);
 
   if (!width) {
@@ -410,6 +433,20 @@ function safeTableWidth(value: string | null) {
   return Number.isInteger(normalizedValue) && normalizedValue >= 30 && normalizedValue <= 100 ? normalizedValue : null;
 }
 
+function safeTablePixelWidth(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= tablePixelWidthBounds.min && normalizedValue <= tablePixelWidthBounds.max
+    ? normalizedValue
+    : null;
+}
+
 function safeTextSize(value: string | null) {
   const normalizedValue = Number(String(value ?? "").replace("px", "").trim());
 
@@ -423,9 +460,13 @@ function safeTextAlign(value: string | null) {
 }
 
 function safeCellColor(value: string | null) {
+  return safeColor(value);
+}
+
+function safeColor(value: string | null) {
   const normalizedValue = normalizeColor(value);
 
-  return normalizedValue && tableCellColors.has(normalizedValue) ? normalizedValue : null;
+  return normalizedValue && (tableCellColors.has(normalizedValue) || safeHexColorPattern.test(normalizedValue)) ? normalizedValue : null;
 }
 
 function safePixelWidth(value: string | null) {

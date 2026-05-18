@@ -14,17 +14,20 @@ import StarterKit from "@tiptap/starter-kit";
 export const editorCellColors = ["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"] as const;
 export const editorImageWidths = [25, 50, 75, 100] as const;
 export const editorImagePixelWidthBounds = { min: 120, max: 1200, step: 10 } as const;
-export const editorTableWidths = [30, 50, 75, 100] as const;
+export const editorTablePixelWidths = [480, 720, 960, 1200] as const;
+export const editorTablePixelWidthBounds = { min: 280, max: 1800, step: 10 } as const;
 export const editorTextSizes = [14, 16, 17, 18, 20, 22, 24, 28] as const;
+export const editorTextColors = ["#14211f", "#64748b", "#dc2626", "#b9822f", "#15803d", "#2563eb", "#7c3aed"] as const;
 
 const editorCellColorSet = new Set<string>(editorCellColors);
 const editorImageWidthSet = new Set<number>(editorImageWidths);
 const editorTextSizeSet = new Set<number>(editorTextSizes);
+const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 
 function normalizedEditorColor(value: unknown) {
   const rawValue = String(value ?? "").trim().toLowerCase();
 
-  if (editorCellColorSet.has(rawValue)) {
+  if (editorCellColorSet.has(rawValue) || safeHexColorPattern.test(rawValue)) {
     return rawValue;
   }
 
@@ -47,6 +50,12 @@ function normalizedTableWidth(value: unknown) {
   const width = Number(String(value ?? "").replace("%", "").trim());
 
   return Number.isInteger(width) && width >= 30 && width <= 100 ? width : null;
+}
+
+function normalizedTablePixelWidth(value: unknown) {
+  const width = Number(String(value ?? "").replace("px", "").trim());
+
+  return Number.isInteger(width) && width >= editorTablePixelWidthBounds.min && width <= editorTablePixelWidthBounds.max ? width : null;
 }
 
 function normalizedTextSize(value: unknown) {
@@ -87,6 +96,38 @@ const TextSize = Mark.create({
   }
 });
 
+const TextColor = Mark.create({
+  name: "textColor",
+
+  addAttributes() {
+    return {
+      color: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedEditorColor(element.getAttribute("data-qm-text-color") || element.style.color),
+        renderHTML: (attributes: { color?: string | null }) => {
+          const color = normalizedEditorColor(attributes.color);
+          return color ? { "data-qm-text-color": color, style: `color: ${color}` } : {};
+        }
+      }
+    };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: "span[data-qm-text-color]"
+      },
+      {
+        style: "color"
+      }
+    ];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["span", HTMLAttributes, 0];
+  }
+});
+
 const ResizableTable = Table.extend({
   addAttributes() {
     return {
@@ -94,9 +135,21 @@ const ResizableTable = Table.extend({
       qmWidth: {
         default: null,
         parseHTML: (element: HTMLElement) => normalizedTableWidth(element.getAttribute("data-qm-table-width") || element.style.width),
-        renderHTML: (attributes: { qmWidth?: number | string | null }) => {
+        renderHTML: (attributes: { qmWidth?: number | string | null; qmWidthPx?: number | string | null }) => {
+          if (normalizedTablePixelWidth(attributes.qmWidthPx)) {
+            return {};
+          }
+
           const width = normalizedTableWidth(attributes.qmWidth);
           return width ? { "data-qm-table-width": String(width), style: `width: ${width}%; max-width: 100%` } : {};
+        }
+      },
+      qmWidthPx: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedTablePixelWidth(element.getAttribute("data-qm-table-width-px") || element.style.width),
+        renderHTML: (attributes: { qmWidthPx?: number | string | null }) => {
+          const width = normalizedTablePixelWidth(attributes.qmWidthPx);
+          return width ? { "data-qm-table-width-px": String(width), style: `width: ${width}px; max-width: 100%` } : {};
         }
       }
     };
@@ -172,6 +225,7 @@ export const richEditorExtensions = [
     }
   }),
   TextSize,
+  TextColor,
   Link.configure({
     autolink: true,
     defaultProtocol: "https",

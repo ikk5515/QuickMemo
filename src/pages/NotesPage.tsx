@@ -21,6 +21,7 @@ import {
   Loader2,
   PanelLeftOpen,
   PaintBucket,
+  Palette,
   Pencil,
   RotateCcw,
   Rows3,
@@ -50,6 +51,7 @@ import {
   useState
 } from "react";
 import { Timestamp } from "firebase/firestore";
+import { strFromU8, unzipSync } from "fflate";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
@@ -81,7 +83,9 @@ import {
 import {
   editorCellColors,
   editorImagePixelWidthBounds,
-  editorTableWidths,
+  editorTablePixelWidthBounds,
+  editorTablePixelWidths,
+  editorTextColors,
   editorTextSizes,
   richEditorExtensions
 } from "../lib/richEditorExtensions";
@@ -211,10 +215,12 @@ const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
-const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "hwp", "hwpx"]);
+const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx"]);
 const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
-const hwpPreviewAttachmentExtensions = new Set(["hwp", "hwpx"]);
+const zippedTextPreviewAttachmentExtensions = new Set(["docx", "hwpx"]);
+const readableTextPreviewAttachmentExtensions = new Set(["doc", "hwp"]);
 const maxTextPreviewCharacters = 120_000;
+const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -1422,6 +1428,7 @@ export default function NotesPage() {
 
   async function createFolder(name: string, color: string) {
     const trimmedName = name.trim();
+    const safeColor = normalizeCustomHexColor(color, folderColorOptions[0]);
 
     if (!trimmedName) {
       setError("폴더 이름을 입력해주세요.");
@@ -1429,12 +1436,12 @@ export default function NotesPage() {
     }
 
     try {
-      const folderRef = await createNoteFolder(unlockedProfile.uid, trimmedName, color);
+      const folderRef = await createNoteFolder(unlockedProfile.uid, trimmedName, safeColor);
       const createdFolder: NoteFolderSnapshot = {
         id: folderRef.id,
         ownerUid: unlockedProfile.uid,
         name: trimmedName,
-        color,
+        color: safeColor,
         createdAt: Timestamp.now(),
         updatedAt: Timestamp.now()
       };
@@ -1931,7 +1938,22 @@ export default function NotesPage() {
         return;
       }
 
-      if (hwpPreviewAttachmentExtensions.has(attachment.extension)) {
+      if (zippedTextPreviewAttachmentExtensions.has(attachment.extension)) {
+        const extractedText = extractZippedDocumentText(plainBytes, attachment.extension);
+
+        setAttachmentPreview({
+          fileName,
+          kind: extractedText ? "text" : "unsupported",
+          label: `${attachment.extension.toUpperCase()} 미리보기`,
+          text:
+            extractedText ||
+            `${attachment.extension.toUpperCase()} 파일에서 안전하게 표시할 텍스트를 찾지 못했습니다. 외부 변환 서버로 전송하지 않기 위해 다운로드 확인만 지원합니다.`
+        });
+        setStatus(extractedText ? "파일 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
+        return;
+      }
+
+      if (readableTextPreviewAttachmentExtensions.has(attachment.extension)) {
         const extractedText = extractReadableAttachmentText(plainBytes);
 
         setAttachmentPreview({
@@ -1940,7 +1962,7 @@ export default function NotesPage() {
           label: `${attachment.extension.toUpperCase()} 미리보기`,
           text:
             extractedText ||
-            "HWP/HWPX 파일은 브라우저가 안전하게 직접 렌더링할 수 없는 형식입니다. 외부 변환 서버로 전송하지 않기 위해 다운로드 확인만 지원합니다."
+            `${attachment.extension.toUpperCase()} 파일은 브라우저가 안전하게 직접 렌더링할 수 없는 형식입니다. 외부 변환 서버로 전송하지 않기 위해 다운로드 확인만 지원합니다.`
         });
         setStatus(extractedText ? "파일 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
         return;
@@ -2242,7 +2264,7 @@ export default function NotesPage() {
             </div>
             <span className="notes-top-status">{saving ? "저장 중..." : status}</span>
           </div>
-          <div className="notes-editor-layout">
+          <div className={`notes-editor-layout ${listOpen ? "with-drawer" : ""}`}>
             <NoteDrawer
               activeNoteId={editor.noteId}
               canRestoreNote={canRestoreNote}
@@ -2477,6 +2499,8 @@ function RichMemoEditor({
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
   const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
+  const [customTextColor, setCustomTextColor] = useState<string>(editorTextColors[0]);
+  const [customCellColor, setCustomCellColor] = useState<string>(editorCellColors[0]);
   const [tableRows, setTableRows] = useState(3);
   const [tableColumns, setTableColumns] = useState(3);
   const [, setToolbarVersion] = useState(0);
@@ -2643,6 +2667,22 @@ function RichMemoEditor({
     runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textSize", { size }).run());
   }
 
+  function applySelectionTextColor(color: string) {
+    const safeColor = normalizeCustomHexColor(color, editorTextColors[0]);
+    setCustomTextColor(safeColor);
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textColor", { color: safeColor }).run());
+  }
+
+  function clearSelectionTextColor() {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().unsetMark("textColor").run());
+  }
+
+  function applyCellColor(color: string) {
+    const safeColor = normalizeCustomHexColor(color, editorCellColors[0]);
+    setCustomCellColor(safeColor);
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().setCellAttribute("backgroundColor", safeColor).run());
+  }
+
   function undoEditorStep() {
     runToolbarCommand((currentEditor) => currentEditor.chain().focus().undo().run());
   }
@@ -2666,8 +2706,8 @@ function RichMemoEditor({
   }
 
   function setTableWidth(width: number) {
-    const safeWidth = Math.min(100, Math.max(30, Math.round(width)));
-    runToolbarCommand((currentEditor) => currentEditor.chain().focus().updateAttributes("table", { qmWidth: safeWidth }).run());
+    const safeWidth = clampTablePixelWidth(width);
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().updateAttributes("table", { qmWidth: null, qmWidthPx: safeWidth }).run());
   }
 
   function chooseFiles() {
@@ -2684,7 +2724,8 @@ function RichMemoEditor({
   }
 
   const currentSelectionFontSize = Number(editor?.getAttributes("textSize").size) || fontSize;
-  const currentTableWidth = Number(editor?.getAttributes("table").qmWidth) || 100;
+  const currentSelectionTextColor = String(editor?.getAttributes("textColor").color || customTextColor);
+  const currentTableWidth = Number(editor?.getAttributes("table").qmWidthPx) || editorTablePixelWidths[1];
   const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
 
   return (
@@ -2798,6 +2839,38 @@ function RichMemoEditor({
             ))}
           </select>
         </label>
+        <div className="text-color-palette" aria-label="글자 색상">
+          <Palette size={15} />
+          {editorTextColors.map((color) => (
+            <button
+              aria-label={`${color} 글자 색상`}
+              aria-pressed={currentSelectionTextColor === color}
+              className={currentSelectionTextColor === color ? "active" : ""}
+              key={color}
+              onClick={() => applySelectionTextColor(color)}
+              onMouseDown={(event) => event.preventDefault()}
+              style={{ backgroundColor: color }}
+              type="button"
+            />
+          ))}
+          <label className="custom-color-input compact" title="직접 글자 색상 선택">
+            <input
+              aria-label="글자 색상 직접 선택"
+              onChange={(event) => applySelectionTextColor(event.target.value)}
+              type="color"
+              value={customTextColor}
+            />
+          </label>
+          <button
+            aria-label="글자 색상 해제"
+            className="cell-color-clear"
+            onClick={clearSelectionTextColor}
+            onMouseDown={(event) => event.preventDefault()}
+            type="button"
+          >
+            <X size={13} />
+          </button>
+        </div>
           </div>
         )}
         {activeToolTab === "table" && (
@@ -2877,27 +2950,28 @@ function RichMemoEditor({
         <span className="table-size-control" aria-label="표 전체 크기">
           <Table2 size={15} />
           <input
-            aria-label="표 전체 크기 세부 조절"
+            aria-label="표 전체 너비"
             disabled={!editor?.isActive("table")}
-            max={100}
-            min={30}
+            max={editorTablePixelWidthBounds.max}
+            min={editorTablePixelWidthBounds.min}
             onChange={(event) => setTableWidth(Number(event.target.value))}
+            step={editorTablePixelWidthBounds.step}
             type="range"
             value={currentTableWidth}
           />
-          <output>{currentTableWidth}%</output>
-          {editorTableWidths.map((width) => (
+          <output>{currentTableWidth}px</output>
+          {editorTablePixelWidths.map((width) => (
             <button
-              aria-label={`표 전체 크기 ${width}%`}
-              aria-pressed={Number(editor?.getAttributes("table").qmWidth) === width}
-              className={Number(editor?.getAttributes("table").qmWidth) === width ? "active" : ""}
+              aria-label={`표 전체 너비 ${width}px`}
+              aria-pressed={Number(editor?.getAttributes("table").qmWidthPx) === width}
+              className={Number(editor?.getAttributes("table").qmWidthPx) === width ? "active" : ""}
               disabled={!editor?.isActive("table")}
               key={width}
               onClick={() => setTableWidth(width)}
               onMouseDown={(event) => event.preventDefault()}
               type="button"
             >
-              {width}%
+              {width}px
             </button>
           ))}
         </span>
@@ -2908,14 +2982,21 @@ function RichMemoEditor({
               aria-label={`${color} 셀 색상`}
               disabled={!editor?.isActive("table")}
               key={color}
-              onClick={() =>
-                runToolbarCommand((currentEditor) => currentEditor.chain().focus().setCellAttribute("backgroundColor", color).run())
-              }
+              onClick={() => applyCellColor(color)}
               onMouseDown={(event) => event.preventDefault()}
               style={{ backgroundColor: color }}
               type="button"
             />
           ))}
+          <label className="custom-color-input compact" title="직접 셀 색상 선택">
+            <input
+              aria-label="셀 색상 직접 선택"
+              disabled={!editor?.isActive("table")}
+              onChange={(event) => applyCellColor(event.target.value)}
+              type="color"
+              value={customCellColor}
+            />
+          </label>
           <button
             aria-label="셀 색상 해제"
             className="cell-color-clear"
@@ -2974,6 +3055,14 @@ function clampTableDimension(value: number) {
   }
 
   return Math.min(12, Math.max(1, Math.round(value)));
+}
+
+function clampTablePixelWidth(value: number) {
+  if (!Number.isFinite(value)) {
+    return editorTablePixelWidths[1];
+  }
+
+  return Math.min(editorTablePixelWidthBounds.max, Math.max(editorTablePixelWidthBounds.min, Math.round(value)));
 }
 
 function RemoteCursorLayer({
@@ -3603,6 +3692,15 @@ function PersonalOverview({
               />
             </label>
             <div className="folder-color-picker" aria-label="폴더 색상">
+              <label className="custom-color-input" title="직접 색상 선택">
+                <Palette size={14} />
+                <input
+                  aria-label="폴더 색상 직접 선택"
+                  onChange={(event) => setFolderColor(normalizeCustomHexColor(event.target.value, folderColor))}
+                  type="color"
+                  value={folderColor}
+                />
+              </label>
               {folderColorOptions.map((color) => (
                 <button
                   aria-label={`${color} 폴더 색상`}
@@ -4375,6 +4473,78 @@ function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
   }
 
   return decodedText.slice(0, maxTextPreviewCharacters);
+}
+
+function extractZippedDocumentText(bytes: Uint8Array, extension: string) {
+  try {
+    const entries = unzipSync(bytes);
+    const textEntries = Object.entries(entries)
+      .filter(([name]) => zippedPreviewEntryPriority(name, extension) > 0)
+      .sort(([leftName], [rightName]) => zippedPreviewEntryPriority(rightName, extension) - zippedPreviewEntryPriority(leftName, extension))
+      .slice(0, 40)
+      .map(([, entry]) => xmlMarkupToText(strFromU8(entry)))
+      .filter(Boolean);
+
+    return textEntries.join("\n\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, maxTextPreviewCharacters);
+  } catch {
+    return "";
+  }
+}
+
+function zippedPreviewEntryPriority(name: string, extension: string) {
+  const normalizedName = name.toLowerCase();
+
+  if (!normalizedName.endsWith(".xml")) {
+    return 0;
+  }
+
+  if (extension === "docx") {
+    if (normalizedName === "word/document.xml") {
+      return 20;
+    }
+
+    return normalizedName.startsWith("word/") ? 8 : 0;
+  }
+
+  if (extension === "hwpx") {
+    if (normalizedName.includes("section") || normalizedName.includes("content")) {
+      return 20;
+    }
+
+    return normalizedName.startsWith("contents/") ? 8 : 0;
+  }
+
+  return 0;
+}
+
+function xmlMarkupToText(markup: string) {
+  return decodeXmlEntities(
+    markup
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+  );
+}
+
+function decodeXmlEntities(value: string) {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (entity, body: string) => {
+    const normalizedBody = body.toLowerCase();
+
+    if (normalizedBody === "amp") return "&";
+    if (normalizedBody === "lt") return "<";
+    if (normalizedBody === "gt") return ">";
+    if (normalizedBody === "quot") return "\"";
+    if (normalizedBody === "apos") return "'";
+    if (normalizedBody.startsWith("#x")) return String.fromCodePoint(Number.parseInt(normalizedBody.slice(2), 16));
+    if (normalizedBody.startsWith("#")) return String.fromCodePoint(Number.parseInt(normalizedBody.slice(1), 10));
+    return entity;
+  });
+}
+
+function normalizeCustomHexColor(value: string, fallback: string) {
+  const normalizedValue = value.trim().toLowerCase();
+
+  return safeHexColorPattern.test(normalizedValue) ? normalizedValue : fallback;
 }
 
 function extractReadableAttachmentText(bytes: Uint8Array) {

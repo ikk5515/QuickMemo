@@ -542,6 +542,7 @@ textarea {
   gap: 14px;
   grid-template-columns: minmax(0, 1fr);
   min-width: 0;
+  transition: grid-template-columns 0.18s ease;
 }
 
 .editor-panel {
@@ -586,13 +587,13 @@ textarea {
   grid-template-columns: minmax(0, 1fr) auto;
   justify-content: space-between;
   min-width: 0;
-  padding: 12px 14px;
+  padding: 9px 12px;
 }
 
 .personal-overview-header h2 {
-  font-size: clamp(20px, 2vw, 26px);
+  font-size: clamp(18px, 1.7vw, 22px);
   line-height: 1.1;
-  margin: 4px 0 0;
+  margin: 2px 0 0;
 }
 
 .personal-overview-layout {
@@ -1328,7 +1329,7 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   font-weight: 900;
-  min-width: 38px;
+  min-width: 56px;
   text-align: right;
 }
 
@@ -1337,7 +1338,8 @@ textarea {
   color: #ffffff;
 }
 
-.cell-color-palette {
+.cell-color-palette,
+.text-color-palette {
   align-items: center;
   background: #ffffff;
   border: 1px solid var(--line);
@@ -1348,7 +1350,8 @@ textarea {
   padding: 4px 6px;
 }
 
-.cell-color-palette button {
+.cell-color-palette button,
+.text-color-palette button {
   border: 1px solid rgb(15 23 42 / 18%);
   border-radius: 999px;
   height: 22px;
@@ -1357,9 +1360,49 @@ textarea {
   width: 22px;
 }
 
-.cell-color-palette .cell-color-clear {
+.cell-color-palette button.active,
+.text-color-palette button.active {
+  box-shadow: 0 0 0 2px #ffffff, 0 0 0 4px var(--ink);
+}
+
+.cell-color-palette .cell-color-clear,
+.text-color-palette .cell-color-clear {
   background: var(--surface);
   color: var(--ink);
+}
+
+.custom-color-input {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  min-width: 34px;
+  overflow: hidden;
+  padding: 0;
+  position: relative;
+  width: 34px;
+}
+
+.custom-color-input.compact {
+  height: 24px;
+  min-width: 24px;
+  width: 24px;
+}
+
+.custom-color-input input[type="color"] {
+  appearance: none;
+  border: 0;
+  cursor: pointer;
+  height: 42px;
+  inset: -4px;
+  min-height: 0;
+  padding: 0;
+  position: absolute;
+  width: 42px;
 }
 
 .remote-cursor-layer {
@@ -1439,7 +1482,7 @@ textarea {
 .rich-body-input li[data-type="taskItem"],
 .note-preview-body li[data-type="taskItem"],
 .admin-note-view-body li[data-type="taskItem"] {
-  align-items: flex-start;
+  align-items: baseline;
   display: flex;
   gap: 0.5em;
   margin-bottom: 8px;
@@ -1452,9 +1495,9 @@ textarea {
   align-items: center;
   display: inline-flex;
   flex: 0 0 auto;
-  height: 1.75em;
+  height: auto;
   min-height: 0;
-  padding-top: 0;
+  padding-top: 0.18em;
   width: auto;
 }
 
@@ -1462,8 +1505,12 @@ textarea {
 .note-preview-body li[data-type="taskItem"] > label input[type="checkbox"],
 .admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"] {
   accent-color: var(--teal);
-  appearance: auto;
+  appearance: none;
+  background: #ffffff;
+  border: 1.4px solid color-mix(in srgb, var(--muted) 72%, #ffffff);
+  border-radius: 0.24em;
   block-size: 1em !important;
+  cursor: pointer;
   flex: 0 0 auto;
   height: 1em !important;
   inline-size: 1em !important;
@@ -1473,8 +1520,18 @@ textarea {
   min-height: 0 !important;
   min-width: 0 !important;
   padding: 0 !important;
-  transform: translateY(0.18em);
+  transform: none;
   width: 1em !important;
+}
+
+.rich-body-input li[data-type="taskItem"] > label input[type="checkbox"]:checked,
+.note-preview-body li[data-type="taskItem"] > label input[type="checkbox"]:checked,
+.admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"]:checked {
+  background:
+    linear-gradient(45deg, transparent 58%, #ffffff 58% 72%, transparent 72%) 19% 53% / 45% 45% no-repeat,
+    linear-gradient(135deg, transparent 52%, #ffffff 52% 66%, transparent 66%) 68% 48% / 58% 58% no-repeat,
+    var(--teal);
+  border-color: var(--teal);
 }
 
 :is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="14"]) > label input[type="checkbox"] {
@@ -1574,6 +1631,12 @@ textarea {
 .rich-body-input table[data-qm-table-width],
 .note-preview-body table[data-qm-table-width],
 .admin-note-view-body table[data-qm-table-width] {
+  max-width: 100%;
+}
+
+.rich-body-input table[data-qm-table-width-px],
+.note-preview-body table[data-qm-table-width-px],
+.admin-note-view-body table[data-qm-table-width-px] {
   max-width: 100%;
 }
 
@@ -3042,6 +3105,21 @@ textarea {
   }
 }
 
+@media (min-width: 981px) {
+  .notes-editor-layout.with-drawer {
+    grid-template-columns: minmax(300px, 372px) minmax(0, 1fr);
+  }
+
+  .notes-editor-layout.with-drawer .note-drawer {
+    max-height: calc(100svh - 110px);
+    position: sticky;
+    left: auto;
+    top: 88px;
+    width: auto;
+    z-index: 1;
+  }
+}
+
 @media (min-width: 1180px) {
   .notes-editor-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -3565,14 +3643,28 @@ textarea {
   }
 
   .personal-overview-header {
-    align-items: stretch;
+    align-items: center;
     gap: 8px;
-    grid-template-columns: 1fr;
-    padding: 10px 12px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 8px 10px;
+  }
+
+  .personal-overview-header h2 {
+    font-size: 18px;
+    margin: 0;
+  }
+
+  .personal-overview-header .note-kind-pill {
+    min-height: 22px;
+    padding: 0 8px;
   }
 
   .personal-overview-header .secondary-button {
-    justify-self: stretch;
+    font-size: 0;
+    gap: 0;
+    min-height: 34px;
+    padding: 0;
+    width: 34px;
   }
 
   .personal-overview-layout {
@@ -3752,11 +3844,13 @@ textarea {
   .table-insert-control,
   .selection-font-control,
   .table-size-control,
-  .cell-color-palette {
+  .cell-color-palette,
+  .text-color-palette {
     flex: 0 0 auto;
   }
 
-  .image-width-control {
+  .image-width-control,
+  .custom-color-input {
     flex: 0 0 auto;
   }
 
