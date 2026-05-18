@@ -20,6 +20,14 @@ const defaultAdmin: PublicRosterUser = {
   isAdmin: true
 };
 
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export default function SetupPage() {
   const navigate = useNavigate();
   const { firebaseUser, loginRosterUser } = useAuth();
@@ -28,6 +36,7 @@ export default function SetupPage() {
   const [avatarText, setAvatarText] = useState(defaultAdmin.avatarText);
   const [color, setColor] = useState(defaultAdmin.color);
   const [password, setPassword] = useState("");
+  const [setupCode, setSetupCode] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,7 +60,10 @@ export default function SetupPage() {
     setError(null);
 
     try {
-      const keyBundle = await generateUserKeyBundle(password);
+      const [keyBundle, setupTokenHash] = await Promise.all([
+        generateUserKeyBundle(password),
+        sha256Hex(setupCode.trim())
+      ]);
       const created = await createFirstAdmin({
         displayName,
         avatarText,
@@ -59,7 +71,8 @@ export default function SetupPage() {
         quickKey: 1,
         password,
         isAdmin: true,
-        keyBundle
+        keyBundle,
+        setupTokenHash
       });
       await loginRosterUser(
         {
@@ -77,7 +90,12 @@ export default function SetupPage() {
       );
       navigate("/app", { replace: true });
     } catch (setupError) {
-      setError(firebaseAuthErrorMessage(setupError, "첫 관리자를 만들지 못했습니다."));
+      const message = firebaseAuthErrorMessage(setupError, "첫 관리자를 만들지 못했습니다.");
+      setError(
+        message.includes("permission") || message.includes("권한")
+          ? "초기 설정 코드가 없거나 올바르지 않습니다. 운영자가 등록한 설정 코드를 확인해주세요."
+          : message
+      );
     } finally {
       setPending(false);
     }
@@ -131,6 +149,17 @@ export default function SetupPage() {
               required
               type="password"
               value={password}
+            />
+          </label>
+          <label>
+            초기 설정 코드
+            <input
+              autoComplete="one-time-code"
+              minLength={8}
+              onChange={(event) => setSetupCode(event.target.value)}
+              required
+              type="password"
+              value={setupCode}
             />
           </label>
           {error && <p className="form-error">{error}</p>}

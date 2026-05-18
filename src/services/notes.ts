@@ -634,9 +634,6 @@ export async function restoreNote(noteId: string, uid: string, readerUids: strin
 }
 
 export async function purgeNote(input: PurgeNoteInput) {
-  await deleteCollectionDocuments(["notes", input.noteId, "attachments"]);
-  await deleteCollectionDocuments(["notes", input.noteId, "history"]);
-
   await updateDoc(doc(db, "notes", input.noteId), {
     type: "personal",
     participantUids: [input.uid],
@@ -653,4 +650,7 @@ export async function purgeNote(input: PurgeNoteInput) {
     savedAt: serverTimestamp(),
     updatedBy: input.uid
   });
+
+  await deleteCollectionDocuments(["notes", input.noteId, "attachments"]);
+  await deleteCollectionDocuments(["notes", input.noteId, "history"]);
 }
