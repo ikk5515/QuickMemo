@@ -10,6 +10,14 @@ service cloud.firestore {
       return /databases/$(database)/documents/system/bootstrap;
     }
 
+    function bootstrapGatePath() {
+      return /databases/$(database)/documents/system/bootstrapGate;
+    }
+
+    function bootstrapAttemptPath(uid) {
+      return /databases/$(database)/documents/system/bootstrapAttempts/attempts/$(uid);
+    }
+
     function userPath(uid) {
       return /databases/$(database)/documents/users/$(uid);
     }
@@ -541,10 +549,32 @@ service cloud.firestore {
         && !existsAfter(quickLoginKeyPath(get(userPath(uid)).data.quickKey));
     }
 
+    function validBootstrapTokenHash(value) {
+      return value is string && value.size() == 64;
+    }
+
+    function validBootstrapAttempt(data, uid) {
+      return data.keys().hasOnly(["uid", "setupTokenHash", "createdAt"])
+        && data.uid == uid
+        && validBootstrapTokenHash(data.setupTokenHash)
+        && data.createdAt == request.time;
+    }
+
+    function validBootstrapGate(data) {
+      return data.keys().hasOnly(["setupTokenHash", "createdAt"])
+        && validBootstrapTokenHash(data.setupTokenHash)
+        && data.createdAt is timestamp;
+    }
+
     function bootstrapCreatesAdmin(uid) {
       return signedIn()
         && request.auth.uid == uid
         && !exists(bootstrapPath())
+        && exists(bootstrapGatePath())
+        && validBootstrapGate(get(bootstrapGatePath()).data)
+        && existsAfter(bootstrapAttemptPath(uid))
+        && validBootstrapAttempt(getAfter(bootstrapAttemptPath(uid)).data, uid)
+        && getAfter(bootstrapAttemptPath(uid)).data.setupTokenHash == get(bootstrapGatePath()).data.setupTokenHash
         && getAfter(bootstrapPath()).data.adminUid == uid;
     }
 
@@ -831,7 +861,7 @@ service cloud.firestore {
     }
 
     match /system/bootstrap {
-      allow read: if true;
+      allow read: if adminUser();
       allow create: if signedIn()
         && !exists(bootstrapPath())
         && request.resource.data.keys().hasOnly(["adminUid", "createdAt"])
@@ -839,6 +869,16 @@ service cloud.firestore {
         && getAfter(userPath(request.auth.uid)).data.isAdmin == true
         && getAfter(userPath(request.auth.uid)).data.isActive == true;
       allow update, delete: if false;
+    }
+
+    match /system/bootstrapGate {
+      allow read, create, update, delete: if false;
+    }
+
+    match /system/bootstrapAttempts/attempts/{uid} {
+      allow read, update, delete: if false;
+      allow create: if validBootstrapAttempt(request.resource.data, uid)
+        && firstAdminCreate(uid);
     }
 
     match /notes/{noteId} {
@@ -876,6 +916,7 @@ service cloud.firestore {
           && historyMatchesNoteMutation(request.resource.data, noteId);
         allow delete: if exists(notePath(noteId))
           && noteDeleted(get(notePath(noteId)).data)
+          && notePurged(get(notePath(noteId)).data)
           && canDeleteNote(get(notePath(noteId)).data);
       }
 

@@ -31,6 +31,10 @@ export interface CreatedUserResult {
   loginEmail: string;
 }
 
+export interface FirstAdminPayload extends NewUserPayload {
+  setupTokenHash: string;
+}
+
 export interface UpdateUserPayload {
   uid: string;
   displayName: string;
@@ -158,7 +162,7 @@ export async function getBootstrapState(): Promise<BootstrapState> {
   };
 }
 
-export async function createFirstAdmin(payload: NewUserPayload): Promise<CreatedUserResult> {
+export async function createFirstAdmin(payload: FirstAdminPayload): Promise<CreatedUserResult> {
   const loginEmail = makeLoginEmail();
   const credential = await createUserWithEmailAndPassword(auth, loginEmail, payload.password);
   await updateProfile(credential.user, { displayName: payload.displayName });
@@ -170,6 +174,11 @@ export async function createFirstAdmin(payload: NewUserPayload): Promise<Created
 
     batch.set(doc(db, "system", "bootstrap"), {
       adminUid: uid,
+      createdAt: serverTimestamp()
+    });
+    batch.set(doc(db, "system", "bootstrapAttempts", "attempts", uid), {
+      uid,
+      setupTokenHash: payload.setupTokenHash,
       createdAt: serverTimestamp()
     });
     batch.set(doc(db, "quickLoginKeys", String(adminPayload.quickKey)), {

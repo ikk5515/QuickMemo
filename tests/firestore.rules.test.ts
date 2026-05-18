@@ -39,6 +39,7 @@ const userKeyPayload = {
   cipherText: "private-key",
   iv: "iv"
 };
+const bootstrapSetupTokenHash = "a".repeat(64);
 
 function userProfile(uid: string, overrides: Record<string, unknown> = {}) {
   const isAdmin = Boolean(overrides.isAdmin);
@@ -220,16 +221,69 @@ describeRules("firestore security rules", () => {
   });
 
   it("allows the first signed-in user to bootstrap the first admin", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "system/bootstrapGate"), {
+        setupTokenHash: bootstrapSetupTokenHash,
+        createdAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+    });
+
     const adminDb = testEnv.authenticatedContext("admin-a").firestore();
     const batch = writeBatch(adminDb);
 
-    batch.set(doc(adminDb, "system/bootstrap"), { adminUid: "admin-a" });
+    batch.set(doc(adminDb, "system/bootstrap"), { adminUid: "admin-a", createdAt: serverTimestamp() });
+    batch.set(doc(adminDb, "system/bootstrapAttempts/attempts/admin-a"), {
+      uid: "admin-a",
+      setupTokenHash: bootstrapSetupTokenHash,
+      createdAt: serverTimestamp()
+    });
     batch.set(doc(adminDb, "quickLoginKeys/1"), quickLoginKey("admin-a", 1));
     batch.set(doc(adminDb, "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
     batch.set(doc(adminDb, "publicLoginRoster/admin-a"), rosterProfile("admin-a", { isAdmin: true, role: "admin" }));
     batch.set(doc(adminDb, "userKeys/admin-a"), userKey("admin-a"));
 
     await assertSucceeds(batch.commit());
+  });
+
+  it("blocks first admin bootstrap without the operator setup gate", async () => {
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const missingGateBatch = writeBatch(adminDb);
+
+    missingGateBatch.set(doc(adminDb, "system/bootstrap"), { adminUid: "admin-a", createdAt: serverTimestamp() });
+    missingGateBatch.set(doc(adminDb, "system/bootstrapAttempts/attempts/admin-a"), {
+      uid: "admin-a",
+      setupTokenHash: bootstrapSetupTokenHash,
+      createdAt: serverTimestamp()
+    });
+    missingGateBatch.set(doc(adminDb, "quickLoginKeys/1"), quickLoginKey("admin-a", 1));
+    missingGateBatch.set(doc(adminDb, "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+    missingGateBatch.set(doc(adminDb, "publicLoginRoster/admin-a"), rosterProfile("admin-a", { isAdmin: true, role: "admin" }));
+    missingGateBatch.set(doc(adminDb, "userKeys/admin-a"), userKey("admin-a"));
+
+    await assertFails(missingGateBatch.commit());
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "system/bootstrapGate"), {
+        setupTokenHash: bootstrapSetupTokenHash,
+        createdAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+    });
+
+    await assertFails(getDoc(doc(testEnv.unauthenticatedContext().firestore(), "system/bootstrap")));
+
+    const wrongTokenBatch = writeBatch(adminDb);
+    wrongTokenBatch.set(doc(adminDb, "system/bootstrap"), { adminUid: "admin-a", createdAt: serverTimestamp() });
+    wrongTokenBatch.set(doc(adminDb, "system/bootstrapAttempts/attempts/admin-a"), {
+      uid: "admin-a",
+      setupTokenHash: "b".repeat(64),
+      createdAt: serverTimestamp()
+    });
+    wrongTokenBatch.set(doc(adminDb, "quickLoginKeys/1"), quickLoginKey("admin-a", 1));
+    wrongTokenBatch.set(doc(adminDb, "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+    wrongTokenBatch.set(doc(adminDb, "publicLoginRoster/admin-a"), rosterProfile("admin-a", { isAdmin: true, role: "admin" }));
+    wrongTokenBatch.set(doc(adminDb, "userKeys/admin-a"), userKey("admin-a"));
+
+    await assertFails(wrongTokenBatch.commit());
   });
 
   it("allows admins to create managed users and blocks non-admins", async () => {
@@ -1015,7 +1069,7 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), restoreFields("user-a")));
   });
 
-  it("allows secure immediate deletion of soft-deleted notes without parent document deletion", async () => {
+  it("allows history cleanup only after the soft-deleted note is irreversibly purged", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
@@ -1040,8 +1094,12 @@ describeRules("firestore security rules", () => {
 
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a")));
     await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
-    await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/history/history-a")));
+    await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/history/history-a")));
+    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), restoreFields("user-a")));
+    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), softDeleteFields("user-a")));
     await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), purgeFields("user-a")));
+    await assertFails(updateDoc(doc(ownerDb, "notes/note-a"), restoreFields("user-a")));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/history/history-a")));
     await assertFails(getDoc(doc(participantDb, "notes/note-a")));
   });
 
