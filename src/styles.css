@@ -1223,7 +1223,9 @@ textarea {
 }
 
 .font-size-control input {
-  max-width: 76px;
+  inline-size: 88px;
+  max-width: none;
+  min-width: 88px;
   padding: 0 8px;
   text-align: center;
 }
@@ -1440,6 +1442,16 @@ textarea {
   width: 72px;
 }
 
+.selection-font-control.compact {
+  min-height: 32px;
+  padding: 3px 6px;
+}
+
+.selection-font-control.compact input,
+.selection-font-control.compact select {
+  min-height: 24px;
+}
+
 .line-height-control input,
 .line-height-control select {
   width: 64px;
@@ -1510,6 +1522,44 @@ textarea {
 .text-color-palette .cell-color-clear {
   background: var(--surface);
   color: var(--ink);
+}
+
+.text-color-palette.compact {
+  min-height: 32px;
+  padding: 4px 6px;
+}
+
+.text-color-palette.compact button {
+  height: 20px;
+  min-height: 20px;
+  width: 20px;
+}
+
+.format-quick-dock {
+  align-items: center;
+  align-self: center;
+  background: rgb(255 255 255 / 94%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgb(15 23 42 / 12%);
+  display: inline-flex;
+  gap: 6px;
+  margin: 8px auto 0;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 6px;
+  position: sticky;
+  bottom: 10px;
+  z-index: 7;
+}
+
+.format-quick-dock > span {
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 950;
+  padding: 0 4px;
+  white-space: nowrap;
 }
 
 .custom-color-input {
@@ -4108,14 +4158,22 @@ textarea {
   }
 
   .note-preview-actions {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     width: 100%;
   }
 
   .note-preview-actions .icon-button {
+    flex: 0 0 38px;
+    max-width: 38px;
     min-height: 38px;
-    width: 100%;
+    width: 38px;
+  }
+
+  .note-preview-action {
+    flex: 1 1 86px;
+    justify-content: center;
   }
 
   .note-preview-body {
@@ -4555,12 +4613,25 @@ textarea {
   .toolbar-actions .font-size-control {
     flex-basis: auto;
     min-height: 38px;
-    min-width: 112px;
+    min-width: 126px;
     padding: 0 10px;
+  }
+
+  .toolbar-actions .font-size-control input {
+    inline-size: 72px;
+    min-width: 72px;
   }
 
   .toolbar-actions .folder-control {
     min-width: 148px;
+  }
+
+  .toolbar-actions > .icon-button {
+    flex: 0 0 38px;
+    inline-size: 38px;
+    max-width: 38px;
+    min-inline-size: 38px;
+    width: 38px;
   }
 
   .rich-editor-toolbar {
@@ -4584,6 +4655,18 @@ textarea {
   .cell-color-palette,
   .text-color-palette {
     flex: 0 0 auto;
+  }
+
+  .format-quick-dock {
+    align-self: stretch;
+    border-radius: 8px;
+    bottom: 8px;
+    justify-content: flex-start;
+    scrollbar-width: thin;
+  }
+
+  .format-quick-dock > span {
+    font-size: 11px;
   }
 
   .image-width-control,
