@@ -452,8 +452,8 @@ function renderSharedAttributionNote(block: HTMLElement, label: string) {
   noteElement.className = "qm-attribution-note";
   noteElement.textContent = label;
 
-  if (block.tagName === "P") {
-    block.insertAdjacentElement("afterend", noteElement);
+  if (block.tagName === "P" && block.parentNode) {
+    block.parentNode.insertBefore(noteElement, block.nextSibling);
     return;
   }
 
@@ -3493,6 +3493,8 @@ function RichMemoEditor({
   const currentSelectionTextColor = String(editor?.getAttributes("textColor").color || customTextColor);
   const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
   const currentTableState = editor ? selectedTableControlState(editor) : null;
+  const quickFontSizeListId = `${controlIdPrefix}-quick-font-sizes`;
+  const quickLineHeightListId = `${controlIdPrefix}-quick-line-heights`;
 
   return (
     <>
@@ -3850,6 +3852,40 @@ function RichMemoEditor({
       <div className="rich-editor-frame">
         <EditorContent editor={editor} style={{ "--editor-font-size": `${fontSize}px` } as CSSProperties} />
         <RemoteCursorLayer cursors={remoteCursors} editorRef={editorRef} />
+      </div>
+      <div className="format-quick-dock" aria-label="선택 영역 빠른 서식">
+        <span>빠른 서식</span>
+        <label className="selection-font-control compact">
+          글자
+          <FontSizeNumberInput
+            ariaLabel="빠른 선택 영역 글자 크기"
+            listId={quickFontSizeListId}
+            onCommit={applySelectionFontSize}
+            value={currentSelectionFontSize}
+          />
+        </label>
+        <label className="selection-font-control compact line-height-control">
+          줄
+          <LineHeightNumberInput
+            ariaLabel="빠른 선택 영역 줄 간격"
+            listId={quickLineHeightListId}
+            onCommit={applySelectionLineHeight}
+            value={currentSelectionLineHeight}
+          />
+        </label>
+        <div className="text-color-palette compact" aria-label="빠른 글자 색상">
+          {editorTextColors.map((color) => (
+            <button
+              aria-label={`글자 색상 ${color}`}
+              className={currentSelectionTextColor === color ? "active" : ""}
+              key={color}
+              onClick={() => applySelectionTextColor(color)}
+              onMouseDown={(event) => event.preventDefault()}
+              style={{ background: color }}
+              type="button"
+            />
+          ))}
+        </div>
       </div>
     </>
   );
@@ -4910,7 +4946,7 @@ function NoteDrawer({
           onClick={() => setMode("trash")}
         >
           복구함
-          <strong>{deletedNotes.length}</strong>
+          <strong>{deletedCounts.all}</strong>
         </button>
       </div>
       <div className="note-filter-tabs" role="tablist" aria-label="노트 종류 필터">
