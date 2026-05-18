@@ -98,6 +98,7 @@ import {
   confirmNoteRead,
   createNoteFolder,
   createNoteAttachment,
+  deleteNoteFolder,
   deleteNoteAttachment,
   createEncryptedNote,
   deleteNote,
@@ -234,7 +235,7 @@ const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
-const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx"]);
+const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx"]);
 const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
 const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 const maxTextPreviewCharacters = 120_000;
@@ -1649,6 +1650,34 @@ export default function NotesPage() {
     }
   }
 
+  async function removeFolder(folder: NoteFolderSnapshot) {
+    const notesInFolder = personalOverviewNotes
+      .filter((note) => note.type === "personal" && note.ownerUid === unlockedProfile.uid && note.folderId === folder.id)
+      .map((note) => note.id);
+
+    if (!window.confirm(`'${folder.name}' 그룹을 삭제할까요? 그룹 안의 노트는 삭제되지 않고 미분류로 이동합니다.`)) {
+      return;
+    }
+
+    try {
+      await deleteNoteFolder(unlockedProfile.uid, folder.id, notesInFolder);
+      setFolders((currentFolders) => currentFolders.filter((currentFolder) => currentFolder.id !== folder.id));
+
+      if (overviewFolderFilter === folder.id) {
+        setOverviewFolderFilter("all");
+      }
+
+      if (editor.folderId === folder.id) {
+        setEditor((current) => ({ ...current, folderId: null, dirty: current.noteId ? current.dirty : true }));
+      }
+
+      setStatus("그룹을 삭제했습니다. 해당 노트는 미분류로 이동했습니다.");
+      setError(null);
+    } catch {
+      setError("그룹을 삭제하지 못했습니다.");
+    }
+  }
+
   async function updateStoredNoteFolder(note: DecryptedNote, folderId: string | null) {
     if (note.type !== "personal" || note.ownerUid !== unlockedProfile.uid) {
       setError("개인 노트만 폴더를 지정할 수 있습니다.");
@@ -2162,6 +2191,20 @@ export default function NotesPage() {
         return;
       }
 
+      if (attachment.extension === "xlsx") {
+        const previewHtml = extractXlsxPreviewHtml(plainBytes);
+
+        setAttachmentPreview({
+          fileName,
+          html: previewHtml,
+          kind: previewHtml ? "html" : "unsupported",
+          label: "XLSX 스프레드시트 미리보기",
+          text: previewHtml ? undefined : "XLSX 파일에서 안전하게 표시할 시트 내용을 찾지 못했습니다."
+        });
+        setStatus(previewHtml ? "XLSX 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
+        return;
+      }
+
       if (textPreviewAttachmentExtensions.has(attachment.extension)) {
         setAttachmentPreview({
           fileName,
@@ -2461,6 +2504,7 @@ export default function NotesPage() {
             notes={personalOverviewNotes}
             onBack={returnToEditor}
             onCreateFolder={createFolder}
+            onDeleteFolder={(folder) => void removeFolder(folder)}
             onFolderFilterChange={setOverviewFolderFilter}
             onPreview={previewStoredNote}
             onUpdateNoteFolder={(note, folderId) => void updateStoredNoteFolder(note, folderId)}
@@ -2835,6 +2879,7 @@ function RichMemoEditor({
 
       const resizeHit = hit;
       event.preventDefault();
+      event.stopPropagation();
       selectedImageRef.current = null;
       setSelectedImageWidthPx(null);
       setResizeCursor(resizeHit.cursor);
@@ -2858,6 +2903,8 @@ function RichMemoEditor({
       const startColumnWidth = resizeHit.cell?.getBoundingClientRect().width ?? 0;
 
       function handleResizeMove(moveEvent: MouseEvent) {
+        moveEvent.preventDefault();
+
         if (resizeHit.kind === "column" && typeof resizeHit.columnIndex === "number") {
           const nextWidth = clampTableColumnPixelWidth(startColumnWidth + moveEvent.clientX - startX);
           updateTableColumnWidth(editor, resizeHit.table, resizeHit.columnIndex, nextWidth);
@@ -3583,6 +3630,8 @@ function updateEditorNodeAttributes(
 }
 
 function updateTableColumnWidth(editor: TipTapEditor, table: HTMLTableElement, columnIndex: number, width: number) {
+  const tableNodePosition = editorNodePositionFromElement(editor, table, "table");
+  const nextColumnWidths = columnWidthsAfterResize(table, columnIndex, width);
   const cellUpdates = Array.from(table.rows)
     .map((row) => row.cells[columnIndex])
     .filter((cell): cell is HTMLTableCellElement => cell instanceof HTMLTableCellElement)
@@ -3597,6 +3646,14 @@ function updateTableColumnWidth(editor: TipTapEditor, table: HTMLTableElement, c
 
   let transaction = editor.state.tr;
 
+  if (tableNodePosition && nextColumnWidths.length) {
+    transaction = transaction.setNodeMarkup(tableNodePosition.position, undefined, {
+      ...tableNodePosition.node.attrs,
+      qmWidth: null,
+      qmWidthPx: clampTablePixelWidth(nextColumnWidths.reduce((sum, columnWidth) => sum + columnWidth, 0))
+    });
+  }
+
   cellUpdates.forEach(({ node, position }) => {
     const colspan = Number(node.attrs.colspan) || 1;
     const colwidth = Array.from({ length: colspan }, () => width);
@@ -3609,6 +3666,18 @@ function updateTableColumnWidth(editor: TipTapEditor, table: HTMLTableElement, c
   });
 
   editor.view.dispatch(transaction);
+}
+
+function columnWidthsAfterResize(table: HTMLTableElement, columnIndex: number, width: number) {
+  const firstRow = table.rows[0];
+
+  if (!firstRow) {
+    return [];
+  }
+
+  return Array.from(firstRow.cells).map((cell, index) =>
+    index === columnIndex ? width : clampTableColumnPixelWidth(cell.getBoundingClientRect().width)
+  );
 }
 
 function editorNodePositionFromElement(
@@ -4199,6 +4268,7 @@ function PersonalOverview({
   notes,
   onBack,
   onCreateFolder,
+  onDeleteFolder,
   onFolderFilterChange,
   onPreview,
   onUpdateNoteFolder
@@ -4211,6 +4281,7 @@ function PersonalOverview({
   notes: DecryptedNote[];
   onBack: () => void;
   onCreateFolder: (name: string, color: string) => Promise<string | null>;
+  onDeleteFolder: (folder: NoteFolderSnapshot) => void;
   onFolderFilterChange: (filter: OverviewFolderFilter) => void;
   onPreview: (note: DecryptedNote) => void;
   onUpdateNoteFolder: (note: DecryptedNote, folderId: string | null) => void;
@@ -4305,7 +4376,7 @@ function PersonalOverview({
           <div className="folder-filter-chips" role="tablist" aria-label="개인 노트 폴더 필터">
             <button
               aria-selected={activeFolderFilter === "all"}
-              className={activeFolderFilter === "all" ? "active" : ""}
+              className={`folder-filter-button ${activeFolderFilter === "all" ? "active" : ""}`}
               onClick={() => onFolderFilterChange("all")}
               role="tab"
               type="button"
@@ -4315,7 +4386,7 @@ function PersonalOverview({
             </button>
             <button
               aria-selected={activeFolderFilter === "unfiled"}
-              className={activeFolderFilter === "unfiled" ? "active" : ""}
+              className={`folder-filter-button ${activeFolderFilter === "unfiled" ? "active" : ""}`}
               onClick={() => onFolderFilterChange("unfiled")}
               role="tab"
               type="button"
@@ -4323,20 +4394,33 @@ function PersonalOverview({
               <span>미분류</span>
               <strong>{unfiledCount}</strong>
             </button>
-            {folders.map((folder) => (
-              <button
-                aria-selected={activeFolderFilter === folder.id}
-                className={activeFolderFilter === folder.id ? "active" : ""}
-                key={folder.id}
-                onClick={() => onFolderFilterChange(folder.id)}
-                role="tab"
-                style={{ "--folder-color": folder.color } as CSSProperties}
-                type="button"
-              >
-                <span className="folder-chip-name">{folder.name}</span>
-                <strong>{notes.filter((note) => note.folderId === folder.id).length}</strong>
-              </button>
-            ))}
+            {folders.map((folder) => {
+              const folderCount = notes.filter((note) => note.folderId === folder.id).length;
+
+              return (
+                <div className="folder-filter-row" key={folder.id} style={{ "--folder-color": folder.color } as CSSProperties}>
+                  <button
+                    aria-selected={activeFolderFilter === folder.id}
+                    className={`folder-filter-button ${activeFolderFilter === folder.id ? "active" : ""}`}
+                    onClick={() => onFolderFilterChange(folder.id)}
+                    role="tab"
+                    type="button"
+                  >
+                    <span className="folder-chip-name">{folder.name}</span>
+                    <strong>{folderCount}</strong>
+                  </button>
+                  <button
+                    aria-label={`${folder.name} 그룹 삭제`}
+                    className="icon-button danger folder-delete-button"
+                    onClick={() => onDeleteFolder(folder)}
+                    title="그룹 삭제"
+                    type="button"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         </aside>
         <section className="overview-note-panel" aria-label={`${activeFilterLabel} 목록`}>
@@ -5353,6 +5437,196 @@ function extractHwpxPreviewHtml(bytes: Uint8Array) {
   } catch {
     return "";
   }
+}
+
+function extractXlsxPreviewHtml(bytes: Uint8Array) {
+  if (typeof DOMParser === "undefined") {
+    return "";
+  }
+
+  try {
+    const entries = unzipSync(bytes);
+    const sharedStrings = xlsxSharedStrings(entries);
+    const sheets = xlsxWorkbookSheets(entries);
+    const blocks: string[] = [];
+
+    sheets.slice(0, 5).forEach((sheet) => {
+      if (blocks.length >= maxDocumentPreviewBlocks) {
+        return;
+      }
+
+      const worksheet = entries[sheet.path];
+
+      if (!worksheet) {
+        return;
+      }
+
+      const table = renderXlsxWorksheet(strFromU8(worksheet), sharedStrings);
+
+      if (table) {
+        blocks.push(`<h3>${escapeHtml(sheet.name)}</h3>`);
+        blocks.push(table);
+      }
+    });
+
+    return documentPreviewHtml(blocks);
+  } catch {
+    return "";
+  }
+}
+
+function xlsxSharedStrings(entries: Record<string, Uint8Array>) {
+  const document = xlsxXmlDocument(entries, "xl/sharedStrings.xml");
+
+  if (!document) {
+    return [];
+  }
+
+  return descendantsByLocalName(document.documentElement, "si").map((item) =>
+    normalizePreviewText(descendantsByLocalName(item, "t").map((textNode) => textNode.textContent ?? "").join(""))
+  );
+}
+
+function xlsxWorkbookSheets(entries: Record<string, Uint8Array>) {
+  const workbook = xlsxXmlDocument(entries, "xl/workbook.xml");
+
+  if (!workbook) {
+    return [];
+  }
+
+  const relationships = xlsxWorkbookRelationships(entries);
+
+  return descendantsByLocalName(workbook.documentElement, "sheet")
+    .slice(0, 20)
+    .map((sheet, index) => {
+      const relationshipId =
+        sheet.getAttribute("r:id") ?? sheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") ?? "";
+      const fallbackPath = `xl/worksheets/sheet${index + 1}.xml`;
+
+      return {
+        name: normalizePreviewText(sheet.getAttribute("name") ?? `Sheet ${index + 1}`) || `Sheet ${index + 1}`,
+        path: relationships.get(relationshipId) ?? fallbackPath
+      };
+    });
+}
+
+function xlsxWorkbookRelationships(entries: Record<string, Uint8Array>) {
+  const relationships = new Map<string, string>();
+  const document = xlsxXmlDocument(entries, "xl/_rels/workbook.xml.rels");
+
+  if (!document) {
+    return relationships;
+  }
+
+  descendantsByLocalName(document.documentElement, "Relationship").forEach((relationship) => {
+    const id = relationship.getAttribute("Id");
+    const target = relationship.getAttribute("Target");
+    const normalizedTarget = normalizeXlsxTargetPath(target);
+
+    if (id && normalizedTarget) {
+      relationships.set(id, normalizedTarget);
+    }
+  });
+
+  return relationships;
+}
+
+function normalizeXlsxTargetPath(target: string | null) {
+  if (!target || target.includes("..")) {
+    return "";
+  }
+
+  const trimmedTarget = target.replace(/^\/+/, "");
+  return trimmedTarget.startsWith("xl/") ? trimmedTarget : `xl/${trimmedTarget}`;
+}
+
+function xlsxXmlDocument(entries: Record<string, Uint8Array>, path: string) {
+  const entry = entries[path];
+
+  if (!entry) {
+    return null;
+  }
+
+  const document = new DOMParser().parseFromString(strFromU8(entry), "application/xml");
+  return document.querySelector("parsererror") ? null : document;
+}
+
+function renderXlsxWorksheet(markup: string, sharedStrings: string[]) {
+  const document = new DOMParser().parseFromString(markup, "application/xml");
+
+  if (document.querySelector("parsererror")) {
+    return "";
+  }
+
+  const rows = descendantsByLocalName(document.documentElement, "row").slice(0, 80);
+  const rowHtml = rows
+    .map((row) => renderXlsxRow(row, sharedStrings))
+    .filter(Boolean)
+    .slice(0, 80)
+    .join("");
+
+  return rowHtml ? `<table>${rowHtml}</table>` : "";
+}
+
+function renderXlsxRow(row: Element, sharedStrings: string[]) {
+  const cells = Array.from(row.children).filter((child) => child.localName.toLowerCase() === "c");
+  const cellsByIndex = new Map<number, string>();
+  let maxColumnIndex = -1;
+  let fallbackIndex = 0;
+
+  cells.slice(0, 40).forEach((cell) => {
+    const refIndex = xlsxCellColumnIndex(cell.getAttribute("r"));
+    const columnIndex = refIndex ?? fallbackIndex;
+    fallbackIndex = columnIndex + 1;
+
+    if (columnIndex < 0 || columnIndex >= 40) {
+      return;
+    }
+
+    const value = xlsxCellText(cell, sharedStrings);
+    cellsByIndex.set(columnIndex, value);
+    maxColumnIndex = Math.max(maxColumnIndex, columnIndex);
+  });
+
+  if (maxColumnIndex < 0 || !Array.from(cellsByIndex.values()).some(Boolean)) {
+    return "";
+  }
+
+  const cellHtml = Array.from({ length: Math.min(maxColumnIndex + 1, 40) }, (_, index) => {
+    const value = cellsByIndex.get(index) ?? "";
+    return `<td>${value ? escapeHtml(value) : "&nbsp;"}</td>`;
+  }).join("");
+
+  return `<tr>${cellHtml}</tr>`;
+}
+
+function xlsxCellColumnIndex(reference: string | null) {
+  const columnLetters = reference?.match(/^[A-Z]+/i)?.[0];
+
+  if (!columnLetters) {
+    return null;
+  }
+
+  return Array.from(columnLetters.toUpperCase()).reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0) - 1;
+}
+
+function xlsxCellText(cell: Element, sharedStrings: string[]) {
+  const type = cell.getAttribute("t");
+  const rawValue = descendantsByLocalName(cell, "v")[0]?.textContent ?? "";
+
+  if (type === "s") {
+    return normalizePreviewText(sharedStrings[Number(rawValue)] ?? "");
+  }
+
+  if (type === "inlineStr") {
+    return normalizePreviewText(descendantsByLocalName(cell, "t").map((textNode) => textNode.textContent ?? "").join(""));
+  }
+
+  if (type === "b") {
+    return rawValue === "1" ? "TRUE" : rawValue === "0" ? "FALSE" : normalizePreviewText(rawValue);
+  }
+
+  return normalizePreviewText(rawValue || descendantsByLocalName(cell, "f")[0]?.textContent || "");
 }
 
 function cfbEntryBytes(entry: { content?: unknown } | null) {

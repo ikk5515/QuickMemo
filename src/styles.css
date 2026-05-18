@@ -715,7 +715,14 @@ textarea {
   min-width: 0;
 }
 
-.folder-filter-chips button {
+.folder-filter-row {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  min-width: 0;
+}
+
+.folder-filter-button {
   align-items: center;
   background: color-mix(in srgb, var(--folder-color, var(--surface)) 16%, #ffffff);
   border: 1px solid color-mix(in srgb, var(--folder-color, var(--line)) 32%, var(--line));
@@ -730,13 +737,13 @@ textarea {
   width: 100%;
 }
 
-.folder-filter-chips button.active {
+.folder-filter-button.active {
   background: var(--ink);
   border-color: var(--ink);
   color: #ffffff;
 }
 
-.folder-filter-chips strong {
+.folder-filter-button strong {
   background: rgb(15 23 42 / 10%);
   border-radius: 999px;
   font-size: 11px;
@@ -746,11 +753,19 @@ textarea {
 }
 
 .folder-chip-name,
-.folder-filter-chips button > span {
+.folder-filter-button > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.folder-delete-button {
+  height: 32px;
+  min-height: 32px;
+  min-width: 32px;
+  padding: 0;
+  width: 32px;
 }
 
 .overview-note-grid {
@@ -923,11 +938,20 @@ textarea {
 
 .note-list-quick-actions .icon-button {
   aspect-ratio: 1;
-  max-width: 36px;
-  min-height: 36px;
-  min-width: 36px;
+  block-size: 32px;
+  flex: 0 0 32px;
+  inline-size: 32px;
+  max-height: 32px;
+  max-width: 32px;
+  min-height: 32px;
+  min-width: 32px;
   padding: 0;
-  width: 36px;
+  width: 32px;
+}
+
+.note-list-quick-actions .icon-button svg {
+  height: 15px;
+  width: 15px;
 }
 
 .star-button {
@@ -1720,7 +1744,19 @@ textarea {
   margin: 0 0 4px;
 }
 
-.rich-body-input table,
+.rich-body-input {
+  overflow-x: auto;
+}
+
+.rich-body-input table {
+  border-collapse: collapse;
+  margin: 0 0 16px;
+  max-width: none;
+  min-width: min(100%, 360px);
+  table-layout: fixed;
+  width: auto;
+}
+
 .note-preview-body table,
 .admin-note-view-body table {
   border-collapse: collapse;
@@ -1734,16 +1770,22 @@ textarea {
   outline-offset: 3px;
 }
 
-.rich-body-input table[data-qm-table-width],
+.rich-body-input table[data-qm-table-width] {
+  max-width: 100%;
+}
+
 .note-preview-body table[data-qm-table-width],
 .admin-note-view-body table[data-qm-table-width] {
   max-width: 100%;
 }
 
-.rich-body-input table[data-qm-table-width-px],
+.rich-body-input table[data-qm-table-width-px] {
+  max-width: none !important;
+}
+
 .note-preview-body table[data-qm-table-width-px],
 .admin-note-view-body table[data-qm-table-width-px] {
-  max-width: 100%;
+  max-width: 100% !important;
 }
 
 .rich-body-input table[data-qm-table-height-px],
@@ -2455,6 +2497,12 @@ textarea {
 .document-preview-page p {
   margin: 0 0 10px;
   white-space: pre-wrap;
+}
+
+.document-preview-page h3 {
+  color: #334155;
+  font-size: 15px;
+  margin: 0 0 8px;
 }
 
 .document-preview-page table {
@@ -4137,9 +4185,18 @@ textarea {
     display: none;
   }
 
-  .folder-filter-chips button {
+  .folder-filter-row {
+    flex: 0 0 auto;
+    max-width: min(230px, 78vw);
+  }
+
+  .folder-filter-chips > .folder-filter-button {
     flex: 0 0 auto;
     max-width: min(190px, 72vw);
+  }
+
+  .folder-filter-button {
+    flex: 0 0 auto;
     width: auto;
   }
 
@@ -4340,11 +4397,19 @@ textarea {
   }
 
   .note-list-quick-actions .icon-button {
-    flex: 0 0 auto;
-    max-width: 34px;
-    min-height: 34px;
-    min-width: 34px;
-    width: 34px;
+    block-size: 28px;
+    flex: 0 0 28px;
+    inline-size: 28px;
+    max-height: 28px;
+    max-width: 28px;
+    min-height: 28px;
+    min-width: 28px;
+    width: 28px;
+  }
+
+  .note-list-quick-actions .icon-button svg {
+    height: 13px;
+    width: 13px;
   }
 }
 

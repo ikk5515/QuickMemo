@@ -175,7 +175,7 @@ const ResizableTable = Table.extend({
         parseHTML: (element: HTMLElement) => normalizedTablePixelWidth(element.getAttribute("data-qm-table-width-px") || element.style.width),
         renderHTML: (attributes: { qmWidthPx?: number | string | null }) => {
           const width = normalizedTablePixelWidth(attributes.qmWidthPx);
-          return width ? { "data-qm-table-width-px": String(width), style: `width: ${width}px; max-width: 100%` } : {};
+          return width ? { "data-qm-table-width-px": String(width), style: `width: ${width}px` } : {};
         }
       },
       qmHeightPx: {
