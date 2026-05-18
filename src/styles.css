@@ -1384,6 +1384,7 @@ textarea {
 }
 
 .table-insert-control,
+.table-size-control,
 .selection-font-control {
   align-items: center;
   background: #ffffff;
@@ -1398,7 +1399,15 @@ textarea {
   padding: 4px 6px;
 }
 
+.table-size-controls {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
 .table-insert-control input,
+.table-size-control input,
 .selection-font-control input,
 .selection-font-control select {
   font-size: 12px;
@@ -1409,6 +1418,21 @@ textarea {
 
 .table-insert-control input {
   width: 42px;
+}
+
+.table-size-control input {
+  width: 72px;
+}
+
+.table-size-control em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.table-size-control input:disabled {
+  opacity: 0.54;
 }
 
 .selection-font-control input,
@@ -2753,7 +2777,9 @@ textarea {
   font-size: 11px;
   font-weight: 850;
   line-height: 1.25;
-  margin-top: 3px;
+  margin: 4px 0 10px;
+  padding-top: 3px;
+  border-top: 1px dashed rgb(148 163 184 / 34%);
   text-align: right;
 }
 
@@ -4107,7 +4133,7 @@ textarea {
   }
 
   .note-preview-body [data-qm-attribution-label]::after {
-    display: block;
+    display: none;
     margin-top: 3px;
     max-width: none;
     position: static;

@@ -39,6 +39,7 @@ import {
   X
 } from "lucide-react";
 import type { Editor as TipTapEditor } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { EditorContent, useEditor } from "@tiptap/react";
 import {
   type ChangeEvent,
@@ -244,6 +245,16 @@ interface TableDocumentInfo {
   tableTarget: TableResizeNodeTarget;
 }
 
+interface TableControlState {
+  columnTargets: TableResizeNodeTarget[];
+  columnWidthPx: number;
+  rowHeightPx: number;
+  rowTarget: TableResizeNodeTarget;
+  tableHeightPx: number;
+  tableTarget: TableResizeNodeTarget;
+  tableWidthPx: number;
+}
+
 const fontSizes = editorTextSizes;
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 2500;
@@ -428,7 +439,7 @@ function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserPro
     const finalLastEditorUid = lastEditorUid ?? safeEditors.at(-1) ?? note.updatedBy ?? note.ownerUid;
     const label = `작성자: ${uidLabels(safeAuthors, usersByUid)}, 최종 수정자: ${uidLabels([finalLastEditorUid], usersByUid)}`;
     block.dataset.qmAttributionLabel = label;
-    block.appendChild(sharedAttributionNoteElement(label));
+    renderSharedAttributionNote(block, label);
   });
 
   const container = document.createElement("div");
@@ -436,11 +447,17 @@ function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserPro
   return container.innerHTML;
 }
 
-function sharedAttributionNoteElement(label: string) {
-  const noteElement = document.createElement("span");
+function renderSharedAttributionNote(block: HTMLElement, label: string) {
+  const noteElement = document.createElement("small");
   noteElement.className = "qm-attribution-note";
   noteElement.textContent = label;
-  return noteElement;
+
+  if (block.tagName === "P") {
+    block.insertAdjacentElement("afterend", noteElement);
+    return;
+  }
+
+  block.appendChild(noteElement);
 }
 
 function uidLabels(uids: string[], usersByUid: Map<string, UserProfile>) {
@@ -3351,6 +3368,91 @@ function RichMemoEditor({
     runToolbarCommand((currentEditor) => currentEditor.chain().focus().setCellAttribute("backgroundColor", safeColor).run());
   }
 
+  function updateSelectedTableWidthPx(width: number) {
+    const safeWidth = clampTablePixelWidth(width);
+    updateCurrentTableAttributes((tableState) => [
+      {
+        target: tableState.tableTarget,
+        attrs: {
+          qmWidth: null,
+          qmWidthPx: safeWidth
+        }
+      }
+    ]);
+  }
+
+  function updateSelectedTableHeightPx(height: number) {
+    const safeHeight = clampTablePixelHeight(height);
+    updateCurrentTableAttributes((tableState) => [
+      {
+        target: tableState.tableTarget,
+        attrs: {
+          qmHeightPx: safeHeight
+        }
+      }
+    ]);
+  }
+
+  function updateSelectedColumnWidthPx(width: number) {
+    const safeWidth = clampTableColumnPixelWidth(width);
+    updateCurrentTableAttributes((tableState) => {
+      const nextTableWidth = clampTablePixelWidth(tableState.tableWidthPx + safeWidth - tableState.columnWidthPx);
+
+      return [
+        {
+          target: tableState.tableTarget,
+          attrs: {
+            qmWidth: null,
+            qmWidthPx: nextTableWidth
+          }
+        },
+        ...tableState.columnTargets.map((target) => {
+          const node = editor?.state.doc.nodeAt(target.position);
+          const colspan = Number(node?.attrs.colspan) || 1;
+
+          return {
+            target,
+            attrs: {
+              colwidth: Array.from({ length: colspan }, () => safeWidth),
+              qmWidthPx: safeWidth
+            }
+          };
+        })
+      ];
+    });
+  }
+
+  function updateSelectedRowHeightPx(height: number) {
+    const safeHeight = clampTableRowPixelHeight(height);
+    updateCurrentTableAttributes((tableState) => [
+      {
+        target: tableState.rowTarget,
+        attrs: {
+          qmHeightPx: safeHeight
+        }
+      }
+    ]);
+  }
+
+  function updateCurrentTableAttributes(
+    updatesFromState: (tableState: TableControlState) => Array<{ attrs: Record<string, number | number[] | null>; target: TableResizeNodeTarget }>
+  ) {
+    if (!editor) {
+      return;
+    }
+
+    const tableState = selectedTableControlState(editor);
+
+    if (!tableState) {
+      return;
+    }
+
+    if (dispatchNodeAttributeUpdates(editor, updatesFromState(tableState))) {
+      onChange(editor.getHTML());
+      setToolbarVersion((version) => version + 1);
+    }
+  }
+
   function undoEditorStep() {
     runToolbarCommand((currentEditor) => currentEditor.chain().focus().undo().run());
   }
@@ -3390,6 +3492,7 @@ function RichMemoEditor({
   const currentSelectionLineHeight = clampSelectionLineHeight(currentBlockLineHeight(editor) ?? 1.5);
   const currentSelectionTextColor = String(editor?.getAttributes("textColor").color || customTextColor);
   const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
+  const currentTableState = editor ? selectedTableControlState(editor) : null;
 
   return (
     <>
@@ -3587,6 +3690,48 @@ function RichMemoEditor({
             추가
           </button>
         </span>
+        <div className="table-size-controls" aria-label="표 크기 조절">
+          <TableSizeNumberInput
+            ariaLabel="표 너비"
+            disabled={!currentTableState}
+            label="표 W"
+            max={editorTablePixelWidthBounds.max}
+            min={editorTablePixelWidthBounds.min}
+            onCommit={updateSelectedTableWidthPx}
+            step={editorTablePixelWidthBounds.step}
+            value={currentTableState?.tableWidthPx ?? editorTablePixelWidthBounds.min}
+          />
+          <TableSizeNumberInput
+            ariaLabel="표 높이"
+            disabled={!currentTableState}
+            label="표 H"
+            max={editorTablePixelHeightBounds.max}
+            min={editorTablePixelHeightBounds.min}
+            onCommit={updateSelectedTableHeightPx}
+            step={editorTablePixelHeightBounds.step}
+            value={currentTableState?.tableHeightPx ?? editorTablePixelHeightBounds.min}
+          />
+          <TableSizeNumberInput
+            ariaLabel="현재 열 너비"
+            disabled={!currentTableState}
+            label="열 W"
+            max={editorTableColumnPixelWidthBounds.max}
+            min={editorTableColumnPixelWidthBounds.min}
+            onCommit={updateSelectedColumnWidthPx}
+            step={editorTableColumnPixelWidthBounds.step}
+            value={currentTableState?.columnWidthPx ?? editorTableColumnPixelWidthBounds.min}
+          />
+          <TableSizeNumberInput
+            ariaLabel="현재 행 높이"
+            disabled={!currentTableState}
+            label="행 H"
+            max={editorTableRowPixelHeightBounds.max}
+            min={editorTableRowPixelHeightBounds.min}
+            onCommit={updateSelectedRowHeightPx}
+            step={editorTableRowPixelHeightBounds.step}
+            value={currentTableState?.rowHeightPx ?? editorTableRowPixelHeightBounds.min}
+          />
+        </div>
         <button
           aria-label="행 추가"
           className="icon-button"
@@ -3813,6 +3958,77 @@ function LineHeightNumberInput({
   );
 }
 
+function TableSizeNumberInput({
+  ariaLabel,
+  disabled = false,
+  label,
+  max,
+  min,
+  onCommit,
+  step,
+  value
+}: {
+  ariaLabel: string;
+  disabled?: boolean;
+  label: string;
+  max: number;
+  min: number;
+  onCommit: (value: number) => void;
+  step: number;
+  value: number;
+}) {
+  const [draftValue, setDraftValue] = useState(String(value));
+
+  useEffect(() => {
+    setDraftValue(String(value));
+  }, [value]);
+
+  function commitValue() {
+    const numericValue = Number(draftValue);
+    const safeValue = Number.isFinite(numericValue) ? Math.min(max, Math.max(min, Math.round(numericValue))) : value;
+
+    setDraftValue(String(safeValue));
+
+    if (!disabled) {
+      onCommit(safeValue);
+    }
+  }
+
+  function updateDraftValue(nextValue: string) {
+    setDraftValue(nextValue);
+
+    const numericValue = Number(nextValue);
+
+    if (!disabled && Number.isFinite(numericValue) && numericValue >= min && numericValue <= max) {
+      onCommit(Math.round(numericValue));
+    }
+  }
+
+  return (
+    <label className="table-size-control">
+      <span>{label}</span>
+      <input
+        aria-label={ariaLabel}
+        disabled={disabled}
+        max={max}
+        min={min}
+        onBlur={commitValue}
+        onChange={(event) => updateDraftValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            commitValue();
+            event.currentTarget.blur();
+          }
+        }}
+        step={step}
+        type="number"
+        value={draftValue}
+      />
+      <em>px</em>
+    </label>
+  );
+}
+
 function clampTableDimension(value: number) {
   if (!Number.isFinite(value)) {
     return 3;
@@ -3917,6 +4133,133 @@ function updateSelectedBlockLineHeight(editor: TipTapEditor, lineHeight: number)
   if (transaction.docChanged) {
     editor.view.dispatch(transaction);
   }
+}
+
+function selectedTableControlState(editor: TipTapEditor): TableControlState | null {
+  const { $from } = editor.state.selection;
+  let cellDepth = -1;
+  let rowDepth = -1;
+  let tableDepth = -1;
+
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const nodeName = $from.node(depth).type.name;
+
+    if (cellDepth < 0 && (nodeName === "tableCell" || nodeName === "tableHeader")) {
+      cellDepth = depth;
+    }
+
+    if (rowDepth < 0 && nodeName === "tableRow") {
+      rowDepth = depth;
+    }
+
+    if (tableDepth < 0 && nodeName === "table") {
+      tableDepth = depth;
+      break;
+    }
+  }
+
+  if (cellDepth < 0 || rowDepth < 0 || tableDepth < 0) {
+    return null;
+  }
+
+  const tableNode = $from.node(tableDepth);
+  const rowNode = $from.node(rowDepth);
+  const tablePosition = $from.before(tableDepth);
+  const rowPosition = $from.before(rowDepth);
+  const cellPosition = $from.before(cellDepth);
+  const columnIndex = columnIndexFromRowPosition(rowNode, rowPosition, cellPosition);
+
+  if (columnIndex < 0) {
+    return null;
+  }
+
+  const rows = tableRowsFromNode(tableNode, tablePosition);
+  const rowTarget = {
+    nodeName: "tableRow" as const,
+    position: rowPosition
+  };
+  const columnTargets = rows.map((row) => row.cells[columnIndex]).filter((target): target is TableResizeNodeTarget => Boolean(target));
+  const selectedCell = editor.state.doc.nodeAt(cellPosition);
+  const tableColumnWidths = columnWidthsFromDocRows(rows, editor.state.doc);
+  const selectedColumnWidth = tableColumnWidthFromNode(selectedCell) ?? tableColumnWidths[columnIndex] ?? 120;
+  const totalColumnWidth = tableColumnWidths.reduce((sum, width) => sum + width, 0);
+
+  return {
+    columnTargets,
+    columnWidthPx: clampTableColumnPixelWidth(selectedColumnWidth),
+    rowHeightPx: clampTableRowPixelHeight(Number(rowNode.attrs.qmHeightPx) || 48),
+    rowTarget,
+    tableHeightPx: clampTablePixelHeight(Number(tableNode.attrs.qmHeightPx) || editorTablePixelHeightBounds.min),
+    tableTarget: {
+      nodeName: "table",
+      position: tablePosition
+    },
+    tableWidthPx: clampTablePixelWidth(Number(tableNode.attrs.qmWidthPx) || totalColumnWidth || 720)
+  };
+}
+
+function columnIndexFromRowPosition(rowNode: ProseMirrorNode, rowPosition: number, cellPosition: number) {
+  let selectedIndex = -1;
+
+  rowNode.forEach((_cellNode, cellOffset, index) => {
+    if (rowPosition + 1 + cellOffset === cellPosition) {
+      selectedIndex = index;
+    }
+  });
+
+  return selectedIndex;
+}
+
+function tableRowsFromNode(tableNode: ProseMirrorNode, tablePosition: number) {
+  const rows: TableDocumentInfo["rows"] = [];
+
+  tableNode.forEach((rowNode, rowOffset) => {
+    if (rowNode.type.name !== "tableRow") {
+      return;
+    }
+
+    const rowPosition = tablePosition + 1 + rowOffset;
+    const cells: TableResizeNodeTarget[] = [];
+
+    rowNode.forEach((cellNode, cellOffset) => {
+      if (cellNode.type.name !== "tableCell" && cellNode.type.name !== "tableHeader") {
+        return;
+      }
+
+      cells.push({
+        nodeName: cellNode.type.name === "tableHeader" ? "tableHeader" : "tableCell",
+        position: rowPosition + 1 + cellOffset
+      });
+    });
+
+    rows.push({
+      cells,
+      target: {
+        nodeName: "tableRow",
+        position: rowPosition
+      }
+    });
+  });
+
+  return rows;
+}
+
+function columnWidthsFromDocRows(rows: TableDocumentInfo["rows"], doc: ProseMirrorNode) {
+  const firstRow = rows[0];
+
+  if (!firstRow) {
+    return [];
+  }
+
+  return firstRow.cells.map((target) => tableColumnWidthFromNode(doc.nodeAt(target.position)) ?? 120);
+}
+
+function tableColumnWidthFromNode(node: ProseMirrorNode | null | undefined) {
+  const colwidth = Array.isArray(node?.attrs.colwidth) ? Number(node?.attrs.colwidth[0]) : null;
+  const qmWidthPx = Number(node?.attrs.qmWidthPx);
+  const width = Number.isFinite(qmWidthPx) && qmWidthPx > 0 ? qmWidthPx : Number.isFinite(colwidth) && colwidth ? colwidth : null;
+
+  return width ? clampTableColumnPixelWidth(width) : null;
 }
 
 function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeHit | null {
@@ -4497,7 +4840,7 @@ function NoteDrawer({
   const isTrashMode = mode === "trash";
   const listedNotes = isTrashMode ? deletedNotes : notes;
   const visibleCounts = isTrashMode ? deletedCounts : counts;
-  const sharedAttentionCount = notes.filter((note) => attentionNoteIds.has(note.id)).length;
+  const sharedAttentionCount = isTrashMode ? 0 : attentionNoteIds.size;
 
   return (
     <aside className="note-drawer" aria-label="노트 목록">
