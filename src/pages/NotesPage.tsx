@@ -19,7 +19,7 @@ import {
   ListChecks,
   ListTodo,
   Loader2,
-  PanelRightOpen,
+  PanelLeftOpen,
   PaintBucket,
   Pencil,
   RotateCcw,
@@ -76,7 +76,7 @@ import {
   sanitizeEditorHtml,
   serializeEditorContent
 } from "../lib/editorContent";
-import { editorCellColors, editorImageWidths, editorTableWidths, richEditorExtensions } from "../lib/richEditorExtensions";
+import { editorCellColors, editorImageWidths, editorTableWidths, editorTextSizes, richEditorExtensions } from "../lib/richEditorExtensions";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
   confirmNoteRead,
@@ -188,7 +188,7 @@ interface CursorClientRect {
 
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const maxImageDataUrlLength = 760_000;
-const autosaveDelayMs = 450;
+const autosaveDelayMs = 2500;
 const deletedNoteRetentionDays = 30;
 const historySummaryMaxLength = 420;
 const cursorPublishDelayMs = 220;
@@ -792,9 +792,6 @@ export default function NotesPage() {
   const [listOpen, setListOpen] = useState(false);
   const [overviewOpen, setOverviewOpen] = useState(false);
   const [overviewFolderFilter, setOverviewFolderFilter] = useState<OverviewFolderFilter>("all");
-  const [desktopWorkspace, setDesktopWorkspace] = useState(() =>
-    typeof window === "undefined" ? false : window.matchMedia("(min-width: 1180px)").matches
-  );
   const [shareOpen, setShareOpen] = useState(false);
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [deadlineOpen, setDeadlineOpen] = useState(false);
@@ -808,16 +805,6 @@ export default function NotesPage() {
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
   const pdfPreviewUrl = useRef<string | null>(null);
-
-  useEffect(() => {
-    const query = window.matchMedia("(min-width: 1180px)");
-    const updateDesktopWorkspace = () => setDesktopWorkspace(query.matches);
-
-    updateDesktopWorkspace();
-    query.addEventListener("change", updateDesktopWorkspace);
-    return () => query.removeEventListener("change", updateDesktopWorkspace);
-  }, []);
-
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -2183,12 +2170,6 @@ export default function NotesPage() {
           />
         ) : (
           <div className="notes-editor-layout">
-            <NoteGroupRail
-              folders={folders}
-              notes={personalOverviewNotes}
-              onNew={startNewNote}
-              onOpenOverview={openOverview}
-            />
             <NoteDrawer
               activeNoteId={editor.noteId}
               canRestoreNote={canRestoreNote}
@@ -2207,8 +2188,7 @@ export default function NotesPage() {
               onRestore={(note) => void restorePreviewNote(note)}
               onSortChange={updateSortSetting}
               onTogglePin={(note) => void togglePinnedNote(note)}
-              open={listOpen || desktopWorkspace}
-              pinned={desktopWorkspace}
+              open={listOpen}
               sortSetting={noteSort}
             />
             <section className="editor-panel full-editor-panel">
@@ -2255,7 +2235,7 @@ export default function NotesPage() {
             </div>
             <div className="toolbar-actions">
               <label className="font-size-control">
-                글자
+                기본 글자
                 <select
                   aria-label="메모 글자 크기"
                   onChange={(event) => updateFontSize(Number(event.target.value))}
@@ -2269,7 +2249,7 @@ export default function NotesPage() {
                 </select>
               </label>
               <button className="secondary-button" type="button" onClick={() => setListOpen((current) => !current)}>
-                <PanelRightOpen size={18} />
+                <PanelLeftOpen size={18} />
                 노트 목록
               </button>
               <button className="secondary-button" type="button" onClick={() => openOverview("all")}>
@@ -2598,6 +2578,10 @@ function RichMemoEditor({
     setToolbarVersion((version) => version + 1);
   }
 
+  function applySelectionFontSize(size: number) {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textSize", { size }).run());
+  }
+
   function insertTable() {
     runToolbarCommand((currentEditor) =>
       currentEditor
@@ -2613,7 +2597,8 @@ function RichMemoEditor({
   }
 
   function setTableWidth(width: number) {
-    runToolbarCommand((currentEditor) => currentEditor.chain().focus().updateAttributes("table", { qmWidth: width }).run());
+    const safeWidth = Math.min(100, Math.max(30, Math.round(width)));
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().updateAttributes("table", { qmWidth: safeWidth }).run());
   }
 
   function chooseFiles() {
@@ -2628,6 +2613,9 @@ function RichMemoEditor({
       void handleFiles(files);
     }
   }
+
+  const currentSelectionFontSize = Number(editor?.getAttributes("textSize").size) || fontSize;
+  const currentTableWidth = Number(editor?.getAttributes("table").qmWidth) || 100;
 
   return (
     <>
@@ -2684,6 +2672,20 @@ function RichMemoEditor({
         >
           <AlignRight size={16} />
         </button>
+        <label className="selection-font-control">
+          선택 글자
+          <select
+            aria-label="선택 영역 글자 크기"
+            onChange={(event) => applySelectionFontSize(Number(event.target.value))}
+            value={currentSelectionFontSize}
+          >
+            {editorTextSizes.map((size) => (
+              <option key={size} value={size}>
+                {size}px
+              </option>
+            ))}
+          </select>
+        </label>
         <span className="table-insert-control">
           <Table2 size={15} />
           <input
@@ -2758,6 +2760,16 @@ function RichMemoEditor({
         </button>
         <span className="table-size-control" aria-label="표 전체 크기">
           <Table2 size={15} />
+          <input
+            aria-label="표 전체 크기 세부 조절"
+            disabled={!editor?.isActive("table")}
+            max={100}
+            min={30}
+            onChange={(event) => setTableWidth(Number(event.target.value))}
+            type="range"
+            value={currentTableWidth}
+          />
+          <output>{currentTableWidth}%</output>
           {editorTableWidths.map((width) => (
             <button
               aria-label={`표 전체 크기 ${width}%`}
@@ -3069,7 +3081,6 @@ function NoteDrawer({
   onSortChange,
   onTogglePin,
   open,
-  pinned,
   sortSetting
 }: {
   activeNoteId: string | null;
@@ -3090,7 +3101,6 @@ function NoteDrawer({
   onSortChange: (setting: NoteSortSetting) => void;
   onTogglePin: (note: DecryptedNote) => void;
   open: boolean;
-  pinned: boolean;
   sortSetting: NoteSortSetting;
 }) {
   const [mode, setMode] = useState<DrawerMode>("notes");
@@ -3103,7 +3113,7 @@ function NoteDrawer({
   const listedNotes = isTrashMode ? deletedNotes : notes;
 
   return (
-    <aside className={`note-drawer ${pinned ? "pinned" : ""}`} aria-label="노트 목록">
+    <aside className="note-drawer" aria-label="노트 목록">
       <div className="note-drawer-header">
         <h2>
           <ListChecks size={18} />
@@ -3232,53 +3242,6 @@ function NoteDrawer({
         onRestore={onRestore}
         onTogglePin={onTogglePin}
       />
-    </aside>
-  );
-}
-
-function NoteGroupRail({
-  folders,
-  notes,
-  onNew,
-  onOpenOverview
-}: {
-  folders: NoteFolderSnapshot[];
-  notes: DecryptedNote[];
-  onNew: () => void;
-  onOpenOverview: (filter?: OverviewFolderFilter) => void;
-}) {
-  const foldersById = new Map(folders.map((folder) => [folder.id, folder]));
-  const unfiledCount = notes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length;
-
-  return (
-    <aside className="note-group-rail" aria-label="개인 노트 그룹">
-      <div className="note-group-rail-header">
-        <span>탐색</span>
-        <strong>{notes.length}</strong>
-      </div>
-      <button type="button" onClick={() => onOpenOverview("all")}>
-        <LayoutGrid size={16} />
-        <span>전체 조회</span>
-        <strong>{notes.length}</strong>
-      </button>
-      <button type="button" onClick={() => onOpenOverview("unfiled")}>
-        <FolderOpen size={16} />
-        <span>미분류</span>
-        <strong>{unfiledCount}</strong>
-      </button>
-      <div className="note-group-rail-folders">
-        {folders.map((folder) => (
-          <button key={folder.id} style={{ "--folder-color": folder.color } as CSSProperties} type="button" onClick={() => onOpenOverview(folder.id)}>
-            <span className="folder-dot" />
-            <span>{folder.name}</span>
-            <strong>{notes.filter((note) => note.folderId === folder.id).length}</strong>
-          </button>
-        ))}
-      </div>
-      <button className="note-group-new" type="button" onClick={onNew}>
-        <FilePlus2 size={16} />
-        <span>새 노트</span>
-      </button>
     </aside>
   );
 }

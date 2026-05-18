@@ -1,3 +1,4 @@
+import { Mark } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -12,11 +13,12 @@ import StarterKit from "@tiptap/starter-kit";
 
 export const editorCellColors = ["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"] as const;
 export const editorImageWidths = [25, 50, 75, 100] as const;
-export const editorTableWidths = [50, 75, 100] as const;
+export const editorTableWidths = [30, 50, 75, 100] as const;
+export const editorTextSizes = [14, 16, 17, 18, 20, 22, 24, 28] as const;
 
 const editorCellColorSet = new Set<string>(editorCellColors);
 const editorImageWidthSet = new Set<number>(editorImageWidths);
-const editorTableWidthSet = new Set<number>(editorTableWidths);
+const editorTextSizeSet = new Set<number>(editorTextSizes);
 
 function normalizedEditorColor(value: unknown) {
   const rawValue = String(value ?? "").trim().toLowerCase();
@@ -37,8 +39,46 @@ function normalizedImageWidth(value: unknown) {
 function normalizedTableWidth(value: unknown) {
   const width = Number(String(value ?? "").replace("%", "").trim());
 
-  return editorTableWidthSet.has(width) ? width : null;
+  return Number.isInteger(width) && width >= 30 && width <= 100 ? width : null;
 }
+
+function normalizedTextSize(value: unknown) {
+  const size = Number(String(value ?? "").replace("px", "").trim());
+
+  return editorTextSizeSet.has(size) ? size : null;
+}
+
+const TextSize = Mark.create({
+  name: "textSize",
+
+  addAttributes() {
+    return {
+      size: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedTextSize(element.getAttribute("data-qm-font-size") || element.style.fontSize),
+        renderHTML: (attributes: { size?: number | string | null }) => {
+          const size = normalizedTextSize(attributes.size);
+          return size ? { "data-qm-font-size": String(size), style: `font-size: ${size}px` } : {};
+        }
+      }
+    };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: "span[data-qm-font-size]"
+      },
+      {
+        style: "font-size"
+      }
+    ];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["span", HTMLAttributes, 0];
+  }
+});
 
 const ResizableTable = Table.extend({
   addAttributes() {
@@ -108,6 +148,7 @@ export const richEditorExtensions = [
   StarterKit.configure({
     link: false
   }),
+  TextSize,
   Link.configure({
     autolink: true,
     defaultProtocol: "https",

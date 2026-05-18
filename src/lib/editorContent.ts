@@ -4,7 +4,7 @@ const htmlTagPattern =
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
-const tableWidthOptions = new Set([50, 75, 100]);
+const textSizeOptions = new Set([14, 16, 17, 18, 20, 22, 24, 28]);
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
 const allowedTags = new Set([
@@ -263,6 +263,7 @@ function applySafeImageWidth(image: HTMLImageElement, source: HTMLElement) {
 function copySafeAttributes(target: HTMLElement, source: HTMLElement) {
   copyTaskAttributes(target, source);
   copyTextAlign(target, source);
+  copyTextSize(target, source);
   copyTableAttributes(target, source);
 }
 
@@ -290,6 +291,17 @@ function copyTextAlign(target: HTMLElement, source: HTMLElement) {
   }
 
   target.style.textAlign = alignment;
+}
+
+function copyTextSize(target: HTMLElement, source: HTMLElement) {
+  const size = safeTextSize(source.getAttribute("data-qm-font-size") || source.style.fontSize);
+
+  if (!size || target.tagName !== "SPAN") {
+    return;
+  }
+
+  target.dataset.qmFontSize = String(size);
+  target.style.fontSize = `${size}px`;
 }
 
 function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
@@ -370,7 +382,13 @@ function safeImageWidth(value: string | null) {
 function safeTableWidth(value: string | null) {
   const normalizedValue = Number(String(value ?? "").replace("%", "").trim());
 
-  return tableWidthOptions.has(normalizedValue) ? normalizedValue : null;
+  return Number.isInteger(normalizedValue) && normalizedValue >= 30 && normalizedValue <= 100 ? normalizedValue : null;
+}
+
+function safeTextSize(value: string | null) {
+  const normalizedValue = Number(String(value ?? "").replace("px", "").trim());
+
+  return textSizeOptions.has(normalizedValue) ? normalizedValue : null;
 }
 
 function safeTextAlign(value: string | null) {

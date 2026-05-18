@@ -54,14 +54,16 @@ describe("editor content helpers", () => {
 
   it("preserves safe task lists, table alignment, and cell colors", () => {
     const html = sanitizeEditorHtml(
-      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><label><input type="checkbox" checked></label><div><p>done</p></div></li></ul><table data-qm-table-width="75"><tbody><tr><td colspan="1" rowspan="1" colwidth="120" data-qm-bg="#dbeafe" style="background: red; text-align:center"><p style="text-align:center">cell</p></td></tr></tbody></table>'
+      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><label><input type="checkbox" checked></label><div><p>done</p></div></li></ul><p><span data-qm-font-size="22" style="font-size:22px">big</span></p><table data-qm-table-width="37"><tbody><tr><td colspan="1" rowspan="1" colwidth="120" data-qm-bg="#dbeafe" style="background: red; text-align:center"><p style="text-align:center">cell</p></td></tr></tbody></table>'
     );
 
     expect(html).toContain('data-type="taskList"');
     expect(html).toContain('data-checked="true"');
     expect(html).toContain('type="checkbox"');
-    expect(html).toContain('data-qm-table-width="75"');
-    expect(html).toContain("width: 75%");
+    expect(html).toContain('data-qm-font-size="22"');
+    expect(html).toContain("font-size: 22px");
+    expect(html).toContain('data-qm-table-width="37"');
+    expect(html).toContain("width: 37%");
     expect(html).toContain('data-qm-bg="#dbeafe"');
     expect(html).toContain('colwidth="120"');
     expect(html).toContain("text-align: center");
@@ -69,10 +71,12 @@ describe("editor content helpers", () => {
 
   it("removes unsafe table and checkbox attributes", () => {
     const html = sanitizeEditorHtml(
-      '<table onclick="alert(1)" data-qm-table-width="999" style="width:9999px"><tbody><tr><td data-qm-bg="#000000" colwidth="99999" style="background-image:url(javascript:bad); width:9999px"><input type="text" value="bad"><p style="text-align:justify">safe</p></td></tr></tbody></table>'
+      '<p><span data-qm-font-size="99" style="font-size:99px">bad</span></p><table onclick="alert(1)" data-qm-table-width="999" style="width:9999px"><tbody><tr><td data-qm-bg="#000000" colwidth="99999" style="background-image:url(javascript:bad); width:9999px"><input type="text" value="bad"><p style="text-align:justify">safe</p></td></tr></tbody></table>'
     );
 
     expect(html).not.toContain("onclick");
+    expect(html).not.toContain('data-qm-font-size="99"');
+    expect(html).not.toContain("font-size: 99px");
     expect(html).not.toContain("#000000");
     expect(html).not.toContain("colwidth");
     expect(html).not.toContain("data-qm-table-width");
