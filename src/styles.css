@@ -2432,6 +2432,51 @@ textarea {
   margin: 0 auto 18px;
 }
 
+.document-preview-frame {
+  background: #eef1f3;
+  flex: 1 1 auto;
+  min-height: 420px;
+  overflow: auto;
+  padding: 22px;
+}
+
+.document-preview-page {
+  background: #ffffff;
+  box-shadow: 0 8px 28px rgb(15 23 42 / 14%);
+  color: #111827;
+  font-size: 14px;
+  line-height: 1.75;
+  margin: 0 auto;
+  max-width: 840px;
+  min-height: 520px;
+  padding: 42px 48px;
+}
+
+.document-preview-page p {
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+}
+
+.document-preview-page table {
+  border-collapse: collapse;
+  margin: 12px 0 18px;
+  table-layout: auto;
+  width: 100%;
+}
+
+.document-preview-page td,
+.document-preview-page th {
+  border: 1px solid #cbd5e1;
+  min-width: 64px;
+  padding: 8px 10px;
+  vertical-align: top;
+}
+
+.document-preview-muted {
+  color: var(--muted);
+  font-weight: 800;
+}
+
 .file-preview-error {
   background: #ffffff;
   border: 1px solid rgb(199 81 70 / 24%);
