@@ -1034,6 +1034,15 @@ function dateFromTimestamp(timestamp: unknown) {
   return null;
 }
 
+function freshRemoteCursorTimestamp(updatedAt: Date | null, clockMs: number) {
+  if (!updatedAt) {
+    return false;
+  }
+
+  const ageMs = clockMs - updatedAt.getTime();
+  return ageMs >= 0 && ageMs <= remoteCursorFreshMs;
+}
+
 function timestampsEqual(left: Date | null, right: Date | null) {
   return (left?.getTime() ?? null) === (right?.getTime() ?? null);
 }
@@ -1799,7 +1808,7 @@ export default function NotesPage() {
         }
 
         const cursorUpdatedAt = dateFromTimestamp(state.cursorUpdatedAt);
-        return Boolean(cursorUpdatedAt && cursorClock - cursorUpdatedAt.getTime() <= remoteCursorFreshMs);
+        return freshRemoteCursorTimestamp(cursorUpdatedAt, cursorClock);
       })
       .map((state) => {
         const user = usersByUid.get(state.uid);
