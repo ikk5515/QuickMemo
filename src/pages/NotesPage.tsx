@@ -7117,6 +7117,11 @@ const builtinXlsxNumberFormats = new Map<number, string>([
   [47, "mmss.0"],
   [49, "@"]
 ]);
+const xlsxExcelMaxColumns = 16_384;
+const xlsxExcelMaxRows = 1_048_576;
+const xlsxPreviewMaxColumns = 50;
+const xlsxPreviewMaxMergeRanges = 200;
+const xlsxPreviewMaxRows = 100;
 
 function renderXlsxWorksheet(markup: string, sharedStrings: string[], styles: XlsxStyles) {
   const document = new DOMParser().parseFromString(markup, "application/xml");
@@ -7127,9 +7132,13 @@ function renderXlsxWorksheet(markup: string, sharedStrings: string[], styles: Xl
 
   const rows = descendantsByLocalName(document.documentElement, "row")
     .filter((row) => row.getAttribute("hidden") !== "1")
-    .slice(0, 100);
-  const mergeInfo = xlsxMergeInfo(document);
-  const maxColumnIndex = Math.min(Math.max(xlsxMaxColumnIndex(rows, mergeInfo), 0), 49);
+    .slice(0, xlsxPreviewMaxRows);
+  const visibleRowNumbers = xlsxVisibleRowNumbers(rows);
+  const mergeInfo = xlsxMergeInfo(document, {
+    maxColumnIndex: xlsxPreviewMaxColumns - 1,
+    visibleRowNumbers
+  });
+  const maxColumnIndex = Math.min(Math.max(xlsxMaxColumnIndex(rows, mergeInfo), 0), xlsxPreviewMaxColumns - 1);
   const columnWidths = xlsxColumnWidths(document, maxColumnIndex + 1);
   const colGroup = [
     '<col style="width:44px">',
@@ -7139,7 +7148,7 @@ function renderXlsxWorksheet(markup: string, sharedStrings: string[], styles: Xl
   const rowHtml = rows
     .map((row, index) => renderXlsxRow(row, sharedStrings, styles, mergeInfo, maxColumnIndex, index + 1))
     .filter(Boolean)
-    .slice(0, 100)
+    .slice(0, xlsxPreviewMaxRows)
     .join("");
 
   return rowHtml ? `<table class="xlsx-preview-table"><colgroup>${colGroup}</colgroup><thead><tr><th scope="col"></th>${headerHtml}</tr></thead><tbody>${rowHtml}</tbody></table>` : "";
@@ -7160,12 +7169,12 @@ function renderXlsxRow(
   let rowMaxColumnIndex = -1;
   let fallbackIndex = 0;
 
-  cells.slice(0, 50).forEach((cell) => {
+  cells.slice(0, xlsxPreviewMaxColumns).forEach((cell) => {
     const refIndex = xlsxCellColumnIndex(cell.getAttribute("r"));
     const columnIndex = refIndex ?? fallbackIndex;
     fallbackIndex = columnIndex + 1;
 
-    if (columnIndex < 0 || columnIndex >= 50) {
+    if (columnIndex < 0 || columnIndex >= xlsxPreviewMaxColumns) {
       return;
     }
 
@@ -7207,6 +7216,11 @@ interface XlsxMergeRange {
 interface XlsxMergeInfo {
   skips: Set<string>;
   starts: Map<string, XlsxMergeRange>;
+}
+
+interface XlsxMergePreviewBounds {
+  maxColumnIndex: number;
+  visibleRowNumbers: Set<number>;
 }
 
 function xlsxStyles(entries: Record<string, Uint8Array>): XlsxStyles {
@@ -7360,26 +7374,58 @@ function xlsxRowStyleAttribute(row: Element) {
   return ` style="height:${pxHeight}px"`;
 }
 
-function xlsxMergeInfo(document: Document): XlsxMergeInfo {
+function xlsxVisibleRowNumbers(rows: Element[]) {
+  return new Set(rows.map((row, index) => safeXlsxRowNumber(row.getAttribute("r"), index + 1)));
+}
+
+function xlsxMergeInfo(document: Document, bounds: XlsxMergePreviewBounds): XlsxMergeInfo {
   const starts = new Map<string, XlsxMergeRange>();
   const skips = new Set<string>();
+  const visibleRows = Array.from(bounds.visibleRowNumbers).sort((left, right) => left - right);
 
-  descendantsByLocalName(document.documentElement, "mergeCell").forEach((mergeCell) => {
+  if (!visibleRows.length || bounds.maxColumnIndex < 0) {
+    return { skips, starts };
+  }
+
+  descendantsByLocalName(document.documentElement, "mergeCell").slice(0, xlsxPreviewMaxMergeRanges).forEach((mergeCell) => {
     const range = xlsxCellRange(mergeCell.getAttribute("ref"));
 
     if (!range) {
       return;
     }
 
-    starts.set(xlsxCellKey(range.startRow, range.startColumn), range);
+    const clampedStartColumn = Math.max(0, range.startColumn);
+    const clampedEndColumn = Math.min(bounds.maxColumnIndex, range.endColumn);
 
-    for (let row = range.startRow; row <= range.endRow; row += 1) {
-      for (let column = range.startColumn; column <= range.endColumn; column += 1) {
+    if (clampedStartColumn > clampedEndColumn) {
+      return;
+    }
+
+    const visibleRowsInRange = visibleRows.filter((row) => row >= range.startRow && row <= range.endRow);
+
+    if (!visibleRowsInRange.length) {
+      return;
+    }
+
+    const startRowVisible = bounds.visibleRowNumbers.has(range.startRow);
+    const startColumnVisible = range.startColumn >= 0 && range.startColumn <= bounds.maxColumnIndex;
+
+    if (startRowVisible && startColumnVisible) {
+      starts.set(xlsxCellKey(range.startRow, range.startColumn), {
+        startColumn: range.startColumn,
+        startRow: range.startRow,
+        endColumn: clampedEndColumn,
+        endRow: visibleRowsInRange.at(-1) ?? range.startRow
+      });
+    }
+
+    visibleRowsInRange.forEach((row) => {
+      for (let column = clampedStartColumn; column <= clampedEndColumn; column += 1) {
         if (row !== range.startRow || column !== range.startColumn) {
           skips.add(xlsxCellKey(row, column));
         }
       }
-    }
+    });
   });
 
   return { skips, starts };
@@ -7387,7 +7433,9 @@ function xlsxMergeInfo(document: Document): XlsxMergeInfo {
 
 function xlsxMaxColumnIndex(rows: Element[], mergeInfo: XlsxMergeInfo) {
   const cellMaxColumn = rows.reduce((maxColumn, row) => {
-    const rowCells = Array.from(row.children).filter((child) => child.localName.toLowerCase() === "c");
+    const rowCells = Array.from(row.children)
+      .filter((child) => child.localName.toLowerCase() === "c")
+      .slice(0, xlsxPreviewMaxColumns);
     const rowMaxColumn = rowCells.reduce((currentMax, cell, fallbackIndex) => {
       const columnIndex = xlsxCellColumnIndex(cell.getAttribute("r")) ?? fallbackIndex;
       return Math.max(currentMax, columnIndex);
@@ -7433,8 +7481,8 @@ function xlsxMergeSpanAttributes(range: XlsxMergeRange | undefined) {
     return "";
   }
 
-  const colSpan = Math.min(50, Math.max(1, range.endColumn - range.startColumn + 1));
-  const rowSpan = Math.min(100, Math.max(1, range.endRow - range.startRow + 1));
+  const colSpan = Math.min(xlsxPreviewMaxColumns, Math.max(1, range.endColumn - range.startColumn + 1));
+  const rowSpan = Math.min(xlsxPreviewMaxRows, Math.max(1, range.endRow - range.startRow + 1));
   const attributes: string[] = [];
 
   if (colSpan > 1) {
@@ -7468,13 +7516,25 @@ function xlsxCellRange(reference: string | null): XlsxMergeRange | null {
 function xlsxCellReference(reference: string) {
   const match = reference.match(/^([A-Z]+)(\d+)$/i);
 
-  if (!match) {
+  if (!match || match[1].length > 3) {
+    return null;
+  }
+  const column = xlsxColumnIndexFromLetters(match[1]);
+  const row = Number(match[2]);
+
+  if (
+    !Number.isInteger(row) ||
+    row < 1 ||
+    row > xlsxExcelMaxRows ||
+    column < 0 ||
+    column >= xlsxExcelMaxColumns
+  ) {
     return null;
   }
 
   return {
-    column: xlsxColumnIndexFromLetters(match[1]),
-    row: Math.max(1, Number(match[2]) || 1)
+    column,
+    row
   };
 }
 
@@ -7490,7 +7550,7 @@ function xlsxCellKey(row: number, column: number) {
 function xlsxCellColumnIndex(reference: string | null) {
   const columnLetters = reference?.match(/^[A-Z]+/i)?.[0];
 
-  if (!columnLetters) {
+  if (!columnLetters || columnLetters.length > 3) {
     return null;
   }
 

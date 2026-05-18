@@ -64,4 +64,26 @@ describe("NotesPage security controls", () => {
     expect(previewHelper).toContain("clearSharedAttributionAttributes(block)");
     expect(notesPageSource).toContain("trustedSharedBlockMetadataFromHistory(note, history, historySnapshots)");
   });
+
+  it("bounds XLSX merge ranges before materializing skipped preview cells", () => {
+    const worksheetHelper =
+      notesPageSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";
+    const mergeHelper =
+      notesPageSource.match(/function xlsxMergeInfo[\s\S]*?function xlsxMaxColumnIndex/)?.[0] ?? "";
+    const referenceHelper =
+      notesPageSource.match(/function xlsxCellReference[\s\S]*?function safeXlsxRowNumber/)?.[0] ?? "";
+
+    expect(notesPageSource).toContain("const xlsxPreviewMaxColumns = 50");
+    expect(notesPageSource).toContain("const xlsxPreviewMaxRows = 100");
+    expect(notesPageSource).toContain("const xlsxPreviewMaxMergeRanges = 200");
+    expect(worksheetHelper).toContain("visibleRowNumbers");
+    expect(worksheetHelper).toContain("xlsxMergeInfo(document, {");
+    expect(mergeHelper).toContain(".slice(0, xlsxPreviewMaxMergeRanges)");
+    expect(mergeHelper).toContain("clampedEndColumn");
+    expect(mergeHelper).toContain("visibleRowsInRange.forEach");
+    expect(mergeHelper).not.toContain("for (let row = range.startRow");
+    expect(mergeHelper).not.toContain("column <= range.endColumn");
+    expect(referenceHelper).toContain("row > xlsxExcelMaxRows");
+    expect(referenceHelper).toContain("column >= xlsxExcelMaxColumns");
+  });
 });
