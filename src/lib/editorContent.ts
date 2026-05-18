@@ -4,6 +4,7 @@ const htmlTagPattern =
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
+const tableWidthOptions = new Set([50, 75, 100]);
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
 const allowedTags = new Set([
@@ -292,6 +293,10 @@ function copyTextAlign(target: HTMLElement, source: HTMLElement) {
 }
 
 function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
+  if (target.tagName === "TABLE") {
+    copyTableWidthAttribute(target, source);
+  }
+
   if (target.tagName === "TD" || target.tagName === "TH") {
     copyPositiveIntegerAttribute(target, source, "colspan", 12);
     copyPositiveIntegerAttribute(target, source, "rowspan", 12);
@@ -306,6 +311,18 @@ function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
       target.style.width = width;
     }
   }
+}
+
+function copyTableWidthAttribute(target: HTMLElement, source: HTMLElement) {
+  const width = safeTableWidth(source.getAttribute("data-qm-table-width") ?? source.style.width);
+
+  if (!width) {
+    return;
+  }
+
+  target.dataset.qmTableWidth = String(width);
+  target.style.width = `${width}%`;
+  target.style.maxWidth = "100%";
 }
 
 function copyPositiveIntegerAttribute(target: HTMLElement, source: HTMLElement, attribute: string, max: number) {
@@ -348,6 +365,12 @@ function safeImageWidth(value: string | null) {
   const normalizedValue = Number(String(value ?? "").replace("%", "").trim());
 
   return imageWidthOptions.has(normalizedValue) ? normalizedValue : null;
+}
+
+function safeTableWidth(value: string | null) {
+  const normalizedValue = Number(String(value ?? "").replace("%", "").trim());
+
+  return tableWidthOptions.has(normalizedValue) ? normalizedValue : null;
 }
 
 function safeTextAlign(value: string | null) {

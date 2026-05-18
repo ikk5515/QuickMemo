@@ -12,9 +12,11 @@ import StarterKit from "@tiptap/starter-kit";
 
 export const editorCellColors = ["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"] as const;
 export const editorImageWidths = [25, 50, 75, 100] as const;
+export const editorTableWidths = [50, 75, 100] as const;
 
 const editorCellColorSet = new Set<string>(editorCellColors);
 const editorImageWidthSet = new Set<number>(editorImageWidths);
+const editorTableWidthSet = new Set<number>(editorTableWidths);
 
 function normalizedEditorColor(value: unknown) {
   const rawValue = String(value ?? "").trim().toLowerCase();
@@ -31,6 +33,28 @@ function normalizedImageWidth(value: unknown) {
 
   return editorImageWidthSet.has(width) ? width : null;
 }
+
+function normalizedTableWidth(value: unknown) {
+  const width = Number(String(value ?? "").replace("%", "").trim());
+
+  return editorTableWidthSet.has(width) ? width : null;
+}
+
+const ResizableTable = Table.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      qmWidth: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedTableWidth(element.getAttribute("data-qm-table-width") || element.style.width),
+        renderHTML: (attributes: { qmWidth?: number | string | null }) => {
+          const width = normalizedTableWidth(attributes.qmWidth);
+          return width ? { "data-qm-table-width": String(width), style: `width: ${width}%; max-width: 100%` } : {};
+        }
+      }
+    };
+  }
+});
 
 const ColoredTableCell = TableCell.extend({
   addAttributes() {
@@ -104,7 +128,7 @@ export const richEditorExtensions = [
   TaskItem.configure({
     nested: true
   }),
-  Table.configure({
+  ResizableTable.configure({
     resizable: true
   }),
   TableRow,

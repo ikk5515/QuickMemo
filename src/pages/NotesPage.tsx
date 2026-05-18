@@ -76,7 +76,7 @@ import {
   sanitizeEditorHtml,
   serializeEditorContent
 } from "../lib/editorContent";
-import { editorCellColors, editorImageWidths, richEditorExtensions } from "../lib/richEditorExtensions";
+import { editorCellColors, editorImageWidths, editorTableWidths, richEditorExtensions } from "../lib/richEditorExtensions";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
   confirmNoteRead,
@@ -2584,6 +2584,10 @@ function RichMemoEditor({
     );
   }
 
+  function setTableWidth(width: number) {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().updateAttributes("table", { qmWidth: width }).run());
+  }
+
   function chooseFiles() {
     fileInputRef.current?.click();
   }
@@ -2724,6 +2728,23 @@ function RichMemoEditor({
         >
           표 삭제
         </button>
+        <span className="table-size-control" aria-label="표 전체 크기">
+          <Table2 size={15} />
+          {editorTableWidths.map((width) => (
+            <button
+              aria-label={`표 전체 크기 ${width}%`}
+              aria-pressed={Number(editor?.getAttributes("table").qmWidth) === width}
+              className={Number(editor?.getAttributes("table").qmWidth) === width ? "active" : ""}
+              disabled={!editor?.isActive("table")}
+              key={width}
+              onClick={() => setTableWidth(width)}
+              onMouseDown={(event) => event.preventDefault()}
+              type="button"
+            >
+              {width}%
+            </button>
+          ))}
+        </span>
         <div className="cell-color-palette" aria-label="셀 색상">
           <PaintBucket size={15} />
           {editorCellColors.map((color) => (

@@ -1177,6 +1177,30 @@ textarea {
   padding: 0 9px;
 }
 
+.table-size-control {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: inline-flex;
+  gap: 5px;
+  min-height: 34px;
+  padding: 4px 6px;
+}
+
+.table-size-control button {
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.table-size-control button.active {
+  background: var(--ink);
+  color: #ffffff;
+}
+
 .cell-color-palette {
   align-items: center;
   background: #ffffff;
@@ -1275,15 +1299,47 @@ textarea {
 .admin-note-view-body li[data-type="taskItem"] {
   align-items: flex-start;
   display: flex;
-  gap: 8px;
+  gap: 0.5em;
   margin-bottom: 8px;
+  min-width: 0;
 }
 
 .rich-body-input li[data-type="taskItem"] > label,
 .note-preview-body li[data-type="taskItem"] > label,
 .admin-note-view-body li[data-type="taskItem"] > label {
+  align-items: center;
+  display: inline-flex;
   flex: 0 0 auto;
-  padding-top: 2px;
+  height: 1.75em;
+  min-height: 0;
+  padding-top: 0;
+  width: auto;
+}
+
+.rich-body-input li[data-type="taskItem"] > label input[type="checkbox"],
+.note-preview-body li[data-type="taskItem"] > label input[type="checkbox"],
+.admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"] {
+  accent-color: var(--teal);
+  appearance: auto;
+  flex: 0 0 auto;
+  height: 1em;
+  margin: 0;
+  min-height: 1em;
+  padding: 0;
+  width: 1em;
+}
+
+.rich-body-input li[data-type="taskItem"] > div,
+.note-preview-body li[data-type="taskItem"] > div,
+.admin-note-view-body li[data-type="taskItem"] > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rich-body-input li[data-type="taskItem"] p,
+.note-preview-body li[data-type="taskItem"] p,
+.admin-note-view-body li[data-type="taskItem"] p {
+  margin: 0 0 4px;
 }
 
 .rich-body-input table,
@@ -1293,6 +1349,12 @@ textarea {
   margin: 0 0 16px;
   table-layout: fixed;
   width: 100%;
+}
+
+.rich-body-input table[data-qm-table-width],
+.note-preview-body table[data-qm-table-width],
+.admin-note-view-body table[data-qm-table-width] {
+  max-width: 100%;
 }
 
 .rich-body-input td,
@@ -3332,6 +3394,7 @@ textarea {
   }
 
   .table-insert-control,
+  .table-size-control,
   .cell-color-palette {
     flex: 0 0 auto;
   }
