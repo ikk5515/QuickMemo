@@ -70,6 +70,31 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).not.toContain("unzipSync(bytes);");
   });
 
+  it("bounds XLSX XML parsing and shared-string enumeration after safe unzip", () => {
+    const xlsxXmlHelper =
+      notesPageSource.match(/function xlsxXmlDocument[\s\S]*?function xlsxEntryText/)?.[0] ?? "";
+    const xlsxTextHelper =
+      notesPageSource.match(/function xlsxEntryText[\s\S]*?interface XlsxFontStyle/)?.[0] ?? "";
+    const sharedStringsHelper =
+      notesPageSource.match(/function xlsxSharedStrings[\s\S]*?function xlsxWorkbookSheets/)?.[0] ?? "";
+    const worksheetHelper =
+      notesPageSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";
+    const stylesHelper =
+      notesPageSource.match(/function xlsxStyles[\s\S]*?function xlsxFontStyle/)?.[0] ?? "";
+
+    expect(notesPageSource).toContain("const maxXlsxSharedStringsXmlCharacters = 1_500_000");
+    expect(notesPageSource).toContain("const maxXlsxWorksheetXmlCharacters = 1_500_000");
+    expect(xlsxXmlHelper).toContain("xlsxEntryText(entry, maxCharacters)");
+    expect(xlsxTextHelper).toContain("entry.length > maxCharacters");
+    expect(xlsxTextHelper).toContain("markup.length <= maxCharacters");
+    expect(sharedStringsHelper).toContain('xlsxElementsByLocalName(document.documentElement, "si", maxXlsxSharedStrings)');
+    expect(sharedStringsHelper).toContain(".slice(0, maxXlsxSharedStringCharacters)");
+    expect(worksheetHelper).toContain("xlsxEntryText(bytes, maxXlsxWorksheetXmlCharacters)");
+    expect(worksheetHelper).toContain('xlsxElementsByLocalName(document.documentElement, "row", xlsxPreviewMaxRows * 4)');
+    expect(stylesHelper).toContain('xlsxElementsByLocalName(document.documentElement, "numFmt", maxXlsxStyleRecords)');
+    expect(stylesHelper).toContain(".slice(0, maxXlsxStyleRecords)");
+  });
+
   it("does not trust shared attribution UIDs from the next rich-text draft", () => {
     const annotateHelper =
       notesPageSource.match(/function annotateSharedNoteBody[\s\S]*?function sharedBlockMetadataFromHtml/)?.[0] ?? "";
@@ -108,7 +133,7 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("const xlsxPreviewMaxMergeRanges = 200");
     expect(worksheetHelper).toContain("visibleRowNumbers");
     expect(worksheetHelper).toContain("xlsxMergeInfo(document, {");
-    expect(mergeHelper).toContain(".slice(0, xlsxPreviewMaxMergeRanges)");
+    expect(mergeHelper).toContain('xlsxElementsByLocalName(document.documentElement, "mergeCell", xlsxPreviewMaxMergeRanges)');
     expect(mergeHelper).toContain("clampedEndColumn");
     expect(mergeHelper).toContain("visibleRowsInRange.forEach");
     expect(mergeHelper).not.toContain("for (let row = range.startRow");
