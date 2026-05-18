@@ -5,11 +5,12 @@ import { describe, expect, it } from "vitest";
 const notesPageSource = readFileSync(join(process.cwd(), "src/pages/NotesPage.tsx"), "utf8");
 
 describe("NotesPage security controls", () => {
-  it("renders PDF previews in a sandboxed iframe without script or same-origin grants", () => {
-    const pdfIframe = notesPageSource.match(/<iframe[\s\S]*?className="pdf-preview-frame"[\s\S]*?\/>/)?.[0] ?? "";
+  it("renders PDF previews as an object without script or same-origin iframe grants", () => {
+    const pdfObject = notesPageSource.match(/<object[\s\S]*?className="pdf-preview-frame"[\s\S]*?>/)?.[0] ?? "";
 
-    expect(pdfIframe).toContain('sandbox=""');
-    expect(pdfIframe).not.toContain("allow-scripts");
-    expect(pdfIframe).not.toContain("allow-same-origin");
+    expect(pdfObject).toContain('type="application/pdf"');
+    expect(pdfObject).not.toContain("allow-scripts");
+    expect(pdfObject).not.toContain("allow-same-origin");
+    expect(notesPageSource).not.toContain("dangerouslySetInnerHTML={preview");
   });
 });

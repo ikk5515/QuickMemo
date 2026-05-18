@@ -138,6 +138,47 @@ export async function generateUserKeyBundle(password: string): Promise<UserKeyBu
   };
 }
 
+export async function relockUserPrivateKey(keyDocument: UserKeyDocument, currentPassword: string, nextPassword: string): Promise<UserKeyBundle> {
+  const privateKeyJson = await decryptPrivateKeyJsonWithFallback(keyDocument, currentPassword);
+  const nextSalt = randomBytes(16);
+  const nextPasswordKey = await derivePasswordKey(nextPassword, nextSalt);
+
+  return {
+    publicKeyJwk: keyDocument.publicKeyJwk,
+    encryptedPrivateKeyJwk: await encryptText(privateKeyJson, nextPasswordKey),
+    kdfSalt: bytesToBase64(nextSalt),
+    kdfIterations: KDF_ITERATIONS
+  };
+}
+
+async function decryptPrivateKeyJsonWithFallback(keyDocument: UserKeyDocument, password: string) {
+  try {
+    const passwordKey = await derivePasswordKey(
+      password,
+      base64ToBytes(keyDocument.kdfSalt),
+      keyDocument.kdfIterations
+    );
+
+    return await decryptText(keyDocument.encryptedPrivateKeyJwk, passwordKey);
+  } catch (error) {
+    if (
+      !keyDocument.pendingEncryptedPrivateKeyJwk ||
+      !keyDocument.pendingKdfSalt ||
+      !keyDocument.pendingKdfIterations
+    ) {
+      throw error;
+    }
+
+    const pendingPasswordKey = await derivePasswordKey(
+      password,
+      base64ToBytes(keyDocument.pendingKdfSalt),
+      keyDocument.pendingKdfIterations
+    );
+
+    return decryptText(keyDocument.pendingEncryptedPrivateKeyJwk, pendingPasswordKey);
+  }
+}
+
 export async function unlockPrivateKey(keyDocument: UserKeyDocument, password: string) {
   const passwordKey = await derivePasswordKey(
     password,
@@ -157,6 +198,30 @@ export async function unlockPrivateKey(keyDocument: UserKeyDocument, password: s
     false,
     ["decrypt"]
   );
+}
+
+export async function unlockPrivateKeyWithFallback(keyDocument: UserKeyDocument, password: string) {
+  try {
+    return await unlockPrivateKey(keyDocument, password);
+  } catch (error) {
+    if (
+      !keyDocument.pendingEncryptedPrivateKeyJwk ||
+      !keyDocument.pendingKdfSalt ||
+      !keyDocument.pendingKdfIterations
+    ) {
+      throw error;
+    }
+
+    return unlockPrivateKey(
+      {
+        ...keyDocument,
+        encryptedPrivateKeyJwk: keyDocument.pendingEncryptedPrivateKeyJwk,
+        kdfSalt: keyDocument.pendingKdfSalt,
+        kdfIterations: keyDocument.pendingKdfIterations
+      },
+      password
+    );
+  }
 }
 
 export async function importPublicKey(publicKeyJwk: JsonWebKey) {

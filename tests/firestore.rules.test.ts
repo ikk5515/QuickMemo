@@ -173,6 +173,7 @@ function noteHistory(noteId: string, actorUid: string, overrides: Record<string,
     action: "content",
     changedFields: ["title", "body"],
     encryptedSummary: encryptedPayload,
+    encryptedSnapshot: encryptedPayload,
     createdAt: serverTimestamp(),
     ...overrides
   };
@@ -255,6 +256,45 @@ describeRules("firestore security rules", () => {
     await assertFails(userBatch.commit());
   });
 
+  it("allows admins to hard-delete managed user account documents in one batch", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "system/bootstrap"), { adminUid: "admin-a" });
+      await setDoc(doc(context.firestore(), "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(context.firestore(), "quickLoginKeys/2"), quickLoginKey("user-b", 2));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b", { order: 2, quickKey: 2 }));
+      await setDoc(doc(context.firestore(), "publicLoginRoster/user-b"), rosterProfile("user-b", { order: 2, quickKey: 2 }));
+      await setDoc(doc(context.firestore(), "userKeys/user-b"), userKey("user-b"));
+      await setDoc(doc(context.firestore(), "quickLoginKeys/3"), quickLoginKey("user-c", 3));
+      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c", { order: 3, quickKey: 3 }));
+      await setDoc(doc(context.firestore(), "publicLoginRoster/user-c"), rosterProfile("user-c", { order: 3, quickKey: 3 }));
+      await setDoc(doc(context.firestore(), "userKeys/user-c"), userKey("user-c"));
+    });
+
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const adminBatch = writeBatch(adminDb);
+    adminBatch.delete(doc(adminDb, "quickLoginKeys/2"));
+    adminBatch.delete(doc(adminDb, "users/user-b"));
+    adminBatch.delete(doc(adminDb, "publicLoginRoster/user-b"));
+    adminBatch.delete(doc(adminDb, "userKeys/user-b"));
+
+    await assertSucceeds(adminBatch.commit());
+    const deletedUserSnapshot = await assertSucceeds(getDoc(doc(adminDb, "users/user-b")));
+    expect(deletedUserSnapshot.exists()).toBe(false);
+
+    const userDb = testEnv.authenticatedContext("user-c").firestore();
+    const userBatch = writeBatch(userDb);
+    userBatch.delete(doc(userDb, "quickLoginKeys/3"));
+    userBatch.delete(doc(userDb, "users/user-c"));
+    userBatch.delete(doc(userDb, "publicLoginRoster/user-c"));
+    userBatch.delete(doc(userDb, "userKeys/user-c"));
+
+    await assertFails(userBatch.commit());
+
+    const selfBatch = writeBatch(adminDb);
+    selfBatch.delete(doc(adminDb, "users/admin-a"));
+    await assertFails(selfBatch.commit());
+  });
+
   it("prevents admins from changing immutable user identity fields", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "system/bootstrap"), { adminUid: "admin-a" });
@@ -300,6 +340,49 @@ describeRules("firestore security rules", () => {
         },
         isDeleted: false,
         updatedBy: "user-a"
+      })
+    );
+  });
+
+  it("allows users to rotate only their own encrypted private key material", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "userKeys/user-a"), userKey("user-a"));
+    });
+
+    const userDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(
+      updateDoc(doc(userDb, "userKeys/user-a"), {
+        pendingEncryptedPrivateKeyJwk: { ...userKeyPayload, cipherText: "pending-key" },
+        pendingKdfSalt: "pending-salt",
+        pendingKdfIterations: 210000,
+        pendingCreatedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(userDb, "userKeys/user-a"), {
+        encryptedPrivateKeyJwk: { ...userKeyPayload, cipherText: "next-key" },
+        kdfSalt: "next-salt",
+        kdfIterations: 210000,
+        pendingEncryptedPrivateKeyJwk: deleteField(),
+        pendingKdfSalt: deleteField(),
+        pendingKdfIterations: deleteField(),
+        pendingCreatedAt: deleteField(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(updateDoc(doc(userDb, "userKeys/user-a"), { publicKeyJwk: { kty: "RSA", kid: "changed" } }));
+    await assertFails(
+      updateDoc(doc(otherDb, "userKeys/user-a"), {
+        pendingEncryptedPrivateKeyJwk: { ...userKeyPayload, cipherText: "stolen" },
+        pendingKdfSalt: "pending-salt",
+        pendingKdfIterations: 210000,
+        pendingCreatedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
       })
     );
   });
@@ -447,6 +530,73 @@ describeRules("firestore security rules", () => {
         },
         isDeleted: false,
         updatedBy: "user-b"
+      })
+    );
+  });
+
+  it("allows owners to manage personal note folders and blocks cross-user assignments", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/personal-note"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(context.firestore(), "notes/shared-note"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "noteFolders/folder-a"), {
+        ownerUid: "user-a",
+        name: "업무",
+        color: "#2f7d70",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(getDoc(doc(otherDb, "noteFolders/folder-a")));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "notes/personal-note"), {
+        folderId: "folder-a",
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-a"
+      })
+    );
+    await assertFails(
+      updateDoc(doc(otherDb, "notes/personal-note"), {
+        folderId: "folder-a",
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-b"
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "notes/shared-note"), {
+        folderId: "folder-a",
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-a"
       })
     );
   });
@@ -1028,6 +1178,12 @@ describeRules("firestore security rules", () => {
       setDoc(
         doc(participantDb, "notes/note-a/history/unsafe-field"),
         noteHistory("note-a", "user-b", { changedFields: ["privateKey"] })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(participantDb, "notes/note-a/history/unsafe-snapshot"),
+        noteHistory("note-a", "user-b", { encryptedSnapshot: { version: 1, algorithm: "AES-GCM", cipherText: 12, iv: "iv" } })
       )
     );
   });

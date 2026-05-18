@@ -19,12 +19,13 @@ import type { Timestamp } from "firebase/firestore";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { AppShell } from "../components/AppShell";
+import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, generateUserKeyBundle, unwrapNoteKey } from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, previewTextFromHtml } from "../lib/editorContent";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { initialsFromName } from "../lib/roster";
-import { createUser, updateUser } from "../services/adminFunctions";
+import { createUser, deleteManagedUserDocuments, updateUser } from "../services/adminFunctions";
 import { deleteNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
 import { subscribeUsers } from "../services/users";
 import type { NoteKind, UserProfile } from "../types";
@@ -53,6 +54,7 @@ const initialDraft: DraftUser = {
 };
 
 type AdminNoteTypeFilter = "all" | NoteKind;
+type AdminTab = "create" | "users" | "notes";
 type UserStatusFilter = "all" | "active" | "inactive" | "admin";
 
 interface AdminNoteView extends NoteSnapshot {
@@ -157,8 +159,10 @@ function stableEditableSignature(user: UserProfile) {
 
 function editableUserValidationError(user: UserProfile, users: UserProfile[]) {
   const quickKey = Number(user.quickKey);
+  const displayName = user.displayName.trim();
+  const normalizedDisplayName = displayName.toLowerCase();
 
-  if (!user.displayName.trim()) {
+  if (!displayName) {
     return "이름을 입력하면 자동 저장됩니다.";
   }
 
@@ -172,6 +176,48 @@ function editableUserValidationError(user: UserProfile, users: UserProfile[]) {
 
   if (users.some((targetUser) => targetUser.uid !== user.uid && targetUser.quickKey === quickKey)) {
     return "이미 사용 중인 번호입니다.";
+  }
+
+  if (
+    users.some(
+      (targetUser) =>
+        targetUser.uid !== user.uid &&
+        targetUser.displayName.trim().toLowerCase() === normalizedDisplayName
+    )
+  ) {
+    return "이미 사용 중인 이름입니다.";
+  }
+
+  return null;
+}
+
+function createUserValidationError(draft: DraftUser, users: UserProfile[], fallbackQuickKey: number) {
+  const displayName = draft.displayName.trim();
+  const avatarText = draft.avatarText.trim();
+  const quickKey = Number(draft.quickKey || fallbackQuickKey);
+
+  if (!displayName) {
+    return "이름을 입력해주세요.";
+  }
+
+  if (!avatarText) {
+    return "원 안 글자를 입력해주세요.";
+  }
+
+  if (!Number.isInteger(quickKey) || quickKey < 1 || quickKey > 99) {
+    return "빠른 로그인 번호는 1부터 99까지 입력해주세요.";
+  }
+
+  if (draft.password.length < 6) {
+    return "초기 비밀번호는 6자 이상 입력해주세요.";
+  }
+
+  if (users.some((user) => user.displayName.trim().toLowerCase() === displayName.toLowerCase())) {
+    return "이미 사용 중인 사용자 이름입니다.";
+  }
+
+  if (users.some((user) => user.quickKey === quickKey)) {
+    return "이미 사용 중인 빠른 로그인 번호입니다.";
   }
 
   return null;
@@ -192,10 +238,27 @@ function updatePayloadFromDraft(user: UserProfile) {
 }
 
 export default function AdminPage() {
+  const { privateKey } = useAuth();
+
+  if (!privateKey) {
+    return (
+      <AppShell>
+        <section className="workspace admin-workspace">
+          <UnlockPanel />
+        </section>
+      </AppShell>
+    );
+  }
+
+  return <AdminDashboard />;
+}
+
+function AdminDashboard() {
   const { profile, privateKey } = useAuth();
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [adminNoteViews, setAdminNoteViews] = useState<AdminNoteView[]>([]);
+  const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>("users");
   const [noteOwnerFilter, setNoteOwnerFilter] = useState("all");
   const [noteTypeFilter, setNoteTypeFilter] = useState<AdminNoteTypeFilter>("all");
   const [noteSearch, setNoteSearch] = useState("");
@@ -299,6 +362,22 @@ export default function AdminPage() {
     }
   }, [adminNoteViews, selectedNoteId]);
 
+  useEffect(() => {
+    if (!selectedNoteId) {
+      return undefined;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSelectedNoteId(null);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedNoteId]);
+
   const nextQuickKey = useMemo(() => {
     const used = new Set(users.map((user) => user.quickKey));
     for (let key = 1; key <= 99; key += 1) {
@@ -311,6 +390,7 @@ export default function AdminPage() {
 
   const userMap = useMemo(() => new Map(users.map((user) => [user.uid, user])), [users]);
   const activeUsers = useMemo(() => users.filter((user) => user.isActive), [users]);
+  const activeAdminCount = useMemo(() => users.filter((user) => user.isAdmin && user.isActive).length, [users]);
 
   const adminNoteCounts = useMemo(
     () =>
@@ -397,6 +477,14 @@ export default function AdminPage() {
 
   async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const validationError = createUserValidationError(draft, users, nextQuickKey);
+
+    if (validationError) {
+      setError(validationError);
+      setNotice(null);
+      return;
+    }
+
     setPending(true);
     setError(null);
     setNotice(null);
@@ -498,8 +586,43 @@ export default function AdminPage() {
           <AdminStat icon={<KeyRound size={18} />} label="공유 허용" value={adminStats.shareLinks} />
         </section>
 
-        <div className="admin-management-grid">
-          <section className="panel admin-create-panel">
+        <div className="admin-tabs" role="tablist" aria-label="관리자 기능">
+          <button
+            aria-selected={activeAdminTab === "create"}
+            className={activeAdminTab === "create" ? "active" : ""}
+            onClick={() => setActiveAdminTab("create")}
+            role="tab"
+            type="button"
+          >
+            <Plus size={16} />
+            사용자 추가
+          </button>
+          <button
+            aria-selected={activeAdminTab === "users"}
+            className={activeAdminTab === "users" ? "active" : ""}
+            onClick={() => setActiveAdminTab("users")}
+            role="tab"
+            type="button"
+          >
+            <UserRoundCog size={16} />
+            사용자 목록
+          </button>
+          <button
+            aria-selected={activeAdminTab === "notes"}
+            className={activeAdminTab === "notes" ? "active" : ""}
+            onClick={() => setActiveAdminTab("notes")}
+            role="tab"
+            type="button"
+          >
+            <FileText size={16} />
+            노트 관리
+          </button>
+        </div>
+
+        {activeAdminTab !== "notes" && (
+          <div className={`admin-management-grid ${activeAdminTab === "users" ? "single-panel" : ""}`}>
+            {activeAdminTab === "create" && (
+              <section className="panel admin-create-panel">
             <div className="admin-section-header">
               <h2>
                 <Plus size={20} />
@@ -604,9 +727,11 @@ export default function AdminPage() {
                 {pending ? "생성 중" : "사용자 생성"}
               </button>
             </form>
-          </section>
+              </section>
+            )}
 
-          <section className="panel admin-users-panel">
+            {activeAdminTab === "users" && (
+              <section className="panel admin-users-panel">
             <div className="admin-section-header">
               <h2>
                 <UserRoundCog size={20} />
@@ -646,6 +771,8 @@ export default function AdminPage() {
 
                   return (
                     <EditableUserCard
+                      activeAdminCount={activeAdminCount}
+                      currentUid={profile?.uid ?? ""}
                       key={user.uid}
                       index={orderIndex >= 0 ? orderIndex : index}
                       total={users.length}
@@ -658,10 +785,13 @@ export default function AdminPage() {
                 <div className="empty-state">조건에 맞는 사용자가 없습니다.</div>
               )}
             </div>
-          </section>
-        </div>
+              </section>
+            )}
+          </div>
+        )}
 
-        <section className="panel wide-panel admin-note-panel">
+        {activeAdminTab === "notes" && (
+          <section className="panel wide-panel admin-note-panel">
           <div className="admin-section-header">
             <h2>
               <FileText size={20} />
@@ -772,7 +902,8 @@ export default function AdminPage() {
               <div className="empty-state">조건에 맞는 노트가 없습니다.</div>
             )}
           </div>
-        </section>
+          </section>
+        )}
         {selectedAdminNote && (
           <div className="modal-backdrop" role="dialog" aria-modal="true">
             <article className="note-preview-modal admin-note-modal">
@@ -845,11 +976,15 @@ function AdminStat({ icon, label, value }: { icon: ReactNode; label: string; val
 }
 
 function EditableUserCard({
+  activeAdminCount,
+  currentUid,
   user,
   users,
   index,
   total
 }: {
+  activeAdminCount: number;
+  currentUid: string;
   user: UserProfile;
   users: UserProfile[];
   index: number;
@@ -1002,6 +1137,43 @@ function EditableUserCard({
     }
   }
 
+  async function deleteUserPermanently() {
+    if (user.uid === currentUid) {
+      setMessage("현재 로그인한 관리자는 삭제할 수 없습니다.");
+      return;
+    }
+
+    if (user.isAdmin && user.isActive && activeAdminCount <= 1) {
+      setMessage("마지막 활성 관리자는 삭제할 수 없습니다.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `${user.displayName || "이 사용자"} 사용자의 앱 계정 문서를 영구 삭제할까요?\n삭제하면 관리자 화면과 로그인 목록에서 바로 사라지며 되돌릴 수 없습니다.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setPending(true);
+    setMessage("삭제 중...");
+
+    try {
+      await deleteManagedUserDocuments(user);
+      dirtyRef.current = false;
+      latestSaveDraftRef.current = null;
+      lastSubmittedSignatureRef.current = stableEditableSignature(user);
+      confirmedSignatureRef.current = stableEditableSignature(user);
+      setDirty(false);
+      setMessage("삭제됨");
+    } catch {
+      setMessage("삭제 실패");
+    } finally {
+      setPending(false);
+    }
+  }
+
   function toggleShareTarget(uid: string, checked: boolean) {
     updateDraft((current) => {
       const currentTargets = shareTargetsOf(current);
@@ -1144,6 +1316,15 @@ function EditableUserCard({
             aria-label="아래로"
           >
             <ArrowDown size={16} />
+          </button>
+          <button
+            className="secondary-button danger admin-user-delete-button"
+            disabled={pending}
+            onClick={() => void deleteUserPermanently()}
+            type="button"
+          >
+            <Trash2 size={15} />
+            삭제
           </button>
         </div>
         <p className="reset-hint">

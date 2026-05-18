@@ -30,6 +30,10 @@ service cloud.firestore {
       return /databases/$(database)/documents/notes/$(noteId);
     }
 
+    function noteFolderPath(folderId) {
+      return /databases/$(database)/documents/noteFolders/$(folderId);
+    }
+
     function activeSignedInUser() {
       return signedIn()
         && exists(userPath(request.auth.uid))
@@ -61,6 +65,7 @@ service cloud.firestore {
         "encryptedTitle",
         "encryptedBody",
         "wrappedKeys",
+        "folderId",
         "createdAt",
         "dueAt",
         "updatedAt",
@@ -81,6 +86,7 @@ service cloud.firestore {
       && encryptedPayload(data.encryptedTitle)
       && encryptedPayload(data.encryptedBody)
       && data.wrappedKeys is map
+      && validNoteFolderReference(data)
       && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
       && (!data.keys().hasAny(["dueAt"]) || data.dueAt == null || data.dueAt is timestamp)
       && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp)
@@ -88,6 +94,27 @@ service cloud.firestore {
       && data.updatedBy is string
       && validDeleteMetadata(data)
       && validPurgeMetadata(data);
+    }
+
+    function validNoteFolderReference(data) {
+      return !data.keys().hasAny(["folderId"])
+        || data.folderId == null
+        || (
+          data.type == "personal"
+          && data.folderId is string
+          && data.folderId.size() > 0
+          && data.folderId.size() <= 120
+        );
+    }
+
+    function validAssignedFolder(data) {
+      return !data.keys().hasAny(["folderId"])
+        || data.folderId == null
+        || (
+          data.folderId is string
+          && exists(noteFolderPath(data.folderId))
+          && get(noteFolderPath(data.folderId)).data.ownerUid == data.ownerUid
+        );
     }
 
     function validDeleteMetadata(data) {
@@ -111,6 +138,10 @@ service cloud.firestore {
 
     function notePurged(data) {
       return data.keys().hasAny(["isPurged"]) && data.isPurged == true;
+    }
+
+    function noteFolderId(data) {
+      return data.keys().hasAny(["folderId"]) ? data.folderId : null;
     }
 
     function validPurgeMetadata(data) {
@@ -211,6 +242,10 @@ service cloud.firestore {
         "encryptedPrivateKeyJwk",
         "kdfSalt",
         "kdfIterations",
+        "pendingEncryptedPrivateKeyJwk",
+        "pendingKdfSalt",
+        "pendingKdfIterations",
+        "pendingCreatedAt",
         "updatedAt"
       ])
       && data.uid == uid
@@ -218,7 +253,32 @@ service cloud.firestore {
       && encryptedPayload(data.encryptedPrivateKeyJwk)
       && data.kdfSalt is string
       && data.kdfIterations is int
-      && data.kdfIterations >= 100000;
+      && data.kdfIterations >= 100000
+      && (
+        !data.keys().hasAny(["pendingEncryptedPrivateKeyJwk", "pendingKdfSalt", "pendingKdfIterations", "pendingCreatedAt"])
+        || (
+          data.keys().hasAll(["pendingEncryptedPrivateKeyJwk", "pendingKdfSalt", "pendingKdfIterations", "pendingCreatedAt"])
+          && encryptedPayload(data.pendingEncryptedPrivateKeyJwk)
+          && data.pendingKdfSalt is string
+          && data.pendingKdfIterations is int
+          && data.pendingKdfIterations >= 100000
+          && data.pendingCreatedAt is timestamp
+        )
+      )
+      && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
+    }
+
+    function validNoteFolder(data) {
+      return data.keys().hasOnly(["ownerUid", "name", "color", "createdAt", "updatedAt"])
+        && data.ownerUid == request.auth.uid
+        && data.name is string
+        && data.name.size() > 0
+        && data.name.size() <= 40
+        && data.color is string
+        && data.color.size() > 0
+        && data.color.size() <= 24
+        && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
+        && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
     }
 
     function validQuickLoginKey(data, uid) {
@@ -274,7 +334,7 @@ service cloud.firestore {
 
     function validNoteHistory(data, noteId) {
       return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields", "createdAt"])
-        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "encryptedSummary", "createdAt"])
+        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "encryptedSummary", "encryptedSnapshot", "createdAt"])
         && data.noteId == noteId
         && data.actorUid == request.auth.uid
         && data.action in ["create", "content", "deadline", "share", "delete", "restore"]
@@ -283,6 +343,7 @@ service cloud.firestore {
         && data.changedFields.size() <= 8
         && data.changedFields.hasOnly(["title", "body", "dueAt", "participants", "deleted", "restored"])
         && (!data.keys().hasAny(["encryptedSummary"]) || encryptedPayload(data.encryptedSummary))
+        && (!data.keys().hasAny(["encryptedSnapshot"]) || encryptedPayload(data.encryptedSnapshot))
         && data.createdAt == request.time;
     }
 
@@ -315,6 +376,7 @@ service cloud.firestore {
         && getAfter(notePath(noteId)).data.type == get(notePath(noteId)).data.type
         && getAfter(notePath(noteId)).data.participantUids == get(notePath(noteId)).data.participantUids
         && getAfter(notePath(noteId)).data.wrappedKeys == get(notePath(noteId)).data.wrappedKeys
+        && noteFolderId(getAfter(notePath(noteId)).data) == noteFolderId(get(notePath(noteId)).data)
         && (
           getAfter(notePath(noteId)).data.encryptedTitle != get(notePath(noteId)).data.encryptedTitle
           || getAfter(notePath(noteId)).data.encryptedBody != get(notePath(noteId)).data.encryptedBody
@@ -334,6 +396,7 @@ service cloud.firestore {
           getAfter(notePath(noteId)).data.type != get(notePath(noteId)).data.type
           || getAfter(notePath(noteId)).data.participantUids != get(notePath(noteId)).data.participantUids
           || getAfter(notePath(noteId)).data.wrappedKeys != get(notePath(noteId)).data.wrappedKeys
+          || noteFolderId(getAfter(notePath(noteId)).data) != noteFolderId(get(notePath(noteId)).data)
         );
     }
 
@@ -343,6 +406,7 @@ service cloud.firestore {
         && !noteDeleted(get(notePath(noteId)).data)
         && !noteDeleted(getAfter(notePath(noteId)).data)
         && data.changedFields.hasOnly(["dueAt"])
+        && noteFolderId(getAfter(notePath(noteId)).data) == noteFolderId(get(notePath(noteId)).data)
         && getAfter(notePath(noteId)).data.dueAt != get(notePath(noteId)).data.dueAt;
     }
 
@@ -449,6 +513,19 @@ service cloud.firestore {
         && getAfter(rosterPath(uid)).data.isAdmin == data.isAdmin;
     }
 
+    function adminDeletesManagedUser(uid) {
+      return adminUser()
+        && uid != request.auth.uid
+        && exists(userPath(uid))
+        && exists(rosterPath(uid))
+        && exists(userKeyPath(uid))
+        && exists(quickLoginKeyPath(get(userPath(uid)).data.quickKey))
+        && !existsAfter(userPath(uid))
+        && !existsAfter(rosterPath(uid))
+        && !existsAfter(userKeyPath(uid))
+        && !existsAfter(quickLoginKeyPath(get(userPath(uid)).data.quickKey));
+    }
+
     function bootstrapCreatesAdmin(uid) {
       return signedIn()
         && request.auth.uid == uid
@@ -479,7 +556,49 @@ service cloud.firestore {
         && data.type == resource.data.type
         && data.participantUids == resource.data.participantUids
         && data.wrappedKeys == resource.data.wrappedKeys
-        && allowedShareTargets(data);
+        && allowedShareTargets(data)
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "encryptedTitle",
+          "encryptedBody",
+          "updatedAt",
+          "updatedBy"
+        ]);
+    }
+
+    function noteDeadlineUpdate(data) {
+      return noteParticipant(data)
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && data.type == resource.data.type
+        && data.participantUids == resource.data.participantUids
+        && data.wrappedKeys == resource.data.wrappedKeys
+        && data.encryptedTitle == resource.data.encryptedTitle
+        && data.encryptedBody == resource.data.encryptedBody
+        && allowedShareTargets(data)
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "dueAt",
+          "updatedAt",
+          "updatedBy"
+        ]);
+    }
+
+    function noteFolderUpdate(data) {
+      return request.auth.uid == resource.data.ownerUid
+        && resource.data.type == "personal"
+        && data.type == "personal"
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && data.participantUids == resource.data.participantUids
+        && data.wrappedKeys == resource.data.wrappedKeys
+        && data.encryptedTitle == resource.data.encryptedTitle
+        && data.encryptedBody == resource.data.encryptedBody
+        && data.updatedBy == request.auth.uid
+        && validAssignedFolder(data)
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "folderId",
+          "updatedAt",
+          "updatedBy"
+        ]);
     }
 
     function ownerAccessUpdate(data) {
@@ -489,10 +608,12 @@ service cloud.firestore {
         && request.auth.uid in data.participantUids
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
+        && validAssignedFolder(data)
         && request.resource.data.diff(resource.data).changedKeys().hasOnly([
           "type",
           "participantUids",
           "wrappedKeys",
+          "folderId",
           "updatedAt",
           "updatedBy"
         ]);
@@ -618,7 +739,7 @@ service cloud.firestore {
         && rosterMatchesUser(request.resource.data, uid)
         && getAfter(userPath(uid)).data.quickKey == request.resource.data.quickKey
         && getAfter(quickLoginKeyPath(request.resource.data.quickKey)).data.uid == uid;
-      allow delete: if false;
+      allow delete: if adminDeletesManagedUser(uid);
     }
 
     match /users/{uid} {
@@ -642,14 +763,46 @@ service cloud.firestore {
         ])
         && getAfter(rosterPath(uid)).data.quickKey == request.resource.data.quickKey
         && getAfter(quickLoginKeyPath(request.resource.data.quickKey)).data.uid == uid;
-      allow delete: if false;
+      allow delete: if adminDeletesManagedUser(uid);
     }
 
     match /userKeys/{uid} {
       allow read: if activeSignedInUser() && request.auth.uid == uid;
       allow create: if validUserKey(request.resource.data, uid)
         && (firstAdminCreate(uid) || adminCreatesUser(uid));
-      allow update, delete: if false;
+      allow update: if activeSignedInUser()
+        && request.auth.uid == uid
+        && validUserKey(request.resource.data, uid)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.publicKeyJwk == resource.data.publicKeyJwk
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "encryptedPrivateKeyJwk",
+          "kdfSalt",
+          "kdfIterations",
+          "pendingEncryptedPrivateKeyJwk",
+          "pendingKdfSalt",
+          "pendingKdfIterations",
+          "pendingCreatedAt",
+          "updatedAt"
+        ]);
+      allow delete: if adminDeletesManagedUser(uid);
+    }
+
+    match /noteFolders/{folderId} {
+      allow read: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+      allow create: if activeSignedInUser()
+        && validNoteFolder(request.resource.data)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid
+        && validNoteFolder(request.resource.data)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["name", "color", "updatedAt"]);
+      allow delete: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
     }
 
     match /quickLoginKeys/{quickKey} {
@@ -681,11 +834,14 @@ service cloud.firestore {
         && !request.resource.data.keys().hasAny(["deletedAt", "deletedBy"])
         && request.resource.data.ownerUid == request.auth.uid
         && request.auth.uid in request.resource.data.participantUids
-        && allowedShareTargets(request.resource.data);
+        && allowedShareTargets(request.resource.data)
+        && validAssignedFolder(request.resource.data);
       allow update: if validNote(request.resource.data)
         && request.resource.data.ownerUid == resource.data.ownerUid
         && (
           noteContentUpdate(request.resource.data)
+          || noteDeadlineUpdate(request.resource.data)
+          || noteFolderUpdate(request.resource.data)
           || (ownerAccessUpdate(request.resource.data) && allowedShareTargets(request.resource.data))
           || noteSoftDeleteUpdate(request.resource.data)
           || noteRestoreUpdate(request.resource.data)

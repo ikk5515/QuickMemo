@@ -19,7 +19,7 @@ import {
   writeBatch
 } from "firebase/firestore";
 import { auth, db, firebaseConfig } from "../lib/firebase";
-import type { NewUserPayload, PublicRosterUser } from "../types";
+import type { NewUserPayload, PublicRosterUser, UserProfile } from "../types";
 
 export interface BootstrapState {
   adminExists: boolean;
@@ -266,6 +266,17 @@ export async function reorderUsers(users: PublicRosterUser[]) {
       order: index + 1
     });
   });
+
+  await batch.commit();
+}
+
+export async function deleteManagedUserDocuments(user: Pick<UserProfile, "uid" | "quickKey">) {
+  const batch = writeBatch(db);
+
+  batch.delete(doc(db, "quickLoginKeys", String(user.quickKey)));
+  batch.delete(doc(db, "users", user.uid));
+  batch.delete(doc(db, "publicLoginRoster", user.uid));
+  batch.delete(doc(db, "userKeys", user.uid));
 
   await batch.commit();
 }

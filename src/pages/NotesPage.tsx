@@ -1,31 +1,50 @@
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   ArrowUpDown,
+  Bold,
   CalendarClock,
   CheckCircle2,
+  Columns3,
   Download,
   Eye,
   File,
   FilePlus2,
+  Folder,
+  FolderPlus,
   FolderOpen,
   History,
+  LayoutGrid,
   ListChecks,
+  ListTodo,
   Loader2,
-  PanelRightOpen,
+  PanelLeftOpen,
+  PaintBucket,
+  Palette,
   Pencil,
   RotateCcw,
+  Rows3,
   Save,
   Share2,
   Star,
+  Strikethrough,
+  Table2,
   Trash2,
+  Redo2,
+  Undo2,
+  Underline,
+  Upload,
   UsersRound,
   X
 } from "lucide-react";
+import type { Editor as TipTapEditor } from "@tiptap/core";
+import { EditorContent, useEditor } from "@tiptap/react";
 import {
   type ChangeEvent,
-  type ClipboardEvent,
   type CSSProperties,
   type FormEvent,
-  type MouseEvent,
+  type MutableRefObject,
   type RefObject,
   useCallback,
   useEffect,
@@ -34,6 +53,7 @@ import {
   useState
 } from "react";
 import { Timestamp } from "firebase/firestore";
+import { decompressSync, strFromU8, unzipSync } from "fflate";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
@@ -62,9 +82,21 @@ import {
   sanitizeEditorHtml,
   serializeEditorContent
 } from "../lib/editorContent";
+import {
+  editorCellColors,
+  editorImagePixelWidthBounds,
+  editorTableColumnPixelWidthBounds,
+  editorTablePixelHeightBounds,
+  editorTableRowPixelHeightBounds,
+  editorTablePixelWidthBounds,
+  editorTextColors,
+  editorTextSizes,
+  richEditorExtensions
+} from "../lib/richEditorExtensions";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
   confirmNoteRead,
+  createNoteFolder,
   createNoteAttachment,
   deleteNoteAttachment,
   createEncryptedNote,
@@ -76,6 +108,7 @@ import {
   setNotePinned,
   subscribeNoteAttachments,
   subscribeDeletedNotes,
+  subscribeNoteFolders,
   subscribeMyNoteStates,
   subscribeNoteHistory,
   subscribeNoteUserStates,
@@ -83,8 +116,10 @@ import {
   updateEncryptedNote,
   updateNoteAccess,
   updateNoteDeadline,
+  updateNoteFolder,
   type NoteHistorySnapshot,
   type NoteAttachmentSnapshot,
+  type NoteFolderSnapshot,
   type NoteUserStateSnapshot,
   type NoteSnapshot
 } from "../services/notes";
@@ -98,6 +133,7 @@ interface EditorState {
   type: NoteKind;
   participantUids: string[];
   noteKey: CryptoKey | null;
+  folderId: string | null;
   fontSize: number;
   dueAt: Date | null;
   dirty: boolean;
@@ -109,9 +145,14 @@ interface NoteDraft {
   fontSize: number;
 }
 
-interface PdfPreviewState {
+interface AttachmentPreviewState {
+  bytes?: Uint8Array;
   fileName: string;
-  url: string;
+  html?: string;
+  kind: "docx" | "html" | "pdf" | "text" | "unsupported";
+  label: string;
+  text?: string;
+  url?: string;
 }
 
 const blankEditor = (uid: string): EditorState => ({
@@ -121,6 +162,7 @@ const blankEditor = (uid: string): EditorState => ({
   type: "personal",
   participantUids: [uid],
   noteKey: null,
+  folderId: null,
   fontSize: 17,
   dueAt: null,
   dirty: false
@@ -129,6 +171,7 @@ const blankEditor = (uid: string): EditorState => ({
 type NoteSortField = "createdAt" | "dueAt";
 type NoteSortDirection = "asc" | "desc";
 type NoteListFilter = "all" | NoteKind;
+type EditorToolTab = "format" | "table" | "media";
 
 interface NoteSortSetting {
   field: NoteSortField;
@@ -143,6 +186,11 @@ interface NoteListCounts {
 
 type NoteStateByNoteId = Record<string, NoteUserStateSnapshot | undefined>;
 type DrawerMode = "notes" | "trash";
+type OverviewFolderFilter = "all" | "unfiled" | string;
+
+interface RichEditorInsertHtml {
+  (html: string): string | null;
+}
 
 interface RemoteCursorView {
   uid: string;
@@ -160,10 +208,22 @@ interface CursorClientRect {
   width: number;
 }
 
+type TableResizeCursor = "col" | "row" | "ew" | "ns" | "nwse";
+
+interface TableResizeHit {
+  cell?: HTMLTableCellElement;
+  columnIndex?: number;
+  cursor: TableResizeCursor;
+  heightSign: -1 | 0 | 1;
+  kind: "column" | "row" | "table";
+  row?: HTMLTableRowElement;
+  table: HTMLTableElement;
+  widthSign: -1 | 0 | 1;
+}
+
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
-const imageWidthOptions = [25, 50, 75, 100];
 const maxImageDataUrlLength = 760_000;
-const autosaveDelayMs = 450;
+const autosaveDelayMs = 2500;
 const deletedNoteRetentionDays = 30;
 const historySummaryMaxLength = 420;
 const cursorPublishDelayMs = 220;
@@ -173,6 +233,13 @@ const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
+const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
+const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx"]);
+const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
+const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
+const maxTextPreviewCharacters = 120_000;
+const maxDocumentPreviewBlocks = 320;
+const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -203,11 +270,285 @@ function clippedText(value: string, maxLength = historySummaryMaxLength) {
   return `${normalizedValue.slice(0, maxLength - 1).trim()}...`;
 }
 
-function historySummaryFromDraft(draft: NoteDraft) {
-  const title = clippedText(draft.title || "제목 없음", 120);
-  const body = clippedText(previewTextFromHtml(draft.body) || (/<img\b/i.test(draft.body) ? "이미지 포함" : "내용 없음"));
+function historySummaryFromDraft(previousDraft: NoteDraft | null, draft: NoteDraft) {
+  if (!previousDraft) {
+    const title = clippedText(draft.title || "제목 없음", 120);
+    const body = clippedText(previewTextFromHtml(draft.body) || (/<img\b/i.test(draft.body) ? "이미지 포함" : "내용 없음"));
 
-  return `제목: ${title}\n내용: ${body}`;
+    return `제목: ${title}\n내용: ${body}`;
+  }
+
+  const changes: string[] = [];
+
+  if (previousDraft.title !== draft.title) {
+    changes.push(`제목 변경: ${textChangeSummary(previousDraft.title || "제목 없음", draft.title || "제목 없음", 160)}`);
+  }
+
+  if (previousDraft.body !== draft.body || previousDraft.fontSize !== draft.fontSize) {
+    changes.push(bodyChangeSummary(previousDraft, draft));
+  }
+
+  return changes.length ? clippedText(changes.join("\n")) : "저장됨";
+}
+
+function historySnapshotFromDraft(draft: NoteDraft) {
+  return JSON.stringify({
+    title: draft.title,
+    body: sanitizeEditorHtml(draft.body),
+    fontSize: clampDraftFontSize(draft.fontSize)
+  });
+}
+
+function draftFromHistorySnapshot(value: string): NoteDraft | null {
+  try {
+    const parsed = JSON.parse(value) as Partial<NoteDraft>;
+
+    if (typeof parsed.title !== "string" || typeof parsed.body !== "string") {
+      return null;
+    }
+
+    return {
+      title: parsed.title,
+      body: sanitizeEditorHtml(parsed.body),
+      fontSize: clampDraftFontSize(Number(parsed.fontSize))
+    };
+  } catch {
+    return null;
+  }
+}
+
+interface HistoryDiffLine {
+  changed: string;
+  id: string;
+  label: string;
+  prefix: string;
+  removed: string;
+  suffix: string;
+}
+
+function historyDiffLines(previousDraft: NoteDraft | null, draft: NoteDraft) {
+  const lines: HistoryDiffLine[] = [];
+
+  if (!previousDraft) {
+    const title = clippedText(draft.title || "제목 없음", 160);
+    const body = clippedText(previewTextFromHtml(draft.body) || (/<img\b/i.test(draft.body) ? "이미지 포함" : "내용 없음"), 260);
+
+    lines.push({ changed: title, id: "title", label: "제목", prefix: "", removed: "", suffix: "" });
+    lines.push({ changed: body, id: "body", label: "내용", prefix: "", removed: "", suffix: "" });
+    return lines;
+  }
+
+  if (previousDraft.title !== draft.title) {
+    lines.push({
+      ...textDiffLine("title", "제목", previousDraft.title || "제목 없음", draft.title || "제목 없음"),
+      id: "title",
+      label: "제목"
+    });
+  }
+
+  const previousText = previewTextFromHtml(previousDraft.body);
+  const nextText = previewTextFromHtml(draft.body);
+
+  if (previousText !== nextText) {
+    lines.push({
+      ...textDiffLine("body", "내용", previousText || "내용 없음", nextText || "내용 없음"),
+      id: "body",
+      label: "내용"
+    });
+  } else if (previousDraft.body !== draft.body) {
+    lines.push({
+      changed: bodyStructureChangeLabel(previousDraft.body, draft.body),
+      id: "body-format",
+      label: "본문",
+      prefix: "",
+      removed: "",
+      suffix: ""
+    });
+  }
+
+  if (previousDraft.fontSize !== draft.fontSize) {
+    lines.push({
+      changed: `${previousDraft.fontSize}px → ${draft.fontSize}px`,
+      id: "font-size",
+      label: "기본 글자",
+      prefix: "",
+      removed: "",
+      suffix: ""
+    });
+  }
+
+  return lines;
+}
+
+function textDiffLine(id: string, label: string, previousValue: string, nextValue: string): HistoryDiffLine {
+  const previousText = previousValue.replace(/\s+/g, " ").trim();
+  const nextText = nextValue.replace(/\s+/g, " ").trim();
+  const maxLength = 320;
+  const previous = previousText.slice(0, maxLength);
+  const next = nextText.slice(0, maxLength);
+  let prefixLength = 0;
+
+  while (prefixLength < previous.length && prefixLength < next.length && previous[prefixLength] === next[prefixLength]) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+
+  while (
+    suffixLength < previous.length - prefixLength &&
+    suffixLength < next.length - prefixLength &&
+    previous[previous.length - 1 - suffixLength] === next[next.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1;
+  }
+
+  const nextChangedEnd = suffixLength ? next.length - suffixLength : next.length;
+  const previousChangedEnd = suffixLength ? previous.length - suffixLength : previous.length;
+  const changed = next.slice(prefixLength, nextChangedEnd);
+  const removed = previous.slice(prefixLength, previousChangedEnd);
+  const prefix = clippedDiffContext(next.slice(0, prefixLength), "end");
+  const suffix = clippedDiffContext(next.slice(nextChangedEnd), "start");
+
+  return {
+    changed: changed || (removed ? "삭제됨" : next || "내용 없음"),
+    id,
+    label,
+    prefix,
+    removed,
+    suffix
+  };
+}
+
+function clippedDiffContext(value: string, edge: "start" | "end") {
+  if (value.length <= 48) {
+    return value;
+  }
+
+  return edge === "start" ? `${value.slice(0, 48)}...` : `...${value.slice(-48)}`;
+}
+
+function bodyStructureChangeLabel(previousBody: string, nextBody: string) {
+  const previousTasks = countMatches(previousBody, /data-checked="true"/g);
+  const nextTasks = countMatches(nextBody, /data-checked="true"/g);
+
+  if (previousTasks !== nextTasks) {
+    return `체크 상태 ${previousTasks}개 → ${nextTasks}개`;
+  }
+
+  if (previousBody.includes("<table") || nextBody.includes("<table")) {
+    return "표 또는 표 서식 변경";
+  }
+
+  if (previousBody.includes("<img") || nextBody.includes("<img")) {
+    return "이미지 변경";
+  }
+
+  return "서식 변경";
+}
+
+function countMatches(value: string, pattern: RegExp) {
+  return value.match(pattern)?.length ?? 0;
+}
+
+function clampDraftFontSize(value: number) {
+  if (!Number.isFinite(value)) {
+    return 17;
+  }
+
+  return Math.min(28, Math.max(14, Math.round(value)));
+}
+
+function bodyChangeSummary(previousDraft: NoteDraft, draft: NoteDraft) {
+  const previousStats = editorBodyStats(previousDraft.body);
+  const nextStats = editorBodyStats(draft.body);
+
+  if (previousStats.text !== nextStats.text) {
+    return `본문 변경: ${textChangeSummary(previousStats.text || "내용 없음", nextStats.text || "내용 없음")}`;
+  }
+
+  const structuralChanges: string[] = [];
+
+  if (previousStats.checkedTasks !== nextStats.checkedTasks || previousStats.totalTasks !== nextStats.totalTasks) {
+    structuralChanges.push(`체크 ${previousStats.checkedTasks}/${previousStats.totalTasks} -> ${nextStats.checkedTasks}/${nextStats.totalTasks}`);
+  }
+
+  if (previousStats.tableCells !== nextStats.tableCells || previousStats.tables !== nextStats.tables) {
+    structuralChanges.push(`표 ${previousStats.tables}개/${previousStats.tableCells}칸 -> ${nextStats.tables}개/${nextStats.tableCells}칸`);
+  }
+
+  if (previousDraft.fontSize !== draft.fontSize) {
+    structuralChanges.push(`글자 ${previousDraft.fontSize}px -> ${draft.fontSize}px`);
+  }
+
+  return structuralChanges.length ? `본문 변경: ${structuralChanges.join(", ")}` : "본문 서식/표 색상 변경";
+}
+
+function editorBodyStats(html: string) {
+  if (typeof document === "undefined") {
+    return {
+      checkedTasks: 0,
+      tableCells: 0,
+      tables: 0,
+      text: previewTextFromHtml(html),
+      totalTasks: 0
+    };
+  }
+
+  const container = document.createElement("div");
+  container.innerHTML = sanitizeEditorHtml(html);
+
+  return {
+    checkedTasks: container.querySelectorAll('li[data-type="taskItem"][data-checked="true"], input[type="checkbox"]:checked').length,
+    tableCells: container.querySelectorAll("td, th").length,
+    tables: container.querySelectorAll("table").length,
+    text: previewTextFromHtml(html),
+    totalTasks: container.querySelectorAll('li[data-type="taskItem"], input[type="checkbox"]').length
+  };
+}
+
+function textChangeSummary(previousText: string, nextText: string, maxLength = 220) {
+  const previousValue = previousText.replace(/\s+/g, " ").trim();
+  const nextValue = nextText.replace(/\s+/g, " ").trim();
+
+  if (!previousValue) {
+    return `추가 "${clippedText(nextValue, maxLength)}"`;
+  }
+
+  if (!nextValue) {
+    return `삭제 "${clippedText(previousValue, maxLength)}"`;
+  }
+
+  const prefixLength = commonPrefixLength(previousValue, nextValue);
+  const suffixLength = commonSuffixLength(previousValue.slice(prefixLength), nextValue.slice(prefixLength));
+  const previousChanged = previousValue.slice(prefixLength, previousValue.length - suffixLength);
+  const nextChanged = nextValue.slice(prefixLength, nextValue.length - suffixLength);
+
+  return `"${clippedText(previousChanged || previousValue, Math.floor(maxLength / 2))}" -> "${clippedText(
+    nextChanged || nextValue,
+    Math.floor(maxLength / 2)
+  )}"`;
+}
+
+function commonPrefixLength(left: string, right: string) {
+  const maxLength = Math.min(left.length, right.length);
+  let index = 0;
+
+  while (index < maxLength && left[index] === right[index]) {
+    index += 1;
+  }
+
+  return index;
+}
+
+function commonSuffixLength(left: string, right: string) {
+  const maxLength = Math.min(left.length, right.length);
+  let index = 0;
+
+  while (index < maxLength && left[left.length - 1 - index] === right[right.length - 1 - index]) {
+    index += 1;
+  }
+
+  return index;
 }
 
 function purgedDraft(): NoteDraft {
@@ -439,6 +780,7 @@ function noteSyncSignature(note: DecryptedNote) {
     note.id,
     updatedAt,
     note.updatedBy,
+    note.folderId ?? "",
     note.encryptedTitle.iv,
     note.encryptedTitle.cipherText,
     note.encryptedBody.iv,
@@ -636,12 +978,24 @@ async function decryptNoteSnapshots(notes: NoteSnapshot[], uid: string, privateK
   return nextNotes.filter((note): note is DecryptedNote => Boolean(note));
 }
 
+function noteCountsFromNotes(notes: DecryptedNote[]) {
+  const counts: NoteListCounts = { all: 0, personal: 0, shared: 0 };
+
+  notes.forEach((note) => {
+    counts.all += 1;
+    counts[note.type] += 1;
+  });
+
+  return counts;
+}
+
 export default function NotesPage() {
   const { profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [deletedNotes, setDeletedNotes] = useState<NoteSnapshot[]>([]);
   const [decryptedNotes, setDecryptedNotes] = useState<DecryptedNote[]>([]);
   const [decryptedDeletedNotes, setDecryptedDeletedNotes] = useState<DecryptedNote[]>([]);
+  const [folders, setFolders] = useState<NoteFolderSnapshot[]>([]);
   const [noteStateMap, setNoteStateMap] = useState<NoteStateByNoteId>({});
   const [activeCursorStates, setActiveCursorStates] = useState<NoteUserStateSnapshot[]>([]);
   const [cursorClock, setCursorClock] = useState(() => Date.now());
@@ -653,8 +1007,10 @@ export default function NotesPage() {
   const [saving, setSaving] = useState(false);
   const [attachmentBusyId, setAttachmentBusyId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
-  const [pdfPreview, setPdfPreview] = useState<PdfPreviewState | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
   const [listOpen, setListOpen] = useState(false);
+  const [overviewOpen, setOverviewOpen] = useState(false);
+  const [overviewFolderFilter, setOverviewFolderFilter] = useState<OverviewFolderFilter>("all");
   const [shareOpen, setShareOpen] = useState(false);
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [deadlineOpen, setDeadlineOpen] = useState(false);
@@ -667,7 +1023,7 @@ export default function NotesPage() {
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
-  const pdfPreviewUrl = useRef<string | null>(null);
+  const attachmentPreviewUrl = useRef<string | null>(null);
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -728,10 +1084,19 @@ export default function NotesPage() {
   }, []);
 
   useEffect(() => {
+    if (!profile) {
+      setFolders([]);
+      return undefined;
+    }
+
+    return subscribeNoteFolders(profile.uid, setFolders, () => setError("폴더 목록을 불러오지 못했습니다."));
+  }, [profile]);
+
+  useEffect(() => {
     return () => {
-      if (pdfPreviewUrl.current) {
-        URL.revokeObjectURL(pdfPreviewUrl.current);
-        pdfPreviewUrl.current = null;
+      if (attachmentPreviewUrl.current) {
+        URL.revokeObjectURL(attachmentPreviewUrl.current);
+        attachmentPreviewUrl.current = null;
       }
     };
   }, []);
@@ -894,22 +1259,20 @@ export default function NotesPage() {
     () => [...decryptedNotes, ...decryptedDeletedNotes].find((note) => note.id === previewNoteId) ?? null,
     [decryptedDeletedNotes, decryptedNotes, previewNoteId]
   );
-  const noteCounts = useMemo(
-    () => {
-      const counts: NoteListCounts = { all: 0, personal: 0, shared: 0 };
-
-      decryptedNotes.forEach((note) => {
-        counts.all += 1;
-        counts[note.type] += 1;
-      });
-
-      return counts;
-    },
-    [decryptedNotes]
-  );
+  const noteCounts = useMemo(() => noteCountsFromNotes(decryptedNotes), [decryptedNotes]);
+  const trashCounts = useMemo(() => noteCountsFromNotes(decryptedDeletedNotes), [decryptedDeletedNotes]);
   const visibleNotes = useMemo(
     () => sortNotes(filterNotes(decryptedNotes, noteFilter), noteSort, noteStateMap),
     [decryptedNotes, noteFilter, noteSort, noteStateMap]
+  );
+  const personalOverviewNotes = useMemo(
+    () =>
+      sortNotes(
+        decryptedNotes.filter((note) => note.type === "personal" && note.ownerUid === profile?.uid),
+        noteSort,
+        noteStateMap
+      ),
+    [decryptedNotes, noteSort, noteStateMap, profile?.uid]
   );
   const trashNotes = useMemo(
     () => sortDeletedNotes(filterNotes(decryptedDeletedNotes, noteFilter)),
@@ -1017,6 +1380,7 @@ export default function NotesPage() {
     const metadataMatches =
       timestampsEqual(editor.dueAt, remoteDueAt) &&
       editor.type === activeRemoteNote.type &&
+      editor.folderId === (activeRemoteNote.folderId ?? null) &&
       editor.participantUids.join("|") === activeRemoteNote.participantUids.join("|");
 
     if (contentMatches && metadataMatches) {
@@ -1056,6 +1420,7 @@ export default function NotesPage() {
       body: remoteDraft.body,
       type: activeRemoteNote.type,
       participantUids: activeRemoteNote.participantUids,
+      folderId: activeRemoteNote.folderId ?? null,
       fontSize: remoteDraft.fontSize,
       dueAt: remoteDueAt,
       dirty: contentMatches ? current.dirty : false
@@ -1122,22 +1487,19 @@ export default function NotesPage() {
   ]);
 
   useEffect(() => {
-    if (!previewNoteId) {
+    if (!listOpen || previewNoteId || attachmentPreview) {
       return undefined;
     }
 
-    function handlePreviewCancel(event: KeyboardEvent) {
-      if (event.key !== "Escape") {
-        return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setListOpen(false);
       }
-
-      event.preventDefault();
-      setPreviewNoteId(null);
     }
 
-    window.addEventListener("keydown", handlePreviewCancel);
-    return () => window.removeEventListener("keydown", handlePreviewCancel);
-  }, [previewNoteId]);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [attachmentPreview, listOpen, previewNoteId]);
 
   if (!profile) {
     return null;
@@ -1217,8 +1579,94 @@ export default function NotesPage() {
     publishEditorCursor(null, false);
   }
 
+  function openOverview(filter: OverviewFolderFilter = "all") {
+    setOverviewFolderFilter(filter);
+    setOverviewOpen(true);
+    setListOpen(false);
+  }
+
+  function returnToEditor() {
+    setOverviewOpen(false);
+    setListOpen(false);
+  }
+
   function updateFontSize(fontSize: number) {
     setEditor((current) => ({ ...current, fontSize, dirty: true }));
+  }
+
+  async function updateEditorFolder(folderId: string | null) {
+    if (currentType !== "personal") {
+      return;
+    }
+
+    setEditor((current) => ({ ...current, folderId, dirty: current.noteId ? current.dirty : true }));
+
+    if (!editor.noteId) {
+      return;
+    }
+
+    try {
+      await updateNoteFolder(editor.noteId, unlockedProfile.uid, folderId);
+      setStatus(folderId ? "노트 폴더를 저장했습니다." : "노트를 미분류로 이동했습니다.");
+    } catch {
+      setEditor((current) => (current.noteId === editor.noteId ? { ...current, folderId: editor.folderId } : current));
+      setError("노트 폴더를 저장하지 못했습니다.");
+    }
+  }
+
+  async function createFolder(name: string, color: string) {
+    const trimmedName = name.trim();
+    const safeColor = normalizeCustomHexColor(color, folderColorOptions[0]);
+
+    if (!trimmedName) {
+      setError("폴더 이름을 입력해주세요.");
+      return null;
+    }
+
+    try {
+      const folderRef = await createNoteFolder(unlockedProfile.uid, trimmedName, safeColor);
+      const createdFolder: NoteFolderSnapshot = {
+        id: folderRef.id,
+        ownerUid: unlockedProfile.uid,
+        name: trimmedName,
+        color: safeColor,
+        createdAt: Timestamp.now(),
+        updatedAt: Timestamp.now()
+      };
+
+      setFolders((currentFolders) =>
+        currentFolders.some((folder) => folder.id === folderRef.id)
+          ? currentFolders
+          : [...currentFolders, createdFolder].sort((left, right) => left.name.localeCompare(right.name, "ko"))
+      );
+      setOverviewFolderFilter(folderRef.id);
+      setStatus("폴더를 만들었습니다.");
+      setError(null);
+      return folderRef.id;
+    } catch {
+      setError("폴더를 만들지 못했습니다.");
+      return null;
+    }
+  }
+
+  async function updateStoredNoteFolder(note: DecryptedNote, folderId: string | null) {
+    if (note.type !== "personal" || note.ownerUid !== unlockedProfile.uid) {
+      setError("개인 노트만 폴더를 지정할 수 있습니다.");
+      return;
+    }
+
+    try {
+      await updateNoteFolder(note.id, unlockedProfile.uid, folderId);
+
+      if (editor.noteId === note.id) {
+        setEditor((current) => ({ ...current, folderId }));
+      }
+
+      setStatus(folderId ? "노트 폴더를 저장했습니다." : "노트를 미분류로 이동했습니다.");
+      setError(null);
+    } catch {
+      setError("노트 폴더를 저장하지 못했습니다.");
+    }
   }
 
   function updateSortSetting(nextSetting: NoteSortSetting) {
@@ -1338,11 +1786,13 @@ export default function NotesPage() {
         type: note.type,
         participantUids: note.participantUids,
         noteKey,
+        folderId: note.folderId ?? null,
         fontSize: nextDraft.fontSize,
         dueAt: dateFromTimestamp(note.dueAt),
         dirty: false
       });
       setListOpen(false);
+      setOverviewOpen(false);
       setShareOpen(false);
       setPreviewNoteId(null);
       setStatus("노트를 열었습니다.");
@@ -1384,6 +1834,7 @@ export default function NotesPage() {
       ...current,
       participantUids,
       type,
+      folderId: type === "personal" ? current.folderId : null,
       dirty: current.noteId ? current.dirty : true
     }));
 
@@ -1427,7 +1878,7 @@ export default function NotesPage() {
     try {
       const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
       const type = noteTypeFromParticipants(participantUids);
-      await updateNoteAccess(noteId, unlockedProfile.uid, type, participantUids, wrappedKeys);
+      await updateNoteAccess(noteId, unlockedProfile.uid, type, participantUids, wrappedKeys, type === "personal" ? editor.folderId : null);
       setStatus(type === "shared" ? "공유 대상을 저장했습니다." : "개인 노트로 변경했습니다.");
     } catch {
       setEditor((current) =>
@@ -1462,14 +1913,19 @@ export default function NotesPage() {
     try {
       if (editor.noteId && editor.noteKey) {
         const payload = await encryptNoteDraft(draft, editor.noteKey);
-        const historySummary = await encryptText(historySummaryFromDraft(draft), editor.noteKey);
+        const previousDraft = activeRemoteNote ? draftFromNote(activeRemoteNote) : null;
+        const [historySummary, historySnapshot] = await Promise.all([
+          encryptText(historySummaryFromDraft(previousDraft, draft), editor.noteKey),
+          encryptText(historySnapshotFromDraft(draft), editor.noteKey)
+        ]);
         await updateEncryptedNote(
           editor.noteId,
           unlockedProfile.uid,
           payload.encryptedTitle,
           payload.encryptedBody,
-          changedDraftFields(activeRemoteNote ? draftFromNote(activeRemoteNote) : null, draft),
-          historySummary
+          changedDraftFields(previousDraft, draft),
+          historySummary,
+          historySnapshot
         );
         pendingLocalEcho.current = { noteId: editor.noteId, draft, createdAt: Date.now() };
         announceActiveNote(editor.noteId);
@@ -1480,7 +1936,10 @@ export default function NotesPage() {
 
       const noteKey = await generateNoteKey();
       const payload = await encryptNoteDraft(draft, noteKey);
-      const historySummary = await encryptText(historySummaryFromDraft(draft), noteKey);
+      const [historySummary, historySnapshot] = await Promise.all([
+        encryptText(historySummaryFromDraft(null, draft), noteKey),
+        encryptText(historySnapshotFromDraft(draft), noteKey)
+      ]);
       const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids])).filter(
         (uid) => uid === unlockedProfile.uid || canShareWithUser(uid)
       );
@@ -1494,8 +1953,10 @@ export default function NotesPage() {
         encryptedTitle: payload.encryptedTitle,
         encryptedBody: payload.encryptedBody,
         wrappedKeys,
+        folderId: type === "personal" ? editor.folderId : null,
         dueAt: editor.dueAt ? Timestamp.fromDate(editor.dueAt) : null,
-        historySummary
+        historySummary,
+        historySnapshot
       });
       pendingLocalEcho.current = { noteId: created.id, draft, createdAt: Date.now() };
 
@@ -1504,6 +1965,7 @@ export default function NotesPage() {
         noteId: created.id,
         noteKey,
         type,
+        folderId: type === "personal" ? current.folderId : null,
         dirty: !draftsMatch(current, draft)
       }));
       announceActiveNote(created.id);
@@ -1535,14 +1997,12 @@ export default function NotesPage() {
     return savedNote;
   }
 
-  async function insertPastedFiles(files: File[], range: Range | null = null) {
+  async function insertPastedFiles(files: File[], insertHtml: RichEditorInsertHtml) {
     const attachmentFiles: File[] = [];
-    let imageRange = range;
 
     for (const file of files) {
       if (file.type.startsWith("image/")) {
-        await insertImageFile(file, imageRange);
-        imageRange = null;
+        await insertImageFile(file, insertHtml);
       } else {
         attachmentFiles.push(file);
       }
@@ -1626,18 +2086,18 @@ export default function NotesPage() {
     );
   }
 
-  function closePdfPreview() {
-    if (pdfPreviewUrl.current) {
-      URL.revokeObjectURL(pdfPreviewUrl.current);
-      pdfPreviewUrl.current = null;
+  function closeAttachmentPreview() {
+    if (attachmentPreviewUrl.current) {
+      URL.revokeObjectURL(attachmentPreviewUrl.current);
+      attachmentPreviewUrl.current = null;
     }
 
-    setPdfPreview(null);
+    setAttachmentPreview(null);
   }
 
-  async function previewPdfAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
-    if (attachment.extension !== "pdf") {
-      setError("PDF 파일만 미리보기할 수 있습니다.");
+  async function previewAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
+    if (!previewableAttachmentExtensions.has(attachment.extension)) {
+      setError("이 파일 형식은 미리보기를 지원하지 않습니다.");
       return;
     }
 
@@ -1646,18 +2106,92 @@ export default function NotesPage() {
 
     try {
       const plainBytes = await decryptAttachmentFile(noteId, attachment);
-      const blob = new Blob([plainBytes], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
+      const fileName = attachmentDownloadName(attachment);
 
-      if (pdfPreviewUrl.current) {
-        URL.revokeObjectURL(pdfPreviewUrl.current);
+      if (attachmentPreviewUrl.current) {
+        URL.revokeObjectURL(attachmentPreviewUrl.current);
+        attachmentPreviewUrl.current = null;
       }
 
-      pdfPreviewUrl.current = url;
-      setPdfPreview({ fileName: attachmentDownloadName(attachment), url });
-      setStatus("PDF 미리보기를 열었습니다.");
+      if (attachment.extension === "pdf") {
+        const blob = new Blob([plainBytes], { type: "application/pdf" });
+        const url = URL.createObjectURL(blob);
+
+        attachmentPreviewUrl.current = url;
+        setAttachmentPreview({ fileName, kind: "pdf", label: "PDF 미리보기", url });
+        setStatus("PDF 미리보기를 열었습니다.");
+        return;
+      }
+
+      if (attachment.extension === "docx") {
+        setAttachmentPreview({
+          bytes: plainBytes,
+          fileName,
+          kind: "docx",
+          label: "DOCX 양식 미리보기"
+        });
+        setStatus("DOCX 미리보기를 열었습니다.");
+        return;
+      }
+
+      if (attachment.extension === "hwp") {
+        const previewHtml = await extractHwpPreviewHtml(plainBytes);
+
+        setAttachmentPreview({
+          fileName,
+          html: previewHtml,
+          kind: previewHtml ? "html" : "unsupported",
+          label: "HWP 문서 미리보기",
+          text: previewHtml ? undefined : "HWP 문서에서 안전하게 표시할 본문을 찾지 못했습니다. 암호화 또는 배포용 문서는 앱 내부 미리보기를 지원하지 않습니다."
+        });
+        setStatus(previewHtml ? "HWP 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
+        return;
+      }
+
+      if (attachment.extension === "hwpx") {
+        const previewHtml = extractHwpxPreviewHtml(plainBytes);
+
+        setAttachmentPreview({
+          fileName,
+          html: previewHtml,
+          kind: previewHtml ? "html" : "unsupported",
+          label: "HWPX 문서 미리보기",
+          text: previewHtml ? undefined : "HWPX 문서에서 안전하게 표시할 본문을 찾지 못했습니다."
+        });
+        setStatus(previewHtml ? "HWPX 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
+        return;
+      }
+
+      if (textPreviewAttachmentExtensions.has(attachment.extension)) {
+        setAttachmentPreview({
+          fileName,
+          kind: "text",
+          label: `${attachment.extension.toUpperCase()} 미리보기`,
+          text: decodeTextAttachmentPreview(plainBytes, attachment.extension)
+        });
+        setStatus("파일 미리보기를 열었습니다.");
+        return;
+      }
+
+      if (legacyBinaryPreviewAttachmentExtensions.has(attachment.extension)) {
+        setAttachmentPreview({
+          fileName,
+          kind: "unsupported",
+          label: `${attachment.extension.toUpperCase()} 미리보기 안내`,
+          text: legacyBinaryPreviewMessage(attachment.extension)
+        });
+        setStatus("안전한 미리보기 안내를 표시했습니다.");
+        return;
+      }
+
+      setAttachmentPreview({
+        fileName,
+        kind: "unsupported",
+        label: "미리보기",
+        text: "이 파일 형식은 앱 내부 미리보기를 지원하지 않습니다."
+      });
     } catch {
-      setError("PDF 미리보기를 열지 못했습니다.");
+      setError("파일 미리보기를 열지 못했습니다.");
     } finally {
       setAttachmentBusyId(null);
     }
@@ -1857,15 +2391,20 @@ export default function NotesPage() {
     try {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
       const payload = await encryptNoteDraft(draft, noteKey);
-      const historySummary = await encryptText(historySummaryFromDraft(draft), noteKey);
+      const previousDraft = draftFromNote(note);
+      const [historySummary, historySnapshot] = await Promise.all([
+        encryptText(historySummaryFromDraft(previousDraft, draft), noteKey),
+        encryptText(historySnapshotFromDraft(draft), noteKey)
+      ]);
 
       await updateEncryptedNote(
         note.id,
         unlockedProfile.uid,
         payload.encryptedTitle,
         payload.encryptedBody,
-        changedDraftFields(draftFromNote(note), draft),
-        historySummary
+        changedDraftFields(previousDraft, draft),
+        historySummary,
+        historySnapshot
       );
       pendingLocalEcho.current = { noteId: note.id, draft, createdAt: Date.now() };
       announceActiveNote(note.id);
@@ -1891,7 +2430,7 @@ export default function NotesPage() {
     }
   }
 
-  async function insertImageFile(file: File, range: Range | null = null) {
+  async function insertImageFile(file: File, insertHtml: RichEditorInsertHtml) {
     try {
       const dataUrl = await imageFileToResizedDataUrl(file);
 
@@ -1901,7 +2440,7 @@ export default function NotesPage() {
       }
 
       const html = imageHtml(dataUrl, file.name);
-      const nextHtml = insertHtmlAtSelection(memoEditorRef.current, html, range);
+      const nextHtml = insertHtml(html);
       setEditor((current) => ({ ...current, body: nextHtml ?? `${current.body}${html}`, dirty: true }));
       setError(null);
     } catch {
@@ -1910,19 +2449,70 @@ export default function NotesPage() {
   }
 
   return (
-    <AppShell>
+    <AppShell onNavigateHome={returnToEditor}>
       <section className="workspace notes-workspace">
-        <section className="editor-panel full-editor-panel">
+        {overviewOpen ? (
+          <PersonalOverview
+            activeFolderFilter={overviewFolderFilter}
+            folders={folders}
+            feedbackError={error}
+            feedbackStatus={status}
+            noteStates={noteStateMap}
+            notes={personalOverviewNotes}
+            onBack={returnToEditor}
+            onCreateFolder={createFolder}
+            onFolderFilterChange={setOverviewFolderFilter}
+            onPreview={previewStoredNote}
+            onUpdateNoteFolder={(note, folderId) => void updateStoredNoteFolder(note, folderId)}
+          />
+        ) : (
+          <>
+          <div className="notes-top-actions" aria-label="노트 탐색">
+            <div>
+              <button className="secondary-button note-nav-button" type="button" onClick={() => setListOpen((current) => !current)}>
+                <PanelLeftOpen size={18} />
+                노트 목록
+              </button>
+              <button className="secondary-button note-nav-button" type="button" onClick={() => openOverview("all")}>
+                <LayoutGrid size={18} />
+                전체 조회
+              </button>
+              <button type="button" onClick={() => startNewNote()}>
+                <FilePlus2 size={18} />
+                새 노트
+              </button>
+            </div>
+            <span className="notes-top-status">{saving ? "저장 중..." : status}</span>
+          </div>
+          <div className={`notes-editor-layout ${listOpen ? "with-drawer" : ""}`}>
+            <NoteDrawer
+              activeNoteId={editor.noteId}
+              canRestoreNote={canRestoreNote}
+              counts={noteCounts}
+              deletedCounts={trashCounts}
+              deletedNotes={trashNotes}
+              filter={noteFilter}
+              folders={folders}
+              noteStates={noteStateMap}
+              notes={visibleNotes}
+              onClose={() => setListOpen(false)}
+              onFilterChange={updateNoteFilter}
+              onOpenOverview={openOverview}
+              onPreview={previewStoredNote}
+              onPurge={(note) => void purgePreviewNote(note)}
+              onRestore={(note) => void restorePreviewNote(note)}
+              onSortChange={updateSortSetting}
+              onTogglePin={(note) => void togglePinnedNote(note)}
+              open={listOpen}
+              sortSetting={noteSort}
+            />
+            <section className="editor-panel full-editor-panel">
           <div className="editor-toolbar">
             <div className="editor-primary-actions">
               <button className="secondary-button" type="button" onClick={() => setShareOpen((current) => !current)}>
                 <UsersRound size={18} />
                 공유 대상
               </button>
-              <span className="note-meta-card">
-                <span>생성일</span>
-                <strong>{formatFullDateTime(createdDate)}</strong>
-              </span>
               <div className="deadline-control">
                 <button
                   className={`deadline-summary ${currentDeadlineTone}`}
@@ -1956,7 +2546,7 @@ export default function NotesPage() {
             </div>
             <div className="toolbar-actions">
               <label className="font-size-control">
-                글자
+                기본 글자
                 <select
                   aria-label="메모 글자 크기"
                   onChange={(event) => updateFontSize(Number(event.target.value))}
@@ -1969,10 +2559,23 @@ export default function NotesPage() {
                   ))}
                 </select>
               </label>
-              <button className="secondary-button" type="button" onClick={() => setListOpen((current) => !current)}>
-                <PanelRightOpen size={18} />
-                노트 목록
-              </button>
+              {currentType === "personal" && (
+                <label className="font-size-control folder-control">
+                  폴더
+                  <select
+                    aria-label="개인 노트 폴더"
+                    onChange={(event) => void updateEditorFolder(event.target.value || null)}
+                    value={editor.folderId ?? ""}
+                  >
+                    <option value="">미분류</option>
+                    {folders.map((folder) => (
+                      <option key={folder.id} value={folder.id}>
+                        {folder.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               {activeRemoteNote && (
                 <button
                   aria-label={activeNotePinned ? "즐겨찾기 해제" : "즐겨찾기"}
@@ -1984,11 +2587,6 @@ export default function NotesPage() {
                   <Star fill="currentColor" size={18} />
                 </button>
               )}
-              <button type="button" onClick={() => startNewNote()}>
-                <FilePlus2 size={18} />
-                새 노트
-              </button>
-              <span className="sync-status">{saving ? "저장 중..." : status}</span>
               <button disabled={saving} onClick={() => void saveCurrentNote(true)} type="button">
                 {saving ? <Loader2 className="spin" size={18} /> : <Save size={18} />}
                 저장
@@ -2044,7 +2642,7 @@ export default function NotesPage() {
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
             onCursorChange={publishEditorCursor}
-            onFilesPaste={(files, range) => void insertPastedFiles(files, range)}
+            onFilesPaste={(files, insertHtml) => void insertPastedFiles(files, insertHtml)}
             onChange={(value) => updateEditor("body", value)}
             remoteCursors={remoteEditorCursors}
             value={editor.body}
@@ -2056,33 +2654,18 @@ export default function NotesPage() {
               canDelete={(attachment) => canDeleteAttachmentForNote(activeRemoteNote, attachment)}
               onDelete={(attachment) => void removeAttachment(activeRemoteNote, attachment)}
               onDownload={(attachment) => void downloadAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
-              onPreview={(attachment) => void previewPdfAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
+              onPreview={(attachment) => void previewAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
             />
           )}
           <div className="editor-footer">
             <span className={`note-kind-pill ${currentType}`}>{currentType === "shared" ? "공유" : "개인"}</span>
+            <span className="note-created-inline">생성 {formatFullDateTime(createdDate)}</span>
             {error && <p className="form-error">{error}</p>}
           </div>
-        </section>
-        <NoteDrawer
-          activeNoteId={editor.noteId}
-          canRestoreNote={canRestoreNote}
-          counts={noteCounts}
-          deletedNotes={trashNotes}
-          filter={noteFilter}
-          noteStates={noteStateMap}
-          notes={visibleNotes}
-          onClose={() => setListOpen(false)}
-          onFilterChange={updateNoteFilter}
-          onNew={startNewNote}
-          onPreview={previewStoredNote}
-          onPurge={(note) => void purgePreviewNote(note)}
-          onRestore={(note) => void restorePreviewNote(note)}
-          onSortChange={updateSortSetting}
-          onTogglePin={(note) => void togglePinnedNote(note)}
-          open={listOpen}
-          sortSetting={noteSort}
-        />
+            </section>
+          </div>
+          </>
+        )}
         {previewNote && (
           <NotePreviewModal
             canDelete={canDeleteNote(previewNote)}
@@ -2096,7 +2679,7 @@ export default function NotesPage() {
             onDelete={(note) => void removePreviewNote(note)}
             onDeleteAttachment={(note, attachment) => void removeAttachment(note, attachment)}
             onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
-            onPreviewAttachment={(note, attachment) => void previewPdfAttachment(note.id, attachment)}
+            onPreviewAttachment={(note, attachment) => void previewAttachment(note.id, attachment)}
             onPurge={(note) => void purgePreviewNote(note)}
             onLoad={(note, draft) => void openNote(note, draft)}
             onResolveNoteKey={resolveNoteKey}
@@ -2105,11 +2688,12 @@ export default function NotesPage() {
             onTogglePin={(note) => void togglePinnedNote(note)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
             saving={saving}
+            suppressEscape={Boolean(attachmentPreview)}
             attachmentBusyId={attachmentBusyId}
             canDeleteAttachment={canDeleteAttachmentForNote}
           />
         )}
-        {pdfPreview && <PdfPreviewModal fileName={pdfPreview.fileName} onClose={closePdfPreview} url={pdfPreview.url} />}
+        {attachmentPreview && <AttachmentPreviewModal onClose={closeAttachmentPreview} preview={attachmentPreview} />}
       </section>
     </AppShell>
   );
@@ -2127,77 +2711,227 @@ function RichMemoEditor({
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
   onCursorChange?: (cursorOffset: number | null, cursorVisible: boolean) => void;
-  onFilesPaste: (files: File[], range: Range | null) => void;
+  onFilesPaste: (files: File[], insertHtml: RichEditorInsertHtml) => void | Promise<void>;
   onChange: (value: string) => void;
   remoteCursors?: RemoteCursorView[];
   value: string;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
-  const [selectedImageWidth, setSelectedImageWidth] = useState<number | null>(null);
+  const tableResizeCleanupRef = useRef<(() => void) | null>(null);
+  const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
+  const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
+  const [customTextColor, setCustomTextColor] = useState<string>(editorTextColors[0]);
+  const [customCellColor, setCustomCellColor] = useState<string>(editorCellColors[0]);
+  const [tableRows, setTableRows] = useState(3);
+  const [tableColumns, setTableColumns] = useState(3);
+  const [, setToolbarVersion] = useState(0);
+  const editor = useEditor({
+    extensions: richEditorExtensions,
+    content: value || "",
+    editorProps: {
+      attributes: {
+        class: "rich-body-input",
+        role: "textbox"
+      },
+      handleClick: (_view, _position, event) => {
+        handleEditorClick(event);
+        return false;
+      },
+      handleDrop: (_view, event) => {
+        const files = Array.from(event.dataTransfer?.files ?? []);
+
+        if (!files.length) {
+          return false;
+        }
+
+        event.preventDefault();
+        void handleFiles(files);
+        return true;
+      },
+      handlePaste: (_view, event) => {
+        const files = Array.from(event.clipboardData?.files ?? []);
+        const itemFiles = Array.from(event.clipboardData?.items ?? [])
+          .map((item) => item.getAsFile())
+          .filter((file): file is File => Boolean(file));
+        const pastedFiles = files.length ? files : itemFiles;
+
+        if (!pastedFiles.length) {
+          return false;
+        }
+
+        event.preventDefault();
+        void handleFiles(pastedFiles);
+        return true;
+      }
+    },
+    onBlur: () => emitCursorPosition(false),
+    onFocus: () => emitCursorPosition(true),
+    onSelectionUpdate: () => {
+      setToolbarVersion((version) => version + 1);
+      emitCursorPosition(true);
+    },
+    onUpdate: ({ editor: nextEditor }) => {
+      onChange(nextEditor.getHTML());
+      setToolbarVersion((version) => version + 1);
+      emitCursorPosition(true);
+    }
+  });
 
   useEffect(() => {
-    const element = editorRef.current;
-
-    if (!element || element.innerHTML === value) {
+    if (!editor) {
       return;
     }
 
-    const wasFocused = document.activeElement === element;
-    element.innerHTML = value;
+    const mutableRef = editorRef as MutableRefObject<HTMLDivElement | null>;
+    mutableRef.current = editor.view.dom as HTMLDivElement;
 
-    if (wasFocused) {
-      placeCaretAtEnd(element);
+    return () => {
+      if (mutableRef.current === editor.view.dom) {
+        mutableRef.current = null;
+      }
+    };
+  }, [editor, editorRef]);
+
+  useEffect(() => {
+    if (!editor) {
+      return undefined;
     }
-  }, [editorRef, value]);
+
+    const editorElement = editor.view.dom as HTMLElement;
+
+    function setResizeCursor(cursor: TableResizeCursor | null) {
+      if (cursor) {
+        editorElement.dataset.qmTableResizeCursor = cursor;
+      } else {
+        delete editorElement.dataset.qmTableResizeCursor;
+      }
+    }
+
+    function handleMouseMove(event: MouseEvent) {
+      if (tableResizeCleanupRef.current) {
+        return;
+      }
+
+      setResizeCursor(tableResizeCursorFromEvent(editorElement, event));
+    }
+
+    function handleMouseLeave() {
+      if (!tableResizeCleanupRef.current) {
+        setResizeCursor(null);
+      }
+    }
+
+    function handleMouseDown(event: MouseEvent) {
+      if (event.button !== 0) {
+        return;
+      }
+
+      const hit = tableResizeHitFromEvent(editorElement, event);
+
+      if (!hit) {
+        return;
+      }
+
+      const resizeHit = hit;
+      event.preventDefault();
+      selectedImageRef.current = null;
+      setSelectedImageWidthPx(null);
+      setResizeCursor(resizeHit.cursor);
+
+      const restoreUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+
+      const cleanup = () => {
+        document.body.style.userSelect = restoreUserSelect;
+        tableResizeCleanupRef.current = null;
+        setResizeCursor(null);
+        window.removeEventListener("mousemove", handleResizeMove);
+        window.removeEventListener("mouseup", cleanup);
+      };
+
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startWidth = resizeHit.table.getBoundingClientRect().width;
+      const startTableHeight = resizeHit.table.getBoundingClientRect().height;
+      const startRowHeight = resizeHit.row?.getBoundingClientRect().height ?? 0;
+      const startColumnWidth = resizeHit.cell?.getBoundingClientRect().width ?? 0;
+
+      function handleResizeMove(moveEvent: MouseEvent) {
+        if (resizeHit.kind === "column" && typeof resizeHit.columnIndex === "number") {
+          const nextWidth = clampTableColumnPixelWidth(startColumnWidth + moveEvent.clientX - startX);
+          updateTableColumnWidth(editor, resizeHit.table, resizeHit.columnIndex, nextWidth);
+          onChange(editor.getHTML());
+          setToolbarVersion((version) => version + 1);
+          return;
+        }
+
+        if (resizeHit.kind === "row" && resizeHit.row) {
+          const nextHeight = clampTableRowPixelHeight(startRowHeight + moveEvent.clientY - startY);
+          updateEditorNodeAttributes(editor, resizeHit.row, "tableRow", { qmHeightPx: nextHeight });
+          onChange(editor.getHTML());
+          setToolbarVersion((version) => version + 1);
+          return;
+        }
+
+        const nextAttributes: Record<string, number | null> = {};
+
+        if (resizeHit.widthSign !== 0) {
+          nextAttributes.qmWidth = null;
+          nextAttributes.qmWidthPx = clampTablePixelWidth(startWidth + (moveEvent.clientX - startX) * resizeHit.widthSign);
+        }
+
+        if (resizeHit.heightSign !== 0) {
+          nextAttributes.qmHeightPx = clampTablePixelHeight(startTableHeight + (moveEvent.clientY - startY) * resizeHit.heightSign);
+        }
+
+        if (Object.keys(nextAttributes).length) {
+          updateEditorNodeAttributes(editor, resizeHit.table, "table", nextAttributes);
+          onChange(editor.getHTML());
+          setToolbarVersion((version) => version + 1);
+        }
+      }
+
+      tableResizeCleanupRef.current = cleanup;
+      window.addEventListener("mousemove", handleResizeMove);
+      window.addEventListener("mouseup", cleanup);
+    }
+
+    editorElement.addEventListener("mousemove", handleMouseMove);
+    editorElement.addEventListener("mouseleave", handleMouseLeave);
+    editorElement.addEventListener("mousedown", handleMouseDown, true);
+
+    return () => {
+      tableResizeCleanupRef.current?.();
+      editorElement.removeEventListener("mousemove", handleMouseMove);
+      editorElement.removeEventListener("mouseleave", handleMouseLeave);
+      editorElement.removeEventListener("mousedown", handleMouseDown, true);
+      setResizeCursor(null);
+    };
+  }, [editor, onChange]);
+
+  useEffect(() => {
+    if (!editor || editor.getHTML() === (value || "")) {
+      return;
+    }
+
+    editor.commands.setContent(value || "", { emitUpdate: false });
+  }, [editor, value]);
 
   function clearImageSelection() {
     selectedImageRef.current = null;
-    setSelectedImageWidth(null);
+    setSelectedImageWidthPx(null);
   }
 
-  function handleInput(event: FormEvent<HTMLDivElement>) {
-    const inputEvent = event.nativeEvent as InputEvent;
-    const shouldLinkify =
-      inputEvent.inputType === "insertParagraph" || inputEvent.inputType === "insertLineBreak" || inputEvent.data === " ";
-
-    onChange(shouldLinkify ? linkifyEditableElement(editorRef.current) : editorRef.current?.innerHTML ?? "");
-    emitCursorPosition(true);
-  }
-
-  function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
-    const files = Array.from(event.clipboardData.files);
-    const itemFiles = Array.from(event.clipboardData.items)
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => Boolean(file));
-    const pastedFiles = files.length ? files : itemFiles;
-
-    if (pastedFiles.length) {
-      const selection = window.getSelection();
-      const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
-      event.preventDefault();
-      onFilesPaste(pastedFiles, range);
-      return;
-    }
-
-    event.preventDefault();
-    document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
-    onChange(linkifyEditableElement(editorRef.current));
-    emitCursorPosition(true);
-  }
-
-  function handleBlur() {
-    onChange(linkifyEditableElement(editorRef.current));
-    emitCursorPosition(false);
-  }
-
-  function handleClick(event: MouseEvent<HTMLDivElement>) {
+  function handleEditorClick(event: Event) {
     const target = event.target;
     const image = target instanceof HTMLElement ? target.closest("img") : null;
     const anchor = target instanceof HTMLElement ? target.closest("a[href]") : null;
 
     if (image instanceof HTMLImageElement && editorRef.current?.contains(image)) {
       selectedImageRef.current = image;
-      setSelectedImageWidth(readImageWidth(image));
+      setSelectedImageWidthPx(readImageWidthPx(image));
+      setActiveToolTab("media");
       emitCursorPosition(true);
       return;
     }
@@ -2213,6 +2947,23 @@ function RichMemoEditor({
     window.open(anchor.href, "_blank", "noopener,noreferrer");
   }
 
+  async function handleFiles(files: File[]) {
+    if (!editor) {
+      return;
+    }
+
+    await onFilesPaste(files, insertHtml);
+  }
+
+  function insertHtml(html: string) {
+    if (!editor) {
+      return null;
+    }
+
+    editor.chain().focus().insertContent(sanitizeEditorHtml(html)).run();
+    return editor.getHTML();
+  }
+
   function emitCursorPosition(cursorVisible: boolean) {
     if (!onCursorChange) {
       return;
@@ -2223,61 +2974,682 @@ function RichMemoEditor({
   }
 
   function updateSelectedImageWidth(width: number) {
+    if (!editor) {
+      return;
+    }
+
     const image = selectedImageRef.current;
+    const safeWidth = clampImagePixelWidth(width);
 
     if (!image || !editorRef.current?.contains(image)) {
       clearImageSelection();
       return;
     }
 
-    image.dataset.qmWidth = String(width);
-    image.style.width = `${width}%`;
-    image.style.maxWidth = "100%";
-    image.style.height = "auto";
-    setSelectedImageWidth(width);
-    onChange(editorRef.current.innerHTML);
+    const position = editor.view.posAtDOM(image, 0);
+
+    editor.chain().focus().setNodeSelection(position).updateAttributes("image", { qmWidth: null, qmWidthPx: safeWidth }).run();
+    setSelectedImageWidthPx(safeWidth);
+    onChange(editor.getHTML());
   }
+
+  function runToolbarCommand(command: (editor: TipTapEditor) => void) {
+    if (!editor) {
+      return;
+    }
+
+    command(editor);
+    setToolbarVersion((version) => version + 1);
+  }
+
+  function applySelectionFontSize(size: number) {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textSize", { size }).run());
+  }
+
+  function applySelectionTextColor(color: string) {
+    const safeColor = normalizeCustomHexColor(color, editorTextColors[0]);
+    setCustomTextColor(safeColor);
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textColor", { color: safeColor }).run());
+  }
+
+  function clearSelectionTextColor() {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().unsetMark("textColor").run());
+  }
+
+  function applyCellColor(color: string) {
+    const safeColor = normalizeCustomHexColor(color, editorCellColors[0]);
+    setCustomCellColor(safeColor);
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().setCellAttribute("backgroundColor", safeColor).run());
+  }
+
+  function undoEditorStep() {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().undo().run());
+  }
+
+  function redoEditorStep() {
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().redo().run());
+  }
+
+  function insertTable() {
+    runToolbarCommand((currentEditor) =>
+      currentEditor
+        .chain()
+        .focus()
+        .insertTable({
+          rows: clampTableDimension(tableRows),
+          cols: clampTableDimension(tableColumns),
+          withHeaderRow: true
+        })
+        .run()
+    );
+  }
+
+  function chooseFiles() {
+    fileInputRef.current?.click();
+  }
+
+  function handleFileInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+
+    if (files.length) {
+      void handleFiles(files);
+    }
+  }
+
+  const currentSelectionFontSize = Number(editor?.getAttributes("textSize").size) || fontSize;
+  const currentSelectionTextColor = String(editor?.getAttributes("textColor").color || customTextColor);
+  const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
 
   return (
     <>
-      {selectedImageWidth && (
-        <div className="image-size-toolbar" aria-label="이미지 크기 조절">
-          <span>이미지 크기</span>
-          {imageWidthOptions.map((width) => (
+      <div className="rich-editor-toolbar" aria-label="편집 도구">
+        <div className="rich-toolbar-tabs" role="tablist" aria-label="편집 도구 탭">
+          {[
+            ["format", "서식"],
+            ["table", "표"],
+            ["media", "파일"]
+          ].map(([tab, label]) => (
             <button
-              aria-pressed={selectedImageWidth === width}
-              className={selectedImageWidth === width ? "active" : ""}
-              key={width}
-              onClick={() => updateSelectedImageWidth(width)}
-              onMouseDown={(event) => event.preventDefault()}
+              aria-selected={activeToolTab === tab}
+              className={activeToolTab === tab ? "active" : ""}
+              key={tab}
+              onClick={() => setActiveToolTab(tab as EditorToolTab)}
               type="button"
+              role="tab"
             >
-              {width}%
+              {label}
             </button>
           ))}
         </div>
-      )}
-      <div className="rich-editor-frame">
-        <div
-          ref={editorRef}
-          className="rich-body-input"
-          contentEditable
-          data-placeholder="메모를 입력하세요..."
-          onBlur={handleBlur}
-          onClick={handleClick}
-          onFocus={() => emitCursorPosition(true)}
-          onInput={handleInput}
-          onKeyUp={() => emitCursorPosition(true)}
-          onMouseUp={() => emitCursorPosition(true)}
-          onPaste={handlePaste}
-          role="textbox"
-          style={{ fontSize }}
-          suppressContentEditableWarning
+        {activeToolTab === "format" && (
+          <div className="rich-toolbar-panel">
+        <button
+          aria-label="뒤로가기"
+          className="icon-button"
+          disabled={!editor?.can().undo()}
+          onClick={undoEditorStep}
+          onMouseDown={(event) => event.preventDefault()}
+          title="뒤로가기"
+          type="button"
+        >
+          <Undo2 size={16} />
+        </button>
+        <button
+          aria-label="앞으로가기"
+          className="icon-button"
+          disabled={!editor?.can().redo()}
+          onClick={redoEditorStep}
+          onMouseDown={(event) => event.preventDefault()}
+          title="앞으로가기"
+          type="button"
+        >
+          <Redo2 size={16} />
+        </button>
+        <button
+          aria-label="굵게"
+          aria-pressed={editor?.isActive("bold") ?? false}
+          className={`icon-button ${editor?.isActive("bold") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleBold().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="굵게"
+          type="button"
+        >
+          <Bold size={16} />
+        </button>
+        <button
+          aria-label="밑줄"
+          aria-pressed={editor?.isActive("underline") ?? false}
+          className={`icon-button ${editor?.isActive("underline") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleUnderline().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="밑줄"
+          type="button"
+        >
+          <Underline size={16} />
+        </button>
+        <button
+          aria-label="가운데 줄"
+          aria-pressed={editor?.isActive("strike") ?? false}
+          className={`icon-button ${editor?.isActive("strike") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleStrike().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="가운데 줄"
+          type="button"
+        >
+          <Strikethrough size={16} />
+        </button>
+        <button
+          aria-label="체크리스트"
+          aria-pressed={editor?.isActive("taskList") ?? false}
+          className={`icon-button ${editor?.isActive("taskList") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleTaskList().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="체크리스트"
+          type="button"
+        >
+          <ListTodo size={16} />
+        </button>
+        <button
+          aria-label="왼쪽 정렬"
+          className="icon-button"
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setTextAlign("left").run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="왼쪽 정렬"
+          type="button"
+        >
+          <AlignLeft size={16} />
+        </button>
+        <button
+          aria-label="가운데 정렬"
+          className="icon-button"
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setTextAlign("center").run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="가운데 정렬"
+          type="button"
+        >
+          <AlignCenter size={16} />
+        </button>
+        <button
+          aria-label="오른쪽 정렬"
+          className="icon-button"
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setTextAlign("right").run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="오른쪽 정렬"
+          type="button"
+        >
+          <AlignRight size={16} />
+        </button>
+        <label className="selection-font-control">
+          선택 글자
+          <select
+            aria-label="선택 영역 글자 크기"
+            onChange={(event) => applySelectionFontSize(Number(event.target.value))}
+            value={currentSelectionFontSize}
+          >
+            {editorTextSizes.map((size) => (
+              <option key={size} value={size}>
+                {size}px
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="text-color-palette" aria-label="글자 색상">
+          <Palette size={15} />
+          {editorTextColors.map((color) => (
+            <button
+              aria-label={`${color} 글자 색상`}
+              aria-pressed={currentSelectionTextColor === color}
+              className={currentSelectionTextColor === color ? "active" : ""}
+              key={color}
+              onClick={() => applySelectionTextColor(color)}
+              onMouseDown={(event) => event.preventDefault()}
+              style={{ backgroundColor: color }}
+              type="button"
+            />
+          ))}
+          <label className="custom-color-input compact" title="직접 글자 색상 선택">
+            <input
+              aria-label="글자 색상 직접 선택"
+              onChange={(event) => applySelectionTextColor(event.target.value)}
+              type="color"
+              value={customTextColor}
+            />
+          </label>
+          <button
+            aria-label="글자 색상 해제"
+            className="cell-color-clear"
+            onClick={clearSelectionTextColor}
+            onMouseDown={(event) => event.preventDefault()}
+            type="button"
+          >
+            <X size={13} />
+          </button>
+        </div>
+          </div>
+        )}
+        {activeToolTab === "table" && (
+          <div className="rich-toolbar-panel">
+        <span className="table-insert-control">
+          <Table2 size={15} />
+          <input
+            aria-label="표 행 수"
+            max={12}
+            min={1}
+            onChange={(event) => setTableRows(clampTableDimension(Number(event.target.value)))}
+            type="number"
+            value={tableRows}
+          />
+          <span>x</span>
+          <input
+            aria-label="표 열 수"
+            max={12}
+            min={1}
+            onChange={(event) => setTableColumns(clampTableDimension(Number(event.target.value)))}
+            type="number"
+            value={tableColumns}
+          />
+          <button onClick={insertTable} onMouseDown={(event) => event.preventDefault()} type="button">
+            추가
+          </button>
+        </span>
+        <button
+          aria-label="행 추가"
+          className="icon-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().addRowAfter().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="행 추가"
+          type="button"
+        >
+          <Rows3 size={16} />
+        </button>
+        <button
+          className="secondary-button table-delete-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().deleteRow().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          type="button"
+        >
+          행 삭제
+        </button>
+        <button
+          aria-label="열 추가"
+          className="icon-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().addColumnAfter().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="열 추가"
+          type="button"
+        >
+          <Columns3 size={16} />
+        </button>
+        <button
+          className="secondary-button table-delete-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().deleteColumn().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          type="button"
+        >
+          열 삭제
+        </button>
+        <button
+          className="secondary-button table-delete-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().deleteTable().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          type="button"
+        >
+          표 삭제
+        </button>
+        <div className="cell-color-palette" aria-label="셀 색상">
+          <PaintBucket size={15} />
+          {editorCellColors.map((color) => (
+            <button
+              aria-label={`${color} 셀 색상`}
+              disabled={!editor?.isActive("table")}
+              key={color}
+              onClick={() => applyCellColor(color)}
+              onMouseDown={(event) => event.preventDefault()}
+              style={{ backgroundColor: color }}
+              type="button"
+            />
+          ))}
+          <label className="custom-color-input compact" title="직접 셀 색상 선택">
+            <input
+              aria-label="셀 색상 직접 선택"
+              disabled={!editor?.isActive("table")}
+              onChange={(event) => applyCellColor(event.target.value)}
+              type="color"
+              value={customCellColor}
+            />
+          </label>
+          <button
+            aria-label="셀 색상 해제"
+            className="cell-color-clear"
+            disabled={!editor?.isActive("table")}
+            onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setCellAttribute("backgroundColor", null).run())}
+            onMouseDown={(event) => event.preventDefault()}
+            type="button"
+          >
+            <X size={13} />
+          </button>
+        </div>
+          </div>
+        )}
+        {activeToolTab === "media" && (
+          <div className="rich-toolbar-panel">
+        <button className="secondary-button editor-upload-button" onClick={chooseFiles} type="button">
+          <Upload size={16} />
+          파일
+        </button>
+        {selectedImageWidthPx && (
+          <label className="image-width-control">
+            이미지 너비
+            <input
+              aria-label="이미지 너비"
+              max={editorImagePixelWidthBounds.max}
+              min={editorImagePixelWidthBounds.min}
+              onChange={(event) => updateSelectedImageWidth(Number(event.target.value))}
+              step={editorImagePixelWidthBounds.step}
+              type="range"
+              value={currentImageWidthPx}
+            />
+            <output>{currentImageWidthPx}px</output>
+          </label>
+        )}
+        <input
+          ref={fileInputRef}
+          className="sr-only"
+          multiple
+          onChange={handleFileInputChange}
+          type="file"
         />
+          </div>
+        )}
+      </div>
+      <div className="rich-editor-frame">
+        <EditorContent editor={editor} style={{ "--editor-font-size": `${fontSize}px` } as CSSProperties} />
         <RemoteCursorLayer cursors={remoteCursors} editorRef={editorRef} />
       </div>
     </>
   );
+}
+
+function clampTableDimension(value: number) {
+  if (!Number.isFinite(value)) {
+    return 3;
+  }
+
+  return Math.min(12, Math.max(1, Math.round(value)));
+}
+
+function clampTablePixelWidth(value: number) {
+  if (!Number.isFinite(value)) {
+    return 720;
+  }
+
+  return Math.min(editorTablePixelWidthBounds.max, Math.max(editorTablePixelWidthBounds.min, Math.round(value)));
+}
+
+function clampTablePixelHeight(value: number) {
+  if (!Number.isFinite(value)) {
+    return editorTablePixelHeightBounds.min;
+  }
+
+  return Math.min(editorTablePixelHeightBounds.max, Math.max(editorTablePixelHeightBounds.min, Math.round(value)));
+}
+
+function clampTableRowPixelHeight(value: number) {
+  if (!Number.isFinite(value)) {
+    return editorTableRowPixelHeightBounds.min;
+  }
+
+  return Math.min(editorTableRowPixelHeightBounds.max, Math.max(editorTableRowPixelHeightBounds.min, Math.round(value)));
+}
+
+function clampTableColumnPixelWidth(value: number) {
+  if (!Number.isFinite(value)) {
+    return editorTableColumnPixelWidthBounds.min;
+  }
+
+  return Math.min(editorTableColumnPixelWidthBounds.max, Math.max(editorTableColumnPixelWidthBounds.min, Math.round(value)));
+}
+
+function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeHit | null {
+  const target = event.target;
+
+  if (!(target instanceof HTMLElement) || !editorElement.contains(target)) {
+    return null;
+  }
+
+  if (target.closest("button, input, select, textarea, a")) {
+    return null;
+  }
+
+  const table = tableFromResizeEvent(editorElement, target, event);
+
+  if (!table) {
+    return null;
+  }
+
+  const tableRect = table.getBoundingClientRect();
+  const edgeThreshold = 14;
+  const boundaryThreshold = 8;
+  const withinTableY = event.clientY >= tableRect.top - edgeThreshold && event.clientY <= tableRect.bottom + edgeThreshold;
+  const withinTableX = event.clientX >= tableRect.left - edgeThreshold && event.clientX <= tableRect.right + edgeThreshold;
+  const nearLeft = withinTableY && Math.abs(event.clientX - tableRect.left) <= edgeThreshold;
+  const nearRight = withinTableY && Math.abs(event.clientX - tableRect.right) <= edgeThreshold;
+  const nearTop = withinTableX && Math.abs(event.clientY - tableRect.top) <= edgeThreshold;
+  const nearBottom = withinTableX && Math.abs(event.clientY - tableRect.bottom) <= edgeThreshold;
+
+  if (nearLeft || nearRight || nearTop || nearBottom) {
+    const widthSign = nearLeft ? -1 : nearRight ? 1 : 0;
+    const heightSign = nearTop ? -1 : nearBottom ? 1 : 0;
+    const cursor: TableResizeCursor =
+      widthSign !== 0 && heightSign !== 0 ? "nwse" : widthSign !== 0 ? "ew" : heightSign !== 0 ? "ns" : "col";
+
+    return { cursor, heightSign, kind: "table", table, widthSign };
+  }
+
+  const columnCell = tableCellNearVerticalBoundary(table, event, boundaryThreshold);
+
+  if (columnCell) {
+    return {
+      cell: columnCell,
+      columnIndex: columnCell.cellIndex,
+      cursor: "col",
+      heightSign: 0,
+      kind: "column",
+      table,
+      widthSign: 1
+    };
+  }
+
+  const row = tableRowNearHorizontalBoundary(table, event, boundaryThreshold);
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    cursor: "row",
+    heightSign: 1,
+    kind: "row",
+    row,
+    table,
+    widthSign: 0
+  };
+}
+
+function tableFromResizeEvent(editorElement: HTMLElement, target: HTMLElement, event: MouseEvent) {
+  const targetTable = target.closest("table");
+
+  if (targetTable instanceof HTMLTableElement && editorElement.contains(targetTable)) {
+    return targetTable;
+  }
+
+  const tables = Array.from(editorElement.querySelectorAll("table"));
+
+  return (
+    tables.find((table) => {
+      const rect = table.getBoundingClientRect();
+      const threshold = 14;
+
+      return (
+        event.clientX >= rect.left - threshold &&
+        event.clientX <= rect.right + threshold &&
+        event.clientY >= rect.top - threshold &&
+        event.clientY <= rect.bottom + threshold
+      );
+    }) ?? null
+  );
+}
+
+function tableCellNearVerticalBoundary(table: HTMLTableElement, event: MouseEvent, threshold: number) {
+  const cells = Array.from(table.querySelectorAll("td, th"));
+  const tableRect = table.getBoundingClientRect();
+
+  return (
+    cells.find((cell): cell is HTMLTableCellElement => {
+      if (!(cell instanceof HTMLTableCellElement)) {
+        return false;
+      }
+
+      const rect = cell.getBoundingClientRect();
+      const nearOuterRight = Math.abs(rect.right - tableRect.right) <= threshold;
+      return !nearOuterRight && event.clientY >= rect.top && event.clientY <= rect.bottom && Math.abs(event.clientX - rect.right) <= threshold;
+    }) ?? null
+  );
+}
+
+function tableRowNearHorizontalBoundary(table: HTMLTableElement, event: MouseEvent, threshold: number) {
+  const rows = Array.from(table.querySelectorAll("tr"));
+  const tableRect = table.getBoundingClientRect();
+
+  return (
+    rows.find((row): row is HTMLTableRowElement => {
+      if (!(row instanceof HTMLTableRowElement)) {
+        return false;
+      }
+
+      const rect = row.getBoundingClientRect();
+      const nearOuterBottom = Math.abs(rect.bottom - tableRect.bottom) <= threshold;
+      return !nearOuterBottom && event.clientX >= rect.left && event.clientX <= rect.right && Math.abs(event.clientY - rect.bottom) <= threshold;
+    }) ?? null
+  );
+}
+
+function tableResizeCursorFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeCursor | null {
+  const actionableHit = tableResizeHitFromEvent(editorElement, event);
+
+  if (actionableHit) {
+    return actionableHit.cursor;
+  }
+
+  const target = event.target;
+
+  if (!(target instanceof HTMLElement) || target.closest("button, input, select, textarea, a")) {
+    return null;
+  }
+
+  const cell = target.closest("td, th");
+
+  if (!(cell instanceof HTMLTableCellElement) || !editorElement.contains(cell)) {
+    return null;
+  }
+
+  const cellRect = cell.getBoundingClientRect();
+  return Math.abs(event.clientX - cellRect.right) <= 6 ? "col" : null;
+}
+
+function updateEditorNodeAttributes(
+  editor: TipTapEditor,
+  element: HTMLElement,
+  nodeName: "table" | "tableCell" | "tableHeader" | "tableRow",
+  nextAttributes: Record<string, number | number[] | null>
+) {
+  const nodePosition = editorNodePositionFromElement(editor, element, nodeName);
+
+  if (!nodePosition) {
+    return;
+  }
+
+  const transaction = editor.state.tr.setNodeMarkup(nodePosition.position, undefined, {
+    ...nodePosition.node.attrs,
+    ...nextAttributes
+  });
+  editor.view.dispatch(transaction);
+}
+
+function updateTableColumnWidth(editor: TipTapEditor, table: HTMLTableElement, columnIndex: number, width: number) {
+  const cellUpdates = Array.from(table.rows)
+    .map((row) => row.cells[columnIndex])
+    .filter((cell): cell is HTMLTableCellElement => cell instanceof HTMLTableCellElement)
+    .map((cell) =>
+      editorNodePositionFromElement(editor, cell, cell.tagName === "TH" ? "tableHeader" : "tableCell")
+    )
+    .filter((nodePosition): nodePosition is NonNullable<typeof nodePosition> => Boolean(nodePosition));
+
+  if (!cellUpdates.length) {
+    return;
+  }
+
+  let transaction = editor.state.tr;
+
+  cellUpdates.forEach(({ node, position }) => {
+    const colspan = Number(node.attrs.colspan) || 1;
+    const colwidth = Array.from({ length: colspan }, () => width);
+
+    transaction = transaction.setNodeMarkup(position, undefined, {
+      ...node.attrs,
+      colwidth,
+      qmWidthPx: width
+    });
+  });
+
+  editor.view.dispatch(transaction);
+}
+
+function editorNodePositionFromElement(
+  editor: TipTapEditor,
+  element: HTMLElement,
+  nodeName: "table" | "tableCell" | "tableHeader" | "tableRow"
+) {
+  const probe = element.matches("td, th") ? element : element.querySelector("td, th") ?? element;
+  const rawPosition = editor.view.posAtDOM(probe, 0);
+  const position = Math.min(Math.max(rawPosition, 0), editor.state.doc.content.size);
+  const resolvedPosition = editor.state.doc.resolve(position);
+
+  for (let depth = resolvedPosition.depth; depth > 0; depth -= 1) {
+    const node = resolvedPosition.node(depth);
+
+    if (node.type.name === nodeName) {
+      return {
+        node,
+        position: resolvedPosition.before(depth)
+      };
+    }
+  }
+
+  for (let offset = -2; offset <= 2; offset += 1) {
+    const candidatePosition = position + offset;
+
+    if (candidatePosition < 0 || candidatePosition > editor.state.doc.content.size) {
+      continue;
+    }
+
+    const node = editor.state.doc.nodeAt(candidatePosition);
+
+    if (node?.type.name === nodeName) {
+      return {
+        node,
+        position: candidatePosition
+      };
+    }
+  }
+
+  return null;
 }
 
 function RemoteCursorLayer({
@@ -2458,37 +3830,22 @@ function rangeFromCharacterSpan(element: HTMLElement, startOffset: number, endOf
   return null;
 }
 
-function readImageWidth(image: HTMLImageElement) {
-  const width = Number(image.dataset.qmWidth ?? image.style.width.replace("%", ""));
-  return imageWidthOptions.includes(width) ? width : 100;
-}
+function readImageWidthPx(image: HTMLImageElement) {
+  const explicitWidth = Number(image.dataset.qmImageWidth ?? image.style.width.replace("px", ""));
 
-function placeCaretAtEnd(element: HTMLElement) {
-  element.focus();
-
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  range.collapse(false);
-
-  const selection = window.getSelection();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-}
-
-function linkifyEditableElement(element: HTMLDivElement | null) {
-  if (!element) {
-    return "";
+  if (Number.isFinite(explicitWidth) && image.style.width.endsWith("px")) {
+    return clampImagePixelWidth(explicitWidth);
   }
 
-  const caretOffset = getCaretCharacterOffset(element);
-  const linkedHtml = linkifyEditorHtml(element.innerHTML);
+  return clampImagePixelWidth(Math.round(image.getBoundingClientRect().width || image.naturalWidth || editorImagePixelWidthBounds.max));
+}
 
-  if (linkedHtml !== element.innerHTML) {
-    element.innerHTML = linkedHtml;
-    restoreCaretByCharacterOffset(element, caretOffset);
+function clampImagePixelWidth(value: number) {
+  if (!Number.isFinite(value)) {
+    return editorImagePixelWidthBounds.max;
   }
 
-  return element.innerHTML;
+  return Math.min(editorImagePixelWidthBounds.max, Math.max(editorImagePixelWidthBounds.min, Math.round(value)));
 }
 
 function getCaretCharacterOffset(element: HTMLElement | null) {
@@ -2514,46 +3871,19 @@ function getCaretCharacterOffset(element: HTMLElement | null) {
   return preCaretRange.toString().length;
 }
 
-function restoreCaretByCharacterOffset(element: HTMLElement, offset: number | null) {
-  if (offset === null) {
-    return;
-  }
-
-  const selection = window.getSelection();
-  const range = document.createRange();
-  const walker = document.createTreeWalker(element, 4);
-  let remainingOffset = offset;
-  let currentNode = walker.nextNode();
-
-  while (currentNode) {
-    const textLength = currentNode.textContent?.length ?? 0;
-
-    if (remainingOffset <= textLength) {
-      range.setStart(currentNode, remainingOffset);
-      range.collapse(true);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      return;
-    }
-
-    remainingOffset -= textLength;
-    currentNode = walker.nextNode();
-  }
-
-  placeCaretAtEnd(element);
-}
-
 function NoteDrawer({
   activeNoteId,
   canRestoreNote,
   counts,
+  deletedCounts,
   deletedNotes,
   filter,
+  folders,
   noteStates,
   notes,
   onClose,
   onFilterChange,
-  onNew,
+  onOpenOverview,
   onPreview,
   onPurge,
   onRestore,
@@ -2565,13 +3895,15 @@ function NoteDrawer({
   activeNoteId: string | null;
   canRestoreNote: (note: DecryptedNote) => boolean;
   counts: NoteListCounts;
+  deletedCounts: NoteListCounts;
   deletedNotes: DecryptedNote[];
   filter: NoteListFilter;
+  folders: NoteFolderSnapshot[];
   noteStates: NoteStateByNoteId;
   notes: DecryptedNote[];
   onClose: () => void;
   onFilterChange: (filter: NoteListFilter) => void;
-  onNew: () => void;
+  onOpenOverview: (filter?: OverviewFolderFilter) => void;
   onPreview: (note: DecryptedNote) => void;
   onPurge: (note: DecryptedNote) => void;
   onRestore: (note: DecryptedNote) => void;
@@ -2588,6 +3920,7 @@ function NoteDrawer({
 
   const isTrashMode = mode === "trash";
   const listedNotes = isTrashMode ? deletedNotes : notes;
+  const visibleCounts = isTrashMode ? deletedCounts : counts;
 
   return (
     <aside className="note-drawer" aria-label="노트 목록">
@@ -2600,17 +3933,31 @@ function NoteDrawer({
           <X size={18} />
         </button>
       </div>
-      <button
-        className="secondary-button drawer-new-button"
-        type="button"
-        onClick={() => {
-          onNew();
-          onClose();
-        }}
-      >
-        <FilePlus2 size={18} />
-        새 메모
-      </button>
+      {!isTrashMode && (
+        <div className="drawer-folder-shortcuts" aria-label="개인 노트 그룹 바로가기">
+          <button className="secondary-button" type="button" onClick={() => onOpenOverview("all")}>
+            <LayoutGrid size={15} />
+            전체 조회
+          </button>
+          {folders.length ? (
+            <div>
+              {folders.slice(0, 5).map((folder) => (
+                <button
+                  key={folder.id}
+                  style={{ "--folder-color": folder.color } as CSSProperties}
+                  type="button"
+                  onClick={() => onOpenOverview(folder.id)}
+                >
+                  <span className="folder-dot" />
+                  <span>{folder.name}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className="drawer-folder-empty">생성된 그룹 없음</span>
+          )}
+        </div>
+      )}
       <div className="drawer-mode-tabs" role="tablist" aria-label="노트 목록 모드">
         <button
           aria-selected={!isTrashMode}
@@ -2634,53 +3981,55 @@ function NoteDrawer({
       </div>
       <div className="note-filter-tabs" role="tablist" aria-label="노트 종류 필터">
         <NoteFilterButton
-          count={counts.all}
+          count={visibleCounts.all}
           filter="all"
           label="전체"
           selected={filter === "all"}
           onSelect={onFilterChange}
         />
         <NoteFilterButton
-          count={counts.personal}
+          count={visibleCounts.personal}
           filter="personal"
           label="개인"
           selected={filter === "personal"}
           onSelect={onFilterChange}
         />
         <NoteFilterButton
-          count={counts.shared}
+          count={visibleCounts.shared}
           filter="shared"
           label="공유"
           selected={filter === "shared"}
           onSelect={onFilterChange}
         />
       </div>
-      <div className="note-sort-controls">
-        <label className="font-size-control">
-          정렬
-          <select
-            aria-label="노트 목록 정렬 기준"
-            onChange={(event) => onSortChange({ ...sortSetting, field: event.target.value as NoteSortField })}
-            value={sortSetting.field}
+      {!isTrashMode && (
+        <div className="note-sort-controls">
+          <label className="font-size-control">
+            정렬
+            <select
+              aria-label="노트 목록 정렬 기준"
+              onChange={(event) => onSortChange({ ...sortSetting, field: event.target.value as NoteSortField })}
+              value={sortSetting.field}
+            >
+              <option value="createdAt">생성일</option>
+              <option value="dueAt">마감일</option>
+            </select>
+          </label>
+          <button
+            className="secondary-button note-sort-direction"
+            type="button"
+            onClick={() =>
+              onSortChange({
+                ...sortSetting,
+                direction: sortSetting.direction === "asc" ? "desc" : "asc"
+              })
+            }
           >
-            <option value="createdAt">생성일</option>
-            <option value="dueAt">마감일</option>
-          </select>
-        </label>
-        <button
-          className="secondary-button note-sort-direction"
-          type="button"
-          onClick={() =>
-            onSortChange({
-              ...sortSetting,
-              direction: sortSetting.direction === "asc" ? "desc" : "asc"
-            })
-          }
-        >
-          <ArrowUpDown size={16} />
-          {sortSetting.direction === "asc" ? "오름차순" : "내림차순"}
-        </button>
-      </div>
+            <ArrowUpDown size={16} />
+            {sortSetting.direction === "asc" ? "오름차순" : "내림차순"}
+          </button>
+        </div>
+      )}
       {isTrashMode && <p className="trash-retention-hint">삭제된 노트는 {deletedNoteRetentionDays}일 보관 기준으로 표시됩니다.</p>}
       <NoteList
         activeNoteId={activeNoteId}
@@ -2841,6 +4190,206 @@ function NoteList({
   );
 }
 
+function PersonalOverview({
+  activeFolderFilter,
+  folders,
+  feedbackError,
+  feedbackStatus,
+  noteStates,
+  notes,
+  onBack,
+  onCreateFolder,
+  onFolderFilterChange,
+  onPreview,
+  onUpdateNoteFolder
+}: {
+  activeFolderFilter: OverviewFolderFilter;
+  folders: NoteFolderSnapshot[];
+  feedbackError: string | null;
+  feedbackStatus: string;
+  noteStates: NoteStateByNoteId;
+  notes: DecryptedNote[];
+  onBack: () => void;
+  onCreateFolder: (name: string, color: string) => Promise<string | null>;
+  onFolderFilterChange: (filter: OverviewFolderFilter) => void;
+  onPreview: (note: DecryptedNote) => void;
+  onUpdateNoteFolder: (note: DecryptedNote, folderId: string | null) => void;
+}) {
+  const [folderName, setFolderName] = useState("");
+  const [folderColor, setFolderColor] = useState(folderColorOptions[0]);
+  const foldersById = new Map(folders.map((folder) => [folder.id, folder]));
+  const visibleNotes = notes.filter((note) => {
+    if (activeFolderFilter === "all") {
+      return true;
+    }
+
+    if (activeFolderFilter === "unfiled") {
+      return !note.folderId || !foldersById.has(note.folderId);
+    }
+
+    return note.folderId === activeFolderFilter;
+  });
+  const unfiledCount = notes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length;
+  const activeFolder = typeof activeFolderFilter === "string" ? foldersById.get(activeFolderFilter) : null;
+  const activeFilterLabel =
+    activeFolderFilter === "all" ? "전체 노트" : activeFolderFilter === "unfiled" ? "미분류" : activeFolder?.name ?? "분류";
+  const showFeedback = feedbackError || feedbackStatus.includes("폴더") || feedbackStatus.includes("분류");
+
+  async function submitFolder(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (await onCreateFolder(folderName, folderColor)) {
+      setFolderName("");
+    }
+  }
+
+  return (
+    <section className="personal-overview" aria-label="개인 노트 전체 조회">
+      <header className="personal-overview-header">
+        <div>
+          <span className="note-kind-pill personal">
+            <Folder size={12} />
+            개인 노트
+          </span>
+          <h2>전체 조회</h2>
+        </div>
+        <button className="secondary-button" type="button" onClick={onBack}>
+          <Pencil size={16} />
+          편집으로 돌아가기
+        </button>
+      </header>
+      <div className="personal-overview-layout">
+        <aside className="overview-folder-panel" aria-label="개인 노트 분류">
+          <form className="folder-create-form" onSubmit={(event) => void submitFolder(event)}>
+            <label>
+              폴더 이름
+              <input
+                maxLength={40}
+                onChange={(event) => setFolderName(event.target.value)}
+                placeholder="새 그룹"
+                value={folderName}
+              />
+            </label>
+            <div className="folder-color-picker" aria-label="폴더 색상">
+              <label className="custom-color-input" title="직접 색상 선택">
+                <Palette size={14} />
+                <input
+                  aria-label="폴더 색상 직접 선택"
+                  onChange={(event) => setFolderColor(normalizeCustomHexColor(event.target.value, folderColor))}
+                  type="color"
+                  value={folderColor}
+                />
+              </label>
+              {folderColorOptions.map((color) => (
+                <button
+                  aria-label={`${color} 폴더 색상`}
+                  aria-pressed={folderColor === color}
+                  className={folderColor === color ? "active" : ""}
+                  key={color}
+                  onClick={() => setFolderColor(color)}
+                  style={{ backgroundColor: color }}
+                  type="button"
+                />
+              ))}
+            </div>
+            <button type="submit">
+              <FolderPlus size={16} />
+              폴더 생성
+            </button>
+          </form>
+          {showFeedback && (
+            <p className={feedbackError ? "form-error overview-feedback" : "form-success overview-feedback"}>
+              {feedbackError ?? feedbackStatus}
+            </p>
+          )}
+          <div className="folder-filter-chips" role="tablist" aria-label="개인 노트 폴더 필터">
+            <button
+              aria-selected={activeFolderFilter === "all"}
+              className={activeFolderFilter === "all" ? "active" : ""}
+              onClick={() => onFolderFilterChange("all")}
+              role="tab"
+              type="button"
+            >
+              <span>전체</span>
+              <strong>{notes.length}</strong>
+            </button>
+            <button
+              aria-selected={activeFolderFilter === "unfiled"}
+              className={activeFolderFilter === "unfiled" ? "active" : ""}
+              onClick={() => onFolderFilterChange("unfiled")}
+              role="tab"
+              type="button"
+            >
+              <span>미분류</span>
+              <strong>{unfiledCount}</strong>
+            </button>
+            {folders.map((folder) => (
+              <button
+                aria-selected={activeFolderFilter === folder.id}
+                className={activeFolderFilter === folder.id ? "active" : ""}
+                key={folder.id}
+                onClick={() => onFolderFilterChange(folder.id)}
+                role="tab"
+                style={{ "--folder-color": folder.color } as CSSProperties}
+                type="button"
+              >
+                <span className="folder-chip-name">{folder.name}</span>
+                <strong>{notes.filter((note) => note.folderId === folder.id).length}</strong>
+              </button>
+            ))}
+          </div>
+        </aside>
+        <section className="overview-note-panel" aria-label={`${activeFilterLabel} 목록`}>
+          <div className="overview-note-panel-header">
+            <div>
+              <span>{activeFilterLabel}</span>
+              <h3>{visibleNotes.length}개 노트</h3>
+            </div>
+          </div>
+          {visibleNotes.length ? (
+            <div className="overview-note-grid">
+              {visibleNotes.map((note) => {
+                const folder = note.folderId ? foldersById.get(note.folderId) : null;
+                const createdAt = dateFromTimestamp(note.createdAt);
+                const pinned = notePinned(note.id, noteStates);
+
+                return (
+                  <article className="overview-note-card" key={note.id}>
+                    <button className="overview-note-open" type="button" onClick={() => onPreview(note)}>
+                      <span className="overview-note-folder" style={{ backgroundColor: folder?.color ?? "#e2e8f0" }}>
+                        {folder?.name ?? "미분류"}
+                      </span>
+                      <strong>{note.title || "제목 없음"}</strong>
+                      <span>{previewTextFromHtml(note.body) || "내용 없음"}</span>
+                      <em>{pinned ? "즐겨찾기 · " : ""}{formatCompactDateTime(createdAt)}</em>
+                    </button>
+                    <label className="overview-folder-select">
+                      <span className="sr-only">폴더 지정</span>
+                      <select
+                        onChange={(event) => onUpdateNoteFolder(note, event.target.value || null)}
+                        value={note.folderId && foldersById.has(note.folderId) ? note.folderId : ""}
+                      >
+                        <option value="">미분류</option>
+                        {folders.map((folderOption) => (
+                          <option key={folderOption.id} value={folderOption.id}>
+                            {folderOption.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="muted empty-state">이 폴더에 표시할 개인 노트가 없습니다.</p>
+          )}
+        </section>
+      </div>
+    </section>
+  );
+}
+
 function AttachmentList({
   attachments,
   busyId,
@@ -2884,7 +4433,7 @@ function AttachmentList({
                 </span>
               </div>
               <div className="attachment-actions">
-                {attachment.extension === "pdf" && onPreview && (
+                {previewableAttachmentExtensions.has(attachment.extension) && onPreview && (
                   <button
                     aria-label={`${attachmentDownloadName(attachment)} 미리보기`}
                     className="secondary-button attachment-action"
@@ -2924,15 +4473,78 @@ function AttachmentList({
   );
 }
 
-function PdfPreviewModal({
-  fileName,
+function AttachmentPreviewModal({
   onClose,
-  url
+  preview
 }: {
-  fileName: string;
   onClose: () => void;
-  url: string;
+  preview: AttachmentPreviewState;
 }) {
+  const docxContainerRef = useRef<HTMLDivElement | null>(null);
+  const [docxError, setDocxError] = useState<string | null>(null);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
+    if (preview.kind !== "docx" || !preview.bytes || !docxContainerRef.current) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const container = docxContainerRef.current;
+    container.innerHTML = "";
+    setDocxError(null);
+
+    async function renderDocxPreview() {
+      const { renderAsync } = await import("docx-preview");
+
+      if (cancelled || preview.kind !== "docx" || !preview.bytes) {
+        return;
+      }
+
+      await renderAsync(preview.bytes.slice(), container, container, {
+        breakPages: true,
+        className: "qm-docx",
+        experimental: false,
+        ignoreFonts: true,
+        ignoreHeight: false,
+        ignoreLastRenderedPageBreak: false,
+        ignoreWidth: false,
+        inWrapper: true,
+        renderAltChunks: false,
+        renderChanges: false,
+        renderComments: false,
+        renderEndnotes: true,
+        renderFooters: true,
+        renderFootnotes: true,
+        renderHeaders: true,
+        trimXmlDeclaration: true,
+        useBase64URL: true
+      });
+    }
+
+    void renderDocxPreview().catch(() => {
+      if (!cancelled) {
+        setDocxError("DOCX 양식 미리보기를 만들지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 요소가 포함되어 있습니다.");
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      container.innerHTML = "";
+    };
+  }, [preview.bytes, preview.kind]);
+
   return (
     <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -2944,26 +4556,45 @@ function PdfPreviewModal({
       >
         <header className="pdf-preview-header">
           <div className="pdf-preview-title">
-            <span>PDF 미리보기</span>
-            <h2 id="pdf-preview-title">{fileName}</h2>
+            <span>{preview.label}</span>
+            <h2 id="pdf-preview-title">{preview.fileName}</h2>
           </div>
           <div className="pdf-preview-actions">
-            <a className="secondary-button pdf-preview-download" download={fileName} href={url}>
-              <Download size={14} />
-              다운로드
-            </a>
-            <button className="icon-button pdf-preview-close" type="button" onClick={onClose} aria-label="PDF 미리보기 닫기">
+            {preview.url && (
+              <a className="secondary-button pdf-preview-download" download={preview.fileName} href={preview.url}>
+                <Download size={14} />
+                다운로드
+              </a>
+            )}
+            <button className="icon-button pdf-preview-close" type="button" onClick={onClose} aria-label="파일 미리보기 닫기">
               <X size={16} />
             </button>
           </div>
         </header>
-        <iframe
-          className="pdf-preview-frame"
-          referrerPolicy="no-referrer"
-          sandbox=""
-          src={url}
-          title={`${fileName} 미리보기`}
-        />
+        {preview.kind === "pdf" && preview.url ? (
+          <object
+            aria-label={`${preview.fileName} 미리보기`}
+            className="pdf-preview-frame"
+            data={preview.url}
+            type="application/pdf"
+          >
+            <a className="secondary-button pdf-preview-download" download={preview.fileName} href={preview.url}>
+              <Download size={14} />
+              다운로드
+            </a>
+          </object>
+        ) : preview.kind === "docx" ? (
+          <div className="docx-preview-frame">
+            <div ref={docxContainerRef} className="docx-preview-content" />
+            {docxError && <p className="file-preview-error">{docxError}</p>}
+          </div>
+        ) : preview.kind === "html" ? (
+          <div className="document-preview-frame">
+            <div className="document-preview-page" dangerouslySetInnerHTML={{ __html: preview.html ?? "" }} />
+          </div>
+        ) : (
+          <pre className={`file-text-preview ${preview.kind === "unsupported" ? "unsupported" : ""}`}>{preview.text}</pre>
+        )}
       </section>
     </div>
   );
@@ -2991,7 +4622,8 @@ function NotePreviewModal({
   onSave,
   onTogglePin,
   onUploadAttachments,
-  saving
+  saving,
+  suppressEscape
 }: {
   attachmentBusyId: string | null;
   canDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => boolean;
@@ -3015,6 +4647,7 @@ function NotePreviewModal({
   onTogglePin: (note: DecryptedNote) => void;
   onUploadAttachments: (note: DecryptedNote, files: File[]) => void;
   saving: boolean;
+  suppressEscape: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState<NoteDraft>(() => draftFromNote(note));
@@ -3024,6 +4657,9 @@ function NotePreviewModal({
   const [readStates, setReadStates] = useState<NoteUserStateSnapshot[]>([]);
   const [history, setHistory] = useState<NoteHistorySnapshot[]>([]);
   const [historySummaries, setHistorySummaries] = useState<Record<string, string>>({});
+  const [historySnapshots, setHistorySnapshots] = useState<Record<string, NoteDraft>>({});
+  const [revertingHistoryId, setRevertingHistoryId] = useState<string | null>(null);
+  const [activityOpen, setActivityOpen] = useState(false);
   const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
   const latestDraftRef = useRef(draft);
@@ -3031,6 +4667,30 @@ function NotePreviewModal({
   useEffect(() => {
     latestDraftRef.current = draft;
   }, [draft]);
+
+  useEffect(() => {
+    if (suppressEscape) {
+      return undefined;
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+
+      if (activityOpen) {
+        setActivityOpen(false);
+        return;
+      }
+
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activityOpen, onClose, suppressEscape]);
 
   useEffect(() => {
     return subscribeNoteAttachments(note.id, setAttachments, () => setModalError("첨부파일 목록을 불러오지 못했습니다."));
@@ -3046,9 +4706,11 @@ function NotePreviewModal({
 
   useEffect(() => {
     const entriesWithSummary = history.filter((entry) => entry.encryptedSummary);
+    const entriesWithSnapshot = history.filter((entry) => entry.encryptedSnapshot);
 
-    if (!entriesWithSummary.length) {
+    if (!entriesWithSummary.length && !entriesWithSnapshot.length) {
       setHistorySummaries({});
+      setHistorySnapshots({});
       return undefined;
     }
 
@@ -3057,8 +4719,8 @@ function NotePreviewModal({
     async function decryptSummaries() {
       try {
         const noteKey = await onResolveNoteKey(note.id);
-        const nextSummaries = Object.fromEntries(
-          await Promise.all(
+        const [nextSummaries, nextSnapshots] = await Promise.all([
+          Promise.all(
             entriesWithSummary.map(async (entry) => {
               try {
                 return [entry.id, await decryptText(entry.encryptedSummary!, noteKey)] as const;
@@ -3066,15 +4728,29 @@ function NotePreviewModal({
                 return [entry.id, "내용 요약을 열 수 없습니다."] as const;
               }
             })
+          ),
+          Promise.all(
+            entriesWithSnapshot.map(async (entry) => {
+              try {
+                const decrypted = await decryptText(entry.encryptedSnapshot!, noteKey);
+                return [entry.id, draftFromHistorySnapshot(decrypted)] as const;
+              } catch {
+                return [entry.id, null] as const;
+              }
+            })
           )
-        );
+        ]);
 
         if (!cancelled) {
-          setHistorySummaries(nextSummaries);
+          setHistorySummaries(Object.fromEntries(nextSummaries));
+          setHistorySnapshots(
+            Object.fromEntries(nextSnapshots.filter((entry): entry is readonly [string, NoteDraft] => Boolean(entry[1])))
+          );
         }
       } catch {
         if (!cancelled) {
           setHistorySummaries({});
+          setHistorySnapshots({});
         }
       }
     }
@@ -3168,7 +4844,40 @@ function NotePreviewModal({
     }
   }
 
-  async function insertPreviewImageFile(file: File, range: Range | null = null) {
+  async function revertToHistory(entry: NoteHistorySnapshot, snapshotDraft: NoteDraft) {
+    if (note.isDeleted) {
+      setModalError("복구함의 노트는 복구 후 되돌릴 수 있습니다.");
+      return;
+    }
+
+    const confirmed = window.confirm("선택한 수정 이력의 내용으로 되돌릴까요?");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setRevertingHistoryId(entry.id);
+    setModalError(null);
+
+    try {
+      const saved = await onSave(note, snapshotDraft);
+
+      if (!saved) {
+        window.alert("수정 이력으로 되돌리지 못했습니다.");
+        return;
+      }
+
+      setDraft(snapshotDraft);
+      setDraftDirty(false);
+      setIsEditing(false);
+      setActivityOpen(false);
+      setModalError(null);
+    } finally {
+      setRevertingHistoryId(null);
+    }
+  }
+
+  async function insertPreviewImageFile(file: File, insertHtml: RichEditorInsertHtml) {
     try {
       const dataUrl = await imageFileToResizedDataUrl(file);
 
@@ -3178,7 +4887,7 @@ function NotePreviewModal({
       }
 
       const html = imageHtml(dataUrl, file.name);
-      const nextHtml = insertHtmlAtSelection(previewEditorRef.current, html, range);
+      const nextHtml = insertHtml(html);
 
       setDraft((current) => ({ ...current, body: nextHtml ?? `${current.body}${html}` }));
       setDraftDirty(true);
@@ -3188,14 +4897,12 @@ function NotePreviewModal({
     }
   }
 
-  async function insertPreviewPastedFiles(files: File[], range: Range | null = null) {
+  async function insertPreviewPastedFiles(files: File[], insertHtml: RichEditorInsertHtml) {
     const attachmentFiles: File[] = [];
-    let imageRange = range;
 
     for (const file of files) {
       if (file.type.startsWith("image/")) {
-        await insertPreviewImageFile(file, imageRange);
-        imageRange = null;
+        await insertPreviewImageFile(file, insertHtml);
       } else {
         attachmentFiles.push(file);
       }
@@ -3335,7 +5042,7 @@ function NotePreviewModal({
             <RichMemoEditor
               editorRef={previewEditorRef}
               fontSize={draft.fontSize}
-              onFilesPaste={(files, range) => void insertPreviewPastedFiles(files, range)}
+              onFilesPaste={(files, insertHtml) => void insertPreviewPastedFiles(files, insertHtml)}
               onChange={(value) => updateDraft("body", value)}
               value={draft.body}
             />
@@ -3348,15 +5055,26 @@ function NotePreviewModal({
             dangerouslySetInnerHTML={{ __html: linkifyEditorHtml(sanitizeEditorHtml(bodyHtml)) }}
           />
         )}
-        <NoteInsightPanel
-          currentUid={currentUid}
-          history={history}
-          historySummaries={historySummaries}
-          note={note}
-          onConfirm={onConfirm}
-          readStates={readStates}
-          users={historyUsers}
-        />
+        <button className="secondary-button note-insight-trigger" type="button" onClick={() => setActivityOpen(true)}>
+          <History size={16} />
+          활동 / 수정 이력 보기
+          <span>{history.length}개 이력</span>
+        </button>
+        {activityOpen && (
+          <NoteInsightModal
+            currentUid={currentUid}
+            history={history}
+            historySnapshots={historySnapshots}
+            historySummaries={historySummaries}
+            note={note}
+            onClose={() => setActivityOpen(false)}
+            onConfirm={onConfirm}
+            onRevert={(entry, snapshotDraft) => void revertToHistory(entry, snapshotDraft)}
+            readStates={readStates}
+            revertingHistoryId={revertingHistoryId}
+            users={historyUsers}
+          />
+        )}
         <AttachmentList
           attachments={attachments}
           busyId={attachmentBusyId}
@@ -3371,21 +5089,29 @@ function NotePreviewModal({
   );
 }
 
-function NoteInsightPanel({
+function NoteInsightModal({
   currentUid,
   history,
+  historySnapshots,
   historySummaries,
   note,
+  onClose,
   onConfirm,
+  onRevert,
   readStates,
+  revertingHistoryId,
   users
 }: {
   currentUid: string;
   history: NoteHistorySnapshot[];
+  historySnapshots: Record<string, NoteDraft>;
   historySummaries: Record<string, string>;
   note: DecryptedNote;
+  onClose: () => void;
   onConfirm: (note: DecryptedNote) => void;
+  onRevert: (entry: NoteHistorySnapshot, snapshotDraft: NoteDraft) => void;
   readStates: NoteUserStateSnapshot[];
+  revertingHistoryId: string | null;
   users: UserProfile[];
 }) {
   const usersByUid = new Map(users.map((user) => [user.uid, user]));
@@ -3394,115 +5120,160 @@ function NoteInsightPanel({
   const showReceipts = note.type === "shared";
 
   return (
-    <section className="note-insight-panel" aria-label="노트 활동 정보">
-      {showReceipts && (
-        <div className="note-insight-section">
-          <div className="note-insight-heading">
-            <h3>
-              <CheckCircle2 size={16} />
-              읽음 / 확인
-            </h3>
-            {!note.isDeleted && (
-              <button
-                className="secondary-button note-preview-action"
-                type="button"
-                onClick={() => onConfirm(note)}
-              >
-                <CheckCircle2 size={14} />
-                확인
-              </button>
+    <div className="modal-backdrop note-insight-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-label="노트 활동 및 수정 이력"
+        aria-modal="true"
+        className="note-insight-modal"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="note-insight-modal-header">
+          <div>
+            <span>
+              <History size={16} />
+              활동
+            </span>
+            <h2>활동 / 수정 이력</h2>
+          </div>
+          <div className="note-insight-modal-actions">
+            <em>{history.length}개 이력</em>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="활동 및 수정 이력 닫기">
+              <X size={16} />
+            </button>
+          </div>
+        </header>
+        <div className="note-insight-modal-body">
+          {showReceipts && (
+            <div className="note-insight-section">
+              <div className="note-insight-heading">
+                <h3>
+                  <CheckCircle2 size={16} />
+                  읽음 / 확인
+                </h3>
+                {!note.isDeleted && (
+                  <button
+                    className="secondary-button note-preview-action"
+                    type="button"
+                    onClick={() => onConfirm(note)}
+                  >
+                    <CheckCircle2 size={14} />
+                    확인
+                  </button>
+                )}
+              </div>
+              <div className="receipt-list">
+                {note.participantUids.map((uid) => {
+                  const user = usersByUid.get(uid);
+                  const state = statesByUid.get(uid);
+                  const readAt = dateFromTimestamp(state?.readAt);
+                  const confirmedAt = dateFromTimestamp(state?.confirmedAt);
+
+                  return (
+                    <article className="receipt-item" key={uid}>
+                      <span className="mini-avatar" style={{ background: user?.color ?? "#64748b" }}>
+                        {user?.avatarText ?? uid.slice(0, 1).toUpperCase()}
+                      </span>
+                      <div>
+                        <strong>{user?.displayName ?? uid}</strong>
+                        <span>{confirmedAt ? `확인 ${formatCompactDateTime(confirmedAt)}` : readAt ? `읽음 ${formatCompactDateTime(readAt)}` : "아직 읽지 않음"}</span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+              {currentState?.confirmedAt && <p className="muted receipt-current">내 확인: {formatFullDateTime(dateFromTimestamp(currentState.confirmedAt))}</p>}
+            </div>
+          )}
+          <div className="note-insight-section">
+            <div className="note-insight-heading">
+              <h3>
+                <History size={16} />
+                수정 이력
+              </h3>
+            </div>
+            {history.length ? (
+              <div className="history-list">
+                {history.map((entry, index) => {
+                  const actor = usersByUid.get(entry.actorUid);
+                  const createdAt = dateFromTimestamp(entry.createdAt);
+                  const summary = historySummaries[entry.id] ?? entry.changedFields.map(historyFieldLabel).join(", ");
+                  const snapshotDraft = historySnapshots[entry.id] ?? null;
+                  const previousSnapshotDraft =
+                    history
+                      .slice(index + 1)
+                      .map((candidate) => historySnapshots[candidate.id])
+                      .find(Boolean) ?? null;
+                  const canRevert = Boolean(snapshotDraft && !note.isDeleted && (entry.action === "create" || entry.action === "content"));
+
+                  return (
+                    <article className="history-item" key={entry.id}>
+                      <span>{historyActionLabel(entry.action)}</span>
+                      <strong className="history-summary-block">
+                        {snapshotDraft ? (
+                          <HistoryDiffSummary draft={snapshotDraft} fallback={summary} previousDraft={previousSnapshotDraft} />
+                        ) : (
+                          <span className={entry.action === "content" || entry.action === "create" ? "history-changed-summary" : ""}>
+                            {summary}
+                          </span>
+                        )}
+                      </strong>
+                      <em>
+                        {actor?.displayName ?? entry.actorUid} · {formatCompactDateTime(createdAt)}
+                      </em>
+                      <button
+                        className="secondary-button history-revert-button"
+                        disabled={!canRevert || revertingHistoryId === entry.id}
+                        onClick={() => snapshotDraft && onRevert(entry, snapshotDraft)}
+                        title={snapshotDraft ? "이 이력의 내용으로 되돌리기" : "이전 형식의 이력은 되돌릴 수 없습니다."}
+                        type="button"
+                      >
+                        {revertingHistoryId === entry.id ? "되돌리는 중" : "이 버전으로 되돌리기"}
+                      </button>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="muted">아직 기록된 수정 이력이 없습니다.</p>
             )}
           </div>
-          <div className="receipt-list">
-            {note.participantUids.map((uid) => {
-              const user = usersByUid.get(uid);
-              const state = statesByUid.get(uid);
-              const readAt = dateFromTimestamp(state?.readAt);
-              const confirmedAt = dateFromTimestamp(state?.confirmedAt);
-
-              return (
-                <article className="receipt-item" key={uid}>
-                  <span className="mini-avatar" style={{ background: user?.color ?? "#64748b" }}>
-                    {user?.avatarText ?? uid.slice(0, 1).toUpperCase()}
-                  </span>
-                  <div>
-                    <strong>{user?.displayName ?? uid}</strong>
-                    <span>{confirmedAt ? `확인 ${formatCompactDateTime(confirmedAt)}` : readAt ? `읽음 ${formatCompactDateTime(readAt)}` : "아직 읽지 않음"}</span>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-          {currentState?.confirmedAt && <p className="muted receipt-current">내 확인: {formatFullDateTime(dateFromTimestamp(currentState.confirmedAt))}</p>}
         </div>
-      )}
-      <div className="note-insight-section">
-        <div className="note-insight-heading">
-          <h3>
-            <History size={16} />
-            수정 이력
-          </h3>
-        </div>
-        {history.length ? (
-          <div className="history-list">
-            {history.slice(0, 8).map((entry) => {
-              const actor = usersByUid.get(entry.actorUid);
-              const createdAt = dateFromTimestamp(entry.createdAt);
-              const summary = historySummaries[entry.id] ?? entry.changedFields.map(historyFieldLabel).join(", ");
-
-              return (
-                <article className="history-item" key={entry.id}>
-                  <span>{historyActionLabel(entry.action)}</span>
-                  <strong>{summary}</strong>
-                  <em>
-                    {actor?.displayName ?? entry.actorUid} · {formatCompactDateTime(createdAt)}
-                  </em>
-                </article>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="muted">아직 기록된 수정 이력이 없습니다.</p>
-        )}
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }
 
-function insertHtmlAtSelection(container: HTMLDivElement | null, html: string, savedRange: Range | null = null) {
-  if (!container) {
-    return null;
+function HistoryDiffSummary({
+  draft,
+  fallback,
+  previousDraft
+}: {
+  draft: NoteDraft;
+  fallback: string;
+  previousDraft: NoteDraft | null;
+}) {
+  const lines = historyDiffLines(previousDraft, draft);
+
+  if (!lines.length) {
+    return <span>{fallback}</span>;
   }
 
-  container.focus();
-
-  const selection = window.getSelection();
-  const currentRange =
-    selection?.rangeCount && selection.anchorNode && container.contains(selection.anchorNode)
-      ? selection.getRangeAt(0)
-      : null;
-  const range = savedRange && container.contains(savedRange.commonAncestorContainer) ? savedRange : currentRange;
-
-  if (range) {
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    const template = document.createElement("template");
-    template.innerHTML = sanitizeEditorHtml(html);
-    const lastNode = template.content.lastChild;
-    range.deleteContents();
-    range.insertNode(template.content);
-
-    if (lastNode) {
-      range.setStartAfter(lastNode);
-      range.collapse(true);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-    }
-  } else {
-    container.insertAdjacentHTML("beforeend", sanitizeEditorHtml(html));
-  }
-
-  return container.innerHTML;
+  return (
+    <>
+      {lines.map((line) => (
+        <span className="history-diff-line" key={line.id}>
+          <span className="history-diff-label">{line.label}</span>
+          <span className="history-diff-text">
+            {line.prefix}
+            {line.changed ? <mark>{line.changed}</mark> : null}
+            {line.suffix}
+            {line.removed && !line.changed ? <del>{line.removed}</del> : null}
+          </span>
+        </span>
+      ))}
+    </>
+  );
 }
 
 async function imageFileToResizedDataUrl(file: File) {
@@ -3512,6 +5283,425 @@ async function imageFileToResizedDataUrl(file: File) {
 
   const dataUrl = await readFileAsDataUrl(file);
   return resizeImageDataUrl(dataUrl);
+}
+
+function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
+  const decodedText = decodeReadableBytes(bytes);
+
+  if (extension === "json") {
+    try {
+      return JSON.stringify(JSON.parse(decodedText), null, 2).slice(0, maxTextPreviewCharacters);
+    } catch {
+      return decodedText.slice(0, maxTextPreviewCharacters);
+    }
+  }
+
+  return decodedText.slice(0, maxTextPreviewCharacters);
+}
+
+async function extractHwpPreviewHtml(bytes: Uint8Array) {
+  try {
+    const CFB = await import("cfb");
+    const container = CFB.read(bytes, { type: "array" });
+    const header = cfbEntryBytes(CFB.find(container, "FileHeader"));
+    const headerInfo = hwpHeaderInfo(header);
+
+    if (!headerInfo || headerInfo.encrypted || headerInfo.distributed) {
+      return "";
+    }
+
+    const blocks: string[] = [];
+
+    hwpSectionEntries(container).forEach(({ entry }) => {
+      if (blocks.length >= maxDocumentPreviewBlocks) {
+        return;
+      }
+
+      const sectionBytes = cfbEntryBytes(entry);
+      const decodedBytes = headerInfo.compressed ? decompressHwpSectionBytes(sectionBytes) : sectionBytes;
+      appendHwpSectionBlocks(decodedBytes, blocks);
+    });
+
+    return documentPreviewHtml(blocks);
+  } catch {
+    return "";
+  }
+}
+
+function extractHwpxPreviewHtml(bytes: Uint8Array) {
+  if (typeof DOMParser === "undefined") {
+    return "";
+  }
+
+  try {
+    const entries = unzipSync(bytes);
+    const blocks: string[] = [];
+
+    Object.entries(entries)
+      .filter(([name]) => hwpxPreviewEntryPriority(name) > 0)
+      .sort(([leftName], [rightName]) => hwpxPreviewEntryPriority(rightName) - hwpxPreviewEntryPriority(leftName))
+      .slice(0, 80)
+      .forEach(([, entry]) => {
+        if (blocks.length >= maxDocumentPreviewBlocks) {
+          return;
+        }
+
+        collectHwpxPreviewBlocks(strFromU8(entry), blocks);
+      });
+
+    return documentPreviewHtml(blocks);
+  } catch {
+    return "";
+  }
+}
+
+function cfbEntryBytes(entry: { content?: unknown } | null) {
+  const content = entry?.content;
+
+  if (content instanceof Uint8Array) {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return new Uint8Array(content);
+  }
+
+  return new Uint8Array();
+}
+
+function hwpHeaderInfo(header: Uint8Array) {
+  if (header.length < 40) {
+    return null;
+  }
+
+  const signature = new TextDecoder("ascii").decode(header.slice(0, 32)).replaceAll("\0", "").trim();
+
+  if (!signature.includes("HWP Document File")) {
+    return null;
+  }
+
+  const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
+  const flags = view.getUint32(36, true);
+
+  return {
+    compressed: (flags & 0x01) !== 0,
+    encrypted: (flags & 0x02) !== 0,
+    distributed: (flags & 0x04) !== 0
+  };
+}
+
+function hwpSectionEntries(container: { FileIndex: Array<{ content?: unknown }>; FullPaths: string[] }) {
+  return container.FullPaths.map((path, index) => ({ entry: container.FileIndex[index], path }))
+    .map((item) => ({ ...item, sectionIndex: Number(item.path.match(/\/BodyText\/Section(\d+)$/i)?.[1] ?? Number.NaN) }))
+    .filter((item) => Number.isInteger(item.sectionIndex))
+    .sort((left, right) => left.sectionIndex - right.sectionIndex);
+}
+
+function decompressHwpSectionBytes(bytes: Uint8Array) {
+  try {
+    return decompressSync(bytes);
+  } catch {
+    return bytes;
+  }
+}
+
+function appendHwpSectionBlocks(bytes: Uint8Array, blocks: string[]) {
+  if (!bytes.length) {
+    return;
+  }
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 0;
+
+  while (offset + 4 <= bytes.length && blocks.length < maxDocumentPreviewBlocks) {
+    const header = view.getUint32(offset, true);
+    offset += 4;
+
+    const tagId = header & 0x3ff;
+    let size = (header >>> 20) & 0xfff;
+
+    if (size === 0xfff) {
+      if (offset + 4 > bytes.length) {
+        break;
+      }
+
+      size = view.getUint32(offset, true);
+      offset += 4;
+    }
+
+    if (size < 0 || offset + size > bytes.length) {
+      break;
+    }
+
+    if (tagId === 67) {
+      appendTextPreviewBlocks(decodeHwpParagraphText(bytes.subarray(offset, offset + size)), blocks);
+    }
+
+    offset += size;
+  }
+}
+
+function decodeHwpParagraphText(bytes: Uint8Array) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let text = "";
+
+  for (let offset = 0; offset + 1 < bytes.length; offset += 2) {
+    const code = view.getUint16(offset, true);
+
+    if (code === 9) {
+      text += " ";
+      continue;
+    }
+
+    if (code === 10 || code === 13) {
+      text += "\n";
+      continue;
+    }
+
+    if (code < 32) {
+      offset += 16;
+      continue;
+    }
+
+    if (code >= 0xd800 && code <= 0xdbff && offset + 3 < bytes.length) {
+      const low = view.getUint16(offset + 2, true);
+
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        text += String.fromCodePoint(0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00));
+        offset += 2;
+        continue;
+      }
+    }
+
+    if (isPreviewCharacter(code)) {
+      text += String.fromCharCode(code);
+    }
+  }
+
+  return normalizePreviewText(text);
+}
+
+function isPreviewCharacter(code: number) {
+  return code >= 32 && code !== 0xfffc && code !== 0xfffd && code !== 0xffff;
+}
+
+function hwpxPreviewEntryPriority(name: string) {
+  const normalizedName = name.toLowerCase();
+
+  if (!normalizedName.endsWith(".xml")) {
+    return 0;
+  }
+
+  if (/^contents\/section\d+\.xml$/i.test(normalizedName)) {
+    return 40;
+  }
+
+  if (normalizedName.includes("section") || normalizedName.includes("content")) {
+    return 20;
+  }
+
+  return normalizedName.startsWith("contents/") ? 8 : 0;
+}
+
+function collectHwpxPreviewBlocks(markup: string, blocks: string[]) {
+  const document = new DOMParser().parseFromString(markup, "application/xml");
+
+  if (document.querySelector("parsererror")) {
+    return;
+  }
+
+  collectHwpxElementBlocks(document.documentElement, blocks);
+}
+
+function collectHwpxElementBlocks(element: Element, blocks: string[]) {
+  if (blocks.length >= maxDocumentPreviewBlocks) {
+    return;
+  }
+
+  const name = element.localName.toLowerCase();
+
+  if (name === "tbl") {
+    const table = renderHwpxTable(element);
+
+    if (table) {
+      blocks.push(table);
+    }
+
+    return;
+  }
+
+  if (name === "p") {
+    const text = normalizePreviewText(element.textContent ?? "");
+
+    if (text) {
+      blocks.push(`<p>${escapeHtml(text)}</p>`);
+    }
+
+    return;
+  }
+
+  Array.from(element.children).forEach((child) => collectHwpxElementBlocks(child, blocks));
+}
+
+function renderHwpxTable(table: Element) {
+  const rows = descendantsByLocalName(table, "tr").filter((row) => nearestAncestorByLocalName(row, "tbl") === table);
+  const rowHtml = rows
+    .slice(0, 80)
+    .map((row) => {
+      const cells = descendantsByLocalName(row, "tc").filter((cell) => nearestAncestorByLocalName(cell, "tr") === row);
+      const cellHtml = cells
+        .slice(0, 20)
+        .map((cell) => `<td${hwpxCellSpanAttributes(cell)}>${hwpxCellHtml(cell) || "&nbsp;"}</td>`)
+        .join("");
+
+      return cellHtml ? `<tr>${cellHtml}</tr>` : "";
+    })
+    .filter(Boolean)
+    .join("");
+
+  return rowHtml ? `<table>${rowHtml}</table>` : "";
+}
+
+function descendantsByLocalName(element: Element, name: string) {
+  return Array.from(element.getElementsByTagName("*")).filter((child) => child.localName.toLowerCase() === name);
+}
+
+function nearestAncestorByLocalName(element: Element, name: string) {
+  let parent = element.parentElement;
+
+  while (parent) {
+    if (parent.localName.toLowerCase() === name) {
+      return parent;
+    }
+
+    parent = parent.parentElement;
+  }
+
+  return null;
+}
+
+function hwpxCellSpanAttributes(cell: Element) {
+  const colSpan = safePreviewSpan(cell.getAttribute("colSpan") ?? cell.getAttribute("colspan"));
+  const rowSpan = safePreviewSpan(cell.getAttribute("rowSpan") ?? cell.getAttribute("rowspan"));
+  const attributes: string[] = [];
+
+  if (colSpan > 1) {
+    attributes.push(` colspan="${colSpan}"`);
+  }
+
+  if (rowSpan > 1) {
+    attributes.push(` rowspan="${rowSpan}"`);
+  }
+
+  return attributes.join("");
+}
+
+function safePreviewSpan(value: string | null) {
+  const span = Number(value);
+
+  return Number.isInteger(span) && span >= 1 && span <= 12 ? span : 1;
+}
+
+function hwpxCellHtml(cell: Element) {
+  const paragraphs = descendantsByLocalName(cell, "p")
+    .map((paragraph) => normalizePreviewText(paragraph.textContent ?? ""))
+    .filter(Boolean);
+
+  if (paragraphs.length) {
+    return paragraphs.slice(0, 12).map(escapeHtml).join("<br>");
+  }
+
+  return escapeHtml(normalizePreviewText(cell.textContent ?? ""));
+}
+
+function appendTextPreviewBlocks(text: string, blocks: string[]) {
+  text
+    .split(/\n+/)
+    .map((line) => normalizePreviewText(line))
+    .filter(Boolean)
+    .forEach((line) => {
+      if (blocks.length < maxDocumentPreviewBlocks) {
+        blocks.push(`<p>${escapeHtml(line)}</p>`);
+      }
+    });
+}
+
+function documentPreviewHtml(blocks: string[]) {
+  const visibleBlocks = blocks.filter(Boolean).slice(0, maxDocumentPreviewBlocks);
+
+  if (!visibleBlocks.length) {
+    return "";
+  }
+
+  const truncated = blocks.length > visibleBlocks.length ? '<p class="document-preview-muted">일부 내용은 미리보기 길이 제한으로 생략되었습니다.</p>' : "";
+  return `<div>${visibleBlocks.join("")}${truncated}</div>`;
+}
+
+function normalizePreviewText(value: string) {
+  return value
+    .replaceAll("\0", "")
+    .replace(/[^\S\r\n]+/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, maxTextPreviewCharacters);
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case "\"":
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return character;
+    }
+  });
+}
+
+function legacyBinaryPreviewMessage(extension: string) {
+  const upperExtension = extension.toUpperCase();
+
+  return [
+    `${upperExtension} 파일은 구형 복합 바이너리 문서라 브라우저 내부에서 양식까지 안전하게 렌더링할 수 없습니다.`,
+    "깨진 바이너리 문자를 미리보기로 노출하지 않도록 앱 안에서는 원본 다운로드 확인만 제공합니다.",
+    extension === "hwp"
+      ? "양식 미리보기가 필요하면 HWPX 또는 PDF로 변환해 업로드해주세요."
+      : "양식 미리보기가 필요하면 DOCX 또는 PDF로 변환해 업로드해주세요."
+  ].join("\n");
+}
+
+function normalizeCustomHexColor(value: string, fallback: string) {
+  const normalizedValue = value.trim().toLowerCase();
+
+  return safeHexColorPattern.test(normalizedValue) ? normalizedValue : fallback;
+}
+
+function decodeReadableBytes(bytes: Uint8Array) {
+  const utf8Text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  const utf16Text = new TextDecoder("utf-16le", { fatal: false }).decode(bytes);
+  const normalizedUtf8 = normalizeDecodedPreviewText(utf8Text);
+  const normalizedUtf16 = normalizeDecodedPreviewText(utf16Text);
+
+  return normalizedUtf16.length > normalizedUtf8.length * 1.4 ? normalizedUtf16 : normalizedUtf8;
+}
+
+function normalizeDecodedPreviewText(value: string) {
+  return value
+    .split("")
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return code === 9 || code === 10 || code === 13 || (code >= 32 && code !== 127);
+    })
+    .join("")
+    .trim();
 }
 
 function readFileAsDataUrl(file: File) {

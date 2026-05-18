@@ -1,25 +1,48 @@
 const fontSizePattern = /^<!--qm-font-size:(\d+)-->/;
-const htmlTagPattern = /<(a|p|div|br|strong|b|em|i|u|span|img|figure|ul|ol|li|blockquote|pre|code)\b/i;
+const htmlTagPattern =
+  /<(a|p|div|br|strong|b|em|i|u|s|del|strike|span|img|figure|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
+const imagePixelWidthBounds = { min: 120, max: 1200 };
+const tablePixelWidthBounds = { min: 280, max: 1800 };
+const tablePixelHeightBounds = { min: 96, max: 2000 };
+const tableRowPixelHeightBounds = { min: 28, max: 900 };
+const tableColumnPixelWidthBounds = { min: 48, max: 900 };
+const textSizeOptions = new Set([14, 16, 17, 18, 20, 22, 24, 28]);
+const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
+const textAlignments = new Set(["left", "center", "right"]);
+const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 const allowedTags = new Set([
   "A",
   "B",
   "BLOCKQUOTE",
   "BR",
   "CODE",
+  "COL",
+  "COLGROUP",
+  "DEL",
   "DIV",
   "EM",
   "FIGURE",
   "I",
   "IMG",
+  "INPUT",
+  "LABEL",
   "LI",
   "OL",
   "P",
   "PRE",
+  "S",
   "SPAN",
+  "STRIKE",
   "STRONG",
+  "TABLE",
+  "TBODY",
+  "TD",
+  "TH",
+  "THEAD",
+  "TR",
   "U",
   "UL"
 ]);
@@ -168,7 +191,12 @@ function sanitizeNode(node: Node): Node | null {
     return sanitizeAnchor(node);
   }
 
+  if (node.tagName === "INPUT") {
+    return sanitizeCheckbox(node);
+  }
+
   const element = document.createElement(node.tagName.toLowerCase());
+  copySafeAttributes(element, node);
 
   node.childNodes.forEach((childNode) => {
     const sanitizedChild = sanitizeNode(childNode);
@@ -179,6 +207,23 @@ function sanitizeNode(node: Node): Node | null {
   });
 
   return element;
+}
+
+function sanitizeCheckbox(node: HTMLElement): Node | null {
+  if (node.getAttribute("type") !== "checkbox") {
+    return null;
+  }
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.disabled = true;
+
+  if (node.hasAttribute("checked")) {
+    checkbox.checked = true;
+    checkbox.setAttribute("checked", "");
+  }
+
+  return checkbox;
 }
 
 function sanitizeAnchor(node: HTMLElement): Node {
@@ -212,6 +257,16 @@ function sanitizeAnchor(node: HTMLElement): Node {
 }
 
 function applySafeImageWidth(image: HTMLImageElement, source: HTMLElement) {
+  const pixelWidth = safeImagePixelWidth(source.getAttribute("data-qm-image-width") ?? source.style.width);
+
+  if (pixelWidth) {
+    image.dataset.qmImageWidth = String(pixelWidth);
+    image.style.width = `${pixelWidth}px`;
+    image.style.maxWidth = "100%";
+    image.style.height = "auto";
+    return;
+  }
+
   const width = safeImageWidth(source.getAttribute("data-qm-width") ?? source.style.width);
 
   if (!width) {
@@ -224,10 +279,314 @@ function applySafeImageWidth(image: HTMLImageElement, source: HTMLElement) {
   image.style.height = "auto";
 }
 
+function copySafeAttributes(target: HTMLElement, source: HTMLElement) {
+  copyTaskAttributes(target, source);
+  copyTextAlign(target, source);
+  copyTextSize(target, source);
+  copyTextColor(target, source);
+  copyTableAttributes(target, source);
+}
+
+function copyTaskAttributes(target: HTMLElement, source: HTMLElement) {
+  const dataType = source.getAttribute("data-type");
+
+  if ((target.tagName === "UL" && dataType === "taskList") || (target.tagName === "LI" && dataType === "taskItem")) {
+    target.dataset.type = dataType;
+  }
+
+  if (target.tagName === "LI") {
+    const checked = source.getAttribute("data-checked");
+
+    if (checked === "true" || checked === "false") {
+      target.dataset.checked = checked;
+    }
+  }
+}
+
+function copyTextAlign(target: HTMLElement, source: HTMLElement) {
+  const alignment = safeTextAlign(source.style.textAlign || source.getAttribute("data-text-align"));
+
+  if (!alignment || !["P", "DIV", "LI", "TD", "TH"].includes(target.tagName)) {
+    return;
+  }
+
+  target.style.textAlign = alignment;
+}
+
+function copyTextSize(target: HTMLElement, source: HTMLElement) {
+  const size = safeTextSize(source.getAttribute("data-qm-font-size") || source.style.fontSize);
+
+  if (!size || target.tagName !== "SPAN") {
+    return;
+  }
+
+  target.dataset.qmFontSize = String(size);
+  target.style.fontSize = `${size}px`;
+}
+
+function copyTextColor(target: HTMLElement, source: HTMLElement) {
+  const color = safeColor(source.getAttribute("data-qm-text-color") || source.style.color);
+
+  if (!color || target.tagName !== "SPAN") {
+    return;
+  }
+
+  target.dataset.qmTextColor = color;
+  target.style.color = color;
+}
+
+function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
+  if (target.tagName === "TABLE") {
+    copyTableWidthAttribute(target, source);
+    copyTableHeightAttribute(target, source);
+  }
+
+  if (target.tagName === "TR") {
+    copyTableRowHeightAttribute(target, source);
+  }
+
+  if (target.tagName === "TD" || target.tagName === "TH") {
+    copyPositiveIntegerAttribute(target, source, "colspan", 12);
+    copyPositiveIntegerAttribute(target, source, "rowspan", 12);
+    copyColumnWidthAttribute(target, source);
+    copyCellWidthAttribute(target, source);
+    copyCellColorAttribute(target, source);
+  }
+
+  if (target.tagName === "COL") {
+    const width = safePixelWidth(source.style.width);
+
+    if (width) {
+      target.style.width = width;
+    }
+  }
+}
+
+function copyTableWidthAttribute(target: HTMLElement, source: HTMLElement) {
+  const pixelWidth = safeTablePixelWidth(source.getAttribute("data-qm-table-width-px") ?? source.style.width);
+
+  if (pixelWidth) {
+    target.dataset.qmTableWidthPx = String(pixelWidth);
+    target.style.width = `${pixelWidth}px`;
+    target.style.maxWidth = "100%";
+    return;
+  }
+
+  const width = safeTableWidth(source.getAttribute("data-qm-table-width") ?? source.style.width);
+
+  if (!width) {
+    return;
+  }
+
+  target.dataset.qmTableWidth = String(width);
+  target.style.width = `${width}%`;
+  target.style.maxWidth = "100%";
+}
+
+function copyTableHeightAttribute(target: HTMLElement, source: HTMLElement) {
+  const pixelHeight = safeTablePixelHeight(source.getAttribute("data-qm-table-height-px") ?? source.style.height);
+
+  if (!pixelHeight) {
+    return;
+  }
+
+  target.dataset.qmTableHeightPx = String(pixelHeight);
+  target.style.height = `${pixelHeight}px`;
+}
+
+function copyTableRowHeightAttribute(target: HTMLElement, source: HTMLElement) {
+  const pixelHeight = safeTableRowPixelHeight(source.getAttribute("data-qm-row-height-px") ?? source.style.height);
+
+  if (!pixelHeight) {
+    return;
+  }
+
+  target.dataset.qmRowHeightPx = String(pixelHeight);
+  target.style.height = `${pixelHeight}px`;
+}
+
+function copyPositiveIntegerAttribute(target: HTMLElement, source: HTMLElement, attribute: string, max: number) {
+  const value = Number(source.getAttribute(attribute));
+
+  if (Number.isInteger(value) && value > 0 && value <= max) {
+    target.setAttribute(attribute, String(value));
+  }
+}
+
+function copyColumnWidthAttribute(target: HTMLElement, source: HTMLElement) {
+  const rawValue = source.getAttribute("colwidth");
+
+  if (!rawValue) {
+    return;
+  }
+
+  const widths = rawValue
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isInteger(value) && value >= 24 && value <= 1600);
+
+  if (widths.length) {
+    target.setAttribute("colwidth", widths.join(","));
+  }
+}
+
+function copyCellWidthAttribute(target: HTMLElement, source: HTMLElement) {
+  const pixelWidth = safeTableColumnPixelWidth(source.getAttribute("data-qm-cell-width-px") ?? source.style.width);
+
+  if (!pixelWidth) {
+    return;
+  }
+
+  target.dataset.qmCellWidthPx = String(pixelWidth);
+  target.style.width = `${pixelWidth}px`;
+}
+
+function copyCellColorAttribute(target: HTMLElement, source: HTMLElement) {
+  const color = safeCellColor(source.getAttribute("data-qm-bg") || source.style.backgroundColor);
+
+  if (!color) {
+    return;
+  }
+
+  target.dataset.qmBg = color;
+  target.style.backgroundColor = color;
+}
+
 function safeImageWidth(value: string | null) {
   const normalizedValue = Number(String(value ?? "").replace("%", "").trim());
 
   return imageWidthOptions.has(normalizedValue) ? normalizedValue : null;
+}
+
+function safeImagePixelWidth(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= imagePixelWidthBounds.min && normalizedValue <= imagePixelWidthBounds.max
+    ? normalizedValue
+    : null;
+}
+
+function safeTableWidth(value: string | null) {
+  const normalizedValue = Number(String(value ?? "").replace("%", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= 30 && normalizedValue <= 100 ? normalizedValue : null;
+}
+
+function safeTablePixelWidth(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= tablePixelWidthBounds.min && normalizedValue <= tablePixelWidthBounds.max
+    ? normalizedValue
+    : null;
+}
+
+function safeTablePixelHeight(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= tablePixelHeightBounds.min && normalizedValue <= tablePixelHeightBounds.max
+    ? normalizedValue
+    : null;
+}
+
+function safeTableRowPixelHeight(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= tableRowPixelHeightBounds.min && normalizedValue <= tableRowPixelHeightBounds.max
+    ? normalizedValue
+    : null;
+}
+
+function safeTableColumnPixelWidth(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= tableColumnPixelWidthBounds.min && normalizedValue <= tableColumnPixelWidthBounds.max
+    ? normalizedValue
+    : null;
+}
+
+function safeTextSize(value: string | null) {
+  const normalizedValue = Number(String(value ?? "").replace("px", "").trim());
+
+  return textSizeOptions.has(normalizedValue) ? normalizedValue : null;
+}
+
+function safeTextAlign(value: string | null) {
+  const normalizedValue = String(value ?? "").trim().toLowerCase();
+
+  return textAlignments.has(normalizedValue) ? normalizedValue : null;
+}
+
+function safeCellColor(value: string | null) {
+  return safeColor(value);
+}
+
+function safeColor(value: string | null) {
+  const normalizedValue = normalizeColor(value);
+
+  return normalizedValue && (tableCellColors.has(normalizedValue) || safeHexColorPattern.test(normalizedValue)) ? normalizedValue : null;
+}
+
+function safePixelWidth(value: string | null) {
+  const match = String(value ?? "").trim().match(/^(\d{1,4})px$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const width = Number(match[1]);
+  return width >= 24 && width <= 1600 ? `${width}px` : null;
+}
+
+function normalizeColor(value: string | null) {
+  const rawValue = String(value ?? "").trim().toLowerCase();
+
+  if (rawValue.startsWith("#")) {
+    return rawValue;
+  }
+
+  const rgbMatch = rawValue.match(/^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/);
+
+  if (!rgbMatch) {
+    return null;
+  }
+
+  const channels = rgbMatch.slice(1).map((channel) => Number(channel));
+
+  if (channels.some((channel) => channel < 0 || channel > 255)) {
+    return null;
+  }
+
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function linkifyTextNode(node: Text) {
