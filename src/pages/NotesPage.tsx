@@ -83,6 +83,8 @@ import {
 import {
   editorCellColors,
   editorImagePixelWidthBounds,
+  editorTablePixelHeightBounds,
+  editorTableRowPixelHeightBounds,
   editorTablePixelWidthBounds,
   editorTablePixelWidths,
   editorTextColors,
@@ -142,8 +144,9 @@ interface NoteDraft {
 }
 
 interface AttachmentPreviewState {
+  bytes?: Uint8Array;
   fileName: string;
-  kind: "pdf" | "text" | "unsupported";
+  kind: "docx" | "pdf" | "text" | "unsupported";
   label: string;
   text?: string;
   url?: string;
@@ -202,6 +205,17 @@ interface CursorClientRect {
   width: number;
 }
 
+type TableResizeCursor = "col" | "row" | "ew" | "ns" | "nwse";
+
+interface TableResizeHit {
+  cursor: TableResizeCursor;
+  heightSign: -1 | 0 | 1;
+  kind: "row" | "table";
+  row?: HTMLTableRowElement;
+  table: HTMLTableElement;
+  widthSign: -1 | 0 | 1;
+}
+
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 2500;
@@ -217,7 +231,7 @@ const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
 const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx"]);
 const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
-const zippedTextPreviewAttachmentExtensions = new Set(["docx", "hwpx"]);
+const zippedTextPreviewAttachmentExtensions = new Set(["hwpx"]);
 const readableTextPreviewAttachmentExtensions = new Set(["doc", "hwp"]);
 const maxTextPreviewCharacters = 120_000;
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
@@ -1929,6 +1943,17 @@ export default function NotesPage() {
         return;
       }
 
+      if (attachment.extension === "docx") {
+        setAttachmentPreview({
+          bytes: plainBytes,
+          fileName,
+          kind: "docx",
+          label: "DOCX 양식 미리보기"
+        });
+        setStatus("DOCX 미리보기를 열었습니다.");
+        return;
+      }
+
       if (textPreviewAttachmentExtensions.has(attachment.extension)) {
         setAttachmentPreview({
           fileName,
@@ -1946,10 +1971,10 @@ export default function NotesPage() {
         setAttachmentPreview({
           fileName,
           kind: extractedText ? "text" : "unsupported",
-          label: `${attachment.extension.toUpperCase()} 미리보기`,
+          label: `${attachment.extension.toUpperCase()} 텍스트 미리보기`,
           text:
             extractedText ||
-            `${attachment.extension.toUpperCase()} 파일에서 안전하게 표시할 텍스트를 찾지 못했습니다. 외부 변환 서버로 전송하지 않기 위해 다운로드 확인만 지원합니다.`
+            `${attachment.extension.toUpperCase()} 파일에서 안전하게 표시할 텍스트를 찾지 못했습니다. 외부 변환 서버로 원본을 전송하지 않기 위해 다운로드 확인만 지원합니다.`
         });
         setStatus(extractedText ? "파일 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
         return;
@@ -1961,10 +1986,10 @@ export default function NotesPage() {
         setAttachmentPreview({
           fileName,
           kind: extractedText ? "text" : "unsupported",
-          label: `${attachment.extension.toUpperCase()} 미리보기`,
+          label: `${attachment.extension.toUpperCase()} 텍스트 미리보기`,
           text:
             extractedText ||
-            `${attachment.extension.toUpperCase()} 파일은 브라우저가 안전하게 직접 렌더링할 수 없는 형식입니다. 외부 변환 서버로 전송하지 않기 위해 다운로드 확인만 지원합니다.`
+            `${attachment.extension.toUpperCase()} 파일은 브라우저가 양식을 안전하게 직접 렌더링할 수 없는 형식입니다. 외부 변환 서버로 원본을 전송하지 않기 위해 다운로드 확인만 지원합니다.`
         });
         setStatus(extractedText ? "파일 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
         return;
@@ -2500,6 +2525,7 @@ function RichMemoEditor({
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
+  const tableResizeCleanupRef = useRef<(() => void) | null>(null);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
   const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
   const [customTextColor, setCustomTextColor] = useState<string>(editorTextColors[0]);
@@ -2573,6 +2599,114 @@ function RichMemoEditor({
       }
     };
   }, [editor, editorRef]);
+
+  useEffect(() => {
+    if (!editor) {
+      return undefined;
+    }
+
+    const editorElement = editor.view.dom as HTMLElement;
+
+    function setResizeCursor(cursor: TableResizeCursor | null) {
+      if (cursor) {
+        editorElement.dataset.qmTableResizeCursor = cursor;
+      } else {
+        delete editorElement.dataset.qmTableResizeCursor;
+      }
+    }
+
+    function handleMouseMove(event: MouseEvent) {
+      if (tableResizeCleanupRef.current) {
+        return;
+      }
+
+      setResizeCursor(tableResizeCursorFromEvent(editorElement, event));
+    }
+
+    function handleMouseLeave() {
+      if (!tableResizeCleanupRef.current) {
+        setResizeCursor(null);
+      }
+    }
+
+    function handleMouseDown(event: MouseEvent) {
+      if (event.button !== 0) {
+        return;
+      }
+
+      const hit = tableResizeHitFromEvent(editorElement, event);
+
+      if (!hit) {
+        return;
+      }
+
+      const resizeHit = hit;
+      event.preventDefault();
+      selectedImageRef.current = null;
+      setSelectedImageWidthPx(null);
+      setResizeCursor(resizeHit.cursor);
+
+      const restoreUserSelect = document.body.style.userSelect;
+      document.body.style.userSelect = "none";
+
+      const cleanup = () => {
+        document.body.style.userSelect = restoreUserSelect;
+        tableResizeCleanupRef.current = null;
+        setResizeCursor(null);
+        window.removeEventListener("mousemove", handleResizeMove);
+        window.removeEventListener("mouseup", cleanup);
+      };
+
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startWidth = resizeHit.table.getBoundingClientRect().width;
+      const startTableHeight = resizeHit.table.getBoundingClientRect().height;
+      const startRowHeight = resizeHit.row?.getBoundingClientRect().height ?? 0;
+
+      function handleResizeMove(moveEvent: MouseEvent) {
+        if (resizeHit.kind === "row" && resizeHit.row) {
+          const nextHeight = clampTableRowPixelHeight(startRowHeight + moveEvent.clientY - startY);
+          updateEditorNodeAttributes(editor, resizeHit.row, "tableRow", { qmHeightPx: nextHeight });
+          onChange(editor.getHTML());
+          setToolbarVersion((version) => version + 1);
+          return;
+        }
+
+        const nextAttributes: Record<string, number | null> = {};
+
+        if (resizeHit.widthSign !== 0) {
+          nextAttributes.qmWidth = null;
+          nextAttributes.qmWidthPx = clampTablePixelWidth(startWidth + (moveEvent.clientX - startX) * resizeHit.widthSign);
+        }
+
+        if (resizeHit.heightSign !== 0) {
+          nextAttributes.qmHeightPx = clampTablePixelHeight(startTableHeight + (moveEvent.clientY - startY) * resizeHit.heightSign);
+        }
+
+        if (Object.keys(nextAttributes).length) {
+          updateEditorNodeAttributes(editor, resizeHit.table, "table", nextAttributes);
+          onChange(editor.getHTML());
+          setToolbarVersion((version) => version + 1);
+        }
+      }
+
+      tableResizeCleanupRef.current = cleanup;
+      window.addEventListener("mousemove", handleResizeMove);
+      window.addEventListener("mouseup", cleanup);
+    }
+
+    editorElement.addEventListener("mousemove", handleMouseMove);
+    editorElement.addEventListener("mouseleave", handleMouseLeave);
+    editorElement.addEventListener("mousedown", handleMouseDown);
+
+    return () => {
+      tableResizeCleanupRef.current?.();
+      editorElement.removeEventListener("mousemove", handleMouseMove);
+      editorElement.removeEventListener("mouseleave", handleMouseLeave);
+      editorElement.removeEventListener("mousedown", handleMouseDown);
+      setResizeCursor(null);
+    };
+  }, [editor, onChange]);
 
   useEffect(() => {
     if (!editor || editor.getHTML() === (value || "")) {
@@ -3066,6 +3200,163 @@ function clampTablePixelWidth(value: number) {
   }
 
   return Math.min(editorTablePixelWidthBounds.max, Math.max(editorTablePixelWidthBounds.min, Math.round(value)));
+}
+
+function clampTablePixelHeight(value: number) {
+  if (!Number.isFinite(value)) {
+    return editorTablePixelHeightBounds.min;
+  }
+
+  return Math.min(editorTablePixelHeightBounds.max, Math.max(editorTablePixelHeightBounds.min, Math.round(value)));
+}
+
+function clampTableRowPixelHeight(value: number) {
+  if (!Number.isFinite(value)) {
+    return editorTableRowPixelHeightBounds.min;
+  }
+
+  return Math.min(editorTableRowPixelHeightBounds.max, Math.max(editorTableRowPixelHeightBounds.min, Math.round(value)));
+}
+
+function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeHit | null {
+  const target = event.target;
+
+  if (!(target instanceof HTMLElement) || !editorElement.contains(target)) {
+    return null;
+  }
+
+  if (target.closest("button, input, select, textarea, a")) {
+    return null;
+  }
+
+  const table = target.closest("table");
+
+  if (!(table instanceof HTMLTableElement) || !editorElement.contains(table)) {
+    return null;
+  }
+
+  const tableRect = table.getBoundingClientRect();
+  const edgeThreshold = 8;
+  const rowThreshold = 6;
+  const nearLeft = Math.abs(event.clientX - tableRect.left) <= edgeThreshold;
+  const nearRight = Math.abs(event.clientX - tableRect.right) <= edgeThreshold;
+  const nearTop = Math.abs(event.clientY - tableRect.top) <= edgeThreshold;
+  const nearBottom = Math.abs(event.clientY - tableRect.bottom) <= edgeThreshold;
+
+  if (nearLeft || nearRight || nearTop || nearBottom) {
+    const widthSign = nearLeft ? -1 : nearRight ? 1 : 0;
+    const heightSign = nearTop ? -1 : nearBottom ? 1 : 0;
+    const cursor: TableResizeCursor =
+      widthSign !== 0 && heightSign !== 0 ? "nwse" : widthSign !== 0 ? "ew" : heightSign !== 0 ? "ns" : "col";
+
+    return { cursor, heightSign, kind: "table", table, widthSign };
+  }
+
+  const cell = target.closest("td, th");
+
+  if (!(cell instanceof HTMLTableCellElement)) {
+    return null;
+  }
+
+  const cellRect = cell.getBoundingClientRect();
+
+  if (Math.abs(event.clientY - cellRect.bottom) > rowThreshold) {
+    return null;
+  }
+
+  const row = cell.closest("tr");
+
+  if (!(row instanceof HTMLTableRowElement)) {
+    return null;
+  }
+
+  return {
+    cursor: "row",
+    heightSign: 1,
+    kind: "row",
+    row,
+    table,
+    widthSign: 0
+  };
+}
+
+function tableResizeCursorFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeCursor | null {
+  const actionableHit = tableResizeHitFromEvent(editorElement, event);
+
+  if (actionableHit) {
+    return actionableHit.cursor;
+  }
+
+  const target = event.target;
+
+  if (!(target instanceof HTMLElement) || target.closest("button, input, select, textarea, a")) {
+    return null;
+  }
+
+  const cell = target.closest("td, th");
+
+  if (!(cell instanceof HTMLTableCellElement) || !editorElement.contains(cell)) {
+    return null;
+  }
+
+  const cellRect = cell.getBoundingClientRect();
+  return Math.abs(event.clientX - cellRect.right) <= 6 ? "col" : null;
+}
+
+function updateEditorNodeAttributes(
+  editor: TipTapEditor,
+  element: HTMLElement,
+  nodeName: "table" | "tableRow",
+  nextAttributes: Record<string, number | null>
+) {
+  const nodePosition = editorNodePositionFromElement(editor, element, nodeName);
+
+  if (!nodePosition) {
+    return;
+  }
+
+  const transaction = editor.state.tr.setNodeMarkup(nodePosition.position, undefined, {
+    ...nodePosition.node.attrs,
+    ...nextAttributes
+  });
+  editor.view.dispatch(transaction);
+}
+
+function editorNodePositionFromElement(editor: TipTapEditor, element: HTMLElement, nodeName: "table" | "tableRow") {
+  const probe = element.matches("td, th") ? element : element.querySelector("td, th") ?? element;
+  const rawPosition = editor.view.posAtDOM(probe, 0);
+  const position = Math.min(Math.max(rawPosition, 0), editor.state.doc.content.size);
+  const resolvedPosition = editor.state.doc.resolve(position);
+
+  for (let depth = resolvedPosition.depth; depth > 0; depth -= 1) {
+    const node = resolvedPosition.node(depth);
+
+    if (node.type.name === nodeName) {
+      return {
+        node,
+        position: resolvedPosition.before(depth)
+      };
+    }
+  }
+
+  for (let offset = -2; offset <= 2; offset += 1) {
+    const candidatePosition = position + offset;
+
+    if (candidatePosition < 0 || candidatePosition > editor.state.doc.content.size) {
+      continue;
+    }
+
+    const node = editor.state.doc.nodeAt(candidatePosition);
+
+    if (node?.type.name === nodeName) {
+      return {
+        node,
+        position: candidatePosition
+      };
+    }
+  }
+
+  return null;
 }
 
 function RemoteCursorLayer({
@@ -3904,6 +4195,9 @@ function AttachmentPreviewModal({
   onClose: () => void;
   preview: AttachmentPreviewState;
 }) {
+  const docxContainerRef = useRef<HTMLDivElement | null>(null);
+  const [docxError, setDocxError] = useState<string | null>(null);
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -3915,6 +4209,56 @@ function AttachmentPreviewModal({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  useEffect(() => {
+    if (preview.kind !== "docx" || !preview.bytes || !docxContainerRef.current) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const container = docxContainerRef.current;
+    container.innerHTML = "";
+    setDocxError(null);
+
+    async function renderDocxPreview() {
+      const { renderAsync } = await import("docx-preview");
+
+      if (cancelled || preview.kind !== "docx" || !preview.bytes) {
+        return;
+      }
+
+      await renderAsync(preview.bytes.slice(), container, container, {
+        breakPages: true,
+        className: "qm-docx",
+        experimental: false,
+        ignoreFonts: true,
+        ignoreHeight: false,
+        ignoreLastRenderedPageBreak: false,
+        ignoreWidth: false,
+        inWrapper: true,
+        renderAltChunks: false,
+        renderChanges: false,
+        renderComments: false,
+        renderEndnotes: true,
+        renderFooters: true,
+        renderFootnotes: true,
+        renderHeaders: true,
+        trimXmlDeclaration: true,
+        useBase64URL: true
+      });
+    }
+
+    void renderDocxPreview().catch(() => {
+      if (!cancelled) {
+        setDocxError("DOCX 양식 미리보기를 만들지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 요소가 포함되어 있습니다.");
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      container.innerHTML = "";
+    };
+  }, [preview.bytes, preview.kind]);
 
   return (
     <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
@@ -3954,6 +4298,11 @@ function AttachmentPreviewModal({
               다운로드
             </a>
           </object>
+        ) : preview.kind === "docx" ? (
+          <div className="docx-preview-frame">
+            <div ref={docxContainerRef} className="docx-preview-content" />
+            {docxError && <p className="file-preview-error">{docxError}</p>}
+          </div>
         ) : (
           <pre className={`file-text-preview ${preview.kind === "unsupported" ? "unsupported" : ""}`}>{preview.text}</pre>
         )}

@@ -1505,6 +1505,16 @@ textarea {
   min-width: 0;
 }
 
+.rich-body-input ul[data-type="taskList"] > li,
+.rich-body-input li[data-checked] {
+  align-items: start;
+  column-gap: 0.45em;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  margin: 0 0 0.35em;
+  min-width: 0;
+}
+
 .rich-body-input li[data-type="taskItem"] > label,
 .note-preview-body li[data-type="taskItem"] > label,
 .admin-note-view-body li[data-type="taskItem"] > label {
@@ -1517,9 +1527,30 @@ textarea {
   width: auto;
 }
 
+.rich-body-input ul[data-type="taskList"] > li > label,
+.rich-body-input li[data-checked] > label {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  height: 1.35em;
+  justify-content: center;
+  min-height: 0 !important;
+  padding: 0.18em 0 0;
+  width: 1.05em;
+}
+
+.rich-body-input ul[data-type="taskList"] > li > label > span,
+.rich-body-input li[data-checked] > label > span,
+.note-preview-body li[data-type="taskItem"] > label > span,
+.admin-note-view-body li[data-type="taskItem"] > label > span {
+  display: none;
+}
+
 .rich-body-input li[data-type="taskItem"] > label input[type="checkbox"],
 .note-preview-body li[data-type="taskItem"] > label input[type="checkbox"],
-.admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"] {
+.admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"],
+.rich-body-input ul[data-type="taskList"] > li > label input[type="checkbox"],
+.rich-body-input li[data-checked] > label input[type="checkbox"] {
   accent-color: var(--teal);
   appearance: none;
   background: #ffffff;
@@ -1542,7 +1573,9 @@ textarea {
 
 .rich-body-input li[data-type="taskItem"] > label input[type="checkbox"]:checked,
 .note-preview-body li[data-type="taskItem"] > label input[type="checkbox"]:checked,
-.admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"]:checked {
+.admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"]:checked,
+.rich-body-input ul[data-type="taskList"] > li > label input[type="checkbox"]:checked,
+.rich-body-input li[data-checked] > label input[type="checkbox"]:checked {
   background:
     linear-gradient(45deg, transparent 58%, #ffffff 58% 72%, transparent 72%) 19% 53% / 45% 45% no-repeat,
     linear-gradient(135deg, transparent 52%, #ffffff 52% 66%, transparent 66%) 68% 48% / 58% 58% no-repeat,
@@ -1551,6 +1584,15 @@ textarea {
 }
 
 :is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="14"]) > label input[type="checkbox"] {
+  block-size: 14px !important;
+  height: 14px !important;
+  inline-size: 14px !important;
+  max-height: 14px !important;
+  max-width: 14px !important;
+  width: 14px !important;
+}
+
+.rich-body-input li[data-checked]:has([data-qm-font-size="14"]) > label input[type="checkbox"] {
   block-size: 14px !important;
   height: 14px !important;
   inline-size: 14px !important;
@@ -1568,7 +1610,25 @@ textarea {
   width: 16px !important;
 }
 
+.rich-body-input li[data-checked]:has([data-qm-font-size="16"]) > label input[type="checkbox"] {
+  block-size: 16px !important;
+  height: 16px !important;
+  inline-size: 16px !important;
+  max-height: 16px !important;
+  max-width: 16px !important;
+  width: 16px !important;
+}
+
 :is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="17"]) > label input[type="checkbox"] {
+  block-size: 17px !important;
+  height: 17px !important;
+  inline-size: 17px !important;
+  max-height: 17px !important;
+  max-width: 17px !important;
+  width: 17px !important;
+}
+
+.rich-body-input li[data-checked]:has([data-qm-font-size="17"]) > label input[type="checkbox"] {
   block-size: 17px !important;
   height: 17px !important;
   inline-size: 17px !important;
@@ -1586,7 +1646,25 @@ textarea {
   width: 18px !important;
 }
 
+.rich-body-input li[data-checked]:has([data-qm-font-size="18"]) > label input[type="checkbox"] {
+  block-size: 18px !important;
+  height: 18px !important;
+  inline-size: 18px !important;
+  max-height: 18px !important;
+  max-width: 18px !important;
+  width: 18px !important;
+}
+
 :is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="20"]) > label input[type="checkbox"] {
+  block-size: 20px !important;
+  height: 20px !important;
+  inline-size: 20px !important;
+  max-height: 20px !important;
+  max-width: 20px !important;
+  width: 20px !important;
+}
+
+.rich-body-input li[data-checked]:has([data-qm-font-size="20"]) > label input[type="checkbox"] {
   block-size: 20px !important;
   height: 20px !important;
   inline-size: 20px !important;
@@ -1604,7 +1682,25 @@ textarea {
   width: 22px !important;
 }
 
+.rich-body-input li[data-checked]:has([data-qm-font-size="22"]) > label input[type="checkbox"] {
+  block-size: 22px !important;
+  height: 22px !important;
+  inline-size: 22px !important;
+  max-height: 22px !important;
+  max-width: 22px !important;
+  width: 22px !important;
+}
+
 :is(.rich-body-input, .note-preview-body, .admin-note-view-body) li[data-type="taskItem"]:has([data-qm-font-size="24"]) > label input[type="checkbox"] {
+  block-size: 24px !important;
+  height: 24px !important;
+  inline-size: 24px !important;
+  max-height: 24px !important;
+  max-width: 24px !important;
+  width: 24px !important;
+}
+
+.rich-body-input li[data-checked]:has([data-qm-font-size="24"]) > label input[type="checkbox"] {
   block-size: 24px !important;
   height: 24px !important;
   inline-size: 24px !important;
@@ -1622,16 +1718,29 @@ textarea {
   width: 28px !important;
 }
 
+.rich-body-input li[data-checked]:has([data-qm-font-size="28"]) > label input[type="checkbox"] {
+  block-size: 28px !important;
+  height: 28px !important;
+  inline-size: 28px !important;
+  max-height: 28px !important;
+  max-width: 28px !important;
+  width: 28px !important;
+}
+
 .rich-body-input li[data-type="taskItem"] > div,
 .note-preview-body li[data-type="taskItem"] > div,
-.admin-note-view-body li[data-type="taskItem"] > div {
+.admin-note-view-body li[data-type="taskItem"] > div,
+.rich-body-input ul[data-type="taskList"] > li > div,
+.rich-body-input li[data-checked] > div {
   flex: 1 1 auto;
   min-width: 0;
 }
 
 .rich-body-input li[data-type="taskItem"] p,
 .note-preview-body li[data-type="taskItem"] p,
-.admin-note-view-body li[data-type="taskItem"] p {
+.admin-note-view-body li[data-type="taskItem"] p,
+.rich-body-input ul[data-type="taskList"] > li p,
+.rich-body-input li[data-checked] p {
   margin: 0 0 4px;
 }
 
@@ -1654,6 +1763,18 @@ textarea {
 .note-preview-body table[data-qm-table-width-px],
 .admin-note-view-body table[data-qm-table-width-px] {
   max-width: 100%;
+}
+
+.rich-body-input table[data-qm-table-height-px],
+.note-preview-body table[data-qm-table-height-px],
+.admin-note-view-body table[data-qm-table-height-px] {
+  min-height: 96px;
+}
+
+.rich-body-input tr[data-qm-row-height-px],
+.note-preview-body tr[data-qm-row-height-px],
+.admin-note-view-body tr[data-qm-row-height-px] {
+  min-height: 28px;
 }
 
 .rich-body-input td,
@@ -1686,17 +1807,34 @@ textarea {
 }
 
 .rich-body-input .column-resize-handle {
-  background: var(--blue);
+  background: rgb(63 111 181 / 78%);
   bottom: -1px;
   pointer-events: none;
   position: absolute;
-  right: -2px;
+  right: -3px;
   top: 0;
-  width: 4px;
+  width: 6px;
 }
 
-.rich-body-input.resize-cursor {
+.rich-body-input.resize-cursor,
+.rich-body-input[data-qm-table-resize-cursor="col"] {
   cursor: col-resize;
+}
+
+.rich-body-input[data-qm-table-resize-cursor="row"] {
+  cursor: row-resize;
+}
+
+.rich-body-input[data-qm-table-resize-cursor="ew"] {
+  cursor: ew-resize;
+}
+
+.rich-body-input[data-qm-table-resize-cursor="ns"] {
+  cursor: ns-resize;
+}
+
+.rich-body-input[data-qm-table-resize-cursor="nwse"] {
+  cursor: nwse-resize;
 }
 
 .rich-body-input img {
@@ -2290,6 +2428,41 @@ textarea {
   font-weight: 800;
   place-items: center;
   text-align: center;
+}
+
+.docx-preview-frame {
+  background: #eef1f3;
+  flex: 1 1 auto;
+  min-height: 420px;
+  overflow: auto;
+  padding: 22px;
+}
+
+.docx-preview-content {
+  color: #111827;
+  min-width: max-content;
+}
+
+.docx-preview-content .qm-docx-wrapper {
+  background: transparent;
+  padding: 0;
+}
+
+.docx-preview-content .qm-docx {
+  box-shadow: 0 8px 28px rgb(15 23 42 / 14%);
+  margin: 0 auto 18px;
+}
+
+.file-preview-error {
+  background: #ffffff;
+  border: 1px solid rgb(199 81 70 / 24%);
+  border-radius: 8px;
+  color: var(--coral);
+  font-size: 14px;
+  font-weight: 850;
+  margin: 12px auto 0;
+  max-width: 680px;
+  padding: 12px;
 }
 
 .note-preview-header {
@@ -3524,6 +3697,11 @@ textarea {
 
   .pdf-preview-frame {
     min-height: 360px;
+  }
+
+  .docx-preview-frame {
+    min-height: 360px;
+    padding: 12px;
   }
 
   .attachment-panel {

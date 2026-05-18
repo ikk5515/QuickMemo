@@ -6,6 +6,8 @@ const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
 const imagePixelWidthBounds = { min: 120, max: 1200 };
 const tablePixelWidthBounds = { min: 280, max: 1800 };
+const tablePixelHeightBounds = { min: 96, max: 2000 };
+const tableRowPixelHeightBounds = { min: 28, max: 900 };
 const textSizeOptions = new Set([14, 16, 17, 18, 20, 22, 24, 28]);
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
@@ -332,6 +334,11 @@ function copyTextColor(target: HTMLElement, source: HTMLElement) {
 function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
   if (target.tagName === "TABLE") {
     copyTableWidthAttribute(target, source);
+    copyTableHeightAttribute(target, source);
+  }
+
+  if (target.tagName === "TR") {
+    copyTableRowHeightAttribute(target, source);
   }
 
   if (target.tagName === "TD" || target.tagName === "TH") {
@@ -369,6 +376,28 @@ function copyTableWidthAttribute(target: HTMLElement, source: HTMLElement) {
   target.dataset.qmTableWidth = String(width);
   target.style.width = `${width}%`;
   target.style.maxWidth = "100%";
+}
+
+function copyTableHeightAttribute(target: HTMLElement, source: HTMLElement) {
+  const pixelHeight = safeTablePixelHeight(source.getAttribute("data-qm-table-height-px") ?? source.style.height);
+
+  if (!pixelHeight) {
+    return;
+  }
+
+  target.dataset.qmTableHeightPx = String(pixelHeight);
+  target.style.height = `${pixelHeight}px`;
+}
+
+function copyTableRowHeightAttribute(target: HTMLElement, source: HTMLElement) {
+  const pixelHeight = safeTableRowPixelHeight(source.getAttribute("data-qm-row-height-px") ?? source.style.height);
+
+  if (!pixelHeight) {
+    return;
+  }
+
+  target.dataset.qmRowHeightPx = String(pixelHeight);
+  target.style.height = `${pixelHeight}px`;
 }
 
 function copyPositiveIntegerAttribute(target: HTMLElement, source: HTMLElement, attribute: string, max: number) {
@@ -443,6 +472,34 @@ function safeTablePixelWidth(value: string | null) {
   const normalizedValue = Number(rawValue.replace("px", "").trim());
 
   return Number.isInteger(normalizedValue) && normalizedValue >= tablePixelWidthBounds.min && normalizedValue <= tablePixelWidthBounds.max
+    ? normalizedValue
+    : null;
+}
+
+function safeTablePixelHeight(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= tablePixelHeightBounds.min && normalizedValue <= tablePixelHeightBounds.max
+    ? normalizedValue
+    : null;
+}
+
+function safeTableRowPixelHeight(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= tableRowPixelHeightBounds.min && normalizedValue <= tableRowPixelHeightBounds.max
     ? normalizedValue
     : null;
 }

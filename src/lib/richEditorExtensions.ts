@@ -16,6 +16,8 @@ export const editorImageWidths = [25, 50, 75, 100] as const;
 export const editorImagePixelWidthBounds = { min: 120, max: 1200, step: 10 } as const;
 export const editorTablePixelWidths = [480, 720, 960, 1200] as const;
 export const editorTablePixelWidthBounds = { min: 280, max: 1800, step: 10 } as const;
+export const editorTablePixelHeightBounds = { min: 96, max: 2000, step: 8 } as const;
+export const editorTableRowPixelHeightBounds = { min: 28, max: 900, step: 4 } as const;
 export const editorTextSizes = [14, 16, 17, 18, 20, 22, 24, 28] as const;
 export const editorTextColors = ["#14211f", "#64748b", "#dc2626", "#b9822f", "#15803d", "#2563eb", "#7c3aed"] as const;
 
@@ -56,6 +58,20 @@ function normalizedTablePixelWidth(value: unknown) {
   const width = Number(String(value ?? "").replace("px", "").trim());
 
   return Number.isInteger(width) && width >= editorTablePixelWidthBounds.min && width <= editorTablePixelWidthBounds.max ? width : null;
+}
+
+function normalizedTablePixelHeight(value: unknown) {
+  const height = Number(String(value ?? "").replace("px", "").trim());
+
+  return Number.isInteger(height) && height >= editorTablePixelHeightBounds.min && height <= editorTablePixelHeightBounds.max ? height : null;
+}
+
+function normalizedTableRowPixelHeight(value: unknown) {
+  const height = Number(String(value ?? "").replace("px", "").trim());
+
+  return Number.isInteger(height) && height >= editorTableRowPixelHeightBounds.min && height <= editorTableRowPixelHeightBounds.max
+    ? height
+    : null;
 }
 
 function normalizedTextSize(value: unknown) {
@@ -150,6 +166,30 @@ const ResizableTable = Table.extend({
         renderHTML: (attributes: { qmWidthPx?: number | string | null }) => {
           const width = normalizedTablePixelWidth(attributes.qmWidthPx);
           return width ? { "data-qm-table-width-px": String(width), style: `width: ${width}px; max-width: 100%` } : {};
+        }
+      },
+      qmHeightPx: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedTablePixelHeight(element.getAttribute("data-qm-table-height-px") || element.style.height),
+        renderHTML: (attributes: { qmHeightPx?: number | string | null }) => {
+          const height = normalizedTablePixelHeight(attributes.qmHeightPx);
+          return height ? { "data-qm-table-height-px": String(height), style: `height: ${height}px` } : {};
+        }
+      }
+    };
+  }
+});
+
+const ResizableTableRow = TableRow.extend({
+  addAttributes() {
+    return {
+      ...this.parent?.(),
+      qmHeightPx: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedTableRowPixelHeight(element.getAttribute("data-qm-row-height-px") || element.style.height),
+        renderHTML: (attributes: { qmHeightPx?: number | string | null }) => {
+          const height = normalizedTableRowPixelHeight(attributes.qmHeightPx);
+          return height ? { "data-qm-row-height-px": String(height), style: `height: ${height}px` } : {};
         }
       }
     };
@@ -249,7 +289,7 @@ export const richEditorExtensions = [
   ResizableTable.configure({
     resizable: true
   }),
-  TableRow,
+  ResizableTableRow,
   ColoredTableHeader,
   ColoredTableCell,
   TextAlign.configure({
