@@ -792,6 +792,9 @@ export default function NotesPage() {
   const [listOpen, setListOpen] = useState(false);
   const [overviewOpen, setOverviewOpen] = useState(false);
   const [overviewFolderFilter, setOverviewFolderFilter] = useState<OverviewFolderFilter>("all");
+  const [desktopWorkspace, setDesktopWorkspace] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia("(min-width: 1180px)").matches
+  );
   const [shareOpen, setShareOpen] = useState(false);
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [deadlineOpen, setDeadlineOpen] = useState(false);
@@ -805,6 +808,16 @@ export default function NotesPage() {
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
   const pdfPreviewUrl = useRef<string | null>(null);
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1180px)");
+    const updateDesktopWorkspace = () => setDesktopWorkspace(query.matches);
+
+    updateDesktopWorkspace();
+    query.addEventListener("change", updateDesktopWorkspace);
+    return () => query.removeEventListener("change", updateDesktopWorkspace);
+  }, []);
+
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -1372,6 +1385,12 @@ export default function NotesPage() {
 
   function clearEditorCursor() {
     publishEditorCursor(null, false);
+  }
+
+  function openOverview(filter: OverviewFolderFilter = "all") {
+    setOverviewFolderFilter(filter);
+    setOverviewOpen(true);
+    setListOpen(false);
   }
 
   function updateFontSize(fontSize: number) {
@@ -2163,8 +2182,36 @@ export default function NotesPage() {
             onUpdateNoteFolder={(note, folderId) => void updateStoredNoteFolder(note, folderId)}
           />
         ) : (
-          <>
-        <section className="editor-panel full-editor-panel">
+          <div className="notes-editor-layout">
+            <NoteGroupRail
+              folders={folders}
+              notes={personalOverviewNotes}
+              onNew={startNewNote}
+              onOpenOverview={openOverview}
+            />
+            <NoteDrawer
+              activeNoteId={editor.noteId}
+              canRestoreNote={canRestoreNote}
+              counts={noteCounts}
+              deletedNotes={trashNotes}
+              filter={noteFilter}
+              folders={folders}
+              noteStates={noteStateMap}
+              notes={visibleNotes}
+              onClose={() => setListOpen(false)}
+              onFilterChange={updateNoteFilter}
+              onNew={startNewNote}
+              onOpenOverview={openOverview}
+              onPreview={previewStoredNote}
+              onPurge={(note) => void purgePreviewNote(note)}
+              onRestore={(note) => void restorePreviewNote(note)}
+              onSortChange={updateSortSetting}
+              onTogglePin={(note) => void togglePinnedNote(note)}
+              open={listOpen || desktopWorkspace}
+              pinned={desktopWorkspace}
+              sortSetting={noteSort}
+            />
+            <section className="editor-panel full-editor-panel">
           <div className="editor-toolbar">
             <div className="editor-primary-actions">
               <button className="secondary-button" type="button" onClick={() => setShareOpen((current) => !current)}>
@@ -2225,7 +2272,7 @@ export default function NotesPage() {
                 <PanelRightOpen size={18} />
                 노트 목록
               </button>
-              <button className="secondary-button" type="button" onClick={() => setOverviewOpen(true)}>
+              <button className="secondary-button" type="button" onClick={() => openOverview("all")}>
                 <LayoutGrid size={18} />
                 전체 조회
               </button>
@@ -2336,27 +2383,8 @@ export default function NotesPage() {
             <span className={`note-kind-pill ${currentType}`}>{currentType === "shared" ? "공유" : "개인"}</span>
             {error && <p className="form-error">{error}</p>}
           </div>
-        </section>
-        <NoteDrawer
-          activeNoteId={editor.noteId}
-          canRestoreNote={canRestoreNote}
-          counts={noteCounts}
-          deletedNotes={trashNotes}
-          filter={noteFilter}
-          noteStates={noteStateMap}
-          notes={visibleNotes}
-          onClose={() => setListOpen(false)}
-          onFilterChange={updateNoteFilter}
-          onNew={startNewNote}
-          onPreview={previewStoredNote}
-          onPurge={(note) => void purgePreviewNote(note)}
-          onRestore={(note) => void restorePreviewNote(note)}
-          onSortChange={updateSortSetting}
-          onTogglePin={(note) => void togglePinnedNote(note)}
-          open={listOpen}
-          sortSetting={noteSort}
-        />
-          </>
+            </section>
+          </div>
         )}
         {previewNote && (
           <NotePreviewModal
@@ -3028,17 +3056,20 @@ function NoteDrawer({
   counts,
   deletedNotes,
   filter,
+  folders,
   noteStates,
   notes,
   onClose,
   onFilterChange,
   onNew,
+  onOpenOverview,
   onPreview,
   onPurge,
   onRestore,
   onSortChange,
   onTogglePin,
   open,
+  pinned,
   sortSetting
 }: {
   activeNoteId: string | null;
@@ -3046,17 +3077,20 @@ function NoteDrawer({
   counts: NoteListCounts;
   deletedNotes: DecryptedNote[];
   filter: NoteListFilter;
+  folders: NoteFolderSnapshot[];
   noteStates: NoteStateByNoteId;
   notes: DecryptedNote[];
   onClose: () => void;
   onFilterChange: (filter: NoteListFilter) => void;
   onNew: () => void;
+  onOpenOverview: (filter?: OverviewFolderFilter) => void;
   onPreview: (note: DecryptedNote) => void;
   onPurge: (note: DecryptedNote) => void;
   onRestore: (note: DecryptedNote) => void;
   onSortChange: (setting: NoteSortSetting) => void;
   onTogglePin: (note: DecryptedNote) => void;
   open: boolean;
+  pinned: boolean;
   sortSetting: NoteSortSetting;
 }) {
   const [mode, setMode] = useState<DrawerMode>("notes");
@@ -3069,7 +3103,7 @@ function NoteDrawer({
   const listedNotes = isTrashMode ? deletedNotes : notes;
 
   return (
-    <aside className="note-drawer" aria-label="노트 목록">
+    <aside className={`note-drawer ${pinned ? "pinned" : ""}`} aria-label="노트 목록">
       <div className="note-drawer-header">
         <h2>
           <ListChecks size={18} />
@@ -3079,6 +3113,31 @@ function NoteDrawer({
           <X size={18} />
         </button>
       </div>
+      {!isTrashMode && (
+        <div className="drawer-folder-shortcuts" aria-label="개인 노트 그룹 바로가기">
+          <button className="secondary-button" type="button" onClick={() => onOpenOverview("all")}>
+            <LayoutGrid size={15} />
+            전체 조회
+          </button>
+          {folders.length ? (
+            <div>
+              {folders.slice(0, 5).map((folder) => (
+                <button
+                  key={folder.id}
+                  style={{ "--folder-color": folder.color } as CSSProperties}
+                  type="button"
+                  onClick={() => onOpenOverview(folder.id)}
+                >
+                  <span className="folder-dot" />
+                  <span>{folder.name}</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className="drawer-folder-empty">생성된 그룹 없음</span>
+          )}
+        </div>
+      )}
       <button
         className="secondary-button drawer-new-button"
         type="button"
@@ -3173,6 +3232,53 @@ function NoteDrawer({
         onRestore={onRestore}
         onTogglePin={onTogglePin}
       />
+    </aside>
+  );
+}
+
+function NoteGroupRail({
+  folders,
+  notes,
+  onNew,
+  onOpenOverview
+}: {
+  folders: NoteFolderSnapshot[];
+  notes: DecryptedNote[];
+  onNew: () => void;
+  onOpenOverview: (filter?: OverviewFolderFilter) => void;
+}) {
+  const foldersById = new Map(folders.map((folder) => [folder.id, folder]));
+  const unfiledCount = notes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length;
+
+  return (
+    <aside className="note-group-rail" aria-label="개인 노트 그룹">
+      <div className="note-group-rail-header">
+        <span>탐색</span>
+        <strong>{notes.length}</strong>
+      </div>
+      <button type="button" onClick={() => onOpenOverview("all")}>
+        <LayoutGrid size={16} />
+        <span>전체 조회</span>
+        <strong>{notes.length}</strong>
+      </button>
+      <button type="button" onClick={() => onOpenOverview("unfiled")}>
+        <FolderOpen size={16} />
+        <span>미분류</span>
+        <strong>{unfiledCount}</strong>
+      </button>
+      <div className="note-group-rail-folders">
+        {folders.map((folder) => (
+          <button key={folder.id} style={{ "--folder-color": folder.color } as CSSProperties} type="button" onClick={() => onOpenOverview(folder.id)}>
+            <span className="folder-dot" />
+            <span>{folder.name}</span>
+            <strong>{notes.filter((note) => note.folderId === folder.id).length}</strong>
+          </button>
+        ))}
+      </div>
+      <button className="note-group-new" type="button" onClick={onNew}>
+        <FilePlus2 size={16} />
+        <span>새 노트</span>
+      </button>
     </aside>
   );
 }
