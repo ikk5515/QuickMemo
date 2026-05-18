@@ -49,6 +49,10 @@ export interface UserKeyDocument {
   encryptedPrivateKeyJwk: EncryptedPayload;
   kdfSalt: string;
   kdfIterations: number;
+  pendingEncryptedPrivateKeyJwk?: EncryptedPayload;
+  pendingKdfSalt?: string;
+  pendingKdfIterations?: number;
+  pendingCreatedAt?: Timestamp;
   updatedAt?: Timestamp;
 }
 
@@ -61,6 +65,7 @@ export interface NoteDocument {
   encryptedTitle: EncryptedPayload;
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
+  folderId?: string | null;
   createdAt?: Timestamp;
   dueAt?: Timestamp | null;
   updatedAt?: Timestamp;
@@ -92,6 +97,14 @@ export interface NoteAttachmentDocument {
   iv: Bytes;
   uploadedBy: string;
   createdAt?: Timestamp;
+}
+
+export interface NoteFolderDocument {
+  ownerUid: string;
+  name: string;
+  color: string;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
 }
 
 export interface NoteUserStateDocument {

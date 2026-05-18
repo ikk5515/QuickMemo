@@ -304,6 +304,49 @@ describeRules("firestore security rules", () => {
     );
   });
 
+  it("allows users to rotate only their own encrypted private key material", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "userKeys/user-a"), userKey("user-a"));
+    });
+
+    const userDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(
+      updateDoc(doc(userDb, "userKeys/user-a"), {
+        pendingEncryptedPrivateKeyJwk: { ...userKeyPayload, cipherText: "pending-key" },
+        pendingKdfSalt: "pending-salt",
+        pendingKdfIterations: 210000,
+        pendingCreatedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(userDb, "userKeys/user-a"), {
+        encryptedPrivateKeyJwk: { ...userKeyPayload, cipherText: "next-key" },
+        kdfSalt: "next-salt",
+        kdfIterations: 210000,
+        pendingEncryptedPrivateKeyJwk: deleteField(),
+        pendingKdfSalt: deleteField(),
+        pendingKdfIterations: deleteField(),
+        pendingCreatedAt: deleteField(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(updateDoc(doc(userDb, "userKeys/user-a"), { publicKeyJwk: { kty: "RSA", kid: "changed" } }));
+    await assertFails(
+      updateDoc(doc(otherDb, "userKeys/user-a"), {
+        pendingEncryptedPrivateKeyJwk: { ...userKeyPayload, cipherText: "stolen" },
+        pendingKdfSalt: "pending-salt",
+        pendingKdfIterations: 210000,
+        pendingCreatedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+  });
+
   it("allows participants to read notes and blocks outsiders", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
@@ -447,6 +490,73 @@ describeRules("firestore security rules", () => {
         },
         isDeleted: false,
         updatedBy: "user-b"
+      })
+    );
+  });
+
+  it("allows owners to manage personal note folders and blocks cross-user assignments", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/personal-note"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(context.firestore(), "notes/shared-note"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "noteFolders/folder-a"), {
+        ownerUid: "user-a",
+        name: "업무",
+        color: "#2f7d70",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(getDoc(doc(otherDb, "noteFolders/folder-a")));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "notes/personal-note"), {
+        folderId: "folder-a",
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-a"
+      })
+    );
+    await assertFails(
+      updateDoc(doc(otherDb, "notes/personal-note"), {
+        folderId: "folder-a",
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-b"
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "notes/shared-note"), {
+        folderId: "folder-a",
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-a"
       })
     );
   });

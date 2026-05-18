@@ -1,7 +1,7 @@
-import { collection, doc, getDoc, onSnapshot, orderBy, query } from "firebase/firestore";
+import { collection, deleteField, doc, getDoc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { sortRoster } from "../lib/roster";
-import type { PublicRosterUser, UserKeyDocument, UserProfile } from "../types";
+import type { PublicRosterUser, UserKeyBundle, UserKeyDocument, UserProfile } from "../types";
 
 export function subscribeRoster(callback: (users: PublicRosterUser[]) => void, onError?: (error: Error) => void) {
   const rosterQuery = query(collection(db, "publicLoginRoster"), orderBy("order", "asc"));
@@ -52,4 +52,37 @@ export async function getUserProfile(uid: string) {
 export async function getUserKeyDocument(uid: string) {
   const snapshot = await getDoc(doc(db, "userKeys", uid));
   return snapshot.exists() ? (snapshot.data() as UserKeyDocument) : null;
+}
+
+export async function stagePendingUserKey(uid: string, keyBundle: UserKeyBundle) {
+  await updateDoc(doc(db, "userKeys", uid), {
+    pendingEncryptedPrivateKeyJwk: keyBundle.encryptedPrivateKeyJwk,
+    pendingKdfSalt: keyBundle.kdfSalt,
+    pendingKdfIterations: keyBundle.kdfIterations,
+    pendingCreatedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function promotePendingUserKey(uid: string, keyBundle: UserKeyBundle) {
+  await updateDoc(doc(db, "userKeys", uid), {
+    encryptedPrivateKeyJwk: keyBundle.encryptedPrivateKeyJwk,
+    kdfSalt: keyBundle.kdfSalt,
+    kdfIterations: keyBundle.kdfIterations,
+    pendingEncryptedPrivateKeyJwk: deleteField(),
+    pendingKdfSalt: deleteField(),
+    pendingKdfIterations: deleteField(),
+    pendingCreatedAt: deleteField(),
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function clearPendingUserKey(uid: string) {
+  await updateDoc(doc(db, "userKeys", uid), {
+    pendingEncryptedPrivateKeyJwk: deleteField(),
+    pendingKdfSalt: deleteField(),
+    pendingKdfIterations: deleteField(),
+    pendingCreatedAt: deleteField(),
+    updatedAt: serverTimestamp()
+  });
 }

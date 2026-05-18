@@ -1,25 +1,38 @@
 const fontSizePattern = /^<!--qm-font-size:(\d+)-->/;
-const htmlTagPattern = /<(a|p|div|br|strong|b|em|i|u|span|img|figure|ul|ol|li|blockquote|pre|code)\b/i;
+const htmlTagPattern =
+  /<(a|p|div|br|strong|b|em|i|u|span|img|figure|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
+const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
+const textAlignments = new Set(["left", "center", "right"]);
 const allowedTags = new Set([
   "A",
   "B",
   "BLOCKQUOTE",
   "BR",
   "CODE",
+  "COL",
+  "COLGROUP",
   "DIV",
   "EM",
   "FIGURE",
   "I",
   "IMG",
+  "INPUT",
+  "LABEL",
   "LI",
   "OL",
   "P",
   "PRE",
   "SPAN",
   "STRONG",
+  "TABLE",
+  "TBODY",
+  "TD",
+  "TH",
+  "THEAD",
+  "TR",
   "U",
   "UL"
 ]);
@@ -168,7 +181,12 @@ function sanitizeNode(node: Node): Node | null {
     return sanitizeAnchor(node);
   }
 
+  if (node.tagName === "INPUT") {
+    return sanitizeCheckbox(node);
+  }
+
   const element = document.createElement(node.tagName.toLowerCase());
+  copySafeAttributes(element, node);
 
   node.childNodes.forEach((childNode) => {
     const sanitizedChild = sanitizeNode(childNode);
@@ -179,6 +197,23 @@ function sanitizeNode(node: Node): Node | null {
   });
 
   return element;
+}
+
+function sanitizeCheckbox(node: HTMLElement): Node | null {
+  if (node.getAttribute("type") !== "checkbox") {
+    return null;
+  }
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.disabled = true;
+
+  if (node.hasAttribute("checked")) {
+    checkbox.checked = true;
+    checkbox.setAttribute("checked", "");
+  }
+
+  return checkbox;
 }
 
 function sanitizeAnchor(node: HTMLElement): Node {
@@ -224,10 +259,140 @@ function applySafeImageWidth(image: HTMLImageElement, source: HTMLElement) {
   image.style.height = "auto";
 }
 
+function copySafeAttributes(target: HTMLElement, source: HTMLElement) {
+  copyTaskAttributes(target, source);
+  copyTextAlign(target, source);
+  copyTableAttributes(target, source);
+}
+
+function copyTaskAttributes(target: HTMLElement, source: HTMLElement) {
+  const dataType = source.getAttribute("data-type");
+
+  if ((target.tagName === "UL" && dataType === "taskList") || (target.tagName === "LI" && dataType === "taskItem")) {
+    target.dataset.type = dataType;
+  }
+
+  if (target.tagName === "LI") {
+    const checked = source.getAttribute("data-checked");
+
+    if (checked === "true" || checked === "false") {
+      target.dataset.checked = checked;
+    }
+  }
+}
+
+function copyTextAlign(target: HTMLElement, source: HTMLElement) {
+  const alignment = safeTextAlign(source.style.textAlign || source.getAttribute("data-text-align"));
+
+  if (!alignment || !["P", "DIV", "LI", "TD", "TH"].includes(target.tagName)) {
+    return;
+  }
+
+  target.style.textAlign = alignment;
+}
+
+function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
+  if (target.tagName === "TD" || target.tagName === "TH") {
+    copyPositiveIntegerAttribute(target, source, "colspan", 12);
+    copyPositiveIntegerAttribute(target, source, "rowspan", 12);
+    copyColumnWidthAttribute(target, source);
+    copyCellColorAttribute(target, source);
+  }
+
+  if (target.tagName === "COL") {
+    const width = safePixelWidth(source.style.width);
+
+    if (width) {
+      target.style.width = width;
+    }
+  }
+}
+
+function copyPositiveIntegerAttribute(target: HTMLElement, source: HTMLElement, attribute: string, max: number) {
+  const value = Number(source.getAttribute(attribute));
+
+  if (Number.isInteger(value) && value > 0 && value <= max) {
+    target.setAttribute(attribute, String(value));
+  }
+}
+
+function copyColumnWidthAttribute(target: HTMLElement, source: HTMLElement) {
+  const rawValue = source.getAttribute("colwidth");
+
+  if (!rawValue) {
+    return;
+  }
+
+  const widths = rawValue
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isInteger(value) && value >= 24 && value <= 1600);
+
+  if (widths.length) {
+    target.setAttribute("colwidth", widths.join(","));
+  }
+}
+
+function copyCellColorAttribute(target: HTMLElement, source: HTMLElement) {
+  const color = safeCellColor(source.getAttribute("data-qm-bg") || source.style.backgroundColor);
+
+  if (!color) {
+    return;
+  }
+
+  target.dataset.qmBg = color;
+  target.style.backgroundColor = color;
+}
+
 function safeImageWidth(value: string | null) {
   const normalizedValue = Number(String(value ?? "").replace("%", "").trim());
 
   return imageWidthOptions.has(normalizedValue) ? normalizedValue : null;
+}
+
+function safeTextAlign(value: string | null) {
+  const normalizedValue = String(value ?? "").trim().toLowerCase();
+
+  return textAlignments.has(normalizedValue) ? normalizedValue : null;
+}
+
+function safeCellColor(value: string | null) {
+  const normalizedValue = normalizeColor(value);
+
+  return normalizedValue && tableCellColors.has(normalizedValue) ? normalizedValue : null;
+}
+
+function safePixelWidth(value: string | null) {
+  const match = String(value ?? "").trim().match(/^(\d{1,4})px$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const width = Number(match[1]);
+  return width >= 24 && width <= 1600 ? `${width}px` : null;
+}
+
+function normalizeColor(value: string | null) {
+  const rawValue = String(value ?? "").trim().toLowerCase();
+
+  if (rawValue.startsWith("#")) {
+    return rawValue;
+  }
+
+  const rgbMatch = rawValue.match(/^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/);
+
+  if (!rgbMatch) {
+    return null;
+  }
+
+  const channels = rgbMatch.slice(1).map((channel) => Number(channel));
+
+  if (channels.some((channel) => channel < 0 || channel > 255)) {
+    return null;
+  }
+
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, "0")).join("")}`;
 }
 
 function linkifyTextNode(node: Text) {

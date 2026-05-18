@@ -1,31 +1,45 @@
 import {
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   ArrowUpDown,
+  Bold,
   CalendarClock,
   CheckCircle2,
+  Columns3,
   Download,
   Eye,
   File,
   FilePlus2,
+  Folder,
+  FolderPlus,
   FolderOpen,
   History,
+  LayoutGrid,
   ListChecks,
+  ListTodo,
   Loader2,
   PanelRightOpen,
+  PaintBucket,
   Pencil,
   RotateCcw,
+  Rows3,
   Save,
   Share2,
   Star,
+  Table2,
   Trash2,
+  Upload,
   UsersRound,
   X
 } from "lucide-react";
+import type { Editor as TipTapEditor } from "@tiptap/core";
+import { EditorContent, useEditor } from "@tiptap/react";
 import {
   type ChangeEvent,
-  type ClipboardEvent,
   type CSSProperties,
   type FormEvent,
-  type MouseEvent,
+  type MutableRefObject,
   type RefObject,
   useCallback,
   useEffect,
@@ -62,9 +76,11 @@ import {
   sanitizeEditorHtml,
   serializeEditorContent
 } from "../lib/editorContent";
+import { editorCellColors, editorImageWidths, richEditorExtensions } from "../lib/richEditorExtensions";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
   confirmNoteRead,
+  createNoteFolder,
   createNoteAttachment,
   deleteNoteAttachment,
   createEncryptedNote,
@@ -76,6 +92,7 @@ import {
   setNotePinned,
   subscribeNoteAttachments,
   subscribeDeletedNotes,
+  subscribeNoteFolders,
   subscribeMyNoteStates,
   subscribeNoteHistory,
   subscribeNoteUserStates,
@@ -83,8 +100,10 @@ import {
   updateEncryptedNote,
   updateNoteAccess,
   updateNoteDeadline,
+  updateNoteFolder,
   type NoteHistorySnapshot,
   type NoteAttachmentSnapshot,
+  type NoteFolderSnapshot,
   type NoteUserStateSnapshot,
   type NoteSnapshot
 } from "../services/notes";
@@ -98,6 +117,7 @@ interface EditorState {
   type: NoteKind;
   participantUids: string[];
   noteKey: CryptoKey | null;
+  folderId: string | null;
   fontSize: number;
   dueAt: Date | null;
   dirty: boolean;
@@ -121,6 +141,7 @@ const blankEditor = (uid: string): EditorState => ({
   type: "personal",
   participantUids: [uid],
   noteKey: null,
+  folderId: null,
   fontSize: 17,
   dueAt: null,
   dirty: false
@@ -143,6 +164,11 @@ interface NoteListCounts {
 
 type NoteStateByNoteId = Record<string, NoteUserStateSnapshot | undefined>;
 type DrawerMode = "notes" | "trash";
+type OverviewFolderFilter = "all" | "unfiled" | string;
+
+interface RichEditorInsertHtml {
+  (html: string): string | null;
+}
 
 interface RemoteCursorView {
   uid: string;
@@ -161,7 +187,6 @@ interface CursorClientRect {
 }
 
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
-const imageWidthOptions = [25, 50, 75, 100];
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 450;
 const deletedNoteRetentionDays = 30;
@@ -173,6 +198,7 @@ const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
+const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -203,11 +229,118 @@ function clippedText(value: string, maxLength = historySummaryMaxLength) {
   return `${normalizedValue.slice(0, maxLength - 1).trim()}...`;
 }
 
-function historySummaryFromDraft(draft: NoteDraft) {
-  const title = clippedText(draft.title || "제목 없음", 120);
-  const body = clippedText(previewTextFromHtml(draft.body) || (/<img\b/i.test(draft.body) ? "이미지 포함" : "내용 없음"));
+function historySummaryFromDraft(previousDraft: NoteDraft | null, draft: NoteDraft) {
+  if (!previousDraft) {
+    const title = clippedText(draft.title || "제목 없음", 120);
+    const body = clippedText(previewTextFromHtml(draft.body) || (/<img\b/i.test(draft.body) ? "이미지 포함" : "내용 없음"));
 
-  return `제목: ${title}\n내용: ${body}`;
+    return `제목: ${title}\n내용: ${body}`;
+  }
+
+  const changes: string[] = [];
+
+  if (previousDraft.title !== draft.title) {
+    changes.push(`제목 변경: ${textChangeSummary(previousDraft.title || "제목 없음", draft.title || "제목 없음", 160)}`);
+  }
+
+  if (previousDraft.body !== draft.body || previousDraft.fontSize !== draft.fontSize) {
+    changes.push(bodyChangeSummary(previousDraft, draft));
+  }
+
+  return changes.length ? clippedText(changes.join("\n")) : "저장됨";
+}
+
+function bodyChangeSummary(previousDraft: NoteDraft, draft: NoteDraft) {
+  const previousStats = editorBodyStats(previousDraft.body);
+  const nextStats = editorBodyStats(draft.body);
+
+  if (previousStats.text !== nextStats.text) {
+    return `본문 변경: ${textChangeSummary(previousStats.text || "내용 없음", nextStats.text || "내용 없음")}`;
+  }
+
+  const structuralChanges: string[] = [];
+
+  if (previousStats.checkedTasks !== nextStats.checkedTasks || previousStats.totalTasks !== nextStats.totalTasks) {
+    structuralChanges.push(`체크 ${previousStats.checkedTasks}/${previousStats.totalTasks} -> ${nextStats.checkedTasks}/${nextStats.totalTasks}`);
+  }
+
+  if (previousStats.tableCells !== nextStats.tableCells || previousStats.tables !== nextStats.tables) {
+    structuralChanges.push(`표 ${previousStats.tables}개/${previousStats.tableCells}칸 -> ${nextStats.tables}개/${nextStats.tableCells}칸`);
+  }
+
+  if (previousDraft.fontSize !== draft.fontSize) {
+    structuralChanges.push(`글자 ${previousDraft.fontSize}px -> ${draft.fontSize}px`);
+  }
+
+  return structuralChanges.length ? `본문 변경: ${structuralChanges.join(", ")}` : "본문 서식/표 색상 변경";
+}
+
+function editorBodyStats(html: string) {
+  if (typeof document === "undefined") {
+    return {
+      checkedTasks: 0,
+      tableCells: 0,
+      tables: 0,
+      text: previewTextFromHtml(html),
+      totalTasks: 0
+    };
+  }
+
+  const container = document.createElement("div");
+  container.innerHTML = sanitizeEditorHtml(html);
+
+  return {
+    checkedTasks: container.querySelectorAll('li[data-type="taskItem"][data-checked="true"], input[type="checkbox"]:checked').length,
+    tableCells: container.querySelectorAll("td, th").length,
+    tables: container.querySelectorAll("table").length,
+    text: previewTextFromHtml(html),
+    totalTasks: container.querySelectorAll('li[data-type="taskItem"], input[type="checkbox"]').length
+  };
+}
+
+function textChangeSummary(previousText: string, nextText: string, maxLength = 220) {
+  const previousValue = previousText.replace(/\s+/g, " ").trim();
+  const nextValue = nextText.replace(/\s+/g, " ").trim();
+
+  if (!previousValue) {
+    return `추가 "${clippedText(nextValue, maxLength)}"`;
+  }
+
+  if (!nextValue) {
+    return `삭제 "${clippedText(previousValue, maxLength)}"`;
+  }
+
+  const prefixLength = commonPrefixLength(previousValue, nextValue);
+  const suffixLength = commonSuffixLength(previousValue.slice(prefixLength), nextValue.slice(prefixLength));
+  const previousChanged = previousValue.slice(prefixLength, previousValue.length - suffixLength);
+  const nextChanged = nextValue.slice(prefixLength, nextValue.length - suffixLength);
+
+  return `"${clippedText(previousChanged || previousValue, Math.floor(maxLength / 2))}" -> "${clippedText(
+    nextChanged || nextValue,
+    Math.floor(maxLength / 2)
+  )}"`;
+}
+
+function commonPrefixLength(left: string, right: string) {
+  const maxLength = Math.min(left.length, right.length);
+  let index = 0;
+
+  while (index < maxLength && left[index] === right[index]) {
+    index += 1;
+  }
+
+  return index;
+}
+
+function commonSuffixLength(left: string, right: string) {
+  const maxLength = Math.min(left.length, right.length);
+  let index = 0;
+
+  while (index < maxLength && left[left.length - 1 - index] === right[right.length - 1 - index]) {
+    index += 1;
+  }
+
+  return index;
 }
 
 function purgedDraft(): NoteDraft {
@@ -439,6 +572,7 @@ function noteSyncSignature(note: DecryptedNote) {
     note.id,
     updatedAt,
     note.updatedBy,
+    note.folderId ?? "",
     note.encryptedTitle.iv,
     note.encryptedTitle.cipherText,
     note.encryptedBody.iv,
@@ -642,6 +776,7 @@ export default function NotesPage() {
   const [deletedNotes, setDeletedNotes] = useState<NoteSnapshot[]>([]);
   const [decryptedNotes, setDecryptedNotes] = useState<DecryptedNote[]>([]);
   const [decryptedDeletedNotes, setDecryptedDeletedNotes] = useState<DecryptedNote[]>([]);
+  const [folders, setFolders] = useState<NoteFolderSnapshot[]>([]);
   const [noteStateMap, setNoteStateMap] = useState<NoteStateByNoteId>({});
   const [activeCursorStates, setActiveCursorStates] = useState<NoteUserStateSnapshot[]>([]);
   const [cursorClock, setCursorClock] = useState(() => Date.now());
@@ -655,6 +790,8 @@ export default function NotesPage() {
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [pdfPreview, setPdfPreview] = useState<PdfPreviewState | null>(null);
   const [listOpen, setListOpen] = useState(false);
+  const [overviewOpen, setOverviewOpen] = useState(false);
+  const [overviewFolderFilter, setOverviewFolderFilter] = useState<OverviewFolderFilter>("all");
   const [shareOpen, setShareOpen] = useState(false);
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [deadlineOpen, setDeadlineOpen] = useState(false);
@@ -726,6 +863,15 @@ export default function NotesPage() {
   useEffect(() => {
     return subscribeUsers(setUsers, () => setError("사용자 목록을 불러오지 못했습니다."));
   }, []);
+
+  useEffect(() => {
+    if (!profile) {
+      setFolders([]);
+      return undefined;
+    }
+
+    return subscribeNoteFolders(profile.uid, setFolders, () => setError("폴더 목록을 불러오지 못했습니다."));
+  }, [profile]);
 
   useEffect(() => {
     return () => {
@@ -911,6 +1057,15 @@ export default function NotesPage() {
     () => sortNotes(filterNotes(decryptedNotes, noteFilter), noteSort, noteStateMap),
     [decryptedNotes, noteFilter, noteSort, noteStateMap]
   );
+  const personalOverviewNotes = useMemo(
+    () =>
+      sortNotes(
+        decryptedNotes.filter((note) => note.type === "personal" && note.ownerUid === profile?.uid),
+        noteSort,
+        noteStateMap
+      ),
+    [decryptedNotes, noteSort, noteStateMap, profile?.uid]
+  );
   const trashNotes = useMemo(
     () => sortDeletedNotes(filterNotes(decryptedDeletedNotes, noteFilter)),
     [decryptedDeletedNotes, noteFilter]
@@ -1017,6 +1172,7 @@ export default function NotesPage() {
     const metadataMatches =
       timestampsEqual(editor.dueAt, remoteDueAt) &&
       editor.type === activeRemoteNote.type &&
+      editor.folderId === (activeRemoteNote.folderId ?? null) &&
       editor.participantUids.join("|") === activeRemoteNote.participantUids.join("|");
 
     if (contentMatches && metadataMatches) {
@@ -1056,6 +1212,7 @@ export default function NotesPage() {
       body: remoteDraft.body,
       type: activeRemoteNote.type,
       participantUids: activeRemoteNote.participantUids,
+      folderId: activeRemoteNote.folderId ?? null,
       fontSize: remoteDraft.fontSize,
       dueAt: remoteDueAt,
       dirty: contentMatches ? current.dirty : false
@@ -1221,6 +1378,65 @@ export default function NotesPage() {
     setEditor((current) => ({ ...current, fontSize, dirty: true }));
   }
 
+  async function updateEditorFolder(folderId: string | null) {
+    if (currentType !== "personal") {
+      return;
+    }
+
+    setEditor((current) => ({ ...current, folderId, dirty: current.noteId ? current.dirty : true }));
+
+    if (!editor.noteId) {
+      return;
+    }
+
+    try {
+      await updateNoteFolder(editor.noteId, unlockedProfile.uid, folderId);
+      setStatus(folderId ? "노트 폴더를 저장했습니다." : "노트를 미분류로 이동했습니다.");
+    } catch {
+      setEditor((current) => (current.noteId === editor.noteId ? { ...current, folderId: editor.folderId } : current));
+      setError("노트 폴더를 저장하지 못했습니다.");
+    }
+  }
+
+  async function createFolder(name: string, color: string) {
+    const trimmedName = name.trim();
+
+    if (!trimmedName) {
+      setError("폴더 이름을 입력해주세요.");
+      return false;
+    }
+
+    try {
+      await createNoteFolder(unlockedProfile.uid, trimmedName, color);
+      setStatus("폴더를 만들었습니다.");
+      setError(null);
+      return true;
+    } catch {
+      setError("폴더를 만들지 못했습니다.");
+      return false;
+    }
+  }
+
+  async function updateStoredNoteFolder(note: DecryptedNote, folderId: string | null) {
+    if (note.type !== "personal" || note.ownerUid !== unlockedProfile.uid) {
+      setError("개인 노트만 폴더를 지정할 수 있습니다.");
+      return;
+    }
+
+    try {
+      await updateNoteFolder(note.id, unlockedProfile.uid, folderId);
+
+      if (editor.noteId === note.id) {
+        setEditor((current) => ({ ...current, folderId }));
+      }
+
+      setStatus(folderId ? "노트 폴더를 저장했습니다." : "노트를 미분류로 이동했습니다.");
+      setError(null);
+    } catch {
+      setError("노트 폴더를 저장하지 못했습니다.");
+    }
+  }
+
   function updateSortSetting(nextSetting: NoteSortSetting) {
     setNoteSort(nextSetting);
     writeNoteSortSetting(unlockedProfile.uid, nextSetting);
@@ -1338,11 +1554,13 @@ export default function NotesPage() {
         type: note.type,
         participantUids: note.participantUids,
         noteKey,
+        folderId: note.folderId ?? null,
         fontSize: nextDraft.fontSize,
         dueAt: dateFromTimestamp(note.dueAt),
         dirty: false
       });
       setListOpen(false);
+      setOverviewOpen(false);
       setShareOpen(false);
       setPreviewNoteId(null);
       setStatus("노트를 열었습니다.");
@@ -1384,6 +1602,7 @@ export default function NotesPage() {
       ...current,
       participantUids,
       type,
+      folderId: type === "personal" ? current.folderId : null,
       dirty: current.noteId ? current.dirty : true
     }));
 
@@ -1427,7 +1646,7 @@ export default function NotesPage() {
     try {
       const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
       const type = noteTypeFromParticipants(participantUids);
-      await updateNoteAccess(noteId, unlockedProfile.uid, type, participantUids, wrappedKeys);
+      await updateNoteAccess(noteId, unlockedProfile.uid, type, participantUids, wrappedKeys, type === "personal" ? editor.folderId : null);
       setStatus(type === "shared" ? "공유 대상을 저장했습니다." : "개인 노트로 변경했습니다.");
     } catch {
       setEditor((current) =>
@@ -1462,13 +1681,14 @@ export default function NotesPage() {
     try {
       if (editor.noteId && editor.noteKey) {
         const payload = await encryptNoteDraft(draft, editor.noteKey);
-        const historySummary = await encryptText(historySummaryFromDraft(draft), editor.noteKey);
+        const previousDraft = activeRemoteNote ? draftFromNote(activeRemoteNote) : null;
+        const historySummary = await encryptText(historySummaryFromDraft(previousDraft, draft), editor.noteKey);
         await updateEncryptedNote(
           editor.noteId,
           unlockedProfile.uid,
           payload.encryptedTitle,
           payload.encryptedBody,
-          changedDraftFields(activeRemoteNote ? draftFromNote(activeRemoteNote) : null, draft),
+          changedDraftFields(previousDraft, draft),
           historySummary
         );
         pendingLocalEcho.current = { noteId: editor.noteId, draft, createdAt: Date.now() };
@@ -1480,7 +1700,7 @@ export default function NotesPage() {
 
       const noteKey = await generateNoteKey();
       const payload = await encryptNoteDraft(draft, noteKey);
-      const historySummary = await encryptText(historySummaryFromDraft(draft), noteKey);
+      const historySummary = await encryptText(historySummaryFromDraft(null, draft), noteKey);
       const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids])).filter(
         (uid) => uid === unlockedProfile.uid || canShareWithUser(uid)
       );
@@ -1494,6 +1714,7 @@ export default function NotesPage() {
         encryptedTitle: payload.encryptedTitle,
         encryptedBody: payload.encryptedBody,
         wrappedKeys,
+        folderId: type === "personal" ? editor.folderId : null,
         dueAt: editor.dueAt ? Timestamp.fromDate(editor.dueAt) : null,
         historySummary
       });
@@ -1504,6 +1725,7 @@ export default function NotesPage() {
         noteId: created.id,
         noteKey,
         type,
+        folderId: type === "personal" ? current.folderId : null,
         dirty: !draftsMatch(current, draft)
       }));
       announceActiveNote(created.id);
@@ -1535,14 +1757,12 @@ export default function NotesPage() {
     return savedNote;
   }
 
-  async function insertPastedFiles(files: File[], range: Range | null = null) {
+  async function insertPastedFiles(files: File[], insertHtml: RichEditorInsertHtml) {
     const attachmentFiles: File[] = [];
-    let imageRange = range;
 
     for (const file of files) {
       if (file.type.startsWith("image/")) {
-        await insertImageFile(file, imageRange);
-        imageRange = null;
+        await insertImageFile(file, insertHtml);
       } else {
         attachmentFiles.push(file);
       }
@@ -1857,14 +2077,15 @@ export default function NotesPage() {
     try {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
       const payload = await encryptNoteDraft(draft, noteKey);
-      const historySummary = await encryptText(historySummaryFromDraft(draft), noteKey);
+      const previousDraft = draftFromNote(note);
+      const historySummary = await encryptText(historySummaryFromDraft(previousDraft, draft), noteKey);
 
       await updateEncryptedNote(
         note.id,
         unlockedProfile.uid,
         payload.encryptedTitle,
         payload.encryptedBody,
-        changedDraftFields(draftFromNote(note), draft),
+        changedDraftFields(previousDraft, draft),
         historySummary
       );
       pendingLocalEcho.current = { noteId: note.id, draft, createdAt: Date.now() };
@@ -1891,7 +2112,7 @@ export default function NotesPage() {
     }
   }
 
-  async function insertImageFile(file: File, range: Range | null = null) {
+  async function insertImageFile(file: File, insertHtml: RichEditorInsertHtml) {
     try {
       const dataUrl = await imageFileToResizedDataUrl(file);
 
@@ -1901,7 +2122,7 @@ export default function NotesPage() {
       }
 
       const html = imageHtml(dataUrl, file.name);
-      const nextHtml = insertHtmlAtSelection(memoEditorRef.current, html, range);
+      const nextHtml = insertHtml(html);
       setEditor((current) => ({ ...current, body: nextHtml ?? `${current.body}${html}`, dirty: true }));
       setError(null);
     } catch {
@@ -1912,6 +2133,20 @@ export default function NotesPage() {
   return (
     <AppShell>
       <section className="workspace notes-workspace">
+        {overviewOpen ? (
+          <PersonalOverview
+            activeFolderFilter={overviewFolderFilter}
+            folders={folders}
+            noteStates={noteStateMap}
+            notes={personalOverviewNotes}
+            onBack={() => setOverviewOpen(false)}
+            onCreateFolder={createFolder}
+            onFolderFilterChange={setOverviewFolderFilter}
+            onPreview={previewStoredNote}
+            onUpdateNoteFolder={(note, folderId) => void updateStoredNoteFolder(note, folderId)}
+          />
+        ) : (
+          <>
         <section className="editor-panel full-editor-panel">
           <div className="editor-toolbar">
             <div className="editor-primary-actions">
@@ -1973,6 +2208,27 @@ export default function NotesPage() {
                 <PanelRightOpen size={18} />
                 노트 목록
               </button>
+              <button className="secondary-button" type="button" onClick={() => setOverviewOpen(true)}>
+                <LayoutGrid size={18} />
+                전체 조회
+              </button>
+              {currentType === "personal" && (
+                <label className="font-size-control folder-control">
+                  폴더
+                  <select
+                    aria-label="개인 노트 폴더"
+                    onChange={(event) => void updateEditorFolder(event.target.value || null)}
+                    value={editor.folderId ?? ""}
+                  >
+                    <option value="">미분류</option>
+                    {folders.map((folder) => (
+                      <option key={folder.id} value={folder.id}>
+                        {folder.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               {activeRemoteNote && (
                 <button
                   aria-label={activeNotePinned ? "즐겨찾기 해제" : "즐겨찾기"}
@@ -2044,7 +2300,7 @@ export default function NotesPage() {
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
             onCursorChange={publishEditorCursor}
-            onFilesPaste={(files, range) => void insertPastedFiles(files, range)}
+            onFilesPaste={(files, insertHtml) => void insertPastedFiles(files, insertHtml)}
             onChange={(value) => updateEditor("body", value)}
             remoteCursors={remoteEditorCursors}
             value={editor.body}
@@ -2083,6 +2339,8 @@ export default function NotesPage() {
           open={listOpen}
           sortSetting={noteSort}
         />
+          </>
+        )}
         {previewNote && (
           <NotePreviewModal
             canDelete={canDeleteNote(previewNote)}
@@ -2127,70 +2385,98 @@ function RichMemoEditor({
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
   onCursorChange?: (cursorOffset: number | null, cursorVisible: boolean) => void;
-  onFilesPaste: (files: File[], range: Range | null) => void;
+  onFilesPaste: (files: File[], insertHtml: RichEditorInsertHtml) => void | Promise<void>;
   onChange: (value: string) => void;
   remoteCursors?: RemoteCursorView[];
   value: string;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
   const [selectedImageWidth, setSelectedImageWidth] = useState<number | null>(null);
+  const [tableRows, setTableRows] = useState(3);
+  const [tableColumns, setTableColumns] = useState(3);
+  const [, setToolbarVersion] = useState(0);
+  const editor = useEditor({
+    extensions: richEditorExtensions,
+    content: value || "",
+    editorProps: {
+      attributes: {
+        class: "rich-body-input",
+        role: "textbox"
+      },
+      handleClick: (_view, _position, event) => {
+        handleEditorClick(event);
+        return false;
+      },
+      handleDrop: (_view, event) => {
+        const files = Array.from(event.dataTransfer?.files ?? []);
+
+        if (!files.length) {
+          return false;
+        }
+
+        event.preventDefault();
+        void handleFiles(files);
+        return true;
+      },
+      handlePaste: (_view, event) => {
+        const files = Array.from(event.clipboardData?.files ?? []);
+        const itemFiles = Array.from(event.clipboardData?.items ?? [])
+          .map((item) => item.getAsFile())
+          .filter((file): file is File => Boolean(file));
+        const pastedFiles = files.length ? files : itemFiles;
+
+        if (!pastedFiles.length) {
+          return false;
+        }
+
+        event.preventDefault();
+        void handleFiles(pastedFiles);
+        return true;
+      }
+    },
+    onBlur: () => emitCursorPosition(false),
+    onFocus: () => emitCursorPosition(true),
+    onSelectionUpdate: () => {
+      setToolbarVersion((version) => version + 1);
+      emitCursorPosition(true);
+    },
+    onUpdate: ({ editor: nextEditor }) => {
+      onChange(nextEditor.getHTML());
+      setToolbarVersion((version) => version + 1);
+      emitCursorPosition(true);
+    }
+  });
 
   useEffect(() => {
-    const element = editorRef.current;
-
-    if (!element || element.innerHTML === value) {
+    if (!editor) {
       return;
     }
 
-    const wasFocused = document.activeElement === element;
-    element.innerHTML = value;
+    const mutableRef = editorRef as MutableRefObject<HTMLDivElement | null>;
+    mutableRef.current = editor.view.dom as HTMLDivElement;
 
-    if (wasFocused) {
-      placeCaretAtEnd(element);
+    return () => {
+      if (mutableRef.current === editor.view.dom) {
+        mutableRef.current = null;
+      }
+    };
+  }, [editor, editorRef]);
+
+  useEffect(() => {
+    if (!editor || editor.getHTML() === (value || "")) {
+      return;
     }
-  }, [editorRef, value]);
+
+    editor.commands.setContent(value || "", { emitUpdate: false });
+  }, [editor, value]);
 
   function clearImageSelection() {
     selectedImageRef.current = null;
     setSelectedImageWidth(null);
   }
 
-  function handleInput(event: FormEvent<HTMLDivElement>) {
-    const inputEvent = event.nativeEvent as InputEvent;
-    const shouldLinkify =
-      inputEvent.inputType === "insertParagraph" || inputEvent.inputType === "insertLineBreak" || inputEvent.data === " ";
-
-    onChange(shouldLinkify ? linkifyEditableElement(editorRef.current) : editorRef.current?.innerHTML ?? "");
-    emitCursorPosition(true);
-  }
-
-  function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
-    const files = Array.from(event.clipboardData.files);
-    const itemFiles = Array.from(event.clipboardData.items)
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => Boolean(file));
-    const pastedFiles = files.length ? files : itemFiles;
-
-    if (pastedFiles.length) {
-      const selection = window.getSelection();
-      const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
-      event.preventDefault();
-      onFilesPaste(pastedFiles, range);
-      return;
-    }
-
-    event.preventDefault();
-    document.execCommand("insertText", false, event.clipboardData.getData("text/plain"));
-    onChange(linkifyEditableElement(editorRef.current));
-    emitCursorPosition(true);
-  }
-
-  function handleBlur() {
-    onChange(linkifyEditableElement(editorRef.current));
-    emitCursorPosition(false);
-  }
-
-  function handleClick(event: MouseEvent<HTMLDivElement>) {
+  function handleEditorClick(event: Event) {
     const target = event.target;
     const image = target instanceof HTMLElement ? target.closest("img") : null;
     const anchor = target instanceof HTMLElement ? target.closest("a[href]") : null;
@@ -2213,6 +2499,23 @@ function RichMemoEditor({
     window.open(anchor.href, "_blank", "noopener,noreferrer");
   }
 
+  async function handleFiles(files: File[]) {
+    if (!editor) {
+      return;
+    }
+
+    await onFilesPaste(files, insertHtml);
+  }
+
+  function insertHtml(html: string) {
+    if (!editor) {
+      return null;
+    }
+
+    editor.chain().focus().insertContent(sanitizeEditorHtml(html)).run();
+    return editor.getHTML();
+  }
+
   function emitCursorPosition(cursorVisible: boolean) {
     if (!onCursorChange) {
       return;
@@ -2223,6 +2526,10 @@ function RichMemoEditor({
   }
 
   function updateSelectedImageWidth(width: number) {
+    if (!editor) {
+      return;
+    }
+
     const image = selectedImageRef.current;
 
     if (!image || !editorRef.current?.contains(image)) {
@@ -2230,20 +2537,218 @@ function RichMemoEditor({
       return;
     }
 
-    image.dataset.qmWidth = String(width);
-    image.style.width = `${width}%`;
-    image.style.maxWidth = "100%";
-    image.style.height = "auto";
+    const position = editor.view.posAtDOM(image, 0);
+
+    editor.chain().focus().setNodeSelection(position).updateAttributes("image", { qmWidth: width }).run();
     setSelectedImageWidth(width);
-    onChange(editorRef.current.innerHTML);
+    onChange(editor.getHTML());
+  }
+
+  function runToolbarCommand(command: (editor: TipTapEditor) => void) {
+    if (!editor) {
+      return;
+    }
+
+    command(editor);
+    setToolbarVersion((version) => version + 1);
+  }
+
+  function insertTable() {
+    runToolbarCommand((currentEditor) =>
+      currentEditor
+        .chain()
+        .focus()
+        .insertTable({
+          rows: clampTableDimension(tableRows),
+          cols: clampTableDimension(tableColumns),
+          withHeaderRow: true
+        })
+        .run()
+    );
+  }
+
+  function chooseFiles() {
+    fileInputRef.current?.click();
+  }
+
+  function handleFileInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+
+    if (files.length) {
+      void handleFiles(files);
+    }
   }
 
   return (
     <>
+      <div className="rich-editor-toolbar" aria-label="편집 도구">
+        <button
+          aria-label="굵게"
+          aria-pressed={editor?.isActive("bold") ?? false}
+          className={`icon-button ${editor?.isActive("bold") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleBold().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="굵게"
+          type="button"
+        >
+          <Bold size={16} />
+        </button>
+        <button
+          aria-label="체크리스트"
+          aria-pressed={editor?.isActive("taskList") ?? false}
+          className={`icon-button ${editor?.isActive("taskList") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleTaskList().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="체크리스트"
+          type="button"
+        >
+          <ListTodo size={16} />
+        </button>
+        <button
+          aria-label="왼쪽 정렬"
+          className="icon-button"
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setTextAlign("left").run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="왼쪽 정렬"
+          type="button"
+        >
+          <AlignLeft size={16} />
+        </button>
+        <button
+          aria-label="가운데 정렬"
+          className="icon-button"
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setTextAlign("center").run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="가운데 정렬"
+          type="button"
+        >
+          <AlignCenter size={16} />
+        </button>
+        <button
+          aria-label="오른쪽 정렬"
+          className="icon-button"
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setTextAlign("right").run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="오른쪽 정렬"
+          type="button"
+        >
+          <AlignRight size={16} />
+        </button>
+        <span className="table-insert-control">
+          <Table2 size={15} />
+          <input
+            aria-label="표 행 수"
+            max={12}
+            min={1}
+            onChange={(event) => setTableRows(clampTableDimension(Number(event.target.value)))}
+            type="number"
+            value={tableRows}
+          />
+          <span>x</span>
+          <input
+            aria-label="표 열 수"
+            max={12}
+            min={1}
+            onChange={(event) => setTableColumns(clampTableDimension(Number(event.target.value)))}
+            type="number"
+            value={tableColumns}
+          />
+          <button onClick={insertTable} onMouseDown={(event) => event.preventDefault()} type="button">
+            추가
+          </button>
+        </span>
+        <button
+          aria-label="행 추가"
+          className="icon-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().addRowAfter().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="행 추가"
+          type="button"
+        >
+          <Rows3 size={16} />
+        </button>
+        <button
+          className="secondary-button table-delete-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().deleteRow().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          type="button"
+        >
+          행 삭제
+        </button>
+        <button
+          aria-label="열 추가"
+          className="icon-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().addColumnAfter().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="열 추가"
+          type="button"
+        >
+          <Columns3 size={16} />
+        </button>
+        <button
+          className="secondary-button table-delete-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().deleteColumn().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          type="button"
+        >
+          열 삭제
+        </button>
+        <button
+          className="secondary-button table-delete-button"
+          disabled={!editor?.isActive("table")}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().deleteTable().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          type="button"
+        >
+          표 삭제
+        </button>
+        <div className="cell-color-palette" aria-label="셀 색상">
+          <PaintBucket size={15} />
+          {editorCellColors.map((color) => (
+            <button
+              aria-label={`${color} 셀 색상`}
+              disabled={!editor?.isActive("table")}
+              key={color}
+              onClick={() =>
+                runToolbarCommand((currentEditor) => currentEditor.chain().focus().setCellAttribute("backgroundColor", color).run())
+              }
+              onMouseDown={(event) => event.preventDefault()}
+              style={{ backgroundColor: color }}
+              type="button"
+            />
+          ))}
+          <button
+            aria-label="셀 색상 해제"
+            className="cell-color-clear"
+            disabled={!editor?.isActive("table")}
+            onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setCellAttribute("backgroundColor", null).run())}
+            onMouseDown={(event) => event.preventDefault()}
+            type="button"
+          >
+            <X size={13} />
+          </button>
+        </div>
+        <button className="secondary-button editor-upload-button" onClick={chooseFiles} type="button">
+          <Upload size={16} />
+          파일
+        </button>
+        <input
+          ref={fileInputRef}
+          className="sr-only"
+          multiple
+          onChange={handleFileInputChange}
+          type="file"
+        />
+      </div>
       {selectedImageWidth && (
         <div className="image-size-toolbar" aria-label="이미지 크기 조절">
           <span>이미지 크기</span>
-          {imageWidthOptions.map((width) => (
+          {editorImageWidths.map((width) => (
             <button
               aria-pressed={selectedImageWidth === width}
               className={selectedImageWidth === width ? "active" : ""}
@@ -2258,26 +2763,19 @@ function RichMemoEditor({
         </div>
       )}
       <div className="rich-editor-frame">
-        <div
-          ref={editorRef}
-          className="rich-body-input"
-          contentEditable
-          data-placeholder="메모를 입력하세요..."
-          onBlur={handleBlur}
-          onClick={handleClick}
-          onFocus={() => emitCursorPosition(true)}
-          onInput={handleInput}
-          onKeyUp={() => emitCursorPosition(true)}
-          onMouseUp={() => emitCursorPosition(true)}
-          onPaste={handlePaste}
-          role="textbox"
-          style={{ fontSize }}
-          suppressContentEditableWarning
-        />
+        <EditorContent editor={editor} style={{ "--editor-font-size": `${fontSize}px` } as CSSProperties} />
         <RemoteCursorLayer cursors={remoteCursors} editorRef={editorRef} />
       </div>
     </>
   );
+}
+
+function clampTableDimension(value: number) {
+  if (!Number.isFinite(value)) {
+    return 3;
+  }
+
+  return Math.min(12, Math.max(1, Math.round(value)));
 }
 
 function RemoteCursorLayer({
@@ -2460,35 +2958,7 @@ function rangeFromCharacterSpan(element: HTMLElement, startOffset: number, endOf
 
 function readImageWidth(image: HTMLImageElement) {
   const width = Number(image.dataset.qmWidth ?? image.style.width.replace("%", ""));
-  return imageWidthOptions.includes(width) ? width : 100;
-}
-
-function placeCaretAtEnd(element: HTMLElement) {
-  element.focus();
-
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  range.collapse(false);
-
-  const selection = window.getSelection();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-}
-
-function linkifyEditableElement(element: HTMLDivElement | null) {
-  if (!element) {
-    return "";
-  }
-
-  const caretOffset = getCaretCharacterOffset(element);
-  const linkedHtml = linkifyEditorHtml(element.innerHTML);
-
-  if (linkedHtml !== element.innerHTML) {
-    element.innerHTML = linkedHtml;
-    restoreCaretByCharacterOffset(element, caretOffset);
-  }
-
-  return element.innerHTML;
+  return editorImageWidths.includes(width as (typeof editorImageWidths)[number]) ? width : 100;
 }
 
 function getCaretCharacterOffset(element: HTMLElement | null) {
@@ -2512,35 +2982,6 @@ function getCaretCharacterOffset(element: HTMLElement | null) {
   preCaretRange.selectNodeContents(element);
   preCaretRange.setEnd(range.startContainer, range.startOffset);
   return preCaretRange.toString().length;
-}
-
-function restoreCaretByCharacterOffset(element: HTMLElement, offset: number | null) {
-  if (offset === null) {
-    return;
-  }
-
-  const selection = window.getSelection();
-  const range = document.createRange();
-  const walker = document.createTreeWalker(element, 4);
-  let remainingOffset = offset;
-  let currentNode = walker.nextNode();
-
-  while (currentNode) {
-    const textLength = currentNode.textContent?.length ?? 0;
-
-    if (remainingOffset <= textLength) {
-      range.setStart(currentNode, remainingOffset);
-      range.collapse(true);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      return;
-    }
-
-    remainingOffset -= textLength;
-    currentNode = walker.nextNode();
-  }
-
-  placeCaretAtEnd(element);
 }
 
 function NoteDrawer({
@@ -2838,6 +3279,171 @@ function NoteList({
         );
       })}
     </div>
+  );
+}
+
+function PersonalOverview({
+  activeFolderFilter,
+  folders,
+  noteStates,
+  notes,
+  onBack,
+  onCreateFolder,
+  onFolderFilterChange,
+  onPreview,
+  onUpdateNoteFolder
+}: {
+  activeFolderFilter: OverviewFolderFilter;
+  folders: NoteFolderSnapshot[];
+  noteStates: NoteStateByNoteId;
+  notes: DecryptedNote[];
+  onBack: () => void;
+  onCreateFolder: (name: string, color: string) => Promise<boolean>;
+  onFolderFilterChange: (filter: OverviewFolderFilter) => void;
+  onPreview: (note: DecryptedNote) => void;
+  onUpdateNoteFolder: (note: DecryptedNote, folderId: string | null) => void;
+}) {
+  const [folderName, setFolderName] = useState("");
+  const [folderColor, setFolderColor] = useState(folderColorOptions[0]);
+  const foldersById = new Map(folders.map((folder) => [folder.id, folder]));
+  const visibleNotes = notes.filter((note) => {
+    if (activeFolderFilter === "all") {
+      return true;
+    }
+
+    if (activeFolderFilter === "unfiled") {
+      return !note.folderId || !foldersById.has(note.folderId);
+    }
+
+    return note.folderId === activeFolderFilter;
+  });
+
+  async function submitFolder(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (await onCreateFolder(folderName, folderColor)) {
+      setFolderName("");
+    }
+  }
+
+  return (
+    <section className="personal-overview" aria-label="개인 노트 전체 조회">
+      <header className="personal-overview-header">
+        <div>
+          <span className="note-kind-pill personal">
+            <Folder size={12} />
+            개인 노트
+          </span>
+          <h2>전체 조회</h2>
+        </div>
+        <button className="secondary-button" type="button" onClick={onBack}>
+          <Pencil size={16} />
+          편집으로 돌아가기
+        </button>
+      </header>
+      <form className="folder-create-form" onSubmit={(event) => void submitFolder(event)}>
+        <label>
+          폴더 이름
+          <input
+            maxLength={40}
+            onChange={(event) => setFolderName(event.target.value)}
+            placeholder="새 그룹"
+            value={folderName}
+          />
+        </label>
+        <div className="folder-color-picker" aria-label="폴더 색상">
+          {folderColorOptions.map((color) => (
+            <button
+              aria-label={`${color} 폴더 색상`}
+              aria-pressed={folderColor === color}
+              className={folderColor === color ? "active" : ""}
+              key={color}
+              onClick={() => setFolderColor(color)}
+              style={{ backgroundColor: color }}
+              type="button"
+            />
+          ))}
+        </div>
+        <button type="submit">
+          <FolderPlus size={16} />
+          폴더 생성
+        </button>
+      </form>
+      <div className="folder-filter-chips" role="tablist" aria-label="개인 노트 폴더 필터">
+        <button
+          aria-selected={activeFolderFilter === "all"}
+          className={activeFolderFilter === "all" ? "active" : ""}
+          onClick={() => onFolderFilterChange("all")}
+          role="tab"
+          type="button"
+        >
+          전체
+          <strong>{notes.length}</strong>
+        </button>
+        <button
+          aria-selected={activeFolderFilter === "unfiled"}
+          className={activeFolderFilter === "unfiled" ? "active" : ""}
+          onClick={() => onFolderFilterChange("unfiled")}
+          role="tab"
+          type="button"
+        >
+          미분류
+          <strong>{notes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length}</strong>
+        </button>
+        {folders.map((folder) => (
+          <button
+            aria-selected={activeFolderFilter === folder.id}
+            className={activeFolderFilter === folder.id ? "active" : ""}
+            key={folder.id}
+            onClick={() => onFolderFilterChange(folder.id)}
+            role="tab"
+            style={{ "--folder-color": folder.color } as CSSProperties}
+            type="button"
+          >
+            {folder.name}
+            <strong>{notes.filter((note) => note.folderId === folder.id).length}</strong>
+          </button>
+        ))}
+      </div>
+      {visibleNotes.length ? (
+        <div className="overview-note-grid">
+          {visibleNotes.map((note) => {
+            const folder = note.folderId ? foldersById.get(note.folderId) : null;
+            const createdAt = dateFromTimestamp(note.createdAt);
+            const pinned = notePinned(note.id, noteStates);
+
+            return (
+              <article className="overview-note-card" key={note.id}>
+                <button className="overview-note-open" type="button" onClick={() => onPreview(note)}>
+                  <span className="overview-note-folder" style={{ backgroundColor: folder?.color ?? "#e2e8f0" }}>
+                    {folder?.name ?? "미분류"}
+                  </span>
+                  <strong>{note.title || "제목 없음"}</strong>
+                  <span>{previewTextFromHtml(note.body) || "내용 없음"}</span>
+                  <em>{pinned ? "즐겨찾기 · " : ""}{formatCompactDateTime(createdAt)}</em>
+                </button>
+                <label className="overview-folder-select">
+                  <span className="sr-only">폴더 지정</span>
+                  <select
+                    onChange={(event) => onUpdateNoteFolder(note, event.target.value || null)}
+                    value={note.folderId && foldersById.has(note.folderId) ? note.folderId : ""}
+                  >
+                    <option value="">미분류</option>
+                    {folders.map((folderOption) => (
+                      <option key={folderOption.id} value={folderOption.id}>
+                        {folderOption.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="muted">이 폴더에 표시할 개인 노트가 없습니다.</p>
+      )}
+    </section>
   );
 }
 
@@ -3168,7 +3774,7 @@ function NotePreviewModal({
     }
   }
 
-  async function insertPreviewImageFile(file: File, range: Range | null = null) {
+  async function insertPreviewImageFile(file: File, insertHtml: RichEditorInsertHtml) {
     try {
       const dataUrl = await imageFileToResizedDataUrl(file);
 
@@ -3178,7 +3784,7 @@ function NotePreviewModal({
       }
 
       const html = imageHtml(dataUrl, file.name);
-      const nextHtml = insertHtmlAtSelection(previewEditorRef.current, html, range);
+      const nextHtml = insertHtml(html);
 
       setDraft((current) => ({ ...current, body: nextHtml ?? `${current.body}${html}` }));
       setDraftDirty(true);
@@ -3188,14 +3794,12 @@ function NotePreviewModal({
     }
   }
 
-  async function insertPreviewPastedFiles(files: File[], range: Range | null = null) {
+  async function insertPreviewPastedFiles(files: File[], insertHtml: RichEditorInsertHtml) {
     const attachmentFiles: File[] = [];
-    let imageRange = range;
 
     for (const file of files) {
       if (file.type.startsWith("image/")) {
-        await insertPreviewImageFile(file, imageRange);
-        imageRange = null;
+        await insertPreviewImageFile(file, insertHtml);
       } else {
         attachmentFiles.push(file);
       }
@@ -3335,7 +3939,7 @@ function NotePreviewModal({
             <RichMemoEditor
               editorRef={previewEditorRef}
               fontSize={draft.fontSize}
-              onFilesPaste={(files, range) => void insertPreviewPastedFiles(files, range)}
+              onFilesPaste={(files, insertHtml) => void insertPreviewPastedFiles(files, insertHtml)}
               onChange={(value) => updateDraft("body", value)}
               value={draft.body}
             />
@@ -3350,6 +3954,7 @@ function NotePreviewModal({
         )}
         <NoteInsightPanel
           currentUid={currentUid}
+          defaultOpen={!isEditing}
           history={history}
           historySummaries={historySummaries}
           note={note}
@@ -3373,6 +3978,7 @@ function NotePreviewModal({
 
 function NoteInsightPanel({
   currentUid,
+  defaultOpen,
   history,
   historySummaries,
   note,
@@ -3381,6 +3987,7 @@ function NoteInsightPanel({
   users
 }: {
   currentUid: string;
+  defaultOpen: boolean;
   history: NoteHistorySnapshot[];
   historySummaries: Record<string, string>;
   note: DecryptedNote;
@@ -3394,7 +4001,14 @@ function NoteInsightPanel({
   const showReceipts = note.type === "shared";
 
   return (
-    <section className="note-insight-panel" aria-label="노트 활동 정보">
+    <details className="note-insight-panel" aria-label="노트 활동 정보" open={defaultOpen}>
+      <summary>
+        <span>
+          <History size={16} />
+          활동
+        </span>
+        <em>{history.length}개 이력</em>
+      </summary>
       {showReceipts && (
         <div className="note-insight-section">
           <div className="note-insight-heading">
@@ -3465,44 +4079,8 @@ function NoteInsightPanel({
           <p className="muted">아직 기록된 수정 이력이 없습니다.</p>
         )}
       </div>
-    </section>
+    </details>
   );
-}
-
-function insertHtmlAtSelection(container: HTMLDivElement | null, html: string, savedRange: Range | null = null) {
-  if (!container) {
-    return null;
-  }
-
-  container.focus();
-
-  const selection = window.getSelection();
-  const currentRange =
-    selection?.rangeCount && selection.anchorNode && container.contains(selection.anchorNode)
-      ? selection.getRangeAt(0)
-      : null;
-  const range = savedRange && container.contains(savedRange.commonAncestorContainer) ? savedRange : currentRange;
-
-  if (range) {
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-    const template = document.createElement("template");
-    template.innerHTML = sanitizeEditorHtml(html);
-    const lastNode = template.content.lastChild;
-    range.deleteContents();
-    range.insertNode(template.content);
-
-    if (lastNode) {
-      range.setStartAfter(lastNode);
-      range.collapse(true);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-    }
-  } else {
-    container.insertAdjacentHTML("beforeend", sanitizeEditorHtml(html));
-  }
-
-  return container.innerHTML;
 }
 
 async function imageFileToResizedDataUrl(file: File) {

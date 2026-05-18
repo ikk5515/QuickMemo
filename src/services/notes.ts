@@ -22,6 +22,7 @@ import type {
   EncryptedPayload,
   NoteAttachmentDocument,
   NoteDocument,
+  NoteFolderDocument,
   NoteHistoryAction,
   NoteHistoryDocument,
   NoteKind,
@@ -45,6 +46,10 @@ export interface NoteHistorySnapshot extends NoteHistoryDocument {
   id: string;
 }
 
+export interface NoteFolderSnapshot extends NoteFolderDocument {
+  id: string;
+}
+
 export interface SaveNoteInput {
   type: NoteKind;
   ownerUid: string;
@@ -52,6 +57,7 @@ export interface SaveNoteInput {
   encryptedTitle: EncryptedPayload;
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
+  folderId?: string | null;
   dueAt?: Timestamp | null;
   historySummary?: EncryptedPayload;
 }
@@ -303,6 +309,7 @@ export async function createEncryptedNote(input: SaveNoteInput) {
   batch.set(noteRef, {
     ...noteInput,
     participantUids: Array.from(new Set(input.participantUids)),
+    folderId: input.type === "personal" ? input.folderId ?? null : null,
     createdAt: serverTimestamp(),
     dueAt: input.dueAt ?? null,
     isDeleted: false,
@@ -342,7 +349,8 @@ export async function updateNoteAccess(
   uid: string,
   type: NoteKind,
   participantUids: string[],
-  wrappedKeys: Record<string, WrappedNoteKey>
+  wrappedKeys: Record<string, WrappedNoteKey>,
+  folderId: string | null = null
 ) {
   const batch = writeBatch(db);
   const noteRef = doc(db, "notes", noteId);
@@ -351,11 +359,20 @@ export async function updateNoteAccess(
     type,
     participantUids: Array.from(new Set(participantUids)),
     wrappedKeys,
+    folderId: type === "personal" ? folderId : null,
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
   setNoteHistory(batch, noteId, uid, "share", ["participants"]);
   await batch.commit();
+}
+
+export async function updateNoteFolder(noteId: string, uid: string, folderId: string | null) {
+  await updateDoc(doc(db, "notes", noteId), {
+    folderId,
+    updatedAt: serverTimestamp(),
+    updatedBy: uid
+  });
 }
 
 export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Timestamp | null) {
@@ -482,6 +499,39 @@ export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
     uploadedBy: input.uploadedBy,
     createdAt: serverTimestamp()
   } satisfies Omit<NoteAttachmentDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> });
+}
+
+export function subscribeNoteFolders(
+  uid: string,
+  callback: (folders: NoteFolderSnapshot[]) => void,
+  onError?: (error: Error) => void
+) {
+  const foldersQuery = query(collection(db, "noteFolders"), where("ownerUid", "==", uid));
+
+  return onSnapshot(
+    foldersQuery,
+    (snapshot) => {
+      callback(
+        snapshot.docs
+          .map((document) => ({ id: document.id, ...(document.data() as NoteFolderDocument) }))
+          .sort((left, right) => left.name.localeCompare(right.name, "ko"))
+      );
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export async function createNoteFolder(uid: string, name: string, color: string) {
+  return addDoc(collection(db, "noteFolders"), {
+    ownerUid: uid,
+    name: name.trim(),
+    color,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  } satisfies Omit<NoteFolderDocument, "createdAt" | "updatedAt"> & {
+    createdAt: ReturnType<typeof serverTimestamp>;
+    updatedAt: ReturnType<typeof serverTimestamp>;
+  });
 }
 
 export async function deleteNoteAttachment(noteId: string, attachmentId: string) {

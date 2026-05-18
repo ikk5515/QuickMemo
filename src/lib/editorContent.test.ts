@@ -51,4 +51,30 @@ describe("editor content helpers", () => {
 
     expect(html).toBe("<p>bad</p>");
   });
+
+  it("preserves safe task lists, table alignment, and cell colors", () => {
+    const html = sanitizeEditorHtml(
+      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><label><input type="checkbox" checked></label><div><p>done</p></div></li></ul><table><tbody><tr><td colspan="1" rowspan="1" colwidth="120" data-qm-bg="#dbeafe" style="background: red; text-align:center"><p style="text-align:center">cell</p></td></tr></tbody></table>'
+    );
+
+    expect(html).toContain('data-type="taskList"');
+    expect(html).toContain('data-checked="true"');
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('data-qm-bg="#dbeafe"');
+    expect(html).toContain('colwidth="120"');
+    expect(html).toContain("text-align: center");
+  });
+
+  it("removes unsafe table and checkbox attributes", () => {
+    const html = sanitizeEditorHtml(
+      '<table onclick="alert(1)"><tbody><tr><td data-qm-bg="#000000" colwidth="99999" style="background-image:url(javascript:bad); width:9999px"><input type="text" value="bad"><p style="text-align:justify">safe</p></td></tr></tbody></table>'
+    );
+
+    expect(html).not.toContain("onclick");
+    expect(html).not.toContain("#000000");
+    expect(html).not.toContain("colwidth");
+    expect(html).not.toContain("javascript");
+    expect(html).not.toContain('type="text"');
+    expect(html).not.toContain("justify");
+  });
 });

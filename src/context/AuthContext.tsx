@@ -1,13 +1,23 @@
 import {
+  EmailAuthProvider,
   User,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   signInWithEmailAndPassword,
-  signOut as firebaseSignOut
+  signOut as firebaseSignOut,
+  updatePassword
 } from "firebase/auth";
 import { PropsWithChildren, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { auth } from "../lib/firebase";
-import { unlockPrivateKey as unlockStoredPrivateKey } from "../lib/crypto";
-import { getUserKeyDocument, getUserProfile, subscribeUserProfile } from "../services/users";
+import { relockUserPrivateKey, unlockPrivateKeyWithFallback } from "../lib/crypto";
+import {
+  clearPendingUserKey,
+  getUserKeyDocument,
+  getUserProfile,
+  promotePendingUserKey,
+  stagePendingUserKey,
+  subscribeUserProfile
+} from "../services/users";
 import type { PublicRosterUser, UserProfile } from "../types";
 
 interface AuthContextValue {
@@ -16,6 +26,7 @@ interface AuthContextValue {
   privateKey: CryptoKey | null;
   loading: boolean;
   keyError: string | null;
+  changePassword: (currentPassword: string, nextPassword: string) => Promise<void>;
   loginRosterUser: (user: PublicRosterUser, password: string) => Promise<UserProfile>;
   unlockPrivateKey: (password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -119,7 +130,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
 
       try {
-        setPrivateKey(await unlockStoredPrivateKey(keyDocument, password));
+        setPrivateKey(await unlockPrivateKeyWithFallback(keyDocument, password));
       } catch (error) {
         setKeyError("노트 암호화 키를 열 수 없습니다. 비밀번호를 확인해주세요.");
         throw error;
@@ -139,10 +150,47 @@ export function AuthProvider({ children }: PropsWithChildren) {
         throw new Error("사용자 프로필 또는 암호화 키를 불러오지 못했습니다.");
       }
 
-      setPrivateKey(await unlockStoredPrivateKey(keyDocument, password));
+      setPrivateKey(await unlockPrivateKeyWithFallback(keyDocument, password));
       return nextProfile;
     },
     [loadProfile]
+  );
+
+  const changePassword = useCallback(
+    async (currentPassword: string, nextPassword: string) => {
+      if (!firebaseUser || !profile) {
+        throw new Error("로그인된 사용자가 없습니다.");
+      }
+
+      const credential = EmailAuthProvider.credential(profile.loginEmail, currentPassword);
+      await reauthenticateWithCredential(firebaseUser, credential);
+
+      const keyDocument = await getUserKeyDocument(firebaseUser.uid);
+
+      if (!keyDocument) {
+        throw new Error("사용자 암호화 키를 찾을 수 없습니다.");
+      }
+
+      const nextKeyBundle = await relockUserPrivateKey(keyDocument, currentPassword, nextPassword);
+      await stagePendingUserKey(firebaseUser.uid, nextKeyBundle);
+
+      let authPasswordChanged = false;
+
+      try {
+        await updatePassword(firebaseUser, nextPassword);
+        authPasswordChanged = true;
+        await promotePendingUserKey(firebaseUser.uid, nextKeyBundle);
+        setPrivateKey(await unlockPrivateKeyWithFallback({ ...keyDocument, ...nextKeyBundle }, nextPassword));
+        setKeyError(null);
+      } catch (error) {
+        if (!authPasswordChanged) {
+          await clearPendingUserKey(firebaseUser.uid).catch(() => undefined);
+        }
+
+        throw error;
+      }
+    },
+    [firebaseUser, profile]
   );
 
   const signOut = useCallback(async () => {
@@ -157,11 +205,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
       privateKey,
       loading,
       keyError,
+      changePassword,
       loginRosterUser,
       unlockPrivateKey,
       signOut
     }),
-    [firebaseUser, keyError, loading, loginRosterUser, privateKey, profile, signOut, unlockPrivateKey]
+    [changePassword, firebaseUser, keyError, loading, loginRosterUser, privateKey, profile, signOut, unlockPrivateKey]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
