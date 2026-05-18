@@ -48,6 +48,7 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState
@@ -85,11 +86,13 @@ import {
 import {
   editorCellColors,
   editorImagePixelWidthBounds,
+  editorLineHeightBounds,
   editorLineHeights,
   editorTableColumnPixelWidthBounds,
   editorTablePixelHeightBounds,
   editorTableRowPixelHeightBounds,
   editorTablePixelWidthBounds,
+  editorTextSizeBounds,
   editorTextColors,
   editorTextSizes,
   richEditorExtensions
@@ -236,7 +239,12 @@ interface TableResizeSession {
   rowTarget: TableResizeNodeTarget | null;
 }
 
-const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
+interface TableDocumentInfo {
+  rows: Array<{ cells: TableResizeNodeTarget[]; target: TableResizeNodeTarget }>;
+  tableTarget: TableResizeNodeTarget;
+}
+
+const fontSizes = editorTextSizes;
 const maxImageDataUrlLength = 760_000;
 const autosaveDelayMs = 2500;
 const deletedNoteRetentionDays = 30;
@@ -278,6 +286,7 @@ async function encryptNoteDraft(draft: NoteDraft, noteKey: CryptoKey) {
 interface SharedBlockMetadata {
   authors: string[];
   editors: string[];
+  lastEditorUid: string | null;
   signature: string;
 }
 
@@ -303,15 +312,19 @@ function annotateSharedNoteBody(previousHtml: string, nextHtml: string, actorUid
     const isNewBlock = !previousBlock;
     const previousAuthors = previousBlock?.authors.length ? previousBlock.authors : [fallbackAuthorUid];
     const previousEditors = previousBlock?.editors.length ? previousBlock.editors : previousAuthors;
+    const previousLastEditorUid = previousBlock?.lastEditorUid ?? previousEditors.at(-1) ?? fallbackAuthorUid;
     const changed = !previousBlock || comparableSharedBlockSignature(block) !== previousBlock.signature;
     const authors = parseUidList(block.dataset.qmAuthorUids);
     const editors = parseUidList(block.dataset.qmEditorUids);
+    const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
     const nextAuthors = authors.length ? authors : isNewBlock ? [actorUid] : previousAuthors;
     const nextEditors = editors.length ? editors : isNewBlock ? [actorUid] : previousEditors;
     const finalEditors = changed ? appendUniqueUid(nextEditors, actorUid) : nextEditors;
+    const finalLastEditorUid = changed ? actorUid : lastEditorUid ?? previousLastEditorUid;
 
     block.dataset.qmAuthorUids = nextAuthors.join(",");
     block.dataset.qmEditorUids = finalEditors.join(",");
+    block.dataset.qmLastEditorUid = finalLastEditorUid;
   });
 
   const container = document.createElement("div");
@@ -330,11 +343,14 @@ function sharedBlockMetadataFromHtml(html: string, fallbackAuthorUid: string): S
   return sharedAttributionBlocks(template.content).map((block) => {
     const authors = parseUidList(block.dataset.qmAuthorUids);
     const editors = parseUidList(block.dataset.qmEditorUids);
+    const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
     const safeAuthors = authors.length ? authors : [fallbackAuthorUid];
+    const safeEditors = editors.length ? editors : safeAuthors;
 
     return {
       authors: safeAuthors,
-      editors: editors.length ? editors : safeAuthors,
+      editors: safeEditors,
+      lastEditorUid: lastEditorUid ?? safeEditors.at(-1) ?? fallbackAuthorUid,
       signature: comparableSharedBlockSignature(block)
     };
   });
@@ -357,13 +373,18 @@ function sharedAttributionBlocks(root: ParentNode) {
 function comparableSharedBlockSignature(block: HTMLElement) {
   const clone = block.cloneNode(true) as HTMLElement;
 
-  clone.querySelectorAll<HTMLElement>("[data-qm-author-uids], [data-qm-editor-uids], [data-qm-attribution-label]").forEach((element) => {
-    element.removeAttribute("data-qm-author-uids");
-    element.removeAttribute("data-qm-editor-uids");
-    element.removeAttribute("data-qm-attribution-label");
-  });
+  clone.querySelectorAll<HTMLElement>(".qm-attribution-note").forEach((element) => element.remove());
+  clone
+    .querySelectorAll<HTMLElement>("[data-qm-author-uids], [data-qm-editor-uids], [data-qm-last-editor-uid], [data-qm-attribution-label]")
+    .forEach((element) => {
+      element.removeAttribute("data-qm-author-uids");
+      element.removeAttribute("data-qm-editor-uids");
+      element.removeAttribute("data-qm-last-editor-uid");
+      element.removeAttribute("data-qm-attribution-label");
+    });
   clone.removeAttribute("data-qm-author-uids");
   clone.removeAttribute("data-qm-editor-uids");
+  clone.removeAttribute("data-qm-last-editor-uid");
   clone.removeAttribute("data-qm-attribution-label");
 
   return `${clone.tagName}:${clone.innerHTML.replace(/\s+/g, " ").trim()}`;
@@ -378,6 +399,11 @@ function parseUidList(value: string | null | undefined) {
         .filter((uid) => /^[A-Za-z0-9_:.-]{1,128}$/.test(uid))
     )
   );
+}
+
+function parseUid(value: string | null | undefined) {
+  const normalizedUid = String(value ?? "").trim();
+  return /^[A-Za-z0-9_:.-]{1,128}$/.test(normalizedUid) ? normalizedUid : null;
 }
 
 function appendUniqueUid(values: string[], uid: string) {
@@ -396,14 +422,25 @@ function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserPro
   sharedAttributionBlocks(template.content).forEach((block) => {
     const authors = parseUidList(block.dataset.qmAuthorUids);
     const editors = parseUidList(block.dataset.qmEditorUids);
+    const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
     const safeAuthors = authors.length ? authors : [note.ownerUid];
     const safeEditors = editors.length ? editors : [note.updatedBy || note.ownerUid];
-    block.dataset.qmAttributionLabel = `작성자: ${uidLabels(safeAuthors, usersByUid)}, 수정자: ${uidLabels(safeEditors, usersByUid)}`;
+    const finalLastEditorUid = lastEditorUid ?? safeEditors.at(-1) ?? note.updatedBy ?? note.ownerUid;
+    const label = `작성자: ${uidLabels(safeAuthors, usersByUid)}, 최종 수정자: ${uidLabels([finalLastEditorUid], usersByUid)}`;
+    block.dataset.qmAttributionLabel = label;
+    block.appendChild(sharedAttributionNoteElement(label));
   });
 
   const container = document.createElement("div");
   container.appendChild(template.content);
   return container.innerHTML;
+}
+
+function sharedAttributionNoteElement(label: string) {
+  const noteElement = document.createElement("span");
+  noteElement.className = "qm-attribution-note";
+  noteElement.textContent = label;
+  return noteElement;
 }
 
 function uidLabels(uids: string[], usersByUid: Map<string, UserProfile>) {
@@ -605,7 +642,20 @@ function clampDraftFontSize(value: number) {
     return 17;
   }
 
-  return Math.min(28, Math.max(14, Math.round(value)));
+  return Math.min(editorTextSizeBounds.max, Math.max(editorTextSizeBounds.min, Math.round(value)));
+}
+
+function clampSelectionFontSize(value: number) {
+  return clampDraftFontSize(value);
+}
+
+function clampSelectionLineHeight(value: number) {
+  if (!Number.isFinite(value)) {
+    return 1.5;
+  }
+
+  const roundedValue = Math.round(value * 100) / 100;
+  return Math.min(editorLineHeightBounds.max, Math.max(editorLineHeightBounds.min, roundedValue));
 }
 
 function bodyChangeSummary(previousDraft: NoteDraft, draft: NoteDraft) {
@@ -1785,7 +1835,7 @@ export default function NotesPage() {
   }
 
   function updateFontSize(fontSize: number) {
-    setEditor((current) => ({ ...current, fontSize, dirty: true }));
+    setEditor((current) => ({ ...current, fontSize: clampDraftFontSize(fontSize), dirty: true }));
   }
 
   async function updateEditorFolder(folderId: string | null) {
@@ -2808,17 +2858,12 @@ export default function NotesPage() {
             <div className="toolbar-actions">
               <label className="font-size-control">
                 기본 글자
-                <select
-                  aria-label="메모 글자 크기"
-                  onChange={(event) => updateFontSize(Number(event.target.value))}
+                <FontSizeNumberInput
+                  ariaLabel="메모 글자 크기"
+                  listId="quickmemo-font-size-options"
+                  onCommit={updateFontSize}
                   value={editor.fontSize}
-                >
-                  {fontSizes.map((fontSize) => (
-                    <option key={fontSize} value={fontSize}>
-                      {fontSize}px
-                    </option>
-                  ))}
-                </select>
+                />
               </label>
               {currentType === "personal" && (
                 <label className="font-size-control folder-control">
@@ -2987,6 +3032,9 @@ function RichMemoEditor({
   const [tableRows, setTableRows] = useState(3);
   const [tableColumns, setTableColumns] = useState(3);
   const [, setToolbarVersion] = useState(0);
+  const controlIdPrefix = useId();
+  const selectionFontSizeListId = `${controlIdPrefix}-selection-font-sizes`;
+  const selectionLineHeightListId = `${controlIdPrefix}-selection-line-heights`;
   const editor = useEditor({
     extensions: richEditorExtensions,
     content: value || "",
@@ -3275,13 +3323,15 @@ function RichMemoEditor({
   }
 
   function applySelectionFontSize(size: number) {
-    runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textSize", { size }).run());
+    const safeSize = clampSelectionFontSize(size);
+    runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textSize", { size: safeSize }).run());
   }
 
   function applySelectionLineHeight(lineHeight: number) {
+    const safeLineHeight = clampSelectionLineHeight(lineHeight);
     runToolbarCommand((currentEditor) => {
-      currentEditor.chain().focus().setMark("lineHeight", { lineHeight }).run();
-      updateSelectedBlockLineHeight(currentEditor, lineHeight);
+      currentEditor.chain().focus().setMark("lineHeight", { lineHeight: safeLineHeight }).run();
+      updateSelectedBlockLineHeight(currentEditor, safeLineHeight);
     });
   }
 
@@ -3336,8 +3386,8 @@ function RichMemoEditor({
     }
   }
 
-  const currentSelectionFontSize = Number(editor?.getAttributes("textSize").size) || fontSize;
-  const currentSelectionLineHeight = currentBlockLineHeight(editor) ?? 1.5;
+  const currentSelectionFontSize = clampSelectionFontSize(Number(editor?.getAttributes("textSize").size) || fontSize);
+  const currentSelectionLineHeight = clampSelectionLineHeight(currentBlockLineHeight(editor) ?? 1.5);
   const currentSelectionTextColor = String(editor?.getAttributes("textColor").color || customTextColor);
   const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
 
@@ -3462,31 +3512,21 @@ function RichMemoEditor({
         </button>
         <label className="selection-font-control">
           선택 글자
-          <select
-            aria-label="선택 영역 글자 크기"
-            onChange={(event) => applySelectionFontSize(Number(event.target.value))}
+          <FontSizeNumberInput
+            ariaLabel="선택 영역 글자 크기"
+            listId={selectionFontSizeListId}
+            onCommit={applySelectionFontSize}
             value={currentSelectionFontSize}
-          >
-            {editorTextSizes.map((size) => (
-              <option key={size} value={size}>
-                {size}px
-              </option>
-            ))}
-          </select>
+          />
         </label>
         <label className="selection-font-control line-height-control">
           줄 간격
-          <select
-            aria-label="선택 영역 줄 간격"
-            onChange={(event) => applySelectionLineHeight(Number(event.target.value))}
+          <LineHeightNumberInput
+            ariaLabel="선택 영역 줄 간격"
+            listId={selectionLineHeightListId}
+            onCommit={applySelectionLineHeight}
             value={currentSelectionLineHeight}
-          >
-            {editorLineHeights.map((lineHeight) => (
-              <option key={lineHeight} value={lineHeight}>
-                {lineHeight}
-              </option>
-            ))}
-          </select>
+          />
         </label>
         <div className="text-color-palette" aria-label="글자 색상">
           <Palette size={15} />
@@ -3670,6 +3710,109 @@ function RichMemoEditor({
   );
 }
 
+function FontSizeNumberInput({
+  ariaLabel,
+  listId,
+  onCommit,
+  value
+}: {
+  ariaLabel: string;
+  listId: string;
+  onCommit: (value: number) => void;
+  value: number;
+}) {
+  const [draftValue, setDraftValue] = useState(String(value));
+
+  useEffect(() => {
+    setDraftValue(String(value));
+  }, [value]);
+
+  function commitValue() {
+    const safeValue = clampDraftFontSize(Number(draftValue));
+    setDraftValue(String(safeValue));
+    onCommit(safeValue);
+  }
+
+  return (
+    <>
+      <input
+        aria-label={ariaLabel}
+        list={listId}
+        max={editorTextSizeBounds.max}
+        min={editorTextSizeBounds.min}
+        onBlur={commitValue}
+        onChange={(event) => setDraftValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            commitValue();
+            event.currentTarget.blur();
+          }
+        }}
+        step={editorTextSizeBounds.step}
+        type="number"
+        value={draftValue}
+      />
+      <span>px</span>
+      <datalist id={listId}>
+        {fontSizes.map((fontSize) => (
+          <option key={fontSize} value={fontSize} />
+        ))}
+      </datalist>
+    </>
+  );
+}
+
+function LineHeightNumberInput({
+  ariaLabel,
+  listId,
+  onCommit,
+  value
+}: {
+  ariaLabel: string;
+  listId: string;
+  onCommit: (value: number) => void;
+  value: number;
+}) {
+  const [draftValue, setDraftValue] = useState(String(value));
+
+  useEffect(() => {
+    setDraftValue(String(value));
+  }, [value]);
+
+  function commitValue() {
+    const safeValue = clampSelectionLineHeight(Number(draftValue));
+    setDraftValue(String(safeValue));
+    onCommit(safeValue);
+  }
+
+  return (
+    <>
+      <input
+        aria-label={ariaLabel}
+        list={listId}
+        max={editorLineHeightBounds.max}
+        min={editorLineHeightBounds.min}
+        onBlur={commitValue}
+        onChange={(event) => setDraftValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            commitValue();
+            event.currentTarget.blur();
+          }
+        }}
+        step={editorLineHeightBounds.step}
+        type="number"
+        value={draftValue}
+      />
+      <datalist id={listId}>
+        {editorLineHeights.map((lineHeight) => (
+          <option key={lineHeight} value={lineHeight} />
+        ))}
+      </datalist>
+    </>
+  );
+}
+
 function clampTableDimension(value: number) {
   if (!Number.isFinite(value)) {
     return 3;
@@ -3717,21 +3860,19 @@ function currentBlockLineHeight(editor: TipTapEditor | null) {
 
   const inlineLineHeight = Number(editor.getAttributes("lineHeight").lineHeight);
 
-  if (editorLineHeights.includes(inlineLineHeight as (typeof editorLineHeights)[number])) {
-    return inlineLineHeight;
+  if (Number.isFinite(inlineLineHeight)) {
+    return clampSelectionLineHeight(inlineLineHeight);
   }
 
   const lineHeight = ["paragraph", "heading", "listItem", "tableCell", "tableHeader"]
     .map((nodeName) => Number(editor.getAttributes(nodeName).qmLineHeight))
-    .find((value) => editorLineHeights.includes(value as (typeof editorLineHeights)[number]));
+    .find((value) => Number.isFinite(value));
 
-  return lineHeight ?? null;
+  return lineHeight ? clampSelectionLineHeight(lineHeight) : null;
 }
 
 function updateSelectedBlockLineHeight(editor: TipTapEditor, lineHeight: number) {
-  if (!editorLineHeights.includes(lineHeight as (typeof editorLineHeights)[number])) {
-    return;
-  }
+  const safeLineHeight = clampSelectionLineHeight(lineHeight);
 
   const blockNodeNames = new Set(["paragraph", "heading", "listItem", "tableCell", "tableHeader"]);
   const { from, to, $from } = editor.state.selection;
@@ -3768,7 +3909,7 @@ function updateSelectedBlockLineHeight(editor: TipTapEditor, lineHeight: number)
       if (node && blockNodeNames.has(node.type.name)) {
         transaction = transaction.setNodeMarkup(position, undefined, {
           ...node.attrs,
-          qmLineHeight: lineHeight
+          qmLineHeight: safeLineHeight
         });
       }
     });
@@ -3926,23 +4067,85 @@ function tableResizeCursorFromEvent(editorElement: HTMLElement, event: MouseEven
 }
 
 function tableResizeSessionFromHit(editor: TipTapEditor, hit: TableResizeHit): TableResizeSession | null {
-  const tableTarget = editorNodePositionFromElement(editor, hit.table, "table");
-  const rowTarget = hit.row ? editorNodePositionFromElement(editor, hit.row, "tableRow") : null;
-  const columnCellTargets =
-    hit.kind === "column" && typeof hit.columnIndex === "number"
-      ? Array.from(hit.table.rows)
-          .map((row) => row.cells[hit.columnIndex!])
-          .filter((cell): cell is HTMLTableCellElement => cell instanceof HTMLTableCellElement)
-          .map((cell) => editorNodePositionFromElement(editor, cell, cell.tagName === "TH" ? "tableHeader" : "tableCell"))
-          .filter((target): target is TableResizeNodeTarget => Boolean(target))
-      : [];
-  const startColumnWidths = columnWidthsFromTable(hit.table);
+  const tableIndex = tableIndexFromElement(editor.view.dom as HTMLElement, hit.table);
+  const tableInfo = tableIndex >= 0 ? tableDocumentInfoByIndex(editor, tableIndex) : null;
 
-  if (!tableTarget && !rowTarget && !columnCellTargets.length) {
+  if (!tableInfo) {
     return null;
   }
 
-  return { columnCellTargets, rowTarget, startColumnWidths, tableTarget };
+  const rowIndex = hit.row ? Array.from(hit.table.rows).indexOf(hit.row) : -1;
+  const rowTarget = rowIndex >= 0 ? tableInfo.rows[rowIndex]?.target ?? null : null;
+  const columnCellTargets =
+    hit.kind === "column" && typeof hit.columnIndex === "number"
+      ? tableInfo.rows.map((row) => row.cells[hit.columnIndex!]).filter((target): target is TableResizeNodeTarget => Boolean(target))
+      : [];
+  const startColumnWidths = columnWidthsFromTable(hit.table);
+
+  return { columnCellTargets, rowTarget, startColumnWidths, tableTarget: tableInfo.tableTarget };
+}
+
+function tableIndexFromElement(editorElement: HTMLElement, table: HTMLTableElement) {
+  return Array.from(editorElement.querySelectorAll("table")).indexOf(table);
+}
+
+function tableDocumentInfoByIndex(editor: TipTapEditor, tableIndex: number): TableDocumentInfo | null {
+  let currentIndex = -1;
+  let tableInfo: TableDocumentInfo | null = null;
+
+  editor.state.doc.descendants((node, position) => {
+    if (node.type.name !== "table") {
+      return true;
+    }
+
+    currentIndex += 1;
+
+    if (currentIndex !== tableIndex) {
+      return false;
+    }
+
+    const rows: TableDocumentInfo["rows"] = [];
+
+    node.forEach((rowNode, rowOffset) => {
+      if (rowNode.type.name !== "tableRow") {
+        return;
+      }
+
+      const rowPosition = position + 1 + rowOffset;
+      const cells: TableResizeNodeTarget[] = [];
+
+      rowNode.forEach((cellNode, cellOffset) => {
+        if (cellNode.type.name !== "tableCell" && cellNode.type.name !== "tableHeader") {
+          return;
+        }
+
+        cells.push({
+          nodeName: cellNode.type.name === "tableHeader" ? "tableHeader" : "tableCell",
+          position: rowPosition + 1 + cellOffset
+        });
+      });
+
+      rows.push({
+        cells,
+        target: {
+          nodeName: "tableRow",
+          position: rowPosition
+        }
+      });
+    });
+
+    tableInfo = {
+      rows,
+      tableTarget: {
+        nodeName: "table",
+        position
+      }
+    };
+
+    return false;
+  });
+
+  return tableInfo;
 }
 
 function updateTableColumnWidthFromSession(
@@ -4021,47 +4224,6 @@ function dispatchNodeAttributeUpdates(
 
   editor.view.dispatch(transaction);
   return true;
-}
-
-function editorNodePositionFromElement(
-  editor: TipTapEditor,
-  element: HTMLElement,
-  nodeName: "table" | "tableCell" | "tableHeader" | "tableRow"
-) {
-  const probe = element.matches("td, th") ? element : element.querySelector("td, th") ?? element;
-  const rawPosition = editor.view.posAtDOM(probe, 0);
-  const position = Math.min(Math.max(rawPosition, 0), editor.state.doc.content.size);
-  const resolvedPosition = editor.state.doc.resolve(position);
-
-  for (let depth = resolvedPosition.depth; depth > 0; depth -= 1) {
-    const node = resolvedPosition.node(depth);
-
-    if (node.type.name === nodeName) {
-      return {
-        nodeName,
-        position: resolvedPosition.before(depth)
-      };
-    }
-  }
-
-  for (let offset = -2; offset <= 2; offset += 1) {
-    const candidatePosition = position + offset;
-
-    if (candidatePosition < 0 || candidatePosition > editor.state.doc.content.size) {
-      continue;
-    }
-
-    const node = editor.state.doc.nodeAt(candidatePosition);
-
-    if (node?.type.name === nodeName) {
-      return {
-        nodeName,
-        position: candidatePosition
-      };
-    }
-  }
-
-  return null;
 }
 
 function RemoteCursorLayer({
@@ -5359,7 +5521,7 @@ function NotePreviewModal({
   }
 
   function updateDraftFontSize(fontSize: number) {
-    setDraft((current) => ({ ...current, fontSize }));
+    setDraft((current) => ({ ...current, fontSize: clampDraftFontSize(fontSize) }));
     setDraftDirty(true);
   }
 
@@ -5568,17 +5730,12 @@ function NotePreviewModal({
           <div className="note-preview-editor">
             <label className="font-size-control note-preview-font-control">
               글자
-              <select
-                aria-label="팝업 메모 글자 크기"
-                onChange={(event) => updateDraftFontSize(Number(event.target.value))}
+              <FontSizeNumberInput
+                ariaLabel="팝업 메모 글자 크기"
+                listId="quickmemo-preview-font-size-options"
+                onCommit={updateDraftFontSize}
                 value={draft.fontSize}
-              >
-                {fontSizes.map((fontSize) => (
-                  <option key={fontSize} value={fontSize}>
-                    {fontSize}px
-                  </option>
-                ))}
-              </select>
+              />
             </label>
             <RichMemoEditor
               editorRef={previewEditorRef}

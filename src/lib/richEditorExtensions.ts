@@ -20,16 +20,17 @@ export const editorTablePixelWidthBounds = { min: 280, max: 1800, step: 10 } as 
 export const editorTablePixelHeightBounds = { min: 96, max: 2000, step: 8 } as const;
 export const editorTableRowPixelHeightBounds = { min: 28, max: 900, step: 4 } as const;
 export const editorTableColumnPixelWidthBounds = { min: 48, max: 900, step: 4 } as const;
-export const editorTextSizes = [14, 16, 17, 18, 20, 22, 24, 28] as const;
+export const editorTextSizeBounds = { min: 10, max: 72, step: 1 } as const;
+export const editorTextSizes = [10, 12, 14, 16, 17, 18, 20, 22, 24, 28, 32, 36, 44, 52, 64, 72] as const;
 export const editorTextColors = ["#14211f", "#64748b", "#dc2626", "#b9822f", "#15803d", "#2563eb", "#7c3aed"] as const;
-export const editorLineHeights = [1.2, 1.35, 1.5, 1.7, 2] as const;
+export const editorLineHeightBounds = { min: 1, max: 3, step: 0.05 } as const;
+export const editorLineHeights = [1, 1.15, 1.2, 1.35, 1.5, 1.7, 2, 2.5, 3] as const;
 
 const editorCellColorSet = new Set<string>(editorCellColors);
 const editorImageWidthSet = new Set<number>(editorImageWidths);
-const editorLineHeightSet = new Set<number>(editorLineHeights);
-const editorTextSizeSet = new Set<number>(editorTextSizes);
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
+const safeUidPattern = /^[A-Za-z0-9_:.-]{1,128}$/;
 
 function normalizedEditorColor(value: unknown) {
   const rawValue = String(value ?? "").trim().toLowerCase();
@@ -90,19 +91,25 @@ function normalizedTableColumnPixelWidth(value: unknown) {
 function normalizedTextSize(value: unknown) {
   const size = Number(String(value ?? "").replace("px", "").trim());
 
-  return editorTextSizeSet.has(size) ? size : null;
+  return Number.isInteger(size) && size >= editorTextSizeBounds.min && size <= editorTextSizeBounds.max ? size : null;
 }
 
 function normalizedLineHeight(value: unknown) {
-  const lineHeight = Number(String(value ?? "").trim());
+  const lineHeight = Math.round(Number(String(value ?? "").trim()) * 100) / 100;
 
-  return editorLineHeightSet.has(lineHeight) ? lineHeight : null;
+  return Number.isFinite(lineHeight) && lineHeight >= editorLineHeightBounds.min && lineHeight <= editorLineHeightBounds.max ? lineHeight : null;
 }
 
 function normalizedUidList(value: unknown) {
   const rawValue = String(value ?? "").trim();
 
   return safeUidListPattern.test(rawValue) ? rawValue : null;
+}
+
+function normalizedUid(value: unknown) {
+  const rawValue = String(value ?? "").trim();
+
+  return safeUidPattern.test(rawValue) ? rawValue : null;
 }
 
 const TextSize = Mark.create({
@@ -245,6 +252,14 @@ const BlockAttribution = Extension.create({
             renderHTML: (attributes: { qmEditorUids?: string | null }) => {
               const value = normalizedUidList(attributes.qmEditorUids);
               return value ? { "data-qm-editor-uids": value } : {};
+            }
+          },
+          qmLastEditorUid: {
+            default: null,
+            parseHTML: (element: HTMLElement) => normalizedUid(element.getAttribute("data-qm-last-editor-uid")),
+            renderHTML: (attributes: { qmLastEditorUid?: string | null }) => {
+              const value = normalizedUid(attributes.qmLastEditorUid);
+              return value ? { "data-qm-last-editor-uid": value } : {};
             }
           }
         }

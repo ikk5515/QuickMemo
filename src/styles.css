@@ -858,10 +858,14 @@ textarea {
 .overview-note-folder {
   border-radius: 999px;
   color: #ffffff;
-  display: block;
+  align-items: center;
+  display: inline-flex;
   font-size: 11px;
   font-weight: 900;
+  justify-content: center;
+  line-height: 1;
   max-width: 100%;
+  min-height: 22px;
   overflow: hidden;
   padding: 3px 8px;
   text-overflow: ellipsis;
@@ -895,7 +899,7 @@ textarea {
 
 .overview-note-card .overview-note-folder {
   color: #ffffff;
-  display: block;
+  display: inline-flex;
 }
 
 .overview-note-alert,
@@ -1212,9 +1216,16 @@ textarea {
   gap: 8px;
 }
 
-.font-size-control select {
+.font-size-control select,
+.font-size-control input {
   min-height: 38px;
   width: auto;
+}
+
+.font-size-control input {
+  max-width: 76px;
+  padding: 0 8px;
+  text-align: center;
 }
 
 .sync-status {
@@ -1388,6 +1399,7 @@ textarea {
 }
 
 .table-insert-control input,
+.selection-font-control input,
 .selection-font-control select {
   font-size: 12px;
   min-height: 26px;
@@ -1399,10 +1411,12 @@ textarea {
   width: 42px;
 }
 
+.selection-font-control input,
 .selection-font-control select {
   width: 72px;
 }
 
+.line-height-control input,
 .line-height-control select {
   width: 64px;
 }
@@ -2733,19 +2747,30 @@ textarea {
   position: relative;
 }
 
+.note-preview-body .qm-attribution-note {
+  color: #94a3b8;
+  display: block;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1.25;
+  margin-top: 3px;
+  text-align: right;
+}
+
 .note-preview-body p[data-qm-attribution-label],
 .note-preview-body li[data-qm-attribution-label] {
-  padding-right: clamp(112px, 18vw, 190px);
+  padding-right: 0;
 }
 
 .note-preview-body td[data-qm-attribution-label],
 .note-preview-body th[data-qm-attribution-label] {
-  padding-right: clamp(82px, 12vw, 130px);
+  padding-right: 8px;
 }
 
 .note-preview-body [data-qm-attribution-label]::after {
   color: #94a3b8;
   content: attr(data-qm-attribution-label);
+  display: none;
   font-size: 11px;
   font-weight: 850;
   line-height: 1.25;
