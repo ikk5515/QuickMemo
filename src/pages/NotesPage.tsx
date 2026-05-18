@@ -6133,10 +6133,15 @@ function NotePreviewModal({
       return;
     }
 
+    if (isEditing && draftDirty) {
+      setModalError("다른 기기 변경 사항이 있지만 현재 편집 중인 내용은 유지했습니다.");
+      return;
+    }
+
     setDraft(remoteDraft);
     setDraftDirty(false);
     setModalError(isEditing ? "다른 기기 변경 사항을 반영했습니다." : null);
-  }, [isEditing, note]);
+  }, [draftDirty, isEditing, note]);
 
   useEffect(() => {
     if (!isEditing || !draftDirty || saving) {

@@ -133,6 +133,20 @@ describe("NotesPage security controls", () => {
     expect(cursorFilter).not.toContain("cursorClock - cursorUpdatedAt.getTime() <= remoteCursorFreshMs");
   });
 
+  it("preserves dirty editor drafts when remote note updates arrive", () => {
+    const activeEditorSync =
+      notesPageSource.match(/const remoteDraft = draftFromNote\(activeRemoteNote\);[\s\S]*?setStatus\(activeRemoteNote\.type === "shared"/)?.[0] ?? "";
+    const previewModalSync =
+      notesPageSource.match(/useEffect\(\(\) => \{\n {4}const remoteDraft = draftFromNote\(note\);[\s\S]*?\}, \[draftDirty, isEditing, note\]\);/)?.[0] ?? "";
+
+    expect(activeEditorSync).toContain("if (editor.dirty && !contentMatches)");
+    expect(activeEditorSync.indexOf("if (editor.dirty && !contentMatches)")).toBeLessThan(activeEditorSync.indexOf("setEditor((current) =>"));
+    expect(previewModalSync).toContain("if (isEditing && draftDirty)");
+    expect(previewModalSync.indexOf("if (isEditing && draftDirty)")).toBeLessThan(previewModalSync.indexOf("setDraft(remoteDraft)"));
+    expect(previewModalSync).toContain("현재 편집 중인 내용은 유지했습니다.");
+    expect(previewModalSync).not.toContain("}, [isEditing, note]);");
+  });
+
   it("bounds XLSX merge ranges before materializing skipped preview cells", () => {
     const worksheetHelper =
       notesPageSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";
