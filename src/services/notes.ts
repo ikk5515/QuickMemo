@@ -532,6 +532,36 @@ export async function createNoteFolder(uid: string, name: string, color: string)
   });
 }
 
+export async function deleteNoteFolder(uid: string, folderId: string, noteIds: string[] = []) {
+  const folderRef = doc(db, "noteFolders", folderId);
+  const uniqueNoteIds = Array.from(new Set(noteIds)).filter(Boolean);
+  const chunkSize = 450;
+
+  if (!uniqueNoteIds.length) {
+    await deleteDoc(folderRef);
+    return;
+  }
+
+  for (let index = 0; index < uniqueNoteIds.length; index += chunkSize) {
+    const batch = writeBatch(db);
+    const chunk = uniqueNoteIds.slice(index, index + chunkSize);
+
+    chunk.forEach((noteId) => {
+      batch.update(doc(db, "notes", noteId), {
+        folderId: null,
+        updatedAt: serverTimestamp(),
+        updatedBy: uid
+      });
+    });
+
+    if (index + chunkSize >= uniqueNoteIds.length) {
+      batch.delete(folderRef);
+    }
+
+    await batch.commit();
+  }
+}
+
 export async function deleteNoteAttachment(noteId: string, attachmentId: string) {
   await deleteDoc(doc(db, "notes", noteId, "attachments", attachmentId));
 }

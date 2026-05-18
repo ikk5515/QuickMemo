@@ -31,6 +31,7 @@
     "docx-preview": "^0.3.7",
     "fflate": "^0.8.3",
     "firebase": "^12.6.0",
+    "hwp.js": "^0.0.3",
     "lucide-react": "^0.555.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
