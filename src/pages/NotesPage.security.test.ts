@@ -40,6 +40,31 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("sanitizeDocxPreviewCss");
   });
 
+  it("bounds ZIP-container previews before inflating DOCX, HWPX, and XLSX attachments", () => {
+    const docxRenderHelper = notesPageSource.match(/async function renderSafeDocxPreviewSrcDoc[\s\S]*?function docxSandboxSrcDoc/)?.[0] ?? "";
+    const zipGuardHelper = notesPageSource.match(/function safeZipPreviewEntries[\s\S]*?interface HwpPreviewResult/)?.[0] ?? "";
+    const hwpxExtractor = notesPageSource.match(/function extractHwpxPreviewHtml[\s\S]*?function extractXlsxPreviewHtml/)?.[0] ?? "";
+    const xlsxExtractor = notesPageSource.match(/function extractXlsxPreviewHtml[\s\S]*?function xlsxPreviewEntryAllowed/)?.[0] ?? "";
+
+    expect(notesPageSource).toContain("const maxZipPreviewEntries = 512");
+    expect(notesPageSource).toContain("const maxDocxPreviewUncompressedBytes = 12_000_000");
+    expect(notesPageSource).toContain("const maxZipPreviewCompressionRatio = 120");
+    expect(docxRenderHelper).toContain("safeZipPreviewEntries(bytes");
+    expect(docxRenderHelper.indexOf("safeZipPreviewEntries(bytes")).toBeGreaterThanOrEqual(0);
+    expect(docxRenderHelper.indexOf("safeZipPreviewEntries(bytes")).toBeLessThan(docxRenderHelper.indexOf("renderAsync"));
+    expect(zipGuardHelper).toContain("filter: (file) => shouldInflateZipPreviewEntry(file, limits, state)");
+    expect(zipGuardHelper).toContain("state.entryCount > limits.maxEntries");
+    expect(zipGuardHelper).toContain("file.originalSize > limits.maxEntryUncompressedBytes");
+    expect(zipGuardHelper).toContain("nextTotalBytes > limits.maxTotalUncompressedBytes");
+    expect(zipGuardHelper).toContain("compressionRatio > maxZipPreviewCompressionRatio");
+    expect(zipGuardHelper).toContain("state.selectedCount > limits.maxSelectedEntries");
+    expect(hwpxExtractor).toContain("safeZipPreviewEntries(bytes");
+    expect(hwpxExtractor).toContain("includeEntry: (name) => hwpxPreviewEntryPriority(name) > 0");
+    expect(xlsxExtractor).toContain("safeZipPreviewEntries(bytes");
+    expect(xlsxExtractor).toContain("includeEntry: xlsxPreviewEntryAllowed");
+    expect(notesPageSource).not.toContain("unzipSync(bytes);");
+  });
+
   it("does not trust shared attribution UIDs from the next rich-text draft", () => {
     const annotateHelper =
       notesPageSource.match(/function annotateSharedNoteBody[\s\S]*?function sharedBlockMetadataFromHtml/)?.[0] ?? "";
