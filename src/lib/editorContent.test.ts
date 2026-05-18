@@ -71,7 +71,7 @@ describe("editor content helpers", () => {
 
   it("preserves safe task lists, table alignment, and cell colors", () => {
     const html = sanitizeEditorHtml(
-      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true" data-qm-author-uids="u1" data-qm-editor-uids="u1,u2" data-qm-last-editor-uid="u2"><label><input type="checkbox" checked></label><div><p>done</p></div></li></ul><p data-qm-line-height="1.35" style="line-height:1.35"><span data-qm-font-size="36" data-qm-text-color="#2563eb" data-qm-line-height="1.85" style="font-size:36px;color:#2563eb;line-height:1.85">big</span></p><table data-qm-table-width-px="720" data-qm-table-height-px="320"><tbody><tr data-qm-row-height-px="80"><td colspan="1" rowspan="1" colwidth="120" data-qm-cell-width-px="120" data-qm-bg="#34c759" style="background: red; text-align:center"><p style="text-align:center">cell</p></td></tr></tbody></table>'
+      '<ul data-type="taskList"><li data-type="taskItem" data-checked="true" data-qm-author-uids="u1" data-qm-editor-uids="u1,u2" data-qm-last-editor-uid="u2" data-qm-attribution-label="작성자: BH, 최종 수정자: KIG"><label><input type="checkbox" checked></label><div><p>done</p></div></li></ul><p data-qm-line-height="1.35" style="line-height:1.35"><span data-qm-font-size="36" data-qm-text-color="#2563eb" data-qm-line-height="1.85" style="font-size:36px;color:#2563eb;line-height:1.85">big</span></p><table data-qm-table-width-px="720" data-qm-table-height-px="320"><tbody><tr data-qm-row-height-px="80"><td colspan="1" rowspan="1" colwidth="120" data-qm-cell-width-px="120" data-qm-bg="#34c759" style="background: red; text-align:center"><p style="text-align:center">cell</p></td></tr></tbody></table>'
     );
 
     expect(html).toContain('data-type="taskList"');
@@ -87,6 +87,7 @@ describe("editor content helpers", () => {
     expect(html).toContain('data-qm-author-uids="u1"');
     expect(html).toContain('data-qm-editor-uids="u1,u2"');
     expect(html).toContain('data-qm-last-editor-uid="u2"');
+    expect(html).toContain('data-qm-attribution-label="작성자: BH, 최종 수정자: KIG"');
     expect(html).toContain('data-qm-table-width-px="720"');
     expect(html).toContain("width: 720px");
     expect(html).toContain('data-qm-table-height-px="320"');
@@ -101,7 +102,7 @@ describe("editor content helpers", () => {
 
   it("removes unsafe table and checkbox attributes", () => {
     const html = sanitizeEditorHtml(
-      '<p data-qm-line-height="99" data-qm-author-uids="<bad>" data-qm-last-editor-uid="bad uid"><span data-qm-font-size="99" data-qm-text-color="javascript:bad" data-qm-line-height="999" style="font-size:99px;color:expression(alert(1));line-height:999">bad</span></p><table onclick="alert(1)" data-qm-table-width="999" data-qm-table-width-px="99999" data-qm-table-height-px="99999" style="width:9999px;height:99999px"><tbody><tr data-qm-row-height-px="99999"><td data-qm-bg="javascript:bad" data-qm-cell-width-px="99999" colwidth="99999" style="background-image:url(javascript:bad); width:9999px"><input type="text" value="bad"><p style="text-align:justify" data-qm-editor-uids="bad uid with spaces">safe</p></td></tr></tbody></table>'
+      '<p data-qm-line-height="99" data-qm-author-uids="<bad>" data-qm-last-editor-uid="bad uid" data-qm-attribution-label="<img src=x onerror=alert(1)>"><span data-qm-font-size="99" data-qm-text-color="javascript:bad" data-qm-line-height="999" style="font-size:99px;color:expression(alert(1));line-height:999">bad</span></p><table onclick="alert(1)" data-qm-table-width="999" data-qm-table-width-px="99999" data-qm-table-height-px="99999" style="width:9999px;height:99999px"><tbody><tr data-qm-row-height-px="99999"><td data-qm-bg="javascript:bad" data-qm-cell-width-px="99999" colwidth="99999" style="background-image:url(javascript:bad); width:9999px"><input type="text" value="bad"><p style="text-align:justify" data-qm-editor-uids="bad uid with spaces">safe</p></td></tr></tbody></table>'
     );
 
     expect(html).not.toContain("onclick");
@@ -111,6 +112,7 @@ describe("editor content helpers", () => {
     expect(html).not.toContain("data-qm-author-uids");
     expect(html).not.toContain("data-qm-editor-uids");
     expect(html).not.toContain("data-qm-last-editor-uid");
+    expect(html).not.toContain("data-qm-attribution-label");
     expect(html).not.toContain("font-size: 99px");
     expect(html).not.toContain("expression");
     expect(html).not.toContain("colwidth");

@@ -31,6 +31,7 @@ const editorImageWidthSet = new Set<number>(editorImageWidths);
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
 const safeUidPattern = /^[A-Za-z0-9_:.-]{1,128}$/;
+const attributionLabelMaxLength = 160;
 
 function normalizedEditorColor(value: unknown) {
   const rawValue = String(value ?? "").trim().toLowerCase();
@@ -110,6 +111,23 @@ function normalizedUid(value: unknown) {
   const rawValue = String(value ?? "").trim();
 
   return safeUidPattern.test(rawValue) ? rawValue : null;
+}
+
+function normalizedAttributionLabel(value: unknown) {
+  const rawValue = String(value ?? "").replace(/\s+/g, " ").trim();
+
+  if (!rawValue || rawValue.length > attributionLabelMaxLength || hasUnsafeAttributionLabelCharacter(rawValue)) {
+    return null;
+  }
+
+  return rawValue;
+}
+
+function hasUnsafeAttributionLabelCharacter(value: string) {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || codePoint === 127 || `<>"'\``.includes(character);
+  });
 }
 
 const TextSize = Mark.create({
@@ -260,6 +278,14 @@ const BlockAttribution = Extension.create({
             renderHTML: (attributes: { qmLastEditorUid?: string | null }) => {
               const value = normalizedUid(attributes.qmLastEditorUid);
               return value ? { "data-qm-last-editor-uid": value } : {};
+            }
+          },
+          qmAttributionLabel: {
+            default: null,
+            parseHTML: (element: HTMLElement) => normalizedAttributionLabel(element.getAttribute("data-qm-attribution-label")),
+            renderHTML: (attributes: { qmAttributionLabel?: string | null }) => {
+              const value = normalizedAttributionLabel(attributes.qmAttributionLabel);
+              return value ? { "data-qm-attribution-label": value } : {};
             }
           }
         }
