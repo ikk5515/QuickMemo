@@ -9,12 +9,13 @@ const tablePixelWidthBounds = { min: 280, max: 1800 };
 const tablePixelHeightBounds = { min: 96, max: 2000 };
 const tableRowPixelHeightBounds = { min: 28, max: 900 };
 const tableColumnPixelWidthBounds = { min: 48, max: 900 };
-const textSizeOptions = new Set([14, 16, 17, 18, 20, 22, 24, 28]);
-const lineHeightOptions = new Set([1.2, 1.35, 1.5, 1.7, 2]);
+const textSizeBounds = { min: 10, max: 72 };
+const lineHeightBounds = { min: 1, max: 3 };
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
+const safeUidPattern = /^[A-Za-z0-9_:.-]{1,128}$/;
 const lineHeightTags = new Set(["P", "DIV", "LI", "TD", "TH", "SPAN"]);
 const attributionTags = new Set(["P", "DIV", "LI", "TD", "TH"]);
 const allowedTags = new Set([
@@ -359,6 +360,7 @@ function copySharedAttribution(target: HTMLElement, source: HTMLElement) {
 
   const authorUids = safeUidList(source.getAttribute("data-qm-author-uids"));
   const editorUids = safeUidList(source.getAttribute("data-qm-editor-uids"));
+  const lastEditorUid = safeUid(source.getAttribute("data-qm-last-editor-uid"));
 
   if (authorUids) {
     target.dataset.qmAuthorUids = authorUids;
@@ -366,6 +368,10 @@ function copySharedAttribution(target: HTMLElement, source: HTMLElement) {
 
   if (editorUids) {
     target.dataset.qmEditorUids = editorUids;
+  }
+
+  if (lastEditorUid) {
+    target.dataset.qmLastEditorUid = lastEditorUid;
   }
 }
 
@@ -571,13 +577,17 @@ function safeTableColumnPixelWidth(value: string | null) {
 function safeTextSize(value: string | null) {
   const normalizedValue = Number(String(value ?? "").replace("px", "").trim());
 
-  return textSizeOptions.has(normalizedValue) ? normalizedValue : null;
+  return Number.isInteger(normalizedValue) && normalizedValue >= textSizeBounds.min && normalizedValue <= textSizeBounds.max
+    ? normalizedValue
+    : null;
 }
 
 function safeLineHeight(value: string | null) {
-  const normalizedValue = Number(String(value ?? "").trim());
+  const normalizedValue = Math.round(Number(String(value ?? "").trim()) * 100) / 100;
 
-  return lineHeightOptions.has(normalizedValue) ? normalizedValue : null;
+  return Number.isFinite(normalizedValue) && normalizedValue >= lineHeightBounds.min && normalizedValue <= lineHeightBounds.max
+    ? normalizedValue
+    : null;
 }
 
 function safeTextAlign(value: string | null) {
@@ -600,6 +610,12 @@ function safeUidList(value: string | null) {
   const normalizedValue = String(value ?? "").trim();
 
   return safeUidListPattern.test(normalizedValue) ? normalizedValue : null;
+}
+
+function safeUid(value: string | null) {
+  const normalizedValue = String(value ?? "").trim();
+
+  return safeUidPattern.test(normalizedValue) ? normalizedValue : null;
 }
 
 function safePixelWidth(value: string | null) {
@@ -735,5 +751,5 @@ function clampFontSize(value: number) {
     return 17;
   }
 
-  return Math.min(28, Math.max(14, Math.round(value)));
+  return Math.min(textSizeBounds.max, Math.max(textSizeBounds.min, Math.round(value)));
 }
