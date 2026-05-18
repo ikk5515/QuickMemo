@@ -25,7 +25,7 @@ import { decryptText, generateUserKeyBundle, unwrapNoteKey } from "../lib/crypto
 import { linkifyEditorHtml, parseEditorContent, previewTextFromHtml } from "../lib/editorContent";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { initialsFromName } from "../lib/roster";
-import { createUser, updateUser } from "../services/adminFunctions";
+import { createUser, deleteManagedUserDocuments, updateUser } from "../services/adminFunctions";
 import { deleteNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
 import { subscribeUsers } from "../services/users";
 import type { NoteKind, UserProfile } from "../types";
@@ -1137,7 +1137,7 @@ function EditableUserCard({
     }
   }
 
-  async function softDeleteUser() {
+  async function deleteUserPermanently() {
     if (user.uid === currentUid) {
       setMessage("현재 로그인한 관리자는 삭제할 수 없습니다.");
       return;
@@ -1149,29 +1149,26 @@ function EditableUserCard({
     }
 
     const confirmed = window.confirm(
-      `${user.displayName || "이 사용자"} 사용자를 삭제 처리할까요?\n로그인 목록에서 숨기고 비활성 상태로 변경합니다.`
+      `${user.displayName || "이 사용자"} 사용자의 앱 계정 문서를 영구 삭제할까요?\n삭제하면 관리자 화면과 로그인 목록에서 바로 사라지며 되돌릴 수 없습니다.`
     );
 
     if (!confirmed) {
       return;
     }
 
-    const nextDraft = editableUserDraft({ ...user, isActive: false });
     setPending(true);
-    setMessage("삭제 처리 중...");
+    setMessage("삭제 중...");
 
     try {
-      await updateUser(updatePayloadFromDraft(nextDraft));
-      draftRef.current = nextDraft;
+      await deleteManagedUserDocuments(user);
       dirtyRef.current = false;
       latestSaveDraftRef.current = null;
-      lastSubmittedSignatureRef.current = stableEditableSignature(nextDraft);
-      confirmedSignatureRef.current = stableEditableSignature(nextDraft);
-      setDraft(nextDraft);
+      lastSubmittedSignatureRef.current = stableEditableSignature(user);
+      confirmedSignatureRef.current = stableEditableSignature(user);
       setDirty(false);
-      setMessage("삭제 처리됨");
+      setMessage("삭제됨");
     } catch {
-      setMessage("삭제 처리 실패");
+      setMessage("삭제 실패");
     } finally {
       setPending(false);
     }
@@ -1322,8 +1319,8 @@ function EditableUserCard({
           </button>
           <button
             className="secondary-button danger admin-user-delete-button"
-            disabled={pending || !user.isActive}
-            onClick={() => void softDeleteUser()}
+            disabled={pending}
+            onClick={() => void deleteUserPermanently()}
             type="button"
           >
             <Trash2 size={15} />

@@ -1,4 +1,4 @@
-import { Mark } from "@tiptap/core";
+import { Mark, mergeAttributes } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -19,6 +19,7 @@ export const editorTablePixelWidths = [480, 720, 960, 1200] as const;
 export const editorTablePixelWidthBounds = { min: 280, max: 1800, step: 10 } as const;
 export const editorTablePixelHeightBounds = { min: 96, max: 2000, step: 8 } as const;
 export const editorTableRowPixelHeightBounds = { min: 28, max: 900, step: 4 } as const;
+export const editorTableColumnPixelWidthBounds = { min: 48, max: 900, step: 4 } as const;
 export const editorTextSizes = [14, 16, 17, 18, 20, 22, 24, 28] as const;
 export const editorTextColors = ["#14211f", "#64748b", "#dc2626", "#b9822f", "#15803d", "#2563eb", "#7c3aed"] as const;
 
@@ -72,6 +73,14 @@ function normalizedTableRowPixelHeight(value: unknown) {
 
   return Number.isInteger(height) && height >= editorTableRowPixelHeightBounds.min && height <= editorTableRowPixelHeightBounds.max
     ? height
+    : null;
+}
+
+function normalizedTableColumnPixelWidth(value: unknown) {
+  const width = Number(String(value ?? "").replace("px", "").trim());
+
+  return Number.isInteger(width) && width >= editorTableColumnPixelWidthBounds.min && width <= editorTableColumnPixelWidthBounds.max
+    ? width
     : null;
 }
 
@@ -201,6 +210,14 @@ const ColoredTableCell = TableCell.extend({
   addAttributes() {
     return {
       ...this.parent?.(),
+      qmWidthPx: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedTableColumnPixelWidth(element.getAttribute("data-qm-cell-width-px") || element.style.width),
+        renderHTML: (attributes: { qmWidthPx?: number | string | null }) => {
+          const width = normalizedTableColumnPixelWidth(attributes.qmWidthPx);
+          return width ? { "data-qm-cell-width-px": String(width), style: `width: ${width}px` } : {};
+        }
+      },
       backgroundColor: {
         default: null,
         parseHTML: (element: HTMLElement) => normalizedEditorColor(element.getAttribute("data-qm-bg") || element.style.backgroundColor),
@@ -210,6 +227,10 @@ const ColoredTableCell = TableCell.extend({
         }
       }
     };
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["td", mergeAttributes(this.options.HTMLAttributes, HTMLAttributes), 0];
   }
 });
 
@@ -217,6 +238,14 @@ const ColoredTableHeader = TableHeader.extend({
   addAttributes() {
     return {
       ...this.parent?.(),
+      qmWidthPx: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedTableColumnPixelWidth(element.getAttribute("data-qm-cell-width-px") || element.style.width),
+        renderHTML: (attributes: { qmWidthPx?: number | string | null }) => {
+          const width = normalizedTableColumnPixelWidth(attributes.qmWidthPx);
+          return width ? { "data-qm-cell-width-px": String(width), style: `width: ${width}px` } : {};
+        }
+      },
       backgroundColor: {
         default: null,
         parseHTML: (element: HTMLElement) => normalizedEditorColor(element.getAttribute("data-qm-bg") || element.style.backgroundColor),
@@ -226,6 +255,10 @@ const ColoredTableHeader = TableHeader.extend({
         }
       }
     };
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["th", mergeAttributes(this.options.HTMLAttributes, HTMLAttributes), 0];
   }
 });
 

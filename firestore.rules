@@ -513,6 +513,19 @@ service cloud.firestore {
         && getAfter(rosterPath(uid)).data.isAdmin == data.isAdmin;
     }
 
+    function adminDeletesManagedUser(uid) {
+      return adminUser()
+        && uid != request.auth.uid
+        && exists(userPath(uid))
+        && exists(rosterPath(uid))
+        && exists(userKeyPath(uid))
+        && exists(quickLoginKeyPath(get(userPath(uid)).data.quickKey))
+        && !existsAfter(userPath(uid))
+        && !existsAfter(rosterPath(uid))
+        && !existsAfter(userKeyPath(uid))
+        && !existsAfter(quickLoginKeyPath(get(userPath(uid)).data.quickKey));
+    }
+
     function bootstrapCreatesAdmin(uid) {
       return signedIn()
         && request.auth.uid == uid
@@ -726,7 +739,7 @@ service cloud.firestore {
         && rosterMatchesUser(request.resource.data, uid)
         && getAfter(userPath(uid)).data.quickKey == request.resource.data.quickKey
         && getAfter(quickLoginKeyPath(request.resource.data.quickKey)).data.uid == uid;
-      allow delete: if false;
+      allow delete: if adminDeletesManagedUser(uid);
     }
 
     match /users/{uid} {
@@ -750,7 +763,7 @@ service cloud.firestore {
         ])
         && getAfter(rosterPath(uid)).data.quickKey == request.resource.data.quickKey
         && getAfter(quickLoginKeyPath(request.resource.data.quickKey)).data.uid == uid;
-      allow delete: if false;
+      allow delete: if adminDeletesManagedUser(uid);
     }
 
     match /userKeys/{uid} {
@@ -772,7 +785,7 @@ service cloud.firestore {
           "pendingCreatedAt",
           "updatedAt"
         ]);
-      allow delete: if false;
+      allow delete: if adminDeletesManagedUser(uid);
     }
 
     match /noteFolders/{folderId} {

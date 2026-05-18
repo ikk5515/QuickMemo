@@ -82,7 +82,6 @@ export interface PurgeNoteInput {
   wrappedKey: WrappedNoteKey;
 }
 
-const contentHistoryBucketMs = 60_000;
 
 function timestampMillis(value: NoteDocument["updatedAt"]) {
   return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
@@ -452,18 +451,7 @@ export async function publishNoteCursor(
   );
 }
 
-function noteHistoryRef(
-  noteId: string,
-  uid: string,
-  action: NoteHistoryAction,
-  encryptedSummary?: EncryptedPayload,
-  encryptedSnapshot?: EncryptedPayload
-) {
-  if (action === "content" && (encryptedSummary || encryptedSnapshot)) {
-    const bucket = Math.floor(Date.now() / contentHistoryBucketMs);
-    return doc(db, "notes", noteId, "history", `content_${uid}_${bucket}`);
-  }
-
+function noteHistoryRef(noteId: string) {
   return doc(collection(db, "notes", noteId, "history"));
 }
 
@@ -492,7 +480,7 @@ function setNoteHistory(
     createdAt: serverTimestamp()
   } satisfies Omit<NoteHistoryDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> };
 
-  batch.set(noteHistoryRef(noteId, uid, action, encryptedSummary, encryptedSnapshot), historyDocument);
+  batch.set(noteHistoryRef(noteId), historyDocument);
 }
 
 export async function createNoteAttachment(input: SaveNoteAttachmentInput) {

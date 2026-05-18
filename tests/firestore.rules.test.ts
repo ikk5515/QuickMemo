@@ -256,6 +256,45 @@ describeRules("firestore security rules", () => {
     await assertFails(userBatch.commit());
   });
 
+  it("allows admins to hard-delete managed user account documents in one batch", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "system/bootstrap"), { adminUid: "admin-a" });
+      await setDoc(doc(context.firestore(), "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(context.firestore(), "quickLoginKeys/2"), quickLoginKey("user-b", 2));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b", { order: 2, quickKey: 2 }));
+      await setDoc(doc(context.firestore(), "publicLoginRoster/user-b"), rosterProfile("user-b", { order: 2, quickKey: 2 }));
+      await setDoc(doc(context.firestore(), "userKeys/user-b"), userKey("user-b"));
+      await setDoc(doc(context.firestore(), "quickLoginKeys/3"), quickLoginKey("user-c", 3));
+      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c", { order: 3, quickKey: 3 }));
+      await setDoc(doc(context.firestore(), "publicLoginRoster/user-c"), rosterProfile("user-c", { order: 3, quickKey: 3 }));
+      await setDoc(doc(context.firestore(), "userKeys/user-c"), userKey("user-c"));
+    });
+
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const adminBatch = writeBatch(adminDb);
+    adminBatch.delete(doc(adminDb, "quickLoginKeys/2"));
+    adminBatch.delete(doc(adminDb, "users/user-b"));
+    adminBatch.delete(doc(adminDb, "publicLoginRoster/user-b"));
+    adminBatch.delete(doc(adminDb, "userKeys/user-b"));
+
+    await assertSucceeds(adminBatch.commit());
+    const deletedUserSnapshot = await assertSucceeds(getDoc(doc(adminDb, "users/user-b")));
+    expect(deletedUserSnapshot.exists()).toBe(false);
+
+    const userDb = testEnv.authenticatedContext("user-c").firestore();
+    const userBatch = writeBatch(userDb);
+    userBatch.delete(doc(userDb, "quickLoginKeys/3"));
+    userBatch.delete(doc(userDb, "users/user-c"));
+    userBatch.delete(doc(userDb, "publicLoginRoster/user-c"));
+    userBatch.delete(doc(userDb, "userKeys/user-c"));
+
+    await assertFails(userBatch.commit());
+
+    const selfBatch = writeBatch(adminDb);
+    selfBatch.delete(doc(adminDb, "users/admin-a"));
+    await assertFails(selfBatch.commit());
+  });
+
   it("prevents admins from changing immutable user identity fields", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "system/bootstrap"), { adminUid: "admin-a" });

@@ -8,6 +8,7 @@ const imagePixelWidthBounds = { min: 120, max: 1200 };
 const tablePixelWidthBounds = { min: 280, max: 1800 };
 const tablePixelHeightBounds = { min: 96, max: 2000 };
 const tableRowPixelHeightBounds = { min: 28, max: 900 };
+const tableColumnPixelWidthBounds = { min: 48, max: 900 };
 const textSizeOptions = new Set([14, 16, 17, 18, 20, 22, 24, 28]);
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
@@ -348,6 +349,7 @@ function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
     copyPositiveIntegerAttribute(target, source, "colspan", 12);
     copyPositiveIntegerAttribute(target, source, "rowspan", 12);
     copyColumnWidthAttribute(target, source);
+    copyCellWidthAttribute(target, source);
     copyCellColorAttribute(target, source);
   }
 
@@ -428,6 +430,17 @@ function copyColumnWidthAttribute(target: HTMLElement, source: HTMLElement) {
   }
 }
 
+function copyCellWidthAttribute(target: HTMLElement, source: HTMLElement) {
+  const pixelWidth = safeTableColumnPixelWidth(source.getAttribute("data-qm-cell-width-px") ?? source.style.width);
+
+  if (!pixelWidth) {
+    return;
+  }
+
+  target.dataset.qmCellWidthPx = String(pixelWidth);
+  target.style.width = `${pixelWidth}px`;
+}
+
 function copyCellColorAttribute(target: HTMLElement, source: HTMLElement) {
   const color = safeCellColor(source.getAttribute("data-qm-bg") || source.style.backgroundColor);
 
@@ -503,6 +516,20 @@ function safeTableRowPixelHeight(value: string | null) {
   const normalizedValue = Number(rawValue.replace("px", "").trim());
 
   return Number.isInteger(normalizedValue) && normalizedValue >= tableRowPixelHeightBounds.min && normalizedValue <= tableRowPixelHeightBounds.max
+    ? normalizedValue
+    : null;
+}
+
+function safeTableColumnPixelWidth(value: string | null) {
+  const rawValue = String(value ?? "").trim();
+
+  if (!rawValue.endsWith("px") && !/^\d+$/.test(rawValue)) {
+    return null;
+  }
+
+  const normalizedValue = Number(rawValue.replace("px", "").trim());
+
+  return Number.isInteger(normalizedValue) && normalizedValue >= tableColumnPixelWidthBounds.min && normalizedValue <= tableColumnPixelWidthBounds.max
     ? normalizedValue
     : null;
 }

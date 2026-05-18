@@ -85,6 +85,7 @@ import {
 import {
   editorCellColors,
   editorImagePixelWidthBounds,
+  editorTableColumnPixelWidthBounds,
   editorTablePixelHeightBounds,
   editorTableRowPixelHeightBounds,
   editorTablePixelWidthBounds,
@@ -235,7 +236,7 @@ const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b
 const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx"]);
 const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
 const zippedTextPreviewAttachmentExtensions = new Set(["hwpx"]);
-const readableTextPreviewAttachmentExtensions = new Set(["doc", "hwp"]);
+const legacyBinaryPreviewAttachmentExtensions = new Set(["doc", "hwp"]);
 const maxTextPreviewCharacters = 120_000;
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
 
@@ -313,6 +314,139 @@ function draftFromHistorySnapshot(value: string): NoteDraft | null {
   } catch {
     return null;
   }
+}
+
+interface HistoryDiffLine {
+  changed: string;
+  id: string;
+  label: string;
+  prefix: string;
+  removed: string;
+  suffix: string;
+}
+
+function historyDiffLines(previousDraft: NoteDraft | null, draft: NoteDraft) {
+  const lines: HistoryDiffLine[] = [];
+
+  if (!previousDraft) {
+    const title = clippedText(draft.title || "제목 없음", 160);
+    const body = clippedText(previewTextFromHtml(draft.body) || (/<img\b/i.test(draft.body) ? "이미지 포함" : "내용 없음"), 260);
+
+    lines.push({ changed: title, id: "title", label: "제목", prefix: "", removed: "", suffix: "" });
+    lines.push({ changed: body, id: "body", label: "내용", prefix: "", removed: "", suffix: "" });
+    return lines;
+  }
+
+  if (previousDraft.title !== draft.title) {
+    lines.push({
+      ...textDiffLine("title", "제목", previousDraft.title || "제목 없음", draft.title || "제목 없음"),
+      id: "title",
+      label: "제목"
+    });
+  }
+
+  const previousText = previewTextFromHtml(previousDraft.body);
+  const nextText = previewTextFromHtml(draft.body);
+
+  if (previousText !== nextText) {
+    lines.push({
+      ...textDiffLine("body", "내용", previousText || "내용 없음", nextText || "내용 없음"),
+      id: "body",
+      label: "내용"
+    });
+  } else if (previousDraft.body !== draft.body) {
+    lines.push({
+      changed: bodyStructureChangeLabel(previousDraft.body, draft.body),
+      id: "body-format",
+      label: "본문",
+      prefix: "",
+      removed: "",
+      suffix: ""
+    });
+  }
+
+  if (previousDraft.fontSize !== draft.fontSize) {
+    lines.push({
+      changed: `${previousDraft.fontSize}px → ${draft.fontSize}px`,
+      id: "font-size",
+      label: "기본 글자",
+      prefix: "",
+      removed: "",
+      suffix: ""
+    });
+  }
+
+  return lines;
+}
+
+function textDiffLine(id: string, label: string, previousValue: string, nextValue: string): HistoryDiffLine {
+  const previousText = previousValue.replace(/\s+/g, " ").trim();
+  const nextText = nextValue.replace(/\s+/g, " ").trim();
+  const maxLength = 320;
+  const previous = previousText.slice(0, maxLength);
+  const next = nextText.slice(0, maxLength);
+  let prefixLength = 0;
+
+  while (prefixLength < previous.length && prefixLength < next.length && previous[prefixLength] === next[prefixLength]) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+
+  while (
+    suffixLength < previous.length - prefixLength &&
+    suffixLength < next.length - prefixLength &&
+    previous[previous.length - 1 - suffixLength] === next[next.length - 1 - suffixLength]
+  ) {
+    suffixLength += 1;
+  }
+
+  const nextChangedEnd = suffixLength ? next.length - suffixLength : next.length;
+  const previousChangedEnd = suffixLength ? previous.length - suffixLength : previous.length;
+  const changed = next.slice(prefixLength, nextChangedEnd);
+  const removed = previous.slice(prefixLength, previousChangedEnd);
+  const prefix = clippedDiffContext(next.slice(0, prefixLength), "end");
+  const suffix = clippedDiffContext(next.slice(nextChangedEnd), "start");
+
+  return {
+    changed: changed || (removed ? "삭제됨" : next || "내용 없음"),
+    id,
+    label,
+    prefix,
+    removed,
+    suffix
+  };
+}
+
+function clippedDiffContext(value: string, edge: "start" | "end") {
+  if (value.length <= 48) {
+    return value;
+  }
+
+  return edge === "start" ? `${value.slice(0, 48)}...` : `...${value.slice(-48)}`;
+}
+
+function bodyStructureChangeLabel(previousBody: string, nextBody: string) {
+  const previousTasks = countMatches(previousBody, /data-checked="true"/g);
+  const nextTasks = countMatches(nextBody, /data-checked="true"/g);
+
+  if (previousTasks !== nextTasks) {
+    return `체크 상태 ${previousTasks}개 → ${nextTasks}개`;
+  }
+
+  if (previousBody.includes("<table") || nextBody.includes("<table")) {
+    return "표 또는 표 서식 변경";
+  }
+
+  if (previousBody.includes("<img") || nextBody.includes("<img")) {
+    return "이미지 변경";
+  }
+
+  return "서식 변경";
+}
+
+function countMatches(value: string, pattern: RegExp) {
+  return value.match(pattern)?.length ?? 0;
 }
 
 function clampDraftFontSize(value: number) {
@@ -2025,18 +2159,14 @@ export default function NotesPage() {
         return;
       }
 
-      if (readableTextPreviewAttachmentExtensions.has(attachment.extension)) {
-        const extractedText = extractReadableAttachmentText(plainBytes);
-
+      if (legacyBinaryPreviewAttachmentExtensions.has(attachment.extension)) {
         setAttachmentPreview({
           fileName,
-          kind: extractedText ? "text" : "unsupported",
-          label: `${attachment.extension.toUpperCase()} 텍스트 미리보기`,
-          text:
-            extractedText ||
-            `${attachment.extension.toUpperCase()} 파일은 브라우저가 양식을 안전하게 직접 렌더링할 수 없는 형식입니다. 외부 변환 서버로 원본을 전송하지 않기 위해 다운로드 확인만 지원합니다.`
+          kind: "unsupported",
+          label: `${attachment.extension.toUpperCase()} 미리보기 안내`,
+          text: legacyBinaryPreviewMessage(attachment.extension)
         });
-        setStatus(extractedText ? "파일 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
+        setStatus("안전한 미리보기 안내를 표시했습니다.");
         return;
       }
 
@@ -3266,10 +3396,10 @@ function clampTableRowPixelHeight(value: number) {
 
 function clampTableColumnPixelWidth(value: number) {
   if (!Number.isFinite(value)) {
-    return 120;
+    return editorTableColumnPixelWidthBounds.min;
   }
 
-  return Math.min(900, Math.max(48, Math.round(value)));
+  return Math.min(editorTableColumnPixelWidthBounds.max, Math.max(editorTableColumnPixelWidthBounds.min, Math.round(value)));
 }
 
 function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeHit | null {
@@ -3364,6 +3494,7 @@ function tableFromResizeEvent(editorElement: HTMLElement, target: HTMLElement, e
 
 function tableCellNearVerticalBoundary(table: HTMLTableElement, event: MouseEvent, threshold: number) {
   const cells = Array.from(table.querySelectorAll("td, th"));
+  const tableRect = table.getBoundingClientRect();
 
   return (
     cells.find((cell): cell is HTMLTableCellElement => {
@@ -3372,13 +3503,15 @@ function tableCellNearVerticalBoundary(table: HTMLTableElement, event: MouseEven
       }
 
       const rect = cell.getBoundingClientRect();
-      return event.clientY >= rect.top && event.clientY <= rect.bottom && Math.abs(event.clientX - rect.right) <= threshold;
+      const nearOuterRight = Math.abs(rect.right - tableRect.right) <= threshold;
+      return !nearOuterRight && event.clientY >= rect.top && event.clientY <= rect.bottom && Math.abs(event.clientX - rect.right) <= threshold;
     }) ?? null
   );
 }
 
 function tableRowNearHorizontalBoundary(table: HTMLTableElement, event: MouseEvent, threshold: number) {
   const rows = Array.from(table.querySelectorAll("tr"));
+  const tableRect = table.getBoundingClientRect();
 
   return (
     rows.find((row): row is HTMLTableRowElement => {
@@ -3387,7 +3520,8 @@ function tableRowNearHorizontalBoundary(table: HTMLTableElement, event: MouseEve
       }
 
       const rect = row.getBoundingClientRect();
-      return event.clientX >= rect.left && event.clientX <= rect.right && Math.abs(event.clientY - rect.bottom) <= threshold;
+      const nearOuterBottom = Math.abs(rect.bottom - tableRect.bottom) <= threshold;
+      return !nearOuterBottom && event.clientX >= rect.left && event.clientX <= rect.right && Math.abs(event.clientY - rect.bottom) <= threshold;
     }) ?? null
   );
 }
@@ -3455,7 +3589,8 @@ function updateTableColumnWidth(editor: TipTapEditor, table: HTMLTableElement, c
 
     transaction = transaction.setNodeMarkup(position, undefined, {
       ...node.attrs,
-      colwidth
+      colwidth,
+      qmWidthPx: width
     });
   });
 
@@ -5041,18 +5176,29 @@ function NoteInsightModal({
             </div>
             {history.length ? (
               <div className="history-list">
-                {history.map((entry) => {
+                {history.map((entry, index) => {
                   const actor = usersByUid.get(entry.actorUid);
                   const createdAt = dateFromTimestamp(entry.createdAt);
                   const summary = historySummaries[entry.id] ?? entry.changedFields.map(historyFieldLabel).join(", ");
                   const snapshotDraft = historySnapshots[entry.id] ?? null;
+                  const previousSnapshotDraft =
+                    history
+                      .slice(index + 1)
+                      .map((candidate) => historySnapshots[candidate.id])
+                      .find(Boolean) ?? null;
                   const canRevert = Boolean(snapshotDraft && !note.isDeleted && (entry.action === "create" || entry.action === "content"));
 
                   return (
                     <article className="history-item" key={entry.id}>
                       <span>{historyActionLabel(entry.action)}</span>
-                      <strong className={entry.action === "content" || entry.action === "create" ? "history-changed-summary" : ""}>
-                        {summary}
+                      <strong className="history-summary-block">
+                        {snapshotDraft ? (
+                          <HistoryDiffSummary draft={snapshotDraft} fallback={summary} previousDraft={previousSnapshotDraft} />
+                        ) : (
+                          <span className={entry.action === "content" || entry.action === "create" ? "history-changed-summary" : ""}>
+                            {summary}
+                          </span>
+                        )}
                       </strong>
                       <em>
                         {actor?.displayName ?? entry.actorUid} · {formatCompactDateTime(createdAt)}
@@ -5077,6 +5223,38 @@ function NoteInsightModal({
         </div>
       </section>
     </div>
+  );
+}
+
+function HistoryDiffSummary({
+  draft,
+  fallback,
+  previousDraft
+}: {
+  draft: NoteDraft;
+  fallback: string;
+  previousDraft: NoteDraft | null;
+}) {
+  const lines = historyDiffLines(previousDraft, draft);
+
+  if (!lines.length) {
+    return <span>{fallback}</span>;
+  }
+
+  return (
+    <>
+      {lines.map((line) => (
+        <span className="history-diff-line" key={line.id}>
+          <span className="history-diff-label">{line.label}</span>
+          <span className="history-diff-text">
+            {line.prefix}
+            {line.changed ? <mark>{line.changed}</mark> : null}
+            {line.suffix}
+            {line.removed && !line.changed ? <del>{line.removed}</del> : null}
+          </span>
+        </span>
+      ))}
+    </>
   );
 }
 
@@ -5169,28 +5347,22 @@ function decodeXmlEntities(value: string) {
   });
 }
 
+function legacyBinaryPreviewMessage(extension: string) {
+  const upperExtension = extension.toUpperCase();
+
+  return [
+    `${upperExtension} 파일은 구형 복합 바이너리 문서라 브라우저 내부에서 양식까지 안전하게 렌더링할 수 없습니다.`,
+    "깨진 바이너리 문자를 미리보기로 노출하지 않도록 앱 안에서는 원본 다운로드 확인만 제공합니다.",
+    extension === "hwp"
+      ? "양식 미리보기가 필요하면 HWPX 또는 PDF로 변환해 업로드해주세요."
+      : "양식 미리보기가 필요하면 DOCX 또는 PDF로 변환해 업로드해주세요."
+  ].join("\n");
+}
+
 function normalizeCustomHexColor(value: string, fallback: string) {
   const normalizedValue = value.trim().toLowerCase();
 
   return safeHexColorPattern.test(normalizedValue) ? normalizedValue : fallback;
-}
-
-function extractReadableAttachmentText(bytes: Uint8Array) {
-  const decodedText = decodeReadableBytes(bytes)
-    .replace(/[^\S\r\n]+/g, " ")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length >= 2)
-    .join("\n")
-    .trim();
-
-  const readableCharacters = decodedText.match(/[가-힣a-zA-Z0-9]/g)?.length ?? 0;
-
-  if (readableCharacters < 40) {
-    return "";
-  }
-
-  return decodedText.slice(0, maxTextPreviewCharacters);
 }
 
 function decodeReadableBytes(bytes: Uint8Array) {
