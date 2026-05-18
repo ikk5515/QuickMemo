@@ -60,6 +60,7 @@ export interface SaveNoteInput {
   folderId?: string | null;
   dueAt?: Timestamp | null;
   historySummary?: EncryptedPayload;
+  historySnapshot?: EncryptedPayload;
 }
 
 export interface SaveNoteAttachmentInput {
@@ -302,7 +303,7 @@ export function subscribeNoteAttachments(
 }
 
 export async function createEncryptedNote(input: SaveNoteInput) {
-  const { historySummary, ...noteInput } = input;
+  const { historySnapshot, historySummary, ...noteInput } = input;
   const noteRef = doc(collection(db, "notes"));
   const batch = writeBatch(db);
 
@@ -317,7 +318,7 @@ export async function createEncryptedNote(input: SaveNoteInput) {
     savedAt: serverTimestamp(),
     updatedBy: input.ownerUid
   });
-  setNoteHistory(batch, noteRef.id, input.ownerUid, "create", ["title", "body", "dueAt"], historySummary);
+  setNoteHistory(batch, noteRef.id, input.ownerUid, "create", ["title", "body", "dueAt"], historySummary, historySnapshot);
 
   await batch.commit();
   return noteRef;
@@ -329,7 +330,8 @@ export async function updateEncryptedNote(
   encryptedTitle: EncryptedPayload,
   encryptedBody: EncryptedPayload,
   changedFields: string[] = ["title", "body"],
-  historySummary?: EncryptedPayload
+  historySummary?: EncryptedPayload,
+  historySnapshot?: EncryptedPayload
 ) {
   const batch = writeBatch(db);
   const noteRef = doc(db, "notes", noteId);
@@ -340,7 +342,7 @@ export async function updateEncryptedNote(
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-  setNoteHistory(batch, noteId, uid, "content", changedFields, historySummary);
+  setNoteHistory(batch, noteId, uid, "content", changedFields, historySummary, historySnapshot);
   await batch.commit();
 }
 
@@ -450,8 +452,14 @@ export async function publishNoteCursor(
   );
 }
 
-function noteHistoryRef(noteId: string, uid: string, action: NoteHistoryAction, encryptedSummary?: EncryptedPayload) {
-  if (action === "content" && encryptedSummary) {
+function noteHistoryRef(
+  noteId: string,
+  uid: string,
+  action: NoteHistoryAction,
+  encryptedSummary?: EncryptedPayload,
+  encryptedSnapshot?: EncryptedPayload
+) {
+  if (action === "content" && (encryptedSummary || encryptedSnapshot)) {
     const bucket = Math.floor(Date.now() / contentHistoryBucketMs);
     return doc(db, "notes", noteId, "history", `content_${uid}_${bucket}`);
   }
@@ -465,7 +473,8 @@ function setNoteHistory(
   uid: string,
   action: NoteHistoryAction,
   changedFields: string[],
-  encryptedSummary?: EncryptedPayload
+  encryptedSummary?: EncryptedPayload,
+  encryptedSnapshot?: EncryptedPayload
 ) {
   const normalizedFields = Array.from(new Set(changedFields)).filter(Boolean);
 
@@ -479,10 +488,11 @@ function setNoteHistory(
     action,
     changedFields: normalizedFields,
     ...(encryptedSummary ? { encryptedSummary } : {}),
+    ...(encryptedSnapshot ? { encryptedSnapshot } : {}),
     createdAt: serverTimestamp()
   } satisfies Omit<NoteHistoryDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> };
 
-  batch.set(noteHistoryRef(noteId, uid, action, encryptedSummary), historyDocument);
+  batch.set(noteHistoryRef(noteId, uid, action, encryptedSummary, encryptedSnapshot), historyDocument);
 }
 
 export async function createNoteAttachment(input: SaveNoteAttachmentInput) {

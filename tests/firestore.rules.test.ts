@@ -173,6 +173,7 @@ function noteHistory(noteId: string, actorUid: string, overrides: Record<string,
     action: "content",
     changedFields: ["title", "body"],
     encryptedSummary: encryptedPayload,
+    encryptedSnapshot: encryptedPayload,
     createdAt: serverTimestamp(),
     ...overrides
   };
@@ -1138,6 +1139,12 @@ describeRules("firestore security rules", () => {
       setDoc(
         doc(participantDb, "notes/note-a/history/unsafe-field"),
         noteHistory("note-a", "user-b", { changedFields: ["privateKey"] })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(participantDb, "notes/note-a/history/unsafe-snapshot"),
+        noteHistory("note-a", "user-b", { encryptedSnapshot: { version: 1, algorithm: "AES-GCM", cipherText: 12, iv: "iv" } })
       )
     );
   });

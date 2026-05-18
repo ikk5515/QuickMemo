@@ -61,6 +61,14 @@ describe("editor content helpers", () => {
     expect(html).toBe("<p>bad</p>");
   });
 
+  it("preserves underline and strike formatting", () => {
+    const html = sanitizeEditorHtml("<p><u>under</u> <s>strike</s> <del>delete</del></p>");
+
+    expect(html).toContain("<u>under</u>");
+    expect(html).toContain("<s>strike</s>");
+    expect(html).toContain("<del>delete</del>");
+  });
+
   it("preserves safe task lists, table alignment, and cell colors", () => {
     const html = sanitizeEditorHtml(
       '<ul data-type="taskList"><li data-type="taskItem" data-checked="true"><label><input type="checkbox" checked></label><div><p>done</p></div></li></ul><p><span data-qm-font-size="22" data-qm-text-color="#2563eb" style="font-size:22px;color:#2563eb">big</span></p><table data-qm-table-width-px="720" data-qm-table-height-px="320"><tbody><tr data-qm-row-height-px="80"><td colspan="1" rowspan="1" colwidth="120" data-qm-bg="#34c759" style="background: red; text-align:center"><p style="text-align:center">cell</p></td></tr></tbody></table>'

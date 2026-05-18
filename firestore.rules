@@ -334,7 +334,7 @@ service cloud.firestore {
 
     function validNoteHistory(data, noteId) {
       return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields", "createdAt"])
-        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "encryptedSummary", "createdAt"])
+        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "encryptedSummary", "encryptedSnapshot", "createdAt"])
         && data.noteId == noteId
         && data.actorUid == request.auth.uid
         && data.action in ["create", "content", "deadline", "share", "delete", "restore"]
@@ -343,6 +343,7 @@ service cloud.firestore {
         && data.changedFields.size() <= 8
         && data.changedFields.hasOnly(["title", "body", "dueAt", "participants", "deleted", "restored"])
         && (!data.keys().hasAny(["encryptedSummary"]) || encryptedPayload(data.encryptedSummary))
+        && (!data.keys().hasAny(["encryptedSnapshot"]) || encryptedPayload(data.encryptedSnapshot))
         && data.createdAt == request.time;
     }
 

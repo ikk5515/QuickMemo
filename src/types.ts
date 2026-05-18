@@ -128,6 +128,7 @@ export interface NoteHistoryDocument {
   action: NoteHistoryAction;
   changedFields: string[];
   encryptedSummary?: EncryptedPayload;
+  encryptedSnapshot?: EncryptedPayload;
   createdAt?: Timestamp;
 }
 

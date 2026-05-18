@@ -1,6 +1,6 @@
 const fontSizePattern = /^<!--qm-font-size:(\d+)-->/;
 const htmlTagPattern =
-  /<(a|p|div|br|strong|b|em|i|u|span|img|figure|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
+  /<(a|p|div|br|strong|b|em|i|u|s|del|strike|span|img|figure|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
@@ -20,6 +20,7 @@ const allowedTags = new Set([
   "CODE",
   "COL",
   "COLGROUP",
+  "DEL",
   "DIV",
   "EM",
   "FIGURE",
@@ -31,7 +32,9 @@ const allowedTags = new Set([
   "OL",
   "P",
   "PRE",
+  "S",
   "SPAN",
+  "STRIKE",
   "STRONG",
   "TABLE",
   "TBODY",

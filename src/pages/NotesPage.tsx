@@ -28,10 +28,12 @@ import {
   Save,
   Share2,
   Star,
+  Strikethrough,
   Table2,
   Trash2,
   Redo2,
   Undo2,
+  Underline,
   Upload,
   UsersRound,
   X
@@ -207,9 +209,11 @@ interface CursorClientRect {
 type TableResizeCursor = "col" | "row" | "ew" | "ns" | "nwse";
 
 interface TableResizeHit {
+  cell?: HTMLTableCellElement;
+  columnIndex?: number;
   cursor: TableResizeCursor;
   heightSign: -1 | 0 | 1;
-  kind: "row" | "table";
+  kind: "column" | "row" | "table";
   row?: HTMLTableRowElement;
   table: HTMLTableElement;
   widthSign: -1 | 0 | 1;
@@ -283,6 +287,40 @@ function historySummaryFromDraft(previousDraft: NoteDraft | null, draft: NoteDra
   }
 
   return changes.length ? clippedText(changes.join("\n")) : "저장됨";
+}
+
+function historySnapshotFromDraft(draft: NoteDraft) {
+  return JSON.stringify({
+    title: draft.title,
+    body: sanitizeEditorHtml(draft.body),
+    fontSize: clampDraftFontSize(draft.fontSize)
+  });
+}
+
+function draftFromHistorySnapshot(value: string): NoteDraft | null {
+  try {
+    const parsed = JSON.parse(value) as Partial<NoteDraft>;
+
+    if (typeof parsed.title !== "string" || typeof parsed.body !== "string") {
+      return null;
+    }
+
+    return {
+      title: parsed.title,
+      body: sanitizeEditorHtml(parsed.body),
+      fontSize: clampDraftFontSize(Number(parsed.fontSize))
+    };
+  } catch {
+    return null;
+  }
+}
+
+function clampDraftFontSize(value: number) {
+  if (!Number.isFinite(value)) {
+    return 17;
+  }
+
+  return Math.min(28, Math.max(14, Math.round(value)));
 }
 
 function bodyChangeSummary(previousDraft: NoteDraft, draft: NoteDraft) {
@@ -805,6 +843,17 @@ async function decryptNoteSnapshots(notes: NoteSnapshot[], uid: string, privateK
   return nextNotes.filter((note): note is DecryptedNote => Boolean(note));
 }
 
+function noteCountsFromNotes(notes: DecryptedNote[]) {
+  const counts: NoteListCounts = { all: 0, personal: 0, shared: 0 };
+
+  notes.forEach((note) => {
+    counts.all += 1;
+    counts[note.type] += 1;
+  });
+
+  return counts;
+}
+
 export default function NotesPage() {
   const { profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
@@ -1075,19 +1124,8 @@ export default function NotesPage() {
     () => [...decryptedNotes, ...decryptedDeletedNotes].find((note) => note.id === previewNoteId) ?? null,
     [decryptedDeletedNotes, decryptedNotes, previewNoteId]
   );
-  const noteCounts = useMemo(
-    () => {
-      const counts: NoteListCounts = { all: 0, personal: 0, shared: 0 };
-
-      decryptedNotes.forEach((note) => {
-        counts.all += 1;
-        counts[note.type] += 1;
-      });
-
-      return counts;
-    },
-    [decryptedNotes]
-  );
+  const noteCounts = useMemo(() => noteCountsFromNotes(decryptedNotes), [decryptedNotes]);
+  const trashCounts = useMemo(() => noteCountsFromNotes(decryptedDeletedNotes), [decryptedDeletedNotes]);
   const visibleNotes = useMemo(
     () => sortNotes(filterNotes(decryptedNotes, noteFilter), noteSort, noteStateMap),
     [decryptedNotes, noteFilter, noteSort, noteStateMap]
@@ -1741,14 +1779,18 @@ export default function NotesPage() {
       if (editor.noteId && editor.noteKey) {
         const payload = await encryptNoteDraft(draft, editor.noteKey);
         const previousDraft = activeRemoteNote ? draftFromNote(activeRemoteNote) : null;
-        const historySummary = await encryptText(historySummaryFromDraft(previousDraft, draft), editor.noteKey);
+        const [historySummary, historySnapshot] = await Promise.all([
+          encryptText(historySummaryFromDraft(previousDraft, draft), editor.noteKey),
+          encryptText(historySnapshotFromDraft(draft), editor.noteKey)
+        ]);
         await updateEncryptedNote(
           editor.noteId,
           unlockedProfile.uid,
           payload.encryptedTitle,
           payload.encryptedBody,
           changedDraftFields(previousDraft, draft),
-          historySummary
+          historySummary,
+          historySnapshot
         );
         pendingLocalEcho.current = { noteId: editor.noteId, draft, createdAt: Date.now() };
         announceActiveNote(editor.noteId);
@@ -1759,7 +1801,10 @@ export default function NotesPage() {
 
       const noteKey = await generateNoteKey();
       const payload = await encryptNoteDraft(draft, noteKey);
-      const historySummary = await encryptText(historySummaryFromDraft(null, draft), noteKey);
+      const [historySummary, historySnapshot] = await Promise.all([
+        encryptText(historySummaryFromDraft(null, draft), noteKey),
+        encryptText(historySnapshotFromDraft(draft), noteKey)
+      ]);
       const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids])).filter(
         (uid) => uid === unlockedProfile.uid || canShareWithUser(uid)
       );
@@ -1775,7 +1820,8 @@ export default function NotesPage() {
         wrappedKeys,
         folderId: type === "personal" ? editor.folderId : null,
         dueAt: editor.dueAt ? Timestamp.fromDate(editor.dueAt) : null,
-        historySummary
+        historySummary,
+        historySnapshot
       });
       pendingLocalEcho.current = { noteId: created.id, draft, createdAt: Date.now() };
 
@@ -2202,7 +2248,10 @@ export default function NotesPage() {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
       const payload = await encryptNoteDraft(draft, noteKey);
       const previousDraft = draftFromNote(note);
-      const historySummary = await encryptText(historySummaryFromDraft(previousDraft, draft), noteKey);
+      const [historySummary, historySnapshot] = await Promise.all([
+        encryptText(historySummaryFromDraft(previousDraft, draft), noteKey),
+        encryptText(historySnapshotFromDraft(draft), noteKey)
+      ]);
 
       await updateEncryptedNote(
         note.id,
@@ -2210,7 +2259,8 @@ export default function NotesPage() {
         payload.encryptedTitle,
         payload.encryptedBody,
         changedDraftFields(previousDraft, draft),
-        historySummary
+        historySummary,
+        historySnapshot
       );
       pendingLocalEcho.current = { noteId: note.id, draft, createdAt: Date.now() };
       announceActiveNote(note.id);
@@ -2295,6 +2345,7 @@ export default function NotesPage() {
               activeNoteId={editor.noteId}
               canRestoreNote={canRestoreNote}
               counts={noteCounts}
+              deletedCounts={trashCounts}
               deletedNotes={trashNotes}
               filter={noteFilter}
               folders={folders}
@@ -2302,7 +2353,6 @@ export default function NotesPage() {
               notes={visibleNotes}
               onClose={() => setListOpen(false)}
               onFilterChange={updateNoteFilter}
-              onNew={startNewNote}
               onOpenOverview={openOverview}
               onPreview={previewStoredNote}
               onPurge={(note) => void purgePreviewNote(note)}
@@ -2661,8 +2711,17 @@ function RichMemoEditor({
       const startWidth = resizeHit.table.getBoundingClientRect().width;
       const startTableHeight = resizeHit.table.getBoundingClientRect().height;
       const startRowHeight = resizeHit.row?.getBoundingClientRect().height ?? 0;
+      const startColumnWidth = resizeHit.cell?.getBoundingClientRect().width ?? 0;
 
       function handleResizeMove(moveEvent: MouseEvent) {
+        if (resizeHit.kind === "column" && typeof resizeHit.columnIndex === "number") {
+          const nextWidth = clampTableColumnPixelWidth(startColumnWidth + moveEvent.clientX - startX);
+          updateTableColumnWidth(editor, resizeHit.table, resizeHit.columnIndex, nextWidth);
+          onChange(editor.getHTML());
+          setToolbarVersion((version) => version + 1);
+          return;
+        }
+
         if (resizeHit.kind === "row" && resizeHit.row) {
           const nextHeight = clampTableRowPixelHeight(startRowHeight + moveEvent.clientY - startY);
           updateEditorNodeAttributes(editor, resizeHit.row, "tableRow", { qmHeightPx: nextHeight });
@@ -2913,6 +2972,28 @@ function RichMemoEditor({
           type="button"
         >
           <Bold size={16} />
+        </button>
+        <button
+          aria-label="밑줄"
+          aria-pressed={editor?.isActive("underline") ?? false}
+          className={`icon-button ${editor?.isActive("underline") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleUnderline().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="밑줄"
+          type="button"
+        >
+          <Underline size={16} />
+        </button>
+        <button
+          aria-label="가운데 줄"
+          aria-pressed={editor?.isActive("strike") ?? false}
+          className={`icon-button ${editor?.isActive("strike") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleStrike().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="가운데 줄"
+          type="button"
+        >
+          <Strikethrough size={16} />
         </button>
         <button
           aria-label="체크리스트"
@@ -3183,6 +3264,14 @@ function clampTableRowPixelHeight(value: number) {
   return Math.min(editorTableRowPixelHeightBounds.max, Math.max(editorTableRowPixelHeightBounds.min, Math.round(value)));
 }
 
+function clampTableColumnPixelWidth(value: number) {
+  if (!Number.isFinite(value)) {
+    return 120;
+  }
+
+  return Math.min(900, Math.max(48, Math.round(value)));
+}
+
 function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeHit | null {
   const target = event.target;
 
@@ -3194,19 +3283,21 @@ function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent):
     return null;
   }
 
-  const table = target.closest("table");
+  const table = tableFromResizeEvent(editorElement, target, event);
 
-  if (!(table instanceof HTMLTableElement) || !editorElement.contains(table)) {
+  if (!table) {
     return null;
   }
 
   const tableRect = table.getBoundingClientRect();
-  const edgeThreshold = 8;
-  const rowThreshold = 6;
-  const nearLeft = Math.abs(event.clientX - tableRect.left) <= edgeThreshold;
-  const nearRight = Math.abs(event.clientX - tableRect.right) <= edgeThreshold;
-  const nearTop = Math.abs(event.clientY - tableRect.top) <= edgeThreshold;
-  const nearBottom = Math.abs(event.clientY - tableRect.bottom) <= edgeThreshold;
+  const edgeThreshold = 14;
+  const boundaryThreshold = 8;
+  const withinTableY = event.clientY >= tableRect.top - edgeThreshold && event.clientY <= tableRect.bottom + edgeThreshold;
+  const withinTableX = event.clientX >= tableRect.left - edgeThreshold && event.clientX <= tableRect.right + edgeThreshold;
+  const nearLeft = withinTableY && Math.abs(event.clientX - tableRect.left) <= edgeThreshold;
+  const nearRight = withinTableY && Math.abs(event.clientX - tableRect.right) <= edgeThreshold;
+  const nearTop = withinTableX && Math.abs(event.clientY - tableRect.top) <= edgeThreshold;
+  const nearBottom = withinTableX && Math.abs(event.clientY - tableRect.bottom) <= edgeThreshold;
 
   if (nearLeft || nearRight || nearTop || nearBottom) {
     const widthSign = nearLeft ? -1 : nearRight ? 1 : 0;
@@ -3217,21 +3308,23 @@ function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent):
     return { cursor, heightSign, kind: "table", table, widthSign };
   }
 
-  const cell = target.closest("td, th");
+  const columnCell = tableCellNearVerticalBoundary(table, event, boundaryThreshold);
 
-  if (!(cell instanceof HTMLTableCellElement)) {
-    return null;
+  if (columnCell) {
+    return {
+      cell: columnCell,
+      columnIndex: columnCell.cellIndex,
+      cursor: "col",
+      heightSign: 0,
+      kind: "column",
+      table,
+      widthSign: 1
+    };
   }
 
-  const cellRect = cell.getBoundingClientRect();
+  const row = tableRowNearHorizontalBoundary(table, event, boundaryThreshold);
 
-  if (Math.abs(event.clientY - cellRect.bottom) > rowThreshold) {
-    return null;
-  }
-
-  const row = cell.closest("tr");
-
-  if (!(row instanceof HTMLTableRowElement)) {
+  if (!row) {
     return null;
   }
 
@@ -3243,6 +3336,60 @@ function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent):
     table,
     widthSign: 0
   };
+}
+
+function tableFromResizeEvent(editorElement: HTMLElement, target: HTMLElement, event: MouseEvent) {
+  const targetTable = target.closest("table");
+
+  if (targetTable instanceof HTMLTableElement && editorElement.contains(targetTable)) {
+    return targetTable;
+  }
+
+  const tables = Array.from(editorElement.querySelectorAll("table"));
+
+  return (
+    tables.find((table) => {
+      const rect = table.getBoundingClientRect();
+      const threshold = 14;
+
+      return (
+        event.clientX >= rect.left - threshold &&
+        event.clientX <= rect.right + threshold &&
+        event.clientY >= rect.top - threshold &&
+        event.clientY <= rect.bottom + threshold
+      );
+    }) ?? null
+  );
+}
+
+function tableCellNearVerticalBoundary(table: HTMLTableElement, event: MouseEvent, threshold: number) {
+  const cells = Array.from(table.querySelectorAll("td, th"));
+
+  return (
+    cells.find((cell): cell is HTMLTableCellElement => {
+      if (!(cell instanceof HTMLTableCellElement)) {
+        return false;
+      }
+
+      const rect = cell.getBoundingClientRect();
+      return event.clientY >= rect.top && event.clientY <= rect.bottom && Math.abs(event.clientX - rect.right) <= threshold;
+    }) ?? null
+  );
+}
+
+function tableRowNearHorizontalBoundary(table: HTMLTableElement, event: MouseEvent, threshold: number) {
+  const rows = Array.from(table.querySelectorAll("tr"));
+
+  return (
+    rows.find((row): row is HTMLTableRowElement => {
+      if (!(row instanceof HTMLTableRowElement)) {
+        return false;
+      }
+
+      const rect = row.getBoundingClientRect();
+      return event.clientX >= rect.left && event.clientX <= rect.right && Math.abs(event.clientY - rect.bottom) <= threshold;
+    }) ?? null
+  );
 }
 
 function tableResizeCursorFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeCursor | null {
@@ -3271,8 +3418,8 @@ function tableResizeCursorFromEvent(editorElement: HTMLElement, event: MouseEven
 function updateEditorNodeAttributes(
   editor: TipTapEditor,
   element: HTMLElement,
-  nodeName: "table" | "tableRow",
-  nextAttributes: Record<string, number | null>
+  nodeName: "table" | "tableCell" | "tableHeader" | "tableRow",
+  nextAttributes: Record<string, number | number[] | null>
 ) {
   const nodePosition = editorNodePositionFromElement(editor, element, nodeName);
 
@@ -3287,7 +3434,39 @@ function updateEditorNodeAttributes(
   editor.view.dispatch(transaction);
 }
 
-function editorNodePositionFromElement(editor: TipTapEditor, element: HTMLElement, nodeName: "table" | "tableRow") {
+function updateTableColumnWidth(editor: TipTapEditor, table: HTMLTableElement, columnIndex: number, width: number) {
+  const cellUpdates = Array.from(table.rows)
+    .map((row) => row.cells[columnIndex])
+    .filter((cell): cell is HTMLTableCellElement => cell instanceof HTMLTableCellElement)
+    .map((cell) =>
+      editorNodePositionFromElement(editor, cell, cell.tagName === "TH" ? "tableHeader" : "tableCell")
+    )
+    .filter((nodePosition): nodePosition is NonNullable<typeof nodePosition> => Boolean(nodePosition));
+
+  if (!cellUpdates.length) {
+    return;
+  }
+
+  let transaction = editor.state.tr;
+
+  cellUpdates.forEach(({ node, position }) => {
+    const colspan = Number(node.attrs.colspan) || 1;
+    const colwidth = Array.from({ length: colspan }, () => width);
+
+    transaction = transaction.setNodeMarkup(position, undefined, {
+      ...node.attrs,
+      colwidth
+    });
+  });
+
+  editor.view.dispatch(transaction);
+}
+
+function editorNodePositionFromElement(
+  editor: TipTapEditor,
+  element: HTMLElement,
+  nodeName: "table" | "tableCell" | "tableHeader" | "tableRow"
+) {
   const probe = element.matches("td, th") ? element : element.querySelector("td, th") ?? element;
   const rawPosition = editor.view.posAtDOM(probe, 0);
   const position = Math.min(Math.max(rawPosition, 0), editor.state.doc.content.size);
@@ -3547,6 +3726,7 @@ function NoteDrawer({
   activeNoteId,
   canRestoreNote,
   counts,
+  deletedCounts,
   deletedNotes,
   filter,
   folders,
@@ -3554,7 +3734,6 @@ function NoteDrawer({
   notes,
   onClose,
   onFilterChange,
-  onNew,
   onOpenOverview,
   onPreview,
   onPurge,
@@ -3567,6 +3746,7 @@ function NoteDrawer({
   activeNoteId: string | null;
   canRestoreNote: (note: DecryptedNote) => boolean;
   counts: NoteListCounts;
+  deletedCounts: NoteListCounts;
   deletedNotes: DecryptedNote[];
   filter: NoteListFilter;
   folders: NoteFolderSnapshot[];
@@ -3574,7 +3754,6 @@ function NoteDrawer({
   notes: DecryptedNote[];
   onClose: () => void;
   onFilterChange: (filter: NoteListFilter) => void;
-  onNew: () => void;
   onOpenOverview: (filter?: OverviewFolderFilter) => void;
   onPreview: (note: DecryptedNote) => void;
   onPurge: (note: DecryptedNote) => void;
@@ -3592,6 +3771,7 @@ function NoteDrawer({
 
   const isTrashMode = mode === "trash";
   const listedNotes = isTrashMode ? deletedNotes : notes;
+  const visibleCounts = isTrashMode ? deletedCounts : counts;
 
   return (
     <aside className="note-drawer" aria-label="노트 목록">
@@ -3629,17 +3809,6 @@ function NoteDrawer({
           )}
         </div>
       )}
-      <button
-        className="secondary-button drawer-new-button"
-        type="button"
-        onClick={() => {
-          onNew();
-          onClose();
-        }}
-      >
-        <FilePlus2 size={18} />
-        새 메모
-      </button>
       <div className="drawer-mode-tabs" role="tablist" aria-label="노트 목록 모드">
         <button
           aria-selected={!isTrashMode}
@@ -3663,53 +3832,55 @@ function NoteDrawer({
       </div>
       <div className="note-filter-tabs" role="tablist" aria-label="노트 종류 필터">
         <NoteFilterButton
-          count={counts.all}
+          count={visibleCounts.all}
           filter="all"
           label="전체"
           selected={filter === "all"}
           onSelect={onFilterChange}
         />
         <NoteFilterButton
-          count={counts.personal}
+          count={visibleCounts.personal}
           filter="personal"
           label="개인"
           selected={filter === "personal"}
           onSelect={onFilterChange}
         />
         <NoteFilterButton
-          count={counts.shared}
+          count={visibleCounts.shared}
           filter="shared"
           label="공유"
           selected={filter === "shared"}
           onSelect={onFilterChange}
         />
       </div>
-      <div className="note-sort-controls">
-        <label className="font-size-control">
-          정렬
-          <select
-            aria-label="노트 목록 정렬 기준"
-            onChange={(event) => onSortChange({ ...sortSetting, field: event.target.value as NoteSortField })}
-            value={sortSetting.field}
+      {!isTrashMode && (
+        <div className="note-sort-controls">
+          <label className="font-size-control">
+            정렬
+            <select
+              aria-label="노트 목록 정렬 기준"
+              onChange={(event) => onSortChange({ ...sortSetting, field: event.target.value as NoteSortField })}
+              value={sortSetting.field}
+            >
+              <option value="createdAt">생성일</option>
+              <option value="dueAt">마감일</option>
+            </select>
+          </label>
+          <button
+            className="secondary-button note-sort-direction"
+            type="button"
+            onClick={() =>
+              onSortChange({
+                ...sortSetting,
+                direction: sortSetting.direction === "asc" ? "desc" : "asc"
+              })
+            }
           >
-            <option value="createdAt">생성일</option>
-            <option value="dueAt">마감일</option>
-          </select>
-        </label>
-        <button
-          className="secondary-button note-sort-direction"
-          type="button"
-          onClick={() =>
-            onSortChange({
-              ...sortSetting,
-              direction: sortSetting.direction === "asc" ? "desc" : "asc"
-            })
-          }
-        >
-          <ArrowUpDown size={16} />
-          {sortSetting.direction === "asc" ? "오름차순" : "내림차순"}
-        </button>
-      </div>
+            <ArrowUpDown size={16} />
+            {sortSetting.direction === "asc" ? "오름차순" : "내림차순"}
+          </button>
+        </div>
+      )}
       {isTrashMode && <p className="trash-retention-hint">삭제된 노트는 {deletedNoteRetentionDays}일 보관 기준으로 표시됩니다.</p>}
       <NoteList
         activeNoteId={activeNoteId}
@@ -4333,6 +4504,8 @@ function NotePreviewModal({
   const [readStates, setReadStates] = useState<NoteUserStateSnapshot[]>([]);
   const [history, setHistory] = useState<NoteHistorySnapshot[]>([]);
   const [historySummaries, setHistorySummaries] = useState<Record<string, string>>({});
+  const [historySnapshots, setHistorySnapshots] = useState<Record<string, NoteDraft>>({});
+  const [revertingHistoryId, setRevertingHistoryId] = useState<string | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
@@ -4380,9 +4553,11 @@ function NotePreviewModal({
 
   useEffect(() => {
     const entriesWithSummary = history.filter((entry) => entry.encryptedSummary);
+    const entriesWithSnapshot = history.filter((entry) => entry.encryptedSnapshot);
 
-    if (!entriesWithSummary.length) {
+    if (!entriesWithSummary.length && !entriesWithSnapshot.length) {
       setHistorySummaries({});
+      setHistorySnapshots({});
       return undefined;
     }
 
@@ -4391,8 +4566,8 @@ function NotePreviewModal({
     async function decryptSummaries() {
       try {
         const noteKey = await onResolveNoteKey(note.id);
-        const nextSummaries = Object.fromEntries(
-          await Promise.all(
+        const [nextSummaries, nextSnapshots] = await Promise.all([
+          Promise.all(
             entriesWithSummary.map(async (entry) => {
               try {
                 return [entry.id, await decryptText(entry.encryptedSummary!, noteKey)] as const;
@@ -4400,15 +4575,29 @@ function NotePreviewModal({
                 return [entry.id, "내용 요약을 열 수 없습니다."] as const;
               }
             })
+          ),
+          Promise.all(
+            entriesWithSnapshot.map(async (entry) => {
+              try {
+                const decrypted = await decryptText(entry.encryptedSnapshot!, noteKey);
+                return [entry.id, draftFromHistorySnapshot(decrypted)] as const;
+              } catch {
+                return [entry.id, null] as const;
+              }
+            })
           )
-        );
+        ]);
 
         if (!cancelled) {
-          setHistorySummaries(nextSummaries);
+          setHistorySummaries(Object.fromEntries(nextSummaries));
+          setHistorySnapshots(
+            Object.fromEntries(nextSnapshots.filter((entry): entry is readonly [string, NoteDraft] => Boolean(entry[1])))
+          );
         }
       } catch {
         if (!cancelled) {
           setHistorySummaries({});
+          setHistorySnapshots({});
         }
       }
     }
@@ -4499,6 +4688,39 @@ function NotePreviewModal({
       if (exitEdit) {
         setIsEditing(false);
       }
+    }
+  }
+
+  async function revertToHistory(entry: NoteHistorySnapshot, snapshotDraft: NoteDraft) {
+    if (note.isDeleted) {
+      setModalError("복구함의 노트는 복구 후 되돌릴 수 있습니다.");
+      return;
+    }
+
+    const confirmed = window.confirm("선택한 수정 이력의 내용으로 되돌릴까요?");
+
+    if (!confirmed) {
+      return;
+    }
+
+    setRevertingHistoryId(entry.id);
+    setModalError(null);
+
+    try {
+      const saved = await onSave(note, snapshotDraft);
+
+      if (!saved) {
+        window.alert("수정 이력으로 되돌리지 못했습니다.");
+        return;
+      }
+
+      setDraft(snapshotDraft);
+      setDraftDirty(false);
+      setIsEditing(false);
+      setActivityOpen(false);
+      setModalError(null);
+    } finally {
+      setRevertingHistoryId(null);
     }
   }
 
@@ -4689,11 +4911,14 @@ function NotePreviewModal({
           <NoteInsightModal
             currentUid={currentUid}
             history={history}
+            historySnapshots={historySnapshots}
             historySummaries={historySummaries}
             note={note}
             onClose={() => setActivityOpen(false)}
             onConfirm={onConfirm}
+            onRevert={(entry, snapshotDraft) => void revertToHistory(entry, snapshotDraft)}
             readStates={readStates}
+            revertingHistoryId={revertingHistoryId}
             users={historyUsers}
           />
         )}
@@ -4714,20 +4939,26 @@ function NotePreviewModal({
 function NoteInsightModal({
   currentUid,
   history,
+  historySnapshots,
   historySummaries,
   note,
   onClose,
   onConfirm,
+  onRevert,
   readStates,
+  revertingHistoryId,
   users
 }: {
   currentUid: string;
   history: NoteHistorySnapshot[];
+  historySnapshots: Record<string, NoteDraft>;
   historySummaries: Record<string, string>;
   note: DecryptedNote;
   onClose: () => void;
   onConfirm: (note: DecryptedNote) => void;
+  onRevert: (entry: NoteHistorySnapshot, snapshotDraft: NoteDraft) => void;
   readStates: NoteUserStateSnapshot[];
+  revertingHistoryId: string | null;
   users: UserProfile[];
 }) {
   const usersByUid = new Map(users.map((user) => [user.uid, user]));
@@ -4810,18 +5041,31 @@ function NoteInsightModal({
             </div>
             {history.length ? (
               <div className="history-list">
-                {history.slice(0, 8).map((entry) => {
+                {history.map((entry) => {
                   const actor = usersByUid.get(entry.actorUid);
                   const createdAt = dateFromTimestamp(entry.createdAt);
                   const summary = historySummaries[entry.id] ?? entry.changedFields.map(historyFieldLabel).join(", ");
+                  const snapshotDraft = historySnapshots[entry.id] ?? null;
+                  const canRevert = Boolean(snapshotDraft && !note.isDeleted && (entry.action === "create" || entry.action === "content"));
 
                   return (
                     <article className="history-item" key={entry.id}>
                       <span>{historyActionLabel(entry.action)}</span>
-                      <strong>{summary}</strong>
+                      <strong className={entry.action === "content" || entry.action === "create" ? "history-changed-summary" : ""}>
+                        {summary}
+                      </strong>
                       <em>
                         {actor?.displayName ?? entry.actorUid} · {formatCompactDateTime(createdAt)}
                       </em>
+                      <button
+                        className="secondary-button history-revert-button"
+                        disabled={!canRevert || revertingHistoryId === entry.id}
+                        onClick={() => snapshotDraft && onRevert(entry, snapshotDraft)}
+                        title={snapshotDraft ? "이 이력의 내용으로 되돌리기" : "이전 형식의 이력은 되돌릴 수 없습니다."}
+                        type="button"
+                      >
+                        {revertingHistoryId === entry.id ? "되돌리는 중" : "이 버전으로 되돌리기"}
+                      </button>
                     </article>
                   );
                 })}

@@ -921,6 +921,15 @@ textarea {
   grid-auto-flow: row;
 }
 
+.note-list-quick-actions .icon-button {
+  aspect-ratio: 1;
+  max-width: 36px;
+  min-height: 36px;
+  min-width: 36px;
+  padding: 0;
+  width: 36px;
+}
+
 .star-button {
   color: #94a3b8;
 }
@@ -1720,6 +1729,11 @@ textarea {
   width: 100%;
 }
 
+.rich-body-input table:hover {
+  outline: 1px dashed rgb(47 125 112 / 34%);
+  outline-offset: 3px;
+}
+
 .rich-body-input table[data-qm-table-width],
 .note-preview-body table[data-qm-table-width],
 .admin-note-view-body table[data-qm-table-width] {
@@ -2095,11 +2109,6 @@ textarea {
   margin: 0;
 }
 
-.drawer-new-button {
-  margin-bottom: 12px;
-  width: 100%;
-}
-
 .drawer-mode-tabs {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -2219,6 +2228,7 @@ textarea {
 }
 
 .note-list-date {
+  align-content: center;
   background: var(--surface);
   border: 1px solid transparent;
   border-radius: 7px;
@@ -2232,6 +2242,7 @@ textarea {
   color: var(--muted);
   font-size: 11px;
   font-weight: 900;
+  line-height: 1.15;
 }
 
 .note-list-date strong {
@@ -2246,6 +2257,7 @@ textarea {
   font-size: 11px;
   font-style: normal;
   font-weight: 900;
+  line-height: 1.15;
 }
 
 .note-list-date.deadline.upcoming {
@@ -2729,7 +2741,7 @@ textarea {
   border-radius: 8px;
   display: grid;
   gap: 8px;
-  grid-template-columns: 86px minmax(0, 1fr);
+  grid-template-columns: 86px minmax(0, 1fr) auto;
   padding: 8px 10px;
 }
 
@@ -2748,6 +2760,10 @@ textarea {
   white-space: pre-line;
 }
 
+.history-changed-summary {
+  color: #dc2626;
+}
+
 .history-item em {
   color: var(--muted);
   font-size: 12px;
@@ -2758,6 +2774,16 @@ textarea {
   text-align: left;
   text-overflow: clip;
   white-space: normal;
+}
+
+.history-revert-button {
+  align-self: center;
+  font-size: 12px;
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  min-height: 34px;
+  padding: 0 10px;
+  white-space: nowrap;
 }
 
 .admin-grid {
@@ -3776,6 +3802,13 @@ textarea {
     text-align: left;
   }
 
+  .history-revert-button {
+    grid-column: auto;
+    grid-row: auto;
+    justify-self: start;
+    white-space: normal;
+  }
+
   .editor-panel {
     min-height: auto;
   }
@@ -4177,7 +4210,6 @@ textarea {
     padding: 10px 14px;
   }
 
-  .drawer-new-button,
   .note-filter-tab,
   .drawer-mode-tabs button,
   .note-sort-direction {
@@ -4193,7 +4225,7 @@ textarea {
 
   .note-list-item {
     gap: 7px;
-    grid-template-columns: minmax(0, 1fr) 36px;
+    grid-template-columns: minmax(0, 1fr) auto;
     min-height: 0;
     padding: 10px;
   }
@@ -4209,6 +4241,7 @@ textarea {
   }
 
   .note-list-date {
+    align-content: center;
     min-height: auto;
     padding: 6px;
   }
@@ -4223,7 +4256,10 @@ textarea {
   }
 
   .note-list-quick-actions .icon-button {
+    flex: 0 0 auto;
+    max-width: 34px;
     min-height: 34px;
+    min-width: 34px;
     width: 34px;
   }
 }

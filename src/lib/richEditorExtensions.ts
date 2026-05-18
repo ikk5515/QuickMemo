@@ -9,6 +9,7 @@ import TableRow from "@tiptap/extension-table-row";
 import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
 import TextAlign from "@tiptap/extension-text-align";
+import Underline from "@tiptap/extension-underline";
 import StarterKit from "@tiptap/starter-kit";
 
 export const editorCellColors = ["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"] as const;
@@ -266,6 +267,7 @@ export const richEditorExtensions = [
   }),
   TextSize,
   TextColor,
+  Underline,
   Link.configure({
     autolink: true,
     defaultProtocol: "https",
@@ -286,9 +288,7 @@ export const richEditorExtensions = [
   TaskItem.configure({
     nested: true
   }),
-  ResizableTable.configure({
-    resizable: true
-  }),
+  ResizableTable,
   ResizableTableRow,
   ColoredTableHeader,
   ColoredTableCell,
