@@ -21,6 +21,7 @@ import {
   Loader2,
   PanelLeftOpen,
   PaintBucket,
+  Paperclip,
   Palette,
   Pencil,
   RotateCcw,
@@ -445,6 +446,33 @@ function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserPro
   const container = document.createElement("div");
   container.appendChild(template.content);
   return container.innerHTML;
+}
+
+function applySharedAttributionLabels(root: HTMLElement | null, note: DecryptedNote | null | undefined, users: UserProfile[]) {
+  if (!root) {
+    return;
+  }
+
+  root.querySelectorAll<HTMLElement>("[data-qm-attribution-label]").forEach((element) => {
+    element.removeAttribute("data-qm-attribution-label");
+  });
+
+  if (!note || note.type !== "shared") {
+    return;
+  }
+
+  const usersByUid = new Map(users.map((user) => [user.uid, user]));
+
+  sharedAttributionBlocks(root).forEach((block) => {
+    const authors = parseUidList(block.dataset.qmAuthorUids);
+    const editors = parseUidList(block.dataset.qmEditorUids);
+    const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
+    const safeAuthors = authors.length ? authors : [note.ownerUid];
+    const safeEditors = editors.length ? editors : [note.updatedBy || note.ownerUid];
+    const finalLastEditorUid = lastEditorUid ?? safeEditors.at(-1) ?? note.updatedBy ?? note.ownerUid;
+
+    block.dataset.qmAttributionLabel = `작성자: ${uidLabels(safeAuthors, usersByUid)}, 최종 수정자: ${uidLabels([finalLastEditorUid], usersByUid)}`;
+  });
 }
 
 function renderSharedAttributionNote(block: HTMLElement, label: string) {
@@ -2962,6 +2990,8 @@ export default function NotesPage() {
             value={editor.title}
           />
           <RichMemoEditor
+            attributionNote={activeRemoteNote}
+            attributionUsers={users}
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
             onCursorChange={publishEditorCursor}
@@ -3023,6 +3053,8 @@ export default function NotesPage() {
 }
 
 function RichMemoEditor({
+  attributionNote = null,
+  attributionUsers = [],
   editorRef,
   fontSize,
   onCursorChange,
@@ -3031,6 +3063,8 @@ function RichMemoEditor({
   remoteCursors = [],
   value
 }: {
+  attributionNote?: DecryptedNote | null;
+  attributionUsers?: UserProfile[];
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
   onCursorChange?: (cursorOffset: number | null, cursorVisible: boolean) => void;
@@ -3048,7 +3082,7 @@ function RichMemoEditor({
   const [customCellColor, setCustomCellColor] = useState<string>(editorCellColors[0]);
   const [tableRows, setTableRows] = useState(3);
   const [tableColumns, setTableColumns] = useState(3);
-  const [, setToolbarVersion] = useState(0);
+  const [toolbarVersion, setToolbarVersion] = useState(0);
   const controlIdPrefix = useId();
   const selectionFontSizeListId = `${controlIdPrefix}-selection-font-sizes`;
   const selectionLineHeightListId = `${controlIdPrefix}-selection-line-heights`;
@@ -3254,6 +3288,14 @@ function RichMemoEditor({
 
     editor.commands.setContent(value || "", { emitUpdate: false });
   }, [editor, value]);
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+
+    applySharedAttributionLabels(editor.view.dom as HTMLElement, attributionNote, attributionUsers);
+  }, [attributionNote, attributionUsers, editor, toolbarVersion, value]);
 
   function clearImageSelection() {
     selectedImageRef.current = null;
@@ -5506,6 +5548,63 @@ function AttachmentList({
   );
 }
 
+function AttachmentListModal({
+  attachments,
+  busyId,
+  canDelete,
+  onClose,
+  onDelete,
+  onDownload,
+  onPreview
+}: {
+  attachments: NoteAttachmentSnapshot[];
+  busyId: string | null;
+  canDelete: (attachment: NoteAttachmentSnapshot) => boolean;
+  onClose: () => void;
+  onDelete: (attachment: NoteAttachmentSnapshot) => void;
+  onDownload: (attachment: NoteAttachmentSnapshot) => void;
+  onPreview: (attachment: NoteAttachmentSnapshot) => void;
+}) {
+  return (
+    <div className="modal-backdrop note-insight-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-label="첨부파일"
+        aria-modal="true"
+        className="note-insight-modal attachment-list-modal"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="note-insight-modal-header">
+          <div>
+            <span>
+              <Paperclip size={16} />
+              첨부파일
+            </span>
+            <h2>첨부파일 보기</h2>
+          </div>
+          <div className="note-insight-modal-actions">
+            <em>{attachments.length}개</em>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="첨부파일 닫기">
+              <X size={16} />
+            </button>
+          </div>
+        </header>
+        <div className="note-insight-modal-body">
+          <AttachmentList
+            attachments={attachments}
+            busyId={busyId}
+            canDelete={canDelete}
+            compact
+            onDelete={onDelete}
+            onDownload={onDownload}
+            onPreview={onPreview}
+          />
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function AttachmentPreviewModal({
   onClose,
   preview
@@ -5740,6 +5839,7 @@ function NotePreviewModal({
   const [historySnapshots, setHistorySnapshots] = useState<Record<string, NoteDraft>>({});
   const [revertingHistoryId, setRevertingHistoryId] = useState<string | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
   const latestDraftRef = useRef(draft);
@@ -5760,6 +5860,11 @@ function NotePreviewModal({
 
       event.preventDefault();
 
+      if (attachmentsOpen) {
+        setAttachmentsOpen(false);
+        return;
+      }
+
       if (activityOpen) {
         setActivityOpen(false);
         return;
@@ -5770,7 +5875,7 @@ function NotePreviewModal({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activityOpen, onClose, suppressEscape]);
+  }, [activityOpen, attachmentsOpen, onClose, suppressEscape]);
 
   useEffect(() => {
     return subscribeNoteAttachments(note.id, setAttachments, () => setModalError("첨부파일 목록을 불러오지 못했습니다."));
@@ -6117,6 +6222,8 @@ function NotePreviewModal({
               />
             </label>
             <RichMemoEditor
+              attributionNote={note}
+              attributionUsers={historyUsers}
               editorRef={previewEditorRef}
               fontSize={draft.fontSize}
               onFilesPaste={(files, insertHtml) => void insertPreviewPastedFiles(files, insertHtml)}
@@ -6132,11 +6239,20 @@ function NotePreviewModal({
             dangerouslySetInnerHTML={{ __html: renderedBodyHtml }}
           />
         )}
-        <button className="secondary-button note-insight-trigger" type="button" onClick={() => setActivityOpen(true)}>
-          <History size={16} />
-          활동 / 수정 이력 보기
-          <span>{history.length}개 이력</span>
-        </button>
+        <div className="note-preview-trigger-row">
+          {attachments.length ? (
+            <button className="secondary-button note-insight-trigger" type="button" onClick={() => setAttachmentsOpen(true)}>
+              <Paperclip size={16} />
+              첨부파일 보기
+              <span>{attachments.length}개</span>
+            </button>
+          ) : null}
+          <button className="secondary-button note-insight-trigger" type="button" onClick={() => setActivityOpen(true)}>
+            <History size={16} />
+            활동 / 수정 이력 보기
+            <span>{history.length}개 이력</span>
+          </button>
+        </div>
         {activityOpen && (
           <NoteInsightModal
             currentUid={currentUid}
@@ -6152,15 +6268,17 @@ function NotePreviewModal({
             users={historyUsers}
           />
         )}
-        <AttachmentList
-          attachments={attachments}
-          busyId={attachmentBusyId}
-          canDelete={(attachment) => canDeleteAttachment(note, attachment)}
-          compact
-          onDelete={(attachment) => onDeleteAttachment(note, attachment)}
-          onDownload={(attachment) => onDownloadAttachment(note, attachment)}
-          onPreview={(attachment) => onPreviewAttachment(note, attachment)}
-        />
+        {attachmentsOpen && (
+          <AttachmentListModal
+            attachments={attachments}
+            busyId={attachmentBusyId}
+            canDelete={(attachment) => canDeleteAttachment(note, attachment)}
+            onClose={() => setAttachmentsOpen(false)}
+            onDelete={(attachment) => onDeleteAttachment(note, attachment)}
+            onDownload={(attachment) => onDownloadAttachment(note, attachment)}
+            onPreview={(attachment) => onPreviewAttachment(note, attachment)}
+          />
+        )}
       </section>
     </div>
   );
