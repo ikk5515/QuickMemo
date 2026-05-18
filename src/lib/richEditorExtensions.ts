@@ -29,6 +29,7 @@ export const editorLineHeights = [1, 1.15, 1.2, 1.35, 1.5, 1.7, 2, 2.5, 3] as co
 const editorCellColorSet = new Set<string>(editorCellColors);
 const editorImageWidthSet = new Set<number>(editorImageWidths);
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
+const safeBlockIdPattern = /^[A-Za-z0-9_-]{12,64}$/;
 const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
 const safeUidPattern = /^[A-Za-z0-9_:.-]{1,128}$/;
 const attributionLabelMaxLength = 160;
@@ -111,6 +112,12 @@ function normalizedUid(value: unknown) {
   const rawValue = String(value ?? "").trim();
 
   return safeUidPattern.test(rawValue) ? rawValue : null;
+}
+
+function normalizedBlockId(value: unknown) {
+  const rawValue = String(value ?? "").trim();
+
+  return safeBlockIdPattern.test(rawValue) ? rawValue : null;
 }
 
 function normalizedAttributionLabel(value: unknown) {
@@ -256,6 +263,14 @@ const BlockAttribution = Extension.create({
       {
         types: ["paragraph", "heading", "listItem", "tableCell", "tableHeader"],
         attributes: {
+          qmBlockId: {
+            default: null,
+            parseHTML: (element: HTMLElement) => normalizedBlockId(element.getAttribute("data-qm-block-id")),
+            renderHTML: (attributes: { qmBlockId?: string | null }) => {
+              const value = normalizedBlockId(attributes.qmBlockId);
+              return value ? { "data-qm-block-id": value } : {};
+            }
+          },
           qmAuthorUids: {
             default: null,
             parseHTML: (element: HTMLElement) => normalizedUidList(element.getAttribute("data-qm-author-uids")),
