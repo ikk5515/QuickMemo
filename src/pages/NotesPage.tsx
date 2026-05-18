@@ -382,21 +382,16 @@ function annotateSharedNoteBody(previousHtml: string, nextHtml: string, actorUid
     const previousEditors = previousBlock?.editors.length ? previousBlock.editors : previousAuthors;
     const previousLastEditorUid = previousBlock?.lastEditorUid ?? previousEditors.at(-1) ?? fallbackAuthorUid;
     const changed = !previousBlock || nextSignature !== previousBlock.signature;
-    const authors = parseUidList(block.dataset.qmAuthorUids);
-    const editors = parseUidList(block.dataset.qmEditorUids);
-    const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
     const shouldTreatAsNewAuthoredBlock = isNewBlock || Boolean(previousBlock?.isBlank);
     const shouldKeepPreviousAuthor = Boolean(previousBlock && previousBlock.hasAttribution && !previousBlock.isBlank);
     const isLegacyContent = Boolean(previousBlock && !previousBlock.hasAttribution && !previousBlock.isBlank);
-    const shouldTrustCurrentAttribution = Boolean(previousBlock && !previousBlock.isBlank);
-    const nextAuthors = shouldTrustCurrentAttribution && authors.length
-      ? authors
-      : shouldTreatAsNewAuthoredBlock || (!shouldKeepPreviousAuthor && !isLegacyContent)
+    const nextAuthors =
+      shouldTreatAsNewAuthoredBlock || (!shouldKeepPreviousAuthor && !isLegacyContent)
         ? [actorUid]
         : previousAuthors;
-    const nextEditors = shouldTrustCurrentAttribution && editors.length ? editors : shouldTreatAsNewAuthoredBlock ? [actorUid] : previousEditors;
+    const nextEditors = shouldTreatAsNewAuthoredBlock ? [actorUid] : previousEditors;
     const finalEditors = changed ? appendUniqueUid(nextEditors, actorUid) : nextEditors;
-    const finalLastEditorUid = changed ? actorUid : lastEditorUid ?? previousLastEditorUid;
+    const finalLastEditorUid = changed ? actorUid : previousLastEditorUid;
 
     block.dataset.qmBlockId = blockId;
     block.dataset.qmAuthorUids = nextAuthors.join(",");
@@ -437,6 +432,96 @@ function sharedBlockMetadataFromHtml(html: string, fallbackAuthorUid: string): S
       signature: comparableSharedBlockSignature(block)
     };
   });
+}
+
+function trustedSharedBlockMetadataFromHistory(
+  note: DecryptedNote,
+  history: NoteHistorySnapshot[],
+  historySnapshots: Record<string, NoteDraft>
+) {
+  const chronologicalEntries = history
+    .map((entry, index) => ({ draft: historySnapshots[entry.id] ?? null, entry, index }))
+    .filter((item): item is { draft: NoteDraft; entry: NoteHistorySnapshot; index: number } => Boolean(item.draft))
+    .sort((left, right) => {
+      const leftMillis = timestampMillisValue(left.entry.createdAt) ?? 0;
+      const rightMillis = timestampMillisValue(right.entry.createdAt) ?? 0;
+      return leftMillis - rightMillis || right.index - left.index;
+    });
+
+  return chronologicalEntries.reduce<SharedBlockMetadata[]>((previousBlocks, { draft, entry }) => {
+    const actorUid = parseUid(entry.actorUid) ?? note.updatedBy ?? note.ownerUid;
+    return deriveSharedBlockMetadataForActor(previousBlocks, draft.body, actorUid, note.ownerUid);
+  }, []);
+}
+
+function deriveSharedBlockMetadataForActor(
+  previousBlocks: SharedBlockMetadata[],
+  nextHtml: string,
+  actorUid: string,
+  fallbackAuthorUid: string
+) {
+  if (typeof document === "undefined") {
+    return [];
+  }
+
+  const usedPreviousBlocks = new Set<SharedBlockMetadata>();
+  const template = document.createElement("template");
+  template.innerHTML = sanitizeEditorHtml(nextHtml);
+
+  return sharedAttributionBlocks(template.content).map((block, index) => {
+    if (isBlankSharedBlock(block)) {
+      return {
+        authors: [],
+        blockId: null,
+        editors: [],
+        hasAttribution: false,
+        isBlank: true,
+        lastEditorUid: null,
+        signature: ""
+      };
+    }
+
+    const signature = comparableSharedBlockSignature(block);
+    const previousBlock = matchSharedBlockMetadata(previousBlocks, usedPreviousBlocks, signature, index);
+    const previousAuthors = previousBlock?.authors.length ? previousBlock.authors : [fallbackAuthorUid];
+    const previousEditors = previousBlock?.editors.length ? previousBlock.editors : previousAuthors;
+    const changed = !previousBlock || signature !== previousBlock.signature;
+    const shouldTreatAsNewAuthoredBlock = !previousBlock || previousBlock.isBlank;
+    const authors = shouldTreatAsNewAuthoredBlock ? [actorUid] : previousAuthors;
+    const nextEditors = shouldTreatAsNewAuthoredBlock ? [actorUid] : previousEditors;
+    const editors = changed ? appendUniqueUid(nextEditors, actorUid) : nextEditors;
+    const lastEditorUid = changed ? actorUid : previousBlock?.lastEditorUid ?? editors.at(-1) ?? actorUid;
+
+    return {
+      authors,
+      blockId: null,
+      editors,
+      hasAttribution: true,
+      isBlank: false,
+      lastEditorUid,
+      signature
+    };
+  });
+}
+
+function matchSharedBlockMetadata(
+  blocks: SharedBlockMetadata[],
+  usedBlocks: Set<SharedBlockMetadata>,
+  signature: string,
+  index: number
+) {
+  let block = blocks.find((candidate) => !usedBlocks.has(candidate) && !candidate.isBlank && candidate.signature === signature) ?? null;
+
+  if (!block) {
+    const indexedBlock = blocks[index];
+    block = indexedBlock && !usedBlocks.has(indexedBlock) && !indexedBlock.isBlank ? indexedBlock : null;
+  }
+
+  if (block) {
+    usedBlocks.add(block);
+  }
+
+  return block;
 }
 
 function sharedAttributionBlocks(root: ParentNode) {
@@ -524,23 +609,34 @@ function isBlankSharedBlock(block: HTMLElement) {
   return !text && !clone.querySelector("img, table, input[type='checkbox']");
 }
 
-function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserProfile[]) {
+function sharedAttributionHtml(
+  html: string,
+  note: DecryptedNote,
+  users: UserProfile[],
+  trustedBlocks: SharedBlockMetadata[] = []
+) {
   if (typeof document === "undefined") {
     return linkifyEditorHtml(sanitizeEditorHtml(html));
   }
 
   const usersByUid = new Map(users.map((user) => [user.uid, user]));
+  const usedTrustedBlocks = new Set<SharedBlockMetadata>();
   const template = document.createElement("template");
   template.innerHTML = linkifyEditorHtml(sanitizeEditorHtml(html));
 
-  sharedAttributionBlocks(template.content).forEach((block) => {
-    const authors = parseUidList(block.dataset.qmAuthorUids);
-    const editors = parseUidList(block.dataset.qmEditorUids);
-    const lastEditorUid = parseUid(block.dataset.qmLastEditorUid);
-    const safeAuthors = authors.length ? authors : [note.ownerUid];
-    const safeEditors = editors.length ? editors : [note.updatedBy || note.ownerUid];
-    const finalLastEditorUid = lastEditorUid ?? safeEditors.at(-1) ?? note.updatedBy ?? note.ownerUid;
+  sharedAttributionBlocks(template.content).forEach((block, index) => {
+    if (isBlankSharedBlock(block)) {
+      clearSharedAttributionAttributes(block);
+      return;
+    }
+
+    const signature = comparableSharedBlockSignature(block);
+    const trustedBlock = matchSharedBlockMetadata(trustedBlocks, usedTrustedBlocks, signature, index);
+    const safeAuthors = trustedBlock?.authors.length ? trustedBlock.authors : [note.ownerUid];
+    const safeEditors = trustedBlock?.editors.length ? trustedBlock.editors : [note.updatedBy || note.ownerUid];
+    const finalLastEditorUid = trustedBlock?.lastEditorUid ?? safeEditors.at(-1) ?? note.updatedBy ?? note.ownerUid;
     const label = sharedAttributionLabel(safeAuthors, finalLastEditorUid, usersByUid);
+    clearSharedAttributionAttributes(block);
     block.dataset.qmAttributionLabel = label;
     renderSharedAttributionNote(block, label);
   });
@@ -6128,8 +6224,14 @@ function NotePreviewModal({
   }
 
   const bodyHtml = draft.body || "<p>내용 없음</p>";
+  const trustedAttributionBlocks = useMemo(
+    () => (note.type === "shared" ? trustedSharedBlockMetadataFromHistory(note, history, historySnapshots) : []),
+    [history, historySnapshots, note]
+  );
   const renderedBodyHtml =
-    note.type === "shared" ? sharedAttributionHtml(bodyHtml, note, historyUsers) : linkifyEditorHtml(sanitizeEditorHtml(bodyHtml));
+    note.type === "shared"
+      ? sharedAttributionHtml(bodyHtml, note, historyUsers, trustedAttributionBlocks)
+      : linkifyEditorHtml(sanitizeEditorHtml(bodyHtml));
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>

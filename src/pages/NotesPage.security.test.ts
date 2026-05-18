@@ -39,4 +39,29 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("function safeDocxPreviewImageSrc");
     expect(notesPageSource).toContain("sanitizeDocxPreviewCss");
   });
+
+  it("does not trust shared attribution UIDs from the next rich-text draft", () => {
+    const annotateHelper =
+      notesPageSource.match(/function annotateSharedNoteBody[\s\S]*?function sharedBlockMetadataFromHtml/)?.[0] ?? "";
+
+    expect(annotateHelper).not.toContain("parseUidList(block.dataset.qmAuthorUids)");
+    expect(annotateHelper).not.toContain("parseUidList(block.dataset.qmEditorUids)");
+    expect(annotateHelper).not.toContain("parseUid(block.dataset.qmLastEditorUid)");
+    expect(annotateHelper).toContain("const finalLastEditorUid = changed ? actorUid : previousLastEditorUid");
+  });
+
+  it("renders shared attribution from authenticated history actors instead of body attributes", () => {
+    const previewHelper =
+      notesPageSource.match(/function sharedAttributionHtml[\s\S]*?function renderSharedAttributionNote/)?.[0] ?? "";
+    const historyHelper =
+      notesPageSource.match(/function trustedSharedBlockMetadataFromHistory[\s\S]*?function sharedAttributionBlocks/)?.[0] ?? "";
+
+    expect(historyHelper).toContain("entry.actorUid");
+    expect(historyHelper).toContain("deriveSharedBlockMetadataForActor");
+    expect(previewHelper).not.toContain("parseUidList(block.dataset.qmAuthorUids)");
+    expect(previewHelper).not.toContain("parseUidList(block.dataset.qmEditorUids)");
+    expect(previewHelper).not.toContain("parseUid(block.dataset.qmLastEditorUid)");
+    expect(previewHelper).toContain("clearSharedAttributionAttributes(block)");
+    expect(notesPageSource).toContain("trustedSharedBlockMetadataFromHistory(note, history, historySnapshots)");
+  });
 });
