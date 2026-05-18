@@ -2683,10 +2683,19 @@ textarea {
 
 .docx-preview-frame {
   background: #eef1f3;
+  display: flex;
   flex: 1 1 auto;
   min-height: 420px;
-  overflow: auto;
-  padding: 22px;
+  overflow: hidden;
+  padding: 0;
+}
+
+.docx-preview-sandbox {
+  background: #f8fafc;
+  border: 0;
+  flex: 1 1 auto;
+  min-height: 420px;
+  width: 100%;
 }
 
 .docx-preview-content {
@@ -4186,7 +4195,10 @@ textarea {
 
   .docx-preview-frame {
     min-height: 360px;
-    padding: 12px;
+  }
+
+  .docx-preview-sandbox {
+    min-height: 360px;
   }
 
   .attachment-panel {
