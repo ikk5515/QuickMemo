@@ -1314,6 +1314,7 @@ textarea {
   flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
+  padding-bottom: 72px;
   position: relative;
 }
 
@@ -1544,13 +1545,17 @@ textarea {
   box-shadow: 0 12px 28px rgb(15 23 42 / 12%);
   display: inline-flex;
   gap: 6px;
-  margin: 8px auto 0;
-  max-width: 100%;
+  justify-content: center;
+  left: 50%;
+  margin: 0;
+  max-width: calc(100vw - 32px);
   overflow-x: auto;
   padding: 6px;
-  position: sticky;
-  bottom: 10px;
-  z-index: 7;
+  position: fixed;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  width: min(720px, calc(100vw - 32px));
+  z-index: 8;
 }
 
 .format-quick-dock > span {
@@ -4705,11 +4710,15 @@ textarea {
   }
 
   .format-quick-dock {
-    align-self: stretch;
     border-radius: 8px;
-    bottom: 8px;
+    bottom: max(8px, env(safe-area-inset-bottom));
     justify-content: flex-start;
+    left: max(10px, env(safe-area-inset-left));
+    max-width: none;
+    right: max(10px, env(safe-area-inset-right));
     scrollbar-width: thin;
+    transform: none;
+    width: auto;
   }
 
   .format-quick-dock > span {
