@@ -1657,6 +1657,21 @@ textarea {
   margin: 0 0 16px;
 }
 
+.rich-body-input [data-qm-attribution-label]::after {
+  border-top: 1px dashed rgb(148 163 184 / 30%);
+  color: #94a3b8;
+  content: attr(data-qm-attribution-label);
+  display: block;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1.25;
+  margin: 4px 0 10px;
+  padding-top: 3px;
+  pointer-events: none;
+  text-align: right;
+  user-select: none;
+}
+
 .rich-body-input .tableWrapper {
   max-width: 100%;
   overflow-x: auto;
@@ -2950,6 +2965,18 @@ textarea {
   margin: 0 18px 12px;
 }
 
+.note-preview-trigger-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 18px 12px;
+}
+
+.note-preview-trigger-row .note-insight-trigger {
+  margin: 0;
+}
+
 .note-insight-trigger span {
   background: rgb(47 125 112 / 10%);
   border-radius: 999px;
@@ -3027,6 +3054,14 @@ textarea {
   gap: 16px;
   overflow: auto;
   padding: 16px;
+}
+
+.attachment-list-modal {
+  width: min(640px, calc(100vw - 32px));
+}
+
+.attachment-list-modal .attachment-panel.compact {
+  margin: 0;
 }
 
 .note-insight-section {
@@ -4209,6 +4244,18 @@ textarea {
   .note-insight-trigger {
     margin: 0 14px 12px;
     width: calc(100% - 28px);
+  }
+
+  .note-preview-trigger-row {
+    align-items: stretch;
+    display: grid;
+    grid-template-columns: 1fr;
+    margin: 0 14px 12px;
+  }
+
+  .note-preview-trigger-row .note-insight-trigger {
+    margin: 0;
+    width: 100%;
   }
 
   .note-insight-modal {
