@@ -288,6 +288,12 @@ const maxHwpxPreviewEntryBytes = 1_500_000;
 const maxXlsxPreviewEntries = 140;
 const maxXlsxPreviewUncompressedBytes = 5_000_000;
 const maxXlsxPreviewEntryBytes = 2_000_000;
+const maxXlsxMetadataXmlCharacters = 800_000;
+const maxXlsxSharedStrings = 5_000;
+const maxXlsxSharedStringCharacters = 240;
+const maxXlsxSharedStringsXmlCharacters = 1_500_000;
+const maxXlsxStyleRecords = 1_024;
+const maxXlsxWorksheetXmlCharacters = 1_500_000;
 const maxHwpPreviewSectionBytes = 1_500_000;
 const maxHwpPreviewTotalBytes = 4_000_000;
 const hwpPreviewCompressedChunkBytes = 16_384;
@@ -7202,7 +7208,7 @@ function extractXlsxPreviewHtml(bytes: Uint8Array) {
         return;
       }
 
-      const table = renderXlsxWorksheet(strFromU8(worksheet), sharedStrings, styles);
+      const table = renderXlsxWorksheet(worksheet, sharedStrings, styles);
 
       if (table) {
         blocks.push(`<h3>${escapeHtml(sheet.name)}</h3>`);
@@ -7226,15 +7232,35 @@ function xlsxPreviewEntryAllowed(name: string) {
   );
 }
 
+function xlsxElementsByLocalName(element: Element, name: string, limit: number) {
+  const result: Element[] = [];
+  const children = element.getElementsByTagName("*");
+
+  for (let index = 0; index < children.length && result.length < limit; index += 1) {
+    const child = children.item(index);
+
+    if (child?.localName.toLowerCase() === name) {
+      result.push(child);
+    }
+  }
+
+  return result;
+}
+
 function xlsxSharedStrings(entries: Record<string, Uint8Array>) {
-  const document = xlsxXmlDocument(entries, "xl/sharedStrings.xml");
+  const document = xlsxXmlDocument(entries, "xl/sharedStrings.xml", maxXlsxSharedStringsXmlCharacters);
 
   if (!document) {
     return [];
   }
 
-  return descendantsByLocalName(document.documentElement, "si").map((item) =>
-    normalizePreviewText(descendantsByLocalName(item, "t").map((textNode) => textNode.textContent ?? "").join(""))
+  return xlsxElementsByLocalName(document.documentElement, "si", maxXlsxSharedStrings).map((item) =>
+    normalizePreviewText(
+      xlsxElementsByLocalName(item, "t", 64)
+        .map((textNode) => textNode.textContent ?? "")
+        .join("")
+        .slice(0, maxXlsxSharedStringCharacters)
+    )
   );
 }
 
@@ -7247,8 +7273,7 @@ function xlsxWorkbookSheets(entries: Record<string, Uint8Array>) {
 
   const relationships = xlsxWorkbookRelationships(entries);
 
-  return descendantsByLocalName(workbook.documentElement, "sheet")
-    .slice(0, 20)
+  return xlsxElementsByLocalName(workbook.documentElement, "sheet", 20)
     .map((sheet, index) => {
       const relationshipId =
         sheet.getAttribute("r:id") ?? sheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") ?? "";
@@ -7269,7 +7294,7 @@ function xlsxWorkbookRelationships(entries: Record<string, Uint8Array>) {
     return relationships;
   }
 
-  descendantsByLocalName(document.documentElement, "Relationship").forEach((relationship) => {
+  xlsxElementsByLocalName(document.documentElement, "Relationship", 200).forEach((relationship) => {
     const id = relationship.getAttribute("Id");
     const target = relationship.getAttribute("Target");
     const normalizedTarget = normalizeXlsxTargetPath(target);
@@ -7291,15 +7316,30 @@ function normalizeXlsxTargetPath(target: string | null) {
   return trimmedTarget.startsWith("xl/") ? trimmedTarget : `xl/${trimmedTarget}`;
 }
 
-function xlsxXmlDocument(entries: Record<string, Uint8Array>, path: string) {
+function xlsxXmlDocument(entries: Record<string, Uint8Array>, path: string, maxCharacters = maxXlsxMetadataXmlCharacters) {
   const entry = entries[path.toLowerCase()];
 
   if (!entry) {
     return null;
   }
 
-  const document = new DOMParser().parseFromString(strFromU8(entry), "application/xml");
+  const markup = xlsxEntryText(entry, maxCharacters);
+
+  if (!markup) {
+    return null;
+  }
+
+  const document = new DOMParser().parseFromString(markup, "application/xml");
   return document.querySelector("parsererror") ? null : document;
+}
+
+function xlsxEntryText(entry: Uint8Array, maxCharacters: number) {
+  if (entry.length > maxCharacters) {
+    return "";
+  }
+
+  const markup = strFromU8(entry);
+  return markup.length <= maxCharacters ? markup : "";
 }
 
 interface XlsxFontStyle {
@@ -7356,14 +7396,20 @@ const xlsxPreviewMaxColumns = 50;
 const xlsxPreviewMaxMergeRanges = 200;
 const xlsxPreviewMaxRows = 100;
 
-function renderXlsxWorksheet(markup: string, sharedStrings: string[], styles: XlsxStyles) {
+function renderXlsxWorksheet(bytes: Uint8Array, sharedStrings: string[], styles: XlsxStyles) {
+  const markup = xlsxEntryText(bytes, maxXlsxWorksheetXmlCharacters);
+
+  if (!markup) {
+    return "";
+  }
+
   const document = new DOMParser().parseFromString(markup, "application/xml");
 
   if (document.querySelector("parsererror")) {
     return "";
   }
 
-  const rows = descendantsByLocalName(document.documentElement, "row")
+  const rows = xlsxElementsByLocalName(document.documentElement, "row", xlsxPreviewMaxRows * 4)
     .filter((row) => row.getAttribute("hidden") !== "1")
     .slice(0, xlsxPreviewMaxRows);
   const visibleRowNumbers = xlsxVisibleRowNumbers(rows);
@@ -7469,7 +7515,7 @@ function xlsxStyles(entries: Record<string, Uint8Array>): XlsxStyles {
   }
 
   const numberFormats = new Map(builtinXlsxNumberFormats);
-  descendantsByLocalName(document.documentElement, "numFmt").forEach((numFmt) => {
+  xlsxElementsByLocalName(document.documentElement, "numFmt", maxXlsxStyleRecords).forEach((numFmt) => {
     const id = Number(numFmt.getAttribute("numFmtId"));
     const formatCode = numFmt.getAttribute("formatCode");
 
@@ -7478,12 +7524,12 @@ function xlsxStyles(entries: Record<string, Uint8Array>): XlsxStyles {
     }
   });
 
-  const fontsElement = descendantsByLocalName(document.documentElement, "fonts")[0] ?? null;
-  const fillsElement = descendantsByLocalName(document.documentElement, "fills")[0] ?? null;
-  const cellXfsElement = descendantsByLocalName(document.documentElement, "cellXfs")[0] ?? null;
-  const fonts = directChildrenByLocalName(fontsElement, "font").map(xlsxFontStyle);
-  const fills = directChildrenByLocalName(fillsElement, "fill").map(xlsxFillColor);
-  const cellFormats = directChildrenByLocalName(cellXfsElement, "xf").map((format) => {
+  const fontsElement = xlsxElementsByLocalName(document.documentElement, "fonts", 1)[0] ?? null;
+  const fillsElement = xlsxElementsByLocalName(document.documentElement, "fills", 1)[0] ?? null;
+  const cellXfsElement = xlsxElementsByLocalName(document.documentElement, "cellXfs", 1)[0] ?? null;
+  const fonts = directChildrenByLocalName(fontsElement, "font").slice(0, maxXlsxStyleRecords).map(xlsxFontStyle);
+  const fills = directChildrenByLocalName(fillsElement, "fill").slice(0, maxXlsxStyleRecords).map(xlsxFillColor);
+  const cellFormats = directChildrenByLocalName(cellXfsElement, "xf").slice(0, maxXlsxStyleRecords).map((format) => {
     const alignment = directChildrenByLocalName(format, "alignment")[0] ?? null;
 
     return {
@@ -7620,7 +7666,7 @@ function xlsxMergeInfo(document: Document, bounds: XlsxMergePreviewBounds): Xlsx
     return { skips, starts };
   }
 
-  descendantsByLocalName(document.documentElement, "mergeCell").slice(0, xlsxPreviewMaxMergeRanges).forEach((mergeCell) => {
+  xlsxElementsByLocalName(document.documentElement, "mergeCell", xlsxPreviewMaxMergeRanges).forEach((mergeCell) => {
     const range = xlsxCellRange(mergeCell.getAttribute("ref"));
 
     if (!range) {
@@ -7684,7 +7730,7 @@ function xlsxMaxColumnIndex(rows: Element[], mergeInfo: XlsxMergeInfo) {
 function xlsxColumnWidths(document: Document, columnCount: number) {
   const widths: Array<number | undefined> = Array.from({ length: columnCount });
 
-  descendantsByLocalName(document.documentElement, "col").forEach((column) => {
+  xlsxElementsByLocalName(document.documentElement, "col", xlsxPreviewMaxColumns).forEach((column) => {
     const min = Math.max(1, Number(column.getAttribute("min")) || 1);
     const max = Math.min(columnCount, Number(column.getAttribute("max")) || min);
     const width = clampXlsxColumnWidth(Number(column.getAttribute("width")));
