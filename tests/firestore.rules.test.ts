@@ -480,6 +480,59 @@ describeRules("firestore security rules", () => {
     await assertFails(getDoc(doc(testEnv.authenticatedContext("user-c").firestore(), "notes/note-a")));
   });
 
+  it("treats legacy active notes without deletion metadata as readable and normalizable", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
+      await setDoc(doc(context.firestore(), "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(context.firestore(), "notes/legacy-note"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a"
+      });
+      await setDoc(
+        doc(context.firestore(), "notes/legacy-note/history/history-a"),
+        noteHistory("legacy-note", "user-a", { readerUids: ["user-a", "user-b"], createdAt: new Date("2026-05-18T08:01:00.000Z") })
+      );
+      await setDoc(doc(context.firestore(), "notes/legacy-note/attachments/attachment-a"), attachmentDocument("legacy-note"));
+      await setDoc(doc(context.firestore(), "notes/admin-legacy-note"), {
+        type: "personal",
+        ownerUid: "user-c",
+        participantUids: ["user-c"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-c": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "c" }
+        },
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-c"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+    const outsiderDb = testEnv.authenticatedContext("user-c").firestore();
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+
+    await assertSucceeds(getDoc(doc(participantDb, "notes/legacy-note")));
+    await assertSucceeds(getDoc(doc(participantDb, "notes/legacy-note/history/history-a")));
+    await assertSucceeds(getDoc(doc(participantDb, "notes/legacy-note/attachments/attachment-a")));
+    await assertFails(getDoc(doc(outsiderDb, "notes/legacy-note")));
+    await assertSucceeds(getDocs(query(collection(ownerDb, "notes"), where("ownerUid", "==", "user-a"))));
+    await assertSucceeds(updateDoc(doc(participantDb, "notes/legacy-note"), { isDeleted: false }));
+    await assertSucceeds(updateDoc(doc(adminDb, "notes/admin-legacy-note"), { isDeleted: false }));
+    await assertFails(updateDoc(doc(participantDb, "notes/legacy-note"), { isDeleted: deleteField() }));
+  });
+
   it("blocks revoked participants from reading existing shared notes", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a"] }));

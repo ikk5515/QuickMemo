@@ -126,7 +126,8 @@ service cloud.firestore {
     }
 
     function validDeleteMetadata(data) {
-      return (
+      return legacyActiveDeleteMetadata(data)
+        || (
           data.keys().hasAny(["isDeleted"])
           && data.isDeleted == false
           && !data.keys().hasAny(["deletedAt", "deletedBy"])
@@ -140,8 +141,17 @@ service cloud.firestore {
         );
     }
 
+    function legacyActiveDeleteMetadata(data) {
+      return !data.keys().hasAny(["isDeleted", "deletedAt", "deletedBy"]);
+    }
+
     function noteDeleted(data) {
-      return data.isDeleted == true;
+      return data.keys().hasAny(["isDeleted"]) && data.isDeleted == true;
+    }
+
+    function noteActive(data) {
+      return legacyActiveDeleteMetadata(data)
+        || (data.keys().hasAny(["isDeleted"]) && data.isDeleted == false);
     }
 
     function notePurged(data) {
@@ -587,6 +597,29 @@ service cloud.firestore {
         && getAfter(quickLoginKeyPath(getAfter(userPath(uid)).data.quickKey)).data.uid == uid;
     }
 
+    function legacyActiveDeleteMetadataAdded(data) {
+      return !resource.data.keys().hasAny(["isDeleted"])
+        && data.keys().hasAny(["isDeleted"])
+        && data.isDeleted == false
+        && !data.keys().hasAny(["deletedAt", "deletedBy"]);
+    }
+
+    function activeNoteUpdateAffectedKeys(keys, keysWithLegacyDeleteMetadata) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys)
+        || (
+          legacyActiveDeleteMetadataAdded(request.resource.data)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(keysWithLegacyDeleteMetadata)
+        );
+    }
+
+    function legacyActiveDeleteMetadataMigration(data) {
+      return (adminUser() || noteParticipant(resource.data))
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && legacyActiveDeleteMetadataAdded(data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isDeleted"]);
+    }
+
     function adminCreatesUser(uid) {
       return adminUser()
         && getAfter(rosterPath(uid)).data.uid == uid
@@ -602,11 +635,17 @@ service cloud.firestore {
         && data.participantUids == resource.data.participantUids
         && data.wrappedKeys == resource.data.wrappedKeys
         && allowedShareTargets(data)
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+        && activeNoteUpdateAffectedKeys([
           "encryptedTitle",
           "encryptedBody",
           "updatedAt",
           "updatedBy"
+        ], [
+          "encryptedTitle",
+          "encryptedBody",
+          "updatedAt",
+          "updatedBy",
+          "isDeleted"
         ]);
     }
 
@@ -620,10 +659,15 @@ service cloud.firestore {
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
         && allowedShareTargets(data)
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+        && activeNoteUpdateAffectedKeys([
           "dueAt",
           "updatedAt",
           "updatedBy"
+        ], [
+          "dueAt",
+          "updatedAt",
+          "updatedBy",
+          "isDeleted"
         ]);
     }
 
@@ -639,10 +683,15 @@ service cloud.firestore {
         && data.encryptedBody == resource.data.encryptedBody
         && data.updatedBy == request.auth.uid
         && validAssignedFolder(data)
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+        && activeNoteUpdateAffectedKeys([
           "folderId",
           "updatedAt",
           "updatedBy"
+        ], [
+          "folderId",
+          "updatedAt",
+          "updatedBy",
+          "isDeleted"
         ]);
     }
 
@@ -654,13 +703,21 @@ service cloud.firestore {
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
         && validAssignedFolder(data)
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+        && activeNoteUpdateAffectedKeys([
           "type",
           "participantUids",
           "wrappedKeys",
           "folderId",
           "updatedAt",
           "updatedBy"
+        ], [
+          "type",
+          "participantUids",
+          "wrappedKeys",
+          "folderId",
+          "updatedAt",
+          "updatedBy",
+          "isDeleted"
         ]);
     }
 
@@ -670,7 +727,7 @@ service cloud.firestore {
         && data.isDeleted == true
         && data.deletedBy == request.auth.uid
         && data.updatedBy == request.auth.uid
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "isDeleted",
           "deletedAt",
           "deletedBy",
@@ -745,10 +802,11 @@ service cloud.firestore {
     }
 
     function canReadNote(data) {
-      return data.isDeleted == false
+      return noteActive(data)
         && !notePurged(data)
         && (
           adminUser()
+          || (activeSignedInUser() && data.ownerUid == request.auth.uid)
           || (noteParticipant(data) && ownerAllowsParticipant(data, request.auth.uid))
         );
     }
@@ -762,8 +820,20 @@ service cloud.firestore {
       return canReadNote(data) || canReadDeletedNote(data);
     }
 
+    function canListNoteDocument(data) {
+      return (
+          canReadNote(data)
+          && (
+            !legacyActiveDeleteMetadata(data)
+            || adminUser()
+            || (activeSignedInUser() && data.ownerUid == request.auth.uid)
+          )
+        )
+        || canReadDeletedNote(data);
+    }
+
     function canDeleteNote(data) {
-      return (noteParticipant(data) && data.ownerUid == request.auth.uid)
+      return (activeSignedInUser() && data.ownerUid == request.auth.uid)
         || adminUser();
     }
 
@@ -882,7 +952,8 @@ service cloud.firestore {
     }
 
     match /notes/{noteId} {
-      allow read: if canReadNoteDocument(resource.data);
+      allow get: if canReadNoteDocument(resource.data);
+      allow list: if canListNoteDocument(resource.data);
       allow create: if activeSignedInUser()
         && validNote(request.resource.data)
         && request.resource.data.isDeleted == false
@@ -898,6 +969,7 @@ service cloud.firestore {
           || noteDeadlineUpdate(request.resource.data)
           || noteFolderUpdate(request.resource.data)
           || (ownerAccessUpdate(request.resource.data) && allowedShareTargets(request.resource.data))
+          || legacyActiveDeleteMetadataMigration(request.resource.data)
           || noteSoftDeleteUpdate(request.resource.data)
           || noteRestoreUpdate(request.resource.data)
           || notePurgeUpdate(request.resource.data)
