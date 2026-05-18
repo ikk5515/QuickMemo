@@ -1,4 +1,4 @@
-import { Mark, mergeAttributes } from "@tiptap/core";
+import { Extension, Mark, mergeAttributes } from "@tiptap/core";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -22,11 +22,14 @@ export const editorTableRowPixelHeightBounds = { min: 28, max: 900, step: 4 } as
 export const editorTableColumnPixelWidthBounds = { min: 48, max: 900, step: 4 } as const;
 export const editorTextSizes = [14, 16, 17, 18, 20, 22, 24, 28] as const;
 export const editorTextColors = ["#14211f", "#64748b", "#dc2626", "#b9822f", "#15803d", "#2563eb", "#7c3aed"] as const;
+export const editorLineHeights = [1.2, 1.35, 1.5, 1.7, 2] as const;
 
 const editorCellColorSet = new Set<string>(editorCellColors);
 const editorImageWidthSet = new Set<number>(editorImageWidths);
+const editorLineHeightSet = new Set<number>(editorLineHeights);
 const editorTextSizeSet = new Set<number>(editorTextSizes);
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
+const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
 
 function normalizedEditorColor(value: unknown) {
   const rawValue = String(value ?? "").trim().toLowerCase();
@@ -90,6 +93,18 @@ function normalizedTextSize(value: unknown) {
   return editorTextSizeSet.has(size) ? size : null;
 }
 
+function normalizedLineHeight(value: unknown) {
+  const lineHeight = Number(String(value ?? "").trim());
+
+  return editorLineHeightSet.has(lineHeight) ? lineHeight : null;
+}
+
+function normalizedUidList(value: unknown) {
+  const rawValue = String(value ?? "").trim();
+
+  return safeUidListPattern.test(rawValue) ? rawValue : null;
+}
+
 const TextSize = Mark.create({
   name: "textSize",
 
@@ -151,6 +166,90 @@ const TextColor = Mark.create({
 
   renderHTML({ HTMLAttributes }) {
     return ["span", HTMLAttributes, 0];
+  }
+});
+
+const LineHeight = Mark.create({
+  name: "lineHeight",
+
+  addAttributes() {
+    return {
+      lineHeight: {
+        default: null,
+        parseHTML: (element: HTMLElement) => normalizedLineHeight(element.getAttribute("data-qm-line-height") || element.style.lineHeight),
+        renderHTML: (attributes: { lineHeight?: number | string | null }) => {
+          const lineHeight = normalizedLineHeight(attributes.lineHeight);
+          return lineHeight ? { "data-qm-line-height": String(lineHeight), style: `line-height: ${lineHeight}` } : {};
+        }
+      }
+    };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: "span[data-qm-line-height]"
+      },
+      {
+        style: "line-height"
+      }
+    ];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["span", HTMLAttributes, 0];
+  }
+});
+
+const BlockLineHeight = Extension.create({
+  name: "blockLineHeight",
+
+  addGlobalAttributes() {
+    return [
+      {
+        types: ["paragraph", "heading", "listItem", "tableCell", "tableHeader"],
+        attributes: {
+          qmLineHeight: {
+            default: null,
+            parseHTML: (element: HTMLElement) => normalizedLineHeight(element.getAttribute("data-qm-line-height") || element.style.lineHeight),
+            renderHTML: (attributes: { qmLineHeight?: number | string | null }) => {
+              const lineHeight = normalizedLineHeight(attributes.qmLineHeight);
+              return lineHeight ? { "data-qm-line-height": String(lineHeight), style: `line-height: ${lineHeight}` } : {};
+            }
+          }
+        }
+      }
+    ];
+  }
+});
+
+const BlockAttribution = Extension.create({
+  name: "blockAttribution",
+
+  addGlobalAttributes() {
+    return [
+      {
+        types: ["paragraph", "heading", "listItem", "tableCell", "tableHeader"],
+        attributes: {
+          qmAuthorUids: {
+            default: null,
+            parseHTML: (element: HTMLElement) => normalizedUidList(element.getAttribute("data-qm-author-uids")),
+            renderHTML: (attributes: { qmAuthorUids?: string | null }) => {
+              const value = normalizedUidList(attributes.qmAuthorUids);
+              return value ? { "data-qm-author-uids": value } : {};
+            }
+          },
+          qmEditorUids: {
+            default: null,
+            parseHTML: (element: HTMLElement) => normalizedUidList(element.getAttribute("data-qm-editor-uids")),
+            renderHTML: (attributes: { qmEditorUids?: string | null }) => {
+              const value = normalizedUidList(attributes.qmEditorUids);
+              return value ? { "data-qm-editor-uids": value } : {};
+            }
+          }
+        }
+      }
+    ];
   }
 });
 
@@ -300,6 +399,9 @@ export const richEditorExtensions = [
   }),
   TextSize,
   TextColor,
+  LineHeight,
+  BlockLineHeight,
+  BlockAttribution,
   Underline,
   Link.configure({
     autolink: true,

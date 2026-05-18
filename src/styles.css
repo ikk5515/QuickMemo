@@ -529,11 +529,54 @@ textarea {
   border-color: color-mix(in srgb, var(--teal) 34%, var(--line));
   color: var(--teal);
   font-weight: 950;
+  position: relative;
 }
 
 .notes-top-actions .note-nav-button:hover {
   background: color-mix(in srgb, var(--teal) 18%, #ffffff);
   border-color: color-mix(in srgb, var(--teal) 48%, var(--line));
+}
+
+.notes-top-actions .note-nav-button.has-alert {
+  background: color-mix(in srgb, var(--coral) 10%, #ffffff);
+  border-color: color-mix(in srgb, var(--coral) 32%, var(--line));
+  color: #a43f37;
+}
+
+.notification-badge,
+.drawer-alert-badge,
+.filter-alert-badge {
+  align-items: center;
+  background: #dc2626;
+  border-radius: 999px;
+  color: #ffffff;
+  display: inline-flex;
+  font-size: 10px;
+  font-weight: 950;
+  justify-content: center;
+  line-height: 1;
+  min-height: 18px;
+  min-width: 18px;
+  padding: 0 5px;
+}
+
+.filter-alert-badge {
+  min-height: 16px;
+  min-width: 16px;
+}
+
+.filter-label-with-badge {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  min-width: 0;
+}
+
+.filter-label-with-badge > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .notes-top-status {
@@ -743,6 +786,10 @@ textarea {
   color: #ffffff;
 }
 
+.folder-filter-button.shared-filter {
+  --folder-color: #3f6fb5;
+}
+
 .folder-filter-button strong {
   background: rgb(15 23 42 / 10%);
   border-radius: 999px;
@@ -787,6 +834,12 @@ textarea {
   overflow: hidden;
   padding: 12px;
   text-align: left;
+}
+
+.overview-note-card.needs-attention,
+.note-list-item.needs-attention {
+  border-color: color-mix(in srgb, #dc2626 28%, var(--line));
+  box-shadow: 0 0 0 3px rgb(220 38 38 / 8%);
 }
 
 .overview-note-open {
@@ -845,6 +898,18 @@ textarea {
   display: block;
 }
 
+.overview-note-alert,
+.note-list-alert {
+  background: rgb(220 38 38 / 10%);
+  border-radius: 999px;
+  color: #dc2626;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 950;
+  line-height: 1;
+  padding: 4px 7px;
+}
+
 .overview-note-card em {
   color: var(--muted);
   font-size: 11px;
@@ -856,6 +921,20 @@ textarea {
 .overview-folder-select {
   display: block;
   min-width: 0;
+}
+
+.overview-shared-label {
+  align-items: center;
+  background: rgb(63 111 181 / 10%);
+  border: 1px solid rgb(63 111 181 / 20%);
+  border-radius: 7px;
+  color: var(--blue);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 9px;
 }
 
 .overview-folder-select select {
@@ -910,6 +989,7 @@ textarea {
 .note-list-item header {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
 }
@@ -1209,7 +1289,7 @@ textarea {
   border-radius: 0;
   box-shadow: none !important;
   flex: 1 1 auto;
-  line-height: 1.75;
+  line-height: 1.55;
   min-height: 430px;
   outline: none;
   overflow-wrap: anywhere;
@@ -1244,6 +1324,9 @@ textarea {
   gap: 8px;
   margin: 10px 0 4px;
   padding: 8px;
+  position: sticky;
+  top: 82px;
+  z-index: 6;
 }
 
 .rich-toolbar-tabs {
@@ -1318,6 +1401,10 @@ textarea {
 
 .selection-font-control select {
   width: 72px;
+}
+
+.line-height-control select {
+  width: 64px;
 }
 
 .table-insert-control button,
@@ -1757,6 +1844,10 @@ textarea {
   width: auto;
 }
 
+.rich-body-input table[data-qm-table-width-px] {
+  min-width: 0;
+}
+
 .note-preview-body table,
 .admin-note-view-body table {
   border-collapse: collapse;
@@ -2097,6 +2188,12 @@ textarea {
 .drawer-folder-shortcuts > button {
   justify-content: flex-start;
   min-height: 36px;
+}
+
+.drawer-folder-shortcuts > button.has-alert {
+  background: color-mix(in srgb, #dc2626 9%, #ffffff);
+  border-color: color-mix(in srgb, #dc2626 24%, var(--line));
+  color: #b91c1c;
 }
 
 .drawer-folder-shortcuts > div {
@@ -2626,10 +2723,45 @@ textarea {
 
 .note-preview-body {
   flex: 1 1 auto;
-  line-height: 1.75;
+  line-height: 1.55;
   overflow: auto;
   overflow-wrap: anywhere;
   padding: 18px;
+}
+
+.note-preview-body [data-qm-attribution-label] {
+  position: relative;
+}
+
+.note-preview-body p[data-qm-attribution-label],
+.note-preview-body li[data-qm-attribution-label] {
+  padding-right: clamp(112px, 18vw, 190px);
+}
+
+.note-preview-body td[data-qm-attribution-label],
+.note-preview-body th[data-qm-attribution-label] {
+  padding-right: clamp(82px, 12vw, 130px);
+}
+
+.note-preview-body [data-qm-attribution-label]::after {
+  color: #94a3b8;
+  content: attr(data-qm-attribution-label);
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1.25;
+  max-width: 180px;
+  position: absolute;
+  right: 0;
+  text-align: right;
+  top: 0.08em;
+  white-space: normal;
+}
+
+.note-preview-body td[data-qm-attribution-label]::after,
+.note-preview-body th[data-qm-attribution-label]::after {
+  max-width: 120px;
+  right: 6px;
+  top: 6px;
 }
 
 .note-preview-body p,
@@ -2654,6 +2786,10 @@ textarea {
   gap: 12px;
   overflow: auto;
   padding: 16px 18px 18px;
+}
+
+.note-preview-editor .rich-editor-toolbar {
+  top: 0;
 }
 
 .note-preview-font-control {
@@ -3935,6 +4071,24 @@ textarea {
     padding: 14px;
   }
 
+  .note-preview-body p[data-qm-attribution-label],
+  .note-preview-body li[data-qm-attribution-label] {
+    padding-right: 0;
+  }
+
+  .note-preview-body td[data-qm-attribution-label],
+  .note-preview-body th[data-qm-attribution-label] {
+    padding-right: 8px;
+  }
+
+  .note-preview-body [data-qm-attribution-label]::after {
+    display: block;
+    margin-top: 3px;
+    max-width: none;
+    position: static;
+    text-align: left;
+  }
+
   .note-preview-editor {
     padding: 14px;
   }
@@ -4360,6 +4514,7 @@ textarea {
 
   .rich-editor-toolbar {
     overflow: hidden;
+    top: 70px;
   }
 
   .rich-toolbar-tabs {

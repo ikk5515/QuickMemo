@@ -10,9 +10,13 @@ const tablePixelHeightBounds = { min: 96, max: 2000 };
 const tableRowPixelHeightBounds = { min: 28, max: 900 };
 const tableColumnPixelWidthBounds = { min: 48, max: 900 };
 const textSizeOptions = new Set([14, 16, 17, 18, 20, 22, 24, 28]);
+const lineHeightOptions = new Set([1.2, 1.35, 1.5, 1.7, 2]);
 const tableCellColors = new Set(["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"]);
 const textAlignments = new Set(["left", "center", "right"]);
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
+const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
+const lineHeightTags = new Set(["P", "DIV", "LI", "TD", "TH", "SPAN"]);
+const attributionTags = new Set(["P", "DIV", "LI", "TD", "TH"]);
 const allowedTags = new Set([
   "A",
   "B",
@@ -282,8 +286,10 @@ function applySafeImageWidth(image: HTMLImageElement, source: HTMLElement) {
 function copySafeAttributes(target: HTMLElement, source: HTMLElement) {
   copyTaskAttributes(target, source);
   copyTextAlign(target, source);
+  copyLineHeight(target, source);
   copyTextSize(target, source);
   copyTextColor(target, source);
+  copySharedAttribution(target, source);
   copyTableAttributes(target, source);
 }
 
@@ -313,6 +319,17 @@ function copyTextAlign(target: HTMLElement, source: HTMLElement) {
   target.style.textAlign = alignment;
 }
 
+function copyLineHeight(target: HTMLElement, source: HTMLElement) {
+  const lineHeight = safeLineHeight(source.getAttribute("data-qm-line-height") || source.style.lineHeight);
+
+  if (!lineHeight || !lineHeightTags.has(target.tagName)) {
+    return;
+  }
+
+  target.dataset.qmLineHeight = String(lineHeight);
+  target.style.lineHeight = String(lineHeight);
+}
+
 function copyTextSize(target: HTMLElement, source: HTMLElement) {
   const size = safeTextSize(source.getAttribute("data-qm-font-size") || source.style.fontSize);
 
@@ -333,6 +350,23 @@ function copyTextColor(target: HTMLElement, source: HTMLElement) {
 
   target.dataset.qmTextColor = color;
   target.style.color = color;
+}
+
+function copySharedAttribution(target: HTMLElement, source: HTMLElement) {
+  if (!attributionTags.has(target.tagName)) {
+    return;
+  }
+
+  const authorUids = safeUidList(source.getAttribute("data-qm-author-uids"));
+  const editorUids = safeUidList(source.getAttribute("data-qm-editor-uids"));
+
+  if (authorUids) {
+    target.dataset.qmAuthorUids = authorUids;
+  }
+
+  if (editorUids) {
+    target.dataset.qmEditorUids = editorUids;
+  }
 }
 
 function copyTableAttributes(target: HTMLElement, source: HTMLElement) {
@@ -540,6 +574,12 @@ function safeTextSize(value: string | null) {
   return textSizeOptions.has(normalizedValue) ? normalizedValue : null;
 }
 
+function safeLineHeight(value: string | null) {
+  const normalizedValue = Number(String(value ?? "").trim());
+
+  return lineHeightOptions.has(normalizedValue) ? normalizedValue : null;
+}
+
 function safeTextAlign(value: string | null) {
   const normalizedValue = String(value ?? "").trim().toLowerCase();
 
@@ -554,6 +594,12 @@ function safeColor(value: string | null) {
   const normalizedValue = normalizeColor(value);
 
   return normalizedValue && (tableCellColors.has(normalizedValue) || safeHexColorPattern.test(normalizedValue)) ? normalizedValue : null;
+}
+
+function safeUidList(value: string | null) {
+  const normalizedValue = String(value ?? "").trim();
+
+  return safeUidListPattern.test(normalizedValue) ? normalizedValue : null;
 }
 
 function safePixelWidth(value: string | null) {

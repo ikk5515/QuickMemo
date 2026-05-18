@@ -85,6 +85,7 @@ import {
 import {
   editorCellColors,
   editorImagePixelWidthBounds,
+  editorLineHeights,
   editorTableColumnPixelWidthBounds,
   editorTablePixelHeightBounds,
   editorTableRowPixelHeightBounds,
@@ -188,7 +189,7 @@ interface NoteListCounts {
 
 type NoteStateByNoteId = Record<string, NoteUserStateSnapshot | undefined>;
 type DrawerMode = "notes" | "trash";
-type OverviewFolderFilter = "all" | "unfiled" | string;
+type OverviewFolderFilter = "all" | "shared" | "unfiled" | string;
 
 interface RichEditorInsertHtml {
   (html: string): string | null;
@@ -221,6 +222,18 @@ interface TableResizeHit {
   row?: HTMLTableRowElement;
   table: HTMLTableElement;
   widthSign: -1 | 0 | 1;
+}
+
+interface TableResizeNodeTarget {
+  nodeName: "table" | "tableCell" | "tableHeader" | "tableRow";
+  position: number;
+}
+
+interface TableResizeSession {
+  columnCellTargets: TableResizeNodeTarget[];
+  startColumnWidths: number[];
+  tableTarget: TableResizeNodeTarget | null;
+  rowTarget: TableResizeNodeTarget | null;
 }
 
 const fontSizes = [14, 16, 17, 18, 20, 22, 24, 28];
@@ -260,6 +273,141 @@ async function encryptNoteDraft(draft: NoteDraft, noteKey: CryptoKey) {
   ]);
 
   return { encryptedTitle, encryptedBody };
+}
+
+interface SharedBlockMetadata {
+  authors: string[];
+  editors: string[];
+  signature: string;
+}
+
+function sharedNoteDraftForSave(previousDraft: NoteDraft | null, draft: NoteDraft, actorUid: string, fallbackAuthorUid: string): NoteDraft {
+  return {
+    ...draft,
+    body: annotateSharedNoteBody(previousDraft?.body ?? "", draft.body, actorUid, fallbackAuthorUid)
+  };
+}
+
+function annotateSharedNoteBody(previousHtml: string, nextHtml: string, actorUid: string, fallbackAuthorUid: string) {
+  if (typeof document === "undefined") {
+    return nextHtml;
+  }
+
+  const previousBlocks = sharedBlockMetadataFromHtml(previousHtml, fallbackAuthorUid);
+  const template = document.createElement("template");
+  template.innerHTML = sanitizeEditorHtml(nextHtml);
+  const nextBlocks = sharedAttributionBlocks(template.content);
+
+  nextBlocks.forEach((block, index) => {
+    const previousBlock = previousBlocks[index];
+    const isNewBlock = !previousBlock;
+    const previousAuthors = previousBlock?.authors.length ? previousBlock.authors : [fallbackAuthorUid];
+    const previousEditors = previousBlock?.editors.length ? previousBlock.editors : previousAuthors;
+    const changed = !previousBlock || comparableSharedBlockSignature(block) !== previousBlock.signature;
+    const authors = parseUidList(block.dataset.qmAuthorUids);
+    const editors = parseUidList(block.dataset.qmEditorUids);
+    const nextAuthors = authors.length ? authors : isNewBlock ? [actorUid] : previousAuthors;
+    const nextEditors = editors.length ? editors : isNewBlock ? [actorUid] : previousEditors;
+    const finalEditors = changed ? appendUniqueUid(nextEditors, actorUid) : nextEditors;
+
+    block.dataset.qmAuthorUids = nextAuthors.join(",");
+    block.dataset.qmEditorUids = finalEditors.join(",");
+  });
+
+  const container = document.createElement("div");
+  container.appendChild(template.content);
+  return container.innerHTML;
+}
+
+function sharedBlockMetadataFromHtml(html: string, fallbackAuthorUid: string): SharedBlockMetadata[] {
+  if (typeof document === "undefined") {
+    return [];
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = sanitizeEditorHtml(html);
+
+  return sharedAttributionBlocks(template.content).map((block) => {
+    const authors = parseUidList(block.dataset.qmAuthorUids);
+    const editors = parseUidList(block.dataset.qmEditorUids);
+    const safeAuthors = authors.length ? authors : [fallbackAuthorUid];
+
+    return {
+      authors: safeAuthors,
+      editors: editors.length ? editors : safeAuthors,
+      signature: comparableSharedBlockSignature(block)
+    };
+  });
+}
+
+function sharedAttributionBlocks(root: ParentNode) {
+  return Array.from(root.querySelectorAll<HTMLElement>("td, th, li, p")).filter((element) => {
+    if (element.tagName === "P") {
+      return !element.closest("td, th, li");
+    }
+
+    if (element.tagName === "LI") {
+      return !element.closest("td, th");
+    }
+
+    return true;
+  });
+}
+
+function comparableSharedBlockSignature(block: HTMLElement) {
+  const clone = block.cloneNode(true) as HTMLElement;
+
+  clone.querySelectorAll<HTMLElement>("[data-qm-author-uids], [data-qm-editor-uids], [data-qm-attribution-label]").forEach((element) => {
+    element.removeAttribute("data-qm-author-uids");
+    element.removeAttribute("data-qm-editor-uids");
+    element.removeAttribute("data-qm-attribution-label");
+  });
+  clone.removeAttribute("data-qm-author-uids");
+  clone.removeAttribute("data-qm-editor-uids");
+  clone.removeAttribute("data-qm-attribution-label");
+
+  return `${clone.tagName}:${clone.innerHTML.replace(/\s+/g, " ").trim()}`;
+}
+
+function parseUidList(value: string | null | undefined) {
+  return Array.from(
+    new Set(
+      String(value ?? "")
+        .split(",")
+        .map((uid) => uid.trim())
+        .filter((uid) => /^[A-Za-z0-9_:.-]{1,128}$/.test(uid))
+    )
+  );
+}
+
+function appendUniqueUid(values: string[], uid: string) {
+  return values.includes(uid) ? values : [...values, uid];
+}
+
+function sharedAttributionHtml(html: string, note: DecryptedNote, users: UserProfile[]) {
+  if (typeof document === "undefined") {
+    return linkifyEditorHtml(sanitizeEditorHtml(html));
+  }
+
+  const usersByUid = new Map(users.map((user) => [user.uid, user]));
+  const template = document.createElement("template");
+  template.innerHTML = linkifyEditorHtml(sanitizeEditorHtml(html));
+
+  sharedAttributionBlocks(template.content).forEach((block) => {
+    const authors = parseUidList(block.dataset.qmAuthorUids);
+    const editors = parseUidList(block.dataset.qmEditorUids);
+    const safeAuthors = authors.length ? authors : [note.ownerUid];
+    const safeEditors = editors.length ? editors : [note.updatedBy || note.ownerUid];
+    block.dataset.qmAttributionLabel = `작성자: ${uidLabels(safeAuthors, usersByUid)}, 수정자: ${uidLabels(safeEditors, usersByUid)}`;
+  });
+
+  const container = document.createElement("div");
+  container.appendChild(template.content);
+  return container.innerHTML;
+}
+
+function uidLabels(uids: string[], usersByUid: Map<string, UserProfile>) {
+  return uids.map((uid) => usersByUid.get(uid)?.avatarText || uid.slice(0, 2).toUpperCase()).join(",");
 }
 
 function clippedText(value: string, maxLength = historySummaryMaxLength) {
@@ -649,6 +797,22 @@ function timestampMillisValue(timestamp: unknown) {
   return null;
 }
 
+function noteNeedsSharedAttention(note: DecryptedNote, state: NoteUserStateSnapshot | undefined, currentUid: string) {
+  if (!currentUid || note.type !== "shared" || note.isDeleted || note.updatedBy === currentUid) {
+    return false;
+  }
+
+  const updatedAt = timestampMillisValue(note.updatedAt);
+
+  if (!updatedAt) {
+    return false;
+  }
+
+  const readAt = timestampMillisValue(state?.readAt) ?? 0;
+  const confirmedAt = timestampMillisValue(state?.confirmedAt) ?? 0;
+  return Math.max(readAt, confirmedAt) + 500 < updatedAt;
+}
+
 function compareNoteTitles(left: DecryptedNote, right: DecryptedNote) {
   return (left.title || "제목 없음").localeCompare(right.title || "제목 없음", "ko");
 }
@@ -999,6 +1163,7 @@ export default function NotesPage() {
   const [decryptedDeletedNotes, setDecryptedDeletedNotes] = useState<DecryptedNote[]>([]);
   const [folders, setFolders] = useState<NoteFolderSnapshot[]>([]);
   const [noteStateMap, setNoteStateMap] = useState<NoteStateByNoteId>({});
+  const [localSharedReadMap, setLocalSharedReadMap] = useState<Record<string, number>>({});
   const [activeCursorStates, setActiveCursorStates] = useState<NoteUserStateSnapshot[]>([]);
   const [cursorClock, setCursorClock] = useState(() => Date.now());
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -1267,15 +1432,33 @@ export default function NotesPage() {
     () => sortNotes(filterNotes(decryptedNotes, noteFilter), noteSort, noteStateMap),
     [decryptedNotes, noteFilter, noteSort, noteStateMap]
   );
-  const personalOverviewNotes = useMemo(
+  const overviewNotes = useMemo(
     () =>
       sortNotes(
-        decryptedNotes.filter((note) => note.type === "personal" && note.ownerUid === profile?.uid),
+        decryptedNotes.filter(
+          (note) =>
+            (note.type === "personal" && note.ownerUid === profile?.uid) ||
+            (note.type === "shared" && note.participantUids.includes(profile?.uid ?? ""))
+        ),
         noteSort,
         noteStateMap
       ),
     [decryptedNotes, noteSort, noteStateMap, profile?.uid]
   );
+  const sharedAttentionNoteIds = useMemo(() => {
+    const uid = profile?.uid ?? "";
+
+    return new Set(
+      decryptedNotes
+        .filter((note) => {
+          const updatedAt = timestampMillisValue(note.updatedAt) ?? 0;
+          const locallyReadAt = localSharedReadMap[note.id] ?? 0;
+          return locallyReadAt + 500 < updatedAt && noteNeedsSharedAttention(note, noteStateMap[note.id], uid);
+        })
+        .map((note) => note.id)
+    );
+  }, [decryptedNotes, localSharedReadMap, noteStateMap, profile?.uid]);
+  const sharedAttentionCount = sharedAttentionNoteIds.size;
   const trashNotes = useMemo(
     () => sortDeletedNotes(filterNotes(decryptedDeletedNotes, noteFilter)),
     [decryptedDeletedNotes, noteFilter]
@@ -1532,6 +1715,15 @@ export default function NotesPage() {
     });
   }
 
+  function acknowledgeSharedAttention(note: DecryptedNote) {
+    if (note.type !== "shared" || note.isDeleted) {
+      return;
+    }
+
+    const updatedAt = timestampMillisValue(note.updatedAt) ?? Date.now();
+    setLocalSharedReadMap((current) => ({ ...current, [note.id]: Math.max(current[note.id] ?? 0, updatedAt) }));
+  }
+
   function updateEditor(field: "title" | "body", value: string) {
     setEditor((current) => ({ ...current, [field]: value, dirty: true }));
   }
@@ -1652,7 +1844,7 @@ export default function NotesPage() {
   }
 
   async function removeFolder(folder: NoteFolderSnapshot) {
-    const notesInFolder = personalOverviewNotes
+    const notesInFolder = overviewNotes
       .filter((note) => note.type === "personal" && note.ownerUid === unlockedProfile.uid && note.folderId === folder.id)
       .map((note) => note.id);
 
@@ -1722,6 +1914,7 @@ export default function NotesPage() {
 
   function previewStoredNote(note: DecryptedNote) {
     if (!note.isDeleted) {
+      acknowledgeSharedAttention(note);
       void markNoteRead(note.id, unlockedProfile.uid).catch(() => undefined);
     }
 
@@ -1736,6 +1929,7 @@ export default function NotesPage() {
     try {
       await confirmNoteRead(note.id, unlockedProfile.uid);
       setStatus("공유 노트를 확인 처리했습니다.");
+      acknowledgeSharedAttention(note);
     } catch {
       setError("확인 상태를 저장하지 못했습니다.");
     }
@@ -1827,6 +2021,7 @@ export default function NotesPage() {
       setPreviewNoteId(null);
       setStatus("노트를 열었습니다.");
       setError(null);
+      acknowledgeSharedAttention(note);
       void markNoteRead(note.id, unlockedProfile.uid).catch(() => undefined);
 
       if (shouldAnnounce) {
@@ -1942,39 +2137,46 @@ export default function NotesPage() {
 
     try {
       if (editor.noteId && editor.noteKey) {
-        const payload = await encryptNoteDraft(draft, editor.noteKey);
         const previousDraft = activeRemoteNote ? draftFromNote(activeRemoteNote) : null;
+        const saveDraft =
+          activeRemoteNote?.type === "shared"
+            ? sharedNoteDraftForSave(previousDraft, draft, unlockedProfile.uid, activeRemoteNote.ownerUid)
+            : draft;
+        const payload = await encryptNoteDraft(saveDraft, editor.noteKey);
         const [historySummary, historySnapshot] = await Promise.all([
-          encryptText(historySummaryFromDraft(previousDraft, draft), editor.noteKey),
-          encryptText(historySnapshotFromDraft(draft), editor.noteKey)
+          encryptText(historySummaryFromDraft(previousDraft, saveDraft), editor.noteKey),
+          encryptText(historySnapshotFromDraft(saveDraft), editor.noteKey)
         ]);
         await updateEncryptedNote(
           editor.noteId,
           unlockedProfile.uid,
           payload.encryptedTitle,
           payload.encryptedBody,
-          changedDraftFields(previousDraft, draft),
+          changedDraftFields(previousDraft, saveDraft),
           historySummary,
           historySnapshot
         );
-        pendingLocalEcho.current = { noteId: editor.noteId, draft, createdAt: Date.now() };
+        pendingLocalEcho.current = { noteId: editor.noteId, draft: saveDraft, createdAt: Date.now() };
         announceActiveNote(editor.noteId);
-        setEditor((current) => (draftsMatch(current, draft) ? { ...current, dirty: false } : current));
+        setEditor((current) =>
+          draftsMatch(current, draft) ? { ...current, body: saveDraft.body, dirty: false } : current
+        );
         setStatus(showSavedMessage ? "변경 사항을 저장했습니다." : "자동 저장됨");
         return { noteId: editor.noteId, noteKey: editor.noteKey };
       }
 
       const noteKey = await generateNoteKey();
-      const payload = await encryptNoteDraft(draft, noteKey);
-      const [historySummary, historySnapshot] = await Promise.all([
-        encryptText(historySummaryFromDraft(null, draft), noteKey),
-        encryptText(historySnapshotFromDraft(draft), noteKey)
-      ]);
       const participantUids = Array.from(new Set([unlockedProfile.uid, ...editor.participantUids])).filter(
         (uid) => uid === unlockedProfile.uid || canShareWithUser(uid)
       );
-      const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
       const type = noteTypeFromParticipants(participantUids);
+      const saveDraft = type === "shared" ? sharedNoteDraftForSave(null, draft, unlockedProfile.uid, unlockedProfile.uid) : draft;
+      const payload = await encryptNoteDraft(saveDraft, noteKey);
+      const [historySummary, historySnapshot] = await Promise.all([
+        encryptText(historySummaryFromDraft(null, saveDraft), noteKey),
+        encryptText(historySnapshotFromDraft(saveDraft), noteKey)
+      ]);
+      const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
 
       const created = await createEncryptedNote({
         type,
@@ -1988,12 +2190,13 @@ export default function NotesPage() {
         historySummary,
         historySnapshot
       });
-      pendingLocalEcho.current = { noteId: created.id, draft, createdAt: Date.now() };
+      pendingLocalEcho.current = { noteId: created.id, draft: saveDraft, createdAt: Date.now() };
 
       setEditor((current) => ({
         ...current,
         noteId: created.id,
         noteKey,
+        body: saveDraft.body,
         type,
         folderId: type === "personal" ? current.folderId : null,
         dirty: !draftsMatch(current, draft)
@@ -2434,11 +2637,13 @@ export default function NotesPage() {
 
     try {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
-      const payload = await encryptNoteDraft(draft, noteKey);
       const previousDraft = draftFromNote(note);
+      const saveDraft =
+        note.type === "shared" ? sharedNoteDraftForSave(previousDraft, draft, unlockedProfile.uid, note.ownerUid) : draft;
+      const payload = await encryptNoteDraft(saveDraft, noteKey);
       const [historySummary, historySnapshot] = await Promise.all([
-        encryptText(historySummaryFromDraft(previousDraft, draft), noteKey),
-        encryptText(historySnapshotFromDraft(draft), noteKey)
+        encryptText(historySummaryFromDraft(previousDraft, saveDraft), noteKey),
+        encryptText(historySnapshotFromDraft(saveDraft), noteKey)
       ]);
 
       await updateEncryptedNote(
@@ -2446,19 +2651,19 @@ export default function NotesPage() {
         unlockedProfile.uid,
         payload.encryptedTitle,
         payload.encryptedBody,
-        changedDraftFields(previousDraft, draft),
+        changedDraftFields(previousDraft, saveDraft),
         historySummary,
         historySnapshot
       );
-      pendingLocalEcho.current = { noteId: note.id, draft, createdAt: Date.now() };
+      pendingLocalEcho.current = { noteId: note.id, draft: saveDraft, createdAt: Date.now() };
       announceActiveNote(note.id);
 
       if (editor.noteId === note.id) {
         setEditor((current) => ({
           ...current,
-          title: draft.title,
-          body: draft.body,
-          fontSize: draft.fontSize,
+          title: saveDraft.title,
+          body: saveDraft.body,
+          fontSize: saveDraft.fontSize,
           noteKey,
           dirty: false
         }));
@@ -2498,11 +2703,12 @@ export default function NotesPage() {
         {overviewOpen ? (
           <PersonalOverview
             activeFolderFilter={overviewFolderFilter}
+            attentionNoteIds={sharedAttentionNoteIds}
             folders={folders}
             feedbackError={error}
             feedbackStatus={status}
             noteStates={noteStateMap}
-            notes={personalOverviewNotes}
+            notes={overviewNotes}
             onBack={returnToEditor}
             onCreateFolder={createFolder}
             onDeleteFolder={(folder) => void removeFolder(folder)}
@@ -2514,9 +2720,18 @@ export default function NotesPage() {
           <>
           <div className="notes-top-actions" aria-label="노트 탐색">
             <div>
-              <button className="secondary-button note-nav-button" type="button" onClick={() => setListOpen((current) => !current)}>
+              <button
+                className={`secondary-button note-nav-button ${sharedAttentionCount ? "has-alert" : ""}`}
+                type="button"
+                onClick={() => setListOpen((current) => !current)}
+              >
                 <PanelLeftOpen size={18} />
                 노트 목록
+                {sharedAttentionCount ? (
+                  <span className="notification-badge" aria-label={`새 공유 업데이트 ${sharedAttentionCount}개`}>
+                    {sharedAttentionCount > 99 ? "99+" : sharedAttentionCount}
+                  </span>
+                ) : null}
               </button>
               <button className="secondary-button note-nav-button" type="button" onClick={() => openOverview("all")}>
                 <LayoutGrid size={18} />
@@ -2532,6 +2747,7 @@ export default function NotesPage() {
           <div className={`notes-editor-layout ${listOpen ? "with-drawer" : ""}`}>
             <NoteDrawer
               activeNoteId={editor.noteId}
+              attentionNoteIds={sharedAttentionNoteIds}
               canRestoreNote={canRestoreNote}
               counts={noteCounts}
               deletedCounts={trashCounts}
@@ -2684,8 +2900,6 @@ export default function NotesPage() {
             value={editor.title}
           />
           <RichMemoEditor
-            defaultTextColor={currentType === "shared" ? unlockedProfile.color : null}
-            defaultTextColorKey={`${editor.noteId ?? "new"}:${currentType}:${unlockedProfile.uid}`}
             editorRef={memoEditorRef}
             fontSize={editor.fontSize}
             onCursorChange={publishEditorCursor}
@@ -2747,8 +2961,6 @@ export default function NotesPage() {
 }
 
 function RichMemoEditor({
-  defaultTextColor,
-  defaultTextColorKey,
   editorRef,
   fontSize,
   onCursorChange,
@@ -2757,8 +2969,6 @@ function RichMemoEditor({
   remoteCursors = [],
   value
 }: {
-  defaultTextColor?: string | null;
-  defaultTextColorKey?: string;
   editorRef: RefObject<HTMLDivElement | null>;
   fontSize: number;
   onCursorChange?: (cursorOffset: number | null, cursorVisible: boolean) => void;
@@ -2768,7 +2978,6 @@ function RichMemoEditor({
   value: string;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const appliedDefaultTextColorKeyRef = useRef<string | null>(null);
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
   const tableResizeCleanupRef = useRef<(() => void) | null>(null);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
@@ -2909,23 +3118,30 @@ function RichMemoEditor({
       const startTableHeight = resizeHit.table.getBoundingClientRect().height;
       const startRowHeight = resizeHit.row?.getBoundingClientRect().height ?? 0;
       const startColumnWidth = resizeHit.cell?.getBoundingClientRect().width ?? 0;
+      const resizeSession = tableResizeSessionFromHit(editor, resizeHit);
 
       function handleResizeMove(moveEvent: MouseEvent) {
         moveEvent.preventDefault();
 
         if (resizeHit.kind === "column" && typeof resizeHit.columnIndex === "number") {
           const nextWidth = clampTableColumnPixelWidth(startColumnWidth + moveEvent.clientX - startX);
-          updateTableColumnWidth(editor, resizeHit.table, resizeHit.columnIndex, nextWidth);
-          onChange(editor.getHTML());
-          setToolbarVersion((version) => version + 1);
+          if (resizeSession && updateTableColumnWidthFromSession(editor, resizeSession, resizeHit.columnIndex, nextWidth)) {
+            onChange(editor.getHTML());
+            setToolbarVersion((version) => version + 1);
+          }
           return;
         }
 
-        if (resizeHit.kind === "row" && resizeHit.row) {
+        if (resizeHit.kind === "row" && resizeSession?.rowTarget) {
           const nextHeight = clampTableRowPixelHeight(startRowHeight + moveEvent.clientY - startY);
-          updateEditorNodeAttributes(editor, resizeHit.row, "tableRow", { qmHeightPx: nextHeight });
-          onChange(editor.getHTML());
-          setToolbarVersion((version) => version + 1);
+          if (dispatchNodeAttributeUpdates(editor, [{ target: resizeSession.rowTarget, attrs: { qmHeightPx: nextHeight } }])) {
+            onChange(editor.getHTML());
+            setToolbarVersion((version) => version + 1);
+          }
+          return;
+        }
+
+        if (!resizeSession?.tableTarget) {
           return;
         }
 
@@ -2941,9 +3157,10 @@ function RichMemoEditor({
         }
 
         if (Object.keys(nextAttributes).length) {
-          updateEditorNodeAttributes(editor, resizeHit.table, "table", nextAttributes);
-          onChange(editor.getHTML());
-          setToolbarVersion((version) => version + 1);
+          if (dispatchNodeAttributeUpdates(editor, [{ target: resizeSession.tableTarget, attrs: nextAttributes }])) {
+            onChange(editor.getHTML());
+            setToolbarVersion((version) => version + 1);
+          }
         }
       }
 
@@ -2972,30 +3189,6 @@ function RichMemoEditor({
 
     editor.commands.setContent(value || "", { emitUpdate: false });
   }, [editor, value]);
-
-  useEffect(() => {
-    const safeDefaultTextColor = defaultTextColor ? normalizeCustomHexColor(defaultTextColor, editorTextColors[0]) : null;
-
-    if (!editor || !safeDefaultTextColor) {
-      appliedDefaultTextColorKeyRef.current = null;
-      return;
-    }
-
-    setCustomTextColor(safeDefaultTextColor);
-
-    const key = defaultTextColorKey ?? safeDefaultTextColor;
-
-    if (appliedDefaultTextColorKeyRef.current === key) {
-      return;
-    }
-
-    appliedDefaultTextColorKeyRef.current = key;
-
-    if (editor.state.selection.empty && !editor.getAttributes("textColor").color) {
-      editor.commands.setMark("textColor", { color: safeDefaultTextColor });
-      setToolbarVersion((version) => version + 1);
-    }
-  }, [defaultTextColor, defaultTextColorKey, editor, value]);
 
   function clearImageSelection() {
     selectedImageRef.current = null;
@@ -3085,6 +3278,13 @@ function RichMemoEditor({
     runToolbarCommand((currentEditor) => currentEditor.chain().focus().setMark("textSize", { size }).run());
   }
 
+  function applySelectionLineHeight(lineHeight: number) {
+    runToolbarCommand((currentEditor) => {
+      currentEditor.chain().focus().setMark("lineHeight", { lineHeight }).run();
+      updateSelectedBlockLineHeight(currentEditor, lineHeight);
+    });
+  }
+
   function applySelectionTextColor(color: string) {
     const safeColor = normalizeCustomHexColor(color, editorTextColors[0]);
     setCustomTextColor(safeColor);
@@ -3137,6 +3337,7 @@ function RichMemoEditor({
   }
 
   const currentSelectionFontSize = Number(editor?.getAttributes("textSize").size) || fontSize;
+  const currentSelectionLineHeight = currentBlockLineHeight(editor) ?? 1.5;
   const currentSelectionTextColor = String(editor?.getAttributes("textColor").color || customTextColor);
   const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
 
@@ -3269,6 +3470,20 @@ function RichMemoEditor({
             {editorTextSizes.map((size) => (
               <option key={size} value={size}>
                 {size}px
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="selection-font-control line-height-control">
+          줄 간격
+          <select
+            aria-label="선택 영역 줄 간격"
+            onChange={(event) => applySelectionLineHeight(Number(event.target.value))}
+            value={currentSelectionLineHeight}
+          >
+            {editorLineHeights.map((lineHeight) => (
+              <option key={lineHeight} value={lineHeight}>
+                {lineHeight}
               </option>
             ))}
           </select>
@@ -3495,6 +3710,74 @@ function clampTableColumnPixelWidth(value: number) {
   return Math.min(editorTableColumnPixelWidthBounds.max, Math.max(editorTableColumnPixelWidthBounds.min, Math.round(value)));
 }
 
+function currentBlockLineHeight(editor: TipTapEditor | null) {
+  if (!editor) {
+    return null;
+  }
+
+  const inlineLineHeight = Number(editor.getAttributes("lineHeight").lineHeight);
+
+  if (editorLineHeights.includes(inlineLineHeight as (typeof editorLineHeights)[number])) {
+    return inlineLineHeight;
+  }
+
+  const lineHeight = ["paragraph", "heading", "listItem", "tableCell", "tableHeader"]
+    .map((nodeName) => Number(editor.getAttributes(nodeName).qmLineHeight))
+    .find((value) => editorLineHeights.includes(value as (typeof editorLineHeights)[number]));
+
+  return lineHeight ?? null;
+}
+
+function updateSelectedBlockLineHeight(editor: TipTapEditor, lineHeight: number) {
+  if (!editorLineHeights.includes(lineHeight as (typeof editorLineHeights)[number])) {
+    return;
+  }
+
+  const blockNodeNames = new Set(["paragraph", "heading", "listItem", "tableCell", "tableHeader"]);
+  const { from, to, $from } = editor.state.selection;
+  const positions = new Set<number>();
+
+  editor.state.doc.nodesBetween(from, to, (node, position) => {
+    if (blockNodeNames.has(node.type.name)) {
+      positions.add(position);
+    }
+  });
+
+  if (!positions.size) {
+    for (let depth = $from.depth; depth > 0; depth -= 1) {
+      const node = $from.node(depth);
+
+      if (blockNodeNames.has(node.type.name)) {
+        positions.add($from.before(depth));
+        break;
+      }
+    }
+  }
+
+  if (!positions.size) {
+    return;
+  }
+
+  let transaction = editor.state.tr;
+
+  Array.from(positions)
+    .sort((left, right) => left - right)
+    .forEach((position) => {
+      const node = transaction.doc.nodeAt(position);
+
+      if (node && blockNodeNames.has(node.type.name)) {
+        transaction = transaction.setNodeMarkup(position, undefined, {
+          ...node.attrs,
+          qmLineHeight: lineHeight
+        });
+      }
+    });
+
+  if (transaction.docChanged) {
+    editor.view.dispatch(transaction);
+  }
+}
+
 function tableResizeHitFromEvent(editorElement: HTMLElement, event: MouseEvent): TableResizeHit | null {
   const target = event.target;
 
@@ -3642,74 +3925,102 @@ function tableResizeCursorFromEvent(editorElement: HTMLElement, event: MouseEven
   return Math.abs(event.clientX - cellRect.right) <= 6 ? "col" : null;
 }
 
-function updateEditorNodeAttributes(
+function tableResizeSessionFromHit(editor: TipTapEditor, hit: TableResizeHit): TableResizeSession | null {
+  const tableTarget = editorNodePositionFromElement(editor, hit.table, "table");
+  const rowTarget = hit.row ? editorNodePositionFromElement(editor, hit.row, "tableRow") : null;
+  const columnCellTargets =
+    hit.kind === "column" && typeof hit.columnIndex === "number"
+      ? Array.from(hit.table.rows)
+          .map((row) => row.cells[hit.columnIndex!])
+          .filter((cell): cell is HTMLTableCellElement => cell instanceof HTMLTableCellElement)
+          .map((cell) => editorNodePositionFromElement(editor, cell, cell.tagName === "TH" ? "tableHeader" : "tableCell"))
+          .filter((target): target is TableResizeNodeTarget => Boolean(target))
+      : [];
+  const startColumnWidths = columnWidthsFromTable(hit.table);
+
+  if (!tableTarget && !rowTarget && !columnCellTargets.length) {
+    return null;
+  }
+
+  return { columnCellTargets, rowTarget, startColumnWidths, tableTarget };
+}
+
+function updateTableColumnWidthFromSession(
   editor: TipTapEditor,
-  element: HTMLElement,
-  nodeName: "table" | "tableCell" | "tableHeader" | "tableRow",
-  nextAttributes: Record<string, number | number[] | null>
+  session: TableResizeSession,
+  columnIndex: number,
+  width: number
 ) {
-  const nodePosition = editorNodePositionFromElement(editor, element, nodeName);
-
-  if (!nodePosition) {
-    return;
+  if (!session.columnCellTargets.length) {
+    return false;
   }
 
-  const transaction = editor.state.tr.setNodeMarkup(nodePosition.position, undefined, {
-    ...nodePosition.node.attrs,
-    ...nextAttributes
-  });
-  editor.view.dispatch(transaction);
-}
+  const nextColumnWidths = session.startColumnWidths.map((columnWidth, index) =>
+    index === columnIndex ? width : clampTableColumnPixelWidth(columnWidth)
+  );
+  const updates: Array<{ attrs: Record<string, number | number[] | null>; target: TableResizeNodeTarget }> = [];
 
-function updateTableColumnWidth(editor: TipTapEditor, table: HTMLTableElement, columnIndex: number, width: number) {
-  const tableNodePosition = editorNodePositionFromElement(editor, table, "table");
-  const nextColumnWidths = columnWidthsAfterResize(table, columnIndex, width);
-  const cellUpdates = Array.from(table.rows)
-    .map((row) => row.cells[columnIndex])
-    .filter((cell): cell is HTMLTableCellElement => cell instanceof HTMLTableCellElement)
-    .map((cell) =>
-      editorNodePositionFromElement(editor, cell, cell.tagName === "TH" ? "tableHeader" : "tableCell")
-    )
-    .filter((nodePosition): nodePosition is NonNullable<typeof nodePosition> => Boolean(nodePosition));
-
-  if (!cellUpdates.length) {
-    return;
-  }
-
-  let transaction = editor.state.tr;
-
-  if (tableNodePosition && nextColumnWidths.length) {
-    transaction = transaction.setNodeMarkup(tableNodePosition.position, undefined, {
-      ...tableNodePosition.node.attrs,
-      qmWidth: null,
-      qmWidthPx: clampTablePixelWidth(nextColumnWidths.reduce((sum, columnWidth) => sum + columnWidth, 0))
+  if (session.tableTarget && nextColumnWidths.length) {
+    updates.push({
+      target: session.tableTarget,
+      attrs: {
+        qmWidth: null,
+        qmWidthPx: clampTablePixelWidth(nextColumnWidths.reduce((sum, columnWidth) => sum + columnWidth, 0))
+      }
     });
   }
 
-  cellUpdates.forEach(({ node, position }) => {
-    const colspan = Number(node.attrs.colspan) || 1;
-    const colwidth = Array.from({ length: colspan }, () => width);
+  session.columnCellTargets.forEach((target) => {
+    const node = editor.state.doc.nodeAt(target.position);
+    const colspan = Number(node?.attrs.colspan) || 1;
 
-    transaction = transaction.setNodeMarkup(position, undefined, {
-      ...node.attrs,
-      colwidth,
-      qmWidthPx: width
+    updates.push({
+      target,
+      attrs: {
+        colwidth: Array.from({ length: colspan }, () => width),
+        qmWidthPx: width
+      }
     });
   });
 
-  editor.view.dispatch(transaction);
+  return dispatchNodeAttributeUpdates(editor, updates);
 }
 
-function columnWidthsAfterResize(table: HTMLTableElement, columnIndex: number, width: number) {
+function columnWidthsFromTable(table: HTMLTableElement) {
   const firstRow = table.rows[0];
 
   if (!firstRow) {
     return [];
   }
 
-  return Array.from(firstRow.cells).map((cell, index) =>
-    index === columnIndex ? width : clampTableColumnPixelWidth(cell.getBoundingClientRect().width)
-  );
+  return Array.from(firstRow.cells).map((cell) => clampTableColumnPixelWidth(cell.getBoundingClientRect().width));
+}
+
+function dispatchNodeAttributeUpdates(
+  editor: TipTapEditor,
+  updates: Array<{ attrs: Record<string, number | number[] | null>; target: TableResizeNodeTarget }>
+) {
+  let transaction = editor.state.tr;
+
+  updates.forEach(({ attrs, target }) => {
+    const node = transaction.doc.nodeAt(target.position);
+
+    if (!node || node.type.name !== target.nodeName) {
+      return;
+    }
+
+    transaction = transaction.setNodeMarkup(target.position, undefined, {
+      ...node.attrs,
+      ...attrs
+    });
+  });
+
+  if (!transaction.docChanged) {
+    return false;
+  }
+
+  editor.view.dispatch(transaction);
+  return true;
 }
 
 function editorNodePositionFromElement(
@@ -3727,7 +4038,7 @@ function editorNodePositionFromElement(
 
     if (node.type.name === nodeName) {
       return {
-        node,
+        nodeName,
         position: resolvedPosition.before(depth)
       };
     }
@@ -3744,7 +4055,7 @@ function editorNodePositionFromElement(
 
     if (node?.type.name === nodeName) {
       return {
-        node,
+        nodeName,
         position: candidatePosition
       };
     }
@@ -3974,6 +4285,7 @@ function getCaretCharacterOffset(element: HTMLElement | null) {
 
 function NoteDrawer({
   activeNoteId,
+  attentionNoteIds,
   canRestoreNote,
   counts,
   deletedCounts,
@@ -3994,6 +4306,7 @@ function NoteDrawer({
   sortSetting
 }: {
   activeNoteId: string | null;
+  attentionNoteIds: Set<string>;
   canRestoreNote: (note: DecryptedNote) => boolean;
   counts: NoteListCounts;
   deletedCounts: NoteListCounts;
@@ -4022,6 +4335,7 @@ function NoteDrawer({
   const isTrashMode = mode === "trash";
   const listedNotes = isTrashMode ? deletedNotes : notes;
   const visibleCounts = isTrashMode ? deletedCounts : counts;
+  const sharedAttentionCount = notes.filter((note) => attentionNoteIds.has(note.id)).length;
 
   return (
     <aside className="note-drawer" aria-label="노트 목록">
@@ -4029,17 +4343,31 @@ function NoteDrawer({
         <h2>
           <ListChecks size={18} />
           {isTrashMode ? "복구함" : "전체 노트"}
+          {!isTrashMode && attentionNoteIds.size ? <span className="drawer-alert-badge">{attentionNoteIds.size}</span> : null}
         </h2>
         <button className="icon-button" type="button" onClick={onClose} aria-label="노트 목록 닫기">
           <X size={18} />
         </button>
       </div>
       {!isTrashMode && (
-        <div className="drawer-folder-shortcuts" aria-label="개인 노트 그룹 바로가기">
+        <div className="drawer-folder-shortcuts" aria-label="노트 그룹 바로가기">
           <button className="secondary-button" type="button" onClick={() => onOpenOverview("all")}>
             <LayoutGrid size={15} />
             전체 조회
           </button>
+          {counts.shared ? (
+            <button
+              className={`secondary-button ${sharedAttentionCount ? "has-alert" : ""}`}
+              type="button"
+              onClick={() => onOpenOverview("shared")}
+            >
+              <Share2 size={15} />
+              <span className="filter-label-with-badge">
+                <span>공유 노트</span>
+                {sharedAttentionCount ? <span className="filter-alert-badge">{sharedAttentionCount}</span> : null}
+              </span>
+            </button>
+          ) : null}
           {folders.length ? (
             <div>
               {folders.slice(0, 5).map((folder) => (
@@ -4096,6 +4424,7 @@ function NoteDrawer({
           onSelect={onFilterChange}
         />
         <NoteFilterButton
+          alertCount={sharedAttentionCount}
           count={visibleCounts.shared}
           filter="shared"
           label="공유"
@@ -4134,6 +4463,7 @@ function NoteDrawer({
       {isTrashMode && <p className="trash-retention-hint">삭제된 노트는 {deletedNoteRetentionDays}일 보관 기준으로 표시됩니다.</p>}
       <NoteList
         activeNoteId={activeNoteId}
+        attentionNoteIds={isTrashMode ? new Set<string>() : attentionNoteIds}
         canRestoreNote={canRestoreNote}
         deleted={isTrashMode}
         filter={filter}
@@ -4149,12 +4479,14 @@ function NoteDrawer({
 }
 
 function NoteFilterButton({
+  alertCount = 0,
   count,
   filter,
   label,
   onSelect,
   selected
 }: {
+  alertCount?: number;
   count: number;
   filter: NoteListFilter;
   label: string;
@@ -4169,7 +4501,10 @@ function NoteFilterButton({
       type="button"
       onClick={() => onSelect(filter)}
     >
-      <span>{label}</span>
+      <span className="filter-label-with-badge">
+        <span>{label}</span>
+        {alertCount ? <span className="filter-alert-badge">{alertCount}</span> : null}
+      </span>
       <strong>{count}</strong>
     </button>
   );
@@ -4177,6 +4512,7 @@ function NoteFilterButton({
 
 function NoteList({
   activeNoteId,
+  attentionNoteIds,
   canRestoreNote,
   deleted = false,
   filter,
@@ -4188,6 +4524,7 @@ function NoteList({
   onTogglePin
 }: {
   activeNoteId: string | null;
+  attentionNoteIds: Set<string>;
   canRestoreNote: (note: DecryptedNote) => boolean;
   deleted?: boolean;
   filter: NoteListFilter;
@@ -4219,11 +4556,12 @@ function NoteList({
         const dueTone = deadlineTone(dueAt);
         const pinned = notePinned(note.id, noteStates);
         const canRestore = canRestoreNote(note);
+        const needsAttention = attentionNoteIds.has(note.id);
 
         return (
           <article
             key={note.id}
-            className={`note-list-item ${activeNoteId === note.id ? "active" : ""} ${deleted ? "deleted" : ""}`}
+            className={`note-list-item ${activeNoteId === note.id ? "active" : ""} ${deleted ? "deleted" : ""} ${needsAttention ? "needs-attention" : ""}`}
           >
             <button className="note-list-open" type="button" onClick={() => onPreview(note)}>
               <header>
@@ -4231,6 +4569,7 @@ function NoteList({
                   {note.type === "shared" ? <Share2 size={12} /> : null}
                   {note.type === "shared" ? "공유" : "개인"}
                 </span>
+                {needsAttention && <span className="note-list-alert">새 업데이트</span>}
                 <strong>{note.title || "제목 없음"}</strong>
               </header>
               <span className="note-snippet">{previewTextFromHtml(note.body) || "내용 없음"}</span>
@@ -4293,6 +4632,7 @@ function NoteList({
 
 function PersonalOverview({
   activeFolderFilter,
+  attentionNoteIds,
   folders,
   feedbackError,
   feedbackStatus,
@@ -4306,6 +4646,7 @@ function PersonalOverview({
   onUpdateNoteFolder
 }: {
   activeFolderFilter: OverviewFolderFilter;
+  attentionNoteIds: Set<string>;
   folders: NoteFolderSnapshot[];
   feedbackError: string | null;
   feedbackStatus: string;
@@ -4321,21 +4662,34 @@ function PersonalOverview({
   const [folderName, setFolderName] = useState("");
   const [folderColor, setFolderColor] = useState(folderColorOptions[0]);
   const foldersById = new Map(folders.map((folder) => [folder.id, folder]));
+  const personalNotes = notes.filter((note) => note.type === "personal");
+  const sharedNotes = notes.filter((note) => note.type === "shared");
+  const sharedAttentionCount = sharedNotes.filter((note) => attentionNoteIds.has(note.id)).length;
   const visibleNotes = notes.filter((note) => {
     if (activeFolderFilter === "all") {
       return true;
     }
 
-    if (activeFolderFilter === "unfiled") {
-      return !note.folderId || !foldersById.has(note.folderId);
+    if (activeFolderFilter === "shared") {
+      return note.type === "shared";
     }
 
-    return note.folderId === activeFolderFilter;
+    if (activeFolderFilter === "unfiled") {
+      return note.type === "personal" && (!note.folderId || !foldersById.has(note.folderId));
+    }
+
+    return note.type === "personal" && note.folderId === activeFolderFilter;
   });
-  const unfiledCount = notes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length;
+  const unfiledCount = personalNotes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length;
   const activeFolder = typeof activeFolderFilter === "string" ? foldersById.get(activeFolderFilter) : null;
   const activeFilterLabel =
-    activeFolderFilter === "all" ? "전체 노트" : activeFolderFilter === "unfiled" ? "미분류" : activeFolder?.name ?? "분류";
+    activeFolderFilter === "all"
+      ? "전체 노트"
+      : activeFolderFilter === "shared"
+        ? "공유 노트"
+        : activeFolderFilter === "unfiled"
+          ? "미분류"
+          : activeFolder?.name ?? "분류";
   const showFeedback = feedbackError || feedbackStatus.includes("폴더") || feedbackStatus.includes("분류");
 
   async function submitFolder(event: FormEvent<HTMLFormElement>) {
@@ -4347,12 +4701,12 @@ function PersonalOverview({
   }
 
   return (
-    <section className="personal-overview" aria-label="개인 노트 전체 조회">
+    <section className="personal-overview" aria-label="노트 전체 조회">
       <header className="personal-overview-header">
         <div>
           <span className="note-kind-pill personal">
             <Folder size={12} />
-            개인 노트
+            개인 {personalNotes.length} · 공유 {sharedNotes.length}
           </span>
           <h2>전체 조회</h2>
         </div>
@@ -4362,7 +4716,7 @@ function PersonalOverview({
         </button>
       </header>
       <div className="personal-overview-layout">
-        <aside className="overview-folder-panel" aria-label="개인 노트 분류">
+        <aside className="overview-folder-panel" aria-label="노트 분류">
           <form className="folder-create-form" onSubmit={(event) => void submitFolder(event)}>
             <label>
               폴더 이름
@@ -4405,7 +4759,7 @@ function PersonalOverview({
               {feedbackError ?? feedbackStatus}
             </p>
           )}
-          <div className="folder-filter-chips" role="tablist" aria-label="개인 노트 폴더 필터">
+          <div className="folder-filter-chips" role="tablist" aria-label="노트 폴더 필터">
             <button
               aria-selected={activeFolderFilter === "all"}
               className={`folder-filter-button ${activeFolderFilter === "all" ? "active" : ""}`}
@@ -4415,6 +4769,19 @@ function PersonalOverview({
             >
               <span>전체</span>
               <strong>{notes.length}</strong>
+            </button>
+            <button
+              aria-selected={activeFolderFilter === "shared"}
+              className={`folder-filter-button shared-filter ${activeFolderFilter === "shared" ? "active" : ""}`}
+              onClick={() => onFolderFilterChange("shared")}
+              role="tab"
+              type="button"
+            >
+              <span className="filter-label-with-badge">
+                <span>공유 노트</span>
+                {sharedAttentionCount ? <span className="filter-alert-badge">{sharedAttentionCount}</span> : null}
+              </span>
+              <strong>{sharedNotes.length}</strong>
             </button>
             <button
               aria-selected={activeFolderFilter === "unfiled"}
@@ -4427,7 +4794,7 @@ function PersonalOverview({
               <strong>{unfiledCount}</strong>
             </button>
             {folders.map((folder) => {
-              const folderCount = notes.filter((note) => note.folderId === folder.id).length;
+              const folderCount = personalNotes.filter((note) => note.folderId === folder.id).length;
 
               return (
                 <div className="folder-filter-row" key={folder.id} style={{ "--folder-color": folder.color } as CSSProperties}>
@@ -4465,40 +4832,49 @@ function PersonalOverview({
           {visibleNotes.length ? (
             <div className="overview-note-grid">
               {visibleNotes.map((note) => {
-                const folder = note.folderId ? foldersById.get(note.folderId) : null;
+                const folder = note.type === "personal" && note.folderId ? foldersById.get(note.folderId) : null;
                 const createdAt = dateFromTimestamp(note.createdAt);
                 const pinned = notePinned(note.id, noteStates);
+                const needsAttention = attentionNoteIds.has(note.id);
 
                 return (
-                  <article className="overview-note-card" key={note.id}>
+                  <article className={`overview-note-card ${needsAttention ? "needs-attention" : ""}`} key={note.id}>
                     <button className="overview-note-open" type="button" onClick={() => onPreview(note)}>
-                      <span className="overview-note-folder" style={{ backgroundColor: folder?.color ?? "#e2e8f0" }}>
-                        {folder?.name ?? "미분류"}
+                      <span className="overview-note-folder" style={{ backgroundColor: note.type === "shared" ? "#3f6fb5" : folder?.color ?? "#e2e8f0" }}>
+                        {note.type === "shared" ? "공유 노트" : folder?.name ?? "미분류"}
                       </span>
+                      {needsAttention && <span className="overview-note-alert">새 업데이트</span>}
                       <strong>{note.title || "제목 없음"}</strong>
                       <span>{previewTextFromHtml(note.body) || "내용 없음"}</span>
                       <em>{pinned ? "즐겨찾기 · " : ""}{formatCompactDateTime(createdAt)}</em>
                     </button>
-                    <label className="overview-folder-select">
-                      <span className="sr-only">폴더 지정</span>
-                      <select
-                        onChange={(event) => onUpdateNoteFolder(note, event.target.value || null)}
-                        value={note.folderId && foldersById.has(note.folderId) ? note.folderId : ""}
-                      >
-                        <option value="">미분류</option>
-                        {folders.map((folderOption) => (
-                          <option key={folderOption.id} value={folderOption.id}>
-                            {folderOption.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                    {note.type === "personal" ? (
+                      <label className="overview-folder-select">
+                        <span className="sr-only">폴더 지정</span>
+                        <select
+                          onChange={(event) => onUpdateNoteFolder(note, event.target.value || null)}
+                          value={note.folderId && foldersById.has(note.folderId) ? note.folderId : ""}
+                        >
+                          <option value="">미분류</option>
+                          {folders.map((folderOption) => (
+                            <option key={folderOption.id} value={folderOption.id}>
+                              {folderOption.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : (
+                      <span className="overview-shared-label">
+                        <Share2 size={13} />
+                        공유 노트
+                      </span>
+                    )}
                   </article>
                 );
               })}
             </div>
           ) : (
-            <p className="muted empty-state">이 폴더에 표시할 개인 노트가 없습니다.</p>
+            <p className="muted empty-state">이 분류에 표시할 노트가 없습니다.</p>
           )}
         </section>
       </div>
@@ -5077,7 +5453,8 @@ function NotePreviewModal({
   }
 
   const bodyHtml = draft.body || "<p>내용 없음</p>";
-  const currentUserColor = historyUsers.find((user) => user.uid === currentUid)?.color ?? null;
+  const renderedBodyHtml =
+    note.type === "shared" ? sharedAttributionHtml(bodyHtml, note, historyUsers) : linkifyEditorHtml(sanitizeEditorHtml(bodyHtml));
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
@@ -5204,8 +5581,6 @@ function NotePreviewModal({
               </select>
             </label>
             <RichMemoEditor
-              defaultTextColor={note.type === "shared" ? currentUserColor : null}
-              defaultTextColorKey={`${note.id}:preview:${note.type}:${currentUid}`}
               editorRef={previewEditorRef}
               fontSize={draft.fontSize}
               onFilesPaste={(files, insertHtml) => void insertPreviewPastedFiles(files, insertHtml)}
@@ -5218,7 +5593,7 @@ function NotePreviewModal({
           <div
             className="note-preview-body"
             style={{ fontSize: draft.fontSize }}
-            dangerouslySetInnerHTML={{ __html: linkifyEditorHtml(sanitizeEditorHtml(bodyHtml)) }}
+            dangerouslySetInnerHTML={{ __html: renderedBodyHtml }}
           />
         )}
         <button className="secondary-button note-insight-trigger" type="button" onClick={() => setActivityOpen(true)}>
@@ -5530,6 +5905,7 @@ function extractXlsxPreviewHtml(bytes: Uint8Array) {
     const entries = unzipSync(bytes);
     const sharedStrings = xlsxSharedStrings(entries);
     const sheets = xlsxWorkbookSheets(entries);
+    const styles = xlsxStyles(entries);
     const blocks: string[] = [];
 
     sheets.slice(0, 5).forEach((sheet) => {
@@ -5543,7 +5919,7 @@ function extractXlsxPreviewHtml(bytes: Uint8Array) {
         return;
       }
 
-      const table = renderXlsxWorksheet(strFromU8(worksheet), sharedStrings);
+      const table = renderXlsxWorksheet(strFromU8(worksheet), sharedStrings, styles);
 
       if (table) {
         blocks.push(`<h3>${escapeHtml(sheet.name)}</h3>`);
@@ -5633,16 +6009,67 @@ function xlsxXmlDocument(entries: Record<string, Uint8Array>, path: string) {
   return document.querySelector("parsererror") ? null : document;
 }
 
-function renderXlsxWorksheet(markup: string, sharedStrings: string[]) {
+interface XlsxFontStyle {
+  bold: boolean;
+  color: string | null;
+  italic: boolean;
+  strike: boolean;
+  underline: boolean;
+}
+
+interface XlsxCellFormat {
+  fillId: number;
+  fontId: number;
+  horizontal: string | null;
+  numFmtId: number;
+  vertical: string | null;
+  wrapText: boolean;
+}
+
+interface XlsxStyles {
+  cellFormats: XlsxCellFormat[];
+  fills: Array<string | null>;
+  fonts: XlsxFontStyle[];
+  numberFormats: Map<number, string>;
+}
+
+const builtinXlsxNumberFormats = new Map<number, string>([
+  [9, "0%"],
+  [10, "0.00%"],
+  [11, "0.00E+00"],
+  [12, "# ?/?"],
+  [13, "# ??/??"],
+  [14, "m/d/yy"],
+  [15, "d-mmm-yy"],
+  [16, "d-mmm"],
+  [17, "mmm-yy"],
+  [18, "h:mm AM/PM"],
+  [19, "h:mm:ss AM/PM"],
+  [20, "h:mm"],
+  [21, "h:mm:ss"],
+  [22, "m/d/yy h:mm"],
+  [37, "#,##0 ;(#,##0)"],
+  [38, "#,##0 ;[Red](#,##0)"],
+  [39, "#,##0.00;(#,##0.00)"],
+  [40, "#,##0.00;[Red](#,##0.00)"],
+  [45, "mm:ss"],
+  [46, "[h]:mm:ss"],
+  [47, "mmss.0"],
+  [49, "@"]
+]);
+
+function renderXlsxWorksheet(markup: string, sharedStrings: string[], styles: XlsxStyles) {
   const document = new DOMParser().parseFromString(markup, "application/xml");
 
   if (document.querySelector("parsererror")) {
     return "";
   }
 
-  const rows = descendantsByLocalName(document.documentElement, "row").slice(0, 80);
+  const rows = descendantsByLocalName(document.documentElement, "row")
+    .filter((row) => row.getAttribute("hidden") !== "1")
+    .slice(0, 100);
   const mergeInfo = xlsxMergeInfo(document);
-  const maxColumnIndex = Math.min(Math.max(xlsxMaxColumnIndex(rows, mergeInfo), 0), 39);
+  const maxColumnIndex = Math.min(Math.max(xlsxMaxColumnIndex(rows, mergeInfo), 0), 49);
   const columnWidths = xlsxColumnWidths(document, maxColumnIndex + 1);
   const colGroup = [
     '<col style="width:44px">',
@@ -5650,32 +6077,43 @@ function renderXlsxWorksheet(markup: string, sharedStrings: string[]) {
   ].join("");
   const headerHtml = Array.from({ length: maxColumnIndex + 1 }, (_, index) => `<th scope="col">${xlsxColumnName(index)}</th>`).join("");
   const rowHtml = rows
-    .map((row, index) => renderXlsxRow(row, sharedStrings, mergeInfo, maxColumnIndex, index + 1))
+    .map((row, index) => renderXlsxRow(row, sharedStrings, styles, mergeInfo, maxColumnIndex, index + 1))
     .filter(Boolean)
-    .slice(0, 80)
+    .slice(0, 100)
     .join("");
 
   return rowHtml ? `<table class="xlsx-preview-table"><colgroup>${colGroup}</colgroup><thead><tr><th scope="col"></th>${headerHtml}</tr></thead><tbody>${rowHtml}</tbody></table>` : "";
 }
 
-function renderXlsxRow(row: Element, sharedStrings: string[], mergeInfo: XlsxMergeInfo, maxColumnIndex: number, fallbackRowNumber: number) {
+function renderXlsxRow(
+  row: Element,
+  sharedStrings: string[],
+  styles: XlsxStyles,
+  mergeInfo: XlsxMergeInfo,
+  maxColumnIndex: number,
+  fallbackRowNumber: number
+) {
   const cells = Array.from(row.children).filter((child) => child.localName.toLowerCase() === "c");
-  const cellsByIndex = new Map<number, string>();
+  const cellsByIndex = new Map<number, { html: string; styleAttribute: string }>();
   const rowNumber = safeXlsxRowNumber(row.getAttribute("r"), fallbackRowNumber);
+  const rowStyle = xlsxRowStyleAttribute(row);
   let rowMaxColumnIndex = -1;
   let fallbackIndex = 0;
 
-  cells.slice(0, 40).forEach((cell) => {
+  cells.slice(0, 50).forEach((cell) => {
     const refIndex = xlsxCellColumnIndex(cell.getAttribute("r"));
     const columnIndex = refIndex ?? fallbackIndex;
     fallbackIndex = columnIndex + 1;
 
-    if (columnIndex < 0 || columnIndex >= 40) {
+    if (columnIndex < 0 || columnIndex >= 50) {
       return;
     }
 
-    const value = xlsxCellText(cell, sharedStrings);
-    cellsByIndex.set(columnIndex, value);
+    const value = xlsxCellText(cell, sharedStrings, styles);
+    cellsByIndex.set(columnIndex, {
+      html: value ? escapeHtml(value) : "&nbsp;",
+      styleAttribute: xlsxCellStyleAttribute(cell, styles)
+    });
     rowMaxColumnIndex = Math.max(rowMaxColumnIndex, columnIndex);
   });
 
@@ -5692,11 +6130,11 @@ function renderXlsxRow(row: Element, sharedStrings: string[], mergeInfo: XlsxMer
 
     const mergeRange = mergeInfo.starts.get(key);
     const spanAttributes = xlsxMergeSpanAttributes(mergeRange);
-    const value = cellsByIndex.get(index) ?? "";
-    return `<td${spanAttributes}>${value ? escapeHtml(value) : "&nbsp;"}</td>`;
+    const cell = cellsByIndex.get(index);
+    return `<td${spanAttributes}${cell?.styleAttribute ?? ""}>${cell?.html ?? "&nbsp;"}</td>`;
   }).join("");
 
-  return `<tr><th scope="row">${rowNumber}</th>${cellHtml}</tr>`;
+  return `<tr${rowStyle}><th scope="row">${rowNumber}</th>${cellHtml}</tr>`;
 }
 
 interface XlsxMergeRange {
@@ -5709,6 +6147,157 @@ interface XlsxMergeRange {
 interface XlsxMergeInfo {
   skips: Set<string>;
   starts: Map<string, XlsxMergeRange>;
+}
+
+function xlsxStyles(entries: Record<string, Uint8Array>): XlsxStyles {
+  const document = xlsxXmlDocument(entries, "xl/styles.xml");
+
+  if (!document) {
+    return {
+      cellFormats: [],
+      fills: [],
+      fonts: [],
+      numberFormats: new Map(builtinXlsxNumberFormats)
+    };
+  }
+
+  const numberFormats = new Map(builtinXlsxNumberFormats);
+  descendantsByLocalName(document.documentElement, "numFmt").forEach((numFmt) => {
+    const id = Number(numFmt.getAttribute("numFmtId"));
+    const formatCode = numFmt.getAttribute("formatCode");
+
+    if (Number.isInteger(id) && formatCode) {
+      numberFormats.set(id, formatCode);
+    }
+  });
+
+  const fontsElement = descendantsByLocalName(document.documentElement, "fonts")[0] ?? null;
+  const fillsElement = descendantsByLocalName(document.documentElement, "fills")[0] ?? null;
+  const cellXfsElement = descendantsByLocalName(document.documentElement, "cellXfs")[0] ?? null;
+  const fonts = directChildrenByLocalName(fontsElement, "font").map(xlsxFontStyle);
+  const fills = directChildrenByLocalName(fillsElement, "fill").map(xlsxFillColor);
+  const cellFormats = directChildrenByLocalName(cellXfsElement, "xf").map((format) => {
+    const alignment = directChildrenByLocalName(format, "alignment")[0] ?? null;
+
+    return {
+      fillId: safeXlsxStyleIndex(format.getAttribute("fillId")),
+      fontId: safeXlsxStyleIndex(format.getAttribute("fontId")),
+      horizontal: safeXlsxAlignment(alignment?.getAttribute("horizontal") ?? null),
+      numFmtId: safeXlsxStyleIndex(format.getAttribute("numFmtId")),
+      vertical: safeXlsxVerticalAlignment(alignment?.getAttribute("vertical") ?? null),
+      wrapText: alignment?.getAttribute("wrapText") === "1" || alignment?.getAttribute("wrapText") === "true"
+    };
+  });
+
+  return { cellFormats, fills, fonts, numberFormats };
+}
+
+function xlsxFontStyle(font: Element): XlsxFontStyle {
+  return {
+    bold: Boolean(directChildrenByLocalName(font, "b").length),
+    color: xlsxColorValue(directChildrenByLocalName(font, "color")[0] ?? null),
+    italic: Boolean(directChildrenByLocalName(font, "i").length),
+    strike: Boolean(directChildrenByLocalName(font, "strike").length),
+    underline: Boolean(directChildrenByLocalName(font, "u").length)
+  };
+}
+
+function xlsxFillColor(fill: Element) {
+  const patternFill = directChildrenByLocalName(fill, "patternFill")[0] ?? null;
+  const patternType = patternFill?.getAttribute("patternType") ?? "";
+
+  if (!patternFill || patternType === "none") {
+    return null;
+  }
+
+  return xlsxColorValue(directChildrenByLocalName(patternFill, "fgColor")[0] ?? directChildrenByLocalName(patternFill, "bgColor")[0] ?? null);
+}
+
+function xlsxColorValue(color: Element | null) {
+  const rgb = color?.getAttribute("rgb");
+
+  if (!rgb) {
+    return null;
+  }
+
+  const normalized = `#${rgb.slice(-6)}`.toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(normalized) ? normalized : null;
+}
+
+function safeXlsxStyleIndex(value: string | null) {
+  const index = Number(value);
+  return Number.isInteger(index) && index >= 0 && index <= 4096 ? index : 0;
+}
+
+function safeXlsxAlignment(value: string | null) {
+  const normalized = String(value ?? "").toLowerCase();
+  return ["left", "center", "right"].includes(normalized) ? normalized : null;
+}
+
+function safeXlsxVerticalAlignment(value: string | null) {
+  const normalized = String(value ?? "").toLowerCase();
+  return ["top", "middle", "bottom"].includes(normalized) ? normalized : null;
+}
+
+function xlsxCellStyleAttribute(cell: Element, styles: XlsxStyles) {
+  const format = styles.cellFormats[safeXlsxStyleIndex(cell.getAttribute("s"))];
+
+  if (!format) {
+    return "";
+  }
+
+  const font = styles.fonts[format.fontId];
+  const fill = styles.fills[format.fillId];
+  const declarations: string[] = [];
+
+  if (fill) {
+    declarations.push(`background-color:${fill}`);
+  }
+
+  if (font?.color) {
+    declarations.push(`color:${font.color}`);
+  }
+
+  if (font?.bold) {
+    declarations.push("font-weight:800");
+  }
+
+  if (font?.italic) {
+    declarations.push("font-style:italic");
+  }
+
+  if (font?.underline && font.strike) {
+    declarations.push("text-decoration:underline line-through");
+  } else if (font?.underline) {
+    declarations.push("text-decoration:underline");
+  } else if (font?.strike) {
+    declarations.push("text-decoration:line-through");
+  }
+
+  if (format.horizontal) {
+    declarations.push(`text-align:${format.horizontal}`);
+  }
+
+  if (format.vertical) {
+    declarations.push(`vertical-align:${format.vertical}`);
+  }
+
+  if (format.wrapText) {
+    declarations.push("white-space:pre-wrap");
+  }
+
+  return declarations.length ? ` style="${declarations.join(";")}"` : "";
+}
+
+function xlsxRowStyleAttribute(row: Element) {
+  const height = Number(row.getAttribute("ht"));
+
+  if (!Number.isFinite(height) || height <= 0) {
+    return "";
+  }
+
+  const pxHeight = Math.min(180, Math.max(20, Math.round(height * 1.34)));
+  return ` style="height:${pxHeight}px"`;
 }
 
 function xlsxMergeInfo(document: Document): XlsxMergeInfo {
@@ -5784,8 +6373,8 @@ function xlsxMergeSpanAttributes(range: XlsxMergeRange | undefined) {
     return "";
   }
 
-  const colSpan = Math.min(40, Math.max(1, range.endColumn - range.startColumn + 1));
-  const rowSpan = Math.min(80, Math.max(1, range.endRow - range.startRow + 1));
+  const colSpan = Math.min(50, Math.max(1, range.endColumn - range.startColumn + 1));
+  const rowSpan = Math.min(100, Math.max(1, range.endRow - range.startRow + 1));
   const attributes: string[] = [];
 
   if (colSpan > 1) {
@@ -5865,7 +6454,7 @@ function xlsxColumnName(index: number) {
   return name;
 }
 
-function xlsxCellText(cell: Element, sharedStrings: string[]) {
+function xlsxCellText(cell: Element, sharedStrings: string[], styles: XlsxStyles) {
   const type = cell.getAttribute("t");
   const rawValue = descendantsByLocalName(cell, "v")[0]?.textContent ?? "";
 
@@ -5881,7 +6470,87 @@ function xlsxCellText(cell: Element, sharedStrings: string[]) {
     return rawValue === "1" ? "TRUE" : rawValue === "0" ? "FALSE" : normalizePreviewText(rawValue);
   }
 
-  return normalizePreviewText(rawValue || descendantsByLocalName(cell, "f")[0]?.textContent || "");
+  if (type === "e") {
+    return normalizePreviewText(rawValue || "ERROR");
+  }
+
+  if (type === "str") {
+    return normalizePreviewText(rawValue || descendantsByLocalName(cell, "f")[0]?.textContent || "");
+  }
+
+  return formatXlsxCellValue(rawValue, styles.cellFormats[safeXlsxStyleIndex(cell.getAttribute("s"))], styles);
+}
+
+function formatXlsxCellValue(rawValue: string, format: XlsxCellFormat | undefined, styles: XlsxStyles) {
+  const normalizedValue = normalizePreviewText(rawValue);
+  const numericValue = Number(rawValue);
+
+  if (!normalizedValue || !Number.isFinite(numericValue) || !format) {
+    return normalizedValue;
+  }
+
+  const formatCode = styles.numberFormats.get(format.numFmtId) ?? "";
+
+  if (xlsxFormatLooksLikeDate(formatCode)) {
+    return formatXlsxDate(numericValue, formatCode);
+  }
+
+  if (formatCode.includes("%")) {
+    const digits = xlsxDecimalPlaces(formatCode);
+    return `${(numericValue * 100).toLocaleString("ko-KR", {
+      maximumFractionDigits: digits,
+      minimumFractionDigits: digits
+    })}%`;
+  }
+
+  if (/[#,]##0|#,##0/.test(formatCode)) {
+    const digits = xlsxDecimalPlaces(formatCode);
+    return numericValue.toLocaleString("ko-KR", {
+      maximumFractionDigits: digits,
+      minimumFractionDigits: digits
+    });
+  }
+
+  if (formatCode.includes(".00")) {
+    return numericValue.toLocaleString("ko-KR", {
+      maximumFractionDigits: 2,
+      minimumFractionDigits: 2
+    });
+  }
+
+  return normalizedValue;
+}
+
+function xlsxFormatLooksLikeDate(formatCode: string) {
+  const stripped = formatCode
+    .replace(/\[[^\]]+]/g, "")
+    .replace(/"[^"]*"/g, "")
+    .replace(/\\./g, "")
+    .toLowerCase();
+
+  return /(^|[^a-z])[ymdhHs]+([^a-z]|$)/.test(stripped) && !stripped.includes("%");
+}
+
+function xlsxDecimalPlaces(formatCode: string) {
+  const decimalMatch = formatCode.match(/\.([0#]+)/);
+  return decimalMatch ? Math.min(decimalMatch[1].length, 4) : 0;
+}
+
+function formatXlsxDate(serialValue: number, formatCode: string) {
+  const wholeDays = Math.floor(serialValue);
+  const milliseconds = Math.round((serialValue - wholeDays) * 86_400_000);
+  const date = new Date(Date.UTC(1899, 11, 30 + wholeDays) + milliseconds);
+
+  if (Number.isNaN(date.getTime())) {
+    return String(serialValue);
+  }
+
+  const hasTime = /[hs]/i.test(formatCode);
+  const hasDate = /[ymd]/i.test(formatCode);
+  const datePart = hasDate ? date.toISOString().slice(0, 10) : "";
+  const timePart = hasTime ? date.toISOString().slice(11, 16) : "";
+
+  return [datePart, timePart].filter(Boolean).join(" ") || datePart || timePart;
 }
 
 function cfbEntryBytes(entry: { content?: unknown } | null) {
@@ -6110,6 +6779,14 @@ function renderHwpxTable(table: Element) {
 
 function descendantsByLocalName(element: Element, name: string) {
   return Array.from(element.getElementsByTagName("*")).filter((child) => child.localName.toLowerCase() === name);
+}
+
+function directChildrenByLocalName(element: Element | null, name: string) {
+  if (!element) {
+    return [];
+  }
+
+  return Array.from(element.children).filter((child) => child.localName.toLowerCase() === name);
 }
 
 function nearestAncestorByLocalName(element: Element, name: string) {
