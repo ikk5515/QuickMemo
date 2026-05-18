@@ -159,6 +159,7 @@ interface AttachmentPreviewState {
   html?: string;
   kind: "docx" | "html" | "hwp" | "pdf" | "text" | "unsupported";
   label: string;
+  srcDoc?: string;
   text?: string;
   url?: string;
 }
@@ -274,7 +275,18 @@ const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
 const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 const maxTextPreviewCharacters = 120_000;
 const maxDocumentPreviewBlocks = 320;
+const maxDocxPreviewMarkupCharacters = 1_600_000;
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
+const docxPreviewFrameCsp = [
+  "default-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "object-src 'none'",
+  "script-src 'none'",
+  "img-src data: blob:",
+  "font-src data:",
+  "style-src 'unsafe-inline'"
+].join("; ");
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -2519,13 +2531,24 @@ export default function NotesPage() {
       }
 
       if (attachment.extension === "docx") {
-        setAttachmentPreview({
-          bytes: plainBytes,
-          fileName,
-          kind: "docx",
-          label: "DOCX 양식 미리보기"
-        });
-        setStatus("DOCX 미리보기를 열었습니다.");
+        const srcDoc = await renderSafeDocxPreviewSrcDoc(plainBytes);
+
+        setAttachmentPreview(
+          srcDoc
+            ? {
+                fileName,
+                kind: "docx",
+                label: "DOCX 양식 미리보기",
+                srcDoc
+              }
+            : {
+                fileName,
+                kind: "unsupported",
+                label: "DOCX 미리보기 안내",
+                text: "DOCX 양식 미리보기를 안전하게 만들지 못했습니다. 원본 파일은 다운로드해서 확인해주세요."
+              }
+        );
+        setStatus(srcDoc ? "DOCX 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
         return;
       }
 
@@ -5665,9 +5688,7 @@ function AttachmentPreviewModal({
   onClose: () => void;
   preview: AttachmentPreviewState;
 }) {
-  const docxContainerRef = useRef<HTMLDivElement | null>(null);
   const hwpContainerRef = useRef<HTMLDivElement | null>(null);
-  const [docxError, setDocxError] = useState<string | null>(null);
   const [hwpError, setHwpError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -5681,56 +5702,6 @@ function AttachmentPreviewModal({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
-
-  useEffect(() => {
-    if (preview.kind !== "docx" || !preview.bytes || !docxContainerRef.current) {
-      return undefined;
-    }
-
-    let cancelled = false;
-    const container = docxContainerRef.current;
-    container.innerHTML = "";
-    setDocxError(null);
-
-    async function renderDocxPreview() {
-      const { renderAsync } = await import("docx-preview");
-
-      if (cancelled || preview.kind !== "docx" || !preview.bytes) {
-        return;
-      }
-
-      await renderAsync(preview.bytes.slice(), container, container, {
-        breakPages: true,
-        className: "qm-docx",
-        experimental: false,
-        ignoreFonts: true,
-        ignoreHeight: false,
-        ignoreLastRenderedPageBreak: false,
-        ignoreWidth: false,
-        inWrapper: true,
-        renderAltChunks: false,
-        renderChanges: false,
-        renderComments: false,
-        renderEndnotes: true,
-        renderFooters: true,
-        renderFootnotes: true,
-        renderHeaders: true,
-        trimXmlDeclaration: true,
-        useBase64URL: true
-      });
-    }
-
-    void renderDocxPreview().catch(() => {
-      if (!cancelled) {
-        setDocxError("DOCX 양식 미리보기를 만들지 못했습니다. 파일이 손상되었거나 지원하지 않는 문서 요소가 포함되어 있습니다.");
-      }
-    });
-
-    return () => {
-      cancelled = true;
-      container.innerHTML = "";
-    };
-  }, [preview.bytes, preview.kind]);
 
   useEffect(() => {
     if (preview.kind !== "hwp" || !preview.bytes || !hwpContainerRef.current) {
@@ -5806,8 +5777,13 @@ function AttachmentPreviewModal({
           </object>
         ) : preview.kind === "docx" ? (
           <div className="docx-preview-frame">
-            <div ref={docxContainerRef} className="docx-preview-content" />
-            {docxError && <p className="file-preview-error">{docxError}</p>}
+            <iframe
+              className="docx-preview-sandbox"
+              referrerPolicy="no-referrer"
+              sandbox=""
+              srcDoc={preview.srcDoc ?? ""}
+              title={`${preview.fileName} DOCX 미리보기`}
+            />
           </div>
         ) : preview.kind === "hwp" ? (
           <div className="hwp-preview-frame">
@@ -6543,6 +6519,283 @@ function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
   }
 
   return decodedText.slice(0, maxTextPreviewCharacters);
+}
+
+async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array) {
+  if (typeof document === "undefined") {
+    return "";
+  }
+
+  try {
+    const { renderAsync } = await import("docx-preview");
+    const previewDocument = document.implementation.createHTMLDocument("DOCX Preview");
+    const styleContainer = previewDocument.createElement("div");
+    const bodyContainer = previewDocument.createElement("div");
+
+    previewDocument.body.append(styleContainer, bodyContainer);
+
+    await renderAsync(bytes.slice(), bodyContainer, styleContainer, {
+      breakPages: true,
+      className: "qm-docx",
+      experimental: false,
+      ignoreFonts: true,
+      ignoreHeight: false,
+      ignoreLastRenderedPageBreak: false,
+      ignoreWidth: false,
+      inWrapper: true,
+      renderAltChunks: false,
+      renderChanges: false,
+      renderComments: false,
+      renderEndnotes: true,
+      renderFooters: true,
+      renderFootnotes: true,
+      renderHeaders: true,
+      trimXmlDeclaration: true,
+      useBase64URL: true
+    });
+
+    sanitizeDocxPreviewTree(bodyContainer);
+
+    const styleText = sanitizeDocxPreviewCss(
+      Array.from(styleContainer.querySelectorAll("style"))
+        .map((styleElement) => styleElement.textContent ?? "")
+        .join("\n")
+    );
+    const bodyHtml = bodyContainer.innerHTML;
+
+    if (!bodyHtml.trim() || bodyHtml.length > maxDocxPreviewMarkupCharacters) {
+      return "";
+    }
+
+    return docxSandboxSrcDoc(styleText, bodyHtml);
+  } catch {
+    return "";
+  }
+}
+
+function docxSandboxSrcDoc(styleText: string, bodyHtml: string) {
+  const baseStyle = [
+    "html,body{margin:0;min-height:100%;background:#f8fafc;color:#14211f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}",
+    "body{box-sizing:border-box;padding:16px;}",
+    ".docx-preview-content{box-sizing:border-box;margin:0 auto;max-width:100%;overflow:auto;}",
+    ".qm-docx-wrapper{box-sizing:border-box;max-width:100%;}",
+    ".qm-docx{box-sizing:border-box;margin:0 auto 16px;max-width:100%;overflow:hidden;background:#fff;border:1px solid #e2e8f0;box-shadow:0 10px 24px rgb(15 23 42 / 8%);}",
+    ".qm-docx *{box-sizing:border-box;}",
+    ".qm-docx img{max-width:100%;height:auto;}",
+    ".qm-docx table{max-width:100%;border-collapse:collapse;}",
+    "a{color:#2563eb;text-decoration:underline;}",
+    "@media (max-width:680px){body{padding:10px}.qm-docx{box-shadow:none}}"
+  ].join("\n");
+
+  return [
+    "<!doctype html>",
+    '<html lang="ko">',
+    "<head>",
+    '<meta charset="utf-8">',
+    `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(docxPreviewFrameCsp)}">`,
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<style>${escapeStyleText(`${baseStyle}\n${styleText}`)}</style>`,
+    "</head>",
+    "<body>",
+    `<main class="docx-preview-content">${bodyHtml}</main>`,
+    "</body>",
+    "</html>"
+  ].join("");
+}
+
+function sanitizeDocxPreviewTree(root: HTMLElement) {
+  Array.from(root.querySelectorAll<HTMLElement>("*")).forEach((element) => {
+    if (isForbiddenDocxPreviewTag(element.tagName)) {
+      element.remove();
+      return;
+    }
+
+    sanitizeDocxPreviewAttributes(element);
+  });
+}
+
+function isForbiddenDocxPreviewTag(tagName: string) {
+  return new Set([
+    "BASE",
+    "BUTTON",
+    "EMBED",
+    "FORM",
+    "IFRAME",
+    "INPUT",
+    "LINK",
+    "META",
+    "OBJECT",
+    "SCRIPT",
+    "SELECT",
+    "STYLE",
+    "SVG",
+    "TEXTAREA",
+    "VIDEO",
+    "AUDIO",
+    "SOURCE"
+  ]).has(tagName);
+}
+
+function sanitizeDocxPreviewAttributes(element: HTMLElement) {
+  Array.from(element.attributes).forEach((attribute) => {
+    const attributeName = attribute.name.toLowerCase();
+    const attributeValue = attribute.value;
+
+    if (
+      attributeName.startsWith("on") ||
+      attributeName === "srcdoc" ||
+      attributeName === "formaction" ||
+      attributeName === "action" ||
+      attributeName === "poster" ||
+      attributeName === "background" ||
+      attributeName.includes(":")
+    ) {
+      element.removeAttribute(attribute.name);
+      return;
+    }
+
+    if (attributeName === "href") {
+      const safeHref = element.tagName === "A" ? safeDocxPreviewHref(attributeValue) : null;
+
+      if (safeHref) {
+        element.setAttribute("href", safeHref);
+        element.setAttribute("target", "_blank");
+        element.setAttribute("rel", "noopener noreferrer");
+      } else {
+        element.removeAttribute(attribute.name);
+      }
+      return;
+    }
+
+    if (attributeName === "src") {
+      const safeSrc = element.tagName === "IMG" ? safeDocxPreviewImageSrc(attributeValue) : null;
+
+      if (safeSrc) {
+        element.setAttribute("src", safeSrc);
+      } else {
+        element.remove();
+      }
+      return;
+    }
+
+    if (attributeName === "style") {
+      const safeStyle = sanitizeDocxStyleAttribute(attributeValue);
+
+      if (safeStyle) {
+        element.setAttribute("style", safeStyle);
+      } else {
+        element.removeAttribute(attribute.name);
+      }
+      return;
+    }
+
+    if (attributeName === "class") {
+      const safeClassName = attributeValue
+        .split(/\s+/)
+        .map((className) => className.replace(/[^A-Za-z0-9_-]/g, ""))
+        .filter(Boolean)
+        .slice(0, 24)
+        .join(" ");
+
+      if (safeClassName) {
+        element.setAttribute("class", safeClassName);
+      } else {
+        element.removeAttribute(attribute.name);
+      }
+      return;
+    }
+
+    if (!isAllowedDocxPreviewAttribute(attributeName)) {
+      element.removeAttribute(attribute.name);
+    } else {
+      element.setAttribute(attribute.name, safeDocxPreviewAttributeText(attributeValue));
+    }
+  });
+}
+
+function isAllowedDocxPreviewAttribute(attributeName: string) {
+  return new Set([
+    "alt",
+    "aria-label",
+    "colspan",
+    "dir",
+    "height",
+    "lang",
+    "role",
+    "rowspan",
+    "title",
+    "width"
+  ]).has(attributeName);
+}
+
+function safeDocxPreviewHref(value: string) {
+  try {
+    const url = new URL(value, "https://quickmemo.invalid");
+
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return url.href;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function safeDocxPreviewImageSrc(value: string) {
+  const trimmedValue = value.trim();
+
+  return /^data:image\/(?:png|jpe?g|gif|webp|bmp);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmedValue) ? trimmedValue : null;
+}
+
+function sanitizeDocxPreviewCss(cssText: string) {
+  return cssText
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/@import\b[^;]*;?/gi, "")
+    .replace(/url\s*\([^)]*\)/gi, "none")
+    .replace(/expression\s*\([^)]*\)/gi, "")
+    .replace(/javascript\s*:/gi, "")
+    .replace(/vbscript\s*:/gi, "")
+    .replace(/-moz-binding\s*:[^;}]*/gi, "")
+    .replace(/behavior\s*:[^;}]*/gi, "")
+    .slice(0, maxDocxPreviewMarkupCharacters);
+}
+
+function sanitizeDocxStyleAttribute(styleText: string) {
+  return styleText
+    .split(";")
+    .map((declaration) => {
+      const [propertyName, ...propertyValueParts] = declaration.split(":");
+      const property = propertyName?.trim().toLowerCase() ?? "";
+      const value = propertyValueParts.join(":").trim();
+
+      if (!property || !value || !/^[-a-z0-9]+$/i.test(property) || !isSafeDocxCssValue(value)) {
+        return "";
+      }
+
+      return `${property}: ${value}`;
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+function isSafeDocxCssValue(value: string) {
+  const normalizedValue = value.toLowerCase();
+  return !/(?:url\s*\(|expression\s*\(|javascript\s*:|vbscript\s*:|data\s*:\s*text\/html|-moz-binding|behavior\s*:|@import)/i.test(normalizedValue);
+}
+
+function safeDocxPreviewAttributeText(value: string) {
+  return Array.from(value)
+    .filter((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint > 31 && codePoint !== 127 && !`<>"'\``.includes(character);
+    })
+    .join("")
+    .slice(0, 240);
+}
+
+function escapeStyleText(value: string) {
+  return value.replace(/<\/style/gi, "<\\/style").replace(/<!--/g, "").replace(/-->/g, "");
 }
 
 async function extractHwpPreviewHtml(bytes: Uint8Array) {
