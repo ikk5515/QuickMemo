@@ -86,7 +86,6 @@ import {
   editorTablePixelHeightBounds,
   editorTableRowPixelHeightBounds,
   editorTablePixelWidthBounds,
-  editorTablePixelWidths,
   editorTextColors,
   editorTextSizes,
   richEditorExtensions
@@ -2697,13 +2696,13 @@ function RichMemoEditor({
 
     editorElement.addEventListener("mousemove", handleMouseMove);
     editorElement.addEventListener("mouseleave", handleMouseLeave);
-    editorElement.addEventListener("mousedown", handleMouseDown);
+    editorElement.addEventListener("mousedown", handleMouseDown, true);
 
     return () => {
       tableResizeCleanupRef.current?.();
       editorElement.removeEventListener("mousemove", handleMouseMove);
       editorElement.removeEventListener("mouseleave", handleMouseLeave);
-      editorElement.removeEventListener("mousedown", handleMouseDown);
+      editorElement.removeEventListener("mousedown", handleMouseDown, true);
       setResizeCursor(null);
     };
   }, [editor, onChange]);
@@ -2842,11 +2841,6 @@ function RichMemoEditor({
     );
   }
 
-  function setTableWidth(width: number) {
-    const safeWidth = clampTablePixelWidth(width);
-    runToolbarCommand((currentEditor) => currentEditor.chain().focus().updateAttributes("table", { qmWidth: null, qmWidthPx: safeWidth }).run());
-  }
-
   function chooseFiles() {
     fileInputRef.current?.click();
   }
@@ -2862,7 +2856,6 @@ function RichMemoEditor({
 
   const currentSelectionFontSize = Number(editor?.getAttributes("textSize").size) || fontSize;
   const currentSelectionTextColor = String(editor?.getAttributes("textColor").color || customTextColor);
-  const currentTableWidth = Number(editor?.getAttributes("table").qmWidthPx) || editorTablePixelWidths[1];
   const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
 
   return (
@@ -3084,34 +3077,6 @@ function RichMemoEditor({
         >
           표 삭제
         </button>
-        <span className="table-size-control" aria-label="표 전체 크기">
-          <Table2 size={15} />
-          <input
-            aria-label="표 전체 너비"
-            disabled={!editor?.isActive("table")}
-            max={editorTablePixelWidthBounds.max}
-            min={editorTablePixelWidthBounds.min}
-            onChange={(event) => setTableWidth(Number(event.target.value))}
-            step={editorTablePixelWidthBounds.step}
-            type="range"
-            value={currentTableWidth}
-          />
-          <output>{currentTableWidth}px</output>
-          {editorTablePixelWidths.map((width) => (
-            <button
-              aria-label={`표 전체 너비 ${width}px`}
-              aria-pressed={Number(editor?.getAttributes("table").qmWidthPx) === width}
-              className={Number(editor?.getAttributes("table").qmWidthPx) === width ? "active" : ""}
-              disabled={!editor?.isActive("table")}
-              key={width}
-              onClick={() => setTableWidth(width)}
-              onMouseDown={(event) => event.preventDefault()}
-              type="button"
-            >
-              {width}px
-            </button>
-          ))}
-        </span>
         <div className="cell-color-palette" aria-label="셀 색상">
           <PaintBucket size={15} />
           {editorCellColors.map((color) => (
@@ -3196,7 +3161,7 @@ function clampTableDimension(value: number) {
 
 function clampTablePixelWidth(value: number) {
   if (!Number.isFinite(value)) {
-    return editorTablePixelWidths[1];
+    return 720;
   }
 
   return Math.min(editorTablePixelWidthBounds.max, Math.max(editorTablePixelWidthBounds.min, Math.round(value)));

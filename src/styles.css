@@ -557,6 +557,10 @@ textarea {
   transition: grid-template-columns 0.18s ease;
 }
 
+.notes-editor-layout.with-drawer {
+  grid-template-columns: minmax(280px, 372px) minmax(0, 1fr);
+}
+
 .editor-panel {
   min-height: calc(100svh - 116px);
   padding: 18px;
@@ -598,16 +602,17 @@ textarea {
   box-shadow: 0 10px 28px rgb(20 33 31 / 5%);
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, max-content) auto;
-  justify-content: start;
+  grid-template-columns: minmax(0, 1fr) auto;
+  justify-content: space-between;
   min-width: 0;
-  padding: 9px 12px;
-  width: fit-content;
   max-width: 100%;
+  min-height: 62px;
+  padding: 12px 14px;
+  width: 100%;
 }
 
 .personal-overview-header h2 {
-  font-size: clamp(18px, 1.7vw, 22px);
+  font-size: clamp(20px, 1.9vw, 24px);
   line-height: 1.1;
   margin: 2px 0 0;
 }
@@ -1290,17 +1295,6 @@ textarea {
   padding: 0 9px;
 }
 
-.table-size-control {
-  align-items: center;
-  background: #ffffff;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  display: inline-flex;
-  gap: 5px;
-  min-height: 34px;
-  padding: 4px 6px;
-}
-
 .image-width-control {
   align-items: center;
   background: #ffffff;
@@ -1325,33 +1319,6 @@ textarea {
   color: var(--ink);
   min-width: 58px;
   text-align: right;
-}
-
-.table-size-control button {
-  background: var(--surface);
-  color: var(--ink);
-  font-size: 12px;
-  min-height: 28px;
-  padding: 0 8px;
-}
-
-.table-size-control input[type="range"] {
-  accent-color: var(--teal);
-  min-height: 24px;
-  width: 112px;
-}
-
-.table-size-control output {
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 900;
-  min-width: 56px;
-  text-align: right;
-}
-
-.table-size-control button.active {
-  background: var(--ink);
-  color: #ffffff;
 }
 
 .cell-color-palette,
@@ -2054,11 +2021,11 @@ textarea {
   max-height: calc(100svh - 110px);
   overflow: auto;
   padding: 16px;
-  position: fixed;
-  left: 22px;
+  position: sticky;
+  left: auto;
   top: 88px;
-  width: min(372px, calc(100vw - 44px));
-  z-index: 12;
+  width: auto;
+  z-index: 1;
 }
 
 .drawer-folder-shortcuts {
@@ -2917,7 +2884,8 @@ textarea {
 }
 
 .admin-management-grid.single-panel {
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: minmax(0, min(100%, 1080px));
+  justify-content: center;
 }
 
 .admin-tabs {
@@ -3043,6 +3011,9 @@ textarea {
 .admin-user-card-list {
   display: grid;
   gap: 12px;
+  justify-self: center;
+  max-width: 1040px;
+  width: 100%;
 }
 
 .admin-user-card {
@@ -3052,6 +3023,11 @@ textarea {
   display: grid;
   gap: 14px;
   padding: 14px;
+}
+
+.admin-user-delete-button {
+  min-height: 38px;
+  padding: 0 12px;
 }
 
 .admin-user-card.inactive {
@@ -3420,17 +3396,9 @@ textarea {
 }
 
 @media (min-width: 981px) {
-  .notes-editor-layout.with-drawer {
-    grid-template-columns: minmax(300px, 372px) minmax(0, 1fr);
-  }
-
   .notes-editor-layout.with-drawer .note-drawer {
     max-height: calc(100svh - 110px);
-    position: sticky;
-    left: auto;
     top: 88px;
-    width: auto;
-    z-index: 1;
   }
 }
 
@@ -3463,6 +3431,24 @@ textarea {
   .admin-grid,
   .admin-management-grid {
     grid-template-columns: 1fr;
+  }
+
+  .notes-workspace {
+    overflow-x: auto;
+  }
+
+  .notes-editor-layout.with-drawer {
+    grid-template-columns: minmax(272px, 78vw) minmax(320px, calc(100vw - 28px));
+    min-width: max-content;
+  }
+
+  .notes-editor-layout.with-drawer .note-drawer {
+    max-height: calc(100svh - 94px);
+    top: 76px;
+  }
+
+  .notes-editor-layout.with-drawer .full-editor-panel {
+    min-width: 320px;
   }
 
   .admin-stats-grid {
@@ -3564,9 +3550,9 @@ textarea {
   }
 
   .note-drawer {
-    left: 18px;
-    top: 118px;
-    width: min(420px, calc(100vw - 36px));
+    left: auto;
+    top: 76px;
+    width: auto;
   }
 
   .user-row {
@@ -3879,15 +3865,14 @@ textarea {
   }
 
   .note-drawer {
-    border-bottom-left-radius: 0;
-    border-left: 0;
-    border-top-left-radius: 0;
-    bottom: 0;
-    left: 0;
-    max-height: 100svh;
+    border-left: 1px solid var(--line);
+    border-radius: 8px;
+    bottom: auto;
+    left: auto;
+    max-height: calc(100svh - 94px);
     right: auto;
-    top: 0;
-    width: min(340px, 88vw);
+    top: 76px;
+    width: auto;
   }
 
   .inline-form,
@@ -3978,12 +3963,13 @@ textarea {
     gap: 8px;
     grid-template-columns: minmax(0, 1fr) auto;
     justify-content: space-between;
-    padding: 8px 10px;
+    min-height: 58px;
+    padding: 10px 12px;
     width: 100%;
   }
 
   .personal-overview-header h2 {
-    font-size: 18px;
+    font-size: 19px;
     margin: 0;
   }
 
@@ -3995,9 +3981,9 @@ textarea {
   .personal-overview-header .secondary-button {
     font-size: 0;
     gap: 0;
-    min-height: 34px;
+    min-height: 40px;
     padding: 0;
-    width: 34px;
+    width: 40px;
   }
 
   .personal-overview-layout {
@@ -4176,7 +4162,6 @@ textarea {
 
   .table-insert-control,
   .selection-font-control,
-  .table-size-control,
   .cell-color-palette,
   .text-color-palette {
     flex: 0 0 auto;
@@ -4185,10 +4170,6 @@ textarea {
   .image-width-control,
   .custom-color-input {
     flex: 0 0 auto;
-  }
-
-  .table-size-control input[type="range"] {
-    width: 92px;
   }
 
   .note-insight-panel {
@@ -4207,7 +4188,7 @@ textarea {
   }
 
   .note-drawer {
-    max-height: 100svh;
+    max-height: calc(100svh - 94px);
   }
 
   .note-list-item {

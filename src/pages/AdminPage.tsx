@@ -159,8 +159,10 @@ function stableEditableSignature(user: UserProfile) {
 
 function editableUserValidationError(user: UserProfile, users: UserProfile[]) {
   const quickKey = Number(user.quickKey);
+  const displayName = user.displayName.trim();
+  const normalizedDisplayName = displayName.toLowerCase();
 
-  if (!user.displayName.trim()) {
+  if (!displayName) {
     return "이름을 입력하면 자동 저장됩니다.";
   }
 
@@ -174,6 +176,48 @@ function editableUserValidationError(user: UserProfile, users: UserProfile[]) {
 
   if (users.some((targetUser) => targetUser.uid !== user.uid && targetUser.quickKey === quickKey)) {
     return "이미 사용 중인 번호입니다.";
+  }
+
+  if (
+    users.some(
+      (targetUser) =>
+        targetUser.uid !== user.uid &&
+        targetUser.displayName.trim().toLowerCase() === normalizedDisplayName
+    )
+  ) {
+    return "이미 사용 중인 이름입니다.";
+  }
+
+  return null;
+}
+
+function createUserValidationError(draft: DraftUser, users: UserProfile[], fallbackQuickKey: number) {
+  const displayName = draft.displayName.trim();
+  const avatarText = draft.avatarText.trim();
+  const quickKey = Number(draft.quickKey || fallbackQuickKey);
+
+  if (!displayName) {
+    return "이름을 입력해주세요.";
+  }
+
+  if (!avatarText) {
+    return "원 안 글자를 입력해주세요.";
+  }
+
+  if (!Number.isInteger(quickKey) || quickKey < 1 || quickKey > 99) {
+    return "빠른 로그인 번호는 1부터 99까지 입력해주세요.";
+  }
+
+  if (draft.password.length < 6) {
+    return "초기 비밀번호는 6자 이상 입력해주세요.";
+  }
+
+  if (users.some((user) => user.displayName.trim().toLowerCase() === displayName.toLowerCase())) {
+    return "이미 사용 중인 사용자 이름입니다.";
+  }
+
+  if (users.some((user) => user.quickKey === quickKey)) {
+    return "이미 사용 중인 빠른 로그인 번호입니다.";
   }
 
   return null;
@@ -346,6 +390,7 @@ function AdminDashboard() {
 
   const userMap = useMemo(() => new Map(users.map((user) => [user.uid, user])), [users]);
   const activeUsers = useMemo(() => users.filter((user) => user.isActive), [users]);
+  const activeAdminCount = useMemo(() => users.filter((user) => user.isAdmin && user.isActive).length, [users]);
 
   const adminNoteCounts = useMemo(
     () =>
@@ -432,6 +477,14 @@ function AdminDashboard() {
 
   async function handleCreateUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const validationError = createUserValidationError(draft, users, nextQuickKey);
+
+    if (validationError) {
+      setError(validationError);
+      setNotice(null);
+      return;
+    }
+
     setPending(true);
     setError(null);
     setNotice(null);
@@ -718,6 +771,8 @@ function AdminDashboard() {
 
                   return (
                     <EditableUserCard
+                      activeAdminCount={activeAdminCount}
+                      currentUid={profile?.uid ?? ""}
                       key={user.uid}
                       index={orderIndex >= 0 ? orderIndex : index}
                       total={users.length}
@@ -921,11 +976,15 @@ function AdminStat({ icon, label, value }: { icon: ReactNode; label: string; val
 }
 
 function EditableUserCard({
+  activeAdminCount,
+  currentUid,
   user,
   users,
   index,
   total
 }: {
+  activeAdminCount: number;
+  currentUid: string;
   user: UserProfile;
   users: UserProfile[];
   index: number;
@@ -1078,6 +1137,46 @@ function EditableUserCard({
     }
   }
 
+  async function softDeleteUser() {
+    if (user.uid === currentUid) {
+      setMessage("현재 로그인한 관리자는 삭제할 수 없습니다.");
+      return;
+    }
+
+    if (user.isAdmin && user.isActive && activeAdminCount <= 1) {
+      setMessage("마지막 활성 관리자는 삭제할 수 없습니다.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `${user.displayName || "이 사용자"} 사용자를 삭제 처리할까요?\n로그인 목록에서 숨기고 비활성 상태로 변경합니다.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    const nextDraft = editableUserDraft({ ...user, isActive: false });
+    setPending(true);
+    setMessage("삭제 처리 중...");
+
+    try {
+      await updateUser(updatePayloadFromDraft(nextDraft));
+      draftRef.current = nextDraft;
+      dirtyRef.current = false;
+      latestSaveDraftRef.current = null;
+      lastSubmittedSignatureRef.current = stableEditableSignature(nextDraft);
+      confirmedSignatureRef.current = stableEditableSignature(nextDraft);
+      setDraft(nextDraft);
+      setDirty(false);
+      setMessage("삭제 처리됨");
+    } catch {
+      setMessage("삭제 처리 실패");
+    } finally {
+      setPending(false);
+    }
+  }
+
   function toggleShareTarget(uid: string, checked: boolean) {
     updateDraft((current) => {
       const currentTargets = shareTargetsOf(current);
@@ -1220,6 +1319,15 @@ function EditableUserCard({
             aria-label="아래로"
           >
             <ArrowDown size={16} />
+          </button>
+          <button
+            className="secondary-button danger admin-user-delete-button"
+            disabled={pending || !user.isActive}
+            onClick={() => void softDeleteUser()}
+            type="button"
+          >
+            <Trash2 size={15} />
+            삭제
           </button>
         </div>
         <p className="reset-hint">
