@@ -5466,6 +5466,38 @@ textarea {
   grid-column: span 2;
 }
 
+.schedule-create-details,
+.schedule-create-checklist {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.schedule-create-details textarea {
+  min-height: 84px;
+}
+
+.schedule-create-checklist h3 {
+  color: var(--ink);
+  font-size: 14px;
+  letter-spacing: 0;
+  margin: 0;
+}
+
+.schedule-create-checklist label {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.schedule-create-checklist input[type="checkbox"] {
+  min-height: 18px;
+  width: 18px;
+}
+
 .schedule-create-options,
 .schedule-create-actions {
   align-items: center;
@@ -5746,6 +5778,7 @@ textarea {
 .calendar-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
+  min-width: 0;
 }
 
 .calendar-weekdays {
@@ -5772,8 +5805,18 @@ textarea {
   gap: 8px;
   justify-content: stretch;
   min-height: 132px;
+  min-width: 0;
   padding: 9px;
   text-align: left;
+  transition:
+    background-color 140ms ease,
+    box-shadow 140ms ease;
+  width: 100%;
+}
+
+.calendar-day:hover,
+.calendar-day:focus-visible {
+  background: #f8fbfa;
 }
 
 .calendar-day:nth-child(7n) {
@@ -5798,6 +5841,7 @@ textarea {
 }
 
 .calendar-day.selected {
+  background: color-mix(in srgb, var(--blue) 5%, #ffffff);
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--blue) 58%, #ffffff);
 }
 
@@ -5808,13 +5852,67 @@ textarea {
 }
 
 .calendar-task-pill {
+  align-items: center;
   background: color-mix(in srgb, var(--teal) 16%, #ffffff);
   border-radius: 5px;
   color: #244d47;
+  display: flex;
   font-size: 12px;
   font-weight: 800;
+  gap: 5px;
+  justify-content: space-between;
   line-height: 1.25;
+  min-height: 22px;
+  min-width: 0;
   padding: 3px 5px;
+}
+
+.calendar-task-pill.range-start {
+  border-bottom-right-radius: 0;
+  border-top-right-radius: 0;
+  margin-right: -10px;
+  padding-right: 10px;
+}
+
+.calendar-task-pill.range-middle {
+  border-radius: 0;
+  margin-left: -10px;
+  margin-right: -10px;
+}
+
+.calendar-task-pill.range-end {
+  border-bottom-left-radius: 0;
+  border-top-left-radius: 0;
+  margin-left: -10px;
+  padding-left: 10px;
+}
+
+.calendar-task-pill.week-start {
+  border-bottom-left-radius: 5px;
+  border-top-left-radius: 5px;
+  margin-left: 0;
+  padding-left: 5px;
+}
+
+.calendar-task-pill.week-end {
+  border-bottom-right-radius: 5px;
+  border-top-right-radius: 5px;
+  margin-right: 0;
+  padding-right: 5px;
+}
+
+.calendar-task-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-task-time {
+  color: color-mix(in srgb, var(--teal) 72%, #14211f);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 900;
 }
 
 .calendar-task-pill.completed {
@@ -6125,6 +6223,8 @@ textarea {
 
   .calendar-panel {
     order: 1;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .calendar-agenda {
@@ -6133,9 +6233,14 @@ textarea {
 }
 
 @media (max-width: 640px) {
+  .schedule-workspace {
+    padding: 14px;
+  }
+
   .schedule-header {
     align-items: stretch;
     display: grid;
+    gap: 14px;
   }
 
   .schedule-view-tabs {
@@ -6145,6 +6250,7 @@ textarea {
   }
 
   .schedule-view-tabs button {
+    min-height: 44px;
     padding: 0;
   }
 
@@ -6156,6 +6262,23 @@ textarea {
   .schedule-create-form.compact .schedule-create-grid,
   .schedule-checklist-add {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .schedule-section,
+  .matrix-section,
+  .calendar-agenda,
+  .completed-panel {
+    padding: 18px;
+  }
+
+  .schedule-section,
+  .matrix-section {
+    min-height: 330px;
+  }
+
+  .calendar-weekdays,
+  .calendar-grid {
+    min-width: 680px;
   }
 
   .schedule-create-title,
@@ -6173,30 +6296,26 @@ textarea {
 
   .calendar-day {
     gap: 4px;
-    min-height: 48px;
-    padding: 6px;
-    place-items: start center;
-    text-align: center;
+    min-height: 92px;
+    padding: 7px;
+    place-items: stretch;
+    text-align: left;
   }
 
   .calendar-task-stack {
-    display: block;
-    min-height: 6px;
+    display: grid;
+    gap: 3px;
+    min-height: 0;
   }
 
   .calendar-task-pill {
-    border-radius: 999px;
-    display: inline-block;
-    height: 6px;
-    margin: 0 1px;
-    overflow: hidden;
-    padding: 0;
-    text-indent: -999px;
-    width: 6px;
+    font-size: 11px;
+    min-height: 20px;
+    padding: 2px 5px;
   }
 
   .calendar-more {
-    display: none;
+    font-size: 11px;
   }
 
   .schedule-detail-backdrop {

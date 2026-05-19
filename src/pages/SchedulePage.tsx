@@ -22,6 +22,7 @@ import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
 import {
+  addDays,
   buildCalendarMonth,
   compareCompletedTasks,
   compareTaskSchedule,
@@ -32,6 +33,7 @@ import {
   groupTasksByMatrix,
   groupTasksByTodoDate,
   normalizeScheduleDetails,
+  taskEndDate,
   taskStartDate,
   taskStartTime,
   tasksByDate,
@@ -41,7 +43,6 @@ import {
 } from "../lib/scheduleHelpers";
 import {
   createScheduleTask,
-  defaultScheduleDetails,
   deleteScheduleTask,
   subscribeScheduleTasks,
   updateScheduleTask,
@@ -53,7 +54,7 @@ import type { DecryptedScheduleTask, ScheduleChecklistItem, ScheduleTaskDetails,
 const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
   { view: "todo", label: "할 일", shortLabel: "할 일", Icon: ListTodo },
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
-  { view: "matrix", label: "아이젠하워", shortLabel: "매트릭스", Icon: Grid2X2 },
+  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 },
   { view: "completed", label: "완료", shortLabel: "완료", Icon: CheckCircle2 }
 ];
 
@@ -84,6 +85,8 @@ interface TaskDraft {
 
 interface CreateTaskDraft {
   title: string;
+  description: string;
+  checklist: ScheduleChecklistItem[];
   startDate: string;
   endDate: string;
   timeMode: "none" | "point" | "range";
@@ -255,7 +258,13 @@ export default function SchedulePage() {
       const startTimeMinutes = draft.timeMode === "none" ? null : timeInputToMinutes(draft.startTime);
       const endTimeMinutes = draft.timeMode === "range" ? timeInputToMinutes(draft.endTime) : null;
       const taskKey = await generateNoteKey();
-      const [encryptedTitle, encryptedDetails] = await encryptTaskFields(trimmedTitle, defaultScheduleDetails, taskKey);
+      const details: ScheduleTaskDetails = {
+        description: draft.description,
+        checklist: draft.checklist
+          .map((item) => ({ ...item, text: item.text.trim() }))
+          .filter((item) => item.text)
+      };
+      const [encryptedTitle, encryptedDetails] = await encryptTaskFields(trimmedTitle, details, taskKey);
       const wrappedKey = await wrapNoteKey(taskKey, unlockedProfile.publicKeyJwk);
 
       await createScheduleTask({
@@ -525,6 +534,7 @@ function ScheduleCreateForm({
 }) {
   const titleId = useId();
   const [draft, setDraft] = useState<CreateTaskDraft>(() => createDraftFromDefaults(defaults));
+  const [checklistText, setChecklistText] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
 
@@ -565,8 +575,23 @@ function ScheduleCreateForm({
 
     if (created) {
       setDraft(createDraftFromDefaults(defaults));
+      setChecklistText("");
       onCreated?.();
     }
+  }
+
+  function addChecklistItem() {
+    const text = checklistText.trim();
+
+    if (!text) {
+      return;
+    }
+
+    setDraft((current) => ({
+      ...current,
+      checklist: [...current.checklist, { id: crypto.randomUUID(), text, checked: false }]
+    }));
+    setChecklistText("");
   }
 
   return (
@@ -664,6 +689,76 @@ function ScheduleCreateForm({
           </label>
         )}
       </div>
+      <label className="schedule-create-details">
+        <span>내용</span>
+        <textarea
+          onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
+          placeholder="일정 내용"
+          rows={3}
+          value={draft.description}
+        />
+      </label>
+      <section className="schedule-create-checklist">
+        <h3>체크리스트</h3>
+        {draft.checklist.map((item) => (
+          <label key={item.id}>
+            <input
+              checked={item.checked}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  checklist: current.checklist.map((checkItem) =>
+                    checkItem.id === item.id ? { ...checkItem, checked: event.target.checked } : checkItem
+                  )
+                }))
+              }
+              type="checkbox"
+            />
+            <input
+              aria-label="체크리스트 항목"
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  checklist: current.checklist.map((checkItem) =>
+                    checkItem.id === item.id ? { ...checkItem, text: event.target.value } : checkItem
+                  )
+                }))
+              }
+              value={item.text}
+            />
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="항목 삭제"
+              onClick={() =>
+                setDraft((current) => ({
+                  ...current,
+                  checklist: current.checklist.filter((checkItem) => checkItem.id !== item.id)
+                }))
+              }
+            >
+              <X size={15} />
+            </button>
+          </label>
+        ))}
+        <div className="schedule-checklist-add">
+          <input
+            onChange={(event) => setChecklistText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                addChecklistItem();
+              }
+            }}
+            placeholder="체크리스트 항목"
+            value={checklistText}
+          />
+          <button className="secondary-button" type="button" onClick={addChecklistItem}>
+            <Plus size={16} />
+            추가
+          </button>
+        </div>
+      </section>
       {allowPriority && (
         <div className="schedule-create-options">
           <label>
@@ -796,6 +891,8 @@ function CalendarView({
   selectedDayTasks: DecryptedScheduleTask[];
   weeks: ReturnType<typeof buildCalendarMonth>;
 }) {
+  const firstVisibleDate = weeks[0]?.days[0]?.dateString ?? selectedDate;
+
   return (
     <div className="calendar-layout">
       <section className="calendar-panel">
@@ -835,14 +932,34 @@ function CalendarView({
                 >
                   <strong>{day.dayNumber}</strong>
                   <span className="calendar-task-stack">
-                    {dayTasks.slice(0, 4).map((task) => (
-                      <span
-                        className={`calendar-task-pill ${task.status === "completed" ? "completed" : ""}`}
-                        key={task.id}
-                      >
-                        {task.title}
-                      </span>
-                    ))}
+                    {dayTasks.slice(0, 4).map((task) => {
+                      const rangePosition = calendarTaskRangePosition(task, day.dateString);
+                      const showLabel = shouldShowCalendarTaskLabel(task, day.dateString, firstVisibleDate);
+                      const timeLabel = formatScheduleTimeRange(task);
+
+                      return (
+                        <span
+                          className={[
+                            "calendar-task-pill",
+                            task.status === "completed" ? "completed" : "",
+                            rangePosition,
+                            day.date.getDay() === 0 ? "week-start" : "",
+                            day.date.getDay() === 6 ? "week-end" : ""
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          key={task.id}
+                          title={`${task.title}${timeLabel ? ` · ${timeLabel}` : ""}`}
+                        >
+                          {showLabel && (
+                            <>
+                              <span className="calendar-task-title">{task.title}</span>
+                              {timeLabel && <span className="calendar-task-time">{timeLabel}</span>}
+                            </>
+                          )}
+                        </span>
+                      );
+                    })}
                     {dayTasks.length > 4 && <span className="calendar-more">+{dayTasks.length - 4}</span>}
                   </span>
                 </button>
@@ -997,7 +1114,7 @@ function CompletedView({
           <Search size={16} />
           <input
             onChange={(event) => onQueryChange(event.target.value)}
-            placeholder="완료한 업무 검색"
+            placeholder="제목, 내용, 체크리스트 검색"
             type="search"
             value={query}
           />
@@ -1435,6 +1552,8 @@ function createDraftFromDefaults(defaults: QuickDefaults): CreateTaskDraft {
 
   return {
     title: "",
+    description: "",
+    checklist: [],
     startDate,
     endDate,
     timeMode: hasStartTime ? (defaults.endTimeMinutes == null ? "point" : "range") : "none",
@@ -1493,4 +1612,38 @@ function formatTaskDateDisplay(task: DecryptedScheduleTask) {
   }
 
   return formatScheduleDateRange(task);
+}
+
+function calendarTaskRangePosition(task: DecryptedScheduleTask, dateString: string) {
+  const startDate = taskStartDate(task);
+  const endDate = taskEndDate(task);
+
+  if (!startDate || !endDate || startDate === endDate) {
+    return "single";
+  }
+
+  if (dateString === startDate) {
+    return "range-start";
+  }
+
+  if (dateString === endDate) {
+    return "range-end";
+  }
+
+  return "range-middle";
+}
+
+function shouldShowCalendarTaskLabel(task: DecryptedScheduleTask, dateString: string, firstVisibleDate: string) {
+  if (calendarTaskRangePosition(task, dateString) === "single") {
+    return true;
+  }
+
+  return dateString === firstVisibleDate || !taskCoversDate(task, addDays(dateString, -1));
+}
+
+function taskCoversDate(task: DecryptedScheduleTask, dateString: string) {
+  const startDate = taskStartDate(task);
+  const endDate = taskEndDate(task);
+
+  return Boolean(startDate && startDate <= dateString && (!endDate || endDate >= dateString));
 }
