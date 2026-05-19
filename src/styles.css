@@ -5818,33 +5818,15 @@ textarea {
   font-weight: 800;
 }
 
-.schedule-color-picker > div {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.schedule-color-picker button,
 .schedule-color-picker input[type="color"] {
-  background: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 24%, #ffffff);
-  border: 1px solid color-mix(in srgb, var(--schedule-task-color, var(--teal)) 48%, #ffffff);
-  border-radius: 999px;
+  appearance: none;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   cursor: pointer;
-  height: 26px;
-  padding: 0;
-  width: 26px;
-}
-
-.schedule-color-picker button.active {
-  box-shadow:
-    0 0 0 2px #ffffff,
-    0 0 0 4px color-mix(in srgb, var(--schedule-task-color, var(--teal)) 64%, #ffffff);
-}
-
-.schedule-color-picker input[type="color"] {
-  background: transparent;
-  overflow: hidden;
+  height: 42px;
+  padding: 3px;
+  width: 100%;
 }
 
 .schedule-create-actions {
@@ -6171,15 +6153,18 @@ textarea {
   min-width: 0;
 }
 
-.calendar-day.today strong,
-.calendar-day.selected strong {
+.calendar-day-head strong {
   align-items: center;
-  border-radius: 999px;
   display: inline-flex;
-  flex: 0 0 auto;
+  flex: 0 0 26px;
   height: 26px;
   justify-content: center;
   width: 26px;
+}
+
+.calendar-day.today strong,
+.calendar-day.selected strong {
+  border-radius: 999px;
 }
 
 .calendar-day.today:not(.selected) strong {
