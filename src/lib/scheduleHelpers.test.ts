@@ -12,6 +12,12 @@ import {
   timeInputToMinutes
 } from "./scheduleHelpers";
 
+function timestamp(value: string) {
+  return {
+    toMillis: () => new Date(value).getTime()
+  } as DecryptedScheduleTask["createdAt"];
+}
+
 function task(id: string, overrides: Partial<DecryptedScheduleTask> = {}): DecryptedScheduleTask {
   return {
     id,
@@ -44,7 +50,8 @@ describe("schedule helpers", () => {
         task("week", { dueDate: "2026-05-24" }),
         task("later", { dueDate: "2026-06-01" }),
         task("none"),
-        task("done", { status: "completed", dueDate: "2026-05-19" })
+        task("done", { status: "completed", dueDate: "2026-05-19", completedAt: timestamp("2026-05-19T08:00:00Z") }),
+        task("old-done", { status: "completed", dueDate: "2026-05-01", completedAt: timestamp("2026-05-01T08:00:00Z") })
       ],
       "2026-05-19"
     );
@@ -90,18 +97,20 @@ describe("schedule helpers", () => {
   it("sorts tasks into Eisenhower matrix sections", () => {
     const sections = groupTasksByMatrix([
       task("urgent-important", { isImportant: true, isUrgent: true }),
-      task("urgent", { isImportant: false, isUrgent: true }),
+      task("urgent", { isImportant: false, isUrgent: true, startDate: "2026-05-21", startTimeMinutes: 600 }),
+      task("urgent-earlier", { isImportant: false, isUrgent: true, startDate: "2026-05-21", startTimeMinutes: 540 }),
       task("important", { isImportant: true, isUrgent: false }),
-      task("waiting"),
+      task("waiting-old", { createdAt: timestamp("2026-05-18T08:00:00Z") }),
+      task("waiting-new", { createdAt: timestamp("2026-05-19T08:00:00Z") }),
       task("done", { status: "completed", isImportant: true, isUrgent: true })
     ]);
 
     expect(matrixQuadrantForTask({ isImportant: true, isUrgent: false })).toBe("importantNotUrgent");
     expect(sections.map((section) => [section.key, section.tasks.map((item) => item.id)])).toEqual([
       ["urgentImportant", ["urgent-important"]],
-      ["urgentNotImportant", ["urgent"]],
+      ["urgentNotImportant", ["urgent-earlier", "urgent"]],
       ["importantNotUrgent", ["important"]],
-      ["notUrgentNotImportant", ["waiting"]]
+      ["notUrgentNotImportant", ["waiting-new", "waiting-old"]]
     ]);
   });
 

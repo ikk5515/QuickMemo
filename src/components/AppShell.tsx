@@ -170,6 +170,7 @@ function SettingsModal({
               <option value="todo">할 일</option>
               <option value="calendar">달력</option>
               <option value="matrix">아이젠하워</option>
+              <option value="completed">완료</option>
             </select>
           </label>
           {error && <p className="form-error">{error}</p>}

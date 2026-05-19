@@ -72,6 +72,68 @@ export function taskEndTime(task: Pick<DecryptedScheduleTask, "endTimeMinutes">)
   return task.endTimeMinutes ?? null;
 }
 
+function timestampMillis(value: { toMillis?: () => number } | null | undefined) {
+  return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
+}
+
+function taskCreatedMillis(task: Pick<DecryptedScheduleTask, "createdAt" | "updatedAt">) {
+  return timestampMillis(task.createdAt) || timestampMillis(task.updatedAt);
+}
+
+export function compareTaskNewest(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  const leftCreated = taskCreatedMillis(left);
+  const rightCreated = taskCreatedMillis(right);
+
+  if (leftCreated !== rightCreated) {
+    return rightCreated - leftCreated;
+  }
+
+  return compareTaskSchedule(left, right);
+}
+
+export function compareCompletedTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  const leftCompleted = timestampMillis(left.completedAt);
+  const rightCompleted = timestampMillis(right.completedAt);
+
+  if (leftCompleted !== rightCompleted) {
+    return rightCompleted - leftCompleted;
+  }
+
+  return compareTaskNewest(left, right);
+}
+
+export function compareMatrixTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  const leftTime = taskStartDateTimeMillis(left);
+  const rightTime = taskStartDateTimeMillis(right);
+
+  if (leftTime != null && rightTime != null && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+
+  if (leftTime != null) {
+    return -1;
+  }
+
+  if (rightTime != null) {
+    return 1;
+  }
+
+  return compareTaskNewest(left, right);
+}
+
+function taskStartDateTimeMillis(task: DecryptedScheduleTask) {
+  const startTime = taskStartTime(task);
+
+  if (startTime == null) {
+    return null;
+  }
+
+  const startDate = taskStartDate(task);
+  const dateMillis = startDate ? parseLocalDateString(startDate).getTime() : Number.MAX_SAFE_INTEGER - 24 * 60 * 60 * 1000;
+
+  return dateMillis + startTime * 60 * 1000;
+}
+
 export function compareTaskSchedule(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
   const leftDate = taskStartDate(left) ?? "9999-12-31";
   const rightDate = taskStartDate(right) ?? "9999-12-31";
@@ -146,6 +208,7 @@ export function formatScheduleTimeRange(task: DecryptedScheduleTask) {
 }
 
 export function groupTasksByTodoDate(tasks: DecryptedScheduleTask[], today = toLocalDateString(new Date())): TodoGroup[] {
+  const completedSince = addDays(today, -6);
   const tomorrow = addDays(today, 1);
   const nextSevenEnd = addDays(today, 7);
   const groups: Record<TodoGroupKey, DecryptedScheduleTask[]> = {
@@ -159,7 +222,12 @@ export function groupTasksByTodoDate(tasks: DecryptedScheduleTask[], today = toL
 
   tasks.forEach((task) => {
     if (task.status === "completed") {
-      groups.completed.push(task);
+      const completedAt = timestampMillis(task.completedAt);
+      const completedDate = completedAt ? toLocalDateString(new Date(completedAt)) : null;
+
+      if (completedDate && completedDate >= completedSince) {
+        groups.completed.push(task);
+      }
       return;
     }
 
@@ -195,12 +263,12 @@ export function groupTasksByTodoDate(tasks: DecryptedScheduleTask[], today = toL
   });
 
   return [
-    { key: "today", label: "오늘", tasks: groups.today.sort(compareTaskSchedule) },
-    { key: "tomorrow", label: "내일", tasks: groups.tomorrow.sort(compareTaskSchedule) },
-    { key: "next7", label: "다음 7일", tasks: groups.next7.sort(compareTaskSchedule) },
-    { key: "later", label: "이후", tasks: groups.later.sort(compareTaskSchedule) },
-    { key: "noDate", label: "날짜 없음", tasks: groups.noDate.sort(compareTaskSchedule) },
-    { key: "completed", label: "완료", tasks: groups.completed.sort(compareTaskSchedule) }
+    { key: "today", label: "오늘", tasks: groups.today.sort(compareTaskNewest) },
+    { key: "tomorrow", label: "내일", tasks: groups.tomorrow.sort(compareTaskNewest) },
+    { key: "next7", label: "다음 7일", tasks: groups.next7.sort(compareTaskNewest) },
+    { key: "later", label: "이후", tasks: groups.later.sort(compareTaskNewest) },
+    { key: "noDate", label: "날짜 없음", tasks: groups.noDate.sort(compareTaskNewest) },
+    { key: "completed", label: "최근 완료", tasks: groups.completed.sort(compareCompletedTasks) }
   ];
 }
 
@@ -318,7 +386,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[]): MatrixSectio
 
   return sections.map((section) => ({
     ...section,
-    tasks: section.tasks.sort(compareTaskSchedule)
+    tasks: section.tasks.sort(compareMatrixTasks)
   }));
 }
 

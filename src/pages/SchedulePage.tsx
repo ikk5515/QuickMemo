@@ -7,8 +7,10 @@ import {
   Flag,
   Grid2X2,
   ListTodo,
+  Pencil,
   Plus,
   Save,
+  Search,
   Trash2,
   X
 } from "lucide-react";
@@ -21,6 +23,7 @@ import { useAuth } from "../context/AuthContext";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
 import {
   buildCalendarMonth,
+  compareCompletedTasks,
   compareTaskSchedule,
   emptyScheduleDetails,
   formatScheduleDateRange,
@@ -50,8 +53,11 @@ import type { DecryptedScheduleTask, ScheduleChecklistItem, ScheduleTaskDetails,
 const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
   { view: "todo", label: "할 일", shortLabel: "할 일", Icon: ListTodo },
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
-  { view: "matrix", label: "아이젠하워", shortLabel: "매트릭스", Icon: Grid2X2 }
+  { view: "matrix", label: "아이젠하워", shortLabel: "매트릭스", Icon: Grid2X2 },
+  { view: "completed", label: "완료", shortLabel: "완료", Icon: CheckCircle2 }
 ];
+
+const taskPageSize = 5;
 
 interface QuickDefaults {
   startDate?: string | null;
@@ -98,10 +104,12 @@ export default function SchedulePage() {
   const [activeView, setActiveView] = useState<ScheduleView>("todo");
   const [tasks, setTasks] = useState<ScheduleTaskSnapshot[]>([]);
   const [decryptedTasks, setDecryptedTasks] = useState<DecryptedScheduleTask[]>([]);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [viewTaskId, setViewTaskId] = useState<string | null>(null);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => toLocalDateString(new Date()));
   const [calendarCursor, setCalendarCursor] = useState(() => new Date());
   const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(null);
+  const [completedQuery, setCompletedQuery] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const today = useMemo(() => toLocalDateString(new Date()), []);
@@ -191,9 +199,17 @@ export default function SchedulePage() {
   }, [privateKey, profile, tasks]);
 
   const sortedTasks = useMemo(() => [...decryptedTasks].sort(compareTaskSchedule), [decryptedTasks]);
-  const selectedTask = useMemo(
-    () => sortedTasks.find((task) => task.id === selectedTaskId) ?? null,
-    [selectedTaskId, sortedTasks]
+  const viewTask = useMemo(
+    () => sortedTasks.find((task) => task.id === viewTaskId) ?? null,
+    [viewTaskId, sortedTasks]
+  );
+  const editingTask = useMemo(
+    () => sortedTasks.find((task) => task.id === editingTaskId) ?? null,
+    [editingTaskId, sortedTasks]
+  );
+  const completedTasks = useMemo(
+    () => sortedTasks.filter((task) => task.status === "completed").sort(compareCompletedTasks),
+    [sortedTasks]
   );
   const todoGroups = useMemo(() => groupTasksByTodoDate(sortedTasks, today), [sortedTasks, today]);
   const matrixSections = useMemo(() => groupTasksByMatrix(sortedTasks), [sortedTasks]);
@@ -315,7 +331,8 @@ export default function SchedulePage() {
         status: draft.status,
         completedAt: nextCompleted ? (task.completedAt ?? serverTimestamp()) : null
       });
-      setSelectedTaskId(null);
+      setEditingTaskId(null);
+      setViewTaskId(null);
       setStatus("일정을 저장했습니다.");
       setError(null);
     } catch (caught) {
@@ -326,7 +343,8 @@ export default function SchedulePage() {
   async function removeTask(task: DecryptedScheduleTask) {
     try {
       await deleteScheduleTask(task.id);
-      setSelectedTaskId(null);
+      setEditingTaskId(null);
+      setViewTaskId(null);
       setStatus("일정을 삭제했습니다.");
       setError(null);
     } catch (caught) {
@@ -406,17 +424,16 @@ export default function SchedulePage() {
           </div>
         )}
 
-        {activeView !== "matrix" && (
+        {activeView === "todo" && (
           <ScheduleCreateForm
-            key={`${activeView}-${selectedCalendarDate}`}
             defaults={quickDefaultsForActiveView()}
-            label={activeView === "calendar" ? `${formatDateLabel(selectedCalendarDate)}에 추가` : "빠른 일정 추가"}
+            label="업무 추가"
             onCreate={createTask}
           />
         )}
 
         {activeView === "todo" && (
-          <TodoView groups={todoGroups} onOpen={setSelectedTaskId} onToggle={(task) => void toggleTask(task)} />
+          <TodoView groups={todoGroups} onOpen={setViewTaskId} onToggle={(task) => void toggleTask(task)} />
         )}
 
         {activeView === "calendar" && (
@@ -426,9 +443,10 @@ export default function SchedulePage() {
             selectedDayTasks={selectedDayTasks}
             weeks={calendarWeeks}
             monthLabel={calendarMonthLabel(calendarCursor)}
+            onAddDate={openCalendarCreateDialog}
             onMoveMonth={moveCalendarMonth}
-            onOpen={setSelectedTaskId}
-            onSelectDate={openCalendarCreateDialog}
+            onOpen={setViewTaskId}
+            onSelectDate={setSelectedCalendarDate}
             onToday={goToday}
             onToggle={(task) => void toggleTask(task)}
           />
@@ -438,18 +456,40 @@ export default function SchedulePage() {
           <MatrixView
             sections={matrixSections}
             onAddSection={openMatrixCreateDialog}
-            onOpen={setSelectedTaskId}
+            onOpen={setViewTaskId}
+            onToggle={(task) => void toggleTask(task)}
+          />
+        )}
+
+        {activeView === "completed" && (
+          <CompletedView
+            query={completedQuery}
+            tasks={completedTasks}
+            onOpen={setViewTaskId}
+            onQueryChange={setCompletedQuery}
             onToggle={(task) => void toggleTask(task)}
           />
         )}
       </section>
 
-      {selectedTask && (
+      {viewTask && (
+        <TaskReadModal
+          task={viewTask}
+          onClose={() => setViewTaskId(null)}
+          onDelete={() => void removeTask(viewTask)}
+          onEdit={() => {
+            setEditingTaskId(viewTask.id);
+            setViewTaskId(null);
+          }}
+        />
+      )}
+
+      {editingTask && (
         <TaskDetailModal
-          task={selectedTask}
-          onClose={() => setSelectedTaskId(null)}
-          onDelete={() => void removeTask(selectedTask)}
-          onSave={(draft) => void saveTask(selectedTask, draft)}
+          task={editingTask}
+          onClose={() => setEditingTaskId(null)}
+          onDelete={() => void removeTask(editingTask)}
+          onSave={(draft) => void saveTask(editingTask, draft)}
         />
       )}
 
@@ -724,7 +764,7 @@ function TodoView({
             <h2>{group.label}</h2>
             <span>{group.tasks.length}</span>
           </header>
-          <TaskList tasks={group.tasks} onOpen={onOpen} onToggle={onToggle} />
+          <PagedTaskList tasks={group.tasks} onOpen={onOpen} onToggle={onToggle} />
         </section>
       ))}
     </div>
@@ -734,6 +774,7 @@ function TodoView({
 function CalendarView({
   calendarTaskMap,
   monthLabel,
+  onAddDate,
   onMoveMonth,
   onOpen,
   onSelectDate,
@@ -745,6 +786,7 @@ function CalendarView({
 }: {
   calendarTaskMap: Record<string, DecryptedScheduleTask[]>;
   monthLabel: string;
+  onAddDate: (dateString: string) => void;
   onMoveMonth: (offset: number) => void;
   onOpen: (taskId: string) => void;
   onSelectDate: (dateString: string) => void;
@@ -788,6 +830,8 @@ function CalendarView({
                   className={`calendar-day ${day.inCurrentMonth ? "" : "muted"} ${day.isToday ? "today" : ""} ${selected ? "selected" : ""}`}
                   type="button"
                   onClick={() => onSelectDate(day.dateString)}
+                  onDoubleClick={() => onAddDate(day.dateString)}
+                  aria-label={`${formatDateLabel(day.dateString)} 선택`}
                 >
                   <strong>{day.dayNumber}</strong>
                   <span className="calendar-task-stack">
@@ -813,6 +857,10 @@ function CalendarView({
           <h2>{formatDateLabel(selectedDate)}</h2>
           <span>{selectedDayTasks.length}</span>
         </header>
+        <button className="secondary-button calendar-agenda-add" type="button" onClick={() => onAddDate(selectedDate)}>
+          <Plus size={16} />
+          일정 추가
+        </button>
         <TaskList tasks={selectedDayTasks} onOpen={onOpen} onToggle={onToggle} />
       </section>
     </div>
@@ -848,21 +896,128 @@ function MatrixView({
               <Plus size={18} />
             </button>
           </header>
-          <TaskList tasks={section.tasks} onOpen={onOpen} onToggle={onToggle} />
+          <PagedTaskList tasks={section.tasks} onOpen={onOpen} onToggle={onToggle} />
         </section>
       ))}
     </div>
   );
 }
 
+function PagedTaskList({
+  onOpen,
+  onToggle,
+  pageSize = taskPageSize,
+  strikeCompleted = true,
+  tasks
+}: {
+  onOpen: (taskId: string) => void;
+  onToggle: (task: DecryptedScheduleTask) => void;
+  pageSize?: number;
+  strikeCompleted?: boolean;
+  tasks: DecryptedScheduleTask[];
+}) {
+  const [page, setPage] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(tasks.length / pageSize));
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, pageCount - 1));
+  }, [pageCount]);
+
+  const visibleTasks = tasks.slice(page * pageSize, page * pageSize + pageSize);
+
+  return (
+    <div className="task-paged-list">
+      <TaskList tasks={visibleTasks} onOpen={onOpen} onToggle={onToggle} strikeCompleted={strikeCompleted} />
+      {tasks.length > pageSize && (
+        <div className="task-pager" aria-label="일정 페이지 이동">
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="이전 일정"
+            disabled={page === 0}
+            onClick={() => setPage((current) => Math.max(0, current - 1))}
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <span>
+            {page + 1} / {pageCount}
+          </span>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="다음 일정"
+            disabled={page >= pageCount - 1}
+            onClick={() => setPage((current) => Math.min(pageCount - 1, current + 1))}
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompletedView({
+  onOpen,
+  onQueryChange,
+  onToggle,
+  query,
+  tasks
+}: {
+  onOpen: (taskId: string) => void;
+  onQueryChange: (query: string) => void;
+  onToggle: (task: DecryptedScheduleTask) => void;
+  query: string;
+  tasks: DecryptedScheduleTask[];
+}) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredTasks = useMemo(() => {
+    if (!normalizedQuery) {
+      return tasks;
+    }
+
+    return tasks.filter((task) => {
+      const details = task.details ?? emptyScheduleDetails;
+      const searchable = [task.title, details.description, ...details.checklist.map((item) => item.text)]
+        .join(" ")
+        .toLowerCase();
+
+      return searchable.includes(normalizedQuery);
+    });
+  }, [normalizedQuery, tasks]);
+
+  return (
+    <section className="completed-panel">
+      <header>
+        <div>
+          <h2>완료 내역</h2>
+          <span>{filteredTasks.length}</span>
+        </div>
+        <label className="completed-search">
+          <Search size={16} />
+          <input
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder="완료한 업무 검색"
+            type="search"
+            value={query}
+          />
+        </label>
+      </header>
+      <TaskList tasks={filteredTasks} onOpen={onOpen} onToggle={onToggle} strikeCompleted={false} />
+    </section>
+  );
+}
+
 function TaskList({
   tasks,
   onOpen,
-  onToggle
+  onToggle,
+  strikeCompleted = true
 }: {
   tasks: DecryptedScheduleTask[];
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
+  strikeCompleted?: boolean;
 }) {
   if (!tasks.length) {
     return <p className="schedule-empty">표시할 일정이 없습니다.</p>;
@@ -871,7 +1026,7 @@ function TaskList({
   return (
     <div className="task-list">
       {tasks.map((task) => (
-        <div className={`task-row ${task.status === "completed" ? "completed" : ""}`} key={task.id}>
+        <div className={`task-row ${strikeCompleted && task.status === "completed" ? "completed" : ""}`} key={task.id}>
           <button
             className="task-check"
             type="button"
@@ -895,6 +1050,97 @@ function TaskList({
           </span>
         </div>
       ))}
+    </div>
+  );
+}
+
+function TaskReadModal({
+  onClose,
+  onDelete,
+  onEdit,
+  task
+}: {
+  onClose: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  task: DecryptedScheduleTask;
+}) {
+  const details = task.details ?? emptyScheduleDetails;
+  const hasChecklist = details.checklist.length > 0;
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="schedule-read-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="schedule-read-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <p className="section-kicker">
+              <CalendarDays size={15} />
+              일정
+            </p>
+            <h2 id="schedule-read-title">{task.title}</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="task-read-meta">
+          <span>{formatTaskDateDisplay(task)}</span>
+          {formatScheduleTimeRange(task) && <span>{formatScheduleTimeRange(task)}</span>}
+          {task.status === "completed" && <span>완료</span>}
+          {task.isImportant && <span>중요</span>}
+          {task.isUrgent && <span>긴급</span>}
+        </div>
+
+        <section className="task-read-section">
+          <h3>내용</h3>
+          <p>{details.description.trim() || "내용이 없습니다."}</p>
+        </section>
+
+        <section className="task-read-section">
+          <h3>체크리스트</h3>
+          {hasChecklist ? (
+            <ul className="task-read-checklist">
+              {details.checklist.map((item) => (
+                <li key={item.id} className={item.checked ? "checked" : ""}>
+                  <CheckCircle2 size={16} />
+                  <span>{item.text}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p>체크리스트가 없습니다.</p>
+          )}
+        </section>
+
+        <footer>
+          <button className="danger-button" type="button" onClick={onDelete}>
+            <Trash2 size={17} />
+            삭제
+          </button>
+          <button type="button" onClick={onEdit}>
+            <Pencil size={17} />
+            수정
+          </button>
+        </footer>
+      </section>
     </div>
   );
 }
