@@ -5699,6 +5699,46 @@ textarea {
   width: 18px;
 }
 
+.schedule-color-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.schedule-color-picker > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.schedule-color-picker > div {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.schedule-color-picker button,
+.schedule-color-picker input[type="color"] {
+  background: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 24%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--schedule-task-color, var(--teal)) 48%, #ffffff);
+  border-radius: 999px;
+  cursor: pointer;
+  height: 26px;
+  padding: 0;
+  width: 26px;
+}
+
+.schedule-color-picker button.active {
+  box-shadow:
+    0 0 0 2px #ffffff,
+    0 0 0 4px color-mix(in srgb, var(--schedule-task-color, var(--teal)) 64%, #ffffff);
+}
+
+.schedule-color-picker input[type="color"] {
+  background: transparent;
+  overflow: hidden;
+}
+
 .schedule-create-actions {
   justify-content: flex-end;
 }
@@ -6087,11 +6127,17 @@ textarea {
   min-width: 0;
 }
 
+.calendar-task-spacer {
+  display: block;
+  min-height: 22px;
+}
+
 .calendar-task-pill {
   align-items: center;
-  background: color-mix(in srgb, var(--teal) 16%, #ffffff);
+  background: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 17%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--schedule-task-color, var(--teal)) 20%, #ffffff);
   border-radius: 5px;
-  color: #244d47;
+  color: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 72%, #17211f);
   display: flex;
   font-size: 12px;
   font-weight: 800;
@@ -6145,7 +6191,7 @@ textarea {
 }
 
 .calendar-task-time {
-  color: color-mix(in srgb, var(--teal) 72%, #14211f);
+  color: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 76%, #14211f);
   flex: 0 0 auto;
   font-size: 11px;
   font-weight: 900;

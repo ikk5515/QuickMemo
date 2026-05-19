@@ -35,6 +35,7 @@ export interface CreateScheduleTaskInput {
   endDate?: string | null;
   startTimeMinutes?: number | null;
   endTimeMinutes?: number | null;
+  color?: string | null;
   isImportant: boolean;
   isUrgent: boolean;
 }
@@ -48,6 +49,7 @@ export interface UpdateScheduleTaskInput {
   endDate?: string | null;
   startTimeMinutes?: number | null;
   endTimeMinutes?: number | null;
+  color?: string | null;
   isImportant?: boolean;
   isUrgent?: boolean;
   status?: ScheduleTaskStatus;
@@ -89,6 +91,7 @@ export async function createScheduleTask(input: CreateScheduleTaskInput) {
     endDate: input.endDate ?? input.startDate ?? input.dueDate,
     startTimeMinutes: input.startTimeMinutes ?? input.dueTimeMinutes,
     endTimeMinutes: input.endTimeMinutes ?? null,
+    color: input.color ?? null,
     isImportant: input.isImportant,
     isUrgent: input.isUrgent,
     encryptedTitle: input.title,
