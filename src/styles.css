@@ -6013,6 +6013,26 @@ textarea {
   font-weight: 800;
 }
 
+.completed-filter-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(220px, 1.4fr) repeat(5, minmax(128px, 1fr));
+  margin-bottom: 14px;
+}
+
+.completed-filter-control {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 6px;
+  min-width: 0;
+}
+
+.completed-filter-control.search {
+  min-width: 0;
+}
+
 .completed-search {
   align-items: center;
   background: var(--surface);
@@ -6021,7 +6041,7 @@ textarea {
   color: var(--muted);
   display: flex;
   gap: 8px;
-  min-width: min(320px, 45vw);
+  min-width: 0;
   padding: 0 10px;
 }
 
@@ -6030,6 +6050,11 @@ textarea {
   border: 0;
   min-height: 40px;
   padding: 0;
+}
+
+.completed-filter-control input,
+.completed-filter-control select {
+  min-height: 42px;
 }
 
 .schedule-read-modal {
@@ -6215,6 +6240,10 @@ textarea {
     padding: 18px;
   }
 
+  .completed-filter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .todo-groups,
   .calendar-layout,
   .matrix-grid {
@@ -6337,8 +6366,8 @@ textarea {
     display: grid;
   }
 
-  .completed-search {
-    min-width: 0;
+  .completed-filter-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .schedule-read-modal {
