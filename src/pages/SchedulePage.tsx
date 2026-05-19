@@ -59,6 +59,11 @@ const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: strin
 ];
 
 const taskPageSize = 5;
+const completedPageSize = 10;
+
+type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
+type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
+type CompletedPriorityFilter = "all" | "important" | "urgent" | "importantUrgent";
 
 interface QuickDefaults {
   startDate?: string | null;
@@ -113,6 +118,11 @@ export default function SchedulePage() {
   const [calendarCursor, setCalendarCursor] = useState(() => new Date());
   const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(null);
   const [completedQuery, setCompletedQuery] = useState("");
+  const [completedDate, setCompletedDate] = useState("");
+  const [completedMonth, setCompletedMonth] = useState(() => toLocalDateString(new Date()).slice(0, 7));
+  const [completedMonths, setCompletedMonths] = useState<CompletedMonthsFilter>("1");
+  const [completedPriority, setCompletedPriority] = useState<CompletedPriorityFilter>("all");
+  const [completedContent, setCompletedContent] = useState<CompletedContentFilter>("all");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const today = useMemo(() => toLocalDateString(new Date()), []);
@@ -472,9 +482,19 @@ export default function SchedulePage() {
 
         {activeView === "completed" && (
           <CompletedView
+            contentFilter={completedContent}
+            dateFilter={completedDate}
+            month={completedMonth}
+            months={completedMonths}
+            priorityFilter={completedPriority}
             query={completedQuery}
             tasks={completedTasks}
+            onContentFilterChange={setCompletedContent}
+            onDateFilterChange={setCompletedDate}
+            onMonthChange={setCompletedMonth}
+            onMonthsChange={setCompletedMonths}
             onOpen={setViewTaskId}
+            onPriorityFilterChange={setCompletedPriority}
             onQueryChange={setCompletedQuery}
             onToggle={(task) => void toggleTask(task)}
           />
@@ -978,7 +998,7 @@ function CalendarView({
           <Plus size={16} />
           일정 추가
         </button>
-        <TaskList tasks={selectedDayTasks} onOpen={onOpen} onToggle={onToggle} />
+        <PagedTaskList tasks={selectedDayTasks} onOpen={onOpen} onToggle={onToggle} />
       </section>
     </div>
   );
@@ -1021,12 +1041,14 @@ function MatrixView({
 }
 
 function PagedTaskList({
+  getMeta,
   onOpen,
   onToggle,
   pageSize = taskPageSize,
   strikeCompleted = true,
   tasks
 }: {
+  getMeta?: (task: DecryptedScheduleTask) => string;
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   pageSize?: number;
@@ -1035,6 +1057,11 @@ function PagedTaskList({
 }) {
   const [page, setPage] = useState(0);
   const pageCount = Math.max(1, Math.ceil(tasks.length / pageSize));
+  const taskPageKey = tasks.map((task) => task.id).join("|");
+
+  useEffect(() => {
+    setPage(0);
+  }, [pageSize, taskPageKey]);
 
   useEffect(() => {
     setPage((current) => Math.min(current, pageCount - 1));
@@ -1044,7 +1071,13 @@ function PagedTaskList({
 
   return (
     <div className="task-paged-list">
-      <TaskList tasks={visibleTasks} onOpen={onOpen} onToggle={onToggle} strikeCompleted={strikeCompleted} />
+      <TaskList
+        getMeta={getMeta}
+        tasks={visibleTasks}
+        onOpen={onOpen}
+        onToggle={onToggle}
+        strikeCompleted={strikeCompleted}
+      />
       {tasks.length > pageSize && (
         <div className="task-pager" aria-label="일정 페이지 이동">
           <button
@@ -1075,62 +1108,171 @@ function PagedTaskList({
 }
 
 function CompletedView({
+  contentFilter,
+  dateFilter,
+  month,
+  months,
+  onContentFilterChange,
+  onDateFilterChange,
+  onMonthChange,
+  onMonthsChange,
   onOpen,
+  onPriorityFilterChange,
   onQueryChange,
   onToggle,
+  priorityFilter,
   query,
   tasks
 }: {
+  contentFilter: CompletedContentFilter;
+  dateFilter: string;
+  month: string;
+  months: CompletedMonthsFilter;
+  onContentFilterChange: (filter: CompletedContentFilter) => void;
+  onDateFilterChange: (date: string) => void;
+  onMonthChange: (month: string) => void;
+  onMonthsChange: (months: CompletedMonthsFilter) => void;
   onOpen: (taskId: string) => void;
+  onPriorityFilterChange: (filter: CompletedPriorityFilter) => void;
   onQueryChange: (query: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
+  priorityFilter: CompletedPriorityFilter;
   query: string;
   tasks: DecryptedScheduleTask[];
 }) {
   const normalizedQuery = query.trim().toLowerCase();
   const filteredTasks = useMemo(() => {
-    if (!normalizedQuery) {
-      return tasks;
-    }
-
     return tasks.filter((task) => {
       const details = task.details ?? emptyScheduleDetails;
+      const completedDate = taskCompletedDate(task);
+
+      if (!completedDate) {
+        return false;
+      }
+
+      if (dateFilter) {
+        if (completedDate !== dateFilter) {
+          return false;
+        }
+      } else if (!completedTaskInMonthWindow(completedDate, month, months)) {
+        return false;
+      }
+
+      if (priorityFilter === "important" && !task.isImportant) {
+        return false;
+      }
+
+      if (priorityFilter === "urgent" && !task.isUrgent) {
+        return false;
+      }
+
+      if (priorityFilter === "importantUrgent" && (!task.isImportant || !task.isUrgent)) {
+        return false;
+      }
+
+      if (contentFilter === "hasDescription" && !details.description.trim()) {
+        return false;
+      }
+
+      if (contentFilter === "hasChecklist" && details.checklist.length === 0) {
+        return false;
+      }
+
+      if (!normalizedQuery) {
+        return true;
+      }
+
       const searchable = [task.title, details.description, ...details.checklist.map((item) => item.text)]
         .join(" ")
         .toLowerCase();
 
       return searchable.includes(normalizedQuery);
     });
-  }, [normalizedQuery, tasks]);
+  }, [contentFilter, dateFilter, month, months, normalizedQuery, priorityFilter, tasks]);
+  const rangeLabel = dateFilter ? `${dateFilter} 완료` : completedMonthRangeLabel(month, months);
 
   return (
     <section className="completed-panel">
       <header>
         <div>
           <h2>완료 내역</h2>
-          <span>{filteredTasks.length}</span>
+          <span>
+            {rangeLabel} · {filteredTasks.length}
+          </span>
         </div>
-        <label className="completed-search">
-          <Search size={16} />
-          <input
-            onChange={(event) => onQueryChange(event.target.value)}
-            placeholder="제목, 내용, 체크리스트 검색"
-            type="search"
-            value={query}
-          />
-        </label>
       </header>
-      <TaskList tasks={filteredTasks} onOpen={onOpen} onToggle={onToggle} strikeCompleted={false} />
+      <div className="completed-filter-grid" aria-label="완료 내역 필터">
+        <label className="completed-filter-control search">
+          <span>검색</span>
+          <span className="completed-search">
+            <Search size={16} />
+            <input
+              onChange={(event) => onQueryChange(event.target.value)}
+              placeholder="제목, 내용, 체크리스트 검색"
+              type="search"
+              value={query}
+            />
+          </span>
+        </label>
+        <label className="completed-filter-control">
+          <span>기준 월</span>
+          <input onChange={(event) => onMonthChange(event.target.value)} type="month" value={month} />
+        </label>
+        <label className="completed-filter-control">
+          <span>조회 기간</span>
+          <select onChange={(event) => onMonthsChange(event.target.value as CompletedMonthsFilter)} value={months}>
+            <option value="1">1개월</option>
+            <option value="3">3개월</option>
+            <option value="6">6개월</option>
+            <option value="12">12개월</option>
+            <option value="all">전체</option>
+          </select>
+        </label>
+        <label className="completed-filter-control">
+          <span>특정 완료일</span>
+          <input onChange={(event) => onDateFilterChange(event.target.value)} type="date" value={dateFilter} />
+        </label>
+        <label className="completed-filter-control">
+          <span>중요/긴급</span>
+          <select
+            onChange={(event) => onPriorityFilterChange(event.target.value as CompletedPriorityFilter)}
+            value={priorityFilter}
+          >
+            <option value="all">전체</option>
+            <option value="important">중요</option>
+            <option value="urgent">긴급</option>
+            <option value="importantUrgent">중요 + 긴급</option>
+          </select>
+        </label>
+        <label className="completed-filter-control">
+          <span>내용 필터</span>
+          <select onChange={(event) => onContentFilterChange(event.target.value as CompletedContentFilter)} value={contentFilter}>
+            <option value="all">전체</option>
+            <option value="hasDescription">내용 있음</option>
+            <option value="hasChecklist">체크리스트 있음</option>
+          </select>
+        </label>
+      </div>
+      <PagedTaskList
+        getMeta={formatCompletedTaskMeta}
+        pageSize={completedPageSize}
+        tasks={filteredTasks}
+        onOpen={onOpen}
+        onToggle={onToggle}
+        strikeCompleted={false}
+      />
     </section>
   );
 }
 
 function TaskList({
+  getMeta,
   tasks,
   onOpen,
   onToggle,
   strikeCompleted = true
 }: {
+  getMeta?: (task: DecryptedScheduleTask) => string;
   tasks: DecryptedScheduleTask[];
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
@@ -1156,10 +1298,7 @@ function TaskList({
           </button>
           <button className="task-main task-open-button" type="button" onClick={() => onOpen(task.id)}>
             <strong>{task.title}</strong>
-            <span>
-              {formatTaskDateDisplay(task)}
-              {formatScheduleTimeRange(task) ? ` · ${formatScheduleTimeRange(task)}` : ""}
-            </span>
+            <span>{getMeta ? getMeta(task) : formatTaskMeta(task)}</span>
           </button>
           <span className="task-flags">
             {task.isImportant && <Flag size={15} aria-label="중요" />}
@@ -1612,6 +1751,65 @@ function formatTaskDateDisplay(task: DecryptedScheduleTask) {
   }
 
   return formatScheduleDateRange(task);
+}
+
+function formatTaskMeta(task: DecryptedScheduleTask) {
+  return `${formatTaskDateDisplay(task)}${formatScheduleTimeRange(task) ? ` · ${formatScheduleTimeRange(task)}` : ""}`;
+}
+
+function formatCompletedTaskMeta(task: DecryptedScheduleTask) {
+  const completedDate = taskCompletedDate(task);
+  const parts = completedDate ? [`완료 ${formatDateLabel(completedDate)}`] : ["완료일 없음"];
+
+  parts.push(formatTaskMeta(task));
+  return parts.join(" · ");
+}
+
+function taskCompletedDate(task: DecryptedScheduleTask) {
+  const completedAt = timestampMillis(task.completedAt);
+  return completedAt ? toLocalDateString(new Date(completedAt)) : null;
+}
+
+function timestampMillis(value: { toMillis?: () => number } | null | undefined) {
+  return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
+}
+
+function completedTaskInMonthWindow(completedDate: string, month: string, months: CompletedMonthsFilter) {
+  if (months === "all") {
+    return true;
+  }
+
+  const range = completedMonthRange(month, months);
+  return completedDate >= range.start && completedDate <= range.end;
+}
+
+function completedMonthRangeLabel(month: string, months: CompletedMonthsFilter) {
+  if (months === "all") {
+    return "전체 기간";
+  }
+
+  const range = completedMonthRange(month, months);
+  return range.start.slice(0, 7) === range.end.slice(0, 7)
+    ? `${range.end.slice(0, 7)} 완료`
+    : `${range.start.slice(0, 7)} - ${range.end.slice(0, 7)} 완료`;
+}
+
+function completedMonthRange(month: string, months: Exclude<CompletedMonthsFilter, "all">) {
+  const [yearText, monthText] = month.split("-");
+  const year = Number(yearText);
+  const monthNumber = Number(monthText);
+  const count = Number(months);
+  const safeDate =
+    Number.isInteger(year) && Number.isInteger(monthNumber) && monthNumber >= 1 && monthNumber <= 12
+      ? new Date(year, monthNumber - 1, 1)
+      : new Date();
+  const start = new Date(safeDate.getFullYear(), safeDate.getMonth() - count + 1, 1);
+  const end = new Date(safeDate.getFullYear(), safeDate.getMonth() + 1, 0);
+
+  return {
+    start: toLocalDateString(start),
+    end: toLocalDateString(end)
+  };
 }
 
 function calendarTaskRangePosition(task: DecryptedScheduleTask, dateString: string) {
