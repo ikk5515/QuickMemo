@@ -22,6 +22,9 @@ describe("public share attachment MIME helpers", () => {
   });
 
   it("requires public share attachment MIME types to match their extension exactly", () => {
+    expect(publicShareAttachmentMimeMatchesExtension("pdf", "application/pdf")).toBe(true);
+    expect(publicShareAttachmentMimeMatchesExtension("pdf", "text/html")).toBe(false);
+    expect(publicShareAttachmentMimeMatchesExtension("pdf", "image/svg+xml")).toBe(false);
     expect(publicShareAttachmentMimeMatchesExtension("png", "image/png")).toBe(true);
     expect(publicShareAttachmentMimeMatchesExtension("png", "image/svg+xml")).toBe(false);
     expect(publicShareAttachmentMimeMatchesExtension("png", "text/html")).toBe(false);
