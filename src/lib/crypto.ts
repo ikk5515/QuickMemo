@@ -294,11 +294,13 @@ async function decryptPrivateKeyJsonWithFallback(keyDocument: UserKeyDocument, p
   }
 }
 
-export async function decryptPrivateKeyJsonForPassword(keyDocument: UserKeyDocument, password: string) {
-  return decryptPrivateKeyJsonWithFallback(keyDocument, password);
-}
-
-export async function importPrivateKeyJson(privateKeyJson: string) {
+export async function unlockPrivateKey(keyDocument: UserKeyDocument, password: string) {
+  const passwordKey = await derivePasswordKey(
+    password,
+    base64ToBytes(keyDocument.kdfSalt),
+    keyDocument.kdfIterations
+  );
+  const privateKeyJson = await decryptText(keyDocument.encryptedPrivateKeyJwk, passwordKey);
   const privateKeyJwk = JSON.parse(privateKeyJson) as JsonWebKey;
 
   return crypto.subtle.importKey(
@@ -311,16 +313,6 @@ export async function importPrivateKeyJson(privateKeyJson: string) {
     false,
     ["decrypt"]
   );
-}
-
-export async function unlockPrivateKey(keyDocument: UserKeyDocument, password: string) {
-  const passwordKey = await derivePasswordKey(
-    password,
-    base64ToBytes(keyDocument.kdfSalt),
-    keyDocument.kdfIterations
-  );
-  const privateKeyJson = await decryptText(keyDocument.encryptedPrivateKeyJwk, passwordKey);
-  return importPrivateKeyJson(privateKeyJson);
 }
 
 export async function unlockPrivateKeyWithFallback(keyDocument: UserKeyDocument, password: string) {
@@ -423,11 +415,11 @@ export async function unwrapNoteKey(wrappedNoteKey: WrappedNoteKey, privateKey: 
   );
 }
 
-export function base64UrlFromBase64(value: string) {
+function base64UrlFromBase64(value: string) {
   return value.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-export function base64FromBase64Url(value: string) {
+function base64FromBase64Url(value: string) {
   const normalizedValue = value.replace(/-/g, "+").replace(/_/g, "/");
   const paddingLength = (4 - (normalizedValue.length % 4)) % 4;
   return `${normalizedValue}${"=".repeat(paddingLength)}`;

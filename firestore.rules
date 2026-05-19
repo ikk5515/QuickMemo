@@ -286,7 +286,6 @@ service cloud.firestore {
         "encryptedPrivateKeyJwk",
         "kdfSalt",
         "kdfIterations",
-        "passkeyUnlock",
         "pendingEncryptedPrivateKeyJwk",
         "pendingKdfSalt",
         "pendingKdfIterations",
@@ -299,7 +298,6 @@ service cloud.firestore {
       && data.kdfSalt is string
       && data.kdfIterations is int
       && data.kdfIterations >= 100000
-      && (!data.keys().hasAny(["passkeyUnlock"]) || validUserPasskeyUnlock(data.passkeyUnlock))
       && (
         !data.keys().hasAny(["pendingEncryptedPrivateKeyJwk", "pendingKdfSalt", "pendingKdfIterations", "pendingCreatedAt"])
         || (
@@ -312,28 +310,6 @@ service cloud.firestore {
         )
       )
       && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
-    }
-
-    function validUserPasskeyUnlock(passkey) {
-      return passkey is map
-        && passkey.keys().hasOnly([
-          "version",
-          "credentialId",
-          "prfSalt",
-          "encryptedPrivateKeyJwk",
-          "createdAt",
-          "updatedAt"
-        ])
-        && passkey.version == 1
-        && passkey.credentialId is string
-        && passkey.credentialId.size() >= 8
-        && passkey.credentialId.size() <= 2048
-        && passkey.prfSalt is string
-        && passkey.prfSalt.size() >= 16
-        && passkey.prfSalt.size() <= 256
-        && encryptedPayload(passkey.encryptedPrivateKeyJwk)
-        && (!passkey.keys().hasAny(["createdAt"]) || passkey.createdAt is timestamp)
-        && (!passkey.keys().hasAny(["updatedAt"]) || passkey.updatedAt is timestamp);
     }
 
     function validNoteFolder(data) {
@@ -1242,7 +1218,6 @@ service cloud.firestore {
           "encryptedPrivateKeyJwk",
           "kdfSalt",
           "kdfIterations",
-          "passkeyUnlock",
           "pendingEncryptedPrivateKeyJwk",
           "pendingKdfSalt",
           "pendingKdfIterations",

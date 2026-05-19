@@ -57,20 +57,10 @@ export interface UserKeyDocument {
   encryptedPrivateKeyJwk: EncryptedPayload;
   kdfSalt: string;
   kdfIterations: number;
-  passkeyUnlock?: UserPasskeyUnlock;
   pendingEncryptedPrivateKeyJwk?: EncryptedPayload;
   pendingKdfSalt?: string;
   pendingKdfIterations?: number;
   pendingCreatedAt?: Timestamp;
-  updatedAt?: Timestamp;
-}
-
-export interface UserPasskeyUnlock {
-  version: 1;
-  credentialId: string;
-  prfSalt: string;
-  encryptedPrivateKeyJwk: EncryptedPayload;
-  createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }
 
