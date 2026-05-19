@@ -539,6 +539,7 @@ service cloud.firestore {
         "encryptedTitle",
         "encryptedBody",
         "attachmentCount",
+        "passwordHash",
         "ready",
         "createdAt",
         "updatedAt",
@@ -557,6 +558,7 @@ service cloud.firestore {
       && data.attachmentCount is int
       && data.attachmentCount >= 0
       && data.attachmentCount <= 100
+      && validPublicSharePassword(data)
       && data.ready is bool
       && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
       && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp)
@@ -570,6 +572,31 @@ service cloud.firestore {
           && data.revokedBy.size() > 0
         )
       );
+    }
+
+    function publicSharePasswordHash(data) {
+      return data.keys().hasAny(["passwordHash"]) ? data.passwordHash : null;
+    }
+
+    function validPublicSharePassword(data) {
+      return !data.keys().hasAny(["passwordHash"])
+        || validPublicSharePasswordHash(data.passwordHash);
+    }
+
+    function validPublicSharePasswordHash(passwordHash) {
+      return passwordHash is map
+        && passwordHash.keys().hasOnly(["version", "algorithm", "salt", "iterations", "hash"])
+        && passwordHash.version == 1
+        && passwordHash.algorithm == "PBKDF2-SHA-256"
+        && passwordHash.salt is string
+        && passwordHash.salt.size() >= 8
+        && passwordHash.salt.size() <= 256
+        && passwordHash.iterations is int
+        && passwordHash.iterations >= 100000
+        && passwordHash.iterations <= 1000000
+        && passwordHash.hash is string
+        && passwordHash.hash.size() >= 8
+        && passwordHash.hash.size() <= 256;
     }
 
     function validPublicShareAttachment(data) {
@@ -991,6 +1018,7 @@ service cloud.firestore {
         && data.encryptedBody == resource.data.encryptedBody
         && data.createdAt == resource.data.createdAt
         && data.expiresAt == resource.data.expiresAt
+        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data)
         && request.resource.data.diff(resource.data).changedKeys().hasOnly(["ready", "attachmentCount", "updatedAt"]);
     }
 
@@ -1009,7 +1037,45 @@ service cloud.firestore {
         && data.ready == resource.data.ready
         && data.createdAt == resource.data.createdAt
         && data.expiresAt == resource.data.expiresAt
+        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data)
         && request.resource.data.diff(resource.data).changedKeys().hasOnly(["revokedAt", "revokedBy", "updatedAt"]);
+    }
+
+    function publicSharePasswordUpdate(data) {
+      return publicShareOwner(resource.data)
+        && publicShareNotRevoked(resource.data)
+        && publicShareNotRevoked(data)
+        && data.updatedAt == request.time
+        && data.sourceNoteId == resource.data.sourceNoteId
+        && data.ownerUid == resource.data.ownerUid
+        && data.version == resource.data.version
+        && data.encryptedTitle == resource.data.encryptedTitle
+        && data.encryptedBody == resource.data.encryptedBody
+        && data.attachmentCount == resource.data.attachmentCount
+        && data.ready == resource.data.ready
+        && data.createdAt == resource.data.createdAt
+        && data.expiresAt == resource.data.expiresAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["passwordHash", "updatedAt"]);
+    }
+
+    function publicShareContentUpdate(data) {
+      return publicShareOwner(resource.data)
+        && publicShareNotRevoked(resource.data)
+        && publicShareNotRevoked(data)
+        && data.updatedAt == request.time
+        && data.sourceNoteId == resource.data.sourceNoteId
+        && data.ownerUid == resource.data.ownerUid
+        && data.version == resource.data.version
+        && data.ready == resource.data.ready
+        && data.createdAt == resource.data.createdAt
+        && data.expiresAt == resource.data.expiresAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "encryptedTitle",
+          "encryptedBody",
+          "attachmentCount",
+          "passwordHash",
+          "updatedAt"
+        ]);
     }
 
     match /publicLoginRoster/{uid} {
@@ -1184,6 +1250,8 @@ service cloud.firestore {
         && (
           publicShareActivateUpdate(request.resource.data)
           || publicShareRevokeUpdate(request.resource.data)
+          || publicSharePasswordUpdate(request.resource.data)
+          || publicShareContentUpdate(request.resource.data)
         );
       allow delete: if publicShareOwner(resource.data);
 

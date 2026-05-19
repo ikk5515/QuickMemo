@@ -2,6 +2,7 @@ import {
   addDoc,
   Bytes,
   collection,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -15,7 +16,12 @@ import {
   where
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import type { EncryptedPayload, PublicNoteShareAttachmentDocument, PublicNoteShareDocument } from "../types";
+import type {
+  EncryptedPayload,
+  PublicNoteShareAttachmentDocument,
+  PublicNoteShareDocument,
+  PublicSharePasswordHash
+} from "../types";
 
 export const publicNoteShareMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
 
@@ -32,6 +38,7 @@ interface CreatePublicNoteShareInput {
   encryptedTitle: EncryptedPayload;
   expiresAt: Date;
   ownerUid: string;
+  passwordHash?: PublicSharePasswordHash;
   sourceNoteId: string;
 }
 
@@ -44,6 +51,13 @@ interface CreatePublicNoteShareAttachmentInput {
   mimeType: string;
   originalSize: number;
   sourceAttachmentId?: string;
+}
+
+interface UpdatePublicNoteShareContentInput {
+  attachmentCount: number;
+  encryptedBody: EncryptedPayload;
+  encryptedTitle: EncryptedPayload;
+  passwordHash: PublicSharePasswordHash | null;
 }
 
 function publicShareSnapshot(id: string, data: PublicNoteShareDocument): PublicNoteShareSnapshot {
@@ -105,6 +119,7 @@ export async function createPublicNoteShare(input: CreatePublicNoteShareInput) {
     encryptedTitle: input.encryptedTitle,
     encryptedBody: input.encryptedBody,
     attachmentCount: 0,
+    ...(input.passwordHash ? { passwordHash: input.passwordHash } : {}),
     ready: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -143,6 +158,16 @@ export async function activatePublicNoteShare(shareId: string, attachmentCount: 
   });
 }
 
+export async function updatePublicNoteShareContent(shareId: string, input: UpdatePublicNoteShareContentInput) {
+  await updateDoc(doc(db, "publicNoteShares", shareId), {
+    attachmentCount: input.attachmentCount,
+    encryptedTitle: input.encryptedTitle,
+    encryptedBody: input.encryptedBody,
+    passwordHash: input.passwordHash ?? deleteField(),
+    updatedAt: serverTimestamp()
+  });
+}
+
 export async function revokePublicNoteShare(shareId: string, ownerUid: string) {
   await updateDoc(doc(db, "publicNoteShares", shareId), {
     revokedAt: serverTimestamp(),
@@ -159,6 +184,22 @@ export async function deletePublicNoteShare(shareId: string) {
     batch.delete(attachment.ref);
   });
   batch.delete(doc(db, "publicNoteShares", shareId));
+
+  await batch.commit();
+}
+
+export async function deletePublicNoteShareAttachments(shareId: string) {
+  const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
+
+  if (attachmentsSnapshot.empty) {
+    return;
+  }
+
+  const batch = writeBatch(db);
+
+  attachmentsSnapshot.docs.forEach((attachment) => {
+    batch.delete(attachment.ref);
+  });
 
   await batch.commit();
 }

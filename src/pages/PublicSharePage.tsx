@@ -1,14 +1,21 @@
-import { AlertTriangle, Download, File, Loader2 } from "lucide-react";
-import { type CSSProperties, useEffect, useState } from "react";
+import { AlertTriangle, Download, File, Loader2, LockKeyhole } from "lucide-react";
+import { type CSSProperties, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { attachmentDownloadName, formatFileSize } from "../lib/attachments";
-import { decryptBytes, decryptText, importAesKeyBase64Url } from "../lib/crypto";
+import {
+  decryptBytes,
+  decryptText,
+  derivePublicShareContentKey,
+  importAesKeyBase64Url,
+  verifyPublicSharePassword
+} from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, sanitizeEditorHtml } from "../lib/editorContent";
 import {
   getPublicNoteShare,
   getPublicNoteShareAttachments,
   publicShareActive,
-  type PublicNoteShareAttachmentSnapshot
+  type PublicNoteShareAttachmentSnapshot,
+  type PublicNoteShareSnapshot
 } from "../services/publicShares";
 
 interface PublicShareAttachmentView {
@@ -20,22 +27,59 @@ interface PublicShareAttachmentView {
   url: string;
 }
 
+interface PublicShareContent {
+  attachments: PublicShareAttachmentView[];
+  bodyHtml: string;
+  fontSize: number;
+  title: string;
+}
+
 export default function PublicSharePage() {
   const { shareId } = useParams();
   const [title, setTitle] = useState("");
   const [bodyHtml, setBodyHtml] = useState("");
   const [fontSize, setFontSize] = useState(17);
   const [attachments, setAttachments] = useState<PublicShareAttachmentView[]>([]);
+  const [share, setShare] = useState<PublicNoteShareSnapshot | null>(null);
+  const [shareKeyValue, setShareKeyValue] = useState<string | null>(null);
+  const [passwordRequired, setPasswordRequired] = useState(false);
+  const [passwordInput, setPasswordInput] = useState("");
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const objectUrlsRef = useRef<string[]>([]);
+
+  const revokeAttachmentUrls = useCallback(() => {
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    objectUrlsRef.current = [];
+  }, []);
+
+  const applyShareContent = useCallback((content: PublicShareContent) => {
+    revokeAttachmentUrls();
+    objectUrlsRef.current = content.attachments.map((attachment) => attachment.url);
+    setTitle(content.title);
+    setBodyHtml(content.bodyHtml);
+    setFontSize(content.fontSize);
+    setAttachments(content.attachments);
+    setPasswordRequired(false);
+  }, [revokeAttachmentUrls]);
 
   useEffect(() => {
     let active = true;
-    const objectUrls: string[] = [];
 
     async function loadShare() {
       setLoading(true);
       setError(null);
+      setPasswordRequired(false);
+      setPasswordInput("");
+      setPasswordError(null);
+      setAttachments([]);
+      setShare(null);
+      setShareKeyValue(null);
+      setTitle("");
+      setBodyHtml("");
+      revokeAttachmentUrls();
 
       try {
         const shareKeyValue = shareKeyFromHash();
@@ -51,28 +95,26 @@ export default function PublicSharePage() {
           throw new Error("공유 링크가 만료되었거나 중단되었습니다.");
         }
 
-        const [decryptedTitle, decryptedBody, encryptedAttachments] = await Promise.all([
-          decryptText(share.encryptedTitle, shareKey),
-          decryptText(share.encryptedBody, shareKey),
-          getPublicNoteShareAttachments(shareId)
-        ]);
-        const parsedBody = parseEditorContent(decryptedBody);
-        const nextAttachments = await Promise.all(
-          encryptedAttachments.map(async (attachment) => {
-            const view = await decryptPublicAttachment(attachment, shareKey);
-            objectUrls.push(view.url);
-            return view;
-          })
-        );
-
         if (!active) {
           return;
         }
 
-        setTitle(decryptedTitle || "제목 없음");
-        setBodyHtml(linkifyEditorHtml(sanitizeEditorHtml(parsedBody.html || "<p>내용 없음</p>")));
-        setFontSize(parsedBody.fontSize);
-        setAttachments(nextAttachments);
+        setShare(share);
+        setShareKeyValue(shareKeyValue);
+
+        if (share.passwordHash) {
+          setPasswordRequired(true);
+          return;
+        }
+
+        const content = await decryptPublicShareContent(shareId, share, shareKey);
+
+        if (!active) {
+          content.attachments.forEach((attachment) => URL.revokeObjectURL(attachment.url));
+          return;
+        }
+
+        applyShareContent(content);
       } catch (loadError) {
         if (active) {
           setError(loadError instanceof Error ? loadError.message : "공유 노트를 열 수 없습니다.");
@@ -88,9 +130,40 @@ export default function PublicSharePage() {
 
     return () => {
       active = false;
-      objectUrls.forEach((url) => URL.revokeObjectURL(url));
+      revokeAttachmentUrls();
     };
-  }, [shareId]);
+  }, [applyShareContent, revokeAttachmentUrls, shareId]);
+
+  async function handlePasswordSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!shareId || !share || !shareKeyValue || !share.passwordHash) {
+      setPasswordError("공유 링크를 다시 열어주세요.");
+      return;
+    }
+
+    setUnlocking(true);
+    setPasswordError(null);
+
+    try {
+      const trimmedPassword = passwordInput.trim();
+      const unlocked = await verifyPublicSharePassword(trimmedPassword, share.passwordHash, shareKeyValue);
+
+      if (!unlocked) {
+        setPasswordError("비밀번호가 올바르지 않습니다.");
+        return;
+      }
+
+      const contentKey = await derivePublicShareContentKey(shareKeyValue, trimmedPassword, share.passwordHash);
+      const content = await decryptPublicShareContent(shareId, share, contentKey);
+      applyShareContent(content);
+      setPasswordInput("");
+    } catch {
+      setPasswordError("공유 노트를 여는 중 문제가 발생했습니다.");
+    } finally {
+      setUnlocking(false);
+    }
+  }
 
   return (
     <main className="public-share-page">
@@ -106,6 +179,27 @@ export default function PublicSharePage() {
             <h1>공유 노트를 열 수 없습니다</h1>
             <p>{error}</p>
           </div>
+        ) : passwordRequired ? (
+          <form className="public-share-state public-share-password-state" onSubmit={handlePasswordSubmit}>
+            <LockKeyhole size={30} />
+            <h1>비밀번호가 필요합니다</h1>
+            <label>
+              <span>비밀번호</span>
+              <input
+                autoComplete="current-password"
+                autoFocus
+                onChange={(event) => setPasswordInput(event.target.value)}
+                placeholder="공유 비밀번호"
+                type="password"
+                value={passwordInput}
+              />
+            </label>
+            <button disabled={unlocking || !passwordInput.trim()} type="submit">
+              {unlocking ? <Loader2 className="spin" size={16} /> : <LockKeyhole size={16} />}
+              확인
+            </button>
+            {passwordError && <p className="form-error">{passwordError}</p>}
+          </form>
         ) : (
           <>
             <header className="public-share-header">
@@ -176,6 +270,23 @@ async function decryptPublicAttachment(attachment: PublicNoteShareAttachmentSnap
     originalSize: attachment.originalSize,
     url: URL.createObjectURL(blob)
   } satisfies PublicShareAttachmentView;
+}
+
+async function decryptPublicShareContent(shareId: string, share: PublicNoteShareSnapshot, shareKey: CryptoKey): Promise<PublicShareContent> {
+  const [decryptedTitle, decryptedBody, encryptedAttachments] = await Promise.all([
+    decryptText(share.encryptedTitle, shareKey),
+    decryptText(share.encryptedBody, shareKey),
+    getPublicNoteShareAttachments(shareId)
+  ]);
+  const parsedBody = parseEditorContent(decryptedBody);
+  const attachments = await Promise.all(encryptedAttachments.map((attachment) => decryptPublicAttachment(attachment, shareKey)));
+
+  return {
+    title: decryptedTitle || "제목 없음",
+    bodyHtml: linkifyEditorHtml(sanitizeEditorHtml(parsedBody.html || "<p>내용 없음</p>")),
+    fontSize: parsedBody.fontSize,
+    attachments
+  };
 }
 
 function shareKeyFromHash() {

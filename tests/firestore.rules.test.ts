@@ -33,6 +33,14 @@ const encryptedPayload = {
   iv: "iv"
 };
 
+const publicSharePasswordHash = {
+  version: 1,
+  algorithm: "PBKDF2-SHA-256",
+  salt: "c2FsdC1ieXRlcy1mb3ItdGVzdA==",
+  iterations: 210000,
+  hash: "aGFzaC1ieXRlcy1mb3ItdGVzdA=="
+};
+
 const userKeyPayload = {
   version: 1,
   algorithm: "AES-GCM",
@@ -559,7 +567,9 @@ describeRules("firestore security rules", () => {
     const publicDb = testEnv.unauthenticatedContext().firestore();
     const shareExpiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
 
-    await assertSucceeds(setDoc(doc(ownerDb, "publicNoteShares/share-a"), publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt })));
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "publicNoteShares/share-a"), publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt, passwordHash: publicSharePasswordHash }))
+    );
     await assertSucceeds(setDoc(doc(ownerDb, "publicNoteShares/share-a/attachments/attachment-a"), publicShareAttachment({ expiresAt: shareExpiresAt })));
     await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { ready: true, attachmentCount: 1, updatedAt: serverTimestamp() }));
 
@@ -572,6 +582,25 @@ describeRules("firestore security rules", () => {
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/expired-share")));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/revoked-share")));
     await assertFails(setDoc(doc(otherDb, "publicNoteShares/forged-share"), publicShareDocument("note-a", "user-b")));
+
+    await assertFails(updateDoc(doc(otherDb, "publicNoteShares/share-a"), { passwordHash: publicSharePasswordHash, updatedAt: serverTimestamp() }));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-a"), {
+        encryptedTitle: { ...encryptedPayload, cipherText: "new-title" },
+        encryptedBody: { ...encryptedPayload, cipherText: "new-body" },
+        passwordHash: { ...publicSharePasswordHash, hash: "bmV3LWhhc2gtYnl0ZXMtZm9yLXRlc3Q=" },
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a")));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-a"), {
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        passwordHash: deleteField(),
+        updatedAt: serverTimestamp()
+      })
+    );
 
     await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { revokedAt: serverTimestamp(), revokedBy: "user-a", updatedAt: serverTimestamp() }));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a")));

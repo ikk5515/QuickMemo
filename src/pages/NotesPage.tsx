@@ -21,6 +21,7 @@ import {
   LayoutGrid,
   ListChecks,
   ListTodo,
+  LockKeyhole,
   Loader2,
   PanelLeftOpen,
   PaintBucket,
@@ -75,10 +76,13 @@ import {
 import {
   decryptBytes,
   decryptText,
+  derivePublicShareContentKey,
   encryptBytes,
   encryptText,
   exportAesKeyBase64Url,
   generateNoteKey,
+  hashPublicSharePassword,
+  importAesKeyBase64Url,
   unwrapNoteKey,
   wrapNoteKey
 } from "../lib/crypto";
@@ -142,11 +146,13 @@ import {
   createPublicNoteShareAttachment,
   deleteExpiredPublicSharesForOwner,
   deletePublicNoteShare,
+  deletePublicNoteShareAttachments,
   publicShareActive,
   publicShareExpiresAt,
   publicShareUrl,
   revokePublicNoteShare,
   subscribePublicSharesForNote,
+  updatePublicNoteShareContent,
   type PublicNoteShareSnapshot
 } from "../services/publicShares";
 import { subscribeUsers } from "../services/users";
@@ -1297,6 +1303,16 @@ function removeStoredPublicShareUrl(uid: string, shareId: string) {
 
 function publicShareUrlStorageKey(uid: string, shareId: string) {
   return `${publicShareUrlStoragePrefix}${uid}:${shareId}`;
+}
+
+function publicShareKeyFromUrl(url: string) {
+  try {
+    const hash = new URL(url).hash.replace(/^#/, "");
+
+    return hash ? new URLSearchParams(hash).get("key") : null;
+  } catch {
+    return null;
+  }
 }
 
 function noteSyncSignature(note: DecryptedNote) {
@@ -2553,15 +2569,9 @@ export default function NotesPage() {
     setPublicShareOpen(true);
     setPublicShareCopied(false);
     setPublicShareError(null);
-
-    if (activePublicShare) {
-      return;
-    }
-
-    await createCurrentPublicShare();
   }
 
-  async function createCurrentPublicShare() {
+  async function createCurrentPublicShare(password = "") {
     if (publicShareBusy) {
       return;
     }
@@ -2587,16 +2597,22 @@ export default function NotesPage() {
       const shareKey = await generateNoteKey();
       const shareKeyValue = await exportAesKeyBase64Url(shareKey);
       const expiresAt = publicShareExpiresAt();
+      const trimmedPassword = password.trim();
+      const passwordHash = trimmedPassword ? await hashPublicSharePassword(trimmedPassword, shareKeyValue) : undefined;
+      const contentKey = passwordHash
+        ? await derivePublicShareContentKey(shareKeyValue, trimmedPassword, passwordHash)
+        : shareKey;
       const [encryptedTitle, encryptedBody] = await Promise.all([
-        encryptText(editor.title.trim() || "제목 없음", shareKey),
-        encryptText(serializeEditorContent(editor.body, editor.fontSize), shareKey)
+        encryptText(editor.title.trim() || "제목 없음", contentKey),
+        encryptText(serializeEditorContent(editor.body, editor.fontSize), contentKey)
       ]);
       const shareId = await createPublicNoteShare({
         sourceNoteId: savedNote.noteId,
         ownerUid: unlockedProfile.uid,
         encryptedTitle,
         encryptedBody,
-        expiresAt
+        expiresAt,
+        passwordHash
       });
       createdShareId = shareId;
 
@@ -2612,7 +2628,7 @@ export default function NotesPage() {
           },
           savedNote.noteKey
         );
-        const encryptedAttachment = await encryptBytes(plainBytes, shareKey);
+        const encryptedAttachment = await encryptBytes(plainBytes, contentKey);
 
         await createPublicNoteShareAttachment(shareId, {
           fileName: attachment.fileName,
@@ -2686,6 +2702,130 @@ export default function NotesPage() {
     } finally {
       setPublicShareBusy(false);
     }
+  }
+
+  async function setCurrentPublicSharePassword(password: string) {
+    const trimmedPassword = password.trim();
+    const shareKeyValue = activePublicShareUrl ? publicShareKeyFromUrl(activePublicShareUrl) : null;
+
+    if (!activePublicShare) {
+      setPublicShareError("비밀번호를 설정할 공유 링크가 없습니다.");
+      return;
+    }
+
+    if (!shareKeyValue) {
+      setPublicShareError("이 브라우저에는 공유 키가 없어 비밀번호를 변경할 수 없습니다.");
+      return;
+    }
+
+    if (!trimmedPassword) {
+      setPublicShareError("비밀번호를 입력해주세요.");
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+
+    try {
+      const passwordHash = await hashPublicSharePassword(trimmedPassword, shareKeyValue);
+      const contentKey = await derivePublicShareContentKey(shareKeyValue, trimmedPassword, passwordHash);
+
+      await rewriteCurrentPublicShareContent(activePublicShare, contentKey, passwordHash);
+      setPublicShareCopied(false);
+      setStatus("공유 비밀번호를 저장했습니다.");
+    } catch {
+      setPublicShareError("공유 비밀번호를 저장하지 못했습니다.");
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function clearCurrentPublicSharePassword() {
+    const shareKeyValue = activePublicShareUrl ? publicShareKeyFromUrl(activePublicShareUrl) : null;
+
+    if (!activePublicShare) {
+      setPublicShareError("비밀번호를 해제할 공유 링크가 없습니다.");
+      return;
+    }
+
+    if (!shareKeyValue) {
+      setPublicShareError("이 브라우저에는 공유 키가 없어 비밀번호를 변경할 수 없습니다.");
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+
+    try {
+      await rewriteCurrentPublicShareContent(activePublicShare, await importAesKeyBase64Url(shareKeyValue), null);
+      setPublicShareCopied(false);
+      setStatus("공유 비밀번호를 해제했습니다.");
+    } catch {
+      setPublicShareError("공유 비밀번호를 해제하지 못했습니다.");
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function rewriteCurrentPublicShareContent(
+    share: PublicNoteShareSnapshot,
+    contentKey: CryptoKey,
+    passwordHash: NonNullable<PublicNoteShareSnapshot["passwordHash"]> | null
+  ) {
+    const savedNote = await persistCurrentNote(false);
+    const expiresAt = dateFromTimestamp(share.expiresAt);
+
+    if (!savedNote) {
+      throw new Error("노트를 먼저 저장하지 못했습니다.");
+    }
+
+    if (!expiresAt) {
+      throw new Error("공유 만료 시간을 확인하지 못했습니다.");
+    }
+
+    const [encryptedTitle, encryptedBody] = await Promise.all([
+      encryptText(editor.title.trim() || "제목 없음", contentKey),
+      encryptText(serializeEditorContent(editor.body, editor.fontSize), contentKey)
+    ]);
+    const noteAttachments = await getNoteAttachments(savedNote.noteId);
+    const nextAttachments: Parameters<typeof createPublicNoteShareAttachment>[1][] = [];
+
+    for (const attachment of noteAttachments) {
+      const plainBytes = await decryptBytes(
+        {
+          version: 1,
+          algorithm: "AES-GCM",
+          cipherBytes: attachment.encryptedData.toUint8Array(),
+          iv: attachment.iv.toUint8Array()
+        },
+        savedNote.noteKey
+      );
+      const encryptedAttachment = await encryptBytes(plainBytes, contentKey);
+
+      nextAttachments.push({
+        fileName: attachment.fileName,
+        extension: attachment.extension,
+        mimeType: attachment.mimeType,
+        originalSize: attachment.originalSize,
+        encryptedData: encryptedAttachment.cipherBytes,
+        iv: encryptedAttachment.iv,
+        expiresAt,
+        sourceAttachmentId: attachment.id
+      });
+    }
+
+    await deletePublicNoteShareAttachments(share.id);
+
+    for (const attachment of nextAttachments) {
+      await createPublicNoteShareAttachment(share.id, attachment);
+    }
+
+    await updatePublicNoteShareContent(share.id, {
+      encryptedTitle,
+      encryptedBody,
+      attachmentCount: nextAttachments.length,
+      passwordHash
+    });
   }
 
   async function persistCurrentNote(showSavedMessage = true): Promise<{ noteId: string; noteKey: CryptoKey } | null> {
@@ -3562,8 +3702,10 @@ export default function NotesPage() {
             error={publicShareError}
             onClose={() => setPublicShareOpen(false)}
             onCopy={() => void copyPublicShareUrl()}
-            onCreate={() => void createCurrentPublicShare()}
+            onClearPassword={() => void clearCurrentPublicSharePassword()}
+            onCreate={(password) => void createCurrentPublicShare(password)}
             onStop={() => void stopPublicShare()}
+            onUpdatePassword={(password) => void setCurrentPublicSharePassword(password)}
             share={activePublicShare}
             shareUrl={activePublicShareUrl}
           />
@@ -3580,8 +3722,10 @@ function PublicShareModal({
   error,
   onClose,
   onCopy,
+  onClearPassword,
   onCreate,
   onStop,
+  onUpdatePassword,
   share,
   shareUrl
 }: {
@@ -3590,12 +3734,17 @@ function PublicShareModal({
   error: string | null;
   onClose: () => void;
   onCopy: () => void;
-  onCreate: () => void;
+  onClearPassword: () => void;
+  onCreate: (password: string) => void;
   onStop: () => void;
+  onUpdatePassword: (password: string) => void;
   share: PublicNoteShareSnapshot | null;
   shareUrl: string | null;
 }) {
+  const [createPassword, setCreatePassword] = useState("");
+  const [passwordDraft, setPasswordDraft] = useState("");
   const expiresAt = dateFromTimestamp(share?.expiresAt);
+  const hasPassword = Boolean(share?.passwordHash);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -3610,6 +3759,17 @@ function PublicShareModal({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  function handleCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onCreate(createPassword);
+  }
+
+  function handlePasswordUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onUpdatePassword(passwordDraft);
+    setPasswordDraft("");
+  }
 
   return (
     <div className="modal-backdrop public-share-backdrop" role="presentation" onMouseDown={onClose}>
@@ -3662,14 +3822,57 @@ function PublicShareModal({
                   공유 중단
                 </button>
               </div>
+              <div className="public-share-password-panel">
+                <div className="public-share-password-heading">
+                  <LockKeyhole size={16} />
+                  <span>{hasPassword ? "비밀번호 사용 중" : "비밀번호 없음"}</span>
+                </div>
+                <form className="public-share-password-form" onSubmit={handlePasswordUpdate}>
+                  <label>
+                    <span>{hasPassword ? "새 비밀번호" : "비밀번호"}</span>
+                    <input
+                      autoComplete="new-password"
+                      disabled={busy}
+                      onChange={(event) => setPasswordDraft(event.target.value)}
+                      placeholder={hasPassword ? "변경할 비밀번호" : "접속 전에 입력할 비밀번호"}
+                      type="password"
+                      value={passwordDraft}
+                    />
+                  </label>
+                  <div className="public-share-password-actions">
+                    <button disabled={busy || !shareUrl || !passwordDraft.trim()} type="submit">
+                      {busy ? <Loader2 className="spin" size={16} /> : <LockKeyhole size={16} />}
+                      {hasPassword ? "변경" : "설정"}
+                    </button>
+                    {hasPassword && (
+                      <button className="secondary-button" disabled={busy || !shareUrl} onClick={onClearPassword} type="button">
+                        비밀번호 해제
+                      </button>
+                    )}
+                  </div>
+                </form>
+              </div>
             </>
           ) : (
             <>
               <p className="public-share-expiry">공유 링크는 최대 7일 동안 열 수 있습니다.</p>
-              <button disabled={busy} onClick={onCreate} type="button">
-                {busy ? <Loader2 className="spin" size={16} /> : <Share2 size={16} />}
-                링크 만들기
-              </button>
+              <form className="public-share-password-form" onSubmit={handleCreate}>
+                <label>
+                  <span>비밀번호 (선택)</span>
+                  <input
+                    autoComplete="new-password"
+                    disabled={busy}
+                    onChange={(event) => setCreatePassword(event.target.value)}
+                    placeholder="비워두면 바로 열 수 있습니다"
+                    type="password"
+                    value={createPassword}
+                  />
+                </label>
+                <button disabled={busy} type="submit">
+                  {busy ? <Loader2 className="spin" size={16} /> : <Share2 size={16} />}
+                  링크 만들기
+                </button>
+              </form>
             </>
           )}
           {busy && <p className="public-share-status">공유 상태를 업데이트하는 중...</p>}

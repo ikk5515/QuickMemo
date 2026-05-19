@@ -2678,6 +2678,46 @@ textarea {
   min-height: 44px;
 }
 
+.public-share-password-panel {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+}
+
+.public-share-password-heading {
+  align-items: center;
+  color: var(--ink);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.public-share-password-form {
+  display: grid;
+  gap: 10px;
+}
+
+.public-share-password-form label {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.public-share-password-form input {
+  font-size: 14px;
+  min-height: 44px;
+}
+
+.public-share-password-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .public-share-modal-actions {
   display: flex;
   flex-wrap: wrap;
@@ -3186,6 +3226,32 @@ textarea {
 
 .public-share-state.error {
   color: var(--coral);
+}
+
+.public-share-password-state {
+  margin: 0 auto;
+  max-width: 360px;
+}
+
+.public-share-password-state label {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 8px;
+  justify-items: stretch;
+  text-align: left;
+  width: min(320px, 100%);
+}
+
+.public-share-password-state input {
+  font-size: 16px;
+  min-height: 46px;
+  width: 100%;
+}
+
+.public-share-password-state button {
+  min-width: min(180px, 100%);
 }
 
 .note-preview-editor {
@@ -4422,6 +4488,10 @@ textarea {
 
   .public-share-modal-actions {
     display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .public-share-password-actions {
     grid-template-columns: 1fr;
   }
 
