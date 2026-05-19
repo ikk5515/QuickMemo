@@ -113,6 +113,7 @@ export interface PublicNoteShareDocument {
   version: 1;
   encryptedTitle: EncryptedPayload;
   encryptedBody: EncryptedPayload;
+  ownerWrappedShareKey?: WrappedNoteKey;
   attachmentCount: number;
   passwordHash?: PublicSharePasswordHash;
   ready: boolean;

@@ -40,6 +40,11 @@ const publicSharePasswordHash = {
   iterations: 210000,
   hash: "aGFzaC1ieXRlcy1mb3ItdGVzdA=="
 };
+const ownerWrappedShareKey = {
+  version: 1,
+  algorithm: "RSA-OAEP",
+  wrappedKey: "b3duZXItd3JhcHBlZC1wdWJsaWMtc2hhcmUta2V5"
+};
 
 const userKeyPayload = {
   version: 1,
@@ -196,6 +201,7 @@ function publicShareDocument(sourceNoteId = "note-a", ownerUid = "user-a", overr
     version: 1,
     encryptedTitle: encryptedPayload,
     encryptedBody: encryptedPayload,
+    ownerWrappedShareKey,
     attachmentCount: 0,
     ready: false,
     createdAt: serverTimestamp(),
@@ -582,6 +588,9 @@ describeRules("firestore security rules", () => {
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/expired-share")));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/revoked-share")));
     await assertFails(setDoc(doc(otherDb, "publicNoteShares/forged-share"), publicShareDocument("note-a", "user-b")));
+    const shareWithoutOwnerKey = { ...publicShareDocument("note-a", "user-a") };
+    Reflect.deleteProperty(shareWithoutOwnerKey, "ownerWrappedShareKey");
+    await assertFails(setDoc(doc(ownerDb, "publicNoteShares/missing-owner-key-share"), shareWithoutOwnerKey));
 
     await assertFails(updateDoc(doc(otherDb, "publicNoteShares/share-a"), { passwordHash: publicSharePasswordHash, updatedAt: serverTimestamp() }));
     await assertSucceeds(

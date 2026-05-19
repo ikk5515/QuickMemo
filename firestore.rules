@@ -69,6 +69,16 @@ service cloud.firestore {
         && payload.iv is string;
     }
 
+    function wrappedAesKeyPayload(payload) {
+      return payload is map
+        && payload.keys().hasOnly(["version", "algorithm", "wrappedKey"])
+        && payload.version == 1
+        && payload.algorithm == "RSA-OAEP"
+        && payload.wrappedKey is string
+        && payload.wrappedKey.size() >= 8
+        && payload.wrappedKey.size() <= 4096;
+    }
+
     function validNote(data) {
       return data.keys().hasOnly([
         "type",
@@ -538,6 +548,7 @@ service cloud.firestore {
         "version",
         "encryptedTitle",
         "encryptedBody",
+        "ownerWrappedShareKey",
         "attachmentCount",
         "passwordHash",
         "ready",
@@ -555,6 +566,7 @@ service cloud.firestore {
       && data.version == 1
       && encryptedPayload(data.encryptedTitle)
       && encryptedPayload(data.encryptedBody)
+      && validPublicShareOwnerWrappedKey(data)
       && data.attachmentCount is int
       && data.attachmentCount >= 0
       && data.attachmentCount <= 100
@@ -576,6 +588,11 @@ service cloud.firestore {
 
     function publicSharePasswordHash(data) {
       return data.keys().hasAny(["passwordHash"]) ? data.passwordHash : null;
+    }
+
+    function validPublicShareOwnerWrappedKey(data) {
+      return !data.keys().hasAny(["ownerWrappedShareKey"])
+        || wrappedAesKeyPayload(data.ownerWrappedShareKey);
     }
 
     function validPublicSharePassword(data) {
@@ -994,6 +1011,7 @@ service cloud.firestore {
         && data.ownerUid == request.auth.uid
         && data.ready == false
         && data.attachmentCount == 0
+        && data.keys().hasAny(["ownerWrappedShareKey"])
         && data.createdAt == request.time
         && data.updatedAt == request.time
         && data.expiresAt > request.time
