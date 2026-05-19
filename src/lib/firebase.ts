@@ -1,7 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
-import { connectAuthEmulator, getAuth } from "firebase/auth";
+import { browserSessionPersistence, connectAuthEmulator, getAuth, setPersistence } from "firebase/auth";
 import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
 
 const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || "quickmemo-demo";
@@ -45,3 +45,5 @@ if (appCheckSiteKey && import.meta.env.VITE_USE_FIREBASE_EMULATORS !== "true") {
     isTokenAutoRefreshEnabled: true
   });
 }
+
+export const authPersistenceReady = setPersistence(auth, browserSessionPersistence).catch(() => undefined);

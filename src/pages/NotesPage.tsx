@@ -47,6 +47,7 @@ import {
   type CSSProperties,
   type FormEvent,
   type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
   useCallback,
   useEffect,
@@ -3308,6 +3309,8 @@ function RichMemoEditor({
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
+  const imageResizeCleanupRef = useRef<(() => void) | null>(null);
+  const imageWidthControlRef = useRef<HTMLLabelElement | null>(null);
   const tableResizeCleanupRef = useRef<(() => void) | null>(null);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
   const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
@@ -3515,6 +3518,49 @@ function RichMemoEditor({
   }, [editor, onChange]);
 
   useEffect(() => {
+    if (!editor) {
+      return undefined;
+    }
+
+    function handleDocumentPointerDown(event: PointerEvent) {
+      if (!selectedImageRef.current) {
+        return;
+      }
+
+      const target = event.target;
+
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (imageWidthControlRef.current?.contains(target)) {
+        return;
+      }
+
+      const image = target instanceof HTMLElement ? target.closest("img") : null;
+
+      if (image instanceof HTMLImageElement && editorRef.current?.contains(image)) {
+        return;
+      }
+
+      selectedImageRef.current = null;
+      setSelectedImageWidthPx(null);
+    }
+
+    document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+
+    return () => {
+      document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+    };
+  }, [editor, editorRef]);
+
+  useEffect(() => {
+    return () => {
+      imageResizeCleanupRef.current?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!editor || editor.getHTML() === (value || "")) {
       return;
     }
@@ -3592,9 +3638,47 @@ function RichMemoEditor({
 
     const position = editor.view.posAtDOM(image, 0);
 
-    editor.chain().focus().setNodeSelection(position).updateAttributes("image", { qmWidth: null, qmWidthPx: safeWidth }).run();
+    editor.chain().setNodeSelection(position).updateAttributes("image", { qmWidth: null, qmWidthPx: safeWidth }).run();
+    selectedImageRef.current = imageElementAtPosition(editor, position, image.currentSrc || image.src) ?? image;
     setSelectedImageWidthPx(safeWidth);
     onChange(editor.getHTML());
+  }
+
+  function beginImageWidthDrag(event: ReactPointerEvent<HTMLLabelElement>) {
+    if (event.button !== 0 || event.target instanceof HTMLInputElement) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    imageResizeCleanupRef.current?.();
+
+    const startX = event.clientX;
+    const startWidth = currentImageWidthPx;
+    const restoreCursor = document.body.style.cursor;
+    const restoreUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+
+    function cleanup() {
+      document.body.style.cursor = restoreCursor;
+      document.body.style.userSelect = restoreUserSelect;
+      imageResizeCleanupRef.current = null;
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointercancel", cleanup);
+    }
+
+    function handlePointerMove(moveEvent: PointerEvent) {
+      moveEvent.preventDefault();
+      updateSelectedImageWidth(startWidth + moveEvent.clientX - startX);
+    }
+
+    imageResizeCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointercancel", cleanup);
   }
 
   function runToolbarCommand(command: (editor: TipTapEditor) => void) {
@@ -4092,8 +4176,8 @@ function RichMemoEditor({
           파일
         </button>
         {selectedImageWidthPx && (
-          <label className="image-width-control">
-            이미지 너비
+          <label className="image-width-control" onPointerDown={beginImageWidthDrag} ref={imageWidthControlRef}>
+            <span className="image-width-drag-target">이미지 너비</span>
             <input
               aria-label="이미지 너비"
               max={editorImagePixelWidthBounds.max}
@@ -4103,7 +4187,7 @@ function RichMemoEditor({
               type="range"
               value={currentImageWidthPx}
             />
-            <output>{currentImageWidthPx}px</output>
+            <output className="image-width-drag-target">{currentImageWidthPx}px</output>
           </label>
         )}
         <input
@@ -5058,6 +5142,31 @@ function readImageWidthPx(image: HTMLImageElement) {
   }
 
   return clampImagePixelWidth(Math.round(image.getBoundingClientRect().width || image.naturalWidth || editorImagePixelWidthBounds.max));
+}
+
+function imageElementAtPosition(editor: TipTapEditor, position: number, fallbackSrc?: string) {
+  const node = editor.view.nodeDOM(position);
+
+  if (node instanceof HTMLImageElement) {
+    return node;
+  }
+
+  const nestedImage = node instanceof HTMLElement ? node.querySelector("img") : null;
+  const selectedImage = editor.view.dom.querySelector("img.ProseMirror-selectednode");
+
+  if (nestedImage instanceof HTMLImageElement) {
+    return nestedImage;
+  }
+
+  if (selectedImage instanceof HTMLImageElement) {
+    return selectedImage;
+  }
+
+  if (!fallbackSrc) {
+    return null;
+  }
+
+  return Array.from(editor.view.dom.querySelectorAll("img")).find((image) => image.currentSrc === fallbackSrc || image.src === fallbackSrc) ?? null;
 }
 
 function clampImagePixelWidth(value: number) {

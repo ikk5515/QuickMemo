@@ -1478,10 +1478,17 @@ textarea {
   gap: 8px;
   min-height: 34px;
   padding: 4px 8px;
+  user-select: none;
+}
+
+.image-width-drag-target {
+  cursor: ew-resize;
+  white-space: nowrap;
 }
 
 .image-width-control input[type="range"] {
   accent-color: var(--teal);
+  cursor: pointer;
   min-height: 24px;
   width: min(220px, 34vw);
 }

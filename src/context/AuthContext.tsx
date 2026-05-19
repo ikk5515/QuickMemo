@@ -7,9 +7,15 @@ import {
   signOut as firebaseSignOut,
   updatePassword
 } from "firebase/auth";
-import { PropsWithChildren, createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { auth } from "../lib/firebase";
+import { PropsWithChildren, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { auth, authPersistenceReady } from "../lib/firebase";
 import { relockUserPrivateKey, unlockPrivateKeyWithFallback } from "../lib/crypto";
+import {
+  deleteSessionPrivateKey,
+  privateKeySessionDurationMs,
+  readSessionPrivateKey,
+  writeSessionPrivateKey
+} from "../lib/sessionPrivateKey";
 import {
   clearPendingUserKey,
   getUserKeyDocument,
@@ -38,15 +44,34 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [privateKey, setPrivateKey] = useState<CryptoKey | null>(null);
+  const [privateKeyUid, setPrivateKeyUid] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [keyError, setKeyError] = useState<string | null>(null);
+  const privateKeyUidRef = useRef<string | null>(null);
   const firebaseUserUid = firebaseUser?.uid ?? null;
+
+  const clearPrivateKey = useCallback(() => {
+    privateKeyUidRef.current = null;
+    setPrivateKeyUid(null);
+    setPrivateKey(null);
+  }, []);
+
+  const rememberPrivateKey = useCallback((uid: string, key: CryptoKey) => {
+    privateKeyUidRef.current = uid;
+    setPrivateKeyUid(uid);
+    setPrivateKey(key);
+    void writeSessionPrivateKey(uid, key).catch(() => undefined);
+  }, []);
 
   const loadProfile = useCallback(async (user: User | null) => {
     if (!user) {
+      const unlockedUid = privateKeyUidRef.current;
+      if (unlockedUid) {
+        await deleteSessionPrivateKey(unlockedUid).catch(() => undefined);
+      }
       setFirebaseUser(null);
       setProfile(null);
-      setPrivateKey(null);
+      clearPrivateKey();
       setLoading(false);
       return null;
     }
@@ -54,30 +79,55 @@ export function AuthProvider({ children }: PropsWithChildren) {
     const nextProfile = await getUserProfile(user.uid);
 
     if (nextProfile && !nextProfile.isActive) {
+      await deleteSessionPrivateKey(user.uid).catch(() => undefined);
       await firebaseSignOut(auth);
       setFirebaseUser(null);
       setProfile(null);
-      setPrivateKey(null);
+      clearPrivateKey();
       setLoading(false);
       return null;
     }
 
+    const cachedPrivateKey = await readSessionPrivateKey(user.uid).catch(() => null);
+
     setFirebaseUser(user);
     setProfile(nextProfile);
+    if (cachedPrivateKey) {
+      rememberPrivateKey(user.uid, cachedPrivateKey);
+    } else if (privateKeyUidRef.current !== user.uid) {
+      clearPrivateKey();
+    }
     setLoading(false);
     return nextProfile;
-  }, []);
+  }, [clearPrivateKey, rememberPrivateKey]);
 
   useEffect(() => {
-    return onAuthStateChanged(auth, (user) => {
-      setLoading(true);
-      void loadProfile(user).catch(() => {
-        setFirebaseUser(user);
-        setProfile(null);
-        setLoading(false);
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+
+    void authPersistenceReady.then(() => {
+      if (!active) {
+        return;
+      }
+
+      unsubscribe = onAuthStateChanged(auth, (user) => {
+        setLoading(true);
+        void loadProfile(user).catch(() => {
+          setFirebaseUser(user);
+          setProfile(null);
+          if (!user || privateKeyUidRef.current !== user.uid) {
+            clearPrivateKey();
+          }
+          setLoading(false);
+        });
       });
     });
-  }, [loadProfile]);
+
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [clearPrivateKey, loadProfile]);
 
   useEffect(() => {
     if (!firebaseUserUid) {
@@ -94,8 +144,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
         }
 
         if (nextProfile && !nextProfile.isActive) {
-          setPrivateKey(null);
+          clearPrivateKey();
           setProfile(null);
+          void deleteSessionPrivateKey(firebaseUserUid).catch(() => undefined);
           void firebaseSignOut(auth);
           return;
         }
@@ -113,7 +164,60 @@ export function AuthProvider({ children }: PropsWithChildren) {
       active = false;
       unsubscribe();
     };
-  }, [firebaseUserUid]);
+  }, [clearPrivateKey, firebaseUserUid]);
+
+  useEffect(() => {
+    if (!firebaseUserUid || !privateKey || privateKeyUid !== firebaseUserUid) {
+      return undefined;
+    }
+
+    const uid = firebaseUserUid;
+    const sessionPrivateKey = privateKey;
+    let timeoutId: number | undefined;
+    let active = true;
+    let lastRefreshAt = 0;
+
+    function clearUnlockAfterIdle() {
+      if (!active) {
+        return;
+      }
+
+      clearPrivateKey();
+      void deleteSessionPrivateKey(uid).catch(() => undefined);
+    }
+
+    function refreshSession() {
+      if (!active) {
+        return;
+      }
+
+      lastRefreshAt = Date.now();
+      window.clearTimeout(timeoutId);
+      void writeSessionPrivateKey(uid, sessionPrivateKey, lastRefreshAt + privateKeySessionDurationMs).catch(() => undefined);
+      timeoutId = window.setTimeout(clearUnlockAfterIdle, privateKeySessionDurationMs);
+    }
+
+    function refreshSessionFromActivity() {
+      if (Date.now() - lastRefreshAt < 60_000) {
+        return;
+      }
+
+      refreshSession();
+    }
+
+    refreshSession();
+    window.addEventListener("keydown", refreshSessionFromActivity, true);
+    window.addEventListener("pointerdown", refreshSessionFromActivity, true);
+    window.addEventListener("focus", refreshSessionFromActivity);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeoutId);
+      window.removeEventListener("keydown", refreshSessionFromActivity, true);
+      window.removeEventListener("pointerdown", refreshSessionFromActivity, true);
+      window.removeEventListener("focus", refreshSessionFromActivity);
+    };
+  }, [clearPrivateKey, firebaseUserUid, privateKey, privateKeyUid]);
 
   const unlockPrivateKey = useCallback(
     async (password: string) => {
@@ -122,6 +226,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
 
       setKeyError(null);
+      await authPersistenceReady;
       await signInWithEmailAndPassword(auth, profile.loginEmail, password);
       const keyDocument = await getUserKeyDocument(firebaseUser.uid);
 
@@ -130,18 +235,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
       }
 
       try {
-        setPrivateKey(await unlockPrivateKeyWithFallback(keyDocument, password));
+        rememberPrivateKey(firebaseUser.uid, await unlockPrivateKeyWithFallback(keyDocument, password));
       } catch (error) {
         setKeyError("노트 암호화 키를 열 수 없습니다. 비밀번호를 확인해주세요.");
         throw error;
       }
     },
-    [firebaseUser, profile]
+    [firebaseUser, profile, rememberPrivateKey]
   );
 
   const loginRosterUser = useCallback(
     async (rosterUser: PublicRosterUser, password: string) => {
       setKeyError(null);
+      await authPersistenceReady;
       const credential = await signInWithEmailAndPassword(auth, rosterUser.loginEmail, password);
       const nextProfile = await loadProfile(credential.user);
       const keyDocument = await getUserKeyDocument(credential.user.uid);
@@ -150,10 +256,10 @@ export function AuthProvider({ children }: PropsWithChildren) {
         throw new Error("사용자 프로필 또는 암호화 키를 불러오지 못했습니다.");
       }
 
-      setPrivateKey(await unlockPrivateKeyWithFallback(keyDocument, password));
+      rememberPrivateKey(credential.user.uid, await unlockPrivateKeyWithFallback(keyDocument, password));
       return nextProfile;
     },
-    [loadProfile]
+    [loadProfile, rememberPrivateKey]
   );
 
   const changePassword = useCallback(
@@ -180,7 +286,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
         await updatePassword(firebaseUser, nextPassword);
         authPasswordChanged = true;
         await promotePendingUserKey(firebaseUser.uid, nextKeyBundle);
-        setPrivateKey(await unlockPrivateKeyWithFallback({ ...keyDocument, ...nextKeyBundle }, nextPassword));
+        rememberPrivateKey(firebaseUser.uid, await unlockPrivateKeyWithFallback({ ...keyDocument, ...nextKeyBundle }, nextPassword));
         setKeyError(null);
       } catch (error) {
         if (!authPasswordChanged) {
@@ -190,19 +296,23 @@ export function AuthProvider({ children }: PropsWithChildren) {
         throw error;
       }
     },
-    [firebaseUser, profile]
+    [firebaseUser, profile, rememberPrivateKey]
   );
 
   const signOut = useCallback(async () => {
-    setPrivateKey(null);
+    const uid = firebaseUser?.uid;
+    clearPrivateKey();
+    if (uid) {
+      await deleteSessionPrivateKey(uid).catch(() => undefined);
+    }
     await firebaseSignOut(auth);
-  }, []);
+  }, [clearPrivateKey, firebaseUser]);
 
   const value = useMemo(
     () => ({
       firebaseUser,
       profile,
-      privateKey,
+      privateKey: privateKeyUid === firebaseUserUid ? privateKey : null,
       loading,
       keyError,
       changePassword,
@@ -210,7 +320,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
       unlockPrivateKey,
       signOut
     }),
-    [changePassword, firebaseUser, keyError, loading, loginRosterUser, privateKey, profile, signOut, unlockPrivateKey]
+    [
+      changePassword,
+      firebaseUser,
+      firebaseUserUid,
+      keyError,
+      loading,
+      loginRosterUser,
+      privateKey,
+      privateKeyUid,
+      profile,
+      signOut,
+      unlockPrivateKey
+    ]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
