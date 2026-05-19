@@ -56,12 +56,6 @@ const userKeyPayload = {
   cipherText: "private-key",
   iv: "iv"
 };
-const passkeyUnlockPayload = {
-  version: 1,
-  credentialId: "credential-id-for-user-a",
-  prfSalt: "cHJmLXNhbHQtZm9yLXVzZXItYQ==",
-  encryptedPrivateKeyJwk: userKeyPayload
-};
 const bootstrapSetupTokenHash = "a".repeat(64);
 
 function userProfile(uid: string, overrides: Record<string, unknown> = {}) {
@@ -536,31 +530,6 @@ describeRules("firestore security rules", () => {
         pendingKdfSalt: deleteField(),
         pendingKdfIterations: deleteField(),
         pendingCreatedAt: deleteField(),
-        updatedAt: serverTimestamp()
-      })
-    );
-    await assertSucceeds(
-      updateDoc(doc(userDb, "userKeys/user-a"), {
-        passkeyUnlock: {
-          ...passkeyUnlockPayload,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp()
-        },
-        updatedAt: serverTimestamp()
-      })
-    );
-    await assertSucceeds(
-      updateDoc(doc(userDb, "userKeys/user-a"), {
-        passkeyUnlock: deleteField(),
-        updatedAt: serverTimestamp()
-      })
-    );
-    await assertFails(
-      updateDoc(doc(userDb, "userKeys/user-a"), {
-        passkeyUnlock: {
-          ...passkeyUnlockPayload,
-          credentialId: "short"
-        },
         updatedAt: serverTimestamp()
       })
     );

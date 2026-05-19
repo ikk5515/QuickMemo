@@ -1,6 +1,6 @@
 const legacyDatabaseName = "quickmemo-private-key-session";
 
-export const privateKeySessionDurationMs = 30 * 60 * 1000;
+export const privateKeySessionDurationMs = 60 * 60 * 1000;
 
 interface SessionPrivateKeyRecord {
   expiresAt: number;

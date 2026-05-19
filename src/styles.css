@@ -385,12 +385,6 @@ textarea {
   margin: 0;
 }
 
-.modal-help-text {
-  color: var(--muted);
-  line-height: 1.5;
-  margin: 0;
-}
-
 .secondary-button {
   background: var(--surface);
   color: var(--ink);
@@ -4327,15 +4321,6 @@ textarea {
   font-size: 28px;
   letter-spacing: 0;
   margin-bottom: 10px;
-}
-
-.unlock-passkey-button {
-  align-items: center;
-  display: inline-flex;
-  gap: 8px;
-  justify-content: center;
-  margin-top: 18px;
-  width: 100%;
 }
 
 .inline-form {
