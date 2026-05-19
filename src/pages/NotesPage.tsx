@@ -97,6 +97,14 @@ import {
   serializeEditorContent
 } from "../lib/editorContent";
 import {
+  maxPdfPreviewCanvasPixels,
+  maxPdfPreviewImagePixels,
+  maxPdfPreviewPageCssWidth,
+  maxPdfPreviewPages,
+  maxPdfPreviewTotalCanvasPixels,
+  pdfPreviewCanvasLayout
+} from "../lib/pdfPreviewCanvas";
+import {
   editorCellColors,
   editorImagePixelWidthBounds,
   editorLineHeightBounds,
@@ -302,10 +310,6 @@ const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const publicShareUrlStoragePrefix = "quickmemo-public-share-url:";
 const publicShareContentKeyStoragePrefix = "quickmemo-public-share-content-key:";
-const maxPdfPreviewPages = 30;
-const maxPdfPreviewCanvasPixels = 4_000_000;
-const maxPdfPreviewImagePixels = 6_000_000;
-const maxPdfPreviewPageCssWidth = 860;
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
@@ -7089,6 +7093,7 @@ function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: st
     let loadingTask: { destroy: () => Promise<void>; promise: Promise<any> } | null = null;
     let pdfDocument: { destroy: () => Promise<void> } | null = null;
     const renderTasks: Array<{ cancel: () => void; promise: Promise<void> }> = [];
+    let retainedCanvasPixels = 0;
 
     previewContainer.replaceChildren();
     setState({ error: null, pageCount: 0, renderedCount: 0, status: "loading" });
@@ -7117,6 +7122,7 @@ function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: st
         pdfDocument = pdf;
         const pageCount = pdf.numPages;
         const pagesToRender = Math.min(pageCount, maxPdfPreviewPages);
+        let renderedPages = 0;
 
         if (!cancelled) {
           setState({ error: null, pageCount, renderedCount: 0, status: "loading" });
@@ -7130,21 +7136,34 @@ function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: st
           const page = await pdf.getPage(pageNumber);
           const baseViewport = page.getViewport({ scale: 1 });
           const containerWidth = previewContainer.clientWidth || maxPdfPreviewPageCssWidth;
-          const targetWidth = Math.min(maxPdfPreviewPageCssWidth, Math.max(220, containerWidth - 32));
-          const cssScale = Math.min(1.5, Math.max(0.2, targetWidth / baseViewport.width));
-          const maxPixelRatio = Math.sqrt(maxPdfPreviewCanvasPixels / (baseViewport.width * baseViewport.height)) / cssScale;
-          const outputScale = Math.max(0.25, Math.min(window.devicePixelRatio || 1, maxPixelRatio));
-          const renderViewport = page.getViewport({ scale: cssScale * outputScale });
-          const cssViewport = page.getViewport({ scale: cssScale });
+          const remainingCanvasPixels = maxPdfPreviewTotalCanvasPixels - retainedCanvasPixels;
+          const layout = pdfPreviewCanvasLayout({
+            baseHeight: baseViewport.height,
+            baseWidth: baseViewport.width,
+            containerWidth,
+            devicePixelRatio: window.devicePixelRatio || 1,
+            remainingCanvasPixels
+          });
+
+          if (!layout) {
+            break;
+          }
+
+          if (layout.canvasPixels > maxPdfPreviewCanvasPixels || layout.canvasPixels > remainingCanvasPixels) {
+            throw new Error("PDF preview canvas budget exceeded.");
+          }
+
+          const renderViewport = page.getViewport({ scale: layout.cssScale * layout.outputScale });
           const canvas = document.createElement("canvas");
 
           canvas.className = "pdf-preview-canvas-page";
-          canvas.width = Math.max(1, Math.floor(renderViewport.width));
-          canvas.height = Math.max(1, Math.floor(renderViewport.height));
-          canvas.style.width = `${Math.max(1, Math.floor(cssViewport.width))}px`;
-          canvas.style.height = `${Math.max(1, Math.floor(cssViewport.height))}px`;
+          canvas.width = layout.canvasWidth;
+          canvas.height = layout.canvasHeight;
+          canvas.style.width = `${layout.cssWidth}px`;
+          canvas.style.height = `${layout.cssHeight}px`;
           canvas.setAttribute("aria-label", `${fileName} ${pageNumber}쪽`);
           previewContainer.append(canvas);
+          retainedCanvasPixels += layout.canvasPixels;
 
           const renderTask = page.render({
             annotationMode: pdfjs.AnnotationMode.DISABLE,
@@ -7155,14 +7174,19 @@ function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: st
 
           renderTasks.push(renderTask);
           await renderTask.promise;
+          renderedPages += 1;
 
           if (!cancelled) {
-            setState({ error: null, pageCount, renderedCount: pageNumber, status: "loading" });
+            setState({ error: null, pageCount, renderedCount: renderedPages, status: "loading" });
           }
         }
 
+        if (pagesToRender > 0 && renderedPages === 0) {
+          throw new Error("PDF preview has no safe renderable pages.");
+        }
+
         if (!cancelled) {
-          setState({ error: null, pageCount, renderedCount: pagesToRender, status: "ready" });
+          setState({ error: null, pageCount, renderedCount: renderedPages, status: "ready" });
         }
       } catch {
         if (!cancelled) {
@@ -7188,7 +7212,8 @@ function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: st
     };
   }, [bytes, fileName]);
 
-  const truncated = state.status === "ready" && state.pageCount > maxPdfPreviewPages;
+  const expectedRenderedPages = Math.min(state.pageCount, maxPdfPreviewPages);
+  const truncated = state.status === "ready" && (state.pageCount > maxPdfPreviewPages || state.renderedCount < expectedRenderedPages);
 
   return (
     <div className="pdf-preview-canvas-frame" aria-label={`${fileName} PDF 미리보기`}>
@@ -7201,7 +7226,7 @@ function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: st
       {state.error && <p className="file-preview-error">{state.error}</p>}
       {truncated && (
         <p className="pdf-preview-status">
-          빠른 미리보기를 위해 처음 {maxPdfPreviewPages}쪽만 표시했습니다. 전체 파일은 다운로드해서 확인해주세요.
+          안전한 미리보기를 위해 {state.renderedCount}/{expectedRenderedPages}쪽만 표시했습니다. 전체 파일은 다운로드해서 확인해주세요.
         </p>
       )}
     </div>
