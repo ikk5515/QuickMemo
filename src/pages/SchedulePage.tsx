@@ -41,7 +41,6 @@ import {
   nextScheduleTaskColor,
   normalizeScheduleDetails,
   normalizeScheduleTaskColor,
-  scheduleTaskColorPalette,
   taskEndDate,
   taskStartDate,
   taskStartTime,
@@ -1206,27 +1205,15 @@ function ScheduleColorPicker({ onChange, value }: { onChange: (color: string) =>
   const normalizedValue = normalizeScheduleTaskColor(value);
 
   return (
-    <div className="schedule-color-picker">
+    <label className="schedule-color-picker">
       <span>색상</span>
-      <div>
-        {scheduleTaskColorPalette.map((color) => (
-          <button
-            aria-label={`${color} 색상 선택`}
-            className={normalizeScheduleTaskColor(color) === normalizedValue ? "active" : ""}
-            key={color}
-            onClick={() => onChange(color)}
-            style={{ "--schedule-task-color": color } as CSSProperties}
-            type="button"
-          />
-        ))}
-        <input
-          aria-label="사용자 지정 색상"
-          onChange={(event) => onChange(event.target.value)}
-          type="color"
-          value={normalizedValue}
-        />
-      </div>
-    </div>
+      <input
+        aria-label="일정 색상"
+        onChange={(event) => onChange(event.target.value)}
+        type="color"
+        value={normalizedValue}
+      />
+    </label>
   );
 }
 
