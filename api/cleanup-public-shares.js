@@ -195,6 +195,62 @@ async function queryExpiredShareQueues({ accessToken, projectId, nowIso, limit }
   return result.flatMap((entry) => (entry.document ? [entry.document] : []));
 }
 
+async function queryExpiredShares({ accessToken, projectId, nowIso, limit }) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: "publicNoteShares" }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "expiresAt" },
+            op: "LESS_THAN_OR_EQUAL",
+            value: { timestampValue: nowIso }
+          }
+        },
+        orderBy: [
+          {
+            field: { fieldPath: "expiresAt" },
+            direction: "ASCENDING"
+          }
+        ],
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+async function queryExpiredPublicShareAttachments({ accessToken, projectId, nowIso, limit }) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: "attachments", allDescendants: true }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "expiresAt" },
+            op: "LESS_THAN_OR_EQUAL",
+            value: { timestampValue: nowIso }
+          }
+        },
+        orderBy: [
+          {
+            field: { fieldPath: "expiresAt" },
+            direction: "ASCENDING"
+          }
+        ],
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
 async function listChildDocuments(parentName, collectionId, accessToken) {
   const documents = [];
   let pageToken = "";
@@ -230,9 +286,48 @@ async function listChildDocuments(parentName, collectionId, accessToken) {
   return documents;
 }
 
-async function deletePublicShareTree(cleanupQueueDocument, accessToken, stats) {
-  const cleanupQueueName = cleanupQueueDocument.name;
-  const shareName = cleanupQueueName.replace("/publicShareCleanupQueue/", "/publicNoteShares/");
+function cleanupQueueNameFromShareName(shareName) {
+  return shareName.replace("/publicNoteShares/", "/publicShareCleanupQueue/");
+}
+
+function publicShareNameFromCleanupQueueName(cleanupQueueName) {
+  return cleanupQueueName.replace("/publicShareCleanupQueue/", "/publicNoteShares/");
+}
+
+function parsePublicShareAttachmentName(attachmentName) {
+  const marker = "/documents/publicNoteShares/";
+  const markerIndex = attachmentName.indexOf(marker);
+
+  if (markerIndex < 0) {
+    return null;
+  }
+
+  const relativePath = attachmentName.slice(markerIndex + marker.length);
+  const [shareId, collectionId, attachmentId] = relativePath.split("/");
+
+  if (!shareId || collectionId !== "attachments" || !attachmentId) {
+    return null;
+  }
+
+  return { attachmentId, shareId };
+}
+
+function cleanupAttachmentQueueNameFromAttachmentName(attachmentName) {
+  const parsed = parsePublicShareAttachmentName(attachmentName);
+
+  if (!parsed) {
+    return "";
+  }
+
+  return attachmentName
+    .slice(0, attachmentName.indexOf("/documents/") + "/documents/".length)
+    .concat(
+      `publicShareCleanupQueue/${parsed.shareId}/publicShareAttachmentCleanupQueue/${parsed.attachmentId}`
+    );
+}
+
+async function deletePublicShareTreeByName(shareName, accessToken, stats) {
+  const cleanupQueueName = cleanupQueueNameFromShareName(shareName);
   const attachmentDocuments = await listChildDocuments(shareName, "attachments", accessToken);
   const cleanupAttachmentDocuments = await listChildDocuments(
     cleanupQueueName,
@@ -273,6 +368,36 @@ async function deletePublicShareTree(cleanupQueueDocument, accessToken, stats) {
   }
 }
 
+async function deletePublicShareTree(cleanupQueueDocument, accessToken, stats) {
+  const shareName = publicShareNameFromCleanupQueueName(cleanupQueueDocument.name);
+
+  await deletePublicShareTreeByName(shareName, accessToken, stats);
+}
+
+async function deleteExpiredPublicShareAttachment(attachmentDocument, accessToken, stats) {
+  const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachmentDocument.name);
+
+  if (!cleanupAttachmentQueueName) {
+    return;
+  }
+
+  if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+    return;
+  }
+
+  const attachmentDeleted = await firestoreDelete(attachmentDocument.name, accessToken);
+  stats.documentDeletesAttempted += 1;
+  stats.attachmentsDeleted += attachmentDeleted ? 1 : 0;
+
+  if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+    return;
+  }
+
+  const cleanupAttachmentDeleted = await firestoreDelete(cleanupAttachmentQueueName, accessToken);
+  stats.documentDeletesAttempted += 1;
+  stats.attachmentQueuesDeleted += cleanupAttachmentDeleted ? 1 : 0;
+}
+
 async function cleanupExpiredPublicShares() {
   const credentials = cleanupCredentials();
   const accessToken = await fetchAccessToken(credentials);
@@ -292,11 +417,10 @@ async function cleanupExpiredPublicShares() {
   };
 
   for (let pass = 0; pass < 20 && stats.documentDeletesAttempted < stats.maxDocumentDeletes; pass += 1) {
+    let foundExpiredDocuments = false;
     const shareQueues = await queryExpiredShareQueues(config);
 
-    if (shareQueues.length === 0) {
-      break;
-    }
+    foundExpiredDocuments ||= shareQueues.length > 0;
 
     for (const shareQueue of shareQueues) {
       if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
@@ -306,7 +430,34 @@ async function cleanupExpiredPublicShares() {
       await deletePublicShareTree(shareQueue, accessToken, stats);
     }
 
-    if (shareQueues.length < config.limit) {
+    const shares = await queryExpiredShares(config);
+
+    foundExpiredDocuments ||= shares.length > 0;
+
+    for (const share of shares) {
+      if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+        break;
+      }
+
+      await deletePublicShareTreeByName(share.name, accessToken, stats);
+    }
+
+    const attachments = await queryExpiredPublicShareAttachments(config);
+
+    foundExpiredDocuments ||= attachments.length > 0;
+
+    for (const attachment of attachments) {
+      if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+        break;
+      }
+
+      await deleteExpiredPublicShareAttachment(attachment, accessToken, stats);
+    }
+
+    if (
+      !foundExpiredDocuments
+      || (shareQueues.length < config.limit && shares.length < config.limit && attachments.length < config.limit)
+    ) {
       break;
     }
   }

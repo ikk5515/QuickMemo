@@ -128,14 +128,22 @@
     {
       "collectionGroup": "attachments",
       "fieldPath": "expiresAt",
-      "ttl": true,
-      "indexes": []
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
     },
     {
       "collectionGroup": "publicNoteShares",
       "fieldPath": "expiresAt",
-      "ttl": true,
-      "indexes": []
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
     },
     {
       "collectionGroup": "scheduleTasks",
