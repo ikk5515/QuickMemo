@@ -7,8 +7,10 @@ import {
   formatTaskTime,
   groupTasksByMatrix,
   groupTasksByTodoDate,
+  isSafeScheduleDateRange,
   tasksByDate,
   matrixQuadrantForTask,
+  scheduleDateRangeDays,
   timeInputToMinutes
 } from "./scheduleHelpers";
 
@@ -93,6 +95,19 @@ describe("schedule helpers", () => {
     ]);
 
     expect(dateMap["2026-05-19"].map((item) => item.id)).toEqual(["active-early", "active-late", "done-early"]);
+  });
+
+  it("rejects invalid and oversized calendar ranges before expanding tasks by date", () => {
+    const dateMap = tasksByDate([
+      task("invalid", { dueDate: "2026-99-99", startDate: "2026-99-99", endDate: "2026-99-99" }),
+      task("oversized", { dueDate: "1900-01-01", startDate: "1900-01-01", endDate: "2199-12-31" })
+    ]);
+
+    expect(Object.keys(dateMap)).toEqual([]);
+    expect(scheduleDateRangeDays("2026-02-29", "2026-02-29")).toBeNull();
+    expect(isSafeScheduleDateRange("2028-02-29", "2028-02-29")).toBe(true);
+    expect(isSafeScheduleDateRange("2026-01-01", "2026-12-31")).toBe(true);
+    expect(isSafeScheduleDateRange("2026-12-31", "2027-01-01")).toBe(false);
   });
 
   it("builds a six-week calendar grid with today marked", () => {

@@ -34,6 +34,9 @@ import {
   formatTaskTime,
   groupTasksByMatrix,
   groupTasksByTodoDate,
+  isSafeScheduleDateRange,
+  isValidScheduleDateString,
+  maxScheduleTaskRangeDays,
   normalizeScheduleDetails,
   taskEndDate,
   taskStartDate,
@@ -62,6 +65,7 @@ const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: strin
 
 const taskPageSize = 5;
 const completedPageSize = 10;
+const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야 하고 같은 연도 안에서 최대 ${maxScheduleTaskRangeDays}일까지 선택할 수 있습니다.`;
 
 type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
 type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
@@ -268,9 +272,15 @@ export default function SchedulePage() {
       return false;
     }
 
+    const startDate = draft.startDate || draft.endDate || null;
+    const endDate = startDate ? draft.endDate || startDate : null;
+
+    if (startDate && !isSafeScheduleDateRange(startDate, endDate)) {
+      setError(scheduleDateRangeValidationMessage);
+      return false;
+    }
+
     try {
-      const startDate = draft.startDate || draft.endDate || null;
-      const endDate = startDate ? draft.endDate || startDate : null;
       const startTimeMinutes = draft.timeMode === "none" ? null : timeInputToMinutes(draft.startTime);
       const endTimeMinutes = draft.timeMode === "range" ? timeInputToMinutes(draft.endTime) : null;
       const taskKey = await generateNoteKey();
@@ -341,6 +351,11 @@ export default function SchedulePage() {
       const endDate = draft.endDate || startDate;
       const startTimeMinutes = draft.timeMode === "none" ? null : timeInputToMinutes(draft.startTime);
       const endTimeMinutes = draft.timeMode === "range" ? timeInputToMinutes(draft.endTime) : null;
+
+      if (startDate && !isSafeScheduleDateRange(startDate, endDate)) {
+        setError(scheduleDateRangeValidationMessage);
+        return;
+      }
 
       await updateScheduleTask(task.id, unlockedProfile.uid, {
         encryptedTitle,
@@ -602,6 +617,11 @@ function ScheduleCreateForm({
 
     if (draft.startDate && draft.endDate && draft.endDate < draft.startDate) {
       setLocalError("종료일은 시작일보다 빠를 수 없습니다.");
+      return;
+    }
+
+    if (draft.startDate && !isSafeScheduleDateRange(draft.startDate, draft.endDate || draft.startDate)) {
+      setLocalError(scheduleDateRangeValidationMessage);
       return;
     }
 
@@ -1669,6 +1689,11 @@ function TaskDetailModal({
       return;
     }
 
+    if (draft.startDate && !isSafeScheduleDateRange(draft.startDate, draft.endDate || draft.startDate)) {
+      setLocalError(scheduleDateRangeValidationMessage);
+      return;
+    }
+
     if (draft.timeMode === "range" && draft.startTime && draft.endTime && draft.endTime < draft.startTime) {
       setLocalError("종료 시간은 시작 시간보다 빠를 수 없습니다.");
       return;
@@ -1985,6 +2010,10 @@ function calendarMonthLabel(date: Date) {
 }
 
 function formatDateLabel(dateString: string) {
+  if (!isValidScheduleDateString(dateString)) {
+    return "날짜 오류";
+  }
+
   return new Intl.DateTimeFormat("ko-KR", { day: "numeric", month: "long", weekday: "short" }).format(
     new Date(`${dateString}T00:00:00`)
   );

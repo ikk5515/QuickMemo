@@ -31,6 +31,9 @@ export interface MatrixSection {
 }
 
 const dayMillis = 24 * 60 * 60 * 1000;
+const scheduleDatePattern = /^(19|20|21)\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+export const maxScheduleTaskRangeDays = 366;
 
 export const emptyScheduleDetails: ScheduleTaskDetails = {
   description: "",
@@ -48,6 +51,47 @@ export function toLocalDateString(date: Date) {
 export function parseLocalDateString(value: string) {
   const [year, month, day] = value.split("-").map(Number);
   return new Date(year, month - 1, day);
+}
+
+export function isValidScheduleDateString(value: string | null | undefined): value is string {
+  if (!value || !scheduleDatePattern.test(value)) {
+    return false;
+  }
+
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+export function scheduleDateRangeDays(startDate: string | null | undefined, endDate: string | null | undefined) {
+  if (!isValidScheduleDateString(startDate)) {
+    return null;
+  }
+
+  const safeEndDate = endDate ?? startDate;
+
+  if (!isValidScheduleDateString(safeEndDate) || safeEndDate < startDate) {
+    return null;
+  }
+
+  const startMillis = parseLocalDateString(startDate).getTime();
+  const endMillis = parseLocalDateString(safeEndDate).getTime();
+
+  return Math.floor((endMillis - startMillis) / dayMillis) + 1;
+}
+
+export function isSafeScheduleDateRange(startDate: string | null | undefined, endDate: string | null | undefined) {
+  const days = scheduleDateRangeDays(startDate, endDate);
+  const safeEndDate = endDate ?? startDate;
+
+  return (
+    days != null
+    && days <= maxScheduleTaskRangeDays
+    && isValidScheduleDateString(startDate)
+    && isValidScheduleDateString(safeEndDate)
+    && startDate.slice(0, 4) === safeEndDate.slice(0, 4)
+  );
 }
 
 export function addDays(dateString: string, days: number) {
@@ -129,7 +173,9 @@ function taskStartDateTimeMillis(task: DecryptedScheduleTask) {
   }
 
   const startDate = taskStartDate(task);
-  const dateMillis = startDate ? parseLocalDateString(startDate).getTime() : Number.MAX_SAFE_INTEGER - 24 * 60 * 60 * 1000;
+  const dateMillis = isValidScheduleDateString(startDate)
+    ? parseLocalDateString(startDate).getTime()
+    : Number.MAX_SAFE_INTEGER - 24 * 60 * 60 * 1000;
 
   return dateMillis + startTime * 60 * 1000;
 }
@@ -189,11 +235,11 @@ export function formatScheduleDateRange(task: DecryptedScheduleTask) {
   const startDate = taskStartDate(task);
   const endDate = taskEndDate(task);
 
-  if (!startDate) {
+  if (!isValidScheduleDateString(startDate)) {
     return "날짜 없음";
   }
 
-  if (!endDate || endDate === startDate) {
+  if (!isValidScheduleDateString(endDate) || endDate === startDate) {
     return startDate;
   }
 
@@ -242,12 +288,14 @@ export function groupTasksByTodoDate(tasks: DecryptedScheduleTask[], today = toL
     const startDate = taskStartDate(task);
     const endDate = taskEndDate(task);
 
-    if (!startDate) {
+    if (!isValidScheduleDateString(startDate)) {
       groups.noDate.push(task);
       return;
     }
 
-    if (startDate <= today && (!endDate || endDate >= today)) {
+    const safeEndDate = isValidScheduleDateString(endDate) ? endDate : startDate;
+
+    if (startDate <= today && safeEndDate >= today) {
       groups.today.push(task);
       return;
     }
@@ -316,14 +364,20 @@ export function tasksByDate(tasks: DecryptedScheduleTask[]) {
     const startDate = taskStartDate(task);
     const endDate = taskEndDate(task);
 
-    if (!startDate) {
+    if (!isValidScheduleDateString(startDate)) {
+      return map;
+    }
+
+    const lastDate = isValidScheduleDateString(endDate) && endDate >= startDate ? endDate : startDate;
+    const rangeDays = scheduleDateRangeDays(startDate, lastDate);
+
+    if (rangeDays == null || rangeDays > maxScheduleTaskRangeDays) {
       return map;
     }
 
     let cursor = startDate;
-    const lastDate = endDate && endDate >= startDate ? endDate : startDate;
 
-    while (cursor <= lastDate) {
+    for (let offset = 0; offset < rangeDays; offset += 1) {
       map[cursor] = [...(map[cursor] ?? []), task];
       map[cursor].sort(compareCalendarTasks);
       cursor = addDays(cursor, 1);
