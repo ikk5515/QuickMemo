@@ -128,13 +128,11 @@
     {
       "collectionGroup": "attachments",
       "fieldPath": "expiresAt",
-      "ttl": true,
       "indexes": []
     },
     {
       "collectionGroup": "publicNoteShares",
       "fieldPath": "expiresAt",
-      "ttl": true,
       "indexes": []
     },
     {
