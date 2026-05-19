@@ -312,6 +312,155 @@ service cloud.firestore {
       && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
     }
 
+    function validUserPreferences(data, uid) {
+      return data.keys().hasOnly(["uid", "defaultHome", "scheduleDefaultView", "createdAt", "updatedAt"])
+        && data.uid == uid
+        && data.defaultHome in ["notes", "schedule"]
+        && data.scheduleDefaultView in ["todo", "calendar", "matrix"]
+        && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
+        && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
+    }
+
+    function validScheduleDate(value) {
+      return value == null
+        || (
+          value is string
+          && value.size() == 10
+          && value.matches("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+        );
+    }
+
+    function validScheduleTime(value) {
+      return value == null || (value is int && value >= 0 && value <= 1439);
+    }
+
+    function scheduleStartDate(data) {
+      return data.keys().hasAny(["startDate"]) ? data.startDate : data.dueDate;
+    }
+
+    function scheduleEndDate(data) {
+      return data.keys().hasAny(["endDate"]) ? data.endDate : scheduleStartDate(data);
+    }
+
+    function scheduleStartTime(data) {
+      return data.keys().hasAny(["startTimeMinutes"]) ? data.startTimeMinutes : data.dueTimeMinutes;
+    }
+
+    function scheduleEndTime(data) {
+      return data.keys().hasAny(["endTimeMinutes"]) ? data.endTimeMinutes : null;
+    }
+
+    function validScheduleDateRange(data) {
+      return validScheduleDate(data.dueDate)
+        && validScheduleDate(scheduleStartDate(data))
+        && validScheduleDate(scheduleEndDate(data))
+        && (
+          scheduleStartDate(data) == null
+          || scheduleEndDate(data) == null
+          || scheduleEndDate(data) >= scheduleStartDate(data)
+        )
+        && (
+          scheduleStartDate(data) == data.dueDate
+          || (scheduleStartDate(data) == null && data.dueDate == null)
+        );
+    }
+
+    function validScheduleTimeRange(data) {
+      return validScheduleTime(data.dueTimeMinutes)
+        && validScheduleTime(scheduleStartTime(data))
+        && validScheduleTime(scheduleEndTime(data))
+        && (
+          scheduleStartTime(data) == data.dueTimeMinutes
+          || (scheduleStartTime(data) == null && data.dueTimeMinutes == null)
+        )
+        && (
+          scheduleEndTime(data) == null
+          || (
+            scheduleStartTime(data) != null
+            && scheduleEndTime(data) >= scheduleStartTime(data)
+          )
+        );
+    }
+
+    function encryptedSchedulePayload(payload, maxCipherTextSize) {
+      return encryptedPayload(payload)
+        && payload.cipherText.size() > 0
+        && payload.cipherText.size() <= maxCipherTextSize
+        && payload.iv.size() > 0
+        && payload.iv.size() <= 256;
+    }
+
+    function validScheduleWrappedKeys(data, uid) {
+      return data.wrappedKeys is map
+        && data.wrappedKeys.keys().hasOnly([uid])
+        && wrappedAesKeyPayload(data.wrappedKeys[uid]);
+    }
+
+    function validScheduleCompletion(data) {
+      return (
+        data.status == "active"
+        && data.completedAt == null
+      )
+      || (
+        data.status == "completed"
+        && data.completedAt is timestamp
+        && data.completedAt <= request.time
+      );
+    }
+
+    function validScheduleTask(data, uid) {
+      return data.keys().hasAll([
+        "ownerUid",
+        "status",
+        "dueDate",
+        "dueTimeMinutes",
+        "isImportant",
+        "isUrgent",
+        "encryptedTitle",
+        "encryptedDetails",
+        "wrappedKeys",
+        "createdBy",
+        "updatedBy",
+        "createdAt",
+        "updatedAt",
+        "completedAt"
+      ])
+      && data.keys().hasOnly([
+        "ownerUid",
+        "status",
+        "dueDate",
+        "dueTimeMinutes",
+        "startDate",
+        "endDate",
+        "startTimeMinutes",
+        "endTimeMinutes",
+        "isImportant",
+        "isUrgent",
+        "encryptedTitle",
+        "encryptedDetails",
+        "wrappedKeys",
+        "createdBy",
+        "updatedBy",
+        "createdAt",
+        "updatedAt",
+        "completedAt"
+      ])
+      && data.ownerUid == uid
+      && data.status in ["active", "completed"]
+      && validScheduleDateRange(data)
+      && validScheduleTimeRange(data)
+      && data.isImportant is bool
+      && data.isUrgent is bool
+      && encryptedSchedulePayload(data.encryptedTitle, 4096)
+      && encryptedSchedulePayload(data.encryptedDetails, 50000)
+      && validScheduleWrappedKeys(data, uid)
+      && data.createdBy == uid
+      && data.updatedBy == uid
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp
+      && validScheduleCompletion(data);
+    }
+
     function validNoteFolder(data) {
       return data.keys().hasOnly(["ownerUid", "name", "color", "createdAt", "updatedAt"])
         && data.ownerUid == request.auth.uid
@@ -384,11 +533,11 @@ service cloud.firestore {
         && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "readerUids", "encryptedSummary", "encryptedSnapshot", "createdAt"])
         && data.noteId == noteId
         && data.actorUid == request.auth.uid
-        && data.action in ["create", "content", "deadline", "share", "delete", "restore"]
+        && data.action in ["create", "content", "share", "delete", "restore"]
         && data.changedFields is list
         && data.changedFields.size() > 0
         && data.changedFields.size() <= 8
-        && data.changedFields.hasOnly(["title", "body", "dueAt", "participants", "deleted", "restored"])
+        && data.changedFields.hasOnly(["title", "body", "participants", "deleted", "restored"])
         && data.readerUids is list
         && data.readerUids.size() > 0
         && data.readerUids.size() <= 200
@@ -422,7 +571,7 @@ service cloud.firestore {
         && getAfter(notePath(noteId)).data.updatedAt == request.time
         && getAfter(notePath(noteId)).data.savedAt == request.time
         && getAfter(notePath(noteId)).data.isDeleted == false
-        && data.changedFields.hasOnly(["title", "body", "dueAt"]);
+        && data.changedFields.hasOnly(["title", "body"]);
     }
 
     function contentHistoryMatchesNote(data, noteId) {
@@ -458,16 +607,6 @@ service cloud.firestore {
         );
     }
 
-    function deadlineHistoryMatchesNote(data, noteId) {
-      return data.action == "deadline"
-        && linkedNoteUpdate(noteId)
-        && !noteDeleted(get(notePath(noteId)).data)
-        && !noteDeleted(getAfter(notePath(noteId)).data)
-        && data.changedFields.hasOnly(["dueAt"])
-        && noteFolderId(getAfter(notePath(noteId)).data) == noteFolderId(get(notePath(noteId)).data)
-        && getAfter(notePath(noteId)).data.dueAt != get(notePath(noteId)).data.dueAt;
-    }
-
     function deleteHistoryMatchesNote(data, noteId) {
       return data.action == "delete"
         && linkedNoteUpdate(noteId)
@@ -492,7 +631,6 @@ service cloud.firestore {
           createHistoryMatchesNote(data, noteId)
           || contentHistoryMatchesNote(data, noteId)
           || shareHistoryMatchesNote(data, noteId)
-          || deadlineHistoryMatchesNote(data, noteId)
           || deleteHistoryMatchesNote(data, noteId)
           || restoreHistoryMatchesNote(data, noteId)
         );
@@ -823,28 +961,6 @@ service cloud.firestore {
         ], [
           "encryptedTitle",
           "encryptedBody",
-          "updatedAt",
-          "updatedBy",
-          "isDeleted"
-        ]);
-    }
-
-    function noteDeadlineUpdate(data) {
-      return noteParticipant(data)
-        && !noteDeleted(resource.data)
-        && !noteDeleted(data)
-        && data.type == resource.data.type
-        && data.participantUids == resource.data.participantUids
-        && data.wrappedKeys == resource.data.wrappedKeys
-        && data.encryptedTitle == resource.data.encryptedTitle
-        && data.encryptedBody == resource.data.encryptedBody
-        && allowedShareTargets(data)
-        && activeNoteUpdateAffectedKeys([
-          "dueAt",
-          "updatedAt",
-          "updatedBy"
-        ], [
-          "dueAt",
           "updatedAt",
           "updatedBy",
           "isDeleted"
@@ -1227,6 +1343,71 @@ service cloud.firestore {
       allow delete: if adminDeletesManagedUser(uid);
     }
 
+    match /userPreferences/{uid} {
+      allow read: if activeSignedInUser() && request.auth.uid == uid;
+      allow create: if activeSignedInUser()
+        && request.auth.uid == uid
+        && validUserPreferences(request.resource.data, uid)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if activeSignedInUser()
+        && request.auth.uid == uid
+        && validUserPreferences(request.resource.data, uid)
+        && request.resource.data.uid == resource.data.uid
+        && (
+          (
+            !request.resource.data.keys().hasAny(["createdAt"])
+            && !resource.data.keys().hasAny(["createdAt"])
+          )
+          || request.resource.data.createdAt == resource.data.createdAt
+        )
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "defaultHome",
+          "scheduleDefaultView",
+          "updatedAt"
+        ]);
+      allow delete: if false;
+    }
+
+    match /scheduleTasks/{taskId} {
+      allow read: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+      allow create: if activeSignedInUser()
+        && validScheduleTask(request.resource.data, request.auth.uid)
+        && request.resource.data.status == "active"
+        && request.resource.data.completedAt == null
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid
+        && validScheduleTask(request.resource.data, request.auth.uid)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.wrappedKeys == resource.data.wrappedKeys
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "dueDate",
+          "dueTimeMinutes",
+          "startDate",
+          "endDate",
+          "startTimeMinutes",
+          "endTimeMinutes",
+          "isImportant",
+          "isUrgent",
+          "encryptedTitle",
+          "encryptedDetails",
+          "updatedBy",
+          "updatedAt",
+          "completedAt"
+        ]);
+      allow delete: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+    }
+
     match /noteFolders/{folderId} {
       allow read: if activeSignedInUser()
         && resource.data.ownerUid == request.auth.uid;
@@ -1290,7 +1471,6 @@ service cloud.firestore {
         && request.resource.data.ownerUid == resource.data.ownerUid
         && (
           noteContentUpdate(request.resource.data)
-          || noteDeadlineUpdate(request.resource.data)
           || noteFolderUpdate(request.resource.data)
           || (ownerAccessUpdate(request.resource.data) && allowedShareTargets(request.resource.data))
           || legacyActiveDeleteMetadataMigration(request.resource.data)

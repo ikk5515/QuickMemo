@@ -280,14 +280,25 @@ export async function reorderUsers(users: PublicRosterUser[]) {
 }
 
 export async function deleteManagedUserDocuments(user: Pick<UserProfile, "uid" | "quickKey">) {
-  const batch = writeBatch(db);
+  const idToken = await auth.currentUser?.getIdToken();
 
-  batch.delete(doc(db, "quickLoginKeys", String(user.quickKey)));
-  batch.delete(doc(db, "users", user.uid));
-  batch.delete(doc(db, "publicLoginRoster", user.uid));
-  batch.delete(doc(db, "userKeys", user.uid));
+  if (!idToken) {
+    throw new Error("관리자 인증을 확인할 수 없습니다.");
+  }
 
-  await batch.commit();
+  const response = await fetch("/api/delete-managed-user", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${idToken}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({ targetUid: user.uid })
+  });
+
+  if (!response.ok) {
+    const result = (await response.json().catch(() => undefined)) as { error?: string } | undefined;
+    throw new Error(result?.error ?? "사용자를 삭제하지 못했습니다.");
+  }
 }
 
 export async function resetUserPassword() {

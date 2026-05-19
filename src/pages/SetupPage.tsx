@@ -47,7 +47,7 @@ export default function SetupPage() {
   }, []);
 
   if (firebaseUser) {
-    return <Navigate to="/app" replace />;
+    return <Navigate to="/home" replace />;
   }
 
   if (adminExists) {
@@ -88,7 +88,7 @@ export default function SetupPage() {
         },
         password
       );
-      navigate("/app", { replace: true });
+      navigate("/home", { replace: true });
     } catch (setupError) {
       const message = firebaseAuthErrorMessage(setupError, "첫 관리자를 만들지 못했습니다.");
       setError(

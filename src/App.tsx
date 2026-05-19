@@ -2,9 +2,11 @@ import type { ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
 import AdminPage from "./pages/AdminPage";
+import HomeRedirectPage from "./pages/HomeRedirectPage";
 import LoginPage from "./pages/LoginPage";
 import NotesPage from "./pages/NotesPage";
 import PublicSharePage from "./pages/PublicSharePage";
+import SchedulePage from "./pages/SchedulePage";
 import SetupPage from "./pages/SetupPage";
 
 function RequireAuth({ children, adminOnly = false }: { children: ReactNode; adminOnly?: boolean }) {
@@ -19,7 +21,7 @@ function RequireAuth({ children, adminOnly = false }: { children: ReactNode; adm
   }
 
   if (adminOnly && !profile.isAdmin) {
-    return <Navigate to="/app" replace />;
+    return <Navigate to="/home" replace />;
   }
 
   return children;
@@ -33,10 +35,26 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/share/:shareId" element={<PublicSharePage />} />
       <Route
+        path="/home"
+        element={
+          <RequireAuth>
+            <HomeRedirectPage />
+          </RequireAuth>
+        }
+      />
+      <Route
         path="/app"
         element={
           <RequireAuth>
             <NotesPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/schedule"
+        element={
+          <RequireAuth>
+            <SchedulePage />
           </RequireAuth>
         }
       />

@@ -77,7 +77,13 @@ PUBLIC_SHARE_CLEANUP_BATCH_SIZE=50
 PUBLIC_SHARE_CLEANUP_MAX_DELETES=1000
 ```
 
-Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. cleanup 함수는 `publicNoteShares.expiresAt <= now`인 문서만 조회해 해당 공유 첨부 파일과 cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
+Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. cleanup 함수는 `publicNoteShares.expiresAt <= now`인 문서만 조회해 해당 공유 첨부 파일과 cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제와 Firebase Auth 사용자 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
+
+### 관리자 사용자 삭제
+
+관리자 화면의 사용자 삭제는 브라우저에서 바로 Firebase Auth 사용자를 삭제하지 않고 `/api/delete-managed-user` Vercel API를 통해 처리합니다. 이 API는 현재 로그인한 관리자의 Firebase ID 토큰을 Identity Toolkit `accounts:lookup`으로 확인하고, Firestore의 `users/{uid}`에서 `isActive`와 `isAdmin`을 다시 검증한 뒤 대상 Auth 계정과 앱 문서를 삭제합니다.
+
+이 기능도 위의 `FIREBASE_CLEANUP_*` 서비스 계정 환경 변수를 같이 사용합니다. Vercel Production 환경에 해당 변수가 없거나 서비스 계정에 Firebase Auth 사용자 삭제 권한이 없으면 앱 문서는 삭제되지 않고 관리자 화면에 실패로 표시됩니다.
 
 ### Auth 설정 오류 해결
 

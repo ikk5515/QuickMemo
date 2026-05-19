@@ -4,7 +4,6 @@ import {
   AlignRight,
   ArrowUpDown,
   Bold,
-  CalendarClock,
   Ban,
   CheckCircle2,
   Columns3,
@@ -142,7 +141,6 @@ import {
   subscribeVisibleNotes,
   updateEncryptedNote,
   updateNoteAccess,
-  updateNoteDeadline,
   updateNoteFolder,
   type NoteHistorySnapshot,
   type NoteAttachmentSnapshot,
@@ -177,7 +175,6 @@ interface EditorState {
   noteKey: CryptoKey | null;
   folderId: string | null;
   fontSize: number;
-  dueAt: Date | null;
   dirty: boolean;
 }
 
@@ -214,11 +211,10 @@ const blankEditor = (uid: string): EditorState => ({
   noteKey: null,
   folderId: null,
   fontSize: 17,
-  dueAt: null,
   dirty: false
 });
 
-type NoteSortField = "createdAt" | "dueAt";
+type NoteSortField = "createdAt";
 type NoteSortDirection = "asc" | "desc";
 type NoteListFilter = "all" | NoteKind;
 type EditorToolTab = "format" | "table" | "media";
@@ -1086,10 +1082,6 @@ function freshRemoteCursorTimestamp(updatedAt: Date | null, clockMs: number) {
   return ageMs >= 0 && ageMs <= remoteCursorFreshMs;
 }
 
-function timestampsEqual(left: Date | null, right: Date | null) {
-  return (left?.getTime() ?? null) === (right?.getTime() ?? null);
-}
-
 function nextParticipantList(currentParticipantUids: string[], selectedUid: string, checked: boolean, ownerUid: string) {
   const participantUids = checked
     ? Array.from(new Set([...currentParticipantUids, selectedUid, ownerUid]))
@@ -1099,7 +1091,7 @@ function nextParticipantList(currentParticipantUids: string[], selectedUid: stri
 }
 
 function noteTimestampMillis(note: DecryptedNote, field: NoteSortField) {
-  const timestamp = field === "createdAt" ? note.createdAt : note.dueAt;
+  const timestamp = note[field];
 
   if (timestamp instanceof Date) {
     return Number.isNaN(timestamp.getTime()) ? null : timestamp.getTime();
@@ -1228,7 +1220,7 @@ function readNoteSortSetting(uid: string): NoteSortSetting {
     const parsed = JSON.parse(rawValue) as Partial<NoteSortSetting>;
 
     if (
-      (parsed.field === "createdAt" || parsed.field === "dueAt") &&
+      parsed.field === "createdAt" &&
       (parsed.direction === "asc" || parsed.direction === "desc")
     ) {
       return { field: parsed.field, direction: parsed.direction };
@@ -1445,44 +1437,6 @@ function startOfLocalDay(date: Date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
 
-function deadlineDDay(date: Date | null) {
-  if (!date) {
-    return null;
-  }
-
-  const dayMs = 24 * 60 * 60 * 1000;
-  const diffDays = Math.round((startOfLocalDay(date) - startOfLocalDay(new Date())) / dayMs);
-
-  if (diffDays === 0) {
-    return "D-Day";
-  }
-
-  return diffDays > 0 ? `D-${diffDays}` : `D+${Math.abs(diffDays)}`;
-}
-
-function deadlineTone(date: Date | null) {
-  if (!date) {
-    return "none";
-  }
-
-  const dayMs = 24 * 60 * 60 * 1000;
-  const diffDays = Math.round((startOfLocalDay(date) - startOfLocalDay(new Date())) / dayMs);
-
-  if (diffDays < 0) {
-    return "overdue";
-  }
-
-  if (diffDays === 0) {
-    return "today";
-  }
-
-  if (diffDays <= 3) {
-    return "soon";
-  }
-
-  return "upcoming";
-}
-
 function publicShareTone(share: PublicNoteShareSnapshot | undefined, clockMs: number) {
   const expiresAt = dateFromTimestamp(share?.expiresAt);
 
@@ -1556,10 +1510,9 @@ function changedDraftFields(previousDraft: NoteDraft | null, nextDraft: NoteDraf
 }
 
 function historyActionLabel(action: NoteHistorySnapshot["action"]) {
-  const labels: Record<NoteHistorySnapshot["action"], string> = {
+  const labels: Partial<Record<NoteHistorySnapshot["action"], string>> = {
     create: "생성",
     content: "내용 수정",
-    deadline: "마감일 변경",
     share: "공유 대상 변경",
     delete: "삭제",
     restore: "복구"
@@ -1572,22 +1525,12 @@ function historyFieldLabel(field: string) {
   const labels: Record<string, string> = {
     title: "제목",
     body: "본문",
-    dueAt: "마감일",
     participants: "공유 대상",
     deleted: "삭제 상태",
     restored: "복구 상태"
   };
 
   return labels[field] ?? field;
-}
-
-function toDateTimeLocalValue(date: Date | null) {
-  if (!date) {
-    return "";
-  }
-
-  const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return offsetDate.toISOString().slice(0, 16);
 }
 
 async function decryptNoteSnapshots(notes: NoteSnapshot[], uid: string, privateKey: CryptoKey) {
@@ -1661,7 +1604,6 @@ export default function NotesPage() {
   const [ownerPublicShares, setOwnerPublicShares] = useState<PublicNoteShareSnapshot[]>([]);
   const [publicShareUrlById, setPublicShareUrlById] = useState<Record<string, string>>({});
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
-  const [deadlineOpen, setDeadlineOpen] = useState(false);
   const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
   const [noteFilter, setNoteFilter] = useState<NoteListFilter>(defaultNoteFilter);
   const autosaveTimer = useRef<number | null>(null);
@@ -1875,7 +1817,6 @@ export default function NotesPage() {
     editor.title,
     editor.body,
     editor.fontSize,
-    editor.dueAt,
     editor.participantUids,
     editor.dirty,
     editor.noteId,
@@ -2175,7 +2116,6 @@ export default function NotesPage() {
     }
 
     const remoteDraft = draftFromNote(activeRemoteNote);
-    const remoteDueAt = dateFromTimestamp(activeRemoteNote.dueAt);
     const remoteSignature = noteSyncSignature(activeRemoteNote);
     const pendingEcho = pendingLocalEcho.current;
     const currentDraft = {
@@ -2190,7 +2130,6 @@ export default function NotesPage() {
 
     const contentMatches = draftsMatch(editor, remoteDraft);
     const metadataMatches =
-      timestampsEqual(editor.dueAt, remoteDueAt) &&
       editor.type === activeRemoteNote.type &&
       editor.folderId === (activeRemoteNote.folderId ?? null) &&
       editor.participantUids.join("|") === activeRemoteNote.participantUids.join("|");
@@ -2234,7 +2173,6 @@ export default function NotesPage() {
       participantUids: activeRemoteNote.participantUids,
       folderId: activeRemoteNote.folderId ?? null,
       fontSize: remoteDraft.fontSize,
-      dueAt: remoteDueAt,
       dirty: contentMatches ? current.dirty : false
     }));
     setStatus(activeRemoteNote.type === "shared" ? "공유 노트 변경 사항을 반영했습니다." : "다른 기기 변경 사항을 반영했습니다.");
@@ -2242,7 +2180,6 @@ export default function NotesPage() {
     activeRemoteNote,
     editor,
     editor.body,
-    editor.dueAt,
     editor.fontSize,
     editor.noteId,
     editor.participantUids,
@@ -2331,9 +2268,6 @@ export default function NotesPage() {
   const canEditShareTargets = !editor.noteId || activeRemoteNote?.ownerUid === unlockedProfile.uid;
   const canDeleteCurrentNote = !editor.noteId || (activeRemoteNote ? canDeleteNote(activeRemoteNote) : false);
   const createdDate = dateFromTimestamp(activeRemoteNote?.createdAt);
-  const deadlineLabel = editor.dueAt ? formatFullDateTime(editor.dueAt) : "마감일 없음";
-  const deadlineDday = deadlineDDay(editor.dueAt);
-  const currentDeadlineTone = deadlineTone(editor.dueAt);
   const activeNotePinned = activeRemoteNote ? notePinned(activeRemoteNote.id, noteStateMap) : false;
 
   function announceActiveNote(noteId: string | null) {
@@ -2577,43 +2511,6 @@ export default function NotesPage() {
     return unlockedProfile.isAdmin || uid === unlockedProfile.uid || allowedShareTargetSet.has(uid);
   }
 
-  function updateDeadline(value: string) {
-    const dueAt = value ? new Date(value) : null;
-    const noteId = editor.noteId;
-
-    setEditor((current) => ({
-      ...current,
-      dueAt,
-      dirty: current.noteId ? current.dirty : true
-    }));
-
-    if (!noteId) {
-      setStatus(dueAt ? "마감일을 선택했습니다." : "마감일을 해제했습니다.");
-      return;
-    }
-
-    void saveDeadline(noteId, dueAt);
-  }
-
-  async function saveDeadline(noteId: string, dueAt: Date | null) {
-    setSaving(true);
-    setError(null);
-
-    try {
-      await updateNoteDeadline(
-        noteId,
-        unlockedProfile.uid,
-        dueAt ? Timestamp.fromDate(dueAt) : null,
-        activeRemoteNote?.participantUids ?? editor.participantUids
-      );
-      setStatus(dueAt ? "마감일을 저장했습니다." : "마감일을 해제했습니다.");
-    } catch {
-      setError("마감일을 저장하지 못했습니다.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   async function openNote(note: DecryptedNote, draftOverride?: NoteDraft, shouldAnnounce = true) {
     if (note.isDeleted) {
       setError("복구함의 노트는 먼저 복구한 뒤 불러올 수 있습니다.");
@@ -2644,7 +2541,6 @@ export default function NotesPage() {
         noteKey,
         folderId: note.folderId ?? null,
         fontSize: nextDraft.fontSize,
-        dueAt: dateFromTimestamp(note.dueAt),
         dirty: false
       });
       setListOpen(false);
@@ -2668,7 +2564,6 @@ export default function NotesPage() {
     clearEditorCursor();
     setEditor(blankEditor(unlockedProfile.uid));
     setShareOpen(false);
-    setDeadlineOpen(false);
     setStatus("새 노트 작성 중");
     setError(null);
     announceActiveNote(null);
@@ -3202,7 +3097,6 @@ export default function NotesPage() {
         encryptedBody: payload.encryptedBody,
         wrappedKeys,
         folderId: type === "personal" ? editor.folderId : null,
-        dueAt: editor.dueAt ? Timestamp.fromDate(editor.dueAt) : null,
         historySummary,
         historySnapshot
       });
@@ -3883,36 +3777,6 @@ export default function NotesPage() {
                 {publicShareBusy ? <Loader2 className="spin" size={18} /> : <Share2 size={18} />}
                 {activePublicShare ? "공유 중" : "공유하기"}
               </button>
-              <div className="deadline-control">
-                <button
-                  className={`deadline-summary ${currentDeadlineTone}`}
-                  type="button"
-                  onClick={() => setDeadlineOpen((current) => !current)}
-                >
-                  <span>
-                    <CalendarClock size={16} />
-                    마감일
-                  </span>
-                  <strong>{deadlineLabel}</strong>
-                  <em>{deadlineDday ?? "설정"}</em>
-                </button>
-                {deadlineOpen && (
-                  <div className="deadline-picker">
-                    <label className="deadline-picker-field">
-                      날짜 및 시간
-                      <input
-                        aria-label="마감일 날짜와 시간"
-                        onChange={(event) => updateDeadline(event.target.value)}
-                        type="datetime-local"
-                        value={toDateTimeLocalValue(editor.dueAt)}
-                      />
-                    </label>
-                    <button className="secondary-button" type="button" onClick={() => updateDeadline("")}>
-                      해제
-                    </button>
-                  </div>
-                )}
-              </div>
             </div>
             <div className="toolbar-actions">
               <label className="font-size-control">
@@ -6326,7 +6190,6 @@ function NoteDrawer({
               value={sortSetting.field}
             >
               <option value="createdAt">생성일</option>
-              <option value="dueAt">마감일</option>
             </select>
           </label>
           <button
@@ -6472,9 +6335,7 @@ function NoteList({
     <div className="note-list">
       {notes.map((note) => {
         const createdAt = dateFromTimestamp(note.createdAt);
-        const dueAt = dateFromTimestamp(note.dueAt);
         const deletedAt = dateFromTimestamp(note.deletedAt);
-        const dueTone = deadlineTone(dueAt);
         const pinned = notePinned(note.id, noteStates);
         const canRestore = canRestoreNote(note);
         const needsAttention = attentionNoteIds.has(note.id);
@@ -6501,11 +6362,6 @@ function NoteList({
                   <span>{deleted ? "삭제" : "생성"}</span>
                   <strong>{formatCompactDateTime(deleted ? deletedAt : createdAt)}</strong>
                   {deleted && <em>{deletedRetentionLabel(note)}</em>}
-                </span>
-                <span className={`note-list-date deadline ${dueTone}`}>
-                  <span>마감</span>
-                  <strong>{formatCompactDateTime(dueAt)}</strong>
-                  {dueAt && <em>{deadlineDDay(dueAt)}</em>}
                 </span>
               </footer>
             </button>
