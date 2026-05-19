@@ -15,7 +15,8 @@ import {
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { FormEvent, useEffect, useId, useMemo, useState } from "react";
+import { FormEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { serverTimestamp } from "firebase/firestore";
 import { AppShell } from "../components/AppShell";
@@ -940,8 +941,11 @@ function DatePickerField({
   value: string;
 }) {
   const todayString = toLocalDateString(new Date());
+  const fieldRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
   const [cursor, setCursor] = useState(() => datePickerCursor(value || min || todayString));
+  const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
   const weeks = useMemo(() => buildCalendarMonth(cursor.getFullYear(), cursor.getMonth(), todayString), [cursor, todayString]);
   const holidayMap = useMemo(
     () => getKoreanHolidayMapForDates(weeks.flatMap((week) => week.days.map((day) => day.dateString))),
@@ -954,6 +958,51 @@ function DatePickerField({
     }
   }, [value]);
 
+  useLayoutEffect(() => {
+    if (!open) {
+      setPopoverStyle(null);
+      return;
+    }
+
+    function updatePopoverPosition() {
+      const field = fieldRef.current;
+
+      if (!field) {
+        return;
+      }
+
+      const rect = field.getBoundingClientRect();
+      const viewportPadding = 16;
+      const width = Math.min(320, window.innerWidth - viewportPadding * 2);
+      const maxHeight = Math.min(390, window.innerHeight - viewportPadding * 2);
+      const clampedLeft = Math.min(
+        Math.max(viewportPadding, rect.left),
+        window.innerWidth - width - viewportPadding
+      );
+      const belowTop = rect.bottom + 8;
+      const aboveTop = rect.top - maxHeight - 8;
+      const fitsBelow = belowTop + maxHeight <= window.innerHeight - viewportPadding;
+      const top = fitsBelow ? belowTop : Math.max(viewportPadding, aboveTop);
+
+      setPopoverStyle({
+        left: clampedLeft,
+        maxHeight,
+        position: "fixed",
+        top,
+        width
+      });
+    }
+
+    updatePopoverPosition();
+    window.addEventListener("resize", updatePopoverPosition);
+    window.addEventListener("scroll", updatePopoverPosition, true);
+
+    return () => {
+      window.removeEventListener("resize", updatePopoverPosition);
+      window.removeEventListener("scroll", updatePopoverPosition, true);
+    };
+  }, [cursor, min, open, value]);
+
   function selectDate(dateString: string) {
     if (min && dateString < min) {
       return;
@@ -963,13 +1012,79 @@ function DatePickerField({
     setOpen(false);
   }
 
+  const popover = open ? (
+    <div
+      className="date-picker-popover"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          setOpen(false);
+        }
+      }}
+      ref={popoverRef}
+      style={popoverStyle ?? undefined}
+    >
+      <header>
+        <button className="icon-button" type="button" aria-label="이전 달" onClick={() => setCursor(monthOffset(cursor, -1))}>
+          <ChevronLeft size={16} />
+        </button>
+        <strong>{calendarMonthLabel(cursor)}</strong>
+        <button className="icon-button" type="button" aria-label="다음 달" onClick={() => setCursor(monthOffset(cursor, 1))}>
+          <ChevronRight size={16} />
+        </button>
+      </header>
+      <div className="date-picker-weekdays" aria-hidden="true">
+        {["일", "월", "화", "수", "목", "금", "토"].map((weekday) => (
+          <span key={weekday}>{weekday}</span>
+        ))}
+      </div>
+      <div className="date-picker-grid">
+        {weeks.flatMap((week) =>
+          week.days.map((day) => {
+            const holidays = holidayMap[day.dateString] ?? [];
+            const disabled = Boolean(min && day.dateString < min);
+
+            return (
+              <button
+                aria-label={`${formatDateLabel(day.dateString)} 선택`}
+                className={[
+                  "date-picker-day",
+                  day.inCurrentMonth ? "" : "muted",
+                  day.dateString === value ? "selected" : "",
+                  day.isToday ? "today" : "",
+                  day.date.getDay() === 0 || holidays.length ? "holiday" : "",
+                  day.date.getDay() === 6 ? "saturday" : ""
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={disabled}
+                key={day.dateString}
+                onClick={() => selectDate(day.dateString)}
+                title={holidays[0]?.name}
+                type="button"
+              >
+                <span>{day.dayNumber}</span>
+                {holidays[0] && <small>{holidays[0].name}</small>}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div
       className={`date-picker-field ${className}`.trim()}
       onBlur={(event) => {
         const nextTarget = event.relatedTarget;
 
-        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+        if (
+          !(nextTarget instanceof Node)
+          || (
+            !event.currentTarget.contains(nextTarget)
+            && !popoverRef.current?.contains(nextTarget)
+          )
+        ) {
           setOpen(false);
         }
       }}
@@ -978,6 +1093,7 @@ function DatePickerField({
           setOpen(false);
         }
       }}
+      ref={fieldRef}
     >
       <span className="date-picker-label">{label}</span>
       <div className="date-picker-shell">
@@ -1003,56 +1119,7 @@ function DatePickerField({
             <X size={15} />
           </button>
         )}
-        {open && (
-          <div className="date-picker-popover">
-            <header>
-              <button className="icon-button" type="button" aria-label="이전 달" onClick={() => setCursor(monthOffset(cursor, -1))}>
-                <ChevronLeft size={16} />
-              </button>
-              <strong>{calendarMonthLabel(cursor)}</strong>
-              <button className="icon-button" type="button" aria-label="다음 달" onClick={() => setCursor(monthOffset(cursor, 1))}>
-                <ChevronRight size={16} />
-              </button>
-            </header>
-            <div className="date-picker-weekdays" aria-hidden="true">
-              {["일", "월", "화", "수", "목", "금", "토"].map((weekday) => (
-                <span key={weekday}>{weekday}</span>
-              ))}
-            </div>
-            <div className="date-picker-grid">
-              {weeks.flatMap((week) =>
-                week.days.map((day) => {
-                  const holidays = holidayMap[day.dateString] ?? [];
-                  const disabled = Boolean(min && day.dateString < min);
-
-                  return (
-                    <button
-                      aria-label={`${formatDateLabel(day.dateString)} 선택`}
-                      className={[
-                        "date-picker-day",
-                        day.inCurrentMonth ? "" : "muted",
-                        day.dateString === value ? "selected" : "",
-                        day.isToday ? "today" : "",
-                        day.date.getDay() === 0 || holidays.length ? "holiday" : "",
-                        day.date.getDay() === 6 ? "saturday" : ""
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                      disabled={disabled}
-                      key={day.dateString}
-                      onClick={() => selectDate(day.dateString)}
-                      title={holidays[0]?.name}
-                      type="button"
-                    >
-                      <span>{day.dayNumber}</span>
-                      {holidays[0] && <small>{holidays[0].name}</small>}
-                    </button>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        )}
+        {popover && createPortal(popover, document.body)}
       </div>
     </div>
   );
