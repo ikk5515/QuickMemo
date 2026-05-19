@@ -5,17 +5,20 @@ import { describe, expect, it } from "vitest";
 const notesPageSource = readFileSync(join(process.cwd(), "src/pages/NotesPage.tsx"), "utf8");
 
 describe("NotesPage security controls", () => {
-  it("renders PDF previews directly in an iframe for Chrome PDF viewer compatibility", () => {
-    const pdfPreviewBranch = notesPageSource.match(/preview\.kind === "pdf" && preview\.url \? \([\s\S]*?\) : preview\.kind === "docx"/)?.[0] ?? "";
+  it("renders PDF previews through bounded canvas rendering without plugin or iframe surfaces", () => {
+    const pdfPreviewBranch = notesPageSource.match(/preview\.kind === "pdf" && preview\.bytes \? \([\s\S]*?\) : preview\.kind === "docx"/)?.[0] ?? "";
 
-    expect(pdfPreviewBranch).toContain("<iframe");
-    expect(pdfPreviewBranch).toContain('className="pdf-preview-frame"');
-    expect(pdfPreviewBranch).toContain('referrerPolicy="no-referrer"');
-    expect(pdfPreviewBranch).toContain("src={preview.url}");
+    expect(pdfPreviewBranch).toContain("<PdfCanvasPreview");
+    expect(pdfPreviewBranch).toContain("bytes={preview.bytes}");
+    expect(pdfPreviewBranch).not.toContain("<iframe");
     expect(pdfPreviewBranch).not.toContain("<object");
-    expect(pdfPreviewBranch).not.toContain("sandbox=");
-    expect(pdfPreviewBranch).not.toContain("allow-scripts");
-    expect(pdfPreviewBranch).not.toContain("allow-same-origin");
+    expect(pdfPreviewBranch).not.toContain("<embed");
+    expect(notesPageSource).toContain("maxPdfPreviewPages");
+    expect(notesPageSource).toContain("maxPdfPreviewCanvasPixels");
+    expect(notesPageSource).toContain("disableFontFace: true");
+    expect(notesPageSource).toContain("enableXfa: false");
+    expect(notesPageSource).toContain("useWorkerFetch: false");
+    expect(notesPageSource).toContain("annotationMode: pdfjs.AnnotationMode.DISABLE");
     expect(notesPageSource).not.toContain("dangerouslySetInnerHTML={preview");
   });
 

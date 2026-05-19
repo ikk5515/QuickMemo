@@ -65,6 +65,7 @@ import { Decompress, strFromU8, unzipSync, type UnzipFileInfo } from "fflate";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import {
   attachmentDownloadName,
   attachmentExtension,
@@ -300,6 +301,10 @@ const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const publicShareUrlStoragePrefix = "quickmemo-public-share-url:";
 const publicShareContentKeyStoragePrefix = "quickmemo-public-share-content-key:";
+const maxPdfPreviewPages = 30;
+const maxPdfPreviewCanvasPixels = 4_000_000;
+const maxPdfPreviewImagePixels = 6_000_000;
+const maxPdfPreviewPageCssWidth = 860;
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
@@ -3362,7 +3367,7 @@ export default function NotesPage() {
         const url = URL.createObjectURL(blob);
 
         attachmentPreviewUrl.current = url;
-        setAttachmentPreview({ fileName, kind: "pdf", label: "PDF 미리보기", url });
+        setAttachmentPreview({ bytes: plainBytes, fileName, kind: "pdf", label: "PDF 미리보기", url });
         setStatus("PDF 미리보기를 열었습니다.");
         return;
       }
@@ -7027,13 +7032,8 @@ export function AttachmentPreviewModal({
           <div className="public-image-preview-frame">
             <img src={preview.url} alt={preview.fileName} />
           </div>
-        ) : preview.kind === "pdf" && preview.url ? (
-          <iframe
-            className="pdf-preview-frame"
-            referrerPolicy="no-referrer"
-            src={preview.url}
-            title={`${preview.fileName} PDF 미리보기`}
-          />
+        ) : preview.kind === "pdf" && preview.bytes ? (
+          <PdfCanvasPreview bytes={preview.bytes} fileName={preview.fileName} />
         ) : preview.kind === "docx" ? (
           <div className="docx-preview-frame">
             <iframe
@@ -7063,6 +7063,146 @@ export function AttachmentPreviewModal({
           <pre className={`file-text-preview ${preview.kind === "unsupported" ? "unsupported" : ""}`}>{preview.text}</pre>
         )}
       </section>
+    </div>
+  );
+}
+
+function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [state, setState] = useState<{ error: string | null; pageCount: number; renderedCount: number; status: "loading" | "ready" | "error" }>({
+    error: null,
+    pageCount: 0,
+    renderedCount: 0,
+    status: "loading"
+  });
+
+  useEffect(() => {
+    const container = containerRef.current;
+
+    if (!container) {
+      return undefined;
+    }
+
+    const previewContainer: HTMLDivElement = container;
+    let cancelled = false;
+    let loadingTask: { destroy: () => Promise<void>; promise: Promise<any> } | null = null;
+    let pdfDocument: { destroy: () => Promise<void> } | null = null;
+    const renderTasks: Array<{ cancel: () => void; promise: Promise<void> }> = [];
+
+    previewContainer.replaceChildren();
+    setState({ error: null, pageCount: 0, renderedCount: 0, status: "loading" });
+
+    async function renderPdf() {
+      try {
+        const pdfjs = await import("pdfjs-dist");
+
+        pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+        loadingTask = pdfjs.getDocument({
+          canvasMaxAreaInBytes: maxPdfPreviewCanvasPixels,
+          data: bytes.slice(),
+          disableAutoFetch: true,
+          disableFontFace: true,
+          disableRange: true,
+          disableStream: true,
+          enableXfa: false,
+          isImageDecoderSupported: false,
+          maxImageSize: maxPdfPreviewImagePixels,
+          stopAtErrors: true,
+          useSystemFonts: false,
+          useWorkerFetch: false
+        });
+
+        const pdf = await loadingTask.promise;
+        pdfDocument = pdf;
+        const pageCount = pdf.numPages;
+        const pagesToRender = Math.min(pageCount, maxPdfPreviewPages);
+
+        if (!cancelled) {
+          setState({ error: null, pageCount, renderedCount: 0, status: "loading" });
+        }
+
+        for (let pageNumber = 1; pageNumber <= pagesToRender; pageNumber += 1) {
+          if (cancelled) {
+            return;
+          }
+
+          const page = await pdf.getPage(pageNumber);
+          const baseViewport = page.getViewport({ scale: 1 });
+          const containerWidth = previewContainer.clientWidth || maxPdfPreviewPageCssWidth;
+          const targetWidth = Math.min(maxPdfPreviewPageCssWidth, Math.max(220, containerWidth - 32));
+          const cssScale = Math.min(1.5, Math.max(0.2, targetWidth / baseViewport.width));
+          const maxPixelRatio = Math.sqrt(maxPdfPreviewCanvasPixels / (baseViewport.width * baseViewport.height)) / cssScale;
+          const outputScale = Math.max(0.25, Math.min(window.devicePixelRatio || 1, maxPixelRatio));
+          const renderViewport = page.getViewport({ scale: cssScale * outputScale });
+          const cssViewport = page.getViewport({ scale: cssScale });
+          const canvas = document.createElement("canvas");
+
+          canvas.className = "pdf-preview-canvas-page";
+          canvas.width = Math.max(1, Math.floor(renderViewport.width));
+          canvas.height = Math.max(1, Math.floor(renderViewport.height));
+          canvas.style.width = `${Math.max(1, Math.floor(cssViewport.width))}px`;
+          canvas.style.height = `${Math.max(1, Math.floor(cssViewport.height))}px`;
+          canvas.setAttribute("aria-label", `${fileName} ${pageNumber}쪽`);
+          previewContainer.append(canvas);
+
+          const renderTask = page.render({
+            annotationMode: pdfjs.AnnotationMode.DISABLE,
+            background: "#ffffff",
+            canvas,
+            viewport: renderViewport
+          });
+
+          renderTasks.push(renderTask);
+          await renderTask.promise;
+
+          if (!cancelled) {
+            setState({ error: null, pageCount, renderedCount: pageNumber, status: "loading" });
+          }
+        }
+
+        if (!cancelled) {
+          setState({ error: null, pageCount, renderedCount: pagesToRender, status: "ready" });
+        }
+      } catch {
+        if (!cancelled) {
+          previewContainer.replaceChildren();
+          setState({
+            error: "PDF 미리보기를 안전하게 렌더링하지 못했습니다. 원본 파일은 다운로드해서 확인해주세요.",
+            pageCount: 0,
+            renderedCount: 0,
+            status: "error"
+          });
+        }
+      }
+    }
+
+    void renderPdf();
+
+    return () => {
+      cancelled = true;
+      renderTasks.forEach((task) => task.cancel());
+      previewContainer.replaceChildren();
+      void pdfDocument?.destroy().catch(() => undefined);
+      void loadingTask?.destroy().catch(() => undefined);
+    };
+  }, [bytes, fileName]);
+
+  const truncated = state.status === "ready" && state.pageCount > maxPdfPreviewPages;
+
+  return (
+    <div className="pdf-preview-canvas-frame" aria-label={`${fileName} PDF 미리보기`}>
+      <div ref={containerRef} className="pdf-preview-canvas-pages" />
+      {state.status === "loading" && (
+        <p className="pdf-preview-status">
+          {state.pageCount ? `${state.renderedCount}/${Math.min(state.pageCount, maxPdfPreviewPages)}쪽 렌더링 중...` : "PDF 미리보기를 준비하는 중..."}
+        </p>
+      )}
+      {state.error && <p className="file-preview-error">{state.error}</p>}
+      {truncated && (
+        <p className="pdf-preview-status">
+          빠른 미리보기를 위해 처음 {maxPdfPreviewPages}쪽만 표시했습니다. 전체 파일은 다운로드해서 확인해주세요.
+        </p>
+      )}
     </div>
   );
 }

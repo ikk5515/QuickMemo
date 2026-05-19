@@ -2841,12 +2841,42 @@ textarea {
   width: 36px;
 }
 
-.pdf-preview-frame {
-  background: var(--surface);
-  border: 0;
+.pdf-preview-canvas-frame {
+  background: #eef1f3;
+  display: grid;
   flex: 1 1 auto;
+  gap: 14px;
+  justify-items: center;
   min-height: 420px;
+  overflow: auto;
+  padding: 18px;
   width: 100%;
+}
+
+.pdf-preview-canvas-pages {
+  align-content: start;
+  display: grid;
+  gap: 16px;
+  justify-items: center;
+  min-width: 0;
+  width: 100%;
+}
+
+.pdf-preview-canvas-page {
+  background: #ffffff;
+  border: 1px solid rgb(15 23 42 / 10%);
+  box-shadow: 0 8px 28px rgb(15 23 42 / 14%);
+  display: block;
+  height: auto;
+  max-width: 100%;
+}
+
+.pdf-preview-status {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  margin: 0;
+  text-align: center;
 }
 
 .file-text-preview {
@@ -4613,8 +4643,9 @@ textarea {
     width: 100%;
   }
 
-  .pdf-preview-frame {
+  .pdf-preview-canvas-frame {
     min-height: 360px;
+    padding: 12px;
   }
 
   .docx-preview-frame {

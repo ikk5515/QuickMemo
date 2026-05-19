@@ -28,6 +28,7 @@ function expectBrowserHardeningHeaders(headers: HostingHeader[]): void {
   expect(csp).toContain("base-uri 'self'");
   expect(csp).toContain("form-action 'self'");
   expect(csp).toContain("object-src 'none'");
+  expect(csp).toContain("worker-src 'self'");
   expect(values.get("x-frame-options")).toBe("DENY");
   expect(values.get("x-content-type-options")).toBe("nosniff");
   expect(values.get("referrer-policy")).toBe("strict-origin-when-cross-origin");

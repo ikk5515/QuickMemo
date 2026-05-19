@@ -33,6 +33,7 @@
     "firebase": "^12.6.0",
     "hwp.js": "^0.0.3",
     "lucide-react": "^0.555.0",
+    "pdfjs-dist": "^5.7.284",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.9.6"
