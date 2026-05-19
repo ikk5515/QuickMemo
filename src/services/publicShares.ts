@@ -1,5 +1,4 @@
 import {
-  addDoc,
   Bytes,
   collection,
   deleteField,
@@ -9,7 +8,6 @@ import {
   onSnapshot,
   query,
   serverTimestamp,
-  setDoc,
   Timestamp,
   updateDoc,
   type Unsubscribe,
@@ -90,6 +88,14 @@ export function publicShareUrl(shareId: string, shareKey: string, origin = windo
   return `${origin}/share/${encodeURIComponent(shareId)}#key=${encodeURIComponent(shareKey)}`;
 }
 
+function publicShareCleanupQueueRef(shareId: string) {
+  return doc(db, "publicShareCleanupQueue", shareId);
+}
+
+function publicShareAttachmentCleanupQueueRef(shareId: string, attachmentId: string) {
+  return doc(db, "publicShareCleanupQueue", shareId, "publicShareAttachmentCleanupQueue", attachmentId);
+}
+
 export function subscribePublicSharesForNote(
   sourceNoteId: string,
   ownerUid: string,
@@ -148,8 +154,11 @@ export function subscribePublicNoteShare(
 
 export async function createPublicNoteShare(input: CreatePublicNoteShareInput) {
   const shareRef = doc(collection(db, "publicNoteShares"));
+  const cleanupRef = publicShareCleanupQueueRef(shareRef.id);
+  const expiresAt = Timestamp.fromDate(input.expiresAt);
+  const batch = writeBatch(db);
 
-  await setDoc(shareRef, {
+  batch.set(shareRef, {
     sourceNoteId: input.sourceNoteId,
     ownerUid: input.ownerUid,
     version: 1,
@@ -161,17 +170,29 @@ export async function createPublicNoteShare(input: CreatePublicNoteShareInput) {
     ready: false,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
-    expiresAt: Timestamp.fromDate(input.expiresAt)
+    expiresAt
   } satisfies Omit<PublicNoteShareDocument, "createdAt" | "updatedAt"> & {
     createdAt: ReturnType<typeof serverTimestamp>;
     updatedAt: ReturnType<typeof serverTimestamp>;
   });
+  batch.set(cleanupRef, {
+    shareId: shareRef.id,
+    expiresAt,
+    createdAt: serverTimestamp()
+  });
+
+  await batch.commit();
 
   return shareRef.id;
 }
 
 export async function createPublicNoteShareAttachment(shareId: string, input: CreatePublicNoteShareAttachmentInput) {
-  return addDoc(collection(db, "publicNoteShares", shareId, "attachments"), {
+  const attachmentRef = doc(collection(db, "publicNoteShares", shareId, "attachments"));
+  const cleanupRef = publicShareAttachmentCleanupQueueRef(shareId, attachmentRef.id);
+  const expiresAt = Timestamp.fromDate(input.expiresAt);
+  const batch = writeBatch(db);
+
+  batch.set(attachmentRef, {
     version: 1,
     algorithm: "AES-GCM",
     fileName: input.fileName,
@@ -181,11 +202,21 @@ export async function createPublicNoteShareAttachment(shareId: string, input: Cr
     encryptedData: Bytes.fromUint8Array(input.encryptedData),
     iv: Bytes.fromUint8Array(input.iv),
     ...(input.sourceAttachmentId ? { sourceAttachmentId: input.sourceAttachmentId } : {}),
-    expiresAt: Timestamp.fromDate(input.expiresAt),
+    expiresAt,
     createdAt: serverTimestamp()
   } satisfies Omit<PublicNoteShareAttachmentDocument, "createdAt"> & {
     createdAt: ReturnType<typeof serverTimestamp>;
   });
+  batch.set(cleanupRef, {
+    shareId,
+    attachmentId: attachmentRef.id,
+    expiresAt,
+    createdAt: serverTimestamp()
+  });
+
+  await batch.commit();
+
+  return attachmentRef;
 }
 
 export async function activatePublicNoteShare(shareId: string, attachmentCount: number) {
@@ -216,20 +247,30 @@ export async function revokePublicNoteShare(shareId: string, ownerUid: string) {
 
 export async function deletePublicNoteShare(shareId: string) {
   const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
+  const attachmentCleanupSnapshot = await getDocs(
+    collection(db, "publicShareCleanupQueue", shareId, "publicShareAttachmentCleanupQueue")
+  );
   const batch = writeBatch(db);
 
   attachmentsSnapshot.docs.forEach((attachment) => {
     batch.delete(attachment.ref);
   });
+  attachmentCleanupSnapshot.docs.forEach((attachmentCleanup) => {
+    batch.delete(attachmentCleanup.ref);
+  });
   batch.delete(doc(db, "publicNoteShares", shareId));
+  batch.delete(publicShareCleanupQueueRef(shareId));
 
   await batch.commit();
 }
 
 export async function deletePublicNoteShareAttachments(shareId: string) {
   const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
+  const attachmentCleanupSnapshot = await getDocs(
+    collection(db, "publicShareCleanupQueue", shareId, "publicShareAttachmentCleanupQueue")
+  );
 
-  if (attachmentsSnapshot.empty) {
+  if (attachmentsSnapshot.empty && attachmentCleanupSnapshot.empty) {
     return;
   }
 
@@ -237,6 +278,9 @@ export async function deletePublicNoteShareAttachments(shareId: string) {
 
   attachmentsSnapshot.docs.forEach((attachment) => {
     batch.delete(attachment.ref);
+  });
+  attachmentCleanupSnapshot.docs.forEach((attachmentCleanup) => {
+    batch.delete(attachmentCleanup.ref);
   });
 
   await batch.commit();

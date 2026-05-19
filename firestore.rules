@@ -46,6 +46,18 @@ service cloud.firestore {
       return /databases/$(database)/documents/publicNoteShares/$(shareId);
     }
 
+    function publicShareAttachmentPath(shareId, attachmentId) {
+      return /databases/$(database)/documents/publicNoteShares/$(shareId)/attachments/$(attachmentId);
+    }
+
+    function publicShareCleanupQueuePath(shareId) {
+      return /databases/$(database)/documents/publicShareCleanupQueue/$(shareId);
+    }
+
+    function publicShareAttachmentCleanupQueuePath(shareId, attachmentId) {
+      return /databases/$(database)/documents/publicShareCleanupQueue/$(shareId)/publicShareAttachmentCleanupQueue/$(attachmentId);
+    }
+
     function activeSignedInUser() {
       return signedIn()
         && exists(userPath(request.auth.uid))
@@ -1028,7 +1040,44 @@ service cloud.firestore {
       return activeSignedInUser() && data.ownerUid == request.auth.uid;
     }
 
-    function publicShareCreate(data) {
+    function validPublicShareCleanupQueue(data, shareId) {
+      return data.keys().hasOnly(["shareId", "expiresAt", "createdAt"])
+        && data.shareId == shareId
+        && data.expiresAt is timestamp
+        && data.createdAt == request.time;
+    }
+
+    function publicShareCleanupQueueCreated(shareId, shareData) {
+      return existsAfter(publicShareCleanupQueuePath(shareId))
+        && validPublicShareCleanupQueue(getAfter(publicShareCleanupQueuePath(shareId)).data, shareId)
+        && getAfter(publicShareCleanupQueuePath(shareId)).data.expiresAt == shareData.expiresAt;
+    }
+
+    function publicShareCleanupQueueOwner(shareId) {
+      return exists(publicSharePath(shareId))
+        && publicShareOwner(get(publicSharePath(shareId)).data);
+    }
+
+    function validPublicShareAttachmentCleanupQueue(data, shareId, attachmentId) {
+      return data.keys().hasOnly(["shareId", "attachmentId", "expiresAt", "createdAt"])
+        && data.shareId == shareId
+        && data.attachmentId == attachmentId
+        && data.expiresAt is timestamp
+        && data.createdAt == request.time;
+    }
+
+    function publicShareAttachmentCleanupQueueCreated(shareId, attachmentId, attachmentData) {
+      return existsAfter(publicShareAttachmentCleanupQueuePath(shareId, attachmentId))
+        && validPublicShareAttachmentCleanupQueue(
+          getAfter(publicShareAttachmentCleanupQueuePath(shareId, attachmentId)).data,
+          shareId,
+          attachmentId
+        )
+        && getAfter(publicShareAttachmentCleanupQueuePath(shareId, attachmentId)).data.expiresAt == attachmentData.expiresAt
+        && getAfter(publicShareAttachmentCleanupQueuePath(shareId, attachmentId)).data.expiresAt == getAfter(publicSharePath(shareId)).data.expiresAt;
+    }
+
+    function publicShareCreate(shareId, data) {
       return activeSignedInUser()
         && validPublicShare(data)
         && data.ownerUid == request.auth.uid
@@ -1042,7 +1091,8 @@ service cloud.firestore {
         && publicShareNotRevoked(data)
         && exists(notePath(data.sourceNoteId))
         && get(notePath(data.sourceNoteId)).data.ownerUid == request.auth.uid
-        && canReadNote(get(notePath(data.sourceNoteId)).data);
+        && canReadNote(get(notePath(data.sourceNoteId)).data)
+        && publicShareCleanupQueueCreated(shareId, data);
     }
 
     function publicShareActivateUpdate(data) {
@@ -1286,7 +1336,7 @@ service cloud.firestore {
     match /publicNoteShares/{shareId} {
       allow get: if publicShareActive(resource.data) || publicShareOwner(resource.data);
       allow list: if publicShareOwner(resource.data);
-      allow create: if publicShareCreate(request.resource.data);
+      allow create: if publicShareCreate(shareId, request.resource.data);
       allow update: if validPublicShare(request.resource.data)
         && (
           publicShareActivateUpdate(request.resource.data)
@@ -1308,7 +1358,32 @@ service cloud.firestore {
           && get(publicSharePath(shareId)).data.expiresAt > request.time
           && request.resource.data.expiresAt == get(publicSharePath(shareId)).data.expiresAt
           && validPublicShareAttachment(request.resource.data)
-          && request.resource.data.createdAt == request.time;
+          && request.resource.data.createdAt == request.time
+          && publicShareAttachmentCleanupQueueCreated(shareId, attachmentId, request.resource.data);
+        allow update: if false;
+        allow delete: if exists(publicSharePath(shareId))
+          && publicShareOwner(get(publicSharePath(shareId)).data);
+      }
+    }
+
+    match /publicShareCleanupQueue/{shareId} {
+      allow get, list: if publicShareCleanupQueueOwner(shareId);
+      allow create: if validPublicShareCleanupQueue(request.resource.data, shareId)
+        && existsAfter(publicSharePath(shareId))
+        && publicShareOwner(getAfter(publicSharePath(shareId)).data)
+        && request.resource.data.expiresAt == getAfter(publicSharePath(shareId)).data.expiresAt;
+      allow update: if false;
+      allow delete: if publicShareCleanupQueueOwner(shareId);
+
+      match /publicShareAttachmentCleanupQueue/{attachmentId} {
+        allow get, list: if exists(publicSharePath(shareId))
+          && publicShareOwner(get(publicSharePath(shareId)).data);
+        allow create: if validPublicShareAttachmentCleanupQueue(request.resource.data, shareId, attachmentId)
+          && existsAfter(publicSharePath(shareId))
+          && existsAfter(publicShareAttachmentPath(shareId, attachmentId))
+          && publicShareOwner(getAfter(publicSharePath(shareId)).data)
+          && request.resource.data.expiresAt == getAfter(publicSharePath(shareId)).data.expiresAt
+          && request.resource.data.expiresAt == getAfter(publicShareAttachmentPath(shareId, attachmentId)).data.expiresAt;
         allow update: if false;
         allow delete: if exists(publicSharePath(shareId))
           && publicShareOwner(get(publicSharePath(shareId)).data);

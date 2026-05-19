@@ -234,6 +234,56 @@ function publicShareAttachment(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function publicShareCleanupQueue(shareId: string, expiresAt: Date, overrides: Record<string, unknown> = {}) {
+  return {
+    shareId,
+    expiresAt,
+    createdAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
+function publicShareAttachmentCleanupQueue(
+  shareId: string,
+  attachmentId: string,
+  expiresAt: Date,
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    shareId,
+    attachmentId,
+    expiresAt,
+    createdAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
+function createPublicShareBatch(
+  db: any,
+  shareId: string,
+  data: ReturnType<typeof publicShareDocument>
+) {
+  const batch = writeBatch(db);
+  batch.set(doc(db, `publicNoteShares/${shareId}`), data);
+  batch.set(doc(db, `publicShareCleanupQueue/${shareId}`), publicShareCleanupQueue(shareId, data.expiresAt as Date));
+  return batch.commit();
+}
+
+function createPublicShareAttachmentBatch(
+  db: any,
+  shareId: string,
+  attachmentId: string,
+  data: ReturnType<typeof publicShareAttachment>
+) {
+  const batch = writeBatch(db);
+  batch.set(doc(db, `publicNoteShares/${shareId}/attachments/${attachmentId}`), data);
+  batch.set(
+    doc(db, `publicShareCleanupQueue/${shareId}/publicShareAttachmentCleanupQueue/${attachmentId}`),
+    publicShareAttachmentCleanupQueue(shareId, attachmentId, data.expiresAt as Date)
+  );
+  return batch.commit();
+}
+
 describeRules("firestore security rules", () => {
   let testEnv: RulesTestEnvironment;
 
@@ -593,13 +643,21 @@ describeRules("firestore security rules", () => {
     const publicDb = testEnv.unauthenticatedContext().firestore();
 
     await assertSucceeds(
-      setDoc(doc(ownerDb, "publicNoteShares/share-a"), publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt, passwordHash: publicSharePasswordHash }))
+      createPublicShareBatch(
+        ownerDb,
+        "share-a",
+        publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt, passwordHash: publicSharePasswordHash })
+      )
     );
-    await assertSucceeds(setDoc(doc(ownerDb, "publicNoteShares/share-a/attachments/attachment-a"), publicShareAttachment({ expiresAt: shareExpiresAt })));
+    await assertSucceeds(
+      createPublicShareAttachmentBatch(ownerDb, "share-a", "attachment-a", publicShareAttachment({ expiresAt: shareExpiresAt }))
+    );
     await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { ready: true, attachmentCount: 1, updatedAt: serverTimestamp() }));
     await assertSucceeds(
-      setDoc(
-        doc(ownerDb, "publicNoteShares/share-a/attachments/png-ok"),
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "png-ok",
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "safe-image", mimeType: "image/png" })
       )
     );
@@ -609,6 +667,12 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(
       getDocs(query(collection(ownerDb, "publicNoteShares"), where("ownerUid", "==", "user-a"), where("sourceNoteId", "==", "note-a")))
     );
+    await assertFails(
+      setDoc(doc(ownerDb, "publicNoteShares/unqueued-share"), publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt }))
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "publicNoteShares/share-a/attachments/unqueued-attachment"), publicShareAttachment({ expiresAt: shareExpiresAt }))
+    );
 
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/expired-share")));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/revoked-share")));
@@ -616,42 +680,53 @@ describeRules("firestore security rules", () => {
     await assertFails(getDocs(collection(publicDb, "publicNoteShares/legacy-protected-share/attachments")));
     await assertSucceeds(getDoc(doc(ownerDb, "publicNoteShares/legacy-protected-share")));
     await assertFails(
-      setDoc(
-        doc(ownerDb, "publicNoteShares/legacy-created-share"),
+      createPublicShareBatch(
+        ownerDb,
+        "legacy-created-share",
         publicShareDocument("note-a", "user-a", { passwordHash: legacyPublicSharePasswordHash })
       )
     );
-    await assertFails(setDoc(doc(otherDb, "publicNoteShares/forged-share"), publicShareDocument("note-a", "user-b")));
+    await assertFails(createPublicShareBatch(otherDb, "forged-share", publicShareDocument("note-a", "user-b")));
     const shareWithoutOwnerKey = { ...publicShareDocument("note-a", "user-a") };
     Reflect.deleteProperty(shareWithoutOwnerKey, "ownerWrappedShareKey");
-    await assertFails(setDoc(doc(ownerDb, "publicNoteShares/missing-owner-key-share"), shareWithoutOwnerKey));
+    await assertFails(createPublicShareBatch(ownerDb, "missing-owner-key-share", shareWithoutOwnerKey));
     await assertFails(
-      setDoc(
-        doc(ownerDb, "publicNoteShares/share-a/attachments/png-svg"),
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "png-svg",
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "unsafe-image", mimeType: "image/svg+xml" })
       )
     );
     await assertFails(
-      setDoc(
-        doc(ownerDb, "publicNoteShares/share-a/attachments/png-html"),
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "png-html",
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "unsafe-html", mimeType: "text/html" })
       )
     );
     await assertFails(
-      setDoc(
-        doc(ownerDb, "publicNoteShares/share-a/attachments/png-jpeg"),
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "png-jpeg",
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "mismatched-image", mimeType: "image/jpeg" })
       )
     );
     await assertFails(
-      setDoc(
-        doc(ownerDb, "publicNoteShares/share-a/attachments/pdf-html"),
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "pdf-html",
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "pdf", fileName: "unsafe-pdf", mimeType: "text/html" })
       )
     );
     await assertFails(
-      setDoc(
-        doc(ownerDb, "publicNoteShares/share-a/attachments/pdf-svg"),
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "pdf-svg",
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "pdf", fileName: "unsafe-pdf", mimeType: "image/svg+xml" })
       )
     );
@@ -678,6 +753,79 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { revokedAt: serverTimestamp(), revokedBy: "user-a", updatedAt: serverTimestamp() }));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a")));
     await assertFails(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
+  });
+
+  it("keeps cleanup queues owner-only while enforcing queue creation for server cleanup", async () => {
+    const expiredAt = new Date(Date.now() - 60 * 60 * 1000);
+    const futureExpiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "publicNoteShares/expired-queued"), {
+        ...publicShareDocument("note-a", "user-a", {
+          attachmentCount: 1,
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: expiredAt,
+          ready: true,
+          updatedAt: new Date("2026-05-18T08:00:00.000Z")
+        })
+      });
+      await setDoc(
+        doc(context.firestore(), "publicNoteShares/expired-queued/attachments/attachment-a"),
+        publicShareAttachment({ createdAt: new Date("2026-05-18T08:00:00.000Z"), expiresAt: expiredAt })
+      );
+      await setDoc(doc(context.firestore(), "publicShareCleanupQueue/expired-queued"), {
+        shareId: "expired-queued",
+        expiresAt: expiredAt,
+        createdAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+      await setDoc(doc(context.firestore(), "publicShareCleanupQueue/expired-queued/publicShareAttachmentCleanupQueue/attachment-a"), {
+        shareId: "expired-queued",
+        attachmentId: "attachment-a",
+        expiresAt: expiredAt,
+        createdAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+      await setDoc(doc(context.firestore(), "publicNoteShares/expired-without-queue"), {
+        ...publicShareDocument("note-a", "user-a", {
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: expiredAt,
+          ready: true,
+          updatedAt: new Date("2026-05-18T08:00:00.000Z")
+        })
+      });
+      await setDoc(doc(context.firestore(), "publicNoteShares/active-queued"), {
+        ...publicShareDocument("note-a", "user-a", {
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: futureExpiresAt,
+          ready: true,
+          updatedAt: new Date("2026-05-18T08:00:00.000Z")
+        })
+      });
+      await setDoc(doc(context.firestore(), "publicShareCleanupQueue/active-queued"), {
+        shareId: "active-queued",
+        expiresAt: futureExpiresAt,
+        createdAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const publicDb = testEnv.unauthenticatedContext().firestore();
+
+    await assertSucceeds(getDoc(doc(ownerDb, "publicShareCleanupQueue/expired-queued")));
+    await assertSucceeds(getDocs(collection(ownerDb, "publicShareCleanupQueue/expired-queued/publicShareAttachmentCleanupQueue")));
+    await assertFails(getDoc(doc(publicDb, "publicShareCleanupQueue/expired-queued")));
+    await assertFails(getDocs(collection(publicDb, "publicShareCleanupQueue/expired-queued/publicShareAttachmentCleanupQueue")));
+    await assertFails(getDoc(doc(publicDb, "publicShareCleanupQueue/active-queued")));
+    await assertFails(deleteDoc(doc(publicDb, "publicNoteShares/active-queued")));
+    await assertFails(deleteDoc(doc(publicDb, "publicNoteShares/expired-without-queue")));
+    await assertFails(deleteDoc(doc(publicDb, "publicShareCleanupQueue/expired-queued")));
+
+    const ownerDeleteBatch = writeBatch(ownerDb);
+    ownerDeleteBatch.delete(doc(ownerDb, "publicNoteShares/expired-queued/attachments/attachment-a"));
+    ownerDeleteBatch.delete(doc(ownerDb, "publicShareCleanupQueue/expired-queued/publicShareAttachmentCleanupQueue/attachment-a"));
+    ownerDeleteBatch.delete(doc(ownerDb, "publicNoteShares/expired-queued"));
+    ownerDeleteBatch.delete(doc(ownerDb, "publicShareCleanupQueue/expired-queued"));
+    await assertSucceeds(ownerDeleteBatch.commit());
   });
 
   it("treats legacy active notes without deletion metadata as readable and normalizable", async () => {
