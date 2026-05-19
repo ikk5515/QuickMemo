@@ -4,6 +4,7 @@ import { useAuth } from "./context/AuthContext";
 import AdminPage from "./pages/AdminPage";
 import LoginPage from "./pages/LoginPage";
 import NotesPage from "./pages/NotesPage";
+import PublicSharePage from "./pages/PublicSharePage";
 import SetupPage from "./pages/SetupPage";
 
 function RequireAuth({ children, adminOnly = false }: { children: ReactNode; adminOnly?: boolean }) {
@@ -30,6 +31,7 @@ export default function App() {
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/setup" element={<SetupPage />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/share/:shareId" element={<PublicSharePage />} />
       <Route
         path="/app"
         element={

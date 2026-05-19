@@ -1,4 +1,11 @@
-import type { EncryptedBinaryPayload, EncryptedPayload, UserKeyBundle, UserKeyDocument, WrappedNoteKey } from "../types";
+import type {
+  EncryptedBinaryPayload,
+  EncryptedPayload,
+  PublicSharePasswordHash,
+  UserKeyBundle,
+  UserKeyDocument,
+  WrappedNoteKey
+} from "../types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -61,6 +68,42 @@ async function derivePasswordKey(password: string, salt: Uint8Array, iterations 
   );
 }
 
+async function derivePasswordBits(passwordMaterial: string, salt: Uint8Array, iterations = KDF_ITERATIONS) {
+  const baseKey = await crypto.subtle.importKey("raw", encoder.encode(passwordMaterial), "PBKDF2", false, [
+    "deriveBits"
+  ]);
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: toArrayBuffer(salt),
+      iterations,
+      hash: "SHA-256"
+    },
+    baseKey,
+    256
+  );
+
+  return new Uint8Array(bits);
+}
+
+function constantTimeEqual(left: Uint8Array, right: Uint8Array) {
+  if (left.byteLength !== right.byteLength) {
+    return false;
+  }
+
+  let difference = 0;
+
+  for (let index = 0; index < left.byteLength; index += 1) {
+    difference |= left[index] ^ right[index];
+  }
+
+  return difference === 0;
+}
+
+function publicSharePasswordMaterial(password: string, shareKeyValue?: string) {
+  return shareKeyValue ? `${shareKeyValue}\n${password}` : password;
+}
+
 export async function encryptText(value: string, key: CryptoKey): Promise<EncryptedPayload> {
   const iv = randomBytes(12);
   const cipherText = await crypto.subtle.encrypt(
@@ -75,6 +118,59 @@ export async function encryptText(value: string, key: CryptoKey): Promise<Encryp
     cipherText: bytesToBase64(cipherText),
     iv: bytesToBase64(iv)
   };
+}
+
+export async function hashPublicSharePassword(password: string, shareKeyValue?: string): Promise<PublicSharePasswordHash> {
+  const salt = randomBytes(16);
+  const hash = await derivePasswordBits(publicSharePasswordMaterial(password, shareKeyValue), salt);
+
+  return {
+    version: 1,
+    algorithm: "PBKDF2-SHA-256",
+    salt: bytesToBase64(salt),
+    iterations: KDF_ITERATIONS,
+    hash: bytesToBase64(hash)
+  };
+}
+
+export async function derivePublicShareContentKey(shareKeyValue: string, password: string, payload: PublicSharePasswordHash) {
+  const rawKey = await derivePasswordBits(
+    publicSharePasswordMaterial(password, shareKeyValue),
+    base64ToBytes(payload.salt),
+    payload.iterations
+  );
+
+  return crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(rawKey),
+    {
+      name: "AES-GCM",
+      length: 256
+    },
+    true,
+    ["encrypt", "decrypt"]
+  );
+}
+
+export async function verifyPublicSharePassword(password: string, payload: PublicSharePasswordHash, shareKeyValue?: string) {
+  if (
+    payload.version !== 1 ||
+    payload.algorithm !== "PBKDF2-SHA-256" ||
+    payload.iterations < 100_000 ||
+    payload.iterations > 1_000_000
+  ) {
+    return false;
+  }
+
+  try {
+    const salt = base64ToBytes(payload.salt);
+    const expectedHash = base64ToBytes(payload.hash);
+    const nextHash = await derivePasswordBits(publicSharePasswordMaterial(password, shareKeyValue), salt, payload.iterations);
+
+    return constantTimeEqual(nextHash, expectedHash);
+  } catch {
+    return false;
+  }
 }
 
 export async function decryptText(payload: EncryptedPayload, key: CryptoKey) {
@@ -248,6 +344,25 @@ export async function generateNoteKey() {
   );
 }
 
+export async function exportAesKeyBase64Url(key: CryptoKey) {
+  return base64UrlFromBase64(bytesToBase64(await crypto.subtle.exportKey("raw", key)));
+}
+
+export async function importAesKeyBase64Url(value: string) {
+  const rawKey = base64ToBytes(base64FromBase64Url(value));
+
+  return crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(rawKey),
+    {
+      name: "AES-GCM",
+      length: 256
+    },
+    true,
+    ["encrypt", "decrypt"]
+  );
+}
+
 export async function wrapNoteKey(noteKey: CryptoKey, publicKeyJwk: JsonWebKey): Promise<WrappedNoteKey> {
   const publicKey = await importPublicKey(publicKeyJwk);
   const rawKey = await crypto.subtle.exportKey("raw", noteKey);
@@ -279,4 +394,14 @@ export async function unwrapNoteKey(wrappedNoteKey: WrappedNoteKey, privateKey: 
     true,
     ["encrypt", "decrypt"]
   );
+}
+
+function base64UrlFromBase64(value: string) {
+  return value.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64FromBase64Url(value: string) {
+  const normalizedValue = value.replace(/-/g, "+").replace(/_/g, "/");
+  const paddingLength = (4 - (normalizedValue.length % 4)) % 4;
+  return `${normalizedValue}${"=".repeat(paddingLength)}`;
 }

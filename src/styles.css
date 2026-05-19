@@ -395,6 +395,11 @@ textarea {
   color: var(--coral);
 }
 
+.secondary-button.active {
+  background: color-mix(in srgb, var(--teal) 14%, #ffffff);
+  color: var(--teal);
+}
+
 .icon-button {
   background: var(--surface);
   color: var(--ink);
@@ -912,6 +917,42 @@ textarea {
   font-weight: 950;
   line-height: 1;
   padding: 4px 7px;
+}
+
+.public-share-list-badge {
+  align-items: center;
+  background: rgb(47 125 112 / 9%);
+  border: 1px solid rgb(47 125 112 / 18%);
+  border-radius: 999px;
+  color: var(--teal);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 950;
+  gap: 4px;
+  line-height: 1;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 4px 7px;
+}
+
+.overview-note-card .public-share-list-badge {
+  color: var(--teal);
+  display: inline-flex;
+  font-size: 11px;
+  line-height: 1;
+  -webkit-line-clamp: unset;
+}
+
+.public-share-list-badge.soon {
+  background: rgb(185 130 47 / 12%);
+  border-color: rgb(185 130 47 / 25%);
+  color: #a16207;
+}
+
+.public-share-list-badge.urgent {
+  background: rgb(220 38 38 / 11%);
+  border-color: rgb(220 38 38 / 22%);
+  color: #dc2626;
 }
 
 .overview-note-card em {
@@ -1478,10 +1519,17 @@ textarea {
   gap: 8px;
   min-height: 34px;
   padding: 4px 8px;
+  user-select: none;
+}
+
+.image-width-drag-target {
+  cursor: ew-resize;
+  white-space: nowrap;
 }
 
 .image-width-control input[type="range"] {
   accent-color: var(--teal);
+  cursor: pointer;
   min-height: 24px;
   width: min(220px, 34vw);
 }
@@ -2420,6 +2468,12 @@ textarea {
   padding: 2px 6px;
 }
 
+.trash-tools {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
 .trash-retention-hint {
   background: rgb(47 125 112 / 8%);
   border: 1px solid rgb(47 125 112 / 16%);
@@ -2427,7 +2481,7 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
-  margin: 0 0 10px;
+  margin: 0;
   padding: 9px 10px;
 }
 
@@ -2587,6 +2641,144 @@ textarea {
   height: min(88svh, 900px);
   overflow: hidden;
   width: min(980px, calc(100vw - 32px));
+}
+
+.public-share-backdrop {
+  z-index: 11;
+}
+
+.public-share-modal {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: grid;
+  overflow: hidden;
+  width: min(520px, calc(100vw - 32px));
+}
+
+.public-share-modal-header {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 16px 18px;
+}
+
+.public-share-modal-header div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.public-share-modal-header span {
+  align-items: center;
+  color: var(--teal);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.public-share-modal-header h2 {
+  font-size: 22px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.public-share-modal-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.public-share-expiry,
+.public-share-status,
+.public-share-missing-key {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 750;
+  margin: 0;
+}
+
+.public-share-status {
+  align-items: center;
+  display: inline-flex;
+}
+
+.public-share-url-field {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.public-share-url-field input {
+  font-size: 13px;
+  min-height: 44px;
+}
+
+.public-share-password-panel {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+}
+
+.public-share-password-heading {
+  align-items: center;
+  color: var(--ink);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.public-share-password-form {
+  display: grid;
+  gap: 10px;
+}
+
+.public-share-password-form label {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.public-share-password-form input {
+  font-size: 14px;
+  min-height: 44px;
+}
+
+.public-share-password-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.public-share-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.public-share-modal-actions > * {
+  flex: 1 1 138px;
+}
+
+.public-share-open-link {
+  align-items: center;
+  border-radius: 8px;
+  display: inline-flex;
+  font-weight: 800;
+  gap: 8px;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 14px;
 }
 
 .pdf-preview-header {
@@ -2932,6 +3124,206 @@ textarea {
   max-height: 520px;
   max-width: 100%;
   object-fit: contain;
+}
+
+.public-share-page {
+  background: #ffffff;
+  color: var(--ink);
+  min-height: 100svh;
+}
+
+.public-share-document {
+  margin: 0 auto;
+  padding: clamp(32px, 7vw, 78px) clamp(18px, 5vw, 52px);
+  width: min(900px, 100%);
+}
+
+.public-share-header {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+}
+
+.public-share-header h1 {
+  font-size: clamp(30px, 5vw, 48px);
+  letter-spacing: 0;
+  line-height: 1.18;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.note-preview-body.public-share-body {
+  font-size: var(--editor-font-size, 17px);
+  min-height: 30svh;
+  overflow: visible;
+  padding: 0;
+}
+
+.public-share-attachments {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 14px;
+  margin-top: 28px;
+  padding-top: 22px;
+}
+
+.public-share-attachments h2 {
+  align-items: center;
+  display: inline-flex;
+  font-size: 16px;
+  gap: 7px;
+  margin: 0;
+}
+
+.public-share-attachment-list {
+  display: grid;
+  gap: 10px;
+}
+
+.public-share-attachment {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 10px;
+}
+
+.public-share-attachment > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.public-share-attachment-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.public-share-attachment strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.public-share-attachment span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.public-share-file-icon {
+  align-items: center;
+  background: var(--surface);
+  border-radius: 8px;
+  color: var(--teal);
+  display: inline-flex;
+  height: 46px;
+  justify-content: center;
+  width: 46px;
+}
+
+.public-share-image-link {
+  border-radius: 8px;
+  display: block;
+  height: 62px;
+  overflow: hidden;
+  width: 82px;
+}
+
+.public-share-image-link img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.public-share-download {
+  align-items: center;
+  border-radius: 8px;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 850;
+  gap: 6px;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.public-attachment-preview-modal {
+  max-height: 88svh;
+}
+
+.public-image-preview-frame {
+  align-items: center;
+  background: #f8fafc;
+  display: flex;
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 420px;
+  overflow: auto;
+  padding: 18px;
+}
+
+.public-image-preview-frame img {
+  border-radius: 8px;
+  height: auto;
+  max-height: calc(88svh - 112px);
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.public-share-state {
+  align-items: center;
+  color: var(--muted);
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  min-height: 55svh;
+  text-align: center;
+}
+
+.public-share-state h1 {
+  color: var(--ink);
+  font-size: 24px;
+  margin: 0;
+}
+
+.public-share-state p {
+  margin: 0;
+}
+
+.public-share-state.error {
+  color: var(--coral);
+}
+
+.public-share-password-state {
+  margin: 0 auto;
+  max-width: 360px;
+}
+
+.public-share-password-state label {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 8px;
+  justify-items: stretch;
+  text-align: left;
+  width: min(320px, 100%);
+}
+
+.public-share-password-state input {
+  font-size: 16px;
+  min-height: 46px;
+  width: 100%;
+}
+
+.public-share-password-state button {
+  min-width: min(180px, 100%);
 }
 
 .note-preview-editor {
@@ -3763,18 +4155,24 @@ textarea {
 }
 
 .admin-note-card {
-  align-items: center;
+  align-items: stretch;
   background: #ffffff;
   border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
   gap: 12px;
   grid-template-columns: minmax(0, 1fr) auto;
+  height: 220px;
+  overflow: hidden;
   padding: 14px;
 }
 
 .admin-note-main {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 .admin-note-title-line {
@@ -3784,17 +4182,26 @@ textarea {
 }
 
 .admin-note-card h3 {
+  display: -webkit-box;
   font-size: 18px;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   letter-spacing: 0;
   margin: 0 0 6px;
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 
 .admin-note-preview {
   color: var(--muted);
+  display: -webkit-box;
   font-size: 14px;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   line-height: 1.55;
   margin: 0;
+  min-height: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 
@@ -3806,6 +4213,8 @@ textarea {
   font-weight: 700;
   gap: 8px;
   margin-top: 10px;
+  max-height: 58px;
+  overflow: hidden;
 }
 
 .admin-note-meta span,
@@ -3929,7 +4338,7 @@ textarea {
 
   .admin-note-card {
     align-items: stretch;
-    min-height: 210px;
+    height: 220px;
   }
 }
 
@@ -4160,6 +4569,21 @@ textarea {
     width: 100%;
   }
 
+  .public-share-modal {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    width: 100%;
+  }
+
+  .public-share-modal-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .public-share-password-actions {
+    grid-template-columns: 1fr;
+  }
+
   .note-preview-modal {
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
@@ -4212,6 +4636,30 @@ textarea {
   .attachment-item {
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+
+  .public-share-attachment {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .public-share-attachment-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    justify-content: stretch;
+  }
+
+  .public-share-image-link {
+    height: auto;
+    width: 100%;
+  }
+
+  .public-share-image-link img {
+    aspect-ratio: 16 / 9;
+  }
+
+  .public-share-download {
+    width: 100%;
   }
 
   .attachment-actions {

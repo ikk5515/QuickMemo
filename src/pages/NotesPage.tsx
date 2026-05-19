@@ -5,9 +5,12 @@ import {
   ArrowUpDown,
   Bold,
   CalendarClock,
+  Ban,
   CheckCircle2,
   Columns3,
+  Copy,
   Download,
+  ExternalLink,
   Eye,
   File,
   FilePlus2,
@@ -18,6 +21,7 @@ import {
   LayoutGrid,
   ListChecks,
   ListTodo,
+  LockKeyhole,
   Loader2,
   PanelLeftOpen,
   PaintBucket,
@@ -47,6 +51,7 @@ import {
   type CSSProperties,
   type FormEvent,
   type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
   type RefObject,
   useCallback,
   useEffect,
@@ -71,9 +76,13 @@ import {
 import {
   decryptBytes,
   decryptText,
+  derivePublicShareContentKey,
   encryptBytes,
   encryptText,
+  exportAesKeyBase64Url,
   generateNoteKey,
+  hashPublicSharePassword,
+  importAesKeyBase64Url,
   unwrapNoteKey,
   wrapNoteKey
 } from "../lib/crypto";
@@ -108,6 +117,7 @@ import {
   deleteNoteAttachment,
   createEncryptedNote,
   deleteNote,
+  getNoteAttachments,
   markNoteRead,
   purgeNote,
   publishNoteCursor,
@@ -130,6 +140,21 @@ import {
   type NoteUserStateSnapshot,
   type NoteSnapshot
 } from "../services/notes";
+import {
+  activatePublicNoteShare,
+  createPublicNoteShare,
+  createPublicNoteShareAttachment,
+  deleteExpiredPublicSharesForOwner,
+  deletePublicNoteShare,
+  deletePublicNoteShareAttachments,
+  publicShareActive,
+  publicShareExpiresAt,
+  publicShareUrl,
+  revokePublicNoteShare,
+  subscribePublicSharesForOwner,
+  updatePublicNoteShareContent,
+  type PublicNoteShareSnapshot
+} from "../services/publicShares";
 import { subscribeUsers } from "../services/users";
 import type { ActiveNoteDocument, DecryptedNote, NoteKind, UserProfile } from "../types";
 
@@ -152,12 +177,18 @@ interface NoteDraft {
   fontSize: number;
 }
 
-interface AttachmentPreviewState {
+interface PersistedNoteResult {
+  noteId: string;
+  noteKey: CryptoKey;
+  draft: NoteDraft;
+}
+
+export interface AttachmentPreviewState {
   bytes?: Uint8Array;
   fileName: string;
   fallbackHtml?: string;
   html?: string;
-  kind: "docx" | "html" | "hwp" | "pdf" | "text" | "unsupported";
+  kind: "docx" | "html" | "hwp" | "image" | "pdf" | "text" | "unsupported";
   label: string;
   srcDoc?: string;
   text?: string;
@@ -267,12 +298,14 @@ const remoteCursorFreshMs = 15_000;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
 const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
+const publicShareUrlStoragePrefix = "quickmemo-public-share-url:";
+const publicShareContentKeyStoragePrefix = "quickmemo-public-share-content-key:";
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
-const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx"]);
-const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
-const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
+export const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx"]);
+export const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
+export const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 const maxTextPreviewCharacters = 120_000;
 const maxDocumentPreviewBlocks = 320;
 const maxDocxPreviewMarkupCharacters = 1_600_000;
@@ -1239,6 +1272,96 @@ function writeNoteFilter(uid: string, filter: NoteListFilter) {
   }
 }
 
+function readStoredPublicShareUrl(uid: string, shareId: string) {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    return window.localStorage.getItem(publicShareUrlStorageKey(uid, shareId));
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPublicShareUrl(uid: string, shareId: string, url: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(publicShareUrlStorageKey(uid, shareId), url);
+  } catch {
+    // The share remains valid; only quick re-copy from this browser is unavailable.
+  }
+}
+
+function removeStoredPublicShareUrl(uid: string, shareId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(publicShareUrlStorageKey(uid, shareId));
+  } catch {
+    // No action needed.
+  }
+}
+
+function readStoredPublicShareContentKey(uid: string, shareId: string) {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    return window.localStorage.getItem(publicShareContentKeyStorageKey(uid, shareId));
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPublicShareContentKey(uid: string, shareId: string, key: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(publicShareContentKeyStorageKey(uid, shareId), key);
+  } catch {
+    // Sharing still works; automatic updates for password-protected links may need the password again.
+  }
+}
+
+function removeStoredPublicShareContentKey(uid: string, shareId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(publicShareContentKeyStorageKey(uid, shareId));
+  } catch {
+    // No action needed.
+  }
+}
+
+function publicShareUrlStorageKey(uid: string, shareId: string) {
+  return `${publicShareUrlStoragePrefix}${uid}:${shareId}`;
+}
+
+function publicShareContentKeyStorageKey(uid: string, shareId: string) {
+  return `${publicShareContentKeyStoragePrefix}${uid}:${shareId}`;
+}
+
+function publicShareKeyFromUrl(url: string) {
+  try {
+    const hash = new URL(url).hash.replace(/^#/, "");
+
+    return hash ? new URLSearchParams(hash).get("key") : null;
+  } catch {
+    return null;
+  }
+}
+
 function noteSyncSignature(note: DecryptedNote) {
   const updatedAt = note.updatedAt ? `${note.updatedAt.seconds}:${note.updatedAt.nanoseconds}` : "pending";
 
@@ -1348,6 +1471,48 @@ function deadlineTone(date: Date | null) {
   }
 
   return "upcoming";
+}
+
+function publicShareTone(share: PublicNoteShareSnapshot | undefined, clockMs: number) {
+  const expiresAt = dateFromTimestamp(share?.expiresAt);
+
+  if (!share || !expiresAt) {
+    return "none";
+  }
+
+  const remainingMs = expiresAt.getTime() - clockMs;
+
+  if (remainingMs <= 24 * 60 * 60 * 1000) {
+    return "urgent";
+  }
+
+  if (remainingMs <= 3 * 24 * 60 * 60 * 1000) {
+    return "soon";
+  }
+
+  return "fresh";
+}
+
+function publicShareRemainingLabel(share: PublicNoteShareSnapshot | undefined, clockMs: number) {
+  const expiresAt = dateFromTimestamp(share?.expiresAt);
+
+  if (!share || !expiresAt) {
+    return null;
+  }
+
+  const remainingMs = expiresAt.getTime() - clockMs;
+
+  if (remainingMs <= 0) {
+    return "만료";
+  }
+
+  const remainingHours = Math.ceil(remainingMs / (60 * 60 * 1000));
+
+  if (remainingHours <= 24) {
+    return `${remainingHours}시간 남음`;
+  }
+
+  return `${Math.ceil(remainingHours / 24)}일 남음`;
 }
 
 function deletedRetentionLabel(note: DecryptedNote) {
@@ -1479,6 +1644,12 @@ export default function NotesPage() {
   const [overviewOpen, setOverviewOpen] = useState(false);
   const [overviewFolderFilter, setOverviewFolderFilter] = useState<OverviewFolderFilter>("all");
   const [shareOpen, setShareOpen] = useState(false);
+  const [publicShareOpen, setPublicShareOpen] = useState(false);
+  const [publicShareBusy, setPublicShareBusy] = useState(false);
+  const [publicShareError, setPublicShareError] = useState<string | null>(null);
+  const [publicShareCopied, setPublicShareCopied] = useState(false);
+  const [ownerPublicShares, setOwnerPublicShares] = useState<PublicNoteShareSnapshot[]>([]);
+  const [publicShareUrlById, setPublicShareUrlById] = useState<Record<string, string>>({});
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [deadlineOpen, setDeadlineOpen] = useState(false);
   const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
@@ -1491,6 +1662,7 @@ export default function NotesPage() {
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
   const attachmentPreviewUrl = useRef<string | null>(null);
+  const stoppingDeletedPublicShares = useRef(new Set<string>());
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -1767,6 +1939,118 @@ export default function NotesPage() {
     () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
     [decryptedNotes, editor.noteId]
   );
+  const canManagePublicShare = !editor.noteId || activeRemoteNote?.ownerUid === profile?.uid;
+  const publicShares = useMemo(
+    () => (editor.noteId ? ownerPublicShares.filter((share) => share.sourceNoteId === editor.noteId) : []),
+    [editor.noteId, ownerPublicShares]
+  );
+  const activePublicShare = useMemo(
+    () => publicShares.find((share) => publicShareActive(share, cursorClock)) ?? null,
+    [cursorClock, publicShares]
+  );
+  const activePublicShareUrl = activePublicShare
+    ? publicShareUrlById[activePublicShare.id] ?? readStoredPublicShareUrl(profile?.uid ?? "", activePublicShare.id)
+    : null;
+  const activePublicShareByNoteId = useMemo(() => {
+    const nextShares = new Map<string, PublicNoteShareSnapshot>();
+
+    ownerPublicShares.forEach((share) => {
+      if (!publicShareActive(share, cursorClock)) {
+        return;
+      }
+
+      const current = nextShares.get(share.sourceNoteId);
+      const currentExpiresAt = current ? dateFromTimestamp(current.expiresAt)?.getTime() ?? Number.POSITIVE_INFINITY : Number.POSITIVE_INFINITY;
+      const nextExpiresAt = dateFromTimestamp(share.expiresAt)?.getTime() ?? Number.POSITIVE_INFINITY;
+
+      if (!current || nextExpiresAt < currentExpiresAt) {
+        nextShares.set(share.sourceNoteId, share);
+      }
+    });
+
+    return nextShares;
+  }, [cursorClock, ownerPublicShares]);
+
+  useEffect(() => {
+    const uid = profile?.uid;
+
+    if (!uid) {
+      return undefined;
+    }
+
+    const cleanupExpiredShares = () => {
+      void deleteExpiredPublicSharesForOwner(uid).catch(() => undefined);
+    };
+
+    cleanupExpiredShares();
+    const intervalId = window.setInterval(cleanupExpiredShares, 60 * 60 * 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [profile?.uid]);
+
+  useEffect(() => {
+    if (!profile) {
+      setOwnerPublicShares([]);
+      setPublicShareUrlById({});
+      return undefined;
+    }
+
+    return subscribePublicSharesForOwner(
+      profile.uid,
+      (shares) => {
+        setOwnerPublicShares(shares);
+        setPublicShareUrlById((current) => {
+          const nextUrls = { ...current };
+
+          shares.forEach((share) => {
+            if (!nextUrls[share.id]) {
+              const storedUrl = readStoredPublicShareUrl(profile.uid, share.id);
+
+              if (storedUrl) {
+                nextUrls[share.id] = storedUrl;
+              }
+            }
+          });
+
+          return nextUrls;
+        });
+      },
+      () => setPublicShareError("공유 링크 상태를 불러오지 못했습니다.")
+    );
+  }, [profile]);
+
+  useEffect(() => {
+    if (!profile) {
+      return;
+    }
+
+    const deletedNoteIds = new Set(
+      decryptedDeletedNotes
+        .filter((note) => note.ownerUid === profile.uid)
+        .map((note) => note.id)
+    );
+    const sharesToStop = ownerPublicShares.filter(
+      (share) => deletedNoteIds.has(share.sourceNoteId) && !stoppingDeletedPublicShares.current.has(share.id)
+    );
+
+    sharesToStop.forEach((share) => {
+      stoppingDeletedPublicShares.current.add(share.id);
+      void deletePublicNoteShare(share.id)
+        .then(() => {
+          removeStoredPublicShareUrl(profile.uid, share.id);
+          removeStoredPublicShareContentKey(profile.uid, share.id);
+          setPublicShareUrlById((current) => {
+            const nextUrls = { ...current };
+            delete nextUrls[share.id];
+            return nextUrls;
+          });
+        })
+        .catch(() => setPublicShareError("복구함으로 이동한 노트의 공유 링크를 중단하지 못했습니다."))
+        .finally(() => {
+          stoppingDeletedPublicShares.current.delete(share.id);
+        });
+    });
+  }, [decryptedDeletedNotes, ownerPublicShares, profile]);
   const resolveNoteKey = useCallback(
     async (noteId: string) => {
       if (!profile || !privateKey) {
@@ -2426,7 +2710,385 @@ export default function NotesPage() {
     }
   }
 
-  async function persistCurrentNote(showSavedMessage = true): Promise<{ noteId: string; noteKey: CryptoKey } | null> {
+  async function openPublicShareDialog() {
+    setPublicShareOpen(true);
+    setPublicShareCopied(false);
+    setPublicShareError(null);
+  }
+
+  async function createCurrentPublicShare(password = "") {
+    if (publicShareBusy) {
+      return;
+    }
+
+    if (!canManagePublicShare) {
+      setPublicShareError("노트 소유자만 링크 공유를 만들 수 있습니다.");
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+    setPublicShareCopied(false);
+
+    let createdShareId: string | null = null;
+
+    try {
+      const savedNote = await persistCurrentNote(false, false);
+
+      if (!savedNote) {
+        throw new Error("노트를 먼저 저장하지 못했습니다.");
+      }
+
+      const shareKey = await generateNoteKey();
+      const shareKeyValue = await exportAesKeyBase64Url(shareKey);
+      const expiresAt = publicShareExpiresAt();
+      const trimmedPassword = password.trim();
+      const passwordHash = trimmedPassword ? await hashPublicSharePassword(trimmedPassword, shareKeyValue) : undefined;
+      const contentKey = passwordHash
+        ? await derivePublicShareContentKey(shareKeyValue, trimmedPassword, passwordHash)
+        : shareKey;
+      const storedContentKeyValue = passwordHash ? await exportAesKeyBase64Url(contentKey) : null;
+      const [encryptedTitle, encryptedBody] = await Promise.all([
+        encryptText(editor.title.trim() || "제목 없음", contentKey),
+        encryptText(serializeEditorContent(editor.body, editor.fontSize), contentKey)
+      ]);
+      const shareId = await createPublicNoteShare({
+        sourceNoteId: savedNote.noteId,
+        ownerUid: unlockedProfile.uid,
+        encryptedTitle,
+        encryptedBody,
+        expiresAt,
+        passwordHash
+      });
+      createdShareId = shareId;
+
+      const noteAttachments = await getNoteAttachments(savedNote.noteId);
+
+      for (const attachment of noteAttachments) {
+        const plainBytes = await decryptBytes(
+          {
+            version: 1,
+            algorithm: "AES-GCM",
+            cipherBytes: attachment.encryptedData.toUint8Array(),
+            iv: attachment.iv.toUint8Array()
+          },
+          savedNote.noteKey
+        );
+        const encryptedAttachment = await encryptBytes(plainBytes, contentKey);
+
+        await createPublicNoteShareAttachment(shareId, {
+          fileName: attachment.fileName,
+          extension: attachment.extension,
+          mimeType: attachment.mimeType,
+          originalSize: attachment.originalSize,
+          encryptedData: encryptedAttachment.cipherBytes,
+          iv: encryptedAttachment.iv,
+          expiresAt,
+          sourceAttachmentId: attachment.id
+        });
+      }
+
+      await activatePublicNoteShare(shareId, noteAttachments.length);
+
+      const nextUrl = publicShareUrl(shareId, shareKeyValue);
+      writeStoredPublicShareUrl(unlockedProfile.uid, shareId, nextUrl);
+      if (storedContentKeyValue) {
+        writeStoredPublicShareContentKey(unlockedProfile.uid, shareId, storedContentKeyValue);
+      }
+      setPublicShareUrlById((current) => ({ ...current, [shareId]: nextUrl }));
+      setStatus("공유 링크를 만들었습니다.");
+    } catch (shareError) {
+      if (createdShareId) {
+        const shareToDelete = createdShareId;
+        await deletePublicNoteShare(shareToDelete)
+          .catch(() => revokePublicNoteShare(shareToDelete, unlockedProfile.uid))
+          .catch(() => undefined);
+      }
+
+      setPublicShareError(shareError instanceof Error ? shareError.message : "공유 링크를 만들지 못했습니다.");
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function copyPublicShareUrl() {
+    if (!activePublicShareUrl) {
+      setPublicShareError("복사할 공유 링크를 찾을 수 없습니다.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(activePublicShareUrl);
+      setPublicShareCopied(true);
+      setPublicShareError(null);
+      setStatus("공유 링크를 복사했습니다.");
+    } catch {
+      setPublicShareError("브라우저에서 링크 복사를 허용하지 않았습니다. 링크를 직접 선택해서 복사해주세요.");
+    }
+  }
+
+  async function stopPublicShare() {
+    if (!activePublicShare) {
+      setPublicShareError("중단할 공유 링크가 없습니다.");
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+
+    try {
+      await deletePublicNoteShare(activePublicShare.id);
+      removeStoredPublicShareUrl(unlockedProfile.uid, activePublicShare.id);
+      removeStoredPublicShareContentKey(unlockedProfile.uid, activePublicShare.id);
+      setPublicShareUrlById((current) => {
+        const nextUrls = { ...current };
+        delete nextUrls[activePublicShare.id];
+        return nextUrls;
+      });
+      setPublicShareCopied(false);
+      setStatus("공유 링크를 중단했습니다.");
+    } catch {
+      setPublicShareError("공유 링크를 중단하지 못했습니다.");
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function setCurrentPublicSharePassword(password: string) {
+    const trimmedPassword = password.trim();
+    const shareKeyValue = activePublicShareUrl ? publicShareKeyFromUrl(activePublicShareUrl) : null;
+
+    if (!activePublicShare) {
+      setPublicShareError("비밀번호를 설정할 공유 링크가 없습니다.");
+      return;
+    }
+
+    if (!shareKeyValue) {
+      setPublicShareError("이 브라우저에는 공유 키가 없어 비밀번호를 변경할 수 없습니다.");
+      return;
+    }
+
+    if (!trimmedPassword) {
+      setPublicShareError("비밀번호를 입력해주세요.");
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+
+    try {
+      const passwordHash = await hashPublicSharePassword(trimmedPassword, shareKeyValue);
+      const contentKey = await derivePublicShareContentKey(shareKeyValue, trimmedPassword, passwordHash);
+      const contentKeyValue = await exportAesKeyBase64Url(contentKey);
+
+      await rewriteCurrentPublicShareContent(activePublicShare, contentKey, passwordHash);
+      writeStoredPublicShareContentKey(unlockedProfile.uid, activePublicShare.id, contentKeyValue);
+      setPublicShareCopied(false);
+      setStatus("공유 비밀번호를 저장했습니다.");
+    } catch {
+      setPublicShareError("공유 비밀번호를 저장하지 못했습니다.");
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function clearCurrentPublicSharePassword() {
+    const shareKeyValue = activePublicShareUrl ? publicShareKeyFromUrl(activePublicShareUrl) : null;
+
+    if (!activePublicShare) {
+      setPublicShareError("비밀번호를 해제할 공유 링크가 없습니다.");
+      return;
+    }
+
+    if (!shareKeyValue) {
+      setPublicShareError("이 브라우저에는 공유 키가 없어 비밀번호를 변경할 수 없습니다.");
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+
+    try {
+      await rewriteCurrentPublicShareContent(activePublicShare, await importAesKeyBase64Url(shareKeyValue), null);
+      removeStoredPublicShareContentKey(unlockedProfile.uid, activePublicShare.id);
+      setPublicShareCopied(false);
+      setStatus("공유 비밀번호를 해제했습니다.");
+    } catch {
+      setPublicShareError("공유 비밀번호를 해제하지 못했습니다.");
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function rewriteCurrentPublicShareContent(
+    share: PublicNoteShareSnapshot,
+    contentKey: CryptoKey,
+    passwordHash: NonNullable<PublicNoteShareSnapshot["passwordHash"]> | null
+  ) {
+    const savedNote = await persistCurrentNote(false, false);
+
+    if (!savedNote) {
+      throw new Error("노트를 먼저 저장하지 못했습니다.");
+    }
+
+    await rewritePublicShareContentFromNote(share, savedNote.noteId, savedNote.noteKey, savedNote.draft, contentKey, passwordHash);
+  }
+
+  async function rewritePublicShareContentFromNote(
+    share: PublicNoteShareSnapshot,
+    noteId: string,
+    noteKey: CryptoKey,
+    draft: NoteDraft,
+    contentKey: CryptoKey,
+    passwordHash: NonNullable<PublicNoteShareSnapshot["passwordHash"]> | null
+  ) {
+    const expiresAt = dateFromTimestamp(share.expiresAt);
+
+    if (!expiresAt) {
+      throw new Error("공유 만료 시간을 확인하지 못했습니다.");
+    }
+
+    const [encryptedTitle, encryptedBody] = await Promise.all([
+      encryptText(draft.title.trim() || "제목 없음", contentKey),
+      encryptText(serializeEditorContent(draft.body, draft.fontSize), contentKey)
+    ]);
+    const noteAttachments = await getNoteAttachments(noteId);
+    const nextAttachments: Parameters<typeof createPublicNoteShareAttachment>[1][] = [];
+
+    for (const attachment of noteAttachments) {
+      const plainBytes = await decryptBytes(
+        {
+          version: 1,
+          algorithm: "AES-GCM",
+          cipherBytes: attachment.encryptedData.toUint8Array(),
+          iv: attachment.iv.toUint8Array()
+        },
+        noteKey
+      );
+      const encryptedAttachment = await encryptBytes(plainBytes, contentKey);
+
+      nextAttachments.push({
+        fileName: attachment.fileName,
+        extension: attachment.extension,
+        mimeType: attachment.mimeType,
+        originalSize: attachment.originalSize,
+        encryptedData: encryptedAttachment.cipherBytes,
+        iv: encryptedAttachment.iv,
+        expiresAt,
+        sourceAttachmentId: attachment.id
+      });
+    }
+
+    await deletePublicNoteShareAttachments(share.id);
+
+    for (const attachment of nextAttachments) {
+      await createPublicNoteShareAttachment(share.id, attachment);
+    }
+
+    await updatePublicNoteShareContent(share.id, {
+      encryptedTitle,
+      encryptedBody,
+      attachmentCount: nextAttachments.length,
+      passwordHash
+    });
+  }
+
+  async function publicShareContentKeyForSync(share: PublicNoteShareSnapshot) {
+    const shareUrl = publicShareUrlById[share.id] ?? readStoredPublicShareUrl(unlockedProfile.uid, share.id);
+    const shareKeyValue = shareUrl ? publicShareKeyFromUrl(shareUrl) : null;
+
+    if (!shareKeyValue) {
+      return null;
+    }
+
+    if (share.passwordHash) {
+      const contentKeyValue = readStoredPublicShareContentKey(unlockedProfile.uid, share.id);
+
+      return contentKeyValue ? importAesKeyBase64Url(contentKeyValue) : null;
+    }
+
+    return importAesKeyBase64Url(shareKeyValue);
+  }
+
+  async function syncPublicSharesForNote(noteId: string, noteKey: CryptoKey, draft: NoteDraft) {
+    const sharesToSync = ownerPublicShares.filter(
+      (share) => share.sourceNoteId === noteId && share.ownerUid === unlockedProfile.uid && publicShareActive(share)
+    );
+
+    if (!sharesToSync.length) {
+      return;
+    }
+
+    let skippedPasswordProtectedShare = false;
+    let syncFailed = false;
+
+    for (const share of sharesToSync) {
+      try {
+        const contentKey = await publicShareContentKeyForSync(share);
+
+        if (!contentKey) {
+          skippedPasswordProtectedShare = skippedPasswordProtectedShare || Boolean(share.passwordHash);
+          continue;
+        }
+
+        await rewritePublicShareContentFromNote(share, noteId, noteKey, draft, contentKey, share.passwordHash ?? null);
+      } catch {
+        syncFailed = true;
+      }
+    }
+
+    if (skippedPasswordProtectedShare) {
+      setPublicShareError("비밀번호가 걸린 공유 링크는 공유 창에서 비밀번호를 다시 설정하면 자동 업데이트가 재개됩니다.");
+    }
+
+    if (syncFailed) {
+      setPublicShareError("공유 링크를 자동 업데이트하지 못했습니다. 공유 창에서 링크 상태를 확인해주세요.");
+    }
+  }
+
+  async function syncPublicSharesForNoteTarget(noteId: string, noteKey: CryptoKey) {
+    const storedNote = [...decryptedNotes, ...decryptedDeletedNotes].find((note) => note.id === noteId) ?? null;
+    const draft =
+      editor.noteId === noteId
+        ? { title: editor.title, body: editor.body, fontSize: editor.fontSize }
+        : storedNote
+          ? draftFromNote(storedNote)
+          : null;
+
+    if (!draft) {
+      return;
+    }
+
+    await syncPublicSharesForNote(noteId, noteKey, draft);
+  }
+
+  async function stopPublicSharesForNote(noteId: string) {
+    const sharesToStop = ownerPublicShares.filter(
+      (share) => share.sourceNoteId === noteId && share.ownerUid === unlockedProfile.uid
+    );
+
+    await Promise.all(
+      sharesToStop.map(async (share) => {
+        await deletePublicNoteShare(share.id);
+        removeStoredPublicShareUrl(unlockedProfile.uid, share.id);
+        removeStoredPublicShareContentKey(unlockedProfile.uid, share.id);
+      })
+    );
+
+    if (sharesToStop.length) {
+      setPublicShareUrlById((current) => {
+        const nextUrls = { ...current };
+
+        sharesToStop.forEach((share) => {
+          delete nextUrls[share.id];
+        });
+
+        return nextUrls;
+      });
+    }
+  }
+
+  async function persistCurrentNote(showSavedMessage = true, syncPublicShare = true): Promise<PersistedNoteResult | null> {
     if (saving) {
       return null;
     }
@@ -2467,8 +3129,11 @@ export default function NotesPage() {
         setEditor((current) =>
           draftsMatch(current, draft) ? { ...current, body: saveDraft.body, dirty: false } : current
         );
+        if (syncPublicShare) {
+          await syncPublicSharesForNote(editor.noteId, editor.noteKey, saveDraft);
+        }
         setStatus(showSavedMessage ? "변경 사항을 저장했습니다." : "자동 저장됨");
-        return { noteId: editor.noteId, noteKey: editor.noteKey };
+        return { noteId: editor.noteId, noteKey: editor.noteKey, draft: saveDraft };
       }
 
       const noteKey = await generateNoteKey();
@@ -2508,8 +3173,11 @@ export default function NotesPage() {
         dirty: !draftsMatch(current, draft)
       }));
       announceActiveNote(created.id);
+      if (syncPublicShare) {
+        await syncPublicSharesForNote(created.id, noteKey, saveDraft);
+      }
       setStatus(showSavedMessage ? "노트를 저장 목록에 추가했습니다." : "자동 저장됨");
-      return { noteId: created.id, noteKey };
+      return { noteId: created.id, noteKey, draft: saveDraft };
     } catch {
       setError("노트를 저장하지 못했습니다.");
       return null;
@@ -2591,6 +3259,8 @@ export default function NotesPage() {
           uploadedBy: unlockedProfile.uid
         });
       }
+
+      await syncPublicSharesForNoteTarget(noteTarget.noteId, noteTarget.noteKey);
 
       setStatus(
         validFiles.length === 1
@@ -2825,6 +3495,7 @@ export default function NotesPage() {
 
     try {
       await deleteNoteAttachment(note.id, attachment.id);
+      await syncPublicSharesForNote(note.id, await noteKeyForDownload(note.id), draftFromNote(note));
       setStatus("첨부파일을 삭제했습니다.");
     } catch {
       setError("첨부파일을 삭제하지 못했습니다.");
@@ -2848,6 +3519,7 @@ export default function NotesPage() {
 
     try {
       await deleteNote(editor.noteId, unlockedProfile.uid, activeRemoteNote.participantUids);
+      await stopPublicSharesForNote(editor.noteId);
       startNewNote();
       setStatus("노트를 삭제했습니다.");
     } catch {
@@ -2868,6 +3540,7 @@ export default function NotesPage() {
 
     try {
       await deleteNote(note.id, unlockedProfile.uid, note.participantUids);
+      await stopPublicSharesForNote(note.id);
       setPreviewNoteId(null);
 
       if (editor.noteId === note.id) {
@@ -2916,29 +3589,11 @@ export default function NotesPage() {
       return;
     }
 
-    const rawNote = [...notes, ...deletedNotes].find((current) => current.id === note.id);
-    const wrappedKey = rawNote?.wrappedKeys[unlockedProfile.uid];
-
-    if (!wrappedKey) {
-      setError("즉시 삭제에 필요한 노트 키를 찾지 못했습니다.");
-      return;
-    }
-
     setSaving(true);
     setError(null);
 
     try {
-      const noteKey = await resolveNoteKey(note.id);
-      const redactedPayload = await encryptNoteDraft(purgedDraft(), noteKey);
-
-      await purgeNote({
-        noteId: note.id,
-        uid: unlockedProfile.uid,
-        encryptedTitle: redactedPayload.encryptedTitle,
-        encryptedBody: redactedPayload.encryptedBody,
-        wrappedKey
-      });
-
+      await purgeDeletedNote(note);
       setPreviewNoteId(null);
 
       if (editor.noteId === note.id) {
@@ -2948,6 +3603,65 @@ export default function NotesPage() {
       setStatus("노트를 즉시 삭제했습니다.");
     } catch {
       setError("노트를 즉시 삭제하지 못했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function purgeDeletedNote(note: DecryptedNote) {
+    const rawNote = [...notes, ...deletedNotes].find((current) => current.id === note.id);
+    const wrappedKey = rawNote?.wrappedKeys[unlockedProfile.uid];
+
+    if (!wrappedKey) {
+      throw new Error("Missing note key.");
+    }
+
+    await stopPublicSharesForNote(note.id);
+
+    const noteKey = await resolveNoteKey(note.id);
+    const redactedPayload = await encryptNoteDraft(purgedDraft(), noteKey);
+
+    await purgeNote({
+      noteId: note.id,
+      uid: unlockedProfile.uid,
+      encryptedTitle: redactedPayload.encryptedTitle,
+      encryptedBody: redactedPayload.encryptedBody,
+      wrappedKey
+    });
+  }
+
+  async function purgeDeletedNotes(notesToPurge: DecryptedNote[]) {
+    const purgeableNotes = notesToPurge.filter((note) => note.isDeleted && canDeleteNote(note));
+
+    if (!purgeableNotes.length) {
+      setError("즉시 삭제할 수 있는 복구함 노트가 없습니다.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `복구함의 노트 ${purgeableNotes.length}개를 즉시 삭제할까요?\n첨부파일과 수정 이력을 정리하고, 노트 내용은 복구할 수 없도록 지웁니다.`
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      for (const note of purgeableNotes) {
+        await purgeDeletedNote(note);
+      }
+
+      if (editor.noteId && purgeableNotes.some((note) => note.id === editor.noteId)) {
+        startNewNote();
+      }
+
+      setPreviewNoteId(null);
+      setStatus(`복구함 노트 ${purgeableNotes.length}개를 즉시 삭제했습니다.`);
+    } catch {
+      setError("복구함 전체삭제를 완료하지 못했습니다.");
     } finally {
       setSaving(false);
     }
@@ -2991,6 +3705,7 @@ export default function NotesPage() {
       );
       pendingLocalEcho.current = { noteId: note.id, draft: saveDraft, createdAt: Date.now() };
       announceActiveNote(note.id);
+      await syncPublicSharesForNote(note.id, noteKey, saveDraft);
 
       if (editor.noteId === note.id) {
         setEditor((current) => ({
@@ -3038,6 +3753,7 @@ export default function NotesPage() {
           <PersonalOverview
             activeFolderFilter={overviewFolderFilter}
             attentionNoteIds={sharedAttentionNoteIds}
+            clockMs={cursorClock}
             folders={folders}
             feedbackError={error}
             feedbackStatus={status}
@@ -3049,6 +3765,7 @@ export default function NotesPage() {
             onFolderFilterChange={setOverviewFolderFilter}
             onPreview={previewStoredNote}
             onUpdateNoteFolder={(note, folderId) => void updateStoredNoteFolder(note, folderId)}
+            publicShareByNoteId={activePublicShareByNoteId}
           />
         ) : (
           <>
@@ -3083,6 +3800,7 @@ export default function NotesPage() {
               activeNoteId={editor.noteId}
               attentionNoteIds={sharedAttentionNoteIds}
               canRestoreNote={canRestoreNote}
+              clockMs={cursorClock}
               counts={noteCounts}
               deletedCounts={trashCounts}
               deletedNotes={trashNotes}
@@ -3093,12 +3811,14 @@ export default function NotesPage() {
               onClose={() => setListOpen(false)}
               onFilterChange={updateNoteFilter}
               onOpenOverview={openOverview}
-              onPreview={previewStoredNote}
-              onPurge={(note) => void purgePreviewNote(note)}
-              onRestore={(note) => void restorePreviewNote(note)}
-              onSortChange={updateSortSetting}
+            onPreview={previewStoredNote}
+            onPurge={(note) => void purgePreviewNote(note)}
+            onPurgeAll={(notesToPurge) => void purgeDeletedNotes(notesToPurge)}
+            onRestore={(note) => void restorePreviewNote(note)}
+            onSortChange={updateSortSetting}
               onTogglePin={(note) => void togglePinnedNote(note)}
               open={listOpen}
+              publicShareByNoteId={activePublicShareByNoteId}
               sortSetting={noteSort}
             />
             <section className="editor-panel full-editor-panel">
@@ -3107,6 +3827,16 @@ export default function NotesPage() {
               <button className="secondary-button" type="button" onClick={() => setShareOpen((current) => !current)}>
                 <UsersRound size={18} />
                 공유 대상
+              </button>
+              <button
+                className={`secondary-button ${activePublicShare ? "active" : ""}`}
+                disabled={saving || publicShareBusy || !canEditShareTargets}
+                type="button"
+                onClick={() => void openPublicShareDialog()}
+                title={canEditShareTargets ? "임시 URL로 노트 공유" : "노트 소유자만 링크 공유를 만들 수 있습니다."}
+              >
+                {publicShareBusy ? <Loader2 className="spin" size={18} /> : <Share2 size={18} />}
+                {activePublicShare ? "공유 중" : "공유하기"}
               </button>
               <div className="deadline-control">
                 <button
@@ -3278,14 +4008,196 @@ export default function NotesPage() {
             onTogglePin={(note) => void togglePinnedNote(note)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
             saving={saving}
-            suppressEscape={Boolean(attachmentPreview)}
+            suppressEscape={Boolean(attachmentPreview || publicShareOpen)}
             attachmentBusyId={attachmentBusyId}
             canDeleteAttachment={canDeleteAttachmentForNote}
+          />
+        )}
+        {publicShareOpen && (
+          <PublicShareModal
+            busy={publicShareBusy}
+            copied={publicShareCopied}
+            error={publicShareError}
+            onClose={() => setPublicShareOpen(false)}
+            onCopy={() => void copyPublicShareUrl()}
+            onClearPassword={() => void clearCurrentPublicSharePassword()}
+            onCreate={(password) => void createCurrentPublicShare(password)}
+            onStop={() => void stopPublicShare()}
+            onUpdatePassword={(password) => void setCurrentPublicSharePassword(password)}
+            share={activePublicShare}
+            shareUrl={activePublicShareUrl}
           />
         )}
         {attachmentPreview && <AttachmentPreviewModal onClose={closeAttachmentPreview} preview={attachmentPreview} />}
       </section>
     </AppShell>
+  );
+}
+
+function PublicShareModal({
+  busy,
+  copied,
+  error,
+  onClose,
+  onCopy,
+  onClearPassword,
+  onCreate,
+  onStop,
+  onUpdatePassword,
+  share,
+  shareUrl
+}: {
+  busy: boolean;
+  copied: boolean;
+  error: string | null;
+  onClose: () => void;
+  onCopy: () => void;
+  onClearPassword: () => void;
+  onCreate: (password: string) => void;
+  onStop: () => void;
+  onUpdatePassword: (password: string) => void;
+  share: PublicNoteShareSnapshot | null;
+  shareUrl: string | null;
+}) {
+  const [createPassword, setCreatePassword] = useState("");
+  const [passwordDraft, setPasswordDraft] = useState("");
+  const expiresAt = dateFromTimestamp(share?.expiresAt);
+  const hasPassword = Boolean(share?.passwordHash);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  function handleCreate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onCreate(createPassword);
+  }
+
+  function handlePasswordUpdate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onUpdatePassword(passwordDraft);
+    setPasswordDraft("");
+  }
+
+  return (
+    <div className="modal-backdrop public-share-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-labelledby="public-share-title"
+        aria-modal="true"
+        className="public-share-modal"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="public-share-modal-header">
+          <div>
+            <span>
+              <Share2 size={16} />
+              임시 URL 공유
+            </span>
+            <h2 id="public-share-title">공유 링크</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="공유 창 닫기">
+            <X size={16} />
+          </button>
+        </header>
+        <div className="public-share-modal-body">
+          {share ? (
+            <>
+              <p className="public-share-expiry">
+                {expiresAt ? `만료 ${formatFullDateTime(expiresAt)}` : "만료 시간을 확인 중입니다."}
+              </p>
+              {shareUrl ? (
+                <label className="public-share-url-field">
+                  <span>URL</span>
+                  <input readOnly value={shareUrl} onFocus={(event) => event.currentTarget.select()} />
+                </label>
+              ) : (
+                <p className="public-share-missing-key">이 브라우저에는 공유 키가 없어 URL을 다시 복사할 수 없습니다.</p>
+              )}
+              <div className="public-share-modal-actions">
+                <button disabled={busy || !shareUrl} onClick={onCopy} type="button">
+                  {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
+                  {copied ? "복사됨" : "URL 복사"}
+                </button>
+                {shareUrl && (
+                  <a className="secondary-button public-share-open-link" href={shareUrl} target="_blank" rel="noopener noreferrer">
+                    <ExternalLink size={16} />
+                    열기
+                  </a>
+                )}
+                <button className="secondary-button danger" disabled={busy} onClick={onStop} type="button">
+                  {busy ? <Loader2 className="spin" size={16} /> : <Ban size={16} />}
+                  공유 중단
+                </button>
+              </div>
+              <div className="public-share-password-panel">
+                <div className="public-share-password-heading">
+                  <LockKeyhole size={16} />
+                  <span>{hasPassword ? "비밀번호 사용 중" : "비밀번호 없음"}</span>
+                </div>
+                <form className="public-share-password-form" onSubmit={handlePasswordUpdate}>
+                  <label>
+                    <span>{hasPassword ? "새 비밀번호" : "비밀번호"}</span>
+                    <input
+                      autoComplete="new-password"
+                      disabled={busy}
+                      onChange={(event) => setPasswordDraft(event.target.value)}
+                      placeholder={hasPassword ? "변경할 비밀번호" : "접속 전에 입력할 비밀번호"}
+                      type="password"
+                      value={passwordDraft}
+                    />
+                  </label>
+                  <div className="public-share-password-actions">
+                    <button disabled={busy || !shareUrl || !passwordDraft.trim()} type="submit">
+                      {busy ? <Loader2 className="spin" size={16} /> : <LockKeyhole size={16} />}
+                      {hasPassword ? "변경" : "설정"}
+                    </button>
+                    {hasPassword && (
+                      <button className="secondary-button" disabled={busy || !shareUrl} onClick={onClearPassword} type="button">
+                        비밀번호 해제
+                      </button>
+                    )}
+                  </div>
+                </form>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="public-share-expiry">공유 링크는 최대 7일 동안 열 수 있습니다.</p>
+              <form className="public-share-password-form" onSubmit={handleCreate}>
+                <label>
+                  <span>비밀번호 (선택)</span>
+                  <input
+                    autoComplete="new-password"
+                    disabled={busy}
+                    onChange={(event) => setCreatePassword(event.target.value)}
+                    placeholder="비워두면 바로 열 수 있습니다"
+                    type="password"
+                    value={createPassword}
+                  />
+                </label>
+                <button disabled={busy} type="submit">
+                  {busy ? <Loader2 className="spin" size={16} /> : <Share2 size={16} />}
+                  링크 만들기
+                </button>
+              </form>
+            </>
+          )}
+          {busy && <p className="public-share-status">공유 상태를 업데이트하는 중...</p>}
+          {error && <p className="form-error">{error}</p>}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -3308,6 +4220,8 @@ function RichMemoEditor({
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedImageRef = useRef<HTMLImageElement | null>(null);
+  const imageResizeCleanupRef = useRef<(() => void) | null>(null);
+  const imageWidthControlRef = useRef<HTMLLabelElement | null>(null);
   const tableResizeCleanupRef = useRef<(() => void) | null>(null);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
   const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
@@ -3515,6 +4429,49 @@ function RichMemoEditor({
   }, [editor, onChange]);
 
   useEffect(() => {
+    if (!editor) {
+      return undefined;
+    }
+
+    function handleDocumentPointerDown(event: PointerEvent) {
+      if (!selectedImageRef.current) {
+        return;
+      }
+
+      const target = event.target;
+
+      if (!(target instanceof Node)) {
+        return;
+      }
+
+      if (imageWidthControlRef.current?.contains(target)) {
+        return;
+      }
+
+      const image = target instanceof HTMLElement ? target.closest("img") : null;
+
+      if (image instanceof HTMLImageElement && editorRef.current?.contains(image)) {
+        return;
+      }
+
+      selectedImageRef.current = null;
+      setSelectedImageWidthPx(null);
+    }
+
+    document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+
+    return () => {
+      document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+    };
+  }, [editor, editorRef]);
+
+  useEffect(() => {
+    return () => {
+      imageResizeCleanupRef.current?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!editor || editor.getHTML() === (value || "")) {
       return;
     }
@@ -3592,9 +4549,47 @@ function RichMemoEditor({
 
     const position = editor.view.posAtDOM(image, 0);
 
-    editor.chain().focus().setNodeSelection(position).updateAttributes("image", { qmWidth: null, qmWidthPx: safeWidth }).run();
+    editor.chain().setNodeSelection(position).updateAttributes("image", { qmWidth: null, qmWidthPx: safeWidth }).run();
+    selectedImageRef.current = imageElementAtPosition(editor, position, image.currentSrc || image.src) ?? image;
     setSelectedImageWidthPx(safeWidth);
     onChange(editor.getHTML());
+  }
+
+  function beginImageWidthDrag(event: ReactPointerEvent<HTMLLabelElement>) {
+    if (event.button !== 0 || event.target instanceof HTMLInputElement) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    imageResizeCleanupRef.current?.();
+
+    const startX = event.clientX;
+    const startWidth = currentImageWidthPx;
+    const restoreCursor = document.body.style.cursor;
+    const restoreUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "ew-resize";
+    document.body.style.userSelect = "none";
+
+    function cleanup() {
+      document.body.style.cursor = restoreCursor;
+      document.body.style.userSelect = restoreUserSelect;
+      imageResizeCleanupRef.current = null;
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointercancel", cleanup);
+    }
+
+    function handlePointerMove(moveEvent: PointerEvent) {
+      moveEvent.preventDefault();
+      updateSelectedImageWidth(startWidth + moveEvent.clientX - startX);
+    }
+
+    imageResizeCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointercancel", cleanup);
   }
 
   function runToolbarCommand(command: (editor: TipTapEditor) => void) {
@@ -4092,8 +5087,8 @@ function RichMemoEditor({
           파일
         </button>
         {selectedImageWidthPx && (
-          <label className="image-width-control">
-            이미지 너비
+          <label className="image-width-control" onPointerDown={beginImageWidthDrag} ref={imageWidthControlRef}>
+            <span className="image-width-drag-target">이미지 너비</span>
             <input
               aria-label="이미지 너비"
               max={editorImagePixelWidthBounds.max}
@@ -4103,7 +5098,7 @@ function RichMemoEditor({
               type="range"
               value={currentImageWidthPx}
             />
-            <output>{currentImageWidthPx}px</output>
+            <output className="image-width-drag-target">{currentImageWidthPx}px</output>
           </label>
         )}
         <input
@@ -5060,6 +6055,31 @@ function readImageWidthPx(image: HTMLImageElement) {
   return clampImagePixelWidth(Math.round(image.getBoundingClientRect().width || image.naturalWidth || editorImagePixelWidthBounds.max));
 }
 
+function imageElementAtPosition(editor: TipTapEditor, position: number, fallbackSrc?: string) {
+  const node = editor.view.nodeDOM(position);
+
+  if (node instanceof HTMLImageElement) {
+    return node;
+  }
+
+  const nestedImage = node instanceof HTMLElement ? node.querySelector("img") : null;
+  const selectedImage = editor.view.dom.querySelector("img.ProseMirror-selectednode");
+
+  if (nestedImage instanceof HTMLImageElement) {
+    return nestedImage;
+  }
+
+  if (selectedImage instanceof HTMLImageElement) {
+    return selectedImage;
+  }
+
+  if (!fallbackSrc) {
+    return null;
+  }
+
+  return Array.from(editor.view.dom.querySelectorAll("img")).find((image) => image.currentSrc === fallbackSrc || image.src === fallbackSrc) ?? null;
+}
+
 function clampImagePixelWidth(value: number) {
   if (!Number.isFinite(value)) {
     return editorImagePixelWidthBounds.max;
@@ -5095,6 +6115,7 @@ function NoteDrawer({
   activeNoteId,
   attentionNoteIds,
   canRestoreNote,
+  clockMs,
   counts,
   deletedCounts,
   deletedNotes,
@@ -5107,15 +6128,18 @@ function NoteDrawer({
   onOpenOverview,
   onPreview,
   onPurge,
+  onPurgeAll,
   onRestore,
   onSortChange,
   onTogglePin,
   open,
+  publicShareByNoteId,
   sortSetting
 }: {
   activeNoteId: string | null;
   attentionNoteIds: Set<string>;
   canRestoreNote: (note: DecryptedNote) => boolean;
+  clockMs: number;
   counts: NoteListCounts;
   deletedCounts: NoteListCounts;
   deletedNotes: DecryptedNote[];
@@ -5128,10 +6152,12 @@ function NoteDrawer({
   onOpenOverview: (filter?: OverviewFolderFilter) => void;
   onPreview: (note: DecryptedNote) => void;
   onPurge: (note: DecryptedNote) => void;
+  onPurgeAll: (notes: DecryptedNote[]) => void;
   onRestore: (note: DecryptedNote) => void;
   onSortChange: (setting: NoteSortSetting) => void;
   onTogglePin: (note: DecryptedNote) => void;
   open: boolean;
+  publicShareByNoteId: Map<string, PublicNoteShareSnapshot>;
   sortSetting: NoteSortSetting;
 }) {
   const [mode, setMode] = useState<DrawerMode>("notes");
@@ -5268,11 +6294,22 @@ function NoteDrawer({
           </button>
         </div>
       )}
-      {isTrashMode && <p className="trash-retention-hint">삭제된 노트는 {deletedNoteRetentionDays}일 보관 기준으로 표시됩니다.</p>}
+      {isTrashMode && (
+        <div className="trash-tools">
+          <p className="trash-retention-hint">삭제된 노트는 {deletedNoteRetentionDays}일 보관 기준으로 표시됩니다.</p>
+          {listedNotes.length > 0 && (
+            <button className="secondary-button danger" type="button" onClick={() => onPurgeAll(listedNotes)}>
+              <Trash2 size={15} />
+              전체삭제
+            </button>
+          )}
+        </div>
+      )}
       <NoteList
         activeNoteId={activeNoteId}
         attentionNoteIds={isTrashMode ? new Set<string>() : attentionNoteIds}
         canRestoreNote={canRestoreNote}
+        clockMs={clockMs}
         deleted={isTrashMode}
         filter={filter}
         noteStates={noteStates}
@@ -5281,6 +6318,7 @@ function NoteDrawer({
         onPurge={onPurge}
         onRestore={onRestore}
         onTogglePin={onTogglePin}
+        publicShareByNoteId={publicShareByNoteId}
       />
     </aside>
   );
@@ -5318,10 +6356,32 @@ function NoteFilterButton({
   );
 }
 
+function PublicShareStatusBadge({
+  clockMs,
+  share
+}: {
+  clockMs: number;
+  share: PublicNoteShareSnapshot | undefined;
+}) {
+  const label = publicShareRemainingLabel(share, clockMs);
+
+  if (!share || !label) {
+    return null;
+  }
+
+  return (
+    <span className={`public-share-list-badge ${publicShareTone(share, clockMs)}`}>
+      <Share2 size={12} />
+      URL 공유 · {label}
+    </span>
+  );
+}
+
 function NoteList({
   activeNoteId,
   attentionNoteIds,
   canRestoreNote,
+  clockMs,
   deleted = false,
   filter,
   noteStates,
@@ -5329,11 +6389,13 @@ function NoteList({
   onPreview,
   onPurge,
   onRestore,
-  onTogglePin
+  onTogglePin,
+  publicShareByNoteId
 }: {
   activeNoteId: string | null;
   attentionNoteIds: Set<string>;
   canRestoreNote: (note: DecryptedNote) => boolean;
+  clockMs: number;
   deleted?: boolean;
   filter: NoteListFilter;
   noteStates: NoteStateByNoteId;
@@ -5342,6 +6404,7 @@ function NoteList({
   onPurge: (note: DecryptedNote) => void;
   onRestore: (note: DecryptedNote) => void;
   onTogglePin: (note: DecryptedNote) => void;
+  publicShareByNoteId: Map<string, PublicNoteShareSnapshot>;
 }) {
   if (notes.length === 0) {
     const emptyMessage = deleted
@@ -5365,6 +6428,7 @@ function NoteList({
         const pinned = notePinned(note.id, noteStates);
         const canRestore = canRestoreNote(note);
         const needsAttention = attentionNoteIds.has(note.id);
+        const publicShare = deleted ? undefined : publicShareByNoteId.get(note.id);
 
         return (
           <article
@@ -5377,6 +6441,7 @@ function NoteList({
                   {note.type === "shared" ? <Share2 size={12} /> : null}
                   {note.type === "shared" ? "공유" : "개인"}
                 </span>
+                <PublicShareStatusBadge clockMs={clockMs} share={publicShare} />
                 {needsAttention && <span className="note-list-alert">새 업데이트</span>}
                 <strong>{note.title || "제목 없음"}</strong>
               </header>
@@ -5441,6 +6506,7 @@ function NoteList({
 function PersonalOverview({
   activeFolderFilter,
   attentionNoteIds,
+  clockMs,
   folders,
   feedbackError,
   feedbackStatus,
@@ -5451,10 +6517,12 @@ function PersonalOverview({
   onDeleteFolder,
   onFolderFilterChange,
   onPreview,
-  onUpdateNoteFolder
+  onUpdateNoteFolder,
+  publicShareByNoteId
 }: {
   activeFolderFilter: OverviewFolderFilter;
   attentionNoteIds: Set<string>;
+  clockMs: number;
   folders: NoteFolderSnapshot[];
   feedbackError: string | null;
   feedbackStatus: string;
@@ -5466,6 +6534,7 @@ function PersonalOverview({
   onFolderFilterChange: (filter: OverviewFolderFilter) => void;
   onPreview: (note: DecryptedNote) => void;
   onUpdateNoteFolder: (note: DecryptedNote, folderId: string | null) => void;
+  publicShareByNoteId: Map<string, PublicNoteShareSnapshot>;
 }) {
   const [folderName, setFolderName] = useState("");
   const [folderColor, setFolderColor] = useState(folderColorOptions[0]);
@@ -5644,6 +6713,7 @@ function PersonalOverview({
                 const createdAt = dateFromTimestamp(note.createdAt);
                 const pinned = notePinned(note.id, noteStates);
                 const needsAttention = attentionNoteIds.has(note.id);
+                const publicShare = publicShareByNoteId.get(note.id);
 
                 return (
                   <article className={`overview-note-card ${needsAttention ? "needs-attention" : ""}`} key={note.id}>
@@ -5651,6 +6721,7 @@ function PersonalOverview({
                       <span className="overview-note-folder" style={{ backgroundColor: note.type === "shared" ? "#3f6fb5" : folder?.color ?? "#e2e8f0" }}>
                         {note.type === "shared" ? "공유 노트" : folder?.name ?? "미분류"}
                       </span>
+                      <PublicShareStatusBadge clockMs={clockMs} share={publicShare} />
                       {needsAttention && <span className="overview-note-alert">새 업데이트</span>}
                       <strong>{note.title || "제목 없음"}</strong>
                       <span>{previewTextFromHtml(note.body) || "내용 없음"}</span>
@@ -5830,7 +6901,7 @@ function AttachmentListModal({
   );
 }
 
-function AttachmentPreviewModal({
+export function AttachmentPreviewModal({
   onClose,
   preview
 }: {
@@ -5912,7 +6983,11 @@ function AttachmentPreviewModal({
             </button>
           </div>
         </header>
-        {preview.kind === "pdf" && preview.url ? (
+        {preview.kind === "image" && preview.url ? (
+          <div className="public-image-preview-frame">
+            <img src={preview.url} alt={preview.fileName} />
+          </div>
+        ) : preview.kind === "pdf" && preview.url ? (
           <iframe
             className="pdf-preview-frame"
             referrerPolicy="no-referrer"
@@ -6669,7 +7744,7 @@ async function imageFileToResizedDataUrl(file: File) {
   return resizeImageDataUrl(dataUrl);
 }
 
-function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
+export function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
   const decodedText = decodeReadableBytes(bytes);
 
   if (extension === "json") {
@@ -6683,7 +7758,7 @@ function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
   return decodedText.slice(0, maxTextPreviewCharacters);
 }
 
-async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array) {
+export async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array) {
   if (typeof document === "undefined") {
     return "";
   }
@@ -7111,7 +8186,7 @@ interface HwpPreviewByteBudget {
   remainingBytes: number;
 }
 
-async function extractHwpPreviewHtml(bytes: Uint8Array): Promise<HwpPreviewResult> {
+export async function extractHwpPreviewHtml(bytes: Uint8Array): Promise<HwpPreviewResult> {
   try {
     const CFB = await import("cfb");
     const container = CFB.read(bytes, { type: "array" });
@@ -7150,7 +8225,7 @@ async function extractHwpPreviewHtml(bytes: Uint8Array): Promise<HwpPreviewResul
   }
 }
 
-function extractHwpxPreviewHtml(bytes: Uint8Array) {
+export function extractHwpxPreviewHtml(bytes: Uint8Array) {
   if (typeof DOMParser === "undefined") {
     return "";
   }
@@ -7188,7 +8263,7 @@ function extractHwpxPreviewHtml(bytes: Uint8Array) {
   }
 }
 
-function extractXlsxPreviewHtml(bytes: Uint8Array) {
+export function extractXlsxPreviewHtml(bytes: Uint8Array) {
   if (typeof DOMParser === "undefined") {
     return "";
   }
@@ -8354,7 +9429,7 @@ function escapeHtml(value: string) {
   });
 }
 
-function legacyBinaryPreviewMessage(extension: string) {
+export function legacyBinaryPreviewMessage(extension: string) {
   const upperExtension = extension.toUpperCase();
 
   return [

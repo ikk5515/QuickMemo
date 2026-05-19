@@ -33,6 +33,14 @@ const encryptedPayload = {
   iv: "iv"
 };
 
+const publicSharePasswordHash = {
+  version: 1,
+  algorithm: "PBKDF2-SHA-256",
+  salt: "c2FsdC1ieXRlcy1mb3ItdGVzdA==",
+  iterations: 210000,
+  hash: "aGFzaC1ieXRlcy1mb3ItdGVzdA=="
+};
+
 const userKeyPayload = {
   version: 1,
   algorithm: "AES-GCM",
@@ -176,6 +184,41 @@ function noteHistory(noteId: string, actorUid: string, overrides: Record<string,
     readerUids: ["user-a", "user-b"],
     encryptedSummary: encryptedPayload,
     encryptedSnapshot: encryptedPayload,
+    createdAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
+function publicShareDocument(sourceNoteId = "note-a", ownerUid = "user-a", overrides: Record<string, unknown> = {}) {
+  return {
+    sourceNoteId,
+    ownerUid,
+    version: 1,
+    encryptedTitle: encryptedPayload,
+    encryptedBody: encryptedPayload,
+    attachmentCount: 0,
+    ready: false,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    expiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
+    ...overrides
+  };
+}
+
+function publicShareAttachment(overrides: Record<string, unknown> = {}) {
+  const originalSize = typeof overrides.originalSize === "number" ? overrides.originalSize : 4;
+
+  return {
+    version: 1,
+    algorithm: "AES-GCM",
+    fileName: "shared-report",
+    extension: "pdf",
+    mimeType: "application/pdf",
+    originalSize,
+    encryptedData: Bytes.fromUint8Array(new Uint8Array(originalSize + 16)),
+    iv: Bytes.fromUint8Array(new Uint8Array(12)),
+    sourceAttachmentId: "attachment-a",
+    expiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
     createdAt: serverTimestamp(),
     ...overrides
   };
@@ -478,6 +521,90 @@ describeRules("firestore security rules", () => {
       )
     );
     await assertFails(getDoc(doc(testEnv.authenticatedContext("user-c").firestore(), "notes/note-a")));
+  });
+
+  it("allows owners to publish temporary public note shares while blocking expired or revoked links", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(context.firestore(), "publicNoteShares/expired-share"), {
+        ...publicShareDocument("note-a", "user-a", {
+          ready: true,
+          attachmentCount: 0,
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: new Date("2026-05-18T09:00:00.000Z")
+        })
+      });
+      await setDoc(doc(context.firestore(), "publicNoteShares/revoked-share"), {
+        ...publicShareDocument("note-a", "user-a", {
+          ready: true,
+          attachmentCount: 0,
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
+          revokedAt: new Date("2026-05-18T08:30:00.000Z"),
+          revokedBy: "user-a"
+        })
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const publicDb = testEnv.unauthenticatedContext().firestore();
+    const shareExpiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
+
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "publicNoteShares/share-a"), publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt, passwordHash: publicSharePasswordHash }))
+    );
+    await assertSucceeds(setDoc(doc(ownerDb, "publicNoteShares/share-a/attachments/attachment-a"), publicShareAttachment({ expiresAt: shareExpiresAt })));
+    await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { ready: true, attachmentCount: 1, updatedAt: serverTimestamp() }));
+
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a")));
+    await assertSucceeds(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
+    await assertSucceeds(
+      getDocs(query(collection(ownerDb, "publicNoteShares"), where("ownerUid", "==", "user-a"), where("sourceNoteId", "==", "note-a")))
+    );
+
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/expired-share")));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/revoked-share")));
+    await assertFails(setDoc(doc(otherDb, "publicNoteShares/forged-share"), publicShareDocument("note-a", "user-b")));
+
+    await assertFails(updateDoc(doc(otherDb, "publicNoteShares/share-a"), { passwordHash: publicSharePasswordHash, updatedAt: serverTimestamp() }));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-a"), {
+        encryptedTitle: { ...encryptedPayload, cipherText: "new-title" },
+        encryptedBody: { ...encryptedPayload, cipherText: "new-body" },
+        passwordHash: { ...publicSharePasswordHash, hash: "bmV3LWhhc2gtYnl0ZXMtZm9yLXRlc3Q=" },
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a")));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-a"), {
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        passwordHash: deleteField(),
+        updatedAt: serverTimestamp()
+      })
+    );
+
+    await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { revokedAt: serverTimestamp(), revokedBy: "user-a", updatedAt: serverTimestamp() }));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a")));
+    await assertFails(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
   });
 
   it("treats legacy active notes without deletion metadata as readable and normalizable", async () => {

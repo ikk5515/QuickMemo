@@ -43,6 +43,14 @@ export interface WrappedNoteKey {
   wrappedKey: string;
 }
 
+export interface PublicSharePasswordHash {
+  version: 1;
+  algorithm: "PBKDF2-SHA-256";
+  salt: string;
+  iterations: number;
+  hash: string;
+}
+
 export interface UserKeyDocument {
   uid: string;
   publicKeyJwk: JsonWebKey;
@@ -96,6 +104,36 @@ export interface NoteAttachmentDocument {
   encryptedData: Bytes;
   iv: Bytes;
   uploadedBy: string;
+  createdAt?: Timestamp;
+}
+
+export interface PublicNoteShareDocument {
+  sourceNoteId: string;
+  ownerUid: string;
+  version: 1;
+  encryptedTitle: EncryptedPayload;
+  encryptedBody: EncryptedPayload;
+  attachmentCount: number;
+  passwordHash?: PublicSharePasswordHash;
+  ready: boolean;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+  expiresAt: Timestamp;
+  revokedAt?: Timestamp;
+  revokedBy?: string;
+}
+
+export interface PublicNoteShareAttachmentDocument {
+  version: 1;
+  algorithm: "AES-GCM";
+  fileName: string;
+  extension: string;
+  mimeType: string;
+  originalSize: number;
+  encryptedData: Bytes;
+  iv: Bytes;
+  sourceAttachmentId?: string;
+  expiresAt: Timestamp;
   createdAt?: Timestamp;
 }
 

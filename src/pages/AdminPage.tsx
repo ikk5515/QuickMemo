@@ -32,6 +32,7 @@ import type { NoteKind, UserProfile } from "../types";
 
 const palette = ["#2f7d70", "#c75146", "#7c5b9e", "#b9822f", "#3f6fb5", "#65707a"];
 const AUTO_SAVE_DELAY_MS = 550;
+const adminNotePreviewMaxCharacters = 240;
 
 interface DraftUser {
   displayName: string;
@@ -61,9 +62,20 @@ interface AdminNoteView extends NoteSnapshot {
   title: string;
   bodyHtml: string;
   bodyPreview: string;
+  bodySearchText: string;
   fontSize: number;
   canReadContent: boolean;
   unavailableReason: string | null;
+}
+
+function adminNotePreviewText(value: string) {
+  const normalizedValue = value.replace(/\s+/g, " ").trim();
+
+  if (normalizedValue.length <= adminNotePreviewMaxCharacters) {
+    return normalizedValue;
+  }
+
+  return `${normalizedValue.slice(0, adminNotePreviewMaxCharacters).trimEnd()}...`;
 }
 
 function timestampToDate(value: Timestamp | Date | null | undefined) {
@@ -300,6 +312,7 @@ function AdminDashboard() {
             title: "암호화된 노트",
             bodyHtml: "",
             bodyPreview: lockedReason,
+            bodySearchText: lockedReason,
             fontSize: 17,
             canReadContent: false,
             unavailableReason: lockedReason
@@ -323,12 +336,14 @@ function AdminDashboard() {
             ]);
             const parsedBody = parseEditorContent(body);
             const previewText = previewTextFromHtml(body);
+            const emptyPreviewText = /<img\b/i.test(parsedBody.html) ? "이미지가 포함된 노트" : "본문 없음";
 
             return {
               ...note,
               title,
               bodyHtml: parsedBody.html,
-              bodyPreview: previewText || (/<img\b/i.test(parsedBody.html) ? "이미지가 포함된 노트" : "본문 없음"),
+              bodyPreview: adminNotePreviewText(previewText) || emptyPreviewText,
+              bodySearchText: previewText || emptyPreviewText,
               fontSize: parsedBody.fontSize,
               canReadContent: true,
               unavailableReason: null
@@ -338,6 +353,7 @@ function AdminDashboard() {
               ...fallback,
               title: "복호화할 수 없는 노트",
               bodyPreview: "키가 변경되었거나 이 계정으로 열 수 없는 노트입니다.",
+              bodySearchText: "키가 변경되었거나 이 계정으로 열 수 없는 노트입니다.",
               unavailableReason: "키가 변경되었거나 이 계정으로 열 수 없는 노트입니다."
             };
           }
@@ -460,7 +476,7 @@ function AdminDashboard() {
         .map((uid) => userMap.get(uid)?.displayName ?? uid)
         .join(" ");
 
-      return [note.title, note.bodyPreview, ownerName, participants]
+      return [note.title, note.bodySearchText, ownerName, participants]
         .join(" ")
         .toLowerCase()
         .includes(searchText);

@@ -42,6 +42,10 @@ service cloud.firestore {
       return /databases/$(database)/documents/noteFolders/$(folderId);
     }
 
+    function publicSharePath(shareId) {
+      return /databases/$(database)/documents/publicNoteShares/$(shareId);
+    }
+
     function activeSignedInUser() {
       return signedIn()
         && exists(userPath(request.auth.uid))
@@ -527,6 +531,128 @@ service cloud.firestore {
       && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
     }
 
+    function validPublicShare(data) {
+      return data.keys().hasOnly([
+        "sourceNoteId",
+        "ownerUid",
+        "version",
+        "encryptedTitle",
+        "encryptedBody",
+        "attachmentCount",
+        "passwordHash",
+        "ready",
+        "createdAt",
+        "updatedAt",
+        "expiresAt",
+        "revokedAt",
+        "revokedBy"
+      ])
+      && data.sourceNoteId is string
+      && data.sourceNoteId.size() > 0
+      && data.sourceNoteId.size() <= 160
+      && data.ownerUid is string
+      && data.ownerUid.size() > 0
+      && data.version == 1
+      && encryptedPayload(data.encryptedTitle)
+      && encryptedPayload(data.encryptedBody)
+      && data.attachmentCount is int
+      && data.attachmentCount >= 0
+      && data.attachmentCount <= 100
+      && validPublicSharePassword(data)
+      && data.ready is bool
+      && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
+      && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp)
+      && data.expiresAt is timestamp
+      && (
+        !data.keys().hasAny(["revokedAt", "revokedBy"])
+        || (
+          data.keys().hasAll(["revokedAt", "revokedBy"])
+          && data.revokedAt is timestamp
+          && data.revokedBy is string
+          && data.revokedBy.size() > 0
+        )
+      );
+    }
+
+    function publicSharePasswordHash(data) {
+      return data.keys().hasAny(["passwordHash"]) ? data.passwordHash : null;
+    }
+
+    function validPublicSharePassword(data) {
+      return !data.keys().hasAny(["passwordHash"])
+        || validPublicSharePasswordHash(data.passwordHash);
+    }
+
+    function validPublicSharePasswordHash(passwordHash) {
+      return passwordHash is map
+        && passwordHash.keys().hasOnly(["version", "algorithm", "salt", "iterations", "hash"])
+        && passwordHash.version == 1
+        && passwordHash.algorithm == "PBKDF2-SHA-256"
+        && passwordHash.salt is string
+        && passwordHash.salt.size() >= 8
+        && passwordHash.salt.size() <= 256
+        && passwordHash.iterations is int
+        && passwordHash.iterations >= 100000
+        && passwordHash.iterations <= 1000000
+        && passwordHash.hash is string
+        && passwordHash.hash.size() >= 8
+        && passwordHash.hash.size() <= 256;
+    }
+
+    function validPublicShareAttachment(data) {
+      return data.keys().hasOnly([
+        "version",
+        "algorithm",
+        "fileName",
+        "extension",
+        "mimeType",
+        "originalSize",
+        "encryptedData",
+        "iv",
+        "sourceAttachmentId",
+        "expiresAt",
+        "createdAt"
+      ])
+      && data.version == 1
+      && data.algorithm == "AES-GCM"
+      && data.fileName is string
+      && data.fileName.size() > 0
+      && data.fileName.size() <= 100
+      && data.extension in [
+        "pdf",
+        "txt",
+        "md",
+        "csv",
+        "json",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "hwp",
+        "hwpx",
+        "png",
+        "jpg",
+        "jpeg",
+        "webp",
+        "gif"
+      ]
+      && data.mimeType is string
+      && data.mimeType.size() <= 120
+      && data.originalSize is int
+      && data.originalSize > 0
+      && data.originalSize <= 1000000
+      && data.encryptedData is bytes
+      && data.encryptedData.size() == data.originalSize + 16
+      && data.encryptedData.size() <= 1000016
+      && data.iv is bytes
+      && data.iv.size() == 12
+      && (!data.keys().hasAny(["sourceAttachmentId"]) || (data.sourceAttachmentId is string && data.sourceAttachmentId.size() <= 160))
+      && data.expiresAt is timestamp
+      && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
+    }
+
     function rosterMatchesUser(data, uid) {
       return getAfter(userPath(uid)).data.displayName == data.displayName
         && getAfter(userPath(uid)).data.avatarText == data.avatarText
@@ -848,6 +974,110 @@ service cloud.firestore {
         );
     }
 
+    function publicShareNotRevoked(data) {
+      return !data.keys().hasAny(["revokedAt", "revokedBy"]);
+    }
+
+    function publicShareActive(data) {
+      return data.ready == true
+        && publicShareNotRevoked(data)
+        && data.expiresAt > request.time;
+    }
+
+    function publicShareOwner(data) {
+      return activeSignedInUser() && data.ownerUid == request.auth.uid;
+    }
+
+    function publicShareCreate(data) {
+      return activeSignedInUser()
+        && validPublicShare(data)
+        && data.ownerUid == request.auth.uid
+        && data.ready == false
+        && data.attachmentCount == 0
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.expiresAt > request.time
+        && data.expiresAt <= request.time + duration.value(7, "d")
+        && publicShareNotRevoked(data)
+        && exists(notePath(data.sourceNoteId))
+        && get(notePath(data.sourceNoteId)).data.ownerUid == request.auth.uid
+        && canReadNote(get(notePath(data.sourceNoteId)).data);
+    }
+
+    function publicShareActivateUpdate(data) {
+      return publicShareOwner(resource.data)
+        && publicShareNotRevoked(resource.data)
+        && publicShareNotRevoked(data)
+        && resource.data.ready == false
+        && data.ready == true
+        && data.updatedAt == request.time
+        && data.sourceNoteId == resource.data.sourceNoteId
+        && data.ownerUid == resource.data.ownerUid
+        && data.version == resource.data.version
+        && data.encryptedTitle == resource.data.encryptedTitle
+        && data.encryptedBody == resource.data.encryptedBody
+        && data.createdAt == resource.data.createdAt
+        && data.expiresAt == resource.data.expiresAt
+        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data)
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["ready", "attachmentCount", "updatedAt"]);
+    }
+
+    function publicShareRevokeUpdate(data) {
+      return publicShareOwner(resource.data)
+        && publicShareNotRevoked(resource.data)
+        && data.revokedAt == request.time
+        && data.revokedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && data.sourceNoteId == resource.data.sourceNoteId
+        && data.ownerUid == resource.data.ownerUid
+        && data.version == resource.data.version
+        && data.encryptedTitle == resource.data.encryptedTitle
+        && data.encryptedBody == resource.data.encryptedBody
+        && data.attachmentCount == resource.data.attachmentCount
+        && data.ready == resource.data.ready
+        && data.createdAt == resource.data.createdAt
+        && data.expiresAt == resource.data.expiresAt
+        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data)
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["revokedAt", "revokedBy", "updatedAt"]);
+    }
+
+    function publicSharePasswordUpdate(data) {
+      return publicShareOwner(resource.data)
+        && publicShareNotRevoked(resource.data)
+        && publicShareNotRevoked(data)
+        && data.updatedAt == request.time
+        && data.sourceNoteId == resource.data.sourceNoteId
+        && data.ownerUid == resource.data.ownerUid
+        && data.version == resource.data.version
+        && data.encryptedTitle == resource.data.encryptedTitle
+        && data.encryptedBody == resource.data.encryptedBody
+        && data.attachmentCount == resource.data.attachmentCount
+        && data.ready == resource.data.ready
+        && data.createdAt == resource.data.createdAt
+        && data.expiresAt == resource.data.expiresAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["passwordHash", "updatedAt"]);
+    }
+
+    function publicShareContentUpdate(data) {
+      return publicShareOwner(resource.data)
+        && publicShareNotRevoked(resource.data)
+        && publicShareNotRevoked(data)
+        && data.updatedAt == request.time
+        && data.sourceNoteId == resource.data.sourceNoteId
+        && data.ownerUid == resource.data.ownerUid
+        && data.version == resource.data.version
+        && data.ready == resource.data.ready
+        && data.createdAt == resource.data.createdAt
+        && data.expiresAt == resource.data.expiresAt
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "encryptedTitle",
+          "encryptedBody",
+          "attachmentCount",
+          "passwordHash",
+          "updatedAt"
+        ]);
+    }
+
     match /publicLoginRoster/{uid} {
       allow read: if true;
       allow create: if validRoster(request.resource.data, uid)
@@ -1009,6 +1239,38 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if exists(notePath(noteId))
           && canDeleteAttachment(get(notePath(noteId)).data, resource.data);
+      }
+    }
+
+    match /publicNoteShares/{shareId} {
+      allow get: if publicShareActive(resource.data) || publicShareOwner(resource.data);
+      allow list: if publicShareOwner(resource.data);
+      allow create: if publicShareCreate(request.resource.data);
+      allow update: if validPublicShare(request.resource.data)
+        && (
+          publicShareActivateUpdate(request.resource.data)
+          || publicShareRevokeUpdate(request.resource.data)
+          || publicSharePasswordUpdate(request.resource.data)
+          || publicShareContentUpdate(request.resource.data)
+        );
+      allow delete: if publicShareOwner(resource.data);
+
+      match /attachments/{attachmentId} {
+        allow read: if exists(publicSharePath(shareId))
+          && (
+            publicShareActive(get(publicSharePath(shareId)).data)
+            || publicShareOwner(get(publicSharePath(shareId)).data)
+          );
+        allow create: if exists(publicSharePath(shareId))
+          && publicShareOwner(get(publicSharePath(shareId)).data)
+          && publicShareNotRevoked(get(publicSharePath(shareId)).data)
+          && get(publicSharePath(shareId)).data.expiresAt > request.time
+          && request.resource.data.expiresAt == get(publicSharePath(shareId)).data.expiresAt
+          && validPublicShareAttachment(request.resource.data)
+          && request.resource.data.createdAt == request.time;
+        allow update: if false;
+        allow delete: if exists(publicSharePath(shareId))
+          && publicShareOwner(get(publicSharePath(shareId)).data);
       }
     }
 

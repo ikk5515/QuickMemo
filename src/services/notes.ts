@@ -341,6 +341,16 @@ export function subscribeNoteAttachments(
   );
 }
 
+export async function getNoteAttachments(noteId: string) {
+  const attachmentsQuery = query(collection(db, "notes", noteId, "attachments"), orderBy("createdAt", "desc"));
+  const snapshot = await getDocs(attachmentsQuery);
+
+  return snapshot.docs.map((document) => ({
+    id: document.id,
+    ...(document.data() as NoteAttachmentDocument)
+  })) satisfies NoteAttachmentSnapshot[];
+}
+
 export async function createEncryptedNote(input: SaveNoteInput) {
   const { historySnapshot, historySummary, ...noteInput } = input;
   const noteRef = doc(collection(db, "notes"));
