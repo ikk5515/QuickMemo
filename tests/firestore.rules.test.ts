@@ -643,6 +643,18 @@ describeRules("firestore security rules", () => {
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "mismatched-image", mimeType: "image/jpeg" })
       )
     );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "publicNoteShares/share-a/attachments/pdf-html"),
+        publicShareAttachment({ expiresAt: shareExpiresAt, extension: "pdf", fileName: "unsafe-pdf", mimeType: "text/html" })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "publicNoteShares/share-a/attachments/pdf-svg"),
+        publicShareAttachment({ expiresAt: shareExpiresAt, extension: "pdf", fileName: "unsafe-pdf", mimeType: "image/svg+xml" })
+      )
+    );
 
     await assertFails(updateDoc(doc(otherDb, "publicNoteShares/share-a"), { passwordHash: publicSharePasswordHash, updatedAt: serverTimestamp() }));
     await assertSucceeds(

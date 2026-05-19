@@ -23,4 +23,16 @@ describe("PublicSharePage security controls", () => {
     expect(imageAttachmentBranch).not.toContain("<a");
     expect(imageAttachmentBranch).not.toContain("target=\"_blank\"");
   });
+
+  it("routes public PDF previews through byte-based canvas rendering instead of blob iframes", () => {
+    const pdfPreviewBranch =
+      publicSharePageSource.match(/if \(attachment\.extension === "pdf"\) \{[\s\S]*?\n {4}\}/)?.[0] ?? "";
+
+    expect(pdfPreviewBranch).toContain("bytes: attachment.bytes");
+    expect(pdfPreviewBranch).toContain("kind: \"pdf\"");
+    expect(pdfPreviewBranch).toContain("url: attachment.downloadUrl");
+    expect(publicSharePageSource).not.toContain("<iframe");
+    expect(publicSharePageSource).not.toContain("src={attachment.downloadUrl}");
+    expect(publicSharePageSource).not.toContain("src={attachment.url}");
+  });
 });
