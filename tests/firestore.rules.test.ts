@@ -672,6 +672,24 @@ describeRules("firestore security rules", () => {
     );
     await assertSucceeds(
       updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: "2026-01-01",
+        startDate: "2026-01-01",
+        endDate: "2026-12-31",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: "2028-02-29",
+        startDate: "2028-02-29",
+        endDate: "2028-02-29",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
         dueDate: null,
         dueTimeMinutes: null,
         startDate: null,
@@ -684,8 +702,32 @@ describeRules("firestore security rules", () => {
     );
     await assertFails(
       updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: "2026-99-99",
+        startDate: "2026-99-99",
+        endDate: "2026-99-99",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: "2026-02-29",
+        startDate: "2026-02-29",
+        endDate: "2026-02-29",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
         dueDate: "05/19/2026",
         startDate: "05/19/2026",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: "2026-12-31",
+        startDate: "2026-12-31",
+        endDate: "2027-01-01",
         updatedAt: serverTimestamp()
       })
     );
