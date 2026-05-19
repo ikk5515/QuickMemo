@@ -32,15 +32,15 @@ function fieldOverride(collectionGroup: string, fieldPath: string) {
 }
 
 describe("Firestore index retention policies", () => {
-  it("keeps no-billing server cleanup indexes for temporary public shares and copied attachments", () => {
+  it("keeps TTL safety nets and cleanup indexes for temporary public shares and copied attachments", () => {
     expect(fieldOverride("publicNoteShares", "expiresAt")).toMatchObject({
+      ttl: true,
       indexes: [{ order: "ASCENDING", queryScope: "COLLECTION" }]
     });
     expect(fieldOverride("attachments", "expiresAt")).toMatchObject({
+      ttl: true,
       indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
     });
-    expect(fieldOverride("publicNoteShares", "expiresAt")?.ttl).toBeUndefined();
-    expect(fieldOverride("attachments", "expiresAt")?.ttl).toBeUndefined();
     expect(fieldOverride("publicShareCleanupQueue", "expiresAt")).toBeUndefined();
   });
 
