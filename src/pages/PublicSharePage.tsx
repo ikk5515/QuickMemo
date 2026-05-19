@@ -262,7 +262,7 @@ export default function PublicSharePage() {
     }
 
     if (attachment.extension === "pdf") {
-      setAttachmentPreview({ fileName, kind: "pdf", label: "PDF 미리보기", url: attachment.url });
+      setAttachmentPreview({ bytes: attachment.bytes, fileName, kind: "pdf", label: "PDF 미리보기", url: attachment.url });
       return;
     }
 
