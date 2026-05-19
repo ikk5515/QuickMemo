@@ -12,7 +12,6 @@ import {
   query,
   serverTimestamp,
   setDoc,
-  Timestamp,
   updateDoc,
   where,
   writeBatch
@@ -58,7 +57,6 @@ export interface SaveNoteInput {
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
   folderId?: string | null;
-  dueAt?: Timestamp | null;
   historySummary?: EncryptedPayload;
   historySnapshot?: EncryptedPayload;
 }
@@ -362,13 +360,12 @@ export async function createEncryptedNote(input: SaveNoteInput) {
     participantUids,
     folderId: input.type === "personal" ? input.folderId ?? null : null,
     createdAt: serverTimestamp(),
-    dueAt: input.dueAt ?? null,
     isDeleted: false,
     updatedAt: serverTimestamp(),
     savedAt: serverTimestamp(),
     updatedBy: input.ownerUid
   });
-  setNoteHistory(batch, noteRef.id, input.ownerUid, "create", ["title", "body", "dueAt"], participantUids, historySummary, historySnapshot);
+  setNoteHistory(batch, noteRef.id, input.ownerUid, "create", ["title", "body"], participantUids, historySummary, historySnapshot);
 
   await batch.commit();
   return noteRef;
@@ -430,20 +427,6 @@ export async function updateNoteFolder(noteId: string, uid: string, folderId: st
     updatedAt: serverTimestamp(),
     updatedBy: uid
   });
-}
-
-export async function updateNoteDeadline(noteId: string, uid: string, dueAt: Timestamp | null, readerUids: string[]) {
-  const batch = writeBatch(db);
-  const noteRef = doc(db, "notes", noteId);
-
-  batch.update(noteRef, {
-    dueAt,
-    isDeleted: false,
-    updatedAt: serverTimestamp(),
-    updatedBy: uid
-  });
-  setNoteHistory(batch, noteId, uid, "deadline", ["dueAt"], readerUids);
-  await batch.commit();
 }
 
 export async function setNotePinned(noteId: string, uid: string, isPinned: boolean) {

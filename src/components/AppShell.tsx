@@ -1,13 +1,26 @@
-import { KeyRound, LogOut, NotebookPen, Shield, X } from "lucide-react";
+import { CalendarDays, KeyRound, LogOut, NotebookPen, Settings, Shield, X } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { hasFirebaseConfig } from "../lib/firebase";
+import { saveUserPreferences, subscribeUserPreferences } from "../services/userPreferences";
+import type { UserPreferencesDocument } from "../types";
 
 export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
   const { changePassword, profile, signOut } = useAuth();
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [preferences, setPreferences] = useState<UserPreferencesDocument | null>(null);
+
+  useEffect(() => {
+    if (!profile) {
+      setPreferences(null);
+      return undefined;
+    }
+
+    return subscribeUserPreferences(profile.uid, setPreferences);
+  }, [profile]);
 
   return (
     <div className="app-frame">
@@ -17,7 +30,7 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
         </div>
       )}
       <header className="topbar">
-        <Link className="brand" to="/app" onClick={onNavigateHome}>
+        <Link className="brand" to="/home" onClick={onNavigateHome}>
           <span className="brand-mark">Q</span>
           <span>QuickMemo</span>
         </Link>
@@ -25,6 +38,10 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           <NavLink to="/app" onClick={onNavigateHome}>
             <NotebookPen size={18} />
             노트
+          </NavLink>
+          <NavLink to="/schedule">
+            <CalendarDays size={18} />
+            일정관리
           </NavLink>
           {profile?.isAdmin && (
             <NavLink to="/admin">
@@ -49,6 +66,11 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
               <span>비밀번호 변경</span>
             </button>
           )}
+          {profile && (
+            <button className="icon-button" type="button" onClick={() => setSettingsModalOpen(true)} aria-label="설정">
+              <Settings size={18} />
+            </button>
+          )}
           <button className="icon-button" type="button" onClick={() => void signOut()} aria-label="로그아웃">
             <LogOut size={18} />
           </button>
@@ -61,6 +83,102 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           onClose={() => setPasswordModalOpen(false)}
         />
       )}
+      {settingsModalOpen && profile && (
+        <SettingsModal
+          preferences={preferences}
+          onClose={() => setSettingsModalOpen(false)}
+          onSave={(nextPreferences) => saveUserPreferences(profile.uid, nextPreferences)}
+        />
+      )}
+    </div>
+  );
+}
+
+function SettingsModal({
+  onClose,
+  onSave,
+  preferences
+}: {
+  onClose: () => void;
+  onSave: (preferences: Pick<UserPreferencesDocument, "defaultHome" | "scheduleDefaultView">) => Promise<void>;
+  preferences: UserPreferencesDocument | null;
+}) {
+  const [defaultHome, setDefaultHome] = useState<UserPreferencesDocument["defaultHome"]>(preferences?.defaultHome ?? "notes");
+  const [scheduleDefaultView, setScheduleDefaultView] = useState<UserPreferencesDocument["scheduleDefaultView"]>(
+    preferences?.scheduleDefaultView ?? "todo"
+  );
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDefaultHome(preferences?.defaultHome ?? "notes");
+    setScheduleDefaultView(preferences?.scheduleDefaultView ?? "todo");
+  }, [preferences]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  async function submitSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      await onSave({ defaultHome, scheduleDefaultView });
+      setMessage("설정을 저장했습니다.");
+    } catch {
+      setError("설정을 저장하지 못했습니다.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="password-modal app-settings-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <button className="icon-button password-change-close" type="button" onClick={onClose} aria-label="설정 닫기">
+          <X size={16} />
+        </button>
+        <h2>설정</h2>
+        <form className="form-grid compact" onSubmit={(event) => void submitSettings(event)}>
+          <label>
+            처음 들어갈 화면
+            <select
+              onChange={(event) => setDefaultHome(event.target.value as UserPreferencesDocument["defaultHome"])}
+              value={defaultHome}
+            >
+              <option value="notes">노트</option>
+              <option value="schedule">일정관리</option>
+            </select>
+          </label>
+          <label>
+            일정관리 기본 탭
+            <select
+              onChange={(event) => setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"])}
+              value={scheduleDefaultView}
+            >
+              <option value="todo">할 일</option>
+              <option value="calendar">달력</option>
+              <option value="matrix">아이젠하워</option>
+            </select>
+          </label>
+          {error && <p className="form-error">{error}</p>}
+          {message && <p className="form-success">{message}</p>}
+          <button disabled={busy} type="submit">
+            {busy ? "저장 중..." : "저장"}
+          </button>
+        </form>
+      </section>
     </div>
   );
 }

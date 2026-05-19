@@ -23,6 +23,17 @@ export interface UserProfile extends PublicRosterUser {
   needsKeyRecovery?: boolean;
 }
 
+export type DefaultHomeView = "notes" | "schedule";
+export type ScheduleView = "todo" | "calendar" | "matrix";
+
+export interface UserPreferencesDocument {
+  uid: string;
+  defaultHome: DefaultHomeView;
+  scheduleDefaultView: ScheduleView;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+}
+
 export interface EncryptedPayload {
   version: 1;
   algorithm: "AES-GCM";
@@ -159,7 +170,7 @@ export interface NoteUserStateDocument {
   updatedAt?: Timestamp;
 }
 
-export type NoteHistoryAction = "create" | "content" | "deadline" | "share" | "delete" | "restore";
+export type NoteHistoryAction = "create" | "content" | "share" | "delete" | "restore";
 
 export interface NoteHistoryDocument {
   noteId: string;
@@ -177,6 +188,46 @@ export interface ActiveNoteDocument {
   noteId: string | null;
   updatedByClientId: string;
   updatedAt?: Timestamp;
+}
+
+export type ScheduleTaskStatus = "active" | "completed";
+
+export interface ScheduleChecklistItem {
+  id: string;
+  text: string;
+  checked: boolean;
+}
+
+export interface ScheduleTaskDetails {
+  description: string;
+  checklist: ScheduleChecklistItem[];
+}
+
+export interface ScheduleTaskDocument {
+  ownerUid: string;
+  status: ScheduleTaskStatus;
+  dueDate: string | null;
+  dueTimeMinutes: number | null;
+  startDate?: string | null;
+  endDate?: string | null;
+  startTimeMinutes?: number | null;
+  endTimeMinutes?: number | null;
+  isImportant: boolean;
+  isUrgent: boolean;
+  encryptedTitle: EncryptedPayload;
+  encryptedDetails: EncryptedPayload;
+  wrappedKeys: Record<string, WrappedNoteKey>;
+  createdBy: string;
+  updatedBy: string;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+  completedAt?: Timestamp | null;
+}
+
+export interface DecryptedScheduleTask extends ScheduleTaskDocument {
+  id: string;
+  title: string;
+  details: ScheduleTaskDetails;
 }
 
 export interface UserKeyBundle {

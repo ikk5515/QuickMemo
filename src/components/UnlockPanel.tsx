@@ -27,7 +27,7 @@ export function UnlockPanel() {
     <section className="unlock-panel">
       <KeyRound size={34} />
       <h1>{profile?.displayName}님의 암호화 키를 열어주세요</h1>
-      <p>탭 세션이 만료되었거나 1시간 동안 활동이 없으면 노트 복호화를 위해 비밀번호가 한 번 더 필요합니다.</p>
+      <p>탭 세션이 만료되었거나 1시간 동안 활동이 없으면 노트와 일정 복호화를 위해 비밀번호가 한 번 더 필요합니다.</p>
       <form onSubmit={handleSubmit} className="inline-form">
         {profile && (
           <input

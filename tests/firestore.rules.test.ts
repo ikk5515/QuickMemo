@@ -105,6 +105,43 @@ function userKey(uid: string) {
   };
 }
 
+function userPreferences(uid: string, overrides: Record<string, unknown> = {}) {
+  return {
+    uid,
+    defaultHome: "notes",
+    scheduleDefaultView: "todo",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
+function scheduleTask(uid: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ownerUid: uid,
+    status: "active",
+    dueDate: "2026-05-19",
+    dueTimeMinutes: 960,
+    startDate: "2026-05-19",
+    endDate: "2026-05-19",
+    startTimeMinutes: 960,
+    endTimeMinutes: null,
+    isImportant: true,
+    isUrgent: false,
+    encryptedTitle: encryptedPayload,
+    encryptedDetails: encryptedPayload,
+    wrappedKeys: {
+      [uid]: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-key" }
+    },
+    createdBy: uid,
+    updatedBy: uid,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    completedAt: null,
+    ...overrides
+  };
+}
+
 function quickLoginKey(uid: string, quickKey: number) {
   return {
     uid,
@@ -543,6 +580,134 @@ describeRules("firestore security rules", () => {
         updatedAt: serverTimestamp()
       })
     );
+  });
+
+  it("keeps user preferences owner-only with strict values", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "userPreferences/user-a"), userPreferences("user-a", { defaultHome: "schedule", scheduleDefaultView: "matrix" }))
+    );
+    await assertSucceeds(getDoc(doc(ownerDb, "userPreferences/user-a")));
+    await assertFails(getDoc(doc(otherDb, "userPreferences/user-a")));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "calendar", updatedAt: serverTimestamp() }));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "userPreferences/user-a"), {
+        uid: "user-a",
+        defaultHome: "notes",
+        scheduleDefaultView: "todo",
+        updatedAt: serverTimestamp()
+      });
+    });
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+        defaultHome: "schedule",
+        scheduleDefaultView: "matrix",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { defaultHome: "admin", updatedAt: serverTimestamp() }));
+    await assertFails(setDoc(doc(otherDb, "userPreferences/user-a"), userPreferences("user-a")));
+  });
+
+  it("keeps personal schedule tasks owner-only and blocks forged attribution", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertSucceeds(setDoc(doc(ownerDb, "scheduleTasks/task-a"), scheduleTask("user-a")));
+    await assertSucceeds(getDoc(doc(ownerDb, "scheduleTasks/task-a")));
+    await assertSucceeds(
+      getDocs(query(collection(ownerDb, "scheduleTasks"), where("ownerUid", "==", "user-a")))
+    );
+    const legacyTask = scheduleTask("user-a") as Record<string, unknown>;
+    delete legacyTask.startDate;
+    delete legacyTask.endDate;
+    delete legacyTask.startTimeMinutes;
+    delete legacyTask.endTimeMinutes;
+    await assertSucceeds(setDoc(doc(ownerDb, "scheduleTasks/task-legacy"), legacyTask));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-legacy"), {
+        status: "completed",
+        completedAt: serverTimestamp(),
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(getDoc(doc(otherDb, "scheduleTasks/task-a")));
+    await assertFails(setDoc(doc(otherDb, "scheduleTasks/forged-owner"), scheduleTask("user-a")));
+    await assertFails(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), { ownerUid: "user-b", updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), { updatedBy: "user-b", updatedAt: serverTimestamp() }));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        status: "completed",
+        completedAt: serverTimestamp(),
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: "2026-05-15",
+        dueTimeMinutes: 540,
+        startDate: "2026-05-15",
+        endDate: "2026-05-20",
+        startTimeMinutes: 540,
+        endTimeMinutes: 600,
+        isUrgent: true,
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: null,
+        dueTimeMinutes: null,
+        startDate: null,
+        endDate: null,
+        startTimeMinutes: null,
+        endTimeMinutes: null,
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: "05/19/2026",
+        startDate: "05/19/2026",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: "2026-05-20",
+        startDate: "2026-05-20",
+        endDate: "2026-05-15",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueTimeMinutes: 600,
+        startTimeMinutes: 600,
+        endTimeMinutes: 540,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), { dueTimeMinutes: 1440, startTimeMinutes: 1440, updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), { status: "archived", updatedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(doc(otherDb, "scheduleTasks/task-a")));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "scheduleTasks/task-a")));
   });
 
   it("allows participants to read notes and blocks outsiders", async () => {
@@ -1246,11 +1411,10 @@ describeRules("firestore security rules", () => {
     );
   });
 
-  it("allows participants to update note deadlines and blocks outsiders", async () => {
+  it("blocks note deadline updates", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
-      await setDoc(doc(context.firestore(), "users/user-c"), userProfile("user-c"));
       await setDoc(doc(context.firestore(), "notes/note-a"), {
         type: "shared",
         ownerUid: "user-a",
@@ -1267,24 +1431,17 @@ describeRules("firestore security rules", () => {
     });
 
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
-    const outsiderDb = testEnv.authenticatedContext("user-c").firestore();
 
-    await assertSucceeds(
+    await assertFails(
       updateDoc(doc(participantDb, "notes/note-a"), {
         dueAt: new Date("2026-05-20T10:00:00.000Z"),
         updatedBy: "user-b"
       })
     );
-    await assertSucceeds(
+    await assertFails(
       updateDoc(doc(participantDb, "notes/note-a"), {
         dueAt: null,
         updatedBy: "user-b"
-      })
-    );
-    await assertFails(
-      updateDoc(doc(outsiderDb, "notes/note-a"), {
-        dueAt: new Date("2026-05-21T10:00:00.000Z"),
-        updatedBy: "user-c"
       })
     );
   });
@@ -1594,7 +1751,6 @@ describeRules("firestore security rules", () => {
         "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
       },
       createdAt: serverTimestamp(),
-      dueAt: null,
       isDeleted: false,
       updatedAt: serverTimestamp(),
       savedAt: serverTimestamp(),
@@ -1602,7 +1758,7 @@ describeRules("firestore security rules", () => {
     });
     createBatch.set(
       doc(ownerDb, "notes/note-created/history/create-a"),
-      noteHistory("note-created", "user-a", { action: "create", changedFields: ["title", "body", "dueAt"] })
+      noteHistory("note-created", "user-a", { action: "create", changedFields: ["title", "body"] })
     );
     await assertSucceeds(createBatch.commit());
 

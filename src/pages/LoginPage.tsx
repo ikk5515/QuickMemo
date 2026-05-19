@@ -64,7 +64,7 @@ export default function LoginPage() {
   const sortedRoster = useMemo(() => roster.filter((user) => user.isActive), [roster]);
 
   if (firebaseUser && profile) {
-    return <Navigate to="/app" replace />;
+    return <Navigate to="/home" replace />;
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -79,7 +79,7 @@ export default function LoginPage() {
 
     try {
       await loginRosterUser(selectedUser, password);
-      navigate("/app", { replace: true });
+      navigate("/home", { replace: true });
     } catch (loginError) {
       setError(firebaseAuthErrorMessage(loginError, "비밀번호를 확인해주세요."));
     } finally {

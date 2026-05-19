@@ -135,7 +135,7 @@ describe("NotesPage security controls", () => {
 
   it("rejects future remote cursor timestamps when checking collaborator freshness", () => {
     const cursorFreshnessHelper =
-      notesPageSource.match(/function freshRemoteCursorTimestamp[\s\S]*?function timestampsEqual/)?.[0] ?? "";
+      notesPageSource.match(/function freshRemoteCursorTimestamp[\s\S]*?function nextParticipantList/)?.[0] ?? "";
     const cursorFilter =
       notesPageSource.match(/const remoteEditorCursors = useMemo[\s\S]*?\.map\(\(state\) =>/)?.[0] ?? "";
 

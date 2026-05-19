@@ -108,27 +108,6 @@ function formatAdminDate(timestamp: Timestamp | Date | null | undefined, emptyTe
   }).format(date);
 }
 
-function startOfLocalDay(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-}
-
-function deadlineDDay(timestamp: Timestamp | Date | null | undefined) {
-  const date = timestampToDate(timestamp);
-
-  if (!date) {
-    return null;
-  }
-
-  const dayMs = 24 * 60 * 60 * 1000;
-  const diffDays = Math.round((startOfLocalDay(date) - startOfLocalDay(new Date())) / dayMs);
-
-  if (diffDays === 0) {
-    return "D-Day";
-  }
-
-  return diffDays > 0 ? `D-${diffDays}` : `D+${Math.abs(diffDays)}`;
-}
-
 function normalizedShareTargets(ownerUid: string, targetUids: string[] = []) {
   return Array.from(new Set([ownerUid, ...targetUids.filter(Boolean)]));
 }
@@ -859,8 +838,6 @@ function AdminDashboard() {
           <div className="admin-note-list">
             {filteredAdminNotes.length ? (
               filteredAdminNotes.map((note) => {
-                const dueLabel = deadlineDDay(note.dueAt);
-
                 return (
                   <article className="admin-note-card" key={note.id}>
                     <div className="admin-note-main">
@@ -884,12 +861,6 @@ function AdminDashboard() {
                         <span>{participantSummary(note)}</span>
                         <span>생성 {formatAdminDate(note.createdAt, "입력 전")}</span>
                         <span>수정 {formatAdminDate(note.updatedAt, "없음")}</span>
-                        {note.dueAt && (
-                          <span>
-                            마감 {formatAdminDate(note.dueAt)}
-                            {dueLabel ? ` · ${dueLabel}` : ""}
-                          </span>
-                        )}
                       </div>
                     </div>
                     <div className="admin-note-actions">
@@ -933,12 +904,6 @@ function AdminDashboard() {
                   <div className="admin-note-modal-meta">
                     <span>생성 {formatAdminDate(selectedAdminNote.createdAt, "입력 전")}</span>
                     <span>수정 {formatAdminDate(selectedAdminNote.updatedAt, "없음")}</span>
-                    {selectedAdminNote.dueAt && (
-                      <span>
-                        마감 {formatAdminDate(selectedAdminNote.dueAt)}
-                        {deadlineDDay(selectedAdminNote.dueAt) ? ` · ${deadlineDDay(selectedAdminNote.dueAt)}` : ""}
-                      </span>
-                    )}
                   </div>
                 </div>
                 <div className="note-preview-actions">
@@ -1165,7 +1130,7 @@ function EditableUserCard({
     }
 
     const confirmed = window.confirm(
-      `${user.displayName || "이 사용자"} 사용자의 앱 계정 문서를 영구 삭제할까요?\n삭제하면 관리자 화면과 로그인 목록에서 바로 사라지며 되돌릴 수 없습니다.`
+      `${user.displayName || "이 사용자"} 사용자를 영구 삭제할까요?\nFirebase Auth 계정과 앱 계정 문서가 함께 삭제되며 되돌릴 수 없습니다.`
     );
 
     if (!confirmed) {

@@ -10,6 +10,11 @@ interface FirestoreFieldOverride {
 }
 
 interface FirestoreIndexesConfig {
+  indexes: Array<{
+    collectionGroup: string;
+    fields: Array<{ fieldPath: string; order?: string }>;
+    queryScope: string;
+  }>;
   fieldOverrides: FirestoreFieldOverride[];
 }
 
@@ -33,5 +38,28 @@ describe("Firestore index retention policies", () => {
       ttl: true,
       indexes: []
     });
+  });
+
+  it("keeps schedule task query indexes and disables encrypted payload indexing", () => {
+    expect(
+      firestoreIndexes.indexes.some(
+        (index) =>
+          index.collectionGroup === "scheduleTasks"
+          && index.fields.some((field) => field.fieldPath === "ownerUid")
+          && index.fields.some((field) => field.fieldPath === "updatedAt" && field.order === "DESCENDING")
+      )
+    ).toBe(true);
+    expect(
+      firestoreIndexes.indexes.some(
+        (index) =>
+          index.collectionGroup === "scheduleTasks"
+          && index.fields.some((field) => field.fieldPath === "ownerUid")
+          && index.fields.some((field) => field.fieldPath === "startDate")
+          && index.fields.some((field) => field.fieldPath === "startTimeMinutes")
+      )
+    ).toBe(true);
+    expect(fieldOverride("scheduleTasks", "encryptedTitle")).toMatchObject({ indexes: [] });
+    expect(fieldOverride("scheduleTasks", "encryptedDetails")).toMatchObject({ indexes: [] });
+    expect(fieldOverride("scheduleTasks", "wrappedKeys")).toMatchObject({ indexes: [] });
   });
 });

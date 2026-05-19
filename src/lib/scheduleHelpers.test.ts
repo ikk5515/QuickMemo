@@ -1,0 +1,114 @@
+import { describe, expect, it } from "vitest";
+import type { DecryptedScheduleTask } from "../types";
+import {
+  buildCalendarMonth,
+  formatScheduleDateRange,
+  formatScheduleTimeRange,
+  formatTaskTime,
+  groupTasksByMatrix,
+  groupTasksByTodoDate,
+  tasksByDate,
+  matrixQuadrantForTask,
+  timeInputToMinutes
+} from "./scheduleHelpers";
+
+function task(id: string, overrides: Partial<DecryptedScheduleTask> = {}): DecryptedScheduleTask {
+  return {
+    id,
+    ownerUid: "user-a",
+    status: "active",
+    dueDate: null,
+    dueTimeMinutes: null,
+    isImportant: false,
+    isUrgent: false,
+    encryptedTitle: { version: 1, algorithm: "AES-GCM", cipherText: "cipher", iv: "iv" },
+    encryptedDetails: { version: 1, algorithm: "AES-GCM", cipherText: "cipher", iv: "iv" },
+    wrappedKeys: {
+      "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped" }
+    },
+    createdBy: "user-a",
+    updatedBy: "user-a",
+    title: id,
+    details: { description: "", checklist: [] },
+    ...overrides
+  };
+}
+
+describe("schedule helpers", () => {
+  it("groups active and completed tasks by todo date", () => {
+    const groups = groupTasksByTodoDate(
+      [
+        task("overdue", { dueDate: "2026-05-18" }),
+        task("today", { dueDate: "2026-05-19" }),
+        task("tomorrow", { dueDate: "2026-05-20" }),
+        task("week", { dueDate: "2026-05-24" }),
+        task("later", { dueDate: "2026-06-01" }),
+        task("none"),
+        task("done", { status: "completed", dueDate: "2026-05-19" })
+      ],
+      "2026-05-19"
+    );
+
+    expect(groups.map((group) => [group.key, group.tasks.map((item) => item.id)])).toEqual([
+      ["today", ["overdue", "today"]],
+      ["tomorrow", ["tomorrow"]],
+      ["next7", ["week"]],
+      ["later", ["later"]],
+      ["noDate", ["none"]],
+      ["completed", ["done"]]
+    ]);
+  });
+
+  it("places multi-day tasks on every calendar date in range", () => {
+    const dateMap = tasksByDate([
+      task("range", {
+        dueDate: "2026-05-15",
+        startDate: "2026-05-15",
+        endDate: "2026-05-17",
+        startTimeMinutes: 540,
+        endTimeMinutes: 600
+      })
+    ]);
+
+    expect(dateMap["2026-05-15"].map((item) => item.id)).toEqual(["range"]);
+    expect(dateMap["2026-05-16"].map((item) => item.id)).toEqual(["range"]);
+    expect(dateMap["2026-05-17"].map((item) => item.id)).toEqual(["range"]);
+    expect(dateMap["2026-05-18"]).toBeUndefined();
+    expect(formatScheduleDateRange(dateMap["2026-05-15"][0])).toBe("2026-05-15 - 2026-05-17");
+    expect(formatScheduleTimeRange(dateMap["2026-05-15"][0])).toBe("09:00 - 10:00");
+  });
+
+  it("builds a six-week calendar grid with today marked", () => {
+    const weeks = buildCalendarMonth(2026, 4, "2026-05-19");
+
+    expect(weeks).toHaveLength(6);
+    expect(weeks[0].days[0].dateString).toBe("2026-04-26");
+    expect(weeks[5].days[6].dateString).toBe("2026-06-06");
+    expect(weeks.flatMap((week) => week.days).find((day) => day.dateString === "2026-05-19")?.isToday).toBe(true);
+  });
+
+  it("sorts tasks into Eisenhower matrix sections", () => {
+    const sections = groupTasksByMatrix([
+      task("urgent-important", { isImportant: true, isUrgent: true }),
+      task("urgent", { isImportant: false, isUrgent: true }),
+      task("important", { isImportant: true, isUrgent: false }),
+      task("waiting"),
+      task("done", { status: "completed", isImportant: true, isUrgent: true })
+    ]);
+
+    expect(matrixQuadrantForTask({ isImportant: true, isUrgent: false })).toBe("importantNotUrgent");
+    expect(sections.map((section) => [section.key, section.tasks.map((item) => item.id)])).toEqual([
+      ["urgentImportant", ["urgent-important"]],
+      ["urgentNotImportant", ["urgent"]],
+      ["importantNotUrgent", ["important"]],
+      ["notUrgentNotImportant", ["waiting"]]
+    ]);
+  });
+
+  it("converts time input to minutes and back", () => {
+    expect(timeInputToMinutes("16:30")).toBe(990);
+    expect(timeInputToMinutes("")).toBeNull();
+    expect(formatTaskTime(990)).toBe("16:30");
+    expect(formatTaskTime(null)).toBe("");
+  });
+});
