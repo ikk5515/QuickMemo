@@ -1,4 +1,5 @@
 import { deleteApp, initializeApp } from "firebase/app";
+import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
 import {
   connectAuthEmulator,
   createUserWithEmailAndPassword,
@@ -16,9 +17,12 @@ import {
   query,
   runTransaction,
   serverTimestamp,
+  connectFirestoreEmulator,
+  getFirestore,
+  type Firestore,
   writeBatch
 } from "firebase/firestore";
-import { auth, db, firebaseConfig } from "../lib/firebase";
+import { appCheckSiteKey, auth, db, firebaseConfig } from "../lib/firebase";
 import type { NewUserPayload, PublicRosterUser, UserProfile } from "../types";
 
 export interface BootstrapState {
@@ -119,16 +123,22 @@ function quickLoginKeyDocument(uid: string, quickKey: number) {
   };
 }
 
-async function writeNewUserDocuments(uid: string, loginEmail: string, payload: NewUserPayload, order: number) {
-  const batch = writeBatch(db);
+async function writeNewUserDocuments(
+  uid: string,
+  loginEmail: string,
+  payload: NewUserPayload,
+  order: number,
+  targetDb: Firestore = db
+) {
+  const batch = writeBatch(targetDb);
 
-  batch.set(doc(db, "quickLoginKeys", String(payload.quickKey)), {
+  batch.set(doc(targetDb, "quickLoginKeys", String(payload.quickKey)), {
     ...quickLoginKeyDocument(uid, payload.quickKey),
     createdAt: serverTimestamp()
   });
-  batch.set(doc(db, "users", uid), profileDocument(uid, loginEmail, payload, order));
-  batch.set(doc(db, "publicLoginRoster", uid), rosterDocument(uid, loginEmail, payload, order));
-  batch.set(doc(db, "userKeys", uid), userKeyDocument(uid, payload));
+  batch.set(doc(targetDb, "users", uid), profileDocument(uid, loginEmail, payload, order));
+  batch.set(doc(targetDb, "publicLoginRoster", uid), rosterDocument(uid, loginEmail, payload, order));
+  batch.set(doc(targetDb, "userKeys", uid), userKeyDocument(uid, payload));
 
   await batch.commit();
 }
@@ -136,15 +146,23 @@ async function writeNewUserDocuments(uid: string, loginEmail: string, payload: N
 async function createSecondaryAuthUser(displayName: string, loginEmail: string, password: string) {
   const secondaryApp = initializeApp(firebaseConfig, `quickmemo-user-create-${crypto.randomUUID()}`);
   const secondaryAuth = getAuth(secondaryApp);
+  const secondaryDb = getFirestore(secondaryApp);
 
   if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true") {
     connectAuthEmulator(secondaryAuth, "http://127.0.0.1:9099", { disableWarnings: true });
+    connectFirestoreEmulator(secondaryDb, "127.0.0.1", 8080);
+  } else if (appCheckSiteKey) {
+    initializeAppCheck(secondaryApp, {
+      provider: new ReCaptchaEnterpriseProvider(appCheckSiteKey),
+      isTokenAutoRefreshEnabled: true
+    });
   }
 
   const credential = await createUserWithEmailAndPassword(secondaryAuth, loginEmail, password);
   await updateProfile(credential.user, { displayName });
 
   return {
+    db: secondaryDb,
     user: credential.user,
     cleanup: async () => {
       await signOut(secondaryAuth).catch(() => undefined);
@@ -164,36 +182,37 @@ export async function getBootstrapState(): Promise<BootstrapState> {
 
 export async function createFirstAdmin(payload: FirstAdminPayload): Promise<CreatedUserResult> {
   const loginEmail = makeLoginEmail();
-  const credential = await createUserWithEmailAndPassword(auth, loginEmail, payload.password);
-  await updateProfile(credential.user, { displayName: payload.displayName });
+  const created = await createSecondaryAuthUser(payload.displayName, loginEmail, payload.password);
 
   try {
-    const batch = writeBatch(db);
-    const uid = credential.user.uid;
+    const batch = writeBatch(created.db);
+    const uid = created.user.uid;
     const adminPayload = { ...payload, isAdmin: true };
 
-    batch.set(doc(db, "system", "bootstrap"), {
+    batch.set(doc(created.db, "system", "bootstrap"), {
       adminUid: uid,
       createdAt: serverTimestamp()
     });
-    batch.set(doc(db, "system", "bootstrapAttempts", "attempts", uid), {
+    batch.set(doc(created.db, "system", "bootstrapAttempts", "attempts", uid), {
       uid,
       setupTokenHash: payload.setupTokenHash,
       createdAt: serverTimestamp()
     });
-    batch.set(doc(db, "quickLoginKeys", String(adminPayload.quickKey)), {
+    batch.set(doc(created.db, "quickLoginKeys", String(adminPayload.quickKey)), {
       ...quickLoginKeyDocument(uid, adminPayload.quickKey),
       createdAt: serverTimestamp()
     });
-    batch.set(doc(db, "users", uid), profileDocument(uid, loginEmail, adminPayload, 1));
-    batch.set(doc(db, "publicLoginRoster", uid), rosterDocument(uid, loginEmail, adminPayload, 1));
-    batch.set(doc(db, "userKeys", uid), userKeyDocument(uid, adminPayload));
+    batch.set(doc(created.db, "users", uid), profileDocument(uid, loginEmail, adminPayload, 1));
+    batch.set(doc(created.db, "publicLoginRoster", uid), rosterDocument(uid, loginEmail, adminPayload, 1));
+    batch.set(doc(created.db, "userKeys", uid), userKeyDocument(uid, adminPayload));
     await batch.commit();
 
     return { uid, loginEmail };
   } catch (error) {
-    await deleteUser(credential.user).catch(() => undefined);
+    await deleteUser(created.user).catch(() => undefined);
     throw error;
+  } finally {
+    await created.cleanup();
   }
 }
 
