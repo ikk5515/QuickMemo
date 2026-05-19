@@ -61,10 +61,10 @@ Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 
 
 ### 임시 공유 만료 cleanup
 
-임시 공유 문서는 Firestore TTL 설정과 Vercel Cron cleanup을 함께 사용합니다.
+임시 공유 문서는 Vercel Cron cleanup으로 만료 데이터를 정리합니다.
 
-- Firestore TTL: `publicNoteShares.expiresAt`와 공유 첨부 파일 `expiresAt` field override가 켜져 있습니다. Firebase billing이 활성화된 프로젝트에서는 `npx firebase-tools deploy --only firestore:indexes`로 서버 측 TTL을 배포할 수 있습니다.
-- Vercel Cron fallback: billing 때문에 TTL을 켤 수 없는 환경에서도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유와 공유 첨부 파일을 삭제합니다. 이 경로는 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다.
+- Vercel Cron cleanup: Firebase billing 없이도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유와 공유 첨부 파일을 삭제합니다. 이 경로는 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다.
+- Firestore TTL: billing이 꺼진 프로젝트에서는 TTL field override 배포가 403으로 실패하므로 기본 배포 파일에는 TTL을 켜지 않습니다. billing이 활성화된 별도 환경에서 TTL을 보조 안전장치로 쓰려면 운영자가 콘솔이나 별도 인덱스 설정으로 켜야 합니다.
 
 Vercel 운영 환경에는 아래 값을 설정합니다. `FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 전체를 넣거나, `FIREBASE_CLEANUP_CLIENT_EMAIL`과 `FIREBASE_CLEANUP_PRIVATE_KEY`를 나누어 넣을 수 있습니다.
 
@@ -77,7 +77,7 @@ PUBLIC_SHARE_CLEANUP_BATCH_SIZE=50
 PUBLIC_SHARE_CLEANUP_MAX_DELETES=1000
 ```
 
-Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. cleanup 함수는 `publicNoteShares.expiresAt <= now`인 문서만 조회해 해당 공유 첨부 파일과 cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제와 Firebase Auth 사용자 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
+Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. cleanup 함수는 `publicShareCleanupQueue.expiresAt <= now`인 queue 문서를 조회해 해당 공유 첨부 파일, 원본 공유 문서, cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제와 Firebase Auth 사용자 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
 
 ### 관리자 사용자 삭제
 
