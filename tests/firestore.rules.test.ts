@@ -34,11 +34,15 @@ const encryptedPayload = {
 };
 
 const publicSharePasswordHash = {
-  version: 1,
+  version: 2,
   algorithm: "PBKDF2-SHA-256",
   salt: "c2FsdC1ieXRlcy1mb3ItdGVzdA==",
   iterations: 210000,
   hash: "aGFzaC1ieXRlcy1mb3ItdGVzdA=="
+};
+const legacyPublicSharePasswordHash = {
+  ...publicSharePasswordHash,
+  version: 1
 };
 const ownerWrappedShareKey = {
   version: 1,
@@ -530,6 +534,8 @@ describeRules("firestore security rules", () => {
   });
 
   it("allows owners to publish temporary public note shares while blocking expired or revoked links", async () => {
+    const shareExpiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
+
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
@@ -566,12 +572,25 @@ describeRules("firestore security rules", () => {
           revokedBy: "user-a"
         })
       });
+      await setDoc(doc(context.firestore(), "publicNoteShares/legacy-protected-share"), {
+        ...publicShareDocument("note-a", "user-a", {
+          attachmentCount: 1,
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: shareExpiresAt,
+          passwordHash: legacyPublicSharePasswordHash,
+          ready: true,
+          updatedAt: new Date("2026-05-18T08:00:00.000Z")
+        })
+      });
+      await setDoc(
+        doc(context.firestore(), "publicNoteShares/legacy-protected-share/attachments/attachment-a"),
+        publicShareAttachment({ createdAt: new Date("2026-05-18T08:00:00.000Z"), expiresAt: shareExpiresAt })
+      );
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     const otherDb = testEnv.authenticatedContext("user-b").firestore();
     const publicDb = testEnv.unauthenticatedContext().firestore();
-    const shareExpiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
 
     await assertSucceeds(
       setDoc(doc(ownerDb, "publicNoteShares/share-a"), publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt, passwordHash: publicSharePasswordHash }))
@@ -593,6 +612,15 @@ describeRules("firestore security rules", () => {
 
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/expired-share")));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/revoked-share")));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/legacy-protected-share")));
+    await assertFails(getDocs(collection(publicDb, "publicNoteShares/legacy-protected-share/attachments")));
+    await assertSucceeds(getDoc(doc(ownerDb, "publicNoteShares/legacy-protected-share")));
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "publicNoteShares/legacy-created-share"),
+        publicShareDocument("note-a", "user-a", { passwordHash: legacyPublicSharePasswordHash })
+      )
+    );
     await assertFails(setDoc(doc(otherDb, "publicNoteShares/forged-share"), publicShareDocument("note-a", "user-b")));
     const shareWithoutOwnerKey = { ...publicShareDocument("note-a", "user-a") };
     Reflect.deleteProperty(shareWithoutOwnerKey, "ownerWrappedShareKey");

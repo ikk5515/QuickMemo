@@ -44,7 +44,7 @@ export interface WrappedNoteKey {
 }
 
 export interface PublicSharePasswordHash {
-  version: 1;
+  version: 1 | 2;
   algorithm: "PBKDF2-SHA-256";
   salt: string;
   iterations: number;

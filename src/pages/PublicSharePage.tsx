@@ -533,6 +533,6 @@ function isImageAttachment(attachment: PublicShareAttachmentView): attachment is
 
 function publicSharePasswordSignature(share: PublicNoteShareSnapshot) {
   return share.passwordHash
-    ? `${share.passwordHash.algorithm}:${share.passwordHash.iterations}:${share.passwordHash.salt}:${share.passwordHash.hash}`
+    ? `${share.passwordHash.version}:${share.passwordHash.algorithm}:${share.passwordHash.iterations}:${share.passwordHash.salt}:${share.passwordHash.hash}`
     : null;
 }

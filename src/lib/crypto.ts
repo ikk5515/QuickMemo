@@ -10,6 +10,9 @@ import type {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const KDF_ITERATIONS = 210_000;
+const PUBLIC_SHARE_PASSWORD_HASH_VERSION = 2;
+const PUBLIC_SHARE_PASSWORD_VERIFIER_PURPOSE = "quickmemo/public-share/password-verifier/v2";
+const PUBLIC_SHARE_CONTENT_KEY_PURPOSE = "quickmemo/public-share/content-key/v2";
 
 function randomBytes(length: number) {
   const bytes = new Uint8Array(length);
@@ -100,8 +103,8 @@ function constantTimeEqual(left: Uint8Array, right: Uint8Array) {
   return difference === 0;
 }
 
-function publicSharePasswordMaterial(password: string, shareKeyValue?: string) {
-  return shareKeyValue ? `${shareKeyValue}\n${password}` : password;
+function publicSharePasswordMaterial(purpose: string, password: string, shareKeyValue?: string) {
+  return `${purpose}\n${shareKeyValue ?? ""}\n${password}`;
 }
 
 export async function encryptText(value: string, key: CryptoKey): Promise<EncryptedPayload> {
@@ -122,10 +125,13 @@ export async function encryptText(value: string, key: CryptoKey): Promise<Encryp
 
 export async function hashPublicSharePassword(password: string, shareKeyValue?: string): Promise<PublicSharePasswordHash> {
   const salt = randomBytes(16);
-  const hash = await derivePasswordBits(publicSharePasswordMaterial(password, shareKeyValue), salt);
+  const hash = await derivePasswordBits(
+    publicSharePasswordMaterial(PUBLIC_SHARE_PASSWORD_VERIFIER_PURPOSE, password, shareKeyValue),
+    salt
+  );
 
   return {
-    version: 1,
+    version: PUBLIC_SHARE_PASSWORD_HASH_VERSION,
     algorithm: "PBKDF2-SHA-256",
     salt: bytesToBase64(salt),
     iterations: KDF_ITERATIONS,
@@ -134,8 +140,17 @@ export async function hashPublicSharePassword(password: string, shareKeyValue?: 
 }
 
 export async function derivePublicShareContentKey(shareKeyValue: string, password: string, payload: PublicSharePasswordHash) {
+  if (
+    payload.version !== PUBLIC_SHARE_PASSWORD_HASH_VERSION ||
+    payload.algorithm !== "PBKDF2-SHA-256" ||
+    payload.iterations < 100_000 ||
+    payload.iterations > 1_000_000
+  ) {
+    throw new Error("Unsupported public share password hash.");
+  }
+
   const rawKey = await derivePasswordBits(
-    publicSharePasswordMaterial(password, shareKeyValue),
+    publicSharePasswordMaterial(PUBLIC_SHARE_CONTENT_KEY_PURPOSE, password, shareKeyValue),
     base64ToBytes(payload.salt),
     payload.iterations
   );
@@ -154,7 +169,7 @@ export async function derivePublicShareContentKey(shareKeyValue: string, passwor
 
 export async function verifyPublicSharePassword(password: string, payload: PublicSharePasswordHash, shareKeyValue?: string) {
   if (
-    payload.version !== 1 ||
+    payload.version !== PUBLIC_SHARE_PASSWORD_HASH_VERSION ||
     payload.algorithm !== "PBKDF2-SHA-256" ||
     payload.iterations < 100_000 ||
     payload.iterations > 1_000_000
@@ -165,7 +180,11 @@ export async function verifyPublicSharePassword(password: string, payload: Publi
   try {
     const salt = base64ToBytes(payload.salt);
     const expectedHash = base64ToBytes(payload.hash);
-    const nextHash = await derivePasswordBits(publicSharePasswordMaterial(password, shareKeyValue), salt, payload.iterations);
+    const nextHash = await derivePasswordBits(
+      publicSharePasswordMaterial(PUBLIC_SHARE_PASSWORD_VERIFIER_PURPOSE, password, shareKeyValue),
+      salt,
+      payload.iterations
+    );
 
     return constantTimeEqual(nextHash, expectedHash);
   } catch {

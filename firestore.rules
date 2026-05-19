@@ -603,7 +603,7 @@ service cloud.firestore {
     function validPublicSharePasswordHash(passwordHash) {
       return passwordHash is map
         && passwordHash.keys().hasOnly(["version", "algorithm", "salt", "iterations", "hash"])
-        && passwordHash.version == 1
+        && passwordHash.version == 2
         && passwordHash.algorithm == "PBKDF2-SHA-256"
         && passwordHash.salt is string
         && passwordHash.salt.size() >= 8
@@ -1020,7 +1020,8 @@ service cloud.firestore {
     function publicShareActive(data) {
       return data.ready == true
         && publicShareNotRevoked(data)
-        && data.expiresAt > request.time;
+        && data.expiresAt > request.time
+        && validPublicSharePassword(data);
     }
 
     function publicShareOwner(data) {
