@@ -85,6 +85,16 @@ describe("schedule helpers", () => {
     expect(formatScheduleTimeRange(dateMap["2026-05-15"][0])).toBe("09:00 - 10:00");
   });
 
+  it("sorts active tasks before completed tasks on the same calendar date", () => {
+    const dateMap = tasksByDate([
+      task("done-early", { status: "completed", dueDate: "2026-05-19", startTimeMinutes: 540 }),
+      task("active-late", { dueDate: "2026-05-19", startTimeMinutes: 900 }),
+      task("active-early", { dueDate: "2026-05-19", startTimeMinutes: 600 })
+    ]);
+
+    expect(dateMap["2026-05-19"].map((item) => item.id)).toEqual(["active-early", "active-late", "done-early"]);
+  });
+
   it("builds a six-week calendar grid with today marked", () => {
     const weeks = buildCalendarMonth(2026, 4, "2026-05-19");
 

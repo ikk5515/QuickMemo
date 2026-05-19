@@ -152,6 +152,14 @@ export function compareTaskSchedule(left: DecryptedScheduleTask, right: Decrypte
   return left.title.localeCompare(right.title, "ko");
 }
 
+export function compareCalendarTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  if (left.status !== right.status) {
+    return left.status === "active" ? -1 : 1;
+  }
+
+  return compareTaskSchedule(left, right);
+}
+
 export function formatTaskTime(minutes: number | null) {
   if (minutes == null) {
     return "";
@@ -317,7 +325,7 @@ export function tasksByDate(tasks: DecryptedScheduleTask[]) {
 
     while (cursor <= lastDate) {
       map[cursor] = [...(map[cursor] ?? []), task];
-      map[cursor].sort(compareTaskSchedule);
+      map[cursor].sort(compareCalendarTasks);
       cursor = addDays(cursor, 1);
     }
 
