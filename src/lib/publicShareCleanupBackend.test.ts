@@ -30,4 +30,10 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain("Bearer");
     expect(cleanupFunctionSource).not.toMatch(forbiddenBackendPattern);
   });
+
+  it("queries the indexed cleanup queue instead of the TTL-only public share expiresAt field", () => {
+    expect(cleanupFunctionSource).toContain('from: [{ collectionId: "publicShareCleanupQueue" }]');
+    expect(cleanupFunctionSource).not.toContain('from: [{ collectionId: "publicNoteShares" }]');
+    expect(cleanupFunctionSource).not.toContain("queryExpiredShares");
+  });
 });

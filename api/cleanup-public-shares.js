@@ -167,13 +167,13 @@ async function firestoreDelete(documentPath, accessToken) {
   return true;
 }
 
-async function queryExpiredShares({ accessToken, projectId, nowIso, limit }) {
+async function queryExpiredShareQueues({ accessToken, projectId, nowIso, limit }) {
   const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
   const result = await firestoreRequest(runQueryPath, accessToken, {
     method: "POST",
     body: JSON.stringify({
       structuredQuery: {
-        from: [{ collectionId: "publicNoteShares" }],
+        from: [{ collectionId: "publicShareCleanupQueue" }],
         where: {
           fieldFilter: {
             field: { fieldPath: "expiresAt" },
@@ -230,9 +230,10 @@ async function listChildDocuments(parentName, collectionId, accessToken) {
   return documents;
 }
 
-async function deletePublicShareTree(shareDocument, accessToken, stats) {
-  const attachmentDocuments = await listChildDocuments(shareDocument.name, "attachments", accessToken);
-  const cleanupQueueName = shareDocument.name.replace("/publicNoteShares/", "/publicShareCleanupQueue/");
+async function deletePublicShareTree(cleanupQueueDocument, accessToken, stats) {
+  const cleanupQueueName = cleanupQueueDocument.name;
+  const shareName = cleanupQueueName.replace("/publicShareCleanupQueue/", "/publicNoteShares/");
+  const attachmentDocuments = await listChildDocuments(shareName, "attachments", accessToken);
   const cleanupAttachmentDocuments = await listChildDocuments(
     cleanupQueueName,
     "publicShareAttachmentCleanupQueue",
@@ -260,7 +261,7 @@ async function deletePublicShareTree(shareDocument, accessToken, stats) {
   }
 
   if (stats.documentDeletesAttempted < stats.maxDocumentDeletes) {
-    const deleted = await firestoreDelete(shareDocument.name, accessToken);
+    const deleted = await firestoreDelete(shareName, accessToken);
     stats.documentDeletesAttempted += 1;
     stats.sharesDeleted += deleted ? 1 : 0;
   }
@@ -291,21 +292,21 @@ async function cleanupExpiredPublicShares() {
   };
 
   for (let pass = 0; pass < 20 && stats.documentDeletesAttempted < stats.maxDocumentDeletes; pass += 1) {
-    const shares = await queryExpiredShares(config);
+    const shareQueues = await queryExpiredShareQueues(config);
 
-    if (shares.length === 0) {
+    if (shareQueues.length === 0) {
       break;
     }
 
-    for (const share of shares) {
+    for (const shareQueue of shareQueues) {
       if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
         break;
       }
 
-      await deletePublicShareTree(share, accessToken, stats);
+      await deletePublicShareTree(shareQueue, accessToken, stats);
     }
 
-    if (shares.length < config.limit) {
+    if (shareQueues.length < config.limit) {
       break;
     }
   }
