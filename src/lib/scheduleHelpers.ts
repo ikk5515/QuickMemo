@@ -279,6 +279,14 @@ export function compareCalendarTasks(left: DecryptedScheduleTask, right: Decrypt
   return compareTaskSchedule(left, right);
 }
 
+export function compareCalendarAgendaTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  if (left.status !== right.status) {
+    return left.status === "active" ? -1 : 1;
+  }
+
+  return compareTodoTasks(left, right);
+}
+
 function compareCalendarLayoutTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
   if (left.status !== right.status) {
     return left.status === "active" ? -1 : 1;

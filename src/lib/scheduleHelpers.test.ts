@@ -3,6 +3,7 @@ import type { DecryptedScheduleTask } from "../types";
 import {
   buildCalendarMonth,
   buildCalendarTaskLayout,
+  compareCalendarAgendaTasks,
   formatScheduleDateRange,
   formatScheduleTimeRange,
   formatTaskTime,
@@ -171,6 +172,54 @@ describe("schedule helpers", () => {
     ]);
 
     expect(dateMap["2026-05-19"].map((item) => item.id)).toEqual(["active-early", "active-late", "done-early"]);
+  });
+
+  it("sorts calendar agenda tasks like the todo view after active status", () => {
+    const agendaTasks = [
+      task("done-important", {
+        status: "completed",
+        dueDate: "2026-05-19",
+        isImportant: true,
+        completedAt: timestamp("2026-05-19T08:00:00Z")
+      }),
+      task("normal-new", {
+        dueDate: "2026-05-19",
+        createdAt: timestamp("2026-05-19T10:00:00Z")
+      }),
+      task("urgent", {
+        dueDate: "2026-05-19",
+        isUrgent: true,
+        createdAt: timestamp("2026-05-19T07:00:00Z")
+      }),
+      task("important", {
+        dueDate: "2026-05-19",
+        isImportant: true,
+        createdAt: timestamp("2026-05-19T06:00:00Z")
+      }),
+      task("top-late", {
+        dueDate: "2026-05-19",
+        isImportant: true,
+        isUrgent: true,
+        startTimeMinutes: 900,
+        createdAt: timestamp("2026-05-19T11:00:00Z")
+      }),
+      task("top-early", {
+        dueDate: "2026-05-19",
+        isImportant: true,
+        isUrgent: true,
+        startTimeMinutes: 540,
+        createdAt: timestamp("2026-05-19T05:00:00Z")
+      })
+    ].sort(compareCalendarAgendaTasks);
+
+    expect(agendaTasks.map((item) => item.id)).toEqual([
+      "top-early",
+      "top-late",
+      "important",
+      "urgent",
+      "normal-new",
+      "done-important"
+    ]);
   });
 
   it("rejects invalid and oversized calendar ranges before expanding tasks by date", () => {
