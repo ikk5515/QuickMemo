@@ -27,6 +27,27 @@ export const allowedAttachmentExtensions = [
 
 const allowedAttachmentExtensionSet = new Set<string>(allowedAttachmentExtensions);
 const dangerousFileNameCharactersPattern = /[<>:"/\\|?*]/g;
+const publicShareAttachmentMimeTypes: Record<string, string> = {
+  csv: "text/csv",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  gif: "image/gif",
+  hwp: "application/x-hwp",
+  hwpx: "application/vnd.hancom.hwpx",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  json: "application/json",
+  md: "text/markdown",
+  pdf: "application/pdf",
+  png: "image/png",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  txt: "text/plain",
+  webp: "image/webp",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+};
+const publicShareRasterImageExtensions = new Set(["gif", "jpeg", "jpg", "png", "webp"]);
 
 export function attachmentExtension(fileName: string) {
   const normalizedName = fileName.trim().toLowerCase();
@@ -41,6 +62,18 @@ export function attachmentExtension(fileName: string) {
 
 export function isAllowedAttachmentExtension(extension: string) {
   return allowedAttachmentExtensionSet.has(extension.toLowerCase());
+}
+
+export function safePublicShareAttachmentMimeType(extension: string) {
+  return publicShareAttachmentMimeTypes[extension.toLowerCase()] ?? "application/octet-stream";
+}
+
+export function isPublicShareRasterImageExtension(extension: string) {
+  return publicShareRasterImageExtensions.has(extension.toLowerCase());
+}
+
+export function publicShareAttachmentMimeMatchesExtension(extension: string, mimeType: string) {
+  return mimeType.trim().toLowerCase() === safePublicShareAttachmentMimeType(extension);
 }
 
 export function attachmentValidationError(file: File) {

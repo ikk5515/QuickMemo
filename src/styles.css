@@ -3258,10 +3258,14 @@ textarea {
 }
 
 .public-share-image-link {
+  background: transparent;
+  border: 0;
   border-radius: 8px;
+  cursor: pointer;
   display: block;
   height: 62px;
   overflow: hidden;
+  padding: 0;
   width: 82px;
 }
 
