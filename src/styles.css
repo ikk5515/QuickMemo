@@ -6451,6 +6451,20 @@ textarea {
 .completed-filter-control input,
 .completed-filter-control select {
   min-height: 42px;
+  min-width: 0;
+}
+
+.completed-filter-control .date-picker-shell {
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
+}
+
+.completed-panel .task-main span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .schedule-read-modal {
@@ -6823,6 +6837,23 @@ textarea {
 
   .completed-filter-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .completed-filter-control input,
+  .completed-filter-control select,
+  .completed-filter-control .date-picker-trigger {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .completed-filter-control .date-picker-shell {
+    grid-template-columns: minmax(0, 1fr) 38px;
+  }
+
+  .completed-filter-control .date-picker-clear {
+    height: 38px;
+    min-height: 38px;
+    width: 38px;
   }
 
   .schedule-read-modal {
