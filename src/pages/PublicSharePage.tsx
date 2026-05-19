@@ -1,4 +1,4 @@
-import { AlertTriangle, Download, Eye, File, Loader2, LockKeyhole, X } from "lucide-react";
+import { AlertTriangle, Download, Eye, File, Loader2, LockKeyhole } from "lucide-react";
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { attachmentDownloadName, formatFileSize } from "../lib/attachments";
@@ -17,6 +17,19 @@ import {
   type PublicNoteShareAttachmentSnapshot,
   type PublicNoteShareSnapshot
 } from "../services/publicShares";
+import {
+  AttachmentPreviewModal,
+  decodeTextAttachmentPreview,
+  extractHwpPreviewHtml,
+  extractHwpxPreviewHtml,
+  extractXlsxPreviewHtml,
+  legacyBinaryPreviewAttachmentExtensions,
+  legacyBinaryPreviewMessage,
+  previewableAttachmentExtensions,
+  renderSafeDocxPreviewSrcDoc,
+  textPreviewAttachmentExtensions,
+  type AttachmentPreviewState
+} from "./NotesPage";
 
 interface PublicShareAttachmentView {
   id: string;
@@ -43,7 +56,7 @@ export default function PublicSharePage() {
   const [attachments, setAttachments] = useState<PublicShareAttachmentView[]>([]);
   const [share, setShare] = useState<PublicNoteShareSnapshot | null>(null);
   const [shareKeyValue, setShareKeyValue] = useState<string | null>(null);
-  const [attachmentPreview, setAttachmentPreview] = useState<PublicShareAttachmentView | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
   const [passwordError, setPasswordError] = useState<string | null>(null);
@@ -230,6 +243,122 @@ export default function PublicSharePage() {
     }
   }
 
+  async function openAttachmentPreview(attachment: PublicShareAttachmentView) {
+    const fileName = attachment.downloadName;
+
+    if (isImageAttachment(attachment)) {
+      setAttachmentPreview({ fileName, kind: "image", label: "이미지 미리보기", url: attachment.url });
+      return;
+    }
+
+    if (!previewableAttachmentExtensions.has(attachment.extension)) {
+      setAttachmentPreview({
+        fileName,
+        kind: "unsupported",
+        label: "미리보기",
+        text: "이 파일 형식은 브라우저 미리보기를 지원하지 않습니다. 다운로드해서 확인해주세요."
+      });
+      return;
+    }
+
+    if (attachment.extension === "pdf") {
+      setAttachmentPreview({ fileName, kind: "pdf", label: "PDF 미리보기", url: attachment.url });
+      return;
+    }
+
+    if (attachment.extension === "docx") {
+      const srcDoc = await renderSafeDocxPreviewSrcDoc(attachment.bytes);
+
+      setAttachmentPreview(
+        srcDoc
+          ? { fileName, kind: "docx", label: "DOCX 양식 미리보기", srcDoc, url: attachment.url }
+          : {
+              fileName,
+              kind: "unsupported",
+              label: "DOCX 미리보기 안내",
+              text: "DOCX 양식 미리보기를 안전하게 만들지 못했습니다. 원본 파일은 다운로드해서 확인해주세요.",
+              url: attachment.url
+            }
+      );
+      return;
+    }
+
+    if (attachment.extension === "hwp") {
+      const preview = await extractHwpPreviewHtml(attachment.bytes);
+
+      setAttachmentPreview(
+        preview.safeForRichPreview
+          ? {
+              bytes: attachment.bytes,
+              fallbackHtml: preview.html,
+              fileName,
+              kind: "hwp",
+              label: "HWP 문서 미리보기",
+              url: attachment.url
+            }
+          : preview.html
+            ? { fileName, html: preview.html, kind: "html", label: "HWP 안전 본문 미리보기", url: attachment.url }
+            : {
+                fileName,
+                kind: "unsupported",
+                label: "HWP 미리보기 안내",
+                text: "HWP 미리보기가 안전 제한을 초과했거나 지원하지 않는 문서입니다. 원본 파일은 다운로드해서 확인해주세요.",
+                url: attachment.url
+              }
+      );
+      return;
+    }
+
+    if (attachment.extension === "hwpx") {
+      const html = extractHwpxPreviewHtml(attachment.bytes);
+
+      setAttachmentPreview({
+        fileName,
+        html,
+        kind: html ? "html" : "unsupported",
+        label: "HWPX 문서 미리보기",
+        text: html ? undefined : "HWPX 문서에서 안전하게 표시할 본문을 찾지 못했습니다.",
+        url: attachment.url
+      });
+      return;
+    }
+
+    if (attachment.extension === "xlsx") {
+      const html = extractXlsxPreviewHtml(attachment.bytes);
+
+      setAttachmentPreview({
+        fileName,
+        html,
+        kind: html ? "html" : "unsupported",
+        label: "XLSX 스프레드시트 미리보기",
+        text: html ? undefined : "XLSX 파일에서 안전하게 표시할 시트 내용을 찾지 못했습니다.",
+        url: attachment.url
+      });
+      return;
+    }
+
+    if (textPreviewAttachmentExtensions.has(attachment.extension)) {
+      setAttachmentPreview({
+        fileName,
+        kind: "text",
+        label: `${attachment.extension.toUpperCase()} 미리보기`,
+        text: decodeTextAttachmentPreview(attachment.bytes, attachment.extension),
+        url: attachment.url
+      });
+      return;
+    }
+
+    if (legacyBinaryPreviewAttachmentExtensions.has(attachment.extension)) {
+      setAttachmentPreview({
+        fileName,
+        kind: "unsupported",
+        label: `${attachment.extension.toUpperCase()} 미리보기 안내`,
+        text: legacyBinaryPreviewMessage(attachment.extension),
+        url: attachment.url
+      });
+    }
+  }
+
   return (
     <main className="public-share-page">
       <section className="public-share-document">
@@ -300,7 +429,11 @@ export default function PublicSharePage() {
                         </span>
                       </div>
                       <div className="public-share-attachment-actions">
-                        <button className="secondary-button public-share-download" type="button" onClick={() => setAttachmentPreview(attachment)}>
+                        <button
+                          className="secondary-button public-share-download"
+                          type="button"
+                          onClick={() => void openAttachmentPreview(attachment)}
+                        >
                           <Eye size={15} />
                           미리보기
                         </button>
@@ -317,9 +450,7 @@ export default function PublicSharePage() {
           </>
         )}
       </section>
-      {attachmentPreview && (
-        <PublicAttachmentPreviewModal attachment={attachmentPreview} onClose={() => setAttachmentPreview(null)} />
-      )}
+      {attachmentPreview && <AttachmentPreviewModal preview={attachmentPreview} onClose={() => setAttachmentPreview(null)} />}
     </main>
   );
 }
@@ -373,91 +504,8 @@ function isImageAttachment(attachment: Pick<PublicShareAttachmentView, "extensio
   return attachment.mimeType.startsWith("image/") || ["gif", "jpeg", "jpg", "png", "webp"].includes(attachment.extension);
 }
 
-function isPdfAttachment(attachment: Pick<PublicShareAttachmentView, "extension" | "mimeType">) {
-  return attachment.mimeType === "application/pdf" || attachment.extension === "pdf";
-}
-
-function isTextAttachment(attachment: Pick<PublicShareAttachmentView, "extension" | "mimeType">) {
-  return attachment.mimeType.startsWith("text/") || ["csv", "json", "md", "txt"].includes(attachment.extension);
-}
-
 function publicSharePasswordSignature(share: PublicNoteShareSnapshot) {
   return share.passwordHash
     ? `${share.passwordHash.algorithm}:${share.passwordHash.iterations}:${share.passwordHash.salt}:${share.passwordHash.hash}`
     : null;
-}
-
-function PublicAttachmentPreviewModal({
-  attachment,
-  onClose
-}: {
-  attachment: PublicShareAttachmentView;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") {
-        return;
-      }
-
-      event.preventDefault();
-      onClose();
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  return (
-    <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        aria-label={`${attachment.downloadName} 미리보기`}
-        aria-modal="true"
-        className="pdf-preview-modal public-attachment-preview-modal"
-        role="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="pdf-preview-header">
-          <div className="pdf-preview-title">
-            <span>첨부파일 미리보기</span>
-            <h2>{attachment.downloadName}</h2>
-          </div>
-          <div className="pdf-preview-actions">
-            <a className="secondary-button pdf-preview-download" download={attachment.downloadName} href={attachment.url}>
-              <Download size={16} />
-              다운로드
-            </a>
-            <button className="icon-button pdf-preview-close" type="button" onClick={onClose} aria-label="미리보기 닫기">
-              <X size={16} />
-            </button>
-          </div>
-        </header>
-        {isImageAttachment(attachment) ? (
-          <div className="public-image-preview-frame">
-            <img src={attachment.url} alt={attachment.downloadName} />
-          </div>
-        ) : isPdfAttachment(attachment) ? (
-          <iframe className="pdf-preview-frame" src={attachment.url} title={`${attachment.downloadName} PDF 미리보기`} />
-        ) : isTextAttachment(attachment) ? (
-          <pre className="file-text-preview">{decodePublicPreviewText(attachment.bytes, attachment.extension)}</pre>
-        ) : (
-          <pre className="file-text-preview unsupported">이 파일 형식은 브라우저 미리보기를 지원하지 않습니다. 다운로드해서 확인해주세요.</pre>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function decodePublicPreviewText(bytes: Uint8Array, extension: string) {
-  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes).slice(0, 120_000);
-
-  if (extension === "json") {
-    try {
-      return JSON.stringify(JSON.parse(text), null, 2).slice(0, 120_000);
-    } catch {
-      return text;
-    }
-  }
-
-  return text;
 }

@@ -183,12 +183,12 @@ interface PersistedNoteResult {
   draft: NoteDraft;
 }
 
-interface AttachmentPreviewState {
+export interface AttachmentPreviewState {
   bytes?: Uint8Array;
   fileName: string;
   fallbackHtml?: string;
   html?: string;
-  kind: "docx" | "html" | "hwp" | "pdf" | "text" | "unsupported";
+  kind: "docx" | "html" | "hwp" | "image" | "pdf" | "text" | "unsupported";
   label: string;
   srcDoc?: string;
   text?: string;
@@ -303,9 +303,9 @@ const publicShareContentKeyStoragePrefix = "quickmemo-public-share-content-key:"
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
-const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx"]);
-const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
-const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
+export const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx"]);
+export const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
+export const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 const maxTextPreviewCharacters = 120_000;
 const maxDocumentPreviewBlocks = 320;
 const maxDocxPreviewMarkupCharacters = 1_600_000;
@@ -6901,7 +6901,7 @@ function AttachmentListModal({
   );
 }
 
-function AttachmentPreviewModal({
+export function AttachmentPreviewModal({
   onClose,
   preview
 }: {
@@ -6983,7 +6983,11 @@ function AttachmentPreviewModal({
             </button>
           </div>
         </header>
-        {preview.kind === "pdf" && preview.url ? (
+        {preview.kind === "image" && preview.url ? (
+          <div className="public-image-preview-frame">
+            <img src={preview.url} alt={preview.fileName} />
+          </div>
+        ) : preview.kind === "pdf" && preview.url ? (
           <iframe
             className="pdf-preview-frame"
             referrerPolicy="no-referrer"
@@ -7740,7 +7744,7 @@ async function imageFileToResizedDataUrl(file: File) {
   return resizeImageDataUrl(dataUrl);
 }
 
-function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
+export function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
   const decodedText = decodeReadableBytes(bytes);
 
   if (extension === "json") {
@@ -7754,7 +7758,7 @@ function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
   return decodedText.slice(0, maxTextPreviewCharacters);
 }
 
-async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array) {
+export async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array) {
   if (typeof document === "undefined") {
     return "";
   }
@@ -8182,7 +8186,7 @@ interface HwpPreviewByteBudget {
   remainingBytes: number;
 }
 
-async function extractHwpPreviewHtml(bytes: Uint8Array): Promise<HwpPreviewResult> {
+export async function extractHwpPreviewHtml(bytes: Uint8Array): Promise<HwpPreviewResult> {
   try {
     const CFB = await import("cfb");
     const container = CFB.read(bytes, { type: "array" });
@@ -8221,7 +8225,7 @@ async function extractHwpPreviewHtml(bytes: Uint8Array): Promise<HwpPreviewResul
   }
 }
 
-function extractHwpxPreviewHtml(bytes: Uint8Array) {
+export function extractHwpxPreviewHtml(bytes: Uint8Array) {
   if (typeof DOMParser === "undefined") {
     return "";
   }
@@ -8259,7 +8263,7 @@ function extractHwpxPreviewHtml(bytes: Uint8Array) {
   }
 }
 
-function extractXlsxPreviewHtml(bytes: Uint8Array) {
+export function extractXlsxPreviewHtml(bytes: Uint8Array) {
   if (typeof DOMParser === "undefined") {
     return "";
   }
@@ -9425,7 +9429,7 @@ function escapeHtml(value: string) {
   });
 }
 
-function legacyBinaryPreviewMessage(extension: string) {
+export function legacyBinaryPreviewMessage(extension: string) {
   const upperExtension = extension.toUpperCase();
 
   return [
