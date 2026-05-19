@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { FormEvent, useEffect, useId, useMemo, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { serverTimestamp } from "firebase/firestore";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
@@ -26,6 +26,7 @@ import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHo
 import {
   addDays,
   buildCalendarMonth,
+  buildCalendarTaskLayout,
   compareCompletedTasks,
   compareTaskSchedule,
   emptyScheduleDetails,
@@ -37,7 +38,10 @@ import {
   isSafeScheduleDateRange,
   isValidScheduleDateString,
   maxScheduleTaskRangeDays,
+  nextScheduleTaskColor,
   normalizeScheduleDetails,
+  normalizeScheduleTaskColor,
+  scheduleTaskColorPalette,
   taskEndDate,
   taskStartDate,
   taskStartTime,
@@ -76,6 +80,7 @@ interface QuickDefaults {
   endDate?: string | null;
   startTimeMinutes?: number | null;
   endTimeMinutes?: number | null;
+  color?: string | null;
   isImportant?: boolean;
   isUrgent?: boolean;
 }
@@ -89,6 +94,7 @@ interface TaskDraft {
   timeMode: "none" | "point" | "range";
   startTime: string;
   endTime: string;
+  color: string;
   isImportant: boolean;
   isUrgent: boolean;
   status: DecryptedScheduleTask["status"];
@@ -103,6 +109,7 @@ interface CreateTaskDraft {
   timeMode: "none" | "point" | "range";
   startTime: string;
   endTime: string;
+  color: string;
   isImportant: boolean;
   isUrgent: boolean;
 }
@@ -237,6 +244,10 @@ export default function SchedulePage() {
     [calendarCursor, today]
   );
   const calendarTaskMap = useMemo(() => tasksByDate(sortedTasks), [sortedTasks]);
+  const calendarTaskLayout = useMemo(
+    () => buildCalendarTaskLayout(calendarWeeks, sortedTasks),
+    [calendarWeeks, sortedTasks]
+  );
   const calendarHolidayMap = useMemo(
     () => getKoreanHolidayMapForDates(calendarWeeks.flatMap((week) => week.days.map((day) => day.dateString))),
     [calendarWeeks]
@@ -304,6 +315,7 @@ export default function SchedulePage() {
         endDate,
         startTimeMinutes,
         endTimeMinutes,
+        color: normalizeScheduleTaskColor(draft.color),
         isImportant: draft.isImportant,
         isUrgent: draft.isUrgent
       });
@@ -366,6 +378,7 @@ export default function SchedulePage() {
         endDate,
         startTimeMinutes,
         endTimeMinutes,
+        color: normalizeScheduleTaskColor(draft.color),
         isImportant: draft.isImportant,
         isUrgent: draft.isUrgent,
         status: draft.status,
@@ -418,11 +431,13 @@ export default function SchedulePage() {
   }
 
   function quickDefaultsForActiveView(): QuickDefaults {
+    const color = nextScheduleTaskColor(decryptedTasks);
+
     if (activeView === "calendar") {
-      return { startDate: selectedCalendarDate, endDate: selectedCalendarDate };
+      return { startDate: selectedCalendarDate, endDate: selectedCalendarDate, color };
     }
 
-    return { startDate: today, endDate: today };
+    return { startDate: today, endDate: today, color };
   }
 
   function moveCalendarMonth(offset: number) {
@@ -438,7 +453,7 @@ export default function SchedulePage() {
   function openCalendarCreateDialog(dateString: string) {
     setSelectedCalendarDate(dateString);
     setCreateDialog({
-      defaults: { startDate: dateString, endDate: dateString },
+      defaults: { startDate: dateString, endDate: dateString, color: nextScheduleTaskColor(decryptedTasks) },
       title: `${formatDateLabel(dateString)} 일정 추가`
     });
   }
@@ -449,6 +464,7 @@ export default function SchedulePage() {
       defaults: {
         startDate: today,
         endDate: today,
+        color: nextScheduleTaskColor(decryptedTasks),
         isImportant: section.isImportant,
         isUrgent: section.isUrgent
       },
@@ -503,6 +519,7 @@ export default function SchedulePage() {
 
         {activeView === "calendar" && (
           <CalendarView
+            calendarTaskLayout={calendarTaskLayout}
             calendarTaskMap={calendarTaskMap}
             holidayMap={calendarHolidayMap}
             selectedDate={selectedCalendarDate}
@@ -752,6 +769,10 @@ function ScheduleCreateForm({
             />
           </label>
         )}
+        <ScheduleColorPicker
+          value={draft.color}
+          onChange={(color) => setDraft((current) => ({ ...current, color }))}
+        />
       </div>
       <label className="schedule-create-details">
         <span>내용</span>
@@ -1046,6 +1067,34 @@ function DatePickerField({
   );
 }
 
+function ScheduleColorPicker({ onChange, value }: { onChange: (color: string) => void; value: string }) {
+  const normalizedValue = normalizeScheduleTaskColor(value);
+
+  return (
+    <div className="schedule-color-picker">
+      <span>색상</span>
+      <div>
+        {scheduleTaskColorPalette.map((color) => (
+          <button
+            aria-label={`${color} 색상 선택`}
+            className={normalizeScheduleTaskColor(color) === normalizedValue ? "active" : ""}
+            key={color}
+            onClick={() => onChange(color)}
+            style={{ "--schedule-task-color": color } as CSSProperties}
+            type="button"
+          />
+        ))}
+        <input
+          aria-label="사용자 지정 색상"
+          onChange={(event) => onChange(event.target.value)}
+          type="color"
+          value={normalizedValue}
+        />
+      </div>
+    </div>
+  );
+}
+
 function TodoView({
   groups,
   onOpen,
@@ -1071,6 +1120,7 @@ function TodoView({
 }
 
 function CalendarView({
+  calendarTaskLayout,
   calendarTaskMap,
   holidayMap,
   monthLabel,
@@ -1084,6 +1134,7 @@ function CalendarView({
   selectedDayTasks,
   weeks
 }: {
+  calendarTaskLayout: ReturnType<typeof buildCalendarTaskLayout>;
   calendarTaskMap: Record<string, DecryptedScheduleTask[]>;
   holidayMap: Record<string, KoreanHoliday[]>;
   monthLabel: string;
@@ -1126,6 +1177,9 @@ function CalendarView({
           {weeks.flatMap((week) =>
             week.days.map((day) => {
               const dayTasks = calendarTaskMap[day.dateString] ?? [];
+              const dayPlacements = calendarTaskLayout[day.dateString] ?? [];
+              const visiblePlacements = dayPlacements.slice(0, 4);
+              const visibleTaskCount = visiblePlacements.filter(Boolean).length;
               const holidays = holidayMap[day.dateString] ?? [];
               const isHoliday = holidays.length > 0;
               const isSaturday = day.date.getDay() === 6;
@@ -1156,7 +1210,12 @@ function CalendarView({
                     {holidays[0] && <span className="calendar-holiday-label">{holidays[0].name}</span>}
                   </span>
                   <span className="calendar-task-stack">
-                    {dayTasks.slice(0, 4).map((task) => {
+                    {visiblePlacements.map((placement, slotIndex) => {
+                      if (!placement) {
+                        return <span aria-hidden="true" className="calendar-task-spacer" key={`empty-${slotIndex}`} />;
+                      }
+
+                      const { color, task } = placement;
                       const rangePosition = calendarTaskRangePosition(task, day.dateString);
                       const showLabel = shouldShowCalendarTaskLabel(task, day.dateString, firstVisibleDate);
                       const timeLabel = formatScheduleTimeRange(task);
@@ -1173,6 +1232,7 @@ function CalendarView({
                             .filter(Boolean)
                             .join(" ")}
                           key={task.id}
+                          style={{ "--schedule-task-color": color } as CSSProperties}
                           title={`${task.title}${timeLabel ? ` · ${timeLabel}` : ""}`}
                         >
                           {showLabel && (
@@ -1184,7 +1244,7 @@ function CalendarView({
                         </span>
                       );
                     })}
-                    {dayTasks.length > 4 && <span className="calendar-more">+{dayTasks.length - 4}</span>}
+                    {dayTasks.length > visibleTaskCount && <span className="calendar-more">+{dayTasks.length - visibleTaskCount}</span>}
                   </span>
                 </button>
               );
@@ -1827,6 +1887,10 @@ function TaskDetailModal({
               긴급
             </label>
           </div>
+          <ScheduleColorPicker
+            value={draft.color}
+            onChange={(color) => setDraft((current) => ({ ...current, color }))}
+          />
           <label>
             설명
             <textarea
@@ -1933,6 +1997,7 @@ function draftFromTask(task: DecryptedScheduleTask): TaskDraft {
     timeMode: startTime == null ? "none" : endTime == null ? "point" : "range",
     startTime: formatTaskTime(startTime),
     endTime: formatTaskTime(endTime),
+    color: normalizeScheduleTaskColor(task.color),
     isImportant: task.isImportant,
     isUrgent: task.isUrgent,
     status: task.status
@@ -1953,6 +2018,7 @@ function createDraftFromDefaults(defaults: QuickDefaults): CreateTaskDraft {
     timeMode: hasStartTime ? (defaults.endTimeMinutes == null ? "point" : "range") : "none",
     startTime: formatTaskTime(defaults.startTimeMinutes ?? null),
     endTime: formatTaskTime(defaults.endTimeMinutes ?? null),
+    color: normalizeScheduleTaskColor(defaults.color),
     isImportant: defaults.isImportant ?? false,
     isUrgent: defaults.isUrgent ?? false
   };

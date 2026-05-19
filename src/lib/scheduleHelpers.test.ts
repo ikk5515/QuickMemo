@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DecryptedScheduleTask } from "../types";
 import {
   buildCalendarMonth,
+  buildCalendarTaskLayout,
   formatScheduleDateRange,
   formatScheduleTimeRange,
   formatTaskTime,
@@ -10,7 +11,9 @@ import {
   isSafeScheduleDateRange,
   tasksByDate,
   matrixQuadrantForTask,
+  normalizeScheduleTaskColor,
   scheduleDateRangeDays,
+  scheduleTaskColorPalette,
   timeInputToMinutes
 } from "./scheduleHelpers";
 
@@ -85,6 +88,30 @@ describe("schedule helpers", () => {
     expect(dateMap["2026-05-18"]).toBeUndefined();
     expect(formatScheduleDateRange(dateMap["2026-05-15"][0])).toBe("2026-05-15 - 2026-05-17");
     expect(formatScheduleTimeRange(dateMap["2026-05-15"][0])).toBe("09:00 - 10:00");
+  });
+
+  it("keeps multi-day calendar tasks in the same visual slot across dates", () => {
+    const weeks = buildCalendarMonth(2026, 4, "2026-05-19");
+    const layout = buildCalendarTaskLayout(weeks, [
+      task("single-20", {
+        dueDate: "2026-05-20",
+        startDate: "2026-05-20",
+        endDate: "2026-05-20",
+        createdAt: timestamp("2026-05-20T08:00:00Z")
+      }),
+      task("range-20-21", {
+        dueDate: "2026-05-20",
+        startDate: "2026-05-20",
+        endDate: "2026-05-21",
+        color: "#7f99c2",
+        createdAt: timestamp("2026-05-20T09:00:00Z")
+      })
+    ]);
+
+    expect(layout["2026-05-20"].map((placement) => placement?.task.id ?? null)).toEqual(["single-20", "range-20-21"]);
+    expect(layout["2026-05-21"].map((placement) => placement?.task.id ?? null)).toEqual([null, "range-20-21"]);
+    expect(layout["2026-05-21"][1]?.color).toBe("#7f99c2");
+    expect(normalizeScheduleTaskColor("not-a-color", 2)).toBe(scheduleTaskColorPalette[2]);
   });
 
   it("sorts active tasks before completed tasks on the same calendar date", () => {

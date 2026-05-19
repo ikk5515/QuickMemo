@@ -334,6 +334,15 @@ service cloud.firestore {
       return value == null || (value is int && value >= 0 && value <= 1439);
     }
 
+    function validScheduleColor(data) {
+      return !data.keys().hasAny(["color"])
+        || data.color == null
+        || (
+          data.color is string
+          && data.color.matches("^#[0-9A-Fa-f]{6}$")
+        );
+    }
+
     function scheduleStartDate(data) {
       return data.keys().hasAny(["startDate"]) ? data.startDate : data.dueDate;
     }
@@ -445,6 +454,7 @@ service cloud.firestore {
         "endDate",
         "startTimeMinutes",
         "endTimeMinutes",
+        "color",
         "isImportant",
         "isUrgent",
         "encryptedTitle",
@@ -460,6 +470,7 @@ service cloud.firestore {
       && data.status in ["active", "completed"]
       && validScheduleDateRange(data)
       && validScheduleTimeRange(data)
+      && validScheduleColor(data)
       && data.isImportant is bool
       && data.isUrgent is bool
       && encryptedSchedulePayload(data.encryptedTitle, 4096)
@@ -1407,6 +1418,7 @@ service cloud.firestore {
           "endDate",
           "startTimeMinutes",
           "endTimeMinutes",
+          "color",
           "isImportant",
           "isUrgent",
           "encryptedTitle",

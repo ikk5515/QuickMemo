@@ -21,6 +21,14 @@ export interface CalendarWeek {
   days: CalendarDay[];
 }
 
+export interface CalendarTaskPlacement {
+  color: string;
+  slotIndex: number;
+  task: DecryptedScheduleTask;
+}
+
+export type CalendarTaskLayout = Record<string, Array<CalendarTaskPlacement | null>>;
+
 export interface MatrixSection {
   key: MatrixQuadrantKey;
   label: string;
@@ -32,8 +40,19 @@ export interface MatrixSection {
 
 const dayMillis = 24 * 60 * 60 * 1000;
 const scheduleDatePattern = /^(19|20|21)\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+const scheduleColorPattern = /^#[0-9a-f]{6}$/i;
 
 export const maxScheduleTaskRangeDays = 366;
+export const scheduleTaskColorPalette = [
+  "#6fa99f",
+  "#7f99c2",
+  "#b79252",
+  "#bd7b73",
+  "#8f9f68",
+  "#a888b8",
+  "#729eae",
+  "#c28794"
+];
 
 export const emptyScheduleDetails: ScheduleTaskDetails = {
   description: "",
@@ -124,6 +143,18 @@ function taskCreatedMillis(task: Pick<DecryptedScheduleTask, "createdAt" | "upda
   return timestampMillis(task.createdAt) || timestampMillis(task.updatedAt);
 }
 
+export function normalizeScheduleTaskColor(color: string | null | undefined, fallbackIndex = 0) {
+  if (typeof color === "string" && scheduleColorPattern.test(color)) {
+    return color;
+  }
+
+  return scheduleTaskColorPalette[Math.abs(fallbackIndex) % scheduleTaskColorPalette.length];
+}
+
+export function nextScheduleTaskColor(tasks: Array<Pick<DecryptedScheduleTask, "createdAt" | "updatedAt">>) {
+  return scheduleTaskColorPalette[tasks.length % scheduleTaskColorPalette.length];
+}
+
 export function compareTaskNewest(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
   const leftCreated = taskCreatedMillis(left);
   const rightCreated = taskCreatedMillis(right);
@@ -201,6 +232,21 @@ export function compareTaskSchedule(left: DecryptedScheduleTask, right: Decrypte
 export function compareCalendarTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
   if (left.status !== right.status) {
     return left.status === "active" ? -1 : 1;
+  }
+
+  return compareTaskSchedule(left, right);
+}
+
+function compareCalendarLayoutTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  if (left.status !== right.status) {
+    return left.status === "active" ? -1 : 1;
+  }
+
+  const leftCreated = taskCreatedMillis(left);
+  const rightCreated = taskCreatedMillis(right);
+
+  if (leftCreated !== rightCreated) {
+    return leftCreated - rightCreated;
   }
 
   return compareTaskSchedule(left, right);
@@ -385,6 +431,94 @@ export function tasksByDate(tasks: DecryptedScheduleTask[]) {
 
     return map;
   }, {});
+}
+
+function taskDateRange(task: DecryptedScheduleTask) {
+  const startDate = taskStartDate(task);
+  const endDate = taskEndDate(task);
+
+  if (!isValidScheduleDateString(startDate)) {
+    return null;
+  }
+
+  const lastDate = isValidScheduleDateString(endDate) && endDate >= startDate ? endDate : startDate;
+  const rangeDays = scheduleDateRangeDays(startDate, lastDate);
+
+  if (rangeDays == null || rangeDays > maxScheduleTaskRangeDays) {
+    return null;
+  }
+
+  return { endDate: lastDate, startDate };
+}
+
+export function buildCalendarTaskLayout(weeks: CalendarWeek[], tasks: DecryptedScheduleTask[]): CalendarTaskLayout {
+  const layout: CalendarTaskLayout = {};
+
+  weeks.forEach((week) => {
+    const weekStart = week.days[0]?.dateString;
+    const weekEnd = week.days[week.days.length - 1]?.dateString;
+
+    if (!weekStart || !weekEnd) {
+      return;
+    }
+
+    const occupied = new Map<string, Set<number>>();
+    const weekTasks = tasks
+      .flatMap((task) => {
+        const range = taskDateRange(task);
+
+        return range ? [{ range, task }] : [];
+      })
+      .filter(
+        (entry) =>
+          entry.range.startDate <= weekEnd
+          && entry.range.endDate >= weekStart
+      )
+      .sort((left, right) => compareCalendarLayoutTasks(left.task, right.task));
+
+    weekTasks.forEach(({ range, task }) => {
+      const segmentStart = range.startDate > weekStart ? range.startDate : weekStart;
+      const segmentEnd = range.endDate < weekEnd ? range.endDate : weekEnd;
+      const segmentDays = scheduleDateRangeDays(segmentStart, segmentEnd);
+
+      if (segmentDays == null) {
+        return;
+      }
+
+      const dates: string[] = [];
+      let cursor = segmentStart;
+
+      for (let offset = 0; offset < segmentDays; offset += 1) {
+        dates.push(cursor);
+        cursor = addDays(cursor, 1);
+      }
+
+      let slotIndex = 0;
+
+      while (dates.some((dateString) => occupied.get(dateString)?.has(slotIndex))) {
+        slotIndex += 1;
+      }
+
+      const color = normalizeScheduleTaskColor(task.color, slotIndex);
+
+      dates.forEach((dateString) => {
+        const dateOccupied = occupied.get(dateString) ?? new Set<number>();
+        dateOccupied.add(slotIndex);
+        occupied.set(dateString, dateOccupied);
+
+        const placements = layout[dateString] ?? [];
+
+        while (placements.length < slotIndex) {
+          placements.push(null);
+        }
+
+        placements[slotIndex] = { color, slotIndex, task };
+        layout[dateString] = placements;
+      });
+    });
+  });
+
+  return layout;
 }
 
 export function matrixQuadrantForTask(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent">): MatrixQuadrantKey {

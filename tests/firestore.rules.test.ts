@@ -659,6 +659,20 @@ describeRules("firestore security rules", () => {
     );
     await assertSucceeds(
       updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        color: "#7f99c2",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        color: "javascript:alert(1)",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
         dueDate: "2026-05-15",
         dueTimeMinutes: 540,
         startDate: "2026-05-15",
