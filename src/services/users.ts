@@ -1,7 +1,7 @@
 import { collection, deleteField, doc, getDoc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { sortRoster } from "../lib/roster";
-import type { PublicRosterUser, UserKeyBundle, UserKeyDocument, UserProfile } from "../types";
+import type { PublicRosterUser, UserKeyBundle, UserKeyDocument, UserPasskeyUnlock, UserProfile } from "../types";
 
 export function subscribeRoster(callback: (users: PublicRosterUser[]) => void, onError?: (error: Error) => void) {
   const rosterQuery = query(collection(db, "publicLoginRoster"), orderBy("order", "asc"));
@@ -83,6 +83,24 @@ export async function clearPendingUserKey(uid: string) {
     pendingKdfSalt: deleteField(),
     pendingKdfIterations: deleteField(),
     pendingCreatedAt: deleteField(),
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function saveUserPasskeyUnlock(uid: string, passkeyUnlock: UserPasskeyUnlock) {
+  await updateDoc(doc(db, "userKeys", uid), {
+    passkeyUnlock: {
+      ...passkeyUnlock,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    },
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function clearUserPasskeyUnlock(uid: string) {
+  await updateDoc(doc(db, "userKeys", uid), {
+    passkeyUnlock: deleteField(),
     updatedAt: serverTimestamp()
   });
 }
