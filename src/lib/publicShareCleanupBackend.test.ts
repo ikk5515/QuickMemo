@@ -38,4 +38,13 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain("queryExpiredShares");
     expect(cleanupFunctionSource).toContain("queryExpiredPublicShareAttachments");
   });
+
+  it("uses high-capacity batched deletes so the no-billing fallback is harder to outpace", () => {
+    expect(cleanupFunctionSource).toContain("const defaultBatchSize = 100");
+    expect(cleanupFunctionSource).toContain("const defaultMaxDocumentDeletes = 18000");
+    expect(cleanupFunctionSource).toContain("const firestoreCommitWriteLimit = 500");
+    expect(cleanupFunctionSource).toContain("firestoreCommitPathFromDocumentName");
+    expect(cleanupFunctionSource).toContain("firestoreDeleteMany");
+    expect(cleanupFunctionSource).toContain(":commit");
+  });
 });
