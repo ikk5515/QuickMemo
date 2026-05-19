@@ -28,6 +28,7 @@ import {
   addDays,
   buildCalendarMonth,
   buildCalendarTaskLayout,
+  compareCalendarAgendaTasks,
   compareCompletedTasks,
   compareTaskSchedule,
   emptyScheduleDetails,
@@ -252,7 +253,10 @@ export default function SchedulePage() {
     () => getKoreanHolidayMapForDates(calendarWeeks.flatMap((week) => week.days.map((day) => day.dateString))),
     [calendarWeeks]
   );
-  const selectedDayTasks = calendarTaskMap[selectedCalendarDate] ?? [];
+  const selectedDayTasks = useMemo(
+    () => [...(calendarTaskMap[selectedCalendarDate] ?? [])].sort(compareCalendarAgendaTasks),
+    [calendarTaskMap, selectedCalendarDate]
+  );
 
   if (!profile) {
     return null;
