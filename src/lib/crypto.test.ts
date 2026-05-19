@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  base64ToBytes,
   decryptBytes,
   decryptText,
+  derivePublicShareContentKey,
   encryptBytes,
   encryptText,
+  exportAesKeyBase64Url,
   generateNoteKey,
   generateUserKeyBundle,
+  hashPublicSharePassword,
   unlockPrivateKey,
   unwrapNoteKey,
+  verifyPublicSharePassword,
   wrapNoteKey
 } from "./crypto";
 import type { UserKeyDocument } from "../types";
@@ -53,5 +58,26 @@ describe("client encryption", () => {
     };
 
     await expect(unlockPrivateKey(keyDocument, "wrong-password")).rejects.toThrow();
+  });
+
+  it("keeps public share password verifiers separate from content encryption keys", async () => {
+    const password = "share-password";
+    const shareKeyValue = await exportAesKeyBase64Url(await generateNoteKey());
+    const passwordHash = await hashPublicSharePassword(password, shareKeyValue);
+    const contentKey = await derivePublicShareContentKey(shareKeyValue, password, passwordHash);
+    const encrypted = await encryptText("protected public note", contentKey);
+    const leakedVerifierKey = await crypto.subtle.importKey(
+      "raw",
+      base64ToBytes(passwordHash.hash),
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["decrypt"]
+    );
+
+    expect(passwordHash.version).toBe(2);
+    await expect(verifyPublicSharePassword(password, passwordHash, shareKeyValue)).resolves.toBe(true);
+    await expect(verifyPublicSharePassword("wrong-password", passwordHash, shareKeyValue)).resolves.toBe(false);
+    await expect(decryptText(encrypted, contentKey)).resolves.toBe("protected public note");
+    await expect(decryptText(encrypted, leakedVerifierKey)).rejects.toThrow();
   });
 });
