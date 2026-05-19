@@ -166,6 +166,48 @@ export function compareTaskNewest(left: DecryptedScheduleTask, right: DecryptedS
   return compareTaskSchedule(left, right);
 }
 
+function taskPriorityRank(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent">) {
+  if (task.isImportant && task.isUrgent) {
+    return 0;
+  }
+
+  if (task.isImportant) {
+    return 1;
+  }
+
+  if (task.isUrgent) {
+    return 2;
+  }
+
+  return 3;
+}
+
+export function compareTodoTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  const leftPriority = taskPriorityRank(left);
+  const rightPriority = taskPriorityRank(right);
+
+  if (leftPriority !== rightPriority) {
+    return leftPriority - rightPriority;
+  }
+
+  const leftTime = taskStartTime(left);
+  const rightTime = taskStartTime(right);
+
+  if (leftTime != null && rightTime != null && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+
+  if (leftTime != null) {
+    return -1;
+  }
+
+  if (rightTime != null) {
+    return 1;
+  }
+
+  return compareTaskNewest(left, right);
+}
+
 export function compareCompletedTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
   const leftCompleted = timestampMillis(left.completedAt);
   const rightCompleted = timestampMillis(right.completedAt);
@@ -365,11 +407,11 @@ export function groupTasksByTodoDate(tasks: DecryptedScheduleTask[], today = toL
   });
 
   return [
-    { key: "today", label: "오늘", tasks: groups.today.sort(compareTaskNewest) },
-    { key: "tomorrow", label: "내일", tasks: groups.tomorrow.sort(compareTaskNewest) },
-    { key: "next7", label: "다음 7일", tasks: groups.next7.sort(compareTaskNewest) },
-    { key: "later", label: "이후", tasks: groups.later.sort(compareTaskNewest) },
-    { key: "noDate", label: "날짜 없음", tasks: groups.noDate.sort(compareTaskNewest) },
+    { key: "today", label: "오늘", tasks: groups.today.sort(compareTodoTasks) },
+    { key: "tomorrow", label: "내일", tasks: groups.tomorrow.sort(compareTodoTasks) },
+    { key: "next7", label: "다음 7일", tasks: groups.next7.sort(compareTodoTasks) },
+    { key: "later", label: "이후", tasks: groups.later.sort(compareTodoTasks) },
+    { key: "noDate", label: "날짜 없음", tasks: groups.noDate.sort(compareTodoTasks) },
     { key: "completed", label: "최근 완료", tasks: groups.completed.sort(compareCompletedTasks) }
   ];
 }

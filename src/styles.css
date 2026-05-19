@@ -5472,6 +5472,16 @@ textarea {
   position: relative;
 }
 
+.time-picker-field {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 6px;
+  min-width: 0;
+  position: relative;
+}
+
 .date-picker-shell {
   display: grid;
   gap: 6px;
@@ -5480,7 +5490,8 @@ textarea {
   position: relative;
 }
 
-.date-picker-trigger {
+.date-picker-trigger,
+.time-picker-trigger {
   background: var(--surface);
   border: 1px solid var(--line);
   color: var(--ink);
@@ -5490,11 +5501,13 @@ textarea {
   width: 100%;
 }
 
-.date-picker-trigger.empty {
+.date-picker-trigger.empty,
+.time-picker-trigger.empty {
   color: var(--muted);
 }
 
-.date-picker-trigger span {
+.date-picker-trigger span,
+.time-picker-trigger span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5507,7 +5520,8 @@ textarea {
   width: 42px;
 }
 
-.date-picker-popover {
+.date-picker-popover,
+.time-picker-popover {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -5523,13 +5537,15 @@ textarea {
   z-index: 22;
 }
 
-.date-picker-popover header {
+.date-picker-popover header,
+.time-picker-popover header {
   align-items: center;
   display: flex;
   justify-content: space-between;
 }
 
-.date-picker-popover strong {
+.date-picker-popover strong,
+.time-picker-popover strong {
   font-size: 15px;
   letter-spacing: 0;
 }
@@ -5640,6 +5656,98 @@ textarea {
   background: #f6f8f5;
   color: #bac1c6;
   cursor: not-allowed;
+}
+
+.time-picker-popover {
+  gap: 12px;
+  width: min(340px, calc(100vw - 40px));
+}
+
+.time-picker-popover header span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.time-picker-presets {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.time-picker-presets button,
+.time-picker-hour-grid button,
+.time-picker-minute-grid button {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 900;
+  min-height: 34px;
+  padding: 0 8px;
+}
+
+.time-picker-presets button:hover,
+.time-picker-hour-grid button:hover,
+.time-picker-minute-grid button:hover,
+.time-picker-presets button:focus-visible,
+.time-picker-hour-grid button:focus-visible,
+.time-picker-minute-grid button:focus-visible {
+  background: var(--surface);
+  border-color: color-mix(in srgb, var(--teal) 34%, #ffffff);
+}
+
+.time-picker-presets button.selected,
+.time-picker-hour-grid button.selected,
+.time-picker-minute-grid button.selected {
+  background: color-mix(in srgb, var(--teal) 12%, #ffffff);
+  border-color: color-mix(in srgb, var(--teal) 48%, #ffffff);
+  color: color-mix(in srgb, var(--teal) 78%, var(--ink));
+}
+
+.time-picker-presets button:disabled,
+.time-picker-hour-grid button:disabled,
+.time-picker-minute-grid button:disabled {
+  background: #f6f8f5;
+  color: #b4bdc3;
+  cursor: not-allowed;
+}
+
+.time-picker-columns {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+}
+
+.time-picker-columns section {
+  display: grid;
+  gap: 7px;
+}
+
+.time-picker-columns section > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.time-picker-hour-grid,
+.time-picker-minute-grid {
+  display: grid;
+  gap: 5px;
+}
+
+.time-picker-hour-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.time-picker-minute-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.time-picker-popover footer {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .schedule-create-title {
@@ -6511,6 +6619,7 @@ textarea {
 }
 
 .schedule-detail-modal label,
+.schedule-detail-modal .time-picker-field,
 .schedule-checklist {
   display: grid;
   gap: 7px;
@@ -6643,9 +6752,14 @@ textarea {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .date-picker-popover {
+  .date-picker-popover,
+  .time-picker-popover {
     max-width: none;
     width: 100%;
+  }
+
+  .time-picker-columns {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .schedule-section,

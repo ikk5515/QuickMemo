@@ -71,6 +71,55 @@ describe("schedule helpers", () => {
     ]);
   });
 
+  it("sorts todo groups by priority, time, then newest creation", () => {
+    const groups = groupTasksByTodoDate(
+      [
+        task("normal-old", {
+          dueDate: "2026-05-19",
+          createdAt: timestamp("2026-05-19T08:00:00Z")
+        }),
+        task("normal-new", {
+          dueDate: "2026-05-19",
+          createdAt: timestamp("2026-05-19T10:00:00Z")
+        }),
+        task("urgent", {
+          dueDate: "2026-05-19",
+          isUrgent: true,
+          createdAt: timestamp("2026-05-19T07:00:00Z")
+        }),
+        task("important", {
+          dueDate: "2026-05-19",
+          isImportant: true,
+          createdAt: timestamp("2026-05-19T06:00:00Z")
+        }),
+        task("top-late", {
+          dueDate: "2026-05-19",
+          isImportant: true,
+          isUrgent: true,
+          startTimeMinutes: 900,
+          createdAt: timestamp("2026-05-19T11:00:00Z")
+        }),
+        task("top-early", {
+          dueDate: "2026-05-19",
+          isImportant: true,
+          isUrgent: true,
+          startTimeMinutes: 540,
+          createdAt: timestamp("2026-05-19T05:00:00Z")
+        })
+      ],
+      "2026-05-19"
+    );
+
+    expect(groups.find((group) => group.key === "today")?.tasks.map((item) => item.id)).toEqual([
+      "top-early",
+      "top-late",
+      "important",
+      "urgent",
+      "normal-new",
+      "normal-old"
+    ]);
+  });
+
   it("places multi-day tasks on every calendar date in range", () => {
     const dateMap = tasksByDate([
       task("range", {
