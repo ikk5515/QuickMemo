@@ -5,15 +5,15 @@ import { describe, expect, it } from "vitest";
 const notesPageSource = readFileSync(join(process.cwd(), "src/pages/NotesPage.tsx"), "utf8");
 
 describe("NotesPage security controls", () => {
-  it("renders PDF previews in a sandboxed iframe without script, same-origin, or referrer grants", () => {
+  it("renders PDF previews directly in an iframe for Chrome PDF viewer compatibility", () => {
     const pdfPreviewBranch = notesPageSource.match(/preview\.kind === "pdf" && preview\.url \? \([\s\S]*?\) : preview\.kind === "docx"/)?.[0] ?? "";
 
     expect(pdfPreviewBranch).toContain("<iframe");
     expect(pdfPreviewBranch).toContain('className="pdf-preview-frame"');
-    expect(pdfPreviewBranch).toContain('sandbox=""');
     expect(pdfPreviewBranch).toContain('referrerPolicy="no-referrer"');
     expect(pdfPreviewBranch).toContain("src={preview.url}");
     expect(pdfPreviewBranch).not.toContain("<object");
+    expect(pdfPreviewBranch).not.toContain("sandbox=");
     expect(pdfPreviewBranch).not.toContain("allow-scripts");
     expect(pdfPreviewBranch).not.toContain("allow-same-origin");
     expect(notesPageSource).not.toContain("dangerouslySetInnerHTML={preview");

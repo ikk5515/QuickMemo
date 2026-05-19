@@ -6991,7 +6991,6 @@ export function AttachmentPreviewModal({
           <iframe
             className="pdf-preview-frame"
             referrerPolicy="no-referrer"
-            sandbox=""
             src={preview.url}
             title={`${preview.fileName} PDF 미리보기`}
           />
