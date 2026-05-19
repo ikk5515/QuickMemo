@@ -1553,7 +1553,7 @@ service cloud.firestore {
         && publicShareOwner(getAfter(publicSharePath(shareId)).data)
         && request.resource.data.expiresAt == getAfter(publicSharePath(shareId)).data.expiresAt;
       allow update: if false;
-      allow delete: if publicShareCleanupQueueOwner(shareId);
+      allow delete: if false;
 
       match /publicShareAttachmentCleanupQueue/{attachmentId} {
         allow get, list: if exists(publicSharePath(shareId))
@@ -1565,8 +1565,7 @@ service cloud.firestore {
           && request.resource.data.expiresAt == getAfter(publicSharePath(shareId)).data.expiresAt
           && request.resource.data.expiresAt == getAfter(publicShareAttachmentPath(shareId, attachmentId)).data.expiresAt;
         allow update: if false;
-        allow delete: if exists(publicSharePath(shareId))
-          && publicShareOwner(get(publicSharePath(shareId)).data);
+        allow delete: if false;
       }
     }
 

@@ -247,30 +247,20 @@ export async function revokePublicNoteShare(shareId: string, ownerUid: string) {
 
 export async function deletePublicNoteShare(shareId: string) {
   const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
-  const attachmentCleanupSnapshot = await getDocs(
-    collection(db, "publicShareCleanupQueue", shareId, "publicShareAttachmentCleanupQueue")
-  );
   const batch = writeBatch(db);
 
   attachmentsSnapshot.docs.forEach((attachment) => {
     batch.delete(attachment.ref);
   });
-  attachmentCleanupSnapshot.docs.forEach((attachmentCleanup) => {
-    batch.delete(attachmentCleanup.ref);
-  });
   batch.delete(doc(db, "publicNoteShares", shareId));
-  batch.delete(publicShareCleanupQueueRef(shareId));
 
   await batch.commit();
 }
 
 export async function deletePublicNoteShareAttachments(shareId: string) {
   const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
-  const attachmentCleanupSnapshot = await getDocs(
-    collection(db, "publicShareCleanupQueue", shareId, "publicShareAttachmentCleanupQueue")
-  );
 
-  if (attachmentsSnapshot.empty && attachmentCleanupSnapshot.empty) {
+  if (attachmentsSnapshot.empty) {
     return;
   }
 
@@ -278,9 +268,6 @@ export async function deletePublicNoteShareAttachments(shareId: string) {
 
   attachmentsSnapshot.docs.forEach((attachment) => {
     batch.delete(attachment.ref);
-  });
-  attachmentCleanupSnapshot.docs.forEach((attachmentCleanup) => {
-    batch.delete(attachmentCleanup.ref);
   });
 
   await batch.commit();

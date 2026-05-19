@@ -921,7 +921,7 @@ describeRules("firestore security rules", () => {
     await assertFails(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
   });
 
-  it("keeps cleanup queues owner-only while enforcing queue creation for server cleanup", async () => {
+  it("keeps cleanup queues immutable to users while enforcing queue creation for server cleanup", async () => {
     const expiredAt = new Date(Date.now() - 60 * 60 * 1000);
     const futureExpiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
 
@@ -985,13 +985,33 @@ describeRules("firestore security rules", () => {
     await assertFails(deleteDoc(doc(publicDb, "publicNoteShares/active-queued")));
     await assertFails(deleteDoc(doc(publicDb, "publicNoteShares/expired-without-queue")));
     await assertFails(deleteDoc(doc(publicDb, "publicShareCleanupQueue/expired-queued")));
+    await assertFails(deleteDoc(doc(ownerDb, "publicShareCleanupQueue/expired-queued")));
+    await assertFails(
+      deleteDoc(doc(ownerDb, "publicShareCleanupQueue/expired-queued/publicShareAttachmentCleanupQueue/attachment-a"))
+    );
+
+    const unsafeOwnerDeleteBatch = writeBatch(ownerDb);
+    unsafeOwnerDeleteBatch.delete(doc(ownerDb, "publicNoteShares/expired-queued/attachments/attachment-a"));
+    unsafeOwnerDeleteBatch.delete(doc(ownerDb, "publicShareCleanupQueue/expired-queued/publicShareAttachmentCleanupQueue/attachment-a"));
+    unsafeOwnerDeleteBatch.delete(doc(ownerDb, "publicNoteShares/expired-queued"));
+    unsafeOwnerDeleteBatch.delete(doc(ownerDb, "publicShareCleanupQueue/expired-queued"));
+    await assertFails(unsafeOwnerDeleteBatch.commit());
 
     const ownerDeleteBatch = writeBatch(ownerDb);
     ownerDeleteBatch.delete(doc(ownerDb, "publicNoteShares/expired-queued/attachments/attachment-a"));
-    ownerDeleteBatch.delete(doc(ownerDb, "publicShareCleanupQueue/expired-queued/publicShareAttachmentCleanupQueue/attachment-a"));
     ownerDeleteBatch.delete(doc(ownerDb, "publicNoteShares/expired-queued"));
-    ownerDeleteBatch.delete(doc(ownerDb, "publicShareCleanupQueue/expired-queued"));
     await assertSucceeds(ownerDeleteBatch.commit());
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      expect((await getDoc(doc(context.firestore(), "publicShareCleanupQueue/expired-queued"))).exists()).toBe(true);
+      expect(
+        (
+          await getDoc(
+            doc(context.firestore(), "publicShareCleanupQueue/expired-queued/publicShareAttachmentCleanupQueue/attachment-a")
+          )
+        ).exists()
+      ).toBe(true);
+    });
   });
 
   it("treats legacy active notes without deletion metadata as readable and normalizable", async () => {
