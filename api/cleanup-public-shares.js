@@ -4,8 +4,9 @@ const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const oauthTokenUrl = "https://oauth2.googleapis.com/token";
 const databaseId = "(default)";
 const datastoreScope = "https://www.googleapis.com/auth/datastore";
-const defaultBatchSize = 25;
-const defaultMaxDocumentDeletes = 1000;
+const defaultBatchSize = 100;
+const defaultMaxDocumentDeletes = 18000;
+const firestoreCommitWriteLimit = 500;
 
 function envValue(name) {
   const value = process.env[name];
@@ -149,22 +150,52 @@ async function firestoreRequest(path, accessToken, init) {
   return response.json();
 }
 
-async function firestoreDelete(documentPath, accessToken) {
-  const response = await fetch(`${firestoreBaseUrl}/${encodeDocumentPath(documentPath)}`, {
-    method: "DELETE",
-    headers: { authorization: `Bearer ${accessToken}` }
-  });
+function firestoreCommitPathFromDocumentName(documentName) {
+  const marker = "/documents/";
+  const markerIndex = documentName.indexOf(marker);
 
-  if (response.status === 404) {
-    return false;
+  if (markerIndex < 0) {
+    throw new Error("Invalid Firestore document name");
   }
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`Firestore delete failed: ${response.status} ${text.slice(0, 300)}`);
+  return `${documentName.slice(0, markerIndex + marker.length - 1)}:commit`;
+}
+
+async function firestoreDeleteMany(documentNames, accessToken) {
+  const uniqueNames = Array.from(new Set(documentNames.filter(Boolean)));
+
+  for (let index = 0; index < uniqueNames.length; index += firestoreCommitWriteLimit) {
+    const chunk = uniqueNames.slice(index, index + firestoreCommitWriteLimit);
+
+    if (!chunk.length) {
+      continue;
+    }
+
+    await firestoreRequest(firestoreCommitPathFromDocumentName(chunk[0]), accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        writes: chunk.map((documentName) => ({ delete: documentName }))
+      })
+    });
   }
 
-  return true;
+  return uniqueNames.length;
+}
+
+async function deleteDocumentNames(documentNames, accessToken, stats, counterName) {
+  const remainingDeletes = Math.max(0, stats.maxDocumentDeletes - stats.documentDeletesAttempted);
+  const names = documentNames.slice(0, remainingDeletes);
+
+  if (!names.length) {
+    return 0;
+  }
+
+  const deletedCount = await firestoreDeleteMany(names, accessToken);
+
+  stats.documentDeletesAttempted += deletedCount;
+  stats[counterName] += deletedCount;
+
+  return deletedCount;
 }
 
 async function queryExpiredShareQueues({ accessToken, projectId, nowIso, limit }) {
@@ -335,37 +366,20 @@ async function deletePublicShareTreeByName(shareName, accessToken, stats) {
     accessToken
   );
 
-  for (const attachment of attachmentDocuments) {
-    if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
-      return;
-    }
-
-    await firestoreDelete(attachment.name, accessToken);
-    stats.documentDeletesAttempted += 1;
-    stats.attachmentsDeleted += 1;
-  }
-
-  for (const cleanupAttachment of cleanupAttachmentDocuments) {
-    if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
-      return;
-    }
-
-    await firestoreDelete(cleanupAttachment.name, accessToken);
-    stats.documentDeletesAttempted += 1;
-    stats.attachmentQueuesDeleted += 1;
-  }
-
-  if (stats.documentDeletesAttempted < stats.maxDocumentDeletes) {
-    const deleted = await firestoreDelete(shareName, accessToken);
-    stats.documentDeletesAttempted += 1;
-    stats.sharesDeleted += deleted ? 1 : 0;
-  }
-
-  if (stats.documentDeletesAttempted < stats.maxDocumentDeletes) {
-    const deleted = await firestoreDelete(cleanupQueueName, accessToken);
-    stats.documentDeletesAttempted += 1;
-    stats.shareQueuesDeleted += deleted ? 1 : 0;
-  }
+  await deleteDocumentNames(
+    attachmentDocuments.map((attachment) => attachment.name),
+    accessToken,
+    stats,
+    "attachmentsDeleted"
+  );
+  await deleteDocumentNames(
+    cleanupAttachmentDocuments.map((cleanupAttachment) => cleanupAttachment.name),
+    accessToken,
+    stats,
+    "attachmentQueuesDeleted"
+  );
+  await deleteDocumentNames([shareName], accessToken, stats, "sharesDeleted");
+  await deleteDocumentNames([cleanupQueueName], accessToken, stats, "shareQueuesDeleted");
 }
 
 async function deletePublicShareTree(cleanupQueueDocument, accessToken, stats) {
@@ -381,21 +395,8 @@ async function deleteExpiredPublicShareAttachment(attachmentDocument, accessToke
     return;
   }
 
-  if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
-    return;
-  }
-
-  const attachmentDeleted = await firestoreDelete(attachmentDocument.name, accessToken);
-  stats.documentDeletesAttempted += 1;
-  stats.attachmentsDeleted += attachmentDeleted ? 1 : 0;
-
-  if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
-    return;
-  }
-
-  const cleanupAttachmentDeleted = await firestoreDelete(cleanupAttachmentQueueName, accessToken);
-  stats.documentDeletesAttempted += 1;
-  stats.attachmentQueuesDeleted += cleanupAttachmentDeleted ? 1 : 0;
+  await deleteDocumentNames([attachmentDocument.name], accessToken, stats, "attachmentsDeleted");
+  await deleteDocumentNames([cleanupAttachmentQueueName], accessToken, stats, "attachmentQueuesDeleted");
 }
 
 async function cleanupExpiredPublicShares() {
