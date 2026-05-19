@@ -21,6 +21,7 @@ import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
+import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import {
   addDays,
   buildCalendarMonth,
@@ -231,6 +232,10 @@ export default function SchedulePage() {
     [calendarCursor, today]
   );
   const calendarTaskMap = useMemo(() => tasksByDate(sortedTasks), [sortedTasks]);
+  const calendarHolidayMap = useMemo(
+    () => getKoreanHolidayMapForDates(calendarWeeks.flatMap((week) => week.days.map((day) => day.dateString))),
+    [calendarWeeks]
+  );
   const selectedDayTasks = calendarTaskMap[selectedCalendarDate] ?? [];
 
   if (!profile) {
@@ -359,6 +364,31 @@ export default function SchedulePage() {
     }
   }
 
+  async function toggleTaskChecklistItem(task: DecryptedScheduleTask, itemId: string) {
+    const wrappedKey = task.wrappedKeys[unlockedProfile.uid];
+
+    if (!wrappedKey) {
+      setError("일정 암호화 키를 찾지 못했습니다.");
+      return;
+    }
+
+    try {
+      const taskKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
+      const details: ScheduleTaskDetails = {
+        description: task.details.description,
+        checklist: task.details.checklist.map((item) =>
+          item.id === itemId ? { ...item, checked: !item.checked } : item
+        )
+      };
+      const encryptedDetails = await encryptText(JSON.stringify(details), taskKey);
+
+      await updateScheduleTask(task.id, unlockedProfile.uid, { encryptedDetails });
+      setError(null);
+    } catch (caught) {
+      setError(scheduleActionError(caught, "체크리스트 상태를 저장하지 못했습니다."));
+    }
+  }
+
   async function removeTask(task: DecryptedScheduleTask) {
     try {
       await deleteScheduleTask(task.id);
@@ -458,6 +488,7 @@ export default function SchedulePage() {
         {activeView === "calendar" && (
           <CalendarView
             calendarTaskMap={calendarTaskMap}
+            holidayMap={calendarHolidayMap}
             selectedDate={selectedCalendarDate}
             selectedDayTasks={selectedDayTasks}
             weeks={calendarWeeks}
@@ -510,6 +541,7 @@ export default function SchedulePage() {
             setEditingTaskId(viewTask.id);
             setViewTaskId(null);
           }}
+          onToggleChecklist={(itemId) => void toggleTaskChecklistItem(viewTask, itemId)}
         />
       )}
 
@@ -888,6 +920,7 @@ function TodoView({
 
 function CalendarView({
   calendarTaskMap,
+  holidayMap,
   monthLabel,
   onAddDate,
   onMoveMonth,
@@ -900,6 +933,7 @@ function CalendarView({
   weeks
 }: {
   calendarTaskMap: Record<string, DecryptedScheduleTask[]>;
+  holidayMap: Record<string, KoreanHoliday[]>;
   monthLabel: string;
   onAddDate: (dateString: string) => void;
   onMoveMonth: (offset: number) => void;
@@ -939,18 +973,35 @@ function CalendarView({
           {weeks.flatMap((week) =>
             week.days.map((day) => {
               const dayTasks = calendarTaskMap[day.dateString] ?? [];
+              const holidays = holidayMap[day.dateString] ?? [];
+              const isHoliday = holidays.length > 0;
+              const isSaturday = day.date.getDay() === 6;
+              const isSunday = day.date.getDay() === 0;
               const selected = selectedDate === day.dateString;
 
               return (
                 <button
                   key={day.dateString}
-                  className={`calendar-day ${day.inCurrentMonth ? "" : "muted"} ${day.isToday ? "today" : ""} ${selected ? "selected" : ""}`}
+                  className={[
+                    "calendar-day",
+                    day.inCurrentMonth ? "" : "muted",
+                    day.isToday ? "today" : "",
+                    selected ? "selected" : "",
+                    isSunday ? "sunday" : "",
+                    isSaturday ? "saturday" : "",
+                    isHoliday ? "holiday" : ""
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                   type="button"
                   onClick={() => onSelectDate(day.dateString)}
                   onDoubleClick={() => onAddDate(day.dateString)}
                   aria-label={`${formatDateLabel(day.dateString)} 선택`}
                 >
-                  <strong>{day.dayNumber}</strong>
+                  <span className="calendar-day-head">
+                    <strong>{day.dayNumber}</strong>
+                    {holidays[0] && <span className="calendar-holiday-label">{holidays[0].name}</span>}
+                  </span>
                   <span className="calendar-task-stack">
                     {dayTasks.slice(0, 4).map((task) => {
                       const rangePosition = calendarTaskRangePosition(task, day.dateString);
@@ -1314,15 +1365,28 @@ function TaskReadModal({
   onClose,
   onDelete,
   onEdit,
+  onToggleChecklist,
   task
 }: {
   onClose: () => void;
   onDelete: () => void;
   onEdit: () => void;
+  onToggleChecklist: (itemId: string) => void | Promise<void>;
   task: DecryptedScheduleTask;
 }) {
   const details = task.details ?? emptyScheduleDetails;
   const hasChecklist = details.checklist.length > 0;
+  const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
+
+  async function toggleChecklistItem(itemId: string) {
+    setPendingChecklistItemId(itemId);
+
+    try {
+      await onToggleChecklist(itemId);
+    } finally {
+      setPendingChecklistItemId(null);
+    }
+  }
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -1376,7 +1440,17 @@ function TaskReadModal({
             <ul className="task-read-checklist">
               {details.checklist.map((item) => (
                 <li key={item.id} className={item.checked ? "checked" : ""}>
-                  <CheckCircle2 size={16} />
+                  <button
+                    aria-checked={item.checked}
+                    aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
+                    className={`task-read-check-button ${item.checked ? "checked" : ""}`}
+                    disabled={pendingChecklistItemId === item.id}
+                    onClick={() => void toggleChecklistItem(item.id)}
+                    role="checkbox"
+                    type="button"
+                  >
+                    {item.checked ? <CheckCircle2 size={16} /> : null}
+                  </button>
                   <span>{item.text}</span>
                 </li>
               ))}
