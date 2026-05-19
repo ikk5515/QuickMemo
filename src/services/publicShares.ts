@@ -79,11 +79,7 @@ export function subscribePublicSharesForNote(
   callback: (shares: PublicNoteShareSnapshot[]) => void,
   onError?: (error: Error) => void
 ) {
-  const sharesQuery = query(
-    collection(db, "publicNoteShares"),
-    where("ownerUid", "==", ownerUid),
-    where("sourceNoteId", "==", sourceNoteId)
-  );
+  const sharesQuery = query(collection(db, "publicNoteShares"), where("ownerUid", "==", ownerUid));
 
   return onSnapshot(
     sharesQuery,
@@ -91,6 +87,7 @@ export function subscribePublicSharesForNote(
       callback(
         snapshot.docs
           .map((document) => publicShareSnapshot(document.id, document.data() as PublicNoteShareDocument))
+          .filter((share) => share.sourceNoteId === sourceNoteId)
           .sort((left, right) => timestampMillis(right.createdAt) - timestampMillis(left.createdAt))
       );
     },
@@ -164,6 +161,18 @@ export async function deletePublicNoteShare(shareId: string) {
   batch.delete(doc(db, "publicNoteShares", shareId));
 
   await batch.commit();
+}
+
+export async function deleteExpiredPublicSharesForOwner(ownerUid: string, now = Date.now()) {
+  const sharesQuery = query(collection(db, "publicNoteShares"), where("ownerUid", "==", ownerUid));
+  const snapshot = await getDocs(sharesQuery);
+  const staleShares = snapshot.docs
+    .map((document) => publicShareSnapshot(document.id, document.data() as PublicNoteShareDocument))
+    .filter((share) => Boolean(share.revokedAt) || timestampMillis(share.expiresAt) <= now);
+
+  await Promise.all(staleShares.map((share) => deletePublicNoteShare(share.id)));
+
+  return staleShares.length;
 }
 
 export async function getPublicNoteShare(shareId: string) {

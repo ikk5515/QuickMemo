@@ -140,6 +140,7 @@ import {
   activatePublicNoteShare,
   createPublicNoteShare,
   createPublicNoteShareAttachment,
+  deleteExpiredPublicSharesForOwner,
   deletePublicNoteShare,
   publicShareActive,
   publicShareExpiresAt,
@@ -1840,6 +1841,24 @@ export default function NotesPage() {
   const activePublicShareUrl = activePublicShare
     ? publicShareUrlById[activePublicShare.id] ?? readStoredPublicShareUrl(profile?.uid ?? "", activePublicShare.id)
     : null;
+
+  useEffect(() => {
+    const uid = profile?.uid;
+
+    if (!uid) {
+      return undefined;
+    }
+
+    const cleanupExpiredShares = () => {
+      void deleteExpiredPublicSharesForOwner(uid).catch(() => undefined);
+    };
+
+    cleanupExpiredShares();
+    const intervalId = window.setInterval(cleanupExpiredShares, 60 * 60 * 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, [profile?.uid]);
+
   useEffect(() => {
     if (!profile || !editor.noteId || activeRemoteNote?.ownerUid !== profile.uid) {
       setPublicShares([]);
