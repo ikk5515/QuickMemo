@@ -668,10 +668,6 @@ function ScheduleCreateForm({
               ...current,
               startDate: dateString,
               endDate: dateString
-                ? current.endDate && current.endDate >= dateString
-                  ? current.endDate
-                  : dateString
-                : ""
             }))
           }
           value={draft.startDate}
@@ -1725,10 +1721,6 @@ function TaskDetailModal({
                   ...current,
                   startDate: dateString,
                   endDate: dateString
-                    ? current.endDate && current.endDate >= dateString
-                      ? current.endDate
-                      : dateString
-                    : ""
                 }))
               }
               value={draft.startDate}
