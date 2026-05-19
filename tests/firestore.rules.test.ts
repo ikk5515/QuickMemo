@@ -578,6 +578,12 @@ describeRules("firestore security rules", () => {
     );
     await assertSucceeds(setDoc(doc(ownerDb, "publicNoteShares/share-a/attachments/attachment-a"), publicShareAttachment({ expiresAt: shareExpiresAt })));
     await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { ready: true, attachmentCount: 1, updatedAt: serverTimestamp() }));
+    await assertSucceeds(
+      setDoc(
+        doc(ownerDb, "publicNoteShares/share-a/attachments/png-ok"),
+        publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "safe-image", mimeType: "image/png" })
+      )
+    );
 
     await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a")));
     await assertSucceeds(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
@@ -591,6 +597,24 @@ describeRules("firestore security rules", () => {
     const shareWithoutOwnerKey = { ...publicShareDocument("note-a", "user-a") };
     Reflect.deleteProperty(shareWithoutOwnerKey, "ownerWrappedShareKey");
     await assertFails(setDoc(doc(ownerDb, "publicNoteShares/missing-owner-key-share"), shareWithoutOwnerKey));
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "publicNoteShares/share-a/attachments/png-svg"),
+        publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "unsafe-image", mimeType: "image/svg+xml" })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "publicNoteShares/share-a/attachments/png-html"),
+        publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "unsafe-html", mimeType: "text/html" })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "publicNoteShares/share-a/attachments/png-jpeg"),
+        publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "mismatched-image", mimeType: "image/jpeg" })
+      )
+    );
 
     await assertFails(updateDoc(doc(otherDb, "publicNoteShares/share-a"), { passwordHash: publicSharePasswordHash, updatedAt: serverTimestamp() }));
     await assertSucceeds(

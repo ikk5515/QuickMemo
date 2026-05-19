@@ -72,7 +72,8 @@ import {
   attachmentValidationError,
   formatFileSize,
   maxAttachmentFileBytes,
-  safeAttachmentBaseName
+  safeAttachmentBaseName,
+  safePublicShareAttachmentMimeType
 } from "../lib/attachments";
 import {
   decryptBytes,
@@ -2819,7 +2820,7 @@ export default function NotesPage() {
         await createPublicNoteShareAttachment(shareId, {
           fileName: attachment.fileName,
           extension: attachment.extension,
-          mimeType: attachment.mimeType,
+          mimeType: safePublicShareAttachmentMimeType(attachment.extension),
           originalSize: attachment.originalSize,
           encryptedData: encryptedAttachment.cipherBytes,
           iv: encryptedAttachment.iv,
@@ -3010,7 +3011,7 @@ export default function NotesPage() {
       nextAttachments.push({
         fileName: attachment.fileName,
         extension: attachment.extension,
-        mimeType: attachment.mimeType,
+        mimeType: safePublicShareAttachmentMimeType(attachment.extension),
         originalSize: attachment.originalSize,
         encryptedData: encryptedAttachment.cipherBytes,
         iv: encryptedAttachment.iv,

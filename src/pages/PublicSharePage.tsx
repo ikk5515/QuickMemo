@@ -1,7 +1,13 @@
 import { AlertTriangle, Download, Eye, File, Loader2, LockKeyhole } from "lucide-react";
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
-import { attachmentDownloadName, formatFileSize } from "../lib/attachments";
+import {
+  attachmentDownloadName,
+  formatFileSize,
+  isPublicShareRasterImageExtension,
+  publicShareAttachmentMimeMatchesExtension,
+  safePublicShareAttachmentMimeType
+} from "../lib/attachments";
 import {
   decryptBytes,
   decryptText,
@@ -34,12 +40,15 @@ import {
 interface PublicShareAttachmentView {
   id: string;
   downloadName: string;
+  downloadUrl: string;
   extension: string;
   mimeType: string;
   originalSize: number;
-  url: string;
+  previewUrl: string | null;
   bytes: Uint8Array;
 }
+
+type PublicShareImageAttachmentView = PublicShareAttachmentView & { previewUrl: string };
 
 interface PublicShareContent {
   attachments: PublicShareAttachmentView[];
@@ -74,7 +83,7 @@ export default function PublicSharePage() {
 
   const applyShareContent = useCallback((content: PublicShareContent) => {
     revokeAttachmentUrls();
-    objectUrlsRef.current = content.attachments.map((attachment) => attachment.url);
+    objectUrlsRef.current = content.attachments.flatMap(publicAttachmentObjectUrls);
     setTitle(content.title);
     setBodyHtml(content.bodyHtml);
     setFontSize(content.fontSize);
@@ -123,7 +132,7 @@ export default function PublicSharePage() {
       const content = await decryptPublicShareContent(shareId ?? "", nextShare, contentKey);
 
       if (!active || currentVersion !== updateVersion) {
-        content.attachments.forEach((attachment) => URL.revokeObjectURL(attachment.url));
+        content.attachments.flatMap(publicAttachmentObjectUrls).forEach((url) => URL.revokeObjectURL(url));
         return;
       }
 
@@ -247,7 +256,7 @@ export default function PublicSharePage() {
     const fileName = attachment.downloadName;
 
     if (isImageAttachment(attachment)) {
-      setAttachmentPreview({ fileName, kind: "image", label: "이미지 미리보기", url: attachment.url });
+      setAttachmentPreview({ fileName, kind: "image", label: "이미지 미리보기", url: attachment.previewUrl });
       return;
     }
 
@@ -262,7 +271,7 @@ export default function PublicSharePage() {
     }
 
     if (attachment.extension === "pdf") {
-      setAttachmentPreview({ bytes: attachment.bytes, fileName, kind: "pdf", label: "PDF 미리보기", url: attachment.url });
+      setAttachmentPreview({ bytes: attachment.bytes, fileName, kind: "pdf", label: "PDF 미리보기", url: attachment.downloadUrl });
       return;
     }
 
@@ -271,13 +280,13 @@ export default function PublicSharePage() {
 
       setAttachmentPreview(
         srcDoc
-          ? { fileName, kind: "docx", label: "DOCX 양식 미리보기", srcDoc, url: attachment.url }
+          ? { fileName, kind: "docx", label: "DOCX 양식 미리보기", srcDoc, url: attachment.downloadUrl }
           : {
               fileName,
               kind: "unsupported",
               label: "DOCX 미리보기 안내",
               text: "DOCX 양식 미리보기를 안전하게 만들지 못했습니다. 원본 파일은 다운로드해서 확인해주세요.",
-              url: attachment.url
+              url: attachment.downloadUrl
             }
       );
       return;
@@ -294,16 +303,16 @@ export default function PublicSharePage() {
               fileName,
               kind: "hwp",
               label: "HWP 문서 미리보기",
-              url: attachment.url
+              url: attachment.downloadUrl
             }
           : preview.html
-            ? { fileName, html: preview.html, kind: "html", label: "HWP 안전 본문 미리보기", url: attachment.url }
+            ? { fileName, html: preview.html, kind: "html", label: "HWP 안전 본문 미리보기", url: attachment.downloadUrl }
             : {
                 fileName,
                 kind: "unsupported",
                 label: "HWP 미리보기 안내",
                 text: "HWP 미리보기가 안전 제한을 초과했거나 지원하지 않는 문서입니다. 원본 파일은 다운로드해서 확인해주세요.",
-                url: attachment.url
+                url: attachment.downloadUrl
               }
       );
       return;
@@ -318,7 +327,7 @@ export default function PublicSharePage() {
         kind: html ? "html" : "unsupported",
         label: "HWPX 문서 미리보기",
         text: html ? undefined : "HWPX 문서에서 안전하게 표시할 본문을 찾지 못했습니다.",
-        url: attachment.url
+        url: attachment.downloadUrl
       });
       return;
     }
@@ -332,7 +341,7 @@ export default function PublicSharePage() {
         kind: html ? "html" : "unsupported",
         label: "XLSX 스프레드시트 미리보기",
         text: html ? undefined : "XLSX 파일에서 안전하게 표시할 시트 내용을 찾지 못했습니다.",
-        url: attachment.url
+        url: attachment.downloadUrl
       });
       return;
     }
@@ -343,7 +352,7 @@ export default function PublicSharePage() {
         kind: "text",
         label: `${attachment.extension.toUpperCase()} 미리보기`,
         text: decodeTextAttachmentPreview(attachment.bytes, attachment.extension),
-        url: attachment.url
+        url: attachment.downloadUrl
       });
       return;
     }
@@ -354,7 +363,7 @@ export default function PublicSharePage() {
         kind: "unsupported",
         label: `${attachment.extension.toUpperCase()} 미리보기 안내`,
         text: legacyBinaryPreviewMessage(attachment.extension),
-        url: attachment.url
+        url: attachment.downloadUrl
       });
     }
   }
@@ -414,9 +423,14 @@ export default function PublicSharePage() {
                   {attachments.map((attachment) => (
                     <article className="public-share-attachment" key={attachment.id}>
                       {isImageAttachment(attachment) ? (
-                        <a href={attachment.url} target="_blank" rel="noopener noreferrer" className="public-share-image-link">
-                          <img src={attachment.url} alt={attachment.downloadName} />
-                        </a>
+                        <button
+                          aria-label={`${attachment.downloadName} 미리보기`}
+                          className="public-share-image-link"
+                          onClick={() => void openAttachmentPreview(attachment)}
+                          type="button"
+                        >
+                          <img src={attachment.previewUrl} alt={attachment.downloadName} />
+                        </button>
                       ) : (
                         <span className="public-share-file-icon">
                           <File size={18} />
@@ -437,7 +451,7 @@ export default function PublicSharePage() {
                           <Eye size={15} />
                           미리보기
                         </button>
-                        <a className="secondary-button public-share-download" href={attachment.url} download={attachment.downloadName}>
+                        <a className="secondary-button public-share-download" href={attachment.downloadUrl} download={attachment.downloadName}>
                           <Download size={15} />
                           다운로드
                         </a>
@@ -465,15 +479,22 @@ async function decryptPublicAttachment(attachment: PublicNoteShareAttachmentSnap
     },
     shareKey
   );
-  const blob = new Blob([bytes], { type: attachment.mimeType || "application/octet-stream" });
+  const extension = attachment.extension.toLowerCase();
+  const mimeType = attachment.mimeType.trim().toLowerCase();
+  const downloadUrl = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+  const previewUrl =
+    isPublicShareRasterImageExtension(extension) && publicShareAttachmentMimeMatchesExtension(extension, mimeType)
+      ? URL.createObjectURL(new Blob([bytes], { type: safePublicShareAttachmentMimeType(extension) }))
+      : null;
 
   return {
     id: attachment.id,
-    downloadName: attachmentDownloadName(attachment),
-    extension: attachment.extension,
-    mimeType: attachment.mimeType,
+    downloadName: attachmentDownloadName({ ...attachment, extension }),
+    downloadUrl,
+    extension,
+    mimeType,
     originalSize: attachment.originalSize,
-    url: URL.createObjectURL(blob),
+    previewUrl,
     bytes
   } satisfies PublicShareAttachmentView;
 }
@@ -500,8 +521,14 @@ function shareKeyFromHash() {
   return new URLSearchParams(hash).get("key");
 }
 
-function isImageAttachment(attachment: Pick<PublicShareAttachmentView, "extension" | "mimeType">) {
-  return attachment.mimeType.startsWith("image/") || ["gif", "jpeg", "jpg", "png", "webp"].includes(attachment.extension);
+function publicAttachmentObjectUrls(attachment: PublicShareAttachmentView) {
+  return attachment.previewUrl ? [attachment.downloadUrl, attachment.previewUrl] : [attachment.downloadUrl];
+}
+
+function isImageAttachment(attachment: PublicShareAttachmentView): attachment is PublicShareImageAttachmentView {
+  return Boolean(attachment.previewUrl)
+    && isPublicShareRasterImageExtension(attachment.extension)
+    && publicShareAttachmentMimeMatchesExtension(attachment.extension, attachment.mimeType);
 }
 
 function publicSharePasswordSignature(share: PublicNoteShareSnapshot) {

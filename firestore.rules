@@ -616,6 +616,27 @@ service cloud.firestore {
         && passwordHash.hash.size() <= 256;
     }
 
+    function publicShareAttachmentMimeMatchesExtension(data) {
+      return (data.extension == "pdf" && data.mimeType == "application/pdf")
+        || (data.extension == "txt" && data.mimeType == "text/plain")
+        || (data.extension == "md" && data.mimeType == "text/markdown")
+        || (data.extension == "csv" && data.mimeType == "text/csv")
+        || (data.extension == "json" && data.mimeType == "application/json")
+        || (data.extension == "doc" && data.mimeType == "application/msword")
+        || (data.extension == "docx" && data.mimeType == "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        || (data.extension == "xls" && data.mimeType == "application/vnd.ms-excel")
+        || (data.extension == "xlsx" && data.mimeType == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        || (data.extension == "ppt" && data.mimeType == "application/vnd.ms-powerpoint")
+        || (data.extension == "pptx" && data.mimeType == "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        || (data.extension == "hwp" && data.mimeType == "application/x-hwp")
+        || (data.extension == "hwpx" && data.mimeType == "application/vnd.hancom.hwpx")
+        || (data.extension == "png" && data.mimeType == "image/png")
+        || (data.extension == "jpg" && data.mimeType == "image/jpeg")
+        || (data.extension == "jpeg" && data.mimeType == "image/jpeg")
+        || (data.extension == "webp" && data.mimeType == "image/webp")
+        || (data.extension == "gif" && data.mimeType == "image/gif");
+    }
+
     function validPublicShareAttachment(data) {
       return data.keys().hasOnly([
         "version",
@@ -657,6 +678,7 @@ service cloud.firestore {
       ]
       && data.mimeType is string
       && data.mimeType.size() <= 120
+      && publicShareAttachmentMimeMatchesExtension(data)
       && data.originalSize is int
       && data.originalSize > 0
       && data.originalSize <= 1000000
