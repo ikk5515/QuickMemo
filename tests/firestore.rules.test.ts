@@ -597,6 +597,7 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDoc(doc(ownerDb, "userPreferences/user-a")));
     await assertFails(getDoc(doc(otherDb, "userPreferences/user-a")));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "calendar", updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "completed", updatedAt: serverTimestamp() }));
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "userPreferences/user-a"), {
         uid: "user-a",

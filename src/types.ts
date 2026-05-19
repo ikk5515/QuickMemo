@@ -24,7 +24,7 @@ export interface UserProfile extends PublicRosterUser {
 }
 
 export type DefaultHomeView = "notes" | "schedule";
-export type ScheduleView = "todo" | "calendar" | "matrix";
+export type ScheduleView = "todo" | "calendar" | "matrix" | "completed";
 
 export interface UserPreferencesDocument {
   uid: string;

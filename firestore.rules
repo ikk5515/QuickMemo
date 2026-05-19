@@ -316,7 +316,7 @@ service cloud.firestore {
       return data.keys().hasOnly(["uid", "defaultHome", "scheduleDefaultView", "createdAt", "updatedAt"])
         && data.uid == uid
         && data.defaultHome in ["notes", "schedule"]
-        && data.scheduleDefaultView in ["todo", "calendar", "matrix"]
+        && data.scheduleDefaultView in ["todo", "calendar", "matrix", "completed"]
         && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
         && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
     }
