@@ -4155,18 +4155,24 @@ textarea {
 }
 
 .admin-note-card {
-  align-items: center;
+  align-items: stretch;
   background: #ffffff;
   border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
   gap: 12px;
   grid-template-columns: minmax(0, 1fr) auto;
+  height: 220px;
+  overflow: hidden;
   padding: 14px;
 }
 
 .admin-note-main {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
 .admin-note-title-line {
@@ -4176,17 +4182,26 @@ textarea {
 }
 
 .admin-note-card h3 {
+  display: -webkit-box;
   font-size: 18px;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   letter-spacing: 0;
   margin: 0 0 6px;
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 
 .admin-note-preview {
   color: var(--muted);
+  display: -webkit-box;
   font-size: 14px;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   line-height: 1.55;
   margin: 0;
+  min-height: 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 
@@ -4198,6 +4213,8 @@ textarea {
   font-weight: 700;
   gap: 8px;
   margin-top: 10px;
+  max-height: 58px;
+  overflow: hidden;
 }
 
 .admin-note-meta span,
@@ -4321,7 +4338,7 @@ textarea {
 
   .admin-note-card {
     align-items: stretch;
-    min-height: 210px;
+    height: 220px;
   }
 }
 
