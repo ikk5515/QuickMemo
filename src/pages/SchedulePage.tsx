@@ -738,36 +738,28 @@ function ScheduleCreateForm({
           </select>
         </label>
         {draft.timeMode !== "none" && (
-          <label>
-            <span>시작 시간</span>
-            <input
-              onChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  startTime: event.target.value,
-                  endTime:
-                    current.timeMode === "range" && current.endTime && current.endTime < event.target.value
-                      ? addMinutesToTimeInput(event.target.value, 60)
-                      : current.endTime
-                }))
-              }
-              required
-              type="time"
-              value={draft.startTime}
-            />
-          </label>
+          <TimePickerField
+            label="시작 시간"
+            onChange={(timeString) =>
+              setDraft((current) => ({
+                ...current,
+                startTime: timeString,
+                endTime:
+                  current.timeMode === "range" && current.endTime && current.endTime < timeString
+                    ? addMinutesToTimeInput(timeString, 60)
+                    : current.endTime
+              }))
+            }
+            value={draft.startTime}
+          />
         )}
         {draft.timeMode === "range" && (
-          <label>
-            <span>종료 시간</span>
-            <input
-              min={draft.startTime || undefined}
-              onChange={(event) => setDraft((current) => ({ ...current, endTime: event.target.value }))}
-              required
-              type="time"
-              value={draft.endTime}
-            />
-          </label>
+          <TimePickerField
+            label="종료 시간"
+            min={draft.startTime || undefined}
+            onChange={(timeString) => setDraft((current) => ({ ...current, endTime: timeString }))}
+            value={draft.endTime}
+          />
         )}
         <ScheduleColorPicker
           value={draft.color}
@@ -1063,6 +1055,149 @@ function DatePickerField({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+const timePickerHours = Array.from({ length: 24 }, (_, index) => index);
+const timePickerMinutes = Array.from({ length: 12 }, (_, index) => index * 5);
+const timePickerPresets = ["09:00", "12:00", "15:00", "18:00", "21:00"];
+
+function TimePickerField({
+  label,
+  min,
+  onChange,
+  value
+}: {
+  label: string;
+  min?: string;
+  onChange: (timeString: string) => void;
+  value: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const valueMinutes = timeInputToMinutes(value);
+  const minMinutes = timeInputToMinutes(min ?? "");
+  const fallbackMinutes = minMinutes ?? 9 * 60;
+  const selectedMinutes = valueMinutes ?? fallbackMinutes;
+  const selectedHour = Math.floor(selectedMinutes / 60);
+  const selectedMinute = selectedMinutes % 60;
+  const minuteOptions = useMemo(
+    () => [...new Set([...timePickerMinutes, selectedMinute, minMinutes == null ? 0 : minMinutes % 60])].sort((left, right) => left - right),
+    [minMinutes, selectedMinute]
+  );
+  const displayValue = valueMinutes == null ? "" : formatTaskTime(valueMinutes);
+
+  function choose(minutes: number) {
+    const nextMinutes = minMinutes != null && minutes < minMinutes ? minMinutes : minutes;
+    onChange(formatTaskTime(nextMinutes));
+  }
+
+  function chooseParts(hour: number, minute: number) {
+    choose(hour * 60 + minute);
+  }
+
+  return (
+    <div
+      className="time-picker-field"
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget;
+
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+          setOpen(false);
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          setOpen(false);
+        }
+      }}
+    >
+      <span className="time-picker-label">{label}</span>
+      <button
+        aria-expanded={open}
+        className={`time-picker-trigger ${displayValue ? "" : "empty"}`}
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        <Clock size={16} />
+        <span>{displayValue || "시간 선택"}</span>
+      </button>
+      {open && (
+        <div className="time-picker-popover">
+          <header>
+            <span>{label}</span>
+            <strong>{formatTaskTime(selectedMinutes)}</strong>
+          </header>
+          <div className="time-picker-presets">
+            {timePickerPresets.map((preset) => {
+              const presetMinutes = timeInputToMinutes(preset) ?? 0;
+              const disabled = minMinutes != null && presetMinutes < minMinutes;
+
+              return (
+                <button
+                  className={preset === displayValue ? "selected" : ""}
+                  disabled={disabled}
+                  key={preset}
+                  onClick={() => {
+                    choose(presetMinutes);
+                    setOpen(false);
+                  }}
+                  type="button"
+                >
+                  {preset}
+                </button>
+              );
+            })}
+          </div>
+          <div className="time-picker-columns">
+            <section>
+              <span>시</span>
+              <div className="time-picker-hour-grid">
+                {timePickerHours.map((hour) => {
+                  const disabled = minMinutes != null && hour * 60 + selectedMinute < minMinutes;
+
+                  return (
+                    <button
+                      className={hour === selectedHour ? "selected" : ""}
+                      disabled={disabled}
+                      key={hour}
+                      onClick={() => chooseParts(hour, selectedMinute)}
+                      type="button"
+                    >
+                      {`${hour}`.padStart(2, "0")}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+            <section>
+              <span>분</span>
+              <div className="time-picker-minute-grid">
+                {minuteOptions.map((minute) => {
+                  const disabled = minMinutes != null && selectedHour * 60 + minute < minMinutes;
+
+                  return (
+                    <button
+                      className={minute === selectedMinute ? "selected" : ""}
+                      disabled={disabled}
+                      key={minute}
+                      onClick={() => chooseParts(selectedHour, minute)}
+                      type="button"
+                    >
+                      {`${minute}`.padStart(2, "0")}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          </div>
+          <footer>
+            <button className="secondary-button" type="button" onClick={() => setOpen(false)}>
+              확인
+            </button>
+          </footer>
+        </div>
+      )}
     </div>
   );
 }
@@ -1821,13 +1956,18 @@ function TaskDetailModal({
             <label>
               시간 방식
               <select
-                onChange={(event) =>
+                onChange={(event) => {
+                  const nextMode = event.target.value as TaskDraft["timeMode"];
                   setDraft((current) => ({
                     ...current,
-                    timeMode: event.target.value as TaskDraft["timeMode"],
-                    endTime: event.target.value === "range" ? current.endTime : ""
-                  }))
-                }
+                    timeMode: nextMode,
+                    startTime: nextMode === "none" ? "" : current.startTime || "09:00",
+                    endTime:
+                      nextMode === "range"
+                        ? current.endTime || addMinutesToTimeInput(current.startTime || "09:00", 60)
+                        : ""
+                  }));
+                }}
                 value={draft.timeMode}
               >
                 <option value="none">시간 없음</option>
@@ -1836,27 +1976,28 @@ function TaskDetailModal({
               </select>
             </label>
             {draft.timeMode !== "none" && (
-              <label>
-                시작 시간
-                <input
-                  onChange={(event) => setDraft((current) => ({ ...current, startTime: event.target.value }))}
-                  required
-                  type="time"
-                  value={draft.startTime}
-                />
-              </label>
+              <TimePickerField
+                label="시작 시간"
+                onChange={(timeString) =>
+                  setDraft((current) => ({
+                    ...current,
+                    startTime: timeString,
+                    endTime:
+                      current.timeMode === "range" && current.endTime && current.endTime < timeString
+                        ? addMinutesToTimeInput(timeString, 60)
+                        : current.endTime
+                  }))
+                }
+                value={draft.startTime}
+              />
             )}
             {draft.timeMode === "range" && (
-              <label>
-                종료 시간
-                <input
-                  min={draft.startTime || undefined}
-                  onChange={(event) => setDraft((current) => ({ ...current, endTime: event.target.value }))}
-                  required
-                  type="time"
-                  value={draft.endTime}
-                />
-              </label>
+              <TimePickerField
+                label="종료 시간"
+                min={draft.startTime || undefined}
+                onChange={(timeString) => setDraft((current) => ({ ...current, endTime: timeString }))}
+                value={draft.endTime}
+              />
             )}
           </div>
           <div className="schedule-toggle-row">
