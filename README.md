@@ -57,7 +57,27 @@ npx firebase-tools deploy --only firestore:rules,firestore:indexes
 
 이 앱은 `src/lib/firebase.ts`에서 `.env.local` 값을 읽어 Firebase 앱, Auth, Firestore를 초기화합니다. Firestore 컬렉션은 앱 사용 중 클라이언트와 Firestore Rules 검증으로 생성됩니다.
 
-Functions 없이 동작하도록 구성되어 있으므로 Blaze 요금제가 없어도 Firestore Rules/Indexes 배포와 Vercel 프론트엔드 배포로 사용할 수 있습니다. 단, Firebase Auth 제한 때문에 관리자가 다른 사용자의 비밀번호를 강제로 변경하려면 Admin SDK가 실행되는 신뢰할 수 있는 서버가 필요합니다.
+Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 요금제가 없어도 Firestore Rules/Indexes 배포와 Vercel 프론트엔드 배포로 사용할 수 있습니다. 단, Firebase Auth 제한 때문에 관리자가 다른 사용자의 비밀번호를 강제로 변경하려면 Admin SDK가 실행되는 신뢰할 수 있는 서버가 필요합니다.
+
+### 임시 공유 만료 cleanup
+
+임시 공유 문서는 Firestore TTL 설정과 Vercel Cron cleanup을 함께 사용합니다.
+
+- Firestore TTL: `publicNoteShares.expiresAt`와 공유 첨부 파일 `expiresAt` field override가 켜져 있습니다. Firebase billing이 활성화된 프로젝트에서는 `npx firebase-tools deploy --only firestore:indexes`로 서버 측 TTL을 배포할 수 있습니다.
+- Vercel Cron fallback: billing 때문에 TTL을 켤 수 없는 환경에서도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유와 공유 첨부 파일을 삭제합니다. 이 경로는 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다.
+
+Vercel 운영 환경에는 아래 값을 설정합니다. `FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 전체를 넣거나, `FIREBASE_CLEANUP_CLIENT_EMAIL`과 `FIREBASE_CLEANUP_PRIVATE_KEY`를 나누어 넣을 수 있습니다.
+
+```bash
+CRON_SECRET=at-least-16-random-characters
+FIREBASE_CLEANUP_PROJECT_ID=quickmemo-a95ba
+FIREBASE_CLEANUP_CLIENT_EMAIL=cleanup-account@quickmemo-a95ba.iam.gserviceaccount.com
+FIREBASE_CLEANUP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+PUBLIC_SHARE_CLEANUP_BATCH_SIZE=50
+PUBLIC_SHARE_CLEANUP_MAX_DELETES=1000
+```
+
+Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. cleanup 함수는 `publicNoteShares.expiresAt <= now`인 문서만 조회해 해당 공유 첨부 파일과 cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
 
 ### Auth 설정 오류 해결
 

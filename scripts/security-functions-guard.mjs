@@ -15,6 +15,7 @@ const forbiddenSourcePatterns = [
 ];
 const scanRoots = [
   ".github/workflows",
+  "api",
   "src",
   "tests"
 ];
