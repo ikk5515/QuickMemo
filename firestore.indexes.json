@@ -53,12 +53,38 @@
           "order": "DESCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "publicNoteShares",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "sourceNoteId",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [
     {
       "collectionGroup": "attachments",
       "fieldPath": "encryptedData",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "attachments",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
+      "collectionGroup": "publicNoteShares",
+      "fieldPath": "expiresAt",
+      "ttl": true,
       "indexes": []
     }
   ]

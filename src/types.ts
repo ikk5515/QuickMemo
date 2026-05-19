@@ -99,6 +99,35 @@ export interface NoteAttachmentDocument {
   createdAt?: Timestamp;
 }
 
+export interface PublicNoteShareDocument {
+  sourceNoteId: string;
+  ownerUid: string;
+  version: 1;
+  encryptedTitle: EncryptedPayload;
+  encryptedBody: EncryptedPayload;
+  attachmentCount: number;
+  ready: boolean;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+  expiresAt: Timestamp;
+  revokedAt?: Timestamp;
+  revokedBy?: string;
+}
+
+export interface PublicNoteShareAttachmentDocument {
+  version: 1;
+  algorithm: "AES-GCM";
+  fileName: string;
+  extension: string;
+  mimeType: string;
+  originalSize: number;
+  encryptedData: Bytes;
+  iv: Bytes;
+  sourceAttachmentId?: string;
+  expiresAt: Timestamp;
+  createdAt?: Timestamp;
+}
+
 export interface NoteFolderDocument {
   ownerUid: string;
   name: string;

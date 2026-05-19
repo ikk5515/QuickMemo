@@ -5,9 +5,12 @@ import {
   ArrowUpDown,
   Bold,
   CalendarClock,
+  Ban,
   CheckCircle2,
   Columns3,
+  Copy,
   Download,
+  ExternalLink,
   Eye,
   File,
   FilePlus2,
@@ -74,6 +77,7 @@ import {
   decryptText,
   encryptBytes,
   encryptText,
+  exportAesKeyBase64Url,
   generateNoteKey,
   unwrapNoteKey,
   wrapNoteKey
@@ -109,6 +113,7 @@ import {
   deleteNoteAttachment,
   createEncryptedNote,
   deleteNote,
+  getNoteAttachments,
   markNoteRead,
   purgeNote,
   publishNoteCursor,
@@ -131,6 +136,18 @@ import {
   type NoteUserStateSnapshot,
   type NoteSnapshot
 } from "../services/notes";
+import {
+  activatePublicNoteShare,
+  createPublicNoteShare,
+  createPublicNoteShareAttachment,
+  deletePublicNoteShare,
+  publicShareActive,
+  publicShareExpiresAt,
+  publicShareUrl,
+  revokePublicNoteShare,
+  subscribePublicSharesForNote,
+  type PublicNoteShareSnapshot
+} from "../services/publicShares";
 import { subscribeUsers } from "../services/users";
 import type { ActiveNoteDocument, DecryptedNote, NoteKind, UserProfile } from "../types";
 
@@ -268,6 +285,7 @@ const remoteCursorFreshMs = 15_000;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
 const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
+const publicShareUrlStoragePrefix = "quickmemo-public-share-url:";
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
@@ -1240,6 +1258,46 @@ function writeNoteFilter(uid: string, filter: NoteListFilter) {
   }
 }
 
+function readStoredPublicShareUrl(uid: string, shareId: string) {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    return window.localStorage.getItem(publicShareUrlStorageKey(uid, shareId));
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredPublicShareUrl(uid: string, shareId: string, url: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(publicShareUrlStorageKey(uid, shareId), url);
+  } catch {
+    // The share remains valid; only quick re-copy from this browser is unavailable.
+  }
+}
+
+function removeStoredPublicShareUrl(uid: string, shareId: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(publicShareUrlStorageKey(uid, shareId));
+  } catch {
+    // No action needed.
+  }
+}
+
+function publicShareUrlStorageKey(uid: string, shareId: string) {
+  return `${publicShareUrlStoragePrefix}${uid}:${shareId}`;
+}
+
 function noteSyncSignature(note: DecryptedNote) {
   const updatedAt = note.updatedAt ? `${note.updatedAt.seconds}:${note.updatedAt.nanoseconds}` : "pending";
 
@@ -1480,6 +1538,12 @@ export default function NotesPage() {
   const [overviewOpen, setOverviewOpen] = useState(false);
   const [overviewFolderFilter, setOverviewFolderFilter] = useState<OverviewFolderFilter>("all");
   const [shareOpen, setShareOpen] = useState(false);
+  const [publicShareOpen, setPublicShareOpen] = useState(false);
+  const [publicShareBusy, setPublicShareBusy] = useState(false);
+  const [publicShareError, setPublicShareError] = useState<string | null>(null);
+  const [publicShareCopied, setPublicShareCopied] = useState(false);
+  const [publicShares, setPublicShares] = useState<PublicNoteShareSnapshot[]>([]);
+  const [publicShareUrlById, setPublicShareUrlById] = useState<Record<string, string>>({});
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [deadlineOpen, setDeadlineOpen] = useState(false);
   const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
@@ -1768,6 +1832,45 @@ export default function NotesPage() {
     () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
     [decryptedNotes, editor.noteId]
   );
+  const canManagePublicShare = !editor.noteId || activeRemoteNote?.ownerUid === profile?.uid;
+  const activePublicShare = useMemo(
+    () => publicShares.find((share) => publicShareActive(share)) ?? null,
+    [publicShares]
+  );
+  const activePublicShareUrl = activePublicShare
+    ? publicShareUrlById[activePublicShare.id] ?? readStoredPublicShareUrl(profile?.uid ?? "", activePublicShare.id)
+    : null;
+  useEffect(() => {
+    if (!profile || !editor.noteId || activeRemoteNote?.ownerUid !== profile.uid) {
+      setPublicShares([]);
+      setPublicShareUrlById({});
+      return undefined;
+    }
+
+    return subscribePublicSharesForNote(
+      editor.noteId,
+      profile.uid,
+      (shares) => {
+        setPublicShares(shares);
+        setPublicShareUrlById((current) => {
+          const nextUrls = { ...current };
+
+          shares.forEach((share) => {
+            if (!nextUrls[share.id]) {
+              const storedUrl = readStoredPublicShareUrl(profile.uid, share.id);
+
+              if (storedUrl) {
+                nextUrls[share.id] = storedUrl;
+              }
+            }
+          });
+
+          return nextUrls;
+        });
+      },
+      () => setPublicShareError("공유 링크 상태를 불러오지 못했습니다.")
+    );
+  }, [activeRemoteNote?.ownerUid, editor.noteId, profile]);
   const resolveNoteKey = useCallback(
     async (noteId: string) => {
       if (!profile || !privateKey) {
@@ -2424,6 +2527,145 @@ export default function NotesPage() {
       setError("공유 대상을 변경하지 못했습니다.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function openPublicShareDialog() {
+    setPublicShareOpen(true);
+    setPublicShareCopied(false);
+    setPublicShareError(null);
+
+    if (activePublicShare) {
+      return;
+    }
+
+    await createCurrentPublicShare();
+  }
+
+  async function createCurrentPublicShare() {
+    if (publicShareBusy) {
+      return;
+    }
+
+    if (!canManagePublicShare) {
+      setPublicShareError("노트 소유자만 링크 공유를 만들 수 있습니다.");
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+    setPublicShareCopied(false);
+
+    let createdShareId: string | null = null;
+
+    try {
+      const savedNote = await persistCurrentNote(false);
+
+      if (!savedNote) {
+        throw new Error("노트를 먼저 저장하지 못했습니다.");
+      }
+
+      const shareKey = await generateNoteKey();
+      const shareKeyValue = await exportAesKeyBase64Url(shareKey);
+      const expiresAt = publicShareExpiresAt();
+      const [encryptedTitle, encryptedBody] = await Promise.all([
+        encryptText(editor.title.trim() || "제목 없음", shareKey),
+        encryptText(serializeEditorContent(editor.body, editor.fontSize), shareKey)
+      ]);
+      const shareId = await createPublicNoteShare({
+        sourceNoteId: savedNote.noteId,
+        ownerUid: unlockedProfile.uid,
+        encryptedTitle,
+        encryptedBody,
+        expiresAt
+      });
+      createdShareId = shareId;
+
+      const noteAttachments = await getNoteAttachments(savedNote.noteId);
+
+      for (const attachment of noteAttachments) {
+        const plainBytes = await decryptBytes(
+          {
+            version: 1,
+            algorithm: "AES-GCM",
+            cipherBytes: attachment.encryptedData.toUint8Array(),
+            iv: attachment.iv.toUint8Array()
+          },
+          savedNote.noteKey
+        );
+        const encryptedAttachment = await encryptBytes(plainBytes, shareKey);
+
+        await createPublicNoteShareAttachment(shareId, {
+          fileName: attachment.fileName,
+          extension: attachment.extension,
+          mimeType: attachment.mimeType,
+          originalSize: attachment.originalSize,
+          encryptedData: encryptedAttachment.cipherBytes,
+          iv: encryptedAttachment.iv,
+          expiresAt,
+          sourceAttachmentId: attachment.id
+        });
+      }
+
+      await activatePublicNoteShare(shareId, noteAttachments.length);
+
+      const nextUrl = publicShareUrl(shareId, shareKeyValue);
+      writeStoredPublicShareUrl(unlockedProfile.uid, shareId, nextUrl);
+      setPublicShareUrlById((current) => ({ ...current, [shareId]: nextUrl }));
+      setStatus("공유 링크를 만들었습니다.");
+    } catch (shareError) {
+      if (createdShareId) {
+        const shareToDelete = createdShareId;
+        await deletePublicNoteShare(shareToDelete)
+          .catch(() => revokePublicNoteShare(shareToDelete, unlockedProfile.uid))
+          .catch(() => undefined);
+      }
+
+      setPublicShareError(shareError instanceof Error ? shareError.message : "공유 링크를 만들지 못했습니다.");
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function copyPublicShareUrl() {
+    if (!activePublicShareUrl) {
+      setPublicShareError("복사할 공유 링크를 찾을 수 없습니다.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(activePublicShareUrl);
+      setPublicShareCopied(true);
+      setPublicShareError(null);
+      setStatus("공유 링크를 복사했습니다.");
+    } catch {
+      setPublicShareError("브라우저에서 링크 복사를 허용하지 않았습니다. 링크를 직접 선택해서 복사해주세요.");
+    }
+  }
+
+  async function stopPublicShare() {
+    if (!activePublicShare) {
+      setPublicShareError("중단할 공유 링크가 없습니다.");
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+
+    try {
+      await deletePublicNoteShare(activePublicShare.id);
+      removeStoredPublicShareUrl(unlockedProfile.uid, activePublicShare.id);
+      setPublicShareUrlById((current) => {
+        const nextUrls = { ...current };
+        delete nextUrls[activePublicShare.id];
+        return nextUrls;
+      });
+      setPublicShareCopied(false);
+      setStatus("공유 링크를 중단했습니다.");
+    } catch {
+      setPublicShareError("공유 링크를 중단하지 못했습니다.");
+    } finally {
+      setPublicShareBusy(false);
     }
   }
 
@@ -3109,6 +3351,16 @@ export default function NotesPage() {
                 <UsersRound size={18} />
                 공유 대상
               </button>
+              <button
+                className={`secondary-button ${activePublicShare ? "active" : ""}`}
+                disabled={saving || publicShareBusy || !canEditShareTargets}
+                type="button"
+                onClick={() => void openPublicShareDialog()}
+                title={canEditShareTargets ? "임시 URL로 노트 공유" : "노트 소유자만 링크 공유를 만들 수 있습니다."}
+              >
+                {publicShareBusy ? <Loader2 className="spin" size={18} /> : <Share2 size={18} />}
+                {activePublicShare ? "공유 중" : "공유하기"}
+              </button>
               <div className="deadline-control">
                 <button
                   className={`deadline-summary ${currentDeadlineTone}`}
@@ -3279,14 +3531,133 @@ export default function NotesPage() {
             onTogglePin={(note) => void togglePinnedNote(note)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
             saving={saving}
-            suppressEscape={Boolean(attachmentPreview)}
+            suppressEscape={Boolean(attachmentPreview || publicShareOpen)}
             attachmentBusyId={attachmentBusyId}
             canDeleteAttachment={canDeleteAttachmentForNote}
+          />
+        )}
+        {publicShareOpen && (
+          <PublicShareModal
+            busy={publicShareBusy}
+            copied={publicShareCopied}
+            error={publicShareError}
+            onClose={() => setPublicShareOpen(false)}
+            onCopy={() => void copyPublicShareUrl()}
+            onCreate={() => void createCurrentPublicShare()}
+            onStop={() => void stopPublicShare()}
+            share={activePublicShare}
+            shareUrl={activePublicShareUrl}
           />
         )}
         {attachmentPreview && <AttachmentPreviewModal onClose={closeAttachmentPreview} preview={attachmentPreview} />}
       </section>
     </AppShell>
+  );
+}
+
+function PublicShareModal({
+  busy,
+  copied,
+  error,
+  onClose,
+  onCopy,
+  onCreate,
+  onStop,
+  share,
+  shareUrl
+}: {
+  busy: boolean;
+  copied: boolean;
+  error: string | null;
+  onClose: () => void;
+  onCopy: () => void;
+  onCreate: () => void;
+  onStop: () => void;
+  share: PublicNoteShareSnapshot | null;
+  shareUrl: string | null;
+}) {
+  const expiresAt = dateFromTimestamp(share?.expiresAt);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop public-share-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-labelledby="public-share-title"
+        aria-modal="true"
+        className="public-share-modal"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="public-share-modal-header">
+          <div>
+            <span>
+              <Share2 size={16} />
+              임시 URL 공유
+            </span>
+            <h2 id="public-share-title">공유 링크</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="공유 창 닫기">
+            <X size={16} />
+          </button>
+        </header>
+        <div className="public-share-modal-body">
+          {share ? (
+            <>
+              <p className="public-share-expiry">
+                {expiresAt ? `만료 ${formatFullDateTime(expiresAt)}` : "만료 시간을 확인 중입니다."}
+              </p>
+              {shareUrl ? (
+                <label className="public-share-url-field">
+                  <span>URL</span>
+                  <input readOnly value={shareUrl} onFocus={(event) => event.currentTarget.select()} />
+                </label>
+              ) : (
+                <p className="public-share-missing-key">이 브라우저에는 공유 키가 없어 URL을 다시 복사할 수 없습니다.</p>
+              )}
+              <div className="public-share-modal-actions">
+                <button disabled={busy || !shareUrl} onClick={onCopy} type="button">
+                  {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
+                  {copied ? "복사됨" : "URL 복사"}
+                </button>
+                {shareUrl && (
+                  <a className="secondary-button public-share-open-link" href={shareUrl} target="_blank" rel="noopener noreferrer">
+                    <ExternalLink size={16} />
+                    열기
+                  </a>
+                )}
+                <button className="secondary-button danger" disabled={busy} onClick={onStop} type="button">
+                  {busy ? <Loader2 className="spin" size={16} /> : <Ban size={16} />}
+                  공유 중단
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="public-share-expiry">공유 링크는 최대 7일 동안 열 수 있습니다.</p>
+              <button disabled={busy} onClick={onCreate} type="button">
+                {busy ? <Loader2 className="spin" size={16} /> : <Share2 size={16} />}
+                링크 만들기
+              </button>
+            </>
+          )}
+          {busy && <p className="public-share-status">공유 상태를 업데이트하는 중...</p>}
+          {error && <p className="form-error">{error}</p>}
+        </div>
+      </section>
+    </div>
   );
 }
 

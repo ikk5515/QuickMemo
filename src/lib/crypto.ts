@@ -248,6 +248,25 @@ export async function generateNoteKey() {
   );
 }
 
+export async function exportAesKeyBase64Url(key: CryptoKey) {
+  return base64UrlFromBase64(bytesToBase64(await crypto.subtle.exportKey("raw", key)));
+}
+
+export async function importAesKeyBase64Url(value: string) {
+  const rawKey = base64ToBytes(base64FromBase64Url(value));
+
+  return crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(rawKey),
+    {
+      name: "AES-GCM",
+      length: 256
+    },
+    true,
+    ["encrypt", "decrypt"]
+  );
+}
+
 export async function wrapNoteKey(noteKey: CryptoKey, publicKeyJwk: JsonWebKey): Promise<WrappedNoteKey> {
   const publicKey = await importPublicKey(publicKeyJwk);
   const rawKey = await crypto.subtle.exportKey("raw", noteKey);
@@ -279,4 +298,14 @@ export async function unwrapNoteKey(wrappedNoteKey: WrappedNoteKey, privateKey: 
     true,
     ["encrypt", "decrypt"]
   );
+}
+
+function base64UrlFromBase64(value: string) {
+  return value.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64FromBase64Url(value: string) {
+  const normalizedValue = value.replace(/-/g, "+").replace(/_/g, "/");
+  const paddingLength = (4 - (normalizedValue.length % 4)) % 4;
+  return `${normalizedValue}${"=".repeat(paddingLength)}`;
 }

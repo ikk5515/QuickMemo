@@ -395,6 +395,11 @@ textarea {
   color: var(--coral);
 }
 
+.secondary-button.active {
+  background: color-mix(in srgb, var(--teal) 14%, #ffffff);
+  color: var(--teal);
+}
+
 .icon-button {
   background: var(--surface);
   color: var(--ink);
@@ -2596,6 +2601,104 @@ textarea {
   width: min(980px, calc(100vw - 32px));
 }
 
+.public-share-backdrop {
+  z-index: 11;
+}
+
+.public-share-modal {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: grid;
+  overflow: hidden;
+  width: min(520px, calc(100vw - 32px));
+}
+
+.public-share-modal-header {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding: 16px 18px;
+}
+
+.public-share-modal-header div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.public-share-modal-header span {
+  align-items: center;
+  color: var(--teal);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.public-share-modal-header h2 {
+  font-size: 22px;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.public-share-modal-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.public-share-expiry,
+.public-share-status,
+.public-share-missing-key {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 750;
+  margin: 0;
+}
+
+.public-share-status {
+  align-items: center;
+  display: inline-flex;
+}
+
+.public-share-url-field {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 7px;
+}
+
+.public-share-url-field input {
+  font-size: 13px;
+  min-height: 44px;
+}
+
+.public-share-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.public-share-modal-actions > * {
+  flex: 1 1 138px;
+}
+
+.public-share-open-link {
+  align-items: center;
+  border-radius: 8px;
+  display: inline-flex;
+  font-weight: 800;
+  gap: 8px;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 14px;
+}
+
 .pdf-preview-header {
   align-items: center;
   border-bottom: 1px solid var(--line);
@@ -2939,6 +3042,150 @@ textarea {
   max-height: 520px;
   max-width: 100%;
   object-fit: contain;
+}
+
+.public-share-page {
+  background: #ffffff;
+  color: var(--ink);
+  min-height: 100svh;
+}
+
+.public-share-document {
+  margin: 0 auto;
+  padding: clamp(32px, 7vw, 78px) clamp(18px, 5vw, 52px);
+  width: min(900px, 100%);
+}
+
+.public-share-header {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+}
+
+.public-share-header h1 {
+  font-size: clamp(30px, 5vw, 48px);
+  letter-spacing: 0;
+  line-height: 1.18;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.note-preview-body.public-share-body {
+  font-size: var(--editor-font-size, 17px);
+  min-height: 30svh;
+  overflow: visible;
+  padding: 0;
+}
+
+.public-share-attachments {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 14px;
+  margin-top: 28px;
+  padding-top: 22px;
+}
+
+.public-share-attachments h2 {
+  align-items: center;
+  display: inline-flex;
+  font-size: 16px;
+  gap: 7px;
+  margin: 0;
+}
+
+.public-share-attachment-list {
+  display: grid;
+  gap: 10px;
+}
+
+.public-share-attachment {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  padding: 10px;
+}
+
+.public-share-attachment > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.public-share-attachment strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.public-share-attachment span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.public-share-file-icon {
+  align-items: center;
+  background: var(--surface);
+  border-radius: 8px;
+  color: var(--teal);
+  display: inline-flex;
+  height: 46px;
+  justify-content: center;
+  width: 46px;
+}
+
+.public-share-image-link {
+  border-radius: 8px;
+  display: block;
+  height: 62px;
+  overflow: hidden;
+  width: 82px;
+}
+
+.public-share-image-link img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.public-share-download {
+  align-items: center;
+  border-radius: 8px;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 850;
+  gap: 6px;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.public-share-state {
+  align-items: center;
+  color: var(--muted);
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  min-height: 55svh;
+  text-align: center;
+}
+
+.public-share-state h1 {
+  color: var(--ink);
+  font-size: 24px;
+  margin: 0;
+}
+
+.public-share-state p {
+  margin: 0;
+}
+
+.public-share-state.error {
+  color: var(--coral);
 }
 
 .note-preview-editor {
@@ -4167,6 +4414,17 @@ textarea {
     width: 100%;
   }
 
+  .public-share-modal {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    width: 100%;
+  }
+
+  .public-share-modal-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
   .note-preview-modal {
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
@@ -4219,6 +4477,24 @@ textarea {
   .attachment-item {
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+
+  .public-share-attachment {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .public-share-image-link {
+    height: auto;
+    width: 100%;
+  }
+
+  .public-share-image-link img {
+    aspect-ratio: 16 / 9;
+  }
+
+  .public-share-download {
+    width: 100%;
   }
 
   .attachment-actions {
