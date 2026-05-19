@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { FormEvent, useEffect, useId, useMemo, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { serverTimestamp } from "firebase/firestore";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
@@ -587,6 +588,7 @@ function ScheduleCreateForm({
   const titleId = useId();
   const [draft, setDraft] = useState<CreateTaskDraft>(() => createDraftFromDefaults(defaults));
   const [checklistText, setChecklistText] = useState("");
+  const [isChecklistComposing, setIsChecklistComposing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
 
@@ -659,33 +661,27 @@ function ScheduleCreateForm({
             value={draft.title}
           />
         </label>
-        <label>
-          <span>시작일</span>
-          <input
-            onChange={(event) =>
-              setDraft((current) => ({
-                ...current,
-                startDate: event.target.value,
-                endDate: event.target.value
-                  ? current.endDate && current.endDate >= event.target.value
-                    ? current.endDate
-                    : event.target.value
-                  : ""
-              }))
-            }
-            type="date"
-            value={draft.startDate}
-          />
-        </label>
-        <label>
-          <span>종료일</span>
-          <input
-            min={draft.startDate || undefined}
-            onChange={(event) => setDraft((current) => ({ ...current, endDate: event.target.value }))}
-            type="date"
-            value={draft.endDate}
-          />
-        </label>
+        <DatePickerField
+          label="시작일"
+          onChange={(dateString) =>
+            setDraft((current) => ({
+              ...current,
+              startDate: dateString,
+              endDate: dateString
+                ? current.endDate && current.endDate >= dateString
+                  ? current.endDate
+                  : dateString
+                : ""
+            }))
+          }
+          value={draft.startDate}
+        />
+        <DatePickerField
+          label="종료일"
+          min={draft.startDate || undefined}
+          onChange={(dateString) => setDraft((current) => ({ ...current, endDate: dateString }))}
+          value={draft.endDate}
+        />
         <label>
           <span>시간</span>
           <select
@@ -795,9 +791,15 @@ function ScheduleCreateForm({
         ))}
         <div className="schedule-checklist-add">
           <input
+            onCompositionEnd={() => setIsChecklistComposing(false)}
+            onCompositionStart={() => setIsChecklistComposing(true)}
             onChange={(event) => setChecklistText(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
+                if (isChecklistComposing || isComposingKeyboardEvent(event)) {
+                  return;
+                }
+
                 event.preventDefault();
                 addChecklistItem();
               }
@@ -894,6 +896,140 @@ function ScheduleCreateDialog({
   );
 }
 
+function DatePickerField({
+  allowClear = true,
+  className = "",
+  label,
+  min,
+  onChange,
+  value
+}: {
+  allowClear?: boolean;
+  className?: string;
+  label: string;
+  min?: string;
+  onChange: (dateString: string) => void;
+  value: string;
+}) {
+  const todayString = toLocalDateString(new Date());
+  const [open, setOpen] = useState(false);
+  const [cursor, setCursor] = useState(() => datePickerCursor(value || min || todayString));
+  const weeks = useMemo(() => buildCalendarMonth(cursor.getFullYear(), cursor.getMonth(), todayString), [cursor, todayString]);
+  const holidayMap = useMemo(
+    () => getKoreanHolidayMapForDates(weeks.flatMap((week) => week.days.map((day) => day.dateString))),
+    [weeks]
+  );
+
+  useEffect(() => {
+    if (value) {
+      setCursor(datePickerCursor(value));
+    }
+  }, [value]);
+
+  function selectDate(dateString: string) {
+    if (min && dateString < min) {
+      return;
+    }
+
+    onChange(dateString);
+    setOpen(false);
+  }
+
+  return (
+    <div
+      className={`date-picker-field ${className}`.trim()}
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget;
+
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+          setOpen(false);
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          setOpen(false);
+        }
+      }}
+    >
+      <span className="date-picker-label">{label}</span>
+      <div className="date-picker-shell">
+        <button
+          aria-expanded={open}
+          className={`date-picker-trigger ${value ? "" : "empty"}`}
+          onClick={() => setOpen((current) => !current)}
+          type="button"
+        >
+          <CalendarDays size={16} />
+          <span>{value ? formatDateLabel(value) : "날짜 선택"}</span>
+        </button>
+        {value && allowClear && (
+          <button
+            aria-label={`${label} 지우기`}
+            className="icon-button date-picker-clear"
+            onClick={() => {
+              onChange("");
+              setOpen(false);
+            }}
+            type="button"
+          >
+            <X size={15} />
+          </button>
+        )}
+        {open && (
+          <div className="date-picker-popover">
+            <header>
+              <button className="icon-button" type="button" aria-label="이전 달" onClick={() => setCursor(monthOffset(cursor, -1))}>
+                <ChevronLeft size={16} />
+              </button>
+              <strong>{calendarMonthLabel(cursor)}</strong>
+              <button className="icon-button" type="button" aria-label="다음 달" onClick={() => setCursor(monthOffset(cursor, 1))}>
+                <ChevronRight size={16} />
+              </button>
+            </header>
+            <div className="date-picker-weekdays" aria-hidden="true">
+              {["일", "월", "화", "수", "목", "금", "토"].map((weekday) => (
+                <span key={weekday}>{weekday}</span>
+              ))}
+            </div>
+            <div className="date-picker-grid">
+              {weeks.flatMap((week) =>
+                week.days.map((day) => {
+                  const holidays = holidayMap[day.dateString] ?? [];
+                  const disabled = Boolean(min && day.dateString < min);
+
+                  return (
+                    <button
+                      aria-label={`${formatDateLabel(day.dateString)} 선택`}
+                      className={[
+                        "date-picker-day",
+                        day.inCurrentMonth ? "" : "muted",
+                        day.dateString === value ? "selected" : "",
+                        day.isToday ? "today" : "",
+                        day.date.getDay() === 0 || holidays.length ? "holiday" : "",
+                        day.date.getDay() === 6 ? "saturday" : ""
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      disabled={disabled}
+                      key={day.dateString}
+                      onClick={() => selectDate(day.dateString)}
+                      title={holidays[0]?.name}
+                      type="button"
+                    >
+                      <span>{day.dayNumber}</span>
+                      {holidays[0] && <small>{holidays[0].name}</small>}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TodoView({
   groups,
   onOpen,
@@ -946,6 +1082,7 @@ function CalendarView({
   weeks: ReturnType<typeof buildCalendarMonth>;
 }) {
   const firstVisibleDate = weeks[0]?.days[0]?.dateString ?? selectedDate;
+  const selectedHolidays = holidayMap[selectedDate] ?? [];
 
   return (
     <div className="calendar-layout">
@@ -1045,11 +1182,26 @@ function CalendarView({
           <h2>{formatDateLabel(selectedDate)}</h2>
           <span>{selectedDayTasks.length}</span>
         </header>
+        {selectedHolidays.length > 0 && (
+          <div className="calendar-agenda-holidays" aria-label="선택한 날짜의 공휴일">
+            {selectedHolidays.map((holiday) => (
+              <span key={holiday.name}>
+                <CalendarDays size={15} />
+                {holiday.name}
+              </span>
+            ))}
+          </div>
+        )}
         <button className="secondary-button calendar-agenda-add" type="button" onClick={() => onAddDate(selectedDate)}>
           <Plus size={16} />
           일정 추가
         </button>
-        <PagedTaskList tasks={selectedDayTasks} onOpen={onOpen} onToggle={onToggle} />
+        <PagedTaskList
+          emptyMessage={selectedHolidays.length ? "등록된 일정은 없습니다." : undefined}
+          tasks={selectedDayTasks}
+          onOpen={onOpen}
+          onToggle={onToggle}
+        />
       </section>
     </div>
   );
@@ -1092,6 +1244,7 @@ function MatrixView({
 }
 
 function PagedTaskList({
+  emptyMessage,
   getMeta,
   onOpen,
   onToggle,
@@ -1099,6 +1252,7 @@ function PagedTaskList({
   strikeCompleted = true,
   tasks
 }: {
+  emptyMessage?: string;
   getMeta?: (task: DecryptedScheduleTask) => string;
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
@@ -1123,6 +1277,7 @@ function PagedTaskList({
   return (
     <div className="task-paged-list">
       <TaskList
+        emptyMessage={emptyMessage}
         getMeta={getMeta}
         tasks={visibleTasks}
         onOpen={onOpen}
@@ -1279,10 +1434,12 @@ function CompletedView({
             <option value="all">전체</option>
           </select>
         </label>
-        <label className="completed-filter-control">
-          <span>특정 완료일</span>
-          <input onChange={(event) => onDateFilterChange(event.target.value)} type="date" value={dateFilter} />
-        </label>
+        <DatePickerField
+          className="completed-filter-control"
+          label="특정 완료일"
+          onChange={onDateFilterChange}
+          value={dateFilter}
+        />
         <label className="completed-filter-control">
           <span>중요/긴급</span>
           <select
@@ -1317,12 +1474,14 @@ function CompletedView({
 }
 
 function TaskList({
+  emptyMessage = "표시할 일정이 없습니다.",
   getMeta,
   tasks,
   onOpen,
   onToggle,
   strikeCompleted = true
 }: {
+  emptyMessage?: string;
   getMeta?: (task: DecryptedScheduleTask) => string;
   tasks: DecryptedScheduleTask[];
   onOpen: (taskId: string) => void;
@@ -1330,7 +1489,7 @@ function TaskList({
   strikeCompleted?: boolean;
 }) {
   if (!tasks.length) {
-    return <p className="schedule-empty">표시할 일정이 없습니다.</p>;
+    return <p className="schedule-empty">{emptyMessage}</p>;
   }
 
   return (
@@ -1488,6 +1647,7 @@ function TaskDetailModal({
 }) {
   const [draft, setDraft] = useState<TaskDraft>(() => draftFromTask(task));
   const [checklistText, setChecklistText] = useState("");
+  const [isChecklistComposing, setIsChecklistComposing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -1558,29 +1718,27 @@ function TaskDetailModal({
             />
           </label>
           <div className="schedule-detail-grid">
-            <label>
-              시작일
-              <input
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    startDate: event.target.value,
-                    endDate: current.endDate && current.endDate < event.target.value ? event.target.value : current.endDate
-                  }))
-                }
-                type="date"
-                value={draft.startDate}
-              />
-            </label>
-            <label>
-              종료일
-              <input
-                min={draft.startDate || undefined}
-                onChange={(event) => setDraft((current) => ({ ...current, endDate: event.target.value }))}
-                type="date"
-                value={draft.endDate}
-              />
-            </label>
+            <DatePickerField
+              label="시작일"
+              onChange={(dateString) =>
+                setDraft((current) => ({
+                  ...current,
+                  startDate: dateString,
+                  endDate: dateString
+                    ? current.endDate && current.endDate >= dateString
+                      ? current.endDate
+                      : dateString
+                    : ""
+                }))
+              }
+              value={draft.startDate}
+            />
+            <DatePickerField
+              label="종료일"
+              min={draft.startDate || undefined}
+              onChange={(dateString) => setDraft((current) => ({ ...current, endDate: dateString }))}
+              value={draft.endDate}
+            />
           </div>
           <div className="schedule-time-grid">
             <label>
@@ -1705,9 +1863,15 @@ function TaskDetailModal({
             ))}
             <div className="schedule-checklist-add">
               <input
+                onCompositionEnd={() => setIsChecklistComposing(false)}
+                onCompositionStart={() => setIsChecklistComposing(true)}
                 onChange={(event) => setChecklistText(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
+                    if (isChecklistComposing || isComposingKeyboardEvent(event)) {
+                      return;
+                    }
+
                     event.preventDefault();
                     addChecklistItem();
                   }
@@ -1781,6 +1945,28 @@ function addMinutesToTimeInput(value: string, minutes: number) {
   const current = timeInputToMinutes(value) ?? 0;
   const next = Math.min(23 * 60 + 59, current + minutes);
   return formatTaskTime(next);
+}
+
+function datePickerCursor(dateString: string) {
+  const [yearText, monthText] = dateString.split("-");
+  const year = Number(yearText);
+  const month = Number(monthText);
+
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+    const today = new Date();
+    return new Date(today.getFullYear(), today.getMonth(), 1);
+  }
+
+  return new Date(year, month - 1, 1);
+}
+
+function monthOffset(date: Date, offset: number) {
+  return new Date(date.getFullYear(), date.getMonth() + offset, 1);
+}
+
+function isComposingKeyboardEvent(event: ReactKeyboardEvent<HTMLInputElement>) {
+  const nativeEvent = event.nativeEvent as KeyboardEvent & { isComposing?: boolean; keyCode?: number };
+  return Boolean(nativeEvent.isComposing || nativeEvent.keyCode === 229 || event.key === "Process");
 }
 
 function scheduleActionError(caught: unknown, fallback: string) {

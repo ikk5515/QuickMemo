@@ -5462,6 +5462,186 @@ textarea {
   min-width: 0;
 }
 
+.date-picker-field {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 6px;
+  min-width: 0;
+  position: relative;
+}
+
+.date-picker-shell {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  position: relative;
+}
+
+.date-picker-trigger {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  justify-content: flex-start;
+  min-width: 0;
+  padding: 0 12px;
+  width: 100%;
+}
+
+.date-picker-trigger.empty {
+  color: var(--muted);
+}
+
+.date-picker-trigger span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.date-picker-clear {
+  height: 42px;
+  min-height: 42px;
+  width: 42px;
+}
+
+.date-picker-popover {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  color: var(--ink);
+  display: grid;
+  gap: 10px;
+  left: 0;
+  padding: 12px;
+  position: absolute;
+  top: calc(100% + 8px);
+  width: min(320px, calc(100vw - 40px));
+  z-index: 22;
+}
+
+.date-picker-popover header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.date-picker-popover strong {
+  font-size: 15px;
+  letter-spacing: 0;
+}
+
+.date-picker-popover .icon-button {
+  height: 32px;
+  min-height: 32px;
+  width: 32px;
+}
+
+.date-picker-weekdays,
+.date-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.date-picker-weekdays {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.date-picker-weekdays span {
+  padding: 2px 0 4px;
+}
+
+.date-picker-weekdays span:first-child {
+  color: var(--coral);
+}
+
+.date-picker-weekdays span:last-child {
+  color: var(--blue);
+}
+
+.date-picker-grid {
+  gap: 4px;
+}
+
+.date-picker-day {
+  background: #ffffff;
+  border: 1px solid transparent;
+  color: var(--ink);
+  display: grid;
+  gap: 1px;
+  min-height: 42px;
+  min-width: 0;
+  padding: 3px;
+  place-items: center;
+}
+
+.date-picker-day:hover,
+.date-picker-day:focus-visible {
+  background: var(--surface);
+  border-color: var(--line);
+}
+
+.date-picker-day.muted {
+  color: #9aa3aa;
+}
+
+.date-picker-day.today span {
+  align-items: center;
+  background: var(--blue);
+  border-radius: 999px;
+  color: #ffffff;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.date-picker-day.selected {
+  background: color-mix(in srgb, var(--teal) 10%, #ffffff);
+  border-color: color-mix(in srgb, var(--teal) 45%, #ffffff);
+}
+
+.date-picker-day.selected span {
+  align-items: center;
+  background: var(--teal);
+  border-radius: 999px;
+  color: #ffffff;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.date-picker-day.holiday:not(.selected):not(.today) {
+  color: var(--coral);
+}
+
+.date-picker-day.saturday:not(.selected):not(.today) {
+  color: var(--blue);
+}
+
+.date-picker-day small {
+  color: var(--coral);
+  font-size: 8px;
+  font-weight: 900;
+  line-height: 1;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.date-picker-day:disabled {
+  background: #f6f8f5;
+  color: #bac1c6;
+  cursor: not-allowed;
+}
+
 .schedule-create-title {
   grid-column: span 2;
 }
@@ -5991,6 +6171,26 @@ textarea {
   width: 100%;
 }
 
+.calendar-agenda-holidays {
+  display: grid;
+  gap: 6px;
+  margin: -4px 0 12px;
+}
+
+.calendar-agenda-holidays span {
+  align-items: center;
+  background: color-mix(in srgb, var(--coral) 9%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--coral) 24%, #ffffff);
+  border-radius: 8px;
+  color: var(--coral);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 900;
+  gap: 7px;
+  min-height: 38px;
+  padding: 8px 10px;
+}
+
 .matrix-grid {
   display: grid;
   gap: 14px;
@@ -6358,12 +6558,19 @@ textarea {
     align-items: stretch;
     display: grid;
     gap: 14px;
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  .schedule-header > * {
+    min-width: 0;
   }
 
   .schedule-view-tabs {
     display: grid;
     gap: 8px;
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    justify-self: stretch;
     padding: 8px;
     width: 100%;
   }
@@ -6372,8 +6579,10 @@ textarea {
     display: grid;
     gap: 4px;
     min-height: 58px;
+    min-width: 0;
     padding: 7px 4px;
     place-items: center;
+    width: 100%;
   }
 
   .schedule-view-tabs button span {
@@ -6386,6 +6595,11 @@ textarea {
   .schedule-create-form.compact .schedule-create-grid,
   .schedule-checklist-add {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .date-picker-popover {
+    max-width: none;
+    width: 100%;
   }
 
   .schedule-section,
