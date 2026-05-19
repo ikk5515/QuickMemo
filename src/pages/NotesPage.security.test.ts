@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const notesPageSource = readFileSync(join(process.cwd(), "src/pages/NotesPage.tsx"), "utf8");
+const pdfPreviewCanvasSource = readFileSync(join(process.cwd(), "src/lib/pdfPreviewCanvas.ts"), "utf8");
 
 describe("NotesPage security controls", () => {
   it("renders PDF previews through bounded canvas rendering without plugin or iframe surfaces", () => {
@@ -15,10 +16,19 @@ describe("NotesPage security controls", () => {
     expect(pdfPreviewBranch).not.toContain("<embed");
     expect(notesPageSource).toContain("maxPdfPreviewPages");
     expect(notesPageSource).toContain("maxPdfPreviewCanvasPixels");
+    expect(notesPageSource).toContain("maxPdfPreviewTotalCanvasPixels");
+    expect(notesPageSource).toContain("retainedCanvasPixels");
+    expect(notesPageSource).toContain("remainingCanvasPixels");
+    expect(notesPageSource).toContain("pdfPreviewCanvasLayout");
+    expect(notesPageSource).toContain("layout.canvasPixels > maxPdfPreviewCanvasPixels");
+    expect(notesPageSource).toContain("layout.canvasPixels > remainingCanvasPixels");
     expect(notesPageSource).toContain("disableFontFace: true");
     expect(notesPageSource).toContain("enableXfa: false");
     expect(notesPageSource).toContain("useWorkerFetch: false");
     expect(notesPageSource).toContain("annotationMode: pdfjs.AnnotationMode.DISABLE");
+    expect(pdfPreviewCanvasSource).toContain("maxPdfPreviewPageCssHeight");
+    expect(pdfPreviewCanvasSource).toContain("maxPdfPreviewTotalCanvasPixels");
+    expect(pdfPreviewCanvasSource).not.toContain("Math.max(0.25");
     expect(notesPageSource).not.toContain("dangerouslySetInnerHTML={preview");
   });
 
