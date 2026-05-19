@@ -21,7 +21,8 @@ import type {
   EncryptedPayload,
   PublicNoteShareAttachmentDocument,
   PublicNoteShareDocument,
-  PublicSharePasswordHash
+  PublicSharePasswordHash,
+  WrappedNoteKey
 } from "../types";
 
 export const publicNoteShareMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
@@ -39,6 +40,7 @@ interface CreatePublicNoteShareInput {
   encryptedTitle: EncryptedPayload;
   expiresAt: Date;
   ownerUid: string;
+  ownerWrappedShareKey: WrappedNoteKey;
   passwordHash?: PublicSharePasswordHash;
   sourceNoteId: string;
 }
@@ -153,6 +155,7 @@ export async function createPublicNoteShare(input: CreatePublicNoteShareInput) {
     version: 1,
     encryptedTitle: input.encryptedTitle,
     encryptedBody: input.encryptedBody,
+    ownerWrappedShareKey: input.ownerWrappedShareKey,
     attachmentCount: 0,
     ...(input.passwordHash ? { passwordHash: input.passwordHash } : {}),
     ready: false,

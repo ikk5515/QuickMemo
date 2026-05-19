@@ -1663,6 +1663,7 @@ export default function NotesPage() {
   const activeNoteClientId = useRef(getActiveNoteClientId());
   const attachmentPreviewUrl = useRef<string | null>(null);
   const stoppingDeletedPublicShares = useRef(new Set<string>());
+  const resolvingPublicShareUrls = useRef(new Set<string>());
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -2018,6 +2019,38 @@ export default function NotesPage() {
       () => setPublicShareError("공유 링크 상태를 불러오지 못했습니다.")
     );
   }, [profile]);
+
+  useEffect(() => {
+    if (!profile || !privateKey) {
+      return;
+    }
+
+    ownerPublicShares.forEach((share) => {
+      if (
+        !publicShareActive(share, cursorClock) ||
+        publicShareUrlById[share.id] ||
+        readStoredPublicShareUrl(profile.uid, share.id) ||
+        !share.ownerWrappedShareKey ||
+        resolvingPublicShareUrls.current.has(share.id)
+      ) {
+        return;
+      }
+
+      resolvingPublicShareUrls.current.add(share.id);
+      void unwrapNoteKey(share.ownerWrappedShareKey, privateKey)
+        .then(exportAesKeyBase64Url)
+        .then((shareKeyValue) => {
+          const nextUrl = publicShareUrl(share.id, shareKeyValue);
+
+          writeStoredPublicShareUrl(profile.uid, share.id, nextUrl);
+          setPublicShareUrlById((current) => ({ ...current, [share.id]: current[share.id] ?? nextUrl }));
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          resolvingPublicShareUrls.current.delete(share.id);
+        });
+    });
+  }, [cursorClock, ownerPublicShares, privateKey, profile, publicShareUrlById]);
 
   useEffect(() => {
     if (!profile) {
@@ -2748,6 +2781,7 @@ export default function NotesPage() {
         ? await derivePublicShareContentKey(shareKeyValue, trimmedPassword, passwordHash)
         : shareKey;
       const storedContentKeyValue = passwordHash ? await exportAesKeyBase64Url(contentKey) : null;
+      const ownerWrappedShareKey = await wrapNoteKey(shareKey, unlockedProfile.publicKeyJwk);
       const [encryptedTitle, encryptedBody] = await Promise.all([
         encryptText(editor.title.trim() || "제목 없음", contentKey),
         encryptText(serializeEditorContent(editor.body, editor.fontSize), contentKey)
@@ -2757,6 +2791,7 @@ export default function NotesPage() {
         ownerUid: unlockedProfile.uid,
         encryptedTitle,
         encryptedBody,
+        ownerWrappedShareKey,
         expiresAt,
         passwordHash
       });
@@ -4063,6 +4098,7 @@ function PublicShareModal({
   const [passwordDraft, setPasswordDraft] = useState("");
   const expiresAt = dateFromTimestamp(share?.expiresAt);
   const hasPassword = Boolean(share?.passwordHash);
+  const canRecoverShareUrl = Boolean(share?.ownerWrappedShareKey);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -4122,7 +4158,11 @@ function PublicShareModal({
                   <input readOnly value={shareUrl} onFocus={(event) => event.currentTarget.select()} />
                 </label>
               ) : (
-                <p className="public-share-missing-key">이 브라우저에는 공유 키가 없어 URL을 다시 복사할 수 없습니다.</p>
+                <p className="public-share-missing-key">
+                  {canRecoverShareUrl
+                    ? "이 브라우저에서 공유 URL을 준비하는 중입니다."
+                    : "이 공유는 키 동기화 전 생성되어 이 브라우저에서 URL을 다시 복사할 수 없습니다. 공유를 새로 만들면 같은 계정의 다른 브라우저에서도 복사할 수 있습니다."}
+                </p>
               )}
               <div className="public-share-modal-actions">
                 <button disabled={busy || !shareUrl} onClick={onCopy} type="button">
