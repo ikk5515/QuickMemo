@@ -12,6 +12,7 @@ import {
   setDoc,
   Timestamp,
   updateDoc,
+  type Unsubscribe,
   writeBatch,
   where
 } from "firebase/firestore";
@@ -104,6 +105,40 @@ export function subscribePublicSharesForNote(
           .filter((share) => share.sourceNoteId === sourceNoteId)
           .sort((left, right) => timestampMillis(right.createdAt) - timestampMillis(left.createdAt))
       );
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export function subscribePublicSharesForOwner(
+  ownerUid: string,
+  callback: (shares: PublicNoteShareSnapshot[]) => void,
+  onError?: (error: Error) => void
+) {
+  const sharesQuery = query(collection(db, "publicNoteShares"), where("ownerUid", "==", ownerUid));
+
+  return onSnapshot(
+    sharesQuery,
+    (snapshot) => {
+      callback(
+        snapshot.docs
+          .map((document) => publicShareSnapshot(document.id, document.data() as PublicNoteShareDocument))
+          .sort((left, right) => timestampMillis(right.createdAt) - timestampMillis(left.createdAt))
+      );
+    },
+    (error) => onError?.(error)
+  );
+}
+
+export function subscribePublicNoteShare(
+  shareId: string,
+  callback: (share: PublicNoteShareSnapshot | null) => void,
+  onError?: (error: Error) => void
+): Unsubscribe {
+  return onSnapshot(
+    doc(db, "publicNoteShares", shareId),
+    (snapshot) => {
+      callback(snapshot.exists() ? publicShareSnapshot(snapshot.id, snapshot.data() as PublicNoteShareDocument) : null);
     },
     (error) => onError?.(error)
   );

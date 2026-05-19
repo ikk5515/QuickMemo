@@ -147,7 +147,7 @@ export async function derivePublicShareContentKey(shareKeyValue: string, passwor
       name: "AES-GCM",
       length: 256
     },
-    false,
+    true,
     ["encrypt", "decrypt"]
   );
 }

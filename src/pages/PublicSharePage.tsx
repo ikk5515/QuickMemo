@@ -1,4 +1,4 @@
-import { AlertTriangle, Download, File, Loader2, LockKeyhole } from "lucide-react";
+import { AlertTriangle, Download, Eye, File, Loader2, LockKeyhole, X } from "lucide-react";
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { attachmentDownloadName, formatFileSize } from "../lib/attachments";
@@ -11,9 +11,9 @@ import {
 } from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, sanitizeEditorHtml } from "../lib/editorContent";
 import {
-  getPublicNoteShare,
   getPublicNoteShareAttachments,
   publicShareActive,
+  subscribePublicNoteShare,
   type PublicNoteShareAttachmentSnapshot,
   type PublicNoteShareSnapshot
 } from "../services/publicShares";
@@ -25,6 +25,7 @@ interface PublicShareAttachmentView {
   mimeType: string;
   originalSize: number;
   url: string;
+  bytes: Uint8Array;
 }
 
 interface PublicShareContent {
@@ -42,6 +43,7 @@ export default function PublicSharePage() {
   const [attachments, setAttachments] = useState<PublicShareAttachmentView[]>([]);
   const [share, setShare] = useState<PublicNoteShareSnapshot | null>(null);
   const [shareKeyValue, setShareKeyValue] = useState<string | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<PublicShareAttachmentView | null>(null);
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
   const [passwordError, setPasswordError] = useState<string | null>(null);
@@ -49,6 +51,8 @@ export default function PublicSharePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const objectUrlsRef = useRef<string[]>([]);
+  const contentKeyRef = useRef<CryptoKey | null>(null);
+  const passwordSignatureRef = useRef<string | null>(null);
 
   const revokeAttachmentUrls = useCallback(() => {
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
@@ -65,8 +69,53 @@ export default function PublicSharePage() {
     setPasswordRequired(false);
   }, [revokeAttachmentUrls]);
 
+  const clearShareContent = useCallback(() => {
+    revokeAttachmentUrls();
+    setTitle("");
+    setBodyHtml("");
+    setAttachments([]);
+    setAttachmentPreview(null);
+  }, [revokeAttachmentUrls]);
+
   useEffect(() => {
     let active = true;
+    let updateVersion = 0;
+
+    async function applyShareUpdate(nextShare: PublicNoteShareSnapshot, nextShareKeyValue: string, shareKey: CryptoKey) {
+      const currentVersion = (updateVersion += 1);
+
+      if (!publicShareActive(nextShare)) {
+        throw new Error("공유 링크가 만료되었거나 중단되었습니다.");
+      }
+
+      setShare(nextShare);
+      setShareKeyValue(nextShareKeyValue);
+
+      if (nextShare.passwordHash) {
+        const nextSignature = publicSharePasswordSignature(nextShare);
+
+        if (!contentKeyRef.current || passwordSignatureRef.current !== nextSignature) {
+          contentKeyRef.current = null;
+          passwordSignatureRef.current = null;
+          clearShareContent();
+          setPasswordRequired(true);
+          return;
+        }
+      } else {
+        contentKeyRef.current = shareKey;
+        passwordSignatureRef.current = null;
+      }
+
+      const contentKey = contentKeyRef.current ?? shareKey;
+      const content = await decryptPublicShareContent(shareId ?? "", nextShare, contentKey);
+
+      if (!active || currentVersion !== updateVersion) {
+        content.attachments.forEach((attachment) => URL.revokeObjectURL(attachment.url));
+        return;
+      }
+
+      applyShareContent(content);
+    }
 
     async function loadShare() {
       setLoading(true);
@@ -77,6 +126,8 @@ export default function PublicSharePage() {
       setAttachments([]);
       setShare(null);
       setShareKeyValue(null);
+      contentKeyRef.current = null;
+      passwordSignatureRef.current = null;
       setTitle("");
       setBodyHtml("");
       revokeAttachmentUrls();
@@ -89,50 +140,62 @@ export default function PublicSharePage() {
         }
 
         const shareKey = await importAesKeyBase64Url(shareKeyValue);
-        const share = await getPublicNoteShare(shareId);
 
-        if (!share || !publicShareActive(share)) {
-          throw new Error("공유 링크가 만료되었거나 중단되었습니다.");
-        }
+        return subscribePublicNoteShare(
+          shareId,
+          (nextShare) => {
+            if (!nextShare) {
+              setError("공유 링크가 만료되었거나 중단되었습니다.");
+              setLoading(false);
+              return;
+            }
 
-        if (!active) {
-          return;
-        }
-
-        setShare(share);
-        setShareKeyValue(shareKeyValue);
-
-        if (share.passwordHash) {
-          setPasswordRequired(true);
-          return;
-        }
-
-        const content = await decryptPublicShareContent(shareId, share, shareKey);
-
-        if (!active) {
-          content.attachments.forEach((attachment) => URL.revokeObjectURL(attachment.url));
-          return;
-        }
-
-        applyShareContent(content);
+            void applyShareUpdate(nextShare, shareKeyValue, shareKey)
+              .then(() => {
+                if (active) {
+                  setError(null);
+                  setLoading(false);
+                }
+              })
+              .catch((shareError) => {
+                if (active) {
+                  clearShareContent();
+                  setError(shareError instanceof Error ? shareError.message : "공유 노트를 열 수 없습니다.");
+                  setLoading(false);
+                }
+              });
+          },
+          () => {
+            if (active) {
+              setError("공유 링크 상태를 불러오지 못했습니다.");
+              setLoading(false);
+            }
+          }
+        );
       } catch (loadError) {
         if (active) {
           setError(loadError instanceof Error ? loadError.message : "공유 노트를 열 수 없습니다.");
-        }
-      } finally {
-        if (active) {
           setLoading(false);
         }
       }
     }
 
-    void loadShare();
+    let unsubscribe: (() => void) | undefined;
+    void loadShare().then((nextUnsubscribe) => {
+      if (!active) {
+        nextUnsubscribe?.();
+        return;
+      }
+
+      unsubscribe = nextUnsubscribe;
+    });
 
     return () => {
       active = false;
+      unsubscribe?.();
       revokeAttachmentUrls();
     };
-  }, [applyShareContent, revokeAttachmentUrls, shareId]);
+  }, [applyShareContent, clearShareContent, revokeAttachmentUrls, shareId]);
 
   async function handlePasswordSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -155,6 +218,8 @@ export default function PublicSharePage() {
       }
 
       const contentKey = await derivePublicShareContentKey(shareKeyValue, trimmedPassword, share.passwordHash);
+      contentKeyRef.current = contentKey;
+      passwordSignatureRef.current = publicSharePasswordSignature(share);
       const content = await decryptPublicShareContent(shareId, share, contentKey);
       applyShareContent(content);
       setPasswordInput("");
@@ -234,10 +299,16 @@ export default function PublicSharePage() {
                           {attachment.extension.toUpperCase()} · {formatFileSize(attachment.originalSize)}
                         </span>
                       </div>
-                      <a className="secondary-button public-share-download" href={attachment.url} download={attachment.downloadName}>
-                        <Download size={15} />
-                        다운로드
-                      </a>
+                      <div className="public-share-attachment-actions">
+                        <button className="secondary-button public-share-download" type="button" onClick={() => setAttachmentPreview(attachment)}>
+                          <Eye size={15} />
+                          미리보기
+                        </button>
+                        <a className="secondary-button public-share-download" href={attachment.url} download={attachment.downloadName}>
+                          <Download size={15} />
+                          다운로드
+                        </a>
+                      </div>
                     </article>
                   ))}
                 </div>
@@ -246,6 +317,9 @@ export default function PublicSharePage() {
           </>
         )}
       </section>
+      {attachmentPreview && (
+        <PublicAttachmentPreviewModal attachment={attachmentPreview} onClose={() => setAttachmentPreview(null)} />
+      )}
     </main>
   );
 }
@@ -268,7 +342,8 @@ async function decryptPublicAttachment(attachment: PublicNoteShareAttachmentSnap
     extension: attachment.extension,
     mimeType: attachment.mimeType,
     originalSize: attachment.originalSize,
-    url: URL.createObjectURL(blob)
+    url: URL.createObjectURL(blob),
+    bytes
   } satisfies PublicShareAttachmentView;
 }
 
@@ -296,4 +371,93 @@ function shareKeyFromHash() {
 
 function isImageAttachment(attachment: Pick<PublicShareAttachmentView, "extension" | "mimeType">) {
   return attachment.mimeType.startsWith("image/") || ["gif", "jpeg", "jpg", "png", "webp"].includes(attachment.extension);
+}
+
+function isPdfAttachment(attachment: Pick<PublicShareAttachmentView, "extension" | "mimeType">) {
+  return attachment.mimeType === "application/pdf" || attachment.extension === "pdf";
+}
+
+function isTextAttachment(attachment: Pick<PublicShareAttachmentView, "extension" | "mimeType">) {
+  return attachment.mimeType.startsWith("text/") || ["csv", "json", "md", "txt"].includes(attachment.extension);
+}
+
+function publicSharePasswordSignature(share: PublicNoteShareSnapshot) {
+  return share.passwordHash
+    ? `${share.passwordHash.algorithm}:${share.passwordHash.iterations}:${share.passwordHash.salt}:${share.passwordHash.hash}`
+    : null;
+}
+
+function PublicAttachmentPreviewModal({
+  attachment,
+  onClose
+}: {
+  attachment: PublicShareAttachmentView;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") {
+        return;
+      }
+
+      event.preventDefault();
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        aria-label={`${attachment.downloadName} 미리보기`}
+        aria-modal="true"
+        className="pdf-preview-modal public-attachment-preview-modal"
+        role="dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="pdf-preview-header">
+          <div className="pdf-preview-title">
+            <span>첨부파일 미리보기</span>
+            <h2>{attachment.downloadName}</h2>
+          </div>
+          <div className="pdf-preview-actions">
+            <a className="secondary-button pdf-preview-download" download={attachment.downloadName} href={attachment.url}>
+              <Download size={16} />
+              다운로드
+            </a>
+            <button className="icon-button pdf-preview-close" type="button" onClick={onClose} aria-label="미리보기 닫기">
+              <X size={16} />
+            </button>
+          </div>
+        </header>
+        {isImageAttachment(attachment) ? (
+          <div className="public-image-preview-frame">
+            <img src={attachment.url} alt={attachment.downloadName} />
+          </div>
+        ) : isPdfAttachment(attachment) ? (
+          <iframe className="pdf-preview-frame" src={attachment.url} title={`${attachment.downloadName} PDF 미리보기`} />
+        ) : isTextAttachment(attachment) ? (
+          <pre className="file-text-preview">{decodePublicPreviewText(attachment.bytes, attachment.extension)}</pre>
+        ) : (
+          <pre className="file-text-preview unsupported">이 파일 형식은 브라우저 미리보기를 지원하지 않습니다. 다운로드해서 확인해주세요.</pre>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function decodePublicPreviewText(bytes: Uint8Array, extension: string) {
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes).slice(0, 120_000);
+
+  if (extension === "json") {
+    try {
+      return JSON.stringify(JSON.parse(text), null, 2).slice(0, 120_000);
+    } catch {
+      return text;
+    }
+  }
+
+  return text;
 }

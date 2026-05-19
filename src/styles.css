@@ -919,6 +919,42 @@ textarea {
   padding: 4px 7px;
 }
 
+.public-share-list-badge {
+  align-items: center;
+  background: rgb(47 125 112 / 9%);
+  border: 1px solid rgb(47 125 112 / 18%);
+  border-radius: 999px;
+  color: var(--teal);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 950;
+  gap: 4px;
+  line-height: 1;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 4px 7px;
+}
+
+.overview-note-card .public-share-list-badge {
+  color: var(--teal);
+  display: inline-flex;
+  font-size: 11px;
+  line-height: 1;
+  -webkit-line-clamp: unset;
+}
+
+.public-share-list-badge.soon {
+  background: rgb(185 130 47 / 12%);
+  border-color: rgb(185 130 47 / 25%);
+  color: #a16207;
+}
+
+.public-share-list-badge.urgent {
+  background: rgb(220 38 38 / 11%);
+  border-color: rgb(220 38 38 / 22%);
+  color: #dc2626;
+}
+
 .overview-note-card em {
   color: var(--muted);
   font-size: 11px;
@@ -2432,6 +2468,12 @@ textarea {
   padding: 2px 6px;
 }
 
+.trash-tools {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
 .trash-retention-hint {
   background: rgb(47 125 112 / 8%);
   border: 1px solid rgb(47 125 112 / 16%);
@@ -2439,7 +2481,7 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
-  margin: 0 0 10px;
+  margin: 0;
   padding: 9px 10px;
 }
 
@@ -3155,6 +3197,13 @@ textarea {
   min-width: 0;
 }
 
+.public-share-attachment-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .public-share-attachment strong {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3202,6 +3251,29 @@ textarea {
   justify-content: center;
   min-height: 38px;
   padding: 0 12px;
+}
+
+.public-attachment-preview-modal {
+  max-height: 88svh;
+}
+
+.public-image-preview-frame {
+  align-items: center;
+  background: #f8fafc;
+  display: flex;
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 420px;
+  overflow: auto;
+  padding: 18px;
+}
+
+.public-image-preview-frame img {
+  border-radius: 8px;
+  height: auto;
+  max-height: calc(88svh - 112px);
+  max-width: 100%;
+  object-fit: contain;
 }
 
 .public-share-state {
@@ -4552,6 +4624,12 @@ textarea {
   .public-share-attachment {
     align-items: stretch;
     grid-template-columns: 1fr;
+  }
+
+  .public-share-attachment-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    justify-content: stretch;
   }
 
   .public-share-image-link {
