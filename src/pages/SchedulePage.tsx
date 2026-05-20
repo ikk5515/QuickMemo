@@ -103,7 +103,6 @@ const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야
 type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
 type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
 type CompletedPriorityFilter = "all" | "important" | "urgent" | "importantUrgent";
-type MatrixProgressState = Record<MatrixQuadrantKey, number>;
 
 interface QuickDefaults {
   startDate?: string | null;
@@ -125,6 +124,7 @@ interface TaskDraft {
   startTime: string;
   endTime: string;
   color: string;
+  progressPercent: number;
   isImportant: boolean;
   isUrgent: boolean;
   status: DecryptedScheduleTask["status"];
@@ -166,7 +166,6 @@ export default function SchedulePage() {
   const [completedMonths, setCompletedMonths] = useState<CompletedMonthsFilter>("1");
   const [completedPriority, setCompletedPriority] = useState<CompletedPriorityFilter>("all");
   const [completedContent, setCompletedContent] = useState<CompletedContentFilter>("all");
-  const [matrixProgress, setMatrixProgress] = useState<MatrixProgressState>(() => defaultMatrixProgressState());
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [today, setToday] = useState(() => toLocalDateString(new Date()));
@@ -197,15 +196,6 @@ export default function SchedulePage() {
 
     return () => window.clearInterval(intervalId);
   }, []);
-
-  useEffect(() => {
-    if (!profile) {
-      setMatrixProgress(defaultMatrixProgressState());
-      return;
-    }
-
-    setMatrixProgress(loadMatrixProgress(profile.uid, today));
-  }, [profile, today]);
 
   useEffect(() => {
     if (!profile) {
@@ -368,6 +358,7 @@ export default function SchedulePage() {
         endTimeMinutes,
         color: normalizeScheduleTaskColor(draft.color),
         sortOrder: null,
+        progressPercent: 0,
         isImportant: draft.isImportant,
         isUrgent: draft.isUrgent
       });
@@ -432,6 +423,7 @@ export default function SchedulePage() {
         endTimeMinutes,
         color: normalizeScheduleTaskColor(draft.color),
         sortOrder: startDate === taskStartDate(task) ? (task.sortOrder ?? null) : null,
+        progressPercent: normalizeTaskProgressPercent(draft.progressPercent),
         isImportant: draft.isImportant,
         isUrgent: draft.isUrgent,
         status: draft.status,
@@ -471,6 +463,17 @@ export default function SchedulePage() {
     }
   }
 
+  async function updateTaskProgress(task: DecryptedScheduleTask, percent: number) {
+    try {
+      await updateScheduleTask(task.id, unlockedProfile.uid, {
+        progressPercent: normalizeTaskProgressPercent(percent)
+      });
+      setError(null);
+    } catch (caught) {
+      setError(scheduleActionError(caught, "진행률을 저장하지 못했습니다."));
+    }
+  }
+
   async function duplicateTask(task: DecryptedScheduleTask) {
     try {
       const details = task.details ?? emptyScheduleDetails;
@@ -502,6 +505,7 @@ export default function SchedulePage() {
         endTimeMinutes: task.endTimeMinutes ?? null,
         color: normalizeScheduleTaskColor(task.color),
         sortOrder: null,
+        progressPercent: 0,
         isImportant: task.isImportant,
         isUrgent: task.isUrgent
       });
@@ -548,17 +552,6 @@ export default function SchedulePage() {
     } catch (caught) {
       setError(scheduleActionError(caught, "업무 순서를 저장하지 못했습니다."));
     }
-  }
-
-  function updateMatrixProgress(sectionKey: MatrixQuadrantKey, percent: number) {
-    const nextPercent = normalizeMatrixProgressPercent(percent);
-
-    setMatrixProgress((current) => {
-      const nextProgress = { ...current, [sectionKey]: nextPercent };
-
-      saveMatrixProgress(unlockedProfile.uid, today, sectionKey, nextPercent);
-      return nextProgress;
-    });
   }
 
   async function removeTask(task: DecryptedScheduleTask) {
@@ -680,12 +673,10 @@ export default function SchedulePage() {
 
         {activeView === "matrix" && (
           <MatrixView
-            progressBySection={matrixProgress}
             sections={matrixSections}
             onAddSection={openMatrixCreateDialog}
             onMoveTaskToSection={(task, sectionKey) => void moveTaskToMatrixSection(task, sectionKey)}
             onOpen={setViewTaskId}
-            onProgressChange={updateMatrixProgress}
             onReorderTasks={(activeTaskId, overTaskId) => void reorderTasksWithinDate(activeTaskId, overTaskId)}
             onToggle={(task) => void toggleTask(task)}
           />
@@ -722,7 +713,8 @@ export default function SchedulePage() {
             setEditingTaskId(viewTask.id);
             setViewTaskId(null);
           }}
-          onToggleChecklist={(itemId) => void toggleTaskChecklistItem(viewTask, itemId)}
+          onUpdateProgress={(percent) => updateTaskProgress(viewTask, percent)}
+          onToggleChecklist={(itemId) => toggleTaskChecklistItem(viewTask, itemId)}
         />
       )}
 
@@ -1624,19 +1616,15 @@ function MatrixView({
   onAddSection,
   onMoveTaskToSection,
   onOpen,
-  onProgressChange,
   onReorderTasks,
   onToggle,
-  progressBySection,
   sections
 }: {
   onAddSection: (section: MatrixSection) => void;
   onMoveTaskToSection: (task: DecryptedScheduleTask, sectionKey: MatrixQuadrantKey) => void;
   onOpen: (taskId: string) => void;
-  onProgressChange: (sectionKey: MatrixQuadrantKey, percent: number) => void;
   onReorderTasks: (activeTaskId: string, overTaskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
-  progressBySection: MatrixProgressState;
   sections: MatrixSection[];
 }) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -1699,10 +1687,8 @@ function MatrixView({
             key={section.key}
             onAddSection={onAddSection}
             onOpen={onOpen}
-            onProgressChange={onProgressChange}
             onToggle={onToggle}
             onToggleGroup={toggleGroup}
-            progressPercent={progressBySection[section.key]}
             section={section}
           />
         ))}
@@ -1725,19 +1711,15 @@ function MatrixSectionPanel({
   collapsedGroups,
   onAddSection,
   onOpen,
-  onProgressChange,
   onToggle,
   onToggleGroup,
-  progressPercent,
   section
 }: {
   collapsedGroups: Record<string, boolean>;
   onAddSection: (section: MatrixSection) => void;
   onOpen: (taskId: string) => void;
-  onProgressChange: (sectionKey: MatrixQuadrantKey, percent: number) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   onToggleGroup: (sectionKey: MatrixQuadrantKey, groupKey: string) => void;
-  progressPercent: number;
   section: MatrixSection;
 }) {
   const { isOver, setNodeRef } = useDroppable({
@@ -1765,11 +1747,6 @@ function MatrixSectionPanel({
           <Plus size={18} />
         </button>
       </header>
-      <MatrixProgress
-        percent={progressPercent}
-        sectionLabel={section.label}
-        onChange={(percent) => onProgressChange(section.key, percent)}
-      />
       {section.key === "urgentImportant" ? (
         <MatrixSortableTaskList sectionKey={section.key} tasks={section.tasks} onOpen={onOpen} onToggle={onToggle} />
       ) : (
@@ -1807,55 +1784,6 @@ function MatrixSectionPanel({
         </div>
       )}
     </section>
-  );
-}
-
-function MatrixProgress({
-  onChange,
-  percent,
-  sectionLabel
-}: {
-  onChange: (percent: number) => void;
-  percent: number;
-  sectionLabel: string;
-}) {
-  const normalizedPercent = normalizeMatrixProgressPercent(percent);
-  const color = matrixProgressColor(normalizedPercent);
-
-  return (
-    <div
-      className="matrix-progress"
-      aria-label={`${sectionLabel} 진행률 ${normalizedPercent}%`}
-      style={{ "--matrix-progress-color": color } as CSSProperties}
-    >
-      <div className="matrix-progress-header">
-        <span className="matrix-progress-value">
-          <strong>{normalizedPercent}%</strong>
-          완료
-        </span>
-        <span className="matrix-progress-note">{matrixProgressStatusLabel(normalizedPercent)}</span>
-      </div>
-      <label className="matrix-progress-slider">
-        <span className="matrix-progress-slider-head">
-          <span>0</span>
-          <span>50</span>
-          <span>100</span>
-        </span>
-        <span className="matrix-progress-range">
-          <span className="sr-only">{sectionLabel} 진행률 선택</span>
-          <input
-            aria-label={`${sectionLabel} 진행률 선택`}
-            max="100"
-            min="0"
-            onChange={(event) => onChange(Number(event.target.value))}
-            step="10"
-            style={{ "--matrix-progress-fill": `${normalizedPercent}%` } as CSSProperties}
-            type="range"
-            value={normalizedPercent}
-          />
-        </span>
-      </label>
-    </div>
   );
 }
 
@@ -2053,55 +1981,17 @@ function isMatrixQuadrantKey(value: unknown): value is MatrixQuadrantKey {
   );
 }
 
-function defaultMatrixProgressState(): MatrixProgressState {
-  return {
-    urgentImportant: 0,
-    urgentNotImportant: 0,
-    importantNotUrgent: 0,
-    notUrgentNotImportant: 0
-  };
-}
+function normalizeTaskProgressPercent(value: number | null | undefined) {
+  const nextValue = Number(value);
 
-function matrixProgressStorageKey(uid: string, today: string, sectionKey: MatrixQuadrantKey) {
-  const datePart = sectionKey === "urgentImportant" ? today : "manual";
-  return `quickmemo-matrix-progress:${uid}:${sectionKey}:${datePart}`;
-}
-
-function loadMatrixProgress(uid: string, today: string): MatrixProgressState {
-  const nextProgress = defaultMatrixProgressState();
-
-  if (typeof window === "undefined") {
-    return nextProgress;
-  }
-
-  (Object.keys(nextProgress) as MatrixQuadrantKey[]).forEach((sectionKey) => {
-    const stored = window.localStorage.getItem(matrixProgressStorageKey(uid, today, sectionKey));
-    nextProgress[sectionKey] = normalizeMatrixProgressPercent(Number(stored));
-  });
-
-  return nextProgress;
-}
-
-function saveMatrixProgress(uid: string, today: string, sectionKey: MatrixQuadrantKey, percent: number) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.localStorage.setItem(
-    matrixProgressStorageKey(uid, today, sectionKey),
-    String(normalizeMatrixProgressPercent(percent))
-  );
-}
-
-function normalizeMatrixProgressPercent(value: number) {
-  if (!Number.isFinite(value)) {
+  if (!Number.isFinite(nextValue)) {
     return 0;
   }
 
-  return Math.max(0, Math.min(100, Math.round(value / 10) * 10));
+  return Math.max(0, Math.min(100, Math.round(nextValue / 10) * 10));
 }
 
-function matrixProgressStatusLabel(percent: number) {
+function taskProgressStatusLabel(percent: number) {
   if (percent >= 100) {
     return "완료";
   }
@@ -2121,7 +2011,7 @@ function matrixProgressStatusLabel(percent: number) {
   return "대기";
 }
 
-function matrixProgressColor(percent: number) {
+function taskProgressColor(percent: number) {
   if (percent >= 100) {
     return "var(--teal)";
   }
@@ -2418,12 +2308,68 @@ function TaskList({
   );
 }
 
+function TaskProgressControl({
+  disabled = false,
+  helperText,
+  onChange,
+  percent,
+  title = "진행률"
+}: {
+  disabled?: boolean;
+  helperText?: string;
+  onChange: (percent: number) => void;
+  percent: number;
+  title?: string;
+}) {
+  const normalizedPercent = normalizeTaskProgressPercent(percent);
+  const color = taskProgressColor(normalizedPercent);
+  const statusLabel = helperText ?? taskProgressStatusLabel(normalizedPercent);
+
+  return (
+    <section
+      className="task-progress"
+      aria-label={`${title} ${normalizedPercent}%`}
+      style={{ "--task-progress-color": color } as CSSProperties}
+    >
+      <div className="task-progress-header">
+        <div>
+          <span>{title}</span>
+          <strong>{normalizedPercent}%</strong>
+        </div>
+        <span className="task-progress-note">{statusLabel}</span>
+      </div>
+      <label className="task-progress-slider">
+        <span className="task-progress-slider-head">
+          <span>0</span>
+          <span>50</span>
+          <span>100</span>
+        </span>
+        <span className="task-progress-range">
+          <span className="sr-only">{title} 선택</span>
+          <input
+            aria-label={`${title} 선택`}
+            disabled={disabled}
+            max="100"
+            min="0"
+            onChange={(event) => onChange(Number(event.target.value))}
+            step="10"
+            style={{ "--task-progress-fill": `${normalizedPercent}%` } as CSSProperties}
+            type="range"
+            value={normalizedPercent}
+          />
+        </span>
+      </label>
+    </section>
+  );
+}
+
 function TaskReadModal({
   onClose,
   onDelete,
   onDuplicate,
   onEdit,
   onToggleChecklist,
+  onUpdateProgress,
   task
 }: {
   onClose: () => void;
@@ -2431,11 +2377,31 @@ function TaskReadModal({
   onDuplicate: () => void;
   onEdit: () => void;
   onToggleChecklist: (itemId: string) => void | Promise<void>;
+  onUpdateProgress: (percent: number) => void | Promise<void>;
   task: DecryptedScheduleTask;
 }) {
   const details = task.details ?? emptyScheduleDetails;
   const hasChecklist = details.checklist.length > 0;
+  const [progressPercent, setProgressPercent] = useState(() => normalizeTaskProgressPercent(task.progressPercent));
+  const [pendingProgress, setPendingProgress] = useState(false);
   const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setProgressPercent(normalizeTaskProgressPercent(task.progressPercent));
+  }, [task.id, task.progressPercent]);
+
+  async function changeProgress(percent: number) {
+    const nextPercent = normalizeTaskProgressPercent(percent);
+
+    setProgressPercent(nextPercent);
+    setPendingProgress(true);
+
+    try {
+      await onUpdateProgress(nextPercent);
+    } finally {
+      setPendingProgress(false);
+    }
+  }
 
   async function toggleChecklistItem(itemId: string) {
     setPendingChecklistItemId(itemId);
@@ -2487,6 +2453,12 @@ function TaskReadModal({
           {task.isImportant && <span>중요</span>}
           {task.isUrgent && <span>긴급</span>}
         </div>
+
+        <TaskProgressControl
+          helperText={pendingProgress ? "저장 중" : undefined}
+          onChange={(percent) => void changeProgress(percent)}
+          percent={progressPercent}
+        />
 
         <section className="task-read-section">
           <h3>내용</h3>
@@ -2727,6 +2699,10 @@ function TaskDetailModal({
             value={draft.color}
             onChange={(color) => setDraft((current) => ({ ...current, color }))}
           />
+          <TaskProgressControl
+            onChange={(progressPercent) => setDraft((current) => ({ ...current, progressPercent }))}
+            percent={draft.progressPercent}
+          />
           <label>
             설명
             <textarea
@@ -2834,6 +2810,7 @@ function draftFromTask(task: DecryptedScheduleTask): TaskDraft {
     startTime: formatTaskTime(startTime),
     endTime: formatTaskTime(endTime),
     color: normalizeScheduleTaskColor(task.color),
+    progressPercent: normalizeTaskProgressPercent(task.progressPercent),
     isImportant: task.isImportant,
     isUrgent: task.isUrgent,
     status: task.status

@@ -127,6 +127,7 @@ function scheduleTask(uid: string, overrides: Record<string, unknown> = {}) {
     startTimeMinutes: 960,
     endTimeMinutes: null,
     sortOrder: null,
+    progressPercent: 0,
     isImportant: true,
     isUrgent: false,
     encryptedTitle: encryptedPayload,
@@ -672,6 +673,13 @@ describeRules("firestore security rules", () => {
         updatedAt: serverTimestamp()
       })
     );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        progressPercent: 80,
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
     await assertFails(
       updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
         color: "javascript:alert(1)",
@@ -689,6 +697,27 @@ describeRules("firestore security rules", () => {
     await assertFails(
       updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
         sortOrder: "first",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        progressPercent: -10,
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        progressPercent: 110,
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        progressPercent: "done",
         updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })

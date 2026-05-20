@@ -214,6 +214,7 @@ export interface ScheduleTaskDocument {
   endTimeMinutes?: number | null;
   color?: string | null;
   sortOrder?: number | null;
+  progressPercent?: number | null;
   isImportant: boolean;
   isUrgent: boolean;
   encryptedTitle: EncryptedPayload;

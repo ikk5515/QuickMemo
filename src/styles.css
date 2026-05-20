@@ -6363,44 +6363,51 @@ textarea {
     inset 0 0 0 2px color-mix(in srgb, var(--teal) 38%, #ffffff);
 }
 
-.matrix-progress {
-  background: color-mix(in srgb, var(--matrix-progress-color, var(--teal)) 7%, #ffffff);
-  border: 1px solid color-mix(in srgb, var(--matrix-progress-color, var(--teal)) 18%, var(--line));
+.task-progress {
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--task-progress-color, var(--teal)) 10%, #ffffff),
+      #ffffff 72%
+    );
+  border: 1px solid color-mix(in srgb, var(--task-progress-color, var(--teal)) 18%, var(--line));
   border-radius: 8px;
   display: grid;
-  gap: 8px;
-  margin: -2px 0 14px;
-  padding: 10px;
+  gap: 10px;
+  padding: 12px;
 }
 
-.matrix-progress-header {
+.task-progress-header {
   align-items: center;
   display: flex;
   gap: 8px;
   justify-content: space-between;
 }
 
-.matrix-progress-value {
-  align-items: baseline;
-  color: var(--muted);
-  display: inline-flex;
+.task-progress-header > div {
+  display: grid;
   gap: 4px;
+}
+
+.task-progress-header > div span {
+  color: var(--muted);
   font-size: 12px;
   font-weight: 900;
   line-height: 1;
 }
 
-.matrix-progress-value strong {
-  color: var(--matrix-progress-color, var(--teal));
-  font-size: 18px;
+.task-progress-header > div strong {
+  color: var(--task-progress-color, var(--teal));
+  font-size: 28px;
+  letter-spacing: 0;
   line-height: 1;
 }
 
-.matrix-progress-note {
-  background: color-mix(in srgb, var(--matrix-progress-color, var(--teal)) 12%, #ffffff);
-  border: 1px solid color-mix(in srgb, var(--matrix-progress-color, var(--teal)) 18%, #ffffff);
+.task-progress-note {
+  background: color-mix(in srgb, var(--task-progress-color, var(--teal)) 12%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--task-progress-color, var(--teal)) 18%, #ffffff);
   border-radius: 999px;
-  color: color-mix(in srgb, var(--matrix-progress-color, var(--teal)) 78%, var(--ink));
+  color: color-mix(in srgb, var(--task-progress-color, var(--teal)) 78%, var(--ink));
   font-size: 11px;
   font-weight: 900;
   line-height: 1;
@@ -6408,12 +6415,12 @@ textarea {
   white-space: nowrap;
 }
 
-.matrix-progress-slider {
+.task-progress-slider {
   display: grid;
   gap: 6px;
 }
 
-.matrix-progress-slider-head {
+.task-progress-slider-head {
   color: var(--muted);
   display: flex;
   font-size: 10px;
@@ -6423,13 +6430,13 @@ textarea {
   padding: 0 1px;
 }
 
-.matrix-progress-range input[type="range"] {
+.task-progress-range input[type="range"] {
   appearance: none;
   background:
     linear-gradient(
       90deg,
-      var(--matrix-progress-color, var(--teal)) 0 var(--matrix-progress-fill, 0%),
-      color-mix(in srgb, var(--matrix-progress-color, var(--teal)) 12%, var(--surface)) var(--matrix-progress-fill, 0%) 100%
+      var(--task-progress-color, var(--teal)) 0 var(--task-progress-fill, 0%),
+      color-mix(in srgb, var(--task-progress-color, var(--teal)) 12%, var(--surface)) var(--task-progress-fill, 0%) 100%
     );
   border: 0;
   border-radius: 999px;
@@ -6441,28 +6448,33 @@ textarea {
   width: 100%;
 }
 
-.matrix-progress-range input[type="range"]::-webkit-slider-thumb {
+.task-progress-range input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   background: #ffffff;
-  border: 3px solid var(--matrix-progress-color, var(--teal));
+  border: 3px solid var(--task-progress-color, var(--teal));
   border-radius: 999px;
   box-shadow: 0 4px 10px rgb(20 33 31 / 18%);
   height: 20px;
   width: 20px;
 }
 
-.matrix-progress-range input[type="range"]::-moz-range-thumb {
+.task-progress-range input[type="range"]::-moz-range-thumb {
   background: #ffffff;
-  border: 3px solid var(--matrix-progress-color, var(--teal));
+  border: 3px solid var(--task-progress-color, var(--teal));
   border-radius: 999px;
   box-shadow: 0 4px 10px rgb(20 33 31 / 18%);
   height: 14px;
   width: 14px;
 }
 
-.matrix-progress-range input[type="range"]:focus-visible {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--matrix-progress-color, var(--teal)) 18%, transparent);
+.task-progress-range input[type="range"]:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--task-progress-color, var(--teal)) 18%, transparent);
+}
+
+.task-progress-range input[type="range"]:disabled {
+  cursor: progress;
+  opacity: 0.78;
 }
 
 .matrix-date-groups {
@@ -6728,6 +6740,10 @@ textarea {
   font-size: 12px;
   font-weight: 900;
   padding: 5px 9px;
+}
+
+.schedule-read-modal .task-progress {
+  margin-bottom: 14px;
 }
 
 .task-read-section {

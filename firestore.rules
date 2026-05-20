@@ -352,6 +352,16 @@ service cloud.firestore {
         );
     }
 
+    function validScheduleProgress(data) {
+      return !data.keys().hasAny(["progressPercent"])
+        || data.progressPercent == null
+        || (
+          data.progressPercent is int
+          && data.progressPercent >= 0
+          && data.progressPercent <= 100
+        );
+    }
+
     function scheduleStartDate(data) {
       return data.keys().hasAny(["startDate"]) ? data.startDate : data.dueDate;
     }
@@ -465,6 +475,7 @@ service cloud.firestore {
         "endTimeMinutes",
         "color",
         "sortOrder",
+        "progressPercent",
         "isImportant",
         "isUrgent",
         "encryptedTitle",
@@ -482,6 +493,7 @@ service cloud.firestore {
       && validScheduleTimeRange(data)
       && validScheduleColor(data)
       && validScheduleSortOrder(data)
+      && validScheduleProgress(data)
       && data.isImportant is bool
       && data.isUrgent is bool
       && encryptedSchedulePayload(data.encryptedTitle, 4096)
@@ -1431,6 +1443,7 @@ service cloud.firestore {
           "endTimeMinutes",
           "color",
           "sortOrder",
+          "progressPercent",
           "isImportant",
           "isUrgent",
           "encryptedTitle",
