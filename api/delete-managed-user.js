@@ -547,9 +547,20 @@ async function identityToolkitRequest(projectId, method, accessToken, body) {
 }
 
 async function lookupCallerUid(projectId, accessToken, idToken) {
-  const result = await identityToolkitRequest(projectId, "lookup", accessToken, {
-    idToken
-  });
+  let result;
+
+  try {
+    result = await identityToolkitRequest(projectId, "lookup", accessToken, {
+      idToken
+    });
+  } catch (error) {
+    if (String(error.body ?? "").includes("INVALID_ID_TOKEN")) {
+      return "";
+    }
+
+    throw error;
+  }
+
   const [user] = result.users ?? [];
   return typeof user?.localId === "string" ? user.localId : "";
 }

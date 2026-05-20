@@ -6,6 +6,7 @@ interface FirestoreFieldOverride {
   collectionGroup: string;
   fieldPath: string;
   indexes?: Array<{
+    arrayConfig?: string;
     order?: string;
     queryScope?: string;
   }>;
@@ -42,6 +43,21 @@ describe("Firestore index retention policies", () => {
       indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
     });
     expect(fieldOverride("publicShareCleanupQueue", "expiresAt")).toBeUndefined();
+  });
+
+  it("keeps collection-group indexes used by managed user deletion cleanup", () => {
+    expect(fieldOverride("attachments", "uploadedBy")).toMatchObject({
+      indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
+    });
+    expect(fieldOverride("history", "actorUid")).toMatchObject({
+      indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
+    });
+    expect(fieldOverride("history", "readerUids")).toMatchObject({
+      indexes: [{ arrayConfig: "CONTAINS", queryScope: "COLLECTION_GROUP" }]
+    });
+    expect(fieldOverride("users", "uid")).toMatchObject({
+      indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
+    });
   });
 
   it("keeps schedule task query indexes and disables encrypted payload indexing", () => {
