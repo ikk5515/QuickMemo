@@ -9,7 +9,8 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("accounts:lookup");
     expect(deleteManagedUserSource).toContain("accounts:delete");
     expect(deleteManagedUserSource).toContain("idToken");
-    expect(deleteManagedUserSource).toContain("management_credentials_missing");
+    expect(deleteManagedUserSource).toContain("missingManagementCredentialsCode");
+    expect(deleteManagedUserSource).not.toContain("error: missingManagementCredentialsCode");
   });
 
   it("checks the caller admin profile and cleans schedule-owned data", () => {
@@ -43,5 +44,19 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("allowedShareTargetUids");
     expect(deleteManagedUserSource).toContain("sharedNoteMembershipsRemoved");
     expect(deleteManagedUserSource).toContain("shareTargetReferencesRemoved");
+  });
+
+  it("deprovisions the target before long cleanup routines can fail", () => {
+    const deactivateIndex = deleteManagedUserSource.indexOf("await deactivateManagedUserBeforeCleanup");
+    const authDeleteIndex = deleteManagedUserSource.indexOf("stats.authUserDeleted = await deleteAuthUser");
+    const cleanupIndex = deleteManagedUserSource.indexOf("await removeDeletedUserFromShareTargets");
+
+    expect(deleteManagedUserSource).toContain("isActive: { booleanValue: false }");
+    expect(deleteManagedUserSource).toContain("firestorePatchFieldsIfExists");
+    expect(deactivateIndex).toBeGreaterThan(-1);
+    expect(authDeleteIndex).toBeGreaterThan(-1);
+    expect(cleanupIndex).toBeGreaterThan(-1);
+    expect(deactivateIndex).toBeLessThan(cleanupIndex);
+    expect(authDeleteIndex).toBeLessThan(cleanupIndex);
   });
 });

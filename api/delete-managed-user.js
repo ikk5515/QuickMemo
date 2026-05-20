@@ -285,6 +285,37 @@ async function firestorePatchFields(projectId, documentPath, fields, accessToken
   );
 }
 
+async function firestorePatchFieldsIfExists(projectId, documentPath, fields, accessToken) {
+  const query = new URLSearchParams();
+
+  Object.keys(fields).forEach((fieldPath) => {
+    query.append("updateMask.fieldPaths", fieldPath);
+  });
+
+  const response = await fetch(
+    `${firestoreBaseUrl}/${documentsRoot(projectId)}/${encodeDocumentPath(documentPath)}?${query.toString()}`,
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ fields })
+    }
+  );
+
+  if (response.status === 404) {
+    return false;
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Firestore patch failed: ${response.status} ${text.slice(0, 300)}`);
+  }
+
+  return true;
+}
+
 async function listCollection(projectId, collectionId, accessToken) {
   const documents = [];
   let pageToken = "";
@@ -977,6 +1008,32 @@ async function reassignBootstrapAdminIfNeeded(projectId, targetUid, callerUid, a
   return true;
 }
 
+async function deactivateManagedUserBeforeCleanup(projectId, targetUid, quickKey, accessToken, stats) {
+  const inactiveFields = {
+    isActive: { booleanValue: false },
+    updatedAt: timestampValue()
+  };
+
+  stats.userProfileDeactivated = await firestorePatchFieldsIfExists(
+    projectId,
+    `users/${targetUid}`,
+    inactiveFields,
+    accessToken
+  );
+  stats.rosterProfileDeactivated = await firestorePatchFieldsIfExists(
+    projectId,
+    `publicLoginRoster/${targetUid}`,
+    inactiveFields,
+    accessToken
+  );
+
+  if (quickKey) {
+    await deleteDocumentPathForStat(projectId, `quickLoginKeys/${quickKey}`, accessToken, stats, "userDocumentsDeleted");
+  }
+
+  await deleteDocumentPathForStat(projectId, `activeNotes/${targetUid}`, accessToken, stats, "userDocumentsDeleted");
+}
+
 async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid }) {
   const callerProfile = await firestoreGet(projectId, `users/${callerUid}`, accessToken);
 
@@ -1022,8 +1079,14 @@ async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid 
     shareTargetReferencesRemoved: 0,
     sharedNoteMembershipsRemoved: 0,
     uploadedNoteAttachmentsDeleted: 0,
+    rosterProfileDeactivated: false,
+    userProfileDeactivated: false,
     userDocumentsDeleted: 0
   };
+
+  await deactivateManagedUserBeforeCleanup(projectId, targetUid, quickKey, accessToken, stats);
+  stats.authUserDeleted = await deleteAuthUser(projectId, accessToken, targetUid);
+  stats.bootstrapAdminReassigned = await reassignBootstrapAdminIfNeeded(projectId, targetUid, callerUid, accessToken);
 
   await removeDeletedUserFromShareTargets(projectId, targetUid, accessToken, stats);
   await deleteOwnedPublicShares(projectId, targetUid, accessToken, stats);
@@ -1036,21 +1099,15 @@ async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid 
   await deleteOwnedNoteFolders(projectId, targetUid, accessToken, stats);
   await deleteOwnedScheduleTasks(projectId, targetUid, accessToken, stats);
 
-  stats.bootstrapAdminReassigned = await reassignBootstrapAdminIfNeeded(projectId, targetUid, callerUid, accessToken);
-
   for (const path of [
-    quickKey ? `quickLoginKeys/${quickKey}` : "",
     `system/bootstrapAttempts/attempts/${targetUid}`,
     `userPreferences/${targetUid}`,
-    `activeNotes/${targetUid}`,
     `userKeys/${targetUid}`,
     `publicLoginRoster/${targetUid}`,
     `users/${targetUid}`
   ].filter(Boolean)) {
     await deleteDocumentPathForStat(projectId, path, accessToken, stats, "userDocumentsDeleted");
   }
-
-  stats.authUserDeleted = await deleteAuthUser(projectId, accessToken, targetUid);
 
   return { statusCode: 200, body: { ok: true, ...stats } };
 }
@@ -1116,11 +1173,6 @@ export default async function handler(request, response) {
     jsonResponse(response, result.statusCode, result.body);
   } catch (error) {
     console.error("managed user delete failed", error);
-    if (error?.code === missingManagementCredentialsCode) {
-      jsonResponse(response, 503, { ok: false, error: missingManagementCredentialsCode });
-      return;
-    }
-
     jsonResponse(response, 500, { ok: false, error: "delete_failed" });
   }
 }
