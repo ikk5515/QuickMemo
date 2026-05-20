@@ -82,6 +82,7 @@ import {
 import {
   createScheduleTask,
   deleteScheduleTask,
+  getScheduleTask,
   subscribeScheduleTasks,
   updateScheduleTask,
   updateScheduleTaskOrderBatch,
@@ -104,6 +105,7 @@ const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야
 type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
 type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
 type CompletedPriorityFilter = "all" | "important" | "urgent" | "importantUrgent";
+type TaskDetailsUpdater = (details: ScheduleTaskDetails) => ScheduleTaskDetails;
 
 interface QuickDefaults {
   startDate?: string | null;
@@ -170,6 +172,8 @@ export default function SchedulePage() {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [today, setToday] = useState(() => toLocalDateString(new Date()));
+  const decryptedTasksRef = useRef<DecryptedScheduleTask[]>([]);
+  const taskDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<ScheduleTaskDetails>>>>({});
 
   useEffect(() => {
     if (!profile) {
@@ -262,6 +266,10 @@ export default function SchedulePage() {
       active = false;
     };
   }, [privateKey, profile, tasks]);
+
+  useEffect(() => {
+    decryptedTasksRef.current = decryptedTasks;
+  }, [decryptedTasks]);
 
   const sortedTasks = useMemo(() => [...decryptedTasks].sort(compareTaskSchedule), [decryptedTasks]);
   const viewTask = useMemo(
@@ -439,7 +447,37 @@ export default function SchedulePage() {
     }
   }
 
-  async function updateTaskDetails(task: DecryptedScheduleTask, details: ScheduleTaskDetails, fallback: string) {
+  function currentTaskDetails(task: DecryptedScheduleTask) {
+    return decryptedTasksRef.current.find((currentTask) => currentTask.id === task.id)?.details ?? task.details ?? emptyScheduleDetails;
+  }
+
+  async function latestTaskDetails(task: DecryptedScheduleTask, taskKey: CryptoKey, fallback: ScheduleTaskDetails) {
+    try {
+      const latestTask = await getScheduleTask(task.id);
+
+      if (!latestTask || latestTask.ownerUid !== unlockedProfile.uid) {
+        return fallback;
+      }
+
+      const latestDetailsJson = await decryptText(latestTask.encryptedDetails, taskKey);
+      return normalizeScheduleDetails(JSON.parse(latestDetailsJson) as unknown);
+    } catch {
+      return fallback;
+    }
+  }
+
+  function normalizeMutableTaskDetails(details: ScheduleTaskDetails): ScheduleTaskDetails {
+    const normalizedDetails = normalizeScheduleDetails(details);
+
+    return {
+      description: normalizedDetails.description,
+      checklist: normalizedDetails.checklist
+        .map((item) => ({ ...item, text: item.text.trim() }))
+        .filter((item) => item.text)
+    };
+  }
+
+  async function updateTaskDetails(task: DecryptedScheduleTask, updateDetails: TaskDetailsUpdater, fallback: string) {
     const wrappedKey = task.wrappedKeys[unlockedProfile.uid];
 
     if (!wrappedKey) {
@@ -447,36 +485,45 @@ export default function SchedulePage() {
       return false;
     }
 
-    try {
-      const taskKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
-      const normalizedDetails: ScheduleTaskDetails = {
-        description: details.description,
-        checklist: details.checklist
-          .map((item) => ({ ...item, text: item.text.trim() }))
-          .filter((item) => item.text)
-      };
-      const encryptedDetails = await encryptText(JSON.stringify(normalizedDetails), taskKey);
+    const queuedUpdate = taskDetailsUpdateQueueRef.current[task.id];
+    const previousUpdate = queuedUpdate ?? Promise.resolve(currentTaskDetails(task));
+    const nextUpdate = previousUpdate
+      .catch(() => currentTaskDetails(task))
+      .then(async (queuedDetails) => {
+        const taskKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
+        const baseDetails = queuedUpdate ? queuedDetails : await latestTaskDetails(task, taskKey, queuedDetails);
+        const nextDetails = normalizeMutableTaskDetails(updateDetails(baseDetails));
+        const encryptedDetails = await encryptText(JSON.stringify(nextDetails), taskKey);
 
-      await updateScheduleTask(task.id, unlockedProfile.uid, { encryptedDetails });
+        await updateScheduleTask(task.id, unlockedProfile.uid, { encryptedDetails });
+        return nextDetails;
+      });
+
+    taskDetailsUpdateQueueRef.current[task.id] = nextUpdate;
+
+    try {
+      await nextUpdate;
       setError(null);
       return true;
     } catch (caught) {
       setError(scheduleActionError(caught, fallback));
       return false;
+    } finally {
+      if (taskDetailsUpdateQueueRef.current[task.id] === nextUpdate) {
+        delete taskDetailsUpdateQueueRef.current[task.id];
+      }
     }
   }
 
   async function toggleTaskChecklistItem(task: DecryptedScheduleTask, itemId: string) {
-    const details = task.details ?? emptyScheduleDetails;
-
     await updateTaskDetails(
       task,
-      {
+      (details) => ({
         description: details.description,
         checklist: details.checklist.map((item) =>
           item.id === itemId ? { ...item, checked: !item.checked } : item
         )
-      },
+      }),
       "체크리스트 상태를 저장하지 못했습니다."
     );
   }
@@ -732,7 +779,7 @@ export default function SchedulePage() {
             setViewTaskId(null);
           }}
           onUpdateProgress={(percent) => updateTaskProgress(viewTask, percent)}
-          onUpdateDetails={(details) => updateTaskDetails(viewTask, details, "일정 상세 내용을 저장하지 못했습니다.")}
+          onUpdateDetails={(updateDetails) => updateTaskDetails(viewTask, updateDetails, "일정 상세 내용을 저장하지 못했습니다.")}
           onToggleChecklist={(itemId) => toggleTaskChecklistItem(viewTask, itemId)}
         />
       )}
@@ -2397,7 +2444,7 @@ function TaskReadModal({
   onDuplicate: () => void;
   onEdit: () => void;
   onToggleChecklist: (itemId: string) => void | Promise<void>;
-  onUpdateDetails: (details: ScheduleTaskDetails) => boolean | Promise<boolean>;
+  onUpdateDetails: (updateDetails: TaskDetailsUpdater) => boolean | Promise<boolean>;
   onUpdateProgress: (percent: number) => void | Promise<void>;
   task: DecryptedScheduleTask;
 }) {
@@ -2414,6 +2461,7 @@ function TaskReadModal({
   const [checklistEditText, setChecklistEditText] = useState("");
   const [isChecklistComposing, setIsChecklistComposing] = useState(false);
   const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
+  const detailsMutationPending = pendingDetailsAction !== null || pendingChecklistItemId !== null;
 
   useEffect(() => {
     setProgressPercent(normalizeTaskProgressPercent(task.progressPercent));
@@ -2445,11 +2493,11 @@ function TaskReadModal({
     }
   }
 
-  async function saveInlineDetails(nextDetails: ScheduleTaskDetails, actionId: string) {
+  async function saveInlineDetails(updateDetails: TaskDetailsUpdater, actionId: string) {
     setPendingDetailsAction(actionId);
 
     try {
-      return await onUpdateDetails(nextDetails);
+      return await onUpdateDetails(updateDetails);
     } finally {
       setPendingDetailsAction(null);
     }
@@ -2457,10 +2505,10 @@ function TaskReadModal({
 
   async function saveDescription() {
     const didSave = await saveInlineDetails(
-      {
+      (currentDetails) => ({
         description: descriptionDraft,
-        checklist: details.checklist
-      },
+        checklist: currentDetails.checklist
+      }),
       "description"
     );
 
@@ -2477,10 +2525,10 @@ function TaskReadModal({
     }
 
     const didSave = await saveInlineDetails(
-      {
-        description: details.description,
-        checklist: [...details.checklist, { id: crypto.randomUUID(), text, checked: false }]
-      },
+      (currentDetails) => ({
+        description: currentDetails.description,
+        checklist: [...currentDetails.checklist, { id: crypto.randomUUID(), text, checked: false }]
+      }),
       "checklist:add"
     );
 
@@ -2503,10 +2551,10 @@ function TaskReadModal({
     }
 
     const didSave = await saveInlineDetails(
-      {
-        description: details.description,
-        checklist: details.checklist.map((item) => (item.id === itemId ? { ...item, text } : item))
-      },
+      (currentDetails) => ({
+        description: currentDetails.description,
+        checklist: currentDetails.checklist.map((item) => (item.id === itemId ? { ...item, text } : item))
+      }),
       `checklist:edit:${itemId}`
     );
 
@@ -2518,10 +2566,10 @@ function TaskReadModal({
 
   async function deleteChecklistItem(itemId: string) {
     const didSave = await saveInlineDetails(
-      {
-        description: details.description,
-        checklist: details.checklist.filter((item) => item.id !== itemId)
-      },
+      (currentDetails) => ({
+        description: currentDetails.description,
+        checklist: currentDetails.checklist.filter((item) => item.id !== itemId)
+      }),
       `checklist:delete:${itemId}`
     );
 
@@ -2597,7 +2645,7 @@ function TaskReadModal({
                   className="icon-button task-read-icon-button"
                   type="button"
                   aria-label="내용 저장"
-                  disabled={pendingDetailsAction === "description"}
+                  disabled={detailsMutationPending}
                   onClick={() => void saveDescription()}
                 >
                   <Save size={15} />
@@ -2606,7 +2654,7 @@ function TaskReadModal({
                   className="icon-button task-read-icon-button"
                   type="button"
                   aria-label="내용 수정 취소"
-                  disabled={pendingDetailsAction === "description"}
+                  disabled={detailsMutationPending}
                   onClick={() => {
                     setDescriptionDraft(details.description);
                     setIsDescriptionEditing(false);
@@ -2620,6 +2668,7 @@ function TaskReadModal({
                 className="icon-button task-read-icon-button"
                 type="button"
                 aria-label="내용 수정"
+                disabled={detailsMutationPending}
                 onClick={() => setIsDescriptionEditing(true)}
               >
                 <Pencil size={15} />
@@ -2645,6 +2694,7 @@ function TaskReadModal({
               className="icon-button task-read-icon-button"
               type="button"
               aria-label="체크리스트 추가"
+              disabled={detailsMutationPending}
               onClick={() => setIsAddingChecklist(true)}
             >
               <Plus size={15} />
@@ -2655,6 +2705,7 @@ function TaskReadModal({
               <input
                 autoFocus
                 aria-label="새 체크리스트 항목"
+                disabled={detailsMutationPending}
                 onCompositionEnd={() => setIsChecklistComposing(false)}
                 onCompositionStart={() => setIsChecklistComposing(true)}
                 onChange={(event) => setNewChecklistText(event.target.value)}
@@ -2677,7 +2728,7 @@ function TaskReadModal({
                   className="icon-button task-read-icon-button"
                   type="button"
                   aria-label="체크리스트 저장"
-                  disabled={pendingDetailsAction === "checklist:add"}
+                  disabled={detailsMutationPending}
                   onClick={() => void addChecklistItem()}
                 >
                   <Save size={15} />
@@ -2686,7 +2737,7 @@ function TaskReadModal({
                   className="icon-button task-read-icon-button"
                   type="button"
                   aria-label="체크리스트 추가 취소"
-                  disabled={pendingDetailsAction === "checklist:add"}
+                  disabled={detailsMutationPending}
                   onClick={() => {
                     setNewChecklistText("");
                     setIsAddingChecklist(false);
@@ -2705,7 +2756,7 @@ function TaskReadModal({
                     aria-checked={item.checked}
                     aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
                     className={`task-read-check-button ${item.checked ? "checked" : ""}`}
-                    disabled={pendingChecklistItemId === item.id}
+                    disabled={detailsMutationPending}
                     onClick={() => void toggleChecklistItem(item.id)}
                     role="checkbox"
                     type="button"
@@ -2718,6 +2769,7 @@ function TaskReadModal({
                         autoFocus
                         aria-label="체크리스트 항목 수정"
                         className="task-read-checklist-input"
+                        disabled={detailsMutationPending}
                         onCompositionEnd={() => setIsChecklistComposing(false)}
                         onCompositionStart={() => setIsChecklistComposing(true)}
                         onChange={(event) => setChecklistEditText(event.target.value)}
@@ -2740,7 +2792,7 @@ function TaskReadModal({
                           className="icon-button task-read-icon-button"
                           type="button"
                           aria-label={`${item.text} 저장`}
-                          disabled={pendingDetailsAction === `checklist:edit:${item.id}`}
+                          disabled={detailsMutationPending}
                           onClick={() => void saveChecklistItemText(item.id)}
                         >
                           <Save size={15} />
@@ -2749,7 +2801,7 @@ function TaskReadModal({
                           className="icon-button task-read-icon-button"
                           type="button"
                           aria-label={`${item.text} 수정 취소`}
-                          disabled={pendingDetailsAction === `checklist:edit:${item.id}`}
+                          disabled={detailsMutationPending}
                           onClick={() => {
                             setEditingChecklistItemId(null);
                             setChecklistEditText("");
@@ -2767,6 +2819,7 @@ function TaskReadModal({
                           className="icon-button task-read-icon-button"
                           type="button"
                           aria-label={`${item.text} 수정`}
+                          disabled={detailsMutationPending}
                           onClick={() => startEditingChecklistItem(item)}
                         >
                           <Pencil size={15} />
@@ -2775,7 +2828,7 @@ function TaskReadModal({
                           className="icon-button task-read-icon-button danger"
                           type="button"
                           aria-label={`${item.text} 삭제`}
-                          disabled={pendingDetailsAction === `checklist:delete:${item.id}`}
+                          disabled={detailsMutationPending}
                           onClick={() => void deleteChecklistItem(item.id)}
                         >
                           <Minus size={15} />

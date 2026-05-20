@@ -3,6 +3,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   onSnapshot,
   query,
   serverTimestamp,
@@ -84,6 +85,12 @@ export function subscribeScheduleTasks(uid: string, callback: (tasks: ScheduleTa
     (snapshot) => callback(snapshotList(snapshot)),
     (error) => onError?.(error)
   );
+}
+
+export async function getScheduleTask(taskId: string) {
+  const snapshot = await getDoc(doc(db, "scheduleTasks", taskId));
+
+  return snapshot.exists() ? ({ id: snapshot.id, ...(snapshot.data() as ScheduleTaskDocument) } satisfies ScheduleTaskSnapshot) : null;
 }
 
 export async function createScheduleTask(input: CreateScheduleTaskInput) {
