@@ -1148,8 +1148,8 @@ function EditableUserCard({
       confirmedSignatureRef.current = stableEditableSignature(user);
       setDirty(false);
       setMessage("삭제됨");
-    } catch {
-      setMessage("삭제 실패");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "삭제 실패");
     } finally {
       setPending(false);
     }

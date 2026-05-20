@@ -9,6 +9,7 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("accounts:lookup");
     expect(deleteManagedUserSource).toContain("accounts:delete");
     expect(deleteManagedUserSource).toContain("idToken");
+    expect(deleteManagedUserSource).toContain("management_credentials_missing");
   });
 
   it("checks the caller admin profile and cleans schedule-owned data", () => {

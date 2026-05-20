@@ -8,6 +8,7 @@ const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const managedUserDeleteQueryLimit = 300;
 const maxManagedUserDeleteIterations = 50;
 const firestoreCommitWriteLimit = 500;
+const missingManagementCredentialsCode = "management_credentials_missing";
 const identityToolkitAccountMethods = {
   lookup: "accounts:lookup",
   delete: "accounts:delete"
@@ -46,7 +47,9 @@ function firebaseCredentials() {
     envValue("GOOGLE_CLOUD_PROJECT");
 
   if (!clientEmail || !privateKey || !projectId) {
-    throw new Error("Missing Firebase management credentials");
+    const error = new Error("Missing Firebase management credentials");
+    error.code = missingManagementCredentialsCode;
+    throw error;
   }
 
   return { clientEmail, privateKey, projectId };
@@ -1113,6 +1116,11 @@ export default async function handler(request, response) {
     jsonResponse(response, result.statusCode, result.body);
   } catch (error) {
     console.error("managed user delete failed", error);
+    if (error?.code === missingManagementCredentialsCode) {
+      jsonResponse(response, 503, { ok: false, error: missingManagementCredentialsCode });
+      return;
+    }
+
     jsonResponse(response, 500, { ok: false, error: "delete_failed" });
   }
 }

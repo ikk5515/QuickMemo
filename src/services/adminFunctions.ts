@@ -316,7 +316,12 @@ export async function deleteManagedUserDocuments(user: Pick<UserProfile, "uid" |
 
   if (!response.ok) {
     const result = (await response.json().catch(() => undefined)) as { error?: string } | undefined;
-    throw new Error(result?.error ?? "사용자를 삭제하지 못했습니다.");
+    const errorMessage =
+      result?.error === "management_credentials_missing"
+        ? "서버 Firebase 관리 환경변수가 없어 삭제할 수 없습니다. Vercel Production에 FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON 또는 FIREBASE_CLEANUP_CLIENT_EMAIL/FIREBASE_CLEANUP_PRIVATE_KEY를 등록해야 합니다."
+        : "사용자를 삭제하지 못했습니다.";
+
+    throw new Error(errorMessage);
   }
 }
 
