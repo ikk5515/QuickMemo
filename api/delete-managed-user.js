@@ -8,9 +8,7 @@ const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const managedUserDeleteQueryLimit = 300;
 const maxManagedUserDeleteIterations = 50;
 const firestoreCommitWriteLimit = 500;
-const missingManagementCredentialsCode = "management_credentials_missing";
 const identityToolkitAccountMethods = {
-  lookup: "accounts:lookup",
   delete: "accounts:delete"
 };
 
@@ -47,12 +45,14 @@ function firebaseCredentials() {
     envValue("GOOGLE_CLOUD_PROJECT");
 
   if (!clientEmail || !privateKey || !projectId) {
-    const error = new Error("Missing Firebase management credentials");
-    error.code = missingManagementCredentialsCode;
-    throw error;
+    throw new Error("Missing Firebase management credentials");
   }
 
   return { clientEmail, privateKey, projectId };
+}
+
+function firebaseWebApiKey() {
+  return envValue("VITE_FIREBASE_API_KEY") || envValue("FIREBASE_API_KEY");
 }
 
 function base64UrlEncode(input) {
@@ -546,20 +546,36 @@ async function identityToolkitRequest(projectId, method, accessToken, body) {
   return responseBody ? JSON.parse(responseBody) : {};
 }
 
-async function lookupCallerUid(projectId, accessToken, idToken) {
-  let result;
+async function lookupCallerUid(idToken) {
+  const apiKey = firebaseWebApiKey();
 
-  try {
-    result = await identityToolkitRequest(projectId, "lookup", accessToken, {
-      idToken
-    });
-  } catch (error) {
-    if (String(error.body ?? "").includes("INVALID_ID_TOKEN")) {
+  if (!apiKey) {
+    throw new Error("Missing Firebase web API key");
+  }
+
+  const response = await fetch(`${identityToolkitBaseUrl}/accounts:lookup?key=${encodeURIComponent(apiKey)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ idToken })
+  });
+  const responseBody = await response.text();
+
+  if (!response.ok) {
+    if (
+      responseBody.includes("INVALID_ID_TOKEN") ||
+      responseBody.includes("USER_NOT_FOUND") ||
+      responseBody.includes("TOKEN_EXPIRED")
+    ) {
       return "";
     }
 
+    const error = new Error(`Identity Toolkit token lookup failed: ${response.status} ${responseBody.slice(0, 300)}`);
+    error.status = response.status;
+    error.body = responseBody;
     throw error;
   }
+
+  const result = responseBody ? JSON.parse(responseBody) : {};
 
   const [user] = result.users ?? [];
   return typeof user?.localId === "string" ? user.localId : "";
@@ -1166,14 +1182,15 @@ export default async function handler(request, response) {
       return;
     }
 
-    const credentials = firebaseCredentials();
-    const accessToken = await fetchAccessToken(credentials);
-    const callerUid = await lookupCallerUid(credentials.projectId, accessToken, idToken);
+    const callerUid = await lookupCallerUid(idToken);
 
     if (!callerUid) {
       jsonResponse(response, 401, { ok: false, error: "invalid_auth_token" });
       return;
     }
+
+    const credentials = firebaseCredentials();
+    const accessToken = await fetchAccessToken(credentials);
 
     const result = await deleteManagedUser({
       accessToken,

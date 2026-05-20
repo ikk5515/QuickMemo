@@ -9,8 +9,21 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("accounts:lookup");
     expect(deleteManagedUserSource).toContain("accounts:delete");
     expect(deleteManagedUserSource).toContain("idToken");
-    expect(deleteManagedUserSource).toContain("missingManagementCredentialsCode");
-    expect(deleteManagedUserSource).not.toContain("error: missingManagementCredentialsCode");
+    expect(deleteManagedUserSource).not.toContain("management_credentials_missing");
+  });
+
+  it("validates the caller token before loading cleanup credentials", () => {
+    const callerLookupIndex = deleteManagedUserSource.indexOf("const callerUid = await lookupCallerUid(idToken)");
+    const credentialsIndex = deleteManagedUserSource.indexOf("const credentials = firebaseCredentials()");
+    const invalidTokenResponseIndex = deleteManagedUserSource.indexOf('error: "invalid_auth_token"');
+
+    expect(deleteManagedUserSource).toContain("VITE_FIREBASE_API_KEY");
+    expect(deleteManagedUserSource).toContain("/accounts:lookup?key=");
+    expect(callerLookupIndex).toBeGreaterThan(-1);
+    expect(credentialsIndex).toBeGreaterThan(-1);
+    expect(invalidTokenResponseIndex).toBeGreaterThan(-1);
+    expect(callerLookupIndex).toBeLessThan(credentialsIndex);
+    expect(invalidTokenResponseIndex).toBeLessThan(credentialsIndex);
   });
 
   it("checks the caller admin profile and cleans schedule-owned data", () => {
