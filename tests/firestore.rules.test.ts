@@ -126,6 +126,7 @@ function scheduleTask(uid: string, overrides: Record<string, unknown> = {}) {
     endDate: "2026-05-19",
     startTimeMinutes: 960,
     endTimeMinutes: null,
+    sortOrder: null,
     isImportant: true,
     isUrgent: false,
     encryptedTitle: encryptedPayload,
@@ -664,9 +665,30 @@ describeRules("firestore security rules", () => {
         updatedAt: serverTimestamp()
       })
     );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        sortOrder: 3,
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
     await assertFails(
       updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
         color: "javascript:alert(1)",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        sortOrder: -1,
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        sortOrder: "first",
         updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })

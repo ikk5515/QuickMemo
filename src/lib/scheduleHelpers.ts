@@ -2,6 +2,7 @@ import type { DecryptedScheduleTask, ScheduleTaskDetails } from "../types";
 
 export type TodoGroupKey = "today" | "tomorrow" | "next7" | "later" | "noDate" | "completed";
 export type MatrixQuadrantKey = "urgentImportant" | "urgentNotImportant" | "importantNotUrgent" | "notUrgentNotImportant";
+export type MatrixDateGroupKey = "next7" | "later" | "noDate";
 
 export interface TodoGroup {
   key: TodoGroupKey;
@@ -35,7 +36,26 @@ export interface MatrixSection {
   accent: "red" | "gold" | "blue" | "teal";
   isImportant: boolean;
   isUrgent: boolean;
+  dateGroups: MatrixDateGroup[];
+  progress: MatrixSectionProgress;
   tasks: DecryptedScheduleTask[];
+}
+
+export interface MatrixDateGroup {
+  key: MatrixDateGroupKey;
+  label: string;
+  tasks: DecryptedScheduleTask[];
+}
+
+export interface MatrixSectionProgress {
+  checked: number;
+  total: number;
+  percent: number;
+}
+
+export interface ScheduleTaskOrderUpdate {
+  taskId: string;
+  sortOrder: number | null;
 }
 
 const dayMillis = 24 * 60 * 60 * 1000;
@@ -143,6 +163,42 @@ function taskCreatedMillis(task: Pick<DecryptedScheduleTask, "createdAt" | "upda
   return timestampMillis(task.createdAt) || timestampMillis(task.updatedAt);
 }
 
+function safeSortOrder(task: Pick<DecryptedScheduleTask, "sortOrder">) {
+  return typeof task.sortOrder === "number" && Number.isInteger(task.sortOrder) && task.sortOrder >= 0
+    ? task.sortOrder
+    : null;
+}
+
+function compareManualOrderWithinSameDate(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  if (left.status !== "active" || right.status !== "active") {
+    return 0;
+  }
+
+  const leftDate = taskStartDate(left);
+  const rightDate = taskStartDate(right);
+
+  if (!isValidScheduleDateString(leftDate) || leftDate !== rightDate) {
+    return 0;
+  }
+
+  const leftOrder = safeSortOrder(left);
+  const rightOrder = safeSortOrder(right);
+
+  if (leftOrder != null && rightOrder != null && leftOrder !== rightOrder) {
+    return leftOrder - rightOrder;
+  }
+
+  if (leftOrder != null && rightOrder == null) {
+    return -1;
+  }
+
+  if (leftOrder == null && rightOrder != null) {
+    return 1;
+  }
+
+  return 0;
+}
+
 export function normalizeScheduleTaskColor(color: string | null | undefined, fallbackIndex = 0) {
   if (typeof color === "string" && scheduleColorPattern.test(color)) {
     return color;
@@ -183,6 +239,12 @@ function taskPriorityRank(task: Pick<DecryptedScheduleTask, "isImportant" | "isU
 }
 
 export function compareTodoTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  const manualOrder = compareManualOrderWithinSameDate(left, right);
+
+  if (manualOrder !== 0) {
+    return manualOrder;
+  }
+
   const leftPriority = taskPriorityRank(left);
   const rightPriority = taskPriorityRank(right);
 
@@ -220,6 +282,12 @@ export function compareCompletedTasks(left: DecryptedScheduleTask, right: Decryp
 }
 
 export function compareMatrixTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  const manualOrder = compareManualOrderWithinSameDate(left, right);
+
+  if (manualOrder !== 0) {
+    return manualOrder;
+  }
+
   const leftTime = taskStartDateTimeMillis(left);
   const rightTime = taskStartDateTimeMillis(right);
 
@@ -259,6 +327,12 @@ export function compareTaskSchedule(left: DecryptedScheduleTask, right: Decrypte
 
   if (leftDate !== rightDate) {
     return leftDate.localeCompare(rightDate);
+  }
+
+  const manualOrder = compareManualOrderWithinSameDate(left, right);
+
+  if (manualOrder !== 0) {
+    return manualOrder;
   }
 
   const leftTime = taskStartTime(left) ?? 24 * 60 + 1;
@@ -587,7 +661,7 @@ export function matrixQuadrantForTask(task: Pick<DecryptedScheduleTask, "isImpor
   return "notUrgentNotImportant";
 }
 
-export function groupTasksByMatrix(tasks: DecryptedScheduleTask[]): MatrixSection[] {
+export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLocalDateString(new Date())): MatrixSection[] {
   const activeTasks = tasks.filter((task) => task.status === "active");
   const sections: MatrixSection[] = [
     {
@@ -596,6 +670,8 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[]): MatrixSectio
       accent: "red",
       isImportant: true,
       isUrgent: true,
+      dateGroups: [],
+      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     },
     {
@@ -604,6 +680,8 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[]): MatrixSectio
       accent: "gold",
       isImportant: false,
       isUrgent: true,
+      dateGroups: [],
+      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     },
     {
@@ -612,6 +690,8 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[]): MatrixSectio
       accent: "blue",
       isImportant: true,
       isUrgent: false,
+      dateGroups: [],
+      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     },
     {
@@ -620,6 +700,8 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[]): MatrixSectio
       accent: "teal",
       isImportant: false,
       isUrgent: false,
+      dateGroups: [],
+      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     }
   ];
@@ -632,8 +714,103 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[]): MatrixSectio
 
   return sections.map((section) => ({
     ...section,
+    dateGroups: groupMatrixTasksByDate(section.tasks, today),
+    progress: calculateMatrixSectionProgress(section.tasks),
     tasks: section.tasks.sort(compareMatrixTasks)
   }));
+}
+
+export function matrixPriorityForSection(key: MatrixQuadrantKey) {
+  return {
+    isImportant: key === "urgentImportant" || key === "importantNotUrgent",
+    isUrgent: key === "urgentImportant" || key === "urgentNotImportant"
+  };
+}
+
+export function calculateMatrixSectionProgress(tasks: DecryptedScheduleTask[]): MatrixSectionProgress {
+  const checklistItems = tasks.flatMap((task) => (task.details ?? emptyScheduleDetails).checklist);
+  const total = checklistItems.length;
+  const checked = checklistItems.filter((item) => item.checked).length;
+
+  return {
+    checked,
+    total,
+    percent: total ? Math.round((checked / total) * 100) : 0
+  };
+}
+
+export function groupMatrixTasksByDate(
+  tasks: DecryptedScheduleTask[],
+  today = toLocalDateString(new Date())
+): MatrixDateGroup[] {
+  const nextSevenEnd = addDays(today, 7);
+  const groups: Record<MatrixDateGroupKey, DecryptedScheduleTask[]> = {
+    next7: [],
+    later: [],
+    noDate: []
+  };
+
+  tasks.forEach((task) => {
+    const startDate = taskStartDate(task);
+
+    if (!isValidScheduleDateString(startDate)) {
+      groups.noDate.push(task);
+      return;
+    }
+
+    if (startDate <= nextSevenEnd) {
+      groups.next7.push(task);
+      return;
+    }
+
+    groups.later.push(task);
+  });
+
+  return [
+    { key: "next7", label: "다음 7일", tasks: groups.next7.sort(compareMatrixTasks) },
+    { key: "later", label: "그 후", tasks: groups.later.sort(compareMatrixTasks) },
+    { key: "noDate", label: "날짜 없음", tasks: groups.noDate.sort(compareMatrixTasks) }
+  ];
+}
+
+export function buildScheduleTaskOrderUpdates(
+  tasks: DecryptedScheduleTask[],
+  activeTaskId: string,
+  overTaskId: string
+): ScheduleTaskOrderUpdate[] | null {
+  if (activeTaskId === overTaskId) {
+    return [];
+  }
+
+  const activeTask = tasks.find((task) => task.id === activeTaskId);
+  const overTask = tasks.find((task) => task.id === overTaskId);
+
+  if (!activeTask || !overTask || activeTask.status !== "active" || overTask.status !== "active") {
+    return null;
+  }
+
+  const activeDate = taskStartDate(activeTask);
+  const overDate = taskStartDate(overTask);
+
+  if (!isValidScheduleDateString(activeDate) || activeDate !== overDate) {
+    return null;
+  }
+
+  const dateTasks = tasks
+    .filter((task) => task.status === "active" && taskStartDate(task) === activeDate)
+    .sort(compareMatrixTasks);
+  const activeIndex = dateTasks.findIndex((task) => task.id === activeTaskId);
+  const overIndex = dateTasks.findIndex((task) => task.id === overTaskId);
+
+  if (activeIndex < 0 || overIndex < 0) {
+    return null;
+  }
+
+  const reorderedTasks = [...dateTasks];
+  const [pickedTask] = reorderedTasks.splice(activeIndex, 1);
+  reorderedTasks.splice(overIndex, 0, pickedTask);
+
+  return reorderedTasks.map((task, index) => ({ taskId: task.id, sortOrder: index + 1 }));
 }
 
 export function normalizeScheduleDetails(value: unknown) {

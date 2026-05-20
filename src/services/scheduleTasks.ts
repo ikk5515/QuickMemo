@@ -8,6 +8,7 @@ import {
   serverTimestamp,
   Timestamp,
   updateDoc,
+  writeBatch,
   where
 } from "firebase/firestore";
 import type { FieldValue } from "firebase/firestore";
@@ -36,6 +37,7 @@ export interface CreateScheduleTaskInput {
   startTimeMinutes?: number | null;
   endTimeMinutes?: number | null;
   color?: string | null;
+  sortOrder?: number | null;
   isImportant: boolean;
   isUrgent: boolean;
 }
@@ -50,6 +52,7 @@ export interface UpdateScheduleTaskInput {
   startTimeMinutes?: number | null;
   endTimeMinutes?: number | null;
   color?: string | null;
+  sortOrder?: number | null;
   isImportant?: boolean;
   isUrgent?: boolean;
   status?: ScheduleTaskStatus;
@@ -92,6 +95,7 @@ export async function createScheduleTask(input: CreateScheduleTaskInput) {
     startTimeMinutes: input.startTimeMinutes ?? input.dueTimeMinutes,
     endTimeMinutes: input.endTimeMinutes ?? null,
     color: input.color ?? null,
+    sortOrder: input.sortOrder ?? null,
     isImportant: input.isImportant,
     isUrgent: input.isUrgent,
     encryptedTitle: input.title,
@@ -113,6 +117,23 @@ export async function updateScheduleTask(taskId: string, uid: string, input: Upd
     updatedBy: uid,
     updatedAt: serverTimestamp()
   });
+}
+
+export async function updateScheduleTaskOrderBatch(
+  uid: string,
+  updates: Array<{ taskId: string; sortOrder: number | null }>
+) {
+  const batch = writeBatch(db);
+
+  updates.forEach((update) => {
+    batch.update(doc(db, "scheduleTasks", update.taskId), {
+      sortOrder: update.sortOrder,
+      updatedBy: uid,
+      updatedAt: serverTimestamp()
+    });
+  });
+
+  await batch.commit();
 }
 
 export async function deleteScheduleTask(taskId: string) {

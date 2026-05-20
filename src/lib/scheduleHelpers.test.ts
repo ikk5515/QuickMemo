@@ -3,10 +3,13 @@ import type { DecryptedScheduleTask } from "../types";
 import {
   buildCalendarMonth,
   buildCalendarTaskLayout,
+  buildScheduleTaskOrderUpdates,
+  calculateMatrixSectionProgress,
   compareCalendarAgendaTasks,
   formatScheduleDateRange,
   formatScheduleTimeRange,
   formatTaskTime,
+  groupMatrixTasksByDate,
   groupTasksByMatrix,
   groupTasksByTodoDate,
   isSafeScheduleDateRange,
@@ -119,6 +122,49 @@ describe("schedule helpers", () => {
       "normal-new",
       "normal-old"
     ]);
+  });
+
+  it("uses manual sort order before automatic priority within the same date", () => {
+    const groups = groupTasksByTodoDate(
+      [
+        task("important", {
+          dueDate: "2026-05-19",
+          isImportant: true,
+          sortOrder: 2
+        }),
+        task("normal", {
+          dueDate: "2026-05-19",
+          sortOrder: 1
+        }),
+        task("other-date", {
+          dueDate: "2026-05-20",
+          sortOrder: 1
+        })
+      ],
+      "2026-05-19"
+    );
+
+    expect(groups.find((group) => group.key === "today")?.tasks.map((item) => item.id)).toEqual([
+      "normal",
+      "important"
+    ]);
+    expect(groups.find((group) => group.key === "tomorrow")?.tasks.map((item) => item.id)).toEqual(["other-date"]);
+  });
+
+  it("builds same-date manual order updates and rejects cross-date reorders", () => {
+    const tasks = [
+      task("a", { dueDate: "2026-05-19", sortOrder: 1 }),
+      task("b", { dueDate: "2026-05-19", sortOrder: 2 }),
+      task("c", { dueDate: "2026-05-19", sortOrder: 3 }),
+      task("next-day", { dueDate: "2026-05-20", sortOrder: 1 })
+    ];
+
+    expect(buildScheduleTaskOrderUpdates(tasks, "c", "a")).toEqual([
+      { taskId: "c", sortOrder: 1 },
+      { taskId: "a", sortOrder: 2 },
+      { taskId: "b", sortOrder: 3 }
+    ]);
+    expect(buildScheduleTaskOrderUpdates(tasks, "a", "next-day")).toBeNull();
   });
 
   it("places multi-day tasks on every calendar date in range", () => {
@@ -262,6 +308,47 @@ describe("schedule helpers", () => {
       ["importantNotUrgent", ["important"]],
       ["notUrgentNotImportant", ["waiting-new", "waiting-old"]]
     ]);
+  });
+
+  it("groups non-primary matrix sections by next seven days, later, and no date", () => {
+    const groups = groupMatrixTasksByDate(
+      [
+        task("overdue", { dueDate: "2026-05-19" }),
+        task("week-end", { dueDate: "2026-05-27" }),
+        task("later", { dueDate: "2026-05-28" }),
+        task("none")
+      ],
+      "2026-05-20"
+    );
+
+    expect(groups.map((group) => [group.key, group.tasks.map((item) => item.id)])).toEqual([
+      ["next7", ["overdue", "week-end"]],
+      ["later", ["later"]],
+      ["noDate", ["none"]]
+    ]);
+  });
+
+  it("calculates matrix section progress from checklist items", () => {
+    expect(
+      calculateMatrixSectionProgress([
+        task("a", {
+          details: {
+            description: "",
+            checklist: [
+              { id: "a-1", text: "첫 항목", checked: true },
+              { id: "a-2", text: "둘째 항목", checked: false }
+            ]
+          }
+        }),
+        task("b", {
+          details: {
+            description: "",
+            checklist: [{ id: "b-1", text: "셋째 항목", checked: true }]
+          }
+        })
+      ])
+    ).toEqual({ checked: 2, percent: 67, total: 3 });
+    expect(calculateMatrixSectionProgress([task("empty")])).toEqual({ checked: 0, percent: 0, total: 0 });
   });
 
   it("converts time input to minutes and back", () => {

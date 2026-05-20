@@ -6356,6 +6356,145 @@ textarea {
   width: 34px;
 }
 
+.matrix-section.drag-over {
+  background: color-mix(in srgb, var(--teal) 5%, #ffffff);
+  box-shadow:
+    0 12px 30px rgb(20 33 31 / 5%),
+    inset 0 0 0 2px color-mix(in srgb, var(--teal) 38%, #ffffff);
+}
+
+.matrix-progress {
+  display: grid;
+  gap: 7px;
+  margin: -2px 0 12px;
+}
+
+.matrix-progress > div {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 900;
+  justify-content: space-between;
+}
+
+.matrix-progress select {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  min-height: 30px;
+  padding: 4px 26px 4px 10px;
+  width: auto;
+}
+
+.matrix-progress-track {
+  background: var(--surface);
+  border-radius: 999px;
+  display: block;
+  height: 5px;
+  overflow: hidden;
+}
+
+.matrix-progress-track span {
+  background: var(--matrix-progress-color, var(--teal));
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+  transition: width 160ms ease;
+}
+
+.matrix-date-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.matrix-date-group {
+  display: grid;
+  gap: 8px;
+}
+
+.matrix-date-group-header {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  display: flex;
+  font-size: 13px;
+  justify-content: space-between;
+  min-height: 30px;
+  padding: 0;
+  text-align: left;
+}
+
+.matrix-date-group-header span {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.matrix-date-group-header svg {
+  transition: transform 140ms ease;
+}
+
+.matrix-date-group-header svg.collapsed {
+  transform: rotate(-90deg);
+}
+
+.matrix-date-group-header strong {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.matrix-task-row {
+  cursor: grab;
+  grid-template-columns: 24px 24px minmax(0, 1fr) auto;
+}
+
+.matrix-task-row:active {
+  cursor: grabbing;
+}
+
+.matrix-task-row.dragging {
+  opacity: 0.35;
+}
+
+.matrix-drag-overlay {
+  background: #ffffff;
+  border-color: var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  width: min(360px, calc(100vw - 32px));
+}
+
+.task-drag-handle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: grab;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  margin-top: 1px;
+  min-height: 24px;
+  padding: 0;
+  width: 24px;
+}
+
+.task-drag-handle:active {
+  cursor: grabbing;
+}
+
+.task-drag-handle:focus-visible {
+  box-shadow: 0 0 0 3px rgb(47 125 112 / 16%);
+  outline: none;
+}
+
+.task-drag-handle.ghost {
+  pointer-events: none;
+}
+
 .matrix-section.red {
   border-top-color: var(--coral);
 }
@@ -6593,6 +6732,11 @@ textarea {
   gap: 10px;
   justify-content: space-between;
   padding-top: 14px;
+}
+
+.task-read-actions > div {
+  display: inline-flex;
+  gap: 10px;
 }
 
 .schedule-detail-modal {

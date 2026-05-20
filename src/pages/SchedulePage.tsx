@@ -1,10 +1,34 @@
 import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  rectIntersection,
+  useDroppable,
+  useSensor,
+  useSensors,
+  pointerWithin,
+  type CollisionDetection,
+  type DragEndEvent,
+  type DragStartEvent
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
+  Copy,
   Flag,
+  GripVertical,
   Grid2X2,
   ListTodo,
   Pencil,
@@ -26,6 +50,7 @@ import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey }
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import {
   addDays,
+  buildScheduleTaskOrderUpdates,
   buildCalendarMonth,
   buildCalendarTaskLayout,
   compareCalendarAgendaTasks,
@@ -39,6 +64,7 @@ import {
   groupTasksByTodoDate,
   isSafeScheduleDateRange,
   isValidScheduleDateString,
+  matrixPriorityForSection,
   maxScheduleTaskRangeDays,
   nextScheduleTaskColor,
   normalizeScheduleDetails,
@@ -49,6 +75,7 @@ import {
   tasksByDate,
   timeInputToMinutes,
   toLocalDateString,
+  type MatrixQuadrantKey,
   type MatrixSection
 } from "../lib/scheduleHelpers";
 import {
@@ -56,6 +83,7 @@ import {
   deleteScheduleTask,
   subscribeScheduleTasks,
   updateScheduleTask,
+  updateScheduleTaskOrderBatch,
   type ScheduleTaskSnapshot
 } from "../services/scheduleTasks";
 import { getUserPreferences } from "../services/userPreferences";
@@ -71,10 +99,12 @@ const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: strin
 const taskPageSize = 5;
 const completedPageSize = 10;
 const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야 하고 같은 연도 안에서 최대 ${maxScheduleTaskRangeDays}일까지 선택할 수 있습니다.`;
+const matrixProgressOptions = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 
 type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
 type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
 type CompletedPriorityFilter = "all" | "important" | "urgent" | "importantUrgent";
+type MatrixProgressState = Record<MatrixQuadrantKey, number>;
 
 interface QuickDefaults {
   startDate?: string | null;
@@ -137,9 +167,10 @@ export default function SchedulePage() {
   const [completedMonths, setCompletedMonths] = useState<CompletedMonthsFilter>("1");
   const [completedPriority, setCompletedPriority] = useState<CompletedPriorityFilter>("all");
   const [completedContent, setCompletedContent] = useState<CompletedContentFilter>("all");
+  const [matrixProgress, setMatrixProgress] = useState<MatrixProgressState>(() => defaultMatrixProgressState());
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const today = useMemo(() => toLocalDateString(new Date()), []);
+  const [today, setToday] = useState(() => toLocalDateString(new Date()));
 
   useEffect(() => {
     if (!profile) {
@@ -159,6 +190,23 @@ export default function SchedulePage() {
       active = false;
     };
   }, [profile]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setToday(toLocalDateString(new Date()));
+    }, 60 * 1000);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    if (!profile) {
+      setMatrixProgress(defaultMatrixProgressState());
+      return;
+    }
+
+    setMatrixProgress(loadMatrixProgress(profile.uid, today));
+  }, [profile, today]);
 
   useEffect(() => {
     if (!profile) {
@@ -239,7 +287,7 @@ export default function SchedulePage() {
     [sortedTasks]
   );
   const todoGroups = useMemo(() => groupTasksByTodoDate(sortedTasks, today), [sortedTasks, today]);
-  const matrixSections = useMemo(() => groupTasksByMatrix(sortedTasks), [sortedTasks]);
+  const matrixSections = useMemo(() => groupTasksByMatrix(sortedTasks, today), [sortedTasks, today]);
   const calendarWeeks = useMemo(
     () => buildCalendarMonth(calendarCursor.getFullYear(), calendarCursor.getMonth(), today),
     [calendarCursor, today]
@@ -320,6 +368,7 @@ export default function SchedulePage() {
         startTimeMinutes,
         endTimeMinutes,
         color: normalizeScheduleTaskColor(draft.color),
+        sortOrder: null,
         isImportant: draft.isImportant,
         isUrgent: draft.isUrgent
       });
@@ -383,6 +432,7 @@ export default function SchedulePage() {
         startTimeMinutes,
         endTimeMinutes,
         color: normalizeScheduleTaskColor(draft.color),
+        sortOrder: startDate === taskStartDate(task) ? (task.sortOrder ?? null) : null,
         isImportant: draft.isImportant,
         isUrgent: draft.isUrgent,
         status: draft.status,
@@ -420,6 +470,96 @@ export default function SchedulePage() {
     } catch (caught) {
       setError(scheduleActionError(caught, "체크리스트 상태를 저장하지 못했습니다."));
     }
+  }
+
+  async function duplicateTask(task: DecryptedScheduleTask) {
+    try {
+      const details = task.details ?? emptyScheduleDetails;
+      const copiedDetails: ScheduleTaskDetails = {
+        description: details.description,
+        checklist: details.checklist.map((item) => ({
+          id: crypto.randomUUID(),
+          text: item.text,
+          checked: false
+        }))
+      };
+      const startDate = taskStartDate(task);
+      const endDate = taskEndDate(task);
+      const startTimeMinutes = taskStartTime(task);
+      const taskKey = await generateNoteKey();
+      const [encryptedTitle, encryptedDetails] = await encryptTaskFields(task.title, copiedDetails, taskKey);
+      const wrappedKey = await wrapNoteKey(taskKey, unlockedProfile.publicKeyJwk);
+
+      await createScheduleTask({
+        ownerUid: unlockedProfile.uid,
+        title: encryptedTitle,
+        details: encryptedDetails,
+        wrappedKey,
+        dueDate: startDate,
+        dueTimeMinutes: startTimeMinutes,
+        startDate,
+        endDate,
+        startTimeMinutes,
+        endTimeMinutes: task.endTimeMinutes ?? null,
+        color: normalizeScheduleTaskColor(task.color),
+        sortOrder: null,
+        isImportant: task.isImportant,
+        isUrgent: task.isUrgent
+      });
+      setViewTaskId(null);
+      setStatus("일정을 복사했습니다.");
+      setError(null);
+    } catch (caught) {
+      setError(scheduleActionError(caught, "일정을 복사하지 못했습니다."));
+    }
+  }
+
+  async function moveTaskToMatrixSection(task: DecryptedScheduleTask, sectionKey: MatrixQuadrantKey) {
+    const priority = matrixPriorityForSection(sectionKey);
+
+    if (task.isImportant === priority.isImportant && task.isUrgent === priority.isUrgent) {
+      return;
+    }
+
+    try {
+      await updateScheduleTask(task.id, unlockedProfile.uid, priority);
+      setStatus("업무 위치를 변경했습니다.");
+      setError(null);
+    } catch (caught) {
+      setError(scheduleActionError(caught, "업무 위치를 변경하지 못했습니다."));
+    }
+  }
+
+  async function reorderTasksWithinDate(activeTaskId: string, overTaskId: string) {
+    const updates = buildScheduleTaskOrderUpdates(sortedTasks, activeTaskId, overTaskId);
+
+    if (updates == null) {
+      setError("동일한 날짜 내에서만 순서를 변경할 수 있습니다.");
+      return;
+    }
+
+    if (!updates.length) {
+      return;
+    }
+
+    try {
+      await updateScheduleTaskOrderBatch(unlockedProfile.uid, updates);
+      setStatus("업무 순서를 저장했습니다.");
+      setError(null);
+    } catch (caught) {
+      setError(scheduleActionError(caught, "업무 순서를 저장하지 못했습니다."));
+    }
+  }
+
+  function updateMatrixProgress(sectionKey: MatrixQuadrantKey, percent: number) {
+    const nextPercent = normalizeMatrixProgressPercent(percent);
+
+    setMatrixProgress((current) => {
+      const nextProgress = { ...current, [sectionKey]: nextPercent };
+
+      saveMatrixProgress(unlockedProfile.uid, today, sectionKey, nextPercent);
+      return nextProgress;
+    });
   }
 
   async function removeTask(task: DecryptedScheduleTask) {
@@ -541,9 +681,13 @@ export default function SchedulePage() {
 
         {activeView === "matrix" && (
           <MatrixView
+            progressBySection={matrixProgress}
             sections={matrixSections}
             onAddSection={openMatrixCreateDialog}
+            onMoveTaskToSection={(task, sectionKey) => void moveTaskToMatrixSection(task, sectionKey)}
             onOpen={setViewTaskId}
+            onProgressChange={updateMatrixProgress}
+            onReorderTasks={(activeTaskId, overTaskId) => void reorderTasksWithinDate(activeTaskId, overTaskId)}
             onToggle={(task) => void toggleTask(task)}
           />
         )}
@@ -574,6 +718,7 @@ export default function SchedulePage() {
           task={viewTask}
           onClose={() => setViewTaskId(null)}
           onDelete={() => void removeTask(viewTask)}
+          onDuplicate={() => void duplicateTask(viewTask)}
           onEdit={() => {
             setEditingTaskId(viewTask.id);
             setViewTaskId(null);
@@ -1478,38 +1623,465 @@ function CalendarView({
 
 function MatrixView({
   onAddSection,
+  onMoveTaskToSection,
   onOpen,
+  onProgressChange,
+  onReorderTasks,
   onToggle,
+  progressBySection,
   sections
 }: {
   onAddSection: (section: MatrixSection) => void;
+  onMoveTaskToSection: (task: DecryptedScheduleTask, sectionKey: MatrixQuadrantKey) => void;
   onOpen: (taskId: string) => void;
+  onProgressChange: (sectionKey: MatrixQuadrantKey, percent: number) => void;
+  onReorderTasks: (activeTaskId: string, overTaskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
+  progressBySection: MatrixProgressState;
   sections: MatrixSection[];
 }) {
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+  const activeTask = useMemo(
+    () => sections.flatMap((section) => section.tasks).find((task) => task.id === activeTaskId) ?? null,
+    [activeTaskId, sections]
+  );
+
+  function toggleGroup(sectionKey: MatrixQuadrantKey, groupKey: string) {
+    const stateKey = matrixGroupStateKey(sectionKey, groupKey);
+    setCollapsedGroups((current) => ({ ...current, [stateKey]: !current[stateKey] }));
+  }
+
+  function handleDragStart(event: DragStartEvent) {
+    setActiveTaskId(String(event.active.id));
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    setActiveTaskId(null);
+
+    if (!event.over) {
+      return;
+    }
+
+    const draggedTaskId = String(event.active.id);
+    const draggedTask = sections.flatMap((section) => section.tasks).find((task) => task.id === draggedTaskId);
+    const overTaskId = event.over.data.current?.type === "matrix-task" ? String(event.over.id) : null;
+    const targetSectionKey = matrixSectionKeyFromDragEvent(event);
+
+    if (!draggedTask) {
+      return;
+    }
+
+    if (targetSectionKey && targetSectionKey !== matrixSectionKeyForTask(draggedTask)) {
+      onMoveTaskToSection(draggedTask, targetSectionKey);
+    }
+
+    if (overTaskId && overTaskId !== draggedTaskId) {
+      onReorderTasks(draggedTaskId, overTaskId);
+    }
+  }
+
   return (
-    <div className="matrix-grid">
-      {sections.map((section) => (
-        <section className={`matrix-section ${section.accent}`} key={section.key}>
-          <header>
-            <div>
-              <h2>{section.label}</h2>
-              <span>{section.tasks.length}</span>
-            </div>
-            <button
-              className="icon-button matrix-add-button"
-              type="button"
-              aria-label={`${section.label} 일정 추가`}
-              onClick={() => onAddSection(section)}
-            >
-              <Plus size={18} />
-            </button>
-          </header>
-          <PagedTaskList tasks={section.tasks} onOpen={onOpen} onToggle={onToggle} />
-        </section>
-      ))}
+    <DndContext
+      collisionDetection={matrixCollisionDetection}
+      onDragEnd={handleDragEnd}
+      onDragStart={handleDragStart}
+      sensors={sensors}
+    >
+      <div className="matrix-grid">
+        {sections.map((section) => (
+          <MatrixSectionPanel
+            collapsedGroups={collapsedGroups}
+            key={section.key}
+            onAddSection={onAddSection}
+            onOpen={onOpen}
+            onProgressChange={onProgressChange}
+            onToggle={onToggle}
+            onToggleGroup={toggleGroup}
+            progressPercent={progressBySection[section.key]}
+            section={section}
+          />
+        ))}
+      </div>
+      <DragOverlay>
+        {activeTask ? (
+          <div className="task-row matrix-task-row matrix-drag-overlay" aria-hidden="true">
+            <span className="task-drag-handle ghost">
+              <GripVertical size={16} />
+            </span>
+            <MatrixTaskRowContent task={activeTask} />
+          </div>
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  );
+}
+
+function MatrixSectionPanel({
+  collapsedGroups,
+  onAddSection,
+  onOpen,
+  onProgressChange,
+  onToggle,
+  onToggleGroup,
+  progressPercent,
+  section
+}: {
+  collapsedGroups: Record<string, boolean>;
+  onAddSection: (section: MatrixSection) => void;
+  onOpen: (taskId: string) => void;
+  onProgressChange: (sectionKey: MatrixQuadrantKey, percent: number) => void;
+  onToggle: (task: DecryptedScheduleTask) => void;
+  onToggleGroup: (sectionKey: MatrixQuadrantKey, groupKey: string) => void;
+  progressPercent: number;
+  section: MatrixSection;
+}) {
+  const { isOver, setNodeRef } = useDroppable({
+    id: matrixSectionDropId(section.key),
+    data: { sectionKey: section.key, type: "matrix-section" }
+  });
+
+  return (
+    <section
+      className={`matrix-section ${section.accent} ${isOver ? "drag-over" : ""}`}
+      key={section.key}
+      ref={setNodeRef}
+    >
+      <header>
+        <div>
+          <h2>{section.label}</h2>
+          <span>{section.tasks.length}</span>
+        </div>
+        <button
+          className="icon-button matrix-add-button"
+          type="button"
+          aria-label={`${section.label} 일정 추가`}
+          onClick={() => onAddSection(section)}
+        >
+          <Plus size={18} />
+        </button>
+      </header>
+      <MatrixProgress
+        percent={progressPercent}
+        sectionLabel={section.label}
+        onChange={(percent) => onProgressChange(section.key, percent)}
+      />
+      {section.key === "urgentImportant" ? (
+        <MatrixSortableTaskList sectionKey={section.key} tasks={section.tasks} onOpen={onOpen} onToggle={onToggle} />
+      ) : (
+        <div className="matrix-date-groups">
+          {section.dateGroups.map((group) => {
+            const stateKey = matrixGroupStateKey(section.key, group.key);
+            const collapsed = collapsedGroups[stateKey] === true;
+
+            return (
+              <section className="matrix-date-group" key={group.key}>
+                <button
+                  className="matrix-date-group-header"
+                  type="button"
+                  aria-expanded={!collapsed}
+                  onClick={() => onToggleGroup(section.key, group.key)}
+                >
+                  <span>
+                    <ChevronDown size={16} aria-hidden="true" className={collapsed ? "collapsed" : ""} />
+                    {group.label}
+                  </span>
+                  <strong>{group.tasks.length}</strong>
+                </button>
+                {!collapsed && (
+                  <MatrixSortableTaskList
+                    emptyMessage="표시할 일정이 없습니다."
+                    sectionKey={section.key}
+                    tasks={group.tasks}
+                    onOpen={onOpen}
+                    onToggle={onToggle}
+                  />
+                )}
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MatrixProgress({
+  onChange,
+  percent,
+  sectionLabel
+}: {
+  onChange: (percent: number) => void;
+  percent: number;
+  sectionLabel: string;
+}) {
+  const normalizedPercent = normalizeMatrixProgressPercent(percent);
+  const color = matrixProgressColor(normalizedPercent);
+
+  return (
+    <div
+      className="matrix-progress"
+      aria-label={`${sectionLabel} 진행률 ${normalizedPercent}%`}
+      style={{ "--matrix-progress-color": color } as CSSProperties}
+    >
+      <div>
+        <span>{normalizedPercent}% 완료</span>
+        <label>
+          <span className="sr-only">{sectionLabel} 진행률 선택</span>
+          <select
+            aria-label={`${sectionLabel} 진행률 선택`}
+            onChange={(event) => onChange(Number(event.target.value))}
+            value={normalizedPercent}
+          >
+            {matrixProgressOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}%
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <span className="matrix-progress-track" aria-hidden="true">
+        <span style={{ width: `${normalizedPercent}%` }} />
+      </span>
     </div>
   );
+}
+
+function MatrixSortableTaskList({
+  emptyMessage = "표시할 일정이 없습니다.",
+  onOpen,
+  onToggle,
+  sectionKey,
+  tasks
+}: {
+  emptyMessage?: string;
+  onOpen: (taskId: string) => void;
+  onToggle: (task: DecryptedScheduleTask) => void;
+  sectionKey: MatrixQuadrantKey;
+  tasks: DecryptedScheduleTask[];
+}) {
+  if (!tasks.length) {
+    return <p className="schedule-empty">{emptyMessage}</p>;
+  }
+
+  return (
+    <SortableContext items={tasks.map((task) => task.id)} strategy={verticalListSortingStrategy}>
+      <div className="task-list matrix-task-list">
+        {tasks.map((task) => (
+          <SortableMatrixTaskRow
+            key={task.id}
+            sectionKey={sectionKey}
+            task={task}
+            onOpen={onOpen}
+            onToggle={onToggle}
+          />
+        ))}
+      </div>
+    </SortableContext>
+  );
+}
+
+function SortableMatrixTaskRow({
+  onOpen,
+  onToggle,
+  sectionKey,
+  task
+}: {
+  onOpen: (taskId: string) => void;
+  onToggle: (task: DecryptedScheduleTask) => void;
+  sectionKey: MatrixQuadrantKey;
+  task: DecryptedScheduleTask;
+}) {
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setNodeRef,
+    transform,
+    transition
+  } = useSortable({
+    id: task.id,
+    data: { sectionKey, taskId: task.id, type: "matrix-task" }
+  });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition
+  };
+
+  return (
+    <div
+      className={`task-row matrix-task-row ${task.status === "completed" ? "completed" : ""} ${isDragging ? "dragging" : ""}`}
+      ref={setNodeRef}
+      style={style}
+      {...attributes}
+      {...listeners}
+    >
+      <button
+        className="task-drag-handle"
+        type="button"
+        aria-label={`${task.title} 드래그 이동`}
+        title="드래그 이동"
+      >
+        <GripVertical size={16} />
+      </button>
+      <MatrixTaskRowContent task={task} onOpen={onOpen} onToggle={onToggle} />
+    </div>
+  );
+}
+
+function MatrixTaskRowContent({
+  onOpen,
+  onToggle,
+  task
+}: {
+  onOpen?: (taskId: string) => void;
+  onToggle?: (task: DecryptedScheduleTask) => void;
+  task: DecryptedScheduleTask;
+}) {
+  return (
+    <>
+      <button
+        className="task-check"
+        type="button"
+        role="checkbox"
+        aria-checked={task.status === "completed"}
+        aria-label={task.status === "completed" ? "일정 완료 해제" : "일정 완료"}
+        onClick={() => onToggle?.(task)}
+      >
+        {task.status === "completed" ? <CheckCircle2 size={18} /> : null}
+      </button>
+      <button className="task-main task-open-button" type="button" onClick={() => onOpen?.(task.id)}>
+        <strong>{task.title}</strong>
+        <span>{formatTaskMeta(task)}</span>
+      </button>
+      <span className="task-flags">
+        {task.isImportant && <Flag size={15} aria-label="중요" />}
+        {task.isUrgent && <Clock size={15} aria-label="긴급" />}
+      </span>
+    </>
+  );
+}
+
+const matrixCollisionDetection: CollisionDetection = (args) => {
+  const pointerCollisions = pointerWithin(args);
+
+  if (pointerCollisions.length > 0) {
+    return pointerCollisions;
+  }
+
+  return rectIntersection(args);
+};
+
+function matrixSectionDropId(sectionKey: MatrixQuadrantKey) {
+  return `matrix-section:${sectionKey}`;
+}
+
+function matrixGroupStateKey(sectionKey: MatrixQuadrantKey, groupKey: string) {
+  return `${sectionKey}:${groupKey}`;
+}
+
+function matrixSectionKeyFromDragEvent(event: DragEndEvent): MatrixQuadrantKey | null {
+  const sectionKey = event.over?.data.current?.sectionKey;
+
+  return isMatrixQuadrantKey(sectionKey) ? sectionKey : null;
+}
+
+function matrixSectionKeyForTask(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent">): MatrixQuadrantKey {
+  if (task.isImportant && task.isUrgent) {
+    return "urgentImportant";
+  }
+
+  if (!task.isImportant && task.isUrgent) {
+    return "urgentNotImportant";
+  }
+
+  if (task.isImportant && !task.isUrgent) {
+    return "importantNotUrgent";
+  }
+
+  return "notUrgentNotImportant";
+}
+
+function isMatrixQuadrantKey(value: unknown): value is MatrixQuadrantKey {
+  return (
+    value === "urgentImportant"
+    || value === "urgentNotImportant"
+    || value === "importantNotUrgent"
+    || value === "notUrgentNotImportant"
+  );
+}
+
+function defaultMatrixProgressState(): MatrixProgressState {
+  return {
+    urgentImportant: 0,
+    urgentNotImportant: 0,
+    importantNotUrgent: 0,
+    notUrgentNotImportant: 0
+  };
+}
+
+function matrixProgressStorageKey(uid: string, today: string, sectionKey: MatrixQuadrantKey) {
+  const datePart = sectionKey === "urgentImportant" ? today : "manual";
+  return `quickmemo-matrix-progress:${uid}:${sectionKey}:${datePart}`;
+}
+
+function loadMatrixProgress(uid: string, today: string): MatrixProgressState {
+  const nextProgress = defaultMatrixProgressState();
+
+  if (typeof window === "undefined") {
+    return nextProgress;
+  }
+
+  (Object.keys(nextProgress) as MatrixQuadrantKey[]).forEach((sectionKey) => {
+    const stored = window.localStorage.getItem(matrixProgressStorageKey(uid, today, sectionKey));
+    nextProgress[sectionKey] = normalizeMatrixProgressPercent(Number(stored));
+  });
+
+  return nextProgress;
+}
+
+function saveMatrixProgress(uid: string, today: string, sectionKey: MatrixQuadrantKey, percent: number) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(
+    matrixProgressStorageKey(uid, today, sectionKey),
+    String(normalizeMatrixProgressPercent(percent))
+  );
+}
+
+function normalizeMatrixProgressPercent(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(value / 10) * 10));
+}
+
+function matrixProgressColor(percent: number) {
+  if (percent >= 100) {
+    return "var(--teal)";
+  }
+
+  if (percent >= 70) {
+    return "var(--blue)";
+  }
+
+  if (percent >= 40) {
+    return "var(--gold)";
+  }
+
+  if (percent > 0) {
+    return "var(--coral)";
+  }
+
+  return "#a7b0a9";
 }
 
 function PagedTaskList({
@@ -1792,12 +2364,14 @@ function TaskList({
 function TaskReadModal({
   onClose,
   onDelete,
+  onDuplicate,
   onEdit,
   onToggleChecklist,
   task
 }: {
   onClose: () => void;
   onDelete: () => void;
+  onDuplicate: () => void;
   onEdit: () => void;
   onToggleChecklist: (itemId: string) => void | Promise<void>;
   task: DecryptedScheduleTask;
@@ -1888,15 +2462,21 @@ function TaskReadModal({
           )}
         </section>
 
-        <footer>
+        <footer className="task-read-actions">
           <button className="danger-button" type="button" onClick={onDelete}>
             <Trash2 size={17} />
             삭제
           </button>
-          <button type="button" onClick={onEdit}>
-            <Pencil size={17} />
-            수정
-          </button>
+          <div>
+            <button className="secondary-button" type="button" onClick={onDuplicate}>
+              <Copy size={17} />
+              복사
+            </button>
+            <button type="button" onClick={onEdit}>
+              <Pencil size={17} />
+              수정
+            </button>
+          </div>
         </footer>
       </section>
     </div>
