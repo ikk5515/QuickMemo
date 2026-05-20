@@ -1945,6 +1945,8 @@ function MatrixTaskRowContent({
   onToggle?: (task: DecryptedScheduleTask) => void;
   task: DecryptedScheduleTask;
 }) {
+  const progressPercent = normalizeTaskProgressPercent(task.progressPercent);
+
   return (
     <>
       <button
@@ -1960,6 +1962,20 @@ function MatrixTaskRowContent({
       <button className="task-main task-open-button" type="button" onClick={() => onOpen?.(task.id)}>
         <strong>{task.title}</strong>
         <span>{formatTaskMeta(task)}</span>
+        <span
+          aria-label={`${task.title} 진행률 ${progressPercent}%`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={progressPercent}
+          className="matrix-task-progress-strip"
+          role="progressbar"
+          style={
+            {
+              "--matrix-task-progress-color": taskProgressColor(progressPercent),
+              "--matrix-task-progress-fill": `${progressPercent}%`
+            } as CSSProperties
+          }
+        />
       </button>
       <span className="task-flags">
         {task.isImportant && <Flag size={15} aria-label="중요" />}

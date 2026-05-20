@@ -6524,6 +6524,28 @@ textarea {
   grid-template-columns: 24px 24px minmax(0, 1fr) auto;
 }
 
+.matrix-task-progress-strip {
+  background:
+    linear-gradient(
+      90deg,
+      var(--matrix-task-progress-color, var(--teal)) 0 var(--matrix-task-progress-fill, 0%),
+      color-mix(in srgb, var(--matrix-task-progress-color, var(--teal)) 12%, var(--surface)) var(--matrix-task-progress-fill, 0%) 100%
+    );
+  border-radius: 999px;
+  display: block;
+  height: 4px;
+  margin-top: 3px;
+  min-height: 4px;
+  overflow: hidden;
+  text-decoration: none;
+  width: 100%;
+}
+
+.task-row.completed .task-main .matrix-task-progress-strip {
+  opacity: 0.72;
+  text-decoration: none;
+}
+
 .matrix-task-row:active {
   cursor: grabbing;
 }
