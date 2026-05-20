@@ -1130,7 +1130,7 @@ function EditableUserCard({
     }
 
     const confirmed = window.confirm(
-      `${user.displayName || "이 사용자"} 사용자를 영구 삭제할까요?\nFirebase Auth 계정과 앱 계정 문서가 함께 삭제되며 되돌릴 수 없습니다.`
+      `${user.displayName || "이 사용자"} 사용자를 영구 삭제할까요?\nFirebase Auth 계정, 앱 계정 문서, 작성한 노트/첨부파일/일정이 함께 삭제되며 되돌릴 수 없습니다.`
     );
 
     if (!confirmed) {

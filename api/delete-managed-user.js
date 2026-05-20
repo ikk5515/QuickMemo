@@ -5,6 +5,9 @@ const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
 const oauthTokenUrl = "https://oauth2.googleapis.com/token";
 const databaseId = "(default)";
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
+const managedUserDeleteQueryLimit = 300;
+const maxManagedUserDeleteIterations = 50;
+const firestoreCommitWriteLimit = 500;
 const identityToolkitAccountMethods = {
   lookup: "accounts:lookup",
   delete: "accounts:delete"
@@ -127,6 +130,67 @@ function documentsRoot(projectId) {
   return `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents`;
 }
 
+function documentsResourceRoot(projectId) {
+  return `projects/${projectId}/databases/${databaseId}/documents`;
+}
+
+function documentNameForPath(projectId, documentPath) {
+  return `${documentsResourceRoot(projectId)}/${documentPath}`;
+}
+
+function documentPathFromName(projectId, documentName) {
+  const prefixes = [`${documentsResourceRoot(projectId)}/`, `${documentsRoot(projectId)}/`];
+  const prefix = prefixes.find((candidate) => documentName.startsWith(candidate));
+
+  if (!prefix) {
+    throw new Error("Invalid Firestore document name");
+  }
+
+  return documentName.slice(prefix.length);
+}
+
+function documentIdFromName(documentName) {
+  const segments = documentName.split("/");
+  return segments[segments.length - 1] ?? "";
+}
+
+function firestoreCommitPathFromDocumentName(documentName) {
+  const marker = "/documents/";
+  const markerIndex = documentName.indexOf(marker);
+
+  if (markerIndex < 0) {
+    throw new Error("Invalid Firestore document name");
+  }
+
+  return `${documentName.slice(0, markerIndex + marker.length - 1)}:commit`;
+}
+
+function stringValue(value) {
+  return { stringValue: value };
+}
+
+function timestampValue(value = new Date()) {
+  return { timestampValue: value.toISOString() };
+}
+
+function stringArrayValue(values) {
+  return {
+    arrayValue: values.length
+      ? {
+          values: values.map((value) => stringValue(value))
+        }
+      : {}
+  };
+}
+
+function mapValue(fields) {
+  return {
+    mapValue: {
+      fields
+    }
+  };
+}
+
 async function firestoreRequest(path, accessToken, init = {}) {
   const response = await fetch(`${firestoreBaseUrl}/${path}`, {
     ...init,
@@ -143,6 +207,27 @@ async function firestoreRequest(path, accessToken, init = {}) {
   }
 
   return response.json();
+}
+
+async function firestoreCommitDeleteMany(documentNames, accessToken) {
+  const uniqueNames = Array.from(new Set(documentNames.filter(Boolean)));
+
+  for (let index = 0; index < uniqueNames.length; index += firestoreCommitWriteLimit) {
+    const chunk = uniqueNames.slice(index, index + firestoreCommitWriteLimit);
+
+    if (!chunk.length) {
+      continue;
+    }
+
+    await firestoreRequest(firestoreCommitPathFromDocumentName(chunk[0]), accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        writes: chunk.map((documentName) => ({ delete: documentName }))
+      })
+    });
+  }
+
+  return uniqueNames.length;
 }
 
 async function firestoreGet(projectId, documentPath, accessToken) {
@@ -180,6 +265,23 @@ async function firestoreDelete(projectId, documentPath, accessToken) {
   return true;
 }
 
+async function firestorePatchFields(projectId, documentPath, fields, accessToken) {
+  const query = new URLSearchParams();
+
+  Object.keys(fields).forEach((fieldPath) => {
+    query.append("updateMask.fieldPaths", fieldPath);
+  });
+
+  await firestoreRequest(
+    `${documentsRoot(projectId)}/${encodeDocumentPath(documentPath)}?${query.toString()}`,
+    accessToken,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ fields })
+    }
+  );
+}
+
 async function listCollection(projectId, collectionId, accessToken) {
   const documents = [];
   let pageToken = "";
@@ -203,34 +305,175 @@ async function listCollection(projectId, collectionId, accessToken) {
   return documents;
 }
 
-async function queryOwnedScheduleTasks(projectId, ownerUid, accessToken) {
+async function listChildDocuments(parentName, collectionId, accessToken) {
+  const documents = [];
+  let pageToken = "";
+
+  do {
+    const query = new URLSearchParams({ pageSize: String(managedUserDeleteQueryLimit) });
+
+    if (pageToken) {
+      query.set("pageToken", pageToken);
+    }
+
+    const response = await fetch(
+      `${firestoreBaseUrl}/${encodeDocumentPath(parentName)}/${encodeURIComponent(collectionId)}?${query.toString()}`,
+      {
+        headers: { authorization: `Bearer ${accessToken}` }
+      }
+    );
+
+    if (response.status === 404) {
+      return documents;
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new Error(`Firestore list failed: ${response.status} ${text.slice(0, 300)}`);
+    }
+
+    const result = await response.json();
+    documents.push(...(result.documents ?? []));
+    pageToken = result.nextPageToken ?? "";
+  } while (pageToken);
+
+  return documents;
+}
+
+async function runStructuredQuery(projectId, accessToken, structuredQuery) {
   const result = await firestoreRequest(`${documentsRoot(projectId)}:runQuery`, accessToken, {
     method: "POST",
-    body: JSON.stringify({
-      structuredQuery: {
-        from: [{ collectionId: "scheduleTasks" }],
-        where: {
-          fieldFilter: {
-            field: { fieldPath: "ownerUid" },
-            op: "EQUAL",
-            value: { stringValue: ownerUid }
-          }
-        },
-        limit: 300
-      }
-    })
+    body: JSON.stringify({ structuredQuery })
   });
 
   return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+async function queryDocumentsByField({
+  accessToken,
+  allDescendants = false,
+  collectionId,
+  fieldPath,
+  op,
+  projectId,
+  value
+}) {
+  return runStructuredQuery(projectId, accessToken, {
+    from: [{ collectionId, ...(allDescendants ? { allDescendants: true } : {}) }],
+    where: {
+      fieldFilter: {
+        field: { fieldPath },
+        op,
+        value
+      }
+    },
+    limit: managedUserDeleteQueryLimit
+  });
+}
+
+async function queryDocumentsByStringField(projectId, collectionId, fieldPath, value, accessToken, allDescendants = false) {
+  return queryDocumentsByField({
+    accessToken,
+    allDescendants,
+    collectionId,
+    fieldPath,
+    op: "EQUAL",
+    projectId,
+    value: stringValue(value)
+  });
+}
+
+async function queryDocumentsByArrayContains(projectId, collectionId, fieldPath, value, accessToken, allDescendants = false) {
+  return queryDocumentsByField({
+    accessToken,
+    allDescendants,
+    collectionId,
+    fieldPath,
+    op: "ARRAY_CONTAINS",
+    projectId,
+    value: stringValue(value)
+  });
+}
+
+async function queryOwnedScheduleTasks(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(projectId, "scheduleTasks", "ownerUid", ownerUid, accessToken);
+}
+
+async function queryOwnedNotes(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(projectId, "notes", "ownerUid", ownerUid, accessToken);
+}
+
+async function queryOwnedNoteFolders(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(projectId, "noteFolders", "ownerUid", ownerUid, accessToken);
+}
+
+async function queryOwnedPublicShares(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(projectId, "publicNoteShares", "ownerUid", ownerUid, accessToken);
+}
+
+async function queryParticipantNotes(projectId, uid, accessToken) {
+  return queryDocumentsByArrayContains(projectId, "notes", "participantUids", uid, accessToken);
+}
+
+async function queryNoteAttachmentsUploadedBy(projectId, uid, accessToken) {
+  return queryDocumentsByStringField(projectId, "attachments", "uploadedBy", uid, accessToken, true);
+}
+
+async function queryNoteUserStatesForUid(projectId, uid, accessToken) {
+  return queryDocumentsByStringField(projectId, "users", "uid", uid, accessToken, true);
+}
+
+async function queryNoteHistoryByActor(projectId, uid, accessToken) {
+  return queryDocumentsByStringField(projectId, "history", "actorUid", uid, accessToken, true);
+}
+
+async function queryNoteHistoryByReader(projectId, uid, accessToken) {
+  return queryDocumentsByArrayContains(projectId, "history", "readerUids", uid, accessToken, true);
+}
+
+async function queryUsersAllowingShareTarget(projectId, uid, accessToken) {
+  return queryDocumentsByArrayContains(projectId, "users", "allowedShareTargetUids", uid, accessToken);
+}
+
+async function queryPublicSharesBySourceNote(projectId, noteId, accessToken) {
+  return runStructuredQuery(projectId, accessToken, {
+    from: [{ collectionId: "publicNoteShares" }],
+    where: {
+      fieldFilter: {
+        field: { fieldPath: "sourceNoteId" },
+        op: "EQUAL",
+        value: stringValue(noteId)
+      }
+    },
+    limit: managedUserDeleteQueryLimit
+  });
 }
 
 function boolField(document, fieldName) {
   return document?.fields?.[fieldName]?.booleanValue === true;
 }
 
+function stringField(document, fieldName) {
+  const value = document?.fields?.[fieldName]?.stringValue;
+  return typeof value === "string" ? value : "";
+}
+
+function stringArrayField(document, fieldName) {
+  const values = document?.fields?.[fieldName]?.arrayValue?.values ?? [];
+  return values.flatMap((value) => (typeof value.stringValue === "string" ? [value.stringValue] : []));
+}
+
+function mapField(document, fieldName) {
+  return document?.fields?.[fieldName]?.mapValue?.fields ?? {};
+}
+
 function integerField(document, fieldName) {
   const value = document?.fields?.[fieldName]?.integerValue;
   return typeof value === "string" ? Number.parseInt(value, 10) : Number(value ?? 0);
+}
+
+function documentIsUnderPath(projectId, documentName, pathPrefix) {
+  return documentPathFromName(projectId, documentName).startsWith(pathPrefix);
 }
 
 function authToken(request) {
@@ -293,28 +536,442 @@ async function deleteAuthUser(projectId, accessToken, uid) {
   return true;
 }
 
-async function deleteOwnedScheduleTasks(projectId, ownerUid, accessToken) {
+async function deleteDocumentNamesForStat(documentNames, accessToken, stats, counterName) {
+  const deletedCount = await firestoreCommitDeleteMany(documentNames, accessToken);
+
+  stats[counterName] += deletedCount;
+  stats.documentsDeleted += deletedCount;
+
+  return deletedCount;
+}
+
+async function deleteDocumentPathForStat(projectId, documentPath, accessToken, stats, counterName) {
+  if (!(await firestoreDelete(projectId, documentPath, accessToken))) {
+    return 0;
+  }
+
+  stats[counterName] += 1;
+  stats.documentsDeleted += 1;
+
+  return 1;
+}
+
+async function deleteRepeatedQueryDocuments(queryDocuments, accessToken, stats, counterName, errorMessage) {
   let deleted = 0;
 
-  for (let iteration = 0; iteration < 20; iteration += 1) {
-    const scheduleTasks = await queryOwnedScheduleTasks(projectId, ownerUid, accessToken);
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const documents = await queryDocuments();
 
-    if (scheduleTasks.length === 0) {
+    if (documents.length === 0) {
       return deleted;
     }
 
-    for (const task of scheduleTasks) {
-      if (await firestoreDelete(projectId, task.name.slice(`${documentsRoot(projectId)}/`.length), accessToken)) {
-        deleted += 1;
-      }
-    }
+    const deletedThisPass = await deleteDocumentNamesForStat(
+      documents.map((document) => document.name),
+      accessToken,
+      stats,
+      counterName
+    );
 
-    if (scheduleTasks.length < 300) {
+    deleted += deletedThisPass;
+
+    if (deletedThisPass === 0 || documents.length < managedUserDeleteQueryLimit) {
       return deleted;
     }
   }
 
-  throw new Error("Too many schedule tasks to delete in one request");
+  throw new Error(errorMessage);
+}
+
+async function deleteOwnedScheduleTasks(projectId, ownerUid, accessToken, stats) {
+  return deleteRepeatedQueryDocuments(
+    () => queryOwnedScheduleTasks(projectId, ownerUid, accessToken),
+    accessToken,
+    stats,
+    "scheduleTasksDeleted",
+    "Too many schedule tasks to delete in one request"
+  );
+}
+
+async function deleteOwnedNoteFolders(projectId, ownerUid, accessToken, stats) {
+  return deleteRepeatedQueryDocuments(
+    () => queryOwnedNoteFolders(projectId, ownerUid, accessToken),
+    accessToken,
+    stats,
+    "noteFoldersDeleted",
+    "Too many note folders to delete in one request"
+  );
+}
+
+async function deleteUploadedNoteAttachments(projectId, uid, accessToken, stats) {
+  let deleted = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const attachments = (await queryNoteAttachmentsUploadedBy(projectId, uid, accessToken)).filter((attachment) =>
+      documentIsUnderPath(projectId, attachment.name, "notes/")
+    );
+
+    if (attachments.length === 0) {
+      return deleted;
+    }
+
+    deleted += await deleteDocumentNamesForStat(
+      attachments.map((attachment) => attachment.name),
+      accessToken,
+      stats,
+      "uploadedNoteAttachmentsDeleted"
+    );
+
+    if (attachments.length < managedUserDeleteQueryLimit) {
+      return deleted;
+    }
+  }
+
+  throw new Error("Too many uploaded note attachments to delete in one request");
+}
+
+async function deleteTargetNoteUserStates(projectId, uid, accessToken, stats) {
+  let deleted = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const states = (await queryNoteUserStatesForUid(projectId, uid, accessToken)).filter((state) =>
+      documentIsUnderPath(projectId, state.name, "noteUserStates/")
+    );
+
+    if (states.length === 0) {
+      return deleted;
+    }
+
+    deleted += await deleteDocumentNamesForStat(
+      states.map((state) => state.name),
+      accessToken,
+      stats,
+      "noteUserStatesDeleted"
+    );
+
+    if (states.length < managedUserDeleteQueryLimit) {
+      return deleted;
+    }
+  }
+
+  throw new Error("Too many note user states to delete in one request");
+}
+
+function cleanupQueueNameFromShareName(shareName) {
+  return shareName.replace("/publicNoteShares/", "/publicShareCleanupQueue/");
+}
+
+async function deletePublicShareTreeByName(shareName, accessToken, stats) {
+  const cleanupQueueName = cleanupQueueNameFromShareName(shareName);
+  const attachmentDocuments = await listChildDocuments(shareName, "attachments", accessToken);
+  const cleanupAttachmentDocuments = await listChildDocuments(
+    cleanupQueueName,
+    "publicShareAttachmentCleanupQueue",
+    accessToken
+  );
+
+  await deleteDocumentNamesForStat(
+    attachmentDocuments.map((attachment) => attachment.name),
+    accessToken,
+    stats,
+    "publicShareAttachmentsDeleted"
+  );
+  await deleteDocumentNamesForStat(
+    cleanupAttachmentDocuments.map((attachment) => attachment.name),
+    accessToken,
+    stats,
+    "publicShareAttachmentQueuesDeleted"
+  );
+  await deleteDocumentNamesForStat([shareName], accessToken, stats, "publicSharesDeleted");
+  await deleteDocumentNamesForStat([cleanupQueueName], accessToken, stats, "publicShareQueuesDeleted");
+}
+
+async function deleteOwnedPublicShares(projectId, ownerUid, accessToken, stats) {
+  let deleted = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const shares = await queryOwnedPublicShares(projectId, ownerUid, accessToken);
+
+    if (shares.length === 0) {
+      return deleted;
+    }
+
+    for (const share of shares) {
+      await deletePublicShareTreeByName(share.name, accessToken, stats);
+      deleted += 1;
+    }
+
+    if (shares.length < managedUserDeleteQueryLimit) {
+      return deleted;
+    }
+  }
+
+  throw new Error("Too many public shares to delete in one request");
+}
+
+async function deletePublicSharesForOwnedNote(projectId, noteId, accessToken, stats) {
+  let deleted = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const shares = await queryPublicSharesBySourceNote(projectId, noteId, accessToken);
+
+    if (shares.length === 0) {
+      return deleted;
+    }
+
+    for (const share of shares) {
+      await deletePublicShareTreeByName(share.name, accessToken, stats);
+      deleted += 1;
+    }
+
+    if (shares.length < managedUserDeleteQueryLimit) {
+      return deleted;
+    }
+  }
+
+  throw new Error("Too many note public shares to delete in one request");
+}
+
+async function deleteNoteTreeByName(projectId, noteName, accessToken, stats) {
+  const noteId = documentIdFromName(noteName);
+  const stateParentName = documentNameForPath(projectId, `noteUserStates/${noteId}`);
+  const attachmentDocuments = await listChildDocuments(noteName, "attachments", accessToken);
+  const historyDocuments = await listChildDocuments(noteName, "history", accessToken);
+  const stateDocuments = await listChildDocuments(stateParentName, "users", accessToken);
+
+  await deletePublicSharesForOwnedNote(projectId, noteId, accessToken, stats);
+  await deleteDocumentNamesForStat(
+    attachmentDocuments.map((attachment) => attachment.name),
+    accessToken,
+    stats,
+    "noteAttachmentsDeleted"
+  );
+  await deleteDocumentNamesForStat(
+    historyDocuments.map((history) => history.name),
+    accessToken,
+    stats,
+    "noteHistoryDeleted"
+  );
+  await deleteDocumentNamesForStat(
+    stateDocuments.map((state) => state.name),
+    accessToken,
+    stats,
+    "noteUserStatesDeleted"
+  );
+  await deleteDocumentNamesForStat([noteName], accessToken, stats, "notesDeleted");
+}
+
+async function deleteOwnedNotes(projectId, ownerUid, accessToken, stats) {
+  let deleted = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const notes = await queryOwnedNotes(projectId, ownerUid, accessToken);
+
+    if (notes.length === 0) {
+      return deleted;
+    }
+
+    for (const note of notes) {
+      await deleteNoteTreeByName(projectId, note.name, accessToken, stats);
+      deleted += 1;
+    }
+
+    if (notes.length < managedUserDeleteQueryLimit) {
+      return deleted;
+    }
+  }
+
+  throw new Error("Too many notes to delete in one request");
+}
+
+async function deleteNoteHistoryByActor(projectId, uid, accessToken, stats) {
+  let deleted = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const historyDocuments = (await queryNoteHistoryByActor(projectId, uid, accessToken)).filter((history) =>
+      documentIsUnderPath(projectId, history.name, "notes/")
+    );
+
+    if (historyDocuments.length === 0) {
+      return deleted;
+    }
+
+    deleted += await deleteDocumentNamesForStat(
+      historyDocuments.map((history) => history.name),
+      accessToken,
+      stats,
+      "noteHistoryDeleted"
+    );
+
+    if (historyDocuments.length < managedUserDeleteQueryLimit) {
+      return deleted;
+    }
+  }
+
+  throw new Error("Too many note history entries to delete in one request");
+}
+
+async function removeDeletedUserFromNoteHistoryReaders(projectId, uid, accessToken, stats) {
+  let updated = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const historyDocuments = (await queryNoteHistoryByReader(projectId, uid, accessToken)).filter((history) =>
+      documentIsUnderPath(projectId, history.name, "notes/")
+    );
+
+    if (historyDocuments.length === 0) {
+      return updated;
+    }
+
+    for (const history of historyDocuments) {
+      const readerUids = stringArrayField(history, "readerUids").filter((readerUid) => readerUid !== uid);
+      const historyPath = documentPathFromName(projectId, history.name);
+
+      if (readerUids.length === 0) {
+        await deleteDocumentNamesForStat([history.name], accessToken, stats, "noteHistoryDeleted");
+      } else {
+        await firestorePatchFields(
+          projectId,
+          historyPath,
+          {
+            readerUids: stringArrayValue(readerUids)
+          },
+          accessToken
+        );
+        stats.noteHistoryReaderReferencesRemoved += 1;
+      }
+
+      updated += 1;
+    }
+
+    if (historyDocuments.length < managedUserDeleteQueryLimit) {
+      return updated;
+    }
+  }
+
+  throw new Error("Too many note history reader references to update in one request");
+}
+
+async function removeDeletedUserFromParticipantNotes(projectId, targetUid, callerUid, accessToken, stats) {
+  let updated = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const notes = await queryParticipantNotes(projectId, targetUid, accessToken);
+    let updatedThisPass = 0;
+
+    if (notes.length === 0) {
+      return updated;
+    }
+
+    for (const note of notes) {
+      const ownerUid = stringField(note, "ownerUid");
+
+      if (ownerUid === targetUid) {
+        continue;
+      }
+
+      const participantUids = stringArrayField(note, "participantUids");
+      const remainingParticipantUids = participantUids.filter((uid) => uid !== targetUid);
+
+      if (ownerUid && !remainingParticipantUids.includes(ownerUid)) {
+        remainingParticipantUids.unshift(ownerUid);
+      }
+
+      if (remainingParticipantUids.length === 0) {
+        continue;
+      }
+
+      const wrappedKeys = { ...mapField(note, "wrappedKeys") };
+      delete wrappedKeys[targetUid];
+      const normalizedParticipantUids = Array.from(new Set(remainingParticipantUids));
+
+      await firestorePatchFields(
+        projectId,
+        documentPathFromName(projectId, note.name),
+        {
+          participantUids: stringArrayValue(normalizedParticipantUids),
+          type: stringValue(normalizedParticipantUids.length > 1 ? "shared" : "personal"),
+          updatedAt: timestampValue(),
+          updatedBy: stringValue(callerUid),
+          wrappedKeys: mapValue(wrappedKeys)
+        },
+        accessToken
+      );
+
+      updated += 1;
+      updatedThisPass += 1;
+      stats.sharedNoteMembershipsRemoved += 1;
+    }
+
+    if (updatedThisPass === 0 || notes.length < managedUserDeleteQueryLimit) {
+      return updated;
+    }
+  }
+
+  throw new Error("Too many shared note memberships to update in one request");
+}
+
+async function removeDeletedUserFromShareTargets(projectId, targetUid, accessToken, stats) {
+  let updated = 0;
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const users = await queryUsersAllowingShareTarget(projectId, targetUid, accessToken);
+    let updatedThisPass = 0;
+
+    if (users.length === 0) {
+      return updated;
+    }
+
+    for (const user of users) {
+      const uid = stringField(user, "uid") || documentIdFromName(user.name);
+
+      if (uid === targetUid) {
+        continue;
+      }
+
+      const allowedShareTargetUids = stringArrayField(user, "allowedShareTargetUids").filter((uidValue) => uidValue !== targetUid);
+
+      await firestorePatchFields(
+        projectId,
+        documentPathFromName(projectId, user.name),
+        {
+          allowedShareTargetUids: stringArrayValue(allowedShareTargetUids),
+          updatedAt: timestampValue()
+        },
+        accessToken
+      );
+
+      updated += 1;
+      updatedThisPass += 1;
+      stats.shareTargetReferencesRemoved += 1;
+    }
+
+    if (updatedThisPass === 0 || users.length < managedUserDeleteQueryLimit) {
+      return updated;
+    }
+  }
+
+  throw new Error("Too many share target references to update in one request");
+}
+
+async function reassignBootstrapAdminIfNeeded(projectId, targetUid, callerUid, accessToken) {
+  const bootstrap = await firestoreGet(projectId, "system/bootstrap", accessToken);
+
+  if (!bootstrap || stringField(bootstrap, "adminUid") !== targetUid) {
+    return false;
+  }
+
+  await firestorePatchFields(
+    projectId,
+    "system/bootstrap",
+    {
+      adminUid: stringValue(callerUid),
+      updatedAt: timestampValue()
+    },
+    accessToken
+  );
+
+  return true;
 }
 
 async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid }) {
@@ -345,26 +1002,52 @@ async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid 
 
   const quickKey = integerField(targetProfile, "quickKey");
   const stats = {
-    authUserDeleted: await deleteAuthUser(projectId, accessToken, targetUid),
+    authUserDeleted: false,
+    bootstrapAdminReassigned: false,
     documentsDeleted: 0,
-    scheduleTasksDeleted: 0
+    noteAttachmentsDeleted: 0,
+    noteFoldersDeleted: 0,
+    noteHistoryDeleted: 0,
+    noteHistoryReaderReferencesRemoved: 0,
+    noteUserStatesDeleted: 0,
+    notesDeleted: 0,
+    publicShareAttachmentQueuesDeleted: 0,
+    publicShareAttachmentsDeleted: 0,
+    publicShareQueuesDeleted: 0,
+    publicSharesDeleted: 0,
+    scheduleTasksDeleted: 0,
+    shareTargetReferencesRemoved: 0,
+    sharedNoteMembershipsRemoved: 0,
+    uploadedNoteAttachmentsDeleted: 0,
+    userDocumentsDeleted: 0
   };
 
-  stats.scheduleTasksDeleted = await deleteOwnedScheduleTasks(projectId, targetUid, accessToken);
-  stats.documentsDeleted += stats.scheduleTasksDeleted;
+  await removeDeletedUserFromShareTargets(projectId, targetUid, accessToken, stats);
+  await deleteOwnedPublicShares(projectId, targetUid, accessToken, stats);
+  await deleteOwnedNotes(projectId, targetUid, accessToken, stats);
+  await removeDeletedUserFromParticipantNotes(projectId, targetUid, callerUid, accessToken, stats);
+  await deleteUploadedNoteAttachments(projectId, targetUid, accessToken, stats);
+  await deleteNoteHistoryByActor(projectId, targetUid, accessToken, stats);
+  await removeDeletedUserFromNoteHistoryReaders(projectId, targetUid, accessToken, stats);
+  await deleteTargetNoteUserStates(projectId, targetUid, accessToken, stats);
+  await deleteOwnedNoteFolders(projectId, targetUid, accessToken, stats);
+  await deleteOwnedScheduleTasks(projectId, targetUid, accessToken, stats);
+
+  stats.bootstrapAdminReassigned = await reassignBootstrapAdminIfNeeded(projectId, targetUid, callerUid, accessToken);
 
   for (const path of [
     quickKey ? `quickLoginKeys/${quickKey}` : "",
+    `system/bootstrapAttempts/attempts/${targetUid}`,
     `userPreferences/${targetUid}`,
     `activeNotes/${targetUid}`,
     `userKeys/${targetUid}`,
     `publicLoginRoster/${targetUid}`,
     `users/${targetUid}`
   ].filter(Boolean)) {
-    if (await firestoreDelete(projectId, path, accessToken)) {
-      stats.documentsDeleted += 1;
-    }
+    await deleteDocumentPathForStat(projectId, path, accessToken, stats, "userDocumentsDeleted");
   }
+
+  stats.authUserDeleted = await deleteAuthUser(projectId, accessToken, targetUid);
 
   return { statusCode: 200, body: { ok: true, ...stats } };
 }

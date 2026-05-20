@@ -22,4 +22,25 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("userPreferences");
     expect(deleteManagedUserSource).not.toMatch(forbiddenBackendPattern);
   });
+
+  it("purges deleted users' owned content and Firestore subcollections", () => {
+    expect(deleteManagedUserSource).toContain("notes");
+    expect(deleteManagedUserSource).toContain("noteFolders");
+    expect(deleteManagedUserSource).toContain("publicNoteShares");
+    expect(deleteManagedUserSource).toContain("publicShareCleanupQueue");
+    expect(deleteManagedUserSource).toContain("publicShareAttachmentCleanupQueue");
+    expect(deleteManagedUserSource).toContain("attachments");
+    expect(deleteManagedUserSource).toContain("history");
+    expect(deleteManagedUserSource).toContain("noteUserStates");
+    expect(deleteManagedUserSource).toContain('queryDocumentsByStringField(projectId, "attachments", "uploadedBy", uid, accessToken, true)');
+    expect(deleteManagedUserSource).toContain('queryDocumentsByStringField(projectId, "history", "actorUid", uid, accessToken, true)');
+  });
+
+  it("removes deleted users from shared-note and share-target references", () => {
+    expect(deleteManagedUserSource).toContain("participantUids");
+    expect(deleteManagedUserSource).toContain("wrappedKeys");
+    expect(deleteManagedUserSource).toContain("allowedShareTargetUids");
+    expect(deleteManagedUserSource).toContain("sharedNoteMembershipsRemoved");
+    expect(deleteManagedUserSource).toContain("shareTargetReferencesRemoved");
+  });
 });
