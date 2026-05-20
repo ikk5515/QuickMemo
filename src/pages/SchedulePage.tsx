@@ -31,6 +31,7 @@ import {
   GripVertical,
   Grid2X2,
   ListTodo,
+  Minus,
   Pencil,
   Plus,
   Save,
@@ -438,29 +439,46 @@ export default function SchedulePage() {
     }
   }
 
-  async function toggleTaskChecklistItem(task: DecryptedScheduleTask, itemId: string) {
+  async function updateTaskDetails(task: DecryptedScheduleTask, details: ScheduleTaskDetails, fallback: string) {
     const wrappedKey = task.wrappedKeys[unlockedProfile.uid];
 
     if (!wrappedKey) {
       setError("일정 암호화 키를 찾지 못했습니다.");
-      return;
+      return false;
     }
 
     try {
       const taskKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
-      const details: ScheduleTaskDetails = {
-        description: task.details.description,
-        checklist: task.details.checklist.map((item) =>
-          item.id === itemId ? { ...item, checked: !item.checked } : item
-        )
+      const normalizedDetails: ScheduleTaskDetails = {
+        description: details.description,
+        checklist: details.checklist
+          .map((item) => ({ ...item, text: item.text.trim() }))
+          .filter((item) => item.text)
       };
-      const encryptedDetails = await encryptText(JSON.stringify(details), taskKey);
+      const encryptedDetails = await encryptText(JSON.stringify(normalizedDetails), taskKey);
 
       await updateScheduleTask(task.id, unlockedProfile.uid, { encryptedDetails });
       setError(null);
+      return true;
     } catch (caught) {
-      setError(scheduleActionError(caught, "체크리스트 상태를 저장하지 못했습니다."));
+      setError(scheduleActionError(caught, fallback));
+      return false;
     }
+  }
+
+  async function toggleTaskChecklistItem(task: DecryptedScheduleTask, itemId: string) {
+    const details = task.details ?? emptyScheduleDetails;
+
+    await updateTaskDetails(
+      task,
+      {
+        description: details.description,
+        checklist: details.checklist.map((item) =>
+          item.id === itemId ? { ...item, checked: !item.checked } : item
+        )
+      },
+      "체크리스트 상태를 저장하지 못했습니다."
+    );
   }
 
   async function updateTaskProgress(task: DecryptedScheduleTask, percent: number) {
@@ -714,6 +732,7 @@ export default function SchedulePage() {
             setViewTaskId(null);
           }}
           onUpdateProgress={(percent) => updateTaskProgress(viewTask, percent)}
+          onUpdateDetails={(details) => updateTaskDetails(viewTask, details, "일정 상세 내용을 저장하지 못했습니다.")}
           onToggleChecklist={(itemId) => toggleTaskChecklistItem(viewTask, itemId)}
         />
       )}
@@ -2369,6 +2388,7 @@ function TaskReadModal({
   onDuplicate,
   onEdit,
   onToggleChecklist,
+  onUpdateDetails,
   onUpdateProgress,
   task
 }: {
@@ -2377,18 +2397,40 @@ function TaskReadModal({
   onDuplicate: () => void;
   onEdit: () => void;
   onToggleChecklist: (itemId: string) => void | Promise<void>;
+  onUpdateDetails: (details: ScheduleTaskDetails) => boolean | Promise<boolean>;
   onUpdateProgress: (percent: number) => void | Promise<void>;
   task: DecryptedScheduleTask;
 }) {
   const details = task.details ?? emptyScheduleDetails;
   const hasChecklist = details.checklist.length > 0;
+  const [isDescriptionEditing, setIsDescriptionEditing] = useState(false);
+  const [descriptionDraft, setDescriptionDraft] = useState(details.description);
   const [progressPercent, setProgressPercent] = useState(() => normalizeTaskProgressPercent(task.progressPercent));
   const [pendingProgress, setPendingProgress] = useState(false);
+  const [pendingDetailsAction, setPendingDetailsAction] = useState<string | null>(null);
+  const [isAddingChecklist, setIsAddingChecklist] = useState(false);
+  const [newChecklistText, setNewChecklistText] = useState("");
+  const [editingChecklistItemId, setEditingChecklistItemId] = useState<string | null>(null);
+  const [checklistEditText, setChecklistEditText] = useState("");
+  const [isChecklistComposing, setIsChecklistComposing] = useState(false);
   const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
 
   useEffect(() => {
     setProgressPercent(normalizeTaskProgressPercent(task.progressPercent));
   }, [task.id, task.progressPercent]);
+
+  useEffect(() => {
+    if (!isDescriptionEditing) {
+      setDescriptionDraft(details.description);
+    }
+  }, [details.description, isDescriptionEditing, task.id]);
+
+  useEffect(() => {
+    setEditingChecklistItemId(null);
+    setChecklistEditText("");
+    setIsAddingChecklist(false);
+    setNewChecklistText("");
+  }, [task.id]);
 
   async function changeProgress(percent: number) {
     const nextPercent = normalizeTaskProgressPercent(percent);
@@ -2400,6 +2442,92 @@ function TaskReadModal({
       await onUpdateProgress(nextPercent);
     } finally {
       setPendingProgress(false);
+    }
+  }
+
+  async function saveInlineDetails(nextDetails: ScheduleTaskDetails, actionId: string) {
+    setPendingDetailsAction(actionId);
+
+    try {
+      return await onUpdateDetails(nextDetails);
+    } finally {
+      setPendingDetailsAction(null);
+    }
+  }
+
+  async function saveDescription() {
+    const didSave = await saveInlineDetails(
+      {
+        description: descriptionDraft,
+        checklist: details.checklist
+      },
+      "description"
+    );
+
+    if (didSave) {
+      setIsDescriptionEditing(false);
+    }
+  }
+
+  async function addChecklistItem() {
+    const text = newChecklistText.trim();
+
+    if (!text) {
+      return;
+    }
+
+    const didSave = await saveInlineDetails(
+      {
+        description: details.description,
+        checklist: [...details.checklist, { id: crypto.randomUUID(), text, checked: false }]
+      },
+      "checklist:add"
+    );
+
+    if (didSave) {
+      setNewChecklistText("");
+      setIsAddingChecklist(false);
+    }
+  }
+
+  function startEditingChecklistItem(item: ScheduleChecklistItem) {
+    setEditingChecklistItemId(item.id);
+    setChecklistEditText(item.text);
+  }
+
+  async function saveChecklistItemText(itemId: string) {
+    const text = checklistEditText.trim();
+
+    if (!text) {
+      return;
+    }
+
+    const didSave = await saveInlineDetails(
+      {
+        description: details.description,
+        checklist: details.checklist.map((item) => (item.id === itemId ? { ...item, text } : item))
+      },
+      `checklist:edit:${itemId}`
+    );
+
+    if (didSave) {
+      setEditingChecklistItemId(null);
+      setChecklistEditText("");
+    }
+  }
+
+  async function deleteChecklistItem(itemId: string) {
+    const didSave = await saveInlineDetails(
+      {
+        description: details.description,
+        checklist: details.checklist.filter((item) => item.id !== itemId)
+      },
+      `checklist:delete:${itemId}`
+    );
+
+    if (didSave && editingChecklistItemId === itemId) {
+      setEditingChecklistItemId(null);
+      setChecklistEditText("");
     }
   }
 
@@ -2461,12 +2589,114 @@ function TaskReadModal({
         />
 
         <section className="task-read-section">
-          <h3>내용</h3>
-          <p>{details.description.trim() || "내용이 없습니다."}</p>
+          <div className="task-read-section-head">
+            <h3>내용</h3>
+            {isDescriptionEditing ? (
+              <div className="task-read-inline-actions">
+                <button
+                  className="icon-button task-read-icon-button"
+                  type="button"
+                  aria-label="내용 저장"
+                  disabled={pendingDetailsAction === "description"}
+                  onClick={() => void saveDescription()}
+                >
+                  <Save size={15} />
+                </button>
+                <button
+                  className="icon-button task-read-icon-button"
+                  type="button"
+                  aria-label="내용 수정 취소"
+                  disabled={pendingDetailsAction === "description"}
+                  onClick={() => {
+                    setDescriptionDraft(details.description);
+                    setIsDescriptionEditing(false);
+                  }}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            ) : (
+              <button
+                className="icon-button task-read-icon-button"
+                type="button"
+                aria-label="내용 수정"
+                onClick={() => setIsDescriptionEditing(true)}
+              >
+                <Pencil size={15} />
+              </button>
+            )}
+          </div>
+          {isDescriptionEditing ? (
+            <textarea
+              className="task-read-inline-textarea"
+              onChange={(event) => setDescriptionDraft(event.target.value)}
+              rows={5}
+              value={descriptionDraft}
+            />
+          ) : (
+            <p>{details.description.trim() || "내용이 없습니다."}</p>
+          )}
         </section>
 
         <section className="task-read-section">
-          <h3>체크리스트</h3>
+          <div className="task-read-section-head">
+            <h3>체크리스트</h3>
+            <button
+              className="icon-button task-read-icon-button"
+              type="button"
+              aria-label="체크리스트 추가"
+              onClick={() => setIsAddingChecklist(true)}
+            >
+              <Plus size={15} />
+            </button>
+          </div>
+          {isAddingChecklist && (
+            <div className="task-read-checklist-add">
+              <input
+                autoFocus
+                aria-label="새 체크리스트 항목"
+                onCompositionEnd={() => setIsChecklistComposing(false)}
+                onCompositionStart={() => setIsChecklistComposing(true)}
+                onChange={(event) => setNewChecklistText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") {
+                    return;
+                  }
+
+                  if (isChecklistComposing || isComposingKeyboardEvent(event)) {
+                    return;
+                  }
+
+                  event.preventDefault();
+                  void addChecklistItem();
+                }}
+                value={newChecklistText}
+              />
+              <div className="task-read-inline-actions">
+                <button
+                  className="icon-button task-read-icon-button"
+                  type="button"
+                  aria-label="체크리스트 저장"
+                  disabled={pendingDetailsAction === "checklist:add"}
+                  onClick={() => void addChecklistItem()}
+                >
+                  <Save size={15} />
+                </button>
+                <button
+                  className="icon-button task-read-icon-button"
+                  type="button"
+                  aria-label="체크리스트 추가 취소"
+                  disabled={pendingDetailsAction === "checklist:add"}
+                  onClick={() => {
+                    setNewChecklistText("");
+                    setIsAddingChecklist(false);
+                  }}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            </div>
+          )}
           {hasChecklist ? (
             <ul className="task-read-checklist">
               {details.checklist.map((item) => (
@@ -2482,13 +2712,83 @@ function TaskReadModal({
                   >
                     {item.checked ? <CheckCircle2 size={16} /> : null}
                   </button>
-                  <span>{item.text}</span>
+                  {editingChecklistItemId === item.id ? (
+                    <>
+                      <input
+                        autoFocus
+                        aria-label="체크리스트 항목 수정"
+                        className="task-read-checklist-input"
+                        onCompositionEnd={() => setIsChecklistComposing(false)}
+                        onCompositionStart={() => setIsChecklistComposing(true)}
+                        onChange={(event) => setChecklistEditText(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") {
+                            return;
+                          }
+
+                          if (isChecklistComposing || isComposingKeyboardEvent(event)) {
+                            return;
+                          }
+
+                          event.preventDefault();
+                          void saveChecklistItemText(item.id);
+                        }}
+                        value={checklistEditText}
+                      />
+                      <div className="task-read-inline-actions">
+                        <button
+                          className="icon-button task-read-icon-button"
+                          type="button"
+                          aria-label={`${item.text} 저장`}
+                          disabled={pendingDetailsAction === `checklist:edit:${item.id}`}
+                          onClick={() => void saveChecklistItemText(item.id)}
+                        >
+                          <Save size={15} />
+                        </button>
+                        <button
+                          className="icon-button task-read-icon-button"
+                          type="button"
+                          aria-label={`${item.text} 수정 취소`}
+                          disabled={pendingDetailsAction === `checklist:edit:${item.id}`}
+                          onClick={() => {
+                            setEditingChecklistItemId(null);
+                            setChecklistEditText("");
+                          }}
+                        >
+                          <X size={15} />
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <span>{item.text}</span>
+                      <div className="task-read-inline-actions">
+                        <button
+                          className="icon-button task-read-icon-button"
+                          type="button"
+                          aria-label={`${item.text} 수정`}
+                          onClick={() => startEditingChecklistItem(item)}
+                        >
+                          <Pencil size={15} />
+                        </button>
+                        <button
+                          className="icon-button task-read-icon-button danger"
+                          type="button"
+                          aria-label={`${item.text} 삭제`}
+                          disabled={pendingDetailsAction === `checklist:delete:${item.id}`}
+                          onClick={() => void deleteChecklistItem(item.id)}
+                        >
+                          <Minus size={15} />
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </li>
               ))}
             </ul>
-          ) : (
+          ) : !isAddingChecklist ? (
             <p>체크리스트가 없습니다.</p>
-          )}
+          ) : null}
         </section>
 
         <footer className="task-read-actions">

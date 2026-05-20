@@ -6753,6 +6753,13 @@ textarea {
   padding: 14px 0;
 }
 
+.task-read-section-head {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
 .task-read-section h3 {
   font-size: 14px;
   letter-spacing: 0;
@@ -6765,6 +6772,44 @@ textarea {
   line-height: 1.6;
   margin: 0;
   white-space: pre-wrap;
+}
+
+.task-read-icon-button {
+  border-radius: 7px;
+  height: 30px;
+  min-height: 30px;
+  width: 30px;
+}
+
+.task-read-inline-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.task-read-inline-textarea,
+.task-read-checklist-input,
+.task-read-checklist-add input {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+  min-width: 0;
+  padding: 9px 10px;
+  width: 100%;
+}
+
+.task-read-inline-textarea {
+  resize: vertical;
+}
+
+.task-read-checklist-add {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .task-read-checklist {
@@ -6782,7 +6827,7 @@ textarea {
   border-radius: 8px;
   display: grid;
   gap: 8px;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   padding: 8px;
 }
 
