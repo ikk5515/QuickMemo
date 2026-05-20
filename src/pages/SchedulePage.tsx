@@ -1669,7 +1669,7 @@ function MatrixView({
 
     const draggedTaskId = String(event.active.id);
     const draggedTask = sections.flatMap((section) => section.tasks).find((task) => task.id === draggedTaskId);
-    const overTaskId = event.over.data.current?.type === "matrix-task" ? String(event.over.id) : null;
+    const overTaskId = matrixTaskIdFromDragEvent(event);
     const targetSectionKey = matrixSectionKeyFromDragEvent(event);
 
     if (!draggedTask) {
@@ -1678,6 +1678,7 @@ function MatrixView({
 
     if (targetSectionKey && targetSectionKey !== matrixSectionKeyForTask(draggedTask)) {
       onMoveTaskToSection(draggedTask, targetSectionKey);
+      return;
     }
 
     if (overTaskId && overTaskId !== draggedTaskId) {
@@ -1908,9 +1909,10 @@ function SortableMatrixTaskRow({
     id: task.id,
     data: { sectionKey, taskId: task.id, type: "matrix-task" }
   });
-  const style = {
+  const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
-    transition
+    transition,
+    touchAction: "none"
   };
 
   return (
@@ -1971,11 +1973,36 @@ const matrixCollisionDetection: CollisionDetection = (args) => {
   const pointerCollisions = pointerWithin(args);
 
   if (pointerCollisions.length > 0) {
+    const taskCollisions = pointerCollisions.filter((collision) => collisionType(collision) === "matrix-task");
+
+    if (taskCollisions.length > 0) {
+      return taskCollisions;
+    }
+
+    const sectionCollisions = pointerCollisions.filter((collision) => collisionType(collision) === "matrix-section");
+
+    if (sectionCollisions.length > 0) {
+      return sectionCollisions;
+    }
+
     return pointerCollisions;
   }
 
-  return rectIntersection(args);
+  const rectangleCollisions = rectIntersection(args);
+  const taskCollisions = rectangleCollisions.filter((collision) => collisionType(collision) === "matrix-task");
+
+  if (taskCollisions.length > 0) {
+    return taskCollisions;
+  }
+
+  const sectionCollisions = rectangleCollisions.filter((collision) => collisionType(collision) === "matrix-section");
+
+  return sectionCollisions.length > 0 ? sectionCollisions : rectangleCollisions;
 };
+
+function collisionType(collision: ReturnType<CollisionDetection>[number]) {
+  return collision.data?.droppableContainer.data.current?.type;
+}
 
 function matrixSectionDropId(sectionKey: MatrixQuadrantKey) {
   return `matrix-section:${sectionKey}`;
@@ -1989,6 +2016,10 @@ function matrixSectionKeyFromDragEvent(event: DragEndEvent): MatrixQuadrantKey |
   const sectionKey = event.over?.data.current?.sectionKey;
 
   return isMatrixQuadrantKey(sectionKey) ? sectionKey : null;
+}
+
+function matrixTaskIdFromDragEvent(event: DragEndEvent) {
+  return event.over?.data.current?.type === "matrix-task" ? String(event.over.id) : null;
 }
 
 function matrixSectionKeyForTask(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent">): MatrixQuadrantKey {
