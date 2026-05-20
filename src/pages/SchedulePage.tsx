@@ -99,7 +99,6 @@ const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: strin
 const taskPageSize = 5;
 const completedPageSize = 10;
 const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야 하고 같은 연도 안에서 최대 ${maxScheduleTaskRangeDays}일까지 선택할 수 있습니다.`;
-const matrixProgressOptions = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 
 type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
 type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
@@ -1829,26 +1828,33 @@ function MatrixProgress({
       aria-label={`${sectionLabel} 진행률 ${normalizedPercent}%`}
       style={{ "--matrix-progress-color": color } as CSSProperties}
     >
-      <div>
-        <span>{normalizedPercent}% 완료</span>
-        <label>
-          <span className="sr-only">{sectionLabel} 진행률 선택</span>
-          <select
-            aria-label={`${sectionLabel} 진행률 선택`}
-            onChange={(event) => onChange(Number(event.target.value))}
-            value={normalizedPercent}
-          >
-            {matrixProgressOptions.map((option) => (
-              <option key={option} value={option}>
-                {option}%
-              </option>
-            ))}
-          </select>
-        </label>
+      <div className="matrix-progress-header">
+        <span className="matrix-progress-value">
+          <strong>{normalizedPercent}%</strong>
+          완료
+        </span>
+        <span className="matrix-progress-note">{matrixProgressStatusLabel(normalizedPercent)}</span>
       </div>
-      <span className="matrix-progress-track" aria-hidden="true">
-        <span style={{ width: `${normalizedPercent}%` }} />
-      </span>
+      <label className="matrix-progress-slider">
+        <span className="matrix-progress-slider-head">
+          <span>0</span>
+          <span>50</span>
+          <span>100</span>
+        </span>
+        <span className="matrix-progress-range">
+          <span className="sr-only">{sectionLabel} 진행률 선택</span>
+          <input
+            aria-label={`${sectionLabel} 진행률 선택`}
+            max="100"
+            min="0"
+            onChange={(event) => onChange(Number(event.target.value))}
+            step="10"
+            style={{ "--matrix-progress-fill": `${normalizedPercent}%` } as CSSProperties}
+            type="range"
+            value={normalizedPercent}
+          />
+        </span>
+      </label>
     </div>
   );
 }
@@ -2093,6 +2099,26 @@ function normalizeMatrixProgressPercent(value: number) {
   }
 
   return Math.max(0, Math.min(100, Math.round(value / 10) * 10));
+}
+
+function matrixProgressStatusLabel(percent: number) {
+  if (percent >= 100) {
+    return "완료";
+  }
+
+  if (percent >= 70) {
+    return "마무리";
+  }
+
+  if (percent >= 40) {
+    return "진행 중";
+  }
+
+  if (percent > 0) {
+    return "시작";
+  }
+
+  return "대기";
 }
 
 function matrixProgressColor(percent: number) {

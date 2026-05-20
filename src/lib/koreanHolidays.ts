@@ -9,6 +9,10 @@ export interface KoreanHoliday {
 const dayMillis = 24 * 60 * 60 * 1000;
 const koreanHolidays = new Holidays("KR");
 const holidayCache = new Map<number, Record<string, KoreanHoliday[]>>();
+// date-holidays can miss Korean term-expiry election public holidays, so keep verified one-off dates here.
+const supplementalPublicHolidays: Record<string, KoreanHoliday[]> = {
+  "2026-06-03": [{ name: "지방선거", type: "public" }]
+};
 
 export function getKoreanHolidayMapForDates(dateStrings: string[]) {
   const years = new Set(
@@ -50,8 +54,27 @@ function getKoreanHolidayMapForYear(year: number) {
       }
     });
 
+  Object.entries(supplementalPublicHolidays).forEach(([dateString, holidays]) => {
+    if (dateString.startsWith(`${year}-`)) {
+      map[dateString] = mergeHolidays(map[dateString], holidays);
+    }
+  });
+
   holidayCache.set(year, map);
   return map;
+}
+
+function mergeHolidays(current: KoreanHoliday[] = [], supplemental: KoreanHoliday[]) {
+  const names = new Set(current.map((holiday) => holiday.name));
+  const next = [...current];
+
+  supplemental.forEach((holiday) => {
+    if (!names.has(holiday.name)) {
+      next.push(holiday);
+    }
+  });
+
+  return next;
 }
 
 export function isKoreanHoliday(dateString: string) {

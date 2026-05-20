@@ -676,7 +676,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "urgentNotImportant",
-      label: "순위 업무",
+      label: "2순위 업무",
       accent: "gold",
       isImportant: false,
       isUrgent: true,
