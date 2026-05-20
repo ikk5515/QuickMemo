@@ -2,7 +2,7 @@ import type { DecryptedScheduleTask, ScheduleTaskDetails } from "../types";
 
 export type TodoGroupKey = "today" | "tomorrow" | "next7" | "later" | "noDate" | "completed";
 export type MatrixQuadrantKey = "urgentImportant" | "urgentNotImportant" | "importantNotUrgent" | "notUrgentNotImportant";
-export type MatrixDateGroupKey = "next7" | "later" | "noDate";
+export type MatrixDateGroupKey = "next3" | "later" | "noDate";
 
 export interface TodoGroup {
   key: TodoGroupKey;
@@ -743,9 +743,9 @@ export function groupMatrixTasksByDate(
   tasks: DecryptedScheduleTask[],
   today = toLocalDateString(new Date())
 ): MatrixDateGroup[] {
-  const nextSevenEnd = addDays(today, 7);
+  const nextThreeEnd = addDays(today, 3);
   const groups: Record<MatrixDateGroupKey, DecryptedScheduleTask[]> = {
-    next7: [],
+    next3: [],
     later: [],
     noDate: []
   };
@@ -758,8 +758,8 @@ export function groupMatrixTasksByDate(
       return;
     }
 
-    if (startDate <= nextSevenEnd) {
-      groups.next7.push(task);
+    if (startDate <= nextThreeEnd) {
+      groups.next3.push(task);
       return;
     }
 
@@ -767,8 +767,8 @@ export function groupMatrixTasksByDate(
   });
 
   return [
-    { key: "next7", label: "다음 7일", tasks: groups.next7.sort(compareMatrixTasks) },
-    { key: "later", label: "그 후", tasks: groups.later.sort(compareMatrixTasks) },
+    { key: "next3", label: "다음 3일", tasks: groups.next3.sort(compareMatrixTasks) },
+    { key: "later", label: "그 이후", tasks: groups.later.sort(compareMatrixTasks) },
     { key: "noDate", label: "날짜 없음", tasks: groups.noDate.sort(compareMatrixTasks) }
   ];
 }

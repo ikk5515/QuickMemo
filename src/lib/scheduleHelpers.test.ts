@@ -310,19 +310,19 @@ describe("schedule helpers", () => {
     ]);
   });
 
-  it("groups non-primary matrix sections by next seven days, later, and no date", () => {
+  it("groups non-primary matrix sections by next three days, later, and no date", () => {
     const groups = groupMatrixTasksByDate(
       [
         task("overdue", { dueDate: "2026-05-19" }),
-        task("week-end", { dueDate: "2026-05-27" }),
-        task("later", { dueDate: "2026-05-28" }),
+        task("three-day-end", { dueDate: "2026-05-23" }),
+        task("later", { dueDate: "2026-05-24" }),
         task("none")
       ],
       "2026-05-20"
     );
 
     expect(groups.map((group) => [group.key, group.tasks.map((item) => item.id)])).toEqual([
-      ["next7", ["overdue", "week-end"]],
+      ["next3", ["overdue", "three-day-end"]],
       ["later", ["later"]],
       ["noDate", ["none"]]
     ]);
