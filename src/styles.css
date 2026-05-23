@@ -6029,6 +6029,16 @@ textarea {
   width: 100%;
 }
 
+.task-row:focus,
+.task-row:focus-visible,
+.task-open-button:focus,
+.task-open-button:focus-visible,
+.task-check:focus,
+.task-check:focus-visible {
+  box-shadow: none;
+  outline: none;
+}
+
 .task-row:hover,
 .task-row:focus-within {
   background: var(--surface);
@@ -6394,16 +6404,33 @@ textarea {
   padding: 8px 10px;
 }
 
-.matrix-grid {
+.matrix-layout {
   display: grid;
   align-items: start;
-  gap: 10px;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 14px;
+  grid-template-columns: minmax(300px, 0.92fr) minmax(0, 2fr);
+}
+
+.matrix-today-rail {
+  display: grid;
+  min-width: 0;
+}
+
+.matrix-today-rail .matrix-section {
+  height: 100%;
+  min-height: 540px;
+}
+
+.matrix-grid {
+  align-items: start;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .matrix-section {
   border-top: 4px solid var(--teal);
-  min-height: 240px;
+  min-height: 260px;
   padding: 14px;
 }
 
@@ -6676,8 +6703,12 @@ textarea {
 }
 
 @media (max-width: 1120px) {
-  .matrix-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .matrix-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .matrix-today-rail .matrix-section {
+    min-height: 320px;
   }
 }
 

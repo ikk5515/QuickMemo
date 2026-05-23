@@ -2330,6 +2330,8 @@ function MatrixView({
     () => sections.flatMap((section) => section.tasks).find((task) => task.id === activeTaskId) ?? null,
     [activeTaskId, sections]
   );
+  const todaySection = sections.find((section) => section.key === "urgentImportant") ?? null;
+  const prioritySections = sections.filter((section) => section.key !== "urgentImportant");
 
   function toggleGroup(sectionKey: MatrixQuadrantKey, groupKey: string) {
     const stateKey = matrixGroupStateKey(sectionKey, groupKey);
@@ -2373,19 +2375,34 @@ function MatrixView({
       onDragStart={handleDragStart}
       sensors={sensors}
     >
-      <div className="matrix-grid">
-        {sections.map((section) => (
-          <MatrixSectionPanel
-            collapsedGroups={collapsedGroups}
-            key={section.key}
-            onAddSection={onAddSection}
-            onOpen={onOpen}
-            onToggle={onToggle}
-            onToggleGroup={toggleGroup}
-            section={section}
-            today={today}
-          />
-        ))}
+      <div className="matrix-layout">
+        {todaySection && (
+          <div className="matrix-today-rail">
+            <MatrixSectionPanel
+              collapsedGroups={collapsedGroups}
+              onAddSection={onAddSection}
+              onOpen={onOpen}
+              onToggle={onToggle}
+              onToggleGroup={toggleGroup}
+              section={todaySection}
+              today={today}
+            />
+          </div>
+        )}
+        <div className="matrix-grid">
+          {prioritySections.map((section) => (
+            <MatrixSectionPanel
+              collapsedGroups={collapsedGroups}
+              key={section.key}
+              onAddSection={onAddSection}
+              onOpen={onOpen}
+              onToggle={onToggle}
+              onToggleGroup={toggleGroup}
+              section={section}
+              today={today}
+            />
+          ))}
+        </div>
       </div>
       <DragOverlay>
         {activeTask ? (
