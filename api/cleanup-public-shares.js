@@ -1,4 +1,5 @@
 /* global Buffer, URLSearchParams, console, crypto, fetch, process */
+import { createHash, timingSafeEqual } from "node:crypto";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const oauthTokenUrl = "https://oauth2.googleapis.com/token";
@@ -18,6 +19,28 @@ function jsonResponse(response, statusCode, body) {
   response.setHeader("content-type", "application/json; charset=utf-8");
   response.setHeader("cache-control", "no-store");
   response.end(JSON.stringify(body));
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest();
+}
+
+function timingSafeStringEqual(left, right) {
+  return timingSafeEqual(sha256(left), sha256(right));
+}
+
+function authorizationHeader(request) {
+  const value = request.headers.authorization;
+
+  if (Array.isArray(value)) {
+    return value[0] ?? "";
+  }
+
+  return typeof value === "string" ? value : "";
+}
+
+function authorizedCleanupRequest(request, cronSecret) {
+  return timingSafeStringEqual(authorizationHeader(request), `Bearer ${cronSecret}`);
 }
 
 function configuredInteger(name, fallback, min, max) {
@@ -482,11 +505,12 @@ export default async function handler(request, response) {
   const cronSecret = envValue("CRON_SECRET");
 
   if (!cronSecret) {
-    jsonResponse(response, 503, { ok: false, error: "cleanup_not_configured" });
+    console.error("public share cleanup denied because CRON_SECRET is not configured");
+    jsonResponse(response, 401, { ok: false, error: "unauthorized" });
     return;
   }
 
-  if (request.headers.authorization !== `Bearer ${cronSecret}`) {
+  if (!authorizedCleanupRequest(request, cronSecret)) {
     jsonResponse(response, 401, { ok: false, error: "unauthorized" });
     return;
   }

@@ -25,10 +25,14 @@ function expectBrowserHardeningHeaders(headers: HostingHeader[]): void {
   const csp = values.get("content-security-policy") ?? "";
 
   expect(csp).toContain("frame-ancestors 'none'");
+  expect(csp).toContain("default-src 'self'");
+  expect(csp).toContain("script-src 'self'");
+  expect(csp).toContain("connect-src 'self' https://*.googleapis.com");
+  expect(csp).toContain("img-src 'self' data: blob:");
   expect(csp).toContain("base-uri 'self'");
   expect(csp).toContain("form-action 'self'");
   expect(csp).toContain("object-src 'none'");
-  expect(csp).toContain("worker-src 'self'");
+  expect(csp).toContain("worker-src 'self' blob:");
   expect(values.get("x-frame-options")).toBe("DENY");
   expect(values.get("x-content-type-options")).toBe("nosniff");
   expect(values.get("referrer-policy")).toBe("strict-origin-when-cross-origin");

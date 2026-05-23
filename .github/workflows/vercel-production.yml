@@ -25,6 +25,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          persist-credentials: false
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Setup Node
@@ -37,4 +38,4 @@ jobs:
         run: npm ci
 
       - name: Deploy
-        run: npx vercel deploy --prod --yes --token="${{ secrets.VERCEL_TOKEN }}"
+        run: npx --yes vercel@54.4.1 deploy --prod --yes --token="${{ secrets.VERCEL_TOKEN }}"

@@ -31,6 +31,17 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).not.toMatch(forbiddenBackendPattern);
   });
 
+  it("does not leak cleanup credential status and compares the cron secret safely", () => {
+    const authGuard = cleanupFunctionSource.match(/const cronSecret = envValue\("CRON_SECRET"\);[\s\S]*?try \{/)?.[0] ?? "";
+
+    expect(cleanupFunctionSource).toContain('import { createHash, timingSafeEqual } from "node:crypto";');
+    expect(cleanupFunctionSource).toContain("function authorizedCleanupRequest");
+    expect(cleanupFunctionSource).toContain("timingSafeStringEqual(authorizationHeader(request)");
+    expect(cleanupFunctionSource).not.toContain('error: "cleanup_not_configured"');
+    expect(authGuard).toContain('error: "unauthorized"');
+    expect(authGuard).not.toContain("request.headers.authorization !==");
+  });
+
   it("uses indexed fallback scans when cleanup queue discovery is incomplete", () => {
     expect(cleanupFunctionSource).toContain('from: [{ collectionId: "publicShareCleanupQueue" }]');
     expect(cleanupFunctionSource).toContain('from: [{ collectionId: "publicNoteShares" }]');

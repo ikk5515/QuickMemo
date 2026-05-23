@@ -14,6 +14,17 @@
     "test:rules": "npx firebase-tools emulators:exec --project quickmemo-rules-test --only firestore \"vitest run --config vitest.rules.config.ts\"",
     "emulators": "npx firebase-tools emulators:start --only auth,firestore,hosting"
   },
+  "overrides": {
+    "firebase-tools": {
+      "uuid": "^11.1.1"
+    },
+    "gaxios@6.7.1": {
+      "uuid": "^11.1.1"
+    },
+    "universal-analytics": {
+      "uuid": "14.0.0"
+    }
+  },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
