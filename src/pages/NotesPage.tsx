@@ -44,6 +44,7 @@ import {
 } from "lucide-react";
 import type { Editor as TipTapEditor } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Selection } from "@tiptap/pm/state";
 import { EditorContent, useEditor } from "@tiptap/react";
 import {
   type ChangeEvent,
@@ -4137,6 +4138,7 @@ function RichMemoEditor({
   const imageResizeCleanupRef = useRef<(() => void) | null>(null);
   const imageWidthControlRef = useRef<HTMLLabelElement | null>(null);
   const tableResizeCleanupRef = useRef<(() => void) | null>(null);
+  const lastEditorSelectionRef = useRef<{ from: number; to: number } | null>(null);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
   const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
   const [customTextColor, setCustomTextColor] = useState<string>(editorTextColors[0]);
@@ -4184,15 +4186,23 @@ function RichMemoEditor({
         event.preventDefault();
         void handleFiles(pastedFiles);
         return true;
+      },
+      handleDOMEvents: {
+        mousedown: (view, event) => handleTableBoundaryMouseDown(view, event)
       }
     },
     onBlur: () => emitCursorPosition(false),
-    onFocus: () => emitCursorPosition(true),
-    onSelectionUpdate: () => {
+    onFocus: ({ editor: focusedEditor }) => {
+      rememberEditorSelection(focusedEditor);
+      emitCursorPosition(true);
+    },
+    onSelectionUpdate: ({ editor: selectionEditor }) => {
+      rememberEditorSelection(selectionEditor);
       setToolbarVersion((version) => version + 1);
       emitCursorPosition(true);
     },
     onUpdate: ({ editor: nextEditor }) => {
+      rememberEditorSelection(nextEditor);
       onChange(nextEditor.getHTML());
       setToolbarVersion((version) => version + 1);
       emitCursorPosition(true);
@@ -4213,6 +4223,19 @@ function RichMemoEditor({
       }
     };
   }, [editor, editorRef]);
+
+  function rememberEditorSelection(currentEditor: TipTapEditor) {
+    const { from, to } = currentEditor.state.selection;
+    lastEditorSelectionRef.current = { from, to };
+  }
+
+  function restoreEditorSelection(currentEditor: TipTapEditor) {
+    const selection = selectionFromStoredRange(currentEditor, lastEditorSelectionRef.current);
+
+    if (selection) {
+      currentEditor.view.dispatch(currentEditor.state.tr.setSelection(selection));
+    }
+  }
 
   useEffect(() => {
     if (!editor) {
@@ -4390,7 +4413,16 @@ function RichMemoEditor({
       return;
     }
 
+    const selectionBookmark = editor.state.selection.getBookmark();
     editor.commands.setContent(value || "", { emitUpdate: false });
+
+    try {
+      const restoredSelection = selectionBookmark.resolve(editor.state.doc);
+      editor.view.dispatch(editor.state.tr.setSelection(restoredSelection));
+      rememberEditorSelection(editor);
+    } catch {
+      restoreEditorSelection(editor);
+    }
   }, [editor, value]);
 
   function clearImageSelection() {
@@ -4511,7 +4543,9 @@ function RichMemoEditor({
       return;
     }
 
+    restoreEditorSelection(editor);
     command(editor);
+    rememberEditorSelection(editor);
     setToolbarVersion((version) => version + 1);
   }
 
@@ -5281,6 +5315,21 @@ function clampTableColumnPixelWidth(value: number) {
   return Math.min(editorTableColumnPixelWidthBounds.max, Math.max(editorTableColumnPixelWidthBounds.min, Math.round(value)));
 }
 
+function selectionFromStoredRange(editor: TipTapEditor, range: { from: number; to: number } | null) {
+  if (!range) {
+    return null;
+  }
+
+  const maxPosition = editor.state.doc.content.size;
+  const from = Math.min(Math.max(range.from, 0), maxPosition);
+
+  try {
+    return Selection.near(editor.state.doc.resolve(from), 1);
+  } catch {
+    return null;
+  }
+}
+
 function currentBlockLineHeight(editor: TipTapEditor | null) {
   if (!editor) {
     return null;
@@ -5619,6 +5668,91 @@ function tableResizeCursorFromEvent(editorElement: HTMLElement, event: MouseEven
 
   const cellRect = cell.getBoundingClientRect();
   return Math.abs(event.clientX - cellRect.right) <= 6 ? "col" : null;
+}
+
+function handleTableBoundaryMouseDown(view: TipTapEditor["view"], event: MouseEvent) {
+  if (event.button !== 0 || event.defaultPrevented) {
+    return false;
+  }
+
+  const target = event.target;
+
+  if (!(target instanceof HTMLElement) || target.closest("td, th")) {
+    return false;
+  }
+
+  const wrapper = target.closest(".tableWrapper");
+
+  if (!(wrapper instanceof HTMLElement) || !view.dom.contains(wrapper)) {
+    return false;
+  }
+
+  const targetTable = target.closest("table");
+  const table =
+    targetTable instanceof HTMLTableElement && wrapper.contains(targetTable)
+      ? targetTable
+      : wrapper.querySelector("table");
+  const cell = table instanceof HTMLTableElement ? nearestTableCellFromPointer(table, event) : null;
+  const selection = cell ? selectionInsideTableCell(view, cell) : null;
+
+  if (!selection) {
+    return false;
+  }
+
+  event.preventDefault();
+  view.dispatch(view.state.tr.setSelection(selection).scrollIntoView());
+  view.focus();
+  return true;
+}
+
+function nearestTableCellFromPointer(table: HTMLTableElement, event: MouseEvent) {
+  const cells = Array.from(table.querySelectorAll("td, th")).filter(
+    (cell): cell is HTMLTableCellElement => cell instanceof HTMLTableCellElement
+  );
+
+  if (!cells.length) {
+    return null;
+  }
+
+  return cells.reduce((nearestCell, cell) => {
+    const currentDistance = pointerDistanceFromRect(event, cell.getBoundingClientRect());
+    const nearestDistance = pointerDistanceFromRect(event, nearestCell.getBoundingClientRect());
+
+    return currentDistance < nearestDistance ? cell : nearestCell;
+  }, cells[0]);
+}
+
+function pointerDistanceFromRect(event: MouseEvent, rect: DOMRect) {
+  const distanceX = event.clientX < rect.left ? rect.left - event.clientX : Math.max(0, event.clientX - rect.right);
+  const distanceY = event.clientY < rect.top ? rect.top - event.clientY : Math.max(0, event.clientY - rect.bottom);
+
+  return distanceX * distanceX + distanceY * distanceY;
+}
+
+function selectionInsideTableCell(view: TipTapEditor["view"], cell: HTMLTableCellElement) {
+  const rawPosition = view.posAtDOM(cell, 0);
+  const maxPosition = view.state.doc.content.size;
+
+  for (let position = Math.max(0, rawPosition - 2); position <= Math.min(maxPosition, rawPosition + 2); position += 1) {
+    const node = view.state.doc.nodeAt(position);
+
+    if (node?.type.name === "tableCell" || node?.type.name === "tableHeader") {
+      return selectionNearPosition(view.state.doc, position + 1);
+    }
+  }
+
+  return selectionNearPosition(view.state.doc, rawPosition);
+}
+
+function selectionNearPosition(doc: ProseMirrorNode, position: number) {
+  const safePosition = Math.min(Math.max(position, 0), doc.content.size);
+
+  try {
+    const resolvedPosition = doc.resolve(safePosition);
+    return Selection.findFrom(resolvedPosition, 1, true) ?? Selection.near(resolvedPosition, 1);
+  } catch {
+    return null;
+  }
 }
 
 function tableResizeSessionFromHit(editor: TipTapEditor, hit: TableResizeHit): TableResizeSession | null {

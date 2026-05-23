@@ -88,7 +88,7 @@ import {
   updateScheduleTaskOrderBatch,
   type ScheduleTaskSnapshot
 } from "../services/scheduleTasks";
-import { getUserPreferences } from "../services/userPreferences";
+import { defaultUserPreferences, getCachedUserPreferences, getUserPreferences } from "../services/userPreferences";
 import type { DecryptedScheduleTask, ScheduleChecklistItem, ScheduleTaskDetails, ScheduleView } from "../types";
 
 const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
@@ -155,7 +155,9 @@ interface CreateDialogState {
 
 export default function SchedulePage() {
   const { privateKey, profile } = useAuth();
-  const [activeView, setActiveView] = useState<ScheduleView>("todo");
+  const [activeView, setActiveView] = useState<ScheduleView | null>(() =>
+    profile ? getCachedUserPreferences(profile.uid)?.scheduleDefaultView ?? null : null
+  );
   const [tasks, setTasks] = useState<ScheduleTaskSnapshot[]>([]);
   const [decryptedTasks, setDecryptedTasks] = useState<DecryptedScheduleTask[]>([]);
   const [viewTaskId, setViewTaskId] = useState<string | null>(null);
@@ -177,17 +179,25 @@ export default function SchedulePage() {
 
   useEffect(() => {
     if (!profile) {
+      setActiveView(null);
       return undefined;
     }
 
     let active = true;
+    const cachedPreferences = getCachedUserPreferences(profile.uid);
+
+    setActiveView(cachedPreferences?.scheduleDefaultView ?? null);
     void getUserPreferences(profile.uid)
       .then((preferences) => {
         if (active) {
           setActiveView(preferences.scheduleDefaultView);
         }
       })
-      .catch(() => undefined);
+      .catch(() => {
+        if (active) {
+          setActiveView(cachedPreferences?.scheduleDefaultView ?? defaultUserPreferences.scheduleDefaultView);
+        }
+      });
 
     return () => {
       active = false;
@@ -682,7 +692,7 @@ export default function SchedulePage() {
               <CalendarDays size={16} />
               일정관리
             </p>
-            <h1>{scheduleTabs.find((tab) => tab.view === activeView)?.label}</h1>
+            <h1>{scheduleTabs.find((tab) => tab.view === activeView)?.label ?? "일정관리"}</h1>
           </div>
           <nav className="schedule-view-tabs" aria-label="일정관리 보기">
             {scheduleTabs.map(({ Icon, label, shortLabel, view }) => (
@@ -705,6 +715,8 @@ export default function SchedulePage() {
             {error || status}
           </div>
         )}
+
+        {!activeView && <p className="schedule-empty">설정한 일정 화면을 여는 중입니다.</p>}
 
         {activeView === "todo" && (
           <ScheduleCreateForm

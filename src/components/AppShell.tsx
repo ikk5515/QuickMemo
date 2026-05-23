@@ -4,19 +4,26 @@ import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { hasFirebaseConfig } from "../lib/firebase";
-import { saveUserPreferences, subscribeUserPreferences } from "../services/userPreferences";
+import { getCachedUserPreferences, saveUserPreferences, subscribeUserPreferences } from "../services/userPreferences";
 import type { UserPreferencesDocument } from "../types";
 
 export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
   const { changePassword, profile, signOut } = useAuth();
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
-  const [preferences, setPreferences] = useState<UserPreferencesDocument | null>(null);
+  const [preferences, setPreferences] = useState<UserPreferencesDocument | null>(() =>
+    profile ? getCachedUserPreferences(profile.uid) : null
+  );
 
   useEffect(() => {
     if (!profile) {
       setPreferences(null);
       return undefined;
+    }
+
+    const cachedPreferences = getCachedUserPreferences(profile.uid);
+    if (cachedPreferences) {
+      setPreferences(cachedPreferences);
     }
 
     return subscribeUserPreferences(profile.uid, setPreferences);
