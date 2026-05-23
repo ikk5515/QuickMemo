@@ -6427,6 +6427,7 @@ textarea {
 
 .matrix-section > .matrix-task-list,
 .matrix-section > .matrix-date-groups {
+  max-height: 100%;
   min-height: 0;
   overflow-y: auto;
   padding-right: 4px;
@@ -6439,15 +6440,23 @@ textarea {
 
 .matrix-section > .matrix-date-groups {
   align-content: start;
+  display: block;
+  overscroll-behavior: contain;
 }
 
 .matrix-date-groups .matrix-task-list {
+  margin-top: 8px;
   overflow: visible;
   padding-right: 0;
 }
 
 .matrix-date-group {
   min-height: 0;
+  overflow: visible;
+}
+
+.matrix-date-group + .matrix-date-group {
+  margin-top: 12px;
 }
 
 .matrix-section .schedule-empty {
@@ -6482,10 +6491,14 @@ textarea {
   display: inline-flex;
   gap: 8px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .matrix-section h2 {
   font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .matrix-add-button {
@@ -6617,25 +6630,29 @@ textarea {
 }
 
 .matrix-date-groups {
-  display: grid;
-  gap: 10px;
+  display: block;
 }
 
 .matrix-date-group {
-  display: grid;
-  gap: 8px;
+  display: block;
 }
 
 .matrix-date-group-header {
+  align-items: center;
   background: transparent;
   border: 0;
+  border-radius: 6px;
   color: var(--ink);
   display: flex;
   font-size: 13px;
+  height: 30px;
   justify-content: space-between;
+  line-height: 1;
   min-height: 30px;
   padding: 0;
+  position: relative;
   text-align: left;
+  z-index: 1;
 }
 
 .matrix-date-group-header span {
@@ -6643,9 +6660,13 @@ textarea {
   display: inline-flex;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .matrix-date-group-header svg {
+  flex: 0 0 auto;
   transition: transform 140ms ease;
 }
 
@@ -6655,12 +6676,42 @@ textarea {
 
 .matrix-date-group-header strong {
   color: var(--muted);
+  flex: 0 0 auto;
   font-size: 12px;
+  margin-left: 8px;
+  min-width: 18px;
+  text-align: right;
 }
 
 .matrix-task-row {
+  align-items: start;
   cursor: grab;
-  grid-template-columns: 24px 24px minmax(0, 1fr) auto;
+  grid-template-columns: 24px 24px minmax(0, 1fr) 38px;
+  min-height: 54px;
+  padding: 6px 8px;
+}
+
+.matrix-task-row .task-main {
+  gap: 2px;
+  overflow: hidden;
+}
+
+.matrix-task-row .task-main strong,
+.matrix-task-row .task-main .task-meta {
+  display: block;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.matrix-task-row .task-flags {
+  justify-content: flex-end;
+  min-width: 38px;
+}
+
+.matrix-date-group .schedule-empty {
+  margin: 8px 0 0;
 }
 
 .matrix-task-progress-strip {
