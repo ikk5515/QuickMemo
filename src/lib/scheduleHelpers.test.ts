@@ -320,9 +320,11 @@ describe("schedule helpers", () => {
   it("sorts tasks into Eisenhower matrix sections", () => {
     const sections = groupTasksByMatrix([
       task("overdue-waiting", { dueDate: "2026-05-19", isImportant: false, isUrgent: false }),
+      task("active-range-urgent-important", { endDate: "2026-05-26", isImportant: true, isUrgent: true, startDate: "2026-05-19" }),
       task("urgent-important", { dueDate: "2026-05-20", isImportant: true, isUrgent: true }),
       task("future-urgent-important", { dueDate: "2026-05-26", isImportant: true, isUrgent: true }),
       task("no-date-urgent-important", { isImportant: true, isUrgent: true }),
+      task("active-range-urgent", { endDate: "2026-05-26", isImportant: false, isUrgent: true, startDate: "2026-05-19" }),
       task("urgent-sooner", { isImportant: false, isUrgent: true, startDate: "2026-05-20", startTimeMinutes: 720 }),
       task("urgent", { isImportant: false, isUrgent: true, startDate: "2026-05-21", startTimeMinutes: 600 }),
       task("urgent-earlier", { isImportant: false, isUrgent: true, startDate: "2026-05-21", startTimeMinutes: 540 }),
@@ -334,9 +336,9 @@ describe("schedule helpers", () => {
 
     expect(matrixQuadrantForTask({ isImportant: true, isUrgent: false })).toBe("importantNotUrgent");
     expect(sections.map((section) => [section.key, section.tasks.map((item) => item.id)])).toEqual([
-      ["urgentImportant", ["overdue-waiting", "urgent-important"]],
+      ["urgentImportant", ["active-range-urgent-important", "overdue-waiting", "urgent-important"]],
       ["firstPriority", ["future-urgent-important", "no-date-urgent-important"]],
-      ["urgentNotImportant", ["urgent-sooner", "urgent-earlier", "urgent"]],
+      ["urgentNotImportant", ["active-range-urgent", "urgent-sooner", "urgent-earlier", "urgent"]],
       ["importantNotUrgent", ["important"]],
       ["notUrgentNotImportant", ["waiting-new", "waiting-old"]]
     ]);

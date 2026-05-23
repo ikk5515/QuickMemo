@@ -784,14 +784,28 @@ function matrixSectionForTask(task: DecryptedScheduleTask, today: string): Matri
 
 function isMatrixOverdueTask(task: DecryptedScheduleTask, today: string) {
   const startDate = taskStartDate(task);
+  const endDate = taskEndDate(task);
 
-  return isValidScheduleDateString(startDate) && startDate < today;
+  if (!isValidScheduleDateString(startDate)) {
+    return false;
+  }
+
+  const safeEndDate = isValidScheduleDateString(endDate) && endDate >= startDate ? endDate : startDate;
+
+  return safeEndDate < today;
 }
 
 function isMatrixTodayTask(task: DecryptedScheduleTask, today: string) {
   const startDate = taskStartDate(task);
+  const endDate = taskEndDate(task);
 
-  return isValidScheduleDateString(startDate) && startDate <= today;
+  if (!isValidScheduleDateString(startDate)) {
+    return false;
+  }
+
+  const safeEndDate = isValidScheduleDateString(endDate) && endDate >= startDate ? endDate : startDate;
+
+  return startDate <= today && today <= safeEndDate;
 }
 
 export function matrixPriorityForSection(key: MatrixQuadrantKey) {
