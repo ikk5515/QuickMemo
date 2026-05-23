@@ -6396,13 +6396,15 @@ textarea {
 
 .matrix-grid {
   display: grid;
-  gap: 14px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .matrix-section {
   border-top: 4px solid var(--teal);
-  min-height: 260px;
+  min-height: 240px;
+  padding: 14px;
 }
 
 .matrix-section > header div {
@@ -6412,11 +6414,15 @@ textarea {
   min-width: 0;
 }
 
+.matrix-section h2 {
+  font-size: 15px;
+}
+
 .matrix-add-button {
   flex: 0 0 auto;
-  height: 34px;
-  min-height: 34px;
-  width: 34px;
+  height: 30px;
+  min-height: 30px;
+  width: 30px;
 }
 
 .matrix-section.drag-over {
@@ -6667,6 +6673,12 @@ textarea {
 
 .matrix-section.teal {
   border-top-color: #1aa77f;
+}
+
+@media (max-width: 1120px) {
+  .matrix-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .schedule-detail-backdrop {
@@ -7810,9 +7822,12 @@ textarea {
 
   .todo-groups,
   .calendar-layout,
-  .matrix-grid,
   .recurring-layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .matrix-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .calendar-panel {
@@ -7896,6 +7911,10 @@ textarea {
   .schedule-section,
   .matrix-section {
     min-height: 330px;
+  }
+
+  .matrix-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .calendar-weekdays,

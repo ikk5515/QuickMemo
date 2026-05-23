@@ -319,6 +319,7 @@ describe("schedule helpers", () => {
 
   it("sorts tasks into Eisenhower matrix sections", () => {
     const sections = groupTasksByMatrix([
+      task("overdue-waiting", { dueDate: "2026-05-19", isImportant: false, isUrgent: false }),
       task("urgent-important", { dueDate: "2026-05-20", isImportant: true, isUrgent: true }),
       task("future-urgent-important", { dueDate: "2026-05-26", isImportant: true, isUrgent: true }),
       task("no-date-urgent-important", { isImportant: true, isUrgent: true }),
@@ -333,7 +334,7 @@ describe("schedule helpers", () => {
 
     expect(matrixQuadrantForTask({ isImportant: true, isUrgent: false })).toBe("importantNotUrgent");
     expect(sections.map((section) => [section.key, section.tasks.map((item) => item.id)])).toEqual([
-      ["urgentImportant", ["urgent-important"]],
+      ["urgentImportant", ["overdue-waiting", "urgent-important"]],
       ["firstPriority", ["future-urgent-important", "no-date-urgent-important"]],
       ["urgentNotImportant", ["urgent-sooner", "urgent-earlier", "urgent"]],
       ["importantNotUrgent", ["important"]],

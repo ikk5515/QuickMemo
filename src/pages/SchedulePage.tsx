@@ -798,9 +798,16 @@ export default function SchedulePage() {
   async function moveTaskToMatrixSection(task: DecryptedScheduleTask, sectionKey: MatrixQuadrantKey) {
     const priority = matrixPriorityForSection(sectionKey);
     const startDate = taskStartDate(task);
+    const isOverdue = isValidScheduleDateString(startDate) && startDate < today;
     const moveToToday = sectionKey === "urgentImportant" && (!isValidScheduleDateString(startDate) || startDate > today);
     const firstPriorityDate = addDays(today, 1);
     const moveToFirstPriority = sectionKey === "firstPriority" && isValidScheduleDateString(startDate) && startDate <= today;
+
+    if (isOverdue && sectionKey !== "urgentImportant") {
+      setStatus("날짜가 지난 업무는 오늘까지 해야 할 일에 유지됩니다.");
+      setError(null);
+      return;
+    }
 
     let updateInput: UpdateScheduleTaskInput = priority;
 
@@ -2725,9 +2732,13 @@ function matrixSectionKeyForTask(
   task: Pick<DecryptedScheduleTask, "dueDate" | "isImportant" | "isUrgent" | "startDate">,
   today: string
 ): MatrixQuadrantKey {
-  if (task.isImportant && task.isUrgent) {
-    const startDate = taskStartDate(task);
+  const startDate = taskStartDate(task);
 
+  if (isValidScheduleDateString(startDate) && startDate < today) {
+    return "urgentImportant";
+  }
+
+  if (task.isImportant && task.isUrgent) {
     return isValidScheduleDateString(startDate) && startDate <= today ? "urgentImportant" : "firstPriority";
   }
 

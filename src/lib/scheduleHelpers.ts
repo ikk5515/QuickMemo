@@ -769,6 +769,10 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
 }
 
 function matrixSectionForTask(task: DecryptedScheduleTask, today: string): MatrixQuadrantKey {
+  if (isMatrixOverdueTask(task, today)) {
+    return "urgentImportant";
+  }
+
   const sectionKey = matrixQuadrantForTask(task);
 
   if (sectionKey !== "urgentImportant") {
@@ -776,6 +780,12 @@ function matrixSectionForTask(task: DecryptedScheduleTask, today: string): Matri
   }
 
   return isMatrixTodayTask(task, today) ? sectionKey : "firstPriority";
+}
+
+function isMatrixOverdueTask(task: DecryptedScheduleTask, today: string) {
+  const startDate = taskStartDate(task);
+
+  return isValidScheduleDateString(startDate) && startDate < today;
 }
 
 function isMatrixTodayTask(task: DecryptedScheduleTask, today: string) {
