@@ -47,7 +47,7 @@ VITE_USE_FIREBASE_EMULATORS=false
 
 4. Build > Firestore Database에서 데이터베이스를 만들고 production mode로 시작합니다.
 5. Build > Authentication에서 시작하기를 누른 뒤 Sign-in method에서 Email/Password를 활성화하고 저장합니다.
-6. `.firebaserc.example`을 `.firebaserc`로 복사하고 프로젝트 ID를 넣습니다.
+6. `.firebaserc.example`을 `.firebaserc`로 복사하고 프로젝트 ID를 넣습니다. `.firebaserc`는 로컬/운영 프로젝트 식별자를 담을 수 있어 git에 올리지 않습니다.
 
 ```bash
 cp .firebaserc.example .firebaserc
@@ -70,8 +70,8 @@ Vercel 운영 환경에는 아래 값을 설정합니다. `FIREBASE_CLEANUP_SERV
 
 ```bash
 CRON_SECRET=at-least-16-random-characters
-FIREBASE_CLEANUP_PROJECT_ID=quickmemo-a95ba
-FIREBASE_CLEANUP_CLIENT_EMAIL=cleanup-account@quickmemo-a95ba.iam.gserviceaccount.com
+FIREBASE_CLEANUP_PROJECT_ID=your-firebase-project-id
+FIREBASE_CLEANUP_CLIENT_EMAIL=cleanup-account@your-firebase-project-id.iam.gserviceaccount.com
 FIREBASE_CLEANUP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 PUBLIC_SHARE_CLEANUP_BATCH_SIZE=50
 PUBLIC_SHARE_CLEANUP_MAX_DELETES=1000
@@ -127,6 +127,19 @@ npx firebase-tools deploy --only firestore:rules,firestore:indexes,hosting
 ```
 
 전역 Firebase CLI가 없어도 `npx firebase-tools`로 실행할 수 있습니다. Vercel을 프론트엔드로 사용할 예정이면 Firebase Hosting 배포는 생략하고 Firestore Rules/Indexes만 배포하면 됩니다.
+
+## 민감 파일 관리
+
+아래 파일은 로컬 또는 배포 환경별 비밀값과 프로젝트 메타데이터를 담을 수 있으므로 git과 Vercel 업로드에서 제외합니다.
+
+- `.env`, `.env.*` 단, 공유용 빈 템플릿인 `.env.example`만 추적합니다.
+- `.firebaserc` 단, `.firebaserc.example`만 추적합니다.
+- `.vercel/`, `.firebase/`, `.runtimeconfig.json`
+- Firebase 서비스 계정 JSON, `*-firebase-adminsdk-*.json`, `*credentials*.json`, `*secret*.json`
+- 개인 키와 인증서 파일: `*.pem`, `*.p12`, `*.pfx`, `*.key`, `*.crt`, `*.cert`
+- 패키지 매니저 인증 파일: `.npmrc`, `.yarnrc`, `.pnpmrc`
+
+실수로 실제 비밀값을 커밋했다면 단순 삭제만으로는 충분하지 않습니다. 해당 키를 Firebase/Vercel/Google Cloud에서 즉시 폐기 또는 재발급하고, 필요한 경우 git 히스토리 정리 절차를 별도로 진행하세요. CI는 `npm run security:gitignore-guard`로 민감 파일 패턴이 추적되는지 확인합니다.
 
 ## Vercel 배포 준비
 

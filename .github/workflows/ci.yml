@@ -38,6 +38,9 @@ jobs:
       - name: Functions-free security guard
         run: npm run security:functions-guard
 
+      - name: Sensitive-file gitignore guard
+        run: npm run security:gitignore-guard
+
       - name: Unit tests
         run: npm test
 

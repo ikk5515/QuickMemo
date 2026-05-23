@@ -1,16 +1,58 @@
-node_modules
-dist
-functions/lib
+# Dependencies and generated output
+node_modules/
+dist/
+functions/lib/
+coverage/
+.vite/
+.vitest/
+*.tsbuildinfo
+
+# Local environment and secret material
 .env
 .env.*
 !.env.example
-.firebase
-.vercel
+.envrc
+.direnv/
 .runtimeconfig.json
+.npmrc
+.yarnrc
+.pnpmrc
+
+# Firebase and Vercel local state
+.firebaserc
+!.firebaserc.example
+.firebase/
+.vercel/
+
+# Service-account credentials and private keys
 serviceAccount*.json
+*service-account*.json
 *-firebase-adminsdk-*.json
+*credentials*.json
+*credential*.json
+*secret*.json
+*.pem
+*.p12
+*.pfx
+*.key
+*.crt
+*.cert
+GoogleService-Info.plist
+google-services.json
+
+# Emulator, debug, and local cache output
 firebase-debug.log
 firestore-debug.log
 ui-debug.log
+*-debug.log
 *.log
+firestore_export/
+firebase-export-*/
+emulator-data/
+.cache/
+
+# OS and editor noise
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
