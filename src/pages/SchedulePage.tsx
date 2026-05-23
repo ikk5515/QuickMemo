@@ -796,13 +796,24 @@ export default function SchedulePage() {
 
   async function moveTaskToMatrixSection(task: DecryptedScheduleTask, sectionKey: MatrixQuadrantKey) {
     const priority = matrixPriorityForSection(sectionKey);
+    const startDate = taskStartDate(task);
+    const moveToToday = sectionKey === "urgentImportant" && (!isValidScheduleDateString(startDate) || startDate > today);
+    const updateInput = moveToToday
+      ? {
+        ...priority,
+        dueDate: today,
+        startDate: today,
+        endDate: today,
+        sortOrder: null
+      }
+      : priority;
 
-    if (task.isImportant === priority.isImportant && task.isUrgent === priority.isUrgent) {
+    if (!moveToToday && task.isImportant === priority.isImportant && task.isUrgent === priority.isUrgent) {
       return;
     }
 
     try {
-      await updateScheduleTask(task.id, unlockedProfile.uid, priority);
+      await updateScheduleTask(task.id, unlockedProfile.uid, updateInput);
       setStatus("업무 위치를 변경했습니다.");
       setError(null);
     } catch (caught) {

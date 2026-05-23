@@ -742,7 +742,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
   const sectionByKey = new Map(sections.map((section) => [section.key, section]));
 
   activeTasks.forEach((task) => {
-    sectionByKey.get(matrixQuadrantForTask(task))?.tasks.push(task);
+    sectionByKey.get(matrixSectionForTask(task, today))?.tasks.push(task);
   });
 
   return sections.map((section) => ({
@@ -751,6 +751,22 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     progress: calculateMatrixSectionProgress(section.tasks),
     tasks: section.tasks.sort(compareMatrixTasks)
   }));
+}
+
+function matrixSectionForTask(task: DecryptedScheduleTask, today: string): MatrixQuadrantKey {
+  const sectionKey = matrixQuadrantForTask(task);
+
+  if (sectionKey !== "urgentImportant") {
+    return sectionKey;
+  }
+
+  return isMatrixTodayTask(task, today) ? sectionKey : "urgentNotImportant";
+}
+
+function isMatrixTodayTask(task: DecryptedScheduleTask, today: string) {
+  const startDate = taskStartDate(task);
+
+  return isValidScheduleDateString(startDate) && startDate <= today;
 }
 
 export function matrixPriorityForSection(key: MatrixQuadrantKey) {
