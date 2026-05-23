@@ -117,6 +117,7 @@ import {
   subscribeScheduleTasks,
   updateScheduleTask,
   updateScheduleTaskOrderBatch,
+  type UpdateScheduleTaskInput,
   type ScheduleTaskSnapshot
 } from "../services/scheduleTasks";
 import {
@@ -798,17 +799,30 @@ export default function SchedulePage() {
     const priority = matrixPriorityForSection(sectionKey);
     const startDate = taskStartDate(task);
     const moveToToday = sectionKey === "urgentImportant" && (!isValidScheduleDateString(startDate) || startDate > today);
-    const updateInput = moveToToday
-      ? {
+    const firstPriorityDate = addDays(today, 1);
+    const moveToFirstPriority = sectionKey === "firstPriority" && isValidScheduleDateString(startDate) && startDate <= today;
+
+    let updateInput: UpdateScheduleTaskInput = priority;
+
+    if (moveToToday) {
+      updateInput = {
         ...priority,
         dueDate: today,
         startDate: today,
         endDate: today,
         sortOrder: null
-      }
-      : priority;
+      };
+    } else if (moveToFirstPriority) {
+      updateInput = {
+        ...priority,
+        dueDate: firstPriorityDate,
+        startDate: firstPriorityDate,
+        endDate: firstPriorityDate,
+        sortOrder: null
+      };
+    }
 
-    if (!moveToToday && task.isImportant === priority.isImportant && task.isUrgent === priority.isUrgent) {
+    if (!moveToToday && !moveToFirstPriority && task.isImportant === priority.isImportant && task.isUrgent === priority.isUrgent) {
       return;
     }
 
@@ -1194,11 +1208,13 @@ export default function SchedulePage() {
   }
 
   function openMatrixCreateDialog(section: MatrixSection) {
+    const defaultDate = section.key === "firstPriority" ? addDays(today, 1) : today;
+
     setCreateDialog({
       allowPriority: false,
       defaults: {
-        startDate: today,
-        endDate: today,
+        startDate: defaultDate,
+        endDate: defaultDate,
         color: nextScheduleTaskColor(decryptedTasks),
         isImportant: section.isImportant,
         isUrgent: section.isUrgent
@@ -2333,7 +2349,7 @@ function MatrixView({
       return;
     }
 
-    if (targetSectionKey && targetSectionKey !== matrixSectionKeyForTask(draggedTask)) {
+    if (targetSectionKey && targetSectionKey !== matrixSectionKeyForTask(draggedTask, today)) {
       onMoveTaskToSection(draggedTask, targetSectionKey);
       return;
     }
@@ -2705,9 +2721,14 @@ function recurringHabitIdFromDragEvent(event: DragEndEvent) {
   return event.over?.data.current?.type === "recurring-habit" ? String(event.over.id) : null;
 }
 
-function matrixSectionKeyForTask(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent">): MatrixQuadrantKey {
+function matrixSectionKeyForTask(
+  task: Pick<DecryptedScheduleTask, "dueDate" | "isImportant" | "isUrgent" | "startDate">,
+  today: string
+): MatrixQuadrantKey {
   if (task.isImportant && task.isUrgent) {
-    return "urgentImportant";
+    const startDate = taskStartDate(task);
+
+    return isValidScheduleDateString(startDate) && startDate <= today ? "urgentImportant" : "firstPriority";
   }
 
   if (!task.isImportant && task.isUrgent) {
@@ -2724,6 +2745,7 @@ function matrixSectionKeyForTask(task: Pick<DecryptedScheduleTask, "isImportant"
 function isMatrixQuadrantKey(value: unknown): value is MatrixQuadrantKey {
   return (
     value === "urgentImportant"
+    || value === "firstPriority"
     || value === "urgentNotImportant"
     || value === "importantNotUrgent"
     || value === "notUrgentNotImportant"
@@ -3454,19 +3476,23 @@ function SortableRecurringHabitRow({
         <button className="recurring-habit-content" type="button" onClick={onOpen} onDoubleClick={onRead}>
           <RecurringHabitRowContent checkIns={checkIns} habit={habit} selectedDate={selectedDate} />
         </button>
-        <button
-          aria-label={`${habit.title} ${progressPercent}% 진행률 수정`}
+        <span
+          aria-label={`${habit.title} 진행률 ${progressPercent}%`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={progressPercent}
           className="recurring-habit-progress-strip"
-          onClick={onRead}
+          onClick={(event) => event.stopPropagation()}
           onDoubleClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          role="progressbar"
           style={
             {
               "--recurring-habit-progress-color": taskProgressColor(progressPercent),
               "--recurring-habit-progress-fill": `${progressPercent}%`
             } as CSSProperties
           }
-          title="진행률 수정"
-          type="button"
+          title={`${progressPercent}%`}
         />
       </div>
       <button

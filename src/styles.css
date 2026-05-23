@@ -7329,12 +7329,8 @@ textarea {
   min-height: 4px;
   overflow: hidden;
   padding: 0;
+  cursor: default;
   width: 100%;
-}
-
-.recurring-habit-progress-strip:hover,
-.recurring-habit-progress-strip:focus-visible {
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--recurring-habit-progress-color, var(--teal)) 18%, transparent);
 }
 
 .recurring-habit-metrics {

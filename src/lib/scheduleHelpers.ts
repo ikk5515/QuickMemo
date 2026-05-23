@@ -1,7 +1,12 @@
 import type { DecryptedScheduleTask, ScheduleTaskDetails } from "../types";
 
 export type TodoGroupKey = "today" | "tomorrow" | "next7" | "later" | "noDate" | "completed";
-export type MatrixQuadrantKey = "urgentImportant" | "urgentNotImportant" | "importantNotUrgent" | "notUrgentNotImportant";
+export type MatrixQuadrantKey =
+  | "urgentImportant"
+  | "firstPriority"
+  | "urgentNotImportant"
+  | "importantNotUrgent"
+  | "notUrgentNotImportant";
 export type MatrixDateGroupKey = "next3" | "later" | "noDate";
 
 export interface TodoGroup {
@@ -708,6 +713,16 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
       tasks: []
     },
     {
+      key: "firstPriority",
+      label: "1순위 업무",
+      accent: "red",
+      isImportant: true,
+      isUrgent: true,
+      dateGroups: [],
+      progress: { checked: 0, percent: 0, total: 0 },
+      tasks: []
+    },
+    {
       key: "urgentNotImportant",
       label: "2순위 업무",
       accent: "gold",
@@ -760,7 +775,7 @@ function matrixSectionForTask(task: DecryptedScheduleTask, today: string): Matri
     return sectionKey;
   }
 
-  return isMatrixTodayTask(task, today) ? sectionKey : "urgentNotImportant";
+  return isMatrixTodayTask(task, today) ? sectionKey : "firstPriority";
 }
 
 function isMatrixTodayTask(task: DecryptedScheduleTask, today: string) {
@@ -771,8 +786,8 @@ function isMatrixTodayTask(task: DecryptedScheduleTask, today: string) {
 
 export function matrixPriorityForSection(key: MatrixQuadrantKey) {
   return {
-    isImportant: key === "urgentImportant" || key === "importantNotUrgent",
-    isUrgent: key === "urgentImportant" || key === "urgentNotImportant"
+    isImportant: key === "urgentImportant" || key === "firstPriority" || key === "importantNotUrgent",
+    isUrgent: key === "urgentImportant" || key === "firstPriority" || key === "urgentNotImportant"
   };
 }
 

@@ -321,6 +321,7 @@ describe("schedule helpers", () => {
     const sections = groupTasksByMatrix([
       task("urgent-important", { dueDate: "2026-05-20", isImportant: true, isUrgent: true }),
       task("future-urgent-important", { dueDate: "2026-05-26", isImportant: true, isUrgent: true }),
+      task("no-date-urgent-important", { isImportant: true, isUrgent: true }),
       task("urgent-sooner", { isImportant: false, isUrgent: true, startDate: "2026-05-20", startTimeMinutes: 720 }),
       task("urgent", { isImportant: false, isUrgent: true, startDate: "2026-05-21", startTimeMinutes: 600 }),
       task("urgent-earlier", { isImportant: false, isUrgent: true, startDate: "2026-05-21", startTimeMinutes: 540 }),
@@ -333,9 +334,15 @@ describe("schedule helpers", () => {
     expect(matrixQuadrantForTask({ isImportant: true, isUrgent: false })).toBe("importantNotUrgent");
     expect(sections.map((section) => [section.key, section.tasks.map((item) => item.id)])).toEqual([
       ["urgentImportant", ["urgent-important"]],
-      ["urgentNotImportant", ["urgent-sooner", "urgent-earlier", "urgent", "future-urgent-important"]],
+      ["firstPriority", ["future-urgent-important", "no-date-urgent-important"]],
+      ["urgentNotImportant", ["urgent-sooner", "urgent-earlier", "urgent"]],
       ["importantNotUrgent", ["important"]],
       ["notUrgentNotImportant", ["waiting-new", "waiting-old"]]
+    ]);
+    expect(sections.find((section) => section.key === "firstPriority")?.dateGroups.map((group) => [group.key, group.tasks.map((item) => item.id)])).toEqual([
+      ["next3", []],
+      ["later", ["future-urgent-important"]],
+      ["noDate", ["no-date-urgent-important"]]
     ]);
   });
 
