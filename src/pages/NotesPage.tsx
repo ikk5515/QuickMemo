@@ -118,6 +118,7 @@ import {
   editorTextSizes,
   richEditorExtensions
 } from "../lib/richEditorExtensions";
+import { selectionFromStoredRange, type StoredEditorSelectionRange } from "../lib/editorSelection";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
   confirmNoteRead,
@@ -4138,7 +4139,7 @@ function RichMemoEditor({
   const imageResizeCleanupRef = useRef<(() => void) | null>(null);
   const imageWidthControlRef = useRef<HTMLLabelElement | null>(null);
   const tableResizeCleanupRef = useRef<(() => void) | null>(null);
-  const lastEditorSelectionRef = useRef<{ from: number; to: number } | null>(null);
+  const lastEditorSelectionRef = useRef<StoredEditorSelectionRange | null>(null);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
   const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
   const [customTextColor, setCustomTextColor] = useState<string>(editorTextColors[0]);
@@ -5314,21 +5315,6 @@ function clampTableColumnPixelWidth(value: number) {
   }
 
   return Math.min(editorTableColumnPixelWidthBounds.max, Math.max(editorTableColumnPixelWidthBounds.min, Math.round(value)));
-}
-
-function selectionFromStoredRange(editor: TipTapEditor, range: { from: number; to: number } | null) {
-  if (!range) {
-    return null;
-  }
-
-  const maxPosition = editor.state.doc.content.size;
-  const from = Math.min(Math.max(range.from, 0), maxPosition);
-
-  try {
-    return Selection.near(editor.state.doc.resolve(from), 1);
-  } catch {
-    return null;
-  }
 }
 
 function currentBlockLineHeight(editor: TipTapEditor | null) {
