@@ -8,6 +8,7 @@ const vercelWorkflowSource = readFileSync(join(process.cwd(), ".github/workflows
 describe("CI/CD security controls", () => {
   it("keeps CI token permissions read-only", () => {
     expect(ciWorkflowSource).toContain("permissions:\n  contents: read");
+    expect(ciWorkflowSource).toContain("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true");
     expect(ciWorkflowSource).toContain("persist-credentials: false");
   });
 
@@ -19,6 +20,7 @@ describe("CI/CD security controls", () => {
     expect(deployCondition).toContain("github.event.workflow_run.head_repository.full_name == github.repository");
     expect(deployCondition).toContain("github.event.workflow_run.head_branch == 'master'");
     expect(vercelWorkflowSource).toContain("permissions:\n  contents: read");
+    expect(vercelWorkflowSource).toContain("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true");
     expect(vercelWorkflowSource).toContain("persist-credentials: false");
   });
 
