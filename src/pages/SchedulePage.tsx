@@ -205,6 +205,8 @@ interface CreateTaskDraft {
   isUrgent: boolean;
 }
 
+type ScheduleTimeModeDraft = Pick<CreateTaskDraft, "endDate" | "endTime" | "startDate" | "startTime" | "timeMode">;
+
 interface CreateDialogState {
   allowPriority?: boolean;
   defaults: QuickDefaults;
@@ -1308,15 +1310,7 @@ function ScheduleCreateForm({
           <select
             onChange={(event) => {
               const nextMode = event.target.value as CreateTaskDraft["timeMode"];
-              setDraft((current) => ({
-                ...current,
-                timeMode: nextMode,
-                startTime: nextMode === "none" ? "" : current.startTime || "09:00",
-                endTime:
-                  nextMode === "range"
-                    ? current.endTime || addMinutesToTimeInput(current.startTime || "09:00", 60)
-                    : ""
-              }));
+              setDraft((current) => applyScheduleTimeMode(current, nextMode));
             }}
             value={draft.timeMode}
           >
@@ -4193,15 +4187,7 @@ function TaskDetailModal({
               <select
                 onChange={(event) => {
                   const nextMode = event.target.value as TaskDraft["timeMode"];
-                  setDraft((current) => ({
-                    ...current,
-                    timeMode: nextMode,
-                    startTime: nextMode === "none" ? "" : current.startTime || "09:00",
-                    endTime:
-                      nextMode === "range"
-                        ? current.endTime || addMinutesToTimeInput(current.startTime || "09:00", 60)
-                        : ""
-                  }));
+                  setDraft((current) => applyScheduleTimeMode(current, nextMode));
                 }}
                 value={draft.timeMode}
               >
@@ -4402,6 +4388,23 @@ function createDraftFromDefaults(defaults: QuickDefaults): CreateTaskDraft {
     color: normalizeScheduleTaskColor(defaults.color),
     isImportant: defaults.isImportant ?? false,
     isUrgent: defaults.isUrgent ?? false
+  };
+}
+
+function applyScheduleTimeMode<TDraft extends ScheduleTimeModeDraft>(
+  draft: TDraft,
+  nextMode: ScheduleTimeModeDraft["timeMode"]
+): TDraft {
+  const pointDate = draft.startDate || draft.endDate;
+  const startTime = nextMode === "none" ? "" : draft.startTime || "09:00";
+
+  return {
+    ...draft,
+    endDate: nextMode === "point" ? pointDate : draft.endDate,
+    endTime: nextMode === "range" ? draft.endTime || addMinutesToTimeInput(draft.startTime || "09:00", 60) : "",
+    startDate: nextMode === "point" ? pointDate : draft.startDate,
+    startTime,
+    timeMode: nextMode
   };
 }
 
