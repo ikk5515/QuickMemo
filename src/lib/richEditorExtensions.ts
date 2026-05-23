@@ -10,6 +10,8 @@ import TaskItem from "@tiptap/extension-task-item";
 import TaskList from "@tiptap/extension-task-list";
 import TextAlign from "@tiptap/extension-text-align";
 import Underline from "@tiptap/extension-underline";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import StarterKit from "@tiptap/starter-kit";
 
 export const editorCellColors = ["#fff7ed", "#fef3c7", "#dcfce7", "#dbeafe", "#fce7f3", "#f1f5f9"] as const;
@@ -255,6 +257,38 @@ const BlockLineHeight = Extension.create({
   }
 });
 
+const ActiveSelectionHighlight = Extension.create({
+  name: "activeSelectionHighlight",
+
+  addProseMirrorPlugins() {
+    return [
+      new Plugin({
+        key: new PluginKey("quickMemoActiveSelectionHighlight"),
+        props: {
+          decorations(state) {
+            const { empty, from, to } = state.selection;
+
+            if (empty || from === to) {
+              return DecorationSet.empty;
+            }
+
+            try {
+              return DecorationSet.create(state.doc, [
+                Decoration.inline(from, to, {
+                  class: "qm-editor-selection-highlight",
+                  "data-qm-active-selection": "true"
+                })
+              ]);
+            } catch {
+              return DecorationSet.empty;
+            }
+          }
+        }
+      })
+    ];
+  }
+});
+
 const BlockAttribution = Extension.create({
   name: "blockAttribution",
 
@@ -457,6 +491,7 @@ export const richEditorExtensions = [
   TextColor,
   LineHeight,
   BlockLineHeight,
+  ActiveSelectionHighlight,
   BlockAttribution,
   Underline,
   Link.configure({

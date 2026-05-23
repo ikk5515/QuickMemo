@@ -4699,16 +4699,17 @@ function RichMemoEditor({
   }
 
   const currentSelectionFontSize = clampSelectionFontSize(Number(editor?.getAttributes("textSize").size) || fontSize);
-  const currentSelectionLineHeight = clampSelectionLineHeight(currentBlockLineHeight(editor) ?? 1.5);
+  const currentSelectionLineHeight = clampSelectionLineHeight(currentBlockLineHeight(editor) ?? 1);
   const currentSelectionTextColor = String(editor?.getAttributes("textColor").color || customTextColor);
   const currentImageWidthPx = selectedImageWidthPx ?? editorImagePixelWidthBounds.max;
   const currentTableState = editor ? selectedTableControlState(editor) : null;
+  const hasTextSelection = Boolean(editor && !editor.state.selection.empty);
   const quickFontSizeListId = `${controlIdPrefix}-quick-font-sizes`;
   const quickLineHeightListId = `${controlIdPrefix}-quick-line-heights`;
 
   return (
     <>
-      <div className="rich-editor-toolbar" aria-label="편집 도구">
+      <div className="rich-editor-toolbar" aria-label="편집 도구" data-has-selection={hasTextSelection ? "true" : undefined}>
         <div className="rich-toolbar-tabs" role="tablist" aria-label="편집 도구 탭">
           {[
             ["format", "서식"],
@@ -5063,7 +5064,7 @@ function RichMemoEditor({
         <EditorContent editor={editor} style={{ "--editor-font-size": `${fontSize}px` } as CSSProperties} />
         <RemoteCursorLayer cursors={remoteCursors} editorRef={editorRef} />
       </div>
-      <div className="format-quick-dock" aria-label="선택 영역 빠른 서식">
+      <div className="format-quick-dock" aria-label="선택 영역 빠른 서식" data-has-selection={hasTextSelection ? "true" : undefined}>
         <span>빠른 서식</span>
         <label className="selection-font-control compact">
           글자
