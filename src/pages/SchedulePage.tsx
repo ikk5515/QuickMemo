@@ -2923,7 +2923,7 @@ function RecurringView({
               >
                 <span>{day.weekday}</span>
                 <strong>{day.dayNumber}</strong>
-                <RecurringProgressRing percent={progress.percent} />
+                <RecurringProgressRing percent={progress.percent} total={progress.total} />
               </button>
             );
           })}
@@ -2948,11 +2948,13 @@ function RecurringView({
         checkIns={checkIns}
         habit={selectedHabit}
         month={month}
+        selectedDate={selectedDate}
         today={today}
         onClose={onCloseHabit}
         onDelete={onDeleteHabit}
         onEdit={onEditHabit}
         onMonthChange={onMonthChange}
+        onSelectDate={onSelectDate}
         onToggleCheckIn={onToggleCheckIn}
       />
     </div>
@@ -3060,7 +3062,9 @@ function RecurringHabitDetailPanel({
   onDelete,
   onEdit,
   onMonthChange,
+  onSelectDate,
   onToggleCheckIn,
+  selectedDate,
   today
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
@@ -3070,7 +3074,9 @@ function RecurringHabitDetailPanel({
   onDelete: (habit: DecryptedRecurringHabit) => void;
   onEdit: (habit: DecryptedRecurringHabit) => void;
   onMonthChange: (month: string) => void;
+  onSelectDate: (date: string) => void;
   onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
+  selectedDate: string;
   today: string;
 }) {
   if (!habit) {
@@ -3084,7 +3090,7 @@ function RecurringHabitDetailPanel({
   }
 
   const safeMonth = normalizeMonthString(month, today.slice(0, 7));
-  const stats = calculateHabitStats(habit.id, checkIns, today);
+  const stats = calculateHabitStats(habit.id, checkIns, selectedDate);
   const monthStats = calculateHabitMonthStats(habit.id, checkIns, safeMonth, today);
 
   return (
@@ -3112,6 +3118,7 @@ function RecurringHabitDetailPanel({
         month={safeMonth}
         today={today}
         onMonthChange={onMonthChange}
+        onSelectDate={onSelectDate}
         onToggleCheckIn={onToggleCheckIn}
       />
 
@@ -3165,6 +3172,7 @@ function RecurringMonthCalendar({
   habit,
   month,
   onMonthChange,
+  onSelectDate,
   onToggleCheckIn,
   today
 }: {
@@ -3172,6 +3180,7 @@ function RecurringMonthCalendar({
   habit: DecryptedRecurringHabit;
   month: string;
   onMonthChange: (month: string) => void;
+  onSelectDate: (date: string) => void;
   onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
   today: string;
 }) {
@@ -3211,7 +3220,10 @@ function RecurringMonthCalendar({
                   .join(" ")}
                 disabled={disabled}
                 key={day.dateString}
-                onClick={() => onToggleCheckIn(habit, day.dateString)}
+                onClick={() => {
+                  onSelectDate(day.dateString);
+                  onToggleCheckIn(habit, day.dateString);
+                }}
                 type="button"
               >
                 <span>{day.dayNumber}</span>
@@ -3583,14 +3595,41 @@ function MiniRecurringMonth({
   );
 }
 
-function RecurringProgressRing({ percent }: { percent: number }) {
+function RecurringProgressRing({ percent, total }: { percent: number; total: number }) {
+  const normalizedPercent = Math.max(0, Math.min(100, percent));
+
   return (
     <span
       aria-hidden="true"
       className="recurring-progress-ring"
-      style={{ "--recurring-progress": `${Math.max(0, Math.min(100, percent))}%` } as CSSProperties}
+      style={
+        {
+          "--recurring-progress": `${normalizedPercent}%`,
+          "--recurring-progress-color": recurringProgressColor(normalizedPercent, total)
+        } as CSSProperties
+      }
     />
   );
+}
+
+function recurringProgressColor(percent: number, total: number) {
+  if (total <= 0) {
+    return "#d7ded9";
+  }
+
+  if (percent >= 100) {
+    return "#2563eb";
+  }
+
+  if (percent >= 67) {
+    return "#16a34a";
+  }
+
+  if (percent >= 34) {
+    return "#f59e0b";
+  }
+
+  return "#dc2626";
 }
 
 function HabitIconBadge({ color, icon }: { color: string; icon: RecurringHabitIcon }) {
