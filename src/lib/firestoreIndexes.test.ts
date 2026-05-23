@@ -81,5 +81,8 @@ describe("Firestore index retention policies", () => {
     expect(fieldOverride("scheduleTasks", "encryptedTitle")).toMatchObject({ indexes: [] });
     expect(fieldOverride("scheduleTasks", "encryptedDetails")).toMatchObject({ indexes: [] });
     expect(fieldOverride("scheduleTasks", "wrappedKeys")).toMatchObject({ indexes: [] });
+    expect(fieldOverride("recurringHabits", "encryptedTitle")).toMatchObject({ indexes: [] });
+    expect(fieldOverride("recurringHabits", "encryptedDetails")).toMatchObject({ indexes: [] });
+    expect(fieldOverride("recurringHabits", "wrappedKeys")).toMatchObject({ indexes: [] });
   });
 });

@@ -316,7 +316,7 @@ service cloud.firestore {
       return data.keys().hasOnly(["uid", "defaultHome", "scheduleDefaultView", "createdAt", "updatedAt"])
         && data.uid == uid
         && data.defaultHome in ["notes", "schedule"]
-        && data.scheduleDefaultView in ["todo", "calendar", "matrix", "completed"]
+        && data.scheduleDefaultView in ["todo", "calendar", "matrix", "recurring", "completed"]
         && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
         && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
     }
@@ -504,6 +504,90 @@ service cloud.firestore {
       && data.createdAt is timestamp
       && data.updatedAt is timestamp
       && validScheduleCompletion(data);
+    }
+
+    function validRecurringHabitColor(value) {
+      return value is string
+        && value.matches("^#[0-9A-Fa-f]{6}$");
+    }
+
+    function validRecurringHabit(data, uid) {
+      return data.keys().hasAll([
+        "ownerUid",
+        "status",
+        "slot",
+        "icon",
+        "color",
+        "encryptedTitle",
+        "encryptedDetails",
+        "wrappedKeys",
+        "createdBy",
+        "updatedBy",
+        "createdAt",
+        "updatedAt"
+      ])
+      && data.keys().hasOnly([
+        "ownerUid",
+        "status",
+        "slot",
+        "icon",
+        "color",
+        "encryptedTitle",
+        "encryptedDetails",
+        "wrappedKeys",
+        "createdBy",
+        "updatedBy",
+        "createdAt",
+        "updatedAt"
+      ])
+      && data.ownerUid == uid
+      && data.status in ["active", "archived"]
+      && data.slot in ["morning", "afternoon", "other"]
+      && data.icon in ["work", "study", "reading", "exercise", "health", "cleanup", "review", "other"]
+      && validRecurringHabitColor(data.color)
+      && encryptedSchedulePayload(data.encryptedTitle, 4096)
+      && encryptedSchedulePayload(data.encryptedDetails, 12000)
+      && validScheduleWrappedKeys(data, uid)
+      && data.createdBy == uid
+      && data.updatedBy == uid
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function recurringHabitBelongsToOwner(habitId, uid) {
+      return exists(/databases/$(database)/documents/recurringHabits/$(habitId))
+        && get(/databases/$(database)/documents/recurringHabits/$(habitId)).data.ownerUid == uid;
+    }
+
+    function validRecurringHabitCheckIn(data, uid, checkInId) {
+      return data.keys().hasAll([
+        "ownerUid",
+        "habitId",
+        "date",
+        "checkedAt",
+        "createdAt",
+        "updatedAt"
+      ])
+      && data.keys().hasOnly([
+        "ownerUid",
+        "habitId",
+        "date",
+        "checkedAt",
+        "createdAt",
+        "updatedAt"
+      ])
+      && data.ownerUid == uid
+      && data.habitId is string
+      && data.habitId.size() > 0
+      && data.habitId.size() <= 128
+      && validScheduleDate(data.date)
+      && data.date != null
+      && checkInId == data.habitId + "_" + data.date
+      && data.checkedAt is timestamp
+      && data.checkedAt <= request.time
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp
+      && recurringHabitBelongsToOwner(data.habitId, uid);
     }
 
     function validNoteFolder(data) {
@@ -1451,6 +1535,60 @@ service cloud.firestore {
           "updatedBy",
           "updatedAt",
           "completedAt"
+        ]);
+      allow delete: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+    }
+
+    match /recurringHabits/{habitId} {
+      allow read: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+      allow create: if activeSignedInUser()
+        && validRecurringHabit(request.resource.data, request.auth.uid)
+        && request.resource.data.status == "active"
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid
+        && validRecurringHabit(request.resource.data, request.auth.uid)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.wrappedKeys == resource.data.wrappedKeys
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "slot",
+          "icon",
+          "color",
+          "encryptedTitle",
+          "encryptedDetails",
+          "updatedBy",
+          "updatedAt"
+        ]);
+      allow delete: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+    }
+
+    match /recurringHabitCheckIns/{checkInId} {
+      allow read: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+      allow create: if activeSignedInUser()
+        && validRecurringHabitCheckIn(request.resource.data, request.auth.uid, checkInId)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid
+        && validRecurringHabitCheckIn(request.resource.data, request.auth.uid, checkInId)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.habitId == resource.data.habitId
+        && request.resource.data.date == resource.data.date
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "checkedAt",
+          "updatedAt"
         ]);
       allow delete: if activeSignedInUser()
         && resource.data.ownerUid == request.auth.uid;

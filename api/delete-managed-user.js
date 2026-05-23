@@ -433,6 +433,14 @@ async function queryOwnedScheduleTasks(projectId, ownerUid, accessToken) {
   return queryDocumentsByStringField(projectId, "scheduleTasks", "ownerUid", ownerUid, accessToken);
 }
 
+async function queryOwnedRecurringHabits(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(projectId, "recurringHabits", "ownerUid", ownerUid, accessToken);
+}
+
+async function queryOwnedRecurringHabitCheckIns(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(projectId, "recurringHabitCheckIns", "ownerUid", ownerUid, accessToken);
+}
+
 async function queryOwnedNotes(projectId, ownerUid, accessToken) {
   return queryDocumentsByStringField(projectId, "notes", "ownerUid", ownerUid, accessToken);
 }
@@ -651,6 +659,26 @@ async function deleteOwnedScheduleTasks(projectId, ownerUid, accessToken, stats)
     stats,
     "scheduleTasksDeleted",
     "Too many schedule tasks to delete in one request"
+  );
+}
+
+async function deleteOwnedRecurringHabits(projectId, ownerUid, accessToken, stats) {
+  return deleteRepeatedQueryDocuments(
+    () => queryOwnedRecurringHabits(projectId, ownerUid, accessToken),
+    accessToken,
+    stats,
+    "recurringHabitsDeleted",
+    "Too many recurring habits to delete in one request"
+  );
+}
+
+async function deleteOwnedRecurringHabitCheckIns(projectId, ownerUid, accessToken, stats) {
+  return deleteRepeatedQueryDocuments(
+    () => queryOwnedRecurringHabitCheckIns(projectId, ownerUid, accessToken),
+    accessToken,
+    stats,
+    "recurringHabitCheckInsDeleted",
+    "Too many recurring habit check-ins to delete in one request"
   );
 }
 
@@ -1102,6 +1130,8 @@ async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid 
     publicShareAttachmentsDeleted: 0,
     publicShareQueuesDeleted: 0,
     publicSharesDeleted: 0,
+    recurringHabitCheckInsDeleted: 0,
+    recurringHabitsDeleted: 0,
     scheduleTasksDeleted: 0,
     shareTargetReferencesRemoved: 0,
     sharedNoteMembershipsRemoved: 0,
@@ -1125,6 +1155,8 @@ async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid 
   await deleteTargetNoteUserStates(projectId, targetUid, accessToken, stats);
   await deleteOwnedNoteFolders(projectId, targetUid, accessToken, stats);
   await deleteOwnedScheduleTasks(projectId, targetUid, accessToken, stats);
+  await deleteOwnedRecurringHabitCheckIns(projectId, targetUid, accessToken, stats);
+  await deleteOwnedRecurringHabits(projectId, targetUid, accessToken, stats);
 
   for (const path of [
     `system/bootstrapAttempts/attempts/${targetUid}`,

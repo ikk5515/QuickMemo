@@ -24,7 +24,7 @@ export interface UserProfile extends PublicRosterUser {
 }
 
 export type DefaultHomeView = "notes" | "schedule";
-export type ScheduleView = "todo" | "calendar" | "matrix" | "completed";
+export type ScheduleView = "todo" | "calendar" | "matrix" | "recurring" | "completed";
 
 export interface UserPreferencesDocument {
   uid: string;
@@ -231,6 +231,52 @@ export interface DecryptedScheduleTask extends ScheduleTaskDocument {
   id: string;
   title: string;
   details: ScheduleTaskDetails;
+}
+
+export type RecurringHabitSlot = "morning" | "afternoon" | "other";
+export type RecurringHabitIcon =
+  | "work"
+  | "study"
+  | "reading"
+  | "exercise"
+  | "health"
+  | "cleanup"
+  | "review"
+  | "other";
+export type RecurringHabitStatus = "active" | "archived";
+
+export interface RecurringHabitDetails {
+  description: string;
+}
+
+export interface RecurringHabitDocument {
+  ownerUid: string;
+  status: RecurringHabitStatus;
+  slot: RecurringHabitSlot;
+  icon: RecurringHabitIcon;
+  color: string;
+  encryptedTitle: EncryptedPayload;
+  encryptedDetails: EncryptedPayload;
+  wrappedKeys: Record<string, WrappedNoteKey>;
+  createdBy: string;
+  updatedBy: string;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+}
+
+export interface DecryptedRecurringHabit extends RecurringHabitDocument {
+  id: string;
+  title: string;
+  details: RecurringHabitDetails;
+}
+
+export interface RecurringHabitCheckInDocument {
+  ownerUid: string;
+  habitId: string;
+  date: string;
+  checkedAt?: Timestamp;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
 }
 
 export interface UserKeyBundle {

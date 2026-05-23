@@ -201,6 +201,21 @@
       "collectionGroup": "scheduleTasks",
       "fieldPath": "wrappedKeys",
       "indexes": []
+    },
+    {
+      "collectionGroup": "recurringHabits",
+      "fieldPath": "encryptedTitle",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "recurringHabits",
+      "fieldPath": "encryptedDetails",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "recurringHabits",
+      "fieldPath": "wrappedKeys",
+      "indexes": []
     }
   ]
 }

@@ -34,6 +34,8 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("cannot_delete_self");
     expect(deleteManagedUserSource).toContain("last_active_admin");
     expect(deleteManagedUserSource).toContain("scheduleTasks");
+    expect(deleteManagedUserSource).toContain("recurringHabits");
+    expect(deleteManagedUserSource).toContain("recurringHabitCheckIns");
     expect(deleteManagedUserSource).toContain("userPreferences");
     expect(deleteManagedUserSource).not.toMatch(forbiddenBackendPattern);
   });

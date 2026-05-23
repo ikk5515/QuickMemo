@@ -20,22 +20,31 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  BookOpen,
+  BriefcaseBusiness,
   CalendarDays,
+  Check,
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
   Copy,
+  Dumbbell,
   Flag,
   GripVertical,
   Grid2X2,
+  GraduationCap,
+  HeartPulse,
+  LayoutGrid,
   ListTodo,
   Minus,
   Pencil,
   Plus,
+  Repeat2,
   Save,
   Search,
+  Sparkles,
   Trash2,
   X
 } from "lucide-react";
@@ -49,6 +58,22 @@ import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
+import {
+  buildRecurringDateStrip,
+  buildRecurringMonthCalendar,
+  buildRecurringMonthlySummaries,
+  calculateHabitMonthStats,
+  calculateHabitStats,
+  calculateRecurringDateProgress,
+  groupRecurringHabitsBySlot,
+  isHabitCheckedOn,
+  normalizeMonthString,
+  normalizeRecurringHabitDetails,
+  recurringCheckInId,
+  recurringHabitIconLabels,
+  recurringHabitIconValues,
+  recurringHabitSlots
+} from "../lib/recurringHabitHelpers";
 import {
   addDays,
   buildScheduleTaskOrderUpdates,
@@ -88,19 +113,49 @@ import {
   updateScheduleTaskOrderBatch,
   type ScheduleTaskSnapshot
 } from "../services/scheduleTasks";
+import {
+  createRecurringHabit,
+  deleteRecurringHabit,
+  setRecurringHabitCheckIn,
+  subscribeRecurringHabitCheckIns,
+  subscribeRecurringHabits,
+  updateRecurringHabit,
+  type RecurringHabitCheckInSnapshot,
+  type RecurringHabitSnapshot
+} from "../services/recurringHabits";
 import { defaultUserPreferences, getCachedUserPreferences, getUserPreferences } from "../services/userPreferences";
-import type { DecryptedScheduleTask, ScheduleChecklistItem, ScheduleTaskDetails, ScheduleView } from "../types";
+import type {
+  DecryptedRecurringHabit,
+  DecryptedScheduleTask,
+  RecurringHabitDetails,
+  RecurringHabitIcon,
+  RecurringHabitSlot,
+  ScheduleChecklistItem,
+  ScheduleTaskDetails,
+  ScheduleView
+} from "../types";
 
 const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
   { view: "todo", label: "할 일", shortLabel: "할 일", Icon: ListTodo },
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
   { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 },
+  { view: "recurring", label: "반복", shortLabel: "반복", Icon: Repeat2 },
   { view: "completed", label: "완료", shortLabel: "완료", Icon: CheckCircle2 }
 ];
 
 const taskPageSize = 5;
 const completedPageSize = 10;
 const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야 하고 같은 연도 안에서 최대 ${maxScheduleTaskRangeDays}일까지 선택할 수 있습니다.`;
+const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; label: string }> = {
+  work: { Icon: BriefcaseBusiness, label: recurringHabitIconLabels.work },
+  study: { Icon: GraduationCap, label: recurringHabitIconLabels.study },
+  reading: { Icon: BookOpen, label: recurringHabitIconLabels.reading },
+  exercise: { Icon: Dumbbell, label: recurringHabitIconLabels.exercise },
+  health: { Icon: HeartPulse, label: recurringHabitIconLabels.health },
+  cleanup: { Icon: Sparkles, label: recurringHabitIconLabels.cleanup },
+  review: { Icon: CheckCircle2, label: recurringHabitIconLabels.review },
+  other: { Icon: Repeat2, label: recurringHabitIconLabels.other }
+};
 
 type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
 type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
@@ -153,6 +208,19 @@ interface CreateDialogState {
   title: string;
 }
 
+interface RecurringHabitDraft {
+  title: string;
+  description: string;
+  slot: RecurringHabitSlot;
+  icon: RecurringHabitIcon;
+  color: string;
+}
+
+interface RecurringHabitDialogState {
+  habitId?: string;
+  mode: "create" | "edit";
+}
+
 export default function SchedulePage() {
   const { privateKey, profile } = useAuth();
   const [activeView, setActiveView] = useState<ScheduleView | null>(() =>
@@ -160,8 +228,17 @@ export default function SchedulePage() {
   );
   const [tasks, setTasks] = useState<ScheduleTaskSnapshot[]>([]);
   const [decryptedTasks, setDecryptedTasks] = useState<DecryptedScheduleTask[]>([]);
+  const [recurringHabits, setRecurringHabits] = useState<RecurringHabitSnapshot[]>([]);
+  const [decryptedRecurringHabits, setDecryptedRecurringHabits] = useState<DecryptedRecurringHabit[]>([]);
+  const [recurringCheckIns, setRecurringCheckIns] = useState<RecurringHabitCheckInSnapshot[]>([]);
   const [viewTaskId, setViewTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [viewRecurringHabitId, setViewRecurringHabitId] = useState<string | null>(null);
+  const [recurringHabitDialog, setRecurringHabitDialog] = useState<RecurringHabitDialogState | null>(null);
+  const [recurringOverviewOpen, setRecurringOverviewOpen] = useState(false);
+  const [selectedRecurringDate, setSelectedRecurringDate] = useState(() => toLocalDateString(new Date()));
+  const [recurringMonth, setRecurringMonth] = useState(() => toLocalDateString(new Date()).slice(0, 7));
+  const [pendingRecurringCheckIn, setPendingRecurringCheckIn] = useState<Record<string, boolean>>({});
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => toLocalDateString(new Date()));
   const [calendarCursor, setCalendarCursor] = useState(() => new Date());
   const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(null);
@@ -206,11 +283,18 @@ export default function SchedulePage() {
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
-      setToday(toLocalDateString(new Date()));
+      const nextToday = toLocalDateString(new Date());
+
+      setToday(nextToday);
     }, 60 * 1000);
 
     return () => window.clearInterval(intervalId);
   }, []);
+
+  useEffect(() => {
+    setSelectedRecurringDate((current) => (current < today ? today : current));
+    setRecurringMonth((current) => current || today.slice(0, 7));
+  }, [today]);
 
   useEffect(() => {
     if (!profile) {
@@ -225,6 +309,36 @@ export default function SchedulePage() {
       },
       (caught) => setError(scheduleActionError(caught, "일정 목록을 불러오지 못했습니다."))
     );
+  }, [profile]);
+
+  useEffect(() => {
+    if (!profile) {
+      setRecurringHabits([]);
+      setRecurringCheckIns([]);
+      return undefined;
+    }
+
+    const unsubscribeHabits = subscribeRecurringHabits(
+      profile.uid,
+      (nextHabits) => {
+        setRecurringHabits(nextHabits);
+        setError(null);
+      },
+      (caught) => setError(scheduleActionError(caught, "반복 업무를 불러오지 못했습니다."))
+    );
+    const unsubscribeCheckIns = subscribeRecurringHabitCheckIns(
+      profile.uid,
+      (nextCheckIns) => {
+        setRecurringCheckIns(nextCheckIns);
+        setError(null);
+      },
+      (caught) => setError(scheduleActionError(caught, "반복 체크인을 불러오지 못했습니다."))
+    );
+
+    return () => {
+      unsubscribeHabits();
+      unsubscribeCheckIns();
+    };
   }, [profile]);
 
   useEffect(() => {
@@ -278,6 +392,55 @@ export default function SchedulePage() {
   }, [privateKey, profile, tasks]);
 
   useEffect(() => {
+    if (!profile || !privateKey) {
+      setDecryptedRecurringHabits([]);
+      return undefined;
+    }
+
+    const safeProfile = profile;
+    const safePrivateKey = privateKey;
+    let active = true;
+
+    async function decryptHabits() {
+      const nextHabits = await Promise.all(
+        recurringHabits.map(async (habit) => {
+          const wrappedKey = habit.wrappedKeys[safeProfile.uid];
+
+          if (!wrappedKey) {
+            return null;
+          }
+
+          try {
+            const habitKey = await unwrapNoteKey(wrappedKey, safePrivateKey);
+            const [title, detailsJson] = await Promise.all([
+              decryptText(habit.encryptedTitle, habitKey),
+              decryptText(habit.encryptedDetails, habitKey)
+            ]);
+
+            return {
+              ...habit,
+              title,
+              details: normalizeRecurringHabitDetails(JSON.parse(detailsJson) as unknown)
+            };
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      if (active) {
+        setDecryptedRecurringHabits(nextHabits.filter((habit): habit is DecryptedRecurringHabit => Boolean(habit)));
+      }
+    }
+
+    void decryptHabits();
+
+    return () => {
+      active = false;
+    };
+  }, [privateKey, profile, recurringHabits]);
+
+  useEffect(() => {
     decryptedTasksRef.current = decryptedTasks;
   }, [decryptedTasks]);
 
@@ -289,6 +452,14 @@ export default function SchedulePage() {
   const editingTask = useMemo(
     () => sortedTasks.find((task) => task.id === editingTaskId) ?? null,
     [editingTaskId, sortedTasks]
+  );
+  const selectedRecurringHabit = useMemo(
+    () => decryptedRecurringHabits.find((habit) => habit.id === viewRecurringHabitId) ?? null,
+    [decryptedRecurringHabits, viewRecurringHabitId]
+  );
+  const editingRecurringHabit = useMemo(
+    () => decryptedRecurringHabits.find((habit) => habit.id === recurringHabitDialog?.habitId) ?? null,
+    [decryptedRecurringHabits, recurringHabitDialog?.habitId]
   );
   const completedTasks = useMemo(
     () => sortedTasks.filter((task) => task.status === "completed").sort(compareCompletedTasks),
@@ -313,6 +484,12 @@ export default function SchedulePage() {
     () => [...(calendarTaskMap[selectedCalendarDate] ?? [])].sort(compareCalendarAgendaTasks),
     [calendarTaskMap, selectedCalendarDate]
   );
+
+  useEffect(() => {
+    if (viewRecurringHabitId && !selectedRecurringHabit) {
+      setViewRecurringHabitId(null);
+    }
+  }, [selectedRecurringHabit, viewRecurringHabitId]);
 
   if (!profile) {
     return null;
@@ -641,6 +818,146 @@ export default function SchedulePage() {
     }
   }
 
+  async function encryptRecurringHabitFields(title: string, details: RecurringHabitDetails, habitKey: CryptoKey) {
+    return Promise.all([
+      encryptText(title.trim() || "반복 업무", habitKey),
+      encryptText(JSON.stringify({ description: details.description }), habitKey)
+    ]);
+  }
+
+  async function createRecurringHabitFromDraft(draft: RecurringHabitDraft) {
+    const trimmedTitle = draft.title.trim();
+
+    if (!trimmedTitle) {
+      setError("반복 업무 이름을 입력해주세요.");
+      return false;
+    }
+
+    try {
+      const habitKey = await generateNoteKey();
+      const [encryptedTitle, encryptedDetails] = await encryptRecurringHabitFields(
+        trimmedTitle,
+        { description: draft.description },
+        habitKey
+      );
+      const wrappedKey = await wrapNoteKey(habitKey, unlockedProfile.publicKeyJwk);
+      const createdHabit = await createRecurringHabit({
+        ownerUid: unlockedProfile.uid,
+        title: encryptedTitle,
+        details: encryptedDetails,
+        wrappedKey,
+        slot: draft.slot,
+        icon: draft.icon,
+        color: normalizeScheduleTaskColor(draft.color)
+      });
+
+      setViewRecurringHabitId(createdHabit.id);
+      setStatus("반복 업무를 추가했습니다.");
+      setError(null);
+      return true;
+    } catch (caught) {
+      setError(scheduleActionError(caught, "반복 업무를 추가하지 못했습니다."));
+      return false;
+    }
+  }
+
+  async function saveRecurringHabit(habit: DecryptedRecurringHabit, draft: RecurringHabitDraft) {
+    const wrappedKey = habit.wrappedKeys[unlockedProfile.uid];
+
+    if (!wrappedKey) {
+      setError("반복 업무 암호화 키를 찾지 못했습니다.");
+      return false;
+    }
+
+    if (!draft.title.trim()) {
+      setError("반복 업무 이름을 입력해주세요.");
+      return false;
+    }
+
+    try {
+      const habitKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
+      const [encryptedTitle, encryptedDetails] = await encryptRecurringHabitFields(
+        draft.title,
+        { description: draft.description },
+        habitKey
+      );
+
+      await updateRecurringHabit(habit.id, unlockedProfile.uid, {
+        encryptedTitle,
+        encryptedDetails,
+        slot: draft.slot,
+        icon: draft.icon,
+        color: normalizeScheduleTaskColor(draft.color)
+      });
+      setRecurringHabitDialog(null);
+      setStatus("반복 업무를 저장했습니다.");
+      setError(null);
+      return true;
+    } catch (caught) {
+      setError(scheduleActionError(caught, "반복 업무를 저장하지 못했습니다."));
+      return false;
+    }
+  }
+
+  async function removeRecurringHabit(habit: DecryptedRecurringHabit) {
+    try {
+      await deleteRecurringHabit(habit.id, unlockedProfile.uid);
+      setRecurringHabitDialog(null);
+      setViewRecurringHabitId(null);
+      setStatus("반복 업무를 삭제했습니다.");
+      setError(null);
+    } catch (caught) {
+      setError(scheduleActionError(caught, "반복 업무를 삭제하지 못했습니다."));
+    }
+  }
+
+  async function toggleRecurringHabitCheckIn(habit: DecryptedRecurringHabit, date: string) {
+    if (!isValidScheduleDateString(date) || date > today) {
+      setError("오늘 또는 지난 날짜만 체크할 수 있습니다.");
+      return;
+    }
+
+    const checkInId = recurringCheckInId(habit.id, date);
+    const checked = isHabitCheckedOn(recurringCheckIns, habit.id, date);
+    const nextChecked = !checked;
+    const previousCheckIns = recurringCheckIns;
+
+    setPendingRecurringCheckIn((current) => ({ ...current, [checkInId]: true }));
+    setRecurringCheckIns((current) => {
+      if (!nextChecked) {
+        return current.filter((checkIn) => !(checkIn.habitId === habit.id && checkIn.date === date));
+      }
+
+      if (current.some((checkIn) => checkIn.habitId === habit.id && checkIn.date === date)) {
+        return current;
+      }
+
+      return [
+        ...current,
+        {
+          id: checkInId,
+          ownerUid: unlockedProfile.uid,
+          habitId: habit.id,
+          date
+        }
+      ];
+    });
+
+    try {
+      await setRecurringHabitCheckIn(unlockedProfile.uid, habit.id, date, nextChecked);
+      setError(null);
+    } catch (caught) {
+      setRecurringCheckIns(previousCheckIns);
+      setError(scheduleActionError(caught, "반복 체크인을 저장하지 못했습니다."));
+    } finally {
+      setPendingRecurringCheckIn((current) => {
+        const next = { ...current };
+        delete next[checkInId];
+        return next;
+      });
+    }
+  }
+
   function quickDefaultsForActiveView(): QuickDefaults {
     const color = nextScheduleTaskColor(decryptedTasks);
 
@@ -760,6 +1077,30 @@ export default function SchedulePage() {
           />
         )}
 
+        {activeView === "recurring" && (
+          <RecurringView
+            checkIns={recurringCheckIns}
+            habits={decryptedRecurringHabits}
+            month={recurringMonth}
+            pendingCheckIns={pendingRecurringCheckIn}
+            selectedDate={selectedRecurringDate}
+            selectedHabit={selectedRecurringHabit}
+            today={today}
+            onAdd={() => setRecurringHabitDialog({ mode: "create" })}
+            onCloseHabit={() => setViewRecurringHabitId(null)}
+            onDeleteHabit={(habit) => void removeRecurringHabit(habit)}
+            onEditHabit={(habit) => setRecurringHabitDialog({ habitId: habit.id, mode: "edit" })}
+            onMonthChange={setRecurringMonth}
+            onOpenHabit={setViewRecurringHabitId}
+            onOpenOverview={() => setRecurringOverviewOpen(true)}
+            onSelectDate={(date) => {
+              setSelectedRecurringDate(date);
+              setRecurringMonth(date.slice(0, 7));
+            }}
+            onToggleCheckIn={(habit, date) => void toggleRecurringHabitCheckIn(habit, date)}
+          />
+        )}
+
         {activeView === "completed" && (
           <CompletedView
             contentFilter={completedContent}
@@ -813,6 +1154,31 @@ export default function SchedulePage() {
           title={createDialog.title}
           onClose={() => setCreateDialog(null)}
           onCreate={createTask}
+        />
+      )}
+
+      {recurringHabitDialog && (recurringHabitDialog.mode === "create" || editingRecurringHabit) && (
+        <RecurringHabitModal
+          habit={recurringHabitDialog.mode === "edit" ? editingRecurringHabit : null}
+          onClose={() => setRecurringHabitDialog(null)}
+          onCreate={createRecurringHabitFromDraft}
+          onDelete={(habit) => void removeRecurringHabit(habit)}
+          onSave={(habit, draft) => saveRecurringHabit(habit, draft)}
+        />
+      )}
+
+      {recurringOverviewOpen && (
+        <RecurringOverviewModal
+          checkIns={recurringCheckIns}
+          habits={decryptedRecurringHabits}
+          month={recurringMonth}
+          today={today}
+          onClose={() => setRecurringOverviewOpen(false)}
+          onMonthChange={setRecurringMonth}
+          onOpenHabit={(habitId) => {
+            setViewRecurringHabitId(habitId);
+            setRecurringOverviewOpen(false);
+          }}
         />
       )}
     </AppShell>
@@ -2476,6 +2842,688 @@ function TaskProgressControl({
       </label>
     </section>
   );
+}
+
+function RecurringView({
+  checkIns,
+  habits,
+  month,
+  onAdd,
+  onCloseHabit,
+  onDeleteHabit,
+  onEditHabit,
+  onMonthChange,
+  onOpenHabit,
+  onOpenOverview,
+  onSelectDate,
+  onToggleCheckIn,
+  pendingCheckIns,
+  selectedDate,
+  selectedHabit,
+  today
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  habits: DecryptedRecurringHabit[];
+  month: string;
+  onAdd: () => void;
+  onCloseHabit: () => void;
+  onDeleteHabit: (habit: DecryptedRecurringHabit) => void;
+  onEditHabit: (habit: DecryptedRecurringHabit) => void;
+  onMonthChange: (month: string) => void;
+  onOpenHabit: (habitId: string) => void;
+  onOpenOverview: () => void;
+  onSelectDate: (date: string) => void;
+  onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
+  pendingCheckIns: Record<string, boolean>;
+  selectedDate: string;
+  selectedHabit: DecryptedRecurringHabit | null;
+  today: string;
+}) {
+  const dateStrip = useMemo(() => buildRecurringDateStrip(today), [today]);
+  const groups = useMemo(() => groupRecurringHabitsBySlot(habits), [habits]);
+  const activeHabitCount = habits.filter((habit) => habit.status === "active").length;
+
+  return (
+    <div className="recurring-layout">
+      <section className="recurring-main-panel">
+        <header className="recurring-toolbar">
+          <div>
+            <h2>반복 업무</h2>
+            <span>{formatDateLabel(selectedDate)} · {activeHabitCount}</span>
+          </div>
+          <div className="recurring-toolbar-actions">
+            <button className="secondary-button" type="button" onClick={onAdd}>
+              <Plus size={16} />
+              추가
+            </button>
+            <button className="icon-button" type="button" aria-label="월별 반복 조회" title="월별 반복 조회" onClick={onOpenOverview}>
+              <LayoutGrid size={18} />
+            </button>
+          </div>
+        </header>
+
+        <div className="recurring-date-strip" aria-label="반복 업무 날짜 선택">
+          {dateStrip.map((day) => {
+            const progress = calculateRecurringDateProgress(habits, checkIns, day.dateString);
+            const selected = selectedDate === day.dateString;
+
+            return (
+              <button
+                aria-label={`${formatDateLabel(day.dateString)} 반복 업무 ${progress.percent}% 완료`}
+                className={selected ? "selected" : ""}
+                key={day.dateString}
+                onClick={() => onSelectDate(day.dateString)}
+                type="button"
+              >
+                <span>{day.weekday}</span>
+                <strong>{day.dayNumber}</strong>
+                <RecurringProgressRing percent={progress.percent} />
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="recurring-slot-groups">
+          {groups.map((group) => (
+            <RecurringSlotSection
+              checkIns={checkIns}
+              group={group}
+              key={group.key}
+              pendingCheckIns={pendingCheckIns}
+              selectedDate={selectedDate}
+              onOpenHabit={onOpenHabit}
+              onToggleCheckIn={onToggleCheckIn}
+            />
+          ))}
+        </div>
+      </section>
+
+      <RecurringHabitDetailPanel
+        checkIns={checkIns}
+        habit={selectedHabit}
+        month={month}
+        today={today}
+        onClose={onCloseHabit}
+        onDelete={onDeleteHabit}
+        onEdit={onEditHabit}
+        onMonthChange={onMonthChange}
+        onToggleCheckIn={onToggleCheckIn}
+      />
+    </div>
+  );
+}
+
+function RecurringSlotSection({
+  checkIns,
+  group,
+  onOpenHabit,
+  onToggleCheckIn,
+  pendingCheckIns,
+  selectedDate
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  group: ReturnType<typeof groupRecurringHabitsBySlot>[number];
+  onOpenHabit: (habitId: string) => void;
+  onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
+  pendingCheckIns: Record<string, boolean>;
+  selectedDate: string;
+}) {
+  return (
+    <section className="recurring-slot-section">
+      <header>
+        <h3>{group.label}</h3>
+        <span>{group.habits.length}</span>
+      </header>
+      {group.habits.length ? (
+        <div className="recurring-habit-list">
+          {group.habits.map((habit) => (
+            <RecurringHabitRow
+              checkIns={checkIns}
+              habit={habit}
+              key={habit.id}
+              pending={pendingCheckIns[recurringCheckInId(habit.id, selectedDate)] === true}
+              selectedDate={selectedDate}
+              onOpen={() => onOpenHabit(habit.id)}
+              onToggle={() => onToggleCheckIn(habit, selectedDate)}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="schedule-empty">등록된 반복 업무가 없습니다.</p>
+      )}
+    </section>
+  );
+}
+
+function RecurringHabitRow({
+  checkIns,
+  habit,
+  onOpen,
+  onToggle,
+  pending,
+  selectedDate
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  habit: DecryptedRecurringHabit;
+  onOpen: () => void;
+  onToggle: () => void;
+  pending: boolean;
+  selectedDate: string;
+}) {
+  const checked = isHabitCheckedOn(checkIns, habit.id, selectedDate);
+  const stats = calculateHabitStats(habit.id, checkIns, selectedDate);
+
+  return (
+    <div className={`recurring-habit-row ${checked ? "checked" : ""}`}>
+      <button className="recurring-habit-main" type="button" onClick={onOpen}>
+        <HabitIconBadge color={habit.color} icon={habit.icon} />
+        <span>
+          <strong>{habit.title}</strong>
+          <small>
+            ⚡ {stats.totalCheckIns}일 · 🔥 {stats.streakDays}일 (연속)
+          </small>
+        </span>
+      </button>
+      <button
+        aria-checked={checked}
+        aria-label={checked ? `${habit.title} 체크 해제` : `${habit.title} 체크`}
+        className={`recurring-check-button ${checked ? "checked" : ""}`}
+        disabled={pending}
+        onClick={onToggle}
+        role="checkbox"
+        type="button"
+      >
+        {checked ? <Check size={17} /> : null}
+      </button>
+    </div>
+  );
+}
+
+function RecurringHabitDetailPanel({
+  checkIns,
+  habit,
+  month,
+  onClose,
+  onDelete,
+  onEdit,
+  onMonthChange,
+  onToggleCheckIn,
+  today
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  habit: DecryptedRecurringHabit | null;
+  month: string;
+  onClose: () => void;
+  onDelete: (habit: DecryptedRecurringHabit) => void;
+  onEdit: (habit: DecryptedRecurringHabit) => void;
+  onMonthChange: (month: string) => void;
+  onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
+  today: string;
+}) {
+  if (!habit) {
+    return (
+      <aside className="recurring-detail-panel empty">
+        <Repeat2 size={22} />
+        <strong>반복 업무를 선택하세요.</strong>
+        <span>월간 출석체크와 연속 기록이 여기에 표시됩니다.</span>
+      </aside>
+    );
+  }
+
+  const safeMonth = normalizeMonthString(month, today.slice(0, 7));
+  const stats = calculateHabitStats(habit.id, checkIns, today);
+  const monthStats = calculateHabitMonthStats(habit.id, checkIns, safeMonth, today);
+
+  return (
+    <aside className="recurring-detail-panel">
+      <header>
+        <div className="recurring-detail-title">
+          <HabitIconBadge color={habit.color} icon={habit.icon} />
+          <div>
+            <h2>{habit.title}</h2>
+            <span>{slotLabel(habit.slot)} · {recurringHabitIconLabels[habit.icon]}</span>
+          </div>
+        </div>
+        <button className="icon-button" type="button" onClick={onClose} aria-label="상세 닫기">
+          <X size={17} />
+        </button>
+      </header>
+
+      {habit.details.description.trim() && <p className="recurring-detail-description">{habit.details.description}</p>}
+
+      <RecurringStatsGrid stats={stats} monthStats={monthStats} />
+
+      <RecurringMonthCalendar
+        checkIns={checkIns}
+        habit={habit}
+        month={safeMonth}
+        today={today}
+        onMonthChange={onMonthChange}
+        onToggleCheckIn={onToggleCheckIn}
+      />
+
+      <footer className="recurring-detail-actions">
+        <button className="danger-button" type="button" onClick={() => onDelete(habit)}>
+          <Trash2 size={16} />
+          삭제
+        </button>
+        <button type="button" onClick={() => onEdit(habit)}>
+          <Pencil size={16} />
+          수정
+        </button>
+      </footer>
+    </aside>
+  );
+}
+
+function RecurringStatsGrid({
+  monthStats,
+  stats
+}: {
+  monthStats: ReturnType<typeof calculateHabitMonthStats>;
+  stats: ReturnType<typeof calculateHabitStats>;
+}) {
+  return (
+    <div className="recurring-stats-grid">
+      <div>
+        <span>월간 출석체크</span>
+        <strong>{monthStats.checkedDays}일</strong>
+      </div>
+      <div>
+        <span>총 체크인 수</span>
+        <strong>{stats.totalCheckIns}일</strong>
+      </div>
+      <div>
+        <span>월별 체크인 비율</span>
+        <strong>{monthStats.percent}%</strong>
+      </div>
+      <div>
+        <span>연속</span>
+        <strong>{stats.streakDays}일</strong>
+      </div>
+    </div>
+  );
+}
+
+function RecurringMonthCalendar({
+  checkIns,
+  habit,
+  month,
+  onMonthChange,
+  onToggleCheckIn,
+  today
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  habit: DecryptedRecurringHabit;
+  month: string;
+  onMonthChange: (month: string) => void;
+  onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
+  today: string;
+}) {
+  const weeks = buildRecurringMonthCalendar(month, today);
+
+  return (
+    <section className="recurring-month-card">
+      <header>
+        <button className="icon-button" type="button" aria-label="이전 달" onClick={() => onMonthChange(recurringMonthOffset(month, -1))}>
+          <ChevronLeft size={16} />
+        </button>
+        <strong>{recurringMonthLabel(month)}</strong>
+        <button className="icon-button" type="button" aria-label="다음 달" onClick={() => onMonthChange(recurringMonthOffset(month, 1))}>
+          <ChevronRight size={16} />
+        </button>
+      </header>
+      <div className="recurring-month-weekdays" aria-hidden="true">
+        {["일", "월", "화", "수", "목", "금", "토"].map((weekday) => (
+          <span key={weekday}>{weekday}</span>
+        ))}
+      </div>
+      <div className="recurring-month-grid">
+        {weeks.flatMap((week) =>
+          week.days.map((day) => {
+            const checked = isHabitCheckedOn(checkIns, habit.id, day.dateString);
+            const disabled = !day.inCurrentMonth || day.dateString > today;
+
+            return (
+              <button
+                aria-label={`${formatDateLabel(day.dateString)} ${checked ? "체크됨" : "체크 안 됨"}`}
+                className={[
+                  day.inCurrentMonth ? "" : "muted",
+                  checked ? "checked" : "",
+                  day.isToday ? "today" : ""
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                disabled={disabled}
+                key={day.dateString}
+                onClick={() => onToggleCheckIn(habit, day.dateString)}
+                type="button"
+              >
+                <span>{day.dayNumber}</span>
+                {checked && <Check size={15} />}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </section>
+  );
+}
+
+function RecurringHabitModal({
+  habit,
+  onClose,
+  onCreate,
+  onDelete,
+  onSave
+}: {
+  habit: DecryptedRecurringHabit | null;
+  onClose: () => void;
+  onCreate: (draft: RecurringHabitDraft) => Promise<boolean>;
+  onDelete: (habit: DecryptedRecurringHabit) => void;
+  onSave: (habit: DecryptedRecurringHabit, draft: RecurringHabitDraft) => Promise<boolean>;
+}) {
+  const [draft, setDraft] = useState<RecurringHabitDraft>(() => recurringDraftFromHabit(habit));
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(recurringDraftFromHabit(habit));
+  }, [habit]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!draft.title.trim()) {
+      setLocalError("반복 업무 이름을 입력해주세요.");
+      return;
+    }
+
+    setBusy(true);
+    setLocalError(null);
+
+    const saved = habit ? await onSave(habit, draft) : await onCreate(draft);
+    setBusy(false);
+
+    if (saved) {
+      onClose();
+    }
+  }
+
+  return (
+    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="recurring-edit-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <p className="section-kicker">
+              <Repeat2 size={15} />
+              반복 업무
+            </p>
+            <h2>{habit ? "반복 업무 수정" : "반복 업무 추가"}</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
+            <X size={18} />
+          </button>
+        </header>
+        <form onSubmit={(event) => void submit(event)}>
+          <label>
+            이름
+            <input
+              autoFocus
+              onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
+              placeholder="반복 업무 이름"
+              value={draft.title}
+            />
+          </label>
+          <label>
+            설명
+            <textarea
+              onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
+              placeholder="간단한 설명"
+              rows={4}
+              value={draft.description}
+            />
+          </label>
+          <div className="recurring-edit-grid">
+            <label>
+              구분
+              <select
+                onChange={(event) => setDraft((current) => ({ ...current, slot: event.target.value as RecurringHabitSlot }))}
+                value={draft.slot}
+              >
+                {recurringHabitSlots.map((slot) => (
+                  <option key={slot.key} value={slot.key}>
+                    {slot.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <ScheduleColorPicker
+              value={draft.color}
+              onChange={(color) => setDraft((current) => ({ ...current, color }))}
+            />
+          </div>
+          <fieldset className="recurring-icon-picker">
+            <legend>이미지</legend>
+            <div>
+              {recurringHabitIconValues.map((icon) => (
+                <button
+                  className={draft.icon === icon ? "selected" : ""}
+                  key={icon}
+                  onClick={() => setDraft((current) => ({ ...current, icon }))}
+                  type="button"
+                >
+                  <HabitIconBadge color={draft.color} icon={icon} />
+                  <span>{recurringHabitIconLabels[icon]}</span>
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          {localError && <p className="form-error">{localError}</p>}
+          <footer>
+            {habit ? (
+              <button className="danger-button" type="button" onClick={() => onDelete(habit)}>
+                <Trash2 size={16} />
+                삭제
+              </button>
+            ) : (
+              <span />
+            )}
+            <button disabled={busy} type="submit">
+              <Save size={16} />
+              {busy ? "저장 중" : "저장"}
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function RecurringOverviewModal({
+  checkIns,
+  habits,
+  month,
+  onClose,
+  onMonthChange,
+  onOpenHabit,
+  today
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  habits: DecryptedRecurringHabit[];
+  month: string;
+  onClose: () => void;
+  onMonthChange: (month: string) => void;
+  onOpenHabit: (habitId: string) => void;
+  today: string;
+}) {
+  const safeMonth = normalizeMonthString(month, today.slice(0, 7));
+  const summaries = buildRecurringMonthlySummaries(habits, checkIns, safeMonth, today, today);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="recurring-overview-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <p className="section-kicker">
+              <LayoutGrid size={15} />
+              월별 반복 조회
+            </p>
+            <h2>{recurringMonthLabel(safeMonth)}</h2>
+          </div>
+          <div>
+            <button className="icon-button" type="button" aria-label="이전 달" onClick={() => onMonthChange(recurringMonthOffset(safeMonth, -1))}>
+              <ChevronLeft size={17} />
+            </button>
+            <input aria-label="조회 월" onChange={(event) => onMonthChange(event.target.value)} type="month" value={safeMonth} />
+            <button className="icon-button" type="button" aria-label="다음 달" onClick={() => onMonthChange(recurringMonthOffset(safeMonth, 1))}>
+              <ChevronRight size={17} />
+            </button>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
+              <X size={18} />
+            </button>
+          </div>
+        </header>
+        {summaries.length ? (
+          <div className="recurring-overview-list">
+            {summaries.map((summary) => (
+              <button
+                className="recurring-overview-item"
+                key={summary.habit.id}
+                onClick={() => onOpenHabit(summary.habit.id)}
+                type="button"
+              >
+                <span className="recurring-overview-title">
+                  <HabitIconBadge color={summary.habit.color} icon={summary.habit.icon} />
+                  <span>
+                    <strong>{summary.habit.title}</strong>
+                    <small>{slotLabel(summary.habit.slot)}</small>
+                  </span>
+                </span>
+                <span className="recurring-overview-stats">
+                  <span>{summary.checkedDays}일</span>
+                  <span>{summary.percent}%</span>
+                  <span>🔥 {summary.streakDays}일</span>
+                </span>
+                <MiniRecurringMonth checkIns={checkIns} habit={summary.habit} month={safeMonth} today={today} />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="schedule-empty">조회할 반복 업무가 없습니다.</p>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function MiniRecurringMonth({
+  checkIns,
+  habit,
+  month,
+  today
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  habit: DecryptedRecurringHabit;
+  month: string;
+  today: string;
+}) {
+  const weeks = buildRecurringMonthCalendar(month, today);
+
+  return (
+    <span className="recurring-mini-month" aria-hidden="true">
+      {weeks.flatMap((week) =>
+        week.days.map((day) => (
+          <span
+            className={[
+              day.inCurrentMonth ? "" : "muted",
+              isHabitCheckedOn(checkIns, habit.id, day.dateString) ? "checked" : ""
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            key={day.dateString}
+          />
+        ))
+      )}
+    </span>
+  );
+}
+
+function RecurringProgressRing({ percent }: { percent: number }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="recurring-progress-ring"
+      style={{ "--recurring-progress": `${Math.max(0, Math.min(100, percent))}%` } as CSSProperties}
+    />
+  );
+}
+
+function HabitIconBadge({ color, icon }: { color: string; icon: RecurringHabitIcon }) {
+  const meta = recurringHabitIconMeta[icon] ?? recurringHabitIconMeta.other;
+  const Icon = meta.Icon;
+
+  return (
+    <span
+      aria-label={meta.label}
+      className="habit-icon-badge"
+      style={{ "--habit-icon-color": normalizeScheduleTaskColor(color) } as CSSProperties}
+      title={meta.label}
+    >
+      <Icon size={18} />
+    </span>
+  );
+}
+
+function recurringDraftFromHabit(habit: DecryptedRecurringHabit | null): RecurringHabitDraft {
+  return {
+    title: habit?.title ?? "",
+    description: habit?.details.description ?? "",
+    slot: habit?.slot ?? "morning",
+    icon: habit?.icon ?? "work",
+    color: normalizeScheduleTaskColor(habit?.color ?? "#6fa99f")
+  };
+}
+
+function slotLabel(slot: RecurringHabitSlot) {
+  return recurringHabitSlots.find((item) => item.key === slot)?.label ?? "기타";
+}
+
+function recurringMonthOffset(month: string, offset: number) {
+  const safeMonth = normalizeMonthString(month);
+  const [year, monthNumber] = safeMonth.split("-").map(Number);
+  const nextDate = new Date(year, monthNumber - 1 + offset, 1);
+
+  return `${nextDate.getFullYear()}-${`${nextDate.getMonth() + 1}`.padStart(2, "0")}`;
+}
+
+function recurringMonthLabel(month: string) {
+  const safeMonth = normalizeMonthString(month);
+  const [year, monthNumber] = safeMonth.split("-").map(Number);
+
+  return new Intl.DateTimeFormat("ko-KR", { month: "long", year: "numeric" }).format(new Date(year, monthNumber - 1, 1));
 }
 
 function TaskReadModal({

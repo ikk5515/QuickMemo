@@ -8,7 +8,7 @@ export const defaultUserPreferences: Pick<UserPreferencesDocument, "defaultHome"
 };
 
 const validDefaultHomeViews = new Set<DefaultHomeView>(["notes", "schedule"]);
-const validScheduleViews = new Set<ScheduleView>(["todo", "calendar", "matrix", "completed"]);
+const validScheduleViews = new Set<ScheduleView>(["todo", "calendar", "matrix", "recurring", "completed"]);
 
 export interface SaveUserPreferencesInput {
   defaultHome?: UserPreferencesDocument["defaultHome"];
