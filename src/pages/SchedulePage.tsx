@@ -32,6 +32,7 @@ import {
   Copy,
   Dumbbell,
   Flag,
+  Flame,
   GripVertical,
   Grid2X2,
   GraduationCap,
@@ -40,12 +41,14 @@ import {
   ListTodo,
   Minus,
   Pencil,
+  Percent,
   Plus,
   Repeat2,
   Save,
   Search,
   Sparkles,
   Trash2,
+  Zap,
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -1044,7 +1047,7 @@ export default function SchedulePage() {
         )}
 
         {activeView === "todo" && (
-          <TodoView groups={todoGroups} onOpen={setViewTaskId} onToggle={(task) => void toggleTask(task)} />
+          <TodoView groups={todoGroups} today={today} onOpen={setViewTaskId} onToggle={(task) => void toggleTask(task)} />
         )}
 
         {activeView === "calendar" && (
@@ -1872,11 +1875,13 @@ function ScheduleColorPicker({ onChange, value }: { onChange: (color: string) =>
 function TodoView({
   groups,
   onOpen,
-  onToggle
+  onToggle,
+  today
 }: {
   groups: ReturnType<typeof groupTasksByTodoDate>;
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
+  today: string;
 }) {
   return (
     <div className="todo-groups">
@@ -1886,7 +1891,7 @@ function TodoView({
             <h2>{group.label}</h2>
             <span>{group.tasks.length}</span>
           </header>
-          <PagedTaskList tasks={group.tasks} onOpen={onOpen} onToggle={onToggle} />
+          <PagedTaskList tasks={group.tasks} today={today} onOpen={onOpen} onToggle={onToggle} />
         </section>
       ))}
     </div>
@@ -2519,6 +2524,7 @@ function PagedTaskList({
   onToggle,
   pageSize = taskPageSize,
   strikeCompleted = true,
+  today = toLocalDateString(new Date()),
   tasks
 }: {
   emptyMessage?: string;
@@ -2527,6 +2533,7 @@ function PagedTaskList({
   onToggle: (task: DecryptedScheduleTask) => void;
   pageSize?: number;
   strikeCompleted?: boolean;
+  today?: string;
   tasks: DecryptedScheduleTask[];
 }) {
   const [page, setPage] = useState(0);
@@ -2552,6 +2559,7 @@ function PagedTaskList({
         onOpen={onOpen}
         onToggle={onToggle}
         strikeCompleted={strikeCompleted}
+        today={today}
       />
       {tasks.length > pageSize && (
         <div className="task-pager" aria-label="일정 페이지 이동">
@@ -2748,7 +2756,8 @@ function TaskList({
   tasks,
   onOpen,
   onToggle,
-  strikeCompleted = true
+  strikeCompleted = true,
+  today = toLocalDateString(new Date())
 }: {
   emptyMessage?: string;
   getMeta?: (task: DecryptedScheduleTask) => string;
@@ -2756,6 +2765,7 @@ function TaskList({
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   strikeCompleted?: boolean;
+  today?: string;
 }) {
   if (!tasks.length) {
     return <p className="schedule-empty">{emptyMessage}</p>;
@@ -2777,7 +2787,9 @@ function TaskList({
           </button>
           <button className="task-main task-open-button" type="button" onClick={() => onOpen(task.id)}>
             <strong>{task.title}</strong>
-            <span>{getMeta ? getMeta(task) : formatTaskMeta(task)}</span>
+            <span className={isTaskScheduleOverdue(task, today) ? "task-meta overdue" : "task-meta"}>
+              {getMeta ? getMeta(task) : formatTaskMeta(task)}
+            </span>
           </button>
           <span className="task-flags">
             {task.isImportant && <Flag size={15} aria-label="중요" />}
@@ -3019,8 +3031,15 @@ function RecurringHabitRow({
         <HabitIconBadge color={habit.color} icon={habit.icon} />
         <span>
           <strong>{habit.title}</strong>
-          <small>
-            ⚡ {stats.totalCheckIns}일 · 🔥 {stats.streakDays}일 (연속)
+          <small className="recurring-habit-metrics">
+            <span>
+              <Zap size={12} />
+              {stats.totalCheckIns}일
+            </span>
+            <span>
+              <Flame size={12} />
+              {stats.streakDays}일 (연속)
+            </span>
           </small>
         </span>
       </button>
@@ -3065,7 +3084,7 @@ function RecurringHabitDetailPanel({
       <aside className="recurring-detail-panel empty">
         <Repeat2 size={22} />
         <strong>반복 업무를 선택하세요.</strong>
-        <span>월간 출석체크와 연속 기록이 여기에 표시됩니다.</span>
+        <span>월간 출석체크, 총 체크인 수, 월별 비율과 연속 기록이 여기에 표시됩니다.</span>
       </aside>
     );
   }
@@ -3123,24 +3142,26 @@ function RecurringStatsGrid({
   monthStats: ReturnType<typeof calculateHabitMonthStats>;
   stats: ReturnType<typeof calculateHabitStats>;
 }) {
+  const cards: Array<{ Icon: LucideIcon; label: string; value: string }> = [
+    { Icon: CheckCircle2, label: "월간 출석체크", value: `${monthStats.checkedDays}일` },
+    { Icon: Zap, label: "총 체크인 수", value: `${stats.totalCheckIns}일` },
+    { Icon: Percent, label: "월별 체크인 비율", value: `${monthStats.percent}%` },
+    { Icon: Flame, label: "연속", value: `${stats.streakDays}일` }
+  ];
+
   return (
     <div className="recurring-stats-grid">
-      <div>
-        <span>월간 출석체크</span>
-        <strong>{monthStats.checkedDays}일</strong>
-      </div>
-      <div>
-        <span>총 체크인 수</span>
-        <strong>{stats.totalCheckIns}일</strong>
-      </div>
-      <div>
-        <span>월별 체크인 비율</span>
-        <strong>{monthStats.percent}%</strong>
-      </div>
-      <div>
-        <span>연속</span>
-        <strong>{stats.streakDays}일</strong>
-      </div>
+      {cards.map(({ Icon, label, value }) => (
+        <div key={label}>
+          <span className="recurring-stat-icon">
+            <Icon size={16} />
+          </span>
+          <span className="recurring-stat-copy">
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -3168,7 +3189,7 @@ function RecurringMonthCalendar({
         <button className="icon-button" type="button" aria-label="이전 달" onClick={() => onMonthChange(recurringMonthOffset(month, -1))}>
           <ChevronLeft size={16} />
         </button>
-        <strong>{recurringMonthLabel(month)}</strong>
+        <MonthPicker value={month} today={today} onChange={onMonthChange} />
         <button className="icon-button" type="button" aria-label="다음 달" onClick={() => onMonthChange(recurringMonthOffset(month, 1))}>
           <ChevronRight size={16} />
         </button>
@@ -3207,6 +3228,90 @@ function RecurringMonthCalendar({
         )}
       </div>
     </section>
+  );
+}
+
+function MonthPicker({
+  onChange,
+  today,
+  value
+}: {
+  onChange: (month: string) => void;
+  today: string;
+  value: string;
+}) {
+  const safeMonth = normalizeMonthString(value, today.slice(0, 7));
+  const safeYear = Number(safeMonth.slice(0, 4)) || new Date().getFullYear();
+  const currentMonth = today.slice(0, 7);
+  const [open, setOpen] = useState(false);
+  const [cursorYear, setCursorYear] = useState(safeYear);
+
+  useEffect(() => {
+    setCursorYear(safeYear);
+  }, [safeYear]);
+
+  function choose(month: string) {
+    onChange(month);
+    setOpen(false);
+  }
+
+  return (
+    <div
+      className="month-picker"
+      onBlur={(event) => {
+        const nextTarget = event.relatedTarget;
+
+        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+          setOpen(false);
+        }
+      }}
+    >
+      <button
+        aria-expanded={open}
+        aria-label={`${recurringMonthLabel(safeMonth)} 선택`}
+        className="month-picker-trigger"
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        <CalendarDays size={15} />
+        <span>{recurringMonthLabel(safeMonth)}</span>
+        <ChevronDown size={14} />
+      </button>
+      {open && (
+        <div className="month-picker-popover">
+          <header>
+            <button className="icon-button" type="button" aria-label="이전 연도" onClick={() => setCursorYear((year) => year - 1)}>
+              <ChevronLeft size={15} />
+            </button>
+            <strong>{cursorYear}</strong>
+            <button className="icon-button" type="button" aria-label="다음 연도" onClick={() => setCursorYear((year) => year + 1)}>
+              <ChevronRight size={15} />
+            </button>
+          </header>
+          <div className="month-picker-grid">
+            {Array.from({ length: 12 }, (_, index) => {
+              const month = `${cursorYear}-${`${index + 1}`.padStart(2, "0")}`;
+
+              return (
+                <button
+                  className={[month === safeMonth ? "selected" : "", month === currentMonth ? "current" : ""].filter(Boolean).join(" ")}
+                  key={month}
+                  onClick={() => choose(month)}
+                  type="button"
+                >
+                  {index + 1}월
+                </button>
+              );
+            })}
+          </div>
+          <footer>
+            <button className="secondary-button" type="button" onClick={() => choose(currentMonth)}>
+              이번 달
+            </button>
+          </footer>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -3397,7 +3502,7 @@ function RecurringOverviewModal({
             <button className="icon-button" type="button" aria-label="이전 달" onClick={() => onMonthChange(recurringMonthOffset(safeMonth, -1))}>
               <ChevronLeft size={17} />
             </button>
-            <input aria-label="조회 월" onChange={(event) => onMonthChange(event.target.value)} type="month" value={safeMonth} />
+            <MonthPicker value={safeMonth} today={today} onChange={onMonthChange} />
             <button className="icon-button" type="button" aria-label="다음 달" onClick={() => onMonthChange(recurringMonthOffset(safeMonth, 1))}>
               <ChevronRight size={17} />
             </button>
@@ -3423,9 +3528,22 @@ function RecurringOverviewModal({
                   </span>
                 </span>
                 <span className="recurring-overview-stats">
-                  <span>{summary.checkedDays}일</span>
-                  <span>{summary.percent}%</span>
-                  <span>🔥 {summary.streakDays}일</span>
+                  <span>
+                    <CheckCircle2 size={13} />
+                    {summary.checkedDays}일
+                  </span>
+                  <span>
+                    <Zap size={13} />
+                    {summary.totalCheckIns}일
+                  </span>
+                  <span>
+                    <Percent size={13} />
+                    {summary.percent}%
+                  </span>
+                  <span>
+                    <Flame size={13} />
+                    {summary.streakDays}일
+                  </span>
                 </span>
                 <MiniRecurringMonth checkIns={checkIns} habit={summary.habit} month={safeMonth} today={today} />
               </button>

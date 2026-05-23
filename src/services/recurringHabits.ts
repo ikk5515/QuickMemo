@@ -2,7 +2,6 @@ import {
   collection,
   deleteDoc,
   doc,
-  getDoc,
   getDocs,
   onSnapshot,
   query,
@@ -65,6 +64,21 @@ function checkInSnapshotList(snapshot: { docs: Array<{ id: string; data: () => u
   return snapshot.docs
     .map((document) => ({ id: document.id, ...(document.data() as RecurringHabitCheckInDocument) }))
     .sort((left, right) => right.date.localeCompare(left.date));
+}
+
+function firestoreErrorCode(error: unknown) {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" ? code : "";
+  }
+
+  return "";
+}
+
+function missingCheckInWriteError(error: unknown) {
+  const code = firestoreErrorCode(error);
+
+  return code === "not-found" || code === "permission-denied";
 }
 
 export function subscribeRecurringHabits(
@@ -148,18 +162,27 @@ export async function setRecurringHabitCheckIn(uid: string, habitId: string, dat
   const checkInRef = doc(db, "recurringHabitCheckIns", recurringCheckInId(habitId, date));
 
   if (!checked) {
-    await deleteDoc(checkInRef);
+    try {
+      await deleteDoc(checkInRef);
+    } catch (caught) {
+      if (!missingCheckInWriteError(caught)) {
+        throw caught;
+      }
+    }
+
     return;
   }
 
-  const snapshot = await getDoc(checkInRef);
-
-  if (snapshot.exists()) {
+  try {
     await updateDoc(checkInRef, {
       checkedAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
     return;
+  } catch (caught) {
+    if (!missingCheckInWriteError(caught)) {
+      throw caught;
+    }
   }
 
   await setDoc(checkInRef, {

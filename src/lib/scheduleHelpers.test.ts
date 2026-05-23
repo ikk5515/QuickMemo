@@ -75,7 +75,7 @@ describe("schedule helpers", () => {
     ]);
   });
 
-  it("sorts todo groups by priority, time, then newest creation", () => {
+  it("sorts todo groups by nearest date before priority, time, and newest creation", () => {
     const groups = groupTasksByTodoDate(
       [
         task("normal-old", {
@@ -121,6 +121,33 @@ describe("schedule helpers", () => {
       "urgent",
       "normal-new",
       "normal-old"
+    ]);
+  });
+
+  it("sorts upcoming todo groups by the closest date instead of newest creation", () => {
+    const groups = groupTasksByTodoDate(
+      [
+        task("later-created-new", {
+          dueDate: "2026-05-23",
+          createdAt: timestamp("2026-05-19T12:00:00Z")
+        }),
+        task("soon-created-old", {
+          dueDate: "2026-05-21",
+          createdAt: timestamp("2026-05-19T07:00:00Z")
+        }),
+        task("middle-important", {
+          dueDate: "2026-05-22",
+          isImportant: true,
+          createdAt: timestamp("2026-05-19T08:00:00Z")
+        })
+      ],
+      "2026-05-19"
+    );
+
+    expect(groups.find((group) => group.key === "next7")?.tasks.map((item) => item.id)).toEqual([
+      "soon-created-old",
+      "middle-important",
+      "later-created-new"
     ]);
   });
 

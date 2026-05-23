@@ -1,16 +1,32 @@
 # QuickMemo
 
-Firebase 기반의 실시간 암호화 메모 웹앱입니다.
+Firebase 기반의 실시간 암호화 메모·일정관리 웹앱입니다. 개인/공유 노트, 일정 매트릭스, 반복 업무, 관리자 사용자 관리를 한 화면 흐름 안에서 다룹니다.
 
 ## 주요 기능
 
-- 첫 관리자 생성 화면(`/setup`)
-- 원형 사용자 버튼 + 숫자 키 빠른 로그인(`/login`)
-- 관리자 전용 사용자 생성, 권한, 색상, 원 안 글자, 순서 관리(`/admin`)
+- 첫 관리자 생성 화면(`/setup`)과 원형 사용자 버튼 기반 빠른 로그인(`/login`)
+- 관리자 전용 사용자 생성, 권한, 색상, 원 안 글자, 순서 관리, 안전한 사용자 삭제(`/admin`)
 - 개인 노트와 선택 사용자 공유 노트(`/app`)
+- TipTap 기반 노트 편집, 표/체크리스트/이미지/문서 미리보기, 커서 안정화, 글자 크기·색상 서식
 - Firestore 실시간 구독 기반 동기화
-- Web Crypto API 기반 클라이언트 노트 암호화
-- Firebase Auth와 Firestore Rules 기반 권한 제어
+- Web Crypto API 기반 클라이언트 암호화
+- Firebase Auth와 Firestore Rules 기반 owner-only 권한 제어
+
+### 일정관리
+
+- `할 일`: 오늘, 내일, 다음 7일, 이후, 날짜 없음, 최근 완료 그룹으로 업무를 관리합니다. 각 그룹 안에서는 가장 임박한 일정이 먼저 보이고, 기간이 지난 활성 일정은 날짜가 빨간색으로 표시됩니다.
+- `달력`: 월간 달력에서 일정 범위와 한국 공휴일/대체공휴일을 함께 확인합니다.
+- `매트릭스`: Eisenhower 매트릭스 기준으로 오늘까지 해야 할 일, 2순위 업무, 업무 목록, 대기 업무를 관리합니다. Drag & Drop 이동 시 도착 섹터에 맞게 중요/긴급 값이 자동 조정되고, 동일 날짜 안에서만 수동 순서를 저장합니다.
+- `반복`: 매일 반복되는 업무·습관을 오전, 오후, 기타로 나누어 관리합니다. 프리셋 아이콘, 날짜별 원형 완료율, 체크인 버튼, 총 체크인 수, 월별 체크인 비율, 연속 기록, 월간 출석 달력을 제공합니다.
+- `완료`: 완료된 일정을 기간, 날짜, 우선순위, 내용 기준으로 조회합니다.
+
+### 보안 설계
+
+- 노트 본문, 일정 제목/상세, 반복 업무 제목/상세는 클라이언트에서 암호화된 뒤 Firestore에 저장됩니다.
+- 반복 체크인은 통계에 필요한 최소 메타데이터(`ownerUid`, `habitId`, `date`, `checkedAt`)만 저장합니다.
+- 반복 업무 아이콘은 앱 내부 enum 프리셋만 사용하며 외부 이미지 URL이나 업로드 권한을 만들지 않습니다.
+- 관리자 사용자 삭제 API는 대상 사용자를 먼저 비활성화한 뒤 노트, 공유, 첨부, 일정, 반복 업무와 체크인을 정리합니다.
+- GitHub Actions 운영 배포는 trusted `push` 기반 CI 완료만 Vercel production 배포로 이어지도록 보호합니다.
 
 ## 로컬 실행
 
@@ -57,7 +73,7 @@ npx firebase-tools deploy --only firestore:rules,firestore:indexes
 
 이 앱은 `src/lib/firebase.ts`에서 `.env.local` 값을 읽어 Firebase 앱, Auth, Firestore를 초기화합니다. Firestore 컬렉션은 앱 사용 중 클라이언트와 Firestore Rules 검증으로 생성됩니다.
 
-Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 요금제가 없어도 Firestore Rules/Indexes 배포와 Vercel 프론트엔드 배포로 사용할 수 있습니다. 단, Firebase Auth 제한 때문에 관리자가 다른 사용자의 비밀번호를 강제로 변경하려면 Admin SDK가 실행되는 신뢰할 수 있는 서버가 필요합니다.
+Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 요금제가 없어도 Firestore Rules 배포와 Vercel 프론트엔드 배포로 사용할 수 있습니다. 단, Firestore TTL field override나 일부 관리형 인덱스 설정은 Firebase billing이 필요할 수 있고, 관리자가 다른 사용자의 비밀번호를 강제로 변경하려면 Admin SDK가 실행되는 신뢰할 수 있는 서버가 필요합니다.
 
 ### 임시 공유 만료 cleanup
 
@@ -81,9 +97,9 @@ Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 s
 
 ### 관리자 사용자 삭제
 
-관리자 화면의 사용자 삭제는 브라우저에서 바로 Firebase Auth 사용자를 삭제하지 않고 `/api/delete-managed-user` Vercel API를 통해 처리합니다. 이 API는 현재 로그인한 관리자의 Firebase ID 토큰을 Identity Toolkit `accounts:lookup`으로 확인하고, Firestore의 `users/{uid}`에서 `isActive`와 `isAdmin`을 다시 검증한 뒤 대상 Auth 계정과 앱 문서를 삭제합니다.
+관리자 화면의 사용자 삭제는 브라우저에서 바로 Firebase Auth 사용자를 삭제하지 않고 `/api/delete-managed-user` Vercel API를 통해 처리합니다. 이 API는 현재 로그인한 관리자의 Firebase ID 토큰을 Identity Toolkit `accounts:lookup`으로 확인하고, Firestore의 `users/{uid}`에서 `isActive`와 `isAdmin`을 다시 검증한 뒤 대상 사용자를 비활성화하고 Auth 계정과 앱 문서를 삭제합니다.
 
-이 기능도 위의 `FIREBASE_CLEANUP_*` 서비스 계정 환경 변수를 같이 사용합니다. Vercel Production 환경에 해당 변수가 없거나 서비스 계정에 Firebase Auth 사용자 삭제 권한이 없으면 앱 문서는 삭제되지 않고 관리자 화면에 실패로 표시됩니다.
+이 기능도 위의 `FIREBASE_CLEANUP_*` 서비스 계정 환경 변수를 같이 사용합니다. 삭제 대상의 노트, 공유, 첨부 파일 cleanup queue, 일정, 반복 업무, 반복 체크인, 사용자 키와 공개 로그인 문서를 함께 정리합니다. Vercel Production 환경에 해당 변수가 없거나 서비스 계정에 Firebase Auth 사용자 삭제 권한이 없으면 관리자 화면에 실패로 표시됩니다.
 
 ### Auth 설정 오류 해결
 

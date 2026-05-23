@@ -862,6 +862,7 @@ describeRules("firestore security rules", () => {
     const otherDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertSucceeds(setDoc(doc(ownerDb, "recurringHabits/habit-a"), recurringHabit("user-a")));
+    await assertSucceeds(setDoc(doc(ownerDb, "recurringHabits/AbCdEfGhIjKlMnOpQrSt"), recurringHabit("user-a")));
     await assertSucceeds(getDoc(doc(ownerDb, "recurringHabits/habit-a")));
     await assertSucceeds(getDocs(query(collection(ownerDb, "recurringHabits"), where("ownerUid", "==", "user-a"))));
     await assertFails(getDoc(doc(otherDb, "recurringHabits/habit-a")));
@@ -901,6 +902,12 @@ describeRules("firestore security rules", () => {
       setDoc(
         doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21"),
         recurringHabitCheckIn("user-a", "habit-a", "2026-05-21")
+      )
+    );
+    await assertSucceeds(
+      setDoc(
+        doc(ownerDb, "recurringHabitCheckIns/AbCdEfGhIjKlMnOpQrSt_2026-05-21"),
+        recurringHabitCheckIn("user-a", "AbCdEfGhIjKlMnOpQrSt", "2026-05-21")
       )
     );
     await assertSucceeds(getDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21")));

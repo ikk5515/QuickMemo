@@ -238,11 +238,38 @@ function taskPriorityRank(task: Pick<DecryptedScheduleTask, "isImportant" | "isU
   return 3;
 }
 
+function compareTaskStartDates(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  const leftDate = taskStartDate(left);
+  const rightDate = taskStartDate(right);
+  const leftHasDate = isValidScheduleDateString(leftDate);
+  const rightHasDate = isValidScheduleDateString(rightDate);
+
+  if (leftHasDate && rightHasDate && leftDate !== rightDate) {
+    return leftDate.localeCompare(rightDate);
+  }
+
+  if (leftHasDate && !rightHasDate) {
+    return -1;
+  }
+
+  if (!leftHasDate && rightHasDate) {
+    return 1;
+  }
+
+  return 0;
+}
+
 export function compareTodoTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
   const manualOrder = compareManualOrderWithinSameDate(left, right);
 
   if (manualOrder !== 0) {
     return manualOrder;
+  }
+
+  const dateOrder = compareTaskStartDates(left, right);
+
+  if (dateOrder !== 0) {
+    return dateOrder;
   }
 
   const leftPriority = taskPriorityRank(left);
@@ -282,21 +309,10 @@ export function compareCompletedTasks(left: DecryptedScheduleTask, right: Decryp
 }
 
 export function compareMatrixTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
-  const leftDate = taskStartDate(left);
-  const rightDate = taskStartDate(right);
-  const leftHasDate = isValidScheduleDateString(leftDate);
-  const rightHasDate = isValidScheduleDateString(rightDate);
+  const dateOrder = compareTaskStartDates(left, right);
 
-  if (leftHasDate && rightHasDate && leftDate !== rightDate) {
-    return leftDate.localeCompare(rightDate);
-  }
-
-  if (leftHasDate && !rightHasDate) {
-    return -1;
-  }
-
-  if (!leftHasDate && rightHasDate) {
-    return 1;
+  if (dateOrder !== 0) {
+    return dateOrder;
   }
 
   const manualOrder = compareManualOrderWithinSameDate(left, right);
