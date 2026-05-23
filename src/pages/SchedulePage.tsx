@@ -2739,6 +2739,20 @@ function matrixTaskIdFromDragEvent(event: DragEndEvent) {
 function recurringSlotFromDragEvent(event: DragEndEvent): RecurringHabitSlot | null {
   const slot = event.over?.data.current?.slot;
 
+  if (isRecurringHabitSlot(slot)) {
+    return slot;
+  }
+
+  return recurringSlotFromDropId(event.over?.id);
+}
+
+function recurringSlotFromDropId(value: unknown): RecurringHabitSlot | null {
+  if (typeof value !== "string" || !value.startsWith("recurring-slot:")) {
+    return null;
+  }
+
+  const slot = value.slice("recurring-slot:".length);
+
   return isRecurringHabitSlot(slot) ? slot : null;
 }
 

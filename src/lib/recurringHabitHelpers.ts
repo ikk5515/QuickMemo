@@ -161,8 +161,9 @@ export function buildRecurringHabitOrderUpdates(
 
     orderedHabits.forEach((habit, index) => {
       const sortOrder = index + 1;
+      const previousHabit = habit.id === activeHabitId ? activeHabit : habit;
 
-      if (habit.slot !== slot || safeSortOrder(habit) !== sortOrder) {
+      if (previousHabit.slot !== slot || safeSortOrder(previousHabit) !== sortOrder) {
         updates.push({ habitId: habit.id, slot, sortOrder });
       }
     });

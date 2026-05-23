@@ -27,7 +27,10 @@ function expectBrowserHardeningHeaders(headers: HostingHeader[]): void {
   expect(csp).toContain("frame-ancestors 'none'");
   expect(csp).toContain("default-src 'self'");
   expect(csp).toContain("script-src 'self'");
+  expect(csp).toContain("https://www.google.com/recaptcha/");
+  expect(csp).toContain("https://www.gstatic.com/recaptcha/");
   expect(csp).toContain("connect-src 'self' https://*.googleapis.com");
+  expect(csp).toContain("https://recaptcha.google.com/recaptcha/");
   expect(csp).toContain("img-src 'self' data: blob:");
   expect(csp).toContain("base-uri 'self'");
   expect(csp).toContain("form-action 'self'");

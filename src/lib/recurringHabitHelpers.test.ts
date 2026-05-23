@@ -134,6 +134,19 @@ describe("recurring habit helpers", () => {
     ]);
   });
 
+  it("builds a slot update when the moved habit keeps the same manual order", () => {
+    const updates = buildRecurringHabitOrderUpdates(
+      [habit("morning-1", { slot: "morning", sortOrder: 1 })],
+      "morning-1",
+      "afternoon",
+      null
+    );
+
+    expect(updates).toEqual([
+      { habitId: "morning-1", slot: "afternoon", sortOrder: 1 }
+    ]);
+  });
+
   it("calculates date progress from active habits only", () => {
     const habits = [
       habit("work"),
