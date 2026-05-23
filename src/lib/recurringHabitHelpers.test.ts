@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DecryptedRecurringHabit, RecurringHabitCheckInDocument } from "../types";
 import {
   buildRecurringDateStrip,
+  buildRecurringHabitOrderUpdates,
   buildRecurringMonthlySummaries,
   calculateHabitMonthStats,
   calculateHabitStats,
@@ -79,6 +80,34 @@ describe("recurring habit helpers", () => {
       ["morning", ["work"]],
       ["afternoon", ["study"]],
       ["other", ["later"]]
+    ]);
+  });
+
+  it("sorts habits by manual order inside each slot", () => {
+    const groups = groupRecurringHabitsBySlot([
+      habit("third", { sortOrder: 3 }),
+      habit("first", { sortOrder: 1 }),
+      habit("second", { sortOrder: 2 })
+    ]);
+
+    expect(groups[0].habits.map((item) => item.id)).toEqual(["first", "second", "third"]);
+  });
+
+  it("builds order updates for moving habits between slots", () => {
+    const updates = buildRecurringHabitOrderUpdates(
+      [
+        habit("morning-1", { slot: "morning", sortOrder: 1 }),
+        habit("morning-2", { slot: "morning", sortOrder: 2 }),
+        habit("afternoon-1", { slot: "afternoon", sortOrder: 1 })
+      ],
+      "morning-2",
+      "afternoon",
+      "afternoon-1"
+    );
+
+    expect(updates).toEqual([
+      { habitId: "morning-2", slot: "afternoon", sortOrder: 1 },
+      { habitId: "afternoon-1", slot: "afternoon", sortOrder: 2 }
     ]);
   });
 

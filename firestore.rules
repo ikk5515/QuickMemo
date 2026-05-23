@@ -511,6 +511,16 @@ service cloud.firestore {
         && value.matches("^#[0-9A-Fa-f]{6}$");
     }
 
+    function validRecurringHabitSortOrder(data) {
+      return !data.keys().hasAny(["sortOrder"])
+        || data.sortOrder == null
+        || (
+          data.sortOrder is int
+          && data.sortOrder >= 0
+          && data.sortOrder <= 1000000
+        );
+    }
+
     function validRecurringHabit(data, uid) {
       return data.keys().hasAll([
         "ownerUid",
@@ -532,6 +542,7 @@ service cloud.firestore {
         "slot",
         "icon",
         "color",
+        "sortOrder",
         "encryptedTitle",
         "encryptedDetails",
         "wrappedKeys",
@@ -545,6 +556,7 @@ service cloud.firestore {
       && data.slot in ["morning", "afternoon", "other"]
       && data.icon in ["work", "study", "reading", "exercise", "health", "cleanup", "review", "other"]
       && validRecurringHabitColor(data.color)
+      && validRecurringHabitSortOrder(data)
       && encryptedSchedulePayload(data.encryptedTitle, 4096)
       && encryptedSchedulePayload(data.encryptedDetails, 12000)
       && validScheduleWrappedKeys(data, uid)
@@ -1562,6 +1574,7 @@ service cloud.firestore {
           "slot",
           "icon",
           "color",
+          "sortOrder",
           "encryptedTitle",
           "encryptedDetails",
           "updatedBy",

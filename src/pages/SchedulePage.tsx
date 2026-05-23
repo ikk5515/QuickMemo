@@ -63,6 +63,7 @@ import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey }
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import {
   buildRecurringDateStrip,
+  buildRecurringHabitOrderUpdates,
   buildRecurringMonthCalendar,
   buildRecurringMonthlySummaries,
   calculateHabitMonthStats,
@@ -123,6 +124,7 @@ import {
   subscribeRecurringHabitCheckIns,
   subscribeRecurringHabits,
   updateRecurringHabit,
+  updateRecurringHabitOrderBatch,
   type RecurringHabitCheckInSnapshot,
   type RecurringHabitSnapshot
 } from "../services/recurringHabits";
@@ -149,15 +151,15 @@ const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: strin
 const taskPageSize = 5;
 const completedPageSize = 10;
 const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야 하고 같은 연도 안에서 최대 ${maxScheduleTaskRangeDays}일까지 선택할 수 있습니다.`;
-const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; label: string }> = {
-  work: { Icon: BriefcaseBusiness, label: recurringHabitIconLabels.work },
-  study: { Icon: GraduationCap, label: recurringHabitIconLabels.study },
-  reading: { Icon: BookOpen, label: recurringHabitIconLabels.reading },
-  exercise: { Icon: Dumbbell, label: recurringHabitIconLabels.exercise },
-  health: { Icon: HeartPulse, label: recurringHabitIconLabels.health },
-  cleanup: { Icon: Sparkles, label: recurringHabitIconLabels.cleanup },
-  review: { Icon: CheckCircle2, label: recurringHabitIconLabels.review },
-  other: { Icon: Repeat2, label: recurringHabitIconLabels.other }
+const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; color: string; label: string }> = {
+  work: { Icon: BriefcaseBusiness, color: "#2563eb", label: recurringHabitIconLabels.work },
+  study: { Icon: GraduationCap, color: "#7c3aed", label: recurringHabitIconLabels.study },
+  reading: { Icon: BookOpen, color: "#0891b2", label: recurringHabitIconLabels.reading },
+  exercise: { Icon: Dumbbell, color: "#ea580c", label: recurringHabitIconLabels.exercise },
+  health: { Icon: HeartPulse, color: "#e11d48", label: recurringHabitIconLabels.health },
+  cleanup: { Icon: Sparkles, color: "#16a34a", label: recurringHabitIconLabels.cleanup },
+  review: { Icon: CheckCircle2, color: "#ca8a04", label: recurringHabitIconLabels.review },
+  other: { Icon: Repeat2, color: "#64748b", label: recurringHabitIconLabels.other }
 };
 
 type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
@@ -853,7 +855,8 @@ export default function SchedulePage() {
         wrappedKey,
         slot: draft.slot,
         icon: draft.icon,
-        color: normalizeScheduleTaskColor(draft.color)
+        color: normalizeScheduleTaskColor(draft.color),
+        sortOrder: nextRecurringHabitSortOrder(decryptedRecurringHabits, draft.slot)
       });
 
       setViewRecurringHabitId(createdHabit.id);
@@ -913,6 +916,22 @@ export default function SchedulePage() {
       setError(null);
     } catch (caught) {
       setError(scheduleActionError(caught, "반복 업무를 삭제하지 못했습니다."));
+    }
+  }
+
+  async function moveRecurringHabit(activeHabitId: string, targetSlot: RecurringHabitSlot, overHabitId: string | null) {
+    const updates = buildRecurringHabitOrderUpdates(decryptedRecurringHabits, activeHabitId, targetSlot, overHabitId);
+
+    if (!updates.length) {
+      return;
+    }
+
+    try {
+      await updateRecurringHabitOrderBatch(unlockedProfile.uid, updates);
+      setStatus("반복 업무 위치를 저장했습니다.");
+      setError(null);
+    } catch (caught) {
+      setError(scheduleActionError(caught, "반복 업무 위치를 저장하지 못했습니다."));
     }
   }
 
@@ -1096,6 +1115,7 @@ export default function SchedulePage() {
             onDeleteHabit={(habit) => void removeRecurringHabit(habit)}
             onEditHabit={(habit) => setRecurringHabitDialog({ habitId: habit.id, mode: "edit" })}
             onMonthChange={setRecurringMonth}
+            onMoveHabit={(habitId, targetSlot, overHabitId) => void moveRecurringHabit(habitId, targetSlot, overHabitId)}
             onOpenHabit={setViewRecurringHabitId}
             onOpenOverview={() => setRecurringOverviewOpen(true)}
             onSelectDate={(date) => {
@@ -2414,12 +2434,47 @@ const matrixCollisionDetection: CollisionDetection = (args) => {
   return sectionCollisions.length > 0 ? sectionCollisions : rectangleCollisions;
 };
 
+const recurringCollisionDetection: CollisionDetection = (args) => {
+  const pointerCollisions = pointerWithin(args);
+
+  if (pointerCollisions.length > 0) {
+    const habitCollisions = pointerCollisions.filter((collision) => collisionType(collision) === "recurring-habit");
+
+    if (habitCollisions.length > 0) {
+      return habitCollisions;
+    }
+
+    const slotCollisions = pointerCollisions.filter((collision) => collisionType(collision) === "recurring-slot");
+
+    if (slotCollisions.length > 0) {
+      return slotCollisions;
+    }
+
+    return pointerCollisions;
+  }
+
+  const rectangleCollisions = rectIntersection(args);
+  const habitCollisions = rectangleCollisions.filter((collision) => collisionType(collision) === "recurring-habit");
+
+  if (habitCollisions.length > 0) {
+    return habitCollisions;
+  }
+
+  const slotCollisions = rectangleCollisions.filter((collision) => collisionType(collision) === "recurring-slot");
+
+  return slotCollisions.length > 0 ? slotCollisions : rectangleCollisions;
+};
+
 function collisionType(collision: ReturnType<CollisionDetection>[number]) {
   return collision.data?.droppableContainer.data.current?.type;
 }
 
 function matrixSectionDropId(sectionKey: MatrixQuadrantKey) {
   return `matrix-section:${sectionKey}`;
+}
+
+function recurringSlotDropId(slot: RecurringHabitSlot) {
+  return `recurring-slot:${slot}`;
 }
 
 function matrixGroupStateKey(sectionKey: MatrixQuadrantKey, groupKey: string) {
@@ -2434,6 +2489,16 @@ function matrixSectionKeyFromDragEvent(event: DragEndEvent): MatrixQuadrantKey |
 
 function matrixTaskIdFromDragEvent(event: DragEndEvent) {
   return event.over?.data.current?.type === "matrix-task" ? String(event.over.id) : null;
+}
+
+function recurringSlotFromDragEvent(event: DragEndEvent): RecurringHabitSlot | null {
+  const slot = event.over?.data.current?.slot;
+
+  return isRecurringHabitSlot(slot) ? slot : null;
+}
+
+function recurringHabitIdFromDragEvent(event: DragEndEvent) {
+  return event.over?.data.current?.type === "recurring-habit" ? String(event.over.id) : null;
 }
 
 function matrixSectionKeyForTask(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent">): MatrixQuadrantKey {
@@ -2459,6 +2524,10 @@ function isMatrixQuadrantKey(value: unknown): value is MatrixQuadrantKey {
     || value === "importantNotUrgent"
     || value === "notUrgentNotImportant"
   );
+}
+
+function isRecurringHabitSlot(value: unknown): value is RecurringHabitSlot {
+  return value === "morning" || value === "afternoon" || value === "other";
 }
 
 function normalizeTaskProgressPercent(value: number | null | undefined) {
@@ -2859,6 +2928,7 @@ function RecurringView({
   onDeleteHabit,
   onEditHabit,
   onMonthChange,
+  onMoveHabit,
   onOpenHabit,
   onOpenOverview,
   onSelectDate,
@@ -2876,6 +2946,7 @@ function RecurringView({
   onDeleteHabit: (habit: DecryptedRecurringHabit) => void;
   onEditHabit: (habit: DecryptedRecurringHabit) => void;
   onMonthChange: (month: string) => void;
+  onMoveHabit: (habitId: string, targetSlot: RecurringHabitSlot, overHabitId: string | null) => void;
   onOpenHabit: (habitId: string) => void;
   onOpenOverview: () => void;
   onSelectDate: (date: string) => void;
@@ -2885,85 +2956,136 @@ function RecurringView({
   selectedHabit: DecryptedRecurringHabit | null;
   today: string;
 }) {
+  const [activeHabitId, setActiveHabitId] = useState<string | null>(null);
   const dateStrip = useMemo(() => buildRecurringDateStrip(today), [today]);
   const groups = useMemo(() => groupRecurringHabitsBySlot(habits), [habits]);
   const activeHabitCount = habits.filter((habit) => habit.status === "active").length;
+  const activeHabit = useMemo(
+    () => habits.find((habit) => habit.id === activeHabitId) ?? null,
+    [activeHabitId, habits]
+  );
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
+
+  function handleDragStart(event: DragStartEvent) {
+    setActiveHabitId(String(event.active.id));
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    setActiveHabitId(null);
+
+    if (!event.over) {
+      return;
+    }
+
+    const activeId = String(event.active.id);
+    const targetSlot = recurringSlotFromDragEvent(event);
+    const overHabitId = recurringHabitIdFromDragEvent(event);
+
+    if (targetSlot) {
+      onMoveHabit(activeId, targetSlot, overHabitId === activeId ? null : overHabitId);
+    }
+  }
 
   return (
-    <div className="recurring-layout">
-      <section className="recurring-main-panel">
-        <header className="recurring-toolbar">
-          <div>
-            <h2>반복 업무</h2>
-            <span>{formatDateLabel(selectedDate)} · {activeHabitCount}</span>
-          </div>
-          <div className="recurring-toolbar-actions">
-            <button className="secondary-button" type="button" onClick={onAdd}>
-              <Plus size={16} />
-              추가
-            </button>
-            <button className="icon-button" type="button" aria-label="월별 반복 조회" title="월별 반복 조회" onClick={onOpenOverview}>
-              <LayoutGrid size={18} />
-            </button>
-          </div>
-        </header>
-
-        <div className="recurring-date-strip" aria-label="반복 업무 날짜 선택">
-          {dateStrip.map((day) => {
-            const progress = calculateRecurringDateProgress(habits, checkIns, day.dateString);
-            const selected = selectedDate === day.dateString;
-
-            return (
-              <button
-                aria-label={`${formatDateLabel(day.dateString)} 반복 업무 ${progress.percent}% 완료`}
-                className={selected ? "selected" : ""}
-                key={day.dateString}
-                onClick={() => onSelectDate(day.dateString)}
-                type="button"
-              >
-                <span>{day.weekday}</span>
-                <strong>{day.dayNumber}</strong>
-                <RecurringProgressRing percent={progress.percent} total={progress.total} />
+    <DndContext
+      collisionDetection={recurringCollisionDetection}
+      onDragEnd={handleDragEnd}
+      onDragStart={handleDragStart}
+      sensors={sensors}
+    >
+      <div className="recurring-layout">
+        <section className="recurring-main-panel">
+          <header className="recurring-toolbar">
+            <div>
+              <h2>반복 업무</h2>
+              <span>{formatDateLabel(selectedDate)} · {activeHabitCount}</span>
+            </div>
+            <div className="recurring-toolbar-actions">
+              <button className="secondary-button" type="button" onClick={onAdd}>
+                <Plus size={16} />
+                추가
               </button>
-            );
-          })}
-        </div>
+              <button className="icon-button" type="button" aria-label="월별 반복 조회" title="월별 반복 조회" onClick={onOpenOverview}>
+                <LayoutGrid size={18} />
+              </button>
+            </div>
+          </header>
 
-        <div className="recurring-slot-groups">
-          {groups.map((group) => (
-            <RecurringSlotSection
-              checkIns={checkIns}
-              group={group}
-              key={group.key}
-              pendingCheckIns={pendingCheckIns}
-              selectedDate={selectedDate}
-              onOpenHabit={onOpenHabit}
-              onToggleCheckIn={onToggleCheckIn}
-            />
-          ))}
-        </div>
-      </section>
+          <div className="recurring-date-strip" aria-label="반복 업무 날짜 선택">
+            {dateStrip.map((day) => {
+              const progress = calculateRecurringDateProgress(habits, checkIns, day.dateString);
+              const selected = selectedDate === day.dateString;
 
-      <RecurringHabitDetailPanel
-        checkIns={checkIns}
-        habit={selectedHabit}
-        month={month}
-        selectedDate={selectedDate}
-        today={today}
-        onClose={onCloseHabit}
-        onDelete={onDeleteHabit}
-        onEdit={onEditHabit}
-        onMonthChange={onMonthChange}
-        onSelectDate={onSelectDate}
-        onToggleCheckIn={onToggleCheckIn}
-      />
-    </div>
+              return (
+                <button
+                  aria-label={`${formatDateLabel(day.dateString)} 반복 업무 ${progress.percent}% 완료`}
+                  className={selected ? "selected" : ""}
+                  key={day.dateString}
+                  onClick={() => onSelectDate(day.dateString)}
+                  type="button"
+                >
+                  <span>{day.weekday}</span>
+                  <strong>{day.dayNumber}</strong>
+                  <RecurringProgressRing percent={progress.percent} total={progress.total} />
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="recurring-slot-groups">
+            {groups.map((group) => (
+              <RecurringSlotSection
+                checkIns={checkIns}
+                group={group}
+                key={group.key}
+                pendingCheckIns={pendingCheckIns}
+                selectedDate={selectedDate}
+                onEditHabit={onEditHabit}
+                onOpenHabit={onOpenHabit}
+                onToggleCheckIn={onToggleCheckIn}
+              />
+            ))}
+          </div>
+        </section>
+
+        <RecurringHabitDetailPanel
+          checkIns={checkIns}
+          habit={selectedHabit}
+          month={month}
+          selectedDate={selectedDate}
+          today={today}
+          onClose={onCloseHabit}
+          onDelete={onDeleteHabit}
+          onEdit={onEditHabit}
+          onMonthChange={onMonthChange}
+          onSelectDate={onSelectDate}
+          onToggleCheckIn={onToggleCheckIn}
+        />
+      </div>
+      <DragOverlay>
+        {activeHabit ? (
+          <div className={`recurring-habit-row recurring-drag-overlay ${isHabitCheckedOn(checkIns, activeHabit.id, selectedDate) ? "checked" : ""}`} aria-hidden="true">
+            <span className="recurring-drag-handle ghost">
+              <GripVertical size={16} />
+            </span>
+            <span className="recurring-habit-main overlay">
+              <RecurringHabitRowContent checkIns={checkIns} habit={activeHabit} selectedDate={selectedDate} />
+            </span>
+            <span className="recurring-check-button ghost" />
+          </div>
+        ) : null}
+      </DragOverlay>
+    </DndContext>
   );
 }
 
 function RecurringSlotSection({
   checkIns,
   group,
+  onEditHabit,
   onOpenHabit,
   onToggleCheckIn,
   pendingCheckIns,
@@ -2971,31 +3093,41 @@ function RecurringSlotSection({
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
   group: ReturnType<typeof groupRecurringHabitsBySlot>[number];
+  onEditHabit: (habit: DecryptedRecurringHabit) => void;
   onOpenHabit: (habitId: string) => void;
   onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
   pendingCheckIns: Record<string, boolean>;
   selectedDate: string;
 }) {
+  const { isOver, setNodeRef } = useDroppable({
+    id: recurringSlotDropId(group.key),
+    data: { slot: group.key, type: "recurring-slot" }
+  });
+
   return (
-    <section className="recurring-slot-section">
+    <section className={`recurring-slot-section ${isOver ? "drag-over" : ""}`} ref={setNodeRef}>
       <header>
         <h3>{group.label}</h3>
         <span>{group.habits.length}</span>
       </header>
       {group.habits.length ? (
-        <div className="recurring-habit-list">
-          {group.habits.map((habit) => (
-            <RecurringHabitRow
-              checkIns={checkIns}
-              habit={habit}
-              key={habit.id}
-              pending={pendingCheckIns[recurringCheckInId(habit.id, selectedDate)] === true}
-              selectedDate={selectedDate}
-              onOpen={() => onOpenHabit(habit.id)}
-              onToggle={() => onToggleCheckIn(habit, selectedDate)}
-            />
-          ))}
-        </div>
+        <SortableContext items={group.habits.map((habit) => habit.id)} strategy={verticalListSortingStrategy}>
+          <div className="recurring-habit-list">
+            {group.habits.map((habit) => (
+              <SortableRecurringHabitRow
+                checkIns={checkIns}
+                habit={habit}
+                key={habit.id}
+                pending={pendingCheckIns[recurringCheckInId(habit.id, selectedDate)] === true}
+                selectedDate={selectedDate}
+                slot={group.key}
+                onEdit={() => onEditHabit(habit)}
+                onOpen={() => onOpenHabit(habit.id)}
+                onToggle={() => onToggleCheckIn(habit, selectedDate)}
+              />
+            ))}
+          </div>
+        </SortableContext>
       ) : (
         <p className="schedule-empty">등록된 반복 업무가 없습니다.</p>
       )}
@@ -3003,41 +3135,61 @@ function RecurringSlotSection({
   );
 }
 
-function RecurringHabitRow({
+function SortableRecurringHabitRow({
   checkIns,
   habit,
+  onEdit,
   onOpen,
   onToggle,
   pending,
-  selectedDate
+  selectedDate,
+  slot
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
   habit: DecryptedRecurringHabit;
+  onEdit: () => void;
   onOpen: () => void;
   onToggle: () => void;
   pending: boolean;
   selectedDate: string;
+  slot: RecurringHabitSlot;
 }) {
   const checked = isHabitCheckedOn(checkIns, habit.id, selectedDate);
-  const stats = calculateHabitStats(habit.id, checkIns, selectedDate);
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setNodeRef,
+    transform,
+    transition
+  } = useSortable({
+    id: habit.id,
+    data: { habitId: habit.id, slot, type: "recurring-habit" }
+  });
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition
+  };
 
   return (
-    <div className={`recurring-habit-row ${checked ? "checked" : ""}`}>
+    <div
+      className={`recurring-habit-row ${checked ? "checked" : ""} ${isDragging ? "dragging" : ""}`}
+      onDoubleClick={onEdit}
+      ref={setNodeRef}
+      style={style}
+      title="더블클릭하여 수정"
+    >
+      <button
+        aria-label={`${habit.title} 위치 이동`}
+        className="recurring-drag-handle"
+        type="button"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical size={16} />
+      </button>
       <button className="recurring-habit-main" type="button" onClick={onOpen}>
-        <HabitIconBadge color={habit.color} icon={habit.icon} />
-        <span>
-          <strong>{habit.title}</strong>
-          <small className="recurring-habit-metrics">
-            <span>
-              <Zap size={12} />
-              {stats.totalCheckIns}일
-            </span>
-            <span>
-              <Flame size={12} />
-              {stats.streakDays}일 (연속)
-            </span>
-          </small>
-        </span>
+        <RecurringHabitRowContent checkIns={checkIns} habit={habit} selectedDate={selectedDate} />
       </button>
       <button
         aria-checked={checked}
@@ -3045,12 +3197,44 @@ function RecurringHabitRow({
         className={`recurring-check-button ${checked ? "checked" : ""}`}
         disabled={pending}
         onClick={onToggle}
+        onDoubleClick={(event) => event.stopPropagation()}
         role="checkbox"
         type="button"
       >
         {checked ? <Check size={17} /> : null}
       </button>
     </div>
+  );
+}
+
+function RecurringHabitRowContent({
+  checkIns,
+  habit,
+  selectedDate
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  habit: DecryptedRecurringHabit;
+  selectedDate: string;
+}) {
+  const stats = calculateHabitStats(habit.id, checkIns, selectedDate);
+
+  return (
+    <>
+      <HabitIconBadge color={habit.color} icon={habit.icon} />
+      <span>
+        <strong>{habit.title}</strong>
+        <small className="recurring-habit-metrics">
+          <span className="metric-total">
+            <Zap size={12} />
+            {stats.totalCheckIns}일
+          </span>
+          <span className="metric-streak">
+            <Flame size={12} />
+            {stats.streakDays}일 (연속)
+          </span>
+        </small>
+      </span>
+    </>
   );
 }
 
@@ -3143,18 +3327,18 @@ function RecurringStatsGrid({
   monthStats: ReturnType<typeof calculateHabitMonthStats>;
   stats: ReturnType<typeof calculateHabitStats>;
 }) {
-  const cards: Array<{ Icon: LucideIcon; label: string; value: string }> = [
-    { Icon: CheckCircle2, label: "월간 출석체크", value: `${monthStats.checkedDays}일` },
-    { Icon: Zap, label: "총 체크인 수", value: `${stats.totalCheckIns}일` },
-    { Icon: Percent, label: "월별 체크인 비율", value: `${monthStats.percent}%` },
-    { Icon: Flame, label: "연속", value: `${stats.streakDays}일` }
+  const cards: Array<{ Icon: LucideIcon; color: string; label: string; value: string }> = [
+    { Icon: CheckCircle2, color: "#10b981", label: "월간 체크인 수", value: `${monthStats.checkedDays}일` },
+    { Icon: Zap, color: "#2563eb", label: "총 체크인 수", value: `${stats.totalCheckIns}일` },
+    { Icon: Percent, color: "#7c3aed", label: "월별 체크인 비율", value: `${monthStats.percent}%` },
+    { Icon: Flame, color: "#ef4444", label: "연속", value: `${stats.streakDays}일` }
   ];
 
   return (
     <div className="recurring-stats-grid">
-      {cards.map(({ Icon, label, value }) => (
+      {cards.map(({ Icon, color, label, value }) => (
         <div key={label}>
-          <span className="recurring-stat-icon">
+          <span className="recurring-stat-icon" style={{ "--recurring-stat-color": color } as CSSProperties}>
             <Icon size={16} />
           </span>
           <span className="recurring-stat-copy">
@@ -3432,10 +3616,10 @@ function RecurringHabitModal({
                 <button
                   className={draft.icon === icon ? "selected" : ""}
                   key={icon}
-                  onClick={() => setDraft((current) => ({ ...current, icon }))}
+                  onClick={() => setDraft((current) => ({ ...current, color: recurringHabitIconMeta[icon].color, icon }))}
                   type="button"
                 >
-                  <HabitIconBadge color={draft.color} icon={icon} />
+                  <HabitIconBadge color={recurringHabitIconMeta[icon].color} icon={icon} />
                   <span>{recurringHabitIconLabels[icon]}</span>
                 </button>
               ))}
@@ -3534,19 +3718,19 @@ function RecurringOverviewModal({
                   </span>
                 </span>
                 <span className="recurring-overview-stats">
-                  <span>
+                  <span className="metric-month">
                     <CheckCircle2 size={13} />
                     {summary.checkedDays}일
                   </span>
-                  <span>
+                  <span className="metric-total">
                     <Zap size={13} />
                     {summary.totalCheckIns}일
                   </span>
-                  <span>
+                  <span className="metric-percent">
                     <Percent size={13} />
                     {summary.percent}%
                   </span>
-                  <span>
+                  <span className="metric-streak">
                     <Flame size={13} />
                     {summary.streakDays}일
                   </span>
@@ -3635,12 +3819,14 @@ function recurringProgressColor(percent: number, total: number) {
 function HabitIconBadge({ color, icon }: { color: string; icon: RecurringHabitIcon }) {
   const meta = recurringHabitIconMeta[icon] ?? recurringHabitIconMeta.other;
   const Icon = meta.Icon;
+  const normalizedColor = normalizeScheduleTaskColor(color);
+  const displayColor = normalizedColor.toLowerCase() === "#6fa99f" ? meta.color : normalizedColor;
 
   return (
     <span
       aria-label={meta.label}
       className="habit-icon-badge"
-      style={{ "--habit-icon-color": normalizeScheduleTaskColor(color) } as CSSProperties}
+      style={{ "--habit-icon-color": displayColor } as CSSProperties}
       title={meta.label}
     >
       <Icon size={18} />
@@ -3654,8 +3840,17 @@ function recurringDraftFromHabit(habit: DecryptedRecurringHabit | null): Recurri
     description: habit?.details.description ?? "",
     slot: habit?.slot ?? "morning",
     icon: habit?.icon ?? "work",
-    color: normalizeScheduleTaskColor(habit?.color ?? "#6fa99f")
+    color: normalizeScheduleTaskColor(habit?.color ?? recurringHabitIconMeta[habit?.icon ?? "work"].color)
   };
+}
+
+function nextRecurringHabitSortOrder(habits: DecryptedRecurringHabit[], slot: RecurringHabitSlot) {
+  const slotOrders = habits
+    .filter((habit) => habit.status === "active" && habit.slot === slot)
+    .map((habit) => habit.sortOrder)
+    .filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0);
+
+  return slotOrders.length ? Math.max(...slotOrders) + 1 : habits.filter((habit) => habit.status === "active" && habit.slot === slot).length + 1;
 }
 
 function slotLabel(slot: RecurringHabitSlot) {

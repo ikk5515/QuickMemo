@@ -872,6 +872,7 @@ describeRules("firestore security rules", () => {
         slot: "afternoon",
         icon: "reading",
         color: "#7f99c2",
+        sortOrder: 2,
         updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })
@@ -893,6 +894,20 @@ describeRules("firestore security rules", () => {
     await assertFails(
       updateDoc(doc(ownerDb, "recurringHabits/habit-a"), {
         color: "javascript:alert(1)",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "recurringHabits/habit-a"), {
+        sortOrder: -1,
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "recurringHabits/habit-a"), {
+        sortOrder: "first",
         updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })

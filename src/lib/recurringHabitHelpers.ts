@@ -39,6 +39,12 @@ export interface RecurringHabitMonthlySummary extends RecurringHabitStats, Recur
   habit: DecryptedRecurringHabit;
 }
 
+export interface RecurringHabitOrderUpdate {
+  habitId: string;
+  slot: RecurringHabitSlot;
+  sortOrder: number;
+}
+
 export const recurringHabitSlots: Array<{ key: RecurringHabitSlot; label: string }> = [
   { key: "morning", label: "오전" },
   { key: "afternoon", label: "오후" },
@@ -99,6 +105,46 @@ export function groupRecurringHabitsBySlot(habits: DecryptedRecurringHabit[]): R
 
 export function recurringCheckInId(habitId: string, date: string) {
   return `${habitId}_${date}`;
+}
+
+export function buildRecurringHabitOrderUpdates(
+  habits: DecryptedRecurringHabit[],
+  activeHabitId: string,
+  targetSlot: RecurringHabitSlot,
+  overHabitId: string | null
+): RecurringHabitOrderUpdate[] {
+  const activeHabit = habits.find((habit) => habit.id === activeHabitId && habit.status === "active");
+
+  if (!activeHabit) {
+    return [];
+  }
+
+  const affectedSlots = new Set<RecurringHabitSlot>([activeHabit.slot, targetSlot]);
+  const groupedHabits = new Map(
+    groupRecurringHabitsBySlot(habits).map((group) => [group.key, group.habits] as const)
+  );
+  const updates: RecurringHabitOrderUpdate[] = [];
+
+  affectedSlots.forEach((slot) => {
+    const orderedHabits = (groupedHabits.get(slot) ?? []).filter((habit) => habit.id !== activeHabitId);
+
+    if (slot === targetSlot) {
+      const targetHabit = { ...activeHabit, slot: targetSlot };
+      const overIndex = overHabitId ? orderedHabits.findIndex((habit) => habit.id === overHabitId) : -1;
+
+      orderedHabits.splice(overIndex >= 0 ? overIndex : orderedHabits.length, 0, targetHabit);
+    }
+
+    orderedHabits.forEach((habit, index) => {
+      const sortOrder = index + 1;
+
+      if (habit.slot !== slot || safeSortOrder(habit) !== sortOrder) {
+        updates.push({ habitId: habit.id, slot, sortOrder });
+      }
+    });
+  });
+
+  return updates;
 }
 
 export function isHabitCheckedOn(checkIns: RecurringHabitCheckInDocument[], habitId: string, date: string) {
@@ -197,6 +243,12 @@ function compareRecurringHabits(left: DecryptedRecurringHabit, right: DecryptedR
     return slotDifference;
   }
 
+  const sortOrderDifference = safeSortOrder(left) - safeSortOrder(right);
+
+  if (sortOrderDifference !== 0) {
+    return sortOrderDifference;
+  }
+
   const createdDifference = timestampMillis(left.createdAt) - timestampMillis(right.createdAt);
 
   if (createdDifference !== 0) {
@@ -212,6 +264,12 @@ function slotRank(slot: RecurringHabitSlot) {
 
 function timestampMillis(value: { toMillis?: () => number } | null | undefined) {
   return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
+}
+
+function safeSortOrder(habit: Pick<DecryptedRecurringHabit, "sortOrder">) {
+  return typeof habit.sortOrder === "number" && Number.isInteger(habit.sortOrder) && habit.sortOrder >= 0
+    ? habit.sortOrder
+    : Number.MAX_SAFE_INTEGER;
 }
 
 function checkInDateSet(habitId: string, checkIns: RecurringHabitCheckInDocument[]) {

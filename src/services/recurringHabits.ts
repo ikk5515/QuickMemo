@@ -39,6 +39,7 @@ export interface CreateRecurringHabitInput {
   slot: RecurringHabitSlot;
   icon: RecurringHabitIcon;
   color: string;
+  sortOrder?: number | null;
 }
 
 export interface UpdateRecurringHabitInput {
@@ -47,6 +48,7 @@ export interface UpdateRecurringHabitInput {
   slot?: RecurringHabitSlot;
   icon?: RecurringHabitIcon;
   color?: string;
+  sortOrder?: number | null;
   status?: RecurringHabitStatus;
 }
 
@@ -118,6 +120,7 @@ export async function createRecurringHabit(input: CreateRecurringHabitInput) {
     slot: input.slot,
     icon: input.icon,
     color: input.color,
+    sortOrder: input.sortOrder ?? null,
     encryptedTitle: input.title,
     encryptedDetails: input.details,
     wrappedKeys: {
@@ -138,6 +141,24 @@ export async function updateRecurringHabit(habitId: string, uid: string, input: 
     updatedBy: uid,
     updatedAt: serverTimestamp()
   });
+}
+
+export async function updateRecurringHabitOrderBatch(
+  uid: string,
+  updates: Array<{ habitId: string; slot: RecurringHabitSlot; sortOrder: number | null }>
+) {
+  const batch = writeBatch(db);
+
+  updates.forEach((update) => {
+    batch.update(doc(db, "recurringHabits", update.habitId), {
+      slot: update.slot,
+      sortOrder: update.sortOrder,
+      updatedBy: uid,
+      updatedAt: serverTimestamp()
+    });
+  });
+
+  await batch.commit();
 }
 
 export async function deleteRecurringHabit(habitId: string, uid: string) {

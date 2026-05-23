@@ -255,6 +255,7 @@ export interface RecurringHabitDocument {
   slot: RecurringHabitSlot;
   icon: RecurringHabitIcon;
   color: string;
+  sortOrder?: number | null;
   encryptedTitle: EncryptedPayload;
   encryptedDetails: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;

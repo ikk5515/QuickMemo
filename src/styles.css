@@ -7141,8 +7141,16 @@ textarea {
 }
 
 .recurring-slot-section {
+  border: 1px solid transparent;
+  border-radius: 8px;
   display: grid;
   gap: 8px;
+  padding: 4px;
+}
+
+.recurring-slot-section.drag-over {
+  background: color-mix(in srgb, var(--teal) 6%, #ffffff);
+  border-color: color-mix(in srgb, var(--teal) 24%, #ffffff);
 }
 
 .recurring-slot-section > header {
@@ -7175,7 +7183,7 @@ textarea {
   border-radius: 8px;
   display: grid;
   gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   min-height: 58px;
   padding: 8px;
 }
@@ -7191,6 +7199,34 @@ textarea {
   border-color: color-mix(in srgb, var(--teal) 22%, #ffffff);
 }
 
+.recurring-habit-row.dragging {
+  opacity: 0.45;
+}
+
+.recurring-drag-overlay {
+  box-shadow: var(--shadow);
+}
+
+.recurring-drag-handle {
+  background: transparent;
+  border: 0;
+  color: #9aa7a1;
+  cursor: grab;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  touch-action: none;
+  width: 24px;
+}
+
+.recurring-drag-handle:active {
+  cursor: grabbing;
+}
+
+.recurring-drag-handle.ghost {
+  pointer-events: none;
+}
+
 .recurring-habit-main {
   background: transparent;
   color: inherit;
@@ -7202,6 +7238,10 @@ textarea {
   min-width: 0;
   padding: 0;
   text-align: left;
+}
+
+.recurring-habit-main.overlay {
+  align-items: center;
 }
 
 .recurring-habit-main > span {
@@ -7239,9 +7279,24 @@ textarea {
 
 .recurring-habit-metrics svg,
 .recurring-overview-stats svg {
-  color: var(--teal);
   flex: 0 0 auto;
   stroke-width: 2.5;
+}
+
+.metric-month svg {
+  color: #10b981;
+}
+
+.metric-total svg {
+  color: #2563eb;
+}
+
+.metric-percent svg {
+  color: #7c3aed;
+}
+
+.metric-streak svg {
+  color: #ef4444;
 }
 
 .habit-icon-badge {
@@ -7271,6 +7326,12 @@ textarea {
 .recurring-check-button.checked {
   background: var(--teal);
   border-color: var(--teal);
+}
+
+.recurring-check-button.ghost {
+  background: transparent;
+  border-color: transparent;
+  pointer-events: none;
 }
 
 .recurring-detail-panel.empty {
@@ -7323,10 +7384,10 @@ textarea {
 
 .recurring-stat-icon {
   align-items: center;
-  background: #ffffff;
-  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--recurring-stat-color, var(--teal)) 11%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--recurring-stat-color, var(--teal)) 22%, #ffffff);
   border-radius: 999px;
-  color: var(--teal);
+  color: var(--recurring-stat-color, var(--teal));
   display: inline-flex;
   height: 32px;
   justify-content: center;
