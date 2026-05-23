@@ -195,7 +195,10 @@ function trackedFileContent(file) {
 
 function hasNonPlaceholderEnvValue(content, names) {
   const escapedNames = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
-  const assignmentPattern = new RegExp(`^\\\\s*(?:${escapedNames})\\\\s*=\\\\s*(.+?)\\\\s*$`, "gmu");
+  const assignmentPattern = new RegExp(
+    `^[^\\S\\r\\n]*(?:${escapedNames})[^\\S\\r\\n]*=[^\\S\\r\\n]*(.*?)[^\\S\\r\\n]*$`,
+    "gmu"
+  );
   let match;
 
   while ((match = assignmentPattern.exec(content)) !== null) {
@@ -225,6 +228,25 @@ function isPlaceholderSecretValue(value) {
   );
 }
 
+function assertSecretEnvAssignmentScanner() {
+  const cronSecretName = ["CRON", "SECRET"].join("_");
+  const firebasePrivateKeyName = ["FIREBASE", "CLEANUP", "PRIVATE", "KEY"].join("_");
+  const vercelTokenName = ["VERCEL", "TOKEN"].join("_");
+
+  if (!hasNonPlaceholderEnvValue(`  ${cronSecretName} = "supersecret-value"`, [cronSecretName])) {
+    errors.push("secret env assignment scanner failed to detect a non-placeholder value");
+  }
+
+  if (hasNonPlaceholderEnvValue(`${cronSecretName}=\n${firebasePrivateKeyName}=`, [cronSecretName, firebasePrivateKeyName])) {
+    errors.push("secret env assignment scanner rejected an empty example value");
+  }
+
+  if (hasNonPlaceholderEnvValue(`${vercelTokenName}=at-least-16-random-characters`, [vercelTokenName])) {
+    errors.push("secret env assignment scanner rejected an allowed placeholder value");
+  }
+}
+
+assertSecretEnvAssignmentScanner();
 assertRequiredPatterns(".gitignore", requiredGitignorePatterns);
 assertRequiredPatterns(".vercelignore", requiredVercelignorePatterns);
 
