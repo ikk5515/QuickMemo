@@ -109,6 +109,52 @@ const forbiddenTrackedPathRules = [
   }
 ];
 
+const forbiddenContentRules = [
+  {
+    label: "private key block",
+    pattern: /-----BEGIN (?:RSA |EC |OPENSSH |)?PRIVATE KEY-----[\s\S]{80,}?-----END (?:RSA |EC |OPENSSH |)?PRIVATE KEY-----/
+  },
+  {
+    label: "Firebase service-account JSON",
+    test: (content) =>
+      /"type"\s*:\s*"service_account"/.test(content) &&
+      /"private_key_id"\s*:/.test(content) &&
+      /"private_key"\s*:/.test(content)
+  },
+  {
+    label: "Firebase Admin SDK service-account email",
+    pattern: /firebase-adminsdk-[A-Za-z0-9_-]+@[^\s"']+\.iam\.gserviceaccount\.com/
+  },
+  {
+    label: "non-placeholder secret env assignment",
+    test: (content) =>
+      hasNonPlaceholderEnvValue(content, [
+        "CRON_SECRET",
+        "FIREBASE_CLEANUP_PRIVATE_KEY",
+        "FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON",
+        "VERCEL_TOKEN",
+        "VERCEL_ORG_ID",
+        "VERCEL_PROJECT_ID"
+      ])
+  },
+  {
+    label: "Google API key",
+    pattern: /AIza[0-9A-Za-z_-]{35}/
+  },
+  {
+    label: "GitHub token",
+    pattern: /gh[pousr]_[A-Za-z0-9_]{36,}/
+  },
+  {
+    label: "Slack token",
+    pattern: /xox[baprs]-[A-Za-z0-9-]{20,}/
+  },
+  {
+    label: "AWS access key",
+    pattern: /AKIA[0-9A-Z]{16}/
+  }
+];
+
 const errors = [];
 
 function normalizedIgnoreLines(fileName) {
@@ -137,6 +183,48 @@ function trackedFiles() {
     .filter(Boolean);
 }
 
+function trackedFileContent(file) {
+  const rawContent = readFileSync(join(root, file));
+
+  if (rawContent.includes(0)) {
+    return null;
+  }
+
+  return rawContent.toString("utf8");
+}
+
+function hasNonPlaceholderEnvValue(content, names) {
+  const escapedNames = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("|");
+  const assignmentPattern = new RegExp(`^\\\\s*(?:${escapedNames})\\\\s*=\\\\s*(.+?)\\\\s*$`, "gmu");
+  let match;
+
+  while ((match = assignmentPattern.exec(content)) !== null) {
+    const value = match[1].trim().replace(/^['"]|['"]$/gu, "");
+
+    if (!value || isPlaceholderSecretValue(value)) {
+      continue;
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+function isPlaceholderSecretValue(value) {
+  const normalizedValue = value.toLowerCase();
+
+  return (
+    normalizedValue === "false" ||
+    normalizedValue === "true" ||
+    normalizedValue.includes("...") ||
+    normalizedValue.includes("your-") ||
+    normalizedValue.includes("example") ||
+    normalizedValue.includes("placeholder") ||
+    normalizedValue.includes("at-least-16-random-characters")
+  );
+}
+
 assertRequiredPatterns(".gitignore", requiredGitignorePatterns);
 assertRequiredPatterns(".vercelignore", requiredVercelignorePatterns);
 
@@ -145,6 +233,18 @@ for (const file of trackedFiles()) {
 
   if (matchedRule) {
     errors.push(`tracked ${matchedRule.label} must be removed from git: ${file}`);
+  }
+
+  const content = trackedFileContent(file);
+
+  if (content === null) {
+    continue;
+  }
+
+  const matchedContentRule = forbiddenContentRules.find((rule) => rule.pattern?.test(content) || rule.test?.(content, file));
+
+  if (matchedContentRule) {
+    errors.push(`tracked file appears to contain ${matchedContentRule.label}: ${file}`);
   }
 }
 
