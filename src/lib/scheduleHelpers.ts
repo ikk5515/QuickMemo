@@ -282,6 +282,23 @@ export function compareCompletedTasks(left: DecryptedScheduleTask, right: Decryp
 }
 
 export function compareMatrixTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  const leftDate = taskStartDate(left);
+  const rightDate = taskStartDate(right);
+  const leftHasDate = isValidScheduleDateString(leftDate);
+  const rightHasDate = isValidScheduleDateString(rightDate);
+
+  if (leftHasDate && rightHasDate && leftDate !== rightDate) {
+    return leftDate.localeCompare(rightDate);
+  }
+
+  if (leftHasDate && !rightHasDate) {
+    return -1;
+  }
+
+  if (!leftHasDate && rightHasDate) {
+    return 1;
+  }
+
   const manualOrder = compareManualOrderWithinSameDate(left, right);
 
   if (manualOrder !== 0) {

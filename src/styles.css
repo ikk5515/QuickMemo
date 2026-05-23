@@ -6048,6 +6048,11 @@ textarea {
   font-weight: 700;
 }
 
+.matrix-task-row .task-main span.task-meta.overdue {
+  color: #dc2626;
+  font-weight: 800;
+}
+
 .task-flags {
   align-items: center;
   color: var(--gold);

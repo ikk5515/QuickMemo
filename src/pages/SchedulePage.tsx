@@ -739,6 +739,7 @@ export default function SchedulePage() {
         {activeView === "matrix" && (
           <MatrixView
             sections={matrixSections}
+            today={today}
             onAddSection={openMatrixCreateDialog}
             onMoveTaskToSection={(task, sectionKey) => void moveTaskToMatrixSection(task, sectionKey)}
             onOpen={setViewTaskId}
@@ -1684,7 +1685,8 @@ function MatrixView({
   onOpen,
   onReorderTasks,
   onToggle,
-  sections
+  sections,
+  today
 }: {
   onAddSection: (section: MatrixSection) => void;
   onMoveTaskToSection: (task: DecryptedScheduleTask, sectionKey: MatrixQuadrantKey) => void;
@@ -1692,6 +1694,7 @@ function MatrixView({
   onReorderTasks: (activeTaskId: string, overTaskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   sections: MatrixSection[];
+  today: string;
 }) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
@@ -1756,6 +1759,7 @@ function MatrixView({
             onToggle={onToggle}
             onToggleGroup={toggleGroup}
             section={section}
+            today={today}
           />
         ))}
       </div>
@@ -1765,7 +1769,7 @@ function MatrixView({
             <span className="task-drag-handle ghost">
               <GripVertical size={16} />
             </span>
-            <MatrixTaskRowContent task={activeTask} />
+            <MatrixTaskRowContent task={activeTask} today={today} />
           </div>
         ) : null}
       </DragOverlay>
@@ -1779,7 +1783,8 @@ function MatrixSectionPanel({
   onOpen,
   onToggle,
   onToggleGroup,
-  section
+  section,
+  today
 }: {
   collapsedGroups: Record<string, boolean>;
   onAddSection: (section: MatrixSection) => void;
@@ -1787,6 +1792,7 @@ function MatrixSectionPanel({
   onToggle: (task: DecryptedScheduleTask) => void;
   onToggleGroup: (sectionKey: MatrixQuadrantKey, groupKey: string) => void;
   section: MatrixSection;
+  today: string;
 }) {
   const { isOver, setNodeRef } = useDroppable({
     id: matrixSectionDropId(section.key),
@@ -1814,7 +1820,13 @@ function MatrixSectionPanel({
         </button>
       </header>
       {section.key === "urgentImportant" ? (
-        <MatrixSortableTaskList sectionKey={section.key} tasks={section.tasks} onOpen={onOpen} onToggle={onToggle} />
+        <MatrixSortableTaskList
+          sectionKey={section.key}
+          tasks={section.tasks}
+          today={today}
+          onOpen={onOpen}
+          onToggle={onToggle}
+        />
       ) : (
         <div className="matrix-date-groups">
           {section.dateGroups.map((group) => {
@@ -1840,6 +1852,7 @@ function MatrixSectionPanel({
                     emptyMessage="표시할 일정이 없습니다."
                     sectionKey={section.key}
                     tasks={group.tasks}
+                    today={today}
                     onOpen={onOpen}
                     onToggle={onToggle}
                   />
@@ -1858,13 +1871,15 @@ function MatrixSortableTaskList({
   onOpen,
   onToggle,
   sectionKey,
-  tasks
+  tasks,
+  today
 }: {
   emptyMessage?: string;
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   sectionKey: MatrixQuadrantKey;
   tasks: DecryptedScheduleTask[];
+  today: string;
 }) {
   if (!tasks.length) {
     return <p className="schedule-empty">{emptyMessage}</p>;
@@ -1878,6 +1893,7 @@ function MatrixSortableTaskList({
             key={task.id}
             sectionKey={sectionKey}
             task={task}
+            today={today}
             onOpen={onOpen}
             onToggle={onToggle}
           />
@@ -1891,12 +1907,14 @@ function SortableMatrixTaskRow({
   onOpen,
   onToggle,
   sectionKey,
-  task
+  task,
+  today
 }: {
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   sectionKey: MatrixQuadrantKey;
   task: DecryptedScheduleTask;
+  today: string;
 }) {
   const {
     attributes,
@@ -1931,7 +1949,7 @@ function SortableMatrixTaskRow({
       >
         <GripVertical size={16} />
       </button>
-      <MatrixTaskRowContent task={task} onOpen={onOpen} onToggle={onToggle} />
+      <MatrixTaskRowContent task={task} today={today} onOpen={onOpen} onToggle={onToggle} />
     </div>
   );
 }
@@ -1939,13 +1957,16 @@ function SortableMatrixTaskRow({
 function MatrixTaskRowContent({
   onOpen,
   onToggle,
-  task
+  task,
+  today
 }: {
   onOpen?: (taskId: string) => void;
   onToggle?: (task: DecryptedScheduleTask) => void;
   task: DecryptedScheduleTask;
+  today: string;
 }) {
   const progressPercent = normalizeTaskProgressPercent(task.progressPercent);
+  const isOverdue = isTaskScheduleOverdue(task, today);
 
   return (
     <>
@@ -1961,7 +1982,7 @@ function MatrixTaskRowContent({
       </button>
       <button className="task-main task-open-button" type="button" onClick={() => onOpen?.(task.id)}>
         <strong>{task.title}</strong>
-        <span>{formatTaskMeta(task)}</span>
+        <span className={isOverdue ? "task-meta overdue" : "task-meta"}>{formatTaskMeta(task)}</span>
         <span
           aria-label={`${task.title} 진행률 ${progressPercent}%`}
           aria-valuemax={100}
@@ -3284,6 +3305,12 @@ function formatTaskDateDisplay(task: DecryptedScheduleTask) {
 
 function formatTaskMeta(task: DecryptedScheduleTask) {
   return `${formatTaskDateDisplay(task)}${formatScheduleTimeRange(task) ? ` · ${formatScheduleTimeRange(task)}` : ""}`;
+}
+
+function isTaskScheduleOverdue(task: DecryptedScheduleTask, today: string) {
+  const endDate = taskEndDate(task);
+
+  return Boolean(task.status === "active" && isValidScheduleDateString(endDate) && endDate < today);
 }
 
 function formatCompletedTaskMeta(task: DecryptedScheduleTask) {
