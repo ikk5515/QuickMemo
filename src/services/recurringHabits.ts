@@ -2,6 +2,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   getDocs,
   onSnapshot,
   query,
@@ -50,6 +51,12 @@ export interface UpdateRecurringHabitInput {
   color?: string;
   sortOrder?: number | null;
   status?: RecurringHabitStatus;
+}
+
+export interface UpdateRecurringHabitDayStateInput {
+  checkedItemIds?: string[];
+  completed?: boolean;
+  progressPercent?: number | null;
 }
 
 function timestampMillis(timestamp: RecurringHabitDocument["updatedAt"]) {
@@ -196,6 +203,8 @@ export async function setRecurringHabitCheckIn(uid: string, habitId: string, dat
 
   try {
     await updateDoc(checkInRef, {
+      completed: true,
+      progressPercent: 100,
       checkedAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
@@ -210,7 +219,44 @@ export async function setRecurringHabitCheckIn(uid: string, habitId: string, dat
     ownerUid: uid,
     habitId,
     date,
+    completed: true,
+    progressPercent: 100,
+    checkedItemIds: [],
     checkedAt: serverTimestamp(),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function updateRecurringHabitDayState(
+  uid: string,
+  habitId: string,
+  date: string,
+  input: UpdateRecurringHabitDayStateInput
+) {
+  const checkInRef = doc(db, "recurringHabitCheckIns", recurringCheckInId(habitId, date));
+  const nextState = {
+    ...(input.completed !== undefined ? { completed: input.completed } : {}),
+    ...(input.progressPercent !== undefined ? { progressPercent: input.progressPercent } : {}),
+    ...(input.checkedItemIds !== undefined ? { checkedItemIds: input.checkedItemIds } : {}),
+    ...(input.completed !== undefined ? { checkedAt: input.completed === true ? serverTimestamp() : null } : {}),
+    updatedAt: serverTimestamp()
+  };
+  const snapshot = await getDoc(checkInRef);
+
+  if (snapshot.exists()) {
+    await updateDoc(checkInRef, nextState);
+    return;
+  }
+
+  await setDoc(checkInRef, {
+    ownerUid: uid,
+    habitId,
+    date,
+    completed: input.completed ?? false,
+    progressPercent: input.progressPercent ?? 0,
+    checkedItemIds: input.checkedItemIds ?? [],
+    checkedAt: input.completed === true ? serverTimestamp() : null,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp()
   });

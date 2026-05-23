@@ -571,6 +571,24 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/recurringHabits/$(habitId)).data.ownerUid == uid;
     }
 
+    function validRecurringHabitCheckInProgress(data) {
+      return !data.keys().hasAny(["progressPercent"])
+        || data.progressPercent == null
+        || (
+          data.progressPercent is int
+          && data.progressPercent >= 0
+          && data.progressPercent <= 100
+        );
+    }
+
+    function validRecurringHabitCheckedItemIds(data) {
+      return !data.keys().hasAny(["checkedItemIds"])
+        || (
+          data.checkedItemIds is list
+          && data.checkedItemIds.size() <= 100
+        );
+    }
+
     function validRecurringHabitCheckIn(data, uid, checkInId) {
       return data.keys().hasAll([
         "ownerUid",
@@ -584,6 +602,9 @@ service cloud.firestore {
         "ownerUid",
         "habitId",
         "date",
+        "completed",
+        "progressPercent",
+        "checkedItemIds",
         "checkedAt",
         "createdAt",
         "updatedAt"
@@ -595,8 +616,16 @@ service cloud.firestore {
       && validScheduleDate(data.date)
       && data.date != null
       && checkInId == data.habitId + "_" + data.date
-      && data.checkedAt is timestamp
-      && data.checkedAt <= request.time
+      && (!data.keys().hasAny(["completed"]) || data.completed is bool)
+      && validRecurringHabitCheckInProgress(data)
+      && validRecurringHabitCheckedItemIds(data)
+      && (
+        data.checkedAt == null
+        || (
+          data.checkedAt is timestamp
+          && data.checkedAt <= request.time
+        )
+      )
       && data.createdAt is timestamp
       && data.updatedAt is timestamp
       && recurringHabitBelongsToOwner(data.habitId, uid);
@@ -1600,6 +1629,9 @@ service cloud.firestore {
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.updatedAt == request.time
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "completed",
+          "progressPercent",
+          "checkedItemIds",
           "checkedAt",
           "updatedAt"
         ]);

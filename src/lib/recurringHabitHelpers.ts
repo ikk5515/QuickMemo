@@ -2,7 +2,8 @@ import type {
   DecryptedRecurringHabit,
   RecurringHabitCheckInDocument,
   RecurringHabitIcon,
-  RecurringHabitSlot
+  RecurringHabitSlot,
+  ScheduleChecklistItem
 } from "../types";
 import {
   addDays,
@@ -66,13 +67,36 @@ export const recurringHabitIconValues = Object.keys(recurringHabitIconLabels) as
 
 export function normalizeRecurringHabitDetails(value: unknown) {
   if (!value || typeof value !== "object") {
-    return { description: "" };
+    return { description: "", checklist: [] };
   }
 
-  const details = value as { description?: unknown };
+  const details = value as { checklist?: unknown; description?: unknown };
+  const checklist = Array.isArray(details.checklist)
+    ? details.checklist
+      .map((item, index): ScheduleChecklistItem | null => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+
+        const checklistItem = item as { checked?: unknown; id?: unknown; text?: unknown };
+        const text = typeof checklistItem.text === "string" ? checklistItem.text.trim() : "";
+
+        if (!text) {
+          return null;
+        }
+
+        return {
+          id: typeof checklistItem.id === "string" && checklistItem.id ? checklistItem.id : `recurring-checklist-${index}`,
+          text,
+          checked: false
+        };
+      })
+      .filter((item): item is ScheduleChecklistItem => Boolean(item))
+    : [];
 
   return {
-    description: typeof details.description === "string" ? details.description : ""
+    description: typeof details.description === "string" ? details.description : "",
+    checklist
   };
 }
 
@@ -148,7 +172,53 @@ export function buildRecurringHabitOrderUpdates(
 }
 
 export function isHabitCheckedOn(checkIns: RecurringHabitCheckInDocument[], habitId: string, date: string) {
-  return checkIns.some((checkIn) => checkIn.habitId === habitId && checkIn.date === date);
+  const checkIn = recurringHabitDayState(checkIns, habitId, date);
+
+  return checkIn ? recurringHabitCheckInCompleted(checkIn) : false;
+}
+
+export function recurringHabitDayState(
+  checkIns: RecurringHabitCheckInDocument[],
+  habitId: string,
+  date: string
+) {
+  return checkIns.find((checkIn) => checkIn.habitId === habitId && checkIn.date === date) ?? null;
+}
+
+export function recurringHabitDayCheckedItemIds(
+  checkIns: RecurringHabitCheckInDocument[],
+  habitId: string,
+  date: string
+) {
+  const state = recurringHabitDayState(checkIns, habitId, date);
+
+  return new Set(
+    Array.isArray(state?.checkedItemIds)
+      ? state.checkedItemIds.filter((itemId): itemId is string => typeof itemId === "string" && itemId.length > 0)
+      : []
+  );
+}
+
+export function recurringHabitDayProgressPercent(
+  habit: DecryptedRecurringHabit,
+  checkIns: RecurringHabitCheckInDocument[],
+  date: string
+) {
+  const state = recurringHabitDayState(checkIns, habit.id, date);
+  const storedPercent = normalizeRecurringProgressPercent(state?.progressPercent);
+
+  if (storedPercent != null) {
+    return storedPercent;
+  }
+
+  if (habit.details.checklist.length > 0) {
+    const checkedIds = recurringHabitDayCheckedItemIds(checkIns, habit.id, date);
+    const checkedCount = habit.details.checklist.filter((item) => checkedIds.has(item.id)).length;
+
+    return Math.round((checkedCount / habit.details.checklist.length) * 100);
+  }
+
+  return state && recurringHabitCheckInCompleted(state) ? 100 : 0;
 }
 
 export function calculateRecurringDateProgress(
@@ -194,7 +264,11 @@ export function calculateHabitMonthStats(
   today = toLocalDateString(new Date())
 ): RecurringHabitMonthStats {
   const safeMonth = normalizeMonthString(month, today.slice(0, 7));
-  const checkedDays = checkIns.filter((checkIn) => checkIn.habitId === habitId && checkIn.date.startsWith(`${safeMonth}-`)).length;
+  const checkedDays = checkIns.filter((checkIn) =>
+    checkIn.habitId === habitId
+    && checkIn.date.startsWith(`${safeMonth}-`)
+    && recurringHabitCheckInCompleted(checkIn)
+  ).length;
   const denominatorDays = monthDenominatorDays(safeMonth, today);
 
   return {
@@ -275,9 +349,25 @@ function safeSortOrder(habit: Pick<DecryptedRecurringHabit, "sortOrder">) {
 function checkInDateSet(habitId: string, checkIns: RecurringHabitCheckInDocument[]) {
   return new Set(
     checkIns
-      .filter((checkIn) => checkIn.habitId === habitId && isValidScheduleDateString(checkIn.date))
+      .filter((checkIn) =>
+        checkIn.habitId === habitId
+        && isValidScheduleDateString(checkIn.date)
+        && recurringHabitCheckInCompleted(checkIn)
+      )
       .map((checkIn) => checkIn.date)
   );
+}
+
+function recurringHabitCheckInCompleted(checkIn: RecurringHabitCheckInDocument) {
+  return checkIn.completed !== false;
+}
+
+function normalizeRecurringProgressPercent(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(value)));
 }
 
 function monthDenominatorDays(month: string, today: string) {

@@ -6089,6 +6089,28 @@ textarea {
   font-weight: 800;
 }
 
+.task-progress-strip {
+  background:
+    linear-gradient(
+      90deg,
+      var(--task-list-progress-color, var(--teal)) 0 var(--task-list-progress-fill, 0%),
+      color-mix(in srgb, var(--task-list-progress-color, var(--teal)) 12%, var(--surface)) var(--task-list-progress-fill, 0%) 100%
+    );
+  border-radius: 999px;
+  display: block;
+  height: 4px;
+  margin-top: 3px;
+  min-height: 4px;
+  overflow: hidden;
+  text-decoration: none;
+  width: 100%;
+}
+
+.task-row.completed .task-main .task-progress-strip {
+  opacity: 0.72;
+  text-decoration: none;
+}
+
 .task-flags {
   align-items: center;
   color: var(--gold);
@@ -7181,6 +7203,7 @@ textarea {
   background: #ffffff;
   border: 1px solid transparent;
   border-radius: 8px;
+  cursor: grab;
   display: grid;
   gap: 10px;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -7201,6 +7224,10 @@ textarea {
 
 .recurring-habit-row.dragging {
   opacity: 0.45;
+}
+
+.recurring-habit-row:active {
+  cursor: grabbing;
 }
 
 .recurring-drag-overlay {
@@ -7231,8 +7258,8 @@ textarea {
   background: transparent;
   color: inherit;
   display: grid;
-  gap: 10px;
-  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr);
   justify-content: stretch;
   min-height: 0;
   min-width: 0;
@@ -7242,26 +7269,72 @@ textarea {
 
 .recurring-habit-main.overlay {
   align-items: center;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr);
 }
 
-.recurring-habit-main > span {
+.recurring-habit-content {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+  justify-content: stretch;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.recurring-habit-content:hover,
+.recurring-habit-content:focus-visible {
+  background: transparent;
+  box-shadow: none;
+}
+
+.recurring-habit-content > span,
+.recurring-habit-main.overlay > span {
   display: grid;
   gap: 3px;
   min-width: 0;
 }
 
-.recurring-habit-main strong,
+.recurring-habit-content strong,
+.recurring-habit-main.overlay strong,
 .recurring-overview-title strong {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recurring-habit-main small,
+.recurring-habit-content small,
+.recurring-habit-main.overlay small,
 .recurring-overview-title small {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+}
+
+.recurring-habit-progress-strip {
+  background:
+    linear-gradient(
+      90deg,
+      var(--recurring-habit-progress-color, var(--teal)) 0 var(--recurring-habit-progress-fill, 0%),
+      color-mix(in srgb, var(--recurring-habit-progress-color, var(--teal)) 12%, var(--surface)) var(--recurring-habit-progress-fill, 0%) 100%
+    );
+  border: 0;
+  border-radius: 999px;
+  display: block;
+  height: 4px;
+  min-height: 4px;
+  overflow: hidden;
+  padding: 0;
+  width: 100%;
+}
+
+.recurring-habit-progress-strip:hover,
+.recurring-habit-progress-strip:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--recurring-habit-progress-color, var(--teal)) 18%, transparent);
 }
 
 .recurring-habit-metrics {
@@ -7317,6 +7390,7 @@ textarea {
   border: 1.5px solid var(--line);
   border-radius: 999px;
   color: #ffffff;
+  cursor: pointer;
   height: 32px;
   min-height: 32px;
   padding: 0;
@@ -7351,6 +7425,18 @@ textarea {
   gap: 10px;
   grid-template-columns: auto minmax(0, 1fr);
   min-width: 0;
+}
+
+.recurring-read-title {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-width: 0;
+}
+
+.recurring-read-modal .task-progress {
+  margin-bottom: 14px;
 }
 
 .recurring-detail-title h2 {

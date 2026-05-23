@@ -9,7 +9,9 @@ import {
   calculateRecurringDateProgress,
   groupRecurringHabitsBySlot,
   isHabitCheckedOn,
-  normalizeRecurringHabitDetails
+  normalizeRecurringHabitDetails,
+  recurringHabitDayCheckedItemIds,
+  recurringHabitDayProgressPercent
 } from "./recurringHabitHelpers";
 
 function timestamp(value: string) {
@@ -36,24 +38,45 @@ function habit(id: string, overrides: Partial<DecryptedRecurringHabit> = {}): De
     createdAt: timestamp("2026-05-01T00:00:00.000Z"),
     updatedAt: timestamp("2026-05-01T00:00:00.000Z"),
     title: id,
-    details: { description: "" },
+    details: { description: "", checklist: [] },
     ...overrides
   };
 }
 
-function checkIn(habitId: string, date: string): RecurringHabitCheckInDocument {
+function checkIn(
+  habitId: string,
+  date: string,
+  overrides: Partial<RecurringHabitCheckInDocument> = {}
+): RecurringHabitCheckInDocument {
   return {
     ownerUid: "user-a",
     habitId,
-    date
+    date,
+    ...overrides
   };
 }
 
 describe("recurring habit helpers", () => {
   it("normalizes encrypted detail payloads safely", () => {
-    expect(normalizeRecurringHabitDetails({ description: "memo" })).toEqual({ description: "memo" });
-    expect(normalizeRecurringHabitDetails({ description: 1 })).toEqual({ description: "" });
-    expect(normalizeRecurringHabitDetails(null)).toEqual({ description: "" });
+    expect(normalizeRecurringHabitDetails({ description: "memo" })).toEqual({ description: "memo", checklist: [] });
+    expect(normalizeRecurringHabitDetails({ description: 1 })).toEqual({ description: "", checklist: [] });
+    expect(normalizeRecurringHabitDetails(null)).toEqual({ description: "", checklist: [] });
+    expect(
+      normalizeRecurringHabitDetails({
+        checklist: [
+          { checked: true, id: "read", text: "  읽기  " },
+          { checked: true, text: "쓰기" },
+          { checked: true, text: " " }
+        ],
+        description: "memo"
+      })
+    ).toEqual({
+      description: "memo",
+      checklist: [
+        { checked: false, id: "read", text: "읽기" },
+        { checked: false, id: "recurring-checklist-1", text: "쓰기" }
+      ]
+    });
   });
 
   it("builds a 7-day strip ending on the anchor date", () => {
@@ -129,13 +152,33 @@ describe("recurring habit helpers", () => {
     });
   });
 
+  it("calculates daily checklist state and progress separately from the template", () => {
+    const readingHabit = habit("read", {
+      details: {
+        description: "",
+        checklist: [
+          { id: "book", text: "책 읽기", checked: false },
+          { id: "memo", text: "메모", checked: false }
+        ]
+      }
+    });
+    const checkIns = [
+      checkIn("read", "2026-05-21", { checkedItemIds: ["book"], completed: false, progressPercent: 50 })
+    ];
+
+    expect([...recurringHabitDayCheckedItemIds(checkIns, "read", "2026-05-21")]).toEqual(["book"]);
+    expect(recurringHabitDayProgressPercent(readingHabit, checkIns, "2026-05-21")).toBe(50);
+    expect(isHabitCheckedOn(checkIns, "read", "2026-05-21")).toBe(false);
+  });
+
   it("calculates total check-ins and streak through the anchor date", () => {
     const checkIns = [
       checkIn("work", "2026-05-18"),
       checkIn("work", "2026-05-20"),
       checkIn("work", "2026-05-21"),
       checkIn("work", "2026-05-22"),
-      checkIn("other", "2026-05-22")
+      checkIn("other", "2026-05-22"),
+      checkIn("work", "2026-05-23", { completed: false, progressPercent: 40 })
     ];
 
     expect(isHabitCheckedOn(checkIns, "work", "2026-05-21")).toBe(true);
@@ -147,6 +190,7 @@ describe("recurring habit helpers", () => {
       totalCheckIns: 4,
       streakDays: 0
     });
+    expect(isHabitCheckedOn(checkIns, "work", "2026-05-23")).toBe(false);
   });
 
   it("calculates current-month ratio against elapsed days", () => {

@@ -247,6 +247,7 @@ export type RecurringHabitStatus = "active" | "archived";
 
 export interface RecurringHabitDetails {
   description: string;
+  checklist: ScheduleChecklistItem[];
 }
 
 export interface RecurringHabitDocument {
@@ -275,7 +276,10 @@ export interface RecurringHabitCheckInDocument {
   ownerUid: string;
   habitId: string;
   date: string;
-  checkedAt?: Timestamp;
+  completed?: boolean;
+  progressPercent?: number | null;
+  checkedItemIds?: string[];
+  checkedAt?: Timestamp | null;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }

@@ -74,6 +74,8 @@ import {
   normalizeMonthString,
   normalizeRecurringHabitDetails,
   recurringCheckInId,
+  recurringHabitDayCheckedItemIds,
+  recurringHabitDayProgressPercent,
   recurringHabitIconLabels,
   recurringHabitIconValues,
   recurringHabitSlots
@@ -124,6 +126,7 @@ import {
   subscribeRecurringHabitCheckIns,
   subscribeRecurringHabits,
   updateRecurringHabit,
+  updateRecurringHabitDayState,
   updateRecurringHabitOrderBatch,
   type RecurringHabitCheckInSnapshot,
   type RecurringHabitSnapshot
@@ -166,6 +169,7 @@ type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
 type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
 type CompletedPriorityFilter = "all" | "important" | "urgent" | "importantUrgent";
 type TaskDetailsUpdater = (details: ScheduleTaskDetails) => ScheduleTaskDetails;
+type RecurringHabitDetailsUpdater = (details: RecurringHabitDetails) => RecurringHabitDetails;
 
 interface QuickDefaults {
   startDate?: string | null;
@@ -241,6 +245,7 @@ export default function SchedulePage() {
   const [viewTaskId, setViewTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [viewRecurringHabitId, setViewRecurringHabitId] = useState<string | null>(null);
+  const [readRecurringHabitId, setReadRecurringHabitId] = useState<string | null>(null);
   const [recurringHabitDialog, setRecurringHabitDialog] = useState<RecurringHabitDialogState | null>(null);
   const [recurringOverviewOpen, setRecurringOverviewOpen] = useState(false);
   const [selectedRecurringDate, setSelectedRecurringDate] = useState(() => toLocalDateString(new Date()));
@@ -259,7 +264,9 @@ export default function SchedulePage() {
   const [error, setError] = useState<string | null>(null);
   const [today, setToday] = useState(() => toLocalDateString(new Date()));
   const decryptedTasksRef = useRef<DecryptedScheduleTask[]>([]);
+  const decryptedRecurringHabitsRef = useRef<DecryptedRecurringHabit[]>([]);
   const taskDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<ScheduleTaskDetails>>>>({});
+  const recurringDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<RecurringHabitDetails>>>>({});
 
   useEffect(() => {
     if (!profile) {
@@ -451,6 +458,10 @@ export default function SchedulePage() {
     decryptedTasksRef.current = decryptedTasks;
   }, [decryptedTasks]);
 
+  useEffect(() => {
+    decryptedRecurringHabitsRef.current = decryptedRecurringHabits;
+  }, [decryptedRecurringHabits]);
+
   const sortedTasks = useMemo(() => [...decryptedTasks].sort(compareTaskSchedule), [decryptedTasks]);
   const viewTask = useMemo(
     () => sortedTasks.find((task) => task.id === viewTaskId) ?? null,
@@ -463,6 +474,10 @@ export default function SchedulePage() {
   const selectedRecurringHabit = useMemo(
     () => decryptedRecurringHabits.find((habit) => habit.id === viewRecurringHabitId) ?? null,
     [decryptedRecurringHabits, viewRecurringHabitId]
+  );
+  const readRecurringHabit = useMemo(
+    () => decryptedRecurringHabits.find((habit) => habit.id === readRecurringHabitId) ?? null,
+    [decryptedRecurringHabits, readRecurringHabitId]
   );
   const editingRecurringHabit = useMemo(
     () => decryptedRecurringHabits.find((habit) => habit.id === recurringHabitDialog?.habitId) ?? null,
@@ -496,7 +511,10 @@ export default function SchedulePage() {
     if (viewRecurringHabitId && !selectedRecurringHabit) {
       setViewRecurringHabitId(null);
     }
-  }, [selectedRecurringHabit, viewRecurringHabitId]);
+    if (readRecurringHabitId && !readRecurringHabit) {
+      setReadRecurringHabitId(null);
+    }
+  }, [readRecurringHabit, readRecurringHabitId, selectedRecurringHabit, viewRecurringHabitId]);
 
   if (!profile) {
     return null;
@@ -826,10 +844,70 @@ export default function SchedulePage() {
   }
 
   async function encryptRecurringHabitFields(title: string, details: RecurringHabitDetails, habitKey: CryptoKey) {
+    const normalizedDetails = normalizeMutableRecurringHabitDetails(details);
+
     return Promise.all([
       encryptText(title.trim() || "반복 업무", habitKey),
-      encryptText(JSON.stringify({ description: details.description }), habitKey)
+      encryptText(JSON.stringify(normalizedDetails), habitKey)
     ]);
+  }
+
+  function currentRecurringHabitDetails(habit: DecryptedRecurringHabit) {
+    return decryptedRecurringHabitsRef.current.find((currentHabit) => currentHabit.id === habit.id)?.details
+      ?? habit.details
+      ?? { description: "", checklist: [] };
+  }
+
+  function normalizeMutableRecurringHabitDetails(details: RecurringHabitDetails): RecurringHabitDetails {
+    const normalizedDetails = normalizeRecurringHabitDetails(details);
+
+    return {
+      description: normalizedDetails.description,
+      checklist: normalizedDetails.checklist
+        .map((item) => ({ ...item, text: item.text.trim(), checked: false }))
+        .filter((item) => item.text)
+    };
+  }
+
+  async function updateRecurringHabitDetails(
+    habit: DecryptedRecurringHabit,
+    updateDetails: RecurringHabitDetailsUpdater,
+    fallback: string
+  ) {
+    const wrappedKey = habit.wrappedKeys[unlockedProfile.uid];
+
+    if (!wrappedKey) {
+      setError("반복 업무 암호화 키를 찾지 못했습니다.");
+      return false;
+    }
+
+    const queuedUpdate = recurringDetailsUpdateQueueRef.current[habit.id];
+    const previousUpdate = queuedUpdate ?? Promise.resolve(currentRecurringHabitDetails(habit));
+    const nextUpdate = previousUpdate
+      .catch(() => currentRecurringHabitDetails(habit))
+      .then(async (queuedDetails) => {
+        const habitKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
+        const nextDetails = normalizeMutableRecurringHabitDetails(updateDetails(queuedDetails));
+        const encryptedDetails = await encryptText(JSON.stringify(nextDetails), habitKey);
+
+        await updateRecurringHabit(habit.id, unlockedProfile.uid, { encryptedDetails });
+        return nextDetails;
+      });
+
+    recurringDetailsUpdateQueueRef.current[habit.id] = nextUpdate;
+
+    try {
+      await nextUpdate;
+      setError(null);
+      return true;
+    } catch (caught) {
+      setError(scheduleActionError(caught, fallback));
+      return false;
+    } finally {
+      if (recurringDetailsUpdateQueueRef.current[habit.id] === nextUpdate) {
+        delete recurringDetailsUpdateQueueRef.current[habit.id];
+      }
+    }
   }
 
   async function createRecurringHabitFromDraft(draft: RecurringHabitDraft) {
@@ -844,7 +922,7 @@ export default function SchedulePage() {
       const habitKey = await generateNoteKey();
       const [encryptedTitle, encryptedDetails] = await encryptRecurringHabitFields(
         trimmedTitle,
-        { description: draft.description },
+        { description: draft.description, checklist: [] },
         habitKey
       );
       const wrappedKey = await wrapNoteKey(habitKey, unlockedProfile.publicKeyJwk);
@@ -884,9 +962,10 @@ export default function SchedulePage() {
 
     try {
       const habitKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
+      const currentDetails = currentRecurringHabitDetails(habit);
       const [encryptedTitle, encryptedDetails] = await encryptRecurringHabitFields(
         draft.title,
-        { description: draft.description },
+        { description: draft.description, checklist: currentDetails.checklist },
         habitKey
       );
 
@@ -912,6 +991,7 @@ export default function SchedulePage() {
       await deleteRecurringHabit(habit.id, unlockedProfile.uid);
       setRecurringHabitDialog(null);
       setViewRecurringHabitId(null);
+      setReadRecurringHabitId(null);
       setStatus("반복 업무를 삭제했습니다.");
       setError(null);
     } catch (caught) {
@@ -953,7 +1033,11 @@ export default function SchedulePage() {
       }
 
       if (current.some((checkIn) => checkIn.habitId === habit.id && checkIn.date === date)) {
-        return current;
+        return current.map((checkIn) =>
+          checkIn.habitId === habit.id && checkIn.date === date
+            ? { ...checkIn, completed: true, progressPercent: 100 }
+            : checkIn
+        );
       }
 
       return [
@@ -962,7 +1046,10 @@ export default function SchedulePage() {
           id: checkInId,
           ownerUid: unlockedProfile.uid,
           habitId: habit.id,
-          date
+          date,
+          completed: true,
+          progressPercent: 100,
+          checkedItemIds: []
         }
       ];
     });
@@ -980,6 +1067,91 @@ export default function SchedulePage() {
         return next;
       });
     }
+  }
+
+  async function updateRecurringHabitDailyState(
+    habit: DecryptedRecurringHabit,
+    date: string,
+    input: { checkedItemIds?: string[]; completed?: boolean; progressPercent?: number | null }
+  ) {
+    if (!isValidScheduleDateString(date) || date > today) {
+      setError("오늘 또는 지난 날짜만 수정할 수 있습니다.");
+      return false;
+    }
+
+    const checkInId = recurringCheckInId(habit.id, date);
+    const previousCheckIns = recurringCheckIns;
+
+    setPendingRecurringCheckIn((current) => ({ ...current, [checkInId]: true }));
+    setRecurringCheckIns((current) => {
+      const existing = current.find((checkIn) => checkIn.habitId === habit.id && checkIn.date === date);
+      const nextState: RecurringHabitCheckInSnapshot = {
+        id: checkInId,
+        ownerUid: unlockedProfile.uid,
+        habitId: habit.id,
+        date,
+        ...(existing ?? {}),
+        ...(input.checkedItemIds !== undefined ? { checkedItemIds: input.checkedItemIds } : {}),
+        ...(input.completed !== undefined ? { completed: input.completed } : {}),
+        ...(input.progressPercent !== undefined ? { progressPercent: input.progressPercent } : {})
+      };
+
+      if (existing) {
+        return current.map((checkIn) =>
+          checkIn.habitId === habit.id && checkIn.date === date ? nextState : checkIn
+        );
+      }
+
+      return [...current, nextState];
+    });
+
+    try {
+      await updateRecurringHabitDayState(unlockedProfile.uid, habit.id, date, input);
+      setError(null);
+      return true;
+    } catch (caught) {
+      setRecurringCheckIns(previousCheckIns);
+      setError(scheduleActionError(caught, "반복 업무 진행 상태를 저장하지 못했습니다."));
+      return false;
+    } finally {
+      setPendingRecurringCheckIn((current) => {
+        const next = { ...current };
+        delete next[checkInId];
+        return next;
+      });
+    }
+  }
+
+  async function updateRecurringHabitProgress(habit: DecryptedRecurringHabit, date: string, percent: number) {
+    const progressPercent = normalizeTaskProgressPercent(percent);
+
+    await updateRecurringHabitDailyState(habit, date, {
+      completed: progressPercent >= 100,
+      progressPercent
+    });
+  }
+
+  async function toggleRecurringHabitChecklistItem(habit: DecryptedRecurringHabit, date: string, itemId: string) {
+    const checklist = habit.details.checklist;
+    const currentCheckedIds = recurringHabitDayCheckedItemIds(recurringCheckIns, habit.id, date);
+    const nextCheckedIds = new Set(currentCheckedIds);
+
+    if (nextCheckedIds.has(itemId)) {
+      nextCheckedIds.delete(itemId);
+    } else {
+      nextCheckedIds.add(itemId);
+    }
+
+    const checkedItemIds = checklist
+      .filter((item) => nextCheckedIds.has(item.id))
+      .map((item) => item.id);
+    const progressPercent = checklist.length ? Math.round((checkedItemIds.length / checklist.length) * 100) : 0;
+
+    await updateRecurringHabitDailyState(habit, date, {
+      checkedItemIds,
+      completed: checklist.length > 0 && progressPercent >= 100,
+      progressPercent
+    });
   }
 
   function quickDefaultsForActiveView(): QuickDefaults {
@@ -1117,6 +1289,7 @@ export default function SchedulePage() {
             onMonthChange={setRecurringMonth}
             onMoveHabit={(habitId, targetSlot, overHabitId) => void moveRecurringHabit(habitId, targetSlot, overHabitId)}
             onOpenHabit={setViewRecurringHabitId}
+            onReadHabit={setReadRecurringHabitId}
             onOpenOverview={() => setRecurringOverviewOpen(true)}
             onSelectDate={(date) => {
               setSelectedRecurringDate(date);
@@ -1169,6 +1342,26 @@ export default function SchedulePage() {
           onClose={() => setEditingTaskId(null)}
           onDelete={() => void removeTask(editingTask)}
           onSave={(draft) => void saveTask(editingTask, draft)}
+        />
+      )}
+
+      {readRecurringHabit && (
+        <RecurringHabitReadModal
+          checkIns={recurringCheckIns}
+          habit={readRecurringHabit}
+          selectedDate={selectedRecurringDate}
+          today={today}
+          onClose={() => setReadRecurringHabitId(null)}
+          onDelete={() => void removeRecurringHabit(readRecurringHabit)}
+          onEdit={() => {
+            setRecurringHabitDialog({ habitId: readRecurringHabit.id, mode: "edit" });
+            setReadRecurringHabitId(null);
+          }}
+          onToggleChecklist={(itemId) => toggleRecurringHabitChecklistItem(readRecurringHabit, selectedRecurringDate, itemId)}
+          onUpdateDetails={(updateDetails) =>
+            updateRecurringHabitDetails(readRecurringHabit, updateDetails, "반복 업무 상세 내용을 저장하지 못했습니다.")
+          }
+          onUpdateProgress={(percent) => updateRecurringHabitProgress(readRecurringHabit, selectedRecurringDate, percent)}
         />
       )}
 
@@ -1905,7 +2098,7 @@ function TodoView({
             <h2>{group.label}</h2>
             <span>{group.tasks.length}</span>
           </header>
-          <PagedTaskList tasks={group.tasks} today={today} onOpen={onOpen} onToggle={onToggle} />
+          <PagedTaskList tasks={group.tasks} today={today} showProgress onOpen={onOpen} onToggle={onToggle} />
         </section>
       ))}
     </div>
@@ -2586,6 +2779,7 @@ function PagedTaskList({
   onOpen,
   onToggle,
   pageSize = taskPageSize,
+  showProgress = false,
   strikeCompleted = true,
   today = toLocalDateString(new Date()),
   tasks
@@ -2595,6 +2789,7 @@ function PagedTaskList({
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   pageSize?: number;
+  showProgress?: boolean;
   strikeCompleted?: boolean;
   today?: string;
   tasks: DecryptedScheduleTask[];
@@ -2621,6 +2816,7 @@ function PagedTaskList({
         tasks={visibleTasks}
         onOpen={onOpen}
         onToggle={onToggle}
+        showProgress={showProgress}
         strikeCompleted={strikeCompleted}
         today={today}
       />
@@ -2819,6 +3015,7 @@ function TaskList({
   tasks,
   onOpen,
   onToggle,
+  showProgress = false,
   strikeCompleted = true,
   today = toLocalDateString(new Date())
 }: {
@@ -2827,6 +3024,7 @@ function TaskList({
   tasks: DecryptedScheduleTask[];
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
+  showProgress?: boolean;
   strikeCompleted?: boolean;
   today?: string;
 }) {
@@ -2837,29 +3035,78 @@ function TaskList({
   return (
     <div className="task-list">
       {tasks.map((task) => (
-        <div className={`task-row ${strikeCompleted && task.status === "completed" ? "completed" : ""}`} key={task.id}>
-          <button
-            className="task-check"
-            type="button"
-            role="checkbox"
-            aria-checked={task.status === "completed"}
-            aria-label={task.status === "completed" ? "일정 완료 해제" : "일정 완료"}
-            onClick={() => onToggle(task)}
-          >
-            {task.status === "completed" ? <CheckCircle2 size={18} /> : null}
-          </button>
-          <button className="task-main task-open-button" type="button" onClick={() => onOpen(task.id)}>
-            <strong>{task.title}</strong>
-            <span className={isTaskScheduleOverdue(task, today) ? "task-meta overdue" : "task-meta"}>
-              {getMeta ? getMeta(task) : formatTaskMeta(task)}
-            </span>
-          </button>
-          <span className="task-flags">
-            {task.isImportant && <Flag size={15} aria-label="중요" />}
-            {task.isUrgent && <Clock size={15} aria-label="긴급" />}
-          </span>
-        </div>
+        <TaskListRow
+          getMeta={getMeta}
+          key={task.id}
+          onOpen={onOpen}
+          onToggle={onToggle}
+          showProgress={showProgress}
+          strikeCompleted={strikeCompleted}
+          task={task}
+          today={today}
+        />
       ))}
+    </div>
+  );
+}
+
+function TaskListRow({
+  getMeta,
+  onOpen,
+  onToggle,
+  showProgress,
+  strikeCompleted,
+  task,
+  today
+}: {
+  getMeta?: (task: DecryptedScheduleTask) => string;
+  onOpen: (taskId: string) => void;
+  onToggle: (task: DecryptedScheduleTask) => void;
+  showProgress: boolean;
+  strikeCompleted: boolean;
+  task: DecryptedScheduleTask;
+  today: string;
+}) {
+  const progressPercent = normalizeTaskProgressPercent(task.progressPercent);
+
+  return (
+    <div className={`task-row ${strikeCompleted && task.status === "completed" ? "completed" : ""}`}>
+      <button
+        className="task-check"
+        type="button"
+        role="checkbox"
+        aria-checked={task.status === "completed"}
+        aria-label={task.status === "completed" ? "일정 완료 해제" : "일정 완료"}
+        onClick={() => onToggle(task)}
+      >
+        {task.status === "completed" ? <CheckCircle2 size={18} /> : null}
+      </button>
+      <button className="task-main task-open-button" type="button" onClick={() => onOpen(task.id)}>
+        <strong>{task.title}</strong>
+        <span className={isTaskScheduleOverdue(task, today) ? "task-meta overdue" : "task-meta"}>
+          {getMeta ? getMeta(task) : formatTaskMeta(task)}
+        </span>
+        {showProgress && (
+          <span
+            aria-label={`${task.title} 진행률 ${progressPercent}%`}
+            aria-valuemax={100}
+            aria-valuemin={0}
+            aria-valuenow={progressPercent}
+            className="task-progress-strip"
+            role="progressbar"
+            style={
+              {
+                "--task-list-progress-color": taskProgressColor(progressPercent),
+                "--task-list-progress-fill": `${progressPercent}%`
+              } as CSSProperties
+            }
+          />
+        )}
+      </button>
+      <span className="task-flags">
+        {task.isImportant && <Flag size={15} aria-label="중요" />}
+        {task.isUrgent && <Clock size={15} aria-label="긴급" />}
+      </span>
     </div>
   );
 }
@@ -2931,6 +3178,7 @@ function RecurringView({
   onMoveHabit,
   onOpenHabit,
   onOpenOverview,
+  onReadHabit,
   onSelectDate,
   onToggleCheckIn,
   pendingCheckIns,
@@ -2949,6 +3197,7 @@ function RecurringView({
   onMoveHabit: (habitId: string, targetSlot: RecurringHabitSlot, overHabitId: string | null) => void;
   onOpenHabit: (habitId: string) => void;
   onOpenOverview: () => void;
+  onReadHabit: (habitId: string) => void;
   onSelectDate: (date: string) => void;
   onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
   pendingCheckIns: Record<string, boolean>;
@@ -3043,8 +3292,8 @@ function RecurringView({
                 key={group.key}
                 pendingCheckIns={pendingCheckIns}
                 selectedDate={selectedDate}
-                onEditHabit={onEditHabit}
                 onOpenHabit={onOpenHabit}
+                onReadHabit={onReadHabit}
                 onToggleCheckIn={onToggleCheckIn}
               />
             ))}
@@ -3085,16 +3334,16 @@ function RecurringView({
 function RecurringSlotSection({
   checkIns,
   group,
-  onEditHabit,
   onOpenHabit,
+  onReadHabit,
   onToggleCheckIn,
   pendingCheckIns,
   selectedDate
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
   group: ReturnType<typeof groupRecurringHabitsBySlot>[number];
-  onEditHabit: (habit: DecryptedRecurringHabit) => void;
   onOpenHabit: (habitId: string) => void;
+  onReadHabit: (habitId: string) => void;
   onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
   pendingCheckIns: Record<string, boolean>;
   selectedDate: string;
@@ -3121,8 +3370,8 @@ function RecurringSlotSection({
                 pending={pendingCheckIns[recurringCheckInId(habit.id, selectedDate)] === true}
                 selectedDate={selectedDate}
                 slot={group.key}
-                onEdit={() => onEditHabit(habit)}
                 onOpen={() => onOpenHabit(habit.id)}
+                onRead={() => onReadHabit(habit.id)}
                 onToggle={() => onToggleCheckIn(habit, selectedDate)}
               />
             ))}
@@ -3138,8 +3387,8 @@ function RecurringSlotSection({
 function SortableRecurringHabitRow({
   checkIns,
   habit,
-  onEdit,
   onOpen,
+  onRead,
   onToggle,
   pending,
   selectedDate,
@@ -3147,14 +3396,15 @@ function SortableRecurringHabitRow({
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
   habit: DecryptedRecurringHabit;
-  onEdit: () => void;
   onOpen: () => void;
+  onRead: () => void;
   onToggle: () => void;
   pending: boolean;
   selectedDate: string;
   slot: RecurringHabitSlot;
 }) {
   const checked = isHabitCheckedOn(checkIns, habit.id, selectedDate);
+  const progressPercent = recurringHabitDayProgressPercent(habit, checkIns, selectedDate);
   const {
     attributes,
     isDragging,
@@ -3168,29 +3418,46 @@ function SortableRecurringHabitRow({
   });
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
-    transition
+    transition,
+    touchAction: "none"
   };
 
   return (
     <div
       className={`recurring-habit-row ${checked ? "checked" : ""} ${isDragging ? "dragging" : ""}`}
-      onDoubleClick={onEdit}
+      onDoubleClick={onRead}
       ref={setNodeRef}
       style={style}
-      title="더블클릭하여 수정"
+      title="더블클릭하여 상세 보기"
+      {...attributes}
+      {...listeners}
     >
       <button
         aria-label={`${habit.title} 위치 이동`}
         className="recurring-drag-handle"
         type="button"
-        {...attributes}
-        {...listeners}
       >
         <GripVertical size={16} />
       </button>
-      <button className="recurring-habit-main" type="button" onClick={onOpen}>
-        <RecurringHabitRowContent checkIns={checkIns} habit={habit} selectedDate={selectedDate} />
-      </button>
+      <div className="recurring-habit-main">
+        <button className="recurring-habit-content" type="button" onClick={onOpen} onDoubleClick={onRead}>
+          <RecurringHabitRowContent checkIns={checkIns} habit={habit} selectedDate={selectedDate} />
+        </button>
+        <button
+          aria-label={`${habit.title} ${progressPercent}% 진행률 수정`}
+          className="recurring-habit-progress-strip"
+          onClick={onRead}
+          onDoubleClick={(event) => event.stopPropagation()}
+          style={
+            {
+              "--recurring-habit-progress-color": taskProgressColor(progressPercent),
+              "--recurring-habit-progress-fill": `${progressPercent}%`
+            } as CSSProperties
+          }
+          title="진행률 수정"
+          type="button"
+        />
+      </div>
       <button
         aria-checked={checked}
         aria-label={checked ? `${habit.title} 체크 해제` : `${habit.title} 체크`}
@@ -3198,6 +3465,7 @@ function SortableRecurringHabitRow({
         disabled={pending}
         onClick={onToggle}
         onDoubleClick={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
         role="checkbox"
         type="button"
       >
@@ -3870,6 +4138,458 @@ function recurringMonthLabel(month: string) {
   const [year, monthNumber] = safeMonth.split("-").map(Number);
 
   return new Intl.DateTimeFormat("ko-KR", { month: "long", year: "numeric" }).format(new Date(year, monthNumber - 1, 1));
+}
+
+function RecurringHabitReadModal({
+  checkIns,
+  habit,
+  onClose,
+  onDelete,
+  onEdit,
+  onToggleChecklist,
+  onUpdateDetails,
+  onUpdateProgress,
+  selectedDate,
+  today
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  habit: DecryptedRecurringHabit;
+  onClose: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onToggleChecklist: (itemId: string) => void | Promise<void>;
+  onUpdateDetails: (updateDetails: RecurringHabitDetailsUpdater) => boolean | Promise<boolean>;
+  onUpdateProgress: (percent: number) => void | Promise<void>;
+  selectedDate: string;
+  today: string;
+}) {
+  const titleId = useId();
+  const details = habit.details ?? { description: "", checklist: [] };
+  const checkedItemIds = recurringHabitDayCheckedItemIds(checkIns, habit.id, selectedDate);
+  const dailyProgressPercent = recurringHabitDayProgressPercent(habit, checkIns, selectedDate);
+  const displayedChecklist = details.checklist.map((item) => ({ ...item, checked: checkedItemIds.has(item.id) }));
+  const hasChecklist = displayedChecklist.length > 0;
+  const selectedDateIsEditable = isValidScheduleDateString(selectedDate) && selectedDate <= today;
+  const [isDescriptionEditing, setIsDescriptionEditing] = useState(false);
+  const [descriptionDraft, setDescriptionDraft] = useState(details.description);
+  const [progressPercent, setProgressPercent] = useState(() => normalizeTaskProgressPercent(dailyProgressPercent));
+  const [pendingProgress, setPendingProgress] = useState(false);
+  const [pendingDetailsAction, setPendingDetailsAction] = useState<string | null>(null);
+  const [isAddingChecklist, setIsAddingChecklist] = useState(false);
+  const [newChecklistText, setNewChecklistText] = useState("");
+  const [editingChecklistItemId, setEditingChecklistItemId] = useState<string | null>(null);
+  const [checklistEditText, setChecklistEditText] = useState("");
+  const [isChecklistComposing, setIsChecklistComposing] = useState(false);
+  const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
+  const detailsMutationPending = pendingDetailsAction !== null || pendingChecklistItemId !== null;
+
+  useEffect(() => {
+    setProgressPercent(normalizeTaskProgressPercent(dailyProgressPercent));
+  }, [dailyProgressPercent, habit.id, selectedDate]);
+
+  useEffect(() => {
+    if (!isDescriptionEditing) {
+      setDescriptionDraft(details.description);
+    }
+  }, [details.description, habit.id, isDescriptionEditing]);
+
+  useEffect(() => {
+    setEditingChecklistItemId(null);
+    setChecklistEditText("");
+    setIsAddingChecklist(false);
+    setNewChecklistText("");
+  }, [habit.id, selectedDate]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  async function changeProgress(percent: number) {
+    if (!selectedDateIsEditable) {
+      return;
+    }
+
+    const nextPercent = normalizeTaskProgressPercent(percent);
+
+    setProgressPercent(nextPercent);
+    setPendingProgress(true);
+
+    try {
+      await onUpdateProgress(nextPercent);
+    } finally {
+      setPendingProgress(false);
+    }
+  }
+
+  async function saveInlineDetails(updateDetails: RecurringHabitDetailsUpdater, actionId: string) {
+    setPendingDetailsAction(actionId);
+
+    try {
+      return await onUpdateDetails(updateDetails);
+    } finally {
+      setPendingDetailsAction(null);
+    }
+  }
+
+  async function saveDescription() {
+    const didSave = await saveInlineDetails(
+      (currentDetails) => ({
+        description: descriptionDraft,
+        checklist: currentDetails.checklist
+      }),
+      "description"
+    );
+
+    if (didSave) {
+      setIsDescriptionEditing(false);
+    }
+  }
+
+  async function addChecklistItem() {
+    const text = newChecklistText.trim();
+
+    if (!text) {
+      return;
+    }
+
+    const didSave = await saveInlineDetails(
+      (currentDetails) => ({
+        description: currentDetails.description,
+        checklist: [...currentDetails.checklist, { id: crypto.randomUUID(), text, checked: false }]
+      }),
+      "checklist:add"
+    );
+
+    if (didSave) {
+      setNewChecklistText("");
+      setIsAddingChecklist(false);
+    }
+  }
+
+  function startEditingChecklistItem(item: ScheduleChecklistItem) {
+    setEditingChecklistItemId(item.id);
+    setChecklistEditText(item.text);
+  }
+
+  async function saveChecklistItemText(itemId: string) {
+    const text = checklistEditText.trim();
+
+    if (!text) {
+      return;
+    }
+
+    const didSave = await saveInlineDetails(
+      (currentDetails) => ({
+        description: currentDetails.description,
+        checklist: currentDetails.checklist.map((item) => (item.id === itemId ? { ...item, text, checked: false } : item))
+      }),
+      `checklist:edit:${itemId}`
+    );
+
+    if (didSave) {
+      setEditingChecklistItemId(null);
+      setChecklistEditText("");
+    }
+  }
+
+  async function deleteChecklistItem(itemId: string) {
+    const didSave = await saveInlineDetails(
+      (currentDetails) => ({
+        description: currentDetails.description,
+        checklist: currentDetails.checklist.filter((item) => item.id !== itemId)
+      }),
+      `checklist:delete:${itemId}`
+    );
+
+    if (didSave && editingChecklistItemId === itemId) {
+      setEditingChecklistItemId(null);
+      setChecklistEditText("");
+    }
+  }
+
+  async function toggleChecklistItem(itemId: string) {
+    if (!selectedDateIsEditable) {
+      return;
+    }
+
+    setPendingChecklistItemId(itemId);
+
+    try {
+      await onToggleChecklist(itemId);
+    } finally {
+      setPendingChecklistItemId(null);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="schedule-read-modal recurring-read-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div className="recurring-read-title">
+            <HabitIconBadge color={habit.color} icon={habit.icon} />
+            <div>
+              <p className="section-kicker">
+                <Repeat2 size={15} />
+                반복 업무
+              </p>
+              <h2 id={titleId}>{habit.title}</h2>
+            </div>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="task-read-meta">
+          <span>{formatDateLabel(selectedDate)}</span>
+          <span>{slotLabel(habit.slot)}</span>
+          <span>{recurringHabitIconLabels[habit.icon]}</span>
+          <span>매일 초기화</span>
+        </div>
+
+        <TaskProgressControl
+          disabled={!selectedDateIsEditable || pendingProgress}
+          helperText={selectedDateIsEditable ? (pendingProgress ? "저장 중" : "선택 날짜 기준") : "미래 날짜는 수정할 수 없습니다"}
+          onChange={(percent) => void changeProgress(percent)}
+          percent={progressPercent}
+        />
+
+        <section className="task-read-section">
+          <div className="task-read-section-head">
+            <h3>내용</h3>
+            {isDescriptionEditing ? (
+              <div className="task-read-inline-actions">
+                <button
+                  className="icon-button task-read-icon-button"
+                  type="button"
+                  aria-label="내용 저장"
+                  disabled={detailsMutationPending}
+                  onClick={() => void saveDescription()}
+                >
+                  <Save size={15} />
+                </button>
+                <button
+                  className="icon-button task-read-icon-button"
+                  type="button"
+                  aria-label="내용 수정 취소"
+                  disabled={detailsMutationPending}
+                  onClick={() => {
+                    setDescriptionDraft(details.description);
+                    setIsDescriptionEditing(false);
+                  }}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            ) : (
+              <button
+                className="icon-button task-read-icon-button"
+                type="button"
+                aria-label="내용 수정"
+                disabled={detailsMutationPending}
+                onClick={() => setIsDescriptionEditing(true)}
+              >
+                <Pencil size={15} />
+              </button>
+            )}
+          </div>
+          {isDescriptionEditing ? (
+            <textarea
+              className="task-read-inline-textarea"
+              onChange={(event) => setDescriptionDraft(event.target.value)}
+              rows={5}
+              value={descriptionDraft}
+            />
+          ) : (
+            <p>{details.description.trim() || "내용이 없습니다."}</p>
+          )}
+        </section>
+
+        <section className="task-read-section">
+          <div className="task-read-section-head">
+            <h3>체크리스트</h3>
+            <button
+              className="icon-button task-read-icon-button"
+              type="button"
+              aria-label="체크리스트 추가"
+              disabled={detailsMutationPending}
+              onClick={() => setIsAddingChecklist(true)}
+            >
+              <Plus size={15} />
+            </button>
+          </div>
+          {isAddingChecklist && (
+            <div className="task-read-checklist-add">
+              <input
+                autoFocus
+                aria-label="새 체크리스트 항목"
+                disabled={detailsMutationPending}
+                onCompositionEnd={() => setIsChecklistComposing(false)}
+                onCompositionStart={() => setIsChecklistComposing(true)}
+                onChange={(event) => setNewChecklistText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") {
+                    return;
+                  }
+
+                  if (isChecklistComposing || isComposingKeyboardEvent(event)) {
+                    return;
+                  }
+
+                  event.preventDefault();
+                  void addChecklistItem();
+                }}
+                value={newChecklistText}
+              />
+              <div className="task-read-inline-actions">
+                <button
+                  className="icon-button task-read-icon-button"
+                  type="button"
+                  aria-label="체크리스트 저장"
+                  disabled={detailsMutationPending}
+                  onClick={() => void addChecklistItem()}
+                >
+                  <Save size={15} />
+                </button>
+                <button
+                  className="icon-button task-read-icon-button"
+                  type="button"
+                  aria-label="체크리스트 추가 취소"
+                  disabled={detailsMutationPending}
+                  onClick={() => {
+                    setNewChecklistText("");
+                    setIsAddingChecklist(false);
+                  }}
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            </div>
+          )}
+          {hasChecklist ? (
+            <ul className="task-read-checklist">
+              {displayedChecklist.map((item) => (
+                <li key={item.id} className={item.checked ? "checked" : ""}>
+                  <button
+                    aria-checked={item.checked}
+                    aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
+                    className={`task-read-check-button ${item.checked ? "checked" : ""}`}
+                    disabled={detailsMutationPending || !selectedDateIsEditable}
+                    onClick={() => void toggleChecklistItem(item.id)}
+                    role="checkbox"
+                    type="button"
+                  >
+                    {item.checked ? <CheckCircle2 size={16} /> : null}
+                  </button>
+                  {editingChecklistItemId === item.id ? (
+                    <>
+                      <input
+                        autoFocus
+                        aria-label="체크리스트 항목 수정"
+                        className="task-read-checklist-input"
+                        disabled={detailsMutationPending}
+                        onCompositionEnd={() => setIsChecklistComposing(false)}
+                        onCompositionStart={() => setIsChecklistComposing(true)}
+                        onChange={(event) => setChecklistEditText(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") {
+                            return;
+                          }
+
+                          if (isChecklistComposing || isComposingKeyboardEvent(event)) {
+                            return;
+                          }
+
+                          event.preventDefault();
+                          void saveChecklistItemText(item.id);
+                        }}
+                        value={checklistEditText}
+                      />
+                      <div className="task-read-inline-actions">
+                        <button
+                          className="icon-button task-read-icon-button"
+                          type="button"
+                          aria-label={`${item.text} 저장`}
+                          disabled={detailsMutationPending}
+                          onClick={() => void saveChecklistItemText(item.id)}
+                        >
+                          <Save size={15} />
+                        </button>
+                        <button
+                          className="icon-button task-read-icon-button"
+                          type="button"
+                          aria-label={`${item.text} 수정 취소`}
+                          disabled={detailsMutationPending}
+                          onClick={() => {
+                            setEditingChecklistItemId(null);
+                            setChecklistEditText("");
+                          }}
+                        >
+                          <X size={15} />
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <span>{item.text}</span>
+                      <div className="task-read-inline-actions">
+                        <button
+                          className="icon-button task-read-icon-button"
+                          type="button"
+                          aria-label={`${item.text} 수정`}
+                          disabled={detailsMutationPending}
+                          onClick={() => startEditingChecklistItem(item)}
+                        >
+                          <Pencil size={15} />
+                        </button>
+                        <button
+                          className="icon-button task-read-icon-button danger"
+                          type="button"
+                          aria-label={`${item.text} 삭제`}
+                          disabled={detailsMutationPending}
+                          onClick={() => void deleteChecklistItem(item.id)}
+                        >
+                          <Minus size={15} />
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : !isAddingChecklist ? (
+            <p>체크리스트가 없습니다.</p>
+          ) : null}
+        </section>
+
+        <footer className="task-read-actions">
+          <button className="danger-button" type="button" onClick={onDelete}>
+            <Trash2 size={17} />
+            삭제
+          </button>
+          <div>
+            <button type="button" onClick={onEdit}>
+              <Pencil size={17} />
+              수정
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
 }
 
 function TaskReadModal({

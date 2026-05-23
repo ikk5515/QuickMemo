@@ -929,11 +929,41 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDocs(query(collection(ownerDb, "recurringHabitCheckIns"), where("ownerUid", "==", "user-a"))));
     await assertSucceeds(
       updateDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21"), {
+        checkedItemIds: ["first-item"],
+        completed: false,
+        progressPercent: 50,
+        checkedAt: null,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21"), {
+        checkedItemIds: ["first-item", "second-item"],
+        completed: true,
+        progressPercent: 100,
         checkedAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       })
     );
     await assertFails(getDoc(doc(otherDb, "recurringHabitCheckIns/habit-a_2026-05-21")));
+    await assertFails(
+      updateDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21"), {
+        progressPercent: -1,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21"), {
+        progressPercent: "done",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21"), {
+        checkedItemIds: Array.from({ length: 101 }, (_, index) => `item-${index}`),
+        updatedAt: serverTimestamp()
+      })
+    );
     await assertFails(
       setDoc(
         doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-99-99"),
