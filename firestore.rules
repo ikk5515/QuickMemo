@@ -845,8 +845,8 @@ service cloud.firestore {
         && data.storagePath == storagePath
         && data.encryptedSize is int
         && data.encryptedSize == data.originalSize + 16
-        && data.originalSize <= 10485760
-        && data.encryptedSize <= 10485776
+        && data.originalSize <= 52428800
+        && data.encryptedSize <= 52428816
         && data.isReady is bool;
     }
 

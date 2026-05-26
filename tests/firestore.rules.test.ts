@@ -1959,8 +1959,8 @@ describeRules("firestore security rules", () => {
       setDoc(
         doc(ownerDb, "notes/note-a/attachments/too-large"),
         storedAttachmentDocument("note-a", "too-large", {
-          originalSize: 10 * 1024 * 1024 + 1,
-          encryptedSize: 10 * 1024 * 1024 + 17
+          originalSize: 50 * 1024 * 1024 + 1,
+          encryptedSize: 50 * 1024 * 1024 + 17
         })
       )
     );

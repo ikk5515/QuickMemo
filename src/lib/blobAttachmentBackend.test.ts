@@ -8,7 +8,8 @@ describe("blob attachment backend", () => {
   it("uses authenticated Vercel Blob client uploads with a 50 MB user quota", () => {
     expect(blobAttachmentApiSource).toContain("handleUpload");
     expect(blobAttachmentApiSource).toContain("BLOB_READ_WRITE_TOKEN");
-    expect(blobAttachmentApiSource).toContain("const userBlobAttachmentQuotaBytes = 50 * 1024 * 1024");
+    expect(blobAttachmentApiSource).toContain("const maxAttachmentFileBytes = 50 * 1024 * 1024");
+    expect(blobAttachmentApiSource).toContain("const userBlobAttachmentQuotaBytes = maxEncryptedAttachmentBytes");
     expect(blobAttachmentApiSource).toContain("reserveUserAttachmentBytes");
     expect(blobAttachmentApiSource).toContain("첨부파일 저장 한도 50.00 MB를 초과했습니다.");
   });

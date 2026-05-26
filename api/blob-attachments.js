@@ -10,10 +10,10 @@ const oauthTokenUrl = "https://oauth2.googleapis.com/token";
 const databaseId = "(default)";
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const blobContentType = "application/octet-stream";
-const maxAttachmentFileBytes = 10 * 1024 * 1024;
+const maxAttachmentFileBytes = 50 * 1024 * 1024;
 const encryptedAttachmentOverheadBytes = 16;
 const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
-const userBlobAttachmentQuotaBytes = 50 * 1024 * 1024;
+const userBlobAttachmentQuotaBytes = maxEncryptedAttachmentBytes;
 const tokenTtlMs = 10 * 60 * 1000;
 const allowedAttachmentExtensions = new Set([
   "pdf",
@@ -378,7 +378,7 @@ function validateIvBase64(value) {
 
 function validateAttachmentSizes(originalSize, encryptedSize) {
   if (originalSize > maxAttachmentFileBytes || encryptedSize > maxEncryptedAttachmentBytes || encryptedSize !== originalSize + encryptedAttachmentOverheadBytes) {
-    throw new HttpError(400, "첨부파일은 10.00 MB 이하만 업로드할 수 있습니다.", "Invalid attachment size");
+    throw new HttpError(400, "첨부파일은 50.00 MB 이하만 업로드할 수 있습니다.", "Invalid attachment size");
   }
 }
 

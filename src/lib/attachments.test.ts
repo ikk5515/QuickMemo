@@ -43,10 +43,10 @@ describe("public share attachment MIME helpers", () => {
     Object.defineProperty(tooLargeFile, "size", { value: maxAttachmentFileBytes + 1 });
 
     expect(attachmentValidationError(file)).toBeNull();
-    expect(attachmentValidationError(tooLargeFile)).toContain("10.00 MB");
+    expect(attachmentValidationError(tooLargeFile)).toContain("50.00 MB");
   });
 
-  it("caps per-user blob attachment storage at 50 MB", () => {
-    expect(maxAttachmentStorageBytes).toBe(50 * 1024 * 1024);
+  it("caps per-user blob attachment storage at one encrypted 50 MB file", () => {
+    expect(maxAttachmentStorageBytes).toBe(50 * 1024 * 1024 + 16);
   });
 });

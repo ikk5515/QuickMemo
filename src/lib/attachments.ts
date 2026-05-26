@@ -1,9 +1,9 @@
 import type { NoteAttachmentDocument } from "../types";
 
-export const maxAttachmentFileBytes = 10 * 1024 * 1024;
-export const maxAttachmentStorageBytes = 50 * 1024 * 1024;
 export const encryptedAttachmentOverheadBytes = 16;
+export const maxAttachmentFileBytes = 50 * 1024 * 1024;
 export const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
+export const maxAttachmentStorageBytes = maxEncryptedAttachmentBytes;
 
 export const allowedAttachmentExtensions = [
   "pdf",
