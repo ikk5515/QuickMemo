@@ -635,8 +635,9 @@ async function createPublicShareAttachmentReservation(projectId, accessToken, ui
   const share = await firestoreGetDocument(projectId, `publicNoteShares/${payload.shareId}`, accessToken);
   const ownerUid = valueString(share, "ownerUid");
   const expiresAt = share?.fields?.expiresAt?.timestampValue;
+  const ownerProfile = await userProfile(projectId, uid, accessToken);
 
-  if (!share || ownerUid !== uid || share?.fields?.revokedAt || !expiresAt || Date.parse(expiresAt) <= Date.now()) {
+  if (!share || !ownerProfile.isActive || ownerUid !== uid || share?.fields?.revokedAt || !expiresAt || Date.parse(expiresAt) <= Date.now()) {
     throw new HttpError(403, "공유 첨부파일 업로드 권한이 없습니다.", "Cannot upload to public share");
   }
 
@@ -847,8 +848,9 @@ async function completeUploadFromClient(request, response) {
     const share = await firestoreGetDocument(credentials.projectId, `publicNoteShares/${shareId}`, accessToken);
     const attachmentPath = `publicNoteShares/${shareId}/attachments/${attachmentId}`;
     const attachment = await firestoreGetDocument(credentials.projectId, attachmentPath, accessToken);
+    const callerProfile = await userProfile(credentials.projectId, uid, accessToken);
 
-    if (!share || !attachment || valueString(share, "ownerUid") !== uid) {
+    if (!share || !attachment || !callerProfile.isActive || valueString(share, "ownerUid") !== uid) {
       throw new HttpError(403, "공유 첨부파일 업로드 완료 권한이 없습니다.", "Cannot complete public share attachment");
     }
 
@@ -970,6 +972,7 @@ async function deleteAttachment(request, response) {
     const callerProfile = await userProfile(credentials.projectId, uid, accessToken);
     const canDelete =
       Boolean(note && attachment)
+      && callerProfile.isActive
       && (callerProfile.isAdmin || (valueStringArray(note, "participantUids").includes(uid) && [valueString(note, "ownerUid"), valueString(attachment, "uploadedBy")].includes(uid)));
 
     if (!canDelete) {
@@ -990,8 +993,9 @@ async function deleteAttachment(request, response) {
     const attachmentPath = `publicNoteShares/${shareId}/attachments/${attachmentId}`;
     const cleanupPath = `publicShareCleanupQueue/${shareId}/publicShareAttachmentCleanupQueue/${attachmentId}`;
     const attachment = await firestoreGetDocument(credentials.projectId, attachmentPath, accessToken);
+    const callerProfile = await userProfile(credentials.projectId, uid, accessToken);
 
-    if (!share || !attachment || valueString(share, "ownerUid") !== uid) {
+    if (!share || !attachment || !callerProfile.isActive || valueString(share, "ownerUid") !== uid) {
       throw new HttpError(403, "공유 첨부파일 삭제 권한이 없습니다.", "Cannot delete public share attachment");
     }
 

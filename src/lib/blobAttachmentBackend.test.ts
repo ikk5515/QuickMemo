@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const blobAttachmentApiSource = readFileSync(join(process.cwd(), "api/blob-attachments.js"), "utf8");
 const blobAttachmentClientSource = readFileSync(join(process.cwd(), "src/services/blobAttachments.ts"), "utf8");
+const firestoreRulesSource = readFileSync(join(process.cwd(), "firestore.rules"), "utf8");
 
 describe("blob attachment backend", () => {
   it("uses authenticated Vercel Blob client uploads with a 1 GB user quota", () => {
@@ -28,6 +29,24 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain("validateUploadedBlob");
     expect(blobAttachmentApiSource).toContain("allowedContentTypes: [blobContentType]");
     expect(blobAttachmentApiSource).toContain("maximumSizeInBytes: payload.encryptedSize");
+  });
+
+  it("mirrors Firestore active-user revocation checks on service-account attachment mutations", () => {
+    const publicShareReservationSource =
+      blobAttachmentApiSource.match(/async function createPublicShareAttachmentReservation[\s\S]*?function callbackUrlForRequest/u)?.[0] ?? "";
+    const completeUploadSource =
+      blobAttachmentApiSource.match(/async function completeUploadFromClient[\s\S]*?async function streamBlobAttachment/u)?.[0] ?? "";
+    const deleteAttachmentSource =
+      blobAttachmentApiSource.match(/async function deleteAttachment[\s\S]*?function handleError/u)?.[0] ?? "";
+
+    expect(firestoreRulesSource).toContain("function activeSignedInUser()");
+    expect(firestoreRulesSource).toContain("function publicShareOwner(data)");
+    expect(publicShareReservationSource).toContain("const ownerProfile = await userProfile(projectId, uid, accessToken)");
+    expect(publicShareReservationSource).toContain("!ownerProfile.isActive");
+    expect(completeUploadSource).toContain("const callerProfile = await userProfile(credentials.projectId, uid, accessToken)");
+    expect(completeUploadSource).toContain("!callerProfile.isActive");
+    expect(deleteAttachmentSource).toContain("&& callerProfile.isActive");
+    expect(deleteAttachmentSource).toContain("!callerProfile.isActive");
   });
 
   it("allows Blob callbacks and client completion requests to mark uploads ready idempotently", () => {
