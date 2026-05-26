@@ -49,6 +49,7 @@ import { EditorContent, useEditor } from "@tiptap/react";
 import {
   type ChangeEvent,
   type CSSProperties,
+  type DragEvent as ReactDragEvent,
   type FormEvent,
   type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
@@ -352,6 +353,10 @@ const docxPreviewFrameCsp = [
   "font-src data:",
   "style-src 'unsafe-inline'"
 ].join("; ");
+
+function dataTransferHasFiles(dataTransfer: DataTransfer | null) {
+  return Boolean(dataTransfer && Array.from(dataTransfer.types).includes("Files"));
+}
 
 function draftFromNote(note: DecryptedNote): NoteDraft {
   const parsedBody = parseEditorContent(note.body);
@@ -4145,10 +4150,12 @@ function RichMemoEditor({
   const imageWidthControlRef = useRef<HTMLLabelElement | null>(null);
   const tableResizeCleanupRef = useRef<(() => void) | null>(null);
   const lastEditorSelectionRef = useRef<StoredEditorSelectionRange | null>(null);
+  const fileDragDepthRef = useRef(0);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
   const [activeToolTab, setActiveToolTab] = useState<EditorToolTab>("format");
   const [customTextColor, setCustomTextColor] = useState<string>(editorTextColors[0]);
   const [customCellColor, setCustomCellColor] = useState<string>(editorCellColors[0]);
+  const [fileDropActive, setFileDropActive] = useState(false);
   const [tableRows, setTableRows] = useState(3);
   const [tableColumns, setTableColumns] = useState(3);
   const [, setToolbarVersion] = useState(0);
@@ -4175,6 +4182,8 @@ function RichMemoEditor({
         }
 
         event.preventDefault();
+        event.stopPropagation();
+        resetFileDropState();
         void handleFiles(files);
         return true;
       },
@@ -4466,6 +4475,64 @@ function RichMemoEditor({
     }
 
     await onFilesPaste(files, insertHtml);
+  }
+
+  function resetFileDropState() {
+    fileDragDepthRef.current = 0;
+    setFileDropActive(false);
+  }
+
+  function prepareFileDrop(event: ReactDragEvent<HTMLElement>) {
+    if (!dataTransferHasFiles(event.dataTransfer)) {
+      return false;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+    return true;
+  }
+
+  function handleEditorFrameDragEnter(event: ReactDragEvent<HTMLDivElement>) {
+    if (!prepareFileDrop(event)) {
+      return;
+    }
+
+    fileDragDepthRef.current += 1;
+    setFileDropActive(true);
+  }
+
+  function handleEditorFrameDragOver(event: ReactDragEvent<HTMLDivElement>) {
+    prepareFileDrop(event);
+  }
+
+  function handleEditorFrameDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+    if (!prepareFileDrop(event)) {
+      return;
+    }
+
+    const relatedTarget = event.relatedTarget;
+
+    if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) {
+      return;
+    }
+
+    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1);
+    setFileDropActive(fileDragDepthRef.current > 0);
+  }
+
+  function handleEditorFrameDrop(event: ReactDragEvent<HTMLDivElement>) {
+    if (!prepareFileDrop(event)) {
+      return;
+    }
+
+    const files = Array.from(event.dataTransfer.files ?? []);
+
+    resetFileDropState();
+
+    if (files.length) {
+      void handleFiles(files);
+    }
   }
 
   function insertHtml(html: string) {
@@ -5067,9 +5134,22 @@ function RichMemoEditor({
           </div>
         )}
       </div>
-      <div className="rich-editor-frame">
+      <div
+        className="rich-editor-frame"
+        data-file-drop-active={fileDropActive ? "true" : undefined}
+        onDragEnter={handleEditorFrameDragEnter}
+        onDragLeave={handleEditorFrameDragLeave}
+        onDragOver={handleEditorFrameDragOver}
+        onDrop={handleEditorFrameDrop}
+      >
         <EditorContent editor={editor} style={{ "--editor-font-size": `${fontSize}px` } as CSSProperties} />
         <RemoteCursorLayer cursors={remoteCursors} editorRef={editorRef} />
+        {fileDropActive && (
+          <div className="rich-editor-drop-overlay" aria-hidden="true">
+            <Upload size={22} />
+            <span>파일 첨부</span>
+          </div>
+        )}
       </div>
       <div className="format-quick-dock" aria-label="선택 영역 빠른 서식" data-has-selection={hasTextSelection ? "true" : undefined}>
         <span>빠른 서식</span>

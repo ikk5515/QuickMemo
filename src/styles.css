@@ -1359,10 +1359,36 @@ textarea {
   position: relative;
 }
 
+.rich-editor-frame[data-file-drop-active="true"] {
+  isolation: isolate;
+}
+
 .rich-editor-frame > div {
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
+}
+
+.rich-editor-drop-overlay {
+  align-items: center;
+  background: color-mix(in srgb, var(--blue) 12%, #ffffff 88%);
+  border: 2px dashed color-mix(in srgb, var(--blue) 72%, var(--line));
+  border-radius: 8px;
+  color: var(--blue);
+  display: flex;
+  font-size: 14px;
+  font-weight: 900;
+  gap: 8px;
+  inset: 12px 0 84px;
+  justify-content: center;
+  min-height: 160px;
+  pointer-events: none;
+  position: absolute;
+  z-index: 5;
+}
+
+.rich-editor-drop-overlay span {
+  line-height: 1;
 }
 
 .rich-body-input.ProseMirror {

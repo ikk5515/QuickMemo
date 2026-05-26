@@ -83,6 +83,16 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).not.toContain("unzipSync(bytes);");
   });
 
+  it("routes dragged attachment files through the controlled upload flow", () => {
+    expect(notesPageSource).toContain("function dataTransferHasFiles");
+    expect(notesPageSource).toContain("event.dataTransfer.dropEffect = \"copy\"");
+    expect(notesPageSource).toContain("onDragEnter={handleEditorFrameDragEnter}");
+    expect(notesPageSource).toContain("onDragOver={handleEditorFrameDragOver}");
+    expect(notesPageSource).toContain("onDrop={handleEditorFrameDrop}");
+    expect(notesPageSource).toContain("void handleFiles(files)");
+    expect(notesPageSource).toContain("accept={attachmentInputAccept}");
+  });
+
   it("bounds XLSX XML parsing and shared-string enumeration after safe unzip", () => {
     const xlsxXmlHelper =
       notesPageSource.match(/function xlsxXmlDocument[\s\S]*?function xlsxEntryText/)?.[0] ?? "";
