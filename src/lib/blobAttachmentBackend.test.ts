@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const blobAttachmentApiSource = readFileSync(join(process.cwd(), "api/blob-attachments.js"), "utf8");
+const blobAttachmentClientSource = readFileSync(join(process.cwd(), "src/services/blobAttachments.ts"), "utf8");
 
 describe("blob attachment backend", () => {
   it("uses authenticated Vercel Blob client uploads with a 50 MB user quota", () => {
@@ -27,5 +28,9 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain("validateUploadedBlob");
     expect(blobAttachmentApiSource).toContain("allowedContentTypes: [blobContentType]");
     expect(blobAttachmentApiSource).toContain("maximumSizeInBytes: payload.encryptedSize");
+  });
+
+  it("uses multipart client uploads for the 50 MB Vercel Blob attachment path", () => {
+    expect(blobAttachmentClientSource.match(/multipart:\s*true/gu)?.length).toBeGreaterThanOrEqual(2);
   });
 });

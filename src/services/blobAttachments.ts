@@ -131,6 +131,7 @@ export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadIn
       access: "private",
       contentType: blobContentType,
       handleUploadUrl: blobAttachmentApiPath,
+      multipart: true,
       headers: authHeaders(idToken),
       clientPayload: JSON.stringify(payload)
     });
@@ -168,6 +169,7 @@ export async function uploadPublicShareAttachmentBlob(
       access: "private",
       contentType: blobContentType,
       handleUploadUrl: blobAttachmentApiPath,
+      multipart: true,
       headers: authHeaders(idToken),
       clientPayload: JSON.stringify(payload)
     });

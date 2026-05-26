@@ -30,6 +30,7 @@ function expectBrowserHardeningHeaders(headers: HostingHeader[]): void {
   expect(csp).toContain("https://www.google.com/recaptcha/");
   expect(csp).toContain("https://www.gstatic.com/recaptcha/");
   expect(csp).toContain("connect-src 'self' https://*.googleapis.com");
+  expect(csp).toContain("https://vercel.com");
   expect(csp).toContain("https://blob.vercel-storage.com");
   expect(csp).toContain("https://*.private.blob.vercel-storage.com");
   expect(csp).toContain("https://*.public.blob.vercel-storage.com");
