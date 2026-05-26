@@ -53,6 +53,19 @@ service firebase.storage {
         && request.auth.uid in data.participantUids;
     }
 
+    function ownerAllowsParticipant(data, uid) {
+      let owner = userData(data.ownerUid);
+      return uid == data.ownerUid
+        || (
+          owner.isActive == true
+          && owner.isAdmin == true
+        )
+        || (
+          owner.keys().hasAny(["allowedShareTargetUids"])
+          && uid in owner.allowedShareTargetUids
+        );
+    }
+
     function canReadNoteObject(noteId) {
       let note = noteData(noteId);
       let user = userData(request.auth.uid);
@@ -63,6 +76,7 @@ service firebase.storage {
           || (
             noteActive(note)
             && noteParticipant(note)
+            && ownerAllowsParticipant(note, request.auth.uid)
           )
           || (
             noteDeleted(note)

@@ -20,6 +20,7 @@ const encryptedPayload = {
 };
 const bucketUrl = "gs://quickmemo-rules-test.appspot.com";
 const noteStoragePath = "notes/note-a/attachments/attachment-a/data";
+const revokedNoteStoragePath = "notes/revoked-share/attachments/revoked-attachment/data";
 const shareStoragePath = "publicNoteShares/share-a/attachments/attachment-a/data";
 
 function encryptedBytes(size = 32) {
@@ -167,6 +168,67 @@ describeStorageRules("storage security rules", () => {
       });
     });
     await assertSucceeds(userStorage.ref(noteStoragePath).getMetadata());
+  });
+
+  it("blocks owner-revoked participants from reading note attachment objects", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), {
+        uid: "user-a",
+        isActive: true,
+        isAdmin: false,
+        allowedShareTargetUids: ["user-a"]
+      });
+      await setDoc(doc(db, "users/user-b"), {
+        uid: "user-b",
+        isActive: true,
+        isAdmin: false
+      });
+      await setDoc(doc(db, "notes/revoked-share"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(db, "notes/revoked-share/attachments/revoked-attachment"), {
+        noteId: "revoked-share",
+        version: 1,
+        algorithm: "AES-GCM",
+        fileName: "archive",
+        extension: "zip",
+        mimeType: "application/zip",
+        originalSize: 16,
+        storagePath: revokedNoteStoragePath,
+        encryptedSize: 32,
+        isReady: true,
+        iv: Bytes.fromUint8Array(new Uint8Array(12)),
+        uploadedBy: "user-a",
+        createdAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+      await uploadTaskPromise(
+        context.storage(bucketUrl).ref(revokedNoteStoragePath).put(
+          encryptedBytes(),
+          encryptedUploadMetadata({
+            noteId: "revoked-share",
+            attachmentId: "revoked-attachment",
+            uploadedBy: "user-a"
+          })
+        )
+      );
+    });
+
+    const ownerStorage = testEnv.authenticatedContext("user-a").storage(bucketUrl);
+    const revokedStorage = testEnv.authenticatedContext("user-b").storage(bucketUrl);
+
+    await assertSucceeds(ownerStorage.ref(revokedNoteStoragePath).getMetadata());
+    await assertFails(revokedStorage.ref(revokedNoteStoragePath).getMetadata());
   });
 
   it("allows active public share attachment reads but validates owner uploads", async () => {
