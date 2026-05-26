@@ -2723,6 +2723,7 @@ export default function NotesPage() {
           fileName: attachment.fileName,
           extension: attachment.extension,
           mimeType: safePublicShareAttachmentMimeType(attachment.extension),
+          ownerUid: unlockedProfile.uid,
           originalSize: attachment.originalSize,
           encryptedData: encryptedAttachment.cipherBytes,
           iv: encryptedAttachment.iv,
@@ -2914,6 +2915,7 @@ export default function NotesPage() {
         fileName: attachment.fileName,
         extension: attachment.extension,
         mimeType: safePublicShareAttachmentMimeType(attachment.extension),
+        ownerUid: unlockedProfile.uid,
         originalSize: attachment.originalSize,
         encryptedData: encryptedAttachment.cipherBytes,
         iv: encryptedAttachment.iv,
@@ -3213,8 +3215,8 @@ export default function NotesPage() {
       if (rejectedFiles.length) {
         setError(`일부 파일은 제외했습니다. ${rejectedFiles[0]}`);
       }
-    } catch {
-      setError("첨부파일을 업로드하지 못했습니다.");
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "첨부파일을 업로드하지 못했습니다.");
     } finally {
       setAttachmentBusyId(null);
     }

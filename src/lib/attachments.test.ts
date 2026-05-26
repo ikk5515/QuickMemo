@@ -3,6 +3,7 @@ import {
   attachmentValidationError,
   isPublicShareRasterImageExtension,
   maxAttachmentFileBytes,
+  maxAttachmentStorageBytes,
   publicShareAttachmentMimeMatchesExtension,
   safePublicShareAttachmentMimeType
 } from "./attachments";
@@ -43,5 +44,9 @@ describe("public share attachment MIME helpers", () => {
 
     expect(attachmentValidationError(file)).toBeNull();
     expect(attachmentValidationError(tooLargeFile)).toContain("10.00 MB");
+  });
+
+  it("caps per-user blob attachment storage at 50 MB", () => {
+    expect(maxAttachmentStorageBytes).toBe(50 * 1024 * 1024);
   });
 });

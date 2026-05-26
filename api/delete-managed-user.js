@@ -1,4 +1,5 @@
 /* global Buffer, URLSearchParams, console, crypto, fetch, process */
+import { del } from "@vercel/blob";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
@@ -547,10 +548,22 @@ function integerField(document, fieldName) {
 
 async function deleteStorageObjectsForDocuments(documents, storageBucket, accessToken, stats) {
   const objectNames = Array.from(new Set(documents.map((document) => stringField(document, "storagePath")).filter(Boolean)));
+  const blobPaths = Array.from(new Set(documents.map((document) => stringField(document, "blobPath")).filter(Boolean)));
 
   for (const objectName of objectNames) {
     if (await storageDeleteObject(storageBucket, objectName, accessToken)) {
       stats.storageObjectsDeleted += 1;
+    }
+  }
+
+  for (const blobPath of blobPaths) {
+    try {
+      await del(blobPath);
+      stats.blobObjectsDeleted += 1;
+    } catch (error) {
+      if (!/not\s+found/iu.test(String(error?.message ?? ""))) {
+        throw error;
+      }
     }
   }
 }
@@ -1162,6 +1175,7 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
   const quickKey = integerField(targetProfile, "quickKey");
   const stats = {
     authUserDeleted: false,
+    blobObjectsDeleted: 0,
     bootstrapAdminReassigned: false,
     documentsDeleted: 0,
     noteAttachmentsDeleted: 0,
@@ -1205,6 +1219,7 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
 
   for (const path of [
     `system/bootstrapAttempts/attempts/${targetUid}`,
+    `userAttachmentUsage/${targetUid}`,
     `userPreferences/${targetUid}`,
     `userKeys/${targetUid}`,
     `publicLoginRoster/${targetUid}`,

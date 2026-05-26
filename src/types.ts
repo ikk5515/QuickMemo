@@ -114,6 +114,11 @@ export interface NoteAttachmentDocument {
   originalSize: number;
   encryptedData?: Bytes;
   storagePath?: string;
+  storageProvider?: "firebase-storage" | "vercel-blob";
+  blobPath?: string;
+  blobUrl?: string;
+  blobDownloadUrl?: string;
+  blobEtag?: string;
   encryptedSize?: number;
   isReady?: boolean;
   iv: Bytes;
@@ -147,9 +152,15 @@ export interface PublicNoteShareAttachmentDocument {
   originalSize: number;
   encryptedData?: Bytes;
   storagePath?: string;
+  storageProvider?: "firebase-storage" | "vercel-blob";
+  blobPath?: string;
+  blobUrl?: string;
+  blobDownloadUrl?: string;
+  blobEtag?: string;
   encryptedSize?: number;
   isReady?: boolean;
   iv: Bytes;
+  ownerUid?: string;
   sourceAttachmentId?: string;
   expiresAt: Timestamp;
   createdAt?: Timestamp;

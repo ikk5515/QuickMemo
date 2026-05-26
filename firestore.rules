@@ -1781,7 +1781,8 @@ service cloud.firestore {
         allow update: if exists(notePath(noteId))
           && noteAttachmentReadyUpdate(request.resource.data, noteId, attachmentId);
         allow delete: if exists(notePath(noteId))
-          && canDeleteAttachment(get(notePath(noteId)).data, resource.data);
+          && canDeleteAttachment(get(notePath(noteId)).data, resource.data)
+          && !resource.data.keys().hasAny(["blobPath"]);
       }
     }
 
@@ -1818,7 +1819,8 @@ service cloud.firestore {
           && publicShareAttachmentCleanupQueueCreated(shareId, attachmentId, request.resource.data);
         allow update: if publicShareAttachmentReadyUpdate(request.resource.data, shareId, attachmentId);
         allow delete: if exists(publicSharePath(shareId))
-          && publicShareOwner(get(publicSharePath(shareId)).data);
+          && publicShareOwner(get(publicSharePath(shareId)).data)
+          && !resource.data.keys().hasAny(["blobPath"]);
       }
     }
 
