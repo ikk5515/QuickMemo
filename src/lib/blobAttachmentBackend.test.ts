@@ -30,6 +30,13 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain("maximumSizeInBytes: payload.encryptedSize");
   });
 
+  it("allows Blob callbacks and client completion requests to mark uploads ready idempotently", () => {
+    const markReadySource = blobAttachmentApiSource.match(/async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u)?.[0] ?? "";
+
+    expect(markReadySource).toContain("currentDocument: { exists: true }");
+    expect(markReadySource).not.toContain("currentDocument: { updateTime: document.updateTime }");
+  });
+
   it("uses multipart client uploads for the 50 MB Vercel Blob attachment path", () => {
     expect(blobAttachmentClientSource.match(/multipart:\s*true/gu)?.length).toBeGreaterThanOrEqual(2);
   });

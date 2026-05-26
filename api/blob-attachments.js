@@ -786,7 +786,7 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
       updateMask: {
         fieldPaths: ["isReady", "blobUrl", "blobDownloadUrl", "blobEtag"]
       },
-      currentDocument: { updateTime: document.updateTime }
+      currentDocument: { exists: true }
     }
   ]);
 }
