@@ -6,13 +6,13 @@ const blobAttachmentApiSource = readFileSync(join(process.cwd(), "api/blob-attac
 const blobAttachmentClientSource = readFileSync(join(process.cwd(), "src/services/blobAttachments.ts"), "utf8");
 
 describe("blob attachment backend", () => {
-  it("uses authenticated Vercel Blob client uploads with a 50 MB user quota", () => {
+  it("uses authenticated Vercel Blob client uploads with a 1 GB user quota", () => {
     expect(blobAttachmentApiSource).toContain("handleUpload");
     expect(blobAttachmentApiSource).toContain("BLOB_READ_WRITE_TOKEN");
     expect(blobAttachmentApiSource).toContain("const maxAttachmentFileBytes = 50 * 1024 * 1024");
-    expect(blobAttachmentApiSource).toContain("const userBlobAttachmentQuotaBytes = maxEncryptedAttachmentBytes");
+    expect(blobAttachmentApiSource).toContain("const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024");
     expect(blobAttachmentApiSource).toContain("reserveUserAttachmentBytes");
-    expect(blobAttachmentApiSource).toContain("첨부파일 저장 한도 50.00 MB를 초과했습니다.");
+    expect(blobAttachmentApiSource).toContain("첨부파일 총 저장 한도 1.00 GB를 초과했습니다.");
   });
 
   it("keeps blob objects private and streams them only after Firestore authorization checks", () => {
@@ -38,6 +38,8 @@ describe("blob attachment backend", () => {
   });
 
   it("uses multipart client uploads for the 50 MB Vercel Blob attachment path", () => {
+    expect(blobAttachmentClientSource).toContain("requestBlobClientToken");
+    expect(blobAttachmentClientSource).toContain("throw new Error(typeof body.error === \"string\" ? body.error");
     expect(blobAttachmentClientSource.match(/multipart:\s*true/gu)?.length).toBeGreaterThanOrEqual(2);
     expect(blobAttachmentClientSource.match(/onUploadProgress:\s*input\.onUploadProgress/gu)?.length).toBeGreaterThanOrEqual(2);
   });

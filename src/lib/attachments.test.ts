@@ -46,7 +46,7 @@ describe("public share attachment MIME helpers", () => {
     expect(attachmentValidationError(tooLargeFile)).toContain("50.00 MB");
   });
 
-  it("caps per-user blob attachment storage at one encrypted 50 MB file", () => {
-    expect(maxAttachmentStorageBytes).toBe(50 * 1024 * 1024 + 16);
+  it("keeps individual files at 50 MB while allowing up to 1 GB of stored attachments", () => {
+    expect(maxAttachmentStorageBytes).toBe(1024 * 1024 * 1024);
   });
 });

@@ -1,5 +1,5 @@
 import type { PutBlobResult } from "@vercel/blob";
-import { upload } from "@vercel/blob/client";
+import { put } from "@vercel/blob/client";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { auth } from "../lib/firebase";
 
@@ -51,6 +51,10 @@ interface DeleteBlobAttachmentInput {
   noteId?: string;
   scope: BlobAttachmentScope;
   shareId?: string;
+}
+
+interface BlobClientTokenResponse {
+  clientToken?: string;
 }
 
 function bytesToBase64(bytes: Uint8Array) {
@@ -119,6 +123,35 @@ async function cancelBlobAttachmentUpload(input: DeleteBlobAttachmentInput, idTo
   }).catch(() => undefined);
 }
 
+async function requestBlobClientToken(pathname: string, clientPayload: string, idToken: string) {
+  const response = await fetch(blobAttachmentApiPath, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...authHeaders(idToken)
+    },
+    body: JSON.stringify({
+      type: "blob.generate-client-token",
+      payload: {
+        pathname,
+        clientPayload,
+        multipart: true
+      }
+    })
+  });
+  const body = await response.json().catch(() => ({})) as BlobClientTokenResponse & { error?: unknown };
+
+  if (!response.ok) {
+    throw new Error(typeof body.error === "string" ? body.error : "첨부파일 업로드 권한을 받지 못했습니다.");
+  }
+
+  if (typeof body.clientToken !== "string" || !body.clientToken) {
+    throw new Error("첨부파일 업로드 토큰을 받지 못했습니다.");
+  }
+
+  return body.clientToken;
+}
+
 export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadInput) {
   const idToken = await currentUserIdToken();
   const pathname = noteBlobPath(input);
@@ -134,23 +167,27 @@ export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadIn
     ivBase64: bytesToBase64(input.iv),
     uploadedBy: input.uploadedBy
   };
+  let hasReservation = false;
 
   try {
-    const blob = await upload(pathname, bytesToBlob(input.encryptedData), {
+    const clientPayload = JSON.stringify(payload);
+    const token = await requestBlobClientToken(pathname, clientPayload, idToken);
+    hasReservation = true;
+    const blob = await put(pathname, bytesToBlob(input.encryptedData), {
       access: "private",
       contentType: blobContentType,
-      handleUploadUrl: blobAttachmentApiPath,
       multipart: true,
       onUploadProgress: input.onUploadProgress,
-      headers: authHeaders(idToken),
-      clientPayload: JSON.stringify(payload)
+      token
     });
 
     await completeBlobAttachmentUpload({ scope: "note", noteId: input.noteId, attachmentId: input.attachmentId, blob }, idToken);
 
     return blob;
   } catch (error) {
-    await cancelBlobAttachmentUpload({ scope: "note", noteId: input.noteId, attachmentId: input.attachmentId }, idToken);
+    if (hasReservation) {
+      await cancelBlobAttachmentUpload({ scope: "note", noteId: input.noteId, attachmentId: input.attachmentId }, idToken);
+    }
     throw error;
   }
 }
@@ -173,16 +210,18 @@ export async function uploadPublicShareAttachmentBlob(
     ivBase64: bytesToBase64(input.iv),
     sourceAttachmentId: input.sourceAttachmentId ?? null
   };
+  let hasReservation = false;
 
   try {
-    const blob = await upload(pathname, bytesToBlob(input.encryptedData), {
+    const clientPayload = JSON.stringify(payload);
+    const token = await requestBlobClientToken(pathname, clientPayload, idToken);
+    hasReservation = true;
+    const blob = await put(pathname, bytesToBlob(input.encryptedData), {
       access: "private",
       contentType: blobContentType,
-      handleUploadUrl: blobAttachmentApiPath,
       multipart: true,
       onUploadProgress: input.onUploadProgress,
-      headers: authHeaders(idToken),
-      clientPayload: JSON.stringify(payload)
+      token
     });
 
     await completeBlobAttachmentUpload(
@@ -192,7 +231,9 @@ export async function uploadPublicShareAttachmentBlob(
 
     return blob;
   } catch (error) {
-    await cancelBlobAttachmentUpload({ scope: "publicShare", shareId: input.shareId, attachmentId: input.attachmentId }, idToken);
+    if (hasReservation) {
+      await cancelBlobAttachmentUpload({ scope: "publicShare", shareId: input.shareId, attachmentId: input.attachmentId }, idToken);
+    }
     throw error;
   }
 }

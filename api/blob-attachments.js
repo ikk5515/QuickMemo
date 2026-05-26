@@ -13,7 +13,7 @@ const blobContentType = "application/octet-stream";
 const maxAttachmentFileBytes = 50 * 1024 * 1024;
 const encryptedAttachmentOverheadBytes = 16;
 const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
-const userBlobAttachmentQuotaBytes = maxEncryptedAttachmentBytes;
+const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
 const tokenTtlMs = 10 * 60 * 1000;
 const allowedAttachmentExtensions = new Set([
   "pdf",
@@ -507,7 +507,7 @@ async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
     const usedBytes = valueInteger(quotaDocument, "usedBytes");
 
     if (usedBytes + bytes > userBlobAttachmentQuotaBytes) {
-      throw new HttpError(413, "첨부파일 저장 한도 50.00 MB를 초과했습니다.", "Blob attachment quota exceeded");
+      throw new HttpError(413, "첨부파일 총 저장 한도 1.00 GB를 초과했습니다.", "Blob attachment quota exceeded");
     }
 
     const quotaWrite = {

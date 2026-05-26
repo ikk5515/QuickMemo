@@ -3,7 +3,7 @@ import type { NoteAttachmentDocument } from "../types";
 export const encryptedAttachmentOverheadBytes = 16;
 export const maxAttachmentFileBytes = 50 * 1024 * 1024;
 export const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
-export const maxAttachmentStorageBytes = maxEncryptedAttachmentBytes;
+export const maxAttachmentStorageBytes = 1024 * 1024 * 1024;
 
 export const allowedAttachmentExtensions = [
   "pdf",
@@ -127,5 +127,9 @@ export function formatFileSize(bytes: number) {
     return `${(bytes / 1024).toFixed(bytes >= 100 * 1024 ? 0 : 1)} KB`;
   }
 
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }

@@ -10,8 +10,7 @@ const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const defaultBatchSize = 100;
 const defaultMaxDocumentDeletes = 18000;
 const firestoreCommitWriteLimit = 500;
-const encryptedAttachmentOverheadBytes = 16;
-const userBlobAttachmentQuotaBytes = 50 * 1024 * 1024 + encryptedAttachmentOverheadBytes;
+const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
 
 function envValue(name) {
   const value = process.env[name];
