@@ -67,6 +67,7 @@ import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import {
+  allowedAttachmentExtensions,
   attachmentDownloadName,
   attachmentExtension,
   attachmentValidationError,
@@ -312,6 +313,7 @@ const publicShareContentKeyStoragePrefix = "quickmemo-public-share-content-key:"
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
+const attachmentInputAccept = allowedAttachmentExtensions.map((extension) => `.${extension}`).join(",");
 export const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx"]);
 export const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
 export const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
@@ -5056,6 +5058,7 @@ function RichMemoEditor({
         )}
         <input
           ref={fileInputRef}
+          accept={attachmentInputAccept}
           className="sr-only"
           multiple
           onChange={handleFileInputChange}
