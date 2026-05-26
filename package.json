@@ -11,8 +11,8 @@
     "security:functions-guard": "node scripts/security-functions-guard.mjs",
     "security:gitignore-guard": "node scripts/security-gitignore-guard.mjs",
     "test": "vitest run",
-    "test:rules": "npx firebase-tools emulators:exec --project quickmemo-rules-test --only firestore \"vitest run --config vitest.rules.config.ts\"",
-    "emulators": "npx firebase-tools emulators:start --only auth,firestore,hosting"
+    "test:rules": "npx firebase-tools emulators:exec --project quickmemo-rules-test --only firestore,storage \"vitest run --config vitest.rules.config.ts\"",
+    "emulators": "npx firebase-tools emulators:start --only auth,firestore,storage,hosting"
   },
   "overrides": {
     "firebase-tools": {

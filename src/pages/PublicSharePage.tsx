@@ -17,6 +17,7 @@ import {
 } from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, sanitizeEditorHtml } from "../lib/editorContent";
 import {
+  getEncryptedPublicShareAttachmentBytes,
   getPublicNoteShareAttachments,
   publicShareActive,
   subscribePublicNoteShare,
@@ -474,7 +475,7 @@ async function decryptPublicAttachment(attachment: PublicNoteShareAttachmentSnap
     {
       version: 1,
       algorithm: "AES-GCM",
-      cipherBytes: attachment.encryptedData.toUint8Array(),
+      cipherBytes: await getEncryptedPublicShareAttachmentBytes(attachment),
       iv: attachment.iv.toUint8Array()
     },
     shareKey

@@ -47,6 +47,9 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("publicShareCleanupQueue");
     expect(deleteManagedUserSource).toContain("publicShareAttachmentCleanupQueue");
     expect(deleteManagedUserSource).toContain("attachments");
+    expect(deleteManagedUserSource).toContain("storage.googleapis.com");
+    expect(deleteManagedUserSource).toContain("storagePath");
+    expect(deleteManagedUserSource).toContain("storageObjectsDeleted");
     expect(deleteManagedUserSource).toContain("history");
     expect(deleteManagedUserSource).toContain("noteUserStates");
     expect(deleteManagedUserSource).toContain('queryDocumentsByStringField(projectId, "attachments", "uploadedBy", uid, accessToken, true)');

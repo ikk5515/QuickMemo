@@ -112,7 +112,10 @@ export interface NoteAttachmentDocument {
   extension: string;
   mimeType: string;
   originalSize: number;
-  encryptedData: Bytes;
+  encryptedData?: Bytes;
+  storagePath?: string;
+  encryptedSize?: number;
+  isReady?: boolean;
   iv: Bytes;
   uploadedBy: string;
   createdAt?: Timestamp;
@@ -142,7 +145,10 @@ export interface PublicNoteShareAttachmentDocument {
   extension: string;
   mimeType: string;
   originalSize: number;
-  encryptedData: Bytes;
+  encryptedData?: Bytes;
+  storagePath?: string;
+  encryptedSize?: number;
+  isReady?: boolean;
   iv: Bytes;
   sourceAttachmentId?: string;
   expiresAt: Timestamp;

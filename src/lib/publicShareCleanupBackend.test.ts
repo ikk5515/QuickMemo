@@ -27,6 +27,9 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain("publicShareCleanupQueue");
     expect(cleanupFunctionSource).toContain("publicShareAttachmentCleanupQueue");
     expect(cleanupFunctionSource).toContain("publicNoteShares");
+    expect(cleanupFunctionSource).toContain("storage.googleapis.com");
+    expect(cleanupFunctionSource).toContain("storagePath");
+    expect(cleanupFunctionSource).toContain("storageObjectsDeleted");
     expect(cleanupFunctionSource).toContain("Bearer");
     expect(cleanupFunctionSource).not.toMatch(forbiddenBackendPattern);
   });

@@ -202,6 +202,27 @@ function attachmentDocument(noteId: string, overrides: Record<string, unknown> =
   };
 }
 
+function storedAttachmentDocument(noteId: string, attachmentId: string, overrides: Record<string, unknown> = {}) {
+  const originalSize = typeof overrides.originalSize === "number" ? overrides.originalSize : 10 * 1024 * 1024;
+
+  return {
+    noteId,
+    version: 1,
+    algorithm: "AES-GCM",
+    fileName: "archive",
+    extension: "zip",
+    mimeType: "application/zip",
+    originalSize,
+    storagePath: `notes/${noteId}/attachments/${attachmentId}/data`,
+    encryptedSize: originalSize + 16,
+    isReady: false,
+    iv: Bytes.fromUint8Array(new Uint8Array(12)),
+    uploadedBy: "user-a",
+    createdAt: new Date("2026-05-18T08:00:00.000Z"),
+    ...overrides
+  };
+}
+
 function softDeleteFields(uid: string) {
   return {
     isDeleted: true,
@@ -305,6 +326,27 @@ function publicShareAttachment(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function storedPublicShareAttachment(shareId: string, attachmentId: string, overrides: Record<string, unknown> = {}) {
+  const originalSize = typeof overrides.originalSize === "number" ? overrides.originalSize : 10 * 1024 * 1024;
+
+  return {
+    version: 1,
+    algorithm: "AES-GCM",
+    fileName: "shared-archive",
+    extension: "zip",
+    mimeType: "application/zip",
+    originalSize,
+    storagePath: `publicNoteShares/${shareId}/attachments/${attachmentId}/data`,
+    encryptedSize: originalSize + 16,
+    isReady: false,
+    iv: Bytes.fromUint8Array(new Uint8Array(12)),
+    sourceAttachmentId: "attachment-a",
+    expiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
+    createdAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
 function publicShareCleanupQueue(shareId: string, expiresAt: Date, overrides: Record<string, unknown> = {}) {
   return {
     shareId,
@@ -344,7 +386,7 @@ function createPublicShareAttachmentBatch(
   db: any,
   shareId: string,
   attachmentId: string,
-  data: ReturnType<typeof publicShareAttachment>
+  data: ReturnType<typeof publicShareAttachment> | ReturnType<typeof storedPublicShareAttachment>
 ) {
   const batch = writeBatch(db);
   batch.set(doc(db, `publicNoteShares/${shareId}/attachments/${attachmentId}`), data);
@@ -1104,6 +1146,30 @@ describeRules("firestore security rules", () => {
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "safe-image", mimeType: "image/png" })
       )
     );
+    await assertSucceeds(
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "zip-storage",
+        storedPublicShareAttachment("share-a", "zip-storage", { expiresAt: shareExpiresAt })
+      )
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-a/attachments/zip-storage"), {
+        isReady: true
+      })
+    );
+    await assertFails(
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "zip-wrong-path",
+        storedPublicShareAttachment("share-a", "zip-wrong-path", {
+          expiresAt: shareExpiresAt,
+          storagePath: "publicNoteShares/share-a/attachments/other/data"
+        })
+      )
+    );
 
     await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a")));
     await assertSucceeds(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
@@ -1844,6 +1910,60 @@ describeRules("firestore security rules", () => {
 
     await assertSucceeds(setDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a"), attachmentDocument("note-a")));
     await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/attachments/attachment-a")));
+  });
+
+  it("allows Storage-backed ZIP attachments up to 10 MiB and validates their storage metadata", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "notes/note-a"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+
+    await assertSucceeds(
+      setDoc(
+        doc(ownerDb, "notes/note-a/attachments/storage-zip"),
+        storedAttachmentDocument("note-a", "storage-zip")
+      )
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "notes/note-a/attachments/storage-zip"), {
+        isReady: true
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "notes/note-a/attachments/storage-zip"), {
+        storagePath: "notes/note-a/attachments/other/data"
+      })
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "notes/note-a/attachments/wrong-path"),
+        storedAttachmentDocument("note-a", "wrong-path", {
+          storagePath: "notes/note-a/attachments/other/data"
+        })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "notes/note-a/attachments/too-large"),
+        storedAttachmentDocument("note-a", "too-large", {
+          originalSize: 10 * 1024 * 1024 + 1,
+          encryptedSize: 10 * 1024 * 1024 + 17
+        })
+      )
+    );
   });
 
   it("blocks direct note deletes and keeps attachments deletable after soft delete", async () => {

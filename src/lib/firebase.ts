@@ -3,6 +3,7 @@ import { getAnalytics, isSupported } from "firebase/analytics";
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
 import { browserSessionPersistence, connectAuthEmulator, getAuth, setPersistence } from "firebase/auth";
 import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
+import { connectStorageEmulator, getStorage } from "firebase/storage";
 
 const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || "quickmemo-demo";
 
@@ -26,6 +27,7 @@ export const hasFirebaseConfig = Boolean(
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+export const storage = getStorage(app);
 export const appCheckSiteKey = import.meta.env.VITE_RECAPTCHA_ENTERPRISE_SITE_KEY;
 export const analyticsPromise =
   firebaseConfig.measurementId && import.meta.env.VITE_USE_FIREBASE_EMULATORS !== "true"
@@ -37,6 +39,7 @@ export const analyticsPromise =
 if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true") {
   connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
+  connectStorageEmulator(storage, "127.0.0.1", 9199);
 }
 
 if (appCheckSiteKey && import.meta.env.VITE_USE_FIREBASE_EMULATORS !== "true") {

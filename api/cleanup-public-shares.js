@@ -2,9 +2,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
+const storageBaseUrl = "https://storage.googleapis.com/storage/v1";
 const oauthTokenUrl = "https://oauth2.googleapis.com/token";
 const databaseId = "(default)";
-const datastoreScope = "https://www.googleapis.com/auth/datastore";
+const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const defaultBatchSize = 100;
 const defaultMaxDocumentDeletes = 18000;
 const firestoreCommitWriteLimit = 500;
@@ -77,7 +78,12 @@ function cleanupCredentials() {
     throw new Error("Missing Firebase cleanup service credentials");
   }
 
-  return { clientEmail, privateKey, projectId };
+  return {
+    clientEmail,
+    privateKey,
+    projectId,
+    storageBucket: envValue("FIREBASE_STORAGE_BUCKET") || envValue("VITE_FIREBASE_STORAGE_BUCKET") || `${projectId}.appspot.com`
+  };
 }
 
 function base64UrlEncode(input) {
@@ -116,7 +122,7 @@ async function fetchAccessToken(credentials) {
   const claims = base64UrlEncode(
     JSON.stringify({
       iss: credentials.clientEmail,
-      scope: datastoreScope,
+      scope: cloudPlatformScope,
       aud: oauthTokenUrl,
       iat: nowSeconds,
       exp: nowSeconds + 3600
@@ -171,6 +177,31 @@ async function firestoreRequest(path, accessToken, init) {
   }
 
   return response.json();
+}
+
+async function storageDeleteObject(bucket, objectName, accessToken) {
+  if (!bucket || !objectName) {
+    return false;
+  }
+
+  const response = await fetch(
+    `${storageBaseUrl}/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(objectName)}`,
+    {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${accessToken}` }
+    }
+  );
+
+  if (response.status === 404) {
+    return false;
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Storage delete failed: ${response.status} ${text.slice(0, 300)}`);
+  }
+
+  return true;
 }
 
 function firestoreCommitPathFromDocumentName(documentName) {
@@ -340,6 +371,21 @@ async function listChildDocuments(parentName, collectionId, accessToken) {
   return documents;
 }
 
+function stringField(document, fieldName) {
+  const value = document?.fields?.[fieldName]?.stringValue;
+  return typeof value === "string" ? value : "";
+}
+
+async function deleteStorageObjectsForDocuments(documents, storageBucket, accessToken, stats) {
+  const objectNames = Array.from(new Set(documents.map((document) => stringField(document, "storagePath")).filter(Boolean)));
+
+  for (const objectName of objectNames) {
+    if (await storageDeleteObject(storageBucket, objectName, accessToken)) {
+      stats.storageObjectsDeleted += 1;
+    }
+  }
+}
+
 function cleanupQueueNameFromShareName(shareName) {
   return shareName.replace("/publicNoteShares/", "/publicShareCleanupQueue/");
 }
@@ -380,7 +426,7 @@ function cleanupAttachmentQueueNameFromAttachmentName(attachmentName) {
     );
 }
 
-async function deletePublicShareTreeByName(shareName, accessToken, stats) {
+async function deletePublicShareTreeByName(shareName, accessToken, storageBucket, stats) {
   const cleanupQueueName = cleanupQueueNameFromShareName(shareName);
   const attachmentDocuments = await listChildDocuments(shareName, "attachments", accessToken);
   const cleanupAttachmentDocuments = await listChildDocuments(
@@ -389,6 +435,7 @@ async function deletePublicShareTreeByName(shareName, accessToken, stats) {
     accessToken
   );
 
+  await deleteStorageObjectsForDocuments(attachmentDocuments, storageBucket, accessToken, stats);
   await deleteDocumentNames(
     attachmentDocuments.map((attachment) => attachment.name),
     accessToken,
@@ -405,19 +452,20 @@ async function deletePublicShareTreeByName(shareName, accessToken, stats) {
   await deleteDocumentNames([cleanupQueueName], accessToken, stats, "shareQueuesDeleted");
 }
 
-async function deletePublicShareTree(cleanupQueueDocument, accessToken, stats) {
+async function deletePublicShareTree(cleanupQueueDocument, accessToken, storageBucket, stats) {
   const shareName = publicShareNameFromCleanupQueueName(cleanupQueueDocument.name);
 
-  await deletePublicShareTreeByName(shareName, accessToken, stats);
+  await deletePublicShareTreeByName(shareName, accessToken, storageBucket, stats);
 }
 
-async function deleteExpiredPublicShareAttachment(attachmentDocument, accessToken, stats) {
+async function deleteExpiredPublicShareAttachment(attachmentDocument, accessToken, storageBucket, stats) {
   const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachmentDocument.name);
 
   if (!cleanupAttachmentQueueName) {
     return;
   }
 
+  await deleteStorageObjectsForDocuments([attachmentDocument], storageBucket, accessToken, stats);
   await deleteDocumentNames([attachmentDocument.name], accessToken, stats, "attachmentsDeleted");
   await deleteDocumentNames([cleanupAttachmentQueueName], accessToken, stats, "attachmentQueuesDeleted");
 }
@@ -428,6 +476,7 @@ async function cleanupExpiredPublicShares() {
   const config = {
     accessToken,
     projectId: credentials.projectId,
+    storageBucket: credentials.storageBucket,
     nowIso: new Date().toISOString(),
     limit: configuredInteger("PUBLIC_SHARE_CLEANUP_BATCH_SIZE", defaultBatchSize, 1, 100)
   };
@@ -437,7 +486,8 @@ async function cleanupExpiredPublicShares() {
     documentDeletesAttempted: 0,
     maxDocumentDeletes: configuredInteger("PUBLIC_SHARE_CLEANUP_MAX_DELETES", defaultMaxDocumentDeletes, 10, 18000),
     shareQueuesDeleted: 0,
-    sharesDeleted: 0
+    sharesDeleted: 0,
+    storageObjectsDeleted: 0
   };
 
   for (let pass = 0; pass < 20 && stats.documentDeletesAttempted < stats.maxDocumentDeletes; pass += 1) {
@@ -451,7 +501,7 @@ async function cleanupExpiredPublicShares() {
         break;
       }
 
-      await deletePublicShareTree(shareQueue, accessToken, stats);
+      await deletePublicShareTree(shareQueue, accessToken, config.storageBucket, stats);
     }
 
     const shares = await queryExpiredShares(config);
@@ -463,7 +513,7 @@ async function cleanupExpiredPublicShares() {
         break;
       }
 
-      await deletePublicShareTreeByName(share.name, accessToken, stats);
+      await deletePublicShareTreeByName(share.name, accessToken, config.storageBucket, stats);
     }
 
     const attachments = await queryExpiredPublicShareAttachments(config);
@@ -475,7 +525,7 @@ async function cleanupExpiredPublicShares() {
         break;
       }
 
-      await deleteExpiredPublicShareAttachment(attachment, accessToken, stats);
+      await deleteExpiredPublicShareAttachment(attachment, accessToken, config.storageBucket, stats);
     }
 
     if (
@@ -491,7 +541,8 @@ async function cleanupExpiredPublicShares() {
     attachmentsDeleted: stats.attachmentsDeleted,
     documentDeletesAttempted: stats.documentDeletesAttempted,
     shareQueuesDeleted: stats.shareQueuesDeleted,
-    sharesDeleted: stats.sharesDeleted
+    sharesDeleted: stats.sharesDeleted,
+    storageObjectsDeleted: stats.storageObjectsDeleted
   };
 }
 

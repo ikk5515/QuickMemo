@@ -2,6 +2,7 @@
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
+const storageBaseUrl = "https://storage.googleapis.com/storage/v1";
 const oauthTokenUrl = "https://oauth2.googleapis.com/token";
 const databaseId = "(default)";
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
@@ -48,7 +49,12 @@ function firebaseCredentials() {
     throw new Error("Missing Firebase management credentials");
   }
 
-  return { clientEmail, privateKey, projectId };
+  return {
+    clientEmail,
+    privateKey,
+    projectId,
+    storageBucket: envValue("FIREBASE_STORAGE_BUCKET") || envValue("VITE_FIREBASE_STORAGE_BUCKET") || `${projectId}.appspot.com`
+  };
 }
 
 function firebaseWebApiKey() {
@@ -210,6 +216,31 @@ async function firestoreRequest(path, accessToken, init = {}) {
   }
 
   return response.json();
+}
+
+async function storageDeleteObject(bucket, objectName, accessToken) {
+  if (!bucket || !objectName) {
+    return false;
+  }
+
+  const response = await fetch(
+    `${storageBaseUrl}/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(objectName)}`,
+    {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${accessToken}` }
+    }
+  );
+
+  if (response.status === 404) {
+    return false;
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Storage delete failed: ${response.status} ${text.slice(0, 300)}`);
+  }
+
+  return true;
 }
 
 async function firestoreCommitDeleteMany(documentNames, accessToken) {
@@ -514,6 +545,16 @@ function integerField(document, fieldName) {
   return typeof value === "string" ? Number.parseInt(value, 10) : Number(value ?? 0);
 }
 
+async function deleteStorageObjectsForDocuments(documents, storageBucket, accessToken, stats) {
+  const objectNames = Array.from(new Set(documents.map((document) => stringField(document, "storagePath")).filter(Boolean)));
+
+  for (const objectName of objectNames) {
+    if (await storageDeleteObject(storageBucket, objectName, accessToken)) {
+      stats.storageObjectsDeleted += 1;
+    }
+  }
+}
+
 function documentIsUnderPath(projectId, documentName, pathPrefix) {
   return documentPathFromName(projectId, documentName).startsWith(pathPrefix);
 }
@@ -692,7 +733,7 @@ async function deleteOwnedNoteFolders(projectId, ownerUid, accessToken, stats) {
   );
 }
 
-async function deleteUploadedNoteAttachments(projectId, uid, accessToken, stats) {
+async function deleteUploadedNoteAttachments(projectId, uid, accessToken, storageBucket, stats) {
   let deleted = 0;
 
   for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
@@ -704,6 +745,7 @@ async function deleteUploadedNoteAttachments(projectId, uid, accessToken, stats)
       return deleted;
     }
 
+    await deleteStorageObjectsForDocuments(attachments, storageBucket, accessToken, stats);
     deleted += await deleteDocumentNamesForStat(
       attachments.map((attachment) => attachment.name),
       accessToken,
@@ -750,7 +792,7 @@ function cleanupQueueNameFromShareName(shareName) {
   return shareName.replace("/publicNoteShares/", "/publicShareCleanupQueue/");
 }
 
-async function deletePublicShareTreeByName(shareName, accessToken, stats) {
+async function deletePublicShareTreeByName(shareName, accessToken, storageBucket, stats) {
   const cleanupQueueName = cleanupQueueNameFromShareName(shareName);
   const attachmentDocuments = await listChildDocuments(shareName, "attachments", accessToken);
   const cleanupAttachmentDocuments = await listChildDocuments(
@@ -759,6 +801,7 @@ async function deletePublicShareTreeByName(shareName, accessToken, stats) {
     accessToken
   );
 
+  await deleteStorageObjectsForDocuments(attachmentDocuments, storageBucket, accessToken, stats);
   await deleteDocumentNamesForStat(
     attachmentDocuments.map((attachment) => attachment.name),
     accessToken,
@@ -775,7 +818,7 @@ async function deletePublicShareTreeByName(shareName, accessToken, stats) {
   await deleteDocumentNamesForStat([cleanupQueueName], accessToken, stats, "publicShareQueuesDeleted");
 }
 
-async function deleteOwnedPublicShares(projectId, ownerUid, accessToken, stats) {
+async function deleteOwnedPublicShares(projectId, ownerUid, accessToken, storageBucket, stats) {
   let deleted = 0;
 
   for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
@@ -786,7 +829,7 @@ async function deleteOwnedPublicShares(projectId, ownerUid, accessToken, stats) 
     }
 
     for (const share of shares) {
-      await deletePublicShareTreeByName(share.name, accessToken, stats);
+      await deletePublicShareTreeByName(share.name, accessToken, storageBucket, stats);
       deleted += 1;
     }
 
@@ -798,7 +841,7 @@ async function deleteOwnedPublicShares(projectId, ownerUid, accessToken, stats) 
   throw new Error("Too many public shares to delete in one request");
 }
 
-async function deletePublicSharesForOwnedNote(projectId, noteId, accessToken, stats) {
+async function deletePublicSharesForOwnedNote(projectId, noteId, accessToken, storageBucket, stats) {
   let deleted = 0;
 
   for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
@@ -809,7 +852,7 @@ async function deletePublicSharesForOwnedNote(projectId, noteId, accessToken, st
     }
 
     for (const share of shares) {
-      await deletePublicShareTreeByName(share.name, accessToken, stats);
+      await deletePublicShareTreeByName(share.name, accessToken, storageBucket, stats);
       deleted += 1;
     }
 
@@ -821,14 +864,15 @@ async function deletePublicSharesForOwnedNote(projectId, noteId, accessToken, st
   throw new Error("Too many note public shares to delete in one request");
 }
 
-async function deleteNoteTreeByName(projectId, noteName, accessToken, stats) {
+async function deleteNoteTreeByName(projectId, noteName, accessToken, storageBucket, stats) {
   const noteId = documentIdFromName(noteName);
   const stateParentName = documentNameForPath(projectId, `noteUserStates/${noteId}`);
   const attachmentDocuments = await listChildDocuments(noteName, "attachments", accessToken);
   const historyDocuments = await listChildDocuments(noteName, "history", accessToken);
   const stateDocuments = await listChildDocuments(stateParentName, "users", accessToken);
 
-  await deletePublicSharesForOwnedNote(projectId, noteId, accessToken, stats);
+  await deletePublicSharesForOwnedNote(projectId, noteId, accessToken, storageBucket, stats);
+  await deleteStorageObjectsForDocuments(attachmentDocuments, storageBucket, accessToken, stats);
   await deleteDocumentNamesForStat(
     attachmentDocuments.map((attachment) => attachment.name),
     accessToken,
@@ -850,7 +894,7 @@ async function deleteNoteTreeByName(projectId, noteName, accessToken, stats) {
   await deleteDocumentNamesForStat([noteName], accessToken, stats, "notesDeleted");
 }
 
-async function deleteOwnedNotes(projectId, ownerUid, accessToken, stats) {
+async function deleteOwnedNotes(projectId, ownerUid, accessToken, storageBucket, stats) {
   let deleted = 0;
 
   for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
@@ -861,7 +905,7 @@ async function deleteOwnedNotes(projectId, ownerUid, accessToken, stats) {
     }
 
     for (const note of notes) {
-      await deleteNoteTreeByName(projectId, note.name, accessToken, stats);
+      await deleteNoteTreeByName(projectId, note.name, accessToken, storageBucket, stats);
       deleted += 1;
     }
 
@@ -1089,7 +1133,7 @@ async function deactivateManagedUserBeforeCleanup(projectId, targetUid, quickKey
   await deleteDocumentPathForStat(projectId, `activeNotes/${targetUid}`, accessToken, stats, "userDocumentsDeleted");
 }
 
-async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid }) {
+async function deleteManagedUser({ accessToken, projectId, storageBucket, targetUid, callerUid }) {
   const callerProfile = await firestoreGet(projectId, `users/${callerUid}`, accessToken);
 
   if (!callerProfile || !boolField(callerProfile, "isActive") || !boolField(callerProfile, "isAdmin")) {
@@ -1135,6 +1179,7 @@ async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid 
     scheduleTasksDeleted: 0,
     shareTargetReferencesRemoved: 0,
     sharedNoteMembershipsRemoved: 0,
+    storageObjectsDeleted: 0,
     uploadedNoteAttachmentsDeleted: 0,
     rosterProfileDeactivated: false,
     userProfileDeactivated: false,
@@ -1146,10 +1191,10 @@ async function deleteManagedUser({ accessToken, projectId, targetUid, callerUid 
   stats.bootstrapAdminReassigned = await reassignBootstrapAdminIfNeeded(projectId, targetUid, callerUid, accessToken);
 
   await removeDeletedUserFromShareTargets(projectId, targetUid, accessToken, stats);
-  await deleteOwnedPublicShares(projectId, targetUid, accessToken, stats);
-  await deleteOwnedNotes(projectId, targetUid, accessToken, stats);
+  await deleteOwnedPublicShares(projectId, targetUid, accessToken, storageBucket, stats);
+  await deleteOwnedNotes(projectId, targetUid, accessToken, storageBucket, stats);
   await removeDeletedUserFromParticipantNotes(projectId, targetUid, callerUid, accessToken, stats);
-  await deleteUploadedNoteAttachments(projectId, targetUid, accessToken, stats);
+  await deleteUploadedNoteAttachments(projectId, targetUid, accessToken, storageBucket, stats);
   await deleteNoteHistoryByActor(projectId, targetUid, accessToken, stats);
   await removeDeletedUserFromNoteHistoryReaders(projectId, targetUid, accessToken, stats);
   await deleteTargetNoteUserStates(projectId, targetUid, accessToken, stats);
@@ -1227,6 +1272,7 @@ export default async function handler(request, response) {
     const result = await deleteManagedUser({
       accessToken,
       projectId: credentials.projectId,
+      storageBucket: credentials.storageBucket,
       targetUid,
       callerUid
     });

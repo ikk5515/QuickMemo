@@ -5,6 +5,7 @@ import {
   deleteDoc,
   deleteField,
   doc,
+  getDoc,
   getDocs,
   limit,
   onSnapshot,
@@ -16,7 +17,9 @@ import {
   where,
   writeBatch
 } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { deleteObject, getBytes, ref, uploadBytes } from "firebase/storage";
+import { maxEncryptedAttachmentBytes } from "../lib/attachments";
+import { db, storage } from "../lib/firebase";
 import type {
   EncryptedPayload,
   NoteAttachmentDocument,
@@ -71,6 +74,8 @@ export interface SaveNoteAttachmentInput {
   iv: Uint8Array;
   uploadedBy: string;
 }
+
+type StoredAttachmentDocument = Pick<NoteAttachmentDocument, "encryptedData" | "storagePath">;
 
 export interface PurgeNoteInput {
   noteId: string;
@@ -329,10 +334,12 @@ export function subscribeNoteAttachments(
     attachmentsQuery,
     (snapshot) => {
       callback(
-        snapshot.docs.map((document) => ({
-          id: document.id,
-          ...(document.data() as NoteAttachmentDocument)
-        }))
+        snapshot.docs
+          .map((document) => ({
+            id: document.id,
+            ...(document.data() as NoteAttachmentDocument)
+          }))
+          .filter((attachment) => attachment.isReady !== false)
       );
     },
     (error) => onError?.(error)
@@ -343,10 +350,12 @@ export async function getNoteAttachments(noteId: string) {
   const attachmentsQuery = query(collection(db, "notes", noteId, "attachments"), orderBy("createdAt", "desc"));
   const snapshot = await getDocs(attachmentsQuery);
 
-  return snapshot.docs.map((document) => ({
-    id: document.id,
-    ...(document.data() as NoteAttachmentDocument)
-  })) satisfies NoteAttachmentSnapshot[];
+  return snapshot.docs
+    .map((document) => ({
+      id: document.id,
+      ...(document.data() as NoteAttachmentDocument)
+    }))
+    .filter((attachment) => attachment.isReady !== false) satisfies NoteAttachmentSnapshot[];
 }
 
 export async function createEncryptedNote(input: SaveNoteInput) {
@@ -527,7 +536,10 @@ function setNoteHistory(
 }
 
 export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
-  return addDoc(collection(db, "notes", input.noteId, "attachments"), {
+  const attachmentRef = doc(collection(db, "notes", input.noteId, "attachments"));
+  const storagePath = noteAttachmentStoragePath(input.noteId, attachmentRef.id);
+
+  await setDoc(attachmentRef, {
     noteId: input.noteId,
     version: 1,
     algorithm: "AES-GCM",
@@ -535,11 +547,89 @@ export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
     extension: input.extension,
     mimeType: input.mimeType,
     originalSize: input.originalSize,
-    encryptedData: Bytes.fromUint8Array(input.encryptedData),
+    storagePath,
+    encryptedSize: input.encryptedData.byteLength,
+    isReady: false,
     iv: Bytes.fromUint8Array(input.iv),
     uploadedBy: input.uploadedBy,
     createdAt: serverTimestamp()
   } satisfies Omit<NoteAttachmentDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> });
+
+  try {
+    await uploadBytes(ref(storage, storagePath), input.encryptedData, {
+      contentType: "application/octet-stream",
+      customMetadata: {
+        algorithm: "AES-GCM",
+        attachmentId: attachmentRef.id,
+        noteId: input.noteId,
+        originalSize: String(input.originalSize),
+        uploadedBy: input.uploadedBy,
+        version: "1"
+      }
+    });
+    await updateDoc(attachmentRef, { isReady: true });
+  } catch (error) {
+    await deleteStorageObjectIfPresent(storagePath).catch(() => undefined);
+    await deleteDoc(attachmentRef).catch(() => undefined);
+    throw error;
+  }
+
+  return attachmentRef;
+}
+
+export async function getEncryptedNoteAttachmentBytes(attachment: StoredAttachmentDocument) {
+  if (attachment.encryptedData) {
+    return attachment.encryptedData.toUint8Array();
+  }
+
+  if (!attachment.storagePath) {
+    throw new Error("첨부파일 암호문 위치를 찾을 수 없습니다.");
+  }
+
+  return new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes));
+}
+
+function noteAttachmentStoragePath(noteId: string, attachmentId: string) {
+  return `notes/${noteId}/attachments/${attachmentId}/data`;
+}
+
+async function deleteStorageObjectIfPresent(storagePath: string) {
+  try {
+    await deleteObject(ref(storage, storagePath));
+  } catch (error) {
+    if (!storageObjectNotFound(error)) {
+      throw error;
+    }
+  }
+}
+
+function storageObjectNotFound(error: unknown) {
+  return (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: string }).code === "storage/object-not-found"
+  );
+}
+
+async function deleteAttachmentStorageObject(documentSnapshot: {
+  data: () => unknown;
+}) {
+  const attachment = documentSnapshot.data() as NoteAttachmentDocument;
+
+  if (attachment.storagePath) {
+    await deleteStorageObjectIfPresent(attachment.storagePath);
+  }
+}
+
+async function deleteNoteAttachmentDocuments(noteId: string) {
+  const snapshot = await getDocs(collection(db, "notes", noteId, "attachments"));
+
+  for (const documentSnapshot of snapshot.docs) {
+    await deleteAttachmentStorageObject(documentSnapshot);
+  }
+
+  await deleteCollectionDocuments(["notes", noteId, "attachments"]);
 }
 
 export function subscribeNoteFolders(
@@ -606,7 +696,14 @@ export async function deleteNoteFolder(uid: string, folderId: string, noteIds: s
 }
 
 export async function deleteNoteAttachment(noteId: string, attachmentId: string) {
-  await deleteDoc(doc(db, "notes", noteId, "attachments", attachmentId));
+  const attachmentRef = doc(db, "notes", noteId, "attachments", attachmentId);
+  const snapshot = await getDoc(attachmentRef);
+
+  if (snapshot.exists()) {
+    await deleteAttachmentStorageObject(snapshot);
+  }
+
+  await deleteDoc(attachmentRef);
 }
 
 async function deleteCollectionDocuments(pathSegments: string[]) {
@@ -643,7 +740,7 @@ export async function deleteNote(noteId: string, uid: string, readerUids: string
   setNoteHistory(batch, noteId, uid, "delete", ["deleted"], readerUids);
   await batch.commit();
 
-  await deleteCollectionDocuments(["notes", noteId, "attachments"]);
+  await deleteNoteAttachmentDocuments(noteId);
 }
 
 export async function restoreNote(noteId: string, uid: string, readerUids: string[]) {
@@ -679,6 +776,6 @@ export async function purgeNote(input: PurgeNoteInput) {
     updatedBy: input.uid
   });
 
-  await deleteCollectionDocuments(["notes", input.noteId, "attachments"]);
+  await deleteNoteAttachmentDocuments(input.noteId);
   await deleteCollectionDocuments(["notes", input.noteId, "history"]);
 }

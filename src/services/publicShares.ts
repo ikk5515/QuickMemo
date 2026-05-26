@@ -14,7 +14,9 @@ import {
   writeBatch,
   where
 } from "firebase/firestore";
-import { db } from "../lib/firebase";
+import { deleteObject, getBytes, ref, uploadBytes } from "firebase/storage";
+import { maxEncryptedAttachmentBytes } from "../lib/attachments";
+import { db, storage } from "../lib/firebase";
 import type {
   EncryptedPayload,
   PublicNoteShareAttachmentDocument,
@@ -53,6 +55,8 @@ interface CreatePublicNoteShareAttachmentInput {
   originalSize: number;
   sourceAttachmentId?: string;
 }
+
+type StoredPublicShareAttachmentDocument = Pick<PublicNoteShareAttachmentDocument, "encryptedData" | "storagePath">;
 
 interface UpdatePublicNoteShareContentInput {
   attachmentCount: number;
@@ -190,6 +194,7 @@ export async function createPublicNoteShareAttachment(shareId: string, input: Cr
   const attachmentRef = doc(collection(db, "publicNoteShares", shareId, "attachments"));
   const cleanupRef = publicShareAttachmentCleanupQueueRef(shareId, attachmentRef.id);
   const expiresAt = Timestamp.fromDate(input.expiresAt);
+  const storagePath = publicShareAttachmentStoragePath(shareId, attachmentRef.id);
   const batch = writeBatch(db);
 
   batch.set(attachmentRef, {
@@ -199,7 +204,9 @@ export async function createPublicNoteShareAttachment(shareId: string, input: Cr
     extension: input.extension,
     mimeType: input.mimeType,
     originalSize: input.originalSize,
-    encryptedData: Bytes.fromUint8Array(input.encryptedData),
+    storagePath,
+    encryptedSize: input.encryptedData.byteLength,
+    isReady: false,
     iv: Bytes.fromUint8Array(input.iv),
     ...(input.sourceAttachmentId ? { sourceAttachmentId: input.sourceAttachmentId } : {}),
     expiresAt,
@@ -216,7 +223,72 @@ export async function createPublicNoteShareAttachment(shareId: string, input: Cr
 
   await batch.commit();
 
+  try {
+    await uploadBytes(ref(storage, storagePath), input.encryptedData, {
+      contentType: "application/octet-stream",
+      customMetadata: {
+        algorithm: "AES-GCM",
+        attachmentId: attachmentRef.id,
+        originalSize: String(input.originalSize),
+        shareId,
+        version: "1"
+      }
+    });
+    await updateDoc(attachmentRef, { isReady: true });
+  } catch (error) {
+    const cleanupBatch = writeBatch(db);
+
+    await deleteStorageObjectIfPresent(storagePath).catch(() => undefined);
+    cleanupBatch.delete(attachmentRef);
+    cleanupBatch.delete(cleanupRef);
+    await cleanupBatch.commit().catch(() => undefined);
+    throw error;
+  }
+
   return attachmentRef;
+}
+
+export async function getEncryptedPublicShareAttachmentBytes(attachment: StoredPublicShareAttachmentDocument) {
+  if (attachment.encryptedData) {
+    return attachment.encryptedData.toUint8Array();
+  }
+
+  if (!attachment.storagePath) {
+    throw new Error("공유 첨부파일 암호문 위치를 찾을 수 없습니다.");
+  }
+
+  return new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes));
+}
+
+function publicShareAttachmentStoragePath(shareId: string, attachmentId: string) {
+  return `publicNoteShares/${shareId}/attachments/${attachmentId}/data`;
+}
+
+async function deleteStorageObjectIfPresent(storagePath: string) {
+  try {
+    await deleteObject(ref(storage, storagePath));
+  } catch (error) {
+    if (!storageObjectNotFound(error)) {
+      throw error;
+    }
+  }
+}
+
+function storageObjectNotFound(error: unknown) {
+  return (
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: string }).code === "storage/object-not-found"
+  );
+}
+
+async function deletePublicShareAttachmentStorageObjects(attachments: PublicNoteShareAttachmentSnapshot[]) {
+  for (const attachment of attachments) {
+    if (attachment.storagePath) {
+      await deleteStorageObjectIfPresent(attachment.storagePath);
+    }
+  }
 }
 
 export async function activatePublicNoteShare(shareId: string, attachmentCount: number) {
@@ -247,7 +319,12 @@ export async function revokePublicNoteShare(shareId: string, ownerUid: string) {
 
 export async function deletePublicNoteShare(shareId: string) {
   const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
+  const attachments = attachmentsSnapshot.docs.map((document) =>
+    publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument)
+  );
   const batch = writeBatch(db);
+
+  await deletePublicShareAttachmentStorageObjects(attachments);
 
   attachmentsSnapshot.docs.forEach((attachment) => {
     batch.delete(attachment.ref);
@@ -264,7 +341,12 @@ export async function deletePublicNoteShareAttachments(shareId: string) {
     return;
   }
 
+  const attachments = attachmentsSnapshot.docs.map((document) =>
+    publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument)
+  );
   const batch = writeBatch(db);
+
+  await deletePublicShareAttachmentStorageObjects(attachments);
 
   attachmentsSnapshot.docs.forEach((attachment) => {
     batch.delete(attachment.ref);
@@ -296,5 +378,6 @@ export async function getPublicNoteShareAttachments(shareId: string) {
 
   return snapshot.docs
     .map((document) => publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument))
+    .filter((attachment) => attachment.isReady !== false)
     .sort((left, right) => timestampMillis(left.createdAt) - timestampMillis(right.createdAt));
 }

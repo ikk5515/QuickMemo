@@ -128,6 +128,7 @@ import {
   deleteNoteAttachment,
   createEncryptedNote,
   deleteNote,
+  getEncryptedNoteAttachmentBytes,
   getNoteAttachments,
   markNoteRead,
   purgeNote,
@@ -2711,7 +2712,7 @@ export default function NotesPage() {
           {
             version: 1,
             algorithm: "AES-GCM",
-            cipherBytes: attachment.encryptedData.toUint8Array(),
+            cipherBytes: await getEncryptedNoteAttachmentBytes(attachment),
             iv: attachment.iv.toUint8Array()
           },
           savedNote.noteKey
@@ -2902,7 +2903,7 @@ export default function NotesPage() {
         {
           version: 1,
           algorithm: "AES-GCM",
-          cipherBytes: attachment.encryptedData.toUint8Array(),
+          cipherBytes: await getEncryptedNoteAttachmentBytes(attachment),
           iv: attachment.iv.toUint8Array()
         },
         noteKey
@@ -3229,7 +3230,7 @@ export default function NotesPage() {
       {
         version: 1,
         algorithm: "AES-GCM",
-        cipherBytes: attachment.encryptedData.toUint8Array(),
+        cipherBytes: await getEncryptedNoteAttachmentBytes(attachment),
         iv: attachment.iv.toUint8Array()
       },
       noteKey

@@ -1,6 +1,6 @@
 import type { NoteAttachmentDocument } from "../types";
 
-export const maxAttachmentFileBytes = 1_000_000;
+export const maxAttachmentFileBytes = 10 * 1024 * 1024;
 export const encryptedAttachmentOverheadBytes = 16;
 export const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
 
@@ -22,7 +22,8 @@ export const allowedAttachmentExtensions = [
   "jpg",
   "jpeg",
   "webp",
-  "gif"
+  "gif",
+  "zip"
 ] as const;
 
 const allowedAttachmentExtensionSet = new Set<string>(allowedAttachmentExtensions);
@@ -45,7 +46,8 @@ const publicShareAttachmentMimeTypes: Record<string, string> = {
   txt: "text/plain",
   webp: "image/webp",
   xls: "application/vnd.ms-excel",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  zip: "application/zip"
 };
 const publicShareRasterImageExtensions = new Set(["gif", "jpeg", "jpg", "png", "webp"]);
 

@@ -806,27 +806,8 @@ service cloud.firestore {
         );
     }
 
-    function validAttachment(data, noteId) {
-      return data.keys().hasOnly([
-        "noteId",
-        "version",
-        "algorithm",
-        "fileName",
-        "extension",
-        "mimeType",
-        "originalSize",
-        "encryptedData",
-        "iv",
-        "uploadedBy",
-        "createdAt"
-      ])
-      && data.noteId == noteId
-      && data.version == 1
-      && data.algorithm == "AES-GCM"
-      && data.fileName is string
-      && data.fileName.size() > 0
-      && data.fileName.size() <= 100
-      && data.extension in [
+    function validAttachmentExtension(extension) {
+      return extension in [
         "pdf",
         "txt",
         "md",
@@ -844,21 +825,77 @@ service cloud.firestore {
         "jpg",
         "jpeg",
         "webp",
-        "gif"
-      ]
+        "gif",
+        "zip"
+      ];
+    }
+
+    function validInlineAttachmentPayload(data) {
+      return data.keys().hasAny(["encryptedData"])
+        && !data.keys().hasAny(["storagePath", "encryptedSize"])
+        && data.originalSize <= 1000000
+        && data.encryptedData is bytes
+        && data.encryptedData.size() == data.originalSize + 16
+        && data.encryptedData.size() <= 1000016;
+    }
+
+    function validStoredAttachmentPayload(data, storagePath) {
+      return !data.keys().hasAny(["encryptedData"])
+        && data.keys().hasAll(["storagePath", "encryptedSize", "isReady"])
+        && data.storagePath == storagePath
+        && data.encryptedSize is int
+        && data.encryptedSize == data.originalSize + 16
+        && data.originalSize <= 10485760
+        && data.encryptedSize <= 10485776
+        && data.isReady is bool;
+    }
+
+    function validAttachment(data, noteId, attachmentId) {
+      return data.keys().hasOnly([
+        "noteId",
+        "version",
+        "algorithm",
+        "fileName",
+        "extension",
+        "mimeType",
+        "originalSize",
+        "encryptedData",
+        "storagePath",
+        "encryptedSize",
+        "isReady",
+        "iv",
+        "uploadedBy",
+        "createdAt"
+      ])
+      && data.noteId == noteId
+      && data.version == 1
+      && data.algorithm == "AES-GCM"
+      && data.fileName is string
+      && data.fileName.size() > 0
+      && data.fileName.size() <= 100
+      && validAttachmentExtension(data.extension)
       && data.mimeType is string
       && data.mimeType.size() <= 120
       && data.originalSize is int
       && data.originalSize > 0
-      && data.originalSize <= 1000000
-      && data.encryptedData is bytes
-      && data.encryptedData.size() == data.originalSize + 16
-      && data.encryptedData.size() <= 1000016
+      && (
+        validInlineAttachmentPayload(data)
+        || validStoredAttachmentPayload(data, "notes/" + noteId + "/attachments/" + attachmentId + "/data")
+      )
       && data.iv is bytes
       && data.iv.size() == 12
       && data.uploadedBy is string
       && data.uploadedBy.size() > 0
       && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
+    }
+
+    function noteAttachmentReadyUpdate(data, noteId, attachmentId) {
+      return validAttachment(data, noteId, attachmentId)
+        && resource.data.keys().hasAny(["isReady"])
+        && resource.data.isReady == false
+        && data.isReady == true
+        && resource.data.uploadedBy == request.auth.uid
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["isReady"]);
     }
 
     function validPublicShare(data) {
@@ -954,10 +991,11 @@ service cloud.firestore {
         || (data.extension == "jpg" && data.mimeType == "image/jpeg")
         || (data.extension == "jpeg" && data.mimeType == "image/jpeg")
         || (data.extension == "webp" && data.mimeType == "image/webp")
-        || (data.extension == "gif" && data.mimeType == "image/gif");
+        || (data.extension == "gif" && data.mimeType == "image/gif")
+        || (data.extension == "zip" && data.mimeType == "application/zip");
     }
 
-    function validPublicShareAttachment(data) {
+    function validPublicShareAttachment(data, shareId, attachmentId) {
       return data.keys().hasOnly([
         "version",
         "algorithm",
@@ -966,6 +1004,9 @@ service cloud.firestore {
         "mimeType",
         "originalSize",
         "encryptedData",
+        "storagePath",
+        "encryptedSize",
+        "isReady",
         "iv",
         "sourceAttachmentId",
         "expiresAt",
@@ -976,40 +1017,35 @@ service cloud.firestore {
       && data.fileName is string
       && data.fileName.size() > 0
       && data.fileName.size() <= 100
-      && data.extension in [
-        "pdf",
-        "txt",
-        "md",
-        "csv",
-        "json",
-        "doc",
-        "docx",
-        "xls",
-        "xlsx",
-        "ppt",
-        "pptx",
-        "hwp",
-        "hwpx",
-        "png",
-        "jpg",
-        "jpeg",
-        "webp",
-        "gif"
-      ]
+      && validAttachmentExtension(data.extension)
       && data.mimeType is string
       && data.mimeType.size() <= 120
       && publicShareAttachmentMimeMatchesExtension(data)
       && data.originalSize is int
       && data.originalSize > 0
-      && data.originalSize <= 1000000
-      && data.encryptedData is bytes
-      && data.encryptedData.size() == data.originalSize + 16
-      && data.encryptedData.size() <= 1000016
+      && (
+        validInlineAttachmentPayload(data)
+        || validStoredAttachmentPayload(
+          data,
+          "publicNoteShares/" + shareId + "/attachments/" + attachmentId + "/data"
+        )
+      )
       && data.iv is bytes
       && data.iv.size() == 12
       && (!data.keys().hasAny(["sourceAttachmentId"]) || (data.sourceAttachmentId is string && data.sourceAttachmentId.size() <= 160))
       && data.expiresAt is timestamp
       && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
+    }
+
+    function publicShareAttachmentReadyUpdate(data, shareId, attachmentId) {
+      return exists(publicSharePath(shareId))
+        && publicShareOwner(get(publicSharePath(shareId)).data)
+        && validPublicShareAttachment(data, shareId, attachmentId)
+        && resource.data.keys().hasAny(["isReady"])
+        && resource.data.isReady == false
+        && data.isReady == true
+        && data.expiresAt == get(publicSharePath(shareId)).data.expiresAt
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["isReady"]);
     }
 
     function rosterMatchesUser(data, uid) {
@@ -1736,9 +1772,14 @@ service cloud.firestore {
         allow create: if exists(notePath(noteId))
           && !noteDeleted(get(notePath(noteId)).data)
           && noteParticipant(get(notePath(noteId)).data)
-          && validAttachment(request.resource.data, noteId)
+          && validAttachment(request.resource.data, noteId, attachmentId)
+          && (
+            !request.resource.data.keys().hasAny(["storagePath"])
+            || request.resource.data.isReady == false
+          )
           && request.resource.data.uploadedBy == request.auth.uid;
-        allow update: if false;
+        allow update: if exists(notePath(noteId))
+          && noteAttachmentReadyUpdate(request.resource.data, noteId, attachmentId);
         allow delete: if exists(notePath(noteId))
           && canDeleteAttachment(get(notePath(noteId)).data, resource.data);
       }
@@ -1768,10 +1809,14 @@ service cloud.firestore {
           && publicShareNotRevoked(get(publicSharePath(shareId)).data)
           && get(publicSharePath(shareId)).data.expiresAt > request.time
           && request.resource.data.expiresAt == get(publicSharePath(shareId)).data.expiresAt
-          && validPublicShareAttachment(request.resource.data)
+          && validPublicShareAttachment(request.resource.data, shareId, attachmentId)
+          && (
+            !request.resource.data.keys().hasAny(["storagePath"])
+            || request.resource.data.isReady == false
+          )
           && request.resource.data.createdAt == request.time
           && publicShareAttachmentCleanupQueueCreated(shareId, attachmentId, request.resource.data);
-        allow update: if false;
+        allow update: if publicShareAttachmentReadyUpdate(request.resource.data, shareId, attachmentId);
         allow delete: if exists(publicSharePath(shareId))
           && publicShareOwner(get(publicSharePath(shareId)).data);
       }
