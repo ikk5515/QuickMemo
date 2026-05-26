@@ -24,6 +24,15 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain("cache-control");
   });
 
+  it("validates downloaded Blob metadata with head before streaming", () => {
+    const streamSource = blobAttachmentApiSource.match(/async function streamBlobAttachment[\s\S]*?async function deleteBlobIfPresent/u)?.[0] ?? "";
+
+    expect(streamSource).toContain("const blobMetadata = await headBlobIfPresent(blobPath)");
+    expect(streamSource).toContain("blobMetadataMatchesAttachment(blobMetadata, blobPath, encryptedSize)");
+    expect(streamSource).not.toContain("blob.blob.size !== encryptedSize");
+    expect(streamSource).toContain("Readable.fromWeb(blob.stream).pipe(response)");
+  });
+
   it("prevents client-side metadata spoofing by validating the reserved path and uploaded blob", () => {
     expect(blobAttachmentApiSource).toContain("Pathname mismatch");
     expect(blobAttachmentApiSource).toContain("validateUploadedBlob");

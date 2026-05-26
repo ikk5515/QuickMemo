@@ -757,6 +757,25 @@ async function validateUploadedBlob(blobPath, encryptedSize) {
   return blob;
 }
 
+async function headBlobIfPresent(blobPath) {
+  try {
+    return await head(blobPath);
+  } catch (error) {
+    if (error?.constructor?.name === "BlobNotFoundError") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function blobMetadataMatchesAttachment(blob, blobPath, encryptedSize) {
+  return Boolean(blob)
+    && blob.pathname === blobPath
+    && blob.size === encryptedSize
+    && blob.contentType === blobContentType;
+}
+
 async function markAttachmentReady(projectId, accessToken, tokenPayload, uploadedBlob) {
   if (uploadedBlob.pathname !== tokenPayload.blobPath) {
     throw new Error("Uploaded blob pathname mismatch");
@@ -917,15 +936,21 @@ async function streamBlobAttachment(request, response) {
     throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Attachment blob not ready");
   }
 
+  const blobMetadata = await headBlobIfPresent(blobPath);
+
+  if (!blobMetadataMatchesAttachment(blobMetadata, blobPath, encryptedSize)) {
+    throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Blob metadata mismatch");
+  }
+
   const blob = await get(blobPath, { access: "private", useCache: false });
 
-  if (!blob || blob.statusCode !== 200 || !blob.stream || blob.blob.size !== encryptedSize) {
+  if (!blob || blob.statusCode !== 200 || !blob.stream) {
     throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Blob not found");
   }
 
   response.statusCode = 200;
   response.setHeader("content-type", blobContentType);
-  response.setHeader("content-length", String(encryptedSize));
+  response.setHeader("content-length", String(blobMetadata.size));
   response.setHeader("cache-control", "no-store");
   response.setHeader("x-content-type-options", "nosniff");
   Readable.fromWeb(blob.stream).pipe(response);
