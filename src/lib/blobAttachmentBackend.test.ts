@@ -39,5 +39,6 @@ describe("blob attachment backend", () => {
 
   it("uses multipart client uploads for the 50 MB Vercel Blob attachment path", () => {
     expect(blobAttachmentClientSource.match(/multipart:\s*true/gu)?.length).toBeGreaterThanOrEqual(2);
+    expect(blobAttachmentClientSource.match(/onUploadProgress:\s*input\.onUploadProgress/gu)?.length).toBeGreaterThanOrEqual(2);
   });
 });

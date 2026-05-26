@@ -318,6 +318,32 @@ const attachmentInputAccept = allowedAttachmentExtensions.map((extension) => `.$
 export const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx"]);
 export const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
 export const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
+const attachmentUploadToastClearDelayMs = 900;
+const attachmentUploadFailureClearDelayMs = 2400;
+
+type AttachmentUploadPhase = "preparing" | "encrypting" | "uploading" | "finalizing" | "syncing" | "complete" | "failed";
+
+interface AttachmentUploadProgressState {
+  fileCount: number;
+  fileIndex: number;
+  fileName: string;
+  loadedBytes: number;
+  overallPercent: number;
+  percent: number;
+  phase: AttachmentUploadPhase;
+  runId: string;
+  totalBytes: number;
+}
+
+const attachmentUploadPhaseLabel: Record<AttachmentUploadPhase, string> = {
+  preparing: "첨부 준비 중",
+  encrypting: "암호화 중",
+  uploading: "업로드 중",
+  finalizing: "마무리 중",
+  syncing: "공유 링크 동기화 중",
+  complete: "업로드 완료",
+  failed: "업로드 실패"
+};
 const maxTextPreviewCharacters = 120_000;
 const maxDocumentPreviewBlocks = 320;
 const maxDocxPreviewMarkupCharacters = 1_600_000;
@@ -1583,6 +1609,28 @@ function noteCountsFromNotes(notes: DecryptedNote[]) {
   return counts;
 }
 
+function clampUploadPercent(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function attachmentUploadOverallPercent(fileIndex: number, fileCount: number, filePercent: number) {
+  if (fileCount <= 0) {
+    return 0;
+  }
+
+  const completedFiles = Math.max(0, fileIndex - 1);
+
+  return clampUploadPercent(((completedFiles + clampUploadPercent(filePercent) / 100) / fileCount) * 100);
+}
+
+function nextAttachmentUploadRunId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 export default function NotesPage() {
   const { profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
@@ -1601,6 +1649,7 @@ export default function NotesPage() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [attachmentBusyId, setAttachmentBusyId] = useState<string | null>(null);
+  const [attachmentUploadProgress, setAttachmentUploadProgress] = useState<AttachmentUploadProgressState | null>(null);
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
   const [listOpen, setListOpen] = useState(false);
@@ -3174,6 +3223,7 @@ export default function NotesPage() {
   async function uploadAttachmentFiles(files: File[], targetNote?: { noteId: string; noteKey: CryptoKey }) {
     const validFiles: File[] = [];
     const rejectedFiles: string[] = [];
+    const runId = nextAttachmentUploadRunId();
 
     files.forEach((file) => {
       const validationError = attachmentValidationError(file);
@@ -3191,14 +3241,58 @@ export default function NotesPage() {
     }
 
     setAttachmentBusyId("upload");
+    setAttachmentUploadProgress({
+      fileCount: validFiles.length,
+      fileIndex: 1,
+      fileName: validFiles[0]?.name ?? "첨부파일",
+      loadedBytes: 0,
+      overallPercent: 0,
+      percent: 0,
+      phase: targetNote ? "encrypting" : "preparing",
+      runId,
+      totalBytes: validFiles[0]?.size ?? 0
+    });
     setError(null);
+    let uploadSucceeded = false;
 
     try {
       const noteTarget = targetNote ?? (await ensureCurrentNoteForAttachment());
 
-      for (const file of validFiles) {
+      for (const [fileIndex, file] of validFiles.entries()) {
+        const fileNumber = fileIndex + 1;
+
+        setAttachmentUploadProgress((current) =>
+          current?.runId === runId
+            ? {
+                ...current,
+                fileIndex: fileNumber,
+                fileName: file.name,
+                loadedBytes: 0,
+                overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 0),
+                percent: 0,
+                phase: "encrypting",
+                totalBytes: file.size
+              }
+            : current
+        );
+
         const fileBytes = new Uint8Array(await file.arrayBuffer());
         const encryptedFile = await encryptBytes(fileBytes, noteTarget.noteKey);
+        const encryptedSize = encryptedFile.cipherBytes.byteLength;
+
+        setAttachmentUploadProgress((current) =>
+          current?.runId === runId
+            ? {
+                ...current,
+                loadedBytes: 0,
+                overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 0),
+                percent: 0,
+                phase: "uploading",
+                totalBytes: encryptedSize
+              }
+            : current
+        );
+
         await createNoteAttachment({
           noteId: noteTarget.noteId,
           fileName: safeAttachmentBaseName(file.name),
@@ -3207,11 +3301,67 @@ export default function NotesPage() {
           originalSize: file.size,
           encryptedData: encryptedFile.cipherBytes,
           iv: encryptedFile.iv,
-          uploadedBy: unlockedProfile.uid
+          uploadedBy: unlockedProfile.uid,
+          onUploadProgress: (progress) => {
+            const totalBytes = progress.total || encryptedSize;
+            const loadedBytes = Math.min(totalBytes, Math.max(0, progress.loaded));
+            const percent = clampUploadPercent(progress.percentage || (totalBytes ? (loadedBytes / totalBytes) * 100 : 0));
+
+            setAttachmentUploadProgress((current) =>
+              current?.runId === runId
+                ? {
+                    ...current,
+                    loadedBytes,
+                    overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, percent),
+                    percent,
+                    phase: "uploading",
+                    totalBytes
+                  }
+                : current
+            );
+          }
         });
+
+        setAttachmentUploadProgress((current) =>
+          current?.runId === runId
+            ? {
+                ...current,
+                loadedBytes: encryptedSize,
+                overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 100),
+                percent: 100,
+                phase: "finalizing",
+                totalBytes: encryptedSize
+              }
+            : current
+        );
       }
 
+      setAttachmentUploadProgress((current) =>
+        current?.runId === runId
+          ? {
+              ...current,
+              fileIndex: validFiles.length,
+              fileName: validFiles.length === 1 ? validFiles[0].name : `${validFiles.length}개 첨부파일`,
+              loadedBytes: current.totalBytes,
+              overallPercent: 100,
+              percent: 100,
+              phase: "syncing"
+            }
+          : current
+      );
       await syncPublicSharesForNoteTarget(noteTarget.noteId, noteTarget.noteKey);
+      uploadSucceeded = true;
+
+      setAttachmentUploadProgress((current) =>
+        current?.runId === runId
+          ? {
+              ...current,
+              overallPercent: 100,
+              percent: 100,
+              phase: "complete"
+            }
+          : current
+      );
 
       setStatus(
         validFiles.length === 1
@@ -3223,9 +3373,14 @@ export default function NotesPage() {
         setError(`일부 파일은 제외했습니다. ${rejectedFiles[0]}`);
       }
     } catch (error) {
+      setAttachmentUploadProgress((current) => (current?.runId === runId ? { ...current, phase: "failed" } : current));
       setError(error instanceof Error ? error.message : "첨부파일을 업로드하지 못했습니다.");
     } finally {
       setAttachmentBusyId(null);
+      window.setTimeout(
+        () => setAttachmentUploadProgress((current) => (current?.runId === runId ? null : current)),
+        uploadSucceeded ? attachmentUploadToastClearDelayMs : attachmentUploadFailureClearDelayMs
+      );
     }
   }
 
@@ -3907,6 +4062,7 @@ export default function NotesPage() {
           </div>
           </>
         )}
+        {attachmentUploadProgress && <AttachmentUploadProgressToast progress={attachmentUploadProgress} />}
         {previewNote && (
           <NotePreviewModal
             canDelete={canDeleteNote(previewNote)}
@@ -6871,6 +7027,60 @@ function PersonalOverview({
         </section>
       </div>
     </section>
+  );
+}
+
+function AttachmentUploadProgressToast({ progress }: { progress: AttachmentUploadProgressState }) {
+  const phaseLabel = attachmentUploadPhaseLabel[progress.phase];
+  const overallPercent = clampUploadPercent(progress.overallPercent);
+  const filePercent = clampUploadPercent(progress.percent);
+  const fileCountLabel = progress.fileCount > 1 ? `${progress.fileIndex}/${progress.fileCount}` : "1개 파일";
+  const byteLabel =
+    progress.totalBytes > 0
+      ? `${formatFileSize(progress.loadedBytes)} / ${formatFileSize(progress.totalBytes)}`
+      : "업로드 준비 중";
+  const isTerminal = progress.phase === "complete" || progress.phase === "failed";
+
+  return (
+    <aside
+      aria-live="polite"
+      className={`attachment-upload-toast ${progress.phase}`}
+      role={progress.phase === "failed" ? "alert" : "status"}
+    >
+      <div className="attachment-upload-toast-head">
+        <span className="attachment-upload-icon" aria-hidden="true">
+          {progress.phase === "complete" ? (
+            <CheckCircle2 size={18} />
+          ) : progress.phase === "failed" ? (
+            <X size={18} />
+          ) : (
+            <Upload size={18} />
+          )}
+        </span>
+        <div>
+          <strong>{phaseLabel}</strong>
+          <span>{fileCountLabel}</span>
+        </div>
+        <em>{overallPercent}%</em>
+      </div>
+      <p className="attachment-upload-file" title={progress.fileName}>
+        {progress.fileName}
+      </p>
+      <div
+        aria-label="첨부파일 업로드 진행률"
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={overallPercent}
+        className="attachment-upload-bar"
+        role="progressbar"
+      >
+        <span style={{ width: `${overallPercent}%` }} />
+      </div>
+      <div className="attachment-upload-meta">
+        <span>{isTerminal ? phaseLabel : byteLabel}</span>
+        <span>{filePercent}%</span>
+      </div>
+    </aside>
   );
 }
 

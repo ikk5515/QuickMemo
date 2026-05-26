@@ -16,7 +16,12 @@ import {
 import { deleteObject, getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { db, storage } from "../lib/firebase";
-import { deleteBlobAttachment, fetchBlobAttachmentBytes, uploadPublicShareAttachmentBlob } from "./blobAttachments";
+import {
+  deleteBlobAttachment,
+  fetchBlobAttachmentBytes,
+  uploadPublicShareAttachmentBlob,
+  type BlobAttachmentUploadProgressHandler
+} from "./blobAttachments";
 import type {
   EncryptedPayload,
   PublicNoteShareAttachmentDocument,
@@ -53,6 +58,7 @@ interface CreatePublicNoteShareAttachmentInput {
   fileName: string;
   iv: Uint8Array;
   mimeType: string;
+  onUploadProgress?: BlobAttachmentUploadProgressHandler;
   ownerUid: string;
   originalSize: number;
   sourceAttachmentId?: string;
@@ -205,6 +211,7 @@ export async function createPublicNoteShareAttachment(shareId: string, input: Cr
       originalSize: input.originalSize,
       encryptedData: input.encryptedData,
       iv: input.iv,
+      onUploadProgress: input.onUploadProgress,
       sourceAttachmentId: input.sourceAttachmentId
     },
     input.ownerUid

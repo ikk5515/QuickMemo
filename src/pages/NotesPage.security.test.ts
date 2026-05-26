@@ -93,6 +93,14 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("accept={attachmentInputAccept}");
   });
 
+  it("surfaces controlled Blob upload progress without exposing attachment bytes", () => {
+    expect(notesPageSource).toContain("AttachmentUploadProgressToast");
+    expect(notesPageSource).toContain("role=\"progressbar\"");
+    expect(notesPageSource).toContain("onUploadProgress: (progress) =>");
+    expect(notesPageSource).toContain("attachmentUploadOverallPercent");
+    expect(notesPageSource).not.toContain("setAttachmentUploadProgress(encryptedFile");
+  });
+
   it("bounds XLSX XML parsing and shared-string enumeration after safe unzip", () => {
     const xlsxXmlHelper =
       notesPageSource.match(/function xlsxXmlDocument[\s\S]*?function xlsxEntryText/)?.[0] ?? "";

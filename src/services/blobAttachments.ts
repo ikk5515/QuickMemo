@@ -8,12 +8,21 @@ const blobContentType = "application/octet-stream";
 
 export type BlobAttachmentScope = "note" | "publicShare";
 
+export interface BlobAttachmentUploadProgress {
+  loaded: number;
+  percentage: number;
+  total: number;
+}
+
+export type BlobAttachmentUploadProgressHandler = (progress: BlobAttachmentUploadProgress) => void;
+
 interface BaseBlobAttachmentUploadInput {
   encryptedData: Uint8Array;
   extension: string;
   fileName: string;
   iv: Uint8Array;
   mimeType: string;
+  onUploadProgress?: BlobAttachmentUploadProgressHandler;
   originalSize: number;
 }
 
@@ -132,6 +141,7 @@ export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadIn
       contentType: blobContentType,
       handleUploadUrl: blobAttachmentApiPath,
       multipart: true,
+      onUploadProgress: input.onUploadProgress,
       headers: authHeaders(idToken),
       clientPayload: JSON.stringify(payload)
     });
@@ -170,6 +180,7 @@ export async function uploadPublicShareAttachmentBlob(
       contentType: blobContentType,
       handleUploadUrl: blobAttachmentApiPath,
       multipart: true,
+      onUploadProgress: input.onUploadProgress,
       headers: authHeaders(idToken),
       clientPayload: JSON.stringify(payload)
     });

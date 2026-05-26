@@ -19,7 +19,12 @@ import {
 import { deleteObject, getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { db, storage } from "../lib/firebase";
-import { deleteBlobAttachment, fetchBlobAttachmentBytes, uploadNoteAttachmentBlob } from "./blobAttachments";
+import {
+  deleteBlobAttachment,
+  fetchBlobAttachmentBytes,
+  uploadNoteAttachmentBlob,
+  type BlobAttachmentUploadProgressHandler
+} from "./blobAttachments";
 import type {
   EncryptedPayload,
   NoteAttachmentDocument,
@@ -73,6 +78,7 @@ export interface SaveNoteAttachmentInput {
   encryptedData: Uint8Array;
   iv: Uint8Array;
   uploadedBy: string;
+  onUploadProgress?: BlobAttachmentUploadProgressHandler;
 }
 
 type StoredAttachmentDocument = Pick<NoteAttachmentDocument, "blobPath" | "encryptedData" | "noteId" | "storagePath"> & {
@@ -549,6 +555,7 @@ export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
     originalSize: input.originalSize,
     encryptedData: input.encryptedData,
     iv: input.iv,
+    onUploadProgress: input.onUploadProgress,
     uploadedBy: input.uploadedBy
   });
 

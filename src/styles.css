@@ -2378,6 +2378,118 @@ textarea {
   width: 34px;
 }
 
+.attachment-upload-toast {
+  background: color-mix(in srgb, #ffffff 94%, var(--teal));
+  border: 1px solid color-mix(in srgb, var(--teal) 20%, var(--line));
+  border-radius: 8px;
+  bottom: 22px;
+  box-shadow: 0 18px 42px rgb(15 23 42 / 18%);
+  display: grid;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  padding: 14px;
+  position: fixed;
+  right: 22px;
+  width: 360px;
+  z-index: 60;
+}
+
+.attachment-upload-toast.failed {
+  border-color: color-mix(in srgb, var(--coral) 34%, var(--line));
+}
+
+.attachment-upload-toast-head {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+}
+
+.attachment-upload-icon {
+  align-items: center;
+  background: color-mix(in srgb, var(--teal) 12%, #ffffff);
+  border-radius: 8px;
+  color: var(--teal);
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  width: 34px;
+}
+
+.attachment-upload-toast.complete .attachment-upload-icon {
+  background: color-mix(in srgb, var(--teal) 13%, #ffffff);
+  color: var(--teal);
+}
+
+.attachment-upload-toast.failed .attachment-upload-icon {
+  background: color-mix(in srgb, var(--coral) 12%, #ffffff);
+  color: var(--coral);
+}
+
+.attachment-upload-toast-head div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.attachment-upload-toast-head strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.attachment-upload-toast-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.attachment-upload-toast-head em {
+  color: var(--teal);
+  font-size: 18px;
+  font-style: normal;
+  font-weight: 950;
+}
+
+.attachment-upload-file {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 850;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-upload-bar {
+  background: color-mix(in srgb, var(--teal) 10%, #eef3f2);
+  border-radius: 999px;
+  height: 9px;
+  overflow: hidden;
+}
+
+.attachment-upload-bar span {
+  background: linear-gradient(90deg, var(--teal), var(--blue));
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  transition: width 160ms ease;
+}
+
+.attachment-upload-toast.failed .attachment-upload-bar span {
+  background: var(--coral);
+}
+
+.attachment-upload-meta {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  font-weight: 800;
+  justify-content: space-between;
+}
+
 .editor-footer {
   align-items: center;
   border-top: 1px solid var(--line);
@@ -4771,6 +4883,14 @@ textarea {
   .attachment-delete-action {
     height: 36px;
     width: 36px;
+  }
+
+  .attachment-upload-toast {
+    bottom: 14px;
+    left: 14px;
+    max-width: none;
+    right: 14px;
+    width: auto;
   }
 
   .note-preview-header {
