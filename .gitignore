@@ -56,3 +56,8 @@ emulator-data/
 Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
+
+# Cloud sync conflict artifacts
+*-MacBook Pro*

@@ -9,7 +9,13 @@ interface AvatarButtonProps {
 
 export function AvatarButton({ user, selected = false, showRole = true, onClick }: AvatarButtonProps) {
   return (
-    <button className={`avatar-button ${selected ? "is-selected" : ""}`} type="button" onClick={onClick}>
+    <button
+      aria-label={`${user.displayName} 사용자 선택`}
+      aria-pressed={selected}
+      className={`avatar-button ${selected ? "is-selected" : ""}`}
+      type="button"
+      onClick={onClick}
+    >
       <span className="quick-key">{user.quickKey}</span>
       <span className="avatar-circle" style={{ background: user.color }}>
         {user.avatarText}

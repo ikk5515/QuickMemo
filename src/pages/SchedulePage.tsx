@@ -166,6 +166,34 @@ const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; col
   other: { Icon: Repeat2, color: "#64748b", label: recurringHabitIconLabels.other }
 };
 
+function useKoreanHolidayMap(dateStrings: string[]) {
+  const cacheKey = dateStrings.join("|");
+  const [holidayMap, setHolidayMap] = useState<Record<string, KoreanHoliday[]>>({});
+
+  useEffect(() => {
+    let active = true;
+
+    if (dateStrings.length === 0) {
+      setHolidayMap({});
+      return () => {
+        active = false;
+      };
+    }
+
+    void getKoreanHolidayMapForDates(dateStrings).then((nextHolidayMap) => {
+      if (active) {
+        setHolidayMap(nextHolidayMap);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [cacheKey, dateStrings]);
+
+  return holidayMap;
+}
+
 type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
 type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
 type CompletedPriorityFilter = "all" | "important" | "urgent" | "importantUrgent";
@@ -499,10 +527,11 @@ export default function SchedulePage() {
     () => buildCalendarTaskLayout(calendarWeeks, sortedTasks),
     [calendarWeeks, sortedTasks]
   );
-  const calendarHolidayMap = useMemo(
-    () => getKoreanHolidayMapForDates(calendarWeeks.flatMap((week) => week.days.map((day) => day.dateString))),
+  const calendarDateStrings = useMemo(
+    () => calendarWeeks.flatMap((week) => week.days.map((day) => day.dateString)),
     [calendarWeeks]
   );
+  const calendarHolidayMap = useKoreanHolidayMap(calendarDateStrings);
   const selectedDayTasks = useMemo(
     () => [...(calendarTaskMap[selectedCalendarDate] ?? [])].sort(compareCalendarAgendaTasks),
     [calendarTaskMap, selectedCalendarDate]
@@ -1777,10 +1806,11 @@ function DatePickerField({
   const [cursor, setCursor] = useState(() => datePickerCursor(value || min || todayString));
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
   const weeks = useMemo(() => buildCalendarMonth(cursor.getFullYear(), cursor.getMonth(), todayString), [cursor, todayString]);
-  const holidayMap = useMemo(
-    () => getKoreanHolidayMapForDates(weeks.flatMap((week) => week.days.map((day) => day.dateString))),
+  const dateStrings = useMemo(
+    () => weeks.flatMap((week) => week.days.map((day) => day.dateString)),
     [weeks]
   );
+  const holidayMap = useKoreanHolidayMap(dateStrings);
 
   useEffect(() => {
     if (value) {

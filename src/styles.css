@@ -4589,6 +4589,7 @@ textarea {
   }
 
   .login-layout {
+    align-content: start;
     align-items: start;
   }
 

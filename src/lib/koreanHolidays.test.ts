@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { getKoreanHolidayMapForDates, isKoreanHoliday } from "./koreanHolidays";
 
 describe("korean holidays", () => {
-  it("marks Korean public holidays for calendar display", () => {
-    const holidayMap = getKoreanHolidayMapForDates([
+  it("marks Korean public holidays for calendar display", async () => {
+    const holidayMap = await getKoreanHolidayMapForDates([
       "2025-05-06",
       "2026-01-01",
       "2026-03-02",
@@ -26,9 +26,9 @@ describe("korean holidays", () => {
     expect(holidayMap["2026-08-17"]?.[0]?.name).toBe("대체공휴일");
     expect(holidayMap["2026-10-05"]?.[0]?.name).toBe("대체공휴일");
     expect(holidayMap["2025-05-06"]?.[0]?.name).toBe("대체공휴일");
-    expect(isKoreanHoliday("2026-01-01")).toBe(true);
-    expect(isKoreanHoliday("2026-05-25")).toBe(true);
-    expect(isKoreanHoliday("2026-06-03")).toBe(true);
-    expect(isKoreanHoliday("2026-06-08")).toBe(false);
+    await expect(isKoreanHoliday("2026-01-01")).resolves.toBe(true);
+    await expect(isKoreanHoliday("2026-05-25")).resolves.toBe(true);
+    await expect(isKoreanHoliday("2026-06-03")).resolves.toBe(true);
+    await expect(isKoreanHoliday("2026-06-08")).resolves.toBe(false);
   });
 });

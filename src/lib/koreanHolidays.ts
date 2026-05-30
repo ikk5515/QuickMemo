@@ -1,14 +1,27 @@
-import Holidays from "date-holidays";
-import { addDays, parseLocalDateString } from "./scheduleHelpers";
+import { addDays } from "./scheduleHelpers";
 
 export interface KoreanHoliday {
   name: string;
   type: string;
 }
 
-const dayMillis = 24 * 60 * 60 * 1000;
-const koreanHolidays = new Holidays("KR");
 const holidayCache = new Map<number, Record<string, KoreanHoliday[]>>();
+const lunarDateFormatter = new Intl.DateTimeFormat("en-u-ca-dangi", {
+  day: "numeric",
+  month: "numeric",
+  timeZone: "Asia/Seoul"
+});
+const solarPublicHolidays: Array<{ name: string; sinceYear?: number; suffix: string }> = [
+  { suffix: "01-01", name: "신정" },
+  { suffix: "03-01", name: "3·1절" },
+  { suffix: "05-05", name: "어린이날" },
+  { suffix: "06-06", name: "현충일" },
+  { suffix: "07-17", name: "제헌절", sinceYear: 2026 },
+  { suffix: "08-15", name: "광복절" },
+  { suffix: "10-03", name: "개천절" },
+  { suffix: "10-09", name: "한글날" },
+  { suffix: "12-25", name: "기독탄신일" }
+];
 const substituteHolidayNames = new Set([
   "3·1절",
   "제헌절",
@@ -33,16 +46,15 @@ interface HolidayOccurrence {
   startDate: string;
 }
 
-export function getKoreanHolidayMapForDates(dateStrings: string[]) {
+export async function getKoreanHolidayMapForDates(dateStrings: string[]) {
   const years = new Set(
     dateStrings
       .map((dateString) => Number(dateString.slice(0, 4)))
       .filter((year) => Number.isInteger(year))
   );
+  const yearMaps = [...years].map((year) => [year, getKoreanHolidayMapForYear(year)] as const);
 
-  return [...years].reduce<Record<string, KoreanHoliday[]>>((map, year) => {
-    const yearMap = getKoreanHolidayMapForYear(year);
-
+  return yearMaps.reduce<Record<string, KoreanHoliday[]>>((map, [, yearMap]) => {
     Object.entries(yearMap).forEach(([dateString, holidays]) => {
       map[dateString] = holidays;
     });
@@ -58,25 +70,23 @@ function getKoreanHolidayMapForYear(year: number) {
     return cached;
   }
 
+  const map = buildKoreanHolidayMapForYear(year);
+  holidayCache.set(year, map);
+
+  return map;
+}
+
+function buildKoreanHolidayMapForYear(year: number) {
   const map: Record<string, KoreanHoliday[]> = {};
   const occurrences: HolidayOccurrence[] = [];
 
-  koreanHolidays
-    .getHolidays(year)
-    .filter((holiday) => holiday.type === "public")
-    .forEach((holiday) => {
-      const startDate = holiday.date.slice(0, 10);
-      const durationDays = Math.max(1, Math.round((holiday.end.getTime() - holiday.start.getTime()) / dayMillis));
-      const dates: string[] = [];
+  solarPublicHolidays.forEach((holiday) => {
+    if (!holiday.sinceYear || year >= holiday.sinceYear) {
+      addHolidayOccurrence(map, occurrences, [`${year}-${holiday.suffix}`], holiday.name);
+    }
+  });
 
-      for (let offset = 0; offset < durationDays; offset += 1) {
-        const dateString = addDays(startDate, offset);
-        dates.push(dateString);
-        map[dateString] = [...(map[dateString] ?? []), { name: holiday.name, type: holiday.type }];
-      }
-
-      occurrences.push({ dates, durationDays, name: holiday.name, startDate });
-    });
+  addLunarHolidayOccurrences(year, map, occurrences);
 
   Object.entries(supplementalPublicHolidays).forEach(([dateString, holidays]) => {
     if (dateString.startsWith(`${year}-`)) {
@@ -86,8 +96,51 @@ function getKoreanHolidayMapForYear(year: number) {
 
   addSubstituteHolidays(map, occurrences);
 
-  holidayCache.set(year, map);
   return map;
+}
+
+function addLunarHolidayOccurrences(
+  year: number,
+  map: Record<string, KoreanHoliday[]>,
+  occurrences: HolidayOccurrence[]
+) {
+  let dateString = `${year}-01-01`;
+  const endDateString = `${year}-12-31`;
+
+  while (dateString <= endDateString) {
+    const lunarDate = koreanLunarMonthDay(dateString);
+
+    if (lunarDate.month === 1 && lunarDate.day === 1) {
+      addHolidayOccurrence(map, occurrences, [addDays(dateString, -1), dateString, addDays(dateString, 1)], "설날");
+    } else if (lunarDate.month === 4 && lunarDate.day === 8) {
+      addHolidayOccurrence(map, occurrences, [dateString], "석가탄신일");
+    } else if (lunarDate.month === 8 && lunarDate.day === 15) {
+      addHolidayOccurrence(map, occurrences, [addDays(dateString, -1), dateString, addDays(dateString, 1)], "추석");
+    }
+
+    dateString = addDays(dateString, 1);
+  }
+}
+
+function addHolidayOccurrence(
+  map: Record<string, KoreanHoliday[]>,
+  occurrences: HolidayOccurrence[],
+  dates: string[],
+  name: string
+) {
+  dates.forEach((dateString) => {
+    map[dateString] = mergeHolidays(map[dateString], [{ name, type: "public" }]);
+  });
+
+  occurrences.push({ dates, durationDays: dates.length, name, startDate: dates[0] });
+}
+
+function koreanLunarMonthDay(dateString: string) {
+  const parts = lunarDateFormatter.formatToParts(new Date(`${dateString}T12:00:00+09:00`));
+  const month = Number(parts.find((part) => part.type === "month")?.value);
+  const day = Number(parts.find((part) => part.type === "day")?.value);
+
+  return { month, day };
 }
 
 function addSubstituteHolidays(map: Record<string, KoreanHoliday[]>, occurrences: HolidayOccurrence[]) {
@@ -125,13 +178,19 @@ function nextNonHolidayAfter(dateString: string, map: Record<string, KoreanHolid
 }
 
 function isWeekend(dateString: string) {
-  const day = parseLocalDateString(dateString).getDay();
+  const day = dayOfWeek(dateString);
 
   return day === 0 || day === 6;
 }
 
 function isSunday(dateString: string) {
-  return parseLocalDateString(dateString).getDay() === 0;
+  return dayOfWeek(dateString) === 0;
+}
+
+function dayOfWeek(dateString: string) {
+  const [year, month, day] = dateString.split("-").map(Number);
+
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
 }
 
 function mergeHolidays(current: KoreanHoliday[] = [], supplemental: KoreanHoliday[]) {
@@ -147,7 +206,7 @@ function mergeHolidays(current: KoreanHoliday[] = [], supplemental: KoreanHolida
   return next;
 }
 
-export function isKoreanHoliday(dateString: string) {
+export async function isKoreanHoliday(dateString: string) {
   const year = Number(dateString.slice(0, 4));
 
   if (!Number.isInteger(year)) {

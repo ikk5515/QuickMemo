@@ -12,13 +12,23 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const { firebaseUser, profile, loginRosterUser } = useAuth();
   const [roster, setRoster] = useState<PublicRosterUser[]>([]);
+  const [rosterLoading, setRosterLoading] = useState(true);
   const [selectedUser, setSelectedUser] = useState<PublicRosterUser | null>(null);
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    return subscribeRoster(setRoster, () => setError("로그인 사용자 목록을 불러오지 못했습니다."));
+    return subscribeRoster(
+      (nextRoster) => {
+        setRoster(nextRoster);
+        setRosterLoading(false);
+      },
+      () => {
+        setRosterLoading(false);
+        setError("로그인 사용자 목록을 불러오지 못했습니다.");
+      }
+    );
   }, []);
 
   useEffect(() => {
@@ -103,7 +113,11 @@ export default function LoginPage() {
           빠른 로그인
         </div>
         {error && !selectedUser && <p className="form-error login-error">{error}</p>}
-        {sortedRoster.length === 0 ? (
+        {rosterLoading ? (
+          <div className="empty-state" role="status" aria-live="polite">
+            <p>사용자 목록을 불러오는 중...</p>
+          </div>
+        ) : sortedRoster.length === 0 ? (
           <div className="empty-state">
             <p>아직 로그인 가능한 사용자가 없습니다.</p>
           </div>
@@ -127,11 +141,17 @@ export default function LoginPage() {
       </section>
       {selectedUser && (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setSelectedUser(null)}>
-          <section className="password-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+          <section
+            className="password-modal"
+            role="dialog"
+            aria-labelledby="password-modal-title"
+            aria-modal="true"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
             <span className="avatar-circle modal-avatar" style={{ background: selectedUser.color }}>
               {selectedUser.avatarText}
             </span>
-            <h2>{selectedUser.displayName}</h2>
+            <h2 id="password-modal-title">{selectedUser.displayName}</h2>
             <form onSubmit={handleSubmit} className="form-grid compact">
               <input
                 autoComplete="username"

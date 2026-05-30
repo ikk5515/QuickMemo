@@ -1,19 +1,28 @@
-import type { ReactNode } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
-import AdminPage from "./pages/AdminPage";
-import HomeRedirectPage from "./pages/HomeRedirectPage";
-import LoginPage from "./pages/LoginPage";
-import NotesPage from "./pages/NotesPage";
-import PublicSharePage from "./pages/PublicSharePage";
-import SchedulePage from "./pages/SchedulePage";
-import SetupPage from "./pages/SetupPage";
+
+const AdminPage = lazy(() => import("./pages/AdminPage"));
+const HomeRedirectPage = lazy(() => import("./pages/HomeRedirectPage"));
+const LoginPage = lazy(() => import("./pages/LoginPage"));
+const NotesPage = lazy(() => import("./pages/NotesPage"));
+const PublicSharePage = lazy(() => import("./pages/PublicSharePage"));
+const SchedulePage = lazy(() => import("./pages/SchedulePage"));
+const SetupPage = lazy(() => import("./pages/SetupPage"));
+
+function PageLoadingFallback() {
+  return (
+    <div className="page-center" role="status" aria-live="polite">
+      불러오는 중...
+    </div>
+  );
+}
 
 function RequireAuth({ children, adminOnly = false }: { children: ReactNode; adminOnly?: boolean }) {
   const { firebaseUser, loading, profile } = useAuth();
 
   if (loading) {
-    return <div className="page-center">불러오는 중...</div>;
+    return <PageLoadingFallback />;
   }
 
   if (!firebaseUser || !profile) {
@@ -29,44 +38,46 @@ function RequireAuth({ children, adminOnly = false }: { children: ReactNode; adm
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Navigate to="/login" replace />} />
-      <Route path="/setup" element={<SetupPage />} />
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/share/:shareId" element={<PublicSharePage />} />
-      <Route
-        path="/home"
-        element={
-          <RequireAuth>
-            <HomeRedirectPage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/app"
-        element={
-          <RequireAuth>
-            <NotesPage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/schedule"
-        element={
-          <RequireAuth>
-            <SchedulePage />
-          </RequireAuth>
-        }
-      />
-      <Route
-        path="/admin"
-        element={
-          <RequireAuth adminOnly>
-            <AdminPage />
-          </RequireAuth>
-        }
-      />
-      <Route path="*" element={<Navigate to="/login" replace />} />
-    </Routes>
+    <Suspense fallback={<PageLoadingFallback />}>
+      <Routes>
+        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="/setup" element={<SetupPage />} />
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/share/:shareId" element={<PublicSharePage />} />
+        <Route
+          path="/home"
+          element={
+            <RequireAuth>
+              <HomeRedirectPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/app"
+          element={
+            <RequireAuth>
+              <NotesPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/schedule"
+          element={
+            <RequireAuth>
+              <SchedulePage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/admin"
+          element={
+            <RequireAuth adminOnly>
+              <AdminPage />
+            </RequireAuth>
+          }
+        />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    </Suspense>
   );
 }

@@ -51,3 +51,8 @@ firebase-export-*
 emulator-data
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
+
+# Cloud sync conflict artifacts
+*-MacBook Pro*
