@@ -34,7 +34,7 @@ const substituteHolidayNames = new Set([
   "부처님 오신 날",
   "기독탄신일"
 ]);
-// date-holidays can miss Korean term-expiry election public holidays, so keep verified one-off dates here.
+// Keep verified one-off Korean public holidays that are not derivable from fixed solar/lunar rules.
 const supplementalPublicHolidays: Record<string, KoreanHoliday[]> = {
   "2026-06-03": [{ name: "지방선거", type: "public" }]
 };
