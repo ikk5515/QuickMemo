@@ -314,6 +314,10 @@ textarea {
   margin: 18px 0 16px;
 }
 
+.login-copy h1 span {
+  display: inline-block;
+}
+
 .login-copy p,
 .auth-panel p,
 .unlock-panel p {
@@ -1226,7 +1230,8 @@ textarea {
 
 .note-list-item strong {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: keep-all;
 }
 
 .note-list-item .note-snippet {
@@ -1531,8 +1536,9 @@ textarea {
   line-height: 1;
   min-height: 430px;
   outline: none;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   padding: 18px 0;
+  word-break: keep-all;
 }
 
 .rich-editor-frame {
@@ -2726,6 +2732,24 @@ textarea {
   color: var(--blue);
 }
 
+.note-folder-badge {
+  align-items: center;
+  background: color-mix(in srgb, var(--folder-color, var(--teal)) 14%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--folder-color, var(--teal)) 28%, var(--line));
+  border-radius: var(--radius-pill);
+  color: color-mix(in srgb, var(--folder-color, var(--teal)) 72%, var(--ink));
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 950;
+  line-height: 1;
+  max-width: 100%;
+  min-height: 22px;
+  overflow: hidden;
+  padding: 4px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .note-drawer {
   max-height: calc(100svh - 110px);
   overflow: auto;
@@ -3562,7 +3586,8 @@ textarea {
   letter-spacing: 0;
   line-height: 1.18;
   margin: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: keep-all;
 }
 
 .note-preview-body.public-share-body {
@@ -3570,6 +3595,8 @@ textarea {
   min-height: 30svh;
   overflow: visible;
   padding: 0;
+  overflow-wrap: break-word;
+  word-break: keep-all;
 }
 
 .public-share-attachments {
@@ -4928,21 +4955,22 @@ textarea {
   }
 
   .notes-workspace {
-    overflow-x: auto;
+    overflow-x: visible;
   }
 
   .notes-editor-layout.with-drawer {
-    grid-template-columns: minmax(272px, 78vw) minmax(320px, calc(100vw - 28px));
-    min-width: max-content;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
   }
 
   .notes-editor-layout.with-drawer .note-drawer {
-    max-height: calc(100svh - 94px);
-    top: 76px;
+    max-height: none;
+    position: static;
+    top: auto;
   }
 
   .notes-editor-layout.with-drawer .full-editor-panel {
-    min-width: 320px;
+    min-width: 0;
   }
 
   .admin-stats-grid {
@@ -8738,6 +8766,8 @@ textarea {
 }
 
 :root {
+  --background: var(--color-page-bg);
+  --text: var(--color-text-primary);
   --color-surface-hover: #f4f8f6;
   --color-primary-subtle: #e7f2ee;
   --color-secondary-subtle: #e9f0fb;
@@ -8749,7 +8779,7 @@ textarea {
   --radius-table-row: 8px;
   --radius-toolbar-item: 8px;
   --type-hero-title: 42px;
-  --type-page-title: 36px;
+  --type-page-title: clamp(30px, 3.2vw, 42px);
   --type-editor-body: 17px;
   --type-editor-heading: 28px;
   --type-empty-state-title: 16px;
@@ -8777,6 +8807,21 @@ button,
 .danger-button,
 .icon-button {
   white-space: nowrap;
+}
+
+.button-reset,
+.task-check,
+.task-drag-handle,
+.recurring-drag-handle,
+.recurring-check-button,
+.date-picker-trigger,
+.date-picker-clear,
+.time-picker-trigger,
+.month-picker-trigger,
+.public-share-image-link,
+.task-open-button,
+.today-recurring-open {
+  color: inherit;
 }
 
 .search-highlight {
@@ -9030,6 +9075,18 @@ button,
   text-overflow: ellipsis;
 }
 
+.attachment-empty {
+  background: var(--color-surface-hover);
+  border: 1px dashed var(--color-border-subtle);
+  border-radius: var(--radius-card);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.5;
+  margin: 0;
+  padding: 12px;
+}
+
 .note-empty-state {
   min-height: 126px;
   padding: var(--space-5);
@@ -9190,6 +9247,137 @@ button,
   padding: 8px 10px;
 }
 
+.today-work-panel {
+  background: var(--panel);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-card);
+  display: grid;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+  padding: var(--space-4);
+}
+
+.today-work-panel > header,
+.today-work-panel > footer {
+  align-items: center;
+  display: flex;
+  gap: var(--space-3);
+  justify-content: space-between;
+}
+
+.today-work-panel h2,
+.today-work-panel h3 {
+  margin: 0;
+}
+
+.today-work-panel h2 {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.today-work-panel header span,
+.today-work-section > div span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.today-work-content {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.today-work-section {
+  background: color-mix(in srgb, var(--surface) 72%, #ffffff);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-card);
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-3);
+}
+
+.today-work-section.overdue {
+  background: color-mix(in srgb, var(--color-danger-subtle) 68%, #ffffff);
+}
+
+.today-work-section > div {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.today-recurring-list {
+  display: grid;
+  gap: 7px;
+}
+
+.today-recurring-item {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-card);
+  display: grid;
+  gap: var(--space-2);
+  grid-template-columns: 32px minmax(0, 1fr);
+  min-height: 50px;
+  padding: var(--space-2);
+}
+
+.today-recurring-item.checked {
+  background: var(--color-success-subtle);
+  border-color: color-mix(in srgb, var(--teal) 24%, var(--line));
+}
+
+.today-recurring-open {
+  background: transparent;
+  border: 0;
+  display: grid;
+  gap: 3px;
+  justify-content: stretch;
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.today-recurring-open strong,
+.today-recurring-open span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.today-recurring-open span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.schedule-create-context-note {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.45;
+  margin: var(--space-1) 0 0;
+}
+
+.matrix-section-progress {
+  background: var(--color-primary-subtle);
+  border: 1px solid color-mix(in srgb, var(--teal) 22%, #ffffff);
+  border-radius: var(--radius-pill);
+  color: var(--teal);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 950;
+  line-height: 1;
+  padding: 4px 7px;
+}
+
 .schedule-view-tabs button:not(.active):hover,
 .schedule-view-tabs button:not(.active):focus-visible,
 .date-picker-day:hover,
@@ -9230,9 +9418,65 @@ button,
 .recurring-habit-content:hover,
 .recurring-habit-content:focus-visible,
 .matrix-date-group-header:hover,
-.matrix-date-group-header:focus-visible {
+.matrix-date-group-header:focus-visible,
+.today-recurring-open:hover,
+.today-recurring-open:focus-visible {
   background: transparent;
   box-shadow: none;
+}
+
+.task-check:not(:disabled):hover,
+.task-check:not(:disabled):focus-visible,
+.task-drag-handle:not(:disabled):hover,
+.task-drag-handle:not(:disabled):focus-visible,
+.recurring-drag-handle:not(:disabled):hover,
+.recurring-drag-handle:not(:disabled):focus-visible,
+.recurring-check-button:not(:disabled):hover,
+.recurring-check-button:not(:disabled):focus-visible,
+.date-picker-trigger:not(:disabled):hover,
+.date-picker-trigger:not(:disabled):focus-visible,
+.date-picker-clear:not(:disabled):hover,
+.date-picker-clear:not(:disabled):focus-visible,
+.time-picker-trigger:not(:disabled):hover,
+.time-picker-trigger:not(:disabled):focus-visible,
+.month-picker-trigger:not(:disabled):hover,
+.month-picker-trigger:not(:disabled):focus-visible,
+.public-share-image-link:not(:disabled):hover,
+.public-share-image-link:not(:disabled):focus-visible {
+  background: var(--color-surface-hover);
+  color: inherit;
+}
+
+.task-check:focus-visible,
+.task-drag-handle:focus-visible,
+.recurring-drag-handle:focus-visible,
+.recurring-check-button:focus-visible,
+.date-picker-trigger:focus-visible,
+.date-picker-clear:focus-visible,
+.time-picker-trigger:focus-visible,
+.month-picker-trigger:focus-visible,
+.today-recurring-open:focus-visible {
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
+  outline: none;
+}
+
+.task-main span.task-meta.overdue,
+.task-row:hover .task-main span.task-meta.overdue,
+.task-row:focus-within .task-main span.task-meta.overdue {
+  color: var(--coral);
+}
+
+.time-picker-presets button.selected:hover,
+.time-picker-hour-grid button.selected:hover,
+.time-picker-minute-grid button.selected:hover,
+.month-picker-grid button.selected:hover,
+.recurring-month-grid button.checked:hover,
+.recurring-date-strip button.selected:hover,
+.recurring-check-button.checked:not(:disabled):hover,
+.recurring-check-button.checked:not(:disabled):focus-visible {
+  background: var(--teal);
+  border-color: var(--teal);
+  color: #ffffff;
 }
 
 .calendar-task-pill:hover,
@@ -9311,6 +9555,10 @@ button,
 
   .schedule-quick-actions button {
     flex: 1 1 140px;
+  }
+
+  .today-work-content {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

@@ -892,15 +892,20 @@ function AdminDashboard() {
           </section>
         )}
         {selectedAdminNote && (
-          <div className="modal-backdrop" role="dialog" aria-modal="true">
-            <article className="note-preview-modal admin-note-modal">
+          <div className="modal-backdrop" role="presentation">
+            <article
+              className="note-preview-modal admin-note-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="admin-note-modal-title"
+            >
               <header className="note-preview-header">
                 <div>
                   <div className="note-preview-kicker">
                     {selectedAdminNote.type === "shared" ? "공유 노트" : "개인 노트"} · 작성자{" "}
                     {userName(selectedAdminNote.ownerUid)}
                   </div>
-                  <h2>{selectedAdminNote.title}</h2>
+                  <h2 id="admin-note-modal-title">{selectedAdminNote.title}</h2>
                   <div className="admin-note-modal-meta">
                     <span>생성 {formatAdminDate(selectedAdminNote.createdAt, "입력 전")}</span>
                     <span>수정 {formatAdminDate(selectedAdminNote.updatedAt, "없음")}</span>

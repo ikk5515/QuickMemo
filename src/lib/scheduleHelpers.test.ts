@@ -349,6 +349,18 @@ describe("schedule helpers", () => {
     ]);
   });
 
+  it("uses action-oriented matrix labels for create-dialog context", () => {
+    const sections = groupTasksByMatrix([], "2026-05-20");
+
+    expect(sections.map((section) => [section.key, section.label])).toEqual([
+      ["urgentImportant", "오늘/지연"],
+      ["firstPriority", "다음 중요·긴급"],
+      ["urgentNotImportant", "긴급 업무"],
+      ["importantNotUrgent", "중요 업무"],
+      ["notUrgentNotImportant", "대기 업무"]
+    ]);
+  });
+
   it("groups non-primary matrix sections by next three days, later, and no date", () => {
     const groups = groupMatrixTasksByDate(
       [

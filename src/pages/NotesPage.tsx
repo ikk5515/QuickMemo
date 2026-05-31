@@ -1594,13 +1594,75 @@ function historyFieldLabel(field: string) {
   return labels[field] ?? field;
 }
 
-async function decryptNoteSnapshots(notes: NoteSnapshot[], uid: string, privateKey: CryptoKey) {
+type DecryptedNoteCache = Map<string, { signature: string; note: DecryptedNote }>;
+
+function timestampSignature(value: { seconds: number; nanoseconds: number } | null | undefined) {
+  return value ? `${value.seconds}:${value.nanoseconds}` : "";
+}
+
+function encryptedPayloadSignature(payload: NoteSnapshot["encryptedTitle"]) {
+  return `${payload.version}:${payload.algorithm}:${payload.iv}:${payload.cipherText}`;
+}
+
+function wrappedKeySignature(wrappedKey: NoteSnapshot["wrappedKeys"][string] | undefined) {
+  return wrappedKey ? `${wrappedKey.version}:${wrappedKey.algorithm}:${wrappedKey.wrappedKey}` : "";
+}
+
+function noteDecryptionSignature(note: NoteSnapshot, uid: string) {
+  return [
+    note.id,
+    note.type,
+    note.ownerUid,
+    note.participantUids.join(","),
+    note.folderId ?? "",
+    note.updatedBy,
+    note.deletedBy ?? "",
+    note.purgedBy ?? "",
+    note.isDeleted ? "deleted" : "active",
+    note.isPurged ? "purged" : "visible",
+    timestampSignature(note.createdAt),
+    timestampSignature(note.dueAt),
+    timestampSignature(note.updatedAt),
+    timestampSignature(note.savedAt),
+    timestampSignature(note.deletedAt),
+    timestampSignature(note.purgedAt),
+    encryptedPayloadSignature(note.encryptedTitle),
+    encryptedPayloadSignature(note.encryptedBody),
+    wrappedKeySignature(note.wrappedKeys[uid])
+  ].join("|");
+}
+
+function pruneDecryptedNoteCache(cache: DecryptedNoteCache | undefined, notes: NoteSnapshot[]) {
+  if (!cache) {
+    return;
+  }
+
+  const activeIds = new Set(notes.map((note) => note.id));
+
+  for (const noteId of cache.keys()) {
+    if (!activeIds.has(noteId)) {
+      cache.delete(noteId);
+    }
+  }
+}
+
+async function decryptNoteSnapshots(notes: NoteSnapshot[], uid: string, privateKey: CryptoKey, cache?: DecryptedNoteCache) {
+  pruneDecryptedNoteCache(cache, notes);
+
   const nextNotes = await Promise.all(
     notes.map(async (note) => {
       const wrappedKey = note.wrappedKeys[uid];
 
       if (!wrappedKey) {
+        cache?.delete(note.id);
         return null;
+      }
+
+      const signature = noteDecryptionSignature(note, uid);
+      const cached = cache?.get(note.id);
+
+      if (cached?.signature === signature) {
+        return cached.note;
       }
 
       try {
@@ -1609,8 +1671,11 @@ async function decryptNoteSnapshots(notes: NoteSnapshot[], uid: string, privateK
           decryptText(note.encryptedTitle, noteKey),
           decryptText(note.encryptedBody, noteKey)
         ]);
-        return { ...note, title, body } satisfies DecryptedNote;
+        const decryptedNote = { ...note, title, body } satisfies DecryptedNote;
+        cache?.set(note.id, { note: decryptedNote, signature });
+        return decryptedNote;
       } catch {
+        cache?.delete(note.id);
         return {
           ...note,
           title: "복호화할 수 없는 노트",
@@ -1701,6 +1766,8 @@ export default function NotesPage() {
   const attachmentPreviewUrl = useRef<string | null>(null);
   const stoppingDeletedPublicShares = useRef(new Set<string>());
   const resolvingPublicShareUrls = useRef(new Set<string>());
+  const decryptedNoteCache = useRef<DecryptedNoteCache>(new Map());
+  const decryptedDeletedNoteCache = useRef<DecryptedNoteCache>(new Map());
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -1811,6 +1878,7 @@ export default function NotesPage() {
     const currentPrivateKey = privateKey;
 
     if (!currentProfile || !currentPrivateKey) {
+      decryptedNoteCache.current.clear();
       setDecryptedNotes([]);
       return;
     }
@@ -1820,7 +1888,7 @@ export default function NotesPage() {
     let cancelled = false;
 
     async function decryptNotes() {
-      const nextNotes = await decryptNoteSnapshots(notes, safeProfile.uid, safePrivateKey);
+      const nextNotes = await decryptNoteSnapshots(notes, safeProfile.uid, safePrivateKey, decryptedNoteCache.current);
 
       if (!cancelled) {
         setDecryptedNotes(nextNotes);
@@ -1838,6 +1906,7 @@ export default function NotesPage() {
     const currentPrivateKey = privateKey;
 
     if (!currentProfile || !currentPrivateKey) {
+      decryptedDeletedNoteCache.current.clear();
       setDecryptedDeletedNotes([]);
       return;
     }
@@ -1847,7 +1916,12 @@ export default function NotesPage() {
     let cancelled = false;
 
     async function decryptNotes() {
-      const nextNotes = await decryptNoteSnapshots(deletedNotes, safeProfile.uid, safePrivateKey);
+      const nextNotes = await decryptNoteSnapshots(
+        deletedNotes,
+        safeProfile.uid,
+        safePrivateKey,
+        decryptedDeletedNoteCache.current
+      );
 
       if (!cancelled) {
         setDecryptedDeletedNotes(nextNotes);
@@ -2646,6 +2720,10 @@ export default function NotesPage() {
   }
 
   function startNewNote() {
+    if (editor.dirty && draftHasContent(editor) && !window.confirm("저장되지 않은 편집 내용이 있습니다. 새 노트로 이동할까요?")) {
+      return;
+    }
+
     clearEditorCursor();
     setEditor(blankEditor(unlockedProfile.uid));
     setShareOpen(false);
@@ -6639,6 +6717,7 @@ function NoteDrawer({
         onPurge={onPurge}
         onRestore={onRestore}
         onTogglePin={onTogglePin}
+        folders={folders}
         publicShareByNoteId={publicShareByNoteId}
         query={query}
       />
@@ -6747,6 +6826,7 @@ function NoteList({
   clockMs,
   deleted = false,
   filter,
+  folders,
   noteStates,
   notes,
   onPreview,
@@ -6762,6 +6842,7 @@ function NoteList({
   clockMs: number;
   deleted?: boolean;
   filter: NoteListFilter;
+  folders: NoteFolderSnapshot[];
   noteStates: NoteStateByNoteId;
   notes: DecryptedNote[];
   onPreview: (note: DecryptedNote) => void;
@@ -6771,6 +6852,8 @@ function NoteList({
   publicShareByNoteId: Map<string, PublicNoteShareSnapshot>;
   query: string;
 }) {
+  const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
+
   if (notes.length === 0) {
     const emptyMessage = query.trim()
       ? "검색 조건에 맞는 노트가 없습니다."
@@ -6799,6 +6882,7 @@ function NoteList({
         const canRestore = canRestoreNote(note);
         const needsAttention = attentionNoteIds.has(note.id);
         const publicShare = deleted ? undefined : publicShareByNoteId.get(note.id);
+        const folder = note.type === "personal" && note.folderId ? folderById.get(note.folderId) : null;
 
         return (
           <article
@@ -6811,6 +6895,11 @@ function NoteList({
                   {note.type === "shared" ? <Share2 size={12} /> : null}
                   {note.type === "shared" ? "공유" : "개인"}
                 </span>
+                {folder && (
+                  <span className="note-folder-badge" style={{ "--folder-color": folder.color } as CSSProperties}>
+                    {folder.name}
+                  </span>
+                )}
                 <PublicShareStatusBadge clockMs={clockMs} share={publicShare} />
                 {needsAttention && <span className="note-list-alert">새 업데이트</span>}
                 <strong>
@@ -7221,7 +7310,18 @@ function AttachmentList({
   onPreview?: (attachment: NoteAttachmentSnapshot) => void;
 }) {
   if (!attachments.length) {
-    return null;
+    return (
+      <section className={`attachment-panel ${compact ? "compact" : ""}`} aria-label="첨부파일">
+        <header>
+          <h3>
+            <File size={16} />
+            첨부파일
+          </h3>
+          <span>0개</span>
+        </header>
+        <p className="attachment-empty">편집 도구의 파일 버튼이나 드래그 앤 드롭으로 파일을 추가할 수 있습니다.</p>
+      </section>
+    );
   }
 
   return (

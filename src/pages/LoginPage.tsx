@@ -104,7 +104,9 @@ export default function LoginPage() {
           <span className="brand-mark">Q</span>
           <span>QuickMemo</span>
         </div>
-        <h1>사용자를 선택하고 바로 메모하세요</h1>
+        <h1>
+          <span>사용자를 선택하고</span> <span>바로 메모하세요</span>
+        </h1>
         <p>원형 사용자 버튼을 클릭하거나 숫자 키를 눌러 비밀번호 창을 열 수 있습니다.</p>
       </section>
       <section className="auth-panel roster-panel">

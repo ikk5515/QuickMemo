@@ -166,6 +166,77 @@ const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; col
   other: { Icon: Repeat2, color: "#64748b", label: recurringHabitIconLabels.other }
 };
 
+type DecryptedTaskCache = Map<string, { signature: string; task: DecryptedScheduleTask }>;
+type DecryptedHabitCache = Map<string, { habit: DecryptedRecurringHabit; signature: string }>;
+
+function scheduleTimestampSignature(value: { seconds: number; nanoseconds: number } | null | undefined) {
+  return value ? `${value.seconds}:${value.nanoseconds}` : "";
+}
+
+function schedulePayloadSignature(payload: ScheduleTaskSnapshot["encryptedTitle"]) {
+  return `${payload.version}:${payload.algorithm}:${payload.iv}:${payload.cipherText}`;
+}
+
+function scheduleWrappedKeySignature(wrappedKey: ScheduleTaskSnapshot["wrappedKeys"][string] | undefined) {
+  return wrappedKey ? `${wrappedKey.version}:${wrappedKey.algorithm}:${wrappedKey.wrappedKey}` : "";
+}
+
+function pruneScheduleDecryptCache<TCache extends Map<string, unknown>>(cache: TCache, snapshots: Array<{ id: string }>) {
+  const activeIds = new Set(snapshots.map((snapshot) => snapshot.id));
+
+  for (const id of cache.keys()) {
+    if (!activeIds.has(id)) {
+      cache.delete(id);
+    }
+  }
+}
+
+function taskDecryptSignature(task: ScheduleTaskSnapshot, uid: string) {
+  return [
+    task.id,
+    task.ownerUid,
+    task.status,
+    task.dueDate ?? "",
+    task.dueTimeMinutes ?? "",
+    task.startDate ?? "",
+    task.endDate ?? "",
+    task.startTimeMinutes ?? "",
+    task.endTimeMinutes ?? "",
+    task.color ?? "",
+    task.sortOrder ?? "",
+    task.progressPercent ?? "",
+    task.isImportant ? "important" : "normal",
+    task.isUrgent ? "urgent" : "later",
+    task.createdBy,
+    task.updatedBy,
+    scheduleTimestampSignature(task.createdAt),
+    scheduleTimestampSignature(task.updatedAt),
+    scheduleTimestampSignature(task.completedAt),
+    schedulePayloadSignature(task.encryptedTitle),
+    schedulePayloadSignature(task.encryptedDetails),
+    scheduleWrappedKeySignature(task.wrappedKeys[uid])
+  ].join("|");
+}
+
+function habitDecryptSignature(habit: RecurringHabitSnapshot, uid: string) {
+  return [
+    habit.id,
+    habit.ownerUid,
+    habit.status,
+    habit.slot,
+    habit.icon,
+    habit.color,
+    habit.sortOrder ?? "",
+    habit.createdBy,
+    habit.updatedBy,
+    scheduleTimestampSignature(habit.createdAt),
+    scheduleTimestampSignature(habit.updatedAt),
+    schedulePayloadSignature(habit.encryptedTitle),
+    schedulePayloadSignature(habit.encryptedDetails),
+    scheduleWrappedKeySignature(habit.wrappedKeys[uid])
+  ].join("|");
+}
+
 function useKoreanHolidayMap(dateStrings: string[]) {
   const cacheKey = dateStrings.join("|");
   const [holidayMap, setHolidayMap] = useState<Record<string, KoreanHoliday[]>>({});
@@ -261,6 +332,12 @@ interface RecurringHabitDialogState {
   mode: "create" | "edit";
 }
 
+interface TodayWorkSummary {
+  overdueTasks: DecryptedScheduleTask[];
+  recurringHabits: DecryptedRecurringHabit[];
+  todayTasks: DecryptedScheduleTask[];
+}
+
 export default function SchedulePage() {
   const { privateKey, profile } = useAuth();
   const [activeView, setActiveView] = useState<ScheduleView | null>(() =>
@@ -277,6 +354,7 @@ export default function SchedulePage() {
   const [readRecurringHabitId, setReadRecurringHabitId] = useState<string | null>(null);
   const [recurringHabitDialog, setRecurringHabitDialog] = useState<RecurringHabitDialogState | null>(null);
   const [recurringOverviewOpen, setRecurringOverviewOpen] = useState(false);
+  const [todayPanelOpen, setTodayPanelOpen] = useState(false);
   const [selectedRecurringDate, setSelectedRecurringDate] = useState(() => toLocalDateString(new Date()));
   const [recurringMonth, setRecurringMonth] = useState(() => toLocalDateString(new Date()).slice(0, 7));
   const [pendingRecurringCheckIn, setPendingRecurringCheckIn] = useState<Record<string, boolean>>({});
@@ -295,6 +373,8 @@ export default function SchedulePage() {
   const [today, setToday] = useState(() => toLocalDateString(new Date()));
   const decryptedTasksRef = useRef<DecryptedScheduleTask[]>([]);
   const decryptedRecurringHabitsRef = useRef<DecryptedRecurringHabit[]>([]);
+  const decryptedTaskCacheRef = useRef<DecryptedTaskCache>(new Map());
+  const decryptedHabitCacheRef = useRef<DecryptedHabitCache>(new Map());
   const taskDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<ScheduleTaskDetails>>>>({});
   const recurringDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<RecurringHabitDetails>>>>({});
 
@@ -387,6 +467,7 @@ export default function SchedulePage() {
 
   useEffect(() => {
     if (!profile || !privateKey) {
+      decryptedTaskCacheRef.current.clear();
       setDecryptedTasks([]);
       return undefined;
     }
@@ -396,12 +477,21 @@ export default function SchedulePage() {
     let active = true;
 
     async function decryptTasks() {
+      pruneScheduleDecryptCache(decryptedTaskCacheRef.current, tasks);
       const nextTasks = await Promise.all(
         tasks.map(async (task) => {
           const wrappedKey = task.wrappedKeys[safeProfile.uid];
 
           if (!wrappedKey) {
+            decryptedTaskCacheRef.current.delete(task.id);
             return null;
+          }
+
+          const signature = taskDecryptSignature(task, safeProfile.uid);
+          const cached = decryptedTaskCacheRef.current.get(task.id);
+
+          if (cached?.signature === signature) {
+            return cached.task;
           }
 
           try {
@@ -412,12 +502,16 @@ export default function SchedulePage() {
             ]);
             const parsedDetails = JSON.parse(detailsJson) as unknown;
 
-            return {
+            const decryptedTask = {
               ...task,
               title,
               details: normalizeScheduleDetails(parsedDetails)
-            };
+            } satisfies DecryptedScheduleTask;
+
+            decryptedTaskCacheRef.current.set(task.id, { signature, task: decryptedTask });
+            return decryptedTask;
           } catch {
+            decryptedTaskCacheRef.current.delete(task.id);
             return null;
           }
         })
@@ -437,6 +531,7 @@ export default function SchedulePage() {
 
   useEffect(() => {
     if (!profile || !privateKey) {
+      decryptedHabitCacheRef.current.clear();
       setDecryptedRecurringHabits([]);
       return undefined;
     }
@@ -446,12 +541,21 @@ export default function SchedulePage() {
     let active = true;
 
     async function decryptHabits() {
+      pruneScheduleDecryptCache(decryptedHabitCacheRef.current, recurringHabits);
       const nextHabits = await Promise.all(
         recurringHabits.map(async (habit) => {
           const wrappedKey = habit.wrappedKeys[safeProfile.uid];
 
           if (!wrappedKey) {
+            decryptedHabitCacheRef.current.delete(habit.id);
             return null;
+          }
+
+          const signature = habitDecryptSignature(habit, safeProfile.uid);
+          const cached = decryptedHabitCacheRef.current.get(habit.id);
+
+          if (cached?.signature === signature) {
+            return cached.habit;
           }
 
           try {
@@ -461,12 +565,16 @@ export default function SchedulePage() {
               decryptText(habit.encryptedDetails, habitKey)
             ]);
 
-            return {
+            const decryptedHabit = {
               ...habit,
               title,
               details: normalizeRecurringHabitDetails(JSON.parse(detailsJson) as unknown)
-            };
+            } satisfies DecryptedRecurringHabit;
+
+            decryptedHabitCacheRef.current.set(habit.id, { habit: decryptedHabit, signature });
+            return decryptedHabit;
           } catch {
+            decryptedHabitCacheRef.current.delete(habit.id);
             return null;
           }
         })
@@ -549,6 +657,14 @@ export default function SchedulePage() {
     () => [...(calendarTaskMap[selectedCalendarDate] ?? [])].sort(compareCalendarAgendaTasks),
     [calendarTaskMap, selectedCalendarDate]
   );
+  const todayWorkSummary = useMemo<TodayWorkSummary>(() => {
+    const activeTasks = sortedTasks.filter((task) => task.status !== "completed");
+    const overdueTasks = activeTasks.filter((task) => isTaskScheduleOverdue(task, today));
+    const todayTasks = activeTasks.filter((task) => taskCoversDate(task, today) && !isTaskScheduleOverdue(task, today));
+    const recurringHabitsForToday = decryptedRecurringHabits.filter((habit) => habit.status === "active");
+
+    return { overdueTasks, recurringHabits: recurringHabitsForToday, todayTasks };
+  }, [decryptedRecurringHabits, sortedTasks, today]);
 
   useEffect(() => {
     if (viewRecurringHabitId && !selectedRecurringHabit) {
@@ -1249,11 +1365,34 @@ export default function SchedulePage() {
     setSelectedCalendarDate(toLocalDateString(nextToday));
   }
 
+  function openTodayWorkPanel() {
+    const nextToday = toLocalDateString(new Date());
+    const nextDate = new Date(`${nextToday}T00:00:00`);
+
+    setCalendarCursor(new Date(nextDate.getFullYear(), nextDate.getMonth(), 1));
+    setSelectedCalendarDate(nextToday);
+    setSelectedRecurringDate(nextToday);
+    setRecurringMonth(nextToday.slice(0, 7));
+    setTodayPanelOpen(true);
+  }
+
   function openQuickTaskDialog() {
-    setActiveView("todo");
+    if (activeView === "matrix") {
+      setCreateDialog({
+        defaults: { startDate: today, endDate: today, color: nextScheduleTaskColor(decryptedTasks), isImportant: true, isUrgent: true },
+        title: "매트릭스 일정 추가"
+      });
+      return;
+    }
+
+    if (activeView === "calendar") {
+      openCalendarCreateDialog(selectedCalendarDate);
+      return;
+    }
+
     setCreateDialog({
       defaults: { startDate: today, endDate: today, color: nextScheduleTaskColor(decryptedTasks) },
-      title: "새 할 일 추가"
+      title: "새 일정 추가"
     });
   }
 
@@ -1308,11 +1447,13 @@ export default function SchedulePage() {
               value={scheduleQuery}
             />
           </label>
-          <nav className="schedule-view-tabs" aria-label="일정관리 보기">
+          <nav className="schedule-view-tabs" role="tablist" aria-label="일정관리 보기">
             {scheduleTabs.map(({ Icon, label, shortLabel, view }) => (
               <button
                 key={view}
+                aria-selected={activeView === view}
                 className={activeView === view ? "active" : ""}
+                role="tab"
                 type="button"
                 onClick={() => setActiveView(view)}
                 aria-label={label}
@@ -1353,9 +1494,9 @@ export default function SchedulePage() {
                 검색 결과 {displayedTasks.length + displayedRecurringHabits.length}개
               </span>
             )}
-            <button className="secondary-button" type="button" onClick={goToday}>
+            <button className="secondary-button" type="button" onClick={openTodayWorkPanel}>
               <Zap size={16} />
-              오늘 보기
+              오늘 업무
             </button>
             <button type="button" onClick={openQuickTaskDialog}>
               <Plus size={16} />
@@ -1367,6 +1508,33 @@ export default function SchedulePage() {
             </button>
           </div>
         </section>
+
+        {todayPanelOpen && (
+          <TodayWorkPanel
+            checkIns={recurringCheckIns}
+            pendingCheckIns={pendingRecurringCheckIn}
+            summary={todayWorkSummary}
+            today={today}
+            onAddTask={() => {
+              setTodayPanelOpen(false);
+              setCreateDialog({
+                defaults: { startDate: today, endDate: today, color: nextScheduleTaskColor(decryptedTasks) },
+                title: "오늘 일정 추가"
+              });
+            }}
+            onClose={() => setTodayPanelOpen(false)}
+            onOpenHabit={(habitId) => {
+              setReadRecurringHabitId(habitId);
+              setTodayPanelOpen(false);
+            }}
+            onOpenTask={(taskId) => {
+              setViewTaskId(taskId);
+              setTodayPanelOpen(false);
+            }}
+            onToggleHabit={(habit) => void toggleRecurringHabitCheckIn(habit, today)}
+            onToggleTask={(task) => void toggleTask(task)}
+          />
+        )}
 
         {(error || status) && (
           <div className={`schedule-feedback ${error ? "error" : ""}`} role="status">
@@ -1826,6 +1994,9 @@ function ScheduleCreateDialog({
   onCreate: (draft: CreateTaskDraft) => Promise<boolean>;
   title: string;
 }) {
+  const titleId = useId();
+  const descriptionId = useId();
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -1839,14 +2010,26 @@ function ScheduleCreateDialog({
 
   return (
     <div className="modal-backdrop schedule-create-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="schedule-create-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+      <section
+        className="schedule-create-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={!allowPriority ? descriptionId : undefined}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <header>
           <div>
             <p className="section-kicker">
               <CalendarDays size={15} />
               일정 추가
             </p>
-            <h2>{title}</h2>
+            <h2 id={titleId}>{title}</h2>
+            {!allowPriority && (
+              <p className="schedule-create-context-note" id={descriptionId}>
+                선택한 매트릭스 영역의 중요도와 긴급도를 적용합니다.
+              </p>
+            )}
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
             <X size={18} />
@@ -1862,6 +2045,120 @@ function ScheduleCreateDialog({
         />
       </section>
     </div>
+  );
+}
+
+function TodayWorkPanel({
+  checkIns,
+  onAddTask,
+  onClose,
+  onOpenHabit,
+  onOpenTask,
+  onToggleHabit,
+  onToggleTask,
+  pendingCheckIns,
+  summary,
+  today
+}: {
+  checkIns: RecurringHabitCheckInSnapshot[];
+  onAddTask: () => void;
+  onClose: () => void;
+  onOpenHabit: (habitId: string) => void;
+  onOpenTask: (taskId: string) => void;
+  onToggleHabit: (habit: DecryptedRecurringHabit) => void;
+  onToggleTask: (task: DecryptedScheduleTask) => void;
+  pendingCheckIns: Record<string, boolean>;
+  summary: TodayWorkSummary;
+  today: string;
+}) {
+  const totalCount = summary.overdueTasks.length + summary.todayTasks.length + summary.recurringHabits.length;
+
+  return (
+    <aside className="today-work-panel" aria-label="오늘 업무">
+      <header>
+        <div>
+          <p className="section-kicker">
+            <Zap size={15} />
+            오늘 업무
+          </p>
+          <h2>{formatDateLabel(today)}</h2>
+          <span>{totalCount ? `${totalCount}개 항목` : "오늘 예정된 업무가 없습니다."}</span>
+        </div>
+        <button className="icon-button" type="button" onClick={onClose} aria-label="오늘 업무 닫기">
+          <X size={18} />
+        </button>
+      </header>
+      <div className="today-work-content">
+        <section className="today-work-section overdue">
+          <div>
+            <h3>지연 업무</h3>
+            <span>{summary.overdueTasks.length}</span>
+          </div>
+          <TaskList
+            emptyMessage="지연된 업무가 없습니다."
+            tasks={summary.overdueTasks}
+            today={today}
+            onOpen={onOpenTask}
+            onToggle={onToggleTask}
+            showProgress
+          />
+        </section>
+        <section className="today-work-section">
+          <div>
+            <h3>오늘 일정</h3>
+            <span>{summary.todayTasks.length}</span>
+          </div>
+          <TaskList
+            emptyMessage="오늘 예정된 일정이 없습니다."
+            tasks={summary.todayTasks}
+            today={today}
+            onOpen={onOpenTask}
+            onToggle={onToggleTask}
+            showProgress
+          />
+        </section>
+        <section className="today-work-section">
+          <div>
+            <h3>반복 업무</h3>
+            <span>{summary.recurringHabits.length}</span>
+          </div>
+          {summary.recurringHabits.length ? (
+            <div className="today-recurring-list">
+              {summary.recurringHabits.map((habit) => {
+                const checked = isHabitCheckedOn(checkIns, habit.id, today);
+                const pending = pendingCheckIns[recurringCheckInId(habit.id, today)] === true;
+
+                return (
+                  <article className={`today-recurring-item ${checked ? "checked" : ""}`} key={habit.id}>
+                    <button
+                      className={`recurring-check-button ${checked ? "checked" : ""}`}
+                      disabled={pending}
+                      type="button"
+                      aria-label={checked ? `${habit.title} 체크 해제` : `${habit.title} 체크`}
+                      onClick={() => onToggleHabit(habit)}
+                    >
+                      {checked ? <Check size={16} /> : null}
+                    </button>
+                    <button className="today-recurring-open" type="button" onClick={() => onOpenHabit(habit.id)}>
+                      <strong>{habit.title}</strong>
+                      <span>{slotLabel(habit.slot)} · {recurringHabitIconLabels[habit.icon]}</span>
+                    </button>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="schedule-empty">오늘 체크할 반복 업무가 없습니다.</p>
+          )}
+        </section>
+      </div>
+      <footer>
+        <button className="secondary-button" type="button" onClick={onAddTask}>
+          <Plus size={16} />
+          오늘 일정 추가
+        </button>
+      </footer>
+    </aside>
   );
 }
 
@@ -2562,6 +2859,7 @@ function MatrixSectionPanel({
         <div>
           <h2>{section.label}</h2>
           <span>{section.tasks.length}</span>
+          {section.progress.total > 0 && <em className="matrix-section-progress">{section.progress.percent}%</em>}
         </div>
         <button
           className="icon-button matrix-add-button"

@@ -39,11 +39,18 @@ export default function SetupPage() {
   const [setupCode, setSetupCode] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
 
   useEffect(() => {
     void getBootstrapState()
-      .then((state) => setAdminExists(state.adminExists))
-      .catch(() => setAdminExists(false));
+      .then((state) => {
+        setAdminExists(state.adminExists);
+        setBootstrapError(null);
+      })
+      .catch(() => {
+        setAdminExists(null);
+        setBootstrapError("초기 설정 상태를 확인하지 못했습니다. 네트워크와 Firebase Functions 설정을 확인해주세요.");
+      });
   }, []);
 
   if (firebaseUser) {
@@ -52,6 +59,30 @@ export default function SetupPage() {
 
   if (adminExists) {
     return <Navigate to="/login" replace />;
+  }
+
+  if (adminExists === null) {
+    return (
+      <main className="auth-page">
+        <section className="auth-panel setup-panel" aria-live="polite">
+          <div className="section-kicker">
+            <CheckCircle2 size={18} />
+            초기 설정
+          </div>
+          <h1>초기 설정 상태 확인</h1>
+          {bootstrapError ? (
+            <>
+              <p>{bootstrapError}</p>
+              <button type="button" onClick={() => window.location.reload()}>
+                다시 확인
+              </button>
+            </>
+          ) : (
+            <p>첫 관리자 설정 가능 여부를 확인하는 중입니다.</p>
+          )}
+        </section>
+      </main>
+    );
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {

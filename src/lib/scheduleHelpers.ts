@@ -704,7 +704,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
   const sections: MatrixSection[] = [
     {
       key: "urgentImportant",
-      label: "오늘까지 해야 할 일",
+      label: "오늘/지연",
       accent: "red",
       isImportant: true,
       isUrgent: true,
@@ -714,7 +714,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "firstPriority",
-      label: "1순위 업무",
+      label: "다음 중요·긴급",
       accent: "red",
       isImportant: true,
       isUrgent: true,
@@ -724,7 +724,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "urgentNotImportant",
-      label: "2순위 업무",
+      label: "긴급 업무",
       accent: "gold",
       isImportant: false,
       isUrgent: true,
@@ -734,7 +734,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "importantNotUrgent",
-      label: "업무 목록",
+      label: "중요 업무",
       accent: "blue",
       isImportant: true,
       isUrgent: false,
