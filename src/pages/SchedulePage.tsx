@@ -2071,17 +2071,38 @@ function TodayWorkPanel({
   summary: TodayWorkSummary;
   today: string;
 }) {
+  const panelRef = useRef<HTMLElement | null>(null);
+  const titleId = useId();
   const totalCount = summary.overdueTasks.length + summary.todayTasks.length + summary.recurringHabits.length;
 
+  useEffect(() => {
+    panelRef.current?.focus({ preventScroll: true });
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   return (
-    <aside className="today-work-panel" aria-label="오늘 업무">
+    <aside
+      className="today-work-panel"
+      ref={panelRef}
+      role="region"
+      aria-labelledby={titleId}
+      tabIndex={-1}
+    >
       <header>
         <div>
           <p className="section-kicker">
             <Zap size={15} />
             오늘 업무
           </p>
-          <h2>{formatDateLabel(today)}</h2>
+          <h2 id={titleId}>{formatDateLabel(today)}</h2>
           <span>{totalCount ? `${totalCount}개 항목` : "오늘 예정된 업무가 없습니다."}</span>
         </div>
         <button className="icon-button" type="button" onClick={onClose} aria-label="오늘 업무 닫기">

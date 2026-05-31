@@ -6610,8 +6610,8 @@ textarea {
 
 .task-row:hover,
 .task-row:focus-within {
-  background: color-mix(in srgb, var(--teal) 6%, #ffffff);
-  border-color: color-mix(in srgb, var(--teal) 20%, var(--line));
+  background: var(--schedule-hover-bg);
+  border-color: var(--schedule-hover-border);
 }
 
 .task-row.completed .task-main strong,
@@ -6777,7 +6777,7 @@ textarea {
 
 .calendar-day:hover,
 .calendar-day:focus-visible {
-  background: #f8fbfa;
+  background: var(--schedule-hover-bg);
 }
 
 .calendar-day:nth-child(7n) {
@@ -7078,10 +7078,10 @@ textarea {
 }
 
 .matrix-section.drag-over {
-  background: color-mix(in srgb, var(--teal) 5%, #ffffff);
+  background: var(--schedule-drop-bg);
   box-shadow:
     0 12px 30px rgb(20 33 31 / 5%),
-    inset 0 0 0 2px color-mix(in srgb, var(--teal) 38%, #ffffff);
+    inset 0 0 0 2px var(--schedule-drop-border);
 }
 
 .task-progress {
@@ -7877,8 +7877,8 @@ textarea {
 }
 
 .recurring-slot-section.drag-over {
-  background: color-mix(in srgb, var(--teal) 6%, #ffffff);
-  border-color: color-mix(in srgb, var(--teal) 24%, #ffffff);
+  background: var(--schedule-drop-bg);
+  border-color: var(--schedule-drop-border);
 }
 
 .recurring-slot-section > header {
@@ -7919,8 +7919,8 @@ textarea {
 
 .recurring-habit-row:hover,
 .recurring-habit-row:focus-within {
-  background: var(--surface);
-  border-color: var(--line);
+  background: var(--schedule-hover-bg);
+  border-color: var(--schedule-hover-border);
 }
 
 .recurring-habit-row.checked {
@@ -8448,7 +8448,8 @@ textarea {
 
 .recurring-overview-item:hover,
 .recurring-overview-item:focus-visible {
-  background: var(--surface);
+  background: var(--schedule-hover-bg);
+  border-color: var(--schedule-hover-border);
 }
 
 .recurring-overview-title {
@@ -8768,7 +8769,17 @@ textarea {
 :root {
   --background: var(--color-page-bg);
   --text: var(--color-text-primary);
-  --color-surface-hover: #f4f8f6;
+  --color-surface-hover: #f8fafc;
+  --list-row-hover-bg: var(--color-surface-hover);
+  --list-row-hover-border: #e2e8f0;
+  --schedule-hover-bg: #f8fafc;
+  --schedule-hover-border: #e2e8f0;
+  --schedule-event-hover-bg: #f1f5f9;
+  --schedule-event-hover-border: #cbd5e1;
+  --schedule-drag-bg: #eff6ff;
+  --schedule-drag-border: #bfdbfe;
+  --schedule-drop-bg: #f1f5f9;
+  --schedule-drop-border: #cbd5e1;
   --color-primary-subtle: #e7f2ee;
   --color-secondary-subtle: #e9f0fb;
   --color-warning-subtle: #fff5df;
@@ -9258,6 +9269,16 @@ button,
   padding: var(--space-4);
 }
 
+.today-work-panel:focus {
+  outline: none;
+}
+
+.today-work-panel:focus-visible {
+  box-shadow:
+    var(--shadow-card),
+    0 0 0 3px var(--color-focus-ring);
+}
+
 .today-work-panel > header,
 .today-work-panel > footer {
   align-items: center;
@@ -9277,7 +9298,7 @@ button,
 }
 
 .today-work-panel header span,
-.today-work-section > div span {
+.today-work-section > div:first-child span {
   color: var(--muted);
   font-size: 12px;
   font-weight: 900;
@@ -9303,7 +9324,7 @@ button,
   background: color-mix(in srgb, var(--color-danger-subtle) 68%, #ffffff);
 }
 
-.today-work-section > div {
+.today-work-section > div:first-child {
   align-items: center;
   display: flex;
   justify-content: space-between;
@@ -9396,6 +9417,8 @@ button,
 .calendar-task-pill:focus-visible,
 .matrix-task-row:hover,
 .matrix-task-row:focus-within,
+.today-recurring-item:hover,
+.today-recurring-item:focus-within,
 .matrix-date-group-header:hover,
 .matrix-date-group-header:focus-visible,
 .recurring-habit-row:hover,
@@ -9408,21 +9431,26 @@ button,
 .month-picker-grid button:focus-visible,
 .recurring-month-grid button:hover,
 .recurring-month-grid button:focus-visible {
-  background: var(--color-surface-hover);
-  border-color: color-mix(in srgb, var(--teal) 22%, var(--line));
+  background: var(--schedule-hover-bg);
+  border-color: var(--schedule-hover-border);
   color: inherit;
 }
 
-.task-open-button:hover,
-.task-open-button:focus-visible,
-.recurring-habit-content:hover,
-.recurring-habit-content:focus-visible,
-.matrix-date-group-header:hover,
-.matrix-date-group-header:focus-visible,
-.today-recurring-open:hover,
-.today-recurring-open:focus-visible {
+button.task-open-button:not(:disabled):hover,
+button.task-open-button:not(:disabled):focus-visible,
+button.task-open-button:not(:disabled):active,
+button.recurring-habit-content:not(:disabled):hover,
+button.recurring-habit-content:not(:disabled):focus-visible,
+button.recurring-habit-content:not(:disabled):active,
+button.matrix-date-group-header:not(:disabled):hover,
+button.matrix-date-group-header:not(:disabled):focus-visible,
+button.matrix-date-group-header:not(:disabled):active,
+button.today-recurring-open:not(:disabled):hover,
+button.today-recurring-open:not(:disabled):focus-visible,
+button.today-recurring-open:not(:disabled):active {
   background: transparent;
   box-shadow: none;
+  color: inherit;
 }
 
 .task-check:not(:disabled):hover,
@@ -9443,7 +9471,7 @@ button,
 .month-picker-trigger:not(:disabled):focus-visible,
 .public-share-image-link:not(:disabled):hover,
 .public-share-image-link:not(:disabled):focus-visible {
-  background: var(--color-surface-hover);
+  background: var(--schedule-hover-bg);
   color: inherit;
 }
 
@@ -9479,31 +9507,36 @@ button,
   color: #ffffff;
 }
 
-.calendar-task-pill:hover,
-.calendar-task-pill:focus-visible {
-  background: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 22%, #ffffff);
-  box-shadow: 0 4px 10px rgb(20 33 31 / 8%);
+button.calendar-task-pill:not(:disabled):hover,
+button.calendar-task-pill:not(:disabled):focus-visible,
+button.calendar-task-pill:not(:disabled):active {
+  background: var(--schedule-event-hover-bg);
+  border-color: var(--schedule-event-hover-border);
+  box-shadow:
+    inset 3px 0 0 var(--schedule-task-color, var(--teal)),
+    0 4px 10px rgb(20 33 31 / 6%);
+  color: var(--ink);
 }
 
 .task-row:hover .task-main span,
 .task-row:focus-within .task-main span,
 .calendar-task-pill:hover .calendar-task-time,
 .calendar-task-pill:focus-visible .calendar-task-time {
-  color: inherit;
+  color: var(--color-text-secondary);
 }
 
 .task-row.dragging,
 .matrix-task-row.dragging,
 .recurring-habit-row.dragging {
-  background: color-mix(in srgb, var(--blue) 8%, #ffffff);
-  border-color: color-mix(in srgb, var(--blue) 24%, var(--line));
+  background: var(--schedule-drag-bg);
+  border-color: var(--schedule-drag-border);
   box-shadow: inset 0 0 0 2px rgb(63 111 181 / 12%);
 }
 
 .matrix-section.drag-over,
 .recurring-slot-section.drag-over {
-  background: color-mix(in srgb, var(--teal) 7%, #ffffff);
-  border-color: color-mix(in srgb, var(--teal) 28%, var(--line));
+  background: var(--schedule-drop-bg);
+  border-color: var(--schedule-drop-border);
 }
 
 .schedule-empty {
@@ -9605,6 +9638,34 @@ button,
 
   .schedule-stat-card.recurring {
     grid-column: 1 / -1;
+  }
+
+  .today-work-panel {
+    inset:
+      max(12px, env(safe-area-inset-top))
+      max(12px, env(safe-area-inset-right))
+      max(12px, env(safe-area-inset-bottom))
+      max(12px, env(safe-area-inset-left));
+    margin: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    position: fixed;
+    z-index: 80;
+  }
+
+  .today-work-panel > header,
+  .today-work-panel > footer {
+    background: var(--panel);
+    position: sticky;
+    z-index: 1;
+  }
+
+  .today-work-panel > header {
+    top: 0;
+  }
+
+  .today-work-panel > footer {
+    bottom: 0;
   }
 }
 
