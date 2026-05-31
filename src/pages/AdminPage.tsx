@@ -1178,9 +1178,17 @@ function EditableUserCard({
         <div>
           <h3>{draft.displayName || "이름 없음"}</h3>
           <div className="admin-user-badges">
-            <span>#{draft.quickKey}</span>
-            <span>{draft.isAdmin ? "관리자" : "사용자"}</span>
-            <span>{draft.isActive ? "활성" : "비활성"}</span>
+            <span className="admin-user-badge key">#{draft.quickKey}</span>
+            <span className={`admin-user-badge ${draft.isAdmin ? "admin" : "user"}`}>
+              {draft.isAdmin ? "관리자" : "사용자"}
+            </span>
+            <span className={`admin-user-badge ${draft.isActive ? "active" : "inactive"}`}>
+              {draft.isActive ? "활성" : "비활성"}
+            </span>
+          </div>
+          <div className="admin-user-meta-row">
+            <span>생성 {formatAdminDate(draft.createdAt, "기록 없음")}</span>
+            <span>수정 {formatAdminDate(draft.updatedAt, "기록 없음")}</span>
           </div>
         </div>
       </header>
@@ -1312,7 +1320,9 @@ function EditableUserCard({
           <UserX size={13} />
           비밀번호 강제 변경은 Admin SDK가 있는 서버를 연결하면 다시 활성화할 수 있습니다.
         </p>
-        <p className="row-message">{message ?? (pending ? "저장 중..." : dirty ? "자동 저장 대기" : "자동 저장")}</p>
+        <p className={`row-message ${pending ? "saving" : dirty ? "pending" : "saved"}`}>
+          {message ?? (pending ? "저장 중..." : dirty ? "자동 저장 대기" : "자동 저장")}
+        </p>
       </footer>
     </article>
   );

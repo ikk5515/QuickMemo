@@ -37,5 +37,13 @@ export default function HomeRedirectPage() {
     return <Navigate to="/login" replace />;
   }
 
-  return <div className="page-center">불러오는 중...</div>;
+  return (
+    <div className="page-center app-loading-page" role="status" aria-live="polite">
+      <section className="loading-card">
+        <span className="brand-mark">Q</span>
+        <strong>기본 화면을 준비하고 있습니다</strong>
+        <p>저장된 시작 화면으로 곧 이동합니다.</p>
+      </section>
+    </div>
+  );
 }

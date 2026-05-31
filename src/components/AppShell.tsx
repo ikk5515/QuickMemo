@@ -152,11 +152,17 @@ function SettingsModal({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="password-modal app-settings-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+      <section
+        className="password-modal app-settings-modal"
+        role="dialog"
+        aria-labelledby="settings-modal-title"
+        aria-modal="true"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <button className="icon-button password-change-close" type="button" onClick={onClose} aria-label="설정 닫기">
           <X size={16} />
         </button>
-        <h2>설정</h2>
+        <h2 id="settings-modal-title">설정</h2>
         <form className="form-grid compact" onSubmit={(event) => void submitSettings(event)}>
           <label>
             처음 들어갈 화면
@@ -249,11 +255,17 @@ function PasswordChangeModal({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="password-modal password-change-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+      <section
+        className="password-modal password-change-modal"
+        role="dialog"
+        aria-labelledby="password-change-title"
+        aria-modal="true"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
         <button className="icon-button password-change-close" type="button" onClick={onClose} aria-label="비밀번호 변경 닫기">
           <X size={16} />
         </button>
-        <h2>비밀번호 변경</h2>
+        <h2 id="password-change-title">비밀번호 변경</h2>
         <form className="form-grid compact" onSubmit={(event) => void submitPasswordChange(event)}>
           <label>
             현재 비밀번호
