@@ -156,6 +156,7 @@ function SettingsModal({
         className="password-modal app-settings-modal"
         role="dialog"
         aria-labelledby="settings-modal-title"
+        aria-describedby="settings-modal-description"
         aria-modal="true"
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -163,30 +164,35 @@ function SettingsModal({
           <X size={16} />
         </button>
         <h2 id="settings-modal-title">설정</h2>
+        <p id="settings-modal-description" className="settings-modal-description">
+          홈의 작업 시작 버튼과 일정관리 기본 탭을 설정합니다.
+        </p>
         <form className="form-grid compact" onSubmit={(event) => void submitSettings(event)}>
-          <label>
-            처음 들어갈 화면
-            <select
-              onChange={(event) => setDefaultHome(event.target.value as UserPreferencesDocument["defaultHome"])}
-              value={defaultHome}
-            >
-              <option value="notes">노트</option>
-              <option value="schedule">일정관리</option>
-            </select>
-          </label>
-          <label>
-            일정관리 기본 탭
-            <select
-              onChange={(event) => setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"])}
-              value={scheduleDefaultView}
-            >
-              <option value="todo">할 일</option>
-              <option value="calendar">달력</option>
-              <option value="matrix">매트릭스</option>
-              <option value="recurring">반복</option>
-              <option value="completed">완료</option>
-            </select>
-          </label>
+          <section className="settings-form-section" aria-label="작업 환경">
+            <label>
+              작업 시작 기본 화면
+              <select
+                onChange={(event) => setDefaultHome(event.target.value as UserPreferencesDocument["defaultHome"])}
+                value={defaultHome}
+              >
+                <option value="notes">노트</option>
+                <option value="schedule">일정관리</option>
+              </select>
+            </label>
+            <label>
+              일정관리 기본 탭
+              <select
+                onChange={(event) => setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"])}
+                value={scheduleDefaultView}
+              >
+                <option value="todo">할 일</option>
+                <option value="calendar">달력</option>
+                <option value="matrix">매트릭스</option>
+                <option value="recurring">반복</option>
+                <option value="completed">완료</option>
+              </select>
+            </label>
+          </section>
           {error && <p className="form-error">{error}</p>}
           {message && <p className="form-success">{message}</p>}
           <button disabled={busy} type="submit">
@@ -259,6 +265,7 @@ function PasswordChangeModal({
         className="password-modal password-change-modal"
         role="dialog"
         aria-labelledby="password-change-title"
+        aria-describedby="password-change-description"
         aria-modal="true"
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -266,6 +273,9 @@ function PasswordChangeModal({
           <X size={16} />
         </button>
         <h2 id="password-change-title">비밀번호 변경</h2>
+        <p id="password-change-description" className="settings-modal-description">
+          현재 비밀번호를 확인한 뒤 새 비밀번호를 저장합니다.
+        </p>
         <form className="form-grid compact" onSubmit={(event) => void submitPasswordChange(event)}>
           <label>
             현재 비밀번호

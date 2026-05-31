@@ -283,6 +283,7 @@ export default function SchedulePage() {
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => toLocalDateString(new Date()));
   const [calendarCursor, setCalendarCursor] = useState(() => new Date());
   const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(null);
+  const [scheduleQuery, setScheduleQuery] = useState("");
   const [completedQuery, setCompletedQuery] = useState("");
   const [completedDate, setCompletedDate] = useState("");
   const [completedMonth, setCompletedMonth] = useState(() => toLocalDateString(new Date()).slice(0, 7));
@@ -492,6 +493,18 @@ export default function SchedulePage() {
   }, [decryptedRecurringHabits]);
 
   const sortedTasks = useMemo(() => [...decryptedTasks].sort(compareTaskSchedule), [decryptedTasks]);
+  const displayedTasks = useMemo(
+    () => sortedTasks.filter((task) => scheduleTaskMatchesQuery(task, scheduleQuery)),
+    [scheduleQuery, sortedTasks]
+  );
+  const displayedRecurringHabits = useMemo(
+    () => decryptedRecurringHabits.filter((habit) => recurringHabitMatchesQuery(habit, scheduleQuery)),
+    [decryptedRecurringHabits, scheduleQuery]
+  );
+  const scheduleStats = useMemo(
+    () => scheduleDashboardStats(sortedTasks, decryptedRecurringHabits, today),
+    [decryptedRecurringHabits, sortedTasks, today]
+  );
   const viewTask = useMemo(
     () => sortedTasks.find((task) => task.id === viewTaskId) ?? null,
     [viewTaskId, sortedTasks]
@@ -513,19 +526,19 @@ export default function SchedulePage() {
     [decryptedRecurringHabits, recurringHabitDialog?.habitId]
   );
   const completedTasks = useMemo(
-    () => sortedTasks.filter((task) => task.status === "completed").sort(compareCompletedTasks),
-    [sortedTasks]
+    () => displayedTasks.filter((task) => task.status === "completed").sort(compareCompletedTasks),
+    [displayedTasks]
   );
-  const todoGroups = useMemo(() => groupTasksByTodoDate(sortedTasks, today), [sortedTasks, today]);
-  const matrixSections = useMemo(() => groupTasksByMatrix(sortedTasks, today), [sortedTasks, today]);
+  const todoGroups = useMemo(() => groupTasksByTodoDate(displayedTasks, today), [displayedTasks, today]);
+  const matrixSections = useMemo(() => groupTasksByMatrix(displayedTasks, today), [displayedTasks, today]);
   const calendarWeeks = useMemo(
     () => buildCalendarMonth(calendarCursor.getFullYear(), calendarCursor.getMonth(), today),
     [calendarCursor, today]
   );
-  const calendarTaskMap = useMemo(() => tasksByDate(sortedTasks), [sortedTasks]);
+  const calendarTaskMap = useMemo(() => tasksByDate(displayedTasks), [displayedTasks]);
   const calendarTaskLayout = useMemo(
-    () => buildCalendarTaskLayout(calendarWeeks, sortedTasks),
-    [calendarWeeks, sortedTasks]
+    () => buildCalendarTaskLayout(calendarWeeks, displayedTasks),
+    [calendarWeeks, displayedTasks]
   );
   const calendarDateStrings = useMemo(
     () => calendarWeeks.flatMap((week) => week.days.map((day) => day.dateString)),
@@ -1236,6 +1249,19 @@ export default function SchedulePage() {
     setSelectedCalendarDate(toLocalDateString(nextToday));
   }
 
+  function openQuickTaskDialog() {
+    setActiveView("todo");
+    setCreateDialog({
+      defaults: { startDate: today, endDate: today, color: nextScheduleTaskColor(decryptedTasks) },
+      title: "새 할 일 추가"
+    });
+  }
+
+  function openQuickRecurringDialog() {
+    setActiveView("recurring");
+    setRecurringHabitDialog({ mode: "create" });
+  }
+
   function openCalendarCreateDialog(dateString: string) {
     setSelectedCalendarDate(dateString);
     setCreateDialog({
@@ -1271,6 +1297,17 @@ export default function SchedulePage() {
             </p>
             <h1>{scheduleTabs.find((tab) => tab.view === activeView)?.label ?? "일정관리"}</h1>
           </div>
+          <label className="schedule-search-control">
+            <Search size={17} aria-hidden="true" />
+            <span className="sr-only">일정 검색</span>
+            <input
+              aria-label="일정과 반복 업무 검색"
+              onChange={(event) => setScheduleQuery(event.target.value)}
+              placeholder="일정, 설명, 체크리스트 검색"
+              type="search"
+              value={scheduleQuery}
+            />
+          </label>
           <nav className="schedule-view-tabs" aria-label="일정관리 보기">
             {scheduleTabs.map(({ Icon, label, shortLabel, view }) => (
               <button
@@ -1286,6 +1323,50 @@ export default function SchedulePage() {
             ))}
           </nav>
         </header>
+
+        <section className="schedule-command-panel" aria-label="일정 요약과 빠른 작업">
+          <div className="schedule-stat-grid">
+            <span className="schedule-stat-card today">
+              <strong>{scheduleStats.today}</strong>
+              <em>오늘</em>
+            </span>
+            <span className="schedule-stat-card overdue">
+              <strong>{scheduleStats.overdue}</strong>
+              <em>지연</em>
+            </span>
+            <span className="schedule-stat-card active">
+              <strong>{scheduleStats.active}</strong>
+              <em>진행 중</em>
+            </span>
+            <span className="schedule-stat-card completed">
+              <strong>{scheduleStats.completed}</strong>
+              <em>완료</em>
+            </span>
+            <span className="schedule-stat-card recurring">
+              <strong>{scheduleStats.recurring}</strong>
+              <em>반복</em>
+            </span>
+          </div>
+          <div className="schedule-quick-actions">
+            {scheduleQuery.trim() && (
+              <span className="schedule-query-result">
+                검색 결과 {displayedTasks.length + displayedRecurringHabits.length}개
+              </span>
+            )}
+            <button className="secondary-button" type="button" onClick={goToday}>
+              <Zap size={16} />
+              오늘 보기
+            </button>
+            <button type="button" onClick={openQuickTaskDialog}>
+              <Plus size={16} />
+              새 일정
+            </button>
+            <button className="secondary-button" type="button" onClick={openQuickRecurringDialog}>
+              <Repeat2 size={16} />
+              반복 업무
+            </button>
+          </div>
+        </section>
 
         {(error || status) && (
           <div className={`schedule-feedback ${error ? "error" : ""}`} role="status">
@@ -1340,7 +1421,7 @@ export default function SchedulePage() {
         {activeView === "recurring" && (
           <RecurringView
             checkIns={recurringCheckIns}
-            habits={decryptedRecurringHabits}
+            habits={displayedRecurringHabits}
             month={recurringMonth}
             pendingCheckIns={pendingRecurringCheckIn}
             selectedDate={selectedRecurringDate}
@@ -5528,6 +5609,62 @@ function monthOffset(date: Date, offset: number) {
 function isComposingKeyboardEvent(event: ReactKeyboardEvent<HTMLInputElement>) {
   const nativeEvent = event.nativeEvent as KeyboardEvent & { isComposing?: boolean; keyCode?: number };
   return Boolean(nativeEvent.isComposing || nativeEvent.keyCode === 229 || event.key === "Process");
+}
+
+function normalizedScheduleSearch(value: string) {
+  return value.trim().toLocaleLowerCase("ko");
+}
+
+function scheduleTaskMatchesQuery(task: DecryptedScheduleTask, query: string) {
+  const term = normalizedScheduleSearch(query);
+
+  if (!term) {
+    return true;
+  }
+
+  return [
+    task.title,
+    task.details.description,
+    task.details.checklist.map((item) => item.text).join(" "),
+    formatTaskDateDisplay(task),
+    task.isImportant ? "중요" : "",
+    task.isUrgent ? "긴급" : "",
+    task.status === "completed" ? "완료" : "진행"
+  ]
+    .join(" ")
+    .toLocaleLowerCase("ko")
+    .includes(term);
+}
+
+function recurringHabitMatchesQuery(habit: DecryptedRecurringHabit, query: string) {
+  const term = normalizedScheduleSearch(query);
+
+  if (!term) {
+    return true;
+  }
+
+  return [
+    habit.title,
+    habit.details.description,
+    habit.details.checklist.map((item) => item.text).join(" "),
+    slotLabel(habit.slot),
+    recurringHabitIconLabels[habit.icon]
+  ]
+    .join(" ")
+    .toLocaleLowerCase("ko")
+    .includes(term);
+}
+
+function scheduleDashboardStats(tasks: DecryptedScheduleTask[], habits: DecryptedRecurringHabit[], today: string) {
+  const activeTasks = tasks.filter((task) => task.status !== "completed");
+
+  return {
+    active: activeTasks.length,
+    completed: tasks.length - activeTasks.length,
+    overdue: activeTasks.filter((task) => isTaskScheduleOverdue(task, today)).length,
+    recurring: habits.filter((habit) => habit.status === "active").length,
+    today: activeTasks.filter((task) => taskCoversDate(task, today)).length
+  };
 }
 
 function scheduleActionError(caught: unknown, fallback: string) {

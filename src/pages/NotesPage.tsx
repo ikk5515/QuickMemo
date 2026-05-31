@@ -30,6 +30,7 @@ import {
   RotateCcw,
   Rows3,
   Save,
+  Search,
   Share2,
   Star,
   Strikethrough,
@@ -219,7 +220,7 @@ const blankEditor = (uid: string): EditorState => ({
   dirty: false
 });
 
-type NoteSortField = "createdAt";
+type NoteSortField = "createdAt" | "updatedAt" | "title";
 type NoteSortDirection = "asc" | "desc";
 type NoteListFilter = "all" | NoteKind;
 type EditorToolTab = "format" | "table" | "media";
@@ -1126,7 +1127,7 @@ function nextParticipantList(currentParticipantUids: string[], selectedUid: stri
   return Array.from(new Set([ownerUid, ...participantUids]));
 }
 
-function noteTimestampMillis(note: DecryptedNote, field: NoteSortField) {
+function noteTimestampMillis(note: DecryptedNote, field: Exclude<NoteSortField, "title">) {
   const timestamp = note[field];
 
   if (timestamp instanceof Date) {
@@ -1197,6 +1198,11 @@ function sortNotes(notes: DecryptedNote[], setting: NoteSortSetting, statesByNot
       return leftPinned ? -1 : 1;
     }
 
+    if (setting.field === "title") {
+      const titleComparison = compareNoteTitles(left, right);
+      return setting.direction === "asc" ? titleComparison : -titleComparison;
+    }
+
     const leftValue = noteTimestampMillis(left, setting.field);
     const rightValue = noteTimestampMillis(right, setting.field);
 
@@ -1237,8 +1243,27 @@ function sortDeletedNotes(notes: DecryptedNote[]) {
   });
 }
 
-function filterNotes(notes: DecryptedNote[], filter: NoteListFilter) {
-  return filter === "all" ? notes : notes.filter((note) => note.type === filter);
+function normalizedSearchTerm(value: string) {
+  return value.trim().toLocaleLowerCase("ko");
+}
+
+function noteMatchesQuery(note: DecryptedNote, query: string) {
+  const term = normalizedSearchTerm(query);
+
+  if (!term) {
+    return true;
+  }
+
+  const searchableText = [note.title, previewTextFromHtml(note.body)]
+    .join(" ")
+    .toLocaleLowerCase("ko");
+
+  return searchableText.includes(term);
+}
+
+function filterNotes(notes: DecryptedNote[], filter: NoteListFilter, query = "") {
+  const filteredByKind = filter === "all" ? notes : notes.filter((note) => note.type === filter);
+  return query ? filteredByKind.filter((note) => noteMatchesQuery(note, query)) : filteredByKind;
 }
 
 function readNoteSortSetting(uid: string): NoteSortSetting {
@@ -1256,7 +1281,7 @@ function readNoteSortSetting(uid: string): NoteSortSetting {
     const parsed = JSON.parse(rawValue) as Partial<NoteSortSetting>;
 
     if (
-      parsed.field === "createdAt" &&
+      (parsed.field === "createdAt" || parsed.field === "updatedAt" || parsed.field === "title") &&
       (parsed.direction === "asc" || parsed.direction === "desc")
     ) {
       return { field: parsed.field, direction: parsed.direction };
@@ -1665,6 +1690,7 @@ export default function NotesPage() {
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
   const [noteFilter, setNoteFilter] = useState<NoteListFilter>(defaultNoteFilter);
+  const [noteQuery, setNoteQuery] = useState("");
   const autosaveTimer = useRef<number | null>(null);
   const cursorPublishTimer = useRef<number | null>(null);
   const lastPublishedCursor = useRef<string | null>(null);
@@ -1912,8 +1938,8 @@ export default function NotesPage() {
   const noteCounts = useMemo(() => noteCountsFromNotes(decryptedNotes), [decryptedNotes]);
   const trashCounts = useMemo(() => noteCountsFromNotes(decryptedDeletedNotes), [decryptedDeletedNotes]);
   const visibleNotes = useMemo(
-    () => sortNotes(filterNotes(decryptedNotes, noteFilter), noteSort, noteStateMap),
-    [decryptedNotes, noteFilter, noteSort, noteStateMap]
+    () => sortNotes(filterNotes(decryptedNotes, noteFilter, noteQuery), noteSort, noteStateMap),
+    [decryptedNotes, noteFilter, noteQuery, noteSort, noteStateMap]
   );
   const overviewNotes = useMemo(
     () =>
@@ -1943,8 +1969,8 @@ export default function NotesPage() {
   }, [decryptedNotes, localSharedReadMap, noteStateMap, profile?.uid]);
   const sharedAttentionCount = sharedAttentionNoteIds.size;
   const trashNotes = useMemo(
-    () => sortDeletedNotes(filterNotes(decryptedDeletedNotes, noteFilter)),
-    [decryptedDeletedNotes, noteFilter]
+    () => sortDeletedNotes(filterNotes(decryptedDeletedNotes, noteFilter, noteQuery)),
+    [decryptedDeletedNotes, noteFilter, noteQuery]
   );
   const activeRemoteNote = useMemo(
     () => decryptedNotes.find((note) => note.id === editor.noteId) ?? null,
@@ -3899,7 +3925,7 @@ export default function NotesPage() {
                 새 노트
               </button>
             </div>
-            <span className="notes-top-status">{saving ? "저장 중..." : status}</span>
+            <span className={`notes-top-status ${saving ? "saving" : ""}`}>{saving ? "저장 중..." : status}</span>
           </div>
           <div className={`notes-editor-layout ${listOpen ? "with-drawer" : ""}`}>
             <NoteDrawer
@@ -3917,14 +3943,16 @@ export default function NotesPage() {
               onClose={() => setListOpen(false)}
               onFilterChange={updateNoteFilter}
               onOpenOverview={openOverview}
-            onPreview={previewStoredNote}
-            onPurge={(note) => void purgePreviewNote(note)}
-            onPurgeAll={(notesToPurge) => void purgeDeletedNotes(notesToPurge)}
-            onRestore={(note) => void restorePreviewNote(note)}
-            onSortChange={updateSortSetting}
+              onPreview={previewStoredNote}
+              onPurge={(note) => void purgePreviewNote(note)}
+              onPurgeAll={(notesToPurge) => void purgeDeletedNotes(notesToPurge)}
+              onQueryChange={setNoteQuery}
+              onRestore={(note) => void restorePreviewNote(note)}
+              onSortChange={updateSortSetting}
               onTogglePin={(note) => void togglePinnedNote(note)}
               open={listOpen}
               publicShareByNoteId={activePublicShareByNoteId}
+              query={noteQuery}
               sortSetting={noteSort}
             />
             <section className="editor-panel full-editor-panel">
@@ -6406,11 +6434,13 @@ function NoteDrawer({
   onPreview,
   onPurge,
   onPurgeAll,
+  onQueryChange,
   onRestore,
   onSortChange,
   onTogglePin,
   open,
   publicShareByNoteId,
+  query,
   sortSetting
 }: {
   activeNoteId: string | null;
@@ -6430,11 +6460,13 @@ function NoteDrawer({
   onPreview: (note: DecryptedNote) => void;
   onPurge: (note: DecryptedNote) => void;
   onPurgeAll: (notes: DecryptedNote[]) => void;
+  onQueryChange: (query: string) => void;
   onRestore: (note: DecryptedNote) => void;
   onSortChange: (setting: NoteSortSetting) => void;
   onTogglePin: (note: DecryptedNote) => void;
   open: boolean;
   publicShareByNoteId: Map<string, PublicNoteShareSnapshot>;
+  query: string;
   sortSetting: NoteSortSetting;
 }) {
   const [mode, setMode] = useState<DrawerMode>("notes");
@@ -6460,6 +6492,17 @@ function NoteDrawer({
           <X size={18} />
         </button>
       </div>
+      <label className="note-search-control">
+        <Search size={16} aria-hidden="true" />
+        <span className="sr-only">노트 검색</span>
+        <input
+          aria-label="노트 제목과 내용 검색"
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder="제목 또는 내용 검색"
+          type="search"
+          value={query}
+        />
+      </label>
       {!isTrashMode && (
         <div className="drawer-folder-shortcuts" aria-label="노트 그룹 바로가기">
           <button className="secondary-button" type="button" onClick={() => onOpenOverview("all")}>
@@ -6553,6 +6596,8 @@ function NoteDrawer({
               value={sortSetting.field}
             >
               <option value="createdAt">생성일</option>
+              <option value="updatedAt">수정일</option>
+              <option value="title">제목</option>
             </select>
           </label>
           <button
@@ -6595,6 +6640,7 @@ function NoteDrawer({
         onRestore={onRestore}
         onTogglePin={onTogglePin}
         publicShareByNoteId={publicShareByNoteId}
+        query={query}
       />
     </aside>
   );
@@ -6653,6 +6699,47 @@ function PublicShareStatusBadge({
   );
 }
 
+function HighlightedText({ query, text }: { query: string; text: string }) {
+  const term = normalizedSearchTerm(query);
+
+  if (!term) {
+    return <>{text}</>;
+  }
+
+  const lowerText = text.toLocaleLowerCase("ko");
+  const parts: Array<{ highlighted: boolean; value: string }> = [];
+  let cursor = 0;
+  let matchIndex = lowerText.indexOf(term);
+
+  while (matchIndex >= 0) {
+    if (matchIndex > cursor) {
+      parts.push({ highlighted: false, value: text.slice(cursor, matchIndex) });
+    }
+
+    parts.push({ highlighted: true, value: text.slice(matchIndex, matchIndex + term.length) });
+    cursor = matchIndex + term.length;
+    matchIndex = lowerText.indexOf(term, cursor);
+  }
+
+  if (cursor < text.length) {
+    parts.push({ highlighted: false, value: text.slice(cursor) });
+  }
+
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.highlighted ? (
+          <mark key={`${part.value}-${index}`} className="search-highlight">
+            {part.value}
+          </mark>
+        ) : (
+          <span key={`${part.value}-${index}`}>{part.value}</span>
+        )
+      )}
+    </>
+  );
+}
+
 function NoteList({
   activeNoteId,
   attentionNoteIds,
@@ -6666,7 +6753,8 @@ function NoteList({
   onPurge,
   onRestore,
   onTogglePin,
-  publicShareByNoteId
+  publicShareByNoteId,
+  query
 }: {
   activeNoteId: string | null;
   attentionNoteIds: Set<string>;
@@ -6681,17 +6769,25 @@ function NoteList({
   onRestore: (note: DecryptedNote) => void;
   onTogglePin: (note: DecryptedNote) => void;
   publicShareByNoteId: Map<string, PublicNoteShareSnapshot>;
+  query: string;
 }) {
   if (notes.length === 0) {
-    const emptyMessage = deleted
-      ? "복구함에 노트가 없습니다."
-      : filter === "personal"
-        ? "아직 저장된 개인 노트가 없습니다."
-        : filter === "shared"
-          ? "아직 저장된 공유 노트가 없습니다."
-          : "아직 저장된 노트가 없습니다.";
+    const emptyMessage = query.trim()
+      ? "검색 조건에 맞는 노트가 없습니다."
+      : deleted
+        ? "복구함에 노트가 없습니다."
+        : filter === "personal"
+          ? "아직 저장된 개인 노트가 없습니다."
+          : filter === "shared"
+            ? "아직 저장된 공유 노트가 없습니다."
+            : "아직 저장된 노트가 없습니다.";
 
-    return <p className="muted">{emptyMessage}</p>;
+    return (
+      <div className="empty-state note-empty-state">
+        <strong>{emptyMessage}</strong>
+        <p>{query.trim() ? "다른 검색어나 필터로 다시 찾아보세요." : "새 노트를 만들거나 공유 노트를 확인해보세요."}</p>
+      </div>
+    );
   }
 
   return (
@@ -6717,9 +6813,13 @@ function NoteList({
                 </span>
                 <PublicShareStatusBadge clockMs={clockMs} share={publicShare} />
                 {needsAttention && <span className="note-list-alert">새 업데이트</span>}
-                <strong>{note.title || "제목 없음"}</strong>
+                <strong>
+                  <HighlightedText text={note.title || "제목 없음"} query={query} />
+                </strong>
               </header>
-              <span className="note-snippet">{previewTextFromHtml(note.body) || "내용 없음"}</span>
+              <span className="note-snippet">
+                <HighlightedText text={previewTextFromHtml(note.body) || "내용 없음"} query={query} />
+              </span>
               <footer className="note-list-meta">
                 <span className="note-list-date">
                   <span>{deleted ? "삭제" : "생성"}</span>
@@ -6807,24 +6907,25 @@ function PersonalOverview({
 }) {
   const [folderName, setFolderName] = useState("");
   const [folderColor, setFolderColor] = useState(folderColorOptions[0]);
+  const [overviewQuery, setOverviewQuery] = useState("");
   const foldersById = new Map(folders.map((folder) => [folder.id, folder]));
   const personalNotes = notes.filter((note) => note.type === "personal");
   const sharedNotes = notes.filter((note) => note.type === "shared");
   const sharedAttentionCount = sharedNotes.filter((note) => attentionNoteIds.has(note.id)).length;
   const visibleNotes = notes.filter((note) => {
     if (activeFolderFilter === "all") {
-      return true;
+      return noteMatchesQuery(note, overviewQuery);
     }
 
     if (activeFolderFilter === "shared") {
-      return note.type === "shared";
+      return note.type === "shared" && noteMatchesQuery(note, overviewQuery);
     }
 
     if (activeFolderFilter === "unfiled") {
-      return note.type === "personal" && (!note.folderId || !foldersById.has(note.folderId));
+      return note.type === "personal" && (!note.folderId || !foldersById.has(note.folderId)) && noteMatchesQuery(note, overviewQuery);
     }
 
-    return note.type === "personal" && note.folderId === activeFolderFilter;
+    return note.type === "personal" && note.folderId === activeFolderFilter && noteMatchesQuery(note, overviewQuery);
   });
   const unfiledCount = personalNotes.filter((note) => !note.folderId || !foldersById.has(note.folderId)).length;
   const activeFolder = typeof activeFolderFilter === "string" ? foldersById.get(activeFolderFilter) : null;
@@ -6974,6 +7075,17 @@ function PersonalOverview({
               <span>{activeFilterLabel}</span>
               <h3>{visibleNotes.length}개 노트</h3>
             </div>
+            <label className="note-search-control overview-search-control">
+              <Search size={16} aria-hidden="true" />
+              <span className="sr-only">전체 조회 검색</span>
+              <input
+                aria-label="전체 조회에서 노트 검색"
+                onChange={(event) => setOverviewQuery(event.target.value)}
+                placeholder="이 분류에서 검색"
+                type="search"
+                value={overviewQuery}
+              />
+            </label>
           </div>
           {visibleNotes.length ? (
             <div className="overview-note-grid">
@@ -6992,8 +7104,12 @@ function PersonalOverview({
                       </span>
                       <PublicShareStatusBadge clockMs={clockMs} share={publicShare} />
                       {needsAttention && <span className="overview-note-alert">새 업데이트</span>}
-                      <strong>{note.title || "제목 없음"}</strong>
-                      <span>{previewTextFromHtml(note.body) || "내용 없음"}</span>
+                      <strong>
+                        <HighlightedText text={note.title || "제목 없음"} query={overviewQuery} />
+                      </strong>
+                      <span>
+                        <HighlightedText text={previewTextFromHtml(note.body) || "내용 없음"} query={overviewQuery} />
+                      </span>
                       <em>{pinned ? "즐겨찾기 · " : ""}{formatCompactDateTime(createdAt)}</em>
                     </button>
                     {note.type === "personal" ? (
@@ -7022,7 +7138,10 @@ function PersonalOverview({
               })}
             </div>
           ) : (
-            <p className="muted empty-state">이 분류에 표시할 노트가 없습니다.</p>
+            <div className="empty-state note-empty-state">
+              <strong>{overviewQuery.trim() ? "검색 조건에 맞는 노트가 없습니다." : "이 분류에 표시할 노트가 없습니다."}</strong>
+              <p>{overviewQuery.trim() ? "검색어를 줄이거나 다른 분류를 선택해보세요." : "폴더를 바꾸거나 새 노트를 만들어 정리해보세요."}</p>
+            </div>
           )}
         </section>
       </div>
@@ -7117,6 +7236,7 @@ function AttachmentList({
       <div className="attachment-list">
         {attachments.map((attachment) => {
           const disabled = busyId === attachment.id;
+          const previewable = previewableAttachmentExtensions.has(attachment.extension);
 
           return (
             <article className="attachment-item" key={attachment.id}>
@@ -7125,9 +7245,12 @@ function AttachmentList({
                 <span>
                   {attachment.extension.toUpperCase()} · {formatFileSize(attachment.originalSize)}
                 </span>
+                <em className={`attachment-status-pill ${previewable ? "previewable" : "download-only"}`}>
+                  {previewable ? "미리보기 가능" : "다운로드 전용"}
+                </em>
               </div>
               <div className="attachment-actions">
-                {previewableAttachmentExtensions.has(attachment.extension) && onPreview && (
+                {previewable && onPreview && (
                   <button
                     aria-label={`${attachmentDownloadName(attachment)} 미리보기`}
                     className="secondary-button attachment-action"
