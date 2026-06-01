@@ -7318,6 +7318,42 @@ textarea {
   min-width: 38px;
 }
 
+.matrix-task-progress-label {
+  align-self: flex-start;
+  background: color-mix(in srgb, var(--matrix-task-progress-color, var(--teal)) 10%, #ffffff);
+  border: 1px solid color-mix(in srgb, var(--matrix-task-progress-color, var(--teal)) 18%, #ffffff);
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--matrix-task-progress-color, var(--teal)) 78%, var(--ink));
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  margin-top: 2px;
+  padding: 2px 6px;
+}
+
+.matrix-task-progress-strip {
+  background:
+    linear-gradient(
+      90deg,
+      var(--matrix-task-progress-color, var(--teal)) 0 var(--matrix-task-progress-fill, 0%),
+      color-mix(in srgb, var(--matrix-task-progress-color, var(--teal)) 12%, var(--surface)) var(--matrix-task-progress-fill, 0%) 100%
+    );
+  border-radius: 999px;
+  display: block;
+  height: 4px;
+  margin-top: 3px;
+  min-height: 4px;
+  overflow: hidden;
+  text-decoration: none;
+  width: 100%;
+}
+
+.task-row.completed .task-main .matrix-task-progress-strip {
+  opacity: 0.72;
+  text-decoration: none;
+}
+
 .matrix-date-group .schedule-empty {
   margin: 8px 0 0;
 }

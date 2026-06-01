@@ -3089,6 +3089,11 @@ function MatrixTaskRowContent({
   task: DecryptedScheduleTask;
   today: string;
 }) {
+  const progressPercent = normalizeTaskProgressPercent(task.progressPercent);
+  const progressStyle = {
+    "--matrix-task-progress-color": taskProgressColor(progressPercent),
+    "--matrix-task-progress-fill": `${progressPercent}%`
+  } as CSSProperties;
   const isOverdue = isTaskScheduleOverdue(task, today);
 
   return (
@@ -3106,6 +3111,18 @@ function MatrixTaskRowContent({
       <button className="task-main task-open-button" type="button" onClick={() => onOpen?.(task.id)}>
         <strong>{task.title}</strong>
         <span className={isOverdue ? "task-meta overdue" : "task-meta"}>{formatTaskMeta(task)}</span>
+        <span className="matrix-task-progress-label" aria-hidden="true" style={progressStyle}>
+          {progressPercent}%
+        </span>
+        <span
+          aria-label={`${task.title} 진행률 ${progressPercent}%`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={progressPercent}
+          className="matrix-task-progress-strip"
+          role="progressbar"
+          style={progressStyle}
+        />
       </button>
       <span className="task-flags">
         {task.isImportant && <Flag size={15} aria-label="중요" />}
