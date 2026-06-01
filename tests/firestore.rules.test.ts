@@ -110,6 +110,7 @@ function userPreferences(uid: string, overrides: Record<string, unknown> = {}) {
     uid,
     defaultHome: "notes",
     scheduleDefaultView: "todo",
+    theme: "system",
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     ...overrides
@@ -679,7 +680,8 @@ describeRules("firestore security rules", () => {
             important: "중요 업무",
             waiting: "대기 업무"
           },
-          scheduleDefaultView: "matrix"
+          scheduleDefaultView: "matrix",
+          theme: "dark"
         })
       )
     );
@@ -688,6 +690,8 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "calendar", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "completed", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "recurring", updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "light", updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "system", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
       matrixLabels: {
         todayOverdue: "오늘 처리",
@@ -742,6 +746,7 @@ describeRules("firestore security rules", () => {
         uid: "user-a",
         defaultHome: "notes",
         scheduleDefaultView: "todo",
+        theme: "system",
         updatedAt: serverTimestamp()
       });
     });
@@ -753,6 +758,7 @@ describeRules("firestore security rules", () => {
       })
     );
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { defaultHome: "admin", updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "midnight", updatedAt: serverTimestamp() }));
     await assertFails(setDoc(doc(otherDb, "userPreferences/user-a"), userPreferences("user-a")));
   });
 

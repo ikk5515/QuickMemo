@@ -1,6 +1,7 @@
 :root {
   color: #17211f;
   background: #f6f7f4;
+  color-scheme: light;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-synthesis: none;
@@ -65,6 +66,71 @@
   --gold: var(--color-warning);
   --blue: var(--color-info);
   --shadow: var(--shadow-card-elevated);
+}
+
+:root[data-theme="dark"] {
+  color: #e5eef7;
+  background: #0f172a;
+  color-scheme: dark;
+  --color-app-bg: #0f172a;
+  --color-page-bg: #111827;
+  --color-surface: #111827;
+  --color-surface-elevated: #182233;
+  --color-surface-muted: #1f2937;
+  --color-primary: #5eead4;
+  --color-primary-hover: #2dd4bf;
+  --color-secondary: #93c5fd;
+  --color-muted: #94a3b8;
+  --color-border: #334155;
+  --color-border-subtle: #243244;
+  --color-text-primary: #e5eef7;
+  --color-text-secondary: #cbd5e1;
+  --color-text-muted: #94a3b8;
+  --color-danger: #fca5a5;
+  --color-warning: #facc15;
+  --color-success: #5eead4;
+  --color-info: #93c5fd;
+  --color-focus-ring: rgb(94 234 212 / 28%);
+  --shadow-card: 0 14px 34px rgb(0 0 0 / 22%);
+  --shadow-card-elevated: 0 22px 58px rgb(0 0 0 / 32%);
+  --shadow-dropdown: 0 22px 48px rgb(0 0 0 / 36%);
+  --shadow-modal: 0 28px 84px rgb(0 0 0 / 46%);
+  --shadow-floating-toolbar: 0 14px 34px rgb(0 0 0 / 28%);
+  --ink: var(--color-text-primary);
+  --muted: var(--color-text-muted);
+  --line: var(--color-border);
+  --panel: var(--color-surface);
+  --surface: var(--color-surface-muted);
+  --teal: var(--color-primary);
+  --coral: var(--color-danger);
+  --gold: var(--color-warning);
+  --blue: var(--color-info);
+  --shadow: var(--shadow-card-elevated);
+  --color-surface-hover: #1e293b;
+  --list-row-hover-bg: #1e293b;
+  --list-row-hover-border: #334155;
+  --note-item-hover-bg: #1e293b;
+  --note-item-hover-border: #334155;
+  --note-item-selected-hover-bg: color-mix(in srgb, var(--teal) 14%, #111827);
+  --schedule-hover-bg: #1e293b;
+  --schedule-hover-border: #334155;
+  --schedule-event-hover-bg: #1f2937;
+  --schedule-event-hover-border: #475569;
+  --schedule-drag-bg: #172554;
+  --schedule-drag-border: #2563eb;
+  --schedule-drop-bg: #1e293b;
+  --schedule-drop-border: #475569;
+  --color-primary-subtle: color-mix(in srgb, var(--teal) 14%, #111827);
+  --color-secondary-subtle: color-mix(in srgb, var(--blue) 16%, #111827);
+  --color-warning-subtle: color-mix(in srgb, var(--gold) 14%, #111827);
+  --color-danger-subtle: color-mix(in srgb, var(--coral) 13%, #111827);
+  --color-success-subtle: color-mix(in srgb, var(--teal) 14%, #111827);
+  --color-info-subtle: color-mix(in srgb, var(--blue) 16%, #111827);
+  --checklist-checked-bg: color-mix(in srgb, var(--teal) 13%, #111827);
+  --checklist-unchecked-bg: #111827;
+  --checklist-divider: #334155;
+  --checklist-group-label-bg: #1f2937;
+  --checklist-group-label-color: #cbd5e1;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2024,6 +2090,20 @@ textarea {
   gap: 0.5em;
   margin-bottom: 8px;
   min-width: 0;
+}
+
+.rich-body-input li[data-type="taskItem"][data-checked="true"],
+.note-preview-body li[data-type="taskItem"][data-checked="true"],
+.admin-note-view-body li[data-type="taskItem"][data-checked="true"] {
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.rich-body-input li[data-type="taskItem"][data-checked="true"] > div,
+.note-preview-body li[data-type="taskItem"][data-checked="true"] > div,
+.admin-note-view-body li[data-type="taskItem"][data-checked="true"] > div {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
 }
 
 .rich-body-input ul[data-type="taskList"] > li,
@@ -7650,10 +7730,59 @@ textarea {
   padding: 0;
 }
 
+.task-read-checklist-groups,
+.checklist-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.checklist-group {
+  border-top: 1px solid var(--checklist-divider);
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.checklist-group:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.checklist-group-header {
+  align-items: center;
+  background: var(--checklist-group-label-bg);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  color: var(--checklist-group-label-color);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 8px;
+  justify-self: start;
+  line-height: 1;
+  min-height: 28px;
+  padding: 0 10px;
+}
+
+.checklist-group-header strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.checklist-group.checked .checklist-group-header {
+  background: var(--checklist-checked-bg);
+  border-color: color-mix(in srgb, var(--teal) 24%, var(--line));
+}
+
+.schedule-checklist-group-list {
+  display: grid;
+  gap: 8px;
+}
+
 .task-read-checklist li {
   align-items: center;
-  background: var(--surface);
-  border: 1px solid transparent;
+  background: var(--checklist-unchecked-bg);
+  border: 1px solid var(--color-border-subtle);
   border-radius: 8px;
   display: grid;
   gap: 8px;
@@ -7662,8 +7791,8 @@ textarea {
 }
 
 .task-read-checklist li.checked {
-  background: color-mix(in srgb, var(--teal) 11%, #ffffff);
-  border-color: color-mix(in srgb, var(--teal) 24%, #ffffff);
+  background: var(--checklist-checked-bg);
+  border-color: color-mix(in srgb, var(--teal) 24%, var(--line));
 }
 
 .task-read-check-button {
@@ -7783,6 +7912,24 @@ textarea {
 .schedule-checklist label {
   gap: 8px;
   grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.schedule-checklist-item {
+  background: var(--checklist-unchecked-bg);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-card);
+  padding: 8px;
+}
+
+.checklist-group.checked .schedule-checklist-item {
+  background: var(--checklist-checked-bg);
+  border-color: color-mix(in srgb, var(--teal) 24%, var(--line));
+}
+
+.checklist-group.checked .schedule-checklist-item > input[type="text"],
+.checklist-group.checked .schedule-checklist-item > input:not([type]) {
+  color: var(--muted);
+  text-decoration: line-through;
 }
 
 .schedule-checklist-add {
@@ -8828,6 +8975,11 @@ textarea {
   --color-danger-subtle: #fff0ee;
   --color-success-subtle: #e7f2ee;
   --color-info-subtle: #e9f0fb;
+  --checklist-checked-bg: var(--color-success-subtle);
+  --checklist-unchecked-bg: #ffffff;
+  --checklist-divider: #dbe4df;
+  --checklist-group-label-bg: #f8fafc;
+  --checklist-group-label-color: var(--muted);
   --space-12: 48px;
   --radius-table-row: 8px;
   --radius-toolbar-item: 8px;
@@ -9665,6 +9817,107 @@ button.calendar-task-pill:not(:disabled):active {
   line-height: 1.55;
   padding: var(--space-4);
   text-align: center;
+}
+
+.theme-toggle-button {
+  flex: 0 0 38px;
+}
+
+html[data-theme="dark"] body {
+  background:
+    linear-gradient(180deg, rgb(30 41 59 / 58%), transparent 300px),
+    var(--color-app-bg);
+}
+
+html[data-theme="dark"] .topbar,
+html[data-theme="dark"] .editor-toolbar,
+html[data-theme="dark"] .rich-editor-toolbar {
+  background: rgb(15 23 42 / 88%);
+  border-color: var(--color-border-subtle);
+}
+
+html[data-theme="dark"] .loading-card,
+html[data-theme="dark"] .home-hero {
+  background:
+    linear-gradient(135deg, rgb(24 34 51 / 94%), rgb(17 24 39 / 94%)),
+    var(--panel);
+}
+
+html[data-theme="dark"] .avatar-button:not(:disabled):hover,
+html[data-theme="dark"] .note-search-control,
+html[data-theme="dark"] .schedule-search-control,
+html[data-theme="dark"] .attachment-item,
+html[data-theme="dark"] .today-recurring-item,
+html[data-theme="dark"] .matrix-drag-overlay,
+html[data-theme="dark"] .task-read-inline-textarea,
+html[data-theme="dark"] .task-read-checklist-input,
+html[data-theme="dark"] .task-read-checklist-add input,
+html[data-theme="dark"] .task-read-check-button {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-border-subtle);
+}
+
+html[data-theme="dark"] .secondary-button:not(:disabled):hover,
+html[data-theme="dark"] .icon-button:not(:disabled):hover,
+html[data-theme="dark"] .nav-links a:hover,
+html[data-theme="dark"] .schedule-view-tabs button:not(.active):hover,
+html[data-theme="dark"] .schedule-view-tabs button:not(.active):focus-visible {
+  background: var(--color-surface-hover);
+  color: var(--teal);
+}
+
+html[data-theme="dark"] .danger-button,
+html[data-theme="dark"] .secondary-button.danger,
+html[data-theme="dark"] .icon-button.danger,
+html[data-theme="dark"] .schedule-feedback.error {
+  background: var(--color-danger-subtle);
+  border-color: color-mix(in srgb, var(--coral) 28%, var(--line));
+  color: var(--coral);
+}
+
+html[data-theme="dark"] .home-action-card > span:first-child,
+html[data-theme="dark"] .search-highlight,
+html[data-theme="dark"] .today-work-section,
+html[data-theme="dark"] .schedule-empty {
+  background: var(--color-surface-hover);
+  border-color: var(--color-border-subtle);
+}
+
+html[data-theme="dark"] .note-list-item.deleted:hover,
+html[data-theme="dark"] .note-list-item.deleted:focus-within {
+  background: var(--color-surface-hover);
+}
+
+html[data-theme="dark"] .rich-body-input li[data-type="taskItem"] > label input[type="checkbox"],
+html[data-theme="dark"] .note-preview-body li[data-type="taskItem"] > label input[type="checkbox"],
+html[data-theme="dark"] .admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"],
+html[data-theme="dark"] .rich-body-input ul[data-type="taskList"] > li > label input[type="checkbox"],
+html[data-theme="dark"] .rich-body-input li[data-checked] > label input[type="checkbox"] {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-border);
+}
+
+html[data-theme="dark"] .rich-body-input li[data-type="taskItem"] > label input[type="checkbox"]:checked,
+html[data-theme="dark"] .note-preview-body li[data-type="taskItem"] > label input[type="checkbox"]:checked,
+html[data-theme="dark"] .admin-note-view-body li[data-type="taskItem"] > label input[type="checkbox"]:checked,
+html[data-theme="dark"] .rich-body-input ul[data-type="taskList"] > li > label input[type="checkbox"]:checked,
+html[data-theme="dark"] .rich-body-input li[data-checked] > label input[type="checkbox"]:checked {
+  background:
+    linear-gradient(45deg, transparent 58%, #ffffff 58% 72%, transparent 72%) 19% 53% / 45% 45% no-repeat,
+    linear-gradient(135deg, transparent 52%, #ffffff 52% 66%, transparent 66%) 68% 48% / 58% 58% no-repeat,
+    var(--teal);
+  border-color: var(--teal);
+}
+
+html[data-theme="dark"] .rich-body-input li[data-type="taskItem"][data-checked="true"] > div,
+html[data-theme="dark"] .note-preview-body li[data-type="taskItem"][data-checked="true"] > div,
+html[data-theme="dark"] .admin-note-view-body li[data-type="taskItem"][data-checked="true"] > div {
+  color: var(--muted);
+}
+
+html[data-theme="dark"] input::placeholder,
+html[data-theme="dark"] textarea::placeholder {
+  color: color-mix(in srgb, var(--muted) 78%, var(--ink));
 }
 
 .settings-modal-description {

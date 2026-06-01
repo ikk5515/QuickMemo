@@ -1,9 +1,17 @@
-import { CalendarDays, KeyRound, LogOut, NotebookPen, Settings, Shield, X } from "lucide-react";
+import { CalendarDays, KeyRound, LogOut, Moon, NotebookPen, Settings, Shield, Sun, X } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { hasFirebaseConfig } from "../lib/firebase";
+import {
+  applyThemePreference,
+  getStoredThemePreference,
+  resolveThemePreference,
+  subscribeSystemThemeChange,
+  writeStoredThemePreference,
+  type ResolvedTheme
+} from "../lib/theme";
 import {
   defaultMatrixLabels,
   matrixLabelFields,
@@ -18,7 +26,7 @@ import {
   subscribeUserPreferences,
   type SaveUserPreferencesInput
 } from "../services/userPreferences";
-import type { MatrixLabels, UserPreferencesDocument } from "../types";
+import type { MatrixLabels, ThemePreference, UserPreferencesDocument } from "../types";
 
 export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
   const { changePassword, profile, signOut } = useAuth();
@@ -27,6 +35,11 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
   const [preferences, setPreferences] = useState<UserPreferencesDocument | null>(() =>
     profile ? getCachedUserPreferences(profile.uid) : null
   );
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
+    profile ? getCachedUserPreferences(profile.uid)?.theme ?? getStoredThemePreference() ?? "system" : getStoredThemePreference() ?? "system"
+  );
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveThemePreference(themePreference));
+  const [themeStatus, setThemeStatus] = useState<string | null>(null);
 
   useEffect(() => {
     if (!profile) {
@@ -41,6 +54,45 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
 
     return subscribeUserPreferences(profile.uid, setPreferences);
   }, [profile]);
+
+  useEffect(() => {
+    const nextPreference = preferences?.theme ?? getStoredThemePreference() ?? "system";
+
+    setThemePreference(nextPreference);
+    writeStoredThemePreference(nextPreference);
+    setResolvedTheme(applyThemePreference(nextPreference));
+  }, [preferences?.theme]);
+
+  useEffect(() => {
+    if (themePreference !== "system") {
+      return undefined;
+    }
+
+    return subscribeSystemThemeChange((nextResolvedTheme) => {
+      setResolvedTheme(nextResolvedTheme);
+      document.documentElement.dataset.theme = nextResolvedTheme;
+      document.documentElement.style.colorScheme = nextResolvedTheme;
+    });
+  }, [themePreference]);
+
+  async function toggleTheme() {
+    const nextPreference: ThemePreference = resolvedTheme === "dark" ? "light" : "dark";
+
+    setThemeStatus(null);
+    setThemePreference(nextPreference);
+    setResolvedTheme(applyThemePreference(nextPreference));
+    writeStoredThemePreference(nextPreference);
+
+    if (!profile) {
+      return;
+    }
+
+    try {
+      await saveUserPreferences(profile.uid, { theme: nextPreference });
+    } catch {
+      setThemeStatus("테마 설정은 이 브라우저에만 저장되었습니다.");
+    }
+  }
 
   return (
     <div className="app-frame">
@@ -86,6 +138,7 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
               <span>비밀번호 변경</span>
             </button>
           )}
+          <ThemeToggleButton onToggle={() => void toggleTheme()} resolvedTheme={resolvedTheme} />
           {profile && (
             <button className="icon-button" type="button" onClick={() => setSettingsModalOpen(true)} aria-label="설정">
               <Settings size={18} />
@@ -94,6 +147,11 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           <button className="icon-button" type="button" onClick={() => void signOut()} aria-label="로그아웃">
             <LogOut size={18} />
           </button>
+          {themeStatus && (
+            <span className="sr-only" role="status">
+              {themeStatus}
+            </span>
+          )}
         </div>
       </header>
       <main>{children}</main>
@@ -111,6 +169,31 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
         />
       )}
     </div>
+  );
+}
+
+export function ThemeToggleButton({
+  onToggle,
+  resolvedTheme
+}: {
+  onToggle: () => void;
+  resolvedTheme: ResolvedTheme;
+}) {
+  const isDark = resolvedTheme === "dark";
+  const label = isDark ? "라이트모드로 전환" : "다크모드로 전환";
+  const Icon = isDark ? Sun : Moon;
+
+  return (
+    <button
+      aria-label={label}
+      aria-pressed={isDark}
+      className="icon-button theme-toggle-button"
+      onClick={onToggle}
+      title={label}
+      type="button"
+    >
+      <Icon size={18} />
+    </button>
   );
 }
 

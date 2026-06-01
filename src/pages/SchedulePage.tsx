@@ -59,6 +59,7 @@ import { serverTimestamp } from "firebase/firestore";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
+import { groupChecklistItems } from "../lib/checklist";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import { defaultMatrixLabels } from "../lib/matrixLabels";
@@ -343,6 +344,35 @@ interface TodayWorkSummary {
   overdueTasks: DecryptedScheduleTask[];
   recurringHabits: DecryptedRecurringHabit[];
   todayTasks: DecryptedScheduleTask[];
+}
+
+type ChecklistGroupKey = "checked" | "unchecked";
+
+interface ChecklistDisplayGroup<TItem extends ScheduleChecklistItem> {
+  countLabel: string;
+  items: TItem[];
+  key: ChecklistGroupKey;
+  label: string;
+}
+
+function checklistDisplayGroups<TItem extends ScheduleChecklistItem>(items: TItem[]): ChecklistDisplayGroup<TItem>[] {
+  const { checkedItems, uncheckedItems } = groupChecklistItems(items);
+  const groups: ChecklistDisplayGroup<TItem>[] = [
+    {
+      countLabel: `${checkedItems.length}개`,
+      items: checkedItems,
+      key: "checked",
+      label: "완료됨"
+    },
+    {
+      countLabel: `${uncheckedItems.length}개`,
+      items: uncheckedItems,
+      key: "unchecked",
+      label: "남은 항목"
+    }
+  ];
+
+  return groups.filter((group) => group.items.length > 0);
 }
 
 export default function SchedulePage() {
@@ -1775,6 +1805,7 @@ function ScheduleCreateForm({
   const [isChecklistComposing, setIsChecklistComposing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const checklistGroups = useMemo(() => checklistDisplayGroups(draft.checklist), [draft.checklist]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1921,47 +1952,61 @@ function ScheduleCreateForm({
       </label>
       <section className="schedule-create-checklist">
         <h3>체크리스트</h3>
-        {draft.checklist.map((item) => (
-          <label key={item.id}>
-            <input
-              checked={item.checked}
-              onChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  checklist: current.checklist.map((checkItem) =>
-                    checkItem.id === item.id ? { ...checkItem, checked: event.target.checked } : checkItem
-                  )
-                }))
-              }
-              type="checkbox"
-            />
-            <input
-              aria-label="체크리스트 항목"
-              onChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  checklist: current.checklist.map((checkItem) =>
-                    checkItem.id === item.id ? { ...checkItem, text: event.target.value } : checkItem
-                  )
-                }))
-              }
-              value={item.text}
-            />
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="항목 삭제"
-              onClick={() =>
-                setDraft((current) => ({
-                  ...current,
-                  checklist: current.checklist.filter((checkItem) => checkItem.id !== item.id)
-                }))
-              }
-            >
-              <X size={15} />
-            </button>
-          </label>
-        ))}
+        {checklistGroups.length > 0 && (
+          <div className="checklist-groups">
+            {checklistGroups.map((group) => (
+              <section className={`checklist-group ${group.key}`} key={group.key} aria-label={`${group.label} ${group.countLabel}`}>
+                <div className="checklist-group-header">
+                  <strong>{group.label}</strong>
+                  <span>{group.countLabel}</span>
+                </div>
+                <div className="schedule-checklist-group-list">
+                  {group.items.map((item) => (
+                    <label className="schedule-checklist-item" key={item.id}>
+                      <input
+                        checked={item.checked}
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            checklist: current.checklist.map((checkItem) =>
+                              checkItem.id === item.id ? { ...checkItem, checked: event.target.checked } : checkItem
+                            )
+                          }))
+                        }
+                        type="checkbox"
+                      />
+                      <input
+                        aria-label="체크리스트 항목"
+                        onChange={(event) =>
+                          setDraft((current) => ({
+                            ...current,
+                            checklist: current.checklist.map((checkItem) =>
+                              checkItem.id === item.id ? { ...checkItem, text: event.target.value } : checkItem
+                            )
+                          }))
+                        }
+                        value={item.text}
+                      />
+                      <button
+                        className="icon-button"
+                        type="button"
+                        aria-label="항목 삭제"
+                        onClick={() =>
+                          setDraft((current) => ({
+                            ...current,
+                            checklist: current.checklist.filter((checkItem) => checkItem.id !== item.id)
+                          }))
+                        }
+                      >
+                        <X size={15} />
+                      </button>
+                    </label>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
         <div className="schedule-checklist-add">
           <input
             onCompositionEnd={() => setIsChecklistComposing(false)}
@@ -4759,6 +4804,7 @@ function RecurringHabitReadModal({
   const checkedItemIds = recurringHabitDayCheckedItemIds(checkIns, habit.id, selectedDate);
   const dailyProgressPercent = recurringHabitDayProgressPercent(habit, checkIns, selectedDate);
   const displayedChecklist = details.checklist.map((item) => ({ ...item, checked: checkedItemIds.has(item.id) }));
+  const checklistGroups = checklistDisplayGroups(displayedChecklist);
   const hasChecklist = displayedChecklist.length > 0;
   const selectedDateIsEditable = isValidScheduleDateString(selectedDate) && selectedDate <= today;
   const [isDescriptionEditing, setIsDescriptionEditing] = useState(false);
@@ -5071,96 +5117,106 @@ function RecurringHabitReadModal({
             </div>
           )}
           {hasChecklist ? (
-            <ul className="task-read-checklist">
-              {displayedChecklist.map((item) => (
-                <li key={item.id} className={item.checked ? "checked" : ""}>
-                  <button
-                    aria-checked={item.checked}
-                    aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
-                    className={`task-read-check-button ${item.checked ? "checked" : ""}`}
-                    disabled={detailsMutationPending || !selectedDateIsEditable}
-                    onClick={() => void toggleChecklistItem(item.id)}
-                    role="checkbox"
-                    type="button"
-                  >
-                    {item.checked ? <CheckCircle2 size={16} /> : null}
-                  </button>
-                  {editingChecklistItemId === item.id ? (
-                    <>
-                      <input
-                        autoFocus
-                        aria-label="체크리스트 항목 수정"
-                        className="task-read-checklist-input"
-                        disabled={detailsMutationPending}
-                        onCompositionEnd={() => setIsChecklistComposing(false)}
-                        onCompositionStart={() => setIsChecklistComposing(true)}
-                        onChange={(event) => setChecklistEditText(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") {
-                            return;
-                          }
+            <div className="task-read-checklist-groups">
+              {checklistGroups.map((group) => (
+                <section className={`checklist-group ${group.key}`} key={group.key} aria-label={`${group.label} ${group.countLabel}`}>
+                  <div className="checklist-group-header">
+                    <strong>{group.label}</strong>
+                    <span>{group.countLabel}</span>
+                  </div>
+                  <ul className="task-read-checklist">
+                    {group.items.map((item) => (
+                      <li key={item.id} className={item.checked ? "checked" : ""}>
+                        <button
+                          aria-checked={item.checked}
+                          aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
+                          className={`task-read-check-button ${item.checked ? "checked" : ""}`}
+                          disabled={detailsMutationPending || !selectedDateIsEditable}
+                          onClick={() => void toggleChecklistItem(item.id)}
+                          role="checkbox"
+                          type="button"
+                        >
+                          {item.checked ? <CheckCircle2 size={16} /> : null}
+                        </button>
+                        {editingChecklistItemId === item.id ? (
+                          <>
+                            <input
+                              autoFocus
+                              aria-label="체크리스트 항목 수정"
+                              className="task-read-checklist-input"
+                              disabled={detailsMutationPending}
+                              onCompositionEnd={() => setIsChecklistComposing(false)}
+                              onCompositionStart={() => setIsChecklistComposing(true)}
+                              onChange={(event) => setChecklistEditText(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key !== "Enter") {
+                                  return;
+                                }
 
-                          if (isChecklistComposing || isComposingKeyboardEvent(event)) {
-                            return;
-                          }
+                                if (isChecklistComposing || isComposingKeyboardEvent(event)) {
+                                  return;
+                                }
 
-                          event.preventDefault();
-                          void saveChecklistItemText(item.id);
-                        }}
-                        value={checklistEditText}
-                      />
-                      <div className="task-read-inline-actions">
-                        <button
-                          className="icon-button task-read-icon-button"
-                          type="button"
-                          aria-label={`${item.text} 저장`}
-                          disabled={detailsMutationPending}
-                          onClick={() => void saveChecklistItemText(item.id)}
-                        >
-                          <Save size={15} />
-                        </button>
-                        <button
-                          className="icon-button task-read-icon-button"
-                          type="button"
-                          aria-label={`${item.text} 수정 취소`}
-                          disabled={detailsMutationPending}
-                          onClick={() => {
-                            setEditingChecklistItemId(null);
-                            setChecklistEditText("");
-                          }}
-                        >
-                          <X size={15} />
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <span>{item.text}</span>
-                      <div className="task-read-inline-actions">
-                        <button
-                          className="icon-button task-read-icon-button"
-                          type="button"
-                          aria-label={`${item.text} 수정`}
-                          disabled={detailsMutationPending}
-                          onClick={() => startEditingChecklistItem(item)}
-                        >
-                          <Pencil size={15} />
-                        </button>
-                        <button
-                          className="icon-button task-read-icon-button danger"
-                          type="button"
-                          aria-label={`${item.text} 삭제`}
-                          disabled={detailsMutationPending}
-                          onClick={() => void deleteChecklistItem(item.id)}
-                        >
-                          <Minus size={15} />
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </li>
+                                event.preventDefault();
+                                void saveChecklistItemText(item.id);
+                              }}
+                              value={checklistEditText}
+                            />
+                            <div className="task-read-inline-actions">
+                              <button
+                                className="icon-button task-read-icon-button"
+                                type="button"
+                                aria-label={`${item.text} 저장`}
+                                disabled={detailsMutationPending}
+                                onClick={() => void saveChecklistItemText(item.id)}
+                              >
+                                <Save size={15} />
+                              </button>
+                              <button
+                                className="icon-button task-read-icon-button"
+                                type="button"
+                                aria-label={`${item.text} 수정 취소`}
+                                disabled={detailsMutationPending}
+                                onClick={() => {
+                                  setEditingChecklistItemId(null);
+                                  setChecklistEditText("");
+                                }}
+                              >
+                                <X size={15} />
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <span>{item.text}</span>
+                            <div className="task-read-inline-actions">
+                              <button
+                                className="icon-button task-read-icon-button"
+                                type="button"
+                                aria-label={`${item.text} 수정`}
+                                disabled={detailsMutationPending}
+                                onClick={() => startEditingChecklistItem(item)}
+                              >
+                                <Pencil size={15} />
+                              </button>
+                              <button
+                                className="icon-button task-read-icon-button danger"
+                                type="button"
+                                aria-label={`${item.text} 삭제`}
+                                disabled={detailsMutationPending}
+                                onClick={() => void deleteChecklistItem(item.id)}
+                              >
+                                <Minus size={15} />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
               ))}
-            </ul>
+            </div>
           ) : !isAddingChecklist ? (
             <p>체크리스트가 없습니다.</p>
           ) : null}
@@ -5204,6 +5260,7 @@ function TaskReadModal({
 }) {
   const details = task.details ?? emptyScheduleDetails;
   const hasChecklist = details.checklist.length > 0;
+  const checklistGroups = checklistDisplayGroups(details.checklist);
   const [isDescriptionEditing, setIsDescriptionEditing] = useState(false);
   const [descriptionDraft, setDescriptionDraft] = useState(details.description);
   const [progressPercent, setProgressPercent] = useState(() => normalizeTaskProgressPercent(task.progressPercent));
@@ -5503,96 +5560,106 @@ function TaskReadModal({
             </div>
           )}
           {hasChecklist ? (
-            <ul className="task-read-checklist">
-              {details.checklist.map((item) => (
-                <li key={item.id} className={item.checked ? "checked" : ""}>
-                  <button
-                    aria-checked={item.checked}
-                    aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
-                    className={`task-read-check-button ${item.checked ? "checked" : ""}`}
-                    disabled={detailsMutationPending}
-                    onClick={() => void toggleChecklistItem(item.id)}
-                    role="checkbox"
-                    type="button"
-                  >
-                    {item.checked ? <CheckCircle2 size={16} /> : null}
-                  </button>
-                  {editingChecklistItemId === item.id ? (
-                    <>
-                      <input
-                        autoFocus
-                        aria-label="체크리스트 항목 수정"
-                        className="task-read-checklist-input"
-                        disabled={detailsMutationPending}
-                        onCompositionEnd={() => setIsChecklistComposing(false)}
-                        onCompositionStart={() => setIsChecklistComposing(true)}
-                        onChange={(event) => setChecklistEditText(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key !== "Enter") {
-                            return;
-                          }
+            <div className="task-read-checklist-groups">
+              {checklistGroups.map((group) => (
+                <section className={`checklist-group ${group.key}`} key={group.key} aria-label={`${group.label} ${group.countLabel}`}>
+                  <div className="checklist-group-header">
+                    <strong>{group.label}</strong>
+                    <span>{group.countLabel}</span>
+                  </div>
+                  <ul className="task-read-checklist">
+                    {group.items.map((item) => (
+                      <li key={item.id} className={item.checked ? "checked" : ""}>
+                        <button
+                          aria-checked={item.checked}
+                          aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
+                          className={`task-read-check-button ${item.checked ? "checked" : ""}`}
+                          disabled={detailsMutationPending}
+                          onClick={() => void toggleChecklistItem(item.id)}
+                          role="checkbox"
+                          type="button"
+                        >
+                          {item.checked ? <CheckCircle2 size={16} /> : null}
+                        </button>
+                        {editingChecklistItemId === item.id ? (
+                          <>
+                            <input
+                              autoFocus
+                              aria-label="체크리스트 항목 수정"
+                              className="task-read-checklist-input"
+                              disabled={detailsMutationPending}
+                              onCompositionEnd={() => setIsChecklistComposing(false)}
+                              onCompositionStart={() => setIsChecklistComposing(true)}
+                              onChange={(event) => setChecklistEditText(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key !== "Enter") {
+                                  return;
+                                }
 
-                          if (isChecklistComposing || isComposingKeyboardEvent(event)) {
-                            return;
-                          }
+                                if (isChecklistComposing || isComposingKeyboardEvent(event)) {
+                                  return;
+                                }
 
-                          event.preventDefault();
-                          void saveChecklistItemText(item.id);
-                        }}
-                        value={checklistEditText}
-                      />
-                      <div className="task-read-inline-actions">
-                        <button
-                          className="icon-button task-read-icon-button"
-                          type="button"
-                          aria-label={`${item.text} 저장`}
-                          disabled={detailsMutationPending}
-                          onClick={() => void saveChecklistItemText(item.id)}
-                        >
-                          <Save size={15} />
-                        </button>
-                        <button
-                          className="icon-button task-read-icon-button"
-                          type="button"
-                          aria-label={`${item.text} 수정 취소`}
-                          disabled={detailsMutationPending}
-                          onClick={() => {
-                            setEditingChecklistItemId(null);
-                            setChecklistEditText("");
-                          }}
-                        >
-                          <X size={15} />
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <span>{item.text}</span>
-                      <div className="task-read-inline-actions">
-                        <button
-                          className="icon-button task-read-icon-button"
-                          type="button"
-                          aria-label={`${item.text} 수정`}
-                          disabled={detailsMutationPending}
-                          onClick={() => startEditingChecklistItem(item)}
-                        >
-                          <Pencil size={15} />
-                        </button>
-                        <button
-                          className="icon-button task-read-icon-button danger"
-                          type="button"
-                          aria-label={`${item.text} 삭제`}
-                          disabled={detailsMutationPending}
-                          onClick={() => void deleteChecklistItem(item.id)}
-                        >
-                          <Minus size={15} />
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </li>
+                                event.preventDefault();
+                                void saveChecklistItemText(item.id);
+                              }}
+                              value={checklistEditText}
+                            />
+                            <div className="task-read-inline-actions">
+                              <button
+                                className="icon-button task-read-icon-button"
+                                type="button"
+                                aria-label={`${item.text} 저장`}
+                                disabled={detailsMutationPending}
+                                onClick={() => void saveChecklistItemText(item.id)}
+                              >
+                                <Save size={15} />
+                              </button>
+                              <button
+                                className="icon-button task-read-icon-button"
+                                type="button"
+                                aria-label={`${item.text} 수정 취소`}
+                                disabled={detailsMutationPending}
+                                onClick={() => {
+                                  setEditingChecklistItemId(null);
+                                  setChecklistEditText("");
+                                }}
+                              >
+                                <X size={15} />
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <span>{item.text}</span>
+                            <div className="task-read-inline-actions">
+                              <button
+                                className="icon-button task-read-icon-button"
+                                type="button"
+                                aria-label={`${item.text} 수정`}
+                                disabled={detailsMutationPending}
+                                onClick={() => startEditingChecklistItem(item)}
+                              >
+                                <Pencil size={15} />
+                              </button>
+                              <button
+                                className="icon-button task-read-icon-button danger"
+                                type="button"
+                                aria-label={`${item.text} 삭제`}
+                                disabled={detailsMutationPending}
+                                onClick={() => void deleteChecklistItem(item.id)}
+                              >
+                                <Minus size={15} />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </section>
               ))}
-            </ul>
+            </div>
           ) : !isAddingChecklist ? (
             <p>체크리스트가 없습니다.</p>
           ) : null}
@@ -5634,6 +5701,7 @@ function TaskDetailModal({
   const [checklistText, setChecklistText] = useState("");
   const [isChecklistComposing, setIsChecklistComposing] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const checklistGroups = useMemo(() => checklistDisplayGroups(draft.checklist), [draft.checklist]);
 
   useEffect(() => {
     setDraft(draftFromTask(task));
@@ -5812,47 +5880,61 @@ function TaskDetailModal({
           </label>
           <section className="schedule-checklist">
             <h3>체크리스트</h3>
-            {draft.checklist.map((item) => (
-              <label key={item.id}>
-                <input
-                  checked={item.checked}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      checklist: current.checklist.map((checkItem) =>
-                        checkItem.id === item.id ? { ...checkItem, checked: event.target.checked } : checkItem
-                      )
-                    }))
-                  }
-                  type="checkbox"
-                />
-                <input
-                  aria-label="체크리스트 항목"
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      checklist: current.checklist.map((checkItem) =>
-                        checkItem.id === item.id ? { ...checkItem, text: event.target.value } : checkItem
-                      )
-                    }))
-                  }
-                  value={item.text}
-                />
-                <button
-                  className="icon-button"
-                  type="button"
-                  aria-label="항목 삭제"
-                  onClick={() =>
-                    setDraft((current) => ({
-                      ...current,
-                      checklist: current.checklist.filter((checkItem) => checkItem.id !== item.id)
-                    }))
-                  }
-                >
-                  <X size={15} />
-                </button>
-              </label>
-            ))}
+            {checklistGroups.length > 0 && (
+              <div className="checklist-groups">
+                {checklistGroups.map((group) => (
+                  <section className={`checklist-group ${group.key}`} key={group.key} aria-label={`${group.label} ${group.countLabel}`}>
+                    <div className="checklist-group-header">
+                      <strong>{group.label}</strong>
+                      <span>{group.countLabel}</span>
+                    </div>
+                    <div className="schedule-checklist-group-list">
+                      {group.items.map((item) => (
+                        <label className="schedule-checklist-item" key={item.id}>
+                          <input
+                            checked={item.checked}
+                            onChange={(event) =>
+                              setDraft((current) => ({
+                                ...current,
+                                checklist: current.checklist.map((checkItem) =>
+                                  checkItem.id === item.id ? { ...checkItem, checked: event.target.checked } : checkItem
+                                )
+                              }))
+                            }
+                            type="checkbox"
+                          />
+                          <input
+                            aria-label="체크리스트 항목"
+                            onChange={(event) =>
+                              setDraft((current) => ({
+                                ...current,
+                                checklist: current.checklist.map((checkItem) =>
+                                  checkItem.id === item.id ? { ...checkItem, text: event.target.value } : checkItem
+                                )
+                              }))
+                            }
+                            value={item.text}
+                          />
+                          <button
+                            className="icon-button"
+                            type="button"
+                            aria-label="항목 삭제"
+                            onClick={() =>
+                              setDraft((current) => ({
+                                ...current,
+                                checklist: current.checklist.filter((checkItem) => checkItem.id !== item.id)
+                              }))
+                            }
+                          >
+                            <X size={15} />
+                          </button>
+                        </label>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            )}
             <div className="schedule-checklist-add">
               <input
                 onCompositionEnd={() => setIsChecklistComposing(false)}

@@ -1,21 +1,25 @@
 import { doc, getDoc, onSnapshot, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { defaultMatrixLabels, normalizeMatrixLabels, sanitizeMatrixLabelsForSave } from "../lib/matrixLabels";
-import type { DefaultHomeView, MatrixLabels, ScheduleView, UserPreferencesDocument } from "../types";
+import { normalizeThemePreference } from "../lib/theme";
+import type { DefaultHomeView, MatrixLabels, ScheduleView, ThemePreference, UserPreferencesDocument } from "../types";
 
-export const defaultUserPreferences: Pick<UserPreferencesDocument, "defaultHome" | "matrixLabels" | "scheduleDefaultView"> = {
+export const defaultUserPreferences: Pick<UserPreferencesDocument, "defaultHome" | "matrixLabels" | "scheduleDefaultView" | "theme"> = {
   defaultHome: "notes",
   matrixLabels: defaultMatrixLabels,
-  scheduleDefaultView: "todo"
+  scheduleDefaultView: "todo",
+  theme: "system"
 };
 
 const validDefaultHomeViews = new Set<DefaultHomeView>(["notes", "schedule"]);
 const validScheduleViews = new Set<ScheduleView>(["todo", "calendar", "matrix", "recurring", "completed"]);
+const validThemes = new Set<ThemePreference>(["light", "dark", "system"]);
 
 export interface SaveUserPreferencesInput {
   defaultHome?: UserPreferencesDocument["defaultHome"];
   matrixLabels?: Partial<MatrixLabels>;
   scheduleDefaultView?: ScheduleView;
+  theme?: ThemePreference;
 }
 
 function preferencesRef(uid: string) {
@@ -42,12 +46,16 @@ function normalizeUserPreferences(uid: string, value: Partial<UserPreferencesDoc
     ? (value?.scheduleDefaultView as ScheduleView)
     : defaultUserPreferences.scheduleDefaultView;
   const matrixLabels = normalizeMatrixLabels(value?.matrixLabels);
+  const theme = validThemes.has(value?.theme as ThemePreference)
+    ? normalizeThemePreference(value?.theme)
+    : defaultUserPreferences.theme;
 
   return {
     uid,
     defaultHome,
     matrixLabels,
     scheduleDefaultView,
+    theme,
     createdAt: value?.createdAt,
     updatedAt: value?.updatedAt
   };
@@ -67,7 +75,7 @@ export function getCachedUserPreferences(uid: string) {
 }
 
 function writeCachedUserPreferences(
-  preferences: Pick<UserPreferencesDocument, "defaultHome" | "matrixLabels" | "scheduleDefaultView" | "uid">
+  preferences: Pick<UserPreferencesDocument, "defaultHome" | "matrixLabels" | "scheduleDefaultView" | "theme" | "uid">
 ) {
   if (!storageAvailable()) {
     return;
@@ -79,7 +87,8 @@ function writeCachedUserPreferences(
       JSON.stringify({
         defaultHome: preferences.defaultHome,
         matrixLabels: preferences.matrixLabels,
-        scheduleDefaultView: preferences.scheduleDefaultView
+        scheduleDefaultView: preferences.scheduleDefaultView,
+        theme: preferences.theme
       })
     );
   } catch {
@@ -132,6 +141,7 @@ export async function saveUserPreferences(uid: string, input: SaveUserPreference
     defaultHome: input.defaultHome ?? current.defaultHome,
     matrixLabels: input.matrixLabels ? sanitizeMatrixLabelsForSave(input.matrixLabels) : current.matrixLabels,
     scheduleDefaultView: input.scheduleDefaultView ?? current.scheduleDefaultView,
+    theme: input.theme ? normalizeThemePreference(input.theme) : current.theme,
     updatedAt: serverTimestamp()
   };
   writeCachedUserPreferences({ uid, ...payload });

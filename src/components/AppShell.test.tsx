@@ -3,14 +3,15 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { defaultMatrixLabels } from "../lib/matrixLabels";
 import type { MatrixLabels, UserPreferencesDocument } from "../types";
-import { SettingsModal } from "./AppShell";
+import { SettingsModal, ThemeToggleButton } from "./AppShell";
 
 function preferences(matrixLabels: MatrixLabels = defaultMatrixLabels): UserPreferencesDocument {
   return {
     uid: "user-a",
     defaultHome: "notes",
     matrixLabels,
-    scheduleDefaultView: "todo"
+    scheduleDefaultView: "todo",
+    theme: "system"
   };
 }
 
@@ -95,5 +96,22 @@ describe("SettingsModal", () => {
       matrixLabels: defaultMatrixLabels,
       scheduleDefaultView: "todo"
     });
+  });
+});
+
+describe("ThemeToggleButton", () => {
+  it("exposes the next theme action and pressed state", async () => {
+    const user = userEvent.setup();
+    const onToggle = vi.fn();
+    const { rerender } = render(<ThemeToggleButton resolvedTheme="light" onToggle={onToggle} />);
+
+    const darkButton = screen.getByRole("button", { name: "다크모드로 전환" });
+    expect(darkButton).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(darkButton);
+    expect(onToggle).toHaveBeenCalledTimes(1);
+
+    rerender(<ThemeToggleButton resolvedTheme="dark" onToggle={onToggle} />);
+    expect(screen.getByRole("button", { name: "라이트모드로 전환" })).toHaveAttribute("aria-pressed", "true");
   });
 });

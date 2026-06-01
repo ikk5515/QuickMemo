@@ -313,11 +313,12 @@ service cloud.firestore {
     }
 
     function validUserPreferences(data, uid) {
-      return data.keys().hasOnly(["uid", "defaultHome", "matrixLabels", "scheduleDefaultView", "createdAt", "updatedAt"])
+      return data.keys().hasOnly(["uid", "defaultHome", "matrixLabels", "scheduleDefaultView", "theme", "createdAt", "updatedAt"])
         && data.uid == uid
         && data.defaultHome in ["notes", "schedule"]
         && (!data.keys().hasAny(["matrixLabels"]) || validMatrixLabels(data.matrixLabels))
         && data.scheduleDefaultView in ["todo", "calendar", "matrix", "recurring", "completed"]
+        && (!data.keys().hasAny(["theme"]) || data.theme in ["light", "dark", "system"])
         && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
         && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
     }
@@ -1590,6 +1591,7 @@ service cloud.firestore {
           "defaultHome",
           "matrixLabels",
           "scheduleDefaultView",
+          "theme",
           "updatedAt"
         ]);
       allow delete: if false;
