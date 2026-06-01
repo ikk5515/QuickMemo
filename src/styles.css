@@ -6983,6 +6983,37 @@ textarea {
   grid-template-columns: minmax(320px, 0.9fr) minmax(0, 2fr);
 }
 
+.matrix-filter-notice {
+  align-items: center;
+  background: var(--color-info-subtle);
+  border: 1px solid color-mix(in srgb, var(--blue) 22%, #ffffff);
+  border-radius: var(--radius-card);
+  color: var(--ink);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+  min-width: 0;
+  padding: var(--space-3);
+}
+
+.matrix-filter-notice span {
+  align-items: center;
+  display: inline-flex;
+  flex: 1 1 240px;
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.4;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.matrix-filter-notice svg {
+  color: var(--blue);
+  flex: 0 0 auto;
+}
+
 .matrix-today-rail {
   display: grid;
   min-height: 0;
@@ -7281,28 +7312,6 @@ textarea {
 
 .matrix-date-group .schedule-empty {
   margin: 8px 0 0;
-}
-
-.matrix-task-progress-strip {
-  background:
-    linear-gradient(
-      90deg,
-      var(--matrix-task-progress-color, var(--teal)) 0 var(--matrix-task-progress-fill, 0%),
-      color-mix(in srgb, var(--matrix-task-progress-color, var(--teal)) 12%, var(--surface)) var(--matrix-task-progress-fill, 0%) 100%
-    );
-  border-radius: 999px;
-  display: block;
-  height: 4px;
-  margin-top: 3px;
-  min-height: 4px;
-  overflow: hidden;
-  text-decoration: none;
-  width: 100%;
-}
-
-.task-row.completed .task-main .matrix-task-progress-strip {
-  opacity: 0.72;
-  text-decoration: none;
 }
 
 .matrix-task-row:active {
@@ -9384,19 +9393,6 @@ button,
   font-weight: 800;
   line-height: 1.45;
   margin: var(--space-1) 0 0;
-}
-
-.matrix-section-progress {
-  background: var(--color-primary-subtle);
-  border: 1px solid color-mix(in srgb, var(--teal) 22%, #ffffff);
-  border-radius: var(--radius-pill);
-  color: var(--teal);
-  flex: 0 0 auto;
-  font-size: 11px;
-  font-style: normal;
-  font-weight: 950;
-  line-height: 1;
-  padding: 4px 7px;
 }
 
 .schedule-view-tabs button:not(.active):hover,

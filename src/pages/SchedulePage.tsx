@@ -639,6 +639,11 @@ export default function SchedulePage() {
   );
   const todoGroups = useMemo(() => groupTasksByTodoDate(displayedTasks, today), [displayedTasks, today]);
   const matrixSections = useMemo(() => groupTasksByMatrix(displayedTasks, today), [displayedTasks, today]);
+  const activeMatrixTaskCount = useMemo(() => sortedTasks.filter((task) => task.status !== "completed").length, [sortedTasks]);
+  const visibleMatrixTaskCount = useMemo(
+    () => displayedTasks.filter((task) => task.status !== "completed").length,
+    [displayedTasks]
+  );
   const calendarWeeks = useMemo(
     () => buildCalendarMonth(calendarCursor.getFullYear(), calendarCursor.getMonth(), today),
     [calendarCursor, today]
@@ -1576,8 +1581,12 @@ export default function SchedulePage() {
 
         {activeView === "matrix" && (
           <MatrixView
+            filterQuery={scheduleQuery.trim()}
+            onClearFilter={() => setScheduleQuery("")}
             sections={matrixSections}
             today={today}
+            totalTaskCount={activeMatrixTaskCount}
+            visibleTaskCount={visibleMatrixTaskCount}
             onAddSection={openMatrixCreateDialog}
             onMoveTaskToSection={(task, sectionKey) => void moveTaskToMatrixSection(task, sectionKey)}
             onOpen={setViewTaskId}
@@ -2121,7 +2130,6 @@ function TodayWorkPanel({
             today={today}
             onOpen={onOpenTask}
             onToggle={onToggleTask}
-            showProgress
           />
         </section>
         <section className="today-work-section">
@@ -2135,7 +2143,6 @@ function TodayWorkPanel({
             today={today}
             onOpen={onOpenTask}
             onToggle={onToggleTask}
-            showProgress
           />
         </section>
         <section className="today-work-section">
@@ -2734,21 +2741,29 @@ function CalendarView({
 }
 
 function MatrixView({
+  filterQuery,
   onAddSection,
+  onClearFilter,
   onMoveTaskToSection,
   onOpen,
   onReorderTasks,
   onToggle,
   sections,
-  today
+  today,
+  totalTaskCount,
+  visibleTaskCount
 }: {
+  filterQuery: string;
   onAddSection: (section: MatrixSection) => void;
+  onClearFilter: () => void;
   onMoveTaskToSection: (task: DecryptedScheduleTask, sectionKey: MatrixQuadrantKey) => void;
   onOpen: (taskId: string) => void;
   onReorderTasks: (activeTaskId: string, overTaskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   sections: MatrixSection[];
   today: string;
+  totalTaskCount: number;
+  visibleTaskCount: number;
 }) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
@@ -2805,6 +2820,17 @@ function MatrixView({
       onDragStart={handleDragStart}
       sensors={sensors}
     >
+      {filterQuery && (
+        <div className="matrix-filter-notice" role="status">
+          <Search size={16} aria-hidden="true" />
+          <span>
+            검색어 "{filterQuery}" 적용 중 · 매트릭스 업무 {visibleTaskCount}/{totalTaskCount}개 표시
+          </span>
+          <button className="secondary-button" type="button" onClick={onClearFilter}>
+            검색 초기화
+          </button>
+        </div>
+      )}
       <div className="matrix-layout">
         {todaySection && (
           <div className="matrix-today-rail">
@@ -2880,7 +2906,6 @@ function MatrixSectionPanel({
         <div>
           <h2>{section.label}</h2>
           <span>{section.tasks.length}</span>
-          {section.progress.total > 0 && <em className="matrix-section-progress">{section.progress.percent}%</em>}
         </div>
         <button
           className="icon-button matrix-add-button"
@@ -3037,7 +3062,6 @@ function MatrixTaskRowContent({
   task: DecryptedScheduleTask;
   today: string;
 }) {
-  const progressPercent = normalizeTaskProgressPercent(task.progressPercent);
   const isOverdue = isTaskScheduleOverdue(task, today);
 
   return (
@@ -3055,20 +3079,6 @@ function MatrixTaskRowContent({
       <button className="task-main task-open-button" type="button" onClick={() => onOpen?.(task.id)}>
         <strong>{task.title}</strong>
         <span className={isOverdue ? "task-meta overdue" : "task-meta"}>{formatTaskMeta(task)}</span>
-        <span
-          aria-label={`${task.title} 진행률 ${progressPercent}%`}
-          aria-valuemax={100}
-          aria-valuemin={0}
-          aria-valuenow={progressPercent}
-          className="matrix-task-progress-strip"
-          role="progressbar"
-          style={
-            {
-              "--matrix-task-progress-color": taskProgressColor(progressPercent),
-              "--matrix-task-progress-fill": `${progressPercent}%`
-            } as CSSProperties
-          }
-        />
       </button>
       <span className="task-flags">
         {task.isImportant && <Flag size={15} aria-label="중요" />}

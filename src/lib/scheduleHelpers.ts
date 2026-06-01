@@ -42,7 +42,6 @@ export interface MatrixSection {
   isImportant: boolean;
   isUrgent: boolean;
   dateGroups: MatrixDateGroup[];
-  progress: MatrixSectionProgress;
   tasks: DecryptedScheduleTask[];
 }
 
@@ -50,12 +49,6 @@ export interface MatrixDateGroup {
   key: MatrixDateGroupKey;
   label: string;
   tasks: DecryptedScheduleTask[];
-}
-
-export interface MatrixSectionProgress {
-  checked: number;
-  total: number;
-  percent: number;
 }
 
 export interface ScheduleTaskOrderUpdate {
@@ -700,7 +693,7 @@ export function matrixQuadrantForTask(task: Pick<DecryptedScheduleTask, "isImpor
 }
 
 export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLocalDateString(new Date())): MatrixSection[] {
-  const activeTasks = tasks.filter((task) => task.status === "active");
+  const activeTasks = tasks.filter(isMatrixVisibleTask);
   const sections: MatrixSection[] = [
     {
       key: "urgentImportant",
@@ -709,7 +702,6 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
       isImportant: true,
       isUrgent: true,
       dateGroups: [],
-      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     },
     {
@@ -719,7 +711,6 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
       isImportant: true,
       isUrgent: true,
       dateGroups: [],
-      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     },
     {
@@ -729,7 +720,6 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
       isImportant: false,
       isUrgent: true,
       dateGroups: [],
-      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     },
     {
@@ -739,7 +729,6 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
       isImportant: true,
       isUrgent: false,
       dateGroups: [],
-      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     },
     {
@@ -749,7 +738,6 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
       isImportant: false,
       isUrgent: false,
       dateGroups: [],
-      progress: { checked: 0, percent: 0, total: 0 },
       tasks: []
     }
   ];
@@ -763,9 +751,21 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
   return sections.map((section) => ({
     ...section,
     dateGroups: groupMatrixTasksByDate(section.tasks, today),
-    progress: calculateMatrixSectionProgress(section.tasks),
     tasks: section.tasks.sort(compareMatrixTasks)
   }));
+}
+
+function isMatrixVisibleTask(task: DecryptedScheduleTask) {
+  const legacyTask = task as unknown as {
+    deleted?: boolean;
+    isDeleted?: boolean;
+    status?: string;
+  };
+
+  return legacyTask.status !== "completed"
+    && legacyTask.status !== "archived"
+    && legacyTask.deleted !== true
+    && legacyTask.isDeleted !== true;
 }
 
 function matrixSectionForTask(task: DecryptedScheduleTask, today: string): MatrixQuadrantKey {
@@ -812,18 +812,6 @@ export function matrixPriorityForSection(key: MatrixQuadrantKey) {
   return {
     isImportant: key === "urgentImportant" || key === "firstPriority" || key === "importantNotUrgent",
     isUrgent: key === "urgentImportant" || key === "firstPriority" || key === "urgentNotImportant"
-  };
-}
-
-export function calculateMatrixSectionProgress(tasks: DecryptedScheduleTask[]): MatrixSectionProgress {
-  const checklistItems = tasks.flatMap((task) => (task.details ?? emptyScheduleDetails).checklist);
-  const total = checklistItems.length;
-  const checked = checklistItems.filter((item) => item.checked).length;
-
-  return {
-    checked,
-    total,
-    percent: total ? Math.round((checked / total) * 100) : 0
   };
 }
 

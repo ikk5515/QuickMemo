@@ -4,7 +4,6 @@ import {
   buildCalendarMonth,
   buildCalendarTaskLayout,
   buildScheduleTaskOrderUpdates,
-  calculateMatrixSectionProgress,
   compareCalendarAgendaTasks,
   formatScheduleDateRange,
   formatScheduleTimeRange,
@@ -379,27 +378,37 @@ describe("schedule helpers", () => {
     ]);
   });
 
-  it("calculates matrix section progress from checklist items", () => {
-    expect(
-      calculateMatrixSectionProgress([
-        task("a", {
-          details: {
-            description: "",
-            checklist: [
-              { id: "a-1", text: "첫 항목", checked: true },
-              { id: "a-2", text: "둘째 항목", checked: false }
-            ]
-          }
-        }),
-        task("b", {
-          details: {
-            description: "",
-            checklist: [{ id: "b-1", text: "셋째 항목", checked: true }]
-          }
-        })
+  it("keeps matrix tasks visible when progress fields are empty", () => {
+    const sections = groupTasksByMatrix([
+      task("important-missing-progress", { isImportant: true, isUrgent: false, progressPercent: undefined }),
+      task("urgent-null-progress", { isImportant: false, isUrgent: true, progressPercent: null }),
+      task("waiting-zero-progress", { isImportant: false, isUrgent: false, progressPercent: 0 }),
+      task("legacy-missing-status", { status: undefined as unknown as DecryptedScheduleTask["status"] }),
+      task("completed-hidden", { status: "completed", isImportant: true, isUrgent: true, progressPercent: 100 }),
+      task("archived-hidden", { status: "archived" as DecryptedScheduleTask["status"] }),
+      task("deleted-hidden", { isDeleted: true } as Partial<DecryptedScheduleTask>)
+    ], "2026-05-20");
+    const matrixTaskIds = sections.flatMap((section) => section.tasks.map((item) => item.id));
+
+    expect(matrixTaskIds).toHaveLength(4);
+    expect(matrixTaskIds).toEqual(
+      expect.arrayContaining([
+        "urgent-null-progress",
+        "important-missing-progress",
+        "waiting-zero-progress",
+        "legacy-missing-status"
       ])
-    ).toEqual({ checked: 2, percent: 67, total: 3 });
-    expect(calculateMatrixSectionProgress([task("empty")])).toEqual({ checked: 0, percent: 0, total: 0 });
+    );
+    expect(sections.find((section) => section.key === "urgentNotImportant")?.tasks.map((item) => item.id)).toEqual(["urgent-null-progress"]);
+    expect(sections.find((section) => section.key === "importantNotUrgent")?.tasks.map((item) => item.id)).toEqual(["important-missing-progress"]);
+    expect(sections.find((section) => section.key === "notUrgentNotImportant")?.tasks.map((item) => item.id)).toEqual(expect.arrayContaining([
+      "legacy-missing-status",
+      "waiting-zero-progress"
+    ]));
+    expect(matrixTaskIds).not.toContain("archived-hidden");
+    expect(matrixTaskIds).not.toContain("completed-hidden");
+    expect(matrixTaskIds).not.toContain("deleted-hidden");
+    expect(sections.some((section) => "progress" in section)).toBe(false);
   });
 
   it("converts time input to minutes and back", () => {
