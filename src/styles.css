@@ -9140,9 +9140,9 @@ button,
 
 .home-primary-action {
   align-items: center;
-  background: var(--ink);
+  background: var(--button-primary-bg);
   border-radius: var(--radius-button);
-  color: #ffffff;
+  color: var(--button-primary-color);
   display: inline-flex;
   font-weight: 900;
   gap: var(--space-2);
@@ -9152,7 +9152,7 @@ button,
 
 .home-primary-action:hover,
 .home-primary-action:focus-visible {
-  background: color-mix(in srgb, var(--teal) 72%, var(--ink));
+  background: var(--button-primary-hover-bg);
   box-shadow: 0 10px 24px rgb(20 33 31 / 14%);
   transform: translateY(-1px);
 }

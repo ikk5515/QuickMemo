@@ -17,7 +17,10 @@ describe("schedule UI styles", () => {
   it("keeps dark mode primary buttons on button tokens instead of text color tokens", () => {
     expect(stylesSource).toContain("--button-primary-bg: #2f6f67");
     expect(stylesSource).toMatch(/button \{[\s\S]*background: var\(--button-primary-bg\);/);
+    expect(stylesSource).toMatch(/\.home-primary-action \{[\s\S]*background: var\(--button-primary-bg\);[\s\S]*color: var\(--button-primary-color\);/);
+    expect(stylesSource).toMatch(/\.home-primary-action:hover,[\s\S]*\.home-primary-action:focus-visible \{[\s\S]*background: var\(--button-primary-hover-bg\);/);
     expect(stylesSource).not.toMatch(/button \{[^}]*background: var\(--ink\);/);
+    expect(stylesSource).not.toMatch(/\.home-primary-action \{[^}]*background: var\(--ink\);/);
   });
 
   it("styles the today quick panel trigger and popover surfaces for light and dark themes", () => {
