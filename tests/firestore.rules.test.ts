@@ -673,6 +673,7 @@ describeRules("firestore security rules", () => {
         userPreferences("user-a", {
           defaultHome: "schedule",
           matrixLabels: {
+            todayOverdue: "오늘/지연",
             importantUrgent: "중요·긴급",
             urgent: "긴급 업무",
             important: "중요 업무",
@@ -689,6 +690,7 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "recurring", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
       matrixLabels: {
+        todayOverdue: "오늘 처리",
         importantUrgent: "바로 처리",
         urgent: "위임 업무",
         important: "집중 업무",
@@ -698,6 +700,7 @@ describeRules("firestore security rules", () => {
     }));
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
       matrixLabels: {
+        todayOverdue: "오늘 처리",
         importantUrgent: "바로 처리",
         urgent: "",
         important: "집중 업무",
@@ -707,6 +710,7 @@ describeRules("firestore security rules", () => {
     }));
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
       matrixLabels: {
+        todayOverdue: "오늘 처리",
         importantUrgent: "가".repeat(17),
         urgent: "위임 업무",
         important: "집중 업무",
@@ -724,6 +728,7 @@ describeRules("firestore security rules", () => {
     }));
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
       matrixLabels: {
+        todayOverdue: "오늘 처리",
         importantUrgent: "바로 처리",
         urgent: "위임 업무",
         important: "집중 업무",

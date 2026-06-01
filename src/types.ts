@@ -25,7 +25,7 @@ export interface UserProfile extends PublicRosterUser {
 
 export type DefaultHomeView = "notes" | "schedule";
 export type ScheduleView = "todo" | "calendar" | "matrix" | "recurring" | "completed";
-export type MatrixLabelKey = "importantUrgent" | "urgent" | "important" | "waiting";
+export type MatrixLabelKey = "todayOverdue" | "importantUrgent" | "urgent" | "important" | "waiting";
 export type MatrixLabels = Record<MatrixLabelKey, string>;
 
 export interface UserPreferencesDocument {

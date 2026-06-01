@@ -31,6 +31,7 @@ describe("SettingsModal", () => {
     const urgentLabelInput = screen.getByLabelText(/^긴급 업무/) as HTMLInputElement;
 
     expect(screen.getByRole("heading", { name: "매트릭스 명칭 설정" })).toBeInTheDocument();
+    expect(screen.getAllByRole("textbox")).toHaveLength(5);
     expect(saveButton).toBeDisabled();
 
     await user.clear(urgentLabelInput);
@@ -75,6 +76,7 @@ describe("SettingsModal", () => {
     render(
       <SettingsModal
         preferences={preferences({
+          todayOverdue: "오늘 처리",
           importantUrgent: "바로 처리",
           urgent: "위임 업무",
           important: "집중 업무",

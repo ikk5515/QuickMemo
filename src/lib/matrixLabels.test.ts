@@ -13,12 +13,14 @@ describe("matrix labels", () => {
     expect(normalizeMatrixLabels(null)).toEqual(defaultMatrixLabels);
     expect(
       normalizeMatrixLabels({
+        todayOverdue: "  오늘 처리  ",
         importantUrgent: "  바로 처리  ",
         urgent: "",
         important: "x".repeat(matrixLabelMaxLength + 1),
         waiting: "대기"
       })
     ).toEqual({
+      todayOverdue: "오늘 처리",
       importantUrgent: "바로 처리",
       urgent: defaultMatrixLabels.urgent,
       important: defaultMatrixLabels.important,
@@ -29,12 +31,14 @@ describe("matrix labels", () => {
   it("validates trimmed labels before saving", () => {
     expect(
       sanitizeMatrixLabelsForSave({
+        todayOverdue: " 오늘/지연 ",
         importantUrgent: "  바로 처리  ",
         urgent: "긴급",
         important: "중요",
         waiting: "대기"
       })
     ).toEqual({
+      todayOverdue: "오늘/지연",
       importantUrgent: "바로 처리",
       urgent: "긴급",
       important: "중요",
@@ -46,10 +50,10 @@ describe("matrix labels", () => {
     );
   });
 
-  it("maps both important-urgent matrix sections to the same user label", () => {
-    const labels = { ...defaultMatrixLabels, importantUrgent: "최우선" };
+  it("maps today-overdue and future important-urgent sections separately", () => {
+    const labels = { ...defaultMatrixLabels, todayOverdue: "오늘 처리", importantUrgent: "최우선" };
 
-    expect(matrixLabelForSectionKey("urgentImportant", labels)).toBe("최우선");
+    expect(matrixLabelForSectionKey("urgentImportant", labels)).toBe("오늘 처리");
     expect(matrixLabelForSectionKey("firstPriority", labels)).toBe("최우선");
     expect(matrixLabelForSectionKey("urgentNotImportant", labels)).toBe(defaultMatrixLabels.urgent);
     expect(matrixLabelForSectionKey("importantNotUrgent", labels)).toBe(defaultMatrixLabels.important);

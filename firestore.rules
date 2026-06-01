@@ -324,8 +324,9 @@ service cloud.firestore {
 
     function validMatrixLabels(labels) {
       return labels is map
-        && labels.keys().hasOnly(["importantUrgent", "urgent", "important", "waiting"])
-        && labels.keys().hasAll(["importantUrgent", "urgent", "important", "waiting"])
+        && labels.keys().hasOnly(["todayOverdue", "importantUrgent", "urgent", "important", "waiting"])
+        && labels.keys().hasAll(["todayOverdue", "importantUrgent", "urgent", "important", "waiting"])
+        && validMatrixLabel(labels.todayOverdue)
         && validMatrixLabel(labels.importantUrgent)
         && validMatrixLabel(labels.urgent)
         && validMatrixLabel(labels.important)

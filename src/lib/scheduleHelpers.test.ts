@@ -352,7 +352,7 @@ describe("schedule helpers", () => {
     const sections = groupTasksByMatrix([], "2026-05-20");
 
     expect(sections.map((section) => [section.key, section.label])).toEqual([
-      ["urgentImportant", "중요·긴급"],
+      ["urgentImportant", "오늘/지연"],
       ["firstPriority", "중요·긴급"],
       ["urgentNotImportant", "긴급 업무"],
       ["importantNotUrgent", "중요 업무"],
@@ -371,6 +371,7 @@ describe("schedule helpers", () => {
       ],
       "2026-05-20",
       {
+        todayOverdue: "오늘 처리",
         importantUrgent: "바로 처리",
         urgent: "위임 업무",
         important: "집중 업무",
@@ -379,7 +380,7 @@ describe("schedule helpers", () => {
     );
 
     expect(sections.map((section) => [section.key, section.label])).toEqual([
-      ["urgentImportant", "바로 처리"],
+      ["urgentImportant", "오늘 처리"],
       ["firstPriority", "바로 처리"],
       ["urgentNotImportant", "위임 업무"],
       ["importantNotUrgent", "집중 업무"],

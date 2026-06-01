@@ -3,6 +3,7 @@ import type { MatrixLabelKey, MatrixLabels } from "../types";
 export const matrixLabelMaxLength = 16;
 
 export const defaultMatrixLabels: MatrixLabels = {
+  todayOverdue: "오늘/지연",
   importantUrgent: "중요·긴급",
   urgent: "긴급 업무",
   important: "중요 업무",
@@ -11,9 +12,14 @@ export const defaultMatrixLabels: MatrixLabels = {
 
 export const matrixLabelFields: Array<{ key: MatrixLabelKey; label: string; description: string }> = [
   {
+    key: "todayOverdue",
+    label: defaultMatrixLabels.todayOverdue,
+    description: "오늘 진행 중이거나 지연된 중요·긴급 업무"
+  },
+  {
     key: "importantUrgent",
     label: defaultMatrixLabels.importantUrgent,
-    description: "중요하고 긴급한 업무"
+    description: "오늘 이후로 예정된 중요·긴급 업무"
   },
   {
     key: "urgent",
@@ -44,6 +50,7 @@ export function normalizeMatrixLabel(value: unknown, fallback: string) {
 
 export function normalizeMatrixLabels(value: Partial<MatrixLabels> | null | undefined): MatrixLabels {
   return {
+    todayOverdue: normalizeMatrixLabel(value?.todayOverdue, defaultMatrixLabels.todayOverdue),
     importantUrgent: normalizeMatrixLabel(value?.importantUrgent, defaultMatrixLabels.importantUrgent),
     urgent: normalizeMatrixLabel(value?.urgent, defaultMatrixLabels.urgent),
     important: normalizeMatrixLabel(value?.important, defaultMatrixLabels.important),
@@ -53,6 +60,7 @@ export function normalizeMatrixLabels(value: Partial<MatrixLabels> | null | unde
 
 export function sanitizeMatrixLabelsForSave(value: Partial<MatrixLabels>): MatrixLabels {
   return {
+    todayOverdue: (value.todayOverdue ?? "").trim(),
     importantUrgent: (value.importantUrgent ?? "").trim(),
     urgent: (value.urgent ?? "").trim(),
     important: (value.important ?? "").trim(),
@@ -80,7 +88,11 @@ export function validateMatrixLabels(value: Partial<MatrixLabels>) {
 export function matrixLabelForSectionKey(sectionKey: string, labelsInput?: Partial<MatrixLabels>) {
   const labels = normalizeMatrixLabels(labelsInput);
 
-  if (sectionKey === "urgentImportant" || sectionKey === "firstPriority") {
+  if (sectionKey === "urgentImportant") {
+    return labels.todayOverdue;
+  }
+
+  if (sectionKey === "firstPriority") {
     return labels.importantUrgent;
   }
 
