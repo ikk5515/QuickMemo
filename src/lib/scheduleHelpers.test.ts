@@ -353,7 +353,7 @@ describe("schedule helpers", () => {
 
     expect(sections.map((section) => [section.key, section.label])).toEqual([
       ["urgentImportant", "오늘/지연"],
-      ["firstPriority", "다음 중요·긴급"],
+      ["firstPriority", "중요-긴급"],
       ["urgentNotImportant", "긴급 업무"],
       ["importantNotUrgent", "중요 업무"],
       ["notUrgentNotImportant", "대기 업무"]
@@ -409,6 +409,24 @@ describe("schedule helpers", () => {
     expect(matrixTaskIds).not.toContain("completed-hidden");
     expect(matrixTaskIds).not.toContain("deleted-hidden");
     expect(sections.some((section) => "progress" in section)).toBe(false);
+  });
+
+  it("keeps legacy important tasks visible in their matrix sections", () => {
+    const legacyImportant = {
+      ...task("legacy-important"),
+      importance: "high",
+      isImportant: undefined
+    } as unknown as DecryptedScheduleTask;
+    const legacyImportantUrgent = {
+      ...task("legacy-important-urgent", { dueDate: "2026-05-26" }),
+      isImportant: undefined,
+      isUrgent: undefined,
+      priority: "important-urgent"
+    } as unknown as DecryptedScheduleTask;
+    const sections = groupTasksByMatrix([legacyImportant, legacyImportantUrgent], "2026-05-20");
+
+    expect(sections.find((section) => section.key === "importantNotUrgent")?.tasks.map((item) => item.id)).toEqual(["legacy-important"]);
+    expect(sections.find((section) => section.key === "firstPriority")?.tasks.map((item) => item.id)).toEqual(["legacy-important-urgent"]);
   });
 
   it("converts time input to minutes and back", () => {

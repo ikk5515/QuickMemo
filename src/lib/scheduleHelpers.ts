@@ -1,4 +1,5 @@
 import type { DecryptedScheduleTask, ScheduleTaskDetails } from "../types";
+import { normalizeSchedulePriorityFlags, type SchedulePrioritySource } from "./schedulePriority";
 
 export type TodoGroupKey = "today" | "tomorrow" | "next7" | "later" | "noDate" | "completed";
 export type MatrixQuadrantKey =
@@ -221,15 +222,17 @@ export function compareTaskNewest(left: DecryptedScheduleTask, right: DecryptedS
 }
 
 function taskPriorityRank(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent">) {
-  if (task.isImportant && task.isUrgent) {
+  const { isImportant, isUrgent } = normalizeSchedulePriorityFlags(task);
+
+  if (isImportant && isUrgent) {
     return 0;
   }
 
-  if (task.isImportant) {
+  if (isImportant) {
     return 1;
   }
 
-  if (task.isUrgent) {
+  if (isUrgent) {
     return 2;
   }
 
@@ -676,16 +679,18 @@ export function buildCalendarTaskLayout(weeks: CalendarWeek[], tasks: DecryptedS
   return layout;
 }
 
-export function matrixQuadrantForTask(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent">): MatrixQuadrantKey {
-  if (task.isImportant && task.isUrgent) {
+export function matrixQuadrantForTask(task: Pick<DecryptedScheduleTask, "isImportant" | "isUrgent"> & SchedulePrioritySource): MatrixQuadrantKey {
+  const { isImportant, isUrgent } = normalizeSchedulePriorityFlags(task);
+
+  if (isImportant && isUrgent) {
     return "urgentImportant";
   }
 
-  if (!task.isImportant && task.isUrgent) {
+  if (!isImportant && isUrgent) {
     return "urgentNotImportant";
   }
 
-  if (task.isImportant && !task.isUrgent) {
+  if (isImportant && !isUrgent) {
     return "importantNotUrgent";
   }
 
@@ -706,7 +711,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "firstPriority",
-      label: "다음 중요·긴급",
+      label: "중요-긴급",
       accent: "red",
       isImportant: true,
       isUrgent: true,

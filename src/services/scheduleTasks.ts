@@ -14,6 +14,7 @@ import {
 } from "firebase/firestore";
 import type { FieldValue } from "firebase/firestore";
 import { db } from "../lib/firebase";
+import { normalizeSchedulePriorityFlags, type SchedulePrioritySource } from "../lib/schedulePriority";
 import type {
   EncryptedPayload,
   ScheduleTaskDetails,
@@ -25,6 +26,10 @@ import type {
 export interface ScheduleTaskSnapshot extends ScheduleTaskDocument {
   id: string;
 }
+
+type RawScheduleTaskDocument = Omit<ScheduleTaskDocument, "status"> & SchedulePrioritySource & {
+  status?: unknown;
+};
 
 export interface CreateScheduleTaskInput {
   ownerUid: string;
@@ -67,9 +72,20 @@ export const defaultScheduleDetails: ScheduleTaskDetails = {
   checklist: []
 };
 
+export function normalizeScheduleTaskDocument(data: unknown): ScheduleTaskDocument {
+  const task = data as RawScheduleTaskDocument;
+  const status = task.status === "completed" || task.status === "archived" ? task.status : "active";
+
+  return {
+    ...task,
+    ...normalizeSchedulePriorityFlags(task),
+    status: status as ScheduleTaskDocument["status"]
+  };
+}
+
 function snapshotList(snapshot: { docs: Array<{ id: string; data: () => unknown }> }) {
   return snapshot.docs
-    .map((document) => ({ id: document.id, ...(document.data() as ScheduleTaskDocument) }))
+    .map((document) => ({ id: document.id, ...normalizeScheduleTaskDocument(document.data()) }))
     .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt));
 }
 

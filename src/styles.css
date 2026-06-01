@@ -8781,6 +8781,9 @@ textarea {
   --color-surface-hover: #f8fafc;
   --list-row-hover-bg: var(--color-surface-hover);
   --list-row-hover-border: #e2e8f0;
+  --note-item-hover-bg: var(--color-surface-hover);
+  --note-item-hover-border: #e2e8f0;
+  --note-item-selected-hover-bg: color-mix(in srgb, var(--teal) 8%, #ffffff);
   --schedule-hover-bg: #f8fafc;
   --schedule-hover-border: #e2e8f0;
   --schedule-event-hover-bg: #f1f5f9;
@@ -9393,6 +9396,96 @@ button,
   font-weight: 800;
   line-height: 1.45;
   margin: var(--space-1) 0 0;
+}
+
+.overview-note-card:hover,
+.overview-note-card:focus-within,
+.note-list-item:hover,
+.note-list-item:focus-within {
+  background: var(--note-item-hover-bg);
+  border-color: var(--note-item-hover-border);
+  color: var(--ink);
+}
+
+.note-list-item.active:hover,
+.note-list-item.active:focus-within {
+  background: var(--note-item-selected-hover-bg);
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgb(47 125 112 / 12%);
+}
+
+.note-list-item.deleted:hover,
+.note-list-item.deleted:focus-within {
+  background: #f8fafc;
+}
+
+button.overview-note-open:not(:disabled):hover,
+button.overview-note-open:not(:disabled):focus-visible,
+button.overview-note-open:not(:disabled):active,
+button.note-list-open:not(:disabled):hover,
+button.note-list-open:not(:disabled):focus-visible,
+button.note-list-open:not(:disabled):active {
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
+}
+
+button.folder-filter-button:not(:disabled):not(.active):hover,
+button.folder-filter-button:not(:disabled):not(.active):focus-visible {
+  background: color-mix(in srgb, var(--folder-color, var(--note-item-hover-bg)) 18%, #ffffff);
+  border-color: color-mix(in srgb, var(--folder-color, var(--note-item-hover-border)) 36%, var(--note-item-hover-border));
+  box-shadow: none;
+  color: var(--ink);
+}
+
+button.folder-filter-button.active:not(:disabled):hover,
+button.folder-filter-button.active:not(:disabled):focus-visible {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #ffffff;
+}
+
+button.note-filter-tab:not(:disabled):not(.active):hover,
+button.note-filter-tab:not(:disabled):not(.active):focus-visible {
+  background: var(--note-item-hover-bg);
+  color: var(--ink);
+}
+
+button.note-filter-tab:not(:disabled):not(.active):hover {
+  box-shadow: none;
+}
+
+button.note-filter-tab:not(:disabled):not(.active):focus-visible {
+  box-shadow: 0 0 0 2px var(--color-focus-ring);
+}
+
+button.note-filter-tab.active:not(:disabled):hover,
+button.note-filter-tab.active:not(:disabled):focus-visible {
+  background: #ffffff;
+  color: var(--ink);
+}
+
+button.note-filter-tab.active:not(:disabled):hover {
+  box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+}
+
+button.note-filter-tab.active:not(:disabled):focus-visible {
+  box-shadow:
+    0 0 0 2px var(--color-focus-ring),
+    0 1px 2px rgb(15 23 42 / 8%);
+}
+
+.overview-note-open:focus-visible,
+.note-list-open:focus-visible,
+.folder-filter-button:focus-visible,
+.note-filter-tab:focus-visible {
+  outline: none;
+}
+
+.overview-note-open:focus-visible,
+.note-list-open:focus-visible,
+.folder-filter-button:focus-visible {
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
 }
 
 .schedule-view-tabs button:not(.active):hover,
