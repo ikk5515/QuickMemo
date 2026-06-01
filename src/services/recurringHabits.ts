@@ -2,7 +2,6 @@ import {
   collection,
   deleteDoc,
   doc,
-  getDoc,
   getDocs,
   onSnapshot,
   query,
@@ -242,11 +241,14 @@ export async function updateRecurringHabitDayState(
     ...(input.completed !== undefined ? { checkedAt: input.completed === true ? serverTimestamp() : null } : {}),
     updatedAt: serverTimestamp()
   };
-  const snapshot = await getDoc(checkInRef);
 
-  if (snapshot.exists()) {
+  try {
     await updateDoc(checkInRef, nextState);
     return;
+  } catch (caught) {
+    if (!missingCheckInWriteError(caught)) {
+      throw caught;
+    }
   }
 
   await setDoc(checkInRef, {

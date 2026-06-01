@@ -1035,6 +1035,17 @@ describeRules("firestore security rules", () => {
         recurringHabitCheckIn("user-a", "AbCdEfGhIjKlMnOpQrSt", "2026-05-21")
       )
     );
+    await assertSucceeds(
+      setDoc(
+        doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-22"),
+        recurringHabitCheckIn("user-a", "habit-a", "2026-05-22", {
+          checkedAt: null,
+          checkedItemIds: [],
+          completed: false,
+          progressPercent: 60
+        })
+      )
+    );
     await assertSucceeds(getDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21")));
     await assertSucceeds(getDocs(query(collection(ownerDb, "recurringHabitCheckIns"), where("ownerUid", "==", "user-a"))));
     await assertSucceeds(
