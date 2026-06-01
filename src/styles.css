@@ -5974,6 +5974,14 @@ textarea {
   min-height: 42px;
 }
 
+.app-settings-modal {
+  max-height: min(760px, calc(100vh - 32px));
+  max-width: 560px;
+  overflow: auto;
+  text-align: left;
+  width: min(100%, 560px);
+}
+
 .schedule-workspace {
   margin: 0 auto;
   max-width: 1440px;
@@ -9652,6 +9660,59 @@ button.calendar-task-pill:not(:disabled):active {
   padding: var(--space-4);
 }
 
+.settings-form-section h3 {
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.settings-section-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: var(--space-3);
+  justify-content: space-between;
+}
+
+.settings-section-heading p,
+.matrix-label-grid small,
+.settings-inline-status {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.settings-section-heading .secondary-button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 8px 12px;
+}
+
+.matrix-label-grid {
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.matrix-label-grid input {
+  min-height: 42px;
+}
+
+.matrix-label-grid input[aria-invalid="true"] {
+  border-color: var(--coral);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--coral) 16%, transparent);
+}
+
+.settings-inline-status {
+  background: color-mix(in srgb, var(--surface) 72%, #ffffff);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  justify-self: start;
+  padding: 6px 10px;
+}
+
 @media (max-width: 1100px) {
   .schedule-header,
   .schedule-command-panel {
@@ -9680,6 +9741,27 @@ button.calendar-task-pill:not(:disabled):active {
   }
 
   .today-work-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .app-settings-modal {
+    max-height: calc(100vh - 24px);
+    padding: 22px;
+  }
+
+  .settings-section-heading {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .settings-section-heading .secondary-button {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .matrix-label-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

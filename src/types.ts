@@ -25,10 +25,13 @@ export interface UserProfile extends PublicRosterUser {
 
 export type DefaultHomeView = "notes" | "schedule";
 export type ScheduleView = "todo" | "calendar" | "matrix" | "recurring" | "completed";
+export type MatrixLabelKey = "importantUrgent" | "urgent" | "important" | "waiting";
+export type MatrixLabels = Record<MatrixLabelKey, string>;
 
 export interface UserPreferencesDocument {
   uid: string;
   defaultHome: DefaultHomeView;
+  matrixLabels: MatrixLabels;
   scheduleDefaultView: ScheduleView;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;

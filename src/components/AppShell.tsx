@@ -1,11 +1,24 @@
 import { CalendarDays, KeyRound, LogOut, NotebookPen, Settings, Shield, X } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { hasFirebaseConfig } from "../lib/firebase";
-import { getCachedUserPreferences, saveUserPreferences, subscribeUserPreferences } from "../services/userPreferences";
-import type { UserPreferencesDocument } from "../types";
+import {
+  defaultMatrixLabels,
+  matrixLabelFields,
+  matrixLabelMaxLength,
+  normalizeMatrixLabels,
+  sanitizeMatrixLabelsForSave,
+  validateMatrixLabels
+} from "../lib/matrixLabels";
+import {
+  getCachedUserPreferences,
+  saveUserPreferences,
+  subscribeUserPreferences,
+  type SaveUserPreferencesInput
+} from "../services/userPreferences";
+import type { MatrixLabels, UserPreferencesDocument } from "../types";
 
 export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
   const { changePassword, profile, signOut } = useAuth();
@@ -101,26 +114,34 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
   );
 }
 
-function SettingsModal({
+export function SettingsModal({
   onClose,
   onSave,
   preferences
 }: {
   onClose: () => void;
-  onSave: (preferences: Pick<UserPreferencesDocument, "defaultHome" | "scheduleDefaultView">) => Promise<void>;
+  onSave: (preferences: SaveUserPreferencesInput) => Promise<void>;
   preferences: UserPreferencesDocument | null;
 }) {
   const [defaultHome, setDefaultHome] = useState<UserPreferencesDocument["defaultHome"]>(preferences?.defaultHome ?? "notes");
   const [scheduleDefaultView, setScheduleDefaultView] = useState<UserPreferencesDocument["scheduleDefaultView"]>(
     preferences?.scheduleDefaultView ?? "todo"
   );
+  const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() => normalizeMatrixLabels(preferences?.matrixLabels));
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const savedMatrixLabels = useMemo(() => normalizeMatrixLabels(preferences?.matrixLabels), [preferences]);
+  const nextMatrixLabels = useMemo(() => sanitizeMatrixLabelsForSave(matrixLabels), [matrixLabels]);
+  const hasChanges =
+    defaultHome !== (preferences?.defaultHome ?? "notes")
+    || scheduleDefaultView !== (preferences?.scheduleDefaultView ?? "todo")
+    || !sameMatrixLabels(nextMatrixLabels, savedMatrixLabels);
 
   useEffect(() => {
     setDefaultHome(preferences?.defaultHome ?? "notes");
     setScheduleDefaultView(preferences?.scheduleDefaultView ?? "todo");
+    setMatrixLabels(normalizeMatrixLabels(preferences?.matrixLabels));
   }, [preferences]);
 
   useEffect(() => {
@@ -136,18 +157,44 @@ function SettingsModal({
 
   async function submitSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const validationError = validateMatrixLabels(matrixLabels);
+
+    if (validationError) {
+      setError(validationError);
+      setMessage(null);
+      return;
+    }
+
     setBusy(true);
     setError(null);
     setMessage(null);
 
     try {
-      await onSave({ defaultHome, scheduleDefaultView });
+      await onSave({ defaultHome, matrixLabels: nextMatrixLabels, scheduleDefaultView });
       setMessage("설정을 저장했습니다.");
     } catch {
       setError("설정을 저장하지 못했습니다.");
     } finally {
       setBusy(false);
     }
+  }
+
+  function updateMatrixLabel(key: keyof MatrixLabels, value: string) {
+    setError(null);
+    setMessage(null);
+    setMatrixLabels((current) => ({ ...current, [key]: value }));
+  }
+
+  function resetMatrixLabels() {
+    const nextDefaultLabels = { ...defaultMatrixLabels };
+
+    setError(null);
+    setMessage(
+      sameMatrixLabels(nextDefaultLabels, savedMatrixLabels)
+        ? "이미 기본 명칭입니다."
+        : "기본 명칭으로 되돌렸습니다. 저장을 눌러 적용하세요."
+    );
+    setMatrixLabels(nextDefaultLabels);
   }
 
   return (
@@ -165,10 +212,11 @@ function SettingsModal({
         </button>
         <h2 id="settings-modal-title">설정</h2>
         <p id="settings-modal-description" className="settings-modal-description">
-          홈의 작업 시작 버튼과 일정관리 기본 탭을 설정합니다.
+          홈, 일정관리 기본 탭, 매트릭스 표시 명칭을 설정합니다.
         </p>
         <form className="form-grid compact" onSubmit={(event) => void submitSettings(event)}>
-          <section className="settings-form-section" aria-label="작업 환경">
+          <section className="settings-form-section" aria-labelledby="settings-workspace-title">
+            <h3 id="settings-workspace-title">작업 환경</h3>
             <label>
               작업 시작 기본 화면
               <select
@@ -193,15 +241,57 @@ function SettingsModal({
               </select>
             </label>
           </section>
+          <section className="settings-form-section matrix-label-settings" aria-labelledby="matrix-label-settings-title">
+            <div className="settings-section-heading">
+              <div>
+                <h3 id="matrix-label-settings-title">매트릭스 명칭 설정</h3>
+                <p>각 영역의 표시 명칭만 바꾸며 일정 분류 기준은 유지됩니다.</p>
+              </div>
+              <button className="secondary-button" type="button" onClick={resetMatrixLabels}>
+                기본값으로 초기화
+              </button>
+            </div>
+            <div className="matrix-label-grid">
+              {matrixLabelFields.map((field) => {
+                const inputId = `matrix-label-${field.key}`;
+                const helperId = `${inputId}-helper`;
+                const value = matrixLabels[field.key];
+                const invalid = value.trim().length === 0 || value.trim().length > matrixLabelMaxLength;
+
+                return (
+                  <label key={field.key} htmlFor={inputId}>
+                    {field.label}
+                    <input
+                      id={inputId}
+                      aria-describedby={helperId}
+                      aria-invalid={invalid}
+                      maxLength={matrixLabelMaxLength}
+                      onBlur={(event) => updateMatrixLabel(field.key, event.target.value.trim())}
+                      onChange={(event) => updateMatrixLabel(field.key, event.target.value)}
+                      value={value}
+                    />
+                    <small id={helperId}>{field.description} · 최대 {matrixLabelMaxLength}자</small>
+                  </label>
+                );
+              })}
+            </div>
+            <p className="settings-inline-status" role="status">
+              {hasChanges ? "변경사항 있음" : "저장된 설정과 같습니다."}
+            </p>
+          </section>
           {error && <p className="form-error">{error}</p>}
           {message && <p className="form-success">{message}</p>}
-          <button disabled={busy} type="submit">
+          <button disabled={busy || !hasChanges} type="submit">
             {busy ? "저장 중..." : "저장"}
           </button>
         </form>
       </section>
     </div>
   );
+}
+
+function sameMatrixLabels(left: MatrixLabels, right: MatrixLabels) {
+  return matrixLabelFields.every(({ key }) => left[key] === right[key]);
 }
 
 function PasswordChangeModal({

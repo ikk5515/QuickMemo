@@ -1,9 +1,11 @@
 import { doc, getDoc, onSnapshot, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
-import type { DefaultHomeView, ScheduleView, UserPreferencesDocument } from "../types";
+import { defaultMatrixLabels, normalizeMatrixLabels, sanitizeMatrixLabelsForSave } from "../lib/matrixLabels";
+import type { DefaultHomeView, MatrixLabels, ScheduleView, UserPreferencesDocument } from "../types";
 
-export const defaultUserPreferences: Pick<UserPreferencesDocument, "defaultHome" | "scheduleDefaultView"> = {
+export const defaultUserPreferences: Pick<UserPreferencesDocument, "defaultHome" | "matrixLabels" | "scheduleDefaultView"> = {
   defaultHome: "notes",
+  matrixLabels: defaultMatrixLabels,
   scheduleDefaultView: "todo"
 };
 
@@ -12,6 +14,7 @@ const validScheduleViews = new Set<ScheduleView>(["todo", "calendar", "matrix", 
 
 export interface SaveUserPreferencesInput {
   defaultHome?: UserPreferencesDocument["defaultHome"];
+  matrixLabels?: Partial<MatrixLabels>;
   scheduleDefaultView?: ScheduleView;
 }
 
@@ -38,10 +41,12 @@ function normalizeUserPreferences(uid: string, value: Partial<UserPreferencesDoc
   const scheduleDefaultView = validScheduleViews.has(value?.scheduleDefaultView as ScheduleView)
     ? (value?.scheduleDefaultView as ScheduleView)
     : defaultUserPreferences.scheduleDefaultView;
+  const matrixLabels = normalizeMatrixLabels(value?.matrixLabels);
 
   return {
     uid,
     defaultHome,
+    matrixLabels,
     scheduleDefaultView,
     createdAt: value?.createdAt,
     updatedAt: value?.updatedAt
@@ -61,7 +66,9 @@ export function getCachedUserPreferences(uid: string) {
   }
 }
 
-function writeCachedUserPreferences(preferences: Pick<UserPreferencesDocument, "defaultHome" | "scheduleDefaultView" | "uid">) {
+function writeCachedUserPreferences(
+  preferences: Pick<UserPreferencesDocument, "defaultHome" | "matrixLabels" | "scheduleDefaultView" | "uid">
+) {
   if (!storageAvailable()) {
     return;
   }
@@ -71,6 +78,7 @@ function writeCachedUserPreferences(preferences: Pick<UserPreferencesDocument, "
       preferencesCacheKey(preferences.uid),
       JSON.stringify({
         defaultHome: preferences.defaultHome,
+        matrixLabels: preferences.matrixLabels,
         scheduleDefaultView: preferences.scheduleDefaultView
       })
     );
@@ -122,6 +130,7 @@ export async function saveUserPreferences(uid: string, input: SaveUserPreference
     : fallbackUserPreferences(uid);
   const payload = {
     defaultHome: input.defaultHome ?? current.defaultHome,
+    matrixLabels: input.matrixLabels ? sanitizeMatrixLabelsForSave(input.matrixLabels) : current.matrixLabels,
     scheduleDefaultView: input.scheduleDefaultView ?? current.scheduleDefaultView,
     updatedAt: serverTimestamp()
   };

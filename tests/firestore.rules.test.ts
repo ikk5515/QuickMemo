@@ -668,13 +668,70 @@ describeRules("firestore security rules", () => {
     const otherDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertSucceeds(
-      setDoc(doc(ownerDb, "userPreferences/user-a"), userPreferences("user-a", { defaultHome: "schedule", scheduleDefaultView: "matrix" }))
+      setDoc(
+        doc(ownerDb, "userPreferences/user-a"),
+        userPreferences("user-a", {
+          defaultHome: "schedule",
+          matrixLabels: {
+            importantUrgent: "중요·긴급",
+            urgent: "긴급 업무",
+            important: "중요 업무",
+            waiting: "대기 업무"
+          },
+          scheduleDefaultView: "matrix"
+        })
+      )
     );
     await assertSucceeds(getDoc(doc(ownerDb, "userPreferences/user-a")));
     await assertFails(getDoc(doc(otherDb, "userPreferences/user-a")));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "calendar", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "completed", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "recurring", updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+      matrixLabels: {
+        importantUrgent: "바로 처리",
+        urgent: "위임 업무",
+        important: "집중 업무",
+        waiting: "대기 목록"
+      },
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+      matrixLabels: {
+        importantUrgent: "바로 처리",
+        urgent: "",
+        important: "집중 업무",
+        waiting: "대기 목록"
+      },
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+      matrixLabels: {
+        importantUrgent: "가".repeat(17),
+        urgent: "위임 업무",
+        important: "집중 업무",
+        waiting: "대기 목록"
+      },
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+      matrixLabels: {
+        importantUrgent: "바로 처리",
+        urgent: "위임 업무",
+        important: "집중 업무"
+      },
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+      matrixLabels: {
+        importantUrgent: "바로 처리",
+        urgent: "위임 업무",
+        important: "집중 업무",
+        waiting: "대기 목록",
+        extra: "추가"
+      },
+      updatedAt: serverTimestamp()
+    }));
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "userPreferences/user-a"), {
         uid: "user-a",

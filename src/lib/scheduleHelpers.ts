@@ -1,4 +1,5 @@
-import type { DecryptedScheduleTask, ScheduleTaskDetails } from "../types";
+import type { DecryptedScheduleTask, MatrixLabels, ScheduleTaskDetails } from "../types";
+import { matrixLabelForSectionKey } from "./matrixLabels";
 import { normalizeSchedulePriorityFlags, type SchedulePrioritySource } from "./schedulePriority";
 
 export type TodoGroupKey = "today" | "tomorrow" | "next7" | "later" | "noDate" | "completed";
@@ -697,12 +698,16 @@ export function matrixQuadrantForTask(task: Pick<DecryptedScheduleTask, "isImpor
   return "notUrgentNotImportant";
 }
 
-export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLocalDateString(new Date())): MatrixSection[] {
+export function groupTasksByMatrix(
+  tasks: DecryptedScheduleTask[],
+  today = toLocalDateString(new Date()),
+  matrixLabels?: Partial<MatrixLabels>
+): MatrixSection[] {
   const activeTasks = tasks.filter(isMatrixVisibleTask);
   const sections: MatrixSection[] = [
     {
       key: "urgentImportant",
-      label: "오늘/지연",
+      label: matrixLabelForSectionKey("urgentImportant", matrixLabels),
       accent: "red",
       isImportant: true,
       isUrgent: true,
@@ -711,7 +716,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "firstPriority",
-      label: "중요-긴급",
+      label: matrixLabelForSectionKey("firstPriority", matrixLabels),
       accent: "red",
       isImportant: true,
       isUrgent: true,
@@ -720,7 +725,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "urgentNotImportant",
-      label: "긴급 업무",
+      label: matrixLabelForSectionKey("urgentNotImportant", matrixLabels),
       accent: "gold",
       isImportant: false,
       isUrgent: true,
@@ -729,7 +734,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "importantNotUrgent",
-      label: "중요 업무",
+      label: matrixLabelForSectionKey("importantNotUrgent", matrixLabels),
       accent: "blue",
       isImportant: true,
       isUrgent: false,
@@ -738,7 +743,7 @@ export function groupTasksByMatrix(tasks: DecryptedScheduleTask[], today = toLoc
     },
     {
       key: "notUrgentNotImportant",
-      label: "대기 업무",
+      label: matrixLabelForSectionKey("notUrgentNotImportant", matrixLabels),
       accent: "teal",
       isImportant: false,
       isUrgent: false,

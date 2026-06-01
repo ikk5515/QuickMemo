@@ -313,12 +313,29 @@ service cloud.firestore {
     }
 
     function validUserPreferences(data, uid) {
-      return data.keys().hasOnly(["uid", "defaultHome", "scheduleDefaultView", "createdAt", "updatedAt"])
+      return data.keys().hasOnly(["uid", "defaultHome", "matrixLabels", "scheduleDefaultView", "createdAt", "updatedAt"])
         && data.uid == uid
         && data.defaultHome in ["notes", "schedule"]
+        && (!data.keys().hasAny(["matrixLabels"]) || validMatrixLabels(data.matrixLabels))
         && data.scheduleDefaultView in ["todo", "calendar", "matrix", "recurring", "completed"]
         && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
         && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
+    }
+
+    function validMatrixLabels(labels) {
+      return labels is map
+        && labels.keys().hasOnly(["importantUrgent", "urgent", "important", "waiting"])
+        && labels.keys().hasAll(["importantUrgent", "urgent", "important", "waiting"])
+        && validMatrixLabel(labels.importantUrgent)
+        && validMatrixLabel(labels.urgent)
+        && validMatrixLabel(labels.important)
+        && validMatrixLabel(labels.waiting);
+    }
+
+    function validMatrixLabel(label) {
+      return label is string
+        && label.size() > 0
+        && label.size() <= 16;
     }
 
     function validScheduleDate(value) {
@@ -1570,6 +1587,7 @@ service cloud.firestore {
         && request.resource.data.updatedAt == request.time
         && request.resource.data.diff(resource.data).changedKeys().hasOnly([
           "defaultHome",
+          "matrixLabels",
           "scheduleDefaultView",
           "updatedAt"
         ]);

@@ -61,6 +61,7 @@ import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
+import { defaultMatrixLabels } from "../lib/matrixLabels";
 import {
   buildRecurringDateStrip,
   buildRecurringHabitOrderUpdates,
@@ -132,10 +133,16 @@ import {
   type RecurringHabitCheckInSnapshot,
   type RecurringHabitSnapshot
 } from "../services/recurringHabits";
-import { defaultUserPreferences, getCachedUserPreferences, getUserPreferences } from "../services/userPreferences";
+import {
+  defaultUserPreferences,
+  getCachedUserPreferences,
+  getUserPreferences,
+  subscribeUserPreferences
+} from "../services/userPreferences";
 import type {
   DecryptedRecurringHabit,
   DecryptedScheduleTask,
+  MatrixLabels,
   RecurringHabitDetails,
   RecurringHabitIcon,
   RecurringHabitSlot,
@@ -343,6 +350,9 @@ export default function SchedulePage() {
   const [activeView, setActiveView] = useState<ScheduleView | null>(() =>
     profile ? getCachedUserPreferences(profile.uid)?.scheduleDefaultView ?? null : null
   );
+  const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() =>
+    profile ? getCachedUserPreferences(profile.uid)?.matrixLabels ?? defaultMatrixLabels : defaultMatrixLabels
+  );
   const [tasks, setTasks] = useState<ScheduleTaskSnapshot[]>([]);
   const [decryptedTasks, setDecryptedTasks] = useState<DecryptedScheduleTask[]>([]);
   const [recurringHabits, setRecurringHabits] = useState<RecurringHabitSnapshot[]>([]);
@@ -403,6 +413,23 @@ export default function SchedulePage() {
     return () => {
       active = false;
     };
+  }, [profile]);
+
+  useEffect(() => {
+    if (!profile) {
+      setMatrixLabels(defaultMatrixLabels);
+      return undefined;
+    }
+
+    const cachedPreferences = getCachedUserPreferences(profile.uid);
+
+    setMatrixLabels(cachedPreferences?.matrixLabels ?? defaultMatrixLabels);
+
+    return subscribeUserPreferences(
+      profile.uid,
+      (preferences) => setMatrixLabels(preferences.matrixLabels),
+      () => setMatrixLabels(cachedPreferences?.matrixLabels ?? defaultMatrixLabels)
+    );
   }, [profile]);
 
   useEffect(() => {
@@ -638,7 +665,7 @@ export default function SchedulePage() {
     [displayedTasks]
   );
   const todoGroups = useMemo(() => groupTasksByTodoDate(displayedTasks, today), [displayedTasks, today]);
-  const matrixSections = useMemo(() => groupTasksByMatrix(displayedTasks, today), [displayedTasks, today]);
+  const matrixSections = useMemo(() => groupTasksByMatrix(displayedTasks, today, matrixLabels), [displayedTasks, matrixLabels, today]);
   const activeMatrixTaskCount = useMemo(() => sortedTasks.filter((task) => task.status !== "completed").length, [sortedTasks]);
   const visibleMatrixTaskCount = useMemo(
     () => displayedTasks.filter((task) => task.status !== "completed").length,

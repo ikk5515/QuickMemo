@@ -352,11 +352,45 @@ describe("schedule helpers", () => {
     const sections = groupTasksByMatrix([], "2026-05-20");
 
     expect(sections.map((section) => [section.key, section.label])).toEqual([
-      ["urgentImportant", "오늘/지연"],
-      ["firstPriority", "중요-긴급"],
+      ["urgentImportant", "중요·긴급"],
+      ["firstPriority", "중요·긴급"],
       ["urgentNotImportant", "긴급 업무"],
       ["importantNotUrgent", "중요 업무"],
       ["notUrgentNotImportant", "대기 업무"]
+    ]);
+  });
+
+  it("applies user matrix labels without changing section keys or classification", () => {
+    const sections = groupTasksByMatrix(
+      [
+        task("today-important-urgent", { dueDate: "2026-05-20", isImportant: true, isUrgent: true }),
+        task("future-important-urgent", { dueDate: "2026-05-26", isImportant: true, isUrgent: true }),
+        task("urgent", { isImportant: false, isUrgent: true }),
+        task("important", { isImportant: true, isUrgent: false }),
+        task("waiting", { isImportant: false, isUrgent: false })
+      ],
+      "2026-05-20",
+      {
+        importantUrgent: "바로 처리",
+        urgent: "위임 업무",
+        important: "집중 업무",
+        waiting: "대기 목록"
+      }
+    );
+
+    expect(sections.map((section) => [section.key, section.label])).toEqual([
+      ["urgentImportant", "바로 처리"],
+      ["firstPriority", "바로 처리"],
+      ["urgentNotImportant", "위임 업무"],
+      ["importantNotUrgent", "집중 업무"],
+      ["notUrgentNotImportant", "대기 목록"]
+    ]);
+    expect(sections.map((section) => [section.key, section.tasks.map((item) => item.id)])).toEqual([
+      ["urgentImportant", ["today-important-urgent"]],
+      ["firstPriority", ["future-important-urgent"]],
+      ["urgentNotImportant", ["urgent"]],
+      ["importantNotUrgent", ["important"]],
+      ["notUrgentNotImportant", ["waiting"]]
     ]);
   });
 
