@@ -1140,6 +1140,7 @@ textarea {
 
 .overview-note-open {
   background: transparent;
+  border: 0;
   color: var(--ink);
   display: grid;
   gap: 8px;
@@ -9673,6 +9674,7 @@ button.note-list-open:not(:disabled):hover,
 button.note-list-open:not(:disabled):focus-visible,
 button.note-list-open:not(:disabled):active {
   background: transparent;
+  border-color: transparent;
   box-shadow: none;
   color: inherit;
 }
@@ -9968,6 +9970,15 @@ html[data-theme="dark"] .icon-button.danger,
 html[data-theme="dark"] .schedule-feedback.error {
   background: var(--color-danger-subtle);
   border-color: color-mix(in srgb, var(--coral) 28%, var(--line));
+  color: var(--coral);
+}
+
+html[data-theme="dark"] .secondary-button.danger:not(:disabled):hover,
+html[data-theme="dark"] .secondary-button.danger:not(:disabled):focus-visible,
+html[data-theme="dark"] .icon-button.danger:not(:disabled):hover,
+html[data-theme="dark"] .icon-button.danger:not(:disabled):focus-visible {
+  background: color-mix(in srgb, var(--coral) 18%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--coral) 36%, var(--line));
   color: var(--coral);
 }
 
@@ -10307,6 +10318,7 @@ html[data-theme="dark"] .rich-toolbar-tabs button.active,
 html[data-theme="dark"] .rich-editor-toolbar .icon-button.active,
 html[data-theme="dark"] .image-size-toolbar button.active,
 html[data-theme="dark"] .folder-filter-button.active,
+html[data-theme="dark"] .secondary-button.active,
 html[data-theme="dark"] .admin-tabs button.active,
 html[data-theme="dark"] .admin-tabs button[aria-selected="true"] {
   background: var(--color-primary-subtle);
@@ -10333,6 +10345,109 @@ html[data-theme="dark"] .folder-filter-button:not(.active) {
   background: color-mix(in srgb, var(--folder-color, var(--color-surface-elevated)) 10%, var(--color-surface));
 }
 
+html[data-theme="dark"] .notes-top-actions .note-nav-button {
+  background: var(--color-primary-subtle);
+  border-color: color-mix(in srgb, var(--teal) 28%, var(--line));
+  color: var(--teal);
+}
+
+html[data-theme="dark"] .notes-top-actions .note-nav-button:hover,
+html[data-theme="dark"] .notes-top-actions .note-nav-button:focus-visible {
+  background: color-mix(in srgb, var(--teal) 18%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--teal) 38%, var(--line));
+}
+
+html[data-theme="dark"] .notes-top-actions .note-nav-button.has-alert {
+  background: var(--color-danger-subtle);
+  border-color: color-mix(in srgb, var(--coral) 28%, var(--line));
+  color: var(--coral);
+}
+
+html[data-theme="dark"] .notes-top-actions .note-nav-button.has-alert:hover,
+html[data-theme="dark"] .notes-top-actions .note-nav-button.has-alert:focus-visible {
+  background: color-mix(in srgb, var(--coral) 18%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--coral) 38%, var(--line));
+}
+
+html[data-theme="dark"] .secondary-button.active:not(:disabled):hover,
+html[data-theme="dark"] .secondary-button.active:not(:disabled):focus-visible {
+  background: color-mix(in srgb, var(--teal) 18%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--teal) 38%, var(--line));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--teal) 22%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--teal) 12%, transparent);
+  color: var(--teal);
+}
+
+html[data-theme="dark"] .overview-note-open,
+html[data-theme="dark"] .note-list-open {
+  border-color: transparent;
+}
+
+html[data-theme="dark"] .overview-note-open:hover,
+html[data-theme="dark"] .overview-note-open:active,
+html[data-theme="dark"] .note-list-open:hover,
+html[data-theme="dark"] .note-list-open:active {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: inherit;
+}
+
+html[data-theme="dark"] .overview-note-open:focus-visible,
+html[data-theme="dark"] .note-list-open:focus-visible {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
+  color: inherit;
+}
+
+html[data-theme="dark"] .folder-filter-button:not(.active):hover,
+html[data-theme="dark"] .folder-filter-button:not(.active):focus-visible {
+  background: color-mix(in srgb, var(--folder-color, var(--color-surface-hover)) 12%, var(--color-surface-hover));
+  border-color: color-mix(in srgb, var(--folder-color, var(--color-border)) 28%, var(--color-border));
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .folder-filter-button.active:not(:disabled):hover,
+html[data-theme="dark"] .folder-filter-button.active:not(:disabled):focus-visible,
+html[data-theme="dark"] .drawer-mode-tabs button.active:not(:disabled):hover,
+html[data-theme="dark"] .drawer-mode-tabs button.active:not(:disabled):focus-visible,
+html[data-theme="dark"] .note-filter-tab.active:not(:disabled):hover,
+html[data-theme="dark"] .note-filter-tab.active:not(:disabled):focus-visible,
+html[data-theme="dark"] .rich-toolbar-tabs button.active:not(:disabled):hover,
+html[data-theme="dark"] .rich-toolbar-tabs button.active:not(:disabled):focus-visible,
+html[data-theme="dark"] .rich-editor-toolbar .icon-button.active:not(:disabled):hover,
+html[data-theme="dark"] .rich-editor-toolbar .icon-button.active:not(:disabled):focus-visible,
+html[data-theme="dark"] .image-size-toolbar button.active:not(:disabled):hover,
+html[data-theme="dark"] .image-size-toolbar button.active:not(:disabled):focus-visible {
+  background: var(--color-primary-subtle);
+  border-color: color-mix(in srgb, var(--teal) 38%, var(--line));
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--teal) 22%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--teal) 12%, transparent);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .folder-color-picker button.active {
+  border-color: color-mix(in srgb, var(--teal) 54%, var(--line));
+  box-shadow:
+    inset 0 0 0 2px var(--color-surface),
+    0 0 0 3px color-mix(in srgb, var(--teal) 24%, transparent);
+}
+
+html[data-theme="dark"] .cell-color-palette button,
+html[data-theme="dark"] .text-color-palette button {
+  border-color: var(--color-border);
+}
+
+html[data-theme="dark"] .cell-color-palette button.active,
+html[data-theme="dark"] .text-color-palette button.active {
+  box-shadow:
+    0 0 0 2px var(--color-surface-elevated),
+    0 0 0 4px color-mix(in srgb, var(--teal) 36%, var(--line));
+}
+
 html[data-theme="dark"] .overview-shared-label,
 html[data-theme="dark"] .admin-user-badge.admin,
 html[data-theme="dark"] .public-share-list-badge,
@@ -10348,6 +10463,12 @@ html[data-theme="dark"] .recurring-stat-icon,
 html[data-theme="dark"] .attachment-upload-icon {
   background: color-mix(in srgb, currentColor 10%, var(--color-surface-elevated));
   border-color: var(--color-border-subtle);
+}
+
+html[data-theme="dark"] .attachment-upload-toast.complete .attachment-upload-icon {
+  background: color-mix(in srgb, var(--teal) 14%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--teal) 28%, var(--line));
+  color: var(--teal);
 }
 
 html[data-theme="dark"] .overview-note-alert,
@@ -10522,6 +10643,29 @@ html[data-theme="dark"] .pdf-preview-canvas-page,
 html[data-theme="dark"] .document-preview-page {
   border-color: var(--color-border-subtle);
   box-shadow: var(--shadow-card);
+}
+
+html[data-theme="dark"] .document-preview-page {
+  background: var(--color-surface);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .document-preview-page h3 {
+  color: var(--color-text-secondary);
+}
+
+html[data-theme="dark"] .document-preview-page td,
+html[data-theme="dark"] .document-preview-page th {
+  border-color: var(--color-border-subtle);
+}
+
+html[data-theme="dark"] .document-preview-page .xlsx-preview-table th {
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+}
+
+html[data-theme="dark"] .document-preview-page .xlsx-preview-table td {
+  background: var(--color-surface);
 }
 
 .settings-modal-description {

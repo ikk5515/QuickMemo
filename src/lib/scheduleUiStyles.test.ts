@@ -57,4 +57,19 @@ describe("schedule UI styles", () => {
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-color-picker input\[type="color"\] \{[\s\S]*background: var\(--color-input-bg\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.empty-state,[\s\S]*html\[data-theme="dark"\] \.note-empty-state,[\s\S]*background: var\(--color-surface-hover\);/);
   });
+
+  it("keeps note all-view and editor controls neutral in dark mode", () => {
+    expect(stylesSource).toMatch(/\.overview-note-open \{[\s\S]*border: 0;/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.overview-note-open,[\s\S]*html\[data-theme="dark"\] \.note-list-open \{[\s\S]*border-color: transparent;/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.overview-note-open:focus-visible,[\s\S]*html\[data-theme="dark"\] \.note-list-open:focus-visible \{[\s\S]*box-shadow: 0 0 0 3px var\(--color-focus-ring\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.notes-top-actions \.note-nav-button \{[\s\S]*background: var\(--color-primary-subtle\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.notes-top-actions \.note-nav-button\.has-alert \{[\s\S]*background: var\(--color-danger-subtle\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.folder-filter-button\.active:not\(:disabled\):hover,[\s\S]*html\[data-theme="dark"\] \.image-size-toolbar button\.active:not\(:disabled\):focus-visible \{[\s\S]*background: var\(--color-primary-subtle\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.secondary-button\.active,[\s\S]*html\[data-theme="dark"\] \.admin-tabs button\[aria-selected="true"\] \{[\s\S]*background: var\(--color-primary-subtle\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.secondary-button\.danger:not\(:disabled\):hover,[\s\S]*html\[data-theme="dark"\] \.icon-button\.danger:not\(:disabled\):focus-visible \{[\s\S]*background: color-mix\(in srgb, var\(--coral\) 18%, var\(--color-surface-elevated\)\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.attachment-upload-toast\.complete \.attachment-upload-icon \{[\s\S]*background: color-mix\(in srgb, var\(--teal\) 14%, var\(--color-surface-elevated\)\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.document-preview-page \{[\s\S]*background: var\(--color-surface\);[\s\S]*color: var\(--ink\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.folder-color-picker button\.active \{[\s\S]*box-shadow:[\s\S]*var\(--color-surface\)/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.cell-color-palette button\.active,[\s\S]*html\[data-theme="dark"\] \.text-color-palette button\.active \{[\s\S]*var\(--color-surface-elevated\)/);
+  });
 });

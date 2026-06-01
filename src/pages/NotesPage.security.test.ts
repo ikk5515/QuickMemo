@@ -47,6 +47,9 @@ describe("NotesPage security controls", () => {
     expect(docxRenderHelper).not.toContain("renderAsync(preview.bytes");
     expect(docxSrcDocHelper).toContain("Content-Security-Policy");
     expect(notesPageSource).toContain("script-src 'none'");
+    expect(notesPageSource).toContain('document.documentElement.dataset.theme === "dark" ? "dark" : "light"');
+    expect(docxSrcDocHelper).toContain("data-theme=\"${theme}\"");
+    expect(docxSrcDocHelper).toContain("background:#09090b");
   });
 
   it("filters active DOCX preview links, resources, and event attributes before sandboxing", () => {

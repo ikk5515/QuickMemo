@@ -3543,7 +3543,10 @@ export default function NotesPage() {
       }
 
       if (attachment.extension === "docx") {
-        const srcDoc = await renderSafeDocxPreviewSrcDoc(plainBytes);
+        const srcDoc = await renderSafeDocxPreviewSrcDoc(
+          plainBytes,
+          document.documentElement.dataset.theme === "dark" ? "dark" : "light"
+        );
 
         setAttachmentPreview(
           srcDoc
@@ -8462,7 +8465,7 @@ export function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string
   return decodedText.slice(0, maxTextPreviewCharacters);
 }
 
-export async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array) {
+export async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array, theme: "light" | "dark" = "light") {
   if (typeof document === "undefined") {
     return "";
   }
@@ -8519,14 +8522,14 @@ export async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array) {
       return "";
     }
 
-    return docxSandboxSrcDoc(styleText, bodyHtml);
+    return docxSandboxSrcDoc(styleText, bodyHtml, theme);
   } catch {
     return "";
   }
 }
 
-function docxSandboxSrcDoc(styleText: string, bodyHtml: string) {
-  const baseStyle = [
+function docxSandboxSrcDoc(styleText: string, bodyHtml: string, theme: "light" | "dark") {
+  const lightBaseStyle = [
     "html,body{margin:0;min-height:100%;background:#f8fafc;color:#14211f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}",
     "body{box-sizing:border-box;padding:16px;}",
     ".docx-preview-content{box-sizing:border-box;margin:0 auto;max-width:100%;overflow:auto;}",
@@ -8538,10 +8541,23 @@ function docxSandboxSrcDoc(styleText: string, bodyHtml: string) {
     "a{color:#2563eb;text-decoration:underline;}",
     "@media (max-width:680px){body{padding:10px}.qm-docx{box-shadow:none}}"
   ].join("\n");
+  const darkBaseStyle = [
+    "html,body{margin:0;min-height:100%;background:#09090b;color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color-scheme:dark;}",
+    "body{box-sizing:border-box;padding:16px;}",
+    ".docx-preview-content{box-sizing:border-box;margin:0 auto;max-width:100%;overflow:auto;}",
+    ".qm-docx-wrapper{box-sizing:border-box;max-width:100%;}",
+    ".qm-docx{box-sizing:border-box;margin:0 auto 16px;max-width:100%;overflow:hidden;background:#18181b;border:1px solid #3a3a40;box-shadow:0 14px 34px rgb(0 0 0 / 22%);color:#f4f4f5;}",
+    ".qm-docx *{box-sizing:border-box;}",
+    ".qm-docx img{max-width:100%;height:auto;}",
+    ".qm-docx table{max-width:100%;border-collapse:collapse;}",
+    "a{color:#93c5fd;text-decoration:underline;}",
+    "@media (max-width:680px){body{padding:10px}.qm-docx{box-shadow:none}}"
+  ].join("\n");
+  const baseStyle = theme === "dark" ? darkBaseStyle : lightBaseStyle;
 
   return [
     "<!doctype html>",
-    '<html lang="ko">',
+    `<html lang="ko" data-theme="${theme}">`,
     "<head>",
     '<meta charset="utf-8">',
     `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(docxPreviewFrameCsp)}">`,
