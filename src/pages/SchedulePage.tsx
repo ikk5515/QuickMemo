@@ -53,9 +53,9 @@ import {
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { FormEvent, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
 import { serverTimestamp } from "firebase/firestore";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
@@ -427,6 +427,27 @@ export default function SchedulePage() {
   const taskDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<ScheduleTaskDetails>>>>({});
   const recurringDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<RecurringHabitDetails>>>>({});
   const scheduleToolsRef = useRef<HTMLDivElement>(null);
+  const scheduleToolsTriggerRef = useRef<HTMLButtonElement>(null);
+  const scheduleToolsPopoverId = useId();
+  const todayPanelId = useId();
+  const todayPanelRef = useRef<HTMLElement | null>(null);
+  const todayWorkTriggerRef = useRef<HTMLButtonElement>(null);
+
+  const closeScheduleToolsMenu = useCallback((restoreFocus = false) => {
+    setScheduleToolsOpen(false);
+
+    if (restoreFocus) {
+      window.setTimeout(() => scheduleToolsTriggerRef.current?.focus({ preventScroll: true }), 0);
+    }
+  }, []);
+
+  const closeTodayWorkPanel = useCallback((restoreFocus = true) => {
+    setTodayPanelOpen(false);
+
+    if (restoreFocus) {
+      window.setTimeout(() => todayWorkTriggerRef.current?.focus({ preventScroll: true }), 0);
+    }
+  }, []);
 
   useEffect(() => {
     if (!profile) {
@@ -467,12 +488,13 @@ export default function SchedulePage() {
         return;
       }
 
-      setScheduleToolsOpen(false);
+      closeScheduleToolsMenu();
     }
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setScheduleToolsOpen(false);
+        event.preventDefault();
+        closeScheduleToolsMenu(true);
       }
     }
 
@@ -482,7 +504,40 @@ export default function SchedulePage() {
       window.removeEventListener("pointerdown", handlePointerDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [scheduleToolsOpen]);
+  }, [closeScheduleToolsMenu, scheduleToolsOpen]);
+
+  useEffect(() => {
+    if (!todayPanelOpen) {
+      return undefined;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+
+      if (
+        target instanceof Node &&
+        (todayPanelRef.current?.contains(target) || todayWorkTriggerRef.current?.contains(target))
+      ) {
+        return;
+      }
+
+      setTodayPanelOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeTodayWorkPanel();
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeTodayWorkPanel, todayPanelOpen]);
 
   useEffect(() => {
     if (!profile) {
@@ -1450,14 +1505,29 @@ export default function SchedulePage() {
     setCalendarCursor((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
   }
 
-  function goToday() {
-    const nextToday = new Date();
-    setCalendarCursor(new Date(nextToday.getFullYear(), nextToday.getMonth(), 1));
-    setSelectedCalendarDate(toLocalDateString(nextToday));
+  function refreshToday() {
+    const nextToday = toLocalDateString(new Date());
+
+    setToday(nextToday);
+    return nextToday;
   }
 
-  function openTodayWorkPanel() {
-    const nextToday = toLocalDateString(new Date());
+  function goToday() {
+    const nextToday = new Date();
+    const nextTodayString = toLocalDateString(nextToday);
+
+    setToday(nextTodayString);
+    setCalendarCursor(new Date(nextToday.getFullYear(), nextToday.getMonth(), 1));
+    setSelectedCalendarDate(nextTodayString);
+  }
+
+  function toggleTodayWorkPanel() {
+    if (todayPanelOpen) {
+      closeTodayWorkPanel(false);
+      return;
+    }
+
+    const nextToday = refreshToday();
     const nextDate = new Date(`${nextToday}T00:00:00`);
 
     setScheduleToolsOpen(false);
@@ -1469,11 +1539,13 @@ export default function SchedulePage() {
   }
 
   function openQuickTaskDialog() {
+    const currentToday = refreshToday();
+
     setScheduleToolsOpen(false);
 
     if (activeView === "matrix") {
       setCreateDialog({
-        defaults: { startDate: today, endDate: today, color: nextScheduleTaskColor(decryptedTasks), isImportant: true, isUrgent: true },
+        defaults: { startDate: currentToday, endDate: currentToday, color: nextScheduleTaskColor(decryptedTasks), isImportant: true, isUrgent: true },
         title: "매트릭스 일정 추가"
       });
       return;
@@ -1485,7 +1557,7 @@ export default function SchedulePage() {
     }
 
     setCreateDialog({
-      defaults: { startDate: today, endDate: today, color: nextScheduleTaskColor(decryptedTasks) },
+      defaults: { startDate: currentToday, endDate: currentToday, color: nextScheduleTaskColor(decryptedTasks) },
       title: "새 일정 추가"
     });
   }
@@ -1509,7 +1581,8 @@ export default function SchedulePage() {
   }
 
   function openMatrixCreateDialog(section: MatrixSection) {
-    const defaultDate = section.key === "firstPriority" ? addDays(today, 1) : today;
+    const currentToday = refreshToday();
+    const defaultDate = section.key === "firstPriority" ? addDays(currentToday, 1) : currentToday;
 
     setCreateDialog({
       allowPriority: false,
@@ -1523,6 +1596,10 @@ export default function SchedulePage() {
       title: `${section.label} 일정 추가`
     });
   }
+
+  const todayPanelToggleLabel = `${todayPanelOpen ? "빠른 업무 패널 닫기" : "빠른 업무 패널 열기"}. 오늘 일정 ${scheduleStats.today}개, 지연 ${scheduleStats.overdue}개`;
+  const utilityViewActive = activeView === "recurring" || activeView === "completed";
+  const scheduleToolsLabel = scheduleToolsOpen ? "일정관리 도구 닫기" : "일정관리 도구 열기";
 
   return (
     <AppShell>
@@ -1546,13 +1623,12 @@ export default function SchedulePage() {
               value={scheduleQuery}
             />
           </label>
-          <nav className="schedule-view-tabs" role="tablist" aria-label="일정관리 보기">
+          <nav className="schedule-view-tabs" aria-label="일정관리 기본 보기">
             {scheduleTabs.map(({ Icon, label, shortLabel, view }) => (
               <button
                 key={view}
-                aria-selected={activeView === view}
+                aria-pressed={activeView === view}
                 className={activeView === view ? "active" : ""}
-                role="tab"
                 type="button"
                 onClick={() => setActiveView(view)}
                 aria-label={label}
@@ -1569,11 +1645,14 @@ export default function SchedulePage() {
               </span>
             )}
             <button
-              className="icon-button today-work-trigger"
+              ref={todayWorkTriggerRef}
+              className={`icon-button today-work-trigger ${todayPanelOpen ? "active" : ""}`}
               type="button"
-              aria-label={`오늘 업무 패널 열기. 오늘 일정 ${scheduleStats.today}개, 지연 ${scheduleStats.overdue}개`}
+              aria-controls={todayPanelId}
+              aria-expanded={todayPanelOpen}
+              aria-label={todayPanelToggleLabel}
               title="오늘 업무"
-              onClick={openTodayWorkPanel}
+              onClick={toggleTodayWorkPanel}
             >
               <Zap size={16} />
             </button>
@@ -1583,33 +1662,35 @@ export default function SchedulePage() {
             </button>
             <div className="schedule-tool-menu" ref={scheduleToolsRef}>
               <button
-                className={`icon-button schedule-tool-menu-trigger ${scheduleToolsOpen ? "active" : ""}`}
+                ref={scheduleToolsTriggerRef}
+                className={`icon-button schedule-tool-menu-trigger ${scheduleToolsOpen || utilityViewActive ? "active" : ""}`}
                 type="button"
+                aria-controls={scheduleToolsPopoverId}
+                aria-current={utilityViewActive && !scheduleToolsOpen ? "page" : undefined}
                 aria-expanded={scheduleToolsOpen}
-                aria-haspopup="menu"
-                aria-label="일정관리 도구 열기"
-                title="일정관리 도구"
+                aria-label={scheduleToolsLabel}
+                title={utilityViewActive ? scheduleViewTitles[activeView] : "일정관리 도구"}
                 onClick={() => setScheduleToolsOpen((current) => !current)}
               >
                 <MoreHorizontal size={18} />
               </button>
               {scheduleToolsOpen && (
-                <div className="schedule-tool-menu-popover" role="menu" aria-label="일정관리 도구">
-                  <button type="button" role="menuitem" onClick={() => openScheduleUtilityView("recurring")}>
+                <div id={scheduleToolsPopoverId} className="schedule-tool-menu-popover" role="group" aria-label="일정관리 도구">
+                  <button className="schedule-quick-menu-item" type="button" onClick={() => openScheduleUtilityView("recurring")}>
                     <Repeat2 size={16} />
                     <span>
                       <strong>반복 업무 관리</strong>
                       <em>체크인과 반복 계획 확인</em>
                     </span>
                   </button>
-                  <button type="button" role="menuitem" onClick={openQuickRecurringDialog}>
+                  <button className="schedule-quick-menu-item" type="button" onClick={openQuickRecurringDialog}>
                     <Plus size={16} />
                     <span>
                       <strong>반복 업무 추가</strong>
                       <em>현재 화면을 유지하고 생성</em>
                     </span>
                   </button>
-                  <button type="button" role="menuitem" onClick={() => openScheduleUtilityView("completed")}>
+                  <button className="schedule-quick-menu-item" type="button" onClick={() => openScheduleUtilityView("completed")}>
                     <CheckCircle2 size={16} />
                     <span>
                       <strong>완료 내역</strong>
@@ -1625,6 +1706,8 @@ export default function SchedulePage() {
         {todayPanelOpen && (
           <TodayWorkPanel
             checkIns={recurringCheckIns}
+            id={todayPanelId}
+            panelRef={todayPanelRef}
             pendingCheckIns={pendingRecurringCheckIn}
             summary={todayWorkSummary}
             today={today}
@@ -1635,7 +1718,7 @@ export default function SchedulePage() {
                 title: "오늘 일정 추가"
               });
             }}
-            onClose={() => setTodayPanelOpen(false)}
+            onClose={() => closeTodayWorkPanel()}
             onOpenHabit={(habitId) => {
               setReadRecurringHabitId(habitId);
               setTodayPanelOpen(false);
@@ -2121,12 +2204,12 @@ function ScheduleCreateDialog({
   const titleId = useId();
   const descriptionId = useId();
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
+	  useEffect(() => {
+	    function handleKeyDown(event: KeyboardEvent) {
+	      if (event.key === "Escape" && !event.defaultPrevented) {
+	        onClose();
+	      }
+	    }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -2174,10 +2257,12 @@ function ScheduleCreateDialog({
 
 function TodayWorkPanel({
   checkIns,
+  id,
   onAddTask,
   onClose,
   onOpenHabit,
   onOpenTask,
+  panelRef,
   onToggleHabit,
   onToggleTask,
   pendingCheckIns,
@@ -2185,35 +2270,28 @@ function TodayWorkPanel({
   today
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
+  id: string;
   onAddTask: () => void;
   onClose: () => void;
   onOpenHabit: (habitId: string) => void;
   onOpenTask: (taskId: string) => void;
+  panelRef: RefObject<HTMLElement | null>;
   onToggleHabit: (habit: DecryptedRecurringHabit) => void;
   onToggleTask: (task: DecryptedScheduleTask) => void;
   pendingCheckIns: Record<string, boolean>;
   summary: TodayWorkSummary;
   today: string;
 }) {
-  const panelRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
   const totalCount = summary.overdueTasks.length + summary.todayTasks.length + summary.recurringHabits.length;
 
   useEffect(() => {
     panelRef.current?.focus({ preventScroll: true });
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [panelRef]);
 
   return (
     <aside
+      id={id}
       className="today-work-panel"
       ref={panelRef}
       role="region"
@@ -2303,6 +2381,12 @@ function TodayWorkPanel({
       </footer>
     </aside>
   );
+}
+
+function consumeNestedEscape(event: ReactKeyboardEvent<HTMLElement>) {
+  event.preventDefault();
+  event.stopPropagation();
+  event.nativeEvent.stopImmediatePropagation();
 }
 
 function DatePickerField({
@@ -2398,6 +2482,7 @@ function DatePickerField({
       className="date-picker-popover"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
+          consumeNestedEscape(event);
           setOpen(false);
         }
       }}
@@ -2470,7 +2555,8 @@ function DatePickerField({
         }
       }}
       onKeyDown={(event) => {
-        if (event.key === "Escape") {
+        if (event.key === "Escape" && open) {
+          consumeNestedEscape(event);
           setOpen(false);
         }
       }}
@@ -2554,7 +2640,8 @@ function TimePickerField({
         }
       }}
       onKeyDown={(event) => {
-        if (event.key === "Escape") {
+        if (event.key === "Escape" && open) {
+          consumeNestedEscape(event);
           setOpen(false);
         }
       }}

@@ -8787,7 +8787,7 @@ textarea {
   .schedule-view-tabs {
     display: grid;
     gap: 8px;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     justify-self: stretch;
     padding: 8px;
     width: 100%;
@@ -9424,12 +9424,24 @@ button,
   color: var(--blue);
 }
 
+.today-work-trigger.active,
+.today-work-trigger[aria-expanded="true"] {
+  background: var(--color-primary-subtle);
+  border-color: color-mix(in srgb, var(--teal) 28%, var(--line));
+  box-shadow: inset 0 0 0 1px rgb(47 125 112 / 10%);
+  color: var(--teal);
+}
+
 .schedule-tool-menu {
   position: relative;
 }
 
-.schedule-tool-menu-trigger.active {
+.schedule-tool-menu-trigger.active,
+.schedule-tool-menu-trigger[aria-expanded="true"],
+.schedule-tool-menu-trigger[aria-current="page"] {
   background: var(--color-primary-subtle);
+  border-color: color-mix(in srgb, var(--teal) 28%, var(--line));
+  box-shadow: inset 0 0 0 1px rgb(47 125 112 / 10%);
   color: var(--teal);
 }
 
@@ -9918,6 +9930,23 @@ html[data-theme="dark"] .schedule-view-tabs button:not(.active):focus-visible {
   color: var(--teal);
 }
 
+html[data-theme="dark"] .today-work-trigger.active,
+html[data-theme="dark"] .today-work-trigger[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--teal) 14%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--teal) 30%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--teal) 22%, transparent);
+  color: var(--teal);
+}
+
+html[data-theme="dark"] .schedule-tool-menu-trigger.active,
+html[data-theme="dark"] .schedule-tool-menu-trigger[aria-expanded="true"],
+html[data-theme="dark"] .schedule-tool-menu-trigger[aria-current="page"] {
+  background: color-mix(in srgb, var(--teal) 14%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--teal) 30%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--teal) 22%, transparent);
+  color: var(--teal);
+}
+
 html[data-theme="dark"] .danger-button,
 html[data-theme="dark"] .secondary-button.danger,
 html[data-theme="dark"] .icon-button.danger,
@@ -9925,6 +9954,12 @@ html[data-theme="dark"] .schedule-feedback.error {
   background: var(--color-danger-subtle);
   border-color: color-mix(in srgb, var(--coral) 28%, var(--line));
   color: var(--coral);
+}
+
+html[data-theme="dark"] .schedule-feedback:not(.error) {
+  background: var(--color-success-subtle);
+  border-color: color-mix(in srgb, var(--teal) 28%, var(--line));
+  color: var(--teal);
 }
 
 html[data-theme="dark"] .home-action-card > span:first-child,
@@ -9972,7 +10007,7 @@ html[data-theme="dark"] textarea::placeholder {
   color: color-mix(in srgb, var(--muted) 78%, var(--ink));
 }
 
-html[data-theme="dark"] button:not(.danger-button):not(.secondary-button):not(.icon-button):not(.task-open-button):not(.today-recurring-open):not(.calendar-task-pill):not(.matrix-date-group-header):not(.recurring-habit-content) {
+html[data-theme="dark"] button:not(.danger-button):not(.secondary-button):not(.icon-button):not(.task-open-button):not(.today-recurring-open):not(.calendar-task-pill):not(.matrix-date-group-header):not(.recurring-habit-content):not(.schedule-quick-menu-item) {
   border-color: color-mix(in srgb, var(--teal) 24%, var(--line));
 }
 
@@ -10144,6 +10179,16 @@ html[data-theme="dark"] .public-share-password-panel {
   background: var(--color-surface-elevated);
   border-color: var(--color-border-subtle);
   color: var(--ink);
+}
+
+html[data-theme="dark"] .today-work-section.overdue {
+  background: var(--color-danger-subtle);
+  border-color: color-mix(in srgb, var(--coral) 24%, var(--line));
+}
+
+html[data-theme="dark"] .today-recurring-item.checked {
+  background: var(--color-success-subtle);
+  border-color: color-mix(in srgb, var(--teal) 26%, var(--line));
 }
 
 .settings-modal-description {
