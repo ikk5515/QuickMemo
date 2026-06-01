@@ -8,14 +8,14 @@ describe("schedule UI styles", () => {
   it("uses explicit light and dark calendar hover tokens instead of black inversion", () => {
     expect(stylesSource).toContain("--schedule-hover-bg: #f8fafc");
     expect(stylesSource).toContain("--schedule-event-hover-bg: #f1f5f9");
-    expect(stylesSource).toContain("--schedule-hover-bg: #1f2937");
-    expect(stylesSource).toContain("--schedule-event-hover-bg: #243244");
+    expect(stylesSource).toContain("--schedule-hover-bg: #2a2a2f");
+    expect(stylesSource).toContain("--schedule-event-hover-bg: #303036");
     expect(stylesSource).toMatch(/\.calendar-day:hover,[\s\S]*background: var\(--schedule-hover-bg\);/);
     expect(stylesSource).toMatch(/\.calendar-task-pill:hover,[\s\S]*background: var\(--schedule-event-hover-bg\);/);
   });
 
   it("keeps dark mode primary buttons on button tokens instead of text color tokens", () => {
-    expect(stylesSource).toContain("--button-primary-bg: #226b61");
+    expect(stylesSource).toContain("--button-primary-bg: #2f6f67");
     expect(stylesSource).toMatch(/button \{[\s\S]*background: var\(--button-primary-bg\);/);
     expect(stylesSource).not.toMatch(/button \{[^}]*background: var\(--ink\);/);
   });
@@ -34,5 +34,27 @@ describe("schedule UI styles", () => {
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.today-work-section\.overdue \{[\s\S]*background: var\(--color-danger-subtle\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.today-recurring-item\.checked \{[\s\S]*background: var\(--color-success-subtle\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-feedback:not\(\.error\) \{[\s\S]*background: var\(--color-success-subtle\);/);
+  });
+
+  it("keeps the dark theme on neutral graphite tokens instead of navy surfaces", () => {
+    const darkBlock = stylesSource.match(/:root\[data-theme="dark"\] \{[\s\S]*?\n\}/)?.[0] ?? "";
+
+    expect(darkBlock).toContain("--color-app-bg: #09090b");
+    expect(darkBlock).toContain("--color-page-bg: #0f0f10");
+    expect(darkBlock).toContain("--color-surface: #18181b");
+    expect(darkBlock).toContain("--color-surface-elevated: #222226");
+    expect(darkBlock).toContain("--color-surface-hover: #2a2a2f");
+    expect(darkBlock).not.toMatch(/#0b1120|#0f172a|#111827|#172033|#1e293b|#1f2937|#243244/u);
+  });
+
+  it("covers note, admin, recurring, and preview surfaces with dark-mode overrides", () => {
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.note-list-item,[\s\S]*html\[data-theme="dark"\] \.overview-note-card,[\s\S]*background: var\(--color-surface\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.rich-toolbar-tabs,[\s\S]*html\[data-theme="dark"\] \.text-color-palette,[\s\S]*background: var\(--color-surface-elevated\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.admin-user-card,[\s\S]*html\[data-theme="dark"\] \.admin-note-card,[\s\S]*background: var\(--color-surface\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.recurring-habit-row,[\s\S]*html\[data-theme="dark"\] \.recurring-overview-item,[\s\S]*background: var\(--color-surface\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.pdf-preview-canvas-frame,[\s\S]*html\[data-theme="dark"\] \.public-image-preview-frame \{[\s\S]*background: var\(--color-app-bg\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.auth-page,[\s\S]*html\[data-theme="dark"\] \.public-share-page \{[\s\S]*var\(--color-app-bg\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-color-picker input\[type="color"\] \{[\s\S]*background: var\(--color-input-bg\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.empty-state,[\s\S]*html\[data-theme="dark"\] \.note-empty-state,[\s\S]*background: var\(--color-surface-hover\);/);
   });
 });

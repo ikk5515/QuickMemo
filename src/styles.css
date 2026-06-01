@@ -87,46 +87,46 @@
 }
 
 :root[data-theme="dark"] {
-  color: #e5edf5;
-  background: #0b1120;
+  color: #f4f4f5;
+  background: #09090b;
   color-scheme: dark;
-  --color-app-bg: #0b1120;
-  --color-page-bg: #0f172a;
-  --color-surface: #111827;
-  --color-surface-elevated: #172033;
-  --color-surface-muted: #1e293b;
-  --color-primary: #7dd3c7;
-  --color-primary-hover: #5eead4;
-  --color-secondary: #9dbbe8;
-  --color-muted: #98a6ba;
-  --color-border: #314158;
-  --color-border-subtle: #253246;
-  --color-text-primary: #e5edf5;
-  --color-text-secondary: #c4d0df;
-  --color-text-muted: #98a6ba;
-  --color-input-bg: #101827;
-  --color-modal-bg: #121c2d;
-  --color-popover-bg: #162033;
-  --color-danger: #f3a7a2;
-  --color-warning: #e9c46a;
-  --color-success: #7dd3c7;
-  --color-info: #9dbbe8;
-  --color-focus-ring: rgb(125 211 199 / 26%);
-  --button-primary-bg: #226b61;
-  --button-primary-hover-bg: #2a7c70;
-  --button-primary-active-bg: #1d5f57;
-  --button-primary-color: #ecfffb;
-  --button-secondary-bg: #172033;
-  --button-secondary-hover-bg: #1f2d42;
-  --button-secondary-color: #dce7f3;
-  --button-icon-bg: #172033;
-  --button-icon-hover-bg: #1f2d42;
-  --calendar-day-bg: #111827;
-  --calendar-day-muted-bg: #0f172a;
-  --calendar-selected-bg: color-mix(in srgb, var(--teal) 14%, #111827);
-  --calendar-selected-hover-bg: color-mix(in srgb, var(--teal) 18%, #111827);
-  --calendar-holiday-bg: color-mix(in srgb, var(--coral) 10%, #111827);
-  --calendar-holiday-muted-bg: color-mix(in srgb, var(--coral) 7%, #0f172a);
+  --color-app-bg: #09090b;
+  --color-page-bg: #0f0f10;
+  --color-surface: #18181b;
+  --color-surface-elevated: #222226;
+  --color-surface-muted: #27272a;
+  --color-primary: #8bd8ce;
+  --color-primary-hover: #9ae6dc;
+  --color-secondary: #b7c0d1;
+  --color-muted: #a1a1aa;
+  --color-border: #3a3a40;
+  --color-border-subtle: #26262b;
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #d4d4d8;
+  --color-text-muted: #a1a1aa;
+  --color-input-bg: #141416;
+  --color-modal-bg: #18181b;
+  --color-popover-bg: #202024;
+  --color-danger: #f0a29a;
+  --color-warning: #e4c069;
+  --color-success: #8bd8ce;
+  --color-info: #b7c0d1;
+  --color-focus-ring: rgb(139 216 206 / 24%);
+  --button-primary-bg: #2f6f67;
+  --button-primary-hover-bg: #377d74;
+  --button-primary-active-bg: #285f58;
+  --button-primary-color: #effffb;
+  --button-secondary-bg: #222226;
+  --button-secondary-hover-bg: #2a2a2f;
+  --button-secondary-color: #f4f4f5;
+  --button-icon-bg: #222226;
+  --button-icon-hover-bg: #2a2a2f;
+  --calendar-day-bg: #18181b;
+  --calendar-day-muted-bg: #111113;
+  --calendar-selected-bg: color-mix(in srgb, var(--teal) 14%, #18181b);
+  --calendar-selected-hover-bg: color-mix(in srgb, var(--teal) 18%, #1f1f23);
+  --calendar-holiday-bg: color-mix(in srgb, var(--coral) 10%, #18181b);
+  --calendar-holiday-muted-bg: color-mix(in srgb, var(--coral) 7%, #111113);
   --shadow-card: 0 14px 34px rgb(0 0 0 / 22%);
   --shadow-card-elevated: 0 22px 58px rgb(0 0 0 / 32%);
   --shadow-dropdown: 0 22px 48px rgb(0 0 0 / 36%);
@@ -142,31 +142,31 @@
   --gold: var(--color-warning);
   --blue: var(--color-info);
   --shadow: var(--shadow-card-elevated);
-  --color-surface-hover: #1e293b;
-  --list-row-hover-bg: #1e293b;
-  --list-row-hover-border: #334155;
-  --note-item-hover-bg: #1e293b;
-  --note-item-hover-border: #334155;
-  --note-item-selected-hover-bg: color-mix(in srgb, var(--teal) 14%, #111827);
-  --schedule-hover-bg: #1f2937;
-  --schedule-hover-border: #334155;
-  --schedule-event-hover-bg: #243244;
-  --schedule-event-hover-border: #475569;
-  --schedule-drag-bg: #172554;
-  --schedule-drag-border: #2563eb;
-  --schedule-drop-bg: #1e293b;
-  --schedule-drop-border: #475569;
-  --color-primary-subtle: color-mix(in srgb, var(--teal) 14%, #111827);
-  --color-secondary-subtle: color-mix(in srgb, var(--blue) 16%, #111827);
-  --color-warning-subtle: color-mix(in srgb, var(--gold) 14%, #111827);
-  --color-danger-subtle: color-mix(in srgb, var(--coral) 13%, #111827);
-  --color-success-subtle: color-mix(in srgb, var(--teal) 14%, #111827);
-  --color-info-subtle: color-mix(in srgb, var(--blue) 16%, #111827);
-  --checklist-checked-bg: color-mix(in srgb, var(--teal) 13%, #111827);
-  --checklist-unchecked-bg: #111827;
-  --checklist-divider: #334155;
-  --checklist-group-label-bg: #1f2937;
-  --checklist-group-label-color: #cbd5e1;
+  --color-surface-hover: #2a2a2f;
+  --list-row-hover-bg: #2a2a2f;
+  --list-row-hover-border: #3a3a40;
+  --note-item-hover-bg: #2a2a2f;
+  --note-item-hover-border: #3a3a40;
+  --note-item-selected-hover-bg: color-mix(in srgb, var(--teal) 14%, #18181b);
+  --schedule-hover-bg: #2a2a2f;
+  --schedule-hover-border: #3a3a40;
+  --schedule-event-hover-bg: #303036;
+  --schedule-event-hover-border: #44444a;
+  --schedule-drag-bg: #242428;
+  --schedule-drag-border: #5b5b63;
+  --schedule-drop-bg: #242428;
+  --schedule-drop-border: #4a4a52;
+  --color-primary-subtle: color-mix(in srgb, var(--teal) 14%, #18181b);
+  --color-secondary-subtle: color-mix(in srgb, var(--blue) 14%, #18181b);
+  --color-warning-subtle: color-mix(in srgb, var(--gold) 14%, #18181b);
+  --color-danger-subtle: color-mix(in srgb, var(--coral) 13%, #18181b);
+  --color-success-subtle: color-mix(in srgb, var(--teal) 14%, #18181b);
+  --color-info-subtle: color-mix(in srgb, var(--blue) 14%, #18181b);
+  --checklist-checked-bg: color-mix(in srgb, var(--teal) 13%, #18181b);
+  --checklist-unchecked-bg: #18181b;
+  --checklist-divider: #3a3a40;
+  --checklist-group-label-bg: #242428;
+  --checklist-group-label-color: #d4d4d8;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -9889,22 +9889,37 @@ button.today-recurring-open:not(:disabled):active {
 
 html[data-theme="dark"] body {
   background:
-    linear-gradient(180deg, rgb(30 41 59 / 58%), transparent 300px),
+    linear-gradient(180deg, rgb(24 24 27 / 64%), transparent 300px),
     var(--color-app-bg);
 }
 
 html[data-theme="dark"] .topbar,
 html[data-theme="dark"] .editor-toolbar,
 html[data-theme="dark"] .rich-editor-toolbar {
-  background: rgb(15 23 42 / 88%);
+  background: rgb(15 15 16 / 88%);
   border-color: var(--color-border-subtle);
+}
+
+html[data-theme="dark"] .app-loading-page,
+html[data-theme="dark"] .auth-page,
+html[data-theme="dark"] .public-share-page {
+  background:
+    linear-gradient(135deg, rgb(39 39 42 / 34%), transparent 48%),
+    linear-gradient(320deg, rgb(24 24 27 / 42%), transparent 58%),
+    var(--color-app-bg);
 }
 
 html[data-theme="dark"] .loading-card,
 html[data-theme="dark"] .home-hero {
   background:
-    linear-gradient(135deg, rgb(24 34 51 / 94%), rgb(17 24 39 / 94%)),
+    linear-gradient(135deg, rgb(31 31 35 / 94%), rgb(18 18 20 / 94%)),
     var(--panel);
+}
+
+html[data-theme="dark"] .config-banner {
+  background: var(--color-warning-subtle);
+  border-color: color-mix(in srgb, var(--gold) 24%, var(--line));
+  color: var(--gold);
 }
 
 html[data-theme="dark"] .avatar-button:not(:disabled):hover,
@@ -9964,10 +9979,13 @@ html[data-theme="dark"] .schedule-feedback:not(.error) {
 
 html[data-theme="dark"] .home-action-card > span:first-child,
 html[data-theme="dark"] .search-highlight,
+html[data-theme="dark"] .empty-state,
+html[data-theme="dark"] .note-empty-state,
 html[data-theme="dark"] .today-work-section,
 html[data-theme="dark"] .schedule-empty {
   background: var(--color-surface-hover);
   border-color: var(--color-border-subtle);
+  color: var(--muted);
 }
 
 html[data-theme="dark"] .note-list-item.deleted:hover,
@@ -10189,6 +10207,321 @@ html[data-theme="dark"] .today-work-section.overdue {
 html[data-theme="dark"] .today-recurring-item.checked {
   background: var(--color-success-subtle);
   border-color: color-mix(in srgb, var(--teal) 26%, var(--line));
+}
+
+html[data-theme="dark"] .personal-overview-header,
+html[data-theme="dark"] .admin-tabs,
+html[data-theme="dark"] .drawer-folder-shortcuts,
+html[data-theme="dark"] .drawer-mode-tabs,
+html[data-theme="dark"] .note-filter-tabs,
+html[data-theme="dark"] .rich-toolbar-tabs,
+html[data-theme="dark"] .table-insert-control,
+html[data-theme="dark"] .table-size-control,
+html[data-theme="dark"] .selection-font-control,
+html[data-theme="dark"] .image-width-control,
+html[data-theme="dark"] .image-size-toolbar button,
+html[data-theme="dark"] .cell-color-palette,
+html[data-theme="dark"] .text-color-palette,
+html[data-theme="dark"] .custom-color-input,
+html[data-theme="dark"] .deadline-picker,
+html[data-theme="dark"] .deadline-summary,
+html[data-theme="dark"] .admin-search-field span,
+html[data-theme="dark"] .admin-note-search span,
+html[data-theme="dark"] .permission-editor,
+html[data-theme="dark"] .admin-share-note,
+html[data-theme="dark"] .public-share-modal,
+html[data-theme="dark"] .public-share-state,
+html[data-theme="dark"] .month-picker-popover,
+html[data-theme="dark"] .receipt-item,
+html[data-theme="dark"] .history-item,
+html[data-theme="dark"] .task-progress {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .personal-overview-header,
+html[data-theme="dark"] .admin-tabs,
+html[data-theme="dark"] .admin-stat-card {
+  box-shadow: var(--shadow-card);
+}
+
+html[data-theme="dark"] .admin-stat-card > span {
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border-subtle);
+  color: var(--teal);
+}
+
+html[data-theme="dark"] .note-list-item,
+html[data-theme="dark"] .overview-note-card,
+html[data-theme="dark"] .admin-user-card,
+html[data-theme="dark"] .admin-note-card,
+html[data-theme="dark"] .public-share-attachment,
+html[data-theme="dark"] .recurring-habit-row,
+html[data-theme="dark"] .recurring-overview-item,
+html[data-theme="dark"] .recurring-icon-picker button,
+html[data-theme="dark"] .recurring-date-strip button,
+html[data-theme="dark"] .recurring-month-grid button,
+html[data-theme="dark"] .month-picker-grid button,
+html[data-theme="dark"] .drawer-folder-shortcuts > div button {
+  background: var(--color-surface);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .note-list-item.deleted,
+html[data-theme="dark"] .admin-user-card.inactive {
+  background: color-mix(in srgb, var(--color-surface) 82%, var(--color-app-bg));
+}
+
+html[data-theme="dark"] .format-quick-dock,
+html[data-theme="dark"] .attachment-upload-toast {
+  background: color-mix(in srgb, var(--color-popover-bg) 92%, transparent);
+  border-color: var(--color-border-subtle);
+  box-shadow: var(--shadow-floating-toolbar);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .rich-editor-drop-overlay {
+  background: color-mix(in srgb, var(--blue) 12%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--blue) 42%, var(--line));
+  color: var(--blue);
+}
+
+html[data-theme="dark"] .attachment-upload-bar {
+  background: color-mix(in srgb, var(--teal) 12%, var(--color-surface-muted));
+}
+
+html[data-theme="dark"] .rich-editor-toolbar[data-has-selection="true"] .selection-font-control,
+html[data-theme="dark"] .rich-editor-toolbar[data-has-selection="true"] .text-color-palette,
+html[data-theme="dark"] .format-quick-dock[data-has-selection="true"] .selection-font-control,
+html[data-theme="dark"] .format-quick-dock[data-has-selection="true"] .text-color-palette {
+  background: color-mix(in srgb, var(--teal) 12%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--teal) 34%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--teal) 18%, transparent);
+}
+
+html[data-theme="dark"] .drawer-mode-tabs button.active,
+html[data-theme="dark"] .note-filter-tab.active,
+html[data-theme="dark"] .rich-toolbar-tabs button.active,
+html[data-theme="dark"] .rich-editor-toolbar .icon-button.active,
+html[data-theme="dark"] .image-size-toolbar button.active,
+html[data-theme="dark"] .folder-filter-button.active,
+html[data-theme="dark"] .admin-tabs button.active,
+html[data-theme="dark"] .admin-tabs button[aria-selected="true"] {
+  background: var(--color-primary-subtle);
+  border-color: color-mix(in srgb, var(--teal) 34%, var(--line));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--teal) 20%, transparent);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .drawer-mode-tabs strong,
+html[data-theme="dark"] .note-filter-tab strong,
+html[data-theme="dark"] .folder-filter-button strong,
+html[data-theme="dark"] .admin-section-count,
+html[data-theme="dark"] .admin-note-counts span,
+html[data-theme="dark"] .admin-note-meta span,
+html[data-theme="dark"] .admin-note-modal-meta span,
+html[data-theme="dark"] .permission-editor-header strong,
+html[data-theme="dark"] .admin-user-badge.key {
+  background: var(--color-surface-muted);
+  border-color: var(--color-border-subtle);
+  color: var(--color-text-secondary);
+}
+
+html[data-theme="dark"] .folder-filter-button:not(.active) {
+  background: color-mix(in srgb, var(--folder-color, var(--color-surface-elevated)) 10%, var(--color-surface));
+}
+
+html[data-theme="dark"] .overview-shared-label,
+html[data-theme="dark"] .admin-user-badge.admin,
+html[data-theme="dark"] .public-share-list-badge,
+html[data-theme="dark"] .attachment-status-pill.previewable {
+  background: var(--color-info-subtle);
+  border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
+  color: var(--blue);
+}
+
+html[data-theme="dark"] .note-folder-badge,
+html[data-theme="dark"] .habit-icon-badge,
+html[data-theme="dark"] .recurring-stat-icon,
+html[data-theme="dark"] .attachment-upload-icon {
+  background: color-mix(in srgb, currentColor 10%, var(--color-surface-elevated));
+  border-color: var(--color-border-subtle);
+}
+
+html[data-theme="dark"] .overview-note-alert,
+html[data-theme="dark"] .note-list-alert,
+html[data-theme="dark"] .public-share-list-badge.urgent,
+html[data-theme="dark"] .admin-user-badge.inactive,
+html[data-theme="dark"] .drawer-folder-shortcuts > button.has-alert,
+html[data-theme="dark"] .attachment-upload-toast.failed .attachment-upload-icon,
+html[data-theme="dark"] .public-share-state.error {
+  background: var(--color-danger-subtle);
+  border-color: color-mix(in srgb, var(--coral) 26%, var(--line));
+  color: var(--coral);
+}
+
+html[data-theme="dark"] .public-share-list-badge.soon,
+html[data-theme="dark"] .note-list-date.deadline.soon,
+html[data-theme="dark"] .note-list-date.deadline.today {
+  background: var(--color-warning-subtle);
+  border-color: color-mix(in srgb, var(--gold) 26%, var(--line));
+  color: var(--gold);
+}
+
+html[data-theme="dark"] .admin-user-badge.active,
+html[data-theme="dark"] .recurring-date-strip button.selected,
+html[data-theme="dark"] .recurring-habit-row.checked,
+html[data-theme="dark"] .recurring-icon-picker button.selected,
+html[data-theme="dark"] .today-recurring-item.checked {
+  background: var(--color-success-subtle);
+  border-color: color-mix(in srgb, var(--teal) 28%, var(--line));
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .admin-user-badge.user,
+html[data-theme="dark"] .permission-chip,
+html[data-theme="dark"] .attachment-status-pill.download-only,
+html[data-theme="dark"] .note-kind-pill,
+html[data-theme="dark"] .note-list-date {
+  background: var(--color-surface-muted);
+  border-color: var(--color-border-subtle);
+  color: var(--color-text-secondary);
+}
+
+html[data-theme="dark"] .permission-chip:hover,
+html[data-theme="dark"] .admin-user-card:hover,
+html[data-theme="dark"] .admin-note-card:hover,
+html[data-theme="dark"] .recurring-overview-item:hover,
+html[data-theme="dark"] .recurring-overview-item:focus-visible {
+  background: var(--color-surface-hover);
+  border-color: var(--color-border);
+}
+
+html[data-theme="dark"] .schedule-color-picker input[type="color"] {
+  background: var(--color-input-bg);
+  border-color: var(--color-border-subtle);
+}
+
+html[data-theme="dark"] .permission-chip:has(input:checked) {
+  background: var(--color-primary-subtle);
+  border-color: color-mix(in srgb, var(--teal) 32%, var(--line));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 12%, transparent);
+}
+
+html[data-theme="dark"] .task-check,
+html[data-theme="dark"] .recurring-check-button {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-border);
+  color: var(--teal);
+}
+
+html[data-theme="dark"] .recurring-check-button.checked,
+html[data-theme="dark"] .month-picker-grid button.selected,
+html[data-theme="dark"] .recurring-month-grid button.checked {
+  background: var(--teal);
+  border-color: var(--teal);
+  color: #071312;
+}
+
+html[data-theme="dark"] .calendar-day.today:not(.selected) strong,
+html[data-theme="dark"] .calendar-day.selected strong {
+  color: #071312;
+}
+
+html[data-theme="dark"] .calendar-agenda-holidays span,
+html[data-theme="dark"] .note-list-date.deadline.overdue {
+  background: var(--color-danger-subtle);
+  border-color: color-mix(in srgb, var(--coral) 24%, var(--line));
+  color: var(--coral);
+}
+
+html[data-theme="dark"] .history-item .history-diff-text mark {
+  background: var(--color-danger-subtle);
+  color: var(--coral);
+}
+
+html[data-theme="dark"] .matrix-filter-notice,
+html[data-theme="dark"] .note-list-date.deadline.upcoming,
+html[data-theme="dark"] .month-picker-grid button.current:not(.selected),
+html[data-theme="dark"] .recurring-month-grid button.today:not(.checked) {
+  background: var(--color-info-subtle);
+  border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
+  color: var(--blue);
+}
+
+html[data-theme="dark"] .date-picker-day.selected,
+html[data-theme="dark"] .time-picker-presets button.selected,
+html[data-theme="dark"] .time-picker-hour-grid button.selected,
+html[data-theme="dark"] .time-picker-minute-grid button.selected {
+  background: var(--color-primary-subtle);
+  border-color: color-mix(in srgb, var(--teal) 34%, var(--line));
+  color: var(--teal);
+}
+
+html[data-theme="dark"] .date-picker-day.today span,
+html[data-theme="dark"] .date-picker-day.selected span {
+  color: #071312;
+}
+
+html[data-theme="dark"] .date-picker-day:disabled,
+html[data-theme="dark"] .time-picker-presets button:disabled,
+html[data-theme="dark"] .time-picker-hour-grid button:disabled,
+html[data-theme="dark"] .time-picker-minute-grid button:disabled {
+  background: color-mix(in srgb, var(--color-surface) 82%, var(--color-app-bg));
+  color: var(--color-text-muted);
+}
+
+html[data-theme="dark"] .task-progress {
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--task-progress-color, var(--teal)) 10%, var(--color-surface-elevated)),
+      var(--color-surface) 78%
+    );
+}
+
+html[data-theme="dark"] .task-progress-note {
+  background: color-mix(in srgb, var(--task-progress-color, var(--teal)) 12%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--task-progress-color, var(--teal)) 20%, var(--line));
+  color: var(--color-text-secondary);
+}
+
+html[data-theme="dark"] .task-progress-range input[type="range"]::-webkit-slider-thumb,
+html[data-theme="dark"] .task-progress-range input[type="range"]::-moz-range-thumb {
+  background: var(--color-surface);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 30%);
+}
+
+html[data-theme="dark"] .recurring-progress-ring {
+  background:
+    radial-gradient(circle, var(--color-surface-elevated) 51%, transparent 52%),
+    conic-gradient(
+      var(--recurring-progress-color, var(--teal)) 0 var(--recurring-progress, 0%),
+      var(--color-surface-muted) var(--recurring-progress, 0%) 100%
+    );
+}
+
+html[data-theme="dark"] .pdf-preview-canvas-frame,
+html[data-theme="dark"] .docx-preview-frame,
+html[data-theme="dark"] .hwp-preview-frame,
+html[data-theme="dark"] .document-preview-frame,
+html[data-theme="dark"] .public-image-preview-frame {
+  background: var(--color-app-bg);
+}
+
+html[data-theme="dark"] .file-text-preview,
+html[data-theme="dark"] .file-preview-error {
+  background: var(--color-surface);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .pdf-preview-canvas-page,
+html[data-theme="dark"] .document-preview-page {
+  border-color: var(--color-border-subtle);
+  box-shadow: var(--shadow-card);
 }
 
 .settings-modal-description {

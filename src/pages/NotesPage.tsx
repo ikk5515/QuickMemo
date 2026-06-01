@@ -7188,7 +7188,10 @@ function PersonalOverview({
                 return (
                   <article className={`overview-note-card ${needsAttention ? "needs-attention" : ""}`} key={note.id}>
                     <button className="overview-note-open" type="button" onClick={() => onPreview(note)}>
-                      <span className="overview-note-folder" style={{ backgroundColor: note.type === "shared" ? "#3f6fb5" : folder?.color ?? "#e2e8f0" }}>
+                      <span
+                        className="overview-note-folder"
+                        style={{ backgroundColor: note.type === "shared" ? "#3f6fb5" : folder?.color ?? "var(--color-surface-muted)" }}
+                      >
                         {note.type === "shared" ? "공유 노트" : folder?.name ?? "미분류"}
                       </span>
                       <PublicShareStatusBadge clockMs={clockMs} share={publicShare} />
