@@ -40,6 +40,7 @@ import {
   LayoutGrid,
   ListTodo,
   Minus,
+  MoreHorizontal,
   Pencil,
   Percent,
   Plus,
@@ -63,6 +64,7 @@ import { groupChecklistItems } from "../lib/checklist";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import { defaultMatrixLabels } from "../lib/matrixLabels";
+import { normalizePrimaryScheduleView, type PrimaryScheduleView } from "../lib/scheduleNavigation";
 import {
   buildRecurringDateStrip,
   buildRecurringHabitOrderUpdates,
@@ -152,13 +154,19 @@ import type {
   ScheduleView
 } from "../types";
 
-const scheduleTabs: Array<{ view: ScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
+const scheduleTabs: Array<{ view: PrimaryScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
   { view: "todo", label: "할 일", shortLabel: "할 일", Icon: ListTodo },
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
-  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 },
-  { view: "recurring", label: "반복", shortLabel: "반복", Icon: Repeat2 },
-  { view: "completed", label: "완료", shortLabel: "완료", Icon: CheckCircle2 }
+  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 }
 ];
+
+const scheduleViewTitles: Record<ScheduleView, string> = {
+  calendar: "달력",
+  completed: "완료 내역",
+  matrix: "매트릭스",
+  recurring: "반복 업무",
+  todo: "할 일"
+};
 
 const taskPageSize = 5;
 const completedPageSize = 10;
@@ -378,7 +386,7 @@ function checklistDisplayGroups<TItem extends ScheduleChecklistItem>(items: TIte
 export default function SchedulePage() {
   const { privateKey, profile } = useAuth();
   const [activeView, setActiveView] = useState<ScheduleView | null>(() =>
-    profile ? getCachedUserPreferences(profile.uid)?.scheduleDefaultView ?? null : null
+    profile ? normalizePrimaryScheduleView(getCachedUserPreferences(profile.uid)?.scheduleDefaultView) : null
   );
   const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() =>
     profile ? getCachedUserPreferences(profile.uid)?.matrixLabels ?? defaultMatrixLabels : defaultMatrixLabels
@@ -395,6 +403,7 @@ export default function SchedulePage() {
   const [recurringHabitDialog, setRecurringHabitDialog] = useState<RecurringHabitDialogState | null>(null);
   const [recurringOverviewOpen, setRecurringOverviewOpen] = useState(false);
   const [todayPanelOpen, setTodayPanelOpen] = useState(false);
+  const [scheduleToolsOpen, setScheduleToolsOpen] = useState(false);
   const [selectedRecurringDate, setSelectedRecurringDate] = useState(() => toLocalDateString(new Date()));
   const [recurringMonth, setRecurringMonth] = useState(() => toLocalDateString(new Date()).slice(0, 7));
   const [pendingRecurringCheckIn, setPendingRecurringCheckIn] = useState<Record<string, boolean>>({});
@@ -417,6 +426,7 @@ export default function SchedulePage() {
   const decryptedHabitCacheRef = useRef<DecryptedHabitCache>(new Map());
   const taskDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<ScheduleTaskDetails>>>>({});
   const recurringDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<RecurringHabitDetails>>>>({});
+  const scheduleToolsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!profile) {
@@ -427,16 +437,16 @@ export default function SchedulePage() {
     let active = true;
     const cachedPreferences = getCachedUserPreferences(profile.uid);
 
-    setActiveView(cachedPreferences?.scheduleDefaultView ?? null);
+    setActiveView(normalizePrimaryScheduleView(cachedPreferences?.scheduleDefaultView));
     void getUserPreferences(profile.uid)
       .then((preferences) => {
         if (active) {
-          setActiveView(preferences.scheduleDefaultView);
+          setActiveView(normalizePrimaryScheduleView(preferences.scheduleDefaultView));
         }
       })
       .catch(() => {
         if (active) {
-          setActiveView(cachedPreferences?.scheduleDefaultView ?? defaultUserPreferences.scheduleDefaultView);
+          setActiveView(normalizePrimaryScheduleView(cachedPreferences?.scheduleDefaultView ?? defaultUserPreferences.scheduleDefaultView));
         }
       });
 
@@ -444,6 +454,35 @@ export default function SchedulePage() {
       active = false;
     };
   }, [profile]);
+
+  useEffect(() => {
+    if (!scheduleToolsOpen) {
+      return undefined;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target;
+
+      if (target instanceof Node && scheduleToolsRef.current?.contains(target)) {
+        return;
+      }
+
+      setScheduleToolsOpen(false);
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setScheduleToolsOpen(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [scheduleToolsOpen]);
 
   useEffect(() => {
     if (!profile) {
@@ -1407,16 +1446,6 @@ export default function SchedulePage() {
     });
   }
 
-  function quickDefaultsForActiveView(): QuickDefaults {
-    const color = nextScheduleTaskColor(decryptedTasks);
-
-    if (activeView === "calendar") {
-      return { startDate: selectedCalendarDate, endDate: selectedCalendarDate, color };
-    }
-
-    return { startDate: today, endDate: today, color };
-  }
-
   function moveCalendarMonth(offset: number) {
     setCalendarCursor((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
   }
@@ -1431,6 +1460,7 @@ export default function SchedulePage() {
     const nextToday = toLocalDateString(new Date());
     const nextDate = new Date(`${nextToday}T00:00:00`);
 
+    setScheduleToolsOpen(false);
     setCalendarCursor(new Date(nextDate.getFullYear(), nextDate.getMonth(), 1));
     setSelectedCalendarDate(nextToday);
     setSelectedRecurringDate(nextToday);
@@ -1439,6 +1469,8 @@ export default function SchedulePage() {
   }
 
   function openQuickTaskDialog() {
+    setScheduleToolsOpen(false);
+
     if (activeView === "matrix") {
       setCreateDialog({
         defaults: { startDate: today, endDate: today, color: nextScheduleTaskColor(decryptedTasks), isImportant: true, isUrgent: true },
@@ -1459,8 +1491,13 @@ export default function SchedulePage() {
   }
 
   function openQuickRecurringDialog() {
-    setActiveView("recurring");
+    setScheduleToolsOpen(false);
     setRecurringHabitDialog({ mode: "create" });
+  }
+
+  function openScheduleUtilityView(view: Extract<ScheduleView, "recurring" | "completed">) {
+    setScheduleToolsOpen(false);
+    setActiveView(view);
   }
 
   function openCalendarCreateDialog(dateString: string) {
@@ -1496,7 +1533,7 @@ export default function SchedulePage() {
               <CalendarDays size={16} />
               일정관리
             </p>
-            <h1>{scheduleTabs.find((tab) => tab.view === activeView)?.label ?? "일정관리"}</h1>
+            <h1>{activeView ? scheduleViewTitles[activeView] : "일정관리"}</h1>
           </div>
           <label className="schedule-search-control">
             <Search size={17} aria-hidden="true" />
@@ -1525,51 +1562,65 @@ export default function SchedulePage() {
               </button>
             ))}
           </nav>
-        </header>
-
-        <section className="schedule-command-panel" aria-label="일정 요약과 빠른 작업">
-          <div className="schedule-stat-grid">
-            <span className="schedule-stat-card today">
-              <strong>{scheduleStats.today}</strong>
-              <em>오늘</em>
-            </span>
-            <span className="schedule-stat-card overdue">
-              <strong>{scheduleStats.overdue}</strong>
-              <em>지연</em>
-            </span>
-            <span className="schedule-stat-card active">
-              <strong>{scheduleStats.active}</strong>
-              <em>진행 중</em>
-            </span>
-            <span className="schedule-stat-card completed">
-              <strong>{scheduleStats.completed}</strong>
-              <em>완료</em>
-            </span>
-            <span className="schedule-stat-card recurring">
-              <strong>{scheduleStats.recurring}</strong>
-              <em>반복</em>
-            </span>
-          </div>
-          <div className="schedule-quick-actions">
+          <div className="schedule-header-actions">
             {scheduleQuery.trim() && (
               <span className="schedule-query-result">
                 검색 결과 {displayedTasks.length + displayedRecurringHabits.length}개
               </span>
             )}
-            <button className="secondary-button" type="button" onClick={openTodayWorkPanel}>
+            <button
+              className="icon-button today-work-trigger"
+              type="button"
+              aria-label={`오늘 업무 패널 열기. 오늘 일정 ${scheduleStats.today}개, 지연 ${scheduleStats.overdue}개`}
+              title="오늘 업무"
+              onClick={openTodayWorkPanel}
+            >
               <Zap size={16} />
-              오늘 업무
             </button>
-            <button type="button" onClick={openQuickTaskDialog}>
+            <button className="schedule-primary-action" type="button" onClick={openQuickTaskDialog}>
               <Plus size={16} />
               새 일정
             </button>
-            <button className="secondary-button" type="button" onClick={openQuickRecurringDialog}>
-              <Repeat2 size={16} />
-              반복 업무
-            </button>
+            <div className="schedule-tool-menu" ref={scheduleToolsRef}>
+              <button
+                className={`icon-button schedule-tool-menu-trigger ${scheduleToolsOpen ? "active" : ""}`}
+                type="button"
+                aria-expanded={scheduleToolsOpen}
+                aria-haspopup="menu"
+                aria-label="일정관리 도구 열기"
+                title="일정관리 도구"
+                onClick={() => setScheduleToolsOpen((current) => !current)}
+              >
+                <MoreHorizontal size={18} />
+              </button>
+              {scheduleToolsOpen && (
+                <div className="schedule-tool-menu-popover" role="menu" aria-label="일정관리 도구">
+                  <button type="button" role="menuitem" onClick={() => openScheduleUtilityView("recurring")}>
+                    <Repeat2 size={16} />
+                    <span>
+                      <strong>반복 업무 관리</strong>
+                      <em>체크인과 반복 계획 확인</em>
+                    </span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={openQuickRecurringDialog}>
+                    <Plus size={16} />
+                    <span>
+                      <strong>반복 업무 추가</strong>
+                      <em>현재 화면을 유지하고 생성</em>
+                    </span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={() => openScheduleUtilityView("completed")}>
+                    <CheckCircle2 size={16} />
+                    <span>
+                      <strong>완료 내역</strong>
+                      <em>완료한 일정과 필터 확인</em>
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </section>
+        </header>
 
         {todayPanelOpen && (
           <TodayWorkPanel
@@ -1605,14 +1656,6 @@ export default function SchedulePage() {
         )}
 
         {!activeView && <p className="schedule-empty">설정한 일정 화면을 여는 중입니다.</p>}
-
-        {activeView === "todo" && (
-          <ScheduleCreateForm
-            defaults={quickDefaultsForActiveView()}
-            label="업무 추가"
-            onCreate={createTask}
-          />
-        )}
 
         {activeView === "todo" && (
           <TodoView groups={todoGroups} today={today} onOpen={setViewTaskId} onToggle={(task) => void toggleTask(task)} />
@@ -2689,8 +2732,8 @@ function CalendarView({
             <button className="icon-button" type="button" aria-label="이전 달" onClick={() => onMoveMonth(-1)}>
               <ChevronLeft size={18} />
             </button>
-            <button className="secondary-button" type="button" onClick={onToday}>
-              오늘
+            <button className="icon-button calendar-today-button" type="button" aria-label="오늘 날짜로 이동" title="오늘 날짜로 이동" onClick={onToday}>
+              <CalendarDays size={16} />
             </button>
             <button className="icon-button" type="button" aria-label="다음 달" onClick={() => onMoveMonth(1)}>
               <ChevronRight size={18} />

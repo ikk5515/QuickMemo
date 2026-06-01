@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
 import { useAuth } from "../context/AuthContext";
+import { normalizePrimaryScheduleView } from "../lib/scheduleNavigation";
 import { defaultUserPreferences, getCachedUserPreferences, getUserPreferences } from "../services/userPreferences";
 import type { UserPreferencesDocument } from "../types";
 
@@ -48,16 +49,13 @@ export default function HomeRedirectPage() {
     return <Navigate to="/login" replace />;
   }
 
+  const scheduleDefaultView = normalizePrimaryScheduleView(preferences?.scheduleDefaultView);
   const scheduleLabel =
-    preferences?.scheduleDefaultView === "calendar"
+    scheduleDefaultView === "calendar"
       ? "달력"
-      : preferences?.scheduleDefaultView === "matrix"
+      : scheduleDefaultView === "matrix"
         ? "매트릭스"
-        : preferences?.scheduleDefaultView === "recurring"
-          ? "반복"
-          : preferences?.scheduleDefaultView === "completed"
-            ? "완료"
-            : "할 일";
+        : "할 일";
 
   return (
     <AppShell>

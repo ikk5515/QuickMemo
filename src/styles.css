@@ -20,11 +20,29 @@
   --color-text-primary: #17211f;
   --color-text-secondary: #40504c;
   --color-text-muted: #65707a;
+  --color-input-bg: #ffffff;
+  --color-modal-bg: #ffffff;
+  --color-popover-bg: #ffffff;
   --color-danger: #c75146;
   --color-warning: #b9822f;
   --color-success: #2f7d70;
   --color-info: #3f6fb5;
   --color-focus-ring: rgb(47 125 112 / 22%);
+  --button-primary-bg: #17211f;
+  --button-primary-hover-bg: color-mix(in srgb, #17211f 88%, #ffffff);
+  --button-primary-active-bg: color-mix(in srgb, #17211f 82%, #ffffff);
+  --button-primary-color: #ffffff;
+  --button-secondary-bg: #eef3ef;
+  --button-secondary-hover-bg: color-mix(in srgb, #2f7d70 9%, #ffffff);
+  --button-secondary-color: #17211f;
+  --button-icon-bg: #eef3ef;
+  --button-icon-hover-bg: color-mix(in srgb, #2f7d70 10%, #ffffff);
+  --calendar-day-bg: #ffffff;
+  --calendar-day-muted-bg: #fafbf9;
+  --calendar-selected-bg: color-mix(in srgb, #2f7d70 6%, #ffffff);
+  --calendar-selected-hover-bg: color-mix(in srgb, #2f7d70 10%, #ffffff);
+  --calendar-holiday-bg: color-mix(in srgb, #c75146 5%, #ffffff);
+  --calendar-holiday-muted-bg: color-mix(in srgb, #c75146 4%, #fafbf9);
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -69,28 +87,46 @@
 }
 
 :root[data-theme="dark"] {
-  color: #e5eef7;
-  background: #0f172a;
+  color: #e5edf5;
+  background: #0b1120;
   color-scheme: dark;
-  --color-app-bg: #0f172a;
-  --color-page-bg: #111827;
+  --color-app-bg: #0b1120;
+  --color-page-bg: #0f172a;
   --color-surface: #111827;
-  --color-surface-elevated: #182233;
-  --color-surface-muted: #1f2937;
-  --color-primary: #5eead4;
-  --color-primary-hover: #2dd4bf;
-  --color-secondary: #93c5fd;
-  --color-muted: #94a3b8;
-  --color-border: #334155;
-  --color-border-subtle: #243244;
-  --color-text-primary: #e5eef7;
-  --color-text-secondary: #cbd5e1;
-  --color-text-muted: #94a3b8;
-  --color-danger: #fca5a5;
-  --color-warning: #facc15;
-  --color-success: #5eead4;
-  --color-info: #93c5fd;
-  --color-focus-ring: rgb(94 234 212 / 28%);
+  --color-surface-elevated: #172033;
+  --color-surface-muted: #1e293b;
+  --color-primary: #7dd3c7;
+  --color-primary-hover: #5eead4;
+  --color-secondary: #9dbbe8;
+  --color-muted: #98a6ba;
+  --color-border: #314158;
+  --color-border-subtle: #253246;
+  --color-text-primary: #e5edf5;
+  --color-text-secondary: #c4d0df;
+  --color-text-muted: #98a6ba;
+  --color-input-bg: #101827;
+  --color-modal-bg: #121c2d;
+  --color-popover-bg: #162033;
+  --color-danger: #f3a7a2;
+  --color-warning: #e9c46a;
+  --color-success: #7dd3c7;
+  --color-info: #9dbbe8;
+  --color-focus-ring: rgb(125 211 199 / 26%);
+  --button-primary-bg: #226b61;
+  --button-primary-hover-bg: #2a7c70;
+  --button-primary-active-bg: #1d5f57;
+  --button-primary-color: #ecfffb;
+  --button-secondary-bg: #172033;
+  --button-secondary-hover-bg: #1f2d42;
+  --button-secondary-color: #dce7f3;
+  --button-icon-bg: #172033;
+  --button-icon-hover-bg: #1f2d42;
+  --calendar-day-bg: #111827;
+  --calendar-day-muted-bg: #0f172a;
+  --calendar-selected-bg: color-mix(in srgb, var(--teal) 14%, #111827);
+  --calendar-selected-hover-bg: color-mix(in srgb, var(--teal) 18%, #111827);
+  --calendar-holiday-bg: color-mix(in srgb, var(--coral) 10%, #111827);
+  --calendar-holiday-muted-bg: color-mix(in srgb, var(--coral) 7%, #0f172a);
   --shadow-card: 0 14px 34px rgb(0 0 0 / 22%);
   --shadow-card-elevated: 0 22px 58px rgb(0 0 0 / 32%);
   --shadow-dropdown: 0 22px 48px rgb(0 0 0 / 36%);
@@ -112,9 +148,9 @@
   --note-item-hover-bg: #1e293b;
   --note-item-hover-border: #334155;
   --note-item-selected-hover-bg: color-mix(in srgb, var(--teal) 14%, #111827);
-  --schedule-hover-bg: #1e293b;
+  --schedule-hover-bg: #1f2937;
   --schedule-hover-border: #334155;
-  --schedule-event-hover-bg: #1f2937;
+  --schedule-event-hover-bg: #243244;
   --schedule-event-hover-border: #475569;
   --schedule-drag-bg: #172554;
   --schedule-drag-border: #2563eb;
@@ -187,10 +223,10 @@ textarea {
 
 button {
   align-items: center;
-  background: var(--ink);
+  background: var(--button-primary-bg);
   border: 1px solid transparent;
   border-radius: var(--radius-button);
-  color: white;
+  color: var(--button-primary-color);
   cursor: pointer;
   display: inline-flex;
   font-size: var(--type-button);
@@ -209,11 +245,11 @@ button {
 }
 
 button:not(:disabled):hover {
-  background: color-mix(in srgb, var(--ink) 88%, #ffffff);
+  background: var(--button-primary-hover-bg);
 }
 
 button:not(:disabled):active {
-  background: color-mix(in srgb, var(--ink) 82%, #ffffff);
+  background: var(--button-primary-active-bg);
 }
 
 button:disabled {
@@ -229,7 +265,7 @@ a {
 input,
 select,
 textarea {
-  background: var(--color-surface);
+  background: var(--color-input-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-input);
   color: var(--ink);
@@ -611,13 +647,13 @@ textarea {
 }
 
 .secondary-button {
-  background: var(--surface);
+  background: var(--button-secondary-bg);
   border-color: var(--color-border-subtle);
-  color: var(--ink);
+  color: var(--button-secondary-color);
 }
 
 .secondary-button:not(:disabled):hover {
-  background: color-mix(in srgb, var(--teal) 9%, #ffffff);
+  background: var(--button-secondary-hover-bg);
   border-color: color-mix(in srgb, var(--teal) 26%, var(--line));
   color: var(--teal);
 }
@@ -640,7 +676,7 @@ textarea {
 }
 
 .icon-button {
-  background: var(--surface);
+  background: var(--button-icon-bg);
   border-color: transparent;
   color: var(--ink);
   min-height: 38px;
@@ -649,7 +685,7 @@ textarea {
 }
 
 .icon-button:not(:disabled):hover {
-  background: color-mix(in srgb, var(--teal) 10%, #ffffff);
+  background: var(--button-icon-hover-bg);
   color: var(--teal);
 }
 
@@ -6102,13 +6138,13 @@ textarea {
 }
 
 .schedule-view-tabs button.active {
-  background: var(--ink);
-  color: #ffffff;
+  background: var(--color-primary-subtle);
+  color: var(--teal);
 }
 
 .schedule-view-tabs button:not(.active):hover {
-  background: color-mix(in srgb, var(--teal) 8%, #ffffff);
-  color: var(--teal);
+  background: var(--color-surface-hover);
+  color: var(--ink);
 }
 
 .schedule-feedback {
@@ -6844,7 +6880,7 @@ textarea {
 
 .calendar-day {
   align-content: start;
-  background: #ffffff;
+  background: var(--calendar-day-bg);
   border: 0;
   border-radius: 0;
   border-right: 1px solid var(--line);
@@ -6866,6 +6902,7 @@ textarea {
 .calendar-day:hover,
 .calendar-day:focus-visible {
   background: var(--schedule-hover-bg);
+  border-color: var(--schedule-hover-border);
 }
 
 .calendar-day:nth-child(7n) {
@@ -6873,7 +6910,7 @@ textarea {
 }
 
 .calendar-day.muted {
-  background: #fafbf9;
+  background: var(--calendar-day-muted-bg);
   color: #9aa3aa;
 }
 
@@ -6909,8 +6946,16 @@ textarea {
 }
 
 .calendar-day.selected {
-  background: color-mix(in srgb, var(--teal) 6%, #ffffff);
+  background: var(--calendar-selected-bg);
   box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--teal) 58%, #ffffff);
+}
+
+.calendar-day.selected:hover,
+.calendar-day.selected:focus-visible {
+  background: var(--calendar-selected-hover-bg);
+  box-shadow:
+    inset 0 0 0 2px color-mix(in srgb, var(--teal) 58%, #ffffff),
+    0 0 0 3px var(--color-focus-ring);
 }
 
 .calendar-day.sunday:not(.today):not(.selected) strong,
@@ -6923,15 +6968,15 @@ textarea {
 }
 
 .calendar-day.holiday {
-  background: color-mix(in srgb, var(--coral) 5%, #ffffff);
+  background: var(--calendar-holiday-bg);
 }
 
 .calendar-day.holiday.muted {
-  background: color-mix(in srgb, var(--coral) 4%, #fafbf9);
+  background: var(--calendar-holiday-muted-bg);
 }
 
 .calendar-day.selected.holiday {
-  background: color-mix(in srgb, var(--teal) 6%, #ffffff);
+  background: var(--calendar-selected-bg);
 }
 
 .calendar-holiday-label {
@@ -6958,8 +7003,8 @@ textarea {
 
 .calendar-task-pill {
   align-items: center;
-  background: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 17%, #ffffff);
-  border: 1px solid color-mix(in srgb, var(--schedule-task-color, var(--teal)) 20%, #ffffff);
+  background: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 17%, var(--calendar-day-bg));
+  border: 1px solid color-mix(in srgb, var(--schedule-task-color, var(--teal)) 20%, var(--calendar-day-bg));
   border-radius: 5px;
   color: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 72%, #17211f);
   display: flex;
@@ -7015,7 +7060,7 @@ textarea {
 }
 
 .calendar-task-time {
-  color: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 76%, #14211f);
+  color: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 76%, var(--ink));
   flex: 0 0 auto;
   font-size: 11px;
   font-weight: 900;
@@ -9000,7 +9045,6 @@ button,
 .home-action-card,
 .note-kind-pill,
 .public-share-list-badge,
-.schedule-stat-card,
 .schedule-view-tabs,
 .note-filter-tab,
 .drawer-mode-tabs {
@@ -9348,7 +9392,7 @@ button,
 .schedule-header {
   align-items: end;
   display: grid;
-  grid-template-columns: minmax(220px, 0.8fr) minmax(260px, 1fr) auto;
+  grid-template-columns: minmax(190px, 0.68fr) minmax(240px, 1fr) auto auto;
 }
 
 .schedule-header h1 {
@@ -9360,85 +9404,94 @@ button,
   width: 100%;
 }
 
-.schedule-command-panel {
+.schedule-header-actions {
   align-items: center;
-  background: var(--panel);
-  border: 1px solid var(--color-border-subtle);
-  border-radius: var(--radius-panel);
-  box-shadow: var(--shadow-card);
-  display: grid;
-  gap: var(--space-4);
-  grid-template-columns: minmax(0, 1fr) auto;
-  margin-bottom: var(--space-4);
-  padding: var(--space-4);
+  display: inline-flex;
+  gap: var(--space-2);
+  justify-self: end;
+  min-width: 0;
+  position: relative;
 }
 
-.schedule-stat-grid {
+.schedule-primary-action {
+  background: var(--button-primary-bg);
+  color: var(--button-primary-color);
+  min-height: 40px;
+  padding: 0 var(--space-4);
+}
+
+.today-work-trigger {
+  color: var(--blue);
+}
+
+.schedule-tool-menu {
+  position: relative;
+}
+
+.schedule-tool-menu-trigger.active {
+  background: var(--color-primary-subtle);
+  color: var(--teal);
+}
+
+.schedule-tool-menu-popover {
+  background: var(--color-popover-bg);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-dropdown);
   display: grid;
-  gap: var(--space-3);
-  grid-template-columns: repeat(5, minmax(88px, 1fr));
+  gap: 4px;
+  min-width: 242px;
+  padding: 6px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 30;
+}
+
+.schedule-tool-menu-popover button {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--ink);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 22px minmax(0, 1fr);
+  justify-content: stretch;
+  min-height: 54px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.schedule-tool-menu-popover button:hover,
+.schedule-tool-menu-popover button:focus-visible {
+  background: var(--color-surface-hover);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+}
+
+.schedule-tool-menu-popover button > span {
+  display: grid;
+  gap: 2px;
   min-width: 0;
 }
 
-.schedule-stat-card {
-  background: var(--schedule-stat-bg, var(--surface));
-  border: 1px solid var(--schedule-stat-border, var(--color-border-subtle));
-  border-radius: var(--radius-card);
-  color: var(--schedule-stat-color, var(--ink));
-  display: grid;
-  gap: 3px;
-  min-height: 68px;
-  padding: var(--space-3);
+.schedule-tool-menu-popover strong,
+.schedule-tool-menu-popover em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.schedule-stat-card strong {
-  font-size: 24px;
-  line-height: 1;
+.schedule-tool-menu-popover strong {
+  font-size: 13px;
+  line-height: 1.25;
 }
 
-.schedule-stat-card em {
+.schedule-tool-menu-popover em {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-style: normal;
-  font-weight: 900;
-}
-
-.schedule-stat-card.today {
-  --schedule-stat-bg: var(--color-info-subtle);
-  --schedule-stat-border: color-mix(in srgb, var(--blue) 22%, #ffffff);
-  --schedule-stat-color: var(--blue);
-}
-
-.schedule-stat-card.overdue {
-  --schedule-stat-bg: var(--color-danger-subtle);
-  --schedule-stat-border: color-mix(in srgb, var(--coral) 22%, #ffffff);
-  --schedule-stat-color: var(--coral);
-}
-
-.schedule-stat-card.active {
-  --schedule-stat-bg: var(--color-primary-subtle);
-  --schedule-stat-border: color-mix(in srgb, var(--teal) 24%, #ffffff);
-  --schedule-stat-color: var(--teal);
-}
-
-.schedule-stat-card.completed {
-  --schedule-stat-bg: var(--color-success-subtle);
-  --schedule-stat-border: color-mix(in srgb, var(--teal) 20%, #ffffff);
-  --schedule-stat-color: #247467;
-}
-
-.schedule-stat-card.recurring {
-  --schedule-stat-bg: var(--color-warning-subtle);
-  --schedule-stat-border: color-mix(in srgb, var(--gold) 22%, #ffffff);
-  --schedule-stat-color: var(--gold);
-}
-
-.schedule-quick-actions {
-  align-items: center;
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  justify-content: flex-end;
+  font-weight: 800;
 }
 
 .schedule-query-result {
@@ -9778,9 +9831,8 @@ button.today-recurring-open:not(:disabled):active {
   color: #ffffff;
 }
 
-button.calendar-task-pill:not(:disabled):hover,
-button.calendar-task-pill:not(:disabled):focus-visible,
-button.calendar-task-pill:not(:disabled):active {
+.calendar-task-pill:hover,
+.calendar-task-pill:focus-visible {
   background: var(--schedule-event-hover-bg);
   border-color: var(--schedule-event-hover-border);
   box-shadow:
@@ -9920,6 +9972,180 @@ html[data-theme="dark"] textarea::placeholder {
   color: color-mix(in srgb, var(--muted) 78%, var(--ink));
 }
 
+html[data-theme="dark"] button:not(.danger-button):not(.secondary-button):not(.icon-button):not(.task-open-button):not(.today-recurring-open):not(.calendar-task-pill):not(.matrix-date-group-header):not(.recurring-habit-content) {
+  border-color: color-mix(in srgb, var(--teal) 24%, var(--line));
+}
+
+html[data-theme="dark"] input,
+html[data-theme="dark"] select,
+html[data-theme="dark"] textarea,
+html[data-theme="dark"] .completed-search,
+html[data-theme="dark"] .date-picker-trigger,
+html[data-theme="dark"] .time-picker-trigger,
+html[data-theme="dark"] .month-picker-trigger {
+  background: var(--color-input-bg);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .auth-panel,
+html[data-theme="dark"] .panel,
+html[data-theme="dark"] .editor-panel,
+html[data-theme="dark"] .note-drawer,
+html[data-theme="dark"] .unlock-panel,
+html[data-theme="dark"] .overview-folder-panel,
+html[data-theme="dark"] .overview-note-panel,
+html[data-theme="dark"] .attachment-panel,
+html[data-theme="dark"] .admin-create-panel,
+html[data-theme="dark"] .admin-users-panel,
+html[data-theme="dark"] .admin-note-panel,
+html[data-theme="dark"] .admin-user-card,
+html[data-theme="dark"] .completed-panel,
+html[data-theme="dark"] .recurring-main-panel,
+html[data-theme="dark"] .recurring-detail-panel,
+html[data-theme="dark"] .calendar-panel,
+html[data-theme="dark"] .calendar-agenda,
+html[data-theme="dark"] .matrix-section,
+html[data-theme="dark"] .schedule-section {
+  background: var(--color-surface);
+  border-color: var(--color-border-subtle);
+  box-shadow: var(--shadow-card);
+}
+
+html[data-theme="dark"] .password-modal,
+html[data-theme="dark"] .note-preview-modal,
+html[data-theme="dark"] .note-insight-modal,
+html[data-theme="dark"] .pdf-preview-modal,
+html[data-theme="dark"] .schedule-create-modal,
+html[data-theme="dark"] .schedule-read-modal,
+html[data-theme="dark"] .schedule-detail-modal,
+html[data-theme="dark"] .recurring-edit-modal,
+html[data-theme="dark"] .recurring-overview-modal,
+html[data-theme="dark"] .date-picker-popover,
+html[data-theme="dark"] .time-picker-popover,
+html[data-theme="dark"] .schedule-tool-menu-popover {
+  background: var(--color-modal-bg);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+  box-shadow: var(--shadow-modal);
+}
+
+html[data-theme="dark"] .date-picker-popover,
+html[data-theme="dark"] .time-picker-popover,
+html[data-theme="dark"] .schedule-tool-menu-popover {
+  background: var(--color-popover-bg);
+  box-shadow: var(--shadow-dropdown);
+}
+
+html[data-theme="dark"] .calendar-day {
+  background: var(--calendar-day-bg);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .calendar-day:hover,
+html[data-theme="dark"] .calendar-day:focus-visible {
+  background: var(--schedule-hover-bg);
+  border-color: var(--schedule-hover-border);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .calendar-day.muted {
+  background: var(--calendar-day-muted-bg);
+  color: var(--color-text-muted);
+}
+
+html[data-theme="dark"] .calendar-day.selected,
+html[data-theme="dark"] .calendar-day.selected.holiday {
+  background: var(--calendar-selected-bg);
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--teal) 42%, var(--line));
+}
+
+html[data-theme="dark"] .calendar-day.selected:hover,
+html[data-theme="dark"] .calendar-day.selected:focus-visible {
+  background: var(--calendar-selected-hover-bg);
+  box-shadow:
+    inset 0 0 0 2px color-mix(in srgb, var(--teal) 46%, var(--line)),
+    0 0 0 3px var(--color-focus-ring);
+}
+
+html[data-theme="dark"] .calendar-day.today:not(.selected) strong,
+html[data-theme="dark"] .calendar-day.selected strong {
+  color: #08111d;
+}
+
+html[data-theme="dark"] .calendar-task-pill {
+  background: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 24%, var(--color-surface-elevated));
+  border-color: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 28%, var(--color-border-subtle));
+  color: var(--color-text-primary);
+}
+
+html[data-theme="dark"] .calendar-task-pill:hover,
+html[data-theme="dark"] .calendar-task-pill:focus-visible {
+  background: var(--schedule-event-hover-bg);
+  border-color: var(--schedule-event-hover-border);
+  color: var(--color-text-primary);
+}
+
+html[data-theme="dark"] .calendar-task-time,
+html[data-theme="dark"] .calendar-task-pill:hover .calendar-task-time,
+html[data-theme="dark"] .calendar-task-pill:focus-visible .calendar-task-time {
+  color: var(--color-text-secondary);
+}
+
+html[data-theme="dark"] .task-check,
+html[data-theme="dark"] .recurring-date-strip button,
+html[data-theme="dark"] .recurring-month-grid button,
+html[data-theme="dark"] .date-picker-day,
+html[data-theme="dark"] .time-picker-presets button,
+html[data-theme="dark"] .time-picker-hour-grid button,
+html[data-theme="dark"] .time-picker-minute-grid button,
+html[data-theme="dark"] .month-picker-grid button,
+html[data-theme="dark"] .today-recurring-item {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .today-recurring-item:hover,
+html[data-theme="dark"] .today-recurring-item:focus-within,
+html[data-theme="dark"] .recurring-date-strip button:hover,
+html[data-theme="dark"] .recurring-date-strip button:focus-visible,
+html[data-theme="dark"] .recurring-month-grid button:hover,
+html[data-theme="dark"] .recurring-month-grid button:focus-visible,
+html[data-theme="dark"] .date-picker-day:hover,
+html[data-theme="dark"] .date-picker-day:focus-visible,
+html[data-theme="dark"] .time-picker-presets button:hover,
+html[data-theme="dark"] .time-picker-hour-grid button:hover,
+html[data-theme="dark"] .time-picker-minute-grid button:hover,
+html[data-theme="dark"] .month-picker-grid button:hover,
+html[data-theme="dark"] .month-picker-grid button:focus-visible {
+  background: var(--schedule-hover-bg);
+  border-color: var(--schedule-hover-border);
+  color: var(--ink);
+}
+
+html[data-theme="dark"] .recurring-progress-ring {
+  background:
+    radial-gradient(circle, var(--color-surface-elevated) 51%, transparent 52%),
+    conic-gradient(
+      var(--recurring-progress-color, var(--teal)) 0 var(--recurring-progress, 0%),
+      var(--color-surface-muted) var(--recurring-progress, 0%) 100%
+    );
+}
+
+html[data-theme="dark"] .settings-form-section,
+html[data-theme="dark"] .settings-inline-status,
+html[data-theme="dark"] .today-work-section,
+html[data-theme="dark"] .schedule-empty,
+html[data-theme="dark"] .attachment-empty,
+html[data-theme="dark"] .admin-stat-card,
+html[data-theme="dark"] .public-share-password-panel {
+  background: var(--color-surface-elevated);
+  border-color: var(--color-border-subtle);
+  color: var(--ink);
+}
+
 .settings-modal-description {
   color: var(--muted);
   line-height: 1.55;
@@ -9989,13 +10215,12 @@ html[data-theme="dark"] textarea::placeholder {
 }
 
 @media (max-width: 1100px) {
-  .schedule-header,
-  .schedule-command-panel {
+  .schedule-header {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .schedule-view-tabs,
-  .schedule-quick-actions {
+  .schedule-header-actions {
     justify-self: stretch;
   }
 
@@ -10007,12 +10232,12 @@ html[data-theme="dark"] textarea::placeholder {
     flex: 1 1 auto;
   }
 
-  .schedule-quick-actions {
-    justify-content: stretch;
+  .schedule-header-actions {
+    justify-content: flex-start;
   }
 
-  .schedule-quick-actions button {
-    flex: 1 1 140px;
+  .schedule-primary-action {
+    flex: 1 1 auto;
   }
 
   .today-work-content {
@@ -10078,14 +10303,6 @@ html[data-theme="dark"] textarea::placeholder {
     width: 100%;
   }
 
-  .schedule-stat-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .schedule-stat-card.recurring {
-    grid-column: 1 / -1;
-  }
-
   .today-work-panel {
     inset:
       max(12px, env(safe-area-inset-top))
@@ -10124,11 +10341,21 @@ html[data-theme="dark"] textarea::placeholder {
     width: 100%;
   }
 
-  .schedule-stat-grid {
-    grid-template-columns: minmax(0, 1fr);
+  .schedule-header-actions {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    width: 100%;
   }
 
-  .schedule-stat-card.recurring {
-    grid-column: auto;
+  .schedule-query-result {
+    grid-column: 1 / -1;
+    justify-content: center;
+    text-align: center;
+    width: 100%;
+  }
+
+  .schedule-tool-menu-popover {
+    min-width: min(280px, calc(100vw - 32px));
+    right: 0;
   }
 }

@@ -12,6 +12,7 @@ import {
   writeStoredThemePreference,
   type ResolvedTheme
 } from "../lib/theme";
+import { normalizePrimaryScheduleView } from "../lib/scheduleNavigation";
 import {
   defaultMatrixLabels,
   matrixLabelFields,
@@ -208,7 +209,7 @@ export function SettingsModal({
 }) {
   const [defaultHome, setDefaultHome] = useState<UserPreferencesDocument["defaultHome"]>(preferences?.defaultHome ?? "notes");
   const [scheduleDefaultView, setScheduleDefaultView] = useState<UserPreferencesDocument["scheduleDefaultView"]>(
-    preferences?.scheduleDefaultView ?? "todo"
+    normalizePrimaryScheduleView(preferences?.scheduleDefaultView)
   );
   const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() => normalizeMatrixLabels(preferences?.matrixLabels));
   const [busy, setBusy] = useState(false);
@@ -218,12 +219,12 @@ export function SettingsModal({
   const nextMatrixLabels = useMemo(() => sanitizeMatrixLabelsForSave(matrixLabels), [matrixLabels]);
   const hasChanges =
     defaultHome !== (preferences?.defaultHome ?? "notes")
-    || scheduleDefaultView !== (preferences?.scheduleDefaultView ?? "todo")
+    || scheduleDefaultView !== normalizePrimaryScheduleView(preferences?.scheduleDefaultView)
     || !sameMatrixLabels(nextMatrixLabels, savedMatrixLabels);
 
   useEffect(() => {
     setDefaultHome(preferences?.defaultHome ?? "notes");
-    setScheduleDefaultView(preferences?.scheduleDefaultView ?? "todo");
+    setScheduleDefaultView(normalizePrimaryScheduleView(preferences?.scheduleDefaultView));
     setMatrixLabels(normalizeMatrixLabels(preferences?.matrixLabels));
   }, [preferences]);
 
@@ -311,7 +312,7 @@ export function SettingsModal({
               </select>
             </label>
             <label>
-              일정관리 기본 탭
+              일정관리 기본 화면
               <select
                 onChange={(event) => setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"])}
                 value={scheduleDefaultView}
@@ -319,8 +320,6 @@ export function SettingsModal({
                 <option value="todo">할 일</option>
                 <option value="calendar">달력</option>
                 <option value="matrix">매트릭스</option>
-                <option value="recurring">반복</option>
-                <option value="completed">완료</option>
               </select>
             </label>
           </section>

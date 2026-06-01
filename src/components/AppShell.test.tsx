@@ -97,6 +97,25 @@ describe("SettingsModal", () => {
       scheduleDefaultView: "todo"
     });
   });
+
+  it("keeps recurring and completed out of the default schedule screen selector", () => {
+    render(
+      <SettingsModal
+        preferences={{ ...preferences(), scheduleDefaultView: "completed" }}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+      />
+    );
+
+    const defaultScheduleSelect = screen.getByLabelText("일정관리 기본 화면") as HTMLSelectElement;
+
+    expect(defaultScheduleSelect.value).toBe("todo");
+    expect(screen.getByRole("option", { name: "할 일" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "달력" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "매트릭스" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "반복" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "완료" })).not.toBeInTheDocument();
+  });
 });
 
 describe("ThemeToggleButton", () => {
