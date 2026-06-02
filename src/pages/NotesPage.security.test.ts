@@ -181,6 +181,34 @@ describe("NotesPage security controls", () => {
     expect(previewModalSync).not.toContain("}, [isEditing, note]);");
   });
 
+  it("does not persist public share URL keys or content keys in browser storage", () => {
+    expect(notesPageSource).toContain("const publicShareUrlMemoryCache = new Map<string, string>();");
+    expect(notesPageSource).toContain("const publicShareContentKeyMemoryCache = new Map<string, string>();");
+    expect(notesPageSource).not.toContain("window.localStorage.setItem(publicShareUrlStorageKey");
+    expect(notesPageSource).not.toContain("window.localStorage.getItem(publicShareUrlStorageKey");
+    expect(notesPageSource).not.toContain("window.localStorage.setItem(publicShareContentKeyStorageKey");
+    expect(notesPageSource).not.toContain("window.localStorage.getItem(publicShareContentKeyStorageKey");
+  });
+
+  it("keeps attachment upload, preview, download, and delete pending states independent", () => {
+    expect(notesPageSource).toContain("interface AttachmentActionBusyState");
+    expect(notesPageSource).toContain("deletingIds: string[];");
+    expect(notesPageSource).toContain("downloadingId: string | null;");
+    expect(notesPageSource).toContain("previewingId: string | null;");
+    expect(notesPageSource).toContain("attachmentUploadInFlightRef");
+    expect(notesPageSource).not.toContain("disabled={Boolean(busyId)}");
+    expect(notesPageSource).not.toContain("setAttachmentBusyId(\"upload\")");
+  });
+
+  it("serializes autosaves and flushes pending dirty drafts on lifecycle changes", () => {
+    expect(notesPageSource).toContain("const saveInFlightRef = useRef<Promise<PersistedNoteResult | null> | null>(null);");
+    expect(notesPageSource).toContain("saveQueuedRef.current = true;");
+    expect(notesPageSource).toContain("flushCurrentNoteSaveRef.current(false)");
+    expect(notesPageSource).toContain("window.addEventListener(\"pagehide\", flushPendingSave)");
+    expect(notesPageSource).toContain("window.addEventListener(\"beforeunload\", handleBeforeUnload)");
+    expect(notesPageSource).toContain("confirmLeaveCurrentEditor(note.id)");
+  });
+
   it("bounds XLSX merge ranges before materializing skipped preview cells", () => {
     const worksheetHelper =
       notesPageSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";

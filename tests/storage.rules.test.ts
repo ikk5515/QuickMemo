@@ -21,6 +21,7 @@ const encryptedPayload = {
 const bucketUrl = "gs://quickmemo-rules-test.appspot.com";
 const noteStoragePath = "notes/note-a/attachments/attachment-a/data";
 const revokedNoteStoragePath = "notes/revoked-share/attachments/revoked-attachment/data";
+const revokedUploadStoragePath = "notes/revoked-share/attachments/revoked-upload/data";
 const shareStoragePath = "publicNoteShares/share-a/attachments/attachment-a/data";
 
 function encryptedBytes(size = 32) {
@@ -197,8 +198,8 @@ describeStorageRules("storage security rules", () => {
         isDeleted: false,
         updatedBy: "user-a"
       });
-      await setDoc(doc(db, "notes/revoked-share/attachments/revoked-attachment"), {
-        noteId: "revoked-share",
+        await setDoc(doc(db, "notes/revoked-share/attachments/revoked-attachment"), {
+          noteId: "revoked-share",
         version: 1,
         algorithm: "AES-GCM",
         fileName: "archive",
@@ -209,26 +210,53 @@ describeStorageRules("storage security rules", () => {
         encryptedSize: 32,
         isReady: true,
         iv: Bytes.fromUint8Array(new Uint8Array(12)),
-        uploadedBy: "user-a",
-        createdAt: new Date("2026-05-18T08:00:00.000Z")
+          uploadedBy: "user-a",
+          createdAt: new Date("2026-05-18T08:00:00.000Z")
+        });
+        await setDoc(doc(db, "notes/revoked-share/attachments/revoked-upload"), {
+          noteId: "revoked-share",
+          version: 1,
+          algorithm: "AES-GCM",
+          fileName: "archive",
+          extension: "zip",
+          mimeType: "application/zip",
+          originalSize: 16,
+          storagePath: revokedUploadStoragePath,
+          encryptedSize: 32,
+          isReady: false,
+          iv: Bytes.fromUint8Array(new Uint8Array(12)),
+          uploadedBy: "user-b",
+          createdAt: new Date("2026-05-18T08:00:00.000Z")
+        });
+        await uploadTaskPromise(
+          context.storage(bucketUrl).ref(revokedNoteStoragePath).put(
+            encryptedBytes(),
+            encryptedUploadMetadata({
+              noteId: "revoked-share",
+              attachmentId: "revoked-attachment",
+              uploadedBy: "user-a"
+            })
+          )
+        );
       });
-      await uploadTaskPromise(
-        context.storage(bucketUrl).ref(revokedNoteStoragePath).put(
-          encryptedBytes(),
-          encryptedUploadMetadata({
-            noteId: "revoked-share",
-            attachmentId: "revoked-attachment",
-            uploadedBy: "user-a"
-          })
-        )
-      );
-    });
 
     const ownerStorage = testEnv.authenticatedContext("user-a").storage(bucketUrl);
     const revokedStorage = testEnv.authenticatedContext("user-b").storage(bucketUrl);
 
     await assertSucceeds(ownerStorage.ref(revokedNoteStoragePath).getMetadata());
     await assertFails(revokedStorage.ref(revokedNoteStoragePath).getMetadata());
+    await assertFails(
+      uploadTaskPromise(
+        revokedStorage.ref(revokedUploadStoragePath).put(
+          encryptedBytes(),
+          encryptedUploadMetadata({
+            noteId: "revoked-share",
+            attachmentId: "revoked-upload",
+            uploadedBy: "user-b"
+          })
+        )
+      )
+    );
   });
 
   it("allows active public share attachment reads but validates owner uploads", async () => {

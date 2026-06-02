@@ -1512,9 +1512,15 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDoc(doc(testEnv.authenticatedContext("user-a").firestore(), "notes/revoked-share")));
     const revokedParticipantDb = testEnv.authenticatedContext("user-b").firestore();
 
-    await assertFails(getDoc(doc(revokedParticipantDb, "notes/revoked-share")));
-    await assertFails(
-      getDocs(
+	    await assertFails(getDoc(doc(revokedParticipantDb, "notes/revoked-share")));
+	    await assertFails(
+	      setDoc(
+	        doc(revokedParticipantDb, "notes/revoked-share/attachments/revoked-upload"),
+	        attachmentDocument("revoked-share", { uploadedBy: "user-b" })
+	      )
+	    );
+	    await assertFails(
+	      getDocs(
         query(
           collection(revokedParticipantDb, "notes"),
           where("ownerUid", "==", "user-a"),

@@ -1,9 +1,14 @@
 import type { NoteAttachmentDocument } from "../types";
 
 export const encryptedAttachmentOverheadBytes = 16;
-export const maxAttachmentFileBytes = 50 * 1024 * 1024;
+export const maxAttachmentFileMegabytes = 150;
+export const maxAttachmentFileBytes = maxAttachmentFileMegabytes * 1024 * 1024;
+export const maxAttachmentFileLabel = `${maxAttachmentFileMegabytes}MB`;
 export const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
 export const maxAttachmentStorageBytes = 1024 * 1024 * 1024;
+export const maxAttachmentPreviewMegabytes = 25;
+export const maxAttachmentPreviewBytes = maxAttachmentPreviewMegabytes * 1024 * 1024;
+export const maxAttachmentPreviewLabel = `${maxAttachmentPreviewMegabytes}MB`;
 
 export const allowedAttachmentExtensions = [
   "pdf",
@@ -91,7 +96,7 @@ export function attachmentValidationError(file: File) {
   }
 
   if (file.size > maxAttachmentFileBytes) {
-    return `파일 크기는 ${formatFileSize(maxAttachmentFileBytes)} 이하만 첨부할 수 있습니다.`;
+    return `최대 ${maxAttachmentFileLabel}까지 업로드할 수 있습니다.`;
   }
 
   return null;

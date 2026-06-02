@@ -5,6 +5,8 @@ import {
   attachmentDownloadName,
   formatFileSize,
   isPublicShareRasterImageExtension,
+  maxAttachmentPreviewBytes,
+  maxAttachmentPreviewLabel,
   publicShareAttachmentMimeMatchesExtension,
   safePublicShareAttachmentMimeType
 } from "../lib/attachments";
@@ -41,15 +43,11 @@ import {
 interface PublicShareAttachmentView {
   id: string;
   downloadName: string;
-  downloadUrl: string;
   extension: string;
   mimeType: string;
   originalSize: number;
-  previewUrl: string | null;
-  bytes: Uint8Array;
+  source: PublicNoteShareAttachmentSnapshot;
 }
-
-type PublicShareImageAttachmentView = PublicShareAttachmentView & { previewUrl: string };
 
 interface PublicShareContent {
   attachments: PublicShareAttachmentView[];
@@ -67,6 +65,8 @@ export default function PublicSharePage() {
   const [share, setShare] = useState<PublicNoteShareSnapshot | null>(null);
   const [shareKeyValue, setShareKeyValue] = useState<string | null>(null);
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
+  const [attachmentAction, setAttachmentAction] = useState<{ id: string; kind: "download" | "preview" } | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
   const [passwordError, setPasswordError] = useState<string | null>(null);
@@ -84,11 +84,11 @@ export default function PublicSharePage() {
 
   const applyShareContent = useCallback((content: PublicShareContent) => {
     revokeAttachmentUrls();
-    objectUrlsRef.current = content.attachments.flatMap(publicAttachmentObjectUrls);
     setTitle(content.title);
     setBodyHtml(content.bodyHtml);
     setFontSize(content.fontSize);
     setAttachments(content.attachments);
+    setAttachmentError(null);
     setPasswordRequired(false);
   }, [revokeAttachmentUrls]);
 
@@ -98,6 +98,8 @@ export default function PublicSharePage() {
     setBodyHtml("");
     setAttachments([]);
     setAttachmentPreview(null);
+    setAttachmentAction(null);
+    setAttachmentError(null);
   }, [revokeAttachmentUrls]);
 
   useEffect(() => {
@@ -133,7 +135,6 @@ export default function PublicSharePage() {
       const content = await decryptPublicShareContent(shareId ?? "", nextShare, contentKey);
 
       if (!active || currentVersion !== updateVersion) {
-        content.attachments.flatMap(publicAttachmentObjectUrls).forEach((url) => URL.revokeObjectURL(url));
         return;
       }
 
@@ -253,119 +254,202 @@ export default function PublicSharePage() {
     }
   }
 
+  function previewObjectUrl(bytes: Uint8Array, type: string) {
+    const blobPart =
+      bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+        ? bytes.buffer
+        : (() => {
+            const copy = new Uint8Array(bytes.byteLength);
+            copy.set(bytes);
+            return copy.buffer;
+          })();
+    const url = URL.createObjectURL(new Blob([blobPart], { type }));
+
+    objectUrlsRef.current.push(url);
+    return url;
+  }
+
+  function closeAttachmentPreview() {
+    setAttachmentPreview(null);
+    revokeAttachmentUrls();
+  }
+
+  async function decryptAttachmentForAction(attachment: PublicShareAttachmentView) {
+    const contentKey = contentKeyRef.current;
+
+    if (!contentKey) {
+      throw new Error("공유 첨부파일 복호화 키를 찾을 수 없습니다.");
+    }
+
+    return decryptPublicAttachmentBytes(attachment.source, contentKey);
+  }
+
+  async function downloadAttachment(attachment: PublicShareAttachmentView) {
+    setAttachmentAction({ id: attachment.id, kind: "download" });
+    setAttachmentError(null);
+
+    try {
+      const bytes = await decryptAttachmentForAction(attachment);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+      const anchor = document.createElement("a");
+
+      anchor.href = url;
+      anchor.download = attachment.downloadName;
+      anchor.rel = "noopener noreferrer";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      setAttachmentError("첨부파일을 다운로드하지 못했습니다.");
+    } finally {
+      setAttachmentAction((current) => (current?.id === attachment.id && current.kind === "download" ? null : current));
+    }
+  }
+
   async function openAttachmentPreview(attachment: PublicShareAttachmentView) {
     const fileName = attachment.downloadName;
+    const extension = attachment.extension.toLowerCase();
 
-    if (isImageAttachment(attachment)) {
-      setAttachmentPreview({ fileName, kind: "image", label: "이미지 미리보기", url: attachment.previewUrl });
-      return;
-    }
+    setAttachmentAction({ id: attachment.id, kind: "preview" });
+    setAttachmentError(null);
+    revokeAttachmentUrls();
 
-    if (!previewableAttachmentExtensions.has(attachment.extension)) {
-      setAttachmentPreview({
-        fileName,
-        kind: "unsupported",
-        label: "미리보기",
-        text: "이 파일 형식은 브라우저 미리보기를 지원하지 않습니다. 다운로드해서 확인해주세요."
-      });
-      return;
-    }
+    try {
+      if (attachment.originalSize > maxAttachmentPreviewBytes) {
+        setAttachmentPreview({
+          fileName,
+          kind: "unsupported",
+          label: "대용량 파일 미리보기 안내",
+          text: `미리보기는 ${maxAttachmentPreviewLabel} 이하 파일만 지원합니다. 원본 파일은 다운로드해서 확인해주세요.`
+        });
+        return;
+      }
 
-    if (attachment.extension === "pdf") {
-      setAttachmentPreview({ bytes: attachment.bytes, fileName, kind: "pdf", label: "PDF 미리보기", url: attachment.downloadUrl });
-      return;
-    }
+      const bytes = await decryptAttachmentForAction(attachment);
+      const downloadUrl = previewObjectUrl(bytes, "application/octet-stream");
 
-    if (attachment.extension === "docx") {
-      const srcDoc = await renderSafeDocxPreviewSrcDoc(attachment.bytes);
+      if (isImageAttachment(attachment)) {
+        setAttachmentPreview({
+          fileName,
+          kind: "image",
+          label: "이미지 미리보기",
+          url: previewObjectUrl(bytes, safePublicShareAttachmentMimeType(extension))
+        });
+        return;
+      }
 
-      setAttachmentPreview(
-        srcDoc
-          ? { fileName, kind: "docx", label: "DOCX 양식 미리보기", srcDoc, url: attachment.downloadUrl }
-          : {
-              fileName,
-              kind: "unsupported",
-              label: "DOCX 미리보기 안내",
-              text: "DOCX 양식 미리보기를 안전하게 만들지 못했습니다. 원본 파일은 다운로드해서 확인해주세요.",
-              url: attachment.downloadUrl
-            }
-      );
-      return;
-    }
+      if (!previewableAttachmentExtensions.has(extension)) {
+        setAttachmentPreview({
+          fileName,
+          kind: "unsupported",
+          label: "미리보기",
+          text: "이 파일 형식은 브라우저 미리보기를 지원하지 않습니다. 다운로드해서 확인해주세요.",
+          url: downloadUrl
+        });
+        return;
+      }
 
-    if (attachment.extension === "hwp") {
-      const preview = await extractHwpPreviewHtml(attachment.bytes);
+      if (extension === "pdf") {
+        setAttachmentPreview({ bytes, fileName, kind: "pdf", label: "PDF 미리보기", url: downloadUrl });
+        return;
+      }
 
-      setAttachmentPreview(
-        preview.safeForRichPreview
-          ? {
-              bytes: attachment.bytes,
-              fallbackHtml: preview.html,
-              fileName,
-              kind: "hwp",
-              label: "HWP 문서 미리보기",
-              url: attachment.downloadUrl
-            }
-          : preview.html
-            ? { fileName, html: preview.html, kind: "html", label: "HWP 안전 본문 미리보기", url: attachment.downloadUrl }
+      if (extension === "docx") {
+        const srcDoc = await renderSafeDocxPreviewSrcDoc(bytes);
+
+        setAttachmentPreview(
+          srcDoc
+            ? { fileName, kind: "docx", label: "DOCX 양식 미리보기", srcDoc, url: downloadUrl }
             : {
                 fileName,
                 kind: "unsupported",
-                label: "HWP 미리보기 안내",
-                text: "HWP 미리보기가 안전 제한을 초과했거나 지원하지 않는 문서입니다. 원본 파일은 다운로드해서 확인해주세요.",
-                url: attachment.downloadUrl
+                label: "DOCX 미리보기 안내",
+                text: "DOCX 양식 미리보기를 안전하게 만들지 못했습니다. 원본 파일은 다운로드해서 확인해주세요.",
+                url: downloadUrl
               }
-      );
-      return;
-    }
+        );
+        return;
+      }
 
-    if (attachment.extension === "hwpx") {
-      const html = extractHwpxPreviewHtml(attachment.bytes);
+      if (extension === "hwp") {
+        const preview = await extractHwpPreviewHtml(bytes);
 
-      setAttachmentPreview({
-        fileName,
-        html,
-        kind: html ? "html" : "unsupported",
-        label: "HWPX 문서 미리보기",
-        text: html ? undefined : "HWPX 문서에서 안전하게 표시할 본문을 찾지 못했습니다.",
-        url: attachment.downloadUrl
-      });
-      return;
-    }
+        setAttachmentPreview(
+          preview.safeForRichPreview
+            ? {
+                bytes,
+                fallbackHtml: preview.html,
+                fileName,
+                kind: "hwp",
+                label: "HWP 문서 미리보기",
+                url: downloadUrl
+              }
+            : preview.html
+              ? { fileName, html: preview.html, kind: "html", label: "HWP 안전 본문 미리보기", url: downloadUrl }
+              : {
+                  fileName,
+                  kind: "unsupported",
+                  label: "HWP 미리보기 안내",
+                  text: "HWP 미리보기가 안전 제한을 초과했거나 지원하지 않는 문서입니다. 원본 파일은 다운로드해서 확인해주세요.",
+                  url: downloadUrl
+                }
+        );
+        return;
+      }
 
-    if (attachment.extension === "xlsx") {
-      const html = extractXlsxPreviewHtml(attachment.bytes);
+      if (extension === "hwpx") {
+        const html = extractHwpxPreviewHtml(bytes);
 
-      setAttachmentPreview({
-        fileName,
-        html,
-        kind: html ? "html" : "unsupported",
-        label: "XLSX 스프레드시트 미리보기",
-        text: html ? undefined : "XLSX 파일에서 안전하게 표시할 시트 내용을 찾지 못했습니다.",
-        url: attachment.downloadUrl
-      });
-      return;
-    }
+        setAttachmentPreview({
+          fileName,
+          html,
+          kind: html ? "html" : "unsupported",
+          label: "HWPX 문서 미리보기",
+          text: html ? undefined : "HWPX 문서에서 안전하게 표시할 본문을 찾지 못했습니다.",
+          url: downloadUrl
+        });
+        return;
+      }
 
-    if (textPreviewAttachmentExtensions.has(attachment.extension)) {
-      setAttachmentPreview({
-        fileName,
-        kind: "text",
-        label: `${attachment.extension.toUpperCase()} 미리보기`,
-        text: decodeTextAttachmentPreview(attachment.bytes, attachment.extension),
-        url: attachment.downloadUrl
-      });
-      return;
-    }
+      if (extension === "xlsx") {
+        const html = extractXlsxPreviewHtml(bytes);
 
-    if (legacyBinaryPreviewAttachmentExtensions.has(attachment.extension)) {
-      setAttachmentPreview({
-        fileName,
-        kind: "unsupported",
-        label: `${attachment.extension.toUpperCase()} 미리보기 안내`,
-        text: legacyBinaryPreviewMessage(attachment.extension),
-        url: attachment.downloadUrl
-      });
+        setAttachmentPreview({
+          fileName,
+          html,
+          kind: html ? "html" : "unsupported",
+          label: "XLSX 스프레드시트 미리보기",
+          text: html ? undefined : "XLSX 파일에서 안전하게 표시할 시트 내용을 찾지 못했습니다.",
+          url: downloadUrl
+        });
+        return;
+      }
+
+      if (textPreviewAttachmentExtensions.has(extension)) {
+        setAttachmentPreview({
+          fileName,
+          kind: "text",
+          label: `${extension.toUpperCase()} 미리보기`,
+          text: decodeTextAttachmentPreview(bytes, extension),
+          url: downloadUrl
+        });
+        return;
+      }
+
+      if (legacyBinaryPreviewAttachmentExtensions.has(extension)) {
+        setAttachmentPreview({
+          fileName,
+          kind: "unsupported",
+          label: `${extension.toUpperCase()} 미리보기 안내`,
+          text: legacyBinaryPreviewMessage(extension),
+          url: downloadUrl
+        });
+      }
+    } catch {
+      setAttachmentError("첨부파일 미리보기를 열지 못했습니다.");
+    } finally {
+      setAttachmentAction((current) => (current?.id === attachment.id && current.kind === "preview" ? null : current));
     }
   }
 
@@ -420,23 +504,13 @@ export default function PublicSharePage() {
                   <File size={17} />
                   첨부파일
                 </h2>
+                {attachmentError && <p className="form-error">{attachmentError}</p>}
                 <div className="public-share-attachment-list">
                   {attachments.map((attachment) => (
                     <article className="public-share-attachment" key={attachment.id}>
-                      {isImageAttachment(attachment) ? (
-                        <button
-                          aria-label={`${attachment.downloadName} 미리보기`}
-                          className="public-share-image-link"
-                          onClick={() => void openAttachmentPreview(attachment)}
-                          type="button"
-                        >
-                          <img src={attachment.previewUrl} alt={attachment.downloadName} />
-                        </button>
-                      ) : (
-                        <span className="public-share-file-icon">
-                          <File size={18} />
-                        </span>
-                      )}
+                      <span className="public-share-file-icon">
+                        <File size={18} />
+                      </span>
                       <div>
                         <strong>{attachment.downloadName}</strong>
                         <span>
@@ -446,16 +520,30 @@ export default function PublicSharePage() {
                       <div className="public-share-attachment-actions">
                         <button
                           className="secondary-button public-share-download"
+                          disabled={attachmentAction?.id === attachment.id && attachmentAction.kind === "preview"}
                           type="button"
                           onClick={() => void openAttachmentPreview(attachment)}
                         >
-                          <Eye size={15} />
+                          {attachmentAction?.id === attachment.id && attachmentAction.kind === "preview" ? (
+                            <Loader2 className="spin" size={15} />
+                          ) : (
+                            <Eye size={15} />
+                          )}
                           미리보기
                         </button>
-                        <a className="secondary-button public-share-download" href={attachment.downloadUrl} download={attachment.downloadName}>
-                          <Download size={15} />
+                        <button
+                          className="secondary-button public-share-download"
+                          disabled={attachmentAction?.id === attachment.id && attachmentAction.kind === "download"}
+                          type="button"
+                          onClick={() => void downloadAttachment(attachment)}
+                        >
+                          {attachmentAction?.id === attachment.id && attachmentAction.kind === "download" ? (
+                            <Loader2 className="spin" size={15} />
+                          ) : (
+                            <Download size={15} />
+                          )}
                           다운로드
-                        </a>
+                        </button>
                       </div>
                     </article>
                   ))}
@@ -465,13 +553,13 @@ export default function PublicSharePage() {
           </>
         )}
       </section>
-      {attachmentPreview && <AttachmentPreviewModal preview={attachmentPreview} onClose={() => setAttachmentPreview(null)} />}
+      {attachmentPreview && <AttachmentPreviewModal preview={attachmentPreview} onClose={closeAttachmentPreview} />}
     </main>
   );
 }
 
-async function decryptPublicAttachment(attachment: PublicNoteShareAttachmentSnapshot, shareKey: CryptoKey) {
-  const bytes = await decryptBytes(
+async function decryptPublicAttachmentBytes(attachment: PublicNoteShareAttachmentSnapshot, shareKey: CryptoKey) {
+  return decryptBytes(
     {
       version: 1,
       algorithm: "AES-GCM",
@@ -480,23 +568,19 @@ async function decryptPublicAttachment(attachment: PublicNoteShareAttachmentSnap
     },
     shareKey
   );
+}
+
+function publicShareAttachmentView(attachment: PublicNoteShareAttachmentSnapshot) {
   const extension = attachment.extension.toLowerCase();
   const mimeType = attachment.mimeType.trim().toLowerCase();
-  const downloadUrl = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
-  const previewUrl =
-    isPublicShareRasterImageExtension(extension) && publicShareAttachmentMimeMatchesExtension(extension, mimeType)
-      ? URL.createObjectURL(new Blob([bytes], { type: safePublicShareAttachmentMimeType(extension) }))
-      : null;
 
   return {
     id: attachment.id,
     downloadName: attachmentDownloadName({ ...attachment, extension }),
-    downloadUrl,
     extension,
     mimeType,
     originalSize: attachment.originalSize,
-    previewUrl,
-    bytes
+    source: attachment
   } satisfies PublicShareAttachmentView;
 }
 
@@ -507,7 +591,7 @@ async function decryptPublicShareContent(shareId: string, share: PublicNoteShare
     getPublicNoteShareAttachments(shareId)
   ]);
   const parsedBody = parseEditorContent(decryptedBody);
-  const attachments = await Promise.all(encryptedAttachments.map((attachment) => decryptPublicAttachment(attachment, shareKey)));
+  const attachments = encryptedAttachments.map(publicShareAttachmentView);
 
   return {
     title: decryptedTitle || "제목 없음",
@@ -522,13 +606,8 @@ function shareKeyFromHash() {
   return new URLSearchParams(hash).get("key");
 }
 
-function publicAttachmentObjectUrls(attachment: PublicShareAttachmentView) {
-  return attachment.previewUrl ? [attachment.downloadUrl, attachment.previewUrl] : [attachment.downloadUrl];
-}
-
-function isImageAttachment(attachment: PublicShareAttachmentView): attachment is PublicShareImageAttachmentView {
-  return Boolean(attachment.previewUrl)
-    && isPublicShareRasterImageExtension(attachment.extension)
+function isImageAttachment(attachment: PublicShareAttachmentView) {
+  return isPublicShareRasterImageExtension(attachment.extension)
     && publicShareAttachmentMimeMatchesExtension(attachment.extension, attachment.mimeType);
 }
 

@@ -10,7 +10,9 @@ const oauthTokenUrl = "https://oauth2.googleapis.com/token";
 const databaseId = "(default)";
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const blobContentType = "application/octet-stream";
-const maxAttachmentFileBytes = 50 * 1024 * 1024;
+const maxAttachmentFileMegabytes = 150;
+const maxAttachmentFileBytes = maxAttachmentFileMegabytes * 1024 * 1024;
+const maxAttachmentFileLabel = `${maxAttachmentFileMegabytes}MB`;
 const encryptedAttachmentOverheadBytes = 16;
 const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
 const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
@@ -36,6 +38,27 @@ const allowedAttachmentExtensions = new Set([
   "gif",
   "zip"
 ]);
+const publicShareAttachmentMimeTypes = {
+  csv: "text/csv",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  gif: "image/gif",
+  hwp: "application/x-hwp",
+  hwpx: "application/vnd.hancom.hwpx",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  json: "application/json",
+  md: "text/markdown",
+  pdf: "application/pdf",
+  png: "image/png",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  txt: "text/plain",
+  webp: "image/webp",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  zip: "application/zip"
+};
 
 class HttpError extends Error {
   constructor(statusCode, publicMessage, internalMessage = publicMessage) {
@@ -360,6 +383,16 @@ function safeMimeType(value) {
   return value || blobContentType;
 }
 
+function safePublicShareMimeType(extension, mimeType) {
+  const normalizedMimeType = safeMimeType(mimeType).trim().toLowerCase();
+
+  if (normalizedMimeType !== publicShareAttachmentMimeTypes[extension]) {
+    throw new HttpError(400, "공유 첨부파일 MIME 타입이 올바르지 않습니다.", "Public share MIME/extension mismatch");
+  }
+
+  return normalizedMimeType;
+}
+
 function safePositiveInteger(value, fieldName) {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new HttpError(400, "첨부파일 크기가 올바르지 않습니다.", `Invalid ${fieldName}`);
@@ -378,7 +411,7 @@ function validateIvBase64(value) {
 
 function validateAttachmentSizes(originalSize, encryptedSize) {
   if (originalSize > maxAttachmentFileBytes || encryptedSize > maxEncryptedAttachmentBytes || encryptedSize !== originalSize + encryptedAttachmentOverheadBytes) {
-    throw new HttpError(400, "첨부파일은 50.00 MB 이하만 업로드할 수 있습니다.", "Invalid attachment size");
+    throw new HttpError(400, `최대 ${maxAttachmentFileLabel}까지 업로드할 수 있습니다.`, "Invalid attachment size");
   }
 }
 
@@ -399,14 +432,16 @@ function parseClientPayload(clientPayload) {
 
   validateAttachmentSizes(originalSize, encryptedSize);
 
+  const extension = safeExtension(parsed.extension);
+
   return {
     scope,
     attachmentId: safeId(parsed.attachmentId, "attachmentId"),
     noteId: scope === "note" ? safeId(parsed.noteId, "noteId") : "",
     shareId: scope === "publicShare" ? safeId(parsed.shareId, "shareId") : "",
     fileName: safeFileName(parsed.fileName),
-    extension: safeExtension(parsed.extension),
-    mimeType: safeMimeType(parsed.mimeType),
+    extension,
+    mimeType: scope === "publicShare" ? safePublicShareMimeType(extension, parsed.mimeType) : safeMimeType(parsed.mimeType),
     originalSize,
     encryptedSize,
     ivBase64: validateIvBase64(parsed.ivBase64),
@@ -489,8 +524,12 @@ async function canUploadToNote(projectId, uid, note, accessToken) {
   }
 
   const callerProfile = await userProfile(projectId, uid, accessToken);
+  const ownerUid = valueString(note, "ownerUid");
+  const participantUids = valueStringArray(note, "participantUids");
 
-  return callerProfile.isActive && valueStringArray(note, "participantUids").includes(uid);
+  return callerProfile.isActive
+    && participantUids.includes(uid)
+    && ownerAllowsParticipant(note, uid, await userProfile(projectId, ownerUid, accessToken));
 }
 
 function publicShareActive(share, now = Date.now()) {

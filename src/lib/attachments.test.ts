@@ -37,16 +37,20 @@ describe("public share attachment MIME helpers", () => {
     expect(publicShareAttachmentMimeMatchesExtension("zip", "application/x-msdownload")).toBe(false);
   });
 
-  it("allows ZIP files up to the encrypted Storage attachment limit", () => {
+  it("allows ZIP files through the 150MB upload limit and rejects larger files", () => {
     const file = new File([new Uint8Array(1024)], "archive.zip", { type: "application/zip" });
+    const boundaryFile = new File([new Uint8Array(1)], "boundary.zip", { type: "application/zip" });
     const tooLargeFile = new File([new Uint8Array(1)], "large.zip", { type: "application/zip" });
+    Object.defineProperty(boundaryFile, "size", { value: maxAttachmentFileBytes });
     Object.defineProperty(tooLargeFile, "size", { value: maxAttachmentFileBytes + 1 });
 
     expect(attachmentValidationError(file)).toBeNull();
-    expect(attachmentValidationError(tooLargeFile)).toContain("50.00 MB");
+    expect(attachmentValidationError(boundaryFile)).toBeNull();
+    expect(maxAttachmentFileBytes).toBe(150 * 1024 * 1024);
+    expect(attachmentValidationError(tooLargeFile)).toContain("최대 150MB까지 업로드할 수 있습니다.");
   });
 
-  it("keeps individual files at 50 MB while allowing up to 1 GB of stored attachments", () => {
+  it("keeps per-user blob attachment storage capped at 1 GB", () => {
     expect(maxAttachmentStorageBytes).toBe(1024 * 1024 * 1024);
   });
 });

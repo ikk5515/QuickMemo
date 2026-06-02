@@ -143,6 +143,7 @@ service firebase.storage {
       return signedIn()
         && noteActive(note)
         && noteParticipant(note)
+        && ownerAllowsParticipant(note, request.auth.uid)
         && attachment.noteId == noteId
         && attachment.uploadedBy == request.auth.uid
         && attachment.storagePath == noteStoragePath(noteId, attachmentId)

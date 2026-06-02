@@ -74,7 +74,9 @@ import {
   attachmentExtension,
   attachmentValidationError,
   formatFileSize,
-  maxAttachmentFileBytes,
+  maxAttachmentFileLabel,
+  maxAttachmentPreviewBytes,
+  maxAttachmentPreviewLabel,
   safeAttachmentBaseName,
   safePublicShareAttachmentMimeType
 } from "../lib/attachments";
@@ -312,6 +314,8 @@ const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
 const publicShareUrlStoragePrefix = "quickmemo-public-share-url:";
 const publicShareContentKeyStoragePrefix = "quickmemo-public-share-content-key:";
+const publicShareUrlMemoryCache = new Map<string, string>();
+const publicShareContentKeyMemoryCache = new Map<string, string>();
 const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc" };
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
@@ -335,6 +339,18 @@ interface AttachmentUploadProgressState {
   runId: string;
   totalBytes: number;
 }
+
+interface AttachmentActionBusyState {
+  deletingIds: string[];
+  downloadingId: string | null;
+  previewingId: string | null;
+}
+
+const idleAttachmentActionBusyState: AttachmentActionBusyState = {
+  deletingIds: [],
+  downloadingId: null,
+  previewingId: null
+};
 
 const attachmentUploadPhaseLabel: Record<AttachmentUploadPhase, string> = {
   preparing: "첨부 준비 중",
@@ -1336,75 +1352,27 @@ function writeNoteFilter(uid: string, filter: NoteListFilter) {
 }
 
 function readStoredPublicShareUrl(uid: string, shareId: string) {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  try {
-    return window.localStorage.getItem(publicShareUrlStorageKey(uid, shareId));
-  } catch {
-    return null;
-  }
+  return publicShareUrlMemoryCache.get(publicShareUrlStorageKey(uid, shareId)) ?? null;
 }
 
 function writeStoredPublicShareUrl(uid: string, shareId: string, url: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(publicShareUrlStorageKey(uid, shareId), url);
-  } catch {
-    // The share remains valid; only quick re-copy from this browser is unavailable.
-  }
+  publicShareUrlMemoryCache.set(publicShareUrlStorageKey(uid, shareId), url);
 }
 
 function removeStoredPublicShareUrl(uid: string, shareId: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.removeItem(publicShareUrlStorageKey(uid, shareId));
-  } catch {
-    // No action needed.
-  }
+  publicShareUrlMemoryCache.delete(publicShareUrlStorageKey(uid, shareId));
 }
 
 function readStoredPublicShareContentKey(uid: string, shareId: string) {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  try {
-    return window.localStorage.getItem(publicShareContentKeyStorageKey(uid, shareId));
-  } catch {
-    return null;
-  }
+  return publicShareContentKeyMemoryCache.get(publicShareContentKeyStorageKey(uid, shareId)) ?? null;
 }
 
 function writeStoredPublicShareContentKey(uid: string, shareId: string, key: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(publicShareContentKeyStorageKey(uid, shareId), key);
-  } catch {
-    // Sharing still works; automatic updates for password-protected links may need the password again.
-  }
+  publicShareContentKeyMemoryCache.set(publicShareContentKeyStorageKey(uid, shareId), key);
 }
 
 function removeStoredPublicShareContentKey(uid: string, shareId: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.removeItem(publicShareContentKeyStorageKey(uid, shareId));
-  } catch {
-    // No action needed.
-  }
+  publicShareContentKeyMemoryCache.delete(publicShareContentKeyStorageKey(uid, shareId));
 }
 
 function publicShareUrlStorageKey(uid: string, shareId: string) {
@@ -1738,7 +1706,7 @@ export default function NotesPage() {
   const [status, setStatus] = useState("준비됨");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [attachmentBusyId, setAttachmentBusyId] = useState<string | null>(null);
+  const [attachmentActionBusy, setAttachmentActionBusy] = useState<AttachmentActionBusyState>(idleAttachmentActionBusyState);
   const [attachmentUploadProgress, setAttachmentUploadProgress] = useState<AttachmentUploadProgressState | null>(null);
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
@@ -1756,7 +1724,15 @@ export default function NotesPage() {
   const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
   const [noteFilter, setNoteFilter] = useState<NoteListFilter>(defaultNoteFilter);
   const [noteQuery, setNoteQuery] = useState("");
+  const latestEditorRef = useRef(editor);
   const autosaveTimer = useRef<number | null>(null);
+  const saveInFlightRef = useRef<Promise<PersistedNoteResult | null> | null>(null);
+  const saveQueuedRef = useRef(false);
+  const saveCurrentNoteRef = useRef<(showSavedMessage?: boolean) => Promise<PersistedNoteResult | null>>(async () => null);
+  const flushCurrentNoteSaveRef = useRef<(showSavedMessage?: boolean, syncPublicShare?: boolean) => Promise<PersistedNoteResult | null>>(
+    async () => null
+  );
+  const attachmentUploadInFlightRef = useRef(false);
   const cursorPublishTimer = useRef<number | null>(null);
   const lastPublishedCursor = useRef<string | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
@@ -1792,6 +1768,10 @@ export default function NotesPage() {
       ])
     );
   }, [profile, users]);
+
+  useEffect(() => {
+    latestEditorRef.current = editor;
+  }, [editor]);
 
   useEffect(() => {
     if (!profile) {
@@ -1962,7 +1942,7 @@ export default function NotesPage() {
     }
 
     autosaveTimer.current = window.setTimeout(() => {
-      void saveCurrentNote(false);
+      void saveCurrentNoteRef.current(false);
     }, autosaveDelayMs);
 
     return () => {
@@ -1970,8 +1950,6 @@ export default function NotesPage() {
         window.clearTimeout(autosaveTimer.current);
       }
     };
-    // saveCurrentNote reads the current render state; adding it here restarts the debounce on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     editor.title,
     editor.body,
@@ -1983,6 +1961,56 @@ export default function NotesPage() {
     profile,
     saving
   ]);
+
+  useEffect(() => {
+    function clearAutosaveTimer() {
+      if (autosaveTimer.current) {
+        window.clearTimeout(autosaveTimer.current);
+        autosaveTimer.current = null;
+      }
+    }
+
+    function flushPendingSave() {
+      const current = latestEditorRef.current;
+
+      if (!current.dirty || (!current.noteId && !draftHasContent(current))) {
+        return;
+      }
+
+      clearAutosaveTimer();
+      void flushCurrentNoteSaveRef.current(false);
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        flushPendingSave();
+      }
+    }
+
+    function handleBeforeUnload(event: BeforeUnloadEvent) {
+      const current = latestEditorRef.current;
+
+      if (!current.dirty || (!current.noteId && !draftHasContent(current))) {
+        return;
+      }
+
+      flushPendingSave();
+      event.preventDefault();
+      event.returnValue = "";
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", flushPendingSave);
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    return () => {
+      clearAutosaveTimer();
+      flushPendingSave();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", flushPendingSave);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, []);
 
   const activeUsers = useMemo(
     () => users.filter((user) => user.isActive && user.publicKeyJwk),
@@ -2670,6 +2698,22 @@ export default function NotesPage() {
     return unlockedProfile.isAdmin || uid === unlockedProfile.uid || allowedShareTargetSet.has(uid);
   }
 
+  async function confirmLeaveCurrentEditor(targetNoteId: string | null) {
+    const current = latestEditorRef.current;
+
+    if (!current.dirty || current.noteId === targetNoteId || !draftHasContent(current)) {
+      return true;
+    }
+
+    await flushCurrentNoteSave(false);
+
+    if (!latestEditorRef.current.dirty) {
+      return true;
+    }
+
+    return window.confirm("저장되지 않은 편집 내용이 있습니다. 저장하지 않고 이동할까요?");
+  }
+
   async function openNote(note: DecryptedNote, draftOverride?: NoteDraft, shouldAnnounce = true) {
     if (note.isDeleted) {
       setError("복구함의 노트는 먼저 복구한 뒤 불러올 수 있습니다.");
@@ -2679,6 +2723,10 @@ export default function NotesPage() {
     const rawNote = notes.find((current) => current.id === note.id);
 
     if (!rawNote) {
+      return;
+    }
+
+    if (!(await confirmLeaveCurrentEditor(note.id))) {
       return;
     }
 
@@ -2719,17 +2767,21 @@ export default function NotesPage() {
     }
   }
 
-  function startNewNote() {
-    if (editor.dirty && draftHasContent(editor) && !window.confirm("저장되지 않은 편집 내용이 있습니다. 새 노트로 이동할까요?")) {
-      return;
-    }
-
+  function resetEditorToBlank(statusMessage = "새 노트 작성 중") {
     clearEditorCursor();
     setEditor(blankEditor(unlockedProfile.uid));
     setShareOpen(false);
-    setStatus("새 노트 작성 중");
+    setStatus(statusMessage);
     setError(null);
     announceActiveNote(null);
+  }
+
+  async function startNewNote() {
+    if (!(await confirmLeaveCurrentEditor(null))) {
+      return;
+    }
+
+    resetEditorToBlank();
   }
 
   function toggleParticipant(event: ChangeEvent<HTMLInputElement>) {
@@ -3057,7 +3109,9 @@ export default function NotesPage() {
       encryptText(serializeEditorContent(draft.body, draft.fontSize), contentKey)
     ]);
     const noteAttachments = await getNoteAttachments(noteId);
-    const nextAttachments: Parameters<typeof createPublicNoteShareAttachment>[1][] = [];
+    let nextAttachmentCount = 0;
+
+    await deletePublicNoteShareAttachments(share.id);
 
     for (const attachment of noteAttachments) {
       const plainBytes = await decryptBytes(
@@ -3071,7 +3125,7 @@ export default function NotesPage() {
       );
       const encryptedAttachment = await encryptBytes(plainBytes, contentKey);
 
-      nextAttachments.push({
+      await createPublicNoteShareAttachment(share.id, {
         fileName: attachment.fileName,
         extension: attachment.extension,
         mimeType: safePublicShareAttachmentMimeType(attachment.extension),
@@ -3082,18 +3136,32 @@ export default function NotesPage() {
         expiresAt,
         sourceAttachmentId: attachment.id
       });
-    }
-
-    await deletePublicNoteShareAttachments(share.id);
-
-    for (const attachment of nextAttachments) {
-      await createPublicNoteShareAttachment(share.id, attachment);
+      nextAttachmentCount += 1;
     }
 
     await updatePublicNoteShareContent(share.id, {
       encryptedTitle,
       encryptedBody,
-      attachmentCount: nextAttachments.length,
+      attachmentCount: nextAttachmentCount,
+      passwordHash
+    });
+  }
+
+  async function updatePublicShareTextFromNote(
+    share: PublicNoteShareSnapshot,
+    draft: NoteDraft,
+    contentKey: CryptoKey,
+    passwordHash: NonNullable<PublicNoteShareSnapshot["passwordHash"]> | null
+  ) {
+    const [encryptedTitle, encryptedBody] = await Promise.all([
+      encryptText(draft.title.trim() || "제목 없음", contentKey),
+      encryptText(serializeEditorContent(draft.body, draft.fontSize), contentKey)
+    ]);
+
+    await updatePublicNoteShareContent(share.id, {
+      encryptedTitle,
+      encryptedBody,
+      attachmentCount: share.attachmentCount,
       passwordHash
     });
   }
@@ -3115,7 +3183,7 @@ export default function NotesPage() {
     return importAesKeyBase64Url(shareKeyValue);
   }
 
-  async function syncPublicSharesForNote(noteId: string, noteKey: CryptoKey, draft: NoteDraft) {
+  async function syncPublicSharesForNote(noteId: string, noteKey: CryptoKey, draft: NoteDraft, syncAttachments = false) {
     const sharesToSync = ownerPublicShares.filter(
       (share) => share.sourceNoteId === noteId && share.ownerUid === unlockedProfile.uid && publicShareActive(share)
     );
@@ -3136,7 +3204,11 @@ export default function NotesPage() {
           continue;
         }
 
-        await rewritePublicShareContentFromNote(share, noteId, noteKey, draft, contentKey, share.passwordHash ?? null);
+        if (syncAttachments) {
+          await rewritePublicShareContentFromNote(share, noteId, noteKey, draft, contentKey, share.passwordHash ?? null);
+        } else {
+          await updatePublicShareTextFromNote(share, draft, contentKey, share.passwordHash ?? null);
+        }
       } catch {
         syncFailed = true;
       }
@@ -3151,7 +3223,7 @@ export default function NotesPage() {
     }
   }
 
-  async function syncPublicSharesForNoteTarget(noteId: string, noteKey: CryptoKey) {
+  async function syncPublicSharesForNoteTarget(noteId: string, noteKey: CryptoKey, syncAttachments = false) {
     const storedNote = [...decryptedNotes, ...decryptedDeletedNotes].find((note) => note.id === noteId) ?? null;
     const draft =
       editor.noteId === noteId
@@ -3164,7 +3236,7 @@ export default function NotesPage() {
       return;
     }
 
-    await syncPublicSharesForNote(noteId, noteKey, draft);
+    await syncPublicSharesForNote(noteId, noteKey, draft, syncAttachments);
   }
 
   async function stopPublicSharesForNote(noteId: string) {
@@ -3194,8 +3266,9 @@ export default function NotesPage() {
   }
 
   async function persistCurrentNote(showSavedMessage = true, syncPublicShare = true): Promise<PersistedNoteResult | null> {
-    if (saving) {
-      return null;
+    if (saveInFlightRef.current) {
+      saveQueuedRef.current = true;
+      return saveInFlightRef.current;
     }
 
     const draft = {
@@ -3205,9 +3278,9 @@ export default function NotesPage() {
     };
 
     setSaving(true);
-    setError(null);
+    const savePromise = (async () => {
+      setError(null);
 
-    try {
       if (editor.noteId && editor.noteKey) {
         const previousDraft = activeRemoteNote ? draftFromNote(activeRemoteNote) : null;
         const saveDraft =
@@ -3282,24 +3355,82 @@ export default function NotesPage() {
       }
       setStatus(showSavedMessage ? "노트를 저장 목록에 추가했습니다." : "자동 저장됨");
       return { noteId: created.id, noteKey, draft: saveDraft };
-    } catch {
+    })().catch(() => {
       setError("노트를 저장하지 못했습니다.");
       return null;
+    });
+
+    saveInFlightRef.current = savePromise;
+
+    try {
+      return await savePromise;
     } finally {
+      saveInFlightRef.current = null;
       setSaving(false);
+
+      if (saveQueuedRef.current) {
+        saveQueuedRef.current = false;
+
+        window.setTimeout(() => {
+          const current = latestEditorRef.current;
+
+          if (current.dirty && (current.noteId || draftHasContent(current))) {
+            void saveCurrentNoteRef.current(false);
+          }
+        }, 0);
+      }
     }
+  }
+
+  async function flushCurrentNoteSave(showSavedMessage = false, syncPublicShare = true) {
+    if (autosaveTimer.current) {
+      window.clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
+
+    let result: PersistedNoteResult | null = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = latestEditorRef.current;
+
+      if (!current.dirty || (!current.noteId && !draftHasContent(current))) {
+        return result;
+      }
+
+      result = await persistCurrentNote(showSavedMessage && attempt === 0, syncPublicShare);
+
+      if (!result && latestEditorRef.current.dirty) {
+        return null;
+      }
+    }
+
+    return result;
   }
 
   async function saveCurrentNote(showSavedMessage = true) {
-    await persistCurrentNote(showSavedMessage);
+    return persistCurrentNote(showSavedMessage);
   }
+
+  saveCurrentNoteRef.current = saveCurrentNote;
+  flushCurrentNoteSaveRef.current = flushCurrentNoteSave;
 
   async function ensureCurrentNoteForAttachment() {
     if (editor.noteId && editor.noteKey) {
-      return { noteId: editor.noteId, noteKey: editor.noteKey };
+      if (editor.dirty) {
+        const savedNote = await flushCurrentNoteSave(false, false);
+
+        if (!savedNote && latestEditorRef.current.dirty) {
+          throw new Error("노트를 먼저 저장하지 못했습니다.");
+        }
+      }
+
+      return {
+        noteId: latestEditorRef.current.noteId ?? editor.noteId,
+        noteKey: latestEditorRef.current.noteKey ?? editor.noteKey
+      };
     }
 
-    const savedNote = await persistCurrentNote(false);
+    const savedNote = await flushCurrentNoteSave(false, false);
 
     if (!savedNote) {
       throw new Error("노트를 먼저 저장하지 못했습니다.");
@@ -3324,10 +3455,15 @@ export default function NotesPage() {
     }
   }
 
-  async function uploadAttachmentFiles(files: File[], targetNote?: { noteId: string; noteKey: CryptoKey }) {
-    const validFiles: File[] = [];
-    const rejectedFiles: string[] = [];
-    const runId = nextAttachmentUploadRunId();
+    async function uploadAttachmentFiles(files: File[], targetNote?: { noteId: string; noteKey: CryptoKey }) {
+      if (attachmentUploadInFlightRef.current) {
+        setError("다른 첨부파일 업로드가 끝난 뒤 다시 시도해주세요.");
+        return;
+      }
+
+      const validFiles: File[] = [];
+      const rejectedFiles: string[] = [];
+      const runId = nextAttachmentUploadRunId();
 
     files.forEach((file) => {
       const validationError = attachmentValidationError(file);
@@ -3344,8 +3480,8 @@ export default function NotesPage() {
       return;
     }
 
-    setAttachmentBusyId("upload");
-    setAttachmentUploadProgress({
+      attachmentUploadInFlightRef.current = true;
+      setAttachmentUploadProgress({
       fileCount: validFiles.length,
       fileIndex: 1,
       fileName: validFiles[0]?.name ?? "첨부파일",
@@ -3453,7 +3589,7 @@ export default function NotesPage() {
             }
           : current
       );
-      await syncPublicSharesForNoteTarget(noteTarget.noteId, noteTarget.noteKey);
+        await syncPublicSharesForNoteTarget(noteTarget.noteId, noteTarget.noteKey, true);
       uploadSucceeded = true;
 
       setAttachmentUploadProgress((current) =>
@@ -3467,11 +3603,11 @@ export default function NotesPage() {
           : current
       );
 
-      setStatus(
-        validFiles.length === 1
-          ? `첨부파일을 업로드했습니다. 최대 ${formatFileSize(maxAttachmentFileBytes)}까지 가능합니다.`
-          : `첨부파일 ${validFiles.length}개를 업로드했습니다.`
-      );
+        setStatus(
+          validFiles.length === 1
+            ? `첨부파일을 업로드했습니다. 최대 ${maxAttachmentFileLabel}까지 가능합니다.`
+            : `첨부파일 ${validFiles.length}개를 업로드했습니다.`
+        );
 
       if (rejectedFiles.length) {
         setError(`일부 파일은 제외했습니다. ${rejectedFiles[0]}`);
@@ -3479,9 +3615,9 @@ export default function NotesPage() {
     } catch (error) {
       setAttachmentUploadProgress((current) => (current?.runId === runId ? { ...current, phase: "failed" } : current));
       setError(error instanceof Error ? error.message : "첨부파일을 업로드하지 못했습니다.");
-    } finally {
-      setAttachmentBusyId(null);
-      window.setTimeout(
+      } finally {
+        attachmentUploadInFlightRef.current = false;
+        window.setTimeout(
         () => setAttachmentUploadProgress((current) => (current?.runId === runId ? null : current)),
         uploadSucceeded ? attachmentUploadToastClearDelayMs : attachmentUploadFailureClearDelayMs
       );
@@ -3514,14 +3650,24 @@ export default function NotesPage() {
     setAttachmentPreview(null);
   }
 
-  async function previewAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
-    if (!previewableAttachmentExtensions.has(attachment.extension)) {
-      setError("이 파일 형식은 미리보기를 지원하지 않습니다.");
-      return;
-    }
+    async function previewAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
+      if (!previewableAttachmentExtensions.has(attachment.extension)) {
+        setError("이 파일 형식은 미리보기를 지원하지 않습니다.");
+        return;
+      }
 
-    setAttachmentBusyId(attachment.id);
-    setError(null);
+      if (attachment.originalSize > maxAttachmentPreviewBytes) {
+        setAttachmentPreview({
+          fileName: attachmentDownloadName(attachment),
+          kind: "unsupported",
+          label: "대용량 파일 미리보기 안내",
+          text: `미리보기는 ${maxAttachmentPreviewLabel} 이하 파일만 지원합니다. 원본 파일은 다운로드해서 확인해주세요.`
+        });
+        return;
+      }
+
+      setAttachmentActionBusy((current) => ({ ...current, previewingId: attachment.id }));
+      setError(null);
 
     try {
       const plainBytes = await decryptAttachmentFile(noteId, attachment);
@@ -3655,14 +3801,17 @@ export default function NotesPage() {
       });
     } catch {
       setError("파일 미리보기를 열지 못했습니다.");
-    } finally {
-      setAttachmentBusyId(null);
+      } finally {
+        setAttachmentActionBusy((current) => ({
+          ...current,
+          previewingId: current.previewingId === attachment.id ? null : current.previewingId
+        }));
+      }
     }
-  }
 
-  async function downloadAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
-    setAttachmentBusyId(attachment.id);
-    setError(null);
+    async function downloadAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
+      setAttachmentActionBusy((current) => ({ ...current, downloadingId: attachment.id }));
+      setError(null);
 
     try {
       const plainBytes = await decryptAttachmentFile(noteId, attachment);
@@ -3675,14 +3824,17 @@ export default function NotesPage() {
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      URL.revokeObjectURL(url);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       setStatus("첨부파일 다운로드를 시작했습니다.");
     } catch {
       setError("첨부파일을 다운로드하지 못했습니다.");
-    } finally {
-      setAttachmentBusyId(null);
+      } finally {
+        setAttachmentActionBusy((current) => ({
+          ...current,
+          downloadingId: current.downloadingId === attachment.id ? null : current.downloadingId
+        }));
+      }
     }
-  }
 
   async function uploadPreviewAttachments(note: DecryptedNote, files: File[]) {
     try {
@@ -3697,31 +3849,40 @@ export default function NotesPage() {
     return canDeleteNote(note) || attachment.uploadedBy === unlockedProfile.uid;
   }
 
-  async function removeAttachment(note: DecryptedNote, attachment: NoteAttachmentSnapshot) {
-    if (!canDeleteAttachmentForNote(note, attachment)) {
-      setError("첨부파일 업로드 사용자, 노트 소유자 또는 관리자만 삭제할 수 있습니다.");
-      return;
+    async function removeAttachment(note: DecryptedNote, attachment: NoteAttachmentSnapshot) {
+      if (!canDeleteAttachmentForNote(note, attachment)) {
+        setError("첨부파일 업로드 사용자, 노트 소유자 또는 관리자만 삭제할 수 있습니다.");
+        return false;
+      }
+
+      setAttachmentActionBusy((current) => ({
+        ...current,
+        deletingIds: Array.from(new Set([...current.deletingIds, attachment.id]))
+      }));
+      setError(null);
+
+      try {
+        await deleteNoteAttachment(note.id, attachment.id);
+        setAttachments((current) => current.filter((currentAttachment) => currentAttachment.id !== attachment.id));
+        await syncPublicSharesForNote(note.id, await noteKeyForDownload(note.id), draftFromNote(note), true);
+        setStatus("첨부파일을 삭제했습니다.");
+        return true;
+      } catch {
+        setError("첨부파일을 삭제하지 못했습니다.");
+        return false;
+      } finally {
+        setAttachmentActionBusy((current) => ({
+          ...current,
+          deletingIds: current.deletingIds.filter((id) => id !== attachment.id)
+        }));
+      }
     }
 
-    setAttachmentBusyId(attachment.id);
-    setError(null);
-
-    try {
-      await deleteNoteAttachment(note.id, attachment.id);
-      await syncPublicSharesForNote(note.id, await noteKeyForDownload(note.id), draftFromNote(note));
-      setStatus("첨부파일을 삭제했습니다.");
-    } catch {
-      setError("첨부파일을 삭제하지 못했습니다.");
-    } finally {
-      setAttachmentBusyId(null);
-    }
-  }
-
-  async function removeCurrentNote() {
-    if (!editor.noteId) {
-      startNewNote();
-      return;
-    }
+    async function removeCurrentNote() {
+      if (!editor.noteId) {
+        void startNewNote();
+        return;
+      }
 
     if (!activeRemoteNote || !canDeleteNote(activeRemoteNote)) {
       setError("노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다.");
@@ -3731,10 +3892,10 @@ export default function NotesPage() {
     setSaving(true);
 
     try {
-      await deleteNote(editor.noteId, unlockedProfile.uid, activeRemoteNote.participantUids);
-      await stopPublicSharesForNote(editor.noteId);
-      startNewNote();
-      setStatus("노트를 삭제했습니다.");
+        await deleteNote(editor.noteId, unlockedProfile.uid, activeRemoteNote.participantUids);
+        await stopPublicSharesForNote(editor.noteId);
+        resetEditorToBlank();
+        setStatus("노트를 삭제했습니다.");
     } catch {
       setError("노트를 삭제하지 못했습니다.");
     } finally {
@@ -3754,11 +3915,11 @@ export default function NotesPage() {
     try {
       await deleteNote(note.id, unlockedProfile.uid, note.participantUids);
       await stopPublicSharesForNote(note.id);
-      setPreviewNoteId(null);
+        setPreviewNoteId(null);
 
-      if (editor.noteId === note.id) {
-        startNewNote();
-      }
+        if (editor.noteId === note.id) {
+          resetEditorToBlank();
+        }
 
       setStatus("노트를 삭제했습니다.");
     } catch {
@@ -3807,11 +3968,11 @@ export default function NotesPage() {
 
     try {
       await purgeDeletedNote(note);
-      setPreviewNoteId(null);
+        setPreviewNoteId(null);
 
-      if (editor.noteId === note.id) {
-        startNewNote();
-      }
+        if (editor.noteId === note.id) {
+          resetEditorToBlank();
+        }
 
       setStatus("노트를 즉시 삭제했습니다.");
     } catch {
@@ -3867,9 +4028,9 @@ export default function NotesPage() {
         await purgeDeletedNote(note);
       }
 
-      if (editor.noteId && purgeableNotes.some((note) => note.id === editor.noteId)) {
-        startNewNote();
-      }
+        if (editor.noteId && purgeableNotes.some((note) => note.id === editor.noteId)) {
+          resetEditorToBlank();
+        }
 
       setPreviewNoteId(null);
       setStatus(`복구함 노트 ${purgeableNotes.length}개를 즉시 삭제했습니다.`);
@@ -4001,7 +4162,7 @@ export default function NotesPage() {
                 <LayoutGrid size={18} />
                 전체 조회
               </button>
-              <button type="button" onClick={() => startNewNote()}>
+                <button type="button" onClick={() => void startNewNote()}>
                 <FilePlus2 size={18} />
                 새 노트
               </button>
@@ -4152,12 +4313,12 @@ export default function NotesPage() {
             remoteCursors={remoteEditorCursors}
             value={editor.body}
           />
-          {editor.noteId && activeRemoteNote && (
-            <AttachmentList
-              attachments={attachments}
-              busyId={attachmentBusyId}
-              canDelete={(attachment) => canDeleteAttachmentForNote(activeRemoteNote, attachment)}
-              onDelete={(attachment) => void removeAttachment(activeRemoteNote, attachment)}
+            {editor.noteId && activeRemoteNote && (
+              <AttachmentList
+                attachments={attachments}
+                busyState={attachmentActionBusy}
+                canDelete={(attachment) => canDeleteAttachmentForNote(activeRemoteNote, attachment)}
+                onDelete={(attachment) => void removeAttachment(activeRemoteNote, attachment)}
               onDownload={(attachment) => void downloadAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
               onPreview={(attachment) => void previewAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
             />
@@ -4183,7 +4344,7 @@ export default function NotesPage() {
             onClose={() => setPreviewNoteId(null)}
             onConfirm={(note) => void confirmSharedNote(note)}
             onDelete={(note) => void removePreviewNote(note)}
-            onDeleteAttachment={(note, attachment) => void removeAttachment(note, attachment)}
+              onDeleteAttachment={(note, attachment) => removeAttachment(note, attachment)}
             onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
             onPreviewAttachment={(note, attachment) => void previewAttachment(note.id, attachment)}
             onPurge={(note) => void purgePreviewNote(note)}
@@ -4193,11 +4354,11 @@ export default function NotesPage() {
             onSave={(note, draft) => savePreviewNote(note, draft)}
             onTogglePin={(note) => void togglePinnedNote(note)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
-            saving={saving}
-            suppressEscape={Boolean(attachmentPreview || publicShareOpen)}
-            attachmentBusyId={attachmentBusyId}
-            canDeleteAttachment={canDeleteAttachmentForNote}
-          />
+              saving={saving}
+              suppressEscape={Boolean(attachmentPreview || publicShareOpen)}
+              attachmentBusyState={attachmentActionBusy}
+              canDeleteAttachment={canDeleteAttachmentForNote}
+            />
         )}
         {publicShareOpen && (
           <PublicShareModal
@@ -7300,7 +7461,7 @@ function AttachmentUploadProgressToast({ progress }: { progress: AttachmentUploa
 
 function AttachmentList({
   attachments,
-  busyId,
+  busyState,
   canDelete,
   compact = false,
   onDelete,
@@ -7308,7 +7469,7 @@ function AttachmentList({
   onPreview
 }: {
   attachments: NoteAttachmentSnapshot[];
-  busyId: string | null;
+  busyState: AttachmentActionBusyState;
   canDelete: (attachment: NoteAttachmentSnapshot) => boolean;
   compact?: boolean;
   onDelete: (attachment: NoteAttachmentSnapshot) => void;
@@ -7341,7 +7502,9 @@ function AttachmentList({
       </header>
       <div className="attachment-list">
         {attachments.map((attachment) => {
-          const disabled = busyId === attachment.id;
+          const deleting = busyState.deletingIds.includes(attachment.id);
+          const downloading = busyState.downloadingId === attachment.id;
+          const previewing = busyState.previewingId === attachment.id;
           const previewable = previewableAttachmentExtensions.has(attachment.extension);
 
           return (
@@ -7357,36 +7520,36 @@ function AttachmentList({
               </div>
               <div className="attachment-actions">
                 {previewable && onPreview && (
-                  <button
-                    aria-label={`${attachmentDownloadName(attachment)} 미리보기`}
-                    className="secondary-button attachment-action"
-                    disabled={Boolean(busyId)}
-                    onClick={() => onPreview(attachment)}
-                    type="button"
-                  >
-                    <Eye size={16} />
-                    미리보기
-                  </button>
+                    <button
+                      aria-label={`${attachmentDownloadName(attachment)} 미리보기`}
+                      className="secondary-button attachment-action"
+                      disabled={deleting || previewing}
+                      onClick={() => onPreview(attachment)}
+                      type="button"
+                    >
+                      {previewing ? <Loader2 className="spin" size={16} /> : <Eye size={16} />}
+                      미리보기
+                    </button>
                 )}
                 <button
-                  aria-label={`${attachmentDownloadName(attachment)} 다운로드`}
-                  className="secondary-button attachment-action"
-                  disabled={Boolean(busyId)}
-                  onClick={() => onDownload(attachment)}
-                  type="button"
-                >
-                  {disabled ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
-                  다운로드
-                </button>
+                    aria-label={`${attachmentDownloadName(attachment)} 다운로드`}
+                    className="secondary-button attachment-action"
+                    disabled={deleting || downloading}
+                    onClick={() => onDownload(attachment)}
+                    type="button"
+                  >
+                    {downloading ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
+                    다운로드
+                  </button>
                 <button
-                  aria-label={`${attachmentDownloadName(attachment)} 삭제`}
-                  className="icon-button danger attachment-delete-action"
-                  disabled={Boolean(busyId) || !canDelete(attachment)}
-                  onClick={() => onDelete(attachment)}
-                  type="button"
-                >
-                  <Trash2 size={16} />
-                </button>
+                    aria-label={`${attachmentDownloadName(attachment)} 삭제`}
+                    className="icon-button danger attachment-delete-action"
+                    disabled={deleting || !canDelete(attachment)}
+                    onClick={() => onDelete(attachment)}
+                    type="button"
+                  >
+                    {deleting ? <Loader2 className="spin" size={16} /> : <Trash2 size={16} />}
+                  </button>
               </div>
             </article>
           );
@@ -7398,7 +7561,7 @@ function AttachmentList({
 
 function AttachmentListModal({
   attachments,
-  busyId,
+  busyState,
   canDelete,
   onClose,
   onDelete,
@@ -7406,7 +7569,7 @@ function AttachmentListModal({
   onPreview
 }: {
   attachments: NoteAttachmentSnapshot[];
-  busyId: string | null;
+  busyState: AttachmentActionBusyState;
   canDelete: (attachment: NoteAttachmentSnapshot) => boolean;
   onClose: () => void;
   onDelete: (attachment: NoteAttachmentSnapshot) => void;
@@ -7438,10 +7601,10 @@ function AttachmentListModal({
           </div>
         </header>
         <div className="note-insight-modal-body">
-          <AttachmentList
-            attachments={attachments}
-            busyId={busyId}
-            canDelete={canDelete}
+            <AttachmentList
+              attachments={attachments}
+              busyState={busyState}
+              canDelete={canDelete}
             compact
             onDelete={onDelete}
             onDownload={onDownload}
@@ -7736,7 +7899,7 @@ function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: st
 }
 
 function NotePreviewModal({
-  attachmentBusyId,
+  attachmentBusyState,
   canDeleteAttachment,
   canDelete,
   canRestore,
@@ -7760,7 +7923,7 @@ function NotePreviewModal({
   saving,
   suppressEscape
 }: {
-  attachmentBusyId: string | null;
+  attachmentBusyState: AttachmentActionBusyState;
   canDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => boolean;
   canDelete: boolean;
   canRestore: boolean;
@@ -7771,7 +7934,7 @@ function NotePreviewModal({
   onClose: () => void;
   onConfirm: (note: DecryptedNote) => void;
   onDelete: (note: DecryptedNote) => void;
-  onDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
+  onDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => Promise<boolean>;
   onDownloadAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onPreviewAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onPurge: (note: DecryptedNote) => void;
@@ -8049,7 +8212,7 @@ function NotePreviewModal({
     }
   }
 
-  async function insertPreviewPastedFiles(files: File[], insertHtml: RichEditorInsertHtml) {
+    async function insertPreviewPastedFiles(files: File[], insertHtml: RichEditorInsertHtml) {
     const attachmentFiles: File[] = [];
 
     for (const file of files) {
@@ -8060,12 +8223,23 @@ function NotePreviewModal({
       }
     }
 
-    if (attachmentFiles.length) {
-      onUploadAttachments(note, attachmentFiles);
+      if (attachmentFiles.length) {
+        onUploadAttachments(note, attachmentFiles);
+      }
     }
-  }
 
-  const bodyHtml = draft.body || "<p>내용 없음</p>";
+    async function deletePreviewAttachment(attachment: NoteAttachmentSnapshot) {
+      setAttachments((current) => current.filter((currentAttachment) => currentAttachment.id !== attachment.id));
+      const deleted = await onDeleteAttachment(note, attachment);
+
+      if (!deleted) {
+        setAttachments((current) =>
+          current.some((currentAttachment) => currentAttachment.id === attachment.id) ? current : [...current, attachment]
+        );
+      }
+    }
+
+    const bodyHtml = draft.body || "<p>내용 없음</p>";
   const trustedAttributionBlocks = useMemo(
     () => (note.type === "shared" ? trustedSharedBlockMetadataFromHistory(note, history, historySnapshots) : []),
     [history, historySnapshots, note]
@@ -8240,12 +8414,12 @@ function NotePreviewModal({
           />
         )}
         {attachmentsOpen && (
-          <AttachmentListModal
-            attachments={attachments}
-            busyId={attachmentBusyId}
-            canDelete={(attachment) => canDeleteAttachment(note, attachment)}
-            onClose={() => setAttachmentsOpen(false)}
-            onDelete={(attachment) => onDeleteAttachment(note, attachment)}
+            <AttachmentListModal
+              attachments={attachments}
+              busyState={attachmentBusyState}
+              canDelete={(attachment) => canDeleteAttachment(note, attachment)}
+              onClose={() => setAttachmentsOpen(false)}
+              onDelete={(attachment) => void deletePreviewAttachment(attachment)}
             onDownload={(attachment) => onDownloadAttachment(note, attachment)}
             onPreview={(attachment) => onPreviewAttachment(note, attachment)}
           />

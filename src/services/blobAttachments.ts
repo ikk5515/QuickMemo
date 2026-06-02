@@ -68,10 +68,13 @@ function bytesToBase64(bytes: Uint8Array) {
 }
 
 function bytesToBlob(bytes: Uint8Array) {
-  const body = new Uint8Array(bytes.byteLength);
+  if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
+    return new Blob([bytes.buffer], { type: blobContentType });
+  }
 
-  body.set(bytes);
-  return new Blob([body], { type: blobContentType });
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return new Blob([copy.buffer], { type: blobContentType });
 }
 
 function authHeaders(idToken: string) {

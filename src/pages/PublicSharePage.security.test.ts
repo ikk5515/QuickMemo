@@ -6,33 +6,33 @@ const publicSharePageSource = readFileSync(join(process.cwd(), "src/pages/Public
 
 describe("PublicSharePage security controls", () => {
   it("does not expose public attachment bytes through attacker-controlled MIME blob documents", () => {
-    expect(publicSharePageSource).toContain("new Blob([bytes], { type: \"application/octet-stream\" })");
-    expect(publicSharePageSource).toContain("publicShareAttachmentMimeMatchesExtension(extension, mimeType)");
-    expect(publicSharePageSource).toContain("isPublicShareRasterImageExtension(extension)");
+    expect(publicSharePageSource).toContain("type: \"application/octet-stream\"");
+    expect(publicSharePageSource).toContain("publicShareAttachmentMimeMatchesExtension(attachment.extension, attachment.mimeType)");
+    expect(publicSharePageSource).toContain("isPublicShareRasterImageExtension(attachment.extension)");
     expect(publicSharePageSource).not.toContain("new Blob([bytes], { type: attachment.mimeType");
     expect(publicSharePageSource).not.toContain("attachment.mimeType || \"application/octet-stream\"");
   });
 
-  it("renders public image previews as in-page buttons instead of same-origin new-tab blob links", () => {
-    const imageAttachmentBranch =
-      publicSharePageSource.match(/\{isImageAttachment\(attachment\) \? \([\s\S]*?\) : \(/)?.[0] ?? "";
+  it("keeps public share attachment bytes lazy until preview or download is requested", () => {
+    const contentLoader =
+      publicSharePageSource.match(/async function decryptPublicShareContent[\s\S]*?function shareKeyFromHash/u)?.[0] ?? "";
 
-    expect(imageAttachmentBranch).toContain("<button");
-    expect(imageAttachmentBranch).toContain("openAttachmentPreview(attachment)");
-    expect(imageAttachmentBranch).toContain("src={attachment.previewUrl}");
-    expect(imageAttachmentBranch).not.toContain("<a");
-    expect(imageAttachmentBranch).not.toContain("target=\"_blank\"");
+    expect(contentLoader).toContain("encryptedAttachments.map(publicShareAttachmentView)");
+    expect(contentLoader).not.toContain("Promise.all(encryptedAttachments.map");
+    expect(publicSharePageSource).not.toContain("bytes: Uint8Array;");
+    expect(publicSharePageSource).not.toContain("downloadUrl: string;");
+    expect(publicSharePageSource).not.toContain("previewUrl: string | null;");
+    expect(publicSharePageSource).not.toContain("src={attachment.previewUrl}");
   });
 
   it("routes public PDF previews through byte-based canvas rendering instead of blob iframes", () => {
-    const pdfPreviewBranch =
-      publicSharePageSource.match(/if \(attachment\.extension === "pdf"\) \{[\s\S]*?\n {4}\}/)?.[0] ?? "";
+    const pdfPreviewBranch = publicSharePageSource.match(/if \(extension === "pdf"\) \{[\s\S]*?\n {8}\}/)?.[0] ?? "";
 
-    expect(pdfPreviewBranch).toContain("bytes: attachment.bytes");
+    expect(pdfPreviewBranch).toContain("bytes, fileName");
     expect(pdfPreviewBranch).toContain("kind: \"pdf\"");
-    expect(pdfPreviewBranch).toContain("url: attachment.downloadUrl");
+    expect(pdfPreviewBranch).toContain("url: downloadUrl");
     expect(publicSharePageSource).not.toContain("<iframe");
-    expect(publicSharePageSource).not.toContain("src={attachment.downloadUrl}");
+    expect(publicSharePageSource).not.toContain("src={downloadUrl}");
     expect(publicSharePageSource).not.toContain("src={attachment.url}");
   });
 });
