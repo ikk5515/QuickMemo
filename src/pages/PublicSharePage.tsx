@@ -11,7 +11,10 @@ import {
   safePublicShareAttachmentMimeType
 } from "../lib/attachments";
 import {
-  decryptBytes,
+  decryptAttachmentToBlob,
+  decryptAttachmentToBytes
+} from "../lib/attachmentCrypto";
+import {
   decryptText,
   derivePublicShareContentKey,
   importAesKeyBase64Url,
@@ -19,7 +22,7 @@ import {
 } from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, sanitizeEditorHtml } from "../lib/editorContent";
 import {
-  getEncryptedPublicShareAttachmentBytes,
+  getEncryptedPublicShareAttachmentSource,
   getPublicNoteShareAttachments,
   publicShareActive,
   subscribePublicNoteShare,
@@ -274,7 +277,17 @@ export default function PublicSharePage() {
     revokeAttachmentUrls();
   }
 
-  async function decryptAttachmentForAction(attachment: PublicShareAttachmentView) {
+  async function decryptAttachmentBlobForAction(attachment: PublicShareAttachmentView) {
+    const contentKey = contentKeyRef.current;
+
+    if (!contentKey) {
+      throw new Error("공유 첨부파일 복호화 키를 찾을 수 없습니다.");
+    }
+
+    return decryptPublicAttachmentBlob(attachment.source, contentKey);
+  }
+
+  async function decryptAttachmentBytesForAction(attachment: PublicShareAttachmentView) {
     const contentKey = contentKeyRef.current;
 
     if (!contentKey) {
@@ -289,8 +302,8 @@ export default function PublicSharePage() {
     setAttachmentError(null);
 
     try {
-      const bytes = await decryptAttachmentForAction(attachment);
-      const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+      const blob = await decryptAttachmentBlobForAction(attachment);
+      const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
 
       anchor.href = url;
@@ -326,18 +339,21 @@ export default function PublicSharePage() {
         return;
       }
 
-      const bytes = await decryptAttachmentForAction(attachment);
-      const downloadUrl = previewObjectUrl(bytes, "application/octet-stream");
+      const bytes = await decryptAttachmentBytesForAction(attachment);
 
       if (isImageAttachment(attachment)) {
+        const imageUrl = previewObjectUrl(bytes, safePublicShareAttachmentMimeType(extension));
+
         setAttachmentPreview({
           fileName,
           kind: "image",
           label: "이미지 미리보기",
-          url: previewObjectUrl(bytes, safePublicShareAttachmentMimeType(extension))
+          url: imageUrl
         });
         return;
       }
+
+      const downloadUrl = previewObjectUrl(bytes, "application/octet-stream");
 
       if (!previewableAttachmentExtensions.has(extension)) {
         setAttachmentPreview({
@@ -559,15 +575,11 @@ export default function PublicSharePage() {
 }
 
 async function decryptPublicAttachmentBytes(attachment: PublicNoteShareAttachmentSnapshot, shareKey: CryptoKey) {
-  return decryptBytes(
-    {
-      version: 1,
-      algorithm: "AES-GCM",
-      cipherBytes: await getEncryptedPublicShareAttachmentBytes(attachment),
-      iv: attachment.iv.toUint8Array()
-    },
-    shareKey
-  );
+  return decryptAttachmentToBytes(attachment, shareKey, await getEncryptedPublicShareAttachmentSource(attachment));
+}
+
+async function decryptPublicAttachmentBlob(attachment: PublicNoteShareAttachmentSnapshot, shareKey: CryptoKey) {
+  return decryptAttachmentToBlob(attachment, shareKey, await getEncryptedPublicShareAttachmentSource(attachment));
 }
 
 function publicShareAttachmentView(attachment: PublicNoteShareAttachmentSnapshot) {

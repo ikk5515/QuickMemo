@@ -101,6 +101,10 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("role=\"progressbar\"");
     expect(notesPageSource).toContain("onUploadProgress: (progress) =>");
     expect(notesPageSource).toContain("attachmentUploadOverallPercent");
+    expect(notesPageSource).toContain("encryptAttachmentBlob(file, noteTarget.noteKey");
+    expect(notesPageSource).toContain("reencryptAttachmentBlob(");
+    expect(notesPageSource).not.toContain("new Uint8Array(await file.arrayBuffer())");
+    expect(notesPageSource).not.toContain("encryptBytes(fileBytes");
     expect(notesPageSource).not.toContain("setAttachmentUploadProgress(encryptedFile");
   });
 

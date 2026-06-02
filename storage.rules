@@ -103,6 +103,7 @@ service firebase.storage {
     function publicShareOwner(shareId) {
       let share = publicShareData(shareId);
       return signedIn()
+        && userData(request.auth.uid).isActive == true
         && share.ownerUid == request.auth.uid;
     }
 
@@ -141,6 +142,7 @@ service firebase.storage {
       let note = noteData(noteId);
       let attachment = noteAttachmentData(noteId, attachmentId);
       return signedIn()
+        && userData(request.auth.uid).isActive == true
         && noteActive(note)
         && noteParticipant(note)
         && ownerAllowsParticipant(note, request.auth.uid)
@@ -175,6 +177,7 @@ service firebase.storage {
       let share = publicShareData(shareId);
       let attachment = publicShareAttachmentData(shareId, attachmentId);
       return signedIn()
+        && userData(request.auth.uid).isActive == true
         && share.ownerUid == request.auth.uid
         && publicShareNotRevoked(share)
         && share.expiresAt > request.time

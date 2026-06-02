@@ -63,6 +63,14 @@ describe("blob attachment backend", () => {
     expect(deleteAttachmentSource).toContain("!callerProfile.isActive");
   });
 
+  it("re-checks active user state before marking Blob uploads ready", () => {
+    const markReadySource = blobAttachmentApiSource.match(/async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u)?.[0] ?? "";
+
+    expect(markReadySource).toContain("userProfile(projectId, tokenPayload.uid, accessToken)");
+    expect(markReadySource).toContain("!uploaderProfile.isActive");
+    expect(markReadySource).toContain("Inactive uploader cannot complete attachment");
+  });
+
   it("allows Blob callbacks and client completion requests to mark uploads ready idempotently", () => {
     const markReadySource = blobAttachmentApiSource.match(/async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u)?.[0] ?? "";
 
@@ -75,6 +83,18 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentClientSource).toContain("throw new Error(typeof body.error === \"string\" ? body.error");
     expect(blobAttachmentClientSource.match(/multipart:\s*true/gu)?.length).toBeGreaterThanOrEqual(2);
     expect(blobAttachmentClientSource.match(/onUploadProgress:\s*input\.onUploadProgress/gu)?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("accepts only validated v1 or chunked v2 attachment manifests in the Blob API", () => {
+    expect(blobAttachmentApiSource).toContain("const encryptedAttachmentChunkSizeBytes = 4 * 1024 * 1024");
+    expect(blobAttachmentApiSource).toContain("function safeAttachmentVersion(value)");
+    expect(blobAttachmentApiSource).toContain("function safeAttachmentAlgorithm(value, version)");
+    expect(blobAttachmentApiSource).toContain("function validateChunkIvBase64List(value, chunkCount)");
+    expect(blobAttachmentApiSource).toContain("encryptedSize !== expectedEncryptedSize");
+    expect(blobAttachmentApiSource).toContain('fields.chunkIvs = bytesArrayValue(payload.chunkIvBase64List)');
+    expect(blobAttachmentApiSource).toContain('fields.iv = bytesValue(payload.ivBase64)');
+    expect(blobAttachmentClientSource).toContain("function encryptionPayloadFields(encryption: AttachmentEncryptionMetadata)");
+    expect(blobAttachmentClientSource).toContain("chunkIvBase64List: encryption.chunkIvs.map");
   });
 
   it("enforces public share MIME/extension invariants in the service-account Blob API", () => {

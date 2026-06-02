@@ -15,10 +15,12 @@ import {
 } from "firebase/firestore";
 import { deleteObject, getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
+import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
 import { db, storage } from "../lib/firebase";
 import {
   deleteBlobAttachment,
   fetchBlobAttachmentBytes,
+  fetchBlobAttachmentResponse,
   uploadPublicShareAttachmentBlob,
   type BlobAttachmentUploadProgressHandler
 } from "./blobAttachments";
@@ -52,11 +54,11 @@ interface CreatePublicNoteShareInput {
 }
 
 interface CreatePublicNoteShareAttachmentInput {
-  encryptedData: Uint8Array;
+  encryptedBlob: Blob;
+  encryption: AttachmentEncryptionMetadata;
   expiresAt: Date;
   extension: string;
   fileName: string;
-  iv: Uint8Array;
   mimeType: string;
   onUploadProgress?: BlobAttachmentUploadProgressHandler;
   ownerUid: string;
@@ -64,7 +66,20 @@ interface CreatePublicNoteShareAttachmentInput {
   sourceAttachmentId?: string;
 }
 
-type StoredPublicShareAttachmentDocument = Pick<PublicNoteShareAttachmentDocument, "blobPath" | "encryptedData" | "storagePath"> & {
+type StoredPublicShareAttachmentDocument = Pick<
+  PublicNoteShareAttachmentDocument,
+  | "algorithm"
+  | "blobPath"
+  | "chunkCount"
+  | "chunkIvs"
+  | "chunkSize"
+  | "encryptedData"
+  | "encryptedSize"
+  | "iv"
+  | "originalSize"
+  | "storagePath"
+  | "version"
+> & {
   id?: string;
   shareId?: string;
 };
@@ -209,8 +224,8 @@ export async function createPublicNoteShareAttachment(shareId: string, input: Cr
       extension: input.extension,
       mimeType: input.mimeType,
       originalSize: input.originalSize,
-      encryptedData: input.encryptedData,
-      iv: input.iv,
+      encryptedBlob: input.encryptedBlob,
+      encryption: input.encryption,
       onUploadProgress: input.onUploadProgress,
       sourceAttachmentId: input.sourceAttachmentId
     },
@@ -230,7 +245,10 @@ export async function getEncryptedPublicShareAttachmentBytes(attachment: StoredP
       throw new Error("공유 첨부파일 식별자를 찾을 수 없습니다.");
     }
 
-    return fetchBlobAttachmentBytes({ scope: "publicShare", shareId: attachment.shareId, attachmentId: attachment.id });
+    return fetchBlobAttachmentBytes(
+      { scope: "publicShare", shareId: attachment.shareId, attachmentId: attachment.id },
+      encryptedAttachmentSizeLimit(attachment)
+    );
   }
 
   if (!attachment.storagePath) {
@@ -238,6 +256,33 @@ export async function getEncryptedPublicShareAttachmentBytes(attachment: StoredP
   }
 
   return new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes));
+}
+
+export async function getEncryptedPublicShareAttachmentSource(
+  attachment: StoredPublicShareAttachmentDocument
+): Promise<EncryptedAttachmentSource> {
+  if (attachment.encryptedData) {
+    return { bytes: attachment.encryptedData.toUint8Array() };
+  }
+
+  if (attachment.blobPath) {
+    if (!attachment.id || !attachment.shareId) {
+      throw new Error("공유 첨부파일 식별자를 찾을 수 없습니다.");
+    }
+
+    return {
+      response: await fetchBlobAttachmentResponse(
+        { scope: "publicShare", shareId: attachment.shareId, attachmentId: attachment.id },
+        encryptedAttachmentSizeLimit(attachment)
+      )
+    };
+  }
+
+  if (!attachment.storagePath) {
+    throw new Error("공유 첨부파일 암호문 위치를 찾을 수 없습니다.");
+  }
+
+  return { bytes: new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes)) };
 }
 
 async function deleteStorageObjectIfPresent(storagePath: string) {

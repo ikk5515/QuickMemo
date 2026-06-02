@@ -1,10 +1,14 @@
 import type { NoteAttachmentDocument } from "../types";
 
 export const encryptedAttachmentOverheadBytes = 16;
+export const encryptedAttachmentChunkSizeBytes = 4 * 1024 * 1024;
 export const maxAttachmentFileMegabytes = 150;
 export const maxAttachmentFileBytes = maxAttachmentFileMegabytes * 1024 * 1024;
 export const maxAttachmentFileLabel = `${maxAttachmentFileMegabytes}MB`;
 export const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
+export const maxEncryptedAttachmentChunkCount = Math.ceil(maxAttachmentFileBytes / encryptedAttachmentChunkSizeBytes);
+export const maxChunkedEncryptedAttachmentBytes =
+  maxAttachmentFileBytes + maxEncryptedAttachmentChunkCount * encryptedAttachmentOverheadBytes;
 export const maxAttachmentStorageBytes = 1024 * 1024 * 1024;
 export const maxAttachmentPreviewMegabytes = 25;
 export const maxAttachmentPreviewBytes = maxAttachmentPreviewMegabytes * 1024 * 1024;

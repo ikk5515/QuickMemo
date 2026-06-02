@@ -18,10 +18,12 @@ import {
 } from "firebase/firestore";
 import { deleteObject, getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
+import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
 import { db, storage } from "../lib/firebase";
 import {
   deleteBlobAttachment,
   fetchBlobAttachmentBytes,
+  fetchBlobAttachmentResponse,
   uploadNoteAttachmentBlob,
   type BlobAttachmentUploadProgressHandler
 } from "./blobAttachments";
@@ -75,13 +77,27 @@ export interface SaveNoteAttachmentInput {
   extension: string;
   mimeType: string;
   originalSize: number;
-  encryptedData: Uint8Array;
-  iv: Uint8Array;
+  encryptedBlob: Blob;
+  encryption: AttachmentEncryptionMetadata;
   uploadedBy: string;
   onUploadProgress?: BlobAttachmentUploadProgressHandler;
 }
 
-type StoredAttachmentDocument = Pick<NoteAttachmentDocument, "blobPath" | "encryptedData" | "noteId" | "storagePath"> & {
+type StoredAttachmentDocument = Pick<
+  NoteAttachmentDocument,
+  | "algorithm"
+  | "blobPath"
+  | "chunkCount"
+  | "chunkIvs"
+  | "chunkSize"
+  | "encryptedData"
+  | "encryptedSize"
+  | "iv"
+  | "noteId"
+  | "originalSize"
+  | "storagePath"
+  | "version"
+> & {
   id?: string;
 };
 
@@ -553,8 +569,8 @@ export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
     extension: input.extension,
     mimeType: input.mimeType,
     originalSize: input.originalSize,
-    encryptedData: input.encryptedData,
-    iv: input.iv,
+    encryptedBlob: input.encryptedBlob,
+    encryption: input.encryption,
     onUploadProgress: input.onUploadProgress,
     uploadedBy: input.uploadedBy
   });
@@ -572,7 +588,10 @@ export async function getEncryptedNoteAttachmentBytes(attachment: StoredAttachme
       throw new Error("첨부파일 식별자를 찾을 수 없습니다.");
     }
 
-    return fetchBlobAttachmentBytes({ scope: "note", noteId: attachment.noteId, attachmentId: attachment.id });
+    return fetchBlobAttachmentBytes(
+      { scope: "note", noteId: attachment.noteId, attachmentId: attachment.id },
+      encryptedAttachmentSizeLimit(attachment)
+    );
   }
 
   if (!attachment.storagePath) {
@@ -580,6 +599,31 @@ export async function getEncryptedNoteAttachmentBytes(attachment: StoredAttachme
   }
 
   return new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes));
+}
+
+export async function getEncryptedNoteAttachmentSource(attachment: StoredAttachmentDocument): Promise<EncryptedAttachmentSource> {
+  if (attachment.encryptedData) {
+    return { bytes: attachment.encryptedData.toUint8Array() };
+  }
+
+  if (attachment.blobPath) {
+    if (!attachment.id) {
+      throw new Error("첨부파일 식별자를 찾을 수 없습니다.");
+    }
+
+    return {
+      response: await fetchBlobAttachmentResponse(
+        { scope: "note", noteId: attachment.noteId, attachmentId: attachment.id },
+        encryptedAttachmentSizeLimit(attachment)
+      )
+    };
+  }
+
+  if (!attachment.storagePath) {
+    throw new Error("첨부파일 암호문 위치를 찾을 수 없습니다.");
+  }
+
+  return { bytes: new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes)) };
 }
 
 async function deleteStorageObjectIfPresent(storagePath: string) {

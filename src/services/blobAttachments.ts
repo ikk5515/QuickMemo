@@ -1,6 +1,6 @@
 import type { PutBlobResult } from "@vercel/blob";
 import { put } from "@vercel/blob/client";
-import { maxEncryptedAttachmentBytes } from "../lib/attachments";
+import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata } from "../lib/attachmentCrypto";
 import { auth } from "../lib/firebase";
 
 const blobAttachmentApiPath = "/api/blob-attachments";
@@ -17,10 +17,10 @@ export interface BlobAttachmentUploadProgress {
 export type BlobAttachmentUploadProgressHandler = (progress: BlobAttachmentUploadProgress) => void;
 
 interface BaseBlobAttachmentUploadInput {
-  encryptedData: Uint8Array;
+  encryptedBlob: Blob;
+  encryption: AttachmentEncryptionMetadata;
   extension: string;
   fileName: string;
-  iv: Uint8Array;
   mimeType: string;
   onUploadProgress?: BlobAttachmentUploadProgressHandler;
   originalSize: number;
@@ -67,16 +67,6 @@ function bytesToBase64(bytes: Uint8Array) {
   return btoa(binary);
 }
 
-function bytesToBlob(bytes: Uint8Array) {
-  if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-    return new Blob([bytes.buffer], { type: blobContentType });
-  }
-
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return new Blob([copy.buffer], { type: blobContentType });
-}
-
 function authHeaders(idToken: string) {
   return { authorization: `Bearer ${idToken}` };
 }
@@ -97,6 +87,26 @@ function noteBlobPath(input: Pick<NoteBlobAttachmentUploadInput, "attachmentId" 
 
 function publicShareBlobPath(input: Pick<PublicShareBlobAttachmentUploadInput, "attachmentId" | "shareId"> & { ownerUid: string }) {
   return `users/${input.ownerUid}/publicNoteShares/${input.shareId}/attachments/${input.attachmentId}/data`;
+}
+
+function encryptionPayloadFields(encryption: AttachmentEncryptionMetadata) {
+  if (encryption.version === 1) {
+    return {
+      algorithm: encryption.algorithm,
+      encryptedSize: encryption.encryptedSize,
+      ivBase64: bytesToBase64(encryption.iv),
+      version: encryption.version
+    };
+  }
+
+  return {
+    algorithm: encryption.algorithm,
+    chunkCount: encryption.chunkCount,
+    chunkIvBase64List: encryption.chunkIvs.map((iv) => bytesToBase64(iv)),
+    chunkSize: encryption.chunkSize,
+    encryptedSize: encryption.encryptedSize,
+    version: encryption.version
+  };
 }
 
 async function completeBlobAttachmentUpload(input: CompletedBlobAttachmentUploadInput, idToken: string) {
@@ -166,9 +176,8 @@ export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadIn
     extension: input.extension,
     mimeType: input.mimeType,
     originalSize: input.originalSize,
-    encryptedSize: input.encryptedData.byteLength,
-    ivBase64: bytesToBase64(input.iv),
-    uploadedBy: input.uploadedBy
+    uploadedBy: input.uploadedBy,
+    ...encryptionPayloadFields(input.encryption)
   };
   let hasReservation = false;
 
@@ -176,7 +185,7 @@ export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadIn
     const clientPayload = JSON.stringify(payload);
     const token = await requestBlobClientToken(pathname, clientPayload, idToken);
     hasReservation = true;
-    const blob = await put(pathname, bytesToBlob(input.encryptedData), {
+    const blob = await put(pathname, input.encryptedBlob, {
       access: "private",
       contentType: blobContentType,
       multipart: true,
@@ -209,9 +218,8 @@ export async function uploadPublicShareAttachmentBlob(
     extension: input.extension,
     mimeType: input.mimeType,
     originalSize: input.originalSize,
-    encryptedSize: input.encryptedData.byteLength,
-    ivBase64: bytesToBase64(input.iv),
-    sourceAttachmentId: input.sourceAttachmentId ?? null
+    sourceAttachmentId: input.sourceAttachmentId ?? null,
+    ...encryptionPayloadFields(input.encryption)
   };
   let hasReservation = false;
 
@@ -219,7 +227,7 @@ export async function uploadPublicShareAttachmentBlob(
     const clientPayload = JSON.stringify(payload);
     const token = await requestBlobClientToken(pathname, clientPayload, idToken);
     hasReservation = true;
-    const blob = await put(pathname, bytesToBlob(input.encryptedData), {
+    const blob = await put(pathname, input.encryptedBlob, {
       access: "private",
       contentType: blobContentType,
       multipart: true,
@@ -241,12 +249,14 @@ export async function uploadPublicShareAttachmentBlob(
   }
 }
 
-export async function fetchBlobAttachmentBytes(input: {
+interface FetchBlobAttachmentInput {
   attachmentId: string;
   noteId?: string;
   scope: BlobAttachmentScope;
   shareId?: string;
-}) {
+}
+
+async function blobAttachmentFetch(input: FetchBlobAttachmentInput) {
   const query = new URLSearchParams({
     attachmentId: input.attachmentId,
     scope: input.scope
@@ -272,14 +282,34 @@ export async function fetchBlobAttachmentBytes(input: {
     headers
   });
 
+  return response;
+}
+
+export async function fetchBlobAttachmentResponse(input: FetchBlobAttachmentInput, maxBytes: number) {
+  const response = await blobAttachmentFetch(input);
+
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(typeof body.error === "string" ? body.error : "첨부파일 암호문을 불러오지 못했습니다.");
   }
 
+  const contentLength = Number.parseInt(response.headers.get("content-length") ?? "", 10);
+
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error("첨부파일 암호문이 허용 크기를 초과했습니다.");
+  }
+
+  return response;
+}
+
+export async function fetchBlobAttachmentBytes(
+  input: FetchBlobAttachmentInput,
+  maxBytes = encryptedAttachmentSizeLimit({ version: 1, algorithm: "AES-GCM" })
+) {
+  const response = await fetchBlobAttachmentResponse(input, maxBytes);
   const bytes = new Uint8Array(await response.arrayBuffer());
 
-  if (bytes.byteLength > maxEncryptedAttachmentBytes) {
+  if (bytes.byteLength > maxBytes) {
     throw new Error("첨부파일 암호문이 허용 크기를 초과했습니다.");
   }
 

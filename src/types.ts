@@ -111,8 +111,8 @@ export interface DecryptedNote extends NoteDocument {
 
 export interface NoteAttachmentDocument {
   noteId: string;
-  version: 1;
-  algorithm: "AES-GCM";
+  version: 1 | 2;
+  algorithm: "AES-GCM" | "AES-GCM-CHUNKED";
   fileName: string;
   extension: string;
   mimeType: string;
@@ -126,7 +126,10 @@ export interface NoteAttachmentDocument {
   blobEtag?: string;
   encryptedSize?: number;
   isReady?: boolean;
-  iv: Bytes;
+  iv?: Bytes;
+  chunkSize?: number;
+  chunkCount?: number;
+  chunkIvs?: Bytes[];
   uploadedBy: string;
   createdAt?: Timestamp;
 }
@@ -149,8 +152,8 @@ export interface PublicNoteShareDocument {
 }
 
 export interface PublicNoteShareAttachmentDocument {
-  version: 1;
-  algorithm: "AES-GCM";
+  version: 1 | 2;
+  algorithm: "AES-GCM" | "AES-GCM-CHUNKED";
   fileName: string;
   extension: string;
   mimeType: string;
@@ -164,7 +167,10 @@ export interface PublicNoteShareAttachmentDocument {
   blobEtag?: string;
   encryptedSize?: number;
   isReady?: boolean;
-  iv: Bytes;
+  iv?: Bytes;
+  chunkSize?: number;
+  chunkCount?: number;
+  chunkIvs?: Bytes[];
   ownerUid?: string;
   sourceAttachmentId?: string;
   expiresAt: Timestamp;

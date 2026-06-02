@@ -81,10 +81,14 @@ import {
   safePublicShareAttachmentMimeType
 } from "../lib/attachments";
 import {
-  decryptBytes,
+  decryptAttachmentToBlob,
+  decryptAttachmentToBytes,
+  encryptAttachmentBlob,
+  reencryptAttachmentBlob
+} from "../lib/attachmentCrypto";
+import {
   decryptText,
   derivePublicShareContentKey,
-  encryptBytes,
   encryptText,
   exportAesKeyBase64Url,
   generateNoteKey,
@@ -133,7 +137,7 @@ import {
   deleteNoteAttachment,
   createEncryptedNote,
   deleteNote,
-  getEncryptedNoteAttachmentBytes,
+  getEncryptedNoteAttachmentSource,
   getNoteAttachments,
   markNoteRead,
   purgeNote,
@@ -2920,16 +2924,12 @@ export default function NotesPage() {
       const noteAttachments = await getNoteAttachments(savedNote.noteId);
 
       for (const attachment of noteAttachments) {
-        const plainBytes = await decryptBytes(
-          {
-            version: 1,
-            algorithm: "AES-GCM",
-            cipherBytes: await getEncryptedNoteAttachmentBytes(attachment),
-            iv: attachment.iv.toUint8Array()
-          },
-          savedNote.noteKey
+        const encryptedAttachment = await reencryptAttachmentBlob(
+          attachment,
+          savedNote.noteKey,
+          contentKey,
+          await getEncryptedNoteAttachmentSource(attachment)
         );
-        const encryptedAttachment = await encryptBytes(plainBytes, contentKey);
 
         await createPublicNoteShareAttachment(shareId, {
           fileName: attachment.fileName,
@@ -2937,8 +2937,8 @@ export default function NotesPage() {
           mimeType: safePublicShareAttachmentMimeType(attachment.extension),
           ownerUid: unlockedProfile.uid,
           originalSize: attachment.originalSize,
-          encryptedData: encryptedAttachment.cipherBytes,
-          iv: encryptedAttachment.iv,
+          encryptedBlob: encryptedAttachment.blob,
+          encryption: encryptedAttachment.metadata,
           expiresAt,
           sourceAttachmentId: attachment.id
         });
@@ -3114,16 +3114,12 @@ export default function NotesPage() {
     await deletePublicNoteShareAttachments(share.id);
 
     for (const attachment of noteAttachments) {
-      const plainBytes = await decryptBytes(
-        {
-          version: 1,
-          algorithm: "AES-GCM",
-          cipherBytes: await getEncryptedNoteAttachmentBytes(attachment),
-          iv: attachment.iv.toUint8Array()
-        },
-        noteKey
+      const encryptedAttachment = await reencryptAttachmentBlob(
+        attachment,
+        noteKey,
+        contentKey,
+        await getEncryptedNoteAttachmentSource(attachment)
       );
-      const encryptedAttachment = await encryptBytes(plainBytes, contentKey);
 
       await createPublicNoteShareAttachment(share.id, {
         fileName: attachment.fileName,
@@ -3131,8 +3127,8 @@ export default function NotesPage() {
         mimeType: safePublicShareAttachmentMimeType(attachment.extension),
         ownerUid: unlockedProfile.uid,
         originalSize: attachment.originalSize,
-        encryptedData: encryptedAttachment.cipherBytes,
-        iv: encryptedAttachment.iv,
+        encryptedBlob: encryptedAttachment.blob,
+        encryption: encryptedAttachment.metadata,
         expiresAt,
         sourceAttachmentId: attachment.id
       });
@@ -3516,9 +3512,24 @@ export default function NotesPage() {
             : current
         );
 
-        const fileBytes = new Uint8Array(await file.arrayBuffer());
-        const encryptedFile = await encryptBytes(fileBytes, noteTarget.noteKey);
-        const encryptedSize = encryptedFile.cipherBytes.byteLength;
+        const encryptedFile = await encryptAttachmentBlob(file, noteTarget.noteKey, (progress) => {
+          const loadedBytes = Math.min(progress.total, Math.max(0, progress.loaded));
+          const percent = clampUploadPercent(progress.percentage || (progress.total ? (loadedBytes / progress.total) * 100 : 0));
+
+          setAttachmentUploadProgress((current) =>
+            current?.runId === runId
+              ? {
+                  ...current,
+                  loadedBytes,
+                  overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, percent),
+                  percent,
+                  phase: "encrypting",
+                  totalBytes: progress.total
+                }
+              : current
+          );
+        });
+        const encryptedSize = encryptedFile.metadata.encryptedSize;
 
         setAttachmentUploadProgress((current) =>
           current?.runId === runId
@@ -3539,8 +3550,8 @@ export default function NotesPage() {
           extension: attachmentExtension(file.name),
           mimeType: (file.type || "application/octet-stream").slice(0, 120),
           originalSize: file.size,
-          encryptedData: encryptedFile.cipherBytes,
-          iv: encryptedFile.iv,
+          encryptedBlob: encryptedFile.blob,
+          encryption: encryptedFile.metadata,
           uploadedBy: unlockedProfile.uid,
           onUploadProgress: (progress) => {
             const totalBytes = progress.total || encryptedSize;
@@ -3630,15 +3641,12 @@ export default function NotesPage() {
 
   async function decryptAttachmentFile(noteId: string, attachment: NoteAttachmentSnapshot) {
     const noteKey = await noteKeyForDownload(noteId);
-    return decryptBytes(
-      {
-        version: 1,
-        algorithm: "AES-GCM",
-        cipherBytes: await getEncryptedNoteAttachmentBytes(attachment),
-        iv: attachment.iv.toUint8Array()
-      },
-      noteKey
-    );
+    return decryptAttachmentToBytes(attachment, noteKey, await getEncryptedNoteAttachmentSource(attachment));
+  }
+
+  async function decryptAttachmentBlob(noteId: string, attachment: NoteAttachmentSnapshot) {
+    const noteKey = await noteKeyForDownload(noteId);
+    return decryptAttachmentToBlob(attachment, noteKey, await getEncryptedNoteAttachmentSource(attachment));
   }
 
   function closeAttachmentPreview() {
@@ -3814,8 +3822,7 @@ export default function NotesPage() {
       setError(null);
 
     try {
-      const plainBytes = await decryptAttachmentFile(noteId, attachment);
-      const blob = new Blob([plainBytes], { type: "application/octet-stream" });
+      const blob = await decryptAttachmentBlob(noteId, attachment);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;

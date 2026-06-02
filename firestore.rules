@@ -909,7 +909,8 @@ service cloud.firestore {
     }
 
     function noteAttachmentReadyUpdate(data, noteId, attachmentId) {
-      return validAttachment(data, noteId, attachmentId)
+      return activeSignedInUser()
+        && validAttachment(data, noteId, attachmentId)
         && resource.data.keys().hasAny(["isReady"])
         && resource.data.isReady == false
         && data.isReady == true

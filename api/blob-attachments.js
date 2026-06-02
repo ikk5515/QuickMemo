@@ -15,6 +15,9 @@ const maxAttachmentFileBytes = maxAttachmentFileMegabytes * 1024 * 1024;
 const maxAttachmentFileLabel = `${maxAttachmentFileMegabytes}MB`;
 const encryptedAttachmentOverheadBytes = 16;
 const maxEncryptedAttachmentBytes = maxAttachmentFileBytes + encryptedAttachmentOverheadBytes;
+const encryptedAttachmentChunkSizeBytes = 4 * 1024 * 1024;
+const maxEncryptedAttachmentChunkCount = Math.ceil(maxAttachmentFileBytes / encryptedAttachmentChunkSizeBytes);
+const maxChunkedEncryptedAttachmentBytes = maxAttachmentFileBytes + maxEncryptedAttachmentChunkCount * encryptedAttachmentOverheadBytes;
 const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
 const tokenTtlMs = 10 * 60 * 1000;
 const allowedAttachmentExtensions = new Set([
@@ -311,6 +314,10 @@ function bytesValue(base64Value) {
   return { bytesValue: base64Value };
 }
 
+function bytesArrayValue(base64Values) {
+  return { arrayValue: { values: base64Values.map((value) => bytesValue(value)) } };
+}
+
 function timestampValue(value) {
   return { timestampValue: value instanceof Date ? value.toISOString() : value };
 }
@@ -409,10 +416,62 @@ function validateIvBase64(value) {
   return value;
 }
 
-function validateAttachmentSizes(originalSize, encryptedSize) {
-  if (originalSize > maxAttachmentFileBytes || encryptedSize > maxEncryptedAttachmentBytes || encryptedSize !== originalSize + encryptedAttachmentOverheadBytes) {
+function validateAttachmentSizes(originalSize, encryptedSize, version, chunkSize, chunkCount) {
+  if (originalSize > maxAttachmentFileBytes) {
     throw new HttpError(400, `최대 ${maxAttachmentFileLabel}까지 업로드할 수 있습니다.`, "Invalid attachment size");
   }
+
+  if (version === 1) {
+    if (encryptedSize > maxEncryptedAttachmentBytes || encryptedSize !== originalSize + encryptedAttachmentOverheadBytes) {
+      throw new HttpError(400, `최대 ${maxAttachmentFileLabel}까지 업로드할 수 있습니다.`, "Invalid attachment size");
+    }
+    return;
+  }
+
+  const expectedChunkCount = Math.ceil(originalSize / encryptedAttachmentChunkSizeBytes);
+  const expectedEncryptedSize = originalSize + expectedChunkCount * encryptedAttachmentOverheadBytes;
+
+  if (
+    version !== 2
+    || chunkSize !== encryptedAttachmentChunkSizeBytes
+    || chunkCount !== expectedChunkCount
+    || chunkCount <= 0
+    || chunkCount > maxEncryptedAttachmentChunkCount
+    || encryptedSize !== expectedEncryptedSize
+    || encryptedSize > maxChunkedEncryptedAttachmentBytes
+  ) {
+    throw new HttpError(400, `최대 ${maxAttachmentFileLabel}까지 업로드할 수 있습니다.`, "Invalid chunked attachment size");
+  }
+}
+
+function safeAttachmentVersion(value) {
+  if (value === 2) {
+    return 2;
+  }
+
+  if (value === undefined || value === null || value === 1) {
+    return 1;
+  }
+
+  throw new HttpError(400, "첨부파일 암호화 버전이 올바르지 않습니다.", "Invalid attachment version");
+}
+
+function safeAttachmentAlgorithm(value, version) {
+  const expectedAlgorithm = version === 2 ? "AES-GCM-CHUNKED" : "AES-GCM";
+
+  if (value !== expectedAlgorithm) {
+    throw new HttpError(400, "첨부파일 암호화 방식이 올바르지 않습니다.", "Invalid attachment algorithm");
+  }
+
+  return expectedAlgorithm;
+}
+
+function validateChunkIvBase64List(value, chunkCount) {
+  if (!Array.isArray(value) || value.length !== chunkCount) {
+    throw new HttpError(400, "첨부파일 chunk 암호화 정보가 올바르지 않습니다.", "Invalid chunk IV count");
+  }
+
+  return value.map((ivBase64) => validateIvBase64(ivBase64));
 }
 
 function parseClientPayload(clientPayload) {
@@ -429,8 +488,12 @@ function parseClientPayload(clientPayload) {
 
   const originalSize = safePositiveInteger(parsed.originalSize, "originalSize");
   const encryptedSize = safePositiveInteger(parsed.encryptedSize, "encryptedSize");
+  const version = safeAttachmentVersion(parsed.version);
+  const algorithm = safeAttachmentAlgorithm(parsed.algorithm ?? "AES-GCM", version);
+  const chunkSize = version === 2 ? safePositiveInteger(parsed.chunkSize, "chunkSize") : 0;
+  const chunkCount = version === 2 ? safePositiveInteger(parsed.chunkCount, "chunkCount") : 0;
 
-  validateAttachmentSizes(originalSize, encryptedSize);
+  validateAttachmentSizes(originalSize, encryptedSize, version, chunkSize, chunkCount);
 
   const extension = safeExtension(parsed.extension);
 
@@ -444,7 +507,12 @@ function parseClientPayload(clientPayload) {
     mimeType: scope === "publicShare" ? safePublicShareMimeType(extension, parsed.mimeType) : safeMimeType(parsed.mimeType),
     originalSize,
     encryptedSize,
-    ivBase64: validateIvBase64(parsed.ivBase64),
+    version,
+    algorithm,
+    ivBase64: version === 1 ? validateIvBase64(parsed.ivBase64) : "",
+    chunkSize,
+    chunkCount,
+    chunkIvBase64List: version === 2 ? validateChunkIvBase64List(parsed.chunkIvBase64List, chunkCount) : [],
     uploadedBy: scope === "note" ? safeId(parsed.uploadedBy, "uploadedBy") : "",
     sourceAttachmentId:
       scope === "publicShare" && typeof parsed.sourceAttachmentId === "string"
@@ -613,9 +681,9 @@ async function releaseUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
 }
 
 function attachmentBaseFields(payload, blobPath) {
-  return {
-    version: integerValue(1),
-    algorithm: stringValue("AES-GCM"),
+  const fields = {
+    version: integerValue(payload.version),
+    algorithm: stringValue(payload.algorithm),
     fileName: stringValue(payload.fileName),
     extension: stringValue(payload.extension),
     mimeType: stringValue(payload.mimeType),
@@ -623,9 +691,18 @@ function attachmentBaseFields(payload, blobPath) {
     encryptedSize: integerValue(payload.encryptedSize),
     storageProvider: stringValue("vercel-blob"),
     blobPath: stringValue(blobPath),
-    isReady: booleanValue(false),
-    iv: bytesValue(payload.ivBase64)
+    isReady: booleanValue(false)
   };
+
+  if (payload.version === 1) {
+    fields.iv = bytesValue(payload.ivBase64);
+  } else {
+    fields.chunkSize = integerValue(payload.chunkSize);
+    fields.chunkCount = integerValue(payload.chunkCount);
+    fields.chunkIvs = bytesArrayValue(payload.chunkIvBase64List);
+  }
+
+  return fields;
 }
 
 async function createNoteAttachmentReservation(projectId, accessToken, uid, payload, pathname) {
@@ -831,6 +908,12 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
     return;
   }
 
+  const uploaderProfile = await userProfile(projectId, tokenPayload.uid, accessToken);
+
+  if (!uploaderProfile.isActive) {
+    throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Inactive uploader cannot complete attachment");
+  }
+
   await firestoreCommit(projectId, accessToken, [
     {
       update: {
@@ -891,15 +974,17 @@ async function completeUploadFromClient(request, response) {
     const noteId = safeId(body.noteId, "noteId");
     const attachmentPath = `notes/${noteId}/attachments/${attachmentId}`;
     const attachment = await firestoreGetDocument(credentials.projectId, attachmentPath, accessToken);
+    const callerProfile = await userProfile(credentials.projectId, uid, accessToken);
 
-    if (!attachment || valueString(attachment, "uploadedBy") !== uid) {
+    if (!attachment || !callerProfile.isActive || valueString(attachment, "uploadedBy") !== uid) {
       throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Cannot complete note attachment");
     }
 
     tokenPayload = {
       attachmentPath,
       blobPath: valueString(attachment, "blobPath"),
-      encryptedSize: valueInteger(attachment, "encryptedSize")
+      encryptedSize: valueInteger(attachment, "encryptedSize"),
+      uid
     };
   } else if (scope === "publicShare") {
     const shareId = safeId(body.shareId, "shareId");
@@ -915,7 +1000,8 @@ async function completeUploadFromClient(request, response) {
     tokenPayload = {
       attachmentPath,
       blobPath: valueString(attachment, "blobPath"),
-      encryptedSize: valueInteger(attachment, "encryptedSize")
+      encryptedSize: valueInteger(attachment, "encryptedSize"),
+      uid
     };
   } else {
     throw new HttpError(400, "첨부파일 업로드 범위가 올바르지 않습니다.", "Invalid scope");
@@ -971,7 +1057,7 @@ async function streamBlobAttachment(request, response) {
   const blobPath = valueString(attachment, "blobPath");
   const encryptedSize = valueInteger(attachment, "encryptedSize");
 
-  if (!attachment || !valueBoolean(attachment, "isReady") || !blobPath || encryptedSize > maxEncryptedAttachmentBytes) {
+  if (!attachment || !valueBoolean(attachment, "isReady") || !blobPath || encryptedSize > maxChunkedEncryptedAttachmentBytes) {
     throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Attachment blob not ready");
   }
 

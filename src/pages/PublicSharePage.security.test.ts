@@ -6,11 +6,20 @@ const publicSharePageSource = readFileSync(join(process.cwd(), "src/pages/Public
 
 describe("PublicSharePage security controls", () => {
   it("does not expose public attachment bytes through attacker-controlled MIME blob documents", () => {
-    expect(publicSharePageSource).toContain("type: \"application/octet-stream\"");
+    expect(publicSharePageSource).toContain("\"application/octet-stream\"");
     expect(publicSharePageSource).toContain("publicShareAttachmentMimeMatchesExtension(attachment.extension, attachment.mimeType)");
     expect(publicSharePageSource).toContain("isPublicShareRasterImageExtension(attachment.extension)");
     expect(publicSharePageSource).not.toContain("new Blob([bytes], { type: attachment.mimeType");
     expect(publicSharePageSource).not.toContain("attachment.mimeType || \"application/octet-stream\"");
+  });
+
+  it("uses chunk-aware decrypt helpers and avoids duplicate image object URLs", () => {
+    const imagePreviewBranch = publicSharePageSource.match(/if \(isImageAttachment\(attachment\)\) \{[\s\S]*?\n {8}\}/)?.[0] ?? "";
+
+    expect(publicSharePageSource).toContain("decryptAttachmentToBlob");
+    expect(publicSharePageSource).toContain("decryptAttachmentToBytes");
+    expect(publicSharePageSource).toContain("getEncryptedPublicShareAttachmentSource");
+    expect(imagePreviewBranch.match(/previewObjectUrl/gu)?.length).toBe(1);
   });
 
   it("keeps public share attachment bytes lazy until preview or download is requested", () => {

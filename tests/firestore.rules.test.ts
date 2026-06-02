@@ -2022,6 +2022,17 @@ describeRules("firestore security rules", () => {
         storedAttachmentDocument("note-a", "storage-zip")
       )
     );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: false });
+    });
+    await assertFails(
+      updateDoc(doc(ownerDb, "notes/note-a/attachments/storage-zip"), {
+        isReady: true
+      })
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: true });
+    });
     await assertSucceeds(
       updateDoc(doc(ownerDb, "notes/note-a/attachments/storage-zip"), {
         isReady: true

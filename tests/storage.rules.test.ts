@@ -126,6 +126,24 @@ describeStorageRules("storage security rules", () => {
 
     const userStorage = testEnv.authenticatedContext("user-a").storage(bucketUrl);
 
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: false });
+    });
+    await assertFails(
+      uploadTaskPromise(
+        userStorage.ref(noteStoragePath).put(
+          encryptedBytes(),
+          encryptedUploadMetadata({
+            noteId: "note-a",
+            attachmentId: "attachment-a",
+            uploadedBy: "user-a"
+          })
+        )
+      )
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: true });
+    });
     await assertSucceeds(
       uploadTaskPromise(
         userStorage.ref(noteStoragePath).put(
@@ -264,6 +282,16 @@ describeStorageRules("storage security rules", () => {
 
     await testEnv.withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), {
+        uid: "user-a",
+        isActive: true,
+        isAdmin: false
+      });
+      await setDoc(doc(db, "users/user-b"), {
+        uid: "user-b",
+        isActive: true,
+        isAdmin: false
+      });
       await setDoc(doc(db, "publicNoteShares/share-a"), {
         sourceNoteId: "note-a",
         ownerUid: "user-a",
@@ -308,6 +336,23 @@ describeStorageRules("storage security rules", () => {
         )
       )
     );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: false });
+    });
+    await assertFails(
+      uploadTaskPromise(
+        ownerStorage.ref(shareStoragePath).put(
+          encryptedBytes(),
+          encryptedUploadMetadata({
+            shareId: "share-a",
+            attachmentId: "attachment-a"
+          })
+        )
+      )
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: true });
+    });
     await assertSucceeds(
       uploadTaskPromise(
         ownerStorage.ref(shareStoragePath).put(
