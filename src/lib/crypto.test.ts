@@ -16,6 +16,7 @@ import {
   wrapNoteKey
 } from "./crypto";
 import type { UserKeyDocument } from "../types";
+import { parseEditorContent, plainTextToEditorHtml, serializeEditorContent } from "./editorContent";
 
 describe("client encryption", () => {
   it("encrypts and decrypts note content with AES-GCM", async () => {
@@ -23,6 +24,19 @@ describe("client encryption", () => {
     const encrypted = await encryptText("실시간 개인 메모", noteKey);
 
     await expect(decryptText(encrypted, noteKey)).resolves.toBe("실시간 개인 메모");
+  });
+
+  it("keeps note tab characters through editor serialization and AES-GCM encryption", async () => {
+    const noteKey = await generateNoteKey();
+    const html = plainTextToEditorHtml("root\n\tchild\n\t\tgrandchild\n이름\t나이\t메모");
+    const serialized = serializeEditorContent(html, 17);
+    const encrypted = await encryptText(serialized, noteKey);
+    const decrypted = await decryptText(encrypted, noteKey);
+    const parsed = parseEditorContent(decrypted);
+
+    expect(decrypted).toContain("\tchild");
+    expect(decrypted).toContain("\t\tgrandchild");
+    expect(parsed.html).toContain("이름\t나이\t메모");
   });
 
   it("encrypts and decrypts binary attachments with AES-GCM", async () => {

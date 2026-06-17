@@ -3,6 +3,7 @@ import {
   imageHtml,
   linkifyEditorHtml,
   parseEditorContent,
+  plainTextToEditorHtml,
   previewTextFromHtml,
   sanitizeEditorHtml,
   serializeEditorContent
@@ -11,6 +12,38 @@ import {
 describe("editor content helpers", () => {
   it("wraps plain text as editable HTML", () => {
     expect(parseEditorContent("hello\nworld").html).toBe("<p>hello<br>world</p>");
+  });
+
+  it("preserves tab characters when converting plain text to editor HTML", () => {
+    const outline = "제목\n\t하위 항목 1\n\t\t하위 항목 1-1\n\t하위 항목 2";
+    const tsv = "이름\t나이\t메모\n홍길동\t30\t테스트\n김철수\t25\t확인";
+
+    expect(plainTextToEditorHtml("a\tb")).toBe("<p>a\tb</p>");
+    expect(plainTextToEditorHtml("\titem")).toBe("<p>\titem</p>");
+    expect(plainTextToEditorHtml("\t\titem")).toBe("<p>\t\titem</p>");
+    expect(plainTextToEditorHtml(outline)).toContain("<br>\t\t하위 항목 1-1");
+    expect(plainTextToEditorHtml(tsv)).toContain("이름\t나이\t메모");
+  });
+
+  it("round-trips tab characters through editor serialization", () => {
+    const html = plainTextToEditorHtml("root\n\tchild\n\t\tgrandchild\nname\tage\tmemo");
+    const serialized = serializeEditorContent(html, 17);
+    const parsed = parseEditorContent(serialized);
+
+    expect(serialized).toContain("\tchild");
+    expect(serialized).toContain("\t\tgrandchild");
+    expect(serialized).toContain("name\tage\tmemo");
+    expect(parsed.html).toContain("\tchild");
+    expect(parsed.html).toContain("name\tage\tmemo");
+  });
+
+  it("preserves tabs while escaping unsafe plain text paste content", () => {
+    const html = plainTextToEditorHtml("\t<script>alert(1)</script>\t<img src=x onerror=alert(1)>");
+
+    expect(html).toContain("\t&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).toContain("\t&lt;img src=x onerror=alert(1)&gt;");
+    expect(sanitizeEditorHtml(html)).not.toContain("<script>");
+    expect(sanitizeEditorHtml(html)).not.toContain("<img");
   });
 
   it("stores and restores editor font size metadata", () => {

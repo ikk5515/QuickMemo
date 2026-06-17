@@ -101,6 +101,7 @@ import {
   imageHtml,
   linkifyEditorHtml,
   parseEditorContent,
+  plainTextToEditorHtml,
   previewTextFromHtml,
   sanitizeEditorHtml,
   serializeEditorContent
@@ -4627,12 +4628,20 @@ function RichMemoEditor({
           .filter((file): file is File => Boolean(file));
         const pastedFiles = files.length ? files : itemFiles;
 
-        if (!pastedFiles.length) {
+        if (pastedFiles.length) {
+          event.preventDefault();
+          void handleFiles(pastedFiles);
+          return true;
+        }
+
+        const plainText = event.clipboardData?.getData("text/plain") ?? "";
+
+        if (!plainText.includes("\t")) {
           return false;
         }
 
         event.preventDefault();
-        void handleFiles(pastedFiles);
+        editor?.chain().focus().insertContent(plainTextToEditorHtml(plainText)).run();
         return true;
       },
       handleDOMEvents: {

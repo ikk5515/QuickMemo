@@ -1688,6 +1688,8 @@ textarea {
 .rich-body-input.ProseMirror {
   font-size: var(--editor-font-size, 17px);
   overflow: auto;
+  tab-size: 4;
+  white-space: pre-wrap;
   width: 100%;
 }
 
@@ -3613,6 +3615,8 @@ textarea {
   overflow: auto;
   overflow-wrap: anywhere;
   padding: 18px;
+  tab-size: 4;
+  white-space: pre-wrap;
 }
 
 .note-preview-body [data-qm-attribution-label] {
@@ -3713,6 +3717,8 @@ textarea {
   overflow: visible;
   padding: 0;
   overflow-wrap: break-word;
+  tab-size: 4;
+  white-space: pre-wrap;
   word-break: keep-all;
 }
 
@@ -4946,6 +4952,8 @@ textarea {
 .admin-note-view-body {
   line-height: 1;
   overflow-wrap: anywhere;
+  tab-size: 4;
+  white-space: pre-wrap;
 }
 
 .admin-note-view-body img {

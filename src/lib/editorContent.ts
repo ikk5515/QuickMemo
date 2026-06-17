@@ -79,7 +79,17 @@ export function normalizeEditorHtml(value: string) {
     return "";
   }
 
-  return htmlTagPattern.test(value) ? sanitizeEditorHtml(value) : plainTextToHtml(value);
+  return htmlTagPattern.test(value) ? sanitizeEditorHtml(value) : plainTextToEditorHtml(value);
+}
+
+export function plainTextToEditorHtml(value: string) {
+  return value
+    .split(/\n{2,}/)
+    .map((paragraph) => {
+      const lines = paragraph.split(/\n/).map(escapeHtml).join("<br>");
+      return `<p>${lines || "<br>"}</p>`;
+    })
+    .join("");
 }
 
 export function previewTextFromHtml(value: string) {
@@ -760,16 +770,6 @@ function normalizedHttpHref(value: string) {
   } catch {
     return null;
   }
-}
-
-function plainTextToHtml(value: string) {
-  return value
-    .split(/\n{2,}/)
-    .map((paragraph) => {
-      const lines = paragraph.split(/\n/).map(escapeHtml).join("<br>");
-      return `<p>${lines || "<br>"}</p>`;
-    })
-    .join("");
 }
 
 function escapeHtml(value: string) {

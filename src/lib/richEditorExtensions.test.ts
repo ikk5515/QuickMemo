@@ -1,5 +1,6 @@
 import { Editor } from "@tiptap/core";
 import { afterEach, describe, expect, it } from "vitest";
+import { plainTextToEditorHtml } from "./editorContent";
 import { richEditorExtensions } from "./richEditorExtensions";
 
 const editors: Editor[] = [];
@@ -87,5 +88,18 @@ describe("rich editor extensions", () => {
     editor.commands.setTextSelection(from);
 
     expect(editor.view.dom.querySelector("[data-qm-active-selection='true']")).toBeNull();
+  });
+
+  it("keeps literal tabs in the TipTap document for pasted plain text", () => {
+    const sample = "제목\n\t하위 항목 1\n\t\t하위 항목 1-1\n이름\t나이\t메모";
+    const editor = createEditor("");
+
+    editor.commands.insertContent(plainTextToEditorHtml(sample));
+
+    expect(editor.getText()).toContain("\t하위 항목 1");
+    expect(editor.getText()).toContain("\t\t하위 항목 1-1");
+    expect(editor.getText()).toContain("이름\t나이\t메모");
+    expect(editor.getHTML()).toContain("\t하위 항목 1");
+    expect(editor.getHTML()).toContain("이름\t나이\t메모");
   });
 });

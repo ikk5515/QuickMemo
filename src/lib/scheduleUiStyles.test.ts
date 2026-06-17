@@ -75,4 +75,11 @@ describe("schedule UI styles", () => {
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.folder-color-picker button\.active \{[\s\S]*box-shadow:[\s\S]*var\(--color-surface\)/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.cell-color-palette button\.active,[\s\S]*html\[data-theme="dark"\] \.text-color-palette button\.active \{[\s\S]*var\(--color-surface-elevated\)/);
   });
+
+  it("preserves literal tabs in editable and read-only note bodies", () => {
+    expect(stylesSource).toMatch(/\.rich-body-input\.ProseMirror \{[\s\S]*tab-size: 4;[\s\S]*white-space: pre-wrap;/);
+    expect(stylesSource).toMatch(/\.note-preview-body \{[\s\S]*tab-size: 4;[\s\S]*white-space: pre-wrap;/);
+    expect(stylesSource).toMatch(/\.note-preview-body\.public-share-body \{[\s\S]*tab-size: 4;[\s\S]*white-space: pre-wrap;/);
+    expect(stylesSource).toMatch(/\.admin-note-view-body \{[\s\S]*tab-size: 4;[\s\S]*white-space: pre-wrap;/);
+  });
 });
