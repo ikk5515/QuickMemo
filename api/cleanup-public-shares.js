@@ -24,6 +24,54 @@ function jsonResponse(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+const sensitiveLogPatterns = [
+  /Bearer\s+[A-Za-z0-9._~+/=-]+/giu,
+  /"access_token"\s*:\s*"[^"]+"/giu,
+  /"idToken"\s*:\s*"[^"]+"/giu,
+  /"private_key"\s*:\s*"[^"]+"/giu,
+  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu,
+  /AIza[0-9A-Za-z_-]{35}/gu,
+  /gh[pousr]_[A-Za-z0-9_]{36,}/gu,
+  /xox[baprs]-[A-Za-z0-9-]{20,}/gu
+];
+
+function redactLogMessage(value) {
+  return String(value)
+    .replace(sensitiveLogPatterns[0], "Bearer [redacted]")
+    .replace(sensitiveLogPatterns[1], '"access_token":"[redacted]"')
+    .replace(sensitiveLogPatterns[2], '"idToken":"[redacted]"')
+    .replace(sensitiveLogPatterns[3], '"private_key":"[redacted]"')
+    .replace(sensitiveLogPatterns[4], "[redacted private key]")
+    .replace(sensitiveLogPatterns[5], "[redacted api key]")
+    .replace(sensitiveLogPatterns[6], "[redacted github token]")
+    .replace(sensitiveLogPatterns[7], "[redacted slack token]")
+    .slice(0, 1000);
+}
+
+function errorNumberField(error, fieldName) {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  const value = error[fieldName];
+  return Number.isInteger(value) ? value : undefined;
+}
+
+function safeErrorSummary(error) {
+  if (error instanceof Error) {
+    return {
+      message: redactLogMessage(error.message),
+      name: error.name,
+      status: errorNumberField(error, "status"),
+      statusCode: errorNumberField(error, "statusCode")
+    };
+  }
+
+  return {
+    message: redactLogMessage(error)
+  };
+}
+
 function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest();
 }
@@ -659,7 +707,7 @@ export default async function handler(request, response) {
   const cronSecret = envValue("CRON_SECRET");
 
   if (!cronSecret) {
-    console.error("public share cleanup denied because CRON_SECRET is not configured");
+    console.error("public share cleanup denied", { reason: "cron_auth_unavailable" });
     jsonResponse(response, 401, { ok: false, error: "unauthorized" });
     return;
   }
@@ -673,7 +721,7 @@ export default async function handler(request, response) {
     const stats = await cleanupExpiredPublicShares();
     jsonResponse(response, 200, { ok: true, ...stats });
   } catch (error) {
-    console.error("public share cleanup failed", error);
+    console.error("public share cleanup failed", safeErrorSummary(error));
     jsonResponse(response, 500, { ok: false, error: "cleanup_failed" });
   }
 }

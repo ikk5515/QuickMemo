@@ -40,7 +40,13 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain('import { createHash, timingSafeEqual } from "node:crypto";');
     expect(cleanupFunctionSource).toContain("function authorizedCleanupRequest");
     expect(cleanupFunctionSource).toContain("timingSafeStringEqual(authorizationHeader(request)");
+    expect(cleanupFunctionSource).toContain("function safeErrorSummary(error)");
+    expect(cleanupFunctionSource).toContain("redactLogMessage(error.message)");
+    expect(cleanupFunctionSource).toContain('console.error("public share cleanup failed", safeErrorSummary(error))');
+    expect(cleanupFunctionSource).toContain('console.error("public share cleanup denied", { reason: "cron_auth_unavailable" })');
     expect(cleanupFunctionSource).not.toContain('error: "cleanup_not_configured"');
+    expect(cleanupFunctionSource).not.toContain("public share cleanup denied because CRON_SECRET is not configured");
+    expect(cleanupFunctionSource).not.toContain('console.error("public share cleanup failed", error)');
     expect(authGuard).toContain('error: "unauthorized"');
     expect(authGuard).not.toContain("request.headers.authorization !==");
   });

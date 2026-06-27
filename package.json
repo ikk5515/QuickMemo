@@ -28,6 +28,7 @@
       "@opentelemetry/core": "^2.8.0"
     },
     "esbuild": "^0.28.1",
+    "undici": "^6.27.0",
     "universal-analytics": {
       "uuid": "14.0.0"
     }

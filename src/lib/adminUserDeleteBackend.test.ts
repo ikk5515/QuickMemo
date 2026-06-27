@@ -26,6 +26,13 @@ describe("managed user backend deletion", () => {
     expect(invalidTokenResponseIndex).toBeLessThan(credentialsIndex);
   });
 
+  it("logs redacted backend error summaries instead of raw exception objects", () => {
+    expect(deleteManagedUserSource).toContain("function safeErrorSummary(error)");
+    expect(deleteManagedUserSource).toContain("redactLogMessage(error.message)");
+    expect(deleteManagedUserSource).toContain('console.error("managed user delete failed", safeErrorSummary(error))');
+    expect(deleteManagedUserSource).not.toContain('console.error("managed user delete failed", error)');
+  });
+
   it("checks the caller admin profile and cleans schedule-owned data", () => {
     const forbiddenBackendPattern = new RegExp(`firebase-${"admin"}|firebase-${"functions"}`, "i");
 

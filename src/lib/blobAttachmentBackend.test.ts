@@ -25,6 +25,13 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain("cache-control");
   });
 
+  it("logs redacted backend error summaries instead of raw exception objects", () => {
+    expect(blobAttachmentApiSource).toContain("function safeErrorSummary(error)");
+    expect(blobAttachmentApiSource).toContain("redactLogMessage(error.message)");
+    expect(blobAttachmentApiSource).toContain('console.error("blob attachment request failed", safeErrorSummary(error))');
+    expect(blobAttachmentApiSource).not.toContain('console.error("blob attachment request failed", error)');
+  });
+
   it("validates downloaded Blob metadata with head before streaming", () => {
     const streamSource = blobAttachmentApiSource.match(/async function streamBlobAttachment[\s\S]*?async function deleteBlobIfPresent/u)?.[0] ?? "";
 

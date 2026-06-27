@@ -83,6 +83,54 @@ function jsonResponse(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
+const sensitiveLogPatterns = [
+  /Bearer\s+[A-Za-z0-9._~+/=-]+/giu,
+  /"access_token"\s*:\s*"[^"]+"/giu,
+  /"idToken"\s*:\s*"[^"]+"/giu,
+  /"private_key"\s*:\s*"[^"]+"/giu,
+  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu,
+  /AIza[0-9A-Za-z_-]{35}/gu,
+  /gh[pousr]_[A-Za-z0-9_]{36,}/gu,
+  /xox[baprs]-[A-Za-z0-9-]{20,}/gu
+];
+
+function redactLogMessage(value) {
+  return String(value)
+    .replace(sensitiveLogPatterns[0], "Bearer [redacted]")
+    .replace(sensitiveLogPatterns[1], '"access_token":"[redacted]"')
+    .replace(sensitiveLogPatterns[2], '"idToken":"[redacted]"')
+    .replace(sensitiveLogPatterns[3], '"private_key":"[redacted]"')
+    .replace(sensitiveLogPatterns[4], "[redacted private key]")
+    .replace(sensitiveLogPatterns[5], "[redacted api key]")
+    .replace(sensitiveLogPatterns[6], "[redacted github token]")
+    .replace(sensitiveLogPatterns[7], "[redacted slack token]")
+    .slice(0, 1000);
+}
+
+function errorNumberField(error, fieldName) {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  const value = error[fieldName];
+  return Number.isInteger(value) ? value : undefined;
+}
+
+function safeErrorSummary(error) {
+  if (error instanceof Error) {
+    return {
+      message: redactLogMessage(error.message),
+      name: error.name,
+      status: errorNumberField(error, "status"),
+      statusCode: errorNumberField(error, "statusCode")
+    };
+  }
+
+  return {
+    message: redactLogMessage(error)
+  };
+}
+
 function parseJsonCredential(value) {
   if (!value) {
     return {};
@@ -1166,7 +1214,7 @@ function handleError(error, response) {
   const message = error instanceof HttpError ? error.publicMessage : "첨부파일 서버 작업에 실패했습니다.";
 
   if (!(error instanceof HttpError)) {
-    console.error("blob attachment request failed", error);
+    console.error("blob attachment request failed", safeErrorSummary(error));
   }
 
   jsonResponse(response, statusCode, { ok: false, error: message });
