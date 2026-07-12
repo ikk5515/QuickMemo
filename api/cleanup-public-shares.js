@@ -1,16 +1,21 @@
 /* global Buffer, URLSearchParams, console, crypto, fetch, process */
 import { del } from "@vercel/blob";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { quotaReleaseAfterAttachmentClaim } from "./_attachment-policy.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const storageBaseUrl = "https://storage.googleapis.com/storage/v1";
 const oauthTokenUrl = "https://oauth2.googleapis.com/token";
 const databaseId = "(default)";
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
-const defaultBatchSize = 100;
-const defaultMaxDocumentDeletes = 18000;
+const defaultBatchSize = 50;
+const defaultMaxDocumentDeletes = 1000;
 const firestoreCommitWriteLimit = 500;
 const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
+const userBlobAttachmentCountLimit = 500;
+const attachmentCountPolicyVersion = 1;
+const deletionRetryDelayMs = 15 * 60 * 1000;
+const legacyReservationGraceMs = 3 * 60 * 60 * 1000;
 
 function envValue(name) {
   const value = process.env[name];
@@ -227,7 +232,9 @@ async function firestoreRequest(path, accessToken, init) {
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    throw new Error(`Firestore request failed: ${response.status} ${text.slice(0, 300)}`);
+    const error = new Error(`Firestore request failed: ${response.status} ${text.slice(0, 300)}`);
+    error.statusCode = response.status;
+    throw error;
   }
 
   return response.json();
@@ -312,6 +319,9 @@ async function queryExpiredShareQueues({ accessToken, projectId, nowIso, limit }
     method: "POST",
     body: JSON.stringify({
       structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
         from: [{ collectionId: "publicShareCleanupQueue" }],
         where: {
           fieldFilter: {
@@ -340,6 +350,9 @@ async function queryExpiredShares({ accessToken, projectId, nowIso, limit }) {
     method: "POST",
     body: JSON.stringify({
       structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
         from: [{ collectionId: "publicNoteShares" }],
         where: {
           fieldFilter: {
@@ -368,6 +381,9 @@ async function queryExpiredPublicShareAttachments({ accessToken, projectId, nowI
     method: "POST",
     body: JSON.stringify({
       structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
         from: [{ collectionId: "attachments", allDescendants: true }],
         where: {
           fieldFilter: {
@@ -390,12 +406,198 @@ async function queryExpiredPublicShareAttachments({ accessToken, projectId, nowI
   return result.flatMap((entry) => (entry.document ? [entry.document] : []));
 }
 
-async function listChildDocuments(parentName, collectionId, accessToken) {
+async function queryExpiredAttachmentReservations({ accessToken, projectId, nowIso, limit }) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
+        from: [{ collectionId: "attachments", allDescendants: true }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "reservationExpiresAt" },
+            op: "LESS_THAN_OR_EQUAL",
+            value: { timestampValue: nowIso }
+          }
+        },
+        orderBy: [
+          {
+            field: { fieldPath: "reservationExpiresAt" },
+            direction: "ASCENDING"
+          }
+        ],
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+async function queryAbandonedAttachmentDeletions({ accessToken, projectId, nowIso, limit }) {
+  const cutoffIso = new Date(Date.parse(nowIso) - deletionRetryDelayMs).toISOString();
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
+        from: [{ collectionId: "attachments", allDescendants: true }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "deletionStartedAt" },
+            op: "LESS_THAN_OR_EQUAL",
+            value: { timestampValue: cutoffIso }
+          }
+        },
+        orderBy: [
+          {
+            field: { fieldPath: "deletionStartedAt" },
+            direction: "ASCENDING"
+          }
+        ],
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+async function queryLegacyExpiredAttachmentReservations({ accessToken, projectId, nowIso, limit }) {
+  const cutoffIso = new Date(Date.parse(nowIso) - legacyReservationGraceMs).toISOString();
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
+        from: [{ collectionId: "attachments", allDescendants: true }],
+        where: {
+          compositeFilter: {
+            op: "AND",
+            filters: [
+              {
+                fieldFilter: {
+                  field: { fieldPath: "storageProvider" },
+                  op: "EQUAL",
+                  value: { stringValue: "vercel-blob" }
+                }
+              },
+              {
+                fieldFilter: {
+                  field: { fieldPath: "isReady" },
+                  op: "EQUAL",
+                  value: { booleanValue: false }
+                }
+              },
+              {
+                fieldFilter: {
+                  field: { fieldPath: "createdAt" },
+                  op: "LESS_THAN_OR_EQUAL",
+                  value: { timestampValue: cutoffIso }
+                }
+              }
+            ]
+          }
+        },
+        orderBy: [
+          {
+            field: { fieldPath: "createdAt" },
+            direction: "ASCENDING"
+          }
+        ],
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+async function queryPurgedNotes({ accessToken, projectId, limit }) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [
+            { fieldPath: "ownerUid" },
+            { fieldPath: "isDeleted" },
+            { fieldPath: "isPurged" }
+          ]
+        },
+        from: [{ collectionId: "notes" }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "isPurged" },
+            op: "EQUAL",
+            value: { booleanValue: true }
+          }
+        },
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+async function queryActiveNotesByNoteId({ accessToken, projectId, noteId, limit = 300 }) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
+        from: [{ collectionId: "activeNotes" }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "noteId" },
+            op: "EQUAL",
+            value: { stringValue: noteId }
+          }
+        },
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+async function listChildDocuments(
+  parentName,
+  collectionId,
+  accessToken,
+  maxDocuments = Number.POSITIVE_INFINITY,
+  fieldMask = []
+) {
   const documents = [];
   let pageToken = "";
 
   do {
-    const query = new URLSearchParams({ pageSize: "300" });
+    const remaining = Math.max(0, maxDocuments - documents.length);
+
+    if (remaining === 0) {
+      break;
+    }
+
+    const query = new URLSearchParams({ pageSize: String(Math.min(300, remaining)) });
+
+    for (const fieldPath of fieldMask) {
+      query.append("mask.fieldPaths", fieldPath);
+    }
 
     if (pageToken) {
       query.set("pageToken", pageToken);
@@ -418,9 +620,9 @@ async function listChildDocuments(parentName, collectionId, accessToken) {
     }
 
     const result = await response.json();
-    documents.push(...(result.documents ?? []));
+    documents.push(...(result.documents ?? []).slice(0, remaining));
     pageToken = result.nextPageToken ?? "";
-  } while (pageToken);
+  } while (pageToken && documents.length < maxDocuments);
 
   return documents;
 }
@@ -435,6 +637,19 @@ function integerField(document, fieldName) {
   const parsed = typeof value === "string" || typeof value === "number" ? Number.parseInt(String(value), 10) : Number.NaN;
 
   return Number.isSafeInteger(parsed) ? parsed : 0;
+}
+
+function booleanField(document, fieldName) {
+  return document?.fields?.[fieldName]?.booleanValue === true;
+}
+
+function hasField(document, fieldName) {
+  return Boolean(document?.fields && Object.hasOwn(document.fields, fieldName));
+}
+
+function timestampFieldMillis(document, fieldName) {
+  const value = document?.fields?.[fieldName]?.timestampValue;
+  return typeof value === "string" ? Date.parse(value) : Number.NaN;
 }
 
 function integerValue(value) {
@@ -462,75 +677,170 @@ async function getDocumentByName(documentName, accessToken) {
   return response.json();
 }
 
-async function releaseBlobQuotaBytes(projectId, uid, bytes, accessToken, stats) {
-  if (!uid || bytes <= 0) {
-    return;
-  }
+async function beginAttachmentDeletionByName(documentName, accessToken, shouldDelete = () => true) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const attachment = await getDocumentByName(documentName, accessToken);
 
-  const quotaName = documentNameForPath(projectId, `userAttachmentUsage/${uid}`);
-  const quotaDocument = await getDocumentByName(quotaName, accessToken);
+    if (!attachment || !shouldDelete(attachment)) {
+      return null;
+    }
 
-  if (!quotaDocument) {
-    return;
-  }
+    if (booleanField(attachment, "deletionStarted")) {
+      return attachment;
+    }
 
-  await firestoreRequest(firestoreCommitPathFromDocumentName(quotaName), accessToken, {
-    method: "POST",
-    body: JSON.stringify({
-      writes: [
-        {
-          update: {
-            name: quotaName,
-            fields: {
-              uid: { stringValue: uid },
-              usedBytes: integerValue(Math.max(0, integerField(quotaDocument, "usedBytes") - bytes)),
-              limitBytes: integerValue(userBlobAttachmentQuotaBytes)
-            }
-          },
-          currentDocument: { updateTime: quotaDocument.updateTime },
-          updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
-        }
-      ]
-    })
-  });
-
-  stats.storageBytesReleased += bytes;
-}
-
-async function releaseBlobQuotasForDocuments(projectId, documents, accessToken, stats) {
-  for (const document of documents) {
-    const uid = stringField(document, "ownerUid") || stringField(document, "uploadedBy");
-
-    await releaseBlobQuotaBytes(projectId, uid, integerField(document, "encryptedSize"), accessToken, stats);
-  }
-}
-
-async function deleteBlobObjectsForDocuments(documents, stats) {
-  const blobPaths = Array.from(new Set(documents.map((document) => stringField(document, "blobPath")).filter(Boolean)));
-
-  for (const blobPath of blobPaths) {
     try {
-      await del(blobPath);
-      stats.blobObjectsDeleted += 1;
+      await firestoreRequest(firestoreCommitPathFromDocumentName(documentName), accessToken, {
+        method: "POST",
+        body: JSON.stringify({
+          writes: [
+            {
+              update: {
+                name: documentName,
+                fields: { deletionStarted: { booleanValue: true } }
+              },
+              updateMask: { fieldPaths: ["deletionStarted"] },
+              currentDocument: { updateTime: attachment.updateTime },
+              updateTransforms: [{ fieldPath: "deletionStartedAt", setToServerValue: "REQUEST_TIME" }]
+            }
+          ]
+        })
+      });
+      return attachment;
     } catch (error) {
-      if (!/not\s+found/iu.test(String(error?.message ?? ""))) {
+      if (![400, 409].includes(error.statusCode)) {
         throw error;
+      }
+
+      if (attempt === 2) {
+        return null;
       }
     }
   }
+
+  return null;
 }
 
-async function deleteStorageObjectsForDocuments(documents, storageBucket, accessToken, stats, projectId) {
-  const objectNames = Array.from(new Set(documents.map((document) => stringField(document, "storagePath")).filter(Boolean)));
+async function claimAttachmentDeletionByName(
+  projectId,
+  attachmentName,
+  accessToken,
+  stats,
+  extraDeleteNames = []
+) {
+  const deleteCount = 1 + extraDeleteNames.filter(Boolean).length;
 
-  for (const objectName of objectNames) {
-    if (await storageDeleteObject(storageBucket, objectName, accessToken)) {
-      stats.storageObjectsDeleted += 1;
+  if (stats.documentDeletesAttempted + deleteCount > stats.maxDocumentDeletes) {
+    return null;
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const attachment = await getDocumentByName(attachmentName, accessToken);
+
+    if (!attachment) {
+      return null;
+    }
+
+    const uid = stringField(attachment, "ownerUid") || stringField(attachment, "uploadedBy");
+    const bytes = Math.max(0, integerField(attachment, "encryptedSize"));
+    const quotaName = uid ? documentNameForPath(projectId, `userAttachmentUsage/${uid}`) : "";
+    const quotaDocument = quotaName ? await getDocumentByName(quotaName, accessToken) : null;
+    const claim = quotaReleaseAfterAttachmentClaim({
+      attachmentExists: true,
+      attachmentUpdateTime: attachment.updateTime,
+      attachmentCount: integerField(quotaDocument, "attachmentCount"),
+      encryptedSize: bytes,
+      quotaReserved: hasField(attachment, "quotaReserved")
+        ? booleanField(attachment, "quotaReserved")
+        : null,
+      legacyBlobReserved:
+        !hasField(attachment, "quotaReserved")
+        && stringField(attachment, "storageProvider") === "vercel-blob"
+        && Boolean(stringField(attachment, "blobPath")),
+      quotaExists: Boolean(quotaDocument),
+      quotaUpdateTime: quotaDocument?.updateTime ?? "",
+      uid,
+      usedBytes: integerField(quotaDocument, "usedBytes")
+    });
+
+    if (!claim) {
+      return null;
+    }
+
+    const writes = [
+      {
+        delete: attachmentName,
+        currentDocument: { updateTime: claim.attachmentUpdateTime }
+      },
+      ...extraDeleteNames.filter(Boolean).map((name) => ({ delete: name }))
+    ];
+
+    if (claim.quota) {
+      writes.push({
+        update: {
+          name: quotaName,
+          fields: {
+            uid: { stringValue: claim.quota.uid },
+            attachmentCount: integerValue(claim.quota.attachmentCount),
+            countPolicyVersion: integerValue(attachmentCountPolicyVersion),
+            limitCount: integerValue(userBlobAttachmentCountLimit),
+            usedBytes: integerValue(claim.quota.usedBytes),
+            limitBytes: integerValue(userBlobAttachmentQuotaBytes)
+          }
+        },
+        currentDocument: { updateTime: claim.quota.quotaUpdateTime },
+        updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+      });
+    }
+
+    try {
+      await firestoreRequest(firestoreCommitPathFromDocumentName(attachmentName), accessToken, {
+        method: "POST",
+        body: JSON.stringify({ writes })
+      });
+      stats.documentDeletesAttempted += deleteCount;
+      stats.attachmentsDeleted += 1;
+      stats.attachmentQueuesDeleted += extraDeleteNames.filter(Boolean).length;
+
+      if (claim.quota) {
+        stats.storageBytesReleased += bytes;
+      }
+
+      return attachment;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode)) {
+        throw error;
+      }
+
+      if (attempt === 2) {
+        return null;
+      }
     }
   }
 
-  await deleteBlobObjectsForDocuments(documents, stats);
-  await releaseBlobQuotasForDocuments(projectId, documents, accessToken, stats);
+  return null;
+}
+
+async function deleteAttachmentObjects(attachment, storageBucket, accessToken, stats) {
+  const storagePath = stringField(attachment, "storagePath");
+  const blobPath = stringField(attachment, "blobPath");
+
+  if (storagePath && await storageDeleteObject(storageBucket, storagePath, accessToken)) {
+    stats.storageObjectsDeleted += 1;
+  }
+
+  if (!blobPath) {
+    return;
+  }
+
+  try {
+    await del(blobPath);
+    stats.blobObjectsDeleted += 1;
+  } catch (error) {
+    if (!/not\s+found/iu.test(String(error?.message ?? ""))) {
+      throw error;
+    }
+  }
 }
 
 function cleanupQueueNameFromShareName(shareName) {
@@ -573,30 +883,121 @@ function cleanupAttachmentQueueNameFromAttachmentName(attachmentName) {
     );
 }
 
+async function cleanupAttachmentDocument(
+  attachmentName,
+  accessToken,
+  storageBucket,
+  stats,
+  projectId,
+  extraDeleteNames = [],
+  shouldDelete = () => true
+) {
+  const attachment = await beginAttachmentDeletionByName(attachmentName, accessToken, shouldDelete);
+
+  if (!attachment) {
+    const attachmentStillExists = await getDocumentByName(attachmentName, accessToken);
+
+    if (attachmentStillExists) {
+      return false;
+    }
+
+    await deleteDocumentNames(
+      extraDeleteNames,
+      accessToken,
+      stats,
+      "attachmentQueuesDeleted"
+    );
+    return true;
+  }
+
+  await deleteAttachmentObjects(attachment, storageBucket, accessToken, stats);
+  const claimed = await claimAttachmentDeletionByName(
+    projectId,
+    attachmentName,
+    accessToken,
+    stats,
+    extraDeleteNames
+  );
+
+  return Boolean(claimed) || (await getDocumentByName(attachmentName, accessToken)) === null;
+}
+
 async function deletePublicShareTreeByName(shareName, accessToken, storageBucket, stats, projectId) {
   const cleanupQueueName = cleanupQueueNameFromShareName(shareName);
-  const attachmentDocuments = await listChildDocuments(shareName, "attachments", accessToken);
+  const remainingAttachmentDeleteBudget = stats.maxDocumentDeletes - stats.documentDeletesAttempted;
+
+  if (remainingAttachmentDeleteBudget <= 0) {
+    return false;
+  }
+
+  const attachmentDocuments = await listChildDocuments(
+    shareName,
+    "attachments",
+    accessToken,
+    Math.min(300, Math.max(1, Math.floor(remainingAttachmentDeleteBudget / 2))),
+    ["isReady"]
+  );
+
+  if (attachmentDocuments.length > 0 && remainingAttachmentDeleteBudget < 2) {
+    return false;
+  }
+
+  for (const attachment of attachmentDocuments) {
+    const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachment.name);
+
+    if (!await cleanupAttachmentDocument(
+      attachment.name,
+      accessToken,
+      storageBucket,
+      stats,
+      projectId,
+      cleanupAttachmentQueueName ? [cleanupAttachmentQueueName] : []
+    )) {
+      return false;
+    }
+  }
+
+  if ((await listChildDocuments(shareName, "attachments", accessToken, 1, ["isReady"])).length > 0) {
+    return false;
+  }
+
+  const remainingQueueDeleteBudget = stats.maxDocumentDeletes - stats.documentDeletesAttempted;
+
+  if (remainingQueueDeleteBudget <= 0) {
+    return false;
+  }
+
   const cleanupAttachmentDocuments = await listChildDocuments(
     cleanupQueueName,
     "publicShareAttachmentCleanupQueue",
-    accessToken
+    accessToken,
+    Math.min(300, remainingQueueDeleteBudget),
+    ["expiresAt"]
   );
 
-  await deleteStorageObjectsForDocuments(attachmentDocuments, storageBucket, accessToken, stats, projectId);
-  await deleteDocumentNames(
-    attachmentDocuments.map((attachment) => attachment.name),
-    accessToken,
-    stats,
-    "attachmentsDeleted"
-  );
   await deleteDocumentNames(
     cleanupAttachmentDocuments.map((cleanupAttachment) => cleanupAttachment.name),
     accessToken,
     stats,
     "attachmentQueuesDeleted"
   );
+
+  if (
+    (await listChildDocuments(shareName, "attachments", accessToken, 1, ["isReady"])).length > 0
+    || (
+      await listChildDocuments(cleanupQueueName, "publicShareAttachmentCleanupQueue", accessToken, 1, ["expiresAt"])
+    ).length > 0
+  ) {
+    return false;
+  }
+
+  if (stats.documentDeletesAttempted + 2 > stats.maxDocumentDeletes) {
+    return false;
+  }
+
   await deleteDocumentNames([shareName], accessToken, stats, "sharesDeleted");
   await deleteDocumentNames([cleanupQueueName], accessToken, stats, "shareQueuesDeleted");
+  return true;
 }
 
 async function deletePublicShareTree(cleanupQueueDocument, accessToken, storageBucket, stats, projectId) {
@@ -605,16 +1006,339 @@ async function deletePublicShareTree(cleanupQueueDocument, accessToken, storageB
   await deletePublicShareTreeByName(shareName, accessToken, storageBucket, stats, projectId);
 }
 
-async function deleteExpiredPublicShareAttachment(attachmentDocument, accessToken, storageBucket, stats, projectId) {
+async function deleteExpiredPublicShareAttachment(attachmentDocument, accessToken, storageBucket, stats, projectId, nowIso) {
   const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachmentDocument.name);
 
   if (!cleanupAttachmentQueueName) {
     return;
   }
 
-  await deleteStorageObjectsForDocuments([attachmentDocument], storageBucket, accessToken, stats, projectId);
-  await deleteDocumentNames([attachmentDocument.name], accessToken, stats, "attachmentsDeleted");
-  await deleteDocumentNames([cleanupAttachmentQueueName], accessToken, stats, "attachmentQueuesDeleted");
+  await cleanupAttachmentDocument(
+    attachmentDocument.name,
+    accessToken,
+    storageBucket,
+    stats,
+    projectId,
+    [cleanupAttachmentQueueName],
+    (current) => {
+      const expiresAt = timestampFieldMillis(current, "expiresAt");
+      return Number.isFinite(expiresAt) && expiresAt <= Date.parse(nowIso);
+    }
+  );
+}
+
+async function deleteExpiredAttachmentReservation(attachmentDocument, accessToken, storageBucket, stats, projectId, nowIso) {
+  const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachmentDocument.name);
+  const deleted = await cleanupAttachmentDocument(
+    attachmentDocument.name,
+    accessToken,
+    storageBucket,
+    stats,
+    projectId,
+    cleanupAttachmentQueueName ? [cleanupAttachmentQueueName] : [],
+    (current) => {
+      const expiresAt = timestampFieldMillis(current, "reservationExpiresAt");
+      return !booleanField(current, "isReady")
+        && Number.isFinite(expiresAt)
+        && expiresAt <= Date.parse(nowIso);
+    }
+  );
+
+  if (deleted) {
+    stats.reservationsDeleted += 1;
+  }
+}
+
+async function deleteAbandonedAttachmentDeletion(attachmentDocument, accessToken, storageBucket, stats, projectId) {
+  const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachmentDocument.name);
+  const deleted = await cleanupAttachmentDocument(
+    attachmentDocument.name,
+    accessToken,
+    storageBucket,
+    stats,
+    projectId,
+    cleanupAttachmentQueueName ? [cleanupAttachmentQueueName] : [],
+    (current) => booleanField(current, "deletionStarted")
+      && Number.isFinite(timestampFieldMillis(current, "deletionStartedAt"))
+  );
+
+  if (deleted) {
+    stats.abandonedDeletionsRetried += 1;
+  }
+}
+
+async function deleteLegacyExpiredAttachmentReservation(
+  attachmentDocument,
+  accessToken,
+  storageBucket,
+  stats,
+  projectId,
+  nowIso
+) {
+  const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachmentDocument.name);
+  const cutoffMillis = Date.parse(nowIso) - legacyReservationGraceMs;
+  const deleted = await cleanupAttachmentDocument(
+    attachmentDocument.name,
+    accessToken,
+    storageBucket,
+    stats,
+    projectId,
+    cleanupAttachmentQueueName ? [cleanupAttachmentQueueName] : [],
+    (current) =>
+      !hasField(current, "reservationExpiresAt")
+      && stringField(current, "storageProvider") === "vercel-blob"
+      && Boolean(stringField(current, "blobPath"))
+      && !booleanField(current, "isReady")
+      && Number.isFinite(timestampFieldMillis(current, "createdAt"))
+      && timestampFieldMillis(current, "createdAt") <= cutoffMillis
+  );
+
+  if (deleted) {
+    stats.legacyReservationsDeleted += 1;
+  }
+}
+
+function documentIdFromName(documentName) {
+  const segments = String(documentName).split("/");
+  return segments.at(-1) ?? "";
+}
+
+function validPurgeQueue(queueDocument, noteDocument, projectId) {
+  const queueId = documentIdFromName(queueDocument?.name);
+  const noteId = stringField(queueDocument, "noteId");
+  const ownerUid = stringField(queueDocument, "ownerUid");
+
+  return /^[A-Za-z0-9_-]{1,160}$/u.test(noteId)
+    && queueId === noteId
+    && ownerUid.length > 0
+    && noteDocument?.name === documentNameForPath(projectId, `notes/${noteId}`)
+    && booleanField(noteDocument, "isDeleted")
+    && booleanField(noteDocument, "isPurged")
+    && stringField(noteDocument, "ownerUid") === ownerUid;
+}
+
+async function finalizePurgedNote(queueDocument, noteId, accessToken, stats, projectId) {
+  if (stats.documentDeletesAttempted + 2 > stats.maxDocumentDeletes) {
+    return false;
+  }
+
+  const queueName = documentNameForPath(projectId, `notePurgeCleanupQueue/${noteId}`);
+  const noteName = documentNameForPath(projectId, `notes/${noteId}`);
+  const [currentQueue, currentNote] = await Promise.all([
+    getDocumentByName(queueName, accessToken),
+    getDocumentByName(noteName, accessToken)
+  ]);
+
+  if (!currentQueue || !currentNote || !validPurgeQueue(currentQueue, currentNote, projectId)) {
+    return false;
+  }
+
+  try {
+    await firestoreRequest(firestoreCommitPathFromDocumentName(noteName), accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        writes: [
+          {
+            delete: noteName,
+            currentDocument: { updateTime: currentNote.updateTime }
+          },
+          {
+            delete: queueName,
+            currentDocument: { updateTime: currentQueue.updateTime }
+          }
+        ]
+      })
+    });
+  } catch (error) {
+    if ([400, 409].includes(error.statusCode)) {
+      return false;
+    }
+    throw error;
+  }
+
+  stats.documentDeletesAttempted += 2;
+  stats.purgedNotesDeleted += 1;
+  stats.purgeQueuesDeleted += 1;
+  return true;
+}
+
+async function cleanupPurgedNote(queueDocument, accessToken, storageBucket, stats, projectId) {
+  const noteId = stringField(queueDocument, "noteId");
+
+  if (!/^[A-Za-z0-9_-]{1,160}$/u.test(noteId)) {
+    stats.purgeQueuesSkipped += 1;
+    return false;
+  }
+
+  const noteName = documentNameForPath(projectId, `notes/${noteId}`);
+  const noteDocument = await getDocumentByName(noteName, accessToken);
+
+  if (!noteDocument || !validPurgeQueue(queueDocument, noteDocument, projectId)) {
+    stats.purgeQueuesSkipped += 1;
+    return false;
+  }
+
+  const remainingAttachmentDeletes = Math.max(1, stats.maxDocumentDeletes - stats.documentDeletesAttempted);
+  const attachmentDocuments = await listChildDocuments(
+    noteName,
+    "attachments",
+    accessToken,
+    Math.min(300, remainingAttachmentDeletes),
+    ["isReady"]
+  );
+
+  for (const attachment of attachmentDocuments) {
+    if (!await cleanupAttachmentDocument(
+      attachment.name,
+      accessToken,
+      storageBucket,
+      stats,
+      projectId
+    )) {
+      return false;
+    }
+    stats.purgedNoteAttachmentsDeleted += 1;
+  }
+
+  if ((await listChildDocuments(noteName, "attachments", accessToken, 1, ["isReady"])).length > 0) {
+    return false;
+  }
+
+  const remainingHistoryDeletes = Math.max(1, stats.maxDocumentDeletes - stats.documentDeletesAttempted);
+  const historyDocuments = await listChildDocuments(
+    noteName,
+    "history",
+    accessToken,
+    Math.min(50, remainingHistoryDeletes),
+    ["revision"]
+  );
+  await deleteDocumentNames(
+    historyDocuments.map((history) => history.name),
+    accessToken,
+    stats,
+    "noteHistoriesDeleted"
+  );
+
+  if ((await listChildDocuments(noteName, "history", accessToken, 1, ["revision"])).length > 0) {
+    return false;
+  }
+
+  const noteStateParentName = documentNameForPath(projectId, `noteUserStates/${noteId}`);
+  const remainingStateDeletes = Math.max(1, stats.maxDocumentDeletes - stats.documentDeletesAttempted);
+  const noteStateDocuments = await listChildDocuments(
+    noteStateParentName,
+    "users",
+    accessToken,
+    Math.min(500, remainingStateDeletes),
+    ["updatedAt"]
+  );
+  await deleteDocumentNames(
+    noteStateDocuments.map((state) => state.name),
+    accessToken,
+    stats,
+    "noteUserStatesDeleted"
+  );
+
+  if ((await listChildDocuments(noteStateParentName, "users", accessToken, 1, ["updatedAt"])).length > 0) {
+    return false;
+  }
+
+  const remainingActiveNoteDeletes = Math.max(1, stats.maxDocumentDeletes - stats.documentDeletesAttempted);
+  const activeNoteDocuments = await queryActiveNotesByNoteId({
+    accessToken,
+    projectId,
+    noteId,
+    limit: Math.min(500, remainingActiveNoteDeletes)
+  });
+  await deleteDocumentNames(
+    activeNoteDocuments.map((activeNote) => activeNote.name),
+    accessToken,
+    stats,
+    "activeNotesDeleted"
+  );
+
+  if ((await queryActiveNotesByNoteId({ accessToken, projectId, noteId, limit: 1 })).length > 0) {
+    return false;
+  }
+
+  const finalized = await finalizePurgedNote(queueDocument, noteId, accessToken, stats, projectId);
+
+  if (finalized) {
+    stats.purgeQueuesProcessed += 1;
+  }
+
+  return finalized;
+}
+
+async function backfillNotePurgeQueues(config, stats) {
+  const purgedNotes = await queryPurgedNotes(config);
+
+  for (const noteDocument of purgedNotes) {
+    const noteId = documentIdFromName(noteDocument.name);
+    const ownerUid = stringField(noteDocument, "ownerUid");
+
+    if (!/^[A-Za-z0-9_-]{1,160}$/u.test(noteId) || !ownerUid || !booleanField(noteDocument, "isPurged")) {
+      continue;
+    }
+
+    const queueName = documentNameForPath(config.projectId, `notePurgeCleanupQueue/${noteId}`);
+
+    if (await getDocumentByName(queueName, config.accessToken)) {
+      continue;
+    }
+
+    try {
+      await firestoreRequest(firestoreCommitPathFromDocumentName(queueName), config.accessToken, {
+        method: "POST",
+        body: JSON.stringify({
+          writes: [
+            {
+              update: {
+                name: queueName,
+                fields: {
+                  noteId: { stringValue: noteId },
+                  ownerUid: { stringValue: ownerUid }
+                }
+              },
+              currentDocument: { exists: false },
+              updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }]
+            }
+          ]
+        })
+      });
+      stats.purgeQueuesBackfilled += 1;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode)) {
+        throw error;
+      }
+    }
+  }
+}
+
+async function cleanupNotePurgeQueues(config, stats) {
+  const queueDocuments = await listChildDocuments(
+    documentsResourceRoot(config.projectId),
+    "notePurgeCleanupQueue",
+    config.accessToken,
+    config.limit,
+    ["noteId", "ownerUid"]
+  );
+
+  for (const queueDocument of queueDocuments) {
+    if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+      break;
+    }
+
+    await cleanupPurgedNote(
+      queueDocument,
+      config.accessToken,
+      config.storageBucket,
+      stats,
+      config.projectId
+    );
+  }
+
+  return queueDocuments.length;
 }
 
 async function cleanupExpiredPublicShares() {
@@ -628,16 +1352,31 @@ async function cleanupExpiredPublicShares() {
     limit: configuredInteger("PUBLIC_SHARE_CLEANUP_BATCH_SIZE", defaultBatchSize, 1, 100)
   };
   const stats = {
+    abandonedDeletionsRetried: 0,
+    activeNotesDeleted: 0,
     attachmentQueuesDeleted: 0,
     attachmentsDeleted: 0,
     blobObjectsDeleted: 0,
     documentDeletesAttempted: 0,
-    maxDocumentDeletes: configuredInteger("PUBLIC_SHARE_CLEANUP_MAX_DELETES", defaultMaxDocumentDeletes, 10, 18000),
+    maxDocumentDeletes: configuredInteger("PUBLIC_SHARE_CLEANUP_MAX_DELETES", defaultMaxDocumentDeletes, 10, 5000),
+    legacyReservationsDeleted: 0,
+    noteHistoriesDeleted: 0,
+    noteUserStatesDeleted: 0,
+    purgeQueuesDeleted: 0,
+    purgeQueuesBackfilled: 0,
+    purgeQueuesProcessed: 0,
+    purgeQueuesSkipped: 0,
+    purgedNoteAttachmentsDeleted: 0,
+    purgedNotesDeleted: 0,
+    reservationsDeleted: 0,
     shareQueuesDeleted: 0,
     sharesDeleted: 0,
     storageBytesReleased: 0,
     storageObjectsDeleted: 0
   };
+
+  await backfillNotePurgeQueues(config, stats);
+  await cleanupNotePurgeQueues(config, stats);
 
   for (let pass = 0; pass < 20 && stats.documentDeletesAttempted < stats.maxDocumentDeletes; pass += 1) {
     let foundExpiredDocuments = false;
@@ -674,22 +1413,104 @@ async function cleanupExpiredPublicShares() {
         break;
       }
 
-      await deleteExpiredPublicShareAttachment(attachment, accessToken, config.storageBucket, stats, config.projectId);
+      await deleteExpiredPublicShareAttachment(
+        attachment,
+        accessToken,
+        config.storageBucket,
+        stats,
+        config.projectId,
+        config.nowIso
+      );
+    }
+
+    const abandonedDeletions = await queryAbandonedAttachmentDeletions(config);
+
+    foundExpiredDocuments ||= abandonedDeletions.length > 0;
+
+    for (const attachment of abandonedDeletions) {
+      if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+        break;
+      }
+
+      await deleteAbandonedAttachmentDeletion(
+        attachment,
+        accessToken,
+        config.storageBucket,
+        stats,
+        config.projectId
+      );
+    }
+
+    const legacyReservations = await queryLegacyExpiredAttachmentReservations(config);
+
+    foundExpiredDocuments ||= legacyReservations.length > 0;
+
+    for (const reservation of legacyReservations) {
+      if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+        break;
+      }
+
+      await deleteLegacyExpiredAttachmentReservation(
+        reservation,
+        accessToken,
+        config.storageBucket,
+        stats,
+        config.projectId,
+        config.nowIso
+      );
+    }
+
+    const reservations = await queryExpiredAttachmentReservations(config);
+
+    foundExpiredDocuments ||= reservations.length > 0;
+
+    for (const reservation of reservations) {
+      if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+        break;
+      }
+
+      await deleteExpiredAttachmentReservation(
+        reservation,
+        accessToken,
+        config.storageBucket,
+        stats,
+        config.projectId,
+        config.nowIso
+      );
     }
 
     if (
       !foundExpiredDocuments
-      || (shareQueues.length < config.limit && shares.length < config.limit && attachments.length < config.limit)
+      || (
+        shareQueues.length < config.limit
+        && shares.length < config.limit
+        && attachments.length < config.limit
+        && abandonedDeletions.length < config.limit
+        && legacyReservations.length < config.limit
+        && reservations.length < config.limit
+      )
     ) {
       break;
     }
   }
 
   return {
+    abandonedDeletionsRetried: stats.abandonedDeletionsRetried,
+    activeNotesDeleted: stats.activeNotesDeleted,
     attachmentQueuesDeleted: stats.attachmentQueuesDeleted,
     attachmentsDeleted: stats.attachmentsDeleted,
     blobObjectsDeleted: stats.blobObjectsDeleted,
     documentDeletesAttempted: stats.documentDeletesAttempted,
+    legacyReservationsDeleted: stats.legacyReservationsDeleted,
+    noteHistoriesDeleted: stats.noteHistoriesDeleted,
+    noteUserStatesDeleted: stats.noteUserStatesDeleted,
+    purgeQueuesDeleted: stats.purgeQueuesDeleted,
+    purgeQueuesBackfilled: stats.purgeQueuesBackfilled,
+    purgeQueuesProcessed: stats.purgeQueuesProcessed,
+    purgeQueuesSkipped: stats.purgeQueuesSkipped,
+    purgedNoteAttachmentsDeleted: stats.purgedNoteAttachmentsDeleted,
+    purgedNotesDeleted: stats.purgedNotesDeleted,
+    reservationsDeleted: stats.reservationsDeleted,
     shareQueuesDeleted: stats.shareQueuesDeleted,
     sharesDeleted: stats.sharesDeleted,
     storageBytesReleased: stats.storageBytesReleased,

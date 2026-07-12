@@ -16,4 +16,17 @@ describe("first admin setup auth isolation", () => {
     expect(createFirstAdminSource).toContain("created.cleanup");
     expect(createFirstAdminSource).not.toContain("createUserWithEmailAndPassword(auth");
   });
+
+  it("continues bounded managed-user cleanup responses without an infinite client loop", () => {
+    const deleteUserSource = adminFunctionsSource.slice(
+      adminFunctionsSource.indexOf("export async function deleteManagedUserDocuments"),
+      adminFunctionsSource.indexOf("export async function resetUserPassword")
+    );
+
+    expect(adminFunctionsSource).toContain("const managedUserDeleteMaxAttempts = 30");
+    expect(deleteUserSource).toContain("attempt <= managedUserDeleteMaxAttempts");
+    expect(deleteUserSource).toContain('response.status === 202 && result?.error === "cleanup_in_progress"');
+    expect(deleteUserSource).toContain("attempt === managedUserDeleteMaxAttempts");
+    expect(deleteUserSource).toContain("onProgress?.({ attempt, maxAttempts: managedUserDeleteMaxAttempts })");
+  });
 });

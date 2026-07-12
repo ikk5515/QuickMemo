@@ -1146,7 +1146,9 @@ function EditableUserCard({
     setMessage("삭제 중...");
 
     try {
-      await deleteManagedUserDocuments(user);
+      await deleteManagedUserDocuments(user, ({ attempt, maxAttempts }) => {
+        setMessage(`삭제 데이터 정리 중... (${attempt}/${maxAttempts})`);
+      });
       dirtyRef.current = false;
       latestSaveDraftRef.current = null;
       lastSubmittedSignatureRef.current = stableEditableSignature(user);

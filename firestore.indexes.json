@@ -55,6 +55,38 @@
       ]
     },
     {
+      "collectionGroup": "history",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "readerUids",
+          "arrayConfig": "CONTAINS"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "attachments",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        {
+          "fieldPath": "storageProvider",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "isReady",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "publicNoteShares",
       "queryScope": "COLLECTION",
       "fields": [
@@ -156,7 +188,26 @@
     {
       "collectionGroup": "attachments",
       "fieldPath": "expiresAt",
-      "ttl": true,
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "attachments",
+      "fieldPath": "reservationExpiresAt",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "attachments",
+      "fieldPath": "deletionStartedAt",
       "indexes": [
         {
           "order": "ASCENDING",

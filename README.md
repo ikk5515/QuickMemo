@@ -87,7 +87,7 @@ VITE_USE_FIREBASE_EMULATORS=false
 ```bash
 cp .firebaserc.example .firebaserc
 npx firebase-tools login
-npx firebase-tools deploy --only firestore:rules,firestore:indexes
+npx firebase-tools deploy --only firestore:rules,firestore:indexes,storage
 ```
 
 이 앱은 `src/lib/firebase.ts`에서 `.env.local` 값을 읽어 Firebase 앱, Auth, Firestore를 초기화합니다. Firestore 컬렉션은 앱 사용 중 클라이언트와 Firestore Rules 검증으로 생성됩니다.
@@ -98,8 +98,9 @@ Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 
 
 임시 공유 문서와 공유 첨부 파일은 Vercel Cron cleanup과 Firestore TTL 설정으로 정리합니다.
 
-- Vercel Cron cleanup: Firebase billing 없이도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유와 공유 첨부 파일을 삭제합니다. 이 경로는 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다.
-- Firestore TTL: `firestore.indexes.json`에는 `attachments.expiresAt`, `publicNoteShares.expiresAt` TTL field override가 포함되어 있습니다. 프로젝트 요금제나 권한 때문에 TTL 배포가 실패하면 Firestore Rules/Indexes 배포 로그를 확인하고, 필요한 경우 Firebase Console에서 TTL을 별도로 켜거나 Rules만 먼저 배포하세요.
+- Vercel Cron cleanup: Firebase billing 없이도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유, 중단된 첨부 예약, 영구 삭제 대기 노트의 첨부·이력·사용자 상태를 제한된 배치로 정리합니다. 삭제가 중단되어도 큐와 tombstone을 남겨 다음 실행에서 안전하게 재시도하며, 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다.
+- Firestore TTL: `publicNoteShares.expiresAt`만 TTL로 사용합니다. 첨부 metadata는 Blob quota와 object를 먼저 원자적으로 정리해야 하므로 `attachments.expiresAt`은 collection-group cleanup 인덱스만 유지하고 TTL로 선삭제하지 않습니다.
+- 공개 첨부 개인정보: 신규·재동기화된 공유의 실제 파일명은 content key로 암호화하고, 익명 문서에는 일반 이름과 확장자·크기·MIME만 둡니다. 기존 공유 첨부는 평문 파일명이 다시 노출되지 않도록 공개 목록에서 숨기며, 소유자가 노트 화면을 열어 자동 마이그레이션하거나 새 링크를 만들면 다시 표시됩니다.
 
 Vercel 운영 환경에는 아래 값을 설정합니다. `FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 전체를 넣거나, `FIREBASE_CLEANUP_CLIENT_EMAIL`과 `FIREBASE_CLEANUP_PRIVATE_KEY`를 나누어 넣을 수 있습니다. 서비스 계정 JSON을 저장소 파일로 두지 말고 Vercel Environment Variable에만 넣으세요.
 

@@ -90,17 +90,6 @@ function bytesLikeToUint8Array(value: BytesLike | Uint8Array | undefined, fieldN
   throw new Error(`${fieldName} 암호화 정보를 찾을 수 없습니다.`);
 }
 
-function concatBytes(left: Uint8Array, right: Uint8Array) {
-  if (!left.byteLength) {
-    return right;
-  }
-
-  const next = new Uint8Array(left.byteLength + right.byteLength);
-  next.set(left, 0);
-  next.set(right, left.byteLength);
-  return next;
-}
-
 function chunkCountForSize(originalSize: number, chunkSize: number) {
   return Math.ceil(originalSize / chunkSize);
 }
@@ -314,32 +303,70 @@ async function* encryptedChunksFromResponse(response: Response, encryptedSizes: 
   }
 
   const reader = response.body.getReader();
-  let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  let completed = false;
+  let pending: Uint8Array<ArrayBufferLike> | null = null;
+  let pendingOffset = 0;
 
   try {
     for (const encryptedSize of encryptedSizes) {
-      while (pending.byteLength < encryptedSize) {
-        const { done, value } = await reader.read();
+      const encryptedChunk = new Uint8Array(encryptedSize);
+      let written = 0;
 
-        if (done || !value) {
-          throw new Error("첨부파일 chunk 암호문이 부족합니다.");
+      while (written < encryptedSize) {
+        if (!pending || pendingOffset >= pending.byteLength) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            throw new Error("첨부파일 chunk 암호문이 부족합니다.");
+          }
+
+          if (!value?.byteLength) {
+            continue;
+          }
+
+          pending = value;
+          pendingOffset = 0;
         }
 
-        pending = concatBytes(pending, value);
+        const available = pending.byteLength - pendingOffset;
+        const copyLength = Math.min(available, encryptedSize - written);
+
+        encryptedChunk.set(pending.subarray(pendingOffset, pendingOffset + copyLength), written);
+        pendingOffset += copyLength;
+        written += copyLength;
       }
 
-      const encryptedChunk = new Uint8Array(encryptedSize);
-      encryptedChunk.set(pending.subarray(0, encryptedSize));
-      pending = pending.subarray(encryptedSize);
+      if (pending && pendingOffset >= pending.byteLength) {
+        pending = null;
+        pendingOffset = 0;
+      }
+
       yield encryptedChunk;
     }
 
-    const { done, value } = await reader.read();
+    const trailingBytes = pending as Uint8Array<ArrayBufferLike> | null;
 
-    if (!done || pending.byteLength || value?.byteLength) {
+    if (trailingBytes && pendingOffset < trailingBytes.byteLength) {
       throw new Error("첨부파일 chunk 암호문 크기가 일치하지 않습니다.");
     }
+
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        completed = true;
+        break;
+      }
+
+      if (value?.byteLength) {
+        throw new Error("첨부파일 chunk 암호문 크기가 일치하지 않습니다.");
+      }
+    }
   } finally {
+    if (!completed) {
+      await reader.cancel().catch(() => undefined);
+    }
+
     reader.releaseLock();
   }
 }

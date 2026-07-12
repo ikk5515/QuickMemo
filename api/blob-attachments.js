@@ -3,10 +3,24 @@
 import { del, get, head } from "@vercel/blob";
 import { handleUpload } from "@vercel/blob/client";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import {
+  attachmentReadyAction,
+  canDeleteNoteAttachmentPolicy,
+  canReadNoteAttachmentPolicy,
+  canUploadNoteAttachmentPolicy,
+  isValidEncryptedFileNamePayload,
+  publicAttachmentSourceAvailablePolicy,
+  publicShareGenericAttachmentBaseName,
+  quotaReleaseAfterAttachmentClaim,
+  shouldBumpAttachmentRevisionOnDelete,
+  shouldRetainPendingDeletionReservation
+} from "./_attachment-policy.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
 const oauthTokenUrl = "https://oauth2.googleapis.com/token";
+const storageBaseUrl = "https://storage.googleapis.com/storage/v1";
 const databaseId = "(default)";
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const blobContentType = "application/octet-stream";
@@ -19,7 +33,11 @@ const encryptedAttachmentChunkSizeBytes = 4 * 1024 * 1024;
 const maxEncryptedAttachmentChunkCount = Math.ceil(maxAttachmentFileBytes / encryptedAttachmentChunkSizeBytes);
 const maxChunkedEncryptedAttachmentBytes = maxAttachmentFileBytes + maxEncryptedAttachmentChunkCount * encryptedAttachmentOverheadBytes;
 const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
+const userBlobAttachmentCountLimit = 500;
+const attachmentCountPolicyVersion = 1;
 const tokenTtlMs = 10 * 60 * 1000;
+const pendingDeletionGraceMs = tokenTtlMs + 60 * 1000;
+const reservationTtlMs = 2 * 60 * 60 * 1000;
 const allowedAttachmentExtensions = new Set([
   "pdf",
   "txt",
@@ -155,7 +173,16 @@ function firebaseCredentials() {
     throw new HttpError(503, "첨부파일 서버 설정이 완료되지 않았습니다.", "Missing Firebase management credentials");
   }
 
-  return { clientEmail, privateKey, projectId };
+  return {
+    clientEmail,
+    privateKey,
+    projectId,
+    storageBucket:
+      envValue("FIREBASE_STORAGE_BUCKET")
+      || envValue("VITE_FIREBASE_STORAGE_BUCKET")
+      || credentialJson.storage_bucket
+      || `${projectId}.appspot.com`
+  };
 }
 
 function firebaseWebApiKey() {
@@ -370,6 +397,19 @@ function timestampValue(value) {
   return { timestampValue: value instanceof Date ? value.toISOString() : value };
 }
 
+function encryptedPayloadValue(payload) {
+  return {
+    mapValue: {
+      fields: {
+        version: integerValue(payload.version),
+        algorithm: stringValue(payload.algorithm),
+        cipherText: stringValue(payload.cipherText),
+        iv: stringValue(payload.iv)
+      }
+    }
+  };
+}
+
 function valueString(document, fieldName) {
   const value = document?.fields?.[fieldName]?.stringValue;
   return typeof value === "string" ? value : "";
@@ -383,6 +423,10 @@ function valueInteger(document, fieldName) {
 
 function valueBoolean(document, fieldName) {
   return document?.fields?.[fieldName]?.booleanValue === true;
+}
+
+function valueHasField(document, fieldName) {
+  return Boolean(document?.fields && Object.hasOwn(document.fields, fieldName));
 }
 
 function valueTimestampMillis(document, fieldName) {
@@ -436,6 +480,19 @@ function safeMimeType(value) {
   }
 
   return value || blobContentType;
+}
+
+function safeEncryptedFileName(value) {
+  if (!isValidEncryptedFileNamePayload(value)) {
+    throw new HttpError(400, "첨부파일 이름 암호화 정보가 올바르지 않습니다.", "Invalid encryptedFileName shape");
+  }
+
+  return {
+    version: 1,
+    algorithm: "AES-GCM",
+    cipherText: value.cipherText,
+    iv: value.iv
+  };
 }
 
 function safePublicShareMimeType(extension, mimeType) {
@@ -544,13 +601,19 @@ function parseClientPayload(clientPayload) {
   validateAttachmentSizes(originalSize, encryptedSize, version, chunkSize, chunkCount);
 
   const extension = safeExtension(parsed.extension);
+  const fileName = safeFileName(parsed.fileName);
+
+  if (scope === "publicShare" && fileName !== publicShareGenericAttachmentBaseName(extension)) {
+    throw new HttpError(400, "공유 첨부파일 이름이 올바르지 않습니다.", "Public attachment fileName must be generic");
+  }
 
   return {
     scope,
     attachmentId: safeId(parsed.attachmentId, "attachmentId"),
     noteId: scope === "note" ? safeId(parsed.noteId, "noteId") : "",
     shareId: scope === "publicShare" ? safeId(parsed.shareId, "shareId") : "",
-    fileName: safeFileName(parsed.fileName),
+    fileName,
+    encryptedFileName: scope === "publicShare" ? safeEncryptedFileName(parsed.encryptedFileName) : null,
     extension,
     mimeType: scope === "publicShare" ? safePublicShareMimeType(extension, parsed.mimeType) : safeMimeType(parsed.mimeType),
     originalSize,
@@ -562,6 +625,7 @@ function parseClientPayload(clientPayload) {
     chunkCount,
     chunkIvBase64List: version === 2 ? validateChunkIvBase64List(parsed.chunkIvBase64List, chunkCount) : [],
     uploadedBy: scope === "note" ? safeId(parsed.uploadedBy, "uploadedBy") : "",
+    generation: scope === "publicShare" ? safeId(parsed.generation, "generation") : "",
     sourceAttachmentId:
       scope === "publicShare" && typeof parsed.sourceAttachmentId === "string"
         ? safeId(parsed.sourceAttachmentId, "sourceAttachmentId")
@@ -599,39 +663,32 @@ function noteIsActive(note) {
   return !note?.fields?.isDeleted || valueBoolean(note, "isDeleted") === false;
 }
 
-function ownerAllowsParticipant(note, uid, ownerProfile) {
-  const ownerUid = valueString(note, "ownerUid");
-
-  return uid === ownerUid || ownerProfile.isAdmin || ownerProfile.allowedShareTargetUids.includes(uid);
-}
-
 async function canReadNote(projectId, uid, note, accessToken) {
   const callerProfile = await userProfile(projectId, uid, accessToken);
-
-  if (!callerProfile.isActive) {
-    return false;
-  }
-
   const ownerUid = valueString(note, "ownerUid");
   const participantUids = valueStringArray(note, "participantUids");
+  const needsOwnerProfile = callerProfile.isActive
+    && !callerProfile.isAdmin
+    && ownerUid !== uid
+    && !noteIsDeleted(note)
+    && !noteIsPurged(note)
+    && participantUids.includes(uid);
+  const ownerProfile = needsOwnerProfile
+    ? await userProfile(projectId, ownerUid, accessToken)
+    : { allowedShareTargetUids: [], isActive: false, isAdmin: false };
 
-  if (noteIsDeleted(note)) {
-    return callerProfile.isAdmin || ownerUid === uid;
-  }
-
-  if (!noteIsActive(note) || noteIsPurged(note)) {
-    return false;
-  }
-
-  if (callerProfile.isAdmin || ownerUid === uid) {
-    return true;
-  }
-
-  if (!participantUids.includes(uid)) {
-    return false;
-  }
-
-  return ownerAllowsParticipant(note, uid, await userProfile(projectId, ownerUid, accessToken));
+  return canReadNoteAttachmentPolicy({
+    callerIsActive: callerProfile.isActive,
+    callerIsAdmin: callerProfile.isAdmin,
+    uid,
+    ownerUid,
+    participantUids,
+    noteIsDeleted: noteIsDeleted(note),
+    noteIsPurged: noteIsPurged(note),
+    ownerIsActive: ownerProfile.isActive,
+    ownerIsAdmin: ownerProfile.isAdmin,
+    ownerAllowedShareTargetUids: ownerProfile.allowedShareTargetUids
+  });
 }
 
 async function canUploadToNote(projectId, uid, note, accessToken) {
@@ -642,10 +699,20 @@ async function canUploadToNote(projectId, uid, note, accessToken) {
   const callerProfile = await userProfile(projectId, uid, accessToken);
   const ownerUid = valueString(note, "ownerUid");
   const participantUids = valueStringArray(note, "participantUids");
+  const ownerProfile = await userProfile(projectId, ownerUid, accessToken);
 
-  return callerProfile.isActive
-    && participantUids.includes(uid)
-    && ownerAllowsParticipant(note, uid, await userProfile(projectId, ownerUid, accessToken));
+  return canUploadNoteAttachmentPolicy({
+    callerIsActive: callerProfile.isActive,
+    callerIsAdmin: callerProfile.isAdmin,
+    uid,
+    ownerUid,
+    participantUids,
+    noteIsDeleted: noteIsDeleted(note),
+    noteIsPurged: noteIsPurged(note),
+    ownerIsActive: ownerProfile.isActive,
+    ownerIsAdmin: ownerProfile.isAdmin,
+    ownerAllowedShareTargetUids: ownerProfile.allowedShareTargetUids
+  });
 }
 
 function publicShareActive(share, now = Date.now()) {
@@ -654,15 +721,62 @@ function publicShareActive(share, now = Date.now()) {
   return valueBoolean(share, "ready") && !share?.fields?.revokedAt && Number.isFinite(expiresAt) && expiresAt > now;
 }
 
+function publicShareAttachmentIsCurrent(share, attachment) {
+  const currentGeneration = valueString(share, "currentGeneration");
+  const attachmentGeneration = valueString(attachment, "generation");
+
+  return currentGeneration
+    ? attachmentGeneration === currentGeneration
+    : !attachmentGeneration;
+}
+
+async function publicShareSourceAvailable(projectId, share, accessToken, requireMatchingRevision = false) {
+  const sourceNoteId = valueString(share, "sourceNoteId");
+  const ownerUid = valueString(share, "ownerUid");
+
+  if (!/^[A-Za-z0-9_-]{1,160}$/u.test(sourceNoteId) || !ownerUid) {
+    return false;
+  }
+
+  const [sourceNote, ownerProfile] = await Promise.all([
+    firestoreGetDocument(projectId, `notes/${sourceNoteId}`, accessToken),
+    userProfile(projectId, ownerUid, accessToken)
+  ]);
+
+  return Boolean(sourceNote)
+    && noteIsActive(sourceNote)
+    && publicAttachmentSourceAvailablePolicy({
+      ownerIsActive: ownerProfile.isActive,
+      shareOwnerUid: ownerUid,
+      noteOwnerUid: valueString(sourceNote, "ownerUid"),
+      noteIsDeleted: noteIsDeleted(sourceNote),
+      noteIsPurged: noteIsPurged(sourceNote),
+      requireMatchingRevision,
+      shareSourceRevision: valueInteger(share, "sourceRevision"),
+      noteRevision: valueInteger(sourceNote, "revision"),
+      shareSourceAttachmentRevision: valueInteger(share, "sourceAttachmentRevision"),
+      noteAttachmentRevision: valueInteger(sourceNote, "attachmentRevision")
+    });
+}
+
+async function publicShareSourceActive(projectId, share, accessToken) {
+  return publicShareSourceAvailable(projectId, share, accessToken, true);
+}
+
 async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, extraWrites) {
   const quotaPath = `userAttachmentUsage/${uid}`;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const quotaDocument = await firestoreGetDocument(projectId, quotaPath, accessToken);
     const usedBytes = valueInteger(quotaDocument, "usedBytes");
+    const attachmentCount = valueInteger(quotaDocument, "attachmentCount");
 
     if (usedBytes + bytes > userBlobAttachmentQuotaBytes) {
       throw new HttpError(413, "첨부파일 총 저장 한도 1.00 GB를 초과했습니다.", "Blob attachment quota exceeded");
+    }
+
+    if (attachmentCount + 1 > userBlobAttachmentCountLimit) {
+      throw new HttpError(413, "첨부파일 저장 개수 한도를 초과했습니다.", "Blob attachment count limit exceeded");
     }
 
     const quotaWrite = {
@@ -670,6 +784,9 @@ async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
         name: documentName(projectId, quotaPath),
         fields: {
           uid: stringValue(uid),
+          attachmentCount: integerValue(attachmentCount + 1),
+          countPolicyVersion: integerValue(attachmentCountPolicyVersion),
+          limitCount: integerValue(userBlobAttachmentCountLimit),
           usedBytes: integerValue(usedBytes + bytes),
           limitBytes: integerValue(userBlobAttachmentQuotaBytes)
         }
@@ -689,43 +806,93 @@ async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
   }
 }
 
-async function releaseUserAttachmentBytes(projectId, accessToken, uid, bytes, extraWrites = []) {
-  if (!uid || bytes <= 0) {
-    await firestoreCommit(projectId, accessToken, extraWrites);
-    return;
-  }
-
-  const quotaPath = `userAttachmentUsage/${uid}`;
-
+async function claimAttachmentDeletion(projectId, accessToken, attachmentPath, extraDeletePaths = []) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const quotaDocument = await firestoreGetDocument(projectId, quotaPath, accessToken);
-    const usedBytes = Math.max(0, valueInteger(quotaDocument, "usedBytes") - bytes);
-    const writes = [...extraWrites];
+    const attachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
 
-    if (quotaDocument) {
+    if (!attachment) {
+      return null;
+    }
+
+    const quotaUid = valueString(attachment, "ownerUid") || valueString(attachment, "uploadedBy");
+    const encryptedSize = Math.max(0, valueInteger(attachment, "encryptedSize"));
+    const quotaPath = quotaUid ? `userAttachmentUsage/${quotaUid}` : "";
+    const quotaDocument = quotaPath
+      ? await firestoreGetDocument(projectId, quotaPath, accessToken)
+      : null;
+    const claim = quotaReleaseAfterAttachmentClaim({
+      attachmentExists: true,
+      attachmentUpdateTime: attachment.updateTime,
+      attachmentCount: valueInteger(quotaDocument, "attachmentCount"),
+      encryptedSize,
+      quotaReserved: valueHasField(attachment, "quotaReserved")
+        ? valueBoolean(attachment, "quotaReserved")
+        : null,
+      legacyBlobReserved:
+        !valueHasField(attachment, "quotaReserved")
+        && valueString(attachment, "storageProvider") === "vercel-blob"
+        && Boolean(valueString(attachment, "blobPath")),
+      quotaExists: Boolean(quotaDocument),
+      quotaUpdateTime: quotaDocument?.updateTime ?? "",
+      uid: quotaUid,
+      usedBytes: valueInteger(quotaDocument, "usedBytes")
+    });
+
+    if (!claim) {
+      return null;
+    }
+
+    const writes = [
+      {
+        delete: documentName(projectId, attachmentPath),
+        currentDocument: { updateTime: claim.attachmentUpdateTime }
+      },
+      ...extraDeletePaths.map((path) => ({ delete: documentName(projectId, path) }))
+    ];
+
+    if (claim.quota) {
       writes.push({
         update: {
           name: documentName(projectId, quotaPath),
           fields: {
-            uid: stringValue(uid),
-            usedBytes: integerValue(usedBytes),
+            uid: stringValue(claim.quota.uid),
+            attachmentCount: integerValue(claim.quota.attachmentCount),
+            countPolicyVersion: integerValue(attachmentCountPolicyVersion),
+            limitCount: integerValue(userBlobAttachmentCountLimit),
+            usedBytes: integerValue(claim.quota.usedBytes),
             limitBytes: integerValue(userBlobAttachmentQuotaBytes)
           }
         },
-        currentDocument: { updateTime: quotaDocument.updateTime },
+        currentDocument: { updateTime: claim.quota.quotaUpdateTime },
         updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
       });
     }
 
     try {
       await firestoreCommit(projectId, accessToken, writes);
-      return;
+      return attachment;
     } catch (error) {
-      if (![400, 409].includes(error.statusCode) || attempt === 2) {
+      if (![400, 409].includes(error.statusCode)) {
         throw error;
+      }
+
+      if (attempt === 2) {
+        const remainingAttachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
+
+        if (!remainingAttachment) {
+          return null;
+        }
+
+        throw new HttpError(
+          409,
+          "첨부파일 정리가 다른 작업과 충돌했습니다. 다시 시도해주세요.",
+          "Attachment deletion claim conflict"
+        );
       }
     }
   }
+
+  return null;
 }
 
 function attachmentBaseFields(payload, blobPath) {
@@ -739,7 +906,9 @@ function attachmentBaseFields(payload, blobPath) {
     encryptedSize: integerValue(payload.encryptedSize),
     storageProvider: stringValue("vercel-blob"),
     blobPath: stringValue(blobPath),
-    isReady: booleanValue(false)
+    isReady: booleanValue(false),
+    quotaReserved: booleanValue(true),
+    reservationExpiresAt: timestampValue(new Date(Date.now() + reservationTtlMs).toISOString())
   };
 
   if (payload.version === 1) {
@@ -801,7 +970,15 @@ async function createPublicShareAttachmentReservation(projectId, accessToken, ui
   const expiresAt = share?.fields?.expiresAt?.timestampValue;
   const ownerProfile = await userProfile(projectId, uid, accessToken);
 
-  if (!share || !ownerProfile.isActive || ownerUid !== uid || share?.fields?.revokedAt || !expiresAt || Date.parse(expiresAt) <= Date.now()) {
+  if (
+    !share
+    || !ownerProfile.isActive
+    || ownerUid !== uid
+    || share?.fields?.revokedAt
+    || !expiresAt
+    || Date.parse(expiresAt) <= Date.now()
+    || !(await publicShareSourceAvailable(projectId, share, accessToken))
+  ) {
     throw new HttpError(403, "공유 첨부파일 업로드 권한이 없습니다.", "Cannot upload to public share");
   }
 
@@ -815,7 +992,10 @@ async function createPublicShareAttachmentReservation(projectId, accessToken, ui
   const cleanupPath = `publicShareCleanupQueue/${payload.shareId}/publicShareAttachmentCleanupQueue/${payload.attachmentId}`;
   const fields = {
     ...attachmentBaseFields(payload, expectedPath),
+    encryptedFileName: encryptedPayloadValue(payload.encryptedFileName),
+    privacyVersion: integerValue(1),
     ownerUid: stringValue(uid),
+    generation: stringValue(payload.generation),
     expiresAt: timestampValue(expiresAt)
   };
 
@@ -857,14 +1037,20 @@ async function createPublicShareAttachmentReservation(projectId, accessToken, ui
 }
 
 function callbackUrlForRequest(request) {
-  const protocol = request.headers["x-forwarded-proto"] || "https";
-  const host = request.headers["x-forwarded-host"] || request.headers.host;
+  const configuredHost = envValue("VERCEL_URL") || envValue("VERCEL_PROJECT_PRODUCTION_URL");
 
-  if (!host) {
+  if (configuredHost && /^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$/u.test(configuredHost)) {
+    return `https://${configuredHost}/api/blob-attachments`;
+  }
+
+  const forwardedHost = request.headers["x-forwarded-host"] || request.headers.host;
+  const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost;
+
+  if (typeof host !== "string" || !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/u.test(host)) {
     return undefined;
   }
 
-  return `${Array.isArray(protocol) ? protocol[0] : protocol}://${Array.isArray(host) ? host[0] : host}/api/blob-attachments`;
+  return `http://${host}/api/blob-attachments`;
 }
 
 async function beforeGenerateToken(request, pathname, clientPayload) {
@@ -946,46 +1132,125 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
   }
 
   const blob = await validateUploadedBlob(tokenPayload.blobPath, tokenPayload.encryptedSize);
-  const document = await firestoreGetDocument(projectId, tokenPayload.attachmentPath, accessToken);
 
-  if (!document) {
-    throw new Error("Attachment reservation no longer exists");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const attachment = await firestoreGetDocument(projectId, tokenPayload.attachmentPath, accessToken);
+
+    if (!attachment) {
+      throw new Error("Attachment reservation no longer exists");
+    }
+
+    const readyAction = attachmentReadyAction({
+      isReady: valueBoolean(attachment, "isReady"),
+      deletionStarted: valueBoolean(attachment, "deletionStarted") || valueHasField(attachment, "deletionStartedAt")
+    });
+
+    if (readyAction === "already-ready") {
+      return;
+    }
+
+    if (readyAction === "blocked") {
+      throw new HttpError(409, "삭제가 시작된 첨부파일은 업로드를 완료할 수 없습니다.", "Attachment deletion already started");
+    }
+
+    const uploaderProfile = await userProfile(projectId, tokenPayload.uid, accessToken);
+
+    if (!uploaderProfile.isActive) {
+      throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Inactive uploader cannot complete attachment");
+    }
+
+    const writes = [
+      {
+        update: {
+          name: documentName(projectId, tokenPayload.attachmentPath),
+          fields: {
+            isReady: booleanValue(true),
+            blobUrl: stringValue(blob.url),
+            blobDownloadUrl: stringValue(blob.downloadUrl),
+            blobEtag: stringValue(blob.etag)
+          }
+        },
+        updateMask: {
+          fieldPaths: ["isReady", "blobUrl", "blobDownloadUrl", "blobEtag", "reservationExpiresAt"]
+        },
+        currentDocument: { updateTime: attachment.updateTime }
+      }
+    ];
+
+    if (tokenPayload.scope === "note") {
+      const noteId = safeId(tokenPayload.noteId, "noteId");
+      const note = await firestoreGetDocument(projectId, `notes/${noteId}`, accessToken);
+
+      if (!note || !(await canUploadToNote(projectId, tokenPayload.uid, note, accessToken))) {
+        throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Uploader no longer has note access");
+      }
+
+      writes.push({
+        update: {
+          name: documentName(projectId, `notes/${noteId}`),
+          fields: {
+            attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1)
+          }
+        },
+        updateMask: { fieldPaths: ["attachmentRevision"] },
+        currentDocument: { updateTime: note.updateTime }
+      });
+    } else if (tokenPayload.scope === "publicShare") {
+      const share = await firestoreGetDocument(projectId, `publicNoteShares/${safeId(tokenPayload.shareId, "shareId")}`, accessToken);
+
+      if (
+        !share
+        || valueString(share, "ownerUid") !== tokenPayload.uid
+        || valueString(attachment, "generation") !== safeId(tokenPayload.generation, "generation")
+        || share?.fields?.revokedAt
+        || !Number.isFinite(valueTimestampMillis(share, "expiresAt"))
+        || valueTimestampMillis(share, "expiresAt") <= Date.now()
+        || !(await publicShareSourceAvailable(projectId, share, accessToken))
+      ) {
+        throw new HttpError(403, "공유 첨부파일 업로드 완료 권한이 없습니다.", "Inactive public share source");
+      }
+    }
+
+    try {
+      await firestoreCommit(projectId, accessToken, writes);
+      return;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode) || attempt === 2) {
+        throw error;
+      }
+    }
   }
+}
 
-  if (valueBoolean(document, "isReady")) {
+async function cleanupRejectedUploadedBlob(projectId, accessToken, tokenPayload, uploadedBlob) {
+  if (!uploadedBlob || uploadedBlob.pathname !== tokenPayload.blobPath) {
     return;
   }
 
-  const uploaderProfile = await userProfile(projectId, tokenPayload.uid, accessToken);
+  const attachment = await firestoreGetDocument(projectId, tokenPayload.attachmentPath, accessToken);
 
-  if (!uploaderProfile.isActive) {
-    throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Inactive uploader cannot complete attachment");
+  if (
+    attachment
+    && !valueBoolean(attachment, "deletionStarted")
+    && !valueHasField(attachment, "deletionStartedAt")
+  ) {
+    return;
   }
 
-  await firestoreCommit(projectId, accessToken, [
-    {
-      update: {
-        name: documentName(projectId, tokenPayload.attachmentPath),
-        fields: {
-          isReady: booleanValue(true),
-          blobUrl: stringValue(blob.url),
-          blobDownloadUrl: stringValue(blob.downloadUrl),
-          blobEtag: stringValue(blob.etag)
-        }
-      },
-      updateMask: {
-        fieldPaths: ["isReady", "blobUrl", "blobDownloadUrl", "blobEtag"]
-      },
-      currentDocument: { exists: true }
-    }
-  ]);
+  await deleteBlobIfPresent(uploadedBlob.pathname);
 }
 
 async function onUploadCompleted({ blob, tokenPayload }) {
   const credentials = firebaseCredentials();
   const accessToken = await fetchAccessToken(credentials);
+  const parsedTokenPayload = parseTokenPayload(tokenPayload);
 
-  await markAttachmentReady(credentials.projectId, accessToken, parseTokenPayload(tokenPayload), blob);
+  try {
+    await markAttachmentReady(credentials.projectId, accessToken, parsedTokenPayload, blob);
+  } catch (error) {
+    await cleanupRejectedUploadedBlob(credentials.projectId, accessToken, parsedTokenPayload, blob);
+    throw error;
+  }
 }
 
 async function handleBlobUploadRequest(request, response, body) {
@@ -1024,11 +1289,26 @@ async function completeUploadFromClient(request, response) {
     const attachment = await firestoreGetDocument(credentials.projectId, attachmentPath, accessToken);
     const callerProfile = await userProfile(credentials.projectId, uid, accessToken);
 
-    if (!attachment || !callerProfile.isActive || valueString(attachment, "uploadedBy") !== uid) {
+    if (!attachment) {
+      await cleanupRejectedUploadedBlob(
+        credentials.projectId,
+        accessToken,
+        {
+          attachmentPath,
+          blobPath: noteBlobPath(uid, noteId, attachmentId)
+        },
+        body.blob
+      );
+      throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Note attachment reservation is missing");
+    }
+
+    if (!callerProfile.isActive || valueString(attachment, "uploadedBy") !== uid) {
       throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Cannot complete note attachment");
     }
 
     tokenPayload = {
+      scope: "note",
+      noteId,
       attachmentPath,
       blobPath: valueString(attachment, "blobPath"),
       encryptedSize: valueInteger(attachment, "encryptedSize"),
@@ -1041,11 +1321,35 @@ async function completeUploadFromClient(request, response) {
     const attachment = await firestoreGetDocument(credentials.projectId, attachmentPath, accessToken);
     const callerProfile = await userProfile(credentials.projectId, uid, accessToken);
 
-    if (!share || !attachment || !callerProfile.isActive || valueString(share, "ownerUid") !== uid) {
+    if (!attachment) {
+      await cleanupRejectedUploadedBlob(
+        credentials.projectId,
+        accessToken,
+        {
+          attachmentPath,
+          blobPath: publicShareBlobPath(uid, shareId, attachmentId)
+        },
+        body.blob
+      );
+      throw new HttpError(403, "공유 첨부파일 업로드 완료 권한이 없습니다.", "Public attachment reservation is missing");
+    }
+
+    if (
+      !share
+      || !callerProfile.isActive
+      || valueString(share, "ownerUid") !== uid
+      || share?.fields?.revokedAt
+      || !Number.isFinite(valueTimestampMillis(share, "expiresAt"))
+      || valueTimestampMillis(share, "expiresAt") <= Date.now()
+      || !(await publicShareSourceAvailable(credentials.projectId, share, accessToken))
+    ) {
       throw new HttpError(403, "공유 첨부파일 업로드 완료 권한이 없습니다.", "Cannot complete public share attachment");
     }
 
     tokenPayload = {
+      scope: "publicShare",
+      shareId,
+      generation: valueString(attachment, "generation"),
       attachmentPath,
       blobPath: valueString(attachment, "blobPath"),
       encryptedSize: valueInteger(attachment, "encryptedSize"),
@@ -1059,7 +1363,12 @@ async function completeUploadFromClient(request, response) {
     throw new HttpError(400, "업로드된 첨부파일 정보가 올바르지 않습니다.", "Invalid uploaded blob");
   }
 
-  await markAttachmentReady(credentials.projectId, accessToken, tokenPayload, body.blob);
+  try {
+    await markAttachmentReady(credentials.projectId, accessToken, tokenPayload, body.blob);
+  } catch (error) {
+    await cleanupRejectedUploadedBlob(credentials.projectId, accessToken, tokenPayload, body.blob);
+    throw error;
+  }
   jsonResponse(response, 200, { ok: true });
 }
 
@@ -1072,6 +1381,7 @@ async function streamBlobAttachment(request, response) {
   const credentials = firebaseCredentials();
   const accessToken = await fetchAccessToken(credentials);
   let attachment;
+  let publicShare;
 
   if (scope === "note") {
     const idToken = authToken(request);
@@ -1093,10 +1403,15 @@ async function streamBlobAttachment(request, response) {
     const shareId = safeId(url.searchParams.get("shareId"), "shareId");
     const share = await firestoreGetDocument(credentials.projectId, `publicNoteShares/${shareId}`, accessToken);
 
-    if (!share || !publicShareActive(share)) {
+    if (
+      !share
+      || !publicShareActive(share)
+      || !(await publicShareSourceActive(credentials.projectId, share, accessToken))
+    ) {
       throw new HttpError(403, "공유 첨부파일을 읽을 수 없습니다.", "Inactive public share");
     }
 
+    publicShare = share;
     attachment = await firestoreGetDocument(credentials.projectId, `publicNoteShares/${shareId}/attachments/${attachmentId}`, accessToken);
   } else {
     throw new HttpError(400, "첨부파일 조회 범위가 올바르지 않습니다.", "Invalid scope");
@@ -1105,7 +1420,17 @@ async function streamBlobAttachment(request, response) {
   const blobPath = valueString(attachment, "blobPath");
   const encryptedSize = valueInteger(attachment, "encryptedSize");
 
-  if (!attachment || !valueBoolean(attachment, "isReady") || !blobPath || encryptedSize > maxChunkedEncryptedAttachmentBytes) {
+  if (
+    !attachment
+    || (publicShare && !publicShareAttachmentIsCurrent(publicShare, attachment))
+    || (
+      publicShare
+      && (valueInteger(attachment, "privacyVersion") !== 1 || !valueHasField(attachment, "encryptedFileName"))
+    )
+    || !valueBoolean(attachment, "isReady")
+    || !blobPath
+    || encryptedSize > maxChunkedEncryptedAttachmentBytes
+  ) {
     throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Attachment blob not ready");
   }
 
@@ -1126,7 +1451,7 @@ async function streamBlobAttachment(request, response) {
   response.setHeader("content-length", String(blobMetadata.size));
   response.setHeader("cache-control", "no-store");
   response.setHeader("x-content-type-options", "nosniff");
-  Readable.fromWeb(blob.stream).pipe(response);
+  await pipeline(Readable.fromWeb(blob.stream), response);
 }
 
 async function deleteBlobIfPresent(blobPath) {
@@ -1143,6 +1468,117 @@ async function deleteBlobIfPresent(blobPath) {
       throw error;
     }
   }
+}
+
+async function deleteStorageObjectIfPresent(storageBucket, storagePath, accessToken) {
+  if (!storageBucket || !storagePath) {
+    return;
+  }
+
+  const response = await fetch(
+    `${storageBaseUrl}/b/${encodeURIComponent(storageBucket)}/o/${encodeURIComponent(storagePath)}`,
+    {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${accessToken}` }
+    }
+  );
+
+  if (response.status === 404) {
+    return;
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Storage delete failed: ${response.status} ${text.slice(0, 300)}`);
+  }
+}
+
+async function deleteAttachmentObjects(credentials, accessToken, attachment) {
+  await deleteBlobIfPresent(valueString(attachment, "blobPath"));
+  await deleteStorageObjectIfPresent(credentials.storageBucket, valueString(attachment, "storagePath"), accessToken);
+}
+
+async function beginAttachmentDeletion(projectId, accessToken, attachmentPath, notePath = "") {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const attachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
+
+    if (!attachment) {
+      return null;
+    }
+
+    const deletionStarted = valueBoolean(attachment, "deletionStarted");
+    const revisionBumped = valueBoolean(attachment, "attachmentRevisionBumped");
+    const shouldBumpRevision = shouldBumpAttachmentRevisionOnDelete({
+      scope: notePath ? "note" : "publicShare",
+      alreadyBumped: revisionBumped,
+      hasReadyField: valueHasField(attachment, "isReady"),
+      isReady: valueBoolean(attachment, "isReady")
+    });
+
+    if (deletionStarted && !shouldBumpRevision) {
+      return attachment;
+    }
+
+    const attachmentFields = { deletionStarted: booleanValue(true) };
+    const attachmentFieldPaths = ["deletionStarted"];
+    const writes = [];
+
+    if (shouldBumpRevision) {
+      const note = await firestoreGetDocument(projectId, notePath, accessToken);
+
+      if (!note) {
+        throw new HttpError(409, "첨부파일의 노트가 더 이상 존재하지 않습니다.", "Attachment note no longer exists");
+      }
+
+      attachmentFields.attachmentRevisionBumped = booleanValue(true);
+      attachmentFieldPaths.push("attachmentRevisionBumped");
+      writes.push({
+        update: {
+          name: documentName(projectId, notePath),
+          fields: {
+            attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1)
+          }
+        },
+        updateMask: { fieldPaths: ["attachmentRevision"] },
+        currentDocument: { updateTime: note.updateTime }
+      });
+    }
+
+    if (shouldRetainPendingDeletionReservation({
+      hasReadyField: valueHasField(attachment, "isReady"),
+      isReady: valueBoolean(attachment, "isReady")
+    })) {
+      attachmentFields.reservationExpiresAt = timestampValue(new Date(Date.now() + pendingDeletionGraceMs));
+      attachmentFieldPaths.push("reservationExpiresAt");
+    }
+
+    writes.unshift({
+      update: {
+        name: documentName(projectId, attachmentPath),
+        fields: attachmentFields
+      },
+      updateMask: { fieldPaths: attachmentFieldPaths },
+      currentDocument: { updateTime: attachment.updateTime },
+      ...(!deletionStarted
+        ? { updateTransforms: [{ fieldPath: "deletionStartedAt", setToServerValue: "REQUEST_TIME" }] }
+        : {})
+    });
+
+    try {
+      await firestoreCommit(projectId, accessToken, writes);
+      return attachment;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode)) {
+        throw error;
+      }
+
+      if (attempt === 2) {
+        throw new HttpError(409, "첨부파일 삭제가 다른 작업과 충돌했습니다. 다시 시도해주세요.", "Attachment deletion precondition conflict");
+      }
+    }
+  }
+
+  return null;
 }
 
 async function deleteAttachment(request, response) {
@@ -1168,19 +1604,44 @@ async function deleteAttachment(request, response) {
     const attachmentPath = `notes/${noteId}/attachments/${attachmentId}`;
     const attachment = await firestoreGetDocument(credentials.projectId, attachmentPath, accessToken);
     const callerProfile = await userProfile(credentials.projectId, uid, accessToken);
-    const canDelete =
-      Boolean(note && attachment)
-      && callerProfile.isActive
-      && (callerProfile.isAdmin || (valueStringArray(note, "participantUids").includes(uid) && [valueString(note, "ownerUid"), valueString(attachment, "uploadedBy")].includes(uid)));
+    const ownerUid = valueString(note, "ownerUid");
+    const ownerProfile = note ? await userProfile(credentials.projectId, ownerUid, accessToken) : { allowedShareTargetUids: [], isActive: false, isAdmin: false };
+    const canDelete = Boolean(note && attachment) && canDeleteNoteAttachmentPolicy({
+      callerIsActive: callerProfile.isActive,
+      callerIsAdmin: callerProfile.isAdmin,
+      uid,
+      ownerUid,
+      participantUids: valueStringArray(note, "participantUids"),
+      uploadedBy: valueString(attachment, "uploadedBy"),
+      noteIsDeleted: noteIsDeleted(note),
+      noteIsPurged: noteIsPurged(note),
+      ownerIsActive: ownerProfile.isActive,
+      ownerIsAdmin: ownerProfile.isAdmin,
+      ownerAllowedShareTargetUids: ownerProfile.allowedShareTargetUids
+    });
 
     if (!canDelete) {
       throw new HttpError(403, "첨부파일 삭제 권한이 없습니다.", "Cannot delete note attachment");
     }
 
-    await deleteBlobIfPresent(valueString(attachment, "blobPath"));
-    await releaseUserAttachmentBytes(credentials.projectId, accessToken, valueString(attachment, "uploadedBy"), valueInteger(attachment, "encryptedSize"), [
-      { delete: documentName(credentials.projectId, attachmentPath) }
-    ]);
+    const deletingAttachment = await beginAttachmentDeletion(
+      credentials.projectId,
+      accessToken,
+      attachmentPath,
+      `notes/${noteId}`
+    );
+
+    if (deletingAttachment) {
+      await deleteAttachmentObjects(credentials, accessToken, deletingAttachment);
+
+      if (!shouldRetainPendingDeletionReservation({
+        hasReadyField: valueHasField(deletingAttachment, "isReady"),
+        isReady: valueBoolean(deletingAttachment, "isReady")
+      })) {
+        await claimAttachmentDeletion(credentials.projectId, accessToken, attachmentPath);
+      }
+    }
+
     jsonResponse(response, 200, { ok: true });
     return;
   }
@@ -1197,11 +1658,19 @@ async function deleteAttachment(request, response) {
       throw new HttpError(403, "공유 첨부파일 삭제 권한이 없습니다.", "Cannot delete public share attachment");
     }
 
-    await deleteBlobIfPresent(valueString(attachment, "blobPath"));
-    await releaseUserAttachmentBytes(credentials.projectId, accessToken, uid, valueInteger(attachment, "encryptedSize"), [
-      { delete: documentName(credentials.projectId, attachmentPath) },
-      { delete: documentName(credentials.projectId, cleanupPath) }
-    ]);
+    const deletingAttachment = await beginAttachmentDeletion(credentials.projectId, accessToken, attachmentPath);
+
+    if (deletingAttachment) {
+      await deleteAttachmentObjects(credentials, accessToken, deletingAttachment);
+
+      if (!shouldRetainPendingDeletionReservation({
+        hasReadyField: valueHasField(deletingAttachment, "isReady"),
+        isReady: valueBoolean(deletingAttachment, "isReady")
+      })) {
+        await claimAttachmentDeletion(credentials.projectId, accessToken, attachmentPath, [cleanupPath]);
+      }
+    }
+
     jsonResponse(response, 200, { ok: true });
     return;
   }

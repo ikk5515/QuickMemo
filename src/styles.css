@@ -5868,21 +5868,15 @@ textarea {
   .editor-primary-actions,
   .toolbar-actions {
     display: flex;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     gap: 6px;
     min-width: 0;
-    overflow-x: auto;
-    padding-bottom: 2px;
-    scrollbar-width: none;
+    overflow-x: visible;
+    padding-bottom: 0;
   }
 
   .editor-primary-actions .note-meta-card,
   .toolbar-actions .sync-status {
-    display: none;
-  }
-
-  .editor-primary-actions::-webkit-scrollbar,
-  .toolbar-actions::-webkit-scrollbar {
     display: none;
   }
 
@@ -5946,7 +5940,7 @@ textarea {
   }
 
   .rich-editor-toolbar {
-    overflow: hidden;
+    overflow: visible;
     top: 70px;
   }
 
@@ -5955,10 +5949,9 @@ textarea {
   }
 
   .rich-toolbar-panel {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    padding-bottom: 2px;
-    scrollbar-width: thin;
+    flex-wrap: wrap;
+    overflow-x: visible;
+    padding-bottom: 0;
   }
 
   .table-insert-control,
@@ -5971,11 +5964,14 @@ textarea {
   .format-quick-dock {
     border-radius: 8px;
     bottom: max(8px, env(safe-area-inset-bottom));
+    flex-wrap: wrap;
     justify-content: flex-start;
     left: max(10px, env(safe-area-inset-left));
+    max-height: min(38svh, 230px);
     max-width: none;
+    overflow-x: visible;
+    overflow-y: auto;
     right: max(10px, env(safe-area-inset-right));
-    scrollbar-width: thin;
     transform: none;
     width: auto;
   }
@@ -9087,6 +9083,7 @@ textarea {
   --type-editor-body: 17px;
   --type-editor-heading: 28px;
   --type-empty-state-title: 16px;
+  --note-reading-measure: 76ch;
 }
 
 h1,
@@ -9412,18 +9409,55 @@ button,
   background: rgb(255 255 255 / 88%);
 }
 
-.rich-body-input.ProseMirror {
-  font-size: var(--type-editor-body);
+.rich-body-input.ProseMirror,
+.note-preview-body,
+.admin-note-view-body {
   line-height: 1.68;
 }
 
-.rich-body-input h1,
-.rich-body-input h2,
-.rich-body-input h3 {
-  font-size: var(--type-editor-heading);
+.rich-body-input.ProseMirror {
+  font-size: var(--editor-font-size, var(--type-editor-body));
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre) {
+  max-inline-size: var(--note-reading-measure);
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) :is(h1, h2, h3, h4, h5, h6) {
   letter-spacing: 0;
-  line-height: 1.2;
+  overflow-wrap: anywhere;
   word-break: keep-all;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) h1 {
+  font-size: 1.75em;
+  line-height: 1.2;
+  margin: 1.15em 0 0.5em;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) h2 {
+  font-size: 1.42em;
+  line-height: 1.26;
+  margin: 1.25em 0 0.5em;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) h3 {
+  font-size: 1.18em;
+  line-height: 1.34;
+  margin: 1.2em 0 0.45em;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) :is(h4, h5, h6) {
+  font-size: 1em;
+  line-height: 1.45;
+  margin: 1.1em 0 0.4em;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 1.75em 0;
+  max-inline-size: var(--note-reading-measure);
 }
 
 .attachment-item {
@@ -10082,6 +10116,10 @@ html[data-theme="dark"] .rich-body-input li[data-type="taskItem"][data-checked="
 html[data-theme="dark"] .note-preview-body li[data-type="taskItem"][data-checked="true"] > div,
 html[data-theme="dark"] .admin-note-view-body li[data-type="taskItem"][data-checked="true"] > div {
   color: var(--muted);
+}
+
+html[data-theme="dark"] :is(.rich-body-input, .note-preview-body, .admin-note-view-body) [data-qm-text-color="#14211f"] {
+  color: var(--ink) !important;
 }
 
 html[data-theme="dark"] input::placeholder,

@@ -42,6 +42,38 @@ async function blobBytes(blob: Blob) {
   );
 }
 
+function streamedResponse(
+  bytes: Uint8Array,
+  options: { closeWhenConsumed?: boolean; onCancel?: () => void; sizes?: number[] } = {}
+) {
+  const sizes = options.sizes?.length ? options.sizes : [bytes.byteLength];
+  let offset = 0;
+  let sizeIndex = 0;
+
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      cancel() {
+        options.onCancel?.();
+      },
+      pull(controller) {
+        if (offset >= bytes.byteLength) {
+          if (options.closeWhenConsumed !== false) {
+            controller.close();
+          }
+          return;
+        }
+
+        const requestedSize = sizes[sizeIndex % sizes.length] ?? bytes.byteLength;
+        const nextOffset = Math.min(bytes.byteLength, offset + Math.max(1, requestedSize));
+
+        controller.enqueue(bytes.slice(offset, nextOffset));
+        offset = nextOffset;
+        sizeIndex += 1;
+      }
+    })
+  );
+}
+
 describe("attachment chunked encryption", () => {
   it("keeps legacy v1 single AES-GCM attachment payloads decryptable", async () => {
     const noteKey = await generateNoteKey();
@@ -91,6 +123,48 @@ describe("attachment chunked encryption", () => {
 
     await expect(blobBytes(decryptedBlob)).resolves.toEqual(plainBytes);
   }, 30_000);
+
+  it("assembles irregular response chunks without requiring cumulative buffer concatenation", async () => {
+    const noteKey = await generateNoteKey();
+    const plainBytes = testBytes(128 * 1024 + 37);
+    const encrypted = await encryptAttachmentBlob(new Blob([plainBytes]), noteKey);
+    const encryptedBytes = await blobBytes(encrypted.blob);
+
+    await expect(
+      decryptAttachmentToBytes(
+        { ...encrypted.metadata, originalSize: plainBytes.byteLength },
+        noteKey,
+        { response: streamedResponse(encryptedBytes, { sizes: [1, 7, 31, 257, 4093] }) }
+      )
+    ).resolves.toEqual(plainBytes);
+  });
+
+  it("cancels an unfinished encrypted response stream when authentication fails", async () => {
+    const noteKey = await generateNoteKey();
+    const plainBytes = testBytes(8193);
+    const encrypted = await encryptAttachmentBlob(new Blob([plainBytes]), noteKey);
+    const tamperedBytes = await blobBytes(encrypted.blob);
+    let cancelCount = 0;
+
+    tamperedBytes[0] ^= 0xff;
+
+    await expect(
+      decryptAttachmentToBytes(
+        { ...encrypted.metadata, originalSize: plainBytes.byteLength },
+        noteKey,
+        {
+          response: streamedResponse(tamperedBytes, {
+            closeWhenConsumed: false,
+            onCancel: () => {
+              cancelCount += 1;
+            },
+            sizes: [tamperedBytes.byteLength]
+          })
+        }
+      )
+    ).rejects.toThrow();
+    expect(cancelCount).toBe(1);
+  });
 
   it("rejects tampered or truncated chunked ciphertext", async () => {
     const noteKey = await generateNoteKey();

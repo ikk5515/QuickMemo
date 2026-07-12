@@ -13,7 +13,7 @@ import {
   writeBatch,
   where
 } from "firebase/firestore";
-import { deleteObject, getBytes, ref } from "firebase/storage";
+import { getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
 import { db, storage } from "../lib/firebase";
@@ -33,6 +33,7 @@ import type {
 } from "../types";
 
 export const publicNoteShareMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
+export const publicNoteShareMaxAttachmentCount = 100;
 
 export interface PublicNoteShareSnapshot extends PublicNoteShareDocument {
   id: string;
@@ -44,6 +45,7 @@ export interface PublicNoteShareAttachmentSnapshot extends PublicNoteShareAttach
 }
 
 interface CreatePublicNoteShareInput {
+  currentGeneration: string;
   encryptedBody: EncryptedPayload;
   encryptedTitle: EncryptedPayload;
   expiresAt: Date;
@@ -51,14 +53,17 @@ interface CreatePublicNoteShareInput {
   ownerWrappedShareKey: WrappedNoteKey;
   passwordHash?: PublicSharePasswordHash;
   sourceNoteId: string;
+  sourceAttachmentRevision: number;
+  sourceRevision: number;
 }
 
 interface CreatePublicNoteShareAttachmentInput {
   encryptedBlob: Blob;
+  encryptedFileName: EncryptedPayload;
   encryption: AttachmentEncryptionMetadata;
   expiresAt: Date;
   extension: string;
-  fileName: string;
+  generation: string;
   mimeType: string;
   onUploadProgress?: BlobAttachmentUploadProgressHandler;
   ownerUid: string;
@@ -86,9 +91,12 @@ type StoredPublicShareAttachmentDocument = Pick<
 
 interface UpdatePublicNoteShareContentInput {
   attachmentCount: number;
+  currentGeneration?: string;
   encryptedBody: EncryptedPayload;
   encryptedTitle: EncryptedPayload;
   passwordHash: PublicSharePasswordHash | null;
+  sourceAttachmentRevision: number;
+  sourceRevision: number;
 }
 
 function publicShareSnapshot(id: string, data: PublicNoteShareDocument): PublicNoteShareSnapshot {
@@ -113,6 +121,15 @@ export function publicShareActive(share: Pick<PublicNoteShareDocument, "expiresA
 
 export function publicShareExpiresAt() {
   return new Date(Date.now() + publicNoteShareMaxAgeMs);
+}
+
+export function createPublicShareGeneration() {
+  const randomValue =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().replaceAll("-", "")
+      : `${Date.now()}${Math.random().toString(36).slice(2)}`;
+
+  return `gen_${randomValue.slice(0, 48)}`;
 }
 
 export function publicShareUrl(shareId: string, shareKey: string, origin = window.location.origin) {
@@ -187,8 +204,11 @@ export async function createPublicNoteShare(input: CreatePublicNoteShareInput) {
 
   batch.set(shareRef, {
     sourceNoteId: input.sourceNoteId,
+    sourceAttachmentRevision: input.sourceAttachmentRevision,
+    sourceRevision: input.sourceRevision,
     ownerUid: input.ownerUid,
     version: 1,
+    currentGeneration: input.currentGeneration,
     encryptedTitle: input.encryptedTitle,
     encryptedBody: input.encryptedBody,
     ownerWrappedShareKey: input.ownerWrappedShareKey,
@@ -219,8 +239,9 @@ export async function createPublicNoteShareAttachment(shareId: string, input: Cr
   await uploadPublicShareAttachmentBlob(
     {
       attachmentId: attachmentRef.id,
+      encryptedFileName: input.encryptedFileName,
+      generation: input.generation,
       shareId,
-      fileName: input.fileName,
       extension: input.extension,
       mimeType: input.mimeType,
       originalSize: input.originalSize,
@@ -285,41 +306,16 @@ export async function getEncryptedPublicShareAttachmentSource(
   return { bytes: new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes)) };
 }
 
-async function deleteStorageObjectIfPresent(storagePath: string) {
-  try {
-    await deleteObject(ref(storage, storagePath));
-  } catch (error) {
-    if (!storageObjectNotFound(error)) {
-      throw error;
-    }
-  }
-}
-
-function storageObjectNotFound(error: unknown) {
-  return (
-    typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: string }).code === "storage/object-not-found"
-  );
-}
-
 async function deletePublicShareAttachmentStorageObjects(attachments: PublicNoteShareAttachmentSnapshot[]) {
   for (const attachment of attachments) {
-    if (attachment.blobPath) {
-      await deleteBlobAttachment({ scope: "publicShare", shareId: attachment.shareId, attachmentId: attachment.id });
-      continue;
-    }
-
-    if (attachment.storagePath) {
-      await deleteStorageObjectIfPresent(attachment.storagePath);
-    }
+    await deleteBlobAttachment({ scope: "publicShare", shareId: attachment.shareId, attachmentId: attachment.id });
   }
 }
 
-export async function activatePublicNoteShare(shareId: string, attachmentCount: number) {
+export async function activatePublicNoteShare(shareId: string, attachmentCount: number, currentGeneration: string) {
   await updateDoc(doc(db, "publicNoteShares", shareId), {
     attachmentCount,
+    currentGeneration,
     ready: true,
     updatedAt: serverTimestamp()
   });
@@ -328,9 +324,12 @@ export async function activatePublicNoteShare(shareId: string, attachmentCount: 
 export async function updatePublicNoteShareContent(shareId: string, input: UpdatePublicNoteShareContentInput) {
   await updateDoc(doc(db, "publicNoteShares", shareId), {
     attachmentCount: input.attachmentCount,
+    ...(input.currentGeneration ? { currentGeneration: input.currentGeneration } : {}),
     encryptedTitle: input.encryptedTitle,
     encryptedBody: input.encryptedBody,
     passwordHash: input.passwordHash ?? deleteField(),
+    sourceAttachmentRevision: input.sourceAttachmentRevision,
+    sourceRevision: input.sourceRevision,
     updatedAt: serverTimestamp()
   });
 }
@@ -348,47 +347,33 @@ export async function deletePublicNoteShare(shareId: string) {
   const attachments = attachmentsSnapshot.docs.map((document) =>
     publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument, shareId)
   );
-  const blobAttachmentIds = new Set(attachments.filter((attachment) => attachment.blobPath).map((attachment) => attachment.id));
   const batch = writeBatch(db);
 
   await deletePublicShareAttachmentStorageObjects(attachments);
-
-  attachmentsSnapshot.docs.forEach((attachment) => {
-    if (!blobAttachmentIds.has(attachment.id)) {
-      batch.delete(attachment.ref);
-    }
-  });
   batch.delete(doc(db, "publicNoteShares", shareId));
 
   await batch.commit();
 }
 
-export async function deletePublicNoteShareAttachments(shareId: string) {
+export async function deletePublicNoteShareAttachments(shareId: string, generation?: string | null) {
   const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
 
   if (attachmentsSnapshot.empty) {
     return;
   }
 
-  const attachments = attachmentsSnapshot.docs.map((document) =>
+  const attachmentDocuments = attachmentsSnapshot.docs.filter((document) => {
+    if (typeof generation === "undefined") {
+      return true;
+    }
+
+    const attachmentGeneration = (document.data() as PublicNoteShareAttachmentDocument).generation;
+    return generation === null ? typeof attachmentGeneration === "undefined" : attachmentGeneration === generation;
+  });
+  const attachments = attachmentDocuments.map((document) =>
     publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument, shareId)
   );
-  const blobAttachmentIds = new Set(attachments.filter((attachment) => attachment.blobPath).map((attachment) => attachment.id));
-  const batch = writeBatch(db);
-  let hasDocumentDeletes = false;
-
   await deletePublicShareAttachmentStorageObjects(attachments);
-
-  attachmentsSnapshot.docs.forEach((attachment) => {
-    if (!blobAttachmentIds.has(attachment.id)) {
-      batch.delete(attachment.ref);
-      hasDocumentDeletes = true;
-    }
-  });
-
-  if (hasDocumentDeletes) {
-    await batch.commit();
-  }
 }
 
 export async function deleteExpiredPublicSharesForOwner(ownerUid: string, now = Date.now()) {
@@ -409,11 +394,34 @@ export async function getPublicNoteShare(shareId: string) {
   return snapshot.exists() ? publicShareSnapshot(snapshot.id, snapshot.data() as PublicNoteShareDocument) : null;
 }
 
-export async function getPublicNoteShareAttachments(shareId: string) {
-  const snapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
+export async function getPublicNoteShareAttachments(shareId: string, currentGeneration?: string) {
+  if (!currentGeneration) {
+    return [];
+  }
+
+  const attachmentsCollection = collection(db, "publicNoteShares", shareId, "attachments");
+  const snapshot = await getDocs(query(
+    attachmentsCollection,
+    where("generation", "==", currentGeneration),
+    where("privacyVersion", "==", 1)
+  ));
 
   return snapshot.docs
     .map((document) => publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument, shareId))
     .filter((attachment) => attachment.isReady !== false)
+    .filter((attachment) => attachment.generation === currentGeneration && attachment.privacyVersion === 1)
+    .sort((left, right) => timestampMillis(left.createdAt) - timestampMillis(right.createdAt));
+}
+
+export async function getOwnerPublicNoteShareAttachments(shareId: string, currentGeneration: string) {
+  const attachmentsCollection = collection(db, "publicNoteShares", shareId, "attachments");
+  const snapshot = await getDocs(
+    query(attachmentsCollection, where("generation", "==", currentGeneration))
+  );
+
+  return snapshot.docs
+    .map((document) => publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument, shareId))
+    .filter((attachment) => attachment.isReady !== false)
+    .filter((attachment) => attachment.generation === currentGeneration)
     .sort((left, right) => timestampMillis(left.createdAt) - timestampMillis(right.createdAt));
 }

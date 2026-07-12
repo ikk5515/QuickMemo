@@ -2,6 +2,7 @@ import type { PutBlobResult } from "@vercel/blob";
 import { put } from "@vercel/blob/client";
 import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata } from "../lib/attachmentCrypto";
 import { auth } from "../lib/firebase";
+import type { EncryptedPayload } from "../types";
 
 const blobAttachmentApiPath = "/api/blob-attachments";
 const blobContentType = "application/octet-stream";
@@ -20,7 +21,6 @@ interface BaseBlobAttachmentUploadInput {
   encryptedBlob: Blob;
   encryption: AttachmentEncryptionMetadata;
   extension: string;
-  fileName: string;
   mimeType: string;
   onUploadProgress?: BlobAttachmentUploadProgressHandler;
   originalSize: number;
@@ -28,12 +28,15 @@ interface BaseBlobAttachmentUploadInput {
 
 export interface NoteBlobAttachmentUploadInput extends BaseBlobAttachmentUploadInput {
   attachmentId: string;
+  fileName: string;
   noteId: string;
   uploadedBy: string;
 }
 
 export interface PublicShareBlobAttachmentUploadInput extends BaseBlobAttachmentUploadInput {
   attachmentId: string;
+  encryptedFileName: EncryptedPayload;
+  generation: string;
   shareId: string;
   sourceAttachmentId?: string;
 }
@@ -87,6 +90,11 @@ function noteBlobPath(input: Pick<NoteBlobAttachmentUploadInput, "attachmentId" 
 
 function publicShareBlobPath(input: Pick<PublicShareBlobAttachmentUploadInput, "attachmentId" | "shareId"> & { ownerUid: string }) {
   return `users/${input.ownerUid}/publicNoteShares/${input.shareId}/attachments/${input.attachmentId}/data`;
+}
+
+export function publicShareGenericAttachmentBaseName(extension: string) {
+  const safeExtension = extension.trim().toLowerCase().replace(/[^a-z0-9]/gu, "").slice(0, 10) || "file";
+  return `shared-${safeExtension}-attachment`;
 }
 
 function encryptionPayloadFields(encryption: AttachmentEncryptionMetadata) {
@@ -213,8 +221,10 @@ export async function uploadPublicShareAttachmentBlob(
   const payload = {
     scope: "publicShare",
     attachmentId: input.attachmentId,
+    generation: input.generation,
     shareId: input.shareId,
-    fileName: input.fileName,
+    fileName: publicShareGenericAttachmentBaseName(input.extension),
+    encryptedFileName: input.encryptedFileName,
     extension: input.extension,
     mimeType: input.mimeType,
     originalSize: input.originalSize,

@@ -18,16 +18,16 @@ export default defineConfig({
             return "firebase";
           }
 
-          if (id.includes("/pdfjs-dist/")) {
-            return "pdf";
+          if (id.includes("/pdfjs-dist/") && !id.includes("?url")) {
+            return "pdf-preview";
           }
 
           if (id.includes("/docx-preview/")) {
             return "docx-preview";
           }
 
-          if (id.includes("/hwp.js/") || id.includes("/cfb/")) {
-            return "office-preview";
+          if (id.includes("/cfb/")) {
+            return "hwp-parser";
           }
 
           if (id.includes("/fflate/")) {
