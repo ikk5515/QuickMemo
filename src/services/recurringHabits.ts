@@ -3,11 +3,12 @@ import {
   deleteDoc,
   doc,
   getDocs,
+  limit,
   onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
-  updateDoc,
   where,
   writeBatch
 } from "firebase/firestore";
@@ -56,6 +57,25 @@ export interface UpdateRecurringHabitDayStateInput {
   checkedItemIds?: string[];
   completed?: boolean;
   progressPercent?: number | null;
+  toggleCheckedItem?: {
+    allowedItemIds: string[];
+    itemId: string;
+  };
+}
+
+export interface RecurringHabitDayStateResult {
+  checkedItemIds: string[];
+  completed: boolean;
+  progressPercent: number;
+}
+
+export interface RecurringHabitCheckInSubscriptionOptions {
+  date?: string;
+}
+
+export interface RecurringHabitLatestUpdate<TResult> {
+  input: UpdateRecurringHabitInput;
+  result: TResult;
 }
 
 function timestampMillis(timestamp: RecurringHabitDocument["updatedAt"]) {
@@ -68,25 +88,16 @@ function habitSnapshotList(snapshot: { docs: Array<{ id: string; data: () => unk
     .sort((left, right) => timestampMillis(left.createdAt) - timestampMillis(right.createdAt));
 }
 
-function checkInSnapshotList(snapshot: { docs: Array<{ id: string; data: () => unknown }> }) {
-  return snapshot.docs
-    .map((document) => ({ id: document.id, ...(document.data() as RecurringHabitCheckInDocument) }))
-    .sort((left, right) => right.date.localeCompare(left.date));
+function normalizedCheckedItemIds(value: unknown) {
+  return Array.isArray(value)
+    ? [...new Set(value.filter((itemId): itemId is string => typeof itemId === "string" && itemId.length > 0))].slice(0, 100)
+    : [];
 }
 
-function firestoreErrorCode(error: unknown) {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const code = (error as { code?: unknown }).code;
-    return typeof code === "string" ? code : "";
-  }
-
-  return "";
-}
-
-function missingCheckInWriteError(error: unknown) {
-  const code = firestoreErrorCode(error);
-
-  return code === "not-found" || code === "permission-denied";
+function normalizedProgressPercent(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100
+    ? value
+    : fallback;
 }
 
 export function subscribeRecurringHabits(
@@ -106,13 +117,34 @@ export function subscribeRecurringHabits(
 export function subscribeRecurringHabitCheckIns(
   uid: string,
   callback: (checkIns: RecurringHabitCheckInSnapshot[]) => void,
-  onError?: (error: Error) => void
+  onError?: (error: Error) => void,
+  options?: RecurringHabitCheckInSubscriptionOptions
 ) {
-  const checkInsQuery = query(collection(db, "recurringHabitCheckIns"), where("ownerUid", "==", uid));
+  const checkInsQuery = options?.date
+    ? query(
+      collection(db, "recurringHabitCheckIns"),
+      where("ownerUid", "==", uid),
+      where("date", "==", options.date)
+    )
+    : query(collection(db, "recurringHabitCheckIns"), where("ownerUid", "==", uid));
+  const checkInsById = new Map<string, RecurringHabitCheckInSnapshot>();
 
   return onSnapshot(
     checkInsQuery,
-    (snapshot) => callback(checkInSnapshotList(snapshot)),
+    (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === "removed") {
+          checkInsById.delete(change.doc.id);
+          return;
+        }
+
+        checkInsById.set(change.doc.id, {
+          id: change.doc.id,
+          ...(change.doc.data() as RecurringHabitCheckInDocument)
+        });
+      });
+      callback([...checkInsById.values()]);
+    },
     (error) => onError?.(error)
   );
 }
@@ -141,11 +173,38 @@ export async function createRecurringHabit(input: CreateRecurringHabitInput) {
   return habitRef;
 }
 
-export async function updateRecurringHabit(habitId: string, uid: string, input: UpdateRecurringHabitInput) {
-  await updateDoc(doc(db, "recurringHabits", habitId), {
-    ...input,
-    updatedBy: uid,
-    updatedAt: serverTimestamp()
+export async function updateRecurringHabitFromLatest<TResult>(
+  habitId: string,
+  uid: string,
+  buildUpdate: (habit: RecurringHabitSnapshot) => Promise<RecurringHabitLatestUpdate<TResult>>
+) {
+  const habitRef = doc(db, "recurringHabits", habitId);
+
+  return runTransaction(db, async (transaction): Promise<TResult> => {
+    const snapshot = await transaction.get(habitRef);
+
+    if (!snapshot.exists()) {
+      throw new Error("반복 업무를 찾을 수 없습니다.");
+    }
+
+    const habit = {
+      id: snapshot.id,
+      ...(snapshot.data() as RecurringHabitDocument)
+    } satisfies RecurringHabitSnapshot;
+
+    if (habit.ownerUid !== uid) {
+      throw new Error("반복 업무 소유자를 확인할 수 없습니다.");
+    }
+
+    const update = await buildUpdate(habit);
+
+    transaction.update(habitRef, {
+      ...update.input,
+      updatedBy: uid,
+      updatedAt: serverTimestamp()
+    });
+
+    return update.result;
   });
 }
 
@@ -168,62 +227,132 @@ export async function updateRecurringHabitOrderBatch(
 }
 
 export async function deleteRecurringHabit(habitId: string, uid: string) {
-  const checkInsSnapshot = await getDocs(
-    query(collection(db, "recurringHabitCheckIns"), where("ownerUid", "==", uid))
-  );
-  const documents = checkInsSnapshot.docs
-    .filter((snapshot) => (snapshot.data() as RecurringHabitCheckInDocument).habitId === habitId)
-    .map((snapshot) => snapshot.ref);
+  const habitRef = doc(db, "recurringHabits", habitId);
+  const habitExists = await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(habitRef);
 
-  for (let index = 0; index < documents.length; index += 450) {
-    const batch = writeBatch(db);
+    if (!snapshot.exists()) {
+      return false;
+    }
 
-    documents.slice(index, index + 450).forEach((documentRef) => batch.delete(documentRef));
-    await batch.commit();
+    const habit = snapshot.data() as RecurringHabitDocument;
+
+    if (habit.ownerUid !== uid) {
+      throw new Error("반복 업무 소유자를 확인할 수 없습니다.");
+    }
+
+    if (habit.status === "active") {
+      transaction.update(habitRef, {
+        status: "archived",
+        updatedBy: uid,
+        updatedAt: serverTimestamp()
+      });
+    }
+
+    return true;
+  });
+
+  if (!habitExists) {
+    return;
   }
 
-  await deleteDoc(doc(db, "recurringHabits", habitId));
+  try {
+    while (true) {
+      const checkInsQuery = query(
+        collection(db, "recurringHabitCheckIns"),
+        where("ownerUid", "==", uid),
+        where("habitId", "==", habitId),
+        limit(450)
+      );
+      const checkInsSnapshot = await getDocs(checkInsQuery);
+
+      if (checkInsSnapshot.empty) {
+        break;
+      }
+
+      const batch = writeBatch(db);
+
+      checkInsSnapshot.docs.forEach((snapshot) => batch.delete(snapshot.ref));
+
+      try {
+        await batch.commit();
+      } catch (caught) {
+        const remainingCheckIns = await getDocs(
+          query(
+            collection(db, "recurringHabitCheckIns"),
+            where("ownerUid", "==", uid),
+            where("habitId", "==", habitId),
+            limit(1)
+          )
+        );
+
+        if (!remainingCheckIns.empty) {
+          throw caught;
+        }
+        break;
+      }
+    }
+
+    try {
+      await deleteDoc(habitRef);
+    } catch (caught) {
+      const remainingHabit = await getDocs(
+        query(
+          collection(db, "recurringHabits"),
+          where("ownerUid", "==", uid)
+        )
+      );
+
+      if (remainingHabit.docs.some((snapshot) => snapshot.id === habitId)) {
+        throw caught;
+      }
+    }
+  } catch (caught) {
+    throw new Error("반복 업무 삭제 정리가 중단됐습니다. 반복 업무 페이지에서 삭제를 다시 시도해주세요.", {
+      cause: caught
+    });
+  }
 }
 
 export async function setRecurringHabitCheckIn(uid: string, habitId: string, date: string, checked: boolean) {
   const checkInRef = doc(db, "recurringHabitCheckIns", recurringCheckInId(habitId, date));
 
-  if (!checked) {
-    try {
-      await deleteDoc(checkInRef);
-    } catch (caught) {
-      if (!missingCheckInWriteError(caught)) {
-        throw caught;
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(checkInRef);
+
+    if (!checked) {
+      if (snapshot.exists()) {
+        transaction.delete(checkInRef);
       }
+      return;
     }
 
-    return;
-  }
+    const timestamp = serverTimestamp();
 
-  try {
-    await updateDoc(checkInRef, {
+    if (snapshot.exists()) {
+      const current = snapshot.data() as RecurringHabitCheckInDocument;
+
+      transaction.update(checkInRef, {
+        checkedItemIds: normalizedCheckedItemIds(current.checkedItemIds),
+        completed: true,
+        progressPercent: 100,
+        checkedAt: timestamp,
+        updatedAt: timestamp
+      });
+      return;
+    }
+
+    transaction.set(checkInRef, {
+      ownerUid: uid,
+      habitId,
+      date,
       completed: true,
       progressPercent: 100,
-      checkedAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
+      checkedItemIds: [],
+      checkedAt: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp
     });
-    return;
-  } catch (caught) {
-    if (!missingCheckInWriteError(caught)) {
-      throw caught;
-    }
-  }
-
-  await setDoc(checkInRef, {
-    ownerUid: uid,
-    habitId,
-    date,
-    completed: true,
-    progressPercent: 100,
-    checkedItemIds: [],
-    checkedAt: serverTimestamp(),
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
   });
 }
 
@@ -234,32 +363,69 @@ export async function updateRecurringHabitDayState(
   input: UpdateRecurringHabitDayStateInput
 ) {
   const checkInRef = doc(db, "recurringHabitCheckIns", recurringCheckInId(habitId, date));
-  const nextState = {
-    ...(input.completed !== undefined ? { completed: input.completed } : {}),
-    ...(input.progressPercent !== undefined ? { progressPercent: input.progressPercent } : {}),
-    ...(input.checkedItemIds !== undefined ? { checkedItemIds: input.checkedItemIds } : {}),
-    ...(input.completed !== undefined ? { checkedAt: input.completed === true ? serverTimestamp() : null } : {}),
-    updatedAt: serverTimestamp()
-  };
+  return runTransaction(db, async (transaction): Promise<RecurringHabitDayStateResult> => {
+    const snapshot = await transaction.get(checkInRef);
+    const current = snapshot.exists() ? snapshot.data() as RecurringHabitCheckInDocument : null;
+    let checkedItemIds = input.checkedItemIds !== undefined
+      ? normalizedCheckedItemIds(input.checkedItemIds)
+      : normalizedCheckedItemIds(current?.checkedItemIds);
+    let progressPercent = normalizedProgressPercent(
+      input.progressPercent,
+      normalizedProgressPercent(current?.progressPercent, current && current.completed !== false ? 100 : 0)
+    );
+    let completed = input.completed ?? (current ? current.completed !== false : false);
 
-  try {
-    await updateDoc(checkInRef, nextState);
-    return;
-  } catch (caught) {
-    if (!missingCheckInWriteError(caught)) {
-      throw caught;
+    if (input.progressPercent !== undefined) {
+      completed = progressPercent >= 100;
+    } else if (input.completed !== undefined) {
+      progressPercent = completed ? 100 : Math.min(progressPercent, 99);
     }
-  }
 
-  await setDoc(checkInRef, {
-    ownerUid: uid,
-    habitId,
-    date,
-    completed: input.completed ?? false,
-    progressPercent: input.progressPercent ?? 0,
-    checkedItemIds: input.checkedItemIds ?? [],
-    checkedAt: input.completed === true ? serverTimestamp() : null,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
+    if (input.toggleCheckedItem) {
+      checkedItemIds = normalizedCheckedItemIds(current?.checkedItemIds);
+      const allowedItemIds = normalizedCheckedItemIds(input.toggleCheckedItem.allowedItemIds);
+
+      if (!allowedItemIds.includes(input.toggleCheckedItem.itemId)) {
+        throw new Error("Invalid recurring checklist item.");
+      }
+
+      const allowedItems = new Set(allowedItemIds);
+      const nextCheckedItems = new Set(checkedItemIds.filter((itemId) => allowedItems.has(itemId)));
+
+      if (nextCheckedItems.has(input.toggleCheckedItem.itemId)) {
+        nextCheckedItems.delete(input.toggleCheckedItem.itemId);
+      } else {
+        nextCheckedItems.add(input.toggleCheckedItem.itemId);
+      }
+
+      checkedItemIds = allowedItemIds.filter((itemId) => nextCheckedItems.has(itemId));
+      progressPercent = allowedItemIds.length
+        ? Math.round((checkedItemIds.length / allowedItemIds.length) * 100)
+        : 0;
+      completed = allowedItemIds.length > 0 && progressPercent >= 100;
+    }
+
+    const timestamp = serverTimestamp();
+    const nextState = {
+      checkedItemIds,
+      completed,
+      progressPercent,
+      checkedAt: completed ? timestamp : null,
+      updatedAt: timestamp
+    };
+
+    if (snapshot.exists()) {
+      transaction.update(checkInRef, nextState);
+    } else {
+      transaction.set(checkInRef, {
+        ownerUid: uid,
+        habitId,
+        date,
+        ...nextState,
+        createdAt: timestamp
+      });
+    }
+
+    return { checkedItemIds, completed, progressPercent };
   });
 }

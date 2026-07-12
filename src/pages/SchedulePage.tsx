@@ -57,6 +57,7 @@ import { FormEvent, useCallback, useEffect, useId, useLayoutEffect, useMemo, use
 import { createPortal } from "react-dom";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
 import { serverTimestamp } from "firebase/firestore";
+import { useLocation, useNavigate } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
@@ -64,7 +65,12 @@ import { groupChecklistItems } from "../lib/checklist";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import { defaultMatrixLabels } from "../lib/matrixLabels";
-import { normalizePrimaryScheduleView, type PrimaryScheduleView } from "../lib/scheduleNavigation";
+import {
+  normalizePrimaryScheduleView,
+  scheduleViewFromSearch,
+  scheduleViewHref,
+  type PrimaryScheduleView
+} from "../lib/scheduleNavigation";
 import {
   buildRecurringDateStrip,
   buildRecurringHabitOrderUpdates,
@@ -77,12 +83,18 @@ import {
   isHabitCheckedOn,
   normalizeMonthString,
   normalizeRecurringHabitDetails,
+  recurringHabitChecklistItemMaxLength,
+  recurringHabitChecklistMaxItems,
   recurringCheckInId,
+  recurringHabitDescriptionMaxLength,
+  recurringHabitDetailsValidationError,
   recurringHabitDayCheckedItemIds,
   recurringHabitDayProgressPercent,
   recurringHabitIconLabels,
   recurringHabitIconValues,
-  recurringHabitSlots
+  recurringHabitSlots,
+  recurringHabitTitleMaxLength,
+  recurringHabitTitleValidationError
 } from "../lib/recurringHabitHelpers";
 import {
   addDays,
@@ -130,11 +142,12 @@ import {
   setRecurringHabitCheckIn,
   subscribeRecurringHabitCheckIns,
   subscribeRecurringHabits,
-  updateRecurringHabit,
   updateRecurringHabitDayState,
+  updateRecurringHabitFromLatest,
   updateRecurringHabitOrderBatch,
   type RecurringHabitCheckInSnapshot,
-  type RecurringHabitSnapshot
+  type RecurringHabitSnapshot,
+  type UpdateRecurringHabitDayStateInput
 } from "../services/recurringHabits";
 import {
   defaultUserPreferences,
@@ -157,7 +170,8 @@ import type {
 const scheduleTabs: Array<{ view: PrimaryScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
   { view: "todo", label: "할 일", shortLabel: "할 일", Icon: ListTodo },
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
-  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 }
+  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 },
+  { view: "recurring", label: "반복 업무", shortLabel: "반복업무", Icon: Repeat2 }
 ];
 
 const scheduleViewTitles: Record<ScheduleView, string> = {
@@ -182,19 +196,62 @@ const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; col
   other: { Icon: Repeat2, color: "#64748b", label: recurringHabitIconLabels.other }
 };
 
-type DecryptedTaskCache = Map<string, { signature: string; task: DecryptedScheduleTask }>;
-type DecryptedHabitCache = Map<string, { habit: DecryptedRecurringHabit; signature: string }>;
+type DecryptedTaskCache = Map<string, {
+  details: ScheduleTaskDetails;
+  encryptedDetails: ScheduleTaskSnapshot["encryptedDetails"];
+  encryptedTitle: ScheduleTaskSnapshot["encryptedTitle"];
+  title: string;
+  wrappedKey: ScheduleTaskSnapshot["wrappedKeys"][string];
+}>;
+type DecryptedHabitCache = Map<string, {
+  details: RecurringHabitDetails;
+  encryptedDetails: RecurringHabitSnapshot["encryptedDetails"];
+  encryptedTitle: RecurringHabitSnapshot["encryptedTitle"];
+  title: string;
+  wrappedKey: RecurringHabitSnapshot["wrappedKeys"][string];
+}>;
 
-function scheduleTimestampSignature(value: { seconds: number; nanoseconds: number } | null | undefined) {
-  return value ? `${value.seconds}:${value.nanoseconds}` : "";
+const scheduleDecryptConcurrency = 6;
+
+async function mapWithConcurrency<TItem, TResult>(
+  items: TItem[],
+  concurrency: number,
+  mapper: (item: TItem, index: number) => Promise<TResult>
+) {
+  const results = new Array<TResult>(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => worker())
+  );
+  return results;
 }
 
-function schedulePayloadSignature(payload: ScheduleTaskSnapshot["encryptedTitle"]) {
-  return `${payload.version}:${payload.algorithm}:${payload.iv}:${payload.cipherText}`;
+function sameEncryptedPayload(
+  left: ScheduleTaskSnapshot["encryptedTitle"],
+  right: ScheduleTaskSnapshot["encryptedTitle"]
+) {
+  return left.version === right.version
+    && left.algorithm === right.algorithm
+    && left.iv === right.iv
+    && left.cipherText === right.cipherText;
 }
 
-function scheduleWrappedKeySignature(wrappedKey: ScheduleTaskSnapshot["wrappedKeys"][string] | undefined) {
-  return wrappedKey ? `${wrappedKey.version}:${wrappedKey.algorithm}:${wrappedKey.wrappedKey}` : "";
+function sameWrappedKey(
+  left: ScheduleTaskSnapshot["wrappedKeys"][string],
+  right: ScheduleTaskSnapshot["wrappedKeys"][string]
+) {
+  return left.version === right.version
+    && left.algorithm === right.algorithm
+    && left.wrappedKey === right.wrappedKey;
 }
 
 function pruneScheduleDecryptCache<TCache extends Map<string, unknown>>(cache: TCache, snapshots: Array<{ id: string }>) {
@@ -207,50 +264,23 @@ function pruneScheduleDecryptCache<TCache extends Map<string, unknown>>(cache: T
   }
 }
 
-function taskDecryptSignature(task: ScheduleTaskSnapshot, uid: string) {
-  return [
-    task.id,
-    task.ownerUid,
-    task.status,
-    task.dueDate ?? "",
-    task.dueTimeMinutes ?? "",
-    task.startDate ?? "",
-    task.endDate ?? "",
-    task.startTimeMinutes ?? "",
-    task.endTimeMinutes ?? "",
-    task.color ?? "",
-    task.sortOrder ?? "",
-    task.progressPercent ?? "",
-    task.isImportant ? "important" : "normal",
-    task.isUrgent ? "urgent" : "later",
-    task.createdBy,
-    task.updatedBy,
-    scheduleTimestampSignature(task.createdAt),
-    scheduleTimestampSignature(task.updatedAt),
-    scheduleTimestampSignature(task.completedAt),
-    schedulePayloadSignature(task.encryptedTitle),
-    schedulePayloadSignature(task.encryptedDetails),
-    scheduleWrappedKeySignature(task.wrappedKeys[uid])
-  ].join("|");
-}
+function replaceRecurringCheckInSnapshot(
+  checkIns: RecurringHabitCheckInSnapshot[],
+  habitId: string,
+  date: string,
+  nextCheckIn: RecurringHabitCheckInSnapshot | null
+) {
+  const existingIndex = checkIns.findIndex((checkIn) => checkIn.habitId === habitId && checkIn.date === date);
 
-function habitDecryptSignature(habit: RecurringHabitSnapshot, uid: string) {
-  return [
-    habit.id,
-    habit.ownerUid,
-    habit.status,
-    habit.slot,
-    habit.icon,
-    habit.color,
-    habit.sortOrder ?? "",
-    habit.createdBy,
-    habit.updatedBy,
-    scheduleTimestampSignature(habit.createdAt),
-    scheduleTimestampSignature(habit.updatedAt),
-    schedulePayloadSignature(habit.encryptedTitle),
-    schedulePayloadSignature(habit.encryptedDetails),
-    scheduleWrappedKeySignature(habit.wrappedKeys[uid])
-  ].join("|");
+  if (!nextCheckIn) {
+    return existingIndex < 0 ? checkIns : checkIns.filter((_, index) => index !== existingIndex);
+  }
+
+  if (existingIndex < 0) {
+    return [...checkIns, nextCheckIn];
+  }
+
+  return checkIns.map((checkIn, index) => index === existingIndex ? nextCheckIn : checkIn);
 }
 
 function useKoreanHolidayMap(dateStrings: string[]) {
@@ -383,10 +413,15 @@ function checklistDisplayGroups<TItem extends ScheduleChecklistItem>(items: TIte
   return groups.filter((group) => group.items.length > 0);
 }
 
-export default function SchedulePage() {
+export default function SchedulePage({ routeView }: { routeView?: Extract<ScheduleView, "recurring"> }) {
   const { privateKey, profile } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const isRecurringPage = routeView === "recurring";
   const [activeView, setActiveView] = useState<ScheduleView | null>(() =>
-    profile ? normalizePrimaryScheduleView(getCachedUserPreferences(profile.uid)?.scheduleDefaultView) : null
+    routeView
+      ?? scheduleViewFromSearch(location.search)
+      ?? (profile ? normalizePrimaryScheduleView(getCachedUserPreferences(profile.uid)?.scheduleDefaultView) : null)
   );
   const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() =>
     profile ? getCachedUserPreferences(profile.uid)?.matrixLabels ?? defaultMatrixLabels : defaultMatrixLabels
@@ -407,6 +442,7 @@ export default function SchedulePage() {
   const [selectedRecurringDate, setSelectedRecurringDate] = useState(() => toLocalDateString(new Date()));
   const [recurringMonth, setRecurringMonth] = useState(() => toLocalDateString(new Date()).slice(0, 7));
   const [pendingRecurringCheckIn, setPendingRecurringCheckIn] = useState<Record<string, boolean>>({});
+  const [pendingRecurringDeletion, setPendingRecurringDeletion] = useState<Record<string, boolean>>({});
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => toLocalDateString(new Date()));
   const [calendarCursor, setCalendarCursor] = useState(() => new Date());
   const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(null);
@@ -424,14 +460,29 @@ export default function SchedulePage() {
   const decryptedRecurringHabitsRef = useRef<DecryptedRecurringHabit[]>([]);
   const decryptedTaskCacheRef = useRef<DecryptedTaskCache>(new Map());
   const decryptedHabitCacheRef = useRef<DecryptedHabitCache>(new Map());
+  const decryptCacheIdentityRef = useRef<{ privateKey: CryptoKey | null; uid: string | null }>({
+    privateKey: null,
+    uid: null
+  });
   const taskDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<ScheduleTaskDetails>>>>({});
   const recurringDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<RecurringHabitDetails>>>>({});
+  const recurringCheckInSnapshotRevisionRef = useRef(0);
+  const recurringCheckInOperationRef = useRef(new Map<string, symbol>());
+  const recurringCheckInWriteQueueRef = useRef(new Map<string, Promise<unknown>>());
+  const seenRecurringHabitIdsRef = useRef(new Set<string>());
   const scheduleToolsRef = useRef<HTMLDivElement>(null);
   const scheduleToolsTriggerRef = useRef<HTMLButtonElement>(null);
   const scheduleToolsPopoverId = useId();
   const todayPanelId = useId();
   const todayPanelRef = useRef<HTMLElement | null>(null);
   const todayWorkTriggerRef = useRef<HTMLButtonElement>(null);
+  const needsScheduleData = Boolean(privateKey)
+    && !isRecurringPage
+    && activeView !== null
+    && activeView !== "recurring";
+  const needsFullRecurringHistory = isRecurringPage
+    || Boolean(viewRecurringHabitId || readRecurringHabitId || recurringHabitDialog || recurringOverviewOpen);
+  const needsRecurringData = Boolean(privateKey) && (needsFullRecurringHistory || todayPanelOpen);
 
   const closeScheduleToolsMenu = useCallback((restoreFocus = false) => {
     setScheduleToolsOpen(false);
@@ -450,6 +501,23 @@ export default function SchedulePage() {
   }, []);
 
   useEffect(() => {
+    if (routeView) {
+      setActiveView(routeView);
+      return undefined;
+    }
+
+    const requestedView = scheduleViewFromSearch(location.search);
+
+    if (requestedView) {
+      if (requestedView === "recurring") {
+        navigate(scheduleViewHref("recurring"), { replace: true });
+        return undefined;
+      }
+
+      setActiveView(requestedView);
+      return undefined;
+    }
+
     if (!profile) {
       setActiveView(null);
       return undefined;
@@ -458,23 +526,44 @@ export default function SchedulePage() {
     let active = true;
     const cachedPreferences = getCachedUserPreferences(profile.uid);
 
-    setActiveView(normalizePrimaryScheduleView(cachedPreferences?.scheduleDefaultView));
+    const cachedView = normalizePrimaryScheduleView(cachedPreferences?.scheduleDefaultView);
+
+    if (cachedView === "recurring") {
+      navigate(scheduleViewHref(cachedView), { replace: true });
+    } else {
+      setActiveView(cachedView);
+    }
+
     void getUserPreferences(profile.uid)
       .then((preferences) => {
         if (active) {
-          setActiveView(normalizePrimaryScheduleView(preferences.scheduleDefaultView));
+          const nextView = normalizePrimaryScheduleView(preferences.scheduleDefaultView);
+
+          if (nextView === "recurring") {
+            navigate(scheduleViewHref(nextView), { replace: true });
+          } else {
+            setActiveView(nextView);
+          }
         }
       })
       .catch(() => {
         if (active) {
-          setActiveView(normalizePrimaryScheduleView(cachedPreferences?.scheduleDefaultView ?? defaultUserPreferences.scheduleDefaultView));
+          const fallbackView = normalizePrimaryScheduleView(
+            cachedPreferences?.scheduleDefaultView ?? defaultUserPreferences.scheduleDefaultView
+          );
+
+          if (fallbackView === "recurring") {
+            navigate(scheduleViewHref(fallbackView), { replace: true });
+          } else {
+            setActiveView(fallbackView);
+          }
         }
       });
 
     return () => {
       active = false;
     };
-  }, [profile]);
+  }, [location.search, navigate, profile, routeView]);
 
   useEffect(() => {
     if (!scheduleToolsOpen) {
@@ -540,7 +629,7 @@ export default function SchedulePage() {
   }, [closeTodayWorkPanel, todayPanelOpen]);
 
   useEffect(() => {
-    if (!profile) {
+    if (!profile || isRecurringPage) {
       setMatrixLabels(defaultMatrixLabels);
       return undefined;
     }
@@ -554,16 +643,41 @@ export default function SchedulePage() {
       (preferences) => setMatrixLabels(preferences.matrixLabels),
       () => setMatrixLabels(cachedPreferences?.matrixLabels ?? defaultMatrixLabels)
     );
-  }, [profile]);
+  }, [isRecurringPage, profile]);
 
   useEffect(() => {
-    const intervalId = window.setInterval(() => {
-      const nextToday = toLocalDateString(new Date());
+    let timeoutId: number | undefined;
 
-      setToday(nextToday);
-    }, 60 * 1000);
+    function scheduleMidnightRefresh() {
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
 
-    return () => window.clearInterval(intervalId);
+      const now = new Date();
+      const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1);
+
+      timeoutId = window.setTimeout(() => {
+        setToday(toLocalDateString(new Date()));
+        scheduleMidnightRefresh();
+      }, Math.max(1000, nextMidnight.getTime() - now.getTime()));
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        setToday(toLocalDateString(new Date()));
+        scheduleMidnightRefresh();
+      }
+    }
+
+    scheduleMidnightRefresh();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, []);
 
   useEffect(() => {
@@ -572,7 +686,8 @@ export default function SchedulePage() {
   }, [today]);
 
   useEffect(() => {
-    if (!profile) {
+    if (!profile || !needsScheduleData) {
+      setTasks([]);
       return undefined;
     }
 
@@ -584,18 +699,23 @@ export default function SchedulePage() {
       },
       (caught) => setError(scheduleActionError(caught, "일정 목록을 불러오지 못했습니다."))
     );
-  }, [profile]);
+  }, [needsScheduleData, profile]);
 
   useEffect(() => {
-    if (!profile) {
+    if (!profile || !needsRecurringData) {
+      recurringCheckInSnapshotRevisionRef.current += 1;
+      recurringCheckInOperationRef.current.clear();
+      seenRecurringHabitIdsRef.current.clear();
       setRecurringHabits([]);
       setRecurringCheckIns([]);
+      setPendingRecurringCheckIn({});
       return undefined;
     }
 
     const unsubscribeHabits = subscribeRecurringHabits(
       profile.uid,
       (nextHabits) => {
+        nextHabits.forEach((habit) => seenRecurringHabitIdsRef.current.add(habit.id));
         setRecurringHabits(nextHabits);
         setError(null);
       },
@@ -604,17 +724,32 @@ export default function SchedulePage() {
     const unsubscribeCheckIns = subscribeRecurringHabitCheckIns(
       profile.uid,
       (nextCheckIns) => {
+        recurringCheckInSnapshotRevisionRef.current += 1;
         setRecurringCheckIns(nextCheckIns);
         setError(null);
       },
-      (caught) => setError(scheduleActionError(caught, "반복 체크인을 불러오지 못했습니다."))
+      (caught) => setError(scheduleActionError(caught, "반복 체크인을 불러오지 못했습니다.")),
+      needsFullRecurringHistory ? undefined : { date: today }
     );
 
     return () => {
       unsubscribeHabits();
       unsubscribeCheckIns();
     };
-  }, [profile]);
+  }, [needsRecurringData, needsFullRecurringHistory, profile, today]);
+
+  useEffect(() => {
+    const uid = profile?.uid ?? null;
+    const currentIdentity = decryptCacheIdentityRef.current;
+
+    if (currentIdentity.privateKey !== privateKey || currentIdentity.uid !== uid) {
+      decryptedTaskCacheRef.current.clear();
+      decryptedHabitCacheRef.current.clear();
+      setDecryptedTasks([]);
+      setDecryptedRecurringHabits([]);
+      decryptCacheIdentityRef.current = { privateKey, uid };
+    }
+  }, [privateKey, profile?.uid]);
 
   useEffect(() => {
     if (!profile || !privateKey) {
@@ -627,10 +762,24 @@ export default function SchedulePage() {
     const safePrivateKey = privateKey;
     let active = true;
 
+    const ownsCurrentCache = () => active
+      && decryptCacheIdentityRef.current.privateKey === safePrivateKey
+      && decryptCacheIdentityRef.current.uid === safeProfile.uid;
+
     async function decryptTasks() {
+      if (!ownsCurrentCache()) {
+        return;
+      }
+
       pruneScheduleDecryptCache(decryptedTaskCacheRef.current, tasks);
-      const nextTasks = await Promise.all(
-        tasks.map(async (task) => {
+      const nextTasks = await mapWithConcurrency(
+        tasks,
+        scheduleDecryptConcurrency,
+        async (task) => {
+          if (!ownsCurrentCache()) {
+            return null;
+          }
+
           const wrappedKey = task.wrappedKeys[safeProfile.uid];
 
           if (!wrappedKey) {
@@ -638,11 +787,26 @@ export default function SchedulePage() {
             return null;
           }
 
-          const signature = taskDecryptSignature(task, safeProfile.uid);
           const cached = decryptedTaskCacheRef.current.get(task.id);
 
-          if (cached?.signature === signature) {
-            return cached.task;
+          if (
+            cached
+            && sameEncryptedPayload(cached.encryptedTitle, task.encryptedTitle)
+            && sameEncryptedPayload(cached.encryptedDetails, task.encryptedDetails)
+            && sameWrappedKey(cached.wrappedKey, wrappedKey)
+          ) {
+            decryptedTaskCacheRef.current.set(task.id, {
+              ...cached,
+              encryptedDetails: task.encryptedDetails,
+              encryptedTitle: task.encryptedTitle,
+              wrappedKey
+            });
+
+            return {
+              ...task,
+              title: cached.title,
+              details: cached.details
+            } satisfies DecryptedScheduleTask;
           }
 
           try {
@@ -659,16 +823,28 @@ export default function SchedulePage() {
               details: normalizeScheduleDetails(parsedDetails)
             } satisfies DecryptedScheduleTask;
 
-            decryptedTaskCacheRef.current.set(task.id, { signature, task: decryptedTask });
+            if (!ownsCurrentCache()) {
+              return null;
+            }
+
+            decryptedTaskCacheRef.current.set(task.id, {
+              details: decryptedTask.details,
+              encryptedDetails: task.encryptedDetails,
+              encryptedTitle: task.encryptedTitle,
+              title: decryptedTask.title,
+              wrappedKey
+            });
             return decryptedTask;
           } catch {
-            decryptedTaskCacheRef.current.delete(task.id);
+            if (ownsCurrentCache()) {
+              decryptedTaskCacheRef.current.delete(task.id);
+            }
             return null;
           }
-        })
+        }
       );
 
-      if (active) {
+      if (ownsCurrentCache()) {
         setDecryptedTasks(nextTasks.filter((task): task is DecryptedScheduleTask => Boolean(task)));
       }
     }
@@ -691,10 +867,24 @@ export default function SchedulePage() {
     const safePrivateKey = privateKey;
     let active = true;
 
+    const ownsCurrentCache = () => active
+      && decryptCacheIdentityRef.current.privateKey === safePrivateKey
+      && decryptCacheIdentityRef.current.uid === safeProfile.uid;
+
     async function decryptHabits() {
+      if (!ownsCurrentCache()) {
+        return;
+      }
+
       pruneScheduleDecryptCache(decryptedHabitCacheRef.current, recurringHabits);
-      const nextHabits = await Promise.all(
-        recurringHabits.map(async (habit) => {
+      const nextHabits = await mapWithConcurrency(
+        recurringHabits,
+        scheduleDecryptConcurrency,
+        async (habit) => {
+          if (!ownsCurrentCache()) {
+            return null;
+          }
+
           const wrappedKey = habit.wrappedKeys[safeProfile.uid];
 
           if (!wrappedKey) {
@@ -702,11 +892,26 @@ export default function SchedulePage() {
             return null;
           }
 
-          const signature = habitDecryptSignature(habit, safeProfile.uid);
           const cached = decryptedHabitCacheRef.current.get(habit.id);
 
-          if (cached?.signature === signature) {
-            return cached.habit;
+          if (
+            cached
+            && sameEncryptedPayload(cached.encryptedTitle, habit.encryptedTitle)
+            && sameEncryptedPayload(cached.encryptedDetails, habit.encryptedDetails)
+            && sameWrappedKey(cached.wrappedKey, wrappedKey)
+          ) {
+            decryptedHabitCacheRef.current.set(habit.id, {
+              ...cached,
+              encryptedDetails: habit.encryptedDetails,
+              encryptedTitle: habit.encryptedTitle,
+              wrappedKey
+            });
+
+            return {
+              ...habit,
+              title: cached.title,
+              details: cached.details
+            } satisfies DecryptedRecurringHabit;
           }
 
           try {
@@ -722,16 +927,28 @@ export default function SchedulePage() {
               details: normalizeRecurringHabitDetails(JSON.parse(detailsJson) as unknown)
             } satisfies DecryptedRecurringHabit;
 
-            decryptedHabitCacheRef.current.set(habit.id, { habit: decryptedHabit, signature });
+            if (!ownsCurrentCache()) {
+              return null;
+            }
+
+            decryptedHabitCacheRef.current.set(habit.id, {
+              details: decryptedHabit.details,
+              encryptedDetails: habit.encryptedDetails,
+              encryptedTitle: habit.encryptedTitle,
+              title: decryptedHabit.title,
+              wrappedKey
+            });
             return decryptedHabit;
           } catch {
-            decryptedHabitCacheRef.current.delete(habit.id);
+            if (ownsCurrentCache()) {
+              decryptedHabitCacheRef.current.delete(habit.id);
+            }
             return null;
           }
-        })
+        }
       );
 
-      if (active) {
+      if (ownsCurrentCache()) {
         setDecryptedRecurringHabits(nextHabits.filter((habit): habit is DecryptedRecurringHabit => Boolean(habit)));
       }
     }
@@ -757,12 +974,20 @@ export default function SchedulePage() {
     [scheduleQuery, sortedTasks]
   );
   const displayedRecurringHabits = useMemo(
-    () => decryptedRecurringHabits.filter((habit) => recurringHabitMatchesQuery(habit, scheduleQuery)),
+    () => decryptedRecurringHabits.filter(
+      (habit) => habit.status === "active" && recurringHabitMatchesQuery(habit, scheduleQuery)
+    ),
     [decryptedRecurringHabits, scheduleQuery]
   );
+  const pendingDeletionHabits = useMemo(
+    () => decryptedRecurringHabits.filter((habit) => habit.status === "archived"),
+    [decryptedRecurringHabits]
+  );
   const scheduleStats = useMemo(
-    () => scheduleDashboardStats(sortedTasks, decryptedRecurringHabits, today),
-    [decryptedRecurringHabits, sortedTasks, today]
+    () => isRecurringPage
+      ? { active: 0, completed: 0, overdue: 0, recurring: 0, today: 0 }
+      : scheduleDashboardStats(sortedTasks, decryptedRecurringHabits, today),
+    [decryptedRecurringHabits, isRecurringPage, sortedTasks, today]
   );
   const viewTask = useMemo(
     () => sortedTasks.find((task) => task.id === viewTaskId) ?? null,
@@ -773,63 +998,118 @@ export default function SchedulePage() {
     [editingTaskId, sortedTasks]
   );
   const selectedRecurringHabit = useMemo(
-    () => decryptedRecurringHabits.find((habit) => habit.id === viewRecurringHabitId) ?? null,
+    () => decryptedRecurringHabits.find(
+      (habit) => habit.id === viewRecurringHabitId && habit.status === "active"
+    ) ?? null,
     [decryptedRecurringHabits, viewRecurringHabitId]
   );
   const readRecurringHabit = useMemo(
-    () => decryptedRecurringHabits.find((habit) => habit.id === readRecurringHabitId) ?? null,
+    () => decryptedRecurringHabits.find(
+      (habit) => habit.id === readRecurringHabitId && habit.status === "active"
+    ) ?? null,
     [decryptedRecurringHabits, readRecurringHabitId]
   );
   const editingRecurringHabit = useMemo(
-    () => decryptedRecurringHabits.find((habit) => habit.id === recurringHabitDialog?.habitId) ?? null,
+    () => decryptedRecurringHabits.find(
+      (habit) => habit.id === recurringHabitDialog?.habitId && habit.status === "active"
+    ) ?? null,
     [decryptedRecurringHabits, recurringHabitDialog?.habitId]
   );
   const completedTasks = useMemo(
-    () => displayedTasks.filter((task) => task.status === "completed").sort(compareCompletedTasks),
-    [displayedTasks]
+    () => activeView === "completed"
+      ? displayedTasks.filter((task) => task.status === "completed").sort(compareCompletedTasks)
+      : [],
+    [activeView, displayedTasks]
   );
-  const todoGroups = useMemo(() => groupTasksByTodoDate(displayedTasks, today), [displayedTasks, today]);
-  const matrixSections = useMemo(() => groupTasksByMatrix(displayedTasks, today, matrixLabels), [displayedTasks, matrixLabels, today]);
-  const activeMatrixTaskCount = useMemo(() => sortedTasks.filter((task) => task.status !== "completed").length, [sortedTasks]);
+  const todoGroups = useMemo(
+    () => activeView === "todo" ? groupTasksByTodoDate(displayedTasks, today) : [],
+    [activeView, displayedTasks, today]
+  );
+  const matrixSections = useMemo(
+    () => activeView === "matrix" ? groupTasksByMatrix(displayedTasks, today, matrixLabels) : [],
+    [activeView, displayedTasks, matrixLabels, today]
+  );
+  const activeMatrixTaskCount = useMemo(
+    () => activeView === "matrix" ? sortedTasks.filter((task) => task.status !== "completed").length : 0,
+    [activeView, sortedTasks]
+  );
   const visibleMatrixTaskCount = useMemo(
-    () => displayedTasks.filter((task) => task.status !== "completed").length,
-    [displayedTasks]
+    () => activeView === "matrix" ? displayedTasks.filter((task) => task.status !== "completed").length : 0,
+    [activeView, displayedTasks]
   );
   const calendarWeeks = useMemo(
-    () => buildCalendarMonth(calendarCursor.getFullYear(), calendarCursor.getMonth(), today),
-    [calendarCursor, today]
+    () => activeView === "calendar"
+      ? buildCalendarMonth(calendarCursor.getFullYear(), calendarCursor.getMonth(), today)
+      : [],
+    [activeView, calendarCursor, today]
   );
-  const calendarTaskMap = useMemo(() => tasksByDate(displayedTasks), [displayedTasks]);
+  const calendarTaskMap = useMemo(
+    () => activeView === "calendar" ? tasksByDate(displayedTasks) : {},
+    [activeView, displayedTasks]
+  );
   const calendarTaskLayout = useMemo(
-    () => buildCalendarTaskLayout(calendarWeeks, displayedTasks),
-    [calendarWeeks, displayedTasks]
+    () => activeView === "calendar" ? buildCalendarTaskLayout(calendarWeeks, displayedTasks) : {},
+    [activeView, calendarWeeks, displayedTasks]
   );
   const calendarDateStrings = useMemo(
-    () => calendarWeeks.flatMap((week) => week.days.map((day) => day.dateString)),
-    [calendarWeeks]
+    () => activeView === "calendar"
+      ? calendarWeeks.flatMap((week) => week.days.map((day) => day.dateString))
+      : [],
+    [activeView, calendarWeeks]
   );
   const calendarHolidayMap = useKoreanHolidayMap(calendarDateStrings);
   const selectedDayTasks = useMemo(
-    () => [...(calendarTaskMap[selectedCalendarDate] ?? [])].sort(compareCalendarAgendaTasks),
-    [calendarTaskMap, selectedCalendarDate]
+    () => activeView === "calendar"
+      ? [...(calendarTaskMap[selectedCalendarDate] ?? [])].sort(compareCalendarAgendaTasks)
+      : [],
+    [activeView, calendarTaskMap, selectedCalendarDate]
   );
   const todayWorkSummary = useMemo<TodayWorkSummary>(() => {
+    if (isRecurringPage) {
+      return { overdueTasks: [], recurringHabits: [], todayTasks: [] };
+    }
+
     const activeTasks = sortedTasks.filter((task) => task.status !== "completed");
     const overdueTasks = activeTasks.filter((task) => isTaskScheduleOverdue(task, today));
     const todayTasks = activeTasks.filter((task) => taskCoversDate(task, today) && !isTaskScheduleOverdue(task, today));
     const recurringHabitsForToday = decryptedRecurringHabits.filter((habit) => habit.status === "active");
 
     return { overdueTasks, recurringHabits: recurringHabitsForToday, todayTasks };
-  }, [decryptedRecurringHabits, sortedTasks, today]);
+  }, [decryptedRecurringHabits, isRecurringPage, sortedTasks, today]);
 
   useEffect(() => {
-    if (viewRecurringHabitId && !selectedRecurringHabit) {
+    const habitIsUnavailable = (habitId: string) => {
+      const rawHabit = recurringHabits.find((habit) => habit.id === habitId);
+
+      return rawHabit?.status === "archived"
+        || (!rawHabit && seenRecurringHabitIdsRef.current.has(habitId));
+    };
+
+    if (viewRecurringHabitId && !selectedRecurringHabit && habitIsUnavailable(viewRecurringHabitId)) {
       setViewRecurringHabitId(null);
     }
-    if (readRecurringHabitId && !readRecurringHabit) {
+    if (readRecurringHabitId && !readRecurringHabit && habitIsUnavailable(readRecurringHabitId)) {
       setReadRecurringHabitId(null);
     }
-  }, [readRecurringHabit, readRecurringHabitId, selectedRecurringHabit, viewRecurringHabitId]);
+
+    if (
+      recurringHabitDialog?.mode === "edit"
+      && recurringHabitDialog.habitId
+      && !editingRecurringHabit
+      && habitIsUnavailable(recurringHabitDialog.habitId)
+    ) {
+      setRecurringHabitDialog(null);
+    }
+  }, [
+    editingRecurringHabit,
+    readRecurringHabit,
+    readRecurringHabitId,
+    recurringHabits,
+    recurringHabitDialog?.habitId,
+    recurringHabitDialog?.mode,
+    selectedRecurringHabit,
+    viewRecurringHabitId
+  ]);
 
   if (!profile) {
     return null;
@@ -845,6 +1125,26 @@ export default function SchedulePage() {
 
   const unlockedProfile = profile;
   const unlockedPrivateKey = privateKey;
+
+  function enqueueRecurringCheckInWrite<TResult>(queueKey: string, write: () => Promise<TResult>) {
+    const previousWrite = recurringCheckInWriteQueueRef.current.get(queueKey) ?? Promise.resolve();
+    const queuedWrite = previousWrite.catch(() => undefined).then(write);
+
+    recurringCheckInWriteQueueRef.current.set(queueKey, queuedWrite);
+    void queuedWrite.then(
+      () => {
+        if (recurringCheckInWriteQueueRef.current.get(queueKey) === queuedWrite) {
+          recurringCheckInWriteQueueRef.current.delete(queueKey);
+        }
+      },
+      () => {
+        if (recurringCheckInWriteQueueRef.current.get(queueKey) === queuedWrite) {
+          recurringCheckInWriteQueueRef.current.delete(queueKey);
+        }
+      }
+    );
+    return queuedWrite;
+  }
 
   async function encryptTaskFields(title: string, details: ScheduleTaskDetails, taskKey: CryptoKey) {
     return Promise.all([
@@ -1192,6 +1492,12 @@ export default function SchedulePage() {
 
   async function encryptRecurringHabitFields(title: string, details: RecurringHabitDetails, habitKey: CryptoKey) {
     const normalizedDetails = normalizeMutableRecurringHabitDetails(details);
+    const validationError = recurringHabitTitleValidationError(title)
+      ?? recurringHabitDetailsValidationError(normalizedDetails);
+
+    if (validationError) {
+      throw new Error(validationError);
+    }
 
     return Promise.all([
       encryptText(title.trim() || "반복 업무", habitKey),
@@ -1205,7 +1511,7 @@ export default function SchedulePage() {
       ?? { description: "", checklist: [] };
   }
 
-  function normalizeMutableRecurringHabitDetails(details: RecurringHabitDetails): RecurringHabitDetails {
+  function normalizeMutableRecurringHabitDetails(details: unknown): RecurringHabitDetails {
     const normalizedDetails = normalizeRecurringHabitDetails(details);
 
     return {
@@ -1232,14 +1538,34 @@ export default function SchedulePage() {
     const previousUpdate = queuedUpdate ?? Promise.resolve(currentRecurringHabitDetails(habit));
     const nextUpdate = previousUpdate
       .catch(() => currentRecurringHabitDetails(habit))
-      .then(async (queuedDetails) => {
-        const habitKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
-        const nextDetails = normalizeMutableRecurringHabitDetails(updateDetails(queuedDetails));
-        const encryptedDetails = await encryptText(JSON.stringify(nextDetails), habitKey);
+      .then(() => updateRecurringHabitFromLatest(
+        habit.id,
+        unlockedProfile.uid,
+        async (latestHabit) => {
+          const latestWrappedKey = latestHabit.wrappedKeys[unlockedProfile.uid];
 
-        await updateRecurringHabit(habit.id, unlockedProfile.uid, { encryptedDetails });
-        return nextDetails;
-      });
+          if (!latestWrappedKey) {
+            throw new Error("반복 업무 암호화 키를 찾지 못했습니다.");
+          }
+
+          const habitKey = await unwrapNoteKey(latestWrappedKey, unlockedPrivateKey);
+          const latestDetailsJson = await decryptText(latestHabit.encryptedDetails, habitKey);
+          const latestDetails = normalizeMutableRecurringHabitDetails(JSON.parse(latestDetailsJson) as unknown);
+          const nextDetails = normalizeMutableRecurringHabitDetails(updateDetails(latestDetails));
+          const validationError = recurringHabitDetailsValidationError(nextDetails);
+
+          if (validationError) {
+            throw new Error(validationError);
+          }
+
+          const encryptedDetails = await encryptText(JSON.stringify(nextDetails), habitKey);
+
+          return {
+            input: { encryptedDetails },
+            result: nextDetails
+          };
+        }
+      ));
 
     recurringDetailsUpdateQueueRef.current[habit.id] = nextUpdate;
 
@@ -1259,9 +1585,11 @@ export default function SchedulePage() {
 
   async function createRecurringHabitFromDraft(draft: RecurringHabitDraft) {
     const trimmedTitle = draft.title.trim();
+    const validationError = recurringHabitTitleValidationError(trimmedTitle)
+      ?? recurringHabitDetailsValidationError({ description: draft.description, checklist: [] });
 
-    if (!trimmedTitle) {
-      setError("반복 업무 이름을 입력해주세요.");
+    if (validationError) {
+      setError(validationError);
       return false;
     }
 
@@ -1302,27 +1630,49 @@ export default function SchedulePage() {
       return false;
     }
 
-    if (!draft.title.trim()) {
-      setError("반복 업무 이름을 입력해주세요.");
+    const validationError = recurringHabitTitleValidationError(draft.title)
+      ?? recurringHabitDetailsValidationError({
+        description: draft.description,
+        checklist: currentRecurringHabitDetails(habit).checklist
+      });
+
+    if (validationError) {
+      setError(validationError);
       return false;
     }
 
     try {
-      const habitKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
-      const currentDetails = currentRecurringHabitDetails(habit);
-      const [encryptedTitle, encryptedDetails] = await encryptRecurringHabitFields(
-        draft.title,
-        { description: draft.description, checklist: currentDetails.checklist },
-        habitKey
-      );
+      await updateRecurringHabitFromLatest(
+        habit.id,
+        unlockedProfile.uid,
+        async (latestHabit) => {
+          const latestWrappedKey = latestHabit.wrappedKeys[unlockedProfile.uid];
 
-      await updateRecurringHabit(habit.id, unlockedProfile.uid, {
-        encryptedTitle,
-        encryptedDetails,
-        slot: draft.slot,
-        icon: draft.icon,
-        color: normalizeScheduleTaskColor(draft.color)
-      });
+          if (!latestWrappedKey) {
+            throw new Error("반복 업무 암호화 키를 찾지 못했습니다.");
+          }
+
+          const habitKey = await unwrapNoteKey(latestWrappedKey, unlockedPrivateKey);
+          const latestDetailsJson = await decryptText(latestHabit.encryptedDetails, habitKey);
+          const currentDetails = normalizeMutableRecurringHabitDetails(JSON.parse(latestDetailsJson) as unknown);
+          const [encryptedTitle, encryptedDetails] = await encryptRecurringHabitFields(
+            draft.title,
+            { description: draft.description, checklist: currentDetails.checklist },
+            habitKey
+          );
+
+          return {
+            input: {
+              encryptedTitle,
+              encryptedDetails,
+              slot: draft.slot,
+              icon: draft.icon,
+              color: normalizeScheduleTaskColor(draft.color)
+            },
+            result: null
+          };
+        }
+      );
       setRecurringHabitDialog(null);
       setStatus("반복 업무를 저장했습니다.");
       setError(null);
@@ -1334,6 +1684,8 @@ export default function SchedulePage() {
   }
 
   async function removeRecurringHabit(habit: DecryptedRecurringHabit) {
+    setPendingRecurringDeletion((current) => ({ ...current, [habit.id]: true }));
+
     try {
       await deleteRecurringHabit(habit.id, unlockedProfile.uid);
       setRecurringHabitDialog(null);
@@ -1343,6 +1695,12 @@ export default function SchedulePage() {
       setError(null);
     } catch (caught) {
       setError(scheduleActionError(caught, "반복 업무를 삭제하지 못했습니다."));
+    } finally {
+      setPendingRecurringDeletion((current) => {
+        const next = { ...current };
+        delete next[habit.id];
+        return next;
+      });
     }
   }
 
@@ -1371,55 +1729,74 @@ export default function SchedulePage() {
     const checkInId = recurringCheckInId(habit.id, date);
     const checked = isHabitCheckedOn(recurringCheckIns, habit.id, date);
     const nextChecked = !checked;
-    const previousCheckIns = recurringCheckIns;
+    const previousCheckIn = recurringCheckIns.find(
+      (checkIn) => checkIn.habitId === habit.id && checkIn.date === date
+    ) ?? null;
+    const operation = Symbol(checkInId);
+    const startingSnapshotRevision = recurringCheckInSnapshotRevisionRef.current;
 
+    recurringCheckInOperationRef.current.set(checkInId, operation);
     setPendingRecurringCheckIn((current) => ({ ...current, [checkInId]: true }));
     setRecurringCheckIns((current) => {
       if (!nextChecked) {
-        return current.filter((checkIn) => !(checkIn.habitId === habit.id && checkIn.date === date));
+        return replaceRecurringCheckInSnapshot(current, habit.id, date, null);
       }
 
-      if (current.some((checkIn) => checkIn.habitId === habit.id && checkIn.date === date)) {
-        return current.map((checkIn) =>
-          checkIn.habitId === habit.id && checkIn.date === date
-            ? { ...checkIn, completed: true, progressPercent: 100 }
-            : checkIn
-        );
-      }
-
-      return [
-        ...current,
+      const existing = current.find((checkIn) => checkIn.habitId === habit.id && checkIn.date === date);
+      return replaceRecurringCheckInSnapshot(
+        current,
+        habit.id,
+        date,
         {
+          ...(existing ?? {}),
           id: checkInId,
           ownerUid: unlockedProfile.uid,
           habitId: habit.id,
           date,
           completed: true,
           progressPercent: 100,
-          checkedItemIds: []
+          checkedItemIds: existing?.checkedItemIds ?? []
         }
-      ];
+      );
     });
 
     try {
-      await setRecurringHabitCheckIn(unlockedProfile.uid, habit.id, date, nextChecked);
-      setError(null);
+      await enqueueRecurringCheckInWrite(
+        `${unlockedProfile.uid}:${checkInId}`,
+        () => setRecurringHabitCheckIn(unlockedProfile.uid, habit.id, date, nextChecked)
+      );
+
+      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
+        setError(null);
+      }
     } catch (caught) {
-      setRecurringCheckIns(previousCheckIns);
-      setError(scheduleActionError(caught, "반복 체크인을 저장하지 못했습니다."));
+      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
+        if (recurringCheckInSnapshotRevisionRef.current === startingSnapshotRevision) {
+          setRecurringCheckIns((current) => replaceRecurringCheckInSnapshot(
+            current,
+            habit.id,
+            date,
+            previousCheckIn
+          ));
+        }
+        setError(scheduleActionError(caught, "반복 체크인을 저장하지 못했습니다."));
+      }
     } finally {
-      setPendingRecurringCheckIn((current) => {
-        const next = { ...current };
-        delete next[checkInId];
-        return next;
-      });
+      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
+        recurringCheckInOperationRef.current.delete(checkInId);
+        setPendingRecurringCheckIn((current) => {
+          const next = { ...current };
+          delete next[checkInId];
+          return next;
+        });
+      }
     }
   }
 
   async function updateRecurringHabitDailyState(
     habit: DecryptedRecurringHabit,
     date: string,
-    input: { checkedItemIds?: string[]; completed?: boolean; progressPercent?: number | null }
+    input: UpdateRecurringHabitDayStateInput
   ) {
     if (!isValidScheduleDateString(date) || date > today) {
       setError("오늘 또는 지난 날짜만 수정할 수 있습니다.");
@@ -1427,17 +1804,22 @@ export default function SchedulePage() {
     }
 
     const checkInId = recurringCheckInId(habit.id, date);
-    const previousCheckIns = recurringCheckIns;
+    const previousCheckIn = recurringCheckIns.find(
+      (checkIn) => checkIn.habitId === habit.id && checkIn.date === date
+    ) ?? null;
+    const operation = Symbol(checkInId);
+    const startingSnapshotRevision = recurringCheckInSnapshotRevisionRef.current;
 
+    recurringCheckInOperationRef.current.set(checkInId, operation);
     setPendingRecurringCheckIn((current) => ({ ...current, [checkInId]: true }));
     setRecurringCheckIns((current) => {
       const existing = current.find((checkIn) => checkIn.habitId === habit.id && checkIn.date === date);
       const nextState: RecurringHabitCheckInSnapshot = {
+        ...(existing ?? {}),
         id: checkInId,
         ownerUid: unlockedProfile.uid,
         habitId: habit.id,
         date,
-        ...(existing ?? {}),
         ...(input.checkedItemIds !== undefined ? { checkedItemIds: input.checkedItemIds } : {}),
         ...(input.completed !== undefined ? { completed: input.completed } : {}),
         ...(input.progressPercent !== undefined ? { progressPercent: input.progressPercent } : {})
@@ -1453,19 +1835,54 @@ export default function SchedulePage() {
     });
 
     try {
-      await updateRecurringHabitDayState(unlockedProfile.uid, habit.id, date, input);
-      setError(null);
+      const committedState = await enqueueRecurringCheckInWrite(
+        `${unlockedProfile.uid}:${checkInId}`,
+        () => updateRecurringHabitDayState(unlockedProfile.uid, habit.id, date, input)
+      );
+
+      if (
+        recurringCheckInOperationRef.current.get(checkInId) === operation
+        && recurringCheckInSnapshotRevisionRef.current === startingSnapshotRevision
+      ) {
+        setRecurringCheckIns((current) => {
+          const existing = current.find((checkIn) => checkIn.habitId === habit.id && checkIn.date === date);
+
+          return replaceRecurringCheckInSnapshot(current, habit.id, date, {
+            ...(existing ?? {}),
+            id: checkInId,
+            ownerUid: unlockedProfile.uid,
+            habitId: habit.id,
+            date,
+            ...committedState
+          });
+        });
+      }
+      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
+        setError(null);
+      }
       return true;
     } catch (caught) {
-      setRecurringCheckIns(previousCheckIns);
-      setError(scheduleActionError(caught, "반복 업무 진행 상태를 저장하지 못했습니다."));
+      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
+        if (recurringCheckInSnapshotRevisionRef.current === startingSnapshotRevision) {
+          setRecurringCheckIns((current) => replaceRecurringCheckInSnapshot(
+            current,
+            habit.id,
+            date,
+            previousCheckIn
+          ));
+        }
+        setError(scheduleActionError(caught, "반복 업무 진행 상태를 저장하지 못했습니다."));
+      }
       return false;
     } finally {
-      setPendingRecurringCheckIn((current) => {
-        const next = { ...current };
-        delete next[checkInId];
-        return next;
-      });
+      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
+        recurringCheckInOperationRef.current.delete(checkInId);
+        setPendingRecurringCheckIn((current) => {
+          const next = { ...current };
+          delete next[checkInId];
+          return next;
+        });
+      }
     }
   }
 
@@ -1497,7 +1914,11 @@ export default function SchedulePage() {
     await updateRecurringHabitDailyState(habit, date, {
       checkedItemIds,
       completed: checklist.length > 0 && progressPercent >= 100,
-      progressPercent
+      progressPercent,
+      toggleCheckedItem: {
+        allowedItemIds: checklist.map((item) => item.id),
+        itemId
+      }
     });
   }
 
@@ -1562,14 +1983,15 @@ export default function SchedulePage() {
     });
   }
 
-  function openQuickRecurringDialog() {
+  function openScheduleTab(view: PrimaryScheduleView) {
     setScheduleToolsOpen(false);
-    setRecurringHabitDialog({ mode: "create" });
+    setTodayPanelOpen(false);
+    navigate(scheduleViewHref(view));
   }
 
-  function openScheduleUtilityView(view: Extract<ScheduleView, "recurring" | "completed">) {
+  function openScheduleUtilityView(view: Extract<ScheduleView, "completed">) {
     setScheduleToolsOpen(false);
-    setActiveView(view);
+    navigate(scheduleViewHref(view));
   }
 
   function openCalendarCreateDialog(dateString: string) {
@@ -1598,8 +2020,13 @@ export default function SchedulePage() {
   }
 
   const todayPanelToggleLabel = `${todayPanelOpen ? "빠른 업무 패널 닫기" : "빠른 업무 패널 열기"}. 오늘 일정 ${scheduleStats.today}개, 지연 ${scheduleStats.overdue}개`;
-  const utilityViewActive = activeView === "recurring" || activeView === "completed";
+  const utilityViewActive = activeView === "completed";
   const scheduleToolsLabel = scheduleToolsOpen ? "일정관리 도구 닫기" : "일정관리 도구 열기";
+  const searchResultCount = isRecurringPage
+    ? displayedRecurringHabits.length
+    : activeView === "completed"
+      ? completedTasks.length
+      : displayedTasks.length;
 
   return (
     <AppShell>
@@ -1614,23 +2041,23 @@ export default function SchedulePage() {
           </div>
           <label className="schedule-search-control">
             <Search size={17} aria-hidden="true" />
-            <span className="sr-only">일정 검색</span>
+            <span className="sr-only">{isRecurringPage ? "반복 업무 검색" : "일정 검색"}</span>
             <input
-              aria-label="일정과 반복 업무 검색"
+              aria-label={isRecurringPage ? "반복 업무 검색" : "일정 검색"}
               onChange={(event) => setScheduleQuery(event.target.value)}
-              placeholder="일정, 설명, 체크리스트 검색"
+              placeholder={isRecurringPage ? "반복 업무, 설명, 체크리스트 검색" : "일정, 설명, 체크리스트 검색"}
               type="search"
               value={scheduleQuery}
             />
           </label>
-          <nav className="schedule-view-tabs" aria-label="일정관리 기본 보기">
+          <nav className="schedule-view-tabs" aria-label="일정관리 보기">
             {scheduleTabs.map(({ Icon, label, shortLabel, view }) => (
               <button
                 key={view}
                 aria-pressed={activeView === view}
                 className={activeView === view ? "active" : ""}
                 type="button"
-                onClick={() => setActiveView(view)}
+                onClick={() => openScheduleTab(view)}
                 aria-label={label}
               >
                 <Icon size={18} />
@@ -1641,24 +2068,30 @@ export default function SchedulePage() {
           <div className="schedule-header-actions">
             {scheduleQuery.trim() && (
               <span className="schedule-query-result">
-                검색 결과 {displayedTasks.length + displayedRecurringHabits.length}개
+                검색 결과 {searchResultCount}개
               </span>
             )}
+            {!isRecurringPage && (
+              <button
+                ref={todayWorkTriggerRef}
+                className={`icon-button today-work-trigger ${todayPanelOpen ? "active" : ""}`}
+                type="button"
+                aria-controls={todayPanelId}
+                aria-expanded={todayPanelOpen}
+                aria-label={todayPanelToggleLabel}
+                title="오늘 업무"
+                onClick={toggleTodayWorkPanel}
+              >
+                <Zap size={16} />
+              </button>
+            )}
             <button
-              ref={todayWorkTriggerRef}
-              className={`icon-button today-work-trigger ${todayPanelOpen ? "active" : ""}`}
+              className="schedule-primary-action"
               type="button"
-              aria-controls={todayPanelId}
-              aria-expanded={todayPanelOpen}
-              aria-label={todayPanelToggleLabel}
-              title="오늘 업무"
-              onClick={toggleTodayWorkPanel}
+              onClick={isRecurringPage ? () => setRecurringHabitDialog({ mode: "create" }) : openQuickTaskDialog}
             >
-              <Zap size={16} />
-            </button>
-            <button className="schedule-primary-action" type="button" onClick={openQuickTaskDialog}>
               <Plus size={16} />
-              새 일정
+              {isRecurringPage ? "새 반복 업무" : "새 일정"}
             </button>
             <div className="schedule-tool-menu" ref={scheduleToolsRef}>
               <button
@@ -1676,20 +2109,6 @@ export default function SchedulePage() {
               </button>
               {scheduleToolsOpen && (
                 <div id={scheduleToolsPopoverId} className="schedule-tool-menu-popover" role="group" aria-label="일정관리 도구">
-                  <button className="schedule-quick-menu-item" type="button" onClick={() => openScheduleUtilityView("recurring")}>
-                    <Repeat2 size={16} />
-                    <span>
-                      <strong>반복 업무 관리</strong>
-                      <em>체크인과 반복 계획 확인</em>
-                    </span>
-                  </button>
-                  <button className="schedule-quick-menu-item" type="button" onClick={openQuickRecurringDialog}>
-                    <Plus size={16} />
-                    <span>
-                      <strong>반복 업무 추가</strong>
-                      <em>현재 화면을 유지하고 생성</em>
-                    </span>
-                  </button>
                   <button className="schedule-quick-menu-item" type="button" onClick={() => openScheduleUtilityView("completed")}>
                     <CheckCircle2 size={16} />
                     <span>
@@ -1703,7 +2122,7 @@ export default function SchedulePage() {
           </div>
         </header>
 
-        {todayPanelOpen && (
+        {!isRecurringPage && todayPanelOpen && (
           <TodayWorkPanel
             checkIns={recurringCheckIns}
             id={todayPanelId}
@@ -1783,6 +2202,8 @@ export default function SchedulePage() {
             checkIns={recurringCheckIns}
             habits={displayedRecurringHabits}
             month={recurringMonth}
+            pendingDeletions={pendingRecurringDeletion}
+            pendingDeletionHabits={pendingDeletionHabits}
             pendingCheckIns={pendingRecurringCheckIn}
             selectedDate={selectedRecurringDate}
             selectedHabit={selectedRecurringHabit}
@@ -1796,6 +2217,7 @@ export default function SchedulePage() {
             onOpenHabit={setViewRecurringHabitId}
             onReadHabit={setReadRecurringHabitId}
             onOpenOverview={() => setRecurringOverviewOpen(true)}
+            onRetryDelete={(habit) => void removeRecurringHabit(habit)}
             onSelectDate={(date) => {
               setSelectedRecurringDate(date);
               setRecurringMonth(date.slice(0, 7));
@@ -1853,6 +2275,9 @@ export default function SchedulePage() {
       {readRecurringHabit && (
         <RecurringHabitReadModal
           checkIns={recurringCheckIns}
+          dayStatePending={pendingRecurringCheckIn[
+            recurringCheckInId(readRecurringHabit.id, selectedRecurringDate)
+          ] === true}
           habit={readRecurringHabit}
           selectedDate={selectedRecurringDate}
           today={today}
@@ -3219,6 +3644,7 @@ function SortableMatrixTaskRow({
     attributes,
     isDragging,
     listeners,
+    setActivatorNodeRef,
     setNodeRef,
     transform,
     transition
@@ -3228,8 +3654,7 @@ function SortableMatrixTaskRow({
   });
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
-    transition,
-    touchAction: "none"
+    transition
   };
 
   return (
@@ -3237,14 +3662,16 @@ function SortableMatrixTaskRow({
       className={`task-row matrix-task-row ${task.status === "completed" ? "completed" : ""} ${isDragging ? "dragging" : ""}`}
       ref={setNodeRef}
       style={style}
-      {...attributes}
-      {...listeners}
     >
       <button
         className="task-drag-handle"
         type="button"
         aria-label={`${task.title} 드래그 이동`}
+        ref={setActivatorNodeRef}
+        style={{ touchAction: "none" }}
         title="드래그 이동"
+        {...attributes}
+        {...listeners}
       >
         <GripVertical size={16} />
       </button>
@@ -3941,9 +4368,12 @@ function RecurringView({
   onOpenHabit,
   onOpenOverview,
   onReadHabit,
+  onRetryDelete,
   onSelectDate,
   onToggleCheckIn,
   pendingCheckIns,
+  pendingDeletionHabits,
+  pendingDeletions,
   selectedDate,
   selectedHabit,
   today
@@ -3960,9 +4390,12 @@ function RecurringView({
   onOpenHabit: (habitId: string) => void;
   onOpenOverview: () => void;
   onReadHabit: (habitId: string) => void;
+  onRetryDelete: (habit: DecryptedRecurringHabit) => void;
   onSelectDate: (date: string) => void;
   onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
   pendingCheckIns: Record<string, boolean>;
+  pendingDeletionHabits: DecryptedRecurringHabit[];
+  pendingDeletions: Record<string, boolean>;
   selectedDate: string;
   selectedHabit: DecryptedRecurringHabit | null;
   today: string;
@@ -4007,8 +4440,32 @@ function RecurringView({
       onDragStart={handleDragStart}
       sensors={sensors}
     >
-      <div className="recurring-layout">
-        <section className="recurring-main-panel">
+      <div className="recurring-page-content">
+        {pendingDeletionHabits.length > 0 && (
+          <section className="recurring-cleanup-notice" role="status" aria-live="polite">
+            <div>
+              <strong>삭제 정리를 다시 시작해야 합니다.</strong>
+              <p>중단된 반복 업무는 완료될 때까지 삭제 대기 상태로 안전하게 유지됩니다.</p>
+            </div>
+            <div className="recurring-cleanup-actions">
+              {pendingDeletionHabits.map((habit) => (
+                <button
+                  className="secondary-button"
+                  disabled={pendingDeletions[habit.id] === true}
+                  key={habit.id}
+                  onClick={() => onRetryDelete(habit)}
+                  type="button"
+                >
+                  <Trash2 size={15} />
+                  {pendingDeletions[habit.id] ? "정리 중" : `${habit.title} 삭제 재시도`}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <div className="recurring-layout">
+          <section className="recurring-main-panel">
           <header className="recurring-toolbar">
             <div>
               <h2>반복 업무</h2>
@@ -4060,21 +4517,23 @@ function RecurringView({
               />
             ))}
           </div>
-        </section>
+          </section>
 
-        <RecurringHabitDetailPanel
-          checkIns={checkIns}
-          habit={selectedHabit}
-          month={month}
-          selectedDate={selectedDate}
-          today={today}
-          onClose={onCloseHabit}
-          onDelete={onDeleteHabit}
-          onEdit={onEditHabit}
-          onMonthChange={onMonthChange}
-          onSelectDate={onSelectDate}
-          onToggleCheckIn={onToggleCheckIn}
-        />
+          <RecurringHabitDetailPanel
+            checkIns={checkIns}
+            habit={selectedHabit}
+            month={month}
+            pendingCheckIns={pendingCheckIns}
+            selectedDate={selectedDate}
+            today={today}
+            onClose={onCloseHabit}
+            onDelete={onDeleteHabit}
+            onEdit={onEditHabit}
+            onMonthChange={onMonthChange}
+            onSelectDate={onSelectDate}
+            onToggleCheckIn={onToggleCheckIn}
+          />
+        </div>
       </div>
       <DragOverlay>
         {activeHabit ? (
@@ -4171,6 +4630,7 @@ function SortableRecurringHabitRow({
     attributes,
     isDragging,
     listeners,
+    setActivatorNodeRef,
     setNodeRef,
     transform,
     transition
@@ -4180,8 +4640,7 @@ function SortableRecurringHabitRow({
   });
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
-    transition,
-    touchAction: "none"
+    transition
   };
 
   return (
@@ -4191,13 +4650,15 @@ function SortableRecurringHabitRow({
       ref={setNodeRef}
       style={style}
       title="더블클릭하여 상세 보기"
-      {...attributes}
-      {...listeners}
     >
       <button
         aria-label={`${habit.title} 위치 이동`}
         className="recurring-drag-handle"
+        ref={setActivatorNodeRef}
+        style={{ touchAction: "none" }}
         type="button"
+        {...attributes}
+        {...listeners}
       >
         <GripVertical size={16} />
       </button>
@@ -4282,6 +4743,7 @@ function RecurringHabitDetailPanel({
   onMonthChange,
   onSelectDate,
   onToggleCheckIn,
+  pendingCheckIns,
   selectedDate,
   today
 }: {
@@ -4294,6 +4756,7 @@ function RecurringHabitDetailPanel({
   onMonthChange: (month: string) => void;
   onSelectDate: (date: string) => void;
   onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
+  pendingCheckIns: Record<string, boolean>;
   selectedDate: string;
   today: string;
 }) {
@@ -4334,6 +4797,7 @@ function RecurringHabitDetailPanel({
         checkIns={checkIns}
         habit={habit}
         month={safeMonth}
+        pendingCheckIns={pendingCheckIns}
         today={today}
         onMonthChange={onMonthChange}
         onSelectDate={onSelectDate}
@@ -4392,6 +4856,7 @@ function RecurringMonthCalendar({
   onMonthChange,
   onSelectDate,
   onToggleCheckIn,
+  pendingCheckIns,
   today
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
@@ -4400,6 +4865,7 @@ function RecurringMonthCalendar({
   onMonthChange: (month: string) => void;
   onSelectDate: (date: string) => void;
   onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
+  pendingCheckIns: Record<string, boolean>;
   today: string;
 }) {
   const weeks = buildRecurringMonthCalendar(month, today);
@@ -4424,7 +4890,8 @@ function RecurringMonthCalendar({
         {weeks.flatMap((week) =>
           week.days.map((day) => {
             const checked = isHabitCheckedOn(checkIns, habit.id, day.dateString);
-            const disabled = !day.inCurrentMonth || day.dateString > today;
+            const pending = pendingCheckIns[recurringCheckInId(habit.id, day.dateString)] === true;
+            const disabled = !day.inCurrentMonth || day.dateString > today || pending;
 
             return (
               <button
@@ -4574,8 +5041,11 @@ function RecurringHabitModal({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!draft.title.trim()) {
-      setLocalError("반복 업무 이름을 입력해주세요.");
+    const validationError = recurringHabitTitleValidationError(draft.title)
+      ?? recurringHabitDetailsValidationError({ description: draft.description, checklist: habit?.details.checklist ?? [] });
+
+    if (validationError) {
+      setLocalError(validationError);
       return;
     }
 
@@ -4610,6 +5080,7 @@ function RecurringHabitModal({
             이름
             <input
               autoFocus
+              maxLength={recurringHabitTitleMaxLength}
               onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
               placeholder="반복 업무 이름"
               value={draft.title}
@@ -4618,6 +5089,7 @@ function RecurringHabitModal({
           <label>
             설명
             <textarea
+              maxLength={recurringHabitDescriptionMaxLength}
               onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
               placeholder="간단한 설명"
               rows={4}
@@ -4908,6 +5380,7 @@ function recurringMonthLabel(month: string) {
 
 function RecurringHabitReadModal({
   checkIns,
+  dayStatePending,
   habit,
   onClose,
   onDelete,
@@ -4919,6 +5392,7 @@ function RecurringHabitReadModal({
   today
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
+  dayStatePending: boolean;
   habit: DecryptedRecurringHabit;
   onClose: () => void;
   onDelete: () => void;
@@ -4949,6 +5423,7 @@ function RecurringHabitReadModal({
   const [isChecklistComposing, setIsChecklistComposing] = useState(false);
   const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
   const detailsMutationPending = pendingDetailsAction !== null || pendingChecklistItemId !== null;
+  const dayMutationPending = dayStatePending || pendingProgress || pendingChecklistItemId !== null;
 
   useEffect(() => {
     setProgressPercent(normalizeTaskProgressPercent(dailyProgressPercent));
@@ -4979,7 +5454,7 @@ function RecurringHabitReadModal({
   }, [onClose]);
 
   async function changeProgress(percent: number) {
-    if (!selectedDateIsEditable) {
+    if (!selectedDateIsEditable || dayMutationPending) {
       return;
     }
 
@@ -5022,7 +5497,7 @@ function RecurringHabitReadModal({
   async function addChecklistItem() {
     const text = newChecklistText.trim();
 
-    if (!text) {
+    if (!text || details.checklist.length >= recurringHabitChecklistMaxItems) {
       return;
     }
 
@@ -5082,7 +5557,7 @@ function RecurringHabitReadModal({
   }
 
   async function toggleChecklistItem(itemId: string) {
-    if (!selectedDateIsEditable) {
+    if (!selectedDateIsEditable || dayMutationPending) {
       return;
     }
 
@@ -5128,8 +5603,8 @@ function RecurringHabitReadModal({
         </div>
 
         <TaskProgressControl
-          disabled={!selectedDateIsEditable || pendingProgress}
-          helperText={selectedDateIsEditable ? (pendingProgress ? "저장 중" : "선택 날짜 기준") : "미래 날짜는 수정할 수 없습니다"}
+          disabled={!selectedDateIsEditable || dayMutationPending}
+          helperText={selectedDateIsEditable ? (dayMutationPending ? "저장 중" : "선택 날짜 기준") : "미래 날짜는 수정할 수 없습니다"}
           onChange={(percent) => void changeProgress(percent)}
           percent={progressPercent}
         />
@@ -5176,6 +5651,7 @@ function RecurringHabitReadModal({
           {isDescriptionEditing ? (
             <textarea
               className="task-read-inline-textarea"
+              maxLength={recurringHabitDescriptionMaxLength}
               onChange={(event) => setDescriptionDraft(event.target.value)}
               rows={5}
               value={descriptionDraft}
@@ -5192,7 +5668,7 @@ function RecurringHabitReadModal({
               className="icon-button task-read-icon-button"
               type="button"
               aria-label="체크리스트 추가"
-              disabled={detailsMutationPending}
+              disabled={detailsMutationPending || details.checklist.length >= recurringHabitChecklistMaxItems}
               onClick={() => setIsAddingChecklist(true)}
             >
               <Plus size={15} />
@@ -5204,6 +5680,7 @@ function RecurringHabitReadModal({
                 autoFocus
                 aria-label="새 체크리스트 항목"
                 disabled={detailsMutationPending}
+                maxLength={recurringHabitChecklistItemMaxLength}
                 onCompositionEnd={() => setIsChecklistComposing(false)}
                 onCompositionStart={() => setIsChecklistComposing(true)}
                 onChange={(event) => setNewChecklistText(event.target.value)}
@@ -5261,7 +5738,7 @@ function RecurringHabitReadModal({
                           aria-checked={item.checked}
                           aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
                           className={`task-read-check-button ${item.checked ? "checked" : ""}`}
-                          disabled={detailsMutationPending || !selectedDateIsEditable}
+                          disabled={detailsMutationPending || dayMutationPending || !selectedDateIsEditable}
                           onClick={() => void toggleChecklistItem(item.id)}
                           role="checkbox"
                           type="button"
@@ -5275,6 +5752,7 @@ function RecurringHabitReadModal({
                               aria-label="체크리스트 항목 수정"
                               className="task-read-checklist-input"
                               disabled={detailsMutationPending}
+                              maxLength={recurringHabitChecklistItemMaxLength}
                               onCompositionEnd={() => setIsChecklistComposing(false)}
                               onCompositionStart={() => setIsChecklistComposing(true)}
                               onChange={(event) => setChecklistEditText(event.target.value)}

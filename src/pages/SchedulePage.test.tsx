@@ -1,8 +1,22 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { PropsWithChildren } from "react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { subscribeRecurringHabitCheckIns, subscribeRecurringHabits } from "../services/recurringHabits";
+import { subscribeScheduleTasks } from "../services/scheduleTasks";
 import SchedulePage from "./SchedulePage";
+
+function renderSchedulePage(routeView?: "recurring") {
+  return render(
+    <MemoryRouter initialEntries={[routeView ? "/schedule/recurring" : "/schedule"]}>
+      <Routes>
+        <Route path="/schedule" element={<SchedulePage />} />
+        <Route path="/schedule/recurring" element={<SchedulePage routeView="recurring" />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
 
 const testData = vi.hoisted(() => {
   const matrixLabels = {
@@ -15,6 +29,7 @@ const testData = vi.hoisted(() => {
 
   return {
     matrixLabels,
+    privateKey: {} as CryptoKey | null,
     userProfile: {
       allowedShareTargetUids: [],
       avatarText: "김",
@@ -47,7 +62,7 @@ vi.mock("../context/AuthContext", () => ({
     keyError: null,
     loading: false,
     loginRosterUser: vi.fn(),
-    privateKey: {} as CryptoKey,
+    privateKey: testData.privateKey,
     profile: testData.userProfile,
     signOut: vi.fn(),
     unlockPrivateKey: vi.fn()
@@ -121,20 +136,21 @@ vi.mock("../services/recurringHabits", () => ({
     onNext([]);
     return vi.fn();
   }),
-  updateRecurringHabit: vi.fn(),
   updateRecurringHabitDayState: vi.fn(),
+  updateRecurringHabitFromLatest: vi.fn(),
   updateRecurringHabitOrderBatch: vi.fn()
 }));
 
 describe("SchedulePage quick work panel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    testData.privateKey = {} as CryptoKey;
   });
 
   it("toggles the lightning quick panel without moving the active tab", async () => {
     const user = userEvent.setup();
 
-    render(<SchedulePage />);
+    renderSchedulePage();
 
     const todoTab = await screen.findByRole("button", { name: "할 일" });
     const quickPanelButton = screen.getByRole("button", { name: /빠른 업무 패널 열기/ });
@@ -142,6 +158,8 @@ describe("SchedulePage quick work panel", () => {
     expect(todoTab).toHaveAttribute("aria-pressed", "true");
     expect(quickPanelButton).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("지연 업무")).not.toBeInTheDocument();
+    expect(subscribeRecurringHabits).not.toHaveBeenCalled();
+    expect(subscribeRecurringHabitCheckIns).not.toHaveBeenCalled();
 
     await user.click(quickPanelButton);
 
@@ -150,6 +168,8 @@ describe("SchedulePage quick work panel", () => {
     expect(screen.getByText("오늘 일정")).toBeInTheDocument();
     expect(screen.getByText("반복 업무")).toBeInTheDocument();
     expect(todoTab).toHaveAttribute("aria-pressed", "true");
+    expect(subscribeRecurringHabits).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(subscribeRecurringHabitCheckIns).mock.calls[0]?.[3]).toEqual({ date: expect.any(String) });
 
     await user.click(quickPanelButton);
 
@@ -161,7 +181,7 @@ describe("SchedulePage quick work panel", () => {
   it("closes the quick panel with Escape and outside pointer input", async () => {
     const user = userEvent.setup();
 
-    render(<SchedulePage />);
+    renderSchedulePage();
 
     const quickPanelButton = await screen.findByRole("button", { name: /빠른 업무 패널 열기/ });
 
@@ -184,7 +204,7 @@ describe("SchedulePage quick work panel", () => {
 
   it("keeps the create dialog open when Escape closes a nested date picker", async () => {
     const user = userEvent.setup();
-    const { container } = render(<SchedulePage />);
+    const { container } = renderSchedulePage();
 
     await user.click(await screen.findByRole("button", { name: "새 일정" }));
 
@@ -200,5 +220,47 @@ describe("SchedulePage quick work panel", () => {
 
     await waitFor(() => expect(document.querySelector(".date-picker-popover")).not.toBeInTheDocument());
     expect(screen.getByRole("dialog", { name: "새 일정 추가" })).toBeInTheDocument();
+  });
+
+  it("keeps recurring management out of the overflow menu", async () => {
+    const user = userEvent.setup();
+    renderSchedulePage();
+
+    await user.click(await screen.findByRole("button", { name: "일정관리 도구 열기" }));
+
+    expect(screen.getByText("완료 내역")).toBeInTheDocument();
+    expect(screen.queryByText("반복 업무 관리")).not.toBeInTheDocument();
+    expect(screen.queryByText("반복 업무 추가")).not.toBeInTheDocument();
+  });
+
+  it("shows recurring work as a dedicated fourth tab and page", async () => {
+    const user = userEvent.setup();
+    renderSchedulePage("recurring");
+
+    const recurringTab = await screen.findByRole("button", { name: "반복 업무" });
+
+    expect(recurringTab).toHaveAttribute("aria-pressed", "true");
+    expect(subscribeScheduleTasks).not.toHaveBeenCalled();
+    expect(subscribeRecurringHabits).toHaveBeenCalledTimes(1);
+    expect(subscribeRecurringHabitCheckIns).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "할 일" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "새 반복 업무" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /빠른 업무 패널/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "할 일" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "할 일" })).toHaveAttribute("aria-pressed", "true"));
+    expect(screen.getByRole("button", { name: "새 일정" })).toBeInTheDocument();
+  });
+
+  it("does not subscribe to schedule data while the encryption key is locked", async () => {
+    testData.privateKey = null;
+
+    renderSchedulePage();
+
+    expect(await screen.findByText("잠금 해제")).toBeInTheDocument();
+    expect(subscribeScheduleTasks).not.toHaveBeenCalled();
+    expect(subscribeRecurringHabits).not.toHaveBeenCalled();
+    expect(subscribeRecurringHabitCheckIns).not.toHaveBeenCalled();
   });
 });

@@ -31,7 +31,7 @@ describe("schedule UI styles", () => {
     expect(stylesSource).toMatch(/\.schedule-tool-menu-trigger\.active,[\s\S]*\.schedule-tool-menu-trigger\[aria-current="page"\] \{[\s\S]*background: var\(--color-primary-subtle\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-tool-menu-trigger\.active,[\s\S]*html\[data-theme="dark"\] \.schedule-tool-menu-trigger\[aria-current="page"\] \{[\s\S]*background: color-mix\(in srgb, var\(--teal\) 14%, var\(--color-surface-elevated\)\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-tool-menu-popover \{[\s\S]*background: var\(--color-popover-bg\);/);
-    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.schedule-view-tabs \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\);/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.schedule-view-tabs \{[\s\S]*grid-template-columns: repeat\(4, minmax\(0, 1fr\)\);/);
     expect(mobileStyles).toMatch(/\.today-work-panel \{[\s\S]*overflow-y: auto;/);
     expect(mobileStyles).toMatch(/\.today-work-panel \{[\s\S]*position: fixed;/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.today-work-section\.overdue \{[\s\S]*background: var\(--color-danger-subtle\);/);

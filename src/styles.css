@@ -7998,6 +7998,40 @@ textarea {
   justify-content: space-between;
 }
 
+.recurring-page-content {
+  display: grid;
+  gap: 12px;
+}
+
+.recurring-cleanup-notice {
+  align-items: center;
+  background: var(--color-warning-subtle);
+  border: 1px solid color-mix(in srgb, var(--gold) 28%, var(--line));
+  border-radius: var(--radius-card);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 12px 14px;
+}
+
+.recurring-cleanup-notice strong {
+  color: var(--ink);
+}
+
+.recurring-cleanup-notice p {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  margin: 3px 0 0;
+}
+
+.recurring-cleanup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .recurring-layout {
   display: grid;
   gap: 16px;
@@ -8796,7 +8830,7 @@ textarea {
   .schedule-view-tabs {
     display: grid;
     gap: 8px;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     justify-self: stretch;
     padding: 8px;
     width: 100%;
@@ -8816,6 +8850,17 @@ textarea {
     display: block;
     font-size: 11px;
     line-height: 1.1;
+  }
+
+  .recurring-cleanup-notice {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recurring-cleanup-actions,
+  .recurring-cleanup-actions button {
+    justify-content: center;
+    width: 100%;
   }
 
   .schedule-create-grid,

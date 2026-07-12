@@ -117,6 +117,34 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "recurringHabitCheckIns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "date",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "recurringHabitCheckIns",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "ownerUid",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "habitId",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [
@@ -215,6 +243,11 @@
     {
       "collectionGroup": "recurringHabits",
       "fieldPath": "wrappedKeys",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "recurringHabitCheckIns",
+      "fieldPath": "checkedItemIds",
       "indexes": []
     }
   ]
