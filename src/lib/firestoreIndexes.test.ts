@@ -16,7 +16,7 @@ interface FirestoreFieldOverride {
 interface FirestoreIndexesConfig {
   indexes: Array<{
     collectionGroup: string;
-    fields: Array<{ fieldPath: string; order?: string }>;
+    fields: Array<{ arrayConfig?: string; fieldPath: string; order?: string }>;
     queryScope: string;
   }>;
   fieldOverrides: FirestoreFieldOverride[];
@@ -33,13 +33,19 @@ function fieldOverride(collectionGroup: string, fieldPath: string) {
 }
 
 describe("Firestore index retention policies", () => {
-  it("keeps TTL safety nets and cleanup indexes for temporary public shares and copied attachments", () => {
+  it("keeps cleanup indexes without billing-only TTL metadata deletion", () => {
     expect(fieldOverride("publicNoteShares", "expiresAt")).toMatchObject({
-      ttl: true,
       indexes: [{ order: "ASCENDING", queryScope: "COLLECTION" }]
     });
+    expect(fieldOverride("publicNoteShares", "expiresAt")?.ttl).toBeUndefined();
     expect(fieldOverride("attachments", "expiresAt")).toMatchObject({
-      ttl: true,
+      indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
+    });
+    expect(fieldOverride("attachments", "expiresAt")?.ttl).toBeUndefined();
+    expect(fieldOverride("attachments", "reservationExpiresAt")).toMatchObject({
+      indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
+    });
+    expect(fieldOverride("attachments", "deletionStartedAt")).toMatchObject({
       indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
     });
     expect(fieldOverride("publicShareCleanupQueue", "expiresAt")).toBeUndefined();
@@ -58,6 +64,31 @@ describe("Firestore index retention policies", () => {
     expect(fieldOverride("users", "uid")).toMatchObject({
       indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
     });
+  });
+
+  it("keeps the bounded legacy Blob reservation cleanup query indexed", () => {
+    expect(
+      firestoreIndexes.indexes.some(
+        (index) =>
+          index.collectionGroup === "attachments"
+          && index.queryScope === "COLLECTION_GROUP"
+          && index.fields.some((field) => field.fieldPath === "storageProvider" && field.order === "ASCENDING")
+          && index.fields.some((field) => field.fieldPath === "isReady" && field.order === "ASCENDING")
+          && index.fields.some((field) => field.fieldPath === "createdAt" && field.order === "ASCENDING")
+      )
+    ).toBe(true);
+  });
+
+  it("keeps participant note history reads ordered and server-bounded", () => {
+    expect(
+      firestoreIndexes.indexes.some(
+        (index) =>
+          index.collectionGroup === "history"
+          && index.queryScope === "COLLECTION"
+          && index.fields.some((field) => field.fieldPath === "readerUids" && field.arrayConfig === "CONTAINS")
+          && index.fields.some((field) => field.fieldPath === "createdAt" && field.order === "DESCENDING")
+      )
+    ).toBe(true);
   });
 
   it("keeps schedule task query indexes and disables encrypted payload indexing", () => {

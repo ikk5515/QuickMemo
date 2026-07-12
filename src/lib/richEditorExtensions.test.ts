@@ -1,7 +1,11 @@
 import { Editor } from "@tiptap/core";
 import { afterEach, describe, expect, it } from "vitest";
 import { plainTextToEditorHtml } from "./editorContent";
-import { richEditorExtensions } from "./richEditorExtensions";
+import {
+  editorUndoGroupDelayMs,
+  editorUndoHistoryDepth,
+  richEditorExtensions
+} from "./richEditorExtensions";
 
 const editors: Editor[] = [];
 const editorElements: HTMLElement[] = [];
@@ -57,6 +61,18 @@ afterEach(() => {
 });
 
 describe("rich editor extensions", () => {
+  it("bounds undo history and groups nearby edits to limit retained editor state", () => {
+    const editor = createEditor("<p>alpha</p>");
+    const undoRedoExtension = editor.extensionManager.extensions.find((extension) => extension.name === "undoRedo");
+
+    expect(editorUndoHistoryDepth).toBe(150);
+    expect(editorUndoGroupDelayMs).toBe(500);
+    expect(undoRedoExtension?.options).toMatchObject({
+      depth: editorUndoHistoryDepth,
+      newGroupDelay: editorUndoGroupDelayMs
+    });
+  });
+
   it("keeps the caret near pasted content after a value sync", () => {
     const editor = createEditor(
       "<p>alpha</p><table><tbody><tr><th><p>head</p></th><th><p>other</p></th></tr><tr><td><p>cell</p></td><td><p>two</p></td></tr></tbody></table><p>omega</p>"
@@ -101,5 +117,19 @@ describe("rich editor extensions", () => {
     expect(editor.getText()).toContain("이름\t나이\t메모");
     expect(editor.getHTML()).toContain("\t하위 항목 1");
     expect(editor.getHTML()).toContain("이름\t나이\t메모");
+  });
+
+  it("keeps every supported heading level and horizontal rules in editor HTML", () => {
+    const editor = createEditor(
+      "<h1>제목 1</h1><h2>제목 2</h2><h3>제목 3</h3><h4>제목 4</h4><h5>제목 5</h5><h6>제목 6</h6><hr><p>본문</p>"
+    );
+    const html = editor.getHTML();
+
+    for (let level = 1; level <= 6; level += 1) {
+      expect(html).toContain(`<h${level}>제목 ${level}</h${level}>`);
+    }
+
+    expect(html).toContain("<hr>");
+    expect(editor.getText()).toContain("본문");
   });
 });

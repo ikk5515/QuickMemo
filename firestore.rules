@@ -38,6 +38,14 @@ service cloud.firestore {
       return /databases/$(database)/documents/notes/$(noteId);
     }
 
+    function noteHistoryPath(noteId, historyId) {
+      return /databases/$(database)/documents/notes/$(noteId)/history/$(historyId);
+    }
+
+    function notePurgeCleanupQueuePath(noteId) {
+      return /databases/$(database)/documents/notePurgeCleanupQueue/$(noteId);
+    }
+
     function noteFolderPath(folderId) {
       return /databases/$(database)/documents/noteFolders/$(folderId);
     }
@@ -106,6 +114,9 @@ service cloud.firestore {
         "updatedAt",
         "updatedBy",
         "savedAt",
+        "revision",
+        "lastMutationId",
+        "attachmentRevision",
         "isDeleted",
         "deletedAt",
         "deletedBy",
@@ -127,8 +138,60 @@ service cloud.firestore {
       && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp)
       && (!data.keys().hasAny(["savedAt"]) || data.savedAt is timestamp)
       && data.updatedBy is string
+      && validNoteRevision(data)
+      && validNoteAttachmentRevision(data)
       && validDeleteMetadata(data)
       && validPurgeMetadata(data);
+    }
+
+    function validNoteAttachmentRevision(data) {
+      return !data.keys().hasAny(["attachmentRevision"])
+        || (
+          data.attachmentRevision is int
+          && data.attachmentRevision >= 0
+          && data.attachmentRevision <= 999999999999
+        );
+    }
+
+    function validNoteRevision(data) {
+      return (
+          !data.keys().hasAny(["revision", "lastMutationId"])
+        )
+        || (
+          data.keys().hasAll(["revision", "lastMutationId"])
+          && data.revision is int
+          && data.revision >= 1
+          && data.revision <= 999999999999
+          && data.lastMutationId is string
+          && data.lastMutationId.matches("^[A-Za-z0-9_-]{8,160}$")
+        );
+    }
+
+    function noteRevisionIsPreserved(data) {
+      return (
+          !resource.data.keys().hasAny(["revision", "lastMutationId"])
+          && !data.keys().hasAny(["revision", "lastMutationId"])
+        )
+        || (
+          resource.data.keys().hasAll(["revision", "lastMutationId"])
+          && data.revision == resource.data.revision
+          && data.lastMutationId == resource.data.lastMutationId
+        );
+    }
+
+    function noteRevisionAdvances(data) {
+      return data.keys().hasAll(["revision", "lastMutationId"])
+        && (
+          (
+            !resource.data.keys().hasAny(["revision", "lastMutationId"])
+            && data.revision == 1
+          )
+          || (
+            resource.data.keys().hasAll(["revision", "lastMutationId"])
+            && data.revision == resource.data.revision + 1
+            && data.lastMutationId != resource.data.lastMutationId
+          )
+        );
     }
 
     function validNoteFolderReference(data) {
@@ -165,6 +228,12 @@ service cloud.firestore {
           && data.deletedAt is timestamp
           && data.deletedBy is string
           && data.deletedBy.size() > 0
+        )
+        || (
+          data.keys().hasAll(["isDeleted", "isPurged", "purgedAt", "purgedBy"])
+          && data.isDeleted == true
+          && data.isPurged == true
+          && !data.keys().hasAny(["deletedAt", "deletedBy"])
         );
     }
 
@@ -193,7 +262,7 @@ service cloud.firestore {
       return !data.keys().hasAny(["isPurged", "purgedAt", "purgedBy"])
         || (
           data.keys().hasAll(["isPurged", "purgedAt", "purgedBy"])
-          && data.keys().hasAll(["isDeleted", "deletedAt", "deletedBy"])
+          && data.keys().hasAny(["isDeleted"])
           && data.isDeleted == true
           && data.isPurged == true
           && data.purgedAt is timestamp
@@ -730,8 +799,8 @@ service cloud.firestore {
     }
 
     function validNoteHistory(data, noteId) {
-      return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields", "readerUids", "createdAt"])
-        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "readerUids", "encryptedSummary", "encryptedSnapshot", "createdAt"])
+      return data.keys().hasAll(["noteId", "actorUid", "action", "changedFields", "readerUids", "revision", "createdAt"])
+        && data.keys().hasOnly(["noteId", "actorUid", "action", "changedFields", "readerUids", "revision", "encryptedSummary", "encryptedSnapshot", "createdAt"])
         && data.noteId == noteId
         && data.actorUid == request.auth.uid
         && data.action in ["create", "content", "share", "delete", "restore"]
@@ -742,6 +811,9 @@ service cloud.firestore {
         && data.readerUids is list
         && data.readerUids.size() > 0
         && data.readerUids.size() <= 200
+        && data.revision is int
+        && data.revision >= 1
+        && data.revision <= 999999999999
         && (!data.keys().hasAny(["encryptedSummary"]) || encryptedPayload(data.encryptedSummary))
         && (!data.keys().hasAny(["encryptedSnapshot"]) || encryptedPayload(data.encryptedSnapshot))
         && data.createdAt == request.time;
@@ -755,14 +827,16 @@ service cloud.firestore {
         );
     }
 
-    function linkedNoteUpdate(noteId) {
+    function linkedNoteUpdate(noteId, historyId, data) {
       return exists(notePath(noteId))
         && existsAfter(notePath(noteId))
         && getAfter(notePath(noteId)).data.updatedBy == request.auth.uid
-        && getAfter(notePath(noteId)).data.updatedAt == request.time;
+        && getAfter(notePath(noteId)).data.updatedAt == request.time
+        && getAfter(notePath(noteId)).data.revision == data.revision
+        && getAfter(notePath(noteId)).data.lastMutationId == historyId;
     }
 
-    function createHistoryMatchesNote(data, noteId) {
+    function createHistoryMatchesNote(data, noteId, historyId) {
       return data.action == "create"
         && !exists(notePath(noteId))
         && existsAfter(notePath(noteId))
@@ -771,13 +845,16 @@ service cloud.firestore {
         && getAfter(notePath(noteId)).data.createdAt == request.time
         && getAfter(notePath(noteId)).data.updatedAt == request.time
         && getAfter(notePath(noteId)).data.savedAt == request.time
+        && getAfter(notePath(noteId)).data.revision == 1
+        && getAfter(notePath(noteId)).data.revision == data.revision
+        && getAfter(notePath(noteId)).data.lastMutationId == historyId
         && getAfter(notePath(noteId)).data.isDeleted == false
         && data.changedFields.hasOnly(["title", "body"]);
     }
 
-    function contentHistoryMatchesNote(data, noteId) {
+    function contentHistoryMatchesNote(data, noteId, historyId) {
       return data.action == "content"
-        && linkedNoteUpdate(noteId)
+        && linkedNoteUpdate(noteId, historyId, data)
         && !noteDeleted(get(notePath(noteId)).data)
         && !noteDeleted(getAfter(notePath(noteId)).data)
         && data.changedFields.hasOnly(["title", "body"])
@@ -791,9 +868,9 @@ service cloud.firestore {
         );
     }
 
-    function shareHistoryMatchesNote(data, noteId) {
+    function shareHistoryMatchesNote(data, noteId, historyId) {
       return data.action == "share"
-        && linkedNoteUpdate(noteId)
+        && linkedNoteUpdate(noteId, historyId, data)
         && request.auth.uid == get(notePath(noteId)).data.ownerUid
         && !noteDeleted(get(notePath(noteId)).data)
         && !noteDeleted(getAfter(notePath(noteId)).data)
@@ -808,33 +885,41 @@ service cloud.firestore {
         );
     }
 
-    function deleteHistoryMatchesNote(data, noteId) {
+    function deleteHistoryMatchesNote(data, noteId, historyId) {
       return data.action == "delete"
-        && linkedNoteUpdate(noteId)
+        && linkedNoteUpdate(noteId, historyId, data)
         && !noteDeleted(get(notePath(noteId)).data)
         && noteDeleted(getAfter(notePath(noteId)).data)
         && getAfter(notePath(noteId)).data.deletedBy == request.auth.uid
         && data.changedFields.hasOnly(["deleted"]);
     }
 
-    function restoreHistoryMatchesNote(data, noteId) {
+    function restoreHistoryMatchesNote(data, noteId, historyId) {
       return data.action == "restore"
-        && linkedNoteUpdate(noteId)
+        && linkedNoteUpdate(noteId, historyId, data)
         && noteDeleted(get(notePath(noteId)).data)
         && !noteDeleted(getAfter(notePath(noteId)).data)
         && data.changedFields.hasOnly(["restored"]);
     }
 
-    function historyMatchesNoteMutation(data, noteId) {
+    function historyMatchesNoteMutation(data, noteId, historyId) {
       return existsAfter(notePath(noteId))
         && data.readerUids == getAfter(notePath(noteId)).data.participantUids
         && (
-          createHistoryMatchesNote(data, noteId)
-          || contentHistoryMatchesNote(data, noteId)
-          || shareHistoryMatchesNote(data, noteId)
-          || deleteHistoryMatchesNote(data, noteId)
-          || restoreHistoryMatchesNote(data, noteId)
+          createHistoryMatchesNote(data, noteId, historyId)
+          || contentHistoryMatchesNote(data, noteId, historyId)
+          || shareHistoryMatchesNote(data, noteId, historyId)
+          || deleteHistoryMatchesNote(data, noteId, historyId)
+          || restoreHistoryMatchesNote(data, noteId, historyId)
         );
+    }
+
+    function pairedNoteHistoryCreated(noteId, data) {
+      return data.keys().hasAll(["revision", "lastMutationId"])
+        && !exists(noteHistoryPath(noteId, data.lastMutationId))
+        && existsAfter(noteHistoryPath(noteId, data.lastMutationId))
+        && getAfter(noteHistoryPath(noteId, data.lastMutationId)).data.revision == data.revision
+        && getAfter(noteHistoryPath(noteId, data.lastMutationId)).data.actorUid == request.auth.uid;
     }
 
     function validAttachmentExtension(extension) {
@@ -896,6 +981,7 @@ service cloud.firestore {
         "isReady",
         "iv",
         "uploadedBy",
+        "quotaReserved",
         "createdAt"
       ])
       && data.noteId == noteId
@@ -917,11 +1003,17 @@ service cloud.firestore {
       && data.iv.size() == 12
       && data.uploadedBy is string
       && data.uploadedBy.size() > 0
+      && (!data.keys().hasAny(["quotaReserved"]) || data.quotaReserved is bool)
       && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
     }
 
     function noteAttachmentReadyUpdate(data, noteId, attachmentId) {
       return activeSignedInUser()
+        && exists(notePath(noteId))
+        && noteActive(get(notePath(noteId)).data)
+        && !notePurged(get(notePath(noteId)).data)
+        && noteParticipant(get(notePath(noteId)).data)
+        && ownerAllowsParticipant(get(notePath(noteId)).data, request.auth.uid)
         && validAttachment(data, noteId, attachmentId)
         && resource.data.keys().hasAny(["isReady"])
         && resource.data.isReady == false
@@ -933,11 +1025,14 @@ service cloud.firestore {
     function validPublicShare(data) {
       return data.keys().hasOnly([
         "sourceNoteId",
+        "sourceRevision",
+        "sourceAttachmentRevision",
         "ownerUid",
         "version",
         "encryptedTitle",
         "encryptedBody",
         "ownerWrappedShareKey",
+        "currentGeneration",
         "attachmentCount",
         "passwordHash",
         "ready",
@@ -950,12 +1045,15 @@ service cloud.firestore {
       && data.sourceNoteId is string
       && data.sourceNoteId.size() > 0
       && data.sourceNoteId.size() <= 160
+      && validOptionalPublicShareSourceRevision(data)
+      && validOptionalPublicShareSourceAttachmentRevision(data)
       && data.ownerUid is string
       && data.ownerUid.size() > 0
       && data.version == 1
       && encryptedPayload(data.encryptedTitle)
       && encryptedPayload(data.encryptedBody)
       && validPublicShareOwnerWrappedKey(data)
+      && validOptionalPublicShareGeneration(data)
       && data.attachmentCount is int
       && data.attachmentCount >= 0
       && data.attachmentCount <= 100
@@ -977,6 +1075,122 @@ service cloud.firestore {
 
     function publicSharePasswordHash(data) {
       return data.keys().hasAny(["passwordHash"]) ? data.passwordHash : null;
+    }
+
+    function validPublicShareGeneration(generation) {
+      return generation is string
+        && generation.matches("^[A-Za-z0-9_-]{1,160}$");
+    }
+
+    function validOptionalPublicShareSourceRevision(data) {
+      return !data.keys().hasAny(["sourceRevision"])
+        || (
+          data.sourceRevision is int
+          && data.sourceRevision >= 0
+          && data.sourceRevision <= 999999999999
+        );
+    }
+
+    function validOptionalPublicShareSourceAttachmentRevision(data) {
+      return !data.keys().hasAny(["sourceAttachmentRevision"])
+        || (
+          data.sourceAttachmentRevision is int
+          && data.sourceAttachmentRevision >= 0
+          && data.sourceAttachmentRevision <= 999999999999
+        );
+    }
+
+    function publicShareSourceRevisionMatches(shareData, sourceNote) {
+      return (
+          (
+            !shareData.keys().hasAny(["sourceRevision"])
+            && !sourceNote.keys().hasAny(["revision"])
+          )
+          || (
+            shareData.keys().hasAny(["sourceRevision"])
+            && shareData.sourceRevision == (
+              sourceNote.keys().hasAny(["revision"])
+                ? sourceNote.revision
+                : 0
+            )
+          )
+        )
+        && (
+          (
+            !shareData.keys().hasAny(["sourceAttachmentRevision"])
+            && !sourceNote.keys().hasAny(["attachmentRevision"])
+          )
+          || (
+            shareData.keys().hasAny(["sourceAttachmentRevision"])
+            && shareData.sourceAttachmentRevision == (
+              sourceNote.keys().hasAny(["attachmentRevision"])
+                ? sourceNote.attachmentRevision
+                : 0
+            )
+          )
+        );
+    }
+
+    function validOptionalPublicShareGeneration(data) {
+      return !data.keys().hasAny(["currentGeneration"])
+        || validPublicShareGeneration(data.currentGeneration);
+    }
+
+    function publicShareAttachmentIsCurrent(shareData, attachmentData) {
+      return (
+          !shareData.keys().hasAny(["currentGeneration"])
+          && !attachmentData.keys().hasAny(["generation"])
+        )
+        || (
+          shareData.keys().hasAny(["currentGeneration"])
+          && attachmentData.keys().hasAny(["generation"])
+          && attachmentData.generation == shareData.currentGeneration
+        );
+    }
+
+    function publicShareGenerationPreserved(data) {
+      return (
+          !resource.data.keys().hasAny(["currentGeneration"])
+          && !data.keys().hasAny(["currentGeneration"])
+        )
+        || (
+          resource.data.keys().hasAny(["currentGeneration"])
+          && data.keys().hasAny(["currentGeneration"])
+          && data.currentGeneration == resource.data.currentGeneration
+        );
+    }
+
+    function publicShareGenerationAdvances(data) {
+      return data.keys().hasAny(["currentGeneration"])
+        && (
+          !resource.data.keys().hasAny(["currentGeneration"])
+          || data.currentGeneration != resource.data.currentGeneration
+        );
+    }
+
+    function publicShareSourceAttachmentRevisionPreserved(data) {
+      return (
+          !resource.data.keys().hasAny(["sourceAttachmentRevision"])
+          && !data.keys().hasAny(["sourceAttachmentRevision"])
+        )
+        || (
+          resource.data.keys().hasAny(["sourceAttachmentRevision"])
+          && data.keys().hasAny(["sourceAttachmentRevision"])
+          && data.sourceAttachmentRevision == resource.data.sourceAttachmentRevision
+        );
+    }
+
+    function publicShareAttachmentRevisionFlipValid(data) {
+      return publicShareSourceAttachmentRevisionPreserved(data)
+        || publicShareGenerationAdvances(data);
+    }
+
+    function publicShareContentGenerationValid(data) {
+      return publicShareGenerationAdvances(data)
+        || (
+          data.attachmentCount == resource.data.attachmentCount
+          && publicShareGenerationPreserved(data)
+        );
     }
 
     function validPublicShareOwnerWrappedKey(data) {
@@ -1027,11 +1241,34 @@ service cloud.firestore {
         || (data.extension == "zip" && data.mimeType == "application/zip");
     }
 
+    function validOptionalPublicAttachmentEncryptedFileName(data) {
+      return (
+          !data.keys().hasAny(["encryptedFileName"])
+          && !data.keys().hasAny(["privacyVersion"])
+        )
+        || (
+          data.keys().hasAll(["encryptedFileName", "privacyVersion"])
+          && data.privacyVersion == 1
+          && encryptedPayload(data.encryptedFileName)
+          && data.encryptedFileName.cipherText.size() >= 24
+          && data.encryptedFileName.cipherText.size() <= 1024
+          && data.encryptedFileName.iv.size() == 16
+          && data.fileName == "shared-" + data.extension + "-attachment"
+        );
+    }
+
+    function publicShareAttachmentPrivacyProtected(data) {
+      return data.keys().hasAll(["encryptedFileName", "privacyVersion"])
+        && validOptionalPublicAttachmentEncryptedFileName(data);
+    }
+
     function validPublicShareAttachment(data, shareId, attachmentId) {
       return data.keys().hasOnly([
         "version",
+        "privacyVersion",
         "algorithm",
         "fileName",
+        "encryptedFileName",
         "extension",
         "mimeType",
         "originalSize",
@@ -1040,7 +1277,9 @@ service cloud.firestore {
         "encryptedSize",
         "isReady",
         "iv",
+        "generation",
         "sourceAttachmentId",
+        "quotaReserved",
         "expiresAt",
         "createdAt"
       ])
@@ -1049,6 +1288,7 @@ service cloud.firestore {
       && data.fileName is string
       && data.fileName.size() > 0
       && data.fileName.size() <= 100
+      && validOptionalPublicAttachmentEncryptedFileName(data)
       && validAttachmentExtension(data.extension)
       && data.mimeType is string
       && data.mimeType.size() <= 120
@@ -1064,7 +1304,9 @@ service cloud.firestore {
       )
       && data.iv is bytes
       && data.iv.size() == 12
+      && (!data.keys().hasAny(["generation"]) || validPublicShareGeneration(data.generation))
       && (!data.keys().hasAny(["sourceAttachmentId"]) || (data.sourceAttachmentId is string && data.sourceAttachmentId.size() <= 160))
+      && (!data.keys().hasAny(["quotaReserved"]) || data.quotaReserved is bool)
       && data.expiresAt is timestamp
       && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp);
     }
@@ -1072,6 +1314,9 @@ service cloud.firestore {
     function publicShareAttachmentReadyUpdate(data, shareId, attachmentId) {
       return exists(publicSharePath(shareId))
         && publicShareOwner(get(publicSharePath(shareId)).data)
+        && publicShareNotRevoked(get(publicSharePath(shareId)).data)
+        && publicShareSourceAvailable(get(publicSharePath(shareId)).data)
+        && get(publicSharePath(shareId)).data.expiresAt > request.time
         && validPublicShareAttachment(data, shareId, attachmentId)
         && resource.data.keys().hasAny(["isReady"])
         && resource.data.isReady == false
@@ -1172,6 +1417,7 @@ service cloud.firestore {
       return (adminUser() || noteParticipant(resource.data))
         && !noteDeleted(resource.data)
         && !noteDeleted(data)
+        && noteRevisionIsPreserved(data)
         && legacyActiveDeleteMetadataAdded(data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isDeleted"]);
     }
@@ -1183,30 +1429,49 @@ service cloud.firestore {
         && getAfter(quickLoginKeyPath(getAfter(userPath(uid)).data.quickKey)).data.uid == uid;
     }
 
-    function noteContentUpdate(data) {
-      return noteParticipant(data)
-        && !noteDeleted(resource.data)
-        && !noteDeleted(data)
-        && data.type == resource.data.type
-        && data.participantUids == resource.data.participantUids
-        && data.wrappedKeys == resource.data.wrappedKeys
-        && allowedShareTargets(data)
-        && activeNoteUpdateAffectedKeys([
+    function noteContentUpdate(noteId, data) {
+      return activeNoteUpdateAffectedKeys([
           "encryptedTitle",
           "encryptedBody",
           "updatedAt",
-          "updatedBy"
+          "updatedBy",
+          "revision",
+          "lastMutationId"
         ], [
           "encryptedTitle",
           "encryptedBody",
           "updatedAt",
           "updatedBy",
+          "revision",
+          "lastMutationId",
           "isDeleted"
-        ]);
+        ])
+        && noteParticipant(data)
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && data.type == resource.data.type
+        && data.participantUids == resource.data.participantUids
+        && data.wrappedKeys == resource.data.wrappedKeys
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && allowedShareTargets(data)
+        && validNote(data);
     }
 
     function noteFolderUpdate(data) {
-      return request.auth.uid == resource.data.ownerUid
+      return activeNoteUpdateAffectedKeys([
+          "folderId",
+          "updatedAt",
+          "updatedBy"
+        ], [
+          "folderId",
+          "updatedAt",
+          "updatedBy",
+          "isDeleted"
+        ])
+        && request.auth.uid == resource.data.ownerUid
         && resource.data.type == "personal"
         && data.type == "personal"
         && !noteDeleted(resource.data)
@@ -1216,110 +1481,157 @@ service cloud.firestore {
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
         && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionIsPreserved(data)
         && validAssignedFolder(data)
-        && activeNoteUpdateAffectedKeys([
-          "folderId",
-          "updatedAt",
-          "updatedBy"
-        ], [
+        && validNote(data);
+    }
+
+    function ownerAccessUpdate(noteId, data) {
+      return activeNoteUpdateAffectedKeys([
+          "type",
+          "participantUids",
+          "wrappedKeys",
           "folderId",
           "updatedAt",
           "updatedBy",
+          "revision",
+          "lastMutationId"
+        ], [
+          "type",
+          "participantUids",
+          "wrappedKeys",
+          "folderId",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId",
           "isDeleted"
-        ]);
-    }
-
-    function ownerAccessUpdate(data) {
-      return request.auth.uid == resource.data.ownerUid
+        ])
+        && request.auth.uid == resource.data.ownerUid
         && !noteDeleted(resource.data)
         && !noteDeleted(data)
         && request.auth.uid in data.participantUids
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
         && validAssignedFolder(data)
-        && activeNoteUpdateAffectedKeys([
-          "type",
-          "participantUids",
-          "wrappedKeys",
-          "folderId",
-          "updatedAt",
-          "updatedBy"
-        ], [
-          "type",
-          "participantUids",
-          "wrappedKeys",
-          "folderId",
-          "updatedAt",
-          "updatedBy",
-          "isDeleted"
-        ]);
+        && validNote(data);
     }
 
-    function noteSoftDeleteUpdate(data) {
-      return !noteDeleted(resource.data)
-        && canDeleteNote(resource.data)
-        && data.isDeleted == true
-        && data.deletedBy == request.auth.uid
-        && data.updatedBy == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+    function noteSoftDeleteUpdate(noteId, data) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "isDeleted",
           "deletedAt",
           "deletedBy",
           "updatedAt",
-          "updatedBy"
-        ]);
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ])
+        && !noteDeleted(resource.data)
+        && canDeleteNote(resource.data)
+        && data.isDeleted == true
+        && data.deletedAt == request.time
+        && data.deletedBy == request.auth.uid
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validNote(data);
     }
 
-    function noteRestoreUpdate(data) {
-      return noteDeleted(resource.data)
+    function noteRestoreUpdate(noteId, data) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "isDeleted",
+          "deletedAt",
+          "deletedBy",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ])
+        && noteDeleted(resource.data)
         && canDeleteNote(resource.data)
         && !notePurged(resource.data)
         && data.isDeleted == false
         && !data.keys().hasAny(["deletedAt", "deletedBy"])
         && data.updatedBy == request.auth.uid
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "isDeleted",
-          "deletedAt",
-          "deletedBy",
-          "updatedAt",
-          "updatedBy"
-        ]);
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validNote(data);
     }
 
-    function notePurgeUpdate(data) {
-      return noteDeleted(resource.data)
-        && canDeleteNote(resource.data)
-        && data.isDeleted == true
-        && data.isPurged == true
-        && data.purgedBy == request.auth.uid
-        && data.updatedBy == request.auth.uid
-        && data.type == "personal"
-        && data.participantUids == [request.auth.uid]
-        && data.wrappedKeys.keys().hasOnly([request.auth.uid])
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+    function notePurgeUpdate(noteId, data) {
+      return request.resource.data.diff(resource.data).changedKeys().hasOnly([
           "type",
           "participantUids",
           "wrappedKeys",
           "encryptedTitle",
           "encryptedBody",
+          "folderId",
+          "dueAt",
+          "deletedAt",
+          "deletedBy",
           "isPurged",
           "purgedAt",
           "purgedBy",
           "updatedAt",
           "savedAt",
           "updatedBy"
-        ]);
+        ])
+        && noteDeleted(resource.data)
+        && canDeleteNote(resource.data)
+        && data.isDeleted == true
+        && data.isPurged == true
+        && !data.keys().hasAny(["folderId", "dueAt", "deletedAt", "deletedBy"])
+        && data.purgedAt == request.time
+        && data.purgedBy == request.auth.uid
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && data.savedAt == request.time
+        && noteRevisionIsPreserved(data)
+        && data.type == "personal"
+        && data.participantUids == [request.auth.uid]
+        && data.wrappedKeys.keys().hasOnly([request.auth.uid])
+        && notePurgeCleanupQueueCreated(noteId, data)
+        && validNote(data);
+    }
+
+    function notePurgeRequested() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny(["isPurged", "purgedAt", "purgedBy"]);
+    }
+
+    function validNotePurgeCleanupQueue(data, noteId) {
+      return data.keys().hasOnly(["noteId", "ownerUid", "createdAt"])
+        && data.keys().hasAll(["noteId", "ownerUid", "createdAt"])
+        && data.noteId == noteId
+        && data.ownerUid is string
+        && data.ownerUid.size() > 0
+        && data.createdAt == request.time;
+    }
+
+    function notePurgeCleanupQueueCreated(noteId, data) {
+      return existsAfter(notePurgeCleanupQueuePath(noteId))
+        && validNotePurgeCleanupQueue(getAfter(notePurgeCleanupQueuePath(noteId)).data, noteId)
+        && getAfter(notePurgeCleanupQueuePath(noteId)).data.ownerUid == data.ownerUid;
     }
 
     function allowedShareTargets(data) {
       return data.participantUids.hasOnly([data.ownerUid])
         || (
           get(userPath(data.ownerUid)).data.isActive == true
-          && get(userPath(data.ownerUid)).data.isAdmin == true
-        )
-        || (
-          get(userPath(data.ownerUid)).data.keys().hasAny(["allowedShareTargetUids"])
-          && data.participantUids.hasOnly(get(userPath(data.ownerUid)).data.allowedShareTargetUids)
+          && (
+            get(userPath(data.ownerUid)).data.isAdmin == true
+            || (
+              get(userPath(data.ownerUid)).data.keys().hasAny(["allowedShareTargetUids"])
+              && data.participantUids.hasOnly(get(userPath(data.ownerUid)).data.allowedShareTargetUids)
+            )
+          )
         );
     }
 
@@ -1327,11 +1639,13 @@ service cloud.firestore {
       return uid == data.ownerUid
         || (
           get(userPath(data.ownerUid)).data.isActive == true
-          && get(userPath(data.ownerUid)).data.isAdmin == true
-        )
-        || (
-          get(userPath(data.ownerUid)).data.keys().hasAny(["allowedShareTargetUids"])
-          && uid in get(userPath(data.ownerUid)).data.allowedShareTargetUids
+          && (
+            get(userPath(data.ownerUid)).data.isAdmin == true
+            || (
+              get(userPath(data.ownerUid)).data.keys().hasAny(["allowedShareTargetUids"])
+              && uid in get(userPath(data.ownerUid)).data.allowedShareTargetUids
+            )
+          )
         );
     }
 
@@ -1347,6 +1661,7 @@ service cloud.firestore {
 
     function canReadDeletedNote(data) {
       return noteDeleted(data)
+        && !notePurged(data)
         && canDeleteNote(data);
     }
 
@@ -1373,9 +1688,13 @@ service cloud.firestore {
 
     function canDeleteAttachment(noteData, attachmentData) {
       return adminUser()
+        || (activeSignedInUser() && noteData.ownerUid == request.auth.uid)
         || (
-          noteParticipant(noteData)
-          && (noteData.ownerUid == request.auth.uid || attachmentData.uploadedBy == request.auth.uid)
+          noteActive(noteData)
+          && !notePurged(noteData)
+          && noteParticipant(noteData)
+          && ownerAllowsParticipant(noteData, request.auth.uid)
+          && attachmentData.uploadedBy == request.auth.uid
         );
     }
 
@@ -1383,11 +1702,28 @@ service cloud.firestore {
       return !data.keys().hasAny(["revokedAt", "revokedBy"]);
     }
 
+    function publicShareSourceAvailable(data) {
+      let sourcePath = notePath(data.sourceNoteId);
+      let sourceNote = get(sourcePath).data;
+      return exists(sourcePath)
+        && exists(userPath(data.ownerUid))
+        && get(userPath(data.ownerUid)).data.isActive == true
+        && sourceNote.ownerUid == data.ownerUid
+        && noteActive(sourceNote)
+        && !notePurged(sourceNote);
+    }
+
+    function publicShareSourceActive(data) {
+      return publicShareSourceAvailable(data)
+        && publicShareSourceRevisionMatches(data, get(notePath(data.sourceNoteId)).data);
+    }
+
     function publicShareActive(data) {
       return data.ready == true
         && publicShareNotRevoked(data)
         && data.expiresAt > request.time
-        && validPublicSharePassword(data);
+        && validPublicSharePassword(data)
+        && publicShareSourceActive(data);
     }
 
     function publicShareOwner(data) {
@@ -1438,21 +1774,25 @@ service cloud.firestore {
         && data.ready == false
         && data.attachmentCount == 0
         && data.keys().hasAny(["ownerWrappedShareKey"])
+        && data.keys().hasAny(["currentGeneration"])
+        && data.keys().hasAny(["sourceRevision"])
+        && data.keys().hasAny(["sourceAttachmentRevision"])
         && data.createdAt == request.time
         && data.updatedAt == request.time
         && data.expiresAt > request.time
         && data.expiresAt <= request.time + duration.value(7, "d")
         && publicShareNotRevoked(data)
-        && exists(notePath(data.sourceNoteId))
-        && get(notePath(data.sourceNoteId)).data.ownerUid == request.auth.uid
+        && publicShareSourceActive(data)
         && canReadNote(get(notePath(data.sourceNoteId)).data)
         && publicShareCleanupQueueCreated(shareId, data);
     }
 
     function publicShareActivateUpdate(data) {
-      return publicShareOwner(resource.data)
+      return request.resource.data.diff(resource.data).changedKeys().hasOnly(["ready", "attachmentCount", "updatedAt"])
+        && publicShareOwner(resource.data)
         && publicShareNotRevoked(resource.data)
         && publicShareNotRevoked(data)
+        && publicShareSourceActive(data)
         && resource.data.ready == false
         && data.ready == true
         && data.updatedAt == request.time
@@ -1461,14 +1801,15 @@ service cloud.firestore {
         && data.version == resource.data.version
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
+        && publicShareGenerationPreserved(data)
         && data.createdAt == resource.data.createdAt
         && data.expiresAt == resource.data.expiresAt
-        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data)
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["ready", "attachmentCount", "updatedAt"]);
+        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data);
     }
 
     function publicShareRevokeUpdate(data) {
-      return publicShareOwner(resource.data)
+      return request.resource.data.diff(resource.data).changedKeys().hasOnly(["revokedAt", "revokedBy", "updatedAt"])
+        && publicShareOwner(resource.data)
         && publicShareNotRevoked(resource.data)
         && data.revokedAt == request.time
         && data.revokedBy == request.auth.uid
@@ -1478,49 +1819,58 @@ service cloud.firestore {
         && data.version == resource.data.version
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
+        && publicShareGenerationPreserved(data)
         && data.attachmentCount == resource.data.attachmentCount
         && data.ready == resource.data.ready
         && data.createdAt == resource.data.createdAt
         && data.expiresAt == resource.data.expiresAt
-        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data)
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["revokedAt", "revokedBy", "updatedAt"]);
+        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data);
     }
 
     function publicSharePasswordUpdate(data) {
-      return publicShareOwner(resource.data)
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(["passwordHash", "updatedAt"])
+        && publicShareOwner(resource.data)
         && publicShareNotRevoked(resource.data)
         && publicShareNotRevoked(data)
+        && publicShareSourceActive(data)
         && data.updatedAt == request.time
         && data.sourceNoteId == resource.data.sourceNoteId
         && data.ownerUid == resource.data.ownerUid
         && data.version == resource.data.version
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
+        && publicShareGenerationPreserved(data)
         && data.attachmentCount == resource.data.attachmentCount
         && data.ready == resource.data.ready
         && data.createdAt == resource.data.createdAt
-        && data.expiresAt == resource.data.expiresAt
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["passwordHash", "updatedAt"]);
+        && data.expiresAt == resource.data.expiresAt;
     }
 
     function publicShareContentUpdate(data) {
-      return publicShareOwner(resource.data)
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "encryptedTitle",
+          "encryptedBody",
+          "sourceRevision",
+          "sourceAttachmentRevision",
+          "currentGeneration",
+          "attachmentCount",
+          "passwordHash",
+          "updatedAt"
+        ])
+        && publicShareOwner(resource.data)
         && publicShareNotRevoked(resource.data)
         && publicShareNotRevoked(data)
+        && data.keys().hasAll(["sourceRevision", "sourceAttachmentRevision"])
+        && publicShareSourceActive(data)
+        && publicShareAttachmentRevisionFlipValid(data)
         && data.updatedAt == request.time
         && data.sourceNoteId == resource.data.sourceNoteId
         && data.ownerUid == resource.data.ownerUid
         && data.version == resource.data.version
+        && publicShareContentGenerationValid(data)
         && data.ready == resource.data.ready
         && data.createdAt == resource.data.createdAt
-        && data.expiresAt == resource.data.expiresAt
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "encryptedTitle",
-          "encryptedBody",
-          "attachmentCount",
-          "passwordHash",
-          "updatedAt"
-        ]);
+        && data.expiresAt == resource.data.expiresAt;
     }
 
     match /publicLoginRoster/{uid} {
@@ -1769,18 +2119,28 @@ service cloud.firestore {
         && !request.resource.data.keys().hasAny(["deletedAt", "deletedBy"])
         && request.resource.data.ownerUid == request.auth.uid
         && request.auth.uid in request.resource.data.participantUids
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.savedAt == request.time
+        && request.resource.data.revision == 1
+        && pairedNoteHistoryCreated(noteId, request.resource.data)
         && allowedShareTargets(request.resource.data)
         && validAssignedFolder(request.resource.data);
-      allow update: if validNote(request.resource.data)
-        && request.resource.data.ownerUid == resource.data.ownerUid
+      allow update: if request.resource.data.ownerUid == resource.data.ownerUid
         && (
-          noteContentUpdate(request.resource.data)
-          || noteFolderUpdate(request.resource.data)
-          || (ownerAccessUpdate(request.resource.data) && allowedShareTargets(request.resource.data))
-          || legacyActiveDeleteMetadataMigration(request.resource.data)
-          || noteSoftDeleteUpdate(request.resource.data)
-          || noteRestoreUpdate(request.resource.data)
-          || notePurgeUpdate(request.resource.data)
+          (notePurgeRequested() && notePurgeUpdate(noteId, request.resource.data))
+          || (
+            !notePurgeRequested()
+            && (
+              noteContentUpdate(noteId, request.resource.data)
+              || noteFolderUpdate(request.resource.data)
+              || (ownerAccessUpdate(noteId, request.resource.data) && allowedShareTargets(request.resource.data))
+              || (legacyActiveDeleteMetadataMigration(request.resource.data) && validNote(request.resource.data))
+              || noteSoftDeleteUpdate(noteId, request.resource.data)
+              || noteRestoreUpdate(noteId, request.resource.data)
+            )
+          )
         );
       allow delete: if false;
 
@@ -1788,12 +2148,10 @@ service cloud.firestore {
         allow read: if exists(notePath(noteId))
           && canReadNoteHistory(resource.data, get(notePath(noteId)).data);
         allow create: if validNoteHistory(request.resource.data, noteId)
-          && historyMatchesNoteMutation(request.resource.data, noteId);
-        allow update: if validNoteHistory(request.resource.data, noteId)
-          && resource.data.actorUid == request.auth.uid
-          && resource.data.action == "content"
-          && request.resource.data.action == "content"
-          && historyMatchesNoteMutation(request.resource.data, noteId);
+          && request.resource.data.revision == getAfter(notePath(noteId)).data.revision
+          && historyId == getAfter(notePath(noteId)).data.lastMutationId
+          && historyMatchesNoteMutation(request.resource.data, noteId, historyId);
+        allow update: if false;
         allow delete: if exists(notePath(noteId))
           && noteDeleted(get(notePath(noteId)).data)
           && notePurged(get(notePath(noteId)).data)
@@ -1806,59 +2164,49 @@ service cloud.firestore {
             canReadNote(get(notePath(noteId)).data)
             || canReadDeletedNote(get(notePath(noteId)).data)
           );
-        allow create: if exists(notePath(noteId))
-          && !noteDeleted(get(notePath(noteId)).data)
-          && noteParticipant(get(notePath(noteId)).data)
-          && ownerAllowsParticipant(get(notePath(noteId)).data, request.auth.uid)
-          && validAttachment(request.resource.data, noteId, attachmentId)
-          && (
-            !request.resource.data.keys().hasAny(["storagePath"])
-            || request.resource.data.isReady == false
-          )
-          && request.resource.data.uploadedBy == request.auth.uid;
-        allow update: if exists(notePath(noteId))
-          && noteAttachmentReadyUpdate(request.resource.data, noteId, attachmentId);
-        allow delete: if exists(notePath(noteId))
-          && canDeleteAttachment(get(notePath(noteId)).data, resource.data)
-          && !resource.data.keys().hasAny(["blobPath"]);
+        allow create, update, delete: if false;
       }
+    }
+
+    match /notePurgeCleanupQueue/{noteId} {
+      allow create: if activeSignedInUser()
+        && validNotePurgeCleanupQueue(request.resource.data, noteId)
+        && exists(notePath(noteId))
+        && !notePurged(get(notePath(noteId)).data)
+        && canDeleteNote(get(notePath(noteId)).data)
+        && existsAfter(notePath(noteId))
+        && notePurged(getAfter(notePath(noteId)).data)
+        && get(notePath(noteId)).data.ownerUid == request.resource.data.ownerUid
+        && getAfter(notePath(noteId)).data.ownerUid == request.resource.data.ownerUid
+        && getAfter(notePath(noteId)).data.purgedBy == request.auth.uid
+        && getAfter(notePath(noteId)).data.purgedAt == request.time;
+      allow get, list, update, delete: if false;
     }
 
     match /publicNoteShares/{shareId} {
       allow get: if publicShareActive(resource.data) || publicShareOwner(resource.data);
       allow list: if publicShareOwner(resource.data);
       allow create: if publicShareCreate(shareId, request.resource.data);
-      allow update: if validPublicShare(request.resource.data)
-        && (
-          publicShareActivateUpdate(request.resource.data)
-          || publicShareRevokeUpdate(request.resource.data)
-          || publicSharePasswordUpdate(request.resource.data)
-          || publicShareContentUpdate(request.resource.data)
+      allow update: if (
+          (publicShareActivateUpdate(request.resource.data) && validPublicShare(request.resource.data))
+          || (publicShareRevokeUpdate(request.resource.data) && validPublicShare(request.resource.data))
+          || (publicSharePasswordUpdate(request.resource.data) && validPublicShare(request.resource.data))
+          || (publicShareContentUpdate(request.resource.data) && validPublicShare(request.resource.data))
         );
       allow delete: if publicShareOwner(resource.data);
 
       match /attachments/{attachmentId} {
         allow read: if exists(publicSharePath(shareId))
-          && (
-            publicShareActive(get(publicSharePath(shareId)).data)
-            || publicShareOwner(get(publicSharePath(shareId)).data)
-          );
-        allow create: if exists(publicSharePath(shareId))
-          && publicShareOwner(get(publicSharePath(shareId)).data)
-          && publicShareNotRevoked(get(publicSharePath(shareId)).data)
-          && get(publicSharePath(shareId)).data.expiresAt > request.time
-          && request.resource.data.expiresAt == get(publicSharePath(shareId)).data.expiresAt
-          && validPublicShareAttachment(request.resource.data, shareId, attachmentId)
-          && (
-            !request.resource.data.keys().hasAny(["storagePath"])
-            || request.resource.data.isReady == false
-          )
-          && request.resource.data.createdAt == request.time
-          && publicShareAttachmentCleanupQueueCreated(shareId, attachmentId, request.resource.data);
-        allow update: if publicShareAttachmentReadyUpdate(request.resource.data, shareId, attachmentId);
-        allow delete: if exists(publicSharePath(shareId))
-          && publicShareOwner(get(publicSharePath(shareId)).data)
-          && !resource.data.keys().hasAny(["blobPath"]);
+          && publicShareOwner(get(publicSharePath(shareId)).data);
+        allow get: if exists(publicSharePath(shareId))
+          && publicShareActive(get(publicSharePath(shareId)).data)
+          && publicShareAttachmentIsCurrent(get(publicSharePath(shareId)).data, resource.data)
+          && publicShareAttachmentPrivacyProtected(resource.data);
+        allow list: if exists(publicSharePath(shareId))
+          && publicShareActive(get(publicSharePath(shareId)).data)
+          && publicShareAttachmentIsCurrent(get(publicSharePath(shareId)).data, resource.data)
+          && resource.data.privacyVersion == 1;
+        allow create, update, delete: if false;
       }
     }
 
@@ -1874,14 +2222,7 @@ service cloud.firestore {
       match /publicShareAttachmentCleanupQueue/{attachmentId} {
         allow get, list: if exists(publicSharePath(shareId))
           && publicShareOwner(get(publicSharePath(shareId)).data);
-        allow create: if validPublicShareAttachmentCleanupQueue(request.resource.data, shareId, attachmentId)
-          && existsAfter(publicSharePath(shareId))
-          && existsAfter(publicShareAttachmentPath(shareId, attachmentId))
-          && publicShareOwner(getAfter(publicSharePath(shareId)).data)
-          && request.resource.data.expiresAt == getAfter(publicSharePath(shareId)).data.expiresAt
-          && request.resource.data.expiresAt == getAfter(publicShareAttachmentPath(shareId, attachmentId)).data.expiresAt;
-        allow update: if false;
-        allow delete: if false;
+        allow create, update, delete: if false;
       }
     }
 
@@ -1908,7 +2249,8 @@ service cloud.firestore {
           || (
             exists(notePath(request.resource.data.noteId))
             && noteParticipant(get(notePath(request.resource.data.noteId)).data)
-            && !noteDeleted(get(notePath(request.resource.data.noteId)).data)
+            && noteActive(get(notePath(request.resource.data.noteId)).data)
+            && !notePurged(get(notePath(request.resource.data.noteId)).data)
           )
         );
       allow delete: if false;

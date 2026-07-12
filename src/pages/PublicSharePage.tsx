@@ -1,5 +1,5 @@
 import { AlertTriangle, Download, Eye, File, Loader2, LockKeyhole } from "lucide-react";
-import { type CSSProperties, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, type CSSProperties, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import {
   attachmentDownloadName,
@@ -21,6 +21,15 @@ import {
   verifyPublicSharePassword
 } from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, sanitizeEditorHtml } from "../lib/editorContent";
+import { safeRasterImageBytes } from "../lib/safeRasterImage";
+import {
+  decodeTextAttachmentPreview,
+  legacyBinaryPreviewAttachmentExtensions,
+  legacyBinaryPreviewMessage,
+  previewableAttachmentExtensions,
+  textPreviewAttachmentExtensions,
+  type PublicAttachmentPreviewState
+} from "../lib/publicAttachmentPreview";
 import {
   getEncryptedPublicShareAttachmentSource,
   getPublicNoteShareAttachments,
@@ -29,20 +38,6 @@ import {
   type PublicNoteShareAttachmentSnapshot,
   type PublicNoteShareSnapshot
 } from "../services/publicShares";
-import {
-  AttachmentPreviewModal,
-  decodeTextAttachmentPreview,
-  extractHwpPreviewHtml,
-  extractHwpxPreviewHtml,
-  extractXlsxPreviewHtml,
-  legacyBinaryPreviewAttachmentExtensions,
-  legacyBinaryPreviewMessage,
-  previewableAttachmentExtensions,
-  renderSafeDocxPreviewSrcDoc,
-  textPreviewAttachmentExtensions,
-  type AttachmentPreviewState
-} from "./NotesPage";
-
 interface PublicShareAttachmentView {
   id: string;
   downloadName: string;
@@ -51,6 +46,8 @@ interface PublicShareAttachmentView {
   originalSize: number;
   source: PublicNoteShareAttachmentSnapshot;
 }
+
+const PublicAttachmentPreviewModal = lazy(() => import("../components/PublicAttachmentPreviewModal"));
 
 interface PublicShareContent {
   attachments: PublicShareAttachmentView[];
@@ -67,7 +64,7 @@ export default function PublicSharePage() {
   const [attachments, setAttachments] = useState<PublicShareAttachmentView[]>([]);
   const [share, setShare] = useState<PublicNoteShareSnapshot | null>(null);
   const [shareKeyValue, setShareKeyValue] = useState<string | null>(null);
-  const [attachmentPreview, setAttachmentPreview] = useState<AttachmentPreviewState | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<PublicAttachmentPreviewState | null>(null);
   const [attachmentAction, setAttachmentAction] = useState<{ id: string; kind: "download" | "preview" } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [passwordRequired, setPasswordRequired] = useState(false);
@@ -76,34 +73,50 @@ export default function PublicSharePage() {
   const [unlocking, setUnlocking] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const objectUrlsRef = useRef<string[]>([]);
+  const objectUrlsRef = useRef(new Set<string>());
+  const downloadObjectUrlsRef = useRef(new Set<string>());
+  const downloadCleanupTimersRef = useRef(new Set<number>());
   const contentKeyRef = useRef<CryptoKey | null>(null);
   const passwordSignatureRef = useRef<string | null>(null);
+  const attachmentActionGenerationRef = useRef(0);
+  const passwordUnlockGenerationRef = useRef(0);
 
   const revokeAttachmentUrls = useCallback(() => {
     objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    objectUrlsRef.current = [];
+    objectUrlsRef.current.clear();
+  }, []);
+
+  const revokeDownloadUrls = useCallback(() => {
+    downloadCleanupTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+    downloadCleanupTimersRef.current.clear();
+    downloadObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    downloadObjectUrlsRef.current.clear();
   }, []);
 
   const applyShareContent = useCallback((content: PublicShareContent) => {
+    attachmentActionGenerationRef.current += 1;
     revokeAttachmentUrls();
+    revokeDownloadUrls();
     setTitle(content.title);
     setBodyHtml(content.bodyHtml);
     setFontSize(content.fontSize);
     setAttachments(content.attachments);
     setAttachmentError(null);
     setPasswordRequired(false);
-  }, [revokeAttachmentUrls]);
+  }, [revokeAttachmentUrls, revokeDownloadUrls]);
 
   const clearShareContent = useCallback(() => {
+    attachmentActionGenerationRef.current += 1;
+    passwordUnlockGenerationRef.current += 1;
     revokeAttachmentUrls();
+    revokeDownloadUrls();
     setTitle("");
     setBodyHtml("");
     setAttachments([]);
     setAttachmentPreview(null);
     setAttachmentAction(null);
     setAttachmentError(null);
-  }, [revokeAttachmentUrls]);
+  }, [revokeAttachmentUrls, revokeDownloadUrls]);
 
   useEffect(() => {
     let active = true;
@@ -111,6 +124,8 @@ export default function PublicSharePage() {
 
     async function applyShareUpdate(nextShare: PublicNoteShareSnapshot, nextShareKeyValue: string, shareKey: CryptoKey) {
       const currentVersion = (updateVersion += 1);
+      passwordUnlockGenerationRef.current += 1;
+      setUnlocking(false);
 
       if (!publicShareActive(nextShare)) {
         throw new Error("공유 링크가 만료되었거나 중단되었습니다.");
@@ -146,6 +161,7 @@ export default function PublicSharePage() {
 
     async function loadShare() {
       setLoading(true);
+      passwordUnlockGenerationRef.current += 1;
       setError(null);
       setPasswordRequired(false);
       setPasswordInput("");
@@ -158,6 +174,7 @@ export default function PublicSharePage() {
       setTitle("");
       setBodyHtml("");
       revokeAttachmentUrls();
+      revokeDownloadUrls();
 
       try {
         const shareKeyValue = shareKeyFromHash();
@@ -172,6 +189,12 @@ export default function PublicSharePage() {
           shareId,
           (nextShare) => {
             if (!nextShare) {
+              updateVersion += 1;
+              clearShareContent();
+              setShare(null);
+              setShareKeyValue(null);
+              contentKeyRef.current = null;
+              passwordSignatureRef.current = null;
               setError("공유 링크가 만료되었거나 중단되었습니다.");
               setLoading(false);
               return;
@@ -194,6 +217,12 @@ export default function PublicSharePage() {
           },
           () => {
             if (active) {
+              updateVersion += 1;
+              clearShareContent();
+              setShare(null);
+              setShareKeyValue(null);
+              contentKeyRef.current = null;
+              passwordSignatureRef.current = null;
               setError("공유 링크 상태를 불러오지 못했습니다.");
               setLoading(false);
             }
@@ -201,6 +230,12 @@ export default function PublicSharePage() {
         );
       } catch (loadError) {
         if (active) {
+          updateVersion += 1;
+          clearShareContent();
+          setShare(null);
+          setShareKeyValue(null);
+          contentKeyRef.current = null;
+          passwordSignatureRef.current = null;
           setError(loadError instanceof Error ? loadError.message : "공유 노트를 열 수 없습니다.");
           setLoading(false);
         }
@@ -219,10 +254,16 @@ export default function PublicSharePage() {
 
     return () => {
       active = false;
+      updateVersion += 1;
+      attachmentActionGenerationRef.current += 1;
+      passwordUnlockGenerationRef.current += 1;
       unsubscribe?.();
       revokeAttachmentUrls();
+      revokeDownloadUrls();
+      contentKeyRef.current = null;
+      passwordSignatureRef.current = null;
     };
-  }, [applyShareContent, clearShareContent, revokeAttachmentUrls, shareId]);
+  }, [applyShareContent, clearShareContent, revokeAttachmentUrls, revokeDownloadUrls, shareId]);
 
   async function handlePasswordSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -232,6 +273,8 @@ export default function PublicSharePage() {
       return;
     }
 
+    const unlockGeneration = passwordUnlockGenerationRef.current + 1;
+    passwordUnlockGenerationRef.current = unlockGeneration;
     setUnlocking(true);
     setPasswordError(null);
 
@@ -239,21 +282,39 @@ export default function PublicSharePage() {
       const trimmedPassword = passwordInput.trim();
       const unlocked = await verifyPublicSharePassword(trimmedPassword, share.passwordHash, shareKeyValue);
 
+      if (passwordUnlockGenerationRef.current !== unlockGeneration) {
+        return;
+      }
+
       if (!unlocked) {
         setPasswordError("비밀번호가 올바르지 않습니다.");
         return;
       }
 
       const contentKey = await derivePublicShareContentKey(shareKeyValue, trimmedPassword, share.passwordHash);
+
+      if (passwordUnlockGenerationRef.current !== unlockGeneration) {
+        return;
+      }
+
       contentKeyRef.current = contentKey;
       passwordSignatureRef.current = publicSharePasswordSignature(share);
       const content = await decryptPublicShareContent(shareId, share, contentKey);
+
+      if (passwordUnlockGenerationRef.current !== unlockGeneration) {
+        return;
+      }
+
       applyShareContent(content);
       setPasswordInput("");
     } catch {
-      setPasswordError("공유 노트를 여는 중 문제가 발생했습니다.");
+      if (passwordUnlockGenerationRef.current === unlockGeneration) {
+        setPasswordError("공유 노트를 여는 중 문제가 발생했습니다.");
+      }
     } finally {
-      setUnlocking(false);
+      if (passwordUnlockGenerationRef.current === unlockGeneration) {
+        setUnlocking(false);
+      }
     }
   }
 
@@ -268,12 +329,14 @@ export default function PublicSharePage() {
           })();
     const url = URL.createObjectURL(new Blob([blobPart], { type }));
 
-    objectUrlsRef.current.push(url);
+    objectUrlsRef.current.add(url);
     return url;
   }
 
   function closeAttachmentPreview() {
+    attachmentActionGenerationRef.current += 1;
     setAttachmentPreview(null);
+    setAttachmentAction((current) => (current?.kind === "preview" ? null : current));
     revokeAttachmentUrls();
   }
 
@@ -298,12 +361,28 @@ export default function PublicSharePage() {
   }
 
   async function downloadAttachment(attachment: PublicShareAttachmentView) {
+    const actionGeneration = attachmentActionGenerationRef.current + 1;
+    attachmentActionGenerationRef.current = actionGeneration;
     setAttachmentAction({ id: attachment.id, kind: "download" });
     setAttachmentError(null);
 
     try {
       const blob = await decryptAttachmentBlobForAction(attachment);
+
+      if (attachmentActionGenerationRef.current !== actionGeneration) {
+        return;
+      }
+
       const url = URL.createObjectURL(blob);
+      downloadObjectUrlsRef.current.add(url);
+      const cleanupTimer = window.setTimeout(() => {
+        downloadCleanupTimersRef.current.delete(cleanupTimer);
+
+        if (downloadObjectUrlsRef.current.delete(url)) {
+          URL.revokeObjectURL(url);
+        }
+      }, 1000);
+      downloadCleanupTimersRef.current.add(cleanupTimer);
       const anchor = document.createElement("a");
 
       anchor.href = url;
@@ -312,17 +391,22 @@ export default function PublicSharePage() {
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch {
-      setAttachmentError("첨부파일을 다운로드하지 못했습니다.");
+      if (attachmentActionGenerationRef.current === actionGeneration) {
+        setAttachmentError("첨부파일을 다운로드하지 못했습니다.");
+      }
     } finally {
-      setAttachmentAction((current) => (current?.id === attachment.id && current.kind === "download" ? null : current));
+      if (attachmentActionGenerationRef.current === actionGeneration) {
+        setAttachmentAction((current) => (current?.id === attachment.id && current.kind === "download" ? null : current));
+      }
     }
   }
 
   async function openAttachmentPreview(attachment: PublicShareAttachmentView) {
     const fileName = attachment.downloadName;
     const extension = attachment.extension.toLowerCase();
+    const actionGeneration = attachmentActionGenerationRef.current + 1;
+    attachmentActionGenerationRef.current = actionGeneration;
 
     setAttachmentAction({ id: attachment.id, kind: "preview" });
     setAttachmentError(null);
@@ -341,8 +425,27 @@ export default function PublicSharePage() {
 
       const bytes = await decryptAttachmentBytesForAction(attachment);
 
+      if (attachmentActionGenerationRef.current !== actionGeneration) {
+        return;
+      }
+
       if (isImageAttachment(attachment)) {
-        const imageUrl = previewObjectUrl(bytes, safePublicShareAttachmentMimeType(extension));
+        const imageMimeType = safePublicShareAttachmentMimeType(extension);
+
+        if (!safeRasterImageBytes(bytes, imageMimeType)) {
+          setAttachmentPreview({
+            fileName,
+            kind: "unsupported",
+            label: "안전한 이미지 미리보기 안내",
+            text: extension === "gif"
+              ? "움직이는 GIF는 과도한 CPU·메모리 사용을 막기 위해 미리보기를 제공하지 않습니다. 다운로드해서 확인해주세요."
+              : "이미지 크기나 형식이 안전 제한을 벗어나 미리보기를 제공하지 않습니다. 다운로드해서 확인해주세요.",
+            url: previewObjectUrl(bytes, "application/octet-stream")
+          });
+          return;
+        }
+
+        const imageUrl = previewObjectUrl(bytes, imageMimeType);
 
         setAttachmentPreview({
           fileName,
@@ -372,7 +475,12 @@ export default function PublicSharePage() {
       }
 
       if (extension === "docx") {
+        const { renderSafeDocxPreviewSrcDoc } = await import("../lib/documentPreview");
         const srcDoc = await renderSafeDocxPreviewSrcDoc(bytes);
+
+        if (attachmentActionGenerationRef.current !== actionGeneration) {
+          return;
+        }
 
         setAttachmentPreview(
           srcDoc
@@ -389,20 +497,22 @@ export default function PublicSharePage() {
       }
 
       if (extension === "hwp") {
+        const { extractHwpPreviewHtml } = await import("../lib/documentPreview");
         const preview = await extractHwpPreviewHtml(bytes);
 
+        if (attachmentActionGenerationRef.current !== actionGeneration) {
+          return;
+        }
+
         setAttachmentPreview(
-          preview.safeForRichPreview
+          preview.html
             ? {
-                bytes,
-                fallbackHtml: preview.html,
                 fileName,
-                kind: "hwp",
-                label: "HWP 문서 미리보기",
+                html: preview.html,
+                kind: "html",
+                label: "HWP 안전 본문 미리보기",
                 url: downloadUrl
               }
-            : preview.html
-              ? { fileName, html: preview.html, kind: "html", label: "HWP 안전 본문 미리보기", url: downloadUrl }
               : {
                   fileName,
                   kind: "unsupported",
@@ -415,7 +525,12 @@ export default function PublicSharePage() {
       }
 
       if (extension === "hwpx") {
+        const { extractHwpxPreviewHtml } = await import("../lib/documentPreview");
         const html = extractHwpxPreviewHtml(bytes);
+
+        if (attachmentActionGenerationRef.current !== actionGeneration) {
+          return;
+        }
 
         setAttachmentPreview({
           fileName,
@@ -429,7 +544,12 @@ export default function PublicSharePage() {
       }
 
       if (extension === "xlsx") {
+        const { extractXlsxPreviewHtml } = await import("../lib/documentPreview");
         const html = extractXlsxPreviewHtml(bytes);
+
+        if (attachmentActionGenerationRef.current !== actionGeneration) {
+          return;
+        }
 
         setAttachmentPreview({
           fileName,
@@ -463,9 +583,15 @@ export default function PublicSharePage() {
         });
       }
     } catch {
-      setAttachmentError("첨부파일 미리보기를 열지 못했습니다.");
+      if (attachmentActionGenerationRef.current === actionGeneration) {
+        revokeAttachmentUrls();
+        setAttachmentPreview(null);
+        setAttachmentError("첨부파일 미리보기를 열지 못했습니다.");
+      }
     } finally {
-      setAttachmentAction((current) => (current?.id === attachment.id && current.kind === "preview" ? null : current));
+      if (attachmentActionGenerationRef.current === actionGeneration) {
+        setAttachmentAction((current) => (current?.id === attachment.id && current.kind === "preview" ? null : current));
+      }
     }
   }
 
@@ -569,7 +695,11 @@ export default function PublicSharePage() {
           </>
         )}
       </section>
-      {attachmentPreview && <AttachmentPreviewModal preview={attachmentPreview} onClose={closeAttachmentPreview} />}
+      {attachmentPreview && (
+        <Suspense fallback={<p className="pdf-preview-status" role="status">미리보기 도구를 불러오는 중...</p>}>
+          <PublicAttachmentPreviewModal preview={attachmentPreview} onClose={closeAttachmentPreview} />
+        </Suspense>
+      )}
     </main>
   );
 }
@@ -582,13 +712,31 @@ async function decryptPublicAttachmentBlob(attachment: PublicNoteShareAttachment
   return decryptAttachmentToBlob(attachment, shareKey, await getEncryptedPublicShareAttachmentSource(attachment));
 }
 
-function publicShareAttachmentView(attachment: PublicNoteShareAttachmentSnapshot) {
+async function publicShareAttachmentView(attachment: PublicNoteShareAttachmentSnapshot, contentKey: CryptoKey) {
+  if (attachment.privacyVersion !== 1 || !attachment.encryptedFileName) {
+    return null;
+  }
+
   const extension = attachment.extension.toLowerCase();
   const mimeType = attachment.mimeType.trim().toLowerCase();
+  let fileName = attachment.fileName;
+
+  if (attachment.encryptedFileName) {
+    try {
+      const decryptedFileName = await decryptText(attachment.encryptedFileName, contentKey);
+      const extensionSuffix = `.${extension}`;
+
+      fileName = decryptedFileName.toLowerCase().endsWith(extensionSuffix)
+        ? decryptedFileName.slice(0, -extensionSuffix.length)
+        : decryptedFileName;
+    } catch {
+      fileName = attachment.fileName;
+    }
+  }
 
   return {
     id: attachment.id,
-    downloadName: attachmentDownloadName({ ...attachment, extension }),
+    downloadName: attachmentDownloadName({ fileName, extension }),
     extension,
     mimeType,
     originalSize: attachment.originalSize,
@@ -600,10 +748,18 @@ async function decryptPublicShareContent(shareId: string, share: PublicNoteShare
   const [decryptedTitle, decryptedBody, encryptedAttachments] = await Promise.all([
     decryptText(share.encryptedTitle, shareKey),
     decryptText(share.encryptedBody, shareKey),
-    getPublicNoteShareAttachments(shareId)
+    getPublicNoteShareAttachments(shareId, share.currentGeneration)
   ]);
   const parsedBody = parseEditorContent(decryptedBody);
-  const attachments = encryptedAttachments.map(publicShareAttachmentView);
+  const attachments: PublicShareAttachmentView[] = [];
+
+  for (const attachment of encryptedAttachments) {
+    const attachmentView = await publicShareAttachmentView(attachment, shareKey);
+
+    if (attachmentView) {
+      attachments.push(attachmentView);
+    }
+  }
 
   return {
     title: decryptedTitle || "제목 없음",

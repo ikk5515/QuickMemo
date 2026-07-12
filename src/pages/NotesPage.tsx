@@ -16,9 +16,13 @@ import {
   Folder,
   FolderPlus,
   FolderOpen,
+  Heading2,
+  Heading3,
   History,
   LayoutGrid,
   ListChecks,
+  List,
+  ListOrdered,
   ListTodo,
   LockKeyhole,
   Loader2,
@@ -27,6 +31,8 @@ import {
   Paperclip,
   Palette,
   Pencil,
+  Pilcrow,
+  Quote,
   RotateCcw,
   Rows3,
   Save,
@@ -63,7 +69,6 @@ import {
   useState
 } from "react";
 import { Timestamp } from "firebase/firestore";
-import { Decompress, strFromU8, unzipSync, type UnzipFileInfo } from "fflate";
 import { AppShell } from "../components/AppShell";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
@@ -129,21 +134,29 @@ import {
   richEditorExtensions
 } from "../lib/richEditorExtensions";
 import { selectionFromStoredRange, type StoredEditorSelectionRange } from "../lib/editorSelection";
+import {
+  extractHwpPreviewHtml,
+  extractHwpxPreviewHtml,
+  extractXlsxPreviewHtml,
+  renderSafeDocxPreviewSrcDoc
+} from "../lib/documentPreview";
+import { safeRasterImageBytes } from "../lib/safeRasterImage";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
 import {
   confirmNoteRead,
+  createRevisionedEncryptedNote,
   createNoteFolder,
   createNoteAttachment,
+  deleteRevisionedNote,
   deleteNoteFolder,
   deleteNoteAttachment,
-  createEncryptedNote,
-  deleteNote,
   getEncryptedNoteAttachmentSource,
   getNoteAttachments,
+  getNoteRevisionState,
   markNoteRead,
   purgeNote,
   publishNoteCursor,
-  restoreNote,
+  restoreRevisionedNote,
   setNotePinned,
   subscribeNoteAttachments,
   subscribeDeletedNotes,
@@ -152,9 +165,10 @@ import {
   subscribeNoteHistory,
   subscribeNoteUserStates,
   subscribeVisibleNotes,
-  updateEncryptedNote,
-  updateNoteAccess,
+  updateRevisionedEncryptedNote,
+  updateRevisionedNoteAccess,
   updateNoteFolder,
+  NoteRevisionConflictError,
   type NoteHistorySnapshot,
   type NoteAttachmentSnapshot,
   type NoteFolderSnapshot,
@@ -163,13 +177,16 @@ import {
 } from "../services/notes";
 import {
   activatePublicNoteShare,
+  createPublicShareGeneration,
   createPublicNoteShare,
   createPublicNoteShareAttachment,
   deleteExpiredPublicSharesForOwner,
   deletePublicNoteShare,
   deletePublicNoteShareAttachments,
+  getOwnerPublicNoteShareAttachments,
   publicShareActive,
   publicShareExpiresAt,
+  publicNoteShareMaxAttachmentCount,
   publicShareUrl,
   revokePublicNoteShare,
   subscribePublicSharesForOwner,
@@ -181,6 +198,7 @@ import type { ActiveNoteDocument, DecryptedNote, NoteKind, UserProfile } from ".
 
 interface EditorState {
   noteId: string | null;
+  baseRevision: number;
   title: string;
   body: string;
   type: NoteKind;
@@ -201,6 +219,19 @@ interface PersistedNoteResult {
   noteId: string;
   noteKey: CryptoKey;
   draft: NoteDraft;
+  revision: number;
+}
+
+interface AttachmentNoteTarget {
+  draft: NoteDraft;
+  noteId: string;
+  noteKey: CryptoKey;
+  revision: number;
+}
+
+interface PreviewNoteSaveResult {
+  error?: string;
+  revision: number | null;
 }
 
 export interface AttachmentPreviewState {
@@ -217,6 +248,7 @@ export interface AttachmentPreviewState {
 
 const blankEditor = (uid: string): EditorState => ({
   noteId: null,
+  baseRevision: 0,
   title: "",
   body: "",
   type: "personal",
@@ -231,6 +263,11 @@ type NoteSortField = "createdAt" | "updatedAt" | "title";
 type NoteSortDirection = "asc" | "desc";
 type NoteListFilter = "all" | NoteKind;
 type EditorToolTab = "format" | "table" | "media";
+const editorToolTabs: Array<{ id: EditorToolTab; label: string }> = [
+  { id: "format", label: "서식" },
+  { id: "table", label: "표" },
+  { id: "media", label: "파일" }
+];
 
 interface NoteSortSetting {
   field: NoteSortField;
@@ -309,7 +346,11 @@ interface TableControlState {
 
 const fontSizes = editorTextSizes;
 const maxImageDataUrlLength = 760_000;
+const maxInlineImageInputBytes = 20 * 1024 * 1024;
+const maxInlineImagePixels = 20_000_000;
+const inlineImageMimeTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 const autosaveDelayMs = 2500;
+const publicSharePasswordMinLength = 12;
 const deletedNoteRetentionDays = 30;
 const historySummaryMaxLength = 420;
 const cursorPublishDelayMs = 220;
@@ -367,40 +408,8 @@ const attachmentUploadPhaseLabel: Record<AttachmentUploadPhase, string> = {
   failed: "업로드 실패"
 };
 const maxTextPreviewCharacters = 120_000;
-const maxDocumentPreviewBlocks = 320;
-const maxDocxPreviewMarkupCharacters = 1_600_000;
-const maxZipPreviewEntries = 512;
-const maxZipPreviewEntryNameLength = 240;
-const maxZipPreviewCompressionRatio = 120;
-const minZipPreviewRatioCheckBytes = 64_000;
-const maxDocxPreviewUncompressedBytes = 12_000_000;
-const maxDocxPreviewEntryBytes = 6_000_000;
-const maxHwpxPreviewEntries = 80;
-const maxHwpxPreviewUncompressedBytes = 4_000_000;
-const maxHwpxPreviewEntryBytes = 1_500_000;
-const maxXlsxPreviewEntries = 140;
-const maxXlsxPreviewUncompressedBytes = 5_000_000;
-const maxXlsxPreviewEntryBytes = 2_000_000;
-const maxXlsxMetadataXmlCharacters = 800_000;
-const maxXlsxSharedStrings = 5_000;
-const maxXlsxSharedStringCharacters = 240;
-const maxXlsxSharedStringsXmlCharacters = 1_500_000;
-const maxXlsxStyleRecords = 1_024;
-const maxXlsxWorksheetXmlCharacters = 1_500_000;
-const maxHwpPreviewSectionBytes = 1_500_000;
-const maxHwpPreviewTotalBytes = 4_000_000;
-const hwpPreviewCompressedChunkBytes = 16_384;
+const maxTextPreviewBytes = 512 * 1024;
 const safeHexColorPattern = /^#[0-9a-f]{6}$/;
-const docxPreviewFrameCsp = [
-  "default-src 'none'",
-  "base-uri 'none'",
-  "form-action 'none'",
-  "object-src 'none'",
-  "script-src 'none'",
-  "img-src data: blob:",
-  "font-src data:",
-  "style-src 'unsafe-inline'"
-].join("; ");
 
 function dataTransferHasFiles(dataTransfer: DataTransfer | null) {
   return Boolean(dataTransfer && Array.from(dataTransfer.types).includes("Files"));
@@ -1268,6 +1277,10 @@ function normalizedSearchTerm(value: string) {
   return value.trim().toLocaleLowerCase("ko");
 }
 
+function notePreviewText(note: DecryptedNote) {
+  return "searchText" in note && typeof note.searchText === "string" ? note.searchText : previewTextFromHtml(note.body);
+}
+
 function noteMatchesQuery(note: DecryptedNote, query: string) {
   const term = normalizedSearchTerm(query);
 
@@ -1275,7 +1288,7 @@ function noteMatchesQuery(note: DecryptedNote, query: string) {
     return true;
   }
 
-  const searchableText = [note.title, previewTextFromHtml(note.body)]
+  const searchableText = [note.title, notePreviewText(note)]
     .join(" ")
     .toLocaleLowerCase("ko");
 
@@ -1380,6 +1393,29 @@ function removeStoredPublicShareContentKey(uid: string, shareId: string) {
   publicShareContentKeyMemoryCache.delete(publicShareContentKeyStorageKey(uid, shareId));
 }
 
+function clearStoredPublicShareSecrets(uid?: string) {
+  if (!uid) {
+    publicShareUrlMemoryCache.clear();
+    publicShareContentKeyMemoryCache.clear();
+    return;
+  }
+
+  const urlPrefix = `${publicShareUrlStoragePrefix}${uid}:`;
+  const contentKeyPrefix = `${publicShareContentKeyStoragePrefix}${uid}:`;
+
+  for (const key of publicShareUrlMemoryCache.keys()) {
+    if (key.startsWith(urlPrefix)) {
+      publicShareUrlMemoryCache.delete(key);
+    }
+  }
+
+  for (const key of publicShareContentKeyMemoryCache.keys()) {
+    if (key.startsWith(contentKeyPrefix)) {
+      publicShareContentKeyMemoryCache.delete(key);
+    }
+  }
+}
+
 function publicShareUrlStorageKey(uid: string, shareId: string) {
   return `${publicShareUrlStoragePrefix}${uid}:${shareId}`;
 }
@@ -1398,11 +1434,19 @@ function publicShareKeyFromUrl(url: string) {
   }
 }
 
+const noteRevisionConflictMessage =
+  "다른 기기에서 이 노트가 먼저 변경되어 저장하지 않았습니다. 현재 편집 내용은 그대로 유지했습니다. 필요한 내용을 복사한 뒤 노트를 다시 열어 최신 버전을 확인해주세요.";
+
+function noteMutationErrorMessage(error: unknown, fallback: string) {
+  return error instanceof NoteRevisionConflictError ? noteRevisionConflictMessage : fallback;
+}
+
 function noteSyncSignature(note: DecryptedNote) {
   const updatedAt = note.updatedAt ? `${note.updatedAt.seconds}:${note.updatedAt.nanoseconds}` : "pending";
 
   return [
     note.id,
+    note.revision ?? 0,
     updatedAt,
     note.updatedBy,
     note.folderId ?? "",
@@ -1411,6 +1455,23 @@ function noteSyncSignature(note: DecryptedNote) {
     note.encryptedBody.iv,
     note.encryptedBody.cipherText
   ].join(":");
+}
+
+function publicShareMatchesSourceRevision(
+  share: PublicNoteShareSnapshot,
+  note: Pick<NoteSnapshot, "attachmentRevision" | "revision"> | undefined
+) {
+  const sourceRevision = note?.revision;
+  const sourceAttachmentRevision = note?.attachmentRevision;
+
+  const contentMatches = share.sourceRevision === undefined
+    ? sourceRevision === undefined
+    : share.sourceRevision === (sourceRevision ?? 0);
+  const attachmentsMatch = share.sourceAttachmentRevision === undefined
+    ? sourceAttachmentRevision === undefined
+    : share.sourceAttachmentRevision === (sourceAttachmentRevision ?? 0);
+
+  return contentMatches && attachmentsMatch;
 }
 
 function getActiveNoteClientId() {
@@ -1567,98 +1628,192 @@ function historyFieldLabel(field: string) {
   return labels[field] ?? field;
 }
 
-type DecryptedNoteCache = Map<string, { signature: string; note: DecryptedNote }>;
-
-function timestampSignature(value: { seconds: number; nanoseconds: number } | null | undefined) {
-  return value ? `${value.seconds}:${value.nanoseconds}` : "";
+interface SearchableDecryptedNote extends DecryptedNote {
+  searchText: string;
 }
 
-function encryptedPayloadSignature(payload: NoteSnapshot["encryptedTitle"]) {
-  return `${payload.version}:${payload.algorithm}:${payload.iv}:${payload.cipherText}`;
+interface DecryptedNoteCacheEntry {
+  body: string;
+  encryptedBody: NoteSnapshot["encryptedBody"];
+  encryptedTitle: NoteSnapshot["encryptedTitle"];
+  searchText: string;
+  title: string;
+  wrappedKey: NoteSnapshot["wrappedKeys"][string];
 }
 
-function wrappedKeySignature(wrappedKey: NoteSnapshot["wrappedKeys"][string] | undefined) {
-  return wrappedKey ? `${wrappedKey.version}:${wrappedKey.algorithm}:${wrappedKey.wrappedKey}` : "";
+type DecryptedNoteCache = Map<string, DecryptedNoteCacheEntry>;
+
+function encryptedPayloadMatches(
+  left: NoteSnapshot["encryptedTitle"],
+  right: NoteSnapshot["encryptedTitle"]
+) {
+  return (
+    left.version === right.version &&
+    left.algorithm === right.algorithm &&
+    left.iv === right.iv &&
+    left.cipherText === right.cipherText
+  );
 }
 
-function noteDecryptionSignature(note: NoteSnapshot, uid: string) {
-  return [
-    note.id,
-    note.type,
-    note.ownerUid,
-    note.participantUids.join(","),
-    note.folderId ?? "",
-    note.updatedBy,
-    note.deletedBy ?? "",
-    note.purgedBy ?? "",
-    note.isDeleted ? "deleted" : "active",
-    note.isPurged ? "purged" : "visible",
-    timestampSignature(note.createdAt),
-    timestampSignature(note.dueAt),
-    timestampSignature(note.updatedAt),
-    timestampSignature(note.savedAt),
-    timestampSignature(note.deletedAt),
-    timestampSignature(note.purgedAt),
-    encryptedPayloadSignature(note.encryptedTitle),
-    encryptedPayloadSignature(note.encryptedBody),
-    wrappedKeySignature(note.wrappedKeys[uid])
-  ].join("|");
+function wrappedKeyMatches(
+  left: NoteSnapshot["wrappedKeys"][string],
+  right: NoteSnapshot["wrappedKeys"][string]
+) {
+  return left.version === right.version && left.algorithm === right.algorithm && left.wrappedKey === right.wrappedKey;
 }
 
-function pruneDecryptedNoteCache(cache: DecryptedNoteCache | undefined, notes: NoteSnapshot[]) {
-  if (!cache) {
-    return;
-  }
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
 
-  const activeIds = new Set(notes.map((note) => note.id));
-
-  for (const noteId of cache.keys()) {
-    if (!activeIds.has(noteId)) {
-      cache.delete(noteId);
+  async function runWorker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index]);
     }
   }
+
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, runWorker));
+  return results;
 }
 
-async function decryptNoteSnapshots(notes: NoteSnapshot[], uid: string, privateKey: CryptoKey, cache?: DecryptedNoteCache) {
-  pruneDecryptedNoteCache(cache, notes);
+const dialogFocusableSelector = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])'
+].join(",");
 
-  const nextNotes = await Promise.all(
-    notes.map(async (note) => {
-      const wrappedKey = note.wrappedKeys[uid];
+function useDialogFocus(dialogRef: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const dialog = dialogRef.current;
 
-      if (!wrappedKey) {
-        cache?.delete(note.id);
-        return null;
+    if (!dialog) {
+      return undefined;
+    }
+
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const frameId = window.requestAnimationFrame(() => {
+      const focusTarget = dialog.querySelector<HTMLElement>("[autofocus], [data-dialog-initial-focus], " + dialogFocusableSelector);
+      dialog.tabIndex = -1;
+      (focusTarget ?? dialog).focus({ preventScroll: true });
+    });
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Tab") {
+        return;
       }
 
-      const signature = noteDecryptionSignature(note, uid);
-      const cached = cache?.get(note.id);
+      const openDialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'));
 
-      if (cached?.signature === signature) {
-        return cached.note;
+      if (openDialogs.at(-1) !== dialog) {
+        return;
       }
 
-      try {
-        const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
-        const [title, body] = await Promise.all([
-          decryptText(note.encryptedTitle, noteKey),
-          decryptText(note.encryptedBody, noteKey)
-        ]);
-        const decryptedNote = { ...note, title, body } satisfies DecryptedNote;
-        cache?.set(note.id, { note: decryptedNote, signature });
-        return decryptedNote;
-      } catch {
-        cache?.delete(note.id);
-        return {
-          ...note,
-          title: "복호화할 수 없는 노트",
-          body: "비밀번호 초기화 또는 공유 키 변경으로 이 기기에서 열 수 없습니다."
-        } satisfies DecryptedNote;
-      }
-    })
-  );
+      const focusableElements = Array.from(dialog.querySelectorAll<HTMLElement>(dialogFocusableSelector)).filter(
+        (element) => !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true"
+      );
 
-  return nextNotes.filter((note): note is DecryptedNote => Boolean(note));
+      if (!focusableElements.length) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const first = focusableElements[0];
+      const last = focusableElements.at(-1)!;
+      const activeElement = document.activeElement;
+
+      if (event.shiftKey && (activeElement === first || !dialog.contains(activeElement))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown, true);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      document.removeEventListener("keydown", handleKeyDown, true);
+
+      if (previousFocus?.isConnected) {
+        previousFocus.focus({ preventScroll: true });
+      }
+    };
+  }, [dialogRef]);
+}
+
+async function decryptNoteSnapshots(
+  notes: NoteSnapshot[],
+  uid: string,
+  privateKey: CryptoKey,
+  cache?: DecryptedNoteCache,
+  isCurrent: () => boolean = () => true
+) {
+  const nextCache = new Map<string, DecryptedNoteCacheEntry>();
+  const nextNotes = await mapWithConcurrency(notes, 4, async (note) => {
+    const wrappedKey = note.wrappedKeys[uid];
+
+    if (!wrappedKey) {
+      return null;
+    }
+
+    const cached = cache?.get(note.id);
+
+    if (
+      cached &&
+      encryptedPayloadMatches(cached.encryptedTitle, note.encryptedTitle) &&
+      encryptedPayloadMatches(cached.encryptedBody, note.encryptedBody) &&
+      wrappedKeyMatches(cached.wrappedKey, wrappedKey)
+    ) {
+      nextCache.set(note.id, {
+        ...cached,
+        encryptedBody: note.encryptedBody,
+        encryptedTitle: note.encryptedTitle,
+        wrappedKey
+      });
+      return { ...note, body: cached.body, searchText: cached.searchText, title: cached.title } satisfies SearchableDecryptedNote;
+    }
+
+    try {
+      const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
+      const [title, body] = await Promise.all([
+        decryptText(note.encryptedTitle, noteKey),
+        decryptText(note.encryptedBody, noteKey)
+      ]);
+      const searchText = previewTextFromHtml(body);
+      const decryptedNote = { ...note, title, body, searchText } satisfies SearchableDecryptedNote;
+      nextCache.set(note.id, {
+        body,
+        encryptedBody: note.encryptedBody,
+        encryptedTitle: note.encryptedTitle,
+        searchText,
+        title,
+        wrappedKey
+      });
+      return decryptedNote;
+    } catch {
+      return {
+        ...note,
+        title: "복호화할 수 없는 노트",
+        body: "비밀번호 초기화 또는 공유 키 변경으로 이 기기에서 열 수 없습니다.",
+        searchText: "복호화할 수 없는 노트 비밀번호 초기화 또는 공유 키 변경"
+      } satisfies SearchableDecryptedNote;
+    }
+  });
+
+  if (cache && isCurrent()) {
+    cache.clear();
+    nextCache.forEach((entry, noteId) => cache.set(noteId, entry));
+  }
+
+  return nextNotes.filter((note): note is SearchableDecryptedNote => Boolean(note));
 }
 
 function noteCountsFromNotes(notes: DecryptedNote[]) {
@@ -1743,12 +1898,20 @@ export default function NotesPage() {
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
   const pendingLocalEcho = useRef<{ noteId: string; draft: NoteDraft; createdAt: number } | null>(null);
   const appliedRemoteRevision = useRef<{ noteId: string; signature: string } | null>(null);
+  const revisionConflictNoteId = useRef<string | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
   const attachmentPreviewUrl = useRef<string | null>(null);
+  const attachmentPreviewGeneration = useRef(0);
+  const attachmentDownloadGeneration = useRef(0);
   const stoppingDeletedPublicShares = useRef(new Set<string>());
   const resolvingPublicShareUrls = useRef(new Set<string>());
+  const migratingLegacyPublicShares = useRef(new Set<string>());
+  const inspectedPublicShareFilenameGenerations = useRef(new Set<string>());
+  const migrateLegacyPublicShareRef = useRef<(share: PublicNoteShareSnapshot, note: DecryptedNote) => Promise<void>>(async () => undefined);
   const decryptedNoteCache = useRef<DecryptedNoteCache>(new Map());
   const decryptedDeletedNoteCache = useRef<DecryptedNoteCache>(new Map());
+  const visibleDecryptionGeneration = useRef(0);
+  const deletedDecryptionGeneration = useRef(0);
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -1773,23 +1936,116 @@ export default function NotesPage() {
       ])
     );
   }, [profile, users]);
+  const noteStateIdKey = useMemo(
+    () => Array.from(new Set([...notes, ...deletedNotes].map((note) => note.id))).sort().join("\n"),
+    [deletedNotes, notes]
+  );
 
   useEffect(() => {
     latestEditorRef.current = editor;
   }, [editor]);
 
   useEffect(() => {
-    if (!profile) {
+    const uid = profile?.uid;
+
+    if (!uid || !privateKey) {
+      return undefined;
+    }
+
+    return () => clearStoredPublicShareSecrets(uid);
+  }, [privateKey, profile]);
+
+  useEffect(() => {
+    if (profile && privateKey) {
+      return;
+    }
+
+    const uid = profile?.uid;
+    const activeNoteId = latestEditorRef.current.noteId;
+
+    if (uid) {
+      void publishActiveNote(uid, null, activeNoteClientId.current).catch(() => undefined);
+
+      if (activeNoteId) {
+        void publishNoteCursor(activeNoteId, uid, activeNoteClientId.current, null, false).catch(() => undefined);
+      }
+    }
+
+    if (autosaveTimer.current) {
+      window.clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
+
+    if (cursorPublishTimer.current) {
+      window.clearTimeout(cursorPublishTimer.current);
+      cursorPublishTimer.current = null;
+    }
+
+    if (attachmentPreviewUrl.current) {
+      URL.revokeObjectURL(attachmentPreviewUrl.current);
+      attachmentPreviewUrl.current = null;
+    }
+
+    attachmentPreviewGeneration.current += 1;
+    attachmentDownloadGeneration.current += 1;
+
+    clearStoredPublicShareSecrets(uid);
+    decryptedNoteCache.current.clear();
+    decryptedDeletedNoteCache.current.clear();
+    visibleDecryptionGeneration.current += 1;
+    deletedDecryptionGeneration.current += 1;
+    pendingLocalEcho.current = null;
+    appliedRemoteRevision.current = null;
+    revisionConflictNoteId.current = null;
+    saveQueuedRef.current = false;
+    lastPublishedCursor.current = null;
+    stoppingDeletedPublicShares.current.clear();
+    resolvingPublicShareUrls.current.clear();
+    migratingLegacyPublicShares.current.clear();
+    inspectedPublicShareFilenameGenerations.current.clear();
+
+    setNotes([]);
+    setDeletedNotes([]);
+    setDecryptedNotes([]);
+    setDecryptedDeletedNotes([]);
+    setFolders([]);
+    setNoteStateMap({});
+    setLocalSharedReadMap({});
+    setActiveCursorStates([]);
+    setUsers([]);
+    setActiveNote(null);
+    setEditor(blankEditor(uid ?? ""));
+    setAttachments([]);
+    setAttachmentPreview(null);
+    setAttachmentUploadProgress(null);
+    setAttachmentActionBusy(idleAttachmentActionBusyState);
+    setOwnerPublicShares([]);
+    setPublicShareUrlById({});
+    setListOpen(false);
+    setOverviewOpen(false);
+    setShareOpen(false);
+    setPublicShareOpen(false);
+    setPreviewNoteId(null);
+    setPublicShareCopied(false);
+    setPublicShareError(null);
+    setError(null);
+    setSaving(false);
+    setStatus(profile ? "암호화 키가 잠겼습니다." : "준비됨");
+  }, [privateKey, profile]);
+
+  useEffect(() => {
+    if (!profile || !privateKey) {
+      setNotes([]);
       return undefined;
     }
 
     return subscribeVisibleNotes(profile.uid, profile.isAdmin ? null : visibleNoteOwnerUids, setNotes, () =>
       setError("노트 목록을 불러오지 못했습니다.")
     );
-  }, [profile, visibleNoteOwnerUids]);
+  }, [privateKey, profile, visibleNoteOwnerUids]);
 
   useEffect(() => {
-    if (!profile) {
+    if (!profile || !privateKey) {
       setDeletedNotes([]);
       return undefined;
     }
@@ -1797,32 +2053,40 @@ export default function NotesPage() {
     return subscribeDeletedNotes(profile.uid, profile.isAdmin ? null : visibleNoteOwnerUids, setDeletedNotes, () =>
       setError("복구함을 불러오지 못했습니다.")
     );
-  }, [profile, visibleNoteOwnerUids]);
+  }, [privateKey, profile, visibleNoteOwnerUids]);
 
   useEffect(() => {
-    if (!profile) {
+    if (!profile || !privateKey) {
       setActiveNote(null);
       return undefined;
     }
 
     return subscribeActiveNote(profile.uid, setActiveNote, () => setError("활성 노트 상태를 불러오지 못했습니다."));
-  }, [profile]);
+  }, [privateKey, profile]);
 
   useEffect(() => {
+    if (!profile || !privateKey) {
+      setUsers([]);
+      return undefined;
+    }
+
     return subscribeUsers(setUsers, () => setError("사용자 목록을 불러오지 못했습니다."));
-  }, []);
+  }, [privateKey, profile]);
 
   useEffect(() => {
-    if (!profile) {
+    if (!profile || !privateKey) {
       setFolders([]);
       return undefined;
     }
 
     return subscribeNoteFolders(profile.uid, setFolders, () => setError("폴더 목록을 불러오지 못했습니다."));
-  }, [profile]);
+  }, [privateKey, profile]);
 
   useEffect(() => {
     return () => {
+      attachmentPreviewGeneration.current += 1;
+      attachmentDownloadGeneration.current += 1;
+
       if (attachmentPreviewUrl.current) {
         URL.revokeObjectURL(attachmentPreviewUrl.current);
         attachmentPreviewUrl.current = null;
@@ -1839,13 +2103,13 @@ export default function NotesPage() {
   }, []);
 
   useEffect(() => {
-    if (!editor.noteId) {
+    if (!privateKey || !editor.noteId) {
       setAttachments([]);
       return undefined;
     }
 
     return subscribeNoteAttachments(editor.noteId, setAttachments, () => setError("첨부파일 목록을 불러오지 못했습니다."));
-  }, [editor.noteId]);
+  }, [editor.noteId, privateKey]);
 
   useEffect(() => {
     if (!profile) {
@@ -1861,6 +2125,8 @@ export default function NotesPage() {
   useEffect(() => {
     const currentProfile = profile;
     const currentPrivateKey = privateKey;
+    const generation = visibleDecryptionGeneration.current + 1;
+    visibleDecryptionGeneration.current = generation;
 
     if (!currentProfile || !currentPrivateKey) {
       decryptedNoteCache.current.clear();
@@ -1873,9 +2139,15 @@ export default function NotesPage() {
     let cancelled = false;
 
     async function decryptNotes() {
-      const nextNotes = await decryptNoteSnapshots(notes, safeProfile.uid, safePrivateKey, decryptedNoteCache.current);
+      const nextNotes = await decryptNoteSnapshots(
+        notes,
+        safeProfile.uid,
+        safePrivateKey,
+        decryptedNoteCache.current,
+        () => !cancelled && visibleDecryptionGeneration.current === generation
+      );
 
-      if (!cancelled) {
+      if (!cancelled && visibleDecryptionGeneration.current === generation) {
         setDecryptedNotes(nextNotes);
       }
     }
@@ -1889,6 +2161,8 @@ export default function NotesPage() {
   useEffect(() => {
     const currentProfile = profile;
     const currentPrivateKey = privateKey;
+    const generation = deletedDecryptionGeneration.current + 1;
+    deletedDecryptionGeneration.current = generation;
 
     if (!currentProfile || !currentPrivateKey) {
       decryptedDeletedNoteCache.current.clear();
@@ -1905,10 +2179,11 @@ export default function NotesPage() {
         deletedNotes,
         safeProfile.uid,
         safePrivateKey,
-        decryptedDeletedNoteCache.current
+        decryptedDeletedNoteCache.current,
+        () => !cancelled && deletedDecryptionGeneration.current === generation
       );
 
-      if (!cancelled) {
+      if (!cancelled && deletedDecryptionGeneration.current === generation) {
         setDecryptedDeletedNotes(nextNotes);
       }
     }
@@ -1920,16 +2195,18 @@ export default function NotesPage() {
   }, [deletedNotes, privateKey, profile]);
 
   useEffect(() => {
-    if (!profile) {
+    const uid = profile?.uid;
+
+    if (!uid || !privateKey) {
       setNoteStateMap({});
       return undefined;
     }
 
-    const noteIds = [...decryptedNotes, ...decryptedDeletedNotes].map((note) => note.id);
-    return subscribeMyNoteStates(profile.uid, noteIds, setNoteStateMap, () =>
+    const noteIds = noteStateIdKey ? noteStateIdKey.split("\n") : [];
+    return subscribeMyNoteStates(uid, noteIds, setNoteStateMap, () =>
       setError("노트 개인 상태를 불러오지 못했습니다.")
     );
-  }, [decryptedDeletedNotes, decryptedNotes, profile]);
+  }, [noteStateIdKey, privateKey, profile?.uid]);
 
   useEffect(() => {
     const draft = {
@@ -1938,7 +2215,13 @@ export default function NotesPage() {
       fontSize: editor.fontSize
     };
 
-    if (!editor.dirty || !profile || saving || (!editor.noteId && !draftHasContent(draft))) {
+    if (
+      !editor.dirty ||
+      !profile ||
+      saving ||
+      (editor.noteId !== null && revisionConflictNoteId.current === editor.noteId) ||
+      (!editor.noteId && !draftHasContent(draft))
+    ) {
       return undefined;
     }
 
@@ -1956,6 +2239,7 @@ export default function NotesPage() {
       }
     };
   }, [
+    editor.baseRevision,
     editor.title,
     editor.body,
     editor.fontSize,
@@ -2089,8 +2373,13 @@ export default function NotesPage() {
     [editor.noteId, ownerPublicShares]
   );
   const activePublicShare = useMemo(
-    () => publicShares.find((share) => publicShareActive(share, cursorClock)) ?? null,
-    [cursorClock, publicShares]
+    () =>
+      publicShares.find(
+        (share) =>
+          publicShareActive(share, cursorClock)
+          && publicShareMatchesSourceRevision(share, notes.find((note) => note.id === share.sourceNoteId))
+      ) ?? null,
+    [cursorClock, notes, publicShares]
   );
   const activePublicShareUrl = activePublicShare
     ? publicShareUrlById[activePublicShare.id] ?? readStoredPublicShareUrl(profile?.uid ?? "", activePublicShare.id)
@@ -2099,7 +2388,10 @@ export default function NotesPage() {
     const nextShares = new Map<string, PublicNoteShareSnapshot>();
 
     ownerPublicShares.forEach((share) => {
-      if (!publicShareActive(share, cursorClock)) {
+      if (
+        !publicShareActive(share, cursorClock)
+        || !publicShareMatchesSourceRevision(share, notes.find((note) => note.id === share.sourceNoteId))
+      ) {
         return;
       }
 
@@ -2113,12 +2405,12 @@ export default function NotesPage() {
     });
 
     return nextShares;
-  }, [cursorClock, ownerPublicShares]);
+  }, [cursorClock, notes, ownerPublicShares]);
 
   useEffect(() => {
     const uid = profile?.uid;
 
-    if (!uid) {
+    if (!uid || !privateKey) {
       return undefined;
     }
 
@@ -2130,10 +2422,10 @@ export default function NotesPage() {
     const intervalId = window.setInterval(cleanupExpiredShares, 60 * 60 * 1000);
 
     return () => window.clearInterval(intervalId);
-  }, [profile?.uid]);
+  }, [privateKey, profile?.uid]);
 
   useEffect(() => {
-    if (!profile) {
+    if (!profile || !privateKey) {
       setOwnerPublicShares([]);
       setPublicShareUrlById({});
       return undefined;
@@ -2161,7 +2453,7 @@ export default function NotesPage() {
       },
       () => setPublicShareError("공유 링크 상태를 불러오지 못했습니다.")
     );
-  }, [profile]);
+  }, [privateKey, profile]);
 
   useEffect(() => {
     if (!profile || !privateKey) {
@@ -2196,7 +2488,7 @@ export default function NotesPage() {
   }, [cursorClock, ownerPublicShares, privateKey, profile, publicShareUrlById]);
 
   useEffect(() => {
-    if (!profile) {
+    if (!profile || !privateKey) {
       return;
     }
 
@@ -2226,7 +2518,7 @@ export default function NotesPage() {
           stoppingDeletedPublicShares.current.delete(share.id);
         });
     });
-  }, [decryptedDeletedNotes, ownerPublicShares, profile]);
+  }, [decryptedDeletedNotes, ownerPublicShares, privateKey, profile]);
   const resolveNoteKey = useCallback(
     async (noteId: string) => {
       if (!profile || !privateKey) {
@@ -2248,6 +2540,103 @@ export default function NotesPage() {
     },
     [deletedNotes, editor.noteId, editor.noteKey, notes, privateKey, profile]
   );
+
+  useEffect(() => {
+    if (!profile || !privateKey) {
+      return;
+    }
+
+    ownerPublicShares.forEach((share) => {
+      const rawNote = notes.find((note) => note.id === share.sourceNoteId);
+      const decryptedNote = decryptedNotes.find((note) => note.id === share.sourceNoteId);
+      const attachmentRevisionMismatch = Boolean(
+        rawNote
+        && share.sourceRevision === (rawNote.revision ?? 0)
+        && share.sourceAttachmentRevision !== (rawNote.attachmentRevision ?? 0)
+      );
+      const needsStructuralMigration =
+        share.sourceRevision === undefined
+        || share.sourceAttachmentRevision === undefined
+        || !share.currentGeneration
+        || attachmentRevisionMismatch;
+      const inspectionKey = `${share.id}:${share.currentGeneration ?? "legacy"}`;
+
+      if (
+        share.ownerUid !== profile.uid
+        || !publicShareActive(share, cursorClock)
+        || !decryptedNote
+        || migratingLegacyPublicShares.current.has(share.id)
+      ) {
+        return;
+      }
+
+      const migrateShare = (filenamePrivacyMigration: boolean) => {
+        if (migratingLegacyPublicShares.current.has(share.id)) {
+          return;
+        }
+
+        const hasMigrationKey = share.passwordHash
+          ? Boolean(readStoredPublicShareContentKey(profile.uid, share.id))
+          : Boolean(publicShareUrlById[share.id] || readStoredPublicShareUrl(profile.uid, share.id));
+
+        if (!hasMigrationKey) {
+          inspectedPublicShareFilenameGenerations.current.delete(inspectionKey);
+          setPublicShareError(
+            share.passwordHash
+              ? "기존 비밀번호 공유 링크는 파일명 보호 업데이트 키가 없어 새 링크를 만들어야 합니다."
+              : "기존 공유 링크의 파일명 보호를 준비 중입니다. 잠시 후 다시 시도해주세요."
+          );
+          return;
+        }
+
+        migratingLegacyPublicShares.current.add(share.id);
+        void migrateLegacyPublicShareRef.current(share, decryptedNote)
+          .then(() => {
+            if (filenamePrivacyMigration) {
+              setStatus("기존 공유 첨부파일의 이름을 암호화해 보호했습니다.");
+            }
+          })
+          .catch(() => {
+            inspectedPublicShareFilenameGenerations.current.delete(inspectionKey);
+            setPublicShareError(
+              share.passwordHash
+                ? "기존 비밀번호 공유 링크는 파일명 보호 업데이트 키가 없어 새 링크를 만들어야 합니다."
+                : "기존 공유 링크의 파일명 보호 업데이트에 실패했습니다. 노트를 저장한 뒤 다시 시도해주세요."
+            );
+          })
+          .finally(() => {
+            migratingLegacyPublicShares.current.delete(share.id);
+          });
+      };
+
+      if (needsStructuralMigration) {
+        migrateShare(false);
+        return;
+      }
+
+      const currentGeneration = share.currentGeneration;
+
+      if (!currentGeneration) {
+        return;
+      }
+
+      if (inspectedPublicShareFilenameGenerations.current.has(inspectionKey)) {
+        return;
+      }
+
+      inspectedPublicShareFilenameGenerations.current.add(inspectionKey);
+      void getOwnerPublicNoteShareAttachments(share.id, currentGeneration)
+        .then((attachments) => {
+          if (attachments.some((attachment) => attachment.privacyVersion !== 1 || !attachment.encryptedFileName)) {
+            migrateShare(true);
+          }
+        })
+        .catch(() => {
+          inspectedPublicShareFilenameGenerations.current.delete(inspectionKey);
+          setPublicShareError("기존 공유 첨부파일의 파일명 보호 상태를 확인하지 못했습니다.");
+        });
+    });
+  }, [cursorClock, decryptedNotes, notes, ownerPublicShares, privateKey, profile, publicShareUrlById]);
   const activeCursorNoteId = activeRemoteNote?.type === "shared" ? activeRemoteNote.id : null;
   const remoteEditorCursors = useMemo(() => {
     if (!profile || !activeRemoteNote || activeRemoteNote.type !== "shared") {
@@ -2283,7 +2672,7 @@ export default function NotesPage() {
   }, [activeCursorStates, activeRemoteNote, cursorClock, profile, users]);
 
   useEffect(() => {
-    if (!activeCursorNoteId) {
+    if (!privateKey || !activeCursorNoteId) {
       setActiveCursorStates([]);
       return undefined;
     }
@@ -2291,16 +2680,16 @@ export default function NotesPage() {
     return subscribeNoteUserStates(activeCursorNoteId, setActiveCursorStates, () =>
       setError("공유 노트 커서 상태를 불러오지 못했습니다.")
     );
-  }, [activeCursorNoteId]);
+  }, [activeCursorNoteId, privateKey]);
 
   useEffect(() => {
-    if (!activeCursorNoteId) {
+    if (!privateKey || !activeCursorNoteId) {
       return undefined;
     }
 
     const intervalId = window.setInterval(() => setCursorClock(Date.now()), 5000);
     return () => window.clearInterval(intervalId);
-  }, [activeCursorNoteId]);
+  }, [activeCursorNoteId, privateKey]);
 
   useEffect(() => {
     if (!activeRemoteNote || !profile) {
@@ -2309,6 +2698,7 @@ export default function NotesPage() {
 
     const remoteDraft = draftFromNote(activeRemoteNote);
     const remoteSignature = noteSyncSignature(activeRemoteNote);
+    const remoteRevision = activeRemoteNote.revision ?? 0;
     const pendingEcho = pendingLocalEcho.current;
     const currentDraft = {
       title: editor.title,
@@ -2332,6 +2722,12 @@ export default function NotesPage() {
       }
 
       appliedRemoteRevision.current = { noteId: activeRemoteNote.id, signature: remoteSignature };
+      revisionConflictNoteId.current = null;
+      setEditor((current) =>
+        current.noteId === activeRemoteNote.id && current.baseRevision !== remoteRevision
+          ? { ...current, baseRevision: remoteRevision }
+          : current
+      );
       return;
     }
 
@@ -2344,11 +2740,17 @@ export default function NotesPage() {
 
     if (pendingEcho?.noteId === activeRemoteNote.id && noteDraftsMatch(remoteDraft, pendingEcho.draft)) {
       appliedRemoteRevision.current = { noteId: activeRemoteNote.id, signature: remoteSignature };
+      revisionConflictNoteId.current = null;
 
       if (noteDraftsMatch(currentDraft, pendingEcho.draft)) {
         pendingLocalEcho.current = null;
       }
 
+      setEditor((current) =>
+        current.noteId === activeRemoteNote.id && current.baseRevision !== remoteRevision
+          ? { ...current, baseRevision: remoteRevision }
+          : current
+      );
       return;
     }
 
@@ -2357,8 +2759,10 @@ export default function NotesPage() {
     }
 
     appliedRemoteRevision.current = { noteId: activeRemoteNote.id, signature: remoteSignature };
+    revisionConflictNoteId.current = null;
     setEditor((current) => ({
       ...current,
+      baseRevision: remoteRevision,
       title: remoteDraft.title,
       body: remoteDraft.body,
       type: activeRemoteNote.type,
@@ -2744,8 +3148,10 @@ export default function NotesPage() {
       }
 
       appliedRemoteRevision.current = { noteId: note.id, signature: noteSyncSignature(note) };
+      revisionConflictNoteId.current = null;
       setEditor({
         noteId: note.id,
+        baseRevision: note.revision ?? 0,
         title: nextDraft.title,
         body: nextDraft.body,
         type: note.type,
@@ -2774,6 +3180,7 @@ export default function NotesPage() {
 
   function resetEditorToBlank(statusMessage = "새 노트 작성 중") {
     clearEditorCursor();
+    revisionConflictNoteId.current = null;
     setEditor(blankEditor(unlockedProfile.uid));
     setShareOpen(false);
     setStatus(statusMessage);
@@ -2811,7 +3218,14 @@ export default function NotesPage() {
     }));
 
     if (editor.noteId && editor.noteKey) {
-      void updateCurrentNoteAccess(editor.noteId, editor.noteKey, participantUids, previousParticipantUids);
+      void updateCurrentNoteAccess(
+        editor.noteId,
+        editor.noteKey,
+        editor.baseRevision,
+        participantUids,
+        previousParticipantUids,
+        editor.folderId
+      );
     }
   }
 
@@ -2836,8 +3250,10 @@ export default function NotesPage() {
   async function updateCurrentNoteAccess(
     noteId: string,
     noteKey: CryptoKey,
+    expectedRevision: number,
     participantUids: string[],
-    previousParticipantUids: string[]
+    previousParticipantUids: string[],
+    previousFolderId: string | null
   ) {
     if (!canEditShareTargets) {
       setError("노트 소유자만 공유 대상을 변경할 수 있습니다.");
@@ -2850,19 +3266,46 @@ export default function NotesPage() {
     try {
       const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
       const type = noteTypeFromParticipants(participantUids);
-      await updateNoteAccess(noteId, unlockedProfile.uid, type, participantUids, wrappedKeys, type === "personal" ? editor.folderId : null);
+      const result = await updateRevisionedNoteAccess({
+        noteId,
+        uid: unlockedProfile.uid,
+        expectedRevision,
+        type,
+        participantUids,
+        wrappedKeys,
+        folderId: type === "personal" ? editor.folderId : null
+      });
+      revisionConflictNoteId.current = null;
+      setEditor((current) =>
+        current.noteId === noteId ? { ...current, baseRevision: result.revision } : current
+      );
+      await syncPublicSharesForNote(
+        noteId,
+        noteKey,
+        {
+          title: latestEditorRef.current.title,
+          body: latestEditorRef.current.body,
+          fontSize: latestEditorRef.current.fontSize
+        },
+        false,
+        result.revision
+      );
       setStatus(type === "shared" ? "공유 대상을 저장했습니다." : "개인 노트로 변경했습니다.");
-    } catch {
+    } catch (error) {
       setEditor((current) =>
         current.noteId === noteId
           ? {
               ...current,
               participantUids: previousParticipantUids,
-              type: noteTypeFromParticipants(previousParticipantUids)
+              type: noteTypeFromParticipants(previousParticipantUids),
+              folderId: previousFolderId
             }
           : current
       );
-      setError("공유 대상을 변경하지 못했습니다.");
+      if (error instanceof NoteRevisionConflictError) {
+        revisionConflictNoteId.current = noteId;
+      }
+      setError(noteMutationErrorMessage(error, "공유 대상을 변경하지 못했습니다."));
     } finally {
       setSaving(false);
     }
@@ -2900,7 +3343,13 @@ export default function NotesPage() {
       const shareKey = await generateNoteKey();
       const shareKeyValue = await exportAesKeyBase64Url(shareKey);
       const expiresAt = publicShareExpiresAt();
+      const currentGeneration = createPublicShareGeneration();
       const trimmedPassword = password.trim();
+
+      if (trimmedPassword && trimmedPassword.length < publicSharePasswordMinLength) {
+        throw new Error(`공유 비밀번호는 ${publicSharePasswordMinLength}자 이상 입력해주세요.`);
+      }
+
       const passwordHash = trimmedPassword ? await hashPublicSharePassword(trimmedPassword, shareKeyValue) : undefined;
       const contentKey = passwordHash
         ? await derivePublicShareContentKey(shareKeyValue, trimmedPassword, passwordHash)
@@ -2911,8 +3360,23 @@ export default function NotesPage() {
         encryptText(editor.title.trim() || "제목 없음", contentKey),
         encryptText(serializeEditorContent(editor.body, editor.fontSize), contentKey)
       ]);
+      const sourceState = await getNoteRevisionState(savedNote.noteId);
+
+      if (sourceState.revision !== savedNote.revision) {
+        throw new NoteRevisionConflictError(savedNote.revision, sourceState.revision);
+      }
+
+      const noteAttachments = await getNoteAttachments(savedNote.noteId);
+
+      if (noteAttachments.length > publicNoteShareMaxAttachmentCount) {
+        throw new Error(`공유 링크에는 첨부파일을 최대 ${publicNoteShareMaxAttachmentCount}개까지 포함할 수 있습니다.`);
+      }
+
       const shareId = await createPublicNoteShare({
+        currentGeneration,
         sourceNoteId: savedNote.noteId,
+        sourceAttachmentRevision: sourceState.attachmentRevision,
+        sourceRevision: sourceState.revision,
         ownerUid: unlockedProfile.uid,
         encryptedTitle,
         encryptedBody,
@@ -2922,19 +3386,17 @@ export default function NotesPage() {
       });
       createdShareId = shareId;
 
-      const noteAttachments = await getNoteAttachments(savedNote.noteId);
-
       for (const attachment of noteAttachments) {
-        const encryptedAttachment = await reencryptAttachmentBlob(
-          attachment,
-          savedNote.noteKey,
-          contentKey,
-          await getEncryptedNoteAttachmentSource(attachment)
-        );
+        const encryptedAttachmentSource = await getEncryptedNoteAttachmentSource(attachment);
+        const [encryptedAttachment, encryptedFileName] = await Promise.all([
+          reencryptAttachmentBlob(attachment, savedNote.noteKey, contentKey, encryptedAttachmentSource),
+          encryptText(attachmentDownloadName(attachment), contentKey)
+        ]);
 
         await createPublicNoteShareAttachment(shareId, {
-          fileName: attachment.fileName,
+          encryptedFileName,
           extension: attachment.extension,
+          generation: currentGeneration,
           mimeType: safePublicShareAttachmentMimeType(attachment.extension),
           ownerUid: unlockedProfile.uid,
           originalSize: attachment.originalSize,
@@ -2945,7 +3407,7 @@ export default function NotesPage() {
         });
       }
 
-      await activatePublicNoteShare(shareId, noteAttachments.length);
+      await activatePublicNoteShare(shareId, noteAttachments.length, currentGeneration);
 
       const nextUrl = publicShareUrl(shareId, shareKeyValue);
       writeStoredPublicShareUrl(unlockedProfile.uid, shareId, nextUrl);
@@ -3030,6 +3492,11 @@ export default function NotesPage() {
       return;
     }
 
+    if (trimmedPassword.length < publicSharePasswordMinLength) {
+      setPublicShareError(`공유 비밀번호는 ${publicSharePasswordMinLength}자 이상 입력해주세요.`);
+      return;
+    }
+
     setPublicShareBusy(true);
     setPublicShareError(null);
 
@@ -3088,7 +3555,21 @@ export default function NotesPage() {
       throw new Error("노트를 먼저 저장하지 못했습니다.");
     }
 
-    await rewritePublicShareContentFromNote(share, savedNote.noteId, savedNote.noteKey, savedNote.draft, contentKey, passwordHash);
+    const sourceState = await getNoteRevisionState(savedNote.noteId);
+
+    if (sourceState.revision !== savedNote.revision) {
+      throw new NoteRevisionConflictError(savedNote.revision, sourceState.revision);
+    }
+
+    await rewritePublicShareContentFromNote(
+      share,
+      savedNote.noteId,
+      savedNote.noteKey,
+      savedNote.draft,
+      sourceState,
+      contentKey,
+      passwordHash
+    );
   }
 
   async function rewritePublicShareContentFromNote(
@@ -3096,6 +3577,7 @@ export default function NotesPage() {
     noteId: string,
     noteKey: CryptoKey,
     draft: NoteDraft,
+    sourceState: { attachmentRevision: number; revision: number },
     contentKey: CryptoKey,
     passwordHash: NonNullable<PublicNoteShareSnapshot["passwordHash"]> | null
   ) {
@@ -3110,45 +3592,61 @@ export default function NotesPage() {
       encryptText(serializeEditorContent(draft.body, draft.fontSize), contentKey)
     ]);
     const noteAttachments = await getNoteAttachments(noteId);
-    let nextAttachmentCount = 0;
 
-    await deletePublicNoteShareAttachments(share.id);
-
-    for (const attachment of noteAttachments) {
-      const encryptedAttachment = await reencryptAttachmentBlob(
-        attachment,
-        noteKey,
-        contentKey,
-        await getEncryptedNoteAttachmentSource(attachment)
-      );
-
-      await createPublicNoteShareAttachment(share.id, {
-        fileName: attachment.fileName,
-        extension: attachment.extension,
-        mimeType: safePublicShareAttachmentMimeType(attachment.extension),
-        ownerUid: unlockedProfile.uid,
-        originalSize: attachment.originalSize,
-        encryptedBlob: encryptedAttachment.blob,
-        encryption: encryptedAttachment.metadata,
-        expiresAt,
-        sourceAttachmentId: attachment.id
-      });
-      nextAttachmentCount += 1;
+    if (noteAttachments.length > publicNoteShareMaxAttachmentCount) {
+      throw new Error(`공유 링크에는 첨부파일을 최대 ${publicNoteShareMaxAttachmentCount}개까지 포함할 수 있습니다.`);
     }
 
-    await updatePublicNoteShareContent(share.id, {
-      encryptedTitle,
-      encryptedBody,
-      attachmentCount: nextAttachmentCount,
-      passwordHash
-    });
+    const nextGeneration = createPublicShareGeneration();
+    const previousGeneration = share.currentGeneration ?? null;
+    let nextAttachmentCount = 0;
+
+    try {
+      for (const attachment of noteAttachments) {
+        const encryptedAttachmentSource = await getEncryptedNoteAttachmentSource(attachment);
+        const [encryptedAttachment, encryptedFileName] = await Promise.all([
+          reencryptAttachmentBlob(attachment, noteKey, contentKey, encryptedAttachmentSource),
+          encryptText(attachmentDownloadName(attachment), contentKey)
+        ]);
+
+        await createPublicNoteShareAttachment(share.id, {
+          encryptedFileName,
+          extension: attachment.extension,
+          generation: nextGeneration,
+          mimeType: safePublicShareAttachmentMimeType(attachment.extension),
+          ownerUid: unlockedProfile.uid,
+          originalSize: attachment.originalSize,
+          encryptedBlob: encryptedAttachment.blob,
+          encryption: encryptedAttachment.metadata,
+          expiresAt,
+          sourceAttachmentId: attachment.id
+        });
+        nextAttachmentCount += 1;
+      }
+
+      await updatePublicNoteShareContent(share.id, {
+        encryptedTitle,
+        encryptedBody,
+        attachmentCount: nextAttachmentCount,
+        currentGeneration: nextGeneration,
+        passwordHash,
+        sourceAttachmentRevision: sourceState.attachmentRevision,
+        sourceRevision: sourceState.revision
+      });
+    } catch (error) {
+      await deletePublicNoteShareAttachments(share.id, nextGeneration).catch(() => undefined);
+      throw error;
+    }
+
+    await deletePublicNoteShareAttachments(share.id, previousGeneration).catch(() => undefined);
   }
 
   async function updatePublicShareTextFromNote(
     share: PublicNoteShareSnapshot,
     draft: NoteDraft,
     contentKey: CryptoKey,
-    passwordHash: NonNullable<PublicNoteShareSnapshot["passwordHash"]> | null
+    passwordHash: NonNullable<PublicNoteShareSnapshot["passwordHash"]> | null,
+    sourceState: { attachmentRevision: number; revision: number }
   ) {
     const [encryptedTitle, encryptedBody] = await Promise.all([
       encryptText(draft.title.trim() || "제목 없음", contentKey),
@@ -3159,7 +3657,9 @@ export default function NotesPage() {
       encryptedTitle,
       encryptedBody,
       attachmentCount: share.attachmentCount,
-      passwordHash
+      passwordHash,
+      sourceAttachmentRevision: sourceState.attachmentRevision,
+      sourceRevision: sourceState.revision
     });
   }
 
@@ -3180,7 +3680,43 @@ export default function NotesPage() {
     return importAesKeyBase64Url(shareKeyValue);
   }
 
-  async function syncPublicSharesForNote(noteId: string, noteKey: CryptoKey, draft: NoteDraft, syncAttachments = false) {
+  async function failClosedPublicShare(share: PublicNoteShareSnapshot) {
+    let stopped = false;
+
+    try {
+      await revokePublicNoteShare(share.id, unlockedProfile.uid);
+      stopped = true;
+    } catch {
+      try {
+        await deletePublicNoteShare(share.id);
+        stopped = true;
+      } catch {
+        // A revision-bound share remains unreadable after a note content mutation even if cleanup is temporarily unavailable.
+      }
+    }
+
+    removeStoredPublicShareUrl(unlockedProfile.uid, share.id);
+    removeStoredPublicShareContentKey(unlockedProfile.uid, share.id);
+    setPublicShareUrlById((current) => {
+      if (!(share.id in current)) {
+        return current;
+      }
+
+      const nextUrls = { ...current };
+      delete nextUrls[share.id];
+      return nextUrls;
+    });
+
+    return stopped;
+  }
+
+  async function syncPublicSharesForNote(
+    noteId: string,
+    noteKey: CryptoKey,
+    draft: NoteDraft,
+    syncAttachments = false,
+    sourceRevision?: number
+  ) {
     const sharesToSync = ownerPublicShares.filter(
       (share) => share.sourceNoteId === noteId && share.ownerUid === unlockedProfile.uid && publicShareActive(share)
     );
@@ -3189,7 +3725,20 @@ export default function NotesPage() {
       return;
     }
 
-    let skippedPasswordProtectedShare = false;
+    const expectedSourceRevision =
+      sourceRevision
+      ?? [...notes, ...deletedNotes].find((note) => note.id === noteId)?.revision
+      ?? 0;
+    const sourceState = await getNoteRevisionState(noteId);
+
+    if (sourceState.revision !== expectedSourceRevision) {
+      for (const share of sharesToSync) {
+        await failClosedPublicShare(share);
+      }
+      throw new NoteRevisionConflictError(expectedSourceRevision, sourceState.revision);
+    }
+
+    let stoppedPasswordProtectedShare = false;
     let syncFailed = false;
 
     for (const share of sharesToSync) {
@@ -3197,44 +3746,80 @@ export default function NotesPage() {
         const contentKey = await publicShareContentKeyForSync(share);
 
         if (!contentKey) {
-          skippedPasswordProtectedShare = skippedPasswordProtectedShare || Boolean(share.passwordHash);
+          stoppedPasswordProtectedShare = Boolean(share.passwordHash) || stoppedPasswordProtectedShare;
+          await failClosedPublicShare(share);
           continue;
         }
 
-        if (syncAttachments) {
-          await rewritePublicShareContentFromNote(share, noteId, noteKey, draft, contentKey, share.passwordHash ?? null);
+        const attachmentsNeedSync =
+          syncAttachments
+          || share.sourceAttachmentRevision !== sourceState.attachmentRevision
+          || !share.currentGeneration;
+
+        if (attachmentsNeedSync) {
+          await rewritePublicShareContentFromNote(
+            share,
+            noteId,
+            noteKey,
+            draft,
+            sourceState,
+            contentKey,
+            share.passwordHash ?? null
+          );
         } else {
-          await updatePublicShareTextFromNote(share, draft, contentKey, share.passwordHash ?? null);
+          await updatePublicShareTextFromNote(
+            share,
+            draft,
+            contentKey,
+            share.passwordHash ?? null,
+            sourceState
+          );
         }
       } catch {
         syncFailed = true;
+        await failClosedPublicShare(share);
       }
     }
 
-    if (skippedPasswordProtectedShare) {
-      setPublicShareError("비밀번호가 걸린 공유 링크는 공유 창에서 비밀번호를 다시 설정하면 자동 업데이트가 재개됩니다.");
+    if (stoppedPasswordProtectedShare) {
+      setPublicShareError("자동 업데이트 키가 없는 비밀번호 공유 링크를 안전을 위해 중단했습니다. 새 링크를 만들어주세요.");
     }
 
     if (syncFailed) {
-      setPublicShareError("공유 링크를 자동 업데이트하지 못했습니다. 공유 창에서 링크 상태를 확인해주세요.");
+      setPublicShareError("공유 링크 업데이트에 실패해 이전 내용이 노출되지 않도록 링크를 중단했습니다.");
     }
   }
 
-  async function syncPublicSharesForNoteTarget(noteId: string, noteKey: CryptoKey, syncAttachments = false) {
-    const storedNote = [...decryptedNotes, ...decryptedDeletedNotes].find((note) => note.id === noteId) ?? null;
-    const draft =
-      editor.noteId === noteId
-        ? { title: editor.title, body: editor.body, fontSize: editor.fontSize }
-        : storedNote
-          ? draftFromNote(storedNote)
-          : null;
+  async function migrateLegacyPublicShare(share: PublicNoteShareSnapshot, note: DecryptedNote) {
+    const contentKey = await publicShareContentKeyForSync(share);
 
-    if (!draft) {
-      return;
+    if (!contentKey) {
+      throw new Error("기존 공유 링크의 자동 업데이트 키가 없습니다.");
     }
 
-    await syncPublicSharesForNote(noteId, noteKey, draft, syncAttachments);
+    const [noteKey, sourceState] = await Promise.all([
+      resolveNoteKey(note.id),
+      getNoteRevisionState(note.id)
+    ]);
+    const expectedRevision = note.revision ?? 0;
+
+    if (sourceState.revision !== expectedRevision) {
+      throw new NoteRevisionConflictError(expectedRevision, sourceState.revision);
+    }
+
+    await rewritePublicShareContentFromNote(
+      share,
+      note.id,
+      noteKey,
+      draftFromNote(note),
+      sourceState,
+      contentKey,
+      share.passwordHash ?? null
+    );
+    setStatus("기존 공유 링크를 현재 보안 형식으로 업데이트했습니다.");
   }
+
+  migrateLegacyPublicShareRef.current = migrateLegacyPublicShare;
 
   async function stopPublicSharesForNote(noteId: string) {
     const sharesToStop = ownerPublicShares.filter(
@@ -3279,6 +3864,7 @@ export default function NotesPage() {
       setError(null);
 
       if (editor.noteId && editor.noteKey) {
+        const expectedRevision = editor.baseRevision;
         const previousDraft = activeRemoteNote ? draftFromNote(activeRemoteNote) : null;
         const saveDraft =
           activeRemoteNote?.type === "shared"
@@ -3289,26 +3875,32 @@ export default function NotesPage() {
           encryptText(historySummaryFromDraft(previousDraft, saveDraft), editor.noteKey),
           encryptText(historySnapshotFromDraft(saveDraft), editor.noteKey)
         ]);
-        await updateEncryptedNote(
-          editor.noteId,
-          unlockedProfile.uid,
-          payload.encryptedTitle,
-          payload.encryptedBody,
-          changedDraftFields(previousDraft, saveDraft),
-          activeRemoteNote?.participantUids ?? editor.participantUids,
+        const result = await updateRevisionedEncryptedNote({
+          noteId: editor.noteId,
+          uid: unlockedProfile.uid,
+          expectedRevision,
+          encryptedTitle: payload.encryptedTitle,
+          encryptedBody: payload.encryptedBody,
+          changedFields: changedDraftFields(previousDraft, saveDraft),
+          readerUids: activeRemoteNote?.participantUids ?? editor.participantUids,
           historySummary,
           historySnapshot
-        );
+        });
+        revisionConflictNoteId.current = null;
         pendingLocalEcho.current = { noteId: editor.noteId, draft: saveDraft, createdAt: Date.now() };
         announceActiveNote(editor.noteId);
         setEditor((current) =>
-          draftsMatch(current, draft) ? { ...current, body: saveDraft.body, dirty: false } : current
+          current.noteId !== editor.noteId
+            ? current
+            : draftsMatch(current, draft)
+              ? { ...current, baseRevision: result.revision, body: saveDraft.body, dirty: false }
+              : { ...current, baseRevision: result.revision }
         );
         if (syncPublicShare) {
-          await syncPublicSharesForNote(editor.noteId, editor.noteKey, saveDraft);
+          await syncPublicSharesForNote(editor.noteId, editor.noteKey, saveDraft, false, result.revision);
         }
         setStatus(showSavedMessage ? "변경 사항을 저장했습니다." : "자동 저장됨");
-        return { noteId: editor.noteId, noteKey: editor.noteKey, draft: saveDraft };
+        return { noteId: editor.noteId, noteKey: editor.noteKey, draft: saveDraft, revision: result.revision };
       }
 
       const noteKey = await generateNoteKey();
@@ -3324,7 +3916,7 @@ export default function NotesPage() {
       ]);
       const wrappedKeys = await wrappedKeysForParticipants(noteKey, participantUids);
 
-      const created = await createEncryptedNote({
+      const created = await createRevisionedEncryptedNote({
         type,
         ownerUid: unlockedProfile.uid,
         participantUids,
@@ -3335,25 +3927,32 @@ export default function NotesPage() {
         historySummary,
         historySnapshot
       });
-      pendingLocalEcho.current = { noteId: created.id, draft: saveDraft, createdAt: Date.now() };
+      revisionConflictNoteId.current = null;
+      pendingLocalEcho.current = { noteId: created.noteId, draft: saveDraft, createdAt: Date.now() };
 
       setEditor((current) => ({
         ...current,
-        noteId: created.id,
+        noteId: created.noteId,
+        baseRevision: created.revision,
         noteKey,
         body: saveDraft.body,
         type,
         folderId: type === "personal" ? current.folderId : null,
         dirty: !draftsMatch(current, draft)
       }));
-      announceActiveNote(created.id);
+      announceActiveNote(created.noteId);
       if (syncPublicShare) {
-        await syncPublicSharesForNote(created.id, noteKey, saveDraft);
+        await syncPublicSharesForNote(created.noteId, noteKey, saveDraft);
       }
       setStatus(showSavedMessage ? "노트를 저장 목록에 추가했습니다." : "자동 저장됨");
-      return { noteId: created.id, noteKey, draft: saveDraft };
-    })().catch(() => {
-      setError("노트를 저장하지 못했습니다.");
+      return { noteId: created.noteId, noteKey, draft: saveDraft, revision: created.revision };
+    })().catch((error: unknown) => {
+      if (error instanceof NoteRevisionConflictError && editor.noteId) {
+        revisionConflictNoteId.current = editor.noteId;
+        pendingLocalEcho.current = null;
+        setStatus("저장 충돌이 감지되었습니다.");
+      }
+      setError(noteMutationErrorMessage(error, "노트를 저장하지 못했습니다."));
       return null;
     });
 
@@ -3371,7 +3970,11 @@ export default function NotesPage() {
         window.setTimeout(() => {
           const current = latestEditorRef.current;
 
-          if (current.dirty && (current.noteId || draftHasContent(current))) {
+          if (
+            current.dirty &&
+            (current.noteId || draftHasContent(current)) &&
+            (current.noteId === null || revisionConflictNoteId.current !== current.noteId)
+          ) {
             void saveCurrentNoteRef.current(false);
           }
         }, 0);
@@ -3412,9 +4015,11 @@ export default function NotesPage() {
   flushCurrentNoteSaveRef.current = flushCurrentNoteSave;
 
   async function ensureCurrentNoteForAttachment() {
+    let savedNote: PersistedNoteResult | null = null;
+
     if (editor.noteId && editor.noteKey) {
       if (editor.dirty) {
-        const savedNote = await flushCurrentNoteSave(false, false);
+        savedNote = await flushCurrentNoteSave(false, false);
 
         if (!savedNote && latestEditorRef.current.dirty) {
           throw new Error("노트를 먼저 저장하지 못했습니다.");
@@ -3422,18 +4027,29 @@ export default function NotesPage() {
       }
 
       return {
-        noteId: latestEditorRef.current.noteId ?? editor.noteId,
-        noteKey: latestEditorRef.current.noteKey ?? editor.noteKey
+        draft: savedNote?.draft ?? {
+          title: latestEditorRef.current.title,
+          body: latestEditorRef.current.body,
+          fontSize: latestEditorRef.current.fontSize
+        },
+        noteId: savedNote?.noteId ?? latestEditorRef.current.noteId ?? editor.noteId,
+        noteKey: savedNote?.noteKey ?? latestEditorRef.current.noteKey ?? editor.noteKey,
+        revision: savedNote?.revision ?? latestEditorRef.current.baseRevision
       };
     }
 
-    const savedNote = await flushCurrentNoteSave(false, false);
+    const createdNote = await flushCurrentNoteSave(false, false);
 
-    if (!savedNote) {
+    if (!createdNote) {
       throw new Error("노트를 먼저 저장하지 못했습니다.");
     }
 
-    return savedNote;
+    return {
+      draft: createdNote.draft,
+      noteId: createdNote.noteId,
+      noteKey: createdNote.noteKey,
+      revision: createdNote.revision
+    };
   }
 
   async function insertPastedFiles(files: File[], insertHtml: RichEditorInsertHtml) {
@@ -3452,7 +4068,7 @@ export default function NotesPage() {
     }
   }
 
-    async function uploadAttachmentFiles(files: File[], targetNote?: { noteId: string; noteKey: CryptoKey }) {
+    async function uploadAttachmentFiles(files: File[], targetNote?: AttachmentNoteTarget) {
       if (attachmentUploadInFlightRef.current) {
         setError("다른 첨부파일 업로드가 끝난 뒤 다시 시도해주세요.");
         return;
@@ -3601,7 +4217,13 @@ export default function NotesPage() {
             }
           : current
       );
-        await syncPublicSharesForNoteTarget(noteTarget.noteId, noteTarget.noteKey, true);
+      await syncPublicSharesForNote(
+        noteTarget.noteId,
+        noteTarget.noteKey,
+        noteTarget.draft,
+        true,
+        noteTarget.revision
+      );
       uploadSucceeded = true;
 
       setAttachmentUploadProgress((current) =>
@@ -3651,12 +4273,15 @@ export default function NotesPage() {
   }
 
   function closeAttachmentPreview() {
+    attachmentPreviewGeneration.current += 1;
+
     if (attachmentPreviewUrl.current) {
       URL.revokeObjectURL(attachmentPreviewUrl.current);
       attachmentPreviewUrl.current = null;
     }
 
     setAttachmentPreview(null);
+    setAttachmentActionBusy((current) => ({ ...current, previewingId: null }));
   }
 
     async function previewAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
@@ -3664,6 +4289,16 @@ export default function NotesPage() {
         setError("이 파일 형식은 미리보기를 지원하지 않습니다.");
         return;
       }
+
+      const previewGeneration = attachmentPreviewGeneration.current + 1;
+      attachmentPreviewGeneration.current = previewGeneration;
+
+      if (attachmentPreviewUrl.current) {
+        URL.revokeObjectURL(attachmentPreviewUrl.current);
+        attachmentPreviewUrl.current = null;
+      }
+
+      setAttachmentPreview(null);
 
       if (attachment.originalSize > maxAttachmentPreviewBytes) {
         setAttachmentPreview({
@@ -3680,12 +4315,12 @@ export default function NotesPage() {
 
     try {
       const plainBytes = await decryptAttachmentFile(noteId, attachment);
-      const fileName = attachmentDownloadName(attachment);
 
-      if (attachmentPreviewUrl.current) {
-        URL.revokeObjectURL(attachmentPreviewUrl.current);
-        attachmentPreviewUrl.current = null;
+      if (attachmentPreviewGeneration.current !== previewGeneration) {
+        return;
       }
+
+      const fileName = attachmentDownloadName(attachment);
 
       if (attachment.extension === "pdf") {
         const blob = new Blob([plainBytes], { type: "application/pdf" });
@@ -3702,6 +4337,10 @@ export default function NotesPage() {
           plainBytes,
           document.documentElement.dataset.theme === "dark" ? "dark" : "light"
         );
+
+        if (attachmentPreviewGeneration.current !== previewGeneration) {
+          return;
+        }
 
         setAttachmentPreview(
           srcDoc
@@ -3725,22 +4364,18 @@ export default function NotesPage() {
       if (attachment.extension === "hwp") {
         const preview = await extractHwpPreviewHtml(plainBytes);
 
+        if (attachmentPreviewGeneration.current !== previewGeneration) {
+          return;
+        }
+
         setAttachmentPreview(
-          preview.safeForRichPreview
+          preview.html
             ? {
-                bytes: plainBytes,
-                fallbackHtml: preview.html,
                 fileName,
-                kind: "hwp",
-                label: "HWP 문서 미리보기"
+                html: preview.html,
+                kind: "html",
+                label: "HWP 안전 본문 미리보기"
               }
-            : preview.html
-              ? {
-                  fileName,
-                  html: preview.html,
-                  kind: "html",
-                  label: "HWP 안전 본문 미리보기"
-                }
               : {
                   fileName,
                   kind: "unsupported",
@@ -3748,7 +4383,7 @@ export default function NotesPage() {
                   text: "HWP 미리보기가 안전 제한을 초과했거나 지원하지 않는 문서입니다. 원본 파일은 다운로드해서 확인해주세요."
                 }
         );
-        setStatus(preview.safeForRichPreview ? "HWP 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
+        setStatus(preview.html ? "HWP 안전 본문 미리보기를 열었습니다." : "안전한 미리보기 안내를 표시했습니다.");
         return;
       }
 
@@ -3809,21 +4444,32 @@ export default function NotesPage() {
         text: "이 파일 형식은 앱 내부 미리보기를 지원하지 않습니다."
       });
     } catch {
-      setError("파일 미리보기를 열지 못했습니다.");
+      if (attachmentPreviewGeneration.current === previewGeneration) {
+        setError("파일 미리보기를 열지 못했습니다.");
+      }
       } finally {
-        setAttachmentActionBusy((current) => ({
-          ...current,
-          previewingId: current.previewingId === attachment.id ? null : current.previewingId
-        }));
+        if (attachmentPreviewGeneration.current === previewGeneration) {
+          setAttachmentActionBusy((current) => ({
+            ...current,
+            previewingId: current.previewingId === attachment.id ? null : current.previewingId
+          }));
+        }
       }
     }
 
     async function downloadAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
+      const downloadGeneration = attachmentDownloadGeneration.current + 1;
+      attachmentDownloadGeneration.current = downloadGeneration;
       setAttachmentActionBusy((current) => ({ ...current, downloadingId: attachment.id }));
       setError(null);
 
     try {
       const blob = await decryptAttachmentBlob(noteId, attachment);
+
+      if (attachmentDownloadGeneration.current !== downloadGeneration) {
+        return;
+      }
+
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -3835,19 +4481,28 @@ export default function NotesPage() {
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       setStatus("첨부파일 다운로드를 시작했습니다.");
     } catch {
-      setError("첨부파일을 다운로드하지 못했습니다.");
+      if (attachmentDownloadGeneration.current === downloadGeneration) {
+        setError("첨부파일을 다운로드하지 못했습니다.");
+      }
       } finally {
-        setAttachmentActionBusy((current) => ({
-          ...current,
-          downloadingId: current.downloadingId === attachment.id ? null : current.downloadingId
-        }));
+        if (attachmentDownloadGeneration.current === downloadGeneration) {
+          setAttachmentActionBusy((current) => ({
+            ...current,
+            downloadingId: current.downloadingId === attachment.id ? null : current.downloadingId
+          }));
+        }
       }
     }
 
   async function uploadPreviewAttachments(note: DecryptedNote, files: File[]) {
     try {
       const noteKey = await noteKeyForDownload(note.id);
-      await uploadAttachmentFiles(files, { noteId: note.id, noteKey });
+      await uploadAttachmentFiles(files, {
+        draft: draftFromNote(note),
+        noteId: note.id,
+        noteKey,
+        revision: note.revision ?? 0
+      });
     } catch {
       setError("첨부파일을 업로드하지 못했습니다.");
     }
@@ -3870,9 +4525,16 @@ export default function NotesPage() {
       setError(null);
 
       try {
+        const noteKey = await noteKeyForDownload(note.id);
         await deleteNoteAttachment(note.id, attachment.id);
         setAttachments((current) => current.filter((currentAttachment) => currentAttachment.id !== attachment.id));
-        await syncPublicSharesForNote(note.id, await noteKeyForDownload(note.id), draftFromNote(note), true);
+        await syncPublicSharesForNote(
+          note.id,
+          noteKey,
+          draftFromNote(note),
+          true,
+          note.revision ?? 0
+        );
         setStatus("첨부파일을 삭제했습니다.");
         return true;
       } catch {
@@ -3900,12 +4562,20 @@ export default function NotesPage() {
     setSaving(true);
 
     try {
-        await deleteNote(editor.noteId, unlockedProfile.uid, activeRemoteNote.participantUids);
+        await deleteRevisionedNote({
+          noteId: editor.noteId,
+          uid: unlockedProfile.uid,
+          expectedRevision: editor.baseRevision,
+          readerUids: activeRemoteNote.participantUids
+        });
         await stopPublicSharesForNote(editor.noteId);
         resetEditorToBlank();
         setStatus("노트를 삭제했습니다.");
-    } catch {
-      setError("노트를 삭제하지 못했습니다.");
+    } catch (error) {
+      if (error instanceof NoteRevisionConflictError) {
+        revisionConflictNoteId.current = editor.noteId;
+      }
+      setError(noteMutationErrorMessage(error, "노트를 삭제하지 못했습니다."));
     } finally {
       setSaving(false);
     }
@@ -3913,25 +4583,34 @@ export default function NotesPage() {
 
   async function removePreviewNote(note: DecryptedNote) {
     if (!canDeleteNote(note)) {
-      setError("노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다.");
-      return;
+      const errorMessage = "노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다.";
+      setError(errorMessage);
+      return errorMessage;
     }
 
     setSaving(true);
     setError(null);
 
     try {
-      await deleteNote(note.id, unlockedProfile.uid, note.participantUids);
+      await deleteRevisionedNote({
+        noteId: note.id,
+        uid: unlockedProfile.uid,
+        expectedRevision: note.revision ?? 0,
+        readerUids: note.participantUids
+      });
       await stopPublicSharesForNote(note.id);
         setPreviewNoteId(null);
 
         if (editor.noteId === note.id) {
           resetEditorToBlank();
-        }
+      }
 
       setStatus("노트를 삭제했습니다.");
-    } catch {
-      setError("노트를 삭제하지 못했습니다.");
+      return null;
+    } catch (error) {
+      const errorMessage = noteMutationErrorMessage(error, "노트를 삭제하지 못했습니다.");
+      setError(errorMessage);
+      return errorMessage;
     } finally {
       setSaving(false);
     }
@@ -3939,19 +4618,28 @@ export default function NotesPage() {
 
   async function restorePreviewNote(note: DecryptedNote) {
     if (!canRestoreNote(note)) {
-      setError("노트 소유자 또는 관리자만 복구할 수 있습니다.");
-      return;
+      const errorMessage = "노트 소유자 또는 관리자만 복구할 수 있습니다.";
+      setError(errorMessage);
+      return errorMessage;
     }
 
     setSaving(true);
     setError(null);
 
     try {
-      await restoreNote(note.id, unlockedProfile.uid, note.participantUids);
+      await restoreRevisionedNote({
+        noteId: note.id,
+        uid: unlockedProfile.uid,
+        expectedRevision: note.revision ?? 0,
+        readerUids: note.participantUids
+      });
       setPreviewNoteId(null);
       setStatus("노트를 복구했습니다.");
-    } catch {
-      setError("노트를 복구하지 못했습니다.");
+      return null;
+    } catch (error) {
+      const errorMessage = noteMutationErrorMessage(error, "노트를 복구하지 못했습니다.");
+      setError(errorMessage);
+      return errorMessage;
     } finally {
       setSaving(false);
     }
@@ -3976,13 +4664,13 @@ export default function NotesPage() {
 
     try {
       await purgeDeletedNote(note);
-        setPreviewNoteId(null);
+      setPreviewNoteId(null);
 
-        if (editor.noteId === note.id) {
-          resetEditorToBlank();
-        }
+      if (editor.noteId === note.id) {
+        resetEditorToBlank();
+      }
 
-      setStatus("노트를 즉시 삭제했습니다.");
+      setStatus("노트 접근을 즉시 차단했고 서버에서 잔여 암호화 데이터를 정리합니다.");
     } catch {
       setError("노트를 즉시 삭제하지 못했습니다.");
     } finally {
@@ -3991,20 +4679,17 @@ export default function NotesPage() {
   }
 
   async function purgeDeletedNote(note: DecryptedNote) {
-    const rawNote = [...notes, ...deletedNotes].find((current) => current.id === note.id);
-    const wrappedKey = rawNote?.wrappedKeys[unlockedProfile.uid];
-
-    if (!wrappedKey) {
-      throw new Error("Missing note key.");
-    }
-
     await stopPublicSharesForNote(note.id);
 
-    const noteKey = await resolveNoteKey(note.id);
-    const redactedPayload = await encryptNoteDraft(purgedDraft(), noteKey);
+    const tombstoneKey = await generateNoteKey();
+    const [redactedPayload, wrappedKey] = await Promise.all([
+      encryptNoteDraft(purgedDraft(), tombstoneKey),
+      wrapNoteKey(tombstoneKey, unlockedProfile.publicKeyJwk)
+    ]);
 
     await purgeNote({
       noteId: note.id,
+      ownerUid: note.ownerUid,
       uid: unlockedProfile.uid,
       encryptedTitle: redactedPayload.encryptedTitle,
       encryptedBody: redactedPayload.encryptedBody,
@@ -4041,7 +4726,7 @@ export default function NotesPage() {
         }
 
       setPreviewNoteId(null);
-      setStatus(`복구함 노트 ${purgeableNotes.length}개를 즉시 삭제했습니다.`);
+      setStatus(`복구함 노트 ${purgeableNotes.length}개의 접근을 차단했고 서버 정리를 시작했습니다.`);
     } catch {
       setError("복구함 전체삭제를 완료하지 못했습니다.");
     } finally {
@@ -4049,16 +4734,20 @@ export default function NotesPage() {
     }
   }
 
-  async function savePreviewNote(note: DecryptedNote, draft: NoteDraft) {
+  async function savePreviewNote(
+    note: DecryptedNote,
+    draft: NoteDraft,
+    expectedRevision: number
+  ): Promise<PreviewNoteSaveResult> {
     if (saving) {
-      return false;
+      return { revision: null, error: "다른 저장 작업이 끝난 뒤 다시 시도해주세요." };
     }
 
     const rawNote = notes.find((current) => current.id === note.id);
 
     if (!rawNote) {
       setError("이 노트를 저장할 수 없습니다.");
-      return false;
+      return { revision: null, error: "이 노트를 저장할 수 없습니다." };
     }
 
     setSaving(true);
@@ -4075,36 +4764,56 @@ export default function NotesPage() {
         encryptText(historySnapshotFromDraft(saveDraft), noteKey)
       ]);
 
-      await updateEncryptedNote(
-        note.id,
-        unlockedProfile.uid,
-        payload.encryptedTitle,
-        payload.encryptedBody,
-        changedDraftFields(previousDraft, saveDraft),
-        note.participantUids,
+      const result = await updateRevisionedEncryptedNote({
+        noteId: note.id,
+        uid: unlockedProfile.uid,
+        expectedRevision,
+        encryptedTitle: payload.encryptedTitle,
+        encryptedBody: payload.encryptedBody,
+        changedFields: changedDraftFields(previousDraft, saveDraft),
+        readerUids: note.participantUids,
         historySummary,
         historySnapshot
-      );
-      pendingLocalEcho.current = { noteId: note.id, draft: saveDraft, createdAt: Date.now() };
+      });
+      revisionConflictNoteId.current = null;
       announceActiveNote(note.id);
-      await syncPublicSharesForNote(note.id, noteKey, saveDraft);
+      await syncPublicSharesForNote(note.id, noteKey, saveDraft, false, result.revision);
 
-      if (editor.noteId === note.id) {
+      const currentEditor = latestEditorRef.current;
+      const preserveIndependentEditorDraft =
+        currentEditor.noteId === note.id && currentEditor.dirty && !draftsMatch(currentEditor, saveDraft);
+
+      if (preserveIndependentEditorDraft) {
+        pendingLocalEcho.current = null;
+        revisionConflictNoteId.current = note.id;
+      } else if (currentEditor.noteId === note.id) {
+        pendingLocalEcho.current = { noteId: note.id, draft: saveDraft, createdAt: Date.now() };
         setEditor((current) => ({
           ...current,
           title: saveDraft.title,
           body: saveDraft.body,
           fontSize: saveDraft.fontSize,
           noteKey,
+          baseRevision: result.revision,
           dirty: false
         }));
+      } else {
+        pendingLocalEcho.current = { noteId: note.id, draft: saveDraft, createdAt: Date.now() };
       }
 
-      setStatus("팝업에서 변경 사항을 저장했습니다.");
-      return true;
-    } catch {
-      setError("노트를 저장하지 못했습니다.");
-      return false;
+      setStatus(
+        preserveIndependentEditorDraft
+          ? "팝업 변경 사항을 저장했고, 편집기에 있던 별도 초안은 그대로 유지했습니다."
+          : "팝업에서 변경 사항을 저장했습니다."
+      );
+      return { revision: result.revision };
+    } catch (error) {
+      const errorMessage = noteMutationErrorMessage(error, "노트를 저장하지 못했습니다.");
+      if (error instanceof NoteRevisionConflictError) {
+        revisionConflictNoteId.current = note.id;
+      }
+      setError(errorMessage);
+      return { revision: null, error: errorMessage };
     } finally {
       setSaving(false);
     }
@@ -4141,6 +4850,7 @@ export default function NotesPage() {
             feedbackStatus={status}
             noteStates={noteStateMap}
             notes={overviewNotes}
+            sortSetting={noteSort}
             onBack={returnToEditor}
             onCreateFolder={createFolder}
             onDeleteFolder={(folder) => void removeFolder(folder)}
@@ -4175,7 +4885,13 @@ export default function NotesPage() {
                 새 노트
               </button>
             </div>
-            <span className={`notes-top-status ${saving ? "saving" : ""}`}>{saving ? "저장 중..." : status}</span>
+            <span
+              aria-live="polite"
+              className={`notes-top-status ${saving ? "saving" : ""}`}
+              role="status"
+            >
+              {saving ? "저장 중..." : status}
+            </span>
           </div>
           <div className={`notes-editor-layout ${listOpen ? "with-drawer" : ""}`}>
             <NoteDrawer
@@ -4307,6 +5023,7 @@ export default function NotesPage() {
             </div>
           )}
           <input
+            aria-label="노트 제목"
             className="title-input"
             onChange={(event) => updateEditor("title", event.target.value)}
             placeholder="노트 제목"
@@ -4334,7 +5051,7 @@ export default function NotesPage() {
           <div className="editor-footer">
             <span className={`note-kind-pill ${currentType}`}>{currentType === "shared" ? "공유" : "개인"}</span>
             <span className="note-created-inline">생성 {formatFullDateTime(createdDate)}</span>
-            {error && <p className="form-error">{error}</p>}
+            {error && <p className="form-error" role="alert">{error}</p>}
           </div>
             </section>
           </div>
@@ -4351,15 +5068,15 @@ export default function NotesPage() {
             note={previewNote}
             onClose={() => setPreviewNoteId(null)}
             onConfirm={(note) => void confirmSharedNote(note)}
-            onDelete={(note) => void removePreviewNote(note)}
+            onDelete={(note) => removePreviewNote(note)}
               onDeleteAttachment={(note, attachment) => removeAttachment(note, attachment)}
             onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
             onPreviewAttachment={(note, attachment) => void previewAttachment(note.id, attachment)}
             onPurge={(note) => void purgePreviewNote(note)}
             onLoad={(note, draft) => void openNote(note, draft)}
             onResolveNoteKey={resolveNoteKey}
-            onRestore={(note) => void restorePreviewNote(note)}
-            onSave={(note, draft) => savePreviewNote(note, draft)}
+            onRestore={(note) => restorePreviewNote(note)}
+            onSave={(note, draft, expectedRevision) => savePreviewNote(note, draft, expectedRevision)}
             onTogglePin={(note) => void togglePinnedNote(note)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
               saving={saving}
@@ -4416,9 +5133,12 @@ function PublicShareModal({
 }) {
   const [createPassword, setCreatePassword] = useState("");
   const [passwordDraft, setPasswordDraft] = useState("");
+  const dialogRef = useRef<HTMLElement | null>(null);
   const expiresAt = dateFromTimestamp(share?.expiresAt);
   const hasPassword = Boolean(share?.passwordHash);
   const canRecoverShareUrl = Boolean(share?.ownerWrappedShareKey);
+
+  useDialogFocus(dialogRef);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -4451,6 +5171,7 @@ function PublicShareModal({
         aria-labelledby="public-share-title"
         aria-modal="true"
         className="public-share-modal"
+        ref={dialogRef}
         role="dialog"
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -4511,14 +5232,18 @@ function PublicShareModal({
                     <input
                       autoComplete="new-password"
                       disabled={busy}
+                      minLength={publicSharePasswordMinLength}
                       onChange={(event) => setPasswordDraft(event.target.value)}
-                      placeholder={hasPassword ? "변경할 비밀번호" : "접속 전에 입력할 비밀번호"}
+                      placeholder={`${publicSharePasswordMinLength}자 이상`}
                       type="password"
                       value={passwordDraft}
                     />
                   </label>
                   <div className="public-share-password-actions">
-                    <button disabled={busy || !shareUrl || !passwordDraft.trim()} type="submit">
+                    <button
+                      disabled={busy || !shareUrl || passwordDraft.trim().length < publicSharePasswordMinLength}
+                      type="submit"
+                    >
                       {busy ? <Loader2 className="spin" size={16} /> : <LockKeyhole size={16} />}
                       {hasPassword ? "변경" : "설정"}
                     </button>
@@ -4540,13 +5265,20 @@ function PublicShareModal({
                   <input
                     autoComplete="new-password"
                     disabled={busy}
+                    minLength={publicSharePasswordMinLength}
                     onChange={(event) => setCreatePassword(event.target.value)}
-                    placeholder="비워두면 바로 열 수 있습니다"
+                    placeholder={`선택 사항 · 사용 시 ${publicSharePasswordMinLength}자 이상`}
                     type="password"
                     value={createPassword}
                   />
                 </label>
-                <button disabled={busy} type="submit">
+                <button
+                  disabled={
+                    busy ||
+                    (createPassword.trim().length > 0 && createPassword.trim().length < publicSharePasswordMinLength)
+                  }
+                  type="submit"
+                >
                   {busy ? <Loader2 className="spin" size={16} /> : <Share2 size={16} />}
                   링크 만들기
                 </button>
@@ -4601,6 +5333,8 @@ function RichMemoEditor({
     content: value || "",
     editorProps: {
       attributes: {
+        "aria-label": "노트 본문",
+        "aria-multiline": "true",
         class: "rich-body-input",
         role: "textbox"
       },
@@ -5222,29 +5956,52 @@ function RichMemoEditor({
   const quickFontSizeListId = `${controlIdPrefix}-quick-font-sizes`;
   const quickLineHeightListId = `${controlIdPrefix}-quick-line-heights`;
 
+  function handleToolTabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, currentTab: EditorToolTab) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home" && event.key !== "End") {
+      return;
+    }
+
+    event.preventDefault();
+    const currentIndex = editorToolTabs.findIndex((tab) => tab.id === currentTab);
+    const nextIndex =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? editorToolTabs.length - 1
+          : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + editorToolTabs.length) % editorToolTabs.length;
+    const nextTab = editorToolTabs[nextIndex];
+    setActiveToolTab(nextTab.id);
+    document.getElementById(`${controlIdPrefix}-${nextTab.id}-tab`)?.focus();
+  }
+
   return (
     <>
       <div className="rich-editor-toolbar" aria-label="편집 도구" data-has-selection={hasTextSelection ? "true" : undefined}>
         <div className="rich-toolbar-tabs" role="tablist" aria-label="편집 도구 탭">
-          {[
-            ["format", "서식"],
-            ["table", "표"],
-            ["media", "파일"]
-          ].map(([tab, label]) => (
+          {editorToolTabs.map((tab) => (
             <button
-              aria-selected={activeToolTab === tab}
-              className={activeToolTab === tab ? "active" : ""}
-              key={tab}
-              onClick={() => setActiveToolTab(tab as EditorToolTab)}
+              aria-controls={`${controlIdPrefix}-${tab.id}-panel`}
+              aria-selected={activeToolTab === tab.id}
+              className={activeToolTab === tab.id ? "active" : ""}
+              id={`${controlIdPrefix}-${tab.id}-tab`}
+              key={tab.id}
+              onClick={() => setActiveToolTab(tab.id)}
+              onKeyDown={(event) => handleToolTabKeyDown(event, tab.id)}
+              tabIndex={activeToolTab === tab.id ? 0 : -1}
               type="button"
               role="tab"
             >
-              {label}
+              {tab.label}
             </button>
           ))}
         </div>
         {activeToolTab === "format" && (
-          <div className="rich-toolbar-panel">
+          <div
+            aria-labelledby={`${controlIdPrefix}-format-tab`}
+            className="rich-toolbar-panel"
+            id={`${controlIdPrefix}-format-panel`}
+            role="tabpanel"
+          >
         <button
           aria-label="뒤로가기"
           className="icon-button"
@@ -5266,6 +6023,72 @@ function RichMemoEditor({
           type="button"
         >
           <Redo2 size={16} />
+        </button>
+        <button
+          aria-label="본문 문단"
+          aria-pressed={editor?.isActive("paragraph") ?? false}
+          className={`icon-button ${editor?.isActive("paragraph") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().setParagraph().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="본문 문단"
+          type="button"
+        >
+          <Pilcrow size={16} />
+        </button>
+        <button
+          aria-label="제목 2"
+          aria-pressed={editor?.isActive("heading", { level: 2 }) ?? false}
+          className={`icon-button ${editor?.isActive("heading", { level: 2 }) ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleHeading({ level: 2 }).run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="제목 2"
+          type="button"
+        >
+          <Heading2 size={16} />
+        </button>
+        <button
+          aria-label="제목 3"
+          aria-pressed={editor?.isActive("heading", { level: 3 }) ?? false}
+          className={`icon-button ${editor?.isActive("heading", { level: 3 }) ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleHeading({ level: 3 }).run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="제목 3"
+          type="button"
+        >
+          <Heading3 size={16} />
+        </button>
+        <button
+          aria-label="글머리 목록"
+          aria-pressed={editor?.isActive("bulletList") ?? false}
+          className={`icon-button ${editor?.isActive("bulletList") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleBulletList().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="글머리 목록"
+          type="button"
+        >
+          <List size={16} />
+        </button>
+        <button
+          aria-label="번호 목록"
+          aria-pressed={editor?.isActive("orderedList") ?? false}
+          className={`icon-button ${editor?.isActive("orderedList") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleOrderedList().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="번호 목록"
+          type="button"
+        >
+          <ListOrdered size={16} />
+        </button>
+        <button
+          aria-label="인용문"
+          aria-pressed={editor?.isActive("blockquote") ?? false}
+          className={`icon-button ${editor?.isActive("blockquote") ? "active" : ""}`}
+          onClick={() => runToolbarCommand((currentEditor) => currentEditor.chain().focus().toggleBlockquote().run())}
+          onMouseDown={(event) => event.preventDefault()}
+          title="인용문"
+          type="button"
+        >
+          <Quote size={16} />
         </button>
         <button
           aria-label="굵게"
@@ -5394,7 +6217,12 @@ function RichMemoEditor({
           </div>
         )}
         {activeToolTab === "table" && (
-          <div className="rich-toolbar-panel">
+          <div
+            aria-labelledby={`${controlIdPrefix}-table-tab`}
+            className="rich-toolbar-panel"
+            id={`${controlIdPrefix}-table-panel`}
+            role="tabpanel"
+          >
         <span className="table-insert-control">
           <Table2 size={15} />
           <input
@@ -5545,7 +6373,12 @@ function RichMemoEditor({
           </div>
         )}
         {activeToolTab === "media" && (
-          <div className="rich-toolbar-panel">
+          <div
+            aria-labelledby={`${controlIdPrefix}-media-tab`}
+            className="rich-toolbar-panel"
+            id={`${controlIdPrefix}-media-panel`}
+            role="tabpanel"
+          >
         <button className="secondary-button editor-upload-button" onClick={chooseFiles} type="button">
           <Upload size={16} />
           파일
@@ -5593,7 +6426,7 @@ function RichMemoEditor({
           </div>
         )}
       </div>
-      <div className="format-quick-dock" aria-label="선택 영역 빠른 서식" data-has-selection={hasTextSelection ? "true" : undefined}>
+      {hasTextSelection && <div className="format-quick-dock" aria-label="선택 영역 빠른 서식" data-has-selection="true">
         <span>빠른 서식</span>
         <label className="selection-font-control compact">
           글자
@@ -5626,7 +6459,7 @@ function RichMemoEditor({
             />
           ))}
         </div>
-      </div>
+      </div>}
     </>
   );
 }
@@ -6799,20 +7632,18 @@ function NoteDrawer({
           )}
         </div>
       )}
-      <div className="drawer-mode-tabs" role="tablist" aria-label="노트 목록 모드">
+      <div className="drawer-mode-tabs" role="group" aria-label="노트 목록 모드">
         <button
-          aria-selected={!isTrashMode}
+          aria-pressed={!isTrashMode}
           className={!isTrashMode ? "active" : ""}
-          role="tab"
           type="button"
           onClick={() => setMode("notes")}
         >
           노트
         </button>
         <button
-          aria-selected={isTrashMode}
+          aria-pressed={isTrashMode}
           className={isTrashMode ? "active" : ""}
-          role="tab"
           type="button"
           onClick={() => setMode("trash")}
         >
@@ -6820,7 +7651,7 @@ function NoteDrawer({
           <strong>{deletedCounts.all}</strong>
         </button>
       </div>
-      <div className="note-filter-tabs" role="tablist" aria-label="노트 종류 필터">
+      <div className="note-filter-tabs" role="group" aria-label="노트 종류 필터">
         <NoteFilterButton
           count={visibleCounts.all}
           filter="all"
@@ -6900,6 +7731,7 @@ function NoteDrawer({
         folders={folders}
         publicShareByNoteId={publicShareByNoteId}
         query={query}
+        sortSetting={sortSetting}
       />
     </aside>
   );
@@ -6922,9 +7754,8 @@ function NoteFilterButton({
 }) {
   return (
     <button
-      aria-selected={selected}
+      aria-pressed={selected}
       className={`note-filter-tab ${selected ? "active" : ""}`}
-      role="tab"
       type="button"
       onClick={() => onSelect(filter)}
     >
@@ -7014,7 +7845,8 @@ function NoteList({
   onRestore,
   onTogglePin,
   publicShareByNoteId,
-  query
+  query,
+  sortSetting
 }: {
   activeNoteId: string | null;
   attentionNoteIds: Set<string>;
@@ -7031,6 +7863,7 @@ function NoteList({
   onTogglePin: (note: DecryptedNote) => void;
   publicShareByNoteId: Map<string, PublicNoteShareSnapshot>;
   query: string;
+  sortSetting: NoteSortSetting;
 }) {
   const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
 
@@ -7057,12 +7890,15 @@ function NoteList({
     <div className="note-list">
       {notes.map((note) => {
         const createdAt = dateFromTimestamp(note.createdAt);
+        const updatedAt = dateFromTimestamp(note.updatedAt);
         const deletedAt = dateFromTimestamp(note.deletedAt);
         const pinned = notePinned(note.id, noteStates);
         const canRestore = canRestoreNote(note);
         const needsAttention = attentionNoteIds.has(note.id);
         const publicShare = deleted ? undefined : publicShareByNoteId.get(note.id);
         const folder = note.type === "personal" && note.folderId ? folderById.get(note.folderId) : null;
+        const listDate = deleted ? deletedAt : sortSetting.field === "createdAt" ? createdAt : updatedAt;
+        const listDateLabel = deleted ? "삭제" : sortSetting.field === "createdAt" ? "생성" : "수정";
 
         return (
           <article
@@ -7087,12 +7923,12 @@ function NoteList({
                 </strong>
               </header>
               <span className="note-snippet">
-                <HighlightedText text={previewTextFromHtml(note.body) || "내용 없음"} query={query} />
+                <HighlightedText text={notePreviewText(note) || "내용 없음"} query={query} />
               </span>
               <footer className="note-list-meta">
                 <span className="note-list-date">
-                  <span>{deleted ? "삭제" : "생성"}</span>
-                  <strong>{formatCompactDateTime(deleted ? deletedAt : createdAt)}</strong>
+                  <span>{listDateLabel}</span>
+                  <strong>{formatCompactDateTime(listDate)}</strong>
                   {deleted && <em>{deletedRetentionLabel(note)}</em>}
                 </span>
               </footer>
@@ -7156,7 +7992,8 @@ function PersonalOverview({
   onFolderFilterChange,
   onPreview,
   onUpdateNoteFolder,
-  publicShareByNoteId
+  publicShareByNoteId,
+  sortSetting
 }: {
   activeFolderFilter: OverviewFolderFilter;
   attentionNoteIds: Set<string>;
@@ -7173,6 +8010,7 @@ function PersonalOverview({
   onPreview: (note: DecryptedNote) => void;
   onUpdateNoteFolder: (note: DecryptedNote, folderId: string | null) => void;
   publicShareByNoteId: Map<string, PublicNoteShareSnapshot>;
+  sortSetting: NoteSortSetting;
 }) {
   const [folderName, setFolderName] = useState("");
   const [folderColor, setFolderColor] = useState(folderColorOptions[0]);
@@ -7361,6 +8199,9 @@ function PersonalOverview({
               {visibleNotes.map((note) => {
                 const folder = note.type === "personal" && note.folderId ? foldersById.get(note.folderId) : null;
                 const createdAt = dateFromTimestamp(note.createdAt);
+                const updatedAt = dateFromTimestamp(note.updatedAt);
+                const cardDate = sortSetting.field === "createdAt" ? createdAt : updatedAt;
+                const cardDateLabel = sortSetting.field === "createdAt" ? "생성" : "수정";
                 const pinned = notePinned(note.id, noteStates);
                 const needsAttention = attentionNoteIds.has(note.id);
                 const publicShare = publicShareByNoteId.get(note.id);
@@ -7380,9 +8221,12 @@ function PersonalOverview({
                         <HighlightedText text={note.title || "제목 없음"} query={overviewQuery} />
                       </strong>
                       <span>
-                        <HighlightedText text={previewTextFromHtml(note.body) || "내용 없음"} query={overviewQuery} />
+                        <HighlightedText text={notePreviewText(note) || "내용 없음"} query={overviewQuery} />
                       </span>
-                      <em>{pinned ? "즐겨찾기 · " : ""}{formatCompactDateTime(createdAt)}</em>
+                      <em>
+                        {pinned ? "즐겨찾기 · " : ""}
+                        {cardDateLabel} {formatCompactDateTime(cardDate)}
+                      </em>
                     </button>
                     {note.type === "personal" ? (
                       <label className="overview-folder-select">
@@ -7592,12 +8436,17 @@ function AttachmentListModal({
   onDownload: (attachment: NoteAttachmentSnapshot) => void;
   onPreview: (attachment: NoteAttachmentSnapshot) => void;
 }) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+
+  useDialogFocus(dialogRef);
+
   return (
     <div className="modal-backdrop note-insight-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         aria-label="첨부파일"
         aria-modal="true"
         className="note-insight-modal attachment-list-modal"
+        ref={dialogRef}
         role="dialog"
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -7639,8 +8488,9 @@ export function AttachmentPreviewModal({
   onClose: () => void;
   preview: AttachmentPreviewState;
 }) {
-  const hwpContainerRef = useRef<HTMLDivElement | null>(null);
-  const [hwpError, setHwpError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
+
+  useDialogFocus(dialogRef);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -7654,46 +8504,13 @@ export function AttachmentPreviewModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  useEffect(() => {
-    if (preview.kind !== "hwp" || !preview.bytes || !hwpContainerRef.current) {
-      return undefined;
-    }
-
-    let cancelled = false;
-    let viewer: { distory?: () => void } | null = null;
-    const container = hwpContainerRef.current;
-    container.innerHTML = "";
-    setHwpError(null);
-
-    async function renderHwpPreview() {
-      const { Viewer } = await import("hwp.js");
-
-      if (cancelled || preview.kind !== "hwp" || !preview.bytes) {
-        return;
-      }
-
-      viewer = new Viewer(container, preview.bytes.slice(), { type: "array" });
-    }
-
-    void renderHwpPreview().catch(() => {
-      if (!cancelled) {
-        setHwpError("HWP 양식 미리보기를 만들지 못해 안전한 본문 미리보기로 전환했습니다.");
-      }
-    });
-
-    return () => {
-      cancelled = true;
-      viewer?.distory?.();
-      container.innerHTML = "";
-    };
-  }, [preview.bytes, preview.kind]);
-
   return (
     <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
       <section
         aria-labelledby="pdf-preview-title"
         aria-modal="true"
         className="pdf-preview-modal"
+        ref={dialogRef}
         role="dialog"
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -7731,15 +8548,11 @@ export function AttachmentPreviewModal({
             />
           </div>
         ) : preview.kind === "hwp" ? (
-          <div className="hwp-preview-frame">
-            <div ref={hwpContainerRef} className="hwp-preview-content" />
-            {hwpError && (
-              preview.fallbackHtml ? (
-                <div className="document-preview-page hwp-fallback-preview" dangerouslySetInnerHTML={{ __html: preview.fallbackHtml }} />
-              ) : (
-                <p className="file-preview-error">{hwpError}</p>
-              )
-            )}
+          <div className="document-preview-frame">
+            <div
+              className="document-preview-page hwp-fallback-preview"
+              dangerouslySetInnerHTML={{ __html: sanitizeEditorHtml(preview.fallbackHtml ?? "") }}
+            />
           </div>
         ) : preview.kind === "html" ? (
           <div className="document-preview-frame">
@@ -7949,15 +8762,15 @@ function NotePreviewModal({
   note: DecryptedNote;
   onClose: () => void;
   onConfirm: (note: DecryptedNote) => void;
-  onDelete: (note: DecryptedNote) => void;
+  onDelete: (note: DecryptedNote) => Promise<string | null>;
   onDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => Promise<boolean>;
   onDownloadAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onPreviewAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
   onPurge: (note: DecryptedNote) => void;
   onLoad: (note: DecryptedNote, draft: NoteDraft) => void;
   onResolveNoteKey: (noteId: string) => Promise<CryptoKey>;
-  onRestore: (note: DecryptedNote) => void;
-  onSave: (note: DecryptedNote, draft: NoteDraft) => Promise<boolean>;
+  onRestore: (note: DecryptedNote) => Promise<string | null>;
+  onSave: (note: DecryptedNote, draft: NoteDraft, expectedRevision: number) => Promise<PreviewNoteSaveResult>;
   onTogglePin: (note: DecryptedNote) => void;
   onUploadAttachments: (note: DecryptedNote, files: File[]) => void;
   saving: boolean;
@@ -7966,6 +8779,7 @@ function NotePreviewModal({
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState<NoteDraft>(() => draftFromNote(note));
   const [draftDirty, setDraftDirty] = useState(false);
+  const [editBaseRevision, setEditBaseRevision] = useState(note.revision ?? 0);
   const [modalError, setModalError] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [readStates, setReadStates] = useState<NoteUserStateSnapshot[]>([]);
@@ -7975,13 +8789,47 @@ function NotePreviewModal({
   const [revertingHistoryId, setRevertingHistoryId] = useState<string | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
   const previewAutosaveTimer = useRef<number | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
   const latestDraftRef = useRef(draft);
+
+  useDialogFocus(dialogRef);
 
   useEffect(() => {
     latestDraftRef.current = draft;
   }, [draft]);
+
+  const requestClose = useCallback(async () => {
+    if (saving || closing) {
+      return;
+    }
+
+    if (isEditing && draftDirty) {
+      setClosing(true);
+      setModalError(null);
+      const savedDraft = latestDraftRef.current;
+      const result = await onSave(note, savedDraft, editBaseRevision);
+
+      if (result.revision === null) {
+        setClosing(false);
+        setModalError(result.error ?? "변경 사항을 저장하지 못해 창을 닫지 않았습니다.");
+        return;
+      }
+
+      setEditBaseRevision(result.revision);
+      if (!noteDraftsMatch(latestDraftRef.current, savedDraft)) {
+        setClosing(false);
+        setModalError("저장 중 추가로 입력한 내용이 있어 창을 닫지 않았습니다. 다시 저장해주세요.");
+        return;
+      }
+      setDraftDirty(false);
+      setClosing(false);
+    }
+
+    onClose();
+  }, [closing, draftDirty, editBaseRevision, isEditing, note, onClose, onSave, saving]);
 
   useEffect(() => {
     if (suppressEscape) {
@@ -8005,22 +8853,37 @@ function NotePreviewModal({
         return;
       }
 
-      onClose();
+      void requestClose();
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activityOpen, attachmentsOpen, onClose, suppressEscape]);
+  }, [activityOpen, attachmentsOpen, requestClose, suppressEscape]);
 
   useEffect(() => {
+    if (!attachmentsOpen) {
+      setAttachments([]);
+      return undefined;
+    }
+
     return subscribeNoteAttachments(note.id, setAttachments, () => setModalError("첨부파일 목록을 불러오지 못했습니다."));
-  }, [note.id]);
+  }, [attachmentsOpen, note.id]);
 
   useEffect(() => {
+    if (!activityOpen) {
+      setReadStates([]);
+      return undefined;
+    }
+
     return subscribeNoteUserStates(note.id, setReadStates, () => setModalError("읽음 상태를 불러오지 못했습니다."));
-  }, [note.id]);
+  }, [activityOpen, note.id]);
 
   useEffect(() => {
+    if (!activityOpen) {
+      setHistory([]);
+      return undefined;
+    }
+
     return subscribeNoteHistory(
       note.id,
       currentUid,
@@ -8028,9 +8891,15 @@ function NotePreviewModal({
       setHistory,
       () => setModalError("수정 이력을 불러오지 못했습니다.")
     );
-  }, [currentUid, note.id, note.ownerUid]);
+  }, [activityOpen, currentUid, note.id, note.ownerUid]);
 
   useEffect(() => {
+    if (!activityOpen) {
+      setHistorySummaries({});
+      setHistorySnapshots({});
+      return undefined;
+    }
+
     const entriesWithSummary = history.filter((entry) => entry.encryptedSummary);
     const entriesWithSnapshot = history.filter((entry) => entry.encryptedSnapshot);
 
@@ -8085,12 +8954,16 @@ function NotePreviewModal({
     return () => {
       cancelled = true;
     };
-  }, [history, note.id, onResolveNoteKey]);
+  }, [activityOpen, history, note.id, onResolveNoteKey]);
 
   useEffect(() => {
     const remoteDraft = draftFromNote(note);
+    const remoteRevision = note.revision ?? 0;
 
     if (noteDraftsMatch(latestDraftRef.current, remoteDraft)) {
+      if (!draftDirty) {
+        setEditBaseRevision(remoteRevision);
+      }
       return;
     }
 
@@ -8100,6 +8973,7 @@ function NotePreviewModal({
     }
 
     setDraft(remoteDraft);
+    setEditBaseRevision(remoteRevision);
     setDraftDirty(false);
     setModalError(isEditing ? "다른 기기 변경 사항을 반영했습니다." : null);
   }, [draftDirty, isEditing, note]);
@@ -8133,6 +9007,7 @@ function NotePreviewModal({
     }
 
     setDraft(draftFromNote(note));
+    setEditBaseRevision(note.revision ?? 0);
     setDraftDirty(false);
     setModalError(null);
     setIsEditing(true);
@@ -8140,9 +9015,28 @@ function NotePreviewModal({
 
   function cancelEdit() {
     setDraft(draftFromNote(note));
+    setEditBaseRevision(note.revision ?? 0);
     setDraftDirty(false);
     setModalError(null);
     setIsEditing(false);
+  }
+
+  async function deletePreviewNote() {
+    setModalError(null);
+    const errorMessage = await onDelete(note);
+
+    if (errorMessage) {
+      setModalError(errorMessage);
+    }
+  }
+
+  async function restorePreviewNote() {
+    setModalError(null);
+    const errorMessage = await onRestore(note);
+
+    if (errorMessage) {
+      setModalError(errorMessage);
+    }
   }
 
   function updateDraft(field: "title" | "body", value: string) {
@@ -8159,13 +9053,14 @@ function NotePreviewModal({
     setModalError(null);
 
     const savedDraft = draft;
-    const saved = await onSave(note, savedDraft);
+    const result = await onSave(note, savedDraft, editBaseRevision);
 
-    if (!saved) {
-      setModalError("노트를 저장하지 못했습니다.");
+    if (result.revision === null) {
+      setModalError(result.error ?? "노트를 저장하지 못했습니다.");
       return;
     }
 
+    setEditBaseRevision(result.revision);
     if (noteDraftsMatch(latestDraftRef.current, savedDraft)) {
       setDraftDirty(false);
 
@@ -8191,13 +9086,15 @@ function NotePreviewModal({
     setModalError(null);
 
     try {
-      const saved = await onSave(note, snapshotDraft);
+      const result = await onSave(note, snapshotDraft, editBaseRevision);
 
-      if (!saved) {
+      if (result.revision === null) {
+        setModalError(result.error ?? "수정 이력으로 되돌리지 못했습니다.");
         window.alert("수정 이력으로 되돌리지 못했습니다.");
         return;
       }
 
+      setEditBaseRevision(result.revision);
       setDraft(snapshotDraft);
       setDraftDirty(false);
       setIsEditing(false);
@@ -8266,9 +9163,10 @@ function NotePreviewModal({
       : linkifyEditorHtml(sanitizeEditorHtml(bodyHtml));
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <div className="modal-backdrop" role="presentation" onMouseDown={() => void requestClose()}>
       <section
         className="note-preview-modal"
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="note-preview-title"
@@ -8327,7 +9225,7 @@ function NotePreviewModal({
                       className="secondary-button note-preview-action"
                       disabled={saving || !canRestore}
                       type="button"
-                      onClick={() => onRestore(note)}
+                      onClick={() => void restorePreviewNote()}
                     >
                       <RotateCcw size={14} />
                       복구
@@ -8362,14 +9260,20 @@ function NotePreviewModal({
                 disabled={saving || !canDelete}
                 title={canDelete ? "노트 삭제" : "노트 소유자 또는 참여 중인 관리자만 삭제할 수 있습니다."}
                 type="button"
-                onClick={() => onDelete(note)}
+                onClick={() => void deletePreviewNote()}
               >
                 <Trash2 size={14} />
                 삭제
               </button>
             )}
-            <button className="icon-button" type="button" onClick={onClose} aria-label="노트 조회 닫기">
-              <X size={16} />
+            <button
+              aria-label="노트 조회 닫기"
+              className="icon-button"
+              disabled={saving || closing}
+              onClick={() => void requestClose()}
+              type="button"
+            >
+              {closing ? <Loader2 className="spin" size={16} /> : <X size={16} />}
             </button>
           </div>
         </header>
@@ -8391,7 +9295,6 @@ function NotePreviewModal({
               onChange={(value) => updateDraft("body", value)}
               value={draft.body}
             />
-            {modalError && <p className="form-error">{modalError}</p>}
           </div>
         ) : (
           <div
@@ -8400,18 +9303,17 @@ function NotePreviewModal({
             dangerouslySetInnerHTML={{ __html: renderedBodyHtml }}
           />
         )}
+        {modalError && <p className="form-error" role="alert">{modalError}</p>}
         <div className="note-preview-trigger-row">
-          {attachments.length ? (
-            <button className="secondary-button note-insight-trigger" type="button" onClick={() => setAttachmentsOpen(true)}>
-              <Paperclip size={16} />
-              첨부파일 보기
-              <span>{attachments.length}개</span>
-            </button>
-          ) : null}
+          <button className="secondary-button note-insight-trigger" type="button" onClick={() => setAttachmentsOpen(true)}>
+            <Paperclip size={16} />
+            첨부파일 보기
+            {attachmentsOpen ? <span>{attachments.length}개</span> : null}
+          </button>
           <button className="secondary-button note-insight-trigger" type="button" onClick={() => setActivityOpen(true)}>
             <History size={16} />
             활동 / 수정 이력 보기
-            <span>{history.length}개 이력</span>
+            {activityOpen ? <span>{history.length}개 이력</span> : null}
           </button>
         </div>
         {activityOpen && (
@@ -8470,10 +9372,13 @@ function NoteInsightModal({
   revertingHistoryId: string | null;
   users: UserProfile[];
 }) {
+  const dialogRef = useRef<HTMLElement | null>(null);
   const usersByUid = new Map(users.map((user) => [user.uid, user]));
   const statesByUid = new Map(readStates.map((state) => [state.uid, state]));
   const currentState = statesByUid.get(currentUid);
   const showReceipts = note.type === "shared";
+
+  useDialogFocus(dialogRef);
 
   return (
     <div className="modal-backdrop note-insight-backdrop" role="presentation" onMouseDown={onClose}>
@@ -8481,6 +9386,7 @@ function NoteInsightModal({
         aria-label="노트 활동 및 수정 이력"
         aria-modal="true"
         className="note-insight-modal"
+        ref={dialogRef}
         role="dialog"
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -8633,18 +9539,33 @@ function HistoryDiffSummary({
 }
 
 async function imageFileToResizedDataUrl(file: File) {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("이미지 파일이 아닙니다.");
+  const mimeType = file.type.toLowerCase();
+
+  if (!inlineImageMimeTypes.has(mimeType)) {
+    throw new Error("지원하는 PNG, JPG, WEBP 이미지를 선택해주세요. 움직이는 이미지는 파일로 첨부해주세요.");
   }
 
-  const dataUrl = await readFileAsDataUrl(file);
-  return resizeImageDataUrl(dataUrl);
+  if (file.size <= 0 || file.size > maxInlineImageInputBytes) {
+    throw new Error("본문 이미지는 20MB 이하만 사용할 수 있습니다.");
+  }
+
+  if (!safeRasterImageBytes(new Uint8Array(await file.arrayBuffer()), mimeType)) {
+    throw new Error("이미지 크기나 형식이 안전 제한을 벗어났습니다.");
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+
+  try {
+    return await resizeImageDataUrl(objectUrl);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 export function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
-  const decodedText = decodeReadableBytes(bytes);
+  const decodedText = decodeReadableBytes(bytes.subarray(0, Math.min(bytes.byteLength, maxTextPreviewBytes)));
 
-  if (extension === "json") {
+  if (extension === "json" && bytes.byteLength <= maxTextPreviewBytes) {
     try {
       return JSON.stringify(JSON.parse(decodedText), null, 2).slice(0, maxTextPreviewCharacters);
     } catch {
@@ -8653,1690 +9574,6 @@ export function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string
   }
 
   return decodedText.slice(0, maxTextPreviewCharacters);
-}
-
-export async function renderSafeDocxPreviewSrcDoc(bytes: Uint8Array, theme: "light" | "dark" = "light") {
-  if (typeof document === "undefined") {
-    return "";
-  }
-
-  try {
-    if (
-      !safeZipPreviewEntries(bytes, {
-        maxEntries: maxZipPreviewEntries,
-        maxEntryUncompressedBytes: maxDocxPreviewEntryBytes,
-        maxSelectedEntries: maxZipPreviewEntries,
-        maxTotalUncompressedBytes: maxDocxPreviewUncompressedBytes
-      })
-    ) {
-      return "";
-    }
-
-    const { renderAsync } = await import("docx-preview");
-    const previewDocument = document.implementation.createHTMLDocument("DOCX Preview");
-    const styleContainer = previewDocument.createElement("div");
-    const bodyContainer = previewDocument.createElement("div");
-
-    previewDocument.body.append(styleContainer, bodyContainer);
-
-    await renderAsync(bytes.slice(), bodyContainer, styleContainer, {
-      breakPages: true,
-      className: "qm-docx",
-      experimental: false,
-      ignoreFonts: true,
-      ignoreHeight: false,
-      ignoreLastRenderedPageBreak: false,
-      ignoreWidth: false,
-      inWrapper: true,
-      renderAltChunks: false,
-      renderChanges: false,
-      renderComments: false,
-      renderEndnotes: true,
-      renderFooters: true,
-      renderFootnotes: true,
-      renderHeaders: true,
-      trimXmlDeclaration: true,
-      useBase64URL: true
-    });
-
-    sanitizeDocxPreviewTree(bodyContainer);
-
-    const styleText = sanitizeDocxPreviewCss(
-      Array.from(styleContainer.querySelectorAll("style"))
-        .map((styleElement) => styleElement.textContent ?? "")
-        .join("\n")
-    );
-    const bodyHtml = bodyContainer.innerHTML;
-
-    if (!bodyHtml.trim() || bodyHtml.length > maxDocxPreviewMarkupCharacters) {
-      return "";
-    }
-
-    return docxSandboxSrcDoc(styleText, bodyHtml, theme);
-  } catch {
-    return "";
-  }
-}
-
-function docxSandboxSrcDoc(styleText: string, bodyHtml: string, theme: "light" | "dark") {
-  const lightBaseStyle = [
-    "html,body{margin:0;min-height:100%;background:#f8fafc;color:#14211f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}",
-    "body{box-sizing:border-box;padding:16px;}",
-    ".docx-preview-content{box-sizing:border-box;margin:0 auto;max-width:100%;overflow:auto;}",
-    ".qm-docx-wrapper{box-sizing:border-box;max-width:100%;}",
-    ".qm-docx{box-sizing:border-box;margin:0 auto 16px;max-width:100%;overflow:hidden;background:#fff;border:1px solid #e2e8f0;box-shadow:0 10px 24px rgb(15 23 42 / 8%);}",
-    ".qm-docx *{box-sizing:border-box;}",
-    ".qm-docx img{max-width:100%;height:auto;}",
-    ".qm-docx table{max-width:100%;border-collapse:collapse;}",
-    "a{color:#2563eb;text-decoration:underline;}",
-    "@media (max-width:680px){body{padding:10px}.qm-docx{box-shadow:none}}"
-  ].join("\n");
-  const darkBaseStyle = [
-    "html,body{margin:0;min-height:100%;background:#09090b;color:#f4f4f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color-scheme:dark;}",
-    "body{box-sizing:border-box;padding:16px;}",
-    ".docx-preview-content{box-sizing:border-box;margin:0 auto;max-width:100%;overflow:auto;}",
-    ".qm-docx-wrapper{box-sizing:border-box;max-width:100%;}",
-    ".qm-docx{box-sizing:border-box;margin:0 auto 16px;max-width:100%;overflow:hidden;background:#18181b;border:1px solid #3a3a40;box-shadow:0 14px 34px rgb(0 0 0 / 22%);color:#f4f4f5;}",
-    ".qm-docx *{box-sizing:border-box;}",
-    ".qm-docx img{max-width:100%;height:auto;}",
-    ".qm-docx table{max-width:100%;border-collapse:collapse;}",
-    "a{color:#93c5fd;text-decoration:underline;}",
-    "@media (max-width:680px){body{padding:10px}.qm-docx{box-shadow:none}}"
-  ].join("\n");
-  const baseStyle = theme === "dark" ? darkBaseStyle : lightBaseStyle;
-
-  return [
-    "<!doctype html>",
-    `<html lang="ko" data-theme="${theme}">`,
-    "<head>",
-    '<meta charset="utf-8">',
-    `<meta http-equiv="Content-Security-Policy" content="${escapeHtml(docxPreviewFrameCsp)}">`,
-    '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    `<style>${escapeStyleText(`${baseStyle}\n${styleText}`)}</style>`,
-    "</head>",
-    "<body>",
-    `<main class="docx-preview-content">${bodyHtml}</main>`,
-    "</body>",
-    "</html>"
-  ].join("");
-}
-
-function sanitizeDocxPreviewTree(root: HTMLElement) {
-  Array.from(root.querySelectorAll<HTMLElement>("*")).forEach((element) => {
-    if (isForbiddenDocxPreviewTag(element.tagName)) {
-      element.remove();
-      return;
-    }
-
-    sanitizeDocxPreviewAttributes(element);
-  });
-}
-
-function isForbiddenDocxPreviewTag(tagName: string) {
-  return new Set([
-    "BASE",
-    "BUTTON",
-    "EMBED",
-    "FORM",
-    "IFRAME",
-    "INPUT",
-    "LINK",
-    "META",
-    "OBJECT",
-    "SCRIPT",
-    "SELECT",
-    "STYLE",
-    "SVG",
-    "TEXTAREA",
-    "VIDEO",
-    "AUDIO",
-    "SOURCE"
-  ]).has(tagName);
-}
-
-function sanitizeDocxPreviewAttributes(element: HTMLElement) {
-  Array.from(element.attributes).forEach((attribute) => {
-    const attributeName = attribute.name.toLowerCase();
-    const attributeValue = attribute.value;
-
-    if (
-      attributeName.startsWith("on") ||
-      attributeName === "srcdoc" ||
-      attributeName === "formaction" ||
-      attributeName === "action" ||
-      attributeName === "poster" ||
-      attributeName === "background" ||
-      attributeName.includes(":")
-    ) {
-      element.removeAttribute(attribute.name);
-      return;
-    }
-
-    if (attributeName === "href") {
-      const safeHref = element.tagName === "A" ? safeDocxPreviewHref(attributeValue) : null;
-
-      if (safeHref) {
-        element.setAttribute("href", safeHref);
-        element.setAttribute("target", "_blank");
-        element.setAttribute("rel", "noopener noreferrer");
-      } else {
-        element.removeAttribute(attribute.name);
-      }
-      return;
-    }
-
-    if (attributeName === "src") {
-      const safeSrc = element.tagName === "IMG" ? safeDocxPreviewImageSrc(attributeValue) : null;
-
-      if (safeSrc) {
-        element.setAttribute("src", safeSrc);
-      } else {
-        element.remove();
-      }
-      return;
-    }
-
-    if (attributeName === "style") {
-      const safeStyle = sanitizeDocxStyleAttribute(attributeValue);
-
-      if (safeStyle) {
-        element.setAttribute("style", safeStyle);
-      } else {
-        element.removeAttribute(attribute.name);
-      }
-      return;
-    }
-
-    if (attributeName === "class") {
-      const safeClassName = attributeValue
-        .split(/\s+/)
-        .map((className) => className.replace(/[^A-Za-z0-9_-]/g, ""))
-        .filter(Boolean)
-        .slice(0, 24)
-        .join(" ");
-
-      if (safeClassName) {
-        element.setAttribute("class", safeClassName);
-      } else {
-        element.removeAttribute(attribute.name);
-      }
-      return;
-    }
-
-    if (!isAllowedDocxPreviewAttribute(attributeName)) {
-      element.removeAttribute(attribute.name);
-    } else {
-      element.setAttribute(attribute.name, safeDocxPreviewAttributeText(attributeValue));
-    }
-  });
-}
-
-function isAllowedDocxPreviewAttribute(attributeName: string) {
-  return new Set([
-    "alt",
-    "aria-label",
-    "colspan",
-    "dir",
-    "height",
-    "lang",
-    "role",
-    "rowspan",
-    "title",
-    "width"
-  ]).has(attributeName);
-}
-
-function safeDocxPreviewHref(value: string) {
-  try {
-    const url = new URL(value, "https://quickmemo.invalid");
-
-    if (url.protocol === "http:" || url.protocol === "https:") {
-      return url.href;
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
-}
-
-function safeDocxPreviewImageSrc(value: string) {
-  const trimmedValue = value.trim();
-
-  return /^data:image\/(?:png|jpe?g|gif|webp|bmp);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmedValue) ? trimmedValue : null;
-}
-
-function sanitizeDocxPreviewCss(cssText: string) {
-  return cssText
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/@import\b[^;]*;?/gi, "")
-    .replace(/url\s*\([^)]*\)/gi, "none")
-    .replace(/expression\s*\([^)]*\)/gi, "")
-    .replace(/javascript\s*:/gi, "")
-    .replace(/vbscript\s*:/gi, "")
-    .replace(/-moz-binding\s*:[^;}]*/gi, "")
-    .replace(/behavior\s*:[^;}]*/gi, "")
-    .slice(0, maxDocxPreviewMarkupCharacters);
-}
-
-function sanitizeDocxStyleAttribute(styleText: string) {
-  return styleText
-    .split(";")
-    .map((declaration) => {
-      const [propertyName, ...propertyValueParts] = declaration.split(":");
-      const property = propertyName?.trim().toLowerCase() ?? "";
-      const value = propertyValueParts.join(":").trim();
-
-      if (!property || !value || !/^[-a-z0-9]+$/i.test(property) || !isSafeDocxCssValue(value)) {
-        return "";
-      }
-
-      return `${property}: ${value}`;
-    })
-    .filter(Boolean)
-    .join("; ");
-}
-
-function isSafeDocxCssValue(value: string) {
-  const normalizedValue = value.toLowerCase();
-  return !/(?:url\s*\(|expression\s*\(|javascript\s*:|vbscript\s*:|data\s*:\s*text\/html|-moz-binding|behavior\s*:|@import)/i.test(normalizedValue);
-}
-
-function safeDocxPreviewAttributeText(value: string) {
-  return Array.from(value)
-    .filter((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint > 31 && codePoint !== 127 && !`<>"'\``.includes(character);
-    })
-    .join("")
-    .slice(0, 240);
-}
-
-function escapeStyleText(value: string) {
-  return value.replace(/<\/style/gi, "<\\/style").replace(/<!--/g, "").replace(/-->/g, "");
-}
-
-interface ZipPreviewLimits {
-  includeEntry?: (name: string) => boolean;
-  maxEntries: number;
-  maxEntryUncompressedBytes: number;
-  maxSelectedEntries: number;
-  maxTotalUncompressedBytes: number;
-}
-
-interface ZipPreviewState {
-  entryCount: number;
-  selectedCount: number;
-  selectedNames: Set<string>;
-  totalUncompressedBytes: number;
-}
-
-function safeZipPreviewEntries(bytes: Uint8Array, limits: ZipPreviewLimits) {
-  const state: ZipPreviewState = {
-    entryCount: 0,
-    selectedCount: 0,
-    selectedNames: new Set<string>(),
-    totalUncompressedBytes: 0
-  };
-
-  try {
-    const inflatedEntries = unzipSync(bytes, {
-      filter: (file) => shouldInflateZipPreviewEntry(file, limits, state)
-    });
-
-    if (!state.selectedCount) {
-      return null;
-    }
-
-    const entries: Record<string, Uint8Array> = {};
-    let verifiedTotalBytes = 0;
-
-    Object.entries(inflatedEntries).forEach(([name, entry]) => {
-      const normalizedName = normalizeZipPreviewEntryName(name);
-
-      if (!normalizedName || !state.selectedNames.has(normalizedName)) {
-        return;
-      }
-
-      verifiedTotalBytes += entry.length;
-
-      if (entry.length > limits.maxEntryUncompressedBytes || verifiedTotalBytes > limits.maxTotalUncompressedBytes) {
-        throw new Error("ZIP preview entry exceeded safe inflated limits.");
-      }
-
-      entries[normalizedName] = entry;
-    });
-
-    return entries;
-  } catch {
-    return null;
-  }
-}
-
-function shouldInflateZipPreviewEntry(file: UnzipFileInfo, limits: ZipPreviewLimits, state: ZipPreviewState) {
-  state.entryCount += 1;
-
-  if (state.entryCount > limits.maxEntries) {
-    throw new Error("ZIP preview entry count exceeded safe limits.");
-  }
-
-  const normalizedName = normalizeZipPreviewEntryName(file.name);
-
-  if (!normalizedName) {
-    throw new Error("ZIP preview entry path is unsafe.");
-  }
-
-  const isDirectory = normalizedName.endsWith("/");
-  const selected = !isDirectory && (limits.includeEntry ? limits.includeEntry(normalizedName) : true);
-
-  if (!selected) {
-    return false;
-  }
-
-  if (file.compression !== 0 && file.compression !== 8) {
-    throw new Error("ZIP preview entry uses an unsupported compression method.");
-  }
-
-  if (!safeZipPreviewSize(file.size) || !safeZipPreviewSize(file.originalSize)) {
-    throw new Error("ZIP preview entry has invalid size metadata.");
-  }
-
-  const compressedSize = Math.max(file.size, 1);
-  const compressionRatio = file.originalSize / compressedSize;
-  const nextTotalBytes = state.totalUncompressedBytes + file.originalSize;
-
-  if (
-    file.originalSize > limits.maxEntryUncompressedBytes
-    || nextTotalBytes > limits.maxTotalUncompressedBytes
-    || (
-      file.originalSize >= minZipPreviewRatioCheckBytes
-      && compressionRatio > maxZipPreviewCompressionRatio
-    )
-  ) {
-    throw new Error("ZIP preview entry exceeded safe compression limits.");
-  }
-
-  state.selectedCount += 1;
-
-  if (state.selectedCount > limits.maxSelectedEntries) {
-    throw new Error("ZIP preview selected entry count exceeded safe limits.");
-  }
-
-  state.totalUncompressedBytes = nextTotalBytes;
-  state.selectedNames.add(normalizedName);
-  return true;
-}
-
-function safeZipPreviewSize(value: number) {
-  return Number.isSafeInteger(value) && value >= 0;
-}
-
-function normalizeZipPreviewEntryName(name: string) {
-  const normalizedName = name.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
-
-  if (
-    !normalizedName
-    || normalizedName.length > maxZipPreviewEntryNameLength
-    || normalizedName.startsWith("/")
-    || normalizedName.includes("../")
-    || normalizedName.split("/").some((part) => part === "..")
-  ) {
-    return "";
-  }
-
-  return normalizedName;
-}
-
-interface HwpPreviewResult {
-  html: string;
-  safeForRichPreview: boolean;
-}
-
-interface HwpPreviewByteBudget {
-  remainingBytes: number;
-}
-
-export async function extractHwpPreviewHtml(bytes: Uint8Array): Promise<HwpPreviewResult> {
-  try {
-    const CFB = await import("cfb");
-    const container = CFB.read(bytes, { type: "array" });
-    const header = cfbEntryBytes(CFB.find(container, "FileHeader"));
-    const headerInfo = hwpHeaderInfo(header);
-
-    if (!headerInfo || headerInfo.encrypted || headerInfo.distributed) {
-      return { html: "", safeForRichPreview: false };
-    }
-
-    const blocks: string[] = [];
-    const budget = { remainingBytes: maxHwpPreviewTotalBytes };
-    let safeForRichPreview = true;
-
-    for (const { entry } of hwpSectionEntries(container)) {
-      if (blocks.length >= maxDocumentPreviewBlocks) {
-        break;
-      }
-
-      const sectionBytes = cfbEntryBytes(entry);
-      const decodedBytes = headerInfo.compressed
-        ? decompressHwpSectionBytes(sectionBytes, budget)
-        : boundedHwpSectionBytes(sectionBytes, budget);
-
-      if (!decodedBytes) {
-        safeForRichPreview = false;
-        break;
-      }
-
-      appendHwpSectionBlocks(decodedBytes, blocks);
-    }
-
-    return { html: documentPreviewHtml(blocks), safeForRichPreview };
-  } catch {
-    return { html: "", safeForRichPreview: false };
-  }
-}
-
-export function extractHwpxPreviewHtml(bytes: Uint8Array) {
-  if (typeof DOMParser === "undefined") {
-    return "";
-  }
-
-  try {
-    const entries = safeZipPreviewEntries(bytes, {
-      includeEntry: (name) => hwpxPreviewEntryPriority(name) > 0,
-      maxEntries: maxZipPreviewEntries,
-      maxEntryUncompressedBytes: maxHwpxPreviewEntryBytes,
-      maxSelectedEntries: maxHwpxPreviewEntries,
-      maxTotalUncompressedBytes: maxHwpxPreviewUncompressedBytes
-    });
-
-    if (!entries) {
-      return "";
-    }
-
-    const blocks: string[] = [];
-
-    Object.entries(entries)
-      .filter(([name]) => hwpxPreviewEntryPriority(name) > 0)
-      .sort(([leftName], [rightName]) => hwpxPreviewEntryPriority(rightName) - hwpxPreviewEntryPriority(leftName))
-      .slice(0, 80)
-      .forEach(([, entry]) => {
-        if (blocks.length >= maxDocumentPreviewBlocks) {
-          return;
-        }
-
-        collectHwpxPreviewBlocks(strFromU8(entry), blocks);
-      });
-
-    return documentPreviewHtml(blocks);
-  } catch {
-    return "";
-  }
-}
-
-export function extractXlsxPreviewHtml(bytes: Uint8Array) {
-  if (typeof DOMParser === "undefined") {
-    return "";
-  }
-
-  try {
-    const entries = safeZipPreviewEntries(bytes, {
-      includeEntry: xlsxPreviewEntryAllowed,
-      maxEntries: maxZipPreviewEntries,
-      maxEntryUncompressedBytes: maxXlsxPreviewEntryBytes,
-      maxSelectedEntries: maxXlsxPreviewEntries,
-      maxTotalUncompressedBytes: maxXlsxPreviewUncompressedBytes
-    });
-
-    if (!entries) {
-      return "";
-    }
-
-    const sharedStrings = xlsxSharedStrings(entries);
-    const sheets = xlsxWorkbookSheets(entries);
-    const styles = xlsxStyles(entries);
-    const blocks: string[] = [];
-
-    sheets.slice(0, 5).forEach((sheet) => {
-      if (blocks.length >= maxDocumentPreviewBlocks) {
-        return;
-      }
-
-      const worksheet = entries[sheet.path.toLowerCase()];
-
-      if (!worksheet) {
-        return;
-      }
-
-      const table = renderXlsxWorksheet(worksheet, sharedStrings, styles);
-
-      if (table) {
-        blocks.push(`<h3>${escapeHtml(sheet.name)}</h3>`);
-        blocks.push(table);
-      }
-    });
-
-    return documentPreviewHtml(blocks);
-  } catch {
-    return "";
-  }
-}
-
-function xlsxPreviewEntryAllowed(name: string) {
-  return (
-    name === "xl/workbook.xml"
-    || name === "xl/_rels/workbook.xml.rels"
-    || name === "xl/sharedstrings.xml"
-    || name === "xl/styles.xml"
-    || /^xl\/worksheets\/[^/]+\.xml$/i.test(name)
-  );
-}
-
-function xlsxElementsByLocalName(element: Element, name: string, limit: number) {
-  const result: Element[] = [];
-  const children = element.getElementsByTagName("*");
-
-  for (let index = 0; index < children.length && result.length < limit; index += 1) {
-    const child = children.item(index);
-
-    if (child?.localName.toLowerCase() === name) {
-      result.push(child);
-    }
-  }
-
-  return result;
-}
-
-function xlsxSharedStrings(entries: Record<string, Uint8Array>) {
-  const document = xlsxXmlDocument(entries, "xl/sharedStrings.xml", maxXlsxSharedStringsXmlCharacters);
-
-  if (!document) {
-    return [];
-  }
-
-  return xlsxElementsByLocalName(document.documentElement, "si", maxXlsxSharedStrings).map((item) =>
-    normalizePreviewText(
-      xlsxElementsByLocalName(item, "t", 64)
-        .map((textNode) => textNode.textContent ?? "")
-        .join("")
-        .slice(0, maxXlsxSharedStringCharacters)
-    )
-  );
-}
-
-function xlsxWorkbookSheets(entries: Record<string, Uint8Array>) {
-  const workbook = xlsxXmlDocument(entries, "xl/workbook.xml");
-
-  if (!workbook) {
-    return [];
-  }
-
-  const relationships = xlsxWorkbookRelationships(entries);
-
-  return xlsxElementsByLocalName(workbook.documentElement, "sheet", 20)
-    .map((sheet, index) => {
-      const relationshipId =
-        sheet.getAttribute("r:id") ?? sheet.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id") ?? "";
-      const fallbackPath = `xl/worksheets/sheet${index + 1}.xml`;
-
-      return {
-        name: normalizePreviewText(sheet.getAttribute("name") ?? `Sheet ${index + 1}`) || `Sheet ${index + 1}`,
-        path: relationships.get(relationshipId) ?? fallbackPath
-      };
-    });
-}
-
-function xlsxWorkbookRelationships(entries: Record<string, Uint8Array>) {
-  const relationships = new Map<string, string>();
-  const document = xlsxXmlDocument(entries, "xl/_rels/workbook.xml.rels");
-
-  if (!document) {
-    return relationships;
-  }
-
-  xlsxElementsByLocalName(document.documentElement, "Relationship", 200).forEach((relationship) => {
-    const id = relationship.getAttribute("Id");
-    const target = relationship.getAttribute("Target");
-    const normalizedTarget = normalizeXlsxTargetPath(target);
-
-    if (id && normalizedTarget) {
-      relationships.set(id, normalizedTarget);
-    }
-  });
-
-  return relationships;
-}
-
-function normalizeXlsxTargetPath(target: string | null) {
-  if (!target || target.includes("..")) {
-    return "";
-  }
-
-  const trimmedTarget = target.replace(/^\/+/, "").toLowerCase();
-  return trimmedTarget.startsWith("xl/") ? trimmedTarget : `xl/${trimmedTarget}`;
-}
-
-function xlsxXmlDocument(entries: Record<string, Uint8Array>, path: string, maxCharacters = maxXlsxMetadataXmlCharacters) {
-  const entry = entries[path.toLowerCase()];
-
-  if (!entry) {
-    return null;
-  }
-
-  const markup = xlsxEntryText(entry, maxCharacters);
-
-  if (!markup) {
-    return null;
-  }
-
-  const document = new DOMParser().parseFromString(markup, "application/xml");
-  return document.querySelector("parsererror") ? null : document;
-}
-
-function xlsxEntryText(entry: Uint8Array, maxCharacters: number) {
-  if (entry.length > maxCharacters) {
-    return "";
-  }
-
-  const markup = strFromU8(entry);
-  return markup.length <= maxCharacters ? markup : "";
-}
-
-interface XlsxFontStyle {
-  bold: boolean;
-  color: string | null;
-  italic: boolean;
-  strike: boolean;
-  underline: boolean;
-}
-
-interface XlsxCellFormat {
-  fillId: number;
-  fontId: number;
-  horizontal: string | null;
-  numFmtId: number;
-  vertical: string | null;
-  wrapText: boolean;
-}
-
-interface XlsxStyles {
-  cellFormats: XlsxCellFormat[];
-  fills: Array<string | null>;
-  fonts: XlsxFontStyle[];
-  numberFormats: Map<number, string>;
-}
-
-const builtinXlsxNumberFormats = new Map<number, string>([
-  [9, "0%"],
-  [10, "0.00%"],
-  [11, "0.00E+00"],
-  [12, "# ?/?"],
-  [13, "# ??/??"],
-  [14, "m/d/yy"],
-  [15, "d-mmm-yy"],
-  [16, "d-mmm"],
-  [17, "mmm-yy"],
-  [18, "h:mm AM/PM"],
-  [19, "h:mm:ss AM/PM"],
-  [20, "h:mm"],
-  [21, "h:mm:ss"],
-  [22, "m/d/yy h:mm"],
-  [37, "#,##0 ;(#,##0)"],
-  [38, "#,##0 ;[Red](#,##0)"],
-  [39, "#,##0.00;(#,##0.00)"],
-  [40, "#,##0.00;[Red](#,##0.00)"],
-  [45, "mm:ss"],
-  [46, "[h]:mm:ss"],
-  [47, "mmss.0"],
-  [49, "@"]
-]);
-const xlsxExcelMaxColumns = 16_384;
-const xlsxExcelMaxRows = 1_048_576;
-const xlsxPreviewMaxColumns = 50;
-const xlsxPreviewMaxMergeRanges = 200;
-const xlsxPreviewMaxRows = 100;
-
-function renderXlsxWorksheet(bytes: Uint8Array, sharedStrings: string[], styles: XlsxStyles) {
-  const markup = xlsxEntryText(bytes, maxXlsxWorksheetXmlCharacters);
-
-  if (!markup) {
-    return "";
-  }
-
-  const document = new DOMParser().parseFromString(markup, "application/xml");
-
-  if (document.querySelector("parsererror")) {
-    return "";
-  }
-
-  const rows = xlsxElementsByLocalName(document.documentElement, "row", xlsxPreviewMaxRows * 4)
-    .filter((row) => row.getAttribute("hidden") !== "1")
-    .slice(0, xlsxPreviewMaxRows);
-  const visibleRowNumbers = xlsxVisibleRowNumbers(rows);
-  const mergeInfo = xlsxMergeInfo(document, {
-    maxColumnIndex: xlsxPreviewMaxColumns - 1,
-    visibleRowNumbers
-  });
-  const maxColumnIndex = Math.min(Math.max(xlsxMaxColumnIndex(rows, mergeInfo), 0), xlsxPreviewMaxColumns - 1);
-  const columnWidths = xlsxColumnWidths(document, maxColumnIndex + 1);
-  const colGroup = [
-    '<col style="width:44px">',
-    ...Array.from({ length: maxColumnIndex + 1 }, (_, index) => `<col style="width:${columnWidths[index] ?? 92}px">`)
-  ].join("");
-  const headerHtml = Array.from({ length: maxColumnIndex + 1 }, (_, index) => `<th scope="col">${xlsxColumnName(index)}</th>`).join("");
-  const rowHtml = rows
-    .map((row, index) => renderXlsxRow(row, sharedStrings, styles, mergeInfo, maxColumnIndex, index + 1))
-    .filter(Boolean)
-    .slice(0, xlsxPreviewMaxRows)
-    .join("");
-
-  return rowHtml ? `<table class="xlsx-preview-table"><colgroup>${colGroup}</colgroup><thead><tr><th scope="col"></th>${headerHtml}</tr></thead><tbody>${rowHtml}</tbody></table>` : "";
-}
-
-function renderXlsxRow(
-  row: Element,
-  sharedStrings: string[],
-  styles: XlsxStyles,
-  mergeInfo: XlsxMergeInfo,
-  maxColumnIndex: number,
-  fallbackRowNumber: number
-) {
-  const cells = Array.from(row.children).filter((child) => child.localName.toLowerCase() === "c");
-  const cellsByIndex = new Map<number, { html: string; styleAttribute: string }>();
-  const rowNumber = safeXlsxRowNumber(row.getAttribute("r"), fallbackRowNumber);
-  const rowStyle = xlsxRowStyleAttribute(row);
-  let rowMaxColumnIndex = -1;
-  let fallbackIndex = 0;
-
-  cells.slice(0, xlsxPreviewMaxColumns).forEach((cell) => {
-    const refIndex = xlsxCellColumnIndex(cell.getAttribute("r"));
-    const columnIndex = refIndex ?? fallbackIndex;
-    fallbackIndex = columnIndex + 1;
-
-    if (columnIndex < 0 || columnIndex >= xlsxPreviewMaxColumns) {
-      return;
-    }
-
-    const value = xlsxCellText(cell, sharedStrings, styles);
-    cellsByIndex.set(columnIndex, {
-      html: value ? escapeHtml(value) : "&nbsp;",
-      styleAttribute: xlsxCellStyleAttribute(cell, styles)
-    });
-    rowMaxColumnIndex = Math.max(rowMaxColumnIndex, columnIndex);
-  });
-
-  if (rowMaxColumnIndex < 0 && !Array.from(mergeInfo.starts.keys()).some((key) => key.startsWith(`${rowNumber}:`))) {
-    return "";
-  }
-
-  const cellHtml = Array.from({ length: maxColumnIndex + 1 }, (_, index) => {
-    const key = xlsxCellKey(rowNumber, index);
-
-    if (mergeInfo.skips.has(key)) {
-      return "";
-    }
-
-    const mergeRange = mergeInfo.starts.get(key);
-    const spanAttributes = xlsxMergeSpanAttributes(mergeRange);
-    const cell = cellsByIndex.get(index);
-    return `<td${spanAttributes}${cell?.styleAttribute ?? ""}>${cell?.html ?? "&nbsp;"}</td>`;
-  }).join("");
-
-  return `<tr${rowStyle}><th scope="row">${rowNumber}</th>${cellHtml}</tr>`;
-}
-
-interface XlsxMergeRange {
-  startColumn: number;
-  startRow: number;
-  endColumn: number;
-  endRow: number;
-}
-
-interface XlsxMergeInfo {
-  skips: Set<string>;
-  starts: Map<string, XlsxMergeRange>;
-}
-
-interface XlsxMergePreviewBounds {
-  maxColumnIndex: number;
-  visibleRowNumbers: Set<number>;
-}
-
-function xlsxStyles(entries: Record<string, Uint8Array>): XlsxStyles {
-  const document = xlsxXmlDocument(entries, "xl/styles.xml");
-
-  if (!document) {
-    return {
-      cellFormats: [],
-      fills: [],
-      fonts: [],
-      numberFormats: new Map(builtinXlsxNumberFormats)
-    };
-  }
-
-  const numberFormats = new Map(builtinXlsxNumberFormats);
-  xlsxElementsByLocalName(document.documentElement, "numFmt", maxXlsxStyleRecords).forEach((numFmt) => {
-    const id = Number(numFmt.getAttribute("numFmtId"));
-    const formatCode = numFmt.getAttribute("formatCode");
-
-    if (Number.isInteger(id) && formatCode) {
-      numberFormats.set(id, formatCode);
-    }
-  });
-
-  const fontsElement = xlsxElementsByLocalName(document.documentElement, "fonts", 1)[0] ?? null;
-  const fillsElement = xlsxElementsByLocalName(document.documentElement, "fills", 1)[0] ?? null;
-  const cellXfsElement = xlsxElementsByLocalName(document.documentElement, "cellXfs", 1)[0] ?? null;
-  const fonts = directChildrenByLocalName(fontsElement, "font").slice(0, maxXlsxStyleRecords).map(xlsxFontStyle);
-  const fills = directChildrenByLocalName(fillsElement, "fill").slice(0, maxXlsxStyleRecords).map(xlsxFillColor);
-  const cellFormats = directChildrenByLocalName(cellXfsElement, "xf").slice(0, maxXlsxStyleRecords).map((format) => {
-    const alignment = directChildrenByLocalName(format, "alignment")[0] ?? null;
-
-    return {
-      fillId: safeXlsxStyleIndex(format.getAttribute("fillId")),
-      fontId: safeXlsxStyleIndex(format.getAttribute("fontId")),
-      horizontal: safeXlsxAlignment(alignment?.getAttribute("horizontal") ?? null),
-      numFmtId: safeXlsxStyleIndex(format.getAttribute("numFmtId")),
-      vertical: safeXlsxVerticalAlignment(alignment?.getAttribute("vertical") ?? null),
-      wrapText: alignment?.getAttribute("wrapText") === "1" || alignment?.getAttribute("wrapText") === "true"
-    };
-  });
-
-  return { cellFormats, fills, fonts, numberFormats };
-}
-
-function xlsxFontStyle(font: Element): XlsxFontStyle {
-  return {
-    bold: Boolean(directChildrenByLocalName(font, "b").length),
-    color: xlsxColorValue(directChildrenByLocalName(font, "color")[0] ?? null),
-    italic: Boolean(directChildrenByLocalName(font, "i").length),
-    strike: Boolean(directChildrenByLocalName(font, "strike").length),
-    underline: Boolean(directChildrenByLocalName(font, "u").length)
-  };
-}
-
-function xlsxFillColor(fill: Element) {
-  const patternFill = directChildrenByLocalName(fill, "patternFill")[0] ?? null;
-  const patternType = patternFill?.getAttribute("patternType") ?? "";
-
-  if (!patternFill || patternType === "none") {
-    return null;
-  }
-
-  return xlsxColorValue(directChildrenByLocalName(patternFill, "fgColor")[0] ?? directChildrenByLocalName(patternFill, "bgColor")[0] ?? null);
-}
-
-function xlsxColorValue(color: Element | null) {
-  const rgb = color?.getAttribute("rgb");
-
-  if (!rgb) {
-    return null;
-  }
-
-  const normalized = `#${rgb.slice(-6)}`.toLowerCase();
-  return /^#[0-9a-f]{6}$/.test(normalized) ? normalized : null;
-}
-
-function safeXlsxStyleIndex(value: string | null) {
-  const index = Number(value);
-  return Number.isInteger(index) && index >= 0 && index <= 4096 ? index : 0;
-}
-
-function safeXlsxAlignment(value: string | null) {
-  const normalized = String(value ?? "").toLowerCase();
-  return ["left", "center", "right"].includes(normalized) ? normalized : null;
-}
-
-function safeXlsxVerticalAlignment(value: string | null) {
-  const normalized = String(value ?? "").toLowerCase();
-  return ["top", "middle", "bottom"].includes(normalized) ? normalized : null;
-}
-
-function xlsxCellStyleAttribute(cell: Element, styles: XlsxStyles) {
-  const format = styles.cellFormats[safeXlsxStyleIndex(cell.getAttribute("s"))];
-
-  if (!format) {
-    return "";
-  }
-
-  const font = styles.fonts[format.fontId];
-  const fill = styles.fills[format.fillId];
-  const declarations: string[] = [];
-
-  if (fill) {
-    declarations.push(`background-color:${fill}`);
-  }
-
-  if (font?.color) {
-    declarations.push(`color:${font.color}`);
-  }
-
-  if (font?.bold) {
-    declarations.push("font-weight:800");
-  }
-
-  if (font?.italic) {
-    declarations.push("font-style:italic");
-  }
-
-  if (font?.underline && font.strike) {
-    declarations.push("text-decoration:underline line-through");
-  } else if (font?.underline) {
-    declarations.push("text-decoration:underline");
-  } else if (font?.strike) {
-    declarations.push("text-decoration:line-through");
-  }
-
-  if (format.horizontal) {
-    declarations.push(`text-align:${format.horizontal}`);
-  }
-
-  if (format.vertical) {
-    declarations.push(`vertical-align:${format.vertical}`);
-  }
-
-  if (format.wrapText) {
-    declarations.push("white-space:pre-wrap");
-  }
-
-  return declarations.length ? ` style="${declarations.join(";")}"` : "";
-}
-
-function xlsxRowStyleAttribute(row: Element) {
-  const height = Number(row.getAttribute("ht"));
-
-  if (!Number.isFinite(height) || height <= 0) {
-    return "";
-  }
-
-  const pxHeight = Math.min(180, Math.max(20, Math.round(height * 1.34)));
-  return ` style="height:${pxHeight}px"`;
-}
-
-function xlsxVisibleRowNumbers(rows: Element[]) {
-  return new Set(rows.map((row, index) => safeXlsxRowNumber(row.getAttribute("r"), index + 1)));
-}
-
-function xlsxMergeInfo(document: Document, bounds: XlsxMergePreviewBounds): XlsxMergeInfo {
-  const starts = new Map<string, XlsxMergeRange>();
-  const skips = new Set<string>();
-  const visibleRows = Array.from(bounds.visibleRowNumbers).sort((left, right) => left - right);
-
-  if (!visibleRows.length || bounds.maxColumnIndex < 0) {
-    return { skips, starts };
-  }
-
-  xlsxElementsByLocalName(document.documentElement, "mergeCell", xlsxPreviewMaxMergeRanges).forEach((mergeCell) => {
-    const range = xlsxCellRange(mergeCell.getAttribute("ref"));
-
-    if (!range) {
-      return;
-    }
-
-    const clampedStartColumn = Math.max(0, range.startColumn);
-    const clampedEndColumn = Math.min(bounds.maxColumnIndex, range.endColumn);
-
-    if (clampedStartColumn > clampedEndColumn) {
-      return;
-    }
-
-    const visibleRowsInRange = visibleRows.filter((row) => row >= range.startRow && row <= range.endRow);
-
-    if (!visibleRowsInRange.length) {
-      return;
-    }
-
-    const startRowVisible = bounds.visibleRowNumbers.has(range.startRow);
-    const startColumnVisible = range.startColumn >= 0 && range.startColumn <= bounds.maxColumnIndex;
-
-    if (startRowVisible && startColumnVisible) {
-      starts.set(xlsxCellKey(range.startRow, range.startColumn), {
-        startColumn: range.startColumn,
-        startRow: range.startRow,
-        endColumn: clampedEndColumn,
-        endRow: visibleRowsInRange.at(-1) ?? range.startRow
-      });
-    }
-
-    visibleRowsInRange.forEach((row) => {
-      for (let column = clampedStartColumn; column <= clampedEndColumn; column += 1) {
-        if (row !== range.startRow || column !== range.startColumn) {
-          skips.add(xlsxCellKey(row, column));
-        }
-      }
-    });
-  });
-
-  return { skips, starts };
-}
-
-function xlsxMaxColumnIndex(rows: Element[], mergeInfo: XlsxMergeInfo) {
-  const cellMaxColumn = rows.reduce((maxColumn, row) => {
-    const rowCells = Array.from(row.children)
-      .filter((child) => child.localName.toLowerCase() === "c")
-      .slice(0, xlsxPreviewMaxColumns);
-    const rowMaxColumn = rowCells.reduce((currentMax, cell, fallbackIndex) => {
-      const columnIndex = xlsxCellColumnIndex(cell.getAttribute("r")) ?? fallbackIndex;
-      return Math.max(currentMax, columnIndex);
-    }, -1);
-
-    return Math.max(maxColumn, rowMaxColumn);
-  }, -1);
-  const mergeMaxColumn = Array.from(mergeInfo.starts.values()).reduce((maxColumn, range) => Math.max(maxColumn, range.endColumn), -1);
-
-  return Math.max(cellMaxColumn, mergeMaxColumn, 0);
-}
-
-function xlsxColumnWidths(document: Document, columnCount: number) {
-  const widths: Array<number | undefined> = Array.from({ length: columnCount });
-
-  xlsxElementsByLocalName(document.documentElement, "col", xlsxPreviewMaxColumns).forEach((column) => {
-    const min = Math.max(1, Number(column.getAttribute("min")) || 1);
-    const max = Math.min(columnCount, Number(column.getAttribute("max")) || min);
-    const width = clampXlsxColumnWidth(Number(column.getAttribute("width")));
-
-    if (!width) {
-      return;
-    }
-
-    for (let index = min - 1; index < max; index += 1) {
-      widths[index] = width;
-    }
-  });
-
-  return widths;
-}
-
-function clampXlsxColumnWidth(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return null;
-  }
-
-  return Math.min(220, Math.max(56, Math.round(value * 7 + 12)));
-}
-
-function xlsxMergeSpanAttributes(range: XlsxMergeRange | undefined) {
-  if (!range) {
-    return "";
-  }
-
-  const colSpan = Math.min(xlsxPreviewMaxColumns, Math.max(1, range.endColumn - range.startColumn + 1));
-  const rowSpan = Math.min(xlsxPreviewMaxRows, Math.max(1, range.endRow - range.startRow + 1));
-  const attributes: string[] = [];
-
-  if (colSpan > 1) {
-    attributes.push(` colspan="${colSpan}"`);
-  }
-
-  if (rowSpan > 1) {
-    attributes.push(` rowspan="${rowSpan}"`);
-  }
-
-  return attributes.join("");
-}
-
-function xlsxCellRange(reference: string | null): XlsxMergeRange | null {
-  const [startReference, endReference = startReference] = String(reference ?? "").split(":");
-  const start = xlsxCellReference(startReference);
-  const end = xlsxCellReference(endReference);
-
-  if (!start || !end) {
-    return null;
-  }
-
-  return {
-    startColumn: Math.min(start.column, end.column),
-    startRow: Math.min(start.row, end.row),
-    endColumn: Math.max(start.column, end.column),
-    endRow: Math.max(start.row, end.row)
-  };
-}
-
-function xlsxCellReference(reference: string) {
-  const match = reference.match(/^([A-Z]+)(\d+)$/i);
-
-  if (!match || match[1].length > 3) {
-    return null;
-  }
-  const column = xlsxColumnIndexFromLetters(match[1]);
-  const row = Number(match[2]);
-
-  if (
-    !Number.isInteger(row) ||
-    row < 1 ||
-    row > xlsxExcelMaxRows ||
-    column < 0 ||
-    column >= xlsxExcelMaxColumns
-  ) {
-    return null;
-  }
-
-  return {
-    column,
-    row
-  };
-}
-
-function safeXlsxRowNumber(value: string | null, fallback: number) {
-  const rowNumber = Number(value);
-  return Number.isInteger(rowNumber) && rowNumber > 0 ? rowNumber : fallback;
-}
-
-function xlsxCellKey(row: number, column: number) {
-  return `${row}:${column}`;
-}
-
-function xlsxCellColumnIndex(reference: string | null) {
-  const columnLetters = reference?.match(/^[A-Z]+/i)?.[0];
-
-  if (!columnLetters || columnLetters.length > 3) {
-    return null;
-  }
-
-  return xlsxColumnIndexFromLetters(columnLetters);
-}
-
-function xlsxColumnIndexFromLetters(columnLetters: string) {
-  return Array.from(columnLetters.toUpperCase()).reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0) - 1;
-}
-
-function xlsxColumnName(index: number) {
-  let value = index + 1;
-  let name = "";
-
-  while (value > 0) {
-    const remainder = (value - 1) % 26;
-    name = String.fromCharCode(65 + remainder) + name;
-    value = Math.floor((value - 1) / 26);
-  }
-
-  return name;
-}
-
-function xlsxCellText(cell: Element, sharedStrings: string[], styles: XlsxStyles) {
-  const type = cell.getAttribute("t");
-  const rawValue = descendantsByLocalName(cell, "v")[0]?.textContent ?? "";
-
-  if (type === "s") {
-    return normalizePreviewText(sharedStrings[Number(rawValue)] ?? "");
-  }
-
-  if (type === "inlineStr") {
-    return normalizePreviewText(descendantsByLocalName(cell, "t").map((textNode) => textNode.textContent ?? "").join(""));
-  }
-
-  if (type === "b") {
-    return rawValue === "1" ? "TRUE" : rawValue === "0" ? "FALSE" : normalizePreviewText(rawValue);
-  }
-
-  if (type === "e") {
-    return normalizePreviewText(rawValue || "ERROR");
-  }
-
-  if (type === "str") {
-    return normalizePreviewText(rawValue || descendantsByLocalName(cell, "f")[0]?.textContent || "");
-  }
-
-  return formatXlsxCellValue(rawValue, styles.cellFormats[safeXlsxStyleIndex(cell.getAttribute("s"))], styles);
-}
-
-function formatXlsxCellValue(rawValue: string, format: XlsxCellFormat | undefined, styles: XlsxStyles) {
-  const normalizedValue = normalizePreviewText(rawValue);
-  const numericValue = Number(rawValue);
-
-  if (!normalizedValue || !Number.isFinite(numericValue) || !format) {
-    return normalizedValue;
-  }
-
-  const formatCode = styles.numberFormats.get(format.numFmtId) ?? "";
-
-  if (xlsxFormatLooksLikeDate(formatCode)) {
-    return formatXlsxDate(numericValue, formatCode);
-  }
-
-  if (formatCode.includes("%")) {
-    const digits = xlsxDecimalPlaces(formatCode);
-    return `${(numericValue * 100).toLocaleString("ko-KR", {
-      maximumFractionDigits: digits,
-      minimumFractionDigits: digits
-    })}%`;
-  }
-
-  if (/[#,]##0|#,##0/.test(formatCode)) {
-    const digits = xlsxDecimalPlaces(formatCode);
-    return numericValue.toLocaleString("ko-KR", {
-      maximumFractionDigits: digits,
-      minimumFractionDigits: digits
-    });
-  }
-
-  if (formatCode.includes(".00")) {
-    return numericValue.toLocaleString("ko-KR", {
-      maximumFractionDigits: 2,
-      minimumFractionDigits: 2
-    });
-  }
-
-  return normalizedValue;
-}
-
-function xlsxFormatLooksLikeDate(formatCode: string) {
-  const stripped = formatCode
-    .replace(/\[[^\]]+]/g, "")
-    .replace(/"[^"]*"/g, "")
-    .replace(/\\./g, "")
-    .toLowerCase();
-
-  return /(^|[^a-z])[ymdhHs]+([^a-z]|$)/.test(stripped) && !stripped.includes("%");
-}
-
-function xlsxDecimalPlaces(formatCode: string) {
-  const decimalMatch = formatCode.match(/\.([0#]+)/);
-  return decimalMatch ? Math.min(decimalMatch[1].length, 4) : 0;
-}
-
-function formatXlsxDate(serialValue: number, formatCode: string) {
-  const wholeDays = Math.floor(serialValue);
-  const milliseconds = Math.round((serialValue - wholeDays) * 86_400_000);
-  const date = new Date(Date.UTC(1899, 11, 30 + wholeDays) + milliseconds);
-
-  if (Number.isNaN(date.getTime())) {
-    return String(serialValue);
-  }
-
-  const hasTime = /[hs]/i.test(formatCode);
-  const hasDate = /[ymd]/i.test(formatCode);
-  const datePart = hasDate ? date.toISOString().slice(0, 10) : "";
-  const timePart = hasTime ? date.toISOString().slice(11, 16) : "";
-
-  return [datePart, timePart].filter(Boolean).join(" ") || datePart || timePart;
-}
-
-function cfbEntryBytes(entry: { content?: unknown } | null) {
-  const content = entry?.content;
-
-  if (content instanceof Uint8Array) {
-    return content;
-  }
-
-  if (Array.isArray(content)) {
-    return new Uint8Array(content);
-  }
-
-  return new Uint8Array();
-}
-
-function hwpHeaderInfo(header: Uint8Array) {
-  if (header.length < 40) {
-    return null;
-  }
-
-  const signature = new TextDecoder("ascii").decode(header.slice(0, 32)).replaceAll("\0", "").trim();
-
-  if (!signature.includes("HWP Document File")) {
-    return null;
-  }
-
-  const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
-  const flags = view.getUint32(36, true);
-
-  return {
-    compressed: (flags & 0x01) !== 0,
-    encrypted: (flags & 0x02) !== 0,
-    distributed: (flags & 0x04) !== 0
-  };
-}
-
-function hwpSectionEntries(container: { FileIndex: Array<{ content?: unknown }>; FullPaths: string[] }) {
-  return container.FullPaths.map((path, index) => ({ entry: container.FileIndex[index], path }))
-    .map((item) => ({ ...item, sectionIndex: Number(item.path.match(/\/BodyText\/Section(\d+)$/i)?.[1] ?? Number.NaN) }))
-    .filter((item) => Number.isInteger(item.sectionIndex))
-    .sort((left, right) => left.sectionIndex - right.sectionIndex);
-}
-
-function boundedHwpSectionBytes(bytes: Uint8Array, budget: HwpPreviewByteBudget) {
-  const sectionLimit = Math.min(maxHwpPreviewSectionBytes, budget.remainingBytes);
-
-  if (sectionLimit <= 0 || bytes.length > sectionLimit) {
-    return null;
-  }
-
-  budget.remainingBytes -= bytes.length;
-  return bytes;
-}
-
-function decompressHwpSectionBytes(bytes: Uint8Array, budget: HwpPreviewByteBudget) {
-  try {
-    const sectionLimit = Math.min(maxHwpPreviewSectionBytes, budget.remainingBytes);
-
-    if (sectionLimit <= 0) {
-      return null;
-    }
-
-    const chunks: Uint8Array[] = [];
-    let decodedLength = 0;
-    const stream = new Decompress((chunk) => {
-      decodedLength += chunk.length;
-
-      if (decodedLength > sectionLimit) {
-        throw new Error("HWP preview decompressed size limit exceeded");
-      }
-
-      chunks.push(chunk.slice());
-    });
-
-    for (let offset = 0; offset < bytes.length; offset += hwpPreviewCompressedChunkBytes) {
-      const nextOffset = Math.min(bytes.length, offset + hwpPreviewCompressedChunkBytes);
-      stream.push(bytes.subarray(offset, nextOffset), nextOffset >= bytes.length);
-    }
-
-    budget.remainingBytes -= decodedLength;
-    return concatPreviewBytes(chunks, decodedLength);
-  } catch {
-    return null;
-  }
-}
-
-function concatPreviewBytes(chunks: Uint8Array[], totalLength: number) {
-  const output = new Uint8Array(totalLength);
-  let offset = 0;
-
-  chunks.forEach((chunk) => {
-    output.set(chunk, offset);
-    offset += chunk.length;
-  });
-
-  return output;
-}
-
-function appendHwpSectionBlocks(bytes: Uint8Array, blocks: string[]) {
-  if (!bytes.length) {
-    return;
-  }
-
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let offset = 0;
-
-  while (offset + 4 <= bytes.length && blocks.length < maxDocumentPreviewBlocks) {
-    const header = view.getUint32(offset, true);
-    offset += 4;
-
-    const tagId = header & 0x3ff;
-    let size = (header >>> 20) & 0xfff;
-
-    if (size === 0xfff) {
-      if (offset + 4 > bytes.length) {
-        break;
-      }
-
-      size = view.getUint32(offset, true);
-      offset += 4;
-    }
-
-    if (size < 0 || offset + size > bytes.length) {
-      break;
-    }
-
-    if (tagId === 67) {
-      appendTextPreviewBlocks(decodeHwpParagraphText(bytes.subarray(offset, offset + size)), blocks);
-    }
-
-    offset += size;
-  }
-}
-
-function decodeHwpParagraphText(bytes: Uint8Array) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let text = "";
-
-  for (let offset = 0; offset + 1 < bytes.length; offset += 2) {
-    const code = view.getUint16(offset, true);
-
-    if (code === 9) {
-      text += " ";
-      continue;
-    }
-
-    if (code === 10 || code === 13) {
-      text += "\n";
-      continue;
-    }
-
-    if (code < 32) {
-      offset += 16;
-      continue;
-    }
-
-    if (code >= 0xd800 && code <= 0xdbff && offset + 3 < bytes.length) {
-      const low = view.getUint16(offset + 2, true);
-
-      if (low >= 0xdc00 && low <= 0xdfff) {
-        text += String.fromCodePoint(0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00));
-        offset += 2;
-        continue;
-      }
-    }
-
-    if (isPreviewCharacter(code)) {
-      text += String.fromCharCode(code);
-    }
-  }
-
-  return normalizePreviewText(text);
-}
-
-function isPreviewCharacter(code: number) {
-  return code >= 32 && code !== 0xfffc && code !== 0xfffd && code !== 0xffff;
-}
-
-function hwpxPreviewEntryPriority(name: string) {
-  const normalizedName = name.toLowerCase();
-
-  if (!normalizedName.endsWith(".xml")) {
-    return 0;
-  }
-
-  if (/^contents\/section\d+\.xml$/i.test(normalizedName)) {
-    return 40;
-  }
-
-  if (normalizedName.includes("section") || normalizedName.includes("content")) {
-    return 20;
-  }
-
-  return normalizedName.startsWith("contents/") ? 8 : 0;
-}
-
-function collectHwpxPreviewBlocks(markup: string, blocks: string[]) {
-  const document = new DOMParser().parseFromString(markup, "application/xml");
-
-  if (document.querySelector("parsererror")) {
-    return;
-  }
-
-  collectHwpxElementBlocks(document.documentElement, blocks);
-}
-
-function collectHwpxElementBlocks(element: Element, blocks: string[]) {
-  if (blocks.length >= maxDocumentPreviewBlocks) {
-    return;
-  }
-
-  const name = element.localName.toLowerCase();
-
-  if (name === "tbl") {
-    const table = renderHwpxTable(element);
-
-    if (table) {
-      blocks.push(table);
-    }
-
-    return;
-  }
-
-  if (name === "p") {
-    const tables = descendantsByLocalName(element, "tbl").filter((table) => nearestAncestorByLocalName(table, "p") === element);
-
-    if (tables.length) {
-      tables.forEach((table) => {
-        if (blocks.length >= maxDocumentPreviewBlocks) {
-          return;
-        }
-
-        const tableHtml = renderHwpxTable(table);
-
-        if (tableHtml) {
-          blocks.push(tableHtml);
-        }
-      });
-      return;
-    }
-
-    const text = normalizePreviewText(element.textContent ?? "");
-
-    if (text) {
-      blocks.push(`<p>${escapeHtml(text)}</p>`);
-    }
-
-    return;
-  }
-
-  Array.from(element.children).forEach((child) => collectHwpxElementBlocks(child, blocks));
-}
-
-function renderHwpxTable(table: Element) {
-  const rows = descendantsByLocalName(table, "tr").filter((row) => nearestAncestorByLocalName(row, "tbl") === table);
-  const rowHtml = rows
-    .slice(0, 80)
-    .map((row) => {
-      const cells = descendantsByLocalName(row, "tc").filter((cell) => nearestAncestorByLocalName(cell, "tr") === row);
-      const cellHtml = cells
-        .slice(0, 20)
-        .map((cell) => `<td${hwpxCellSpanAttributes(cell)}>${hwpxCellHtml(cell) || "&nbsp;"}</td>`)
-        .join("");
-
-      return cellHtml ? `<tr>${cellHtml}</tr>` : "";
-    })
-    .filter(Boolean)
-    .join("");
-
-  return rowHtml ? `<table>${rowHtml}</table>` : "";
-}
-
-function descendantsByLocalName(element: Element, name: string) {
-  return Array.from(element.getElementsByTagName("*")).filter((child) => child.localName.toLowerCase() === name);
-}
-
-function directChildrenByLocalName(element: Element | null, name: string) {
-  if (!element) {
-    return [];
-  }
-
-  return Array.from(element.children).filter((child) => child.localName.toLowerCase() === name);
-}
-
-function nearestAncestorByLocalName(element: Element, name: string) {
-  let parent = element.parentElement;
-
-  while (parent) {
-    if (parent.localName.toLowerCase() === name) {
-      return parent;
-    }
-
-    parent = parent.parentElement;
-  }
-
-  return null;
-}
-
-function hwpxCellSpanAttributes(cell: Element) {
-  const cellProperties = descendantsByLocalName(cell, "tcPr").find((candidate) => nearestAncestorByLocalName(candidate, "tc") === cell);
-  const colSpan = safePreviewSpan(
-    cell.getAttribute("colSpan") ?? cell.getAttribute("colspan") ?? cellProperties?.getAttribute("colSpan") ?? cellProperties?.getAttribute("colspan") ?? null
-  );
-  const rowSpan = safePreviewSpan(
-    cell.getAttribute("rowSpan") ?? cell.getAttribute("rowspan") ?? cellProperties?.getAttribute("rowSpan") ?? cellProperties?.getAttribute("rowspan") ?? null
-  );
-  const attributes: string[] = [];
-
-  if (colSpan > 1) {
-    attributes.push(` colspan="${colSpan}"`);
-  }
-
-  if (rowSpan > 1) {
-    attributes.push(` rowspan="${rowSpan}"`);
-  }
-
-  return attributes.join("");
-}
-
-function safePreviewSpan(value: string | null) {
-  const span = Number(value);
-
-  return Number.isInteger(span) && span >= 1 && span <= 12 ? span : 1;
-}
-
-function hwpxCellHtml(cell: Element) {
-  const paragraphs = descendantsByLocalName(cell, "p")
-    .map((paragraph) => normalizePreviewText(paragraph.textContent ?? ""))
-    .filter(Boolean);
-
-  if (paragraphs.length) {
-    return paragraphs.slice(0, 12).map(escapeHtml).join("<br>");
-  }
-
-  return escapeHtml(normalizePreviewText(cell.textContent ?? ""));
-}
-
-function appendTextPreviewBlocks(text: string, blocks: string[]) {
-  text
-    .split(/\n+/)
-    .map((line) => normalizePreviewText(line))
-    .filter(Boolean)
-    .forEach((line) => {
-      if (blocks.length < maxDocumentPreviewBlocks) {
-        blocks.push(`<p>${escapeHtml(line)}</p>`);
-      }
-    });
-}
-
-function documentPreviewHtml(blocks: string[]) {
-  const visibleBlocks = blocks.filter(Boolean).slice(0, maxDocumentPreviewBlocks);
-
-  if (!visibleBlocks.length) {
-    return "";
-  }
-
-  const truncated = blocks.length > visibleBlocks.length ? '<p class="document-preview-muted">일부 내용은 미리보기 길이 제한으로 생략되었습니다.</p>' : "";
-  return `<div>${visibleBlocks.join("")}${truncated}</div>`;
-}
-
-function normalizePreviewText(value: string) {
-  return value
-    .replaceAll("\0", "")
-    .replace(/[^\S\r\n]+/g, " ")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim()
-    .slice(0, maxTextPreviewCharacters);
-}
-
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (character) => {
-    switch (character) {
-      case "&":
-        return "&amp;";
-      case "<":
-        return "&lt;";
-      case ">":
-        return "&gt;";
-      case "\"":
-        return "&quot;";
-      case "'":
-        return "&#39;";
-      default:
-        return character;
-    }
-  });
 }
 
 export function legacyBinaryPreviewMessage(extension: string) {
@@ -10367,29 +9604,33 @@ function decodeReadableBytes(bytes: Uint8Array) {
 }
 
 function normalizeDecodedPreviewText(value: string) {
-  return value
-    .split("")
-    .filter((character) => {
-      const code = character.charCodeAt(0);
-      return code === 9 || code === 10 || code === 13 || (code >= 32 && code !== 127);
-    })
-    .join("")
-    .trim();
-}
+  let normalized = "";
+  let segmentStart = 0;
 
-function readFileAsDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => resolve(String(reader.result)));
-    reader.addEventListener("error", () => reject(reader.error));
-    reader.readAsDataURL(file);
-  });
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+    const removableControl =
+      (codePoint <= 0x1f && codePoint !== 0x09 && codePoint !== 0x0a && codePoint !== 0x0d)
+      || codePoint === 0x7f;
+
+    if (removableControl) {
+      normalized += value.slice(segmentStart, index);
+      segmentStart = index + 1;
+    }
+  }
+
+  return `${normalized}${value.slice(segmentStart)}`.trim();
 }
 
 function resizeImageDataUrl(dataUrl: string) {
   return new Promise<string>((resolve, reject) => {
     const image = new Image();
     image.addEventListener("load", () => {
+      if (!image.width || !image.height || image.width * image.height > maxInlineImagePixels) {
+        reject(new Error("이미지 해상도가 너무 큽니다."));
+        return;
+      }
+
       const scale = Math.min(1, 1280 / Math.max(image.width, image.height));
       const canvas = document.createElement("canvas");
       canvas.width = Math.max(1, Math.round(image.width * scale));

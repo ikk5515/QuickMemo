@@ -27,6 +27,9 @@ export const editorTextSizes = [10, 12, 14, 16, 17, 18, 20, 22, 24, 28, 32, 36, 
 export const editorTextColors = ["#14211f", "#64748b", "#dc2626", "#b9822f", "#15803d", "#2563eb", "#7c3aed"] as const;
 export const editorLineHeightBounds = { min: 1, max: 3, step: 0.05 } as const;
 export const editorLineHeights = [1, 1.15, 1.2, 1.35, 1.5, 1.7, 2, 2.5, 3] as const;
+export const editorHeadingLevels = [1, 2, 3, 4, 5, 6] as const;
+export const editorUndoHistoryDepth = 150;
+export const editorUndoGroupDelayMs = 500;
 
 const editorCellColorSet = new Set<string>(editorCellColors);
 const editorImageWidthSet = new Set<number>(editorImageWidths);
@@ -481,10 +484,13 @@ const ResizableImage = Image.extend({
 
 export const richEditorExtensions = [
   StarterKit.configure({
+    heading: {
+      levels: [...editorHeadingLevels]
+    },
     link: false,
     undoRedo: {
-      depth: 500,
-      newGroupDelay: 0
+      depth: editorUndoHistoryDepth,
+      newGroupDelay: editorUndoGroupDelayMs
     }
   }),
   TextSize,

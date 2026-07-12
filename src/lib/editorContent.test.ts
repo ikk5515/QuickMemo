@@ -9,6 +9,9 @@ import {
   serializeEditorContent
 } from "./editorContent";
 
+const safePngDataUrl =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nAAAAABJRU5ErkJggg==";
+
 describe("editor content helpers", () => {
   it("wraps plain text as editable HTML", () => {
     expect(parseEditorContent("hello\nworld").html).toBe("<p>hello<br>world</p>");
@@ -51,31 +54,72 @@ describe("editor content helpers", () => {
     expect(parseEditorContent(stored)).toEqual({ html: "<p>memo</p>", fontSize: 22 });
   });
 
+  it("round-trips heading levels and horizontal rules without losing safe text", () => {
+    const source =
+      '<h1 data-qm-line-height="1.35" data-qm-block-id="qm_123456789abc" style="text-align:center" onclick="alert(1)">큰 제목<script>alert(1)</script></h1><h2>중간 제목</h2><h3>작은 제목</h3><h4>제목 4</h4><h5>제목 5</h5><h6>제목 6</h6><hr><p>본문</p>';
+    const serialized = serializeEditorContent(source, 19);
+    const parsed = parseEditorContent(serialized);
+
+    expect(parsed.fontSize).toBe(19);
+    expect(parsed.html).toContain(
+      '<h1 style="text-align: center; line-height: 1.35;" data-qm-line-height="1.35" data-qm-block-id="qm_123456789abc">큰 제목</h1>'
+    );
+    expect(parsed.html).toContain("<h2>중간 제목</h2>");
+    expect(parsed.html).toContain("<h3>작은 제목</h3>");
+    expect(parsed.html).toContain("<h4>제목 4</h4>");
+    expect(parsed.html).toContain("<h5>제목 5</h5>");
+    expect(parsed.html).toContain("<h6>제목 6</h6>");
+    expect(parsed.html).toContain("<hr>");
+    expect(parsed.html).toContain("<p>본문</p>");
+    expect(parsed.html).not.toContain("onclick");
+    expect(parsed.html).not.toContain("script");
+    expect(parsed.html).not.toContain("alert(1)");
+  });
+
+  it("recognizes heading-only HTML instead of escaping it as plain text", () => {
+    expect(parseEditorContent("<h1>제목만 있는 메모</h1>").html).toBe("<h1>제목만 있는 메모</h1>");
+  });
+
   it("strips unsafe HTML from previews", () => {
     expect(previewTextFromHtml('<script>alert(1)</script><p>safe</p>')).toBe("safe");
   });
 
   it("allows inline image data URLs", () => {
-    const html = imageHtml("data:image/png;base64,abc", "test");
-    expect(parseEditorContent(html).html).toContain("data:image/png;base64,abc");
+    const html = imageHtml(safePngDataUrl, "test");
+    expect(parseEditorContent(html).html).toContain(safePngDataUrl);
   });
 
   it("preserves only safe image width values", () => {
-    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-width="50"></p>').html).toContain(
+    expect(parseEditorContent(`<p><img src="${safePngDataUrl}" data-qm-width="50"></p>`).html).toContain(
       'data-qm-width="50"'
     );
-    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-image-width="480"></p>').html).toContain(
+    expect(parseEditorContent(`<p><img src="${safePngDataUrl}" data-qm-image-width="480"></p>`).html).toContain(
       'data-qm-image-width="480"'
     );
-    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-image-width="480"></p>').html).toContain(
+    expect(parseEditorContent(`<p><img src="${safePngDataUrl}" data-qm-image-width="480"></p>`).html).toContain(
       "width: 480px"
     );
-    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" style="width:13px"></p>').html).not.toContain(
+    expect(parseEditorContent(`<p><img src="${safePngDataUrl}" style="width:13px"></p>`).html).not.toContain(
       "width:13px"
     );
-    expect(parseEditorContent('<p><img src="data:image/png;base64,abc" data-qm-image-width="9999"></p>').html).not.toContain(
+    expect(parseEditorContent(`<p><img src="${safePngDataUrl}" data-qm-image-width="9999"></p>`).html).not.toContain(
       "data-qm-image-width"
     );
+  });
+
+  it("rejects oversized, animated, and malformed inline image payloads before browser decode", () => {
+    const hugePngHeader = new Uint8Array(33);
+    hugePngHeader.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const view = new DataView(hugePngHeader.buffer);
+    view.setUint32(8, 13);
+    hugePngHeader.set([0x49, 0x48, 0x44, 0x52], 12);
+    view.setUint32(16, 20_000);
+    view.setUint32(20, 20_000);
+    const hugePng = `data:image/png;base64,${btoa(String.fromCharCode(...hugePngHeader))}`;
+
+    expect(sanitizeEditorHtml(`<p><img src="${hugePng}"></p>`)).not.toContain("<img");
+    expect(sanitizeEditorHtml('<p><img src="data:image/gif;base64,R0lGODlhAQABAAAAACw="></p>')).not.toContain("<img");
+    expect(sanitizeEditorHtml('<p><img src="data:image/png;base64,abc"></p>')).not.toContain("<img");
   });
 
   it("turns typed web URLs into safe links", () => {

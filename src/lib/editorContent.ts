@@ -1,6 +1,8 @@
+import { safeRasterDataUrl } from "./safeRasterImage";
+
 const fontSizePattern = /^<!--qm-font-size:(\d+)-->/;
 const htmlTagPattern =
-  /<(a|p|div|br|strong|b|em|i|u|s|del|strike|span|img|figure|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
+  /<(a|p|div|br|strong|b|em|i|u|s|del|strike|span|img|figure|h[1-6]|hr|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
@@ -18,8 +20,9 @@ const safeBlockIdPattern = /^[A-Za-z0-9_-]{12,64}$/;
 const safeUidListPattern = /^[A-Za-z0-9_,:.-]{1,600}$/;
 const safeUidPattern = /^[A-Za-z0-9_:.-]{1,128}$/;
 const attributionLabelMaxLength = 160;
-const lineHeightTags = new Set(["P", "DIV", "LI", "TD", "TH", "SPAN"]);
-const attributionTags = new Set(["P", "DIV", "LI", "TD", "TH"]);
+const headingTags = ["H1", "H2", "H3", "H4", "H5", "H6"] as const;
+const lineHeightTags = new Set(["P", "DIV", "LI", "TD", "TH", "SPAN", ...headingTags]);
+const attributionTags = new Set(["P", "DIV", "LI", "TD", "TH", ...headingTags]);
 const allowedTags = new Set([
   "A",
   "B",
@@ -32,6 +35,13 @@ const allowedTags = new Set([
   "DIV",
   "EM",
   "FIGURE",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "HR",
   "I",
   "IMG",
   "INPUT",
@@ -192,7 +202,7 @@ function sanitizeNode(node: Node): Node | null {
   if (node.tagName === "IMG") {
     const src = node.getAttribute("src") ?? "";
 
-    if (!/^data:image\/(png|jpe?g|webp|gif);base64,/i.test(src)) {
+    if (!safeRasterDataUrl(src)) {
       return null;
     }
 
@@ -325,7 +335,7 @@ function copyTaskAttributes(target: HTMLElement, source: HTMLElement) {
 function copyTextAlign(target: HTMLElement, source: HTMLElement) {
   const alignment = safeTextAlign(source.style.textAlign || source.getAttribute("data-text-align"));
 
-  if (!alignment || !["P", "DIV", "LI", "TD", "TH"].includes(target.tagName)) {
+  if (!alignment || !["P", "DIV", "LI", "TD", "TH", ...headingTags].includes(target.tagName)) {
     return;
   }
 

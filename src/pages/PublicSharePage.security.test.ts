@@ -26,7 +26,8 @@ describe("PublicSharePage security controls", () => {
     const contentLoader =
       publicSharePageSource.match(/async function decryptPublicShareContent[\s\S]*?function shareKeyFromHash/u)?.[0] ?? "";
 
-    expect(contentLoader).toContain("encryptedAttachments.map(publicShareAttachmentView)");
+    expect(contentLoader).toContain("for (const attachment of encryptedAttachments)");
+    expect(contentLoader).toContain("publicShareAttachmentView(attachment, shareKey)");
     expect(contentLoader).not.toContain("Promise.all(encryptedAttachments.map");
     expect(publicSharePageSource).not.toContain("bytes: Uint8Array;");
     expect(publicSharePageSource).not.toContain("downloadUrl: string;");

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   RulesTestEnvironment,
+  type RulesTestContext,
   assertFails,
   assertSucceeds,
   initializeTestEnvironment
@@ -25,6 +26,7 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const describeRules = process.env.FIRESTORE_EMULATOR_HOST ? describe : describe.skip;
+type RulesFirestore = ReturnType<RulesTestContext["firestore"]>;
 
 const encryptedPayload = {
   version: 1,
@@ -247,24 +249,6 @@ function restoreFields(uid: string) {
   };
 }
 
-function purgeFields(uid: string) {
-  return {
-    type: "personal",
-    participantUids: [uid],
-    wrappedKeys: {
-      [uid]: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
-    },
-    encryptedTitle: encryptedPayload,
-    encryptedBody: encryptedPayload,
-    isPurged: true,
-    purgedAt: new Date("2026-05-18T12:00:00.000Z"),
-    purgedBy: uid,
-    updatedAt: new Date("2026-05-18T12:00:00.000Z"),
-    savedAt: new Date("2026-05-18T12:00:00.000Z"),
-    updatedBy: uid
-  };
-}
-
 function noteUserState(noteId: string, uid: string, overrides: Record<string, unknown> = {}) {
   return {
     uid,
@@ -287,6 +271,7 @@ function noteHistory(noteId: string, actorUid: string, overrides: Record<string,
     action: "content",
     changedFields: ["title", "body"],
     readerUids: ["user-a", "user-b"],
+    revision: 1,
     encryptedSummary: encryptedPayload,
     encryptedSnapshot: encryptedPayload,
     createdAt: serverTimestamp(),
@@ -294,14 +279,82 @@ function noteHistory(noteId: string, actorUid: string, overrides: Record<string,
   };
 }
 
+function noteRevisionId(revision: number) {
+  return `revision-${String(revision).padStart(12, "0")}`;
+}
+
+function createAuditedNote(
+  firestore: RulesFirestore,
+  noteId: string,
+  actorUid: string,
+  note: Record<string, unknown>,
+  readerUids: string[]
+) {
+  const revision = 1;
+  const historyId = noteRevisionId(revision);
+  const batch = writeBatch(firestore);
+
+  batch.set(doc(firestore, "notes", noteId), {
+    ...note,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    savedAt: serverTimestamp(),
+    updatedBy: actorUid,
+    revision,
+    lastMutationId: historyId
+  });
+  batch.set(
+    doc(firestore, "notes", noteId, "history", historyId),
+    noteHistory(noteId, actorUid, {
+      action: "create",
+      changedFields: ["title", "body"],
+      readerUids,
+      revision
+    })
+  );
+
+  return batch.commit();
+}
+
+function updateAuditedNote(
+  firestore: RulesFirestore,
+  noteId: string,
+  actorUid: string,
+  revision: number,
+  action: "content" | "share" | "delete" | "restore",
+  changedFields: string[],
+  readerUids: string[],
+  updates: Record<string, unknown>
+) {
+  const historyId = noteRevisionId(revision);
+  const batch = writeBatch(firestore);
+
+  batch.update(doc(firestore, "notes", noteId), {
+    ...updates,
+    updatedAt: serverTimestamp(),
+    updatedBy: actorUid,
+    revision,
+    lastMutationId: historyId
+  });
+  batch.set(
+    doc(firestore, "notes", noteId, "history", historyId),
+    noteHistory(noteId, actorUid, { action, changedFields, readerUids, revision })
+  );
+
+  return batch.commit();
+}
+
 function publicShareDocument(sourceNoteId = "note-a", ownerUid = "user-a", overrides: Record<string, unknown> = {}) {
   return {
     sourceNoteId,
+    sourceRevision: 0,
+    sourceAttachmentRevision: 0,
     ownerUid,
     version: 1,
     encryptedTitle: encryptedPayload,
     encryptedBody: encryptedPayload,
     ownerWrappedShareKey,
+    currentGeneration: "generation-a",
     attachmentCount: 0,
     ready: false,
     createdAt: serverTimestamp(),
@@ -313,16 +366,25 @@ function publicShareDocument(sourceNoteId = "note-a", ownerUid = "user-a", overr
 
 function publicShareAttachment(overrides: Record<string, unknown> = {}) {
   const originalSize = typeof overrides.originalSize === "number" ? overrides.originalSize : 4;
+  const extension = typeof overrides.extension === "string" ? overrides.extension : "pdf";
 
   return {
     version: 1,
+    privacyVersion: 1,
     algorithm: "AES-GCM",
-    fileName: "shared-report",
-    extension: "pdf",
+    fileName: `shared-${extension}-attachment`,
+    encryptedFileName: {
+      version: 1,
+      algorithm: "AES-GCM",
+      cipherText: "A".repeat(24),
+      iv: "A".repeat(16)
+    },
+    extension,
     mimeType: "application/pdf",
     originalSize,
     encryptedData: Bytes.fromUint8Array(new Uint8Array(originalSize + 16)),
     iv: Bytes.fromUint8Array(new Uint8Array(12)),
+    generation: "generation-a",
     sourceAttachmentId: "attachment-a",
     expiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
     createdAt: serverTimestamp(),
@@ -330,13 +392,28 @@ function publicShareAttachment(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function legacyPublicShareAttachment(overrides: Record<string, unknown> = {}) {
+  const attachment = publicShareAttachment(overrides) as Record<string, unknown>;
+  delete attachment.privacyVersion;
+  delete attachment.encryptedFileName;
+  attachment.fileName = "legacy-plaintext-report";
+  return attachment;
+}
+
 function storedPublicShareAttachment(shareId: string, attachmentId: string, overrides: Record<string, unknown> = {}) {
   const originalSize = typeof overrides.originalSize === "number" ? overrides.originalSize : 10 * 1024 * 1024;
 
   return {
     version: 1,
+    privacyVersion: 1,
     algorithm: "AES-GCM",
-    fileName: "shared-archive",
+    fileName: "shared-zip-attachment",
+    encryptedFileName: {
+      version: 1,
+      algorithm: "AES-GCM",
+      cipherText: "A".repeat(24),
+      iv: "A".repeat(16)
+    },
     extension: "zip",
     mimeType: "application/zip",
     originalSize,
@@ -344,6 +421,7 @@ function storedPublicShareAttachment(shareId: string, attachmentId: string, over
     encryptedSize: originalSize + 16,
     isReady: false,
     iv: Bytes.fromUint8Array(new Uint8Array(12)),
+    generation: "generation-a",
     sourceAttachmentId: "attachment-a",
     expiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000),
     createdAt: serverTimestamp(),
@@ -1241,6 +1319,13 @@ describeRules("firestore security rules", () => {
 
   it("allows owners to publish temporary public note shares while blocking expired or revoked links", async () => {
     const shareExpiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
+    const legacySourceAttachmentShare = publicShareDocument("note-a", "user-a", {
+      ready: true,
+      createdAt: new Date("2026-05-18T08:00:00.000Z"),
+      updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+      expiresAt: shareExpiresAt
+    });
+    Reflect.deleteProperty(legacySourceAttachmentShare, "sourceAttachmentRevision");
 
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
@@ -1278,6 +1363,22 @@ describeRules("firestore security rules", () => {
           revokedBy: "user-a"
         })
       });
+      await setDoc(doc(context.firestore(), "publicNoteShares/missing-source-share"), {
+        ...publicShareDocument("missing-note", "user-a", {
+          ready: true,
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: shareExpiresAt
+        })
+      });
+      await setDoc(doc(context.firestore(), "publicNoteShares/owner-mismatch-share"), {
+        ...publicShareDocument("note-a", "user-b", {
+          ready: true,
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: shareExpiresAt
+        })
+      });
       await setDoc(doc(context.firestore(), "publicNoteShares/legacy-protected-share"), {
         ...publicShareDocument("note-a", "user-a", {
           attachmentCount: 1,
@@ -1292,6 +1393,7 @@ describeRules("firestore security rules", () => {
         doc(context.firestore(), "publicNoteShares/legacy-protected-share/attachments/attachment-a"),
         publicShareAttachment({ createdAt: new Date("2026-05-18T08:00:00.000Z"), expiresAt: shareExpiresAt })
       );
+      await setDoc(doc(context.firestore(), "publicNoteShares/legacy-source-attachment-share"), legacySourceAttachmentShare);
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
@@ -1305,11 +1407,21 @@ describeRules("firestore security rules", () => {
         publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt, passwordHash: publicSharePasswordHash })
       )
     );
-    await assertSucceeds(
+    await assertFails(
       createPublicShareAttachmentBatch(ownerDb, "share-a", "attachment-a", publicShareAttachment({ expiresAt: shareExpiresAt }))
     );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "publicNoteShares/share-a/attachments/attachment-a"),
+        publicShareAttachment({ createdAt: new Date("2026-05-18T08:00:00.000Z"), expiresAt: shareExpiresAt })
+      );
+      await setDoc(
+        doc(context.firestore(), "publicNoteShares/share-a/attachments/legacy-plaintext-name"),
+        legacyPublicShareAttachment({ createdAt: new Date("2026-05-18T08:00:00.000Z"), expiresAt: shareExpiresAt })
+      );
+    });
     await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { ready: true, attachmentCount: 1, updatedAt: serverTimestamp() }));
-    await assertSucceeds(
+    await assertFails(
       createPublicShareAttachmentBatch(
         ownerDb,
         "share-a",
@@ -1317,7 +1429,7 @@ describeRules("firestore security rules", () => {
         publicShareAttachment({ expiresAt: shareExpiresAt, extension: "png", fileName: "safe-image", mimeType: "image/png" })
       )
     );
-    await assertSucceeds(
+    await assertFails(
       createPublicShareAttachmentBatch(
         ownerDb,
         "share-a",
@@ -1325,11 +1437,43 @@ describeRules("firestore security rules", () => {
         storedPublicShareAttachment("share-a", "zip-storage", { expiresAt: shareExpiresAt })
       )
     );
-    await assertSucceeds(
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "publicNoteShares/share-a/attachments/zip-storage"),
+        storedPublicShareAttachment("share-a", "zip-storage", {
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: shareExpiresAt
+        })
+      );
+    });
+    await assertFails(
       updateDoc(doc(ownerDb, "publicNoteShares/share-a/attachments/zip-storage"), {
         isReady: true
       })
     );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "publicNoteShares/share-a/attachments/zip-storage"), { isReady: true });
+      await deleteDoc(doc(context.firestore(), "publicNoteShares/share-a/attachments/zip-storage"));
+    });
+    await assertFails(
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-a",
+        "generation-b-attachment",
+        publicShareAttachment({ expiresAt: shareExpiresAt, generation: "generation-b" })
+      )
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "publicNoteShares/share-a/attachments/generation-b-attachment"),
+        publicShareAttachment({
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt: shareExpiresAt,
+          generation: "generation-b"
+        })
+      );
+    });
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a/attachments/generation-b-attachment")));
     await assertFails(
       createPublicShareAttachmentBatch(
         ownerDb,
@@ -1343,7 +1487,31 @@ describeRules("firestore security rules", () => {
     );
 
     await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a")));
-    await assertSucceeds(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a/attachments/legacy-plaintext-name")));
+    await assertSucceeds(getDoc(doc(ownerDb, "publicNoteShares/share-a/attachments/legacy-plaintext-name")));
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(publicDb, "publicNoteShares/share-a/attachments"),
+          where("generation", "==", "generation-a"),
+          where("privacyVersion", "==", 1)
+        )
+      )
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/note-a"), { isDeleted: true });
+    });
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a")));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a/attachments/attachment-a")));
+    await assertSucceeds(getDoc(doc(ownerDb, "publicNoteShares/share-a")));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/note-a"), { isDeleted: false });
+      await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: false });
+    });
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a")));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: true });
+    });
     await assertSucceeds(
       getDocs(query(collection(ownerDb, "publicNoteShares"), where("ownerUid", "==", "user-a"), where("sourceNoteId", "==", "note-a")))
     );
@@ -1356,6 +1524,8 @@ describeRules("firestore security rules", () => {
 
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/expired-share")));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/revoked-share")));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/missing-source-share")));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/owner-mismatch-share")));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/legacy-protected-share")));
     await assertFails(getDocs(collection(publicDb, "publicNoteShares/legacy-protected-share/attachments")));
     await assertSucceeds(getDoc(doc(ownerDb, "publicNoteShares/legacy-protected-share")));
@@ -1370,6 +1540,32 @@ describeRules("firestore security rules", () => {
     const shareWithoutOwnerKey = { ...publicShareDocument("note-a", "user-a") };
     Reflect.deleteProperty(shareWithoutOwnerKey, "ownerWrappedShareKey");
     await assertFails(createPublicShareBatch(ownerDb, "missing-owner-key-share", shareWithoutOwnerKey));
+    const shareWithoutSourceAttachmentRevision = { ...publicShareDocument("note-a", "user-a") };
+    Reflect.deleteProperty(shareWithoutSourceAttachmentRevision, "sourceAttachmentRevision");
+    await assertFails(
+      createPublicShareBatch(ownerDb, "missing-source-attachment-revision", shareWithoutSourceAttachmentRevision)
+    );
+    await assertFails(
+      createPublicShareBatch(
+        ownerDb,
+        "invalid-source-attachment-revision",
+        publicShareDocument("note-a", "user-a", { sourceAttachmentRevision: -1 })
+      )
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "publicNoteShares/legacy-source-attachment-share"), {
+        encryptedBody: { ...encryptedPayload, cipherText: "legacy-without-attachment-revision" },
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "publicNoteShares/legacy-source-attachment-share"), {
+        encryptedBody: { ...encryptedPayload, cipherText: "legacy-migrated" },
+        sourceAttachmentRevision: 0,
+        currentGeneration: "generation-b",
+        updatedAt: serverTimestamp()
+      })
+    );
     await assertFails(
       createPublicShareAttachmentBatch(
         ownerDb,
@@ -1414,17 +1610,33 @@ describeRules("firestore security rules", () => {
     await assertFails(updateDoc(doc(otherDb, "publicNoteShares/share-a"), { passwordHash: publicSharePasswordHash, updatedAt: serverTimestamp() }));
     await assertSucceeds(
       updateDoc(doc(ownerDb, "publicNoteShares/share-a"), {
+        encryptedBody: { ...encryptedPayload, cipherText: "text-only-sync" },
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-a"), {
+        attachmentCount: 2,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-a"), {
         encryptedTitle: { ...encryptedPayload, cipherText: "new-title" },
         encryptedBody: { ...encryptedPayload, cipherText: "new-body" },
+        currentGeneration: "generation-b",
         passwordHash: { ...publicSharePasswordHash, hash: "bmV3LWhhc2gtYnl0ZXMtZm9yLXRlc3Q=" },
         updatedAt: serverTimestamp()
       })
     );
     await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a")));
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a/attachments/generation-b-attachment")));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a/attachments/attachment-a")));
     await assertSucceeds(
       updateDoc(doc(ownerDb, "publicNoteShares/share-a"), {
         encryptedTitle: encryptedPayload,
         encryptedBody: encryptedPayload,
+        currentGeneration: "generation-c",
         passwordHash: deleteField(),
         updatedAt: serverTimestamp()
       })
@@ -1433,6 +1645,157 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(updateDoc(doc(ownerDb, "publicNoteShares/share-a"), { revokedAt: serverTimestamp(), revokedBy: "user-a", updatedAt: serverTimestamp() }));
     await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a")));
     await assertFails(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
+  });
+
+  it("fails public reads closed on source revision drift and permits only backend staging before an owner flip", async () => {
+    const expiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "notes/note-a"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        revision: 5,
+        lastMutationId: "mutation-initial-0001",
+        attachmentRevision: 2,
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      await setDoc(
+        doc(db, "publicNoteShares/share-revision-bound"),
+        publicShareDocument("note-a", "user-a", {
+          sourceRevision: 5,
+          sourceAttachmentRevision: 2,
+          ready: true,
+          attachmentCount: 1,
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt
+        })
+      );
+      await setDoc(
+        doc(db, "publicNoteShares/share-revision-bound/attachments/generation-a"),
+        publicShareAttachment({
+          generation: "generation-a",
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt
+        })
+      );
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const publicDb = testEnv.unauthenticatedContext().firestore();
+    const shareRef = doc(ownerDb, "publicNoteShares/share-revision-bound");
+
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
+    await assertSucceeds(
+      getDoc(doc(publicDb, "publicNoteShares/share-revision-bound/attachments/generation-a"))
+    );
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/note-a"), { attachmentRevision: 3 });
+    });
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
+    await assertFails(
+      updateDoc(shareRef, {
+        encryptedBody: { ...encryptedPayload, cipherText: "unsafe-revision-only-flip" },
+        sourceAttachmentRevision: 3,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-revision-bound",
+        "generation-b",
+        publicShareAttachment({ generation: "generation-b", expiresAt })
+      )
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "publicNoteShares/share-revision-bound/attachments/generation-b"),
+        publicShareAttachment({
+          generation: "generation-b",
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          expiresAt
+        })
+      );
+    });
+    await assertSucceeds(
+      updateDoc(shareRef, {
+        encryptedBody: { ...encryptedPayload, cipherText: "attachment-revision-3" },
+        sourceAttachmentRevision: 3,
+        currentGeneration: "generation-b",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
+    await assertSucceeds(
+      getDoc(doc(publicDb, "publicNoteShares/share-revision-bound/attachments/generation-b"))
+    );
+    await assertFails(
+      getDoc(doc(publicDb, "publicNoteShares/share-revision-bound/attachments/generation-a"))
+    );
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/note-a"), { revision: 6 });
+    });
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
+    await assertSucceeds(
+      updateDoc(shareRef, {
+        encryptedBody: { ...encryptedPayload, cipherText: "content-revision-6" },
+        sourceRevision: 6,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
+
+    await assertFails(
+      createPublicShareAttachmentBatch(
+        ownerDb,
+        "share-revision-bound",
+        "pending-ready",
+        storedPublicShareAttachment("share-revision-bound", "pending-ready", {
+          generation: "generation-b",
+          expiresAt
+        })
+      )
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "publicNoteShares/share-revision-bound/attachments/pending-ready"),
+        storedPublicShareAttachment("share-revision-bound", "pending-ready", {
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          generation: "generation-b",
+          expiresAt
+        })
+      );
+    });
+    await assertFails(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-revision-bound/attachments/pending-ready"), { isReady: true })
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/note-a"), { isDeleted: true });
+    });
+    await assertFails(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-revision-bound/attachments/pending-ready"), { isReady: true })
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/note-a"), { isDeleted: false });
+    });
+    await assertSucceeds(
+      updateDoc(shareRef, { revokedAt: serverTimestamp(), revokedBy: "user-a", updatedAt: serverTimestamp() })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "publicNoteShares/share-revision-bound/attachments/pending-ready"), { isReady: true })
+    );
   });
 
   it("keeps cleanup queues immutable to users while enforcing queue creation for server cleanup", async () => {
@@ -1514,7 +1877,12 @@ describeRules("firestore security rules", () => {
     const ownerDeleteBatch = writeBatch(ownerDb);
     ownerDeleteBatch.delete(doc(ownerDb, "publicNoteShares/expired-queued/attachments/attachment-a"));
     ownerDeleteBatch.delete(doc(ownerDb, "publicNoteShares/expired-queued"));
-    await assertSucceeds(ownerDeleteBatch.commit());
+    await assertFails(ownerDeleteBatch.commit());
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await deleteDoc(doc(context.firestore(), "publicNoteShares/expired-queued/attachments/attachment-a"));
+    });
+    await assertSucceeds(deleteDoc(doc(ownerDb, "publicNoteShares/expired-queued")));
 
     await testEnv.withSecurityRulesDisabled(async (context) => {
       expect((await getDoc(doc(context.firestore(), "publicShareCleanupQueue/expired-queued"))).exists()).toBe(true);
@@ -1632,7 +2000,7 @@ describeRules("firestore security rules", () => {
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     await assertSucceeds(
-      setDoc(doc(ownerDb, "notes/note-a"), {
+      createAuditedNote(ownerDb, "note-a", "user-a", {
         type: "shared",
         ownerUid: "user-a",
         participantUids: ["user-a", "user-b"],
@@ -1642,40 +2010,33 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
-        isDeleted: false,
-        updatedBy: "user-a"
-      })
+        isDeleted: false
+      }, ["user-a", "user-b"])
     );
 
     await expect(getDoc(doc(ownerDb, "notes/note-a"))).resolves.toBeTruthy();
     await assertSucceeds(
-      setDoc(doc(ownerDb, "notes/note-a"), {
+      updateAuditedNote(ownerDb, "note-a", "user-a", 2, "share", ["participants"], ["user-a"], {
         type: "personal",
-        ownerUid: "user-a",
         participantUids: ["user-a"],
-        encryptedTitle: encryptedPayload,
-        encryptedBody: encryptedPayload,
         wrappedKeys: {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
         },
-        isDeleted: false,
-        updatedBy: "user-a"
+        folderId: null,
+        isDeleted: false
       })
     );
 
     await assertSucceeds(
-      setDoc(doc(ownerDb, "notes/note-a"), {
+      updateAuditedNote(ownerDb, "note-a", "user-a", 3, "share", ["participants"], ["user-a", "user-b"], {
         type: "shared",
-        ownerUid: "user-a",
         participantUids: ["user-a", "user-b"],
-        encryptedTitle: encryptedPayload,
-        encryptedBody: encryptedPayload,
         wrappedKeys: {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
-        isDeleted: false,
-        updatedBy: "user-a"
+        folderId: null,
+        isDeleted: false
       })
     );
 
@@ -1806,6 +2167,16 @@ describeRules("firestore security rules", () => {
       );
     }
 
+    await assertSucceeds(
+      createAuditedNote(ownerDb, "valid-attachment-revision", "user-a", { ...baseNote, attachmentRevision: 0 }, ["user-a"])
+    );
+    await assertFails(
+      createAuditedNote(ownerDb, "negative-attachment-revision", "user-a", { ...baseNote, attachmentRevision: -1 }, ["user-a"])
+    );
+    await assertFails(
+      createAuditedNote(ownerDb, "fractional-attachment-revision", "user-a", { ...baseNote, attachmentRevision: 1.5 }, ["user-a"])
+    );
+
     await assertFails(
       updateDoc(doc(ownerDb, "notes/valid-note"), {
         updatedAt: "not-a-timestamp"
@@ -1843,13 +2214,14 @@ describeRules("firestore security rules", () => {
     );
 
     await assertSucceeds(
-      updateDoc(doc(ownerDb, "notes/revoked-share"), {
+      updateAuditedNote(ownerDb, "revoked-share", "user-a", 1, "share", ["participants"], ["user-a"], {
         type: "personal",
         participantUids: ["user-a"],
         wrappedKeys: {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
         },
-        updatedBy: "user-a"
+        folderId: null,
+        isDeleted: false
       })
     );
   });
@@ -1864,7 +2236,7 @@ describeRules("firestore security rules", () => {
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
 
     await assertSucceeds(
-      setDoc(doc(ownerDb, "notes/approved-share"), {
+      createAuditedNote(ownerDb, "approved-share", "user-a", {
         type: "shared",
         ownerUid: "user-a",
         participantUids: ["user-a", "user-b"],
@@ -1874,9 +2246,8 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
-        isDeleted: false,
-        updatedBy: "user-a"
-      })
+        isDeleted: false
+      }, ["user-a", "user-b"])
     );
 
     await assertFails(
@@ -1908,7 +2279,7 @@ describeRules("firestore security rules", () => {
     const adminDb = testEnv.authenticatedContext("admin-a").firestore();
 
     await assertSucceeds(
-      setDoc(doc(adminDb, "notes/admin-open-share"), {
+      createAuditedNote(adminDb, "admin-open-share", "admin-a", {
         type: "shared",
         ownerUid: "admin-a",
         participantUids: ["admin-a", "user-c"],
@@ -1918,9 +2289,8 @@ describeRules("firestore security rules", () => {
           "admin-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "admin" },
           "user-c": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "c" }
         },
-        isDeleted: false,
-        updatedBy: "admin-a"
-      })
+        isDeleted: false
+      }, ["admin-a", "user-c"])
     );
   });
 
@@ -2015,7 +2385,13 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDocs(query(collection(adminDb, "notes"), where("isDeleted", "==", false), orderBy("updatedAt", "desc"))));
     await assertFails(getDoc(doc(outsiderDb, "notes/note-personal")));
     await assertFails(deleteDoc(doc(adminDb, "notes/note-personal")));
-    await assertSucceeds(updateDoc(doc(adminDb, "notes/note-personal"), softDeleteFields("admin-a")));
+    await assertSucceeds(
+      updateAuditedNote(adminDb, "note-personal", "admin-a", 1, "delete", ["deleted"], ["user-a"], {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "admin-a"
+      })
+    );
   });
 
   it("allows admins to soft-delete shared notes and blocks other non-owner participants", async () => {
@@ -2056,14 +2432,32 @@ describeRules("firestore security rules", () => {
     await assertFails(updateDoc(doc(testEnv.authenticatedContext("user-b").firestore(), "notes/note-user-shared"), softDeleteFields("user-b")));
     await assertFails(deleteDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-user-shared")));
     await assertSucceeds(
-      updateDoc(doc(testEnv.authenticatedContext("admin-b").firestore(), "notes/note-user-shared"), softDeleteFields("admin-b"))
+      updateAuditedNote(
+        testEnv.authenticatedContext("admin-b").firestore(),
+        "note-user-shared",
+        "admin-b",
+        1,
+        "delete",
+        ["deleted"],
+        ["user-a", "user-b"],
+        { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "admin-b" }
+      )
     );
     await assertSucceeds(
-      updateDoc(doc(testEnv.authenticatedContext("admin-a").firestore(), "notes/note-admin-shared"), softDeleteFields("admin-a"))
+      updateAuditedNote(
+        testEnv.authenticatedContext("admin-a").firestore(),
+        "note-admin-shared",
+        "admin-a",
+        1,
+        "delete",
+        ["deleted"],
+        ["user-a", "user-b", "admin-a"],
+        { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "admin-a" }
+      )
     );
   });
 
-  it("allows note participants to create and read encrypted attachments", async () => {
+  it("allows participants to read backend-created encrypted attachments while blocking direct client creation", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
@@ -2080,16 +2474,17 @@ describeRules("firestore security rules", () => {
         isDeleted: false,
         updatedBy: "user-a"
       });
+      await setDoc(doc(context.firestore(), "notes/note-a/attachments/backend-created"), attachmentDocument("note-a"));
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
 
-    await assertSucceeds(setDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a"), attachmentDocument("note-a")));
-    await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/attachments/attachment-a")));
+    await assertFails(setDoc(doc(ownerDb, "notes/note-a/attachments/client-created"), attachmentDocument("note-a")));
+    await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/attachments/backend-created")));
   });
 
-  it("allows Storage-backed ZIP attachments up to 10 MiB and validates their storage metadata", async () => {
+  it("keeps backend-created Storage attachment metadata readable while denying client reservations and ready writes", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
       await setDoc(doc(context.firestore(), "notes/note-a"), {
@@ -2104,14 +2499,18 @@ describeRules("firestore security rules", () => {
         isDeleted: false,
         updatedBy: "user-a"
       });
+      await setDoc(
+        doc(context.firestore(), "notes/note-a/attachments/storage-zip"),
+        storedAttachmentDocument("note-a", "storage-zip")
+      );
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
 
-    await assertSucceeds(
+    await assertFails(
       setDoc(
-        doc(ownerDb, "notes/note-a/attachments/storage-zip"),
-        storedAttachmentDocument("note-a", "storage-zip")
+        doc(ownerDb, "notes/note-a/attachments/client-reservation"),
+        storedAttachmentDocument("note-a", "client-reservation")
       )
     );
     await testEnv.withSecurityRulesDisabled(async (context) => {
@@ -2125,11 +2524,15 @@ describeRules("firestore security rules", () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: true });
     });
-    await assertSucceeds(
+    await assertFails(
       updateDoc(doc(ownerDb, "notes/note-a/attachments/storage-zip"), {
         isReady: true
       })
     );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/note-a/attachments/storage-zip"), { isReady: true });
+    });
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a/attachments/storage-zip")));
     await assertFails(
       updateDoc(doc(ownerDb, "notes/note-a/attachments/storage-zip"), {
         storagePath: "notes/note-a/attachments/other/data"
@@ -2154,7 +2557,62 @@ describeRules("firestore security rules", () => {
     );
   });
 
-  it("blocks direct note deletes and keeps attachments deletable after soft delete", async () => {
+  it("blocks every client attachment ready/delete mutation, including after revocation or source deletion", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      for (const attachmentId of ["allowed-ready", "revoked-ready", "deleted-ready"]) {
+        await setDoc(
+          doc(db, `notes/note-a/attachments/${attachmentId}`),
+          storedAttachmentDocument("note-a", attachmentId, { uploadedBy: "user-b" })
+        );
+      }
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+
+    await assertFails(
+      updateDoc(doc(participantDb, "notes/note-a/attachments/allowed-ready"), { isReady: true })
+    );
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/note-a/attachments/allowed-ready"), { isReady: true });
+    });
+    await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/attachments/allowed-ready")));
+    await assertFails(deleteDoc(doc(participantDb, "notes/note-a/attachments/revoked-ready")));
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { allowedShareTargetUids: ["user-a"] });
+    });
+    await assertFails(
+      updateDoc(doc(participantDb, "notes/note-a/attachments/revoked-ready"), { isReady: true })
+    );
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), { allowedShareTargetUids: ["user-a", "user-b"] });
+      await updateDoc(doc(context.firestore(), "notes/note-a"), { isDeleted: true });
+    });
+    await assertFails(
+      updateDoc(doc(participantDb, "notes/note-a/attachments/deleted-ready"), { isReady: true })
+    );
+    await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/attachments/deleted-ready")));
+  });
+
+  it("blocks direct note and attachment deletes so cleanup must use the trusted API", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
@@ -2178,7 +2636,13 @@ describeRules("firestore security rules", () => {
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a")));
-    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), softDeleteFields("user-a")));
+    await assertSucceeds(
+      updateAuditedNote(ownerDb, "note-a", "user-a", 1, "delete", ["deleted"], ["user-a", "user-b"], {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a"
+      })
+    );
     await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a")));
     await assertFails(getDoc(doc(participantDb, "notes/note-a")));
     await assertSucceeds(
@@ -2205,7 +2669,7 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
     await assertFails(getDoc(doc(participantDb, "notes/note-a/attachments/attachment-a")));
     await assertFails(setDoc(doc(ownerDb, "notes/note-a/attachments/attachment-b"), attachmentDocument("note-a")));
-    await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
+    await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
   });
 
   it("allows owners to restore soft-deleted notes and blocks non-owners", async () => {
@@ -2230,7 +2694,13 @@ describeRules("firestore security rules", () => {
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertFails(updateDoc(doc(participantDb, "notes/note-a"), restoreFields("user-b")));
-    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), restoreFields("user-a")));
+    await assertSucceeds(
+      updateAuditedNote(ownerDb, "note-a", "user-a", 1, "restore", ["restored"], ["user-a", "user-b"], {
+        isDeleted: false,
+        deletedAt: deleteField(),
+        deletedBy: deleteField()
+      })
+    );
   });
 
   it("allows history cleanup only after the soft-deleted note is irreversibly purged", async () => {
@@ -2257,14 +2727,120 @@ describeRules("firestore security rules", () => {
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a")));
-    await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
+    await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/history/history-a")));
-    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), restoreFields("user-a")));
-    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), softDeleteFields("user-a")));
-    await assertSucceeds(updateDoc(doc(ownerDb, "notes/note-a"), purgeFields("user-a")));
+    await assertSucceeds(
+      updateAuditedNote(ownerDb, "note-a", "user-a", 1, "restore", ["restored"], ["user-a", "user-b"], {
+        isDeleted: false,
+        deletedAt: deleteField(),
+        deletedBy: deleteField()
+      })
+    );
+    await assertSucceeds(
+      updateAuditedNote(ownerDb, "note-a", "user-a", 2, "delete", ["deleted"], ["user-a", "user-b"], {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a"
+      })
+    );
+    const purgeUpdates = {
+      type: "personal",
+      participantUids: ["user-a"],
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+      },
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      deletedAt: deleteField(),
+      deletedBy: deleteField(),
+      isPurged: true,
+      purgedAt: serverTimestamp(),
+      purgedBy: "user-a",
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: "user-a"
+    };
+
+    await assertFails(updateDoc(doc(ownerDb, "notes/note-a"), purgeUpdates));
+    await assertFails(
+      setDoc(doc(participantDb, "notePurgeCleanupQueue/note-a"), {
+        noteId: "note-a",
+        ownerUid: "user-a",
+        createdAt: serverTimestamp()
+      })
+    );
+
+    const wrongQueueBatch = writeBatch(ownerDb);
+    wrongQueueBatch.update(doc(ownerDb, "notes/note-a"), purgeUpdates);
+    wrongQueueBatch.set(doc(ownerDb, "notePurgeCleanupQueue/note-a"), {
+      noteId: "note-a",
+      ownerUid: "user-b",
+      createdAt: serverTimestamp()
+    });
+    await assertFails(wrongQueueBatch.commit());
+
+    const purgeBatch = writeBatch(ownerDb);
+    purgeBatch.update(doc(ownerDb, "notes/note-a"), purgeUpdates);
+    purgeBatch.set(doc(ownerDb, "notePurgeCleanupQueue/note-a"), {
+      noteId: "note-a",
+      ownerUid: "user-a",
+      createdAt: serverTimestamp()
+    });
+    await assertSucceeds(purgeBatch.commit());
+    await assertFails(getDoc(doc(ownerDb, "notePurgeCleanupQueue/note-a")));
+    await assertFails(getDoc(doc(participantDb, "notePurgeCleanupQueue/note-a")));
     await assertFails(updateDoc(doc(ownerDb, "notes/note-a"), restoreFields("user-a")));
+    await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
     await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/history/history-a")));
     await assertFails(getDoc(doc(participantDb, "notes/note-a")));
+  });
+
+  it("allows an active admin to enqueue cleanup for a purged note while preserving the source owner id", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true }));
+      await setDoc(doc(db, "notes/note-a"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        ...softDeleteFields("user-a")
+      });
+    });
+
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const batch = writeBatch(adminDb);
+    batch.update(doc(adminDb, "notes/note-a"), {
+      type: "personal",
+      participantUids: ["admin-a"],
+      wrappedKeys: {
+        "admin-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "admin" }
+      },
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      deletedAt: deleteField(),
+      deletedBy: deleteField(),
+      isPurged: true,
+      purgedAt: serverTimestamp(),
+      purgedBy: "admin-a",
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: "admin-a"
+    });
+    batch.set(doc(adminDb, "notePurgeCleanupQueue/note-a"), {
+      noteId: "note-a",
+      ownerUid: "user-a",
+      createdAt: serverTimestamp()
+    });
+
+    await assertSucceeds(batch.commit());
+    await assertFails(getDoc(doc(adminDb, "notes/note-a")));
+    await assertFails(getDoc(doc(adminDb, "notePurgeCleanupQueue/note-a")));
   });
 
   it("allows users to manage only their own note state for accessible notes", async () => {
@@ -2345,6 +2921,7 @@ describeRules("firestore security rules", () => {
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     const createdNoteRef = doc(ownerDb, "notes/note-created");
     const createBatch = writeBatch(ownerDb);
+    const createHistoryId = noteRevisionId(1);
 
     createBatch.set(createdNoteRef, {
       type: "shared",
@@ -2360,15 +2937,17 @@ describeRules("firestore security rules", () => {
       isDeleted: false,
       updatedAt: serverTimestamp(),
       savedAt: serverTimestamp(),
-      updatedBy: "user-a"
+      updatedBy: "user-a",
+      revision: 1,
+      lastMutationId: createHistoryId
     });
     createBatch.set(
-      doc(ownerDb, "notes/note-created/history/create-a"),
-      noteHistory("note-created", "user-a", { action: "create", changedFields: ["title", "body"] })
+      doc(ownerDb, "notes/note-created/history", createHistoryId),
+      noteHistory("note-created", "user-a", { action: "create", changedFields: ["title", "body"], revision: 1 })
     );
     await assertSucceeds(createBatch.commit());
 
-    const historyRef = doc(participantDb, "notes/note-a/history/history-a");
+    const historyRef = doc(participantDb, "notes/note-a/history", noteRevisionId(1));
 
     await assertFails(setDoc(historyRef, noteHistory("note-a", "user-b")));
     await assertFails(
@@ -2382,21 +2961,77 @@ describeRules("firestore security rules", () => {
     firstBatch.update(doc(participantDb, "notes/note-a"), {
       encryptedBody: { ...encryptedPayload, cipherText: "updated-body" },
       updatedAt: serverTimestamp(),
-      updatedBy: "user-b"
+      updatedBy: "user-b",
+      revision: 1,
+      lastMutationId: noteRevisionId(1)
     });
-    firstBatch.set(historyRef, noteHistory("note-a", "user-b", { changedFields: ["body"] }));
+    firstBatch.set(historyRef, noteHistory("note-a", "user-b", { changedFields: ["body"], revision: 1 }));
     await assertSucceeds(firstBatch.commit());
 
     const secondBatch = writeBatch(participantDb);
+    const secondHistoryRef = doc(participantDb, "notes/note-a/history", noteRevisionId(2));
     secondBatch.update(doc(participantDb, "notes/note-a"), {
       encryptedTitle: { ...encryptedPayload, cipherText: "updated-title" },
       updatedAt: serverTimestamp(),
-      updatedBy: "user-b"
+      updatedBy: "user-b",
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
     });
-    secondBatch.set(historyRef, noteHistory("note-a", "user-b", { changedFields: ["title"] }));
+    secondBatch.set(secondHistoryRef, noteHistory("note-a", "user-b", { changedFields: ["title"], revision: 2 }));
     await assertSucceeds(secondBatch.commit());
 
     await assertSucceeds(getDoc(historyRef));
+    await assertFails(
+      updateDoc(doc(participantDb, "notes/note-a"), {
+        encryptedBody: { ...encryptedPayload, cipherText: "missing-history" },
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-b",
+        revision: 3,
+        lastMutationId: noteRevisionId(3)
+      })
+    );
+    const forgedActorBatch = writeBatch(participantDb);
+    forgedActorBatch.update(doc(participantDb, "notes/note-a"), {
+      encryptedBody: { ...encryptedPayload, cipherText: "forged-actor" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 3,
+      lastMutationId: noteRevisionId(3)
+    });
+    forgedActorBatch.set(
+      doc(participantDb, "notes/note-a/history", noteRevisionId(3)),
+      noteHistory("note-a", "user-b", { changedFields: ["body"], revision: 3 })
+    );
+    await assertFails(forgedActorBatch.commit());
+    const skippedRevisionBatch = writeBatch(participantDb);
+    skippedRevisionBatch.update(doc(participantDb, "notes/note-a"), {
+      encryptedBody: { ...encryptedPayload, cipherText: "skipped-revision" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-b",
+      revision: 4,
+      lastMutationId: noteRevisionId(4)
+    });
+    skippedRevisionBatch.set(
+      doc(participantDb, "notes/note-a/history", noteRevisionId(4)),
+      noteHistory("note-a", "user-b", { changedFields: ["body"], revision: 4 })
+    );
+    await assertFails(skippedRevisionBatch.commit());
+    const forgedTimestampBatch = writeBatch(participantDb);
+    forgedTimestampBatch.update(doc(participantDb, "notes/note-a"), {
+      encryptedBody: { ...encryptedPayload, cipherText: "forged-time" },
+      updatedAt: new Date("2026-05-18T09:00:00.000Z"),
+      updatedBy: "user-b",
+      revision: 3,
+      lastMutationId: noteRevisionId(3)
+    });
+    forgedTimestampBatch.set(
+      doc(participantDb, "notes/note-a/history", noteRevisionId(3)),
+      noteHistory("note-a", "user-b", { changedFields: ["body"], revision: 3 })
+    );
+    await assertFails(forgedTimestampBatch.commit());
+    await assertFails(
+      setDoc(historyRef, noteHistory("note-a", "user-b", { changedFields: ["body"], revision: 1 }))
+    );
     await assertFails(
       setDoc(
         doc(participantDb, "notes/note-a/history/forged-share"),
@@ -2421,13 +3056,64 @@ describeRules("firestore security rules", () => {
     mismatchedReaderBatch.update(doc(participantDb, "notes/note-a"), {
       encryptedBody: { ...encryptedPayload, cipherText: "reader-mismatch" },
       updatedAt: serverTimestamp(),
-      updatedBy: "user-b"
+      updatedBy: "user-b",
+      revision: 3,
+      lastMutationId: noteRevisionId(3)
     });
     mismatchedReaderBatch.set(
-      doc(participantDb, "notes/note-a/history/reader-mismatch"),
-      noteHistory("note-a", "user-b", { changedFields: ["body"], readerUids: ["user-b"] })
+      doc(participantDb, "notes/note-a/history", noteRevisionId(3)),
+      noteHistory("note-a", "user-b", { changedFields: ["body"], readerUids: ["user-b"], revision: 3 })
     );
     await assertFails(mismatchedReaderBatch.commit());
+  });
+
+  it("allows random mutation ids to advance even when a deterministic future history id was pre-reserved", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+    });
+
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+    const commitContentMutation = async (revision: number, historyId: string, cipherText: string) => {
+      const batch = writeBatch(participantDb);
+      batch.update(doc(participantDb, "notes/note-a"), {
+        encryptedBody: { ...encryptedPayload, cipherText },
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-b",
+        revision,
+        lastMutationId: historyId
+      });
+      batch.set(
+        doc(participantDb, "notes/note-a/history", historyId),
+        noteHistory("note-a", "user-b", { changedFields: ["body"], revision })
+      );
+      return batch.commit();
+    };
+
+    const preReservedFutureId = noteRevisionId(3);
+    await assertSucceeds(commitContentMutation(1, preReservedFutureId, "reserved-future-id"));
+    await assertSucceeds(commitContentMutation(2, "mutation-random-id-0002", "random-revision-2"));
+    await assertSucceeds(commitContentMutation(3, "mutation-random-id-0003", "random-revision-3"));
+
+    const noteSnapshot = await getDoc(doc(participantDb, "notes/note-a"));
+    const reservedSnapshot = await getDoc(doc(participantDb, "notes/note-a/history", preReservedFutureId));
+    expect(noteSnapshot.data()?.revision).toBe(3);
+    expect(noteSnapshot.data()?.lastMutationId).toBe("mutation-random-id-0003");
+    expect(reservedSnapshot.data()?.revision).toBe(1);
   });
 
   it("limits history snapshot reads to users authorized when the snapshot was created", async () => {
@@ -2572,6 +3258,35 @@ describeRules("firestore security rules", () => {
         isDeleted: false,
         updatedBy: "user-b"
       });
+      await setDoc(doc(context.firestore(), "notes/note-deleted"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        isDeleted: true,
+        deletedAt: new Date("2026-05-18T10:00:00.000Z"),
+        deletedBy: "user-a",
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(context.firestore(), "notes/note-purged"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        isDeleted: true,
+        isPurged: true,
+        purgedAt: new Date("2026-05-18T11:00:00.000Z"),
+        purgedBy: "user-a",
+        updatedBy: "user-a"
+      });
     });
 
     const userDb = testEnv.authenticatedContext("user-a").firestore();
@@ -2601,6 +3316,20 @@ describeRules("firestore security rules", () => {
       setDoc(doc(userDb, "activeNotes/user-a"), {
         uid: "user-a",
         noteId: "note-b",
+        updatedByClientId: "client-a"
+      })
+    );
+    await assertFails(
+      setDoc(doc(userDb, "activeNotes/user-a"), {
+        uid: "user-a",
+        noteId: "note-deleted",
+        updatedByClientId: "client-a"
+      })
+    );
+    await assertFails(
+      setDoc(doc(userDb, "activeNotes/user-a"), {
+        uid: "user-a",
+        noteId: "note-purged",
         updatedByClientId: "client-a"
       })
     );

@@ -10,6 +10,7 @@ import {
   generateNoteKey,
   generateUserKeyBundle,
   hashPublicSharePassword,
+  importAesKeyBase64Url,
   unlockPrivateKey,
   unwrapNoteKey,
   verifyPublicSharePassword,
@@ -24,6 +25,24 @@ describe("client encryption", () => {
     const encrypted = await encryptText("실시간 개인 메모", noteKey);
 
     await expect(decryptText(encrypted, noteKey)).resolves.toBe("실시간 개인 메모");
+  });
+
+  it("accepts only canonical 32-byte AES keys before base64 decoding", async () => {
+    const exported = await exportAesKeyBase64Url(await generateNoteKey());
+
+    expect(exported).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    await expect(importAesKeyBase64Url(exported)).resolves.toMatchObject({
+      algorithm: { name: "AES-GCM", length: 256 }
+    });
+    await expect(importAesKeyBase64Url("A".repeat(1_000_000))).rejects.toThrow(
+      "Invalid AES-256 key encoding."
+    );
+    await expect(importAesKeyBase64Url(`${exported}=`)).rejects.toThrow(
+      "Invalid AES-256 key encoding."
+    );
+    await expect(importAesKeyBase64Url("A".repeat(42))).rejects.toThrow(
+      "Invalid AES-256 key encoding."
+    );
   });
 
   it("keeps note tab characters through editor serialization and AES-GCM encryption", async () => {

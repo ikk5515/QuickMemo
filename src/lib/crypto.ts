@@ -372,7 +372,15 @@ export async function exportAesKeyBase64Url(key: CryptoKey) {
 }
 
 export async function importAesKeyBase64Url(value: string) {
+  if (value.length !== 43 || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
+    throw new Error("Invalid AES-256 key encoding.");
+  }
+
   const rawKey = base64ToBytes(base64FromBase64Url(value));
+
+  if (rawKey.byteLength !== 32) {
+    throw new Error("Invalid AES-256 key length.");
+  }
 
   return crypto.subtle.importKey(
     "raw",

@@ -3,9 +3,20 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const notesPageSource = readFileSync(join(process.cwd(), "src/pages/NotesPage.tsx"), "utf8");
+const documentPreviewSource = readFileSync(join(process.cwd(), "src/lib/documentPreview.ts"), "utf8");
 const pdfPreviewCanvasSource = readFileSync(join(process.cwd(), "src/lib/pdfPreviewCanvas.ts"), "utf8");
 
 describe("NotesPage security controls", () => {
+  it("keeps bounded document parsing in the shared preview module", () => {
+    expect(notesPageSource).toContain('from "../lib/documentPreview"');
+    expect(notesPageSource).not.toContain("function safeZipPreviewEntries");
+    expect(notesPageSource).not.toContain("function decompressHwpSectionBytes");
+    expect(documentPreviewSource).toContain("export async function renderSafeDocxPreviewSrcDoc");
+    expect(documentPreviewSource).toContain("export async function extractHwpPreviewHtml");
+    expect(documentPreviewSource).toContain("export function extractHwpxPreviewHtml");
+    expect(documentPreviewSource).toContain("export function extractXlsxPreviewHtml");
+  });
+
   it("renders PDF previews through bounded canvas rendering without plugin or iframe surfaces", () => {
     const pdfPreviewBranch = notesPageSource.match(/preview\.kind === "pdf" && preview\.bytes \? \([\s\S]*?\) : preview\.kind === "docx"/)?.[0] ?? "";
 
@@ -34,8 +45,8 @@ describe("NotesPage security controls", () => {
 
   it("renders DOCX previews through sanitized sandboxed srcDoc instead of the live app DOM", () => {
     const docxPreviewBranch = notesPageSource.match(/preview\.kind === "docx" \? \([\s\S]*?\) : preview\.kind === "hwp"/)?.[0] ?? "";
-    const docxRenderHelper = notesPageSource.match(/async function renderSafeDocxPreviewSrcDoc[\s\S]*?function docxSandboxSrcDoc/)?.[0] ?? "";
-    const docxSrcDocHelper = notesPageSource.match(/function docxSandboxSrcDoc[\s\S]*?function sanitizeDocxPreviewTree/)?.[0] ?? "";
+    const docxRenderHelper = documentPreviewSource.match(/async function renderSafeDocxPreviewSrcDoc[\s\S]*?function docxSandboxSrcDoc/)?.[0] ?? "";
+    const docxSrcDocHelper = documentPreviewSource.match(/function docxSandboxSrcDoc[\s\S]*?function sanitizeDocxPreviewTree/)?.[0] ?? "";
 
     expect(docxPreviewBranch).toContain("<iframe");
     expect(docxPreviewBranch).toContain('sandbox=""');
@@ -46,30 +57,31 @@ describe("NotesPage security controls", () => {
     expect(docxRenderHelper).toContain("sanitizeDocxPreviewTree");
     expect(docxRenderHelper).not.toContain("renderAsync(preview.bytes");
     expect(docxSrcDocHelper).toContain("Content-Security-Policy");
-    expect(notesPageSource).toContain("script-src 'none'");
+    expect(documentPreviewSource).toContain("script-src 'none'");
     expect(notesPageSource).toContain('document.documentElement.dataset.theme === "dark" ? "dark" : "light"');
     expect(docxSrcDocHelper).toContain("data-theme=\"${theme}\"");
     expect(docxSrcDocHelper).toContain("background:#09090b");
   });
 
   it("filters active DOCX preview links, resources, and event attributes before sandboxing", () => {
-    expect(notesPageSource).toContain("function sanitizeDocxPreviewAttributes");
-    expect(notesPageSource).toContain("attributeName.startsWith(\"on\")");
-    expect(notesPageSource).toContain("function safeDocxPreviewHref");
-    expect(notesPageSource).toContain("url.protocol === \"http:\" || url.protocol === \"https:\"");
-    expect(notesPageSource).toContain("function safeDocxPreviewImageSrc");
-    expect(notesPageSource).toContain("sanitizeDocxPreviewCss");
+    expect(documentPreviewSource).toContain("function sanitizeDocxPreviewAttributes");
+    expect(documentPreviewSource).toContain("attributeName.startsWith(\"on\")");
+    expect(documentPreviewSource).toContain("function safeDocxPreviewHref");
+    expect(documentPreviewSource).toContain("url.protocol === \"http:\" || url.protocol === \"https:\"");
+    expect(documentPreviewSource).toContain("function safeDocxPreviewImageSrc");
+    expect(documentPreviewSource).toContain("return safeRasterDataUrl(trimmedValue)");
+    expect(documentPreviewSource).toContain("sanitizeDocxPreviewCss");
   });
 
   it("bounds ZIP-container previews before inflating DOCX, HWPX, and XLSX attachments", () => {
-    const docxRenderHelper = notesPageSource.match(/async function renderSafeDocxPreviewSrcDoc[\s\S]*?function docxSandboxSrcDoc/)?.[0] ?? "";
-    const zipGuardHelper = notesPageSource.match(/function safeZipPreviewEntries[\s\S]*?interface HwpPreviewResult/)?.[0] ?? "";
-    const hwpxExtractor = notesPageSource.match(/function extractHwpxPreviewHtml[\s\S]*?function extractXlsxPreviewHtml/)?.[0] ?? "";
-    const xlsxExtractor = notesPageSource.match(/function extractXlsxPreviewHtml[\s\S]*?function xlsxPreviewEntryAllowed/)?.[0] ?? "";
+    const docxRenderHelper = documentPreviewSource.match(/async function renderSafeDocxPreviewSrcDoc[\s\S]*?function docxSandboxSrcDoc/)?.[0] ?? "";
+    const zipGuardHelper = documentPreviewSource.match(/function safeZipPreviewEntries[\s\S]*?interface HwpPreviewResult/)?.[0] ?? "";
+    const hwpxExtractor = documentPreviewSource.match(/function extractHwpxPreviewHtml[\s\S]*?function extractXlsxPreviewHtml/)?.[0] ?? "";
+    const xlsxExtractor = documentPreviewSource.match(/function extractXlsxPreviewHtml[\s\S]*?function xlsxPreviewEntryAllowed/)?.[0] ?? "";
 
-    expect(notesPageSource).toContain("const maxZipPreviewEntries = 512");
-    expect(notesPageSource).toContain("const maxDocxPreviewUncompressedBytes = 12_000_000");
-    expect(notesPageSource).toContain("const maxZipPreviewCompressionRatio = 120");
+    expect(documentPreviewSource).toContain("const maxZipPreviewEntries = 512");
+    expect(documentPreviewSource).toContain("const maxDocxPreviewUncompressedBytes = 12_000_000");
+    expect(documentPreviewSource).toContain("const maxZipPreviewCompressionRatio = 120");
     expect(docxRenderHelper).toContain("safeZipPreviewEntries(bytes");
     expect(docxRenderHelper.indexOf("safeZipPreviewEntries(bytes")).toBeGreaterThanOrEqual(0);
     expect(docxRenderHelper.indexOf("safeZipPreviewEntries(bytes")).toBeLessThan(docxRenderHelper.indexOf("renderAsync"));
@@ -83,7 +95,7 @@ describe("NotesPage security controls", () => {
     expect(hwpxExtractor).toContain("includeEntry: (name) => hwpxPreviewEntryPriority(name) > 0");
     expect(xlsxExtractor).toContain("safeZipPreviewEntries(bytes");
     expect(xlsxExtractor).toContain("includeEntry: xlsxPreviewEntryAllowed");
-    expect(notesPageSource).not.toContain("unzipSync(bytes);");
+    expect(documentPreviewSource).not.toContain("unzipSync(bytes);");
   });
 
   it("routes dragged attachment files through the controlled upload flow", () => {
@@ -97,31 +109,37 @@ describe("NotesPage security controls", () => {
   });
 
   it("surfaces controlled Blob upload progress without exposing attachment bytes", () => {
+    const attachmentUploadFlow =
+      notesPageSource.match(/async function uploadAttachmentFiles[\s\S]*?async function noteKeyForDownload/)?.[0] ?? "";
+
     expect(notesPageSource).toContain("AttachmentUploadProgressToast");
     expect(notesPageSource).toContain("role=\"progressbar\"");
     expect(notesPageSource).toContain("onUploadProgress: (progress) =>");
     expect(notesPageSource).toContain("attachmentUploadOverallPercent");
     expect(notesPageSource).toContain("encryptAttachmentBlob(file, noteTarget.noteKey");
     expect(notesPageSource).toContain("reencryptAttachmentBlob(");
-    expect(notesPageSource).not.toContain("new Uint8Array(await file.arrayBuffer())");
-    expect(notesPageSource).not.toContain("encryptBytes(fileBytes");
-    expect(notesPageSource).not.toContain("setAttachmentUploadProgress(encryptedFile");
+    expect(attachmentUploadFlow).not.toContain("new Uint8Array(await file.arrayBuffer())");
+    expect(attachmentUploadFlow).not.toContain("encryptBytes(fileBytes");
+    expect(attachmentUploadFlow).not.toContain("setAttachmentUploadProgress(encryptedFile");
+    expect(notesPageSource).toContain(
+      "safeRasterImageBytes(new Uint8Array(await file.arrayBuffer()), mimeType)",
+    );
   });
 
   it("bounds XLSX XML parsing and shared-string enumeration after safe unzip", () => {
     const xlsxXmlHelper =
-      notesPageSource.match(/function xlsxXmlDocument[\s\S]*?function xlsxEntryText/)?.[0] ?? "";
+      documentPreviewSource.match(/function xlsxXmlDocument[\s\S]*?function xlsxEntryText/)?.[0] ?? "";
     const xlsxTextHelper =
-      notesPageSource.match(/function xlsxEntryText[\s\S]*?interface XlsxFontStyle/)?.[0] ?? "";
+      documentPreviewSource.match(/function xlsxEntryText[\s\S]*?interface XlsxFontStyle/)?.[0] ?? "";
     const sharedStringsHelper =
-      notesPageSource.match(/function xlsxSharedStrings[\s\S]*?function xlsxWorkbookSheets/)?.[0] ?? "";
+      documentPreviewSource.match(/function xlsxSharedStrings[\s\S]*?function xlsxWorkbookSheets/)?.[0] ?? "";
     const worksheetHelper =
-      notesPageSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";
+      documentPreviewSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";
     const stylesHelper =
-      notesPageSource.match(/function xlsxStyles[\s\S]*?function xlsxFontStyle/)?.[0] ?? "";
+      documentPreviewSource.match(/function xlsxStyles[\s\S]*?function xlsxFontStyle/)?.[0] ?? "";
 
-    expect(notesPageSource).toContain("const maxXlsxSharedStringsXmlCharacters = 1_500_000");
-    expect(notesPageSource).toContain("const maxXlsxWorksheetXmlCharacters = 1_500_000");
+    expect(documentPreviewSource).toContain("const maxXlsxSharedStringsXmlCharacters = 1_500_000");
+    expect(documentPreviewSource).toContain("const maxXlsxWorksheetXmlCharacters = 1_500_000");
     expect(xlsxXmlHelper).toContain("xlsxEntryText(entry, maxCharacters)");
     expect(xlsxTextHelper).toContain("entry.length > maxCharacters");
     expect(xlsxTextHelper).toContain("markup.length <= maxCharacters");
@@ -178,7 +196,9 @@ describe("NotesPage security controls", () => {
       notesPageSource.match(/useEffect\(\(\) => \{\n {4}const remoteDraft = draftFromNote\(note\);[\s\S]*?\}, \[draftDirty, isEditing, note\]\);/)?.[0] ?? "";
 
     expect(activeEditorSync).toContain("if (editor.dirty && !contentMatches)");
-    expect(activeEditorSync.indexOf("if (editor.dirty && !contentMatches)")).toBeLessThan(activeEditorSync.indexOf("setEditor((current) =>"));
+    expect(activeEditorSync.indexOf("if (editor.dirty && !contentMatches)")).toBeLessThan(
+      activeEditorSync.indexOf("title: remoteDraft.title")
+    );
     expect(previewModalSync).toContain("if (isEditing && draftDirty)");
     expect(previewModalSync.indexOf("if (isEditing && draftDirty)")).toBeLessThan(previewModalSync.indexOf("setDraft(remoteDraft)"));
     expect(previewModalSync).toContain("현재 편집 중인 내용은 유지했습니다.");
@@ -215,15 +235,15 @@ describe("NotesPage security controls", () => {
 
   it("bounds XLSX merge ranges before materializing skipped preview cells", () => {
     const worksheetHelper =
-      notesPageSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";
+      documentPreviewSource.match(/function renderXlsxWorksheet[\s\S]*?function renderXlsxRow/)?.[0] ?? "";
     const mergeHelper =
-      notesPageSource.match(/function xlsxMergeInfo[\s\S]*?function xlsxMaxColumnIndex/)?.[0] ?? "";
+      documentPreviewSource.match(/function xlsxMergeInfo[\s\S]*?function xlsxMaxColumnIndex/)?.[0] ?? "";
     const referenceHelper =
-      notesPageSource.match(/function xlsxCellReference[\s\S]*?function safeXlsxRowNumber/)?.[0] ?? "";
+      documentPreviewSource.match(/function xlsxCellReference[\s\S]*?function safeXlsxRowNumber/)?.[0] ?? "";
 
-    expect(notesPageSource).toContain("const xlsxPreviewMaxColumns = 50");
-    expect(notesPageSource).toContain("const xlsxPreviewMaxRows = 100");
-    expect(notesPageSource).toContain("const xlsxPreviewMaxMergeRanges = 200");
+    expect(documentPreviewSource).toContain("const xlsxPreviewMaxColumns = 50");
+    expect(documentPreviewSource).toContain("const xlsxPreviewMaxRows = 100");
+    expect(documentPreviewSource).toContain("const xlsxPreviewMaxMergeRanges = 200");
     expect(worksheetHelper).toContain("visibleRowNumbers");
     expect(worksheetHelper).toContain("xlsxMergeInfo(document, {");
     expect(mergeHelper).toContain('xlsxElementsByLocalName(document.documentElement, "mergeCell", xlsxPreviewMaxMergeRanges)');
@@ -235,23 +255,38 @@ describe("NotesPage security controls", () => {
     expect(referenceHelper).toContain("column >= xlsxExcelMaxColumns");
   });
 
-  it("bounds compressed HWP preview sections before rich rendering", () => {
+  it("bounds compressed HWP preview sections and never invokes full-file rich rendering", () => {
     const hwpAttachmentBranch =
       notesPageSource.match(/if \(attachment\.extension === "hwp"\) \{[\s\S]*?if \(attachment\.extension === "hwpx"\)/)?.[0] ?? "";
     const hwpExtractor =
-      notesPageSource.match(/async function extractHwpPreviewHtml[\s\S]*?function extractHwpxPreviewHtml/)?.[0] ?? "";
+      documentPreviewSource.match(/async function extractHwpPreviewHtml[\s\S]*?function extractHwpxPreviewHtml/)?.[0] ?? "";
     const hwpDecompressor =
-      notesPageSource.match(/function decompressHwpSectionBytes[\s\S]*?function appendHwpSectionBlocks/)?.[0] ?? "";
+      documentPreviewSource.match(/function decompressHwpSectionBytes[\s\S]*?function appendHwpSectionBlocks/)?.[0] ?? "";
 
-    expect(notesPageSource).toContain("const maxHwpPreviewSectionBytes = 1_500_000");
-    expect(notesPageSource).toContain("const maxHwpPreviewTotalBytes = 4_000_000");
-    expect(hwpAttachmentBranch).toContain("preview.safeForRichPreview");
+    expect(documentPreviewSource).toContain("const maxHwpPreviewSectionBytes = 1_500_000");
+    expect(documentPreviewSource).toContain("const maxHwpPreviewTotalBytes = 4_000_000");
     expect(hwpAttachmentBranch).toContain("kind: \"html\"");
-    expect(hwpExtractor).toContain("safeForRichPreview = false");
+    expect(hwpExtractor).toContain("safeForRichPreview: false");
+    expect(documentPreviewSource).not.toContain('import("hwp.js")');
     expect(hwpExtractor).toContain("boundedHwpSectionBytes");
     expect(hwpDecompressor).toContain("new Decompress");
     expect(hwpDecompressor).toContain("decodedLength > sectionLimit");
     expect(hwpDecompressor).toContain("hwpPreviewCompressedChunkBytes");
     expect(hwpDecompressor).not.toContain("decompressSync");
+  });
+
+  it("guards every user-facing note mutation with an explicit base revision", () => {
+    expect(notesPageSource).toContain("baseRevision: number;");
+    expect(notesPageSource).toContain("baseRevision: note.revision ?? 0");
+    expect(notesPageSource).toContain("createRevisionedEncryptedNote({");
+    expect(notesPageSource).toContain("updateRevisionedEncryptedNote({");
+    expect(notesPageSource).toContain("updateRevisionedNoteAccess({");
+    expect(notesPageSource).toContain("deleteRevisionedNote({");
+    expect(notesPageSource).toContain("restoreRevisionedNote({");
+    expect(notesPageSource).toContain("expectedRevision: editor.baseRevision");
+    expect(notesPageSource).toContain("expectedRevision: note.revision ?? 0");
+    expect(notesPageSource).toContain("revisionConflictNoteId.current === editor.noteId");
+    expect(notesPageSource).toContain("현재 편집 내용은 그대로 유지했습니다.");
+    expect(notesPageSource).toContain("onSave(note, savedDraft, editBaseRevision)");
   });
 });

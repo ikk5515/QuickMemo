@@ -14,10 +14,6 @@ service firebase.storage {
       return /databases/(default)/documents/notes/$(noteId);
     }
 
-    function noteAttachmentPath(noteId, attachmentId) {
-      return /databases/(default)/documents/notes/$(noteId)/attachments/$(attachmentId);
-    }
-
     function publicSharePath(shareId) {
       return /databases/(default)/documents/publicNoteShares/$(shareId);
     }
@@ -58,11 +54,13 @@ service firebase.storage {
       return uid == data.ownerUid
         || (
           owner.isActive == true
-          && owner.isAdmin == true
-        )
-        || (
-          owner.keys().hasAny(["allowedShareTargetUids"])
-          && uid in owner.allowedShareTargetUids
+          && (
+            owner.isAdmin == true
+            || (
+              owner.keys().hasAny(["allowedShareTargetUids"])
+              && uid in owner.allowedShareTargetUids
+            )
+          )
         );
     }
 
@@ -71,6 +69,7 @@ service firebase.storage {
       let user = userData(request.auth.uid);
       return signedIn()
         && user.isActive == true
+        && !notePurged(note)
         && (
           user.isAdmin == true
           || (
@@ -88,14 +87,6 @@ service firebase.storage {
         );
     }
 
-    function noteAttachmentData(noteId, attachmentId) {
-      return firestore.get(noteAttachmentPath(noteId, attachmentId)).data;
-    }
-
-    function noteStoragePath(noteId, attachmentId) {
-      return "notes/" + noteId + "/attachments/" + attachmentId + "/data";
-    }
-
     function publicShareData(shareId) {
       return firestore.get(publicSharePath(shareId)).data;
     }
@@ -111,98 +102,81 @@ service firebase.storage {
       return !data.keys().hasAny(["revokedAt", "revokedBy"]);
     }
 
+    function publicShareSourceAvailable(data) {
+      let note = noteData(data.sourceNoteId);
+      return userData(data.ownerUid).isActive == true
+        && note.ownerUid == data.ownerUid
+        && noteActive(note);
+    }
+
+    function publicShareSourceActive(data) {
+      let note = noteData(data.sourceNoteId);
+      return publicShareSourceAvailable(data)
+        && (
+          (
+            !data.keys().hasAny(["sourceRevision"])
+            && !note.keys().hasAny(["revision"])
+          )
+          || (
+            data.keys().hasAny(["sourceRevision"])
+            && data.sourceRevision == (
+              note.keys().hasAny(["revision"])
+                ? note.revision
+                : 0
+            )
+          )
+        )
+        && (
+          (
+            !data.keys().hasAny(["sourceAttachmentRevision"])
+            && !note.keys().hasAny(["attachmentRevision"])
+          )
+          || (
+            data.keys().hasAny(["sourceAttachmentRevision"])
+            && data.sourceAttachmentRevision == (
+              note.keys().hasAny(["attachmentRevision"])
+                ? note.attachmentRevision
+                : 0
+            )
+          )
+        );
+    }
+
     function publicShareActive(shareId) {
       let share = publicShareData(shareId);
       return share.ready == true
         && publicShareNotRevoked(share)
-        && share.expiresAt > request.time;
+        && share.expiresAt > request.time
+        && publicShareSourceActive(share);
+    }
+
+    function publicShareAttachmentIsCurrent(shareId, attachmentId) {
+      let share = publicShareData(shareId);
+      let attachment = publicShareAttachmentData(shareId, attachmentId);
+      return (
+          !share.keys().hasAny(["currentGeneration"])
+          && !attachment.keys().hasAny(["generation"])
+        )
+        || (
+          share.keys().hasAny(["currentGeneration"])
+          && attachment.keys().hasAny(["generation"])
+          && attachment.generation == share.currentGeneration
+        );
     }
 
     function publicShareAttachmentData(shareId, attachmentId) {
       return firestore.get(publicShareAttachmentPath(shareId, attachmentId)).data;
     }
 
-    function publicShareStoragePath(shareId, attachmentId) {
-      return "publicNoteShares/" + shareId + "/attachments/" + attachmentId + "/data";
-    }
-
-    function validEncryptedUpload(requiredMetadata) {
-      return resource == null
-        && request.resource != null
-        && request.resource.size > 16
-        && request.resource.size <= 10485776
-        && request.resource.contentType == "application/octet-stream"
-        && request.resource.metadata.keys().hasOnly(requiredMetadata)
-        && request.resource.metadata.keys().hasAll(requiredMetadata)
-        && request.resource.metadata.version == "1"
-        && request.resource.metadata.algorithm == "AES-GCM";
-    }
-
-    function validNoteAttachmentUpload(noteId, attachmentId) {
-      let note = noteData(noteId);
-      let attachment = noteAttachmentData(noteId, attachmentId);
-      return signedIn()
-        && userData(request.auth.uid).isActive == true
-        && noteActive(note)
-        && noteParticipant(note)
-        && ownerAllowsParticipant(note, request.auth.uid)
-        && attachment.noteId == noteId
-        && attachment.uploadedBy == request.auth.uid
-        && attachment.storagePath == noteStoragePath(noteId, attachmentId)
-        && attachment.encryptedSize == request.resource.size
-        && attachment.isReady == false
-        && request.resource.metadata.noteId == noteId
-        && request.resource.metadata.attachmentId == attachmentId
-        && request.resource.metadata.uploadedBy == request.auth.uid;
-    }
-
-    function canDeleteNoteObject(noteId) {
-      let note = noteData(noteId);
-      let user = userData(request.auth.uid);
-      return signedIn()
-        && user.isActive == true
-        && (
-          user.isAdmin == true
-          || (
-            noteParticipant(note)
-            && (
-              note.ownerUid == request.auth.uid
-              || resource.metadata.uploadedBy == request.auth.uid
-            )
-          )
-        );
-    }
-
-    function validPublicShareAttachmentUpload(shareId, attachmentId) {
-      let share = publicShareData(shareId);
-      let attachment = publicShareAttachmentData(shareId, attachmentId);
-      return signedIn()
-        && userData(request.auth.uid).isActive == true
-        && share.ownerUid == request.auth.uid
-        && publicShareNotRevoked(share)
-        && share.expiresAt > request.time
-        && attachment.storagePath == publicShareStoragePath(shareId, attachmentId)
-        && attachment.encryptedSize == request.resource.size
-        && attachment.isReady == false
-        && attachment.expiresAt == share.expiresAt
-        && request.resource.metadata.shareId == shareId
-        && request.resource.metadata.attachmentId == attachmentId;
-    }
-
     match /notes/{noteId}/attachments/{attachmentId}/data {
       allow read: if canReadNoteObject(noteId);
-      allow create: if validEncryptedUpload(["version", "algorithm", "noteId", "attachmentId", "originalSize", "uploadedBy"])
-        && validNoteAttachmentUpload(noteId, attachmentId);
-      allow update: if false;
-      allow delete: if canDeleteNoteObject(noteId);
+      allow create, update, delete: if false;
     }
 
     match /publicNoteShares/{shareId}/attachments/{attachmentId}/data {
-      allow read: if publicShareActive(shareId) || publicShareOwner(shareId);
-      allow create: if validEncryptedUpload(["version", "algorithm", "shareId", "attachmentId", "originalSize"])
-        && validPublicShareAttachmentUpload(shareId, attachmentId);
-      allow update: if false;
-      allow delete: if publicShareOwner(shareId);
+      allow read: if publicShareOwner(shareId)
+        || (publicShareActive(shareId) && publicShareAttachmentIsCurrent(shareId, attachmentId));
+      allow create, update, delete: if false;
     }
 
     match /{path=**} {

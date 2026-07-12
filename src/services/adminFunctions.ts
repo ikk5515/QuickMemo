@@ -57,6 +57,13 @@ export interface ResetPasswordPayload {
   keyBundle: NewUserPayload["keyBundle"];
 }
 
+export interface ManagedUserDeleteProgress {
+  attempt: number;
+  maxAttempts: number;
+}
+
+const managedUserDeleteMaxAttempts = 30;
+
 function makeLoginEmail() {
   const alias = `qm_${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`;
   return `${alias}@quickmemo.local`;
@@ -298,25 +305,42 @@ export async function reorderUsers(users: PublicRosterUser[]) {
   await batch.commit();
 }
 
-export async function deleteManagedUserDocuments(user: Pick<UserProfile, "uid" | "quickKey">) {
-  const idToken = await auth.currentUser?.getIdToken();
+export async function deleteManagedUserDocuments(
+  user: Pick<UserProfile, "uid" | "quickKey">,
+  onProgress?: (progress: ManagedUserDeleteProgress) => void
+) {
+  for (let attempt = 1; attempt <= managedUserDeleteMaxAttempts; attempt += 1) {
+    onProgress?.({ attempt, maxAttempts: managedUserDeleteMaxAttempts });
 
-  if (!idToken) {
-    throw new Error("관리자 인증을 확인할 수 없습니다.");
-  }
+    const idToken = await auth.currentUser?.getIdToken();
 
-  const response = await fetch("/api/delete-managed-user", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${idToken}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({ targetUid: user.uid })
-  });
+    if (!idToken) {
+      throw new Error("관리자 인증을 확인할 수 없습니다.");
+    }
 
-  if (!response.ok) {
-    const result = (await response.json().catch(() => undefined)) as { error?: string } | undefined;
-    throw new Error(result?.error ?? "사용자를 삭제하지 못했습니다.");
+    const response = await fetch("/api/delete-managed-user", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${idToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ targetUid: user.uid })
+    });
+    const result = (await response.json().catch(() => undefined)) as { error?: string; ok?: boolean } | undefined;
+
+    if (response.status === 202 && result?.error === "cleanup_in_progress") {
+      if (attempt === managedUserDeleteMaxAttempts) {
+        throw new Error("첨부파일 정리가 오래 걸리고 있습니다. 잠시 후 사용자 삭제를 다시 시도해주세요.");
+      }
+
+      continue;
+    }
+
+    if (!response.ok) {
+      throw new Error(result?.error ?? "사용자를 삭제하지 못했습니다.");
+    }
+
+    return;
   }
 }
 

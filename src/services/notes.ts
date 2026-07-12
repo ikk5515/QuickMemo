@@ -10,13 +10,14 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
   writeBatch
 } from "firebase/firestore";
-import { deleteObject, getBytes, ref } from "firebase/storage";
+import { getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
 import { db, storage } from "../lib/firebase";
@@ -71,6 +72,58 @@ export interface SaveNoteInput {
   historySnapshot?: EncryptedPayload;
 }
 
+export interface NoteMutationResult {
+  lastMutationId: string;
+  noteId: string;
+  revision: number;
+}
+
+export interface CreatedRevisionedNoteResult extends NoteMutationResult {
+  noteRef: ReturnType<typeof doc>;
+}
+
+export interface UpdateRevisionedEncryptedNoteInput {
+  changedFields?: string[];
+  encryptedBody: EncryptedPayload;
+  encryptedTitle: EncryptedPayload;
+  expectedRevision: number;
+  historySnapshot?: EncryptedPayload;
+  historySummary?: EncryptedPayload;
+  noteId: string;
+  readerUids: string[];
+  uid: string;
+}
+
+export interface UpdateRevisionedNoteAccessInput {
+  expectedRevision: number;
+  folderId?: string | null;
+  noteId: string;
+  participantUids: string[];
+  type: NoteKind;
+  uid: string;
+  wrappedKeys: Record<string, WrappedNoteKey>;
+}
+
+export interface RevisionedNoteLifecycleInput {
+  expectedRevision: number;
+  noteId: string;
+  readerUids: string[];
+  uid: string;
+}
+
+export class NoteRevisionConflictError extends Error {
+  readonly actualRevision: number;
+  readonly code = "note/revision-conflict";
+  readonly expectedRevision: number;
+
+  constructor(expectedRevision: number, actualRevision: number) {
+    super(`노트가 다른 곳에서 변경되었습니다. 예상 revision ${expectedRevision}, 현재 revision ${actualRevision}.`);
+    this.name = "NoteRevisionConflictError";
+    this.expectedRevision = expectedRevision;
+    this.actualRevision = actualRevision;
+  }
+}
+
 export interface SaveNoteAttachmentInput {
   noteId: string;
   fileName: string;
@@ -103,10 +156,42 @@ type StoredAttachmentDocument = Pick<
 
 export interface PurgeNoteInput {
   noteId: string;
+  ownerUid: string;
   uid: string;
   encryptedTitle: EncryptedPayload;
   encryptedBody: EncryptedPayload;
   wrappedKey: WrappedNoteKey;
+}
+
+const initialNoteRevision = 1;
+const maxNoteRevision = 999_999_999_999;
+
+function expectedNoteRevision(revision: number) {
+  if (!Number.isSafeInteger(revision) || revision < 0 || revision > maxNoteRevision) {
+    throw new RangeError(`예상 노트 revision은 0 이상 ${maxNoteRevision} 이하의 정수여야 합니다.`);
+  }
+
+  return revision;
+}
+
+function storedNoteRevision(note: Pick<NoteDocument, "revision">) {
+  const revision = note.revision ?? 0;
+
+  if (!Number.isSafeInteger(revision) || revision < 0 || revision > maxNoteRevision) {
+    throw new Error("저장된 노트 revision이 올바르지 않습니다.");
+  }
+
+  return revision;
+}
+
+function storedAttachmentRevision(note: Pick<NoteDocument, "attachmentRevision">) {
+  const revision = note.attachmentRevision ?? 0;
+
+  if (!Number.isSafeInteger(revision) || revision < 0 || revision > maxNoteRevision) {
+    throw new Error("저장된 첨부파일 revision이 올바르지 않습니다.");
+  }
+
+  return revision;
 }
 
 
@@ -291,11 +376,21 @@ export function subscribeMyNoteStates(
 
   const statesByNoteId: Record<string, NoteUserStateSnapshot | undefined> = {};
   let closed = false;
+  let emitQueued = false;
 
-  const emitStates = () => {
-    if (!closed) {
-      callback({ ...statesByNoteId });
+  const scheduleEmitStates = () => {
+    if (closed || emitQueued) {
+      return;
     }
+
+    emitQueued = true;
+    queueMicrotask(() => {
+      emitQueued = false;
+
+      if (!closed) {
+        callback({ ...statesByNoteId });
+      }
+    });
   };
 
   const unsubscribes = uniqueNoteIds.map((noteId) =>
@@ -305,9 +400,13 @@ export function subscribeMyNoteStates(
         statesByNoteId[noteId] = snapshot.exists()
           ? ({ id: snapshot.id, ...(snapshot.data() as NoteUserStateDocument) } satisfies NoteUserStateSnapshot)
           : undefined;
-        emitStates();
+        scheduleEmitStates();
       },
-      (error) => onError?.(error)
+      (error) => {
+        if (!closed) {
+          onError?.(error);
+        }
+      }
     )
   );
 
@@ -327,7 +426,12 @@ export function subscribeNoteHistory(
   const historyCollection = collection(db, "notes", noteId, "history");
   const historyQuery = includeAllReadableHistory
     ? query(historyCollection, orderBy("createdAt", "desc"), limit(80))
-    : query(historyCollection, where("readerUids", "array-contains", uid));
+    : query(
+        historyCollection,
+        where("readerUids", "array-contains", uid),
+        orderBy("createdAt", "desc"),
+        limit(80)
+      );
 
   return onSnapshot(
     historyQuery,
@@ -337,11 +441,7 @@ export function subscribeNoteHistory(
           ...(document.data() as NoteHistoryDocument)
         }));
 
-      callback(
-        includeAllReadableHistory
-          ? history
-          : history.sort((left, right) => timestampMillis(right.createdAt) - timestampMillis(left.createdAt)).slice(0, 80)
-      );
+      callback(history);
     },
     (error) => onError?.(error)
   );
@@ -382,26 +482,84 @@ export async function getNoteAttachments(noteId: string) {
     .filter((attachment) => attachment.isReady !== false) satisfies NoteAttachmentSnapshot[];
 }
 
-export async function createEncryptedNote(input: SaveNoteInput) {
+export async function getNoteRevisionState(noteId: string) {
+  const snapshot = await getDoc(doc(db, "notes", noteId));
+
+  if (!snapshot.exists()) {
+    throw new Error("노트 revision을 확인할 수 없습니다.");
+  }
+
+  const note = snapshot.data() as NoteDocument;
+  return {
+    attachmentRevision: storedAttachmentRevision(note),
+    revision: storedNoteRevision(note)
+  };
+}
+
+export async function createRevisionedEncryptedNote(input: SaveNoteInput): Promise<CreatedRevisionedNoteResult> {
   const { historySnapshot, historySummary, ...noteInput } = input;
   const noteRef = doc(collection(db, "notes"));
+  const historyRef = doc(collection(db, "notes", noteRef.id, "history"));
   const batch = writeBatch(db);
   const participantUids = Array.from(new Set(input.participantUids));
+  const revision = initialNoteRevision;
+  const lastMutationId = historyRef.id;
+  const historyDocument = noteHistoryDocument(
+    noteRef.id,
+    input.ownerUid,
+    "create",
+    ["title", "body"],
+    participantUids,
+    revision,
+    historySummary,
+    historySnapshot
+  );
+
+  if (!historyDocument) {
+    throw new Error("노트 생성 이력을 만들 수 없습니다.");
+  }
 
   batch.set(noteRef, {
     ...noteInput,
+    attachmentRevision: 0,
     participantUids,
     folderId: input.type === "personal" ? input.folderId ?? null : null,
     createdAt: serverTimestamp(),
     isDeleted: false,
+    lastMutationId,
+    revision,
     updatedAt: serverTimestamp(),
     savedAt: serverTimestamp(),
     updatedBy: input.ownerUid
   });
-  setNoteHistory(batch, noteRef.id, input.ownerUid, "create", ["title", "body"], participantUids, historySummary, historySnapshot);
+  batch.set(historyRef, historyDocument);
 
   await batch.commit();
-  return noteRef;
+  return { lastMutationId, noteId: noteRef.id, noteRef, revision };
+}
+
+export async function createEncryptedNote(input: SaveNoteInput) {
+  return (await createRevisionedEncryptedNote(input)).noteRef;
+}
+
+export async function updateRevisionedEncryptedNote(input: UpdateRevisionedEncryptedNoteInput) {
+  return commitRevisionedNoteMutation({
+    action: "content",
+    changedFields: input.changedFields ?? ["title", "body"],
+    encryptedSnapshot: input.historySnapshot,
+    encryptedSummary: input.historySummary,
+    expectedRevision: expectedNoteRevision(input.expectedRevision),
+    noteId: input.noteId,
+    readerUids: input.readerUids,
+    uid: input.uid,
+    update: {
+      encryptedTitle: input.encryptedTitle,
+      encryptedBody: input.encryptedBody,
+      isDeleted: false,
+      updatedAt: serverTimestamp(),
+      updatedBy: input.uid
+    }
+  });
 }
 
 export async function updateEncryptedNote(
@@ -414,18 +572,26 @@ export async function updateEncryptedNote(
   historySummary?: EncryptedPayload,
   historySnapshot?: EncryptedPayload
 ) {
-  const batch = writeBatch(db);
-  const noteRef = doc(db, "notes", noteId);
-
-  batch.update(noteRef, {
-    encryptedTitle,
-    encryptedBody,
-    isDeleted: false,
-    updatedAt: serverTimestamp(),
-    updatedBy: uid
+  return commitRevisionedNoteMutation({
+    action: "content",
+    changedFields,
+    encryptedSnapshot: historySnapshot,
+    encryptedSummary: historySummary,
+    noteId,
+    readerUids,
+    uid,
+    update: {
+      encryptedTitle,
+      encryptedBody,
+      isDeleted: false,
+      updatedAt: serverTimestamp(),
+      updatedBy: uid
+    }
   });
-  setNoteHistory(batch, noteId, uid, "content", changedFields, readerUids, historySummary, historySnapshot);
-  await batch.commit();
+}
+
+export async function updateRevisionedNoteAccess(input: UpdateRevisionedNoteAccessInput) {
+  return commitRevisionedNoteAccess(input, expectedNoteRevision(input.expectedRevision));
 }
 
 export async function updateNoteAccess(
@@ -436,21 +602,7 @@ export async function updateNoteAccess(
   wrappedKeys: Record<string, WrappedNoteKey>,
   folderId: string | null = null
 ) {
-  const batch = writeBatch(db);
-  const noteRef = doc(db, "notes", noteId);
-  const normalizedParticipantUids = Array.from(new Set(participantUids));
-
-  batch.update(noteRef, {
-    type,
-    participantUids: normalizedParticipantUids,
-    wrappedKeys,
-    folderId: type === "personal" ? folderId : null,
-    isDeleted: false,
-    updatedAt: serverTimestamp(),
-    updatedBy: uid
-  });
-  setNoteHistory(batch, noteId, uid, "share", ["participants"], normalizedParticipantUids);
-  await batch.commit();
+  return commitRevisionedNoteAccess({ noteId, uid, type, participantUids, wrappedKeys, folderId });
 }
 
 export async function updateNoteFolder(noteId: string, uid: string, folderId: string | null) {
@@ -524,17 +676,13 @@ export async function publishNoteCursor(
   );
 }
 
-function noteHistoryRef(noteId: string) {
-  return doc(collection(db, "notes", noteId, "history"));
-}
-
-function setNoteHistory(
-  batch: ReturnType<typeof writeBatch>,
+function noteHistoryDocument(
   noteId: string,
   uid: string,
   action: NoteHistoryAction,
   changedFields: string[],
   readerUids: string[],
+  revision: number,
   encryptedSummary?: EncryptedPayload,
   encryptedSnapshot?: EncryptedPayload
 ) {
@@ -542,10 +690,10 @@ function setNoteHistory(
   const normalizedReaderUids = Array.from(new Set(readerUids)).filter(Boolean);
 
   if (!normalizedFields.length || !normalizedReaderUids.length) {
-    return;
+    return null;
   }
 
-  const historyDocument = {
+  return {
     noteId,
     actorUid: uid,
     action,
@@ -553,10 +701,92 @@ function setNoteHistory(
     readerUids: normalizedReaderUids,
     ...(encryptedSummary ? { encryptedSummary } : {}),
     ...(encryptedSnapshot ? { encryptedSnapshot } : {}),
+    revision,
     createdAt: serverTimestamp()
   } satisfies Omit<NoteHistoryDocument, "createdAt"> & { createdAt: ReturnType<typeof serverTimestamp> };
+}
 
-  batch.set(noteHistoryRef(noteId), historyDocument);
+interface RevisionedNoteMutationInput {
+  action: NoteHistoryAction;
+  changedFields: string[];
+  encryptedSnapshot?: EncryptedPayload;
+  encryptedSummary?: EncryptedPayload;
+  expectedRevision?: number;
+  noteId: string;
+  readerUids: string[];
+  uid: string;
+  update: Record<string, unknown>;
+}
+
+async function commitRevisionedNoteMutation(input: RevisionedNoteMutationInput): Promise<NoteMutationResult> {
+  const noteRef = doc(db, "notes", input.noteId);
+  const historyRef = doc(collection(db, "notes", input.noteId, "history"));
+  const lastMutationId = historyRef.id;
+
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(noteRef);
+
+    if (!snapshot.exists()) {
+      throw new Error("저장할 노트를 찾을 수 없습니다.");
+    }
+
+    const currentRevision = storedNoteRevision(snapshot.data() as NoteDocument);
+
+    if (input.expectedRevision !== undefined && currentRevision !== input.expectedRevision) {
+      throw new NoteRevisionConflictError(input.expectedRevision, currentRevision);
+    }
+
+    const revision = currentRevision + 1;
+    const historyDocument = noteHistoryDocument(
+      input.noteId,
+      input.uid,
+      input.action,
+      input.changedFields,
+      input.readerUids,
+      revision,
+      input.encryptedSummary,
+      input.encryptedSnapshot
+    );
+
+    if (!historyDocument) {
+      throw new Error("노트 변경 이력을 만들 수 없습니다.");
+    }
+
+    transaction.update(noteRef, {
+      ...input.update,
+      lastMutationId,
+      revision
+    });
+    transaction.set(historyRef, historyDocument);
+
+    return { lastMutationId, noteId: input.noteId, revision };
+  });
+}
+
+type CompatibleRevisionedNoteAccessInput = Omit<UpdateRevisionedNoteAccessInput, "expectedRevision"> & {
+  expectedRevision?: number;
+};
+
+function commitRevisionedNoteAccess(input: CompatibleRevisionedNoteAccessInput, expectedRevision?: number) {
+  const normalizedParticipantUids = Array.from(new Set(input.participantUids));
+
+  return commitRevisionedNoteMutation({
+    action: "share",
+    changedFields: ["participants"],
+    expectedRevision,
+    noteId: input.noteId,
+    readerUids: normalizedParticipantUids,
+    uid: input.uid,
+    update: {
+      type: input.type,
+      participantUids: normalizedParticipantUids,
+      wrappedKeys: input.wrappedKeys,
+      folderId: input.type === "personal" ? input.folderId ?? null : null,
+      isDeleted: false,
+      updatedAt: serverTimestamp(),
+      updatedBy: input.uid
+    }
+  });
 }
 
 export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
@@ -626,57 +856,6 @@ export async function getEncryptedNoteAttachmentSource(attachment: StoredAttachm
   return { bytes: new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes)) };
 }
 
-async function deleteStorageObjectIfPresent(storagePath: string) {
-  try {
-    await deleteObject(ref(storage, storagePath));
-  } catch (error) {
-    if (!storageObjectNotFound(error)) {
-      throw error;
-    }
-  }
-}
-
-function storageObjectNotFound(error: unknown) {
-  return (
-    typeof error === "object"
-    && error !== null
-    && "code" in error
-    && (error as { code?: string }).code === "storage/object-not-found"
-  );
-}
-
-async function deleteAttachmentStorageObject(documentSnapshot: {
-  id: string;
-  data: () => unknown;
-}) {
-  const attachment = documentSnapshot.data() as NoteAttachmentDocument;
-
-  if (attachment.blobPath) {
-    await deleteBlobAttachment({ scope: "note", noteId: attachment.noteId, attachmentId: documentSnapshot.id });
-    return;
-  }
-
-  if (attachment.storagePath) {
-    await deleteStorageObjectIfPresent(attachment.storagePath);
-  }
-}
-
-async function deleteNoteAttachmentDocuments(noteId: string) {
-  const snapshot = await getDocs(collection(db, "notes", noteId, "attachments"));
-
-  for (const documentSnapshot of snapshot.docs) {
-    const attachment = documentSnapshot.data() as NoteAttachmentDocument;
-
-    if (attachment.blobPath) {
-      await deleteBlobAttachment({ scope: "note", noteId, attachmentId: documentSnapshot.id });
-      continue;
-    }
-
-    await deleteAttachmentStorageObject(documentSnapshot);
-    await deleteDoc(documentSnapshot.ref);
-  }
-}
-
 export function subscribeNoteFolders(
   uid: string,
   callback: (folders: NoteFolderSnapshot[]) => void,
@@ -741,77 +920,85 @@ export async function deleteNoteFolder(uid: string, folderId: string, noteIds: s
 }
 
 export async function deleteNoteAttachment(noteId: string, attachmentId: string) {
-  const attachmentRef = doc(db, "notes", noteId, "attachments", attachmentId);
-  const snapshot = await getDoc(attachmentRef);
-
-  if (snapshot.exists()) {
-    const attachment = snapshot.data() as NoteAttachmentDocument;
-
-    if (attachment.blobPath) {
-      await deleteBlobAttachment({ scope: "note", noteId, attachmentId });
-      return;
-    }
-
-    await deleteAttachmentStorageObject(snapshot);
-  }
-
-  await deleteDoc(attachmentRef);
+  await deleteBlobAttachment({ scope: "note", noteId, attachmentId });
 }
 
-async function deleteCollectionDocuments(pathSegments: string[]) {
-  const [headSegment, ...tailSegments] = pathSegments;
-
-  if (!headSegment) {
-    return;
-  }
-
-  const snapshot = await getDocs(collection(db, headSegment, ...tailSegments));
-  const refsToDelete = snapshot.docs.map((documentSnapshot) => documentSnapshot.ref);
-  const chunkSize = 450;
-
-  for (let index = 0; index < refsToDelete.length; index += chunkSize) {
-    const batch = writeBatch(db);
-    refsToDelete.slice(index, index + chunkSize).forEach((documentRef) => {
-      batch.delete(documentRef);
-    });
-    await batch.commit();
-  }
+export async function deleteRevisionedNote(input: RevisionedNoteLifecycleInput) {
+  return commitRevisionedNoteMutation({
+    action: "delete",
+    changedFields: ["deleted"],
+    expectedRevision: expectedNoteRevision(input.expectedRevision),
+    noteId: input.noteId,
+    readerUids: input.readerUids,
+    uid: input.uid,
+    update: {
+      isDeleted: true,
+      deletedAt: serverTimestamp(),
+      deletedBy: input.uid,
+      updatedAt: serverTimestamp(),
+      updatedBy: input.uid
+    }
+  });
 }
 
 export async function deleteNote(noteId: string, uid: string, readerUids: string[]) {
-  const batch = writeBatch(db);
-  const noteRef = doc(db, "notes", noteId);
-
-  batch.update(noteRef, {
-    isDeleted: true,
-    deletedAt: serverTimestamp(),
-    deletedBy: uid,
-    updatedAt: serverTimestamp(),
-    updatedBy: uid
+  return commitRevisionedNoteMutation({
+    action: "delete",
+    changedFields: ["deleted"],
+    noteId,
+    readerUids,
+    uid,
+    update: {
+      isDeleted: true,
+      deletedAt: serverTimestamp(),
+      deletedBy: uid,
+      updatedAt: serverTimestamp(),
+      updatedBy: uid
+    }
   });
-  setNoteHistory(batch, noteId, uid, "delete", ["deleted"], readerUids);
-  await batch.commit();
+}
 
-  await deleteNoteAttachmentDocuments(noteId);
+export async function restoreRevisionedNote(input: RevisionedNoteLifecycleInput) {
+  return commitRevisionedNoteMutation({
+    action: "restore",
+    changedFields: ["restored"],
+    expectedRevision: expectedNoteRevision(input.expectedRevision),
+    noteId: input.noteId,
+    readerUids: input.readerUids,
+    uid: input.uid,
+    update: {
+      isDeleted: false,
+      deletedAt: deleteField(),
+      deletedBy: deleteField(),
+      updatedAt: serverTimestamp(),
+      updatedBy: input.uid
+    }
+  });
 }
 
 export async function restoreNote(noteId: string, uid: string, readerUids: string[]) {
-  const batch = writeBatch(db);
-  const noteRef = doc(db, "notes", noteId);
-
-  batch.update(noteRef, {
-    isDeleted: false,
-    deletedAt: deleteField(),
-    deletedBy: deleteField(),
-    updatedAt: serverTimestamp(),
-    updatedBy: uid
+  return commitRevisionedNoteMutation({
+    action: "restore",
+    changedFields: ["restored"],
+    noteId,
+    readerUids,
+    uid,
+    update: {
+      isDeleted: false,
+      deletedAt: deleteField(),
+      deletedBy: deleteField(),
+      updatedAt: serverTimestamp(),
+      updatedBy: uid
+    }
   });
-  setNoteHistory(batch, noteId, uid, "restore", ["restored"], readerUids);
-  await batch.commit();
 }
 
 export async function purgeNote(input: PurgeNoteInput) {
-  await updateDoc(doc(db, "notes", input.noteId), {
+  const noteRef = doc(db, "notes", input.noteId);
+  const cleanupQueueRef = doc(db, "notePurgeCleanupQueue", input.noteId);
+  const batch = writeBatch(db);
+
+  batch.update(noteRef, {
     type: "personal",
     participantUids: [input.uid],
     wrappedKeys: {
@@ -819,6 +1006,10 @@ export async function purgeNote(input: PurgeNoteInput) {
     },
     encryptedTitle: input.encryptedTitle,
     encryptedBody: input.encryptedBody,
+    folderId: deleteField(),
+    dueAt: deleteField(),
+    deletedAt: deleteField(),
+    deletedBy: deleteField(),
     isDeleted: true,
     isPurged: true,
     purgedAt: serverTimestamp(),
@@ -827,7 +1018,11 @@ export async function purgeNote(input: PurgeNoteInput) {
     savedAt: serverTimestamp(),
     updatedBy: input.uid
   });
+  batch.set(cleanupQueueRef, {
+    noteId: input.noteId,
+    ownerUid: input.ownerUid,
+    createdAt: serverTimestamp()
+  });
 
-  await deleteNoteAttachmentDocuments(input.noteId);
-  await deleteCollectionDocuments(["notes", input.noteId, "history"]);
+  await batch.commit();
 }

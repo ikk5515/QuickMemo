@@ -57,14 +57,113 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain('from: [{ collectionId: "attachments", allDescendants: true }]');
     expect(cleanupFunctionSource).toContain("queryExpiredShares");
     expect(cleanupFunctionSource).toContain("queryExpiredPublicShareAttachments");
+    expect(cleanupFunctionSource).toContain("queryExpiredAttachmentReservations");
+    expect(cleanupFunctionSource).toContain('fieldPath: "reservationExpiresAt"');
+    expect(cleanupFunctionSource).toContain("deleteExpiredAttachmentReservation");
+    expect(cleanupFunctionSource).toContain("reservationsDeleted");
+    expect(cleanupFunctionSource).toContain("queryAbandonedAttachmentDeletions");
+    expect(cleanupFunctionSource).toContain('fieldPath: "deletionStartedAt"');
+    expect(cleanupFunctionSource).toContain("queryLegacyExpiredAttachmentReservations");
+    expect(cleanupFunctionSource).toContain("legacyReservationGraceMs");
   });
 
   it("uses high-capacity batched deletes so the no-billing fallback is harder to outpace", () => {
-    expect(cleanupFunctionSource).toContain("const defaultBatchSize = 100");
-    expect(cleanupFunctionSource).toContain("const defaultMaxDocumentDeletes = 18000");
+    expect(cleanupFunctionSource).toContain("const defaultBatchSize = 50");
+    expect(cleanupFunctionSource).toContain("const defaultMaxDocumentDeletes = 1000");
+    expect(cleanupFunctionSource).toContain("defaultMaxDocumentDeletes, 10, 5000");
     expect(cleanupFunctionSource).toContain("const firestoreCommitWriteLimit = 500");
     expect(cleanupFunctionSource).toContain("firestoreCommitPathFromDocumentName");
     expect(cleanupFunctionSource).toContain("firestoreDeleteMany");
     expect(cleanupFunctionSource).toContain(":commit");
+  });
+
+  it("claims attachment metadata and quota in one preconditioned commit", () => {
+    const claimSource = cleanupFunctionSource.match(
+      /async function claimAttachmentDeletionByName[\s\S]*?async function deleteAttachmentObjects/u
+    )?.[0] ?? "";
+
+    expect(claimSource).toContain("quotaReleaseAfterAttachmentClaim");
+    expect(claimSource).toContain("currentDocument: { updateTime: claim.attachmentUpdateTime }");
+    expect(claimSource).toContain("currentDocument: { updateTime: claim.quota.quotaUpdateTime }");
+    expect(claimSource).toContain('quotaReserved: hasField(attachment, "quotaReserved")');
+    expect(claimSource).toContain('stringField(attachment, "storageProvider") === "vercel-blob"');
+    expect(cleanupFunctionSource).toContain("countPolicyVersion");
+  });
+
+  it("durably cleans validated purged-note queues before the final tombstone commit", () => {
+    const purgeSource = cleanupFunctionSource.match(
+      /function validPurgeQueue[\s\S]*?async function cleanupExpiredPublicShares/u
+    )?.[0] ?? "";
+
+    expect(purgeSource).toContain("notePurgeCleanupQueue");
+    expect(purgeSource).toContain('booleanField(noteDocument, "isPurged")');
+    expect(purgeSource).toContain('stringField(noteDocument, "ownerUid") === ownerUid');
+    expect(purgeSource).toContain('listChildDocuments(noteName, "attachments"');
+    expect(purgeSource).toContain('listChildDocuments(noteName, "history"');
+    expect(purgeSource).toContain("noteUserStates");
+    expect(purgeSource).toContain("queryActiveNotesByNoteId");
+    expect(purgeSource).toContain("finalizePurgedNote");
+    expect(purgeSource).toContain("backfillNotePurgeQueues");
+    expect(purgeSource).toContain("queryPurgedNotes");
+    expect(purgeSource).toContain("currentDocument: { exists: false }");
+    expect(purgeSource).toContain("currentDocument: { updateTime: currentNote.updateTime }");
+    expect(purgeSource).toContain("currentDocument: { updateTime: currentQueue.updateTime }");
+  });
+
+  it("bounds purge queue and child reads to the serverless delete budget", () => {
+    expect(cleanupFunctionSource).toContain("maxDocuments = Number.POSITIVE_INFINITY");
+    expect(cleanupFunctionSource).toContain("documents.length < maxDocuments");
+    expect(cleanupFunctionSource).toContain('"notePurgeCleanupQueue",\n    config.accessToken,\n    config.limit');
+    expect(cleanupFunctionSource).toContain("Math.min(50, remainingHistoryDeletes)");
+    expect(cleanupFunctionSource).toContain("Math.min(500, remainingStateDeletes)");
+  });
+
+  it("projects cleanup discovery and child listings without encrypted payload fields", () => {
+    const nameOnlyQueries = [
+      "queryExpiredShareQueues",
+      "queryExpiredShares",
+      "queryExpiredPublicShareAttachments",
+      "queryExpiredAttachmentReservations",
+      "queryAbandonedAttachmentDeletions",
+      "queryLegacyExpiredAttachmentReservations",
+      "queryActiveNotesByNoteId"
+    ];
+
+    for (const functionName of nameOnlyQueries) {
+      const querySource = cleanupFunctionSource.match(
+        new RegExp(`async function ${functionName}\\([\\s\\S]*?return result\\.flatMap`, "u")
+      )?.[0] ?? "";
+
+      expect(querySource).toContain('fields: [{ fieldPath: "__name__" }]');
+    }
+
+    const purgedNoteQuery = cleanupFunctionSource.match(
+      /async function queryPurgedNotes[\s\S]*?return result\.flatMap/u
+    )?.[0] ?? "";
+
+    expect(purgedNoteQuery).toContain('{ fieldPath: "ownerUid" }');
+    expect(purgedNoteQuery).toContain('{ fieldPath: "isDeleted" }');
+    expect(purgedNoteQuery).toContain('{ fieldPath: "isPurged" }');
+    expect(cleanupFunctionSource).toContain('query.append("mask.fieldPaths", fieldPath)');
+    expect(cleanupFunctionSource).toContain('["noteId", "ownerUid"]');
+    expect(cleanupFunctionSource).toContain('["revision"]');
+    expect(cleanupFunctionSource).toContain('["updatedAt"]');
+    expect(cleanupFunctionSource).toContain('["isReady"]');
+    expect(cleanupFunctionSource).toContain('["expiresAt"]');
+  });
+
+  it("bounds public share tree cleanup and retains parents while children remain", () => {
+    const shareTreeSource = cleanupFunctionSource.match(
+      /async function deletePublicShareTreeByName[\s\S]*?async function deletePublicShareTree\(/u
+    )?.[0] ?? "";
+
+    expect(shareTreeSource).toContain("remainingAttachmentDeleteBudget");
+    expect(shareTreeSource).toContain("Math.min(300, Math.max(1, Math.floor(remainingAttachmentDeleteBudget / 2)))");
+    expect(shareTreeSource).toContain('listChildDocuments(shareName, "attachments", accessToken, 1, ["isReady"])');
+    expect(shareTreeSource).toContain("Math.min(300, remainingQueueDeleteBudget)");
+    expect(shareTreeSource).toContain(
+      'listChildDocuments(cleanupQueueName, "publicShareAttachmentCleanupQueue", accessToken, 1, ["expiresAt"])'
+    );
+    expect(shareTreeSource).toContain("stats.documentDeletesAttempted + 2 > stats.maxDocumentDeletes");
   });
 });

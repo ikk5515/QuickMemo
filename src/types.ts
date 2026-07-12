@@ -95,6 +95,9 @@ export interface NoteDocument {
   updatedAt?: Timestamp;
   updatedBy: string;
   savedAt?: Timestamp;
+  revision?: number;
+  lastMutationId?: string;
+  attachmentRevision?: number;
   isDeleted?: boolean;
   deletedAt?: Timestamp;
   deletedBy?: string;
@@ -125,6 +128,7 @@ export interface NoteAttachmentDocument {
   blobDownloadUrl?: string;
   blobEtag?: string;
   encryptedSize?: number;
+  quotaReserved?: boolean;
   isReady?: boolean;
   iv?: Bytes;
   chunkSize?: number;
@@ -136,8 +140,11 @@ export interface NoteAttachmentDocument {
 
 export interface PublicNoteShareDocument {
   sourceNoteId: string;
+  sourceRevision?: number;
+  sourceAttachmentRevision?: number;
   ownerUid: string;
   version: 1;
+  currentGeneration?: string;
   encryptedTitle: EncryptedPayload;
   encryptedBody: EncryptedPayload;
   ownerWrappedShareKey?: WrappedNoteKey;
@@ -153,8 +160,11 @@ export interface PublicNoteShareDocument {
 
 export interface PublicNoteShareAttachmentDocument {
   version: 1 | 2;
+  privacyVersion?: 1;
   algorithm: "AES-GCM" | "AES-GCM-CHUNKED";
+  generation?: string;
   fileName: string;
+  encryptedFileName?: EncryptedPayload;
   extension: string;
   mimeType: string;
   originalSize: number;
@@ -166,6 +176,7 @@ export interface PublicNoteShareAttachmentDocument {
   blobDownloadUrl?: string;
   blobEtag?: string;
   encryptedSize?: number;
+  quotaReserved?: boolean;
   isReady?: boolean;
   iv?: Bytes;
   chunkSize?: number;
@@ -208,6 +219,7 @@ export interface NoteHistoryDocument {
   readerUids?: string[];
   encryptedSummary?: EncryptedPayload;
   encryptedSnapshot?: EncryptedPayload;
+  revision?: number;
   createdAt?: Timestamp;
 }
 
