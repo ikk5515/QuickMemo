@@ -84,13 +84,7 @@ export function normalizeScheduleTaskDocument(data: unknown): ScheduleTaskDocume
 }
 
 function snapshotList(snapshot: { docs: Array<{ id: string; data: () => unknown }> }) {
-  return snapshot.docs
-    .map((document) => ({ id: document.id, ...normalizeScheduleTaskDocument(document.data()) }))
-    .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt));
-}
-
-function timestampMillis(timestamp: ScheduleTaskDocument["updatedAt"]) {
-  return timestamp && typeof timestamp.toMillis === "function" ? timestamp.toMillis() : 0;
+  return snapshot.docs.map((document) => ({ id: document.id, ...normalizeScheduleTaskDocument(document.data()) }));
 }
 
 export function subscribeScheduleTasks(uid: string, callback: (tasks: ScheduleTaskSnapshot[]) => void, onError?: (error: Error) => void) {

@@ -85,4 +85,19 @@ describe("Firestore index retention policies", () => {
     expect(fieldOverride("recurringHabits", "encryptedDetails")).toMatchObject({ indexes: [] });
     expect(fieldOverride("recurringHabits", "wrappedKeys")).toMatchObject({ indexes: [] });
   });
+
+  it("indexes bounded recurring check-in queries without indexing checklist arrays", () => {
+    for (const fieldPath of ["date", "habitId"]) {
+      expect(
+        firestoreIndexes.indexes.some(
+          (index) =>
+            index.collectionGroup === "recurringHabitCheckIns"
+            && index.fields.some((field) => field.fieldPath === "ownerUid")
+            && index.fields.some((field) => field.fieldPath === fieldPath)
+        )
+      ).toBe(true);
+    }
+
+    expect(fieldOverride("recurringHabitCheckIns", "checkedItemIds")).toMatchObject({ indexes: [] });
+  });
 });

@@ -565,7 +565,7 @@ export function buildCalendarMonth(year: number, monthIndex: number, today = toL
 }
 
 export function tasksByDate(tasks: DecryptedScheduleTask[]) {
-  return tasks.reduce<Record<string, DecryptedScheduleTask[]>>((map, task) => {
+  const taskMap = tasks.reduce<Record<string, DecryptedScheduleTask[]>>((map, task) => {
     const startDate = taskStartDate(task);
     const endDate = taskEndDate(task);
 
@@ -583,13 +583,15 @@ export function tasksByDate(tasks: DecryptedScheduleTask[]) {
     let cursor = startDate;
 
     for (let offset = 0; offset < rangeDays; offset += 1) {
-      map[cursor] = [...(map[cursor] ?? []), task];
-      map[cursor].sort(compareCalendarTasks);
+      (map[cursor] ??= []).push(task);
       cursor = addDays(cursor, 1);
     }
 
     return map;
   }, {});
+
+  Object.values(taskMap).forEach((dateTasks) => dateTasks.sort(compareCalendarTasks));
+  return taskMap;
 }
 
 function taskDateRange(task: DecryptedScheduleTask) {

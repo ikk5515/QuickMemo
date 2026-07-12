@@ -75,6 +75,7 @@ service cloud.firestore {
 
     function encryptedPayload(payload) {
       return payload is map
+        && payload.keys().hasOnly(["version", "algorithm", "cipherText", "iv"])
         && payload.version == 1
         && payload.algorithm == "AES-GCM"
         && payload.cipherText is string
@@ -587,7 +588,8 @@ service cloud.firestore {
 
     function recurringHabitBelongsToOwner(habitId, uid) {
       return exists(/databases/$(database)/documents/recurringHabits/$(habitId))
-        && get(/databases/$(database)/documents/recurringHabits/$(habitId)).data.ownerUid == uid;
+        && get(/databases/$(database)/documents/recurringHabits/$(habitId)).data.ownerUid == uid
+        && get(/databases/$(database)/documents/recurringHabits/$(habitId)).data.status == "active";
     }
 
     function validRecurringHabitCheckInProgress(data) {
@@ -613,6 +615,9 @@ service cloud.firestore {
         "ownerUid",
         "habitId",
         "date",
+        "completed",
+        "progressPercent",
+        "checkedItemIds",
         "checkedAt",
         "createdAt",
         "updatedAt"
@@ -635,13 +640,20 @@ service cloud.firestore {
       && validScheduleDate(data.date)
       && data.date != null
       && checkInId == data.habitId + "_" + data.date
-      && (!data.keys().hasAny(["completed"]) || data.completed is bool)
+      && data.completed is bool
+      && data.progressPercent is int
       && validRecurringHabitCheckInProgress(data)
       && validRecurringHabitCheckedItemIds(data)
       && (
-        data.checkedAt == null
+        (
+          data.completed == false
+          && data.progressPercent < 100
+          && data.checkedAt == null
+        )
         || (
-          data.checkedAt is timestamp
+          data.completed == true
+          && data.progressPercent == 100
+          && data.checkedAt is timestamp
           && data.checkedAt <= request.time
         )
       )
@@ -1656,6 +1668,8 @@ service cloud.firestore {
         && request.resource.data.wrappedKeys == resource.data.wrappedKeys
         && request.resource.data.updatedBy == request.auth.uid
         && request.resource.data.updatedAt == request.time
+        && resource.data.status == "active"
+        && request.resource.data.status in ["active", "archived"]
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "status",
           "slot",
@@ -1668,7 +1682,8 @@ service cloud.firestore {
           "updatedAt"
         ]);
       allow delete: if activeSignedInUser()
-        && resource.data.ownerUid == request.auth.uid;
+        && resource.data.ownerUid == request.auth.uid
+        && resource.data.status == "archived";
     }
 
     match /recurringHabitCheckIns/{checkInId} {

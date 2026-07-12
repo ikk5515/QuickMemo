@@ -1,6 +1,7 @@
 import type {
   DecryptedRecurringHabit,
   RecurringHabitCheckInDocument,
+  RecurringHabitDetails,
   RecurringHabitIcon,
   RecurringHabitSlot,
   ScheduleChecklistItem
@@ -46,6 +47,50 @@ export interface RecurringHabitOrderUpdate {
   sortOrder: number;
 }
 
+export const recurringHabitTitleMaxLength = 160;
+export const recurringHabitDescriptionMaxLength = 4000;
+export const recurringHabitChecklistItemMaxLength = 200;
+export const recurringHabitChecklistMaxItems = 100;
+export const recurringHabitDetailsMaxBytes = 8000;
+
+function utf8ByteLength(value: string) {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+export function recurringHabitTitleValidationError(title: string) {
+  const trimmedTitle = title.trim();
+
+  if (!trimmedTitle) {
+    return "반복 업무 이름을 입력해주세요.";
+  }
+
+  if (trimmedTitle.length > recurringHabitTitleMaxLength || utf8ByteLength(trimmedTitle) > 600) {
+    return `반복 업무 이름은 ${recurringHabitTitleMaxLength}자 이내로 입력해주세요.`;
+  }
+
+  return null;
+}
+
+export function recurringHabitDetailsValidationError(details: RecurringHabitDetails) {
+  if (details.description.length > recurringHabitDescriptionMaxLength) {
+    return `반복 업무 설명은 ${recurringHabitDescriptionMaxLength}자 이내로 입력해주세요.`;
+  }
+
+  if (details.checklist.length > recurringHabitChecklistMaxItems) {
+    return `체크리스트는 최대 ${recurringHabitChecklistMaxItems}개까지 추가할 수 있습니다.`;
+  }
+
+  if (details.checklist.some((item) => item.text.length > recurringHabitChecklistItemMaxLength)) {
+    return `체크리스트 항목은 ${recurringHabitChecklistItemMaxLength}자 이내로 입력해주세요.`;
+  }
+
+  if (utf8ByteLength(JSON.stringify(details)) > recurringHabitDetailsMaxBytes) {
+    return "반복 업무 상세 내용이 너무 큽니다. 설명이나 체크리스트를 줄여주세요.";
+  }
+
+  return null;
+}
+
 export const recurringHabitSlots: Array<{ key: RecurringHabitSlot; label: string }> = [
   { key: "morning", label: "오전" },
   { key: "afternoon", label: "오후" },
@@ -64,6 +109,43 @@ export const recurringHabitIconLabels: Record<RecurringHabitIcon, string> = {
 };
 
 export const recurringHabitIconValues = Object.keys(recurringHabitIconLabels) as RecurringHabitIcon[];
+
+interface RecurringCheckInIndex {
+  byHabitDate: Map<string, RecurringHabitCheckInDocument>;
+  completedDatesByHabit: Map<string, Set<string>>;
+}
+
+const recurringCheckInIndexCache = new WeakMap<RecurringHabitCheckInDocument[], RecurringCheckInIndex>();
+
+function recurringCheckInIndex(checkIns: RecurringHabitCheckInDocument[]) {
+  const cached = recurringCheckInIndexCache.get(checkIns);
+
+  if (cached) {
+    return cached;
+  }
+
+  const index: RecurringCheckInIndex = {
+    byHabitDate: new Map(),
+    completedDatesByHabit: new Map()
+  };
+
+  checkIns.forEach((checkIn) => {
+    if (!checkIn.habitId || !isValidScheduleDateString(checkIn.date)) {
+      return;
+    }
+
+    index.byHabitDate.set(recurringCheckInId(checkIn.habitId, checkIn.date), checkIn);
+
+    if (recurringHabitCheckInCompleted(checkIn)) {
+      const dates = index.completedDatesByHabit.get(checkIn.habitId) ?? new Set<string>();
+      dates.add(checkIn.date);
+      index.completedDatesByHabit.set(checkIn.habitId, dates);
+    }
+  });
+
+  recurringCheckInIndexCache.set(checkIns, index);
+  return index;
+}
 
 export function normalizeRecurringHabitDetails(value: unknown) {
   if (!value || typeof value !== "object") {
@@ -183,7 +265,7 @@ export function recurringHabitDayState(
   habitId: string,
   date: string
 ) {
-  return checkIns.find((checkIn) => checkIn.habitId === habitId && checkIn.date === date) ?? null;
+  return recurringCheckInIndex(checkIns).byHabitDate.get(recurringCheckInId(habitId, date)) ?? null;
 }
 
 export function recurringHabitDayCheckedItemIds(
@@ -265,11 +347,8 @@ export function calculateHabitMonthStats(
   today = toLocalDateString(new Date())
 ): RecurringHabitMonthStats {
   const safeMonth = normalizeMonthString(month, today.slice(0, 7));
-  const checkedDays = checkIns.filter((checkIn) =>
-    checkIn.habitId === habitId
-    && checkIn.date.startsWith(`${safeMonth}-`)
-    && recurringHabitCheckInCompleted(checkIn)
-  ).length;
+  const checkedDays = [...checkInDateSet(habitId, checkIns)]
+    .filter((date) => date.startsWith(`${safeMonth}-`)).length;
   const denominatorDays = monthDenominatorDays(safeMonth, today);
 
   return {
@@ -348,15 +427,7 @@ function safeSortOrder(habit: Pick<DecryptedRecurringHabit, "sortOrder">) {
 }
 
 function checkInDateSet(habitId: string, checkIns: RecurringHabitCheckInDocument[]) {
-  return new Set(
-    checkIns
-      .filter((checkIn) =>
-        checkIn.habitId === habitId
-        && isValidScheduleDateString(checkIn.date)
-        && recurringHabitCheckInCompleted(checkIn)
-      )
-      .map((checkIn) => checkIn.date)
-  );
+  return recurringCheckInIndex(checkIns).completedDatesByHabit.get(habitId) ?? new Set<string>();
 }
 
 function recurringHabitCheckInCompleted(checkIn: RecurringHabitCheckInDocument) {

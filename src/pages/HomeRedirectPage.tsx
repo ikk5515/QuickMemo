@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
 import { useAuth } from "../context/AuthContext";
-import { normalizePrimaryScheduleView } from "../lib/scheduleNavigation";
+import { normalizePrimaryScheduleView, scheduleViewHref } from "../lib/scheduleNavigation";
 import { defaultUserPreferences, getCachedUserPreferences, getUserPreferences } from "../services/userPreferences";
 import type { UserPreferencesDocument } from "../types";
 
@@ -40,21 +40,24 @@ export default function HomeRedirectPage() {
     };
   }, [profile]);
 
+  const scheduleDefaultView = normalizePrimaryScheduleView(preferences?.scheduleDefaultView);
+  const scheduleTarget = scheduleViewHref(scheduleDefaultView);
   const startTarget = useMemo(() => {
     const defaultHome = preferences?.defaultHome ?? defaultUserPreferences.defaultHome;
-    return defaultHome === "schedule" ? "/schedule" : "/app";
-  }, [preferences?.defaultHome]);
+    return defaultHome === "schedule" ? scheduleTarget : "/app";
+  }, [preferences?.defaultHome, scheduleTarget]);
 
   if (!profile) {
     return <Navigate to="/login" replace />;
   }
 
-  const scheduleDefaultView = normalizePrimaryScheduleView(preferences?.scheduleDefaultView);
   const scheduleLabel =
     scheduleDefaultView === "calendar"
       ? "달력"
       : scheduleDefaultView === "matrix"
         ? "매트릭스"
+        : scheduleDefaultView === "recurring"
+          ? "반복 업무"
         : "할 일";
 
   return (
@@ -84,7 +87,7 @@ export default function HomeRedirectPage() {
             <p>문서, 첨부파일, 공유 노트를 한 작업 공간에서 정리합니다.</p>
             <em>바로 열기</em>
           </Link>
-          <Link className="home-action-card schedule" to="/schedule">
+          <Link className="home-action-card schedule" to={scheduleTarget}>
             <span>
               <CalendarDays size={22} />
             </span>

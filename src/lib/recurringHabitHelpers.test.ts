@@ -10,8 +10,11 @@ import {
   groupRecurringHabitsBySlot,
   isHabitCheckedOn,
   normalizeRecurringHabitDetails,
+  recurringHabitChecklistMaxItems,
   recurringHabitDayCheckedItemIds,
-  recurringHabitDayProgressPercent
+  recurringHabitDayProgressPercent,
+  recurringHabitDetailsValidationError,
+  recurringHabitTitleValidationError
 } from "./recurringHabitHelpers";
 
 function timestamp(value: string) {
@@ -77,6 +80,19 @@ describe("recurring habit helpers", () => {
         { checked: false, id: "recurring-checklist-1", text: "쓰기" }
       ]
     });
+  });
+
+  it("rejects oversized recurring fields before encryption", () => {
+    expect(recurringHabitTitleValidationError(" ")).toBe("반복 업무 이름을 입력해주세요.");
+    expect(recurringHabitTitleValidationError("업무")).toBeNull();
+    expect(recurringHabitDetailsValidationError({
+      description: "",
+      checklist: Array.from({ length: recurringHabitChecklistMaxItems + 1 }, (_, index) => ({
+        checked: false,
+        id: `item-${index}`,
+        text: "항목"
+      }))
+    })).toBe(`체크리스트는 최대 ${recurringHabitChecklistMaxItems}개까지 추가할 수 있습니다.`);
   });
 
   it("builds a 7-day strip ending on the anchor date", () => {

@@ -170,6 +170,9 @@ function recurringHabitCheckIn(uid: string, habitId: string, date: string, overr
     ownerUid: uid,
     habitId,
     date,
+    completed: true,
+    progressPercent: 100,
+    checkedItemIds: [],
     checkedAt: serverTimestamp(),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -966,17 +969,53 @@ describeRules("firestore security rules", () => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
       await setDoc(doc(context.firestore(), "recurringHabits/habit-b"), recurringHabit("user-b"));
+      await setDoc(
+        doc(context.firestore(), "recurringHabits/habit-archived"),
+        recurringHabit("user-a", { status: "archived" })
+      );
+      await setDoc(
+        doc(context.firestore(), "recurringHabitCheckIns/habit-archived_2026-05-21"),
+        recurringHabitCheckIn("user-a", "habit-archived", "2026-05-21")
+      );
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     const otherDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertSucceeds(setDoc(doc(ownerDb, "recurringHabits/habit-a"), recurringHabit("user-a")));
+    await assertSucceeds(setDoc(doc(ownerDb, "recurringHabits/habit-recovery"), recurringHabit("user-a")));
     await assertSucceeds(setDoc(doc(ownerDb, "recurringHabits/AbCdEfGhIjKlMnOpQrSt"), recurringHabit("user-a")));
     await assertSucceeds(getDoc(doc(ownerDb, "recurringHabits/habit-a")));
     await assertSucceeds(getDocs(query(collection(ownerDb, "recurringHabits"), where("ownerUid", "==", "user-a"))));
     await assertFails(getDoc(doc(otherDb, "recurringHabits/habit-a")));
     await assertFails(setDoc(doc(otherDb, "recurringHabits/forged-owner"), recurringHabit("user-a")));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "recurringHabits/habit-recovery"), {
+        status: "archived",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "recurringHabits/habit-recovery"), {
+        status: "active",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "recurringHabits/habit-recovery"), {
+        color: "#123456",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "recurringHabits/plaintext-extra"),
+        recurringHabit("user-a", { encryptedTitle: { ...encryptedPayload, plaintext: "not-allowed" } })
+      )
+    );
     await assertSucceeds(
       updateDoc(doc(ownerDb, "recurringHabits/habit-a"), {
         slot: "afternoon",
@@ -1028,6 +1067,45 @@ describeRules("firestore security rules", () => {
         doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21"),
         recurringHabitCheckIn("user-a", "habit-a", "2026-05-21")
       )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-23"),
+        recurringHabitCheckIn("user-a", "habit-a", "2026-05-23", {
+          completed: true,
+          progressPercent: 50
+        })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-24"),
+        recurringHabitCheckIn("user-a", "habit-a", "2026-05-24", {
+          checkedAt: null,
+          completed: false,
+          progressPercent: 100
+        })
+      )
+    );
+    const missingCompleted = recurringHabitCheckIn("user-a", "habit-a", "2026-05-25") as Record<string, unknown>;
+    delete missingCompleted.completed;
+    await assertFails(
+      setDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-25"), missingCompleted)
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "recurringHabitCheckIns/habit-archived_2026-05-22"),
+        recurringHabitCheckIn("user-a", "habit-archived", "2026-05-22")
+      )
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "recurringHabitCheckIns/habit-archived_2026-05-21"), {
+        checkedItemIds: [],
+        completed: true,
+        progressPercent: 100,
+        checkedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
     );
     await assertSucceeds(
       setDoc(
@@ -1106,7 +1184,21 @@ describeRules("firestore security rules", () => {
     await assertFails(deleteDoc(doc(otherDb, "recurringHabitCheckIns/habit-a_2026-05-21")));
     await assertSucceeds(deleteDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-21")));
     await assertFails(deleteDoc(doc(otherDb, "recurringHabits/habit-a")));
+    await assertFails(deleteDoc(doc(ownerDb, "recurringHabits/habit-a")));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "recurringHabitCheckIns/habit-a_2026-05-22")));
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "recurringHabits/habit-a"), {
+        status: "archived",
+        updatedBy: "user-a",
+        updatedAt: serverTimestamp()
+      })
+    );
     await assertSucceeds(deleteDoc(doc(ownerDb, "recurringHabits/habit-a")));
+    const remainingOwnedHabits = await assertSucceeds(getDocs(query(
+      collection(ownerDb, "recurringHabits"),
+      where("ownerUid", "==", "user-a")
+    )));
+    expect(remainingOwnedHabits.docs.some((snapshot) => snapshot.id === "habit-a")).toBe(false);
   });
 
   it("allows participants to read notes and blocks outsiders", async () => {

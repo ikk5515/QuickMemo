@@ -7,6 +7,7 @@ const HomeRedirectPage = lazy(() => import("./pages/HomeRedirectPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const NotesPage = lazy(() => import("./pages/NotesPage"));
 const PublicSharePage = lazy(() => import("./pages/PublicSharePage"));
+const RecurringPage = lazy(() => import("./pages/RecurringPage"));
 const SchedulePage = lazy(() => import("./pages/SchedulePage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
 
@@ -65,6 +66,14 @@ export default function App() {
           element={
             <RequireAuth>
               <SchedulePage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/schedule/recurring"
+          element={
+            <RequireAuth>
+              <RecurringPage />
             </RequireAuth>
           }
         />

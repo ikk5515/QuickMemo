@@ -98,7 +98,7 @@ describe("SettingsModal", () => {
     });
   });
 
-  it("keeps recurring and completed out of the default schedule screen selector", () => {
+  it("offers recurring work as a default schedule tab while excluding completed history", () => {
     render(
       <SettingsModal
         preferences={{ ...preferences(), scheduleDefaultView: "completed" }}
@@ -113,7 +113,7 @@ describe("SettingsModal", () => {
     expect(screen.getByRole("option", { name: "할 일" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "달력" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "매트릭스" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "반복" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "반복 업무" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "완료" })).not.toBeInTheDocument();
   });
 });
