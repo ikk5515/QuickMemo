@@ -248,7 +248,6 @@
     {
       "collectionGroup": "publicNoteShares",
       "fieldPath": "expiresAt",
-      "ttl": true,
       "indexes": [
         {
           "order": "ASCENDING",
