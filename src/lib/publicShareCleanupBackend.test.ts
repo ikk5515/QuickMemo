@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 interface VercelConfig {
+  fluid?: boolean;
   crons?: Array<{
     path: string;
     schedule: string;
@@ -13,6 +14,11 @@ const vercelConfig = JSON.parse(readFileSync(join(process.cwd(), "vercel.json"),
 const cleanupFunctionSource = readFileSync(join(process.cwd(), "api/cleanup-public-shares.js"), "utf8");
 
 describe("public share backend cleanup", () => {
+  it("keeps cleanup APIs on Fluid Compute without lowering the platform duration default", () => {
+    expect(vercelConfig.fluid).toBe(true);
+    expect(vercelConfig).not.toHaveProperty("functions");
+  });
+
   it("keeps a production cron route for expired public share cleanup", () => {
     expect(vercelConfig.crons).toContainEqual({
       path: "/api/cleanup-public-shares",
