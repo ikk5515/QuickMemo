@@ -113,7 +113,7 @@ PUBLIC_SHARE_CLEANUP_BATCH_SIZE=50
 PUBLIC_SHARE_CLEANUP_MAX_DELETES=1000
 ```
 
-Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. cleanup 함수는 `publicShareCleanupQueue.expiresAt <= now`인 queue 문서를 조회해 해당 공유 첨부 파일, 원본 공유 문서, cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제와 Firebase Auth 사용자 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
+Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. 같은 설정에서 Fluid Compute를 명시적으로 활성화하되 함수 실행시간을 더 짧게 덮어쓰지 않아 Vercel의 플랜 기본 제한을 사용합니다. cleanup 함수는 `publicShareCleanupQueue.expiresAt <= now`인 queue 문서를 조회해 해당 공유 첨부 파일, 원본 공유 문서, cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제와 Firebase Auth 사용자 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
 
 ### 관리자 사용자 삭제
 
