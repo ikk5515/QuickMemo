@@ -790,6 +790,10 @@ textarea {
 }
 
 .notes-workspace {
+  --notes-layout-gap: 16px;
+  --notes-panel-height: calc(100svh - 110px);
+  --notes-panel-padding: 16px;
+  --notes-rail-width: clamp(280px, 24vw, 320px);
   grid-template-columns: minmax(0, 1fr);
   position: relative;
 }
@@ -890,19 +894,21 @@ textarea {
 .notes-editor-layout {
   align-items: start;
   display: grid;
-  gap: 14px;
+  gap: var(--notes-layout-gap);
   grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   transition: grid-template-columns 0.18s ease;
 }
 
 .notes-editor-layout.with-drawer {
-  grid-template-columns: minmax(280px, 372px) minmax(0, 1fr);
+  grid-template-columns: var(--notes-rail-width) minmax(0, 1fr);
 }
 
 .editor-panel {
-  min-height: calc(100svh - 116px);
+  min-height: var(--notes-panel-height);
+  min-width: 0;
   padding: 18px;
+  width: 100%;
 }
 
 .panel h2 {
@@ -959,13 +965,14 @@ textarea {
 .personal-overview-layout {
   align-items: start;
   display: grid;
-  gap: 16px;
-  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: var(--notes-layout-gap);
+  grid-template-columns: var(--notes-rail-width) minmax(0, 1fr);
   min-width: 0;
 }
 
 .overview-folder-panel,
 .overview-note-panel {
+  align-content: start;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -976,7 +983,10 @@ textarea {
 .overview-folder-panel {
   display: grid;
   gap: 14px;
-  padding: 14px;
+  height: var(--notes-panel-height);
+  max-height: var(--notes-panel-height);
+  overflow: auto;
+  padding: var(--notes-panel-padding);
   position: sticky;
   top: 88px;
 }
@@ -984,7 +994,8 @@ textarea {
 .overview-note-panel {
   display: grid;
   gap: 14px;
-  padding: 16px;
+  min-height: var(--notes-panel-height);
+  padding: var(--notes-panel-padding);
 }
 
 .overview-note-panel-header {
@@ -1389,6 +1400,7 @@ textarea {
 .full-editor-panel {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .editor-toolbar {
@@ -2059,13 +2071,6 @@ textarea {
 
 .rich-body-input.ProseMirror-focused .qm-editor-selection-highlight {
   background: rgb(63 111 181 / 24%);
-}
-
-.rich-body-input p,
-.rich-body-input figure,
-.rich-body-input ul,
-.rich-body-input ol {
-  margin: 0 0 16px;
 }
 
 .rich-body-input [data-qm-attribution-label] {
@@ -2870,13 +2875,15 @@ textarea {
 }
 
 .note-drawer {
-  max-height: calc(100svh - 110px);
+  height: var(--notes-panel-height);
+  max-height: var(--notes-panel-height);
+  min-width: 0;
   overflow: auto;
-  padding: 16px;
+  padding: var(--notes-panel-padding);
   position: sticky;
   left: auto;
   top: 88px;
-  width: auto;
+  width: 100%;
   z-index: 1;
 }
 
@@ -3665,11 +3672,6 @@ textarea {
   max-width: 120px;
   right: 6px;
   top: 6px;
-}
-
-.note-preview-body p,
-.note-preview-body figure {
-  margin: 0 0 16px;
 }
 
 .note-preview-body img {
@@ -5043,7 +5045,7 @@ textarea {
 
 @media (min-width: 981px) {
   .notes-editor-layout.with-drawer .note-drawer {
-    max-height: calc(100svh - 110px);
+    max-height: var(--notes-panel-height);
     top: 88px;
   }
 }
@@ -5054,7 +5056,7 @@ textarea {
   }
 
   .notes-editor-layout .full-editor-panel {
-    min-height: calc(100svh - 110px);
+    min-height: var(--notes-panel-height);
   }
 
   .admin-workspace {
@@ -5089,7 +5091,10 @@ textarea {
   }
 
   .notes-editor-layout.with-drawer .note-drawer {
-    max-height: none;
+    height: auto;
+    max-height: min(58svh, 560px);
+    min-height: 0;
+    overflow: auto;
     position: static;
     top: auto;
   }
@@ -5770,11 +5775,15 @@ textarea {
 
   .overview-folder-panel {
     gap: 12px;
+    height: auto;
+    max-height: none;
+    overflow: visible;
     padding: 12px;
     position: static;
   }
 
   .overview-note-panel {
+    min-height: 0;
     padding: 12px;
   }
 
@@ -9412,11 +9421,31 @@ button,
 .rich-body-input.ProseMirror,
 .note-preview-body,
 .admin-note-view-body {
-  line-height: 1.68;
+  line-height: 1;
 }
 
 .rich-body-input.ProseMirror {
   font-size: var(--editor-font-size, var(--type-editor-body));
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) p {
+  margin: 0;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) :is(figure, ul, ol) {
+  margin: 0 0 0.5em;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) :is(ul, ol):not([data-type="taskList"]) {
+  padding-inline-start: 2em;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) > :first-child {
+  margin-block-start: 0;
+}
+
+:is(.rich-body-input, .note-preview-body, .admin-note-view-body) > :last-child {
+  margin-block-end: 0;
 }
 
 :is(.rich-body-input, .note-preview-body, .admin-note-view-body) > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre) {
