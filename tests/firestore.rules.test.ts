@@ -17,6 +17,7 @@ import {
   getDocs,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -1040,6 +1041,31 @@ describeRules("firestore security rules", () => {
     await assertFails(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), { status: "archived", updatedAt: serverTimestamp() }));
     await assertFails(deleteDoc(doc(otherDb, "scheduleTasks/task-a")));
     await assertSucceeds(deleteDoc(doc(ownerDb, "scheduleTasks/task-a")));
+  });
+
+  it("allows only active habit owners to create the first check-in transactionally", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "users/user-inactive"), userProfile("user-inactive", { isActive: false }));
+      await setDoc(doc(context.firestore(), "recurringHabits/habit-transaction"), recurringHabit("user-a"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const inactiveDb = testEnv.authenticatedContext("user-inactive").firestore();
+    const firstCheckInRef = doc(ownerDb, "recurringHabitCheckIns/habit-transaction_2026-05-20");
+
+    await assertSucceeds(runTransaction(ownerDb, async (transaction) => {
+      const missingCheckIn = await transaction.get(firstCheckInRef);
+
+      expect(missingCheckIn.exists()).toBe(false);
+      transaction.set(firstCheckInRef, recurringHabitCheckIn("user-a", "habit-transaction", "2026-05-20"));
+    }));
+    await assertSucceeds(getDoc(firstCheckInRef));
+    await assertFails(getDoc(doc(otherDb, "recurringHabitCheckIns/habit-transaction_2026-05-21")));
+    await assertFails(getDoc(doc(ownerDb, "recurringHabitCheckIns/malformed-check-in")));
+    await assertFails(getDoc(doc(inactiveDb, "recurringHabitCheckIns/habit-transaction_2026-05-21")));
   });
 
   it("keeps recurring habits and check-ins owner-only with strict values", async () => {

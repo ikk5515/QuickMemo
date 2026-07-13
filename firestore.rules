@@ -661,6 +661,14 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/recurringHabits/$(habitId)).data.status == "active";
     }
 
+    function recurringHabitCheckInTargetBelongsToOwner(checkInId, uid) {
+      let separatorIndex = checkInId.size() - 11;
+      return checkInId.size() > 11
+        && checkInId[separatorIndex] == "_"
+        && validScheduleDate(checkInId[separatorIndex + 1:checkInId.size()])
+        && recurringHabitBelongsToOwner(checkInId[0:separatorIndex], uid);
+    }
+
     function validRecurringHabitCheckInProgress(data) {
       return !data.keys().hasAny(["progressPercent"])
         || data.progressPercent == null
@@ -2037,7 +2045,18 @@ service cloud.firestore {
     }
 
     match /recurringHabitCheckIns/{checkInId} {
-      allow read: if activeSignedInUser()
+      allow get: if activeSignedInUser()
+        && (
+          (
+            exists(/databases/$(database)/documents/recurringHabitCheckIns/$(checkInId))
+            && resource.data.ownerUid == request.auth.uid
+          )
+          || (
+            !exists(/databases/$(database)/documents/recurringHabitCheckIns/$(checkInId))
+            && recurringHabitCheckInTargetBelongsToOwner(checkInId, request.auth.uid)
+          )
+        );
+      allow list: if activeSignedInUser()
         && resource.data.ownerUid == request.auth.uid;
       allow create: if activeSignedInUser()
         && validRecurringHabitCheckIn(request.resource.data, request.auth.uid, checkInId)
