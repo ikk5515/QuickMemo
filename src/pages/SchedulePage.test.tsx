@@ -1,15 +1,15 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { PropsWithChildren } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { subscribeRecurringHabitCheckIns, subscribeRecurringHabits } from "../services/recurringHabits";
-import { subscribeScheduleTasks } from "../services/scheduleTasks";
+import { subscribeScheduleTasks, updateScheduleTask, type ScheduleTaskSnapshot } from "../services/scheduleTasks";
 import SchedulePage from "./SchedulePage";
 
-function renderSchedulePage(routeView?: "recurring") {
+function renderSchedulePage(routeView?: "recurring", initialEntry?: string) {
   return render(
-    <MemoryRouter initialEntries={[routeView ? "/schedule/recurring" : "/schedule"]}>
+    <MemoryRouter initialEntries={[initialEntry ?? (routeView ? "/schedule/recurring" : "/schedule")]}>
       <Routes>
         <Route path="/schedule" element={<SchedulePage />} />
         <Route path="/schedule/recurring" element={<SchedulePage routeView="recurring" />} />
@@ -47,6 +47,13 @@ const testData = vi.hoisted(() => {
   };
 });
 
+const cryptoMocks = vi.hoisted(() => ({
+  decryptText: vi.fn(async (payload: { cipherText: string }) =>
+    payload.cipherText === "matrix-title" ? "matrix drag task" : JSON.stringify({ checklist: [], description: "" })
+  ),
+  unwrapNoteKey: vi.fn(async () => ({} as CryptoKey))
+}));
+
 vi.mock("../components/AppShell", () => ({
   AppShell: ({ children }: PropsWithChildren) => <div>{children}</div>
 }));
@@ -68,6 +75,16 @@ vi.mock("../context/AuthContext", () => ({
     unlockPrivateKey: vi.fn()
   })
 }));
+
+vi.mock("../lib/crypto", async () => {
+  const actual = await vi.importActual<typeof import("../lib/crypto")>("../lib/crypto");
+
+  return {
+    ...actual,
+    decryptText: cryptoMocks.decryptText,
+    unwrapNoteKey: cryptoMocks.unwrapNoteKey
+  };
+});
 
 vi.mock("../lib/koreanHolidays", async () => {
   const actual = await vi.importActual<typeof import("../lib/koreanHolidays")>("../lib/koreanHolidays");
@@ -263,4 +280,88 @@ describe("SchedulePage quick work panel", () => {
     expect(subscribeRecurringHabits).not.toHaveBeenCalled();
     expect(subscribeRecurringHabitCheckIns).not.toHaveBeenCalled();
   });
+
+  it("drags task content into another matrix section and updates its priority", async () => {
+    const matrixTask: ScheduleTaskSnapshot = {
+      id: "matrix-task-a",
+      ownerUid: "user-a",
+      status: "active",
+      dueDate: null,
+      dueTimeMinutes: null,
+      isImportant: true,
+      isUrgent: true,
+      encryptedTitle: { version: 1, algorithm: "AES-GCM", cipherText: "matrix-title", iv: "iv" },
+      encryptedDetails: { version: 1, algorithm: "AES-GCM", cipherText: "matrix-details", iv: "iv" },
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped" }
+      },
+      createdBy: "user-a",
+      updatedBy: "user-a"
+    };
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([matrixTask]);
+      return vi.fn();
+    });
+
+    renderSchedulePage(undefined, "/schedule?view=matrix");
+
+    const taskTitle = await screen.findByText("matrix drag task");
+    const taskRow = taskTitle.closest<HTMLElement>(".matrix-task-row");
+    const dragHandle = taskRow?.querySelector<HTMLButtonElement>(".task-drag-handle");
+    const urgentSection = screen.getByRole("heading", { name: testData.matrixLabels.urgent }).closest<HTMLElement>(
+      ".matrix-section"
+    );
+
+    expect(taskRow).not.toBeNull();
+    expect(urgentSection).not.toBeNull();
+    expect(dragHandle).toHaveAttribute("tabindex", "0");
+
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement
+    ) {
+      if (this === taskRow) {
+        return testRect(0, 0, 240, 60);
+      }
+
+      if (this === urgentSection) {
+        return testRect(300, 0, 240, 220);
+      }
+
+      return testRect(0, 0, 0, 0);
+    });
+
+    fireEvent.pointerDown(taskTitle, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 1 });
+    fireEvent.pointerMove(document, { button: 0, clientX: 20, clientY: 10, isPrimary: true, pointerId: 1 });
+
+    await waitFor(() => expect(document.querySelector(".matrix-drag-overlay")).toBeInTheDocument());
+
+    fireEvent.pointerMove(document, { button: 0, clientX: 360, clientY: 40, isPrimary: true, pointerId: 1 });
+    await waitFor(() => expect(urgentSection).toHaveClass("drag-over"));
+
+    fireEvent.pointerUp(document, { button: 0, clientX: 360, clientY: 40, isPrimary: true, pointerId: 1 });
+
+    await waitFor(() =>
+      expect(updateScheduleTask).toHaveBeenCalledWith("matrix-task-a", "user-a", {
+        isImportant: false,
+        isUrgent: true
+      })
+    );
+
+    rectSpy.mockRestore();
+  });
 });
+
+function testRect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    bottom: top + height,
+    height,
+    left,
+    right: left + width,
+    top,
+    width,
+    x: left,
+    y: top,
+    toJSON: () => ({})
+  } as DOMRect;
+}

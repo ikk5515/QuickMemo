@@ -3662,6 +3662,7 @@ function SortableMatrixTaskRow({
       className={`task-row matrix-task-row ${task.status === "completed" ? "completed" : ""} ${isDragging ? "dragging" : ""}`}
       ref={setNodeRef}
       style={style}
+      {...listeners}
     >
       <button
         className="task-drag-handle"
@@ -3671,7 +3672,6 @@ function SortableMatrixTaskRow({
         style={{ touchAction: "none" }}
         title="드래그 이동"
         {...attributes}
-        {...listeners}
       >
         <GripVertical size={16} />
       </button>
