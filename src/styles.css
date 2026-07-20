@@ -32,6 +32,10 @@
   --button-primary-hover-bg: color-mix(in srgb, #17211f 88%, #ffffff);
   --button-primary-active-bg: color-mix(in srgb, #17211f 82%, #ffffff);
   --button-primary-color: #ffffff;
+  --button-danger-solid-bg: #b9473d;
+  --button-danger-solid-hover-bg: #a63f36;
+  --button-danger-solid-active-bg: #96372f;
+  --button-danger-solid-color: #ffffff;
   --button-secondary-bg: #eef3ef;
   --button-secondary-hover-bg: color-mix(in srgb, #2f7d70 9%, #ffffff);
   --button-secondary-color: #17211f;
@@ -116,6 +120,10 @@
   --button-primary-hover-bg: #377d74;
   --button-primary-active-bg: #285f58;
   --button-primary-color: #effffb;
+  --button-danger-solid-bg: #b94f46;
+  --button-danger-solid-hover-bg: #a8433b;
+  --button-danger-solid-active-bg: #96372f;
+  --button-danger-solid-color: #ffffff;
   --button-secondary-bg: #222226;
   --button-secondary-hover-bg: #2a2a2f;
   --button-secondary-color: #f4f4f5;
@@ -10999,5 +11007,218 @@ html[data-theme="dark"] .document-preview-page .xlsx-preview-table td {
   .schedule-tool-menu-popover {
     min-width: min(280px, calc(100vw - 32px));
     right: 0;
+  }
+}
+
+.schedule-delete-confirm-backdrop {
+  align-items: center;
+  backdrop-filter: blur(10px) saturate(90%);
+  background: rgb(12 18 17 / 62%);
+  padding:
+    max(16px, env(safe-area-inset-top))
+    max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+  z-index: 30;
+}
+
+.schedule-delete-confirm-modal {
+  animation: modal-panel-in var(--duration-base) var(--ease-standard);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--color-danger-subtle) 46%, transparent), transparent 42%),
+    var(--color-modal-bg);
+  border: 1px solid color-mix(in srgb, var(--coral) 22%, var(--line));
+  border-radius: calc(var(--radius-modal) + 6px);
+  box-shadow: 0 30px 96px rgb(10 20 18 / 34%);
+  color: var(--ink);
+  max-width: 440px;
+  overflow: hidden;
+  padding: 24px;
+  position: relative;
+  width: min(100%, 440px);
+}
+
+.schedule-delete-confirm-modal::before {
+  background: linear-gradient(90deg, var(--button-danger-solid-bg), color-mix(in srgb, var(--coral) 58%, transparent));
+  content: "";
+  height: 3px;
+  inset: 0 0 auto;
+  position: absolute;
+}
+
+.schedule-delete-confirm-header {
+  align-items: start;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+}
+
+.schedule-delete-confirm-header > div {
+  min-width: 0;
+}
+
+.schedule-delete-confirm-icon {
+  align-items: center;
+  background: var(--color-danger-subtle);
+  border: 1px solid color-mix(in srgb, var(--coral) 26%, var(--line));
+  border-radius: 13px;
+  color: var(--coral);
+  display: inline-flex;
+  height: 46px;
+  justify-content: center;
+  width: 46px;
+}
+
+.schedule-delete-confirm-kicker {
+  color: var(--button-danger-solid-bg);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  margin: 0 0 4px;
+}
+
+.schedule-delete-confirm-modal h2 {
+  font-size: 21px;
+  letter-spacing: -0.015em;
+  line-height: 1.3;
+  margin: 0;
+}
+
+.schedule-delete-confirm-close {
+  background: color-mix(in srgb, var(--surface) 74%, transparent);
+  height: 34px;
+  min-height: 34px;
+  width: 34px;
+}
+
+.schedule-delete-confirm-description {
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.65;
+  margin: 15px 0 0 60px;
+}
+
+.schedule-delete-confirm-target {
+  align-items: center;
+  background: color-mix(in srgb, var(--color-danger-subtle) 56%, var(--panel));
+  border: 1px solid var(--color-border-subtle);
+  border-left: 3px solid var(--button-danger-solid-bg);
+  border-radius: calc(var(--radius-card) + 2px);
+  color: var(--ink);
+  display: grid;
+  gap: 11px;
+  grid-template-columns: auto minmax(0, 1fr);
+  margin-top: 20px;
+  padding: 12px 14px;
+}
+
+.schedule-delete-confirm-target > svg {
+  color: var(--coral);
+}
+
+.schedule-delete-confirm-target div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.schedule-delete-confirm-target span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.schedule-delete-confirm-target strong {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.schedule-delete-confirm-error {
+  background: var(--color-danger-subtle);
+  border: 1px solid color-mix(in srgb, var(--coral) 24%, var(--line));
+  border-radius: var(--radius-card);
+  color: color-mix(in srgb, var(--coral) 78%, var(--ink));
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.5;
+  margin: 14px 0 0;
+  padding: 10px 12px;
+}
+
+.schedule-delete-confirm-actions {
+  border-top: 1px solid var(--color-border-subtle);
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 20px;
+  padding-top: 16px;
+}
+
+.schedule-delete-confirm-actions button {
+  min-height: 44px;
+  min-width: 0;
+  width: 100%;
+}
+
+.schedule-delete-confirm-submit,
+html[data-theme="dark"] .schedule-delete-confirm-submit {
+  background: var(--button-danger-solid-bg);
+  border-color: var(--button-danger-solid-bg);
+  color: var(--button-danger-solid-color);
+}
+
+.schedule-delete-confirm-submit:not(:disabled):hover,
+html[data-theme="dark"] .schedule-delete-confirm-submit:not(:disabled):hover {
+  background: var(--button-danger-solid-hover-bg);
+  border-color: var(--button-danger-solid-hover-bg);
+  color: var(--button-danger-solid-color);
+}
+
+.schedule-delete-confirm-submit:not(:disabled):active,
+html[data-theme="dark"] .schedule-delete-confirm-submit:not(:disabled):active {
+  background: var(--button-danger-solid-active-bg);
+  border-color: var(--button-danger-solid-active-bg);
+}
+
+.schedule-delete-confirm-submit:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--coral) 32%, transparent);
+}
+
+html[data-theme="dark"] .schedule-delete-confirm-backdrop {
+  background: rgb(0 0 0 / 68%);
+}
+
+html[data-theme="dark"] .schedule-delete-confirm-modal {
+  box-shadow: 0 32px 100px rgb(0 0 0 / 62%);
+}
+
+html[data-theme="dark"] .schedule-delete-confirm-kicker {
+  color: var(--coral);
+}
+
+@media (max-width: 460px) {
+  .schedule-delete-confirm-modal {
+    border-radius: calc(var(--radius-modal) + 2px);
+    padding: 20px;
+  }
+
+  .schedule-delete-confirm-header {
+    gap: 12px;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+  }
+
+  .schedule-delete-confirm-icon {
+    height: 44px;
+    width: 44px;
+  }
+
+  .schedule-delete-confirm-modal h2 {
+    font-size: 19px;
+  }
+
+  .schedule-delete-confirm-description {
+    margin-left: 0;
   }
 }

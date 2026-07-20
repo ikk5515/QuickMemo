@@ -362,9 +362,8 @@ describe("SchedulePage quick work panel", () => {
     rectSpy.mockRestore();
   });
 
-  it("deletes a schedule only after confirmation from its read or edit dialog", async () => {
+  it("uses an accessible confirmation dialog before deleting from read or edit", async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
       onNext([scheduleTaskSnapshot()]);
@@ -380,27 +379,46 @@ describe("SchedulePage quick work panel", () => {
     await user.click(taskOpenButton!);
 
     const readDialog = await screen.findByRole("dialog", { name: "matrix drag task" });
+    const readDeleteButton = within(readDialog).getByRole("button", { name: "삭제" });
 
-    await user.click(within(readDialog).getByRole("button", { name: "삭제" }));
+    await user.click(readDeleteButton);
 
-    expect(confirmSpy).toHaveBeenCalledWith(
-      '"matrix drag task" 일정을 삭제할까요?\n삭제한 일정은 복구할 수 없습니다.'
-    );
+    let deleteDialog = screen.getByRole("alertdialog", { name: "이 일정을 삭제할까요?" });
+    const cancelButton = within(deleteDialog).getByRole("button", { name: "취소" });
+
+    expect(within(deleteDialog).getByText("matrix drag task")).toBeInTheDocument();
+    expect(within(deleteDialog).getByText("삭제한 일정과 체크리스트는 복구할 수 없습니다.")).toBeInTheDocument();
+    expect(cancelButton).toHaveFocus();
+    expect(readDialog.closest(".schedule-detail-backdrop")).toHaveAttribute("inert");
     expect(deleteScheduleTask).not.toHaveBeenCalled();
+
+    await user.keyboard("{Escape}");
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     expect(readDialog).toBeInTheDocument();
+    expect(deleteScheduleTask).not.toHaveBeenCalled();
+    await waitFor(() => expect(readDeleteButton).toHaveFocus());
+
+    await user.click(readDeleteButton);
+    deleteDialog = screen.getByRole("alertdialog", { name: "이 일정을 삭제할까요?" });
+    await user.click(within(deleteDialog).getByRole("button", { name: "취소" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(readDialog).toBeInTheDocument();
+    expect(deleteScheduleTask).not.toHaveBeenCalled();
 
     await user.click(within(readDialog).getByRole("button", { name: "수정" }));
 
     const editDialog = screen.getByRole("dialog");
-    confirmSpy.mockReturnValue(true);
     await user.click(within(editDialog).getByRole("button", { name: "삭제" }));
+
+    deleteDialog = screen.getByRole("alertdialog", { name: "이 일정을 삭제할까요?" });
+    await user.click(within(deleteDialog).getByRole("button", { name: "일정 삭제" }));
 
     await waitFor(() => expect(deleteScheduleTask).toHaveBeenCalledOnce());
     expect(deleteScheduleTask).toHaveBeenCalledWith("matrix-task-a");
-    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-
-    confirmSpy.mockRestore();
   });
 });
 

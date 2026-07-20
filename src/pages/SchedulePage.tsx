@@ -39,6 +39,7 @@ import {
   HeartPulse,
   LayoutGrid,
   ListTodo,
+  LoaderCircle,
   Minus,
   MoreHorizontal,
   Pencil,
@@ -433,6 +434,9 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const [recurringCheckIns, setRecurringCheckIns] = useState<RecurringHabitCheckInSnapshot[]>([]);
   const [viewTaskId, setViewTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [deleteConfirmationTask, setDeleteConfirmationTask] = useState<DecryptedScheduleTask | null>(null);
+  const [taskDeletionPending, setTaskDeletionPending] = useState(false);
+  const [taskDeletionError, setTaskDeletionError] = useState<string | null>(null);
   const [viewRecurringHabitId, setViewRecurringHabitId] = useState<string | null>(null);
   const [readRecurringHabitId, setReadRecurringHabitId] = useState<string | null>(null);
   const [recurringHabitDialog, setRecurringHabitDialog] = useState<RecurringHabitDialogState | null>(null);
@@ -1478,21 +1482,48 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     }
   }
 
-  async function removeTask(task: DecryptedScheduleTask) {
-    const confirmed = window.confirm(`"${task.title.trim() || "제목 없는 일정"}" 일정을 삭제할까요?\n삭제한 일정은 복구할 수 없습니다.`);
-
-    if (!confirmed) {
+  function requestTaskDeletion(task: DecryptedScheduleTask) {
+    if (taskDeletionPending) {
       return;
     }
 
+    setTaskDeletionError(null);
+    setDeleteConfirmationTask(task);
+  }
+
+  function cancelTaskDeletion() {
+    if (taskDeletionPending) {
+      return;
+    }
+
+    setTaskDeletionError(null);
+    setDeleteConfirmationTask(null);
+  }
+
+  async function confirmTaskDeletion() {
+    const task = deleteConfirmationTask;
+
+    if (!task || taskDeletionPending) {
+      return;
+    }
+
+    setTaskDeletionPending(true);
+    setTaskDeletionError(null);
+
     try {
       await deleteScheduleTask(task.id);
+      setDeleteConfirmationTask(null);
       setEditingTaskId(null);
       setViewTaskId(null);
       setStatus("일정을 삭제했습니다.");
       setError(null);
     } catch (caught) {
-      setError(scheduleActionError(caught, "일정을 삭제하지 못했습니다."));
+      const message = scheduleActionError(caught, "일정을 삭제하지 못했습니다.");
+
+      setTaskDeletionError(message);
+      setError(message);
+    } finally {
+      setTaskDeletionPending(false);
     }
   }
 
@@ -2255,9 +2286,10 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
 
       {viewTask && (
         <TaskReadModal
+          inactive={deleteConfirmationTask !== null}
           task={viewTask}
           onClose={() => setViewTaskId(null)}
-          onDelete={() => void removeTask(viewTask)}
+          onDelete={() => requestTaskDeletion(viewTask)}
           onDuplicate={() => void duplicateTask(viewTask)}
           onEdit={() => {
             setEditingTaskId(viewTask.id);
@@ -2271,10 +2303,21 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
 
       {editingTask && (
         <TaskDetailModal
+          inactive={deleteConfirmationTask !== null}
           task={editingTask}
           onClose={() => setEditingTaskId(null)}
-          onDelete={() => void removeTask(editingTask)}
+          onDelete={() => requestTaskDeletion(editingTask)}
           onSave={(draft) => void saveTask(editingTask, draft)}
+        />
+      )}
+
+      {deleteConfirmationTask && (
+        <TaskDeleteConfirmDialog
+          error={taskDeletionError}
+          pending={taskDeletionPending}
+          task={deleteConfirmationTask}
+          onCancel={cancelTaskDeletion}
+          onConfirm={() => void confirmTaskDeletion()}
         />
       )}
 
@@ -5853,7 +5896,161 @@ function RecurringHabitReadModal({
   );
 }
 
+function TaskDeleteConfirmDialog({
+  error,
+  onCancel,
+  onConfirm,
+  pending,
+  task
+}: {
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+  pending: boolean;
+  task: DecryptedScheduleTask;
+}) {
+  const titleId = useId();
+  const descriptionId = useId();
+  const targetId = useId();
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const displayTitle = task.title.trim() || "제목 없는 일정";
+
+  useLayoutEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    cancelButtonRef.current?.focus({ preventScroll: true });
+
+    return () => {
+      window.setTimeout(() => {
+        if (previouslyFocused?.isConnected) {
+          previouslyFocused.focus({ preventScroll: true });
+        }
+      }, 0);
+    };
+  }, []);
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (!pending) {
+        onCancel();
+      }
+      return;
+    }
+
+    if (event.key !== "Tab") {
+      return;
+    }
+
+    const focusableElements = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled)")
+    );
+    const firstFocusableElement = focusableElements[0];
+    const lastFocusableElement = focusableElements.at(-1);
+
+    if (!firstFocusableElement || !lastFocusableElement) {
+      event.preventDefault();
+      return;
+    }
+
+    if (event.shiftKey && document.activeElement === firstFocusableElement) {
+      event.preventDefault();
+      lastFocusableElement.focus();
+    } else if (!event.shiftKey && document.activeElement === lastFocusableElement) {
+      event.preventDefault();
+      firstFocusableElement.focus();
+    }
+  }
+
+  return createPortal(
+    <div
+      className="modal-backdrop schedule-delete-confirm-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        event.stopPropagation();
+
+        if (event.target === event.currentTarget && !pending) {
+          onCancel();
+        }
+      }}
+    >
+      <section
+        aria-busy={pending}
+        aria-describedby={`${descriptionId} ${targetId}`}
+        aria-labelledby={titleId}
+        aria-modal="true"
+        className="schedule-delete-confirm-modal"
+        role="alertdialog"
+        onKeyDown={handleKeyDown}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="schedule-delete-confirm-header">
+          <span className="schedule-delete-confirm-icon" aria-hidden="true">
+            <Trash2 size={21} strokeWidth={2.2} />
+          </span>
+          <div>
+            <p className="schedule-delete-confirm-kicker">삭제 확인</p>
+            <h2 id={titleId}>이 일정을 삭제할까요?</h2>
+          </div>
+          <button
+            aria-label="삭제 확인 닫기"
+            className="icon-button schedule-delete-confirm-close"
+            disabled={pending}
+            type="button"
+            onClick={onCancel}
+          >
+            <X size={18} />
+          </button>
+        </header>
+
+        <p className="schedule-delete-confirm-description" id={descriptionId}>
+          삭제한 일정과 체크리스트는 복구할 수 없습니다.
+        </p>
+
+        <div className="schedule-delete-confirm-target" id={targetId}>
+          <CalendarDays aria-hidden="true" size={18} />
+          <div>
+            <span>삭제할 일정</span>
+            <strong>{displayTitle}</strong>
+          </div>
+        </div>
+
+        {error && (
+          <p className="schedule-delete-confirm-error" role="alert">
+            {error}
+          </p>
+        )}
+
+        <footer className="schedule-delete-confirm-actions">
+          <button
+            className="secondary-button"
+            disabled={pending}
+            ref={cancelButtonRef}
+            type="button"
+            onClick={onCancel}
+          >
+            취소
+          </button>
+          <button
+            className="schedule-delete-confirm-submit"
+            disabled={pending}
+            type="button"
+            onClick={onConfirm}
+          >
+            {pending ? <LoaderCircle aria-hidden="true" className="spin" size={18} /> : <Trash2 aria-hidden="true" size={18} />}
+            {pending ? "삭제하는 중" : "일정 삭제"}
+          </button>
+        </footer>
+      </section>
+    </div>,
+    document.body
+  );
+}
+
 function TaskReadModal({
+  inactive,
   onClose,
   onDelete,
   onDuplicate,
@@ -5863,6 +6060,7 @@ function TaskReadModal({
   onUpdateProgress,
   task
 }: {
+  inactive: boolean;
   onClose: () => void;
   onDelete: () => void;
   onDuplicate: () => void;
@@ -6016,17 +6214,23 @@ function TaskReadModal({
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !inactive) {
         onClose();
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [inactive, onClose]);
 
   return (
-    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
+    <div
+      aria-hidden={inactive || undefined}
+      className="modal-backdrop schedule-detail-backdrop"
+      inert={inactive}
+      role="presentation"
+      onMouseDown={inactive ? undefined : onClose}
+    >
       <section
         className="schedule-read-modal"
         role="dialog"
@@ -6301,11 +6505,13 @@ function TaskReadModal({
 }
 
 function TaskDetailModal({
+  inactive,
   onClose,
   onDelete,
   onSave,
   task
 }: {
+  inactive: boolean;
   onClose: () => void;
   onDelete: () => void;
   onSave: (draft: TaskDraft) => void;
@@ -6323,14 +6529,14 @@ function TaskDetailModal({
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !inactive) {
         onClose();
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [inactive, onClose]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -6372,7 +6578,13 @@ function TaskDetailModal({
   }
 
   return (
-    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
+    <div
+      aria-hidden={inactive || undefined}
+      className="modal-backdrop schedule-detail-backdrop"
+      inert={inactive}
+      role="presentation"
+      onMouseDown={inactive ? undefined : onClose}
+    >
       <section className="schedule-detail-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
         <header>
           <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
