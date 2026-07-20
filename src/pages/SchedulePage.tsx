@@ -1479,6 +1479,12 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   }
 
   async function removeTask(task: DecryptedScheduleTask) {
+    const confirmed = window.confirm(`"${task.title.trim() || "제목 없는 일정"}" 일정을 삭제할까요?\n삭제한 일정은 복구할 수 없습니다.`);
+
+    if (!confirmed) {
+      return;
+    }
+
     try {
       await deleteScheduleTask(task.id);
       setEditingTaskId(null);

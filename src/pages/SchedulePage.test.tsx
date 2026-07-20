@@ -1,10 +1,15 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { PropsWithChildren } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { subscribeRecurringHabitCheckIns, subscribeRecurringHabits } from "../services/recurringHabits";
-import { subscribeScheduleTasks, updateScheduleTask, type ScheduleTaskSnapshot } from "../services/scheduleTasks";
+import {
+  deleteScheduleTask,
+  subscribeScheduleTasks,
+  updateScheduleTask,
+  type ScheduleTaskSnapshot
+} from "../services/scheduleTasks";
 import SchedulePage from "./SchedulePage";
 
 function renderSchedulePage(routeView?: "recurring", initialEntry?: string) {
@@ -16,6 +21,25 @@ function renderSchedulePage(routeView?: "recurring", initialEntry?: string) {
       </Routes>
     </MemoryRouter>
   );
+}
+
+function scheduleTaskSnapshot(): ScheduleTaskSnapshot {
+  return {
+    id: "matrix-task-a",
+    ownerUid: "user-a",
+    status: "active",
+    dueDate: null,
+    dueTimeMinutes: null,
+    isImportant: true,
+    isUrgent: true,
+    encryptedTitle: { version: 1, algorithm: "AES-GCM", cipherText: "matrix-title", iv: "iv" },
+    encryptedDetails: { version: 1, algorithm: "AES-GCM", cipherText: "matrix-details", iv: "iv" },
+    wrappedKeys: {
+      "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped" }
+    },
+    createdBy: "user-a",
+    updatedBy: "user-a"
+  };
 }
 
 const testData = vi.hoisted(() => {
@@ -282,22 +306,7 @@ describe("SchedulePage quick work panel", () => {
   });
 
   it("drags task content into another matrix section and updates its priority", async () => {
-    const matrixTask: ScheduleTaskSnapshot = {
-      id: "matrix-task-a",
-      ownerUid: "user-a",
-      status: "active",
-      dueDate: null,
-      dueTimeMinutes: null,
-      isImportant: true,
-      isUrgent: true,
-      encryptedTitle: { version: 1, algorithm: "AES-GCM", cipherText: "matrix-title", iv: "iv" },
-      encryptedDetails: { version: 1, algorithm: "AES-GCM", cipherText: "matrix-details", iv: "iv" },
-      wrappedKeys: {
-        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped" }
-      },
-      createdBy: "user-a",
-      updatedBy: "user-a"
-    };
+    const matrixTask = scheduleTaskSnapshot();
 
     vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
       onNext([matrixTask]);
@@ -348,7 +357,50 @@ describe("SchedulePage quick work panel", () => {
       })
     );
 
+    // dnd-kit removes its document-level click guard shortly after the pointer sensor detaches.
+    await new Promise((resolve) => window.setTimeout(resolve, 60));
     rectSpy.mockRestore();
+  });
+
+  it("deletes a schedule only after confirmation from its read or edit dialog", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([scheduleTaskSnapshot()]);
+      return vi.fn();
+    });
+
+    renderSchedulePage();
+
+    const taskTitle = await screen.findByText("matrix drag task");
+    const taskOpenButton = taskTitle.closest<HTMLButtonElement>(".task-open-button");
+
+    expect(taskOpenButton).not.toBeNull();
+    await user.click(taskOpenButton!);
+
+    const readDialog = await screen.findByRole("dialog", { name: "matrix drag task" });
+
+    await user.click(within(readDialog).getByRole("button", { name: "삭제" }));
+
+    expect(confirmSpy).toHaveBeenCalledWith(
+      '"matrix drag task" 일정을 삭제할까요?\n삭제한 일정은 복구할 수 없습니다.'
+    );
+    expect(deleteScheduleTask).not.toHaveBeenCalled();
+    expect(readDialog).toBeInTheDocument();
+
+    await user.click(within(readDialog).getByRole("button", { name: "수정" }));
+
+    const editDialog = screen.getByRole("dialog");
+    confirmSpy.mockReturnValue(true);
+    await user.click(within(editDialog).getByRole("button", { name: "삭제" }));
+
+    await waitFor(() => expect(deleteScheduleTask).toHaveBeenCalledOnce());
+    expect(deleteScheduleTask).toHaveBeenCalledWith("matrix-task-a");
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    confirmSpy.mockRestore();
   });
 });
 
