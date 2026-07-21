@@ -41,8 +41,29 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("cannot_delete_self");
     expect(deleteManagedUserSource).toContain("last_active_admin");
     expect(deleteManagedUserSource).toContain("scheduleTasks");
+    expect(deleteManagedUserSource).toContain(
+      'queryDocumentsByStringField(\n    projectId,\n    "googleCalendarTaskTombstones",\n    "ownerUid",'
+    );
+    expect(deleteManagedUserSource).toContain(
+      "await deleteOwnedGoogleCalendarTaskTombstones(projectId, targetUid, accessToken, stats)"
+    );
+    expect(deleteManagedUserSource).toContain("googleCalendarTaskTombstonesDeleted");
+    expect(deleteManagedUserSource).toContain("googleCalendarTaskSyncReceipts");
+    expect(deleteManagedUserSource).toContain(
+      "await deleteOwnedGoogleCalendarTaskSyncReceipts(projectId, targetUid, accessToken, stats)"
+    );
+    expect(deleteManagedUserSource).toContain("googleCalendarTaskSyncReceiptsDeleted");
+    expect(deleteManagedUserSource).toContain("googleCalendarOAuthStates");
+    expect(deleteManagedUserSource).toContain(
+      "await deleteOwnedGoogleCalendarOAuthStates(projectId, targetUid, accessToken, stats)"
+    );
+    expect(deleteManagedUserSource).toContain("googleCalendarOAuthStatesDeleted");
     expect(deleteManagedUserSource).toContain("recurringHabits");
     expect(deleteManagedUserSource).toContain("recurringHabitCheckIns");
+    expect(deleteManagedUserSource).toContain('`googleCalendarConnections/${targetUid}`');
+    expect(deleteManagedUserSource).toContain('`googleCalendarConnectionEpochs/${targetUid}`');
+    expect(deleteManagedUserSource).toContain("disconnectGoogleCalendarForManagedUser(projectId, accessToken, targetUid)");
+    expect(deleteManagedUserSource).toContain("Google Calendar credential cleanup failures must not block permanent user deletion");
     expect(deleteManagedUserSource).toContain("userPreferences");
     expect(deleteManagedUserSource).not.toMatch(forbiddenBackendPattern);
   });

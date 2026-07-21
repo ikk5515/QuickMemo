@@ -1,11 +1,11 @@
 import {
   addDoc,
   collection,
-  deleteDoc,
   doc,
-  getDoc,
+  getDocFromServer,
   onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
   Timestamp,
   updateDoc,
@@ -67,6 +67,20 @@ export interface UpdateScheduleTaskInput {
   completedAt?: FieldValue | Timestamp | null;
 }
 
+const googleCalendarTaskFieldNames = new Set<keyof UpdateScheduleTaskInput>([
+  "encryptedTitle",
+  "dueDate",
+  "dueTimeMinutes",
+  "startDate",
+  "endDate",
+  "startTimeMinutes",
+  "endTimeMinutes"
+]);
+
+function updateChangesGoogleCalendar(input: UpdateScheduleTaskInput) {
+  return Object.keys(input).some((key) => googleCalendarTaskFieldNames.has(key as keyof UpdateScheduleTaskInput));
+}
+
 export const defaultScheduleDetails: ScheduleTaskDetails = {
   description: "",
   checklist: []
@@ -98,7 +112,7 @@ export function subscribeScheduleTasks(uid: string, callback: (tasks: ScheduleTa
 }
 
 export async function getScheduleTask(taskId: string) {
-  const snapshot = await getDoc(doc(db, "scheduleTasks", taskId));
+  const snapshot = await getDocFromServer(doc(db, "scheduleTasks", taskId));
 
   return snapshot.exists() ? ({ id: snapshot.id, ...(snapshot.data() as ScheduleTaskDocument) } satisfies ScheduleTaskSnapshot) : null;
 }
@@ -127,15 +141,24 @@ export async function createScheduleTask(input: CreateScheduleTaskInput) {
     updatedBy: input.ownerUid,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
+    calendarUpdatedAt: serverTimestamp(),
     completedAt: null
   });
 }
 
-export async function updateScheduleTask(taskId: string, uid: string, input: UpdateScheduleTaskInput) {
+export async function updateScheduleTask(
+  taskId: string,
+  uid: string,
+  input: UpdateScheduleTaskInput,
+  options: { googleCalendarChanged?: boolean } = {}
+) {
+  const googleCalendarChanged = options.googleCalendarChanged ?? updateChangesGoogleCalendar(input);
+
   await updateDoc(doc(db, "scheduleTasks", taskId), {
     ...input,
     updatedBy: uid,
-    updatedAt: serverTimestamp()
+    updatedAt: serverTimestamp(),
+    ...(googleCalendarChanged ? { calendarUpdatedAt: serverTimestamp() } : {})
   });
 }
 
@@ -157,5 +180,15 @@ export async function updateScheduleTaskOrderBatch(
 }
 
 export async function deleteScheduleTask(taskId: string) {
-  await deleteDoc(doc(db, "scheduleTasks", taskId));
+  const taskRef = doc(db, "scheduleTasks", taskId);
+  const receiptRef = doc(db, "googleCalendarTaskSyncReceipts", taskId);
+
+  await runTransaction(db, async (transaction) => {
+    const receipt = await transaction.get(receiptRef);
+
+    transaction.delete(taskRef);
+    if (receipt.exists()) {
+      transaction.delete(receiptRef);
+    }
+  });
 }

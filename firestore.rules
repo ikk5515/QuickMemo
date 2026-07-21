@@ -38,6 +38,22 @@ service cloud.firestore {
       return /databases/$(database)/documents/notes/$(noteId);
     }
 
+    function scheduleTaskPath(taskId) {
+      return /databases/$(database)/documents/scheduleTasks/$(taskId);
+    }
+
+    function googleCalendarTaskTombstonePath(taskId) {
+      return /databases/$(database)/documents/googleCalendarTaskTombstones/$(taskId);
+    }
+
+    function googleCalendarTaskSyncReceiptPath(taskId) {
+      return /databases/$(database)/documents/googleCalendarTaskSyncReceipts/$(taskId);
+    }
+
+    function googleCalendarConnectionPath(uid) {
+      return /databases/$(database)/documents/googleCalendarConnections/$(uid);
+    }
+
     function noteHistoryPath(noteId, historyId) {
       return /databases/$(database)/documents/notes/$(noteId)/history/$(historyId);
     }
@@ -536,6 +552,12 @@ service cloud.firestore {
       );
     }
 
+    function currentGoogleCalendarConnectionGeneration(uid, generation) {
+      return exists(googleCalendarConnectionPath(uid))
+        && get(googleCalendarConnectionPath(uid)).data.connectionStatus == "connected"
+        && get(googleCalendarConnectionPath(uid)).data.connectionGeneration == generation;
+    }
+
     function validScheduleTask(data, uid) {
       return data.keys().hasAll([
         "ownerUid",
@@ -574,6 +596,7 @@ service cloud.firestore {
         "updatedBy",
         "createdAt",
         "updatedAt",
+        "calendarUpdatedAt",
         "completedAt"
       ])
       && data.ownerUid == uid
@@ -592,7 +615,100 @@ service cloud.firestore {
       && data.updatedBy == uid
       && data.createdAt is timestamp
       && data.updatedAt is timestamp
+      && data.get("calendarUpdatedAt", request.time) is timestamp
       && validScheduleCompletion(data);
+    }
+
+    function validGoogleCalendarTaskTombstone(data, taskId, uid) {
+      return data.keys().hasOnly([
+          "ownerUid",
+          "taskId",
+          "deletionAttemptId",
+          "connectionGeneration",
+          "createdAt",
+          "leaseExpiresAt"
+        ])
+        && data.keys().hasAll(["ownerUid", "taskId", "deletionAttemptId", "createdAt", "leaseExpiresAt"])
+        && data.ownerUid == uid
+        && data.taskId is string
+        && data.taskId == taskId
+        && data.taskId.matches("^[A-Za-z0-9_-]{1,128}$")
+        && data.deletionAttemptId is string
+        && data.deletionAttemptId.matches("^[0-9a-f]{32}$")
+        && (
+          !data.keys().hasAny(["connectionGeneration"])
+          || data.connectionGeneration == null
+          || (
+            data.connectionGeneration is string
+            && data.connectionGeneration.matches("^[A-Za-z0-9_-]{43}$")
+          )
+        )
+        && data.createdAt is timestamp
+        && data.leaseExpiresAt is timestamp;
+    }
+
+    function googleCalendarTaskTombstoneMatchesConnection(data, uid) {
+      return (
+          (
+            !data.keys().hasAny(["connectionGeneration"])
+            || data.connectionGeneration == null
+          )
+          && !exists(googleCalendarConnectionPath(uid))
+        )
+        || (
+          data.keys().hasAny(["connectionGeneration"])
+          && data.connectionGeneration is string
+          && currentGoogleCalendarConnectionGeneration(uid, data.connectionGeneration)
+        );
+    }
+
+    function validGoogleCalendarTaskSyncReceipt(data, taskId, uid) {
+      return data.keys().hasOnly([
+          "ownerUid",
+          "taskId",
+          "connectionGeneration",
+          "taskUpdatedAt",
+          "syncedAt"
+        ])
+        && data.keys().hasAll([
+          "ownerUid",
+          "taskId",
+          "connectionGeneration",
+          "taskUpdatedAt",
+          "syncedAt"
+        ])
+        && data.ownerUid == uid
+        && data.taskId == taskId
+        && data.taskId is string
+        && data.taskId.matches("^[A-Za-z0-9_-]{1,128}$")
+        && data.connectionGeneration is string
+        && data.connectionGeneration.matches("^[A-Za-z0-9_-]{43}$")
+        && data.taskUpdatedAt is timestamp
+        && data.syncedAt is timestamp;
+    }
+
+    function googleCalendarTaskSyncReceiptMatchesRevision(taskData, taskUpdatedAt) {
+      return (
+          taskData.keys().hasAny(["calendarUpdatedAt"])
+          && taskData.calendarUpdatedAt is timestamp
+          && taskUpdatedAt == taskData.calendarUpdatedAt
+        )
+        || (
+          !taskData.keys().hasAny(["calendarUpdatedAt"])
+          && taskData.keys().hasAny(["createdAt"])
+          && taskData.createdAt is timestamp
+          && taskUpdatedAt == taskData.createdAt
+        )
+        || (
+          !taskData.keys().hasAny(["calendarUpdatedAt"])
+          && (
+            !taskData.keys().hasAny(["createdAt"])
+            || !(taskData.createdAt is timestamp)
+          )
+          && taskData.keys().hasAny(["updatedAt"])
+          && taskData.updatedAt is timestamp
+          && taskUpdatedAt == taskData.updatedAt
+        );
     }
 
     function validRecurringHabitColor(value) {
@@ -1968,6 +2084,94 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /googleCalendarConnections/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /googleCalendarConnectionEpochs/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /googleCalendarOAuthStates/{document=**} {
+      allow read, write: if false;
+    }
+
+    match /googleCalendarTaskSyncReceipts/{taskId} {
+      allow get: if activeSignedInUser()
+        && (
+          (
+            exists(googleCalendarTaskSyncReceiptPath(taskId))
+            && validGoogleCalendarTaskSyncReceipt(resource.data, taskId, request.auth.uid)
+          )
+          || (
+            !exists(googleCalendarTaskSyncReceiptPath(taskId))
+            && exists(scheduleTaskPath(taskId))
+            && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid
+          )
+        );
+      allow list: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+      allow create, update: if activeSignedInUser()
+        && validGoogleCalendarTaskSyncReceipt(request.resource.data, taskId, request.auth.uid)
+        && request.resource.data.syncedAt == request.time
+        && exists(scheduleTaskPath(taskId))
+        && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid
+        && googleCalendarTaskSyncReceiptMatchesRevision(
+          get(scheduleTaskPath(taskId)).data,
+          request.resource.data.taskUpdatedAt
+        )
+        && (
+          !exists(googleCalendarTaskTombstonePath(taskId))
+          || get(googleCalendarTaskTombstonePath(taskId)).data.leaseExpiresAt <= request.time
+        )
+        && currentGoogleCalendarConnectionGeneration(
+          request.auth.uid,
+          request.resource.data.connectionGeneration
+        );
+      allow delete: if activeSignedInUser()
+        && validGoogleCalendarTaskSyncReceipt(resource.data, taskId, request.auth.uid);
+    }
+
+    match /googleCalendarTaskTombstones/{taskId} {
+      allow get: if activeSignedInUser()
+        && (
+          (
+            exists(googleCalendarTaskTombstonePath(taskId))
+            && validGoogleCalendarTaskTombstone(resource.data, taskId, request.auth.uid)
+          )
+          || (
+            !exists(googleCalendarTaskTombstonePath(taskId))
+            && exists(scheduleTaskPath(taskId))
+            && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid
+          )
+        );
+      allow list: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+      allow create: if activeSignedInUser()
+        && validGoogleCalendarTaskTombstone(request.resource.data, taskId, request.auth.uid)
+        && googleCalendarTaskTombstoneMatchesConnection(request.resource.data, request.auth.uid)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.leaseExpiresAt > request.time
+        && request.resource.data.leaseExpiresAt <= request.time + duration.value(5, "m")
+        && exists(scheduleTaskPath(taskId))
+        && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid;
+      allow update: if activeSignedInUser()
+        && validGoogleCalendarTaskTombstone(resource.data, taskId, request.auth.uid)
+        && validGoogleCalendarTaskTombstone(request.resource.data, taskId, request.auth.uid)
+        && googleCalendarTaskTombstoneMatchesConnection(request.resource.data, request.auth.uid)
+        && resource.data.leaseExpiresAt <= request.time
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.taskId == resource.data.taskId
+        && request.resource.data.deletionAttemptId != resource.data.deletionAttemptId
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.leaseExpiresAt > request.time
+        && request.resource.data.leaseExpiresAt <= request.time + duration.value(5, "m")
+        && exists(scheduleTaskPath(taskId))
+        && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid;
+      allow delete: if activeSignedInUser()
+        && validGoogleCalendarTaskTombstone(resource.data, taskId, request.auth.uid);
+    }
+
     match /scheduleTasks/{taskId} {
       allow read: if activeSignedInUser()
         && resource.data.ownerUid == request.auth.uid;
@@ -1979,12 +2183,21 @@ service cloud.firestore {
         && request.resource.data.updatedAt == request.time;
       allow update: if activeSignedInUser()
         && resource.data.ownerUid == request.auth.uid
+        && (
+          !exists(googleCalendarTaskTombstonePath(taskId))
+          || (
+            validGoogleCalendarTaskTombstone(
+              get(googleCalendarTaskTombstonePath(taskId)).data,
+              taskId,
+              request.auth.uid
+            )
+            && get(googleCalendarTaskTombstonePath(taskId)).data.leaseExpiresAt <= request.time
+          )
+        )
         && validScheduleTask(request.resource.data, request.auth.uid)
-        && request.resource.data.ownerUid == resource.data.ownerUid
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.wrappedKeys == resource.data.wrappedKeys
-        && request.resource.data.updatedBy == request.auth.uid
         && request.resource.data.updatedAt == request.time
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "status",
@@ -2003,10 +2216,22 @@ service cloud.firestore {
           "encryptedDetails",
           "updatedBy",
           "updatedAt",
+          "calendarUpdatedAt",
           "completedAt"
         ]);
       allow delete: if activeSignedInUser()
-        && resource.data.ownerUid == request.auth.uid;
+        && resource.data.ownerUid == request.auth.uid
+        && exists(googleCalendarTaskTombstonePath(taskId))
+        && validGoogleCalendarTaskTombstone(
+          get(googleCalendarTaskTombstonePath(taskId)).data,
+          taskId,
+          request.auth.uid
+        )
+        && googleCalendarTaskTombstoneMatchesConnection(
+          get(googleCalendarTaskTombstonePath(taskId)).data,
+          request.auth.uid
+        )
+        && get(googleCalendarTaskTombstonePath(taskId)).data.leaseExpiresAt > request.time;
     }
 
     match /recurringHabits/{habitId} {

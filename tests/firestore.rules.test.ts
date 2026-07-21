@@ -519,6 +519,54 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDoc(doc(publicDb, "publicLoginRoster/user-a")));
   });
 
+  it("blocks every client from Google Calendar server-only collections", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true }));
+      await setDoc(doc(db, "googleCalendarConnections/user-a"), {
+        uid: "user-a",
+        calendarId: "primary",
+        encryptedRefreshToken: "server-only"
+      });
+      await setDoc(doc(db, "googleCalendarOAuthStates/state-a"), {
+        uid: "user-a",
+        stateHash: "server-only",
+        expiresAt: new Date("2026-05-18T09:00:00.000Z")
+      });
+      await setDoc(doc(db, "googleCalendarConnectionEpochs/user-a"), {
+        ownerUid: "user-a",
+        connectionEpoch: "server-only"
+      });
+    });
+
+    const clientDatabases = [
+      testEnv.unauthenticatedContext().firestore(),
+      testEnv.authenticatedContext("user-a").firestore(),
+      testEnv.authenticatedContext("user-b").firestore(),
+      testEnv.authenticatedContext("admin-a").firestore()
+    ];
+    const serverOnlyCollections = [
+      "googleCalendarConnectionEpochs",
+      "googleCalendarConnections",
+      "googleCalendarOAuthStates"
+    ];
+
+    for (const db of clientDatabases) {
+      for (const collectionName of serverOnlyCollections) {
+        const existingId = collectionName === "googleCalendarOAuthStates" ? "state-a" : "user-a";
+        const existingDocument = doc(db, collectionName, existingId);
+
+        await assertFails(getDoc(existingDocument));
+        await assertFails(getDocs(collection(db, collectionName)));
+        await assertFails(setDoc(doc(db, collectionName, "client-created"), { value: "blocked" }));
+        await assertFails(updateDoc(existingDocument, { value: "blocked" }));
+        await assertFails(deleteDoc(existingDocument));
+      }
+    }
+  });
+
   it("allows the first signed-in user to bootstrap the first admin", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "system/bootstrapGate"), {
@@ -1040,7 +1088,453 @@ describeRules("firestore security rules", () => {
     await assertFails(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), { dueTimeMinutes: 1440, startTimeMinutes: 1440, updatedAt: serverTimestamp() }));
     await assertFails(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), { status: "archived", updatedAt: serverTimestamp() }));
     await assertFails(deleteDoc(doc(otherDb, "scheduleTasks/task-a")));
+    await assertFails(deleteDoc(doc(ownerDb, "scheduleTasks/task-a")));
+    await assertSucceeds(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-a"), {
+      ownerUid: "user-a",
+      taskId: "task-a",
+      deletionAttemptId: "a".repeat(32),
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+      progressPercent: 42,
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
     await assertSucceeds(deleteDoc(doc(ownerDb, "scheduleTasks/task-a")));
+  });
+
+  it("accepts only timestamp Google Calendar task revisions without weakening task ownership", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const legacyRef = doc(ownerDb, "scheduleTasks/task-calendar-legacy");
+    const projectedRef = doc(ownerDb, "scheduleTasks/task-calendar-projected");
+
+    await assertSucceeds(setDoc(legacyRef, scheduleTask("user-a")));
+    await assertSucceeds(setDoc(
+      projectedRef,
+      scheduleTask("user-a", { calendarUpdatedAt: serverTimestamp() })
+    ));
+    await assertFails(setDoc(
+      doc(ownerDb, "scheduleTasks/task-calendar-invalid"),
+      scheduleTask("user-a", { calendarUpdatedAt: "not-a-timestamp" })
+    ));
+    await assertSucceeds(updateDoc(legacyRef, {
+      calendarUpdatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(projectedRef, {
+      calendarUpdatedAt: "not-a-timestamp",
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(otherDb, "scheduleTasks/task-calendar-projected"), {
+      calendarUpdatedAt: serverTimestamp(),
+      updatedBy: "user-b",
+      updatedAt: serverTimestamp()
+    }));
+  });
+
+  it("fails closed when the Google connection changes after a deletion tombstone is created", async () => {
+    const generationA = "a".repeat(43);
+    const generationB = "b".repeat(43);
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "scheduleTasks/task-disconnected"), scheduleTask("user-a"));
+      await setDoc(doc(db, "scheduleTasks/task-stale-null"), scheduleTask("user-a"));
+      await setDoc(doc(db, "scheduleTasks/task-connected"), scheduleTask("user-a"));
+      await setDoc(doc(db, "scheduleTasks/task-generation-changed"), scheduleTask("user-a"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const tombstone = (taskId: string, connectionGeneration: string | null) => ({
+      ownerUid: "user-a",
+      taskId,
+      deletionAttemptId: taskId === "task-connected" ? "b".repeat(32) : "a".repeat(32),
+      connectionGeneration,
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    });
+
+    await assertSucceeds(setDoc(
+      doc(ownerDb, "googleCalendarTaskTombstones/task-disconnected"),
+      tombstone("task-disconnected", null)
+    ));
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "googleCalendarConnections/user-a"), {
+        connectionGeneration: generationA,
+        connectionStatus: "connected"
+      });
+    });
+
+    // A connection created after a null-generation tombstone invalidates the
+    // local delete, and a stale null tombstone cannot be created afterwards.
+    await assertFails(deleteDoc(doc(ownerDb, "scheduleTasks/task-disconnected")));
+    await assertFails(setDoc(
+      doc(ownerDb, "googleCalendarTaskTombstones/task-stale-null"),
+      tombstone("task-stale-null", null)
+    ));
+
+    await assertSucceeds(setDoc(
+      doc(ownerDb, "googleCalendarTaskTombstones/task-connected"),
+      tombstone("task-connected", generationA)
+    ));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "scheduleTasks/task-connected")));
+
+    await assertSucceeds(setDoc(
+      doc(ownerDb, "googleCalendarTaskTombstones/task-generation-changed"),
+      tombstone("task-generation-changed", generationA)
+    ));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "googleCalendarConnections/user-a"), {
+        connectionGeneration: generationB
+      });
+    });
+    await assertFails(deleteDoc(doc(ownerDb, "scheduleTasks/task-generation-changed")));
+  });
+
+  it("allows only revision-bound Google Calendar sync receipts for the current connection", async () => {
+    const generationA = "a".repeat(43);
+    const generationB = "b".repeat(43);
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "scheduleTasks/task-receipt"), scheduleTask("user-a"));
+      await setDoc(doc(db, "googleCalendarConnections/user-a"), {
+        connectionGeneration: generationA,
+        connectionStatus: "connected"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const taskRef = doc(ownerDb, "scheduleTasks/task-receipt");
+    const originalTask = await getDoc(taskRef);
+    const originalCreatedAt = originalTask.data()?.createdAt;
+    const receiptRef = doc(ownerDb, "googleCalendarTaskSyncReceipts/task-receipt");
+    const receipt = (connectionGeneration: string, taskUpdatedAt: unknown, extra = {}) => ({
+      ownerUid: "user-a",
+      taskId: "task-receipt",
+      connectionGeneration,
+      taskUpdatedAt,
+      syncedAt: serverTimestamp(),
+      ...extra
+    });
+
+    await assertSucceeds(setDoc(receiptRef, receipt(generationA, originalCreatedAt)));
+    await assertSucceeds(getDoc(receiptRef));
+    await assertSucceeds(getDocs(query(
+      collection(ownerDb, "googleCalendarTaskSyncReceipts"),
+      where("ownerUid", "==", "user-a")
+    )));
+    await assertFails(getDocs(collection(ownerDb, "googleCalendarTaskSyncReceipts")));
+    await assertFails(getDoc(doc(otherDb, "googleCalendarTaskSyncReceipts/task-receipt")));
+    await assertSucceeds(updateDoc(taskRef, {
+      progressPercent: 60,
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    const revisedTask = await getDoc(taskRef);
+    const revisedUpdatedAt = revisedTask.data()?.updatedAt;
+
+    await assertSucceeds(setDoc(receiptRef, receipt(generationA, originalCreatedAt)));
+    await assertFails(setDoc(receiptRef, receipt(generationA, revisedUpdatedAt)));
+    await assertFails(setDoc(receiptRef, receipt(generationB, originalCreatedAt)));
+    await assertFails(setDoc(receiptRef, receipt(generationA, originalCreatedAt, { extra: true })));
+    await assertFails(setDoc(doc(otherDb, "googleCalendarTaskSyncReceipts/task-receipt"), {
+      ...receipt(generationA, originalCreatedAt),
+      ownerUid: "user-b"
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskSyncReceipts/missing-task"), {
+      ...receipt(generationA, originalCreatedAt),
+      taskId: "missing-task"
+    }));
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "googleCalendarConnections/user-a"), {
+        connectionGeneration: generationB
+      });
+    });
+    await assertFails(setDoc(receiptRef, receipt(generationA, originalCreatedAt)));
+    await assertSucceeds(setDoc(receiptRef, receipt(generationB, originalCreatedAt)));
+    await assertSucceeds(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-receipt"), {
+      ownerUid: "user-a",
+      taskId: "task-receipt",
+      deletionAttemptId: "c".repeat(32),
+      connectionGeneration: generationB,
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertSucceeds(runTransaction(ownerDb, async (transaction) => {
+      const currentReceipt = await transaction.get(receiptRef);
+
+      expect(currentReceipt.exists()).toBe(true);
+      transaction.delete(taskRef);
+      transaction.delete(receiptRef);
+    }));
+  });
+
+  it("uses the exact Google Calendar revision projection for sync receipts", async () => {
+    const generation = "a".repeat(43);
+    const createdRevision = new Date("2026-05-18T08:00:00.000Z");
+    const updatedRevision = new Date("2026-05-18T09:00:00.000Z");
+    const calendarRevision = new Date("2026-05-18T10:00:00.000Z");
+    const updatedOnlyRevision = new Date("2026-05-18T11:00:00.000Z");
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      const updatedOnlyTask = scheduleTask("user-a", {
+        updatedAt: updatedOnlyRevision
+      }) as Record<string, unknown>;
+
+      delete updatedOnlyTask.createdAt;
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "scheduleTasks/task-calendar-projection"), scheduleTask("user-a", {
+        createdAt: createdRevision,
+        updatedAt: updatedRevision,
+        calendarUpdatedAt: calendarRevision
+      }));
+      await setDoc(doc(db, "scheduleTasks/task-updated-fallback"), updatedOnlyTask);
+      await setDoc(doc(db, "googleCalendarConnections/user-a"), {
+        connectionGeneration: generation,
+        connectionStatus: "connected"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const receipt = (taskId: string, taskUpdatedAt: Date) => ({
+      ownerUid: "user-a",
+      taskId,
+      connectionGeneration: generation,
+      taskUpdatedAt,
+      syncedAt: serverTimestamp()
+    });
+    const projectedReceiptRef = doc(
+      ownerDb,
+      "googleCalendarTaskSyncReceipts/task-calendar-projection"
+    );
+
+    await assertSucceeds(setDoc(
+      projectedReceiptRef,
+      receipt("task-calendar-projection", calendarRevision)
+    ));
+    await assertFails(setDoc(
+      projectedReceiptRef,
+      receipt("task-calendar-projection", createdRevision)
+    ));
+    await assertFails(setDoc(
+      projectedReceiptRef,
+      receipt("task-calendar-projection", updatedRevision)
+    ));
+    await assertFails(setDoc(
+      projectedReceiptRef,
+      receipt("task-calendar-projection", new Date("2026-05-18T12:00:00.000Z"))
+    ));
+    await assertSucceeds(setDoc(
+      doc(ownerDb, "googleCalendarTaskSyncReceipts/task-updated-fallback"),
+      receipt("task-updated-fallback", updatedOnlyRevision)
+    ));
+  });
+
+  it("keeps Google Calendar deletion tombstones owner-only with bounded lease takeover", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true }));
+      await setDoc(doc(db, "users/user-inactive"), userProfile("user-inactive", { isActive: false }));
+      await setDoc(doc(db, "scheduleTasks/task-a"), scheduleTask("user-a"));
+      await setDoc(doc(db, "scheduleTasks/task-b"), scheduleTask("user-b"));
+      await setDoc(doc(db, "scheduleTasks/task-inactive"), scheduleTask("user-inactive"));
+      await setDoc(doc(db, "scheduleTasks/task-persist"), scheduleTask("user-a"));
+      await setDoc(doc(db, "scheduleTasks/task-expired"), scheduleTask("user-a"));
+      await setDoc(doc(db, "googleCalendarTaskTombstones/task-inactive"), {
+        ownerUid: "user-inactive",
+        taskId: "task-inactive",
+        deletionAttemptId: "c".repeat(32),
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        leaseExpiresAt: new Date("2026-05-18T08:05:00.000Z")
+      });
+      await setDoc(doc(db, "googleCalendarTaskTombstones/task-expired"), {
+        ownerUid: "user-a",
+        taskId: "task-expired",
+        deletionAttemptId: "d".repeat(32),
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        leaseExpiresAt: new Date("2026-05-18T08:05:00.000Z")
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const inactiveDb = testEnv.authenticatedContext("user-inactive").firestore();
+    const publicDb = testEnv.unauthenticatedContext().firestore();
+    const attemptId = "a".repeat(32);
+    const tombstoneRef = doc(ownerDb, "googleCalendarTaskTombstones/task-a");
+
+    await assertSucceeds(getDoc(tombstoneRef).then((snapshot) => {
+      expect(snapshot.exists()).toBe(false);
+    }));
+    await assertFails(getDoc(doc(otherDb, "googleCalendarTaskTombstones/task-a")));
+    await assertFails(getDoc(doc(ownerDb, "googleCalendarTaskTombstones/missing-task")));
+
+    await assertSucceeds(runTransaction(ownerDb, async (transaction) => {
+      const taskSnapshot = await transaction.get(doc(ownerDb, "scheduleTasks/task-a"));
+      const tombstoneSnapshot = await transaction.get(tombstoneRef);
+
+      expect(taskSnapshot.exists()).toBe(true);
+      expect(tombstoneSnapshot.exists()).toBe(false);
+      transaction.set(tombstoneRef, {
+        ownerUid: "user-a",
+        taskId: "task-a",
+        deletionAttemptId: attemptId,
+        createdAt: serverTimestamp(),
+        leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+      });
+    }));
+
+    await assertSucceeds(getDoc(tombstoneRef));
+    await assertSucceeds(
+      getDocs(query(collection(ownerDb, "googleCalendarTaskTombstones"), where("ownerUid", "==", "user-a")))
+    );
+    await assertFails(getDocs(collection(ownerDb, "googleCalendarTaskTombstones")));
+    await assertFails(
+      getDocs(query(collection(ownerDb, "googleCalendarTaskTombstones"), where("ownerUid", "==", "user-b")))
+    );
+    await assertSucceeds(updateDoc(doc(ownerDb, "scheduleTasks/task-expired"), {
+      isUrgent: true,
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(deleteDoc(doc(ownerDb, "scheduleTasks/task-expired")));
+    await assertFails(setDoc(tombstoneRef, {
+      ownerUid: "user-a",
+      taskId: "task-a",
+      deletionAttemptId: "f".repeat(32),
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertSucceeds(runTransaction(ownerDb, async (transaction) => {
+      const expiredRef = doc(ownerDb, "googleCalendarTaskTombstones/task-expired");
+
+      await transaction.get(doc(ownerDb, "scheduleTasks/task-expired"));
+      await transaction.get(expiredRef);
+      transaction.set(expiredRef, {
+        ownerUid: "user-a",
+        taskId: "task-expired",
+        deletionAttemptId: "e".repeat(32),
+        createdAt: serverTimestamp(),
+        leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+      });
+    }));
+    await assertFails(getDoc(doc(otherDb, "googleCalendarTaskTombstones/task-a")));
+    await assertFails(getDoc(doc(adminDb, "googleCalendarTaskTombstones/task-a")));
+    await assertFails(getDoc(doc(publicDb, "googleCalendarTaskTombstones/task-a")));
+    await assertFails(getDoc(doc(inactiveDb, "googleCalendarTaskTombstones/task-inactive")));
+    await assertFails(updateDoc(tombstoneRef, { deletionAttemptId: "b".repeat(32) }));
+    await assertFails(deleteDoc(doc(otherDb, "googleCalendarTaskTombstones/task-a")));
+    await assertFails(deleteDoc(doc(adminDb, "googleCalendarTaskTombstones/task-a")));
+    await assertFails(deleteDoc(doc(inactiveDb, "googleCalendarTaskTombstones/task-inactive")));
+
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/missing-task"), {
+      ownerUid: "user-a",
+      taskId: "missing-task",
+      deletionAttemptId: attemptId,
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-b"), {
+      ownerUid: "user-a",
+      taskId: "task-b",
+      deletionAttemptId: attemptId,
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/forged-task"), {
+      ownerUid: "user-a",
+      taskId: "task-a",
+      deletionAttemptId: attemptId,
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-persist"), {
+      ownerUid: "user-a",
+      taskId: "task-persist",
+      deletionAttemptId: "A".repeat(32),
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-persist"), {
+      ownerUid: "user-a",
+      taskId: "task-persist",
+      deletionAttemptId: "b".repeat(32),
+      connectionGeneration: "short",
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-persist"), {
+      ownerUid: "user-a",
+      taskId: "task-persist",
+      deletionAttemptId: "b".repeat(32),
+      createdAt: new Date("2026-05-18T08:00:00.000Z"),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-persist"), {
+      ownerUid: "user-a",
+      taskId: "task-persist",
+      deletionAttemptId: "b".repeat(32),
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() - 1000)
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-persist"), {
+      ownerUid: "user-a",
+      taskId: "task-persist",
+      deletionAttemptId: "b".repeat(32),
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 6 * 60 * 1000)
+    }));
+    await assertFails(setDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-persist"), {
+      ownerUid: "user-a",
+      taskId: "task-persist",
+      deletionAttemptId: "b".repeat(32),
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000),
+      extra: "blocked"
+    }));
+    await assertFails(setDoc(doc(inactiveDb, "googleCalendarTaskTombstones/task-inactive"), {
+      ownerUid: "user-inactive",
+      taskId: "task-inactive",
+      deletionAttemptId: attemptId,
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+
+    const persistentTombstoneRef = doc(ownerDb, "googleCalendarTaskTombstones/task-persist");
+    await assertSucceeds(setDoc(persistentTombstoneRef, {
+      ownerUid: "user-a",
+      taskId: "task-persist",
+      deletionAttemptId: "b".repeat(32),
+      createdAt: serverTimestamp(),
+      leaseExpiresAt: new Date(Date.now() + 4 * 60 * 1000)
+    }));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "scheduleTasks/task-persist")));
+    await assertSucceeds(getDoc(persistentTombstoneRef));
+    await assertSucceeds(deleteDoc(persistentTombstoneRef));
+    await assertSucceeds(deleteDoc(tombstoneRef));
+    await assertSucceeds(deleteDoc(doc(ownerDb, "googleCalendarTaskTombstones/task-expired")));
   });
 
   it("allows only active habit owners to create the first check-in transactionally", async () => {

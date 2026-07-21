@@ -132,6 +132,8 @@ const forbiddenContentRules = [
         "CRON_SECRET",
         "FIREBASE_CLEANUP_PRIVATE_KEY",
         "FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON",
+        "GOOGLE_CALENDAR_CLIENT_SECRET",
+        "GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY",
         "VERCEL_TOKEN",
         "VERCEL_ORG_ID",
         "VERCEL_PROJECT_ID"
@@ -140,6 +142,10 @@ const forbiddenContentRules = [
   {
     label: "Google API key",
     pattern: /AIza[0-9A-Za-z_-]{35}/
+  },
+  {
+    label: "Google OAuth client secret",
+    pattern: /GOCSPX-[A-Za-z0-9_-]{20,}/
   },
   {
     label: "GitHub token",
@@ -231,6 +237,8 @@ function isPlaceholderSecretValue(value) {
 function assertSecretEnvAssignmentScanner() {
   const cronSecretName = ["CRON", "SECRET"].join("_");
   const firebasePrivateKeyName = ["FIREBASE", "CLEANUP", "PRIVATE", "KEY"].join("_");
+  const googleClientSecretName = ["GOOGLE", "CALENDAR", "CLIENT", "SECRET"].join("_");
+  const googleEncryptionKeyName = ["GOOGLE", "CALENDAR", "TOKEN", "ENCRYPTION", "KEY"].join("_");
   const vercelTokenName = ["VERCEL", "TOKEN"].join("_");
 
   if (!hasNonPlaceholderEnvValue(`  ${cronSecretName} = "supersecret-value"`, [cronSecretName])) {
@@ -243,6 +251,13 @@ function assertSecretEnvAssignmentScanner() {
 
   if (hasNonPlaceholderEnvValue(`${vercelTokenName}=at-least-16-random-characters`, [vercelTokenName])) {
     errors.push("secret env assignment scanner rejected an allowed placeholder value");
+  }
+
+  if (!hasNonPlaceholderEnvValue(
+    `${googleClientSecretName}=real-client-secret\n${googleEncryptionKeyName}=real-encryption-key`,
+    [googleClientSecretName, googleEncryptionKeyName]
+  )) {
+    errors.push("secret env assignment scanner failed to detect Google Calendar secrets");
   }
 }
 

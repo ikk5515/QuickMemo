@@ -66,6 +66,15 @@ describe("Firestore index retention policies", () => {
     });
   });
 
+  it("expires Google Calendar OAuth state documents without indexing the expiry field", () => {
+    expect(fieldOverride("googleCalendarOAuthStates", "expiresAt")).toEqual({
+      collectionGroup: "googleCalendarOAuthStates",
+      fieldPath: "expiresAt",
+      ttl: true,
+      indexes: []
+    });
+  });
+
   it("keeps the bounded legacy Blob reservation cleanup query indexed", () => {
     expect(
       firestoreIndexes.indexes.some(

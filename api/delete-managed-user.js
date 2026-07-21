@@ -4,6 +4,7 @@ import {
   quotaReleaseAfterAttachmentClaim,
   shouldBumpAttachmentRevisionOnDelete
 } from "./_attachment-policy.js";
+import { disconnectGoogleCalendarForManagedUser } from "./_google-calendar-common.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
@@ -593,6 +594,36 @@ async function queryDocumentsByArrayContains(
 
 async function queryOwnedScheduleTasks(projectId, ownerUid, accessToken) {
   return queryDocumentsByStringField(projectId, "scheduleTasks", "ownerUid", ownerUid, accessToken);
+}
+
+async function queryOwnedGoogleCalendarTaskTombstones(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(
+    projectId,
+    "googleCalendarTaskTombstones",
+    "ownerUid",
+    ownerUid,
+    accessToken
+  );
+}
+
+async function queryOwnedGoogleCalendarTaskSyncReceipts(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(
+    projectId,
+    "googleCalendarTaskSyncReceipts",
+    "ownerUid",
+    ownerUid,
+    accessToken
+  );
+}
+
+async function queryOwnedGoogleCalendarOAuthStates(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(
+    projectId,
+    "googleCalendarOAuthStates",
+    "ownerUid",
+    ownerUid,
+    accessToken
+  );
 }
 
 async function queryOwnedRecurringHabits(projectId, ownerUid, accessToken) {
@@ -1267,6 +1298,36 @@ async function deleteOwnedScheduleTasks(projectId, ownerUid, accessToken, stats)
   );
 }
 
+async function deleteOwnedGoogleCalendarTaskTombstones(projectId, ownerUid, accessToken, stats) {
+  return deleteRepeatedQueryDocuments(
+    () => queryOwnedGoogleCalendarTaskTombstones(projectId, ownerUid, accessToken),
+    accessToken,
+    stats,
+    "googleCalendarTaskTombstonesDeleted",
+    "Too many Google Calendar task tombstones to delete in one request"
+  );
+}
+
+async function deleteOwnedGoogleCalendarTaskSyncReceipts(projectId, ownerUid, accessToken, stats) {
+  return deleteRepeatedQueryDocuments(
+    () => queryOwnedGoogleCalendarTaskSyncReceipts(projectId, ownerUid, accessToken),
+    accessToken,
+    stats,
+    "googleCalendarTaskSyncReceiptsDeleted",
+    "Too many Google Calendar task sync receipts to delete in one request"
+  );
+}
+
+async function deleteOwnedGoogleCalendarOAuthStates(projectId, ownerUid, accessToken, stats) {
+  return deleteRepeatedQueryDocuments(
+    () => queryOwnedGoogleCalendarOAuthStates(projectId, ownerUid, accessToken),
+    accessToken,
+    stats,
+    "googleCalendarOAuthStatesDeleted",
+    "Too many Google Calendar OAuth states to delete in one request"
+  );
+}
+
 async function deleteOwnedRecurringHabits(projectId, ownerUid, accessToken, stats) {
   return deleteRepeatedQueryDocuments(
     () => queryOwnedRecurringHabits(projectId, ownerUid, accessToken),
@@ -1883,6 +1944,9 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
     blobObjectsDeleted: 0,
     bootstrapAdminReassigned: false,
     documentsDeleted: 0,
+    googleCalendarOAuthStatesDeleted: 0,
+    googleCalendarTaskSyncReceiptsDeleted: 0,
+    googleCalendarTaskTombstonesDeleted: 0,
     noteAttachmentsDeleted: 0,
     noteAttachmentRevisionBumps: 0,
     noteFoldersDeleted: 0,
@@ -1921,12 +1985,23 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
   await removeDeletedUserFromNoteHistoryReaders(projectId, targetUid, accessToken, stats);
   await deleteTargetNoteUserStates(projectId, targetUid, accessToken, stats);
   await deleteOwnedNoteFolders(projectId, targetUid, accessToken, stats);
+  await deleteOwnedGoogleCalendarOAuthStates(projectId, targetUid, accessToken, stats);
+  await deleteOwnedGoogleCalendarTaskTombstones(projectId, targetUid, accessToken, stats);
+  await deleteOwnedGoogleCalendarTaskSyncReceipts(projectId, targetUid, accessToken, stats);
   await deleteOwnedScheduleTasks(projectId, targetUid, accessToken, stats);
   await deleteOwnedRecurringHabitCheckIns(projectId, targetUid, accessToken, stats);
   await deleteOwnedRecurringHabits(projectId, targetUid, accessToken, stats);
 
+  try {
+    await disconnectGoogleCalendarForManagedUser(projectId, accessToken, targetUid);
+  } catch {
+    // Google Calendar credential cleanup failures must not block permanent user deletion.
+  }
+
   for (const path of [
     `system/bootstrapAttempts/attempts/${targetUid}`,
+    `googleCalendarConnectionEpochs/${targetUid}`,
+    `googleCalendarConnections/${targetUid}`,
     `userAttachmentUsage/${targetUid}`,
     `userPreferences/${targetUid}`,
     `userKeys/${targetUid}`,

@@ -266,6 +266,12 @@
       ]
     },
     {
+      "collectionGroup": "googleCalendarOAuthStates",
+      "fieldPath": "expiresAt",
+      "ttl": true,
+      "indexes": []
+    },
+    {
       "collectionGroup": "scheduleTasks",
       "fieldPath": "encryptedTitle",
       "indexes": []

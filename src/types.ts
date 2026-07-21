@@ -264,6 +264,7 @@ export interface ScheduleTaskDocument {
   updatedBy: string;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
+  calendarUpdatedAt?: Timestamp;
   completedAt?: Timestamp | null;
 }
 
