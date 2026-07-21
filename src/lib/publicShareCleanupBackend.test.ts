@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  googleCalendarOAuthStateCleanupBatchLimit,
+  queryExpiredGoogleCalendarOAuthStates
+} from "../../api/cleanup-public-shares.js";
 
 interface VercelConfig {
   fluid?: boolean;
@@ -14,6 +18,10 @@ const vercelConfig = JSON.parse(readFileSync(join(process.cwd(), "vercel.json"),
 const cleanupFunctionSource = readFileSync(join(process.cwd(), "api/cleanup-public-shares.js"), "utf8");
 
 describe("public share backend cleanup", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("keeps cleanup APIs on Fluid Compute without lowering the platform duration default", () => {
     expect(vercelConfig.fluid).toBe(true);
     expect(vercelConfig).not.toHaveProperty("functions");
@@ -71,6 +79,63 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain('fieldPath: "deletionStartedAt"');
     expect(cleanupFunctionSource).toContain("queryLegacyExpiredAttachmentReservations");
     expect(cleanupFunctionSource).toContain("legacyReservationGraceMs");
+    expect(cleanupFunctionSource).toContain("queryExpiredGoogleCalendarOAuthStates");
+    expect(cleanupFunctionSource).toContain('from: [{ collectionId: "googleCalendarOAuthStates" }]');
+    expect(cleanupFunctionSource).toContain("googleCalendarOAuthStatesDeleted");
+    expect(cleanupFunctionSource).toContain("without allowing authorization churn to starve user-data queues");
+  });
+
+  it("queries only expired OAuth state names in oldest-first bounded order", async () => {
+    const stateName = "projects/test-project/databases/(default)/documents/googleCalendarOAuthStates/state-1";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ document: { name: stateName } }]
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(queryExpiredGoogleCalendarOAuthStates({
+      accessToken: "test-access-token",
+      projectId: "test-project",
+      nowIso: "2026-07-22T00:00:00.000Z",
+      limit: 37
+    })).resolves.toEqual([{ name: stateName }]);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(url).toBe(
+      "https://firestore.googleapis.com/v1/projects/test-project/databases/(default)/documents:runQuery"
+    );
+    expect(init.method).toBe("POST");
+    expect(body.structuredQuery).toEqual({
+      select: { fields: [{ fieldPath: "__name__" }] },
+      from: [{ collectionId: "googleCalendarOAuthStates" }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: "expiresAt" },
+          op: "LESS_THAN_OR_EQUAL",
+          value: { timestampValue: "2026-07-22T00:00:00.000Z" }
+        }
+      },
+      orderBy: [{ field: { fieldPath: "expiresAt" }, direction: "ASCENDING" }],
+      limit: 37
+    });
+  });
+
+  it("reserves a small OAuth cleanup batch while preserving most of the shared delete budget", () => {
+    expect(googleCalendarOAuthStateCleanupBatchLimit(50, 1000)).toBe(50);
+    expect(googleCalendarOAuthStateCleanupBatchLimit(100, 100)).toBe(10);
+    expect(googleCalendarOAuthStateCleanupBatchLimit(100, 10)).toBe(1);
+
+    const cleanupStart = cleanupFunctionSource.indexOf("async function cleanupExpiredPublicShares");
+    const oauthCleanup = cleanupFunctionSource.indexOf(
+      "await cleanupExpiredGoogleCalendarOAuthStates(config, stats)",
+      cleanupStart
+    );
+    const purgeCleanup = cleanupFunctionSource.indexOf("await cleanupNotePurgeQueues(config, stats)", cleanupStart);
+    expect(cleanupStart).toBeGreaterThanOrEqual(0);
+    expect(oauthCleanup).toBeGreaterThan(cleanupStart);
+    expect(oauthCleanup).toBeLessThan(purgeCleanup);
   });
 
   it("uses high-capacity batched deletes so the no-billing fallback is harder to outpace", () => {
@@ -127,6 +192,7 @@ describe("public share backend cleanup", () => {
   it("projects cleanup discovery and child listings without encrypted payload fields", () => {
     const nameOnlyQueries = [
       "queryExpiredShareQueues",
+      "queryExpiredGoogleCalendarOAuthStates",
       "queryExpiredShares",
       "queryExpiredPublicShareAttachments",
       "queryExpiredAttachmentReservations",

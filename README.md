@@ -75,7 +75,7 @@ GOOGLE_CALENDAR_ALLOWED_ORIGINS=https://your-domain.example
 
 암호화 키는 예를 들어 `openssl rand -base64 32`로 새로 생성하고 Vercel 환경 변수에만 보관합니다. 기존 관리 API와 마찬가지로 `FIREBASE_CLEANUP_*` 서비스 계정 설정도 필요합니다.
 
-5. `googleCalendarConnections`, `googleCalendarConnectionEpochs`, `googleCalendarOAuthStates`는 서버 전용이며 클라이언트 읽기·쓰기를 전면 차단합니다. `googleCalendarTaskSyncReceipts`와 `googleCalendarTaskTombstones`에는 토큰이나 일정 내용 없이 소유자·일정 ID·연결 세대·수정 시각만 저장하고, 현재 연결 및 정확한 일정 수정본에 한해서만 owner write를 허용합니다. OAuth state 자동 만료 설정까지 반영되도록 Firestore Rules와 Indexes를 먼저 배포한 뒤 Vercel Production을 배포합니다.
+5. `googleCalendarConnections`, `googleCalendarConnectionEpochs`, `googleCalendarOAuthStates`는 서버 전용이며 클라이언트 읽기·쓰기를 전면 차단합니다. `googleCalendarTaskSyncReceipts`와 `googleCalendarTaskTombstones`에는 토큰이나 일정 내용 없이 소유자·일정 ID·연결 세대·수정 시각만 저장하고, 현재 연결 및 정확한 일정 수정본에 한해서만 owner write를 허용합니다. 10분이 지난 OAuth state는 기존 Vercel 정리 작업이 매일 제한된 배치로 삭제하므로 Firebase 유료 TTL 기능에 의존하지 않습니다. 이 정리 쿼리에 필요한 Firestore Rules와 Indexes를 먼저 배포한 뒤 Vercel Production을 배포합니다.
 
 ```bash
 npx firebase-tools deploy --only firestore:rules,firestore:indexes
@@ -128,11 +128,11 @@ npx firebase-tools deploy --only firestore:rules,firestore:indexes,storage
 
 Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 요금제가 없어도 Firestore Rules·인덱스와 Vercel 앱을 배포할 수 있습니다. 관리자가 다른 사용자의 비밀번호를 강제로 변경하려면 Admin SDK가 실행되는 별도 신뢰 서버가 필요합니다.
 
-### 임시 공유 만료 cleanup
+### 임시 데이터 만료 cleanup
 
-임시 공유 문서와 공유 첨부 파일은 Firestore Rules의 즉시 만료 차단과 Vercel Cron cleanup으로 정리합니다.
+임시 공유 문서·공유 첨부 파일·Google Calendar OAuth 상태는 Firestore Rules의 즉시 만료 차단과 Vercel Cron cleanup으로 정리합니다.
 
-- Vercel Cron cleanup: Firebase billing 없이도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유, 중단된 첨부 예약, 영구 삭제 대기 노트의 첨부·이력·사용자 상태를 제한된 배치로 정리합니다. 삭제가 중단되어도 큐와 tombstone을 남겨 다음 실행에서 안전하게 재시도하며, 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다.
+- Vercel Cron cleanup: Firebase billing 없이도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유와 Google Calendar 인증 상태, 중단된 첨부 예약, 영구 삭제 대기 노트의 첨부·이력·사용자 상태를 제한된 배치로 정리합니다. 삭제가 중단되어도 큐와 tombstone을 남겨 다음 실행에서 안전하게 재시도하며, 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다.
 - Firestore 만료 인덱스: `publicNoteShares.expiresAt`과 첨부 만료 필드는 cleanup 조회용 인덱스만 유지합니다. TTL 선삭제는 Blob quota·object·하위 문서의 원자적 정리를 건너뛸 수 있어 사용하지 않습니다.
 - 공개 첨부 개인정보: 신규·재동기화된 공유의 실제 파일명은 content key로 암호화하고, 익명 문서에는 일반 이름과 확장자·크기·MIME만 둡니다. 기존 공유 첨부는 평문 파일명이 다시 노출되지 않도록 공개 목록에서 숨기며, 소유자가 노트 화면을 열어 자동 마이그레이션하거나 새 링크를 만들면 다시 표시됩니다.
 

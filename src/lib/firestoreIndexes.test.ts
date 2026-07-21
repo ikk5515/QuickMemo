@@ -66,12 +66,16 @@ describe("Firestore index retention policies", () => {
     });
   });
 
-  it("expires Google Calendar OAuth state documents without indexing the expiry field", () => {
+  it("indexes Google Calendar OAuth state expiry for no-billing cron cleanup", () => {
     expect(fieldOverride("googleCalendarOAuthStates", "expiresAt")).toEqual({
       collectionGroup: "googleCalendarOAuthStates",
       fieldPath: "expiresAt",
-      ttl: true,
-      indexes: []
+      indexes: [
+        {
+          order: "ASCENDING",
+          queryScope: "COLLECTION"
+        }
+      ]
     });
   });
 

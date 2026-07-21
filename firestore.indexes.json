@@ -268,8 +268,12 @@
     {
       "collectionGroup": "googleCalendarOAuthStates",
       "fieldPath": "expiresAt",
-      "ttl": true,
-      "indexes": []
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        }
+      ]
     },
     {
       "collectionGroup": "scheduleTasks",

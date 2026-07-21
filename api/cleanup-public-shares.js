@@ -344,6 +344,53 @@ async function queryExpiredShareQueues({ accessToken, projectId, nowIso, limit }
   return result.flatMap((entry) => (entry.document ? [entry.document] : []));
 }
 
+export function googleCalendarOAuthStateCleanupBatchLimit(batchSize, maxDocumentDeletes) {
+  return Math.min(batchSize, Math.max(1, Math.floor(maxDocumentDeletes / 10)));
+}
+
+export async function queryExpiredGoogleCalendarOAuthStates({ accessToken, projectId, nowIso, limit }) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
+        from: [{ collectionId: "googleCalendarOAuthStates" }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "expiresAt" },
+            op: "LESS_THAN_OR_EQUAL",
+            value: { timestampValue: nowIso }
+          }
+        },
+        orderBy: [
+          {
+            field: { fieldPath: "expiresAt" },
+            direction: "ASCENDING"
+          }
+        ],
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+async function cleanupExpiredGoogleCalendarOAuthStates(config, stats) {
+  const limit = googleCalendarOAuthStateCleanupBatchLimit(config.limit, stats.maxDocumentDeletes);
+  const documents = await queryExpiredGoogleCalendarOAuthStates({ ...config, limit });
+
+  return deleteDocumentNames(
+    documents.map((document) => document.name),
+    config.accessToken,
+    stats,
+    "googleCalendarOAuthStatesDeleted"
+  );
+}
+
 async function queryExpiredShares({ accessToken, projectId, nowIso, limit }) {
   const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
   const result = await firestoreRequest(runQueryPath, accessToken, {
@@ -1358,6 +1405,7 @@ async function cleanupExpiredPublicShares() {
     attachmentsDeleted: 0,
     blobObjectsDeleted: 0,
     documentDeletesAttempted: 0,
+    googleCalendarOAuthStatesDeleted: 0,
     maxDocumentDeletes: configuredInteger("PUBLIC_SHARE_CLEANUP_MAX_DELETES", defaultMaxDocumentDeletes, 10, 5000),
     legacyReservationsDeleted: 0,
     noteHistoriesDeleted: 0,
@@ -1375,6 +1423,10 @@ async function cleanupExpiredPublicShares() {
     storageObjectsDeleted: 0
   };
 
+  // Reserve at most 10% of the delete budget (and no more than one configured
+  // batch) for expired OAuth state. This guarantees bounded daily retention
+  // cleanup without allowing authorization churn to starve user-data queues.
+  await cleanupExpiredGoogleCalendarOAuthStates(config, stats);
   await backfillNotePurgeQueues(config, stats);
   await cleanupNotePurgeQueues(config, stats);
 
@@ -1501,6 +1553,7 @@ async function cleanupExpiredPublicShares() {
     attachmentsDeleted: stats.attachmentsDeleted,
     blobObjectsDeleted: stats.blobObjectsDeleted,
     documentDeletesAttempted: stats.documentDeletesAttempted,
+    googleCalendarOAuthStatesDeleted: stats.googleCalendarOAuthStatesDeleted,
     legacyReservationsDeleted: stats.legacyReservationsDeleted,
     noteHistoriesDeleted: stats.noteHistoriesDeleted,
     noteUserStatesDeleted: stats.noteUserStatesDeleted,
