@@ -1168,6 +1168,14 @@ function assertGoogleCalendarTaskAuthorityInput(taskId, expectedRevision) {
   }
 }
 
+function assertExistingSyncCutoffDate(existingSyncCutoffDate) {
+  if (existingSyncCutoffDate !== null
+    && (typeof existingSyncCutoffDate !== "string"
+      || !/^\d{4}-\d{2}-\d{2}$/u.test(existingSyncCutoffDate))) {
+    throw new HttpError(400, "invalid_request");
+  }
+}
+
 function assertGoogleCalendarConnectionGeneration(expectedGeneration) {
   if (typeof expectedGeneration !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(expectedGeneration)) {
     throw new HttpError(400, "invalid_request");
@@ -1180,8 +1188,14 @@ function assertGoogleCalendarLeaseId(leaseId) {
   }
 }
 
-export async function getGoogleCalendarTaskAuthority(context, taskId, expectedRevision) {
+export async function getGoogleCalendarTaskAuthority(
+  context,
+  taskId,
+  expectedRevision,
+  existingSyncCutoffDate = null
+) {
   assertGoogleCalendarTaskAuthorityInput(taskId, expectedRevision);
+  assertExistingSyncCutoffDate(existingSyncCutoffDate);
 
   const [tombstone, task] = await Promise.all([
     firestoreGet(
@@ -1209,15 +1223,25 @@ export async function getGoogleCalendarTaskAuthority(context, taskId, expectedRe
     return "deleted";
   }
 
-  const startDate = readString(task, "startDate") || readString(task, "dueDate");
-  if (!/^\d{4}-\d{2}-\d{2}$/u.test(startDate)) {
-    return "undated";
-  }
-
   const currentRevision = firestoreTimestampRevision(task, "calendarUpdatedAt")
     ?? firestoreTimestampRevision(task, "createdAt")
     ?? firestoreTimestampRevision(task, "updatedAt");
-  return expectedRevision === currentRevision ? "current" : "stale";
+  if (expectedRevision !== currentRevision) {
+    return "stale";
+  }
+
+  const startDate = readString(task, "startDate") || readString(task, "dueDate");
+  if (existingSyncCutoffDate !== null) {
+    const endDate = readString(task, "endDate") || startDate;
+
+    if (readString(task, "status") !== "active"
+      || !/^\d{4}-\d{2}-\d{2}$/u.test(startDate)
+      || !/^\d{4}-\d{2}-\d{2}$/u.test(endDate)
+      || endDate < existingSyncCutoffDate) {
+      return "ineligible";
+    }
+  }
+  return /^\d{4}-\d{2}-\d{2}$/u.test(startDate) ? "current" : "undated";
 }
 
 export async function beginGoogleCalendarTaskOperation(
@@ -1225,14 +1249,20 @@ export async function beginGoogleCalendarTaskOperation(
   expectedGeneration,
   taskId,
   expectedRevision,
-  deletionWorkflowLeaseId = null
+  deletionWorkflowLeaseId = null,
+  existingSyncCutoffDate = null
 ) {
   assertGoogleCalendarTaskAuthorityInput(taskId, expectedRevision);
   assertGoogleCalendarConnectionGeneration(expectedGeneration);
   if (deletionWorkflowLeaseId !== null) {
     assertGoogleCalendarLeaseId(deletionWorkflowLeaseId);
   }
-  const state = await getGoogleCalendarTaskAuthority(context, taskId, expectedRevision);
+  const state = await getGoogleCalendarTaskAuthority(
+    context,
+    taskId,
+    expectedRevision,
+    existingSyncCutoffDate
+  );
 
   // A stale task must be re-read and decrypted by the client before any Google
   // mutation begins. Avoid acquiring a lease that would only block that retry,
@@ -1599,21 +1629,89 @@ export async function finishGoogleCalendarTaskOperation(
   expectedGeneration,
   leaseId,
   taskId,
-  expectedRevision
+  expectedRevision,
+  deletionWorkflowLeaseId = null,
+  existingSyncCutoffDate = null
 ) {
   assertGoogleCalendarTaskAuthorityInput(taskId, expectedRevision);
   assertGoogleCalendarConnectionGeneration(expectedGeneration);
   assertGoogleCalendarLeaseId(leaseId);
+  if (deletionWorkflowLeaseId !== null) {
+    assertGoogleCalendarLeaseId(deletionWorkflowLeaseId);
+  }
+  assertExistingSyncCutoffDate(existingSyncCutoffDate);
 
-  // Preserve the existing convergence order: release the account-bound lease
-  // first, then inspect authority. If the authority read times out, the lease is
-  // already gone and the durable receipt/tombstone recovery can safely retry.
-  const released = await endGoogleCalendarOperation(context, expectedGeneration, leaseId);
+  // Release the account-bound operation lease and, during a task deletion,
+  // renew the matching deletion workflow in one CAS. This removes a browser
+  // round trip without creating a gap in which another tab can replace the
+  // Google account or start a conflicting mutation.
+  let released = false;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const connection = await requireCurrentGoogleConnection(context, expectedGeneration);
+    const operationLeaseMatches = readString(connection, "operationLeaseId") === leaseId
+      && readString(connection, "operationLeaseGeneration") === expectedGeneration;
+
+    if (!operationLeaseMatches || !connectionOperationLeaseIsActive(connection)) {
+      throw new HttpError(409, "google_operation_expired");
+    }
+    if (deletionWorkflowLeaseId !== null
+      && (!connectionDeletionWorkflowLeaseMatches(
+        connection,
+        expectedGeneration,
+        deletionWorkflowLeaseId
+      ) || !connectionDeletionWorkflowLeaseIsActive(connection))) {
+      throw new HttpError(409, "google_operation_expired");
+    }
+
+    const fields = {
+      operationLeaseId: stringValue(""),
+      operationLeaseGeneration: stringValue(""),
+      operationLeaseExpiresAt: timestampValue("1970-01-01T00:00:00.000Z"),
+      ...(deletionWorkflowLeaseId !== null ? {
+        deletionWorkflowLeaseExpiresAt: timestampValue(
+          new Date(Date.now() + googleDeletionWorkflowLeaseMs)
+        )
+      } : {})
+    };
+    const fieldPaths = [
+      "operationLeaseId",
+      "operationLeaseGeneration",
+      "operationLeaseExpiresAt",
+      ...(deletionWorkflowLeaseId !== null ? ["deletionWorkflowLeaseExpiresAt"] : [])
+    ];
+
+    try {
+      await firestoreCommit(context.credentials.projectId, context.accessToken, [{
+        update: {
+          name: connection.name,
+          fields
+        },
+        updateMask: { fieldPaths },
+        currentDocument: { updateTime: connection.updateTime },
+        updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+      }]);
+      released = true;
+      break;
+    } catch (error) {
+      if (error?.upstreamStatus !== 400 && error?.upstreamStatus !== 409) {
+        throw error;
+      }
+    }
+  }
+
   if (!released) {
     throw new HttpError(409, "google_operation_release_failed");
   }
 
-  return getGoogleCalendarTaskAuthority(context, taskId, expectedRevision);
+  // Preserve the convergence order: authority is inspected only after the
+  // operation lease is gone. If this read times out, durable receipt/tombstone
+  // recovery can retry while the deletion workflow remains safely renewed.
+  return getGoogleCalendarTaskAuthority(
+    context,
+    taskId,
+    expectedRevision,
+    existingSyncCutoffDate
+  );
 }
 
 export function publicConnectionStatus(document, configured = true) {

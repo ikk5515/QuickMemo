@@ -147,7 +147,6 @@ import {
   GoogleCalendarError,
   reconcileGoogleCalendarTask,
   reportGoogleCalendarSync,
-  renewGoogleCalendarDeletionWorkflow,
   startGoogleCalendarConnection,
   upsertGoogleCalendarTask,
   type GoogleCalendarConnectionStatus,
@@ -456,6 +455,23 @@ function isEligibleExistingGoogleCalendarTask(task: DecryptedScheduleTask, today
     && isValidScheduleDateString(startDate)
     && isValidScheduleDateString(endDate)
     && endDate >= today;
+}
+
+const authoritativeGoogleCalendarTaskStatuses = new WeakMap<
+  GoogleCalendarTaskInput,
+  DecryptedScheduleTask["status"]
+>();
+
+function isEligibleAuthoritativeGoogleCalendarTask(
+  task: GoogleCalendarTaskInput,
+  cutoffDate: string
+) {
+  const endDate = task.endDate ?? task.startDate;
+
+  return authoritativeGoogleCalendarTaskStatuses.get(task) === "active"
+    && isValidScheduleDateString(task.startDate)
+    && isValidScheduleDateString(endDate)
+    && endDate >= cutoffDate;
 }
 
 type ScheduleTimeModeDraft = Pick<CreateTaskDraft, "endDate" | "endTime" | "startDate" | "startTime" | "timeMode">;
@@ -1898,7 +1914,9 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const unlockedProfile = profile;
   const unlockedPrivateKey = privateKey;
 
-  async function authoritativeGoogleCalendarTask(taskId: string): Promise<GoogleCalendarTaskInput | null> {
+  async function authoritativeGoogleCalendarTask(
+    taskId: string
+  ): Promise<GoogleCalendarTaskInput | null> {
     const latestTask = await getScheduleTask(taskId);
 
     if (!latestTask || latestTask.ownerUid !== unlockedProfile.uid) {
@@ -1913,7 +1931,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     const startDate = latestTask.startDate ?? latestTask.dueDate ?? null;
     const calendarRevisionTimestamp = googleCalendarTaskRevisionTimestamp(latestTask);
 
-    return {
+    const googleTask: GoogleCalendarTaskInput = {
       id: latestTask.id,
       ownerUid: latestTask.ownerUid,
       title: title.trim() || "제목 없음",
@@ -1923,6 +1941,9 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       endTimeMinutes: latestTask.endTimeMinutes ?? null,
       revision: googleCalendarTaskRevision(calendarRevisionTimestamp)
     };
+
+    authoritativeGoogleCalendarTaskStatuses.set(googleTask, latestTask.status);
+    return googleTask;
   }
 
   function applyGoogleCalendarSyncSuccess(syncedCount: number) {
@@ -2322,23 +2343,134 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   async function reconcileGoogleCalendarTaskAfterSave(
     task: GoogleCalendarTaskInput,
     connection: GoogleCalendarConnectionStatus,
-    authorityReconciliations = 0
+    authorityReconciliations = 0,
+    signal?: AbortSignal,
+    existingSyncCutoffDate?: string
   ): Promise<{
     receiptTask: GoogleCalendarTaskInput | null;
     result: GoogleCalendarSyncResult;
   }> {
     const timeZone = connection.timeZone || detectedGoogleCalendarTimeZone();
-    const reconciliation = await reconcileGoogleCalendarTask(
-      task,
-      timeZone,
-      undefined,
-      undefined,
-      connection
-    );
+    let reconciliation: Awaited<ReturnType<typeof reconcileGoogleCalendarTask>>;
+
+    try {
+      reconciliation = existingSyncCutoffDate
+        ? await reconcileGoogleCalendarTask(
+          task,
+          timeZone,
+          signal,
+          undefined,
+          connection,
+          existingSyncCutoffDate
+        )
+        : await reconcileGoogleCalendarTask(
+          task,
+          timeZone,
+          signal,
+          undefined,
+          connection
+        );
+    } catch (caught) {
+      // If a Google mutation may have completed but the final authority check
+      // failed, restore a still-dated authoritative task before surfacing the
+      // error. Tombstoned, deleted, and undated tasks intentionally stay absent.
+      if (caught instanceof GoogleCalendarError && caught.mutationMayHaveApplied) {
+        const latestTask = await authoritativeGoogleCalendarTask(task.id).catch(() => null);
+
+        if (latestTask && existingSyncCutoffDate
+          && !isEligibleAuthoritativeGoogleCalendarTask(latestTask, existingSyncCutoffDate)) {
+          await reconcileGoogleCalendarTask(
+            latestTask,
+            timeZone,
+            undefined,
+            undefined,
+            connection,
+            existingSyncCutoffDate
+          );
+        } else if (latestTask?.startDate) {
+          await upsertGoogleCalendarTask(
+            latestTask,
+            timeZone,
+            undefined,
+            undefined,
+            connection
+          );
+        }
+      }
+      throw caught;
+    }
     const stableAuthority = reconciliation.authorityBefore !== "stale"
       && reconciliation.authorityBefore === reconciliation.authorityAfter;
 
     if (stableAuthority) {
+      if (reconciliation.authorityAfter === "ineligible") {
+        if (!existingSyncCutoffDate) {
+          throw new GoogleCalendarError(
+            "invalid_auth_response",
+            "Google Calendar 일정의 동기화 자격을 확인하지 못했습니다."
+          );
+        }
+        const latestTask = await authoritativeGoogleCalendarTask(task.id);
+
+        if (latestTask
+          && isEligibleAuthoritativeGoogleCalendarTask(latestTask, existingSyncCutoffDate)) {
+          if (authorityReconciliations >= 2) {
+            await upsertGoogleCalendarTask(
+              latestTask,
+              timeZone,
+              signal,
+              undefined,
+              connection
+            );
+            throw new GoogleCalendarError(
+              "event_conflict",
+              "일정이 다른 창에서 계속 변경되고 있습니다. 최신 내용을 확인한 뒤 다시 동기화해주세요."
+            );
+          }
+          return reconcileGoogleCalendarTaskAfterSave(
+            latestTask,
+            connection,
+            authorityReconciliations + 1,
+            signal,
+            existingSyncCutoffDate
+          );
+        }
+
+        return { receiptTask: latestTask, result: reconciliation.result };
+      }
+
+      if (reconciliation.authorityAfter === "undated") {
+        const latestTask = await authoritativeGoogleCalendarTask(task.id);
+
+        if (latestTask?.startDate
+          && (!existingSyncCutoffDate
+            || isEligibleAuthoritativeGoogleCalendarTask(latestTask, existingSyncCutoffDate))) {
+          if (authorityReconciliations >= 2) {
+            await upsertGoogleCalendarTask(
+              latestTask,
+              timeZone,
+              signal,
+              undefined,
+              connection
+            );
+            throw new GoogleCalendarError(
+              "event_conflict",
+              "일정이 다른 창에서 계속 변경되고 있습니다. 최신 내용을 확인한 뒤 다시 동기화해주세요."
+            );
+          }
+
+          return reconcileGoogleCalendarTaskAfterSave(
+            latestTask,
+            connection,
+            authorityReconciliations + 1,
+            signal,
+            existingSyncCutoffDate
+          );
+        }
+
+        return { receiptTask: latestTask, result: reconciliation.result };
+      }
+
       return {
         receiptTask: reconciliation.authorityAfter === "deleted" ? null : task,
         result: reconciliation.result
@@ -2352,11 +2484,14 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       // with a newly dated revision, restore the latest event before surfacing
       // the conflict. The durable receipt is intentionally not written because
       // convergence was not proven for an exact revision.
-      if (reconciliation.result.outcome === "deleted" && latestTask?.startDate) {
+      if (reconciliation.result.outcome === "deleted"
+        && latestTask?.startDate
+        && (!existingSyncCutoffDate
+          || isEligibleAuthoritativeGoogleCalendarTask(latestTask, existingSyncCutoffDate))) {
         await upsertGoogleCalendarTask(
           latestTask,
           timeZone,
-          undefined,
+          signal,
           undefined,
           connection
         );
@@ -2370,8 +2505,63 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     return reconcileGoogleCalendarTaskAfterSave(
       latestTask ?? task,
       connection,
-      authorityReconciliations + 1
+      authorityReconciliations + 1,
+      signal,
+      existingSyncCutoffDate
     );
+  }
+
+  async function reconcileGoogleCalendarTaskAfterSaveWithRetry(
+    task: GoogleCalendarTaskInput,
+    connection: GoogleCalendarConnectionStatus,
+    signal: AbortSignal,
+    existingSyncCutoffDate: string,
+    maxRetries = 2
+  ) {
+    let attempt = 0;
+
+    while (true) {
+      if (signal.aborted) {
+        throw new GoogleCalendarError("sync_cancelled", "기존 일정 동기화를 취소했습니다.");
+      }
+
+      try {
+        return await reconcileGoogleCalendarTaskAfterSave(
+          task,
+          connection,
+          0,
+          signal,
+          existingSyncCutoffDate
+        );
+      } catch (caught) {
+        const retryable = caught instanceof GoogleCalendarError && caught.retryable;
+
+        if (!retryable || attempt >= maxRetries) {
+          throw caught;
+        }
+
+        const retryAfter = caught.retryAfterMs ?? 0;
+        const backoff = Math.min(5_000, 500 * (2 ** attempt) + Math.floor(Math.random() * 250));
+        await new Promise<void>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new GoogleCalendarError("sync_cancelled", "기존 일정 동기화를 취소했습니다."));
+            return;
+          }
+
+          const timer = window.setTimeout(() => {
+            signal.removeEventListener("abort", handleAbort);
+            resolve();
+          }, Math.max(retryAfter, backoff));
+          const handleAbort = () => {
+            window.clearTimeout(timer);
+            reject(new GoogleCalendarError("sync_cancelled", "기존 일정 동기화를 취소했습니다."));
+          };
+
+          signal.addEventListener("abort", handleAbort, { once: true });
+        });
+        attempt += 1;
+      }
+    }
   }
 
   async function syncGoogleCalendarTaskAfterSave(
@@ -2608,13 +2798,16 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     setGoogleCalendarNotice(null);
   }
 
-  async function syncExistingGoogleCalendarTasks() {
+  async function syncExistingGoogleCalendarTasks(
+    verifiedConnection?: GoogleCalendarConnectionStatus
+  ) {
     if (googleCalendarOperationRef.current) {
       return;
     }
 
+    const bulkToday = toLocalDateString(new Date());
     const eligibleTasks = decryptedTasksRef.current.filter((task) =>
-      isEligibleExistingGoogleCalendarTask(task, toLocalDateString(new Date()))
+      isEligibleExistingGoogleCalendarTask(task, bulkToday)
     );
 
     if (!eligibleTasks.length) {
@@ -2634,7 +2827,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     setGoogleCalendarNotice(null);
     setGoogleCalendarProgress({ completed: 0, total: eligibleTasks.length });
 
-    let syncTimeZone = googleCalendarConnection.timeZone || detectedGoogleCalendarTimeZone();
     let succeeded = 0;
     let failed = 0;
     let skipped = 0;
@@ -2650,7 +2842,8 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     };
 
     try {
-      const currentConnection = await refreshGoogleCalendarStatus(false, false, abortController.signal);
+      const currentConnection = verifiedConnection
+        ?? await refreshGoogleCalendarStatus(false, false, abortController.signal);
 
       if (googleCalendarUiEpochRef.current !== uiEpoch || abortController.signal.aborted) {
         return;
@@ -2658,8 +2851,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       if (!currentConnection.connected || currentConnection.needsReconnect) {
         throw new GoogleCalendarError("not_connected", "Google Calendar 계정을 먼저 연결해주세요.");
       }
-      syncTimeZone = currentConnection.timeZone || syncTimeZone;
-
       for (let index = 0; index < eligibleTasks.length; index += 1) {
         const task = eligibleTasks[index];
 
@@ -2669,27 +2860,29 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         }
 
         try {
-          if (!await scheduleTaskRevisionIsCurrent(task)) {
+          const taskRevisionIsCurrent = await scheduleTaskRevisionIsCurrent(task, bulkToday);
+
+          if (googleCalendarUiEpochRef.current !== uiEpoch || abortController.signal.aborted) {
+            cancelled = true;
+            break;
+          }
+          if (!taskRevisionIsCurrent) {
             skipped += 1;
             updateBulkProgress(index + 1);
             continue;
           }
 
-          const result = await upsertGoogleCalendarTaskWithRetry(
+          const { receiptTask, result } = await reconcileGoogleCalendarTaskAfterSaveWithRetry(
             googleCalendarTaskFromDecrypted(task),
-            2,
-            syncTimeZone,
+            currentConnection,
             abortController.signal,
-            0,
-            undefined,
-            currentConnection
+            bulkToday
           );
-          await recordGoogleCalendarTaskSyncReceipt(
-            googleCalendarTaskFromDecrypted(task),
-            currentConnection
-          );
+          if (receiptTask) {
+            await recordGoogleCalendarTaskSyncReceipt(receiptTask, currentConnection);
+          }
           succeededTaskIds.add(task.id);
-          if (result.outcome === "skipped") {
+          if (!receiptTask || result.outcome === "skipped") {
             skipped += 1;
           } else {
             succeeded += 1;
@@ -2923,7 +3116,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             setGoogleCalendarError(null);
 
             if (syncExisting) {
-              await syncExistingGoogleCalendarTasks();
+              await syncExistingGoogleCalendarTasks(nextStatus);
             }
             return;
           }
@@ -3196,17 +3389,22 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     return decryptedTasksRef.current.find((currentTask) => currentTask.id === task.id)?.details ?? task.details ?? emptyScheduleDetails;
   }
 
-  async function scheduleTaskRevisionIsCurrent(task: DecryptedScheduleTask) {
+  async function scheduleTaskRevisionIsCurrent(task: DecryptedScheduleTask, today: string) {
     try {
       const latestTask = await getScheduleTask(task.id);
       const previousRevision = googleCalendarTaskRevisionTimestamp(task);
       const latestRevision = latestTask ? googleCalendarTaskRevisionTimestamp(latestTask) : null;
+      const latestStartDate = latestTask?.startDate ?? latestTask?.dueDate ?? null;
+      const latestEndDate = latestTask?.endDate ?? latestStartDate;
 
       return Boolean(
         latestTask
         && latestTask.id === task.id
         && latestTask.ownerUid === unlockedProfile.uid
-        && latestTask.status === task.status
+        && latestTask.status === "active"
+        && isValidScheduleDateString(latestStartDate)
+        && isValidScheduleDateString(latestEndDate)
+        && latestEndDate >= today
         && previousRevision
         && latestRevision
         && previousRevision.seconds === latestRevision.seconds
@@ -3602,12 +3800,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         }
       }
 
-      if (deletionWorkflow) {
-        // Revalidate the account-bound workflow immediately before the local
-        // delete. If the browser slept or the lease expired, keep the task and
-        // restore its Google event instead of crossing account generations.
-        await renewGoogleCalendarDeletionWorkflow(deletionWorkflow);
-      }
       await deleteScheduleTask(task.id);
       localTaskDeleted = true;
       setDeleteConfirmationTask(null);

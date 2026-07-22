@@ -90,14 +90,16 @@ async function handlePost(request, response) {
       "taskId",
       "revision",
       "connectionGeneration",
-      "deletionWorkflowLeaseId"
+      "deletionWorkflowLeaseId",
+      "existingSyncCutoffDate"
     ]);
     const operation = await beginGoogleCalendarTaskOperation(
       context,
       body.connectionGeneration,
       body.taskId,
       body.revision,
-      body.deletionWorkflowLeaseId ?? null
+      body.deletionWorkflowLeaseId ?? null,
+      body.existingSyncCutoffDate ?? null
     );
     jsonResponse(response, 200, { ok: true, ...operation });
     return;
@@ -123,14 +125,18 @@ async function handlePost(request, response) {
       "taskId",
       "revision",
       "connectionGeneration",
-      "operationLeaseId"
+      "operationLeaseId",
+      "deletionWorkflowLeaseId",
+      "existingSyncCutoffDate"
     ]);
     const state = await finishGoogleCalendarTaskOperation(
       context,
       body.connectionGeneration,
       body.operationLeaseId,
       body.taskId,
-      body.revision
+      body.revision,
+      body.deletionWorkflowLeaseId ?? null,
+      body.existingSyncCutoffDate ?? null
     );
     jsonResponse(response, 200, { ok: true, state });
     return;

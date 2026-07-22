@@ -9,8 +9,16 @@ interface SessionPrivateKeyRecord {
 }
 
 const sessionPrivateKeys = new Map<string, SessionPrivateKeyRecord>();
+const sessionPrivateKeyMutationVersions = new Map<string, number>();
 let legacyDatabaseDeleteComplete = false;
 let legacyDatabaseDeletePromise: Promise<void> | null = null;
+
+function nextSessionPrivateKeyMutationVersion(uid: string) {
+  const version = (sessionPrivateKeyMutationVersions.get(uid) ?? 0) + 1;
+
+  sessionPrivateKeyMutationVersions.set(uid, version);
+  return version;
+}
 
 export async function readSessionPrivateKey(uid: string, now = Date.now()) {
   await deletePersistedSessionPrivateKeyStore();
@@ -26,13 +34,33 @@ export async function readSessionPrivateKey(uid: string, now = Date.now()) {
 }
 
 export async function writeSessionPrivateKey(uid: string, privateKey: CryptoKey, expiresAt = Date.now() + privateKeySessionDurationMs) {
+  const mutationVersion = nextSessionPrivateKeyMutationVersion(uid);
+
   await deletePersistedSessionPrivateKeyStore();
+
+  if (sessionPrivateKeyMutationVersions.get(uid) !== mutationVersion) {
+    return null;
+  }
+
   sessionPrivateKeys.set(uid, { expiresAt, privateKey, uid });
+  return mutationVersion;
 }
 
-export async function deleteSessionPrivateKey(uid: string) {
+export async function deleteSessionPrivateKey(uid: string, expectedMutationVersion?: number) {
+  if (expectedMutationVersion !== undefined
+    && sessionPrivateKeyMutationVersions.get(uid) !== expectedMutationVersion) {
+    return false;
+  }
+
+  const mutationVersion = nextSessionPrivateKeyMutationVersion(uid);
+
   sessionPrivateKeys.delete(uid);
   await deletePersistedSessionPrivateKeyStore();
+
+  if (sessionPrivateKeyMutationVersions.get(uid) === mutationVersion) {
+    sessionPrivateKeys.delete(uid);
+  }
+  return true;
 }
 
 export async function deletePersistedSessionPrivateKeyStore() {

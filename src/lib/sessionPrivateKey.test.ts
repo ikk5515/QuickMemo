@@ -28,4 +28,19 @@ describe("session private key cache", () => {
     await expect(readSessionPrivateKey("user-a", 1_500)).resolves.toBeNull();
     await expect(readSessionPrivateKey("user-b", 1_499)).resolves.toBeNull();
   });
+
+  it("keeps the last key-cache intent when a write and sign-out cleanup overlap", async () => {
+    const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    const staleWrite = writeSessionPrivateKey("user-a", key, Date.now() + 60_000);
+    const signOutCleanup = deleteSessionPrivateKey("user-a");
+
+    await Promise.all([staleWrite, signOutCleanup]);
+    await expect(readSessionPrivateKey("user-a")).resolves.toBeNull();
+
+    const olderCleanup = deleteSessionPrivateKey("user-a");
+    const newSessionWrite = writeSessionPrivateKey("user-a", key, Date.now() + 60_000);
+
+    await Promise.all([olderCleanup, newSessionWrite]);
+    await expect(readSessionPrivateKey("user-a")).resolves.toBe(key);
+  });
 });

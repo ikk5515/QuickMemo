@@ -1123,6 +1123,42 @@ describe("Google Calendar account and operation race guards", () => {
     expect(calendarCalls(fetchMock).map(({ init }) => init.method)).toEqual(["GET", "POST"]);
   });
 
+  it("binds combined deletion finalization to the same workflow lease", async () => {
+    const task = activeTask({
+      id: "task-combined-delete-workflow",
+      revision: "001753142400.000000010"
+    });
+    const workflow = {
+      connectionGeneration: generationA,
+      ownerUid: "user-a",
+      workflowLeaseId: "w".repeat(43)
+    };
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)]
+    });
+    const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+    await expect(reconcileGoogleCalendarTask(
+      task,
+      "Asia/Seoul",
+      undefined,
+      workflow,
+      verifiedStatus
+    )).resolves.toMatchObject({
+      authorityBefore: "current",
+      authorityAfter: "current",
+      result: { outcome: "created" }
+    });
+
+    expect(backendActions(fetchMock).find(({ action }) => action === "begin-task-operation"))
+      .toMatchObject({ deletionWorkflowLeaseId: workflow.workflowLeaseId });
+    expect(backendActions(fetchMock).find(({ action }) => action === "finish-task-operation"))
+      .toMatchObject({ deletionWorkflowLeaseId: workflow.workflowLeaseId });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "renew-deletion-workflow"))
+      .toHaveLength(0);
+  });
+
   it("returns a stale combined authority result without acquiring a lease or calling Google", async () => {
     const fetchMock = installScenario({
       beginTaskOperationResponses: [jsonResponse({
@@ -1187,7 +1223,7 @@ describe("Google Calendar account and operation race guards", () => {
     ]);
   });
 
-  it.each(["deleted", "undated"] as const)(
+  it.each(["deleted", "ineligible", "undated"] as const)(
     "uses a delete mutation when combined authority is %s",
     async (authority) => {
       const task = activeTask({
@@ -1214,7 +1250,8 @@ describe("Google Calendar account and operation race guards", () => {
         "Asia/Seoul",
         undefined,
         undefined,
-        verifiedStatus
+        verifiedStatus,
+        authority === "ineligible" ? "2026-07-22" : undefined
       )).resolves.toEqual({
         authorityBefore: authority,
         authorityAfter: authority,
@@ -1224,6 +1261,12 @@ describe("Google Calendar account and operation race guards", () => {
       expect(calendarCalls(fetchMock).map(({ init }) => init.method)).toEqual(["GET", "DELETE"]);
       expect(backendActions(fetchMock).filter(({ action }) => action === "status"))
         .toHaveLength(1);
+      if (authority === "ineligible") {
+        expect(backendActions(fetchMock).find(({ action }) => action === "begin-task-operation"))
+          .toMatchObject({ existingSyncCutoffDate: "2026-07-22" });
+        expect(backendActions(fetchMock).find(({ action }) => action === "finish-task-operation"))
+          .toMatchObject({ existingSyncCutoffDate: "2026-07-22" });
+      }
     }
   );
 

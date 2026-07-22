@@ -50,7 +50,7 @@ export interface GoogleCalendarSyncResult {
   remoteWasPresent?: boolean;
 }
 
-export type GoogleCalendarTaskAuthorityState = "current" | "deleted" | "stale" | "undated";
+export type GoogleCalendarTaskAuthorityState = "current" | "deleted" | "ineligible" | "stale" | "undated";
 
 export interface GoogleCalendarTaskReconciliationResult {
   authorityAfter: GoogleCalendarTaskAuthorityState;
@@ -1783,7 +1783,11 @@ async function releaseGoogleCalendarOperation(context: GoogleCalendarOperationCo
 function normalizedGoogleCalendarTaskAuthorityState(
   value: unknown
 ): GoogleCalendarTaskAuthorityState | null {
-  return value === "current" || value === "deleted" || value === "stale" || value === "undated"
+  return value === "current"
+    || value === "deleted"
+    || value === "ineligible"
+    || value === "stale"
+    || value === "undated"
     ? value
     : null;
 }
@@ -1792,7 +1796,8 @@ async function prepareGoogleCalendarTaskOperation(
   task: GoogleCalendarTaskInput,
   signal?: AbortSignal,
   deletionWorkflow?: GoogleCalendarDeletionWorkflow,
-  verifiedStatus?: GoogleCalendarConnectionStatus
+  verifiedStatus?: GoogleCalendarConnectionStatus,
+  existingSyncCutoffDate?: string
 ): Promise<{
   authorityBefore: GoogleCalendarTaskAuthorityState;
   context: GoogleCalendarOperationContext | null;
@@ -1810,7 +1815,8 @@ async function prepareGoogleCalendarTaskOperation(
     connectionGeneration: status.connectionGeneration,
     ...(deletionWorkflow
       ? { deletionWorkflowLeaseId: deletionWorkflow.workflowLeaseId }
-      : {})
+      : {}),
+    ...(existingSyncCutoffDate ? { existingSyncCutoffDate } : {})
   }, baseContext.user, baseContext.sessionSignal, signal);
   const operation = payload && typeof payload === "object"
     ? payload as Record<string, unknown>
@@ -1852,14 +1858,20 @@ async function prepareGoogleCalendarTaskOperation(
 
 async function finishGoogleCalendarTaskOperation(
   context: GoogleCalendarOperationContext,
-  task: GoogleCalendarTaskInput
+  task: GoogleCalendarTaskInput,
+  deletionWorkflow?: GoogleCalendarDeletionWorkflow,
+  existingSyncCutoffDate?: string
 ) {
   const payload = await backendRequest<unknown>(googleCalendarConnectionApiPath, {
     action: "finish-task-operation",
     taskId: task.id,
     revision: task.revision ?? null,
     connectionGeneration: context.connectionGeneration,
-    operationLeaseId: context.operationLeaseId
+    operationLeaseId: context.operationLeaseId,
+    ...(deletionWorkflow
+      ? { deletionWorkflowLeaseId: deletionWorkflow.workflowLeaseId }
+      : {}),
+    ...(existingSyncCutoffDate ? { existingSyncCutoffDate } : {})
   }, true, context.user, context.sessionSignal);
   const state = normalizedGoogleCalendarTaskAuthorityState(
     payload && typeof payload === "object"
@@ -1911,7 +1923,8 @@ export async function reconcileGoogleCalendarTask(
   timeZone: string,
   signal?: AbortSignal,
   deletionWorkflow?: GoogleCalendarDeletionWorkflow,
-  verifiedStatus?: GoogleCalendarConnectionStatus
+  verifiedStatus?: GoogleCalendarConnectionStatus,
+  existingSyncCutoffDate?: string
 ): Promise<GoogleCalendarTaskReconciliationResult> {
   assertGoogleCalendarTaskOwner(task.ownerUid);
   if (deletionWorkflow && deletionWorkflow.ownerUid !== task.ownerUid) {
@@ -1927,7 +1940,8 @@ export async function reconcileGoogleCalendarTask(
       task,
       signal,
       deletionWorkflow,
-      verifiedStatus
+      verifiedStatus,
+      existingSyncCutoffDate
     );
 
     if (!prepared.context) {
@@ -1956,7 +1970,12 @@ export async function reconcileGoogleCalendarTask(
           context,
           signal
         );
-      const authorityAfter = await finishGoogleCalendarTaskOperation(context, task);
+      const authorityAfter = await finishGoogleCalendarTaskOperation(
+        context,
+        task,
+        deletionWorkflow,
+        existingSyncCutoffDate
+      );
 
       return { authorityBefore: prepared.authorityBefore, authorityAfter, result };
     } catch (caught) {

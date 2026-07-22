@@ -30,11 +30,12 @@ interface BackendModule {
     expectedGeneration: string,
     taskId: string,
     expectedRevision: string | null,
-    deletionWorkflowLeaseId?: string | null
+    deletionWorkflowLeaseId?: string | null,
+    existingSyncCutoffDate?: string | null
   ): Promise<{
     connectionGeneration: string;
     leaseId: string | null;
-    state: "current" | "deleted" | "stale" | "undated";
+    state: "current" | "deleted" | "ineligible" | "stale" | "undated";
   }>;
   beginGoogleCalendarDeletionWorkflow(
     context: BackendContext,
@@ -85,8 +86,10 @@ interface BackendModule {
     expectedGeneration: string,
     leaseId: string,
     taskId: string,
-    expectedRevision: string | null
-  ): Promise<"current" | "deleted" | "stale" | "undated">;
+    expectedRevision: string | null,
+    deletionWorkflowLeaseId?: string | null,
+    existingSyncCutoffDate?: string | null
+  ): Promise<"current" | "deleted" | "ineligible" | "stale" | "undated">;
   googleCalendarCallbackHtml(kind: string): string;
   htmlResponse(response: {
     statusCode?: number;
@@ -104,8 +107,9 @@ interface BackendModule {
   getGoogleCalendarTaskAuthority(
     context: BackendContext,
     taskId: string,
-    expectedRevision: string | null
-  ): Promise<"current" | "deleted" | "stale" | "undated">;
+    expectedRevision: string | null,
+    existingSyncCutoffDate?: string | null
+  ): Promise<"current" | "deleted" | "ineligible" | "stale" | "undated">;
   isValidTimeZone(value: unknown): boolean;
   maskGoogleEmail(email: unknown): string;
   oauthSessionCookie(
@@ -250,6 +254,24 @@ function deletionWorkflowGoogleConnectionDocument(
   const document = googleConnectionDocument(connectionGeneration);
 
   document.fields.deletionWorkflowLeaseId = { stringValue: leaseId };
+  document.fields.deletionWorkflowLeaseGeneration = { stringValue: connectionGeneration };
+  document.fields.deletionWorkflowLeaseExpiresAt = { timestampValue: leaseExpiresAt };
+  return document;
+}
+
+function leasedDeletionWorkflowGoogleConnectionDocument(
+  connectionGeneration = generationA,
+  operationLeaseId = "l".repeat(43),
+  workflowLeaseId = "w".repeat(43),
+  leaseExpiresAt = new Date(Date.now() + 60_000).toISOString()
+): FirestoreDocument {
+  const document = leasedGoogleConnectionDocument(
+    connectionGeneration,
+    operationLeaseId,
+    leaseExpiresAt
+  );
+
+  document.fields.deletionWorkflowLeaseId = { stringValue: workflowLeaseId };
   document.fields.deletionWorkflowLeaseGeneration = { stringValue: connectionGeneration };
   document.fields.deletionWorkflowLeaseExpiresAt = { timestampValue: leaseExpiresAt };
   return document;
@@ -614,6 +636,8 @@ describe("Google Calendar backend security", () => {
     let createdAt: string | null = null;
     let leaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
     let taskStartDate: string | null = "2026-07-22";
+    let taskEndDate: string | null = "2026-07-22";
+    let taskStatus = "active";
     let taskExists = true;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -634,7 +658,9 @@ describe("Google Calendar backend security", () => {
         return backendJsonResponse({
           fields: {
             ownerUid: { stringValue: backendContext.uid },
+            status: { stringValue: taskStatus },
             ...(taskStartDate ? { startDate: { stringValue: taskStartDate } } : {}),
+            ...(taskEndDate ? { endDate: { stringValue: taskEndDate } } : {}),
             ...(calendarUpdatedAt ? { calendarUpdatedAt: { timestampValue: calendarUpdatedAt } } : {}),
             ...(createdAt ? { createdAt: { timestampValue: createdAt } } : {}),
             updatedAt: { timestampValue: updatedAt }
@@ -684,12 +710,47 @@ describe("Google Calendar backend security", () => {
       "task-a",
       createdRevision
     )).resolves.toBe("current");
+    await expect(backend.getGoogleCalendarTaskAuthority(
+      backendContext,
+      "task-a",
+      createdRevision,
+      "2026-07-22"
+    )).resolves.toBe("current");
+
+    taskStatus = "completed";
+    await expect(backend.getGoogleCalendarTaskAuthority(
+      backendContext,
+      "task-a",
+      createdRevision,
+      "2026-07-22"
+    )).resolves.toBe("ineligible");
+    await expect(backend.getGoogleCalendarTaskAuthority(
+      backendContext,
+      "task-a",
+      expectedRevision,
+      "2026-07-22"
+    )).resolves.toBe("stale");
+
+    taskStatus = "active";
+    taskEndDate = "2026-07-21";
+    await expect(backend.getGoogleCalendarTaskAuthority(
+      backendContext,
+      "task-a",
+      createdRevision,
+      "2026-07-22"
+    )).resolves.toBe("ineligible");
+    taskEndDate = "2026-07-22";
 
     taskStartDate = null;
     await expect(backend.getGoogleCalendarTaskAuthority(
       backendContext,
       "task-a",
       expectedRevision
+    )).resolves.toBe("stale");
+    await expect(backend.getGoogleCalendarTaskAuthority(
+      backendContext,
+      "task-a",
+      createdRevision
     )).resolves.toBe("undated");
 
     taskExists = false;
@@ -886,6 +947,14 @@ describe("Google Calendar backend security", () => {
       "task-malformed-lease",
       "001753142400.000000000"
     )).rejects.toMatchObject({ statusCode: 400, errorCode: "invalid_request" });
+    await expect(backend.finishGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      "l".repeat(43),
+      "task-malformed-workflow-lease",
+      "001753142400.000000000",
+      "not-a-valid-workflow-lease"
+    )).rejects.toMatchObject({ statusCode: 400, errorCode: "invalid_request" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -975,6 +1044,130 @@ describe("Google Calendar backend security", () => {
     )).rejects.toThrow("Firestore read failed");
     expect(leaseReleased).toBe(true);
   });
+
+  it("atomically releases a task operation and renews its bound deletion workflow", async () => {
+    const updatedAt = "2026-07-22T00:00:00.123456789Z";
+    const expectedRevision = `${String(Math.floor(Date.parse(updatedAt) / 1000)).padStart(12, "0")}.123456789`;
+    const operationLeaseId = "l".repeat(43);
+    const workflowLeaseId = "w".repeat(43);
+    const connection = leasedDeletionWorkflowGoogleConnectionDocument(
+      generationA,
+      operationLeaseId,
+      workflowLeaseId
+    );
+    let leaseFinished = false;
+    let commitCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes("googleCalendarConnections/user-a")) {
+        return backendJsonResponse(connection);
+      }
+      if (url.endsWith(":commit")) {
+        commitCount += 1;
+        const commit = JSON.parse(String(init?.body)) as {
+          writes: Array<{
+            currentDocument?: { updateTime?: string };
+            update?: { fields?: Record<string, { stringValue?: string; timestampValue?: string }> };
+            updateMask?: { fieldPaths?: string[] };
+          }>;
+        };
+        const write = commit.writes[0];
+        const renewedExpiry = write.update?.fields?.deletionWorkflowLeaseExpiresAt?.timestampValue;
+
+        expect(write.currentDocument).toEqual({ updateTime: connection.updateTime });
+        expect(write.updateMask?.fieldPaths).toEqual([
+          "operationLeaseId",
+          "operationLeaseGeneration",
+          "operationLeaseExpiresAt",
+          "deletionWorkflowLeaseExpiresAt"
+        ]);
+        expect(write.update?.fields).toMatchObject({
+          operationLeaseId: { stringValue: "" },
+          operationLeaseGeneration: { stringValue: "" },
+          operationLeaseExpiresAt: { timestampValue: "1970-01-01T00:00:00.000Z" }
+        });
+        expect(Date.parse(renewedExpiry ?? "")).toBeGreaterThan(Date.now());
+        leaseFinished = true;
+        return backendJsonResponse({ commitTime: "2026-07-22T00:00:01Z" });
+      }
+      if (url.includes("googleCalendarTaskTombstones/task-finish-delete")) {
+        expect(leaseFinished).toBe(true);
+        return backendJsonResponse({}, 404);
+      }
+      if (url.includes("scheduleTasks/task-finish-delete")) {
+        expect(leaseFinished).toBe(true);
+        return backendJsonResponse({
+          fields: {
+            ownerUid: { stringValue: backendContext.uid },
+            startDate: { stringValue: "2026-07-22" },
+            calendarUpdatedAt: { timestampValue: updatedAt }
+          }
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(backend.finishGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      operationLeaseId,
+      "task-finish-delete",
+      expectedRevision,
+      workflowLeaseId
+    )).resolves.toBe("current");
+    expect(commitCount).toBe(1);
+  });
+
+  it.each(["expired", "mismatched"] as const)(
+    "fails closed before release when the bound deletion workflow is %s",
+    async (failureKind) => {
+      const operationLeaseId = "l".repeat(43);
+      const workflowLeaseId = "w".repeat(43);
+      const connection = leasedDeletionWorkflowGoogleConnectionDocument(
+        generationA,
+        operationLeaseId,
+        workflowLeaseId
+      );
+      if (failureKind === "expired") {
+        connection.fields.deletionWorkflowLeaseExpiresAt = {
+          timestampValue: new Date(Date.now() - 1_000).toISOString()
+        };
+      }
+      const requestedWorkflowLeaseId = failureKind === "mismatched"
+        ? "x".repeat(43)
+        : workflowLeaseId;
+      let authorityReads = 0;
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+
+        if (url.includes("googleCalendarConnections/user-a")) {
+          return backendJsonResponse(connection);
+        }
+        if (url.includes("scheduleTasks/") || url.includes("googleCalendarTaskTombstones/")) {
+          authorityReads += 1;
+          return backendJsonResponse({}, 404);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      await expect(backend.finishGoogleCalendarTaskOperation(
+        backendContext,
+        generationA,
+        operationLeaseId,
+        `task-${failureKind}-delete`,
+        "001753142400.000000000",
+        requestedWorkflowLeaseId
+      )).rejects.toMatchObject({
+        statusCode: 409,
+        errorCode: "google_operation_expired"
+      });
+      expect(authorityReads).toBe(0);
+      expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith(":commit"))).toBe(false);
+    }
+  );
 
   it("fails closed when a finish operation cannot release its lease", async () => {
     const leaseId = "l".repeat(43);
@@ -1929,7 +2122,7 @@ describe("Google Calendar backend security", () => {
       /if \(body\.action === "begin-task-operation"\) \{[\s\S]*?assertOnlyKeys\(body, \[[\s\S]*?"taskId"[\s\S]*?"revision"[\s\S]*?"connectionGeneration"[\s\S]*?"deletionWorkflowLeaseId"[\s\S]*?\]\);/u
     );
     expect(connectionSource).toMatch(
-      /if \(body\.action === "finish-task-operation"\) \{[\s\S]*?assertOnlyKeys\(body, \[[\s\S]*?"taskId"[\s\S]*?"revision"[\s\S]*?"connectionGeneration"[\s\S]*?"operationLeaseId"[\s\S]*?\]\);/u
+      /if \(body\.action === "finish-task-operation"\) \{[\s\S]*?assertOnlyKeys\(body, \[[\s\S]*?"taskId"[\s\S]*?"revision"[\s\S]*?"connectionGeneration"[\s\S]*?"operationLeaseId"[\s\S]*?"deletionWorkflowLeaseId"[\s\S]*?\]\);/u
     );
     expect(connectionSource).not.toContain("eventTitle");
     expect(connectionSource).not.toContain("eventDescription");
