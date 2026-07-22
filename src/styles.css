@@ -11550,6 +11550,15 @@ html[data-theme="dark"] .schedule-delete-confirm-kicker {
   line-height: 1.45;
 }
 
+.google-calendar-existing-summary {
+  cursor: default;
+}
+
+.google-calendar-existing-summary > svg {
+  color: var(--blue);
+  margin-top: 1px;
+}
+
 .google-calendar-security-note {
   align-items: start;
   background: color-mix(in srgb, var(--color-primary-subtle) 50%, var(--panel));

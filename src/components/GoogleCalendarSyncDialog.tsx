@@ -402,10 +402,22 @@ export function GoogleCalendarSyncDialog({
                   <span>
                     <strong>기존 일정도 한 번 동기화</strong>
                     <small>
-                      오늘 이후 미완료 일정 {eligibleExistingCount}개를 연결 직후 함께 반영합니다.
+                      날짜가 있는 기존 일정 {eligibleExistingCount}개를 연결 직후 함께 반영합니다. 과거나 완료된 일정도 포함하며, 이미 동기화된 일정은 중복 등록하지 않습니다.
                     </small>
                   </span>
                 </label>
+              )}
+
+              {connection.connected && (
+                <div className="google-calendar-existing-option google-calendar-existing-summary">
+                  <CalendarSync size={18} aria-hidden="true" />
+                  <span>
+                    <strong>기존 일정 동기화 범위</strong>
+                    <small>
+                      날짜가 있는 기존 일정 {eligibleExistingCount}개가 대상입니다. 과거나 완료된 일정도 포함하며, 이미 동기화된 일정은 중복 등록하지 않습니다.
+                    </small>
+                  </span>
+                </div>
               )}
 
               <div className="google-calendar-security-note">

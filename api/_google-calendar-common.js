@@ -1223,6 +1223,17 @@ export async function getGoogleCalendarTaskAuthority(
     return "deleted";
   }
 
+  const taskStatus = readString(task, "status");
+
+  // Legacy schedule documents can still carry the old archived status even
+  // though current clients only create active/completed tasks. Treat every
+  // explicit non-syncable status as removed before revision comparison so a
+  // stale browser can only delete, never recreate, its Google event. Missing
+  // status remains compatible with older active documents.
+  if (taskStatus && taskStatus !== "active" && taskStatus !== "completed") {
+    return "deleted";
+  }
+
   const currentRevision = firestoreTimestampRevision(task, "calendarUpdatedAt")
     ?? firestoreTimestampRevision(task, "createdAt")
     ?? firestoreTimestampRevision(task, "updatedAt");
@@ -1234,7 +1245,7 @@ export async function getGoogleCalendarTaskAuthority(
   if (existingSyncCutoffDate !== null) {
     const endDate = readString(task, "endDate") || startDate;
 
-    if (readString(task, "status") !== "active"
+    if (taskStatus !== "active"
       || !/^\d{4}-\d{2}-\d{2}$/u.test(startDate)
       || !/^\d{4}-\d{2}-\d{2}$/u.test(endDate)
       || endDate < existingSyncCutoffDate) {

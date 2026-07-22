@@ -721,6 +721,11 @@ describe("Google Calendar backend security", () => {
     await expect(backend.getGoogleCalendarTaskAuthority(
       backendContext,
       "task-a",
+      createdRevision
+    )).resolves.toBe("current");
+    await expect(backend.getGoogleCalendarTaskAuthority(
+      backendContext,
+      "task-a",
       createdRevision,
       "2026-07-22"
     )).resolves.toBe("ineligible");
@@ -730,6 +735,18 @@ describe("Google Calendar backend security", () => {
       expectedRevision,
       "2026-07-22"
     )).resolves.toBe("stale");
+
+    taskStatus = "archived";
+    await expect(backend.getGoogleCalendarTaskAuthority(
+      backendContext,
+      "task-a",
+      createdRevision
+    )).resolves.toBe("deleted");
+    await expect(backend.getGoogleCalendarTaskAuthority(
+      backendContext,
+      "task-a",
+      expectedRevision
+    )).resolves.toBe("deleted");
 
     taskStatus = "active";
     taskEndDate = "2026-07-21";

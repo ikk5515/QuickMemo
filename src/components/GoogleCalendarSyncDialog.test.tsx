@@ -133,6 +133,8 @@ describe("GoogleCalendarSyncDialog", () => {
     expect(screen.getByText("비밀번호는 QuickMemo에 입력하지 않습니다.")).toBeInTheDocument();
     expect(screen.getByText(/제목·날짜·시간만 전송합니다/)).toBeInTheDocument();
     expect(screen.getByText(/상세 내용과 체크리스트는 전송하지 않습니다/)).toBeInTheDocument();
+    expect(screen.getByText(/과거나 완료된 일정도 포함/)).toBeInTheDocument();
+    expect(screen.getByText(/이미 동기화된 일정은 중복 등록하지 않습니다/)).toBeInTheDocument();
 
     const existingTasksCheckbox = screen.getByRole("checkbox", { name: /기존 일정도 한 번 동기화/ });
     const connectButton = screen.getByRole("button", { name: "Google 계정 연결" });
@@ -158,6 +160,10 @@ describe("GoogleCalendarSyncDialog", () => {
       onRefresh,
       onSyncExisting
     });
+
+    expect(screen.getByText("기존 일정 동기화 범위")).toBeInTheDocument();
+    expect(screen.getByText(/과거나 완료된 일정도 포함/)).toBeInTheDocument();
+    expect(screen.getByText(/이미 동기화된 일정은 중복 등록하지 않습니다/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "상태 새로고침" }));
     await user.click(screen.getByRole("button", { name: "기존 일정 동기화" }));

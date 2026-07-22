@@ -850,15 +850,28 @@ describe("SchedulePage quick work panel", () => {
     }));
   });
 
-  it("skips a bulk task that became completed before its Google mutation", async () => {
+  it("syncs past active and past or future completed tasks while excluding undated tasks", async () => {
     const user = userEvent.setup();
-    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "완료 경합 일정");
+    const tasks: ScheduleTaskSnapshot[] = [
+      datedScheduleTaskSnapshot("past-active", "과거 진행 일정", "2020-01-01"),
+      {
+        ...datedScheduleTaskSnapshot("past-completed", "과거 완료 일정", "2020-01-02"),
+        status: "completed"
+      },
+      {
+        ...datedScheduleTaskSnapshot("future-completed", "미래 완료 일정", "2099-01-12"),
+        status: "completed"
+      },
+      {
+        ...scheduleTaskSnapshot(),
+        id: "undated-active"
+      }
+    ];
 
     vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
-      onNext([datedTask]);
+      onNext(tasks);
       return vi.fn();
     });
-    vi.mocked(getScheduleTask).mockResolvedValue({ ...datedTask, status: "completed" });
     vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue({
       configured: true,
       connected: true,
@@ -877,76 +890,93 @@ describe("SchedulePage quick work panel", () => {
     const dialog = await screen.findByRole("dialog", { name: "Google Calendar 동기화" });
     await user.click(await within(dialog).findByRole("button", { name: "기존 일정 동기화" }));
 
-    await screen.findByText("0개 일정을 동기화하고, 실행 중 변경된 1개는 안전하게 건너뛰었습니다.");
-    expect(reconcileGoogleCalendarTask).not.toHaveBeenCalled();
-    expect(markScheduleTaskGoogleCalendarSynced).not.toHaveBeenCalled();
-  });
-
-  it("cleans up a bulk task that becomes completed after the client preflight", async () => {
-    const user = userEvent.setup();
-    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "서버 완료 경합 일정");
-    const completedTask = { ...datedTask, status: "completed" as const };
-
-    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
-      onNext([datedTask]);
-      return vi.fn();
-    });
-    vi.mocked(getScheduleTask)
-      .mockResolvedValueOnce(datedTask)
-      .mockResolvedValue(completedTask);
-    vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue({
-      configured: true,
-      connected: true,
-      hasStoredConnection: true,
-      needsReconnect: false,
-      connectionGeneration: "generation-a",
-      email: "te***@example.com",
-      lastSyncAt: null,
-      lastSyncStatus: "idle",
-      syncedCount: 0,
-      timeZone: "Asia/Seoul"
-    });
-    vi.mocked(reconcileGoogleCalendarTask).mockResolvedValue({
-      authorityAfter: "ineligible",
-      authorityBefore: "ineligible",
-      result: { eventId: "event-a", outcome: "deleted", remoteWasPresent: true }
-    });
-
-    renderSchedulePage();
-    await user.click(await screen.findByRole("button", { name: "Google Calendar 동기화: 미동기화" }));
-    const dialog = await screen.findByRole("dialog", { name: "Google Calendar 동기화" });
-    await user.click(await within(dialog).findByRole("button", { name: "기존 일정 동기화" }));
-
-    await waitFor(() => expect(markScheduleTaskGoogleCalendarSynced).toHaveBeenCalled());
-    expect(reconcileGoogleCalendarTask).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "matrix-task-a" }),
+    await screen.findByText("3개 일정을 Google Calendar에 동기화했습니다.");
+    expect(reconcileGoogleCalendarTask).toHaveBeenCalledTimes(3);
+    expect(upsertGoogleCalendarTask).toHaveBeenCalledTimes(3);
+    expect(upsertGoogleCalendarTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "past-active", startDate: "2020-01-01" }),
       "Asia/Seoul",
       expect.any(AbortSignal),
       undefined,
-      expect.objectContaining({ connectionGeneration: "generation-a" }),
-      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/u)
+      expect.objectContaining({ connectionGeneration: "generation-a" })
     );
-    expect(upsertGoogleCalendarTask).not.toHaveBeenCalled();
+    expect(upsertGoogleCalendarTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "past-completed", startDate: "2020-01-02" }),
+      "Asia/Seoul",
+      expect.any(AbortSignal),
+      undefined,
+      expect.objectContaining({ connectionGeneration: "generation-a" })
+    );
+    expect(upsertGoogleCalendarTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "future-completed", startDate: "2099-01-12" }),
+      "Asia/Seoul",
+      expect.any(AbortSignal),
+      undefined,
+      expect.objectContaining({ connectionGeneration: "generation-a" })
+    );
+    expect(upsertGoogleCalendarTask).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: "undated-active" }),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    );
+    expect(markScheduleTaskGoogleCalendarSynced).toHaveBeenCalledTimes(3);
   });
 
-  it("does not re-upsert a bulk task that moves into the past after preflight", async () => {
+  it("reports an already synchronized event as deduplicated while repairing its receipt", async () => {
     const user = userEvent.setup();
-    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "서버 과거 경합 일정");
-    const pastTask: ScheduleTaskSnapshot = {
+    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "이미 동기화된 일정", "2020-01-01");
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([datedTask]);
+      return vi.fn();
+    });
+    vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue({
+      configured: true,
+      connected: true,
+      hasStoredConnection: true,
+      needsReconnect: false,
+      connectionGeneration: "generation-a",
+      email: "te***@example.com",
+      lastSyncAt: null,
+      lastSyncStatus: "idle",
+      syncedCount: 0,
+      timeZone: "Asia/Seoul"
+    });
+    vi.mocked(reconcileGoogleCalendarTask).mockResolvedValueOnce({
+      authorityAfter: "current",
+      authorityBefore: "current",
+      result: { eventId: "event-a", outcome: "skipped" }
+    });
+
+    renderSchedulePage();
+    await user.click(await screen.findByRole("button", { name: "Google Calendar 동기화: 미동기화" }));
+    const dialog = await screen.findByRole("dialog", { name: "Google Calendar 동기화" });
+    await user.click(await within(dialog).findByRole("button", { name: "기존 일정 동기화" }));
+
+    await screen.findByText("이미 최신인 1개는 중복 없이 유지했습니다.");
+    expect(markScheduleTaskGoogleCalendarSynced).toHaveBeenCalledOnce();
+    expect(reportGoogleCalendarSync).toHaveBeenCalledWith({
+      status: "synced",
+      syncedCount: 0
+    });
+  });
+
+  it("upserts a task that becomes completed during server reconciliation", async () => {
+    const user = userEvent.setup();
+    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "서버 완료 경합 일정");
+    const completedTask: ScheduleTaskSnapshot = {
       ...datedTask,
-      dueDate: "2020-01-01",
-      startDate: "2020-01-01",
-      endDate: "2020-01-01",
-      calendarUpdatedAt: { seconds: 1_753_142_500, nanoseconds: 11 } as ScheduleTaskSnapshot["calendarUpdatedAt"]
+      status: "completed",
+      calendarUpdatedAt: { seconds: 1_753_142_500, nanoseconds: 10 } as ScheduleTaskSnapshot["calendarUpdatedAt"]
     };
 
     vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
       onNext([datedTask]);
       return vi.fn();
     });
-    vi.mocked(getScheduleTask)
-      .mockResolvedValueOnce(datedTask)
-      .mockResolvedValue(pastTask);
+    vi.mocked(getScheduleTask).mockResolvedValue(completedTask);
     vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue({
       configured: true,
       connected: true,
@@ -966,9 +996,73 @@ describe("SchedulePage quick work panel", () => {
         result: { eventId: null, outcome: "skipped" }
       })
       .mockResolvedValueOnce({
-        authorityAfter: "ineligible",
-        authorityBefore: "ineligible",
-        result: { eventId: "event-a", outcome: "deleted", remoteWasPresent: true }
+        authorityAfter: "current",
+        authorityBefore: "current",
+        result: { eventId: "event-a", outcome: "updated" }
+      });
+
+    renderSchedulePage();
+    await user.click(await screen.findByRole("button", { name: "Google Calendar 동기화: 미동기화" }));
+    const dialog = await screen.findByRole("dialog", { name: "Google Calendar 동기화" });
+    await user.click(await within(dialog).findByRole("button", { name: "기존 일정 동기화" }));
+
+    await waitFor(() => expect(reconcileGoogleCalendarTask).toHaveBeenCalledTimes(2));
+    expect(reconcileGoogleCalendarTask).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        id: "matrix-task-a",
+        revision: "001753142500.000000010"
+      }),
+      "Asia/Seoul",
+      expect.any(AbortSignal),
+      undefined,
+      expect.objectContaining({ connectionGeneration: "generation-a" })
+    );
+    await waitFor(() => expect(markScheduleTaskGoogleCalendarSynced).toHaveBeenCalledWith(
+      "matrix-task-a",
+      "user-a",
+      "generation-a",
+      { seconds: 1_753_142_500, nanoseconds: 10 }
+    ));
+  });
+
+  it("upserts the latest revision when a bulk task moves into the past", async () => {
+    const user = userEvent.setup();
+    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "서버 과거 경합 일정");
+    const pastTask: ScheduleTaskSnapshot = {
+      ...datedTask,
+      dueDate: "2020-01-01",
+      startDate: "2020-01-01",
+      endDate: "2020-01-01",
+      calendarUpdatedAt: { seconds: 1_753_142_500, nanoseconds: 11 } as ScheduleTaskSnapshot["calendarUpdatedAt"]
+    };
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([datedTask]);
+      return vi.fn();
+    });
+    vi.mocked(getScheduleTask).mockResolvedValue(pastTask);
+    vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue({
+      configured: true,
+      connected: true,
+      hasStoredConnection: true,
+      needsReconnect: false,
+      connectionGeneration: "generation-a",
+      email: "te***@example.com",
+      lastSyncAt: null,
+      lastSyncStatus: "idle",
+      syncedCount: 0,
+      timeZone: "Asia/Seoul"
+    });
+    vi.mocked(reconcileGoogleCalendarTask)
+      .mockResolvedValueOnce({
+        authorityAfter: "stale",
+        authorityBefore: "stale",
+        result: { eventId: null, outcome: "skipped" }
+      })
+      .mockResolvedValueOnce({
+        authorityAfter: "current",
+        authorityBefore: "current",
+        result: { eventId: "event-a", outcome: "updated" }
       });
 
     renderSchedulePage();
@@ -982,16 +1076,109 @@ describe("SchedulePage quick work panel", () => {
       "Asia/Seoul",
       expect.any(AbortSignal),
       undefined,
-      expect.objectContaining({ connectionGeneration: "generation-a" }),
-      expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/u)
+      expect.objectContaining({ connectionGeneration: "generation-a" })
     );
-    expect(upsertGoogleCalendarTask).not.toHaveBeenCalled();
     await waitFor(() => expect(markScheduleTaskGoogleCalendarSynced).toHaveBeenCalledWith(
       "matrix-task-a",
       "user-a",
       "generation-a",
       { seconds: 1_753_142_500, nanoseconds: 11 }
     ));
+  });
+
+  it("shows a specific permission message when a stale task cannot be reread", async () => {
+    const user = userEvent.setup();
+    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "권한 확인 일정");
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([datedTask]);
+      return vi.fn();
+    });
+    vi.mocked(getScheduleTask).mockRejectedValueOnce({ code: "firestore/permission-denied" });
+    vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue({
+      configured: true,
+      connected: true,
+      hasStoredConnection: true,
+      needsReconnect: false,
+      connectionGeneration: "generation-a",
+      email: "te***@example.com",
+      lastSyncAt: null,
+      lastSyncStatus: "idle",
+      syncedCount: 0,
+      timeZone: "Asia/Seoul"
+    });
+    vi.mocked(reconcileGoogleCalendarTask).mockResolvedValueOnce({
+      authorityAfter: "stale",
+      authorityBefore: "stale",
+      result: { eventId: null, outcome: "skipped" }
+    });
+
+    renderSchedulePage();
+    await user.click(await screen.findByRole("button", { name: "Google Calendar 동기화: 미동기화" }));
+    const dialog = await screen.findByRole("dialog", { name: "Google Calendar 동기화" });
+    await user.click(await within(dialog).findByRole("button", { name: "기존 일정 동기화" }));
+
+    const alert = await within(dialog).findByRole("alert");
+
+    expect(alert).toHaveTextContent("일정의 최신 내용을 읽을 권한이 없습니다. 사용자 활성 상태를 확인해주세요.");
+    expect(alert).not.toHaveTextContent("예상하지 못한 오류");
+    expect(reportGoogleCalendarSync).toHaveBeenCalledWith({
+      failureCode: "permission_denied",
+      status: "failed",
+      syncedCount: 0
+    });
+  });
+
+  it("does not recreate a legacy task that becomes archived during reconciliation", async () => {
+    const user = userEvent.setup();
+    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "보관 경합 일정");
+    const archivedTask = {
+      ...datedTask,
+      status: "archived",
+      calendarUpdatedAt: { seconds: 1_753_142_500, nanoseconds: 12 }
+    } as unknown as ScheduleTaskSnapshot;
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([datedTask]);
+      return vi.fn();
+    });
+    vi.mocked(getScheduleTask).mockResolvedValue(archivedTask);
+    vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue({
+      configured: true,
+      connected: true,
+      hasStoredConnection: true,
+      needsReconnect: false,
+      connectionGeneration: "generation-a",
+      email: "te***@example.com",
+      lastSyncAt: null,
+      lastSyncStatus: "idle",
+      syncedCount: 0,
+      timeZone: "Asia/Seoul"
+    });
+    vi.mocked(reconcileGoogleCalendarTask)
+      .mockResolvedValueOnce({
+        authorityAfter: "deleted",
+        authorityBefore: "current",
+        result: { eventId: "event-a", outcome: "updated" }
+      })
+      .mockResolvedValueOnce({
+        authorityAfter: "deleted",
+        authorityBefore: "deleted",
+        result: { eventId: "event-a", outcome: "deleted", remoteWasPresent: true }
+      });
+
+    renderSchedulePage();
+    await user.click(await screen.findByRole("button", { name: "Google Calendar 동기화: 미동기화" }));
+    const dialog = await screen.findByRole("dialog", { name: "Google Calendar 동기화" });
+
+    cryptoMocks.unwrapNoteKey.mockClear();
+    await user.click(await within(dialog).findByRole("button", { name: "기존 일정 동기화" }));
+
+    await screen.findByText("실행 중 변경된 1개는 안전하게 건너뛰었습니다.");
+    expect(reconcileGoogleCalendarTask).toHaveBeenCalledTimes(2);
+    expect(cryptoMocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(markScheduleTaskGoogleCalendarSynced).not.toHaveBeenCalled();
+    expect(upsertGoogleCalendarTask).not.toHaveBeenCalled();
   });
 
   it("records the latest undated revision after a date-removal race", async () => {
@@ -2479,7 +2666,7 @@ describe("SchedulePage quick work panel", () => {
     expect(upsertGoogleCalendarTask).not.toHaveBeenCalled();
   });
 
-  it("keeps cancellation visible when the latest-task preflight finishes as ineligible", async () => {
+  it("keeps cancellation visible when an authoritative stale-task read finishes", async () => {
     const user = userEvent.setup();
     const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "취소 경합 일정");
     let resolveLatestTask!: (task: ScheduleTaskSnapshot) => void;
@@ -2503,17 +2690,36 @@ describe("SchedulePage quick work panel", () => {
     vi.mocked(getScheduleTask).mockImplementationOnce(() => new Promise((resolve) => {
       resolveLatestTask = resolve;
     }));
+    vi.mocked(reconcileGoogleCalendarTask)
+      .mockResolvedValueOnce({
+        authorityAfter: "stale",
+        authorityBefore: "stale",
+        result: { eventId: null, outcome: "skipped" }
+      })
+      .mockImplementationOnce(async (_task, _timeZone, signal) => {
+        if (signal?.aborted) {
+          throw new GoogleCalendarError("sync_cancelled", "기존 일정 동기화를 취소했습니다.");
+        }
+
+        return {
+          authorityAfter: "current",
+          authorityBefore: "current",
+          result: { eventId: "event-a", outcome: "updated" }
+        };
+      });
 
     renderSchedulePage();
     await user.click(await screen.findByRole("button", { name: "Google Calendar 동기화: 미동기화" }));
     const dialog = await screen.findByRole("dialog", { name: "Google Calendar 동기화" });
     await user.click(await within(dialog).findByRole("button", { name: "기존 일정 동기화" }));
+    await waitFor(() => expect(reconcileGoogleCalendarTask).toHaveBeenCalledOnce());
     await waitFor(() => expect(getScheduleTask).toHaveBeenCalledWith("matrix-task-a"));
     await user.click(within(dialog).getByRole("button", { name: "동기화 취소" }));
     resolveLatestTask({ ...datedTask, status: "completed" });
 
     await waitFor(() => expect(within(dialog).getByText("기존 일정 동기화를 중단했습니다.")).toBeInTheDocument());
-    expect(reconcileGoogleCalendarTask).not.toHaveBeenCalled();
+    expect(reconcileGoogleCalendarTask).toHaveBeenCalledTimes(2);
+    expect(upsertGoogleCalendarTask).not.toHaveBeenCalled();
   });
 
   it("keeps an earlier bulk-sync failure visible when the user cancels a later task", async () => {

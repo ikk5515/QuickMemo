@@ -19,11 +19,13 @@ import type { GoogleCalendarTaskInput } from "./googleCalendar";
 
 const firebaseMocks = vi.hoisted(() => {
   const userA = {
-    getIdToken: vi.fn(async (forceRefresh = false) => forceRefresh ? "firebase-a-refreshed" : "firebase-a"),
+    getIdToken: vi.fn(async (forceRefresh = false): Promise<string> =>
+      forceRefresh ? "firebase-a-refreshed" : "firebase-a"),
     uid: "user-a"
   };
   const userB = {
-    getIdToken: vi.fn(async (forceRefresh = false) => forceRefresh ? "firebase-b-refreshed" : "firebase-b"),
+    getIdToken: vi.fn(async (forceRefresh = false): Promise<string> =>
+      forceRefresh ? "firebase-b-refreshed" : "firebase-b"),
     uid: "user-b"
   };
   const auth: { currentUser: typeof userA | typeof userB | null } = { currentUser: userA };
@@ -392,6 +394,25 @@ describe("Google Calendar event conversion", () => {
     await expect(googleCalendarEventId("user-a", "task-b")).resolves.not.toBe(first);
     expect(first).toMatch(/^qm[0-9a-f]{48}$/u);
   });
+
+  it("keeps the deployed event-id derivation compatible with its golden vector", async () => {
+    await expect(googleCalendarEventId("user-a", "task-a"))
+      .resolves.toBe("qm9ff90b9100050cecc4426133651c8d93647985fad3d11c32");
+  });
+
+  it("normalizes a browser digest failure instead of leaking an unexpected error", async () => {
+    const digestSpy = vi.spyOn(crypto.subtle, "digest")
+      .mockRejectedValueOnce(new Error("digest unavailable"));
+
+    try {
+      await expect(googleCalendarEventId("user-a", "task-a")).rejects.toMatchObject({
+        name: "GoogleCalendarError",
+        code: "client_crypto_unavailable"
+      });
+    } finally {
+      digestSpy.mockRestore();
+    }
+  });
 });
 
 describe("Google Calendar CRUD and conflict handling", () => {
@@ -446,6 +467,50 @@ describe("Google Calendar CRUD and conflict handling", () => {
       connectionGeneration: generationA,
       operationLeaseId: "l".repeat(43)
     });
+  });
+
+  it("reuses the same deterministic id and does not POST a duplicate on a repeated upsert", async () => {
+    const task = activeTask({
+      id: "task-repeat",
+      revision: "001753142401.000000000"
+    });
+    const eventId = await googleCalendarEventId(task.ownerUid, task.id);
+    const fetchMock = installScenario({
+      eventGetResponses: [
+        emptyResponse(404),
+        jsonResponse(quickMemoEventWithRevision(eventId, task.revision as string))
+      ],
+      postResponses: [jsonResponse({}, 201)]
+    });
+
+    await expect(upsertGoogleCalendarTask(task, "Asia/Seoul"))
+      .resolves.toEqual({ eventId, outcome: "created" });
+    await expect(upsertGoogleCalendarTask(task, "Asia/Seoul"))
+      .resolves.toEqual({ eventId, outcome: "skipped" });
+
+    const calls = calendarCalls(fetchMock);
+    expect(calls.map(({ init }) => init.method)).toEqual(["GET", "POST", "GET"]);
+    expect(calls.filter(({ init }) => init.method === "POST")).toHaveLength(1);
+    expect(JSON.parse(String(calls[1].init.body))).toMatchObject({ id: eventId });
+    expect(calls[0].url).toContain(`/events/${eventId}`);
+    expect(calls[2].url).toContain(`/events/${eventId}`);
+  });
+
+  it("normalizes a malformed Google event response as a retryable outage", async () => {
+    const fetchMock = installScenario({
+      eventGetResponses: [new Response("{", {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })]
+    });
+
+    await expect(upsertGoogleCalendarTask(activeTask({ id: "task-invalid-json" }), "Asia/Seoul"))
+      .rejects.toMatchObject({
+        name: "GoogleCalendarError",
+        code: "google_unavailable",
+        retryable: true
+      });
+    expect(calendarCalls(fetchMock).map(({ init }) => init.method)).toEqual(["GET"]);
   });
 
   it("waits for another tab's account operation lease before calling Google", async () => {
@@ -944,6 +1009,62 @@ describe("Google Calendar CRUD and conflict handling", () => {
 });
 
 describe("Google Calendar account and operation race guards", () => {
+  it("normalizes a Firebase token network failure before any backend request", async () => {
+    const fetchMock = installScenario();
+    firebaseMocks.userA.getIdToken.mockRejectedValueOnce({ code: "auth/network-request-failed" });
+
+    await expect(getGoogleCalendarConnectionStatus()).rejects.toMatchObject({
+      name: "GoogleCalendarError",
+      code: "network_error",
+      retryable: true
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("normalizes an expired Firebase token as login_required before any backend request", async () => {
+    const fetchMock = installScenario();
+    firebaseMocks.userA.getIdToken.mockRejectedValueOnce({ code: "auth/user-token-expired" });
+
+    await expect(getGoogleCalendarConnectionStatus()).rejects.toMatchObject({
+      name: "GoogleCalendarError",
+      code: "login_required",
+      retryable: false
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when Firebase returns an empty identity token", async () => {
+    const fetchMock = installScenario();
+    firebaseMocks.userA.getIdToken.mockResolvedValueOnce("");
+
+    await expect(getGoogleCalendarConnectionStatus()).rejects.toMatchObject({
+      name: "GoogleCalendarError",
+      code: "login_required",
+      retryable: false
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reports an account switch during Firebase token loading as login_required", async () => {
+    let resolveToken!: (token: string) => void;
+    const fetchMock = installScenario();
+
+    firebaseMocks.userA.getIdToken.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveToken = resolve;
+    }));
+    const statusRequest = getGoogleCalendarConnectionStatus();
+
+    await vi.waitFor(() => expect(firebaseMocks.userA.getIdToken).toHaveBeenCalledOnce());
+    firebaseMocks.auth.currentUser = firebaseMocks.userB;
+    resolveToken("firebase-a");
+
+    await expect(statusRequest).rejects.toMatchObject({
+      name: "GoogleCalendarError",
+      code: "login_required"
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("accepts only the official Google authorization host with a correlated attempt id", async () => {
     const connectionAttemptId = "a".repeat(43);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

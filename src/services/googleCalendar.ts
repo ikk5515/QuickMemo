@@ -357,6 +357,75 @@ function syncCancelledError() {
   return new GoogleCalendarError("sync_cancelled", "기존 일정 동기화를 취소했습니다.");
 }
 
+function firebaseAuthErrorCode(caught: unknown) {
+  if (!caught || typeof caught !== "object") {
+    return "";
+  }
+
+  const code = (caught as { code?: unknown }).code;
+
+  return typeof code === "string" ? code : "";
+}
+
+function googleCalendarFirebaseTokenError(caught: unknown) {
+  if (caught instanceof GoogleCalendarError) {
+    if (caught.code === "login_required") {
+      invalidateGoogleCalendarSession();
+    }
+    return caught;
+  }
+
+  const code = firebaseAuthErrorCode(caught);
+
+  if (code === "auth/network-request-failed" || code === "auth/timeout") {
+    return new GoogleCalendarError(
+      "network_error",
+      "QuickMemo 로그인 상태를 확인할 수 없습니다. 네트워크를 확인한 뒤 다시 시도해주세요.",
+      true
+    );
+  }
+
+  // Firebase can keep the app shell mounted after its refresh credential has
+  // expired. Fail closed before any Calendar request and ask for a fresh app
+  // login instead of surfacing a raw SDK error or retrying with stale identity.
+  invalidateGoogleCalendarSession();
+  return new GoogleCalendarError(
+    "login_required",
+    "QuickMemo 로그인 확인이 만료되었습니다. 다시 로그인한 뒤 Google Calendar 동기화를 시도해주세요."
+  );
+}
+
+async function getFirebaseCalendarIdToken(
+  user: FirebaseCalendarUser,
+  forceRefresh: boolean,
+  signal: AbortSignal
+) {
+  throwIfBackendRequestAborted(signal);
+
+  try {
+    const token = await user.getIdToken(forceRefresh);
+
+    throwIfBackendRequestAborted(signal);
+    assertFirebaseUser(user);
+    if (typeof token !== "string" || !token) {
+      throw new GoogleCalendarError(
+        "login_required",
+        "QuickMemo 로그인 확인이 만료되었습니다. 다시 로그인해주세요."
+      );
+    }
+    return token;
+  } catch (caught) {
+    if (auth.currentUser !== user || auth.currentUser?.uid !== user.uid) {
+      invalidateGoogleCalendarSession();
+      throw new GoogleCalendarError("login_required", "QuickMemo 계정이 변경되었습니다. 다시 시도해주세요.");
+    }
+    if (signal.aborted) {
+      throw syncCancelledError();
+    }
+    throw googleCalendarFirebaseTokenError(caught);
+  }
+}
+
 function combineGoogleCalendarAbortSignals(...signals: Array<AbortSignal | undefined>) {
   const uniqueSignals = [...new Set(signals.filter((signal): signal is AbortSignal => Boolean(signal)))];
 
@@ -473,9 +542,7 @@ async function backendRequest<T>(
   try {
     throwIfBackendRequestAborted(combinedSignal.signal);
     assertFirebaseUser(requestUser);
-    const idToken = await requestUser.getIdToken(false);
-    throwIfBackendRequestAborted(combinedSignal.signal);
-    assertFirebaseUser(requestUser);
+    const idToken = await getFirebaseCalendarIdToken(requestUser, false, combinedSignal.signal);
     let result = await fetchGoogleCalendarBackend(
       path,
       body,
@@ -486,9 +553,7 @@ async function backendRequest<T>(
     if (result.response.status === 401 && retryAuth) {
       throwIfBackendRequestAborted(combinedSignal.signal);
       assertFirebaseUser(requestUser);
-      const refreshedToken = await requestUser.getIdToken(true);
-      throwIfBackendRequestAborted(combinedSignal.signal);
-      assertFirebaseUser(requestUser);
+      const refreshedToken = await getFirebaseCalendarIdToken(requestUser, true, combinedSignal.signal);
       result = await fetchGoogleCalendarBackend(
         path,
         body,
@@ -1209,7 +1274,16 @@ function hexDigest(bytes: ArrayBuffer) {
 
 export async function googleCalendarEventId(ownerUid: string, taskId: string) {
   const identifier = `${ownerUid}:${taskId}`;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identifier));
+  let digest: ArrayBuffer;
+
+  try {
+    digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identifier));
+  } catch {
+    throw new GoogleCalendarError(
+      "client_crypto_unavailable",
+      "Google Calendar 일정의 중복 방지 식별자를 안전하게 만들지 못했습니다. 보안 연결을 확인한 뒤 다시 시도해주세요."
+    );
+  }
 
   // Google event ids allow base32hex characters (0-9, a-v). Hex is a strict subset.
   return `qm${hexDigest(digest).slice(0, 48)}`;
@@ -1346,7 +1420,20 @@ async function readGoogleCalendarEvent(
     throw await googleCalendarResponseError(response);
   }
 
-  return response.json() as Promise<GoogleCalendarEventResource>;
+  try {
+    const payload = await response.json() as unknown;
+
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid Google Calendar event payload");
+    }
+    return payload as GoogleCalendarEventResource;
+  } catch {
+    throw new GoogleCalendarError(
+      "google_unavailable",
+      "Google Calendar 응답을 확인하지 못했습니다. 잠시 후 다시 시도해주세요.",
+      true
+    );
+  }
 }
 
 async function deleteGoogleCalendarTaskNow(
