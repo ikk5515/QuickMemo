@@ -14,6 +14,9 @@ const firestoreMocks = vi.hoisted(() => ({
   query: vi.fn((...parts: unknown[]) => ({ queryParts: parts })),
   serverTimestamp: vi.fn(() => ({ __type: "serverTimestamp" })),
   setDoc: vi.fn(),
+  Timestamp: class Timestamp {
+    constructor(readonly seconds: number, readonly nanoseconds: number) {}
+  },
   where: vi.fn((...parts: unknown[]) => ({ whereParts: parts }))
 }));
 
@@ -25,6 +28,7 @@ vi.mock("firebase/firestore", () => ({
   query: firestoreMocks.query,
   serverTimestamp: firestoreMocks.serverTimestamp,
   setDoc: firestoreMocks.setDoc,
+  Timestamp: firestoreMocks.Timestamp,
   where: firestoreMocks.where
 }));
 
@@ -89,13 +93,15 @@ describe("Google Calendar task sync receipts", () => {
   it("writes only owner, generation, and revision metadata", async () => {
     await markScheduleTaskGoogleCalendarSynced("task-a", "user-a", generation, updatedAt);
 
+    expect(firestoreMocks.setDoc.mock.calls[0]?.[1].taskUpdatedAt)
+      .toBeInstanceOf(firestoreMocks.Timestamp);
     expect(firestoreMocks.setDoc).toHaveBeenCalledWith(
       { parts: [firestoreMocks.db, "googleCalendarTaskSyncReceipts", "task-a"] },
       {
         ownerUid: "user-a",
         taskId: "task-a",
         connectionGeneration: generation,
-        taskUpdatedAt: updatedAt,
+        taskUpdatedAt: new firestoreMocks.Timestamp(updatedAt.seconds, updatedAt.nanoseconds),
         syncedAt: { __type: "serverTimestamp" }
       }
     );

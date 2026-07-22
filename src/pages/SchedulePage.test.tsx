@@ -1399,7 +1399,10 @@ describe("SchedulePage quick work panel", () => {
     await user.type(within(createDialog).getByPlaceholderText("일정 제목"), "영수증 충돌 일정");
     await user.click(createDialog.querySelector<HTMLButtonElement>('button[type="submit"]')!);
 
-    expect(await screen.findByText(/동기화 상태를 저장하지 못했습니다/u)).toBeInTheDocument();
+    expect(await screen.findByText(/^Google 일정은 반영했지만 동기화 상태를 저장하지 못했습니다/u))
+      .toBeInTheDocument();
+    expect(screen.queryByText(/Google Calendar에는 반영하지 못했습니다.*Google 일정은 반영했지만/u))
+      .not.toBeInTheDocument();
     expect(getScheduleTask).toHaveBeenCalledTimes(1);
     expect(markScheduleTaskGoogleCalendarSynced).toHaveBeenCalledWith(
       "new-task",

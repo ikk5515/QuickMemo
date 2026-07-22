@@ -1372,6 +1372,13 @@ describeRules("firestore security rules", () => {
       "googleCalendarTaskSyncReceipts/task-calendar-projection"
     );
 
+    await assertFails(setDoc(projectedReceiptRef, {
+      ...receipt("task-calendar-projection", calendarRevision),
+      taskUpdatedAt: {
+        seconds: Math.floor(calendarRevision.getTime() / 1000),
+        nanoseconds: 0
+      }
+    }));
     await assertSucceeds(setDoc(
       projectedReceiptRef,
       receipt("task-calendar-projection", calendarRevision)

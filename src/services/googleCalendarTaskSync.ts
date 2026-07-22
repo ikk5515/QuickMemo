@@ -5,9 +5,9 @@ import {
   query,
   serverTimestamp,
   setDoc,
+  Timestamp,
   where,
   type DocumentData,
-  type Timestamp
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
 
@@ -144,7 +144,10 @@ export async function markScheduleTaskGoogleCalendarSynced(
     ownerUid,
     taskId,
     connectionGeneration,
-    taskUpdatedAt: expectedUpdatedAt,
+    // Reconstructed Calendar revisions are plain seconds/nanoseconds values.
+    // Normalize them back to a native Firestore Timestamp so the owner-only
+    // receipt rules can validate the field with `is timestamp`.
+    taskUpdatedAt: new Timestamp(expectedUpdatedAt.seconds, expectedUpdatedAt.nanoseconds),
     syncedAt: serverTimestamp()
   });
 }

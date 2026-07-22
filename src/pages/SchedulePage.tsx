@@ -2440,10 +2440,14 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         }
         return { kind: "synced", syncedCount: result.outcome === "skipped" ? 0 : 1 };
       } catch (caught) {
+        const warning = caught instanceof GoogleCalendarError && caught.code === "sync_receipt_failed"
+          ? caught.message
+          : `일정은 QuickMemo에 저장했지만 Google Calendar에는 반영하지 못했습니다. ${googleCalendarErrorMessage(caught)}`;
+
         return {
           kind: "failed",
           caught,
-          warning: `일정은 QuickMemo에 저장했지만 Google Calendar에는 반영하지 못했습니다. ${googleCalendarErrorMessage(caught)}`
+          warning
         };
       }
     } finally {
