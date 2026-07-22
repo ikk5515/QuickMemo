@@ -340,6 +340,36 @@ describe("LibraryPage", () => {
     expect(screen.getByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
   });
 
+  it("separates links and files with one synchronized, accessible type filter", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const linkItem = await screen.findByRole("button", { name: "보안 가이드 열기" });
+    expect(await screen.findByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
+    await user.click(linkItem);
+    expect(screen.getByRole("heading", { name: "보안 가이드" })).toBeInTheDocument();
+
+    const kindNavigation = screen.getByRole("navigation", { name: "자료 유형" });
+    const linkFilter = within(kindNavigation).getByRole("button", { name: /^링크\s*1$/ });
+    const fileFilter = within(kindNavigation).getByRole("button", { name: /^파일\s*1$/ });
+    await user.click(fileFilter);
+
+    expect(fileFilter).toHaveAttribute("aria-pressed", "true");
+    expect(linkFilter).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "보안 가이드" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^필터/ }));
+    const kindSelect = screen.getByRole("combobox", { name: "종류" });
+    expect(kindSelect).toHaveValue("attachment");
+    await user.selectOptions(kindSelect, "link");
+
+    expect(linkFilter).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "보안 가이드 열기" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "운영-체크리스트.pdf 열기" })).not.toBeInTheDocument();
+  });
+
   it("re-decrypts a deterministic document id after delete and recreate at the same revision", async () => {
     serviceMocks.decryptLibraryItems.mockImplementation(async (items) => ({
       failedItemIds: [],

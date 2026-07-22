@@ -1,12 +1,14 @@
 import {
   collection,
   doc,
+  getDoc,
   limit as queryLimit,
   onSnapshot,
   orderBy,
   query,
   runTransaction,
   serverTimestamp,
+  setDoc,
   where
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
@@ -133,6 +135,15 @@ function validateCreateInput(input: CreateLibraryItemInput, content: LibraryItem
   if (input.captureSource === "attachment-ocr" && input.kind !== "attachment") {
     throw new Error("첨부파일 OCR 자료의 종류를 확인할 수 없습니다.");
   }
+}
+
+function isPermissionDenied(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) {
+    return false;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  return code === "permission-denied" || code === "firestore/permission-denied";
 }
 
 async function getOrCreateLibraryVaultKey(
@@ -283,14 +294,8 @@ export async function createLibraryItem(input: CreateLibraryItemInput) {
   const lastMutationId = nextLibraryId();
   const status = validStatuses.has(input.status as LibraryItemStatus) ? (input.status as LibraryItemStatus) : "inbox";
 
-  await runTransaction(db, async (transaction) => {
-    const existing = await transaction.get(reference);
-
-    if (existing.exists()) {
-      throw new DuplicateLibraryItemError(existing.id);
-    }
-
-    transaction.set(reference, {
+  try {
+    await setDoc(reference, {
       ownerUid: input.uid,
       generationId,
       kind: input.kind,
@@ -310,7 +315,29 @@ export async function createLibraryItem(input: CreateLibraryItemInput) {
       lastOpenedAt: null,
       lastReviewedAt: null
     });
-  });
+  } catch (writeError) {
+    if (!isPermissionDenied(writeError)) {
+      throw writeError;
+    }
+
+    try {
+      const existing = await getDoc(reference);
+
+      if (existing.exists()) {
+        const value = existing.data() as Partial<LibraryItemDocument>;
+
+        if (value.ownerUid === input.uid) {
+          throw new DuplicateLibraryItemError(existing.id);
+        }
+      }
+    } catch (lookupError) {
+      if (lookupError instanceof DuplicateLibraryItemError) {
+        throw lookupError;
+      }
+    }
+
+    throw writeError;
+  }
 
   return { content, id: itemId, itemKey, lastMutationId, revision: 1 };
 }

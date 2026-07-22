@@ -58,6 +58,10 @@ service cloud.firestore {
       return /databases/$(database)/documents/googleCalendarConnections/$(uid);
     }
 
+    function libraryVaultPath(uid) {
+      return /databases/$(database)/documents/libraryVaults/$(uid);
+    }
+
     function noteHistoryPath(noteId, historyId) {
       return /databases/$(database)/documents/notes/$(noteId)/history/$(historyId);
     }
@@ -2268,9 +2272,13 @@ service cloud.firestore {
     }
 
     match /libraryVaults/{uid} {
-      allow read: if activeSignedInUser()
+      allow get: if activeSignedInUser()
         && request.auth.uid == uid
-        && resource.data.ownerUid == uid;
+        && (
+          !exists(libraryVaultPath(uid))
+          || resource.data.ownerUid == uid
+        );
+      allow list: if false;
       allow create: if activeSignedInUser()
         && request.auth.uid == uid
         && validLibraryVault(request.resource.data, uid)

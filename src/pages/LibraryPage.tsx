@@ -221,7 +221,7 @@ const statusLabels: Record<LibraryItemStatus, string> = {
 const kindLabels: Record<LibraryItemKind, string> = {
   link: "링크",
   clip: "클립",
-  attachment: "첨부파일"
+  attachment: "파일"
 };
 const initialAttachmentNoteLimit = 80;
 const attachmentNoteLimitStep = 80;
@@ -495,22 +495,22 @@ function readerBlockElement(kind: LibraryReaderBlockKind, children: ReactNode, c
   const common = { className, "data-library-reader-block-id": blockId };
 
   if (kind === "heading") {
-    return <h3 {...common}>{children}</h3>;
+    return <h3 {...common} key={blockId}>{children}</h3>;
   }
 
   if (kind === "quote") {
-    return <blockquote {...common}>{children}</blockquote>;
+    return <blockquote {...common} key={blockId}>{children}</blockquote>;
   }
 
   if (kind === "list-item") {
-    return <p {...common} className={`${className} list-item`}>{children}</p>;
+    return <p {...common} className={`${className} list-item`} key={blockId}>{children}</p>;
   }
 
   if (kind === "code") {
-    return <pre {...common}>{children}</pre>;
+    return <pre {...common} key={blockId}>{children}</pre>;
   }
 
-  return <p {...common}>{children}</p>;
+  return <p {...common} key={blockId}>{children}</p>;
 }
 
 function highlightedBlockText(block: LibraryReaderBlock, highlights: LibraryHighlight[]) {
@@ -1265,9 +1265,9 @@ export default function LibraryPage() {
       : new Map<string, string>(),
     [allViewItems, searchActive]
   );
-  const filteredItems = useMemo(() => {
+  const kindFacetItems = useMemo(() => {
     const today = todayStartMillis();
-    const nextItems = allViewItems.filter((item) => {
+    return allViewItems.filter((item) => {
       if (quickView === "all" && statusFilter !== "archived" && viewItemStatus(item) === "archived") {
         return false;
       }
@@ -1290,10 +1290,6 @@ export default function LibraryPage() {
         return false;
       }
 
-      if (kindFilter !== "all" && viewItemKind(item) !== kindFilter) {
-        return false;
-      }
-
       if (statusFilter !== "all" && viewItemStatus(item) !== statusFilter) {
         return false;
       }
@@ -1308,6 +1304,33 @@ export default function LibraryPage() {
 
       return tagFilter === "all" || viewItemTags(item).includes(tagFilter);
     });
+  }, [
+    allViewItems,
+    collectionFilter,
+    favoriteOnly,
+    normalizedQuery,
+    quickView,
+    searchTextById,
+    statusFilter,
+    tagFilter
+  ]);
+  const kindFacetCounts = useMemo<Record<LibraryKindFilter, number>>(() => {
+    const counts: Record<LibraryKindFilter, number> = {
+      all: kindFacetItems.length,
+      attachment: 0,
+      clip: 0,
+      link: 0
+    };
+
+    kindFacetItems.forEach((item) => {
+      counts[viewItemKind(item)] += 1;
+    });
+    return counts;
+  }, [kindFacetItems]);
+  const filteredItems = useMemo(() => {
+    const nextItems = kindFilter === "all"
+      ? [...kindFacetItems]
+      : kindFacetItems.filter((item) => viewItemKind(item) === kindFilter);
 
     return nextItems.sort((left, right) => {
       if (sort === "title") {
@@ -1327,16 +1350,9 @@ export default function LibraryPage() {
       return viewItemUpdatedAt(right) - viewItemUpdatedAt(left);
     });
   }, [
-    allViewItems,
-    collectionFilter,
-    favoriteOnly,
+    kindFacetItems,
     kindFilter,
-    normalizedQuery,
-    quickView,
-    searchTextById,
-    sort,
-    statusFilter,
-    tagFilter
+    sort
   ]);
   const selectedItem = useMemo(
     () => allViewItems.find((item) => item.id === selectedId) ?? null,
@@ -1408,6 +1424,15 @@ export default function LibraryPage() {
       setStatusMessage("원본 자료의 접근 권한이 변경되어 목록에서 제거했습니다.");
     }
   }, [selectedId, selectedItem]);
+
+  useEffect(() => {
+    if (selectedId && selectedItem && !filteredItems.some((item) => item.id === selectedId)) {
+      setSelectedId(null);
+      setAttachmentText(null);
+      closeAttachmentPreview();
+      setStatusMessage("선택한 자료가 현재 보기에서 제외되어 리더를 닫았습니다.");
+    }
+  }, [filteredItems, selectedId, selectedItem]);
 
   useEffect(() => {
     if (!currentUid || !selectedManagedSourceNoteId) {
@@ -1717,6 +1742,7 @@ export default function LibraryPage() {
       setCaptureDraft(emptyCaptureDraft);
       setCaptureOpen(false);
       setQuickView("all");
+      setKindFilter(captureDraft.kind);
       setStatusMessage(captureDraft.kind === "link" ? "링크를 암호화해 저장했습니다." : "클립을 암호화해 저장했습니다.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "자료를 저장하지 못했습니다.");
@@ -2102,6 +2128,7 @@ export default function LibraryPage() {
         });
         setSelectedId(null);
         setQuickView("all");
+        setKindFilter("attachment");
         setStatusMessage(completionMessage);
       }
     } catch (caught) {
@@ -2306,6 +2333,8 @@ export default function LibraryPage() {
             attachmentCount={virtualAttachments.length}
             collections={collections}
             favoriteCount={libraryItems.filter((item) => item.isFavorite).length}
+            kindFacetCounts={kindFacetCounts}
+            kindFilter={kindFilter}
             itemCount={allViewItems.filter((item) => viewItemStatus(item) !== "archived").length}
             quickView={quickView}
             reviewCount={reviewCount}
@@ -2314,6 +2343,7 @@ export default function LibraryPage() {
               setCollectionFilter(collection);
               setQuickView("all");
             }}
+            onKindFilterChange={setKindFilter}
             onQuickViewChange={(view) => {
               setQuickView(view);
               if (view === "archived") {
@@ -2546,7 +2576,7 @@ function LibraryFilterPanel({
           <option value="all">전체 종류</option>
           <option value="link">링크</option>
           <option value="clip">클립</option>
-          <option value="attachment">첨부파일</option>
+          <option value="attachment">파일</option>
         </select>
       </label>
       <label>
@@ -2589,7 +2619,10 @@ function LibrarySidebar({
   collections,
   favoriteCount,
   itemCount,
+  kindFacetCounts,
+  kindFilter,
   onCollectionSelect,
+  onKindFilterChange,
   onQuickViewChange,
   quickView,
   reviewCount,
@@ -2599,7 +2632,10 @@ function LibrarySidebar({
   collections: string[];
   favoriteCount: number;
   itemCount: number;
+  kindFacetCounts: Record<LibraryKindFilter, number>;
+  kindFilter: LibraryKindFilter;
   onCollectionSelect: (collection: string) => void;
+  onKindFilterChange: (kind: LibraryKindFilter) => void;
   onQuickViewChange: (view: LibraryQuickView) => void;
   quickView: LibraryQuickView;
   reviewCount: number;
@@ -2610,6 +2646,12 @@ function LibrarySidebar({
     { count: reviewCount, Icon: BookOpenCheck, id: "today", label: "오늘의 리뷰" },
     { count: favoriteCount, Icon: Star, id: "favorites", label: "즐겨찾기" },
     { count: 0, Icon: Archive, id: "archived", label: "보관함" }
+  ];
+  const kindViews: Array<{ Icon: typeof Inbox; id: LibraryKindFilter; label: string }> = [
+    { Icon: LibraryBig, id: "all", label: "전체" },
+    { Icon: Link2, id: "link", label: "링크" },
+    { Icon: File, id: "attachment", label: "파일" },
+    { Icon: FileText, id: "clip", label: "클립" }
   ];
 
   return (
@@ -2627,6 +2669,22 @@ function LibrarySidebar({
             <Icon aria-hidden="true" size={17} />
             <span>{label}</span>
             {id !== "archived" && <em>{count}</em>}
+          </button>
+        ))}
+      </nav>
+      <nav aria-label="자료 유형" className="library-sidebar-kind-nav">
+        <span className="library-sidebar-label">자료 유형</span>
+        {kindViews.map(({ Icon, id, label }) => (
+          <button
+            aria-pressed={kindFilter === id}
+            className={kindFilter === id ? "active" : ""}
+            key={id}
+            onClick={() => onKindFilterChange(id)}
+            type="button"
+          >
+            <Icon aria-hidden="true" size={17} />
+            <span>{label}</span>
+            <em>{kindFacetCounts[id]}</em>
           </button>
         ))}
       </nav>

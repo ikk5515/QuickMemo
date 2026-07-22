@@ -983,6 +983,33 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(deleteDoc(itemRef));
   });
 
+  it("keeps missing library item reads private while allowing create-first deterministic writes", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const itemRef = doc(ownerDb, "libraryItems/link-deterministic");
+
+    await assertFails(runTransaction(ownerDb, async (transaction) => {
+      const snapshot = await transaction.get(itemRef);
+
+      if (!snapshot.exists()) {
+        transaction.set(itemRef, libraryItem("user-a"));
+      }
+    }));
+    await assertSucceeds(setDoc(itemRef, libraryItem("user-a")));
+    await assertFails(setDoc(itemRef, libraryItem("user-a")));
+    await assertSucceeds(getDoc(itemRef));
+    await assertFails(getDoc(doc(otherDb, "libraryItems/link-deterministic")));
+    await assertFails(setDoc(
+      doc(otherDb, "libraryItems/link-deterministic"),
+      libraryItem("user-b")
+    ));
+  });
+
   it("only lets a note owner persist an OCR copy of an existing ready attachment", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();
@@ -1189,8 +1216,17 @@ describeRules("firestore security rules", () => {
     const inactiveDb = testEnv.authenticatedContext("user-inactive").firestore();
     const vaultRef = doc(ownerDb, "libraryVaults/user-a");
 
-    await assertSucceeds(setDoc(vaultRef, libraryVault("user-a")));
+    const missingVault = await assertSucceeds(getDoc(vaultRef));
+    expect(missingVault.exists()).toBe(false);
+    await assertSucceeds(runTransaction(ownerDb, async (transaction) => {
+      const snapshot = await transaction.get(vaultRef);
+
+      if (!snapshot.exists()) {
+        transaction.set(vaultRef, libraryVault("user-a"));
+      }
+    }));
     await assertSucceeds(getDoc(vaultRef));
+    await assertFails(getDocs(collection(ownerDb, "libraryVaults")));
     await assertFails(getDoc(doc(outsiderDb, "libraryVaults/user-a")));
     await assertFails(getDoc(doc(adminDb, "libraryVaults/user-a")));
     await assertFails(setDoc(doc(outsiderDb, "libraryVaults/user-a"), libraryVault("user-a")));
