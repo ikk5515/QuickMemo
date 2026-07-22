@@ -1004,6 +1004,7 @@ describeRules("firestore security rules", () => {
         startTimeMinutes: 540,
         endTimeMinutes: 600,
         isUrgent: true,
+        calendarUpdatedAt: serverTimestamp(),
         updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })
@@ -1013,6 +1014,7 @@ describeRules("firestore security rules", () => {
         dueDate: "2026-01-01",
         startDate: "2026-01-01",
         endDate: "2026-12-31",
+        calendarUpdatedAt: serverTimestamp(),
         updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })
@@ -1022,6 +1024,7 @@ describeRules("firestore security rules", () => {
         dueDate: "2028-02-29",
         startDate: "2028-02-29",
         endDate: "2028-02-29",
+        calendarUpdatedAt: serverTimestamp(),
         updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })
@@ -1034,6 +1037,7 @@ describeRules("firestore security rules", () => {
         endDate: null,
         startTimeMinutes: null,
         endTimeMinutes: null,
+        calendarUpdatedAt: serverTimestamp(),
         updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })
@@ -1043,6 +1047,14 @@ describeRules("firestore security rules", () => {
         dueDate: "2026-99-99",
         startDate: "2026-99-99",
         endDate: "2026-99-99",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+        dueDate: deleteField(),
+        calendarUpdatedAt: serverTimestamp(),
+        updatedBy: "user-a",
         updatedAt: serverTimestamp()
       })
     );
@@ -1124,8 +1136,41 @@ describeRules("firestore security rules", () => {
       doc(ownerDb, "scheduleTasks/task-calendar-invalid"),
       scheduleTask("user-a", { calendarUpdatedAt: "not-a-timestamp" })
     ));
-    await assertSucceeds(updateDoc(legacyRef, {
+    await assertFails(updateDoc(legacyRef, {
       calendarUpdatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(legacyRef, {
+      dueDate: "2026-05-20",
+      startDate: "2026-05-20",
+      endDate: "2026-05-20",
+      calendarUpdatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(projectedRef, {
+      calendarUpdatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(projectedRef, {
+      dueDate: "2026-05-20",
+      startDate: "2026-05-20",
+      endDate: "2026-05-20",
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(projectedRef, {
+      dueDate: "2026-05-20",
+      startDate: "2026-05-20",
+      endDate: "2026-05-20",
+      calendarUpdatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(projectedRef, {
+      progressPercent: 10,
       updatedBy: "user-a",
       updatedAt: serverTimestamp()
     }));

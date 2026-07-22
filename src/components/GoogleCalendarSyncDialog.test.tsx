@@ -97,6 +97,26 @@ describe("GoogleCalendarSyncDialog", () => {
     rerender(
       <GoogleCalendarSyncDialog
         {...props}
+        backgroundSyncPendingCount={2}
+        connection={connectedConnection}
+      />
+    );
+    expect(topStatusBadge()).toHaveTextContent("동기화 중");
+    expect(topStatusBadge()).toHaveClass("syncing");
+
+    rerender(
+      <GoogleCalendarSyncDialog
+        {...props}
+        connection={connectedConnection}
+        operation="syncing"
+      />
+    );
+    expect(topStatusBadge()).toHaveTextContent("동기화 중");
+    expect(topStatusBadge()).toHaveClass("syncing");
+
+    rerender(
+      <GoogleCalendarSyncDialog
+        {...props}
         connection={{ ...connectedConnection, lastSyncStatus: "failed" }}
       />
     );

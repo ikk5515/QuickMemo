@@ -7,10 +7,12 @@ import {
   authenticateActiveUser,
   beginGoogleCalendarDeletionWorkflow,
   beginGoogleCalendarOperation,
+  beginGoogleCalendarTaskOperation,
   disconnectGoogleCalendar,
   endGoogleCalendarDeletionWorkflow,
   endGoogleCalendarOperation,
   ensureSameOrigin,
+  finishGoogleCalendarTaskOperation,
   getGoogleConnection,
   getGoogleCalendarTaskAuthority,
   googleCalendarConfig,
@@ -82,6 +84,25 @@ async function handlePost(request, response) {
     return;
   }
 
+  if (body.action === "begin-task-operation") {
+    assertOnlyKeys(body, [
+      "action",
+      "taskId",
+      "revision",
+      "connectionGeneration",
+      "deletionWorkflowLeaseId"
+    ]);
+    const operation = await beginGoogleCalendarTaskOperation(
+      context,
+      body.connectionGeneration,
+      body.taskId,
+      body.revision,
+      body.deletionWorkflowLeaseId ?? null
+    );
+    jsonResponse(response, 200, { ok: true, ...operation });
+    return;
+  }
+
   if (body.action === "begin-deletion-workflow") {
     assertOnlyKeys(body, ["action", "connectionGeneration"]);
     const workflow = await beginGoogleCalendarDeletionWorkflow(context, body.connectionGeneration);
@@ -93,6 +114,25 @@ async function handlePost(request, response) {
     assertOnlyKeys(body, ["action", "connectionGeneration", "operationLeaseId"]);
     await endGoogleCalendarOperation(context, body.connectionGeneration, body.operationLeaseId);
     jsonResponse(response, 200, { ok: true });
+    return;
+  }
+
+  if (body.action === "finish-task-operation") {
+    assertOnlyKeys(body, [
+      "action",
+      "taskId",
+      "revision",
+      "connectionGeneration",
+      "operationLeaseId"
+    ]);
+    const state = await finishGoogleCalendarTaskOperation(
+      context,
+      body.connectionGeneration,
+      body.operationLeaseId,
+      body.taskId,
+      body.revision
+    );
+    jsonResponse(response, 200, { ok: true, state });
     return;
   }
 

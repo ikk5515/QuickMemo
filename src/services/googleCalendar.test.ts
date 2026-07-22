@@ -9,6 +9,7 @@ import {
   getGoogleCalendarConnectionStatus,
   getGoogleCalendarTaskAuthority,
   googleCalendarEventId,
+  reconcileGoogleCalendarTask,
   reportGoogleCalendarSync,
   renewGoogleCalendarDeletionWorkflow,
   startGoogleCalendarConnection,
@@ -41,12 +42,16 @@ const generationB = "b".repeat(43);
 interface ScenarioOptions {
   authorityResponses?: ResponseFactory[];
   beginOperationResponses?: ResponseFactory[];
+  beginTaskOperationResponses?: ResponseFactory[];
   deleteResponses?: ResponseFactory[];
+  endOperationResponses?: ResponseFactory[];
   eventGetResponses?: ResponseFactory[];
+  reportResponses?: ResponseFactory[];
   patchResponses?: ResponseFactory[];
   postResponses?: ResponseFactory[];
   statusGenerations?: string[];
   statusResponses?: ResponseFactory[];
+  finishTaskOperationResponses?: ResponseFactory[];
   tokenGenerations?: string[];
   tokens?: string[];
   validateResponses?: ResponseFactory[];
@@ -75,12 +80,16 @@ async function resolveFactory(factory: ResponseFactory | undefined, fallback: ()
 function installScenario(options: ScenarioOptions = {}) {
   const authorities = [...(options.authorityResponses ?? [])];
   const beginOperations = [...(options.beginOperationResponses ?? [])];
+  const beginTaskOperations = [...(options.beginTaskOperationResponses ?? [])];
   const eventGets = [...(options.eventGetResponses ?? [])];
+  const endOperations = [...(options.endOperationResponses ?? [])];
+  const reports = [...(options.reportResponses ?? [])];
   const posts = [...(options.postResponses ?? [])];
   const patches = [...(options.patchResponses ?? [])];
   const deletes = [...(options.deleteResponses ?? [])];
   const statusGenerations = [...(options.statusGenerations ?? [generationA])];
   const statusResponses = [...(options.statusResponses ?? [])];
+  const finishTaskOperations = [...(options.finishTaskOperationResponses ?? [])];
   const tokenGenerations = [...(options.tokenGenerations ?? [generationA])];
   const tokens = [...(options.tokens ?? ["google-token-a"])];
   const validations = [...(options.validateResponses ?? [])];
@@ -117,6 +126,15 @@ function installScenario(options: ScenarioOptions = {}) {
         }));
       }
 
+      if (body.action === "begin-task-operation") {
+        return resolveFactory(beginTaskOperations.shift(), () => jsonResponse({
+          ok: true,
+          state: "current",
+          connectionGeneration: body.connectionGeneration ?? generationA,
+          leaseId: "l".repeat(43)
+        }));
+      }
+
       if (body.action === "begin-deletion-workflow") {
         return jsonResponse({
           ok: true,
@@ -133,7 +151,18 @@ function installScenario(options: ScenarioOptions = {}) {
         });
       }
 
-      if (body.action === "end-operation" || body.action === "end-deletion-workflow") {
+      if (body.action === "finish-task-operation") {
+        return resolveFactory(finishTaskOperations.shift(), () => jsonResponse({
+          ok: true,
+          state: "current"
+        }));
+      }
+
+      if (body.action === "end-operation") {
+        return resolveFactory(endOperations.shift(), () => jsonResponse({ ok: true }));
+      }
+
+      if (body.action === "end-deletion-workflow") {
         return jsonResponse({ ok: true });
       }
 
@@ -154,6 +183,10 @@ function installScenario(options: ScenarioOptions = {}) {
 
       if (body.action === "task-authority") {
         return resolveFactory(authorities.shift(), () => jsonResponse({ ok: true, state: "current" }));
+      }
+
+      if (body.action === "report") {
+        return resolveFactory(reports.shift(), () => jsonResponse({ ok: true }));
       }
 
       return jsonResponse({ ok: true });
@@ -972,6 +1005,49 @@ describe("Google Calendar account and operation race guards", () => {
     });
   });
 
+  it("does not let a stale task-authority response invalidate the new user session", async () => {
+    let resolveUserAAuthority: ((response: Response) => void) | undefined;
+    const userAAuthorityResponse = new Promise<Response>((resolve) => {
+      resolveUserAAuthority = resolve;
+    });
+    const fetchMock = installScenario({
+      authorityResponses: [() => userAAuthorityResponse],
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)],
+      statusGenerations: [generationB],
+      tokenGenerations: [generationB],
+      tokens: ["google-token-b"]
+    });
+    const staleUserAAuthority = getGoogleCalendarTaskAuthority({
+      id: "task-user-a-stale-authority",
+      ownerUid: "user-a",
+      revision: null
+    });
+    const staleUserAExpectation = expect(staleUserAAuthority).rejects.toMatchObject({
+      code: "sync_cancelled"
+    });
+    await vi.waitFor(() => expect(
+      backendActions(fetchMock).filter(({ action }) => action === "task-authority")
+    ).toHaveLength(1));
+
+    firebaseMocks.auth.currentUser = firebaseMocks.userB;
+    clearGoogleCalendarSession();
+    const userBStatus = await getGoogleCalendarConnectionStatus();
+
+    resolveUserAAuthority?.(jsonResponse({ ok: true, state: "current" }));
+    await staleUserAExpectation;
+    await expect(upsertGoogleCalendarTask(
+      activeTask({ id: "task-user-b-after-stale-authority", ownerUid: "user-b" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      userBStatus
+    )).resolves.toMatchObject({ outcome: "created" });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(1);
+    expect(backendActions(fetchMock).find(({ action }) => action === "access-token"))
+      .toMatchObject({ connectionGeneration: generationB });
+  });
+
   it("fails closed for malformed or cross-user authority responses", async () => {
     installScenario({
       authorityResponses: [jsonResponse({ ok: true, state: "unexpected" })]
@@ -990,6 +1066,192 @@ describe("Google Calendar account and operation race guards", () => {
       revision: null
     }), "permission_denied");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("combines task authority, lease acquisition, mutation, and finish without duplicate authority calls", async () => {
+    const task = activeTask({
+      id: "task-combined",
+      revision: "001753142400.000000007"
+    });
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)]
+    });
+    const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+    await expect(reconcileGoogleCalendarTask(
+      task,
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      verifiedStatus
+    )).resolves.toEqual({
+      authorityBefore: "current",
+      authorityAfter: "current",
+      result: {
+        eventId: await googleCalendarEventId("user-a", "task-combined"),
+        outcome: "created"
+      }
+    });
+
+    expect(backendActions(fetchMock).map(({ action }) => action)).toEqual([
+      "status",
+      "begin-task-operation",
+      "access-token",
+      "validate-generation",
+      "finish-task-operation"
+    ]);
+    expect(backendActions(fetchMock)[1]).toEqual({
+      action: "begin-task-operation",
+      taskId: "task-combined",
+      revision: "001753142400.000000007",
+      connectionGeneration: generationA
+    });
+    expect(backendActions(fetchMock)[4]).toEqual({
+      action: "finish-task-operation",
+      taskId: "task-combined",
+      revision: "001753142400.000000007",
+      connectionGeneration: generationA,
+      operationLeaseId: "l".repeat(43)
+    });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "task-authority"))
+      .toHaveLength(0);
+    expect(backendActions(fetchMock).filter(({ action }) => action === "begin-operation"))
+      .toHaveLength(0);
+    expect(backendActions(fetchMock).filter(({ action }) => action === "end-operation"))
+      .toHaveLength(0);
+    expect(calendarCalls(fetchMock).map(({ init }) => init.method)).toEqual(["GET", "POST"]);
+  });
+
+  it("returns a stale combined authority result without acquiring a lease or calling Google", async () => {
+    const fetchMock = installScenario({
+      beginTaskOperationResponses: [jsonResponse({
+        ok: true,
+        state: "stale",
+        connectionGeneration: generationA,
+        leaseId: null
+      })]
+    });
+    const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+    await expect(reconcileGoogleCalendarTask(
+      activeTask({ id: "task-combined-stale", revision: null }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      verifiedStatus
+    )).resolves.toEqual({
+      authorityBefore: "stale",
+      authorityAfter: "stale",
+      result: { eventId: null, outcome: "skipped" }
+    });
+
+    expect(backendActions(fetchMock).map(({ action }) => action)).toEqual([
+      "status",
+      "begin-task-operation"
+    ]);
+    expect(backendActions(fetchMock)[1]).toMatchObject({ revision: null });
+    expect(calendarCalls(fetchMock)).toHaveLength(0);
+  });
+
+  it("falls back to idempotent lease release when combined finish fails after mutation", async () => {
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)],
+      finishTaskOperationResponses: [jsonResponse({
+        ok: false,
+        error: "google_calendar_unavailable"
+      }, 502)]
+    });
+    const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+    await expect(reconcileGoogleCalendarTask(
+      activeTask({ id: "task-finish-failure", revision: "001753142400.000000008" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      verifiedStatus
+    )).rejects.toMatchObject({
+      code: "google_calendar_unavailable",
+      mutationMayHaveApplied: true,
+      retryable: true
+    });
+
+    expect(backendActions(fetchMock).map(({ action }) => action)).toEqual([
+      "status",
+      "begin-task-operation",
+      "access-token",
+      "validate-generation",
+      "finish-task-operation",
+      "end-operation"
+    ]);
+  });
+
+  it.each(["deleted", "undated"] as const)(
+    "uses a delete mutation when combined authority is %s",
+    async (authority) => {
+      const task = activeTask({
+        id: `task-combined-${authority}`,
+        revision: "001753142400.000000009",
+        ...(authority === "undated" ? { startDate: null, endDate: null } : {})
+      });
+      const eventId = await googleCalendarEventId(task.ownerUid, task.id);
+      const fetchMock = installScenario({
+        beginTaskOperationResponses: [jsonResponse({
+          ok: true,
+          state: authority,
+          connectionGeneration: generationA,
+          leaseId: "l".repeat(43)
+        })],
+        eventGetResponses: [jsonResponse(quickMemoEvent(eventId))],
+        deleteResponses: [emptyResponse(204)],
+        finishTaskOperationResponses: [jsonResponse({ ok: true, state: authority })]
+      });
+      const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+      await expect(reconcileGoogleCalendarTask(
+        task,
+        "Asia/Seoul",
+        undefined,
+        undefined,
+        verifiedStatus
+      )).resolves.toEqual({
+        authorityBefore: authority,
+        authorityAfter: authority,
+        result: { eventId, outcome: "deleted", remoteWasPresent: true }
+      });
+
+      expect(calendarCalls(fetchMock).map(({ init }) => init.method)).toEqual(["GET", "DELETE"]);
+      expect(backendActions(fetchMock).filter(({ action }) => action === "status"))
+        .toHaveLength(1);
+    }
+  );
+
+  it("rejects malformed combined operation states and releases any returned lease", async () => {
+    const fetchMock = installScenario({
+      beginTaskOperationResponses: [jsonResponse({
+        ok: true,
+        state: "stale",
+        connectionGeneration: generationA,
+        leaseId: "l".repeat(43)
+      })]
+    });
+    const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+    await expectGoogleError(reconcileGoogleCalendarTask(
+      activeTask({ id: "task-malformed-combined" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      verifiedStatus
+    ), "invalid_auth_response");
+
+    expect(backendActions(fetchMock).map(({ action }) => action)).toEqual([
+      "status",
+      "begin-task-operation",
+      "end-operation"
+    ]);
+    expect(calendarCalls(fetchMock)).toHaveLength(0);
   });
 
   it("treats a malformed stored connection generation as requiring reconnection", async () => {
@@ -1032,6 +1294,45 @@ describe("Google Calendar account and operation race guards", () => {
       "begin-deletion-workflow",
       "renew-deletion-workflow",
       "end-deletion-workflow"
+    ]);
+  });
+
+  it("reuses a verified current-session status when starting a deletion workflow", async () => {
+    const fetchMock = installScenario();
+    const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+    await expect(beginGoogleCalendarDeletionWorkflow(
+      "user-a",
+      generationA,
+      undefined,
+      verifiedStatus
+    )).resolves.toMatchObject({
+      connectionGeneration: generationA,
+      ownerUid: "user-a"
+    });
+
+    expect(backendActions(fetchMock).map(({ action }) => action)).toEqual([
+      "status",
+      "begin-deletion-workflow"
+    ]);
+  });
+
+  it("fetches a fresh deletion-workflow status when the supplied status was tampered with", async () => {
+    const fetchMock = installScenario();
+    const tamperedStatus = await getGoogleCalendarConnectionStatus();
+
+    tamperedStatus.connectionGeneration = generationB;
+    await expect(beginGoogleCalendarDeletionWorkflow(
+      "user-a",
+      generationA,
+      undefined,
+      tamperedStatus
+    )).resolves.toMatchObject({ connectionGeneration: generationA });
+
+    expect(backendActions(fetchMock).map(({ action }) => action)).toEqual([
+      "status",
+      "status",
+      "begin-deletion-workflow"
     ]);
   });
 
@@ -1089,7 +1390,313 @@ describe("Google Calendar account and operation race guards", () => {
     expect(calendarCalls(fetchMock)).toHaveLength(0);
   });
 
-  it("serializes status reads so a caller never receives an older overlapping response", async () => {
+  it("coalesces concurrent status reads without abort signals into one backend request", async () => {
+    let resolveFirstStatus: ((response: Response) => void) | undefined;
+    const firstStatus = new Promise<Response>((resolve) => {
+      resolveFirstStatus = resolve;
+    });
+    const statusResponse = (connectionGeneration: string) => jsonResponse({
+      ok: true,
+      configured: true,
+      connected: true,
+      needsReconnect: false,
+      connectionGeneration,
+      email: "us***@example.com",
+      lastSyncAt: null,
+      lastSyncStatus: "idle",
+      syncedCount: 0,
+      timeZone: "Asia/Seoul"
+    });
+    const fetchMock = installScenario({
+      statusResponses: [() => firstStatus]
+    });
+
+    const firstRequest = getGoogleCalendarConnectionStatus();
+    await vi.waitFor(() => expect(
+      backendActions(fetchMock).filter(({ action }) => action === "status")
+    ).toHaveLength(1));
+    const secondRequest = getGoogleCalendarConnectionStatus();
+    expect(secondRequest).toBe(firstRequest);
+    await Promise.resolve();
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(1);
+
+    resolveFirstStatus?.(statusResponse(generationA));
+    await expect(firstRequest).resolves.toMatchObject({ connectionGeneration: generationA });
+    await expect(secondRequest).resolves.toMatchObject({
+      connected: true,
+      connectionGeneration: generationA
+    });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(1);
+
+    await reportGoogleCalendarSync({ status: "synced", syncedCount: 1 });
+    const report = backendActions(fetchMock).find(({ action }) => action === "report");
+    expect(report?.connectionGeneration).toBe(generationA);
+    expect(report).not.toHaveProperty("reportSequence");
+  });
+
+  it("starts a fresh status request after the shared in-flight request settles", async () => {
+    const fetchMock = installScenario();
+
+    await getGoogleCalendarConnectionStatus();
+    await getGoogleCalendarConnectionStatus();
+
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
+  });
+
+  it("does not let a stale user status response invalidate the newly established session", async () => {
+    let resolveUserAStatus: ((response: Response) => void) | undefined;
+    const userAStatusResponse = new Promise<Response>((resolve) => {
+      resolveUserAStatus = resolve;
+    });
+    const statusResponse = (connectionGeneration: string) => jsonResponse({
+      ok: true,
+      configured: true,
+      connected: true,
+      needsReconnect: false,
+      connectionGeneration,
+      email: "us***@example.com",
+      lastSyncAt: null,
+      lastSyncStatus: "idle",
+      syncedCount: 0,
+      timeZone: "Asia/Seoul"
+    });
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)],
+      statusGenerations: [generationA, generationB],
+      statusResponses: [() => userAStatusResponse, statusResponse(generationB)],
+      tokenGenerations: [generationB],
+      tokens: ["google-token-b"]
+    });
+
+    const staleUserAStatus = getGoogleCalendarConnectionStatus();
+    const staleUserAExpectation = expect(staleUserAStatus).rejects.toMatchObject({
+      code: "sync_cancelled"
+    });
+    await vi.waitFor(() => expect(
+      backendActions(fetchMock).filter(({ action }) => action === "status")
+    ).toHaveLength(1));
+
+    firebaseMocks.auth.currentUser = firebaseMocks.userB;
+    clearGoogleCalendarSession();
+    const userBStatusRequest = getGoogleCalendarConnectionStatus();
+    const dedupedUserBStatusRequest = getGoogleCalendarConnectionStatus();
+
+    expect(dedupedUserBStatusRequest).toBe(userBStatusRequest);
+    await expect(userBStatusRequest).resolves.toMatchObject({
+      connected: true,
+      connectionGeneration: generationB
+    });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
+
+    resolveUserAStatus?.(statusResponse(generationA));
+    await staleUserAExpectation;
+
+    await expect(upsertGoogleCalendarTask(
+      activeTask({ id: "task-user-b-after-stale-status", ownerUid: "user-b" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      await dedupedUserBStatusRequest
+    )).resolves.toMatchObject({ outcome: "created" });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
+    expect(backendActions(fetchMock).find(({ action }) => action === "access-token"))
+      .toMatchObject({ connectionGeneration: generationB });
+  });
+
+  it("does not let stale task finalization invalidate a newly established user session", async () => {
+    let resolveUserAFinish: ((response: Response) => void) | undefined;
+    const userAFinishResponse = new Promise<Response>((resolve) => {
+      resolveUserAFinish = resolve;
+    });
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404), emptyResponse(404)],
+      finishTaskOperationResponses: [() => userAFinishResponse],
+      postResponses: [emptyResponse(201), emptyResponse(201)],
+      statusGenerations: [generationA, generationB],
+      tokenGenerations: [generationA, generationB],
+      tokens: ["google-token-a", "google-token-b"]
+    });
+    const userAStatus = await getGoogleCalendarConnectionStatus();
+    const staleUserAOperation = reconcileGoogleCalendarTask(
+      activeTask({ id: "task-user-a-stale-finish" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      userAStatus
+    );
+    const staleUserAExpectation = expect(staleUserAOperation).rejects.toMatchObject({
+      code: "sync_cancelled",
+      mutationMayHaveApplied: true
+    });
+    await vi.waitFor(() => expect(
+      backendActions(fetchMock).filter(({ action }) => action === "finish-task-operation")
+    ).toHaveLength(1));
+
+    firebaseMocks.auth.currentUser = firebaseMocks.userB;
+    clearGoogleCalendarSession();
+    const userBStatus = await getGoogleCalendarConnectionStatus();
+
+    resolveUserAFinish?.(jsonResponse({ ok: true, state: "current" }));
+    await staleUserAExpectation;
+
+    await expect(reconcileGoogleCalendarTask(
+      activeTask({ id: "task-user-b-after-stale-finish", ownerUid: "user-b" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      userBStatus
+    )).resolves.toMatchObject({
+      authorityAfter: "current",
+      result: { outcome: "created" }
+    });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
+    // The stale session must not send a cross-account cleanup request. Its
+    // exact server lease is bounded and expires if finish did not apply.
+    expect(backendActions(fetchMock).filter(({ action }) => action === "end-operation"))
+      .toHaveLength(0);
+  });
+
+  it("does not let a stale best-effort lease release invalidate the new session", async () => {
+    let resolveUserARelease: ((response: Response) => void) | undefined;
+    const userAReleaseResponse = new Promise<Response>((resolve) => {
+      resolveUserARelease = resolve;
+    });
+    const fetchMock = installScenario({
+      endOperationResponses: [() => userAReleaseResponse],
+      eventGetResponses: [emptyResponse(404), emptyResponse(404)],
+      postResponses: [emptyResponse(201), emptyResponse(201)],
+      statusGenerations: [generationA, generationB],
+      tokenGenerations: [generationA, generationB],
+      tokens: ["google-token-a", "google-token-b"]
+    });
+    const userAStatus = await getGoogleCalendarConnectionStatus();
+    const staleUserAOperation = upsertGoogleCalendarTask(
+      activeTask({ id: "task-user-a-stale-release" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      userAStatus
+    );
+    await vi.waitFor(() => expect(
+      backendActions(fetchMock).filter(({ action }) => action === "end-operation")
+    ).toHaveLength(1));
+
+    firebaseMocks.auth.currentUser = firebaseMocks.userB;
+    clearGoogleCalendarSession();
+    const userBStatus = await getGoogleCalendarConnectionStatus();
+
+    resolveUserARelease?.(jsonResponse({ ok: true }));
+    await expect(staleUserAOperation).resolves.toMatchObject({ outcome: "created" });
+    await expect(upsertGoogleCalendarTask(
+      activeTask({ id: "task-user-b-after-stale-release", ownerUid: "user-b" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      userBStatus
+    )).resolves.toMatchObject({ outcome: "created" });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
+  });
+
+  it("serializes concurrent sync reports in invocation order", async () => {
+    let resolveFirstReport: ((response: Response) => void) | undefined;
+    const firstReportResponse = new Promise<Response>((resolve) => {
+      resolveFirstReport = resolve;
+    });
+    const fetchMock = installScenario({
+      reportResponses: [() => firstReportResponse]
+    });
+
+    await getGoogleCalendarConnectionStatus();
+    const firstReport = reportGoogleCalendarSync({
+      failureCode: "network_error",
+      status: "failed",
+      syncedCount: 0
+    });
+    await vi.waitFor(() => expect(
+      backendActions(fetchMock).filter(({ action }) => action === "report")
+    ).toHaveLength(1));
+    const secondReport = reportGoogleCalendarSync({ status: "synced", syncedCount: 2 });
+
+    await Promise.resolve();
+    expect(backendActions(fetchMock).filter(({ action }) => action === "report"))
+      .toHaveLength(1);
+
+    resolveFirstReport?.(jsonResponse({ ok: true }));
+    await expect(Promise.all([firstReport, secondReport])).resolves.toEqual([undefined, undefined]);
+    expect(backendActions(fetchMock).filter(({ action }) => action === "report"))
+      .toEqual([
+        expect.objectContaining({ status: "failed", syncedCount: 0 }),
+        expect.objectContaining({ status: "synced", syncedCount: 2 })
+      ]);
+  });
+
+  it("continues the report queue after an earlier report fails", async () => {
+    const fetchMock = installScenario({
+      reportResponses: [jsonResponse({
+        ok: false,
+        error: "google_calendar_unavailable"
+      }, 502)]
+    });
+
+    await getGoogleCalendarConnectionStatus();
+    const failedReport = reportGoogleCalendarSync({ status: "failed", syncedCount: 0 });
+    const laterReport = reportGoogleCalendarSync({ status: "synced", syncedCount: 3 });
+
+    await expect(failedReport).rejects.toMatchObject({
+      code: "google_calendar_unavailable",
+      retryable: true
+    });
+    await expect(laterReport).resolves.toBeUndefined();
+    expect(backendActions(fetchMock).filter(({ action }) => action === "report"))
+      .toEqual([
+        expect.objectContaining({ status: "failed", syncedCount: 0 }),
+        expect.objectContaining({ status: "synced", syncedCount: 3 })
+      ]);
+  });
+
+  it("does not let old in-flight or queued reports invalidate a newly established user session", async () => {
+    let resolveFirstReport: ((response: Response) => void) | undefined;
+    const firstReportResponse = new Promise<Response>((resolve) => {
+      resolveFirstReport = resolve;
+    });
+    const fetchMock = installScenario({
+      reportResponses: [() => firstReportResponse],
+      statusGenerations: [generationA, generationB]
+    });
+
+    await getGoogleCalendarConnectionStatus();
+    const inFlightReport = reportGoogleCalendarSync({ status: "failed", syncedCount: 0 });
+    await vi.waitFor(() => expect(
+      backendActions(fetchMock).filter(({ action }) => action === "report")
+    ).toHaveLength(1));
+    const inFlightExpectation = expect(inFlightReport).rejects.toMatchObject({
+      code: "sync_cancelled"
+    });
+    const staleQueuedReport = reportGoogleCalendarSync({ status: "synced", syncedCount: 1 });
+    const staleExpectation = expect(staleQueuedReport).rejects.toMatchObject({
+      code: "connection_changed"
+    });
+
+    firebaseMocks.auth.currentUser = firebaseMocks.userB;
+    clearGoogleCalendarSession();
+    await expect(getGoogleCalendarConnectionStatus()).resolves.toMatchObject({
+      connectionGeneration: generationB
+    });
+    const currentReport = reportGoogleCalendarSync({ status: "synced", syncedCount: 2 });
+
+    resolveFirstReport?.(jsonResponse({ ok: true }));
+    await inFlightExpectation;
+    await staleExpectation;
+    await expect(currentReport).resolves.toBeUndefined();
+    expect(backendActions(fetchMock).filter(({ action }) => action === "report"))
+      .toEqual([
+        expect.objectContaining({ connectionGeneration: generationA, syncedCount: 0 }),
+        expect.objectContaining({ connectionGeneration: generationB, syncedCount: 2 })
+      ]);
+  });
+
+  it("keeps a status read with an abort signal serialized as its own request", async () => {
     let resolveFirstStatus: ((response: Response) => void) | undefined;
     const firstStatus = new Promise<Response>((resolve) => {
       resolveFirstStatus = resolve;
@@ -1110,26 +1717,22 @@ describe("Google Calendar account and operation race guards", () => {
       statusGenerations: [generationA, generationB],
       statusResponses: [() => firstStatus, statusResponse(generationB)]
     });
-
     const firstRequest = getGoogleCalendarConnectionStatus();
+
     await vi.waitFor(() => expect(
       backendActions(fetchMock).filter(({ action }) => action === "status")
     ).toHaveLength(1));
-    const secondRequest = getGoogleCalendarConnectionStatus();
+    const controller = new AbortController();
+    const secondRequest = getGoogleCalendarConnectionStatus(controller.signal);
+
+    expect(secondRequest).not.toBe(firstRequest);
     await Promise.resolve();
     expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(1);
 
     resolveFirstStatus?.(statusResponse(generationA));
     await expect(firstRequest).resolves.toMatchObject({ connectionGeneration: generationA });
-    await expect(secondRequest).resolves.toMatchObject({
-      connected: true,
-      connectionGeneration: generationB
-    });
-
-    await reportGoogleCalendarSync({ status: "synced", syncedCount: 1 });
-    const report = backendActions(fetchMock).find(({ action }) => action === "report");
-    expect(report?.connectionGeneration).toBe(generationB);
-    expect(report).not.toHaveProperty("reportSequence");
+    await expect(secondRequest).resolves.toMatchObject({ connectionGeneration: generationB });
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
   });
 
   it("cancels a queued status read immediately without breaking serialization", async () => {
@@ -1165,6 +1768,107 @@ describe("Google Calendar account and operation race guards", () => {
       timeZone: "Asia/Seoul"
     }));
     await expect(firstRequest).resolves.toMatchObject({ connectionGeneration: generationA });
+  });
+
+  it("reuses a verified current-session status without skipping the server operation lease", async () => {
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)]
+    });
+    const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+    await expect(upsertGoogleCalendarTask(
+      activeTask({ id: "task-verified-status" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      verifiedStatus
+    )).resolves.toMatchObject({ outcome: "created" });
+
+    expect(backendActions(fetchMock).map(({ action }) => action)).toEqual([
+      "status",
+      "begin-operation",
+      "access-token",
+      "validate-generation",
+      "end-operation"
+    ]);
+  });
+
+  it("reuses a verified current-session status for delete operations", async () => {
+    const fetchMock = installScenario({ eventGetResponses: [emptyResponse(404)] });
+    const verifiedStatus = await getGoogleCalendarConnectionStatus();
+
+    await expect(deleteGoogleCalendarTask(
+      { id: "task-verified-delete", ownerUid: "user-a" },
+      undefined,
+      undefined,
+      verifiedStatus
+    )).resolves.toMatchObject({ outcome: "deleted", remoteWasPresent: false });
+
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(1);
+    expect(backendActions(fetchMock).filter(({ action }) => action === "begin-operation")).toHaveLength(1);
+    expect(backendActions(fetchMock).filter(({ action }) => action === "end-operation")).toHaveLength(1);
+  });
+
+  it("does not reuse a verified status for another signed-in QuickMemo user", async () => {
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)]
+    });
+    const userAStatus = await getGoogleCalendarConnectionStatus();
+
+    firebaseMocks.auth.currentUser = firebaseMocks.userB;
+    await expect(upsertGoogleCalendarTask(
+      activeTask({ id: "task-user-b-status", ownerUid: "user-b" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      userAStatus
+    )).resolves.toMatchObject({ outcome: "created" });
+
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
+    expect(backendActions(fetchMock).filter(({ action }) => action === "begin-operation")).toHaveLength(1);
+  });
+
+  it("does not reuse a verified status after the Calendar session epoch changes", async () => {
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)]
+    });
+    const previousSessionStatus = await getGoogleCalendarConnectionStatus();
+
+    clearGoogleCalendarSession();
+    await expect(upsertGoogleCalendarTask(
+      activeTask({ id: "task-stale-status" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      previousSessionStatus
+    )).resolves.toMatchObject({ outcome: "created" });
+
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
+    expect(backendActions(fetchMock).filter(({ action }) => action === "begin-operation")).toHaveLength(1);
+  });
+
+  it("re-fetches a verified status when its operation-critical fields were mutated", async () => {
+    const fetchMock = installScenario({
+      eventGetResponses: [emptyResponse(404)],
+      postResponses: [emptyResponse(201)]
+    });
+    const mutatedStatus = await getGoogleCalendarConnectionStatus();
+
+    mutatedStatus.connectionGeneration = generationB;
+    await expect(upsertGoogleCalendarTask(
+      activeTask({ id: "task-mutated-status" }),
+      "Asia/Seoul",
+      undefined,
+      undefined,
+      mutatedStatus
+    )).resolves.toMatchObject({ outcome: "created" });
+
+    expect(backendActions(fetchMock).filter(({ action }) => action === "status")).toHaveLength(2);
+    expect(backendActions(fetchMock).find(({ action }) => action === "begin-operation"))
+      .toMatchObject({ connectionGeneration: generationA });
   });
 
   it("rejects an access token issued for a different connection generation", async () => {
@@ -1227,6 +1931,7 @@ describe("Google Calendar account and operation race guards", () => {
     const requestInit = fetchMock.mock.calls[0]?.[1];
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/api/google-calendar-connection");
     expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
+    expect(requestInit?.signal).not.toBe(controller.signal);
     expect(requestInit?.signal?.aborted).toBe(false);
 
     controller.abort();

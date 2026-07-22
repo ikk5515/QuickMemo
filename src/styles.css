@@ -11240,6 +11240,12 @@ html[data-theme="dark"] .schedule-delete-confirm-kicker {
   color: var(--coral);
 }
 
+.google-calendar-trigger[data-sync-state="syncing"] {
+  background: var(--color-info-subtle);
+  border-color: color-mix(in srgb, var(--blue) 34%, var(--line));
+  color: var(--blue);
+}
+
 .google-calendar-trigger-status {
   background: var(--muted);
   border: 2px solid var(--panel);
@@ -11257,6 +11263,11 @@ html[data-theme="dark"] .schedule-delete-confirm-kicker {
 
 .google-calendar-trigger[data-sync-state="failed"] .google-calendar-trigger-status {
   background: var(--coral);
+}
+
+.google-calendar-trigger[data-sync-state="syncing"] .google-calendar-trigger-status {
+  animation: pulse-status 1.2s ease-in-out infinite;
+  background: var(--blue);
 }
 
 .google-calendar-sync-backdrop {
@@ -11366,6 +11377,12 @@ html[data-theme="dark"] .schedule-delete-confirm-kicker {
   background: var(--color-success-subtle);
   border-color: color-mix(in srgb, var(--teal) 28%, var(--line));
   color: color-mix(in srgb, var(--teal) 82%, var(--ink));
+}
+
+.google-calendar-sync-badge.syncing {
+  background: color-mix(in srgb, var(--color-info-subtle) 82%, var(--surface));
+  border-color: color-mix(in srgb, var(--blue) 30%, var(--line));
+  color: color-mix(in srgb, var(--blue) 82%, var(--ink));
 }
 
 .google-calendar-sync-badge.failed {

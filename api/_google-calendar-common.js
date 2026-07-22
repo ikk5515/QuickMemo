@@ -1157,7 +1157,7 @@ function firestoreTimestampRevision(document, fieldName) {
   return `${String(seconds).padStart(12, "0")}.${nanoseconds}`;
 }
 
-export async function getGoogleCalendarTaskAuthority(context, taskId, expectedRevision) {
+function assertGoogleCalendarTaskAuthorityInput(taskId, expectedRevision) {
   if (typeof taskId !== "string"
     || !/^[A-Za-z0-9_-]{1,128}$/u.test(taskId)
     || (expectedRevision !== null && (
@@ -1166,6 +1166,22 @@ export async function getGoogleCalendarTaskAuthority(context, taskId, expectedRe
     ))) {
     throw new HttpError(400, "invalid_request");
   }
+}
+
+function assertGoogleCalendarConnectionGeneration(expectedGeneration) {
+  if (typeof expectedGeneration !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(expectedGeneration)) {
+    throw new HttpError(400, "invalid_request");
+  }
+}
+
+function assertGoogleCalendarLeaseId(leaseId) {
+  if (typeof leaseId !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(leaseId)) {
+    throw new HttpError(400, "invalid_request");
+  }
+}
+
+export async function getGoogleCalendarTaskAuthority(context, taskId, expectedRevision) {
+  assertGoogleCalendarTaskAuthorityInput(taskId, expectedRevision);
 
   const [tombstone, task] = await Promise.all([
     firestoreGet(
@@ -1202,6 +1218,40 @@ export async function getGoogleCalendarTaskAuthority(context, taskId, expectedRe
     ?? firestoreTimestampRevision(task, "createdAt")
     ?? firestoreTimestampRevision(task, "updatedAt");
   return expectedRevision === currentRevision ? "current" : "stale";
+}
+
+export async function beginGoogleCalendarTaskOperation(
+  context,
+  expectedGeneration,
+  taskId,
+  expectedRevision,
+  deletionWorkflowLeaseId = null
+) {
+  assertGoogleCalendarTaskAuthorityInput(taskId, expectedRevision);
+  assertGoogleCalendarConnectionGeneration(expectedGeneration);
+  if (deletionWorkflowLeaseId !== null) {
+    assertGoogleCalendarLeaseId(deletionWorkflowLeaseId);
+  }
+  const state = await getGoogleCalendarTaskAuthority(context, taskId, expectedRevision);
+
+  // A stale task must be re-read and decrypted by the client before any Google
+  // mutation begins. Avoid acquiring a lease that would only block that retry,
+  // but still reject an outdated account generation before returning the state.
+  if (state === "stale") {
+    await requireCurrentGoogleConnection(context, expectedGeneration);
+    return {
+      state,
+      connectionGeneration: expectedGeneration,
+      leaseId: null
+    };
+  }
+
+  const operation = await beginGoogleCalendarOperation(
+    context,
+    expectedGeneration,
+    deletionWorkflowLeaseId
+  );
+  return { state, ...operation };
 }
 
 export async function requireCurrentGoogleConnection(context, expectedGeneration) {
@@ -1514,7 +1564,7 @@ export async function endGoogleCalendarOperation(context, expectedGeneration, le
     if (!connection
       || readString(connection, "connectionGeneration") !== expectedGeneration
       || readString(connection, "operationLeaseId") !== leaseId) {
-      return;
+      return false;
     }
 
     try {
@@ -1533,13 +1583,37 @@ export async function endGoogleCalendarOperation(context, expectedGeneration, le
         currentDocument: { updateTime: connection.updateTime },
         updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
       }]);
-      return;
+      return true;
     } catch (error) {
       if (error?.upstreamStatus !== 400 && error?.upstreamStatus !== 409) {
         throw error;
       }
     }
   }
+
+  return false;
+}
+
+export async function finishGoogleCalendarTaskOperation(
+  context,
+  expectedGeneration,
+  leaseId,
+  taskId,
+  expectedRevision
+) {
+  assertGoogleCalendarTaskAuthorityInput(taskId, expectedRevision);
+  assertGoogleCalendarConnectionGeneration(expectedGeneration);
+  assertGoogleCalendarLeaseId(leaseId);
+
+  // Preserve the existing convergence order: release the account-bound lease
+  // first, then inspect authority. If the authority read times out, the lease is
+  // already gone and the durable receipt/tombstone recovery can safely retry.
+  const released = await endGoogleCalendarOperation(context, expectedGeneration, leaseId);
+  if (!released) {
+    throw new HttpError(409, "google_operation_release_failed");
+  }
+
+  return getGoogleCalendarTaskAuthority(context, taskId, expectedRevision);
 }
 
 export function publicConnectionStatus(document, configured = true) {

@@ -67,6 +67,28 @@ export interface UpdateScheduleTaskInput {
   completedAt?: FieldValue | Timestamp | null;
 }
 
+export interface UpdateScheduleTaskOptions {
+  expectedUpdatedAt?: Timestamp;
+  googleCalendarChanged?: boolean;
+}
+
+export type ScheduleTaskSaveConflictReason = "missing-or-forbidden" | "revision-mismatch";
+
+export class ScheduleTaskRevisionConflictError extends Error {
+  readonly code = "schedule-task/revision-conflict";
+  readonly reason: ScheduleTaskSaveConflictReason;
+
+  constructor(reason: ScheduleTaskSaveConflictReason) {
+    super(
+      reason === "revision-mismatch"
+        ? "일정이 다른 곳에서 변경되었습니다. 최신 내용을 확인한 뒤 다시 저장해주세요."
+        : "일정이 삭제되었거나 접근 권한이 변경되었습니다. 목록을 새로고침한 뒤 다시 시도해주세요."
+    );
+    this.name = "ScheduleTaskRevisionConflictError";
+    this.reason = reason;
+  }
+}
+
 const googleCalendarTaskFieldNames = new Set<keyof UpdateScheduleTaskInput>([
   "encryptedTitle",
   "dueDate",
@@ -79,6 +101,37 @@ const googleCalendarTaskFieldNames = new Set<keyof UpdateScheduleTaskInput>([
 
 function updateChangesGoogleCalendar(input: UpdateScheduleTaskInput) {
   return Object.keys(input).some((key) => googleCalendarTaskFieldNames.has(key as keyof UpdateScheduleTaskInput));
+}
+
+function timestampRevision(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const { seconds, nanoseconds } = value as { nanoseconds?: unknown; seconds?: unknown };
+
+  if (
+    !Number.isSafeInteger(seconds)
+    || !Number.isInteger(nanoseconds)
+    || (nanoseconds as number) < 0
+    || (nanoseconds as number) > 999_999_999
+  ) {
+    return null;
+  }
+
+  return { nanoseconds: nanoseconds as number, seconds: seconds as number };
+}
+
+function timestampRevisionsMatch(current: unknown, expected: Timestamp) {
+  const currentRevision = timestampRevision(current);
+  const expectedRevision = timestampRevision(expected);
+
+  return Boolean(
+    currentRevision
+    && expectedRevision
+    && currentRevision.seconds === expectedRevision.seconds
+    && currentRevision.nanoseconds === expectedRevision.nanoseconds
+  );
 }
 
 export const defaultScheduleDetails: ScheduleTaskDetails = {
@@ -150,15 +203,41 @@ export async function updateScheduleTask(
   taskId: string,
   uid: string,
   input: UpdateScheduleTaskInput,
-  options: { googleCalendarChanged?: boolean } = {}
+  options: UpdateScheduleTaskOptions = {}
 ) {
   const googleCalendarChanged = options.googleCalendarChanged ?? updateChangesGoogleCalendar(input);
-
-  await updateDoc(doc(db, "scheduleTasks", taskId), {
+  const expectedUpdatedAt = options.expectedUpdatedAt;
+  const taskRef = doc(db, "scheduleTasks", taskId);
+  const update = {
     ...input,
     updatedBy: uid,
     updatedAt: serverTimestamp(),
     ...(googleCalendarChanged ? { calendarUpdatedAt: serverTimestamp() } : {})
+  };
+
+  if (expectedUpdatedAt === undefined) {
+    await updateDoc(taskRef, update);
+    return;
+  }
+
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(taskRef);
+
+    if (!snapshot.exists()) {
+      throw new ScheduleTaskRevisionConflictError("missing-or-forbidden");
+    }
+
+    const currentTask = snapshot.data() as Partial<ScheduleTaskDocument>;
+
+    if (currentTask.ownerUid !== uid) {
+      throw new ScheduleTaskRevisionConflictError("missing-or-forbidden");
+    }
+
+    if (!timestampRevisionsMatch(currentTask.updatedAt, expectedUpdatedAt)) {
+      throw new ScheduleTaskRevisionConflictError("revision-mismatch");
+    }
+
+    transaction.update(taskRef, update);
   });
 }
 

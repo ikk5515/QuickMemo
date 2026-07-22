@@ -25,6 +25,17 @@ interface FirestoreDocument {
 }
 
 interface BackendModule {
+  beginGoogleCalendarTaskOperation(
+    context: BackendContext,
+    expectedGeneration: string,
+    taskId: string,
+    expectedRevision: string | null,
+    deletionWorkflowLeaseId?: string | null
+  ): Promise<{
+    connectionGeneration: string;
+    leaseId: string | null;
+    state: "current" | "deleted" | "stale" | "undated";
+  }>;
   beginGoogleCalendarDeletionWorkflow(
     context: BackendContext,
     expectedGeneration: string
@@ -59,7 +70,7 @@ interface BackendModule {
     context: BackendContext,
     expectedGeneration: string,
     leaseId: string
-  ): Promise<void>;
+  ): Promise<boolean>;
   encryptRefreshToken(token: string, uid: string): Promise<EncryptedRefreshToken>;
   fetchFirebaseManagementAccessToken(credentials: {
     clientEmail: string;
@@ -69,6 +80,13 @@ interface BackendModule {
   ensureGoogleRedirectOrigin(request: { headers: Record<string, string> }, redirectUri: string): void;
   ensureSameOrigin(request: { headers: Record<string, string> }): void;
   fetchGoogleAccount(accessToken: string): Promise<{ sub: string }>;
+  finishGoogleCalendarTaskOperation(
+    context: BackendContext,
+    expectedGeneration: string,
+    leaseId: string,
+    taskId: string,
+    expectedRevision: string | null
+  ): Promise<"current" | "deleted" | "stale" | "undated">;
   googleCalendarCallbackHtml(kind: string): string;
   htmlResponse(response: {
     statusCode?: number;
@@ -750,8 +768,247 @@ describe("Google Calendar backend security", () => {
       backendContext,
       generationA,
       beginLeaseId
-    )).resolves.toBeUndefined();
+    )).resolves.toBe(true);
     expect(commitCount).toBe(3);
+  });
+
+  it("combines current task authority with a CAS-bound operation lease", async () => {
+    const updatedAt = "2026-07-22T00:00:00.123456789Z";
+    const expectedRevision = `${String(Math.floor(Date.parse(updatedAt) / 1000)).padStart(12, "0")}.123456789`;
+    const connection = googleConnectionDocument(generationA);
+    let commitCount = 0;
+    let leaseId = "";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes("googleCalendarTaskTombstones/task-combined")) {
+        return backendJsonResponse({}, 404);
+      }
+      if (url.includes("scheduleTasks/task-combined")) {
+        return backendJsonResponse({
+          fields: {
+            ownerUid: { stringValue: backendContext.uid },
+            startDate: { stringValue: "2026-07-22" },
+            calendarUpdatedAt: { timestampValue: updatedAt }
+          }
+        });
+      }
+      if (url.includes("googleCalendarConnections/user-a")) {
+        return backendJsonResponse(connection);
+      }
+      if (url.endsWith(":commit")) {
+        commitCount += 1;
+        const commit = JSON.parse(String(init?.body)) as {
+          writes: Array<{ update?: { fields?: Record<string, { stringValue?: string }> } }>;
+        };
+        leaseId = commit.writes[0]?.update?.fields?.operationLeaseId?.stringValue ?? "";
+        return backendJsonResponse({ commitTime: "2026-07-22T00:00:01Z" });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const operation = await backend.beginGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      "task-combined",
+      expectedRevision
+    );
+
+    expect(operation).toEqual({
+      connectionGeneration: generationA,
+      leaseId,
+      state: "current"
+    });
+    expect(leaseId).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(commitCount).toBe(1);
+  });
+
+  it("returns stale authority without acquiring a blocking operation lease", async () => {
+    const connection = googleConnectionDocument(generationA);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("googleCalendarTaskTombstones/task-stale")) {
+        return backendJsonResponse({}, 404);
+      }
+      if (url.includes("scheduleTasks/task-stale")) {
+        return backendJsonResponse({
+          fields: {
+            ownerUid: { stringValue: backendContext.uid },
+            startDate: { stringValue: "2026-07-22" },
+            calendarUpdatedAt: { timestampValue: "2026-07-22T00:00:01.000000000Z" }
+          }
+        });
+      }
+      if (url.includes("googleCalendarConnections/user-a")) {
+        return backendJsonResponse(connection);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(backend.beginGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      "task-stale",
+      "001753142400.000000000"
+    )).resolves.toEqual({
+      connectionGeneration: generationA,
+      leaseId: null,
+      state: "stale"
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith(":commit"))).toBe(false);
+
+    await expect(backend.beginGoogleCalendarTaskOperation(
+      backendContext,
+      generationB,
+      "task-stale",
+      "001753142400.000000000"
+    )).rejects.toMatchObject({ errorCode: "google_connection_changed" });
+  });
+
+  it("rejects malformed combined-operation leases before any authority read", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(backend.beginGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      "task-malformed-lease",
+      "001753142400.000000000",
+      "not-a-valid-lease"
+    )).rejects.toMatchObject({ statusCode: 400, errorCode: "invalid_request" });
+    await expect(backend.finishGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      "not-a-valid-lease",
+      "task-malformed-lease",
+      "001753142400.000000000"
+    )).rejects.toMatchObject({ statusCode: 400, errorCode: "invalid_request" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("releases the operation lease before evaluating finish authority", async () => {
+    const updatedAt = "2026-07-22T00:00:00.123456789Z";
+    const expectedRevision = `${String(Math.floor(Date.parse(updatedAt) / 1000)).padStart(12, "0")}.123456789`;
+    const leaseId = "l".repeat(43);
+    const connection = leasedGoogleConnectionDocument(generationA, leaseId);
+    let leaseReleased = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes("googleCalendarConnections/user-a")) {
+        return backendJsonResponse(connection);
+      }
+      if (url.endsWith(":commit")) {
+        const commit = JSON.parse(String(init?.body)) as {
+          writes: Array<{ update?: { fields?: Record<string, { stringValue?: string }> } }>;
+        };
+        expect(commit.writes[0]?.update?.fields).toMatchObject({
+          operationLeaseId: { stringValue: "" },
+          operationLeaseGeneration: { stringValue: "" }
+        });
+        leaseReleased = true;
+        return backendJsonResponse({ commitTime: "2026-07-22T00:00:01Z" });
+      }
+      if (url.includes("googleCalendarTaskTombstones/task-finish")) {
+        expect(leaseReleased).toBe(true);
+        return backendJsonResponse({}, 404);
+      }
+      if (url.includes("scheduleTasks/task-finish")) {
+        expect(leaseReleased).toBe(true);
+        return backendJsonResponse({
+          fields: {
+            ownerUid: { stringValue: backendContext.uid },
+            startDate: { stringValue: "2026-07-22" },
+            calendarUpdatedAt: { timestampValue: updatedAt }
+          }
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(backend.finishGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      leaseId,
+      "task-finish",
+      expectedRevision
+    )).resolves.toBe("current");
+    expect(leaseReleased).toBe(true);
+  });
+
+  it("keeps the lease released when the finish authority read fails", async () => {
+    const leaseId = "l".repeat(43);
+    const connection = leasedGoogleConnectionDocument(generationA, leaseId);
+    let leaseReleased = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("googleCalendarConnections/user-a")) {
+        return backendJsonResponse(connection);
+      }
+      if (url.endsWith(":commit")) {
+        leaseReleased = true;
+        return backendJsonResponse({ commitTime: "2026-07-22T00:00:01Z" });
+      }
+      if (url.includes("googleCalendarTaskTombstones/task-timeout")) {
+        expect(leaseReleased).toBe(true);
+        return backendJsonResponse({}, 404);
+      }
+      if (url.includes("scheduleTasks/task-timeout")) {
+        expect(leaseReleased).toBe(true);
+        return backendJsonResponse({}, 504);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(backend.finishGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      leaseId,
+      "task-timeout",
+      "001753142400.000000000"
+    )).rejects.toThrow("Firestore read failed");
+    expect(leaseReleased).toBe(true);
+  });
+
+  it("fails closed when a finish operation cannot release its lease", async () => {
+    const leaseId = "l".repeat(43);
+    const connection = leasedGoogleConnectionDocument(generationA, leaseId);
+    let authorityReads = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url.includes("googleCalendarConnections/user-a")) {
+        return backendJsonResponse(connection);
+      }
+      if (url.endsWith(":commit")) {
+        return backendJsonResponse({}, 409);
+      }
+      if (url.includes("scheduleTasks/") || url.includes("googleCalendarTaskTombstones/")) {
+        authorityReads += 1;
+        return backendJsonResponse({}, 404);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(backend.finishGoogleCalendarTaskOperation(
+      backendContext,
+      generationA,
+      leaseId,
+      "task-release-conflict",
+      "001753142400.000000000"
+    )).rejects.toMatchObject({
+      statusCode: 409,
+      errorCode: "google_operation_release_failed"
+    });
+    expect(authorityReads).toBe(0);
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).endsWith(":commit"))).toHaveLength(4);
   });
 
   it("holds a CAS-bound workflow lease across the complete task deletion sequence", async () => {
@@ -1668,6 +1925,12 @@ describe("Google Calendar backend security", () => {
     expect(authSource).not.toContain("body.codeVerifier");
     expect(authSource).not.toContain("body.uid");
     expect(connectionSource).toContain('assertOnlyKeys(body, ["action"])');
+    expect(connectionSource).toMatch(
+      /if \(body\.action === "begin-task-operation"\) \{[\s\S]*?assertOnlyKeys\(body, \[[\s\S]*?"taskId"[\s\S]*?"revision"[\s\S]*?"connectionGeneration"[\s\S]*?"deletionWorkflowLeaseId"[\s\S]*?\]\);/u
+    );
+    expect(connectionSource).toMatch(
+      /if \(body\.action === "finish-task-operation"\) \{[\s\S]*?assertOnlyKeys\(body, \[[\s\S]*?"taskId"[\s\S]*?"revision"[\s\S]*?"connectionGeneration"[\s\S]*?"operationLeaseId"[\s\S]*?\]\);/u
+    );
     expect(connectionSource).not.toContain("eventTitle");
     expect(connectionSource).not.toContain("eventDescription");
     expect(connectionSource).not.toContain("refreshToken:");

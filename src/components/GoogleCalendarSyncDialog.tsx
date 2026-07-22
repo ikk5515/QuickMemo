@@ -22,6 +22,7 @@ export interface GoogleCalendarSyncProgress {
 }
 
 interface GoogleCalendarSyncDialogProps {
+  backgroundSyncPendingCount?: number;
   connection: GoogleCalendarConnectionStatus;
   eligibleExistingCount: number;
   error: string | null;
@@ -65,6 +66,7 @@ function formattedSyncTime(value: string | null) {
 }
 
 export function GoogleCalendarSyncDialog({
+  backgroundSyncPendingCount = 0,
   connection,
   eligibleExistingCount,
   error,
@@ -100,7 +102,11 @@ export function GoogleCalendarSyncDialog({
   const busy = operation !== null;
   const hasStoredConnection = connection.connected || connection.hasStoredConnection;
   const syncState = connection.lastSyncStatus;
-  const { Icon: StatusIcon, label: statusLabel, tone } = statusMeta[syncState];
+  const backgroundSyncing = backgroundSyncPendingCount > 0 || operation === "syncing";
+  const stateMeta = statusMeta[syncState];
+  const StatusIcon = backgroundSyncing ? LoaderCircle : stateMeta.Icon;
+  const statusLabel = backgroundSyncing ? "동기화 중" : stateMeta.label;
+  const tone = backgroundSyncing ? "syncing" : stateMeta.tone;
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -288,7 +294,7 @@ export function GoogleCalendarSyncDialog({
           </div>
           <div className="google-calendar-sync-header-tools">
             <span className={`google-calendar-sync-badge ${tone}`} role="status">
-              <StatusIcon size={15} aria-hidden="true" />
+              <StatusIcon className={backgroundSyncing ? "spin" : undefined} size={15} aria-hidden="true" />
               {statusLabel}
             </span>
             <button

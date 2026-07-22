@@ -50,6 +50,14 @@ export interface GoogleCalendarSyncResult {
   remoteWasPresent?: boolean;
 }
 
+export type GoogleCalendarTaskAuthorityState = "current" | "deleted" | "stale" | "undated";
+
+export interface GoogleCalendarTaskReconciliationResult {
+  authorityAfter: GoogleCalendarTaskAuthorityState;
+  authorityBefore: GoogleCalendarTaskAuthorityState;
+  result: GoogleCalendarSyncResult;
+}
+
 export interface GoogleCalendarDeletionWorkflow {
   connectionGeneration: string;
   ownerUid: string;
@@ -79,6 +87,16 @@ interface CachedGoogleAccessToken {
   epoch: number;
   expiresAt: number;
   token: string;
+  uid: string;
+}
+
+interface VerifiedGoogleCalendarStatusBinding {
+  configured: boolean;
+  connected: boolean;
+  connectionGeneration: string | null;
+  epoch: number;
+  hasStoredConnection: boolean;
+  needsReconnect: boolean;
   uid: string;
 }
 
@@ -134,18 +152,27 @@ let googleCalendarSessionAbortController = new AbortController();
 let googleCalendarStatusRequestSequence = 0;
 let googleCalendarStatusAppliedSequence = 0;
 let googleCalendarStatusRequestQueue: Promise<void> = Promise.resolve();
-const eventOperationQueues = new Map<string, Promise<GoogleCalendarSyncResult>>();
+let googleCalendarStatusRequestInFlight: Promise<GoogleCalendarConnectionStatus> | null = null;
+let googleCalendarReportRequestQueue: Promise<void> = Promise.resolve();
+const verifiedGoogleCalendarStatuses = new WeakMap<
+  GoogleCalendarConnectionStatus,
+  VerifiedGoogleCalendarStatusBinding
+>();
+const eventOperationQueues = new Map<string, Promise<unknown>>();
 
 type FirebaseCalendarUser = NonNullable<typeof auth.currentUser>;
 
 interface GoogleCalendarOperationContext {
   connectionGeneration: string;
   epoch: number;
+  mutationMayHaveApplied: boolean;
   operationLeaseId: string;
   sessionSignal: AbortSignal;
   uid: string;
   user: FirebaseCalendarUser;
 }
+
+type GoogleCalendarOperationBaseContext = Omit<GoogleCalendarOperationContext, "operationLeaseId">;
 
 function normalizedSyncState(value: unknown): GoogleCalendarSyncState {
   return value === "synced" || value === "failed" ? value : "idle";
@@ -206,7 +233,53 @@ function invalidateGoogleCalendarSession() {
   googleCalendarSessionAbortController = new AbortController();
   cachedAccessToken = null;
   knownConnectionGeneration = null;
+  googleCalendarStatusRequestInFlight = null;
+  // A status request from the previous Firebase user may ignore abort until
+  // its transport settles. Do not make the new user's status wait behind that
+  // stale queue tail; the captured session signal still makes the old request
+  // fail closed when it eventually resumes.
+  googleCalendarStatusRequestQueue = Promise.resolve();
   googleCalendarSessionEpoch += 1;
+}
+
+function bindGoogleCalendarStatusToCurrentSession(status: GoogleCalendarConnectionStatus) {
+  const uid = auth.currentUser?.uid;
+
+  if (!uid) {
+    return;
+  }
+  verifiedGoogleCalendarStatuses.set(status, {
+    configured: status.configured,
+    connected: status.connected,
+    connectionGeneration: status.connectionGeneration,
+    epoch: googleCalendarSessionEpoch,
+    hasStoredConnection: status.hasStoredConnection,
+    needsReconnect: status.needsReconnect,
+    uid
+  });
+}
+
+function isGoogleCalendarStatusVerifiedForCurrentSession(
+  status: GoogleCalendarConnectionStatus | undefined,
+  uid: string
+) {
+  if (!status || typeof status !== "object") {
+    return false;
+  }
+
+  const binding = verifiedGoogleCalendarStatuses.get(status);
+
+  return Boolean(
+    binding
+    && binding.uid === uid
+    && auth.currentUser?.uid === uid
+    && binding.epoch === googleCalendarSessionEpoch
+    && status.configured === binding.configured
+    && status.connected === binding.connected
+    && status.connectionGeneration === binding.connectionGeneration
+    && status.hasStoredConnection === binding.hasStoredConnection
+    && status.needsReconnect === binding.needsReconnect
+  );
 }
 
 function assertFirebaseUser(user: FirebaseCalendarUser) {
@@ -282,6 +355,34 @@ function backendError(status: number, payload: BackendErrorPayload) {
 
 function syncCancelledError() {
   return new GoogleCalendarError("sync_cancelled", "기존 일정 동기화를 취소했습니다.");
+}
+
+function combineGoogleCalendarAbortSignals(...signals: Array<AbortSignal | undefined>) {
+  const uniqueSignals = [...new Set(signals.filter((signal): signal is AbortSignal => Boolean(signal)))];
+
+  if (uniqueSignals.length === 1) {
+    return { cleanup: () => undefined, signal: uniqueSignals[0] };
+  }
+
+  const controller = new AbortController();
+  const handleAbort = () => controller.abort();
+
+  for (const signal of uniqueSignals) {
+    if (signal.aborted) {
+      controller.abort();
+      break;
+    }
+    signal.addEventListener("abort", handleAbort, { once: true });
+  }
+
+  return {
+    cleanup: () => {
+      for (const signal of uniqueSignals) {
+        signal.removeEventListener("abort", handleAbort);
+      }
+    },
+    signal: controller.signal
+  };
 }
 
 function throwIfBackendRequestAborted(signal?: AbortSignal) {
@@ -361,35 +462,52 @@ async function backendRequest<T>(
   signal?: AbortSignal
 ): Promise<T> {
   const requestUser = expectedUser ?? auth.currentUser;
+  const requestSessionSignal = googleCalendarSessionAbortController.signal;
+  const combinedSignal = combineGoogleCalendarAbortSignals(requestSessionSignal, signal);
 
   if (!requestUser) {
+    combinedSignal.cleanup();
     throw new GoogleCalendarError("login_required", "Google Calendar 연결을 위해 다시 로그인해주세요.");
   }
 
-  throwIfBackendRequestAborted(signal);
-  assertFirebaseUser(requestUser);
-  const idToken = await requestUser.getIdToken(false);
-  throwIfBackendRequestAborted(signal);
-  assertFirebaseUser(requestUser);
-  let result = await fetchGoogleCalendarBackend(path, body, idToken, signal);
-
-  if (result.response.status === 401 && retryAuth) {
-    throwIfBackendRequestAborted(signal);
+  try {
+    throwIfBackendRequestAborted(combinedSignal.signal);
     assertFirebaseUser(requestUser);
-    const refreshedToken = await requestUser.getIdToken(true);
-    throwIfBackendRequestAborted(signal);
+    const idToken = await requestUser.getIdToken(false);
+    throwIfBackendRequestAborted(combinedSignal.signal);
     assertFirebaseUser(requestUser);
-    result = await fetchGoogleCalendarBackend(path, body, refreshedToken, signal);
+    let result = await fetchGoogleCalendarBackend(
+      path,
+      body,
+      idToken,
+      combinedSignal.signal
+    );
+
+    if (result.response.status === 401 && retryAuth) {
+      throwIfBackendRequestAborted(combinedSignal.signal);
+      assertFirebaseUser(requestUser);
+      const refreshedToken = await requestUser.getIdToken(true);
+      throwIfBackendRequestAborted(combinedSignal.signal);
+      assertFirebaseUser(requestUser);
+      result = await fetchGoogleCalendarBackend(
+        path,
+        body,
+        refreshedToken,
+        combinedSignal.signal
+      );
+    }
+
+    throwIfBackendRequestAborted(combinedSignal.signal);
+    assertFirebaseUser(requestUser);
+
+    if (!result.response.ok) {
+      throw backendError(result.response.status, result.payload);
+    }
+
+    return result.payload as T;
+  } finally {
+    combinedSignal.cleanup();
   }
-
-  throwIfBackendRequestAborted(signal);
-  assertFirebaseUser(requestUser);
-
-  if (!result.response.ok) {
-    throw backendError(result.response.status, result.payload);
-  }
-
-  return result.payload as T;
 }
 
 export function detectedGoogleCalendarTimeZone() {
@@ -411,16 +529,23 @@ export function isValidGoogleCalendarTimeZone(value: unknown): value is string {
   }
 }
 
-async function requestGoogleCalendarConnectionStatus(signal?: AbortSignal) {
+async function requestGoogleCalendarConnectionStatus(
+  requestUser: FirebaseCalendarUser | null,
+  requestEpoch: number,
+  signal: AbortSignal
+) {
   const requestSequence = googleCalendarStatusRequestSequence + 1;
-  const requestEpoch = googleCalendarSessionEpoch;
+
+  if (!requestUser) {
+    throw new GoogleCalendarError("login_required", "Google Calendar 연결을 위해 다시 로그인해주세요.");
+  }
 
   googleCalendarStatusRequestSequence = requestSequence;
   const payload = await backendRequest<unknown>(
     googleCalendarConnectionApiPath,
     { action: "status" },
     true,
-    undefined,
+    requestUser,
     signal
   );
   const status = normalizeConnectionStatus(payload);
@@ -445,10 +570,15 @@ async function requestGoogleCalendarConnectionStatus(signal?: AbortSignal) {
     knownConnectionGeneration = status.connectionGeneration;
   }
 
+  bindGoogleCalendarStatusToCurrentSession(status);
   return status;
 }
 
-export function getGoogleCalendarConnectionStatus(signal?: AbortSignal) {
+function enqueueGoogleCalendarConnectionStatusRequest(signal?: AbortSignal) {
+  const requestEpoch = googleCalendarSessionEpoch;
+  const requestUser = auth.currentUser;
+  const sessionSignal = googleCalendarSessionAbortController.signal;
+  const combinedSignal = combineGoogleCalendarAbortSignals(sessionSignal, signal);
   const previousRequest = googleCalendarStatusRequestQueue;
   let releaseTurn: () => void = () => undefined;
   const currentTurn = new Promise<void>((resolve) => {
@@ -461,7 +591,7 @@ export function getGoogleCalendarConnectionStatus(signal?: AbortSignal) {
     let handleAbort: (() => void) | null = null;
 
     try {
-      if (signal?.aborted) {
+      if (combinedSignal.signal.aborted) {
         throw syncCancelledError();
       }
       if (signal) {
@@ -469,21 +599,46 @@ export function getGoogleCalendarConnectionStatus(signal?: AbortSignal) {
           previousRequest,
           new Promise<never>((_resolve, reject) => {
             handleAbort = () => reject(syncCancelledError());
-            signal.addEventListener("abort", handleAbort, { once: true });
+            combinedSignal.signal.addEventListener("abort", handleAbort, { once: true });
           })
         ]);
       } else {
         await previousRequest;
       }
-      throwIfBackendRequestAborted(signal);
-      return await requestGoogleCalendarConnectionStatus(signal);
+      throwIfBackendRequestAborted(combinedSignal.signal);
+      return await requestGoogleCalendarConnectionStatus(
+        requestUser,
+        requestEpoch,
+        combinedSignal.signal
+      );
     } finally {
       if (handleAbort) {
-        signal?.removeEventListener("abort", handleAbort);
+        combinedSignal.signal.removeEventListener("abort", handleAbort);
       }
+      combinedSignal.cleanup();
       releaseTurn();
     }
   })();
+}
+
+export function getGoogleCalendarConnectionStatus(signal?: AbortSignal) {
+  if (signal) {
+    return enqueueGoogleCalendarConnectionStatusRequest(signal);
+  }
+  if (googleCalendarStatusRequestInFlight) {
+    return googleCalendarStatusRequestInFlight;
+  }
+
+  const request = enqueueGoogleCalendarConnectionStatusRequest();
+  const clearInFlightRequest = () => {
+    if (googleCalendarStatusRequestInFlight === request) {
+      googleCalendarStatusRequestInFlight = null;
+    }
+  };
+
+  googleCalendarStatusRequestInFlight = request;
+  void request.then(clearInFlightRequest, clearInFlightRequest);
+  return request;
 }
 
 export async function getGoogleCalendarTaskAuthority(input: {
@@ -555,7 +710,8 @@ export async function disconnectGoogleCalendar(
 export async function beginGoogleCalendarDeletionWorkflow(
   ownerUid: string,
   expectedConnectionGeneration: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  verifiedStatus?: GoogleCalendarConnectionStatus
 ): Promise<GoogleCalendarDeletionWorkflow> {
   assertGoogleCalendarTaskOwner(ownerUid);
   if (!/^[A-Za-z0-9_-]{43}$/u.test(expectedConnectionGeneration)) {
@@ -563,7 +719,17 @@ export async function beginGoogleCalendarDeletionWorkflow(
   }
   const user = auth.currentUser;
   assertFirebaseUser(user!);
-  const status = await getGoogleCalendarConnectionStatus(signal);
+  const status = isGoogleCalendarStatusVerifiedForCurrentSession(verifiedStatus, ownerUid)
+    ? verifiedStatus!
+    : await getGoogleCalendarConnectionStatus(signal);
+
+  if (auth.currentUser !== user
+    || !isGoogleCalendarStatusVerifiedForCurrentSession(status, ownerUid)) {
+    throw new GoogleCalendarError(
+      "connection_changed",
+      "연결된 Google 계정이 변경되었습니다. 상태를 새로고침한 뒤 다시 시도해주세요."
+    );
+  }
 
   if (!status.connected
     || status.needsReconnect
@@ -574,58 +740,67 @@ export async function beginGoogleCalendarDeletionWorkflow(
     );
   }
 
-  const deadline = Date.now() + googleCalendarOperationWaitMs;
-  let payload: unknown;
+  const operationSignal = combineGoogleCalendarAbortSignals(
+    googleCalendarSessionAbortController.signal,
+    signal
+  );
 
-  while (true) {
-    try {
-      payload = await backendRequest<unknown>(googleCalendarConnectionApiPath, {
-        action: "begin-deletion-workflow",
-        connectionGeneration: expectedConnectionGeneration
-      }, true, user!, signal);
-      break;
-    } catch (caught) {
-      if (!(caught instanceof GoogleCalendarError)
-        || caught.code !== "operation_in_progress"
-        || Date.now() >= deadline) {
-        throw caught;
+  try {
+    const deadline = Date.now() + googleCalendarOperationWaitMs;
+    let payload: unknown;
+
+    while (true) {
+      try {
+        payload = await backendRequest<unknown>(googleCalendarConnectionApiPath, {
+          action: "begin-deletion-workflow",
+          connectionGeneration: expectedConnectionGeneration
+        }, true, user!, operationSignal.signal);
+        break;
+      } catch (caught) {
+        if (!(caught instanceof GoogleCalendarError)
+          || caught.code !== "operation_in_progress"
+          || Date.now() >= deadline) {
+          throw caught;
+        }
+        await new Promise<void>((resolve, reject) => {
+          if (operationSignal.signal.aborted) {
+            reject(syncCancelledError());
+            return;
+          }
+          const remaining = Math.max(0, deadline - Date.now());
+          const delay = Math.min(caught.retryAfterMs ?? 1_000, remaining);
+          if (delay === 0) {
+            reject(caught);
+            return;
+          }
+          const timer = globalThis.setTimeout(() => {
+            operationSignal.signal.removeEventListener("abort", handleAbort);
+            resolve();
+          }, delay);
+          const handleAbort = () => {
+            globalThis.clearTimeout(timer);
+            reject(syncCancelledError());
+          };
+          operationSignal.signal.addEventListener("abort", handleAbort, { once: true });
+        });
       }
-      await new Promise<void>((resolve, reject) => {
-        if (signal?.aborted) {
-          reject(syncCancelledError());
-          return;
-        }
-        const remaining = Math.max(0, deadline - Date.now());
-        const delay = Math.min(caught.retryAfterMs ?? 1_000, remaining);
-        if (delay === 0) {
-          reject(caught);
-          return;
-        }
-        const timer = globalThis.setTimeout(() => {
-          signal?.removeEventListener("abort", handleAbort);
-          resolve();
-        }, delay);
-        const handleAbort = () => {
-          globalThis.clearTimeout(timer);
-          reject(syncCancelledError());
-        };
-        signal?.addEventListener("abort", handleAbort, { once: true });
-      });
     }
+
+    const result = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+    const connectionGeneration = normalizedConnectionGeneration(result.connectionGeneration);
+    const workflowLeaseId = normalizedConnectionGeneration(result.leaseId);
+
+    if (connectionGeneration !== expectedConnectionGeneration || !workflowLeaseId) {
+      throw new GoogleCalendarError(
+        "invalid_auth_response",
+        "Google Calendar 삭제 보호 상태를 확인하지 못했습니다."
+      );
+    }
+
+    return { connectionGeneration, ownerUid, workflowLeaseId };
+  } finally {
+    operationSignal.cleanup();
   }
-
-  const result = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-  const connectionGeneration = normalizedConnectionGeneration(result.connectionGeneration);
-  const workflowLeaseId = normalizedConnectionGeneration(result.leaseId);
-
-  if (connectionGeneration !== expectedConnectionGeneration || !workflowLeaseId) {
-    throw new GoogleCalendarError(
-      "invalid_auth_response",
-      "Google Calendar 삭제 보호 상태를 확인하지 못했습니다."
-    );
-  }
-
-  return { connectionGeneration, ownerUid, workflowLeaseId };
 }
 
 export async function endGoogleCalendarDeletionWorkflow(workflow: GoogleCalendarDeletionWorkflow) {
@@ -705,20 +880,50 @@ export async function reportGoogleCalendarSync(input: {
       ? "google_api_error"
       : undefined;
   const syncedCount = Math.max(0, Math.min(100_000, Math.trunc(input.syncedCount ?? 0)));
+  const user = auth.currentUser;
 
-  await backendRequest(googleCalendarConnectionApiPath, {
-    action: "report",
-    connectionGeneration,
-    status: input.status,
-    syncedCount,
-    ...(failureCode ? { failureCode } : {})
+  if (!user) {
+    throw new GoogleCalendarError("login_required", "Google Calendar 연결을 위해 다시 로그인해주세요.");
+  }
+  const reportEpoch = googleCalendarSessionEpoch;
+  const reportSessionSignal = googleCalendarSessionAbortController.signal;
+  const previousReport = googleCalendarReportRequestQueue;
+  const report = previousReport.catch(() => undefined).then(async () => {
+    const currentUser = auth.currentUser;
+
+    if (reportEpoch !== googleCalendarSessionEpoch
+      || knownConnectionGeneration !== connectionGeneration
+      || currentUser !== user
+      || currentUser.uid !== user.uid) {
+      throw new GoogleCalendarError(
+        "connection_changed",
+        "연결된 Google 계정이 변경되었습니다. 상태를 새로고침한 뒤 다시 시도해주세요."
+      );
+    }
+    // Only use the mutating session assertion after the captured report has
+    // proven it still belongs to the current epoch, generation, and user.
+    // Otherwise an old queued report could invalidate a newly established
+    // Calendar session.
+    assertFirebaseUser(user);
+    await backendRequest(googleCalendarConnectionApiPath, {
+      action: "report",
+      connectionGeneration,
+      status: input.status,
+      syncedCount,
+      ...(failureCode ? { failureCode } : {})
+    }, true, user, reportSessionSignal);
   });
+
+  // Keep the queue tail fulfilled so one observability failure cannot block
+  // later reports, while returning the original promise to the caller.
+  googleCalendarReportRequestQueue = report.catch(() => undefined);
+  await report;
 }
 
 function assertGoogleCalendarOperationContext(context: GoogleCalendarOperationContext) {
-  assertFirebaseUser(context.user);
   if (
-    googleCalendarSessionEpoch !== context.epoch
+    context.sessionSignal.aborted
+    || googleCalendarSessionEpoch !== context.epoch
     || knownConnectionGeneration !== context.connectionGeneration
   ) {
     throw new GoogleCalendarError(
@@ -726,6 +931,7 @@ function assertGoogleCalendarOperationContext(context: GoogleCalendarOperationCo
       "연결된 Google 계정이 변경되었습니다. 상태를 새로고침한 뒤 다시 시도해주세요."
     );
   }
+  assertFirebaseUser(context.user);
 }
 
 async function getGoogleCalendarAccessToken(
@@ -841,6 +1047,15 @@ async function googleCalendarRequest(
   sessionSignal.addEventListener("abort", handleSessionAbort, { once: true });
 
   try {
+    const method = (init.method ?? "GET").toUpperCase();
+
+    if (!new Set(["GET", "HEAD", "OPTIONS"]).has(method)) {
+      // Once a mutating request is handed to fetch, a lost or aborted response
+      // cannot prove whether Google applied it. Preserve that ambiguity through
+      // the task-operation finish/recovery path instead of reporting a false
+      // clean failure.
+      context.mutationMayHaveApplied = true;
+    }
     response = await fetch(`${googleCalendarApiBaseUrl}${path}`, {
       ...init,
       cache: "no-store",
@@ -1382,11 +1597,11 @@ async function upsertGoogleCalendarTaskNow(
   return { eventId, outcome: "created" };
 }
 
-function enqueueEventOperation(
+function enqueueEventOperation<T>(
   eventKey: string,
-  operation: () => Promise<GoogleCalendarSyncResult>
+  operation: () => Promise<T>
 ) {
-  const previous = eventOperationQueues.get(eventKey) ?? Promise.resolve({ eventId: null, outcome: "skipped" } as GoogleCalendarSyncResult);
+  const previous = eventOperationQueues.get(eventKey) ?? Promise.resolve();
   const queued = previous.catch(() => undefined).then(operation);
 
   eventOperationQueues.set(eventKey, queued);
@@ -1401,11 +1616,15 @@ function enqueueEventOperation(
   return queued;
 }
 
-async function prepareGoogleCalendarOperation(
+async function prepareGoogleCalendarOperationBase(
   ownerUid: string,
   signal?: AbortSignal,
-  deletionWorkflow?: GoogleCalendarDeletionWorkflow
-): Promise<GoogleCalendarOperationContext> {
+  deletionWorkflow?: GoogleCalendarDeletionWorkflow,
+  verifiedStatus?: GoogleCalendarConnectionStatus
+): Promise<{
+  baseContext: GoogleCalendarOperationBaseContext;
+  status: GoogleCalendarConnectionStatus & { connectionGeneration: string };
+}> {
   const user = auth.currentUser;
 
   if (!user || !ownerUid || user.uid !== ownerUid) {
@@ -1413,7 +1632,17 @@ async function prepareGoogleCalendarOperation(
     throw new GoogleCalendarError("permission_denied", "현재 QuickMemo 계정의 일정만 동기화할 수 있습니다.");
   }
 
-  const status = await getGoogleCalendarConnectionStatus(signal);
+  const status = isGoogleCalendarStatusVerifiedForCurrentSession(verifiedStatus, ownerUid)
+    ? verifiedStatus!
+    : await getGoogleCalendarConnectionStatus(signal);
+
+  if (auth.currentUser !== user
+    || !isGoogleCalendarStatusVerifiedForCurrentSession(status, ownerUid)) {
+    throw new GoogleCalendarError(
+      "connection_changed",
+      "연결된 Google 계정이 변경되었습니다. 상태를 새로고침한 뒤 다시 시도해주세요."
+    );
+  }
 
   if (status.needsReconnect) {
     throw new GoogleCalendarError(
@@ -1436,57 +1665,95 @@ async function prepareGoogleCalendarOperation(
   }
 
   assertFirebaseUser(user);
-  const baseContext = {
-    connectionGeneration: status.connectionGeneration,
-    epoch: googleCalendarSessionEpoch,
-    sessionSignal: googleCalendarSessionAbortController.signal,
-    uid: ownerUid,
-    user
+  return {
+    baseContext: {
+      connectionGeneration: status.connectionGeneration,
+      epoch: googleCalendarSessionEpoch,
+      mutationMayHaveApplied: false,
+      sessionSignal: googleCalendarSessionAbortController.signal,
+      uid: ownerUid,
+      user
+    },
+    status: status as GoogleCalendarConnectionStatus & { connectionGeneration: string }
   };
-  let payload: unknown;
-  const operationWaitDeadline = Date.now() + googleCalendarOperationWaitMs;
+}
 
-  while (true) {
-    try {
-      payload = await backendRequest<unknown>(googleCalendarConnectionApiPath, {
-        action: "begin-operation",
-        connectionGeneration: status.connectionGeneration,
-        ...(deletionWorkflow
-          ? { deletionWorkflowLeaseId: deletionWorkflow.workflowLeaseId }
-          : {})
-      }, true, user, signal);
-      break;
-    } catch (caught) {
-      if (!(caught instanceof GoogleCalendarError)
-        || caught.code !== "operation_in_progress"
-        || Date.now() >= operationWaitDeadline) {
-        throw caught;
+async function requestGoogleCalendarOperationLease(
+  body: Record<string, unknown>,
+  user: FirebaseCalendarUser,
+  sessionSignal: AbortSignal,
+  signal?: AbortSignal
+) {
+  const operationSignal = combineGoogleCalendarAbortSignals(sessionSignal, signal);
+
+  try {
+    const operationWaitDeadline = Date.now() + googleCalendarOperationWaitMs;
+
+    while (true) {
+      try {
+        return await backendRequest<unknown>(
+          googleCalendarConnectionApiPath,
+          body,
+          true,
+          user,
+          operationSignal.signal
+        );
+      } catch (caught) {
+        if (!(caught instanceof GoogleCalendarError)
+          || caught.code !== "operation_in_progress"
+          || Date.now() >= operationWaitDeadline) {
+          throw caught;
+        }
+        await new Promise<void>((resolve, reject) => {
+          if (operationSignal.signal.aborted) {
+            reject(syncCancelledError());
+            return;
+          }
+          const remainingWaitMs = Math.max(0, operationWaitDeadline - Date.now());
+          const delayMs = Math.min(caught.retryAfterMs ?? 1_000, remainingWaitMs);
+
+          if (delayMs === 0) {
+            reject(caught);
+            return;
+          }
+          const timer = globalThis.setTimeout(() => {
+            operationSignal.signal.removeEventListener("abort", handleAbort);
+            resolve();
+          }, delayMs);
+          const handleAbort = () => {
+            globalThis.clearTimeout(timer);
+            reject(syncCancelledError());
+          };
+
+          operationSignal.signal.addEventListener("abort", handleAbort, { once: true });
+        });
       }
-      await new Promise<void>((resolve, reject) => {
-        if (signal?.aborted) {
-          reject(syncCancelledError());
-          return;
-        }
-        const remainingWaitMs = Math.max(0, operationWaitDeadline - Date.now());
-        const delayMs = Math.min(caught.retryAfterMs ?? 1_000, remainingWaitMs);
-
-        if (delayMs === 0) {
-          reject(caught);
-          return;
-        }
-        const timer = globalThis.setTimeout(() => {
-          signal?.removeEventListener("abort", handleAbort);
-          resolve();
-        }, delayMs);
-        const handleAbort = () => {
-          globalThis.clearTimeout(timer);
-          reject(syncCancelledError());
-        };
-
-        signal?.addEventListener("abort", handleAbort, { once: true });
-      });
     }
+  } finally {
+    operationSignal.cleanup();
   }
+}
+
+async function prepareGoogleCalendarOperation(
+  ownerUid: string,
+  signal?: AbortSignal,
+  deletionWorkflow?: GoogleCalendarDeletionWorkflow,
+  verifiedStatus?: GoogleCalendarConnectionStatus
+): Promise<GoogleCalendarOperationContext> {
+  const { baseContext, status } = await prepareGoogleCalendarOperationBase(
+    ownerUid,
+    signal,
+    deletionWorkflow,
+    verifiedStatus
+  );
+  const user = baseContext.user;
+  const payload = await requestGoogleCalendarOperationLease({
+    action: "begin-operation",
+    connectionGeneration: status.connectionGeneration,
+    ...(deletionWorkflow
+      ? { deletionWorkflowLeaseId: deletionWorkflow.workflowLeaseId }
+      : {})
+  }, user, baseContext.sessionSignal, signal);
   const operation = payload && typeof payload === "object"
     ? payload as Record<string, unknown>
     : {};
@@ -1510,7 +1777,123 @@ async function releaseGoogleCalendarOperation(context: GoogleCalendarOperationCo
     action: "end-operation",
     connectionGeneration: context.connectionGeneration,
     operationLeaseId: context.operationLeaseId
-  }, true, context.user).catch(() => undefined);
+  }, true, context.user, context.sessionSignal).catch(() => undefined);
+}
+
+function normalizedGoogleCalendarTaskAuthorityState(
+  value: unknown
+): GoogleCalendarTaskAuthorityState | null {
+  return value === "current" || value === "deleted" || value === "stale" || value === "undated"
+    ? value
+    : null;
+}
+
+async function prepareGoogleCalendarTaskOperation(
+  task: GoogleCalendarTaskInput,
+  signal?: AbortSignal,
+  deletionWorkflow?: GoogleCalendarDeletionWorkflow,
+  verifiedStatus?: GoogleCalendarConnectionStatus
+): Promise<{
+  authorityBefore: GoogleCalendarTaskAuthorityState;
+  context: GoogleCalendarOperationContext | null;
+}> {
+  const { baseContext, status } = await prepareGoogleCalendarOperationBase(
+    task.ownerUid,
+    signal,
+    deletionWorkflow,
+    verifiedStatus
+  );
+  const payload = await requestGoogleCalendarOperationLease({
+    action: "begin-task-operation",
+    taskId: task.id,
+    revision: task.revision ?? null,
+    connectionGeneration: status.connectionGeneration,
+    ...(deletionWorkflow
+      ? { deletionWorkflowLeaseId: deletionWorkflow.workflowLeaseId }
+      : {})
+  }, baseContext.user, baseContext.sessionSignal, signal);
+  const operation = payload && typeof payload === "object"
+    ? payload as Record<string, unknown>
+    : {};
+  const authorityBefore = normalizedGoogleCalendarTaskAuthorityState(operation.state);
+  const operationGeneration = normalizedConnectionGeneration(operation.connectionGeneration);
+  const operationLeaseId = normalizedConnectionGeneration(operation.leaseId);
+  const hasLeaseId = Object.prototype.hasOwnProperty.call(operation, "leaseId");
+  const malformedStale = authorityBefore === "stale"
+    && (!hasLeaseId || operation.leaseId !== null);
+  const malformedLeased = authorityBefore !== null
+    && authorityBefore !== "stale"
+    && !operationLeaseId;
+
+  if (!authorityBefore
+    || operationGeneration !== status.connectionGeneration
+    || malformedStale
+    || malformedLeased) {
+    // A malformed response may still represent a successfully acquired server
+    // lease. Release any syntactically valid lease before failing closed.
+    if (operationLeaseId) {
+      await releaseGoogleCalendarOperation({ ...baseContext, operationLeaseId });
+    }
+    throw new GoogleCalendarError(
+      "invalid_auth_response",
+      "Google Calendar 일정 작업 보호 상태를 확인하지 못했습니다."
+    );
+  }
+
+  if (authorityBefore === "stale") {
+    return { authorityBefore, context: null };
+  }
+
+  return {
+    authorityBefore,
+    context: { ...baseContext, operationLeaseId: operationLeaseId! }
+  };
+}
+
+async function finishGoogleCalendarTaskOperation(
+  context: GoogleCalendarOperationContext,
+  task: GoogleCalendarTaskInput
+) {
+  const payload = await backendRequest<unknown>(googleCalendarConnectionApiPath, {
+    action: "finish-task-operation",
+    taskId: task.id,
+    revision: task.revision ?? null,
+    connectionGeneration: context.connectionGeneration,
+    operationLeaseId: context.operationLeaseId
+  }, true, context.user, context.sessionSignal);
+  const state = normalizedGoogleCalendarTaskAuthorityState(
+    payload && typeof payload === "object"
+      ? (payload as Record<string, unknown>).state
+      : null
+  );
+
+  if (!state) {
+    throw new GoogleCalendarError(
+      "invalid_auth_response",
+      "Google Calendar 일정의 완료 상태를 확인하지 못했습니다."
+    );
+  }
+  return state;
+}
+
+function googleCalendarMutationFailure(
+  caught: unknown,
+  mutationMayHaveApplied: boolean
+) {
+  if (!mutationMayHaveApplied) {
+    return caught;
+  }
+  if (caught instanceof GoogleCalendarError) {
+    caught.mutationMayHaveApplied = true;
+    return caught;
+  }
+  return new GoogleCalendarError(
+    "unknown_error",
+    "Google Calendar 반영 여부를 확인하지 못했습니다. 잠시 후 다시 동기화해주세요.",
+    true,
+    null,
+    true
+  );
 }
 
 function assertGoogleCalendarTaskOwner(ownerUid: string) {
@@ -1523,11 +1906,72 @@ function assertGoogleCalendarTaskOwner(ownerUid: string) {
   assertFirebaseUser(user);
 }
 
+export async function reconcileGoogleCalendarTask(
+  task: GoogleCalendarTaskInput,
+  timeZone: string,
+  signal?: AbortSignal,
+  deletionWorkflow?: GoogleCalendarDeletionWorkflow,
+  verifiedStatus?: GoogleCalendarConnectionStatus
+): Promise<GoogleCalendarTaskReconciliationResult> {
+  assertGoogleCalendarTaskOwner(task.ownerUid);
+  if (deletionWorkflow && deletionWorkflow.ownerUid !== task.ownerUid) {
+    throw new GoogleCalendarError(
+      "permission_denied",
+      "현재 QuickMemo 계정의 삭제 보호 상태만 사용할 수 있습니다."
+    );
+  }
+  const requestedConnectionGeneration = knownConnectionGeneration;
+
+  return enqueueEventOperation(task.ownerUid, async () => {
+    const prepared = await prepareGoogleCalendarTaskOperation(
+      task,
+      signal,
+      deletionWorkflow,
+      verifiedStatus
+    );
+
+    if (!prepared.context) {
+      return {
+        authorityBefore: prepared.authorityBefore,
+        authorityAfter: prepared.authorityBefore,
+        result: { eventId: null, outcome: "skipped" }
+      };
+    }
+
+    const context = prepared.context;
+
+    try {
+      if (requestedConnectionGeneration
+        && context.connectionGeneration !== requestedConnectionGeneration) {
+        throw new GoogleCalendarError(
+          "connection_changed",
+          "연결된 Google 계정이 변경되었습니다. 상태를 새로고침한 뒤 다시 시도해주세요."
+        );
+      }
+
+      const result = prepared.authorityBefore === "current"
+        ? await upsertGoogleCalendarTaskNow(task, timeZone, context, signal)
+        : await deleteGoogleCalendarTaskNow(
+          await googleCalendarEventId(task.ownerUid, task.id),
+          context,
+          signal
+        );
+      const authorityAfter = await finishGoogleCalendarTaskOperation(context, task);
+
+      return { authorityBefore: prepared.authorityBefore, authorityAfter, result };
+    } catch (caught) {
+      await releaseGoogleCalendarOperation(context);
+      throw googleCalendarMutationFailure(caught, context.mutationMayHaveApplied);
+    }
+  });
+}
+
 export async function upsertGoogleCalendarTask(
   task: GoogleCalendarTaskInput,
   timeZone: string,
   signal?: AbortSignal,
-  deletionWorkflow?: GoogleCalendarDeletionWorkflow
+  deletionWorkflow?: GoogleCalendarDeletionWorkflow,
+  verifiedStatus?: GoogleCalendarConnectionStatus
 ) {
   assertGoogleCalendarTaskOwner(task.ownerUid);
   if (deletionWorkflow && deletionWorkflow.ownerUid !== task.ownerUid) {
@@ -1539,7 +1983,12 @@ export async function upsertGoogleCalendarTask(
   const requestedConnectionGeneration = knownConnectionGeneration;
 
   return enqueueEventOperation(task.ownerUid, async () => {
-    const context = await prepareGoogleCalendarOperation(task.ownerUid, signal, deletionWorkflow);
+    const context = await prepareGoogleCalendarOperation(
+      task.ownerUid,
+      signal,
+      deletionWorkflow,
+      verifiedStatus
+    );
 
     try {
       if (
@@ -1562,7 +2011,8 @@ export async function upsertGoogleCalendarTask(
 export async function deleteGoogleCalendarTask(
   task: Pick<GoogleCalendarTaskInput, "id" | "ownerUid">,
   signal?: AbortSignal,
-  deletionWorkflow?: GoogleCalendarDeletionWorkflow
+  deletionWorkflow?: GoogleCalendarDeletionWorkflow,
+  verifiedStatus?: GoogleCalendarConnectionStatus
 ) {
   assertGoogleCalendarTaskOwner(task.ownerUid);
   if (deletionWorkflow && deletionWorkflow.ownerUid !== task.ownerUid) {
@@ -1575,7 +2025,12 @@ export async function deleteGoogleCalendarTask(
   const eventId = await googleCalendarEventId(task.ownerUid, task.id);
 
   return enqueueEventOperation(task.ownerUid, async () => {
-    const context = await prepareGoogleCalendarOperation(task.ownerUid, signal, deletionWorkflow);
+    const context = await prepareGoogleCalendarOperation(
+      task.ownerUid,
+      signal,
+      deletionWorkflow,
+      verifiedStatus
+    );
 
     try {
       if (

@@ -559,23 +559,10 @@ service cloud.firestore {
     }
 
     function validScheduleTask(data, uid) {
-      return data.keys().hasAll([
-        "ownerUid",
-        "status",
-        "dueDate",
-        "dueTimeMinutes",
-        "isImportant",
-        "isUrgent",
-        "encryptedTitle",
-        "encryptedDetails",
-        "wrappedKeys",
-        "createdBy",
-        "updatedBy",
-        "createdAt",
-        "updatedAt",
-        "completedAt"
-      ])
-      && data.keys().hasOnly([
+      // Every required field below is read and type-checked. Keeping a second
+      // hasAll list would duplicate those checks and can exhaust Firestore's
+      // per-request expression budget on guarded updates.
+      return data.keys().hasOnly([
         "ownerUid",
         "status",
         "dueDate",
@@ -617,6 +604,46 @@ service cloud.firestore {
       && data.updatedAt is timestamp
       && data.get("calendarUpdatedAt", request.time) is timestamp
       && validScheduleCompletion(data);
+    }
+
+    function validScheduleUpdateFields() {
+      let affectedKeys = request.resource.data.diff(resource.data).affectedKeys();
+      let projectedFieldsChanged = affectedKeys.hasAny([
+        "encryptedTitle",
+        "dueDate",
+        "dueTimeMinutes",
+        "startDate",
+        "endDate",
+        "startTimeMinutes",
+        "endTimeMinutes"
+      ]);
+      let calendarRevisionChanged = affectedKeys.hasAny(["calendarUpdatedAt"]);
+
+      return affectedKeys.hasOnly([
+          "status",
+          "dueDate",
+          "dueTimeMinutes",
+          "startDate",
+          "endDate",
+          "startTimeMinutes",
+          "endTimeMinutes",
+          "color",
+          "sortOrder",
+          "progressPercent",
+          "isImportant",
+          "isUrgent",
+          "encryptedTitle",
+          "encryptedDetails",
+          "updatedBy",
+          "updatedAt",
+          "calendarUpdatedAt",
+          "completedAt"
+        ])
+        && projectedFieldsChanged == calendarRevisionChanged
+        && (
+          !calendarRevisionChanged
+          || request.resource.data.calendarUpdatedAt == request.time
+        );
     }
 
     function validGoogleCalendarTaskTombstone(data, taskId, uid) {
@@ -2199,26 +2226,7 @@ service cloud.firestore {
         && request.resource.data.createdAt == resource.data.createdAt
         && request.resource.data.wrappedKeys == resource.data.wrappedKeys
         && request.resource.data.updatedAt == request.time
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "status",
-          "dueDate",
-          "dueTimeMinutes",
-          "startDate",
-          "endDate",
-          "startTimeMinutes",
-          "endTimeMinutes",
-          "color",
-          "sortOrder",
-          "progressPercent",
-          "isImportant",
-          "isUrgent",
-          "encryptedTitle",
-          "encryptedDetails",
-          "updatedBy",
-          "updatedAt",
-          "calendarUpdatedAt",
-          "completedAt"
-        ]);
+        && validScheduleUpdateFields();
       allow delete: if activeSignedInUser()
         && resource.data.ownerUid == request.auth.uid
         && exists(googleCalendarTaskTombstonePath(taskId))
