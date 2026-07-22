@@ -2143,8 +2143,62 @@ describe("SchedulePage quick work panel", () => {
     renderSchedulePage();
 
     await waitFor(() => expect(listGoogleCalendarTaskSyncReceipts).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listGoogleCalendarTaskTombstones).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(reportGoogleCalendarSync).not.toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }));
     fireEvent(window, new Event("online"));
     await waitFor(() => expect(listGoogleCalendarTaskSyncReceipts).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(reportGoogleCalendarSync).not.toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }));
+  });
+
+  it("waits for deletion protection state before recovering a dated task", async () => {
+    const generation = "g".repeat(43);
+    const datedTask = datedScheduleTaskSnapshot("matrix-task-a", "보호 상태 재시도 일정");
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([datedTask]);
+      return vi.fn();
+    });
+    vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue({
+      configured: true,
+      connected: true,
+      connectedAt: "2025-07-21T23:59:59.000Z",
+      hasStoredConnection: true,
+      needsReconnect: false,
+      connectionGeneration: generation,
+      email: "te***@example.com",
+      lastSyncAt: null,
+      lastSyncStatus: "idle",
+      syncedCount: 0,
+      timeZone: "Asia/Seoul"
+    });
+    vi.mocked(scheduleTaskNeedsGoogleCalendarRecovery).mockReturnValue(true);
+    vi.mocked(listGoogleCalendarTaskTombstones)
+      .mockRejectedValueOnce(new Error("temporary tombstone read failure"))
+      .mockResolvedValue([]);
+
+    renderSchedulePage();
+
+    await waitFor(() => expect(listGoogleCalendarTaskTombstones).toHaveBeenCalledTimes(1));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(upsertGoogleCalendarTask).not.toHaveBeenCalled();
+    expect(deleteGoogleCalendarTask).not.toHaveBeenCalled();
+    expect(markScheduleTaskGoogleCalendarSynced).not.toHaveBeenCalled();
+    expect(reportGoogleCalendarSync).not.toHaveBeenCalledWith(expect.objectContaining({ status: "failed" }));
+
+    fireEvent(window, new Event("online"));
+
+    await waitFor(() => expect(listGoogleCalendarTaskTombstones).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(upsertGoogleCalendarTask).toHaveBeenCalledWith({
+      id: "matrix-task-a",
+      ownerUid: "user-a",
+      title: "보호 상태 재시도 일정",
+      startDate: "2099-01-10",
+      endDate: "2099-01-10",
+      startTimeMinutes: null,
+      endTimeMinutes: null,
+      revision: "001753142400.000000000"
+    }, "Asia/Seoul", expect.any(AbortSignal)));
   });
 
   it("does not cancel or recreate an existing task while another tab's deletion lease is active", async () => {

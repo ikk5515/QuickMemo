@@ -629,11 +629,12 @@ function GoogleCalendarRecoveryWorker({
         retryDelayMs = retryDelayMs === null
           ? googleCalendarRecoveryBackgroundRetryMs
           : Math.min(retryDelayMs, googleCalendarRecoveryBackgroundRetryMs);
-        return;
+        return attempt;
       }
       const delay = Math.min(30_000, baseDelayMs * (2 ** Math.max(0, attempt - 1)));
 
       retryDelayMs = retryDelayMs === null ? delay : Math.min(retryDelayMs, delay);
+      return attempt;
     };
 
     const receiptKey = (task: DecryptedScheduleTask) => {
@@ -696,9 +697,23 @@ function GoogleCalendarRecoveryWorker({
       // Let Firestore deliver the initial encrypted and decrypted snapshots as
       // one stable batch before starting network recovery.
       await new Promise<void>((resolve) => {
-        retryTimer = window.setTimeout(resolve, 250);
+        let settled = false;
+        const finishInitialDelay = () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          if (retryTimer !== null) {
+            window.clearTimeout(retryTimer);
+            retryTimer = null;
+          }
+          controller.signal.removeEventListener("abort", finishInitialDelay);
+          resolve();
+        };
+
+        retryTimer = window.setTimeout(finishInitialDelay, 250);
+        controller.signal.addEventListener("abort", finishInitialDelay, { once: true });
       });
-      retryTimer = null;
       if (!active || controller.signal.aborted) {
         return;
       }
@@ -707,7 +722,23 @@ function GoogleCalendarRecoveryWorker({
 
       let tombstones: GoogleCalendarTaskTombstone[] = [];
       let receipts = new Map<string, Awaited<ReturnType<typeof listGoogleCalendarTaskSyncReceipts>>[number]>();
-      let receiptsAvailable = true;
+      let recoveryStateAvailable = true;
+
+      const recordRecoveryStateFailure = (key: string, caught: unknown) => {
+        recoveryStateAvailable = false;
+        const attempt = requestRetry(key);
+
+        if (attempt <= googleCalendarRecoveryMaxAttempts || firstFailure) {
+          return;
+        }
+        firstFailure = caught instanceof GoogleCalendarError
+          ? caught
+          : new GoogleCalendarError(
+            "calendar_request_failed",
+            "Google Calendar 동기화 보호 상태를 확인하지 못했습니다. 잠시 후 자동으로 다시 시도합니다.",
+            true
+          );
+      };
 
       try {
         receipts = new Map(
@@ -715,17 +746,30 @@ function GoogleCalendarRecoveryWorker({
         );
         attemptsRef.current.delete(`receipt-list:${generation}`);
       } catch (caught) {
-        receiptsAvailable = false;
-        firstFailure = caught;
-        requestRetry(`receipt-list:${generation}`);
+        recordRecoveryStateFailure(`receipt-list:${generation}`, caught);
       }
 
       try {
         tombstones = await listGoogleCalendarTaskTombstones(ownerUid);
         attemptsRef.current.delete(`tombstone-list:${generation}`);
       } catch (caught) {
-        firstFailure = caught;
-        requestRetry(`tombstone-list:${generation}`);
+        recordRecoveryStateFailure(`tombstone-list:${generation}`, caught);
+      }
+
+      if (!active || controller.signal.aborted) {
+        return;
+      }
+      if (!recoveryStateAvailable) {
+        if (firstFailure) {
+          await callbackRef.current.onFailure(firstFailure);
+        }
+        if (!active || controller.signal.aborted) {
+          return;
+        }
+        if (retryDelayMs !== null) {
+          retryTimer = window.setTimeout(() => setRetryTick((current) => current + 1), retryDelayMs);
+        }
+        return;
       }
 
       const matchingTombstones = tombstones.filter(
@@ -803,7 +847,7 @@ function GoogleCalendarRecoveryWorker({
         }
       }
 
-      for (const task of !batchBlocked && receiptsAvailable ? currentTasks : []) {
+      for (const task of !batchBlocked ? currentTasks : []) {
         if (!active || controller.signal.aborted) {
           return;
         }
