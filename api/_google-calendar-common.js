@@ -448,7 +448,34 @@ export async function activeManagementContext(uid, credentials, accessToken) {
   if (!profile || profile.fields?.isActive?.booleanValue !== true) {
     throw new HttpError(403, "inactive_user");
   }
+  if (!profileHasFeatureAccess(profile, "schedule")) {
+    throw new HttpError(403, "feature_access_denied");
+  }
   return { uid, credentials: resolvedCredentials, accessToken: resolvedAccessToken };
+}
+
+function profileHasFeatureAccess(profile, feature) {
+  const fields = profile?.fields;
+
+  if (!fields) {
+    return false;
+  }
+  if (fields.isAdmin?.booleanValue === true) {
+    return true;
+  }
+  if (!Object.prototype.hasOwnProperty.call(fields, "featureAccess")) {
+    return true;
+  }
+
+  const accessFields = fields.featureAccess?.mapValue?.fields;
+  const expectedFeatures = ["notes", "library", "schedule"];
+
+  return Boolean(
+    accessFields
+    && Object.keys(accessFields).length === expectedFeatures.length
+    && expectedFeatures.every((key) => typeof accessFields[key]?.booleanValue === "boolean")
+    && accessFields[feature]?.booleanValue === true
+  );
 }
 
 function headerValue(request, name) {

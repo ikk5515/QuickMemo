@@ -1,10 +1,13 @@
 import {
   ArrowDown,
   ArrowUp,
+  CalendarDays,
   Eye,
   FileText,
   KeyRound,
+  LibraryBig,
   LockKeyhole,
+  NotebookPen,
   Plus,
   Search,
   ShieldCheck,
@@ -24,15 +27,21 @@ import { useAuth } from "../context/AuthContext";
 import { decryptText, generateUserKeyBundle, unwrapNoteKey } from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, previewTextFromHtml } from "../lib/editorContent";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
+import { defaultFeatureAccess, normalizeFeatureAccess } from "../lib/featureAccess";
 import { initialsFromName } from "../lib/roster";
 import { createUser, deleteManagedUserDocuments, updateUser } from "../services/adminFunctions";
 import { deleteNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
 import { subscribeUsers } from "../services/users";
-import type { NoteKind, UserProfile } from "../types";
+import type { AppFeature, FeatureAccess, NoteKind, UserProfile } from "../types";
 
 const palette = ["#2f7d70", "#c75146", "#7c5b9e", "#b9822f", "#3f6fb5", "#65707a"];
 const AUTO_SAVE_DELAY_MS = 550;
 const adminNotePreviewMaxCharacters = 240;
+const featureAccessOptions = [
+  { feature: "notes", label: "노트", icon: NotebookPen },
+  { feature: "library", label: "자료실", icon: LibraryBig },
+  { feature: "schedule", label: "일정관리", icon: CalendarDays }
+] as const;
 
 interface DraftUser {
   displayName: string;
@@ -41,6 +50,7 @@ interface DraftUser {
   quickKey: number;
   password: string;
   isAdmin: boolean;
+  featureAccess: FeatureAccess;
   allowedShareTargetUids: string[];
 }
 
@@ -51,6 +61,7 @@ const initialDraft: DraftUser = {
   quickKey: 0,
   password: "",
   isAdmin: false,
+  featureAccess: { ...defaultFeatureAccess },
   allowedShareTargetUids: []
 };
 
@@ -120,16 +131,18 @@ function persistedShareTargetsOf(user: Pick<UserProfile, "uid" | "isAdmin" | "al
   return user.isAdmin ? [user.uid] : shareTargetsOf(user);
 }
 
-function editableUserDraft(user: UserProfile) {
+export function editableUserDraft(user: UserProfile) {
   return {
     ...user,
     role: user.isAdmin ? ("admin" as const) : ("user" as const),
+    featureAccess: normalizeFeatureAccess(user),
     allowedShareTargetUids: persistedShareTargetsOf(user)
   };
 }
 
-function stableEditableSignature(user: UserProfile) {
+export function stableEditableSignature(user: UserProfile) {
   const shareTargets = persistedShareTargetsOf(user);
+  const featureAccess = normalizeFeatureAccess(user);
   const sortedTargets = [
     user.uid,
     ...shareTargets.filter((targetUid) => targetUid !== user.uid).sort((left, right) => left.localeCompare(right))
@@ -144,6 +157,7 @@ function stableEditableSignature(user: UserProfile) {
     order: Number(user.order),
     isActive: user.isActive,
     isAdmin: user.isAdmin,
+    featureAccess,
     allowedShareTargetUids: sortedTargets
   });
 }
@@ -214,7 +228,7 @@ function createUserValidationError(draft: DraftUser, users: UserProfile[], fallb
   return null;
 }
 
-function updatePayloadFromDraft(user: UserProfile) {
+export function updatePayloadFromDraft(user: UserProfile) {
   return {
     uid: user.uid,
     displayName: user.displayName,
@@ -224,8 +238,52 @@ function updatePayloadFromDraft(user: UserProfile) {
     order: Number(user.order),
     isActive: user.isActive,
     isAdmin: user.isAdmin,
+    featureAccess: normalizeFeatureAccess(user),
     allowedShareTargetUids: persistedShareTargetsOf(user)
   };
+}
+
+export function FeatureAccessFields({
+  access,
+  disabled,
+  onToggle
+}: {
+  access: FeatureAccess;
+  disabled: boolean;
+  onToggle: (feature: AppFeature, checked: boolean) => void;
+}) {
+  const enabledCount = featureAccessOptions.filter(({ feature }) => access[feature]).length;
+
+  return (
+    <>
+      <div className="permission-editor-header">
+        <span>
+          <ShieldCheck size={16} />
+          기능 권한
+        </span>
+        <strong>{enabledCount}/{featureAccessOptions.length}</strong>
+      </div>
+      <p className="muted">
+        {disabled
+          ? "관리자는 계정 운영을 위해 모든 기능을 사용합니다."
+          : "체크한 기능만 해당 사용자의 메뉴와 작업 공간에서 사용할 수 있습니다."}
+      </p>
+      <div className="permission-chip-grid" role="group" aria-label="사용 기능">
+        {featureAccessOptions.map(({ feature, icon: Icon, label }) => (
+          <label key={feature} className="permission-chip">
+            <input
+              checked={access[feature]}
+              disabled={disabled}
+              onChange={(event) => onToggle(feature, event.target.checked)}
+              type="checkbox"
+            />
+            <Icon aria-hidden="true" size={15} />
+            {label}
+          </label>
+        ))}
+      </div>
+    </>
+  );
 }
 
 export default function AdminPage() {
@@ -493,6 +551,7 @@ function AdminDashboard() {
         quickKey: Number(draft.quickKey || nextQuickKey),
         password: draft.password,
         isAdmin: draft.isAdmin,
+        featureAccess: normalizeFeatureAccess(draft),
         allowedShareTargetUids: draft.isAdmin ? [] : draft.allowedShareTargetUids,
         keyBundle
       });
@@ -527,6 +586,16 @@ function AdminDashboard() {
       allowedShareTargetUids: checked
         ? Array.from(new Set([...current.allowedShareTargetUids, uid]))
         : current.allowedShareTargetUids.filter((targetUid) => targetUid !== uid)
+    }));
+  }
+
+  function toggleDraftFeatureAccess(feature: AppFeature, checked: boolean) {
+    setDraft((current) => ({
+      ...current,
+      featureAccess: {
+        ...normalizeFeatureAccess(current),
+        [feature]: checked
+      }
     }));
   }
 
@@ -684,38 +753,54 @@ function AdminDashboard() {
               <label className="checkbox-row">
                 <input
                   checked={draft.isAdmin}
-                  onChange={(event) => setDraft((current) => ({ ...current, isAdmin: event.target.checked }))}
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      isAdmin: event.target.checked,
+                      featureAccess: event.target.checked
+                        ? { ...defaultFeatureAccess }
+                        : current.featureAccess
+                    }))
+                  }
                   type="checkbox"
                 />
                 관리자 권한
               </label>
-              {!draft.isAdmin && activeUsers.length > 0 && (
-                <div className="permission-editor create-permission-editor">
-                  <div className="permission-editor-header">
-                    <span>
-                      <UsersRound size={16} />
-                      공유 허용 대상
-                    </span>
-                    <strong>{draft.allowedShareTargetUids.length}</strong>
-                  </div>
-                  <div className="permission-chip-grid">
-                    {activeUsers.map((user) => (
-                      <label key={user.uid} className="permission-chip">
-                        <input
-                          checked={draft.allowedShareTargetUids.includes(user.uid)}
-                          onChange={(event) => toggleDraftShareTarget(user.uid, event.target.checked)}
-                          type="checkbox"
-                        />
-                        <span className="mini-avatar" style={{ background: user.color }}>
-                          {user.avatarText}
-                        </span>
-                        {user.displayName}
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {draft.isAdmin && <p className="admin-share-note">관리자는 모든 사용자에게 공유할 수 있습니다.</p>}
+              <div className="permission-editor create-permission-editor">
+                <FeatureAccessFields
+                  access={normalizeFeatureAccess(draft)}
+                  disabled={draft.isAdmin}
+                  onToggle={toggleDraftFeatureAccess}
+                />
+                {!draft.isAdmin && (
+                  <>
+                    <div className="permission-editor-header">
+                      <span>
+                        <UsersRound size={16} />
+                        공유 허용 대상
+                      </span>
+                      <strong>{draft.allowedShareTargetUids.length}</strong>
+                    </div>
+                    <div className="permission-chip-grid">
+                      {activeUsers.map((user) => (
+                        <label key={user.uid} className="permission-chip">
+                          <input
+                            checked={draft.allowedShareTargetUids.includes(user.uid)}
+                            onChange={(event) => toggleDraftShareTarget(user.uid, event.target.checked)}
+                            type="checkbox"
+                          />
+                          <span className="mini-avatar" style={{ background: user.color }}>
+                            {user.avatarText}
+                          </span>
+                          {user.displayName}
+                        </label>
+                      ))}
+                      {activeUsers.length === 0 && <p className="muted">선택할 사용자가 없습니다.</p>}
+                    </div>
+                  </>
+                )}
+                {draft.isAdmin && <p className="admin-share-note">관리자는 모든 사용자에게 공유할 수 있습니다.</p>}
+              </div>
               {notice && <p className="form-success">{notice}</p>}
               {error && <p className="form-error">{error}</p>}
               <button disabled={pending} type="submit">
@@ -961,7 +1046,7 @@ function AdminStat({ icon, label, value }: { icon: ReactNode; label: string; val
   );
 }
 
-function EditableUserCard({
+export function EditableUserCard({
   activeAdminCount,
   currentUid,
   user,
@@ -1017,8 +1102,8 @@ function EditableUserCard({
           const draftSignature = stableEditableSignature(draftToSave);
 
           if (
-            draftSignature === confirmedSignatureRef.current ||
-            draftSignature === lastSubmittedSignatureRef.current
+            draftSignature === confirmedSignatureRef.current
+            && draftSignature === lastSubmittedSignatureRef.current
           ) {
             setMessage("저장됨");
             continue;
@@ -1082,7 +1167,13 @@ function EditableUserCard({
   function updateDraft(updater: (current: UserProfile) => UserProfile, saveMode: "debounced" | "immediate" = "debounced") {
     const nextDraft = editableUserDraft(updater(draftRef.current));
     const nextSignature = stableEditableSignature(nextDraft);
-    const isDirty = nextSignature !== confirmedSignatureRef.current;
+    const saveHasUnconfirmedState = savingRef.current
+      || latestSaveDraftRef.current !== null
+      || (
+        lastSubmittedSignatureRef.current !== null
+        && lastSubmittedSignatureRef.current !== confirmedSignatureRef.current
+      );
+    const isDirty = nextSignature !== confirmedSignatureRef.current || saveHasUnconfirmedState;
 
     draftRef.current = nextDraft;
     dirtyRef.current = isDirty;
@@ -1176,6 +1267,16 @@ function EditableUserCard({
     }, "immediate");
   }
 
+  function toggleFeatureAccess(feature: AppFeature, checked: boolean) {
+    updateDraft((current) => ({
+      ...current,
+      featureAccess: {
+        ...normalizeFeatureAccess(current),
+        [feature]: checked
+      }
+    }), "immediate");
+  }
+
   return (
     <article className={`admin-user-card ${draft.isActive ? "" : "inactive"}`}>
       <header className="admin-user-card-header">
@@ -1250,6 +1351,9 @@ function EditableUserCard({
                   ...current,
                   isAdmin: event.target.checked,
                   role: event.target.checked ? "admin" : "user",
+                  featureAccess: event.target.checked
+                    ? { ...defaultFeatureAccess }
+                    : normalizeFeatureAccess(current),
                   allowedShareTargetUids: event.target.checked ? [user.uid] : shareTargetsOf(current)
                 }),
                 "immediate"
@@ -1269,35 +1373,42 @@ function EditableUserCard({
         </label>
       </div>
 
-      {draft.isAdmin ? (
-        <p className="admin-share-note">관리자는 공유 허용 대상 설정 없이 모든 사용자에게 공유할 수 있습니다.</p>
-      ) : (
-        <div className="permission-editor">
-          <div className="permission-editor-header">
-            <span>
-              <UsersRound size={16} />
-              공유 허용 대상
-            </span>
-            <strong>{selectedTargetUsers.length}</strong>
-          </div>
-          <div className="permission-chip-grid">
-            {targetUsers.map((targetUser) => (
-              <label key={targetUser.uid} className="permission-chip">
-                <input
-                  checked={targetUids.includes(targetUser.uid)}
-                  onChange={(event) => toggleShareTarget(targetUser.uid, event.target.checked)}
-                  type="checkbox"
-                />
-                <span className="mini-avatar" style={{ background: targetUser.color }}>
-                  {targetUser.avatarText}
-                </span>
-                {targetUser.displayName}
-              </label>
-            ))}
-            {targetUsers.length === 0 && <p className="muted">선택할 사용자가 없습니다.</p>}
-          </div>
-        </div>
-      )}
+      <div className="permission-editor">
+        <FeatureAccessFields
+          access={normalizeFeatureAccess(draft)}
+          disabled={draft.isAdmin}
+          onToggle={toggleFeatureAccess}
+        />
+        {draft.isAdmin ? (
+          <p className="admin-share-note">관리자는 공유 허용 대상 설정 없이 모든 사용자에게 공유할 수 있습니다.</p>
+        ) : (
+          <>
+            <div className="permission-editor-header">
+              <span>
+                <UsersRound size={16} />
+                공유 허용 대상
+              </span>
+              <strong>{selectedTargetUsers.length}</strong>
+            </div>
+            <div className="permission-chip-grid">
+              {targetUsers.map((targetUser) => (
+                <label key={targetUser.uid} className="permission-chip">
+                  <input
+                    checked={targetUids.includes(targetUser.uid)}
+                    onChange={(event) => toggleShareTarget(targetUser.uid, event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span className="mini-avatar" style={{ background: targetUser.color }}>
+                    {targetUser.avatarText}
+                  </span>
+                  {targetUser.displayName}
+                </label>
+              ))}
+              {targetUsers.length === 0 && <p className="muted">선택할 사용자가 없습니다.</p>}
+            </div>
+          </>
+        )}
+      </div>
 
       <footer className="admin-user-card-footer">
         <div className="row-actions">

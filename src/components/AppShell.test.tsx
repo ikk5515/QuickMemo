@@ -139,6 +139,39 @@ describe("SettingsModal", () => {
       scheduleDefaultView: "todo"
     });
   });
+
+  it("only offers granted features and hides schedule settings when denied", () => {
+    render(
+      <SettingsModal
+        featureAccess={{ notes: false, library: true, schedule: false }}
+        preferences={preferences()}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+      />
+    );
+
+    const homeSelect = screen.getByLabelText("작업 시작 기본 화면") as HTMLSelectElement;
+    expect(homeSelect.value).toBe("library");
+    expect(screen.getByRole("option", { name: "자료실" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "노트" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("일정관리 기본 화면")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "매트릭스 명칭 설정" })).not.toBeInTheDocument();
+  });
+
+  it("explains when no workspace feature is available", () => {
+    render(
+      <SettingsModal
+        featureAccess={{ notes: false, library: false, schedule: false }}
+        preferences={preferences()}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("현재 사용할 수 있는 작업 기능이 없습니다. 관리자에게 권한을 요청해 주세요.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("작업 시작 기본 화면")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  });
 });
 
 describe("ThemeToggleButton", () => {

@@ -116,6 +116,21 @@ describe("blob attachment backend", () => {
     expect(deleteAttachmentSource).toContain("canDeleteNoteAttachmentPolicy");
   });
 
+  it("mirrors Notes feature revocation across authenticated and public-share Blob access", () => {
+    const profileSource = blobAttachmentApiSource.match(
+      /async function userProfile[\s\S]*?function noteIsDeleted/u
+    )?.[0] ?? "";
+    const publicShareSource = blobAttachmentApiSource.match(
+      /async function publicShareSourceAvailable[\s\S]*?async function reserveUserAttachmentBytes/u
+    )?.[0] ?? "";
+
+    expect(profileSource).toContain('profileHasFeatureAccess(document, "notes")');
+    expect(profileSource).toContain('Object.prototype.hasOwnProperty.call(document.fields, "featureAccess")');
+    expect(profileSource).toContain('const expectedFeatures = ["notes", "library", "schedule"]');
+    expect(publicShareSource).toContain("userProfile(projectId, ownerUid, accessToken)");
+    expect(publicShareSource).toContain("ownerIsActive: ownerProfile.isActive");
+  });
+
   it("re-checks active user state before marking Blob uploads ready", () => {
     const markReadySource = blobAttachmentApiSource.match(/async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u)?.[0] ?? "";
 

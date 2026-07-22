@@ -24,6 +24,15 @@ const revokedNoteStoragePath = "notes/revoked-share/attachments/revoked-attachme
 const revokedUploadStoragePath = "notes/revoked-share/attachments/revoked-upload/data";
 const shareStoragePath = "publicNoteShares/share-a/attachments/attachment-a/data";
 
+function featureAccess(overrides: Partial<Record<"notes" | "library" | "schedule", boolean>> = {}) {
+  return {
+    notes: true,
+    library: true,
+    schedule: true,
+    ...overrides
+  };
+}
+
 function encryptedBytes(size = 32) {
   return new Uint8Array(size);
 }
@@ -200,6 +209,32 @@ describeStorageRules("storage security rules", () => {
       });
     });
     await assertSucceeds(userStorage.ref(noteStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        featureAccess: featureAccess({ notes: false })
+      });
+    });
+    await assertFails(userStorage.ref(noteStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        isAdmin: true,
+        featureAccess: featureAccess({ notes: false, library: false, schedule: false })
+      });
+    });
+    await assertSucceeds(userStorage.ref(noteStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        isAdmin: false,
+        featureAccess: { notes: true, library: true }
+      });
+    });
+    await assertFails(userStorage.ref(noteStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        featureAccess: featureAccess()
+      });
+    });
+    await assertSucceeds(userStorage.ref(noteStoragePath).getMetadata());
     await assertFails(userStorage.ref(noteStoragePath).delete());
   });
 
@@ -210,7 +245,7 @@ describeStorageRules("storage security rules", () => {
         uid: "user-a",
         isActive: true,
         isAdmin: false,
-        allowedShareTargetUids: ["user-a"]
+        allowedShareTargetUids: ["user-a", "user-b"]
       });
       await setDoc(doc(db, "users/user-b"), {
         uid: "user-b",
@@ -281,6 +316,28 @@ describeStorageRules("storage security rules", () => {
     const revokedStorage = testEnv.authenticatedContext("user-b").storage(bucketUrl);
 
     await assertSucceeds(ownerStorage.ref(revokedNoteStoragePath).getMetadata());
+    await assertSucceeds(revokedStorage.ref(revokedNoteStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-b"), {
+        featureAccess: featureAccess({ notes: false })
+      });
+    });
+    await assertFails(revokedStorage.ref(revokedNoteStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await updateDoc(doc(db, "users/user-b"), { featureAccess: featureAccess() });
+      await updateDoc(doc(db, "users/user-a"), {
+        featureAccess: featureAccess({ notes: false })
+      });
+    });
+    await assertFails(ownerStorage.ref(revokedNoteStoragePath).getMetadata());
+    await assertFails(revokedStorage.ref(revokedNoteStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        featureAccess: featureAccess(),
+        allowedShareTargetUids: ["user-a"]
+      });
+    });
     await assertFails(revokedStorage.ref(revokedNoteStoragePath).getMetadata());
     await assertFails(
       uploadTaskPromise(
@@ -407,6 +464,19 @@ describeStorageRules("storage security rules", () => {
     await assertFails(publicStorage.ref(shareStoragePath).getMetadata());
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await updateDoc(doc(context.firestore(), "publicNoteShares/share-a"), { sourceAttachmentRevision: 3 });
+    });
+    await assertSucceeds(publicStorage.ref(shareStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        featureAccess: featureAccess({ notes: false })
+      });
+    });
+    await assertFails(publicStorage.ref(shareStoragePath).getMetadata());
+    await assertFails(ownerStorage.ref(shareStoragePath).getMetadata());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        featureAccess: featureAccess()
+      });
     });
     await assertSucceeds(publicStorage.ref(shareStoragePath).getMetadata());
     await assertFails(ownerStorage.ref(shareStoragePath).delete());

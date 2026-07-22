@@ -22,8 +22,9 @@ import {
   type Firestore,
   writeBatch
 } from "firebase/firestore";
+import { normalizeFeatureAccess } from "../lib/featureAccess";
 import { appCheckSiteKey, auth, db, firebaseConfig } from "../lib/firebase";
-import type { NewUserPayload, PublicRosterUser, UserProfile } from "../types";
+import type { FeatureAccess, NewUserPayload, PublicRosterUser, UserProfile } from "../types";
 
 export interface BootstrapState {
   adminExists: boolean;
@@ -48,6 +49,7 @@ export interface UpdateUserPayload {
   order: number;
   isActive: boolean;
   isAdmin: boolean;
+  featureAccess: FeatureAccess;
   allowedShareTargetUids: string[];
 }
 
@@ -75,7 +77,7 @@ async function nextOrder() {
   return lastUser ? Number(lastUser.get("order") ?? 0) + 1 : 1;
 }
 
-function profileDocument(uid: string, loginEmail: string, payload: NewUserPayload, order: number) {
+export function profileDocument(uid: string, loginEmail: string, payload: NewUserPayload, order: number) {
   const now = serverTimestamp();
 
   return {
@@ -90,6 +92,7 @@ function profileDocument(uid: string, loginEmail: string, payload: NewUserPayloa
     isAdmin: payload.isAdmin,
     role: payload.isAdmin ? "admin" : "user",
     publicKeyJwk: payload.keyBundle.publicKeyJwk,
+    featureAccess: normalizeFeatureAccess(payload),
     allowedShareTargetUids: Array.from(new Set([uid, ...(payload.allowedShareTargetUids ?? [])])),
     createdAt: now,
     updatedAt: now,
@@ -258,6 +261,7 @@ export async function updateUser(payload: UpdateUserPayload) {
       isActive: payload.isActive,
       isAdmin: payload.isAdmin,
       role: payload.isAdmin ? "admin" : "user",
+      featureAccess: normalizeFeatureAccess(payload),
       allowedShareTargetUids: Array.from(new Set([payload.uid, ...payload.allowedShareTargetUids])),
       updatedAt: serverTimestamp()
     };

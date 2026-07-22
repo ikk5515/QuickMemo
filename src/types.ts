@@ -1,6 +1,8 @@
 import type { Bytes, Timestamp } from "firebase/firestore";
 
 export type UserRole = "admin" | "user";
+export type AppFeature = "notes" | "library" | "schedule";
+export type FeatureAccess = Record<AppFeature, boolean>;
 
 export interface PublicRosterUser {
   uid: string;
@@ -17,6 +19,7 @@ export interface PublicRosterUser {
 export interface UserProfile extends PublicRosterUser {
   role: UserRole;
   publicKeyJwk: JsonWebKey;
+  featureAccess?: FeatureAccess;
   allowedShareTargetUids?: string[];
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
@@ -406,6 +409,7 @@ export interface NewUserPayload {
   quickKey: number;
   password: string;
   isAdmin: boolean;
+  featureAccess?: FeatureAccess;
   allowedShareTargetUids?: string[];
   keyBundle: UserKeyBundle;
 }

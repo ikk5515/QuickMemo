@@ -4,6 +4,7 @@ import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { hasFirebaseConfig } from "../lib/firebase";
+import { appFeatures, defaultFeatureAccess, normalizeFeatureAccess, resolveAccessibleHome } from "../lib/featureAccess";
 import {
   applyThemePreference,
   getStoredThemePreference,
@@ -27,7 +28,7 @@ import {
   subscribeUserPreferences,
   type SaveUserPreferencesInput
 } from "../services/userPreferences";
-import type { MatrixLabels, ThemePreference, UserPreferencesDocument } from "../types";
+import type { DefaultHomeView, FeatureAccess, MatrixLabels, ThemePreference, UserPreferencesDocument } from "../types";
 
 export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
   const { changePassword, profile, signOut } = useAuth();
@@ -41,6 +42,10 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
   );
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveThemePreference(themePreference));
   const [themeStatus, setThemeStatus] = useState<string | null>(null);
+  const featureAccess = useMemo(
+    () => normalizeFeatureAccess(profile),
+    [profile]
+  );
 
   useEffect(() => {
     if (!profile) {
@@ -108,18 +113,24 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           <span>QuickMemo</span>
         </Link>
         <nav className="nav-links" aria-label="주요 메뉴">
-          <NavLink to="/app" onClick={onNavigateHome}>
-            <NotebookPen size={18} />
-            노트
-          </NavLink>
-          <NavLink to="/library">
-            <LibraryBig size={18} />
-            자료실
-          </NavLink>
-          <NavLink to="/schedule">
-            <CalendarDays size={18} />
-            일정관리
-          </NavLink>
+          {featureAccess.notes && (
+            <NavLink to="/app" onClick={onNavigateHome}>
+              <NotebookPen size={18} />
+              노트
+            </NavLink>
+          )}
+          {featureAccess.library && (
+            <NavLink to="/library">
+              <LibraryBig size={18} />
+              자료실
+            </NavLink>
+          )}
+          {featureAccess.schedule && (
+            <NavLink to="/schedule">
+              <CalendarDays size={18} />
+              일정관리
+            </NavLink>
+          )}
           {profile?.isAdmin && (
             <NavLink to="/admin">
               <Shield size={18} />
@@ -168,6 +179,7 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
       )}
       {settingsModalOpen && profile && (
         <SettingsModal
+          featureAccess={featureAccess}
           preferences={preferences}
           onClose={() => setSettingsModalOpen(false)}
           onSave={(nextPreferences) => saveUserPreferences(profile.uid, nextPreferences)}
@@ -203,15 +215,19 @@ export function ThemeToggleButton({
 }
 
 export function SettingsModal({
+  featureAccess = defaultFeatureAccess,
   onClose,
   onSave,
   preferences
 }: {
+  featureAccess?: FeatureAccess;
   onClose: () => void;
   onSave: (preferences: SaveUserPreferencesInput) => Promise<void>;
   preferences: UserPreferencesDocument | null;
 }) {
-  const [defaultHome, setDefaultHome] = useState<UserPreferencesDocument["defaultHome"]>(preferences?.defaultHome ?? "notes");
+  const preferredDefaultHome = preferences?.defaultHome ?? "notes";
+  const savedAccessibleHome = resolveAccessibleHome({ featureAccess }, preferredDefaultHome);
+  const [defaultHome, setDefaultHome] = useState<DefaultHomeView | null>(savedAccessibleHome);
   const [scheduleDefaultView, setScheduleDefaultView] = useState<UserPreferencesDocument["scheduleDefaultView"]>(
     normalizePrimaryScheduleView(preferences?.scheduleDefaultView)
   );
@@ -221,16 +237,17 @@ export function SettingsModal({
   const [error, setError] = useState<string | null>(null);
   const savedMatrixLabels = useMemo(() => normalizeMatrixLabels(preferences?.matrixLabels), [preferences]);
   const nextMatrixLabels = useMemo(() => sanitizeMatrixLabelsForSave(matrixLabels), [matrixLabels]);
+  const availableDefaultHomes = appFeatures.filter((feature) => featureAccess[feature]);
   const hasChanges =
-    defaultHome !== (preferences?.defaultHome ?? "notes")
-    || scheduleDefaultView !== normalizePrimaryScheduleView(preferences?.scheduleDefaultView)
-    || !sameMatrixLabels(nextMatrixLabels, savedMatrixLabels);
+    defaultHome !== savedAccessibleHome
+    || (featureAccess.schedule && scheduleDefaultView !== normalizePrimaryScheduleView(preferences?.scheduleDefaultView))
+    || (featureAccess.schedule && !sameMatrixLabels(nextMatrixLabels, savedMatrixLabels));
 
   useEffect(() => {
-    setDefaultHome(preferences?.defaultHome ?? "notes");
+    setDefaultHome(resolveAccessibleHome({ featureAccess }, preferences?.defaultHome ?? "notes"));
     setScheduleDefaultView(normalizePrimaryScheduleView(preferences?.scheduleDefaultView));
     setMatrixLabels(normalizeMatrixLabels(preferences?.matrixLabels));
-  }, [preferences]);
+  }, [featureAccess, preferences]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -245,7 +262,7 @@ export function SettingsModal({
 
   async function submitSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const validationError = validateMatrixLabels(matrixLabels);
+    const validationError = featureAccess.schedule ? validateMatrixLabels(matrixLabels) : null;
 
     if (validationError) {
       setError(validationError);
@@ -258,7 +275,17 @@ export function SettingsModal({
     setMessage(null);
 
     try {
-      await onSave({ defaultHome, matrixLabels: nextMatrixLabels, scheduleDefaultView });
+      const nextPreferences: SaveUserPreferencesInput = {};
+
+      if (defaultHome) {
+        nextPreferences.defaultHome = defaultHome;
+      }
+      if (featureAccess.schedule) {
+        nextPreferences.matrixLabels = nextMatrixLabels;
+        nextPreferences.scheduleDefaultView = scheduleDefaultView;
+      }
+
+      await onSave(nextPreferences);
       setMessage("설정을 저장했습니다.");
     } catch {
       setError("설정을 저장하지 못했습니다.");
@@ -305,31 +332,39 @@ export function SettingsModal({
         <form className="form-grid compact" onSubmit={(event) => void submitSettings(event)}>
           <section className="settings-form-section" aria-labelledby="settings-workspace-title">
             <h3 id="settings-workspace-title">작업 환경</h3>
-            <label>
-              작업 시작 기본 화면
-              <select
-                onChange={(event) => setDefaultHome(event.target.value as UserPreferencesDocument["defaultHome"])}
-                value={defaultHome}
-              >
-                <option value="notes">노트</option>
-                <option value="library">자료실</option>
-                <option value="schedule">일정관리</option>
-              </select>
-            </label>
-            <label>
-              일정관리 기본 화면
-              <select
-                onChange={(event) => setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"])}
-                value={scheduleDefaultView}
-              >
-                <option value="todo">할 일</option>
-                <option value="calendar">달력</option>
-                <option value="matrix">매트릭스</option>
-                <option value="recurring">반복 업무</option>
-              </select>
-            </label>
+            {availableDefaultHomes.length > 0 ? (
+              <label>
+                작업 시작 기본 화면
+                <select
+                  onChange={(event) => setDefaultHome(event.target.value as DefaultHomeView)}
+                  value={defaultHome ?? ""}
+                >
+                  {featureAccess.notes && <option value="notes">노트</option>}
+                  {featureAccess.library && <option value="library">자료실</option>}
+                  {featureAccess.schedule && <option value="schedule">일정관리</option>}
+                </select>
+              </label>
+            ) : (
+              <p className="settings-access-note" role="status">
+                현재 사용할 수 있는 작업 기능이 없습니다. 관리자에게 권한을 요청해 주세요.
+              </p>
+            )}
+            {featureAccess.schedule && (
+              <label>
+                일정관리 기본 화면
+                <select
+                  onChange={(event) => setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"])}
+                  value={scheduleDefaultView}
+                >
+                  <option value="todo">할 일</option>
+                  <option value="calendar">달력</option>
+                  <option value="matrix">매트릭스</option>
+                  <option value="recurring">반복 업무</option>
+                </select>
+              </label>
+            )}
           </section>
-          <section className="settings-form-section matrix-label-settings" aria-labelledby="matrix-label-settings-title">
+          {featureAccess.schedule && <section className="settings-form-section matrix-label-settings" aria-labelledby="matrix-label-settings-title">
             <div className="settings-section-heading">
               <div>
                 <h3 id="matrix-label-settings-title">매트릭스 명칭 설정</h3>
@@ -366,7 +401,7 @@ export function SettingsModal({
             <p className="settings-inline-status" role="status">
               {hasChanges ? "변경사항 있음" : "저장된 설정과 같습니다."}
             </p>
-          </section>
+          </section>}
           {error && <p className="form-error">{error}</p>}
           {message && <p className="form-success">{message}</p>}
           <button disabled={busy || !hasChanges} type="submit">

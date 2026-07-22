@@ -643,12 +643,35 @@ function publicShareBlobPath(uid, shareId, attachmentId) {
 
 async function userProfile(projectId, uid, accessToken) {
   const document = await firestoreGetDocument(projectId, `users/${uid}`, accessToken);
+  const accountIsActive = valueBoolean(document, "isActive");
 
   return {
-    isActive: valueBoolean(document, "isActive"),
+    isActive: accountIsActive && profileHasFeatureAccess(document, "notes"),
     isAdmin: valueBoolean(document, "isAdmin"),
     allowedShareTargetUids: valueStringArray(document, "allowedShareTargetUids")
   };
+}
+
+function profileHasFeatureAccess(document, feature) {
+  if (!document?.fields) {
+    return false;
+  }
+  if (valueBoolean(document, "isAdmin")) {
+    return true;
+  }
+  if (!Object.prototype.hasOwnProperty.call(document.fields, "featureAccess")) {
+    return true;
+  }
+
+  const accessFields = document.fields.featureAccess?.mapValue?.fields;
+  const expectedFeatures = ["notes", "library", "schedule"];
+
+  return Boolean(
+    accessFields
+    && Object.keys(accessFields).length === expectedFeatures.length
+    && expectedFeatures.every((key) => typeof accessFields[key]?.booleanValue === "boolean")
+    && accessFields[feature]?.booleanValue === true
+  );
 }
 
 function noteIsDeleted(note) {

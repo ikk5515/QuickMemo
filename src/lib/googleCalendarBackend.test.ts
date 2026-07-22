@@ -25,6 +25,11 @@ interface FirestoreDocument {
 }
 
 interface BackendModule {
+  activeManagementContext(
+    uid: string,
+    credentials: { projectId: string },
+    accessToken: string
+  ): Promise<BackendContext>;
   beginGoogleCalendarTaskOperation(
     context: BackendContext,
     expectedGeneration: string,
@@ -285,6 +290,55 @@ function backendJsonResponse(body: unknown, status = 200) {
 }
 
 describe("Google Calendar backend security", () => {
+  it("enforces schedule permission for every authenticated management context", async () => {
+    let profileFields: Record<string, unknown> = {
+      isActive: { booleanValue: true }
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/documents/users/user-a")) {
+        return backendJsonResponse({ fields: profileFields });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(backend.activeManagementContext(
+      "user-a",
+      backendContext.credentials,
+      backendContext.accessToken
+    )).resolves.toEqual(backendContext);
+
+    profileFields = {
+      isActive: { booleanValue: true },
+      isAdmin: { booleanValue: false },
+      featureAccess: {
+        mapValue: {
+          fields: {
+            notes: { booleanValue: true },
+            library: { booleanValue: true },
+            schedule: { booleanValue: false }
+          }
+        }
+      }
+    };
+    await expect(backend.activeManagementContext(
+      "user-a",
+      backendContext.credentials,
+      backendContext.accessToken
+    )).rejects.toMatchObject({ statusCode: 403, errorCode: "feature_access_denied" });
+
+    profileFields = {
+      ...profileFields,
+      isAdmin: { booleanValue: true }
+    };
+    await expect(backend.activeManagementContext(
+      "user-a",
+      backendContext.credentials,
+      backendContext.accessToken
+    )).resolves.toEqual(backendContext);
+  });
+
   it("generates a standards-compliant PKCE S256 verifier and challenge", async () => {
     const first = await backend.buildPkcePair();
     const second = await backend.buildPkcePair();

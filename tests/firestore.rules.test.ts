@@ -62,6 +62,15 @@ const userKeyPayload = {
 };
 const bootstrapSetupTokenHash = "a".repeat(64);
 
+function featureAccess(overrides: Partial<Record<"notes" | "library" | "schedule", boolean>> = {}) {
+  return {
+    notes: true,
+    library: true,
+    schedule: true,
+    ...overrides
+  };
+}
+
 function userProfile(uid: string, overrides: Record<string, unknown> = {}) {
   const isAdmin = Boolean(overrides.isAdmin);
 
@@ -757,6 +766,47 @@ describeRules("firestore security rules", () => {
     await assertFails(updateDoc(doc(adminDb, "users/user-b"), { loginEmail: "changed@quickmemo.local" }));
   });
 
+  it("allows only admins to persist a strictly shaped per-user feature access map", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "system/bootstrap"), { adminUid: "admin-a" });
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(db, "quickLoginKeys/2"), quickLoginKey("user-b", 2));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b", { order: 2, quickKey: 2 }));
+      await setDoc(doc(db, "publicLoginRoster/user-b"), rosterProfile("user-b", { order: 2, quickKey: 2 }));
+    });
+
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const userDb = testEnv.authenticatedContext("user-b").firestore();
+    const userRef = doc(adminDb, "users/user-b");
+
+    await assertSucceeds(
+      updateDoc(userRef, {
+        featureAccess: featureAccess({ library: false, schedule: false })
+      })
+    );
+    await assertFails(
+      updateDoc(userRef, {
+        featureAccess: { notes: true, library: true }
+      })
+    );
+    await assertFails(
+      updateDoc(userRef, {
+        featureAccess: { ...featureAccess(), billing: true }
+      })
+    );
+    await assertFails(
+      updateDoc(userRef, {
+        featureAccess: { ...featureAccess(), schedule: "yes" }
+      })
+    );
+    await assertFails(
+      updateDoc(doc(userDb, "users/user-b"), {
+        featureAccess: featureAccess()
+      })
+    );
+  });
+
   it("blocks inactive users from sensitive reads and note creation", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { isActive: false }));
@@ -789,6 +839,131 @@ describeRules("firestore security rules", () => {
         updatedBy: "user-a"
       })
     );
+  });
+
+  it("enforces independent feature access while preserving legacy users and the admin bypass", async () => {
+    const accessByUid: Record<string, Record<string, unknown>> = {
+      "legacy-user": {},
+      "notes-user": { featureAccess: featureAccess({ library: false, schedule: false }) },
+      "library-user": { featureAccess: featureAccess({ notes: false, schedule: false }) },
+      "schedule-user": { featureAccess: featureAccess({ notes: false, library: false }) },
+      "admin-a": { isAdmin: true, role: "admin", featureAccess: featureAccess({ notes: false, library: false, schedule: false }) },
+      "malformed-user": { featureAccess: { notes: true, library: true } }
+    };
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+
+      for (const [uid, overrides] of Object.entries(accessByUid)) {
+        await setDoc(doc(db, `users/${uid}`), userProfile(uid, overrides));
+        await setDoc(doc(db, `libraryVaults/${uid}`), { ownerUid: uid });
+        await setDoc(doc(db, `libraryItems/item-${uid}`), { ownerUid: uid });
+        await setDoc(doc(db, `scheduleTasks/task-${uid}`), { ownerUid: uid });
+        await setDoc(doc(db, `recurringHabits/habit-${uid}`), { ownerUid: uid });
+        await setDoc(doc(db, `recurringHabitCheckIns/check-in-${uid}`), { ownerUid: uid });
+        await setDoc(doc(db, `googleCalendarTaskSyncReceipts/receipt-${uid}`), { ownerUid: uid });
+        await setDoc(doc(db, `googleCalendarTaskTombstones/tombstone-${uid}`), { ownerUid: uid });
+        await setDoc(doc(db, `noteFolders/folder-${uid}`), { ownerUid: uid });
+        await setDoc(doc(db, `notes/note-${uid}`), {
+          ownerUid: uid,
+          participantUids: [uid],
+          isDeleted: false
+        });
+        await setDoc(doc(db, `notes/note-${uid}/history/history-a`), {
+          readerUids: [uid]
+        });
+        await setDoc(doc(db, `notes/note-${uid}/attachments/attachment-a`), {
+          noteId: `note-${uid}`
+        });
+        await setDoc(doc(db, `noteUserStates/note-${uid}/users/${uid}`), {
+          uid,
+          noteId: `note-${uid}`
+        });
+        await setDoc(doc(db, `activeNotes/${uid}`), {
+          uid,
+          noteId: null,
+          updatedByClientId: "feature-test"
+        });
+      }
+
+      await setDoc(doc(db, "notes/library-source"), {
+        ownerUid: "library-user",
+        participantUids: ["library-user"],
+        isDeleted: false,
+        isPurged: false
+      });
+      await setDoc(doc(db, "notes/library-source/attachments/source-attachment"), {
+        noteId: "library-source",
+        isReady: true
+      });
+    });
+
+    const legacyDb = testEnv.authenticatedContext("legacy-user").firestore();
+    await assertSucceeds(getDoc(doc(legacyDb, "notes/note-legacy-user")));
+    await assertSucceeds(getDoc(doc(legacyDb, "libraryItems/item-legacy-user")));
+    await assertSucceeds(getDoc(doc(legacyDb, "scheduleTasks/task-legacy-user")));
+
+    const notesDb = testEnv.authenticatedContext("notes-user").firestore();
+    await assertSucceeds(getDoc(doc(notesDb, "notes/note-notes-user")));
+    await assertSucceeds(getDoc(doc(notesDb, "noteFolders/folder-notes-user")));
+    await assertSucceeds(getDoc(doc(notesDb, "notes/note-notes-user/history/history-a")));
+    await assertSucceeds(getDoc(doc(notesDb, "notes/note-notes-user/attachments/attachment-a")));
+    await assertSucceeds(getDoc(doc(notesDb, "noteUserStates/note-notes-user/users/notes-user")));
+    await assertSucceeds(getDoc(doc(notesDb, "activeNotes/notes-user")));
+    await assertFails(getDoc(doc(notesDb, "libraryItems/item-notes-user")));
+    await assertFails(getDoc(doc(notesDb, "scheduleTasks/task-notes-user")));
+
+    const libraryDb = testEnv.authenticatedContext("library-user").firestore();
+    await assertSucceeds(getDoc(doc(libraryDb, "libraryVaults/library-user")));
+    await assertSucceeds(getDoc(doc(libraryDb, "libraryItems/item-library-user")));
+    await assertSucceeds(setDoc(doc(libraryDb, "libraryItems/new-link"), libraryItem("library-user")));
+    await assertFails(
+      setDoc(
+        doc(libraryDb, "libraryItems/note-derived-file"),
+        libraryItem("library-user", {
+          kind: "attachment",
+          captureSource: "attachment-ocr",
+          urlFingerprint: null,
+          sourceNoteId: "library-source",
+          sourceAttachmentId: "source-attachment"
+        })
+      )
+    );
+    await assertFails(getDoc(doc(libraryDb, "notes/note-library-user")));
+    await assertFails(getDoc(doc(libraryDb, "scheduleTasks/task-library-user")));
+
+    const scheduleDb = testEnv.authenticatedContext("schedule-user").firestore();
+    await assertSucceeds(getDoc(doc(scheduleDb, "scheduleTasks/task-schedule-user")));
+    await assertSucceeds(getDoc(doc(scheduleDb, "recurringHabits/habit-schedule-user")));
+    await assertSucceeds(getDoc(doc(scheduleDb, "recurringHabitCheckIns/check-in-schedule-user")));
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(scheduleDb, "googleCalendarTaskSyncReceipts"),
+          where("ownerUid", "==", "schedule-user")
+        )
+      )
+    );
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(scheduleDb, "googleCalendarTaskTombstones"),
+          where("ownerUid", "==", "schedule-user")
+        )
+      )
+    );
+    await assertFails(getDoc(doc(scheduleDb, "notes/note-schedule-user")));
+    await assertFails(getDoc(doc(scheduleDb, "libraryItems/item-schedule-user")));
+
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    await assertSucceeds(getDoc(doc(adminDb, "notes/note-admin-a")));
+    await assertSucceeds(getDoc(doc(adminDb, "libraryItems/item-admin-a")));
+    await assertSucceeds(getDoc(doc(adminDb, "scheduleTasks/task-admin-a")));
+
+    const malformedDb = testEnv.authenticatedContext("malformed-user").firestore();
+    await assertFails(getDoc(doc(malformedDb, "notes/note-malformed-user")));
+    await assertFails(getDoc(doc(malformedDb, "libraryItems/item-malformed-user")));
+    await assertFails(getDoc(doc(malformedDb, "scheduleTasks/task-malformed-user")));
   });
 
   it("allows users to rotate only their own encrypted private key material", async () => {
@@ -2242,6 +2417,24 @@ describeRules("firestore security rules", () => {
       )
     );
     await assertFails(getDoc(doc(testEnv.authenticatedContext("user-c").firestore(), "notes/note-a")));
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        featureAccess: featureAccess({ notes: false })
+      });
+    });
+    await assertFails(getDoc(doc(ownerDb, "notes/note-a")));
+    await assertFails(getDoc(doc(participantDb, "notes/note-a")));
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await updateDoc(doc(db, "users/user-a"), { featureAccess: featureAccess() });
+      await updateDoc(doc(db, "users/user-b"), {
+        featureAccess: featureAccess({ notes: false })
+      });
+    });
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a")));
+    await assertFails(getDoc(doc(participantDb, "notes/note-a")));
   });
 
   it("allows owners to publish temporary public note shares while blocking expired or revoked links", async () => {
@@ -2439,6 +2632,19 @@ describeRules("firestore security rules", () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await updateDoc(doc(context.firestore(), "users/user-a"), { isActive: true });
     });
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        featureAccess: featureAccess({ notes: false })
+      });
+    });
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-a")));
+    await assertFails(getDoc(doc(ownerDb, "publicNoteShares/share-a")));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "users/user-a"), {
+        featureAccess: featureAccess()
+      });
+    });
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-a")));
     await assertSucceeds(
       getDocs(query(collection(ownerDb, "publicNoteShares"), where("ownerUid", "==", "user-a"), where("sourceNoteId", "==", "note-a")))
     );

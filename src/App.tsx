@@ -1,6 +1,8 @@
 import { lazy, Suspense, type ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
+import { hasFeatureAccess } from "./lib/featureAccess";
+import type { AppFeature } from "./types";
 
 const AdminPage = lazy(() => import("./pages/AdminPage"));
 const HomeRedirectPage = lazy(() => import("./pages/HomeRedirectPage"));
@@ -20,7 +22,15 @@ function PageLoadingFallback() {
   );
 }
 
-function RequireAuth({ children, adminOnly = false }: { children: ReactNode; adminOnly?: boolean }) {
+export function RequireAuth({
+  children,
+  adminOnly = false,
+  feature
+}: {
+  children: ReactNode;
+  adminOnly?: boolean;
+  feature?: AppFeature;
+}) {
   const { firebaseUser, loading, profile } = useAuth();
 
   if (loading) {
@@ -32,6 +42,10 @@ function RequireAuth({ children, adminOnly = false }: { children: ReactNode; adm
   }
 
   if (adminOnly && !profile.isAdmin) {
+    return <Navigate to="/home" replace />;
+  }
+
+  if (feature && !hasFeatureAccess(profile, feature)) {
     return <Navigate to="/home" replace />;
   }
 
@@ -57,7 +71,7 @@ export default function App() {
         <Route
           path="/app"
           element={
-            <RequireAuth>
+            <RequireAuth feature="notes">
               <NotesPage />
             </RequireAuth>
           }
@@ -65,7 +79,7 @@ export default function App() {
         <Route
           path="/library"
           element={
-            <RequireAuth>
+            <RequireAuth feature="library">
               <LibraryPage />
             </RequireAuth>
           }
@@ -73,7 +87,7 @@ export default function App() {
         <Route
           path="/schedule"
           element={
-            <RequireAuth>
+            <RequireAuth feature="schedule">
               <SchedulePage />
             </RequireAuth>
           }
@@ -81,7 +95,7 @@ export default function App() {
         <Route
           path="/schedule/recurring"
           element={
-            <RequireAuth>
+            <RequireAuth feature="schedule">
               <RecurringPage />
             </RequireAuth>
           }

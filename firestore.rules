@@ -96,13 +96,57 @@ service cloud.firestore {
         && get(userPath(request.auth.uid)).data.isActive == true;
     }
 
+    function validFeatureAccess(data) {
+      return data.keys().hasOnly(["notes", "library", "schedule"])
+        && data.notes is bool
+        && data.library is bool
+        && data.schedule is bool;
+    }
+
+    function userHasFeature(uid, feature) {
+      let profile = get(userPath(uid)).data;
+      return exists(userPath(uid))
+        && profile.isActive == true
+        && (
+          profile.isAdmin == true
+          || !profile.keys().hasAny(["featureAccess"])
+          || (
+            validFeatureAccess(profile.featureAccess)
+            && profile.featureAccess.get(feature, false) == true
+          )
+        );
+    }
+
+    function activeSignedInUserHasFeature(feature) {
+      return signedIn() && userHasFeature(request.auth.uid, feature);
+    }
+
+    function userHasNotes(uid) {
+      let profile = get(userPath(uid)).data;
+      return exists(userPath(uid))
+        && profile.isActive == true
+        && (
+          profile.isAdmin == true
+          || !profile.keys().hasAny(["featureAccess"])
+          || (
+            validFeatureAccess(profile.featureAccess)
+            && profile.featureAccess.notes == true
+          )
+        );
+    }
+
+    function activeSignedInUserHasNotes() {
+      return signedIn() && userHasNotes(request.auth.uid);
+    }
+
     function adminUser() {
       return activeSignedInUser()
         && get(userPath(request.auth.uid)).data.isAdmin == true;
     }
 
     function noteParticipant(data) {
-      return activeSignedInUser() && request.auth.uid in data.participantUids;
+      return activeSignedInUserHasNotes()
+        && request.auth.uid in data.participantUids;
     }
 
     function encryptedPayload(payload) {
@@ -339,6 +383,7 @@ service cloud.firestore {
         "role",
         "publicKeyJwk",
         "allowedShareTargetUids",
+        "featureAccess",
         "createdAt",
         "updatedAt",
         "needsKeyRecovery"
@@ -362,6 +407,10 @@ service cloud.firestore {
       && data.role in ["admin", "user"]
       && ((data.isAdmin == true && data.role == "admin") || (data.isAdmin == false && data.role == "user"))
       && data.publicKeyJwk is map
+      && (
+        !data.keys().hasAny(["featureAccess"])
+        || validFeatureAccess(data.featureAccess)
+      )
       && (
         !data.keys().hasAny(["allowedShareTargetUids"])
         || (
@@ -602,7 +651,8 @@ service cloud.firestore {
     function validLibraryAttachmentSource(data) {
       return data.kind != "attachment"
         || (
-          exists(notePath(data.sourceNoteId))
+          activeSignedInUserHasNotes()
+          && exists(notePath(data.sourceNoteId))
           && exists(noteAttachmentPath(data.sourceNoteId, data.sourceAttachmentId))
           && get(notePath(data.sourceNoteId)).data.ownerUid == request.auth.uid
           && noteActive(get(notePath(data.sourceNoteId)).data)
@@ -1319,11 +1369,11 @@ service cloud.firestore {
     }
 
     function noteAttachmentReadyUpdate(data, noteId, attachmentId) {
-      return activeSignedInUser()
+      return activeSignedInUserHasNotes()
         && exists(notePath(noteId))
         && noteActive(get(notePath(noteId)).data)
         && !notePurged(get(notePath(noteId)).data)
-        && noteParticipant(get(notePath(noteId)).data)
+        && request.auth.uid in get(notePath(noteId)).data.participantUids
         && ownerAllowsParticipant(get(notePath(noteId)).data, request.auth.uid)
         && validAttachment(data, noteId, attachmentId)
         && resource.data.keys().hasAny(["isReady"])
@@ -1382,10 +1432,6 @@ service cloud.firestore {
           && data.revokedBy.size() > 0
         )
       );
-    }
-
-    function publicSharePasswordHash(data) {
-      return data.keys().hasAny(["passwordHash"]) ? data.passwordHash : null;
     }
 
     function validPublicShareGeneration(generation) {
@@ -1624,7 +1670,7 @@ service cloud.firestore {
 
     function publicShareAttachmentReadyUpdate(data, shareId, attachmentId) {
       return exists(publicSharePath(shareId))
-        && publicShareOwner(get(publicSharePath(shareId)).data)
+        && get(publicSharePath(shareId)).data.ownerUid == request.auth.uid
         && publicShareNotRevoked(get(publicSharePath(shareId)).data)
         && publicShareSourceAvailable(get(publicSharePath(shareId)).data)
         && get(publicSharePath(shareId)).data.expiresAt > request.time
@@ -1725,10 +1771,13 @@ service cloud.firestore {
     }
 
     function legacyActiveDeleteMetadataMigration(data) {
-      return (adminUser() || noteParticipant(resource.data))
-        && !noteDeleted(resource.data)
-        && !noteDeleted(data)
-        && noteRevisionIsPreserved(data)
+      return (
+          get(userPath(request.auth.uid)).data.isAdmin == true
+          || (
+            request.auth.uid in resource.data.participantUids
+            && ownerAllowsParticipant(resource.data, request.auth.uid)
+          )
+        )
         && legacyActiveDeleteMetadataAdded(data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["isDeleted"]);
     }
@@ -1757,7 +1806,7 @@ service cloud.firestore {
           "lastMutationId",
           "isDeleted"
         ])
-        && noteParticipant(data)
+        && request.auth.uid in data.participantUids
         && !noteDeleted(resource.data)
         && !noteDeleted(data)
         && data.type == resource.data.type
@@ -1844,7 +1893,7 @@ service cloud.firestore {
           "lastMutationId"
         ])
         && !noteDeleted(resource.data)
-        && canDeleteNote(resource.data)
+        && canManageNoteAfterFeatureGate(resource.data)
         && data.isDeleted == true
         && data.deletedAt == request.time
         && data.deletedBy == request.auth.uid
@@ -1866,7 +1915,7 @@ service cloud.firestore {
           "lastMutationId"
         ])
         && noteDeleted(resource.data)
-        && canDeleteNote(resource.data)
+        && canManageNoteAfterFeatureGate(resource.data)
         && !notePurged(resource.data)
         && data.isDeleted == false
         && !data.keys().hasAny(["deletedAt", "deletedBy"])
@@ -1896,7 +1945,7 @@ service cloud.firestore {
           "updatedBy"
         ])
         && noteDeleted(resource.data)
-        && canDeleteNote(resource.data)
+        && canManageNoteAfterFeatureGate(resource.data)
         && data.isDeleted == true
         && data.isPurged == true
         && !data.keys().hasAny(["folderId", "dueAt", "deletedAt", "deletedBy"])
@@ -1935,7 +1984,7 @@ service cloud.firestore {
     function allowedShareTargets(data) {
       return data.participantUids.hasOnly([data.ownerUid])
         || (
-          get(userPath(data.ownerUid)).data.isActive == true
+          userHasNotes(data.ownerUid)
           && (
             get(userPath(data.ownerUid)).data.isAdmin == true
             || (
@@ -1949,7 +1998,7 @@ service cloud.firestore {
     function ownerAllowsParticipant(data, uid) {
       return uid == data.ownerUid
         || (
-          get(userPath(data.ownerUid)).data.isActive == true
+          userHasNotes(data.ownerUid)
           && (
             get(userPath(data.ownerUid)).data.isAdmin == true
             || (
@@ -1965,8 +2014,16 @@ service cloud.firestore {
         && !notePurged(data)
         && (
           adminUser()
-          || (activeSignedInUser() && data.ownerUid == request.auth.uid)
-          || (noteParticipant(data) && ownerAllowsParticipant(data, request.auth.uid))
+          || (
+            activeSignedInUserHasNotes()
+            && (
+              data.ownerUid == request.auth.uid
+              || (
+                request.auth.uid in data.participantUids
+                && ownerAllowsParticipant(data, request.auth.uid)
+              )
+            )
+          )
         );
     }
 
@@ -1986,24 +2043,30 @@ service cloud.firestore {
           && (
             !legacyActiveDeleteMetadata(data)
             || adminUser()
-            || (activeSignedInUser() && data.ownerUid == request.auth.uid)
+            || data.ownerUid == request.auth.uid
           )
         )
         || canReadDeletedNote(data);
     }
 
     function canDeleteNote(data) {
-      return (activeSignedInUser() && data.ownerUid == request.auth.uid)
-        || adminUser();
+      return adminUser()
+        || (activeSignedInUserHasNotes() && data.ownerUid == request.auth.uid);
+    }
+
+    function canManageNoteAfterFeatureGate(data) {
+      return get(userPath(request.auth.uid)).data.isAdmin == true
+        || data.ownerUid == request.auth.uid;
     }
 
     function canDeleteAttachment(noteData, attachmentData) {
       return adminUser()
-        || (activeSignedInUser() && noteData.ownerUid == request.auth.uid)
+        || (activeSignedInUserHasNotes() && noteData.ownerUid == request.auth.uid)
         || (
-          noteActive(noteData)
+          activeSignedInUserHasNotes()
+          && noteActive(noteData)
           && !notePurged(noteData)
-          && noteParticipant(noteData)
+          && request.auth.uid in noteData.participantUids
           && ownerAllowsParticipant(noteData, request.auth.uid)
           && attachmentData.uploadedBy == request.auth.uid
         );
@@ -2018,7 +2081,7 @@ service cloud.firestore {
       let sourceNote = get(sourcePath).data;
       return exists(sourcePath)
         && exists(userPath(data.ownerUid))
-        && get(userPath(data.ownerUid)).data.isActive == true
+        && userHasNotes(data.ownerUid)
         && sourceNote.ownerUid == data.ownerUid
         && noteActive(sourceNote)
         && !notePurged(sourceNote);
@@ -2027,6 +2090,16 @@ service cloud.firestore {
     function publicShareSourceActive(data) {
       return publicShareSourceAvailable(data)
         && publicShareSourceRevisionMatches(data, get(notePath(data.sourceNoteId)).data);
+    }
+
+    function publicShareSourceActiveAfterFeatureGate(data) {
+      let sourcePath = notePath(data.sourceNoteId);
+      let sourceNote = get(sourcePath).data;
+      return exists(sourcePath)
+        && sourceNote.ownerUid == data.ownerUid
+        && noteActive(sourceNote)
+        && !notePurged(sourceNote)
+        && publicShareSourceRevisionMatches(data, sourceNote);
     }
 
     function publicShareActive(data) {
@@ -2038,7 +2111,8 @@ service cloud.firestore {
     }
 
     function publicShareOwner(data) {
-      return activeSignedInUser() && data.ownerUid == request.auth.uid;
+      return activeSignedInUserHasNotes()
+        && data.ownerUid == request.auth.uid;
     }
 
     function validPublicShareCleanupQueue(data, shareId) {
@@ -2094,67 +2168,36 @@ service cloud.firestore {
         && data.expiresAt <= request.time + duration.value(7, "d")
         && publicShareNotRevoked(data)
         && publicShareSourceActive(data)
-        && canReadNote(get(notePath(data.sourceNoteId)).data)
         && publicShareCleanupQueueCreated(shareId, data);
     }
 
     function publicShareActivateUpdate(data) {
-      return request.resource.data.diff(resource.data).changedKeys().hasOnly(["ready", "attachmentCount", "updatedAt"])
-        && publicShareOwner(resource.data)
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(["ready", "attachmentCount", "updatedAt"])
+        && resource.data.ownerUid == request.auth.uid
         && publicShareNotRevoked(resource.data)
         && publicShareNotRevoked(data)
-        && publicShareSourceActive(data)
+        && publicShareSourceActiveAfterFeatureGate(data)
         && resource.data.ready == false
         && data.ready == true
-        && data.updatedAt == request.time
-        && data.sourceNoteId == resource.data.sourceNoteId
-        && data.ownerUid == resource.data.ownerUid
-        && data.version == resource.data.version
-        && data.encryptedTitle == resource.data.encryptedTitle
-        && data.encryptedBody == resource.data.encryptedBody
-        && publicShareGenerationPreserved(data)
-        && data.createdAt == resource.data.createdAt
-        && data.expiresAt == resource.data.expiresAt
-        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data);
+        && data.updatedAt == request.time;
     }
 
     function publicShareRevokeUpdate(data) {
-      return request.resource.data.diff(resource.data).changedKeys().hasOnly(["revokedAt", "revokedBy", "updatedAt"])
-        && publicShareOwner(resource.data)
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(["revokedAt", "revokedBy", "updatedAt"])
+        && resource.data.ownerUid == request.auth.uid
         && publicShareNotRevoked(resource.data)
         && data.revokedAt == request.time
         && data.revokedBy == request.auth.uid
-        && data.updatedAt == request.time
-        && data.sourceNoteId == resource.data.sourceNoteId
-        && data.ownerUid == resource.data.ownerUid
-        && data.version == resource.data.version
-        && data.encryptedTitle == resource.data.encryptedTitle
-        && data.encryptedBody == resource.data.encryptedBody
-        && publicShareGenerationPreserved(data)
-        && data.attachmentCount == resource.data.attachmentCount
-        && data.ready == resource.data.ready
-        && data.createdAt == resource.data.createdAt
-        && data.expiresAt == resource.data.expiresAt
-        && publicSharePasswordHash(data) == publicSharePasswordHash(resource.data);
+        && data.updatedAt == request.time;
     }
 
     function publicSharePasswordUpdate(data) {
       return request.resource.data.diff(resource.data).affectedKeys().hasOnly(["passwordHash", "updatedAt"])
-        && publicShareOwner(resource.data)
+        && resource.data.ownerUid == request.auth.uid
         && publicShareNotRevoked(resource.data)
         && publicShareNotRevoked(data)
-        && publicShareSourceActive(data)
-        && data.updatedAt == request.time
-        && data.sourceNoteId == resource.data.sourceNoteId
-        && data.ownerUid == resource.data.ownerUid
-        && data.version == resource.data.version
-        && data.encryptedTitle == resource.data.encryptedTitle
-        && data.encryptedBody == resource.data.encryptedBody
-        && publicShareGenerationPreserved(data)
-        && data.attachmentCount == resource.data.attachmentCount
-        && data.ready == resource.data.ready
-        && data.createdAt == resource.data.createdAt
-        && data.expiresAt == resource.data.expiresAt;
+        && publicShareSourceActiveAfterFeatureGate(data)
+        && data.updatedAt == request.time;
     }
 
     function publicShareContentUpdate(data) {
@@ -2168,20 +2211,14 @@ service cloud.firestore {
           "passwordHash",
           "updatedAt"
         ])
-        && publicShareOwner(resource.data)
+        && resource.data.ownerUid == request.auth.uid
         && publicShareNotRevoked(resource.data)
         && publicShareNotRevoked(data)
         && data.keys().hasAll(["sourceRevision", "sourceAttachmentRevision"])
-        && publicShareSourceActive(data)
+        && publicShareSourceActiveAfterFeatureGate(data)
         && publicShareAttachmentRevisionFlipValid(data)
         && data.updatedAt == request.time
-        && data.sourceNoteId == resource.data.sourceNoteId
-        && data.ownerUid == resource.data.ownerUid
-        && data.version == resource.data.version
-        && publicShareContentGenerationValid(data)
-        && data.ready == resource.data.ready
-        && data.createdAt == resource.data.createdAt
-        && data.expiresAt == resource.data.expiresAt;
+        && publicShareContentGenerationValid(data);
     }
 
     match /publicLoginRoster/{uid} {
@@ -2213,6 +2250,7 @@ service cloud.firestore {
           "isAdmin",
           "role",
           "allowedShareTargetUids",
+          "featureAccess",
           "updatedAt"
         ])
         && getAfter(rosterPath(uid)).data.quickKey == request.resource.data.quickKey
@@ -2272,14 +2310,14 @@ service cloud.firestore {
     }
 
     match /libraryVaults/{uid} {
-      allow get: if activeSignedInUser()
+      allow get: if activeSignedInUserHasFeature("library")
         && request.auth.uid == uid
         && (
           !exists(libraryVaultPath(uid))
           || resource.data.ownerUid == uid
         );
       allow list: if false;
-      allow create: if activeSignedInUser()
+      allow create: if activeSignedInUserHasFeature("library")
         && request.auth.uid == uid
         && validLibraryVault(request.resource.data, uid)
         && request.resource.data.createdAt == request.time
@@ -2288,9 +2326,9 @@ service cloud.firestore {
     }
 
     match /libraryItems/{itemId} {
-      allow read: if activeSignedInUser()
+      allow read: if activeSignedInUserHasFeature("library")
         && resource.data.ownerUid == request.auth.uid;
-      allow create: if activeSignedInUser()
+      allow create: if activeSignedInUserHasFeature("library")
         && validLibraryItem(request.resource.data)
         && validLibraryAttachmentSource(request.resource.data)
         && request.resource.data.ownerUid == request.auth.uid
@@ -2300,7 +2338,7 @@ service cloud.firestore {
         && request.resource.data.lastReviewedAt == null
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
-      allow update: if activeSignedInUser()
+      allow update: if activeSignedInUserHasFeature("library")
         && resource.data.ownerUid == request.auth.uid
         && validLibraryItem(request.resource.data)
         && request.resource.data.ownerUid == resource.data.ownerUid
@@ -2342,7 +2380,7 @@ service cloud.firestore {
           "lastOpenedAt",
           "lastReviewedAt"
         ]);
-      allow delete: if activeSignedInUser()
+      allow delete: if activeSignedInUserHasFeature("library")
         && resource.data.ownerUid == request.auth.uid;
     }
 
@@ -2359,7 +2397,7 @@ service cloud.firestore {
     }
 
     match /googleCalendarTaskSyncReceipts/{taskId} {
-      allow get: if activeSignedInUser()
+      allow get: if activeSignedInUserHasFeature("schedule")
         && (
           (
             exists(googleCalendarTaskSyncReceiptPath(taskId))
@@ -2371,9 +2409,9 @@ service cloud.firestore {
             && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid
           )
         );
-      allow list: if activeSignedInUser()
+      allow list: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid;
-      allow create, update: if activeSignedInUser()
+      allow create, update: if activeSignedInUserHasFeature("schedule")
         && validGoogleCalendarTaskSyncReceipt(request.resource.data, taskId, request.auth.uid)
         && request.resource.data.syncedAt == request.time
         && exists(scheduleTaskPath(taskId))
@@ -2390,12 +2428,12 @@ service cloud.firestore {
           request.auth.uid,
           request.resource.data.connectionGeneration
         );
-      allow delete: if activeSignedInUser()
+      allow delete: if activeSignedInUserHasFeature("schedule")
         && validGoogleCalendarTaskSyncReceipt(resource.data, taskId, request.auth.uid);
     }
 
     match /googleCalendarTaskTombstones/{taskId} {
-      allow get: if activeSignedInUser()
+      allow get: if activeSignedInUserHasFeature("schedule")
         && (
           (
             exists(googleCalendarTaskTombstonePath(taskId))
@@ -2407,9 +2445,9 @@ service cloud.firestore {
             && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid
           )
         );
-      allow list: if activeSignedInUser()
+      allow list: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid;
-      allow create: if activeSignedInUser()
+      allow create: if activeSignedInUserHasFeature("schedule")
         && validGoogleCalendarTaskTombstone(request.resource.data, taskId, request.auth.uid)
         && googleCalendarTaskTombstoneMatchesConnection(request.resource.data, request.auth.uid)
         && request.resource.data.createdAt == request.time
@@ -2417,7 +2455,7 @@ service cloud.firestore {
         && request.resource.data.leaseExpiresAt <= request.time + duration.value(5, "m")
         && exists(scheduleTaskPath(taskId))
         && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid;
-      allow update: if activeSignedInUser()
+      allow update: if activeSignedInUserHasFeature("schedule")
         && validGoogleCalendarTaskTombstone(resource.data, taskId, request.auth.uid)
         && validGoogleCalendarTaskTombstone(request.resource.data, taskId, request.auth.uid)
         && googleCalendarTaskTombstoneMatchesConnection(request.resource.data, request.auth.uid)
@@ -2430,20 +2468,20 @@ service cloud.firestore {
         && request.resource.data.leaseExpiresAt <= request.time + duration.value(5, "m")
         && exists(scheduleTaskPath(taskId))
         && get(scheduleTaskPath(taskId)).data.ownerUid == request.auth.uid;
-      allow delete: if activeSignedInUser()
+      allow delete: if activeSignedInUserHasFeature("schedule")
         && validGoogleCalendarTaskTombstone(resource.data, taskId, request.auth.uid);
     }
 
     match /scheduleTasks/{taskId} {
-      allow read: if activeSignedInUser()
+      allow read: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid;
-      allow create: if activeSignedInUser()
+      allow create: if activeSignedInUserHasFeature("schedule")
         && validScheduleTask(request.resource.data, request.auth.uid)
         && request.resource.data.status == "active"
         && request.resource.data.completedAt == null
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
-      allow update: if activeSignedInUser()
+      allow update: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid
         && (
           !exists(googleCalendarTaskTombstonePath(taskId))
@@ -2457,12 +2495,9 @@ service cloud.firestore {
           )
         )
         && validScheduleTask(request.resource.data, request.auth.uid)
-        && request.resource.data.createdBy == resource.data.createdBy
-        && request.resource.data.createdAt == resource.data.createdAt
-        && request.resource.data.wrappedKeys == resource.data.wrappedKeys
         && request.resource.data.updatedAt == request.time
         && validScheduleUpdateFields();
-      allow delete: if activeSignedInUser()
+      allow delete: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid
         && exists(googleCalendarTaskTombstonePath(taskId))
         && validGoogleCalendarTaskTombstone(
@@ -2478,14 +2513,14 @@ service cloud.firestore {
     }
 
     match /recurringHabits/{habitId} {
-      allow read: if activeSignedInUser()
+      allow read: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid;
-      allow create: if activeSignedInUser()
+      allow create: if activeSignedInUserHasFeature("schedule")
         && validRecurringHabit(request.resource.data, request.auth.uid)
         && request.resource.data.status == "active"
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
-      allow update: if activeSignedInUser()
+      allow update: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid
         && validRecurringHabit(request.resource.data, request.auth.uid)
         && request.resource.data.ownerUid == resource.data.ownerUid
@@ -2507,13 +2542,13 @@ service cloud.firestore {
           "updatedBy",
           "updatedAt"
         ]);
-      allow delete: if activeSignedInUser()
+      allow delete: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid
         && resource.data.status == "archived";
     }
 
     match /recurringHabitCheckIns/{checkInId} {
-      allow get: if activeSignedInUser()
+      allow get: if activeSignedInUserHasFeature("schedule")
         && (
           (
             exists(/databases/$(database)/documents/recurringHabitCheckIns/$(checkInId))
@@ -2524,13 +2559,13 @@ service cloud.firestore {
             && recurringHabitCheckInTargetBelongsToOwner(checkInId, request.auth.uid)
           )
         );
-      allow list: if activeSignedInUser()
+      allow list: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid;
-      allow create: if activeSignedInUser()
+      allow create: if activeSignedInUserHasFeature("schedule")
         && validRecurringHabitCheckIn(request.resource.data, request.auth.uid, checkInId)
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
-      allow update: if activeSignedInUser()
+      allow update: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid
         && validRecurringHabitCheckIn(request.resource.data, request.auth.uid, checkInId)
         && request.resource.data.ownerUid == resource.data.ownerUid
@@ -2545,24 +2580,24 @@ service cloud.firestore {
           "checkedAt",
           "updatedAt"
         ]);
-      allow delete: if activeSignedInUser()
+      allow delete: if activeSignedInUserHasFeature("schedule")
         && resource.data.ownerUid == request.auth.uid;
     }
 
     match /noteFolders/{folderId} {
-      allow read: if activeSignedInUser()
+      allow read: if activeSignedInUserHasNotes()
         && resource.data.ownerUid == request.auth.uid;
-      allow create: if activeSignedInUser()
+      allow create: if activeSignedInUserHasNotes()
         && validNoteFolder(request.resource.data)
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
-      allow update: if activeSignedInUser()
+      allow update: if activeSignedInUserHasNotes()
         && resource.data.ownerUid == request.auth.uid
         && validNoteFolder(request.resource.data)
         && request.resource.data.ownerUid == resource.data.ownerUid
         && request.resource.data.updatedAt == request.time
         && request.resource.data.diff(resource.data).changedKeys().hasOnly(["name", "color", "updatedAt"]);
-      allow delete: if activeSignedInUser()
+      allow delete: if activeSignedInUserHasNotes()
         && resource.data.ownerUid == request.auth.uid;
     }
 
@@ -2600,7 +2635,7 @@ service cloud.firestore {
     match /notes/{noteId} {
       allow get: if canReadNoteDocument(resource.data);
       allow list: if canListNoteDocument(resource.data);
-      allow create: if activeSignedInUser()
+      allow create: if activeSignedInUserHasNotes()
         && validNote(request.resource.data)
         && request.resource.data.isDeleted == false
         && !request.resource.data.keys().hasAny(["deletedAt", "deletedBy"])
@@ -2614,7 +2649,7 @@ service cloud.firestore {
         && pairedNoteHistoryCreated(noteId, request.resource.data)
         && allowedShareTargets(request.resource.data)
         && validAssignedFolder(request.resource.data);
-      allow update: if request.resource.data.ownerUid == resource.data.ownerUid
+      allow update: if activeSignedInUserHasNotes()
         && (
           (notePurgeRequested() && notePurgeUpdate(noteId, request.resource.data))
           || (
@@ -2674,7 +2709,8 @@ service cloud.firestore {
       allow get: if publicShareActive(resource.data) || publicShareOwner(resource.data);
       allow list: if publicShareOwner(resource.data);
       allow create: if publicShareCreate(shareId, request.resource.data);
-      allow update: if (
+      allow update: if activeSignedInUserHasNotes()
+        && (
           (publicShareActivateUpdate(request.resource.data) && validPublicShare(request.resource.data))
           || (publicShareRevokeUpdate(request.resource.data) && validPublicShare(request.resource.data))
           || (publicSharePasswordUpdate(request.resource.data) && validPublicShare(request.resource.data))
@@ -2716,26 +2752,31 @@ service cloud.firestore {
     match /noteUserStates/{noteId}/users/{uid} {
       allow read: if exists(notePath(noteId))
         && canReadNoteDocument(get(notePath(noteId)).data);
-      allow create, update: if activeSignedInUser()
+      allow create, update: if activeSignedInUserHasNotes()
         && request.auth.uid == uid
         && exists(notePath(noteId))
         && !noteDeleted(get(notePath(noteId)).data)
-        && noteParticipant(get(notePath(noteId)).data)
+        && request.auth.uid in get(notePath(noteId)).data.participantUids
         && ownerAllowsParticipant(get(notePath(noteId)).data, request.auth.uid)
         && validNoteUserState(request.resource.data, noteId, uid);
       allow delete: if false;
     }
 
     match /activeNotes/{uid} {
-      allow read: if activeSignedInUser() && request.auth.uid == uid;
-      allow create, update: if activeSignedInUser()
+      allow read: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid;
+      allow create, update: if activeSignedInUserHasNotes()
         && request.auth.uid == uid
         && validActiveNote(request.resource.data, uid)
         && (
           request.resource.data.noteId == null
           || (
             exists(notePath(request.resource.data.noteId))
-            && noteParticipant(get(notePath(request.resource.data.noteId)).data)
+            && request.auth.uid in get(notePath(request.resource.data.noteId)).data.participantUids
+            && ownerAllowsParticipant(
+              get(notePath(request.resource.data.noteId)).data,
+              request.auth.uid
+            )
             && noteActive(get(notePath(request.resource.data.noteId)).data)
             && !notePurged(get(notePath(request.resource.data.noteId)).data)
           )

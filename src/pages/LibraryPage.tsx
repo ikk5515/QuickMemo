@@ -56,6 +56,7 @@ import {
 } from "../lib/attachments";
 import { decryptAttachmentToBlob, decryptAttachmentToBytes } from "../lib/attachmentCrypto";
 import { decryptText, unwrapNoteKey } from "../lib/crypto";
+import { hasFeatureAccess } from "../lib/featureAccess";
 import {
   extractLibraryAttachmentText,
   libraryAttachmentExtractionMode,
@@ -659,8 +660,9 @@ export default function LibraryPage() {
   const openedThisSession = useRef(new Set<string>());
   const captureHandoffStarted = useRef(false);
   const currentUid = profile?.uid ?? null;
+  const notesFeatureEnabled = hasFeatureAccess(profile, "notes");
   const visibleNoteOwnerUids = useMemo(() => {
-    if (!profile) {
+    if (!profile || !notesFeatureEnabled) {
       return [];
     }
 
@@ -678,7 +680,7 @@ export default function LibraryPage() {
         })
         .map((user) => user.uid)
     ]));
-  }, [profile, users]);
+  }, [notesFeatureEnabled, profile, users]);
 
   useLayoutEffect(() => {
     if (captureHandoffStarted.current) {
@@ -757,6 +759,35 @@ export default function LibraryPage() {
     downloadCleanupTimers.current.clear();
     downloadObjectUrls.current.clear();
   }, [currentUid, privateKey]);
+
+  useEffect(() => {
+    if (notesFeatureEnabled) {
+      return;
+    }
+
+    noteDecryptGeneration.current += 1;
+    attachmentGeneration.current += 1;
+    attachmentActionGeneration.current += 1;
+    attachmentExtractionController.current?.abort();
+    attachmentExtractionController.current = null;
+    attachmentExtractionBase.current = null;
+    noteTitleCache.current.clear();
+    attachmentCache.current.clear();
+    attachmentRequests.current.clear();
+    managedSourceChecked.current.clear();
+    setUsers([]);
+    setNotes([]);
+    setManagedSourceNotes([]);
+    setNoteTitles({});
+    setAttachmentGroups({});
+    setAttachmentProgress({ completed: 0, total: 0 });
+    setAttachmentFailureCount(0);
+    setNotesLoading(false);
+    setAttachmentBusy(false);
+    setAttachmentText(null);
+    closeAttachmentPreview();
+    setAttachmentExtraction(null);
+  }, [notesFeatureEnabled]);
 
   useEffect(() => {
     if (!profile || !privateKey) {
@@ -891,7 +922,7 @@ export default function LibraryPage() {
   }, [privateKey, profile, rawLibraryItems]);
 
   useEffect(() => {
-    if (!profile || !privateKey || profile.isAdmin) {
+    if (!profile || !privateKey || profile.isAdmin || !notesFeatureEnabled) {
       setUsers([]);
       return undefined;
     }
@@ -903,10 +934,10 @@ export default function LibraryPage() {
         setError("공유 노트 소유자 범위를 확인하지 못해 내 노트만 표시합니다.");
       }
     );
-  }, [privateKey, profile]);
+  }, [notesFeatureEnabled, privateKey, profile]);
 
   useEffect(() => {
-    if (!profile || !privateKey) {
+    if (!profile || !privateKey || !notesFeatureEnabled) {
       setNotes([]);
       setNotesLoading(false);
       return undefined;
@@ -937,11 +968,15 @@ export default function LibraryPage() {
       },
       attachmentNoteLimit
     );
-  }, [attachmentNoteLimit, privateKey, profile, visibleNoteOwnerUids]);
+  }, [attachmentNoteLimit, notesFeatureEnabled, privateKey, profile, visibleNoteOwnerUids]);
 
   const managedSourceNoteIds = useMemo(
-    () => new Set(rawLibraryItems.map((item) => item.sourceNoteId).filter((id): id is string => Boolean(id))),
-    [rawLibraryItems]
+    () => new Set(
+      notesFeatureEnabled
+        ? rawLibraryItems.map((item) => item.sourceNoteId).filter((id): id is string => Boolean(id))
+        : []
+    ),
+    [notesFeatureEnabled, rawLibraryItems]
   );
   const missingManagedSourceNoteIds = useMemo(
     () => Array.from(managedSourceNoteIds).filter(
@@ -964,7 +999,7 @@ export default function LibraryPage() {
   }, [managedSourceNoteIds]);
 
   useEffect(() => {
-    if (!profile || !privateKey) {
+    if (!profile || !privateKey || !notesFeatureEnabled) {
       setManagedSourceNotes([]);
       return;
     }
@@ -997,7 +1032,7 @@ export default function LibraryPage() {
     return () => {
       cancelled = true;
     };
-  }, [missingManagedSourceNoteIds, privateKey, profile]);
+  }, [missingManagedSourceNoteIds, notesFeatureEnabled, privateKey, profile]);
 
   const availableNotes = useMemo(() => {
     const byId = new Map(managedSourceNotes.map((note) => [note.id, note]));
@@ -1026,7 +1061,7 @@ export default function LibraryPage() {
   const hasMoreAttachmentNotes = notes.length >= attachmentNoteLimit;
 
   useEffect(() => {
-    if (!profile || !privateKey) {
+    if (!profile || !privateKey || !notesFeatureEnabled) {
       setNoteTitles({});
       return;
     }
@@ -1100,10 +1135,10 @@ export default function LibraryPage() {
     return () => {
       cancelled = true;
     };
-  }, [attachmentCandidateNotes, privateKey, profile]);
+  }, [attachmentCandidateNotes, notesFeatureEnabled, privateKey, profile]);
 
   useEffect(() => {
-    if (!profile || !privateKey) {
+    if (!profile || !privateKey || !notesFeatureEnabled) {
       setAttachmentGroups({});
       setAttachmentProgress({ completed: 0, total: 0 });
       return;
@@ -1189,7 +1224,7 @@ export default function LibraryPage() {
     return () => {
       cancelled = true;
     };
-  }, [attachmentCandidateNotes, privateKey, profile]);
+  }, [attachmentCandidateNotes, notesFeatureEnabled, privateKey, profile]);
 
   useEffect(() => {
     const cleanupTimers = downloadCleanupTimers.current;
@@ -1435,7 +1470,7 @@ export default function LibraryPage() {
   }, [filteredItems, selectedId, selectedItem]);
 
   useEffect(() => {
-    if (!currentUid || !selectedManagedSourceNoteId) {
+    if (!currentUid || !selectedManagedSourceNoteId || !notesFeatureEnabled) {
       return undefined;
     }
 
@@ -1471,7 +1506,7 @@ export default function LibraryPage() {
       },
       removeUnavailableSource
     );
-  }, [currentUid, selectedManagedSourceNoteId]);
+  }, [currentUid, notesFeatureEnabled, selectedManagedSourceNoteId]);
 
   useEffect(() => {
     const base = attachmentExtractionBase.current;
@@ -1795,7 +1830,7 @@ export default function LibraryPage() {
   }
 
   async function openSourceNote(noteId: string) {
-    if (!profile || !availableNotes.some((note) => note.id === noteId)) {
+    if (!profile || !notesFeatureEnabled || !availableNotes.some((note) => note.id === noteId)) {
       setError("원본 노트의 접근 권한을 확인할 수 없습니다.");
       return;
     }
@@ -2255,7 +2290,9 @@ export default function LibraryPage() {
               자료실
             </p>
             <h1 id="library-page-title">{quickViewLabels[quickView]}</h1>
-            <p>노트 첨부파일과 저장한 링크를 한 곳에서 검색하고 다시 읽습니다.</p>
+            <p>{notesFeatureEnabled
+              ? "노트 첨부파일과 저장한 링크를 한 곳에서 검색하고 다시 읽습니다."
+              : "저장한 링크와 클립을 한 곳에서 검색하고 다시 읽습니다."}</p>
           </div>
           <label className="library-search-control">
             <Search aria-hidden="true" size={18} />
@@ -2298,6 +2335,11 @@ export default function LibraryPage() {
         <div className="library-live-region" aria-live="polite" role="status">
           {loading ? loadingMessage : `${filteredItems.length}개 자료를 표시합니다. ${statusMessage}`}
         </div>
+        {!notesFeatureEnabled && (
+          <div className="library-feedback" role="status">
+            노트 첨부파일은 노트 기능 권한이 있을 때 함께 표시됩니다. 저장한 자료는 계속 사용할 수 있습니다.
+          </div>
+        )}
         {!captureOpen && (error || attachmentFailureCount > 0 || decryptFailureCount > 0) && (
           <div className="library-feedback error" role="alert">
             <span>

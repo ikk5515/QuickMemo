@@ -26,6 +26,32 @@ service firebase.storage {
       return firestore.get(userPath(uid)).data;
     }
 
+    function validFeatureAccess(data) {
+      return data is map
+        && data.keys().hasAll(["notes", "library", "schedule"])
+        && data.keys().hasOnly(["notes", "library", "schedule"])
+        && data.notes is bool
+        && data.library is bool
+        && data.schedule is bool;
+    }
+
+    function userHasFeature(uid, feature) {
+      let user = userData(uid);
+      return user.isActive == true
+        && (
+          user.isAdmin == true
+          || !user.keys().hasAny(["featureAccess"])
+          || (
+            validFeatureAccess(user.featureAccess)
+            && (
+              (feature == "notes" && user.featureAccess.notes == true)
+              || (feature == "library" && user.featureAccess.library == true)
+              || (feature == "schedule" && user.featureAccess.schedule == true)
+            )
+          )
+        );
+    }
+
     function noteData(noteId) {
       return firestore.get(notePath(noteId)).data;
     }
@@ -46,6 +72,7 @@ service firebase.storage {
 
     function noteParticipant(data) {
       return signedIn()
+        && userHasFeature(request.auth.uid, "notes")
         && request.auth.uid in data.participantUids;
     }
 
@@ -53,7 +80,7 @@ service firebase.storage {
       let owner = userData(data.ownerUid);
       return uid == data.ownerUid
         || (
-          owner.isActive == true
+          userHasFeature(data.ownerUid, "notes")
           && (
             owner.isAdmin == true
             || (
@@ -68,7 +95,7 @@ service firebase.storage {
       let note = noteData(noteId);
       let user = userData(request.auth.uid);
       return signedIn()
-        && user.isActive == true
+        && userHasFeature(request.auth.uid, "notes")
         && !notePurged(note)
         && (
           user.isAdmin == true
@@ -94,7 +121,7 @@ service firebase.storage {
     function publicShareOwner(shareId) {
       let share = publicShareData(shareId);
       return signedIn()
-        && userData(request.auth.uid).isActive == true
+        && userHasFeature(request.auth.uid, "notes")
         && share.ownerUid == request.auth.uid;
     }
 
@@ -104,7 +131,7 @@ service firebase.storage {
 
     function publicShareSourceAvailable(data) {
       let note = noteData(data.sourceNoteId);
-      return userData(data.ownerUid).isActive == true
+      return userHasFeature(data.ownerUid, "notes")
         && note.ownerUid == data.ownerUid
         && noteActive(note);
     }

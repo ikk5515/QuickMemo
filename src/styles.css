@@ -9232,6 +9232,34 @@ button,
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
+.home-access-empty {
+  align-items: center;
+  background: color-mix(in srgb, var(--panel) 92%, var(--teal));
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-card);
+  color: var(--ink);
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-6);
+}
+
+.home-access-empty > svg {
+  color: var(--teal);
+  flex: 0 0 auto;
+}
+
+.home-access-empty h2 {
+  font-size: var(--type-section-title);
+  margin: 0 0 var(--space-2);
+}
+
+.home-access-empty p,
+.settings-access-note {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+}
+
 .home-action-card {
   background: var(--panel);
   border: 1px solid var(--color-border-subtle);

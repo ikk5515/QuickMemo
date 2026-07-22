@@ -12,6 +12,7 @@ const testData = vi.hoisted(() => {
     avatarText: "김",
     color: "#2f7d70",
     displayName: "김테스트",
+    featureAccess: { notes: true, library: true, schedule: true },
     isActive: true,
     isAdmin: false,
     loginEmail: "tester@quickmemo.local",
@@ -257,6 +258,7 @@ beforeEach(() => {
   Reflect.deleteProperty(globalThis, "chrome");
   window.history.replaceState(null, "", "/library");
   testData.auth.privateKey = {} as CryptoKey;
+  testData.auth.profile.featureAccess = { notes: true, library: true, schedule: true };
   testData.libraryErrorSubscriber = null;
   testData.librarySubscriber = null;
   testData.noteErrorSubscriber = null;
@@ -326,6 +328,26 @@ beforeEach(() => {
 });
 
 describe("LibraryPage", () => {
+  it("keeps saved library items usable without reading note data when Notes is denied", async () => {
+    testData.auth.profile.featureAccess = { notes: false, library: true, schedule: false };
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "보안 가이드 열기" })).toBeInTheDocument();
+    expect(serviceMocks.subscribeLibraryItems).toHaveBeenCalledWith(
+      "user-a",
+      expect.any(Function),
+      expect.any(Function),
+      120
+    );
+    expect(serviceMocks.subscribeUsers).not.toHaveBeenCalled();
+    expect(serviceMocks.subscribeVisibleNotes).not.toHaveBeenCalled();
+    expect(serviceMocks.getVisibleNotesByIds).not.toHaveBeenCalled();
+    expect(serviceMocks.getNoteAttachments).not.toHaveBeenCalled();
+    expect(screen.getByText(/노트 첨부파일은 노트 기능 권한이 있을 때/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("merges encrypted saved items with currently accessible note attachments and searches both", async () => {
     const user = userEvent.setup();
     renderPage();
