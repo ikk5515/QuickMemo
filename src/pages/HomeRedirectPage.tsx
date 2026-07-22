@@ -1,4 +1,4 @@
-import { ArrowRight, CalendarDays, NotebookPen, Shield, Sparkles } from "lucide-react";
+import { ArrowRight, CalendarDays, LibraryBig, NotebookPen, Shield, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, Navigate } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
@@ -44,7 +44,11 @@ export default function HomeRedirectPage() {
   const scheduleTarget = scheduleViewHref(scheduleDefaultView);
   const startTarget = useMemo(() => {
     const defaultHome = preferences?.defaultHome ?? defaultUserPreferences.defaultHome;
-    return defaultHome === "schedule" ? scheduleTarget : "/app";
+    if (defaultHome === "schedule") {
+      return scheduleTarget;
+    }
+
+    return defaultHome === "library" ? "/library" : "/app";
   }, [preferences?.defaultHome, scheduleTarget]);
 
   if (!profile) {
@@ -94,6 +98,14 @@ export default function HomeRedirectPage() {
             <strong>일정관리</strong>
             <p>기본 탭은 {scheduleLabel}입니다. 오늘 할 일과 반복 업무를 빠르게 확인하세요.</p>
             <em>일정 보기</em>
+          </Link>
+          <Link className="home-action-card library" to="/library">
+            <span>
+              <LibraryBig size={22} />
+            </span>
+            <strong>자료실</strong>
+            <p>노트 첨부파일과 저장한 링크를 검색하고 다시 읽을 자료로 정리합니다.</p>
+            <em>자료 보기</em>
           </Link>
           {profile.isAdmin && (
             <Link className="home-action-card admin" to="/admin">

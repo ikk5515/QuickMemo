@@ -130,6 +130,43 @@ describe("Firestore index retention policies", () => {
     expect(fieldOverride("recurringHabits", "wrappedKeys")).toMatchObject({ indexes: [] });
   });
 
+  it("orders owner-scoped library items without indexing encrypted content or wrapped keys", () => {
+    expect(
+      firestoreIndexes.indexes.some(
+        (index) =>
+          index.collectionGroup === "libraryItems"
+          && index.queryScope === "COLLECTION"
+          && index.fields.some((field) => field.fieldPath === "ownerUid" && field.order === "ASCENDING")
+          && index.fields.some((field) => field.fieldPath === "updatedAt" && field.order === "DESCENDING")
+      )
+    ).toBe(true);
+    expect(fieldOverride("libraryItems", "encryptedContent")).toMatchObject({ indexes: [] });
+    expect(fieldOverride("libraryItems", "wrappedKeys")).toMatchObject({ indexes: [] });
+  });
+
+  it("keeps bounded active and legacy-owner note reads indexed for the library", () => {
+    expect(
+      firestoreIndexes.indexes.some(
+        (index) =>
+          index.collectionGroup === "notes"
+          && index.queryScope === "COLLECTION"
+          && index.fields.some((field) => field.fieldPath === "isDeleted" && field.order === "ASCENDING")
+          && index.fields.some((field) => field.fieldPath === "participantUids" && field.arrayConfig === "CONTAINS")
+          && index.fields.some((field) => field.fieldPath === "updatedAt" && field.order === "DESCENDING")
+      )
+    ).toBe(true);
+    expect(
+      firestoreIndexes.indexes.some(
+        (index) =>
+          index.collectionGroup === "notes"
+          && index.queryScope === "COLLECTION"
+          && index.fields.length === 2
+          && index.fields.some((field) => field.fieldPath === "ownerUid" && field.order === "ASCENDING")
+          && index.fields.some((field) => field.fieldPath === "updatedAt" && field.order === "DESCENDING")
+      )
+    ).toBe(true);
+  });
+
   it("indexes bounded recurring check-in queries without indexing checklist arrays", () => {
     for (const fieldPath of ["date", "habitId"]) {
       expect(

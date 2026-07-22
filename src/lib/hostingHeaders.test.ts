@@ -27,6 +27,8 @@ function expectBrowserHardeningHeaders(headers: HostingHeader[]): void {
   expect(csp).toContain("frame-ancestors 'none'");
   expect(csp).toContain("default-src 'self'");
   expect(csp).toContain("script-src 'self'");
+  expect(csp).not.toContain("'wasm-unsafe-eval'");
+  expect(csp).not.toContain("'unsafe-eval'");
   expect(csp).toContain("https://www.google.com/recaptcha/");
   expect(csp).toContain("https://www.gstatic.com/recaptcha/");
   expect(csp).toContain("connect-src 'self' https://*.googleapis.com");

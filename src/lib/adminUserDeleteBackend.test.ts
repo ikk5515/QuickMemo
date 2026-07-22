@@ -84,6 +84,21 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain('queryDocumentsByStringField(projectId, "history", "actorUid", uid, accessToken, {');
   });
 
+  it("deletes owner-scoped library items and the target user's immutable vault", () => {
+    expect(deleteManagedUserSource).toContain(
+      'queryDocumentsByStringField(projectId, "libraryItems", "ownerUid", ownerUid, accessToken)'
+    );
+    expect(deleteManagedUserSource).toContain(
+      "await deleteOwnedLibraryItems(projectId, targetUid, accessToken, stats)"
+    );
+    expect(deleteManagedUserSource).toContain(
+      "await deleteOwnedLibraryVault(projectId, targetUid, accessToken, stats)"
+    );
+    expect(deleteManagedUserSource).toContain('`libraryVaults/${ownerUid}`');
+    expect(deleteManagedUserSource).toContain("libraryItemsDeleted");
+    expect(deleteManagedUserSource).toContain("libraryVaultsDeleted");
+  });
+
   it("claims attachment deletion before objects and finalizes metadata with optimistic preconditions", () => {
     const cleanupFunction = deleteManagedUserSource.slice(
       deleteManagedUserSource.indexOf("async function cleanupManagedAttachmentDocument"),
@@ -206,13 +221,17 @@ describe("managed user backend deletion", () => {
     const deactivateIndex = deleteManagedUserSource.indexOf("await deactivateManagedUserBeforeCleanup");
     const authDeleteIndex = deleteManagedUserSource.indexOf("stats.authUserDeleted = await deleteAuthUser");
     const cleanupIndex = deleteManagedUserSource.indexOf("await removeDeletedUserFromShareTargets");
+    const libraryCleanupIndex = deleteManagedUserSource.indexOf("await deleteOwnedLibraryItems");
 
     expect(deleteManagedUserSource).toContain("isActive: { booleanValue: false }");
     expect(deleteManagedUserSource).toContain("firestorePatchFieldsIfExists");
     expect(deactivateIndex).toBeGreaterThan(-1);
     expect(authDeleteIndex).toBeGreaterThan(-1);
     expect(cleanupIndex).toBeGreaterThan(-1);
+    expect(libraryCleanupIndex).toBeGreaterThan(-1);
     expect(deactivateIndex).toBeLessThan(cleanupIndex);
     expect(authDeleteIndex).toBeLessThan(cleanupIndex);
+    expect(deactivateIndex).toBeLessThan(libraryCleanupIndex);
+    expect(authDeleteIndex).toBeLessThan(libraryCleanupIndex);
   });
 });

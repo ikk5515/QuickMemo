@@ -1,4 +1,4 @@
-import { CalendarDays, KeyRound, LogOut, Moon, NotebookPen, Settings, Shield, Sun, X } from "lucide-react";
+import { CalendarDays, KeyRound, LibraryBig, LogOut, Moon, NotebookPen, Settings, Shield, Sun, X } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
@@ -111,6 +111,10 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           <NavLink to="/app" onClick={onNavigateHome}>
             <NotebookPen size={18} />
             노트
+          </NavLink>
+          <NavLink to="/library">
+            <LibraryBig size={18} />
+            자료실
           </NavLink>
           <NavLink to="/schedule">
             <CalendarDays size={18} />
@@ -296,7 +300,7 @@ export function SettingsModal({
         </button>
         <h2 id="settings-modal-title">설정</h2>
         <p id="settings-modal-description" className="settings-modal-description">
-          홈, 일정관리 기본 탭, 매트릭스 표시 명칭을 설정합니다.
+          작업 시작 화면, 일정관리 기본 탭, 매트릭스 표시 명칭을 설정합니다.
         </p>
         <form className="form-grid compact" onSubmit={(event) => void submitSettings(event)}>
           <section className="settings-form-section" aria-labelledby="settings-workspace-title">
@@ -308,6 +312,7 @@ export function SettingsModal({
                 value={defaultHome}
               >
                 <option value="notes">노트</option>
+                <option value="library">자료실</option>
                 <option value="schedule">일정관리</option>
               </select>
             </label>

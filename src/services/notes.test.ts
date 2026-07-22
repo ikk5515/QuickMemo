@@ -4,10 +4,12 @@ import {
   createRevisionedEncryptedNote,
   deleteNote,
   getNoteRevisionState,
+  getVisibleNotesByIds,
   purgeNote,
   restoreRevisionedNote,
   subscribeMyNoteStates,
   subscribeNoteHistory,
+  subscribeVisibleNotes,
   updateRevisionedEncryptedNote,
   updateRevisionedNoteAccess
 } from "./notes";
@@ -372,6 +374,55 @@ describe("note history subscriptions", () => {
       expect.objectContaining({ type: "orderBy" }),
       expect.objectContaining({ count: 80, type: "limit" })
     );
+  });
+});
+
+describe("bounded library note reads", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fans out bounded recent reads by authorized owner before applying a global limit", () => {
+    subscribeVisibleNotes("user-a", ["user-a", "owner-b"], vi.fn(), vi.fn(), 80);
+
+    expect(mocks.where).toHaveBeenCalledWith("ownerUid", "==", "user-a");
+    expect(mocks.where).toHaveBeenCalledWith("ownerUid", "==", "owner-b");
+    expect(mocks.where).toHaveBeenCalledWith("isDeleted", "==", false);
+    expect(mocks.where).toHaveBeenCalledWith("participantUids", "array-contains", "user-a");
+    expect(mocks.orderBy).toHaveBeenCalledWith("updatedAt", "desc");
+    expect(mocks.limit).toHaveBeenCalledTimes(2);
+    expect(mocks.limit).toHaveBeenNthCalledWith(1, 80);
+    expect(mocks.limit).toHaveBeenNthCalledWith(2, 80);
+  });
+
+  it("bounds the admin-wide query to active notes", () => {
+    subscribeVisibleNotes("admin-a", null, vi.fn(), vi.fn(), 80);
+
+    expect(mocks.where).toHaveBeenCalledWith("isDeleted", "==", false);
+    expect(mocks.orderBy).toHaveBeenCalledWith("updatedAt", "desc");
+    expect(mocks.limit).toHaveBeenCalledWith(80);
+  });
+
+  it("keeps readable direct sources when another source is deleted or denied", async () => {
+    mocks.getDoc
+      .mockResolvedValueOnce({
+        data: () => ({
+          isDeleted: false,
+          participantUids: ["user-a"],
+          updatedAt: { toMillis: () => 100 }
+        }),
+        exists: () => true,
+        id: "note-readable"
+      })
+      .mockRejectedValueOnce(new Error("permission-denied"))
+      .mockResolvedValueOnce({ exists: () => false, id: "note-missing" });
+
+    await expect(getVisibleNotesByIds("user-a", ["note-readable", "note-denied", "note-missing"]))
+      .resolves.toEqual({
+        notes: [expect.objectContaining({ id: "note-readable" })],
+        resolvedNoteIds: expect.arrayContaining(["note-readable", "note-missing"])
+      });
+    expect(mocks.getDoc).toHaveBeenCalledTimes(3);
   });
 });
 

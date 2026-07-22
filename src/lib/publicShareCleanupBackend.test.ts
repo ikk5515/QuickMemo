@@ -8,6 +8,10 @@ import {
 
 interface VercelConfig {
   fluid?: boolean;
+  functions?: Record<string, {
+    includeFiles?: string;
+    maxDuration?: number;
+  }>;
   crons?: Array<{
     path: string;
     schedule: string;
@@ -24,7 +28,13 @@ describe("public share backend cleanup", () => {
 
   it("keeps cleanup APIs on Fluid Compute without lowering the platform duration default", () => {
     expect(vercelConfig.fluid).toBe(true);
-    expect(vercelConfig).not.toHaveProperty("functions");
+    expect(vercelConfig.functions).not.toHaveProperty("api/cleanup-public-shares.js");
+    expect(vercelConfig.functions?.["api/library-ocr-worker.js"]).toEqual({
+      includeFiles: "node_modules/tesseract.js/dist/worker.min.js"
+    });
+    expect(
+      Object.values(vercelConfig.functions ?? {}).every((configuration) => configuration.maxDuration === undefined)
+    ).toBe(true);
   });
 
   it("keeps a production cron route for expired public share cleanup", () => {

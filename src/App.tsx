@@ -4,6 +4,7 @@ import { useAuth } from "./context/AuthContext";
 
 const AdminPage = lazy(() => import("./pages/AdminPage"));
 const HomeRedirectPage = lazy(() => import("./pages/HomeRedirectPage"));
+const LibraryPage = lazy(() => import("./pages/LibraryPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
 const NotesPage = lazy(() => import("./pages/NotesPage"));
 const PublicSharePage = lazy(() => import("./pages/PublicSharePage"));
@@ -58,6 +59,14 @@ export default function App() {
           element={
             <RequireAuth>
               <NotesPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/library"
+          element={
+            <RequireAuth>
+              <LibraryPage />
             </RequireAuth>
           }
         />

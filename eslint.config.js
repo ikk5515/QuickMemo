@@ -4,7 +4,7 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "functions/lib", "node_modules"] },
+  { ignores: [".firebase", ".vercel", "dist", "functions/lib", "node_modules"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

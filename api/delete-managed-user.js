@@ -634,6 +634,10 @@ async function queryOwnedRecurringHabitCheckIns(projectId, ownerUid, accessToken
   return queryDocumentsByStringField(projectId, "recurringHabitCheckIns", "ownerUid", ownerUid, accessToken);
 }
 
+async function queryOwnedLibraryItems(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(projectId, "libraryItems", "ownerUid", ownerUid, accessToken);
+}
+
 async function queryOwnedNotes(projectId, ownerUid, accessToken) {
   return queryDocumentsByStringField(projectId, "notes", "ownerUid", ownerUid, accessToken);
 }
@@ -1348,6 +1352,26 @@ async function deleteOwnedRecurringHabitCheckIns(projectId, ownerUid, accessToke
   );
 }
 
+async function deleteOwnedLibraryItems(projectId, ownerUid, accessToken, stats) {
+  return deleteRepeatedQueryDocuments(
+    () => queryOwnedLibraryItems(projectId, ownerUid, accessToken),
+    accessToken,
+    stats,
+    "libraryItemsDeleted",
+    "Too many library items to delete in one request"
+  );
+}
+
+async function deleteOwnedLibraryVault(projectId, ownerUid, accessToken, stats) {
+  return deleteDocumentPathForStat(
+    projectId,
+    `libraryVaults/${ownerUid}`,
+    accessToken,
+    stats,
+    "libraryVaultsDeleted"
+  );
+}
+
 async function deleteOwnedNoteFolders(projectId, ownerUid, accessToken, stats) {
   return deleteRepeatedQueryDocuments(
     () => queryOwnedNoteFolders(projectId, ownerUid, accessToken),
@@ -1947,6 +1971,8 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
     googleCalendarOAuthStatesDeleted: 0,
     googleCalendarTaskSyncReceiptsDeleted: 0,
     googleCalendarTaskTombstonesDeleted: 0,
+    libraryItemsDeleted: 0,
+    libraryVaultsDeleted: 0,
     noteAttachmentsDeleted: 0,
     noteAttachmentRevisionBumps: 0,
     noteFoldersDeleted: 0,
@@ -1978,6 +2004,8 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
 
   await removeDeletedUserFromShareTargets(projectId, targetUid, accessToken, stats);
   await deleteOwnedPublicShares(projectId, targetUid, accessToken, storageBucket, stats);
+  await deleteOwnedLibraryItems(projectId, targetUid, accessToken, stats);
+  await deleteOwnedLibraryVault(projectId, targetUid, accessToken, stats);
   await deleteOwnedNotes(projectId, targetUid, accessToken, storageBucket, stats);
   await removeDeletedUserFromParticipantNotes(projectId, targetUid, callerUid, accessToken, stats);
   await deleteUploadedNoteAttachments(projectId, targetUid, accessToken, storageBucket, stats);

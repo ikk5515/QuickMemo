@@ -15,6 +15,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   orderBy,
   query,
   runTransaction,
@@ -114,6 +115,50 @@ function userPreferences(uid: string, overrides: Record<string, unknown> = {}) {
     defaultHome: "notes",
     scheduleDefaultView: "todo",
     theme: "system",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
+const validLibraryWrappedKey = "A".repeat(342) + "==";
+const validLibraryUrlFingerprint = "F".repeat(43);
+const validLibraryEncryptedPayload = {
+  ...encryptedPayload,
+  cipherText: "A".repeat(24),
+  iv: "A".repeat(16)
+};
+
+function libraryItem(uid: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ownerUid: uid,
+    generationId: "library-generation-1",
+    kind: "link",
+    status: "inbox",
+    captureSource: "manual",
+    isFavorite: false,
+    encryptedContent: validLibraryEncryptedPayload,
+    urlFingerprint: validLibraryUrlFingerprint,
+    sourceNoteId: null,
+    sourceAttachmentId: null,
+    wrappedKeys: {
+      [uid]: { version: 1, algorithm: "RSA-OAEP", wrappedKey: validLibraryWrappedKey }
+    },
+    revision: 1,
+    lastMutationId: "library-mutation-1",
+    reviewCount: 0,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    lastOpenedAt: null,
+    lastReviewedAt: null,
+    ...overrides
+  };
+}
+
+function libraryVault(uid: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ownerUid: uid,
+    wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: validLibraryWrappedKey },
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     ...overrides
@@ -817,6 +862,7 @@ describeRules("firestore security rules", () => {
     );
     await assertSucceeds(getDoc(doc(ownerDb, "userPreferences/user-a")));
     await assertFails(getDoc(doc(otherDb, "userPreferences/user-a")));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { defaultHome: "library", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "calendar", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "completed", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "recurring", updatedAt: serverTimestamp() }));
@@ -890,6 +936,267 @@ describeRules("firestore security rules", () => {
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { defaultHome: "admin", updatedAt: serverTimestamp() }));
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "midnight", updatedAt: serverTimestamp() }));
     await assertFails(setDoc(doc(otherDb, "userPreferences/user-a"), userPreferences("user-a")));
+  });
+
+  it("allows active owners to create, revise, query, and delete their library items", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, `notes/${"n".repeat(180)}`), {
+        ownerUid: "user-a",
+        isDeleted: false,
+        isPurged: false
+      });
+      await setDoc(doc(db, `notes/${"n".repeat(180)}/attachments/${"a".repeat(180)}`), {
+        noteId: "n".repeat(180)
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const itemRef = doc(ownerDb, "libraryItems/item-a");
+
+    await assertSucceeds(
+      setDoc(itemRef, libraryItem("user-a", {
+        kind: "attachment",
+        captureSource: "attachment-ocr",
+        urlFingerprint: null,
+        sourceNoteId: "n".repeat(180),
+        sourceAttachmentId: "a".repeat(180)
+      }))
+    );
+    await assertSucceeds(getDoc(itemRef));
+    await assertSucceeds(
+      getDocs(query(collection(ownerDb, "libraryItems"), where("ownerUid", "==", "user-a"), orderBy("updatedAt", "desc")))
+    );
+    await assertSucceeds(
+      updateDoc(itemRef, {
+        status: "reading",
+        isFavorite: true,
+        revision: 2,
+        lastMutationId: "library-mutation-2",
+        reviewCount: 1,
+        lastOpenedAt: serverTimestamp(),
+        lastReviewedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(deleteDoc(itemRef));
+  });
+
+  it("only lets a note owner persist an OCR copy of an existing ready attachment", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "notes/owned-note"), {
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        isDeleted: false,
+        isPurged: false
+      });
+      await setDoc(doc(db, "notes/owned-note/attachments/inline-ready"), {
+        noteId: "owned-note"
+      });
+      await setDoc(doc(db, "notes/owned-note/attachments/stored-ready"), {
+        noteId: "owned-note",
+        isReady: true
+      });
+      await setDoc(doc(db, "notes/owned-note/attachments/stored-pending"), {
+        noteId: "owned-note",
+        isReady: false
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+    const attachmentItem = (attachmentId: string) => libraryItem("user-a", {
+      kind: "attachment",
+      captureSource: "attachment-ocr",
+      urlFingerprint: null,
+      sourceNoteId: "owned-note",
+      sourceAttachmentId: attachmentId
+    });
+
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "libraryItems/inline-ready"), attachmentItem("inline-ready"))
+    );
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "libraryItems/stored-ready"), attachmentItem("stored-ready"))
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "libraryItems/stored-pending"), attachmentItem("stored-pending"))
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "libraryItems/missing-source"), attachmentItem("missing"))
+    );
+    await assertFails(
+      setDoc(
+        doc(participantDb, "libraryItems/shared-source-copy"),
+        libraryItem("user-b", {
+          kind: "attachment",
+          captureSource: "attachment-ocr",
+          urlFingerprint: null,
+          sourceNoteId: "owned-note",
+          sourceAttachmentId: "inline-ready"
+        })
+      )
+    );
+  });
+
+  it("keeps library items private from outsiders, admins, and inactive owners", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(db, "users/user-inactive"), userProfile("user-inactive", { isActive: false }));
+      await setDoc(doc(db, "libraryItems/item-a"), libraryItem("user-a"));
+      await setDoc(doc(db, "libraryItems/item-inactive"), libraryItem("user-inactive"));
+    });
+
+    const outsiderDb = testEnv.authenticatedContext("user-b").firestore();
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const inactiveDb = testEnv.authenticatedContext("user-inactive").firestore();
+
+    await assertFails(getDoc(doc(outsiderDb, "libraryItems/item-a")));
+    await assertFails(deleteDoc(doc(outsiderDb, "libraryItems/item-a")));
+    await assertFails(getDoc(doc(adminDb, "libraryItems/item-a")));
+    await assertFails(deleteDoc(doc(adminDb, "libraryItems/item-a")));
+    await assertFails(getDoc(doc(inactiveDb, "libraryItems/item-inactive")));
+    await assertFails(deleteDoc(doc(inactiveDb, "libraryItems/item-inactive")));
+    await assertFails(setDoc(doc(inactiveDb, "libraryItems/inactive-created"), libraryItem("user-inactive")));
+  });
+
+  it("rejects forged, unbounded, extra-field, shared-key, and skipped-revision library writes", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+
+    await assertFails(setDoc(doc(ownerDb, "libraryItems/forged-owner"), libraryItem("user-b")));
+    await assertFails(setDoc(doc(ownerDb, "libraryItems/invalid-generation"), libraryItem("user-a", { generationId: "short" })));
+    await assertFails(setDoc(doc(ownerDb, "libraryItems/extra-field"), libraryItem("user-a", { extra: true })));
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "libraryItems/invalid-iv"),
+        libraryItem("user-a", { encryptedContent: { ...validLibraryEncryptedPayload, iv: "too-short" } })
+      )
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "libraryItems/unbound-link"), libraryItem("user-a", { urlFingerprint: null }))
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "libraryItems/forged-attachment-binding"),
+        libraryItem("user-a", {
+          kind: "attachment",
+          captureSource: "attachment-ocr",
+          urlFingerprint: null,
+          sourceNoteId: "note_12345678",
+          sourceAttachmentId: null
+        })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "libraryItems/short-wrapped-key"),
+        libraryItem("user-a", {
+          wrappedKeys: {
+            "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "too-short" }
+          }
+        })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "libraryItems/shared-key"),
+        libraryItem("user-a", {
+          wrappedKeys: {
+            "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: validLibraryWrappedKey },
+            "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "B".repeat(342) + "==" }
+          }
+        })
+      )
+    );
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "libraryItems/oversized"),
+        libraryItem("user-a", {
+          encryptedContent: { ...validLibraryEncryptedPayload, cipherText: "a".repeat(700001) }
+        })
+      )
+    );
+
+    const itemRef = doc(ownerDb, "libraryItems/item-a");
+    await assertSucceeds(setDoc(itemRef, libraryItem("user-a")));
+    await assertFails(
+      updateDoc(itemRef, {
+        revision: 3,
+        lastMutationId: "library-mutation-3",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(itemRef, {
+        revision: 2,
+        lastMutationId: "library-mutation-review-without-time",
+        reviewCount: 1,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(itemRef, {
+        generationId: "library-generation-2",
+        revision: 2,
+        lastMutationId: "library-mutation-generation-change",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(itemRef, {
+        kind: "clip",
+        revision: 2,
+        lastMutationId: "library-mutation-2",
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(itemRef, {
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "B".repeat(342) + "==" }
+        },
+        revision: 2,
+        lastMutationId: "library-mutation-2",
+        updatedAt: serverTimestamp()
+      })
+    );
+  });
+
+  it("creates one immutable library vault per active owner and isolates it from admins", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(db, "users/user-inactive"), userProfile("user-inactive", { isActive: false }));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const outsiderDb = testEnv.authenticatedContext("user-b").firestore();
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const inactiveDb = testEnv.authenticatedContext("user-inactive").firestore();
+    const vaultRef = doc(ownerDb, "libraryVaults/user-a");
+
+    await assertSucceeds(setDoc(vaultRef, libraryVault("user-a")));
+    await assertSucceeds(getDoc(vaultRef));
+    await assertFails(getDoc(doc(outsiderDb, "libraryVaults/user-a")));
+    await assertFails(getDoc(doc(adminDb, "libraryVaults/user-a")));
+    await assertFails(setDoc(doc(outsiderDb, "libraryVaults/user-a"), libraryVault("user-a")));
+    await assertFails(setDoc(doc(inactiveDb, "libraryVaults/user-inactive"), libraryVault("user-inactive")));
+    await assertFails(updateDoc(vaultRef, { updatedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(vaultRef));
   });
 
   it("keeps personal schedule tasks owner-only and blocks forged attribution", async () => {
@@ -1872,6 +2179,7 @@ describeRules("firestore security rules", () => {
       });
     });
 
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertSucceeds(getDoc(doc(participantDb, "notes/note-a")));
@@ -1882,7 +2190,18 @@ describeRules("firestore security rules", () => {
           where("ownerUid", "==", "user-a"),
           where("isDeleted", "==", false),
           where("participantUids", "array-contains", "user-b"),
-          orderBy("updatedAt", "desc")
+          orderBy("updatedAt", "desc"),
+          limit(80)
+        )
+      )
+    );
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(ownerDb, "notes"),
+          where("ownerUid", "==", "user-a"),
+          orderBy("updatedAt", "desc"),
+          limit(80)
         )
       )
     );
@@ -2954,7 +3273,16 @@ describeRules("firestore security rules", () => {
     const outsiderDb = testEnv.authenticatedContext("user-c").firestore();
 
     await assertSucceeds(getDoc(doc(adminDb, "notes/note-personal")));
-    await assertSucceeds(getDocs(query(collection(adminDb, "notes"), where("isDeleted", "==", false), orderBy("updatedAt", "desc"))));
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(adminDb, "notes"),
+          where("isDeleted", "==", false),
+          orderBy("updatedAt", "desc"),
+          limit(80)
+        )
+      )
+    );
     await assertFails(getDoc(doc(outsiderDb, "notes/note-personal")));
     await assertFails(deleteDoc(doc(adminDb, "notes/note-personal")));
     await assertSucceeds(

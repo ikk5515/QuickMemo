@@ -11,7 +11,7 @@ export const defaultUserPreferences: Pick<UserPreferencesDocument, "defaultHome"
   theme: "system"
 };
 
-const validDefaultHomeViews = new Set<DefaultHomeView>(["notes", "schedule"]);
+const validDefaultHomeViews = new Set<DefaultHomeView>(["notes", "library", "schedule"]);
 const validScheduleViews = new Set<ScheduleView>(["todo", "calendar", "matrix", "recurring", "completed"]);
 const validThemes = new Set<ThemePreference>(["light", "dark", "system"]);
 

@@ -245,11 +245,30 @@ function subscribeNotesByDeletedState(
   ownerUids: string[] | null,
   deleted: boolean,
   callback: (notes: NoteSnapshot[]) => void,
-  onError?: (error: Error) => void
+  onError?: (error: Error) => void,
+  maximumNotes?: number
 ) {
   const noteFilter = deleted ? deletedNote : visibleNote;
 
   if (ownerUids === null) {
+    if (!deleted && maximumNotes) {
+      const boundedMaximum = Math.min(2_000, Math.max(1, Math.floor(maximumNotes)));
+      const notesQuery = query(
+        collection(db, "notes"),
+        where("isDeleted", "==", false),
+        orderBy("updatedAt", "desc"),
+        limit(boundedMaximum)
+      );
+
+      return onSnapshot(
+        notesQuery,
+        (snapshot) => {
+          callback(noteSnapshotList(snapshot, noteFilter).slice(0, boundedMaximum));
+        },
+        (error) => onError?.(error)
+      );
+    }
+
     const notesQuery = deleted
       ? query(
           collection(db, "notes"),
@@ -269,6 +288,9 @@ function subscribeNotesByDeletedState(
   }
 
   const normalizedOwnerUids = Array.from(new Set(deleted ? [uid] : [uid, ...ownerUids])).filter(Boolean);
+  const boundedMaximum = maximumNotes
+    ? Math.min(2_000, Math.max(1, Math.floor(maximumNotes)))
+    : null;
   const notesByOwner = new Map<string, NoteSnapshot[]>();
   let closed = false;
 
@@ -277,17 +299,31 @@ function subscribeNotesByDeletedState(
       return;
     }
 
-    callback(
-      Array.from(notesByOwner.values())
-        .flat()
-        .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt))
-    );
+    const merged = Array.from(notesByOwner.values())
+      .flat()
+      .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt));
+    callback(boundedMaximum ? merged.slice(0, boundedMaximum) : merged);
   };
 
   const unsubscribes = normalizedOwnerUids.map((ownerUid) => {
-    const notesQuery =
-      !deleted && ownerUid === uid
-        ? query(collection(db, "notes"), where("ownerUid", "==", ownerUid))
+    const notesQuery = !deleted && ownerUid === uid
+      ? boundedMaximum
+        ? query(
+            collection(db, "notes"),
+            where("ownerUid", "==", ownerUid),
+            orderBy("updatedAt", "desc"),
+            limit(boundedMaximum)
+          )
+        : query(collection(db, "notes"), where("ownerUid", "==", ownerUid))
+      : boundedMaximum
+        ? query(
+            collection(db, "notes"),
+            where("ownerUid", "==", ownerUid),
+            where("isDeleted", "==", deleted),
+            where("participantUids", "array-contains", uid),
+            orderBy("updatedAt", "desc"),
+            limit(boundedMaximum)
+          )
         : query(
             collection(db, "notes"),
             where("ownerUid", "==", ownerUid),
@@ -316,9 +352,74 @@ export function subscribeVisibleNotes(
   uid: string,
   ownerUids: string[] | null,
   callback: (notes: NoteSnapshot[]) => void,
-  onError?: (error: Error) => void
+  onError?: (error: Error) => void,
+  maximumNotes?: number
 ) {
-  return subscribeNotesByDeletedState(uid, ownerUids, false, callback, onError);
+  return subscribeNotesByDeletedState(uid, ownerUids, false, callback, onError, maximumNotes);
+}
+
+export async function getVisibleNotesByIds(uid: string, noteIds: string[]) {
+  const uniqueIds = Array.from(new Set(noteIds)).filter(Boolean).slice(0, 1_200);
+  const notes: NoteSnapshot[] = [];
+  const resolvedNoteIds: string[] = [];
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < uniqueIds.length) {
+      const noteId = uniqueIds[nextIndex];
+      nextIndex += 1;
+
+      try {
+        const snapshot = await getDoc(doc(db, "notes", noteId));
+        resolvedNoteIds.push(noteId);
+
+        if (!snapshot.exists()) {
+          continue;
+        }
+
+        const note = { id: snapshot.id, ...(snapshot.data() as NoteDocument) };
+
+        if (visibleNote(note) && note.participantUids.includes(uid)) {
+          notes.push(note);
+        }
+      } catch {
+        // One deleted, revoked, or temporarily unreadable source must not hide
+        // the user's other independently authorized source notes.
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(8, uniqueIds.length) }, worker));
+
+  normalizeLegacyDeletionMetadata(notes);
+  return { notes: sortedByUpdatedAt(notes), resolvedNoteIds };
+}
+
+export function subscribeVisibleNoteById(
+  uid: string,
+  noteId: string,
+  callback: (note: NoteSnapshot) => void,
+  onUnavailable: (error?: Error) => void
+) {
+  return onSnapshot(
+    doc(db, "notes", noteId),
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        onUnavailable();
+        return;
+      }
+
+      const note = { id: snapshot.id, ...(snapshot.data() as NoteDocument) };
+
+      if (!visibleNote(note) || !note.participantUids.includes(uid)) {
+        onUnavailable();
+        return;
+      }
+
+      callback(note);
+    },
+    (error) => onUnavailable(error)
+  );
 }
 
 export function subscribeDeletedNotes(

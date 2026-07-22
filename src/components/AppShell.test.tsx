@@ -116,6 +116,29 @@ describe("SettingsModal", () => {
     expect(screen.getByRole("option", { name: "반복 업무" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "완료" })).not.toBeInTheDocument();
   });
+
+  it("offers the encrypted library as a default start screen", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <SettingsModal
+        preferences={preferences()}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />
+    );
+
+    await user.selectOptions(screen.getByLabelText("작업 시작 기본 화면"), "library");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+
+    expect(screen.getByRole("option", { name: "자료실" })).toBeInTheDocument();
+    expect(onSave).toHaveBeenCalledWith({
+      defaultHome: "library",
+      matrixLabels: defaultMatrixLabels,
+      scheduleDefaultView: "todo"
+    });
+  });
 });
 
 describe("ThemeToggleButton", () => {

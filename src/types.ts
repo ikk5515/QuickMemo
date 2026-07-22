@@ -23,7 +23,7 @@ export interface UserProfile extends PublicRosterUser {
   needsKeyRecovery?: boolean;
 }
 
-export type DefaultHomeView = "notes" | "schedule";
+export type DefaultHomeView = "notes" | "library" | "schedule";
 export type ScheduleView = "todo" | "calendar" | "matrix" | "recurring" | "completed";
 export type ThemePreference = "light" | "dark" | "system";
 export type MatrixLabelKey = "todayOverdue" | "importantUrgent" | "urgent" | "important" | "waiting";
@@ -228,6 +228,73 @@ export interface ActiveNoteDocument {
   noteId: string | null;
   updatedByClientId: string;
   updatedAt?: Timestamp;
+}
+
+export type LibraryItemKind = "link" | "clip" | "attachment";
+export type LibraryItemStatus = "inbox" | "reading" | "archived";
+export type LibraryCaptureSource = "manual" | "browser-extension" | "bookmarklet" | "attachment-ocr";
+export type LibraryReaderBlockKind = "heading" | "paragraph" | "quote" | "list-item" | "code";
+export type LibraryHighlightColor = "yellow" | "green" | "blue" | "pink";
+
+export interface LibraryReaderBlock {
+  id: string;
+  kind: LibraryReaderBlockKind;
+  text: string;
+}
+
+export interface LibraryHighlight {
+  id: string;
+  blockId: string;
+  startOffset: number;
+  endOffset: number;
+  quote: string;
+  note: string;
+  color: LibraryHighlightColor;
+  createdAt: string;
+}
+
+export interface LibraryItemContent {
+  version: 1;
+  title: string;
+  url: string;
+  description: string;
+  siteName: string;
+  collection: string;
+  tags: string[];
+  selectionText: string;
+  readerBlocks: LibraryReaderBlock[];
+  highlights: LibraryHighlight[];
+  ocrText: string;
+  sourceFileName: string;
+  archivedAt: string | null;
+}
+
+export interface LibraryVaultDocument {
+  ownerUid: string;
+  wrappedKey: WrappedNoteKey;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+}
+
+export interface LibraryItemDocument {
+  ownerUid: string;
+  generationId: string;
+  kind: LibraryItemKind;
+  status: LibraryItemStatus;
+  captureSource: LibraryCaptureSource;
+  isFavorite: boolean;
+  encryptedContent: EncryptedPayload;
+  wrappedKeys: Record<string, WrappedNoteKey>;
+  urlFingerprint: string | null;
+  sourceNoteId: string | null;
+  sourceAttachmentId: string | null;
+  revision: number;
+  lastMutationId: string;
+  reviewCount: number;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+  lastOpenedAt?: Timestamp | null;
+  lastReviewedAt?: Timestamp | null;
 }
 
 export type ScheduleTaskStatus = "active" | "completed";

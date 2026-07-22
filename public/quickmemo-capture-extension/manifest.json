@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "QuickMemo 자료 캡처",
+  "version": "0.1.0",
+  "description": "현재 페이지의 선택 텍스트와 읽을 수 있는 본문을 QuickMemo 자료실로 전달합니다.",
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "scripting",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "QuickMemo 자료실에 저장"
+  },
+  "externally_connectable": {
+    "matches": [
+      "__QUICKMEMO_MATCH_PATTERN__"
+    ]
+  }
+}

@@ -38,6 +38,10 @@ service cloud.firestore {
       return /databases/$(database)/documents/notes/$(noteId);
     }
 
+    function noteAttachmentPath(noteId, attachmentId) {
+      return /databases/$(database)/documents/notes/$(noteId)/attachments/$(attachmentId);
+    }
+
     function scheduleTaskPath(taskId) {
       return /databases/$(database)/documents/scheduleTasks/$(taskId);
     }
@@ -401,7 +405,7 @@ service cloud.firestore {
     function validUserPreferences(data, uid) {
       return data.keys().hasOnly(["uid", "defaultHome", "matrixLabels", "scheduleDefaultView", "theme", "createdAt", "updatedAt"])
         && data.uid == uid
-        && data.defaultHome in ["notes", "schedule"]
+        && data.defaultHome in ["notes", "library", "schedule"]
         && (!data.keys().hasAny(["matrixLabels"]) || validMatrixLabels(data.matrixLabels))
         && data.scheduleDefaultView in ["todo", "calendar", "matrix", "recurring", "completed"]
         && (!data.keys().hasAny(["theme"]) || data.theme in ["light", "dark", "system"])
@@ -532,6 +536,158 @@ service cloud.firestore {
         && payload.cipherText.size() <= maxCipherTextSize
         && payload.iv.size() > 0
         && payload.iv.size() <= 256;
+    }
+
+    function encryptedLibraryPayload(payload) {
+      return encryptedPayload(payload)
+        && payload.cipherText.size() >= 24
+        && payload.cipherText.size() <= 700000
+        && payload.iv.size() == 16;
+    }
+
+    function validLibraryOptionalId(value) {
+      return value == null
+        || (
+          value is string
+          && value.matches("^[A-Za-z0-9_-]{1,180}$")
+        );
+    }
+
+    function validLibraryUrlFingerprint(value) {
+      return value == null
+        || (
+          value is string
+          && value.matches("^[A-Za-z0-9_-]{43}$")
+        );
+    }
+
+    function validLibraryWrappedKey(payload) {
+      return wrappedAesKeyPayload(payload)
+        && payload.wrappedKey.size() == 344;
+    }
+
+    function validLibraryWrappedKeys(data) {
+      return data.wrappedKeys is map
+        && data.wrappedKeys.keys().hasAll([data.ownerUid])
+        && data.wrappedKeys.keys().hasOnly([data.ownerUid])
+        && validLibraryWrappedKey(data.wrappedKeys[data.ownerUid]);
+    }
+
+    function validLibrarySourceBinding(data) {
+      return (
+          data.kind == "link"
+          && data.urlFingerprint != null
+          && data.sourceNoteId == null
+          && data.sourceAttachmentId == null
+          && data.captureSource != "attachment-ocr"
+        )
+        || (
+          data.kind == "clip"
+          && data.sourceNoteId == null
+          && data.sourceAttachmentId == null
+          && data.captureSource != "attachment-ocr"
+        )
+        || (
+          data.kind == "attachment"
+          && data.sourceNoteId != null
+          && data.sourceAttachmentId != null
+          && data.captureSource == "attachment-ocr"
+        );
+    }
+
+    function validLibraryAttachmentSource(data) {
+      return data.kind != "attachment"
+        || (
+          exists(notePath(data.sourceNoteId))
+          && exists(noteAttachmentPath(data.sourceNoteId, data.sourceAttachmentId))
+          && get(notePath(data.sourceNoteId)).data.ownerUid == request.auth.uid
+          && noteActive(get(notePath(data.sourceNoteId)).data)
+          && !notePurged(get(notePath(data.sourceNoteId)).data)
+          && get(noteAttachmentPath(data.sourceNoteId, data.sourceAttachmentId)).data.noteId == data.sourceNoteId
+          && (
+            !get(noteAttachmentPath(data.sourceNoteId, data.sourceAttachmentId)).data.keys().hasAny(["isReady"])
+            || get(noteAttachmentPath(data.sourceNoteId, data.sourceAttachmentId)).data.isReady == true
+          )
+        );
+    }
+
+    function validLibraryItem(data) {
+      return data.keys().hasAll([
+          "ownerUid",
+          "generationId",
+          "kind",
+          "status",
+          "captureSource",
+          "isFavorite",
+          "encryptedContent",
+          "urlFingerprint",
+          "sourceNoteId",
+          "sourceAttachmentId",
+          "wrappedKeys",
+          "revision",
+          "lastMutationId",
+          "reviewCount",
+          "createdAt",
+          "updatedAt",
+          "lastOpenedAt",
+          "lastReviewedAt"
+        ])
+        && data.keys().hasOnly([
+          "ownerUid",
+          "generationId",
+          "kind",
+          "status",
+          "captureSource",
+          "isFavorite",
+          "encryptedContent",
+          "urlFingerprint",
+          "sourceNoteId",
+          "sourceAttachmentId",
+          "wrappedKeys",
+          "revision",
+          "lastMutationId",
+          "reviewCount",
+          "createdAt",
+          "updatedAt",
+          "lastOpenedAt",
+          "lastReviewedAt"
+        ])
+        && data.ownerUid is string
+        && data.ownerUid.size() > 0
+        && data.ownerUid.size() <= 160
+        && data.generationId is string
+        && data.generationId.matches("^[A-Za-z0-9_-]{8,160}$")
+        && data.kind in ["link", "clip", "attachment"]
+        && data.status in ["inbox", "reading", "archived"]
+        && data.captureSource in ["manual", "browser-extension", "bookmarklet", "attachment-ocr"]
+        && data.isFavorite is bool
+        && encryptedLibraryPayload(data.encryptedContent)
+        && validLibraryUrlFingerprint(data.urlFingerprint)
+        && validLibraryOptionalId(data.sourceNoteId)
+        && validLibraryOptionalId(data.sourceAttachmentId)
+        && validLibrarySourceBinding(data)
+        && validLibraryWrappedKeys(data)
+        && data.revision is int
+        && data.revision >= 1
+        && data.revision <= 999999999999
+        && data.lastMutationId is string
+        && data.lastMutationId.matches("^[A-Za-z0-9_-]{8,160}$")
+        && data.reviewCount is int
+        && data.reviewCount >= 0
+        && data.reviewCount <= 999999999999
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && (data.lastOpenedAt == null || data.lastOpenedAt is timestamp)
+        && (data.lastReviewedAt == null || data.lastReviewedAt is timestamp);
+    }
+
+    function validLibraryVault(data, uid) {
+      return data.keys().hasAll(["ownerUid", "wrappedKey", "createdAt", "updatedAt"])
+        && data.keys().hasOnly(["ownerUid", "wrappedKey", "createdAt", "updatedAt"])
+        && data.ownerUid == uid
+        && validLibraryWrappedKey(data.wrappedKey)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
     }
 
     function validScheduleWrappedKeys(data, uid) {
@@ -2109,6 +2265,77 @@ service cloud.firestore {
           "updatedAt"
         ]);
       allow delete: if false;
+    }
+
+    match /libraryVaults/{uid} {
+      allow read: if activeSignedInUser()
+        && request.auth.uid == uid
+        && resource.data.ownerUid == uid;
+      allow create: if activeSignedInUser()
+        && request.auth.uid == uid
+        && validLibraryVault(request.resource.data, uid)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /libraryItems/{itemId} {
+      allow read: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
+      allow create: if activeSignedInUser()
+        && validLibraryItem(request.resource.data)
+        && validLibraryAttachmentSource(request.resource.data)
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.revision == 1
+        && request.resource.data.reviewCount == 0
+        && request.resource.data.lastOpenedAt == null
+        && request.resource.data.lastReviewedAt == null
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid
+        && validLibraryItem(request.resource.data)
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.generationId == resource.data.generationId
+        && request.resource.data.kind == resource.data.kind
+        && request.resource.data.captureSource == resource.data.captureSource
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.wrappedKeys == resource.data.wrappedKeys
+        && request.resource.data.urlFingerprint == resource.data.urlFingerprint
+        && request.resource.data.sourceNoteId == resource.data.sourceNoteId
+        && request.resource.data.sourceAttachmentId == resource.data.sourceAttachmentId
+        && request.resource.data.revision == resource.data.revision + 1
+        && request.resource.data.lastMutationId != resource.data.lastMutationId
+        && request.resource.data.reviewCount >= resource.data.reviewCount
+        && request.resource.data.reviewCount <= resource.data.reviewCount + 1
+        && (
+          (
+            request.resource.data.reviewCount == resource.data.reviewCount
+            && request.resource.data.lastReviewedAt == resource.data.lastReviewedAt
+          )
+          || (
+            request.resource.data.reviewCount == resource.data.reviewCount + 1
+            && request.resource.data.lastReviewedAt == request.time
+          )
+        )
+        && (
+          request.resource.data.lastOpenedAt == resource.data.lastOpenedAt
+          || request.resource.data.lastOpenedAt == request.time
+        )
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "isFavorite",
+          "encryptedContent",
+          "revision",
+          "lastMutationId",
+          "reviewCount",
+          "updatedAt",
+          "lastOpenedAt",
+          "lastReviewedAt"
+        ]);
+      allow delete: if activeSignedInUser()
+        && resource.data.ownerUid == request.auth.uid;
     }
 
     match /googleCalendarConnections/{document=**} {
