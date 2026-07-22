@@ -13,6 +13,7 @@ import {
   deleteDoc,
   deleteField,
   doc,
+  documentId,
   getDoc,
   getDocs,
   limit,
@@ -1141,7 +1142,13 @@ describeRules("firestore security rules", () => {
     );
     await assertSucceeds(getDoc(itemRef));
     await assertSucceeds(
-      getDocs(query(collection(ownerDb, "libraryItems"), where("ownerUid", "==", "user-a"), orderBy("updatedAt", "desc")))
+      getDocs(query(
+        collection(ownerDb, "libraryItems"),
+        where("ownerUid", "==", "user-a"),
+        orderBy("updatedAt", "desc"),
+        orderBy(documentId(), "desc"),
+        limit(121)
+      ))
     );
     await assertSucceeds(
       updateDoc(itemRef, {
@@ -1150,12 +1157,97 @@ describeRules("firestore security rules", () => {
         revision: 2,
         lastMutationId: "library-mutation-2",
         reviewCount: 1,
-        lastOpenedAt: serverTimestamp(),
         lastReviewedAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       })
     );
     await assertSucceeds(deleteDoc(itemRef));
+  });
+
+  it("requires owner-scoped bounded library list queries", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "libraryItems/item-a"), libraryItem("user-a"));
+      await setDoc(doc(db, "libraryItems/item-b"), libraryItem("user-b"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const ownerItems = collection(ownerDb, "libraryItems");
+    const ownQuery = (maximum?: number) => query(
+      ownerItems,
+      where("ownerUid", "==", "user-a"),
+      orderBy("updatedAt", "desc"),
+      orderBy(documentId(), "desc"),
+      ...(maximum === undefined ? [] : [limit(maximum)])
+    );
+
+    await assertSucceeds(getDocs(ownQuery(121)));
+    await assertFails(getDocs(ownQuery()));
+    await assertFails(getDocs(ownQuery(122)));
+    await assertFails(getDocs(query(
+      ownerItems,
+      where("ownerUid", "==", "user-b"),
+      orderBy("updatedAt", "desc"),
+      orderBy(documentId(), "desc"),
+      limit(121)
+    )));
+  });
+
+  it("isolates last-open tracking from revisioned library mutations", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "users/user-inactive"), userProfile("user-inactive", { isActive: false }));
+      await setDoc(doc(db, "libraryItems/item-a"), libraryItem("user-a"));
+      await setDoc(doc(db, "libraryItems/item-inactive"), libraryItem("user-inactive"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const inactiveDb = testEnv.authenticatedContext("user-inactive").firestore();
+    const itemRef = doc(ownerDb, "libraryItems/item-a");
+
+    await assertSucceeds(updateDoc(itemRef, { lastOpenedAt: serverTimestamp() }));
+    const openedAt = (await getDoc(itemRef)).data()?.lastOpenedAt;
+
+    await assertFails(updateDoc(itemRef, {
+      lastOpenedAt: serverTimestamp(),
+      lastMutationId: "library-mutation-open-revision",
+      revision: 2
+    }));
+    await assertFails(updateDoc(itemRef, {
+      lastOpenedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(itemRef, {
+      isFavorite: true,
+      lastOpenedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(otherDb, "libraryItems/item-a"), {
+      lastOpenedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(inactiveDb, "libraryItems/item-inactive"), {
+      lastOpenedAt: serverTimestamp()
+    }));
+
+    await assertSucceeds(updateDoc(itemRef, {
+      lastMutationId: "library-mutation-after-open",
+      revision: 2,
+      status: "reading",
+      updatedAt: serverTimestamp()
+    }));
+    const afterRevision = (await getDoc(itemRef)).data();
+    expect(afterRevision?.lastOpenedAt.isEqual(openedAt)).toBe(true);
+
+    await assertFails(updateDoc(itemRef, {
+      lastMutationId: "library-mutation-reopens",
+      lastOpenedAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
   });
 
   it("keeps missing library item reads private while allowing create-first deterministic writes", async () => {

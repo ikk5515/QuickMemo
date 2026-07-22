@@ -1,7 +1,9 @@
 import {
   collection,
   doc,
+  documentId,
   getDoc,
+  getDocs,
   limit as queryLimit,
   onSnapshot,
   orderBy,
@@ -9,6 +11,7 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  startAfter,
   where
 } from "firebase/firestore";
 import { db } from "../lib/firebase";
@@ -65,6 +68,23 @@ export interface LibraryDecryptResult {
   failedItemIds: string[];
 }
 
+export type LibraryItemsServerFacet =
+  | { field: "isFavorite"; value: true }
+  | { field: "kind"; value: LibraryItemKind }
+  | { field: "status"; value: LibraryItemStatus }
+  | null;
+
+export interface LibraryItemsCursor {
+  id: string;
+  updatedAt: NonNullable<LibraryItemDocument["updatedAt"]>;
+}
+
+export interface LibraryItemsPage {
+  cursor: LibraryItemsCursor | null;
+  hasMore: boolean;
+  items: LibraryItemSnapshot[];
+}
+
 export class LibraryItemRevisionConflictError extends Error {
   readonly code = "library-item/revision-conflict";
 
@@ -86,11 +106,12 @@ export class DuplicateLibraryItemError extends Error {
 }
 
 const validStatuses = new Set<LibraryItemStatus>(["inbox", "reading", "archived"]);
+const validKinds = new Set<LibraryItemKind>(["link", "clip", "attachment"]);
 const vaultKeyCache = new WeakMap<CryptoKey, Map<string, CryptoKey>>();
 const libraryDecryptConcurrency = 4;
 export const libraryInitialSubscriptionLimit = 120;
 export const librarySubscriptionStep = 120;
-export const libraryMaximumSubscriptionLimit = 1_200;
+const libraryMaximumPageSize = 120;
 
 function libraryVaultRef(uid: string) {
   return doc(db, "libraryVaults", uid);
@@ -191,28 +212,106 @@ async function getOrCreateLibraryVaultKey(
   return vaultKey;
 }
 
+function boundedLibraryPageSize(pageSize: number) {
+  return Math.min(libraryMaximumPageSize, Math.max(1, Math.floor(pageSize)));
+}
+
+function libraryFacetConstraint(facet: LibraryItemsServerFacet) {
+  if (!facet) {
+    return [];
+  }
+
+  if (facet.field === "isFavorite") {
+    if (facet.value !== true) {
+      throw new Error("자료실 즐겨찾기 필터를 확인할 수 없습니다.");
+    }
+    return [where("isFavorite", "==", true)];
+  }
+
+  if (facet.field === "kind") {
+    if (!validKinds.has(facet.value)) {
+      throw new Error("자료실 종류 필터를 확인할 수 없습니다.");
+    }
+    return [where("kind", "==", facet.value)];
+  }
+
+  if (!validStatuses.has(facet.value)) {
+    throw new Error("자료실 상태 필터를 확인할 수 없습니다.");
+  }
+  return [where("status", "==", facet.value)];
+}
+
+function libraryItemsPageQuery(
+  uid: string,
+  facet: LibraryItemsServerFacet,
+  pageSize: number,
+  cursor: LibraryItemsCursor | null
+) {
+  const constraints = [
+    where("ownerUid", "==", uid),
+    ...libraryFacetConstraint(facet),
+    orderBy("updatedAt", "desc"),
+    orderBy(documentId(), "desc"),
+    ...(cursor ? [startAfter(cursor.updatedAt, cursor.id)] : []),
+    queryLimit(pageSize + 1)
+  ];
+
+  return query(collection(db, "libraryItems"), ...constraints);
+}
+
+function libraryItemsPageFromSnapshot(
+  snapshot: { docs: Array<{ id: string; data: () => unknown }> },
+  pageSize: number
+): LibraryItemsPage {
+  const pageDocuments = snapshot.docs.slice(0, pageSize);
+  const items = pageDocuments.map((item) => ({
+    id: item.id,
+    ...(item.data() as LibraryItemDocument)
+  }));
+  const lastItem = items.at(-1);
+
+  return {
+    // A newly-created local Firestore snapshot may expose an unresolved
+    // serverTimestamp as null. Keep the item visible, but do not offer a
+    // cursor until the acknowledged snapshot supplies a real timestamp.
+    cursor: lastItem?.updatedAt ? { id: lastItem.id, updatedAt: lastItem.updatedAt } : null,
+    hasMore: Boolean(lastItem?.updatedAt) && snapshot.docs.length > pageSize,
+    items
+  };
+}
+
 export function subscribeLibraryItems(
   uid: string,
-  callback: (items: LibraryItemSnapshot[]) => void,
+  facet: LibraryItemsServerFacet,
+  callback: (page: LibraryItemsPage) => void,
   onError?: (error: Error) => void,
-  maximumItems = libraryInitialSubscriptionLimit
+  requestedPageSize = libraryInitialSubscriptionLimit
 ) {
-  const boundedMaximum = Math.min(
-    libraryMaximumSubscriptionLimit,
-    Math.max(1, Math.floor(maximumItems))
-  );
-  const itemsQuery = query(
-    collection(db, "libraryItems"),
-    where("ownerUid", "==", uid),
-    orderBy("updatedAt", "desc"),
-    queryLimit(boundedMaximum)
-  );
+  const pageSize = boundedLibraryPageSize(requestedPageSize);
+  const itemsQuery = libraryItemsPageQuery(uid, facet, pageSize, null);
 
   return onSnapshot(
     itemsQuery,
-    (snapshot) => callback(snapshot.docs.map((item) => ({ id: item.id, ...(item.data() as LibraryItemDocument) }))),
+    (snapshot) => {
+      try {
+        callback(libraryItemsPageFromSnapshot(snapshot, pageSize));
+      } catch (error) {
+        onError?.(error instanceof Error ? error : new Error("자료실 목록을 확인하지 못했습니다."));
+      }
+    },
     (error) => onError?.(error)
   );
+}
+
+export async function getNextLibraryItemsPage(
+  uid: string,
+  facet: LibraryItemsServerFacet,
+  cursor: LibraryItemsCursor,
+  requestedPageSize = librarySubscriptionStep
+) {
+  const pageSize = boundedLibraryPageSize(requestedPageSize);
+  const snapshot = await getDocs(libraryItemsPageQuery(uid, facet, pageSize, cursor));
+  return libraryItemsPageFromSnapshot(snapshot, pageSize);
 }
 
 export async function decryptLibraryItem(
@@ -417,13 +516,25 @@ export async function updateLibraryItem(
 export function touchLibraryItemOpened(
   itemId: string,
   uid: string,
-  expectedRevision: number,
-  expectedLastMutationId: string,
   expectedGenerationId: string
 ) {
-  return commitLibraryItemMutation(itemId, uid, expectedRevision, expectedLastMutationId, expectedGenerationId, () => ({
-    lastOpenedAt: serverTimestamp()
-  }));
+  const reference = libraryItemRef(itemId);
+
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(reference);
+
+    if (!snapshot.exists()) {
+      throw new LibraryItemRevisionConflictError();
+    }
+
+    const current = snapshot.data() as LibraryItemDocument;
+
+    if (current.ownerUid !== uid || current.generationId !== expectedGenerationId) {
+      throw new LibraryItemRevisionConflictError();
+    }
+
+    transaction.update(reference, { lastOpenedAt: serverTimestamp() });
+  });
 }
 
 export function markLibraryItemReviewed(

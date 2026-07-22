@@ -13,6 +13,7 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  startAfter,
   updateDoc,
   where,
   writeBatch
@@ -211,23 +212,109 @@ function deletedNote(document: NoteSnapshot) {
   return document.isDeleted === true && !purgedNote(document);
 }
 
-const legacyDeletionMetadataRepairs = new Set<string>();
+const legacyDeletionMetadataRepairs = new Map<string, Promise<boolean>>();
+interface LegacyDeletionMetadataMigrationState {
+  completed: boolean;
+  cursor?: { id: string };
+  inFlight?: Promise<void>;
+}
+
+const legacyDeletionMetadataMigrationStates = new Map<string, LegacyDeletionMetadataMigrationState>();
+const legacyDeletionMetadataMigrationPageSize = 100;
+const legacyDeletionMetadataMigrationMaxDocuments = 500;
 
 function hasDeletionMetadata(document: NoteSnapshot) {
   return Object.prototype.hasOwnProperty.call(document, "isDeleted");
 }
 
 function normalizeLegacyDeletionMetadata(notes: NoteSnapshot[]) {
-  notes.forEach((note) => {
-    if (hasDeletionMetadata(note) || !visibleNote(note) || legacyDeletionMetadataRepairs.has(note.id)) {
-      return;
+  return notes.flatMap((note) => {
+    const existingRepair = legacyDeletionMetadataRepairs.get(note.id);
+    if (existingRepair) {
+      return [existingRepair];
+    }
+    if (hasDeletionMetadata(note) || !visibleNote(note)) {
+      return [];
     }
 
-    legacyDeletionMetadataRepairs.add(note.id);
-    void updateDoc(doc(db, "notes", note.id), { isDeleted: false }).catch(() => {
-      legacyDeletionMetadataRepairs.delete(note.id);
-    });
+    const repair = updateDoc(doc(db, "notes", note.id), { isDeleted: false })
+      .then(() => true)
+      .catch(() => {
+        legacyDeletionMetadataRepairs.delete(note.id);
+        return false;
+      });
+    legacyDeletionMetadataRepairs.set(note.id, repair);
+    return [repair];
   });
+}
+
+function migrateLegacyDeletionMetadata(uid: string, adminScope: boolean) {
+  const migrationKey = adminScope ? "admin" : `owner:${uid}`;
+  const state = legacyDeletionMetadataMigrationStates.get(migrationKey) ?? { completed: false };
+  legacyDeletionMetadataMigrationStates.set(migrationKey, state);
+
+  if (state.completed) {
+    return Promise.resolve();
+  }
+  if (state.inFlight) {
+    return state.inFlight;
+  }
+
+  const migrationRun = (async () => {
+    let scannedDocuments = 0;
+
+    while (scannedDocuments < legacyDeletionMetadataMigrationMaxDocuments) {
+      const pageLimit = Math.min(
+        legacyDeletionMetadataMigrationPageSize,
+        legacyDeletionMetadataMigrationMaxDocuments - scannedDocuments
+      );
+      const baseConstraints = adminScope
+        ? [orderBy("updatedAt", "desc")]
+        : [where("ownerUid", "==", uid), orderBy("updatedAt", "desc")];
+      const pageQuery = query(
+        collection(db, "notes"),
+        ...baseConstraints,
+        ...(state.cursor ? [startAfter(state.cursor)] : []),
+        limit(pageLimit)
+      );
+      const snapshot = await getDocs(pageQuery);
+
+      if (!snapshot.docs.length) {
+        state.completed = true;
+        break;
+      }
+
+      scannedDocuments += snapshot.docs.length;
+      const notes = snapshot.docs.map((document) => ({
+        id: document.id,
+        ...(document.data() as NoteDocument)
+      }));
+      const repairs = await Promise.all(normalizeLegacyDeletionMetadata(notes));
+
+      // Do not move past a document whose normalization failed. A later
+      // subscription can safely retry this same page without rescanning the
+      // already-completed newest pages.
+      if (repairs.some((repaired) => !repaired)) {
+        break;
+      }
+
+      if (snapshot.docs.length < pageLimit) {
+        state.completed = true;
+        break;
+      }
+
+      state.cursor = snapshot.docs.at(-1);
+    }
+  })()
+    .catch(() => undefined)
+    .finally(() => {
+      if (state.inFlight === migrationRun) {
+        state.inFlight = undefined;
+      }
+    });
+
+  state.inFlight = migrationRun;
+  return migrationRun;
 }
 
 function sortedByUpdatedAt(notes: NoteSnapshot[]) {
@@ -252,6 +339,7 @@ function subscribeNotesByDeletedState(
 
   if (ownerUids === null) {
     if (!deleted && maximumNotes) {
+      void migrateLegacyDeletionMetadata(uid, true);
       const boundedMaximum = Math.min(2_000, Math.max(1, Math.floor(maximumNotes)));
       const notesQuery = query(
         collection(db, "notes"),
@@ -276,7 +364,16 @@ function subscribeNotesByDeletedState(
           where("participantUids", "array-contains", uid),
           orderBy("updatedAt", "desc")
         )
-      : query(collection(db, "notes"), where("participantUids", "array-contains", uid));
+      : query(
+          collection(db, "notes"),
+          where("isDeleted", "==", false),
+          where("participantUids", "array-contains", uid),
+          orderBy("updatedAt", "desc")
+        );
+
+    if (!deleted) {
+      void migrateLegacyDeletionMetadata(uid, true);
+    }
 
     return onSnapshot(
       notesQuery,
@@ -294,6 +391,10 @@ function subscribeNotesByDeletedState(
   const notesByOwner = new Map<string, NoteSnapshot[]>();
   let closed = false;
 
+  if (!deleted) {
+    void migrateLegacyDeletionMetadata(uid, false);
+  }
+
   const emitNotes = () => {
     if (closed) {
       return;
@@ -306,31 +407,15 @@ function subscribeNotesByDeletedState(
   };
 
   const unsubscribes = normalizedOwnerUids.map((ownerUid) => {
-    const notesQuery = !deleted && ownerUid === uid
-      ? boundedMaximum
-        ? query(
-            collection(db, "notes"),
-            where("ownerUid", "==", ownerUid),
-            orderBy("updatedAt", "desc"),
-            limit(boundedMaximum)
-          )
-        : query(collection(db, "notes"), where("ownerUid", "==", ownerUid))
-      : boundedMaximum
-        ? query(
-            collection(db, "notes"),
-            where("ownerUid", "==", ownerUid),
-            where("isDeleted", "==", deleted),
-            where("participantUids", "array-contains", uid),
-            orderBy("updatedAt", "desc"),
-            limit(boundedMaximum)
-          )
-        : query(
-            collection(db, "notes"),
-            where("ownerUid", "==", ownerUid),
-            where("isDeleted", "==", deleted),
-            where("participantUids", "array-contains", uid),
-            orderBy("updatedAt", "desc")
-          );
+    const baseConstraints = [
+      where("ownerUid", "==", ownerUid),
+      where("isDeleted", "==", deleted),
+      where("participantUids", "array-contains", uid),
+      orderBy("updatedAt", "desc")
+    ];
+    const notesQuery = boundedMaximum
+      ? query(collection(db, "notes"), ...baseConstraints, limit(boundedMaximum))
+      : query(collection(db, "notes"), ...baseConstraints);
 
     return onSnapshot(
       notesQuery,

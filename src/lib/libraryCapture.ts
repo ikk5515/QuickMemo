@@ -33,6 +33,11 @@ export interface LibraryCaptureHandoff {
   nonce: string;
 }
 
+export interface LibraryCaptureLoginState {
+  returnTo: "/library";
+  captureFragment: string;
+}
+
 export class LibraryCaptureValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -47,9 +52,15 @@ const blockKeys = new Set(["kind", "text"]);
 const extensionResponseKeys = new Set(["ok", "payload"]);
 const extensionFailureResponseKeys = new Set(["ok", "error"]);
 const handoffKeys = new Set(["capture", "extension"]);
+const loginStateKeys = new Set(["returnTo", "captureFragment"]);
 const forbiddenCaptureContainerSelector = "script, style, noscript, nav, header, footer, form, button, input, textarea, select, svg, canvas, iframe";
 const captureBlockSelector = "h1, h2, h3, h4, h5, h6, p, blockquote, li, pre, code";
-const sensitiveQueryParameterPattern = /(?:^|[_-])(token|access[_-]?token|id[_-]?token|refresh[_-]?token|auth|authorization|code|credential|key|pass(?:word)?|secret|session|signature|sig)(?:$|[_-])/i;
+const sensitiveQueryParameterPattern = /(?:^|[_-])(token|access[_-]?token|id[_-]?token|refresh[_-]?token|auth|authorization|code|credential|api[_-]?key|client[_-]?secret|private[_-]?key|key|pass(?:word)?|secret|session|signature|sig)(?:$|[_-])/i;
+const sensitiveUrlCredentialAssignmentPattern = /(?:^|[\s"'([{/?#&,;])(?:token|access[_-]?token|id[_-]?token|refresh[_-]?token|auth|authorization|code|credential|api[_-]?key|client[_-]?secret|private[_-]?key|key|pass(?:word)?|secret|session|signature|sig)\s*["']?\s*(?:=|:)\s*["']?\s*[^\s"'})\]/?#&,;]+/i;
+const stronglySensitivePathLabelPattern = /^(?:access[_-]?token|id[_-]?token|refresh[_-]?token|authorization|credential|api[_-]?key|client[_-]?secret|private[_-]?key|pass(?:word)?|secret|session|signature|sig)$/i;
+const weaklySensitivePathLabelPattern = /^(?:token|auth|code|key)$/i;
+const opaqueCredentialAtomPattern = /^[A-Za-z0-9._~+/=-]{16,}$/;
+const jwtLikeUrlCredentialPattern = /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{3,}\.[A-Za-z0-9_-]{8,}(?:$|[^A-Za-z0-9_-])/;
 // eslint-disable-next-line no-control-regex
 const disallowedTextCharactersPattern = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u202A-\u202E\u2066-\u2069]/g;
 const sensitiveCredentialPatterns = [
@@ -149,6 +160,99 @@ function normalizeBoundedText(value: unknown, maxCharacters: number, fieldName: 
   return normalized;
 }
 
+function repeatedlyDecodeUrlComponent(value: string) {
+  let decoded = value;
+
+  // URL and URLSearchParams may already decode one layer. Two additional
+  // rounds cover percent- and double-encoded nested redirect values without
+  // allowing an unbounded decoder loop.
+  for (let round = 0; round < 3; round += 1) {
+    try {
+      const next = decodeURIComponent(decoded);
+      if (next === decoded) {
+        break;
+      }
+      decoded = next;
+    } catch {
+      // One malformed percent sign must not shield otherwise valid encoded
+      // ASCII credential markers in the same component.
+      const next = decoded.replace(/%([0-7][0-9A-F])/gi, (_match, hexadecimal: string) =>
+        String.fromCharCode(Number.parseInt(hexadecimal, 16))
+      );
+      if (next === decoded) {
+        break;
+      }
+      decoded = next;
+    }
+  }
+
+  return decoded;
+}
+
+function containsCredentialLikeUrlValue(value: string) {
+  const decoded = repeatedlyDecodeUrlComponent(value);
+  return sensitiveUrlCredentialAssignmentPattern.test(decoded)
+    || jwtLikeUrlCredentialPattern.test(decoded)
+    || sensitiveCredentialPatterns.some((pattern) => pattern.test(decoded));
+}
+
+function looksLikeOpaqueCredentialAtom(value: string) {
+  const decoded = repeatedlyDecodeUrlComponent(value);
+  return sensitiveCredentialPatterns.some((pattern) => pattern.test(decoded))
+    || jwtLikeUrlCredentialPattern.test(decoded)
+    || (
+      opaqueCredentialAtomPattern.test(decoded)
+      && /[A-Z0-9._~+/=]/.test(decoded)
+    );
+}
+
+function decodedPathContainsCredentialPair(value: string) {
+  const parts = value.split("/").filter(Boolean);
+
+  return parts.some((part, index) => {
+    const nextPart = parts[index + 1];
+    if (!nextPart) {
+      return false;
+    }
+    return stronglySensitivePathLabelPattern.test(part)
+      || (weaklySensitivePathLabelPattern.test(part) && looksLikeOpaqueCredentialAtom(nextPart));
+  });
+}
+
+function sanitizeCapturePathname(pathname: string) {
+  const segments = pathname.split("/");
+  const decodedSegments = segments.map(repeatedlyDecodeUrlComponent);
+  const removedIndexes = new Set<number>();
+
+  for (let index = 0; index < decodedSegments.length; index += 1) {
+    const segment = decodedSegments[index] ?? "";
+    if (
+      containsCredentialLikeUrlValue(segment)
+      || decodedPathContainsCredentialPair(segment)
+    ) {
+      removedIndexes.add(index);
+      continue;
+    }
+
+    const nextSegment = decodedSegments[index + 1];
+    if (!nextSegment) {
+      continue;
+    }
+
+    if (
+      stronglySensitivePathLabelPattern.test(segment)
+      || (weaklySensitivePathLabelPattern.test(segment) && looksLikeOpaqueCredentialAtom(nextSegment))
+    ) {
+      removedIndexes.add(index);
+      removedIndexes.add(index + 1);
+      index += 1;
+    }
+  }
+
+  const sanitized = segments.filter((_segment, index) => !removedIndexes.has(index)).join("/");
+  return sanitized || "/";
+}
+
 function normalizeCaptureUrl(value: unknown) {
   if (typeof value !== "string") {
     throw new LibraryCaptureValidationError("캡처 URL 형식이 올바르지 않습니다.");
@@ -173,10 +277,22 @@ function normalizeCaptureUrl(value: unknown) {
   }
 
   parsed.hash = "";
-  for (const key of [...parsed.searchParams.keys()]) {
-    if (sensitiveQueryParameterPattern.test(key)) {
-      parsed.searchParams.delete(key);
+  parsed.pathname = sanitizeCapturePathname(parsed.pathname);
+
+  const safeSearchParameters: Array<[string, string]> = [];
+  for (const [key, parameterValue] of parsed.searchParams.entries()) {
+    const decodedKey = repeatedlyDecodeUrlComponent(key);
+    if (
+      sensitiveQueryParameterPattern.test(decodedKey)
+      || containsCredentialLikeUrlValue(parameterValue)
+    ) {
+      continue;
     }
+    safeSearchParameters.push([key, parameterValue]);
+  }
+  parsed.search = "";
+  for (const [key, parameterValue] of safeSearchParameters) {
+    parsed.searchParams.append(key, parameterValue);
   }
 
   const normalized = parsed.toString();
@@ -489,6 +605,59 @@ export function parseLibraryCaptureHandoffFragment(fragment: string): LibraryCap
   }
 
   return { extensionId, nonce };
+}
+
+/**
+ * Produces the only fragment shape that may cross the unauthenticated login
+ * boundary. The destination path is deliberately not caller-controlled.
+ */
+export function normalizeLibraryCaptureHandoffFragment(fragment: string) {
+  const handoff = parseLibraryCaptureHandoffFragment(fragment);
+  if (!handoff) {
+    return null;
+  }
+
+  return `#capture=${handoff.nonce}&extension=${handoff.extensionId}`;
+}
+
+export function createLibraryCaptureLoginState(pathname: string, fragment: string): LibraryCaptureLoginState | null {
+  if (pathname !== "/library") {
+    return null;
+  }
+
+  const captureFragment = normalizeLibraryCaptureHandoffFragment(fragment);
+  if (!captureFragment) {
+    return null;
+  }
+
+  return { returnTo: "/library", captureFragment };
+}
+
+export function parseLibraryCaptureLoginState(value: unknown): LibraryCaptureLoginState | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!isPlainRecord(value)) {
+    throw new LibraryCaptureValidationError("캡처 로그인 정보가 올바르지 않습니다.");
+  }
+  assertOnlyKeys(value, loginStateKeys, "캡처 로그인 정보");
+  const returnTo = Object.getOwnPropertyDescriptor(value, "returnTo")?.value;
+  const captureFragmentValue = Object.getOwnPropertyDescriptor(value, "captureFragment")?.value;
+  if (returnTo !== "/library" || typeof captureFragmentValue !== "string") {
+    throw new LibraryCaptureValidationError("캡처 로그인 정보가 올바르지 않습니다.");
+  }
+
+  let captureFragment: string | null;
+  try {
+    captureFragment = normalizeLibraryCaptureHandoffFragment(captureFragmentValue);
+  } catch {
+    throw new LibraryCaptureValidationError("캡처 로그인 정보가 올바르지 않습니다.");
+  }
+  if (!captureFragment || captureFragment !== captureFragmentValue) {
+    throw new LibraryCaptureValidationError("캡처 로그인 정보가 올바르지 않습니다.");
+  }
+
+  return { returnTo: "/library", captureFragment };
 }
 
 /**

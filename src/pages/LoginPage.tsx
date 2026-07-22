@@ -1,15 +1,17 @@
 import { LockKeyhole } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { AvatarButton } from "../components/AvatarButton";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
+import { parseLibraryCaptureLoginState } from "../lib/libraryCapture";
 import { findRosterByShortcut } from "../lib/roster";
 import { subscribeRoster } from "../services/users";
 import type { PublicRosterUser } from "../types";
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { firebaseUser, profile, loginRosterUser } = useAuth();
   const [roster, setRoster] = useState<PublicRosterUser[]>([]);
   const [rosterLoading, setRosterLoading] = useState(true);
@@ -17,6 +19,22 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const captureLoginState = useMemo(() => {
+    try {
+      return parseLibraryCaptureLoginState(location.state);
+    } catch {
+      return null;
+    }
+  }, [location.state]);
+  const captureRedirectTarget = captureLoginState
+    ? `${captureLoginState.returnTo}${captureLoginState.captureFragment}`
+    : null;
+
+  useEffect(() => {
+    if (location.hash) {
+      navigate("/login", { replace: true, state: captureLoginState ?? undefined });
+    }
+  }, [captureLoginState, location.hash, navigate]);
 
   useEffect(() => {
     return subscribeRoster(
@@ -74,7 +92,7 @@ export default function LoginPage() {
   const sortedRoster = useMemo(() => roster.filter((user) => user.isActive), [roster]);
 
   if (firebaseUser && profile) {
-    return <Navigate to="/home" replace />;
+    return <Navigate to={captureRedirectTarget ?? "/home"} replace />;
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -89,7 +107,7 @@ export default function LoginPage() {
 
     try {
       await loginRosterUser(selectedUser, password);
-      navigate("/home", { replace: true });
+      navigate(captureRedirectTarget ?? "/home", { replace: true });
     } catch (loginError) {
       setError(firebaseAuthErrorMessage(loginError, "비밀번호를 확인해주세요."));
     } finally {

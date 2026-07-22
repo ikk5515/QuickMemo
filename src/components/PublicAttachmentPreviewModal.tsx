@@ -15,15 +15,19 @@ const dialogFocusableSelector = [
 ].join(",");
 
 export default function PublicAttachmentPreviewModal({
+  fallbackFocus = null,
   onClose,
-  preview
+  preview,
+  returnFocus = null
 }: {
+  fallbackFocus?: HTMLElement | null;
   onClose: () => void;
   preview: PublicAttachmentPreviewState;
+  returnFocus?: HTMLElement | null;
 }) {
   const dialogRef = useRef<HTMLElement | null>(null);
 
-  useDialogFocus(dialogRef);
+  useDialogFocus(dialogRef, returnFocus, fallbackFocus);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -124,7 +128,11 @@ function PreviewLoadingStatus({ label }: { label: string }) {
   );
 }
 
-function useDialogFocus(dialogRef: RefObject<HTMLElement | null>) {
+function useDialogFocus(
+  dialogRef: RefObject<HTMLElement | null>,
+  returnFocus: HTMLElement | null,
+  fallbackFocus: HTMLElement | null
+) {
   useEffect(() => {
     const dialog = dialogRef.current;
 
@@ -133,7 +141,9 @@ function useDialogFocus(dialogRef: RefObject<HTMLElement | null>) {
     }
 
     const previewDialog: HTMLElement = dialog;
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousFocus = returnFocus?.isConnected
+      ? returnFocus
+      : document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const frameId = window.requestAnimationFrame(() => {
       const focusTarget = previewDialog.querySelector<HTMLElement>("[autofocus], [data-dialog-initial-focus], " + dialogFocusableSelector);
       previewDialog.tabIndex = -1;
@@ -174,9 +184,10 @@ function useDialogFocus(dialogRef: RefObject<HTMLElement | null>) {
       window.cancelAnimationFrame(frameId);
       document.removeEventListener("keydown", handleKeyDown, true);
 
-      if (previousFocus?.isConnected) {
-        previousFocus.focus({ preventScroll: true });
+      const focusTarget = previousFocus?.isConnected ? previousFocus : fallbackFocus;
+      if (focusTarget?.isConnected) {
+        focusTarget.focus({ preventScroll: true });
       }
     };
-  }, [dialogRef]);
+  }, [dialogRef, fallbackFocus, returnFocus]);
 }

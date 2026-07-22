@@ -141,7 +141,7 @@ Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 
 
 임시 공유 문서·공유 첨부 파일·Google Calendar OAuth 상태는 Firestore Rules의 즉시 만료 차단과 Vercel Cron cleanup으로 정리합니다.
 
-- Vercel Cron cleanup: Firebase billing 없이도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유와 Google Calendar 인증 상태, 중단된 첨부 예약, 영구 삭제 대기 노트의 첨부·이력·사용자 상태를 제한된 배치로 정리합니다. 삭제가 중단되어도 큐와 tombstone을 남겨 다음 실행에서 안전하게 재시도하며, 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다.
+- Vercel Cron cleanup: Firebase billing 없이도 `/api/cleanup-public-shares`가 하루 한 번 서비스 계정 OAuth로 만료된 공유와 Google Calendar 인증 상태, 중단된 첨부 예약, 영구 삭제 대기 노트의 첨부·이력·사용자 상태를 제한된 배치로 정리합니다. 삭제가 중단되어도 큐와 tombstone을 남겨 다음 실행에서 안전하게 재시도하며, 소유자가 다시 로그인하거나 NotesPage를 열지 않아도 동작합니다. 핵심 retention 정리 후에는 삭제 메타데이터가 없는 레거시 노트를 커서 기반으로 제한된 범위만 조회해 `isDeleted: false`로 보정하며, 이 보조 마이그레이션이 실패해도 기존 정리를 중단하지 않습니다.
 - Firestore 만료 인덱스: `publicNoteShares.expiresAt`과 첨부 만료 필드는 cleanup 조회용 인덱스만 유지합니다. TTL 선삭제는 Blob quota·object·하위 문서의 원자적 정리를 건너뛸 수 있어 사용하지 않습니다.
 - 공개 첨부 개인정보: 신규·재동기화된 공유의 실제 파일명은 content key로 암호화하고, 익명 문서에는 일반 이름과 확장자·크기·MIME만 둡니다. 기존 공유 첨부는 평문 파일명이 다시 노출되지 않도록 공개 목록에서 숨기며, 소유자가 노트 화면을 열어 자동 마이그레이션하거나 새 링크를 만들면 다시 표시됩니다.
 
@@ -154,6 +154,8 @@ FIREBASE_CLEANUP_CLIENT_EMAIL=cleanup-account@your-firebase-project-id.iam.gserv
 FIREBASE_CLEANUP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 PUBLIC_SHARE_CLEANUP_BATCH_SIZE=50
 PUBLIC_SHARE_CLEANUP_MAX_DELETES=1000
+LEGACY_NOTE_BACKFILL_PAGE_SIZE=50
+LEGACY_NOTE_BACKFILL_MAX_SCANNED=500
 ```
 
 Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. 같은 설정에서 Fluid Compute를 명시적으로 활성화하되 함수 실행시간을 더 짧게 덮어쓰지 않아 Vercel의 플랜 기본 제한을 사용합니다. cleanup 함수는 `publicShareCleanupQueue.expiresAt <= now`인 queue 문서를 조회해 해당 공유 첨부 파일, 원본 공유 문서, cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제와 Firebase Auth 사용자 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
@@ -214,10 +216,11 @@ Firestore Rules에는 다음 주요 컬렉션의 owner-only 접근과 데이터 
 - `users`, `userPreferences`, `userKeys`, `publicLoginRoster`
 - `notes`, `noteFolders`, `activeNotes`, 노트 첨부/히스토리/상태 문서
 - `publicNoteShares`, `publicShareCleanupQueue`
+- `libraryItems`, `libraryVaults`
 - `scheduleTasks`, `googleCalendarTaskSyncReceipts`, `googleCalendarTaskTombstones`
 - `recurringHabits`, `recurringHabitCheckIns`
 
-각 기능 컬렉션은 활성 사용자·소유자 검증에 더해 `users/{uid}.featureAccess`를 확인합니다. 노트 권한은 공개 공유 원본과 Storage/Blob 첨부파일에도 적용되고, 일정관리 권한은 Google Calendar 동기화 영수증과 삭제 tombstone에도 적용됩니다.
+각 기능 컬렉션은 활성 사용자·소유자 검증에 더해 `users/{uid}.featureAccess`를 확인합니다. 노트 권한은 공개 공유 원본과 Storage/Blob 첨부파일에도 적용되고, 일정관리 권한은 Google Calendar 동기화 영수증과 삭제 tombstone에도 적용됩니다. 자료실 목록은 본인 `ownerUid`와 명시적인 페이지 한도를 필수로 하며, 열람 기록은 revision과 `updatedAt`을 변경하지 않는 `lastOpenedAt` 단일 필드 업데이트만 허용합니다.
 
 ## 민감 파일 관리
 

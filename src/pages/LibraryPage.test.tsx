@@ -31,7 +31,7 @@ const testData = vi.hoisted(() => {
       profile
     },
     libraryErrorSubscriber: null as null | ((error: Error) => void),
-    librarySubscriber: null as null | ((items: unknown[]) => void),
+    librarySubscriber: null as null | ((items: unknown[], hasMore?: boolean) => void),
     noteErrorSubscriber: null as null | ((error: Error) => void),
     noteSubscriber: null as null | ((notes: unknown[]) => void),
     sourceNoteSubscriber: null as null | ((note: unknown) => void),
@@ -43,6 +43,7 @@ const serviceMocks = vi.hoisted(() => ({
   createLibraryItem: vi.fn(),
   decryptLibraryItems: vi.fn(),
   deleteLibraryItem: vi.fn(),
+  getNextLibraryItemsPage: vi.fn(),
   getEncryptedNoteAttachmentSource: vi.fn(),
   getNoteAttachments: vi.fn(),
   getVisibleNotesByIds: vi.fn(),
@@ -86,8 +87,8 @@ vi.mock("../services/library", () => ({
   createLibraryItem: serviceMocks.createLibraryItem,
   decryptLibraryItems: serviceMocks.decryptLibraryItems,
   deleteLibraryItem: serviceMocks.deleteLibraryItem,
+  getNextLibraryItemsPage: serviceMocks.getNextLibraryItemsPage,
   libraryInitialSubscriptionLimit: 120,
-  libraryMaximumSubscriptionLimit: 1_200,
   librarySubscriptionStep: 120,
   LibraryItemRevisionConflictError: class LibraryItemRevisionConflictError extends Error {
     constructor() {
@@ -253,9 +254,26 @@ function renderStrictPage() {
   );
 }
 
+function useMobileViewport(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((media: string) => ({
+      addEventListener: vi.fn(),
+      addListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      matches,
+      media,
+      onchange: null,
+      removeEventListener: vi.fn(),
+      removeListener: vi.fn()
+    }))
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   Reflect.deleteProperty(globalThis, "chrome");
+  Reflect.deleteProperty(window, "matchMedia");
   window.history.replaceState(null, "", "/library");
   testData.auth.privateKey = {} as CryptoKey;
   testData.auth.profile.featureAccess = { notes: true, library: true, schedule: true };
@@ -281,24 +299,30 @@ beforeEach(() => {
   serviceMocks.createLibraryItem.mockResolvedValue({ id: "created-a", revision: 1 });
   serviceMocks.deleteLibraryItem.mockResolvedValue(undefined);
   serviceMocks.getNoteAttachments.mockResolvedValue([attachmentSnapshot()]);
+  serviceMocks.getNextLibraryItemsPage.mockResolvedValue({ cursor: null, hasMore: false, items: [] });
   serviceMocks.getVisibleNotesByIds.mockResolvedValue({ notes: [], resolvedNoteIds: [] });
   serviceMocks.markLibraryItemReviewed.mockImplementation(async (_id, _uid, revision: number) => ({
     lastMutationId: `mutation-reviewed-${revision + 1}`,
     revision: revision + 1
   }));
   serviceMocks.publishActiveNote.mockResolvedValue(undefined);
-  serviceMocks.touchLibraryItemOpened.mockImplementation(async (_id, _uid, revision: number) => ({
-    lastMutationId: `mutation-opened-${revision + 1}`,
-    revision: revision + 1
-  }));
+  serviceMocks.touchLibraryItemOpened.mockResolvedValue(undefined);
   serviceMocks.updateLibraryItem.mockImplementation(async (item) => ({
     lastMutationId: `mutation-updated-${item.revision + 1}`,
     revision: item.revision + 1
   }));
-  serviceMocks.subscribeLibraryItems.mockImplementation((_uid, callback, onError) => {
+  serviceMocks.subscribeLibraryItems.mockImplementation((_uid, _facet, callback, onError) => {
     testData.libraryErrorSubscriber = onError;
-    testData.librarySubscriber = callback;
-    callback([librarySnapshot()]);
+    testData.librarySubscriber = (items, hasMore = false) => {
+      const snapshots = items as ReturnType<typeof librarySnapshot>[];
+      const last = snapshots.at(-1);
+      callback({
+        cursor: last ? { id: last.id, updatedAt: last.updatedAt } : null,
+        hasMore,
+        items: snapshots
+      });
+    };
+    testData.librarySubscriber([librarySnapshot()]);
     return vi.fn();
   });
   serviceMocks.subscribeUsers.mockImplementation((callback) => {
@@ -336,6 +360,7 @@ describe("LibraryPage", () => {
     expect(await screen.findByRole("button", { name: "보안 가이드 열기" })).toBeInTheDocument();
     expect(serviceMocks.subscribeLibraryItems).toHaveBeenCalledWith(
       "user-a",
+      null,
       expect.any(Function),
       expect.any(Function),
       120
@@ -392,6 +417,90 @@ describe("LibraryPage", () => {
     expect(screen.queryByRole("button", { name: "운영-체크리스트.pdf 열기" })).not.toBeInTheDocument();
   });
 
+  it("treats the mobile reader as a focus-contained dialog with Escape and backdrop close", async () => {
+    useMobileViewport(true);
+    const user = userEvent.setup();
+    renderPage();
+
+    const opener = await screen.findByRole("button", { name: "보안 가이드 열기" });
+    await user.click(opener);
+
+    const dialog = screen.getByRole("dialog", { name: "보안 가이드" });
+    const closeButton = within(dialog).getByRole("button", { name: "자료 리더 닫기" });
+    const deleteButton = within(dialog).getByRole("button", { name: "삭제" });
+    const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+      "a[href], button, input, select, textarea, [tabindex]"
+    )).filter((element) => element.tabIndex >= 0 && !("disabled" in element && element.disabled));
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(closeButton).toHaveFocus();
+    expect(focusable[0]).toBe(closeButton);
+    expect(focusable.at(-1)).toBe(deleteButton);
+
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(deleteButton).toHaveFocus();
+
+    await user.click(deleteButton);
+    const confirmation = screen.getByRole("alertdialog", { name: "이 자료를 삭제할까요?" });
+    await user.click(within(confirmation).getByRole("button", { name: "취소" }));
+    await waitFor(() => expect(deleteButton).toHaveFocus());
+
+    closeButton.focus();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "보안 가이드" })).not.toBeInTheDocument());
+    await waitFor(() => expect(opener).toHaveFocus());
+
+    await user.click(opener);
+    const reopened = screen.getByRole("dialog", { name: "보안 가이드" });
+    fireEvent.mouseDown(reopened.parentElement!);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "보안 가이드" })).not.toBeInTheDocument());
+  });
+
+  it("suspends the mobile reader and restores safe list focus when deletion removes its trigger first", async () => {
+    useMobileViewport(true);
+    const user = userEvent.setup();
+    serviceMocks.deleteLibraryItem.mockImplementationOnce(async () => {
+      act(() => testData.librarySubscriber?.([]));
+    });
+    renderPage();
+
+    const opener = await screen.findByRole("button", { name: "보안 가이드 열기" });
+    await user.click(opener);
+
+    const reader = screen.getByRole("dialog", { name: "보안 가이드" });
+    const readerBackdrop = reader.closest(".library-reader-backdrop");
+    await user.click(within(reader).getByRole("button", { name: "삭제" }));
+
+    const confirmation = screen.getByRole("alertdialog", { name: "이 자료를 삭제할까요?" });
+    expect(readerBackdrop).toHaveAttribute("aria-hidden", "true");
+    expect(readerBackdrop).toHaveAttribute("inert");
+    expect(reader).not.toHaveAttribute("aria-modal");
+
+    await user.click(within(confirmation).getByRole("button", { name: "삭제" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "보안 가이드" })).not.toBeInTheDocument());
+    expect(opener).not.toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector("#library-results-title")).toHaveFocus());
+  });
+
+  it("restores the captured mobile reader trigger after closing an attachment preview", async () => {
+    useMobileViewport(true);
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "운영-체크리스트.pdf 열기" }));
+    const reader = screen.getByRole("dialog", { name: "운영-체크리스트.pdf" });
+    const previewTrigger = within(reader).getByRole("button", { name: "미리보기" });
+    await user.click(previewTrigger);
+
+    const preview = await screen.findByRole("dialog", { name: "운영-체크리스트.pdf" });
+    expect(reader.closest(".library-reader-backdrop")).toHaveAttribute("inert");
+    await user.click(within(preview).getByRole("button", { name: "파일 미리보기 닫기" }));
+
+    await waitFor(() => expect(previewTrigger).toHaveFocus());
+    expect(reader).toHaveAttribute("aria-modal", "true");
+  });
+
   it("re-decrypts a deterministic document id after delete and recreate at the same revision", async () => {
     serviceMocks.decryptLibraryItems.mockImplementation(async (items) => ({
       failedItemIds: [],
@@ -418,22 +527,111 @@ describe("LibraryPage", () => {
     expect(serviceMocks.decryptLibraryItems).toHaveBeenCalledTimes(2);
   });
 
-  it("bounds the live library window and expands it only after an explicit request", async () => {
+  it("does not let a late decrypt result repopulate items after the subscription fails", async () => {
+    let resolveDecrypt: ((value: { failedItemIds: string[]; items: unknown[] }) => void) | undefined;
+    serviceMocks.decryptLibraryItems.mockImplementation(() => new Promise((resolve) => {
+      resolveDecrypt = resolve;
+    }));
+    renderPage();
+
+    await waitFor(() => expect(serviceMocks.decryptLibraryItems).toHaveBeenCalledTimes(1));
+    act(() => testData.libraryErrorSubscriber?.(new Error("permission-denied")));
+    expect(await screen.findByRole("alert")).toHaveTextContent("저장한 자료를 불러오지 못했습니다");
+
+    await act(async () => {
+      resolveDecrypt?.({
+        failedItemIds: [],
+        items: [{
+          ...librarySnapshot(),
+          content: libraryContent(),
+          itemKey: {} as CryptoKey
+        }]
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("저장한 자료를 불러오지 못했습니다");
+  });
+
+  it("merges open-only snapshot metadata into the decrypt cache without decrypting again", async () => {
     const user = userEvent.setup();
-    serviceMocks.subscribeLibraryItems.mockImplementation((_uid, callback, onError, maximumItems) => {
+    const first = librarySnapshot("library-a");
+    const second = {
+      ...librarySnapshot("library-b"),
+      generationId: "library-generation-b",
+      lastMutationId: "mutation-b"
+    };
+    serviceMocks.subscribeLibraryItems.mockImplementation((_uid, _facet, callback, onError) => {
       testData.libraryErrorSubscriber = onError;
-      testData.librarySubscriber = callback;
-      callback(Array.from({ length: Math.min(120, maximumItems) }, (_, index) => ({
-        ...librarySnapshot(`library-${index}`),
-        generationId: `library-generation-${index}`
-      })));
+      testData.librarySubscriber = (items) => callback({
+        cursor: { id: (items.at(-1) as ReturnType<typeof librarySnapshot>).id, updatedAt: timestamp(1_753_000_000_000) },
+        hasMore: false,
+        items
+      });
+      testData.librarySubscriber([first, second]);
       return vi.fn();
+    });
+    serviceMocks.decryptLibraryItems.mockImplementation(async (items) => ({
+      failedItemIds: [],
+      items: items.map((item: ReturnType<typeof librarySnapshot>) => ({
+        ...item,
+        content: libraryContent({ title: item.id === "library-a" ? "A 자료" : "B 자료" }),
+        itemKey: {} as CryptoKey
+      }))
+    }));
+    renderPage();
+
+    await screen.findByRole("button", { name: "A 자료 열기" });
+    await user.selectOptions(screen.getByRole("combobox", { name: "자료 정렬" }), "opened");
+    act(() => testData.librarySubscriber?.([
+      first,
+      { ...second, lastOpenedAt: timestamp(1_800_000_000_000) }
+    ]));
+
+    await waitFor(() => {
+      const rows = screen.getAllByRole("button", { name: /[AB] 자료 열기/ });
+      expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual(["B 자료 열기", "A 자료 열기"]);
+    });
+    expect(serviceMocks.decryptLibraryItems).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads older library pages with a cursor without expanding the live query", async () => {
+    const user = userEvent.setup();
+    const firstItems = Array.from({ length: 120 }, (_, index) => ({
+      ...librarySnapshot(`library-${index}`),
+      generationId: `library-generation-${index}`
+    }));
+    const olderItem = {
+      ...librarySnapshot("library-120"),
+      generationId: "library-generation-120",
+      updatedAt: timestamp(1_700_000_000_000)
+    };
+    serviceMocks.subscribeLibraryItems.mockImplementation((_uid, _facet, callback, onError) => {
+      testData.libraryErrorSubscriber = onError;
+      testData.librarySubscriber = (items, hasMore = false) => callback({
+        cursor: { id: (items.at(-1) as ReturnType<typeof librarySnapshot>).id, updatedAt: timestamp(1_753_000_000_000) },
+        hasMore,
+        items
+      });
+      callback({
+        cursor: { id: "library-119", updatedAt: timestamp(1_753_000_000_000) },
+        hasMore: true,
+        items: firstItems
+      });
+      return vi.fn();
+    });
+    serviceMocks.getNextLibraryItemsPage.mockResolvedValue({
+      cursor: { id: olderItem.id, updatedAt: olderItem.updatedAt },
+      hasMore: false,
+      items: [olderItem]
     });
     renderPage();
 
     const loadMore = await screen.findByRole("button", { name: "저장한 자료 120개 더 불러오기" });
     expect(serviceMocks.subscribeLibraryItems).toHaveBeenLastCalledWith(
       "user-a",
+      null,
       expect.any(Function),
       expect.any(Function),
       120
@@ -441,12 +639,15 @@ describe("LibraryPage", () => {
 
     await user.click(loadMore);
 
-    await waitFor(() => expect(serviceMocks.subscribeLibraryItems).toHaveBeenLastCalledWith(
+    await waitFor(() => expect(serviceMocks.getNextLibraryItemsPage).toHaveBeenCalledWith(
       "user-a",
-      expect.any(Function),
-      expect.any(Function),
-      240
+      null,
+      { id: "library-119", updatedAt: expect.anything() },
+      120
     ));
+    expect(await screen.findAllByRole("button", { name: "보안 가이드 열기" })).toHaveLength(121);
+    expect(serviceMocks.subscribeLibraryItems).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "저장한 자료 120개 더 불러오기" })).not.toBeInTheDocument();
   });
 
   it("stores capture fields only through the encrypted library service", async () => {
@@ -674,10 +875,14 @@ describe("LibraryPage", () => {
       });
     });
     serviceMocks.getEncryptedNoteAttachmentSource.mockResolvedValue(new Uint8Array([9, 8, 7]));
-    serviceMocks.subscribeLibraryItems.mockImplementation((_uid, callback, onError) => {
+    serviceMocks.subscribeLibraryItems.mockImplementation((_uid, _facet, callback, onError) => {
       testData.libraryErrorSubscriber = onError;
-      testData.librarySubscriber = callback;
-      callback([managedAttachmentSnapshot()]);
+      testData.librarySubscriber = (items) => callback({
+        cursor: { id: (items[0] as ReturnType<typeof managedAttachmentSnapshot>).id, updatedAt: timestamp(1_753_000_000_000) },
+        hasMore: false,
+        items
+      });
+      testData.librarySubscriber([managedAttachmentSnapshot()]);
       return vi.fn();
     });
     serviceMocks.decryptLibraryItems.mockImplementation(async (items) => ({
@@ -797,10 +1002,14 @@ describe("LibraryPage", () => {
 
   it("live-validates an older managed source and closes its actions when that source disappears", async () => {
     const user = userEvent.setup();
-    serviceMocks.subscribeLibraryItems.mockImplementation((_uid, callback, onError) => {
+    serviceMocks.subscribeLibraryItems.mockImplementation((_uid, _facet, callback, onError) => {
       testData.libraryErrorSubscriber = onError;
-      testData.librarySubscriber = callback;
-      callback([managedAttachmentSnapshot()]);
+      testData.librarySubscriber = (items) => callback({
+        cursor: { id: (items[0] as ReturnType<typeof managedAttachmentSnapshot>).id, updatedAt: timestamp(1_753_000_000_000) },
+        hasMore: false,
+        items
+      });
+      testData.librarySubscriber([managedAttachmentSnapshot()]);
       return vi.fn();
     });
     serviceMocks.subscribeVisibleNotes.mockImplementation((_uid, _ownerUids, callback, onError) => {

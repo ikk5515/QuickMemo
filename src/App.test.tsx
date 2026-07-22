@@ -39,7 +39,13 @@ function profile(overrides: Partial<UserProfile> = {}): UserProfile {
 }
 
 function LocationProbe() {
-  return <span data-testid="location">{useLocation().pathname}</span>;
+  const location = useLocation();
+  return (
+    <>
+      <span data-testid="location">{location.pathname}{location.hash}</span>
+      <span data-testid="location-state">{location.state === null ? "" : JSON.stringify(location.state)}</span>
+    </>
+  );
 }
 
 function renderGuard(feature: "notes" | "library" | "schedule") {
@@ -154,5 +160,57 @@ describe("RequireAuth feature access", () => {
     );
 
     expect(await screen.findByText("홈 화면")).toBeInTheDocument();
+  });
+
+  it("preserves only a validated library capture fragment across the login redirect", () => {
+    const nonce = "A".repeat(43);
+    const extensionId = "a".repeat(32);
+    authState.firebaseUser = null;
+    authState.profile = null;
+
+    render(
+      <MemoryRouter initialEntries={[`/library#capture=${nonce}&extension=${extensionId}`]}>
+        <LocationProbe />
+        <Routes>
+          <Route
+            path="/library"
+            element={<RequireAuth feature="library"><span>자료실</span></RequireAuth>}
+          />
+          <Route path="/login" element={<span>로그인</span>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
+    expect(screen.getByTestId("location-state")).toHaveTextContent(
+      JSON.stringify({
+        returnTo: "/library",
+        captureFragment: `#capture=${nonce}&extension=${extensionId}`
+      })
+    );
+    expect(screen.getByTestId("location")).not.toHaveTextContent("body");
+  });
+
+  it("drops malformed or body-bearing capture fragments at the login boundary", () => {
+    const nonce = "A".repeat(43);
+    const extensionId = "a".repeat(32);
+    authState.firebaseUser = null;
+    authState.profile = null;
+
+    render(
+      <MemoryRouter initialEntries={[`/library#capture=${nonce}&extension=${extensionId}&body=secret`]}>
+        <LocationProbe />
+        <Routes>
+          <Route
+            path="/library"
+            element={<RequireAuth feature="library"><span>자료실</span></RequireAuth>}
+          />
+          <Route path="/login" element={<span>로그인</span>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
+    expect(screen.getByTestId("location-state")).toBeEmptyDOMElement();
   });
 });

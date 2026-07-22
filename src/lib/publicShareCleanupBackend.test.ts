@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  backfillLegacyNoteDeletionMetadata,
   googleCalendarOAuthStateCleanupBatchLimit,
-  queryExpiredGoogleCalendarOAuthStates
+  queryExpiredGoogleCalendarOAuthStates,
+  queryLegacyNoteDeletionPage
 } from "../../api/cleanup-public-shares.js";
 
 interface VercelConfig {
@@ -132,6 +134,211 @@ describe("public share backend cleanup", () => {
     });
   });
 
+  it("pages legacy note metadata by document name without selecting encrypted content", async () => {
+    const lastDocumentName = "projects/test-project/databases/(default)/documents/notes/note-100";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ document: { name: `${lastDocumentName}-next` } }]
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(queryLegacyNoteDeletionPage({
+      accessToken: "test-access-token",
+      projectId: "test-project",
+      limit: 50,
+      lastDocumentName
+    })).resolves.toEqual([{ name: `${lastDocumentName}-next` }]);
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.structuredQuery).toEqual({
+      select: {
+        fields: [
+          { fieldPath: "__name__" },
+          { fieldPath: "isDeleted" },
+          { fieldPath: "deletedAt" },
+          { fieldPath: "deletedBy" },
+          { fieldPath: "isPurged" },
+          { fieldPath: "purgedAt" },
+          { fieldPath: "purgedBy" }
+        ]
+      },
+      from: [{ collectionId: "notes" }],
+      orderBy: [{ field: { fieldPath: "__name__" }, direction: "ASCENDING" }],
+      limit: 50,
+      startAt: {
+        before: false,
+        values: [{ referenceValue: lastDocumentName }]
+      }
+    });
+    expect(String(init.body)).not.toContain("encryptedTitle");
+    expect(String(init.body)).not.toContain("encryptedBody");
+  });
+
+  it("backfills only missing deletion metadata and advances a preconditioned cursor", async () => {
+    const notesRoot = "projects/test-project/databases/(default)/documents/notes";
+    const cursorPath = "systemMaintenance/legacyNoteDeletionBackfillV1";
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes(cursorPath) && (!init?.method || init.method === "GET")) {
+        return { ok: false, status: 404 };
+      }
+
+      if (url.endsWith("/documents:runQuery")) {
+        return {
+          ok: true,
+          json: async () => [
+            {
+              document: {
+                name: `${notesRoot}/legacy-a`,
+                fields: {},
+                updateTime: "2026-07-23T00:00:00.000Z"
+              }
+            },
+            {
+              document: {
+                name: `${notesRoot}/modern-b`,
+                fields: { isDeleted: { booleanValue: false } },
+                updateTime: "2026-07-23T00:00:01.000Z"
+              }
+            },
+            {
+              document: {
+                name: `${notesRoot}/ambiguous-c`,
+                fields: { deletedAt: { timestampValue: "2026-07-22T00:00:00.000Z" } },
+                updateTime: "2026-07-23T00:00:02.000Z"
+              }
+            }
+          ]
+        };
+      }
+
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const stats = {
+      legacyNoteBackfillComplete: false,
+      legacyNotesBackfilled: 0,
+      legacyNotesScanned: 0
+    };
+
+    await backfillLegacyNoteDeletionMetadata({
+      accessToken: "test-access-token",
+      projectId: "test-project",
+      legacyNoteBackfillMaxScanned: 10,
+      legacyNoteBackfillPageSize: 10
+    }, stats);
+
+    expect(stats).toEqual({
+      legacyNoteBackfillComplete: true,
+      legacyNotesBackfilled: 1,
+      legacyNotesScanned: 3
+    });
+    const commitBodies = fetchMock.mock.calls
+      .filter(([, init]) => init?.method === "POST" && String(init.body).includes('"writes"'))
+      .map(([, init]) => JSON.parse(String(init?.body)));
+    const noteWrite = commitBodies.find((body) => body.writes[0]?.update?.name === `${notesRoot}/legacy-a`);
+    const cursorWrite = commitBodies.find((body) => body.writes[0]?.update?.name.includes(cursorPath));
+    expect(noteWrite.writes[0]).toMatchObject({
+      update: {
+        fields: { isDeleted: { booleanValue: false } },
+        name: `${notesRoot}/legacy-a`
+      },
+      updateMask: { fieldPaths: ["isDeleted"] },
+      currentDocument: { updateTime: "2026-07-23T00:00:00.000Z" }
+    });
+    expect(cursorWrite.writes[0]).toMatchObject({
+      currentDocument: { exists: false },
+      update: {
+        fields: {
+          completed: { booleanValue: true },
+          lastDocumentName: { stringValue: `${notesRoot}/ambiguous-c` },
+          version: { integerValue: "1" }
+        }
+      }
+    });
+    expect(commitBodies.some((body) => body.writes[0]?.update?.name === `${notesRoot}/modern-b`)).toBe(false);
+    expect(commitBodies.some((body) => body.writes[0]?.update?.name === `${notesRoot}/ambiguous-c`)).toBe(false);
+  });
+
+  it("resumes after the stored cursor and stops at the per-run scan cap", async () => {
+    const notesRoot = "projects/test-project/databases/(default)/documents/notes";
+    const previousName = `${notesRoot}/note-100`;
+    const nextName = `${notesRoot}/note-101`;
+    const cursorPath = "systemMaintenance/legacyNoteDeletionBackfillV1";
+    const cursorUpdateTime = "2026-07-23T00:00:00.000Z";
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.includes(cursorPath) && (!init?.method || init.method === "GET")) {
+        return {
+          ok: true,
+          json: async () => ({
+            fields: {
+              completed: { booleanValue: false },
+              lastDocumentName: { stringValue: previousName },
+              version: { integerValue: "1" }
+            },
+            updateTime: cursorUpdateTime
+          })
+        };
+      }
+
+      if (url.endsWith("/documents:runQuery")) {
+        return {
+          ok: true,
+          json: async () => [{
+            document: {
+              name: nextName,
+              fields: { isDeleted: { booleanValue: false } },
+              updateTime: "2026-07-23T00:00:01.000Z"
+            }
+          }]
+        };
+      }
+
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const stats = {
+      legacyNoteBackfillComplete: false,
+      legacyNotesBackfilled: 0,
+      legacyNotesScanned: 0
+    };
+
+    await backfillLegacyNoteDeletionMetadata({
+      accessToken: "test-access-token",
+      projectId: "test-project",
+      legacyNoteBackfillMaxScanned: 1,
+      legacyNoteBackfillPageSize: 50
+    }, stats);
+
+    expect(stats).toEqual({
+      legacyNoteBackfillComplete: false,
+      legacyNotesBackfilled: 0,
+      legacyNotesScanned: 1
+    });
+    const queryCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/documents:runQuery"));
+    const queryBody = JSON.parse(String(queryCall?.[1]?.body));
+    expect(queryBody.structuredQuery).toMatchObject({
+      limit: 1,
+      startAt: { before: false, values: [{ referenceValue: previousName }] }
+    });
+    const cursorCommit = fetchMock.mock.calls
+      .map(([, init]) => init?.body ? JSON.parse(String(init.body)) : null)
+      .find((body) => body?.writes?.[0]?.update?.name.includes(cursorPath));
+    expect(cursorCommit.writes[0]).toMatchObject({
+      currentDocument: { updateTime: cursorUpdateTime },
+      update: {
+        fields: {
+          completed: { booleanValue: false },
+          lastDocumentName: { stringValue: nextName }
+        }
+      }
+    });
+  });
+
   it("reserves a small OAuth cleanup batch while preserving most of the shared delete budget", () => {
     expect(googleCalendarOAuthStateCleanupBatchLimit(50, 1000)).toBe(50);
     expect(googleCalendarOAuthStateCleanupBatchLimit(100, 100)).toBe(10);
@@ -142,10 +349,17 @@ describe("public share backend cleanup", () => {
       "await cleanupExpiredGoogleCalendarOAuthStates(config, stats)",
       cleanupStart
     );
+    const legacyNoteBackfill = cleanupFunctionSource.indexOf(
+      "await backfillLegacyNoteDeletionMetadata(config, stats)",
+      cleanupStart
+    );
     const purgeCleanup = cleanupFunctionSource.indexOf("await cleanupNotePurgeQueues(config, stats)", cleanupStart);
     expect(cleanupStart).toBeGreaterThanOrEqual(0);
     expect(oauthCleanup).toBeGreaterThan(cleanupStart);
     expect(oauthCleanup).toBeLessThan(purgeCleanup);
+    expect(purgeCleanup).toBeLessThan(legacyNoteBackfill);
+    expect(cleanupFunctionSource.slice(legacyNoteBackfill - 400, legacyNoteBackfill)).toContain("try {");
+    expect(cleanupFunctionSource).toContain("stats.legacyNoteBackfillFailed = true");
   });
 
   it("uses high-capacity batched deletes so the no-billing fallback is harder to outpace", () => {

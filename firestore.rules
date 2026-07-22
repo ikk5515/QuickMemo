@@ -735,6 +735,51 @@ service cloud.firestore {
         && (data.lastReviewedAt == null || data.lastReviewedAt is timestamp);
     }
 
+    function validLibraryLastOpenedAtUpdate(data) {
+      let affectedKeys = data.diff(resource.data).affectedKeys();
+      return data.lastOpenedAt == request.time
+        && affectedKeys.hasAll(["lastOpenedAt"])
+        && affectedKeys.hasOnly(["lastOpenedAt"]);
+    }
+
+    function validLibraryRevisionUpdate(data) {
+      return data.ownerUid == resource.data.ownerUid
+        && data.generationId == resource.data.generationId
+        && data.kind == resource.data.kind
+        && data.captureSource == resource.data.captureSource
+        && data.createdAt == resource.data.createdAt
+        && data.wrappedKeys == resource.data.wrappedKeys
+        && data.urlFingerprint == resource.data.urlFingerprint
+        && data.sourceNoteId == resource.data.sourceNoteId
+        && data.sourceAttachmentId == resource.data.sourceAttachmentId
+        && data.revision == resource.data.revision + 1
+        && data.lastMutationId != resource.data.lastMutationId
+        && data.reviewCount >= resource.data.reviewCount
+        && data.reviewCount <= resource.data.reviewCount + 1
+        && (
+          (
+            data.reviewCount == resource.data.reviewCount
+            && data.lastReviewedAt == resource.data.lastReviewedAt
+          )
+          || (
+            data.reviewCount == resource.data.reviewCount + 1
+            && data.lastReviewedAt == request.time
+          )
+        )
+        && data.lastOpenedAt == resource.data.lastOpenedAt
+        && data.updatedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "isFavorite",
+          "encryptedContent",
+          "revision",
+          "lastMutationId",
+          "reviewCount",
+          "updatedAt",
+          "lastReviewedAt"
+        ]);
+    }
+
     function validLibraryVault(data, uid) {
       return data.keys().hasAll(["ownerUid", "wrappedKey", "createdAt", "updatedAt"])
         && data.keys().hasOnly(["ownerUid", "wrappedKey", "createdAt", "updatedAt"])
@@ -2326,8 +2371,12 @@ service cloud.firestore {
     }
 
     match /libraryItems/{itemId} {
-      allow read: if activeSignedInUserHasFeature("library")
+      allow get: if activeSignedInUserHasFeature("library")
         && resource.data.ownerUid == request.auth.uid;
+      allow list: if activeSignedInUserHasFeature("library")
+        && resource.data.ownerUid == request.auth.uid
+        && request.query.limit != null
+        && request.query.limit <= 121;
       allow create: if activeSignedInUserHasFeature("library")
         && validLibraryItem(request.resource.data)
         && validLibraryAttachmentSource(request.resource.data)
@@ -2341,45 +2390,10 @@ service cloud.firestore {
       allow update: if activeSignedInUserHasFeature("library")
         && resource.data.ownerUid == request.auth.uid
         && validLibraryItem(request.resource.data)
-        && request.resource.data.ownerUid == resource.data.ownerUid
-        && request.resource.data.generationId == resource.data.generationId
-        && request.resource.data.kind == resource.data.kind
-        && request.resource.data.captureSource == resource.data.captureSource
-        && request.resource.data.createdAt == resource.data.createdAt
-        && request.resource.data.wrappedKeys == resource.data.wrappedKeys
-        && request.resource.data.urlFingerprint == resource.data.urlFingerprint
-        && request.resource.data.sourceNoteId == resource.data.sourceNoteId
-        && request.resource.data.sourceAttachmentId == resource.data.sourceAttachmentId
-        && request.resource.data.revision == resource.data.revision + 1
-        && request.resource.data.lastMutationId != resource.data.lastMutationId
-        && request.resource.data.reviewCount >= resource.data.reviewCount
-        && request.resource.data.reviewCount <= resource.data.reviewCount + 1
         && (
-          (
-            request.resource.data.reviewCount == resource.data.reviewCount
-            && request.resource.data.lastReviewedAt == resource.data.lastReviewedAt
-          )
-          || (
-            request.resource.data.reviewCount == resource.data.reviewCount + 1
-            && request.resource.data.lastReviewedAt == request.time
-          )
-        )
-        && (
-          request.resource.data.lastOpenedAt == resource.data.lastOpenedAt
-          || request.resource.data.lastOpenedAt == request.time
-        )
-        && request.resource.data.updatedAt == request.time
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          "status",
-          "isFavorite",
-          "encryptedContent",
-          "revision",
-          "lastMutationId",
-          "reviewCount",
-          "updatedAt",
-          "lastOpenedAt",
-          "lastReviewedAt"
-        ]);
+          validLibraryLastOpenedAtUpdate(request.resource.data)
+          || validLibraryRevisionUpdate(request.resource.data)
+        );
       allow delete: if activeSignedInUserHasFeature("library")
         && resource.data.ownerUid == request.auth.uid;
     }

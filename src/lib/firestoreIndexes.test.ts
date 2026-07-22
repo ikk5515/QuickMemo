@@ -136,12 +136,45 @@ describe("Firestore index retention policies", () => {
         (index) =>
           index.collectionGroup === "libraryItems"
           && index.queryScope === "COLLECTION"
-          && index.fields.some((field) => field.fieldPath === "ownerUid" && field.order === "ASCENDING")
-          && index.fields.some((field) => field.fieldPath === "updatedAt" && field.order === "DESCENDING")
+          && index.fields.length === 3
+          && index.fields[0]?.fieldPath === "ownerUid"
+          && index.fields[0]?.order === "ASCENDING"
+          && index.fields[1]?.fieldPath === "updatedAt"
+          && index.fields[1]?.order === "DESCENDING"
+          && index.fields[2]?.fieldPath === "__name__"
+          && index.fields[2]?.order === "DESCENDING"
       )
     ).toBe(true);
     expect(fieldOverride("libraryItems", "encryptedContent")).toMatchObject({ indexes: [] });
     expect(fieldOverride("libraryItems", "wrappedKeys")).toMatchObject({ indexes: [] });
+  });
+
+  it("keeps exactly the three primary owner-scoped library facet indexes", () => {
+    const facetFields = new Set(["status", "kind", "isFavorite"]);
+    const facetIndexes = firestoreIndexes.indexes.filter((index) =>
+      index.collectionGroup === "libraryItems"
+      && index.queryScope === "COLLECTION"
+      && index.fields.some((field) => facetFields.has(field.fieldPath))
+    );
+
+    expect(facetIndexes).toHaveLength(3);
+
+    for (const facetField of facetFields) {
+      expect(facetIndexes).toContainEqual({
+        collectionGroup: "libraryItems",
+        queryScope: "COLLECTION",
+        fields: [
+          { fieldPath: "ownerUid", order: "ASCENDING" },
+          { fieldPath: facetField, order: "ASCENDING" },
+          { fieldPath: "updatedAt", order: "DESCENDING" },
+          { fieldPath: "__name__", order: "DESCENDING" }
+        ]
+      });
+    }
+
+    expect(facetIndexes.every((index) => index.fields.some(
+      (field) => field.fieldPath === "__name__" && field.order === "DESCENDING"
+    ))).toBe(true);
   });
 
   it("keeps bounded active and legacy-owner note reads indexed for the library", () => {

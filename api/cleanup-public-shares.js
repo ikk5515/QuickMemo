@@ -10,12 +10,14 @@ const databaseId = "(default)";
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
 const defaultBatchSize = 50;
 const defaultMaxDocumentDeletes = 1000;
+const defaultLegacyNoteBackfillMaxScanned = 500;
 const firestoreCommitWriteLimit = 500;
 const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
 const userBlobAttachmentCountLimit = 500;
 const attachmentCountPolicyVersion = 1;
 const deletionRetryDelayMs = 15 * 60 * 1000;
 const legacyReservationGraceMs = 3 * 60 * 60 * 1000;
+const legacyNoteDeletionBackfillVersion = 1;
 
 function envValue(name) {
   const value = process.env[name];
@@ -391,6 +393,50 @@ async function cleanupExpiredGoogleCalendarOAuthStates(config, stats) {
   );
 }
 
+export async function queryLegacyNoteDeletionPage({
+  accessToken,
+  projectId,
+  limit,
+  lastDocumentName = ""
+}) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const structuredQuery = {
+    select: {
+      fields: [
+        { fieldPath: "__name__" },
+        { fieldPath: "isDeleted" },
+        { fieldPath: "deletedAt" },
+        { fieldPath: "deletedBy" },
+        { fieldPath: "isPurged" },
+        { fieldPath: "purgedAt" },
+        { fieldPath: "purgedBy" }
+      ]
+    },
+    from: [{ collectionId: "notes" }],
+    orderBy: [
+      {
+        field: { fieldPath: "__name__" },
+        direction: "ASCENDING"
+      }
+    ],
+    limit
+  };
+
+  if (lastDocumentName) {
+    structuredQuery.startAt = {
+      before: false,
+      values: [{ referenceValue: lastDocumentName }]
+    };
+  }
+
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({ structuredQuery })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
 async function queryExpiredShares({ accessToken, projectId, nowIso, limit }) {
   const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
   const result = await firestoreRequest(runQueryPath, accessToken, {
@@ -722,6 +768,180 @@ async function getDocumentByName(documentName, accessToken) {
   }
 
   return response.json();
+}
+
+function legacyNoteDeletionBackfillCursorName(projectId) {
+  return documentNameForPath(projectId, "systemMaintenance/legacyNoteDeletionBackfillV1");
+}
+
+function validNoteDocumentName(documentName, projectId) {
+  const prefix = `${documentNameForPath(projectId, "notes")}/`;
+  const noteId = typeof documentName === "string" && documentName.startsWith(prefix)
+    ? documentName.slice(prefix.length)
+    : "";
+
+  return /^[A-Za-z0-9_-]{1,160}$/u.test(noteId);
+}
+
+function legacyNoteBackfillCursor(cursorDocument, projectId) {
+  if (!cursorDocument || integerField(cursorDocument, "version") !== legacyNoteDeletionBackfillVersion) {
+    return { completed: false, lastDocumentName: "" };
+  }
+
+  const lastDocumentName = stringField(cursorDocument, "lastDocumentName");
+
+  return {
+    completed: booleanField(cursorDocument, "completed"),
+    lastDocumentName: validNoteDocumentName(lastDocumentName, projectId) ? lastDocumentName : ""
+  };
+}
+
+function safeLegacyActiveNote(document) {
+  return ![
+    "isDeleted",
+    "deletedAt",
+    "deletedBy",
+    "isPurged",
+    "purgedAt",
+    "purgedBy"
+  ].some((fieldName) => hasField(document, fieldName));
+}
+
+async function writeLegacyNoteBackfillCursor({
+  accessToken,
+  completed,
+  cursorDocument,
+  lastDocumentName,
+  projectId
+}) {
+  const cursorName = legacyNoteDeletionBackfillCursorName(projectId);
+  const currentDocument = cursorDocument?.updateTime
+    ? { updateTime: cursorDocument.updateTime }
+    : { exists: false };
+
+  try {
+    await firestoreRequest(firestoreCommitPathFromDocumentName(cursorName), accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        writes: [
+          {
+            update: {
+              name: cursorName,
+              fields: {
+                completed: { booleanValue: completed },
+                lastDocumentName: { stringValue: lastDocumentName },
+                version: integerValue(legacyNoteDeletionBackfillVersion)
+              }
+            },
+            currentDocument,
+            updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+          }
+        ]
+      })
+    });
+    return true;
+  } catch (error) {
+    if ([400, 409].includes(error.statusCode)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function normalizeLegacyNoteDeletionDocument(noteDocument, accessToken, projectId) {
+  let currentDocument = noteDocument;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!currentDocument || !validNoteDocumentName(currentDocument.name, projectId)) {
+      return { normalized: false, resolved: true };
+    }
+
+    if (!safeLegacyActiveNote(currentDocument)) {
+      return { normalized: false, resolved: true };
+    }
+
+    if (!currentDocument.updateTime) {
+      return { normalized: false, resolved: false };
+    }
+
+    try {
+      await firestoreRequest(firestoreCommitPathFromDocumentName(currentDocument.name), accessToken, {
+        method: "POST",
+        body: JSON.stringify({
+          writes: [
+            {
+              update: {
+                name: currentDocument.name,
+                fields: { isDeleted: { booleanValue: false } }
+              },
+              updateMask: { fieldPaths: ["isDeleted"] },
+              currentDocument: { updateTime: currentDocument.updateTime }
+            }
+          ]
+        })
+      });
+      return { normalized: true, resolved: true };
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode)) {
+        throw error;
+      }
+    }
+
+    currentDocument = await getDocumentByName(currentDocument.name, accessToken);
+  }
+
+  return { normalized: false, resolved: false };
+}
+
+async function normalizeLegacyNoteDeletionPage(noteDocuments, accessToken, projectId) {
+  const candidates = noteDocuments.filter((document) => safeLegacyActiveNote(document));
+
+  if (!candidates.length) {
+    return { normalized: 0, resolved: true };
+  }
+
+  if (candidates.some((document) => !validNoteDocumentName(document.name, projectId) || !document.updateTime)) {
+    return { normalized: 0, resolved: false };
+  }
+
+  try {
+    await firestoreRequest(firestoreCommitPathFromDocumentName(candidates[0].name), accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        writes: candidates.map((document) => ({
+          update: {
+            name: document.name,
+            fields: { isDeleted: { booleanValue: false } }
+          },
+          updateMask: { fieldPaths: ["isDeleted"] },
+          currentDocument: { updateTime: document.updateTime }
+        }))
+      })
+    });
+    return { normalized: candidates.length, resolved: true };
+  } catch (error) {
+    if (![400, 409].includes(error.statusCode)) {
+      throw error;
+    }
+  }
+
+  const results = [];
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < candidates.length) {
+      const document = candidates[nextIndex];
+      nextIndex += 1;
+      results.push(await normalizeLegacyNoteDeletionDocument(document, accessToken, projectId));
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(8, candidates.length) }, worker));
+
+  return {
+    normalized: results.filter((result) => result.normalized).length,
+    resolved: results.every((result) => result.resolved)
+  };
 }
 
 async function beginAttachmentDeletionByName(documentName, accessToken, shouldDelete = () => true) {
@@ -1317,6 +1537,80 @@ async function cleanupPurgedNote(queueDocument, accessToken, storageBucket, stat
   return finalized;
 }
 
+export async function backfillLegacyNoteDeletionMetadata(config, stats) {
+  const cursorName = legacyNoteDeletionBackfillCursorName(config.projectId);
+  let cursorDocument = await getDocumentByName(cursorName, config.accessToken);
+  let cursor = legacyNoteBackfillCursor(cursorDocument, config.projectId);
+
+  if (cursor.completed) {
+    stats.legacyNoteBackfillComplete = true;
+    return;
+  }
+
+  while (stats.legacyNotesScanned < config.legacyNoteBackfillMaxScanned) {
+    const remaining = config.legacyNoteBackfillMaxScanned - stats.legacyNotesScanned;
+    const pageLimit = Math.min(config.legacyNoteBackfillPageSize, remaining);
+    const noteDocuments = await queryLegacyNoteDeletionPage({
+      accessToken: config.accessToken,
+      projectId: config.projectId,
+      limit: pageLimit,
+      lastDocumentName: cursor.lastDocumentName
+    });
+
+    if (!noteDocuments.length) {
+      stats.legacyNoteBackfillComplete = await writeLegacyNoteBackfillCursor({
+        accessToken: config.accessToken,
+        completed: true,
+        cursorDocument,
+        lastDocumentName: cursor.lastDocumentName,
+        projectId: config.projectId
+      });
+      return;
+    }
+
+    stats.legacyNotesScanned += noteDocuments.length;
+    const pageResult = await normalizeLegacyNoteDeletionPage(
+      noteDocuments,
+      config.accessToken,
+      config.projectId
+    );
+    stats.legacyNotesBackfilled += pageResult.normalized;
+
+    const lastDocumentName = noteDocuments.at(-1)?.name ?? "";
+
+    if (!pageResult.resolved || !validNoteDocumentName(lastDocumentName, config.projectId)) {
+      return;
+    }
+
+    const reachedEnd = noteDocuments.length < pageLimit;
+    const cursorAdvanced = await writeLegacyNoteBackfillCursor({
+      accessToken: config.accessToken,
+      completed: reachedEnd,
+      cursorDocument,
+      lastDocumentName,
+      projectId: config.projectId
+    });
+
+    if (!cursorAdvanced) {
+      return;
+    }
+
+    stats.legacyNoteBackfillComplete = reachedEnd;
+
+    if (reachedEnd) {
+      return;
+    }
+
+    cursorDocument = await getDocumentByName(cursorName, config.accessToken);
+    cursor = legacyNoteBackfillCursor(cursorDocument, config.projectId);
+
+    if (cursor.completed || cursor.lastDocumentName !== lastDocumentName) {
+      stats.legacyNoteBackfillComplete = cursor.completed;
+      return;
+    }
+  }
+}
+
 async function backfillNotePurgeQueues(config, stats) {
   const purgedNotes = await queryPurgedNotes(config);
 
@@ -1396,7 +1690,14 @@ async function cleanupExpiredPublicShares() {
     projectId: credentials.projectId,
     storageBucket: credentials.storageBucket,
     nowIso: new Date().toISOString(),
-    limit: configuredInteger("PUBLIC_SHARE_CLEANUP_BATCH_SIZE", defaultBatchSize, 1, 100)
+    limit: configuredInteger("PUBLIC_SHARE_CLEANUP_BATCH_SIZE", defaultBatchSize, 1, 100),
+    legacyNoteBackfillPageSize: configuredInteger("LEGACY_NOTE_BACKFILL_PAGE_SIZE", defaultBatchSize, 1, 100),
+    legacyNoteBackfillMaxScanned: configuredInteger(
+      "LEGACY_NOTE_BACKFILL_MAX_SCANNED",
+      defaultLegacyNoteBackfillMaxScanned,
+      1,
+      2000
+    )
   };
   const stats = {
     abandonedDeletionsRetried: 0,
@@ -1406,6 +1707,10 @@ async function cleanupExpiredPublicShares() {
     blobObjectsDeleted: 0,
     documentDeletesAttempted: 0,
     googleCalendarOAuthStatesDeleted: 0,
+    legacyNoteBackfillComplete: false,
+    legacyNoteBackfillFailed: false,
+    legacyNotesBackfilled: 0,
+    legacyNotesScanned: 0,
     maxDocumentDeletes: configuredInteger("PUBLIC_SHARE_CLEANUP_MAX_DELETES", defaultMaxDocumentDeletes, 10, 5000),
     legacyReservationsDeleted: 0,
     noteHistoriesDeleted: 0,
@@ -1546,6 +1851,15 @@ async function cleanupExpiredPublicShares() {
     }
   }
 
+  // Legacy visibility repair is best-effort and intentionally follows the
+  // retention queues. A migration-only failure must never block purged-note,
+  // expired-share, or abandoned-attachment cleanup.
+  try {
+    await backfillLegacyNoteDeletionMetadata(config, stats);
+  } catch {
+    stats.legacyNoteBackfillFailed = true;
+  }
+
   return {
     abandonedDeletionsRetried: stats.abandonedDeletionsRetried,
     activeNotesDeleted: stats.activeNotesDeleted,
@@ -1554,6 +1868,10 @@ async function cleanupExpiredPublicShares() {
     blobObjectsDeleted: stats.blobObjectsDeleted,
     documentDeletesAttempted: stats.documentDeletesAttempted,
     googleCalendarOAuthStatesDeleted: stats.googleCalendarOAuthStatesDeleted,
+    legacyNoteBackfillComplete: stats.legacyNoteBackfillComplete,
+    legacyNoteBackfillFailed: stats.legacyNoteBackfillFailed,
+    legacyNotesBackfilled: stats.legacyNotesBackfilled,
+    legacyNotesScanned: stats.legacyNotesScanned,
     legacyReservationsDeleted: stats.legacyReservationsDeleted,
     noteHistoriesDeleted: stats.noteHistoriesDeleted,
     noteUserStatesDeleted: stats.noteUserStatesDeleted,

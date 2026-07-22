@@ -64,6 +64,7 @@ const mocks = vi.hoisted(() => {
     runTransaction: vi.fn(),
     serverTimestamp: vi.fn(() => timestamp),
     setDoc: vi.fn(),
+    startAfter: vi.fn((snapshot: unknown) => ({ snapshot, type: "startAfter" })),
     storage: { __type: "storage" },
     timestamp,
     transaction,
@@ -97,6 +98,7 @@ vi.mock("firebase/firestore", () => ({
   runTransaction: mocks.runTransaction,
   serverTimestamp: mocks.serverTimestamp,
   setDoc: mocks.setDoc,
+  startAfter: mocks.startAfter,
   updateDoc: mocks.updateDoc,
   where: mocks.where,
   writeBatch: mocks.writeBatch
@@ -390,9 +392,149 @@ describe("bounded library note reads", () => {
     expect(mocks.where).toHaveBeenCalledWith("isDeleted", "==", false);
     expect(mocks.where).toHaveBeenCalledWith("participantUids", "array-contains", "user-a");
     expect(mocks.orderBy).toHaveBeenCalledWith("updatedAt", "desc");
-    expect(mocks.limit).toHaveBeenCalledTimes(2);
-    expect(mocks.limit).toHaveBeenNthCalledWith(1, 80);
-    expect(mocks.limit).toHaveBeenNthCalledWith(2, 80);
+    const activeQueries = mocks.query.mock.calls.filter((call) =>
+      call.some((constraint) => {
+        const candidate = constraint as { count?: number; type?: string };
+        return candidate.type === "limit" && candidate.count === 80;
+      })
+    );
+    expect(activeQueries).toHaveLength(2);
+    expect(activeQueries.every((call) => call.some((constraint) => {
+      const candidate = constraint as { parts?: unknown[]; type?: string };
+      return candidate.type === "where"
+        && candidate.parts?.[0] === "isDeleted"
+        && candidate.parts[2] === false;
+    }))).toBe(true);
+  });
+
+  it("paginates owner-safe legacy normalization beyond the visible-note limit", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      data: () => ({
+        ...(index === 0 ? {} : { isDeleted: index % 2 === 0 }),
+        ownerUid: "legacy-owner",
+        participantUids: ["legacy-owner"],
+        updatedAt: { toMillis: () => 1_000 - index }
+      }),
+      id: `recent-${index}`
+    }));
+    const olderLegacyDocument = {
+      data: () => ({
+        ownerUid: "legacy-owner",
+        participantUids: ["legacy-owner"],
+        updatedAt: { toMillis: () => 1 }
+      }),
+      id: "older-legacy"
+    };
+    mocks.getDocs
+      .mockResolvedValueOnce({ docs: firstPage })
+      .mockResolvedValueOnce({ docs: [olderLegacyDocument] });
+    mocks.updateDoc.mockResolvedValue(undefined);
+
+    subscribeVisibleNotes("legacy-owner", ["legacy-owner"], vi.fn(), vi.fn(), 10);
+
+    await vi.waitFor(() => expect(mocks.getDocs).toHaveBeenCalledTimes(2));
+    expect(mocks.startAfter).toHaveBeenCalledWith(firstPage[99]);
+    expect(mocks.updateDoc).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "older-legacy" }),
+      { isDeleted: false }
+    );
+  });
+
+  it("retries a transient legacy normalization failure on a later subscription", async () => {
+    const legacyDocument = {
+      data: () => ({
+        ownerUid: "retry-owner",
+        participantUids: ["retry-owner"],
+        updatedAt: { toMillis: () => 1 }
+      }),
+      id: "retry-legacy"
+    };
+    mocks.getDocs.mockResolvedValue({ docs: [legacyDocument] });
+    mocks.updateDoc
+      .mockRejectedValueOnce(new Error("temporarily unavailable"))
+      .mockResolvedValue(undefined);
+
+    subscribeVisibleNotes("retry-owner", ["retry-owner"], vi.fn(), vi.fn(), 10);
+    await vi.waitFor(() => expect(mocks.updateDoc).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mocks.getDocs).toHaveBeenCalledTimes(1));
+
+    subscribeVisibleNotes("retry-owner", ["retry-owner"], vi.fn(), vi.fn(), 10);
+
+    await vi.waitFor(() => expect(mocks.getDocs).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(mocks.updateDoc).toHaveBeenCalledTimes(2));
+  });
+
+  it("awaits a direct-read legacy repair before advancing the migration cursor", async () => {
+    let rejectRepair!: (error: Error) => void;
+    const legacyDocument = {
+      data: () => ({
+        ownerUid: "race-owner",
+        participantUids: ["race-owner"],
+        updatedAt: { toMillis: () => 1 }
+      }),
+      exists: () => true,
+      id: "race-legacy"
+    };
+    mocks.getDoc.mockResolvedValue(legacyDocument);
+    mocks.getDocs.mockResolvedValue({ docs: [legacyDocument] });
+    mocks.updateDoc
+      .mockReturnValueOnce(new Promise<void>((_resolve, reject) => {
+        rejectRepair = reject;
+      }))
+      .mockResolvedValue(undefined);
+
+    await getVisibleNotesByIds("race-owner", ["race-legacy"]);
+    await vi.waitFor(() => expect(mocks.updateDoc).toHaveBeenCalledTimes(1));
+
+    subscribeVisibleNotes("race-owner", ["race-owner"], vi.fn(), vi.fn(), 10);
+    await vi.waitFor(() => expect(mocks.getDocs).toHaveBeenCalledTimes(1));
+    expect(mocks.startAfter).not.toHaveBeenCalled();
+
+    rejectRepair(new Error("temporarily unavailable"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    subscribeVisibleNotes("race-owner", ["race-owner"], vi.fn(), vi.fn(), 10);
+
+    await vi.waitFor(() => expect(mocks.getDocs).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(mocks.updateDoc).toHaveBeenCalledTimes(2));
+    expect(mocks.startAfter).not.toHaveBeenCalled();
+  });
+
+  it("resumes after the per-run legacy scan cap and does not rescan a completed scope", async () => {
+    const pages = Array.from({ length: 5 }, (_, page) => Array.from({ length: 100 }, (_, index) => ({
+      data: () => ({
+        isDeleted: false,
+        ownerUid: "cursor-owner",
+        participantUids: ["cursor-owner"],
+        updatedAt: { toMillis: () => 10_000 - page * 100 - index }
+      }),
+      id: `page-${page}-note-${index}`
+    })));
+    const olderLegacyDocument = {
+      data: () => ({
+        ownerUid: "cursor-owner",
+        participantUids: ["cursor-owner"],
+        updatedAt: { toMillis: () => 1 }
+      }),
+      id: "cursor-older-legacy"
+    };
+    pages.forEach((page) => mocks.getDocs.mockResolvedValueOnce({ docs: page }));
+    mocks.getDocs.mockResolvedValueOnce({ docs: [olderLegacyDocument] });
+    mocks.updateDoc.mockResolvedValue(undefined);
+
+    subscribeVisibleNotes("cursor-owner", ["cursor-owner"], vi.fn(), vi.fn(), 10);
+    await vi.waitFor(() => expect(mocks.getDocs).toHaveBeenCalledTimes(5));
+
+    subscribeVisibleNotes("cursor-owner", ["cursor-owner"], vi.fn(), vi.fn(), 10);
+    await vi.waitFor(() => expect(mocks.getDocs).toHaveBeenCalledTimes(6));
+    expect(mocks.startAfter).toHaveBeenLastCalledWith(pages[4][99]);
+    await vi.waitFor(() => expect(mocks.updateDoc).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "cursor-older-legacy" }),
+      { isDeleted: false }
+    ));
+
+    subscribeVisibleNotes("cursor-owner", ["cursor-owner"], vi.fn(), vi.fn(), 10);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.getDocs).toHaveBeenCalledTimes(6);
   });
 
   it("bounds the admin-wide query to active notes", () => {

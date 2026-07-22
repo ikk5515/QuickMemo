@@ -1,7 +1,8 @@
 import { lazy, Suspense, type ReactNode } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
 import { hasFeatureAccess } from "./lib/featureAccess";
+import { createLibraryCaptureLoginState } from "./lib/libraryCapture";
 import type { AppFeature } from "./types";
 
 const AdminPage = lazy(() => import("./pages/AdminPage"));
@@ -32,13 +33,22 @@ export function RequireAuth({
   feature?: AppFeature;
 }) {
   const { firebaseUser, loading, profile } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return <PageLoadingFallback />;
   }
 
   if (!firebaseUser || !profile) {
-    return <Navigate to="/login" replace />;
+    let captureLoginState;
+    try {
+      captureLoginState = createLibraryCaptureLoginState(location.pathname, location.hash);
+    } catch {
+      // Malformed or body-bearing capture fragments are intentionally
+      // discarded instead of being reflected through the login route.
+      captureLoginState = null;
+    }
+    return <Navigate to="/login" replace state={captureLoginState ?? undefined} />;
   }
 
   if (adminOnly && !profile.isAdmin) {

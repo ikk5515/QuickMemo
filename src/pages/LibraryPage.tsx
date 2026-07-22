@@ -37,6 +37,7 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useCallback,
   useMemo,
   useRef,
   useState
@@ -89,8 +90,8 @@ import {
   createLibraryItem,
   decryptLibraryItems,
   deleteLibraryItem,
+  getNextLibraryItemsPage,
   libraryInitialSubscriptionLimit,
-  libraryMaximumSubscriptionLimit,
   librarySubscriptionStep,
   LibraryItemRevisionConflictError,
   markLibraryItemReviewed,
@@ -98,6 +99,8 @@ import {
   touchLibraryItemOpened,
   updateLibraryItem,
   type DecryptedLibraryItem,
+  type LibraryItemsCursor,
+  type LibraryItemsServerFacet,
   type LibraryItemSnapshot
 } from "../services/library";
 import {
@@ -177,6 +180,28 @@ interface DeleteTarget {
   lastMutationId: string;
   revision: number;
   title: string;
+}
+
+function useMobileLibraryReader() {
+  const [mobile, setMobile] = useState(() =>
+    typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(max-width: 900px)").matches
+  );
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") {
+      return undefined;
+    }
+
+    const media = window.matchMedia("(max-width: 900px)");
+    const update = () => setMobile(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return mobile;
 }
 
 interface AttachmentExtractionProgress {
@@ -597,7 +622,9 @@ export default function LibraryPage() {
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [managedSourceNotes, setManagedSourceNotes] = useState<NoteSnapshot[]>([]);
-  const [libraryItemLimit, setLibraryItemLimit] = useState(libraryInitialSubscriptionLimit);
+  const [libraryPageCursor, setLibraryPageCursor] = useState<LibraryItemsCursor | null>(null);
+  const [libraryHasMore, setLibraryHasMore] = useState(false);
+  const [libraryLoadingMore, setLibraryLoadingMore] = useState(false);
   const [attachmentNoteLimit, setAttachmentNoteLimit] = useState(initialAttachmentNoteLimit);
   const [noteTitles, setNoteTitles] = useState<Record<string, string>>({});
   const [attachmentGroups, setAttachmentGroups] = useState<Record<string, AttachmentGroup>>({});
@@ -640,17 +667,25 @@ export default function LibraryPage() {
   const attachmentRequests = useRef(new Map<string, Promise<NoteAttachmentSnapshot[]>>());
   const managedSourceChecked = useRef(new Set<string>());
   const libraryDecryptGeneration = useRef(0);
+  const libraryPageGeneration = useRef(0);
+  const libraryPaginationRequestGeneration = useRef(0);
+  const libraryLiveItemIds = useRef<string[]>([]);
+  const libraryLoadedPageCount = useRef(0);
   const noteDecryptGeneration = useRef(0);
   const attachmentGeneration = useRef(0);
   const attachmentActionGeneration = useRef(0);
   const attachmentExtractionController = useRef<AbortController | null>(null);
   const attachmentExtractionBase = useRef<AttachmentExtractionBase | null>(null);
   const previewObjectUrl = useRef<string | null>(null);
+  const previewReturnFocus = useRef<HTMLElement | null>(null);
   const downloadObjectUrls = useRef(new Set<string>());
   const downloadCleanupTimers = useRef(new Set<number>());
   const libraryClientId = useRef(createLibraryClientId());
   const libraryItemsRef = useRef<DecryptedLibraryItem[]>([]);
+  const libraryResultsRef = useRef<HTMLHeadingElement>(null);
   const readerReturnFocus = useRef<HTMLElement | null>(null);
+  const deleteReturnFocus = useRef<HTMLElement | null>(null);
+  const deleteSucceeded = useRef(false);
   const revisionOverrides = useRef(new Map<string, {
     generationId: string;
     lastMutationId: string;
@@ -660,7 +695,34 @@ export default function LibraryPage() {
   const openedThisSession = useRef(new Set<string>());
   const captureHandoffStarted = useRef(false);
   const currentUid = profile?.uid ?? null;
+  const restoreDeleteDialogFocus = useCallback(() => {
+    if (deleteSucceeded.current) {
+      return;
+    }
+    const focusTarget = deleteReturnFocus.current?.isConnected
+      ? deleteReturnFocus.current
+      : libraryResultsRef.current;
+    focusTarget?.focus({ preventScroll: true });
+  }, []);
   const notesFeatureEnabled = hasFeatureAccess(profile, "notes");
+  const libraryServerFacet = useMemo<LibraryItemsServerFacet>(() => {
+    if (quickView === "archived") {
+      return { field: "status", value: "archived" };
+    }
+    if (quickView === "favorites") {
+      return { field: "isFavorite", value: true };
+    }
+    if (statusFilter !== "all") {
+      return { field: "status", value: statusFilter };
+    }
+    if (favoriteOnly) {
+      return { field: "isFavorite", value: true };
+    }
+    if (kindFilter !== "all") {
+      return { field: "kind", value: kindFilter };
+    }
+    return null;
+  }, [favoriteOnly, kindFilter, quickView, statusFilter]);
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || !notesFeatureEnabled) {
       return [];
@@ -736,7 +798,12 @@ export default function LibraryPage() {
     setLibraryItems([]);
     setNotes([]);
     setManagedSourceNotes([]);
-    setLibraryItemLimit(libraryInitialSubscriptionLimit);
+    libraryPaginationRequestGeneration.current += 1;
+    libraryLiveItemIds.current = [];
+    libraryLoadedPageCount.current = 0;
+    setLibraryPageCursor(null);
+    setLibraryHasMore(false);
+    setLibraryLoadingMore(false);
     setAttachmentNoteLimit(initialAttachmentNoteLimit);
     setNoteTitles({});
     setAttachmentGroups({});
@@ -791,17 +858,38 @@ export default function LibraryPage() {
 
   useEffect(() => {
     if (!profile || !privateKey) {
+      libraryPageGeneration.current += 1;
+      libraryPaginationRequestGeneration.current += 1;
+      libraryLiveItemIds.current = [];
+      libraryLoadedPageCount.current = 0;
       setRawLibraryItems([]);
+      setLibraryPageCursor(null);
+      setLibraryHasMore(false);
+      setLibraryLoadingMore(false);
       setLibraryLoading(false);
       return undefined;
     }
 
+    const pageGeneration = libraryPageGeneration.current + 1;
+    libraryPageGeneration.current = pageGeneration;
+    libraryPaginationRequestGeneration.current += 1;
+    libraryLiveItemIds.current = [];
+    libraryLoadedPageCount.current = 0;
+    setRawLibraryItems([]);
+    setLibraryPageCursor(null);
+    setLibraryHasMore(false);
+    setLibraryLoadingMore(false);
     setLibraryLoading(true);
 
     return subscribeLibraryItems(
       profile.uid,
-      (items) => {
-        items.forEach((item) => {
+      libraryServerFacet,
+      (page) => {
+        if (libraryPageGeneration.current !== pageGeneration) {
+          return;
+        }
+
+        page.items.forEach((item) => {
           const override = revisionOverrides.current.get(item.id);
 
           if (
@@ -815,26 +903,67 @@ export default function LibraryPage() {
             revisionOverrides.current.delete(item.id);
           }
         });
-        setRawLibraryItems(items);
+
+        const nextLiveIds = page.items.map((item) => item.id);
+        const previousLiveIds = libraryLiveItemIds.current;
+        const sameLiveWindow = nextLiveIds.length === previousLiveIds.length
+          && nextLiveIds.every((id, index) => id === previousLiveIds[index]);
+        const preserveLoadedTail = sameLiveWindow && libraryLoadedPageCount.current > 1;
+
+        if (!sameLiveWindow) {
+          libraryPaginationRequestGeneration.current += 1;
+          setLibraryLoadingMore(false);
+        }
+
+        setRawLibraryItems((current) => {
+          if (!sameLiveWindow) {
+            return page.items;
+          }
+
+          const liveIds = new Set(nextLiveIds);
+          const previousHeadIds = new Set(previousLiveIds);
+          return [
+            ...page.items,
+            ...current.filter((item) => !liveIds.has(item.id) && !previousHeadIds.has(item.id))
+          ];
+        });
+        libraryLiveItemIds.current = nextLiveIds;
+
+        if (!preserveLoadedTail) {
+          libraryLoadedPageCount.current = 1;
+          setLibraryPageCursor(page.cursor);
+          setLibraryHasMore(page.hasMore);
+        }
         setLibraryLoading(false);
       },
       () => {
+        libraryDecryptGeneration.current += 1;
+        libraryPageGeneration.current += 1;
+        libraryPaginationRequestGeneration.current += 1;
         libraryDecryptCache.current.clear();
         revisionOverrides.current.clear();
+        libraryLiveItemIds.current = [];
+        libraryLoadedPageCount.current = 0;
         setRawLibraryItems([]);
         setLibraryItems([]);
+        setLibraryPageCursor(null);
+        setLibraryHasMore(false);
+        setLibraryLoadingMore(false);
+        setLibraryDecrypting(false);
+        setDecryptFailureCount(0);
         setSelectedId(null);
         setAttachmentText(null);
         closeAttachmentPreview();
         setLibraryLoading(false);
         setError("저장한 자료를 불러오지 못했습니다. 계정 상태와 연결을 확인해주세요.");
       },
-      libraryItemLimit
+      libraryInitialSubscriptionLimit
     );
-  }, [libraryItemLimit, privateKey, profile]);
+  }, [libraryServerFacet, privateKey, profile]);
 
   useEffect(() => {
     if (!profile || !privateKey) {
+      libraryDecryptGeneration.current += 1;
       setLibraryItems([]);
       setLibraryDecrypting(false);
       return;
@@ -864,9 +993,17 @@ export default function LibraryPage() {
     const previousById = new Map(libraryItemsRef.current.map((item) => [item.id, item]));
     rawLibraryItems.forEach((item) => {
       const key = cacheKey(item);
+      const cached = libraryDecryptCache.current.get(key);
       const previous = previousById.get(item.id);
 
-      if (!libraryDecryptCache.current.has(key) && previous && sameEncryptedLibraryContent(item, previous)) {
+      if (cached) {
+        libraryDecryptCache.current.set(key, {
+          ...cached,
+          ...item,
+          content: cached.content,
+          itemKey: cached.itemKey
+        });
+      } else if (previous && sameEncryptedLibraryContent(item, previous)) {
         libraryDecryptCache.current.set(key, { ...item, content: previous.content, itemKey: previous.itemKey });
       }
     });
@@ -1429,10 +1566,7 @@ export default function LibraryPage() {
     || favoriteOnly
     || collectionFilter !== "all"
     || tagFilter !== "all";
-  const canLoadMoreLibraryItems = rawLibraryItems.length >= libraryItemLimit
-    && libraryItemLimit < libraryMaximumSubscriptionLimit;
-  const libraryItemLimitReached = rawLibraryItems.length >= libraryItemLimit
-    && libraryItemLimit >= libraryMaximumSubscriptionLimit;
+  const canLoadMoreLibraryItems = libraryHasMore && Boolean(libraryPageCursor);
   const canLoadMoreAttachmentNotes = hasMoreAttachmentNotes
     && attachmentNoteLimit < maximumAttachmentNoteLimit;
   const attachmentNoteLimitReached = hasMoreAttachmentNotes
@@ -1560,6 +1694,46 @@ export default function LibraryPage() {
     return () => document.removeEventListener("selectionchange", captureSelection);
   }, [selectedItem]);
 
+  async function loadMoreLibraryItems() {
+    if (!profile || !libraryPageCursor || !libraryHasMore || libraryLoadingMore) {
+      return;
+    }
+
+    const requestGeneration = libraryPaginationRequestGeneration.current;
+    const cursor = libraryPageCursor;
+    setLibraryLoadingMore(true);
+    setError(null);
+
+    try {
+      const page = await getNextLibraryItemsPage(
+        profile.uid,
+        libraryServerFacet,
+        cursor,
+        librarySubscriptionStep
+      );
+
+      if (libraryPaginationRequestGeneration.current !== requestGeneration) {
+        return;
+      }
+
+      setRawLibraryItems((current) => {
+        const existingIds = new Set(current.map((item) => item.id));
+        return [...current, ...page.items.filter((item) => !existingIds.has(item.id))];
+      });
+      libraryLoadedPageCount.current += 1;
+      setLibraryPageCursor(page.cursor ?? cursor);
+      setLibraryHasMore(page.hasMore);
+    } catch (caught) {
+      if (libraryPaginationRequestGeneration.current === requestGeneration) {
+        setError(caught instanceof Error ? caught.message : "이전 자료를 불러오지 못했습니다.");
+      }
+    } finally {
+      if (libraryPaginationRequestGeneration.current === requestGeneration) {
+        setLibraryLoadingMore(false);
+      }
+    }
+  }
+
   function clearFilters() {
     setKindFilter("all");
     setStatusFilter("all");
@@ -1639,25 +1813,19 @@ export default function LibraryPage() {
 
     if (item.source === "managed" && !openedThisSession.current.has(item.id)) {
       openedThisSession.current.add(item.id);
-      void queueManagedMutation(
-        item.id,
-        (current) => touchLibraryItemOpened(
-          current.id,
-          current.ownerUid,
-          current.revision,
-          current.lastMutationId,
-          current.generationId
-        ),
-        (current, revision) => ({ ...current, revision }),
-        { quiet: true }
-      );
+      void touchLibraryItemOpened(item.item.id, item.item.ownerUid, item.item.generationId).catch(() => {
+        openedThisSession.current.delete(item.id);
+      });
     }
   }
 
   function closeReader() {
     const returnFocus = readerReturnFocus.current;
     setSelectedId(null);
-    window.setTimeout(() => returnFocus?.isConnected && returnFocus.focus({ preventScroll: true }), 0);
+    window.setTimeout(() => {
+      const focusTarget = returnFocus?.isConnected ? returnFocus : libraryResultsRef.current;
+      focusTarget?.focus({ preventScroll: true });
+    }, 0);
   }
 
   function toggleFavorite(item: DecryptedLibraryItem) {
@@ -1819,7 +1987,12 @@ export default function LibraryPage() {
         deleteTarget.lastMutationId,
         deleteTarget.generationId
       );
-      setSelectedId((current) => current === deleteTarget.id ? null : current);
+      deleteSucceeded.current = true;
+      if (selectedId === deleteTarget.id) {
+        closeReader();
+      } else {
+        window.setTimeout(() => libraryResultsRef.current?.focus({ preventScroll: true }), 0);
+      }
       setDeleteTarget(null);
       setStatusMessage("자료를 삭제했습니다.");
     } catch (caught) {
@@ -2398,7 +2571,7 @@ export default function LibraryPage() {
             <header className="library-results-header">
               <div>
                 <span>{quickView === "today" ? "오늘 확인할 자료" : "검색 결과"}</span>
-                <h2 id="library-results-title">{filteredItems.length}개</h2>
+                <h2 id="library-results-title" ref={libraryResultsRef} tabIndex={-1}>{filteredItems.length}개</h2>
               </div>
               <label className="library-sort-control">
                 <ListFilter aria-hidden="true" size={16} />
@@ -2436,7 +2609,9 @@ export default function LibraryPage() {
                     key={item.id}
                     reviewMode={quickView === "today"}
                     onArchive={toggleArchive}
-                    onDelete={(target) => {
+                    onDelete={(target, returnFocus) => {
+                      deleteSucceeded.current = false;
+                      deleteReturnFocus.current = returnFocus;
                       setDeleteError(null);
                       setDeleteTarget(target);
                     }}
@@ -2458,19 +2633,18 @@ export default function LibraryPage() {
                 onCreate={openManualCapture}
               />
             )}
-            {(canLoadMoreLibraryItems || canLoadMoreAttachmentNotes || libraryItemLimitReached || attachmentNoteLimitReached) && (
+            {(canLoadMoreLibraryItems || canLoadMoreAttachmentNotes || attachmentNoteLimitReached) && (
               <div className="library-load-more" aria-label="추가 자료 불러오기">
                 {canLoadMoreLibraryItems && (
                   <button
                     className="secondary-button"
-                    disabled={libraryLoading}
-                    onClick={() => setLibraryItemLimit((current) => Math.min(
-                      libraryMaximumSubscriptionLimit,
-                      current + librarySubscriptionStep
-                    ))}
+                    disabled={libraryLoading || libraryLoadingMore}
+                    onClick={() => void loadMoreLibraryItems()}
                     type="button"
                   >
-                    저장한 자료 {librarySubscriptionStep}개 더 불러오기
+                    {libraryLoadingMore
+                      ? "이전 자료 불러오는 중..."
+                      : `저장한 자료 ${librarySubscriptionStep}개 더 불러오기`}
                   </button>
                 )}
                 {canLoadMoreAttachmentNotes && (
@@ -2486,9 +2660,9 @@ export default function LibraryPage() {
                     이전 노트 첨부 더 확인하기
                   </button>
                 )}
-                {(libraryItemLimitReached || attachmentNoteLimitReached) && (
+                {attachmentNoteLimitReached && (
                   <p role="status">
-                    한 번에 불러오는 안전 한도에 도달했습니다. 검색 범위를 줄이거나 오래된 자료를 보관해주세요.
+                    노트 첨부파일 확인 한도에 도달했습니다. 검색 범위를 줄여주세요.
                   </p>
                 )}
               </div>
@@ -2510,10 +2684,13 @@ export default function LibraryPage() {
                 || attachmentExtraction?.id === selectedItem.id
               }
               pendingHighlight={pendingHighlight?.itemId === selectedItem.id ? pendingHighlight : null}
+              suspended={captureOpen || Boolean(deleteTarget) || Boolean(attachmentPreview)}
               onAddHighlight={addHighlight}
               onArchive={toggleArchive}
               onClose={closeReader}
-              onDelete={(target) => {
+              onDelete={(target, returnFocus) => {
+                deleteSucceeded.current = false;
+                deleteReturnFocus.current = returnFocus;
                 setDeleteError(null);
                 setDeleteTarget(target);
               }}
@@ -2523,7 +2700,10 @@ export default function LibraryPage() {
               onHighlightColorChange={setHighlightColor}
               onHighlightNoteChange={setHighlightNote}
               onOpenSource={(noteId) => void openSourceNote(noteId)}
-              onPreview={() => void previewSelectedAttachment()}
+              onPreview={(returnFocus) => {
+                previewReturnFocus.current = returnFocus;
+                void previewSelectedAttachment();
+              }}
               onReview={reviewItem}
             />
           )}
@@ -2558,11 +2738,17 @@ export default function LibraryPage() {
               }
             }}
             onConfirm={() => void confirmDelete()}
+            onRestoreFocus={restoreDeleteDialogFocus}
           />
         )}
         {attachmentPreview && (
           <Suspense fallback={<div className="page-center" role="status">미리보기를 준비하는 중...</div>}>
-            <PublicAttachmentPreviewModal onClose={closeAttachmentPreview} preview={attachmentPreview} />
+            <PublicAttachmentPreviewModal
+              fallbackFocus={libraryResultsRef.current}
+              onClose={closeAttachmentPreview}
+              preview={attachmentPreview}
+              returnFocus={previewReturnFocus.current}
+            />
           </Suspense>
         )}
       </section>
@@ -2817,7 +3003,7 @@ function LibraryItemRow({
   busy: boolean;
   item: LibraryViewItem;
   onArchive: (item: DecryptedLibraryItem) => void;
-  onDelete: (target: DeleteTarget) => void;
+  onDelete: (target: DeleteTarget, returnFocus: HTMLElement) => void;
   onFavorite: (item: DecryptedLibraryItem) => void;
   onReview: (item: DecryptedLibraryItem) => void;
   onSelect: (item: LibraryViewItem) => void;
@@ -2894,13 +3080,16 @@ function LibraryItemRow({
             aria-label={`${title} 삭제`}
             className="icon-button danger"
             disabled={busy}
-            onClick={() => onDelete({
-              generationId: item.item.generationId,
-              id: item.item.id,
-              lastMutationId: item.item.lastMutationId,
-              revision: item.item.revision,
-              title
-            })}
+            onClick={(event) => onDelete(
+              {
+                generationId: item.item.generationId,
+                id: item.item.id,
+                lastMutationId: item.item.lastMutationId,
+                revision: item.item.revision,
+                title
+              },
+              event.currentTarget
+            )}
             type="button"
           >
             <Trash2 size={15} />
@@ -2933,7 +3122,8 @@ function LibraryReader({
   onOpenSource,
   onPreview,
   onReview,
-  pendingHighlight
+  pendingHighlight,
+  suspended
 }: {
   attachmentBusy: boolean;
   attachmentExtraction: AttachmentExtractionProgress | null;
@@ -2947,19 +3137,22 @@ function LibraryReader({
   onAddHighlight: () => void;
   onArchive: (item: DecryptedLibraryItem) => void;
   onClose: () => void;
-  onDelete: (target: DeleteTarget) => void;
+  onDelete: (target: DeleteTarget, returnFocus: HTMLElement) => void;
   onDownload: () => void;
   onExtract: () => void;
   onFavorite: (item: DecryptedLibraryItem) => void;
   onHighlightColorChange: (color: LibraryHighlightColor) => void;
   onHighlightNoteChange: (value: string) => void;
   onOpenSource: (noteId: string) => void;
-  onPreview: () => void;
+  onPreview: (returnFocus: HTMLElement) => void;
   onReview: (item: DecryptedLibraryItem) => void;
   pendingHighlight: PendingHighlight | null;
+  suspended: boolean;
 }) {
   const titleId = useId();
   const readerRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileReader = useMobileLibraryReader();
   const title = viewItemTitle(item);
   const managed = item.source === "managed" ? item.item : null;
   const safeUrl = managed?.content.url ? safeLibraryExternalUrl(managed.content.url) : null;
@@ -2976,17 +3169,50 @@ function LibraryReader({
   );
 
   useLayoutEffect(() => {
-    readerRef.current?.focus({ preventScroll: true });
-  }, [item.id]);
+    if (mobileReader) {
+      closeButtonRef.current?.focus({ preventScroll: true });
+    } else {
+      readerRef.current?.focus({ preventScroll: true });
+    }
+  }, [item.id, mobileReader]);
 
   return (
-    <aside aria-labelledby={titleId} className="library-reader" ref={readerRef} tabIndex={-1}>
+    <div
+      aria-hidden={suspended ? true : undefined}
+      className="library-reader-backdrop"
+      inert={suspended}
+      role="presentation"
+      onMouseDown={(event) => {
+        if (mobileReader && !suspended && event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+    <aside
+      aria-labelledby={titleId}
+      aria-modal={mobileReader && !suspended ? true : undefined}
+      className="library-reader"
+      ref={readerRef}
+      role={mobileReader ? "dialog" : undefined}
+      tabIndex={-1}
+      onKeyDown={(event) => {
+        if (mobileReader && !suspended) {
+          trapDialogKeyboard(event, false, onClose);
+        }
+      }}
+    >
       <header className="library-reader-header">
         <div>
           <span>{kindLabels[viewItemKind(item)]}</span>
           <h2 id={titleId}>{title}</h2>
         </div>
-        <button aria-label="자료 리더 닫기" className="icon-button" onClick={onClose} type="button">
+        <button
+          aria-label="자료 리더 닫기"
+          className="icon-button"
+          onClick={onClose}
+          ref={closeButtonRef}
+          type="button"
+        >
           <PanelRightClose size={18} />
         </button>
       </header>
@@ -3039,7 +3265,12 @@ function LibraryReader({
               </button>
             )}
             {canPreviewAttachment && (
-              <button className="secondary-button" disabled={attachmentBusy} onClick={onPreview} type="button">
+              <button
+                className="secondary-button"
+                disabled={attachmentBusy}
+                onClick={(event) => onPreview(event.currentTarget)}
+                type="button"
+              >
                 {attachmentBusy ? <Loader2 className="spin" size={15} /> : <Eye size={15} />}
                 미리보기
               </button>
@@ -3216,13 +3447,16 @@ function LibraryReader({
           <button
             className="secondary-button danger"
             disabled={mutating}
-            onClick={() => onDelete({
-              generationId: managed.generationId,
-              id: managed.id,
-              lastMutationId: managed.lastMutationId,
-              revision: managed.revision,
-              title
-            })}
+            onClick={(event) => onDelete(
+              {
+                generationId: managed.generationId,
+                id: managed.id,
+                lastMutationId: managed.lastMutationId,
+                revision: managed.revision,
+                title
+              },
+              event.currentTarget
+            )}
             type="button"
           >
             <Trash2 size={15} />
@@ -3231,15 +3465,24 @@ function LibraryReader({
         </footer>
       )}
     </aside>
+    </div>
   );
 }
 
 function focusableDialogElements(container: HTMLElement) {
   return Array.from(
     container.querySelectorAll<HTMLElement>(
-      'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      "a[href], button, input, select, textarea, [tabindex]"
     )
-  ).filter((element) => element.getAttribute("aria-hidden") !== "true");
+  ).filter((element) => {
+    const disabled = "disabled" in element && Boolean((element as HTMLElement & { disabled?: boolean }).disabled);
+    const hiddenInput = element instanceof HTMLInputElement && element.type === "hidden";
+    return !disabled
+      && !hiddenInput
+      && element.tabIndex >= 0
+      && element.getAttribute("aria-hidden") !== "true"
+      && !element.closest("[hidden]");
+  });
 }
 
 function trapDialogKeyboard(
@@ -3534,12 +3777,14 @@ function LibraryDeleteConfirmDialog({
   error,
   onCancel,
   onConfirm,
+  onRestoreFocus,
   pending,
   target
 }: {
   error: string | null;
   onCancel: () => void;
   onConfirm: () => void;
+  onRestoreFocus: () => void;
   pending: boolean;
   target: DeleteTarget;
 }) {
@@ -3549,13 +3794,12 @@ function LibraryDeleteConfirmDialog({
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
 
   useLayoutEffect(() => {
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     cancelButtonRef.current?.focus({ preventScroll: true });
 
     return () => {
-      window.setTimeout(() => previousFocus?.isConnected && previousFocus.focus({ preventScroll: true }), 0);
+      window.setTimeout(onRestoreFocus, 0);
     };
-  }, []);
+  }, [onRestoreFocus]);
 
   return createPortal(
     <div
