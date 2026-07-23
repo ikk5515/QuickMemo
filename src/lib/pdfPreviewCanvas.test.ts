@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  maxCompactPdfPreviewPages,
+  maxCompactPdfPreviewTotalCanvasPixels,
   maxPdfPreviewCanvasPixels,
   maxPdfPreviewPageCssHeight,
   maxPdfPreviewPageCssWidth,
+  maxPdfPreviewPages,
   maxPdfPreviewTotalCanvasPixels,
-  pdfPreviewCanvasLayout
+  pdfPreviewCanvasLayout,
+  pdfPreviewRenderBudget
 } from "./pdfPreviewCanvas";
 
 describe("pdfPreviewCanvasLayout", () => {
@@ -46,5 +50,46 @@ describe("pdfPreviewCanvasLayout", () => {
         remainingCanvasPixels: 0
       })
     ).toBeNull();
+  });
+
+  it("uses a smaller bounded render budget on compact mobile screens", () => {
+    expect(pdfPreviewRenderBudget(true)).toEqual({
+      maxPages: maxCompactPdfPreviewPages,
+      totalCanvasPixels: maxCompactPdfPreviewTotalCanvasPixels
+    });
+    expect(pdfPreviewRenderBudget(false)).toEqual({
+      maxPages: maxPdfPreviewPages,
+      totalCanvasPixels: maxPdfPreviewTotalCanvasPixels
+    });
+    expect(maxCompactPdfPreviewPages).toBeLessThan(maxPdfPreviewPages);
+    expect(maxCompactPdfPreviewTotalCanvasPixels).toBeLessThan(maxPdfPreviewTotalCanvasPixels);
+  });
+
+  it("never exceeds the compact aggregate canvas budget at mobile DPR 3", () => {
+    const budget = pdfPreviewRenderBudget(true);
+    let remainingCanvasPixels = budget.totalCanvasPixels;
+    let renderedPages = 0;
+
+    for (let pageNumber = 0; pageNumber < budget.maxPages; pageNumber += 1) {
+      const layout = pdfPreviewCanvasLayout({
+        baseHeight: 792,
+        baseWidth: 612,
+        containerWidth: 390,
+        devicePixelRatio: 3,
+        remainingCanvasPixels
+      });
+
+      if (!layout) {
+        break;
+      }
+
+      remainingCanvasPixels -= layout.canvasPixels;
+      renderedPages += 1;
+    }
+
+    expect(renderedPages).toBeGreaterThan(0);
+    expect(budget.totalCanvasPixels - remainingCanvasPixels).toBeLessThanOrEqual(
+      maxCompactPdfPreviewTotalCanvasPixels
+    );
   });
 });

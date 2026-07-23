@@ -280,7 +280,8 @@ export async function getEncryptedPublicShareAttachmentBytes(attachment: StoredP
 }
 
 export async function getEncryptedPublicShareAttachmentSource(
-  attachment: StoredPublicShareAttachmentDocument
+  attachment: StoredPublicShareAttachmentDocument,
+  signal?: AbortSignal
 ): Promise<EncryptedAttachmentSource> {
   if (attachment.encryptedData) {
     return { bytes: attachment.encryptedData.toUint8Array() };
@@ -294,7 +295,8 @@ export async function getEncryptedPublicShareAttachmentSource(
     return {
       response: await fetchBlobAttachmentResponse(
         { scope: "publicShare", shareId: attachment.shareId, attachmentId: attachment.id },
-        encryptedAttachmentSizeLimit(attachment)
+        encryptedAttachmentSizeLimit(attachment),
+        signal
       )
     };
   }

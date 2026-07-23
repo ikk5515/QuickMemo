@@ -1,9 +1,23 @@
 export const maxPdfPreviewPages = 30;
 export const maxPdfPreviewCanvasPixels = 4_000_000;
 export const maxPdfPreviewTotalCanvasPixels = 32_000_000;
+export const maxCompactPdfPreviewPages = 12;
+export const maxCompactPdfPreviewTotalCanvasPixels = 12_000_000;
 export const maxPdfPreviewImagePixels = 6_000_000;
 export const maxPdfPreviewPageCssWidth = 860;
 export const maxPdfPreviewPageCssHeight = 1400;
+
+export function pdfPreviewRenderBudget(compact: boolean) {
+  return compact
+    ? {
+        maxPages: maxCompactPdfPreviewPages,
+        totalCanvasPixels: maxCompactPdfPreviewTotalCanvasPixels
+      }
+    : {
+        maxPages: maxPdfPreviewPages,
+        totalCanvasPixels: maxPdfPreviewTotalCanvasPixels
+      };
+}
 
 interface PdfPreviewCanvasLayoutInput {
   baseHeight: number;

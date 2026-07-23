@@ -3169,7 +3169,7 @@ textarea {
 }
 
 .pdf-preview-backdrop {
-  z-index: 12;
+  z-index: 70;
 }
 
 .pdf-preview-modal {
@@ -5262,6 +5262,31 @@ textarea {
   }
 }
 
+@media (max-width: 900px) {
+  .pdf-preview-modal {
+    min-height: 0;
+  }
+
+  .pdf-preview-backdrop {
+    padding:
+      max(10px, env(safe-area-inset-top))
+      max(10px, env(safe-area-inset-right))
+      max(10px, env(safe-area-inset-bottom))
+      max(10px, env(safe-area-inset-left));
+  }
+
+  .pdf-preview-canvas-frame,
+  .docx-preview-frame,
+  .docx-preview-sandbox,
+  .hwp-preview-frame,
+  .document-preview-frame,
+  .public-image-preview-frame,
+  .file-text-preview {
+    min-height: 0;
+    overscroll-behavior: contain;
+  }
+}
+
 @media (max-width: 680px) {
   .auth-page,
   .workspace {
@@ -5360,16 +5385,7 @@ textarea {
   }
 
   .pdf-preview-canvas-frame {
-    min-height: 360px;
     padding: 12px;
-  }
-
-  .docx-preview-frame {
-    min-height: 360px;
-  }
-
-  .docx-preview-sandbox {
-    min-height: 360px;
   }
 
   .attachment-panel {

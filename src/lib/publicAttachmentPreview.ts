@@ -15,11 +15,13 @@ export const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "jso
 export const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 
 const maxTextPreviewCharacters = 120_000;
+export const maxTextAttachmentPreviewBytes = 512 * 1024;
 
 export function decodeTextAttachmentPreview(bytes: Uint8Array, extension: string) {
-  const decodedText = decodeReadableBytes(bytes);
+  const previewBytes = bytes.subarray(0, Math.min(bytes.byteLength, maxTextAttachmentPreviewBytes));
+  const decodedText = decodeReadableBytes(previewBytes);
 
-  if (extension === "json") {
+  if (extension === "json" && bytes.byteLength <= maxTextAttachmentPreviewBytes) {
     try {
       return JSON.stringify(JSON.parse(decodedText), null, 2).slice(0, maxTextPreviewCharacters);
     } catch {
@@ -91,12 +93,20 @@ function countReplacementCharacters(value: string) {
 }
 
 function normalizeDecodedPreviewText(value: string) {
-  return value
-    .split("")
-    .filter((character) => {
-      const code = character.charCodeAt(0);
-      return code === 9 || code === 10 || code === 13 || (code >= 32 && code !== 127);
-    })
-    .join("")
-    .trim();
+  let normalized = "";
+  let segmentStart = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    const removableControl =
+      (code < 32 && code !== 9 && code !== 10 && code !== 13)
+      || code === 127;
+
+    if (removableControl) {
+      normalized += value.slice(segmentStart, index);
+      segmentStart = index + 1;
+    }
+  }
+
+  return `${normalized}${value.slice(segmentStart)}`.trim();
 }

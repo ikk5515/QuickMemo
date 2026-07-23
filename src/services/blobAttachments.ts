@@ -266,7 +266,14 @@ interface FetchBlobAttachmentInput {
   shareId?: string;
 }
 
-async function blobAttachmentFetch(input: FetchBlobAttachmentInput) {
+function throwIfRequestAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new DOMException("첨부파일 요청이 취소되었습니다.", "AbortError");
+  }
+}
+
+async function blobAttachmentFetch(input: FetchBlobAttachmentInput, signal?: AbortSignal) {
+  throwIfRequestAborted(signal);
   const query = new URLSearchParams({
     attachmentId: input.attachmentId,
     scope: input.scope
@@ -280,6 +287,7 @@ async function blobAttachmentFetch(input: FetchBlobAttachmentInput) {
 
     query.set("noteId", input.noteId);
     Object.assign(headers, authHeaders(await currentUserIdToken()));
+    throwIfRequestAborted(signal);
   } else {
     if (!input.shareId) {
       throw new Error("공유 첨부파일 정보를 찾을 수 없습니다.");
@@ -289,14 +297,19 @@ async function blobAttachmentFetch(input: FetchBlobAttachmentInput) {
   }
 
   const response = await fetch(`${blobAttachmentApiPath}?${query.toString()}`, {
-    headers
+    headers,
+    signal
   });
 
   return response;
 }
 
-export async function fetchBlobAttachmentResponse(input: FetchBlobAttachmentInput, maxBytes: number) {
-  const response = await blobAttachmentFetch(input);
+export async function fetchBlobAttachmentResponse(
+  input: FetchBlobAttachmentInput,
+  maxBytes: number,
+  signal?: AbortSignal
+) {
+  const response = await blobAttachmentFetch(input, signal);
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
@@ -314,9 +327,10 @@ export async function fetchBlobAttachmentResponse(input: FetchBlobAttachmentInpu
 
 export async function fetchBlobAttachmentBytes(
   input: FetchBlobAttachmentInput,
-  maxBytes = encryptedAttachmentSizeLimit({ version: 1, algorithm: "AES-GCM" })
+  maxBytes = encryptedAttachmentSizeLimit({ version: 1, algorithm: "AES-GCM" }),
+  signal?: AbortSignal
 ) {
-  const response = await fetchBlobAttachmentResponse(input, maxBytes);
+  const response = await fetchBlobAttachmentResponse(input, maxBytes, signal);
   const bytes = new Uint8Array(await response.arrayBuffer());
 
   if (bytes.byteLength > maxBytes) {

@@ -5,16 +5,22 @@ import {
   maxPdfPreviewCanvasPixels,
   maxPdfPreviewImagePixels,
   maxPdfPreviewPageCssWidth,
-  maxPdfPreviewPages,
-  maxPdfPreviewTotalCanvasPixels,
-  pdfPreviewCanvasLayout
+  pdfPreviewCanvasLayout,
+  pdfPreviewRenderBudget
 } from "../lib/pdfPreviewCanvas";
 
 export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: string }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [state, setState] = useState<{ error: string | null; pageCount: number; renderedCount: number; status: "loading" | "ready" | "error" }>({
+  const [state, setState] = useState<{
+    error: string | null;
+    pageCount: number;
+    pageLimit: number;
+    renderedCount: number;
+    status: "loading" | "ready" | "error";
+  }>({
     error: null,
     pageCount: 0,
+    pageLimit: 0,
     renderedCount: 0,
     status: "loading"
   });
@@ -43,7 +49,7 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
     }
 
     previewContainer.replaceChildren();
-    setState({ error: null, pageCount: 0, renderedCount: 0, status: "loading" });
+    setState({ error: null, pageCount: 0, pageLimit: 0, renderedCount: 0, status: "loading" });
 
     async function renderPdf() {
       try {
@@ -77,10 +83,20 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
         }
 
         const pageCount = pdf.numPages;
-        const pagesToRender = Math.min(pageCount, maxPdfPreviewPages);
+        const compactPreview = typeof window.matchMedia === "function"
+          ? window.matchMedia("(max-width: 900px)").matches
+          : window.innerWidth <= 900;
+        const renderBudget = pdfPreviewRenderBudget(compactPreview);
+        const pagesToRender = Math.min(pageCount, renderBudget.maxPages);
         let renderedPages = 0;
 
-        setState({ error: null, pageCount, renderedCount: 0, status: "loading" });
+        setState({
+          error: null,
+          pageCount,
+          pageLimit: renderBudget.maxPages,
+          renderedCount: 0,
+          status: "loading"
+        });
 
         for (let pageNumber = 1; pageNumber <= pagesToRender; pageNumber += 1) {
           if (cancelled) {
@@ -98,7 +114,7 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
 
           const baseViewport = page.getViewport({ scale: 1 });
           const containerWidth = previewContainer.clientWidth || maxPdfPreviewPageCssWidth;
-          const remainingCanvasPixels = maxPdfPreviewTotalCanvasPixels - retainedCanvasPixels;
+          const remainingCanvasPixels = renderBudget.totalCanvasPixels - retainedCanvasPixels;
           const layout = pdfPreviewCanvasLayout({
             baseHeight: baseViewport.height,
             baseWidth: baseViewport.width,
@@ -144,7 +160,13 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
           renderedPages += 1;
 
           if (!cancelled) {
-            setState({ error: null, pageCount, renderedCount: renderedPages, status: "loading" });
+            setState({
+              error: null,
+              pageCount,
+              pageLimit: renderBudget.maxPages,
+              renderedCount: renderedPages,
+              status: "loading"
+            });
           }
         }
 
@@ -153,7 +175,13 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
         }
 
         if (!cancelled) {
-          setState({ error: null, pageCount, renderedCount: renderedPages, status: "ready" });
+          setState({
+            error: null,
+            pageCount,
+            pageLimit: renderBudget.maxPages,
+            renderedCount: renderedPages,
+            status: "ready"
+          });
         }
       } catch {
         if (!cancelled) {
@@ -161,6 +189,7 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
           setState({
             error: "PDF 미리보기를 안전하게 렌더링하지 못했습니다. 원본 파일은 다운로드해서 확인해주세요.",
             pageCount: 0,
+            pageLimit: 0,
             renderedCount: 0,
             status: "error"
           });
@@ -186,15 +215,18 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
     };
   }, [bytes, fileName]);
 
-  const expectedRenderedPages = Math.min(state.pageCount, maxPdfPreviewPages);
-  const truncated = state.status === "ready" && (state.pageCount > maxPdfPreviewPages || state.renderedCount < expectedRenderedPages);
+  const expectedRenderedPages = Math.min(state.pageCount, state.pageLimit);
+  const truncated = state.status === "ready" && (
+    state.pageCount > state.pageLimit
+    || state.renderedCount < expectedRenderedPages
+  );
 
   return (
     <div className="pdf-preview-canvas-frame" aria-label={`${fileName} PDF 미리보기`}>
       <div ref={containerRef} className="pdf-preview-canvas-pages" />
       {state.status === "loading" && (
         <p className="pdf-preview-status" role="status" aria-live="polite">
-          {state.pageCount ? `${state.renderedCount}/${Math.min(state.pageCount, maxPdfPreviewPages)}쪽 렌더링 중...` : "PDF 미리보기를 준비하는 중..."}
+          {state.pageCount ? `${state.renderedCount}/${expectedRenderedPages}쪽 렌더링 중...` : "PDF 미리보기를 준비하는 중..."}
         </p>
       )}
       {state.error && <p className="file-preview-error">{state.error}</p>}

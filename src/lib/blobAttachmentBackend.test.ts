@@ -212,6 +212,16 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentClientSource.match(/onUploadProgress:\s*input\.onUploadProgress/gu)?.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("propagates attachment preview cancellation to the private Blob fetch", () => {
+    const fetchSource = blobAttachmentClientSource.match(
+      /async function blobAttachmentFetch[\s\S]*?export async function fetchBlobAttachmentBytes/u
+    )?.[0] ?? "";
+
+    expect(fetchSource).toContain("throwIfRequestAborted(signal)");
+    expect(fetchSource).toContain("signal");
+    expect(fetchSource).toMatch(/fetch\(`\$\{blobAttachmentApiPath\}\?\$\{query\.toString\(\)\}`, \{\s*headers,\s*signal\s*\}\)/u);
+  });
+
   it("accepts only validated v1 or chunked v2 attachment manifests in the Blob API", () => {
     expect(blobAttachmentApiSource).toContain("const encryptedAttachmentChunkSizeBytes = 4 * 1024 * 1024");
     expect(blobAttachmentApiSource).toContain("function safeAttachmentVersion(value)");

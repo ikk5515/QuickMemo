@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { decodeTextAttachmentPreview, legacyBinaryPreviewMessage } from "./publicAttachmentPreview";
+import {
+  decodeTextAttachmentPreview,
+  legacyBinaryPreviewMessage,
+  maxTextAttachmentPreviewBytes
+} from "./publicAttachmentPreview";
 
 describe("public attachment preview helpers", () => {
   it("formats JSON without retaining disallowed control characters", () => {
@@ -25,5 +29,18 @@ describe("public attachment preview helpers", () => {
 
   it("keeps legacy binary documents download-only", () => {
     expect(legacyBinaryPreviewMessage("doc")).toContain("원본 다운로드");
+  });
+
+  it("decodes only a bounded prefix of oversized text attachments", () => {
+    const hiddenSuffix = "SHOULD_NOT_BE_DECODED";
+    const bytes = new Uint8Array(maxTextAttachmentPreviewBytes + hiddenSuffix.length + 32);
+
+    bytes.fill("a".charCodeAt(0), 0, maxTextAttachmentPreviewBytes);
+    bytes.set(new TextEncoder().encode(hiddenSuffix), maxTextAttachmentPreviewBytes + 8);
+
+    const preview = decodeTextAttachmentPreview(bytes, "txt");
+
+    expect(preview).not.toContain(hiddenSuffix);
+    expect(preview.length).toBeLessThanOrEqual(120_000);
   });
 });

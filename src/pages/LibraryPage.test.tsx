@@ -272,6 +272,14 @@ function useMobileViewport(matches: boolean) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.defineProperty(URL, "createObjectURL", {
+    configurable: true,
+    value: vi.fn(() => "blob:quickmemo-preview")
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    configurable: true,
+    value: vi.fn()
+  });
   Reflect.deleteProperty(globalThis, "chrome");
   Reflect.deleteProperty(window, "matchMedia");
   window.history.replaceState(null, "", "/library");
@@ -495,10 +503,46 @@ describe("LibraryPage", () => {
 
     const preview = await screen.findByRole("dialog", { name: "운영-체크리스트.pdf" });
     expect(reader.closest(".library-reader-backdrop")).toHaveAttribute("inert");
+    expect(within(preview).getByRole("link", { name: "다운로드" })).toHaveAttribute(
+      "href",
+      "blob:quickmemo-preview"
+    );
     await user.click(within(preview).getByRole("button", { name: "파일 미리보기 닫기" }));
 
     await waitFor(() => expect(previewTrigger).toHaveFocus());
     expect(reader).toHaveAttribute("aria-modal", "true");
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:quickmemo-preview");
+  });
+
+  it("aborts an in-flight mobile attachment preview when the reader closes", async () => {
+    useMobileViewport(true);
+    const user = userEvent.setup();
+    let requestSignal: AbortSignal | undefined;
+
+    serviceMocks.getEncryptedNoteAttachmentSource.mockImplementation((_attachment, signal?: AbortSignal) => {
+      requestSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          { once: true }
+        );
+      });
+    });
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "운영-체크리스트.pdf 열기" }));
+    const reader = screen.getByRole("dialog", { name: "운영-체크리스트.pdf" });
+    await user.click(within(reader).getByRole("button", { name: "미리보기" }));
+    await waitFor(() => expect(requestSignal).toBeDefined());
+
+    await user.click(within(reader).getByRole("button", { name: "자료 리더 닫기" }));
+
+    expect(requestSignal?.aborted).toBe(true);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "운영-체크리스트.pdf" })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("re-decrypts a deterministic document id after delete and recreate at the same revision", async () => {

@@ -29,8 +29,6 @@ import {
   X
 } from "lucide-react";
 import {
-  Suspense,
-  lazy,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
@@ -45,6 +43,7 @@ import {
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
+import PublicAttachmentPreviewModal from "../components/PublicAttachmentPreviewModal";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -124,8 +123,6 @@ import type {
   LibraryReaderBlockKind,
   UserProfile
 } from "../types";
-
-const PublicAttachmentPreviewModal = lazy(() => import("../components/PublicAttachmentPreviewModal"));
 
 type LibraryQuickView = "all" | "today" | "favorites" | "archived";
 type LibraryKindFilter = "all" | LibraryItemKind;
@@ -258,6 +255,12 @@ const highlightColorLabels: Record<LibraryHighlightColor, string> = {
   blue: "파랑",
   pink: "분홍"
 };
+
+function throwIfAttachmentActionAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new DOMException("첨부파일 작업이 취소되었습니다.", "AbortError");
+  }
+}
 
 function attachmentRevision(note: NoteSnapshot) {
   const value = note.attachmentRevision;
@@ -674,6 +677,7 @@ export default function LibraryPage() {
   const noteDecryptGeneration = useRef(0);
   const attachmentGeneration = useRef(0);
   const attachmentActionGeneration = useRef(0);
+  const attachmentPreviewController = useRef<AbortController | null>(null);
   const attachmentExtractionController = useRef<AbortController | null>(null);
   const attachmentExtractionBase = useRef<AttachmentExtractionBase | null>(null);
   const previewObjectUrl = useRef<string | null>(null);
@@ -811,6 +815,8 @@ export default function LibraryPage() {
     setAttachmentText(null);
     setAttachmentPreview(null);
     setAttachmentExtraction(null);
+    attachmentPreviewController.current?.abort();
+    attachmentPreviewController.current = null;
     attachmentExtractionController.current?.abort();
     attachmentExtractionController.current = null;
     attachmentExtractionBase.current = null;
@@ -1371,6 +1377,8 @@ export default function LibraryPage() {
       attachmentExtractionController.current?.abort();
       attachmentExtractionController.current = null;
       attachmentExtractionBase.current = null;
+      attachmentPreviewController.current?.abort();
+      attachmentPreviewController.current = null;
       attachmentActionGeneration.current += 1;
 
       if (previewObjectUrl.current) {
@@ -1821,6 +1829,7 @@ export default function LibraryPage() {
 
   function closeReader() {
     const returnFocus = readerReturnFocus.current;
+    closeAttachmentPreview();
     setSelectedId(null);
     window.setTimeout(() => {
       const focusTarget = returnFocus?.isConnected ? returnFocus : libraryResultsRef.current;
@@ -2016,11 +2025,12 @@ export default function LibraryPage() {
     }
   }
 
-  async function decryptAttachmentBytes(source: VirtualAttachmentItem) {
+  async function decryptAttachmentBytes(source: VirtualAttachmentItem, signal?: AbortSignal) {
     if (!profile || !privateKey) {
       throw new Error("암호화 키가 잠겨 있습니다.");
     }
 
+    throwIfAttachmentActionAborted(signal);
     const wrappedKey = source.note.wrappedKeys[profile.uid];
 
     if (!wrappedKey) {
@@ -2028,8 +2038,12 @@ export default function LibraryPage() {
     }
 
     const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
-    const encryptedSource = await getEncryptedNoteAttachmentSource(source.attachment);
-    return decryptAttachmentToBytes(source.attachment, noteKey, encryptedSource);
+    throwIfAttachmentActionAborted(signal);
+    const encryptedSource = await getEncryptedNoteAttachmentSource(source.attachment, signal);
+    throwIfAttachmentActionAborted(signal);
+    const bytes = await decryptAttachmentToBytes(source.attachment, noteKey, encryptedSource);
+    throwIfAttachmentActionAborted(signal);
+    return bytes;
   }
 
   async function decryptAttachmentBlob(source: VirtualAttachmentItem) {
@@ -2050,6 +2064,8 @@ export default function LibraryPage() {
 
   function closeAttachmentPreview() {
     attachmentActionGeneration.current += 1;
+    attachmentPreviewController.current?.abort();
+    attachmentPreviewController.current = null;
 
     if (previewObjectUrl.current) {
       URL.revokeObjectURL(previewObjectUrl.current);
@@ -2081,13 +2097,20 @@ export default function LibraryPage() {
 
     const generation = attachmentActionGeneration.current + 1;
     attachmentActionGeneration.current = generation;
+    attachmentPreviewController.current?.abort();
+    const controller = new AbortController();
+    attachmentPreviewController.current = controller;
     setAttachmentBusy(true);
     setError(null);
 
     try {
-      const bytes = await decryptAttachmentBytes(source);
+      const bytes = await decryptAttachmentBytes(source, controller.signal);
 
-      if (attachmentActionGeneration.current !== generation || selectedId !== selectedItem?.id) {
+      if (
+        controller.signal.aborted
+        || attachmentActionGeneration.current !== generation
+        || selectedId !== selectedItem?.id
+      ) {
         return;
       }
 
@@ -2100,7 +2123,9 @@ export default function LibraryPage() {
       }
 
       if (extension === "pdf") {
-        setAttachmentPreview({ bytes, fileName, kind: "pdf", label: "PDF 안전 미리보기" });
+        const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+        previewObjectUrl.current = url;
+        setAttachmentPreview({ bytes, fileName, kind: "pdf", label: "PDF 안전 미리보기", url });
         return;
       }
 
@@ -2116,12 +2141,15 @@ export default function LibraryPage() {
         setAttachmentPreview({ fileName, kind: "image", label: "이미지 안전 미리보기", url });
       }
     } catch (caught) {
-      if (attachmentActionGeneration.current === generation) {
+      if (!controller.signal.aborted && attachmentActionGeneration.current === generation) {
         setError(caught instanceof Error ? caught.message : "첨부파일 미리보기를 열지 못했습니다.");
       }
     } finally {
       if (attachmentActionGeneration.current === generation) {
         setAttachmentBusy(false);
+      }
+      if (attachmentPreviewController.current === controller) {
+        attachmentPreviewController.current = null;
       }
     }
   }
@@ -2236,7 +2264,7 @@ export default function LibraryPage() {
     });
 
     try {
-      const bytes = await decryptAttachmentBytes(source);
+      const bytes = await decryptAttachmentBytes(source, controller.signal);
 
       if (controller.signal.aborted || attachmentActionGeneration.current !== generation) {
         return;
@@ -2742,14 +2770,12 @@ export default function LibraryPage() {
           />
         )}
         {attachmentPreview && (
-          <Suspense fallback={<div className="page-center" role="status">미리보기를 준비하는 중...</div>}>
-            <PublicAttachmentPreviewModal
-              fallbackFocus={libraryResultsRef.current}
-              onClose={closeAttachmentPreview}
-              preview={attachmentPreview}
-              returnFocus={previewReturnFocus.current}
-            />
-          </Suspense>
+          <PublicAttachmentPreviewModal
+            fallbackFocus={libraryResultsRef.current}
+            onClose={closeAttachmentPreview}
+            preview={attachmentPreview}
+            returnFocus={previewReturnFocus.current}
+          />
         )}
       </section>
     </AppShell>

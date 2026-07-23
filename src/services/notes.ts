@@ -1017,7 +1017,10 @@ export async function getEncryptedNoteAttachmentBytes(attachment: StoredAttachme
   return new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes));
 }
 
-export async function getEncryptedNoteAttachmentSource(attachment: StoredAttachmentDocument): Promise<EncryptedAttachmentSource> {
+export async function getEncryptedNoteAttachmentSource(
+  attachment: StoredAttachmentDocument,
+  signal?: AbortSignal
+): Promise<EncryptedAttachmentSource> {
   if (attachment.encryptedData) {
     return { bytes: attachment.encryptedData.toUint8Array() };
   }
@@ -1030,7 +1033,8 @@ export async function getEncryptedNoteAttachmentSource(attachment: StoredAttachm
     return {
       response: await fetchBlobAttachmentResponse(
         { scope: "note", noteId: attachment.noteId, attachmentId: attachment.id },
-        encryptedAttachmentSizeLimit(attachment)
+        encryptedAttachmentSizeLimit(attachment),
+        signal
       )
     };
   }
