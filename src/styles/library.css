@@ -232,16 +232,16 @@
 
 .library-sidebar,
 .library-results-panel,
-.library-reader-backdrop {
-  display: contents;
-}
-
 .library-reader {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   box-shadow: var(--shadow-card);
   min-width: 0;
+}
+
+.library-reader-backdrop {
+  display: contents;
 }
 
 .library-sidebar {
