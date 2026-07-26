@@ -103,6 +103,29 @@ describe("LoginPage library capture handoff", () => {
     expect(mocks.loginRosterUser).toHaveBeenCalledWith(rosterUser, "password");
   });
 
+  it("returns a validated Safari bookmarklet nonce without accepting capture body state", async () => {
+    const user = userEvent.setup();
+    const nonce = "B".repeat(43);
+    renderLogin([{
+      pathname: "/login",
+      state: {
+        returnTo: "/library",
+        captureFragment: `#capture=${nonce}&source=bookmarklet`
+      }
+    }]);
+
+    await user.click(await screen.findByRole("button", { name: "사용자 사용자 선택" }));
+    await user.type(screen.getByLabelText("비밀번호"), "password");
+    await user.click(screen.getByRole("button", { name: "로그인" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("location")).toHaveTextContent(
+        `/library#capture=${nonce}&source=bookmarklet`
+      );
+    });
+    expect(screen.getByTestId("location-state")).toBeEmptyDOMElement();
+  });
+
   it.each([
     {
       returnTo: "https://evil.example",

@@ -11,6 +11,7 @@ const manifest = JSON.parse(readFileSync(join(extensionRoot, "manifest.json"), "
 };
 const serviceWorker = readFileSync(join(extensionRoot, "service-worker.js"), "utf8");
 const captureScript = readFileSync(join(extensionRoot, "capture.js"), "utf8");
+const bookmarkletSource = readFileSync(join(process.cwd(), "src", "lib", "libraryBookmarklet.ts"), "utf8");
 const buildScript = readFileSync(join(process.cwd(), "scripts", "build-library-extension.mjs"), "utf8");
 
 describe("QuickMemo capture extension security boundary", () => {
@@ -41,8 +42,25 @@ describe("QuickMemo capture extension security boundary", () => {
     expect(captureScript).toContain("element.textContent");
     expect(captureScript).not.toContain("innerHTML");
     expect(captureScript).toContain("SENSITIVE_CREDENTIALS");
+    expect(captureScript).toContain("aggregateCaptureText");
+    expect(captureScript).toContain("sensitiveCredentialDetected");
+    expect(serviceWorker).toContain("aggregateCaptureText");
+    expect(serviceWorker).toContain("!containsSensitiveCredential(aggregateCaptureText)");
     expect(buildScript).toContain("zipSync");
     expect(buildScript).toContain("quickmemo-capture-extension.zip");
     expect(buildScript).toContain("placeholder");
+  });
+
+  it("keeps Safari capture in a text-only, no-referrer, memory-only handoff", () => {
+    expect(bookmarkletSource).toContain("element.textContent");
+    expect(bookmarkletSource).not.toContain("innerHTML");
+    expect(bookmarkletSource).not.toContain("localStorage");
+    expect(bookmarkletSource).not.toContain("sessionStorage");
+    expect(bookmarkletSource).not.toContain("fetch(");
+    expect(bookmarkletSource).not.toContain("sendBeacon");
+    expect(bookmarkletSource).toContain('window.open("about:blank", "_blank")');
+    expect(bookmarkletSource).toContain('referrerPolicy = "no-referrer"');
+    expect(bookmarkletSource).toContain("popup?.postMessage");
+    expect(bookmarkletSource).toContain("quickMemoOrigin");
   });
 });

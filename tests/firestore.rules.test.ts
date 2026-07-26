@@ -1140,6 +1140,20 @@ describeRules("firestore security rules", () => {
         sourceAttachmentId: "a".repeat(180)
       }))
     );
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "libraryItems/bookmarklet-item"), libraryItem("user-a", {
+        captureSource: "bookmarklet",
+        generationId: "bookmarklet-generation-1",
+        lastMutationId: "bookmarklet-mutation-1"
+      }))
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "libraryItems/unknown-capture-item"), libraryItem("user-a", {
+        captureSource: "safari-script",
+        generationId: "unknown-capture-generation-1",
+        lastMutationId: "unknown-capture-mutation-1"
+      }))
+    );
     await assertSucceeds(getDoc(itemRef));
     await assertSucceeds(
       getDocs(query(

@@ -1,9 +1,11 @@
 import {
   Archive,
   ArchiveRestore,
+  BookmarkPlus,
   BookOpenCheck,
   Check,
   ChevronRight,
+  Copy,
   Download,
   ExternalLink,
   Eye,
@@ -62,7 +64,9 @@ import {
   libraryAttachmentExtractionMode,
   type LibraryAttachmentExtractionMode
 } from "../lib/libraryAttachmentExtraction";
+import { createLibraryCaptureBookmarkletUrl } from "../lib/libraryBookmarklet";
 import {
+  consumeLibraryBookmarkletCaptureHandoff,
   consumeLibraryCaptureHandoff,
   libraryCaptureFromPaste,
   takeLibraryCaptureHandoffFromLocation,
@@ -651,6 +655,7 @@ export default function LibraryPage() {
   const [captureDraft, setCaptureDraft] = useState<CaptureDraft>(emptyCaptureDraft);
   const [captureBusy, setCaptureBusy] = useState(false);
   const [captureHandoffBusy, setCaptureHandoffBusy] = useState(false);
+  const [captureHandoffSource, setCaptureHandoffSource] = useState<"extension" | "bookmarklet" | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -771,16 +776,22 @@ export default function LibraryPage() {
     setCaptureDraft(emptyCaptureDraft);
     setCaptureOpen(true);
     setCaptureHandoffBusy(true);
+    setCaptureHandoffSource("source" in handoff ? "bookmarklet" : "extension");
     setError(null);
-    void consumeLibraryCaptureHandoff(handoff).then(
+    const capturePromise = "source" in handoff
+      ? consumeLibraryBookmarkletCaptureHandoff(handoff)
+      : consumeLibraryCaptureHandoff(handoff);
+    void capturePromise.then(
       (payload) => {
         setCaptureDraft(captureDraftFromPayload(payload));
         setCaptureHandoffBusy(false);
+        setCaptureHandoffSource(null);
         setStatusMessage("캡처한 내용을 확인한 뒤 저장해주세요.");
       },
       (caught: unknown) => {
         setCaptureHandoffBusy(false);
-        setError(caught instanceof Error ? caught.message : "확장 프로그램 캡처를 가져오지 못했습니다.");
+        setCaptureHandoffSource(null);
+        setError(caught instanceof Error ? caught.message : "브라우저 캡처를 가져오지 못했습니다.");
       }
     );
   }, []);
@@ -2743,6 +2754,7 @@ export default function LibraryPage() {
             draft={captureDraft}
             error={error}
             importing={captureHandoffBusy}
+            importingSource={captureHandoffSource}
             onChange={setCaptureDraft}
             onClose={() => {
               if (!captureBusy && !captureHandoffBusy) {
@@ -3549,11 +3561,104 @@ function trapDialogKeyboard(
   }
 }
 
+function LibraryBookmarkletInstall({ disabled }: { disabled: boolean }) {
+  const titleId = useId();
+  const installId = useId();
+  const usageId = useId();
+  const securityId = useId();
+  const linkRef = useRef<HTMLAnchorElement>(null);
+  const [status, setStatus] = useState("");
+  const bookmarkletUrl = useMemo(
+    () => createLibraryCaptureBookmarkletUrl(window.location.origin),
+    []
+  );
+
+  useLayoutEffect(() => {
+    // React intentionally blocks declarative javascript: URLs. This narrowly
+    // installs only our self-contained generator output; no user input enters
+    // the attribute, and clicking it inside QuickMemo remains disabled below.
+    linkRef.current?.setAttribute("href", bookmarkletUrl);
+  }, [bookmarkletUrl]);
+
+  async function copyBookmarklet() {
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(bookmarkletUrl);
+      setStatus("북마클릿 주소를 복사했습니다. Safari 책갈피의 주소 칸에 붙여넣으세요.");
+    } catch {
+      setStatus("주소를 복사하지 못했습니다. 설치 링크를 Safari 즐겨찾기 막대로 드래그해주세요.");
+    }
+  }
+
+  return (
+    <section aria-labelledby={titleId} className="library-bookmarklet-install">
+      <header>
+        <span aria-hidden="true"><BookmarkPlus size={18} /></span>
+        <div>
+          <h3 id={titleId}>Safari에서 한 번에 가져오기</h3>
+          <p id={installId}>
+            Safari의 ‘보기 → 즐겨찾기 막대 보기’를 켠 뒤 아래 설치 링크를 막대로 드래그하세요.
+          </p>
+        </div>
+      </header>
+      <div className="library-bookmarklet-actions">
+        <a
+          aria-describedby={`${installId} ${usageId} ${securityId}`}
+          aria-disabled={disabled || undefined}
+          className="secondary-button library-bookmarklet-link"
+          draggable={!disabled}
+          onClick={(event) => {
+            event.preventDefault();
+            if (!disabled) {
+              setStatus("설치 링크를 Safari 즐겨찾기 막대로 드래그해주세요.");
+            }
+          }}
+          onDragStart={(event) => {
+            if (disabled) {
+              event.preventDefault();
+            }
+          }}
+          ref={linkRef}
+        >
+          <BookmarkPlus aria-hidden="true" size={16} />
+          QuickMemo로 저장
+        </a>
+        <button
+          className="secondary-button"
+          disabled={disabled}
+          onClick={() => void copyBookmarklet()}
+          type="button"
+        >
+          <Copy aria-hidden="true" size={16} />
+          북마클릿 주소 복사
+        </button>
+      </div>
+      <ol id={usageId}>
+        <li>웹페이지에서 필요한 문장을 선택합니다. 선택하지 않아도 본문은 가져옵니다.</li>
+        <li>즐겨찾기 막대의 ‘QuickMemo로 저장’을 누릅니다.</li>
+        <li>새 자료실 창에서 제목·URL·선택 텍스트·본문을 확인한 뒤 ‘자료 저장’을 누릅니다.</li>
+      </ol>
+      <p className="library-bookmarklet-security" id={securityId}>
+        본문은 주소·서버·웹 저장소에 넣지 않습니다. 인증 정보로 보이는 값은 차단하고,
+        확인한 내용만 이 기기에서 암호화합니다.
+      </p>
+      <p className="library-bookmarklet-limitation">
+        Safari 내부 페이지나 창 연결을 차단한 사이트에서는 실행되지 않을 수 있습니다.
+        이때는 아래 ‘직접 가져오기’를 사용하세요.
+      </p>
+      <p aria-live="polite" className="library-bookmarklet-status" role="status">{status}</p>
+    </section>
+  );
+}
+
 function LibraryCaptureDialog({
   busy,
   draft,
   error,
   importing,
+  importingSource,
   onChange,
   onClose,
   onImport,
@@ -3563,6 +3668,7 @@ function LibraryCaptureDialog({
   draft: CaptureDraft;
   error: string | null;
   importing: boolean;
+  importingSource: "extension" | "bookmarklet" | null;
   onChange: (draft: CaptureDraft) => void;
   onClose: () => void;
   onImport: (input: string) => boolean;
@@ -3636,7 +3742,8 @@ function LibraryCaptureDialog({
         {importing && (
           <p className="library-capture-source" role="status">
             <Loader2 aria-hidden="true" className="spin" size={15} />
-            Chrome 확장 프로그램에서 캡처 내용을 가져오는 중입니다.
+            {importingSource === "bookmarklet" ? "Safari 북마클릿" : "Chrome 확장 프로그램"}에서
+            캡처 내용을 가져오는 중입니다.
           </p>
         )}
         {draft.captureSource !== "manual" && (
@@ -3647,9 +3754,10 @@ function LibraryCaptureDialog({
         )}
         {error && <p className="library-capture-error" role="alert">{error}</p>}
         <form onSubmit={onSubmit}>
+          <LibraryBookmarkletInstall disabled={interactionBusy} />
           <details className="library-capture-import">
-            <summary>Safari 또는 북마클릿에서 가져오기</summary>
-            <p>URL, 일반 텍스트 또는 QuickMemo 북마클릿 JSON을 붙여넣으세요.</p>
+            <summary>Chrome 확장 또는 직접 가져오기</summary>
+            <p>Chrome 확장 프로그램을 설치하거나 URL, 일반 텍스트, 호환 캡처 JSON을 직접 붙여넣으세요.</p>
             <a className="library-capture-extension-download" download href="/quickmemo-capture-extension.zip">
               <Download aria-hidden="true" size={15} />
               Chrome용 캡처 확장 프로그램 받기 (ZIP)

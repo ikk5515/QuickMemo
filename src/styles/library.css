@@ -1122,6 +1122,95 @@
   gap: 14px;
 }
 
+.library-bookmarklet-install {
+  background: color-mix(in srgb, var(--teal) 7%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--teal) 24%, var(--line));
+  border-radius: var(--radius-card);
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+}
+
+.library-bookmarklet-install > header {
+  align-items: start;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: 32px minmax(0, 1fr);
+}
+
+.library-bookmarklet-install > header > span {
+  align-items: center;
+  background: var(--color-primary-subtle);
+  border-radius: 9px;
+  color: var(--teal);
+  display: inline-flex;
+  height: 32px;
+  justify-content: center;
+  width: 32px;
+}
+
+.library-bookmarklet-install h3 {
+  font-size: 14px;
+  margin: 0 0 3px;
+}
+
+.library-bookmarklet-install header p,
+.library-bookmarklet-security,
+.library-bookmarklet-limitation,
+.library-bookmarklet-status {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.library-bookmarklet-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.library-bookmarklet-actions .secondary-button {
+  justify-content: center;
+  min-height: 42px;
+  min-width: 0;
+  text-align: center;
+}
+
+.library-bookmarklet-link {
+  cursor: grab;
+  text-decoration: none;
+}
+
+.library-bookmarklet-link:active {
+  cursor: grabbing;
+}
+
+.library-bookmarklet-link[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.library-bookmarklet-install ol {
+  color: var(--text);
+  display: grid;
+  font-size: 11px;
+  gap: 4px;
+  line-height: 1.5;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.library-bookmarklet-security {
+  background: color-mix(in srgb, var(--surface-strong) 72%, transparent);
+  border-radius: 9px;
+  padding: 8px 9px;
+}
+
+.library-bookmarklet-status:empty {
+  display: none;
+}
+
 .library-capture-import {
   background: color-mix(in srgb, var(--surface) 92%, transparent);
   border: 1px solid var(--color-border-subtle);
@@ -1461,6 +1550,10 @@ html[data-theme="dark"] .library-highlight {
 
   .library-capture-description {
     margin-left: 0;
+  }
+
+  .library-bookmarklet-actions {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .library-capture-grid {

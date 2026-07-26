@@ -191,6 +191,35 @@ describe("RequireAuth feature access", () => {
     expect(screen.getByTestId("location")).not.toHaveTextContent("body");
   });
 
+  it("preserves a nonce-only Safari bookmarklet marker across the fixed login route", () => {
+    const nonce = "B".repeat(43);
+    authState.firebaseUser = null;
+    authState.profile = null;
+
+    render(
+      <MemoryRouter initialEntries={[`/library#capture=${nonce}&source=bookmarklet`]}>
+        <LocationProbe />
+        <Routes>
+          <Route
+            path="/library"
+            element={<RequireAuth feature="library"><span>자료실</span></RequireAuth>}
+          />
+          <Route path="/login" element={<span>로그인</span>} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
+    expect(screen.getByTestId("location-state")).toHaveTextContent(
+      JSON.stringify({
+        returnTo: "/library",
+        captureFragment: `#capture=${nonce}&source=bookmarklet`
+      })
+    );
+    expect(screen.getByTestId("location-state")).not.toHaveTextContent("title");
+    expect(screen.getByTestId("location-state")).not.toHaveTextContent("body");
+  });
+
   it("drops malformed or body-bearing capture fragments at the login boundary", () => {
     const nonce = "A".repeat(43);
     const extensionId = "a".repeat(32);

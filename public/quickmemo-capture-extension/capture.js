@@ -21,6 +21,10 @@
     /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/i,
     /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/
   ];
+  let sensitiveCredentialDetected = false;
+
+  const containsSensitiveCredential = (value) =>
+    SENSITIVE_CREDENTIALS.some((pattern) => pattern.test(value));
 
   const normalizeText = (value) => String(value ?? "")
     .normalize("NFC")
@@ -46,7 +50,8 @@
 
   const safeText = (value, limit) => {
     const normalized = normalizeText(value);
-    if (SENSITIVE_CREDENTIALS.some((pattern) => pattern.test(normalized))) {
+    if (containsSensitiveCredential(normalized)) {
+      sensitiveCredentialDetected = true;
       return "";
     }
     return truncateText(normalized, limit);
@@ -156,5 +161,14 @@
     }
   }
 
-  return serializedSize() <= MAX_PAYLOAD_BYTES ? payload : null;
+  const aggregateCaptureText = [
+    payload.title,
+    payload.selectionText ?? "",
+    ...payload.blocks.map((block) => block.text)
+  ].filter(Boolean).join("\n");
+  return serializedSize() <= MAX_PAYLOAD_BYTES
+    && !sensitiveCredentialDetected
+    && !containsSensitiveCredential(aggregateCaptureText)
+    ? payload
+    : null;
 })();

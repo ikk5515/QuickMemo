@@ -80,7 +80,12 @@ const validCapturePayload = (value) => {
     totalBlockCharacters += block.text.length;
     if (totalBlockCharacters > MAX_BLOCK_CHARACTERS_TOTAL) return false;
   }
-  return true;
+  const aggregateCaptureText = [
+    value.title,
+    value.selectionText ?? "",
+    ...value.blocks.map((block) => block.text)
+  ].filter(Boolean).join("\n");
+  return !containsSensitiveCredential(aggregateCaptureText);
 };
 
 const storageKey = (nonce) => `${STORAGE_PREFIX}${nonce}`;

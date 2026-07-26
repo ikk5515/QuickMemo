@@ -2,11 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   LibraryCaptureValidationError,
   captureLibraryDocument,
+  consumeLibraryBookmarkletCaptureHandoff,
   consumeLibraryCaptureHandoff,
   createLibraryCaptureLoginState,
   extractLibraryCaptureBlocks,
+  libraryBookmarkletCaptureTtlMilliseconds,
   libraryCaptureFromPaste,
   maxLibraryCapturePayloadBytes,
+  normalizeLibraryBookmarkletCaptureMessage,
   normalizeLibraryCaptureExtensionResponse,
   normalizeLibraryCaptureHandoffFragment,
   normalizeLibraryCapturePayload,
@@ -28,11 +31,29 @@ function validCapture(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function validBookmarkletMessage(
+  nonce: string,
+  capturedAt: string,
+  payloadOverrides: Record<string, unknown> = {}
+) {
+  return {
+    type: "quickmemo.libraryCapture.bookmarklet",
+    nonce,
+    payload: validCapture({
+      source: "bookmarklet",
+      url: "https://source.example/article",
+      capturedAt,
+      ...payloadOverrides
+    })
+  };
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   document.body.replaceChildren();
   document.title = "";
   window.history.replaceState(null, "", "/");
+  Object.defineProperty(window, "opener", { configurable: true, value: null, writable: true });
 });
 
 describe("normalizeLibraryCapturePayload", () => {
@@ -191,6 +212,15 @@ describe("normalizeLibraryCapturePayload", () => {
   ])("refuses credential-like text instead of persisting it: %s", (text) => {
     expect(() => normalizeLibraryCapturePayload(validCapture({ selectionText: text }))).toThrow("인증 정보");
   });
+
+  it("refuses a credential split across adjacent capture blocks", () => {
+    expect(() => normalizeLibraryCapturePayload(validCapture({
+      blocks: [
+        { kind: "heading", text: "Authorization: Bearer" },
+        { kind: "paragraph", text: "abcdefghijklmnopqrstuvwxyz" }
+      ]
+    }))).toThrow("인증 정보");
+  });
 });
 
 describe("library capture input adapters", () => {
@@ -278,6 +308,138 @@ describe("DOM capture", () => {
   });
 });
 
+describe("Safari bookmarklet memory handoff", () => {
+  const now = Date.parse("2026-07-27T03:00:00.000Z");
+
+  it("accepts only an exact, fresh bookmarklet envelope from the captured URL origin", () => {
+    const nonce = "C".repeat(43);
+    const message = validBookmarkletMessage(nonce, new Date(now).toISOString());
+
+    expect(normalizeLibraryBookmarkletCaptureMessage(
+      message,
+      nonce,
+      "https://source.example",
+      now
+    )).toMatchObject({
+      source: "bookmarklet",
+      title: "읽을 자료",
+      url: "https://source.example/article"
+    });
+    expect(() => normalizeLibraryBookmarkletCaptureMessage(
+      { ...message, body: "주소에 두면 안 되는 본문" },
+      nonce,
+      "https://source.example",
+      now
+    )).toThrow("허용되지 않은 필드");
+    expect(() => normalizeLibraryBookmarkletCaptureMessage(
+      message,
+      nonce,
+      "https://other.example",
+      now
+    )).toThrow("일치하지 않습니다");
+    expect(() => normalizeLibraryBookmarkletCaptureMessage(
+      validBookmarkletMessage(nonce, new Date(now).toISOString(), { source: "extension" }),
+      nonce,
+      "https://source.example",
+      now
+    )).toThrow("출처");
+  });
+
+  it("rejects expired or future captures and fails closed on credential-like text", () => {
+    const nonce = "D".repeat(43);
+    expect(() => normalizeLibraryBookmarkletCaptureMessage(
+      validBookmarkletMessage(
+        nonce,
+        new Date(now - libraryBookmarkletCaptureTtlMilliseconds - 1).toISOString()
+      ),
+      nonce,
+      "https://source.example",
+      now
+    )).toThrow("만료");
+    expect(() => normalizeLibraryBookmarkletCaptureMessage(
+      validBookmarkletMessage(nonce, new Date(now + 30_001).toISOString()),
+      nonce,
+      "https://source.example",
+      now
+    )).toThrow("만료");
+    expect(() => normalizeLibraryBookmarkletCaptureMessage(
+      validBookmarkletMessage(nonce, new Date(now).toISOString(), {
+        blocks: [{ kind: "paragraph", text: "Bearer abcdefghijklmnopqrstuvwxyz" }]
+      }),
+      nonce,
+      "https://source.example",
+      now
+    )).toThrow("인증 정보");
+    expect(() => normalizeLibraryBookmarkletCaptureMessage(
+      validBookmarkletMessage(nonce, new Date(now).toISOString(), {
+        blocks: [
+          { kind: "heading", text: "Authorization: Bearer" },
+          { kind: "paragraph", text: "abcdefghijklmnopqrstuvwxyz" }
+        ]
+      }),
+      nonce,
+      "https://source.example",
+      now
+    )).toThrow("인증 정보");
+  });
+
+  it("binds delivery to opener and nonce, consumes once, and sends no auth-dependent acknowledgement", async () => {
+    const nonce = "E".repeat(43);
+    const opener = { postMessage: vi.fn() } as unknown as Window;
+    Object.defineProperty(window, "opener", { configurable: true, value: opener, writable: true });
+    const promise = consumeLibraryBookmarkletCaptureHandoff(
+      { nonce, source: "bookmarklet" },
+      window,
+      1_000,
+      () => now
+    );
+
+    window.dispatchEvent(new MessageEvent("message", {
+      data: validBookmarkletMessage("X".repeat(43), new Date(now).toISOString()),
+      origin: "https://source.example",
+      source: opener
+    }));
+    window.dispatchEvent(new MessageEvent("message", {
+      data: validBookmarkletMessage(nonce, new Date(now).toISOString()),
+      origin: "https://source.example",
+      source: { postMessage: vi.fn() } as unknown as Window
+    }));
+    window.dispatchEvent(new MessageEvent("message", {
+      data: validBookmarkletMessage(nonce, new Date(now).toISOString()),
+      origin: "https://source.example",
+      source: opener
+    }));
+
+    await expect(promise).resolves.toMatchObject({ source: "bookmarklet", title: "읽을 자료" });
+    expect(opener.postMessage).not.toHaveBeenCalled();
+    expect(window.opener).toBeNull();
+    await expect(consumeLibraryBookmarkletCaptureHandoff(
+      { nonce, source: "bookmarklet" },
+      window,
+      1_000,
+      () => now
+    )).rejects.toThrow("이미 사용");
+  });
+
+  it("times out without persisting the body when the source page never connects", async () => {
+    vi.useFakeTimers();
+    const nonce = "F".repeat(43);
+    const opener = { postMessage: vi.fn() } as unknown as Window;
+    Object.defineProperty(window, "opener", { configurable: true, value: opener, writable: true });
+    const promise = consumeLibraryBookmarkletCaptureHandoff(
+      { nonce, source: "bookmarklet" },
+      window,
+      25,
+      () => now
+    );
+    const rejection = expect(promise).rejects.toThrow("응답 시간이 초과");
+
+    await vi.advanceTimersByTimeAsync(25);
+    await rejection;
+    expect(opener.postMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe("extension one-time handoff", () => {
   const nonce = "A".repeat(43);
   const extensionId = "a".repeat(32);
@@ -291,11 +453,23 @@ describe("extension one-time handoff", () => {
     expect(normalizeLibraryCaptureHandoffFragment(`#capture=${nonce}&extension=${extensionId}`)).toBe(
       `#capture=${nonce}&extension=${extensionId}`
     );
+    expect(parseLibraryCaptureHandoffFragment(`#capture=${nonce}&source=bookmarklet`)).toEqual({
+      nonce,
+      source: "bookmarklet"
+    });
+    expect(normalizeLibraryCaptureHandoffFragment(`#capture=${nonce}&source=bookmarklet`)).toBe(
+      `#capture=${nonce}&source=bookmarklet`
+    );
     const loginState = createLibraryCaptureLoginState(
       "/library",
       `#capture=${nonce}&extension=${extensionId}`
     );
     expect(parseLibraryCaptureLoginState(loginState)).toEqual(loginState);
+    const bookmarkletLoginState = createLibraryCaptureLoginState(
+      "/library",
+      `#capture=${nonce}&source=bookmarklet`
+    );
+    expect(parseLibraryCaptureLoginState(bookmarkletLoginState)).toEqual(bookmarkletLoginState);
     expect(createLibraryCaptureLoginState("/admin", `#capture=${nonce}&extension=${extensionId}`)).toBeNull();
   });
 
@@ -339,7 +513,10 @@ describe("extension one-time handoff", () => {
     `#capture=${nonce}&extension=${extensionId}&body=본문`,
     `#capture=${nonce}&capture=${nonce}&extension=${extensionId}`,
     `#capture=short&extension=${extensionId}`,
-    `#capture=${nonce}&extension=invalid`
+    `#capture=${nonce}&extension=invalid`,
+    `#capture=${nonce}&source=extension`,
+    `#capture=${nonce}&source=bookmarklet&body=본문`,
+    `#capture=${nonce}&source=bookmarklet&extension=${extensionId}`
   ])("rejects malformed or body-bearing fragments", (fragment) => {
     expect(() => parseLibraryCaptureHandoffFragment(fragment)).toThrow("핸드오프 주소");
   });
@@ -372,6 +549,10 @@ describe("extension one-time handoff", () => {
     expect(takeLibraryCaptureHandoffFromLocation()).toEqual({ nonce, extensionId });
     expect(window.location.pathname).toBe("/library");
     expect(window.location.search).toBe("?view=all");
+    expect(window.location.hash).toBe("");
+
+    window.history.replaceState(null, "", `/library#capture=${nonce}&source=bookmarklet`);
+    expect(takeLibraryCaptureHandoffFromLocation()).toEqual({ nonce, source: "bookmarklet" });
     expect(window.location.hash).toBe("");
 
     window.history.replaceState(null, "", "/library#capture=invalid");

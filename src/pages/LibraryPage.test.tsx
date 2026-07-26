@@ -282,6 +282,8 @@ beforeEach(() => {
   });
   Reflect.deleteProperty(globalThis, "chrome");
   Reflect.deleteProperty(window, "matchMedia");
+  Object.defineProperty(window, "opener", { configurable: true, value: null, writable: true });
+  Reflect.deleteProperty(navigator, "clipboard");
   window.history.replaceState(null, "", "/library");
   testData.auth.privateKey = {} as CryptoKey;
   testData.auth.profile.featureAccess = { notes: true, library: true, schedule: true };
@@ -800,13 +802,98 @@ describe("LibraryPage", () => {
     }));
   });
 
-  it("imports Safari bookmarklet JSON into the review dialog without auto-saving", async () => {
+  it("receives a Safari bookmarklet from opener memory, clears the nonce, and waits for encrypted save confirmation", async () => {
+    const user = userEvent.setup();
+    const nonce = "S".repeat(43);
+    const opener = { postMessage: vi.fn() } as unknown as Window;
+    Object.defineProperty(window, "opener", { configurable: true, value: opener, writable: true });
+    window.history.replaceState(null, "", `/library#capture=${nonce}&source=bookmarklet`);
+
+    renderStrictPage();
+
+    const dialog = await screen.findByRole("dialog", { name: "링크나 클립 저장" });
+    expect(window.location.hash).toBe("");
+    expect(within(dialog).getByText(/Safari 북마클릿에서 캡처 내용을 가져오는 중/)).toBeInTheDocument();
+
+    window.dispatchEvent(new MessageEvent("message", {
+      data: {
+        type: "quickmemo.libraryCapture.bookmarklet",
+        nonce,
+        payload: {
+          version: 1,
+          source: "bookmarklet",
+          title: "Safari에서 캡처한 자료",
+          url: "https://source.example/read?article=1&access_token=never-store-this#private",
+          selectionText: "선택한 핵심 문장",
+          blocks: [
+            { kind: "heading", text: "주요 제목" },
+            { kind: "paragraph", text: "읽을 본문" }
+          ],
+          capturedAt: new Date().toISOString()
+        }
+      },
+      origin: "https://source.example",
+      source: opener
+    }));
+
+    await waitFor(() => {
+      expect(within(dialog).getByLabelText("제목")).toHaveValue("Safari에서 캡처한 자료");
+    });
+    expect(within(dialog).getByLabelText("URL")).toHaveValue("https://source.example/read?article=1");
+    expect(within(dialog).getByLabelText(/선택 텍스트/)).toHaveValue("선택한 핵심 문장");
+    expect(within(dialog).getByLabelText(/리더 본문/)).toHaveValue("주요 제목\n\n읽을 본문");
+    expect(within(dialog).getByText(/북마클릿에서 가져왔습니다/)).toBeInTheDocument();
+    expect(serviceMocks.createLibraryItem).not.toHaveBeenCalled();
+    expect(opener.postMessage).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "자료 저장" }));
+    await waitFor(() => expect(serviceMocks.createLibraryItem).toHaveBeenCalledTimes(1));
+    expect(serviceMocks.createLibraryItem).toHaveBeenCalledWith(expect.objectContaining({
+      captureSource: "bookmarklet",
+      content: expect.objectContaining({
+        selectionText: "선택한 핵심 문장",
+        url: "https://source.example/read?article=1",
+        readerBlocks: [
+          expect.objectContaining({ kind: "heading", text: "주요 제목" }),
+          expect.objectContaining({ kind: "paragraph", text: "읽을 본문" })
+        ]
+      }),
+      privateKey: expect.anything(),
+      uid: "user-a"
+    }));
+  });
+
+  it("installs the Safari bookmarklet and keeps manual JSON import behind the review dialog", async () => {
     const user = userEvent.setup();
     renderPage();
     await user.click(await screen.findByRole("button", { name: "자료 저장" }));
 
     const dialog = screen.getByRole("dialog", { name: "링크나 클립 저장" });
-    await user.click(within(dialog).getByText("Safari 또는 북마클릿에서 가져오기"));
+    const bookmarkletLink = within(dialog).getByRole("link", { name: "QuickMemo로 저장" });
+    const bookmarkletUrl = bookmarkletLink.getAttribute("href");
+    expect(bookmarkletUrl).toMatch(/^javascript:/);
+    expect(bookmarkletUrl).toContain("quickmemo.libraryCapture.bookmarklet");
+    expect(bookmarkletUrl).toContain("http://localhost:3000");
+    expect(bookmarkletUrl).not.toContain("javascript:throw new Error");
+    expect(bookmarkletLink).toHaveAttribute("aria-describedby");
+    expect(within(dialog).getByText(/보기 → 즐겨찾기 막대 보기/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/본문은 주소·서버·웹 저장소에 넣지 않습니다/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/창 연결을 차단한 사이트/)).toBeInTheDocument();
+
+    await user.click(bookmarkletLink);
+    expect(within(dialog).getByRole("status")).toHaveTextContent("즐겨찾기 막대로 드래그");
+    expect(serviceMocks.createLibraryItem).not.toHaveBeenCalled();
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText }
+    });
+    await user.click(within(dialog).getByRole("button", { name: "북마클릿 주소 복사" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(bookmarkletUrl));
+    expect(within(dialog).getByRole("status")).toHaveTextContent("북마클릿 주소를 복사했습니다");
+
+    await user.click(within(dialog).getByText("Chrome 확장 또는 직접 가져오기"));
     expect(within(dialog).getByRole("link", { name: "Chrome용 캡처 확장 프로그램 받기 (ZIP)" })).toHaveAttribute(
       "href",
       "/quickmemo-capture-extension.zip"

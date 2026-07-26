@@ -2,6 +2,14 @@
 
 현재 탭의 제목, `http(s)` URL, 사용자가 선택한 텍스트와 `article`/`main` 안의 구조화된 텍스트 블록만 QuickMemo 자료실로 전달하는 Chrome Manifest V3 확장 프로그램입니다. 원본 HTML, 스타일, 이미지, 쿠키 또는 로그인 정보는 수집하지 않습니다.
 
+## Safari 북마클릿
+
+Safari에서는 QuickMemo의 `자료실 → 자료 저장`을 열고 `QuickMemo로 저장` 링크를 즐겨찾기 막대로 드래그합니다. 웹페이지에서 필요한 문장을 선택한 뒤 이 북마클릿을 누르면 제목, 정리된 URL, 선택 텍스트와 읽을 본문이 새 자료실 창의 검토 화면에 함께 채워집니다.
+
+북마클릿은 256비트 nonce만 `/library` fragment에 넣고, 실제 본문은 원본 탭과 QuickMemo 창 사이의 `postMessage` 메모리 전달만 사용합니다. URL, 웹 저장소, 클립보드 또는 서버 요청에는 캡처 본문을 넣지 않습니다. QuickMemo는 원본 창·origin·nonce·2분 TTL·payload schema와 비밀값을 다시 확인하며, 사용자가 검토 화면의 `자료 저장`을 누른 뒤에만 기존 클라이언트 암호화를 거쳐 저장합니다.
+
+Safari 내부 페이지, 팝업이 차단된 페이지, 엄격한 CSP·sandbox 또는 `Cross-Origin-Opener-Policy: same-origin` 같은 창 격리가 적용된 일부 페이지에서는 북마클릿이 실행되지 않을 수 있습니다. 이때 본문을 URL에 싣는 우회는 하지 않으며, 자료 저장 창의 직접 붙여넣기를 사용합니다.
+
 ## 빌드와 설치
 
 이 폴더는 origin placeholder가 포함된 원본 템플릿이므로 그대로 설치하면 안 됩니다. `npm run build`는 현재 운영 origin에 맞춘 설치용 결과물을 `dist/quickmemo-capture-extension`에 함께 생성합니다. 운영 도메인이 바뀌면 빌드 스크립트의 origin도 함께 변경해야 합니다.

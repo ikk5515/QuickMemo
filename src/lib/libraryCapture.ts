@@ -33,6 +33,13 @@ export interface LibraryCaptureHandoff {
   nonce: string;
 }
 
+export interface LibraryBookmarkletCaptureHandoff {
+  nonce: string;
+  source: "bookmarklet";
+}
+
+export type LibraryCaptureLocationHandoff = LibraryCaptureHandoff | LibraryBookmarkletCaptureHandoff;
+
 export interface LibraryCaptureLoginState {
   returnTo: "/library";
   captureFragment: string;
@@ -51,7 +58,9 @@ const rootPayloadKeys = new Set(["version", "source", "title", "url", "selection
 const blockKeys = new Set(["kind", "text"]);
 const extensionResponseKeys = new Set(["ok", "payload"]);
 const extensionFailureResponseKeys = new Set(["ok", "error"]);
-const handoffKeys = new Set(["capture", "extension"]);
+const extensionHandoffKeys = new Set(["capture", "extension"]);
+const bookmarkletHandoffKeys = new Set(["capture", "source"]);
+const bookmarkletMessageKeys = new Set(["type", "nonce", "payload"]);
 const loginStateKeys = new Set(["returnTo", "captureFragment"]);
 const forbiddenCaptureContainerSelector = "script, style, noscript, nav, header, footer, form, button, input, textarea, select, svg, canvas, iframe";
 const captureBlockSelector = "h1, h2, h3, h4, h5, h6, p, blockquote, li, pre, code";
@@ -71,6 +80,10 @@ const sensitiveCredentialPatterns = [
 ];
 const chromeExtensionIdPattern = /^[a-p]{32}$/;
 const captureNoncePattern = /^[A-Za-z0-9_-]{43}$/;
+const libraryBookmarkletMessageType = "quickmemo.libraryCapture.bookmarklet";
+export const libraryBookmarkletCaptureTtlMilliseconds = 2 * 60 * 1000;
+const consumingBookmarkletNonces = new Set<string>();
+const consumedBookmarkletNonces = new Set<string>();
 
 export interface LibraryCaptureExternalRuntime {
   lastError?: { message?: string };
@@ -90,6 +103,14 @@ interface LibraryCaptureLocation {
 interface LibraryCaptureHistory {
   readonly state: unknown;
   replaceState: (data: unknown, unused: string, url?: string | URL | null) => void;
+}
+
+export interface LibraryBookmarkletCaptureWindow {
+  opener: Window | null;
+  addEventListener: (type: "message", listener: (event: MessageEvent) => void) => void;
+  removeEventListener: (type: "message", listener: (event: MessageEvent) => void) => void;
+  setTimeout: (handler: () => void, timeout: number) => number;
+  clearTimeout: (handle: number) => void;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -149,7 +170,7 @@ function normalizeBoundedText(value: unknown, maxCharacters: number, fieldName: 
 
   const normalized = normalizeText(value);
 
-  if (sensitiveCredentialPatterns.some((pattern) => pattern.test(normalized))) {
+  if (containsSensitiveCredential(normalized)) {
     throw new LibraryCaptureValidationError(`${fieldName}에 저장할 수 없는 인증 정보가 포함되어 있습니다.`);
   }
 
@@ -158,6 +179,10 @@ function normalizeBoundedText(value: unknown, maxCharacters: number, fieldName: 
   }
 
   return normalized;
+}
+
+function containsSensitiveCredential(value: string) {
+  return sensitiveCredentialPatterns.some((pattern) => pattern.test(value));
 }
 
 function repeatedlyDecodeUrlComponent(value: string) {
@@ -445,6 +470,16 @@ export function normalizeLibraryCapturePayload(value: unknown): LibraryCapturePa
       normalized.selectionText = selectionText;
     }
   }
+  const aggregateCaptureText = [
+    normalized.title,
+    normalized.selectionText ?? "",
+    ...normalized.blocks.map((block) => block.text)
+  ].filter(Boolean).join("\n");
+  if (containsSensitiveCredential(aggregateCaptureText)) {
+    throw new LibraryCaptureValidationError(
+      "캡처 데이터에 저장할 수 없는 인증 정보가 포함되어 있습니다."
+    );
+  }
   if (value.capturedAt !== undefined) {
     normalized.capturedAt = normalizeCapturedAt(value.capturedAt);
   }
@@ -582,7 +617,7 @@ export function captureLibraryDocument(
   return normalizeLibraryCapturePayload(payload);
 }
 
-export function parseLibraryCaptureHandoffFragment(fragment: string): LibraryCaptureHandoff | null {
+export function parseLibraryCaptureHandoffFragment(fragment: string): LibraryCaptureLocationHandoff | null {
   const rawFragment = fragment.startsWith("#") ? fragment.slice(1) : fragment;
   if (!rawFragment) {
     return null;
@@ -592,18 +627,38 @@ export function parseLibraryCaptureHandoffFragment(fragment: string): LibraryCap
   if (!parameters.has("capture")) {
     return null;
   }
+  const extensionHandoff = parameters.has("extension") && !parameters.has("source");
+  const bookmarkletHandoff = parameters.has("source") && !parameters.has("extension");
+  const allowedKeys = extensionHandoff
+    ? extensionHandoffKeys
+    : bookmarkletHandoff
+      ? bookmarkletHandoffKeys
+      : null;
+  if (!allowedKeys || [...allowedKeys].some((key) => !parameters.has(key))) {
+    throw new LibraryCaptureValidationError("캡처 핸드오프 주소가 올바르지 않습니다.");
+  }
   for (const key of parameters.keys()) {
-    if (!handoffKeys.has(key) || parameters.getAll(key).length !== 1) {
+    if (!allowedKeys.has(key) || parameters.getAll(key).length !== 1) {
       throw new LibraryCaptureValidationError("캡처 핸드오프 주소가 올바르지 않습니다.");
     }
   }
 
   const nonce = parameters.get("capture") ?? "";
-  const extensionId = parameters.get("extension") ?? "";
-  if (!captureNoncePattern.test(nonce) || !chromeExtensionIdPattern.test(extensionId)) {
+  if (!captureNoncePattern.test(nonce)) {
     throw new LibraryCaptureValidationError("캡처 핸드오프 주소가 올바르지 않습니다.");
   }
 
+  if (bookmarkletHandoff) {
+    if (parameters.get("source") !== "bookmarklet") {
+      throw new LibraryCaptureValidationError("캡처 핸드오프 주소가 올바르지 않습니다.");
+    }
+    return { nonce, source: "bookmarklet" };
+  }
+
+  const extensionId = parameters.get("extension") ?? "";
+  if (!chromeExtensionIdPattern.test(extensionId)) {
+    throw new LibraryCaptureValidationError("캡처 핸드오프 주소가 올바르지 않습니다.");
+  }
   return { extensionId, nonce };
 }
 
@@ -617,7 +672,9 @@ export function normalizeLibraryCaptureHandoffFragment(fragment: string) {
     return null;
   }
 
-  return `#capture=${handoff.nonce}&extension=${handoff.extensionId}`;
+  return "source" in handoff
+    ? `#capture=${handoff.nonce}&source=bookmarklet`
+    : `#capture=${handoff.nonce}&extension=${handoff.extensionId}`;
 }
 
 export function createLibraryCaptureLoginState(pathname: string, fragment: string): LibraryCaptureLoginState | null {
@@ -662,7 +719,8 @@ export function parseLibraryCaptureLoginState(value: unknown): LibraryCaptureLog
 
 /**
  * Reads only the nonce handoff and removes it from the address before any
- * extension round trip starts. Capture bodies never belong in browser history.
+ * extension or bookmarklet round trip starts. Capture bodies never belong in
+ * browser history.
  */
 export function takeLibraryCaptureHandoffFromLocation(
   captureLocation: LibraryCaptureLocation = window.location,
@@ -680,6 +738,158 @@ export function takeLibraryCaptureHandoffFromLocation(
   } finally {
     captureHistory.replaceState(captureHistory.state, "", `${captureLocation.pathname}${captureLocation.search}`);
   }
+}
+
+export function normalizeLibraryBookmarkletCaptureMessage(
+  value: unknown,
+  expectedNonce: string,
+  sourceOrigin: string,
+  nowMilliseconds = Date.now()
+) {
+  if (!captureNoncePattern.test(expectedNonce) || !isPlainRecord(value)) {
+    throw new LibraryCaptureValidationError("Safari 북마클릿 캡처 형식이 올바르지 않습니다.");
+  }
+  assertOnlyKeys(value, bookmarkletMessageKeys, "Safari 북마클릿 캡처");
+
+  const type = Object.getOwnPropertyDescriptor(value, "type")?.value;
+  const nonce = Object.getOwnPropertyDescriptor(value, "nonce")?.value;
+  const rawPayload = Object.getOwnPropertyDescriptor(value, "payload")?.value;
+  if (type !== libraryBookmarkletMessageType || nonce !== expectedNonce) {
+    throw new LibraryCaptureValidationError("Safari 북마클릿 캡처 형식이 올바르지 않습니다.");
+  }
+
+  let parsedSourceOrigin: URL;
+  try {
+    parsedSourceOrigin = new URL(sourceOrigin);
+  } catch {
+    throw new LibraryCaptureValidationError("Safari 북마클릿 원본 페이지를 확인할 수 없습니다.");
+  }
+  if (
+    (parsedSourceOrigin.protocol !== "http:" && parsedSourceOrigin.protocol !== "https:")
+    || parsedSourceOrigin.origin !== sourceOrigin
+  ) {
+    throw new LibraryCaptureValidationError("Safari 북마클릿 원본 페이지를 확인할 수 없습니다.");
+  }
+
+  const payload = normalizeLibraryCapturePayload(rawPayload);
+  if (payload.source !== "bookmarklet" || !payload.url || !payload.capturedAt) {
+    throw new LibraryCaptureValidationError("Safari 북마클릿 캡처 출처가 올바르지 않습니다.");
+  }
+  if (new URL(payload.url).origin !== parsedSourceOrigin.origin) {
+    throw new LibraryCaptureValidationError("Safari 북마클릿 원본 페이지와 캡처 URL이 일치하지 않습니다.");
+  }
+
+  const capturedAt = Date.parse(payload.capturedAt);
+  if (
+    capturedAt > nowMilliseconds + 30_000
+    || nowMilliseconds - capturedAt > libraryBookmarkletCaptureTtlMilliseconds
+  ) {
+    throw new LibraryCaptureValidationError(
+      "Safari 북마클릿 캡처 요청이 만료되었습니다. 원본 페이지에서 다시 캡처해주세요."
+    );
+  }
+
+  return payload;
+}
+
+function currentBookmarkletCaptureWindow() {
+  return window as unknown as LibraryBookmarkletCaptureWindow;
+}
+
+export function consumeLibraryBookmarkletCaptureHandoff(
+  handoff: LibraryBookmarkletCaptureHandoff,
+  captureWindow: LibraryBookmarkletCaptureWindow = currentBookmarkletCaptureWindow(),
+  timeoutMilliseconds = libraryBookmarkletCaptureTtlMilliseconds,
+  now: () => number = Date.now
+) {
+  if (
+    handoff.source !== "bookmarklet"
+    || !captureNoncePattern.test(handoff.nonce)
+    || consumingBookmarkletNonces.has(handoff.nonce)
+    || consumedBookmarkletNonces.has(handoff.nonce)
+  ) {
+    return Promise.reject(new LibraryCaptureValidationError(
+      "Safari 북마클릿 캡처 요청이 올바르지 않거나 이미 사용되었습니다."
+    ));
+  }
+
+  const opener = captureWindow.opener;
+  if (!opener) {
+    return Promise.reject(new LibraryCaptureValidationError(
+      "원본 Safari 페이지와 연결할 수 없습니다. 원본 페이지에서 다시 캡처해주세요."
+    ));
+  }
+
+  consumingBookmarkletNonces.add(handoff.nonce);
+
+  return new Promise<LibraryCapturePayload>((resolve, reject) => {
+    let settled = false;
+    let timeout = 0;
+    const finish = (action: () => void, consumed: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      captureWindow.removeEventListener("message", handleMessage);
+      captureWindow.clearTimeout(timeout);
+      consumingBookmarkletNonces.delete(handoff.nonce);
+      if (consumed) {
+        consumedBookmarkletNonces.add(handoff.nonce);
+      }
+      action();
+    };
+    const handleMessage = (event: MessageEvent) => {
+      if (event.source !== opener) {
+        return;
+      }
+
+      let matchingProtocolMessage = false;
+      try {
+        if (!isPlainRecord(event.data)) {
+          return;
+        }
+        const typeDescriptor = Object.getOwnPropertyDescriptor(event.data, "type");
+        const nonceDescriptor = Object.getOwnPropertyDescriptor(event.data, "nonce");
+        matchingProtocolMessage = Boolean(
+          typeDescriptor
+          && "value" in typeDescriptor
+          && typeDescriptor.value === libraryBookmarkletMessageType
+          && nonceDescriptor
+          && "value" in nonceDescriptor
+          && nonceDescriptor.value === handoff.nonce
+        );
+      } catch {
+        return;
+      }
+      if (!matchingProtocolMessage) {
+        return;
+      }
+
+      try {
+        const payload = normalizeLibraryBookmarkletCaptureMessage(
+          event.data,
+          handoff.nonce,
+          event.origin,
+          now()
+        );
+        try {
+          captureWindow.opener = null;
+        } catch {
+          // Safari may expose a read-only opener proxy.
+        }
+        finish(() => resolve(payload), true);
+      } catch (error) {
+        finish(() => reject(error), true);
+      }
+    };
+
+    captureWindow.addEventListener("message", handleMessage);
+    timeout = captureWindow.setTimeout(() => {
+      finish(() => reject(new LibraryCaptureValidationError(
+        "Safari 북마클릿 캡처 응답 시간이 초과됐습니다. 원본 페이지를 열어 둔 채 다시 시도해주세요."
+      )), true);
+    }, Math.min(libraryBookmarkletCaptureTtlMilliseconds, Math.max(1, timeoutMilliseconds)));
+  });
 }
 
 function extensionFailureMessage(code: unknown) {
