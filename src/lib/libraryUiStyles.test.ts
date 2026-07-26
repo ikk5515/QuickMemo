@@ -73,4 +73,48 @@ describe("library UI styles", () => {
       /\.pdf-preview-canvas-frame,\s*\.docx-preview-frame,\s*\.docx-preview-sandbox,\s*\.hwp-preview-frame,\s*\.document-preview-frame,\s*\.public-image-preview-frame,\s*\.file-text-preview \{\s*min-height: 0;\s*overscroll-behavior: contain;\s*\}/
     );
   });
+
+  it("keeps the Safari bookmarklet label inside the same responsive button box as copy", () => {
+    const style = document.createElement("style");
+    style.dataset.libraryStyleTest = "true";
+    style.textContent = `${appStylesSource}\n${stylesSource}`;
+    document.head.append(style);
+    document.body.innerHTML = `
+      <div class="library-bookmarklet-actions">
+        <a class="secondary-button library-bookmarklet-link" href="#">
+          <svg aria-hidden="true"></svg>
+          QuickMemo로 저장
+        </a>
+        <button class="secondary-button" type="button">
+          <svg aria-hidden="true"></svg>
+          북마클릿 주소 복사
+        </button>
+      </div>
+    `;
+
+    const link = document.querySelector<HTMLElement>(".library-bookmarklet-link");
+    const copyButton = document.querySelector<HTMLButtonElement>("button.secondary-button");
+    const icon = link?.querySelector<SVGElement>("svg");
+    const linkStyle = getComputedStyle(link!);
+    const copyButtonStyle = getComputedStyle(copyButton!);
+
+    expect(linkStyle.display).toBe("inline-flex");
+    expect(linkStyle.alignItems).toBe("center");
+    expect(linkStyle.justifyContent).toBe("center");
+    expect(linkStyle.gap).toBe("8px");
+    expect(linkStyle.minWidth).toBe("0");
+    expect(linkStyle.maxWidth).toBe("100%");
+    expect(linkStyle.width).toBe("100%");
+    expect(linkStyle.whiteSpace).toBe("normal");
+    expect(linkStyle.overflowWrap).toBe("anywhere");
+    expect(linkStyle.fontSize).toBe(copyButtonStyle.fontSize);
+    expect(linkStyle.fontWeight).toBe(copyButtonStyle.fontWeight);
+    expect(linkStyle.padding).toBe(copyButtonStyle.padding);
+    expect(linkStyle.borderTopStyle).toBe(copyButtonStyle.borderTopStyle);
+    expect(linkStyle.borderRadius).toBe(copyButtonStyle.borderRadius);
+    expect(getComputedStyle(icon!).flexShrink).toBe("0");
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 680px\) \{[\s\S]*?\.library-bookmarklet-actions \{\s*grid-template-columns: minmax\(0, 1fr\);\s*\}/
+    );
+  });
 });
