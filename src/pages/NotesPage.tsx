@@ -6480,6 +6480,7 @@ export function SecureShareOwnerModal({
   const [revokeAttempted, setRevokeAttempted] = useState(false);
   const dialogRef = useRef<HTMLElement | null>(null);
   const revokeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const revokeReturnFocusRef = useRef<"history" | "trigger" | null>(null);
   const capabilities = secureShareManagementCapabilities(share, nowMilliseconds);
   const orderedShares = useMemo(
     () => [...shares].sort((left, right) =>
@@ -6522,29 +6523,31 @@ export function SecureShareOwnerModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [busy, onClose, revokeTarget]);
 
-  function focusSelectedHistoryItem() {
-    window.requestAnimationFrame(() => {
-      const dialog = dialogRef.current;
-      const target = dialog?.querySelector<HTMLElement>(
+  useEffect(() => {
+    const returnFocus = revokeReturnFocusRef.current;
+
+    if (busy || revokeTarget || !returnFocus) {
+      return;
+    }
+
+    const trigger = revokeButtonRef.current;
+    const dialog = dialogRef.current;
+    const target = returnFocus === "trigger" && trigger && !trigger.disabled
+      ? trigger
+      : dialog?.querySelector<HTMLElement>(
         '.secure-share-history-item[aria-current="true"]:not(:disabled)'
       ) ?? dialog?.querySelector<HTMLElement>("#secure-share-detail-title");
 
-      target?.focus({ preventScroll: true });
-    });
-  }
+    if (target) {
+      revokeReturnFocusRef.current = null;
+      target.focus({ preventScroll: true });
+    }
+  }, [busy, revokeTarget, share.shareId]);
 
   function cancelRevoke() {
+    revokeReturnFocusRef.current = "trigger";
     setRevokeTarget(null);
     setRevokeAttempted(false);
-    window.requestAnimationFrame(() => {
-      const target = revokeButtonRef.current;
-
-      if (target && !target.disabled) {
-        target.focus({ preventScroll: true });
-      } else {
-        focusSelectedHistoryItem();
-      }
-    });
   }
 
   async function confirmRevoke() {
@@ -6554,9 +6557,9 @@ export function SecureShareOwnerModal({
 
     setRevokeAttempted(true);
     if (await onRevoke(revokeTarget)) {
+      revokeReturnFocusRef.current = "history";
       setRevokeTarget(null);
       setRevokeAttempted(false);
-      focusSelectedHistoryItem();
     }
   }
 
