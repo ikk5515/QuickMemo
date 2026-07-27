@@ -6,6 +6,7 @@ import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { parseLibraryCaptureLoginState } from "../lib/libraryCapture";
 import { findRosterByShortcut } from "../lib/roster";
+import { secureShareLoginDestination } from "../lib/shareLoginReturn";
 import { subscribeRoster } from "../services/users";
 import type { PublicRosterUser } from "../types";
 
@@ -29,12 +30,22 @@ export default function LoginPage() {
   const captureRedirectTarget = captureLoginState
     ? `${captureLoginState.returnTo}${captureLoginState.captureFragment}`
     : null;
+  const secureShareRedirectTarget = useMemo(
+    () => secureShareLoginDestination(location.state),
+    [location.state]
+  );
+  const redirectTarget = secureShareRedirectTarget ?? captureRedirectTarget ?? "/home";
 
   useEffect(() => {
     if (location.hash) {
-      navigate("/login", { replace: true, state: captureLoginState ?? undefined });
+      navigate("/login", {
+        replace: true,
+        state: secureShareRedirectTarget
+          ? location.state
+          : captureLoginState ?? undefined
+      });
     }
-  }, [captureLoginState, location.hash, navigate]);
+  }, [captureLoginState, location.hash, location.state, navigate, secureShareRedirectTarget]);
 
   useEffect(() => {
     return subscribeRoster(
@@ -92,7 +103,7 @@ export default function LoginPage() {
   const sortedRoster = useMemo(() => roster.filter((user) => user.isActive), [roster]);
 
   if (firebaseUser && profile) {
-    return <Navigate to={captureRedirectTarget ?? "/home"} replace />;
+    return <Navigate to={redirectTarget} replace />;
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -107,7 +118,7 @@ export default function LoginPage() {
 
     try {
       await loginRosterUser(selectedUser, password);
-      navigate(captureRedirectTarget ?? "/home", { replace: true });
+      navigate(redirectTarget, { replace: true });
     } catch (loginError) {
       setError(firebaseAuthErrorMessage(loginError, "비밀번호를 확인해주세요."));
     } finally {

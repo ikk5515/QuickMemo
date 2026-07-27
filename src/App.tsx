@@ -1,4 +1,4 @@
-import { lazy, Suspense, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
 import { hasFeatureAccess } from "./lib/featureAccess";
@@ -21,6 +21,52 @@ function PageLoadingFallback() {
       불러오는 중...
     </div>
   );
+}
+
+function SecureShareCopyRecovery() {
+  const { firebaseUser, profile } = useAuth();
+  const lastRunAtRef = useRef(0);
+  const uid = firebaseUser?.uid === profile?.uid
+    && profile?.isActive
+    && hasFeatureAccess(profile, "notes")
+    ? profile.uid
+    : null;
+
+  useEffect(() => {
+    if (!uid) {
+      lastRunAtRef.current = 0;
+      return undefined;
+    }
+
+    let active = true;
+    const minimumRunIntervalMs = 30 * 60 * 1000;
+
+    const recover = () => {
+      const now = Date.now();
+      if (now - lastRunAtRef.current < minimumRunIntervalMs) {
+        return;
+      }
+
+      lastRunAtRef.current = now;
+      void import("./services/secureShareCopyJobs")
+        .then(({ reapStaleSecureShareCopyJobs }) =>
+          active ? reapStaleSecureShareCopyJobs(uid) : undefined
+        )
+        .catch(() => undefined);
+    };
+
+    recover();
+    const intervalId = window.setInterval(recover, 6 * 60 * 60 * 1000);
+    window.addEventListener("focus", recover);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", recover);
+    };
+  }, [uid]);
+
+  return null;
 }
 
 export function RequireAuth({
@@ -65,6 +111,7 @@ export function RequireAuth({
 export default function App() {
   return (
     <Suspense fallback={<PageLoadingFallback />}>
+      <SecureShareCopyRecovery />
       <Routes>
         <Route path="/" element={<Navigate to="/login" replace />} />
         <Route path="/setup" element={<SetupPage />} />

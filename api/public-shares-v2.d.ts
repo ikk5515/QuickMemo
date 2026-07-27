@@ -1,0 +1,286 @@
+export interface SecureSharePasswordHashRecord {
+  algorithm: "scrypt";
+  digest: string;
+  hashVersion: 1;
+  parameters: {
+    N: number;
+    keyLength: number;
+    p: number;
+    r: number;
+  };
+  pepperVersion: string;
+  salt: string;
+}
+
+export class HttpError extends Error {
+  code: string;
+  expose: boolean;
+  retryAfter?: number;
+  statusCode: number;
+  constructor(
+    statusCode: number,
+    code: string,
+    internalMessage?: string,
+    options?: { expose?: boolean; retryAfter?: number }
+  );
+}
+
+export const secureShareScryptParameters: Readonly<{
+  N: 131072;
+  keyLength: 32;
+  maxmem: number;
+  p: 2;
+  r: 8;
+}>;
+
+export function normalizeEmail(value: string): string;
+export function normalizeAllowedEmails(values: string[]): string[];
+export function assertOnlyKeys(value: unknown, allowedKeys: string[]): void;
+export function buildPolicySettings(
+  body: Record<string, unknown>,
+  existingPolicy?: Record<string, unknown> | null
+): Promise<Record<string, unknown>>;
+export function emailDigest(normalizedEmail: string, secret?: string): string;
+export function otpCodeDigest(
+  challengeId: string,
+  shareId: string,
+  emailHash: string,
+  code: string,
+  secret?: string
+): string;
+export function sessionTokenDigest(token: string, secret?: string): string;
+export function unlockAttemptDigest(
+  shareId: string,
+  unlockAttemptId: string,
+  identityHash: string,
+  secret?: string
+): string;
+export function hashSharePassword(
+  password: string,
+  pepper?: string,
+  pepperVersion?: string
+): Promise<SecureSharePasswordHashRecord>;
+export function verifySharePassword(
+  password: string,
+  record: SecureSharePasswordHashRecord,
+  pepper?: string,
+  pepperVersion?: string
+): Promise<boolean>;
+
+export function consumeRateLimits(
+  context: { accessToken: string; projectId: string },
+  definitions: Array<{
+    keyParts: string[];
+    limit: number;
+    limitType: string;
+    ownerUid?: string;
+    shareId: string;
+    windowSeconds: number;
+  }>
+): Promise<string[]>;
+
+export const auditRetentionDays: number;
+
+export function safeDisplayName(
+  value: unknown,
+  fallback?: string,
+  allowReserved?: boolean
+): string;
+
+export function emailChallengeMinimumResponseMilliseconds(
+  random?: (minimum: number, maximum: number) => number
+): number;
+export function padEmailChallengeResponse(
+  timingStartedAt: number,
+  minimumResponseMilliseconds: number,
+  now?: () => number,
+  wait?: (milliseconds: number) => Promise<unknown>
+): Promise<number>;
+export function otpVerificationFailureMinimumResponseMilliseconds(
+  random?: (minimum: number, maximum: number) => number
+): number;
+export function padOtpVerificationFailureResponse(
+  timingStartedAt: number,
+  minimumResponseMilliseconds: number,
+  now?: () => number,
+  wait?: (milliseconds: number) => Promise<unknown>
+): Promise<number>;
+
+export function evaluateCopyAttachmentQuota(input: {
+  additionalBytes: number;
+  additionalCount: number;
+  usedBytes: number;
+  usedCount: number;
+}):
+  | { allowed: false; reason: "bytes_exceeded" | "count_exceeded" | "invalid_usage" }
+  | {
+      allowed: true;
+      reason: "ok";
+      remainingBytes: number;
+      remainingCount: number;
+    };
+
+export function copyGrantAuthorizesDownload(
+  grant: Record<string, unknown> | null,
+  context: {
+    ownerPreview: boolean;
+    permissionLevel: string;
+    policyVersion: number;
+    sessionReferenceHash: string;
+    shareId: string;
+    uid: string;
+  }
+): boolean;
+
+export function secureShareAttachmentBlobPath(
+  ownerUid: string,
+  shareId: string,
+  attachmentId: string
+): string;
+
+export function shareOwnedBy(
+  state: { share: { ownerUid: string } } | null,
+  user: { uid: string; isAdmin?: boolean } | null
+): boolean;
+
+export function shareManagedBy(
+  state: { share: { ownerUid: string } } | null,
+  user: { uid: string; isAdmin?: boolean } | null
+): boolean;
+
+export function sourceSnapshotAvailable(
+  share: Record<string, unknown>,
+  note: Record<string, unknown> | null,
+  ownerProfile: Record<string, unknown> | null
+): boolean;
+
+export function ensureSameOrigin(request: {
+  headers?: Record<string, string | string[] | undefined>;
+  url?: string;
+}): void;
+
+export function handleApiError(
+  error: unknown,
+  response: {
+    destroyed?: boolean;
+    headersSent?: boolean;
+    statusCode?: number;
+    destroy?(): void;
+    end(value?: unknown): void;
+    setHeader(name: string, value: string | string[]): void;
+  },
+  requestId: string
+): void;
+
+export function issueAccessSession(
+  request: {
+    headers?: Record<string, string | string[] | undefined>;
+  },
+  context: { accessToken: string; projectId: string },
+  shareId: string,
+  verifiedPolicyVersion: number,
+  identity: {
+    authorUid: string;
+    challenge: Record<string, unknown> | null;
+    displayName: string;
+    identityHash: string;
+    identityType: string;
+  },
+  browserBindingHash: string,
+  attemptHash: string,
+  requestId: string
+): Promise<{
+  csrfToken: string;
+  expiresAt: string;
+  policy: Record<string, unknown>;
+  sessionToken: string;
+}>;
+
+export function resolveAccessIdentity(
+  request: {
+    headers?: Record<string, string | string[] | undefined>;
+  },
+  context: { accessToken: string; projectId: string },
+  shareId: string,
+  policy: Record<string, unknown>,
+  body: Record<string, unknown>,
+  otpVerificationTiming?: {
+    now?: () => number;
+    random?: (minimum: number, maximum: number) => number;
+    wait?: (milliseconds: number) => Promise<unknown>;
+  }
+): Promise<{
+  authorUid: string;
+  caller: Record<string, unknown> | null;
+  challenge: Record<string, unknown> | null;
+  displayName: string;
+  identityHash: string;
+  identityType: string;
+}>;
+
+export function readJsonBody(
+  request: {
+    body?: unknown;
+    headers?: Record<string, string | string[] | undefined>;
+    [Symbol.asyncIterator]?: () => AsyncIterator<unknown>;
+  },
+  maximumBytes?: number
+): Promise<Record<string, unknown>>;
+
+export function signedOpaqueToken(
+  payload: Record<string, unknown>,
+  purpose: string,
+  ttlSeconds: number,
+  secret?: string
+): string;
+
+export function verifySignedOpaqueToken(
+  token: string,
+  purpose: string,
+  secret?: string,
+  nowSeconds?: number
+): Record<string, unknown> | null;
+
+export function secureShareEmailReadiness(): {
+  ready: boolean;
+  v2Enabled: boolean;
+  featureEnabled: boolean;
+  providerConfigured: boolean;
+};
+
+export function verificationEmailText(code: string, ttlSeconds: number): string;
+
+export function createResendEmailAdapter(
+  request?: typeof fetch,
+  wait?: (milliseconds: number) => Promise<unknown>
+): {
+  healthCheck(input: {
+    from: string;
+    idempotencyKey: string;
+    to: string;
+  }): Promise<boolean>;
+  send(input: {
+    from: string;
+    idempotencyKey: string;
+    text: string;
+    to: string;
+  }): Promise<boolean>;
+};
+
+declare function handler(
+  request: {
+    body?: unknown;
+    headers?: Record<string, string | string[] | undefined>;
+    method?: string;
+    url?: string;
+  },
+  response: {
+    destroyed?: boolean;
+    headersSent?: boolean;
+    statusCode?: number;
+    destroy?(): void;
+    end(value?: unknown): void;
+    setHeader(name: string, value: string | string[]): void;
+  }
+): Promise<void>;
+export default handler;

@@ -19,6 +19,38 @@ const attachmentCleanupBatchSize = 20;
 const historyCleanupBatchSize = 50;
 const participantNoteCleanupBatchSize = 50;
 const managedUserAttachmentDeleteBudget = 20;
+const secureShareRootStateCollections = [
+  {
+    collectionId: "publicShareAccessSessions",
+    counterName: "secureShareAccessSessionsDeleted"
+  },
+  {
+    collectionId: "publicShareEmailChallenges",
+    counterName: "secureShareEmailChallengesDeleted"
+  },
+  {
+    collectionId: "publicShareUnlockGrants",
+    counterName: "secureShareUnlockGrantsDeleted"
+  },
+  {
+    collectionId: "publicShareRateLimits",
+    counterName: "secureShareRateLimitsDeleted"
+  }
+];
+const secureShareChildStateCollections = [
+  {
+    counterName: "secureShareRecipientsDeleted",
+    parentCollectionId: "publicShareRecipients"
+  },
+  {
+    counterName: "secureShareCommentsDeleted",
+    parentCollectionId: "publicShareComments"
+  },
+  {
+    counterName: "secureShareAuditEventsDeleted",
+    parentCollectionId: "publicShareAuditEvents"
+  }
+];
 const identityToolkitAccountMethods = {
   delete: "accounts:delete"
 };
@@ -648,6 +680,81 @@ async function queryOwnedNoteFolders(projectId, ownerUid, accessToken) {
 
 async function queryOwnedPublicShares(projectId, ownerUid, accessToken) {
   return queryDocumentsByStringField(projectId, "publicNoteShares", "ownerUid", ownerUid, accessToken);
+}
+
+async function queryOwnedSecureSharePolicies(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(
+    projectId,
+    "publicSharePolicies",
+    "ownerUid",
+    ownerUid,
+    accessToken,
+    {
+      selectFieldPaths: ["__name__", "shareId", "ownerUid"]
+    }
+  );
+}
+
+async function querySecureShareRootStateByShareId(
+  projectId,
+  collectionId,
+  shareId,
+  accessToken
+) {
+  return queryDocumentsByStringField(
+    projectId,
+    collectionId,
+    "shareId",
+    shareId,
+    accessToken
+  );
+}
+
+async function queryOwnedSecureShareRootState(
+  projectId,
+  collectionId,
+  ownerUid,
+  accessToken
+) {
+  return queryDocumentsByStringField(
+    projectId,
+    collectionId,
+    "ownerUid",
+    ownerUid,
+    accessToken
+  );
+}
+
+async function queryOwnedSecureShareContainers(
+  projectId,
+  collectionId,
+  ownerUid,
+  accessToken
+) {
+  return queryDocumentsByStringField(
+    projectId,
+    collectionId,
+    "ownerUid",
+    ownerUid,
+    accessToken,
+    {
+      selectFieldPaths: ["__name__", "shareId", "ownerUid"]
+    }
+  );
+}
+
+async function queryOwnedSecureShareItems(projectId, ownerUid, accessToken) {
+  return queryDocumentsByStringField(
+    projectId,
+    "items",
+    "ownerUid",
+    ownerUid,
+    accessToken,
+    {
+      allDescendants: true,
+      selectFieldPaths: ["__name__", "shareId", "ownerUid"]
+    }
+  );
 }
 
 async function queryParticipantNotes(projectId, uid, accessToken) {
@@ -1478,6 +1585,111 @@ function cleanupAttachmentQueueNameFromAttachmentName(projectId, attachmentName)
   );
 }
 
+function publicShareIdFromShareName(projectId, shareName) {
+  const prefix = `${documentNameForPath(projectId, "publicNoteShares")}/`;
+  const shareId = typeof shareName === "string" && shareName.startsWith(prefix)
+    ? shareName.slice(prefix.length)
+    : "";
+
+  return shareId && !shareId.includes("/") ? shareId : "";
+}
+
+function secureShareItemState(projectId, documentName) {
+  const segments = documentPathFromName(projectId, documentName).split("/");
+
+  if (segments.length !== 4 || segments[2] !== "items" || !segments[1] || !segments[3]) {
+    return null;
+  }
+
+  const definition = secureShareChildStateCollections.find(
+    (candidate) => candidate.parentCollectionId === segments[0]
+  );
+
+  return definition
+    ? { counterName: definition.counterName, shareId: segments[1] }
+    : null;
+}
+
+async function deleteSecureShareDirectDocument(
+  projectId,
+  documentPath,
+  accessToken,
+  stats,
+  counterName
+) {
+  const documentName = documentNameForPath(projectId, documentPath);
+  const document = await firestoreGetByName(
+    projectId,
+    documentName,
+    accessToken,
+    ["shareId"]
+  );
+
+  if (!document) {
+    return 0;
+  }
+
+  return deleteProjectedDocumentForStat(document, accessToken, stats, counterName);
+}
+
+async function deleteSecureShareStateByShareId(
+  projectId,
+  shareId,
+  accessToken,
+  stats
+) {
+  if (!shareId || shareId.includes("/")) {
+    throw new ManagedUserCleanupInProgressError("Invalid secure share cleanup scope");
+  }
+
+  for (const definition of secureShareRootStateCollections) {
+    await deleteRepeatedQueryDocuments(
+      () => querySecureShareRootStateByShareId(
+        projectId,
+        definition.collectionId,
+        shareId,
+        accessToken
+      ),
+      accessToken,
+      stats,
+      definition.counterName,
+      `Too many ${definition.collectionId} documents to delete in one request`
+    );
+  }
+
+  for (const definition of secureShareChildStateCollections) {
+    await deleteChildDocumentsRepeatedly({
+      accessToken,
+      collectionId: "items",
+      counterName: definition.counterName,
+      errorMessage: `Too many ${definition.parentCollectionId} items to delete in one request`,
+      parentName: documentNameForPath(
+        projectId,
+        `${definition.parentCollectionId}/${shareId}`
+      ),
+      stats
+    });
+  }
+
+  for (const definition of secureShareChildStateCollections) {
+    await deleteSecureShareDirectDocument(
+      projectId,
+      `${definition.parentCollectionId}/${shareId}`,
+      accessToken,
+      stats,
+      "secureShareContainersDeleted"
+    );
+  }
+
+  await deleteSecureShareDirectDocument(
+    projectId,
+    `publicSharePolicies/${shareId}`,
+    accessToken,
+    stats,
+    "secureSharePoliciesDeleted"
+  );
+}
+
 async function finalizePublicShareTreeDeletion(projectId, shareName, cleanupQueueName, accessToken, stats) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const [share, cleanupQueue] = await Promise.all([
@@ -1521,6 +1733,11 @@ async function finalizePublicShareTreeDeletion(projectId, shareName, cleanupQueu
 
 async function deletePublicShareTreeByName(projectId, shareName, accessToken, storageBucket, stats) {
   const cleanupQueueName = cleanupQueueNameFromShareName(shareName);
+  const shareId = publicShareIdFromShareName(projectId, shareName);
+
+  if (!shareId) {
+    throw new ManagedUserCleanupInProgressError("Invalid public share cleanup scope");
+  }
 
   await deleteChildAttachmentsRepeatedly({
     accessToken,
@@ -1553,6 +1770,17 @@ async function deletePublicShareTreeByName(projectId, shareName, accessToken, st
     throw new Error("Public share attachment cleanup did not reach an empty child collection");
   }
 
+  const shareMetadata = await firestoreGetByName(
+    projectId,
+    shareName,
+    accessToken,
+    ["schemaVersion"]
+  );
+
+  if (!shareMetadata || integerField(shareMetadata, "schemaVersion") >= 2) {
+    await deleteSecureShareStateByShareId(projectId, shareId, accessToken, stats);
+  }
+
   await finalizePublicShareTreeDeletion(projectId, shareName, cleanupQueueName, accessToken, stats);
 }
 
@@ -1577,6 +1805,187 @@ async function deleteOwnedPublicShares(projectId, ownerUid, accessToken, storage
   }
 
   throw new ManagedUserCleanupInProgressError("Too many public shares to delete in one request");
+}
+
+async function deleteOwnedSecureShareScope(
+  projectId,
+  shareId,
+  ownerUid,
+  accessToken,
+  storageBucket,
+  stats
+) {
+  const shareName = documentNameForPath(projectId, `publicNoteShares/${shareId}`);
+  const share = await firestoreGetByName(
+    projectId,
+    shareName,
+    accessToken,
+    ["ownerUid"]
+  );
+
+  if (share && stringField(share, "ownerUid") !== ownerUid) {
+    throw new ManagedUserCleanupInProgressError("Secure share ownership changed during cleanup");
+  }
+
+  if (share) {
+    await deletePublicShareTreeByName(
+      projectId,
+      shareName,
+      accessToken,
+      storageBucket,
+      stats
+    );
+  }
+
+  await deleteSecureShareStateByShareId(projectId, shareId, accessToken, stats);
+}
+
+async function deleteOwnedSecureSharePolicies(
+  projectId,
+  ownerUid,
+  accessToken,
+  storageBucket,
+  stats
+) {
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const policies = await queryOwnedSecureSharePolicies(projectId, ownerUid, accessToken);
+
+    if (policies.length === 0) {
+      return;
+    }
+
+    for (const policy of policies) {
+      const shareId = documentIdFromName(policy.name);
+      const storedShareId = stringField(policy, "shareId");
+
+      if (!shareId || shareId.includes("/") || (storedShareId && storedShareId !== shareId)) {
+        throw new ManagedUserCleanupInProgressError("Invalid owner-scoped secure share policy");
+      }
+
+      await deleteOwnedSecureShareScope(
+        projectId,
+        shareId,
+        ownerUid,
+        accessToken,
+        storageBucket,
+        stats
+      );
+    }
+
+    if (policies.length < managedUserDeleteQueryLimit) {
+      return;
+    }
+  }
+
+  throw new ManagedUserCleanupInProgressError(
+    "Too many secure share policies to delete in one request"
+  );
+}
+
+async function deleteOwnedSecureShareContainers(
+  projectId,
+  ownerUid,
+  accessToken,
+  storageBucket,
+  stats
+) {
+  for (const definition of secureShareChildStateCollections) {
+    for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+      const containers = await queryOwnedSecureShareContainers(
+        projectId,
+        definition.parentCollectionId,
+        ownerUid,
+        accessToken
+      );
+
+      if (containers.length === 0) {
+        break;
+      }
+
+      for (const container of containers) {
+        const shareId = documentIdFromName(container.name);
+        const storedShareId = stringField(container, "shareId");
+
+        if (!shareId || shareId.includes("/") || (storedShareId && storedShareId !== shareId)) {
+          throw new ManagedUserCleanupInProgressError("Invalid owner-scoped secure share container");
+        }
+
+        await deleteOwnedSecureShareScope(
+          projectId,
+          shareId,
+          ownerUid,
+          accessToken,
+          storageBucket,
+          stats
+        );
+      }
+
+      if (containers.length < managedUserDeleteQueryLimit) {
+        break;
+      }
+
+      if (iteration === maxManagedUserDeleteIterations - 1) {
+        throw new ManagedUserCleanupInProgressError(
+          `Too many ${definition.parentCollectionId} containers to delete in one request`
+        );
+      }
+    }
+  }
+}
+
+async function deleteOwnedSecureShareOrphanState(projectId, ownerUid, accessToken, stats) {
+  for (const definition of secureShareRootStateCollections) {
+    await deleteRepeatedQueryDocuments(
+      () => queryOwnedSecureShareRootState(
+        projectId,
+        definition.collectionId,
+        ownerUid,
+        accessToken
+      ),
+      accessToken,
+      stats,
+      definition.counterName,
+      `Too many owner-scoped ${definition.collectionId} documents to delete in one request`
+    );
+  }
+
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const items = await queryOwnedSecureShareItems(projectId, ownerUid, accessToken);
+    const itemsByCounter = new Map();
+
+    for (const item of items) {
+      const state = secureShareItemState(projectId, item.name);
+
+      if (!state) {
+        continue;
+      }
+
+      const names = itemsByCounter.get(state.counterName) ?? [];
+      names.push(item.name);
+      itemsByCounter.set(state.counterName, names);
+    }
+
+    if (itemsByCounter.size === 0) {
+      return;
+    }
+
+    for (const [counterName, documentNames] of itemsByCounter) {
+      await deleteDocumentNamesForStat(
+        documentNames,
+        accessToken,
+        stats,
+        counterName
+      );
+    }
+
+    if (items.length < managedUserDeleteQueryLimit) {
+      return;
+    }
+  }
+
+  throw new ManagedUserCleanupInProgressError(
+    "Too many owner-scoped secure share items to delete in one request"
+  );
 }
 
 async function deletePublicSharesForOwnedNote(projectId, noteId, accessToken, storageBucket, stats) {
@@ -1988,6 +2397,15 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
     recurringHabitCheckInsDeleted: 0,
     recurringHabitsDeleted: 0,
     scheduleTasksDeleted: 0,
+    secureShareAccessSessionsDeleted: 0,
+    secureShareAuditEventsDeleted: 0,
+    secureShareCommentsDeleted: 0,
+    secureShareContainersDeleted: 0,
+    secureShareEmailChallengesDeleted: 0,
+    secureSharePoliciesDeleted: 0,
+    secureShareRateLimitsDeleted: 0,
+    secureShareRecipientsDeleted: 0,
+    secureShareUnlockGrantsDeleted: 0,
     shareTargetReferencesRemoved: 0,
     sharedNoteMembershipsRemoved: 0,
     storageObjectsDeleted: 0,
@@ -2004,6 +2422,21 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
 
   await removeDeletedUserFromShareTargets(projectId, targetUid, accessToken, stats);
   await deleteOwnedPublicShares(projectId, targetUid, accessToken, storageBucket, stats);
+  await deleteOwnedSecureSharePolicies(
+    projectId,
+    targetUid,
+    accessToken,
+    storageBucket,
+    stats
+  );
+  await deleteOwnedSecureShareContainers(
+    projectId,
+    targetUid,
+    accessToken,
+    storageBucket,
+    stats
+  );
+  await deleteOwnedSecureShareOrphanState(projectId, targetUid, accessToken, stats);
   await deleteOwnedLibraryItems(projectId, targetUid, accessToken, stats);
   await deleteOwnedLibraryVault(projectId, targetUid, accessToken, stats);
   await deleteOwnedNotes(projectId, targetUid, accessToken, storageBucket, stats);

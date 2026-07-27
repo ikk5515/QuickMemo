@@ -185,6 +185,16 @@ service cloud.firestore {
         "revision",
         "lastMutationId",
         "attachmentRevision",
+        "secureShareCopyState",
+        "secureShareCopyJobId",
+        "secureShareCopyExpectedAttachmentCount",
+        "secureShareCopyReservedAttachmentCount",
+        "secureShareCopyReadyAttachmentCount",
+        "secureShareCopyStartedAt",
+        "secureShareCopyUpdatedAt",
+        "secureShareCopyFinishedAt",
+        "secureShareCopyCleanupClaimId",
+        "secureShareCopyCleanupClaimedAt",
         "isDeleted",
         "deletedAt",
         "deletedBy",
@@ -210,6 +220,62 @@ service cloud.firestore {
       && validNoteAttachmentRevision(data)
       && validDeleteMetadata(data)
       && validPurgeMetadata(data);
+    }
+
+    function secureShareCopyMetadataAbsent(data) {
+      return !data.keys().hasAny([
+        "secureShareCopyState",
+        "secureShareCopyJobId",
+        "secureShareCopyExpectedAttachmentCount",
+        "secureShareCopyReservedAttachmentCount",
+        "secureShareCopyReadyAttachmentCount",
+        "secureShareCopyStartedAt",
+        "secureShareCopyUpdatedAt",
+        "secureShareCopyFinishedAt",
+        "secureShareCopyCleanupClaimId",
+        "secureShareCopyCleanupClaimedAt"
+      ]);
+    }
+
+    function secureShareCopyCreate(data) {
+      return data.keys().hasAll([
+          "secureShareCopyState",
+          "secureShareCopyJobId",
+          "secureShareCopyExpectedAttachmentCount",
+          "secureShareCopyReservedAttachmentCount",
+          "secureShareCopyReadyAttachmentCount",
+          "secureShareCopyStartedAt",
+          "secureShareCopyUpdatedAt"
+        ])
+        && !data.keys().hasAny([
+          "secureShareCopyFinishedAt",
+          "secureShareCopyCleanupClaimId",
+          "secureShareCopyCleanupClaimedAt"
+        ])
+        && data.type == "personal"
+        && data.participantUids == [data.ownerUid]
+        && data.secureShareCopyState == "copying"
+        && data.secureShareCopyJobId is string
+        && data.secureShareCopyJobId.matches("^[A-Za-z0-9_-]{16,160}$")
+        && data.secureShareCopyExpectedAttachmentCount is int
+        && data.secureShareCopyExpectedAttachmentCount >= 0
+        && data.secureShareCopyExpectedAttachmentCount <= 100
+        && data.secureShareCopyReservedAttachmentCount == 0
+        && data.secureShareCopyReadyAttachmentCount == 0
+        && data.secureShareCopyStartedAt == request.time
+        && data.secureShareCopyUpdatedAt == request.time;
+    }
+
+    function secureShareCopyUsable(data) {
+      return secureShareCopyMetadataAbsent(data)
+        || data.secureShareCopyState == "active";
+    }
+
+    function secureShareCopyStateChangeRequested() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        "secureShareCopyState",
+        "secureShareCopyFinishedAt"
+      ]);
     }
 
     function validNoteAttachmentRevision(data) {
@@ -1852,6 +1918,7 @@ service cloud.firestore {
           "isDeleted"
         ])
         && request.auth.uid in data.participantUids
+        && secureShareCopyUsable(resource.data)
         && !noteDeleted(resource.data)
         && !noteDeleted(data)
         && data.type == resource.data.type
@@ -1877,6 +1944,7 @@ service cloud.firestore {
           "isDeleted"
         ])
         && request.auth.uid == resource.data.ownerUid
+        && secureShareCopyUsable(resource.data)
         && resource.data.type == "personal"
         && data.type == "personal"
         && !noteDeleted(resource.data)
@@ -1914,6 +1982,7 @@ service cloud.firestore {
           "isDeleted"
         ])
         && request.auth.uid == resource.data.ownerUid
+        && secureShareCopyUsable(resource.data)
         && !noteDeleted(resource.data)
         && !noteDeleted(data)
         && request.auth.uid in data.participantUids
@@ -1938,6 +2007,7 @@ service cloud.firestore {
           "lastMutationId"
         ])
         && !noteDeleted(resource.data)
+        && secureShareCopyUsable(resource.data)
         && canManageNoteAfterFeatureGate(resource.data)
         && data.isDeleted == true
         && data.deletedAt == request.time
@@ -1960,12 +2030,84 @@ service cloud.firestore {
           "lastMutationId"
         ])
         && noteDeleted(resource.data)
+        && secureShareCopyUsable(resource.data)
         && canManageNoteAfterFeatureGate(resource.data)
         && !notePurged(resource.data)
         && data.isDeleted == false
         && !data.keys().hasAny(["deletedAt", "deletedBy"])
         && data.updatedBy == request.auth.uid
         && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validNote(data);
+    }
+
+    function secureShareCopyActivateUpdate(data) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "secureShareCopyState",
+          "secureShareCopyUpdatedAt",
+          "secureShareCopyFinishedAt",
+          "updatedAt",
+          "updatedBy",
+          "savedAt"
+        ])
+        && activeSignedInUserHasNotes()
+        && request.auth.uid == resource.data.ownerUid
+        && !resource.data.keys().hasAny([
+          "secureShareCopyCleanupClaimId",
+          "secureShareCopyCleanupClaimedAt"
+        ])
+        && resource.data.secureShareCopyState == "copying"
+        && data.secureShareCopyState == "active"
+        && data.secureShareCopyJobId == resource.data.secureShareCopyJobId
+        && data.secureShareCopyExpectedAttachmentCount == resource.data.secureShareCopyExpectedAttachmentCount
+        && data.secureShareCopyReservedAttachmentCount == resource.data.secureShareCopyReservedAttachmentCount
+        && data.secureShareCopyReadyAttachmentCount == resource.data.secureShareCopyReadyAttachmentCount
+        && data.secureShareCopyStartedAt == resource.data.secureShareCopyStartedAt
+        && data.secureShareCopyReservedAttachmentCount == data.secureShareCopyExpectedAttachmentCount
+        && data.secureShareCopyReadyAttachmentCount == data.secureShareCopyExpectedAttachmentCount
+        && data.secureShareCopyUpdatedAt == request.time
+        && data.secureShareCopyFinishedAt == request.time
+        && data.updatedAt == request.time
+        && data.savedAt == request.time
+        && data.updatedBy == request.auth.uid
+        && noteRevisionIsPreserved(data)
+        && validNote(data);
+    }
+
+    function secureShareCopyAbortUpdate(noteId, data) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "isDeleted",
+          "deletedAt",
+          "deletedBy",
+          "secureShareCopyState",
+          "secureShareCopyUpdatedAt",
+          "secureShareCopyFinishedAt",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ])
+        && activeSignedInUserHasNotes()
+        && request.auth.uid == resource.data.ownerUid
+        && !resource.data.keys().hasAny([
+          "secureShareCopyCleanupClaimId",
+          "secureShareCopyCleanupClaimedAt"
+        ])
+        && resource.data.secureShareCopyState == "copying"
+        && data.secureShareCopyState == "aborted"
+        && data.secureShareCopyJobId == resource.data.secureShareCopyJobId
+        && data.secureShareCopyExpectedAttachmentCount == resource.data.secureShareCopyExpectedAttachmentCount
+        && data.secureShareCopyReservedAttachmentCount == 0
+        && data.secureShareCopyReadyAttachmentCount == 0
+        && data.secureShareCopyStartedAt == resource.data.secureShareCopyStartedAt
+        && data.isDeleted == true
+        && data.deletedAt == request.time
+        && data.deletedBy == request.auth.uid
+        && data.secureShareCopyUpdatedAt == request.time
+        && data.secureShareCopyFinishedAt == request.time
+        && data.updatedAt == request.time
+        && data.updatedBy == request.auth.uid
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
         && validNote(data);
@@ -2057,6 +2199,7 @@ service cloud.firestore {
     function canReadNote(data) {
       return noteActive(data)
         && !notePurged(data)
+        && secureShareCopyUsable(data)
         && (
           adminUser()
           || (
@@ -2072,6 +2215,19 @@ service cloud.firestore {
         );
     }
 
+    function canReadSecureShareCopyNote(data) {
+      return !secureShareCopyMetadataAbsent(data)
+        && data.secureShareCopyState in ["copying", "aborted"]
+        && !notePurged(data)
+        && (
+          adminUser()
+          || (
+            activeSignedInUserHasNotes()
+            && data.ownerUid == request.auth.uid
+          )
+        );
+    }
+
     function canReadDeletedNote(data) {
       return noteDeleted(data)
         && !notePurged(data)
@@ -2079,7 +2235,9 @@ service cloud.firestore {
     }
 
     function canReadNoteDocument(data) {
-      return canReadNote(data) || canReadDeletedNote(data);
+      return canReadNote(data)
+        || canReadDeletedNote(data)
+        || canReadSecureShareCopyNote(data);
     }
 
     function canListNoteDocument(data) {
@@ -2091,7 +2249,8 @@ service cloud.firestore {
             || data.ownerUid == request.auth.uid
           )
         )
-        || canReadDeletedNote(data);
+        || canReadDeletedNote(data)
+        || canReadSecureShareCopyNote(data);
     }
 
     function canDeleteNote(data) {
@@ -2121,6 +2280,11 @@ service cloud.firestore {
       return !data.keys().hasAny(["revokedAt", "revokedBy"]);
     }
 
+    function securePublicShareV2(data) {
+      return data.keys().hasAny(["schemaVersion"])
+        && data.schemaVersion == 2;
+    }
+
     function publicShareSourceAvailable(data) {
       let sourcePath = notePath(data.sourceNoteId);
       let sourceNote = get(sourcePath).data;
@@ -2148,7 +2312,8 @@ service cloud.firestore {
     }
 
     function publicShareActive(data) {
-      return data.ready == true
+      return !securePublicShareV2(data)
+        && data.ready == true
         && publicShareNotRevoked(data)
         && data.expiresAt > request.time
         && validPublicSharePassword(data)
@@ -2661,6 +2826,10 @@ service cloud.firestore {
         && request.resource.data.savedAt == request.time
         && request.resource.data.revision == 1
         && pairedNoteHistoryCreated(noteId, request.resource.data)
+        && (
+          secureShareCopyMetadataAbsent(request.resource.data)
+          || secureShareCopyCreate(request.resource.data)
+        )
         && allowedShareTargets(request.resource.data)
         && validAssignedFolder(request.resource.data);
       allow update: if activeSignedInUserHasNotes()
@@ -2669,12 +2838,24 @@ service cloud.firestore {
           || (
             !notePurgeRequested()
             && (
-              noteContentUpdate(noteId, request.resource.data)
-              || noteFolderUpdate(request.resource.data)
-              || (ownerAccessUpdate(noteId, request.resource.data) && allowedShareTargets(request.resource.data))
-              || (legacyActiveDeleteMetadataMigration(request.resource.data) && validNote(request.resource.data))
-              || noteSoftDeleteUpdate(noteId, request.resource.data)
-              || noteRestoreUpdate(noteId, request.resource.data)
+              (
+                secureShareCopyStateChangeRequested()
+                && (
+                  secureShareCopyActivateUpdate(request.resource.data)
+                  || secureShareCopyAbortUpdate(noteId, request.resource.data)
+                )
+              )
+              || (
+                !secureShareCopyStateChangeRequested()
+                && (
+                  noteContentUpdate(noteId, request.resource.data)
+                  || noteFolderUpdate(request.resource.data)
+                  || (ownerAccessUpdate(noteId, request.resource.data) && allowedShareTargets(request.resource.data))
+                  || (legacyActiveDeleteMetadataMigration(request.resource.data) && validNote(request.resource.data))
+                  || noteSoftDeleteUpdate(noteId, request.resource.data)
+                  || noteRestoreUpdate(noteId, request.resource.data)
+                )
+              )
             )
           )
         );
@@ -2698,6 +2879,7 @@ service cloud.firestore {
         allow read: if exists(notePath(noteId))
           && (
             canReadNote(get(notePath(noteId)).data)
+            || canReadSecureShareCopyNote(get(notePath(noteId)).data)
             || canReadDeletedNote(get(notePath(noteId)).data)
           );
         allow create, update, delete: if false;
@@ -2730,7 +2912,8 @@ service cloud.firestore {
           || (publicSharePasswordUpdate(request.resource.data) && validPublicShare(request.resource.data))
           || (publicShareContentUpdate(request.resource.data) && validPublicShare(request.resource.data))
         );
-      allow delete: if publicShareOwner(resource.data);
+      allow delete: if !securePublicShareV2(resource.data)
+        && publicShareOwner(resource.data);
 
       match /attachments/{attachmentId} {
         allow read: if exists(publicSharePath(shareId))
@@ -2745,6 +2928,38 @@ service cloud.firestore {
           && resource.data.privacyVersion == 1;
         allow create, update, delete: if false;
       }
+    }
+
+    match /publicSharePolicies/{shareId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareRecipients/{shareId}/items/{recipientId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareAccessSessions/{sessionId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareEmailChallenges/{challengeId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareUnlockGrants/{grantId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareRateLimits/{bucketId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareComments/{shareId}/items/{commentId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareAuditEvents/{shareId}/items/{eventId} {
+      allow read, write: if false;
     }
 
     match /publicShareCleanupQueue/{shareId} {

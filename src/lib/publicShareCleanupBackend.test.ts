@@ -3,9 +3,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   backfillLegacyNoteDeletionMetadata,
+  beginAttachmentDeletionByName,
   googleCalendarOAuthStateCleanupBatchLimit,
+  queryExpiredSecureShareDocuments,
   queryExpiredGoogleCalendarOAuthStates,
-  queryLegacyNoteDeletionPage
+  queryLegacyNoteDeletionPage,
+  querySecureShareDocumentsByShareId
 } from "../../api/cleanup-public-shares.js";
 
 interface VercelConfig {
@@ -20,7 +23,22 @@ interface VercelConfig {
   }>;
 }
 
+interface FirestoreIndexes {
+  indexes?: Array<{
+    collectionGroup?: string;
+    fields?: Array<{
+      arrayConfig?: string;
+      fieldPath?: string;
+      order?: string;
+    }>;
+    queryScope?: string;
+  }>;
+}
+
 const vercelConfig = JSON.parse(readFileSync(join(process.cwd(), "vercel.json"), "utf8")) as VercelConfig;
+const firestoreIndexes = JSON.parse(
+  readFileSync(join(process.cwd(), "firestore.indexes.json"), "utf8")
+) as FirestoreIndexes;
 const cleanupFunctionSource = readFileSync(join(process.cwd(), "api/cleanup-public-shares.js"), "utf8");
 
 describe("public share backend cleanup", () => {
@@ -131,6 +149,80 @@ describe("public share backend cleanup", () => {
       },
       orderBy: [{ field: { fieldPath: "expiresAt" }, direction: "ASCENDING" }],
       limit: 37
+    });
+  });
+
+  it("queries secure share root state by share id without loading sensitive fields", async () => {
+    const sessionName = "projects/test-project/databases/(default)/documents/publicShareAccessSessions/session-1";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ document: { name: sessionName } }]
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(querySecureShareDocumentsByShareId({
+      accessToken: "test-access-token",
+      collectionId: "publicShareAccessSessions",
+      limit: 23,
+      projectId: "test-project",
+      shareId: "share-1"
+    })).resolves.toEqual([{ name: sessionName }]);
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.structuredQuery).toEqual({
+      select: { fields: [{ fieldPath: "__name__" }] },
+      from: [{ collectionId: "publicShareAccessSessions" }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: "shareId" },
+          op: "EQUAL",
+          value: { stringValue: "share-1" }
+        }
+      },
+      limit: 23
+    });
+    expect(String(init.body)).not.toContain("identityHash");
+    expect(String(init.body)).not.toContain("emailHash");
+  });
+
+  it("queries bounded nested secure-share retention by retention timestamp", async () => {
+    const auditName = "projects/test-project/databases/(default)/documents/publicShareAuditEvents/share-1/items/audit-1";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ document: { name: auditName } }]
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(queryExpiredSecureShareDocuments({
+      accessToken: "test-access-token",
+      allDescendants: true,
+      collectionId: "items",
+      fieldPath: "retentionExpiresAt",
+      limit: 19,
+      nowIso: "2026-07-28T00:00:00.000Z",
+      projectId: "test-project"
+    })).resolves.toEqual([{ name: auditName }]);
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.structuredQuery).toEqual({
+      select: { fields: [{ fieldPath: "__name__" }] },
+      from: [{ collectionId: "items", allDescendants: true }],
+      where: {
+        fieldFilter: {
+          field: { fieldPath: "retentionExpiresAt" },
+          op: "LESS_THAN_OR_EQUAL",
+          value: { timestampValue: "2026-07-28T00:00:00.000Z" }
+        }
+      },
+      orderBy: [
+        {
+          field: { fieldPath: "retentionExpiresAt" },
+          direction: "ASCENDING"
+        }
+      ],
+      limit: 19
     });
   });
 
@@ -372,6 +464,38 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain(":commit");
   });
 
+  it("bounds the server-side stale secure-share copy reaper and keeps its query indexed", () => {
+    const reaperSource = cleanupFunctionSource.match(
+      /async function queryStaleSecureShareCopyJobs[\s\S]*?async function deletePublicShareTreeByName/u
+    )?.[0] ?? "";
+
+    expect(cleanupFunctionSource).toContain("const secureShareCopyCleanupBatchLimit = 20");
+    expect(cleanupFunctionSource).toContain("const secureShareCopyCleanupAttachmentDeleteLimit = 100");
+    expect(reaperSource).toContain('{ fieldPath: "secureShareCopyState" }');
+    expect(reaperSource).toContain('{ fieldPath: "secureShareCopyUpdatedAt" }');
+    expect(reaperSource).toContain("currentDocument: { updateTime: note.updateTime }");
+    expect(reaperSource).toContain("claimStaleSecureShareCopyJob");
+    expect(reaperSource).toContain("secureShareCopyCleanupClaimIdField");
+    expect(reaperSource).toContain("exactSecureShareCopyCleanupClaim");
+    expect(reaperSource).toContain("requiredCopyJobId");
+    expect(reaperSource).toContain("requiredCleanupClaimId");
+    expect(reaperSource).toContain("staleSecureShareCopyJobsRetained");
+    expect(firestoreIndexes.indexes).toContainEqual({
+      collectionGroup: "notes",
+      queryScope: "COLLECTION",
+      fields: [
+        {
+          fieldPath: "secureShareCopyState",
+          order: "ASCENDING"
+        },
+        {
+          fieldPath: "secureShareCopyUpdatedAt",
+          order: "ASCENDING"
+        }
+      ]
+    });
+  });
+
   it("claims attachment metadata and quota in one preconditioned commit", () => {
     const claimSource = cleanupFunctionSource.match(
       /async function claimAttachmentDeletionByName[\s\S]*?async function deleteAttachmentObjects/u
@@ -383,6 +507,226 @@ describe("public share backend cleanup", () => {
     expect(claimSource).toContain('quotaReserved: hasField(attachment, "quotaReserved")');
     expect(claimSource).toContain('stringField(attachment, "storageProvider") === "vercel-blob"');
     expect(cleanupFunctionSource).toContain("countPolicyVersion");
+  });
+
+  it("atomically releases a matching copying-note reservation when cleanup claims the attachment", async () => {
+    const projectId = "test-project";
+    const documentRoot = `projects/${projectId}/databases/(default)/documents`;
+    const noteName = `${documentRoot}/notes/note-copy-a`;
+    const attachmentName = `${noteName}/attachments/attachment-a`;
+    const attachment = {
+      name: attachmentName,
+      fields: {
+        isReady: { booleanValue: false },
+        secureShareCopyJobId: { stringValue: "copy_job_1234567890" }
+      },
+      updateTime: "2026-07-28T01:00:00.000Z"
+    };
+    const note = {
+      name: noteName,
+      fields: {
+        secureShareCopyState: { stringValue: "copying" },
+        secureShareCopyJobId: { stringValue: "copy_job_1234567890" },
+        secureShareCopyExpectedAttachmentCount: { integerValue: "2" },
+        secureShareCopyReservedAttachmentCount: { integerValue: "2" },
+        secureShareCopyReadyAttachmentCount: { integerValue: "1" }
+      },
+      updateTime: "2026-07-28T01:00:01.000Z"
+    };
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+
+      if (init?.method === "POST") {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (url.endsWith(attachmentName)) {
+        return { ok: true, json: async () => attachment };
+      }
+      if (url.endsWith(noteName)) {
+        return { ok: true, json: async () => note };
+      }
+      throw new Error(`Unexpected cleanup request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(beginAttachmentDeletionByName(
+      projectId,
+      attachmentName,
+      "test-access-token"
+    )).resolves.toEqual(attachment);
+
+    const commitCall = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    const commitBody = JSON.parse(String(commitCall?.[1]?.body));
+    expect(commitBody.writes).toHaveLength(2);
+    expect(commitBody.writes[0]).toMatchObject({
+      update: {
+        name: attachmentName,
+        fields: { deletionStarted: { booleanValue: true } }
+      },
+      currentDocument: { updateTime: attachment.updateTime }
+    });
+    expect(commitBody.writes[1]).toEqual({
+      update: {
+        name: noteName,
+        fields: {
+          secureShareCopyReservedAttachmentCount: { integerValue: "1" }
+        }
+      },
+      updateMask: {
+        fieldPaths: ["secureShareCopyReservedAttachmentCount"]
+      },
+      currentDocument: { updateTime: note.updateTime },
+      updateTransforms: [{
+        fieldPath: "secureShareCopyUpdatedAt",
+        setToServerValue: "REQUEST_TIME"
+      }]
+    });
+  });
+
+  it("does not decrement a current copying note for an attachment from another job", async () => {
+    const projectId = "test-project";
+    const documentRoot = `projects/${projectId}/databases/(default)/documents`;
+    const noteName = `${documentRoot}/notes/note-copy-b`;
+    const attachmentName = `${noteName}/attachments/attachment-b`;
+    const attachment = {
+      name: attachmentName,
+      fields: {
+        isReady: { booleanValue: false },
+        secureShareCopyJobId: { stringValue: "copy_job_old_12345678" }
+      },
+      updateTime: "2026-07-28T02:00:00.000Z"
+    };
+    const note = {
+      name: noteName,
+      fields: {
+        secureShareCopyState: { stringValue: "copying" },
+        secureShareCopyJobId: { stringValue: "copy_job_new_12345678" },
+        secureShareCopyExpectedAttachmentCount: { integerValue: "1" },
+        secureShareCopyReservedAttachmentCount: { integerValue: "1" },
+        secureShareCopyReadyAttachmentCount: { integerValue: "0" }
+      },
+      updateTime: "2026-07-28T02:00:01.000Z"
+    };
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+
+      if (init?.method === "POST") {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (url.endsWith(attachmentName)) {
+        return { ok: true, json: async () => attachment };
+      }
+      if (url.endsWith(noteName)) {
+        return { ok: true, json: async () => note };
+      }
+      throw new Error(`Unexpected cleanup request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await beginAttachmentDeletionByName(projectId, attachmentName, "test-access-token");
+
+    const commitCall = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    const commitBody = JSON.parse(String(commitCall?.[1]?.body));
+    expect(commitBody.writes).toHaveLength(1);
+    expect(commitBody.writes[0].update.name).toBe(attachmentName);
+  });
+
+  it("lets a concurrently completed upload win without deleting or decrementing it", async () => {
+    const projectId = "test-project";
+    const documentRoot = `projects/${projectId}/databases/(default)/documents`;
+    const noteName = `${documentRoot}/notes/note-copy-c`;
+    const attachmentName = `${noteName}/attachments/attachment-c`;
+    const pendingAttachment = {
+      name: attachmentName,
+      fields: {
+        isReady: { booleanValue: false },
+        secureShareCopyJobId: { stringValue: "copy_job_1234567890" }
+      },
+      updateTime: "2026-07-28T03:00:00.000Z"
+    };
+    const readyAttachment = {
+      ...pendingAttachment,
+      fields: {
+        ...pendingAttachment.fields,
+        isReady: { booleanValue: true }
+      },
+      updateTime: "2026-07-28T03:00:02.000Z"
+    };
+    const note = {
+      name: noteName,
+      fields: {
+        secureShareCopyState: { stringValue: "copying" },
+        secureShareCopyJobId: { stringValue: "copy_job_1234567890" },
+        secureShareCopyExpectedAttachmentCount: { integerValue: "1" },
+        secureShareCopyReservedAttachmentCount: { integerValue: "1" },
+        secureShareCopyReadyAttachmentCount: { integerValue: "0" }
+      },
+      updateTime: "2026-07-28T03:00:01.000Z"
+    };
+    let attachmentReads = 0;
+    let commits = 0;
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+
+      if (init?.method === "POST") {
+        commits += 1;
+        return {
+          ok: false,
+          status: 409,
+          text: async () => "concurrent upload completed"
+        };
+      }
+      if (url.endsWith(attachmentName)) {
+        attachmentReads += 1;
+        return {
+          ok: true,
+          json: async () => attachmentReads === 1 ? pendingAttachment : readyAttachment
+        };
+      }
+      if (url.endsWith(noteName)) {
+        return { ok: true, json: async () => note };
+      }
+      throw new Error(`Unexpected cleanup request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(beginAttachmentDeletionByName(
+      projectId,
+      attachmentName,
+      "test-access-token",
+      (document) =>
+        (document.fields?.isReady as { booleanValue?: boolean } | undefined)?.booleanValue !== true
+    )).resolves.toBeNull();
+    expect(attachmentReads).toBe(2);
+    expect(commits).toBe(1);
+  });
+
+  it("treats deletionStarted as the idempotent counter-release boundary", async () => {
+    const projectId = "test-project";
+    const documentRoot = `projects/${projectId}/databases/(default)/documents`;
+    const attachmentName =
+      `${documentRoot}/notes/note-copy-d/attachments/attachment-d`;
+    const attachment = {
+      name: attachmentName,
+      fields: {
+        deletionStarted: { booleanValue: true },
+        isReady: { booleanValue: false },
+        secureShareCopyJobId: { stringValue: "copy_job_1234567890" }
+      },
+      updateTime: "2026-07-28T04:00:00.000Z"
+    };
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => attachment
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(beginAttachmentDeletionByName(
+      projectId,
+      attachmentName,
+      "test-access-token"
+    )).resolves.toEqual(attachment);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("durably cleans validated purged-note queues before the final tombstone commit", () => {
@@ -461,5 +805,40 @@ describe("public share backend cleanup", () => {
       'listChildDocuments(cleanupQueueName, "publicShareAttachmentCleanupQueue", accessToken, 1, ["expiresAt"])'
     );
     expect(shareTreeSource).toContain("stats.documentDeletesAttempted + 2 > stats.maxDocumentDeletes");
+  });
+
+  it("removes all secure-share server state before an expired share root", () => {
+    const secureStateSource = cleanupFunctionSource.match(
+      /async function deleteSecureShareStateByShareId[\s\S]*?async function cleanupExpiredSecureShareState/u
+    )?.[0] ?? "";
+    const shareTreeSource = cleanupFunctionSource.match(
+      /async function deletePublicShareTreeByName[\s\S]*?async function deletePublicShareTree\(/u
+    )?.[0] ?? "";
+
+    for (const collectionId of [
+      "publicSharePolicies",
+      "publicShareRecipients",
+      "publicShareAccessSessions",
+      "publicShareEmailChallenges",
+      "publicShareUnlockGrants",
+      "publicShareRateLimits",
+      "publicShareComments",
+      "publicShareAuditEvents"
+    ]) {
+      expect(cleanupFunctionSource).toContain(collectionId);
+    }
+
+    expect(secureStateSource).toContain("querySecureShareDocumentsByShareId");
+    expect(secureStateSource).toContain("secureShareStateRemains");
+    expect(secureStateSource).toContain("stats.maxDocumentDeletes - stats.documentDeletesAttempted");
+    expect(secureStateSource).toContain('["__name__"]');
+    expect(shareTreeSource).toContain(
+      "await deleteSecureShareStateByShareId(shareId, accessToken, stats, projectId)"
+    );
+    expect(shareTreeSource.indexOf("deleteSecureShareStateByShareId")).toBeLessThan(
+      shareTreeSource.indexOf("deleteDocumentNames([shareName]")
+    );
+    expect(cleanupFunctionSource).toContain('["expiresAt", "retentionExpiresAt"]');
+    expect(cleanupFunctionSource).toContain("Math.floor(stats.maxDocumentDeletes / 10)");
   });
 });

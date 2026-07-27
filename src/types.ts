@@ -84,6 +84,7 @@ export interface UserKeyDocument {
 }
 
 export type NoteKind = "personal" | "shared";
+export type SecureShareCopyState = "copying" | "active" | "aborted";
 
 export interface NoteDocument {
   type: NoteKind;
@@ -101,6 +102,16 @@ export interface NoteDocument {
   revision?: number;
   lastMutationId?: string;
   attachmentRevision?: number;
+  secureShareCopyState?: SecureShareCopyState;
+  secureShareCopyJobId?: string;
+  secureShareCopyExpectedAttachmentCount?: number;
+  secureShareCopyReservedAttachmentCount?: number;
+  secureShareCopyReadyAttachmentCount?: number;
+  secureShareCopyStartedAt?: Timestamp;
+  secureShareCopyUpdatedAt?: Timestamp;
+  secureShareCopyFinishedAt?: Timestamp;
+  secureShareCopyCleanupClaimId?: string;
+  secureShareCopyCleanupClaimedAt?: Timestamp;
   isDeleted?: boolean;
   deletedAt?: Timestamp;
   deletedBy?: string;
@@ -138,15 +149,17 @@ export interface NoteAttachmentDocument {
   chunkCount?: number;
   chunkIvs?: Bytes[];
   uploadedBy: string;
+  secureShareCopyJobId?: string;
   createdAt?: Timestamp;
 }
 
 export interface PublicNoteShareDocument {
+  schemaVersion?: 1 | 2;
   sourceNoteId: string;
   sourceRevision?: number;
   sourceAttachmentRevision?: number;
   ownerUid: string;
-  version: 1;
+  version: 1 | 2;
   currentGeneration?: string;
   encryptedTitle: EncryptedPayload;
   encryptedBody: EncryptedPayload;
@@ -189,6 +202,35 @@ export interface PublicNoteShareAttachmentDocument {
   sourceAttachmentId?: string;
   expiresAt: Timestamp;
   createdAt?: Timestamp;
+}
+
+export type SecureShareOwnerStatus = "active" | "consumed" | "expired" | "pending" | "revoked";
+
+export interface SecureShareOwnerSummary {
+  accessMode: "allowed_emails" | "anyone_with_link" | "authenticated_users";
+  attachmentCount: number;
+  consumedAt: string | null;
+  createdAt: string;
+  downloadAllowed: boolean;
+  expiresAt: string;
+  hasPassword: boolean;
+  lastAccessAt: string | null;
+  oneTimeEnabled: boolean;
+  ownerWrappedShareKey?: WrappedNoteKey;
+  permissionLevel: "comment" | "save_copy" | "view";
+  policyVersion: number;
+  quickCopyButtonVisible: boolean;
+  ready: boolean;
+  requiresEmailVerification: boolean;
+  revokedAt: string | null;
+  schemaVersion: 2;
+  shareId: string;
+  sourceAttachmentRevision?: number;
+  sourceNoteId: string;
+  sourceRevision?: number;
+  status: SecureShareOwnerStatus;
+  successfulAccessCount: number;
+  updatedAt: string;
 }
 
 export interface NoteFolderDocument {

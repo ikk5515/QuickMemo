@@ -199,6 +199,21 @@ VITE_RECAPTCHA_ENTERPRISE_SITE_KEY=...
 
 값이 있으면 앱이 App Check 토큰 자동 갱신을 켭니다. 처음에는 Firebase Console에서 모니터링 모드로 트래픽을 확인한 뒤 Firestore enforcement를 켜는 흐름을 권장합니다.
 
+## Secure Share v2
+
+Secure Share v2는 기존 v1 공개 링크와 URL fragment 기반 콘텐츠 키를
+보존하면서 비밀번호, 이메일 OTP, 1회 열람, 댓글, 복사본 저장 및
+첨부파일 다운로드 정책을 서버에서 강제하는 호환 확장입니다.
+
+기능은 기본적으로 꺼져 있으며 `SECURE_SHARE_V2_ENABLED`,
+`SECURE_SHARE_EMAIL_ENABLED`, `VITE_SECURE_SHARE_V2_ENABLED`가 모두
+검증된 Production 설정일 때만 활성화합니다. 이메일 공급자 자격 증명,
+Rules 테스트, 필요한 인덱스 준비, 실제 OTP 및 브라우저 smoke 검증 없이
+활성화하면 안 됩니다.
+
+구조, 환경변수 이름, 로컬 검증, 단계적 배포 및 rollback 절차는
+[`docs/secure-share-v2.md`](docs/secure-share-v2.md)를 참고하세요.
+
 ## Firebase 배포 준비
 
 ```bash

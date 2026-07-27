@@ -29,6 +29,13 @@ export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
 export const appCheckSiteKey = import.meta.env.VITE_RECAPTCHA_ENTERPRISE_SITE_KEY;
+export const appCheck =
+  appCheckSiteKey && import.meta.env.VITE_USE_FIREBASE_EMULATORS !== "true"
+    ? initializeAppCheck(app, {
+        provider: new ReCaptchaEnterpriseProvider(appCheckSiteKey),
+        isTokenAutoRefreshEnabled: true
+      })
+    : null;
 export const analyticsPromise =
   firebaseConfig.measurementId && import.meta.env.VITE_USE_FIREBASE_EMULATORS !== "true"
     ? isSupported()
@@ -40,13 +47,6 @@ if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true") {
   connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
   connectStorageEmulator(storage, "127.0.0.1", 9199);
-}
-
-if (appCheckSiteKey && import.meta.env.VITE_USE_FIREBASE_EMULATORS !== "true") {
-  initializeAppCheck(app, {
-    provider: new ReCaptchaEnterpriseProvider(appCheckSiteKey),
-    isTokenAutoRefreshEnabled: true
-  });
 }
 
 export const authPersistenceReady = setPersistence(auth, browserSessionPersistence).catch(() => undefined);

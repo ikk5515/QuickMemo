@@ -103,6 +103,16 @@ function publicShareSnapshot(id: string, data: PublicNoteShareDocument): PublicN
   return { id, ...data };
 }
 
+/**
+ * Secure Share v2 documents are server-authoritative. Legacy browser code must
+ * never mutate or clean them through the Firestore client SDK.
+ */
+export function isLegacyPublicNoteShare(
+  share: Pick<PublicNoteShareDocument, "schemaVersion" | "version">
+) {
+  return share.schemaVersion !== 2 && share.version === 1;
+}
+
 function publicShareAttachmentSnapshot(
   id: string,
   data: PublicNoteShareAttachmentDocument,
@@ -115,8 +125,14 @@ function timestampMillis(value: PublicNoteShareDocument["createdAt"]) {
   return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
 }
 
-export function publicShareActive(share: Pick<PublicNoteShareDocument, "expiresAt" | "ready" | "revokedAt">, now = Date.now()) {
-  return share.ready === true && !share.revokedAt && timestampMillis(share.expiresAt) > now;
+export function publicShareActive(
+  share: Pick<PublicNoteShareDocument, "expiresAt" | "ready" | "revokedAt" | "schemaVersion" | "version">,
+  now = Date.now()
+) {
+  return isLegacyPublicNoteShare(share)
+    && share.ready === true
+    && !share.revokedAt
+    && timestampMillis(share.expiresAt) > now;
 }
 
 export function publicShareExpiresAt() {
@@ -140,6 +156,16 @@ function publicShareCleanupQueueRef(shareId: string) {
   return doc(db, "publicShareCleanupQueue", shareId);
 }
 
+async function requireLegacyPublicNoteShare(shareId: string) {
+  const share = await getPublicNoteShare(shareId);
+
+  if (!share) {
+    throw new Error("보안 공유는 서버 API에서만 변경할 수 있습니다.");
+  }
+
+  return share;
+}
+
 export function subscribePublicSharesForNote(
   sourceNoteId: string,
   ownerUid: string,
@@ -154,6 +180,7 @@ export function subscribePublicSharesForNote(
       callback(
         snapshot.docs
           .map((document) => publicShareSnapshot(document.id, document.data() as PublicNoteShareDocument))
+          .filter(isLegacyPublicNoteShare)
           .filter((share) => share.sourceNoteId === sourceNoteId)
           .sort((left, right) => timestampMillis(right.createdAt) - timestampMillis(left.createdAt))
       );
@@ -175,6 +202,7 @@ export function subscribePublicSharesForOwner(
       callback(
         snapshot.docs
           .map((document) => publicShareSnapshot(document.id, document.data() as PublicNoteShareDocument))
+          .filter(isLegacyPublicNoteShare)
           .sort((left, right) => timestampMillis(right.createdAt) - timestampMillis(left.createdAt))
       );
     },
@@ -190,7 +218,13 @@ export function subscribePublicNoteShare(
   return onSnapshot(
     doc(db, "publicNoteShares", shareId),
     (snapshot) => {
-      callback(snapshot.exists() ? publicShareSnapshot(snapshot.id, snapshot.data() as PublicNoteShareDocument) : null);
+      if (!snapshot.exists()) {
+        callback(null);
+        return;
+      }
+
+      const share = publicShareSnapshot(snapshot.id, snapshot.data() as PublicNoteShareDocument);
+      callback(isLegacyPublicNoteShare(share) ? share : null);
     },
     (error) => onError?.(error)
   );
@@ -315,6 +349,7 @@ async function deletePublicShareAttachmentStorageObjects(attachments: PublicNote
 }
 
 export async function activatePublicNoteShare(shareId: string, attachmentCount: number, currentGeneration: string) {
+  await requireLegacyPublicNoteShare(shareId);
   await updateDoc(doc(db, "publicNoteShares", shareId), {
     attachmentCount,
     currentGeneration,
@@ -324,6 +359,7 @@ export async function activatePublicNoteShare(shareId: string, attachmentCount: 
 }
 
 export async function updatePublicNoteShareContent(shareId: string, input: UpdatePublicNoteShareContentInput) {
+  await requireLegacyPublicNoteShare(shareId);
   await updateDoc(doc(db, "publicNoteShares", shareId), {
     attachmentCount: input.attachmentCount,
     ...(input.currentGeneration ? { currentGeneration: input.currentGeneration } : {}),
@@ -337,6 +373,7 @@ export async function updatePublicNoteShareContent(shareId: string, input: Updat
 }
 
 export async function revokePublicNoteShare(shareId: string, ownerUid: string) {
+  await requireLegacyPublicNoteShare(shareId);
   await updateDoc(doc(db, "publicNoteShares", shareId), {
     revokedAt: serverTimestamp(),
     revokedBy: ownerUid,
@@ -345,6 +382,7 @@ export async function revokePublicNoteShare(shareId: string, ownerUid: string) {
 }
 
 export async function deletePublicNoteShare(shareId: string) {
+  await requireLegacyPublicNoteShare(shareId);
   const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
   const attachments = attachmentsSnapshot.docs.map((document) =>
     publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument, shareId)
@@ -358,6 +396,8 @@ export async function deletePublicNoteShare(shareId: string) {
 }
 
 export async function deletePublicNoteShareAttachments(shareId: string, generation?: string | null) {
+  await requireLegacyPublicNoteShare(shareId);
+
   const attachmentsSnapshot = await getDocs(collection(db, "publicNoteShares", shareId, "attachments"));
 
   if (attachmentsSnapshot.empty) {
@@ -383,6 +423,7 @@ export async function deleteExpiredPublicSharesForOwner(ownerUid: string, now = 
   const snapshot = await getDocs(sharesQuery);
   const staleShares = snapshot.docs
     .map((document) => publicShareSnapshot(document.id, document.data() as PublicNoteShareDocument))
+    .filter(isLegacyPublicNoteShare)
     .filter((share) => Boolean(share.revokedAt) || timestampMillis(share.expiresAt) <= now);
 
   await Promise.all(staleShares.map((share) => deletePublicNoteShare(share.id)));
@@ -393,11 +434,22 @@ export async function deleteExpiredPublicSharesForOwner(ownerUid: string, now = 
 export async function getPublicNoteShare(shareId: string) {
   const snapshot = await getDoc(doc(db, "publicNoteShares", shareId));
 
-  return snapshot.exists() ? publicShareSnapshot(snapshot.id, snapshot.data() as PublicNoteShareDocument) : null;
+  if (!snapshot.exists()) {
+    return null;
+  }
+
+  const share = publicShareSnapshot(snapshot.id, snapshot.data() as PublicNoteShareDocument);
+  return isLegacyPublicNoteShare(share) ? share : null;
 }
 
 export async function getPublicNoteShareAttachments(shareId: string, currentGeneration?: string) {
   if (!currentGeneration) {
+    return [];
+  }
+
+  const share = await getPublicNoteShare(shareId);
+
+  if (!share) {
     return [];
   }
 
@@ -416,6 +468,12 @@ export async function getPublicNoteShareAttachments(shareId: string, currentGene
 }
 
 export async function getOwnerPublicNoteShareAttachments(shareId: string, currentGeneration: string) {
+  const share = await getPublicNoteShare(shareId);
+
+  if (!share) {
+    return [];
+  }
+
   const attachmentsCollection = collection(db, "publicNoteShares", shareId, "attachments");
   const snapshot = await getDocs(
     query(attachmentsCollection, where("generation", "==", currentGeneration))
@@ -426,4 +484,8 @@ export async function getOwnerPublicNoteShareAttachments(shareId: string, curren
     .filter((attachment) => attachment.isReady !== false)
     .filter((attachment) => attachment.generation === currentGeneration)
     .sort((left, right) => timestampMillis(left.createdAt) - timestampMillis(right.createdAt));
+}
+
+export async function deleteUploadedPublicShareAttachment(shareId: string, attachmentId: string) {
+  await deleteBlobAttachment({ scope: "publicShare", shareId, attachmentId });
 }

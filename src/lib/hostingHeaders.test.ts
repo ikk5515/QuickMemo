@@ -65,4 +65,25 @@ describe("hosting security headers", () => {
     expect(catchAllHeaders).toBeDefined();
     expectBrowserHardeningHeaders(catchAllHeaders ?? []);
   });
+
+  it("keeps public share documents out of caches, referrers, and search indexes", () => {
+    const firebaseConfig = readJsonFile<{ hosting: { headers?: HeaderRule[] } }>("firebase.json");
+    const vercelConfig = readJsonFile<{ headers?: HeaderRule[] }>("vercel.json");
+    const firebaseShareHeaders = headersByKey(
+      firebaseConfig.hosting.headers?.find((rule) => rule.source === "/share/**")?.headers ?? []
+    );
+    const vercelShareHeaders = headersByKey(
+      vercelConfig.headers?.find((rule) => rule.source === "/share/(.*)")?.headers ?? []
+    );
+    const vercelApiHeaders = headersByKey(
+      vercelConfig.headers?.find((rule) => rule.source === "/api/public-shares-v2")?.headers ?? []
+    );
+
+    for (const headers of [firebaseShareHeaders, vercelShareHeaders, vercelApiHeaders]) {
+      expect(headers.get("cache-control")).toContain("no-store");
+      expect(headers.get("referrer-policy")).toBe("no-referrer");
+      expect(headers.get("x-robots-tag")).toContain("noindex");
+      expect(headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    }
+  });
 });

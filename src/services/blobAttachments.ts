@@ -30,6 +30,7 @@ export interface NoteBlobAttachmentUploadInput extends BaseBlobAttachmentUploadI
   attachmentId: string;
   fileName: string;
   noteId: string;
+  secureShareCopyJobId?: string;
   uploadedBy: string;
 }
 
@@ -184,6 +185,7 @@ export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadIn
     extension: input.extension,
     mimeType: input.mimeType,
     originalSize: input.originalSize,
+    secureShareCopyJobId: input.secureShareCopyJobId ?? null,
     uploadedBy: input.uploadedBy,
     ...encryptionPayloadFields(input.encryption)
   };

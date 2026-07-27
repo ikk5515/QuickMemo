@@ -38,6 +38,7 @@ import {
   Save,
   Search,
   Share2,
+  ShieldCheck,
   Star,
   Strikethrough,
   Table2,
@@ -70,6 +71,7 @@ import {
 } from "react";
 import { Timestamp } from "firebase/firestore";
 import { AppShell } from "../components/AppShell";
+import { SecureShareSettingsModal } from "../components/SecureShareSettingsModal";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
@@ -102,6 +104,11 @@ import {
   unwrapNoteKey,
   wrapNoteKey
 } from "../lib/crypto";
+import {
+  defaultSecureSharePolicy,
+  resolveSecureShareFeatureFlags,
+  type SecureSharePolicyInput
+} from "../lib/secureSharePolicy";
 import {
   imageHtml,
   linkifyEditorHtml,
@@ -183,6 +190,7 @@ import {
   deleteExpiredPublicSharesForOwner,
   deletePublicNoteShare,
   deletePublicNoteShareAttachments,
+  deleteUploadedPublicShareAttachment,
   getOwnerPublicNoteShareAttachments,
   publicShareActive,
   publicShareExpiresAt,
@@ -193,8 +201,25 @@ import {
   updatePublicNoteShareContent,
   type PublicNoteShareSnapshot
 } from "../services/publicShares";
+import {
+  activateSecureShare,
+  createSecureShare,
+  getSecureShareFeatureStatus,
+  getSecureShareOwnerDetails,
+  listOwnedSecureShares,
+  revokeSecureShare,
+  updateSecureShare
+} from "../services/secureShares";
 import { subscribeUsers } from "../services/users";
-import type { ActiveNoteDocument, DecryptedNote, NoteKind, UserProfile } from "../types";
+import type {
+  ActiveNoteDocument,
+  DecryptedNote,
+  NoteKind,
+  SecureShareOwnerStatus,
+  SecureShareOwnerSummary,
+  UserProfile,
+  WrappedNoteKey
+} from "../types";
 
 interface EditorState {
   noteId: string | null;
@@ -1434,6 +1459,331 @@ function publicShareKeyFromUrl(url: string) {
   }
 }
 
+const secureShareOwnerStatuses = new Set(["active", "consumed", "expired", "pending", "revoked"]);
+const secureShareAccessModes = new Set(["allowed_emails", "anyone_with_link", "authenticated_users"]);
+const secureSharePermissionLevels = new Set(["comment", "save_copy", "view"]);
+const secureShareIdentifierPattern = /^[A-Za-z0-9_-]{6,128}$/u;
+
+export interface SecureShareManagementCapabilities {
+  canCopy: boolean;
+  canEdit: boolean;
+  canPreview: boolean;
+  canRevoke: boolean;
+  status: SecureShareOwnerStatus;
+}
+
+export function secureShareManagementStatus(
+  share: SecureShareOwnerSummary,
+  nowMilliseconds = Date.now()
+): SecureShareOwnerStatus {
+  if (share.status === "revoked" || share.revokedAt) {
+    return "revoked";
+  }
+  if (share.status === "expired" || Date.parse(share.expiresAt) <= nowMilliseconds) {
+    return "expired";
+  }
+  if (share.status === "consumed" || share.consumedAt) {
+    return "consumed";
+  }
+  if (share.status === "pending") {
+    return "pending";
+  }
+  return "active";
+}
+
+export function secureShareManagementCapabilities(
+  share: SecureShareOwnerSummary,
+  nowMilliseconds = Date.now()
+): SecureShareManagementCapabilities {
+  const status = secureShareManagementStatus(share, nowMilliseconds);
+  const ready = share.ready === true;
+
+  return {
+    canCopy: status === "active" && ready,
+    canEdit: status === "active" && ready,
+    canPreview: (status === "active" || status === "consumed") && ready,
+    canRevoke: status === "active" || status === "consumed" || status === "pending",
+    status
+  };
+}
+
+export function canCreateSecureShareFromHistory(
+  shares: readonly SecureShareOwnerSummary[],
+  nowMilliseconds = Date.now()
+) {
+  return !shares.some((share) => {
+    const status = secureShareManagementStatus(share, nowMilliseconds);
+    return status === "active" || status === "pending";
+  });
+}
+
+export function resolveSecureShareManagementSelection(
+  shares: readonly SecureShareOwnerSummary[],
+  selectedShareId: string | null,
+  nowMilliseconds = Date.now()
+) {
+  return shares.find((share) => share.shareId === selectedShareId)
+    ?? shares.find((share) => {
+      const status = secureShareManagementStatus(share, nowMilliseconds);
+      return status === "active" || status === "pending";
+    })
+    ?? shares[0]
+    ?? null;
+}
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function secureShareDateString(value: unknown, field: string) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new Error(`보안 공유 ${field} 응답이 올바르지 않습니다.`);
+  }
+
+  return value;
+}
+
+function optionalSecureShareDateString(value: unknown, field: string) {
+  return value === null || value === undefined ? null : secureShareDateString(value, field);
+}
+
+function secureShareWrappedKey(value: unknown): WrappedNoteKey | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    !plainRecord(value)
+    || value.version !== 1
+    || value.algorithm !== "RSA-OAEP"
+    || typeof value.wrappedKey !== "string"
+    || value.wrappedKey.length < 8
+    || value.wrappedKey.length > 4096
+  ) {
+    throw new Error("보안 공유 소유자 키 응답이 올바르지 않습니다.");
+  }
+
+  return {
+    version: 1,
+    algorithm: "RSA-OAEP",
+    wrappedKey: value.wrappedKey
+  };
+}
+
+export function parseSecureShareOwnerSummary(value: unknown): SecureShareOwnerSummary {
+  if (!plainRecord(value)) {
+    throw new Error("보안 공유 응답이 올바르지 않습니다.");
+  }
+
+  const {
+    accessMode,
+    attachmentCount,
+    consumedAt,
+    createdAt,
+    downloadAllowed,
+    expiresAt,
+    hasPassword,
+    lastAccessAt,
+    oneTimeEnabled,
+    permissionLevel,
+    policyVersion,
+    quickCopyButtonVisible,
+    ready,
+    requiresEmailVerification,
+    revokedAt,
+    schemaVersion,
+    shareId,
+    sourceAttachmentRevision,
+    sourceNoteId,
+    sourceRevision,
+    status,
+    successfulAccessCount,
+    updatedAt
+  } = value;
+
+  if (
+    schemaVersion !== 2
+    || typeof shareId !== "string"
+    || !secureShareIdentifierPattern.test(shareId)
+    || typeof sourceNoteId !== "string"
+    || !secureShareIdentifierPattern.test(sourceNoteId)
+    || typeof status !== "string"
+    || !secureShareOwnerStatuses.has(status)
+    || typeof accessMode !== "string"
+    || !secureShareAccessModes.has(accessMode)
+    || typeof permissionLevel !== "string"
+    || !secureSharePermissionLevels.has(permissionLevel)
+    || typeof ready !== "boolean"
+    || typeof hasPassword !== "boolean"
+    || typeof requiresEmailVerification !== "boolean"
+    || typeof oneTimeEnabled !== "boolean"
+    || typeof downloadAllowed !== "boolean"
+    || typeof quickCopyButtonVisible !== "boolean"
+    || !Number.isSafeInteger(attachmentCount)
+    || Number(attachmentCount) < 0
+    || Number(attachmentCount) > publicNoteShareMaxAttachmentCount
+    || !Number.isSafeInteger(policyVersion)
+    || Number(policyVersion) < 1
+    || !Number.isSafeInteger(successfulAccessCount)
+    || Number(successfulAccessCount) < 0
+    || (sourceRevision !== undefined && (!Number.isSafeInteger(sourceRevision) || Number(sourceRevision) < 0))
+    || (
+      sourceAttachmentRevision !== undefined
+      && (!Number.isSafeInteger(sourceAttachmentRevision) || Number(sourceAttachmentRevision) < 0)
+    )
+  ) {
+    throw new Error("보안 공유 응답의 필드가 올바르지 않습니다.");
+  }
+
+  return {
+    accessMode: accessMode as SecureShareOwnerSummary["accessMode"],
+    attachmentCount: Number(attachmentCount),
+    consumedAt: optionalSecureShareDateString(consumedAt, "사용 완료 시간"),
+    createdAt: secureShareDateString(createdAt, "생성 시간"),
+    downloadAllowed,
+    expiresAt: secureShareDateString(expiresAt, "만료 시간"),
+    hasPassword,
+    lastAccessAt: optionalSecureShareDateString(lastAccessAt, "최근 접근 시간"),
+    oneTimeEnabled,
+    ownerWrappedShareKey: secureShareWrappedKey(value.ownerWrappedShareKey),
+    permissionLevel: permissionLevel as SecureShareOwnerSummary["permissionLevel"],
+    policyVersion: Number(policyVersion),
+    quickCopyButtonVisible,
+    ready,
+    requiresEmailVerification,
+    revokedAt: optionalSecureShareDateString(revokedAt, "중단 시간"),
+    schemaVersion: 2,
+    shareId,
+    sourceAttachmentRevision: sourceAttachmentRevision === undefined
+      ? undefined
+      : Number(sourceAttachmentRevision),
+    sourceNoteId,
+    sourceRevision: sourceRevision === undefined ? undefined : Number(sourceRevision),
+    status: status as SecureShareOwnerSummary["status"],
+    successfulAccessCount: Number(successfulAccessCount),
+    updatedAt: secureShareDateString(updatedAt, "수정 시간")
+  };
+}
+
+export function parseSecureShareListPage(value: unknown) {
+  if (
+    !plainRecord(value)
+    || value.ok !== true
+    || !Array.isArray(value.shares)
+    || (value.nextCursor !== null && value.nextCursor !== undefined && typeof value.nextCursor !== "string")
+  ) {
+    throw new Error("보안 공유 목록 응답이 올바르지 않습니다.");
+  }
+
+  return {
+    nextCursor: typeof value.nextCursor === "string" ? value.nextCursor : null,
+    shares: value.shares.map(parseSecureShareOwnerSummary)
+  };
+}
+
+export function parseSecureShareListResponse(value: unknown) {
+  return parseSecureShareListPage(value).shares;
+}
+
+async function fetchAllSecureShareOwnerSummaries(idToken: string) {
+  const sharesById = new Map<string, SecureShareOwnerSummary>();
+  let cursor: string | undefined;
+
+  for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
+    const response = await listOwnedSecureShares(idToken, { cursor, limit: 50 });
+    const page = parseSecureShareListPage(response);
+
+    page.shares.forEach((share) => sharesById.set(share.shareId, share));
+    if (!page.nextCursor) {
+      return Array.from(sharesById.values());
+    }
+    cursor = page.nextCursor;
+  }
+
+  throw new Error("보안 공유 목록이 너무 많아 전체 상태를 안전하게 확인하지 못했습니다.");
+}
+
+export function parseSecureShareMutationResponse(value: unknown, expectedShareId?: string) {
+  if (!plainRecord(value) || value.ok !== true) {
+    throw new Error("보안 공유 변경 응답이 올바르지 않습니다.");
+  }
+
+  const share = parseSecureShareOwnerSummary(value.share);
+
+  if (expectedShareId && share.shareId !== expectedShareId) {
+    throw new Error("보안 공유 변경 대상이 일치하지 않습니다.");
+  }
+
+  return share;
+}
+
+interface ParsedSecureShareOwnerDetails {
+  initialPolicy: SecureSharePolicyInput;
+  share: SecureShareOwnerSummary;
+}
+
+export function parseSecureShareOwnerDetailsResponse(value: unknown): ParsedSecureShareOwnerDetails {
+  if (!plainRecord(value) || value.ok !== true || !plainRecord(value.policy)) {
+    throw new Error("보안 공유 상세 응답이 올바르지 않습니다.");
+  }
+
+  const share = parseSecureShareOwnerSummary(value.share);
+  const policy = value.policy;
+  const allowedEmails = policy.allowedEmails === undefined
+    ? []
+    : Array.isArray(policy.allowedEmails) && policy.allowedEmails.every((email) => typeof email === "string")
+      ? [...policy.allowedEmails]
+      : null;
+  const expirationPreset = policy.expirationPreset;
+  const customExpiresAt = policy.customExpiresAt;
+
+  if (
+    allowedEmails === null
+    || (
+      expirationPreset !== undefined
+      && !new Set(["one_hour", "one_day", "seven_days", "custom"]).has(String(expirationPreset))
+    )
+    || (customExpiresAt !== undefined && customExpiresAt !== null && typeof customExpiresAt !== "string")
+  ) {
+    throw new Error("보안 공유 정책 응답이 올바르지 않습니다.");
+  }
+
+  return {
+    share,
+    initialPolicy: {
+      accessMode: share.accessMode,
+      allowedEmails,
+      customExpiresAt: typeof customExpiresAt === "string"
+        ? secureShareDateString(customExpiresAt, "직접 만료 시간")
+        : share.expiresAt,
+      downloadAllowed: share.downloadAllowed,
+      emailVerificationRequired: share.requiresEmailVerification,
+      expirationPreset: (
+        expirationPreset === "one_hour"
+        || expirationPreset === "one_day"
+        || expirationPreset === "seven_days"
+        || expirationPreset === "custom"
+      )
+        ? expirationPreset
+        : "custom",
+      oneTimeEnabled: share.oneTimeEnabled,
+      oneTimeScope: "global",
+      passwordEnabled: share.hasPassword,
+      permissionLevel: share.permissionLevel,
+      quickCopyButtonVisible: share.quickCopyButtonVisible
+    }
+  };
+}
+
+function secureShareIdempotencyKey(operation: string) {
+  const randomValue = crypto.randomUUID().replaceAll("-", "");
+  return `${operation}_${randomValue}`;
+}
+
 const noteRevisionConflictMessage =
   "다른 기기에서 이 노트가 먼저 변경되어 저장하지 않았습니다. 현재 편집 내용은 그대로 유지했습니다. 필요한 내용을 복사한 뒤 노트를 다시 열어 최신 버전을 확인해주세요.";
 
@@ -1707,7 +2057,9 @@ function useDialogFocus(dialogRef: RefObject<HTMLElement | null>) {
         return;
       }
 
-      const openDialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]'));
+      const openDialogs = Array.from(document.querySelectorAll<HTMLElement>(
+        '[role="dialog"][aria-modal="true"], [role="alertdialog"][aria-modal="true"]'
+      ));
 
       if (openDialogs.at(-1) !== dialog) {
         return;
@@ -1850,7 +2202,7 @@ function nextAttachmentUploadRunId() {
 }
 
 export default function NotesPage() {
-  const { profile, privateKey } = useAuth();
+  const { firebaseUser, profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [deletedNotes, setDeletedNotes] = useState<NoteSnapshot[]>([]);
   const [decryptedNotes, setDecryptedNotes] = useState<DecryptedNote[]>([]);
@@ -1879,6 +2231,15 @@ export default function NotesPage() {
   const [publicShareError, setPublicShareError] = useState<string | null>(null);
   const [publicShareCopied, setPublicShareCopied] = useState(false);
   const [ownerPublicShares, setOwnerPublicShares] = useState<PublicNoteShareSnapshot[]>([]);
+  const [ownerSecureShares, setOwnerSecureShares] = useState<SecureShareOwnerSummary[]>([]);
+  const [secureShareFlags, setSecureShareFlags] = useState(() => resolveSecureShareFeatureFlags());
+  const [secureShareOwnerOpen, setSecureShareOwnerOpen] = useState(false);
+  const [secureShareSettingsOpen, setSecureShareSettingsOpen] = useState(false);
+  const [secureShareSettingsMode, setSecureShareSettingsMode] = useState<"create" | "edit">("create");
+  const [secureShareSelectedId, setSecureShareSelectedId] = useState<string | null>(null);
+  const [secureShareSettingsReturnToOwner, setSecureShareSettingsReturnToOwner] = useState(false);
+  const [secureShareInitialPolicy, setSecureShareInitialPolicy] = useState<SecureSharePolicyInput | null>(null);
+  const [secureShareEditingId, setSecureShareEditingId] = useState<string | null>(null);
   const [publicShareUrlById, setPublicShareUrlById] = useState<Record<string, string>>({});
   const [previewNoteId, setPreviewNoteId] = useState<string | null>(null);
   const [noteSort, setNoteSort] = useState<NoteSortSetting>(defaultNoteSort);
@@ -1907,6 +2268,7 @@ export default function NotesPage() {
   const resolvingPublicShareUrls = useRef(new Set<string>());
   const migratingLegacyPublicShares = useRef(new Set<string>());
   const inspectedPublicShareFilenameGenerations = useRef(new Set<string>());
+  const revokingSecureShares = useRef(new Set<string>());
   const migrateLegacyPublicShareRef = useRef<(share: PublicNoteShareSnapshot, note: DecryptedNote) => Promise<void>>(async () => undefined);
   const decryptedNoteCache = useRef<DecryptedNoteCache>(new Map());
   const decryptedDeletedNoteCache = useRef<DecryptedNoteCache>(new Map());
@@ -2003,6 +2365,7 @@ export default function NotesPage() {
     resolvingPublicShareUrls.current.clear();
     migratingLegacyPublicShares.current.clear();
     inspectedPublicShareFilenameGenerations.current.clear();
+    revokingSecureShares.current.clear();
 
     setNotes([]);
     setDeletedNotes([]);
@@ -2020,6 +2383,12 @@ export default function NotesPage() {
     setAttachmentUploadProgress(null);
     setAttachmentActionBusy(idleAttachmentActionBusyState);
     setOwnerPublicShares([]);
+    setOwnerSecureShares([]);
+    setSecureShareFlags(resolveSecureShareFeatureFlags());
+    setSecureShareOwnerOpen(false);
+    setSecureShareSettingsOpen(false);
+    setSecureShareInitialPolicy(null);
+    setSecureShareEditingId(null);
     setPublicShareUrlById({});
     setListOpen(false);
     setOverviewOpen(false);
@@ -2372,6 +2741,10 @@ export default function NotesPage() {
     () => (editor.noteId ? ownerPublicShares.filter((share) => share.sourceNoteId === editor.noteId) : []),
     [editor.noteId, ownerPublicShares]
   );
+  const secureShares = useMemo(
+    () => (editor.noteId ? ownerSecureShares.filter((share) => share.sourceNoteId === editor.noteId) : []),
+    [editor.noteId, ownerSecureShares]
+  );
   const activePublicShare = useMemo(
     () =>
       publicShares.find(
@@ -2384,6 +2757,42 @@ export default function NotesPage() {
   const activePublicShareUrl = activePublicShare
     ? publicShareUrlById[activePublicShare.id] ?? readStoredPublicShareUrl(profile?.uid ?? "", activePublicShare.id)
     : null;
+  const activeSecureShare = useMemo(
+    () =>
+      secureShares.find(
+        (share) =>
+          ["active", "pending"].includes(secureShareManagementStatus(share, cursorClock))
+          && !share.revokedAt
+          && Date.parse(share.expiresAt) > cursorClock
+      ) ?? null,
+    [cursorClock, secureShares]
+  );
+  const selectedSecureShare = useMemo(
+    () => resolveSecureShareManagementSelection(
+      secureShares,
+      secureShareSelectedId,
+      cursorClock
+    ),
+    [cursorClock, secureShareSelectedId, secureShares]
+  );
+  const selectedSecureShareUrl = selectedSecureShare
+    ? publicShareUrlById[selectedSecureShare.shareId]
+      ?? readStoredPublicShareUrl(profile?.uid ?? "", selectedSecureShare.shareId)
+    : null;
+  const secureShareCreationAllowed = !activePublicShare
+    && canManagePublicShare
+    && canCreateSecureShareFromHistory(secureShares, cursorClock);
+
+  useEffect(() => {
+    if (
+      secureShareSelectedId
+      && !secureShares.some((share) => share.shareId === secureShareSelectedId)
+    ) {
+      setSecureShareSelectedId(
+        resolveSecureShareManagementSelection(secureShares, null, cursorClock)?.shareId ?? null
+      );
+    }
+  }, [cursorClock, secureShareSelectedId, secureShares]);
   const activePublicShareByNoteId = useMemo(() => {
     const nextShares = new Map<string, PublicNoteShareSnapshot>();
 
@@ -2406,6 +2815,90 @@ export default function NotesPage() {
 
     return nextShares;
   }, [cursorClock, notes, ownerPublicShares]);
+
+  useEffect(() => {
+    const clientFlags = resolveSecureShareFeatureFlags();
+    const uid = profile?.uid;
+
+    if (
+      !clientFlags.clientV2Enabled
+      || !uid
+      || !privateKey
+      || !firebaseUser
+      || firebaseUser.uid !== uid
+    ) {
+      setSecureShareFlags(clientFlags);
+      setOwnerSecureShares([]);
+      setSecureShareOwnerOpen(false);
+      setSecureShareSettingsOpen(false);
+      setSecureShareSelectedId(null);
+      setSecureShareSettingsReturnToOwner(false);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        const serverStatus = await getSecureShareFeatureStatus(controller.signal);
+        const nextFlags = resolveSecureShareFeatureFlags(serverStatus);
+
+        if (controller.signal.aborted) {
+          return;
+        }
+        setSecureShareFlags(nextFlags);
+
+        if (!nextFlags.v2Enabled) {
+          setOwnerSecureShares([]);
+          setSecureShareOwnerOpen(false);
+          setSecureShareSettingsOpen(false);
+          setSecureShareSelectedId(null);
+          setSecureShareSettingsReturnToOwner(false);
+          return;
+        }
+
+        const idToken = await firebaseUser.getIdToken();
+        const shares = await fetchAllSecureShareOwnerSummaries(idToken);
+
+        if (!controller.signal.aborted) {
+          setOwnerSecureShares(shares);
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setSecureShareFlags(resolveSecureShareFeatureFlags());
+          setOwnerSecureShares([]);
+          setSecureShareOwnerOpen(false);
+          setSecureShareSettingsOpen(false);
+          setSecureShareSelectedId(null);
+          setSecureShareSettingsReturnToOwner(false);
+          setPublicShareError("보안 공유 기능 상태를 확인하지 못해 안전하게 숨겼습니다.");
+        }
+      }
+    })();
+
+    return () => controller.abort();
+  }, [firebaseUser, privateKey, profile?.uid]);
+
+  useEffect(() => {
+    setSecureShareSelectedId(null);
+  }, [editor.noteId]);
+
+  const refreshSecureOwnerShares = useCallback(async () => {
+    if (
+      !secureShareFlags.v2Enabled
+      || !firebaseUser
+      || !profile
+      || firebaseUser.uid !== profile.uid
+    ) {
+      setOwnerSecureShares([]);
+      return [];
+    }
+
+    const idToken = await firebaseUser.getIdToken();
+    const shares = await fetchAllSecureShareOwnerSummaries(idToken);
+    setOwnerSecureShares(shares);
+    return shares;
+  }, [firebaseUser, profile, secureShareFlags.v2Enabled]);
 
   useEffect(() => {
     const uid = profile?.uid;
@@ -2486,6 +2979,50 @@ export default function NotesPage() {
         });
     });
   }, [cursorClock, ownerPublicShares, privateKey, profile, publicShareUrlById]);
+
+  useEffect(() => {
+    if (!profile || !privateKey || !secureShareFlags.v2Enabled) {
+      return;
+    }
+
+    ownerSecureShares.forEach((share) => {
+      if (
+        !["active", "consumed", "pending"].includes(share.status)
+        || share.revokedAt
+        || Date.parse(share.expiresAt) <= cursorClock
+        || publicShareUrlById[share.shareId]
+        || readStoredPublicShareUrl(profile.uid, share.shareId)
+        || !share.ownerWrappedShareKey
+        || resolvingPublicShareUrls.current.has(share.shareId)
+      ) {
+        return;
+      }
+
+      resolvingPublicShareUrls.current.add(share.shareId);
+      void unwrapNoteKey(share.ownerWrappedShareKey, privateKey)
+        .then(exportAesKeyBase64Url)
+        .then((shareKeyValue) => {
+          const nextUrl = publicShareUrl(share.shareId, shareKeyValue);
+
+          writeStoredPublicShareUrl(profile.uid, share.shareId, nextUrl);
+          setPublicShareUrlById((current) => ({
+            ...current,
+            [share.shareId]: current[share.shareId] ?? nextUrl
+          }));
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          resolvingPublicShareUrls.current.delete(share.shareId);
+        });
+    });
+  }, [
+    cursorClock,
+    ownerSecureShares,
+    privateKey,
+    profile,
+    publicShareUrlById,
+    secureShareFlags.v2Enabled
+  ]);
 
   useEffect(() => {
     if (!profile || !privateKey) {
@@ -2683,13 +3220,20 @@ export default function NotesPage() {
   }, [activeCursorNoteId, privateKey]);
 
   useEffect(() => {
-    if (!privateKey || !activeCursorNoteId) {
+    if (
+      !privateKey
+      || (!activeCursorNoteId && secureShares.length === 0 && !secureShareOwnerOpen)
+    ) {
       return undefined;
     }
 
+    const initialTimeoutId = window.setTimeout(() => setCursorClock(Date.now()), 0);
     const intervalId = window.setInterval(() => setCursorClock(Date.now()), 5000);
-    return () => window.clearInterval(intervalId);
-  }, [activeCursorNoteId, privateKey]);
+    return () => {
+      window.clearTimeout(initialTimeoutId);
+      window.clearInterval(intervalId);
+    };
+  }, [activeCursorNoteId, privateKey, secureShareOwnerOpen, secureShares.length]);
 
   useEffect(() => {
     if (!activeRemoteNote || !profile) {
@@ -3312,9 +3856,442 @@ export default function NotesPage() {
   }
 
   async function openPublicShareDialog() {
+    if (
+      secureShareFlags.v2Enabled
+      && (activeSecureShare || (!activePublicShare && secureShares.length > 0))
+    ) {
+      const shareToManage = selectedSecureShare ?? activeSecureShare ?? secureShares[0];
+
+      if (shareToManage) {
+        await selectSecureShareForManagement(shareToManage, true);
+        return;
+      }
+    }
+
+    if (secureShareFlags.v2Enabled && !activePublicShare) {
+      openSecureShareSettingsForCreate(false);
+      return;
+    }
+
     setPublicShareOpen(true);
     setPublicShareCopied(false);
     setPublicShareError(null);
+  }
+
+  async function secureShareOwnerIdToken() {
+    if (!firebaseUser || firebaseUser.uid !== unlockedProfile.uid) {
+      throw new Error("보안 공유 작업을 위해 다시 로그인해주세요.");
+    }
+
+    return firebaseUser.getIdToken();
+  }
+
+  function rememberSecureShareUrl(shareId: string, shareKeyValue: string) {
+    const nextUrl = publicShareUrl(shareId, shareKeyValue);
+    writeStoredPublicShareUrl(unlockedProfile.uid, shareId, nextUrl);
+    setPublicShareUrlById((current) => ({ ...current, [shareId]: nextUrl }));
+    return nextUrl;
+  }
+
+  function forgetSecureShareUrl(shareId: string) {
+    removeStoredPublicShareUrl(unlockedProfile.uid, shareId);
+    removeStoredPublicShareContentKey(unlockedProfile.uid, shareId);
+    setPublicShareUrlById((current) => {
+      if (!(shareId in current)) {
+        return current;
+      }
+
+      const nextUrls = { ...current };
+      delete nextUrls[shareId];
+      return nextUrls;
+    });
+  }
+
+  async function recoverSecureShareUrl(share: SecureShareOwnerSummary) {
+    const existingUrl =
+      publicShareUrlById[share.shareId]
+      ?? readStoredPublicShareUrl(unlockedProfile.uid, share.shareId);
+
+    if (existingUrl) {
+      return existingUrl;
+    }
+    if (!share.ownerWrappedShareKey) {
+      return null;
+    }
+
+    const shareKey = await unwrapNoteKey(share.ownerWrappedShareKey, unlockedPrivateKey);
+    return rememberSecureShareUrl(share.shareId, await exportAesKeyBase64Url(shareKey));
+  }
+
+  function openSecureShareSettingsForCreate(returnToOwner: boolean) {
+    if (!secureShareCreationAllowed || publicShareBusy) {
+      setPublicShareError("현재 활성 또는 준비 중인 보안 공유를 먼저 중단해주세요.");
+      return;
+    }
+
+    setSecureShareSettingsMode("create");
+    setSecureShareInitialPolicy(defaultSecureSharePolicy());
+    setSecureShareEditingId(null);
+    setSecureShareSettingsReturnToOwner(returnToOwner);
+    setSecureShareOwnerOpen(false);
+    setSecureShareSettingsOpen(true);
+    setPublicShareCopied(false);
+    setPublicShareError(null);
+  }
+
+  async function selectSecureShareForManagement(
+    share: SecureShareOwnerSummary,
+    openDialog = false
+  ) {
+    if (publicShareBusy) {
+      return;
+    }
+
+    setSecureShareSelectedId(share.shareId);
+    setPublicShareCopied(false);
+    setPublicShareError(null);
+    if (openDialog) {
+      setSecureShareOwnerOpen(true);
+    }
+    setPublicShareBusy(true);
+
+    try {
+      const idToken = await secureShareOwnerIdToken();
+      const response = await getSecureShareOwnerDetails(share.shareId, idToken);
+      const details = parseSecureShareOwnerDetailsResponse(response);
+
+      if (details.share.shareId !== share.shareId) {
+        throw new Error("보안 공유 상세 대상이 일치하지 않습니다.");
+      }
+
+      setOwnerSecureShares((current) =>
+        current.map((currentShare) =>
+          currentShare.shareId === details.share.shareId ? details.share : currentShare
+        )
+      );
+      const capabilities = secureShareManagementCapabilities(details.share, Date.now());
+
+      if (capabilities.canCopy || capabilities.canPreview) {
+        await recoverSecureShareUrl(details.share);
+      }
+    } catch (caught) {
+      setPublicShareError(
+        caught instanceof Error ? caught.message : "보안 공유 상태를 불러오지 못했습니다."
+      );
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function openSecureShareSettingsForEdit(share: SecureShareOwnerSummary) {
+    if (!secureShareManagementCapabilities(share, Date.now()).canEdit || publicShareBusy) {
+      return;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+
+    try {
+      const idToken = await secureShareOwnerIdToken();
+      const response = await getSecureShareOwnerDetails(share.shareId, idToken);
+      const details = parseSecureShareOwnerDetailsResponse(response);
+
+      if (details.share.shareId !== share.shareId) {
+        throw new Error("보안 공유 상세 대상이 일치하지 않습니다.");
+      }
+      if (
+        details.initialPolicy.accessMode === "allowed_emails"
+        && details.initialPolicy.allowedEmails.length === 0
+      ) {
+        throw new Error("허용 이메일 목록을 안전하게 불러오지 못해 설정 변경을 중단했습니다.");
+      }
+
+      setOwnerSecureShares((current) =>
+        current.map((share) => share.shareId === details.share.shareId ? details.share : share)
+      );
+      await recoverSecureShareUrl(details.share);
+      setSecureShareInitialPolicy(details.initialPolicy);
+      setSecureShareEditingId(details.share.shareId);
+      setSecureShareSelectedId(details.share.shareId);
+      setSecureShareSettingsMode("edit");
+      setSecureShareSettingsReturnToOwner(true);
+      setSecureShareOwnerOpen(false);
+      setSecureShareSettingsOpen(true);
+    } catch (caught) {
+      setPublicShareError(
+        caught instanceof Error ? caught.message : "보안 공유 설정을 불러오지 못했습니다."
+      );
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function saveSecureShareSettings(policy: SecureSharePolicyInput) {
+    if (!secureShareFlags.v2Enabled) {
+      throw new Error("보안 공유 기능이 현재 비활성화되어 있습니다.");
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+    setPublicShareCopied(false);
+
+    if (secureShareSettingsMode === "edit") {
+      const shareId = secureShareEditingId;
+
+      if (!shareId) {
+        setPublicShareBusy(false);
+        throw new Error("변경할 보안 공유를 찾을 수 없습니다.");
+      }
+
+      try {
+        const idToken = await secureShareOwnerIdToken();
+        const response = await updateSecureShare(
+          shareId,
+          {
+            idempotencyKey: secureShareIdempotencyKey("update"),
+            policy
+          },
+          idToken,
+          {
+            emailFeatureEnabled: secureShareFlags.emailEnabled,
+            now: new Date()
+          }
+        );
+        const updatedShare = parseSecureShareMutationResponse(response, shareId);
+
+        setOwnerSecureShares((current) =>
+          current.map((share) => share.shareId === shareId ? updatedShare : share)
+        );
+        setSecureShareSelectedId(updatedShare.shareId);
+        setSecureShareSettingsOpen(false);
+        setSecureShareInitialPolicy(null);
+        setSecureShareEditingId(null);
+        setSecureShareSettingsReturnToOwner(false);
+        setSecureShareOwnerOpen(true);
+        setStatus("보안 공유 설정을 저장했습니다.");
+      } catch (caught) {
+        const message = caught instanceof Error
+          ? caught.message
+          : "보안 공유 설정을 저장하지 못했습니다.";
+        setPublicShareError(message);
+        throw new Error(message);
+      } finally {
+        setPublicShareBusy(false);
+      }
+
+      return;
+    }
+
+    let createdShareId: string | null = null;
+    const uploadedAttachmentIds: string[] = [];
+
+    try {
+      const savedNote = await persistCurrentNote(false, false);
+
+      if (!savedNote) {
+        throw new Error("노트를 먼저 저장하지 못했습니다.");
+      }
+
+      const sourceState = await getNoteRevisionState(savedNote.noteId);
+
+      if (sourceState.revision !== savedNote.revision) {
+        throw new NoteRevisionConflictError(savedNote.revision, sourceState.revision);
+      }
+
+      const noteAttachments = await getNoteAttachments(savedNote.noteId);
+
+      if (noteAttachments.length > publicNoteShareMaxAttachmentCount) {
+        throw new Error(`보안 공유에는 첨부파일을 최대 ${publicNoteShareMaxAttachmentCount}개까지 포함할 수 있습니다.`);
+      }
+
+      const [idToken, shareKey] = await Promise.all([
+        secureShareOwnerIdToken(),
+        generateNoteKey()
+      ]);
+      const shareKeyValue = await exportAesKeyBase64Url(shareKey);
+      const ownerWrappedShareKey = await wrapNoteKey(shareKey, unlockedProfile.publicKeyJwk);
+      const [encryptedTitle, encryptedBody] = await Promise.all([
+        encryptText(editor.title.trim() || "제목 없음", shareKey),
+        encryptText(serializeEditorContent(editor.body, editor.fontSize), shareKey)
+      ]);
+      const createResponse = await createSecureShare(
+        {
+          attachmentCount: noteAttachments.length,
+          encryptedBody,
+          encryptedTitle,
+          idempotencyKey: secureShareIdempotencyKey("create"),
+          ownerWrappedShareKey,
+          policy,
+          sourceAttachmentRevision: sourceState.attachmentRevision,
+          sourceNoteId: savedNote.noteId,
+          sourceRevision: sourceState.revision
+        },
+        idToken,
+        {
+          emailFeatureEnabled: secureShareFlags.emailEnabled,
+          now: new Date()
+        }
+      );
+      const pendingShare = parseSecureShareMutationResponse(createResponse);
+
+      if (pendingShare.sourceNoteId !== savedNote.noteId || pendingShare.status !== "pending") {
+        throw new Error("보안 공유 생성 상태를 확인하지 못했습니다.");
+      }
+
+      createdShareId = pendingShare.shareId;
+      const generation = createPublicShareGeneration();
+
+      for (const attachment of noteAttachments) {
+        const encryptedAttachmentSource = await getEncryptedNoteAttachmentSource(attachment);
+        const [encryptedAttachment, encryptedFileName] = await Promise.all([
+          reencryptAttachmentBlob(attachment, savedNote.noteKey, shareKey, encryptedAttachmentSource),
+          encryptText(attachmentDownloadName(attachment), shareKey)
+        ]);
+        const attachmentRef = await createPublicNoteShareAttachment(createdShareId, {
+          encryptedFileName,
+          extension: attachment.extension,
+          generation,
+          mimeType: safePublicShareAttachmentMimeType(attachment.extension),
+          ownerUid: unlockedProfile.uid,
+          originalSize: attachment.originalSize,
+          encryptedBlob: encryptedAttachment.blob,
+          encryption: encryptedAttachment.metadata,
+          expiresAt: new Date(pendingShare.expiresAt),
+          sourceAttachmentId: attachment.id
+        });
+        uploadedAttachmentIds.push(attachmentRef.id);
+      }
+
+      const activateResponse = await activateSecureShare(
+        createdShareId,
+        {
+          attachmentCount: noteAttachments.length,
+          generation,
+          idempotencyKey: secureShareIdempotencyKey("activate")
+        },
+        idToken
+      );
+      const activeShare = parseSecureShareMutationResponse(activateResponse, createdShareId);
+
+      if (activeShare.status !== "active" || !activeShare.ready) {
+        throw new Error("보안 공유 활성화 상태를 확인하지 못했습니다.");
+      }
+
+      rememberSecureShareUrl(createdShareId, shareKeyValue);
+      setOwnerSecureShares((current) => [
+        activeShare,
+        ...current.filter((share) => share.shareId !== activeShare.shareId)
+      ]);
+      setSecureShareSelectedId(activeShare.shareId);
+      setSecureShareSettingsOpen(false);
+      setSecureShareInitialPolicy(null);
+      setSecureShareEditingId(null);
+      setSecureShareSettingsReturnToOwner(false);
+      setSecureShareOwnerOpen(true);
+      setStatus("보안 공유 링크를 만들었습니다.");
+      await refreshSecureOwnerShares().catch(() => undefined);
+    } catch (caught) {
+      const rollbackShareId = createdShareId;
+
+      await Promise.allSettled(
+        rollbackShareId
+          ? uploadedAttachmentIds.map((attachmentId) =>
+              deleteUploadedPublicShareAttachment(rollbackShareId, attachmentId)
+            )
+          : []
+      );
+
+      if (rollbackShareId) {
+        const idToken = await secureShareOwnerIdToken().catch(() => null);
+
+        if (idToken) {
+          await revokeSecureShare(
+            rollbackShareId,
+            idToken,
+            secureShareIdempotencyKey("rollback")
+          ).catch(() => undefined);
+        }
+        forgetSecureShareUrl(rollbackShareId);
+      }
+
+      const message = caught instanceof Error
+        ? caught.message
+        : "보안 공유 링크를 만들지 못했습니다.";
+      setPublicShareError(message);
+      throw new Error(message);
+    } finally {
+      setPublicShareBusy(false);
+    }
+  }
+
+  async function copySecureShareUrl(share: SecureShareOwnerSummary) {
+    if (!secureShareManagementCapabilities(share, Date.now()).canCopy) {
+      setPublicShareError("복사할 보안 공유 링크를 찾을 수 없습니다.");
+      return;
+    }
+
+    try {
+      const url = publicShareUrlById[share.shareId]
+        ?? readStoredPublicShareUrl(unlockedProfile.uid, share.shareId)
+        ?? await recoverSecureShareUrl(share);
+
+      if (!url) {
+        throw new Error("이 브라우저에서 공유 키를 복구할 수 없습니다.");
+      }
+
+      await navigator.clipboard.writeText(url);
+      setPublicShareCopied(true);
+      setPublicShareError(null);
+      setStatus("보안 공유 링크를 복사했습니다.");
+    } catch (caught) {
+      setPublicShareError(
+        caught instanceof Error
+          ? caught.message
+          : "브라우저에서 링크 복사를 허용하지 않았습니다."
+      );
+    }
+  }
+
+  async function stopSecureShare(share: SecureShareOwnerSummary) {
+    if (!secureShareManagementCapabilities(share, Date.now()).canRevoke || publicShareBusy) {
+      return false;
+    }
+
+    setPublicShareBusy(true);
+    setPublicShareError(null);
+
+    try {
+      const idToken = await secureShareOwnerIdToken();
+      const response = await revokeSecureShare(
+        share.shareId,
+        idToken,
+        secureShareIdempotencyKey("revoke")
+      );
+      const revokedShare = parseSecureShareMutationResponse(response, share.shareId);
+
+      if (revokedShare.status !== "revoked") {
+        throw new Error("보안 공유 중단 상태를 확인하지 못했습니다.");
+      }
+
+      forgetSecureShareUrl(share.shareId);
+      setOwnerSecureShares((current) =>
+        current.map((currentShare) =>
+          currentShare.shareId === revokedShare.shareId ? revokedShare : currentShare
+        )
+      );
+      setSecureShareSelectedId(revokedShare.shareId);
+      setPublicShareCopied(false);
+      setStatus("보안 공유 링크를 중단했습니다.");
+      await refreshSecureOwnerShares().catch(() => undefined);
+      return true;
+    } catch (caught) {
+      setPublicShareError(
+        caught instanceof Error ? caught.message : "보안 공유 링크를 중단하지 못했습니다."
+      );
+      return false;
+    } finally {
+      setPublicShareBusy(false);
+    }
   }
 
   async function createCurrentPublicShare(password = "") {
@@ -3710,6 +4687,70 @@ export default function NotesPage() {
     return stopped;
   }
 
+  async function failClosedSecureSharesForNote(noteId: string) {
+    const sharesToRevoke = ownerSecureShares.filter(
+      (share) =>
+        share.sourceNoteId === noteId
+        && ["active", "consumed", "pending"].includes(share.status)
+        && !share.revokedAt
+        && Date.parse(share.expiresAt) > Date.now()
+        && !revokingSecureShares.current.has(share.shareId)
+    );
+
+    if (!sharesToRevoke.length) {
+      return;
+    }
+    if (!secureShareFlags.v2Enabled) {
+      throw new Error("보안 공유를 안전하게 중단할 수 없어 원본 변경을 완료하지 못했습니다.");
+    }
+
+    const idToken = await secureShareOwnerIdToken();
+    const revokedShares: SecureShareOwnerSummary[] = [];
+    let revokeFailure: unknown = null;
+
+    for (const share of sharesToRevoke) {
+      revokingSecureShares.current.add(share.shareId);
+
+      try {
+        const response = await revokeSecureShare(
+          share.shareId,
+          idToken,
+          secureShareIdempotencyKey("source_changed")
+        );
+        const revokedShare = parseSecureShareMutationResponse(response, share.shareId);
+
+        if (revokedShare.status !== "revoked") {
+          throw new Error("보안 공유 중단 상태를 확인하지 못했습니다.");
+        }
+        revokedShares.push(revokedShare);
+        forgetSecureShareUrl(share.shareId);
+      } catch (caught) {
+        revokeFailure = caught;
+        break;
+      } finally {
+        revokingSecureShares.current.delete(share.shareId);
+      }
+    }
+
+    setOwnerSecureShares((current) =>
+      current.map((share) =>
+        revokedShares.find((revokedShare) => revokedShare.shareId === share.shareId) ?? share
+      )
+    );
+    if (revokedShares.length) {
+      setSecureShareOwnerOpen(false);
+      setPublicShareCopied(false);
+    }
+    if (revokeFailure) {
+      throw new Error("원본 변경 후 보안 공유 링크를 안전하게 중단하지 못했습니다.", {
+        cause: revokeFailure
+      });
+    }
+    setPublicShareError(
+      "원본 노트가 변경되어 이전 내용 노출을 막기 위해 보안 공유 링크를 중단했습니다. 새 링크를 만들어주세요."
+    );
+  }
+
   async function syncPublicSharesForNote(
     noteId: string,
     noteKey: CryptoKey,
@@ -3717,6 +4758,8 @@ export default function NotesPage() {
     syncAttachments = false,
     sourceRevision?: number
   ) {
+    await failClosedSecureSharesForNote(noteId);
+
     const sharesToSync = ownerPublicShares.filter(
       (share) => share.sourceNoteId === noteId && share.ownerUid === unlockedProfile.uid && publicShareActive(share)
     );
@@ -3833,6 +4876,7 @@ export default function NotesPage() {
         removeStoredPublicShareContentKey(unlockedProfile.uid, share.id);
       })
     );
+    await failClosedSecureSharesForNote(noteId);
 
     if (sharesToStop.length) {
       setPublicShareUrlById((current) => {
@@ -4929,14 +5973,14 @@ export default function NotesPage() {
                 공유 대상
               </button>
               <button
-                className={`secondary-button ${activePublicShare ? "active" : ""}`}
+                className={`secondary-button ${activePublicShare || activeSecureShare ? "active" : ""}`}
                 disabled={saving || publicShareBusy || !canEditShareTargets}
                 type="button"
                 onClick={() => void openPublicShareDialog()}
                 title={canEditShareTargets ? "임시 URL로 노트 공유" : "노트 소유자만 링크 공유를 만들 수 있습니다."}
               >
                 {publicShareBusy ? <Loader2 className="spin" size={18} /> : <Share2 size={18} />}
-                {activePublicShare ? "공유 중" : "공유하기"}
+                {activeSecureShare ? "보안 공유 중" : activePublicShare ? "공유 중" : "공유하기"}
               </button>
             </div>
             <div className="toolbar-actions">
@@ -5080,7 +6124,12 @@ export default function NotesPage() {
             onTogglePin={(note) => void togglePinnedNote(note)}
             onUploadAttachments={(note, files) => void uploadPreviewAttachments(note, files)}
               saving={saving}
-              suppressEscape={Boolean(attachmentPreview || publicShareOpen)}
+              suppressEscape={Boolean(
+                attachmentPreview
+                || publicShareOpen
+                || secureShareOwnerOpen
+                || secureShareSettingsOpen
+              )}
               attachmentBusyState={attachmentActionBusy}
               canDeleteAttachment={canDeleteAttachmentForNote}
             />
@@ -5100,6 +6149,59 @@ export default function NotesPage() {
             shareUrl={activePublicShareUrl}
           />
         )}
+        {secureShareOwnerOpen && selectedSecureShare && secureShareFlags.v2Enabled && (
+          <SecureShareOwnerModal
+            busy={publicShareBusy}
+            canCreate={secureShareCreationAllowed}
+            copied={publicShareCopied}
+            error={publicShareError}
+            noteTitle={editor.title.trim() || "제목 없음"}
+            nowMilliseconds={cursorClock}
+            onClose={() => setSecureShareOwnerOpen(false)}
+            onCopy={(share) => void copySecureShareUrl(share)}
+            onCreate={() => openSecureShareSettingsForCreate(true)}
+            onEdit={(share) => void openSecureShareSettingsForEdit(share)}
+            onRevoke={stopSecureShare}
+            onSelect={(share) => void selectSecureShareForManagement(share)}
+            share={selectedSecureShare}
+            shares={secureShares}
+            shareUrl={selectedSecureShareUrl}
+          />
+        )}
+        {secureShareSettingsOpen
+          && secureShareFlags.v2Enabled
+          && secureShareInitialPolicy
+          && (
+            <SecureShareSettingsModal
+              emailFeatureEnabled={secureShareFlags.emailEnabled}
+              error={publicShareError}
+              hasStoredPassword={
+                secureShareSettingsMode === "edit"
+                && Boolean(
+                  ownerSecureShares.find((share) => share.shareId === secureShareEditingId)?.hasPassword
+                )
+              }
+              initialValue={secureShareInitialPolicy}
+              mode={secureShareSettingsMode}
+              onClose={() => {
+                if (publicShareBusy) {
+                  return;
+                }
+                const shouldReturnToOwner =
+                  secureShareSettingsReturnToOwner && secureShares.length > 0;
+
+                setSecureShareSettingsOpen(false);
+                setSecureShareInitialPolicy(null);
+                setSecureShareEditingId(null);
+                setSecureShareSettingsReturnToOwner(false);
+                if (shouldReturnToOwner) {
+                  setSecureShareOwnerOpen(true);
+                }
+              }}
+              onSave={saveSecureShareSettings}
+              saving={publicShareBusy}
+            />
+          )}
         {attachmentPreview && <AttachmentPreviewModal onClose={closeAttachmentPreview} preview={attachmentPreview} />}
       </section>
     </AppShell>
@@ -5287,6 +6389,498 @@ function PublicShareModal({
           )}
           {busy && <p className="public-share-status">공유 상태를 업데이트하는 중...</p>}
           {error && <p className="form-error">{error}</p>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+const secureShareStatusLabels: Record<SecureShareOwnerStatus, string> = {
+  active: "활성",
+  consumed: "사용 완료",
+  expired: "만료",
+  pending: "준비 중",
+  revoked: "공유 해제"
+};
+
+function secureShareAccessModeLabel(accessMode: SecureShareOwnerSummary["accessMode"]) {
+  if (accessMode === "allowed_emails") {
+    return "허용 이메일";
+  }
+  if (accessMode === "authenticated_users") {
+    return "QuickMemo 로그인 사용자";
+  }
+  return "링크를 가진 사용자";
+}
+
+function secureSharePermissionLabel(permission: SecureShareOwnerSummary["permissionLevel"]) {
+  if (permission === "comment") {
+    return "댓글 가능";
+  }
+  if (permission === "save_copy") {
+    return "복사본 저장 가능";
+  }
+  return "보기만 가능";
+}
+
+function secureShareSecurityBadges(share: SecureShareOwnerSummary) {
+  const badges: string[] = [];
+
+  if (share.hasPassword) {
+    badges.push("비밀번호");
+  }
+  if (share.requiresEmailVerification) {
+    badges.push("이메일 인증");
+  }
+  if (share.oneTimeEnabled) {
+    badges.push("1회 열람");
+  }
+  badges.push(share.downloadAllowed ? "다운로드 허용" : "다운로드 제한");
+  if (!share.quickCopyButtonVisible) {
+    badges.push("빠른 복사 숨김");
+  }
+
+  return badges;
+}
+
+export function SecureShareOwnerModal({
+  busy,
+  canCreate,
+  copied,
+  error,
+  noteTitle,
+  nowMilliseconds,
+  onClose,
+  onCopy,
+  onCreate,
+  onEdit,
+  onRevoke,
+  onSelect,
+  share,
+  shares,
+  shareUrl
+}: {
+  busy: boolean;
+  canCreate: boolean;
+  copied: boolean;
+  error: string | null;
+  noteTitle: string;
+  nowMilliseconds: number;
+  onClose: () => void;
+  onCopy: (share: SecureShareOwnerSummary) => void;
+  onCreate: () => void;
+  onEdit: (share: SecureShareOwnerSummary) => void;
+  onRevoke: (share: SecureShareOwnerSummary) => Promise<boolean>;
+  onSelect: (share: SecureShareOwnerSummary) => void;
+  share: SecureShareOwnerSummary;
+  shares: SecureShareOwnerSummary[];
+  shareUrl: string | null;
+}) {
+  const [revokeTarget, setRevokeTarget] = useState<SecureShareOwnerSummary | null>(null);
+  const [revokeAttempted, setRevokeAttempted] = useState(false);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const revokeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const capabilities = secureShareManagementCapabilities(share, nowMilliseconds);
+  const orderedShares = useMemo(
+    () => [...shares].sort((left, right) =>
+      Date.parse(right.createdAt) - Date.parse(left.createdAt)
+      || right.shareId.localeCompare(left.shareId)
+    ),
+    [shares]
+  );
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "브라우저 로컬";
+
+  useDialogFocus(dialogRef);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+
+    if (
+      busy
+      || !dialog
+      || (document.activeElement !== dialog && dialog.contains(document.activeElement))
+    ) {
+      return;
+    }
+
+    dialog.querySelector<HTMLElement>(
+      '.secure-share-history-item[aria-current="true"]:not(:disabled)'
+    )?.focus({ preventScroll: true });
+  }, [busy, share.shareId]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape" || busy || revokeTarget) {
+        return;
+      }
+
+      event.preventDefault();
+      onClose();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [busy, onClose, revokeTarget]);
+
+  function focusSelectedHistoryItem() {
+    window.requestAnimationFrame(() => {
+      const dialog = dialogRef.current;
+      const target = dialog?.querySelector<HTMLElement>(
+        '.secure-share-history-item[aria-current="true"]:not(:disabled)'
+      ) ?? dialog?.querySelector<HTMLElement>("#secure-share-detail-title");
+
+      target?.focus({ preventScroll: true });
+    });
+  }
+
+  function cancelRevoke() {
+    setRevokeTarget(null);
+    setRevokeAttempted(false);
+    window.requestAnimationFrame(() => {
+      const target = revokeButtonRef.current;
+
+      if (target && !target.disabled) {
+        target.focus({ preventScroll: true });
+      } else {
+        focusSelectedHistoryItem();
+      }
+    });
+  }
+
+  async function confirmRevoke() {
+    if (!revokeTarget || busy) {
+      return;
+    }
+
+    setRevokeAttempted(true);
+    if (await onRevoke(revokeTarget)) {
+      setRevokeTarget(null);
+      setRevokeAttempted(false);
+      focusSelectedHistoryItem();
+    }
+  }
+
+  return (
+    <>
+      <div
+        className="modal-backdrop public-share-backdrop"
+        role="presentation"
+        onMouseDown={busy || revokeTarget ? undefined : onClose}
+      >
+        <section
+          aria-hidden={revokeTarget ? "true" : undefined}
+          aria-labelledby="secure-share-owner-title"
+          aria-modal={revokeTarget ? undefined : "true"}
+          className="public-share-modal secure-share-management-modal"
+          inert={revokeTarget ? true : undefined}
+          ref={dialogRef}
+          role="dialog"
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <header className="public-share-modal-header">
+            <div>
+              <span>
+                <ShieldCheck aria-hidden="true" size={16} />
+                Secure Share v2
+              </span>
+              <h2 id="secure-share-owner-title">보안 공유 관리</h2>
+            </div>
+            <button
+              aria-label="보안 공유 창 닫기"
+              className="icon-button"
+              disabled={busy || Boolean(revokeTarget)}
+              onClick={onClose}
+              type="button"
+            >
+              <X aria-hidden="true" size={16} />
+            </button>
+          </header>
+          <div className="public-share-modal-body secure-share-management-body">
+            <div className="secure-share-management-heading">
+              <div>
+                <strong>{noteTitle}</strong>
+                <span>
+                  보안 공유 {shares.length}개 · 표시 시간대 {timeZone}
+                </span>
+              </div>
+              <button
+                className="secondary-button"
+                disabled={busy || !canCreate}
+                onClick={onCreate}
+                title={canCreate ? "이 노트에 새 보안 공유 만들기" : "활성 또는 준비 중인 공유를 먼저 중단해주세요."}
+                type="button"
+              >
+                <FilePlus2 aria-hidden="true" size={16} />
+                새 공유
+              </button>
+            </div>
+
+            <div className="secure-share-management-layout">
+              <nav aria-label="이 노트의 보안 공유 이력" className="secure-share-history">
+                <h3>
+                  <History aria-hidden="true" size={16} />
+                  공유 이력
+                </h3>
+                <div className="secure-share-history-list">
+                  {orderedShares.map((candidate) => {
+                    const status = secureShareManagementStatus(candidate, nowMilliseconds);
+                    const selected = candidate.shareId === share.shareId;
+
+                    return (
+                      <button
+                        aria-current={selected ? "true" : undefined}
+                        className={`secure-share-history-item ${selected ? "selected" : ""}`}
+                        data-dialog-initial-focus={selected && !busy ? true : undefined}
+                        disabled={busy}
+                        key={candidate.shareId}
+                        onClick={() => {
+                          setRevokeTarget(null);
+                          setRevokeAttempted(false);
+                          onSelect(candidate);
+                        }}
+                        type="button"
+                      >
+                        <span className={`secure-share-status-badge ${status}`}>
+                          {secureShareStatusLabels[status]}
+                        </span>
+                        <strong>{formatFullDateTime(new Date(candidate.createdAt))}</strong>
+                        <small>
+                          {secureShareAccessModeLabel(candidate.accessMode)}
+                          {" · "}
+                          {secureSharePermissionLabel(candidate.permissionLevel)}
+                        </small>
+                      </button>
+                    );
+                  })}
+                </div>
+              </nav>
+
+              <section
+                aria-labelledby="secure-share-detail-title"
+                className="secure-share-management-detail"
+              >
+                <div className="secure-share-detail-heading">
+                  <div>
+                    <span className={`secure-share-status-badge ${capabilities.status}`}>
+                      {secureShareStatusLabels[capabilities.status]}
+                    </span>
+                    <h3 id="secure-share-detail-title" tabIndex={-1}>선택한 공유 상세</h3>
+                  </div>
+                  <span>첨부 {share.attachmentCount}개</span>
+                </div>
+
+                <dl className="secure-share-detail-grid">
+                  <div>
+                    <dt>생성일</dt>
+                    <dd>{formatFullDateTime(new Date(share.createdAt))}</dd>
+                  </div>
+                  <div>
+                    <dt>만료일</dt>
+                    <dd>{formatFullDateTime(new Date(share.expiresAt))}</dd>
+                  </div>
+                  <div>
+                    <dt>접근 모드</dt>
+                    <dd>{secureShareAccessModeLabel(share.accessMode)}</dd>
+                  </div>
+                  <div>
+                    <dt>권한</dt>
+                    <dd>{secureSharePermissionLabel(share.permissionLevel)}</dd>
+                  </div>
+                  <div>
+                    <dt>성공 접근</dt>
+                    <dd>{share.successfulAccessCount.toLocaleString("ko-KR")}회</dd>
+                  </div>
+                  <div>
+                    <dt>마지막 접근</dt>
+                    <dd>
+                      {share.lastAccessAt
+                        ? formatFullDateTime(new Date(share.lastAccessAt))
+                        : "아직 없음"}
+                    </dd>
+                  </div>
+                  <div className="secure-share-detail-wide">
+                    <dt>1회 링크</dt>
+                    <dd>
+                      {!share.oneTimeEnabled
+                        ? "사용 안 함"
+                        : share.consumedAt
+                          ? `소비됨 · ${formatFullDateTime(new Date(share.consumedAt))}`
+                          : "아직 소비되지 않음"}
+                    </dd>
+                  </div>
+                </dl>
+
+                <div aria-label="보안 설정" className="secure-share-security-badges">
+                  {secureShareSecurityBadges(share).map((badge) => (
+                    <span key={badge}>{badge}</span>
+                  ))}
+                </div>
+
+                {shareUrl && (capabilities.canCopy || capabilities.canPreview) ? (
+                  <label className="public-share-url-field">
+                    <span>URL</span>
+                    <input
+                      onFocus={(event) => event.currentTarget.select()}
+                      readOnly
+                      value={shareUrl}
+                    />
+                  </label>
+                ) : (
+                  <p className="public-share-missing-key">
+                    {capabilities.status === "revoked" || capabilities.status === "expired"
+                      ? "종료된 공유의 URL은 다시 표시하지 않습니다."
+                      : "이 브라우저에서 공유 키를 복구할 수 없어 URL을 표시하지 않습니다."}
+                  </p>
+                )}
+
+                <div className="public-share-modal-actions secure-share-management-actions">
+                  <button
+                    disabled={busy || !capabilities.canCopy || !shareUrl}
+                    onClick={() => onCopy(share)}
+                    type="button"
+                  >
+                    {copied ? <CheckCircle2 aria-hidden="true" size={16} /> : <Copy aria-hidden="true" size={16} />}
+                    {copied ? "복사됨" : "URL 복사"}
+                  </button>
+                  {!busy && capabilities.canPreview && shareUrl ? (
+                    <a
+                      className="secondary-button public-share-open-link"
+                      href={shareUrl}
+                      rel="noopener noreferrer"
+                      target="_blank"
+                    >
+                      <Eye aria-hidden="true" size={16} />
+                      소유자 미리보기
+                    </a>
+                  ) : (
+                    <button className="secondary-button" disabled type="button">
+                      <Eye aria-hidden="true" size={16} />
+                      소유자 미리보기
+                    </button>
+                  )}
+                  <button
+                    className="secondary-button"
+                    disabled={busy || !capabilities.canEdit}
+                    onClick={() => onEdit(share)}
+                    type="button"
+                  >
+                    <Pencil aria-hidden="true" size={16} />
+                    설정 변경
+                  </button>
+                  <button
+                    className="secondary-button danger"
+                    disabled={busy || !capabilities.canRevoke}
+                    onClick={() => {
+                      setRevokeAttempted(false);
+                      setRevokeTarget(share);
+                    }}
+                    ref={revokeButtonRef}
+                    type="button"
+                  >
+                    {busy ? <Loader2 aria-hidden="true" className="spin" size={16} /> : <Ban aria-hidden="true" size={16} />}
+                    공유 중단
+                  </button>
+                </div>
+
+                {busy && (
+                  <p aria-live="polite" className="public-share-status">
+                    보안 공유 상태를 업데이트하는 중...
+                  </p>
+                )}
+                {error && <p className="form-error" role="alert">{error}</p>}
+              </section>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      {revokeTarget && (
+        <SecureShareRevokeConfirmDialog
+          busy={busy}
+          error={revokeAttempted ? error : null}
+          noteTitle={noteTitle}
+          onCancel={cancelRevoke}
+          onConfirm={() => void confirmRevoke()}
+          share={revokeTarget}
+        />
+      )}
+    </>
+  );
+}
+
+function SecureShareRevokeConfirmDialog({
+  busy,
+  error,
+  noteTitle,
+  onCancel,
+  onConfirm,
+  share
+}: {
+  busy: boolean;
+  error: string | null;
+  noteTitle: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+  share: SecureShareOwnerSummary;
+}) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+
+  useDialogFocus(dialogRef);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape" || busy) {
+        return;
+      }
+
+      event.preventDefault();
+      onCancel();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [busy, onCancel]);
+
+  return (
+    <div
+      className="modal-backdrop secure-share-revoke-backdrop"
+      onMouseDown={busy ? undefined : onCancel}
+      role="presentation"
+    >
+      <section
+        aria-describedby="secure-share-revoke-description"
+        aria-labelledby="secure-share-revoke-title"
+        aria-modal="true"
+        className="secure-share-revoke-dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="alertdialog"
+      >
+        <span className="secure-share-revoke-icon" aria-hidden="true">
+          <Ban size={22} />
+        </span>
+        <div>
+          <h2 id="secure-share-revoke-title">이 공유를 즉시 중단할까요?</h2>
+          <p id="secure-share-revoke-description">
+            “{noteTitle}”의 {formatFullDateTime(new Date(share.createdAt))} 공유를 중단합니다.
+            기존 접근 세션도 즉시 무효화되며, 같은 링크를 다시 활성화할 수 없습니다.
+          </p>
+          {error && <p className="form-error" role="alert">{error}</p>}
+        </div>
+        <div className="secure-share-revoke-actions">
+          <button
+            className="secondary-button"
+            data-dialog-initial-focus
+            disabled={busy}
+            onClick={onCancel}
+            type="button"
+          >
+            취소
+          </button>
+          <button className="danger" disabled={busy} onClick={onConfirm} type="button">
+            {busy ? <Loader2 aria-hidden="true" className="spin" size={16} /> : <Ban aria-hidden="true" size={16} />}
+            공유 중단
+          </button>
         </div>
       </section>
     </div>
