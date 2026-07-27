@@ -7,6 +7,11 @@ import { SecureShareSettingsModal } from "./SecureShareSettingsModal";
 
 type ModalProps = ComponentProps<typeof SecureShareSettingsModal>;
 
+function localDateTimeInputValue(date: Date) {
+  const localMilliseconds = date.getTime() - date.getTimezoneOffset() * 60_000;
+  return new Date(localMilliseconds).toISOString().slice(0, 16);
+}
+
 function renderModal(overrides: Partial<ModalProps> = {}) {
   const appRoot = document.createElement("div");
   const opener = document.createElement("button");
@@ -186,13 +191,17 @@ describe("SecureShareSettingsModal", () => {
 
     await user.click(screen.getByRole("radio", { name: /직접 지정/ }));
     const customExpiry = screen.getByLabelText("만료 날짜와 시간");
-    fireEvent.change(customExpiry, { target: { value: "2026-07-28T09:04" } });
+    fireEvent.change(customExpiry, {
+      target: { value: localDateTimeInputValue(new Date("2026-07-28T00:04:00.000Z")) }
+    });
     await user.click(screen.getByRole("button", { name: "보안 공유 만들기" }));
 
     expect(screen.getByRole("alert")).toHaveTextContent("최소 5분 이후");
     expect(onSave).not.toHaveBeenCalled();
 
-    fireEvent.change(customExpiry, { target: { value: "2026-07-29T09:00" } });
+    fireEvent.change(customExpiry, {
+      target: { value: localDateTimeInputValue(new Date("2026-07-29T00:00:00.000Z")) }
+    });
     await user.click(screen.getByRole("button", { name: "보안 공유 만들기" }));
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
