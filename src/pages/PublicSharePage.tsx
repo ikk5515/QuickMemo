@@ -1,6 +1,17 @@
 import { AlertTriangle, Download, Eye, File, Loader2, LockKeyhole } from "lucide-react";
-import { lazy, Suspense, type CSSProperties, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import {
+  lazy,
+  Suspense,
+  type CSSProperties,
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 import {
   attachmentDownloadName,
   formatFileSize,
@@ -22,6 +33,14 @@ import {
 } from "../lib/crypto";
 import { linkifyEditorHtml, parseEditorContent, sanitizeEditorHtml } from "../lib/editorContent";
 import { safeRasterImageBytes } from "../lib/safeRasterImage";
+import { resolveSecureShareFeatureFlags } from "../lib/secureSharePolicy";
+import {
+  createSecureShareLoginReturnState,
+  parseSecureShareContentKeyFragment
+} from "../lib/shareLoginReturn";
+import {
+  type SecureShareSaveCopyProgress
+} from "../lib/secureShareSaveCopy";
 import {
   decodeTextAttachmentPreview,
   legacyBinaryPreviewAttachmentExtensions,
@@ -38,6 +57,8 @@ import {
   type PublicNoteShareAttachmentSnapshot,
   type PublicNoteShareSnapshot
 } from "../services/publicShares";
+import { getSecureShareFeatureStatus } from "../services/secureShares";
+import type { SecurePublicShareCopyPayload } from "../components/SecurePublicShareViewer";
 interface PublicShareAttachmentView {
   id: string;
   downloadName: string;
@@ -48,6 +69,12 @@ interface PublicShareAttachmentView {
 }
 
 const PublicAttachmentPreviewModal = lazy(() => import("../components/PublicAttachmentPreviewModal"));
+const SecurePublicShareViewer = lazy(() =>
+  import("../components/SecurePublicShareViewer").then((module) => ({
+    default: module.SecurePublicShareViewer
+  }))
+);
+const secureShareV2IdentifierPattern = /^ss2_[A-Za-z0-9_-]{2,124}$/u;
 
 interface PublicShareContent {
   attachments: PublicShareAttachmentView[];
@@ -56,7 +83,332 @@ interface PublicShareContent {
   title: string;
 }
 
+type SecureShareFeatureGateState = "checking" | "enabled" | "unavailable";
+
 export default function PublicSharePage() {
+  const { shareId } = useParams();
+
+  return shareId && secureShareV2IdentifierPattern.test(shareId)
+    ? <SecurePublicShareRoute key={shareId} shareId={shareId} />
+    : <LegacyPublicSharePage />;
+}
+
+function SecurePublicShareRoute({ shareId }: { shareId: string }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { firebaseUser, loading: authLoading, privateKey, profile } = useAuth();
+  const parsedFragment = useMemo(
+    () => parseSecureShareContentKeyFragment(location.hash),
+    [location.hash]
+  );
+  const [featureGateState, setFeatureGateState] = useState<SecureShareFeatureGateState>("checking");
+  const [idTokenState, setIdTokenState] = useState<{ token: string; uid: string } | null>(null);
+  const [tokenError, setTokenError] = useState("");
+  const [copyProgress, setCopyProgress] = useState<SecureShareSaveCopyProgress | null>(null);
+  const [copyResult, setCopyResult] = useState("");
+  const [copyError, setCopyError] = useState("");
+  const [copyRunning, setCopyRunning] = useState(false);
+  const copyAbortControllerRef = useRef<AbortController | null>(null);
+  const authenticatedProfile = Boolean(
+    firebaseUser
+    && profile
+    && profile.isActive
+    && firebaseUser.uid === profile.uid
+  );
+  const idToken = authenticatedProfile
+    && idTokenState
+    && idTokenState.uid === firebaseUser?.uid
+    ? idTokenState.token
+    : undefined;
+
+  useEffect(() => {
+    const clientFlags = resolveSecureShareFeatureFlags();
+
+    if (!clientFlags.clientV2Enabled) {
+      setFeatureGateState("unavailable");
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    setFeatureGateState("checking");
+
+    void getSecureShareFeatureStatus(controller.signal)
+      .then((serverStatus) => {
+        if (!controller.signal.aborted) {
+          setFeatureGateState(
+            resolveSecureShareFeatureFlags(serverStatus).v2Enabled
+              ? "enabled"
+              : "unavailable"
+          );
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setFeatureGateState("unavailable");
+        }
+      });
+
+    return () => controller.abort();
+  }, [shareId]);
+
+  useEffect(() => {
+    let active = true;
+    const uid = featureGateState === "enabled" && authenticatedProfile
+      ? firebaseUser?.uid
+      : null;
+
+    setIdTokenState(null);
+    setTokenError("");
+
+    if (!uid || !firebaseUser) {
+      return () => {
+        active = false;
+      };
+    }
+
+    void firebaseUser.getIdToken()
+      .then((token) => {
+        if (active && firebaseUser.uid === uid) {
+          setIdTokenState({ token, uid });
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setTokenError("QuickMemo 로그인 토큰을 확인하지 못했습니다.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authenticatedProfile, featureGateState, firebaseUser]);
+
+  useEffect(() => {
+    return () => {
+      copyAbortControllerRef.current?.abort();
+      copyAbortControllerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    copyAbortControllerRef.current?.abort();
+    copyAbortControllerRef.current = null;
+    setCopyProgress(null);
+    setCopyResult("");
+    setCopyError("");
+    setCopyRunning(false);
+  }, [parsedFragment?.contentKey, shareId]);
+
+  const requireLogin = useCallback(() => {
+    const returnState = createSecureShareLoginReturnState(
+      location.pathname,
+      location.hash
+    );
+
+    if (!returnState) {
+      setCopyError("로그인 후 돌아올 보안 공유 주소를 확인하지 못했습니다.");
+      return;
+    }
+
+    navigate("/login", {
+      state: returnState
+    });
+  }, [location.hash, location.pathname, navigate]);
+
+  const saveCopy = useCallback(async (payload: SecurePublicShareCopyPayload) => {
+    if (copyAbortControllerRef.current) {
+      const message = "이미 복사본 저장 작업이 진행 중입니다.";
+      setCopyError(message);
+      throw new Error(message);
+    }
+    if (
+      !firebaseUser
+      || !profile
+      || !privateKey
+      || !idToken
+      || firebaseUser.uid !== profile.uid
+    ) {
+      const message = "활성 QuickMemo 노트 권한과 암호화 키를 확인해주세요.";
+      setCopyError(message);
+      throw new Error(message);
+    }
+
+    const controller = new AbortController();
+    copyAbortControllerRef.current = controller;
+    setCopyRunning(true);
+    setCopyError("");
+    setCopyResult("");
+    setCopyProgress({
+      fileCount: payload.attachments.length,
+      fileIndex: 0,
+      fileName: "",
+      loadedBytes: 0,
+      percent: 0,
+      phase: "preparing",
+      totalBytes: 0
+    });
+
+    try {
+      const { saveSecureShareCopy } = await import("../lib/secureShareSaveCopy");
+      await saveSecureShareCopy({
+        payload,
+        privateKey,
+        profile,
+        signal: controller.signal,
+        onProgress: setCopyProgress
+      });
+      setCopyResult("보안 공유의 독립 복사본을 QuickMemo에 저장했습니다.");
+    } catch (caught) {
+      const message = caught instanceof Error && caught.name === "SecureShareSaveCopyError"
+        ? caught.message
+        : "복사본 저장 중 오류가 발생했습니다.";
+      setCopyProgress(null);
+      setCopyResult("");
+      setCopyError(message);
+      throw caught;
+    } finally {
+      if (copyAbortControllerRef.current === controller) {
+        copyAbortControllerRef.current = null;
+      }
+      setCopyRunning(false);
+    }
+  }, [firebaseUser, idToken, privateKey, profile]);
+
+  if (featureGateState === "checking") {
+    return (
+      <main className="public-share-page">
+        <section className="secure-public-share-state" aria-live="polite">
+          <Loader2 aria-hidden="true" className="spin" size={24} />
+          <h1>보안 공유를 확인하는 중</h1>
+          <p>잠시만 기다려주세요.</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (featureGateState === "unavailable") {
+    return <SecureShareUnavailableState />;
+  }
+
+  if (!parsedFragment) {
+    return (
+      <main className="public-share-page">
+        <section className="secure-public-share-state error" role="alert">
+          <AlertTriangle aria-hidden="true" size={28} />
+          <h1>보안 공유 링크가 올바르지 않습니다.</h1>
+          <p>주소의 암호화 키 조각을 확인해주세요.</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (
+    authLoading
+    || (authenticatedProfile && !idToken && !tokenError)
+  ) {
+    return (
+      <main className="public-share-page">
+        <section className="secure-public-share-state" aria-live="polite">
+          <Loader2 aria-hidden="true" className="spin" size={24} />
+          <h1>보안 공유 로그인 상태 확인 중</h1>
+          <p>잠시만 기다려주세요.</p>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main className="public-share-page">
+      {tokenError && <p className="secure-public-share-error" role="alert">{tokenError}</p>}
+      {(copyProgress || copyResult || copyError) && (
+        <section className="secure-public-share-viewer" aria-live="polite">
+          {copyProgress && copyProgress.phase !== "complete" && (
+            <>
+              <strong>{secureShareCopyProgressLabel(copyProgress)}</strong>
+              {copyProgress.totalBytes > 0 && (
+                <progress
+                  aria-label="복사본 저장 진행률"
+                  max={100}
+                  value={Math.min(100, Math.max(0, copyProgress.percent))}
+                />
+              )}
+              {copyRunning && copyProgress.phase !== "cleaning_up" && (
+                <button
+                  className="secondary-button danger"
+                  onClick={() => {
+                    copyAbortControllerRef.current?.abort();
+                    setCopyResult("취소 요청을 처리하고 생성된 데이터를 정리하는 중입니다.");
+                    setCopyProgress((current) =>
+                      current ? { ...current, phase: "cleaning_up", percent: 0 } : current
+                    );
+                  }}
+                  type="button"
+                >
+                  복사본 저장 취소
+                </button>
+              )}
+            </>
+          )}
+          {copyResult && <p className="secure-public-share-notice" role="status">{copyResult}</p>}
+          {copyError && <p className="secure-public-share-error" role="alert">{copyError}</p>}
+        </section>
+      )}
+      <Suspense fallback={<section className="secure-public-share-state">보안 공유 화면을 불러오는 중...</section>}>
+        <SecurePublicShareViewer
+          contentKey={parsedFragment.contentKey}
+          idToken={idToken}
+          isAuthenticated={Boolean(authenticatedProfile && idToken)}
+          onRequireLogin={requireLogin}
+          onSaveCopy={saveCopy}
+          shareId={shareId}
+        />
+      </Suspense>
+    </main>
+  );
+}
+
+function SecureShareUnavailableState() {
+  return (
+    <main className="public-share-page">
+      <section className="secure-public-share-state error" role="alert">
+        <AlertTriangle aria-hidden="true" size={28} />
+        <h1>보안 공유를 사용할 수 없습니다.</h1>
+        <p>링크가 만료되었거나 현재 사용할 수 없습니다.</p>
+      </section>
+    </main>
+  );
+}
+
+function secureShareCopyProgressLabel(progress: SecureShareSaveCopyProgress) {
+  if (progress.phase === "preparing") {
+    return "복사본 저장을 준비하는 중입니다.";
+  }
+  if (progress.phase === "creating_note") {
+    return "암호화된 새 노트를 만드는 중입니다.";
+  }
+  if (progress.phase === "activating") {
+    return "첨부파일을 확인하고 새 노트를 활성화하는 중입니다.";
+  }
+  if (progress.phase === "cleaning_up") {
+    return "생성된 일부 데이터를 안전하게 정리하는 중입니다.";
+  }
+  if (progress.phase === "complete") {
+    return "복사본 저장을 완료했습니다.";
+  }
+
+  const fileLabel = progress.fileCount > 0
+    ? `파일 ${progress.fileIndex}/${progress.fileCount} · ${progress.fileName}`
+    : "";
+  const phaseLabel = progress.phase === "downloading"
+    ? "복사 권한으로 가져오는 중"
+    : progress.phase === "encrypting"
+      ? "새 노트 키로 암호화 중"
+      : "암호화된 첨부파일 업로드 중";
+
+  return `${fileLabel} · ${phaseLabel}`;
+}
+
+function LegacyPublicSharePage() {
   const { shareId } = useParams();
   const [title, setTitle] = useState("");
   const [bodyHtml, setBodyHtml] = useState("");

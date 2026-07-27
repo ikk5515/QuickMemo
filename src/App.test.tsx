@@ -10,10 +10,19 @@ const authState = vi.hoisted(() => ({
   loading: false,
   profile: null as UserProfile | null
 }));
+const recoveryMocks = vi.hoisted(() => ({
+  reapStaleSecureShareCopyJobs: vi.fn(async () => ({
+    aborted: 0,
+    activated: 0,
+    retained: 0,
+    scanned: 0
+  }))
+}));
 
 vi.mock("./context/AuthContext", () => ({
   useAuth: () => authState
 }));
+vi.mock("./services/secureShareCopyJobs", () => recoveryMocks);
 
 vi.mock("./pages/HomeRedirectPage", () => ({ default: () => <span>홈 화면</span> }));
 vi.mock("./pages/LibraryPage", () => ({ default: () => <span>자료실 화면</span> }));
@@ -70,9 +79,21 @@ function renderGuard(feature: "notes" | "library" | "schedule") {
 
 describe("RequireAuth feature access", () => {
   beforeEach(() => {
+    recoveryMocks.reapStaleSecureShareCopyJobs.mockClear();
     authState.firebaseUser = { uid: "user-a" } as User;
     authState.loading = false;
     authState.profile = profile();
+  });
+
+  it("starts durable stale-copy recovery for an authenticated notes user", async () => {
+    render(
+      <MemoryRouter initialEntries={["/home"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("홈 화면")).toBeInTheDocument();
+    expect(recoveryMocks.reapStaleSecureShareCopyJobs).toHaveBeenCalledWith("user-a");
   });
 
   it("keeps legacy profiles compatible", () => {

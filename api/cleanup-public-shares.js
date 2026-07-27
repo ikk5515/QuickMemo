@@ -18,6 +18,37 @@ const attachmentCountPolicyVersion = 1;
 const deletionRetryDelayMs = 15 * 60 * 1000;
 const legacyReservationGraceMs = 3 * 60 * 60 * 1000;
 const legacyNoteDeletionBackfillVersion = 1;
+const secureShareCopyStaleMs = 24 * 60 * 60 * 1000;
+const secureShareCopyCleanupBatchLimit = 20;
+const secureShareCopyCleanupAttachmentDeleteLimit = 100;
+const secureShareCopyCleanupClaimIdField = "secureShareCopyCleanupClaimId";
+const secureShareCopyCleanupClaimedAtField = "secureShareCopyCleanupClaimedAt";
+const secureShareRootStateCollections = [
+  "publicShareAccessSessions",
+  "publicShareEmailChallenges",
+  "publicShareUnlockGrants",
+  "publicShareRateLimits"
+];
+const secureShareChildStateCollections = [
+  {
+    collectionId: "items",
+    counterName: "secureShareRecipientsDeleted",
+    parentCollectionId: "publicShareRecipients"
+  },
+  {
+    collectionId: "items",
+    counterName: "secureShareCommentsDeleted",
+    parentCollectionId: "publicShareComments"
+  },
+  {
+    collectionId: "items",
+    counterName: "secureShareAuditEventsDeleted",
+    parentCollectionId: "publicShareAuditEvents"
+  }
+];
+const secureShareContainerCollections = secureShareChildStateCollections.map(
+  ({ parentCollectionId }) => parentCollectionId
+);
 
 function envValue(name) {
   const value = process.env[name];
@@ -468,6 +499,76 @@ async function queryExpiredShares({ accessToken, projectId, nowIso, limit }) {
   return result.flatMap((entry) => (entry.document ? [entry.document] : []));
 }
 
+export async function querySecureShareDocumentsByShareId({
+  accessToken,
+  collectionId,
+  limit,
+  projectId,
+  shareId
+}) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
+        from: [{ collectionId }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "shareId" },
+            op: "EQUAL",
+            value: { stringValue: shareId }
+          }
+        },
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+export async function queryExpiredSecureShareDocuments({
+  accessToken,
+  allDescendants = false,
+  collectionId,
+  fieldPath,
+  limit,
+  nowIso,
+  projectId
+}) {
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [{ fieldPath: "__name__" }]
+        },
+        from: [{ collectionId, ...(allDescendants ? { allDescendants: true } : {}) }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath },
+            op: "LESS_THAN_OR_EQUAL",
+            value: { timestampValue: nowIso }
+          }
+        },
+        orderBy: [
+          {
+            field: { fieldPath },
+            direction: "ASCENDING"
+          }
+        ],
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
 async function queryExpiredPublicShareAttachments({ accessToken, projectId, nowIso, limit }) {
   const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
   const result = await firestoreRequest(runQueryPath, accessToken, {
@@ -644,6 +745,62 @@ async function queryPurgedNotes({ accessToken, projectId, limit }) {
   return result.flatMap((entry) => (entry.document ? [entry.document] : []));
 }
 
+async function queryStaleSecureShareCopyJobs({ accessToken, projectId, nowIso, limit }) {
+  const cutoffIso = new Date(Date.parse(nowIso) - secureShareCopyStaleMs).toISOString();
+  const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        select: {
+          fields: [
+            { fieldPath: "ownerUid" },
+            { fieldPath: "type" },
+            { fieldPath: "participantUids" },
+            { fieldPath: "isDeleted" },
+            { fieldPath: "revision" },
+            { fieldPath: "secureShareCopyState" },
+            { fieldPath: "secureShareCopyJobId" },
+            { fieldPath: "secureShareCopyExpectedAttachmentCount" },
+            { fieldPath: "secureShareCopyReservedAttachmentCount" },
+            { fieldPath: "secureShareCopyReadyAttachmentCount" },
+            { fieldPath: "secureShareCopyUpdatedAt" }
+          ]
+        },
+        from: [{ collectionId: "notes" }],
+        where: {
+          compositeFilter: {
+            op: "AND",
+            filters: [
+              {
+                fieldFilter: {
+                  field: { fieldPath: "secureShareCopyState" },
+                  op: "EQUAL",
+                  value: { stringValue: "copying" }
+                }
+              },
+              {
+                fieldFilter: {
+                  field: { fieldPath: "secureShareCopyUpdatedAt" },
+                  op: "LESS_THAN_OR_EQUAL",
+                  value: { timestampValue: cutoffIso }
+                }
+              }
+            ]
+          }
+        },
+        orderBy: [{
+          field: { fieldPath: "secureShareCopyUpdatedAt" },
+          direction: "ASCENDING"
+        }],
+        limit
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
 async function queryActiveNotesByNoteId({ accessToken, projectId, noteId, limit = 300 }) {
   const runQueryPath = `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
   const result = await firestoreRequest(runQueryPath, accessToken, {
@@ -732,6 +889,17 @@ function integerField(document, fieldName) {
   return Number.isSafeInteger(parsed) ? parsed : 0;
 }
 
+function stringArrayField(document, fieldName) {
+  const values = document?.fields?.[fieldName]?.arrayValue?.values;
+
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  const strings = values.map((value) => value?.stringValue);
+  return strings.every((value) => typeof value === "string") ? strings : [];
+}
+
 function booleanField(document, fieldName) {
   return document?.fields?.[fieldName]?.booleanValue === true;
 }
@@ -753,8 +921,15 @@ function documentNameForPath(projectId, documentPath) {
   return `${documentsResourceRoot(projectId)}/${documentPath}`;
 }
 
-async function getDocumentByName(documentName, accessToken) {
-  const response = await fetch(`${firestoreBaseUrl}/${encodeDocumentPath(documentName)}`, {
+async function getDocumentByName(documentName, accessToken, fieldMask = []) {
+  const query = new URLSearchParams();
+
+  for (const fieldPath of fieldMask) {
+    query.append("mask.fieldPaths", fieldPath);
+  }
+
+  const queryString = query.toString();
+  const response = await fetch(`${firestoreBaseUrl}/${encodeDocumentPath(documentName)}${queryString ? `?${queryString}` : ""}`, {
     headers: { authorization: `Bearer ${accessToken}` }
   });
 
@@ -944,7 +1119,107 @@ async function normalizeLegacyNoteDeletionPage(noteDocuments, accessToken, proje
   };
 }
 
-async function beginAttachmentDeletionByName(documentName, accessToken, shouldDelete = () => true) {
+function noteAttachmentParentState(attachmentName, projectId) {
+  const notesPrefix = `${documentNameForPath(projectId, "notes")}/`;
+  const relativeName =
+    typeof attachmentName === "string" && attachmentName.startsWith(notesPrefix)
+      ? attachmentName.slice(notesPrefix.length)
+      : "";
+  const [noteId, collectionId, attachmentId, ...extraSegments] = relativeName.split("/");
+
+  if (
+    !/^[A-Za-z0-9_-]{1,160}$/u.test(noteId)
+    || collectionId !== "attachments"
+    || !/^[A-Za-z0-9_-]{1,160}$/u.test(attachmentId)
+    || extraSegments.length > 0
+  ) {
+    return null;
+  }
+
+  return {
+    attachmentId,
+    noteId,
+    noteName: `${notesPrefix}${noteId}`
+  };
+}
+
+function secureShareCopyCounterReleaseWrite(
+  attachment,
+  note,
+  noteName,
+  preserveStaleHeartbeat = false
+) {
+  const copyJobId = stringField(attachment, "secureShareCopyJobId");
+
+  if (
+    !copyJobId
+    || !note
+    || stringField(note, "secureShareCopyState") !== "copying"
+    || stringField(note, "secureShareCopyJobId") !== copyJobId
+  ) {
+    return { valid: true, write: null };
+  }
+
+  const expectedCount = integerField(note, "secureShareCopyExpectedAttachmentCount");
+  const reservedCount = integerField(note, "secureShareCopyReservedAttachmentCount");
+  const readyCount = integerField(note, "secureShareCopyReadyAttachmentCount");
+  const attachmentReady = booleanField(attachment, "isReady");
+
+  if (
+    !note.updateTime
+    || !hasField(note, "secureShareCopyExpectedAttachmentCount")
+    || !hasField(note, "secureShareCopyReservedAttachmentCount")
+    || !hasField(note, "secureShareCopyReadyAttachmentCount")
+    || expectedCount < 0
+    || expectedCount > 100
+    || reservedCount <= 0
+    || reservedCount > expectedCount
+    || readyCount < 0
+    || readyCount > reservedCount
+    || (attachmentReady && readyCount <= 0)
+  ) {
+    return { valid: false, write: null };
+  }
+
+  const fields = {
+    secureShareCopyReservedAttachmentCount: integerValue(reservedCount - 1)
+  };
+  const fieldPaths = ["secureShareCopyReservedAttachmentCount"];
+
+  if (attachmentReady) {
+    fields.secureShareCopyReadyAttachmentCount = integerValue(readyCount - 1);
+    fieldPaths.push("secureShareCopyReadyAttachmentCount");
+  }
+
+  return {
+    valid: true,
+    write: {
+      update: {
+        name: noteName,
+        fields
+      },
+      updateMask: { fieldPaths },
+      currentDocument: { updateTime: note.updateTime },
+      ...(!preserveStaleHeartbeat
+        ? {
+            updateTransforms: [{
+              fieldPath: "secureShareCopyUpdatedAt",
+              setToServerValue: "REQUEST_TIME"
+            }]
+          }
+        : {})
+    }
+  };
+}
+
+export async function beginAttachmentDeletionByName(
+  projectId,
+  documentName,
+  accessToken,
+  shouldDelete = () => true,
+  requiredCopyJobId = "",
+  requiredCleanupClaimId = ""
+) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const attachment = await getDocumentByName(documentName, accessToken);
 
@@ -952,8 +1227,69 @@ async function beginAttachmentDeletionByName(documentName, accessToken, shouldDe
       return null;
     }
 
+    if (
+      booleanField(attachment, "deletionStarted")
+      && !requiredCopyJobId
+      && !requiredCleanupClaimId
+    ) {
+      return attachment;
+    }
+
+    const copyJobId = stringField(attachment, "secureShareCopyJobId");
+    const parentState = copyJobId
+      ? noteAttachmentParentState(documentName, projectId)
+      : null;
+    const note = parentState
+      ? await getDocumentByName(parentState.noteName, accessToken)
+      : null;
+
+    if (
+      (
+        requiredCopyJobId
+        && (
+          copyJobId !== requiredCopyJobId
+          || !parentState
+          || !note
+          || stringField(note, "secureShareCopyState") !== "copying"
+          || stringField(note, "secureShareCopyJobId") !== requiredCopyJobId
+        )
+      )
+      || (
+        requiredCleanupClaimId
+        && (
+          !note
+          || stringField(note, secureShareCopyCleanupClaimIdField) !== requiredCleanupClaimId
+          || !Number.isFinite(
+            timestampFieldMillis(note, secureShareCopyCleanupClaimedAtField)
+          )
+        )
+      )
+    ) {
+      return null;
+    }
+
+    // The Blob API and this cron path record deletionStarted in the same
+    // preconditioned commit that releases secure-share copy counters. Treat it
+    // as the idempotency boundary so their retries cannot decrement twice. A
+    // stale-copy cleanup must still prove its exact durable claim before using
+    // that boundary, otherwise a resumed job could be deleted by an old pass.
     if (booleanField(attachment, "deletionStarted")) {
       return attachment;
+    }
+
+    const counterRelease = parentState
+      ? secureShareCopyCounterReleaseWrite(
+          attachment,
+          note,
+          parentState.noteName,
+          Boolean(requiredCleanupClaimId)
+        )
+      : { valid: true, write: null };
+
+    // A matching copying job with malformed counters is retained for a later
+    // safe repair instead of deleting metadata and creating a ghost count.
+    if (!counterRelease.valid) {
+      return null;
     }
 
     try {
@@ -969,7 +1305,8 @@ async function beginAttachmentDeletionByName(documentName, accessToken, shouldDe
               updateMask: { fieldPaths: ["deletionStarted"] },
               currentDocument: { updateTime: attachment.updateTime },
               updateTransforms: [{ fieldPath: "deletionStartedAt", setToServerValue: "REQUEST_TIME" }]
-            }
+            },
+            ...(counterRelease.write ? [counterRelease.write] : [])
           ]
         })
       });
@@ -1150,6 +1487,287 @@ function cleanupAttachmentQueueNameFromAttachmentName(attachmentName) {
     );
 }
 
+function publicShareIdFromShareName(shareName, projectId) {
+  const prefix = `${documentNameForPath(projectId, "publicNoteShares")}/`;
+  const shareId = typeof shareName === "string" && shareName.startsWith(prefix)
+    ? shareName.slice(prefix.length)
+    : "";
+
+  return shareId && !shareId.includes("/") ? shareId : "";
+}
+
+function publicShareIdFromPolicyName(policyName, projectId) {
+  const prefix = `${documentNameForPath(projectId, "publicSharePolicies")}/`;
+  const shareId = typeof policyName === "string" && policyName.startsWith(prefix)
+    ? policyName.slice(prefix.length)
+    : "";
+
+  return shareId && !shareId.includes("/") ? shareId : "";
+}
+
+function secureShareRootStateCounterName(collectionId) {
+  switch (collectionId) {
+    case "publicShareAccessSessions":
+      return "secureShareAccessSessionsDeleted";
+    case "publicShareEmailChallenges":
+      return "secureShareEmailChallengesDeleted";
+    case "publicShareUnlockGrants":
+      return "secureShareUnlockGrantsDeleted";
+    case "publicShareRateLimits":
+      return "secureShareRateLimitsDeleted";
+    default:
+      throw new Error("Unsupported secure share state collection");
+  }
+}
+
+function secureShareItemState(documentName, projectId) {
+  const prefix = `${documentsResourceRoot(projectId)}/`;
+  const relativeName = typeof documentName === "string" && documentName.startsWith(prefix)
+    ? documentName.slice(prefix.length)
+    : "";
+  const [parentCollectionId, shareId, collectionId, documentId, ...extraSegments] = relativeName.split("/");
+  const definition = secureShareChildStateCollections.find(
+    (candidate) => candidate.parentCollectionId === parentCollectionId
+  );
+
+  if (
+    !definition
+    || !shareId
+    || collectionId !== definition.collectionId
+    || !documentId
+    || extraSegments.length > 0
+  ) {
+    return null;
+  }
+
+  return { counterName: definition.counterName, shareId };
+}
+
+async function secureShareStateRemains(shareId, accessToken, projectId) {
+  for (const collectionId of secureShareRootStateCollections) {
+    const documents = await querySecureShareDocumentsByShareId({
+      accessToken,
+      collectionId,
+      limit: 1,
+      projectId,
+      shareId
+    });
+
+    if (documents.length > 0) {
+      return true;
+    }
+  }
+
+  for (const definition of secureShareChildStateCollections) {
+    const parentName = documentNameForPath(
+      projectId,
+      `${definition.parentCollectionId}/${shareId}`
+    );
+    const documents = await listChildDocuments(
+      parentName,
+      definition.collectionId,
+      accessToken,
+      1,
+      ["__name__"]
+    );
+
+    if (documents.length > 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function deleteSecureShareStateByShareId(shareId, accessToken, stats, projectId) {
+  if (!shareId) {
+    return false;
+  }
+
+  for (const collectionId of secureShareRootStateCollections) {
+    const remainingDeletes = stats.maxDocumentDeletes - stats.documentDeletesAttempted;
+
+    if (remainingDeletes <= 0) {
+      return false;
+    }
+
+    const documents = await querySecureShareDocumentsByShareId({
+      accessToken,
+      collectionId,
+      limit: Math.min(300, remainingDeletes),
+      projectId,
+      shareId
+    });
+    await deleteDocumentNames(
+      documents.map((document) => document.name),
+      accessToken,
+      stats,
+      secureShareRootStateCounterName(collectionId)
+    );
+  }
+
+  for (const definition of secureShareChildStateCollections) {
+    const remainingDeletes = stats.maxDocumentDeletes - stats.documentDeletesAttempted;
+
+    if (remainingDeletes <= 0) {
+      return false;
+    }
+
+    const parentName = documentNameForPath(
+      projectId,
+      `${definition.parentCollectionId}/${shareId}`
+    );
+    const documents = await listChildDocuments(
+      parentName,
+      definition.collectionId,
+      accessToken,
+      Math.min(300, remainingDeletes),
+      ["__name__"]
+    );
+    await deleteDocumentNames(
+      documents.map((document) => document.name),
+      accessToken,
+      stats,
+      definition.counterName
+    );
+  }
+
+  if (await secureShareStateRemains(shareId, accessToken, projectId)) {
+    return false;
+  }
+
+  const existingContainerNames = (
+    await Promise.all(
+      secureShareContainerCollections.map(async (collectionId) => {
+        const documentName = documentNameForPath(projectId, `${collectionId}/${shareId}`);
+        return await getDocumentByName(documentName, accessToken, ["shareId"])
+          ? documentName
+          : "";
+      })
+    )
+  ).filter(Boolean);
+  const remainingContainerDeletes = stats.maxDocumentDeletes - stats.documentDeletesAttempted;
+
+  if (existingContainerNames.length > remainingContainerDeletes) {
+    return false;
+  }
+
+  await deleteDocumentNames(
+    existingContainerNames,
+    accessToken,
+    stats,
+    "secureShareContainersDeleted"
+  );
+
+  const policyName = documentNameForPath(projectId, `publicSharePolicies/${shareId}`);
+  const policy = await getDocumentByName(policyName, accessToken, ["shareId"]);
+
+  if (!policy) {
+    return true;
+  }
+
+  if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+    return false;
+  }
+
+  await deleteDocumentNames(
+    [policyName],
+    accessToken,
+    stats,
+    "secureSharePoliciesDeleted"
+  );
+  return true;
+}
+
+async function cleanupExpiredSecureShareState(config, stats) {
+  let remainingRetentionDeletes = Math.min(
+    config.limit,
+    Math.max(1, Math.floor(stats.maxDocumentDeletes / 10))
+  );
+
+  for (const fieldPath of ["expiresAt", "retentionExpiresAt"]) {
+    for (const collectionId of secureShareRootStateCollections) {
+      if (
+        remainingRetentionDeletes <= 0
+        || stats.documentDeletesAttempted >= stats.maxDocumentDeletes
+      ) {
+        return;
+      }
+
+      const documents = await queryExpiredSecureShareDocuments({
+        ...config,
+        collectionId,
+        fieldPath,
+        limit: Math.min(config.limit, remainingRetentionDeletes)
+      });
+      const deleted = await deleteDocumentNames(
+        documents.map((document) => document.name),
+        config.accessToken,
+        stats,
+        secureShareRootStateCounterName(collectionId)
+      );
+      remainingRetentionDeletes -= deleted;
+    }
+
+    if (
+      remainingRetentionDeletes <= 0
+      || stats.documentDeletesAttempted >= stats.maxDocumentDeletes
+    ) {
+      return;
+    }
+
+    const itemDocuments = await queryExpiredSecureShareDocuments({
+      ...config,
+      allDescendants: true,
+      collectionId: "items",
+      fieldPath,
+      limit: Math.min(config.limit, remainingRetentionDeletes)
+    });
+    const documentsByCounter = new Map();
+
+    for (const document of itemDocuments) {
+      const state = secureShareItemState(document.name, config.projectId);
+
+      if (!state) {
+        continue;
+      }
+
+      const names = documentsByCounter.get(state.counterName) ?? [];
+      names.push(document.name);
+      documentsByCounter.set(state.counterName, names);
+    }
+
+    for (const [counterName, documentNames] of documentsByCounter) {
+      const deleted = await deleteDocumentNames(
+        documentNames.slice(0, remainingRetentionDeletes),
+        config.accessToken,
+        stats,
+        counterName
+      );
+      remainingRetentionDeletes -= deleted;
+    }
+  }
+}
+
+async function queryExpiredSecureSharePolicies(config) {
+  const results = await Promise.all(
+    ["expiresAt", "retentionExpiresAt"].map((fieldPath) =>
+      queryExpiredSecureShareDocuments({
+        ...config,
+        collectionId: "publicSharePolicies",
+        fieldPath
+      })
+    )
+  );
+  const uniqueDocuments = new Map();
+
+  for (const document of results.flat()) {
+    uniqueDocuments.set(document.name, document);
+  }
+
+  return Array.from(uniqueDocuments.values());
+}
+
 async function cleanupAttachmentDocument(
   attachmentName,
   accessToken,
@@ -1157,9 +1775,18 @@ async function cleanupAttachmentDocument(
   stats,
   projectId,
   extraDeleteNames = [],
-  shouldDelete = () => true
+  shouldDelete = () => true,
+  requiredCopyJobId = "",
+  requiredCleanupClaimId = ""
 ) {
-  const attachment = await beginAttachmentDeletionByName(attachmentName, accessToken, shouldDelete);
+  const attachment = await beginAttachmentDeletionByName(
+    projectId,
+    attachmentName,
+    accessToken,
+    shouldDelete,
+    requiredCopyJobId,
+    requiredCleanupClaimId
+  );
 
   if (!attachment) {
     const attachmentStillExists = await getDocumentByName(attachmentName, accessToken);
@@ -1189,8 +1816,464 @@ async function cleanupAttachmentDocument(
   return Boolean(claimed) || (await getDocumentByName(attachmentName, accessToken)) === null;
 }
 
+function secureShareCopyJobState(note, projectId, staleCutoffMs = Number.POSITIVE_INFINITY) {
+  const noteId = documentIdFromName(note?.name);
+  const ownerUid = stringField(note, "ownerUid");
+  const participantUids = stringArrayField(note, "participantUids");
+  const copyJobId = stringField(note, "secureShareCopyJobId");
+  const expectedCount = integerField(note, "secureShareCopyExpectedAttachmentCount");
+  const reservedCount = integerField(note, "secureShareCopyReservedAttachmentCount");
+  const readyCount = integerField(note, "secureShareCopyReadyAttachmentCount");
+  const revision = integerField(note, "revision");
+  const copyUpdatedAtMs = timestampFieldMillis(note, "secureShareCopyUpdatedAt");
+
+  if (
+    !validNoteDocumentName(note?.name, projectId)
+    || !/^[A-Za-z0-9_-]{1,160}$/u.test(noteId)
+    || !/^[A-Za-z0-9_-]{1,160}$/u.test(ownerUid)
+    || stringField(note, "type") !== "personal"
+    || participantUids.length !== 1
+    || participantUids[0] !== ownerUid
+    || !hasField(note, "isDeleted")
+    || booleanField(note, "isDeleted")
+    || stringField(note, "secureShareCopyState") !== "copying"
+    || !/^[A-Za-z0-9_-]{16,160}$/u.test(copyJobId)
+    || !hasField(note, "secureShareCopyExpectedAttachmentCount")
+    || !hasField(note, "secureShareCopyReservedAttachmentCount")
+    || !hasField(note, "secureShareCopyReadyAttachmentCount")
+    || !hasField(note, "revision")
+    || expectedCount < 0
+    || expectedCount > 100
+    || reservedCount < 0
+    || reservedCount > expectedCount
+    || readyCount < 0
+    || readyCount > reservedCount
+    || revision < 1
+    || revision >= 999999999999
+    || !note.updateTime
+    || !Number.isFinite(copyUpdatedAtMs)
+    || copyUpdatedAtMs > staleCutoffMs
+  ) {
+    return null;
+  }
+
+  return {
+    copyJobId,
+    expectedCount,
+    noteId,
+    ownerUid,
+    readyCount,
+    reservedCount,
+    revision
+  };
+}
+
+function secureShareCopyCleanupClaimId(note, state) {
+  return `copy_cleanup_claim_${createHash("sha256")
+    .update(`${note.name}:${state.copyJobId}:${state.revision}`, "utf8")
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+function exactSecureShareCopyCleanupClaim(note, state, cleanupClaimId) {
+  return cleanupClaimId === secureShareCopyCleanupClaimId(note, state)
+    && stringField(note, secureShareCopyCleanupClaimIdField) === cleanupClaimId
+    && Number.isFinite(timestampFieldMillis(note, secureShareCopyCleanupClaimedAtField));
+}
+
+async function claimStaleSecureShareCopyJob(
+  note,
+  state,
+  accessToken,
+  projectId,
+  staleCutoffMs
+) {
+  const cleanupClaimId = secureShareCopyCleanupClaimId(note, state);
+  const storedClaimId = stringField(note, secureShareCopyCleanupClaimIdField);
+  const hasStoredClaimedAt = hasField(note, secureShareCopyCleanupClaimedAtField);
+
+  if (storedClaimId || hasStoredClaimedAt) {
+    return exactSecureShareCopyCleanupClaim(note, state, cleanupClaimId)
+      ? { cleanupClaimId, note, state }
+      : null;
+  }
+
+  if (!secureShareCopyJobState(note, projectId, staleCutoffMs)) {
+    return null;
+  }
+
+  try {
+    await firestoreRequest(firestoreCommitPathFromDocumentName(note.name), accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        writes: [
+          {
+            update: {
+              name: note.name,
+              fields: {
+                [secureShareCopyCleanupClaimIdField]: { stringValue: cleanupClaimId }
+              }
+            },
+            updateMask: { fieldPaths: [secureShareCopyCleanupClaimIdField] },
+            currentDocument: { updateTime: note.updateTime },
+            updateTransforms: [{
+              fieldPath: secureShareCopyCleanupClaimedAtField,
+              setToServerValue: "REQUEST_TIME"
+            }]
+          }
+        ]
+      })
+    });
+  } catch (error) {
+    if ([400, 409].includes(error.statusCode)) {
+      return null;
+    }
+    throw error;
+  }
+
+  const claimedNote = await getDocumentByName(note.name, accessToken);
+  const claimedState = secureShareCopyJobState(claimedNote, projectId);
+
+  if (
+    !claimedState
+    || claimedState.copyJobId !== state.copyJobId
+    || claimedState.ownerUid !== state.ownerUid
+    || claimedState.revision !== state.revision
+    || !exactSecureShareCopyCleanupClaim(claimedNote, claimedState, cleanupClaimId)
+  ) {
+    return null;
+  }
+
+  return { cleanupClaimId, note: claimedNote, state: claimedState };
+}
+
+async function activateStaleSecureShareCopyJob(
+  note,
+  state,
+  cleanupClaimId,
+  accessToken
+) {
+  if (!exactSecureShareCopyCleanupClaim(note, state, cleanupClaimId)) {
+    return false;
+  }
+
+  try {
+    await firestoreRequest(firestoreCommitPathFromDocumentName(note.name), accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        writes: [
+          {
+            update: {
+              name: note.name,
+              fields: {
+                secureShareCopyState: { stringValue: "active" },
+                updatedBy: { stringValue: state.ownerUid }
+              }
+            },
+            updateMask: {
+              fieldPaths: [
+                "secureShareCopyState",
+                "updatedBy",
+                secureShareCopyCleanupClaimIdField,
+                secureShareCopyCleanupClaimedAtField
+              ]
+            },
+            currentDocument: { updateTime: note.updateTime },
+            updateTransforms: [
+              { fieldPath: "savedAt", setToServerValue: "REQUEST_TIME" },
+              { fieldPath: "secureShareCopyFinishedAt", setToServerValue: "REQUEST_TIME" },
+              { fieldPath: "secureShareCopyUpdatedAt", setToServerValue: "REQUEST_TIME" },
+              { fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }
+            ]
+          }
+        ]
+      })
+    });
+    return true;
+  } catch (error) {
+    if ([400, 409].includes(error.statusCode)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function secureShareCopyAbortMutationId(note, state) {
+  return `copy_cleanup_${createHash("sha256")
+    .update(`${note.name}:${state.copyJobId}:${state.revision}`, "utf8")
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+async function abortStaleSecureShareCopyJob(
+  note,
+  state,
+  cleanupClaimId,
+  accessToken
+) {
+  if (!exactSecureShareCopyCleanupClaim(note, state, cleanupClaimId)) {
+    return false;
+  }
+
+  const mutationId = secureShareCopyAbortMutationId(note, state);
+  const historyName = `${note.name}/history/${mutationId}`;
+  const revision = state.revision + 1;
+
+  try {
+    await firestoreRequest(firestoreCommitPathFromDocumentName(note.name), accessToken, {
+      method: "POST",
+      body: JSON.stringify({
+        writes: [
+          {
+            update: {
+              name: note.name,
+              fields: {
+                deletedBy: { stringValue: state.ownerUid },
+                isDeleted: { booleanValue: true },
+                lastMutationId: { stringValue: mutationId },
+                revision: integerValue(revision),
+                secureShareCopyState: { stringValue: "aborted" },
+                updatedBy: { stringValue: state.ownerUid }
+              }
+            },
+            updateMask: {
+              fieldPaths: [
+                "deletedBy",
+                "isDeleted",
+                "lastMutationId",
+                "revision",
+                "secureShareCopyState",
+                "updatedBy",
+                secureShareCopyCleanupClaimIdField,
+                secureShareCopyCleanupClaimedAtField
+              ]
+            },
+            currentDocument: { updateTime: note.updateTime },
+            updateTransforms: [
+              { fieldPath: "deletedAt", setToServerValue: "REQUEST_TIME" },
+              { fieldPath: "secureShareCopyFinishedAt", setToServerValue: "REQUEST_TIME" },
+              { fieldPath: "secureShareCopyUpdatedAt", setToServerValue: "REQUEST_TIME" },
+              { fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }
+            ]
+          },
+          {
+            update: {
+              name: historyName,
+              fields: {
+                action: { stringValue: "delete" },
+                actorUid: { stringValue: state.ownerUid },
+                changedFields: {
+                  arrayValue: { values: [{ stringValue: "deleted" }] }
+                },
+                noteId: { stringValue: state.noteId },
+                readerUids: {
+                  arrayValue: { values: [{ stringValue: state.ownerUid }] }
+                },
+                revision: integerValue(revision)
+              }
+            },
+            currentDocument: { exists: false },
+            updateTransforms: [
+              { fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }
+            ]
+          }
+        ]
+      })
+    });
+    return true;
+  } catch (error) {
+    if ([400, 409].includes(error.statusCode)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function cleanupStaleSecureShareCopyJobs(config, stats) {
+  const jobs = await queryStaleSecureShareCopyJobs({
+    ...config,
+    limit: Math.min(config.limit, secureShareCopyCleanupBatchLimit)
+  });
+  const staleCutoffMs = Date.parse(config.nowIso) - secureShareCopyStaleMs;
+  const attachmentsDeletedAtStart = stats.attachmentsDeleted;
+
+  stats.staleSecureShareCopyJobsScanned += jobs.length;
+
+  for (const discoveredNote of jobs) {
+    if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+      stats.staleSecureShareCopyJobsRetained += 1;
+      continue;
+    }
+
+    const discoveredCurrentNote = await getDocumentByName(
+      discoveredNote.name,
+      config.accessToken
+    );
+    const discoveredState = secureShareCopyJobState(
+      discoveredCurrentNote,
+      config.projectId,
+      staleCutoffMs
+    );
+
+    if (!discoveredState) {
+      stats.staleSecureShareCopyJobsRetained += 1;
+      continue;
+    }
+
+    const claimedJob = await claimStaleSecureShareCopyJob(
+      discoveredCurrentNote,
+      discoveredState,
+      config.accessToken,
+      config.projectId,
+      staleCutoffMs
+    );
+
+    if (!claimedJob) {
+      stats.staleSecureShareCopyJobsRetained += 1;
+      continue;
+    }
+
+    const {
+      cleanupClaimId,
+      note,
+      state
+    } = claimedJob;
+
+    if (
+      state.reservedCount === state.expectedCount
+      && state.readyCount === state.expectedCount
+    ) {
+      if (
+        await activateStaleSecureShareCopyJob(
+          note,
+          state,
+          cleanupClaimId,
+          config.accessToken
+        )
+      ) {
+        stats.staleSecureShareCopyJobsActivated += 1;
+      } else {
+        stats.staleSecureShareCopyJobsRetained += 1;
+      }
+      continue;
+    }
+
+    const attachments = await listChildDocuments(
+      note.name,
+      "attachments",
+      config.accessToken,
+      101,
+      ["secureShareCopyJobId", "ownerUid", "uploadedBy"]
+    );
+
+    if (
+      attachments.length > 100
+      || attachments.length > (
+        secureShareCopyCleanupAttachmentDeleteLimit
+        - (stats.attachmentsDeleted - attachmentsDeletedAtStart)
+      )
+      || attachments.some((attachment) =>
+        stringField(attachment, "secureShareCopyJobId") !== state.copyJobId
+        || (
+          stringField(attachment, "ownerUid")
+          || stringField(attachment, "uploadedBy")
+        ) !== state.ownerUid
+      )
+    ) {
+      stats.staleSecureShareCopyJobsRetained += 1;
+      continue;
+    }
+
+    let cleanupComplete = true;
+
+    for (const attachment of attachments) {
+      if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+        cleanupComplete = false;
+        break;
+      }
+
+      const cleaned = await cleanupAttachmentDocument(
+        attachment.name,
+        config.accessToken,
+        config.storageBucket,
+        stats,
+        config.projectId,
+        [],
+        (currentAttachment) =>
+          stringField(currentAttachment, "secureShareCopyJobId") === state.copyJobId
+          && (
+            stringField(currentAttachment, "ownerUid")
+            || stringField(currentAttachment, "uploadedBy")
+          ) === state.ownerUid,
+        state.copyJobId,
+        cleanupClaimId
+      );
+
+      if (!cleaned) {
+        cleanupComplete = false;
+        break;
+      }
+    }
+
+    if (
+      !cleanupComplete
+      || (
+        await listChildDocuments(
+          note.name,
+          "attachments",
+          config.accessToken,
+          1,
+          ["secureShareCopyJobId"]
+        )
+      ).length > 0
+    ) {
+      stats.staleSecureShareCopyJobsRetained += 1;
+      continue;
+    }
+
+    const currentNote = await getDocumentByName(note.name, config.accessToken);
+    const currentState = secureShareCopyJobState(currentNote, config.projectId);
+
+    if (
+      !currentState
+      || currentState.copyJobId !== state.copyJobId
+      || currentState.ownerUid !== state.ownerUid
+      || currentState.revision !== state.revision
+      || currentState.reservedCount !== 0
+      || currentState.readyCount !== 0
+      || !exactSecureShareCopyCleanupClaim(
+        currentNote,
+        currentState,
+        cleanupClaimId
+      )
+    ) {
+      stats.staleSecureShareCopyJobsRetained += 1;
+      continue;
+    }
+
+    if (
+      await abortStaleSecureShareCopyJob(
+        currentNote,
+        currentState,
+        cleanupClaimId,
+        config.accessToken
+      )
+    ) {
+      stats.staleSecureShareCopyJobsAborted += 1;
+    } else {
+      stats.staleSecureShareCopyJobsRetained += 1;
+    }
+  }
+}
+
 async function deletePublicShareTreeByName(shareName, accessToken, storageBucket, stats, projectId) {
   const cleanupQueueName = cleanupQueueNameFromShareName(shareName);
+  const shareId = publicShareIdFromShareName(shareName, projectId);
+
+  if (!shareId) {
+    return false;
+  }
+
   const remainingAttachmentDeleteBudget = stats.maxDocumentDeletes - stats.documentDeletesAttempted;
 
   if (remainingAttachmentDeleteBudget <= 0) {
@@ -1254,6 +2337,15 @@ async function deletePublicShareTreeByName(shareName, accessToken, storageBucket
     || (
       await listChildDocuments(cleanupQueueName, "publicShareAttachmentCleanupQueue", accessToken, 1, ["expiresAt"])
     ).length > 0
+  ) {
+    return false;
+  }
+
+  const shareMetadata = await getDocumentByName(shareName, accessToken, ["schemaVersion"]);
+
+  if (
+    (!shareMetadata || integerField(shareMetadata, "schemaVersion") >= 2)
+    && !await deleteSecureShareStateByShareId(shareId, accessToken, stats, projectId)
   ) {
     return false;
   }
@@ -1722,16 +2814,31 @@ async function cleanupExpiredPublicShares() {
     purgedNoteAttachmentsDeleted: 0,
     purgedNotesDeleted: 0,
     reservationsDeleted: 0,
+    secureShareAccessSessionsDeleted: 0,
+    secureShareAuditEventsDeleted: 0,
+    secureShareCommentsDeleted: 0,
+    secureShareContainersDeleted: 0,
+    secureShareEmailChallengesDeleted: 0,
+    secureSharePoliciesDeleted: 0,
+    secureShareRateLimitsDeleted: 0,
+    secureShareRecipientsDeleted: 0,
+    secureShareUnlockGrantsDeleted: 0,
     shareQueuesDeleted: 0,
     sharesDeleted: 0,
     storageBytesReleased: 0,
-    storageObjectsDeleted: 0
+    storageObjectsDeleted: 0,
+    staleSecureShareCopyJobsAborted: 0,
+    staleSecureShareCopyJobsActivated: 0,
+    staleSecureShareCopyJobsRetained: 0,
+    staleSecureShareCopyJobsScanned: 0
   };
 
   // Reserve at most 10% of the delete budget (and no more than one configured
   // batch) for expired OAuth state. This guarantees bounded daily retention
   // cleanup without allowing authorization churn to starve user-data queues.
   await cleanupExpiredGoogleCalendarOAuthStates(config, stats);
+  await cleanupExpiredSecureShareState(config, stats);
+  await cleanupStaleSecureShareCopyJobs(config, stats);
   await backfillNotePurgeQueues(config, stats);
   await cleanupNotePurgeQueues(config, stats);
 
@@ -1759,6 +2866,30 @@ async function cleanupExpiredPublicShares() {
       }
 
       await deletePublicShareTreeByName(share.name, accessToken, config.storageBucket, stats, config.projectId);
+    }
+
+    const secureSharePolicies = await queryExpiredSecureSharePolicies(config);
+
+    foundExpiredDocuments ||= secureSharePolicies.length > 0;
+
+    for (const policy of secureSharePolicies) {
+      if (stats.documentDeletesAttempted >= stats.maxDocumentDeletes) {
+        break;
+      }
+
+      const shareId = publicShareIdFromPolicyName(policy.name, config.projectId);
+
+      if (!shareId) {
+        continue;
+      }
+
+      await deletePublicShareTreeByName(
+        documentNameForPath(config.projectId, `publicNoteShares/${shareId}`),
+        accessToken,
+        config.storageBucket,
+        stats,
+        config.projectId
+      );
     }
 
     const attachments = await queryExpiredPublicShareAttachments(config);
@@ -1841,6 +2972,7 @@ async function cleanupExpiredPublicShares() {
       || (
         shareQueues.length < config.limit
         && shares.length < config.limit
+        && secureSharePolicies.length < config.limit
         && attachments.length < config.limit
         && abandonedDeletions.length < config.limit
         && legacyReservations.length < config.limit
@@ -1882,8 +3014,21 @@ async function cleanupExpiredPublicShares() {
     purgedNoteAttachmentsDeleted: stats.purgedNoteAttachmentsDeleted,
     purgedNotesDeleted: stats.purgedNotesDeleted,
     reservationsDeleted: stats.reservationsDeleted,
+    secureShareAccessSessionsDeleted: stats.secureShareAccessSessionsDeleted,
+    secureShareAuditEventsDeleted: stats.secureShareAuditEventsDeleted,
+    secureShareCommentsDeleted: stats.secureShareCommentsDeleted,
+    secureShareContainersDeleted: stats.secureShareContainersDeleted,
+    secureShareEmailChallengesDeleted: stats.secureShareEmailChallengesDeleted,
+    secureSharePoliciesDeleted: stats.secureSharePoliciesDeleted,
+    secureShareRateLimitsDeleted: stats.secureShareRateLimitsDeleted,
+    secureShareRecipientsDeleted: stats.secureShareRecipientsDeleted,
+    secureShareUnlockGrantsDeleted: stats.secureShareUnlockGrantsDeleted,
     shareQueuesDeleted: stats.shareQueuesDeleted,
     sharesDeleted: stats.sharesDeleted,
+    staleSecureShareCopyJobsAborted: stats.staleSecureShareCopyJobsAborted,
+    staleSecureShareCopyJobsActivated: stats.staleSecureShareCopyJobsActivated,
+    staleSecureShareCopyJobsRetained: stats.staleSecureShareCopyJobsRetained,
+    staleSecureShareCopyJobsScanned: stats.staleSecureShareCopyJobsScanned,
     storageBytesReleased: stats.storageBytesReleased,
     storageObjectsDeleted: stats.storageObjectsDeleted
   };

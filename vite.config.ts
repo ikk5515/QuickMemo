@@ -52,6 +52,14 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: "./src/test/setup.ts",
-    exclude: ["tests/firestore.rules.test.ts", "node_modules", "dist", "functions/lib"]
+    exclude: [
+      "tests/firestore.rules.test.ts",
+      "tests/storage.rules.test.ts",
+      "tests/secureShareApiEmulator.test.ts",
+      "tests/e2e/**",
+      "node_modules",
+      "dist",
+      "functions/lib"
+    ]
   }
 });

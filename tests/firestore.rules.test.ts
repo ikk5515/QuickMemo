@@ -2886,6 +2886,105 @@ describeRules("firestore security rules", () => {
     await assertFails(getDocs(collection(publicDb, "publicNoteShares/share-a/attachments")));
   });
 
+  it("keeps secure share v2 content and server state behind the server API", async () => {
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "notes/note-a"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        revision: 1,
+        attachmentRevision: 0,
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(db, "publicNoteShares/secure-v2"), {
+        ...publicShareDocument("note-a", "user-a", {
+          attachmentCount: 1,
+          createdAt: new Date("2026-07-28T00:00:00.000Z"),
+          expiresAt,
+          ready: true,
+          updatedAt: new Date("2026-07-28T00:00:00.000Z")
+        }),
+        schemaVersion: 2,
+        policyVersion: 1,
+        status: "active"
+      });
+      await setDoc(
+        doc(db, "publicNoteShares/secure-v2/attachments/attachment-a"),
+        publicShareAttachment({
+          createdAt: new Date("2026-07-28T00:00:00.000Z"),
+          expiresAt
+        })
+      );
+      await setDoc(doc(db, "publicSharePolicies/secure-v2"), {
+        ownerUid: "user-a",
+        policyVersion: 1
+      });
+      await setDoc(doc(db, "publicShareRecipients/secure-v2/items/recipient-a"), {
+        emailHash: "server-only"
+      });
+      await setDoc(doc(db, "publicShareAccessSessions/session-a"), {
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareEmailChallenges/challenge-a"), {
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareUnlockGrants/grant-a"), {
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareRateLimits/rate-a"), {
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareComments/secure-v2/items/comment-a"), {
+        body: "server only"
+      });
+      await setDoc(doc(db, "publicShareAuditEvents/secure-v2/items/event-a"), {
+        eventType: "access"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const publicDb = testEnv.unauthenticatedContext().firestore();
+
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/secure-v2")));
+    await assertSucceeds(getDoc(doc(ownerDb, "publicNoteShares/secure-v2")));
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/secure-v2/attachments/attachment-a")));
+    await assertSucceeds(getDoc(doc(ownerDb, "publicNoteShares/secure-v2/attachments/attachment-a")));
+    await assertFails(updateDoc(doc(ownerDb, "publicNoteShares/secure-v2"), {
+      encryptedBody: { ...encryptedPayload, cipherText: "direct-write" },
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "publicNoteShares/secure-v2"), {
+      schemaVersion: deleteField(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(deleteDoc(doc(ownerDb, "publicNoteShares/secure-v2")));
+
+    for (const path of [
+      "publicSharePolicies/secure-v2",
+      "publicShareRecipients/secure-v2/items/recipient-a",
+      "publicShareAccessSessions/session-a",
+      "publicShareEmailChallenges/challenge-a",
+      "publicShareUnlockGrants/grant-a",
+      "publicShareRateLimits/rate-a",
+      "publicShareComments/secure-v2/items/comment-a",
+      "publicShareAuditEvents/secure-v2/items/event-a"
+    ]) {
+      await assertFails(getDoc(doc(ownerDb, path)));
+      await assertFails(getDoc(doc(publicDb, path)));
+      await assertFails(setDoc(doc(ownerDb, path), { forged: true }));
+    }
+  });
+
   it("fails public reads closed on source revision drift and permits only backend staging before an owner flip", async () => {
     const expiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
 
@@ -4581,5 +4680,163 @@ describeRules("firestore security rules", () => {
         updatedByClientId: "client-a"
       })
     );
+  });
+
+  it("keeps secure-share copies hidden until server-counted attachments atomically activate", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const outsiderDb = testEnv.authenticatedContext("user-b").firestore();
+    const copyJobId = "copy_job_1234567890";
+    const copyingNote = {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+      },
+      attachmentRevision: 0,
+      secureShareCopyState: "copying",
+      secureShareCopyJobId: copyJobId,
+      secureShareCopyExpectedAttachmentCount: 2,
+      secureShareCopyReservedAttachmentCount: 0,
+      secureShareCopyReadyAttachmentCount: 0,
+      secureShareCopyStartedAt: serverTimestamp(),
+      secureShareCopyUpdatedAt: serverTimestamp(),
+      isDeleted: false
+    };
+
+    await assertSucceeds(
+      createAuditedNote(ownerDb, "secure-copy-a", "user-a", copyingNote, ["user-a"])
+    );
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/secure-copy-a")));
+    await assertFails(getDoc(doc(outsiderDb, "notes/secure-copy-a")));
+    await assertFails(updateDoc(doc(ownerDb, "notes/secure-copy-a"), {
+      secureShareCopyReadyAttachmentCount: 1
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "notes/secure-copy-a"), {
+      secureShareCopyState: "active",
+      secureShareCopyFinishedAt: serverTimestamp(),
+      secureShareCopyUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: "user-a"
+    }));
+    await assertFails(
+      createAuditedNote(ownerDb, "forged-claimed-copy", "user-a", {
+        ...copyingNote,
+        secureShareCopyCleanupClaimId: "copy_cleanup_claim_forged",
+        secureShareCopyCleanupClaimedAt: serverTimestamp()
+      }, ["user-a"])
+    );
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/secure-copy-a"), {
+        secureShareCopyCleanupClaimId:
+          "copy_cleanup_claim_1234567890abcdef1234567890abcdef",
+        secureShareCopyCleanupClaimedAt: serverTimestamp(),
+        secureShareCopyReservedAttachmentCount: 2,
+        secureShareCopyReadyAttachmentCount: 2,
+        secureShareCopyUpdatedAt: serverTimestamp()
+      });
+    });
+
+    const activateCopy = {
+      secureShareCopyState: "active",
+      secureShareCopyFinishedAt: serverTimestamp(),
+      secureShareCopyUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: "user-a"
+    };
+
+    await assertFails(updateDoc(doc(ownerDb, "notes/secure-copy-a"), activateCopy));
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(doc(context.firestore(), "notes/secure-copy-a"), {
+        secureShareCopyCleanupClaimId: deleteField(),
+        secureShareCopyCleanupClaimedAt: deleteField()
+      });
+    });
+
+    await assertSucceeds(updateDoc(doc(ownerDb, "notes/secure-copy-a"), activateCopy));
+
+    await assertFails(
+      createAuditedNote(ownerDb, "forged-active-copy", "user-a", {
+        ...copyingNote,
+        secureShareCopyState: "active",
+        secureShareCopyExpectedAttachmentCount: 0,
+        secureShareCopyFinishedAt: serverTimestamp()
+      }, ["user-a"])
+    );
+  });
+
+  it("allows an audited copy abort only after server-side attachment compensation reaches zero", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const copyJobId = "copy_job_1234567890";
+    const copyingNote = {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+      },
+      attachmentRevision: 0,
+      secureShareCopyState: "copying",
+      secureShareCopyJobId: copyJobId,
+      secureShareCopyExpectedAttachmentCount: 1,
+      secureShareCopyReservedAttachmentCount: 0,
+      secureShareCopyReadyAttachmentCount: 0,
+      secureShareCopyStartedAt: serverTimestamp(),
+      secureShareCopyUpdatedAt: serverTimestamp(),
+      isDeleted: false
+    };
+
+    await assertSucceeds(
+      createAuditedNote(ownerDb, "secure-copy-abort", "user-a", copyingNote, ["user-a"])
+    );
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "secure-copy-abort",
+      "user-a",
+      2,
+      "delete",
+      ["deleted"],
+      ["user-a"],
+      {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a",
+        secureShareCopyState: "aborted",
+        secureShareCopyFinishedAt: serverTimestamp(),
+        secureShareCopyUpdatedAt: serverTimestamp()
+      }
+    ));
+
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "secure-copy-abort",
+      "user-a",
+      3,
+      "restore",
+      ["restored"],
+      ["user-a"],
+      {
+        isDeleted: false,
+        deletedAt: deleteField(),
+        deletedBy: deleteField()
+      }
+    ));
   });
 });

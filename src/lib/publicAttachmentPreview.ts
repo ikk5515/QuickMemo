@@ -1,5 +1,7 @@
 export interface PublicAttachmentPreviewState {
   bytes?: Uint8Array;
+  downloadAllowed?: boolean;
+  downloadUrl?: string;
   fileName: string;
   fallbackHtml?: string;
   html?: string;

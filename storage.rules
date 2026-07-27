@@ -129,6 +129,11 @@ service firebase.storage {
       return !data.keys().hasAny(["revokedAt", "revokedBy"]);
     }
 
+    function securePublicShareV2(data) {
+      return data.keys().hasAny(["schemaVersion"])
+        && data.schemaVersion == 2;
+    }
+
     function publicShareSourceAvailable(data) {
       let note = noteData(data.sourceNoteId);
       return userHasFeature(data.ownerUid, "notes")
@@ -171,7 +176,8 @@ service firebase.storage {
 
     function publicShareActive(shareId) {
       let share = publicShareData(shareId);
-      return share.ready == true
+      return !securePublicShareV2(share)
+        && share.ready == true
         && publicShareNotRevoked(share)
         && share.expiresAt > request.time
         && publicShareSourceActive(share);

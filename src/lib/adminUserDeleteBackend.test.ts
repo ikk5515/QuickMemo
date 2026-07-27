@@ -84,6 +84,36 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain('queryDocumentsByStringField(projectId, "history", "actorUid", uid, accessToken, {');
   });
 
+  it("purges owner-scoped secure-share policy, session, recipient, comment, and audit state", () => {
+    for (const collectionId of [
+      "publicSharePolicies",
+      "publicShareRecipients",
+      "publicShareAccessSessions",
+      "publicShareEmailChallenges",
+      "publicShareUnlockGrants",
+      "publicShareRateLimits",
+      "publicShareComments",
+      "publicShareAuditEvents"
+    ]) {
+      expect(deleteManagedUserSource).toContain(collectionId);
+    }
+
+    expect(deleteManagedUserSource).toContain("async function deleteSecureShareStateByShareId");
+    expect(deleteManagedUserSource).toContain('"shareId",\n    shareId,');
+    expect(deleteManagedUserSource).toContain('"ownerUid",\n    ownerUid,');
+    expect(deleteManagedUserSource).toContain(
+      "await deleteOwnedSecureSharePolicies("
+    );
+    expect(deleteManagedUserSource).toContain(
+      "await deleteOwnedSecureShareContainers("
+    );
+    expect(deleteManagedUserSource).toContain(
+      "await deleteOwnedSecureShareOrphanState(projectId, targetUid, accessToken, stats)"
+    );
+    expect(deleteManagedUserSource).toContain("maxManagedUserDeleteIterations");
+    expect(deleteManagedUserSource).toContain("Secure share ownership changed during cleanup");
+  });
+
   it("deletes owner-scoped library items and the target user's immutable vault", () => {
     expect(deleteManagedUserSource).toContain(
       'queryDocumentsByStringField(projectId, "libraryItems", "ownerUid", ownerUid, accessToken)'

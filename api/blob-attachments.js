@@ -38,6 +38,8 @@ const attachmentCountPolicyVersion = 1;
 const tokenTtlMs = 10 * 60 * 1000;
 const pendingDeletionGraceMs = tokenTtlMs + 60 * 1000;
 const reservationTtlMs = 2 * 60 * 60 * 1000;
+const secureShareCopyCleanupClaimIdField = "secureShareCopyCleanupClaimId";
+const secureShareCopyCleanupClaimedAtField = "secureShareCopyCleanupClaimedAt";
 const allowedAttachmentExtensions = new Set([
   "pdf",
   "txt",
@@ -625,6 +627,10 @@ function parseClientPayload(clientPayload) {
     chunkCount,
     chunkIvBase64List: version === 2 ? validateChunkIvBase64List(parsed.chunkIvBase64List, chunkCount) : [],
     uploadedBy: scope === "note" ? safeId(parsed.uploadedBy, "uploadedBy") : "",
+    secureShareCopyJobId:
+      scope === "note" && typeof parsed.secureShareCopyJobId === "string" && parsed.secureShareCopyJobId
+        ? safeId(parsed.secureShareCopyJobId, "secureShareCopyJobId")
+        : "",
     generation: scope === "publicShare" ? safeId(parsed.generation, "generation") : "",
     sourceAttachmentId:
       scope === "publicShare" && typeof parsed.sourceAttachmentId === "string"
@@ -684,6 +690,15 @@ function noteIsPurged(note) {
 
 function noteIsActive(note) {
   return !note?.fields?.isDeleted || valueBoolean(note, "isDeleted") === false;
+}
+
+function secureShareCopyState(note) {
+  return valueString(note, "secureShareCopyState");
+}
+
+function secureShareCopyCleanupClaimed(note) {
+  return valueHasField(note, secureShareCopyCleanupClaimIdField)
+    || valueHasField(note, secureShareCopyCleanupClaimedAtField);
 }
 
 async function canReadNote(projectId, uid, note, accessToken) {
@@ -817,9 +832,12 @@ async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
       currentDocument: quotaDocument ? { updateTime: quotaDocument.updateTime } : { exists: false },
       updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
     };
+    const resolvedExtraWrites = typeof extraWrites === "function"
+      ? await extraWrites()
+      : extraWrites;
 
     try {
-      await firestoreCommit(projectId, accessToken, [quotaWrite, ...extraWrites]);
+      await firestoreCommit(projectId, accessToken, [quotaWrite, ...resolvedExtraWrites]);
       return;
     } catch (error) {
       if (![400, 409].includes(error.statusCode) || attempt === 2) {
@@ -963,20 +981,83 @@ async function createNoteAttachmentReservation(projectId, accessToken, uid, payl
   }
 
   const attachmentPath = `notes/${payload.noteId}/attachments/${payload.attachmentId}`;
-  const write = {
+  const initialCopyState = secureShareCopyState(note);
+
+  if (
+    (initialCopyState === "copying" && (
+      payload.secureShareCopyJobId !== valueString(note, "secureShareCopyJobId")
+      || valueString(note, "ownerUid") !== uid
+      || secureShareCopyCleanupClaimed(note)
+    ))
+    || (initialCopyState !== "copying" && payload.secureShareCopyJobId)
+  ) {
+    throw new HttpError(403, "첨부파일 복사 작업 권한이 없습니다.", "Secure share copy job mismatch");
+  }
+
+  const attachmentFields = {
+    noteId: stringValue(payload.noteId),
+    ...attachmentBaseFields(payload, expectedPath),
+    uploadedBy: stringValue(uid)
+  };
+
+  if (payload.secureShareCopyJobId) {
+    attachmentFields.secureShareCopyJobId = stringValue(payload.secureShareCopyJobId);
+  }
+
+  const attachmentWrite = {
     update: {
       name: documentName(projectId, attachmentPath),
-      fields: {
-        noteId: stringValue(payload.noteId),
-        ...attachmentBaseFields(payload, expectedPath),
-        uploadedBy: stringValue(uid)
-      }
+      fields: attachmentFields
     },
     currentDocument: { exists: false },
     updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }]
   };
 
-  await reserveUserAttachmentBytes(projectId, accessToken, uid, payload.encryptedSize, [write]);
+  await reserveUserAttachmentBytes(
+    projectId,
+    accessToken,
+    uid,
+    payload.encryptedSize,
+    initialCopyState === "copying"
+      ? async () => {
+          const currentNote = await firestoreGetDocument(projectId, `notes/${payload.noteId}`, accessToken);
+          const expectedCount = valueInteger(currentNote, "secureShareCopyExpectedAttachmentCount");
+          const reservedCount = valueInteger(currentNote, "secureShareCopyReservedAttachmentCount");
+
+          if (
+            !currentNote
+            || !(await canUploadToNote(projectId, uid, currentNote, accessToken))
+            || secureShareCopyState(currentNote) !== "copying"
+            || valueString(currentNote, "ownerUid") !== uid
+            || valueString(currentNote, "secureShareCopyJobId") !== payload.secureShareCopyJobId
+            || secureShareCopyCleanupClaimed(currentNote)
+            || expectedCount < 0
+            || reservedCount < 0
+            || reservedCount >= expectedCount
+          ) {
+            throw new HttpError(409, "복사할 첨부파일 예약 한도를 초과했습니다.", "Secure share copy reservation is no longer valid");
+          }
+
+          return [
+            attachmentWrite,
+            {
+              update: {
+                name: documentName(projectId, `notes/${payload.noteId}`),
+                fields: {
+                  secureShareCopyReservedAttachmentCount: integerValue(reservedCount + 1)
+                }
+              },
+              updateMask: { fieldPaths: ["secureShareCopyReservedAttachmentCount"] },
+              currentDocument: { updateTime: currentNote.updateTime },
+              updateTransforms: [{
+                fieldPath: "secureShareCopyUpdatedAt",
+                setToServerValue: "REQUEST_TIME"
+              }]
+            }
+          ];
+        }
+      : [attachmentWrite]
+  );
 
   return {
     ...payload,
@@ -1208,15 +1289,46 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
         throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Uploader no longer has note access");
       }
 
+      const noteFields = {
+        attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1)
+      };
+      const noteFieldPaths = ["attachmentRevision"];
+      const noteTransforms = [];
+
+      if (secureShareCopyState(note) === "copying") {
+        const expectedCount = valueInteger(note, "secureShareCopyExpectedAttachmentCount");
+        const reservedCount = valueInteger(note, "secureShareCopyReservedAttachmentCount");
+        const readyCount = valueInteger(note, "secureShareCopyReadyAttachmentCount");
+
+        if (
+          valueString(note, "ownerUid") !== tokenPayload.uid
+          || valueString(note, "secureShareCopyJobId") !== valueString(attachment, "secureShareCopyJobId")
+          || secureShareCopyCleanupClaimed(note)
+          || readyCount < 0
+          || readyCount >= reservedCount
+          || reservedCount > expectedCount
+        ) {
+          throw new HttpError(409, "복사 첨부파일 상태가 일치하지 않습니다.", "Secure share copy ready count mismatch");
+        }
+
+        noteFields.secureShareCopyReadyAttachmentCount = integerValue(readyCount + 1);
+        noteFieldPaths.push("secureShareCopyReadyAttachmentCount");
+        noteTransforms.push({
+          fieldPath: "secureShareCopyUpdatedAt",
+          setToServerValue: "REQUEST_TIME"
+        });
+      } else if (valueString(attachment, "secureShareCopyJobId")) {
+        throw new HttpError(409, "복사 첨부파일 작업이 종료되었습니다.", "Secure share copy job is no longer copying");
+      }
+
       writes.push({
         update: {
           name: documentName(projectId, `notes/${noteId}`),
-          fields: {
-            attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1)
-          }
+          fields: noteFields
         },
-        updateMask: { fieldPaths: ["attachmentRevision"] },
-        currentDocument: { updateTime: note.updateTime }
+        updateMask: { fieldPaths: noteFieldPaths },
+        currentDocument: { updateTime: note.updateTime },
+        ...(noteTransforms.length ? { updateTransforms: noteTransforms } : {})
       });
     } else if (tokenPayload.scope === "publicShare") {
       const share = await firestoreGetDocument(projectId, `publicNoteShares/${safeId(tokenPayload.shareId, "shareId")}`, accessToken);
@@ -1428,6 +1540,7 @@ async function streamBlobAttachment(request, response) {
 
     if (
       !share
+      || valueInteger(share, "schemaVersion") === 2
       || !publicShareActive(share)
       || !(await publicShareSourceActive(credentials.projectId, share, accessToken))
     ) {
@@ -1531,6 +1644,7 @@ async function beginAttachmentDeletion(projectId, accessToken, attachmentPath, n
 
     const deletionStarted = valueBoolean(attachment, "deletionStarted");
     const revisionBumped = valueBoolean(attachment, "attachmentRevisionBumped");
+    const secureShareCopyJobId = valueString(attachment, "secureShareCopyJobId");
     const shouldBumpRevision = shouldBumpAttachmentRevisionOnDelete({
       scope: notePath ? "note" : "publicShare",
       alreadyBumped: revisionBumped,
@@ -1539,31 +1653,78 @@ async function beginAttachmentDeletion(projectId, accessToken, attachmentPath, n
     });
 
     if (deletionStarted && !shouldBumpRevision) {
+      const claimedNote = secureShareCopyJobId && notePath
+        ? await firestoreGetDocument(projectId, notePath, accessToken)
+        : null;
+
+      if (secureShareCopyCleanupClaimed(claimedNote)) {
+        throw new HttpError(
+          409,
+          "서버에서 복사 첨부파일을 정리하고 있습니다.",
+          "Secure share copy cleanup already claimed"
+        );
+      }
       return attachment;
     }
 
     const attachmentFields = { deletionStarted: booleanValue(true) };
     const attachmentFieldPaths = ["deletionStarted"];
     const writes = [];
+    const note = notePath && (shouldBumpRevision || (secureShareCopyJobId && !deletionStarted))
+      ? await firestoreGetDocument(projectId, notePath, accessToken)
+      : null;
 
-    if (shouldBumpRevision) {
-      const note = await firestoreGetDocument(projectId, notePath, accessToken);
-
+    if (shouldBumpRevision || (secureShareCopyJobId && !deletionStarted)) {
       if (!note) {
         throw new HttpError(409, "첨부파일의 노트가 더 이상 존재하지 않습니다.", "Attachment note no longer exists");
       }
 
-      attachmentFields.attachmentRevisionBumped = booleanValue(true);
-      attachmentFieldPaths.push("attachmentRevisionBumped");
+      const noteFields = {};
+      const noteFieldPaths = [];
+      const noteTransforms = [];
+
+      if (shouldBumpRevision) {
+        attachmentFields.attachmentRevisionBumped = booleanValue(true);
+        attachmentFieldPaths.push("attachmentRevisionBumped");
+        noteFields.attachmentRevision = integerValue(valueInteger(note, "attachmentRevision") + 1);
+        noteFieldPaths.push("attachmentRevision");
+      }
+
+      if (secureShareCopyJobId && !deletionStarted && secureShareCopyState(note) === "copying") {
+        const reservedCount = valueInteger(note, "secureShareCopyReservedAttachmentCount");
+        const readyCount = valueInteger(note, "secureShareCopyReadyAttachmentCount");
+
+        if (
+          valueString(note, "secureShareCopyJobId") !== secureShareCopyJobId
+          || secureShareCopyCleanupClaimed(note)
+          || reservedCount <= 0
+          || (valueBoolean(attachment, "isReady") && readyCount <= 0)
+        ) {
+          throw new HttpError(409, "복사 첨부파일 정리 상태가 일치하지 않습니다.", "Secure share copy deletion count mismatch");
+        }
+
+        noteFields.secureShareCopyReservedAttachmentCount = integerValue(reservedCount - 1);
+        noteFieldPaths.push("secureShareCopyReservedAttachmentCount");
+
+        if (valueBoolean(attachment, "isReady")) {
+          noteFields.secureShareCopyReadyAttachmentCount = integerValue(readyCount - 1);
+          noteFieldPaths.push("secureShareCopyReadyAttachmentCount");
+        }
+
+        noteTransforms.push({
+          fieldPath: "secureShareCopyUpdatedAt",
+          setToServerValue: "REQUEST_TIME"
+        });
+      }
+
       writes.push({
         update: {
           name: documentName(projectId, notePath),
-          fields: {
-            attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1)
-          }
+          fields: noteFields
         },
-        updateMask: { fieldPaths: ["attachmentRevision"] },
-        currentDocument: { updateTime: note.updateTime }
+        updateMask: { fieldPaths: noteFieldPaths },
+        currentDocument: { updateTime: note.updateTime },
+        ...(noteTransforms.length ? { updateTransforms: noteTransforms } : {})
       });
     }
 

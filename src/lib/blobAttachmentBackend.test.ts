@@ -58,6 +58,7 @@ describe("blob attachment backend", () => {
     expect(markReadySource).toContain('Number.isFinite(valueTimestampMillis(share, "expiresAt"))');
     expect(streamSource).toContain("publicShareSourceActive(credentials.projectId, share, accessToken)");
     expect(streamSource).toContain("publicShareAttachmentIsCurrent(publicShare, attachment)");
+    expect(streamSource).toContain('valueInteger(share, "schemaVersion") === 2');
   });
 
   it("logs redacted backend error summaries instead of raw exception objects", () => {
@@ -151,6 +152,29 @@ describe("blob attachment backend", () => {
     expect(markReadySource).toContain('"reservationExpiresAt"');
   });
 
+  it("binds secure-share copy reservations and ready counts to the durable note job", () => {
+    const reservationSource = blobAttachmentApiSource.match(
+      /async function createNoteAttachmentReservation[\s\S]*?async function createPublicShareAttachmentReservation/u
+    )?.[0] ?? "";
+    const markReadySource = blobAttachmentApiSource.match(
+      /async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u
+    )?.[0] ?? "";
+    const beginDeleteSource = blobAttachmentApiSource.match(
+      /async function beginAttachmentDeletion[\s\S]*?async function deleteAttachment/u
+    )?.[0] ?? "";
+
+    expect(reservationSource).toContain("Secure share copy job mismatch");
+    expect(reservationSource).toContain('valueString(currentNote, "secureShareCopyJobId") !== payload.secureShareCopyJobId');
+    expect(reservationSource.match(/secureShareCopyCleanupClaimed\(/gu)).toHaveLength(2);
+    expect(reservationSource).toContain("secureShareCopyReservedAttachmentCount: integerValue(reservedCount + 1)");
+    expect(markReadySource).toContain("secureShareCopyCleanupClaimed(note)");
+    expect(markReadySource).toContain("secureShareCopyReadyAttachmentCount = integerValue(readyCount + 1)");
+    expect(beginDeleteSource).toContain("secureShareCopyCleanupClaimed(note)");
+    expect(beginDeleteSource).toContain("Secure share copy cleanup already claimed");
+    expect(beginDeleteSource).toContain("secureShareCopyReservedAttachmentCount = integerValue(reservedCount - 1)");
+    expect(beginDeleteSource).toContain("secureShareCopyReadyAttachmentCount = integerValue(readyCount - 1)");
+  });
+
   it("invalidates public attachment snapshots before deleting ready note attachments", () => {
     const beginDeleteSource = blobAttachmentApiSource.match(
       /async function beginAttachmentDeletion[\s\S]*?async function deleteAttachment/u
@@ -160,7 +184,7 @@ describe("blob attachment backend", () => {
     )?.[0] ?? "";
 
     expect(beginDeleteSource).toContain("shouldBumpAttachmentRevisionOnDelete");
-    expect(beginDeleteSource).toContain('attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1)');
+    expect(beginDeleteSource).toContain('noteFields.attachmentRevision = integerValue(valueInteger(note, "attachmentRevision") + 1)');
     expect(beginDeleteSource).toContain('attachmentRevisionBumped = booleanValue(true)');
     expect(beginDeleteSource).toContain("currentDocument: { updateTime: note.updateTime }");
     expect(deleteSource.indexOf("const deletingAttachment = await beginAttachmentDeletion(")).toBeLessThan(

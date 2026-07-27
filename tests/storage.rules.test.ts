@@ -493,4 +493,69 @@ describeStorageRules("storage security rules", () => {
     await assertFails(publicStorage.ref(shareStoragePath).getMetadata());
     await assertSucceeds(ownerStorage.ref(shareStoragePath).getMetadata());
   });
+
+  it("denies public Firebase Storage fallback reads for secure share v2", async () => {
+    const expiresAt = new Date(Date.now() + 60_000);
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), {
+        uid: "user-a",
+        isActive: true,
+        isAdmin: false
+      });
+      await setDoc(doc(db, "notes/note-a"), {
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        revision: 4,
+        attachmentRevision: 2,
+        isDeleted: false
+      });
+      await setDoc(doc(db, "publicNoteShares/share-a"), {
+        sourceNoteId: "note-a",
+        sourceRevision: 4,
+        sourceAttachmentRevision: 2,
+        ownerUid: "user-a",
+        schemaVersion: 2,
+        version: 1,
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        attachmentCount: 1,
+        ready: true,
+        createdAt: new Date("2026-07-28T00:00:00.000Z"),
+        updatedAt: new Date("2026-07-28T00:00:00.000Z"),
+        expiresAt
+      });
+      await setDoc(doc(db, "publicNoteShares/share-a/attachments/attachment-a"), {
+        version: 1,
+        algorithm: "AES-GCM",
+        fileName: "archive",
+        extension: "zip",
+        mimeType: "application/zip",
+        originalSize: 16,
+        storagePath: shareStoragePath,
+        encryptedSize: 32,
+        isReady: true,
+        iv: Bytes.fromUint8Array(new Uint8Array(12)),
+        sourceAttachmentId: "source-a",
+        expiresAt,
+        createdAt: new Date("2026-07-28T00:00:00.000Z")
+      });
+      await uploadTaskPromise(
+        context.storage(bucketUrl).ref(shareStoragePath).put(
+          encryptedBytes(),
+          encryptedUploadMetadata({
+            shareId: "share-a",
+            attachmentId: "attachment-a"
+          })
+        )
+      );
+    });
+
+    const publicStorage = testEnv.unauthenticatedContext().storage(bucketUrl);
+    const ownerStorage = testEnv.authenticatedContext("user-a").storage(bucketUrl);
+
+    await assertFails(publicStorage.ref(shareStoragePath).getMetadata());
+    await assertSucceeds(ownerStorage.ref(shareStoragePath).getMetadata());
+  });
 });

@@ -12,16 +12,18 @@
     "security:functions-guard": "node scripts/security-functions-guard.mjs",
     "security:gitignore-guard": "node scripts/security-gitignore-guard.mjs",
     "test": "vitest run",
-    "test:rules": "npx firebase-tools emulators:exec --project quickmemo-rules-test --only firestore,storage \"vitest run --config vitest.rules.config.ts\"",
-    "emulators": "npx firebase-tools emulators:start --only auth,firestore,storage,hosting"
+    "test:rules": "npx --yes firebase-tools@15.24.0 emulators:exec --project quickmemo-rules-test --only firestore,storage \"vitest run --config vitest.rules.config.ts\"",
+    "test:api-emulator": "npx --yes firebase-tools@15.24.0 emulators:exec --project quickmemo-share-api-test --only auth,firestore \"vitest run --config vitest.integration.config.ts\"",
+    "test:cleanup-handler": "vitest run src/lib/publicShareCleanupHandler.integration.test.ts src/lib/publicShareCleanupBackend.test.ts",
+    "test:integration": "npm run test:api-emulator && npm run test:cleanup-handler",
+    "test:e2e": "playwright test",
+    "test:e2e:chromium": "playwright test --project=chromium-desktop --project=chromium-mobile-390 --project=chromium-mobile-320",
+    "test:e2e:webkit": "playwright test --project=webkit-desktop --project=webkit-mobile-390",
+    "emulators": "npx --yes firebase-tools@15.24.0 emulators:start --only auth,firestore,storage,hosting"
   },
   "overrides": {
     "@hono/node-server": "^2.0.11",
-    "firebase-tools": {
-      "js-yaml": "^4.2.0",
-      "tmp": "^0.2.6",
-      "uuid": "^11.1.1"
-    },
+    "brace-expansion": "^5.0.8",
     "tmp": "^0.2.6",
     "gaxios@6.7.1": {
       "uuid": "^11.1.1"
@@ -64,12 +66,13 @@
     "pdfjs-dist": "^5.7.284",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-router-dom": "^7.9.6",
+    "react-router-dom": "npm:react-router@8.3.0",
     "tesseract.js": "7.0.0"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.1",
+    "@eslint/js": "^9.39.5",
     "@firebase/rules-unit-testing": "^5.0.0",
+    "@playwright/test": "1.62.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
@@ -77,10 +80,9 @@
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.1.0",
-    "eslint": "^9.39.1",
+    "eslint": "^10.8.0",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
-    "firebase-tools": "^15.18.0",
     "jsdom": "^27.2.0",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.3",

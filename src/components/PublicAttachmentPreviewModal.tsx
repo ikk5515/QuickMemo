@@ -26,6 +26,7 @@ export default function PublicAttachmentPreviewModal({
   returnFocus?: HTMLElement | null;
 }) {
   const dialogRef = useRef<HTMLElement | null>(null);
+  const downloadUrl = preview.downloadUrl ?? preview.url;
 
   useDialogFocus(dialogRef, returnFocus, fallbackFocus);
 
@@ -57,11 +58,11 @@ export default function PublicAttachmentPreviewModal({
             <h2 id="public-attachment-preview-title">{preview.fileName}</h2>
           </div>
           <div className="pdf-preview-actions">
-            {preview.url && (
+            {preview.downloadAllowed !== false && downloadUrl && (
               <a
                 className="secondary-button pdf-preview-download"
                 download={preview.fileName}
-                href={preview.url}
+                href={downloadUrl}
                 rel="noopener noreferrer"
               >
                 <Download size={14} />

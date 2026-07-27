@@ -83,6 +83,18 @@ export interface CreatedRevisionedNoteResult extends NoteMutationResult {
   noteRef: ReturnType<typeof doc>;
 }
 
+export interface CreateSecureShareCopyingNoteInput extends SaveNoteInput {
+  copyJobId: string;
+  expectedAttachmentCount: number;
+}
+
+export interface SecureShareCopyingNoteLifecycleInput {
+  copyJobId: string;
+  expectedRevision: number;
+  noteId: string;
+  uid: string;
+}
+
 export interface UpdateRevisionedEncryptedNoteInput {
   changedFields?: string[];
   encryptedBody: EncryptedPayload;
@@ -134,6 +146,7 @@ export interface SaveNoteAttachmentInput {
   encryptedBlob: Blob;
   encryption: AttachmentEncryptionMetadata;
   uploadedBy: string;
+  secureShareCopyJobId?: string;
   onUploadProgress?: BlobAttachmentUploadProgressHandler;
 }
 
@@ -205,11 +218,17 @@ function purgedNote(document: NoteSnapshot) {
 }
 
 function visibleNote(document: NoteSnapshot) {
-  return document.isDeleted !== true && !purgedNote(document);
+  return document.isDeleted !== true
+    && document.secureShareCopyState !== "copying"
+    && document.secureShareCopyState !== "aborted"
+    && !purgedNote(document);
 }
 
 function deletedNote(document: NoteSnapshot) {
-  return document.isDeleted === true && !purgedNote(document);
+  return document.isDeleted === true
+    && document.secureShareCopyState !== "copying"
+    && document.secureShareCopyState !== "aborted"
+    && !purgedNote(document);
 }
 
 const legacyDeletionMetadataRepairs = new Map<string, Promise<boolean>>();
@@ -668,6 +687,41 @@ export async function getNoteAttachments(noteId: string) {
     .filter((attachment) => attachment.isReady !== false) satisfies NoteAttachmentSnapshot[];
 }
 
+export async function getAllNoteAttachments(noteId: string) {
+  const attachmentsQuery = query(collection(db, "notes", noteId, "attachments"), orderBy("createdAt", "desc"));
+  const snapshot = await getDocs(attachmentsQuery);
+
+  return snapshot.docs.map((document) => ({
+    id: document.id,
+    ...(document.data() as NoteAttachmentDocument)
+  })) satisfies NoteAttachmentSnapshot[];
+}
+
+export async function listStaleSecureShareCopyingNotes(
+  uid: string,
+  updatedBefore: Date,
+  maximumNotes = 20
+) {
+  if (!uid || !Number.isFinite(updatedBefore.getTime())) {
+    throw new Error("보안 공유 복사 작업 조회 조건이 올바르지 않습니다.");
+  }
+
+  const boundedMaximum = Math.min(50, Math.max(1, Math.floor(maximumNotes)));
+  const snapshot = await getDocs(query(
+    collection(db, "notes"),
+    where("ownerUid", "==", uid),
+    where("secureShareCopyState", "==", "copying"),
+    where("secureShareCopyUpdatedAt", "<=", updatedBefore),
+    orderBy("secureShareCopyUpdatedAt", "asc"),
+    limit(boundedMaximum)
+  ));
+
+  return snapshot.docs.map((document) => ({
+    id: document.id,
+    ...(document.data() as NoteDocument)
+  })) satisfies NoteSnapshot[];
+}
+
 export async function getNoteRevisionState(noteId: string) {
   const snapshot = await getDoc(doc(db, "notes", noteId));
 
@@ -682,7 +736,10 @@ export async function getNoteRevisionState(noteId: string) {
   };
 }
 
-export async function createRevisionedEncryptedNote(input: SaveNoteInput): Promise<CreatedRevisionedNoteResult> {
+async function createRevisionedEncryptedNoteWithFields(
+  input: SaveNoteInput,
+  additionalFields: Record<string, unknown> = {}
+): Promise<CreatedRevisionedNoteResult> {
   const { historySnapshot, historySummary, ...noteInput } = input;
   const noteRef = doc(collection(db, "notes"));
   const historyRef = doc(collection(db, "notes", noteRef.id, "history"));
@@ -708,6 +765,7 @@ export async function createRevisionedEncryptedNote(input: SaveNoteInput): Promi
   batch.set(noteRef, {
     ...noteInput,
     attachmentRevision: 0,
+    ...additionalFields,
     participantUids,
     folderId: input.type === "personal" ? input.folderId ?? null : null,
     createdAt: serverTimestamp(),
@@ -722,6 +780,101 @@ export async function createRevisionedEncryptedNote(input: SaveNoteInput): Promi
 
   await batch.commit();
   return { lastMutationId, noteId: noteRef.id, noteRef, revision };
+}
+
+export async function createRevisionedEncryptedNote(input: SaveNoteInput): Promise<CreatedRevisionedNoteResult> {
+  return createRevisionedEncryptedNoteWithFields(input);
+}
+
+export async function createSecureShareCopyingNote(
+  input: CreateSecureShareCopyingNoteInput
+): Promise<CreatedRevisionedNoteResult> {
+  if (
+    input.type !== "personal"
+    || input.ownerUid.length === 0
+    || input.participantUids.length !== 1
+    || input.participantUids[0] !== input.ownerUid
+    || !/^[A-Za-z0-9_-]{16,160}$/u.test(input.copyJobId)
+    || !Number.isSafeInteger(input.expectedAttachmentCount)
+    || input.expectedAttachmentCount < 0
+    || input.expectedAttachmentCount > 100
+  ) {
+    throw new Error("보안 공유 복사 작업 정보가 올바르지 않습니다.");
+  }
+
+  const {
+    copyJobId,
+    expectedAttachmentCount,
+    ...noteInput
+  } = input;
+
+  return createRevisionedEncryptedNoteWithFields(noteInput, {
+    secureShareCopyExpectedAttachmentCount: expectedAttachmentCount,
+    secureShareCopyJobId: copyJobId,
+    secureShareCopyReadyAttachmentCount: 0,
+    secureShareCopyReservedAttachmentCount: 0,
+    secureShareCopyStartedAt: serverTimestamp(),
+    secureShareCopyState: "copying",
+    secureShareCopyUpdatedAt: serverTimestamp()
+  });
+}
+
+export async function activateSecureShareCopyingNote(
+  input: SecureShareCopyingNoteLifecycleInput
+): Promise<{ noteId: string; state: "active" }> {
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const noteRef = doc(db, "notes", input.noteId);
+
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(noteRef);
+
+    if (!snapshot.exists()) {
+      throw new Error("활성화할 복사 노트를 찾을 수 없습니다.");
+    }
+
+    const note = snapshot.data() as NoteDocument;
+
+    if (
+      note.ownerUid !== input.uid
+      || note.secureShareCopyJobId !== input.copyJobId
+      || storedNoteRevision(note) !== expectedRevision
+    ) {
+      throw new Error("보안 공유 복사 작업이 현재 노트와 일치하지 않습니다.");
+    }
+
+    if (note.secureShareCopyState === "active") {
+      return { noteId: input.noteId, state: "active" as const };
+    }
+
+    const expectedCount = note.secureShareCopyExpectedAttachmentCount;
+    const reservedCount = note.secureShareCopyReservedAttachmentCount;
+    const readyCount = note.secureShareCopyReadyAttachmentCount;
+
+    if (
+      note.secureShareCopyState !== "copying"
+      || note.isDeleted === true
+      || Boolean(
+        note.secureShareCopyCleanupClaimId
+        || note.secureShareCopyCleanupClaimedAt
+      )
+      || !Number.isSafeInteger(expectedCount)
+      || reservedCount !== expectedCount
+      || readyCount !== expectedCount
+    ) {
+      throw new Error("복사할 첨부파일이 모두 준비되지 않았습니다.");
+    }
+
+    transaction.update(noteRef, {
+      savedAt: serverTimestamp(),
+      secureShareCopyFinishedAt: serverTimestamp(),
+      secureShareCopyState: "active",
+      secureShareCopyUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      updatedBy: input.uid
+    });
+
+    return { noteId: input.noteId, state: "active" as const };
+  });
 }
 
 export async function createEncryptedNote(input: SaveNoteInput) {
@@ -902,6 +1055,7 @@ interface RevisionedNoteMutationInput {
   readerUids: string[];
   uid: string;
   update: Record<string, unknown>;
+  validateCurrent?: (note: NoteDocument) => boolean;
 }
 
 async function commitRevisionedNoteMutation(input: RevisionedNoteMutationInput): Promise<NoteMutationResult> {
@@ -916,10 +1070,14 @@ async function commitRevisionedNoteMutation(input: RevisionedNoteMutationInput):
       throw new Error("저장할 노트를 찾을 수 없습니다.");
     }
 
-    const currentRevision = storedNoteRevision(snapshot.data() as NoteDocument);
+    const currentNote = snapshot.data() as NoteDocument;
+    const currentRevision = storedNoteRevision(currentNote);
 
     if (input.expectedRevision !== undefined && currentRevision !== input.expectedRevision) {
       throw new NoteRevisionConflictError(input.expectedRevision, currentRevision);
+    }
+    if (input.validateCurrent && !input.validateCurrent(currentNote)) {
+      throw new Error("현재 노트 상태가 요청한 작업과 일치하지 않습니다.");
     }
 
     const revision = currentRevision + 1;
@@ -988,6 +1146,7 @@ export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
     encryptedBlob: input.encryptedBlob,
     encryption: input.encryption,
     onUploadProgress: input.onUploadProgress,
+    secureShareCopyJobId: input.secureShareCopyJobId,
     uploadedBy: input.uploadedBy
   });
 
@@ -1128,6 +1287,36 @@ export async function deleteRevisionedNote(input: RevisionedNoteLifecycleInput) 
       updatedAt: serverTimestamp(),
       updatedBy: input.uid
     }
+  });
+}
+
+export async function abortSecureShareCopyingNote(
+  input: SecureShareCopyingNoteLifecycleInput
+) {
+  return commitRevisionedNoteMutation({
+    action: "delete",
+    changedFields: ["deleted"],
+    expectedRevision: expectedNoteRevision(input.expectedRevision),
+    noteId: input.noteId,
+    readerUids: [input.uid],
+    uid: input.uid,
+    update: {
+      isDeleted: true,
+      deletedAt: serverTimestamp(),
+      deletedBy: input.uid,
+      secureShareCopyFinishedAt: serverTimestamp(),
+      secureShareCopyState: "aborted",
+      secureShareCopyUpdatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      updatedBy: input.uid
+    },
+    validateCurrent: (note) =>
+      note.ownerUid === input.uid
+      && note.secureShareCopyJobId === input.copyJobId
+      && note.secureShareCopyState === "copying"
+      && !note.secureShareCopyCleanupClaimId
+      && !note.secureShareCopyCleanupClaimedAt
+      && note.secureShareCopyReadyAttachmentCount === 0
   });
 }
 

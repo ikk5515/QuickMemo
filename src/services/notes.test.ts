@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   NoteRevisionConflictError,
+  abortSecureShareCopyingNote,
+  activateSecureShareCopyingNote,
   createRevisionedEncryptedNote,
+  createSecureShareCopyingNote,
   deleteNote,
   getNoteRevisionState,
   getVisibleNotesByIds,
+  listStaleSecureShareCopyingNotes,
   purgeNote,
   restoreRevisionedNote,
   subscribeMyNoteStates,
@@ -183,6 +187,148 @@ describe("revision-aware note persistence", () => {
         revision: 1
       })
     );
+  });
+
+  it("creates an invisible copying note with durable zeroed counters", async () => {
+    const result = await createSecureShareCopyingNote({
+      copyJobId: "copy_job_1234567890",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      expectedAttachmentCount: 2,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    });
+
+    expect(mocks.batch.set).toHaveBeenNthCalledWith(
+      1,
+      result.noteRef,
+      expect.objectContaining({
+        secureShareCopyExpectedAttachmentCount: 2,
+        secureShareCopyJobId: "copy_job_1234567890",
+        secureShareCopyReadyAttachmentCount: 0,
+        secureShareCopyReservedAttachmentCount: 0,
+        secureShareCopyStartedAt: mocks.timestamp,
+        secureShareCopyState: "copying",
+        secureShareCopyUpdatedAt: mocks.timestamp
+      })
+    );
+  });
+
+  it("atomically activates only a fully reserved and ready copying note", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        ownerUid: "user-a",
+        revision: 1,
+        isDeleted: false,
+        secureShareCopyState: "copying",
+        secureShareCopyJobId: "copy_job_1234567890",
+        secureShareCopyExpectedAttachmentCount: 2,
+        secureShareCopyReservedAttachmentCount: 2,
+        secureShareCopyReadyAttachmentCount: 2
+      }),
+      exists: () => true,
+      id: "note-copy"
+    });
+
+    await expect(activateSecureShareCopyingNote({
+      copyJobId: "copy_job_1234567890",
+      expectedRevision: 1,
+      noteId: "note-copy",
+      uid: "user-a"
+    })).resolves.toEqual({ noteId: "note-copy", state: "active" });
+
+    expect(mocks.transaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "note-copy" }),
+      expect.objectContaining({
+        secureShareCopyFinishedAt: mocks.timestamp,
+        secureShareCopyState: "active",
+        secureShareCopyUpdatedAt: mocks.timestamp
+      })
+    );
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("refuses activation while a reserved attachment is not ready", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        ownerUid: "user-a",
+        revision: 1,
+        isDeleted: false,
+        secureShareCopyState: "copying",
+        secureShareCopyJobId: "copy_job_1234567890",
+        secureShareCopyExpectedAttachmentCount: 2,
+        secureShareCopyReservedAttachmentCount: 2,
+        secureShareCopyReadyAttachmentCount: 1
+      }),
+      exists: () => true,
+      id: "note-copy"
+    });
+
+    await expect(activateSecureShareCopyingNote({
+      copyJobId: "copy_job_1234567890",
+      expectedRevision: 1,
+      noteId: "note-copy",
+      uid: "user-a"
+    })).rejects.toThrow("모두 준비되지 않았습니다");
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+  });
+
+  it("pairs a stale copying-note abort with revision history", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        ownerUid: "user-a",
+        revision: 1,
+        secureShareCopyState: "copying",
+        secureShareCopyJobId: "copy_job_1234567890",
+        secureShareCopyReadyAttachmentCount: 0
+      }),
+      exists: () => true,
+      id: "note-copy"
+    });
+
+    await abortSecureShareCopyingNote({
+      copyJobId: "copy_job_1234567890",
+      expectedRevision: 1,
+      noteId: "note-copy",
+      uid: "user-a"
+    });
+
+    expect(mocks.transaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "note-copy" }),
+      expect.objectContaining({
+        isDeleted: true,
+        secureShareCopyState: "aborted",
+        revision: 2
+      })
+    );
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "delete", revision: 2 })
+    );
+  });
+
+  it("queries only owner-scoped stale copying jobs through the recovery index", async () => {
+    mocks.getDocs.mockResolvedValueOnce({
+      docs: [{
+        data: () => ({
+          ownerUid: "user-a",
+          secureShareCopyState: "copying"
+        }),
+        id: "note-copy"
+      }]
+    });
+    const cutoff = new Date("2026-07-27T00:00:00.000Z");
+
+    await expect(listStaleSecureShareCopyingNotes("user-a", cutoff, 20))
+      .resolves.toEqual([expect.objectContaining({ id: "note-copy" })]);
+
+    expect(mocks.where).toHaveBeenCalledWith("ownerUid", "==", "user-a");
+    expect(mocks.where).toHaveBeenCalledWith("secureShareCopyState", "==", "copying");
+    expect(mocks.where).toHaveBeenCalledWith("secureShareCopyUpdatedAt", "<=", cutoff);
   });
 
   it("reads content and attachment revisions with legacy zero defaults", async () => {
@@ -565,6 +711,39 @@ describe("bounded library note reads", () => {
         resolvedNoteIds: expect.arrayContaining(["note-readable", "note-missing"])
       });
     expect(mocks.getDoc).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not expose copying or aborted saga notes through visible direct reads", async () => {
+    mocks.getDoc
+      .mockResolvedValueOnce({
+        data: () => ({
+          isDeleted: false,
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          secureShareCopyState: "copying",
+          updatedAt: { toMillis: () => 100 }
+        }),
+        exists: () => true,
+        id: "copying-note"
+      })
+      .mockResolvedValueOnce({
+        data: () => ({
+          isDeleted: true,
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          secureShareCopyState: "aborted",
+          updatedAt: { toMillis: () => 90 }
+        }),
+        exists: () => true,
+        id: "aborted-note"
+      });
+
+    await expect(getVisibleNotesByIds("user-a", ["copying-note", "aborted-note"]))
+      .resolves.toEqual({
+        notes: [],
+        resolvedNoteIds: ["copying-note", "aborted-note"]
+      });
+    expect(mocks.updateDoc).not.toHaveBeenCalled();
   });
 });
 

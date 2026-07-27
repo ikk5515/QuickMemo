@@ -5,6 +5,9 @@ functions/lib/
 coverage/
 .vite/
 .vitest/
+playwright-report/
+test-results/
+blob-report/
 *.tsbuildinfo
 
 # Local environment and secret material
