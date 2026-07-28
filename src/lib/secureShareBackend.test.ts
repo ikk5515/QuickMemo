@@ -1519,6 +1519,18 @@ describe("Secure Share v2 transactional source contracts", () => {
     expect(ownerCreate).toContain("firestoreBatchGetNewTransaction(context");
     expect(ownerCreate).toContain("user.uid,\n          input.sourceNoteId,\n          transaction");
     expect(ownerCreate).toContain("firestoreCommit(context, [...writes, guardWrite], transaction)");
+    expect(ownerCreate).toContain("sourceCreateTransactionMaximumAttempts");
+    expect(ownerCreate).toContain("blockingSourceShareFromGuard(");
+    expect(ownerCreate).toContain("await waitBeforeOptimisticRetry(attempt)");
+    expect(ownerCreate).toContain("if (error instanceof HttpError)");
+    expect(ownerCreate).toContain("const createRateLimitReservations = await consumeRateLimits");
+    expect(ownerCreate).toContain("catch (recoveryError)");
+    expect(ownerCreate).toContain("Source share conflict recovery did not converge");
+    expect(
+      ownerCreate.match(
+        /releaseRateLimitReservations\(\s*context,\s*createRateLimitReservations\s*\)/gu
+      )
+    ).toHaveLength(2);
     expect(ownerCreate).toContain('"active_share_exists"');
     expect(ownerList).toContain("ownedSourceShareHistory(");
     expect(ownerList).toContain("nextCursor: null");
@@ -1531,6 +1543,9 @@ describe("Secure Share v2 transactional source contracts", () => {
     )?.[0] ?? "";
     const release = backendSource.match(
       /async function releaseRateLimitReservations[\s\S]*?function policyInputKeys/u
+    )?.[0] ?? "";
+    const consume = backendSource.match(
+      /async function consumeRateLimits[\s\S]*?async function releaseRateLimitReservations/u
     )?.[0] ?? "";
     const ownerCreate = backendSource.match(
       /async function handleOwnerCreate[\s\S]*?async function handleOwnerList/u
@@ -1545,6 +1560,12 @@ describe("Secure Share v2 transactional source contracts", () => {
     );
     expect(release).toContain("count: count - 1");
     expect(release).toContain("deleteDocumentWrite(");
+    expect(release).toContain("rateLimitTransactionMaximumAttempts");
+    expect(release).toContain("await waitBeforeOptimisticRetry(attempt)");
+    expect(release).toContain("Rate limit release did not converge");
+    expect(consume).toContain("rateLimitTransactionMaximumAttempts");
+    expect(consume).toContain("await waitBeforeOptimisticRetry(attempt)");
+    expect(consume).toContain("Rate limit update did not converge");
     expect(ownerCreate).toContain('"share_create_owner_hour"');
     expect(ownerCreate).toContain('"share_create_owner_day"');
     expect(ownerCreate).toContain("limit: 20");
