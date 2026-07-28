@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import handler, {
   HttpError,
   assertOnlyKeys,
+  assertEmailPolicyAvailable,
   buildPolicySettings,
   copyGrantAuthorizesDownload,
   createResendEmailAdapter,
@@ -168,6 +169,11 @@ describe("Secure Share v2 cryptographic primitives", () => {
 
   it("does not let a verified Firebase caller bypass a required email OTP", async () => {
     vi.stubEnv("VITE_FIREBASE_API_KEY", "test-web-api-key");
+    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
+    vi.stubEnv("SECURE_SHARE_EMAIL_ENABLED", "true");
+    vi.stubEnv("SHARE_EMAIL_PROVIDER", "resend");
+    vi.stubEnv("SHARE_EMAIL_API_KEY", "test-provider-key");
+    vi.stubEnv("SHARE_EMAIL_FROM", "sender@example.com");
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = decodeURIComponent(String(input));
       if (url.includes("/accounts:lookup")) {
@@ -370,7 +376,30 @@ describe("Secure Share v2 request boundary", () => {
       accessMode: "allowed_emails",
       allowedEmails: ["person@example.com"],
       passwordEnabled: false
-    })).rejects.toMatchObject({ statusCode: 503, code: "email_unavailable" });
+    })).rejects.toMatchObject({ statusCode: 503, code: "email_feature_unavailable" });
+  });
+
+  it("fails closed for existing email-gated policies and sessions while email is disabled", () => {
+    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
+    vi.stubEnv("SECURE_SHARE_EMAIL_ENABLED", "false");
+    expect(() => assertEmailPolicyAvailable({
+      accessMode: "allowed_emails",
+      emailVerificationRequired: true
+    })).toThrowError(expect.objectContaining({
+      statusCode: 503,
+      code: "email_feature_unavailable"
+    }));
+    expect(() => assertEmailPolicyAvailable({
+      accessMode: "authenticated_users",
+      emailVerificationRequired: true
+    })).toThrowError(expect.objectContaining({
+      statusCode: 503,
+      code: "email_feature_unavailable"
+    }));
+    expect(() => assertEmailPolicyAvailable({
+      accessMode: "authenticated_users",
+      emailVerificationRequired: false
+    })).not.toThrow();
   });
 });
 
@@ -441,6 +470,11 @@ describe("Secure Share v2 email and identity defenses", () => {
 
   it("rejects pending and suppressed OTP candidates with the same padded failure contract", async () => {
     vi.stubEnv("SHARE_OTP_HMAC_KEY", "o".repeat(48));
+    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
+    vi.stubEnv("SECURE_SHARE_EMAIL_ENABLED", "true");
+    vi.stubEnv("SHARE_EMAIL_PROVIDER", "resend");
+    vi.stubEnv("SHARE_EMAIL_API_KEY", "test-provider-key");
+    vi.stubEnv("SHARE_EMAIL_FROM", "sender@example.com");
     const pendingChallengeId = "ch_pending_candidate";
     const suppressedChallengeId = "ch_suppressed_candidate";
     const pendingEmailHash = "pending-email-hash";
@@ -633,7 +667,7 @@ describe("Secure Share v2 owner, source, quota, and attachment policy", () => {
     })).toBe(false);
   });
 
-  it("preflights the same 1 GiB and 500-object boundaries enforced by final uploads", () => {
+  it("preflights the same user and global boundaries enforced by final uploads", () => {
     expect(evaluateCopyAttachmentQuota({
       additionalBytes: 24,
       additionalCount: 2,
@@ -658,6 +692,12 @@ describe("Secure Share v2 owner, source, quota, and attachment policy", () => {
       usedBytes: -1,
       usedCount: 0
     })).toEqual({ allowed: false, reason: "invalid_usage" });
+    const copyPreflightSource = backendSource.match(
+      /async function preflightCopyAttachmentQuota[\s\S]*?function copyGrantAuthorizesDownload/u
+    )?.[0] ?? "";
+    expect(copyPreflightSource).toContain("GLOBAL_BLOB_USAGE_DOCUMENT_PATH");
+    expect(copyPreflightSource).toContain("evaluateFreeTierUpload");
+    expect(copyPreflightSource).toContain("Global Blob usage counter is missing or invalid");
   });
 
   it("derives the only accepted private attachment path from server-owned identifiers", () => {
@@ -676,7 +716,24 @@ describe("Secure Share v2 owner, source, quota, and attachment policy", () => {
     expect(reservation).toContain("userBlobAttachmentQuotaBytes");
     expect(reservation).toContain("userBlobAttachmentCountLimit");
     expect(reservation).toContain("currentDocument: quotaDocument ? { updateTime: quotaDocument.updateTime }");
-    expect(reservation).toContain("await firestoreCommit(projectId, accessToken, [quotaWrite, ...resolvedExtraWrites])");
+    expect(reservation).toContain(
+      "[quotaWrite, ...(globalWrite ? [globalWrite] : []), ...resolvedExtraWrites]"
+    );
+  });
+
+  it("throttles session last-seen metadata to at most once per hour", () => {
+    const sessionHandler = backendSource.match(
+      /async function handleSession[\s\S]*?function safeAttachmentMetadata/u
+    )?.[0] ?? "";
+
+    expect(backendSource).toContain(
+      "const sessionLastSeenWriteIntervalMilliseconds = 60 * 60 * 1000"
+    );
+    expect(sessionHandler).toContain(
+      "lastSeenAt <= Date.now() - sessionLastSeenWriteIntervalMilliseconds"
+    );
+    expect(sessionHandler).toContain('const sessionUpdateFieldPaths = ["csrfDigest"]');
+    expect(sessionHandler).toContain('sessionUpdateFieldPaths.push("lastSeenAt")');
   });
 });
 

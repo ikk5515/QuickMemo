@@ -38,10 +38,12 @@ const cleanupEnvironmentKeys = [
   "FIREBASE_CLEANUP_PRIVATE_KEY",
   "FIREBASE_CLEANUP_PROJECT_ID",
   "FIREBASE_STORAGE_BUCKET",
+  "LEGACY_FIREBASE_STORAGE_ENABLED",
   "LEGACY_NOTE_BACKFILL_MAX_SCANNED",
   "LEGACY_NOTE_BACKFILL_PAGE_SIZE",
   "PUBLIC_SHARE_CLEANUP_BATCH_SIZE",
-  "PUBLIC_SHARE_CLEANUP_MAX_DELETES"
+  "PUBLIC_SHARE_CLEANUP_MAX_DELETES",
+  "PUBLIC_SHARE_CLEANUP_MAX_RUNTIME_SECONDS"
 ] as const;
 const originalEnvironment = new Map(
   cleanupEnvironmentKeys.map((key) => [key, process.env[key]])
@@ -159,6 +161,7 @@ function collectionMatches(
 class FakeFirestoreRest {
   readonly documents = new Map<string, FirestoreDocument>();
   requests = 0;
+  beforeNextRunQuery: (() => Promise<void>) | null = null;
   failCommitContainingOnce = "";
   raceAbortDocumentOnce = "";
   raceCleanupClaimHeartbeatDocumentOnce = "";
@@ -234,6 +237,10 @@ class FakeFirestoreRest {
   }
 
   private async runQuery(init?: RequestInit) {
+    const beforeRunQuery = this.beforeNextRunQuery;
+    this.beforeNextRunQuery = null;
+    await beforeRunQuery?.();
+
     const body = await this.requestBody(init);
     const query = body.structuredQuery as {
       from?: Array<{ allDescendants?: boolean; collectionId?: string }>;
@@ -570,10 +577,12 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     process.env.FIREBASE_CLEANUP_PRIVATE_KEY = privateKey;
     process.env.FIREBASE_CLEANUP_PROJECT_ID = testProjectId;
     process.env.FIREBASE_STORAGE_BUCKET = `${testProjectId}.appspot.com`;
+    process.env.LEGACY_FIREBASE_STORAGE_ENABLED = "false";
     process.env.LEGACY_NOTE_BACKFILL_MAX_SCANNED = "10";
     process.env.LEGACY_NOTE_BACKFILL_PAGE_SIZE = "10";
     process.env.PUBLIC_SHARE_CLEANUP_BATCH_SIZE = "50";
     process.env.PUBLIC_SHARE_CLEANUP_MAX_DELETES = "1000";
+    process.env.PUBLIC_SHARE_CLEANUP_MAX_RUNTIME_SECONDS = "240";
   });
 
   afterEach(() => {
@@ -603,6 +612,259 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(backend.requests).toBe(0);
+  });
+
+  it("serializes concurrent handlers with a Firestore lease and returns a neutral skip", async () => {
+    const backend = new FakeFirestoreRest();
+    completedBackfillCursor(backend);
+    let releaseRunQuery!: () => void;
+    let reportRunQueryStarted!: () => void;
+    const runQueryStarted = new Promise<void>((resolve) => {
+      reportRunQueryStarted = resolve;
+    });
+    const runQueryGate = new Promise<void>((resolve) => {
+      releaseRunQuery = resolve;
+    });
+    backend.beforeNextRunQuery = async () => {
+      reportRunQueryStarted();
+      await runQueryGate;
+    };
+    installBackend(backend);
+
+    const firstRun = callHandler(`Bearer ${cronSecret}`);
+    await runQueryStarted;
+
+    const concurrentRun = await callHandler(`Bearer ${cronSecret}`);
+    expect(concurrentRun).toMatchObject({
+      body: {
+        ok: true,
+        reason: "already_running",
+        skipped: true
+      },
+      status: 200
+    });
+    expect(backend.has("systemMaintenance/secureShareCleanupLockV1")).toBe(true);
+
+    releaseRunQuery();
+    const completedRun = await firstRun;
+    expect(completedRun.status).toBe(200);
+    expect(completedRun.body).toMatchObject({ ok: true, deadlineReached: false });
+    expect(backend.has("systemMaintenance/secureShareCleanupLockV1")).toBe(false);
+  });
+
+  it("takes over a stale cleanup lease and releases only the acquired run", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+
+    completedBackfillCursor(backend);
+    backend.add("systemMaintenance/secureShareCleanupLockV1", {
+      leaseExpiresAt: timestampValue(expired),
+      runId: stringValue("cleanup_run_stale_owner"),
+      startedAt: timestampValue(expired)
+    });
+    backend.add("publicShareAccessSessions/expired-after-stale-lease", {
+      expiresAt: timestampValue(expired)
+    });
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ok: true,
+      secureShareAccessSessionsDeleted: 1
+    });
+    expect(response.body).not.toHaveProperty("skipped");
+    expect(backend.has("publicShareAccessSessions/expired-after-stale-lease")).toBe(false);
+    expect(backend.has("systemMaintenance/secureShareCleanupLockV1")).toBe(false);
+  });
+
+  it("stops scheduling cleanup work when the 240 second run deadline is reached", async () => {
+    const backend = new FakeFirestoreRest();
+    let clock = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+
+    completedBackfillCursor(backend);
+    backend.beforeNextRunQuery = async () => {
+      clock += 240_001;
+    };
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      deadlineReached: true,
+      documentDeletesAttempted: 0,
+      ok: true
+    });
+    expect(backend.has("systemMaintenance/secureShareCleanupLockV1")).toBe(false);
+  });
+
+  it("gives each secure-share retention collection a bounded fair delete share", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+
+    process.env.PUBLIC_SHARE_CLEANUP_BATCH_SIZE = "5";
+    completedBackfillCursor(backend);
+    for (let index = 0; index < 20; index += 1) {
+      backend.add(`publicShareAccessSessions/expired-session-${index}`, {
+        expiresAt: timestampValue(expired)
+      });
+    }
+    backend.add("publicShareEmailChallenges/expired-challenge", {
+      expiresAt: timestampValue(expired)
+    });
+    backend.add("publicShareUnlockGrants/expired-grant", {
+      expiresAt: timestampValue(expired)
+    });
+    backend.add("publicShareRateLimits/expired-rate", {
+      expiresAt: timestampValue(expired)
+    });
+    backend.add("publicShareAuditEvents/share-fair/items/expired-audit", {
+      retentionExpiresAt: timestampValue(expired)
+    });
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      documentDeletesAttempted: 5,
+      secureShareAccessSessionsDeleted: 1,
+      secureShareAuditEventsDeleted: 1,
+      secureShareEmailChallengesDeleted: 1,
+      secureShareRateLimitsDeleted: 1,
+      secureShareUnlockGrantsDeleted: 1
+    });
+    expect(
+      backend.pathsStartingWith("publicShareAccessSessions/expired-session-")
+    ).toHaveLength(19);
+    expect(backend.has("publicShareAuditEvents/share-fair/items/expired-audit")).toBe(false);
+  });
+
+  it("skips disabled legacy Storage I/O and atomically releases valid global Blob usage", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+
+    completedBackfillCursor(backend);
+    backend.add("systemUsage/blobAttachmentsV1", {
+      accountingMode: stringValue("ready_and_pending_reservations"),
+      attachmentCount: integerValue(1),
+      schemaVersion: integerValue(1),
+      usedBytes: integerValue(100)
+    });
+    backend.add("userAttachmentUsage/owner-storage", {
+      attachmentCount: integerValue(1),
+      usedBytes: integerValue(100)
+    });
+    backend.add("notes/storage-cleanup/attachments/legacy-object", {
+      encryptedSize: integerValue(100),
+      isReady: booleanValue(false),
+      ownerUid: stringValue("owner-storage"),
+      quotaReserved: booleanValue(true),
+      reservationExpiresAt: timestampValue(expired),
+      storagePath: stringValue("legacy/private/object.bin")
+    });
+    installBackend(backend);
+
+    const first = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({
+      attachmentsDeleted: 1,
+      storageBytesReleased: 100,
+      storageObjectsDeleted: 0
+    });
+    expect(backend.has("notes/storage-cleanup/attachments/legacy-object")).toBe(false);
+    expect(backend.get("userAttachmentUsage/owner-storage")?.fields).toMatchObject({
+      attachmentCount: integerValue(0),
+      usedBytes: integerValue(0)
+    });
+    expect(backend.get("systemUsage/blobAttachmentsV1")?.fields).toMatchObject({
+      attachmentCount: integerValue(0),
+      schemaVersion: integerValue(1),
+      usedBytes: integerValue(0)
+    });
+
+    const duplicate = await callHandler(`Bearer ${cronSecret}`);
+    expect(duplicate.status).toBe(200);
+    expect(duplicate.body).toMatchObject({ attachmentsDeleted: 0 });
+    expect(backend.get("systemUsage/blobAttachmentsV1")?.fields).toMatchObject({
+      attachmentCount: integerValue(0),
+      usedBytes: integerValue(0)
+    });
+  });
+
+  it("continues deletion when the optional global Blob usage document is invalid", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+
+    completedBackfillCursor(backend);
+    backend.add("systemUsage/blobAttachmentsV1", {
+      attachmentCount: integerValue(10),
+      schemaVersion: integerValue(999),
+      usedBytes: integerValue(10_000)
+    });
+    backend.add("notes/invalid-usage/attachments/pending-object", {
+      encryptedSize: integerValue(50),
+      isReady: booleanValue(false),
+      ownerUid: stringValue("owner-invalid-usage"),
+      quotaReserved: booleanValue(true),
+      reservationExpiresAt: timestampValue(expired)
+    });
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ attachmentsDeleted: 1 });
+    expect(backend.has("notes/invalid-usage/attachments/pending-object")).toBe(false);
+    expect(backend.get("systemUsage/blobAttachmentsV1")?.fields).toMatchObject({
+      attachmentCount: integerValue(10),
+      schemaVersion: integerValue(999),
+      usedBytes: integerValue(10_000)
+    });
+  });
+
+  it("preserves a schema-valid global counter instead of underflowing it", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    completedBackfillCursor(backend);
+    backend.add("systemUsage/blobAttachmentsV1", {
+      attachmentCount: integerValue(0),
+      schemaVersion: integerValue(1),
+      usedBytes: integerValue(10)
+    });
+    backend.add("userAttachmentUsage/owner-underflow", {
+      attachmentCount: integerValue(1),
+      usedBytes: integerValue(100)
+    });
+    backend.add("notes/underflow/attachments/pending-object", {
+      encryptedSize: integerValue(100),
+      isReady: booleanValue(false),
+      ownerUid: stringValue("owner-underflow"),
+      quotaReserved: booleanValue(true),
+      reservationExpiresAt: timestampValue(expired)
+    });
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ attachmentsDeleted: 1 });
+    expect(backend.has("notes/underflow/attachments/pending-object")).toBe(false);
+    expect(backend.get("systemUsage/blobAttachmentsV1")?.fields).toMatchObject({
+      attachmentCount: integerValue(0),
+      schemaVersion: integerValue(1),
+      usedBytes: integerValue(10)
+    });
+    expect(warning).toHaveBeenCalledWith(
+      "blob storage counter release skipped",
+      { reason: "counter_underflow_guard" }
+    );
   });
 
   it("returns 200 and cleans expired state plus stale copy jobs without touching active or racing data", async () => {

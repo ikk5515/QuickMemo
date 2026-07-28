@@ -4,7 +4,9 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
+  orderBy,
   query,
   serverTimestamp,
   Timestamp,
@@ -16,7 +18,7 @@ import {
 import { getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
-import { db, storage } from "../lib/firebase";
+import { db, getLegacyStorage } from "../lib/firebase";
 import {
   deleteBlobAttachment,
   fetchBlobAttachmentBytes,
@@ -34,6 +36,7 @@ import type {
 
 export const publicNoteShareMaxAgeMs = 7 * 24 * 60 * 60 * 1000;
 export const publicNoteShareMaxAttachmentCount = 100;
+const legacyOwnerShareListenerLimit = 500;
 
 export interface PublicNoteShareSnapshot extends PublicNoteShareDocument {
   id: string;
@@ -166,35 +169,20 @@ async function requireLegacyPublicNoteShare(shareId: string) {
   return share;
 }
 
-export function subscribePublicSharesForNote(
-  sourceNoteId: string,
-  ownerUid: string,
-  callback: (shares: PublicNoteShareSnapshot[]) => void,
-  onError?: (error: Error) => void
-) {
-  const sharesQuery = query(collection(db, "publicNoteShares"), where("ownerUid", "==", ownerUid));
-
-  return onSnapshot(
-    sharesQuery,
-    (snapshot) => {
-      callback(
-        snapshot.docs
-          .map((document) => publicShareSnapshot(document.id, document.data() as PublicNoteShareDocument))
-          .filter(isLegacyPublicNoteShare)
-          .filter((share) => share.sourceNoteId === sourceNoteId)
-          .sort((left, right) => timestampMillis(right.createdAt) - timestampMillis(left.createdAt))
-      );
-    },
-    (error) => onError?.(error)
-  );
-}
-
 export function subscribePublicSharesForOwner(
   ownerUid: string,
   callback: (shares: PublicNoteShareSnapshot[]) => void,
   onError?: (error: Error) => void
 ) {
-  const sharesQuery = query(collection(db, "publicNoteShares"), where("ownerUid", "==", ownerUid));
+  const sharesQuery = query(
+    collection(db, "publicNoteShares"),
+    where("ownerUid", "==", ownerUid),
+    where("version", "==", 1),
+    where("ready", "==", true),
+    where("expiresAt", ">", Timestamp.now()),
+    orderBy("expiresAt", "asc"),
+    limit(legacyOwnerShareListenerLimit)
+  );
 
   return onSnapshot(
     sharesQuery,
@@ -310,7 +298,9 @@ export async function getEncryptedPublicShareAttachmentBytes(attachment: StoredP
     throw new Error("공유 첨부파일 암호문 위치를 찾을 수 없습니다.");
   }
 
-  return new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes));
+  return new Uint8Array(
+    await getBytes(ref(getLegacyStorage(), attachment.storagePath), maxEncryptedAttachmentBytes)
+  );
 }
 
 export async function getEncryptedPublicShareAttachmentSource(
@@ -339,7 +329,11 @@ export async function getEncryptedPublicShareAttachmentSource(
     throw new Error("공유 첨부파일 암호문 위치를 찾을 수 없습니다.");
   }
 
-  return { bytes: new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes)) };
+  return {
+    bytes: new Uint8Array(
+      await getBytes(ref(getLegacyStorage(), attachment.storagePath), maxEncryptedAttachmentBytes)
+    )
+  };
 }
 
 async function deletePublicShareAttachmentStorageObjects(attachments: PublicNoteShareAttachmentSnapshot[]) {
@@ -416,19 +410,6 @@ export async function deletePublicNoteShareAttachments(shareId: string, generati
     publicShareAttachmentSnapshot(document.id, document.data() as PublicNoteShareAttachmentDocument, shareId)
   );
   await deletePublicShareAttachmentStorageObjects(attachments);
-}
-
-export async function deleteExpiredPublicSharesForOwner(ownerUid: string, now = Date.now()) {
-  const sharesQuery = query(collection(db, "publicNoteShares"), where("ownerUid", "==", ownerUid));
-  const snapshot = await getDocs(sharesQuery);
-  const staleShares = snapshot.docs
-    .map((document) => publicShareSnapshot(document.id, document.data() as PublicNoteShareDocument))
-    .filter(isLegacyPublicNoteShare)
-    .filter((share) => Boolean(share.revokedAt) || timestampMillis(share.expiresAt) <= now);
-
-  await Promise.all(staleShares.map((share) => deletePublicNoteShare(share.id)));
-
-  return staleShares.length;
 }
 
 export async function getPublicNoteShare(shareId: string) {

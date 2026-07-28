@@ -1,6 +1,6 @@
-/* global Buffer, console */
+/* global Buffer, console, process */
 
-import { get, head } from "@vercel/blob";
+import { get } from "@vercel/blob";
 import { randomInt } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -73,6 +73,12 @@ import {
   verifySharePassword,
   verificationEmailText
 } from "./_secure-share-common.js";
+import {
+  GLOBAL_BLOB_USAGE_DOCUMENT_PATH,
+  GLOBAL_BLOB_USAGE_SCHEMA_VERSION,
+  evaluateFreeTierUpload,
+  resolveFreeTierPolicy
+} from "./_free-tier-policy.js";
 
 const accessModes = new Set(["anyone_with_link", "allowed_emails", "authenticated_users"]);
 const permissionLevels = new Set(["view", "comment", "save_copy"]);
@@ -89,6 +95,7 @@ const auditRetentionDays = configuredInteger("SHARE_AUDIT_RETENTION_DAYS", 90, 3
 const auditRetentionMilliseconds = auditRetentionDays * 24 * 60 * 60 * 1000;
 const defaultPageSize = 20;
 const maximumPageSize = 50;
+const sessionLastSeenWriteIntervalMilliseconds = 60 * 60 * 1000;
 const validActions = new Set([
   "feature-status",
   "owner-list",
@@ -316,6 +323,22 @@ function persistedPolicySettings(settings) {
   const persisted = { ...settings };
   delete persisted.allowedEmails;
   return persisted;
+}
+
+function assertEmailPolicyAvailable(policy) {
+  if (
+    (
+      policy?.accessMode === "allowed_emails"
+      || policy?.emailVerificationRequired === true
+    )
+    && !secureShareEmailEnabled()
+  ) {
+    throw new HttpError(
+      503,
+      "email_feature_unavailable",
+      "Secure Share email is unavailable"
+    );
+  }
 }
 
 async function secureContext(request) {
@@ -576,7 +599,7 @@ async function buildPolicySettings(body, existingPolicy = null) {
       "emailVerificationRequired"
     );
   if (emailVerificationRequired && !secureShareEmailEnabled()) {
-    throw new HttpError(503, "email_unavailable", "Email verification is not configured");
+    throw new HttpError(503, "email_feature_unavailable", "Email verification is not configured");
   }
 
   let allowedEmails = null;
@@ -1345,6 +1368,7 @@ async function handleMetadata(request, response, id, shareId) {
   }
   if (!ownerPreview) {
     assertPublicShareAvailable(state);
+    assertEmailPolicyAvailable(state.policy);
   } else if (
     !state
     || state.share.revokedAt
@@ -1501,7 +1525,7 @@ async function handleEmailChallenge(request, response, id, shareId) {
   requireMethod(request, ["POST"]);
   ensureSameOrigin(request);
   if (!secureShareEmailEnabled()) {
-    throw new HttpError(503, "email_unavailable", "Secure Share email is unavailable");
+    throw new HttpError(503, "email_feature_unavailable", "Secure Share email is unavailable");
   }
   const body = await readJsonBody(request, 16 * 1024);
   assertOnlyKeys(body, ["email"]);
@@ -1736,6 +1760,7 @@ async function verifiedChallengeIdentity(context, shareId, policy, body, timing 
 }
 
 async function resolveAccessIdentity(request, context, shareId, policy, body, otpVerificationTiming) {
+  assertEmailPolicyAvailable(policy);
   let caller = null;
   if (authorizationToken(request)) {
     caller = await activeUserFromRequest(request, context);
@@ -1917,6 +1942,7 @@ async function issueAccessSession(
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const state = await loadShareState(context, shareId);
     assertPublicShareAvailable(state);
+    assertEmailPolicyAvailable(state.policy);
     if (state.policy.policyVersion !== verifiedPolicyVersion) {
       throw new HttpError(409, "policy_changed");
     }
@@ -2160,6 +2186,7 @@ async function handleAccess(request, response, id, shareId) {
   }
 
   assertPublicShareAvailable(state);
+  assertEmailPolicyAvailable(state.policy);
   await requireSourceAvailable(context, state.share);
   if (state.policy.oneTimeEnabled === true && body.oneTimeOpenConfirmed !== true) {
     throw new HttpError(400, "one_time_confirmation_required");
@@ -2326,6 +2353,7 @@ async function validatedSession(request, context, shareId) {
     ) {
       throw new HttpError(401, "session_expired");
     }
+    assertEmailPolicyAvailable(state.policy);
   }
   await requireSourceAvailable(context, state.share);
   session.__sessionDigest = digest;
@@ -2338,12 +2366,23 @@ async function handleSession(request, response, id, shareId) {
   const { session, state } = await validatedSession(request, context, shareId);
   const csrfToken = randomToken(32);
   const csrfDigest = csrfTokenDigest(csrfToken, session.__sessionDigest);
+  const sessionUpdateFields = { csrfDigest };
+  const sessionUpdateFieldPaths = ["csrfDigest"];
+  const lastSeenAt = timestampMilliseconds(session.lastSeenAt);
+
+  if (
+    !Number.isFinite(lastSeenAt)
+    || lastSeenAt <= Date.now() - sessionLastSeenWriteIntervalMilliseconds
+  ) {
+    sessionUpdateFields.lastSeenAt = new Date();
+    sessionUpdateFieldPaths.push("lastSeenAt");
+  }
   await firestoreCommit(context, [
     updateDocumentWrite(
       context.projectId,
       `publicShareAccessSessions/${session.__sessionDigest}`,
-      { csrfDigest, lastSeenAt: new Date() },
-      ["csrfDigest", "lastSeenAt"],
+      sessionUpdateFields,
+      sessionUpdateFieldPaths,
       session.__updateTime
     )
   ]);
@@ -2810,9 +2849,13 @@ function evaluateCopyAttachmentQuota({
 }
 
 async function preflightCopyAttachmentQuota(context, uid, share) {
-  const [attachments, usage] = await Promise.all([
+  const freeTierPolicy = resolveFreeTierPolicy(process.env);
+  const [attachments, usage, globalUsage] = await Promise.all([
     currentAttachments(context, share),
-    firestoreGet(context, `userAttachmentUsage/${safeId(uid, "uid")}`)
+    firestoreGet(context, `userAttachmentUsage/${safeId(uid, "uid")}`),
+    freeTierPolicy.enabled
+      ? firestoreGet(context, GLOBAL_BLOB_USAGE_DOCUMENT_PATH)
+      : Promise.resolve(null)
   ]);
   let additionalBytes = 0;
   for (const attachment of attachments) {
@@ -2837,6 +2880,27 @@ async function preflightCopyAttachmentQuota(context, uid, share) {
   }
   if (!decision.allowed) {
     throw new HttpError(413, "attachment_quota_exceeded", "Attachment quota preflight failed");
+  }
+  if (freeTierPolicy.enabled) {
+    if (
+      !globalUsage
+      || globalUsage.schemaVersion !== GLOBAL_BLOB_USAGE_SCHEMA_VERSION
+      || !Number.isSafeInteger(globalUsage.usedBytes)
+      || globalUsage.usedBytes < 0
+    ) {
+      throw new HttpError(503, "service_unavailable", "Global Blob usage counter is missing or invalid", {
+        expose: false
+      });
+    }
+    const globalDecision = evaluateFreeTierUpload({
+      usedBytes: globalUsage.usedBytes,
+      reservedBytes: 0,
+      requestedBytes: additionalBytes
+    }, freeTierPolicy);
+    if (!globalDecision.allowUpload) {
+      throw new HttpError(507, "attachment_quota_exceeded", "Global Blob free-tier hard stop");
+    }
+    return { ...decision, globalDecision };
   }
   return decision;
 }
@@ -2987,18 +3051,17 @@ async function streamAttachment(request, response, id, shareId, attachmentId, di
     if (attachment.blobPath !== expectedBlobPath) {
       throw new HttpError(404, "not_found", "Private Blob attachment is unavailable");
     }
-    const metadata = await head(attachment.blobPath);
-    if (
-      !metadata
-      || metadata.pathname !== attachment.blobPath
-      || metadata.size !== encryptedSize
-      || metadata.contentType !== "application/octet-stream"
-    ) {
-      throw new HttpError(404, "not_found", "Private Blob metadata mismatch");
-    }
     const blob = await get(attachment.blobPath, { access: "private", useCache: false });
     if (!blob || blob.statusCode !== 200 || !blob.stream) {
       throw new HttpError(404, "not_found", "Private Blob is unavailable");
+    }
+    if (
+      blob.blob.pathname !== attachment.blobPath
+      || blob.blob.size !== encryptedSize
+      || blob.blob.contentType !== "application/octet-stream"
+    ) {
+      await blob.stream.cancel().catch(() => undefined);
+      throw new HttpError(404, "not_found", "Private Blob metadata mismatch");
     }
     privateBlobStream = blob.stream;
   }
@@ -3094,6 +3157,7 @@ async function dispatch(request, response, id) {
 export {
   HttpError,
   auditRetentionDays,
+  assertEmailPolicyAvailable,
   assertOnlyKeys,
   buildPolicySettings,
   copyGrantAuthorizesDownload,

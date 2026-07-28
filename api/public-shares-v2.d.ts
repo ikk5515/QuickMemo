@@ -36,6 +36,10 @@ export const secureShareScryptParameters: Readonly<{
 export function normalizeEmail(value: string): string;
 export function normalizeAllowedEmails(values: string[]): string[];
 export function assertOnlyKeys(value: unknown, allowedKeys: string[]): void;
+export function assertEmailPolicyAvailable(policy: {
+  accessMode?: string;
+  emailVerificationRequired?: boolean;
+} | null): void;
 export function buildPolicySettings(
   body: Record<string, unknown>,
   existingPolicy?: Record<string, unknown> | null

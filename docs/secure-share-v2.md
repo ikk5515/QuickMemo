@@ -16,10 +16,13 @@ without changing the existing end-to-end content encryption boundary.
 - `SECURE_SHARE_EMAIL_ENABLED=true` is required before OTP delivery is
   available. It must remain false until the Production email provider, sender
   domain, and approved smoke-test mailbox are verified.
+- Email false does not disable Core v2. Existing email-gated policies and
+  sessions fail closed with `email_feature_unavailable`; they are never
+  downgraded to a link-only or authenticated-users policy.
 - Turning the server flag off makes every v2 API fail closed while leaving v1
   shares unchanged.
 
-The first compatibility deployment must keep both server flags false.
+The first compatibility deployment must keep Core and email flags false.
 
 ## Access modes
 
@@ -82,7 +85,8 @@ Production activation requires:
 - a verified sender domain,
 - a server-only API credential,
 - `SHARE_EMAIL_FROM`,
-- an approved `SHARE_SMOKE_TEST_EMAIL`,
+- an approved operator-controlled smoke-test mailbox (do not persist it as an
+  application environment variable),
 - a real delivery and wrong-code/reuse smoke test.
 
 ## One-time semantics
@@ -220,6 +224,36 @@ existing 150 MB attachment limit, 25 MB preview limit, encrypted filename,
 AES-GCM/AES-GCM-CHUNKED metadata, source revision binding, and quota policy
 remain in force.
 
+Production does not provision Firebase Storage. New uploads use private Vercel
+Blob objects, and the Firebase Storage legacy fallback is disabled unless the
+explicit client/server legacy flags are both intentionally enabled. Merely
+having a legacy `storagePath` does not initialize or contact an unprovisioned
+bucket.
+
+## Free-tier storage guard
+
+`FREE_TIER_MODE=true` enables a server-only global counter at
+`systemUsage/blobAttachmentsV1`. Every pending reservation and ready Vercel
+Blob attachment counts toward `usedBytes`; upload reservation and the global
+counter update share the same Firestore commit and update-time preconditions.
+Deletion releases bytes and count at the same idempotent metadata claim.
+
+The default policy uses the official 1,000,000,000-byte included capacity,
+warns at 65%, raises the admin warning at 75%, and stops new uploads at the
+more conservative 800,000,000-byte operational cap. Existing reads, deletes,
+and cleanup remain available. Values are configured once through the
+`BLOB_STORAGE_*` server variables rather than duplicated across routes.
+If a smaller official allowance creates a distinct 80–85% restricted band,
+new uploads above `BLOB_STORAGE_RESTRICTED_UPLOAD_MAX_BYTES` (25,000,000 bytes
+by default) are rejected while smaller cleanup-friendly operations remain
+available.
+
+Before enabling free-tier mode, reconcile Vercel Blob store totals against
+Firestore attachment metadata and seed the server-only counter with the exact
+byte and object totals. Missing or malformed counter state blocks new uploads
+instead of assuming zero. The app estimate is an operational guard, not a
+replacement for the Vercel Usage dashboard.
+
 ## Save-copy durability
 
 A saved copy is created as an owner-only personal Note with
@@ -278,6 +312,16 @@ approved Vercel Production secret workflow.
 Never use a `VITE_` prefix for a password pepper, session/cookie/CSRF/OTP/email
 or rate-limit HMAC key, or an email API credential.
 
+Core requires distinct server-only values for `SHARE_PASSWORD_PEPPER`,
+`SHARE_SESSION_HMAC_KEY`, `SHARE_COOKIE_NAME_HMAC_KEY`,
+`SHARE_CSRF_HMAC_KEY`, and `SHARE_RATE_LIMIT_HMAC_KEY`, plus an exact
+`SECURE_SHARE_ALLOWED_ORIGINS` allowlist. `SHARE_OTP_HMAC_KEY`,
+`SHARE_EMAIL_HMAC_KEY`, provider credentials, and sender configuration are
+email-only while `SECURE_SHARE_EMAIL_ENABLED=false`. `CRON_SECRET` is separate
+from both groups. Generate every secret independently from at least 32 random
+bytes (48–64 recommended), inject it through stdin or an equivalent
+non-logging secret workflow, and report only whether each variable exists.
+
 Changing a Vercel environment variable requires a new Production deployment
 before runtime behavior changes.
 
@@ -308,34 +352,65 @@ CSP, and secret-free network responses.
 
 ## Production rollout
 
-1. Verify the exact GitHub repository, master SHA, Vercel team/project/domain,
-   and Firebase project.
-2. Keep both server flags false.
-3. Deploy the compatibility code from a successful master CI run.
-4. Smoke legacy login, notes, autosave, v1 shares, attachments, dark mode,
-   schedule, and matrix.
-5. Deploy only changed Firestore Rules/indexes and, if changed, Storage Rules
-   to the explicitly verified Firebase project.
-6. Wait for every new index to become ready.
-7. Verify all required Production secret names without printing values.
-8. Send a real OTP to the approved smoke mailbox and test wrong, correct, and
-   reused codes.
-9. Enable server and client v2 flags, redeploy the same master SHA, and run the
-   complete Production smoke matrix.
+1. Verify the exact GitHub repository, master SHA, Vercel Hobby usage,
+   team/project/domain, Firebase Spark project, billing-disabled state, and
+   rollback candidate.
+2. Deploy only changed additive Firestore indexes to the explicitly verified
+   Firebase project and wait until every new index is READY. Do not initialize
+   or deploy Firebase Storage. This must precede the frontend because the
+   legacy v1 listener uses the new bounded index regardless of Core flags.
+3. Keep Core server/client and email flags false. Set both legacy Storage flags
+   false. After confirming `CRON_SECRET` has no external consumer, generate or
+   rotate it together with the distinct Core secrets, exact origin, cleanup
+   bounds, free-tier thresholds, and `FREE_TIER_MODE=true`. Batch-set them
+   without printing values and retain the Cron value only in the current
+   deployment process memory for the later one-time call.
+4. Deploy the CI-green guarded master SHA. Until the global counter is seeded,
+   new uploads and Save Copy must fail closed with reads/deletes still working.
+   This short upload-maintenance window closes the seed/deploy race.
+5. Confirm the guarded Production alias/SHA, allow pre-guard requests to drain,
+   then obtain two matching Blob plus ready/pending metadata snapshots across a
+   short quiet interval. Create `systemUsage/blobAttachmentsV1` with
+   `schemaVersion=1`, `accountingMode=ready_and_pending_reservations`, and exact
+   bytes/count using an `exists:false` CAS, then read it back. Never blind
+   overwrite a mismatch.
+6. Snapshot cleanup targets and Blob/metadata totals read-only. With the Cron
+   value already active in this deployment, make exactly one authenticated
+   POST, then unset the in-memory value.
+   A 200 response with `skipped`, `deadlineReached`, or
+   `legacyNoteBackfillFailed` is not a completed run. Inspect safe deployment
+   logs before deciding whether any retry is warranted.
+7. Reconcile Blob, ready/pending metadata, user usage, and the global counter
+   again after cleanup. Stop on any mismatch rather than rewriting the counter.
+8. Smoke legacy login, notes, autosave, v1 shares, attachments, dark mode,
+   schedule, matrix, cleanup authentication, CSP, and 5xx behavior. Confirm
+   official Vercel/Firebase usage remains inside the activation gate.
+9. Enable only Core server/client, keep email false, redeploy the same master
+   SHA, and run the complete Production smoke and synthetic cleanup matrix.
+   If and only if a verified provider is already configured, email may instead
+   be tested separately before its flag is enabled.
 
-Do not activate if an email credential is absent, an index is building, any
-P0/P1 issue remains, a required check fails, or the rollback deployment is
-unknown.
+Do not activate Core if an index is building, any P0/P1 issue remains, a
+required check fails, the global counter is absent, or the rollback deployment
+is unknown. An absent email credential blocks only email sharing.
 
 ## Rollback
 
-First set both server flags false and redeploy. This removes v2 UI and makes
-the API fail closed without deleting user data.
+First set `VITE_SECURE_SHARE_V2_ENABLED=false`,
+`SECURE_SHARE_V2_ENABLED=false`, and `SECURE_SHARE_EMAIL_ENABLED=false`, then
+redeploy the same guarded SHA. Keep `FREE_TIER_MODE=true` and preserve the
+global counter. This removes v2 UI and makes its API fail closed without
+deleting user data or removing the v1 attachment guard.
 
-If compatibility behavior is affected, restore the previously recorded Vercel
-Production deployment. If Rules must be restored, check out the prior
-`firestore.rules`, `firestore.indexes.json`, and `storage.rules`, rerun Rules
-tests, and deploy only the affected resource to the explicit project.
+Record the flags-off guarded deployment as the primary rollback candidate
+before enabling Core. Only if the guarded SHA itself breaks compatibility
+should the previously recorded pre-guard Vercel deployment be restored; that
+exceptional rollback also removes the global upload guard and therefore
+requires an upload maintenance window and close monitoring.
+
+This release changes no Rules or Storage configuration. Keep the new additive
+index in place during rollback; do not deploy an older index file, because that
+can request an unnecessary index deletion.
 
 Do not delete v2 documents, comments, copied notes, or indexes as an emergency
 rollback shortcut. Confirm login, notes, v1 share, attachments, and the

@@ -16,6 +16,12 @@ import {
   shouldBumpAttachmentRevisionOnDelete,
   shouldRetainPendingDeletionReservation
 } from "./_attachment-policy.js";
+import {
+  GLOBAL_BLOB_USAGE_DOCUMENT_PATH,
+  GLOBAL_BLOB_USAGE_SCHEMA_VERSION,
+  evaluateFreeTierUpload,
+  resolveFreeTierPolicy
+} from "./_free-tier-policy.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
@@ -801,15 +807,75 @@ async function publicShareSourceActive(projectId, share, accessToken) {
   return publicShareSourceAvailable(projectId, share, accessToken, true);
 }
 
+function nonNegativeIntegerField(document, fieldName) {
+  const value = document?.fields?.[fieldName]?.integerValue;
+  const parsed = typeof value === "string" || typeof value === "number"
+    ? Number(value)
+    : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function globalBlobUsage(document) {
+  const schemaVersion = nonNegativeIntegerField(document, "schemaVersion");
+  const usedBytes = nonNegativeIntegerField(document, "usedBytes");
+  const attachmentCount = nonNegativeIntegerField(document, "attachmentCount");
+
+  if (
+    !document?.updateTime
+    || schemaVersion !== GLOBAL_BLOB_USAGE_SCHEMA_VERSION
+    || usedBytes === null
+    || attachmentCount === null
+  ) {
+    return null;
+  }
+
+  return {
+    attachmentCount,
+    updateTime: document.updateTime,
+    usedBytes
+  };
+}
+
+function globalBlobUsageWrite(projectId, usage, nextUsedBytes, nextAttachmentCount, policy, state) {
+  return {
+    update: {
+      name: documentName(projectId, GLOBAL_BLOB_USAGE_DOCUMENT_PATH),
+      fields: {
+        schemaVersion: integerValue(GLOBAL_BLOB_USAGE_SCHEMA_VERSION),
+        attachmentCount: integerValue(nextAttachmentCount),
+        usedBytes: integerValue(nextUsedBytes),
+        officialCapacityBytes: integerValue(policy.officialCapacityBytes),
+        operationalCapBytes: integerValue(policy.operationalCapBytes),
+        hardStopBytes: integerValue(policy.hardStopBytes),
+        capacityState: stringValue(state),
+        accountingMode: stringValue("ready_and_pending_reservations")
+      }
+    },
+    currentDocument: { updateTime: usage.updateTime },
+    updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+  };
+}
+
 async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, extraWrites) {
   const quotaPath = `userAttachmentUsage/${uid}`;
+  const policy = resolveFreeTierPolicy(process.env);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const quotaDocument = await firestoreGetDocument(projectId, quotaPath, accessToken);
+    const [quotaDocument, globalUsageDocument] = await Promise.all([
+      firestoreGetDocument(projectId, quotaPath, accessToken),
+      policy.enabled
+        ? firestoreGetDocument(projectId, GLOBAL_BLOB_USAGE_DOCUMENT_PATH, accessToken)
+        : Promise.resolve(null)
+    ]);
     const usedBytes = valueInteger(quotaDocument, "usedBytes");
     const attachmentCount = valueInteger(quotaDocument, "attachmentCount");
 
-    if (usedBytes + bytes > userBlobAttachmentQuotaBytes) {
+    if (
+      !Number.isSafeInteger(bytes)
+      || bytes <= 0
+      || !Number.isSafeInteger(usedBytes + bytes)
+      || usedBytes + bytes > userBlobAttachmentQuotaBytes
+    ) {
       throw new HttpError(413, "첨부파일 총 저장 한도 1.00 GB를 초과했습니다.", "Blob attachment quota exceeded");
     }
 
@@ -832,12 +898,71 @@ async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
       currentDocument: quotaDocument ? { updateTime: quotaDocument.updateTime } : { exists: false },
       updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
     };
+    let globalWrite = null;
+    let globalDecision = null;
+    let globalThresholdCrossed = false;
+
+    if (policy.enabled) {
+      const usage = globalBlobUsage(globalUsageDocument);
+      if (!usage) {
+        throw new HttpError(
+          503,
+          "저장 용량 상태를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.",
+          "Global Blob usage counter is missing or invalid"
+        );
+      }
+      globalDecision = evaluateFreeTierUpload({
+        usedBytes: usage.usedBytes,
+        reservedBytes: 0,
+        requestedBytes: bytes
+      }, policy);
+      if (!globalDecision.allowUpload) {
+        throw new HttpError(
+          507,
+          "저장 용량 보호 한도에 도달했습니다. 기존 첨부파일을 정리한 뒤 다시 시도해주세요.",
+          "Global Blob free-tier hard stop"
+        );
+      }
+      globalWrite = globalBlobUsageWrite(
+        projectId,
+        usage,
+        globalDecision.projectedBytes,
+        usage.attachmentCount + 1,
+        policy,
+        globalDecision.state
+      );
+      const priorGlobalDecision = evaluateFreeTierUpload({
+        usedBytes: usage.usedBytes,
+        reservedBytes: 0,
+        requestedBytes: 0
+      }, policy);
+      globalThresholdCrossed = (
+        globalDecision.warnUser
+        && (
+          !priorGlobalDecision.warnUser
+          || globalDecision.warnAdmin !== priorGlobalDecision.warnAdmin
+          || globalDecision.restrictLargeUploads !== priorGlobalDecision.restrictLargeUploads
+        )
+      );
+    }
     const resolvedExtraWrites = typeof extraWrites === "function"
       ? await extraWrites()
       : extraWrites;
 
     try {
-      await firestoreCommit(projectId, accessToken, [quotaWrite, ...resolvedExtraWrites]);
+      await firestoreCommit(
+        projectId,
+        accessToken,
+        [quotaWrite, ...(globalWrite ? [globalWrite] : []), ...resolvedExtraWrites]
+      );
+      if (globalThresholdCrossed) {
+        console.warn("blob storage capacity threshold crossed", {
+          state: globalDecision.state,
+          projectedBytes: globalDecision.projectedBytes,
+          hardStopBytes: globalDecision.hardStopBytes,
+          adminWarning: globalDecision.warnAdmin
+        });
+      }
       return;
     } catch (error) {
       if (![400, 409].includes(error.statusCode) || attempt === 2) {
@@ -861,6 +986,11 @@ async function claimAttachmentDeletion(projectId, accessToken, attachmentPath, e
     const quotaDocument = quotaPath
       ? await firestoreGetDocument(projectId, quotaPath, accessToken)
       : null;
+    const globalUsageDocument = await firestoreGetDocument(
+      projectId,
+      GLOBAL_BLOB_USAGE_DOCUMENT_PATH,
+      accessToken
+    );
     const claim = quotaReleaseAfterAttachmentClaim({
       attachmentExists: true,
       attachmentUpdateTime: attachment.updateTime,
@@ -906,6 +1036,42 @@ async function claimAttachmentDeletion(projectId, accessToken, attachmentPath, e
         },
         currentDocument: { updateTime: claim.quota.quotaUpdateTime },
         updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+      });
+    }
+
+    const releaseGlobalUsage = (
+      valueHasField(attachment, "quotaReserved")
+        ? valueBoolean(attachment, "quotaReserved")
+        : (
+            valueString(attachment, "storageProvider") === "vercel-blob"
+            && Boolean(valueString(attachment, "blobPath"))
+          )
+    );
+    const usage = releaseGlobalUsage ? globalBlobUsage(globalUsageDocument) : null;
+    if (
+      usage
+      && usage.usedBytes >= encryptedSize
+      && usage.attachmentCount >= 1
+    ) {
+      const policy = resolveFreeTierPolicy(process.env);
+      const nextUsedBytes = usage.usedBytes - encryptedSize;
+      const nextAttachmentCount = usage.attachmentCount - 1;
+      const nextDecision = evaluateFreeTierUpload({
+        usedBytes: nextUsedBytes,
+        reservedBytes: 0,
+        requestedBytes: 0
+      }, policy);
+      writes.push(globalBlobUsageWrite(
+        projectId,
+        usage,
+        nextUsedBytes,
+        nextAttachmentCount,
+        policy,
+        nextDecision.state
+      ));
+    } else if (usage) {
+      console.warn("blob storage counter release skipped", {
+        reason: "counter_underflow_guard"
       });
     }
 
@@ -1209,18 +1375,6 @@ async function validateUploadedBlob(blobPath, encryptedSize) {
   }
 
   return blob;
-}
-
-async function headBlobIfPresent(blobPath) {
-  try {
-    return await head(blobPath);
-  } catch (error) {
-    if (error?.constructor?.name === "BlobNotFoundError") {
-      return null;
-    }
-
-    throw error;
-  }
 }
 
 function blobMetadataMatchesAttachment(blob, blobPath, encryptedSize) {
@@ -1570,21 +1724,19 @@ async function streamBlobAttachment(request, response) {
     throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Attachment blob not ready");
   }
 
-  const blobMetadata = await headBlobIfPresent(blobPath);
-
-  if (!blobMetadataMatchesAttachment(blobMetadata, blobPath, encryptedSize)) {
-    throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Blob metadata mismatch");
-  }
-
   const blob = await get(blobPath, { access: "private", useCache: false });
 
   if (!blob || blob.statusCode !== 200 || !blob.stream) {
     throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Blob not found");
   }
+  if (!blobMetadataMatchesAttachment(blob.blob, blobPath, encryptedSize)) {
+    await blob.stream.cancel().catch(() => undefined);
+    throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Blob metadata mismatch");
+  }
 
   response.statusCode = 200;
   response.setHeader("content-type", blobContentType);
-  response.setHeader("content-length", String(blobMetadata.size));
+  response.setHeader("content-length", String(blob.blob.size));
   response.setHeader("cache-control", "no-store");
   response.setHeader("x-content-type-options", "nosniff");
   await pipeline(Readable.fromWeb(blob.stream), response);
@@ -1607,7 +1759,11 @@ async function deleteBlobIfPresent(blobPath) {
 }
 
 async function deleteStorageObjectIfPresent(storageBucket, storagePath, accessToken) {
-  if (!storageBucket || !storagePath) {
+  if (
+    envValue("LEGACY_FIREBASE_STORAGE_ENABLED") !== "true"
+    || !storageBucket
+    || !storagePath
+  ) {
     return;
   }
 
@@ -1872,6 +2028,11 @@ function handleError(error, response) {
 
   jsonResponse(response, statusCode, { ok: false, error: message });
 }
+
+export {
+  claimAttachmentDeletion,
+  reserveUserAttachmentBytes
+};
 
 export default async function handler(request, response) {
   try {

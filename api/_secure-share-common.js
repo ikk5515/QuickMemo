@@ -1404,14 +1404,14 @@ export function createResendEmailAdapter(request = fetch, wait = delay) {
             continue;
           }
         }
-        throw new HttpError(503, "email_unavailable", "Email provider request failed", {
+        throw new HttpError(503, "email_feature_unavailable", "Email provider request failed", {
           expose: false
         });
       }
     }
     throw new HttpError(
       503,
-      "email_unavailable",
+      "email_feature_unavailable",
       `Email provider rejected request (${lastStatus || "unknown"})`,
       { expose: false }
     );
@@ -1437,7 +1437,7 @@ export async function sendVerificationEmail(
   timeoutMilliseconds = emailProviderTotalTimeoutMilliseconds
 ) {
   if (!secureShareEmailEnabled()) {
-    throw new HttpError(503, "email_unavailable", "Email delivery is disabled");
+    throw new HttpError(503, "email_feature_unavailable", "Email delivery is disabled");
   }
   return adapter.send({
     from: envValue("SHARE_EMAIL_FROM"),

@@ -95,6 +95,52 @@ describe("public share backend cleanup", () => {
     expect(authGuard).not.toContain("request.headers.authorization !==");
   });
 
+  it("uses a preconditioned Firestore lease, exact-owner release, and a 240 second deadline", () => {
+    const leaseSource = cleanupFunctionSource.match(
+      /async function acquireCleanupLease[\s\S]*?function legacyNoteDeletionBackfillCursorName/u
+    )?.[0] ?? "";
+
+    expect(cleanupFunctionSource).toContain(
+      'const cleanupLeaseDocumentPath = "systemMaintenance/secureShareCleanupLockV1"'
+    );
+    expect(cleanupFunctionSource).toContain("const defaultCleanupMaxRuntimeSeconds = 240");
+    expect(cleanupFunctionSource).toContain("const maximumCleanupMaxRuntimeSeconds = 240");
+    expect(cleanupFunctionSource).toContain(
+      "const cleanupExternalRequestTimeoutMilliseconds = 20 * 1000"
+    );
+    expect(cleanupFunctionSource).toContain(
+      "globalThis.AbortSignal.timeout(cleanupExternalRequestTimeoutMilliseconds)"
+    );
+    expect(cleanupFunctionSource).toContain(
+      "del(blobPath, { abortSignal: cleanupAbortSignal() })"
+    );
+    expect(leaseSource).toContain("currentDocument: existing");
+    expect(leaseSource).toContain("{ updateTime: existing.updateTime }");
+    expect(leaseSource).toContain("{ exists: false }");
+    expect(leaseSource).toContain('stringField(existing, "runId") !== lease.runId');
+    expect(leaseSource).toContain("currentDocument: { updateTime: existing.updateTime }");
+    expect(cleanupFunctionSource).toContain('reason: "already_running"');
+    expect(cleanupFunctionSource).toContain("cleanupCanContinue(config, stats)");
+    expect(cleanupFunctionSource).not.toContain("console.log(lease");
+  });
+
+  it("fairly reserves retention budget and only opts into legacy Storage explicitly", () => {
+    const retentionSource = cleanupFunctionSource.match(
+      /function secureShareRetentionQueues[\s\S]*?async function queryExpiredSecureSharePolicies/u
+    )?.[0] ?? "";
+    const storageDeleteSource = cleanupFunctionSource.match(
+      /async function storageDeleteObject[\s\S]*?function firestoreCommitPathFromDocumentName/u
+    )?.[0] ?? "";
+
+    expect(retentionSource).toContain("perQueueFairShare");
+    expect(retentionSource).toContain("perFieldFairShare");
+    expect(retentionSource).toContain("secureShareRootStateCollections.map");
+    expect(retentionSource).toContain('collectionId: "items"');
+    expect(storageDeleteSource).toContain(
+      'envValue("LEGACY_FIREBASE_STORAGE_ENABLED") !== "true"'
+    );
+  });
+
   it("uses indexed fallback scans when cleanup queue discovery is incomplete", () => {
     expect(cleanupFunctionSource).toContain('from: [{ collectionId: "publicShareCleanupQueue" }]');
     expect(cleanupFunctionSource).toContain('from: [{ collectionId: "publicNoteShares" }]');
@@ -507,6 +553,9 @@ describe("public share backend cleanup", () => {
     expect(claimSource).toContain('quotaReserved: hasField(attachment, "quotaReserved")');
     expect(claimSource).toContain('stringField(attachment, "storageProvider") === "vercel-blob"');
     expect(cleanupFunctionSource).toContain("countPolicyVersion");
+    expect(claimSource).toContain("GLOBAL_BLOB_USAGE_DOCUMENT_PATH");
+    expect(claimSource).toContain("globalBlobUsageReleaseWrite");
+    expect(claimSource).toContain("releaseGlobalUsage");
   });
 
   it("atomically releases a matching copying-note reservation when cleanup claims the attachment", async () => {

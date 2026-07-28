@@ -21,7 +21,7 @@ import {
 import { getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
-import { db, storage } from "../lib/firebase";
+import { db, getLegacyStorage } from "../lib/firebase";
 import {
   deleteBlobAttachment,
   fetchBlobAttachmentBytes,
@@ -1173,7 +1173,9 @@ export async function getEncryptedNoteAttachmentBytes(attachment: StoredAttachme
     throw new Error("첨부파일 암호문 위치를 찾을 수 없습니다.");
   }
 
-  return new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes));
+  return new Uint8Array(
+    await getBytes(ref(getLegacyStorage(), attachment.storagePath), maxEncryptedAttachmentBytes)
+  );
 }
 
 export async function getEncryptedNoteAttachmentSource(
@@ -1202,7 +1204,11 @@ export async function getEncryptedNoteAttachmentSource(
     throw new Error("첨부파일 암호문 위치를 찾을 수 없습니다.");
   }
 
-  return { bytes: new Uint8Array(await getBytes(ref(storage, attachment.storagePath), maxEncryptedAttachmentBytes)) };
+  return {
+    bytes: new Uint8Array(
+      await getBytes(ref(getLegacyStorage(), attachment.storagePath), maxEncryptedAttachmentBytes)
+    )
+  };
 }
 
 export function subscribeNoteFolders(

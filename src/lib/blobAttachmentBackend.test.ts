@@ -19,6 +19,30 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain("첨부파일 총 저장 한도 1.00 GB를 초과했습니다.");
   });
 
+  it("atomically enforces the server-only global free-tier Blob counter", () => {
+    const reservationSource = blobAttachmentApiSource.match(
+      /async function reserveUserAttachmentBytes[\s\S]*?async function claimAttachmentDeletion/u
+    )?.[0] ?? "";
+    const deletionSource = blobAttachmentApiSource.match(
+      /async function claimAttachmentDeletion[\s\S]*?function attachmentBaseFields/u
+    )?.[0] ?? "";
+
+    expect(reservationSource).toContain("GLOBAL_BLOB_USAGE_DOCUMENT_PATH");
+    expect(reservationSource).toContain("evaluateFreeTierUpload");
+    expect(reservationSource).toContain("Global Blob usage counter is missing or invalid");
+    expect(reservationSource).toContain("[quotaWrite, ...(globalWrite ? [globalWrite] : []), ...resolvedExtraWrites]");
+    expect(reservationSource).toContain("blob storage capacity threshold crossed");
+    expect(reservationSource).toContain("!priorGlobalDecision.warnUser");
+    expect(reservationSource).toContain(
+      "globalDecision.warnAdmin !== priorGlobalDecision.warnAdmin"
+    );
+    expect(blobAttachmentApiSource).toContain("currentDocument: { updateTime: usage.updateTime }");
+    expect(deletionSource).toContain("usage.usedBytes >= encryptedSize");
+    expect(deletionSource).toContain("usage.attachmentCount >= 1");
+    expect(deletionSource).toContain("const nextUsedBytes = usage.usedBytes - encryptedSize");
+    expect(deletionSource).toContain('reason: "counter_underflow_guard"');
+  });
+
   it("keeps blob objects private and streams them only after Firestore authorization checks", () => {
     expect(blobAttachmentApiSource).toContain('access: "private"');
     expect(blobAttachmentApiSource).toContain("canReadNote");
@@ -68,12 +92,12 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).not.toContain('console.error("blob attachment request failed", error)');
   });
 
-  it("validates downloaded Blob metadata with head before streaming", () => {
+  it("validates metadata from the streaming Blob response without a duplicate head operation", () => {
     const streamSource = blobAttachmentApiSource.match(/async function streamBlobAttachment[\s\S]*?async function deleteBlobIfPresent/u)?.[0] ?? "";
 
-    expect(streamSource).toContain("const blobMetadata = await headBlobIfPresent(blobPath)");
-    expect(streamSource).toContain("blobMetadataMatchesAttachment(blobMetadata, blobPath, encryptedSize)");
-    expect(streamSource).not.toContain("blob.blob.size !== encryptedSize");
+    expect(streamSource).not.toContain("headBlobIfPresent");
+    expect(streamSource).toContain("blobMetadataMatchesAttachment(blob.blob, blobPath, encryptedSize)");
+    expect(streamSource).toContain("await blob.stream.cancel()");
     expect(streamSource).toContain("await pipeline(Readable.fromWeb(blob.stream), response)");
     expect(streamSource).not.toContain("Readable.fromWeb(blob.stream).pipe(response)");
   });
@@ -208,11 +232,14 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain("countPolicyVersion");
   });
 
-  it("deletes both Vercel Blob and legacy Firebase Storage objects", () => {
+  it("deletes Vercel Blob objects and gates legacy Firebase Storage cleanup", () => {
     expect(blobAttachmentApiSource).toContain('const storageBaseUrl = "https://storage.googleapis.com/storage/v1"');
     expect(blobAttachmentApiSource).toContain("storageBucket:");
     expect(blobAttachmentApiSource).toContain("deleteStorageObjectIfPresent");
     expect(blobAttachmentApiSource).toContain('valueString(attachment, "storagePath")');
+    expect(blobAttachmentApiSource).toContain(
+      'envValue("LEGACY_FIREBASE_STORAGE_ENABLED") !== "true"'
+    );
   });
 
   it("retains pending deletion reservations through token expiry and removes rejected upload blobs", () => {
