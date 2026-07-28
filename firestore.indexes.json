@@ -438,6 +438,16 @@
       ]
     },
     {
+      "collectionGroup": "items",
+      "fieldPath": "ownerUid",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
       "collectionGroup": "history",
       "fieldPath": "actorUid",
       "indexes": [
