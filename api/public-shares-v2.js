@@ -106,6 +106,8 @@ const copyGrantReplayMinimumSeconds = 15;
 const copyGrantRequestRetentionSeconds = 24 * 60 * 60;
 const copyGrantRateWindowSeconds = 60;
 const copyGrantRateLimit = 3;
+const copyGrantTransactionMaximumAttempts = 8;
+const copyGrantRetryMaximumDelayMilliseconds = 250;
 const emailProviderRequestRateWindowSeconds = 1;
 const emailProviderRequestRateLimit = 2;
 const sessionLastSeenWriteIntervalMilliseconds = 60 * 60 * 1000;
@@ -4002,6 +4004,9 @@ async function beginCopyGrantRequestTransaction(
 }
 
 function copyGrantCommitCanRetry(error) {
+  if (error instanceof HttpError) {
+    return false;
+  }
   const statusCode = Number.isInteger(error?.statusCode)
     ? error.statusCode
     : 0;
@@ -4010,6 +4015,17 @@ function copyGrantCommitCanRetry(error) {
     || statusCode === 429
     || statusCode >= 500
     || statusCode === 0;
+}
+
+async function waitBeforeCopyGrantRetry(attempt) {
+  const baseDelayMilliseconds = Math.min(
+    copyGrantRetryMaximumDelayMilliseconds,
+    15 * (2 ** Math.min(attempt, 5))
+  );
+  await delay(
+    baseDelayMilliseconds
+      + randomInt(0, baseDelayMilliseconds + 1)
+  );
 }
 
 function sendCopyGrantResponse(response, id, replay) {
@@ -4073,7 +4089,11 @@ async function handleCopyGrant(request, response, id, shareId) {
   const networkHash = clientNetworkDigest(request);
   const agentHash = userAgentDigest(request);
 
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < copyGrantTransactionMaximumAttempts;
+    attempt += 1
+  ) {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const rateBucket = copyGrantRateBucket(
       shareId,
@@ -4166,7 +4186,11 @@ async function handleCopyGrant(request, response, id, shareId) {
         await rollbackShareMutation(context, transaction);
       }
       if (!commitAttempted) {
-        if (copyGrantCommitCanRetry(error) && attempt < 3) {
+        if (
+          copyGrantCommitCanRetry(error)
+          && attempt < copyGrantTransactionMaximumAttempts - 1
+        ) {
+          await waitBeforeCopyGrantRetry(attempt);
           continue;
         }
         throw error;
@@ -4179,7 +4203,11 @@ async function handleCopyGrant(request, response, id, shareId) {
           expected
         );
       } catch (recoveryError) {
-        if (copyGrantCommitCanRetry(error) && attempt < 3) {
+        if (
+          copyGrantCommitCanRetry(error)
+          && attempt < copyGrantTransactionMaximumAttempts - 1
+        ) {
+          await waitBeforeCopyGrantRetry(attempt);
           continue;
         }
         throw recoveryError;
@@ -4195,7 +4223,11 @@ async function handleCopyGrant(request, response, id, shareId) {
         sendCopyGrantResponse(response, id, recovered);
         return;
       }
-      if (copyGrantCommitCanRetry(error) && attempt < 3) {
+      if (
+        copyGrantCommitCanRetry(error)
+        && attempt < copyGrantTransactionMaximumAttempts - 1
+      ) {
+        await waitBeforeCopyGrantRetry(attempt);
         continue;
       }
       if (isOptimisticConflict(error)) {

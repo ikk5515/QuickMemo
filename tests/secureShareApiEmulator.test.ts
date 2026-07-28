@@ -535,7 +535,14 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       fetchSpy.mockRestore();
     }
     expect(commitResponseLost).toBe(true);
-    expect(concurrent.every(({ response }) => response.status === 200)).toBe(true);
+    expect(
+      concurrent
+        .filter(({ response }) => response.status !== 200)
+        .map(({ body, response }) => ({
+          error: body.error,
+          status: response.status
+        }))
+    ).toEqual([]);
     const firstTokens = new Set(concurrent.map(({ body }) => body.copyGrant));
     const firstExpirations = new Set(concurrent.map(({ body }) => body.expiresAt));
     expect(firstTokens.size).toBe(1);
@@ -671,7 +678,14 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
           shareId
         })
       ));
-      expect(expiringRetries.every(({ response }) => response.status === 200)).toBe(true);
+      expect(
+        expiringRetries
+          .filter(({ response }) => response.status !== 200)
+          .map(({ body, response }) => ({
+            error: body.error,
+            status: response.status
+          }))
+      ).toEqual([]);
       expect(new Set(expiringRetries.map(({ body }) => body.copyGrant)).size).toBe(1);
       expect(expiringRetries[0].body.copyGrant).not.toBe(secondToken);
     } finally {
