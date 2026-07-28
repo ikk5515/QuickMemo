@@ -320,6 +320,22 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(await listEmulatorCollection("publicNoteShares")).toHaveLength(1);
     expect(await listEmulatorCollection("publicSharePolicies")).toHaveLength(1);
     expect(await listEmulatorCollection("publicShareSourceGuards")).toHaveLength(1);
+    const createRateBuckets = (await listEmulatorCollection("publicShareRateLimits"))
+      .filter(({ limitType }) => new Set([
+        "share_create_owner_hour",
+        "share_create_owner_day"
+      ]).has(String(limitType)));
+    expect(createRateBuckets).toHaveLength(2);
+    expect(createRateBuckets).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        count: 4,
+        limitType: "share_create_owner_hour"
+      }),
+      expect.objectContaining({
+        count: 4,
+        limitType: "share_create_owner_day"
+      })
+    ]));
 
     const createdShare = created[0].body.share as Record<string, unknown>;
     const shareId = String(createdShare.shareId);
@@ -453,6 +469,85 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(await oversizedHistory.json()).toMatchObject({
       ok: false,
       error: "source_share_history_too_large"
+    });
+  }, 30_000);
+
+  it("replays four parallel creates with one idempotency key as a single share", async () => {
+    const owner = await createEmulatorOwner(
+      "source-idempotency-owner@example.test",
+      "emulator-owner-password"
+    );
+    const sourceNoteId = "source_note_idempotency_0001";
+    await writeEmulatorDocuments([
+      {
+        path: `users/${owner.localId}`,
+        fields: {
+          displayName: "Source Idempotency Owner",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: owner.localId
+        }
+      },
+      {
+        path: `notes/${sourceNoteId}`,
+        fields: {
+          attachmentRevision: 0,
+          isDeleted: false,
+          isPurged: false,
+          ownerUid: owner.localId,
+          revision: 1
+        }
+      }
+    ]);
+
+    const concurrent = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+      ownerCreateRequest({
+        harness,
+        idToken: owner.idToken,
+        idempotencyKey: "source_create_same_key_0001",
+        networkSuffix: 96 + index,
+        sourceNoteId
+      })
+    ));
+    expect(
+      concurrent
+        .map(({ response }) => response.status)
+        .sort((left, right) => left - right)
+    ).toEqual([200, 200, 200, 201]);
+    expect(concurrent.filter(({ body }) => body.created === true)).toHaveLength(1);
+    expect(concurrent.filter(({ body }) => body.created === false)).toHaveLength(3);
+
+    const shares = concurrent.map(({ body }) => body.share as Record<string, unknown>);
+    const shareIds = new Set(shares.map((share) => String(share.shareId)));
+    expect(shareIds.size).toBe(1);
+    const [shareId] = shareIds;
+    expect(shareId).toMatch(/^ss2_[A-Za-z0-9_-]{40}$/u);
+    expect(await listEmulatorCollection("publicNoteShares")).toHaveLength(1);
+    expect(await listEmulatorCollection("publicSharePolicies")).toHaveLength(1);
+    expect(await listEmulatorCollection("publicShareSourceGuards")).toHaveLength(1);
+    const createRateBuckets = (await listEmulatorCollection("publicShareRateLimits"))
+      .filter(({ limitType }) => new Set([
+        "share_create_owner_hour",
+        "share_create_owner_day"
+      ]).has(String(limitType)));
+    expect(createRateBuckets).toHaveLength(2);
+    expect(createRateBuckets).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        count: 1,
+        limitType: "share_create_owner_hour"
+      }),
+      expect.objectContaining({
+        count: 1,
+        limitType: "share_create_owner_day"
+      })
+    ]));
+
+    const guardId = sourceShareGuardId(owner.localId, sourceNoteId);
+    expect(await readEmulatorDocument(`publicShareSourceGuards/${guardId}`)).toMatchObject({
+      ownerUid: owner.localId,
+      shareId,
+      sourceNoteId
     });
   }, 30_000);
 

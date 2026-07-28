@@ -100,6 +100,9 @@ const auditRetentionMilliseconds = auditRetentionDays * 24 * 60 * 60 * 1000;
 const defaultPageSize = 20;
 const maximumPageSize = 50;
 const maximumSourceShareHistory = 100;
+const rateLimitTransactionMaximumAttempts = 8;
+const sourceCreateTransactionMaximumAttempts = 8;
+const optimisticRetryMaximumDelayMilliseconds = 250;
 const copyGrantPurpose = "quickmemo/secure-share/copy-grant/v1";
 const copyGrantTtlSeconds = 5 * 60;
 const copyGrantReplayMinimumSeconds = 15;
@@ -436,6 +439,17 @@ function sourceShareBlocksCreation(share, ownerUid, sourceNoteId, now = Date.now
   );
 }
 
+async function waitBeforeOptimisticRetry(attempt) {
+  const baseDelayMilliseconds = Math.min(
+    optimisticRetryMaximumDelayMilliseconds,
+    15 * (2 ** Math.min(attempt, 5))
+  );
+  await delay(
+    baseDelayMilliseconds
+      + randomInt(0, baseDelayMilliseconds + 1)
+  );
+}
+
 function sourceShareGuardMatches(
   guard,
   ownerUid,
@@ -451,6 +465,22 @@ function sourceShareGuardMatches(
     && guard.shareId
     && (!shareId || guard.shareId === shareId)
   );
+}
+
+async function blockingSourceShareFromGuard(
+  context,
+  guardPath,
+  ownerUid,
+  sourceNoteId
+) {
+  const guard = await firestoreGet(context, guardPath);
+  if (!sourceShareGuardMatches(guard, ownerUid, sourceNoteId)) {
+    return null;
+  }
+  const state = await loadShareState(context, guard.shareId);
+  return sourceShareBlocksCreation(state?.share, ownerUid, sourceNoteId)
+    ? state.share
+    : null;
 }
 
 async function beginShareMutationTransaction(context, shareId) {
@@ -587,7 +617,7 @@ async function consumeRateLimits(context, definitions) {
   if (!definitions.length) {
     return [];
   }
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < rateLimitTransactionMaximumAttempts; attempt += 1) {
     const nowMilliseconds = Date.now();
     const states = await Promise.all(definitions.map(async (definition) => {
       const windowStartSeconds =
@@ -629,9 +659,19 @@ async function consumeRateLimits(context, definitions) {
       await firestoreCommit(context, writes);
       return states.map(({ path }) => path);
     } catch (error) {
-      if (!isOptimisticConflict(error) || attempt === 3) {
+      if (!isOptimisticConflict(error)) {
         throw error;
       }
+      if (attempt < rateLimitTransactionMaximumAttempts - 1) {
+        await waitBeforeOptimisticRetry(attempt);
+        continue;
+      }
+      throw new HttpError(
+        503,
+        "service_unavailable",
+        "Rate limit update did not converge",
+        { expose: false }
+      );
     }
   }
   return [];
@@ -641,7 +681,7 @@ async function releaseRateLimitReservations(context, paths) {
   if (!paths.length) {
     return;
   }
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < rateLimitTransactionMaximumAttempts; attempt += 1) {
     const documents = await Promise.all(paths.map((path) => firestoreGet(context, path)));
     const writes = documents.flatMap((document, index) => {
       if (!document) {
@@ -666,9 +706,19 @@ async function releaseRateLimitReservations(context, paths) {
       await firestoreCommit(context, writes);
       return;
     } catch (error) {
-      if (!isOptimisticConflict(error) || attempt === 3) {
+      if (!isOptimisticConflict(error)) {
         throw error;
       }
+      if (attempt < rateLimitTransactionMaximumAttempts - 1) {
+        await waitBeforeOptimisticRetry(attempt);
+        continue;
+      }
+      throw new HttpError(
+        503,
+        "service_unavailable",
+        "Rate limit release did not converge",
+        { expose: false }
+      );
     }
   }
 }
@@ -948,7 +998,7 @@ async function handleOwnerCreate(request, response, id) {
     });
     return;
   }
-  await consumeRateLimits(context, [
+  const createRateLimitReservations = await consumeRateLimits(context, [
     {
       limitType: "share_create_owner_hour",
       keyParts: [user.uid],
@@ -1035,7 +1085,11 @@ async function handleOwnerCreate(request, response, id) {
   }
 
   const guardPath = sourceShareGuardPath(user.uid, input.sourceNoteId);
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < sourceCreateTransactionMaximumAttempts;
+    attempt += 1
+  ) {
     let transaction = "";
     try {
       const snapshot = await firestoreBatchGetNewTransaction(context, [
@@ -1089,6 +1143,10 @@ async function handleOwnerCreate(request, response, id) {
             && raced.share.ownerUid === user.uid
             && raced.share.sourceNoteId === input.sourceNoteId
           ) {
+            await releaseRateLimitReservations(
+              context,
+              createRateLimitReservations
+            );
             jsonResponse(response, 200, {
               ok: true,
               created: false,
@@ -1097,7 +1155,8 @@ async function handleOwnerCreate(request, response, id) {
             });
             return;
           }
-          if (attempt < 4) {
+          if (attempt < sourceCreateTransactionMaximumAttempts - 1) {
+            await waitBeforeOptimisticRetry(attempt);
             continue;
           }
         }
@@ -1141,24 +1200,62 @@ async function handleOwnerCreate(request, response, id) {
       if (transaction) {
         await rollbackShareMutation(context, transaction);
       }
-      if (isOptimisticConflict(error) && attempt < 4) {
-        continue;
+      if (error instanceof HttpError) {
+        throw error;
       }
-      if (isOptimisticConflict(error) && input.idempotencyKey) {
-        const raced = await loadShareState(context, shareId);
-        if (
-          raced
-          && raced.share.ownerUid === user.uid
-          && raced.share.sourceNoteId === input.sourceNoteId
-        ) {
-          jsonResponse(response, 200, {
-            ok: true,
-            created: false,
-            share: shareSummary(raced.share),
-            requestId: id
-          });
-          return;
+      if (isOptimisticConflict(error)) {
+        let blockingShare;
+        try {
+          blockingShare = await blockingSourceShareFromGuard(
+            context,
+            guardPath,
+            user.uid,
+            input.sourceNoteId
+          );
+        } catch (recoveryError) {
+          if (recoveryError instanceof HttpError) {
+            throw recoveryError;
+          }
+          if (attempt < sourceCreateTransactionMaximumAttempts - 1) {
+            await waitBeforeOptimisticRetry(attempt);
+            continue;
+          }
+          throw new HttpError(
+            503,
+            "service_unavailable",
+            "Source share conflict recovery did not converge",
+            { expose: false }
+          );
         }
+        if (blockingShare) {
+          if (input.idempotencyKey && blockingShare.__id === shareId) {
+            await releaseRateLimitReservations(
+              context,
+              createRateLimitReservations
+            );
+            jsonResponse(response, 200, {
+              ok: true,
+              created: false,
+              share: shareSummary(blockingShare),
+              requestId: id
+            });
+            return;
+          }
+          throw new HttpError(
+            409,
+            "active_share_exists",
+            "An active share already exists for the source note"
+          );
+        }
+        if (attempt < sourceCreateTransactionMaximumAttempts - 1) {
+          await waitBeforeOptimisticRetry(attempt);
+          continue;
+        }
+        throw new HttpError(
+          409,
+          "request_conflict",
+          "Concurrent share creation did not converge"
+        );
       }
       throw error;
     }
