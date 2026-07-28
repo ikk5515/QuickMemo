@@ -86,4 +86,27 @@ describe("hosting security headers", () => {
       expect(headers.get("cross-origin-resource-policy")).toBe("same-origin");
     }
   });
+
+  it("does not initialize unused analytics outside the production CSP", () => {
+    const firebaseSource = readFileSync(
+      join(process.cwd(), "src/lib/firebase.ts"),
+      "utf8"
+    );
+    const firebaseConfig = readJsonFile<{ hosting: { headers?: HeaderRule[] } }>("firebase.json");
+    const vercelConfig = readJsonFile<{ headers?: HeaderRule[] }>("vercel.json");
+    const contentSecurityPolicies = [
+      headersByKey(
+        firebaseConfig.hosting.headers?.find((rule) => rule.source === "**")?.headers ?? []
+      ).get("content-security-policy") ?? "",
+      headersByKey(
+        vercelConfig.headers?.find((rule) => rule.source === "/(.*)")?.headers ?? []
+      ).get("content-security-policy") ?? ""
+    ];
+
+    expect(firebaseSource).not.toContain("firebase/analytics");
+    for (const contentSecurityPolicy of contentSecurityPolicies) {
+      expect(contentSecurityPolicy).not.toContain("googletagmanager.com");
+      expect(contentSecurityPolicy).not.toContain("google-analytics.com");
+    }
+  });
 });

@@ -1,5 +1,4 @@
 import { initializeApp } from "firebase/app";
-import { getAnalytics, isSupported } from "firebase/analytics";
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
 import { browserSessionPersistence, connectAuthEmulator, getAuth, setPersistence } from "firebase/auth";
 import {
@@ -73,13 +72,6 @@ export const appCheck =
         isTokenAutoRefreshEnabled: true
       })
     : null;
-export const analyticsPromise =
-  firebaseConfig.measurementId && import.meta.env.VITE_USE_FIREBASE_EMULATORS !== "true"
-    ? isSupported()
-        .then((supported) => (supported ? getAnalytics(app) : null))
-        .catch(() => null)
-    : Promise.resolve(null);
-
 if (useFirebaseEmulators) {
   connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
