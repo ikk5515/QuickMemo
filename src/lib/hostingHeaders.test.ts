@@ -107,6 +107,27 @@ describe("hosting security headers", () => {
     for (const contentSecurityPolicy of contentSecurityPolicies) {
       expect(contentSecurityPolicy).not.toContain("googletagmanager.com");
       expect(contentSecurityPolicy).not.toContain("google-analytics.com");
+      expect(contentSecurityPolicy).not.toContain("apis.google.com");
     }
+  });
+
+  it("does not initialize Firebase popup infrastructure on Safari", () => {
+    const firebaseSource = readFileSync(
+      join(process.cwd(), "src/lib/firebase.ts"),
+      "utf8"
+    );
+    const adminFunctionsSource = readFileSync(
+      join(process.cwd(), "src/services/adminFunctions.ts"),
+      "utf8"
+    );
+
+    expect(firebaseSource).toContain("initializeAuth(app, {");
+    expect(firebaseSource).toContain("persistence: browserSessionPersistence");
+    expect(firebaseSource).not.toContain("getAuth(app)");
+    expect(firebaseSource).not.toContain("popupRedirectResolver");
+    expect(adminFunctionsSource).toContain("initializeAuth(secondaryApp, {");
+    expect(adminFunctionsSource).toContain("persistence: inMemoryPersistence");
+    expect(adminFunctionsSource).not.toContain("getAuth(secondaryApp)");
+    expect(adminFunctionsSource).not.toContain("popupRedirectResolver");
   });
 });

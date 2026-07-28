@@ -17,6 +17,12 @@ test("secure share is keyboard-accessible without horizontal overflow in dark mo
 }) => {
   const fixture = await seedScenario(request, "responsive");
   const diagnostics = observePage(page);
+  const popupInfrastructureRequests = [];
+  page.on("request", (browserRequest) => {
+    if (browserRequest.url().startsWith("https://apis.google.com/js/api.js")) {
+      popupInfrastructureRequests.push(browserRequest.url());
+    }
+  });
 
   await openV2Share(page, fixture);
   expect(
@@ -28,5 +34,9 @@ test("secure share is keyboard-accessible without horizontal overflow in dark mo
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
   await expectNoHorizontalOverflow(page);
+  expect(
+    popupInfrastructureRequests,
+    "password-only auth must not load Firebase popup infrastructure"
+  ).toEqual([]);
   await expectCleanRuntime(diagnostics, fixture);
 });
