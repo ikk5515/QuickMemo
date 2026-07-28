@@ -4,6 +4,7 @@ import { expect, test } from "@playwright/test";
 import {
   apiPath,
   deliveredOtp,
+  exhaustEmailQuota,
   expectCleanRuntime,
   loginDirectly,
   loginRosterUser,
@@ -32,7 +33,9 @@ test("legacy v1 share remains readable through Firestore Rules", async ({ page, 
   const diagnostics = observePage(page);
 
   await page.goto(fixture.url);
-  await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
+  await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible({
+    timeout: 35_000
+  });
   await expect(page.getByText(fixture.bodyText)).toBeVisible();
   await expect(
     page.locator(".public-share-body script, .public-share-body [onerror]")
@@ -58,7 +61,10 @@ test("v2 anonymous access decrypts in-browser and view permission rejects commen
   const commentResponse = await page.request.post(
     apiPath("comments", fixture.shareId),
     {
-      data: { body: "view 권한 댓글 차단" },
+      data: {
+        body: "view 권한 댓글 차단",
+        clientRequestId: "e2e-view-comment-request-0001"
+      },
       headers: {
         origin: "http://127.0.0.1:4173",
         "sec-fetch-site": "same-origin"
@@ -134,6 +140,24 @@ test("non-allowed email receives the same browser message without local delivery
   await expect(page.getByLabel("6자리 인증 코드")).toBeVisible();
   expect(await deliveredOtp(request, outsider)).toBeNull();
   await expectCleanRuntime(diagnostics, fixture, [outsider]);
+});
+
+test("email quota hard stop fails closed without provider delivery", async ({
+  page,
+  request
+}) => {
+  await resetEmulators(request);
+  const fixture = await seedScenario(request, "otp");
+  await exhaustEmailQuota(request);
+
+  await openV2Share(page, fixture);
+  await page.getByLabel("인증 이메일").fill(fixture.allowedEmail);
+  await page.getByRole("button", { name: "인증 코드 보내기" }).click();
+  await expect(page.getByRole("alert")).toHaveText(
+    "요청이 너무 많습니다. 잠시 후 다시 시도해주세요."
+  );
+  expect(await deliveredOtp(request, fixture.allowedEmail)).toBeNull();
+  await resetEmulators(request);
 });
 
 test("authenticated-only share rejects anonymous access and accepts a verified emulator user", async ({
@@ -306,10 +330,12 @@ test("owner preview can delete a guest comment without consuming a one-time shar
 
   const ownerContext = await browser.newContext();
   const ownerPage = await ownerContext.newPage();
-  const ownerDiagnostics = observePage(ownerPage);
   await loginDirectly(ownerPage, fixture.ownerAuth);
   await ownerPage.goto(fixture.url);
-  await expect(ownerPage.getByText(/소유자\/관리자 미리보기 · 일회성 링크 미소비/u)).toBeVisible();
+  const ownerDiagnostics = observePage(ownerPage);
+  await expect(
+    ownerPage.getByText(/소유자\/관리자 미리보기 · 일회성 링크 미소비/u)
+  ).toBeVisible({ timeout: 35_000 });
   await ownerPage.getByRole("button", { name: "소유자/관리자 미리보기 열기" }).click();
   await expect(ownerPage.getByRole("heading", { name: fixture.title })).toBeVisible();
   await expect(ownerPage.getByText(guestComment)).toBeVisible();

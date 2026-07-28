@@ -6,6 +6,7 @@ import {
   type FormEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState
@@ -109,6 +110,7 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
   const [copyError, setCopyError] = useState("");
   const [copyRunning, setCopyRunning] = useState(false);
   const copyAbortControllerRef = useRef<AbortController | null>(null);
+  const copyLifecycleGenerationRef = useRef(0);
   const authenticatedProfile = Boolean(
     firebaseUser
     && profile
@@ -120,6 +122,35 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
     && idTokenState.uid === firebaseUser?.uid
     ? idTokenState.token
     : undefined;
+  const copyLifecycleIdentityRef = useRef({
+    authenticatedProfile,
+    contentKey: parsedFragment?.contentKey ?? null,
+    firebaseUser,
+    idToken,
+    privateKey,
+    profile,
+    shareId
+  });
+
+  useLayoutEffect(() => {
+    copyLifecycleIdentityRef.current = {
+      authenticatedProfile,
+      contentKey: parsedFragment?.contentKey ?? null,
+      firebaseUser,
+      idToken,
+      privateKey,
+      profile,
+      shareId
+    };
+  }, [
+    authenticatedProfile,
+    firebaseUser,
+    idToken,
+    parsedFragment?.contentKey,
+    privateKey,
+    profile,
+    shareId
+  ]);
 
   useEffect(() => {
     const clientFlags = resolveSecureShareFeatureFlags();
@@ -183,21 +214,32 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
     };
   }, [authenticatedProfile, featureGateState, firebaseUser]);
 
-  useEffect(() => {
-    return () => {
-      copyAbortControllerRef.current?.abort();
-      copyAbortControllerRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const generation = copyLifecycleGenerationRef.current + 1;
+    copyLifecycleGenerationRef.current = generation;
     copyAbortControllerRef.current?.abort();
     copyAbortControllerRef.current = null;
     setCopyProgress(null);
     setCopyResult("");
     setCopyError("");
     setCopyRunning(false);
-  }, [parsedFragment?.contentKey, shareId]);
+
+    return () => {
+      if (copyLifecycleGenerationRef.current === generation) {
+        copyLifecycleGenerationRef.current += 1;
+      }
+      copyAbortControllerRef.current?.abort();
+      copyAbortControllerRef.current = null;
+    };
+  }, [
+    authenticatedProfile,
+    firebaseUser,
+    idToken,
+    parsedFragment?.contentKey,
+    privateKey,
+    profile,
+    shareId
+  ]);
 
   const requireLogin = useCallback(() => {
     const returnState = createSecureShareLoginReturnState(
@@ -216,6 +258,23 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
   }, [location.hash, location.pathname, navigate]);
 
   const saveCopy = useCallback(async (payload: SecurePublicShareCopyPayload) => {
+    const operationGeneration = copyLifecycleGenerationRef.current;
+    const operationIsCurrent = () => {
+      const current = copyLifecycleIdentityRef.current;
+
+      return operationGeneration === copyLifecycleGenerationRef.current
+        && current.authenticatedProfile === authenticatedProfile
+        && current.contentKey === (parsedFragment?.contentKey ?? null)
+        && current.firebaseUser === firebaseUser
+        && current.idToken === idToken
+        && current.privateKey === privateKey
+        && current.profile === profile
+        && current.shareId === shareId;
+    };
+
+    if (!operationIsCurrent()) {
+      throw new Error("로그인 상태가 변경되어 복사본 저장을 중단했습니다.");
+    }
     if (copyAbortControllerRef.current) {
       const message = "이미 복사본 저장 작업이 진행 중입니다.";
       setCopyError(message);
@@ -227,6 +286,7 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
       || !privateKey
       || !idToken
       || firebaseUser.uid !== profile.uid
+      || !authenticatedProfile
     ) {
       const message = "활성 QuickMemo 노트 권한과 암호화 키를 확인해주세요.";
       setCopyError(message);
@@ -250,15 +310,29 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
 
     try {
       const { saveSecureShareCopy } = await import("../lib/secureShareSaveCopy");
+      if (!operationIsCurrent()) {
+        controller.abort();
+        throw new Error("로그인 상태가 변경되어 복사본 저장을 중단했습니다.");
+      }
       await saveSecureShareCopy({
         payload,
         privateKey,
         profile,
         signal: controller.signal,
-        onProgress: setCopyProgress
+        onProgress: (progress) => {
+          if (operationIsCurrent()) {
+            setCopyProgress(progress);
+          }
+        }
       });
+      if (!operationIsCurrent()) {
+        return;
+      }
       setCopyResult("보안 공유의 독립 복사본을 QuickMemo에 저장했습니다.");
     } catch (caught) {
+      if (!operationIsCurrent()) {
+        throw caught;
+      }
       const message = caught instanceof Error && caught.name === "SecureShareSaveCopyError"
         ? caught.message
         : "복사본 저장 중 오류가 발생했습니다.";
@@ -270,9 +344,19 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
       if (copyAbortControllerRef.current === controller) {
         copyAbortControllerRef.current = null;
       }
-      setCopyRunning(false);
+      if (operationIsCurrent()) {
+        setCopyRunning(false);
+      }
     }
-  }, [firebaseUser, idToken, privateKey, profile]);
+  }, [
+    authenticatedProfile,
+    firebaseUser,
+    idToken,
+    parsedFragment?.contentKey,
+    privateKey,
+    profile,
+    shareId
+  ]);
 
   if (featureGateState === "checking") {
     return (

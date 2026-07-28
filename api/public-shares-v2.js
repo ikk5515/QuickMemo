@@ -22,12 +22,14 @@ import {
   csrfTokenDigest,
   emailDigest,
   ensureSameOrigin,
+  firestoreBatchGetNewTransaction,
   firestoreCommit,
   deleteDocumentWrite,
   firestoreGet,
   firestoreIntegerValue,
   firestoreListCollection,
   firestoreReferenceValue,
+  firestoreRollback,
   firestoreRunQuery,
   firestoreStringValue,
   firestoreTimestampValue,
@@ -64,6 +66,7 @@ import {
   sessionTokenDigest,
   sessionTokenFromRequest,
   sessionTtlSeconds,
+  sha256Digest,
   signedOpaqueToken,
   unlockAttemptDigest,
   updateDocumentWrite,
@@ -83,6 +86,7 @@ import {
 const accessModes = new Set(["anyone_with_link", "allowed_emails", "authenticated_users"]);
 const permissionLevels = new Set(["view", "comment", "save_copy"]);
 const expirationPresets = new Set(["one_hour", "one_day", "seven_days", "custom"]);
+const ownerShareStatuses = new Set(["pending", "active", "consumed", "revoked", "expired"]);
 const previewableExtensions = new Set([
   "pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx",
   "png", "jpg", "jpeg", "webp", "gif"
@@ -95,6 +99,15 @@ const auditRetentionDays = configuredInteger("SHARE_AUDIT_RETENTION_DAYS", 90, 3
 const auditRetentionMilliseconds = auditRetentionDays * 24 * 60 * 60 * 1000;
 const defaultPageSize = 20;
 const maximumPageSize = 50;
+const maximumSourceShareHistory = 100;
+const copyGrantPurpose = "quickmemo/secure-share/copy-grant/v1";
+const copyGrantTtlSeconds = 5 * 60;
+const copyGrantReplayMinimumSeconds = 15;
+const copyGrantRequestRetentionSeconds = 24 * 60 * 60;
+const copyGrantRateWindowSeconds = 60;
+const copyGrantRateLimit = 3;
+const emailProviderRequestRateWindowSeconds = 1;
+const emailProviderRequestRateLimit = 2;
 const sessionLastSeenWriteIntervalMilliseconds = 60 * 60 * 1000;
 const validActions = new Set([
   "feature-status",
@@ -134,7 +147,13 @@ function assertQueryKeys(url, allowedKeys) {
 function isOptimisticConflict(error) {
   return error
     && typeof error === "object"
-    && [400, 409, 412].includes(error.statusCode);
+    && (
+      [409, 412].includes(error.statusCode)
+      || (
+        error.statusCode === 400
+        && error.upstreamCode === "FAILED_PRECONDITION"
+      )
+    );
 }
 
 function boundedInteger(value, fieldName, minimum, maximum) {
@@ -302,6 +321,33 @@ function shareSummary(share) {
   };
 }
 
+const ownerShareSummaryFieldPaths = [
+  "schemaVersion",
+  "sourceNoteId",
+  "sourceRevision",
+  "sourceAttachmentRevision",
+  "currentGeneration",
+  "ownerUid",
+  "status",
+  "ready",
+  "createdAt",
+  "updatedAt",
+  "expiresAt",
+  "policyVersion",
+  "accessModePublicHint",
+  "hasPassword",
+  "requiresEmailVerification",
+  "oneTimeEnabled",
+  "permissionLevel",
+  "downloadAllowed",
+  "quickCopyButtonVisible",
+  "attachmentCount",
+  "consumedAt",
+  "revokedAt",
+  "lastAccessAt",
+  "successfulAccessCount"
+];
+
 function policySummary(policy) {
   return {
     accessMode: policy.accessMode,
@@ -361,6 +407,82 @@ async function loadShareState(context, shareId) {
     return null;
   }
   return { share, policy };
+}
+
+function sourceShareGuardId(ownerUid, sourceNoteId) {
+  return `source_${hmacDigest(
+    requiredSecret("SHARE_SESSION_HMAC_KEY"),
+    "quickmemo/secure-share/source-guard/v1",
+    safeId(ownerUid, "ownerUid"),
+    safeId(sourceNoteId, "sourceNoteId")
+  ).slice(0, 48)}`;
+}
+
+function sourceShareGuardPath(ownerUid, sourceNoteId) {
+  return `publicShareSourceGuards/${sourceShareGuardId(ownerUid, sourceNoteId)}`;
+}
+
+function sourceShareBlocksCreation(share, ownerUid, sourceNoteId, now = Date.now()) {
+  return Boolean(
+    share
+    && share.schemaVersion === 2
+    && share.ownerUid === ownerUid
+    && share.sourceNoteId === sourceNoteId
+    && new Set(["pending", "active"]).has(share.status)
+    && !share.revokedAt
+    && timestampMilliseconds(share.expiresAt) > now
+  );
+}
+
+function sourceShareGuardMatches(
+  guard,
+  ownerUid,
+  sourceNoteId,
+  shareId = ""
+) {
+  return Boolean(
+    guard
+    && guard.schemaVersion === 1
+    && guard.ownerUid === ownerUid
+    && guard.sourceNoteId === sourceNoteId
+    && typeof guard.shareId === "string"
+    && guard.shareId
+    && (!shareId || guard.shareId === shareId)
+  );
+}
+
+async function beginShareMutationTransaction(context, shareId) {
+  const { documents, transaction } = await firestoreBatchGetNewTransaction(
+    context,
+    [
+      `publicNoteShares/${shareId}`,
+      `publicSharePolicies/${shareId}`
+    ]
+  );
+  const [share, policy] = documents;
+  const state = share
+    && policy
+    && share.schemaVersion === 2
+    && policy.schemaVersion === 2
+      ? { share, policy }
+      : null;
+  return { state, transaction };
+}
+
+async function rollbackShareMutation(context, transaction) {
+  await firestoreRollback(context, transaction).catch(() => undefined);
+}
+
+function shareMutationSnapshotMatches(current, expected) {
+  return Boolean(
+    current
+    && expected
+    && current.share.__id === expected.share.__id
+    && current.share.ownerUid === expected.share.ownerUid
+    && current.share.policyVersion === expected.share.policyVersion
+    && current.policy.policyVersion === expected.policy.policyVersion
+    && publicShareAvailable(current)
+  );
 }
 
 function shareOwnedBy(state, user) {
@@ -434,7 +556,9 @@ function assertPublicShareAvailable(state) {
 }
 
 function createAuditWrite(context, share, eventType, result, details = {}) {
-  const id = `evt_${randomToken(18)}`;
+  const id = details.eventId
+    ? safeId(details.eventId, "eventId")
+    : `evt_${randomToken(18)}`;
   const now = new Date();
   return createDocumentWrite(
     context.projectId,
@@ -702,6 +826,89 @@ function validateCreateBody(body) {
   };
 }
 
+function sourceShareHistoryQuery(ownerUid, sourceNoteId) {
+  return {
+    select: {
+      fields: ownerShareSummaryFieldPaths.map((fieldPath) => ({ fieldPath }))
+    },
+    from: [{ collectionId: "publicNoteShares" }],
+    where: {
+      compositeFilter: {
+        op: "AND",
+        filters: [
+          {
+            fieldFilter: {
+              field: { fieldPath: "ownerUid" },
+              op: "EQUAL",
+              value: firestoreStringValue(ownerUid)
+            }
+          },
+          {
+            fieldFilter: {
+              field: { fieldPath: "sourceNoteId" },
+              op: "EQUAL",
+              value: firestoreStringValue(sourceNoteId)
+            }
+          }
+        ]
+      }
+    },
+    limit: maximumSourceShareHistory + 1
+  };
+}
+
+async function readSourceShareHistory(
+  context,
+  ownerUid,
+  sourceNoteId,
+  transaction = ""
+) {
+  const documents = await firestoreRunQuery(
+    context,
+    sourceShareHistoryQuery(ownerUid, sourceNoteId),
+    "",
+    transaction
+  );
+  if (documents.length > maximumSourceShareHistory) {
+    throw new HttpError(
+      409,
+      "source_share_history_too_large",
+      "Source note share history exceeded its safe complete-read bound"
+    );
+  }
+  return documents;
+}
+
+function ownedSourceShareHistory(documents, ownerUid, sourceNoteId, status = "") {
+  return documents
+    .filter((share) =>
+      share.schemaVersion === 2
+      && share.ownerUid === ownerUid
+      && share.sourceNoteId === sourceNoteId
+      && ownerShareStatuses.has(share.status)
+      && (!status || share.status === status)
+    )
+    .sort((left, right) => {
+      const createdDifference =
+        timestampMilliseconds(right.createdAt) - timestampMilliseconds(left.createdAt);
+      if (Number.isFinite(createdDifference) && createdDifference !== 0) {
+        return createdDifference;
+      }
+      return String(right.__name).localeCompare(String(left.__name));
+    });
+}
+
+function sourceNoteMatchesCreate(note, ownerUid, input) {
+  const actualRevision = Number.isSafeInteger(note?.revision) ? note.revision : 0;
+  const actualAttachmentRevision = Number.isSafeInteger(note?.attachmentRevision)
+    ? note.attachmentRevision
+    : 0;
+  return sourceNoteActive(note)
+    && note.ownerUid === ownerUid
+    && actualRevision === input.sourceRevision
+    && actualAttachmentRevision === input.sourceAttachmentRevision;
+}
+
 async function handleOwnerCreate(request, response, id) {
   requireMethod(request, ["POST"]);
   ensureSameOrigin(request);
@@ -710,14 +917,7 @@ async function handleOwnerCreate(request, response, id) {
   const user = await ownerContext(request);
   const context = user.context;
   const note = await firestoreGet(context, `notes/${input.sourceNoteId}`);
-  const actualRevision = Number.isSafeInteger(note?.revision) ? note.revision : 0;
-  const actualAttachmentRevision = Number.isSafeInteger(note?.attachmentRevision) ? note.attachmentRevision : 0;
-  if (
-    !sourceNoteActive(note)
-    || note.ownerUid !== user.uid
-    || actualRevision !== input.sourceRevision
-    || actualAttachmentRevision !== input.sourceAttachmentRevision
-  ) {
+  if (!sourceNoteMatchesCreate(note, user.uid, input)) {
     throw new HttpError(404, "not_found", "Source note is not owned by caller");
   }
   const shareId = input.idempotencyKey
@@ -731,6 +931,13 @@ async function handleOwnerCreate(request, response, id) {
   const existing = await loadShareState(context, shareId);
   if (existing) {
     requireOwner(existing, user);
+    if (existing.share.sourceNoteId !== input.sourceNoteId) {
+      throw new HttpError(
+        409,
+        "request_conflict",
+        "Share creation idempotency key was reused for another source note"
+      );
+    }
     jsonResponse(response, 200, {
       ok: true,
       created: false,
@@ -824,28 +1031,137 @@ async function handleOwnerCreate(request, response, id) {
       }
     ));
   }
-  try {
-    await firestoreCommit(context, writes);
-  } catch (error) {
-    if (!isOptimisticConflict(error) || !input.idempotencyKey) {
+
+  const guardPath = sourceShareGuardPath(user.uid, input.sourceNoteId);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    let transaction = "";
+    try {
+      const snapshot = await firestoreBatchGetNewTransaction(context, [
+        `notes/${input.sourceNoteId}`,
+        guardPath
+      ]);
+      transaction = snapshot.transaction;
+      const [currentNote, guard] = snapshot.documents;
+      if (!sourceNoteMatchesCreate(currentNote, user.uid, input)) {
+        throw new HttpError(409, "source_state_changed", "Source note changed during share creation");
+      }
+      if (
+        guard
+        && !sourceShareGuardMatches(guard, user.uid, input.sourceNoteId)
+      ) {
+        throw new HttpError(
+          409,
+          "source_share_guard_invalid",
+          "Source share guard state is invalid"
+        );
+      }
+
+      const history = ownedSourceShareHistory(
+        await readSourceShareHistory(
+          context,
+          user.uid,
+          input.sourceNoteId,
+          transaction
+        ),
+        user.uid,
+        input.sourceNoteId
+      );
+      const blockingShares = history.filter((candidate) =>
+        sourceShareBlocksCreation(candidate, user.uid, input.sourceNoteId)
+      );
+      if (blockingShares.length > 1) {
+        throw new HttpError(
+          409,
+          "source_share_state_invalid",
+          "Multiple active source shares require cleanup"
+        );
+      }
+      const blockingShare = blockingShares[0] ?? null;
+      if (blockingShare) {
+        await rollbackShareMutation(context, transaction);
+        transaction = "";
+        if (input.idempotencyKey && blockingShare.__id === shareId) {
+          const raced = await loadShareState(context, shareId);
+          if (
+            raced
+            && raced.share.ownerUid === user.uid
+            && raced.share.sourceNoteId === input.sourceNoteId
+          ) {
+            jsonResponse(response, 200, {
+              ok: true,
+              created: false,
+              share: shareSummary(raced.share),
+              requestId: id
+            });
+            return;
+          }
+          if (attempt < 4) {
+            continue;
+          }
+        }
+        throw new HttpError(
+          409,
+          "active_share_exists",
+          "An active share already exists for the source note"
+        );
+      }
+
+      const guardFields = {
+        schemaVersion: 1,
+        ownerUid: user.uid,
+        sourceNoteId: input.sourceNoteId,
+        shareId,
+        updatedAt: now,
+        expiresAt
+      };
+      const guardWrite = guard
+        ? updateDocumentWrite(
+          context.projectId,
+          guardPath,
+          guardFields,
+          Object.keys(guardFields),
+          guard.__updateTime
+        )
+        : createDocumentWrite(context.projectId, guardPath, {
+          ...guardFields,
+          createdAt: now
+        });
+      await firestoreCommit(context, [...writes, guardWrite], transaction);
+      transaction = "";
+      jsonResponse(response, 201, {
+        ok: true,
+        created: true,
+        share: shareSummary({ ...share, __id: shareId }),
+        requestId: id
+      });
+      return;
+    } catch (error) {
+      if (transaction) {
+        await rollbackShareMutation(context, transaction);
+      }
+      if (isOptimisticConflict(error) && attempt < 4) {
+        continue;
+      }
+      if (isOptimisticConflict(error) && input.idempotencyKey) {
+        const raced = await loadShareState(context, shareId);
+        if (
+          raced
+          && raced.share.ownerUid === user.uid
+          && raced.share.sourceNoteId === input.sourceNoteId
+        ) {
+          jsonResponse(response, 200, {
+            ok: true,
+            created: false,
+            share: shareSummary(raced.share),
+            requestId: id
+          });
+          return;
+        }
+      }
       throw error;
     }
-    const raced = await loadShareState(context, shareId);
-    requireOwner(raced, user);
-    jsonResponse(response, 200, {
-      ok: true,
-      created: false,
-      share: shareSummary(raced.share),
-      requestId: id
-    });
-    return;
   }
-  jsonResponse(response, 201, {
-    ok: true,
-    created: true,
-    share: shareSummary({ ...share, __id: shareId }),
-    requestId: id
-  });
+  throw new HttpError(409, "request_conflict");
 }
 
 function ownerListCursor(value) {
@@ -879,14 +1195,45 @@ async function handleOwnerList(request, response, id, url) {
   requireMethod(request, ["GET"]);
   const user = await ownerContext(request);
   const status = queryString(url, "status", 20);
-  if (status && !new Set(["pending", "active", "consumed", "revoked", "expired"]).has(status)) {
+  if (status && !ownerShareStatuses.has(status)) {
     throw new HttpError(400, "invalid_request", "Invalid status filter");
   }
+  const sourceNoteId = url.searchParams.has("sourceNoteId")
+    ? safeId(queryString(url, "sourceNoteId", 160), "sourceNoteId")
+    : "";
   const pageSizeText = queryString(url, "limit", 3);
   const pageSize = pageSizeText
-    ? boundedInteger(Number.parseInt(pageSizeText, 10), "pageSize", 1, maximumPageSize)
+    ? boundedInteger(
+      Number.parseInt(pageSizeText, 10),
+      "pageSize",
+      1,
+      sourceNoteId ? maximumSourceShareHistory : maximumPageSize
+    )
     : defaultPageSize;
-  const cursor = ownerListCursor(queryString(url, "cursor", 1000));
+  const cursorText = queryString(url, "cursor", 1000);
+  if (sourceNoteId) {
+    if (url.searchParams.has("cursor")) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        "Source-specific share history does not accept a cursor"
+      );
+    }
+    const shares = ownedSourceShareHistory(
+      await readSourceShareHistory(user.context, user.uid, sourceNoteId),
+      user.uid,
+      sourceNoteId,
+      status
+    );
+    jsonResponse(response, 200, {
+      ok: true,
+      shares: shares.map((share) => shareSummary(share)),
+      nextCursor: null,
+      requestId: id
+    });
+    return;
+  }
+  const cursor = ownerListCursor(cursorText);
   const filters = [
     {
       fieldFilter: {
@@ -914,32 +1261,7 @@ async function handleOwnerList(request, response, id, url) {
   }
   const structuredQuery = {
     select: {
-      fields: [
-        "schemaVersion",
-        "sourceNoteId",
-        "sourceRevision",
-        "sourceAttachmentRevision",
-        "currentGeneration",
-        "ownerUid",
-        "status",
-        "ready",
-        "createdAt",
-        "updatedAt",
-        "expiresAt",
-        "policyVersion",
-        "accessModePublicHint",
-        "hasPassword",
-        "requiresEmailVerification",
-        "oneTimeEnabled",
-        "permissionLevel",
-        "downloadAllowed",
-        "quickCopyButtonVisible",
-        "attachmentCount",
-        "consumedAt",
-        "revokedAt",
-        "lastAccessAt",
-        "successfulAccessCount"
-      ].map((fieldPath) => ({ fieldPath }))
+      fields: ownerShareSummaryFieldPaths.map((fieldPath) => ({ fieldPath }))
     },
     from: [{ collectionId: "publicNoteShares" }],
     where: filters.length === 1 ? filters[0] : { compositeFilter: { op: "AND", filters } },
@@ -1018,39 +1340,6 @@ function validateUpdateBody(body) {
   };
 }
 
-async function deleteEmailChallengesForShare(context, shareId) {
-  let deleted = 0;
-  for (let page = 0; page < 50; page += 1) {
-    const challenges = await firestoreRunQuery(context, {
-      from: [{ collectionId: "publicShareEmailChallenges" }],
-      where: {
-        fieldFilter: {
-          field: { fieldPath: "shareId" },
-          op: "EQUAL",
-          value: firestoreStringValue(shareId)
-        }
-      },
-      limit: 200
-    });
-    if (!challenges.length) {
-      return deleted;
-    }
-    await firestoreCommit(
-      context,
-      challenges.map((challenge) =>
-        deleteDocumentWrite(
-          context.projectId,
-          `publicShareEmailChallenges/${safeId(challenge.__id, "challengeId")}`,
-          challenge.__updateTime
-        ))
-    );
-    deleted += challenges.length;
-  }
-  throw new HttpError(503, "service_unavailable", "Challenge cleanup exceeded its safe bound", {
-    expose: false
-  });
-}
-
 async function handleOwnerUpdate(request, response, id, shareId) {
   requireMethod(request, ["PATCH", "POST"]);
   ensureSameOrigin(request);
@@ -1065,7 +1354,6 @@ async function handleOwnerUpdate(request, response, id, shareId) {
       throw new HttpError(409, "share_unavailable");
     }
     if (state.share.lastOwnerMutationId === updateInput.idempotencyKey) {
-      await deleteEmailChallengesForShare(user.context, shareId);
       jsonResponse(response, 200, {
         ok: true,
         share: shareSummary(state.share),
@@ -1115,6 +1403,8 @@ async function handleOwnerUpdate(request, response, id, shareId) {
       "consumedAttemptHash",
       "consumedIdentityHash"
     ];
+    const guardPath = sourceShareGuardPath(user.uid, state.share.sourceNoteId);
+    const guard = await firestoreGet(user.context, guardPath);
     const writes = [
       updateDocumentWrite(
         user.context.projectId,
@@ -1136,6 +1426,22 @@ async function handleOwnerUpdate(request, response, id, shareId) {
         identityHash: identityDigest("uid", user.uid)
       })
     ];
+    if (
+      sourceShareGuardMatches(
+        guard,
+        user.uid,
+        state.share.sourceNoteId,
+        shareId
+      )
+    ) {
+      writes.push(updateDocumentWrite(
+        user.context.projectId,
+        guardPath,
+        { expiresAt, updatedAt: now },
+        ["expiresAt", "updatedAt"],
+        guard.__updateTime
+      ));
+    }
     const recipients = await firestoreListCollection(
       user.context,
       `publicShareRecipients/${shareId}`,
@@ -1196,7 +1502,6 @@ async function handleOwnerUpdate(request, response, id, shareId) {
     }
     try {
       await firestoreCommit(user.context, writes);
-      await deleteEmailChallengesForShare(user.context, shareId);
       jsonResponse(response, 200, {
         ok: true,
         share: shareSummary({ ...state.share, ...shareFields, __id: shareId }),
@@ -1300,7 +1605,32 @@ async function handleOwnerRevoke(request, response, id, shareId) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const state = await loadShareState(user.context, shareId);
     requireShareManager(state, user);
+    const guardPath = sourceShareGuardPath(user.uid, state.share.sourceNoteId);
+    const guard = await firestoreGet(user.context, guardPath);
     if (state.share.status === "revoked" || state.share.revokedAt) {
+      if (
+        sourceShareGuardMatches(
+          guard,
+          user.uid,
+          state.share.sourceNoteId,
+          shareId
+        )
+      ) {
+        try {
+          await firestoreCommit(user.context, [
+            deleteDocumentWrite(
+              user.context.projectId,
+              guardPath,
+              guard.__updateTime
+            )
+          ]);
+        } catch (error) {
+          if (isOptimisticConflict(error) && attempt < 2) {
+            continue;
+          }
+          throw error;
+        }
+      }
       jsonResponse(response, 200, { ok: true, share: shareSummary(state.share), requestId: id });
       return;
     }
@@ -1316,8 +1646,7 @@ async function handleOwnerRevoke(request, response, id, shareId) {
       updatedAt: now
     };
     const policyFields = { policyVersion, updatedAt: now, revokedAt: now };
-    try {
-      await firestoreCommit(user.context, [
+    const writes = [
         updateDocumentWrite(
           user.context.projectId,
           `publicNoteShares/${shareId}`,
@@ -1337,7 +1666,23 @@ async function handleOwnerRevoke(request, response, id, shareId) {
           identityType: "quickmemo_user",
           identityHash: identityDigest("uid", user.uid)
         })
-      ]);
+    ];
+    if (
+      sourceShareGuardMatches(
+        guard,
+        user.uid,
+        state.share.sourceNoteId,
+        shareId
+      )
+    ) {
+      writes.push(deleteDocumentWrite(
+        user.context.projectId,
+        guardPath,
+        guard.__updateTime
+      ));
+    }
+    try {
+      await firestoreCommit(user.context, writes);
       jsonResponse(response, 200, {
         ok: true,
         share: shareSummary({ ...state.share, ...shareFields }),
@@ -1443,25 +1788,417 @@ async function emailChallengeEligibility(context, state, emailHash) {
   }
 }
 
-async function updateChallengeAfterSendFailure(context, path, challenge) {
-  try {
-    const latest = await firestoreGet(context, path);
-    if (!latest || latest.status !== "pending" || latest.codeDigest !== challenge.codeDigest) {
+function resolveEmailQuotaPolicy(environment = process.env) {
+  const configured = (name, fallback, minimum, maximum) => {
+    const parsed = Number.parseInt(environment[name], 10);
+    return Number.isSafeInteger(parsed)
+      ? Math.min(Math.max(parsed, minimum), maximum)
+      : fallback;
+  };
+  const dailyHardLimit = configured("SHARE_EMAIL_DAILY_HARD_LIMIT", 80, 1, 80);
+  const monthlyHardLimit = configured("SHARE_EMAIL_MONTHLY_HARD_LIMIT", 2_400, 1, 2_400);
+  return {
+    dailyHardLimit,
+    dailySoftLimit: Math.min(
+      configured("SHARE_EMAIL_DAILY_SOFT_LIMIT", 64, 1, 80),
+      dailyHardLimit
+    ),
+    monthlyHardLimit,
+    monthlySoftLimit: Math.min(
+      configured("SHARE_EMAIL_MONTHLY_SOFT_LIMIT", 1_920, 1, 2_400),
+      monthlyHardLimit
+    )
+  };
+}
+
+function emailQuotaPeriods(nowMilliseconds = Date.now(), policy = resolveEmailQuotaPolicy()) {
+  const now = new Date(nowMilliseconds);
+  if (!Number.isFinite(now.getTime())) {
+    throw new HttpError(500, "internal_error", "Invalid email quota clock", { expose: false });
+  }
+  const dayKey = now.toISOString().slice(0, 10);
+  const monthKey = now.toISOString().slice(0, 7);
+  const nextDay = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1
+  );
+  const nextMonth = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+  return [
+    {
+      bucketId: `day_${dayKey}`,
+      expiresAt: new Date(nextDay + 45 * 24 * 60 * 60 * 1000),
+      hardLimit: policy.dailyHardLimit,
+      periodKey: dayKey,
+      scope: "daily",
+      softLimit: policy.dailySoftLimit
+    },
+    {
+      bucketId: `month_${monthKey}`,
+      expiresAt: new Date(nextMonth + 400 * 24 * 60 * 60 * 1000),
+      hardLimit: policy.monthlyHardLimit,
+      periodKey: monthKey,
+      scope: "monthly",
+      softLimit: policy.monthlySoftLimit
+    }
+  ];
+}
+
+function emailQuotaCount(document) {
+  const reservedCount = document
+    ? document.reservedCount
+    : 0;
+  const sentCount = document
+    ? document.sentCount
+    : 0;
+  if (
+    !Number.isSafeInteger(reservedCount)
+    || reservedCount < 0
+    || !Number.isSafeInteger(sentCount)
+    || sentCount < 0
+  ) {
+    throw new HttpError(503, "email_feature_unavailable", "Email quota state is invalid", {
+      expose: false
+    });
+  }
+  return { reservedCount, sentCount, total: reservedCount + sentCount };
+}
+
+function emailQuotaExceeded(document, period) {
+  const counts = emailQuotaCount(document);
+  return {
+    ...counts,
+    exceeded: counts.total >= period.hardLimit,
+    softLimitReached: counts.total >= period.softLimit
+  };
+}
+
+async function readEmailQuotaStates(context, nowMilliseconds) {
+  const periods = emailQuotaPeriods(nowMilliseconds);
+  const documents = await Promise.all(periods.map((period) =>
+    firestoreGet(context, `publicShareEmailQuotaBuckets/${period.bucketId}`)
+  ));
+  return periods.map((period, index) => ({
+    document: documents[index],
+    path: `publicShareEmailQuotaBuckets/${period.bucketId}`,
+    period,
+    ...emailQuotaExceeded(documents[index], period)
+  }));
+}
+
+function storedEmailQuotaState(document, bucketId) {
+  const expectedScope = bucketId.startsWith("day_")
+    ? "daily"
+    : bucketId.startsWith("month_")
+      ? "monthly"
+      : "";
+  const expectedPeriodKey = expectedScope === "daily"
+    ? bucketId.slice("day_".length)
+    : bucketId.slice("month_".length);
+  if (
+    !document
+    || !new Set(["daily", "monthly"]).has(document.scope)
+    || document.scope !== expectedScope
+    || typeof document.periodKey !== "string"
+    || document.periodKey !== expectedPeriodKey
+    || (
+      document.scope === "daily"
+        ? !/^\d{4}-\d{2}-\d{2}$/u.test(document.periodKey)
+        : !/^\d{4}-\d{2}$/u.test(document.periodKey)
+    )
+    || !Number.isSafeInteger(document.softLimit)
+    || !Number.isSafeInteger(document.hardLimit)
+    || document.softLimit < 1
+    || document.hardLimit < document.softLimit
+    || timestampMilliseconds(document.expiresAt) <= 0
+  ) {
+    throw new HttpError(503, "email_feature_unavailable", "Email quota bucket is invalid", {
+      expose: false
+    });
+  }
+  const counts = emailQuotaCount(document);
+  return {
+    document,
+    path: `publicShareEmailQuotaBuckets/${bucketId}`,
+    period: {
+      bucketId,
+      expiresAt: new Date(timestampMilliseconds(document.expiresAt)),
+      hardLimit: document.hardLimit,
+      periodKey: document.periodKey,
+      scope: document.scope,
+      softLimit: document.softLimit
+    },
+    ...counts,
+    exceeded: counts.total >= document.hardLimit,
+    softLimitReached: counts.total >= document.softLimit
+  };
+}
+
+function assertEmailQuotaAvailable(states) {
+  if (states.some((state) => state.exceeded)) {
+    throw new HttpError(429, "rate_limited", "Secure Share email quota is exhausted", {
+      retryAfter: 60 * 60
+    });
+  }
+}
+
+function emailQuotaBucketWrite(context, state, reservedDelta, sentDelta, now) {
+  const reservedCount = state.reservedCount + reservedDelta;
+  const sentCount = state.sentCount + sentDelta;
+  if (reservedCount < 0 || sentCount < 0) {
+    throw new HttpError(503, "email_feature_unavailable", "Email quota release underflow", {
+      expose: false
+    });
+  }
+  const fields = {
+    scope: state.period.scope,
+    periodKey: state.period.periodKey,
+    reservedCount,
+    sentCount,
+    softLimit: state.period.softLimit,
+    hardLimit: state.period.hardLimit,
+    softLimitReached: reservedCount + sentCount >= state.period.softLimit,
+    updatedAt: now,
+    expiresAt: state.period.expiresAt
+  };
+  return state.document
+    ? updateDocumentWrite(
+      context.projectId,
+      state.path,
+      fields,
+      [
+        "scope",
+        "periodKey",
+        "reservedCount",
+        "sentCount",
+        "softLimit",
+        "hardLimit",
+        "softLimitReached",
+        "updatedAt",
+        "expiresAt"
+      ],
+      state.document.__updateTime
+    )
+    : createDocumentWrite(context.projectId, state.path, fields);
+}
+
+function emailDeliveryId(challengeId, codeDigest, sendAttemptId) {
+  return `mail_${hmacDigest(
+    requiredSecret("SHARE_OTP_HMAC_KEY"),
+    "quickmemo/secure-share/email-delivery/v1",
+    challengeId,
+    codeDigest,
+    safeId(sendAttemptId, "sendAttemptId")
+  ).slice(0, 48)}`;
+}
+
+async function commitEmailChallenge({
+  challenge,
+  challengePath,
+  context,
+  eligible,
+  existing,
+  state
+}) {
+  const deliveryId = eligible
+    ? emailDeliveryId(
+        challenge.__challengeId,
+        challenge.codeDigest,
+        challenge.sendAttemptId
+      )
+    : "";
+  const deliveryPath = deliveryId ? `publicShareEmailDeliveries/${deliveryId}` : "";
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const now = new Date();
+    const [quotaStates, delivery] = await Promise.all([
+      readEmailQuotaStates(context, now.getTime()),
+      deliveryPath ? firestoreGet(context, deliveryPath) : Promise.resolve(null)
+    ]);
+    if (delivery) {
+      return { committed: false, deliveryId, deliveryPath, duplicate: true };
+    }
+    assertEmailQuotaAvailable(quotaStates);
+    const challengeFields = { ...challenge };
+    delete challengeFields.__challengeId;
+    const challengeWrite = existing
+      ? updateDocumentWrite(
+        context.projectId,
+        challengePath,
+        challengeFields,
+        Object.keys(challengeFields),
+        existing.__updateTime
+      )
+      : createDocumentWrite(context.projectId, challengePath, challengeFields);
+    const writes = [challengeWrite];
+    if (eligible) {
+      writes.push(
+        createDocumentWrite(context.projectId, deliveryPath, {
+          shareId: state.share.__id,
+          ownerUid: state.share.ownerUid,
+          challengeId: challenge.__challengeId,
+          emailHash: challenge.emailHash,
+          policyVersion: state.policy.policyVersion,
+          provider: "resend",
+          status: "reserved",
+          dailyBucketId: quotaStates[0].period.bucketId,
+          monthlyBucketId: quotaStates[1].period.bucketId,
+          createdAt: now,
+          updatedAt: now,
+          expiresAt: new Date(now.getTime() + 48 * 60 * 60 * 1000)
+        }),
+        ...quotaStates.map((quotaState) =>
+          emailQuotaBucketWrite(context, quotaState, 1, 0, now)
+        )
+      );
+    }
+    let transaction = "";
+    if (state) {
+      const transactionSnapshot = await beginShareMutationTransaction(
+        context,
+        state.share.__id
+      );
+      const currentState = transactionSnapshot.state;
+      const validSnapshot =
+        shareMutationSnapshotMatches(currentState, state)
+        && (
+          !eligible
+          || (
+            currentState.share.status !== "consumed"
+            && !currentState.policy.consumedAt
+          )
+        );
+      if (!validSnapshot) {
+        await rollbackShareMutation(context, transactionSnapshot.transaction);
+        return { committed: false, deliveryId, deliveryPath, duplicate: true };
+      }
+      transaction = transactionSnapshot.transaction;
+    }
+    try {
+      await firestoreCommit(context, writes, transaction);
+      if (eligible) {
+        for (const quotaState of quotaStates) {
+          if (quotaState.total + 1 === quotaState.period.softLimit) {
+            console.warn("secure share email quota soft limit reached", {
+              hardLimit: quotaState.period.hardLimit,
+              scope: quotaState.period.scope,
+              total: quotaState.total + 1
+            });
+          }
+        }
+      }
+      return { committed: true, deliveryId, deliveryPath, duplicate: false };
+    } catch (error) {
+      if (transaction) {
+        await rollbackShareMutation(context, transaction);
+      }
+      if (!isOptimisticConflict(error)) {
+        throw error;
+      }
+      const latest = await firestoreGet(context, challengePath);
+      if (
+        latest
+        && (
+          latest.codeDigest !== challenge.codeDigest
+          || latest.policyVersion !== challenge.policyVersion
+          || latest.sendAttemptId !== challenge.sendAttemptId
+        )
+      ) {
+        return { committed: false, deliveryId, deliveryPath, duplicate: true };
+      }
+      if (attempt === 4) {
+        throw new HttpError(409, "request_conflict", "Email challenge reservation conflict");
+      }
+    }
+  }
+  throw new HttpError(409, "request_conflict");
+}
+
+async function finalizeEmailDelivery(
+  context,
+  challengePath,
+  challenge,
+  reservation,
+  outcome,
+  providerMessageId = ""
+) {
+  if (!reservation?.committed || !reservation.deliveryPath) {
+    return;
+  }
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const now = new Date();
+    const [delivery, latestChallenge] = await Promise.all([
+      firestoreGet(context, reservation.deliveryPath),
+      firestoreGet(context, challengePath)
+    ]);
+    if (!delivery || delivery.status !== "reserved") {
       return;
     }
-    await firestoreCommit(context, [
+    const bucketIds = [delivery.dailyBucketId, delivery.monthlyBucketId];
+    if (
+      bucketIds.some((bucketId) =>
+        typeof bucketId !== "string" || !/^(?:day|month)_[0-9-]{7,10}$/u.test(bucketId)
+      )
+    ) {
+      throw new HttpError(503, "email_feature_unavailable", "Email delivery bucket is invalid", {
+        expose: false
+      });
+    }
+    const quotaDocuments = await Promise.all(bucketIds.map((bucketId) =>
+      firestoreGet(context, `publicShareEmailQuotaBuckets/${bucketId}`)
+    ));
+    const quotaStates = quotaDocuments.map((document, index) =>
+      storedEmailQuotaState(document, bucketIds[index])
+    );
+    const challengeMatches =
+      latestChallenge
+      && latestChallenge.codeDigest === challenge.codeDigest
+      && latestChallenge.policyVersion === challenge.policyVersion;
+    const releaseReservation = outcome !== "ambiguous";
+    const accepted = outcome === "sent";
+    const providerMessageIdHash = accepted && providerMessageId
+      ? sha256Digest(providerMessageId)
+      : "";
+    const writes = [
       updateDocumentWrite(
         context.projectId,
-        path,
-        { status: "send_failed", updatedAt: new Date() },
-        ["status", "updatedAt"],
-        latest.__updateTime
+        reservation.deliveryPath,
+        {
+          status: outcome,
+          providerMessageIdHash,
+          updatedAt: now,
+          completedAt: outcome === "ambiguous" ? undefined : now
+        },
+        ["status", "providerMessageIdHash", "updatedAt", "completedAt"],
+        delivery.__updateTime
       )
-    ]);
-  } catch (error) {
-    console.error("secure share challenge status update failed", {
-      error: error instanceof Error ? error.name : "unknown"
-    });
+    ];
+    if (releaseReservation) {
+      writes.push(...quotaStates.map((quotaState) =>
+        emailQuotaBucketWrite(context, quotaState, -1, accepted ? 1 : 0, now)
+      ));
+    }
+    if (challengeMatches) {
+      writes.push(updateDocumentWrite(
+        context.projectId,
+        challengePath,
+        {
+          status: accepted || outcome === "ambiguous" ? "pending" : "send_failed",
+          deliveryStatus: outcome,
+          providerMessageIdHash,
+          updatedAt: now
+        },
+        ["status", "deliveryStatus", "providerMessageIdHash", "updatedAt"],
+        latestChallenge.__updateTime
+      ));
+    }
+    try {
+      await firestoreCommit(context, writes);
+      return;
+    } catch (error) {
+      if (!isOptimisticConflict(error) || attempt === 4) {
+        throw error;
+      }
+    }
   }
 }
 
@@ -1584,6 +2321,7 @@ async function handleEmailChallenge(request, response, id, shareId) {
 
   const eligible = await emailChallengeEligibility(context, state, hashedEmail);
   const challenge = {
+    __challengeId: challengeId,
     shareId,
     ownerUid,
     policyVersion: state?.policy?.policyVersion ?? 0,
@@ -1597,54 +2335,87 @@ async function handleEmailChallenge(request, response, id, shareId) {
     resendNotBefore: new Date(now + 60 * 1000),
     requestIpHash: networkHash,
     status: eligible ? "pending" : "suppressed",
+    deliveryStatus: eligible ? "reserved" : "suppressed",
+    sendAttemptId: `send_${randomToken(18)}`,
+    providerMessageIdHash: "",
     verifiedAt: undefined,
     consumedAt: undefined,
     consumedAttemptHash: undefined
   };
-  const write = existing
-    ? updateDocumentWrite(
-      context.projectId,
-      path,
-      challenge,
-      [
-        "shareId",
-        "ownerUid",
-        "policyVersion",
-        "emailHash",
-        "codeDigest",
-        "attempts",
-        "maxAttempts",
-        "createdAt",
-        "updatedAt",
-        "expiresAt",
-        "resendNotBefore",
-        "requestIpHash",
-        "status",
-        "verifiedAt",
-        "consumedAt",
-        "consumedAttemptHash"
-      ],
-      existing.__updateTime
-    )
-    : createDocumentWrite(context.projectId, path, challenge);
-  await firestoreCommit(context, [write]);
+  const reservation = await commitEmailChallenge({
+    challenge,
+    challengePath: path,
+    context,
+    eligible,
+    existing,
+    state
+  });
 
-  if (eligible) {
+  if (eligible && reservation.committed) {
+    let delivery = null;
     try {
       const elapsedMilliseconds = Math.max(0, Date.now() - timingStartedAt);
       const deliveryBudgetMilliseconds = Math.max(
         1,
         Math.min(2_500, minimumResponseMilliseconds - elapsedMilliseconds - 250)
       );
-      await sendVerificationEmail(
+      const providerAdapter = createResendEmailAdapter(
+        undefined,
+        delay,
+        async () => {
+          // Consume a distributed token before every real provider request,
+          // including the adapter's idempotent retry. Two requests in each
+          // fixed UTC second also cap any rolling one-second boundary at four.
+          await consumeRateLimits(context, [
+            {
+              limitType: "email_provider_request_global_second",
+              keyParts: ["resend"],
+              shareId: "email_provider_global",
+              ownerUid: "",
+              windowSeconds: emailProviderRequestRateWindowSeconds,
+              limit: emailProviderRequestRateLimit
+            }
+          ]);
+        }
+      );
+      delivery = await sendVerificationEmail(
         normalizedEmail,
         code,
         challengeTtlSeconds,
-        undefined,
+        reservation.deliveryId,
+        providerAdapter,
         deliveryBudgetMilliseconds
       );
-    } catch {
-      await updateChallengeAfterSendFailure(context, path, challenge);
+    } catch (error) {
+      try {
+        await finalizeEmailDelivery(
+          context,
+          path,
+          challenge,
+          reservation,
+          error instanceof HttpError && error.deliveryAmbiguous ? "ambiguous" : "failed"
+        );
+      } catch (finalizeError) {
+        console.error("secure share email delivery finalization failed", {
+          error: finalizeError instanceof Error ? finalizeError.name : "unknown"
+        });
+      }
+    }
+    if (delivery) {
+      try {
+        await finalizeEmailDelivery(
+          context,
+          path,
+          challenge,
+          reservation,
+          "sent",
+          delivery.messageId
+        );
+      } catch (error) {
+        console.error("secure share accepted email accounting finalization failed", {
+          error: error instanceof Error ? error.name : "unknown"
+        });
+      }
     }
   }
   await padEmailChallengeResponse(timingStartedAt, minimumResponseMilliseconds);
@@ -2077,6 +2848,25 @@ async function issueAccessSession(
             policyVersion: state.policy.policyVersion
           }
         ));
+        const guardPath = sourceShareGuardPath(
+          state.share.ownerUid,
+          state.share.sourceNoteId
+        );
+        const guard = await firestoreGet(context, guardPath);
+        if (
+          sourceShareGuardMatches(
+            guard,
+            state.share.ownerUid,
+            state.share.sourceNoteId,
+            shareId
+          )
+        ) {
+          writes.push(deleteDocumentWrite(
+            context.projectId,
+            guardPath,
+            guard.__updateTime
+          ));
+        }
       }
       if (identity.challenge) {
         if (identity.challenge.status !== "pending") {
@@ -2466,12 +3256,25 @@ function validateCommentBody(value) {
     throw new HttpError(400, "invalid_request", "Comment body must be text");
   }
   const body = value.trim();
+  const hasForbiddenControl = [...body].some((character) => {
+    const codePoint = character.codePointAt(0);
+    return (
+      (codePoint <= 31 && !new Set([9, 10, 13]).has(codePoint))
+      || codePoint === 127
+      || (codePoint >= 0x80 && codePoint <= 0x9f)
+      || codePoint === 0x061c
+      || (codePoint >= 0x200b && codePoint <= 0x200f)
+      || (codePoint >= 0x202a && codePoint <= 0x202e)
+      || (codePoint >= 0x2060 && codePoint <= 0x206f)
+      || codePoint === 0xfeff
+    );
+  });
   if (
     Array.from(body).length < 1
     || Array.from(body).length > 2000
     || body.includes("<")
     || body.includes(">")
-    || body.includes("\u0000")
+    || hasForbiddenControl
   ) {
     throw new HttpError(400, "invalid_request", "Comment body is invalid");
   }
@@ -2611,16 +3414,45 @@ async function handleComments(request, response, id, shareId, url) {
   requireMethod(request, ["POST"]);
   ensureSameOrigin(request);
   const body = await readJsonBody(request, 16 * 1024);
-  assertOnlyKeys(body, ["body"]);
+  assertOnlyKeys(body, ["body", "clientRequestId"]);
   const text = validateCommentBody(body.body);
+  const clientRequestId = safeUnlockAttemptId(body.clientRequestId);
   const context = await secureContext(request);
   const { session, state } = await validatedSession(request, context, shareId);
   if (session.ownerPreview !== true && state.policy.permissionLevel !== "comment") {
     throw new HttpError(403, "access_denied");
   }
   requireCsrf(request, session);
+  const commentId = `c_${hmacDigest(
+    requiredSecret("SHARE_SESSION_HMAC_KEY"),
+    "quickmemo/secure-share/comment-idempotency/v1",
+    shareId,
+    session.identityHash,
+    clientRequestId
+  ).slice(0, 48)}`;
+  const commentPath = `publicShareComments/${shareId}/items/${commentId}`;
+  const existingComment = await firestoreGet(context, commentPath);
+  if (existingComment) {
+    if (
+      existingComment.shareId === shareId
+      && existingComment.authorIdentityHash === session.identityHash
+      && existingComment.body === text
+      && !existingComment.deletedAt
+    ) {
+      jsonResponse(response, 200, {
+        ok: true,
+        comment: {
+          ...publicComment(existingComment),
+          canDelete: true
+        },
+        requestId: id
+      });
+      return;
+    }
+    throw new HttpError(409, "request_conflict", "Comment idempotency key was reused");
+  }
   const networkHash = clientNetworkDigest(request);
-  await consumeRateLimits(context, [
+  const rateLimitReservations = await consumeRateLimits(context, [
     {
       limitType: "comment_session_minute",
       keyParts: [shareId, session.__sessionDigest],
@@ -2646,7 +3478,6 @@ async function handleComments(request, response, id, shareId, url) {
       limit: 30
     }
   ]);
-  const commentId = `c_${randomToken(24)}`;
   const now = new Date();
   const authorBadge = session.identityType === "admin_preview"
     ? "admin"
@@ -2680,25 +3511,61 @@ async function handleComments(request, response, id, shareId, url) {
       timestampMilliseconds(state.share.expiresAt),
       now.getTime() + auditRetentionMilliseconds
     )),
-    sessionDigestReference: session.sessionReferenceHash
+    sessionDigestReference: session.sessionReferenceHash,
+    clientRequestHash: hmacDigest(
+      requiredSecret("SHARE_SESSION_HMAC_KEY"),
+      "quickmemo/secure-share/comment-request/v1",
+      clientRequestId
+    )
   };
-  await firestoreCommit(context, [
-    createDocumentWrite(
-      context.projectId,
-      `publicShareComments/${shareId}/items/${commentId}`,
-      comment
-    ),
-    createAuditWrite(context, state.share, "comment_create", "success", {
-      requestId: id,
-      identityType: session.identityType,
-      identityHash: session.identityHash,
-      ipHash: networkHash,
-      userAgentHash: userAgentDigest(request)
-    })
-  ]);
+  const transactionSnapshot = await beginShareMutationTransaction(context, shareId);
+  if (!shareMutationSnapshotMatches(transactionSnapshot.state, state)) {
+    await rollbackShareMutation(context, transactionSnapshot.transaction);
+    throw new HttpError(409, "request_conflict", "Share changed before comment creation");
+  }
+  try {
+    await firestoreCommit(context, [
+      createDocumentWrite(context.projectId, commentPath, comment),
+      createAuditWrite(context, state.share, "comment_create", "success", {
+        eventId: `evt_comment_${commentId}`,
+        requestId: id,
+        identityType: session.identityType,
+        identityHash: session.identityHash,
+        ipHash: networkHash,
+        userAgentHash: userAgentDigest(request)
+      })
+    ], transactionSnapshot.transaction);
+  } catch (error) {
+    await rollbackShareMutation(context, transactionSnapshot.transaction);
+    if (isOptimisticConflict(error)) {
+      const duplicate = await firestoreGet(context, commentPath);
+      if (
+        duplicate
+        && duplicate.authorIdentityHash === session.identityHash
+        && duplicate.body === text
+        && !duplicate.deletedAt
+      ) {
+        await releaseRateLimitReservations(context, rateLimitReservations);
+        jsonResponse(response, 200, {
+          ok: true,
+          comment: {
+            ...publicComment(duplicate),
+            canDelete: true
+          },
+          requestId: id
+        });
+        return;
+      }
+      throw new HttpError(409, "request_conflict", "Comment creation raced a share change");
+    }
+    throw error;
+  }
   jsonResponse(response, 201, {
     ok: true,
-    comment: publicComment({ ...comment, __id: commentId }),
+    comment: {
+      ...publicComment({ ...comment, __id: commentId }),
+      canDelete: true
+    },
     requestId: id
   });
 }
@@ -2736,32 +3603,422 @@ async function handleCommentDelete(request, response, id, shareId) {
   }
   const actor = access.owner ? access.owner.uid : access.session.identityHash;
   const managerRole = access.owner?.isAdmin === true ? "admin" : "owner";
-  await firestoreCommit(context, [
-    updateDocumentWrite(
-      context.projectId,
-      `publicShareComments/${shareId}/items/${commentId}`,
-      {
-        body: "",
-        deletedAt: new Date(),
-        deletedBy: access.owner ? managerRole : "author",
-        deletedByHash: identityDigest(access.owner ? "uid" : "comment-author", actor)
-      },
-      ["body", "deletedAt", "deletedBy", "deletedByHash"],
-      comment.__updateTime
-    ),
-    createAuditWrite(context, access.state.share, "comment_delete", "success", {
-      requestId: id,
-      identityType: access.owner
-        ? access.owner.isAdmin === true
-          ? "admin_preview"
-          : "quickmemo_user"
-        : access.session.identityType,
-      identityHash: access.owner ? identityDigest("uid", access.owner.uid) : access.session.identityHash,
-      ipHash: clientNetworkDigest(request),
-      userAgentHash: userAgentDigest(request)
-    })
-  ]);
+  const transactionSnapshot = await beginShareMutationTransaction(context, shareId);
+  if (!shareMutationSnapshotMatches(transactionSnapshot.state, access.state)) {
+    await rollbackShareMutation(context, transactionSnapshot.transaction);
+    throw new HttpError(409, "request_conflict", "Share changed before comment deletion");
+  }
+  try {
+    await firestoreCommit(context, [
+      updateDocumentWrite(
+        context.projectId,
+        `publicShareComments/${shareId}/items/${commentId}`,
+        {
+          body: "",
+          deletedAt: new Date(),
+          deletedBy: access.owner ? managerRole : "author",
+          deletedByHash: identityDigest(access.owner ? "uid" : "comment-author", actor)
+        },
+        ["body", "deletedAt", "deletedBy", "deletedByHash"],
+        comment.__updateTime
+      ),
+      createAuditWrite(context, access.state.share, "comment_delete", "success", {
+        requestId: id,
+        identityType: access.owner
+          ? access.owner.isAdmin === true
+            ? "admin_preview"
+            : "quickmemo_user"
+          : access.session.identityType,
+        identityHash: access.owner ? identityDigest("uid", access.owner.uid) : access.session.identityHash,
+        ipHash: clientNetworkDigest(request),
+        userAgentHash: userAgentDigest(request)
+      })
+    ], transactionSnapshot.transaction);
+  } catch (error) {
+    await rollbackShareMutation(context, transactionSnapshot.transaction);
+    if (isOptimisticConflict(error)) {
+      const latest = await firestoreGet(
+        context,
+        `publicShareComments/${shareId}/items/${commentId}`
+      );
+      if (latest?.deletedAt) {
+        jsonResponse(response, 200, { ok: true, deleted: true, requestId: id });
+        return;
+      }
+      throw new HttpError(409, "request_conflict", "Comment deletion raced a share change");
+    }
+    throw error;
+  }
   jsonResponse(response, 200, { ok: true, deleted: true, requestId: id });
+}
+
+function copyGrantRequestId(shareId, requesterUid, idempotencyKey) {
+  return `copy_${hmacDigest(
+    requiredSecret("SHARE_SESSION_HMAC_KEY"),
+    "quickmemo/secure-share/copy-grant-request/v1",
+    safeId(shareId, "shareId"),
+    safeId(requesterUid, "requesterUid"),
+    safeUnlockAttemptId(idempotencyKey)
+  )}`;
+}
+
+function copyGrantRequestKeyHash(
+  shareId,
+  requesterUid,
+  idempotencyKey,
+  secret = requiredSecret("SHARE_SESSION_HMAC_KEY")
+) {
+  return hmacDigest(
+    secret,
+    "quickmemo/secure-share/copy-grant-request-key/v1",
+    shareId,
+    requesterUid,
+    idempotencyKey
+  );
+}
+
+function copyGrantTokenHash(
+  copyGrant,
+  secret = requiredSecret("SHARE_SESSION_HMAC_KEY")
+) {
+  return hmacDigest(
+    secret,
+    "quickmemo/secure-share/copy-grant-token-record/v1",
+    copyGrant
+  );
+}
+
+function copyGrantAuditEventId(
+  requestDocumentId,
+  copyGrant,
+  secret = requiredSecret("SHARE_SESSION_HMAC_KEY")
+) {
+  return `evt_cg_${hmacDigest(
+    secret,
+    "quickmemo/secure-share/copy-grant-audit/v1",
+    requestDocumentId,
+    copyGrant
+  )}`;
+}
+
+function exactTimestampSeconds(value) {
+  const milliseconds = timestampMilliseconds(value);
+  if (
+    !Number.isSafeInteger(milliseconds)
+    || milliseconds < 0
+    || milliseconds % 1000 !== 0
+  ) {
+    return -1;
+  }
+  return milliseconds / 1000;
+}
+
+function copyGrantRequestDisposition(
+  requestDocument,
+  expected,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  secret = requiredSecret("SHARE_SESSION_HMAC_KEY")
+) {
+  if (!requestDocument) {
+    return { status: "issue" };
+  }
+  if (
+    requestDocument.schemaVersion !== 1
+    || requestDocument.shareId !== expected.shareId
+    || requestDocument.ownerUid !== expected.ownerUid
+    || requestDocument.requesterUid !== expected.requesterUid
+    || typeof requestDocument.requestKeyHash !== "string"
+    || !constantTimeStringEqual(
+      requestDocument.requestKeyHash,
+      expected.requestKeyHash
+    )
+    || !Number.isSafeInteger(requestDocument.issuanceGeneration)
+    || requestDocument.issuanceGeneration < 1
+    || typeof requestDocument.grantToken !== "string"
+    || typeof requestDocument.grantTokenHash !== "string"
+    || typeof requestDocument.sessionReferenceHash !== "string"
+    || !Number.isSafeInteger(requestDocument.policyVersion)
+  ) {
+    return { status: "conflict" };
+  }
+  if (
+    !constantTimeStringEqual(
+      requestDocument.grantTokenHash,
+      copyGrantTokenHash(requestDocument.grantToken, secret)
+    )
+  ) {
+    return { status: "conflict" };
+  }
+  const issuedAtSeconds = exactTimestampSeconds(requestDocument.grantIssuedAt);
+  const expiresAtSeconds = exactTimestampSeconds(requestDocument.grantExpiresAt);
+  const retentionExpiresAtSeconds = exactTimestampSeconds(requestDocument.expiresAt);
+  if (
+    issuedAtSeconds < 0
+    || expiresAtSeconds <= issuedAtSeconds
+    || retentionExpiresAtSeconds !== expiresAtSeconds + copyGrantRequestRetentionSeconds
+  ) {
+    return { status: "conflict" };
+  }
+  const grant = verifySignedOpaqueToken(
+    requestDocument.grantToken,
+    copyGrantPurpose,
+    secret,
+    issuedAtSeconds
+  );
+  if (
+    !grant
+    || grant.kind !== "secure_share_copy_grant"
+    || grant.shareId !== expected.shareId
+    || grant.uid !== expected.requesterUid
+    || grant.policyVersion !== requestDocument.policyVersion
+    || grant.iat !== issuedAtSeconds
+    || grant.exp !== expiresAtSeconds
+    || typeof grant.idempotencyHash !== "string"
+    || !constantTimeStringEqual(grant.idempotencyHash, expected.requestKeyHash)
+    || typeof grant.sessionReferenceHash !== "string"
+    || !constantTimeStringEqual(
+      grant.sessionReferenceHash,
+      requestDocument.sessionReferenceHash
+    )
+  ) {
+    return { status: "conflict" };
+  }
+  if (
+    requestDocument.policyVersion !== expected.policyVersion
+    || !constantTimeStringEqual(
+      requestDocument.sessionReferenceHash,
+      expected.sessionReferenceHash
+    )
+    || expiresAtSeconds <= nowSeconds + copyGrantReplayMinimumSeconds
+  ) {
+    return { status: "renew" };
+  }
+  return {
+    status: "replay",
+    copyGrant: requestDocument.grantToken,
+    expiresAt: new Date(expiresAtSeconds * 1000).toISOString()
+  };
+}
+
+function createCopyGrantCandidate(
+  expected,
+  session,
+  state,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  secret = requiredSecret("SHARE_SESSION_HMAC_KEY")
+) {
+  const sessionExpiresAtSeconds = Math.floor(
+    timestampMilliseconds(session.expiresAt) / 1000
+  );
+  const shareExpiresAtSeconds = Math.floor(
+    timestampMilliseconds(state.share.expiresAt) / 1000
+  );
+  const expiresAtSeconds = Math.min(
+    nowSeconds + copyGrantTtlSeconds,
+    sessionExpiresAtSeconds,
+    shareExpiresAtSeconds
+  );
+  const ttlSeconds = expiresAtSeconds - nowSeconds;
+  if (
+    !Number.isSafeInteger(expiresAtSeconds)
+    || ttlSeconds <= copyGrantReplayMinimumSeconds
+  ) {
+    throw new HttpError(
+      401,
+      "session_expired",
+      "Session lifetime is too short for a copy grant"
+    );
+  }
+  const copyGrant = signedOpaqueToken(
+    {
+      kind: "secure_share_copy_grant",
+      shareId: expected.shareId,
+      uid: expected.requesterUid,
+      policyVersion: expected.policyVersion,
+      idempotencyHash: expected.requestKeyHash,
+      sessionReferenceHash: expected.sessionReferenceHash
+    },
+    copyGrantPurpose,
+    ttlSeconds,
+    secret,
+    nowSeconds
+  );
+  const grant = verifySignedOpaqueToken(
+    copyGrant,
+    copyGrantPurpose,
+    secret,
+    nowSeconds
+  );
+  if (
+    !grant
+    || grant.iat !== nowSeconds
+    || grant.exp !== expiresAtSeconds
+  ) {
+    throw new HttpError(503, "service_unavailable", "Copy grant generation failed", {
+      expose: false
+    });
+  }
+  return {
+    copyGrant,
+    grantTokenHash: copyGrantTokenHash(copyGrant, secret),
+    grantIssuedAt: new Date(nowSeconds * 1000),
+    grantExpiresAt: new Date(expiresAtSeconds * 1000),
+    expiresAt: new Date(
+      (expiresAtSeconds + copyGrantRequestRetentionSeconds) * 1000
+    )
+  };
+}
+
+function copyGrantRateBucket(shareId, sessionDigest, nowSeconds) {
+  const windowStartSeconds =
+    Math.floor(nowSeconds / copyGrantRateWindowSeconds) * copyGrantRateWindowSeconds;
+  const bucketId = rateLimitBucketDigest(
+    "copy_grant_session_minute",
+    [shareId, sessionDigest, String(windowStartSeconds)]
+  );
+  return {
+    bucketId,
+    path: `publicShareRateLimits/${bucketId}`,
+    windowStartSeconds
+  };
+}
+
+function copyGrantRateWrite(
+  context,
+  bucket,
+  rateState,
+  share,
+  nowSeconds
+) {
+  const count = rateState?.count ?? 0;
+  if (
+    rateState
+    && (
+      rateState.limitType !== "copy_grant_session_minute"
+      || rateState.shareId !== share.__id
+      || rateState.ownerUid !== share.ownerUid
+      || timestampMilliseconds(rateState.windowStart)
+        !== bucket.windowStartSeconds * 1000
+      || !Number.isSafeInteger(rateState.count)
+      || rateState.count < 0
+    )
+  ) {
+    throw new HttpError(409, "rate_limit_state_invalid");
+  }
+  if (count >= copyGrantRateLimit) {
+    throw new HttpError(429, "rate_limited", "Rate limit exceeded", {
+      retryAfter: Math.max(
+        1,
+        bucket.windowStartSeconds + copyGrantRateWindowSeconds - nowSeconds
+      )
+    });
+  }
+  const fields = {
+    shareId: share.__id,
+    ownerUid: share.ownerUid,
+    limitType: "copy_grant_session_minute",
+    windowStart: new Date(bucket.windowStartSeconds * 1000),
+    count: count + 1,
+    updatedAt: new Date(nowSeconds * 1000),
+    expiresAt: new Date(
+      (bucket.windowStartSeconds + copyGrantRateWindowSeconds * 2) * 1000
+    )
+  };
+  return rateState
+    ? updateDocumentWrite(
+      context.projectId,
+      bucket.path,
+      fields,
+      Object.keys(fields),
+      rateState.__updateTime
+    )
+    : createDocumentWrite(context.projectId, bucket.path, fields);
+}
+
+function copyGrantRequestWrite(
+  context,
+  requestPath,
+  requestDocument,
+  expected,
+  candidate
+) {
+  const fields = {
+    schemaVersion: 1,
+    shareId: expected.shareId,
+    ownerUid: expected.ownerUid,
+    requesterUid: expected.requesterUid,
+    requestKeyHash: expected.requestKeyHash,
+    sessionReferenceHash: expected.sessionReferenceHash,
+    policyVersion: expected.policyVersion,
+    grantToken: candidate.copyGrant,
+    grantTokenHash: candidate.grantTokenHash,
+    grantIssuedAt: candidate.grantIssuedAt,
+    grantExpiresAt: candidate.grantExpiresAt,
+    issuanceGeneration: requestDocument
+      ? requestDocument.issuanceGeneration + 1
+      : 1,
+    updatedAt: candidate.grantIssuedAt,
+    expiresAt: candidate.expiresAt
+  };
+  return requestDocument
+    ? updateDocumentWrite(
+      context.projectId,
+      requestPath,
+      fields,
+      Object.keys(fields),
+      requestDocument.__updateTime
+    )
+    : createDocumentWrite(context.projectId, requestPath, {
+      ...fields,
+      createdAt: candidate.grantIssuedAt
+    });
+}
+
+async function beginCopyGrantRequestTransaction(
+  context,
+  shareId,
+  requestPath,
+  ratePath
+) {
+  const snapshot = await firestoreBatchGetNewTransaction(context, [
+    `publicNoteShares/${shareId}`,
+    `publicSharePolicies/${shareId}`,
+    requestPath,
+    ratePath
+  ]);
+  const [share, policy, requestDocument, rateState] = snapshot.documents;
+  const state = share
+    && policy
+    && share.schemaVersion === 2
+    && policy.schemaVersion === 2
+      ? { share, policy }
+      : null;
+  return {
+    state,
+    requestDocument,
+    rateState,
+    transaction: snapshot.transaction
+  };
+}
+
+function copyGrantCommitCanRetry(error) {
+  const statusCode = Number.isInteger(error?.statusCode)
+    ? error.statusCode
+    : 0;
+  return isOptimisticConflict(error)
+    || statusCode === 408
+    || statusCode === 429
+    || statusCode >= 500
+    || statusCode === 0;
+}
+
+function sendCopyGrantResponse(response, id, replay) {
+  jsonResponse(response, 200, {
+    ok: true,
+    copyGrant: replay.copyGrant,
+    expiresAt: replay.expiresAt,
+    requestId: id
+  });
 }
 
 async function handleCopyGrant(request, response, id, shareId) {
@@ -2777,51 +4034,181 @@ async function handleCopyGrant(request, response, id, shareId) {
   }
   requireCsrf(request, session);
   const user = await activeUserFromRequest(request, context);
-  const networkHash = clientNetworkDigest(request);
-  await consumeRateLimits(context, [
-    {
-      limitType: "copy_grant_session_minute",
-      keyParts: [shareId, session.__sessionDigest],
-      shareId,
-      ownerUid: state.share.ownerUid,
-      windowSeconds: 60,
-      limit: 3
-    }
-  ]);
-  await preflightCopyAttachmentQuota(context, user.uid, state.share);
-  const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-  const copyGrant = signedOpaqueToken(
-    {
-      kind: "secure_share_copy_grant",
-      shareId,
-      uid: user.uid,
-      policyVersion: state.policy.policyVersion,
-      idempotencyHash: hmacDigest(
-        requiredSecret("SHARE_SESSION_HMAC_KEY"),
-        "quickmemo/secure-share/copy-idempotency/v1",
-        user.uid,
-        idempotencyKey
-      ),
-      sessionReferenceHash: session.sessionReferenceHash
-    },
-    "quickmemo/secure-share/copy-grant/v1",
-    5 * 60
+  const requestDocumentId = copyGrantRequestId(
+    shareId,
+    user.uid,
+    idempotencyKey
   );
-  await firestoreCommit(context, [
-    createAuditWrite(context, state.share, "copy_grant", "success", {
-      requestId: id,
-      identityType: "quickmemo_user",
-      identityHash: identityDigest("uid", user.uid),
-      ipHash: networkHash,
-      userAgentHash: userAgentDigest(request)
-    })
-  ]);
-  jsonResponse(response, 200, {
-    ok: true,
-    copyGrant,
-    expiresAt: expiresAt.toISOString(),
-    requestId: id
-  });
+  const requestPath = `publicShareCopyGrantRequests/${requestDocumentId}`;
+  const expected = {
+    shareId,
+    ownerUid: state.share.ownerUid,
+    requesterUid: user.uid,
+    requestKeyHash: copyGrantRequestKeyHash(
+      shareId,
+      user.uid,
+      idempotencyKey
+    ),
+    policyVersion: state.policy.policyVersion,
+    sessionReferenceHash: session.sessionReferenceHash
+  };
+  const fastReplay = copyGrantRequestDisposition(
+    await firestoreGet(context, requestPath),
+    expected
+  );
+  if (fastReplay.status === "conflict") {
+    throw new HttpError(409, "request_conflict", "Copy grant request state is invalid");
+  }
+  if (fastReplay.status === "replay") {
+    sendCopyGrantResponse(response, id, fastReplay);
+    return;
+  }
+
+  await preflightCopyAttachmentQuota(context, user.uid, state.share);
+  const candidate = createCopyGrantCandidate(
+    expected,
+    session,
+    state
+  );
+  const networkHash = clientNetworkDigest(request);
+  const agentHash = userAgentDigest(request);
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const rateBucket = copyGrantRateBucket(
+      shareId,
+      session.__sessionDigest,
+      nowSeconds
+    );
+    let transaction = "";
+    let commitAttempted = false;
+    try {
+      const transactionSnapshot = await beginCopyGrantRequestTransaction(
+        context,
+        shareId,
+        requestPath,
+        rateBucket.path
+      );
+      transaction = transactionSnapshot.transaction;
+      if (
+        !shareMutationSnapshotMatches(transactionSnapshot.state, state)
+        || transactionSnapshot.state.policy.permissionLevel !== "save_copy"
+      ) {
+        throw new HttpError(
+          409,
+          "request_conflict",
+          "Share changed before copy grant"
+        );
+      }
+      const disposition = copyGrantRequestDisposition(
+        transactionSnapshot.requestDocument,
+        expected,
+        nowSeconds
+      );
+      if (disposition.status === "conflict") {
+        throw new HttpError(
+          409,
+          "request_conflict",
+          "Copy grant request state is invalid"
+        );
+      }
+      if (disposition.status === "replay") {
+        await rollbackShareMutation(context, transaction);
+        transaction = "";
+        sendCopyGrantResponse(response, id, disposition);
+        return;
+      }
+      const requestWrite = copyGrantRequestWrite(
+        context,
+        requestPath,
+        transactionSnapshot.requestDocument,
+        expected,
+        candidate
+      );
+      const rateWrite = copyGrantRateWrite(
+        context,
+        rateBucket,
+        transactionSnapshot.rateState,
+        transactionSnapshot.state.share,
+        nowSeconds
+      );
+      const auditWrite = createAuditWrite(
+        context,
+        transactionSnapshot.state.share,
+        "copy_grant",
+        "success",
+        {
+          eventId: copyGrantAuditEventId(
+            requestDocumentId,
+            candidate.copyGrant
+          ),
+          requestId: id,
+          identityType: "quickmemo_user",
+          identityHash: identityDigest("uid", user.uid),
+          ipHash: networkHash,
+          userAgentHash: agentHash
+        }
+      );
+      commitAttempted = true;
+      await firestoreCommit(
+        context,
+        [requestWrite, rateWrite, auditWrite],
+        transaction
+      );
+      transaction = "";
+      sendCopyGrantResponse(response, id, {
+        copyGrant: candidate.copyGrant,
+        expiresAt: candidate.grantExpiresAt.toISOString()
+      });
+      return;
+    } catch (error) {
+      if (transaction) {
+        await rollbackShareMutation(context, transaction);
+      }
+      if (!commitAttempted) {
+        if (copyGrantCommitCanRetry(error) && attempt < 3) {
+          continue;
+        }
+        throw error;
+      }
+
+      let recovered;
+      try {
+        recovered = copyGrantRequestDisposition(
+          await firestoreGet(context, requestPath),
+          expected
+        );
+      } catch (recoveryError) {
+        if (copyGrantCommitCanRetry(error) && attempt < 3) {
+          continue;
+        }
+        throw recoveryError;
+      }
+      if (recovered.status === "conflict") {
+        throw new HttpError(
+          409,
+          "request_conflict",
+          "Copy grant recovery state is invalid"
+        );
+      }
+      if (recovered.status === "replay") {
+        sendCopyGrantResponse(response, id, recovered);
+        return;
+      }
+      if (copyGrantCommitCanRetry(error) && attempt < 3) {
+        continue;
+      }
+      if (isOptimisticConflict(error)) {
+        throw new HttpError(
+          409,
+          "request_conflict",
+          "Copy grant raced a share change"
+        );
+      }
+      throw error;
+    }
+  }
+  throw new HttpError(409, "request_conflict");
 }
 
 function evaluateCopyAttachmentQuota({
@@ -3102,7 +4489,7 @@ async function dispatch(request, response, id) {
 
   requireSecureShareV2();
   if (action === "owner-list") {
-    assertQueryKeys(url, ["action", "cursor", "limit", "status"]);
+    assertQueryKeys(url, ["action", "cursor", "limit", "sourceNoteId", "status"]);
   } else if (action === "comments" && request.method === "GET") {
     assertQueryKeys(url, ["action", "shareId", "cursor", "limit"]);
   } else if (action === "attachment-preview" || action === "attachment-download") {
@@ -3161,8 +4548,15 @@ export {
   assertOnlyKeys,
   buildPolicySettings,
   copyGrantAuthorizesDownload,
+  copyGrantAuditEventId,
+  copyGrantRequestId,
+  copyGrantRequestDisposition,
+  copyGrantRequestKeyHash,
+  copyGrantTokenHash,
   consumeRateLimits,
   createResendEmailAdapter,
+  emailQuotaExceeded,
+  emailQuotaPeriods,
   emailDigest,
   emailChallengeMinimumResponseMilliseconds,
   ensureSameOrigin,
@@ -3177,6 +4571,7 @@ export {
   padEmailChallengeResponse,
   padOtpVerificationFailureResponse,
   readJsonBody,
+  resolveEmailQuotaPolicy,
   resolveAccessIdentity,
   safeDisplayName,
   secureShareScryptParameters,
@@ -3186,8 +4581,10 @@ export {
   shareOwnedBy,
   shareManagedBy,
   signedOpaqueToken,
+  sourceShareGuardId,
   sourceSnapshotAvailable,
   unlockAttemptDigest,
+  validateCommentBody,
   verificationEmailText,
   verifySignedOpaqueToken,
   verifySharePassword

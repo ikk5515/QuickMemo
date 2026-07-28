@@ -2951,6 +2951,23 @@ describeRules("firestore security rules", () => {
       await setDoc(doc(db, "publicShareEmailChallenges/challenge-a"), {
         shareId: "secure-v2"
       });
+      await setDoc(doc(db, "publicShareEmailQuotaBuckets/day-2026-07-29"), {
+        scope: "daily"
+      });
+      await setDoc(doc(db, "publicShareEmailDeliveries/delivery-a"), {
+        ownerUid: "user-a",
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareCopyGrantRequests/request-a"), {
+        ownerUid: "user-a",
+        requesterUid: "user-b",
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareSourceGuards/source-a"), {
+        ownerUid: "user-a",
+        shareId: "secure-v2",
+        sourceNoteId: "note-a"
+      });
       await setDoc(doc(db, "publicShareUnlockGrants/grant-a"), {
         shareId: "secure-v2"
       });
@@ -2987,6 +3004,10 @@ describeRules("firestore security rules", () => {
       "publicShareRecipients/secure-v2/items/recipient-a",
       "publicShareAccessSessions/session-a",
       "publicShareEmailChallenges/challenge-a",
+      "publicShareEmailQuotaBuckets/day-2026-07-29",
+      "publicShareEmailDeliveries/delivery-a",
+      "publicShareCopyGrantRequests/request-a",
+      "publicShareSourceGuards/source-a",
       "publicShareUnlockGrants/grant-a",
       "publicShareRateLimits/rate-a",
       "publicShareComments/secure-v2/items/comment-a",

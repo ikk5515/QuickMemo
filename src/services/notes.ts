@@ -148,6 +148,7 @@ export interface SaveNoteAttachmentInput {
   uploadedBy: string;
   secureShareCopyJobId?: string;
   onUploadProgress?: BlobAttachmentUploadProgressHandler;
+  signal?: AbortSignal;
 }
 
 type StoredAttachmentDocument = Pick<
@@ -1147,6 +1148,7 @@ export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
     encryption: input.encryption,
     onUploadProgress: input.onUploadProgress,
     secureShareCopyJobId: input.secureShareCopyJobId,
+    signal: input.signal,
     uploadedBy: input.uploadedBy
   });
 

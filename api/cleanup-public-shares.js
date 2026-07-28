@@ -32,13 +32,24 @@ const legacyNoteDeletionBackfillVersion = 1;
 const secureShareCopyStaleMs = 24 * 60 * 60 * 1000;
 const secureShareCopyCleanupBatchLimit = 20;
 const secureShareCopyCleanupAttachmentDeleteLimit = 100;
+const secureShareEmailDeliveryCleanupLimit = 200;
 const secureShareCopyCleanupClaimIdField = "secureShareCopyCleanupClaimId";
 const secureShareCopyCleanupClaimedAtField = "secureShareCopyCleanupClaimedAt";
 const secureShareRootStateCollections = [
   "publicShareAccessSessions",
   "publicShareEmailChallenges",
+  "publicShareEmailDeliveries",
+  "publicShareCopyGrantRequests",
+  "publicShareSourceGuards",
   "publicShareUnlockGrants",
   "publicShareRateLimits"
+];
+const secureShareGlobalRetentionCollections = [
+  {
+    allDescendants: false,
+    collectionId: "publicShareEmailQuotaBuckets",
+    counterName: "secureShareEmailQuotaBucketsDeleted"
+  }
 ];
 const secureShareChildStateCollections = [
   {
@@ -1754,6 +1765,12 @@ function secureShareRootStateCounterName(collectionId) {
       return "secureShareAccessSessionsDeleted";
     case "publicShareEmailChallenges":
       return "secureShareEmailChallengesDeleted";
+    case "publicShareEmailDeliveries":
+      return "secureShareEmailDeliveriesDeleted";
+    case "publicShareCopyGrantRequests":
+      return "secureShareCopyGrantRequestsDeleted";
+    case "publicShareSourceGuards":
+      return "secureShareSourceGuardsDeleted";
     case "publicShareUnlockGrants":
       return "secureShareUnlockGrantsDeleted";
     case "publicShareRateLimits":
@@ -1946,11 +1963,14 @@ function cleanupCanContinue(config, stats) {
 
 function secureShareRetentionQueues() {
   return [
-    ...secureShareRootStateCollections.map((collectionId) => ({
-      allDescendants: false,
-      collectionId,
-      counterName: secureShareRootStateCounterName(collectionId)
-    })),
+    ...secureShareRootStateCollections
+      .filter((collectionId) => collectionId !== "publicShareEmailDeliveries")
+      .map((collectionId) => ({
+        allDescendants: false,
+        collectionId,
+        counterName: secureShareRootStateCounterName(collectionId)
+      })),
+    ...secureShareGlobalRetentionCollections,
     {
       allDescendants: true,
       collectionId: "items",
@@ -2062,6 +2082,24 @@ async function cleanupSecureShareRetentionQueue(queue, limit, config, stats) {
 }
 
 async function cleanupExpiredSecureShareState(config, stats) {
+  const deliveryBudget = Math.min(
+    secureShareEmailDeliveryCleanupLimit,
+    Math.max(0, stats.maxDocumentDeletes - stats.documentDeletesAttempted)
+  );
+  if (deliveryBudget > 0 && cleanupCanContinue(config, stats)) {
+    await deleteExpiredSecureShareQueueDocuments(
+      {
+        allDescendants: false,
+        collectionId: "publicShareEmailDeliveries",
+        counterName: "secureShareEmailDeliveriesDeleted"
+      },
+      "expiresAt",
+      deliveryBudget,
+      config,
+      stats
+    );
+  }
+
   const queues = secureShareRetentionQueues();
   const retentionDeleteBudget = Math.min(
     config.limit,
@@ -3229,10 +3267,14 @@ async function cleanupExpiredPublicShares({
     secureShareAuditEventsDeleted: 0,
     secureShareCommentsDeleted: 0,
     secureShareContainersDeleted: 0,
+    secureShareCopyGrantRequestsDeleted: 0,
     secureShareEmailChallengesDeleted: 0,
+    secureShareEmailDeliveriesDeleted: 0,
+    secureShareEmailQuotaBucketsDeleted: 0,
     secureSharePoliciesDeleted: 0,
     secureShareRateLimitsDeleted: 0,
     secureShareRecipientsDeleted: 0,
+    secureShareSourceGuardsDeleted: 0,
     secureShareUnlockGrantsDeleted: 0,
     shareQueuesDeleted: 0,
     sharesDeleted: 0,
@@ -3487,10 +3529,14 @@ async function cleanupExpiredPublicShares({
     secureShareAuditEventsDeleted: stats.secureShareAuditEventsDeleted,
     secureShareCommentsDeleted: stats.secureShareCommentsDeleted,
     secureShareContainersDeleted: stats.secureShareContainersDeleted,
+    secureShareCopyGrantRequestsDeleted: stats.secureShareCopyGrantRequestsDeleted,
     secureShareEmailChallengesDeleted: stats.secureShareEmailChallengesDeleted,
+    secureShareEmailDeliveriesDeleted: stats.secureShareEmailDeliveriesDeleted,
+    secureShareEmailQuotaBucketsDeleted: stats.secureShareEmailQuotaBucketsDeleted,
     secureSharePoliciesDeleted: stats.secureSharePoliciesDeleted,
     secureShareRateLimitsDeleted: stats.secureShareRateLimitsDeleted,
     secureShareRecipientsDeleted: stats.secureShareRecipientsDeleted,
+    secureShareSourceGuardsDeleted: stats.secureShareSourceGuardsDeleted,
     secureShareUnlockGrantsDeleted: stats.secureShareUnlockGrantsDeleted,
     shareQueuesDeleted: stats.shareQueuesDeleted,
     sharesDeleted: stats.sharesDeleted,

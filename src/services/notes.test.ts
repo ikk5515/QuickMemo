@@ -3,6 +3,7 @@ import {
   NoteRevisionConflictError,
   abortSecureShareCopyingNote,
   activateSecureShareCopyingNote,
+  createNoteAttachment,
   createRevisionedEncryptedNote,
   createSecureShareCopyingNote,
   deleteNote,
@@ -216,6 +217,36 @@ describe("revision-aware note persistence", () => {
         secureShareCopyUpdatedAt: mocks.timestamp
       })
     );
+  });
+
+  it("forwards the caller AbortSignal to the Blob attachment upload", async () => {
+    const controller = new AbortController();
+    mocks.uploadNoteAttachmentBlob.mockResolvedValue(undefined);
+
+    await expect(createNoteAttachment({
+      encryptedBlob: new Blob([new Uint8Array([1, 2, 3, 4])]),
+      encryption: {
+        algorithm: "AES-GCM",
+        encryptedSize: 20,
+        iv: new Uint8Array(12),
+        version: 1
+      },
+      extension: "pdf",
+      fileName: "copy.pdf",
+      mimeType: "application/pdf",
+      noteId: "note-copy",
+      originalSize: 4,
+      secureShareCopyJobId: "copy_job_1234567890",
+      signal: controller.signal,
+      uploadedBy: "user-a"
+    })).resolves.toEqual(expect.objectContaining({ id: "generated-1" }));
+
+    expect(mocks.uploadNoteAttachmentBlob).toHaveBeenCalledWith(expect.objectContaining({
+      attachmentId: "generated-1",
+      noteId: "note-copy",
+      secureShareCopyJobId: "copy_job_1234567890",
+      signal: controller.signal
+    }));
   });
 
   it("atomically activates only a fully reserved and ready copying note", async () => {

@@ -1,9 +1,12 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  copyGrantAuthorizesDownload,
   emailDigest,
   hashSharePassword,
   otpCodeDigest,
-  sessionTokenDigest
+  sessionTokenDigest,
+  sourceShareGuardId,
+  verifySignedOpaqueToken
 } from "../api/public-shares-v2.js";
 import {
   apiHeaders,
@@ -16,7 +19,8 @@ import {
   readEmulatorDocument,
   seedSecureShare,
   startSecureShareApiHarness,
-  type SecureShareApiHarness
+  type SecureShareApiHarness,
+  writeEmulatorDocuments
 } from "./helpers/secureShareApiEmulator.js";
 
 const describeEmulator =
@@ -28,6 +32,98 @@ const failureOnlyKeys = ["error", "ok", "requestId"];
 
 function accessUrl(origin: string, shareId: string) {
   return `${origin}/api/public-shares-v2?action=access&shareId=${encodeURIComponent(shareId)}`;
+}
+
+function ownerCreateBody(sourceNoteId: string, idempotencyKey: string) {
+  return {
+    sourceNoteId,
+    sourceRevision: 1,
+    sourceAttachmentRevision: 0,
+    encryptedTitle: {
+      version: 1,
+      algorithm: "AES-GCM",
+      cipherText: Buffer.alloc(16, 1).toString("base64"),
+      iv: Buffer.alloc(12, 2).toString("base64")
+    },
+    encryptedBody: {
+      version: 1,
+      algorithm: "AES-GCM",
+      cipherText: Buffer.alloc(32, 3).toString("base64"),
+      iv: Buffer.alloc(12, 4).toString("base64")
+    },
+    ownerWrappedShareKey: {
+      version: 1,
+      algorithm: "RSA-OAEP",
+      wrappedKey: Buffer.alloc(256, 5).toString("base64")
+    },
+    attachmentCount: 0,
+    idempotencyKey,
+    policy: {
+      accessMode: "anyone_with_link",
+      passwordEnabled: false,
+      emailVerificationRequired: false,
+      oneTimeEnabled: false,
+      oneTimeScope: "global",
+      expirationPreset: "one_day",
+      permissionLevel: "view",
+      downloadAllowed: true,
+      quickCopyButtonVisible: true
+    }
+  };
+}
+
+async function ownerCreateRequest(input: {
+  harness: SecureShareApiHarness;
+  idToken: string;
+  idempotencyKey: string;
+  networkSuffix: number;
+  sourceNoteId: string;
+}) {
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=owner-create`,
+    {
+      method: "POST",
+      headers: apiHeaders(input.harness.origin, {
+        authorization: input.idToken,
+        networkSuffix: input.networkSuffix
+      }),
+      body: JSON.stringify(ownerCreateBody(input.sourceNoteId, input.idempotencyKey))
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
+}
+
+async function copyGrantRequest(input: {
+  bindingCookie: string;
+  csrfToken: string;
+  harness: SecureShareApiHarness;
+  idToken: string;
+  idempotencyKey: string;
+  networkSuffix: number;
+  sessionCookie: string;
+  shareId: string;
+}) {
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=copy-grant`
+    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    {
+      method: "POST",
+      headers: apiHeaders(input.harness.origin, {
+        authorization: input.idToken,
+        bindingCookie: `${input.bindingCookie}; ${input.sessionCookie}`,
+        csrfToken: input.csrfToken,
+        networkSuffix: input.networkSuffix
+      }),
+      body: JSON.stringify({ idempotencyKey: input.idempotencyKey })
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
 }
 
 async function accessRequest(input: {
@@ -49,6 +145,81 @@ async function accessRequest(input: {
   });
   const body = await response.json() as Record<string, unknown>;
   return { body, response };
+}
+
+async function emailChallengeRequest(input: {
+  email: string;
+  harness: SecureShareApiHarness;
+  networkSuffix: number;
+  shareId: string;
+}) {
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=email-challenge`
+    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    {
+      method: "POST",
+      headers: apiHeaders(input.harness.origin, {
+        networkSuffix: input.networkSuffix
+      }),
+      body: JSON.stringify({ email: input.email })
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
+}
+
+async function runEmailDeliveryScenario(
+  harness: SecureShareApiHarness,
+  shareId: string,
+  providerResponse: (attempt: number) => Promise<Response> | Response
+) {
+  const email = `${shareId}@example.test`;
+  Object.assign(process.env, {
+    SECURE_SHARE_EMAIL_ENABLED: "true",
+    SHARE_EMAIL_PROVIDER: "resend",
+    SHARE_EMAIL_API_KEY: "emulator-provider-key",
+    SHARE_EMAIL_FROM: "sender@example.test",
+    SHARE_EMAIL_SENDER_VERIFIED: "true"
+  });
+  await seedSecureShare({
+    accessMode: "allowed_emails",
+    allowedEmailHashes: [emailDigest(email)],
+    emailVerificationRequired: true,
+    oneTimeEnabled: false,
+    shareId
+  });
+
+  const realFetch = globalThis.fetch.bind(globalThis);
+  let providerCalls = 0;
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+    async (input: URL | RequestInfo, init?: RequestInit) => {
+      if (String(input) === "https://api.resend.com/emails") {
+        providerCalls += 1;
+        return providerResponse(providerCalls);
+      }
+      return realFetch(input, init);
+    }
+  );
+  let result: Awaited<ReturnType<typeof emailChallengeRequest>>;
+  try {
+    result = await emailChallengeRequest({
+      email,
+      harness,
+      networkSuffix: 73,
+      shareId
+    });
+  } finally {
+    fetchSpy.mockRestore();
+  }
+  return {
+    ...result,
+    challenges: await listEmulatorCollection("publicShareEmailChallenges"),
+    deliveries: await listEmulatorCollection("publicShareEmailDeliveries"),
+    providerCalls,
+    quotaBuckets: await listEmulatorCollection("publicShareEmailQuotaBuckets")
+  };
 }
 
 function sessionTokenFromCookie(cookie: string) {
@@ -102,6 +273,424 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       process.env.NODE_ENV = "test";
     }
   });
+
+  it("creates at most one live share per source note and replaces stale guards safely", async () => {
+    const owner = await createEmulatorOwner(
+      "source-guard-owner@example.test",
+      "emulator-owner-password"
+    );
+    const sourceNoteId = "source_note_guard_0001";
+    await writeEmulatorDocuments([
+      {
+        path: `users/${owner.localId}`,
+        fields: {
+          displayName: "Source Guard Owner",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: owner.localId
+        }
+      },
+      {
+        path: `notes/${sourceNoteId}`,
+        fields: {
+          attachmentRevision: 0,
+          isDeleted: false,
+          isPurged: false,
+          ownerUid: owner.localId,
+          revision: 1
+        }
+      }
+    ]);
+
+    const concurrent = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+      ownerCreateRequest({
+        harness,
+        idToken: owner.idToken,
+        idempotencyKey: `source_create_attempt_${String(index).padStart(4, "0")}`,
+        networkSuffix: 80 + index,
+        sourceNoteId
+      })
+    ));
+    const created = concurrent.filter(({ response }) => response.status === 201);
+    const blocked = concurrent.filter(({ response }) => response.status === 409);
+    expect(created).toHaveLength(1);
+    expect(blocked).toHaveLength(3);
+    expect(blocked.every(({ body }) => body.error === "active_share_exists")).toBe(true);
+    expect(await listEmulatorCollection("publicNoteShares")).toHaveLength(1);
+    expect(await listEmulatorCollection("publicSharePolicies")).toHaveLength(1);
+    expect(await listEmulatorCollection("publicShareSourceGuards")).toHaveLength(1);
+
+    const createdShare = created[0].body.share as Record<string, unknown>;
+    const shareId = String(createdShare.shareId);
+    const guardId = sourceShareGuardId(owner.localId, sourceNoteId);
+    expect(await readEmulatorDocument(`publicShareSourceGuards/${guardId}`)).toMatchObject({
+      ownerUid: owner.localId,
+      shareId,
+      sourceNoteId
+    });
+
+    const sourceList = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-list`
+      + `&sourceNoteId=${encodeURIComponent(sourceNoteId)}&limit=100`,
+      {
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 90
+        })
+      }
+    );
+    expect(sourceList.status).toBe(200);
+    expect(await sourceList.json()).toMatchObject({
+      ok: true,
+      nextCursor: null,
+      shares: [{ shareId, sourceNoteId }]
+    });
+
+    const cursorRejected = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-list`
+      + `&sourceNoteId=${encodeURIComponent(sourceNoteId)}&limit=100&cursor=not-allowed`,
+      {
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 91
+        })
+      }
+    );
+    expect(cursorRejected.status).toBe(400);
+    expect(await cursorRejected.json()).toMatchObject({
+      ok: false,
+      error: "invalid_request"
+    });
+
+    const revoked = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-revoke`
+      + `&shareId=${encodeURIComponent(shareId)}`,
+      {
+        method: "POST",
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 92
+        }),
+        body: JSON.stringify({ idempotencyKey: "source_revoke_attempt_0001" })
+      }
+    );
+    expect(revoked.status).toBe(200);
+    expect(await readEmulatorDocument(`publicShareSourceGuards/${guardId}`)).toBeNull();
+
+    await writeEmulatorDocuments([
+      {
+        path: `publicShareSourceGuards/${guardId}`,
+        fields: {
+          schemaVersion: 1,
+          ownerUid: owner.localId,
+          sourceNoteId,
+          shareId,
+          createdAt: new Date(Date.now() - 60_000),
+          updatedAt: new Date(Date.now() - 60_000),
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000)
+        }
+      }
+    ]);
+    const replacement = await ownerCreateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "source_create_replacement_0001",
+      networkSuffix: 93,
+      sourceNoteId
+    });
+    expect(replacement.response.status).toBe(201);
+    const replacementShare = replacement.body.share as Record<string, unknown>;
+    expect(replacementShare.shareId).not.toBe(shareId);
+    expect(await readEmulatorDocument(`publicShareSourceGuards/${guardId}`)).toMatchObject({
+      shareId: replacementShare.shareId
+    });
+
+    await writeEmulatorDocuments(Array.from({ length: 99 }, (_, index) => ({
+      path: `publicNoteShares/source_history_noise_${String(index).padStart(3, "0")}`,
+      fields: {
+        schemaVersion: 1,
+        ownerUid: "another_owner",
+        sourceNoteId,
+        status: "revoked"
+      }
+    })));
+    const ownerHistoryUnaffected = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-list`
+      + `&sourceNoteId=${encodeURIComponent(sourceNoteId)}&limit=100`,
+      {
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 94
+        })
+      }
+    );
+    expect(ownerHistoryUnaffected.status).toBe(200);
+    expect((await ownerHistoryUnaffected.json() as {
+      shares: unknown[];
+    }).shares).toHaveLength(2);
+
+    await writeEmulatorDocuments(Array.from({ length: 99 }, (_, index) => ({
+      path: `publicNoteShares/source_owner_history_${String(index).padStart(3, "0")}`,
+      fields: {
+        schemaVersion: 1,
+        ownerUid: owner.localId,
+        sourceNoteId,
+        status: "revoked"
+      }
+    })));
+    const oversizedHistory = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-list`
+      + `&sourceNoteId=${encodeURIComponent(sourceNoteId)}&limit=100`,
+      {
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 95
+        })
+      }
+    );
+    expect(oversizedHistory.status).toBe(409);
+    expect(await oversizedHistory.json()).toMatchObject({
+      ok: false,
+      error: "source_share_history_too_large"
+    });
+  }, 30_000);
+
+  it("persistently replays one copy grant and renews it once per session or expiry window", async () => {
+    const shareId = "persistent_copy_grant_share";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "save_copy",
+      shareId
+    });
+    const requester = await createEmulatorOwner(
+      "copy-requester@example.test",
+      "emulator-requester-password"
+    );
+    await writeEmulatorDocuments([
+      {
+        path: `users/${requester.localId}`,
+        fields: {
+          displayName: "Copy Requester",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: requester.localId
+        }
+      }
+    ]);
+
+    const firstMetadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 100
+    });
+    const firstAccess = await accessRequest({
+      bindingCookie: firstMetadata.bindingCookie,
+      body: {
+        displayName: "Copy viewer",
+        unlockAttemptId: "copy_access_attempt_0001"
+      },
+      harness,
+      networkSuffix: 100,
+      shareId
+    });
+    expect(firstAccess.response.status).toBe(200);
+    const firstSessionCookie = cookiePair(firstAccess.response);
+    const firstCsrfToken = String(firstAccess.body.csrfToken);
+    const stableRequestKey = "persistent_copy_request_0001";
+
+    const realFetch = globalThis.fetch.bind(globalThis);
+    let commitResponseLost = false;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: URL | RequestInfo, init?: RequestInit) => {
+        const upstream = await realFetch(input, init);
+        if (
+          !commitResponseLost
+          && String(input).endsWith("/documents:commit")
+          && String(init?.body).includes("publicShareCopyGrantRequests/")
+        ) {
+          commitResponseLost = true;
+          return new Response("{", {
+            headers: { "content-type": "application/json" },
+            status: 200
+          });
+        }
+        return upstream;
+      }
+    );
+    let concurrent: Awaited<ReturnType<typeof copyGrantRequest>>[];
+    try {
+      concurrent = await Promise.all(Array.from({ length: 12 }, (_, index) =>
+        copyGrantRequest({
+          bindingCookie: firstMetadata.bindingCookie,
+          csrfToken: firstCsrfToken,
+          harness,
+          idToken: requester.idToken,
+          idempotencyKey: stableRequestKey,
+          networkSuffix: 101 + index,
+          sessionCookie: firstSessionCookie,
+          shareId
+        })
+      ));
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    expect(commitResponseLost).toBe(true);
+    expect(concurrent.every(({ response }) => response.status === 200)).toBe(true);
+    const firstTokens = new Set(concurrent.map(({ body }) => body.copyGrant));
+    const firstExpirations = new Set(concurrent.map(({ body }) => body.expiresAt));
+    expect(firstTokens.size).toBe(1);
+    expect(firstExpirations.size).toBe(1);
+    const firstToken = String(concurrent[0].body.copyGrant);
+    const firstExpiration = String(concurrent[0].body.expiresAt);
+    const firstGrant = verifySignedOpaqueToken(
+      firstToken,
+      "quickmemo/secure-share/copy-grant/v1"
+    );
+    expect(new Date(Number(firstGrant?.exp) * 1000).toISOString()).toBe(firstExpiration);
+
+    let requestDocuments = await listEmulatorCollection("publicShareCopyGrantRequests");
+    let copyAudits = (await listEmulatorCollection(
+      `publicShareAuditEvents/${shareId}/items`
+    )).filter((audit) => audit.eventType === "copy_grant");
+    let copyRateBuckets = (await listEmulatorCollection("publicShareRateLimits"))
+      .filter((bucket) => bucket.limitType === "copy_grant_session_minute");
+    expect(requestDocuments).toHaveLength(1);
+    expect(requestDocuments[0]).toMatchObject({ issuanceGeneration: 1 });
+    expect(copyAudits).toHaveLength(1);
+    expect(copyRateBuckets).toHaveLength(1);
+    expect(copyRateBuckets[0]).toMatchObject({ count: 1 });
+
+    await writeEmulatorDocuments([
+      {
+        path: `userAttachmentUsage/${requester.localId}`,
+        fields: {
+          attachmentCount: -1,
+          uid: requester.localId,
+          usedBytes: -1
+        }
+      }
+    ]);
+    const replayAfterDiscard = await copyGrantRequest({
+      bindingCookie: firstMetadata.bindingCookie,
+      csrfToken: firstCsrfToken,
+      harness,
+      idToken: requester.idToken,
+      idempotencyKey: stableRequestKey,
+      networkSuffix: 114,
+      sessionCookie: firstSessionCookie,
+      shareId
+    });
+    expect(replayAfterDiscard.response.status).toBe(200);
+    expect(replayAfterDiscard.body).toMatchObject({
+      copyGrant: firstToken,
+      expiresAt: firstExpiration
+    });
+    const quotaBlocked = await copyGrantRequest({
+      bindingCookie: firstMetadata.bindingCookie,
+      csrfToken: firstCsrfToken,
+      harness,
+      idToken: requester.idToken,
+      idempotencyKey: "persistent_copy_request_0002",
+      networkSuffix: 115,
+      sessionCookie: firstSessionCookie,
+      shareId
+    });
+    expect(quotaBlocked.response.status).toBe(503);
+    expect(await listEmulatorCollection("publicShareCopyGrantRequests")).toHaveLength(1);
+    expect((await listEmulatorCollection(
+      `publicShareAuditEvents/${shareId}/items`
+    )).filter((audit) => audit.eventType === "copy_grant")).toHaveLength(1);
+    await writeEmulatorDocuments([
+      {
+        path: `userAttachmentUsage/${requester.localId}`,
+        fields: {
+          attachmentCount: 0,
+          uid: requester.localId,
+          usedBytes: 0
+        }
+      }
+    ]);
+
+    const secondMetadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 116
+    });
+    const secondAccess = await accessRequest({
+      bindingCookie: secondMetadata.bindingCookie,
+      body: {
+        displayName: "Copy viewer renewed",
+        unlockAttemptId: "copy_access_attempt_0002"
+      },
+      harness,
+      networkSuffix: 116,
+      shareId
+    });
+    expect(secondAccess.response.status).toBe(200);
+    const secondSessionCookie = cookiePair(secondAccess.response);
+    const sessionRenewal = await copyGrantRequest({
+      bindingCookie: secondMetadata.bindingCookie,
+      csrfToken: String(secondAccess.body.csrfToken),
+      harness,
+      idToken: requester.idToken,
+      idempotencyKey: stableRequestKey,
+      networkSuffix: 117,
+      sessionCookie: secondSessionCookie,
+      shareId
+    });
+    expect(sessionRenewal.response.status).toBe(200);
+    const secondToken = String(sessionRenewal.body.copyGrant);
+    expect(secondToken).not.toBe(firstToken);
+    requestDocuments = await listEmulatorCollection("publicShareCopyGrantRequests");
+    expect(requestDocuments[0]).toMatchObject({ issuanceGeneration: 2 });
+
+    const secondSessionToken = sessionTokenFromCookie(secondSessionCookie);
+    const secondSession = await readEmulatorDocument(
+      `publicShareAccessSessions/${sessionTokenDigest(secondSessionToken)}`
+    );
+    expect(copyGrantAuthorizesDownload(firstGrant, {
+      ownerPreview: false,
+      permissionLevel: "save_copy",
+      policyVersion: 1,
+      sessionReferenceHash: String(secondSession?.sessionReferenceHash),
+      shareId,
+      uid: requester.localId
+    })).toBe(false);
+
+    const clock = vi.spyOn(Date, "now");
+    const advancedNow = Date.now() + 291_000;
+    clock.mockReturnValue(advancedNow);
+    try {
+      const expiringRetries = await Promise.all(Array.from({ length: 6 }, (_, index) =>
+        copyGrantRequest({
+          bindingCookie: secondMetadata.bindingCookie,
+          csrfToken: String(secondAccess.body.csrfToken),
+          harness,
+          idToken: requester.idToken,
+          idempotencyKey: stableRequestKey,
+          networkSuffix: 118 + index,
+          sessionCookie: secondSessionCookie,
+          shareId
+        })
+      ));
+      expect(expiringRetries.every(({ response }) => response.status === 200)).toBe(true);
+      expect(new Set(expiringRetries.map(({ body }) => body.copyGrant)).size).toBe(1);
+      expect(expiringRetries[0].body.copyGrant).not.toBe(secondToken);
+    } finally {
+      clock.mockRestore();
+    }
+
+    requestDocuments = await listEmulatorCollection("publicShareCopyGrantRequests");
+    copyAudits = (await listEmulatorCollection(
+      `publicShareAuditEvents/${shareId}/items`
+    )).filter((audit) => audit.eventType === "copy_grant");
+    copyRateBuckets = (await listEmulatorCollection("publicShareRateLimits"))
+      .filter((bucket) => bucket.limitType === "copy_grant_session_minute");
+    expect(requestDocuments[0]).toMatchObject({ issuanceGeneration: 3 });
+    expect(copyAudits).toHaveLength(3);
+    expect(copyRateBuckets.reduce(
+      (total, bucket) => total + Number(bucket.count),
+      0
+    )).toBe(3);
+  }, 30_000);
 
   it("does not consume a one-time share during metadata or an authenticated owner preview", async () => {
     const owner = await createEmulatorOwner(
@@ -160,6 +749,219 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(grants).toHaveLength(0);
   });
 
+  it("keeps ambiguous provider outcomes reserved and releases only definitive failures", async () => {
+    const concurrent = await runEmailDeliveryScenario(
+      harness,
+      "email_concurrent_409_share",
+      () => new Response(
+        JSON.stringify({ name: "concurrent_idempotent_requests" }),
+        {
+          headers: { "content-type": "application/json" },
+          status: 409
+        }
+      )
+    );
+    expect(concurrent.response.status).toBe(202);
+    expect(concurrent.providerCalls).toBe(2);
+    expect(concurrent.deliveries).toHaveLength(1);
+    expect(concurrent.deliveries[0]).toMatchObject({ status: "ambiguous" });
+    expect(concurrent.challenges[0]).toMatchObject({
+      deliveryStatus: "ambiguous",
+      status: "pending"
+    });
+    expect(concurrent.quotaBuckets).toHaveLength(2);
+    expect(concurrent.quotaBuckets.every((bucket) =>
+      bucket.reservedCount === 1 && bucket.sentCount === 0
+    )).toBe(true);
+
+    await clearSecureShareEmulators();
+    const invalid = await runEmailDeliveryScenario(
+      harness,
+      "email_invalid_409_share",
+      () => new Response(
+        JSON.stringify({ name: "invalid_idempotent_request" }),
+        {
+          headers: { "content-type": "application/json" },
+          status: 409
+        }
+      )
+    );
+    expect(invalid.response.status).toBe(202);
+    expect(invalid.providerCalls).toBe(1);
+    expect(invalid.deliveries).toHaveLength(1);
+    expect(invalid.deliveries[0]).toMatchObject({ status: "failed" });
+    expect(invalid.challenges[0]).toMatchObject({
+      deliveryStatus: "failed",
+      status: "send_failed"
+    });
+    expect(invalid.quotaBuckets).toHaveLength(2);
+    expect(invalid.quotaBuckets.every((bucket) =>
+      bucket.reservedCount === 0 && bucket.sentCount === 0
+    )).toBe(true);
+
+    await clearSecureShareEmulators();
+    const malformedSuccess = await runEmailDeliveryScenario(
+      harness,
+      "email_malformed_success_share",
+      () => new Response("{}", {
+        headers: { "content-type": "application/json" },
+        status: 200
+      })
+    );
+    expect(malformedSuccess.response.status).toBe(202);
+    expect(malformedSuccess.providerCalls).toBe(1);
+    expect(malformedSuccess.deliveries[0]).toMatchObject({ status: "ambiguous" });
+    expect(malformedSuccess.challenges[0]).toMatchObject({
+      deliveryStatus: "ambiguous",
+      status: "pending"
+    });
+    expect(malformedSuccess.quotaBuckets.every((bucket) =>
+      bucket.reservedCount === 1 && bucket.sentCount === 0
+    )).toBe(true);
+  }, 30_000);
+
+  it("keeps quota reserved when an accepted delivery cannot be finalized", async () => {
+    const shareId = "email_finalize_failure_share";
+    const email = "email-finalize-failure@example.test";
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailDigest(email)],
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      shareId
+    });
+
+    const realFetch = globalThis.fetch.bind(globalThis);
+    let providerAccepted = false;
+    let finalizationRejected = false;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: URL | RequestInfo, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "https://api.resend.com/emails") {
+          providerAccepted = true;
+          return new Response(JSON.stringify({ id: "accepted_message_123456" }), {
+            headers: { "content-type": "application/json" },
+            status: 200
+          });
+        }
+        if (
+          providerAccepted
+          && url.endsWith("/documents:commit")
+          && String(init?.body).includes("providerMessageIdHash")
+          && String(init?.body).includes('"sent"')
+        ) {
+          finalizationRejected = true;
+          return new Response(JSON.stringify({
+            error: { code: 503, message: "synthetic finalization outage" }
+          }), {
+            headers: { "content-type": "application/json" },
+            status: 503
+          });
+        }
+        return realFetch(input, init);
+      }
+    );
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let result: Awaited<ReturnType<typeof emailChallengeRequest>>;
+    try {
+      result = await emailChallengeRequest({
+        email,
+        harness,
+        networkSuffix: 74,
+        shareId
+      });
+    } finally {
+      fetchSpy.mockRestore();
+      consoleError.mockRestore();
+    }
+    expect(result.response.status).toBe(202);
+    expect(providerAccepted).toBe(true);
+    expect(finalizationRejected).toBe(true);
+    const deliveries = await listEmulatorCollection("publicShareEmailDeliveries");
+    const challenges = await listEmulatorCollection("publicShareEmailChallenges");
+    const quotaBuckets = await listEmulatorCollection("publicShareEmailQuotaBuckets");
+    expect(deliveries[0]).toMatchObject({ status: "reserved" });
+    expect(challenges[0]).toMatchObject({
+      deliveryStatus: "reserved",
+      status: "pending"
+    });
+    expect(quotaBuckets.every((bucket) =>
+      bucket.reservedCount === 1 && bucket.sentCount === 0
+    )).toBe(true);
+  }, 15_000);
+
+  it("allows at most two real provider attempts in one distributed second", async () => {
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    const scenarios = Array.from({ length: 3 }, (_, index) => ({
+      email: `global-rate-${index}@example.test`,
+      shareId: `email_global_rate_share_${index}`
+    }));
+    for (const scenario of scenarios) {
+      await seedSecureShare({
+        accessMode: "allowed_emails",
+        allowedEmailHashes: [emailDigest(scenario.email)],
+        emailVerificationRequired: true,
+        oneTimeEnabled: false,
+        shareId: scenario.shareId
+      });
+    }
+
+    const fixedNow = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(fixedNow);
+    const realFetch = globalThis.fetch.bind(globalThis);
+    let providerCalls = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: URL | RequestInfo, init?: RequestInit) => {
+        if (String(input) === "https://api.resend.com/emails") {
+          providerCalls += 1;
+          return new Response(
+            JSON.stringify({ id: `global_rate_message_${providerCalls}` }),
+            {
+              headers: { "content-type": "application/json" },
+              status: 200
+            }
+          );
+        }
+        return realFetch(input, init);
+      }
+    );
+    let results: Awaited<ReturnType<typeof emailChallengeRequest>>[];
+    try {
+      results = await Promise.all(scenarios.map((scenario, index) =>
+        emailChallengeRequest({
+          ...scenario,
+          harness,
+          networkSuffix: 75 + index
+        })
+      ));
+    } finally {
+      fetchSpy.mockRestore();
+      clock.mockRestore();
+    }
+    expect(results.every(({ response }) => response.status === 202)).toBe(true);
+    expect(providerCalls).toBe(2);
+    const deliveries = await listEmulatorCollection("publicShareEmailDeliveries");
+    expect(deliveries.filter((delivery) => delivery.status === "sent")).toHaveLength(2);
+    expect(deliveries.filter((delivery) => delivery.status === "failed")).toHaveLength(1);
+    const quotaBuckets = await listEmulatorCollection("publicShareEmailQuotaBuckets");
+    expect(quotaBuckets.every((bucket) =>
+      bucket.reservedCount === 0 && bucket.sentCount === 2
+    )).toBe(true);
+  }, 15_000);
+
   it("does not consume on a wrong password or OTP and keeps failure responses secret-free", async () => {
     const passwordShareId = "wrong_password_share";
     const passwordRecord = await hashSharePassword("correct-password-for-test");
@@ -195,7 +997,8 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       SECURE_SHARE_EMAIL_ENABLED: "true",
       SHARE_EMAIL_PROVIDER: "resend",
       SHARE_EMAIL_API_KEY: "emulator-provider-key",
-      SHARE_EMAIL_FROM: "sender@example.test"
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
     });
     const challengeId = "challenge_wrong_otp_0001";
     const normalizedEmailHash = emailDigest("viewer@example.test");
@@ -266,7 +1069,8 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       SECURE_SHARE_EMAIL_ENABLED: "true",
       SHARE_EMAIL_PROVIDER: "resend",
       SHARE_EMAIL_API_KEY: "emulator-provider-key",
-      SHARE_EMAIL_FROM: "sender@example.test"
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
     });
     const shareId = "email_disabled_existing_share";
     const challengeId = "email_disabled_challenge_0001";
@@ -352,6 +1156,21 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
   it("atomically grants exactly one of 20 parallel identities and preserves same-attempt grace", async () => {
     const shareId = "parallel_one_time_share";
     const seed = await seedSecureShare({ shareId });
+    const guardId = sourceShareGuardId(seed.ownerUid, seed.noteId);
+    await writeEmulatorDocuments([
+      {
+        path: `publicShareSourceGuards/${guardId}`,
+        fields: {
+          schemaVersion: 1,
+          ownerUid: seed.ownerUid,
+          sourceNoteId: seed.noteId,
+          shareId,
+          createdAt: new Date(Date.now() - 60_000),
+          updatedAt: new Date(Date.now() - 60_000),
+          expiresAt: new Date(Date.now() + 60 * 60 * 1000)
+        }
+      }
+    ]);
     const candidates = await Promise.all(
       Array.from({ length: 20 }, (_, index) => (
         metadataBinding(harness.origin, shareId, { networkSuffix: index + 10 })
@@ -409,6 +1228,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       status: "consumed",
       successfulAccessCount: 1
     });
+    expect(await readEmulatorDocument(`publicShareSourceGuards/${guardId}`)).toBeNull();
     expect(shareAfterParallel?.consumedAt).toEqual(policyAfterParallel?.consumedAt);
     expect(typeof shareAfterParallel?.consumedAt).toBe("string");
     expect(sessionsAfterParallel).toHaveLength(1);

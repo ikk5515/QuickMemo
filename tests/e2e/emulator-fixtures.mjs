@@ -26,6 +26,52 @@ function randomSuffix() {
   return crypto.randomUUID().replaceAll("-", "").slice(0, 20);
 }
 
+export async function seedE2eEmailQuotaAtHardLimit() {
+  const now = new Date();
+  const dayKey = now.toISOString().slice(0, 10);
+  const monthKey = now.toISOString().slice(0, 7);
+  const nextDay = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1
+  ));
+  const nextMonth = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth() + 1,
+    1
+  ));
+  await writeEmulatorDocuments([
+    {
+      path: `publicShareEmailQuotaBuckets/day_${dayKey}`,
+      fields: {
+        scope: "daily",
+        periodKey: dayKey,
+        reservedCount: 0,
+        sentCount: 80,
+        softLimit: 64,
+        hardLimit: 80,
+        softLimitReached: true,
+        updatedAt: now,
+        expiresAt: new Date(nextDay.getTime() + 45 * 24 * 60 * 60 * 1000)
+      }
+    },
+    {
+      path: `publicShareEmailQuotaBuckets/month_${monthKey}`,
+      fields: {
+        scope: "monthly",
+        periodKey: monthKey,
+        reservedCount: 0,
+        sentCount: 2_400,
+        softLimit: 1_920,
+        hardLimit: 2_400,
+        softLimitReached: true,
+        updatedAt: now,
+        expiresAt: new Date(nextMonth.getTime() + 400 * 24 * 60 * 60 * 1000)
+      }
+    }
+  ]);
+}
+
 function toBase64(value) {
   return Buffer.from(value).toString("base64");
 }

@@ -42,6 +42,11 @@ export async function deliveredOtp(request, email) {
   return (await response.json()).delivery?.code ?? null;
 }
 
+export async function exhaustEmailQuota(request) {
+  const response = await request.post("/__e2e__/quota-hard");
+  expect(response.ok()).toBeTruthy();
+}
+
 export function apiPath(action, shareId, query = {}) {
   const parameters = new URLSearchParams({ action, shareId, ...query });
   return `/api/public-shares-v2?${parameters.toString()}`;
@@ -74,6 +79,7 @@ export async function loginRosterUser(page, user) {
 export async function loginDirectly(page, user) {
   await page.goto("/login");
   await loginRosterUser(page, user);
+  await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
 }
 
 export function observePage(page) {

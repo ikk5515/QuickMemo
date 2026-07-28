@@ -705,7 +705,7 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     const backend = new FakeFirestoreRest();
     const expired = new Date(Date.now() - 60_000).toISOString();
 
-    process.env.PUBLIC_SHARE_CLEANUP_BATCH_SIZE = "5";
+    process.env.PUBLIC_SHARE_CLEANUP_BATCH_SIZE = "7";
     completedBackfillCursor(backend);
     for (let index = 0; index < 20; index += 1) {
       backend.add(`publicShareAccessSessions/expired-session-${index}`, {
@@ -715,10 +715,19 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     backend.add("publicShareEmailChallenges/expired-challenge", {
       expiresAt: timestampValue(expired)
     });
+    backend.add("publicShareSourceGuards/expired-guard", {
+      expiresAt: timestampValue(expired)
+    });
     backend.add("publicShareUnlockGrants/expired-grant", {
       expiresAt: timestampValue(expired)
     });
     backend.add("publicShareRateLimits/expired-rate", {
+      expiresAt: timestampValue(expired)
+    });
+    backend.add("publicShareEmailDeliveries/expired-delivery", {
+      expiresAt: timestampValue(expired)
+    });
+    backend.add("publicShareEmailQuotaBuckets/expired-day", {
       expiresAt: timestampValue(expired)
     });
     backend.add("publicShareAuditEvents/share-fair/items/expired-audit", {
@@ -730,17 +739,58 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
-      documentDeletesAttempted: 5,
+      documentDeletesAttempted: 8,
       secureShareAccessSessionsDeleted: 1,
       secureShareAuditEventsDeleted: 1,
       secureShareEmailChallengesDeleted: 1,
+      secureShareEmailDeliveriesDeleted: 1,
+      secureShareEmailQuotaBucketsDeleted: 1,
       secureShareRateLimitsDeleted: 1,
+      secureShareSourceGuardsDeleted: 1,
       secureShareUnlockGrantsDeleted: 1
     });
     expect(
       backend.pathsStartingWith("publicShareAccessSessions/expired-session-")
     ).toHaveLength(19);
+    expect(backend.has("publicShareSourceGuards/expired-guard")).toBe(false);
     expect(backend.has("publicShareAuditEvents/share-fair/items/expired-audit")).toBe(false);
+  });
+
+  it("deletes delivery and copy-request roots with their expired secure share tree", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    completedBackfillCursor(backend);
+    backend.add("publicNoteShares/expired-secure-tree", {
+      expiresAt: timestampValue(expired),
+      schemaVersion: integerValue(2),
+      status: stringValue("active")
+    });
+    backend.add("publicShareEmailDeliveries/tree-delivery", {
+      expiresAt: timestampValue(future),
+      ownerUid: stringValue("owner-tree"),
+      shareId: stringValue("expired-secure-tree")
+    });
+    backend.add("publicShareCopyGrantRequests/tree-copy-request", {
+      expiresAt: timestampValue(future),
+      ownerUid: stringValue("owner-tree"),
+      requesterUid: stringValue("requester-tree"),
+      shareId: stringValue("expired-secure-tree")
+    });
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      secureShareCopyGrantRequestsDeleted: 1,
+      secureShareEmailDeliveriesDeleted: 1,
+      sharesDeleted: 1
+    });
+    expect(backend.has("publicNoteShares/expired-secure-tree")).toBe(false);
+    expect(backend.has("publicShareEmailDeliveries/tree-delivery")).toBe(false);
+    expect(backend.has("publicShareCopyGrantRequests/tree-copy-request")).toBe(false);
   });
 
   it("skips disabled legacy Storage I/O and atomically releases valid global Blob usage", async () => {
@@ -882,6 +932,44 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     backend.add("publicShareAccessSessions/active-session", { expiresAt: timestampValue(future) });
     backend.add("publicShareRateLimits/expired-rate", { expiresAt: timestampValue(expired) });
     backend.add("publicShareRateLimits/active-rate", { expiresAt: timestampValue(future) });
+    backend.add("publicShareCopyGrantRequests/expired-copy-request", {
+      expiresAt: timestampValue(expired),
+      ownerUid: stringValue("owner-a"),
+      requesterUid: stringValue("requester-a"),
+      shareId: stringValue("share-a")
+    });
+    backend.add("publicShareCopyGrantRequests/active-copy-request", {
+      expiresAt: timestampValue(future),
+      ownerUid: stringValue("owner-a"),
+      requesterUid: stringValue("requester-a"),
+      shareId: stringValue("share-a")
+    });
+    backend.add("publicShareSourceGuards/expired-guard", {
+      expiresAt: timestampValue(expired),
+      ownerUid: stringValue("owner-a"),
+      shareId: stringValue("share-a")
+    });
+    backend.add("publicShareSourceGuards/active-guard", {
+      expiresAt: timestampValue(future),
+      ownerUid: stringValue("owner-a"),
+      shareId: stringValue("share-a")
+    });
+    backend.add("publicShareEmailDeliveries/expired-delivery", {
+      expiresAt: timestampValue(expired),
+      ownerUid: stringValue("owner-a"),
+      shareId: stringValue("share-a")
+    });
+    backend.add("publicShareEmailDeliveries/active-delivery", {
+      expiresAt: timestampValue(future),
+      ownerUid: stringValue("owner-a"),
+      shareId: stringValue("share-a")
+    });
+    backend.add("publicShareEmailQuotaBuckets/expired-day", {
+      expiresAt: timestampValue(expired)
+    });
+    backend.add("publicShareEmailQuotaBuckets/active-month", {
+      expiresAt: timestampValue(future)
+    });
     backend.add(
       "publicShareAuditEvents/share-a/items/expired-audit",
       { retentionExpiresAt: timestampValue(expired) }
@@ -936,7 +1024,11 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
       secureShareAccessSessionsDeleted: 1,
       secureShareAuditEventsDeleted: 1,
       secureShareEmailChallengesDeleted: 1,
+      secureShareCopyGrantRequestsDeleted: 1,
+      secureShareEmailDeliveriesDeleted: 1,
+      secureShareEmailQuotaBucketsDeleted: 1,
       secureShareRateLimitsDeleted: 1,
+      secureShareSourceGuardsDeleted: 1,
       staleSecureShareCopyJobsAborted: 1,
       staleSecureShareCopyJobsActivated: 1,
       staleSecureShareCopyJobsRetained: 3,
@@ -945,10 +1037,18 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     expect(backend.has("publicShareEmailChallenges/expired-otp")).toBe(false);
     expect(backend.has("publicShareAccessSessions/expired-session")).toBe(false);
     expect(backend.has("publicShareRateLimits/expired-rate")).toBe(false);
+    expect(backend.has("publicShareCopyGrantRequests/expired-copy-request")).toBe(false);
+    expect(backend.has("publicShareSourceGuards/expired-guard")).toBe(false);
+    expect(backend.has("publicShareEmailDeliveries/expired-delivery")).toBe(false);
+    expect(backend.has("publicShareEmailQuotaBuckets/expired-day")).toBe(false);
     expect(backend.has("publicShareAuditEvents/share-a/items/expired-audit")).toBe(false);
     expect(backend.has("publicShareEmailChallenges/active-otp")).toBe(true);
     expect(backend.has("publicShareAccessSessions/active-session")).toBe(true);
     expect(backend.has("publicShareRateLimits/active-rate")).toBe(true);
+    expect(backend.has("publicShareCopyGrantRequests/active-copy-request")).toBe(true);
+    expect(backend.has("publicShareSourceGuards/active-guard")).toBe(true);
+    expect(backend.has("publicShareEmailDeliveries/active-delivery")).toBe(true);
+    expect(backend.has("publicShareEmailQuotaBuckets/active-month")).toBe(true);
     expect(backend.has("publicShareAuditEvents/share-a/items/active-audit")).toBe(true);
     expect(backend.has("publicNoteShares/active-share")).toBe(true);
     expect(backend.get("notes/stale-incomplete")?.fields.secureShareCopyState).toEqual(
@@ -990,7 +1090,11 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
       secureShareAccessSessionsDeleted: 0,
       secureShareAuditEventsDeleted: 0,
       secureShareEmailChallengesDeleted: 0,
+      secureShareCopyGrantRequestsDeleted: 0,
+      secureShareEmailDeliveriesDeleted: 0,
+      secureShareEmailQuotaBucketsDeleted: 0,
       secureShareRateLimitsDeleted: 0,
+      secureShareSourceGuardsDeleted: 0,
       staleSecureShareCopyJobsAborted: 0,
       staleSecureShareCopyJobsActivated: 0,
       staleSecureShareCopyJobsRetained: 2,

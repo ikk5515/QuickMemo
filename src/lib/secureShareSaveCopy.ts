@@ -1,5 +1,6 @@
 import {
   attachmentExtension,
+  encryptedAttachmentChunkSizeBytes,
   isAllowedAttachmentExtension,
   maxAttachmentFileBytes,
   maxAttachmentStorageBytes,
@@ -25,8 +26,9 @@ import {
   activateSecureShareCopyingNote,
   createNoteAttachment,
   createSecureShareCopyingNote,
-  deleteNoteAttachment,
+  deleteNoteAttachment
 } from "../services/notes";
+import { BlobAttachmentReservationCleanupError } from "../services/blobAttachments";
 import type {
   SecurePublicShareAttachmentMetadata,
   SecurePublicShareCopyPayload
@@ -36,6 +38,66 @@ import type { UserProfile } from "../types";
 const maximumCopyAttachmentCount = 100;
 const maximumCopyTitleBytes = 64 * 1024;
 const maximumSerializedBodyBytes = 900 * 1024;
+export const secureShareCopyMaximumConcurrentAttachments = 3;
+export const secureShareCopyLiveByteBudget = 96 * 1024 * 1024;
+const secureShareCopyPerTaskWorkingBytes = encryptedAttachmentChunkSizeBytes * 2;
+
+export function estimateSecureShareCopyAttachmentLiveBytes(originalSize: number) {
+  if (!Number.isSafeInteger(originalSize) || originalSize <= 0) {
+    throw new RangeError("복사할 첨부파일 크기가 올바르지 않습니다.");
+  }
+
+  // The plaintext source and encrypted destination coexist during re-encryption.
+  // Two chunk buffers cover the decrypt/encrypt boundary without treating Blob
+  // backing stores as free memory.
+  return originalSize * 2 + secureShareCopyPerTaskWorkingBytes;
+}
+
+interface SecureShareCopyScheduleState {
+  activeOriginalSizes: readonly number[];
+  pendingOriginalSizes: readonly number[];
+}
+
+export function selectSecureShareCopyAttachmentStarts({
+  activeOriginalSizes,
+  pendingOriginalSizes
+}: SecureShareCopyScheduleState) {
+  if (
+    activeOriginalSizes.length > secureShareCopyMaximumConcurrentAttachments
+    || activeOriginalSizes.some((size) =>
+      estimateSecureShareCopyAttachmentLiveBytes(size) > secureShareCopyLiveByteBudget
+    )
+  ) {
+    return 0;
+  }
+
+  let activeLiveBytes = activeOriginalSizes.reduce(
+    (total, size) => total + estimateSecureShareCopyAttachmentLiveBytes(size),
+    0
+  );
+  let startCount = 0;
+
+  for (const originalSize of pendingOriginalSizes) {
+    const estimatedLiveBytes = estimateSecureShareCopyAttachmentLiveBytes(originalSize);
+    const runningCount = activeOriginalSizes.length + startCount;
+
+    if (estimatedLiveBytes > secureShareCopyLiveByteBudget) {
+      return runningCount === 0 ? 1 : startCount;
+    }
+
+    if (
+      runningCount >= secureShareCopyMaximumConcurrentAttachments
+      || activeLiveBytes + estimatedLiveBytes > secureShareCopyLiveByteBudget
+    ) {
+      break;
+    }
+
+    activeLiveBytes += estimatedLiveBytes;
+    startCount += 1;
+  }
+
+  return startCount;
+}
 
 export type SecureShareSaveCopyPhase =
   | "cleaning_up"
@@ -281,6 +343,105 @@ async function retryAttachmentCleanup(
   return lastError;
 }
 
+async function runByteBudgetedAttachmentTasks<T>(
+  items: T[],
+  originalSize: (item: T) => number,
+  signal: AbortSignal,
+  task: (item: T, index: number, taskSignal: AbortSignal) => Promise<void>
+) {
+  if (!items.length) {
+    return;
+  }
+
+  const taskController = new AbortController();
+  const activeOriginalSizes = new Map<number, number>();
+  let nextIndex = 0;
+  let firstError: unknown;
+  let failed = false;
+  let completionCleanup: () => void = () => undefined;
+
+  const completion = new Promise<void>((resolve, reject) => {
+    const finishIfPossible = () => {
+      if (activeOriginalSizes.size > 0) {
+        return false;
+      }
+
+      if (failed) {
+        reject(firstError);
+        return true;
+      }
+
+      if (nextIndex >= items.length) {
+        resolve();
+        return true;
+      }
+
+      return false;
+    };
+
+    const fail = (caught: unknown) => {
+      if (!failed) {
+        failed = true;
+        firstError = caught;
+        taskController.abort();
+      }
+    };
+
+    const pump = () => {
+      if (finishIfPossible() || failed) {
+        return;
+      }
+
+      const startCount = selectSecureShareCopyAttachmentStarts({
+        activeOriginalSizes: [...activeOriginalSizes.values()],
+        pendingOriginalSizes: items
+          .slice(nextIndex)
+          .map((item) => originalSize(item))
+      });
+
+      for (let offset = 0; offset < startCount; offset += 1) {
+        const index = nextIndex;
+        const item = items[index];
+        const itemOriginalSize = originalSize(item);
+        nextIndex += 1;
+        activeOriginalSizes.set(index, itemOriginalSize);
+
+        void Promise.resolve()
+          .then(() => task(item, index, taskController.signal))
+          .catch(fail)
+          .finally(() => {
+            activeOriginalSizes.delete(index);
+            pump();
+          });
+      }
+
+      if (startCount === 0 && activeOriginalSizes.size === 0) {
+        fail(new Error("첨부파일 복사 작업을 예약하지 못했습니다."));
+        finishIfPossible();
+      }
+    };
+
+    const abortTasks = () => {
+      fail(new DOMException("첨부파일 복사 요청이 취소되었습니다.", "AbortError"));
+      finishIfPossible();
+    };
+
+    if (signal.aborted) {
+      abortTasks();
+    } else {
+      signal.addEventListener("abort", abortTasks, { once: true });
+      completionCleanup = () => signal.removeEventListener("abort", abortTasks);
+      pump();
+    }
+  });
+
+  try {
+    await completion;
+  } finally {
+    completionCleanup();
+  }
+}
+
 export async function saveSecureShareCopy(
   input: SecureShareSaveCopyInput,
   dependencies: SecureShareSaveCopyDependencies = defaultDependencies
@@ -315,7 +476,9 @@ export async function saveSecureShareCopy(
   let createdNoteId: string | null = null;
   let copyJobId: string | null = null;
   let activationAttempted = false;
-  const createdAttachmentIds: string[] = [];
+  const createdAttachmentIds: Array<string | undefined> = new Array(
+    validated.attachments.length
+  );
 
   try {
     const generatedNoteKey = await dependencies.generateNoteKey();
@@ -344,7 +507,8 @@ export async function saveSecureShareCopy(
     });
     assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
 
-    copyJobId = dependencies.createCopyJobId();
+    const activeCopyJobId = dependencies.createCopyJobId();
+    copyJobId = activeCopyJobId;
     const createdNote = await dependencies.createSecureShareCopyingNote({
       type: "personal",
       ownerUid: profile.uid,
@@ -355,91 +519,116 @@ export async function saveSecureShareCopy(
       folderId: null,
       historySummary,
       historySnapshot,
-      copyJobId,
+      copyJobId: activeCopyJobId,
       expectedAttachmentCount: validated.attachments.length
     });
     createdNoteId = createdNote.noteId;
     assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
 
-    for (const [attachmentIndex, attachment] of validated.attachments.entries()) {
-      const fileIndex = attachmentIndex + 1;
-      const { metadata } = attachment;
+    await runByteBudgetedAttachmentTasks(
+      validated.attachments,
+      (attachment) => attachment.metadata.originalSize,
+      signal,
+      async (attachment, attachmentIndex, taskSignal) => {
+        const fileIndex = attachmentIndex + 1;
+        const { metadata } = attachment;
 
-      emitProgress(input.onProgress, {
-        fileCount: validated.attachments.length,
-        fileIndex,
-        fileName: metadata.fileName,
-        loadedBytes: 0,
-        percent: 0,
-        phase: "downloading",
-        totalBytes: metadata.originalSize
-      });
-      assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
-      const plainBlob = await payload.copyAttachment(metadata, signal);
-      assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
+        emitProgress(input.onProgress, {
+          fileCount: validated.attachments.length,
+          fileIndex,
+          fileName: metadata.fileName,
+          loadedBytes: 0,
+          percent: 0,
+          phase: "downloading",
+          totalBytes: metadata.originalSize
+        });
+        assertActive(taskSignal, validated.copyGrantExpiresAt, dependencies.now());
+        const plainBlob = await payload.copyAttachment(metadata, taskSignal);
+        assertActive(taskSignal, validated.copyGrantExpiresAt, dependencies.now());
 
-      if (
-        plainBlob.size !== metadata.originalSize
-        || plainBlob.type.toLowerCase() !== attachment.safeMimeType
-      ) {
-        throw new SecureShareSaveCopyError(
-          "invalid_attachment",
-          "복사한 첨부파일의 크기 또는 형식이 원본 메타데이터와 일치하지 않습니다."
+        if (
+          plainBlob.size !== metadata.originalSize
+          || plainBlob.type.toLowerCase() !== attachment.safeMimeType
+        ) {
+          throw new SecureShareSaveCopyError(
+            "invalid_attachment",
+            "복사한 첨부파일의 크기 또는 형식이 원본 메타데이터와 일치하지 않습니다."
+          );
+        }
+
+        emitProgress(input.onProgress, {
+          fileCount: validated.attachments.length,
+          fileIndex,
+          fileName: metadata.fileName,
+          loadedBytes: 0,
+          percent: 0,
+          phase: "encrypting",
+          totalBytes: metadata.originalSize
+        });
+        const encryptedAttachment = await dependencies.encryptAttachmentBlob(
+          plainBlob,
+          noteKey,
+          (progress) => {
+            assertActive(taskSignal, validated.copyGrantExpiresAt, dependencies.now());
+            emitProgress(input.onProgress, {
+              fileCount: validated.attachments.length,
+              fileIndex,
+              fileName: metadata.fileName,
+              loadedBytes: progress.loaded,
+              percent: progress.percentage,
+              phase: "encrypting",
+              totalBytes: progress.total
+            });
+          }
         );
+        assertActive(taskSignal, validated.copyGrantExpiresAt, dependencies.now());
+
+        try {
+          const attachmentRef = await dependencies.createNoteAttachment({
+            noteId: createdNote.noteId,
+            fileName: attachment.safeBaseName,
+            extension: metadata.extension,
+            mimeType: attachment.safeMimeType,
+            originalSize: metadata.originalSize,
+            encryptedBlob: encryptedAttachment.blob,
+            encryption: encryptedAttachment.metadata,
+            secureShareCopyJobId: activeCopyJobId,
+            uploadedBy: profile.uid,
+            signal: taskSignal,
+            onUploadProgress: (progress) => {
+              if (abortOrExpiryError(
+                taskSignal,
+                validated.copyGrantExpiresAt,
+                dependencies.now()
+              )) {
+                return;
+              }
+              emitProgress(input.onProgress, {
+                fileCount: validated.attachments.length,
+                fileIndex,
+                fileName: metadata.fileName,
+                loadedBytes: progress.loaded,
+                percent: progress.percentage,
+                phase: "uploading",
+                totalBytes: progress.total
+              });
+            }
+          });
+          createdAttachmentIds[attachmentIndex] = attachmentRef.id;
+        } catch (caught) {
+          if (
+            caught instanceof BlobAttachmentReservationCleanupError
+            && caught.scope === "note"
+            && caught.noteId === createdNote.noteId
+          ) {
+            createdAttachmentIds[attachmentIndex] = caught.attachmentId;
+          }
+
+          throw caught;
+        }
+        assertActive(taskSignal, validated.copyGrantExpiresAt, dependencies.now());
       }
-
-      emitProgress(input.onProgress, {
-        fileCount: validated.attachments.length,
-        fileIndex,
-        fileName: metadata.fileName,
-        loadedBytes: 0,
-        percent: 0,
-        phase: "encrypting",
-        totalBytes: metadata.originalSize
-      });
-      const encryptedAttachment = await dependencies.encryptAttachmentBlob(
-        plainBlob,
-        noteKey,
-        (progress) => {
-          assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
-          emitProgress(input.onProgress, {
-            fileCount: validated.attachments.length,
-            fileIndex,
-            fileName: metadata.fileName,
-            loadedBytes: progress.loaded,
-            percent: progress.percentage,
-            phase: "encrypting",
-            totalBytes: progress.total
-          });
-        }
-      );
-      assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
-
-      const attachmentRef = await dependencies.createNoteAttachment({
-        noteId: createdNote.noteId,
-        fileName: attachment.safeBaseName,
-        extension: metadata.extension,
-        mimeType: attachment.safeMimeType,
-        originalSize: metadata.originalSize,
-        encryptedBlob: encryptedAttachment.blob,
-        encryption: encryptedAttachment.metadata,
-        secureShareCopyJobId: copyJobId,
-        uploadedBy: profile.uid,
-        onUploadProgress: (progress) => {
-          emitProgress(input.onProgress, {
-            fileCount: validated.attachments.length,
-            fileIndex,
-            fileName: metadata.fileName,
-            loadedBytes: progress.loaded,
-            percent: progress.percentage,
-            phase: "uploading",
-            totalBytes: progress.total
-          });
-        }
-      });
-      createdAttachmentIds.push(attachmentRef.id);
-      assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
-    }
+    );
 
     emitProgress(input.onProgress, {
       fileCount: validated.attachments.length,
@@ -508,7 +697,7 @@ export async function saveSecureShareCopy(
 
     emitProgress(input.onProgress, {
       fileCount: validated.attachments.length,
-      fileIndex: createdAttachmentIds.length,
+      fileIndex: createdAttachmentIds.filter(Boolean).length,
       fileName: "",
       loadedBytes: 0,
       percent: 0,
@@ -519,6 +708,10 @@ export async function saveSecureShareCopy(
     const cleanupErrors: unknown[] = [];
 
     for (const attachmentId of [...createdAttachmentIds].reverse()) {
+      if (!attachmentId) {
+        continue;
+      }
+
       const cleanupError = await retryAttachmentCleanup(
         createdNoteId,
         attachmentId,

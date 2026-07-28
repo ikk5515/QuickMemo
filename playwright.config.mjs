@@ -79,7 +79,7 @@ export default defineConfig({
     },
     {
       name: "webkit-desktop",
-      testMatch: ["**/responsive.spec.mjs"],
+      testMatch: ["**/*.spec.mjs"],
       use: {
         browserName: "webkit",
         viewport: { width: 1280, height: 720 }

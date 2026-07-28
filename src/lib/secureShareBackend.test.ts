@@ -7,9 +7,16 @@ import handler, {
   assertEmailPolicyAvailable,
   buildPolicySettings,
   copyGrantAuthorizesDownload,
+  copyGrantAuditEventId,
+  copyGrantRequestDisposition,
+  copyGrantRequestId,
+  copyGrantRequestKeyHash,
+  copyGrantTokenHash,
   createResendEmailAdapter,
   emailChallengeMinimumResponseMilliseconds,
   emailDigest,
+  emailQuotaExceeded,
+  emailQuotaPeriods,
   ensureSameOrigin,
   evaluateCopyAttachmentQuota,
   handleApiError,
@@ -23,13 +30,16 @@ import handler, {
   padOtpVerificationFailureResponse,
   readJsonBody,
   resolveAccessIdentity,
+  resolveEmailQuotaPolicy,
   safeDisplayName,
   secureShareAttachmentBlobPath,
   secureShareEmailReadiness,
   shareManagedBy,
   shareOwnedBy,
   signedOpaqueToken,
+  sourceShareGuardId,
   sourceSnapshotAvailable,
+  validateCommentBody,
   verificationEmailText,
   verifySharePassword,
   verifySignedOpaqueToken
@@ -118,6 +128,18 @@ function fetchResponse(status: number, body: unknown = {}) {
   };
 }
 
+function stubReadyEmailDelivery() {
+  vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
+  vi.stubEnv("SECURE_SHARE_EMAIL_ENABLED", "true");
+  vi.stubEnv("SHARE_EMAIL_PROVIDER", "resend");
+  vi.stubEnv("SHARE_EMAIL_API_KEY", "test-provider-key");
+  vi.stubEnv("SHARE_EMAIL_FROM", "QuickMemo <share@example.com>");
+  vi.stubEnv("SHARE_EMAIL_SENDER_VERIFIED", "true");
+  vi.stubEnv("SHARE_OTP_HMAC_KEY", "o".repeat(48));
+  vi.stubEnv("SHARE_EMAIL_HMAC_KEY", "e".repeat(48));
+  vi.stubEnv("SHARE_RATE_LIMIT_HMAC_KEY", "r".repeat(48));
+}
+
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
@@ -125,6 +147,115 @@ afterEach(() => {
 });
 
 describe("Secure Share v2 cryptographic primitives", () => {
+  it("derives stable source-share guard ids without exposing owner or note ids", () => {
+    vi.stubEnv("SHARE_SESSION_HMAC_KEY", "s".repeat(48));
+    const first = sourceShareGuardId("owner_123", "note_123");
+
+    expect(first).toMatch(/^source_[A-Za-z0-9_-]{43}$/u);
+    expect(sourceShareGuardId("owner_123", "note_123")).toBe(first);
+    expect(sourceShareGuardId("owner_124", "note_123")).not.toBe(first);
+    expect(sourceShareGuardId("owner_123", "note_124")).not.toBe(first);
+    expect(first).not.toContain("owner_123");
+    expect(first).not.toContain("note_123");
+  });
+
+  it("derives isolated persistent copy-grant request ids without exposing the raw key", () => {
+    vi.stubEnv("SHARE_SESSION_HMAC_KEY", "s".repeat(48));
+    const requestKey = "copy_request_attempt_0001";
+    const first = copyGrantRequestId("share_123", "user_123", requestKey);
+
+    expect(first).toMatch(/^copy_[A-Za-z0-9_-]{43}$/u);
+    expect(copyGrantRequestId("share_123", "user_123", requestKey)).toBe(first);
+    expect(copyGrantRequestId("share_124", "user_123", requestKey)).not.toBe(first);
+    expect(copyGrantRequestId("share_123", "user_124", requestKey)).not.toBe(first);
+    expect(copyGrantRequestId("share_123", "user_123", "copy_request_attempt_0002"))
+      .not.toBe(first);
+    expect(first).not.toContain(requestKey);
+  });
+
+  it("classifies exact copy-grant replay, renewal, and malformed request conflicts", () => {
+    const secret = "s".repeat(48);
+    const now = 2_000_000_000;
+    const requestKey = "copy_request_attempt_0001";
+    const requestKeyHash = copyGrantRequestKeyHash(
+      "share_123",
+      "user_123",
+      requestKey,
+      secret
+    );
+    const expected = {
+      ownerUid: "owner_123",
+      policyVersion: 7,
+      requesterUid: "user_123",
+      requestKeyHash,
+      sessionReferenceHash: "session_reference_123",
+      shareId: "share_123"
+    };
+    const copyGrant = signedOpaqueToken({
+      kind: "secure_share_copy_grant",
+      shareId: expected.shareId,
+      uid: expected.requesterUid,
+      policyVersion: expected.policyVersion,
+      idempotencyHash: requestKeyHash,
+      sessionReferenceHash: expected.sessionReferenceHash
+    }, "quickmemo/secure-share/copy-grant/v1", 300, secret, now);
+    const requestDocument = {
+      schemaVersion: 1,
+      shareId: expected.shareId,
+      ownerUid: expected.ownerUid,
+      requesterUid: expected.requesterUid,
+      requestKeyHash,
+      sessionReferenceHash: expected.sessionReferenceHash,
+      policyVersion: expected.policyVersion,
+      grantToken: copyGrant,
+      grantTokenHash: copyGrantTokenHash(copyGrant, secret),
+      grantIssuedAt: new Date(now * 1000).toISOString(),
+      grantExpiresAt: new Date((now + 300) * 1000).toISOString(),
+      issuanceGeneration: 1,
+      expiresAt: new Date((now + 300 + 24 * 60 * 60) * 1000).toISOString()
+    };
+
+    expect(copyGrantRequestDisposition(
+      requestDocument,
+      expected,
+      now,
+      secret
+    )).toEqual({
+      status: "replay",
+      copyGrant,
+      expiresAt: new Date((now + 300) * 1000).toISOString()
+    });
+    expect(copyGrantRequestDisposition(
+      requestDocument,
+      expected,
+      now + 285,
+      secret
+    )).toEqual({ status: "renew" });
+    expect(copyGrantRequestDisposition(
+      requestDocument,
+      { ...expected, sessionReferenceHash: "renewed_session_reference" },
+      now,
+      secret
+    )).toEqual({ status: "renew" });
+    expect(copyGrantRequestDisposition(
+      requestDocument,
+      { ...expected, policyVersion: 8 },
+      now,
+      secret
+    )).toEqual({ status: "renew" });
+    expect(copyGrantRequestDisposition(
+      { ...requestDocument, grantTokenHash: "tampered" },
+      expected,
+      now,
+      secret
+    )).toEqual({ status: "conflict" });
+
+    const auditId = copyGrantAuditEventId("copy_request_doc", copyGrant, secret);
+    expect(auditId).toMatch(/^evt_cg_[A-Za-z0-9_-]{43}$/u);
+    expect(copyGrantAuditEventId("copy_request_doc", copyGrant, secret)).toBe(auditId);
+    expect(copyGrantAuditEventId("copy_request_other", copyGrant, secret)).not.toBe(auditId);
+  });
+
   it("preserves password whitespace and rejects a changed record or pepper version", async () => {
     const pepper = "p".repeat(48);
     const record = await hashSharePassword("  correct horse  ", pepper, "2026-07");
@@ -169,11 +300,7 @@ describe("Secure Share v2 cryptographic primitives", () => {
 
   it("does not let a verified Firebase caller bypass a required email OTP", async () => {
     vi.stubEnv("VITE_FIREBASE_API_KEY", "test-web-api-key");
-    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
-    vi.stubEnv("SECURE_SHARE_EMAIL_ENABLED", "true");
-    vi.stubEnv("SHARE_EMAIL_PROVIDER", "resend");
-    vi.stubEnv("SHARE_EMAIL_API_KEY", "test-provider-key");
-    vi.stubEnv("SHARE_EMAIL_FROM", "sender@example.com");
+    stubReadyEmailDelivery();
     const fetchMock = vi.fn(async (input: string | URL | Request) => {
       const url = decodeURIComponent(String(input));
       if (url.includes("/accounts:lookup")) {
@@ -245,7 +372,7 @@ describe("Secure Share v2 cryptographic primitives", () => {
       uid: "user-a",
       policyVersion: 7,
       sessionReferenceHash: "session-reference"
-    }, purpose, 300, secret);
+    }, purpose, 300, secret, now);
     const grant = verifySignedOpaqueToken(token, purpose, secret, now);
     const context = {
       ownerPreview: false,
@@ -469,12 +596,7 @@ describe("Secure Share v2 email and identity defenses", () => {
   });
 
   it("rejects pending and suppressed OTP candidates with the same padded failure contract", async () => {
-    vi.stubEnv("SHARE_OTP_HMAC_KEY", "o".repeat(48));
-    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
-    vi.stubEnv("SECURE_SHARE_EMAIL_ENABLED", "true");
-    vi.stubEnv("SHARE_EMAIL_PROVIDER", "resend");
-    vi.stubEnv("SHARE_EMAIL_API_KEY", "test-provider-key");
-    vi.stubEnv("SHARE_EMAIL_FROM", "sender@example.com");
+    stubReadyEmailDelivery();
     const pendingChallengeId = "ch_pending_candidate";
     const suppressedChallengeId = "ch_suppressed_candidate";
     const pendingEmailHash = "pending-email-hash";
@@ -562,19 +684,37 @@ describe("Secure Share v2 email and identity defenses", () => {
   });
 
   it("reports provider readiness without exposing credentials and formats the configured OTP TTL", () => {
-    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
-    vi.stubEnv("SECURE_SHARE_EMAIL_ENABLED", "true");
-    vi.stubEnv("SHARE_EMAIL_PROVIDER", "resend");
+    stubReadyEmailDelivery();
     vi.stubEnv("SHARE_EMAIL_API_KEY", "test-key-never-returned");
-    vi.stubEnv("SHARE_EMAIL_FROM", "QuickMemo <share@example.com>");
 
     expect(secureShareEmailReadiness()).toEqual({
       ready: true,
       v2Enabled: true,
       featureEnabled: true,
-      providerConfigured: true
+      providerConfigured: true,
+      secretsConfigured: true,
+      senderVerified: true
     });
     expect(JSON.stringify(secureShareEmailReadiness())).not.toContain("test-key-never-returned");
+    vi.stubEnv("SHARE_EMAIL_SENDER_VERIFIED", "false");
+    expect(secureShareEmailReadiness()).toMatchObject({
+      ready: false,
+      providerConfigured: true,
+      secretsConfigured: true,
+      senderVerified: false
+    });
+    vi.stubEnv("SHARE_EMAIL_SENDER_VERIFIED", "true");
+    vi.stubEnv("SHARE_EMAIL_HMAC_KEY", "o".repeat(48));
+    expect(secureShareEmailReadiness()).toMatchObject({
+      ready: false,
+      secretsConfigured: false
+    });
+    vi.stubEnv("SHARE_EMAIL_HMAC_KEY", "e".repeat(48));
+    vi.stubEnv("SHARE_EMAIL_FROM", "QuickMemo <share@example.com>\r\nBcc: attacker@example.com");
+    expect(secureShareEmailReadiness()).toMatchObject({
+      ready: false,
+      providerConfigured: false
+    });
     expect(verificationEmailText("123456", 600)).toContain("10분 동안 유효");
     expect(verificationEmailText("123456", 301)).toContain("301초 동안 유효");
   });
@@ -583,17 +723,30 @@ describe("Secure Share v2 email and identity defenses", () => {
     vi.stubEnv("SHARE_EMAIL_API_KEY", "provider-key");
     const request = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 503 })
-      .mockResolvedValueOnce({ ok: true, status: 200 });
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "email_message_123456" })
+      });
     const wait = vi.fn(async () => undefined);
-    const adapter = createResendEmailAdapter(request as unknown as typeof fetch, wait);
+    const beforeAttempt = vi.fn(async () => undefined);
+    const adapter = createResendEmailAdapter(
+      request as unknown as typeof fetch,
+      wait,
+      beforeAttempt
+    );
 
     await expect(adapter.send({
       from: "QuickMemo <share@example.com>",
       idempotencyKey: "opaque-delivery-key",
       text: "generic message",
       to: "person@example.com"
-    })).resolves.toBe(true);
+    })).resolves.toEqual({
+      accepted: true,
+      messageId: "email_message_123456"
+    });
     expect(request).toHaveBeenCalledTimes(2);
+    expect(beforeAttempt).toHaveBeenCalledTimes(2);
     expect(wait).toHaveBeenCalledOnce();
     const init = request.mock.calls[0]?.[1] as RequestInit;
     expect(init.headers).toMatchObject({
@@ -601,15 +754,286 @@ describe("Secure Share v2 email and identity defenses", () => {
       "user-agent": "QuickMemo-Secure-Share/2"
     });
 
-    request.mockResolvedValueOnce({ ok: true, status: 200 });
+    request.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: "email_health_123456" })
+    });
     await expect(adapter.healthCheck({
       from: "QuickMemo <share@example.com>",
       idempotencyKey: "opaque-health-key",
       to: "health@example.com"
-    })).resolves.toBe(true);
+    })).resolves.toEqual({
+      accepted: true,
+      messageId: "email_health_123456"
+    });
     expect(request).toHaveBeenCalledTimes(3);
+    expect(beforeAttempt).toHaveBeenCalledTimes(3);
     const healthInit = request.mock.calls[2]?.[1] as RequestInit;
     expect(String(healthInit.body)).toContain("상태 확인");
+  });
+
+  it("fails before provider I/O when the distributed request gate rejects an attempt", async () => {
+    vi.stubEnv("SHARE_EMAIL_API_KEY", "provider-key");
+    const request = vi.fn();
+    const beforeAttempt = vi.fn().mockRejectedValue(
+      new HttpError(429, "rate_limited", "Provider request capacity is exhausted")
+    );
+    const adapter = createResendEmailAdapter(
+      request as unknown as typeof fetch,
+      async () => undefined,
+      beforeAttempt
+    );
+
+    await expect(adapter.send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-rate-gated-provider-key",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      code: "rate_limited",
+      deliveryAmbiguous: false,
+      statusCode: 429
+    });
+    expect(beforeAttempt).toHaveBeenCalledOnce();
+    expect(request).not.toHaveBeenCalled();
+
+    const networkThenGateFailure = vi.fn()
+      .mockRejectedValueOnce(new TypeError("connection reset"));
+    const retryGate = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(
+        new HttpError(429, "rate_limited", "Provider request capacity is exhausted")
+      );
+    await expect(createResendEmailAdapter(
+      networkThenGateFailure as unknown as typeof fetch,
+      async () => undefined,
+      retryGate
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-ambiguous-before-rate-gate",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      code: "rate_limited",
+      deliveryAmbiguous: true,
+      statusCode: 429
+    });
+    expect(retryGate).toHaveBeenCalledTimes(2);
+    expect(networkThenGateFailure).toHaveBeenCalledOnce();
+  });
+
+  it("treats malformed provider success as ambiguous and never retries a definitive 4xx", async () => {
+    vi.stubEnv("SHARE_EMAIL_API_KEY", "provider-key");
+    const malformedSuccess = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({})
+    });
+    await expect(createResendEmailAdapter(
+      malformedSuccess as unknown as typeof fetch
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-malformed-success-key",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      code: "email_feature_unavailable",
+      deliveryAmbiguous: true,
+      upstreamStatus: 200
+    });
+    expect(malformedSuccess).toHaveBeenCalledOnce();
+
+    const rejected = vi.fn().mockResolvedValue({ ok: false, status: 400 });
+    await expect(createResendEmailAdapter(
+      rejected as unknown as typeof fetch
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-definitive-rejection-key",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      code: "email_feature_unavailable",
+      deliveryAmbiguous: false,
+      upstreamStatus: 400
+    });
+    expect(rejected).toHaveBeenCalledOnce();
+
+    const timeoutError = Object.assign(new Error("provider timeout"), {
+      name: "AbortError"
+    });
+    const timedOut = vi.fn().mockRejectedValue(timeoutError);
+    await expect(createResendEmailAdapter(
+      timedOut as unknown as typeof fetch
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-provider-timeout-key",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      code: "email_feature_unavailable",
+      deliveryAmbiguous: true
+    });
+    expect(timedOut).toHaveBeenCalledOnce();
+
+    const repeatedServerFailure = vi.fn()
+      .mockResolvedValue({ ok: false, status: 503 });
+    await expect(createResendEmailAdapter(
+      repeatedServerFailure as unknown as typeof fetch,
+      async () => undefined
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-repeated-server-failure",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      deliveryAmbiguous: true,
+      upstreamStatus: 503
+    });
+    expect(repeatedServerFailure).toHaveBeenCalledTimes(2);
+
+    const networkThenRejected = vi.fn()
+      .mockRejectedValueOnce(new TypeError("connection reset"))
+      .mockResolvedValueOnce({ ok: false, status: 400 });
+    await expect(createResendEmailAdapter(
+      networkThenRejected as unknown as typeof fetch,
+      async () => undefined
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-network-then-rejection",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      deliveryAmbiguous: true,
+      upstreamStatus: 400
+    });
+    expect(networkThenRejected).toHaveBeenCalledTimes(2);
+
+    const concurrentIdempotentRequest = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ name: "concurrent_idempotent_requests" })
+    });
+    await expect(createResendEmailAdapter(
+      concurrentIdempotentRequest as unknown as typeof fetch,
+      async () => undefined
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-concurrent-idempotent-request",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      deliveryAmbiguous: true,
+      upstreamStatus: 409
+    });
+    expect(concurrentIdempotentRequest).toHaveBeenCalledTimes(2);
+
+    const invalidIdempotentRequest = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => ({ name: "invalid_idempotent_request" })
+    });
+    await expect(createResendEmailAdapter(
+      invalidIdempotentRequest as unknown as typeof fetch,
+      async () => undefined
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-invalid-idempotent-request",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      deliveryAmbiguous: false,
+      upstreamStatus: 409
+    });
+    expect(invalidIdempotentRequest).toHaveBeenCalledOnce();
+
+    const unknownIdempotentConflict = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      json: async () => {
+        throw new SyntaxError("malformed provider error");
+      }
+    });
+    await expect(createResendEmailAdapter(
+      unknownIdempotentConflict as unknown as typeof fetch,
+      async () => undefined
+    ).send({
+      from: "QuickMemo <share@example.com>",
+      idempotencyKey: "opaque-unknown-idempotent-conflict",
+      text: "generic message",
+      to: "person@example.com"
+    })).rejects.toMatchObject({
+      deliveryAmbiguous: true,
+      upstreamStatus: 409
+    });
+    expect(unknownIdempotentConflict).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps email quota configuration below the provider free tier and counts reservations", () => {
+    expect(resolveEmailQuotaPolicy({})).toEqual({
+      dailyHardLimit: 80,
+      dailySoftLimit: 64,
+      monthlyHardLimit: 2_400,
+      monthlySoftLimit: 1_920
+    });
+    expect(resolveEmailQuotaPolicy({
+      SHARE_EMAIL_DAILY_HARD_LIMIT: "999",
+      SHARE_EMAIL_DAILY_SOFT_LIMIT: "999",
+      SHARE_EMAIL_MONTHLY_HARD_LIMIT: "9999",
+      SHARE_EMAIL_MONTHLY_SOFT_LIMIT: "9999"
+    })).toEqual({
+      dailyHardLimit: 80,
+      dailySoftLimit: 80,
+      monthlyHardLimit: 2_400,
+      monthlySoftLimit: 2_400
+    });
+
+    const [daily, monthly] = emailQuotaPeriods(
+      Date.parse("2026-07-29T12:34:56.000Z")
+    );
+    expect(daily).toMatchObject({
+      bucketId: "day_2026-07-29",
+      periodKey: "2026-07-29",
+      scope: "daily",
+      softLimit: 64,
+      hardLimit: 80
+    });
+    expect(monthly).toMatchObject({
+      bucketId: "month_2026-07",
+      periodKey: "2026-07",
+      scope: "monthly",
+      softLimit: 1_920,
+      hardLimit: 2_400
+    });
+    expect(emailQuotaExceeded(
+      { reservedCount: 1, sentCount: 79 },
+      daily
+    )).toMatchObject({
+      exceeded: true,
+      softLimitReached: true,
+      total: 80
+    });
+    expect(emailQuotaExceeded(
+      { reservedCount: 0, sentCount: 2_399 },
+      monthly
+    )).toMatchObject({
+      exceeded: false,
+      softLimitReached: true,
+      total: 2_399
+    });
+    expect(emailQuotaExceeded(
+      { reservedCount: 1, sentCount: 2_399 },
+      monthly
+    )).toMatchObject({
+      exceeded: true,
+      total: 2_400
+    });
+    expect(emailQuotaPeriods(
+      Date.parse("2026-08-01T00:00:00.000Z")
+    ).map((period) => period.bucketId)).toEqual([
+      "day_2026-08-01",
+      "month_2026-08"
+    ]);
   });
 
   it("normalizes display names before blocking controls, bidi marks, and reserved impersonation", () => {
@@ -627,6 +1051,24 @@ describe("Secure Share v2 email and identity defenses", () => {
       expect.objectContaining({ statusCode: 400 })
     );
     expect(safeDisplayName("Owner", "Owner", true)).toBe("Owner");
+  });
+
+  it("keeps comments plain text and rejects control, bidi, and zero-width spoofing", () => {
+    expect(validateCommentBody("  줄 1\n줄 2  ")).toBe("줄 1\n줄 2");
+    for (const invalid of [
+      "<b>html</b>",
+      "hidden\u0000control",
+      "c1\u0085control",
+      "arabic\u061cmark",
+      "bidi\u202eoverride",
+      "isolate\u2066spoof",
+      "zero\u200bwidth",
+      "bom\ufeffmark"
+    ]) {
+      expect(() => validateCommentBody(invalid)).toThrowError(
+        expect.objectContaining({ statusCode: 400, code: "invalid_request" })
+      );
+    }
   });
 });
 
@@ -888,6 +1330,9 @@ describe("Secure Share v2 transactional source contracts", () => {
           ? fetchResponse(200, initialSessionDocument)
           : fetchResponse(404);
       }
+      if (url.includes("/documents/publicShareSourceGuards/")) {
+        return fetchResponse(404);
+      }
       throw new Error(`Unexpected test Firestore request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -1054,6 +1499,32 @@ describe("Secure Share v2 transactional source contracts", () => {
     expect(ownerList).not.toContain("documents.filter((share) => share.schemaVersion === 2)");
   });
 
+  it("uses a bounded complete source-note query and transactional uniqueness guard", () => {
+    const sourceQuery = backendSource.match(
+      /function sourceShareHistoryQuery[\s\S]*?function sourceNoteMatchesCreate/u
+    )?.[0] ?? "";
+    const ownerCreate = backendSource.match(
+      /async function handleOwnerCreate[\s\S]*?function ownerListCursor/u
+    )?.[0] ?? "";
+    const ownerList = backendSource.match(
+      /async function handleOwnerList[\s\S]*?async function handleOwnerDetails/u
+    )?.[0] ?? "";
+
+    expect(sourceQuery).toContain('field: { fieldPath: "ownerUid" }');
+    expect(sourceQuery).toContain('field: { fieldPath: "sourceNoteId" }');
+    expect(sourceQuery).toContain("limit: maximumSourceShareHistory + 1");
+    expect(sourceQuery).toContain("compositeFilter");
+    expect(sourceQuery).not.toContain("orderBy");
+    expect(sourceQuery).toContain("documents.length > maximumSourceShareHistory");
+    expect(ownerCreate).toContain("firestoreBatchGetNewTransaction(context");
+    expect(ownerCreate).toContain("user.uid,\n          input.sourceNoteId,\n          transaction");
+    expect(ownerCreate).toContain("firestoreCommit(context, [...writes, guardWrite], transaction)");
+    expect(ownerCreate).toContain('"active_share_exists"');
+    expect(ownerList).toContain("ownedSourceShareHistory(");
+    expect(ownerList).toContain("nextCursor: null");
+    expect(ownerList).toContain("Source-specific share history does not accept a cursor");
+  });
+
   it("keeps only failed password attempts and applies the documented create and copy limits", () => {
     const access = backendSource.match(
       /async function handleAccess[\s\S]*?async function validatedSession/u
@@ -1078,10 +1549,47 @@ describe("Secure Share v2 transactional source contracts", () => {
     expect(ownerCreate).toContain('"share_create_owner_day"');
     expect(ownerCreate).toContain("limit: 20");
     expect(ownerCreate).toContain("limit: 100");
-    expect(copyGrant).toContain('"copy_grant_session_minute"');
-    expect(copyGrant).toContain("keyParts: [shareId, session.__sessionDigest]");
-    expect(copyGrant).toContain("windowSeconds: 60");
-    expect(copyGrant).toContain("limit: 3");
+    expect(copyGrant).toContain("copyGrantRateBucket(");
+    expect(copyGrant).toContain("beginCopyGrantRequestTransaction(");
+    expect(copyGrant).toContain("[requestWrite, rateWrite, auditWrite]");
+    expect(copyGrant).not.toContain("consumeRateLimits(context");
+  });
+
+  it("consumes a conservative distributed token before every provider attempt", () => {
+    const emailChallenge = backendSource.match(
+      /async function handleEmailChallenge[\s\S]*?async function incrementChallengeFailure/u
+    )?.[0] ?? "";
+
+    expect(backendSource).toContain("const emailProviderRequestRateWindowSeconds = 1");
+    expect(backendSource).toContain("const emailProviderRequestRateLimit = 2");
+    expect(emailChallenge).toContain("createResendEmailAdapter(");
+    expect(emailChallenge).toContain('"email_provider_request_global_second"');
+    expect(emailChallenge).toContain('keyParts: ["resend"]');
+    expect(emailChallenge).toContain("including the adapter's idempotent retry");
+    expect(emailChallenge).toContain("providerAdapter,");
+  });
+
+  it("replays persistent copy grants before quota work and recovers ambiguous commits", () => {
+    const copyGrant = backendSource.match(
+      /function copyGrantRequestId[\s\S]*?function evaluateCopyAttachmentQuota/u
+    )?.[0] ?? "";
+    const handlerSource = backendSource.match(
+      /async function handleCopyGrant[\s\S]*?function evaluateCopyAttachmentQuota/u
+    )?.[0] ?? "";
+
+    expect(copyGrant).toContain("publicShareCopyGrantRequests/${requestDocumentId}");
+    expect(copyGrant).toContain("firestoreBatchGetNewTransaction(context");
+    expect(copyGrant).toContain("requestDocument.issuanceGeneration + 1");
+    expect(copyGrant).toContain("expiresAtSeconds <= nowSeconds + copyGrantReplayMinimumSeconds");
+    expect(copyGrant).toContain("copyGrantAuditEventId(");
+    expect(copyGrant).toContain("grant.exp !== expiresAtSeconds");
+    expect(handlerSource.indexOf("fastReplay.status === \"replay\"")).toBeLessThan(
+      handlerSource.indexOf("preflightCopyAttachmentQuota(")
+    );
+    expect(handlerSource).toContain("[requestWrite, rateWrite, auditWrite]");
+    expect(handlerSource).toContain("commitAttempted = true");
+    expect(handlerSource).toContain("await firestoreGet(context, requestPath)");
+    expect(handlerSource).toContain("recovered.status === \"replay\"");
   });
 
   it("uses a structured comment cursor query instead of a bounded collection scan", () => {

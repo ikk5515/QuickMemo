@@ -14,14 +14,21 @@ export interface SecureSharePasswordHashRecord {
 
 export class HttpError extends Error {
   code: string;
+  deliveryAmbiguous: boolean;
   expose: boolean;
   retryAfter?: number;
   statusCode: number;
+  upstreamStatus?: number;
   constructor(
     statusCode: number,
     code: string,
     internalMessage?: string,
-    options?: { expose?: boolean; retryAfter?: number }
+    options?: {
+      deliveryAmbiguous?: boolean;
+      expose?: boolean;
+      retryAfter?: number;
+      upstreamStatus?: number;
+    }
   );
 }
 
@@ -136,6 +143,43 @@ export function copyGrantAuthorizesDownload(
   }
 ): boolean;
 
+export function copyGrantRequestId(
+  shareId: string,
+  requesterUid: string,
+  idempotencyKey: string
+): string;
+
+export function copyGrantRequestKeyHash(
+  shareId: string,
+  requesterUid: string,
+  idempotencyKey: string,
+  secret?: string
+): string;
+
+export function copyGrantRequestDisposition(
+  requestDocument: Record<string, unknown> | null,
+  expected: {
+    ownerUid: string;
+    policyVersion: number;
+    requesterUid: string;
+    requestKeyHash: string;
+    sessionReferenceHash: string;
+    shareId: string;
+  },
+  nowSeconds?: number,
+  secret?: string
+):
+  | { status: "conflict" | "issue" | "renew" }
+  | { status: "replay"; copyGrant: string; expiresAt: string };
+
+export function copyGrantTokenHash(copyGrant: string, secret?: string): string;
+
+export function copyGrantAuditEventId(
+  requestDocumentId: string,
+  copyGrant: string,
+  secret?: string
+): string;
+
 export function secureShareAttachmentBlobPath(
   ownerUid: string,
   shareId: string,
@@ -151,6 +195,8 @@ export function shareManagedBy(
   state: { share: { ownerUid: string } } | null,
   user: { uid: string; isAdmin?: boolean } | null
 ): boolean;
+
+export function sourceShareGuardId(ownerUid: string, sourceNoteId: string): string;
 
 export function sourceSnapshotAvailable(
   share: Record<string, unknown>,
@@ -235,7 +281,8 @@ export function signedOpaqueToken(
   payload: Record<string, unknown>,
   purpose: string,
   ttlSeconds: number,
-  secret?: string
+  secret?: string,
+  nowSeconds?: number
 ): string;
 
 export function verifySignedOpaqueToken(
@@ -250,25 +297,67 @@ export function secureShareEmailReadiness(): {
   v2Enabled: boolean;
   featureEnabled: boolean;
   providerConfigured: boolean;
+  secretsConfigured: boolean;
+  senderVerified: boolean;
 };
 
 export function verificationEmailText(code: string, ttlSeconds: number): string;
+export function validateCommentBody(value: unknown): string;
+
+export interface SecureShareEmailDeliveryResult {
+  accepted: true;
+  messageId: string;
+}
 
 export function createResendEmailAdapter(
   request?: typeof fetch,
-  wait?: (milliseconds: number) => Promise<unknown>
+  wait?: (milliseconds: number) => Promise<unknown>,
+  beforeAttempt?: () => Promise<unknown>
 ): {
   healthCheck(input: {
     from: string;
     idempotencyKey: string;
     to: string;
-  }): Promise<boolean>;
+  }): Promise<SecureShareEmailDeliveryResult>;
   send(input: {
     from: string;
     idempotencyKey: string;
     text: string;
+    timeoutMilliseconds?: number;
     to: string;
-  }): Promise<boolean>;
+  }): Promise<SecureShareEmailDeliveryResult>;
+};
+
+export function resolveEmailQuotaPolicy(environment?: Record<string, string | undefined>): {
+  dailyHardLimit: number;
+  dailySoftLimit: number;
+  monthlyHardLimit: number;
+  monthlySoftLimit: number;
+};
+
+export interface SecureShareEmailQuotaPeriod {
+  bucketId: string;
+  expiresAt: Date;
+  hardLimit: number;
+  periodKey: string;
+  scope: "daily" | "monthly";
+  softLimit: number;
+}
+
+export function emailQuotaPeriods(
+  nowMilliseconds?: number,
+  policy?: ReturnType<typeof resolveEmailQuotaPolicy>
+): SecureShareEmailQuotaPeriod[];
+
+export function emailQuotaExceeded(
+  document: { reservedCount: number; sentCount: number } | null,
+  period: SecureShareEmailQuotaPeriod
+): {
+  exceeded: boolean;
+  reservedCount: number;
+  sentCount: number;
+  softLimitReached: boolean;
+  total: number;
 };
 
 declare function handler(
