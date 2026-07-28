@@ -56,6 +56,7 @@ export interface SecureShareSeedOptions {
   ownerUid?: string;
   passwordEnabled?: boolean;
   passwordHashRecord?: Record<string, unknown>;
+  permissionLevel?: "comment" | "save_copy" | "view";
   shareId: string;
 }
 
@@ -94,6 +95,7 @@ export function configureSecureShareApiEmulatorEnvironment() {
     GCLOUD_PROJECT: secureShareApiEmulatorProjectId,
     NODE_ENV: "test",
     SECURE_SHARE_EMAIL_ENABLED: "false",
+    SHARE_EMAIL_SENDER_VERIFIED: "false",
     SECURE_SHARE_V2_ENABLED: "true",
     VERCEL: "1",
     VITE_FIREBASE_API_KEY: "fake-emulator-api-key",
@@ -311,6 +313,7 @@ export async function seedSecureShare(options: SecureShareSeedOptions) {
   const oneTimeEnabled = options.oneTimeEnabled ?? true;
   const emailVerificationRequired = options.emailVerificationRequired ?? false;
   const passwordEnabled = options.passwordEnabled ?? false;
+  const permissionLevel = options.permissionLevel ?? "view";
   const noteId = `note_${options.shareId}`;
   const cipherSentinel = `ciphertext-must-never-leak-${options.shareId}`;
   const commonPolicyFields = {
@@ -325,7 +328,7 @@ export async function seedSecureShare(options: SecureShareSeedOptions) {
     oneTimeSessionTtlSeconds: 1_800,
     ownerUid,
     passwordEnabled,
-    permissionLevel: "view",
+    permissionLevel,
     policyVersion: 1,
     quickCopyButtonVisible: false,
     schemaVersion: 2,
@@ -368,7 +371,7 @@ export async function seedSecureShare(options: SecureShareSeedOptions) {
         hasPassword: passwordEnabled,
         oneTimeEnabled,
         ownerUid,
-        permissionLevel: "view",
+        permissionLevel,
         policyVersion: 1,
         quickCopyButtonVisible: false,
         ready: true,
@@ -462,6 +465,7 @@ export function apiHeaders(
   options: {
     authorization?: string;
     bindingCookie?: string;
+    csrfToken?: string;
     networkSuffix?: number;
   } = {}
 ) {
@@ -470,6 +474,7 @@ export function apiHeaders(
       ? { authorization: `Bearer ${options.authorization}` }
       : {}),
     ...(options.bindingCookie ? { cookie: options.bindingCookie } : {}),
+    ...(options.csrfToken ? { "x-csrf-token": options.csrfToken } : {}),
     "content-type": "application/json",
     origin,
     "sec-fetch-site": "same-origin",

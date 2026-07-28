@@ -1688,22 +1688,104 @@ export function parseSecureShareListResponse(value: unknown) {
   return parseSecureShareListPage(value).shares;
 }
 
-async function fetchAllSecureShareOwnerSummaries(idToken: string) {
-  const sharesById = new Map<string, SecureShareOwnerSummary>();
-  let cursor: string | undefined;
+export const secureShareOwnerPageSize = 20;
+export const secureShareOwnerSourcePageSize = 100;
+export const secureSharePostCommitCleanupMessage =
+  "변경 사항은 저장됐고 기존 보안 공유 링크는 원본 버전 검증으로 이미 차단되었습니다. 보안 공유 관리에서 링크 중단을 다시 시도해주세요.";
 
-  for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
-    const response = await listOwnedSecureShares(idToken, { cursor, limit: 50 });
-    const page = parseSecureShareListPage(response);
+export interface SecureShareOwnerOperationContext {
+  generation: number;
+  uid: string;
+}
 
-    page.shares.forEach((share) => sharesById.set(share.shareId, share));
-    if (!page.nextCursor) {
-      return Array.from(sharesById.values());
+export interface SecureShareOwnerIdentitySnapshot {
+  firebaseUid: string | null;
+  generation: number;
+  profileUid: string | null;
+  unlocked: boolean;
+}
+
+export class SecureShareOwnerOperationStaleError extends Error {
+  constructor() {
+    super("로그인 상태가 변경되어 보안 공유 작업을 중단했습니다.");
+    this.name = "SecureShareOwnerOperationStaleError";
+  }
+}
+
+export class SecureSharePostCommitCleanupError extends Error {
+  constructor(cause?: unknown) {
+    super(secureSharePostCommitCleanupMessage, { cause });
+    this.name = "SecureSharePostCommitCleanupError";
+  }
+}
+
+export async function runPublicShareCleanupWithCommitBoundary(
+  sourceAlreadyCommitted: boolean,
+  cleanup: () => Promise<void>
+) {
+  try {
+    await cleanup();
+  } catch (error) {
+    if (
+      error instanceof SecureShareOwnerOperationStaleError
+      || error instanceof SecureSharePostCommitCleanupError
+    ) {
+      throw error;
     }
-    cursor = page.nextCursor;
+    if (sourceAlreadyCommitted) {
+      throw new SecureSharePostCommitCleanupError(error);
+    }
+    throw error;
+  }
+}
+
+export function assertSecureShareOwnerOperationCurrent(
+  operation: SecureShareOwnerOperationContext,
+  current: SecureShareOwnerIdentitySnapshot
+) {
+  if (
+    !current.unlocked
+    || current.generation !== operation.generation
+    || current.profileUid !== operation.uid
+    || current.firebaseUid !== operation.uid
+  ) {
+    throw new SecureShareOwnerOperationStaleError();
+  }
+}
+
+export function parseCompleteSecureShareSourcePage(
+  value: unknown,
+  expectedSourceNoteId: string
+) {
+  const page = parseSecureShareListPage(value);
+
+  if (page.nextCursor !== null) {
+    throw new Error(
+      "이 노트의 보안 공유 이력이 100개를 초과해 안전하게 확인할 수 없습니다."
+    );
+  }
+  if (page.shares.some((share) => share.sourceNoteId !== expectedSourceNoteId)) {
+    throw new Error("보안 공유 목록의 원본 노트가 요청과 일치하지 않습니다.");
   }
 
-  throw new Error("보안 공유 목록이 너무 많아 전체 상태를 안전하게 확인하지 못했습니다.");
+  return page.shares;
+}
+
+export function mergeSecureShareOwnerSummaries(
+  current: SecureShareOwnerSummary[],
+  incoming: SecureShareOwnerSummary[]
+) {
+  const incomingById = new Map(incoming.map((share) => [share.shareId, share]));
+  const merged = current.map((share) => incomingById.get(share.shareId) ?? share);
+  const knownShareIds = new Set(current.map((share) => share.shareId));
+
+  incoming.forEach((share) => {
+    if (!knownShareIds.has(share.shareId)) {
+      merged.push(share);
+    }
+  });
+
+  return merged;
 }
 
 export function parseSecureShareMutationResponse(value: unknown, expectedShareId?: string) {
@@ -2231,6 +2313,8 @@ export default function NotesPage() {
   const [publicShareCopied, setPublicShareCopied] = useState(false);
   const [ownerPublicShares, setOwnerPublicShares] = useState<PublicNoteShareSnapshot[]>([]);
   const [ownerSecureShares, setOwnerSecureShares] = useState<SecureShareOwnerSummary[]>([]);
+  const [ownerSecureSharesNextCursor, setOwnerSecureSharesNextCursor] = useState<string | null>();
+  const [secureShareOwnerLoadingMore, setSecureShareOwnerLoadingMore] = useState(false);
   const [secureShareFlags, setSecureShareFlags] = useState(() => resolveSecureShareFeatureFlags());
   const [secureShareOwnerOpen, setSecureShareOwnerOpen] = useState(false);
   const [secureShareSettingsOpen, setSecureShareSettingsOpen] = useState(false);
@@ -2268,11 +2352,58 @@ export default function NotesPage() {
   const migratingLegacyPublicShares = useRef(new Set<string>());
   const inspectedPublicShareFilenameGenerations = useRef(new Set<string>());
   const revokingSecureShares = useRef(new Set<string>());
+  const secureShareOwnerLoadMoreInFlight = useRef(false);
+  const secureShareOwnerPageGeneration = useRef(0);
+  const secureShareOwnerIdentity = useRef({
+    firebaseUid: firebaseUser?.uid ?? null,
+    profileUid: profile?.uid ?? null,
+    unlocked: Boolean(profile && privateKey)
+  });
   const migrateLegacyPublicShareRef = useRef<(share: PublicNoteShareSnapshot, note: DecryptedNote) => Promise<void>>(async () => undefined);
   const decryptedNoteCache = useRef<DecryptedNoteCache>(new Map());
   const decryptedDeletedNoteCache = useRef<DecryptedNoteCache>(new Map());
   const visibleDecryptionGeneration = useRef(0);
   const deletedDecryptionGeneration = useRef(0);
+
+  secureShareOwnerIdentity.current = {
+    firebaseUid: firebaseUser?.uid ?? null,
+    profileUid: profile?.uid ?? null,
+    unlocked: Boolean(profile && privateKey)
+  };
+
+  const currentSecureShareOwnerIdentity = useCallback(
+    (): SecureShareOwnerIdentitySnapshot => ({
+      ...secureShareOwnerIdentity.current,
+      generation: secureShareOwnerPageGeneration.current
+    }),
+    []
+  );
+  const captureSecureShareOwnerOperation = useCallback((expectedUid?: string) => {
+    const current = currentSecureShareOwnerIdentity();
+    const uid = expectedUid ?? current.profileUid;
+
+    if (!uid) {
+      throw new SecureShareOwnerOperationStaleError();
+    }
+
+    const operation = {
+      generation: current.generation,
+      uid
+    } satisfies SecureShareOwnerOperationContext;
+
+    assertSecureShareOwnerOperationCurrent(operation, current);
+    return operation;
+  }, [currentSecureShareOwnerIdentity]);
+  const assertCurrentSecureShareOwnerOperation = useCallback(
+    (operation: SecureShareOwnerOperationContext) => {
+      assertSecureShareOwnerOperationCurrent(
+        operation,
+        currentSecureShareOwnerIdentity()
+      );
+    },
+    [currentSecureShareOwnerIdentity]
+  );
+
   const visibleNoteOwnerUids = useMemo(() => {
     if (!profile || profile.isAdmin) {
       return [];
@@ -2816,6 +2947,10 @@ export default function NotesPage() {
   }, [cursorClock, notes, ownerPublicShares]);
 
   useEffect(() => {
+    const pageGeneration = secureShareOwnerPageGeneration.current + 1;
+    secureShareOwnerPageGeneration.current = pageGeneration;
+    secureShareOwnerLoadMoreInFlight.current = false;
+    setSecureShareOwnerLoadingMore(false);
     const clientFlags = resolveSecureShareFeatureFlags();
     const uid = profile?.uid;
 
@@ -2828,6 +2963,7 @@ export default function NotesPage() {
     ) {
       setSecureShareFlags(clientFlags);
       setOwnerSecureShares([]);
+      setOwnerSecureSharesNextCursor(undefined);
       setSecureShareOwnerOpen(false);
       setSecureShareSettingsOpen(false);
       setSecureShareSelectedId(null);
@@ -2842,13 +2978,17 @@ export default function NotesPage() {
         const serverStatus = await getSecureShareFeatureStatus(controller.signal);
         const nextFlags = resolveSecureShareFeatureFlags(serverStatus);
 
-        if (controller.signal.aborted) {
+        if (
+          controller.signal.aborted
+          || secureShareOwnerPageGeneration.current !== pageGeneration
+        ) {
           return;
         }
         setSecureShareFlags(nextFlags);
 
         if (!nextFlags.v2Enabled) {
           setOwnerSecureShares([]);
+          setOwnerSecureSharesNextCursor(undefined);
           setSecureShareOwnerOpen(false);
           setSecureShareSettingsOpen(false);
           setSecureShareSelectedId(null);
@@ -2857,15 +2997,26 @@ export default function NotesPage() {
         }
 
         const idToken = await firebaseUser.getIdToken();
-        const shares = await fetchAllSecureShareOwnerSummaries(idToken);
+        const response = await listOwnedSecureShares(idToken, {
+          limit: secureShareOwnerPageSize
+        });
+        const page = parseSecureShareListPage(response);
 
-        if (!controller.signal.aborted) {
-          setOwnerSecureShares(shares);
+        if (
+          !controller.signal.aborted
+          && secureShareOwnerPageGeneration.current === pageGeneration
+        ) {
+          setOwnerSecureShares(page.shares);
+          setOwnerSecureSharesNextCursor(page.nextCursor);
         }
       } catch {
-        if (!controller.signal.aborted) {
+        if (
+          !controller.signal.aborted
+          && secureShareOwnerPageGeneration.current === pageGeneration
+        ) {
           setSecureShareFlags(resolveSecureShareFeatureFlags());
           setOwnerSecureShares([]);
+          setOwnerSecureSharesNextCursor(undefined);
           setSecureShareOwnerOpen(false);
           setSecureShareSettingsOpen(false);
           setSecureShareSelectedId(null);
@@ -2875,14 +3026,24 @@ export default function NotesPage() {
       }
     })();
 
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (secureShareOwnerPageGeneration.current === pageGeneration) {
+        secureShareOwnerPageGeneration.current += 1;
+      }
+    };
   }, [firebaseUser, privateKey, profile?.uid]);
 
   useEffect(() => {
     setSecureShareSelectedId(null);
   }, [editor.noteId]);
 
-  const refreshSecureOwnerShares = useCallback(async () => {
+  const refreshSecureOwnerShares = useCallback(async (
+    operation?: SecureShareOwnerOperationContext
+  ) => {
+    if (operation) {
+      assertCurrentSecureShareOwnerOperation(operation);
+    }
     if (
       !secureShareFlags.v2Enabled
       || !firebaseUser
@@ -2890,14 +3051,149 @@ export default function NotesPage() {
       || firebaseUser.uid !== profile.uid
     ) {
       setOwnerSecureShares([]);
+      setOwnerSecureSharesNextCursor(undefined);
       return [];
     }
 
+    const pageGeneration = secureShareOwnerPageGeneration.current;
     const idToken = await firebaseUser.getIdToken();
-    const shares = await fetchAllSecureShareOwnerSummaries(idToken);
-    setOwnerSecureShares(shares);
+    if (operation) {
+      assertCurrentSecureShareOwnerOperation(operation);
+    }
+    const response = await listOwnedSecureShares(idToken, {
+      limit: secureShareOwnerPageSize
+    });
+    if (operation) {
+      assertCurrentSecureShareOwnerOperation(operation);
+    }
+    const page = parseSecureShareListPage(response);
+
+    if (secureShareOwnerPageGeneration.current !== pageGeneration) {
+      return [];
+    }
+    setOwnerSecureShares((current) => {
+      if (operation) {
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+        } catch {
+          return current;
+        }
+      }
+      return mergeSecureShareOwnerSummaries(current, page.shares);
+    });
+    if (operation) {
+      assertCurrentSecureShareOwnerOperation(operation);
+    }
+    setOwnerSecureSharesNextCursor(page.nextCursor);
+    return page.shares;
+  }, [
+    assertCurrentSecureShareOwnerOperation,
+    firebaseUser,
+    profile,
+    secureShareFlags.v2Enabled
+  ]);
+
+  const loadCompleteSecureSharesForNote = useCallback(async (
+    sourceNoteId: string,
+    operation = captureSecureShareOwnerOperation()
+  ) => {
+    assertCurrentSecureShareOwnerOperation(operation);
+
+    if (
+      !secureShareFlags.v2Enabled
+      || !firebaseUser
+      || firebaseUser.uid !== operation.uid
+    ) {
+      throw new SecureShareOwnerOperationStaleError();
+    }
+
+    const idToken = await firebaseUser.getIdToken();
+    assertCurrentSecureShareOwnerOperation(operation);
+    const response = await listOwnedSecureShares(idToken, {
+      limit: secureShareOwnerSourcePageSize,
+      sourceNoteId
+    });
+    assertCurrentSecureShareOwnerOperation(operation);
+    const shares = parseCompleteSecureShareSourcePage(response, sourceNoteId);
+    assertCurrentSecureShareOwnerOperation(operation);
+
+    setOwnerSecureShares((current) => {
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return current;
+      }
+      const sourceShareIds = new Set(shares.map((share) => share.shareId));
+
+      return [
+        ...shares,
+        ...current.filter(
+          (share) =>
+            share.sourceNoteId !== sourceNoteId
+            && !sourceShareIds.has(share.shareId)
+        )
+      ];
+    });
     return shares;
-  }, [firebaseUser, profile, secureShareFlags.v2Enabled]);
+  }, [
+    assertCurrentSecureShareOwnerOperation,
+    captureSecureShareOwnerOperation,
+    firebaseUser,
+    secureShareFlags.v2Enabled
+  ]);
+
+  const loadMoreSecureOwnerShares = useCallback(async () => {
+    const cursor = ownerSecureSharesNextCursor;
+
+    if (
+      !cursor
+      || secureShareOwnerLoadMoreInFlight.current
+      || !secureShareFlags.v2Enabled
+      || !firebaseUser
+      || !profile
+      || firebaseUser.uid !== profile.uid
+    ) {
+      return;
+    }
+
+    secureShareOwnerLoadMoreInFlight.current = true;
+    const pageGeneration = secureShareOwnerPageGeneration.current;
+    setSecureShareOwnerLoadingMore(true);
+    setPublicShareError(null);
+
+    try {
+      const idToken = await firebaseUser.getIdToken();
+      const response = await listOwnedSecureShares(idToken, {
+        cursor,
+        limit: secureShareOwnerPageSize
+      });
+      const page = parseSecureShareListPage(response);
+
+      if (secureShareOwnerPageGeneration.current !== pageGeneration) {
+        return;
+      }
+      setOwnerSecureShares((current) => mergeSecureShareOwnerSummaries(current, page.shares));
+      setOwnerSecureSharesNextCursor(page.nextCursor);
+    } catch (caught) {
+      if (secureShareOwnerPageGeneration.current === pageGeneration) {
+        setPublicShareError(
+          caught instanceof Error
+            ? caught.message
+            : "보안 공유 이력을 더 불러오지 못했습니다."
+        );
+      }
+    } finally {
+      if (secureShareOwnerPageGeneration.current === pageGeneration) {
+        secureShareOwnerLoadMoreInFlight.current = false;
+        setSecureShareOwnerLoadingMore(false);
+      }
+    }
+  }, [
+    firebaseUser,
+    ownerSecureSharesNextCursor,
+    profile,
+    secureShareFlags.v2Enabled
+  ]);
 
   useEffect(() => {
     if (!profile || !privateKey) {
@@ -3818,6 +4114,14 @@ export default function NotesPage() {
       );
       setStatus(type === "shared" ? "공유 대상을 저장했습니다." : "개인 노트로 변경했습니다.");
     } catch (error) {
+      if (error instanceof SecureShareOwnerOperationStaleError) {
+        return;
+      }
+      if (error instanceof SecureSharePostCommitCleanupError) {
+        setStatus("공유 대상 변경은 저장되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
+        setError(error.message);
+        return;
+      }
       setEditor((current) =>
         current.noteId === noteId
           ? {
@@ -3838,20 +4142,64 @@ export default function NotesPage() {
   }
 
   async function openPublicShareDialog() {
-    if (
-      secureShareFlags.v2Enabled
-      && (activeSecureShare || (!activePublicShare && secureShares.length > 0))
-    ) {
-      const shareToManage = selectedSecureShare ?? activeSecureShare ?? secureShares[0];
+    let checkedSecureShares = secureShares;
+    let operation: SecureShareOwnerOperationContext | null = null;
 
-      if (shareToManage) {
-        await selectSecureShareForManagement(shareToManage, true);
+    if (secureShareFlags.v2Enabled && !activePublicShare) {
+      try {
+        operation = captureSecureShareOwnerOperation();
+        if (editor.noteId) {
+          checkedSecureShares = await loadCompleteSecureSharesForNote(
+            editor.noteId,
+            operation
+          );
+          assertCurrentSecureShareOwnerOperation(operation);
+        }
+      } catch (caught) {
+        if (caught instanceof SecureShareOwnerOperationStaleError) {
+          return;
+        }
+        if (!operation) {
+          return;
+        }
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+        } catch {
+          return;
+        }
+        const message = caught instanceof Error
+          ? caught.message
+          : "이 노트의 보안 공유 상태를 안전하게 확인하지 못했습니다.";
+
+        setPublicShareError(message);
+        setStatus(message);
         return;
       }
     }
 
+    if (secureShareFlags.v2Enabled && !activePublicShare && checkedSecureShares.length > 0) {
+      const shareToManage = resolveSecureShareManagementSelection(
+        checkedSecureShares,
+        secureShareSelectedId,
+        cursorClock
+      );
+
+      if (shareToManage) {
+        await selectSecureShareForManagement(
+          shareToManage,
+          true,
+          operation ?? captureSecureShareOwnerOperation()
+        );
+      }
+      return;
+    }
+
     if (secureShareFlags.v2Enabled && !activePublicShare) {
-      openSecureShareSettingsForCreate(false);
+      await openSecureShareSettingsForCreate(
+        false,
+        checkedSecureShares,
+        operation ?? captureSecureShareOwnerOperation()
+      );
       return;
     }
 
@@ -3860,25 +4208,53 @@ export default function NotesPage() {
     setPublicShareError(null);
   }
 
-  async function secureShareOwnerIdToken() {
-    if (!firebaseUser || firebaseUser.uid !== unlockedProfile.uid) {
-      throw new Error("보안 공유 작업을 위해 다시 로그인해주세요.");
+  async function secureShareOwnerIdToken(
+    operation = captureSecureShareOwnerOperation()
+  ) {
+    assertCurrentSecureShareOwnerOperation(operation);
+    if (!firebaseUser || firebaseUser.uid !== operation.uid) {
+      throw new SecureShareOwnerOperationStaleError();
     }
 
-    return firebaseUser.getIdToken();
+    const idToken = await firebaseUser.getIdToken();
+    assertCurrentSecureShareOwnerOperation(operation);
+    return idToken;
   }
 
-  function rememberSecureShareUrl(shareId: string, shareKeyValue: string) {
+  function rememberSecureShareUrl(
+    shareId: string,
+    shareKeyValue: string,
+    operation: SecureShareOwnerOperationContext
+  ) {
+    assertCurrentSecureShareOwnerOperation(operation);
     const nextUrl = publicShareUrl(shareId, shareKeyValue);
-    writeStoredPublicShareUrl(unlockedProfile.uid, shareId, nextUrl);
-    setPublicShareUrlById((current) => ({ ...current, [shareId]: nextUrl }));
+    writeStoredPublicShareUrl(operation.uid, shareId, nextUrl);
+    assertCurrentSecureShareOwnerOperation(operation);
+    setPublicShareUrlById((current) => {
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return current;
+      }
+      return { ...current, [shareId]: nextUrl };
+    });
     return nextUrl;
   }
 
-  function forgetSecureShareUrl(shareId: string) {
-    removeStoredPublicShareUrl(unlockedProfile.uid, shareId);
-    removeStoredPublicShareContentKey(unlockedProfile.uid, shareId);
+  function forgetSecureShareUrl(
+    shareId: string,
+    operation: SecureShareOwnerOperationContext
+  ) {
+    assertCurrentSecureShareOwnerOperation(operation);
+    removeStoredPublicShareUrl(operation.uid, shareId);
+    removeStoredPublicShareContentKey(operation.uid, shareId);
+    assertCurrentSecureShareOwnerOperation(operation);
     setPublicShareUrlById((current) => {
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return current;
+      }
       if (!(shareId in current)) {
         return current;
       }
@@ -3889,10 +4265,14 @@ export default function NotesPage() {
     });
   }
 
-  async function recoverSecureShareUrl(share: SecureShareOwnerSummary) {
+  async function recoverSecureShareUrl(
+    share: SecureShareOwnerSummary,
+    operation: SecureShareOwnerOperationContext
+  ) {
+    assertCurrentSecureShareOwnerOperation(operation);
     const existingUrl =
       publicShareUrlById[share.shareId]
-      ?? readStoredPublicShareUrl(unlockedProfile.uid, share.shareId);
+      ?? readStoredPublicShareUrl(operation.uid, share.shareId);
 
     if (existingUrl) {
       return existingUrl;
@@ -3902,15 +4282,64 @@ export default function NotesPage() {
     }
 
     const shareKey = await unwrapNoteKey(share.ownerWrappedShareKey, unlockedPrivateKey);
-    return rememberSecureShareUrl(share.shareId, await exportAesKeyBase64Url(shareKey));
+    assertCurrentSecureShareOwnerOperation(operation);
+    const shareKeyValue = await exportAesKeyBase64Url(shareKey);
+    assertCurrentSecureShareOwnerOperation(operation);
+    return rememberSecureShareUrl(share.shareId, shareKeyValue, operation);
   }
 
-  function openSecureShareSettingsForCreate(returnToOwner: boolean) {
-    if (!secureShareCreationAllowed || publicShareBusy) {
+  async function openSecureShareSettingsForCreate(
+    returnToOwner: boolean,
+    verifiedShares?: readonly SecureShareOwnerSummary[],
+    existingOperation?: SecureShareOwnerOperationContext
+  ) {
+    if (publicShareBusy) {
+      return;
+    }
+
+    const operation = existingOperation ?? captureSecureShareOwnerOperation();
+    assertCurrentSecureShareOwnerOperation(operation);
+    let checkedShares = verifiedShares ?? secureShares;
+
+    if (
+      verifiedShares === undefined
+      && secureShareFlags.v2Enabled
+      && editor.noteId
+    ) {
+      try {
+        checkedShares = await loadCompleteSecureSharesForNote(
+          editor.noteId,
+          operation
+        );
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch (caught) {
+        if (caught instanceof SecureShareOwnerOperationStaleError) {
+          return;
+        }
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+        } catch {
+          return;
+        }
+        setPublicShareError(
+          caught instanceof Error
+            ? caught.message
+            : "이 노트의 보안 공유 상태를 안전하게 확인하지 못했습니다."
+        );
+        return;
+      }
+    }
+
+    if (
+      activePublicShare
+      || !canManagePublicShare
+      || !canCreateSecureShareFromHistory(checkedShares, Date.now())
+    ) {
       setPublicShareError("현재 활성 또는 준비 중인 보안 공유를 먼저 중단해주세요.");
       return;
     }
 
+    assertCurrentSecureShareOwnerOperation(operation);
     setSecureShareSettingsMode("create");
     setSecureShareInitialPolicy(defaultSecureSharePolicy());
     setSecureShareEditingId(null);
@@ -3923,12 +4352,14 @@ export default function NotesPage() {
 
   async function selectSecureShareForManagement(
     share: SecureShareOwnerSummary,
-    openDialog = false
+    openDialog = false,
+    operation = captureSecureShareOwnerOperation()
   ) {
     if (publicShareBusy) {
       return;
     }
 
+    assertCurrentSecureShareOwnerOperation(operation);
     setSecureShareSelectedId(share.shareId);
     setPublicShareCopied(false);
     setPublicShareError(null);
@@ -3938,44 +4369,71 @@ export default function NotesPage() {
     setPublicShareBusy(true);
 
     try {
-      const idToken = await secureShareOwnerIdToken();
+      const idToken = await secureShareOwnerIdToken(operation);
+      assertCurrentSecureShareOwnerOperation(operation);
       const response = await getSecureShareOwnerDetails(share.shareId, idToken);
+      assertCurrentSecureShareOwnerOperation(operation);
       const details = parseSecureShareOwnerDetailsResponse(response);
 
       if (details.share.shareId !== share.shareId) {
         throw new Error("보안 공유 상세 대상이 일치하지 않습니다.");
       }
 
-      setOwnerSecureShares((current) =>
-        current.map((currentShare) =>
+      setOwnerSecureShares((current) => {
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+        } catch {
+          return current;
+        }
+        return current.map((currentShare) =>
           currentShare.shareId === details.share.shareId ? details.share : currentShare
-        )
-      );
+        );
+      });
       const capabilities = secureShareManagementCapabilities(details.share, Date.now());
 
       if (capabilities.canCopy || capabilities.canPreview) {
-        await recoverSecureShareUrl(details.share);
+        await recoverSecureShareUrl(details.share, operation);
+        assertCurrentSecureShareOwnerOperation(operation);
       }
     } catch (caught) {
+      if (caught instanceof SecureShareOwnerOperationStaleError) {
+        return;
+      }
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return;
+      }
       setPublicShareError(
         caught instanceof Error ? caught.message : "보안 공유 상태를 불러오지 못했습니다."
       );
     } finally {
-      setPublicShareBusy(false);
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+        setPublicShareBusy(false);
+      } catch {
+        // The new account lifecycle owns its own busy state.
+      }
     }
   }
 
-  async function openSecureShareSettingsForEdit(share: SecureShareOwnerSummary) {
+  async function openSecureShareSettingsForEdit(
+    share: SecureShareOwnerSummary,
+    operation = captureSecureShareOwnerOperation()
+  ) {
     if (!secureShareManagementCapabilities(share, Date.now()).canEdit || publicShareBusy) {
       return;
     }
 
+    assertCurrentSecureShareOwnerOperation(operation);
     setPublicShareBusy(true);
     setPublicShareError(null);
 
     try {
-      const idToken = await secureShareOwnerIdToken();
+      const idToken = await secureShareOwnerIdToken(operation);
+      assertCurrentSecureShareOwnerOperation(operation);
       const response = await getSecureShareOwnerDetails(share.shareId, idToken);
+      assertCurrentSecureShareOwnerOperation(operation);
       const details = parseSecureShareOwnerDetailsResponse(response);
 
       if (details.share.shareId !== share.shareId) {
@@ -3988,10 +4446,18 @@ export default function NotesPage() {
         throw new Error("허용 이메일 목록을 안전하게 불러오지 못해 설정 변경을 중단했습니다.");
       }
 
-      setOwnerSecureShares((current) =>
-        current.map((share) => share.shareId === details.share.shareId ? details.share : share)
-      );
-      await recoverSecureShareUrl(details.share);
+      setOwnerSecureShares((current) => {
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+        } catch {
+          return current;
+        }
+        return current.map((currentShare) =>
+          currentShare.shareId === details.share.shareId ? details.share : currentShare
+        );
+      });
+      await recoverSecureShareUrl(details.share, operation);
+      assertCurrentSecureShareOwnerOperation(operation);
       setSecureShareInitialPolicy(details.initialPolicy);
       setSecureShareEditingId(details.share.shareId);
       setSecureShareSelectedId(details.share.shareId);
@@ -4000,11 +4466,24 @@ export default function NotesPage() {
       setSecureShareOwnerOpen(false);
       setSecureShareSettingsOpen(true);
     } catch (caught) {
+      if (caught instanceof SecureShareOwnerOperationStaleError) {
+        return;
+      }
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return;
+      }
       setPublicShareError(
         caught instanceof Error ? caught.message : "보안 공유 설정을 불러오지 못했습니다."
       );
     } finally {
-      setPublicShareBusy(false);
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+        setPublicShareBusy(false);
+      } catch {
+        // The new account lifecycle owns its own busy state.
+      }
     }
   }
 
@@ -4013,6 +4492,8 @@ export default function NotesPage() {
       throw new Error("보안 공유 기능이 현재 비활성화되어 있습니다.");
     }
 
+    const operation = captureSecureShareOwnerOperation();
+    assertCurrentSecureShareOwnerOperation(operation);
     setPublicShareBusy(true);
     setPublicShareError(null);
     setPublicShareCopied(false);
@@ -4026,7 +4507,8 @@ export default function NotesPage() {
       }
 
       try {
-        const idToken = await secureShareOwnerIdToken();
+        const idToken = await secureShareOwnerIdToken(operation);
+        assertCurrentSecureShareOwnerOperation(operation);
         const response = await updateSecureShare(
           shareId,
           {
@@ -4039,11 +4521,18 @@ export default function NotesPage() {
             now: new Date()
           }
         );
+        assertCurrentSecureShareOwnerOperation(operation);
         const updatedShare = parseSecureShareMutationResponse(response, shareId);
 
-        setOwnerSecureShares((current) =>
-          current.map((share) => share.shareId === shareId ? updatedShare : share)
-        );
+        setOwnerSecureShares((current) => {
+          try {
+            assertCurrentSecureShareOwnerOperation(operation);
+          } catch {
+            return current;
+          }
+          return current.map((share) => share.shareId === shareId ? updatedShare : share);
+        });
+        assertCurrentSecureShareOwnerOperation(operation);
         setSecureShareSelectedId(updatedShare.shareId);
         setSecureShareSettingsOpen(false);
         setSecureShareInitialPolicy(null);
@@ -4052,50 +4541,82 @@ export default function NotesPage() {
         setSecureShareOwnerOpen(true);
         setStatus("보안 공유 설정을 저장했습니다.");
       } catch (caught) {
+        if (caught instanceof SecureShareOwnerOperationStaleError) {
+          throw caught;
+        }
+        assertCurrentSecureShareOwnerOperation(operation);
         const message = caught instanceof Error
           ? caught.message
           : "보안 공유 설정을 저장하지 못했습니다.";
         setPublicShareError(message);
         throw new Error(message);
       } finally {
-        setPublicShareBusy(false);
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+          setPublicShareBusy(false);
+        } catch {
+          // The new account lifecycle owns its own busy state.
+        }
       }
 
       return;
     }
 
     let createdShareId: string | null = null;
+    let createIdToken: string | null = null;
     const uploadedAttachmentIds: string[] = [];
 
     try {
       const savedNote = await persistCurrentNote(false, false);
+      assertCurrentSecureShareOwnerOperation(operation);
 
       if (!savedNote) {
         throw new Error("노트를 먼저 저장하지 못했습니다.");
       }
 
+      const checkedShares = await loadCompleteSecureSharesForNote(
+        savedNote.noteId,
+        operation
+      );
+      assertCurrentSecureShareOwnerOperation(operation);
+
+      if (
+        activePublicShare
+        || !canManagePublicShare
+        || !canCreateSecureShareFromHistory(checkedShares, Date.now())
+      ) {
+        throw new Error("현재 활성 또는 준비 중인 보안 공유를 먼저 중단해주세요.");
+      }
+
       const sourceState = await getNoteRevisionState(savedNote.noteId);
+      assertCurrentSecureShareOwnerOperation(operation);
 
       if (sourceState.revision !== savedNote.revision) {
         throw new NoteRevisionConflictError(savedNote.revision, sourceState.revision);
       }
 
       const noteAttachments = await getNoteAttachments(savedNote.noteId);
+      assertCurrentSecureShareOwnerOperation(operation);
 
       if (noteAttachments.length > publicNoteShareMaxAttachmentCount) {
         throw new Error(`보안 공유에는 첨부파일을 최대 ${publicNoteShareMaxAttachmentCount}개까지 포함할 수 있습니다.`);
       }
 
       const [idToken, shareKey] = await Promise.all([
-        secureShareOwnerIdToken(),
+        secureShareOwnerIdToken(operation),
         generateNoteKey()
       ]);
+      assertCurrentSecureShareOwnerOperation(operation);
+      createIdToken = idToken;
       const shareKeyValue = await exportAesKeyBase64Url(shareKey);
+      assertCurrentSecureShareOwnerOperation(operation);
       const ownerWrappedShareKey = await wrapNoteKey(shareKey, unlockedProfile.publicKeyJwk);
+      assertCurrentSecureShareOwnerOperation(operation);
       const [encryptedTitle, encryptedBody] = await Promise.all([
         encryptText(editor.title.trim() || "제목 없음", shareKey),
         encryptText(serializeEditorContent(editor.body, editor.fontSize), shareKey)
       ]);
+      assertCurrentSecureShareOwnerOperation(operation);
       const createResponse = await createSecureShare(
         {
           attachmentCount: noteAttachments.length,
@@ -4115,32 +4636,36 @@ export default function NotesPage() {
         }
       );
       const pendingShare = parseSecureShareMutationResponse(createResponse);
+      createdShareId = pendingShare.shareId;
+      assertCurrentSecureShareOwnerOperation(operation);
 
       if (pendingShare.sourceNoteId !== savedNote.noteId || pendingShare.status !== "pending") {
         throw new Error("보안 공유 생성 상태를 확인하지 못했습니다.");
       }
 
-      createdShareId = pendingShare.shareId;
       const generation = createPublicShareGeneration();
 
       for (const attachment of noteAttachments) {
         const encryptedAttachmentSource = await getEncryptedNoteAttachmentSource(attachment);
+        assertCurrentSecureShareOwnerOperation(operation);
         const [encryptedAttachment, encryptedFileName] = await Promise.all([
           reencryptAttachmentBlob(attachment, savedNote.noteKey, shareKey, encryptedAttachmentSource),
           encryptText(attachmentDownloadName(attachment), shareKey)
         ]);
+        assertCurrentSecureShareOwnerOperation(operation);
         const attachmentRef = await createPublicNoteShareAttachment(createdShareId, {
           encryptedFileName,
           extension: attachment.extension,
           generation,
           mimeType: safePublicShareAttachmentMimeType(attachment.extension),
-          ownerUid: unlockedProfile.uid,
+          ownerUid: operation.uid,
           originalSize: attachment.originalSize,
           encryptedBlob: encryptedAttachment.blob,
           encryption: encryptedAttachment.metadata,
           expiresAt: new Date(pendingShare.expiresAt),
           sourceAttachmentId: attachment.id
         });
+        assertCurrentSecureShareOwnerOperation(operation);
         uploadedAttachmentIds.push(attachmentRef.id);
       }
 
@@ -4153,17 +4678,27 @@ export default function NotesPage() {
         },
         idToken
       );
+      assertCurrentSecureShareOwnerOperation(operation);
       const activeShare = parseSecureShareMutationResponse(activateResponse, createdShareId);
 
       if (activeShare.status !== "active" || !activeShare.ready) {
         throw new Error("보안 공유 활성화 상태를 확인하지 못했습니다.");
       }
 
-      rememberSecureShareUrl(createdShareId, shareKeyValue);
-      setOwnerSecureShares((current) => [
-        activeShare,
-        ...current.filter((share) => share.shareId !== activeShare.shareId)
-      ]);
+      rememberSecureShareUrl(createdShareId, shareKeyValue, operation);
+      assertCurrentSecureShareOwnerOperation(operation);
+      setOwnerSecureShares((current) => {
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+        } catch {
+          return current;
+        }
+        return [
+          activeShare,
+          ...current.filter((share) => share.shareId !== activeShare.shareId)
+        ];
+      });
+      assertCurrentSecureShareOwnerOperation(operation);
       setSecureShareSelectedId(activeShare.shareId);
       setSecureShareSettingsOpen(false);
       setSecureShareInitialPolicy(null);
@@ -4171,7 +4706,7 @@ export default function NotesPage() {
       setSecureShareSettingsReturnToOwner(false);
       setSecureShareOwnerOpen(true);
       setStatus("보안 공유 링크를 만들었습니다.");
-      await refreshSecureOwnerShares().catch(() => undefined);
+      await refreshSecureOwnerShares(operation).catch(() => undefined);
     } catch (caught) {
       const rollbackShareId = createdShareId;
 
@@ -4184,25 +4719,48 @@ export default function NotesPage() {
       );
 
       if (rollbackShareId) {
-        const idToken = await secureShareOwnerIdToken().catch(() => null);
-
-        if (idToken) {
+        if (createIdToken) {
           await revokeSecureShare(
             rollbackShareId,
-            idToken,
+            createIdToken,
             secureShareIdempotencyKey("rollback")
           ).catch(() => undefined);
         }
-        forgetSecureShareUrl(rollbackShareId);
+        removeStoredPublicShareUrl(operation.uid, rollbackShareId);
+        removeStoredPublicShareContentKey(operation.uid, rollbackShareId);
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+          setPublicShareUrlById((current) => {
+            try {
+              assertCurrentSecureShareOwnerOperation(operation);
+            } catch {
+              return current;
+            }
+            const next = { ...current };
+            delete next[rollbackShareId];
+            return next;
+          });
+        } catch {
+          // Do not write stale operation state into a new account lifecycle.
+        }
       }
 
+      if (caught instanceof SecureShareOwnerOperationStaleError) {
+        throw caught;
+      }
+      assertCurrentSecureShareOwnerOperation(operation);
       const message = caught instanceof Error
         ? caught.message
         : "보안 공유 링크를 만들지 못했습니다.";
       setPublicShareError(message);
       throw new Error(message);
     } finally {
-      setPublicShareBusy(false);
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+        setPublicShareBusy(false);
+      } catch {
+        // The new account lifecycle owns its own busy state.
+      }
     }
   }
 
@@ -4212,20 +4770,32 @@ export default function NotesPage() {
       return;
     }
 
+    const operation = captureSecureShareOwnerOperation();
     try {
+      assertCurrentSecureShareOwnerOperation(operation);
       const url = publicShareUrlById[share.shareId]
-        ?? readStoredPublicShareUrl(unlockedProfile.uid, share.shareId)
-        ?? await recoverSecureShareUrl(share);
+        ?? readStoredPublicShareUrl(operation.uid, share.shareId)
+        ?? await recoverSecureShareUrl(share, operation);
+      assertCurrentSecureShareOwnerOperation(operation);
 
       if (!url) {
         throw new Error("이 브라우저에서 공유 키를 복구할 수 없습니다.");
       }
 
       await navigator.clipboard.writeText(url);
+      assertCurrentSecureShareOwnerOperation(operation);
       setPublicShareCopied(true);
       setPublicShareError(null);
       setStatus("보안 공유 링크를 복사했습니다.");
     } catch (caught) {
+      if (caught instanceof SecureShareOwnerOperationStaleError) {
+        return;
+      }
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return;
+      }
       setPublicShareError(
         caught instanceof Error
           ? caught.message
@@ -4239,40 +4809,64 @@ export default function NotesPage() {
       return false;
     }
 
+    const operation = captureSecureShareOwnerOperation();
+    assertCurrentSecureShareOwnerOperation(operation);
     setPublicShareBusy(true);
     setPublicShareError(null);
 
     try {
-      const idToken = await secureShareOwnerIdToken();
+      const idToken = await secureShareOwnerIdToken(operation);
+      assertCurrentSecureShareOwnerOperation(operation);
       const response = await revokeSecureShare(
         share.shareId,
         idToken,
         secureShareIdempotencyKey("revoke")
       );
+      assertCurrentSecureShareOwnerOperation(operation);
       const revokedShare = parseSecureShareMutationResponse(response, share.shareId);
 
       if (revokedShare.status !== "revoked") {
         throw new Error("보안 공유 중단 상태를 확인하지 못했습니다.");
       }
 
-      forgetSecureShareUrl(share.shareId);
-      setOwnerSecureShares((current) =>
-        current.map((currentShare) =>
+      forgetSecureShareUrl(share.shareId, operation);
+      assertCurrentSecureShareOwnerOperation(operation);
+      setOwnerSecureShares((current) => {
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+        } catch {
+          return current;
+        }
+        return current.map((currentShare) =>
           currentShare.shareId === revokedShare.shareId ? revokedShare : currentShare
-        )
-      );
+        );
+      });
+      assertCurrentSecureShareOwnerOperation(operation);
       setSecureShareSelectedId(revokedShare.shareId);
       setPublicShareCopied(false);
       setStatus("보안 공유 링크를 중단했습니다.");
-      await refreshSecureOwnerShares().catch(() => undefined);
+      await refreshSecureOwnerShares(operation).catch(() => undefined);
       return true;
     } catch (caught) {
+      if (caught instanceof SecureShareOwnerOperationStaleError) {
+        return false;
+      }
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return false;
+      }
       setPublicShareError(
         caught instanceof Error ? caught.message : "보안 공유 링크를 중단하지 못했습니다."
       );
       return false;
     } finally {
-      setPublicShareBusy(false);
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+        setPublicShareBusy(false);
+      } catch {
+        // The new account lifecycle owns its own busy state.
+      }
     }
   }
 
@@ -4669,11 +5263,22 @@ export default function NotesPage() {
     return stopped;
   }
 
-  async function failClosedSecureSharesForNote(noteId: string) {
-    const sharesToRevoke = ownerSecureShares.filter(
+  async function failClosedSecureSharesForNote(
+    noteId: string,
+    existingOperation?: SecureShareOwnerOperationContext
+  ) {
+    const operation = secureShareFlags.v2Enabled
+      ? existingOperation ?? captureSecureShareOwnerOperation(unlockedProfile.uid)
+      : null;
+    const checkedShares = secureShareFlags.v2Enabled
+      ? await loadCompleteSecureSharesForNote(noteId, operation!)
+      : ownerSecureShares.filter((share) => share.sourceNoteId === noteId);
+    if (operation) {
+      assertCurrentSecureShareOwnerOperation(operation);
+    }
+    const sharesToRevoke = checkedShares.filter(
       (share) =>
-        share.sourceNoteId === noteId
-        && ["active", "consumed", "pending"].includes(share.status)
+        ["active", "consumed", "pending"].includes(share.status)
         && !share.revokedAt
         && Date.parse(share.expiresAt) > Date.now()
         && !revokingSecureShares.current.has(share.shareId)
@@ -4686,7 +5291,8 @@ export default function NotesPage() {
       throw new Error("보안 공유를 안전하게 중단할 수 없어 원본 변경을 완료하지 못했습니다.");
     }
 
-    const idToken = await secureShareOwnerIdToken();
+    const idToken = await secureShareOwnerIdToken(operation!);
+    assertCurrentSecureShareOwnerOperation(operation!);
     const revokedShares: SecureShareOwnerSummary[] = [];
     let revokeFailure: unknown = null;
 
@@ -4699,13 +5305,14 @@ export default function NotesPage() {
           idToken,
           secureShareIdempotencyKey("source_changed")
         );
+        assertCurrentSecureShareOwnerOperation(operation!);
         const revokedShare = parseSecureShareMutationResponse(response, share.shareId);
 
         if (revokedShare.status !== "revoked") {
           throw new Error("보안 공유 중단 상태를 확인하지 못했습니다.");
         }
         revokedShares.push(revokedShare);
-        forgetSecureShareUrl(share.shareId);
+        forgetSecureShareUrl(share.shareId, operation!);
       } catch (caught) {
         revokeFailure = caught;
         break;
@@ -4714,11 +5321,18 @@ export default function NotesPage() {
       }
     }
 
-    setOwnerSecureShares((current) =>
-      current.map((share) =>
+    assertCurrentSecureShareOwnerOperation(operation!);
+    setOwnerSecureShares((current) => {
+      try {
+        assertCurrentSecureShareOwnerOperation(operation!);
+      } catch {
+        return current;
+      }
+      return current.map((share) =>
         revokedShares.find((revokedShare) => revokedShare.shareId === share.shareId) ?? share
-      )
-    );
+      );
+    });
+    assertCurrentSecureShareOwnerOperation(operation!);
     if (revokedShares.length) {
       setSecureShareOwnerOpen(false);
       setPublicShareCopied(false);
@@ -4740,7 +5354,14 @@ export default function NotesPage() {
     syncAttachments = false,
     sourceRevision?: number
   ) {
-    await failClosedSecureSharesForNote(noteId);
+    try {
+      await failClosedSecureSharesForNote(noteId);
+    } catch (error) {
+      if (error instanceof SecureShareOwnerOperationStaleError) {
+        throw error;
+      }
+      throw new SecureSharePostCommitCleanupError(error);
+    }
 
     const sharesToSync = ownerPublicShares.filter(
       (share) => share.sourceNoteId === noteId && share.ownerUid === unlockedProfile.uid && publicShareActive(share)
@@ -4846,19 +5467,33 @@ export default function NotesPage() {
 
   migrateLegacyPublicShareRef.current = migrateLegacyPublicShare;
 
-  async function stopPublicSharesForNote(noteId: string) {
+  async function stopPublicSharesForNote(
+    noteId: string,
+    sourceAlreadyCommitted = false
+  ) {
     const sharesToStop = ownerPublicShares.filter(
       (share) => share.sourceNoteId === noteId && share.ownerUid === unlockedProfile.uid
     );
 
-    await Promise.all(
-      sharesToStop.map(async (share) => {
-        await deletePublicNoteShare(share.id);
-        removeStoredPublicShareUrl(unlockedProfile.uid, share.id);
-        removeStoredPublicShareContentKey(unlockedProfile.uid, share.id);
-      })
-    );
-    await failClosedSecureSharesForNote(noteId);
+    if (sourceAlreadyCommitted) {
+      await runPublicShareCleanupWithCommitBoundary(
+        true,
+        () => failClosedSecureSharesForNote(noteId)
+      );
+    }
+
+    await runPublicShareCleanupWithCommitBoundary(sourceAlreadyCommitted, async () => {
+      await Promise.all(
+        sharesToStop.map(async (share) => {
+          await deletePublicNoteShare(share.id);
+          removeStoredPublicShareUrl(unlockedProfile.uid, share.id);
+          removeStoredPublicShareContentKey(unlockedProfile.uid, share.id);
+        })
+      );
+    });
+    if (!sourceAlreadyCommitted) {
+      await failClosedSecureSharesForNote(noteId);
+    }
 
     if (sharesToStop.length) {
       setPublicShareUrlById((current) => {
@@ -4886,6 +5521,7 @@ export default function NotesPage() {
     };
 
     setSaving(true);
+    let committedResult: PersistedNoteResult | null = null;
     const savePromise = (async () => {
       setError(null);
 
@@ -4912,6 +5548,12 @@ export default function NotesPage() {
           historySummary,
           historySnapshot
         });
+        committedResult = {
+          noteId: editor.noteId,
+          noteKey: editor.noteKey,
+          draft: saveDraft,
+          revision: result.revision
+        };
         revisionConflictNoteId.current = null;
         pendingLocalEcho.current = { noteId: editor.noteId, draft: saveDraft, createdAt: Date.now() };
         announceActiveNote(editor.noteId);
@@ -4926,7 +5568,7 @@ export default function NotesPage() {
           await syncPublicSharesForNote(editor.noteId, editor.noteKey, saveDraft, false, result.revision);
         }
         setStatus(showSavedMessage ? "변경 사항을 저장했습니다." : "자동 저장됨");
-        return { noteId: editor.noteId, noteKey: editor.noteKey, draft: saveDraft, revision: result.revision };
+        return committedResult;
       }
 
       const noteKey = await generateNoteKey();
@@ -4953,6 +5595,12 @@ export default function NotesPage() {
         historySummary,
         historySnapshot
       });
+      committedResult = {
+        noteId: created.noteId,
+        noteKey,
+        draft: saveDraft,
+        revision: created.revision
+      };
       revisionConflictNoteId.current = null;
       pendingLocalEcho.current = { noteId: created.noteId, draft: saveDraft, createdAt: Date.now() };
 
@@ -4971,8 +5619,16 @@ export default function NotesPage() {
         await syncPublicSharesForNote(created.noteId, noteKey, saveDraft);
       }
       setStatus(showSavedMessage ? "노트를 저장 목록에 추가했습니다." : "자동 저장됨");
-      return { noteId: created.noteId, noteKey, draft: saveDraft, revision: created.revision };
+      return committedResult;
     })().catch((error: unknown) => {
+      if (error instanceof SecureShareOwnerOperationStaleError) {
+        return committedResult;
+      }
+      if (error instanceof SecureSharePostCommitCleanupError && committedResult) {
+        setStatus("변경 사항은 저장되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
+        setError(error.message);
+        return committedResult;
+      }
       if (error instanceof NoteRevisionConflictError && editor.noteId) {
         revisionConflictNoteId.current = editor.noteId;
         pendingLocalEcho.current = null;
@@ -5273,6 +5929,18 @@ export default function NotesPage() {
         setError(`일부 파일은 제외했습니다. ${rejectedFiles[0]}`);
       }
     } catch (error) {
+      if (error instanceof SecureShareOwnerOperationStaleError) {
+        return;
+      }
+      if (error instanceof SecureSharePostCommitCleanupError) {
+        uploadSucceeded = true;
+        setAttachmentUploadProgress((current) =>
+          current?.runId === runId ? { ...current, phase: "complete" } : current
+        );
+        setStatus("첨부파일은 업로드되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
+        setError(error.message);
+        return;
+      }
       setAttachmentUploadProgress((current) => (current?.runId === runId ? { ...current, phase: "failed" } : current));
       setError(error instanceof Error ? error.message : "첨부파일을 업로드하지 못했습니다.");
       } finally {
@@ -5563,7 +6231,15 @@ export default function NotesPage() {
         );
         setStatus("첨부파일을 삭제했습니다.");
         return true;
-      } catch {
+      } catch (error) {
+        if (error instanceof SecureShareOwnerOperationStaleError) {
+          return true;
+        }
+        if (error instanceof SecureSharePostCommitCleanupError) {
+          setStatus("첨부파일은 삭제되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
+          setError(error.message);
+          return true;
+        }
         setError("첨부파일을 삭제하지 못했습니다.");
         return false;
       } finally {
@@ -5594,10 +6270,18 @@ export default function NotesPage() {
           expectedRevision: editor.baseRevision,
           readerUids: activeRemoteNote.participantUids
         });
-        await stopPublicSharesForNote(editor.noteId);
+        await stopPublicSharesForNote(editor.noteId, true);
         resetEditorToBlank();
         setStatus("노트를 삭제했습니다.");
     } catch (error) {
+      if (error instanceof SecureShareOwnerOperationStaleError) {
+        return;
+      }
+      if (error instanceof SecureSharePostCommitCleanupError) {
+        resetEditorToBlank("노트는 삭제되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
+        setError(error.message);
+        return;
+      }
       if (error instanceof NoteRevisionConflictError) {
         revisionConflictNoteId.current = editor.noteId;
       }
@@ -5624,7 +6308,7 @@ export default function NotesPage() {
         expectedRevision: note.revision ?? 0,
         readerUids: note.participantUids
       });
-      await stopPublicSharesForNote(note.id);
+      await stopPublicSharesForNote(note.id, true);
         setPreviewNoteId(null);
 
         if (editor.noteId === note.id) {
@@ -5634,6 +6318,19 @@ export default function NotesPage() {
       setStatus("노트를 삭제했습니다.");
       return null;
     } catch (error) {
+      if (error instanceof SecureShareOwnerOperationStaleError) {
+        return null;
+      }
+      if (error instanceof SecureSharePostCommitCleanupError) {
+        setPreviewNoteId(null);
+        if (editor.noteId === note.id) {
+          resetEditorToBlank("노트는 삭제되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
+        } else {
+          setStatus("노트는 삭제되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
+        }
+        setError(error.message);
+        return null;
+      }
       const errorMessage = noteMutationErrorMessage(error, "노트를 삭제하지 못했습니다.");
       setError(errorMessage);
       return errorMessage;
@@ -5778,6 +6475,7 @@ export default function NotesPage() {
 
     setSaving(true);
     setError(null);
+    let committedRevision: number | null = null;
 
     try {
       const noteKey = await unwrapNoteKey(rawNote.wrappedKeys[unlockedProfile.uid], unlockedPrivateKey);
@@ -5801,9 +6499,9 @@ export default function NotesPage() {
         historySummary,
         historySnapshot
       });
+      committedRevision = result.revision;
       revisionConflictNoteId.current = null;
       announceActiveNote(note.id);
-      await syncPublicSharesForNote(note.id, noteKey, saveDraft, false, result.revision);
 
       const currentEditor = latestEditorRef.current;
       const preserveIndependentEditorDraft =
@@ -5827,6 +6525,7 @@ export default function NotesPage() {
         pendingLocalEcho.current = { noteId: note.id, draft: saveDraft, createdAt: Date.now() };
       }
 
+      await syncPublicSharesForNote(note.id, noteKey, saveDraft, false, result.revision);
       setStatus(
         preserveIndependentEditorDraft
           ? "팝업 변경 사항을 저장했고, 편집기에 있던 별도 초안은 그대로 유지했습니다."
@@ -5834,6 +6533,17 @@ export default function NotesPage() {
       );
       return { revision: result.revision };
     } catch (error) {
+      if (error instanceof SecureShareOwnerOperationStaleError && committedRevision !== null) {
+        return { revision: committedRevision };
+      }
+      if (
+        error instanceof SecureSharePostCommitCleanupError
+        && committedRevision !== null
+      ) {
+        setStatus("팝업 변경 사항은 저장되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
+        setError(error.message);
+        return { revision: committedRevision, error: error.message };
+      }
       const errorMessage = noteMutationErrorMessage(error, "노트를 저장하지 못했습니다.");
       if (error instanceof NoteRevisionConflictError) {
         revisionConflictNoteId.current = note.id;
@@ -6131,18 +6841,21 @@ export default function NotesPage() {
             shareUrl={activePublicShareUrl}
           />
         )}
-        {secureShareOwnerOpen && selectedSecureShare && secureShareFlags.v2Enabled && (
+        {secureShareOwnerOpen && secureShareFlags.v2Enabled && (
           <SecureShareOwnerModal
             busy={publicShareBusy}
             canCreate={secureShareCreationAllowed}
             copied={publicShareCopied}
             error={publicShareError}
+            hasMore={false}
+            loadingMore={secureShareOwnerLoadingMore}
             noteTitle={editor.title.trim() || "제목 없음"}
             nowMilliseconds={cursorClock}
             onClose={() => setSecureShareOwnerOpen(false)}
             onCopy={(share) => void copySecureShareUrl(share)}
-            onCreate={() => openSecureShareSettingsForCreate(true)}
+            onCreate={() => void openSecureShareSettingsForCreate(true)}
             onEdit={(share) => void openSecureShareSettingsForEdit(share)}
+            onLoadMore={() => void loadMoreSecureOwnerShares()}
             onRevoke={stopSecureShare}
             onSelect={(share) => void selectSecureShareForManagement(share)}
             share={selectedSecureShare}
@@ -6430,12 +7143,15 @@ export function SecureShareOwnerModal({
   canCreate,
   copied,
   error,
+  hasMore,
+  loadingMore,
   noteTitle,
   nowMilliseconds,
   onClose,
   onCopy,
   onCreate,
   onEdit,
+  onLoadMore,
   onRevoke,
   onSelect,
   share,
@@ -6446,15 +7162,18 @@ export function SecureShareOwnerModal({
   canCreate: boolean;
   copied: boolean;
   error: string | null;
+  hasMore: boolean;
+  loadingMore: boolean;
   noteTitle: string;
   nowMilliseconds: number;
   onClose: () => void;
   onCopy: (share: SecureShareOwnerSummary) => void;
   onCreate: () => void;
   onEdit: (share: SecureShareOwnerSummary) => void;
+  onLoadMore: () => void;
   onRevoke: (share: SecureShareOwnerSummary) => Promise<boolean>;
   onSelect: (share: SecureShareOwnerSummary) => void;
-  share: SecureShareOwnerSummary;
+  share: SecureShareOwnerSummary | null;
   shares: SecureShareOwnerSummary[];
   shareUrl: string | null;
 }) {
@@ -6463,7 +7182,10 @@ export function SecureShareOwnerModal({
   const dialogRef = useRef<HTMLElement | null>(null);
   const revokeButtonRef = useRef<HTMLButtonElement | null>(null);
   const revokeReturnFocusRef = useRef<"history" | "trigger" | null>(null);
-  const capabilities = secureShareManagementCapabilities(share, nowMilliseconds);
+  const interactionBusy = busy || loadingMore;
+  const capabilities = share
+    ? secureShareManagementCapabilities(share, nowMilliseconds)
+    : null;
   const orderedShares = useMemo(
     () => [...shares].sort((left, right) =>
       Date.parse(right.createdAt) - Date.parse(left.createdAt)
@@ -6479,21 +7201,23 @@ export function SecureShareOwnerModal({
     const dialog = dialogRef.current;
 
     if (
-      busy
+      interactionBusy
       || !dialog
       || (document.activeElement !== dialog && dialog.contains(document.activeElement))
     ) {
       return;
     }
 
-    dialog.querySelector<HTMLElement>(
+    const focusTarget = dialog.querySelector<HTMLElement>(
       '.secure-share-history-item[aria-current="true"]:not(:disabled)'
-    )?.focus({ preventScroll: true });
-  }, [busy, share.shareId]);
+    ) ?? dialog.querySelector<HTMLElement>("#secure-share-detail-title");
+
+    focusTarget?.focus({ preventScroll: true });
+  }, [interactionBusy, share?.shareId]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape" || busy || revokeTarget) {
+      if (event.key !== "Escape" || interactionBusy || revokeTarget) {
         return;
       }
 
@@ -6503,12 +7227,12 @@ export function SecureShareOwnerModal({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onClose, revokeTarget]);
+  }, [interactionBusy, onClose, revokeTarget]);
 
   useEffect(() => {
     const returnFocus = revokeReturnFocusRef.current;
 
-    if (busy || revokeTarget || !returnFocus) {
+    if (interactionBusy || revokeTarget || !returnFocus) {
       return;
     }
 
@@ -6524,7 +7248,7 @@ export function SecureShareOwnerModal({
       revokeReturnFocusRef.current = null;
       target.focus({ preventScroll: true });
     }
-  }, [busy, revokeTarget, share.shareId]);
+  }, [interactionBusy, revokeTarget, share?.shareId]);
 
   function cancelRevoke() {
     revokeReturnFocusRef.current = "trigger";
@@ -6533,7 +7257,7 @@ export function SecureShareOwnerModal({
   }
 
   async function confirmRevoke() {
-    if (!revokeTarget || busy) {
+    if (!revokeTarget || interactionBusy) {
       return;
     }
 
@@ -6550,7 +7274,7 @@ export function SecureShareOwnerModal({
       <div
         className="modal-backdrop public-share-backdrop"
         role="presentation"
-        onMouseDown={busy || revokeTarget ? undefined : onClose}
+        onMouseDown={interactionBusy || revokeTarget ? undefined : onClose}
       >
         <section
           aria-hidden={revokeTarget ? "true" : undefined}
@@ -6573,7 +7297,7 @@ export function SecureShareOwnerModal({
             <button
               aria-label="보안 공유 창 닫기"
               className="icon-button"
-              disabled={busy || Boolean(revokeTarget)}
+              disabled={interactionBusy || Boolean(revokeTarget)}
               onClick={onClose}
               type="button"
             >
@@ -6585,14 +7309,20 @@ export function SecureShareOwnerModal({
               <div>
                 <strong>{noteTitle}</strong>
                 <span>
-                  보안 공유 {shares.length}개 · 표시 시간대 {timeZone}
+                  {hasMore ? "불러온 " : ""}보안 공유 {shares.length}개 · 표시 시간대 {timeZone}
                 </span>
               </div>
               <button
                 className="secondary-button"
-                disabled={busy || !canCreate}
+                disabled={interactionBusy || !canCreate}
                 onClick={onCreate}
-                title={canCreate ? "이 노트에 새 보안 공유 만들기" : "활성 또는 준비 중인 공유를 먼저 중단해주세요."}
+                title={
+                  canCreate
+                    ? "이 노트에 새 보안 공유 만들기"
+                    : hasMore
+                      ? "공유 이력을 모두 불러온 후 새 공유를 만들 수 있습니다."
+                      : "활성 또는 준비 중인 공유를 먼저 중단해주세요."
+                }
                 type="button"
               >
                 <FilePlus2 aria-hidden="true" size={16} />
@@ -6601,22 +7331,26 @@ export function SecureShareOwnerModal({
             </div>
 
             <div className="secure-share-management-layout">
-              <nav aria-label="이 노트의 보안 공유 이력" className="secure-share-history">
+              <nav
+                aria-busy={loadingMore ? "true" : undefined}
+                aria-label="이 노트의 보안 공유 이력"
+                className="secure-share-history"
+              >
                 <h3>
                   <History aria-hidden="true" size={16} />
                   공유 이력
                 </h3>
-                <div className="secure-share-history-list">
+                <div className="secure-share-history-list" id="secure-share-history-list">
                   {orderedShares.map((candidate) => {
                     const status = secureShareManagementStatus(candidate, nowMilliseconds);
-                    const selected = candidate.shareId === share.shareId;
+                    const selected = candidate.shareId === share?.shareId;
 
                     return (
                       <button
                         aria-current={selected ? "true" : undefined}
                         className={`secure-share-history-item ${selected ? "selected" : ""}`}
-                        data-dialog-initial-focus={selected && !busy ? true : undefined}
-                        disabled={busy}
+                        data-dialog-initial-focus={selected && !interactionBusy ? true : undefined}
+                        disabled={interactionBusy}
                         key={candidate.shareId}
                         onClick={() => {
                           setRevokeTarget(null);
@@ -6637,13 +7371,39 @@ export function SecureShareOwnerModal({
                       </button>
                     );
                   })}
+                  {orderedShares.length === 0 && (
+                    <p className="public-share-missing-key">
+                      현재 불러온 이력에 이 노트의 보안 공유가 없습니다.
+                    </p>
+                  )}
                 </div>
+                {hasMore && (
+                  <button
+                    aria-controls="secure-share-history-list"
+                    className="secondary-button"
+                    data-dialog-initial-focus={!share && !interactionBusy ? true : undefined}
+                    disabled={interactionBusy}
+                    onClick={onLoadMore}
+                    type="button"
+                  >
+                    {loadingMore
+                      ? <Loader2 aria-hidden="true" className="spin" size={16} />
+                      : <History aria-hidden="true" size={16} />}
+                    {loadingMore ? "불러오는 중..." : "더 보기"}
+                  </button>
+                )}
+                {loadingMore && (
+                  <p aria-live="polite" className="public-share-status">
+                    보안 공유 이력을 더 불러오는 중...
+                  </p>
+                )}
               </nav>
 
-              <section
-                aria-labelledby="secure-share-detail-title"
-                className="secure-share-management-detail"
-              >
+              {share && capabilities ? (
+                <section
+                  aria-labelledby="secure-share-detail-title"
+                  className="secure-share-management-detail"
+                >
                 <div className="secure-share-detail-heading">
                   <div>
                     <span className={`secure-share-status-badge ${capabilities.status}`}>
@@ -6720,14 +7480,14 @@ export function SecureShareOwnerModal({
 
                 <div className="public-share-modal-actions secure-share-management-actions">
                   <button
-                    disabled={busy || !capabilities.canCopy || !shareUrl}
+                    disabled={interactionBusy || !capabilities.canCopy || !shareUrl}
                     onClick={() => onCopy(share)}
                     type="button"
                   >
                     {copied ? <CheckCircle2 aria-hidden="true" size={16} /> : <Copy aria-hidden="true" size={16} />}
                     {copied ? "복사됨" : "URL 복사"}
                   </button>
-                  {!busy && capabilities.canPreview && shareUrl ? (
+                  {!interactionBusy && capabilities.canPreview && shareUrl ? (
                     <a
                       className="secondary-button public-share-open-link"
                       href={shareUrl}
@@ -6745,7 +7505,7 @@ export function SecureShareOwnerModal({
                   )}
                   <button
                     className="secondary-button"
-                    disabled={busy || !capabilities.canEdit}
+                    disabled={interactionBusy || !capabilities.canEdit}
                     onClick={() => onEdit(share)}
                     type="button"
                   >
@@ -6754,7 +7514,7 @@ export function SecureShareOwnerModal({
                   </button>
                   <button
                     className="secondary-button danger"
-                    disabled={busy || !capabilities.canRevoke}
+                    disabled={interactionBusy || !capabilities.canRevoke}
                     onClick={() => {
                       setRevokeAttempted(false);
                       setRevokeTarget(share);
@@ -6773,7 +7533,23 @@ export function SecureShareOwnerModal({
                   </p>
                 )}
                 {error && <p className="form-error" role="alert">{error}</p>}
-              </section>
+                </section>
+              ) : (
+                <section
+                  aria-labelledby="secure-share-detail-title"
+                  className="secure-share-management-detail"
+                >
+                  <div className="secure-share-detail-heading">
+                    <h3 id="secure-share-detail-title" tabIndex={-1}>선택한 공유 상세</h3>
+                  </div>
+                  <p className="public-share-missing-key">
+                    {hasMore
+                      ? "‘더 보기’를 눌러 이 노트의 이전 공유를 확인하거나 전체 이력 확인을 완료해주세요."
+                      : "이 노트에는 관리할 보안 공유 이력이 없습니다."}
+                  </p>
+                  {error && <p className="form-error" role="alert">{error}</p>}
+                </section>
+              )}
             </div>
           </div>
         </section>

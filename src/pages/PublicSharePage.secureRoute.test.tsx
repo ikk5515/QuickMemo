@@ -78,8 +78,8 @@ function LoginStateProbe() {
   return <pre>{JSON.stringify({ hash: location.hash, state: location.state })}</pre>;
 }
 
-function renderRoute(entry: string) {
-  return render(
+function TestRoute({ entry }: { entry: string }) {
+  return (
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/share/:shareId" element={<PublicSharePage />} />
@@ -87,6 +87,10 @@ function renderRoute(entry: string) {
       </Routes>
     </MemoryRouter>
   );
+}
+
+function renderRoute(entry: string) {
+  return render(<TestRoute entry={entry} />);
 }
 
 describe("PublicSharePage Secure Share v2 route wrapper", () => {
@@ -243,5 +247,74 @@ describe("PublicSharePage Secure Share v2 route wrapper", () => {
       signal: expect.any(AbortSignal),
       onProgress: expect.any(Function)
     }));
+  });
+
+  it("aborts an active copy and rejects its stale callback when the authenticated identity changes", async () => {
+    const entry = `/share/ss2_secure_123456#key=${"I".repeat(43)}`;
+    const firstProfile = {
+      uid: "owner_first_123456",
+      isActive: true,
+      isAdmin: false,
+      featureAccess: { notes: true, library: false, schedule: false },
+      publicKeyJwk: {}
+    };
+    const nextProfile = {
+      ...firstProfile,
+      uid: "owner_next_123456",
+      publicKeyJwk: { kty: "RSA" }
+    };
+    mocks.auth = {
+      firebaseUser: {
+        uid: firstProfile.uid,
+        getIdToken: vi.fn(async () => "header.payload.first-signature")
+      },
+      loading: false,
+      privateKey: { account: "first" },
+      profile: firstProfile
+    };
+    const activeSignal = { current: null as AbortSignal | null };
+    mocks.saveSecureShareCopy.mockImplementation(async (input: {
+      signal: AbortSignal;
+    }) => {
+      activeSignal.current = input.signal;
+      await new Promise<void>((_resolve, reject) => {
+        input.signal.addEventListener(
+          "abort",
+          () => reject(new DOMException("copy aborted", "AbortError")),
+          { once: true }
+        );
+      });
+    });
+
+    const view = renderRoute(entry);
+    fireEvent.click(await screen.findByRole("button", { name: "secure-save-copy" }));
+    await waitFor(() => expect(mocks.saveSecureShareCopy).toHaveBeenCalledTimes(1));
+    const staleSaveCopy = mocks.secureViewerProps?.onSaveCopy as
+      | ((payload: unknown) => Promise<void>)
+      | undefined;
+    expect(staleSaveCopy).toBeTypeOf("function");
+    if (!staleSaveCopy) {
+      throw new Error("stale save-copy callback was not captured");
+    }
+    expect(activeSignal.current?.aborted).toBe(false);
+
+    mocks.auth = {
+      firebaseUser: {
+        uid: nextProfile.uid,
+        getIdToken: vi.fn(async () => "header.payload.next-signature")
+      },
+      loading: false,
+      privateKey: { account: "next" },
+      profile: nextProfile
+    };
+    view.rerender(<TestRoute entry={entry} />);
+
+    await waitFor(() => expect(activeSignal.current?.aborted).toBe(true));
+    await expect(staleSaveCopy({ attachments: [] })).rejects.toThrow(
+      /로그인 상태가 변경/
+    );
+    expect(mocks.saveSecureShareCopy).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("보안 공유의 독립 복사본을 QuickMemo에 저장했습니다."))
+      .not.toBeInTheDocument();
   });
 });

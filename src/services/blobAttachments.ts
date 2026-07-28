@@ -6,6 +6,7 @@ import type { EncryptedPayload } from "../types";
 
 const blobAttachmentApiPath = "/api/blob-attachments";
 const blobContentType = "application/octet-stream";
+const cancelBlobAttachmentUploadAttempts = 2;
 
 export type BlobAttachmentScope = "note" | "publicShare";
 
@@ -24,6 +25,7 @@ interface BaseBlobAttachmentUploadInput {
   mimeType: string;
   onUploadProgress?: BlobAttachmentUploadProgressHandler;
   originalSize: number;
+  signal?: AbortSignal;
 }
 
 export interface NoteBlobAttachmentUploadInput extends BaseBlobAttachmentUploadInput {
@@ -55,6 +57,33 @@ interface DeleteBlobAttachmentInput {
   noteId?: string;
   scope: BlobAttachmentScope;
   shareId?: string;
+}
+
+export class BlobAttachmentReservationCleanupError extends Error {
+  readonly attachmentId: string;
+  readonly cleanupError: unknown;
+  readonly code = "blob/reservation-cleanup-failed";
+  readonly noteId?: string;
+  readonly scope: BlobAttachmentScope;
+  readonly shareId?: string;
+  readonly uploadError: unknown;
+
+  constructor(
+    input: DeleteBlobAttachmentInput,
+    uploadError: unknown,
+    cleanupError: unknown
+  ) {
+    super("첨부파일 업로드 예약 정리를 완료하지 못했습니다.", {
+      cause: uploadError
+    });
+    this.name = "BlobAttachmentReservationCleanupError";
+    this.attachmentId = input.attachmentId;
+    this.cleanupError = cleanupError;
+    this.noteId = input.noteId;
+    this.scope = input.scope;
+    this.shareId = input.shareId;
+    this.uploadError = uploadError;
+  }
 }
 
 interface BlobClientTokenResponse {
@@ -118,14 +147,19 @@ function encryptionPayloadFields(encryption: AttachmentEncryptionMetadata) {
   };
 }
 
-async function completeBlobAttachmentUpload(input: CompletedBlobAttachmentUploadInput, idToken: string) {
+async function completeBlobAttachmentUpload(
+  input: CompletedBlobAttachmentUploadInput,
+  idToken: string,
+  signal?: AbortSignal
+) {
   const response = await fetch(blobAttachmentApiPath, {
     method: "PATCH",
     headers: {
       "content-type": "application/json",
       ...authHeaders(idToken)
     },
-    body: JSON.stringify(input)
+    body: JSON.stringify(input),
+    signal
   });
 
   if (!response.ok) {
@@ -135,17 +169,44 @@ async function completeBlobAttachmentUpload(input: CompletedBlobAttachmentUpload
 }
 
 async function cancelBlobAttachmentUpload(input: DeleteBlobAttachmentInput, idToken: string) {
-  await fetch(blobAttachmentApiPath, {
-    method: "DELETE",
-    headers: {
-      "content-type": "application/json",
-      ...authHeaders(idToken)
-    },
-    body: JSON.stringify(input)
-  }).catch(() => undefined);
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < cancelBlobAttachmentUploadAttempts; attempt += 1) {
+    try {
+      const response = await fetch(blobAttachmentApiPath, {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          ...authHeaders(idToken)
+        },
+        body: JSON.stringify(input)
+      });
+
+      if (response.ok) {
+        return;
+      }
+
+      const body = await response.json().catch(() => ({}));
+      lastError = new Error(
+        typeof body.error === "string"
+          ? body.error
+          : "첨부파일 업로드 예약을 정리하지 못했습니다."
+      );
+    } catch (caught) {
+      lastError = caught;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("첨부파일 업로드 예약을 정리하지 못했습니다.");
 }
 
-async function requestBlobClientToken(pathname: string, clientPayload: string, idToken: string) {
+async function requestBlobClientToken(
+  pathname: string,
+  clientPayload: string,
+  idToken: string
+) {
   const response = await fetch(blobAttachmentApiPath, {
     method: "POST",
     headers: {
@@ -175,7 +236,9 @@ async function requestBlobClientToken(pathname: string, clientPayload: string, i
 }
 
 export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadInput) {
+  throwIfRequestAborted(input.signal);
   const idToken = await currentUserIdToken();
+  throwIfRequestAborted(input.signal);
   const pathname = noteBlobPath(input);
   const payload = {
     scope: "note",
@@ -193,22 +256,44 @@ export async function uploadNoteAttachmentBlob(input: NoteBlobAttachmentUploadIn
 
   try {
     const clientPayload = JSON.stringify(payload);
+    // Token issuance reserves quota server-side. Let that response settle so a
+    // cancellation can release the reservation deterministically.
     const token = await requestBlobClientToken(pathname, clientPayload, idToken);
     hasReservation = true;
+    throwIfRequestAborted(input.signal);
     const blob = await put(pathname, input.encryptedBlob, {
       access: "private",
+      abortSignal: input.signal,
       contentType: blobContentType,
       multipart: true,
       onUploadProgress: input.onUploadProgress,
       token
     });
 
-    await completeBlobAttachmentUpload({ scope: "note", noteId: input.noteId, attachmentId: input.attachmentId, blob }, idToken);
+    await completeBlobAttachmentUpload(
+      { scope: "note", noteId: input.noteId, attachmentId: input.attachmentId, blob },
+      idToken,
+      input.signal
+    );
 
     return blob;
   } catch (error) {
     if (hasReservation) {
-      await cancelBlobAttachmentUpload({ scope: "note", noteId: input.noteId, attachmentId: input.attachmentId }, idToken);
+      const cleanupTarget = {
+        scope: "note" as const,
+        noteId: input.noteId,
+        attachmentId: input.attachmentId
+      };
+
+      try {
+        await cancelBlobAttachmentUpload(cleanupTarget, idToken);
+      } catch (cleanupError) {
+        throw new BlobAttachmentReservationCleanupError(
+          cleanupTarget,
+          error,
+          cleanupError
+        );
+      }
     }
     throw error;
   }
@@ -218,7 +303,9 @@ export async function uploadPublicShareAttachmentBlob(
   input: PublicShareBlobAttachmentUploadInput,
   ownerUid: string
 ) {
+  throwIfRequestAborted(input.signal);
   const idToken = await currentUserIdToken();
+  throwIfRequestAborted(input.signal);
   const pathname = publicShareBlobPath({ ...input, ownerUid });
   const payload = {
     scope: "publicShare",
@@ -239,8 +326,10 @@ export async function uploadPublicShareAttachmentBlob(
     const clientPayload = JSON.stringify(payload);
     const token = await requestBlobClientToken(pathname, clientPayload, idToken);
     hasReservation = true;
+    throwIfRequestAborted(input.signal);
     const blob = await put(pathname, input.encryptedBlob, {
       access: "private",
+      abortSignal: input.signal,
       contentType: blobContentType,
       multipart: true,
       onUploadProgress: input.onUploadProgress,
@@ -249,13 +338,28 @@ export async function uploadPublicShareAttachmentBlob(
 
     await completeBlobAttachmentUpload(
       { scope: "publicShare", shareId: input.shareId, attachmentId: input.attachmentId, blob },
-      idToken
+      idToken,
+      input.signal
     );
 
     return blob;
   } catch (error) {
     if (hasReservation) {
-      await cancelBlobAttachmentUpload({ scope: "publicShare", shareId: input.shareId, attachmentId: input.attachmentId }, idToken);
+      const cleanupTarget = {
+        scope: "publicShare" as const,
+        shareId: input.shareId,
+        attachmentId: input.attachmentId
+      };
+
+      try {
+        await cancelBlobAttachmentUpload(cleanupTarget, idToken);
+      } catch (cleanupError) {
+        throw new BlobAttachmentReservationCleanupError(
+          cleanupTarget,
+          error,
+          cleanupError
+        );
+      }
     }
     throw error;
   }

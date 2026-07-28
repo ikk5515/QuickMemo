@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SecurePublicShareCopyPayload } from "../components/SecurePublicShareViewer";
+import { maxAttachmentFileBytes } from "./attachments";
+import { BlobAttachmentReservationCleanupError } from "../services/blobAttachments";
 import type { UserProfile } from "../types";
 import {
+  estimateSecureShareCopyAttachmentLiveBytes,
   saveSecureShareCopy,
+  secureShareCopyLiveByteBudget,
+  selectSecureShareCopyAttachmentStarts,
   SecureShareSaveCopyError,
   type SecureShareSaveCopyProgress
 } from "./secureShareSaveCopy";
@@ -33,19 +38,37 @@ const wrappedKey = {
   wrappedKey: "wrapped-owner-key"
 };
 
-function attachment(id: string, fileName: string) {
+function deferred<T>() {
+  let reject!: (reason?: unknown) => void;
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+
+  return { promise, reject, resolve };
+}
+
+function metadataOnlyBlob(size: number) {
+  return {
+    size,
+    type: "application/pdf"
+  } as Blob;
+}
+
+function attachment(id: string, fileName: string, originalSize = 4) {
   return {
     id,
     fileName,
     extension: "pdf",
     mimeType: "application/pdf",
-    originalSize: 4,
+    originalSize,
     previewAllowed: true,
     encryption: {
       version: 1 as const,
       algorithm: "AES-GCM" as const,
-      originalSize: 4,
-      encryptedSize: 20,
+      originalSize,
+      encryptedSize: originalSize + 16,
       iv: new Uint8Array(12)
     }
   };
@@ -85,11 +108,14 @@ function dependencies() {
       state: "active" as const
     })),
     createCopyJobId: vi.fn(() => "copy_job_1234567890"),
-    createNoteAttachment: vi.fn(async (input: { onUploadProgress?: (progress: {
-      loaded: number;
-      percentage: number;
-      total: number;
-    }) => void }) => {
+    createNoteAttachment: vi.fn(async (input: {
+      onUploadProgress?: (progress: {
+        loaded: number;
+        percentage: number;
+        total: number;
+      }) => void;
+      signal?: AbortSignal;
+    }) => {
       input.onUploadProgress?.({ loaded: 20, percentage: 100, total: 20 });
       return { id: "new_attachment_123456" };
     }),
@@ -130,7 +156,30 @@ function dependencies() {
 }
 
 describe("secure share save-copy saga", () => {
-  it("creates an independent personal note and re-encrypts attachments sequentially", async () => {
+  it("selects work by estimated live bytes and isolates a maximum-size attachment", () => {
+    const mebibyte = 1024 * 1024;
+
+    expect(estimateSecureShareCopyAttachmentLiveBytes(maxAttachmentFileBytes))
+      .toBeGreaterThan(secureShareCopyLiveByteBudget);
+    expect(selectSecureShareCopyAttachmentStarts({
+      activeOriginalSizes: [],
+      pendingOriginalSizes: [maxAttachmentFileBytes, mebibyte]
+    })).toBe(1);
+    expect(selectSecureShareCopyAttachmentStarts({
+      activeOriginalSizes: [maxAttachmentFileBytes],
+      pendingOriginalSizes: [mebibyte]
+    })).toBe(0);
+    expect(selectSecureShareCopyAttachmentStarts({
+      activeOriginalSizes: [],
+      pendingOriginalSizes: [10 * mebibyte, 10 * mebibyte, 10 * mebibyte, 10 * mebibyte]
+    })).toBe(3);
+    expect(selectSecureShareCopyAttachmentStarts({
+      activeOriginalSizes: [],
+      pendingOriginalSizes: [30 * mebibyte, 30 * mebibyte]
+    })).toBe(1);
+  });
+
+  it("creates an independent personal note and re-encrypts attachments", async () => {
     const deps = dependencies();
     const source = payload([
       attachment("attachment_123456", "report.pdf"),
@@ -184,15 +233,126 @@ describe("secure share save-copy saga", () => {
     ]));
   });
 
+  it("bounds attachment work to three tasks and propagates one cancellable signal", async () => {
+    const deps = dependencies();
+    const attachments = Array.from({ length: 5 }, (_, index) =>
+      attachment(`attachment_${index}123456`, `report-${index}.pdf`)
+    );
+    const source = payload(attachments);
+    const gates = new Map(
+      attachments.map(({ id }) => [id, deferred<Blob>()])
+    );
+    let activeDownloads = 0;
+    let maximumActiveDownloads = 0;
+
+    vi.mocked(source.copyAttachment).mockImplementation(async (metadata, taskSignal) => {
+      expect(taskSignal?.aborted).toBe(false);
+      activeDownloads += 1;
+      maximumActiveDownloads = Math.max(maximumActiveDownloads, activeDownloads);
+
+      try {
+        return await gates.get(metadata.id)!.promise;
+      } finally {
+        activeDownloads -= 1;
+      }
+    });
+
+    const saving = saveSecureShareCopy({
+      payload: source,
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps);
+
+    await vi.waitFor(() => expect(source.copyAttachment).toHaveBeenCalledTimes(3));
+    expect(maximumActiveDownloads).toBe(3);
+
+    gates.get(attachments[0].id)!.resolve(
+      new Blob([new Uint8Array([1, 2, 3, 4])], { type: "application/pdf" })
+    );
+    await vi.waitFor(() => expect(source.copyAttachment).toHaveBeenCalledTimes(4));
+    gates.get(attachments[1].id)!.resolve(
+      new Blob([new Uint8Array([1, 2, 3, 4])], { type: "application/pdf" })
+    );
+    await vi.waitFor(() => expect(source.copyAttachment).toHaveBeenCalledTimes(5));
+
+    for (const gate of gates.values()) {
+      gate.resolve(new Blob([new Uint8Array([1, 2, 3, 4])], {
+        type: "application/pdf"
+      }));
+    }
+
+    await expect(saving).resolves.toEqual({ noteId: "new_note_123456" });
+    expect(maximumActiveDownloads).toBe(3);
+    expect(deps.createNoteAttachment).toHaveBeenCalledTimes(5);
+    const uploadSignals = vi.mocked(deps.createNoteAttachment).mock.calls.map(
+      ([input]) => input.signal
+    );
+    expect(uploadSignals.every((taskSignal) =>
+      taskSignal instanceof AbortSignal && !taskSignal.aborted
+    )).toBe(true);
+  });
+
+  it("runs a maximum-size attachment alone between smaller queued files", async () => {
+    const deps = dependencies();
+    const attachments = [
+      attachment("attachment_123456", "small-first.pdf"),
+      attachment("attachment_234567", "large.pdf", maxAttachmentFileBytes),
+      attachment("attachment_345678", "small-last.pdf")
+    ];
+    const source = payload(attachments);
+    const gates = new Map(
+      attachments.map(({ id }) => [id, deferred<Blob>()])
+    );
+
+    vi.mocked(source.copyAttachment).mockImplementation((metadata) =>
+      gates.get(metadata.id)!.promise
+    );
+
+    const saving = saveSecureShareCopy({
+      payload: source,
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps);
+
+    await vi.waitFor(() => expect(source.copyAttachment).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(source.copyAttachment).mock.calls[0]?.[0].id)
+      .toBe(attachments[0].id);
+
+    gates.get(attachments[0].id)!.resolve(metadataOnlyBlob(attachments[0].originalSize));
+    await vi.waitFor(() => expect(source.copyAttachment).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(source.copyAttachment).mock.calls[1]?.[0].id)
+      .toBe(attachments[1].id);
+    expect(source.copyAttachment).toHaveBeenCalledTimes(2);
+
+    gates.get(attachments[1].id)!.resolve(metadataOnlyBlob(attachments[1].originalSize));
+    await vi.waitFor(() => expect(source.copyAttachment).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(source.copyAttachment).mock.calls[2]?.[0].id)
+      .toBe(attachments[2].id);
+    gates.get(attachments[2].id)!.resolve(metadataOnlyBlob(attachments[2].originalSize));
+
+    await expect(saving).resolves.toEqual({ noteId: "new_note_123456" });
+  });
+
   it("compensates uploaded objects and soft-deletes revision 1 without mutating the source share", async () => {
     const deps = dependencies();
     const source = payload([
       attachment("attachment_123456", "report.pdf"),
       attachment("attachment_234567", "second.pdf")
     ]);
-    vi.mocked(source.copyAttachment)
-      .mockResolvedValueOnce(new Blob([new Uint8Array([1, 2, 3, 4])], { type: "application/pdf" }))
-      .mockRejectedValueOnce(new Error("copy failed"));
+    const failSecondCopy = deferred<Blob>();
+    vi.mocked(source.copyAttachment).mockImplementation((metadata) =>
+      metadata.id === "attachment_123456"
+        ? Promise.resolve(new Blob([new Uint8Array([1, 2, 3, 4])], {
+            type: "application/pdf"
+          }))
+        : failSecondCopy.promise
+    );
+    vi.mocked(deps.createNoteAttachment).mockImplementation(async () => {
+      failSecondCopy.reject(new Error("copy failed"));
+      return { id: "new_attachment_123456" } as never;
+    });
 
     await expect(saveSecureShareCopy({
       payload: source,
@@ -213,12 +373,153 @@ describe("secure share save-copy saga", () => {
     });
   });
 
+  it("waits for concurrent uploads to settle and cleans successful objects in reverse input order", async () => {
+    const deps = dependencies();
+    const source = payload([
+      attachment("attachment_123456", "first.pdf"),
+      attachment("attachment_234567", "second.pdf"),
+      attachment("attachment_345678", "third.pdf"),
+      attachment("attachment_456789", "fourth.pdf")
+    ]);
+    const uploadGates = [
+      deferred<{ id: string }>(),
+      deferred<{ id: string }>(),
+      deferred<{ id: string }>()
+    ];
+
+    vi.mocked(deps.createNoteAttachment).mockImplementation((input) => {
+      const index = ["first", "second", "third"].indexOf(input.fileName);
+
+      if (index < 0) {
+        throw new Error("a fourth task must not start after failure");
+      }
+      return uploadGates[index].promise as never;
+    });
+
+    const saving = saveSecureShareCopy({
+      payload: source,
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps);
+    const savingResult = saving.catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(deps.createNoteAttachment).toHaveBeenCalledTimes(3));
+    uploadGates[1].reject(new Error("upload failed"));
+    await vi.waitFor(() => {
+      const signals = vi.mocked(deps.createNoteAttachment).mock.calls.map(
+        ([input]) => input.signal
+      );
+      expect(signals.every((taskSignal) => taskSignal?.aborted)).toBe(true);
+    });
+    expect(deps.deleteNoteAttachment).not.toHaveBeenCalled();
+
+    uploadGates[0].resolve({ id: "new_attachment_first" });
+    uploadGates[2].resolve({ id: "new_attachment_third" });
+
+    await expect(savingResult).resolves.toMatchObject({ code: "save_failed" });
+    expect(deps.createNoteAttachment).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(deps.deleteNoteAttachment).mock.calls).toEqual([
+      ["new_note_123456", "new_attachment_third"],
+      ["new_note_123456", "new_attachment_first"]
+    ]);
+    expect(deps.abortSecureShareCopyingNote).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-cleans a leaked reservation target after sibling uploads settle", async () => {
+    const deps = dependencies();
+    const source = payload([
+      attachment("attachment_123456", "first.pdf"),
+      attachment("attachment_234567", "second.pdf")
+    ]);
+    const firstFailureGate = deferred<void>();
+    const secondUploadGate = deferred<{ id: string }>();
+
+    vi.mocked(deps.createNoteAttachment).mockImplementation(async (input) => {
+      if (input.fileName === "first") {
+        await firstFailureGate.promise;
+        throw new BlobAttachmentReservationCleanupError(
+          {
+            attachmentId: "reserved_attachment_first",
+            noteId: "new_note_123456",
+            scope: "note"
+          },
+          new DOMException("upload cancelled", "AbortError"),
+          new Error("reservation delete failed")
+        );
+      }
+
+      return secondUploadGate.promise as never;
+    });
+
+    const saving = saveSecureShareCopy({
+      payload: source,
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps);
+    const savingResult = saving.catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(deps.createNoteAttachment).toHaveBeenCalledTimes(2));
+    firstFailureGate.resolve(undefined);
+    await vi.waitFor(() => {
+      const signals = vi.mocked(deps.createNoteAttachment).mock.calls.map(
+        ([input]) => input.signal
+      );
+      expect(signals.every((taskSignal) => taskSignal?.aborted)).toBe(true);
+    });
+    expect(deps.deleteNoteAttachment).not.toHaveBeenCalled();
+
+    secondUploadGate.resolve({ id: "new_attachment_second" });
+
+    await expect(savingResult).resolves.toMatchObject({ code: "save_failed" });
+    expect(vi.mocked(deps.deleteNoteAttachment).mock.calls).toEqual([
+      ["new_note_123456", "new_attachment_second"],
+      ["new_note_123456", "reserved_attachment_first"]
+    ]);
+    expect(deps.abortSecureShareCopyingNote).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports incomplete cleanup when a leaked reservation cannot be re-cleaned", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.createNoteAttachment).mockRejectedValue(
+      new BlobAttachmentReservationCleanupError(
+        {
+          attachmentId: "reserved_attachment_123456",
+          noteId: "new_note_123456",
+          scope: "note"
+        },
+        new DOMException("upload cancelled", "AbortError"),
+        new Error("reservation delete failed")
+      )
+    );
+    vi.mocked(deps.deleteNoteAttachment).mockRejectedValue(
+      new Error("reservation still cannot be deleted")
+    );
+
+    await expect(saveSecureShareCopy({
+      payload: payload(),
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps)).rejects.toMatchObject({ code: "cleanup_incomplete" });
+
+    expect(deps.deleteNoteAttachment).toHaveBeenCalledTimes(2);
+    expect(deps.deleteNoteAttachment).toHaveBeenNthCalledWith(
+      1,
+      "new_note_123456",
+      "reserved_attachment_123456"
+    );
+    expect(deps.abortSecureShareCopyingNote).toHaveBeenCalledTimes(1);
+  });
+
   it("uses the same compensation path when cancellation arrives during upload", async () => {
     const deps = dependencies();
     const controller = new AbortController();
     const source = payload();
-    vi.mocked(deps.createNoteAttachment).mockImplementation(async () => {
+    vi.mocked(deps.createNoteAttachment).mockImplementation(async (input) => {
       controller.abort();
+      expect(input.signal?.aborted).toBe(true);
       return { id: "new_attachment_123456" } as never;
     });
 

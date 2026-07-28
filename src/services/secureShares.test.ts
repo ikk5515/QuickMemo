@@ -86,7 +86,11 @@ describe("secure share API client", () => {
   it("uses the flat action router, includes credentials, and sends owner auth", async () => {
     vi.mocked(fetch).mockResolvedValue(jsonResponse({ items: [] }));
 
-    await listOwnedSecureShares(idToken, { limit: 20, status: "active" });
+    await listOwnedSecureShares(idToken, {
+      limit: 20,
+      sourceNoteId: "note_source_123456",
+      status: "active"
+    });
 
     expect(fetch).toHaveBeenCalledTimes(1);
     const [url, init] = vi.mocked(fetch).mock.calls[0];
@@ -95,6 +99,7 @@ describe("secure share API client", () => {
 
     expect(parsedUrl.pathname).toBe("/api/public-shares-v2");
     expect(parsedUrl.searchParams.get("action")).toBe("owner-list");
+    expect(parsedUrl.searchParams.get("sourceNoteId")).toBe("note_source_123456");
     expect(parsedUrl.searchParams.get("status")).toBe("active");
     expect(init).toMatchObject({
       cache: "no-store",
@@ -104,6 +109,14 @@ describe("secure share API client", () => {
       referrerPolicy: "no-referrer"
     });
     expect(headers.get("authorization")).toBe(`Bearer ${idToken}`);
+  });
+
+  it("rejects an invalid owner-list source note identifier before making a request", () => {
+    expect(() => listOwnedSecureShares(idToken, {
+      sourceNoteId: "invalid source note"
+    })).toThrow("sourceNoteId 값이 올바르지 않습니다.");
+
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("sends optional owner authentication on metadata without any fragment material", async () => {
@@ -203,11 +216,18 @@ describe("secure share API client", () => {
       password: " 123456 "
     });
 
-    await createSecureShareComment(shareId, { body: "안전한 댓글" });
+    await createSecureShareComment(shareId, {
+      body: "안전한 댓글",
+      clientRequestId: "comment-request-123456"
+    });
     const secondRequest = vi.mocked(fetch).mock.calls[1];
     const headers = new Headers(secondRequest[1]?.headers);
 
     expect(headers.get("x-csrf-token")).toBe(csrfToken);
+    expect(JSON.parse(String(secondRequest[1]?.body))).toEqual({
+      body: "안전한 댓글",
+      clientRequestId: "comment-request-123456"
+    });
     expect(String(secondRequest[0])).not.toContain(csrfToken);
   });
 
@@ -234,7 +254,10 @@ describe("secure share API client", () => {
     );
     await createSecureShareComment(
       shareId,
-      { body: "소유자 댓글" },
+      {
+        body: "소유자 댓글",
+        clientRequestId: "comment-request-owner-123456"
+      },
       { idToken }
     );
 
@@ -268,7 +291,10 @@ describe("secure share API client", () => {
   });
 
   it("fails closed when a post-session mutation has no in-memory CSRF token", async () => {
-    await expect(createSecureShareComment(shareId, { body: "댓글" }))
+    await expect(createSecureShareComment(shareId, {
+      body: "댓글",
+      clientRequestId: "comment-request-failure-123456"
+    }))
       .rejects.toMatchObject({ code: "session_required", status: 401 });
     expect(fetch).not.toHaveBeenCalled();
   });

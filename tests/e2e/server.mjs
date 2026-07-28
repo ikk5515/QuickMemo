@@ -27,6 +27,7 @@ Object.assign(process.env, {
   SHARE_EMAIL_PROVIDER: "resend",
   SHARE_EMAIL_API_KEY: "re_e2e_local_only_not_a_real_provider_key",
   SHARE_EMAIL_FROM: "QuickMemo E2E <e2e-sender@example.test>",
+  SHARE_EMAIL_SENDER_VERIFIED: "true",
   VITE_FIREBASE_API_KEY: "fake-emulator-api-key",
   VITE_FIREBASE_AUTH_DOMAIN: `${projectId}.firebaseapp.com`,
   VITE_FIREBASE_PROJECT_ID: projectId,
@@ -34,6 +35,8 @@ Object.assign(process.env, {
   VITE_FIREBASE_MESSAGING_SENDER_ID: "000000000000",
   VITE_FIREBASE_APP_ID: "1:000000000000:web:quickmemo-e2e",
   VITE_USE_FIREBASE_EMULATORS: "true",
+  VITE_E2E_FIRESTORE_FORCE_LONG_POLLING: "true",
+  VITE_E2E_NAVIGATION_BRIDGE: "true",
   VITE_SECURE_SHARE_V2_ENABLED: "true"
 });
 
@@ -72,11 +75,14 @@ Object.assign(process.env, {
   SHARE_EMAIL_PROVIDER: "resend",
   SHARE_EMAIL_API_KEY: "re_e2e_local_only_not_a_real_provider_key",
   SHARE_EMAIL_FROM: "QuickMemo E2E <e2e-sender@example.test>",
+  SHARE_EMAIL_SENDER_VERIFIED: "true",
   VITE_FIREBASE_AUTH_DOMAIN: `${projectId}.firebaseapp.com`,
   VITE_FIREBASE_STORAGE_BUCKET: `${projectId}.appspot.com`,
   VITE_FIREBASE_MESSAGING_SENDER_ID: "000000000000",
   VITE_FIREBASE_APP_ID: "1:000000000000:web:quickmemo-e2e",
   VITE_USE_FIREBASE_EMULATORS: "true",
+  VITE_E2E_FIRESTORE_FORCE_LONG_POLLING: "true",
+  VITE_E2E_NAVIGATION_BRIDGE: "true",
   VITE_SECURE_SHARE_V2_ENABLED: "true"
 });
 
@@ -304,6 +310,11 @@ async function handleE2eRequest(request, response, url) {
     }
     const fixture = await fixtures.seedE2eScenario(body.scenario);
     json(response, 201, { ok: true, fixture });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/__e2e__/quota-hard") {
+    await fixtures.seedE2eEmailQuotaAtHardLimit();
+    json(response, 200, { ok: true });
     return;
   }
   if (request.method === "POST" && url.pathname === "/__e2e__/mutate") {

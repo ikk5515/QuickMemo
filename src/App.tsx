@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
 import { hasFeatureAccess } from "./lib/featureAccess";
 import { createLibraryCaptureLoginState } from "./lib/libraryCapture";
@@ -20,6 +20,27 @@ function PageLoadingFallback() {
     <div className="page-center" role="status" aria-live="polite">
       불러오는 중...
     </div>
+  );
+}
+
+function E2eNavigationBridge() {
+  const navigate = useNavigate();
+
+  return (
+    <button
+      aria-hidden="true"
+      data-quickmemo-e2e-navigation
+      hidden
+      onClick={(event) => {
+        const target = event.currentTarget.dataset.target;
+        delete event.currentTarget.dataset.target;
+        if (target) {
+          navigate(target);
+        }
+      }}
+      tabIndex={-1}
+      type="button"
+    />
   );
 }
 
@@ -111,6 +132,7 @@ export function RequireAuth({
 export default function App() {
   return (
     <Suspense fallback={<PageLoadingFallback />}>
+      {import.meta.env.VITE_E2E_NAVIGATION_BRIDGE === "true" && <E2eNavigationBridge />}
       <SecureShareCopyRecovery />
       <Routes>
         <Route path="/" element={<Navigate to="/login" replace />} />

@@ -90,6 +90,9 @@ describe("managed user backend deletion", () => {
       "publicShareRecipients",
       "publicShareAccessSessions",
       "publicShareEmailChallenges",
+      "publicShareEmailDeliveries",
+      "publicShareCopyGrantRequests",
+      "publicShareSourceGuards",
       "publicShareUnlockGrants",
       "publicShareRateLimits",
       "publicShareComments",
@@ -112,6 +115,16 @@ describe("managed user backend deletion", () => {
     );
     expect(deleteManagedUserSource).toContain("maxManagedUserDeleteIterations");
     expect(deleteManagedUserSource).toContain("Secure share ownership changed during cleanup");
+    expect(deleteManagedUserSource).toContain("secureShareEmailDeliveriesDeleted");
+    expect(deleteManagedUserSource).toContain("secureShareCopyGrantRequestsDeleted");
+    expect(deleteManagedUserSource).toContain("secureShareSourceGuardsDeleted");
+    expect(deleteManagedUserSource).toContain(
+      "deleteSecureShareCopyGrantRequestsByRequester("
+    );
+    expect(deleteManagedUserSource).toContain('"requesterUid",');
+    expect(deleteManagedUserSource).not.toContain(
+      'collectionId: "publicShareEmailQuotaBuckets"'
+    );
   });
 
   it("deletes owner-scoped library items and the target user's immutable vault", () => {

@@ -110,6 +110,7 @@ export interface SecureShareOwnerActivateInput {
 export interface SecureShareListOptions {
   cursor?: string;
   limit?: number;
+  sourceNoteId?: string;
   status?: "active" | "consumed" | "expired" | "revoked";
 }
 
@@ -129,6 +130,7 @@ export interface SecureShareAccessInput {
 
 export interface SecureShareCommentInput {
   body: string;
+  clientRequestId: string;
 }
 
 export interface SecureShareViewerRequestOptions {
@@ -542,6 +544,10 @@ export function listOwnedSecureShares(idToken: string, options: SecureShareListO
     ? 20
     : Math.min(100, Math.max(1, Math.trunc(options.limit)));
 
+  if (options.sourceNoteId !== undefined) {
+    assertIdentifier(options.sourceNoteId, "sourceNoteId");
+  }
+
   return secureShareApiRequest({
     action: "owner-list",
     method: "GET",
@@ -549,6 +555,7 @@ export function listOwnedSecureShares(idToken: string, options: SecureShareListO
     query: {
       cursor: options.cursor,
       limit,
+      sourceNoteId: options.sourceNoteId,
       status: options.status
     }
   });

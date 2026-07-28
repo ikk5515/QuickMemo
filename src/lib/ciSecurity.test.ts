@@ -29,8 +29,12 @@ describe("CI/CD security controls", () => {
     expect(vercelWorkflowSource).toContain("persist-credentials: false");
   });
 
-  it("uses an explicitly versioned Vercel CLI for token-bearing deploys", () => {
+  it("uses an explicitly versioned Vercel CLI without putting its token in argv", () => {
     expect(vercelWorkflowSource).toContain("npx --yes vercel@54.4.1 deploy");
     expect(vercelWorkflowSource).not.toContain("npx vercel deploy");
+    expect(vercelWorkflowSource).toContain("VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}");
+    expect(vercelWorkflowSource).not.toContain("--token");
+    expect(vercelWorkflowSource).toContain("fetch-depth: 2");
+    expect(vercelWorkflowSource).toContain("git diff --check HEAD^ HEAD");
   });
 });

@@ -134,7 +134,20 @@ describe("public share backend cleanup", () => {
 
     expect(retentionSource).toContain("perQueueFairShare");
     expect(retentionSource).toContain("perFieldFairShare");
-    expect(retentionSource).toContain("secureShareRootStateCollections.map");
+    expect(retentionSource).toContain("secureShareRootStateCollections");
+    expect(retentionSource).toContain(".map((collectionId) =>");
+    expect(retentionSource).toContain("secureShareGlobalRetentionCollections");
+    expect(cleanupFunctionSource).toContain('"publicShareEmailQuotaBuckets"');
+    expect(cleanupFunctionSource).toContain('"publicShareCopyGrantRequests"');
+    expect(cleanupFunctionSource).toContain('"publicShareSourceGuards"');
+    expect(cleanupFunctionSource).toContain("secureShareCopyGrantRequestsDeleted");
+    expect(cleanupFunctionSource).toContain("secureShareSourceGuardsDeleted");
+    expect(cleanupFunctionSource).toContain(
+      '.filter((collectionId) => collectionId !== "publicShareEmailDeliveries")'
+    );
+    expect(cleanupFunctionSource).toMatch(
+      /const secureShareRootStateCollections = \[[\s\S]*?"publicShareEmailDeliveries"/u
+    );
     expect(retentionSource).toContain('collectionId: "items"');
     expect(storageDeleteSource).toContain(
       'envValue("LEGACY_FIREBASE_STORAGE_ENABLED") !== "true"'
@@ -869,6 +882,7 @@ describe("public share backend cleanup", () => {
       "publicShareRecipients",
       "publicShareAccessSessions",
       "publicShareEmailChallenges",
+      "publicShareEmailDeliveries",
       "publicShareUnlockGrants",
       "publicShareRateLimits",
       "publicShareComments",
@@ -888,6 +902,8 @@ describe("public share backend cleanup", () => {
       shareTreeSource.indexOf("deleteDocumentNames([shareName]")
     );
     expect(cleanupFunctionSource).toContain('["expiresAt", "retentionExpiresAt"]');
+    expect(cleanupFunctionSource).toContain("secureShareEmailDeliveriesDeleted");
+    expect(cleanupFunctionSource).toContain("secureShareEmailQuotaBucketsDeleted");
     expect(cleanupFunctionSource).toContain("Math.floor(stats.maxDocumentDeletes / 10)");
   });
 });

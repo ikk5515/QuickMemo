@@ -16,6 +16,9 @@ without changing the existing end-to-end content encryption boundary.
 - `SECURE_SHARE_EMAIL_ENABLED=true` is required before OTP delivery is
   available. It must remain false until the Production email provider, sender
   domain, and approved smoke-test mailbox are verified.
+- `SHARE_EMAIL_SENDER_VERIFIED=true` is a separate exact flag. Keep it false
+  until the configured `SHARE_EMAIL_FROM` domain or sender is shown as verified
+  by the provider. It is not inferred from the presence of an API key.
 - Email false does not disable Core v2. Existing email-gated policies and
   sessions fail closed with `email_feature_unavailable`; they are never
   downgraded to a link-only or authenticated-users policy.
@@ -85,9 +88,41 @@ Production activation requires:
 - a verified sender domain,
 - a server-only API credential,
 - `SHARE_EMAIL_FROM`,
+- `SHARE_EMAIL_SENDER_VERIFIED=true` only after that sender verification is
+  confirmed,
+- a signed Resend webhook with replay-safe bounce/complaint suppression,
 - an approved operator-controlled smoke-test mailbox (do not persist it as an
   application environment variable),
 - a real delivery and wrong-code/reuse smoke test.
+
+The signed webhook and suppression path is not implemented in this release.
+That is an Email activation blocker, not a reason to weaken an existing email
+policy or downgrade it to link-only access. Keep `SECURE_SHARE_EMAIL_ENABLED`
+false until the path and its provider-side endpoint are both verified.
+
+### Email quota guard
+
+Resend Free currently provides 100 transactional emails per day and 3,000 per
+month. QuickMemo defaults to lower UTC limits so provider usage, inbound mail,
+and operational retries retain headroom:
+
+- `SHARE_EMAIL_DAILY_SOFT_LIMIT=64`
+- `SHARE_EMAIL_DAILY_HARD_LIMIT=80`
+- `SHARE_EMAIL_MONTHLY_SOFT_LIMIT=1920`
+- `SHARE_EMAIL_MONTHLY_HARD_LIMIT=2400`
+
+The server clamps configured hard limits to 80 daily and 2,400 monthly and
+clamps each soft limit to its hard limit. Both `reservedCount` and `sentCount`
+count toward the hard stop. Reservation, challenge, delivery idempotency
+record, and both UTC quota buckets commit together; a definite provider
+failure releases the reservation, while an ambiguous delivery remains
+reserved to prevent oversending. Provider `429` remains fail closed.
+
+These defaults leave 20% below the published Resend Free limits. Re-check the
+[official Resend account quotas](https://resend.com/docs/knowledge-base/account-quotas-and-limits)
+before activation because provider limits can change. If another application
+or inbound email shares the same Resend team, reduce QuickMemo's limits rather
+than raising them.
 
 ## One-time semantics
 
@@ -138,12 +173,35 @@ capability.
 
 Comments are plain text, 1 to 2,000 characters. HTML is not accepted. Author
 badges are derived from the server session, never from client-supplied role or
-email fields.
+email fields. A client-generated request ID is HMAC-bound to the share and
+session identity, so a retry of the same body returns the existing comment
+instead of creating a duplicate. Control, bidi, and zero-width format
+characters used for spoofing are rejected. Successful creation is prepended
+locally and deletion removes the local row without refetching the whole page.
 
 Save-copy requires both a valid share session and an active, non-anonymous
 QuickMemo login. Decryption and re-encryption stay in the browser. The content
 key is never sent to the server. A copy uses a new note key and independent
 attachment objects; comments and audit events are not copied.
+
+Copy-grant issuance is persistently idempotent. The browser keeps one stable
+request ID for the copy attempt, while the server stores only a deterministic
+HMAC-bound request document in `publicShareCopyGrantRequests`. An exact retry
+under the same user, share, policy, and session returns the original signed
+grant and exact token expiration without repeating attachment quota work,
+rate-limit consumption, or audit creation.
+
+New issuance or renewal reads the share, policy, request document, and current
+minute rate bucket in one Firestore read-write transaction. The request,
+single rate increment, and deterministic audit event commit atomically.
+Concurrent retries therefore converge on one grant. A grant that has expired,
+has at most 15 seconds remaining, or belongs to an older valid session/policy
+is renewed in the same request document with a higher issuance generation.
+Malformed or cross-bound request state fails closed. The signed grant expires
+within five minutes and never later than its share or session. A lost commit
+response is recovered by rereading the request document; the attachment
+download path still validates only the signed grant, current user, session,
+and policy and does not read the idempotency document.
 
 ## Download and quick-copy limits
 
@@ -171,6 +229,10 @@ Rules and are accessed only by the server:
 - `publicShareRecipients`
 - `publicShareAccessSessions`
 - `publicShareEmailChallenges`
+- `publicShareEmailQuotaBuckets`
+- `publicShareEmailDeliveries`
+- `publicShareCopyGrantRequests`
+- `publicShareSourceGuards`
 - `publicShareUnlockGrants`
 - `publicShareRateLimits`
 - `publicShareComments`
@@ -185,6 +247,36 @@ are denied.
 Session documents contain token and CSRF digests only. They never contain the
 content key, password, OTP, raw email, raw IP, Firebase ID token, cookie, or
 authorization header.
+
+Email delivery documents contain only HMAC email identifiers, provider message
+ID hashes, quota bucket IDs, lifecycle status, owner/share IDs, and timestamps.
+They never store raw recipient addresses, OTP values, or provider credentials.
+Delivery idempotency records expire after 48 hours. Daily quota buckets remain
+until 45 days after the next UTC day and monthly buckets until 400 days after
+the next UTC month so operational reconciliation remains possible. The
+authenticated cleanup route deletes expired records in bounded daily batches;
+email delivery records receive a dedicated maximum 200-document drain before
+the shared retention queues, which is above the app's 80-message daily hard
+limit while remaining inside the global cleanup delete/runtime budget.
+managed-user deletion removes owner-scoped delivery records but never deletes
+the global quota buckets.
+
+Copy-grant request documents are server-only and retain the signed grant,
+HMAC request/token identifiers, owner/requester IDs, policy/session binding,
+issuance generation, and timestamps. They never store the raw client request
+ID, content key, decrypted note data, cookie, Firebase ID token, or CSRF token.
+They expire 24 hours after the grant and are removed by expiration cleanup,
+share-tree cleanup, owner deletion, or requester-account deletion.
+
+Source-share guard documents use a deterministic server HMAC of the owner UID
+and source note ID. They contain no content key or plaintext note data and are
+never readable or writable by Firebase clients. Share creation reads the
+source note, guard, and the complete bounded source history in one Firestore
+transaction. Only an unexpired `pending` or `active` share blocks creation;
+`consumed`, `revoked`, expired, or orphaned stale guards are replaced. Revoke
+and one-time consumption remove a guard only when it still points to that same
+share. Expiration cleanup and managed-user deletion also remove remaining
+owner-scoped guards.
 
 ## Session and request security
 
@@ -285,12 +377,38 @@ or audited abort removes the claim. Malformed claims are retained for manual
 repair. Ambiguous or racing transitions retain the job for a later recovery
 pass instead of overwriting the newer state.
 
+The browser processes at most three copy attachments concurrently. The first
+failure aborts sibling download/upload work, waits for in-flight tasks to
+settle, and compensates completed attachments in reverse source order.
+The same `AbortSignal` is carried from encrypted copy download through Vercel
+Blob upload and completion; an upload reservation that loses the cancellation
+race is released with a non-aborted cleanup request.
+
+## Owner management pagination
+
+The owner management view requests 20 summaries at a time through the existing
+server cursor and loads later pages only when the owner activates the
+accessible `더 보기` control. It does not fetch 1,000 shares on mount. Cursor
+results are merged by share ID and stale account responses are ignored.
+Create and source mutation use a separate `ownerUid + sourceNoteId`
+equality-only query. The owner predicate is enforced in Firestore as well as
+after decoding, so another tenant cannot consume this history bound. That mode
+does not accept a cursor, reads at most 101 documents, filters
+owner/schema/status again on the server, and returns `nextCursor: null` only
+when the complete owner-scoped history is at most 100 documents. More than 100
+matching documents fails closed until retention cleanup or operator repair
+restores a bounded complete history.
+
 ## Rate limits
 
 Default server-side buckets:
 
 - password: share and IP, 5 attempts per 15 minutes; IP, 20 per hour,
 - OTP send: share and email, 3 per 15 minutes and 10 per day; IP, 20 per hour,
+- email provider API requests: 2 globally per fixed UTC second, with a
+  distributed token consumed immediately before every provider attempt,
+  including an idempotent retry; this also caps a rolling one-second boundary
+  at four requests beneath a five-request operational ceiling,
 - OTP verify: 5 per challenge,
 - comments: session and share, 5 per minute and 50 per day,
 - copy grant: session, 3 per minute,
@@ -306,8 +424,9 @@ revealing counters.
 
 ## Environment variables
 
-The repository's `.env.example` lists names only. Values belong in the
-approved Vercel Production secret workflow.
+The repository's `.env.example` lists variable names and non-secret safety
+defaults only. Secret values belong in the approved Vercel Production secret
+workflow.
 
 Never use a `VITE_` prefix for a password pepper, session/cookie/CSRF/OTP/email
 or rate-limit HMAC key, or an email API credential.
@@ -321,6 +440,19 @@ email-only while `SECURE_SHARE_EMAIL_ENABLED=false`. `CRON_SECRET` is separate
 from both groups. Generate every secret independently from at least 32 random
 bytes (48–64 recommended), inject it through stdin or an equivalent
 non-logging secret workflow, and report only whether each variable exists.
+
+Email readiness additionally requires all of the following:
+
+- `SHARE_EMAIL_PROVIDER=resend`
+- non-empty `SHARE_EMAIL_API_KEY` and `SHARE_EMAIL_FROM`
+- exact `SHARE_EMAIL_SENDER_VERIFIED=true`
+- distinct `SHARE_OTP_HMAC_KEY`, `SHARE_EMAIL_HMAC_KEY`, and
+  `SHARE_RATE_LIMIT_HMAC_KEY` values of at least 32 bytes
+- daily/monthly soft and hard limits reviewed against the current provider
+  account quota
+
+The committed example deliberately keeps `SECURE_SHARE_EMAIL_ENABLED=false`
+and `SHARE_EMAIL_SENDER_VERIFIED=false`.
 
 Changing a Vercel environment variable requires a new Production deployment
 before runtime behavior changes.
@@ -408,9 +540,10 @@ should the previously recorded pre-guard Vercel deployment be restored; that
 exceptional rollback also removes the global upload guard and therefore
 requires an upload maintenance window and close monitoring.
 
-This release changes no Rules or Storage configuration. Keep the new additive
-index in place during rollback; do not deploy an older index file, because that
-can request an unnecessary index deletion.
+This release adds deny-only Firestore Rules for email quota and delivery state
+but changes no Storage configuration. Keep those deny rules and the additive
+index in place during rollback; do not deploy older Rules or index files,
+because that can expose server state or request an unnecessary index deletion.
 
 Do not delete v2 documents, comments, copied notes, or indexes as an emergency
 rollback shortcut. Confirm login, notes, v1 share, attachments, and the

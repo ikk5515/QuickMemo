@@ -18,6 +18,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent
@@ -95,6 +96,15 @@ type SecureShareViewerPhase =
   | "loading_content"
   | "ready"
   | "unavailable";
+
+interface SecureShareViewerLifecycle {
+  contentKey: string;
+  generation: number;
+  idToken?: string;
+  isAuthenticated: boolean;
+  shareId: string;
+  signal?: AbortSignal;
+}
 
 export interface SecurePublicShareViewerProps {
   contentKey: string;
@@ -591,6 +601,51 @@ function parseCommentsDto(value: unknown) {
   return { items, nextCursor };
 }
 
+function parseCommentMutationDto(value: unknown) {
+  if (
+    !isPlainRecord(value)
+    || value.ok !== true
+    || !safeString(value.requestId, 128)
+  ) {
+    return null;
+  }
+  const parsed = parseCommentsDto({
+    ok: true,
+    items: [value.comment],
+    nextCursor: null,
+    requestId: value.requestId
+  });
+  return parsed?.items[0] ?? null;
+}
+
+function mergeCommentPage(
+  current: SecureShareComment[],
+  incoming: SecureShareComment[],
+  append: boolean
+) {
+  const incomingIds = new Set<string>();
+  const uniqueIncoming = incoming.filter((comment) => {
+    if (incomingIds.has(comment.id)) {
+      return false;
+    }
+    incomingIds.add(comment.id);
+    return true;
+  });
+
+  if (append) {
+    const currentIds = new Set(current.map((comment) => comment.id));
+    return [
+      ...current,
+      ...uniqueIncoming.filter((comment) => !currentIds.has(comment.id))
+    ];
+  }
+
+  return [
+    ...current.filter((comment) => !incomingIds.has(comment.id)),
+    ...uniqueIncoming
+  ];
+}
+
 function parseCopyGrantDto(value: unknown) {
   if (
     !isPlainRecord(value)
@@ -735,10 +790,22 @@ export function SecurePublicShareViewer({
   const [commentCursor, setCommentCursor] = useState<string | null>(null);
   const [commentBody, setCommentBody] = useState("");
   const [commentError, setCommentError] = useState("");
+  const commentRequestRef = useRef<{ body: string; clientRequestId: string } | null>(null);
+  const saveCopyRequestRef = useRef<{
+    clientRequestId: string;
+    shareId: string;
+  } | null>(null);
   const accessErrorRef = useRef<HTMLParagraphElement | null>(null);
   const keyRef = useRef<CryptoKey | null>(null);
   const mountedRef = useRef(true);
   const loadGenerationRef = useRef(0);
+  const lifecycleControllerRef = useRef<AbortController | null>(null);
+  const lifecycleIdentityRef = useRef({
+    contentKey,
+    idToken,
+    isAuthenticated,
+    shareId
+  });
   const objectUrlsRef = useRef(new Set<string>());
   const cleanupTimersRef = useRef(new Set<number>());
   const [unlockAttemptId] = useState(() => crypto.randomUUID());
@@ -759,6 +826,38 @@ export function SecurePublicShareViewer({
     && (!requiresOneTimeConfirmation || oneTimeConfirmed)
   );
 
+  useLayoutEffect(() => {
+    lifecycleIdentityRef.current = {
+      contentKey,
+      idToken,
+      isAuthenticated,
+      shareId
+    };
+  }, [contentKey, idToken, isAuthenticated, shareId]);
+
+  function captureLifecycle(): SecureShareViewerLifecycle {
+    return {
+      contentKey,
+      generation: loadGenerationRef.current,
+      idToken,
+      isAuthenticated,
+      shareId,
+      signal: lifecycleControllerRef.current?.signal
+    };
+  }
+
+  function lifecycleIsCurrent(lifecycle: SecureShareViewerLifecycle) {
+    const current = lifecycleIdentityRef.current;
+
+    return mountedRef.current
+      && !lifecycle.signal?.aborted
+      && lifecycle.generation === loadGenerationRef.current
+      && lifecycle.contentKey === current.contentKey
+      && lifecycle.idToken === current.idToken
+      && lifecycle.isAuthenticated === current.isAuthenticated
+      && lifecycle.shareId === current.shareId;
+  }
+
   const revokeObjectUrls = useCallback(() => {
     cleanupTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     cleanupTimersRef.current.clear();
@@ -772,6 +871,10 @@ export function SecurePublicShareViewer({
       mountedRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    saveCopyRequestRef.current = null;
+  }, [shareId]);
 
   useEffect(() => {
     if (resendSeconds <= 0) {
@@ -796,6 +899,8 @@ export function SecurePublicShareViewer({
       return;
     }
 
+    const generation = loadGenerationRef.current;
+
     try {
       const parsed = parseCommentsDto(await listSecureShareComments(shareId, {
         cursor: cursor ?? undefined,
@@ -803,18 +908,26 @@ export function SecurePublicShareViewer({
         limit: 20
       }));
 
-      if (!parsed || !mountedRef.current) {
-        if (!parsed) {
+      if (
+        !parsed
+        || !mountedRef.current
+        || generation !== loadGenerationRef.current
+      ) {
+        if (
+          !parsed
+          && mountedRef.current
+          && generation === loadGenerationRef.current
+        ) {
           setCommentError("댓글 응답을 확인하지 못했습니다.");
         }
         return;
       }
 
-      setComments((current) => append ? [...current, ...parsed.items] : parsed.items);
+      setComments((current) => mergeCommentPage(current, parsed.items, append));
       setCommentCursor(parsed.nextCursor);
       setCommentError("");
     } catch {
-      if (mountedRef.current) {
+      if (mountedRef.current && generation === loadGenerationRef.current) {
         setCommentError("댓글을 불러오지 못했습니다.");
       }
     }
@@ -823,10 +936,18 @@ export function SecurePublicShareViewer({
   const loadGrantedContent = useCallback(async function loadGrantedContent(
     knownSession?: SecureShareViewerSessionDto,
     signal?: AbortSignal,
-    ownerPreviewAuth = false
+    ownerPreviewAuth = false,
+    expectedGeneration = loadGenerationRef.current
   ) {
-    const generation = loadGenerationRef.current + 1;
-    loadGenerationRef.current = generation;
+    const generation = expectedGeneration;
+
+    if (
+      !mountedRef.current
+      || signal?.aborted
+      || generation !== loadGenerationRef.current
+    ) {
+      return;
+    }
     setPhase("loading_content");
     setAccessError("");
 
@@ -843,6 +964,13 @@ export function SecurePublicShareViewer({
       if (nextSession.ownerPreview !== ownerPreviewAuth) {
         throw new Error("session_mode_mismatch");
       }
+      if (
+        !mountedRef.current
+        || signal?.aborted
+        || generation !== loadGenerationRef.current
+      ) {
+        return;
+      }
 
       const contentPayload = parseContentDto(await getSecureShareContent(shareId, {
         idToken: nextSession.ownerPreview ? idToken : undefined,
@@ -856,7 +984,11 @@ export function SecurePublicShareViewer({
 
       const decrypted = await decryptContent(contentPayload, key);
 
-      if (!mountedRef.current || generation !== loadGenerationRef.current) {
+      if (
+        !mountedRef.current
+        || signal?.aborted
+        || generation !== loadGenerationRef.current
+      ) {
         return;
       }
 
@@ -880,8 +1012,11 @@ export function SecurePublicShareViewer({
             && mountedRef.current
             && generation === loadGenerationRef.current
           ) {
-            setComments(parsedComments.items);
+            setComments((current) =>
+              mergeCommentPage(current, parsedComments.items, false)
+            );
             setCommentCursor(parsedComments.nextCursor);
+            setCommentError("");
           }
         } catch {
           if (mountedRef.current && generation === loadGenerationRef.current) {
@@ -906,10 +1041,11 @@ export function SecurePublicShareViewer({
     }
   }, [idToken, shareId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const controller = new AbortController();
     const generation = loadGenerationRef.current + 1;
     loadGenerationRef.current = generation;
+    lifecycleControllerRef.current = controller;
 
     async function initialize() {
       setPhase("loading");
@@ -918,6 +1054,11 @@ export function SecurePublicShareViewer({
       setContent(null);
       setComments([]);
       setCommentCursor(null);
+      setCommentBody("");
+      setCommentError("");
+      setBusyAction(null);
+      commentRequestRef.current = null;
+      saveCopyRequestRef.current = null;
       setChallengeId(null);
       setPassword("");
       setEmail("");
@@ -979,7 +1120,8 @@ export function SecurePublicShareViewer({
           await loadGrantedContent(
             existingSession,
             controller.signal,
-            existingSession.ownerPreview
+            existingSession.ownerPreview,
+            generation
           );
         } catch (caught) {
           if (!mountedRef.current || controller.signal.aborted) {
@@ -1005,6 +1147,9 @@ export function SecurePublicShareViewer({
 
     return () => {
       controller.abort();
+      if (lifecycleControllerRef.current === controller) {
+        lifecycleControllerRef.current = null;
+      }
       loadGenerationRef.current += 1;
       keyRef.current = null;
       revokeObjectUrls();
@@ -1016,13 +1161,17 @@ export function SecurePublicShareViewer({
       return;
     }
 
+    const lifecycle = captureLifecycle();
     setBusyAction("email");
     setAccessError("");
     try {
       const challenge = parseEmailChallengeDto(
-        await requestSecureShareEmailChallenge(shareId, email)
+        await requestSecureShareEmailChallenge(shareId, email, lifecycle.signal)
       );
 
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
       if (!challenge) {
         throw new Error("invalid_challenge");
       }
@@ -1031,6 +1180,9 @@ export function SecurePublicShareViewer({
       setNotice("인증 가능한 이메일인 경우 코드를 전송했습니다.");
       setOtp("");
     } catch (caught) {
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
       if (
         caught instanceof SecureShareApiError
         && caught.retryAfterSeconds
@@ -1040,7 +1192,9 @@ export function SecurePublicShareViewer({
       }
       setAccessError(viewerErrorMessage(caught));
     } finally {
-      setBusyAction(null);
+      if (lifecycleIsCurrent(lifecycle)) {
+        setBusyAction(null);
+      }
     }
   }
 
@@ -1051,6 +1205,7 @@ export function SecurePublicShareViewer({
       return;
     }
 
+    const lifecycle = captureLifecycle();
     setBusyAction("access");
     setAccessError("");
     try {
@@ -1067,41 +1222,63 @@ export function SecurePublicShareViewer({
           ...(requiresPassword ? { password } : {}),
           unlockAttemptId
         },
-        { idToken }
+        { idToken, signal: lifecycle.signal }
       );
-      await loadGrantedContent(undefined, undefined, metadata.ownerPreview);
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
+      await loadGrantedContent(
+        undefined,
+        lifecycle.signal,
+        metadata.ownerPreview,
+        lifecycle.generation
+      );
     } catch (caught) {
-      setAccessError(viewerErrorMessage(caught));
+      if (lifecycleIsCurrent(lifecycle)) {
+        setAccessError(viewerErrorMessage(caught));
+      }
     } finally {
-      setBusyAction(null);
+      if (lifecycleIsCurrent(lifecycle)) {
+        setBusyAction(null);
+      }
     }
   }
 
   async function openAttachmentPreview(attachment: SecurePublicShareAttachmentMetadata) {
-    if (!canPreviewAttachment(attachment) || !keyRef.current) {
+    const key = keyRef.current;
+
+    if (!canPreviewAttachment(attachment) || !key) {
       setAttachmentError("이 첨부파일은 안전한 미리보기를 지원하지 않습니다.");
       return;
     }
 
+    const lifecycle = captureLifecycle();
     setBusyAction(`preview:${attachment.id}`);
     setAttachmentError("");
     revokeObjectUrls();
 
     try {
       const response = await getSecureShareAttachmentPreview(shareId, attachment.id, {
-        idToken: session?.ownerPreview ? idToken : undefined
+        idToken: session?.ownerPreview ? idToken : undefined,
+        signal: lifecycle.signal
       });
 
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
       if (!response.ok) {
         throw new Error("preview_denied");
       }
 
       const bytes = await decryptAttachmentToBytes(
         attachment.encryption,
-        keyRef.current,
+        key,
         { response }
       );
 
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
       if (isPublicShareRasterImageExtension(attachment.extension)) {
         const mimeType = safePublicShareAttachmentMimeType(attachment.extension);
 
@@ -1127,7 +1304,13 @@ export function SecurePublicShareViewer({
         });
       } else if (attachment.extension === "docx") {
         const { renderSafeDocxPreviewSrcDoc } = await import("../lib/documentPreview");
+        if (!lifecycleIsCurrent(lifecycle)) {
+          return;
+        }
         const srcDoc = await renderSafeDocxPreviewSrcDoc(bytes);
+        if (!lifecycleIsCurrent(lifecycle)) {
+          return;
+        }
         setPreview(srcDoc
           ? {
               fileName: attachment.fileName,
@@ -1145,7 +1328,13 @@ export function SecurePublicShareViewer({
             });
       } else if (attachment.extension === "hwp") {
         const { extractHwpPreviewHtml } = await import("../lib/documentPreview");
+        if (!lifecycleIsCurrent(lifecycle)) {
+          return;
+        }
         const documentPreview = await extractHwpPreviewHtml(bytes);
+        if (!lifecycleIsCurrent(lifecycle)) {
+          return;
+        }
         setPreview(documentPreview.html
           ? {
               fileName: attachment.fileName,
@@ -1163,6 +1352,9 @@ export function SecurePublicShareViewer({
             });
       } else if (attachment.extension === "hwpx") {
         const { extractHwpxPreviewHtml } = await import("../lib/documentPreview");
+        if (!lifecycleIsCurrent(lifecycle)) {
+          return;
+        }
         const html = extractHwpxPreviewHtml(bytes);
         setPreview({
           fileName: attachment.fileName,
@@ -1174,6 +1366,9 @@ export function SecurePublicShareViewer({
         });
       } else if (attachment.extension === "xlsx") {
         const { extractXlsxPreviewHtml } = await import("../lib/documentPreview");
+        if (!lifecycleIsCurrent(lifecycle)) {
+          return;
+        }
         const html = extractXlsxPreviewHtml(bytes);
         setPreview({
           fileName: attachment.fileName,
@@ -1203,9 +1398,13 @@ export function SecurePublicShareViewer({
         throw new Error("unsupported_preview");
       }
     } catch {
-      setAttachmentError("첨부파일 미리보기를 열지 못했습니다.");
+      if (lifecycleIsCurrent(lifecycle)) {
+        setAttachmentError("첨부파일 미리보기를 열지 못했습니다.");
+      }
     } finally {
-      setBusyAction(null);
+      if (lifecycleIsCurrent(lifecycle)) {
+        setBusyAction(null);
+      }
     }
   }
 
@@ -1215,27 +1414,37 @@ export function SecurePublicShareViewer({
   }
 
   async function downloadAttachment(attachment: SecurePublicShareAttachmentMetadata) {
-    if (!session?.capabilities.downloadAllowed || !keyRef.current) {
+    const key = keyRef.current;
+
+    if (!session?.capabilities.downloadAllowed || !key) {
       setAttachmentError("첨부파일 다운로드가 허용되지 않았습니다.");
       return;
     }
 
+    const lifecycle = captureLifecycle();
     setBusyAction(`download:${attachment.id}`);
     setAttachmentError("");
     try {
       const response = await getSecureShareAttachmentDownload(shareId, attachment.id, {
-        idToken: session.ownerPreview ? idToken : undefined
+        idToken: session.ownerPreview ? idToken : undefined,
+        signal: lifecycle.signal
       });
 
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
       if (!response.ok) {
         throw new Error("download_denied");
       }
 
       const blob = await decryptAttachmentToBlob(
         attachment.encryption,
-        keyRef.current,
+        key,
         { response }
       );
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
       const url = URL.createObjectURL(new Blob([blob], {
         type: safePublicShareAttachmentMimeType(attachment.extension)
       }));
@@ -1257,9 +1466,13 @@ export function SecurePublicShareViewer({
       }, 1_000);
       cleanupTimersRef.current.add(timer);
     } catch {
-      setAttachmentError("첨부파일을 다운로드하지 못했습니다.");
+      if (lifecycleIsCurrent(lifecycle)) {
+        setAttachmentError("첨부파일을 다운로드하지 못했습니다.");
+      }
     } finally {
-      setBusyAction(null);
+      if (lifecycleIsCurrent(lifecycle)) {
+        setBusyAction(null);
+      }
     }
   }
 
@@ -1268,11 +1481,18 @@ export function SecurePublicShareViewer({
       return;
     }
 
+    const lifecycle = captureLifecycle();
+    const bodyPlainText = content.bodyPlainText;
+
     try {
-      await navigator.clipboard.writeText(content.bodyPlainText);
-      setNotice("본문을 복사했습니다.");
+      await navigator.clipboard.writeText(bodyPlainText);
+      if (lifecycleIsCurrent(lifecycle)) {
+        setNotice("본문을 복사했습니다.");
+      }
     } catch {
-      setNotice("본문을 복사하지 못했습니다. 직접 선택해 복사해주세요.");
+      if (lifecycleIsCurrent(lifecycle)) {
+        setNotice("본문을 복사하지 못했습니다. 직접 선택해 복사해주세요.");
+      }
     }
   }
 
@@ -1298,36 +1518,72 @@ export function SecurePublicShareViewer({
 
     setBusyAction("comment");
     setCommentError("");
+    const generation = loadGenerationRef.current;
+    const pendingRequest = commentRequestRef.current?.body === body
+      ? commentRequestRef.current
+      : {
+          body,
+          clientRequestId: crypto.randomUUID()
+        };
+    commentRequestRef.current = pendingRequest;
     try {
-      await createSecureShareComment(shareId, { body }, {
-        idToken: session.ownerPreview ? idToken : undefined
-      });
+      const createdComment = parseCommentMutationDto(
+        await createSecureShareComment(shareId, pendingRequest, {
+          idToken: session.ownerPreview ? idToken : undefined
+        })
+      );
+      if (!mountedRef.current || generation !== loadGenerationRef.current) {
+        return;
+      }
+      if (!createdComment) {
+        throw new Error("Invalid comment response");
+      }
+      setComments((current) => [
+        createdComment,
+        ...current.filter((comment) => comment.id !== createdComment.id)
+      ]);
+      commentRequestRef.current = null;
       setCommentBody("");
-      await loadComments();
     } catch {
-      setCommentError("댓글을 저장하지 못했습니다.");
+      if (mountedRef.current && generation === loadGenerationRef.current) {
+        setCommentError("댓글을 저장하지 못했습니다.");
+      }
     } finally {
-      setBusyAction(null);
+      if (mountedRef.current && generation === loadGenerationRef.current) {
+        setBusyAction(null);
+      }
     }
   }
 
   async function removeComment(commentId: string) {
     setBusyAction(`comment-delete:${commentId}`);
     setCommentError("");
+    const generation = loadGenerationRef.current;
     try {
       await deleteSecureShareComment(shareId, commentId, {
         idToken: session?.ownerPreview ? idToken : undefined
       });
+      if (!mountedRef.current || generation !== loadGenerationRef.current) {
+        return;
+      }
       setComments((current) => current.filter((comment) => comment.id !== commentId));
     } catch {
-      setCommentError("댓글을 삭제하지 못했습니다.");
+      if (mountedRef.current && generation === loadGenerationRef.current) {
+        setCommentError("댓글을 삭제하지 못했습니다.");
+      }
     } finally {
-      setBusyAction(null);
+      if (mountedRef.current && generation === loadGenerationRef.current) {
+        setBusyAction(null);
+      }
     }
   }
 
   async function saveCopy() {
-    if (!content || !session?.capabilities.canSaveCopy || !onSaveCopy) {
+    const copyContent = content;
+    const copySession = session;
+    const key = keyRef.current;
+
+    if (!copyContent || !copySession?.capabilities.canSaveCopy || !onSaveCopy || !key) {
       return;
     }
     if (!isAuthenticated || !idToken) {
@@ -1335,17 +1591,29 @@ export function SecurePublicShareViewer({
       return;
     }
 
+    const lifecycle = captureLifecycle();
     setBusyAction("copy");
     setNotice("");
+    const pendingRequest = saveCopyRequestRef.current?.shareId === shareId
+      ? saveCopyRequestRef.current
+      : {
+          clientRequestId: crypto.randomUUID(),
+          shareId
+        };
+    saveCopyRequestRef.current = pendingRequest;
     try {
       const grant = parseCopyGrantDto(
         await requestSecureShareCopyGrant(
           shareId,
           idToken,
-          crypto.randomUUID()
+          pendingRequest.clientRequestId,
+          lifecycle.signal
         )
       );
 
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
       if (!grant) {
         throw new Error("invalid_copy_grant");
       }
@@ -1354,52 +1622,99 @@ export function SecurePublicShareViewer({
         attachment: SecurePublicShareAttachmentMetadata,
         signal?: AbortSignal
       ) => {
-        const currentAttachment = content.attachments.find(
+        if (!lifecycleIsCurrent(lifecycle) || signal?.aborted) {
+          throw new DOMException("복사 첨부파일 요청이 취소되었습니다.", "AbortError");
+        }
+        const currentAttachment = copyContent.attachments.find(
           (candidate) => candidate.id === attachment.id
         );
-        const key = keyRef.current;
 
-        if (!currentAttachment || !key) {
+        if (!currentAttachment) {
           throw new Error("copy_attachment_unavailable");
         }
 
-        const response = await getSecureShareAttachmentForCopy(
-          shareId,
-          currentAttachment.id,
-          idToken,
-          grant.copyGrant,
-          signal
+        const requestController = new AbortController();
+        const abortRequest = () => requestController.abort();
+        const requestSignals = [lifecycle.signal, signal].filter(
+          (candidate): candidate is AbortSignal => Boolean(candidate)
         );
 
-        if (!response.ok) {
-          throw new Error("copy_attachment_denied");
-        }
-
-        const decrypted = await decryptAttachmentToBlob(
-          currentAttachment.encryption,
-          key,
-          { response }
-        );
-
-        return new Blob([decrypted], {
-          type: safePublicShareAttachmentMimeType(currentAttachment.extension)
+        requestSignals.forEach((requestSignal) => {
+          if (requestSignal.aborted) {
+            requestController.abort();
+          } else {
+            requestSignal.addEventListener("abort", abortRequest, { once: true });
+          }
         });
+
+        try {
+          const response = await getSecureShareAttachmentForCopy(
+            shareId,
+            currentAttachment.id,
+            idToken,
+            grant.copyGrant,
+            requestController.signal
+          );
+
+          if (
+            !lifecycleIsCurrent(lifecycle)
+            || signal?.aborted
+            || requestController.signal.aborted
+          ) {
+            throw new DOMException("복사 첨부파일 요청이 취소되었습니다.", "AbortError");
+          }
+          if (!response.ok) {
+            throw new Error("copy_attachment_denied");
+          }
+
+          const decrypted = await decryptAttachmentToBlob(
+            currentAttachment.encryption,
+            key,
+            { response }
+          );
+
+          if (
+            !lifecycleIsCurrent(lifecycle)
+            || signal?.aborted
+            || requestController.signal.aborted
+          ) {
+            throw new DOMException("복사 첨부파일 요청이 취소되었습니다.", "AbortError");
+          }
+
+          return new Blob([decrypted], {
+            type: safePublicShareAttachmentMimeType(currentAttachment.extension)
+          });
+        } finally {
+          requestSignals.forEach((requestSignal) =>
+            requestSignal.removeEventListener("abort", abortRequest)
+          );
+        }
       };
 
       await onSaveCopy({
-        title: content.title,
-        body: content.body,
-        bodyHtml: content.bodyHtml,
-        attachments: content.attachments,
-        capabilities: session.capabilities,
+        title: copyContent.title,
+        body: copyContent.body,
+        bodyHtml: copyContent.bodyHtml,
+        attachments: copyContent.attachments,
+        capabilities: copySession.capabilities,
         copyAttachment,
         copyGrantExpiresAt: grant.expiresAt
       });
+      if (!lifecycleIsCurrent(lifecycle)) {
+        return;
+      }
+      if (saveCopyRequestRef.current === pendingRequest) {
+        saveCopyRequestRef.current = null;
+      }
       setNotice("QuickMemo 복사본 저장 작업을 시작했습니다.");
     } catch {
-      setNotice("복사본 저장을 시작하지 못했습니다.");
+      if (lifecycleIsCurrent(lifecycle)) {
+        setNotice("복사본 저장을 시작하지 못했습니다.");
+      }
     } finally {
-      setBusyAction(null);
+      if (lifecycleIsCurrent(lifecycle)) {
+        setBusyAction(null);
+      }
     }
   }
 
@@ -1660,9 +1975,13 @@ export function SecurePublicShareViewer({
               <textarea
                 disabled={busyAction !== null}
                 maxLength={4_000}
-                onChange={(event) => setCommentBody(
-                  Array.from(event.target.value).slice(0, 2_000).join("")
-                )}
+                onChange={(event) => {
+                  const nextBody = Array.from(event.target.value).slice(0, 2_000).join("");
+                  if (commentRequestRef.current?.body !== nextBody.trim()) {
+                    commentRequestRef.current = null;
+                  }
+                  setCommentBody(nextBody);
+                }}
                 placeholder="평문 댓글을 입력하세요."
                 rows={3}
                 value={commentBody}

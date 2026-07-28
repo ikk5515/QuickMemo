@@ -235,6 +235,22 @@ Secure Share v2는 기존 v1 공개 링크와 URL fragment 기반 콘텐츠 키�
 1회 열람, 댓글, 복사본 저장 등 Core v2는 사용할 수 있고 이메일 정책은
 서버에서 `email_feature_unavailable`로 fail closed합니다.
 
+이메일 OTP는 `SHARE_EMAIL_PROVIDER=resend`, API key, 검증된 발신자 주소와
+서로 다른 32바이트 이상의 OTP/email/rate-limit HMAC key가 모두 준비된
+뒤에만 활성화합니다. Resend에서 발신 도메인 또는 발신자 검증을 실제로
+확인한 후 `SHARE_EMAIL_SENDER_VERIFIED=true`를 설정해야 하며, 확인 전에는
+이 값과 `SECURE_SHARE_EMAIL_ENABLED`를 모두 false로 유지합니다.
+현재 저장소에는 Resend signed webhook의 bounce/complaint suppression
+경로가 아직 없으므로, 실제 Provider·발신자·수신함 검증과 해당 경로의
+구현·검증 전에도 `SECURE_SHARE_EMAIL_ENABLED=false`를 유지합니다.
+
+무료 등급 보호 기본값은 일 64/80건(soft/hard), 월 1,920/2,400건입니다.
+Resend Free의 일 100건·월 3,000건 한도보다 20% 여유를 남기며, 전역
+`reservedCount + sentCount`를 UTC 일/월 bucket에서 원자적으로 검사합니다.
+`publicShareEmailQuotaBuckets`와 `publicShareEmailDeliveries`는 모든 Firebase
+클라이언트 접근을 차단한 서버 전용 컬렉션이고, 만료 문서는 기존 일일
+cleanup이 제한된 배치로 정리합니다.
+
 구조, 환경변수 이름, 로컬 검증, 단계적 배포 및 rollback 절차는
 [`docs/secure-share-v2.md`](docs/secure-share-v2.md)를 참고하세요.
 
@@ -257,6 +273,13 @@ Firestore Rules에는 다음 주요 컬렉션의 owner-only 접근과 데이터 
 - `users`, `userPreferences`, `userKeys`, `publicLoginRoster`
 - `notes`, `noteFolders`, `activeNotes`, 노트 첨부/히스토리/상태 문서
 - `publicNoteShares`, `publicShareCleanupQueue`
+- Secure Share 서버 상태: `publicSharePolicies`, `publicShareRecipients`,
+  `publicShareAccessSessions`, `publicShareEmailChallenges`,
+  `publicShareEmailQuotaBuckets`, `publicShareEmailDeliveries`,
+  `publicShareCopyGrantRequests`, `publicShareSourceGuards`,
+  `publicShareUnlockGrants`, `publicShareRateLimits`, `publicShareComments`,
+  `publicShareAuditEvents`
+  (Firebase 클라이언트 직접 접근 금지)
 - `libraryItems`, `libraryVaults`
 - `scheduleTasks`, `googleCalendarTaskSyncReceipts`, `googleCalendarTaskTombstones`
 - `recurringHabits`, `recurringHabitCheckIns`

@@ -46,6 +46,10 @@ export class HttpError extends Error {
     this.code = code;
     this.retryAfter = Number.isInteger(options.retryAfter) ? options.retryAfter : undefined;
     this.expose = options.expose !== false;
+    this.deliveryAmbiguous = options.deliveryAmbiguous === true;
+    this.upstreamStatus = Number.isInteger(options.upstreamStatus)
+      ? options.upstreamStatus
+      : undefined;
   }
 }
 
@@ -109,19 +113,58 @@ export function secureShareEmailEnabled() {
   return secureShareEmailReadiness().ready;
 }
 
+function configuredEmailSender(value) {
+  const hasControlCharacter = typeof value === "string"
+    && Array.from(value).some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+    });
+  if (
+    typeof value !== "string"
+    || value.length < 3
+    || value.length > 320
+    || hasControlCharacter
+  ) {
+    return false;
+  }
+  const mailbox = /^(?:[^<>]{1,120}<([^<>]+)>|([^<>]+))$/u.exec(value);
+  const address = mailbox?.[1] ?? mailbox?.[2] ?? "";
+  try {
+    return normalizeEmail(address) === address.trim().normalize("NFKC").toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
 export function secureShareEmailReadiness() {
   const v2Enabled = secureShareV2Enabled();
   const featureEnabled = exactFeatureFlag("SECURE_SHARE_EMAIL_ENABLED");
   const provider = envValue("SHARE_EMAIL_PROVIDER").toLowerCase();
-  const configured =
+  const providerConfigured =
     provider === "resend"
-    && Boolean(envValue("SHARE_EMAIL_API_KEY"))
-    && Boolean(envValue("SHARE_EMAIL_FROM"));
+    && envValue("SHARE_EMAIL_API_KEY").length >= 16
+    && configuredEmailSender(envValue("SHARE_EMAIL_FROM"));
+  const requiredEmailSecrets = [
+    "SHARE_OTP_HMAC_KEY",
+    "SHARE_EMAIL_HMAC_KEY",
+    "SHARE_RATE_LIMIT_HMAC_KEY"
+  ].map((name) => envValue(name));
+  const secretsConfigured =
+    requiredEmailSecrets.every((value) => Buffer.byteLength(value, "utf8") >= 32)
+    && new Set(requiredEmailSecrets).size === requiredEmailSecrets.length;
+  const senderVerified = exactFeatureFlag("SHARE_EMAIL_SENDER_VERIFIED");
   return {
-    ready: v2Enabled && featureEnabled && configured,
+    ready:
+      v2Enabled
+      && featureEnabled
+      && providerConfigured
+      && secretsConfigured
+      && senderVerified,
     v2Enabled,
     featureEnabled,
-    providerConfigured: configured
+    providerConfigured,
+    secretsConfigured,
+    senderVerified
   };
 }
 
@@ -1003,10 +1046,20 @@ async function firestoreFetch(context, path, init = {}) {
   return response;
 }
 
-function upstreamError(message, response) {
+async function upstreamError(message, response) {
+  let upstreamCode = "";
+  try {
+    const payload = await response.json();
+    upstreamCode = typeof payload?.error?.status === "string"
+      ? payload.error.status
+      : "";
+  } catch {
+    // Normalize only the status code; never surface the upstream response body.
+  }
   const error = new Error(message);
   error.name = "UpstreamError";
   error.statusCode = response.status;
+  error.upstreamCode = upstreamCode;
   error.upstreamStatus = response.status;
   return error;
 }
@@ -1128,32 +1181,106 @@ export async function firestoreGet(context, documentPath) {
     return null;
   }
   if (!response.ok) {
-    throw upstreamError("Firestore read failed", response);
+    throw await upstreamError("Firestore read failed", response);
   }
   return decodeFirestoreDocument(await response.json());
 }
 
-export async function firestoreCommit(context, writes) {
+export async function firestoreCommit(context, writes, transaction = "") {
   const response = await firestoreFetch(context, `${documentsRoot(context.projectId)}:commit`, {
     method: "POST",
-    body: JSON.stringify({ writes })
+    body: JSON.stringify({
+      writes,
+      ...(transaction ? { transaction } : {})
+    })
   });
   if (!response.ok) {
-    throw upstreamError("Firestore commit failed", response);
+    throw await upstreamError("Firestore commit failed", response);
   }
   return response.json();
 }
 
-export async function firestoreRunQuery(context, structuredQuery, parentPath = "") {
+export async function firestoreBatchGetNewTransaction(context, documentPaths) {
+  if (
+    !Array.isArray(documentPaths)
+    || documentPaths.length < 1
+    || documentPaths.length > 100
+  ) {
+    throw new TypeError("A bounded transaction read set is required");
+  }
+  const response = await firestoreFetch(
+    context,
+    `${documentsRoot(context.projectId)}:batchGet`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        documents: documentPaths.map((documentPath) =>
+          firestoreDocumentName(context.projectId, documentPath)
+        ),
+        newTransaction: { readWrite: {} }
+      })
+    }
+  );
+  if (!response.ok) {
+    throw await upstreamError("Firestore transaction read failed", response);
+  }
+  const rows = await response.json();
+  if (!Array.isArray(rows)) {
+    throw new Error("Firestore transaction read returned an invalid response");
+  }
+  const transaction = rows.find((row) => typeof row?.transaction === "string")
+    ?.transaction ?? "";
+  if (!/^[A-Za-z0-9+/=_-]{8,4096}$/u.test(transaction)) {
+    throw new Error("Firestore transaction read omitted its transaction token");
+  }
+  const documentsByName = new Map(
+    rows
+      .filter((row) => row?.found?.name)
+      .map((row) => [row.found.name, decodeFirestoreDocument(row.found)])
+  );
+  return {
+    documents: documentPaths.map((documentPath) =>
+      documentsByName.get(firestoreDocumentName(context.projectId, documentPath)) ?? null
+    ),
+    transaction
+  };
+}
+
+export async function firestoreRollback(context, transaction) {
+  if (!/^[A-Za-z0-9+/=_-]{8,4096}$/u.test(transaction)) {
+    throw new TypeError("A valid Firestore transaction token is required");
+  }
+  const response = await firestoreFetch(
+    context,
+    `${documentsRoot(context.projectId)}:rollback`,
+    {
+      method: "POST",
+      body: JSON.stringify({ transaction })
+    }
+  );
+  if (!response.ok) {
+    throw await upstreamError("Firestore rollback failed", response);
+  }
+}
+
+export async function firestoreRunQuery(
+  context,
+  structuredQuery,
+  parentPath = "",
+  transaction = ""
+) {
   const queryParent = parentPath
     ? `${documentsRoot(context.projectId)}/${encodeDocumentPath(parentPath)}`
     : documentsRoot(context.projectId);
   const response = await firestoreFetch(context, `${queryParent}:runQuery`, {
     method: "POST",
-    body: JSON.stringify({ structuredQuery })
+    body: JSON.stringify({
+      structuredQuery,
+      ...(transaction ? { transaction } : {})
+    })
   });
   if (!response.ok) {
-    throw upstreamError("Firestore query failed", response);
+    throw await upstreamError("Firestore query failed", response);
   }
   const rows = await response.json();
   return rows.map((row) => decodeFirestoreDocument(row.document)).filter(Boolean);
@@ -1165,7 +1292,7 @@ export async function firestoreListCollection(context, parentPath, collectionId,
     : `${documentsRoot(context.projectId)}/${encodeURIComponent(collectionId)}`;
   const response = await firestoreFetch(context, `${base}?pageSize=${Math.min(Math.max(pageSize, 1), 300)}`);
   if (!response.ok) {
-    throw upstreamError("Firestore list failed", response);
+    throw await upstreamError("Firestore list failed", response);
   }
   const payload = await response.json();
   return (payload.documents ?? []).map((document) => decodeFirestoreDocument(document)).filter(Boolean);
@@ -1235,7 +1362,7 @@ export async function lookupFirebaseCaller(idToken) {
     if (response.status >= 400 && response.status < 500) {
       return null;
     }
-    throw upstreamError("Identity lookup failed", response);
+    throw await upstreamError("Identity lookup failed", response);
   }
   const user = (await response.json()).users?.[0];
   if (typeof user?.localId !== "string" || !user.localId || user.disabled === true) {
@@ -1293,10 +1420,7 @@ export async function activeUserFromRequest(request, context = null, options = {
 
 export function clientNetworkDigest(request) {
   const forwarded = process.env.VERCEL === "1"
-    ? (
-        headerValue(request, "x-vercel-forwarded-for")
-        || headerValue(request, "x-forwarded-for")
-      ).split(",")[0]?.trim()
+    ? headerValue(request, "x-vercel-forwarded-for").split(",")[0]?.trim()
     : "";
   const directAddress = typeof request?.socket?.remoteAddress === "string"
     ? request.socket.remoteAddress.trim()
@@ -1339,7 +1463,11 @@ export function verificationEmailText(code, ttlSeconds) {
   ].join("\n");
 }
 
-export function createResendEmailAdapter(request = fetch, wait = delay) {
+export function createResendEmailAdapter(
+  request = fetch,
+  wait = delay,
+  beforeAttempt = async () => undefined
+) {
   const send = async ({
     from,
     idempotencyKey,
@@ -1355,8 +1483,32 @@ export function createResendEmailAdapter(request = fetch, wait = delay) {
         : emailProviderTotalTimeoutMilliseconds;
     const startedAt = Date.now();
     let lastStatus = 0;
+    let mayHaveBeenAccepted = false;
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const remainingMilliseconds =
+      let remainingMilliseconds =
+        boundedTimeoutMilliseconds - (Date.now() - startedAt);
+      if (remainingMilliseconds <= 0) {
+        break;
+      }
+      try {
+        await beforeAttempt();
+      } catch (error) {
+        if (error instanceof HttpError) {
+          error.deliveryAmbiguous =
+            error.deliveryAmbiguous || mayHaveBeenAccepted;
+          throw error;
+        }
+        throw new HttpError(
+          503,
+          "email_feature_unavailable",
+          "Email provider request gate failed",
+          {
+            deliveryAmbiguous: mayHaveBeenAccepted,
+            expose: false
+          }
+        );
+      }
+      remainingMilliseconds =
         boundedTimeoutMilliseconds - (Date.now() - startedAt);
       if (remainingMilliseconds <= 0) {
         break;
@@ -1379,10 +1531,73 @@ export function createResendEmailAdapter(request = fetch, wait = delay) {
           signal: AbortSignal.timeout(remainingMilliseconds)
         });
         if (response.ok) {
-          return true;
+          let payload;
+          try {
+            payload = await response.json();
+          } catch {
+            throw new HttpError(
+              503,
+              "email_feature_unavailable",
+              "Email provider returned malformed success",
+              {
+                deliveryAmbiguous: true,
+                expose: false,
+                upstreamStatus: response.status
+              }
+            );
+          }
+          if (
+            typeof payload?.id !== "string"
+            || !/^[A-Za-z0-9_-]{8,160}$/u.test(payload.id)
+          ) {
+            throw new HttpError(
+              503,
+              "email_feature_unavailable",
+              "Email provider success lacked a valid message id",
+              {
+                deliveryAmbiguous: true,
+                expose: false,
+                upstreamStatus: response.status
+              }
+            );
+          }
+          return { accepted: true, messageId: payload.id };
         }
         lastStatus = response.status;
-        if (attempt === 0 && (response.status === 429 || response.status >= 500)) {
+        let providerErrorName = "";
+        if (response.status === 409) {
+          try {
+            const payload = await response.json();
+            const candidate = payload?.name ?? payload?.error?.name ?? payload?.error?.code;
+            providerErrorName = typeof candidate === "string" ? candidate : "";
+          } catch {
+            // An unknown 409 is delivery-ambiguous; never expose the provider body.
+          }
+        }
+        const concurrentIdempotentRequest =
+          response.status === 409
+          && providerErrorName === "concurrent_idempotent_requests";
+        const invalidIdempotentRequest =
+          response.status === 409
+          && providerErrorName === "invalid_idempotent_request";
+        if (
+          response.status >= 500
+          || (
+            response.status === 409
+            && !invalidIdempotentRequest
+          )
+        ) {
+          mayHaveBeenAccepted = true;
+        }
+        if (
+          attempt === 0
+          && (
+            response.status === 429
+            || response.status >= 500
+            || concurrentIdempotentRequest
+            || (response.status === 409 && !providerErrorName)
+          )
+        ) {
           const retryDelayMilliseconds = 100 + randomInt(0, 101);
           if (
             Date.now() - startedAt + retryDelayMilliseconds
@@ -1394,6 +1609,10 @@ export function createResendEmailAdapter(request = fetch, wait = delay) {
         }
         break;
       } catch (error) {
+        if (error instanceof HttpError) {
+          throw error;
+        }
+        mayHaveBeenAccepted = true;
         if (attempt === 0 && error instanceof Error && error.name !== "AbortError") {
           const retryDelayMilliseconds = 100 + randomInt(0, 101);
           if (
@@ -1405,6 +1624,7 @@ export function createResendEmailAdapter(request = fetch, wait = delay) {
           }
         }
         throw new HttpError(503, "email_feature_unavailable", "Email provider request failed", {
+          deliveryAmbiguous: mayHaveBeenAccepted,
           expose: false
         });
       }
@@ -1413,7 +1633,11 @@ export function createResendEmailAdapter(request = fetch, wait = delay) {
       503,
       "email_feature_unavailable",
       `Email provider rejected request (${lastStatus || "unknown"})`,
-      { expose: false }
+      {
+        deliveryAmbiguous: mayHaveBeenAccepted,
+        expose: false,
+        upstreamStatus: lastStatus || undefined
+      }
     );
   };
   return {
@@ -1433,28 +1657,40 @@ export async function sendVerificationEmail(
   to,
   code,
   ttlSeconds,
+  idempotencyKey,
   adapter = createResendEmailAdapter(),
   timeoutMilliseconds = emailProviderTotalTimeoutMilliseconds
 ) {
   if (!secureShareEmailEnabled()) {
     throw new HttpError(503, "email_feature_unavailable", "Email delivery is disabled");
   }
+  if (
+    typeof idempotencyKey !== "string"
+    || !/^[A-Za-z0-9_-]{16,200}$/u.test(idempotencyKey)
+  ) {
+    throw new HttpError(500, "internal_error", "Invalid email idempotency key", {
+      expose: false
+    });
+  }
   return adapter.send({
     from: envValue("SHARE_EMAIL_FROM"),
-    idempotencyKey: hmacDigest(
-      requiredSecret("SHARE_OTP_HMAC_KEY"),
-      "quickmemo/secure-share/email-delivery-idempotency/v1",
-      normalizeEmail(to),
-      code
-    ),
+    idempotencyKey,
     text: verificationEmailText(code, ttlSeconds),
     timeoutMilliseconds,
     to: normalizeEmail(to)
   });
 }
 
-export function signedOpaqueToken(payload, purpose, ttlSeconds, secret = requiredSecret("SHARE_SESSION_HMAC_KEY")) {
-  const now = Math.floor(Date.now() / 1000);
+export function signedOpaqueToken(
+  payload,
+  purpose,
+  ttlSeconds,
+  secret = requiredSecret("SHARE_SESSION_HMAC_KEY"),
+  now = Math.floor(Date.now() / 1000)
+) {
+  if (!Number.isSafeInteger(now) || now < 0) {
+    throw new TypeError("A valid token issue time is required");
+  }
   const body = base64UrlEncode(JSON.stringify({ ...payload, iat: now, exp: now + ttlSeconds }));
   const signature = hmacDigest(secret, purpose, body);
   return `${body}.${signature}`;

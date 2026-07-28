@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SecureShareApiError } from "../services/secureShares";
@@ -105,6 +105,15 @@ const shareId = "secure_share_123456";
 const contentKey = "K".repeat(43);
 const iv = "AAAAAAAAAAAAAAAA";
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+
+  return { promise, resolve };
+}
+
 function encrypted(cipherText: string) {
   return {
     version: 1,
@@ -178,6 +187,21 @@ function content(attachments: unknown[] = []) {
   };
 }
 
+function commentMutation(id: string, body: string) {
+  return {
+    ok: true,
+    comment: {
+      id,
+      body,
+      displayName: "검증 사용자",
+      badge: "guest",
+      createdAt: "2026-07-28T00:00:00.000Z",
+      canDelete: true
+    },
+    requestId: "request_comment_123456"
+  };
+}
+
 function renderViewer(overrides: Partial<Parameters<typeof SecurePublicShareViewer>[0]> = {}) {
   const props = {
     shareId,
@@ -215,7 +239,21 @@ beforeEach(() => {
     requestId: "request_123456"
   });
   mocks.unlock.mockResolvedValue({ granted: true });
-  mocks.createComment.mockResolvedValue({ commentId: "comment_123456" });
+  mocks.createComment.mockImplementation(async (
+    _shareId: string,
+    input: { body: string }
+  ) => ({
+    ok: true,
+    comment: {
+      id: "comment_123456",
+      body: input.body,
+      displayName: "검증 사용자",
+      badge: "guest",
+      createdAt: "2026-07-28T00:00:00.000Z",
+      canDelete: true
+    },
+    requestId: "request_123456"
+  }));
   mocks.deleteComment.mockResolvedValue({ deleted: true });
   mocks.requestCopyGrant.mockResolvedValue({
     ok: true,
@@ -326,7 +364,10 @@ describe("SecurePublicShareViewer", () => {
       otp: "123456",
       password: " 123456 "
     }));
-    expect(mocks.unlock.mock.calls[0][2]).toEqual({ idToken });
+    expect(mocks.unlock.mock.calls[0][2]).toEqual({
+      idToken,
+      signal: expect.any(AbortSignal)
+    });
   });
 
   it("uses Firebase authentication without a redundant OTP challenge", async () => {
@@ -354,9 +395,54 @@ describe("SecurePublicShareViewer", () => {
     expect(mocks.unlock).toHaveBeenCalledWith(
       shareId,
       expect.objectContaining({ password: "12345678" }),
-      { idToken }
+      { idToken, signal: expect.any(AbortSignal) }
     );
     expect(mocks.unlock.mock.calls[0][1]).not.toHaveProperty("otp");
+  });
+
+  it("does not let a stale access response restore plaintext after authentication changes", async () => {
+    const user = userEvent.setup();
+    const unlockGate = deferred<unknown>();
+    const firstIdToken = "header.payload.signature-before-auth-change";
+    const nextIdToken = "header.payload.signature-after-auth-change";
+    mocks.getMetadata.mockResolvedValue(metadata({
+      hasPassword: true,
+      requiresPassword: true
+    }));
+    mocks.refreshSession
+      .mockRejectedValueOnce(new SecureShareApiError("session_required", "missing", 401))
+      .mockRejectedValueOnce(new SecureShareApiError("session_required", "missing", 401))
+      .mockResolvedValueOnce(session());
+    mocks.unlock.mockImplementationOnce(() => unlockGate.promise);
+
+    const { props, rerender } = renderViewer({
+      idToken: firstIdToken,
+      isAuthenticated: true
+    });
+
+    await user.type(await screen.findByLabelText(/^공유 비밀번호/u), "12345678");
+    await user.click(screen.getByRole("button", { name: "보안 공유 열기" }));
+    await waitFor(() => expect(mocks.unlock).toHaveBeenCalledTimes(1));
+    const staleSignal = mocks.unlock.mock.calls[0]?.[2]?.signal as AbortSignal;
+
+    rerender(
+      <SecurePublicShareViewer
+        {...props}
+        idToken={nextIdToken}
+        isAuthenticated
+      />
+    );
+    await waitFor(() => expect(mocks.getMetadata).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(staleSignal.aborted).toBe(true));
+
+    await act(async () => {
+      unlockGate.resolve({ granted: true });
+      await unlockGate.promise;
+    });
+
+    await waitFor(() => expect(mocks.refreshSession).toHaveBeenCalledTimes(2));
+    expect(mocks.getContent).not.toHaveBeenCalled();
+    expect(screen.queryByRole("heading", { name: "보안 제목" })).not.toBeInTheDocument();
   });
 
   it("requires login without putting the fragment key in the callback", async () => {
@@ -449,7 +535,10 @@ describe("SecurePublicShareViewer", () => {
     await user.click(screen.getByRole("button", { name: "댓글 작성" }));
     await waitFor(() => expect(mocks.createComment).toHaveBeenCalledWith(
       shareId,
-      { body: "소유자 새 댓글" },
+      {
+        body: "소유자 새 댓글",
+        clientRequestId: expect.any(String)
+      },
       { idToken }
     ));
   });
@@ -497,7 +586,10 @@ describe("SecurePublicShareViewer", () => {
 
     await waitFor(() => expect(mocks.createComment).toHaveBeenCalledWith(
       shareId,
-      { body: "안전한 댓글" },
+      {
+        body: "안전한 댓글",
+        clientRequestId: expect.any(String)
+      },
       { idToken: undefined }
     ));
     expect(document.querySelector(".secure-public-share-comment-list script")).toBeNull();
@@ -507,6 +599,164 @@ describe("SecurePublicShareViewer", () => {
     expect(mocks.createComment).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("댓글에는 HTML 태그를 입력할 수 없습니다."))
       .toBeInTheDocument();
+  });
+
+  it("reuses the same comment request id after an ambiguous client retry", async () => {
+    const user = userEvent.setup();
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.createComment
+      .mockRejectedValueOnce(new Error("ambiguous network failure"))
+      .mockResolvedValueOnce({
+        ok: true,
+        comment: {
+          id: "comment_retry_123456",
+          body: "재시도 댓글",
+          displayName: "검증 사용자",
+          badge: "guest",
+          createdAt: "2026-07-28T00:00:00.000Z",
+          canDelete: true
+        },
+        requestId: "request_retry_123456"
+      });
+
+    renderViewer();
+    await screen.findByRole("heading", { name: "댓글" });
+    await user.type(screen.getByLabelText("새 댓글"), "재시도 댓글");
+    await user.click(screen.getByRole("button", { name: "댓글 작성" }));
+    expect(await screen.findByText("댓글을 저장하지 못했습니다.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "댓글 작성" }));
+
+    await waitFor(() => expect(mocks.createComment).toHaveBeenCalledTimes(2));
+    const firstRequest = mocks.createComment.mock.calls[0]?.[1] as {
+      clientRequestId: string;
+    };
+    const retryRequest = mocks.createComment.mock.calls[1]?.[1] as {
+      clientRequestId: string;
+    };
+    expect(retryRequest.clientRequestId).toBe(firstRequest.clientRequestId);
+    expect(await screen.findByText("재시도 댓글")).toBeInTheDocument();
+  });
+
+  it("keeps an optimistic comment when the initial comment page resolves later", async () => {
+    const user = userEvent.setup();
+    const initialComments = deferred<unknown>();
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.listComments.mockImplementationOnce(() => initialComments.promise);
+
+    renderViewer();
+    await screen.findByRole("heading", { name: "댓글" });
+    await user.type(screen.getByLabelText("새 댓글"), "방금 작성한 댓글");
+    await user.click(screen.getByRole("button", { name: "댓글 작성" }));
+    expect(await screen.findByText("방금 작성한 댓글")).toBeInTheDocument();
+
+    await act(async () => {
+      initialComments.resolve({
+        ok: true,
+        items: [{
+          id: "comment_existing_123456",
+          body: "기존 댓글",
+          displayName: "기존 사용자",
+          badge: "guest",
+          createdAt: "2026-07-27T23:59:00.000Z",
+          canDelete: false
+        }],
+        nextCursor: null,
+        requestId: "request_existing_123456"
+      });
+      await initialComments.promise;
+    });
+
+    expect(screen.getByText("방금 작성한 댓글")).toBeInTheDocument();
+    expect(screen.getByText("기존 댓글")).toBeInTheDocument();
+  });
+
+  it("ignores a stale comment mutation without clearing the next share's busy state", async () => {
+    const user = userEvent.setup();
+    const firstMutation = deferred<unknown>();
+    const secondMutation = deferred<unknown>();
+    const nextShareId = "secure_share_654321";
+    const nextContentKey = "L".repeat(43);
+    const commentSession = session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    });
+    mocks.refreshSession.mockResolvedValue(commentSession);
+    mocks.createComment
+      .mockImplementationOnce(() => firstMutation.promise)
+      .mockImplementationOnce(() => secondMutation.promise);
+
+    const { props, rerender } = renderViewer();
+    await screen.findByRole("heading", { name: "댓글" });
+    await user.type(screen.getByLabelText("새 댓글"), "이전 공유 댓글");
+    await user.click(screen.getByRole("button", { name: "댓글 작성" }));
+    await waitFor(() => expect(mocks.createComment).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <SecurePublicShareViewer
+        {...props}
+        contentKey={nextContentKey}
+        shareId={nextShareId}
+      />
+    );
+    await waitFor(() => expect(mocks.listComments).toHaveBeenCalledWith(
+      nextShareId,
+      expect.objectContaining({ limit: 20 })
+    ));
+    await waitFor(() => expect(screen.getByLabelText("새 댓글")).toHaveValue(""));
+
+    await user.type(screen.getByLabelText("새 댓글"), "현재 공유 댓글");
+    await user.click(screen.getByRole("button", { name: "댓글 작성" }));
+    await waitFor(() => expect(mocks.createComment).toHaveBeenCalledTimes(2));
+    expect(mocks.createComment).toHaveBeenLastCalledWith(
+      nextShareId,
+      expect.objectContaining({ body: "현재 공유 댓글" }),
+      expect.any(Object)
+    );
+
+    await act(async () => {
+      firstMutation.resolve(commentMutation(
+        "comment_previous_123456",
+        "이전 공유 댓글"
+      ));
+      await firstMutation.promise;
+    });
+
+    expect(screen.queryByText("이전 공유 댓글")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("새 댓글")).toHaveValue("현재 공유 댓글");
+    expect(screen.getByLabelText("새 댓글")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "댓글 작성" })).toBeDisabled();
+
+    await act(async () => {
+      secondMutation.resolve(commentMutation(
+        "comment_current_123456",
+        "현재 공유 댓글"
+      ));
+      await secondMutation.promise;
+    });
+
+    expect(await screen.findByText("현재 공유 댓글")).toBeInTheDocument();
+    expect(screen.getByLabelText("새 댓글")).toHaveValue("");
   });
 
   it("previews and downloads only through authenticated API responses and revokes object URLs", async () => {
@@ -533,7 +783,7 @@ describe("SecurePublicShareViewer", () => {
     expect(mocks.getPreview).toHaveBeenCalledWith(
       shareId,
       "attachment_123456",
-      { idToken: undefined }
+      { idToken: undefined, signal: expect.any(AbortSignal) }
     );
 
     await user.click(screen.getByRole("button", { name: "미리보기 닫기" }));
@@ -544,11 +794,78 @@ describe("SecurePublicShareViewer", () => {
     expect(mocks.getDownload).toHaveBeenCalledWith(
       shareId,
       "attachment_123456",
-      { idToken: undefined }
+      { idToken: undefined, signal: expect.any(AbortSignal) }
     );
 
     unmount();
     expect(revokeObjectUrl).toHaveBeenCalledWith("blob:secure-download");
+  });
+
+  it("aborts and discards an in-flight attachment preview when the content key changes", async () => {
+    const user = userEvent.setup();
+    const previewGate = deferred<Response>();
+    mocks.refreshSession.mockResolvedValue(session());
+    mocks.getContent.mockResolvedValue(content([attachment()]));
+    mocks.getPreview.mockImplementationOnce(() => previewGate.promise);
+
+    const { props, rerender } = renderViewer();
+    expect(await screen.findByText("안전한 이미지.png")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "미리보기" }));
+    await waitFor(() => expect(mocks.getPreview).toHaveBeenCalledTimes(1));
+    const staleSignal = mocks.getPreview.mock.calls[0]?.[2]?.signal as AbortSignal;
+
+    rerender(
+      <SecurePublicShareViewer
+        {...props}
+        contentKey={"L".repeat(43)}
+      />
+    );
+    await waitFor(() => expect(staleSignal.aborted).toBe(true));
+
+    await act(async () => {
+      previewGate.resolve(new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+      await previewGate.promise;
+    });
+
+    expect(mocks.decryptAttachmentToBytes).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "안전한 이미지.png" })).not.toBeInTheDocument();
+  });
+
+  it("aborts and discards an in-flight attachment download when authentication changes", async () => {
+    const user = userEvent.setup();
+    const downloadGate = deferred<Response>();
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const firstIdToken = "header.payload.signature-before-download-auth-change";
+    const nextIdToken = "header.payload.signature-after-download-auth-change";
+    mocks.refreshSession.mockResolvedValue(session());
+    mocks.getContent.mockResolvedValue(content([attachment()]));
+    mocks.getDownload.mockImplementationOnce(() => downloadGate.promise);
+
+    const { props, rerender } = renderViewer({
+      idToken: firstIdToken,
+      isAuthenticated: true
+    });
+    expect(await screen.findByText("안전한 이미지.png")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "다운로드" }));
+    await waitFor(() => expect(mocks.getDownload).toHaveBeenCalledTimes(1));
+    const staleSignal = mocks.getDownload.mock.calls[0]?.[2]?.signal as AbortSignal;
+
+    rerender(
+      <SecurePublicShareViewer
+        {...props}
+        idToken={nextIdToken}
+        isAuthenticated
+      />
+    );
+    await waitFor(() => expect(staleSignal.aborted).toBe(true));
+
+    await act(async () => {
+      downloadGate.resolve(new Response(new Uint8Array([1, 2, 3]), { status: 200 }));
+      await downloadGate.promise;
+    });
+
+    expect(mocks.decryptAttachmentToBlob).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -610,7 +927,8 @@ describe("SecurePublicShareViewer", () => {
     expect(mocks.requestCopyGrant).toHaveBeenCalledWith(
       shareId,
       idToken,
-      expect.any(String)
+      expect.any(String),
+      expect.any(AbortSignal)
     );
     const copyPayload = onSaveCopy.mock.calls[0][0];
     expect(copyPayload).toEqual(expect.objectContaining({
@@ -626,12 +944,199 @@ describe("SecurePublicShareViewer", () => {
       "attachment_123456",
       idToken,
       `${"G".repeat(40)}.${"S".repeat(43)}`,
-      signal
+      expect.any(AbortSignal)
     );
     expect(JSON.stringify(copyPayload)).not.toContain(contentKey);
     expect(JSON.stringify(copyPayload)).not.toContain(`${"G".repeat(40)}.${"S".repeat(43)}`);
     expect(copyPayload.body).not.toMatch(/script|onclick|javascript:/iu);
     expect(copyPayload).not.toHaveProperty("contentKey");
+  });
+
+  it("aborts a pending copy grant and blocks its stale handoff after authentication changes", async () => {
+    const user = userEvent.setup();
+    const grantGate = deferred<unknown>();
+    const onSaveCopy = vi.fn().mockResolvedValue(undefined);
+    const firstIdToken = "header.payload.signature-before-copy-auth-change";
+    const nextIdToken = "header.payload.signature-after-copy-auth-change";
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "save_copy",
+        canComment: false,
+        canSaveCopy: true,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.requestCopyGrant.mockImplementationOnce(() => grantGate.promise);
+
+    const { props, rerender } = renderViewer({
+      idToken: firstIdToken,
+      isAuthenticated: true,
+      onSaveCopy
+    });
+    await user.click(await screen.findByRole("button", {
+      name: "QuickMemo에 복사본 저장"
+    }));
+    await waitFor(() => expect(mocks.requestCopyGrant).toHaveBeenCalledTimes(1));
+    const staleSignal = mocks.requestCopyGrant.mock.calls[0]?.[3] as AbortSignal;
+
+    rerender(
+      <SecurePublicShareViewer
+        {...props}
+        idToken={nextIdToken}
+        isAuthenticated
+      />
+    );
+    await waitFor(() => expect(staleSignal.aborted).toBe(true));
+
+    await act(async () => {
+      grantGate.resolve({
+        ok: true,
+        copyGrant: `${"G".repeat(40)}.${"S".repeat(43)}`,
+        expiresAt: "2026-07-28T00:05:00.000Z",
+        requestId: "request_stale_copy_123456"
+      });
+      await grantGate.promise;
+    });
+
+    expect(onSaveCopy).not.toHaveBeenCalled();
+    expect(screen.queryByText("QuickMemo 복사본 저장 작업을 시작했습니다."))
+      .not.toBeInTheDocument();
+  });
+
+  it("reuses the Save Copy request ID after a lost grant response and a failed copy handoff", async () => {
+    const user = userEvent.setup();
+    const onSaveCopy = vi.fn()
+      .mockRejectedValueOnce(new Error("copy failed"))
+      .mockResolvedValue(undefined);
+    const idToken = "header.payload.signature-for-copy-retry";
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "save_copy",
+        canComment: false,
+        canSaveCopy: true,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.requestCopyGrant.mockRejectedValueOnce(new Error("grant response lost"));
+
+    renderViewer({
+      idToken,
+      isAuthenticated: true,
+      onSaveCopy
+    });
+
+    const copyButton = await screen.findByRole("button", {
+      name: "QuickMemo에 복사본 저장"
+    });
+    await user.click(copyButton);
+    await waitFor(() => expect(mocks.requestCopyGrant).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(copyButton).toBeEnabled());
+
+    await user.click(copyButton);
+    await waitFor(() => expect(mocks.requestCopyGrant).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(onSaveCopy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(copyButton).toBeEnabled());
+
+    await user.click(copyButton);
+    await waitFor(() => expect(mocks.requestCopyGrant).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(onSaveCopy).toHaveBeenCalledTimes(2));
+
+    const requestIds = mocks.requestCopyGrant.mock.calls.map((call) => call[2]);
+    expect(new Set(requestIds).size).toBe(1);
+    expect(await screen.findByText("QuickMemo 복사본 저장 작업을 시작했습니다."))
+      .toBeInTheDocument();
+  });
+
+  it("allocates a new Save Copy request ID only after the prior copy succeeds", async () => {
+    const user = userEvent.setup();
+    const onSaveCopy = vi.fn().mockResolvedValue(undefined);
+    const idToken = "header.payload.signature-for-copy-success";
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "save_copy",
+        canComment: false,
+        canSaveCopy: true,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+
+    renderViewer({
+      idToken,
+      isAuthenticated: true,
+      onSaveCopy
+    });
+
+    const copyButton = await screen.findByRole("button", {
+      name: "QuickMemo에 복사본 저장"
+    });
+    await user.click(copyButton);
+    await waitFor(() => expect(onSaveCopy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(copyButton).toBeEnabled());
+
+    await user.click(copyButton);
+    await waitFor(() => expect(onSaveCopy).toHaveBeenCalledTimes(2));
+
+    expect(mocks.requestCopyGrant).toHaveBeenCalledTimes(2);
+    expect(mocks.requestCopyGrant.mock.calls[0][2])
+      .not.toBe(mocks.requestCopyGrant.mock.calls[1][2]);
+  });
+
+  it("resets a pending Save Copy request ID when the share changes", async () => {
+    const user = userEvent.setup();
+    const onSaveCopy = vi.fn().mockResolvedValue(undefined);
+    const idToken = "header.payload.signature-for-copy-share-change";
+    const nextShareId = "secure_share_654321";
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "save_copy",
+        canComment: false,
+        canSaveCopy: true,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.requestCopyGrant.mockRejectedValueOnce(new Error("grant response lost"));
+
+    const { rerender } = renderViewer({
+      idToken,
+      isAuthenticated: true,
+      onSaveCopy
+    });
+
+    const firstCopyButton = await screen.findByRole("button", {
+      name: "QuickMemo에 복사본 저장"
+    });
+    await user.click(firstCopyButton);
+    await waitFor(() => expect(mocks.requestCopyGrant).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(firstCopyButton).toBeEnabled());
+
+    rerender(
+      <SecurePublicShareViewer
+        contentKey={contentKey}
+        idToken={idToken}
+        isAuthenticated
+        onRequireLogin={vi.fn()}
+        onSaveCopy={onSaveCopy}
+        shareId={nextShareId}
+      />
+    );
+    await waitFor(() => expect(mocks.getContent.mock.calls.some(
+      ([requestedShareId]) => requestedShareId === nextShareId
+    )).toBe(true));
+
+    const nextCopyButton = await screen.findByRole("button", {
+      name: "QuickMemo에 복사본 저장"
+    });
+    await user.click(nextCopyButton);
+    await waitFor(() => expect(mocks.requestCopyGrant).toHaveBeenCalledTimes(2));
+
+    expect(mocks.requestCopyGrant.mock.calls[0][0]).toBe(shareId);
+    expect(mocks.requestCopyGrant.mock.calls[1][0]).toBe(nextShareId);
+    expect(mocks.requestCopyGrant.mock.calls[0][2])
+      .not.toBe(mocks.requestCopyGrant.mock.calls[1][2]);
   });
 
   it("fails closed on an invalid metadata DTO", async () => {

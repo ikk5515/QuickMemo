@@ -35,6 +35,18 @@ const secureShareRootStateCollections = [
     counterName: "secureShareEmailChallengesDeleted"
   },
   {
+    collectionId: "publicShareEmailDeliveries",
+    counterName: "secureShareEmailDeliveriesDeleted"
+  },
+  {
+    collectionId: "publicShareCopyGrantRequests",
+    counterName: "secureShareCopyGrantRequestsDeleted"
+  },
+  {
+    collectionId: "publicShareSourceGuards",
+    counterName: "secureShareSourceGuardsDeleted"
+  },
+  {
     collectionId: "publicShareUnlockGrants",
     counterName: "secureShareUnlockGrantsDeleted"
   },
@@ -731,6 +743,20 @@ async function queryOwnedSecureShareRootState(
     collectionId,
     "ownerUid",
     ownerUid,
+    accessToken
+  );
+}
+
+async function querySecureShareCopyGrantRequestsByRequester(
+  projectId,
+  requesterUid,
+  accessToken
+) {
+  return queryDocumentsByStringField(
+    projectId,
+    "publicShareCopyGrantRequests",
+    "requesterUid",
+    requesterUid,
     accessToken
   );
 }
@@ -2046,6 +2072,25 @@ async function deleteOwnedSecureShareOrphanState(projectId, ownerUid, accessToke
   );
 }
 
+async function deleteSecureShareCopyGrantRequestsByRequester(
+  projectId,
+  requesterUid,
+  accessToken,
+  stats
+) {
+  await deleteRepeatedQueryDocuments(
+    () => querySecureShareCopyGrantRequestsByRequester(
+      projectId,
+      requesterUid,
+      accessToken
+    ),
+    accessToken,
+    stats,
+    "secureShareCopyGrantRequestsDeleted",
+    "Too many requester-scoped copy grant requests to delete in one request"
+  );
+}
+
 async function deletePublicSharesForOwnedNote(projectId, noteId, accessToken, storageBucket, stats) {
   let deleted = 0;
 
@@ -2459,10 +2504,13 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
     secureShareAuditEventsDeleted: 0,
     secureShareCommentsDeleted: 0,
     secureShareContainersDeleted: 0,
+    secureShareCopyGrantRequestsDeleted: 0,
     secureShareEmailChallengesDeleted: 0,
+    secureShareEmailDeliveriesDeleted: 0,
     secureSharePoliciesDeleted: 0,
     secureShareRateLimitsDeleted: 0,
     secureShareRecipientsDeleted: 0,
+    secureShareSourceGuardsDeleted: 0,
     secureShareUnlockGrantsDeleted: 0,
     shareTargetReferencesRemoved: 0,
     sharedNoteMembershipsRemoved: 0,
@@ -2495,6 +2543,12 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
     stats
   );
   await deleteOwnedSecureShareOrphanState(projectId, targetUid, accessToken, stats);
+  await deleteSecureShareCopyGrantRequestsByRequester(
+    projectId,
+    targetUid,
+    accessToken,
+    stats
+  );
   await deleteOwnedLibraryItems(projectId, targetUid, accessToken, stats);
   await deleteOwnedLibraryVault(projectId, targetUid, accessToken, stats);
   await deleteOwnedNotes(projectId, targetUid, accessToken, storageBucket, stats);
