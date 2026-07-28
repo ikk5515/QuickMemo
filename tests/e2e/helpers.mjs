@@ -148,6 +148,7 @@ export function observePage(page) {
   const pageErrors = [];
   const apiPayloads = [];
   const pendingResponses = [];
+  const expectedConsoleErrors = new Set();
   const expectedTransientFirestoreTransportErrors = new Set();
 
   page.on("console", (message) => {
@@ -180,6 +181,7 @@ export function observePage(page) {
   return {
     apiPayloads,
     consoleErrors,
+    expectedConsoleErrors,
     expectedTransientFirestoreTransportErrors,
     pageErrors,
     pendingResponses
@@ -202,6 +204,7 @@ export async function expectCleanRuntime(diagnostics, fixture, extraSecrets = []
   const unexpectedConsoleErrors = diagnostics.consoleErrors.filter(
     (message) =>
       !expectedAuthorizationProbes.includes(message)
+      && !diagnostics.expectedConsoleErrors.has(message)
       && !diagnostics.expectedTransientFirestoreTransportErrors.has(message)
   );
   expect(unexpectedConsoleErrors, "unexpected browser console errors").toEqual([]);

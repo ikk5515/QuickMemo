@@ -293,6 +293,22 @@ test("comment permission keeps XSS text out and supports author deletion", async
   const diagnostics = observePage(page);
 
   await unlockV2Share(page, fixture);
+  await expect(page.getByText("내 댓글 이름")).toBeVisible();
+  await expect(page.getByText("guest1, 네트워크 대역 203.226")).toBeVisible();
+  await expect(
+    page.getByText("전체 IP 주소가 아닌 일부 네트워크 대역만 표시됩니다.")
+  ).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("203.226.244.27");
+
+  await page.getByRole("button", { name: "이름 변경" }).click();
+  const displayNameInput = page.getByLabel("표시 이름");
+  await displayNameInput.fill("인기테스터");
+  await page.getByRole("button", { name: "저장" }).click();
+  await expect(page.getByRole("status")).toContainText(
+    "댓글 표시 이름을 변경했습니다."
+  );
+  await expect(page.getByText("인기테스터, 네트워크 대역 203.226")).toBeVisible();
+
   const commentInput = page.getByLabel("새 댓글");
   await commentInput.fill("<img src=x onerror=alert(1)>");
   await page.getByRole("button", { name: "댓글 작성" }).click();
@@ -303,9 +319,89 @@ test("comment permission keeps XSS text out and supports author deletion", async
   await page.getByRole("button", { name: "댓글 작성" }).click();
   await expect(page.getByText(commentText)).toBeVisible();
   await expect(page.locator(".secure-public-share-comment-list script")).toHaveCount(0);
-  await page.getByRole("button", { name: /Guest 댓글 삭제/u }).click();
+  await page.getByRole("button", { name: /인기테스터 댓글 삭제/u }).click();
   await expect(page.getByText(commentText)).toHaveCount(0);
   await expectCleanRuntime(diagnostics, fixture);
+});
+
+test("independent browsers receive per-share identities and keep renamed authors", async ({
+  browser,
+  page,
+  request
+}) => {
+  const fixture = await seedScenario(request, "comment");
+  const firstDiagnostics = observePage(page);
+  const secondContext = await browser.newContext({
+    baseURL: "http://127.0.0.1:4173",
+    locale: "ko-KR",
+    timezoneId: "Asia/Seoul"
+  });
+  const secondPage = await secondContext.newPage();
+  const secondDiagnostics = observePage(secondPage);
+
+  try {
+    await unlockV2Share(page, fixture);
+    await expect(page.getByText("guest1, 네트워크 대역 203.226")).toBeVisible();
+    const firstComment = "첫 번째 브라우저의 기존 댓글";
+    await page.getByLabel("새 댓글").fill(firstComment);
+    await page.getByRole("button", { name: "댓글 작성" }).click();
+    await expect(page.getByText(firstComment)).toBeVisible();
+    await page.getByRole("button", { name: "이름 변경" }).click();
+    await page.getByLabel("표시 이름").fill("테스터A");
+    await page.getByRole("button", { name: "저장" }).click();
+    await expect(page.getByText("테스터A, 네트워크 대역 203.226")).toHaveCount(2);
+
+    await unlockV2Share(secondPage, fixture);
+    await expect(secondPage.getByText("guest2, 네트워크 대역 203.226")).toBeVisible();
+    await secondPage.getByRole("button", { name: "이름 변경" }).click();
+    await secondPage.getByLabel("표시 이름").fill("테스터A");
+    const duplicateAttemptConsoleOffset = secondDiagnostics.consoleErrors.length;
+    await secondPage.getByRole("button", { name: "저장" }).click();
+    await expect(
+      secondPage.getByText("이미 사용 중인 이름입니다. 다른 이름을 입력해주세요.")
+    ).toBeVisible();
+    const duplicateNameConflict = secondDiagnostics.consoleErrors
+      .slice(duplicateAttemptConsoleOffset)
+      .find(({ location, text }) => (
+        location.includes("/api/public-shares-v2?action=participant-me")
+        && /status of 409 \(Conflict\)$/u.test(text)
+      ));
+    expect(duplicateNameConflict, "duplicate-name conflict must be the observed 409").toBeDefined();
+    secondDiagnostics.expectedConsoleErrors.add(duplicateNameConflict);
+    await secondPage.getByLabel("표시 이름").fill("테스터B");
+    await secondPage.getByRole("button", { name: "저장" }).click();
+    await expect(secondPage.getByText("테스터B, 네트워크 대역 203.226")).toBeVisible();
+    const secondComment = "두 번째 브라우저의 댓글";
+    await secondPage.getByLabel("새 댓글").fill(secondComment);
+    await secondPage.getByRole("button", { name: "댓글 작성" }).click();
+    await expect(secondPage.getByText(secondComment)).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
+    await expect(
+      page
+        .locator(".secure-public-share-comment-list article")
+        .filter({ hasText: firstComment })
+        .getByText("테스터A, 네트워크 대역 203.226")
+    ).toBeVisible();
+    await expect(page.getByText(firstComment)).toBeVisible();
+    await expect(page.getByText(secondComment)).toBeVisible();
+
+    await Promise.all([
+      expectCleanRuntime(firstDiagnostics, fixture),
+      expectCleanRuntime(secondDiagnostics, fixture)
+    ]);
+    const observedPayloads = JSON.stringify([
+      ...firstDiagnostics.apiPayloads,
+      ...secondDiagnostics.apiPayloads
+    ]);
+    expect(observedPayloads).not.toContain("203.226.244.27");
+    expect(observedPayloads).not.toMatch(
+      /"(?:carrier|isp|asn|country|city|location)"\s*:/iu
+    );
+  } finally {
+    await secondContext.close();
+  }
 });
 
 test("owner preview can delete a guest comment without consuming a one-time share", async ({
@@ -340,7 +436,7 @@ test("owner preview can delete a guest comment without consuming a one-time shar
   await ownerPage.getByRole("button", { name: "소유자/관리자 미리보기 열기" }).click();
   await expect(ownerPage.getByRole("heading", { name: fixture.title })).toBeVisible();
   await expect(ownerPage.getByText(guestComment)).toBeVisible();
-  await ownerPage.getByRole("button", { name: /Guest 댓글 삭제/u }).click();
+  await ownerPage.getByRole("button", { name: /guest1 댓글 삭제/iu }).click();
   await expect(ownerPage.getByText(guestComment)).toHaveCount(0);
   const afterOwnerPreview = await scenarioState(request, fixture);
   expect(afterOwnerPreview.share.consumedAt).toBe(beforeOwnerPreview.share.consumedAt);

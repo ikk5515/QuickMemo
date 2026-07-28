@@ -2977,6 +2977,25 @@ describeRules("firestore security rules", () => {
       await setDoc(doc(db, "publicShareComments/secure-v2/items/comment-a"), {
         body: "server only"
       });
+      await setDoc(doc(db, "publicShareParticipants/secure-v2/items/participant-a"), {
+        displayName: "guest1",
+        participantId: "participant-a",
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareParticipantNames/secure-v2/items/name-a"), {
+        participantId: "participant-a",
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareParticipantRenameRequests/secure-v2/items/request-a"), {
+        participantId: "participant-a",
+        shareId: "secure-v2",
+        status: "succeeded"
+      });
+      await setDoc(doc(db, "publicShareParticipantCounters/secure-v2"), {
+        nextGuestNumber: 2,
+        participantCount: 1,
+        shareId: "secure-v2"
+      });
       await setDoc(doc(db, "publicShareAuditEvents/secure-v2/items/event-a"), {
         eventType: "access"
       });
@@ -3011,6 +3030,10 @@ describeRules("firestore security rules", () => {
       "publicShareUnlockGrants/grant-a",
       "publicShareRateLimits/rate-a",
       "publicShareComments/secure-v2/items/comment-a",
+      "publicShareParticipants/secure-v2/items/participant-a",
+      "publicShareParticipantNames/secure-v2/items/name-a",
+      "publicShareParticipantRenameRequests/secure-v2/items/request-a",
+      "publicShareParticipantCounters/secure-v2",
       "publicShareAuditEvents/secure-v2/items/event-a"
     ]) {
       await assertFails(getDoc(doc(ownerDb, path)));

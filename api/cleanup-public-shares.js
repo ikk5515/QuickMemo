@@ -42,8 +42,12 @@ const secureShareRootStateCollections = [
   "publicShareCopyGrantRequests",
   "publicShareSourceGuards",
   "publicShareUnlockGrants",
-  "publicShareRateLimits"
+  "publicShareRateLimits",
+  "publicShareParticipantCounters"
 ];
+const secureShareRootRetentionCollections = secureShareRootStateCollections.filter(
+  (collectionId) => collectionId !== "publicShareParticipantCounters"
+);
 const secureShareGlobalRetentionCollections = [
   {
     allDescendants: false,
@@ -66,6 +70,24 @@ const secureShareChildStateCollections = [
     collectionId: "items",
     counterName: "secureShareAuditEventsDeleted",
     parentCollectionId: "publicShareAuditEvents"
+  },
+  {
+    collectionId: "items",
+    counterName: "secureShareParticipantsDeleted",
+    parentCollectionId: "publicShareParticipants",
+    retentionEligible: false
+  },
+  {
+    collectionId: "items",
+    counterName: "secureShareParticipantNamesDeleted",
+    parentCollectionId: "publicShareParticipantNames",
+    retentionEligible: false
+  },
+  {
+    collectionId: "items",
+    counterName: "secureShareParticipantRenameRequestsDeleted",
+    parentCollectionId: "publicShareParticipantRenameRequests",
+    retentionEligible: false
   }
 ];
 const secureShareContainerCollections = secureShareChildStateCollections.map(
@@ -1775,6 +1797,8 @@ function secureShareRootStateCounterName(collectionId) {
       return "secureShareUnlockGrantsDeleted";
     case "publicShareRateLimits":
       return "secureShareRateLimitsDeleted";
+    case "publicShareParticipantCounters":
+      return "secureShareParticipantCountersDeleted";
     default:
       throw new Error("Unsupported secure share state collection");
   }
@@ -1787,7 +1811,9 @@ function secureShareItemState(documentName, projectId) {
     : "";
   const [parentCollectionId, shareId, collectionId, documentId, ...extraSegments] = relativeName.split("/");
   const definition = secureShareChildStateCollections.find(
-    (candidate) => candidate.parentCollectionId === parentCollectionId
+    (candidate) =>
+      candidate.parentCollectionId === parentCollectionId
+      && candidate.retentionEligible !== false
   );
 
   if (
@@ -1800,7 +1826,11 @@ function secureShareItemState(documentName, projectId) {
     return null;
   }
 
-  return { counterName: definition.counterName, shareId };
+  return {
+    counterName: definition.counterName,
+    parentCollectionId,
+    shareId
+  };
 }
 
 async function secureShareStateRemains(shareId, accessToken, projectId) {
@@ -1963,7 +1993,7 @@ function cleanupCanContinue(config, stats) {
 
 function secureShareRetentionQueues() {
   return [
-    ...secureShareRootStateCollections
+    ...secureShareRootRetentionCollections
       .filter((collectionId) => collectionId !== "publicShareEmailDeliveries")
       .map((collectionId) => ({
         allDescendants: false,
@@ -2008,11 +2038,49 @@ async function deleteExpiredSecureShareQueueDocuments(
   }
 
   const documentsByCounter = new Map();
+  const itemStates = documents.map((document) =>
+    secureShareItemState(document.name, config.projectId)
+  );
+  const shareEligibility = new Map();
 
-  for (const document of documents) {
-    const state = secureShareItemState(document.name, config.projectId);
+  const requiresCurrentShareExpiry = (state) =>
+    fieldPath === "expiresAt"
+    || state?.parentCollectionId === "publicShareComments";
 
-    if (!state) {
+  if (itemStates.some(requiresCurrentShareExpiry)) {
+    const shareIds = [...new Set(itemStates.flatMap((state) =>
+      state?.shareId && requiresCurrentShareExpiry(state) ? [state.shareId] : []
+    ))];
+    let nextShareIndex = 0;
+    async function loadShareEligibility() {
+      while (nextShareIndex < shareIds.length) {
+        const shareId = shareIds[nextShareIndex];
+        nextShareIndex += 1;
+        shareEligibility.set(
+          shareId,
+          await claimExpiredPublicShareCleanup(
+            documentNameForPath(config.projectId, `publicNoteShares/${shareId}`),
+            config.accessToken
+          )
+        );
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(8, shareIds.length) }, loadShareEligibility)
+    );
+  }
+
+  for (let index = 0; index < documents.length; index += 1) {
+    const document = documents[index];
+    const state = itemStates[index];
+
+    if (
+      !state
+      || (
+        requiresCurrentShareExpiry(state)
+        && shareEligibility.get(state.shareId) !== true
+      )
+    ) {
       continue;
     }
 
@@ -2676,11 +2744,80 @@ async function cleanupStaleSecureShareCopyJobs(config, stats) {
   }
 }
 
+async function claimExpiredPublicShareCleanup(shareName, accessToken) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const share = await getDocumentByName(
+      shareName,
+      accessToken,
+      ["cleanupClaimVersion", "cleanupStartedAt", "expiresAt", "schemaVersion"]
+    );
+
+    if (!share) {
+      return true;
+    }
+    const expiresAt = timestampFieldMillis(share, "expiresAt");
+    if (!Number.isFinite(expiresAt) || expiresAt > Date.now()) {
+      return false;
+    }
+    if (
+      integerField(share, "schemaVersion") < 2
+      || hasField(share, "cleanupStartedAt")
+    ) {
+      return true;
+    }
+    if (!share.updateTime) {
+      return false;
+    }
+
+    try {
+      await firestoreRequest(firestoreCommitPathFromDocumentName(shareName), accessToken, {
+        method: "POST",
+        body: JSON.stringify({
+          writes: [{
+            update: {
+              name: shareName,
+              fields: { cleanupClaimVersion: integerValue(1) }
+            },
+            updateMask: { fieldPaths: ["cleanupClaimVersion"] },
+            currentDocument: { updateTime: share.updateTime },
+            updateTransforms: [{
+              fieldPath: "cleanupStartedAt",
+              setToServerValue: "REQUEST_TIME"
+            }]
+          }]
+        })
+      });
+      return true;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode)) {
+        throw error;
+      }
+    }
+  }
+
+  return false;
+}
+
 async function deletePublicShareTreeByName(shareName, accessToken, storageBucket, stats, projectId) {
   const cleanupQueueName = cleanupQueueNameFromShareName(shareName);
   const shareId = publicShareIdFromShareName(shareName, projectId);
 
   if (!shareId || !cleanupStatsCanContinue(stats)) {
+    return false;
+  }
+  if (!await claimExpiredPublicShareCleanup(shareName, accessToken)) {
+    return false;
+  }
+  const initialShare = await getDocumentByName(
+    shareName,
+    accessToken,
+    ["expiresAt", "schemaVersion"]
+  );
+  const initialExpiresAt = timestampFieldMillis(initialShare, "expiresAt");
+  if (
+    initialShare
+    && (!Number.isFinite(initialExpiresAt) || initialExpiresAt > Date.now())
+  ) {
     return false;
   }
 
@@ -2758,7 +2895,19 @@ async function deletePublicShareTreeByName(shareName, accessToken, storageBucket
     return false;
   }
 
-  const shareMetadata = await getDocumentByName(shareName, accessToken, ["schemaVersion"]);
+  const shareMetadata = await getDocumentByName(
+    shareName,
+    accessToken,
+    ["expiresAt", "schemaVersion"]
+  );
+  const currentExpiresAt = timestampFieldMillis(shareMetadata, "expiresAt");
+
+  if (
+    shareMetadata
+    && (!Number.isFinite(currentExpiresAt) || currentExpiresAt > Date.now())
+  ) {
+    return false;
+  }
 
   if (
     (!shareMetadata || integerField(shareMetadata, "schemaVersion") >= 2)
@@ -2784,8 +2933,28 @@ async function deletePublicShareTree(cleanupQueueDocument, accessToken, storageB
 
 async function deleteExpiredPublicShareAttachment(attachmentDocument, accessToken, storageBucket, stats, projectId, nowIso) {
   const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachmentDocument.name);
+  const parsedAttachment = parsePublicShareAttachmentName(attachmentDocument.name);
 
-  if (!cleanupAttachmentQueueName) {
+  if (!cleanupAttachmentQueueName || !parsedAttachment) {
+    return;
+  }
+  const shareName = documentNameForPath(
+    projectId,
+    `publicNoteShares/${parsedAttachment.shareId}`
+  );
+  if (!await claimExpiredPublicShareCleanup(shareName, accessToken)) {
+    return;
+  }
+  const share = await getDocumentByName(
+    shareName,
+    accessToken,
+    ["expiresAt"]
+  );
+  const shareExpiresAt = timestampFieldMillis(share, "expiresAt");
+  if (
+    share
+    && (!Number.isFinite(shareExpiresAt) || shareExpiresAt > Date.parse(nowIso))
+  ) {
     return;
   }
 
@@ -3271,6 +3440,10 @@ async function cleanupExpiredPublicShares({
     secureShareEmailChallengesDeleted: 0,
     secureShareEmailDeliveriesDeleted: 0,
     secureShareEmailQuotaBucketsDeleted: 0,
+    secureShareParticipantCountersDeleted: 0,
+    secureShareParticipantNamesDeleted: 0,
+    secureShareParticipantRenameRequestsDeleted: 0,
+    secureShareParticipantsDeleted: 0,
     secureSharePoliciesDeleted: 0,
     secureShareRateLimitsDeleted: 0,
     secureShareRecipientsDeleted: 0,
@@ -3533,6 +3706,11 @@ async function cleanupExpiredPublicShares({
     secureShareEmailChallengesDeleted: stats.secureShareEmailChallengesDeleted,
     secureShareEmailDeliveriesDeleted: stats.secureShareEmailDeliveriesDeleted,
     secureShareEmailQuotaBucketsDeleted: stats.secureShareEmailQuotaBucketsDeleted,
+    secureShareParticipantCountersDeleted: stats.secureShareParticipantCountersDeleted,
+    secureShareParticipantNamesDeleted: stats.secureShareParticipantNamesDeleted,
+    secureShareParticipantRenameRequestsDeleted:
+      stats.secureShareParticipantRenameRequestsDeleted,
+    secureShareParticipantsDeleted: stats.secureShareParticipantsDeleted,
     secureSharePoliciesDeleted: stats.secureSharePoliciesDeleted,
     secureShareRateLimitsDeleted: stats.secureShareRateLimitsDeleted,
     secureShareRecipientsDeleted: stats.secureShareRecipientsDeleted,

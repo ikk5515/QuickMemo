@@ -40,6 +40,7 @@ function secureShare(
     revokedAt: null,
     schemaVersion: 2,
     shareId,
+    showCommenterIpPrefix: true,
     sourceNoteId: "note_123456",
     status: "active",
     successfulAccessCount: 12,

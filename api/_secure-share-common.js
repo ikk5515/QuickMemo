@@ -9,6 +9,7 @@ import {
   sign as signBytes,
   timingSafeEqual
 } from "node:crypto";
+import { isIP } from "node:net";
 import { domainToASCII } from "node:url";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
@@ -111,6 +112,67 @@ export function secureShareV2Enabled() {
 
 export function secureShareEmailEnabled() {
   return secureShareEmailReadiness().ready;
+}
+
+export function secureShareParticipantIdentityEnabled() {
+  const requested = secureShareV2Enabled()
+    && exactFeatureFlag("SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED");
+  if (!requested) {
+    return false;
+  }
+  const participantKey = envValue("SHARE_PARTICIPANT_HMAC_KEY");
+  const prohibitedReuse = [
+    "SHARE_PASSWORD_PEPPER",
+    "SHARE_SESSION_HMAC_KEY",
+    "SHARE_COOKIE_NAME_HMAC_KEY",
+    "SHARE_CSRF_HMAC_KEY",
+    "SHARE_OTP_HMAC_KEY",
+    "SHARE_EMAIL_HMAC_KEY",
+    "SHARE_RATE_LIMIT_HMAC_KEY"
+  ].some((name) => {
+    const otherSecret = envValue(name);
+    return otherSecret && otherSecret === participantKey;
+  });
+  if (
+    Buffer.byteLength(participantKey, "utf8") < 32
+    || prohibitedReuse
+  ) {
+    throw new HttpError(
+      503,
+      "service_unavailable",
+      "Participant identity secret is unavailable",
+      { expose: false }
+    );
+  }
+  return true;
+}
+
+export function secureShareCommentIpPrefixEnabled() {
+  const requested = secureShareParticipantIdentityEnabled()
+    && exactFeatureFlag("SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED");
+  if (!requested) {
+    return false;
+  }
+  const networkKey = envValue("SHARE_RATE_LIMIT_HMAC_KEY");
+  const prohibitedReuse = [
+    "SHARE_PASSWORD_PEPPER",
+    "SHARE_SESSION_HMAC_KEY"
+  ].some((name) => {
+    const otherSecret = envValue(name);
+    return otherSecret && otherSecret === networkKey;
+  });
+  if (
+    Buffer.byteLength(networkKey, "utf8") < 32
+    || prohibitedReuse
+  ) {
+    throw new HttpError(
+      503,
+      "service_unavailable",
+      "Network identity secret is unavailable",
+      { expose: false }
+    );
+  }
+  return true;
 }
 
 function configuredEmailSender(value) {
@@ -799,6 +861,10 @@ export function browserBindingCookieName(shareId, request) {
   return `${isProductionRequest(request) ? "__Secure-" : ""}qmsb_${cookieSuffix(shareId)}`;
 }
 
+export function participantCookieName(shareId, request) {
+  return `${isProductionRequest(request) ? "__Secure-" : ""}qmsp_${cookieSuffix(shareId)}`;
+}
+
 function cookieHeader(name, value, request, maxAgeSeconds, httpOnly = true) {
   const parts = [
     `${name}=${value}`,
@@ -827,6 +893,15 @@ export function browserBindingCookie(request, shareId, token, maxAgeSeconds = 24
   return cookieHeader(browserBindingCookieName(shareId, request), token, request, maxAgeSeconds);
 }
 
+export function participantCookie(
+  request,
+  shareId,
+  token,
+  maxAgeSeconds = 365 * 24 * 60 * 60
+) {
+  return cookieHeader(participantCookieName(shareId, request), token, request, maxAgeSeconds);
+}
+
 export function sessionTokenFromRequest(request, shareId) {
   const token = parseCookies(request).get(sessionCookieName(shareId, request)) ?? "";
   return /^[A-Za-z0-9_-]{40,200}$/u.test(token) ? token : "";
@@ -834,6 +909,11 @@ export function sessionTokenFromRequest(request, shareId) {
 
 export function browserBindingFromRequest(request, shareId) {
   const token = parseCookies(request).get(browserBindingCookieName(shareId, request)) ?? "";
+  return /^[A-Za-z0-9_-]{40,200}$/u.test(token) ? token : "";
+}
+
+export function participantTokenFromRequest(request, shareId) {
+  const token = parseCookies(request).get(participantCookieName(shareId, request)) ?? "";
   return /^[A-Za-z0-9_-]{40,200}$/u.test(token) ? token : "";
 }
 
@@ -1186,6 +1266,43 @@ export async function firestoreGet(context, documentPath) {
   return decodeFirestoreDocument(await response.json());
 }
 
+export async function firestoreBatchGet(context, documentPaths) {
+  if (
+    !Array.isArray(documentPaths)
+    || documentPaths.length < 1
+    || documentPaths.length > 100
+  ) {
+    throw new TypeError("A bounded Firestore read set is required");
+  }
+  const response = await firestoreFetch(
+    context,
+    `${documentsRoot(context.projectId)}:batchGet`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        documents: documentPaths.map((documentPath) =>
+          firestoreDocumentName(context.projectId, documentPath)
+        )
+      })
+    }
+  );
+  if (!response.ok) {
+    throw await upstreamError("Firestore batch read failed", response);
+  }
+  const rows = await response.json();
+  if (!Array.isArray(rows)) {
+    throw new Error("Firestore batch read returned an invalid response");
+  }
+  const documentsByName = new Map(
+    rows
+      .filter((row) => row?.found?.name)
+      .map((row) => [row.found.name, decodeFirestoreDocument(row.found)])
+  );
+  return documentPaths.map((documentPath) =>
+    documentsByName.get(firestoreDocumentName(context.projectId, documentPath)) ?? null
+  );
+}
+
 export async function firestoreCommit(context, writes, transaction = "") {
   const response = await firestoreFetch(context, `${documentsRoot(context.projectId)}:commit`, {
     method: "POST",
@@ -1418,19 +1535,160 @@ export async function activeUserFromRequest(request, context = null, options = {
   };
 }
 
-export function clientNetworkDigest(request) {
-  const forwarded = process.env.VERCEL === "1"
-    ? headerValue(request, "x-vercel-forwarded-for").split(",")[0]?.trim()
+function parsedPublicIpv4(value) {
+  if (isIP(value) !== 4) {
+    return null;
+  }
+  const octets = value.split(".").map((part) => Number.parseInt(part, 10));
+  const [first, second] = octets;
+  const reserved = (
+    first === 0
+    || first === 10
+    || first === 127
+    || first >= 224
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 0)
+    || (first === 192 && second === 88)
+    || (first === 192 && second === 168)
+    || (first === 198 && (second === 18 || second === 19))
+    || (first === 198 && second === 51)
+    || (first === 203 && second === 0)
+  );
+  return reserved ? null : octets;
+}
+
+function expandedIpv6(value) {
+  if (isIP(value) !== 6 || value.includes("%")) {
+    return null;
+  }
+  let normalized = value.toLowerCase();
+  const ipv4Match = /(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/u.exec(normalized);
+  if (ipv4Match) {
+    const ipv4 = ipv4Match[1];
+    if (isIP(ipv4) !== 4) {
+      return null;
+    }
+    const octets = ipv4.split(".").map((part) => Number.parseInt(part, 10));
+    const replacement = `${((octets[0] << 8) | octets[1]).toString(16)}:`
+      + `${((octets[2] << 8) | octets[3]).toString(16)}`;
+    normalized = `${normalized.slice(0, normalized.length - ipv4.length)}${replacement}`;
+  }
+  const halves = normalized.split("::");
+  if (halves.length > 2) {
+    return null;
+  }
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if (
+    (halves.length === 1 && missing !== 0)
+    || (halves.length === 2 && missing < 1)
+  ) {
+    return null;
+  }
+  const groups = [
+    ...left,
+    ...Array.from({ length: Math.max(0, missing) }, () => "0"),
+    ...right
+  ].map((group) => Number.parseInt(group || "0", 16));
+  return groups.length === 8 && groups.every((group) =>
+    Number.isSafeInteger(group) && group >= 0 && group <= 0xffff
+  )
+    ? groups
+    : null;
+}
+
+export function publicIpPrefix(value) {
+  if (typeof value !== "string" || value.length < 2 || value.length > 128) {
+    return null;
+  }
+  const candidate = value.trim();
+  const directIpv4 = parsedPublicIpv4(candidate);
+  if (directIpv4) {
+    return `${directIpv4[0]}.${directIpv4[1]}`;
+  }
+  const groups = expandedIpv6(candidate);
+  if (!groups) {
+    return null;
+  }
+  const ipv4Mapped = groups.slice(0, 5).every((group) => group === 0)
+    && groups[5] === 0xffff;
+  if (ipv4Mapped) {
+    const mapped = [
+      groups[6] >> 8,
+      groups[6] & 0xff,
+      groups[7] >> 8,
+      groups[7] & 0xff
+    ].join(".");
+    const mappedIpv4 = parsedPublicIpv4(mapped);
+    return mappedIpv4 ? `${mappedIpv4[0]}.${mappedIpv4[1]}` : null;
+  }
+  const first = groups[0];
+  const second = groups[1];
+  const allZero = groups.every((group) => group === 0);
+  const reserved = (
+    allZero
+    || (first & 0xe000) !== 0x2000
+    || (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1)
+    || (first & 0xfe00) === 0xfc00
+    || (first & 0xffc0) === 0xfe80
+    || (first & 0xffc0) === 0xfec0
+    || (first & 0xff00) === 0xff00
+    || (first === 0x2001 && second === 0x0002 && groups[2] === 0)
+    || (first === 0x2001 && second === 0x0db8)
+    || (first === 0x3fff && (second & 0xf000) === 0)
+  );
+  if (reserved) {
+    return null;
+  }
+  return `${first.toString(16)}:${second.toString(16)}`;
+}
+
+function trustedClientNetworkValues(request) {
+  const injected = process.env.NODE_ENV === "test"
+    && typeof request?.secureShareTestClientIp === "string"
+    ? request.secureShareTestClientIp.trim()
+    : "";
+  const managedForwarded = process.env.VERCEL === "1"
+    ? headerValue(request, "x-vercel-forwarded-for")
+    : "";
+  const singleForwarded = managedForwarded && !managedForwarded.includes(",")
+    ? managedForwarded.trim()
     : "";
   const directAddress = typeof request?.socket?.remoteAddress === "string"
     ? request.socket.remoteAddress.trim()
     : "";
-  const candidate = forwarded || directAddress || "unknown";
-  return hmacDigest(
-    requiredSecret("SHARE_RATE_LIMIT_HMAC_KEY"),
-    "quickmemo/secure-share/network/v1",
-    candidate.slice(0, 128)
-  );
+  const digestCandidate =
+    injected
+    || singleForwarded
+    || directAddress
+    || "unknown";
+  return {
+    digestCandidate,
+    prefixCandidate: injected || singleForwarded || ""
+  };
+}
+
+export function clientNetworkIdentity(request) {
+  const values = trustedClientNetworkValues(request);
+  return {
+    digest: hmacDigest(
+      requiredSecret("SHARE_RATE_LIMIT_HMAC_KEY"),
+      "quickmemo/secure-share/network/v1",
+      values.digestCandidate.slice(0, 128)
+    ),
+    prefix: publicIpPrefix(values.prefixCandidate)
+  };
+}
+
+export function clientIpPrefix(request) {
+  return publicIpPrefix(trustedClientNetworkValues(request).prefixCandidate);
+}
+
+export function clientNetworkDigest(request) {
+  return clientNetworkIdentity(request).digest;
 }
 
 export function userAgentDigest(request) {

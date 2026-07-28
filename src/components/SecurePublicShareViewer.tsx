@@ -8,10 +8,12 @@ import {
   LockKeyhole,
   LogIn,
   MessageCircle,
+  Pencil,
   Save,
   Send,
   ShieldCheck,
-  Trash2
+  Trash2,
+  X
 } from "lucide-react";
 import {
   lazy,
@@ -64,11 +66,16 @@ import {
   getSecureShareAttachmentPreview,
   getSecureShareContent,
   getSecureShareMetadata,
+  getSecureShareParticipant,
   listSecureShareComments,
+  normalizeSecureShareParticipantDisplayName,
+  parseSecureShareIpPrefix,
   refreshSecureShareSession,
+  renameSecureShareParticipant,
   requestSecureShareCopyGrant,
   requestSecureShareEmailChallenge,
-  unlockSecureShare
+  unlockSecureShare,
+  type SecureShareParticipantDto
 } from "../services/secureShares";
 import type { EncryptedPayload } from "../types";
 
@@ -81,6 +88,10 @@ const base64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]
 const accessModes = new Set(["anyone_with_link", "allowed_emails", "authenticated_users"]);
 const permissionLevels = new Set(["view", "comment", "save_copy"]);
 const commentBadges = new Set(["guest", "email_verified", "quickmemo_user", "owner", "admin"]);
+const commentDateFormatter = new Intl.DateTimeFormat("ko-KR", {
+  dateStyle: "medium",
+  timeStyle: "short"
+});
 const previewExtensions = new Set([
   ...previewableAttachmentExtensions,
   "png",
@@ -136,8 +147,14 @@ export interface SecurePublicShareCapabilities {
   quickCopyButtonVisible: boolean;
 }
 
+export interface SecureShareViewerCapabilities extends SecurePublicShareCapabilities {
+  commentIpPrefixEnabled: boolean;
+  participantIdentityEnabled: boolean;
+  participantLimitReached: boolean;
+}
+
 export interface SecureShareViewerSessionDto {
-  capabilities: SecurePublicShareCapabilities;
+  capabilities: SecureShareViewerCapabilities;
   ownerPreview: boolean;
   sessionExpiresAt: string;
 }
@@ -182,12 +199,14 @@ interface DecryptedSecureShareContent {
 }
 
 interface SecureShareComment {
+  authorParticipantId?: string;
   badge: "admin" | "email_verified" | "guest" | "owner" | "quickmemo_user";
   body: string;
   canDelete: boolean;
   createdAt: string;
   displayName: string;
   id: string;
+  ipPrefix?: string;
 }
 
 interface InternalAttachment extends SecurePublicShareAttachmentMetadata {
@@ -201,6 +220,11 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly string[]) {
+  const allowed = new Set(allowedKeys);
+  return Object.keys(value).every((key) => allowed.has(key));
 }
 
 function safeString(value: unknown, maximumLength: number) {
@@ -406,6 +430,18 @@ function parseSessionDto(value: unknown): SecureShareViewerSessionDto | null {
   const capabilities = value.capabilities;
   const permissionLevel = capabilities.permissionLevel;
   const sessionExpiresAt = safeDateString(value.sessionExpiresAt);
+  const participantIdentityEnabled =
+    capabilities.participantIdentityEnabled === undefined
+      ? false
+      : capabilities.participantIdentityEnabled;
+  const commentIpPrefixEnabled =
+    capabilities.commentIpPrefixEnabled === undefined
+      ? false
+      : capabilities.commentIpPrefixEnabled;
+  const participantLimitReached =
+    capabilities.participantLimitReached === undefined
+      ? false
+      : capabilities.participantLimitReached;
 
   if (
     typeof permissionLevel !== "string"
@@ -414,13 +450,37 @@ function parseSessionDto(value: unknown): SecureShareViewerSessionDto | null {
     || typeof capabilities.canSaveCopy !== "boolean"
     || typeof capabilities.downloadAllowed !== "boolean"
     || typeof capabilities.quickCopyButtonVisible !== "boolean"
+    || typeof participantIdentityEnabled !== "boolean"
+    || typeof commentIpPrefixEnabled !== "boolean"
+    || typeof participantLimitReached !== "boolean"
     || typeof value.ownerPreview !== "boolean"
     || !sessionExpiresAt
+    || (participantIdentityEnabled && permissionLevel !== "comment")
+    || (
+      commentIpPrefixEnabled
+      && (
+        permissionLevel !== "comment"
+        || (!value.ownerPreview && !participantIdentityEnabled)
+      )
+    )
+    || (
+      participantLimitReached
+      && (!participantIdentityEnabled || capabilities.canComment)
+    )
+    || (
+      value.ownerPreview
+      && (
+        participantIdentityEnabled
+        || participantLimitReached
+      )
+    )
     || (
       value.ownerPreview
         ? capabilities.canComment !== true || capabilities.canSaveCopy !== false
         : (
-          capabilities.canComment !== (permissionLevel === "comment")
+          capabilities.canComment !== (
+            permissionLevel === "comment" && !participantLimitReached
+          )
           || capabilities.canSaveCopy !== (permissionLevel === "save_copy")
         )
     )
@@ -433,7 +493,10 @@ function parseSessionDto(value: unknown): SecureShareViewerSessionDto | null {
       permissionLevel: permissionLevel as SecurePublicShareCapabilities["permissionLevel"],
       canComment: capabilities.canComment,
       canSaveCopy: capabilities.canSaveCopy,
+      commentIpPrefixEnabled,
       downloadAllowed: capabilities.downloadAllowed,
+      participantIdentityEnabled,
+      participantLimitReached,
       quickCopyButtonVisible: capabilities.quickCopyButtonVisible
     },
     ownerPreview: value.ownerPreview,
@@ -543,9 +606,10 @@ function parseEmailChallengeDto(value: unknown) {
   return { challengeId, resendAfterSeconds };
 }
 
-function parseCommentsDto(value: unknown) {
+function parseCommentsDto(value: unknown, allowIpPrefix = false) {
   if (
     !isPlainRecord(value)
+    || !hasOnlyKeys(value, ["ok", "items", "nextCursor", "requestId"])
     || value.ok !== true
     || !safeString(value.requestId, 128)
     || !Array.isArray(value.items)
@@ -560,12 +624,33 @@ function parseCommentsDto(value: unknown) {
     if (!isPlainRecord(rawItem)) {
       return null;
     }
+    if (!hasOnlyKeys(rawItem, [
+      "id",
+      "displayName",
+      "badge",
+      "body",
+      "createdAt",
+      "canDelete",
+      "authorParticipantId",
+      "ipPrefix"
+    ])) {
+      return null;
+    }
 
     const id = safeString(rawItem.id, 128);
     const body = safeUnicodeString(rawItem.body, 2_000);
-    const displayName = safeUnicodeString(rawItem.displayName, 40);
+    const displayName = safeUnicodeString(rawItem.displayName, 72);
     const createdAt = safeDateString(rawItem.createdAt);
     const badge = rawItem.badge;
+    const authorParticipantId = Object.prototype.hasOwnProperty.call(
+      rawItem,
+      "authorParticipantId"
+    )
+      ? safeString(rawItem.authorParticipantId, 128)
+      : undefined;
+    const ipPrefix = Object.prototype.hasOwnProperty.call(rawItem, "ipPrefix")
+      ? parseSecureShareIpPrefix(rawItem.ipPrefix)
+      : undefined;
 
     if (
       !id
@@ -576,6 +661,14 @@ function parseCommentsDto(value: unknown) {
       || typeof badge !== "string"
       || !commentBadges.has(badge)
       || typeof rawItem.canDelete !== "boolean"
+      || (
+        Object.prototype.hasOwnProperty.call(rawItem, "authorParticipantId")
+        && (!authorParticipantId || !shareIdentifierPattern.test(authorParticipantId))
+      )
+      || (
+        Object.prototype.hasOwnProperty.call(rawItem, "ipPrefix")
+        && (!allowIpPrefix || !ipPrefix)
+      )
     ) {
       return null;
     }
@@ -586,7 +679,9 @@ function parseCommentsDto(value: unknown) {
       displayName,
       createdAt,
       badge: badge as SecureShareComment["badge"],
-      canDelete: rawItem.canDelete
+      canDelete: rawItem.canDelete,
+      ...(authorParticipantId ? { authorParticipantId } : {}),
+      ...(ipPrefix ? { ipPrefix } : {})
     });
   }
 
@@ -601,9 +696,10 @@ function parseCommentsDto(value: unknown) {
   return { items, nextCursor };
 }
 
-function parseCommentMutationDto(value: unknown) {
+function parseCommentMutationDto(value: unknown, allowIpPrefix = false) {
   if (
     !isPlainRecord(value)
+    || !hasOnlyKeys(value, ["ok", "comment", "requestId"])
     || value.ok !== true
     || !safeString(value.requestId, 128)
   ) {
@@ -614,7 +710,7 @@ function parseCommentMutationDto(value: unknown) {
     items: [value.comment],
     nextCursor: null,
     requestId: value.requestId
-  });
+  }, allowIpPrefix);
   return parsed?.items[0] ?? null;
 }
 
@@ -739,6 +835,26 @@ function viewerErrorMessage(caught: unknown) {
   return "이 공유 링크를 사용할 수 없습니다.";
 }
 
+function participantRenameErrorMessage(caught: unknown) {
+  if (caught instanceof SecureShareApiError) {
+    if (caught.code === "display_name_unavailable") {
+      return "이미 사용 중인 이름입니다. 다른 이름을 입력해주세요.";
+    }
+    if (caught.code === "invalid_display_name") {
+      return "한글·영문·일본어·숫자와 공백, 점, 밑줄, 하이픈만 1~24자로 입력해주세요.";
+    }
+    if (caught.status === 429) {
+      return caught.retryAfterSeconds && caught.retryAfterSeconds > 0
+        ? `${caught.retryAfterSeconds}초 후 다시 변경할 수 있습니다.`
+        : "이름 변경 횟수를 초과했습니다. 잠시 후 다시 시도해주세요.";
+    }
+    if (caught.code === "network_error") {
+      return "네트워크 연결을 확인한 뒤 같은 이름으로 다시 시도해주세요.";
+    }
+  }
+  return "표시 이름을 변경하지 못했습니다. 다시 시도해주세요.";
+}
+
 function badgeLabel(badge: SecureShareComment["badge"]) {
   if (badge === "admin") {
     return "관리자";
@@ -753,6 +869,31 @@ function badgeLabel(badge: SecureShareComment["badge"]) {
     return "이메일 인증됨";
   }
   return "게스트";
+}
+
+function ParticipantDisplay({
+  displayName,
+  ipPrefix
+}: {
+  displayName: string;
+  ipPrefix?: string;
+}) {
+  if (!ipPrefix) {
+    return <strong>{displayName}</strong>;
+  }
+
+  return (
+    <span className="secure-public-share-author-identity">
+      <span className="sr-only">{displayName}, 네트워크 대역 {ipPrefix}</span>
+      <strong aria-hidden="true">{displayName}</strong>
+      <span
+        aria-hidden="true"
+        className="secure-public-share-ip-prefix"
+      >
+        ({ipPrefix})
+      </span>
+    </span>
+  );
 }
 
 function canPreviewAttachment(attachment: SecurePublicShareAttachmentMetadata) {
@@ -790,7 +931,22 @@ export function SecurePublicShareViewer({
   const [commentCursor, setCommentCursor] = useState<string | null>(null);
   const [commentBody, setCommentBody] = useState("");
   const [commentError, setCommentError] = useState("");
+  const [participant, setParticipant] = useState<SecureShareParticipantDto | null>(null);
+  const [participantError, setParticipantError] = useState("");
+  const [participantStatus, setParticipantStatus] = useState("");
+  const [participantLoading, setParticipantLoading] = useState(false);
+  const [renameEditing, setRenameEditing] = useState(false);
+  const [renameDisplayName, setRenameDisplayName] = useState("");
+  const [renameError, setRenameError] = useState("");
+  const [restoreRenameFocus, setRestoreRenameFocus] = useState(false);
+  const [participantClock, setParticipantClock] = useState(() => Date.now());
   const commentRequestRef = useRef<{ body: string; clientRequestId: string } | null>(null);
+  const renameRequestRef = useRef<{
+    clientRequestId: string;
+    displayName: string;
+  } | null>(null);
+  const renameButtonRef = useRef<HTMLButtonElement | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
   const saveCopyRequestRef = useRef<{
     clientRequestId: string;
     shareId: string;
@@ -825,6 +981,12 @@ export function SecurePublicShareViewer({
     && (!requiresEmailChallenge || (challengeId && otpPattern.test(otp)))
     && (!requiresOneTimeConfirmation || oneTimeConfirmed)
   );
+  const renameCooldownMilliseconds = participant?.renameCooldownEndsAt
+    ? Date.parse(participant.renameCooldownEndsAt)
+    : Number.NaN;
+  const renameCooldownActive =
+    Number.isFinite(renameCooldownMilliseconds)
+    && renameCooldownMilliseconds > participantClock;
 
   useLayoutEffect(() => {
     lifecycleIdentityRef.current = {
@@ -874,7 +1036,39 @@ export function SecurePublicShareViewer({
 
   useEffect(() => {
     saveCopyRequestRef.current = null;
+    renameRequestRef.current = null;
   }, [shareId]);
+
+  useEffect(() => {
+    if (renameEditing) {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }
+  }, [renameEditing]);
+
+  useEffect(() => {
+    if (!renameEditing && restoreRenameFocus) {
+      renameButtonRef.current?.focus();
+      setRestoreRenameFocus(false);
+    }
+  }, [renameEditing, restoreRenameFocus]);
+
+  useEffect(() => {
+    if (!Number.isFinite(renameCooldownMilliseconds)) {
+      return undefined;
+    }
+    const remaining = renameCooldownMilliseconds - Date.now();
+
+    if (remaining <= 0) {
+      setParticipantClock(Date.now());
+      return undefined;
+    }
+    const timer = window.setTimeout(
+      () => setParticipantClock(Date.now()),
+      Math.min(remaining + 50, 1_000)
+    );
+    return () => window.clearTimeout(timer);
+  }, [participantClock, renameCooldownMilliseconds]);
 
   useEffect(() => {
     if (resendSeconds <= 0) {
@@ -895,18 +1089,27 @@ export function SecurePublicShareViewer({
   }, [accessError, phase]);
 
   async function loadComments(cursor: string | null = null, append = false) {
-    if (!session?.capabilities.canComment) {
+    if (
+      !session
+      || (
+        !session.capabilities.canComment
+        && !session.capabilities.participantLimitReached
+      )
+    ) {
       return;
     }
 
     const generation = loadGenerationRef.current;
 
     try {
-      const parsed = parseCommentsDto(await listSecureShareComments(shareId, {
-        cursor: cursor ?? undefined,
-        idToken: session.ownerPreview ? idToken : undefined,
-        limit: 20
-      }));
+      const parsed = parseCommentsDto(
+        await listSecureShareComments(shareId, {
+          cursor: cursor ?? undefined,
+          idToken: session.ownerPreview ? idToken : undefined,
+          limit: 20
+        }),
+        session.capabilities.commentIpPrefixEnabled
+      );
 
       if (
         !parsed
@@ -999,31 +1202,98 @@ export function SecurePublicShareViewer({
       setOtp("");
       setNotice("");
 
-      if (nextSession.capabilities.canComment) {
-        try {
-          const parsedComments = parseCommentsDto(await listSecureShareComments(shareId, {
-            idToken: nextSession.ownerPreview ? idToken : undefined,
-            limit: 20,
-            signal
-          }));
+      const postLoadTasks: Promise<void>[] = [];
 
-          if (
-            parsedComments
-            && mountedRef.current
-            && generation === loadGenerationRef.current
-          ) {
-            setComments((current) =>
-              mergeCommentPage(current, parsedComments.items, false)
-            );
-            setCommentCursor(parsedComments.nextCursor);
-            setCommentError("");
+      if (
+        nextSession.capabilities.canComment
+        && nextSession.capabilities.participantIdentityEnabled
+        && !nextSession.ownerPreview
+      ) {
+        setParticipantLoading(true);
+        postLoadTasks.push((async () => {
+          try {
+            const nextParticipant = await getSecureShareParticipant(shareId, { signal });
+
+            if (
+              mountedRef.current
+              && !signal?.aborted
+              && generation === loadGenerationRef.current
+            ) {
+              setParticipant(nextParticipant);
+              setParticipantClock(Date.now());
+              setParticipantError("");
+            }
+          } catch {
+            if (
+              mountedRef.current
+              && !signal?.aborted
+              && generation === loadGenerationRef.current
+            ) {
+              setParticipant(null);
+              setParticipantError("댓글 참여자 정보를 불러오지 못했습니다.");
+            }
+          } finally {
+            if (
+              mountedRef.current
+              && !signal?.aborted
+              && generation === loadGenerationRef.current
+            ) {
+              setParticipantLoading(false);
+            }
           }
-        } catch {
-          if (mountedRef.current && generation === loadGenerationRef.current) {
-            setCommentError("댓글을 불러오지 못했습니다.");
-          }
-        }
+        })());
+      } else {
+        setParticipant(null);
+        setParticipantLoading(false);
+        setParticipantError("");
       }
+
+      if (
+        nextSession.capabilities.canComment
+        || nextSession.capabilities.participantLimitReached
+      ) {
+        postLoadTasks.push((async () => {
+          try {
+            const parsedComments = parseCommentsDto(
+              await listSecureShareComments(shareId, {
+                idToken: nextSession.ownerPreview ? idToken : undefined,
+                limit: 20,
+                signal
+              }),
+              nextSession.capabilities.commentIpPrefixEnabled
+            );
+
+            if (
+              parsedComments
+              && mountedRef.current
+              && !signal?.aborted
+              && generation === loadGenerationRef.current
+            ) {
+              setComments((current) =>
+                mergeCommentPage(current, parsedComments.items, false)
+              );
+              setCommentCursor(parsedComments.nextCursor);
+              setCommentError("");
+            } else if (
+              !parsedComments
+              && mountedRef.current
+              && !signal?.aborted
+              && generation === loadGenerationRef.current
+            ) {
+              setCommentError("댓글 응답을 확인하지 못했습니다.");
+            }
+          } catch {
+            if (
+              mountedRef.current
+              && !signal?.aborted
+              && generation === loadGenerationRef.current
+            ) {
+              setCommentError("댓글을 불러오지 못했습니다.");
+            }
+          }
+        })());
+      }
+      await Promise.all(postLoadTasks);
     } catch (caught) {
       if (!mountedRef.current || generation !== loadGenerationRef.current) {
         return;
@@ -1056,8 +1326,18 @@ export function SecurePublicShareViewer({
       setCommentCursor(null);
       setCommentBody("");
       setCommentError("");
+      setParticipant(null);
+      setParticipantError("");
+      setParticipantStatus("");
+      setParticipantLoading(false);
+      setRenameEditing(false);
+      setRenameDisplayName("");
+      setRenameError("");
+      setRestoreRenameFocus(false);
+      setParticipantClock(Date.now());
       setBusyAction(null);
       commentRequestRef.current = null;
+      renameRequestRef.current = null;
       saveCopyRequestRef.current = null;
       setChallengeId(null);
       setPassword("");
@@ -1496,6 +1776,102 @@ export function SecurePublicShareViewer({
     }
   }
 
+  function beginParticipantRename() {
+    if (busyAction !== null) {
+      return;
+    }
+    if (!participant || !participant.canRename) {
+      setParticipantStatus("현재 표시 이름을 변경할 수 없습니다.");
+      return;
+    }
+    if (renameCooldownActive) {
+      setParticipantStatus("이름 변경 후 60초 동안 다시 변경할 수 없습니다.");
+      return;
+    }
+    setRenameDisplayName(participant.displayName);
+    setRenameError("");
+    setParticipantStatus("");
+    setRenameEditing(true);
+  }
+
+  function cancelParticipantRename() {
+    setRenameDisplayName(participant?.displayName ?? "");
+    setRenameError("");
+    renameRequestRef.current = null;
+    setRenameEditing(false);
+    setRestoreRenameFocus(true);
+  }
+
+  async function submitParticipantRename(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (
+      !participant
+      || !session?.capabilities.participantIdentityEnabled
+      || !participant.capabilities.canRename
+      || renameCooldownActive
+      || busyAction !== null
+    ) {
+      return;
+    }
+
+    let displayName: string;
+    try {
+      displayName = normalizeSecureShareParticipantDisplayName(renameDisplayName);
+    } catch (caught) {
+      setRenameError(participantRenameErrorMessage(caught));
+      return;
+    }
+    if (displayName === participant.displayName) {
+      cancelParticipantRename();
+      return;
+    }
+
+    const generation = loadGenerationRef.current;
+    const pendingRequest = renameRequestRef.current?.displayName === displayName
+      ? renameRequestRef.current
+      : {
+          clientRequestId: crypto.randomUUID(),
+          displayName
+        };
+    renameRequestRef.current = pendingRequest;
+    setBusyAction("participant-rename");
+    setRenameError("");
+    setParticipantStatus("");
+
+    try {
+      const nextParticipant = await renameSecureShareParticipant(
+        shareId,
+        pendingRequest,
+        { signal: lifecycleControllerRef.current?.signal }
+      );
+      if (!mountedRef.current || generation !== loadGenerationRef.current) {
+        return;
+      }
+
+      setParticipant(nextParticipant);
+      setParticipantClock(Date.now());
+      setComments((current) => current.map((comment) =>
+        comment.authorParticipantId === nextParticipant.participantId
+          ? { ...comment, displayName: nextParticipant.displayName }
+          : comment
+      ));
+      renameRequestRef.current = null;
+      setRenameDisplayName(nextParticipant.displayName);
+      setRenameError("");
+      setParticipantStatus("댓글 표시 이름을 변경했습니다.");
+      setRenameEditing(false);
+      setRestoreRenameFocus(true);
+    } catch (caught) {
+      if (mountedRef.current && generation === loadGenerationRef.current) {
+        setRenameError(participantRenameErrorMessage(caught));
+      }
+    } finally {
+      if (mountedRef.current && generation === loadGenerationRef.current) {
+        setBusyAction(null);
+      }
+    }
+  }
+
   async function submitComment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const body = commentBody.trim();
@@ -1530,7 +1906,8 @@ export function SecurePublicShareViewer({
       const createdComment = parseCommentMutationDto(
         await createSecureShareComment(shareId, pendingRequest, {
           idToken: session.ownerPreview ? idToken : undefined
-        })
+        }),
+        session.capabilities.commentIpPrefixEnabled
       );
       if (!mountedRef.current || generation !== loadGenerationRef.current) {
         return;
@@ -1966,55 +2343,224 @@ export function SecurePublicShareViewer({
         </section>
       )}
 
-      {session.capabilities.canComment && (
+      {(session.capabilities.canComment
+        || session.capabilities.participantLimitReached) && (
         <section className="secure-public-share-comments">
           <h2><MessageCircle aria-hidden="true" size={17} /> 댓글</h2>
-          <form onSubmit={submitComment}>
-            <label>
-              새 댓글
-              <textarea
-                disabled={busyAction !== null}
-                maxLength={4_000}
-                onChange={(event) => {
-                  const nextBody = Array.from(event.target.value).slice(0, 2_000).join("");
-                  if (commentRequestRef.current?.body !== nextBody.trim()) {
-                    commentRequestRef.current = null;
-                  }
-                  setCommentBody(nextBody);
-                }}
-                placeholder="평문 댓글을 입력하세요."
-                rows={3}
-                value={commentBody}
-              />
-            </label>
-            <div>
-              <span>{unicodeLength(commentBody)}/2,000</span>
-              <button disabled={busyAction !== null || !commentBody.trim()} type="submit">
-                {busyAction === "comment"
-                  ? <Loader2 aria-hidden="true" className="spin" size={15} />
-                  : <Send aria-hidden="true" size={15} />}
-                댓글 작성
-              </button>
-            </div>
-          </form>
+          {session.capabilities.participantLimitReached && (
+            <p
+              aria-live="polite"
+              className="secure-public-share-notice"
+              role="status"
+            >
+              이 공유의 댓글 참여 인원이 많아 새 댓글 작성이 제한되었습니다.
+            </p>
+          )}
+          {session.capabilities.canComment
+            && session.capabilities.participantIdentityEnabled && (
+            <section
+              aria-labelledby="secure-public-share-participant-heading"
+              className="secure-public-share-participant-card"
+            >
+              <header>
+                <div>
+                  <span id="secure-public-share-participant-heading">내 댓글 이름</span>
+                  {participant && (
+                    <ParticipantDisplay
+                      displayName={participant.displayName}
+                      ipPrefix={
+                        session.capabilities.commentIpPrefixEnabled
+                        && participant.capabilities.showsCommenterIpPrefix
+                          ? participant.currentIpPrefix
+                          : undefined
+                      }
+                    />
+                  )}
+                  {participantLoading && (
+                    <span className="secure-public-share-participant-loading" role="status">
+                      <Loader2 aria-hidden="true" className="spin" size={14} />
+                      참여자 정보 확인 중
+                    </span>
+                  )}
+                </div>
+                {participant && !renameEditing && (
+                  <button
+                    aria-describedby="secure-public-share-participant-help"
+                    aria-disabled={
+                      !participant.canRename
+                      || renameCooldownActive
+                      || busyAction !== null
+                    }
+                    className="secondary-button"
+                    disabled={busyAction !== null}
+                    onClick={beginParticipantRename}
+                    ref={renameButtonRef}
+                    type="button"
+                  >
+                    <Pencil aria-hidden="true" size={14} />
+                    이름 변경
+                  </button>
+                )}
+              </header>
+
+              {renameEditing && participant && (
+                <form
+                  className="secure-public-share-participant-rename"
+                  noValidate
+                  onSubmit={submitParticipantRename}
+                >
+                  <label htmlFor="secure-public-share-participant-name">표시 이름</label>
+                  <div>
+                    <input
+                      aria-describedby={[
+                        "secure-public-share-participant-name-help",
+                        renameError ? "secure-public-share-participant-name-error" : ""
+                      ].filter(Boolean).join(" ")}
+                      aria-invalid={Boolean(renameError)}
+                      autoComplete="off"
+                      disabled={busyAction !== null}
+                      id="secure-public-share-participant-name"
+                      maxLength={72}
+                      onChange={(event) => {
+                        const nextDisplayName = event.target.value;
+                        if (renameRequestRef.current?.displayName !== nextDisplayName) {
+                          renameRequestRef.current = null;
+                        }
+                        setRenameDisplayName(nextDisplayName);
+                        setRenameError("");
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelParticipantRename();
+                        }
+                      }}
+                      ref={renameInputRef}
+                      spellCheck={false}
+                      value={renameDisplayName}
+                    />
+                    <button
+                      disabled={
+                        busyAction !== null
+                        || !renameDisplayName.trim()
+                        || renameDisplayName.trim() === participant.displayName
+                      }
+                      type="submit"
+                    >
+                      {busyAction === "participant-rename"
+                        ? <Loader2 aria-hidden="true" className="spin" size={14} />
+                        : <Check aria-hidden="true" size={14} />}
+                      저장
+                    </button>
+                    <button
+                      className="secondary-button"
+                      disabled={busyAction !== null}
+                      onClick={cancelParticipantRename}
+                      type="button"
+                    >
+                      <X aria-hidden="true" size={14} />
+                      취소
+                    </button>
+                  </div>
+                  <p
+                    className="secure-public-share-participant-name-help"
+                    id="secure-public-share-participant-name-help"
+                  >
+                    1~24자. 한글·영문·일본어·숫자와 공백, 점, 밑줄, 하이픈을 사용할 수 있습니다.
+                  </p>
+                  {renameError && (
+                    <p
+                      className="secure-public-share-error"
+                      id="secure-public-share-participant-name-error"
+                      role="alert"
+                    >
+                      {renameError}
+                    </p>
+                  )}
+                </form>
+              )}
+
+              {participantError && (
+                <p className="secure-public-share-error" role="alert">{participantError}</p>
+              )}
+              {participantStatus && (
+                <p
+                  aria-live="polite"
+                  className="secure-public-share-notice"
+                  role="status"
+                >
+                  {participantStatus}
+                </p>
+              )}
+              <p
+                className="secure-public-share-participant-help"
+                id="secure-public-share-participant-help"
+              >
+                {renameCooldownActive
+                  ? "이름 변경 후 60초 동안 다시 변경할 수 없습니다."
+                  : "이 공유에서 작성하는 댓글에 같은 이름이 표시됩니다."}
+              </p>
+              {session.capabilities.commentIpPrefixEnabled && (
+                <p className="secure-public-share-participant-help">
+                  전체 IP 주소가 아닌 일부 네트워크 대역만 표시됩니다.
+                </p>
+              )}
+            </section>
+          )}
+          {session.capabilities.canComment && (
+            <form onSubmit={submitComment}>
+              <label>
+                새 댓글
+                <textarea
+                  disabled={busyAction !== null}
+                  maxLength={4_000}
+                  onChange={(event) => {
+                    const nextBody = Array.from(event.target.value).slice(0, 2_000).join("");
+                    if (commentRequestRef.current?.body !== nextBody.trim()) {
+                      commentRequestRef.current = null;
+                    }
+                    setCommentBody(nextBody);
+                  }}
+                  placeholder="평문 댓글을 입력하세요."
+                  rows={3}
+                  value={commentBody}
+                />
+              </label>
+              <div>
+                <span>{unicodeLength(commentBody)}/2,000</span>
+                <button disabled={busyAction !== null || !commentBody.trim()} type="submit">
+                  {busyAction === "comment"
+                    ? <Loader2 aria-hidden="true" className="spin" size={15} />
+                    : <Send aria-hidden="true" size={15} />}
+                  댓글 작성
+                </button>
+              </div>
+            </form>
+          )}
           {commentError && <p className="secure-public-share-error" role="alert">{commentError}</p>}
           <div className="secure-public-share-comment-list">
             {comments.map((comment) => (
               <article key={comment.id}>
                 <header>
                   <div>
-                    <strong>{comment.displayName}</strong>
-                    <span>{badgeLabel(comment.badge)}</span>
+                    <ParticipantDisplay
+                      displayName={comment.displayName}
+                      ipPrefix={
+                        session.capabilities.commentIpPrefixEnabled
+                          ? comment.ipPrefix
+                          : undefined
+                      }
+                    />
+                    <span className="secure-public-share-author-badge">
+                      {badgeLabel(comment.badge)}
+                    </span>
                   </div>
                   <time dateTime={comment.createdAt}>
-                    {new Intl.DateTimeFormat("ko-KR", {
-                      dateStyle: "medium",
-                      timeStyle: "short"
-                    }).format(new Date(comment.createdAt))}
+                    {commentDateFormatter.format(new Date(comment.createdAt))}
                   </time>
                 </header>
                 <p>{comment.body}</p>
-                {comment.canDelete && (
+                {session.capabilities.canComment && comment.canDelete && (
                   <button
                     aria-label={`${comment.displayName} 댓글 삭제`}
                     className="secondary-button danger"

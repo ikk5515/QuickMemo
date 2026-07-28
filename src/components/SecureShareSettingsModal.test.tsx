@@ -215,6 +215,87 @@ describe("SecureShareSettingsModal", () => {
     }));
   });
 
+  it("offers commenter IP prefix display only for a newly selected comment permission", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderModal({ onSave });
+
+    expect(screen.queryByRole("checkbox", {
+      name: /댓글 작성자의 IP 일부 표시/
+    })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("radio", { name: /댓글 가능/ }));
+
+    const prefixToggle = screen.getByRole("checkbox", {
+      name: /댓글 작성자의 IP 일부 표시/
+    });
+    expect(prefixToggle).toBeChecked();
+    expect(screen.getByText(
+      "댓글 작성 시 전체 IP가 아닌 앞부분만 작성자 이름 옆에 표시됩니다."
+    )).toBeInTheDocument();
+    expect(screen.getByText(
+      "예: guest1 (203.226). 전체 IP 주소는 표시하거나 저장하지 않습니다."
+    )).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "보안 공유 만들기" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({
+      permissionLevel: "comment",
+      showCommenterIpPrefix: true
+    }));
+
+    await waitFor(() => expect(prefixToggle).toBeEnabled());
+    await user.click(prefixToggle);
+    await user.click(screen.getByRole("button", { name: "보안 공유 만들기" }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
+    expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({
+      permissionLevel: "comment",
+      showCommenterIpPrefix: false
+    }));
+  });
+
+  it("keeps existing comment shares private until the owner explicitly enables prefix display", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    renderModal({
+      initialValue: {
+        ...defaultSecureSharePolicy(),
+        permissionLevel: "comment",
+        showCommenterIpPrefix: false
+      },
+      mode: "edit",
+      onSave
+    });
+
+    const prefixToggle = screen.getByRole("checkbox", {
+      name: /댓글 작성자의 IP 일부 표시/
+    });
+    expect(prefixToggle).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "설정 저장" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      permissionLevel: "comment",
+      showCommenterIpPrefix: false
+    }));
+
+    await waitFor(() => expect(prefixToggle).toBeEnabled());
+    await user.click(prefixToggle);
+    await user.click(screen.getByRole("radio", {
+      name: /QuickMemo에 복사본 저장 가능/
+    }));
+    expect(screen.queryByRole("checkbox", {
+      name: /댓글 작성자의 IP 일부 표시/
+    })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "설정 저장" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
+    expect(onSave).toHaveBeenLastCalledWith(expect.objectContaining({
+      permissionLevel: "save_copy",
+      showCommenterIpPrefix: false
+    }));
+  });
+
   it("keeps the dialog busy and moves focus to a save failure", async () => {
     const user = userEvent.setup();
     renderModal({

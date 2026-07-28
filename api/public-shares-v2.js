@@ -13,6 +13,7 @@ import {
   authorizationToken,
   browserBindingCookie,
   browserBindingFromRequest,
+  clientNetworkIdentity,
   clientNetworkDigest,
   constantTimeStringEqual,
   configuredInteger,
@@ -23,6 +24,7 @@ import {
   emailDigest,
   ensureSameOrigin,
   firestoreBatchGetNewTransaction,
+  firestoreBatchGet,
   firestoreCommit,
   deleteDocumentWrite,
   firestoreGet,
@@ -46,6 +48,8 @@ import {
   oneTimeGraceSeconds,
   otpCodeDigest,
   otpTtlSeconds,
+  participantCookie,
+  participantTokenFromRequest,
   queryString,
   randomToken,
   rateLimitBucketDigest,
@@ -59,6 +63,8 @@ import {
   safeUnlockAttemptId,
   secureShareEmailEnabled,
   secureShareEmailReadiness,
+  secureShareCommentIpPrefixEnabled,
+  secureShareParticipantIdentityEnabled,
   secureShareScryptParameters,
   secureShareV2Enabled,
   sendVerificationEmail,
@@ -114,6 +120,18 @@ const copyGrantRetryMaximumDelayMilliseconds = 250;
 const emailProviderRequestRateWindowSeconds = 1;
 const emailProviderRequestRateLimit = 2;
 const sessionLastSeenWriteIntervalMilliseconds = 60 * 60 * 1000;
+const participantAllocationMaximumAttempts = 24;
+const participantRenameMaximumAttempts = 8;
+const participantIpPrefixVersion = 1;
+const participantTokenPartLength = 43;
+const participantTokenV2Prefix = "p2_";
+const maximumCommentPageSize = 20;
+const maximumParticipantsPerShare = configuredInteger(
+  "SECURE_SHARE_MAX_PARTICIPANTS_PER_SHARE",
+  1000,
+  1,
+  1000
+);
 const validActions = new Set([
   "feature-status",
   "owner-list",
@@ -127,6 +145,7 @@ const validActions = new Set([
   "access",
   "session",
   "content",
+  "participant-me",
   "comments",
   "comment-delete",
   "copy-grant",
@@ -256,8 +275,249 @@ function safeDisplayName(value, fallback = "Guest", allowReserved = false) {
   return normalized;
 }
 
+function unicodeGraphemeLength(value) {
+  if (typeof Intl?.Segmenter === "function") {
+    return Array.from(new Intl.Segmenter("und", { granularity: "grapheme" }).segment(value)).length;
+  }
+  return Array.from(value).length;
+}
+
+function normalizedParticipantName(value) {
+  return value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLocaleLowerCase("und");
+}
+
+function participantRoleSkeleton(value) {
+  const substitutions = new Map([
+    ["0", "o"],
+    ["1", "i"],
+    ["3", "e"],
+    ["4", "a"],
+    ["5", "s"],
+    ["7", "t"],
+    ["8", "b"],
+    ["9", "g"],
+    ["l", "i"],
+    ["○", "o"],
+    ["〇", "o"]
+  ]);
+  return Array.from(value.replace(/rn/gu, "m").replace(/vv/gu, "w"))
+    .map((character) => substitutions.get(character) ?? character)
+    .join("");
+}
+
+function isReservedParticipantRoleKey(value, anywhere = false) {
+  if (
+    anywhere
+    && /(?:guest|quickmemo|admin(?:istrator)?|owner|official|support|system)/u.test(value)
+  ) {
+    return true;
+  }
+  return (
+    /^guest/u.test(value)
+    || /quickmemo/u.test(value)
+    || /^(?:admin(?:istrator)?|owner|official|support)/u.test(value)
+    || /^system/u.test(value)
+  );
+}
+
+function hasLocalizedParticipantRolePrefix(value) {
+  return /^(?:공식|公式|官方|管理员|管理員|系统|系統)/u.test(value);
+}
+
+function safeParticipantDisplayName(value) {
+  if (typeof value !== "string") {
+    throw new HttpError(400, "invalid_request", "Invalid displayName");
+  }
+  const normalizedInput = value.normalize("NFKC");
+  if (/[\p{Cc}\p{Zl}\p{Zp}]/u.test(normalizedInput)) {
+    throw new HttpError(400, "invalid_display_name", "Invalid participant displayName");
+  }
+  const displayName = normalizedInput.trim().replace(/ +/gu, " ");
+  const graphemeLength = unicodeGraphemeLength(displayName);
+  const codePoints = Array.from(displayName);
+  const combiningMarks = codePoints.filter((character) => /\p{M}/u.test(character)).length;
+  const hasExcessiveCombiningSequence = /\p{M}{3,}/u.test(displayName);
+  const hasAsciiLatin = /[A-Za-z]/u.test(displayName);
+  const hasNonAsciiLatin = codePoints.some((character) =>
+    /\p{Script=Latin}/u.test(character) && !/[A-Za-z]/u.test(character)
+  );
+  const scriptFamilyCount = [
+    hasAsciiLatin,
+    /\p{Script=Hangul}/u.test(displayName),
+    /[\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Han}]/u.test(displayName)
+  ].filter(Boolean).length;
+  const hasMixedScripts = scriptFamilyCount > 1;
+  const reservedKey = displayName
+    .toLocaleLowerCase("und")
+    .replace(/[ ._-]+/gu, "");
+  const roleSkeleton = participantRoleSkeleton(reservedKey);
+  if (
+    graphemeLength < 1
+    || graphemeLength > 24
+    || codePoints.length > 72
+    || combiningMarks > 8
+    || hasNonAsciiLatin
+    || (hasAsciiLatin && combiningMarks > 0)
+    || hasExcessiveCombiningSequence
+    || /[\p{Cc}\p{Cf}<>{}()\\:@]/u.test(displayName)
+    || displayName.includes("[")
+    || displayName.includes("]")
+    || displayName.includes("/")
+    || /\p{Default_Ignorable_Code_Point}/u.test(displayName)
+    || /(?:^|\s)www\.|[\p{L}\p{N}][\p{L}\p{N}-]*\.[\p{L}\p{N}-]{2,}/iu.test(displayName)
+    || /^(?:\p{N}{1,3}\.){3}\p{N}{1,3}$/u.test(displayName)
+    || !/^[\p{Script=Hangul}\p{Script=Latin}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Han}\p{N}\p{M} ._-]+$/u.test(displayName)
+    || !/[A-Za-z\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\p{N}]/u.test(displayName)
+    || isReservedParticipantRoleKey(reservedKey)
+    || isReservedParticipantRoleKey(roleSkeleton)
+    || (
+      hasMixedScripts
+      && (
+        isReservedParticipantRoleKey(reservedKey, true)
+        || isReservedParticipantRoleKey(roleSkeleton, true)
+      )
+    )
+    || /(?:소유자|관리자|운영자|시스템|퀵메모|오너|어드민|서포트)/u.test(reservedKey)
+    || /(?:オーナー|所有者|管理者|運営者|システム|クイックメモ|アドミン|サポート)/u.test(reservedKey)
+    || hasLocalizedParticipantRolePrefix(reservedKey)
+    || /(?:quick|퀵|クイック)(?:memo|메모|メモ)/u.test(reservedKey)
+  ) {
+    throw new HttpError(400, "invalid_display_name", "Invalid participant displayName");
+  }
+  return {
+    displayName,
+    normalizedDisplayName: normalizedParticipantName(displayName)
+  };
+}
+
+function participantIdentityHash(shareId, identityType, identityValue) {
+  return hmacDigest(
+    requiredSecret("SHARE_PARTICIPANT_HMAC_KEY"),
+    "quickmemo/secure-share/participant-identity/v1",
+    shareId,
+    identityType,
+    identityValue
+  );
+}
+
+function participantIssuanceIdentity(shareId, browserBinding, unlockAttemptId) {
+  return hmacDigest(
+    requiredSecret("SHARE_PARTICIPANT_HMAC_KEY"),
+    "quickmemo/secure-share/participant-issuance/v2",
+    shareId,
+    browserBinding,
+    unlockAttemptId
+  );
+}
+
+function participantTokenV2Signature(shareId, issuanceIdentity, nonce) {
+  return hmacDigest(
+    requiredSecret("SHARE_PARTICIPANT_HMAC_KEY"),
+    "quickmemo/secure-share/participant-token-signature/v2",
+    shareId,
+    issuanceIdentity,
+    nonce
+  );
+}
+
+function issueAnonymousParticipantToken(shareId, browserBinding, unlockAttemptId) {
+  const issuanceIdentity = participantIssuanceIdentity(
+    shareId,
+    browserBinding,
+    unlockAttemptId
+  );
+  const nonce = randomToken(32);
+  const signature = participantTokenV2Signature(
+    shareId,
+    issuanceIdentity,
+    nonce
+  );
+  return {
+    issuanceIdentity,
+    token: `${participantTokenV2Prefix}${issuanceIdentity}${nonce}${signature}`,
+    version: 2
+  };
+}
+
+function verifiedAnonymousParticipantToken(shareId, token) {
+  if (!token.startsWith(participantTokenV2Prefix)) {
+    throw new HttpError(401, "participant_identity_invalid");
+  }
+  const expectedLength = participantTokenV2Prefix.length
+    + participantTokenPartLength * 3;
+  if (
+    token.length !== expectedLength
+    || !/^p2_[A-Za-z0-9_-]+$/u.test(token)
+  ) {
+    throw new HttpError(401, "participant_identity_invalid");
+  }
+  const issuanceStart = participantTokenV2Prefix.length;
+  const nonceStart = issuanceStart + participantTokenPartLength;
+  const signatureStart = nonceStart + participantTokenPartLength;
+  const issuanceIdentity = token.slice(issuanceStart, nonceStart);
+  const nonce = token.slice(nonceStart, signatureStart);
+  const signature = token.slice(signatureStart);
+  if (!constantTimeStringEqual(
+    participantTokenV2Signature(
+      shareId,
+      issuanceIdentity,
+      nonce
+    ),
+    signature
+  )) {
+    throw new HttpError(401, "participant_identity_invalid");
+  }
+  return {
+    issuanceIdentity,
+    version: 2
+  };
+}
+
+function participantTokenIdentityDigest(shareId, issuanceIdentity) {
+  return hmacDigest(
+    requiredSecret("SHARE_PARTICIPANT_HMAC_KEY"),
+    "quickmemo/secure-share/participant-token/v2",
+    shareId,
+    issuanceIdentity
+  );
+}
+
+function participantIdFromIdentityHash(identityHash) {
+  return `p_${identityHash.slice(0, 48)}`;
+}
+
+function participantNameRegistryId(shareId, normalizedDisplayName) {
+  return `n_${hmacDigest(
+    requiredSecret("SHARE_PARTICIPANT_HMAC_KEY"),
+    "quickmemo/secure-share/participant-name/v1",
+    shareId,
+    normalizedDisplayName
+  ).slice(0, 48)}`;
+}
+
+function participantDocumentPath(shareId, participantId) {
+  return `publicShareParticipants/${shareId}/items/${participantId}`;
+}
+
+function participantCounterPath(shareId) {
+  return `publicShareParticipantCounters/${shareId}`;
+}
+
+function participantNameRegistryPath(shareId, normalizedDisplayName) {
+  return `publicShareParticipantNames/${shareId}/items/`
+    + participantNameRegistryId(shareId, normalizedDisplayName);
+}
+
+function participantRenameRequestPath(shareId, participantId) {
+  return `publicShareParticipantRenameRequests/${shareId}/items/${participantId}`;
+}
+
 function timestampMilliseconds(value) {
-  const milliseconds = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  const milliseconds = value instanceof Date
+    ? value.getTime()
+    : typeof value === "string"
+      ? Date.parse(value)
+      : Number.NaN;
   return Number.isFinite(milliseconds) ? milliseconds : Number.NaN;
 }
 
@@ -316,6 +576,7 @@ function shareSummary(share) {
     requiresEmailVerification: share.requiresEmailVerification === true,
     oneTimeEnabled: share.oneTimeEnabled === true,
     permissionLevel: share.permissionLevel,
+    showCommenterIpPrefix: share.showCommenterIpPrefix === true,
     downloadAllowed: share.downloadAllowed === true,
     quickCopyButtonVisible: share.quickCopyButtonVisible !== false,
     attachmentCount: Number.isSafeInteger(share.attachmentCount) ? share.attachmentCount : 0,
@@ -344,6 +605,7 @@ const ownerShareSummaryFieldPaths = [
   "requiresEmailVerification",
   "oneTimeEnabled",
   "permissionLevel",
+  "showCommenterIpPrefix",
   "downloadAllowed",
   "quickCopyButtonVisible",
   "attachmentCount",
@@ -362,6 +624,9 @@ function policySummary(policy) {
     oneTimeEnabled: policy.oneTimeEnabled === true,
     oneTimeScope: "global",
     permissionLevel: policy.permissionLevel,
+    showCommenterIpPrefix:
+      policy.permissionLevel === "comment"
+      && policy.showCommenterIpPrefix === true,
     downloadAllowed: policy.downloadAllowed === true,
     quickCopyButtonVisible: policy.quickCopyButtonVisible !== false,
     policyVersion: policy.policyVersion,
@@ -734,6 +999,7 @@ function policyInputKeys() {
     "expirationPreset",
     "customExpiresAt",
     "permissionLevel",
+    "showCommenterIpPrefix",
     "downloadAllowed",
     "quickCopyButtonVisible",
     "oneTimeScope"
@@ -749,6 +1015,14 @@ async function buildPolicySettings(body, existingPolicy = null) {
   if (!permissionLevels.has(permissionLevel)) {
     throw new HttpError(400, "invalid_request", "Invalid permissionLevel");
   }
+  const showCommenterIpPrefix = permissionLevel === "comment"
+    && optionalBoolean(
+      body.showCommenterIpPrefix,
+      existingPolicy
+        ? existingPolicy.showCommenterIpPrefix === true
+        : true,
+      "showCommenterIpPrefix"
+    );
   const oneTimeEnabled = optionalBoolean(
     body.oneTimeEnabled,
     existingPolicy?.oneTimeEnabled === true,
@@ -834,6 +1108,7 @@ async function buildPolicySettings(body, existingPolicy = null) {
     oneTimeEnabled,
     oneTimeScope: "global",
     permissionLevel,
+    showCommenterIpPrefix,
     downloadAllowed,
     quickCopyButtonVisible,
     sessionTtlSeconds: sessionTtlSeconds(false),
@@ -1044,6 +1319,7 @@ async function handleOwnerCreate(request, response, id) {
     requiresEmailVerification: policySettings.emailVerificationRequired,
     oneTimeEnabled: policySettings.oneTimeEnabled,
     permissionLevel: policySettings.permissionLevel,
+    showCommenterIpPrefix: policySettings.showCommenterIpPrefix,
     downloadAllowed: policySettings.downloadAllowed,
     quickCopyButtonVisible: policySettings.quickCopyButtonVisible,
     successfulAccessCount: 0
@@ -1449,7 +1725,12 @@ async function handleOwnerUpdate(request, response, id, shareId) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const state = await loadShareState(user.context, shareId);
     requireShareManager(state, user);
-    if (state.share.status === "revoked" || state.share.revokedAt) {
+    if (
+      state.share.status === "revoked"
+      || state.share.revokedAt
+      || state.share.cleanupStartedAt
+      || timestampMilliseconds(state.share.expiresAt) <= Date.now()
+    ) {
       throw new HttpError(409, "share_unavailable");
     }
     if (state.share.lastOwnerMutationId === updateInput.idempotencyKey) {
@@ -1479,6 +1760,7 @@ async function handleOwnerUpdate(request, response, id, shareId) {
       requiresEmailVerification: policySettings.emailVerificationRequired,
       oneTimeEnabled: policySettings.oneTimeEnabled,
       permissionLevel: policySettings.permissionLevel,
+      showCommenterIpPrefix: policySettings.showCommenterIpPrefix,
       downloadAllowed: policySettings.downloadAllowed,
       quickCopyButtonVisible: policySettings.quickCopyButtonVisible
     };
@@ -1504,6 +1786,15 @@ async function handleOwnerUpdate(request, response, id, shareId) {
     ];
     const guardPath = sourceShareGuardPath(user.uid, state.share.sourceNoteId);
     const guard = await firestoreGet(user.context, guardPath);
+    const cleanupQueuePath = `publicShareCleanupQueue/${shareId}`;
+    const cleanupQueue = await firestoreGet(user.context, cleanupQueuePath);
+    if (
+      !cleanupQueue
+      || cleanupQueue.shareId !== shareId
+      || cleanupQueue.ownerUid !== state.share.ownerUid
+    ) {
+      throw new HttpError(409, "cleanup_state_invalid");
+    }
     const writes = [
       updateDocumentWrite(
         user.context.projectId,
@@ -1518,6 +1809,13 @@ async function handleOwnerUpdate(request, response, id, shareId) {
         policyFields,
         policyPaths,
         state.policy.__updateTime
+      ),
+      updateDocumentWrite(
+        user.context.projectId,
+        cleanupQueuePath,
+        { expiresAt, updatedAt: now },
+        ["expiresAt", "updatedAt"],
+        cleanupQueue.__updateTime
       ),
       createAuditWrite(user.context, state.share, "owner_update", "success", {
         requestId: id,
@@ -2624,16 +2922,42 @@ async function verifiedChallengeIdentity(context, shareId, policy, body, timing 
   return {
     identityType: "verified_email",
     identityHash: identityDigest("email", challenge.emailHash),
+    participantIdentityHash:
+      secureShareParticipantIdentityEnabled() && policy.permissionLevel === "comment"
+      ? participantIdentityHash(shareId, "verified_email", challenge.emailHash)
+      : "",
+    participantToken: "",
+    participantTokenDigest: "",
+    setParticipantCookie: false,
     displayName: safeDisplayName(body.displayName, "Verified guest"),
     challenge
   };
 }
 
-async function resolveAccessIdentity(request, context, shareId, policy, body, otpVerificationTiming) {
+async function resolveAccessIdentity(
+  request,
+  context,
+  shareId,
+  stateOrPolicy,
+  body,
+  otpVerificationTiming,
+  preverifiedCaller
+) {
+  const state = stateOrPolicy?.share && stateOrPolicy?.policy
+    ? stateOrPolicy
+    : null;
+  const policy = state?.policy ?? stateOrPolicy;
   assertEmailPolicyAvailable(policy);
-  let caller = null;
-  if (authorizationToken(request)) {
+  let caller = preverifiedCaller === undefined ? null : preverifiedCaller;
+  if (preverifiedCaller === undefined && authorizationToken(request)) {
     caller = await activeUserFromRequest(request, context);
+  }
+  if (caller && state && shareManagedBy(state, caller)) {
+    throw new HttpError(
+      409,
+      "owner_preview_required",
+      "Share managers must use owner preview"
+    );
   }
   if (policy.accessMode === "authenticated_users") {
     if (!caller) {
@@ -2645,6 +2969,13 @@ async function resolveAccessIdentity(request, context, shareId, policy, body, ot
     return {
       identityType: "quickmemo_user",
       identityHash: identityDigest("uid", caller.uid),
+      participantIdentityHash:
+        secureShareParticipantIdentityEnabled() && policy.permissionLevel === "comment"
+        ? participantIdentityHash(shareId, "quickmemo_user", caller.uid)
+        : "",
+      participantToken: "",
+      participantTokenDigest: "",
+      setParticipantCookie: false,
       authorUid: caller.uid,
       displayName: safeDisplayName(caller.profileDisplayName || caller.displayName, "QuickMemo user"),
       caller,
@@ -2653,14 +2984,32 @@ async function resolveAccessIdentity(request, context, shareId, policy, body, ot
   }
 
   if (policy.emailVerificationRequired === true) {
+    const verifiedIdentity = await verifiedChallengeIdentity(
+      context,
+      shareId,
+      policy,
+      body,
+      otpVerificationTiming
+    );
+    if (caller) {
+      return {
+        ...verifiedIdentity,
+        identityType: "quickmemo_user",
+        identityHash: identityDigest("uid", caller.uid),
+        participantIdentityHash:
+          secureShareParticipantIdentityEnabled() && policy.permissionLevel === "comment"
+            ? participantIdentityHash(shareId, "quickmemo_user", caller.uid)
+            : "",
+        authorUid: caller.uid,
+        displayName: safeDisplayName(
+          caller.profileDisplayName || caller.displayName,
+          "QuickMemo user"
+        ),
+        caller
+      };
+    }
     return {
-      ...(await verifiedChallengeIdentity(
-        context,
-        shareId,
-        policy,
-        body,
-        otpVerificationTiming
-      )),
+      ...verifiedIdentity,
       authorUid: "",
       caller: null
     };
@@ -2670,6 +3019,13 @@ async function resolveAccessIdentity(request, context, shareId, policy, body, ot
     return {
       identityType: "quickmemo_user",
       identityHash: identityDigest("uid", caller.uid),
+      participantIdentityHash:
+        secureShareParticipantIdentityEnabled() && policy.permissionLevel === "comment"
+        ? participantIdentityHash(shareId, "quickmemo_user", caller.uid)
+        : "",
+      participantToken: "",
+      participantTokenDigest: "",
+      setParticipantCookie: false,
       authorUid: caller.uid,
       displayName: safeDisplayName(caller.profileDisplayName || caller.displayName, "QuickMemo user"),
       caller,
@@ -2680,9 +3036,44 @@ async function resolveAccessIdentity(request, context, shareId, policy, body, ot
   if (!binding) {
     throw new HttpError(428, "metadata_required", "Browser binding is missing");
   }
+  const participantEnabled = secureShareParticipantIdentityEnabled()
+    && policy.permissionLevel === "comment";
+  const existingParticipantToken = participantEnabled
+    ? participantTokenFromRequest(request, shareId)
+    : "";
+  const issuedParticipant = participantEnabled && !existingParticipantToken
+    ? issueAnonymousParticipantToken(
+        shareId,
+        binding,
+        safeUnlockAttemptId(body.unlockAttemptId)
+      )
+    : null;
+  const participantToken = participantEnabled
+    ? existingParticipantToken || issuedParticipant.token
+    : "";
+  const verifiedParticipant = participantEnabled
+    ? issuedParticipant ?? verifiedAnonymousParticipantToken(
+        shareId,
+        participantToken
+      )
+    : null;
+  const participantIdentityValue = verifiedParticipant?.issuanceIdentity ?? "";
   return {
     identityType: "browser",
-    identityHash: identityDigest("browser", binding),
+    identityHash: participantEnabled
+      ? identityDigest("participant-token", participantIdentityValue)
+      : identityDigest("browser", binding),
+    participantIdentityHash: participantEnabled
+      ? participantIdentityHash(shareId, "browser", participantIdentityValue)
+      : "",
+    participantToken,
+    participantTokenDigest: participantEnabled
+      ? participantTokenIdentityDigest(
+          shareId,
+          participantIdentityValue
+        )
+      : "",
+    setParticipantCookie: participantEnabled && !existingParticipantToken,
     authorUid: "",
     displayName: safeDisplayName(body.displayName, "Guest"),
     caller: null,
@@ -2690,13 +3081,259 @@ async function resolveAccessIdentity(request, context, shareId, policy, body, ot
   };
 }
 
-function sessionCapabilities(policy, ownerPreview = false) {
+function allocatedParticipantMatches(
+  participant,
+  expectedState,
+  identity,
+  participantId
+) {
+  return Boolean(
+    participant
+    && participant.schemaVersion === 1
+    && participant.shareId === expectedState.share.__id
+    && participant.ownerUid === expectedState.share.ownerUid
+    && participant.participantId === participantId
+    && participant.identityHash === identity.participantIdentityHash
+    && participant.identityType === identity.identityType
+    && typeof participant.participantTokenDigest === "string"
+    && (
+      identity.identityType === "browser"
+        ? participant.participantTokenDigest === identity.participantTokenDigest
+        : participant.participantTokenDigest === ""
+    )
+    && participant.status === "active"
+    && typeof participant.displayName === "string"
+    && typeof participant.systemDefaultName === "string"
+    && typeof participant.normalizedDisplayName === "string"
+    && Number.isSafeInteger(participant.guestNumber)
+    && participant.guestNumber >= 1
+    && participant.guestNumber <= 1_000_000_000
+    && participant.systemDefaultName === `guest${participant.guestNumber}`
+  );
+}
+
+function participantLastSeenWrites(context, participantPath, participant) {
+  const lastSeenAt = timestampMilliseconds(participant.lastSeenAt);
+  if (
+    Number.isFinite(lastSeenAt)
+    && lastSeenAt > Date.now() - sessionLastSeenWriteIntervalMilliseconds
+  ) {
+    return [];
+  }
+  const now = new Date();
+  return [updateDocumentWrite(
+    context.projectId,
+    participantPath,
+    { lastSeenAt: now, updatedAt: now },
+    ["lastSeenAt", "updatedAt"],
+    participant.__updateTime
+  )];
+}
+
+async function beginParticipantAllocation(context, expectedState, identity) {
+  const shareId = expectedState.share.__id;
+  if (
+    !secureShareParticipantIdentityEnabled()
+    || expectedState.policy.permissionLevel !== "comment"
+  ) {
+    return {
+      enabled: false,
+      limitReached: false,
+      participant: null,
+      transaction: "",
+      writes: []
+    };
+  }
+  if (
+    typeof identity.participantIdentityHash !== "string"
+    || !/^[A-Za-z0-9_-]{40,128}$/u.test(identity.participantIdentityHash)
+  ) {
+    throw new HttpError(503, "service_unavailable", "Participant identity is unavailable", {
+      expose: false
+    });
+  }
+  const participantId = participantIdFromIdentityHash(identity.participantIdentityHash);
+  const participantPath = participantDocumentPath(shareId, participantId);
+  const counterPath = participantCounterPath(shareId);
+  const reusableParticipant = await firestoreGet(context, participantPath);
+  if (reusableParticipant) {
+    if (!allocatedParticipantMatches(
+      reusableParticipant,
+      expectedState,
+      identity,
+      participantId
+    )) {
+      throw new HttpError(409, "participant_state_invalid");
+    }
+    return {
+      enabled: true,
+      limitReached: false,
+      participant: reusableParticipant,
+      transaction: "",
+      writes: participantLastSeenWrites(
+        context,
+        participantPath,
+        reusableParticipant
+      )
+    };
+  }
+  const snapshot = await firestoreBatchGetNewTransaction(context, [
+    `publicNoteShares/${shareId}`,
+    `publicSharePolicies/${shareId}`,
+    participantPath,
+    counterPath
+  ]);
+  const [share, policy, participant, counter] = snapshot.documents;
+  const transactionState = share
+    && policy
+    && share.schemaVersion === 2
+    && policy.schemaVersion === 2
+      ? { share, policy }
+      : null;
+  if (!shareMutationSnapshotMatches(transactionState, expectedState)) {
+    await rollbackShareMutation(context, snapshot.transaction);
+    throw new HttpError(409, "request_conflict", "Share changed before participant allocation");
+  }
+  if (participant) {
+    if (
+      !counter
+      || counter.schemaVersion !== 1
+      || counter.shareId !== shareId
+      || counter.ownerUid !== expectedState.share.ownerUid
+      || !Number.isSafeInteger(counter.nextGuestNumber)
+      || !Number.isSafeInteger(counter.participantCount)
+      || counter.nextGuestNumber <= participant.guestNumber
+      || counter.participantCount < 1
+      || counter.participantCount > 1000
+      || !allocatedParticipantMatches(participant, expectedState, identity, participantId)
+    ) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      throw new HttpError(409, "participant_state_invalid");
+    }
+    return {
+      enabled: true,
+      limitReached: false,
+      participant,
+      transaction: snapshot.transaction,
+      writes: participantLastSeenWrites(context, participantPath, participant)
+    };
+  }
+
+  const nextGuestNumber = counter
+    ? counter.nextGuestNumber
+    : 1;
+  const participantCount = counter
+    ? counter.participantCount
+    : 0;
+  if (
+    !Number.isSafeInteger(nextGuestNumber)
+    || !Number.isSafeInteger(participantCount)
+    || nextGuestNumber < 1
+    || nextGuestNumber > 1_000_000_000
+    || participantCount < 0
+    || participantCount > 1000
+    || (counter && (
+      counter.schemaVersion !== 1
+      || counter.shareId !== shareId
+      || counter.ownerUid !== expectedState.share.ownerUid
+    ))
+  ) {
+    await rollbackShareMutation(context, snapshot.transaction);
+    throw new HttpError(409, "participant_state_invalid");
+  }
+  if (participantCount >= maximumParticipantsPerShare) {
+    return {
+      enabled: true,
+      limitReached: true,
+      participant: null,
+      transaction: snapshot.transaction,
+      writes: []
+    };
+  }
+  const now = new Date();
+  const systemDefaultName = `guest${nextGuestNumber}`;
+  const createdParticipant = {
+    schemaVersion: 1,
+    shareId,
+    ownerUid: expectedState.share.ownerUid,
+    participantId,
+    guestNumber: nextGuestNumber,
+    systemDefaultName,
+    displayName: systemDefaultName,
+    normalizedDisplayName: systemDefaultName,
+    identityType: identity.identityType,
+    identityHash: identity.participantIdentityHash,
+    participantTokenDigest: identity.participantTokenDigest || "",
+    createdAt: now,
+    updatedAt: now,
+    lastSeenAt: now,
+    lastRenamedAt: undefined,
+    renameCount: 0,
+    status: "active",
+    policyVersionAtCreation: expectedState.policy.policyVersion
+  };
+  const counterFields = {
+    schemaVersion: 1,
+    shareId,
+    ownerUid: expectedState.share.ownerUid,
+    nextGuestNumber: nextGuestNumber + 1,
+    participantCount: participantCount + 1,
+    createdAt: counter?.createdAt ?? now,
+    updatedAt: now
+  };
+  return {
+    enabled: true,
+    limitReached: false,
+    participant: { ...createdParticipant, __id: participantId },
+    transaction: snapshot.transaction,
+    writes: [
+      counter
+        ? updateDocumentWrite(
+            context.projectId,
+            counterPath,
+            counterFields,
+            Object.keys(counterFields),
+            counter.__updateTime
+          )
+        : createDocumentWrite(context.projectId, counterPath, counterFields),
+      createDocumentWrite(context.projectId, participantPath, createdParticipant)
+    ]
+  };
+}
+
+function sessionCapabilities(
+  policy,
+  ownerPreview = false,
+  participantAvailable = true,
+  participantIdentitySessionEnabled = secureShareParticipantIdentityEnabled(),
+  participantLimitReached = false
+) {
+  const participantIdentityEnabled =
+    !ownerPreview
+    && policy.permissionLevel === "comment"
+    && secureShareParticipantIdentityEnabled()
+    && participantIdentitySessionEnabled;
   return {
     permissionLevel: policy.permissionLevel,
-    canComment: ownerPreview || policy.permissionLevel === "comment",
+    canComment:
+      ownerPreview
+      || (
+        policy.permissionLevel === "comment"
+        && (
+          !participantIdentityEnabled
+          || participantAvailable
+        )
+      ),
     canSaveCopy: !ownerPreview && policy.permissionLevel === "save_copy",
     downloadAllowed: policy.downloadAllowed === true,
-    quickCopyButtonVisible: policy.quickCopyButtonVisible !== false
+    quickCopyButtonVisible: policy.quickCopyButtonVisible !== false,
+    participantIdentityEnabled,
+    participantLimitReached:
+      participantIdentityEnabled && participantLimitReached,
+    commentIpPrefixEnabled:
+      (ownerPreview || participantIdentityEnabled)
+      && policy.showCommenterIpPrefix === true
+      && secureShareCommentIpPrefixEnabled()
   };
 }
 
@@ -2746,6 +3383,7 @@ async function issueOwnerPreviewSession(
   owner,
   browserBindingHash,
   unlockAttemptId,
+  networkHash,
   id
 ) {
   const identity = {
@@ -2786,16 +3424,32 @@ async function issueOwnerPreviewSession(
     expiresAt,
     ownerPreview: true
   });
-  await firestoreCommit(context, [
-    createDocumentWrite(context.projectId, `publicShareAccessSessions/${digest}`, session),
-    createAuditWrite(context, state.share, "owner_preview", "success", {
-      requestId: id,
-      identityType: identity.identityType,
-      identityHash: identity.identityHash,
-      ipHash: clientNetworkDigest(request),
-      userAgentHash: userAgentDigest(request)
-    })
-  ]);
+  const transactionSnapshot = await beginShareMutationTransaction(
+    context,
+    state.share.__id
+  );
+  if (!shareMutationSnapshotMatches(transactionSnapshot.state, state)) {
+    await rollbackShareMutation(context, transactionSnapshot.transaction);
+    throw new HttpError(409, "request_conflict", "Share changed before owner preview");
+  }
+  try {
+    await firestoreCommit(context, [
+      createDocumentWrite(context.projectId, `publicShareAccessSessions/${digest}`, session),
+      createAuditWrite(context, state.share, "owner_preview", "success", {
+        requestId: id,
+        identityType: identity.identityType,
+        identityHash: identity.identityHash,
+        ipHash: networkHash,
+        userAgentHash: userAgentDigest(request)
+      })
+    ], transactionSnapshot.transaction);
+  } catch (error) {
+    await rollbackShareMutation(context, transactionSnapshot.transaction);
+    if (isOptimisticConflict(error)) {
+      throw new HttpError(409, "request_conflict", "Share changed before owner preview");
+    }
+    throw error;
+  }
   return { sessionToken, csrfToken, expiresAt: expiresAt.toISOString() };
 }
 
@@ -2807,9 +3461,10 @@ async function issueAccessSession(
   identity,
   browserBindingHash,
   attemptHash,
+  networkHash,
   id
 ) {
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  for (let attempt = 0; attempt < participantAllocationMaximumAttempts; attempt += 1) {
     const state = await loadShareState(context, shareId);
     assertPublicShareAvailable(state);
     assertEmailPolicyAvailable(state.policy);
@@ -2986,25 +3641,82 @@ async function issueAccessSession(
         ));
       }
     }
+    const participantAllocation = await beginParticipantAllocation(
+      context,
+      state,
+      identity
+    );
+    if (
+      state.policy.oneTimeEnabled === true
+      && consumed
+      && !participantAllocation.transaction
+    ) {
+      const transactionSnapshot = await beginShareMutationTransaction(
+        context,
+        shareId
+      );
+      if (!shareMutationSnapshotMatches(transactionSnapshot.state, state)) {
+        await rollbackShareMutation(context, transactionSnapshot.transaction);
+        throw new HttpError(
+          409,
+          "request_conflict",
+          "Share changed before one-time grace access"
+        );
+      }
+      participantAllocation.transaction = transactionSnapshot.transaction;
+    }
+    if (participantAllocation.participant) {
+      session.participantId = participantAllocation.participant.participantId;
+      session.authorDisplayName = participantAllocation.participant.displayName;
+    }
+    session.participantIdentityEnabled = participantAllocation.enabled;
+    session.participantLimitReached = participantAllocation.limitReached;
+    const sessionDocumentSuffix = `/documents/publicShareAccessSessions/${digest}`;
+    const sessionWriteIndex = writes.findIndex((write) =>
+      write?.update?.name?.endsWith(sessionDocumentSuffix)
+      && write?.currentDocument?.exists === false
+    );
+    if (sessionWriteIndex < 0) {
+      await rollbackShareMutation(context, participantAllocation.transaction);
+      throw new HttpError(503, "service_unavailable", "Session write is unavailable", {
+        expose: false
+      });
+    }
+    writes[sessionWriteIndex] = createDocumentWrite(
+      context.projectId,
+      `publicShareAccessSessions/${digest}`,
+      session
+    );
+    writes.push(...participantAllocation.writes);
     writes.push(createAuditWrite(context, state.share, "viewer_access", "success", {
       requestId: id,
       identityType: identity.identityType,
       identityHash: identity.identityHash,
-      ipHash: clientNetworkDigest(request),
+      ipHash: networkHash,
       userAgentHash: userAgentDigest(request)
     }));
     try {
-      await firestoreCommit(context, writes);
+      await firestoreCommit(context, writes, participantAllocation.transaction);
       return {
         sessionToken,
         csrfToken,
         expiresAt: expiresAt.toISOString(),
-        policy: state.policy
+        policy: state.policy,
+        participantId: participantAllocation.participant?.participantId ?? "",
+        participantIdentityEnabled: participantAllocation.enabled,
+        participantLimitReached: participantAllocation.limitReached
       };
     } catch (error) {
-      if (!isOptimisticConflict(error) || attempt === 3) {
+      if (participantAllocation.transaction) {
+        await rollbackShareMutation(context, participantAllocation.transaction);
+      }
+      if (
+        !isOptimisticConflict(error)
+        || attempt === participantAllocationMaximumAttempts - 1
+      ) {
         throw error;
       }
+      await waitBeforeOptimisticRetry(Math.min(attempt, 8));
     }
   }
   throw new HttpError(409, "request_conflict");
@@ -3031,8 +3743,27 @@ async function handleAccess(request, response, id, shareId) {
     throw new HttpError(428, "metadata_required", "Browser binding is missing");
   }
   const browserBindingHash = identityDigest("browser-binding", binding);
+  const networkIdentity = clientNetworkIdentity(request);
 
   if (body.ownerPreview === true) {
+    await consumeRateLimits(context, [
+      {
+        limitType: "owner_preview_share_network_15m",
+        keyParts: [shareId, networkIdentity.digest],
+        shareId,
+        ownerUid: state.share?.ownerUid ?? "",
+        windowSeconds: 15 * 60,
+        limit: 20
+      },
+      {
+        limitType: "owner_preview_network_hour",
+        keyParts: [networkIdentity.digest],
+        shareId,
+        ownerUid: state.share?.ownerUid ?? "",
+        windowSeconds: 60 * 60,
+        limit: 60
+      }
+    ]);
     const owner = await activeUserFromRequest(request, context);
     requireShareManager(state, owner);
     if (
@@ -3052,6 +3783,7 @@ async function handleAccess(request, response, id, shareId) {
       owner,
       browserBindingHash,
       unlockAttemptId,
+      networkIdentity.digest,
       id
     );
     jsonResponse(response, 200, {
@@ -3080,7 +3812,7 @@ async function handleAccess(request, response, id, shareId) {
   if (state.policy.oneTimeEnabled === true && body.oneTimeOpenConfirmed !== true) {
     throw new HttpError(400, "one_time_confirmation_required");
   }
-  const networkHash = clientNetworkDigest(request);
+  const networkHash = networkIdentity.digest;
   const accessLimits = [
     {
       limitType: "access_share_network_15m",
@@ -3152,7 +3884,23 @@ async function handleAccess(request, response, id, shareId) {
     throw new HttpError(400, "invalid_request", "Password was not requested");
   }
 
-  const identity = await resolveAccessIdentity(request, context, shareId, state.policy, body);
+  let signedInUser = null;
+  if (authorizationToken(request)) {
+    signedInUser = await activeUserFromRequest(request, context);
+    if (shareManagedBy(state, signedInUser)) {
+      throw new HttpError(409, "owner_preview_required");
+    }
+  }
+
+  const identity = await resolveAccessIdentity(
+    request,
+    context,
+    shareId,
+    state,
+    body,
+    undefined,
+    signedInUser
+  );
   const boundIdentityHash = hmacDigest(
     requiredSecret("SHARE_SESSION_HMAC_KEY"),
     "quickmemo/secure-share/bound-identity/v1",
@@ -3174,6 +3922,7 @@ async function handleAccess(request, response, id, shareId) {
     identity,
     browserBindingHash,
     attemptHash,
+    networkHash,
     id
   );
   jsonResponse(response, 200, {
@@ -3181,7 +3930,13 @@ async function handleAccess(request, response, id, shareId) {
     csrfToken: grant.csrfToken,
     sessionExpiresAt: grant.expiresAt,
     ownerPreview: false,
-    capabilities: sessionCapabilities(grant.policy, false),
+    capabilities: sessionCapabilities(
+      grant.policy,
+      false,
+      Boolean(grant.participantId) && !grant.participantLimitReached,
+      grant.participantIdentityEnabled,
+      grant.participantLimitReached
+    ),
     requestId: id
   }, {
     setCookies: [
@@ -3190,6 +3945,11 @@ async function handleAccess(request, response, id, shareId) {
         shareId,
         grant.sessionToken,
         Math.max(1, Math.floor((Date.parse(grant.expiresAt) - Date.now()) / 1000))
+      ),
+      ...(
+        grant.participantId && identity.setParticipantCookie
+          ? [participantCookie(request, shareId, identity.participantToken)]
+          : []
       )
     ]
   });
@@ -3280,7 +4040,13 @@ async function handleSession(request, response, id, shareId) {
     csrfToken,
     sessionExpiresAt: session.expiresAt,
     ownerPreview: session.ownerPreview === true,
-    capabilities: sessionCapabilities(state.policy, session.ownerPreview === true),
+    capabilities: sessionCapabilities(
+      state.policy,
+      session.ownerPreview === true,
+      Boolean(session.participantId) && session.participantLimitReached !== true,
+      session.participantIdentityEnabled === true,
+      session.participantLimitReached === true
+    ),
     requestId: id
   });
 }
@@ -3350,6 +4116,624 @@ async function handleContent(request, response, id, shareId) {
   });
 }
 
+function participantPublicDto(participant, state, currentIpPrefix) {
+  const lastRenamedAt = timestampMilliseconds(participant.lastRenamedAt);
+  const cooldownMilliseconds = Number.isFinite(lastRenamedAt)
+    ? lastRenamedAt + 60_000
+    : Number.NaN;
+  const prefixVisible =
+    state.policy.permissionLevel === "comment"
+    && state.policy.showCommenterIpPrefix === true
+    && secureShareCommentIpPrefixEnabled();
+  const prefix = prefixVisible
+    ? safeIpPrefixSnapshot(currentIpPrefix)
+    : null;
+  return {
+    participantId: participant.participantId,
+    guestNumber: participant.guestNumber,
+    displayName: participant.displayName,
+    isSystemDefaultName:
+      participant.displayName === participant.systemDefaultName,
+    canRename: participant.status === "active",
+    renameCooldownEndsAt:
+      Number.isFinite(cooldownMilliseconds) && cooldownMilliseconds > Date.now()
+        ? new Date(cooldownMilliseconds).toISOString()
+        : null,
+    capabilities: {
+      canRename: participant.status === "active",
+      showsCommenterIpPrefix: prefixVisible
+    },
+    ...(prefix ? { currentIpPrefix: prefix } : {})
+  };
+}
+
+function validParticipantForSession(participant, shareId, participantId) {
+  return Boolean(
+    participant
+    && participant.schemaVersion === 1
+    && participant.shareId === shareId
+    && participant.participantId === participantId
+    && participant.status === "active"
+    && typeof participant.displayName === "string"
+    && typeof participant.systemDefaultName === "string"
+    && Number.isSafeInteger(participant.guestNumber)
+    && participant.guestNumber >= 1
+  );
+}
+
+function participantRenameSnapshotMatches(preReadParticipant, transactionParticipant) {
+  return Boolean(
+    preReadParticipant
+    && transactionParticipant
+    && preReadParticipant.__updateTime === transactionParticipant.__updateTime
+    && preReadParticipant.displayName === transactionParticipant.displayName
+    && preReadParticipant.normalizedDisplayName
+      === transactionParticipant.normalizedDisplayName
+  );
+}
+
+function renameWindowState(participant, nowMilliseconds) {
+  const hourStartMilliseconds = Math.floor(nowMilliseconds / 3_600_000) * 3_600_000;
+  const dayStartMilliseconds = Math.floor(nowMilliseconds / 86_400_000) * 86_400_000;
+  const storedHourStart = timestampMilliseconds(participant.renameHourWindowStart);
+  const storedDayStart = timestampMilliseconds(participant.renameDayWindowStart);
+  return {
+    hourStartMilliseconds,
+    dayStartMilliseconds,
+    hourCount:
+      storedHourStart === hourStartMilliseconds && Number.isSafeInteger(participant.renameHourCount)
+        ? participant.renameHourCount
+        : 0,
+    dayCount:
+      storedDayStart === dayStartMilliseconds && Number.isSafeInteger(participant.renameDayCount)
+        ? participant.renameDayCount
+        : 0
+  };
+}
+
+function renameRequestHistory(requestDocument) {
+  if (!requestDocument) {
+    return [];
+  }
+  const legacyLatest = {
+    requestHash: requestDocument.requestHash,
+    requestedNameHash: requestDocument.requestedNameHash,
+    status: requestDocument.status,
+    noChange: requestDocument.noChange === true,
+    completedAt: requestDocument.updatedAt
+  };
+  const history = Array.isArray(requestDocument.recentRequests)
+    ? requestDocument.recentRequests
+    : [legacyLatest];
+  if (
+    history.length < 1
+    || history.length > 10
+    || history.some((entry) =>
+      !isPlainRecord(entry)
+      || typeof entry.requestHash !== "string"
+      || !/^[A-Za-z0-9_-]{40,128}$/u.test(entry.requestHash)
+      || typeof entry.requestedNameHash !== "string"
+      || !/^[A-Za-z0-9_-]{40,128}$/u.test(entry.requestedNameHash)
+      || entry.status !== "succeeded"
+      || typeof entry.noChange !== "boolean"
+      || !Number.isFinite(timestampMilliseconds(entry.completedAt))
+    )
+  ) {
+    return null;
+  }
+  return history;
+}
+
+async function renameParticipant(
+  request,
+  context,
+  state,
+  session,
+  participantId,
+  displayName,
+  clientRequestId,
+  networkIdentity,
+  requestIdentifier
+) {
+  const name = safeParticipantDisplayName(displayName);
+  const participantPath = participantDocumentPath(state.share.__id, participantId);
+  const ownerProfilePath = `users/${safeId(state.share.ownerUid, "ownerUid")}`;
+  const requestHash = hmacDigest(
+    requiredSecret("SHARE_PARTICIPANT_HMAC_KEY"),
+    "quickmemo/secure-share/participant-rename-request/v1",
+    state.share.__id,
+    participantId,
+    clientRequestId
+  );
+  const requestedNameHash = hmacDigest(
+    requiredSecret("SHARE_PARTICIPANT_HMAC_KEY"),
+    "quickmemo/secure-share/participant-rename-value/v1",
+    state.share.__id,
+    name.normalizedDisplayName
+  );
+  const renameRequestPath = participantRenameRequestPath(
+    state.share.__id,
+    participantId
+  );
+
+  for (let attempt = 0; attempt < participantRenameMaximumAttempts; attempt += 1) {
+    const currentParticipant = await firestoreGet(context, participantPath);
+    if (!validParticipantForSession(
+      currentParticipant,
+      state.share.__id,
+      participantId
+    )) {
+      throw new HttpError(409, "participant_unavailable");
+    }
+    const newRegistryPath = participantNameRegistryPath(
+      state.share.__id,
+      name.normalizedDisplayName
+    );
+    const hasCustomCurrentName =
+      currentParticipant.displayName !== currentParticipant.systemDefaultName;
+    const oldRegistryPath = hasCustomCurrentName
+      ? participantNameRegistryPath(
+          state.share.__id,
+          normalizedParticipantName(currentParticipant.displayName)
+        )
+      : "";
+    const readPaths = [
+      `publicNoteShares/${state.share.__id}`,
+      `publicSharePolicies/${state.share.__id}`,
+      ownerProfilePath,
+      participantPath,
+      renameRequestPath,
+      newRegistryPath,
+      ...(oldRegistryPath && oldRegistryPath !== newRegistryPath ? [oldRegistryPath] : [])
+    ];
+    const snapshot = await firestoreBatchGetNewTransaction(context, readPaths);
+    const byPath = new Map(readPaths.map((path, index) => [path, snapshot.documents[index]]));
+    const transactionState = byPath.get(`publicNoteShares/${state.share.__id}`)
+      && byPath.get(`publicSharePolicies/${state.share.__id}`)
+      ? {
+          share: byPath.get(`publicNoteShares/${state.share.__id}`),
+          policy: byPath.get(`publicSharePolicies/${state.share.__id}`)
+        }
+      : null;
+    const participant = byPath.get(participantPath);
+    const ownerProfile = byPath.get(ownerProfilePath);
+    const renameRequest = byPath.get(renameRequestPath);
+    let recentRenameRequests = [];
+    if (
+      !shareMutationSnapshotMatches(transactionState, state)
+      || !validParticipantForSession(participant, state.share.__id, participantId)
+      || session.policyVersion !== transactionState?.policy?.policyVersion
+    ) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      throw new HttpError(409, "request_conflict", "Share changed before participant rename");
+    }
+    if (!participantRenameSnapshotMatches(currentParticipant, participant)) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      if (attempt === participantRenameMaximumAttempts - 1) {
+        throw new HttpError(
+          409,
+          "request_conflict",
+          "Participant changed before participant rename"
+        );
+      }
+      await waitBeforeOptimisticRetry(attempt);
+      continue;
+    }
+    const ownerDisplayName =
+      typeof ownerProfile?.displayName === "string"
+      && ownerProfile.displayName.length <= 256
+        ? ownerProfile.displayName
+        : "";
+    if (
+      ownerDisplayName
+      && normalizedParticipantName(ownerDisplayName)
+        === name.normalizedDisplayName
+    ) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      throw new HttpError(409, "display_name_unavailable");
+    }
+    if (renameRequest) {
+      recentRenameRequests = renameRequestHistory(renameRequest);
+      if (
+        renameRequest.schemaVersion !== 1
+        || renameRequest.shareId !== state.share.__id
+        || renameRequest.ownerUid !== state.share.ownerUid
+        || renameRequest.participantId !== participantId
+        || !recentRenameRequests
+      ) {
+        await rollbackShareMutation(context, snapshot.transaction);
+        throw new HttpError(409, "participant_state_invalid");
+      }
+      const replay = recentRenameRequests.find((entry) =>
+        entry.requestHash === requestHash
+      );
+      if (replay) {
+        await rollbackShareMutation(context, snapshot.transaction);
+        if (
+          replay.requestedNameHash === requestedNameHash
+          && replay.status === "succeeded"
+        ) {
+          return participant;
+        }
+        throw new HttpError(409, "request_conflict", "Rename idempotency key was reused");
+      }
+    }
+    const nowMilliseconds = Date.now();
+    const lastRenamedAt = timestampMilliseconds(participant.lastRenamedAt);
+    if (Number.isFinite(lastRenamedAt) && nowMilliseconds < lastRenamedAt + 60_000) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      throw new HttpError(429, "rate_limited", "Rename cooldown is active", {
+        retryAfter: Math.max(1, Math.ceil((lastRenamedAt + 60_000 - nowMilliseconds) / 1000))
+      });
+    }
+    const window = renameWindowState(participant, nowMilliseconds);
+    if (window.hourCount >= 3) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      throw new HttpError(429, "rate_limited", "Hourly rename limit exceeded", {
+        retryAfter: Math.max(
+          1,
+          Math.ceil((window.hourStartMilliseconds + 3_600_000 - nowMilliseconds) / 1000)
+        )
+      });
+    }
+    if (window.dayCount >= 10) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      throw new HttpError(429, "rate_limited", "Daily rename limit exceeded", {
+        retryAfter: Math.max(
+          1,
+          Math.ceil((window.dayStartMilliseconds + 86_400_000 - nowMilliseconds) / 1000)
+        )
+      });
+    }
+    if (participant.normalizedDisplayName === name.normalizedDisplayName) {
+      const now = new Date(nowMilliseconds);
+      const participantFields = {
+        updatedAt: now,
+        lastRenamedAt: now,
+        renameCount: (Number.isSafeInteger(participant.renameCount)
+          ? participant.renameCount
+          : 0) + 1,
+        renameHourWindowStart: new Date(window.hourStartMilliseconds),
+        renameHourCount: window.hourCount + 1,
+        renameDayWindowStart: new Date(window.dayStartMilliseconds),
+        renameDayCount: window.dayCount + 1,
+        lastRenameRequestHash: requestHash,
+        lastRenameRequestedNameHash: requestedNameHash
+      };
+      try {
+        await firestoreCommit(context, [
+          updateDocumentWrite(
+            context.projectId,
+            participantPath,
+            participantFields,
+            Object.keys(participantFields),
+            participant.__updateTime
+          ),
+          (
+            renameRequest
+              ? updateDocumentWrite(
+                  context.projectId,
+                  renameRequestPath,
+                  {
+                    schemaVersion: 1,
+                    shareId: state.share.__id,
+                    ownerUid: state.share.ownerUid,
+                    participantId,
+                    requestHash,
+                    requestedNameHash,
+                    status: "succeeded",
+                    noChange: true,
+                    recentRequests: [
+                      ...recentRenameRequests,
+                      {
+                        requestHash,
+                        requestedNameHash,
+                        status: "succeeded",
+                        noChange: true,
+                        completedAt: now
+                      }
+                    ].slice(-10),
+                    createdAt: renameRequest.createdAt ?? now,
+                    updatedAt: now
+                  },
+                  [
+                    "schemaVersion",
+                    "shareId",
+                    "ownerUid",
+                    "participantId",
+                    "requestHash",
+                    "requestedNameHash",
+                    "status",
+                    "noChange",
+                    "recentRequests",
+                    "createdAt",
+                    "updatedAt"
+                  ],
+                  renameRequest.__updateTime
+                )
+              : createDocumentWrite(context.projectId, renameRequestPath, {
+                  schemaVersion: 1,
+                  shareId: state.share.__id,
+                  ownerUid: state.share.ownerUid,
+                  participantId,
+                  requestHash,
+                  requestedNameHash,
+                  status: "succeeded",
+                  noChange: true,
+                  recentRequests: [{
+                    requestHash,
+                    requestedNameHash,
+                    status: "succeeded",
+                    noChange: true,
+                    completedAt: now
+                  }],
+                  createdAt: now,
+                  updatedAt: now
+                })
+          ),
+          createAuditWrite(context, state.share, "participant_rename_noop", "success", {
+            eventId: `evt_rename_${requestHash.slice(0, 40)}`,
+            requestId: requestIdentifier,
+            identityType: session.identityType,
+            identityHash: session.identityHash,
+            ipHash: networkIdentity.digest,
+            userAgentHash: userAgentDigest(request)
+          })
+        ], snapshot.transaction);
+        return { ...participant, ...participantFields };
+      } catch (error) {
+        await rollbackShareMutation(context, snapshot.transaction);
+        if (
+          !isOptimisticConflict(error)
+          || attempt === participantRenameMaximumAttempts - 1
+        ) {
+          throw error;
+        }
+        await waitBeforeOptimisticRetry(attempt);
+        continue;
+      }
+    }
+    const newRegistry = byPath.get(newRegistryPath);
+    if (newRegistry) {
+      if (newRegistry.participantId !== participantId) {
+        await rollbackShareMutation(context, snapshot.transaction);
+        throw new HttpError(409, "display_name_unavailable");
+      }
+      if (
+        newRegistry.schemaVersion !== 1
+        || newRegistry.shareId !== state.share.__id
+        || newRegistry.ownerUid !== state.share.ownerUid
+      ) {
+        await rollbackShareMutation(context, snapshot.transaction);
+        throw new HttpError(409, "participant_state_invalid");
+      }
+    }
+    const oldRegistry = oldRegistryPath ? byPath.get(oldRegistryPath) : null;
+    if (
+      oldRegistryPath
+      && oldRegistryPath !== newRegistryPath
+      && (
+        !oldRegistry
+        || oldRegistry.schemaVersion !== 1
+        || oldRegistry.shareId !== state.share.__id
+        || oldRegistry.ownerUid !== state.share.ownerUid
+        || oldRegistry.participantId !== participantId
+      )
+    ) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      throw new HttpError(409, "participant_state_invalid");
+    }
+    const now = new Date(nowMilliseconds);
+    const participantFields = {
+      displayName: name.displayName,
+      normalizedDisplayName: name.normalizedDisplayName,
+      updatedAt: now,
+      lastRenamedAt: now,
+      renameCount: (Number.isSafeInteger(participant.renameCount)
+        ? participant.renameCount
+        : 0) + 1,
+      renameHourWindowStart: new Date(window.hourStartMilliseconds),
+      renameHourCount: window.hourCount + 1,
+      renameDayWindowStart: new Date(window.dayStartMilliseconds),
+      renameDayCount: window.dayCount + 1,
+      lastRenameRequestHash: requestHash,
+      lastRenameRequestedNameHash: requestedNameHash
+    };
+    const registryFields = {
+      schemaVersion: 1,
+      shareId: state.share.__id,
+      ownerUid: state.share.ownerUid,
+      participantId,
+      createdAt: newRegistry?.createdAt ?? now,
+      updatedAt: now
+    };
+    const writes = [
+      updateDocumentWrite(
+        context.projectId,
+        participantPath,
+        participantFields,
+        Object.keys(participantFields),
+        participant.__updateTime
+      ),
+      newRegistry
+        ? updateDocumentWrite(
+            context.projectId,
+            newRegistryPath,
+            registryFields,
+            Object.keys(registryFields),
+            newRegistry.__updateTime
+          )
+        : createDocumentWrite(context.projectId, newRegistryPath, registryFields),
+      createAuditWrite(context, state.share, "participant_rename", "success", {
+        eventId: `evt_rename_${requestHash.slice(0, 40)}`,
+        requestId: requestIdentifier,
+        identityType: session.identityType,
+        identityHash: session.identityHash,
+        ipHash: networkIdentity.digest,
+        userAgentHash: userAgentDigest(request)
+      }),
+      renameRequest
+        ? updateDocumentWrite(
+            context.projectId,
+            renameRequestPath,
+            {
+              schemaVersion: 1,
+              shareId: state.share.__id,
+              ownerUid: state.share.ownerUid,
+              participantId,
+              requestHash,
+              requestedNameHash,
+              status: "succeeded",
+              noChange: false,
+              recentRequests: [
+                ...recentRenameRequests,
+                {
+                  requestHash,
+                  requestedNameHash,
+                  status: "succeeded",
+                  noChange: false,
+                  completedAt: now
+                }
+              ].slice(-10),
+              createdAt: renameRequest.createdAt ?? now,
+              updatedAt: now
+            },
+            [
+              "schemaVersion",
+              "shareId",
+              "ownerUid",
+              "participantId",
+              "requestHash",
+              "requestedNameHash",
+              "status",
+              "noChange",
+              "recentRequests",
+              "createdAt",
+              "updatedAt"
+            ],
+            renameRequest.__updateTime
+          )
+        : createDocumentWrite(context.projectId, renameRequestPath, {
+            schemaVersion: 1,
+            shareId: state.share.__id,
+            ownerUid: state.share.ownerUid,
+            participantId,
+            requestHash,
+            requestedNameHash,
+            status: "succeeded",
+            noChange: false,
+            recentRequests: [{
+              requestHash,
+              requestedNameHash,
+              status: "succeeded",
+              noChange: false,
+              completedAt: now
+            }],
+            createdAt: now,
+            updatedAt: now
+          })
+    ];
+    if (oldRegistryPath && oldRegistryPath !== newRegistryPath) {
+      writes.push(deleteDocumentWrite(
+        context.projectId,
+        oldRegistryPath,
+        oldRegistry.__updateTime
+      ));
+    }
+    try {
+      await firestoreCommit(context, writes, snapshot.transaction);
+      return { ...participant, ...participantFields };
+    } catch (error) {
+      await rollbackShareMutation(context, snapshot.transaction);
+      if (
+        !isOptimisticConflict(error)
+        || attempt === participantRenameMaximumAttempts - 1
+      ) {
+        throw error;
+      }
+      await waitBeforeOptimisticRetry(attempt);
+    }
+  }
+  throw new HttpError(409, "request_conflict");
+}
+
+async function handleParticipantMe(request, response, id, shareId) {
+  requireMethod(request, ["GET", "PATCH"]);
+  if (!secureShareParticipantIdentityEnabled()) {
+    throw new HttpError(404, "not_found");
+  }
+  const context = await secureContext(request);
+  const access = await commentAccess(request, context, shareId, request.method === "PATCH");
+  if (
+    access.session?.ownerPreview === true
+    || access.state.policy.permissionLevel !== "comment"
+  ) {
+    throw new HttpError(403, "access_denied");
+  }
+  const participantId = safeId(access.session?.participantId, "participantId");
+  const networkIdentity = clientNetworkIdentity(request);
+  if (request.method === "GET") {
+    const participant = await firestoreGet(
+      context,
+      participantDocumentPath(shareId, participantId)
+    );
+    if (!validParticipantForSession(participant, shareId, participantId)) {
+      throw new HttpError(409, "participant_unavailable");
+    }
+    jsonResponse(response, 200, {
+      ok: true,
+      participant: participantPublicDto(
+        participant,
+        access.state,
+        networkIdentity.prefix
+      ),
+      requestId: id
+    });
+    return;
+  }
+  await consumeRateLimits(context, [
+    {
+      limitType: "participant_rename_identity_hour",
+      keyParts: [shareId, access.session.identityHash],
+      shareId,
+      ownerUid: access.state.share.ownerUid,
+      windowSeconds: 60 * 60,
+      limit: 30
+    },
+    {
+      limitType: "participant_rename_share_network_hour",
+      keyParts: [shareId, networkIdentity.digest],
+      shareId,
+      ownerUid: access.state.share.ownerUid,
+      windowSeconds: 60 * 60,
+      limit: 120
+    }
+  ]);
+  const body = await readJsonBody(request, 8 * 1024);
+  assertOnlyKeys(body, ["displayName", "clientRequestId"]);
+  const clientRequestId = safeUnlockAttemptId(body.clientRequestId);
+  const participant = await renameParticipant(
+    request,
+    context,
+    access.state,
+    access.session,
+    participantId,
+    body.displayName,
+    clientRequestId,
+    networkIdentity,
+    id
+  );
+  jsonResponse(response, 200, {
+    ok: true,
+    participant: participantPublicDto(
+      participant,
+      access.state,
+      networkIdentity.prefix
+    ),
+    requestId: id
+  });
+}
+
 function validateCommentBody(value) {
   if (typeof value !== "string") {
     throw new HttpError(400, "invalid_request", "Comment body must be text");
@@ -3380,14 +4764,72 @@ function validateCommentBody(value) {
   return body;
 }
 
-function publicComment(comment) {
+function safeIpPrefixSnapshot(value) {
+  if (typeof value !== "string" || value.length > 16) {
+    return null;
+  }
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})$/u.exec(value);
+  if (ipv4) {
+    const first = Number.parseInt(ipv4[1], 10);
+    const second = Number.parseInt(ipv4[2], 10);
+    const reserved = (
+      first > 255
+      || second > 255
+      || first === 0
+      || first === 10
+      || first === 127
+      || first >= 224
+      || (first === 100 && second >= 64 && second <= 127)
+      || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && new Set([0, 88, 168]).has(second))
+      || (first === 198 && new Set([18, 19, 51]).has(second))
+      || (first === 203 && second === 0)
+    );
+    return reserved ? null : `${first}.${second}`;
+  }
+  const ipv6 = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u.exec(value);
+  if (!ipv6) {
+    return null;
+  }
+  const first = Number.parseInt(ipv6[1], 16);
+  const second = Number.parseInt(ipv6[2], 16);
+  const reserved = (
+    (first & 0xe000) !== 0x2000
+    || (first === 0x2001 && new Set([0x0002, 0x0db8]).has(second))
+    || (first === 0x3fff && (second & 0xf000) === 0)
+  );
+  return reserved ? null : `${first.toString(16)}:${second.toString(16)}`;
+}
+
+function publicComment(comment, participant = null, includeIpPrefix = false) {
+  const displayName =
+    participant?.status === "active"
+    && participant?.shareId === comment.shareId
+    && participant?.participantId === comment.authorParticipantId
+    && typeof participant?.displayName === "string"
+      ? participant.displayName
+      : (
+          comment.authorDisplayNameSnapshot
+          || comment.authorDisplayName
+          || "Guest"
+        );
+  const ipPrefix = includeIpPrefix
+    ? safeIpPrefixSnapshot(comment.ipPrefixSnapshot)
+    : null;
   return {
     id: comment.__id,
-    displayName: comment.authorDisplayName,
+    displayName,
     badge: comment.authorBadge,
     body: comment.deletedAt ? "(삭제된 댓글)" : comment.body,
     createdAt: comment.createdAt,
-    canDelete: false
+    canDelete: false,
+    ...(
+      typeof comment.authorParticipantId === "string"
+        ? { authorParticipantId: comment.authorParticipantId }
+        : {}
+    ),
+    ...(ipPrefix ? { ipPrefix } : {})
   };
 }
 
@@ -3463,7 +4905,7 @@ async function handleComments(request, response, id, shareId, url) {
     }
     const pageSizeText = queryString(url, "limit", 3);
     const pageSize = pageSizeText
-      ? boundedInteger(Number.parseInt(pageSizeText, 10), "limit", 1, maximumPageSize)
+      ? boundedInteger(Number.parseInt(pageSizeText, 10), "limit", 1, maximumCommentPageSize)
       : defaultPageSize;
     const cursor = commentsCursor(queryString(url, "cursor", 1000), shareId, context.projectId);
     const structuredQuery = {
@@ -3493,14 +4935,59 @@ async function handleComments(request, response, id, shareId, url) {
     const nextCursor = filtered.length > pageSize && page.length
       ? encodeCommentsCursor(page.at(-1))
       : null;
+    const participantIds = [...new Set(
+      page
+        .map((comment) => comment.authorParticipantId)
+        .filter((participantId) =>
+          typeof participantId === "string"
+          && /^[A-Za-z0-9_-]{1,160}$/u.test(participantId)
+        )
+    )].slice(0, maximumCommentPageSize);
+    const participantDocuments = participantIds.length
+      ? await firestoreBatchGet(
+          context,
+          participantIds.map((participantId) =>
+            participantDocumentPath(shareId, participantId)
+          )
+        )
+      : [];
+    const participantsById = new Map(
+      participantDocuments.flatMap((participant, index) =>
+        validParticipantForSession(participant, shareId, participantIds[index])
+          ? [[participantIds[index], participant]]
+          : []
+      )
+    );
+    const includeIpPrefix =
+      access.state.policy.permissionLevel === "comment"
+      && access.state.policy.showCommenterIpPrefix === true
+      && secureShareCommentIpPrefixEnabled()
+      && Boolean(
+        access.owner
+        || access.session?.ownerPreview === true
+        || access.session?.participantIdentityEnabled === true
+      );
     const items = page.map((comment) => {
-      const result = publicComment(comment);
+      const result = publicComment(
+        comment,
+        participantsById.get(comment.authorParticipantId) ?? null,
+        includeIpPrefix
+      );
       result.canDelete = Boolean(
         access.owner
         || access.session?.ownerPreview === true
         || (
           access.session
-          && comment.authorIdentityHash === access.session.identityHash
+          && (
+            (
+              typeof comment.authorParticipantId === "string"
+              && comment.authorParticipantId === access.session.participantId
+            )
+            || (
+              !comment.authorParticipantId
+              && comment.authorIdentityHash === access.session.identityHash
+            )
+          )
           && !comment.deletedAt
         )
       );
@@ -3522,6 +5009,24 @@ async function handleComments(request, response, id, shareId, url) {
     throw new HttpError(403, "access_denied");
   }
   requireCsrf(request, session);
+  let participant = null;
+  if (
+    session.ownerPreview !== true
+    && secureShareParticipantIdentityEnabled()
+    && session.participantIdentityEnabled === true
+  ) {
+    if (session.participantLimitReached === true || !session.participantId) {
+      throw new HttpError(403, "participant_limit_reached");
+    }
+    const participantId = safeId(session.participantId, "participantId");
+    participant = await firestoreGet(
+      context,
+      participantDocumentPath(shareId, participantId)
+    );
+    if (!validParticipantForSession(participant, shareId, participantId)) {
+      throw new HttpError(409, "participant_unavailable");
+    }
+  }
   const commentId = `c_${hmacDigest(
     requiredSecret("SHARE_SESSION_HMAC_KEY"),
     "quickmemo/secure-share/comment-idempotency/v1",
@@ -3534,14 +5039,23 @@ async function handleComments(request, response, id, shareId, url) {
   if (existingComment) {
     if (
       existingComment.shareId === shareId
-      && existingComment.authorIdentityHash === session.identityHash
+      && (
+        participant
+          ? existingComment.authorParticipantId === participant.participantId
+          : existingComment.authorIdentityHash === session.identityHash
+      )
       && existingComment.body === text
       && !existingComment.deletedAt
     ) {
       jsonResponse(response, 200, {
         ok: true,
         comment: {
-          ...publicComment(existingComment),
+          ...publicComment(
+            existingComment,
+            participant,
+            state.policy.showCommenterIpPrefix === true
+              && secureShareCommentIpPrefixEnabled()
+          ),
           canDelete: true
         },
         requestId: id
@@ -3550,7 +5064,8 @@ async function handleComments(request, response, id, shareId, url) {
     }
     throw new HttpError(409, "request_conflict", "Comment idempotency key was reused");
   }
-  const networkHash = clientNetworkDigest(request);
+  const networkIdentity = clientNetworkIdentity(request);
+  const networkHash = networkIdentity.digest;
   const rateLimitReservations = await consumeRateLimits(context, [
     {
       limitType: "comment_session_minute",
@@ -3587,13 +5102,16 @@ async function handleComments(request, response, id, shareId, url) {
         : session.identityType === "verified_email"
           ? "email_verified"
           : "guest";
-  const comment = {
-    shareId,
-    ownerUid: state.share.ownerUid,
-    authorType: session.identityType,
-    authorUid: session.authorUid || "",
-    authorIdentityHash: session.identityHash,
-    authorDisplayName: safeDisplayName(
+  const showCommenterIpPrefix =
+    session.ownerPreview !== true
+    && Boolean(participant)
+    && state.policy.showCommenterIpPrefix === true
+    && secureShareCommentIpPrefixEnabled();
+  const ipPrefixSnapshot = showCommenterIpPrefix
+    ? safeIpPrefixSnapshot(networkIdentity.prefix)
+    : null;
+  const authorDisplayName = participant?.displayName
+    ?? safeDisplayName(
       session.authorDisplayName,
       session.identityType === "admin_preview"
         ? "Administrator"
@@ -3601,8 +5119,19 @@ async function handleComments(request, response, id, shareId, url) {
           ? "Owner"
           : "Guest",
       session.ownerPreview === true
-    ),
+    );
+  const comment = {
+    shareId,
+    ownerUid: state.share.ownerUid,
+    authorType: session.identityType,
+    authorUid: participant ? undefined : session.authorUid || "",
+    authorIdentityHash: participant ? undefined : session.identityHash,
+    authorDisplayName,
+    authorDisplayNameSnapshot: authorDisplayName,
+    authorParticipantId: participant?.participantId ?? undefined,
     authorBadge,
+    ipPrefixSnapshot: ipPrefixSnapshot ?? undefined,
+    ipPrefixVersion: ipPrefixSnapshot ? participantIpPrefixVersion : undefined,
     body: text,
     createdAt: now,
     expiresAt: new Date(timestampMilliseconds(state.share.expiresAt)),
@@ -3640,7 +5169,11 @@ async function handleComments(request, response, id, shareId, url) {
       const duplicate = await firestoreGet(context, commentPath);
       if (
         duplicate
-        && duplicate.authorIdentityHash === session.identityHash
+        && (
+          participant
+            ? duplicate.authorParticipantId === participant.participantId
+            : duplicate.authorIdentityHash === session.identityHash
+        )
         && duplicate.body === text
         && !duplicate.deletedAt
       ) {
@@ -3648,7 +5181,11 @@ async function handleComments(request, response, id, shareId, url) {
         jsonResponse(response, 200, {
           ok: true,
           comment: {
-            ...publicComment(duplicate),
+            ...publicComment(
+              duplicate,
+              participant,
+              showCommenterIpPrefix
+            ),
             canDelete: true
           },
           requestId: id
@@ -3662,7 +5199,11 @@ async function handleComments(request, response, id, shareId, url) {
   jsonResponse(response, 201, {
     ok: true,
     comment: {
-      ...publicComment({ ...comment, __id: commentId }),
+      ...publicComment(
+        { ...comment, __id: commentId },
+        participant,
+        showCommenterIpPrefix
+      ),
       canDelete: true
     },
     requestId: id
@@ -3690,7 +5231,16 @@ async function handleCommentDelete(request, response, id, shareId) {
       !access.session
       || (
         access.session.ownerPreview !== true
-        && comment.authorIdentityHash !== access.session.identityHash
+        && !(
+          (
+            typeof comment.authorParticipantId === "string"
+            && comment.authorParticipantId === access.session.participantId
+          )
+          || (
+            !comment.authorParticipantId
+            && comment.authorIdentityHash === access.session.identityHash
+          )
+        )
       )
     )
   ) {
@@ -4652,6 +6202,8 @@ async function dispatch(request, response, id) {
     await handleSession(request, response, id, shareId);
   } else if (action === "content") {
     await handleContent(request, response, id, shareId);
+  } else if (action === "participant-me") {
+    await handleParticipantMe(request, response, id, shareId);
   } else if (action === "comments") {
     await handleComments(request, response, id, shareId, url);
   } else if (action === "comment-delete") {
@@ -4703,6 +6255,8 @@ export {
   resolveEmailQuotaPolicy,
   resolveAccessIdentity,
   safeDisplayName,
+  safeIpPrefixSnapshot,
+  safeParticipantDisplayName,
   secureShareScryptParameters,
   secureShareAttachmentBlobPath,
   secureShareEmailReadiness,
@@ -4712,6 +6266,12 @@ export {
   signedOpaqueToken,
   sourceShareGuardId,
   sourceSnapshotAvailable,
+  participantIdentityHash,
+  issueAnonymousParticipantToken,
+  participantNameRegistryId,
+  participantRenameSnapshotMatches,
+  renameParticipant,
+  verifiedAnonymousParticipantToken,
   unlockAttemptDigest,
   validateCommentBody,
   verificationEmailText,

@@ -33,10 +33,16 @@ test("secure share is keyboard-accessible without horizontal overflow in dark mo
   await expect(openButton).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
+  await expect(page.getByText("내 댓글 이름")).toBeVisible();
+  await expect(page.getByText("guest1, 네트워크 대역 203.226")).toBeVisible();
+  await expect(
+    page.getByText("전체 IP 주소가 아닌 일부 네트워크 대역만 표시됩니다.")
+  ).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("203.226.244.27");
   await expectNoHorizontalOverflow(page);
   expect(
     popupInfrastructureRequests,
-    "password-only auth must not load Firebase popup infrastructure"
+    "anonymous comment access must not load Firebase popup infrastructure"
   ).toEqual([]);
   await expectCleanRuntime(diagnostics, fixture);
 });

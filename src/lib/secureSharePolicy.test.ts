@@ -56,6 +56,66 @@ describe("secure share policy validation", () => {
     }
   );
 
+  it("keeps commenter IP prefix display comment-only and defaults non-comment policies to private", () => {
+    expect(defaultSecureSharePolicy()).toMatchObject({
+      permissionLevel: "view",
+      showCommenterIpPrefix: false
+    });
+
+    expect(validateSecureSharePolicyInput(validPolicy({
+      permissionLevel: "comment",
+      showCommenterIpPrefix: true
+    }))).toMatchObject({
+      ok: true,
+      value: {
+        permissionLevel: "comment",
+        showCommenterIpPrefix: true
+      }
+    });
+
+    for (const permissionLevel of ["view", "save_copy"] as const) {
+      expect(validateSecureSharePolicyInput(validPolicy({
+        permissionLevel,
+        showCommenterIpPrefix: true
+      }))).toMatchObject({
+        ok: true,
+        value: {
+          permissionLevel,
+          showCommenterIpPrefix: false
+        }
+      });
+    }
+  });
+
+  it("requires an explicit commenter IP prefix boolean at the policy boundary", () => {
+    const legacyPolicy: Record<string, unknown> = { ...validPolicy() };
+    delete legacyPolicy.showCommenterIpPrefix;
+    const missing = validateSecureSharePolicyInput(legacyPolicy);
+    const invalid = validateSecureSharePolicyInput({
+      ...validPolicy(),
+      showCommenterIpPrefix: "true"
+    });
+
+    expect(missing).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "missing_field",
+          field: "showCommenterIpPrefix"
+        })
+      ])
+    });
+    expect(invalid).toMatchObject({
+      ok: false,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_type",
+          field: "showCommenterIpPrefix"
+        })
+      ])
+    });
+  });
+
   it("rejects invalid enums, unknown fields, and injected server-owned fields", () => {
     const result = validateSecureSharePolicyInput({
       ...validPolicy(),
@@ -263,6 +323,18 @@ describe("secure share summary and feature flags", () => {
     expect(summary).toContain("직접 다운로드는 제한");
     expect(summary).toContain("빠른 복사 버튼은 표시되지");
     expect(summary).toContain("7일 후 종료");
+  });
+
+  it("summarizes commenter IP prefix display only for comment shares", () => {
+    expect(summarizeSecureSharePolicy(validPolicy({
+      permissionLevel: "comment",
+      showCommenterIpPrefix: true
+    }))).toContain("전체 IP가 아닌 일부 네트워크 대역");
+
+    expect(summarizeSecureSharePolicy(validPolicy({
+      permissionLevel: "comment",
+      showCommenterIpPrefix: false
+    }))).not.toContain("일부 네트워크 대역");
   });
 
   it("requires both client and server v2 flags and gates email separately", () => {

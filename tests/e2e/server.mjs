@@ -71,7 +71,9 @@ const emulatorHelper = await import("../helpers/secureShareApiEmulator.ts");
 emulatorHelper.configureSecureShareApiEmulatorEnvironment();
 Object.assign(process.env, {
   SECURE_SHARE_ALLOWED_ORIGINS: origin,
+  SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED: "true",
   SECURE_SHARE_EMAIL_ENABLED: "true",
+  SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED: "true",
   SHARE_EMAIL_PROVIDER: "resend",
   SHARE_EMAIL_API_KEY: "re_e2e_local_only_not_a_real_provider_key",
   SHARE_EMAIL_FROM: "QuickMemo E2E <e2e-sender@example.test>",
@@ -394,6 +396,12 @@ const server = createServer((request, response) => {
     return;
   }
   if (url.pathname === "/api/public-shares-v2") {
+    Object.defineProperty(request, "secureShareTestClientIp", {
+      configurable: false,
+      enumerable: false,
+      value: "203.226.244.27",
+      writable: false
+    });
     void secureShareHandler(request, response);
     return;
   }
