@@ -2974,6 +2974,22 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /publicShareParticipants/{shareId}/items/{participantId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareParticipantNames/{shareId}/items/{nameId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareParticipantRenameRequests/{shareId}/items/{requestId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareParticipantCounters/{shareId} {
+      allow read, write: if false;
+    }
+
     match /publicShareAuditEvents/{shareId}/items/{eventId} {
       allow read, write: if false;
     }

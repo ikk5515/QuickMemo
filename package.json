@@ -16,6 +16,7 @@
     "test:api-emulator": "npx --yes firebase-tools@15.24.0 emulators:exec --project quickmemo-share-api-test --only auth,firestore \"vitest run --config vitest.integration.config.ts\"",
     "test:cleanup-handler": "vitest run src/lib/publicShareCleanupHandler.integration.test.ts src/lib/publicShareCleanupBackend.test.ts",
     "test:integration": "npm run test:api-emulator && npm run test:cleanup-handler",
+    "benchmark:secure-share": "npx --yes firebase-tools@15.24.0 emulators:exec --project quickmemo-share-api-test --only auth,firestore \"vitest run --config vitest.performance.config.ts --disableConsoleIntercept\"",
     "test:e2e": "playwright test",
     "test:e2e:chromium": "playwright test --project=chromium-desktop --project=chromium-mobile-390 --project=chromium-mobile-320",
     "test:e2e:webkit": "playwright test --project=webkit-desktop --project=webkit-mobile-390",

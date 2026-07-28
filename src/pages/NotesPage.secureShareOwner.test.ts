@@ -33,6 +33,7 @@ const validSummary = {
   revokedAt: null,
   schemaVersion: 2,
   shareId: "ss2_secure_share_123456",
+  showCommenterIpPrefix: true,
   sourceAttachmentRevision: 3,
   sourceNoteId: "note_123456",
   sourceRevision: 7,
@@ -46,9 +47,27 @@ describe("Secure Share v2 owner DTO boundary", () => {
     expect(parseSecureShareOwnerSummary(validSummary)).toMatchObject({
       schemaVersion: 2,
       shareId: validSummary.shareId,
+      showCommenterIpPrefix: true,
       sourceRevision: 7,
       ownerWrappedShareKey: validSummary.ownerWrappedShareKey
     });
+  });
+
+  it("defaults legacy owner summaries to hidden prefixes and rejects invalid values", () => {
+    const legacySummary = { ...validSummary } as Record<string, unknown>;
+    delete legacySummary.showCommenterIpPrefix;
+
+    expect(parseSecureShareOwnerSummary(legacySummary))
+      .toMatchObject({ showCommenterIpPrefix: false });
+    expect(parseSecureShareOwnerSummary({
+      ...validSummary,
+      permissionLevel: "view",
+      showCommenterIpPrefix: true
+    })).toMatchObject({ showCommenterIpPrefix: false });
+    expect(() => parseSecureShareOwnerSummary({
+      ...validSummary,
+      showCommenterIpPrefix: "true"
+    })).toThrow(/필드가 올바르지/);
   });
 
   it("rejects schema downgrade, invalid timestamps, and mismatched mutations", () => {
@@ -92,8 +111,25 @@ describe("Secure Share v2 owner DTO boundary", () => {
       accessMode: "allowed_emails",
       allowedEmails: ["viewer@example.com"],
       passwordEnabled: true,
-      permissionLevel: "comment"
+      permissionLevel: "comment",
+      showCommenterIpPrefix: true
     });
+  });
+
+  it("maps a missing legacy prefix policy to false in the settings contract", () => {
+    const legacyShare = { ...validSummary } as Record<string, unknown>;
+    delete legacyShare.showCommenterIpPrefix;
+
+    const details = parseSecureShareOwnerDetailsResponse({
+      ok: true,
+      share: legacyShare,
+      policy: {
+        allowedEmails: [],
+        expirationPreset: "seven_days"
+      }
+    });
+
+    expect(details.initialPolicy.showCommenterIpPrefix).toBe(false);
   });
 
   it("derives display status and action availability from server state plus expiration", () => {

@@ -21,6 +21,7 @@ import handler, {
   evaluateCopyAttachmentQuota,
   handleApiError,
   hashSharePassword,
+  issueAnonymousParticipantToken,
   issueAccessSession,
   normalizeAllowedEmails,
   normalizeEmail,
@@ -32,6 +33,7 @@ import handler, {
   resolveAccessIdentity,
   resolveEmailQuotaPolicy,
   safeDisplayName,
+  safeParticipantDisplayName,
   secureShareAttachmentBlobPath,
   secureShareEmailReadiness,
   shareManagedBy,
@@ -41,6 +43,7 @@ import handler, {
   sourceSnapshotAvailable,
   validateCommentBody,
   verificationEmailText,
+  verifiedAnonymousParticipantToken,
   verifySharePassword,
   verifySignedOpaqueToken
 } from "../../api/public-shares-v2.js";
@@ -147,6 +150,80 @@ afterEach(() => {
 });
 
 describe("Secure Share v2 cryptographic primitives", () => {
+  it("issues independent CSPRNG participant cookies for one idempotent access identity", () => {
+    vi.stubEnv("SHARE_PARTICIPANT_HMAC_KEY", "p".repeat(48));
+    const shareId = "share_participant_token_v2";
+    const browserBinding = "b".repeat(43);
+    const unlockAttemptId = "participant_token_attempt_0001";
+    const first = issueAnonymousParticipantToken(
+      shareId,
+      browserBinding,
+      unlockAttemptId
+    );
+    const second = issueAnonymousParticipantToken(
+      shareId,
+      browserBinding,
+      unlockAttemptId
+    );
+    const nextAttempt = issueAnonymousParticipantToken(
+      shareId,
+      browserBinding,
+      "participant_token_attempt_0002"
+    );
+
+    expect(first.token).toMatch(/^p2_[A-Za-z0-9_-]{129}$/u);
+    expect(second.token).toMatch(/^p2_[A-Za-z0-9_-]{129}$/u);
+    expect(first.token).not.toBe(second.token);
+    expect(first.issuanceIdentity).toBe(second.issuanceIdentity);
+    expect(nextAttempt.issuanceIdentity).not.toBe(first.issuanceIdentity);
+    expect(verifiedAnonymousParticipantToken(
+      shareId,
+      first.token
+    )).toEqual({
+      issuanceIdentity: first.issuanceIdentity,
+      version: 2
+    });
+    expect(verifiedAnonymousParticipantToken(
+      shareId,
+      second.token
+    )).toEqual({
+      issuanceIdentity: first.issuanceIdentity,
+      version: 2
+    });
+
+    const tamperedToken = `${first.token.slice(0, -1)}${
+      first.token.endsWith("A") ? "B" : "A"
+    }`;
+    expect(() => verifiedAnonymousParticipantToken(
+      shareId,
+      tamperedToken
+    )).toThrowError(expect.objectContaining({
+      code: "participant_identity_invalid",
+      statusCode: 401
+    }));
+    expect(() => verifiedAnonymousParticipantToken(
+      "other-share",
+      first.token
+    )).toThrowError(expect.objectContaining({
+      code: "participant_identity_invalid",
+      statusCode: 401
+    }));
+    expect(() => verifiedAnonymousParticipantToken(
+      shareId,
+      "a".repeat(43)
+    )).toThrowError(expect.objectContaining({
+      code: "participant_identity_invalid",
+      statusCode: 401
+    }));
+    expect(() => verifiedAnonymousParticipantToken(
+      shareId,
+      `p3_${first.token.slice(3)}`
+    )).toThrowError(expect.objectContaining({
+      code: "participant_identity_invalid",
+      statusCode: 401
+    }));
+  });
+
   it("derives stable source-share guard ids without exposing owner or note ids", () => {
     vi.stubEnv("SHARE_SESSION_HMAC_KEY", "s".repeat(48));
     const first = sourceShareGuardId("owner_123", "note_123");
@@ -345,6 +422,291 @@ describe("Secure Share v2 cryptographic primitives", () => {
     }
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("prefers an active QuickMemo caller identity after the required OTP succeeds", async () => {
+    stubReadyEmailDelivery();
+    vi.stubEnv("VITE_FIREBASE_API_KEY", "test-web-api-key");
+    vi.stubEnv("SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED", "true");
+    vi.stubEnv("SHARE_PARTICIPANT_HMAC_KEY", "p".repeat(48));
+    vi.stubEnv("SHARE_SESSION_HMAC_KEY", "s".repeat(48));
+    const shareId = "share-caller-otp";
+    const firstChallengeId = "ch_caller_otp_a";
+    const secondChallengeId = "ch_caller_otp_b";
+    const firstEmailHash = emailDigest("first@example.test");
+    const secondEmailHash = emailDigest("second@example.test");
+    const challenges = new Map([
+      [
+        firstChallengeId,
+        firestoreDocument(`publicShareEmailChallenges/${firstChallengeId}`, {
+          attempts: 0,
+          codeDigest: otpCodeDigest(
+            firstChallengeId,
+            shareId,
+            firstEmailHash,
+            "135790"
+          ),
+          emailHash: firstEmailHash,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          policyVersion: 3,
+          shareId,
+          status: "pending"
+        })
+      ],
+      [
+        secondChallengeId,
+        firestoreDocument(`publicShareEmailChallenges/${secondChallengeId}`, {
+          attempts: 0,
+          codeDigest: otpCodeDigest(
+            secondChallengeId,
+            shareId,
+            secondEmailHash,
+            "246801"
+          ),
+          emailHash: secondEmailHash,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          policyVersion: 3,
+          shareId,
+          status: "pending"
+        })
+      ]
+    ]);
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = decodeURIComponent(String(input));
+      if (url.includes("/accounts:lookup")) {
+        return fetchResponse(200, {
+          users: [{
+            email: "signed-in@example.test",
+            emailVerified: true,
+            localId: "user-caller-otp",
+            providerUserInfo: [{ providerId: "password" }]
+          }]
+        });
+      }
+      if (url.includes("/documents/users/user-caller-otp")) {
+        return fetchResponse(200, firestoreDocument("users/user-caller-otp", {
+          displayName: "Signed-in caller",
+          featureAccess: { notes: true },
+          isActive: true
+        }));
+      }
+      const challenge = challenges.get(url.split("/").at(-1) ?? "");
+      return challenge ? fetchResponse(200, challenge) : fetchResponse(404);
+    }));
+    const policy = {
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [firstEmailHash, secondEmailHash],
+      emailVerificationRequired: true,
+      permissionLevel: "comment",
+      policyVersion: 3
+    };
+    const request = {
+      headers: { authorization: "Bearer firebase-id-token-for-test" }
+    };
+
+    const first = await resolveAccessIdentity(
+      request,
+      { accessToken: "management-token", projectId: "test-project" },
+      shareId,
+      policy,
+      { challengeId: firstChallengeId, otp: "135790" }
+    );
+    const second = await resolveAccessIdentity(
+      request,
+      { accessToken: "management-token", projectId: "test-project" },
+      shareId,
+      policy,
+      { challengeId: secondChallengeId, otp: "246801" }
+    );
+
+    expect(first).toMatchObject({
+      authorUid: "user-caller-otp",
+      challenge: expect.objectContaining({ __id: firstChallengeId }),
+      identityType: "quickmemo_user"
+    });
+    expect(second).toMatchObject({
+      authorUid: "user-caller-otp",
+      challenge: expect.objectContaining({ __id: secondChallengeId }),
+      identityType: "quickmemo_user"
+    });
+    expect(first.identityHash).toBe(second.identityHash);
+    expect(first.participantIdentityHash).toBe(second.participantIdentityHash);
+    expect(first.participantIdentityHash).not.toBe("");
+  });
+
+  it("rejects share owners and administrators inside public identity resolution", async () => {
+    vi.stubEnv("VITE_FIREBASE_API_KEY", "test-web-api-key");
+    const ownerToken = "firebaseownertokenfortest";
+    const adminToken = "firebaseadmintokenfortest";
+    vi.stubGlobal("fetch", vi.fn(async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      const url = decodeURIComponent(String(input));
+      if (url.includes("/accounts:lookup")) {
+        const token = String(JSON.parse(String(init?.body)).idToken);
+        const localId = token === adminToken ? "admin-a" : "owner-a";
+        return fetchResponse(200, {
+          users: [{
+            email: `${localId}@example.test`,
+            emailVerified: true,
+            localId,
+            providerUserInfo: [{ providerId: "password" }]
+          }]
+        });
+      }
+      if (url.includes("/documents/users/owner-a")) {
+        return fetchResponse(200, firestoreDocument("users/owner-a", {
+          displayName: "Share owner",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false
+        }));
+      }
+      if (url.includes("/documents/users/admin-a")) {
+        return fetchResponse(200, firestoreDocument("users/admin-a", {
+          displayName: "Administrator",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: true
+        }));
+      }
+      throw new Error(`Unexpected manager identity request: ${url}`);
+    }));
+    const state = {
+      share: {
+        __id: "share-manager-guard",
+        ownerUid: "owner-a"
+      },
+      policy: {
+        accessMode: "anyone_with_link",
+        emailVerificationRequired: false,
+        ownerUid: "owner-a",
+        permissionLevel: "comment",
+        policyVersion: 1
+      }
+    };
+
+    for (const token of [ownerToken, adminToken]) {
+      await expect(resolveAccessIdentity(
+        { headers: { authorization: `Bearer ${token}` } },
+        { accessToken: "management-token", projectId: "test-project" },
+        "share-manager-guard",
+        state,
+        { unlockAttemptId: "manager_public_access_attempt_0001" }
+      )).rejects.toMatchObject({
+        code: "owner_preview_required",
+        statusCode: 409
+      });
+    }
+  });
+
+  it("keeps a signed participant cookie valid after the browser binding rotates", async () => {
+    const {
+      browserBindingCookieName,
+      participantCookieName
+    } = await vi.importActual<{
+      browserBindingCookieName(
+        shareId: string,
+        request: { headers?: Record<string, string> }
+      ): string;
+      participantCookieName(
+        shareId: string,
+        request: { headers?: Record<string, string> }
+      ): string;
+    }>("../../api/_secure-share-common.js");
+    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
+    vi.stubEnv("SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED", "true");
+    vi.stubEnv("SHARE_COOKIE_NAME_HMAC_KEY", "k".repeat(48));
+    vi.stubEnv("SHARE_PARTICIPANT_HMAC_KEY", "p".repeat(48));
+    vi.stubEnv("SHARE_SESSION_HMAC_KEY", "s".repeat(48));
+    const shareId = "share-binding-rotation";
+    const policy = {
+      accessMode: "anyone_with_link",
+      emailVerificationRequired: false,
+      permissionLevel: "comment",
+      policyVersion: 1
+    };
+    const requestShape = { headers: { host: "localhost" } };
+    const bindingName = browserBindingCookieName(shareId, requestShape);
+    const participantName = participantCookieName(shareId, requestShape);
+    const firstBinding = "a".repeat(43);
+    const rotatedBinding = "b".repeat(43);
+    const first = await resolveAccessIdentity(
+      {
+        headers: {
+          cookie: `${bindingName}=${firstBinding}`,
+          host: "localhost"
+        }
+      },
+      { accessToken: "management-token", projectId: "test-project" },
+      shareId,
+      policy,
+      { unlockAttemptId: "binding_rotation_initial_attempt_0001" }
+    );
+    const reused = await resolveAccessIdentity(
+      {
+        headers: {
+          cookie: `${bindingName}=${rotatedBinding}; ${participantName}=${first.participantToken}`,
+          host: "localhost"
+        }
+      },
+      { accessToken: "management-token", projectId: "test-project" },
+      shareId,
+      policy,
+      { unlockAttemptId: "binding_rotation_reuse_attempt_0002" }
+    );
+
+    expect(first.participantToken).toMatch(/^p2_[A-Za-z0-9_-]{129}$/u);
+    expect(reused).toMatchObject({
+      identityHash: first.identityHash,
+      participantIdentityHash: first.participantIdentityHash,
+      participantTokenDigest: first.participantTokenDigest,
+      setParticipantCookie: false
+    });
+  });
+
+  it("reuses a caller verified by the access guard without a second auth lookup", async () => {
+    vi.stubEnv("SHARE_SESSION_HMAC_KEY", "s".repeat(48));
+    const fetchMock = vi.fn(async () => {
+      throw new Error("preverified caller must not trigger another lookup");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const caller = {
+      uid: "viewer-a",
+      email: "viewer-a@example.test",
+      emailVerified: true,
+      displayName: "Viewer A",
+      profileDisplayName: "Viewer A",
+      isAdmin: false
+    };
+    const identity = await resolveAccessIdentity(
+      { headers: { authorization: "Bearer already-verified-token" } },
+      { accessToken: "management-token", projectId: "test-project" },
+      "share-preverified-caller",
+      {
+        share: {
+          __id: "share-preverified-caller",
+          ownerUid: "owner-a"
+        },
+        policy: {
+          accessMode: "anyone_with_link",
+          emailVerificationRequired: false,
+          permissionLevel: "comment",
+          policyVersion: 1
+        }
+      },
+      { unlockAttemptId: "preverified_caller_access_attempt_0001" },
+      undefined,
+      caller
+    );
+
+    expect(identity).toMatchObject({
+      authorUid: "viewer-a",
+      caller,
+      identityType: "quickmemo_user"
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("domain-separates email and OTP HMACs without embedding the raw value", () => {
@@ -1053,6 +1415,104 @@ describe("Secure Share v2 email and identity defenses", () => {
     expect(safeDisplayName("Owner", "Owner", true)).toBe("Owner");
   });
 
+  it("rejects participant-name invisibles, URL forms, and trusted-role impersonation", () => {
+    expect(safeParticipantDisplayName("  Ａｌｉｃｅ   Kim  ")).toMatchObject({
+      displayName: "Alice Kim",
+      normalizedDisplayName: "alice kim"
+    });
+    expect(safeParticipantDisplayName("Alice_2").displayName).toBe("Alice_2");
+    expect(safeParticipantDisplayName("테스터김").displayName).toBe("테스터김");
+    expect(safeParticipantDisplayName("테스터A").displayName).toBe("테스터A");
+    expect(safeParticipantDisplayName("テスト利用者").displayName).toBe("テスト利用者");
+    expect(safeParticipantDisplayName("テスターB").displayName).toBe("テスターB");
+    expect(safeParticipantDisplayName("ユーザー").displayName).toBe("ユーザー");
+    expect(safeParticipantDisplayName("비공식 연구자").displayName).toBe("비공식 연구자");
+    expect(safeParticipantDisplayName("非公式研究者").displayName).toBe("非公式研究者");
+    expect(safeParticipantDisplayName("王小明").displayName).toBe("王小明");
+    expect(safeParticipantDisplayName("李系统").displayName).toBe("李系统");
+    for (const invalid of [
+      "Alice\u034f",
+      "Alice\u180b",
+      "Alice\u17b4",
+      "Alice\u0301",
+      "Alice\nBob",
+      "Alice\tBob",
+      "A\u2028B",
+      "8.8.8.8",
+      "123.com",
+      "1.co",
+      "2026.kr",
+      "evil.dev",
+      "QuickMemo Support",
+      "Admin Team",
+      "System Admin",
+      "System Administrator",
+      "System Owner",
+      "System Manager",
+      "System Staff",
+      "System Help",
+      "System X",
+      "Administrator",
+      "Owner",
+      "guest١",
+      "guest۱",
+      "guest१",
+      "guestI",
+      "Guestl",
+      "guestO",
+      "0wner",
+      "adm1n",
+      "supp0rt",
+      "qu1ckmemo",
+      "quickmem0",
+      "systern",
+      "테스터Admin",
+      "Support테스터",
+      "퀵Memo",
+      "Quick메모",
+      "クイックMemo",
+      "Quickメモ",
+      "오너",
+      "어드민",
+      "서포트",
+      "アドミン",
+      "サポート",
+      "所有者",
+      "공식",
+      "공식계정",
+      "공식계정1",
+      "공식안내",
+      "公式",
+      "公式アカウント",
+      "公式アカウント1",
+      "公式案内",
+      "管理员",
+      "管理员1",
+      "管理員通知",
+      "系统",
+      "系统通知",
+      "系統通知",
+      "官方",
+      "官方账号1",
+      "官方帳號通知",
+      "admın",
+      "admɪn",
+      "ᴀdmin",
+      "adᴍin",
+      "ᴏwner",
+      "quıckmemo",
+      "quickmem〇",
+      "ーー"
+    ]) {
+      expect(() => safeParticipantDisplayName(invalid), invalid).toThrowError(
+        expect.objectContaining({
+          code: "invalid_display_name",
+          statusCode: 400
+        })
+      );
+    }
+  });
+
   it("keeps comments plain text and rejects control, bidi, and zero-width spoofing", () => {
     expect(validateCommentBody("  줄 1\n줄 2  ")).toBe("줄 1\n줄 2");
     for (const invalid of [
@@ -1199,7 +1659,11 @@ describe("Secure Share v2 transactional source contracts", () => {
       challenge: null,
       displayName: "Guest",
       identityHash: "identity-a",
-      identityType: "browser"
+      identityType: "browser",
+      participantIdentityHash: "",
+      participantToken: "",
+      participantTokenDigest: "",
+      setParticipantCookie: false
     };
     let consumed = false;
     let winningAttempt = "";
@@ -1228,6 +1692,40 @@ describe("Secure Share v2 transactional source contracts", () => {
 
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = decodeURIComponent(String(input));
+      if (url.endsWith("/documents:batchGet")) {
+        return fetchResponse(200, [
+          {
+            found: firestoreDocument("publicNoteShares/share-a", {
+              schemaVersion: 2,
+              ownerUid: "owner-a",
+              sourceNoteId: "note-a",
+              sourceRevision: 9,
+              sourceAttachmentRevision: 4,
+              ready: true,
+              status: "consumed",
+              expiresAt,
+              policyVersion: 7,
+              successfulAccessCount: 1,
+              consumedAt: new Date()
+            }),
+            transaction: "transaction-replay-state-token"
+          },
+          {
+            found: firestoreDocument("publicSharePolicies/share-a", {
+              schemaVersion: 2,
+              ownerUid: "owner-a",
+              policyVersion: 7,
+              oneTimeEnabled: true,
+              permissionLevel: "view",
+              downloadAllowed: false,
+              quickCopyButtonVisible: true,
+              consumedAt: new Date(),
+              consumedAttemptHash: winningAttempt,
+              consumedIdentityHash: identity.identityHash
+            })
+          }
+        ]);
+      }
       if (url.endsWith("/documents:commit")) {
         const body = JSON.parse(String(init?.body)) as {
           writes: Array<{
@@ -1347,6 +1845,7 @@ describe("Secure Share v2 transactional source contracts", () => {
         identity,
         "browser-binding-a",
         `attempt-${index + 1}`,
+        "network-hash-a",
         `request-${index + 1}`
       )
     ));
@@ -1368,6 +1867,7 @@ describe("Secure Share v2 transactional source contracts", () => {
       identity,
       "browser-binding-a",
       winningAttempt,
+      "network-hash-a",
       "request-retry"
     )).resolves.toMatchObject({ policy: { oneTimeEnabled: true, policyVersion: 7 } });
 
@@ -1393,14 +1893,42 @@ describe("Secure Share v2 transactional source contracts", () => {
     const issue = backendSource.match(
       /async function issueAccessSession[\s\S]*?async function handleAccess/u
     )?.[0] ?? "";
-    expect(issue).toContain("for (let attempt = 0; attempt < 4; attempt += 1)");
+    expect(backendSource).toContain("const participantAllocationMaximumAttempts = 24");
+    expect(issue).toContain(
+      "for (let attempt = 0; attempt < participantAllocationMaximumAttempts; attempt += 1)"
+    );
     expect(issue).toContain("state.share.__updateTime");
     expect(issue).toContain("state.policy.__updateTime");
     expect(issue).toContain("`publicShareUnlockGrants/${attemptHash}`");
     expect(issue).toContain("createDocumentWrite(context.projectId, `publicShareAccessSessions/${digest}`");
-    expect(issue).toContain("await firestoreCommit(context, writes)");
+    expect(issue).toContain(
+      "await firestoreCommit(context, writes, participantAllocation.transaction)"
+    );
     expect(issue).toContain("isOptimisticConflict(error)");
-    expect(issue.indexOf("createAuditWrite(")).toBeLessThan(issue.indexOf("await firestoreCommit(context, writes)"));
+    expect(issue.indexOf("createAuditWrite(")).toBeLessThan(
+      issue.indexOf("await firestoreCommit(context, writes, participantAllocation.transaction)")
+    );
+  });
+
+  it("updates the cleanup queue expiry with a precondition in the owner-update commit", () => {
+    const ownerUpdate = backendSource.match(
+      /async function handleOwnerUpdate[\s\S]*?async function handleOwnerActivate/u
+    )?.[0] ?? "";
+
+    expect(ownerUpdate).toContain(
+      "const cleanupQueuePath = `publicShareCleanupQueue/${shareId}`"
+    );
+    expect(ownerUpdate).toContain(
+      "const cleanupQueue = await firestoreGet(user.context, cleanupQueuePath)"
+    );
+    expect(ownerUpdate).toContain("cleanupQueue.shareId !== shareId");
+    expect(ownerUpdate).toContain("cleanupQueue.ownerUid !== state.share.ownerUid");
+    expect(ownerUpdate).toContain(
+      'updateDocumentWrite(\n        user.context.projectId,\n        cleanupQueuePath,\n        { expiresAt, updatedAt: now },\n        ["expiresAt", "updatedAt"],\n        cleanupQueue.__updateTime'
+    );
+    expect(ownerUpdate.indexOf("cleanupQueuePath")).toBeLessThan(
+      ownerUpdate.indexOf("await firestoreCommit(user.context, writes)")
+    );
   });
 
   it("allows only the bound same-attempt grace replacement and revokes its prior session", () => {
@@ -1626,13 +2154,27 @@ describe("Secure Share v2 transactional source contracts", () => {
   });
 
   it("accepts proxy IP headers only in the Vercel runtime and prefers Vercel's stable header", () => {
-    const networkIdentity = commonSource.match(
-      /export function clientNetworkDigest[\s\S]*?export function userAgentDigest/u
+    const trustedInputs = commonSource.match(
+      /function trustedClientNetworkValues[\s\S]*?export function clientNetworkIdentity/u
     )?.[0] ?? "";
-    expect(networkIdentity).toContain('process.env.VERCEL === "1"');
-    expect(networkIdentity).toContain('"x-vercel-forwarded-for"');
-    expect(networkIdentity).toContain("request?.socket?.remoteAddress");
-    expect(networkIdentity).not.toContain('headerValue(request, "x-real-ip")');
+    const networkIdentity = commonSource.match(
+      /export function clientNetworkIdentity[\s\S]*?export function clientIpPrefix/u
+    )?.[0] ?? "";
+    const consumers = commonSource.match(
+      /export function clientIpPrefix[\s\S]*?export function userAgentDigest/u
+    )?.[0] ?? "";
+    expect(trustedInputs).toContain('process.env.VERCEL === "1"');
+    expect(trustedInputs).toContain('"x-vercel-forwarded-for"');
+    expect(trustedInputs).toContain("request?.socket?.remoteAddress");
+    expect(trustedInputs).not.toContain('headerValue(request, "x-real-ip")');
+    expect(trustedInputs.match(/headerValue\(request, "x-vercel-forwarded-for"\)/gu))
+      .toHaveLength(1);
+    expect(networkIdentity).toContain("digest:");
+    expect(networkIdentity).toContain("prefix:");
+    expect(consumers).toContain(
+      "return publicIpPrefix(trustedClientNetworkValues(request).prefixCandidate)"
+    );
+    expect(consumers).toContain("return clientNetworkIdentity(request).digest");
   });
 
   it("records an authorized administrator distinctly when deleting a comment", () => {
@@ -1641,5 +2183,353 @@ describe("Secure Share v2 transactional source contracts", () => {
     )?.[0] ?? "";
     expect(deletion).toContain('const managerRole = access.owner?.isAdmin === true ? "admin" : "owner"');
     expect(deletion).toContain('? "admin_preview"');
+  });
+});
+
+describe("Secure Share v2 participant identity and coarse network contracts", () => {
+  it("fails participant identity closed for missing, short, or reused HMAC keys", async () => {
+    const { secureShareParticipantIdentityEnabled } = await vi.importActual<{
+      secureShareParticipantIdentityEnabled(): boolean;
+    }>("../../api/_secure-share-common.js");
+    const secretNames = [
+      "SHARE_PASSWORD_PEPPER",
+      "SHARE_SESSION_HMAC_KEY",
+      "SHARE_COOKIE_NAME_HMAC_KEY",
+      "SHARE_CSRF_HMAC_KEY",
+      "SHARE_OTP_HMAC_KEY",
+      "SHARE_EMAIL_HMAC_KEY",
+      "SHARE_RATE_LIMIT_HMAC_KEY"
+    ];
+    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
+    vi.stubEnv("SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED", "false");
+    vi.stubEnv("SHARE_PARTICIPANT_HMAC_KEY", "");
+    expect(secureShareParticipantIdentityEnabled()).toBe(false);
+
+    vi.stubEnv("SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED", "true");
+    for (const invalid of ["", "short-participant-key"]) {
+      vi.stubEnv("SHARE_PARTICIPANT_HMAC_KEY", invalid);
+      expect(() => secureShareParticipantIdentityEnabled()).toThrowError(
+        expect.objectContaining({
+          code: "service_unavailable",
+          expose: false,
+          statusCode: 503
+        })
+      );
+    }
+
+    const participantKey = "participant-key-distinct-000000000000000001";
+    secretNames.forEach((name, index) => {
+      vi.stubEnv(name, `other-secret-${index}-0000000000000000000000000001`);
+    });
+    vi.stubEnv("SHARE_PARTICIPANT_HMAC_KEY", participantKey);
+    expect(secureShareParticipantIdentityEnabled()).toBe(true);
+
+    const logSpies = [
+      vi.spyOn(console, "error").mockImplementation(() => undefined),
+      vi.spyOn(console, "log").mockImplementation(() => undefined),
+      vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    ];
+    for (const name of secretNames) {
+      secretNames.forEach((candidate, index) => {
+        vi.stubEnv(
+          candidate,
+          `other-secret-${index}-0000000000000000000000000001`
+        );
+      });
+      vi.stubEnv(name, participantKey);
+      expect(() => secureShareParticipantIdentityEnabled(), name).toThrowError(
+        expect.objectContaining({
+          code: "service_unavailable",
+          expose: false,
+          statusCode: 503
+        })
+      );
+    }
+    expect(logSpies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
+  });
+
+  it("fails IP-prefix display closed when its network HMAC is short or reused", async () => {
+    const { secureShareCommentIpPrefixEnabled } = await vi.importActual<{
+      secureShareCommentIpPrefixEnabled(): boolean;
+    }>("../../api/_secure-share-common.js");
+    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
+    vi.stubEnv("SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED", "true");
+    vi.stubEnv("SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED", "true");
+    vi.stubEnv("SHARE_PARTICIPANT_HMAC_KEY", "p".repeat(48));
+    vi.stubEnv("SHARE_PASSWORD_PEPPER", "w".repeat(48));
+    vi.stubEnv("SHARE_SESSION_HMAC_KEY", "s".repeat(48));
+    vi.stubEnv("SHARE_COOKIE_NAME_HMAC_KEY", "k".repeat(48));
+    vi.stubEnv("SHARE_CSRF_HMAC_KEY", "c".repeat(48));
+    vi.stubEnv("SHARE_OTP_HMAC_KEY", "o".repeat(48));
+    vi.stubEnv("SHARE_EMAIL_HMAC_KEY", "e".repeat(48));
+    vi.stubEnv("SHARE_RATE_LIMIT_HMAC_KEY", "r".repeat(48));
+    expect(secureShareCommentIpPrefixEnabled()).toBe(true);
+
+    for (const invalid of [
+      "short-network-key",
+      "w".repeat(48),
+      "s".repeat(48)
+    ]) {
+      vi.stubEnv("SHARE_RATE_LIMIT_HMAC_KEY", invalid);
+      expect(() => secureShareCommentIpPrefixEnabled()).toThrowError(
+        expect.objectContaining({
+          code: "service_unavailable",
+          expose: false,
+          statusCode: 503
+        })
+      );
+    }
+  });
+
+  it("normalizes only coarse public IPv4 and IPv6 prefixes", async () => {
+    const { publicIpPrefix } = await vi.importActual<{
+      publicIpPrefix(value: string): string | null;
+    }>("../../api/_secure-share-common.js");
+
+    expect(publicIpPrefix("203.226.244.27")).toBe("203.226");
+    expect(publicIpPrefix("2001:2D8:1234::99")).toBe("2001:2d8");
+    expect(publicIpPrefix("::ffff:203.226.244.27")).toBe("203.226");
+
+    for (const rejected of [
+      "10.1.2.3",
+      "100.64.1.2",
+      "127.0.0.1",
+      "169.254.1.2",
+      "172.16.1.2",
+      "192.0.3.1",
+      "192.168.1.2",
+      "192.88.99.7",
+      "192.88.100.1",
+      "198.51.100.7",
+      "198.51.101.1",
+      "203.0.113.7",
+      "203.0.114.1",
+      "::1",
+      "::2",
+      "fc00::1",
+      "fe80::1",
+      "2001:2::1",
+      "2001:db8::1",
+      "3fff:0::1",
+      "3fff:fff::1",
+      "::ffff:192.168.1.2",
+      "not-an-ip"
+    ]) {
+      expect(publicIpPrefix(rejected), rejected).toBeNull();
+    }
+  });
+
+  it("rejects private, benchmark, and documentation prefixes from stored snapshots", async () => {
+    const { safeIpPrefixSnapshot } = await vi.importActual<{
+      safeIpPrefixSnapshot(value: unknown): string | null;
+    }>("../../api/public-shares-v2.js");
+
+    expect(safeIpPrefixSnapshot("203.226")).toBe("203.226");
+    expect(safeIpPrefixSnapshot("2001:2d8")).toBe("2001:2d8");
+    for (const rejected of [
+      "10.1",
+      "192.168",
+      "198.51",
+      "203.0",
+      "2001:db8",
+      "2001:2",
+      "3fff:0"
+    ]) {
+      expect(safeIpPrefixSnapshot(rejected), rejected).toBeNull();
+    }
+  });
+
+  it("uses production-disabled IP injection and rejects forwarded chains", async () => {
+    const { clientIpPrefix } = await vi.importActual<{
+      clientIpPrefix(request: unknown): string | null;
+    }>("../../api/_secure-share-common.js");
+
+    vi.stubEnv("SHARE_RATE_LIMIT_HMAC_KEY", "r".repeat(48));
+    vi.stubEnv("NODE_ENV", "test");
+    vi.stubEnv("VERCEL", "1");
+    expect(clientIpPrefix({
+      headers: { "x-vercel-forwarded-for": "8.8.8.8" },
+      secureShareTestClientIp: "203.226.244.27"
+    })).toBe("203.226");
+    expect(clientIpPrefix({
+      headers: { "x-vercel-forwarded-for": "8.8.8.8, 1.1.1.1" }
+    })).toBeNull();
+
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("VERCEL", "0");
+    expect(clientIpPrefix({
+      headers: {
+        "x-forwarded-for": "203.226.244.27",
+        "x-real-ip": "203.226.244.27",
+        "x-vercel-forwarded-for": "203.226.244.27"
+      },
+      secureShareTestClientIp: "203.226.244.27"
+    })).toBeNull();
+  });
+
+  it("allocates an idempotent participant from CSPRNG-signed cookies in the access transaction", () => {
+    const identity = backendSource.match(
+      /async function resolveAccessIdentity[\s\S]*?async function beginParticipantAllocation/u
+    )?.[0] ?? "";
+    const tokenIssuance = backendSource.match(
+      /function participantIssuanceIdentity[\s\S]*?function participantIdFromIdentityHash/u
+    )?.[0] ?? "";
+    const allocation = backendSource.match(
+      /async function beginParticipantAllocation[\s\S]*?function sessionCapabilities/u
+    )?.[0] ?? "";
+    const lastSeen = backendSource.match(
+      /function participantLastSeenWrites[\s\S]*?async function beginParticipantAllocation/u
+    )?.[0] ?? "";
+    const issue = backendSource.match(
+      /async function issueAccessSession[\s\S]*?async function handleAccess/u
+    )?.[0] ?? "";
+    const access = backendSource.match(
+      /async function handleAccess[\s\S]*?async function validatedSession/u
+    )?.[0] ?? "";
+    const metadata = backendSource.match(
+      /async function handleMetadata[\s\S]*?async function emailChallengeEligibility/u
+    )?.[0] ?? "";
+
+    expect(identity).toContain("issueAnonymousParticipantToken(");
+    expect(identity).toContain("safeUnlockAttemptId(body.unlockAttemptId)");
+    expect(identity).toContain("verifiedAnonymousParticipantToken(");
+    expect(identity).toContain("participantIdentityValue");
+    expect(tokenIssuance).toContain("const nonce = randomToken(32)");
+    expect(tokenIssuance).toContain('"quickmemo/secure-share/participant-issuance/v2"');
+    expect(tokenIssuance).toContain(
+      '"quickmemo/secure-share/participant-token-signature/v2"'
+    );
+    expect(tokenIssuance).not.toContain(
+      '"quickmemo/secure-share/participant-token-issuance/v1"'
+    );
+    expect(allocation).toContain("firestoreBatchGetNewTransaction(context");
+    expect(allocation).toContain("participantDocumentPath(shareId, participantId)");
+    expect(allocation).toContain("participantCounterPath(shareId)");
+    expect(allocation).toContain("participantCount >= maximumParticipantsPerShare");
+    expect(allocation).toContain("participant: null");
+    expect(lastSeen).toContain(
+      "lastSeenAt > Date.now() - sessionLastSeenWriteIntervalMilliseconds"
+    );
+    expect(lastSeen).toContain('{ lastSeenAt: now, updatedAt: now }');
+    expect(lastSeen).toContain('["lastSeenAt", "updatedAt"]');
+    expect(lastSeen).toContain("participant.__updateTime");
+    expect(allocation).toContain("transaction: \"\"");
+    expect(issue).toContain("firestoreCommit(context, writes, participantAllocation.transaction)");
+    expect(issue).toContain("session.participantId = participantAllocation.participant.participantId");
+    expect(issue).toContain(
+      "session.participantIdentityEnabled = participantAllocation.enabled"
+    );
+    expect(issue).toContain(
+      "session.participantLimitReached = participantAllocation.limitReached"
+    );
+    expect(issue).toContain(
+      "participantIdentityEnabled: participantAllocation.enabled"
+    );
+    expect(access).toContain("participantCookie(request, shareId, identity.participantToken)");
+    expect(access).toContain("grant.participantIdentityEnabled");
+    expect(access).toContain('"owner_preview_share_network_15m"');
+    expect(access).toContain('"owner_preview_network_hour"');
+    expect(metadata).not.toContain("beginParticipantAllocation(");
+    expect(backendSource).toContain('"SECURE_SHARE_MAX_PARTICIPANTS_PER_SHARE",\n  1000,\n  1,\n  1000');
+  });
+
+  it("keeps legacy sessions legacy across rollout while exposing capped sessions explicitly", () => {
+    const capabilities = backendSource.match(
+      /function sessionCapabilities[\s\S]*?function sessionFields/u
+    )?.[0] ?? "";
+    const sessionHandler = backendSource.match(
+      /async function handleSession[\s\S]*?function safeAttachmentMetadata/u
+    )?.[0] ?? "";
+    const comments = backendSource.match(
+      /async function handleComments[\s\S]*?async function handleCommentDelete/u
+    )?.[0] ?? "";
+
+    expect(capabilities).toContain(
+      "participantIdentitySessionEnabled = secureShareParticipantIdentityEnabled()"
+    );
+    expect(capabilities).toContain("&& participantIdentitySessionEnabled");
+    expect(capabilities).toContain("participantLimitReached:");
+    expect(capabilities).toContain("participantIdentityEnabled && participantLimitReached");
+    expect(capabilities).toContain("!participantIdentityEnabled");
+    expect(capabilities).toContain("|| participantAvailable");
+    expect(sessionHandler).toContain("session.participantIdentityEnabled === true");
+    expect(sessionHandler).toContain("session.participantLimitReached === true");
+    expect(comments).toContain("session.participantIdentityEnabled === true");
+  });
+
+  it("keeps participant APIs session-bound, CSRF protected, and idempotent", () => {
+    const rename = backendSource.match(
+      /async function renameParticipant[\s\S]*?async function handleParticipantMe/u
+    )?.[0] ?? "";
+    const participantMe = backendSource.match(
+      /async function handleParticipantMe[\s\S]*?function validateCommentBody/u
+    )?.[0] ?? "";
+    const dispatch = backendSource.match(
+      /async function dispatch[\s\S]*?export \{/u
+    )?.[0] ?? "";
+
+    expect(participantMe).toContain('requireMethod(request, ["GET", "PATCH"])');
+    expect(participantMe).toContain("commentAccess(request, context, shareId, request.method === \"PATCH\")");
+    expect(participantMe).toContain('assertOnlyKeys(body, ["displayName", "clientRequestId"])');
+    expect(participantMe).not.toContain('"participantId",');
+    expect(participantMe).toContain('"participant_rename_identity_hour"');
+    expect(participantMe).toContain('"participant_rename_share_network_hour"');
+    expect(backendSource).toContain(
+      "publicShareParticipantRenameRequests/${shareId}/items/${participantId}"
+    );
+    expect(rename).toContain("renameRequestPath");
+    expect(rename).toContain("renameRequestHistory(renameRequest)");
+    expect(rename).toContain("recentRenameRequests.find((entry)");
+    expect(rename).toContain("].slice(-10)");
+    expect(rename).toContain("firestoreBatchGetNewTransaction(context, readPaths)");
+    expect(rename).toContain("window.hourCount >= 3");
+    expect(rename).toContain("window.dayCount >= 10");
+    expect(rename).toContain("lastRenamedAt + 60_000");
+    expect(rename).toContain("participant.normalizedDisplayName === name.normalizedDisplayName");
+    expect(rename).toContain("renameHourCount: window.hourCount + 1");
+    expect(rename).toContain("renameDayCount: window.dayCount + 1");
+    expect(rename).toContain('"participant_rename_noop"');
+    expect(rename).toContain('"display_name_unavailable"');
+    expect(dispatch).toContain('action === "participant-me"');
+    expect(dispatch).toContain("handleParticipantMe(request, response, id, shareId)");
+  });
+
+  it("hydrates at most twenty comment authors in one bounded batch and preserves legacy fallback", () => {
+    const comments = backendSource.match(
+      /async function handleComments[\s\S]*?async function handleCommentDelete/u
+    )?.[0] ?? "";
+    const publicComment = backendSource.match(
+      /function publicComment[\s\S]*?function commentsCursor/u
+    )?.[0] ?? "";
+    const deletion = backendSource.match(
+      /async function handleCommentDelete[\s\S]*?async function handleCopyGrant/u
+    )?.[0] ?? "";
+
+    expect(backendSource).toContain("const maximumCommentPageSize = 20");
+    expect(comments).toContain("boundedInteger(Number.parseInt(pageSizeText, 10), \"limit\", 1, maximumCommentPageSize)");
+    expect(comments).toContain("const participantIds = [...new Set(");
+    expect(comments).toContain("await firestoreBatchGet(");
+    expect(comments.match(/await firestoreBatchGet\(/gu)).toHaveLength(1);
+    expect(comments).not.toContain("firestoreListCollection(");
+    expect(publicComment).toContain("comment.authorDisplayNameSnapshot");
+    expect(publicComment).toContain("comment.authorDisplayName");
+    expect(publicComment).toContain("safeIpPrefixSnapshot(comment.ipPrefixSnapshot)");
+    expect(publicComment).not.toContain("identityHash:");
+    expect(comments).toContain("authorUid: participant ? undefined");
+    expect(comments).toContain("authorIdentityHash: participant ? undefined");
+    expect(comments).toContain("authorParticipantId: participant?.participantId");
+    expect(deletion).toContain("comment.authorParticipantId === access.session.participantId");
+    expect(deletion).toContain("!comment.authorParticipantId");
+  });
+
+  it("keeps feature status on the exact backward-compatible two-boolean contract", () => {
+    const featureStatus = backendSource.match(
+      /if \(action === "feature-status"\)[\s\S]*?return;/u
+    )?.[0] ?? "";
+
+    expect(featureStatus).toContain("v2Enabled: secureShareV2Enabled()");
+    expect(featureStatus).toContain("emailEnabled: secureShareEmailEnabled()");
+    expect(featureStatus).not.toContain("participantIdentityEnabled");
+    expect(featureStatus).not.toContain("commentIpPrefixEnabled");
   });
 });

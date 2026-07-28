@@ -12,6 +12,7 @@ const testSecrets = {
   SHARE_OTP_HMAC_KEY: "otp-emulator-test-key-00000000000000000000000000001",
   SHARE_PASSWORD_PEPPER: "password-emulator-test-pepper-000000000000000000001",
   SHARE_PASSWORD_PEPPER_VERSION: "emulator-v1",
+  SHARE_PARTICIPANT_HMAC_KEY: "participant-emulator-test-key-00000000000000000000001",
   SHARE_RATE_LIMIT_HMAC_KEY: "rate-emulator-test-key-000000000000000000000000001",
   SHARE_SESSION_HMAC_KEY: "session-emulator-test-key-00000000000000000000000001"
 } as const;
@@ -58,6 +59,7 @@ export interface SecureShareSeedOptions {
   passwordHashRecord?: Record<string, unknown>;
   permissionLevel?: "comment" | "save_copy" | "view";
   shareId: string;
+  showCommenterIpPrefix?: boolean;
 }
 
 export interface SecureShareApiHarness {
@@ -94,7 +96,10 @@ export function configureSecureShareApiEmulatorEnvironment() {
     FIREBASE_CLEANUP_PROJECT_ID: secureShareApiEmulatorProjectId,
     GCLOUD_PROJECT: secureShareApiEmulatorProjectId,
     NODE_ENV: "test",
+    SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED: "false",
     SECURE_SHARE_EMAIL_ENABLED: "false",
+    SECURE_SHARE_MAX_PARTICIPANTS_PER_SHARE: "1000",
+    SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED: "false",
     SHARE_EMAIL_SENDER_VERIFIED: "false",
     SECURE_SHARE_V2_ENABLED: "true",
     VERCEL: "1",
@@ -314,6 +319,7 @@ export async function seedSecureShare(options: SecureShareSeedOptions) {
   const emailVerificationRequired = options.emailVerificationRequired ?? false;
   const passwordEnabled = options.passwordEnabled ?? false;
   const permissionLevel = options.permissionLevel ?? "view";
+  const showCommenterIpPrefix = options.showCommenterIpPrefix === true;
   const noteId = `note_${options.shareId}`;
   const cipherSentinel = `ciphertext-must-never-leak-${options.shareId}`;
   const commonPolicyFields = {
@@ -333,6 +339,7 @@ export async function seedSecureShare(options: SecureShareSeedOptions) {
     quickCopyButtonVisible: false,
     schemaVersion: 2,
     sessionTtlSeconds: 14_400,
+    showCommenterIpPrefix,
     updatedAt: new Date(now - 60_000)
   };
   const documents: Array<{ fields: Record<string, unknown>; path: string }> = [
@@ -377,6 +384,7 @@ export async function seedSecureShare(options: SecureShareSeedOptions) {
         ready: true,
         requiresEmailVerification: emailVerificationRequired,
         schemaVersion: 2,
+        showCommenterIpPrefix,
         sourceAttachmentRevision: 0,
         sourceNoteId: noteId,
         sourceRevision: 1,
@@ -433,6 +441,16 @@ export async function createEmulatorOwner(email: string, password: string) {
 
 export async function startSecureShareApiHarness(): Promise<SecureShareApiHarness> {
   const server: Server = createServer((request, response) => {
+    const injectedClientIp = request.headers["x-quickmemo-test-client-ip"];
+    delete request.headers["x-quickmemo-test-client-ip"];
+    if (typeof injectedClientIp === "string") {
+      Object.defineProperty(request, "secureShareTestClientIp", {
+        configurable: false,
+        enumerable: false,
+        value: injectedClientIp,
+        writable: false
+      });
+    }
     void handler(request, response);
   });
   await new Promise<void>((resolve, reject) => {
@@ -452,12 +470,25 @@ export async function startSecureShareApiHarness(): Promise<SecureShareApiHarnes
 }
 
 export function cookiePair(response: Response) {
-  const setCookie = response.headers.get("set-cookie") ?? "";
-  const pair = setCookie.split(";", 1)[0];
+  const pair = cookiePairs(response)[0] ?? "";
   if (!/^[^=]+=[A-Za-z0-9_-]{20,}$/u.test(pair)) {
     throw new Error("Expected a secure-share cookie");
   }
   return pair;
+}
+
+export function cookiePairs(response: Response) {
+  const headers = response.headers as Headers & {
+    getSetCookie?: () => string[];
+  };
+  const setCookieValues = headers.getSetCookie?.()
+    ?? (response.headers.get("set-cookie") ?? "")
+      .split(/,(?=\s*[^;,=\s]+=[^;,]+)/u)
+      .filter(Boolean);
+  return setCookieValues.flatMap((setCookie) => {
+    const pair = setCookie.trim().split(";", 1)[0] ?? "";
+    return /^[^=]+=[A-Za-z0-9_-]{20,}$/u.test(pair) ? [pair] : [];
+  });
 }
 
 export function apiHeaders(
@@ -467,6 +498,7 @@ export function apiHeaders(
     bindingCookie?: string;
     csrfToken?: string;
     networkSuffix?: number;
+    testClientIp?: string;
   } = {}
 ) {
   return {
@@ -479,6 +511,9 @@ export function apiHeaders(
     origin,
     "sec-fetch-site": "same-origin",
     "user-agent": "QuickMemo-Secure-Share-Emulator-Test/1.0",
+    ...(options.testClientIp
+      ? { "x-quickmemo-test-client-ip": options.testClientIp }
+      : {}),
     "x-vercel-forwarded-for": `198.51.100.${options.networkSuffix ?? 1}`
   };
 }

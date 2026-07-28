@@ -134,7 +134,7 @@ describe("public share backend cleanup", () => {
 
     expect(retentionSource).toContain("perQueueFairShare");
     expect(retentionSource).toContain("perFieldFairShare");
-    expect(retentionSource).toContain("secureShareRootStateCollections");
+    expect(retentionSource).toContain("secureShareRootRetentionCollections");
     expect(retentionSource).toContain(".map((collectionId) =>");
     expect(retentionSource).toContain("secureShareGlobalRetentionCollections");
     expect(cleanupFunctionSource).toContain('"publicShareEmailQuotaBuckets"');
@@ -147,6 +147,15 @@ describe("public share backend cleanup", () => {
     );
     expect(cleanupFunctionSource).toMatch(
       /const secureShareRootStateCollections = \[[\s\S]*?"publicShareEmailDeliveries"/u
+    );
+    expect(cleanupFunctionSource).toMatch(
+      /const secureShareRootStateCollections = \[[\s\S]*?"publicShareParticipantCounters"/u
+    );
+    expect(cleanupFunctionSource).toContain(
+      'const secureShareRootRetentionCollections = secureShareRootStateCollections.filter('
+    );
+    expect(cleanupFunctionSource).toContain(
+      '(collectionId) => collectionId !== "publicShareParticipantCounters"'
     );
     expect(retentionSource).toContain('collectionId: "items"');
     expect(storageDeleteSource).toContain(
@@ -172,6 +181,42 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain('from: [{ collectionId: "googleCalendarOAuthStates" }]');
     expect(cleanupFunctionSource).toContain("googleCalendarOAuthStatesDeleted");
     expect(cleanupFunctionSource).toContain("without allowing authorization churn to starve user-data queues");
+  });
+
+  it("rechecks renewed parent expiry before child or attachment deletion", () => {
+    const childCleanup = cleanupFunctionSource.match(
+      /async function deleteExpiredSecureShareQueueDocuments[\s\S]*?async function cleanupSecureShareRetentionQueue/u
+    )?.[0] ?? "";
+    const attachmentCleanup = cleanupFunctionSource.match(
+      /async function deleteExpiredPublicShareAttachment[\s\S]*?async function deleteExpiredAttachmentReservation/u
+    )?.[0] ?? "";
+
+    expect(childCleanup).toContain(
+      'fieldPath === "expiresAt"\n    || state?.parentCollectionId === "publicShareComments"'
+    );
+    expect(childCleanup).toContain(
+      "documentNameForPath(config.projectId, `publicNoteShares/${shareId}`)"
+    );
+    expect(childCleanup).toContain("await claimExpiredPublicShareCleanup(");
+    expect(childCleanup).toContain(
+      "Array.from({ length: Math.min(8, shareIds.length) }, loadShareEligibility)"
+    );
+    expect(childCleanup).toContain(
+      "requiresCurrentShareExpiry(state)\n        && shareEligibility.get(state.shareId) !== true"
+    );
+    expect(attachmentCleanup).toContain("parsePublicShareAttachmentName");
+    expect(attachmentCleanup).toContain(
+      "const shareName = documentNameForPath("
+    );
+    expect(attachmentCleanup).toContain(
+      "`publicNoteShares/${parsedAttachment.shareId}`"
+    );
+    expect(attachmentCleanup).toContain(
+      "claimExpiredPublicShareCleanup(shareName, accessToken)"
+    );
+    expect(attachmentCleanup).toContain(
+      "shareExpiresAt > Date.parse(nowIso)"
+    );
   });
 
   it("queries only expired OAuth state names in oldest-first bounded order", async () => {
@@ -866,6 +911,15 @@ describe("public share backend cleanup", () => {
     expect(shareTreeSource).toContain(
       'listChildDocuments(cleanupQueueName, "publicShareAttachmentCleanupQueue", accessToken, 1, ["expiresAt"])'
     );
+    expect(shareTreeSource).toContain(
+      'const initialShare = await getDocumentByName(\n    shareName,\n    accessToken,\n    ["expiresAt", "schemaVersion"]'
+    );
+    expect(shareTreeSource).toContain(
+      'const shareMetadata = await getDocumentByName(\n    shareName,\n    accessToken,\n    ["expiresAt", "schemaVersion"]'
+    );
+    expect(shareTreeSource).toContain(
+      "shareMetadata\n    && (!Number.isFinite(currentExpiresAt) || currentExpiresAt > Date.now())"
+    );
     expect(shareTreeSource).toContain("stats.documentDeletesAttempted + 2 > stats.maxDocumentDeletes");
   });
 
@@ -886,6 +940,10 @@ describe("public share backend cleanup", () => {
       "publicShareUnlockGrants",
       "publicShareRateLimits",
       "publicShareComments",
+      "publicShareParticipantCounters",
+      "publicShareParticipants",
+      "publicShareParticipantNames",
+      "publicShareParticipantRenameRequests",
       "publicShareAuditEvents"
     ]) {
       expect(cleanupFunctionSource).toContain(collectionId);
@@ -904,6 +962,10 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain('["expiresAt", "retentionExpiresAt"]');
     expect(cleanupFunctionSource).toContain("secureShareEmailDeliveriesDeleted");
     expect(cleanupFunctionSource).toContain("secureShareEmailQuotaBucketsDeleted");
+    expect(cleanupFunctionSource).toContain("secureShareParticipantCountersDeleted");
+    expect(cleanupFunctionSource).toContain("secureShareParticipantsDeleted");
+    expect(cleanupFunctionSource).toContain("secureShareParticipantNamesDeleted");
+    expect(cleanupFunctionSource).toContain("secureShareParticipantRenameRequestsDeleted");
     expect(cleanupFunctionSource).toContain("Math.floor(stats.maxDocumentDeletes / 10)");
   });
 });

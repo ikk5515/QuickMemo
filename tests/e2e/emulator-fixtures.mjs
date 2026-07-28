@@ -309,6 +309,7 @@ function scenarioOptions(scenario) {
     permissionLevel: "view",
     quickCopyButtonVisible: true,
     schemaVersion: 2,
+    showCommenterIpPrefix: false,
     viewerAuth: null,
     withAttachment: false
   };
@@ -329,6 +330,7 @@ function scenarioOptions(scenario) {
   } else if (scenario === "comment") {
     options.ownerAuth = true;
     options.permissionLevel = "comment";
+    options.showCommenterIpPrefix = true;
   } else if (scenario === "save-copy") {
     options.permissionLevel = "save_copy";
     options.viewerAuth = "verified";
@@ -348,6 +350,10 @@ function scenarioOptions(scenario) {
     options.oneTimeEnabled = true;
     options.ownerAuth = true;
     options.permissionLevel = "comment";
+    options.showCommenterIpPrefix = true;
+  } else if (scenario === "responsive") {
+    options.permissionLevel = "comment";
+    options.showCommenterIpPrefix = true;
   } else if (scenario === "lifecycle") {
     options.ownerAuth = true;
   } else if (scenario === "expired") {
@@ -504,6 +510,7 @@ export async function seedE2eScenario(scenario) {
           permissionLevel: options.permissionLevel,
           downloadAllowed: options.downloadAllowed,
           quickCopyButtonVisible: options.quickCopyButtonVisible,
+          showCommenterIpPrefix: options.showCommenterIpPrefix,
           successfulAccessCount: 0
         }
       },
@@ -524,12 +531,22 @@ export async function seedE2eScenario(scenario) {
           permissionLevel: options.permissionLevel,
           downloadAllowed: options.downloadAllowed,
           quickCopyButtonVisible: options.quickCopyButtonVisible,
+          showCommenterIpPrefix: options.showCommenterIpPrefix,
           sessionTtlSeconds: 14_400,
           oneTimeSessionTtlSeconds: 1_800,
           policyVersion: 1,
           createdAt: now,
           updatedAt: now,
           expiresAt
+        }
+      },
+      {
+        path: `publicShareCleanupQueue/${shareId}`,
+        fields: {
+          shareId,
+          ownerUid,
+          expiresAt,
+          createdAt: now
         }
       },
       ...(attachment ? [attachment.document] : [])

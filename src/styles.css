@@ -13027,6 +13027,114 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   min-height: 38px;
 }
 
+.secure-public-share-participant-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-card);
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 14px;
+}
+
+.secure-public-share-participant-card > header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.secure-public-share-participant-card > header > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.secure-public-share-participant-card > header > div > span:first-child {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.secure-public-share-participant-card > header > div > .secure-public-share-author-identity {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.secure-public-share-participant-card > header > button {
+  flex: 0 0 auto;
+  min-height: 38px;
+}
+
+.secure-public-share-participant-card > header > button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.secure-public-share-participant-loading {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 13px;
+  gap: 7px;
+}
+
+.secure-public-share-author-identity {
+  align-items: baseline;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.secure-public-share-author-identity strong {
+  overflow-wrap: anywhere;
+}
+
+.secure-public-share-ip-prefix {
+  color: var(--muted);
+  font-size: 0.78em;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.secure-public-share-participant-rename {
+  border-top: 1px solid var(--color-border-subtle);
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 12px;
+}
+
+.secure-public-share-participant-rename > div {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-width: 0;
+}
+
+.secure-public-share-participant-rename input {
+  min-width: 0;
+}
+
+.secure-public-share-participant-rename button {
+  min-height: 40px;
+}
+
+.secure-public-share-participant-help,
+.secure-public-share-participant-name-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .secure-public-share-comments > form {
   background: var(--color-surface-muted);
   border: 1px solid var(--color-border-subtle);
@@ -13060,6 +13168,8 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   border-radius: var(--radius-card);
   display: grid;
   gap: 10px;
+  min-width: 0;
+  overflow: hidden;
   padding: 14px;
 }
 
@@ -13075,9 +13185,10 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+  min-width: 0;
 }
 
-.secure-public-share-comment-list article > header span {
+.secure-public-share-author-badge {
   background: var(--color-primary-subtle);
   border-radius: var(--radius-pill);
   color: var(--teal);
@@ -13183,6 +13294,27 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
 
   .secure-public-share-comment-list article > header {
     display: grid;
+  }
+
+  .secure-public-share-participant-card > header {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .secure-public-share-participant-card > header > button {
+    width: 100%;
+  }
+
+  .secure-public-share-participant-rename > div {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .secure-public-share-participant-rename input {
+    grid-column: 1 / -1;
+  }
+
+  .secure-public-share-participant-rename button {
+    width: 100%;
   }
 
   .secure-public-share-comment-list time {

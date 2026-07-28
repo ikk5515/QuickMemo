@@ -23,6 +23,7 @@ export const secureShareApiActions = [
   "access",
   "session",
   "content",
+  "participant-me",
   "comments",
   "comment-delete",
   "copy-grant",
@@ -60,6 +61,7 @@ export const secureShareApiActionContract: Record<
   access: { auth: "optional", csrf: "none", methods: ["POST"] },
   session: { auth: "session", csrf: "none", methods: ["GET"] },
   content: { auth: "session", csrf: "none", methods: ["GET"] },
+  "participant-me": { auth: "session", csrf: "after_session", methods: ["GET", "PATCH"] },
   comments: { auth: "session", csrf: "after_session", methods: ["GET", "POST"] },
   "comment-delete": { auth: "session", csrf: "after_session", methods: ["DELETE"] },
   "copy-grant": { auth: "session", csrf: "after_session", methods: ["POST"] },
@@ -133,6 +135,27 @@ export interface SecureShareCommentInput {
   clientRequestId: string;
 }
 
+export interface SecureShareParticipantCapabilities {
+  canRename: boolean;
+  showsCommenterIpPrefix: boolean;
+}
+
+export interface SecureShareParticipantDto {
+  canRename: boolean;
+  capabilities: SecureShareParticipantCapabilities;
+  currentIpPrefix?: string;
+  displayName: string;
+  guestNumber: number;
+  isSystemDefaultName: boolean;
+  participantId: string;
+  renameCooldownEndsAt: string | null;
+}
+
+export interface SecureShareParticipantRenameInput {
+  clientRequestId: string;
+  displayName: string;
+}
+
 export interface SecureShareViewerRequestOptions {
   idToken?: string;
   signal?: AbortSignal;
@@ -175,6 +198,323 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly string[]) {
+  const allowed = new Set(allowedKeys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function unicodeGraphemeLength(value: string) {
+  if (typeof Intl.Segmenter !== "function") {
+    return Array.from(value).length;
+  }
+  return Array.from(
+    new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)
+  ).length;
+}
+
+const participantDisplayNamePattern =
+  /^[\p{Script=Hangul}\p{Script=Latin}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Han}\p{N}\p{M} ._-]+$/u;
+
+function participantRoleSkeleton(value: string) {
+  const substitutions = new Map([
+    ["0", "o"],
+    ["1", "i"],
+    ["3", "e"],
+    ["4", "a"],
+    ["5", "s"],
+    ["7", "t"],
+    ["8", "b"],
+    ["9", "g"],
+    ["l", "i"],
+    ["○", "o"],
+    ["〇", "o"]
+  ]);
+  return Array.from(value.replace(/rn/gu, "m").replace(/vv/gu, "w"))
+    .map((character) => substitutions.get(character) ?? character)
+    .join("");
+}
+
+function isReservedParticipantRoleKey(value: string, anywhere = false) {
+  if (
+    anywhere
+    && /(?:guest|quickmemo|admin(?:istrator)?|owner|official|support|system)/u.test(value)
+  ) {
+    return true;
+  }
+  return (
+    /^guest/u.test(value)
+    || /quickmemo/u.test(value)
+    || /^(?:admin(?:istrator)?|owner|official|support)/u.test(value)
+    || /^system/u.test(value)
+  );
+}
+
+function hasLocalizedParticipantRolePrefix(value: string) {
+  return /^(?:공식|公式|官方|管理员|管理員|系统|系統)/u.test(value);
+}
+
+function isReservedParticipantName(reservedKey: string, hasMixedScripts: boolean) {
+  const roleSkeleton = participantRoleSkeleton(reservedKey);
+  return (
+    isReservedParticipantRoleKey(reservedKey)
+    || isReservedParticipantRoleKey(roleSkeleton)
+    || (
+      hasMixedScripts
+      && (
+        isReservedParticipantRoleKey(reservedKey, true)
+        || isReservedParticipantRoleKey(roleSkeleton, true)
+      )
+    )
+    || /(?:소유자|관리자|운영자|시스템|퀵메모|오너|어드민|서포트)/u.test(reservedKey)
+    || /(?:オーナー|所有者|管理者|運営者|システム|クイックメモ|アドミン|サポート)/u.test(reservedKey)
+    || hasLocalizedParticipantRolePrefix(reservedKey)
+    || /(?:quick|퀵|クイック)(?:memo|메모|メモ)/u.test(reservedKey)
+  );
+}
+
+function hasMixedParticipantScripts(value: string) {
+  return [
+    /[A-Za-z]/u.test(value),
+    /\p{Script=Hangul}/u.test(value),
+    /[\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script=Han}]/u
+      .test(value)
+  ].filter(Boolean).length > 1;
+}
+
+function safeParticipantDisplayName(value: unknown, allowSystemDefault: boolean) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 256) {
+    return null;
+  }
+
+  const normalizedInput = value.normalize("NFKC");
+  if (/[\p{Cc}\p{Zl}\p{Zp}]/u.test(normalizedInput)) {
+    return null;
+  }
+  const displayName = normalizedInput.trim().replace(/ +/gu, " ");
+  const comparisonKey = displayName
+    .toLocaleLowerCase("und")
+    .replace(/[ ._-]+/gu, "");
+  const graphemeLength = unicodeGraphemeLength(displayName);
+  const codePoints = Array.from(displayName);
+  const combiningMarks = codePoints.filter((character) => /\p{M}/u.test(character)).length;
+  const hasAsciiLatin = /[A-Za-z]/u.test(displayName);
+  const hasNonAsciiLatin = codePoints.some((character) =>
+    /\p{Script=Latin}/u.test(character) && !/[A-Za-z]/u.test(character)
+  );
+  const hasMixedScripts = hasMixedParticipantScripts(displayName);
+  const hasInvisibleSpoofCharacter = codePoints.some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return (
+      codePoint === 0x115f
+      || codePoint === 0x1160
+      || codePoint === 0x3164
+      || codePoint === 0xffa0
+      || (codePoint >= 0xfe00 && codePoint <= 0xfe0f)
+      || (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
+    );
+  });
+
+  if (
+    displayName !== value
+    || graphemeLength < 1
+    || graphemeLength > 24
+    || codePoints.length > 72
+    || combiningMarks > 8
+    || hasNonAsciiLatin
+    || (hasAsciiLatin && combiningMarks > 0)
+    || /[\p{Cc}\p{Cf}<>{}()\\:@]/u.test(displayName)
+    || displayName.includes("[")
+    || displayName.includes("]")
+    || displayName.includes("/")
+    || /\p{Default_Ignorable_Code_Point}/u.test(displayName)
+    || hasInvisibleSpoofCharacter
+    || /\p{M}{3,}/u.test(displayName)
+    || /(?:^|\s)www\.|[\p{L}\p{N}][\p{L}\p{N}-]*\.[\p{L}\p{N}-]{2,}/iu.test(displayName)
+    || /^(?:\p{N}{1,3}\.){3}\p{N}{1,3}$/u.test(displayName)
+    || !participantDisplayNamePattern.test(displayName)
+    || !/[A-Za-z\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}\p{N}]/u.test(displayName)
+    || (
+      !allowSystemDefault
+      && isReservedParticipantName(comparisonKey, hasMixedScripts)
+    )
+  ) {
+    return null;
+  }
+
+  return displayName;
+}
+
+export function normalizeSecureShareParticipantDisplayName(value: string) {
+  if (typeof value !== "string" || value.length > 256) {
+    throw new SecureShareApiError(
+      "invalid_display_name",
+      "표시 이름은 1~24자로 입력해주세요."
+    );
+  }
+
+  const normalizedInput = value.normalize("NFKC");
+  if (/[\p{Cc}\p{Zl}\p{Zp}]/u.test(normalizedInput)) {
+    throw new SecureShareApiError(
+      "invalid_display_name",
+      "한글·영문·일본어·숫자와 공백, 점, 밑줄, 하이픈만 1~24자로 입력해주세요."
+    );
+  }
+  const normalized = normalizedInput.trim().replace(/ +/gu, " ");
+  const displayName = safeParticipantDisplayName(normalized, false);
+
+  if (!displayName) {
+    throw new SecureShareApiError(
+      "invalid_display_name",
+      "한글·영문·일본어·숫자와 공백, 점, 밑줄, 하이픈만 1~24자로 입력해주세요."
+    );
+  }
+  return displayName;
+}
+
+export function parseSecureShareIpPrefix(value: unknown) {
+  if (typeof value !== "string" || value.length > 16) {
+    return null;
+  }
+
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})$/u.exec(value);
+  if (ipv4) {
+    const first = Number.parseInt(ipv4[1], 10);
+    const second = Number.parseInt(ipv4[2], 10);
+    const canonical = `${first}.${second}`;
+    const reserved = (
+      first === 0
+      || first === 10
+      || first === 127
+      || first >= 224
+      || (first === 100 && second >= 64 && second <= 127)
+      || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && (second === 0 || second === 88 || second === 168))
+      || (first === 198 && (second === 18 || second === 19 || second === 51))
+      || (first === 203 && second === 0)
+    );
+
+    return first <= 255 && second <= 255 && canonical === value && !reserved
+      ? canonical
+      : null;
+  }
+
+  const ipv6 = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u.exec(value);
+  if (!ipv6) {
+    return null;
+  }
+  const first = Number.parseInt(ipv6[1], 16);
+  const second = Number.parseInt(ipv6[2], 16);
+  const canonical = `${first.toString(16)}:${second.toString(16)}`;
+  const reserved = (
+    (first & 0xe000) !== 0x2000
+    || (first === 0x2001 && (second === 0x0002 || second === 0x0db8))
+    || (first === 0x3fff && (second & 0xf000) === 0)
+  );
+  return canonical === value && !reserved ? canonical : null;
+}
+
+export function parseSecureShareParticipantDto(
+  value: unknown
+): SecureShareParticipantDto | null {
+  if (
+    !isPlainRecord(value)
+    || !hasOnlyKeys(value, [
+      "participantId",
+      "guestNumber",
+      "displayName",
+      "isSystemDefaultName",
+      "canRename",
+      "renameCooldownEndsAt",
+      "capabilities",
+      "currentIpPrefix"
+    ])
+    || !isPlainRecord(value.capabilities)
+    || !hasOnlyKeys(value.capabilities, ["canRename", "showsCommenterIpPrefix"])
+  ) {
+    return null;
+  }
+
+  const participantId = typeof value.participantId === "string"
+    && secureShareIdentifierPattern.test(value.participantId)
+    ? value.participantId
+    : null;
+  const guestNumber = value.guestNumber;
+  const displayName = safeParticipantDisplayName(value.displayName, true);
+  const renameCooldownEndsAt = value.renameCooldownEndsAt === null
+    ? null
+    : (
+        typeof value.renameCooldownEndsAt === "string"
+        && value.renameCooldownEndsAt.length <= 64
+        && Number.isFinite(Date.parse(value.renameCooldownEndsAt))
+          ? new Date(value.renameCooldownEndsAt).toISOString()
+          : undefined
+      );
+  const currentIpPrefix = Object.prototype.hasOwnProperty.call(value, "currentIpPrefix")
+    ? parseSecureShareIpPrefix(value.currentIpPrefix)
+    : undefined;
+
+  if (
+    !participantId
+    || typeof guestNumber !== "number"
+    || !Number.isSafeInteger(guestNumber)
+    || guestNumber < 1
+    || guestNumber > 1_000_000_000
+    || !displayName
+    || typeof value.isSystemDefaultName !== "boolean"
+    || typeof value.canRename !== "boolean"
+    || typeof value.capabilities.canRename !== "boolean"
+    || typeof value.capabilities.showsCommenterIpPrefix !== "boolean"
+    || value.canRename !== value.capabilities.canRename
+    || renameCooldownEndsAt === undefined
+    || (
+      value.isSystemDefaultName
+        ? displayName !== `guest${guestNumber}`
+        : isReservedParticipantName(
+            displayName.toLocaleLowerCase("und").replace(/[ ._-]+/gu, ""),
+            hasMixedParticipantScripts(displayName)
+          )
+    )
+    || (
+      Object.prototype.hasOwnProperty.call(value, "currentIpPrefix")
+      && !currentIpPrefix
+    )
+    || (
+      !value.capabilities.showsCommenterIpPrefix
+      && Object.prototype.hasOwnProperty.call(value, "currentIpPrefix")
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    participantId,
+    guestNumber,
+    displayName,
+    isSystemDefaultName: value.isSystemDefaultName,
+    canRename: value.canRename,
+    renameCooldownEndsAt,
+    capabilities: {
+      canRename: value.capabilities.canRename,
+      showsCommenterIpPrefix: value.capabilities.showsCommenterIpPrefix
+    },
+    ...(currentIpPrefix ? { currentIpPrefix } : {})
+  };
+}
+
+function parseParticipantEnvelope(value: unknown) {
+  if (
+    !isPlainRecord(value)
+    || !hasOnlyKeys(value, ["ok", "participant", "requestId"])
+    || value.ok !== true
+    || typeof value.requestId !== "string"
+    || !secureShareIdentifierPattern.test(value.requestId)
+  ) {
+    return null;
+  }
+  return parseSecureShareParticipantDto(value.participant);
 }
 
 function containsAsciiWhitespaceOrControl(value: string) {
@@ -745,6 +1085,57 @@ export function getSecureShareContent(
   });
 }
 
+export async function getSecureShareParticipant(
+  shareId: string,
+  options: SecureShareViewerRequestOptions = {}
+): Promise<SecureShareParticipantDto> {
+  const payload = await secureShareApiRequest<unknown>({
+    action: "participant-me",
+    method: "GET",
+    idToken: options.idToken,
+    shareId,
+    signal: options.signal
+  });
+  const participant = parseParticipantEnvelope(payload);
+
+  if (!participant) {
+    throw new SecureShareApiError(
+      "invalid_response",
+      "댓글 참여자 정보를 확인하지 못했습니다."
+    );
+  }
+  return participant;
+}
+
+export async function renameSecureShareParticipant(
+  shareId: string,
+  input: SecureShareParticipantRenameInput,
+  options: SecureShareViewerRequestOptions = {}
+): Promise<SecureShareParticipantDto> {
+  assertIdentifier(input.clientRequestId, "clientRequestId");
+  const displayName = normalizeSecureShareParticipantDisplayName(input.displayName);
+  const payload = await secureShareApiRequest<unknown>({
+    action: "participant-me",
+    method: "PATCH",
+    idToken: options.idToken,
+    shareId,
+    signal: options.signal,
+    body: {
+      displayName,
+      clientRequestId: input.clientRequestId
+    }
+  });
+  const participant = parseParticipantEnvelope(payload);
+
+  if (!participant) {
+    throw new SecureShareApiError(
+      "invalid_response",
+      "변경된 댓글 이름을 확인하지 못했습니다."
+    );
+  }
+  return participant;
+}
+
 export function listSecureShareComments(
   shareId: string,
   options: SecureShareViewerRequestOptions & { cursor?: string; limit?: number } = {}
@@ -759,7 +1150,7 @@ export function listSecureShareComments(
       cursor: options.cursor,
       limit: options.limit === undefined
         ? 20
-        : Math.min(100, Math.max(1, Math.trunc(options.limit)))
+        : Math.min(20, Math.max(1, Math.trunc(options.limit)))
     }
   });
 }

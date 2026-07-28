@@ -778,6 +778,25 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
       requesterUid: stringValue("requester-tree"),
       shareId: stringValue("expired-secure-tree")
     });
+    backend.add("publicShareParticipantCounters/expired-secure-tree", {
+      nextGuestNumber: integerValue(2),
+      participantCount: integerValue(1),
+      shareId: stringValue("expired-secure-tree")
+    });
+    backend.add("publicShareParticipants/expired-secure-tree/items/participant-a", {
+      displayName: stringValue("guest1"),
+      participantId: stringValue("participant-a"),
+      shareId: stringValue("expired-secure-tree")
+    });
+    backend.add("publicShareParticipantNames/expired-secure-tree/items/name-a", {
+      participantId: stringValue("participant-a"),
+      shareId: stringValue("expired-secure-tree")
+    });
+    backend.add("publicShareParticipantRenameRequests/expired-secure-tree/items/request-a", {
+      participantId: stringValue("participant-a"),
+      shareId: stringValue("expired-secure-tree"),
+      status: stringValue("succeeded")
+    });
     installBackend(backend);
 
     const response = await callHandler(`Bearer ${cronSecret}`);
@@ -786,11 +805,113 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     expect(response.body).toMatchObject({
       secureShareCopyGrantRequestsDeleted: 1,
       secureShareEmailDeliveriesDeleted: 1,
+      secureShareParticipantCountersDeleted: 1,
+      secureShareParticipantNamesDeleted: 1,
+      secureShareParticipantRenameRequestsDeleted: 1,
+      secureShareParticipantsDeleted: 1,
       sharesDeleted: 1
     });
     expect(backend.has("publicNoteShares/expired-secure-tree")).toBe(false);
     expect(backend.has("publicShareEmailDeliveries/tree-delivery")).toBe(false);
     expect(backend.has("publicShareCopyGrantRequests/tree-copy-request")).toBe(false);
+    expect(backend.has("publicShareParticipantCounters/expired-secure-tree")).toBe(false);
+    expect(
+      backend.has("publicShareParticipants/expired-secure-tree/items/participant-a")
+    ).toBe(false);
+    expect(
+      backend.has("publicShareParticipantNames/expired-secure-tree/items/name-a")
+    ).toBe(false);
+    expect(
+      backend.has("publicShareParticipantRenameRequests/expired-secure-tree/items/request-a")
+    ).toBe(false);
+  });
+
+  it("retains a renewed share tree when an expired cleanup queue is stale", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const shareId = "renewed-share-stale-queue";
+
+    completedBackfillCursor(backend);
+    backend.add(`publicNoteShares/${shareId}`, {
+      expiresAt: timestampValue(future),
+      ownerUid: stringValue("owner-renewed"),
+      schemaVersion: integerValue(2),
+      status: stringValue("active")
+    });
+    backend.add(`publicShareCleanupQueue/${shareId}`, {
+      expiresAt: timestampValue(expired),
+      ownerUid: stringValue("owner-renewed"),
+      shareId: stringValue(shareId)
+    });
+    backend.add(`publicShareParticipantCounters/${shareId}`, {
+      nextGuestNumber: integerValue(2),
+      participantCount: integerValue(1),
+      shareId: stringValue(shareId)
+    });
+    backend.add(`publicShareParticipants/${shareId}/items/participant-a`, {
+      displayName: stringValue("guest1"),
+      participantId: stringValue("participant-a"),
+      shareId: stringValue(shareId)
+    });
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      secureShareParticipantCountersDeleted: 0,
+      secureShareParticipantsDeleted: 0,
+      sharesDeleted: 0
+    });
+    expect(backend.has(`publicNoteShares/${shareId}`)).toBe(true);
+    expect(backend.has(`publicShareCleanupQueue/${shareId}`)).toBe(true);
+    expect(backend.has(`publicShareParticipantCounters/${shareId}`)).toBe(true);
+    expect(
+      backend.has(`publicShareParticipants/${shareId}/items/participant-a`)
+    ).toBe(true);
+  });
+
+  it("retains stale child and attachment expiries after their parent share is renewed", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const shareId = "renewed-share-stale-children";
+
+    completedBackfillCursor(backend);
+    backend.add(`publicNoteShares/${shareId}`, {
+      expiresAt: timestampValue(future),
+      ownerUid: stringValue("owner-renewed"),
+      schemaVersion: integerValue(2),
+      status: stringValue("active")
+    });
+    backend.add(`publicShareComments/${shareId}/items/comment-a`, {
+      body: stringValue("must remain"),
+      expiresAt: timestampValue(expired),
+      shareId: stringValue(shareId)
+    });
+    backend.add(`publicNoteShares/${shareId}/attachments/attachment-a`, {
+      expiresAt: timestampValue(expired),
+      isReady: booleanValue(true),
+      ownerUid: stringValue("owner-renewed")
+    });
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      attachmentsDeleted: 0,
+      secureShareCommentsDeleted: 0,
+      sharesDeleted: 0
+    });
+    expect(
+      backend.has(`publicShareComments/${shareId}/items/comment-a`)
+    ).toBe(true);
+    expect(
+      backend.has(`publicNoteShares/${shareId}/attachments/attachment-a`)
+    ).toBe(true);
+    expect(backend.has(`publicNoteShares/${shareId}`)).toBe(true);
   });
 
   it("skips disabled legacy Storage I/O and atomically releases valid global Blob usage", async () => {

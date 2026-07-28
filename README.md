@@ -235,6 +235,13 @@ Secure Share v2는 기존 v1 공개 링크와 URL fragment 기반 콘텐츠 키�
 1회 열람, 댓글, 복사본 저장 등 Core v2는 사용할 수 있고 이메일 정책은
 서버에서 `email_feature_unavailable`로 fail closed합니다.
 
+댓글 공유는 별도의 서버 플래그로 참여자별 `guestN` identity와 본인 이름
+변경을 활성화합니다. IP는 identity로 사용하지 않으며, Owner 정책과
+서버 플래그가 모두 켜진 경우에만 공개 IP의 앞 두 구간만 댓글 옆에
+표시합니다. 전체 IP·사설/루프백/문서용 대역은 저장하거나 응답하지
+않습니다. 참여자 HMAC key와 두 플래그는 초기 배포에서 false로 유지한
+뒤 동일한 검증 SHA로 단계적으로 활성화합니다.
+
 이메일 OTP는 `SHARE_EMAIL_PROVIDER=resend`, API key, 검증된 발신자 주소와
 서로 다른 32바이트 이상의 OTP/email/rate-limit HMAC key가 모두 준비된
 뒤에만 활성화합니다. Resend에서 발신 도메인 또는 발신자 검증을 실제로
@@ -278,7 +285,9 @@ Firestore Rules에는 다음 주요 컬렉션의 owner-only 접근과 데이터 
   `publicShareEmailQuotaBuckets`, `publicShareEmailDeliveries`,
   `publicShareCopyGrantRequests`, `publicShareSourceGuards`,
   `publicShareUnlockGrants`, `publicShareRateLimits`, `publicShareComments`,
-  `publicShareAuditEvents`
+  `publicShareAuditEvents`, `publicShareParticipants`,
+  `publicShareParticipantNames`, `publicShareParticipantRenameRequests`,
+  `publicShareParticipantCounters`
   (Firebase 클라이언트 직접 접근 금지)
 - `libraryItems`, `libraryVaults`
 - `scheduleTasks`, `googleCalendarTaskSyncReceipts`, `googleCalendarTaskTombstones`

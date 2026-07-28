@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   copyGrantAuthorizesDownload,
@@ -13,9 +15,11 @@ import {
   clearSecureShareEmulators,
   configureSecureShareApiEmulatorEnvironment,
   cookiePair,
+  cookiePairs,
   createEmulatorOwner,
   listEmulatorCollection,
   metadataBinding,
+  patchEmulatorDocuments,
   readEmulatorDocument,
   seedSecureShare,
   startSecureShareApiHarness,
@@ -32,6 +36,33 @@ const failureOnlyKeys = ["error", "ok", "requestId"];
 
 function accessUrl(origin: string, shareId: string) {
   return `${origin}/api/public-shares-v2?action=access&shareId=${encodeURIComponent(shareId)}`;
+}
+
+async function startConfiguredSecureShareApiHarness(
+  moduleTag: string
+): Promise<SecureShareApiHarness> {
+  const moduleUrl = new URL("../api/public-shares-v2.js", import.meta.url);
+  moduleUrl.searchParams.set("integration-instance", moduleTag);
+  const isolatedModule = await import(
+    /* @vite-ignore */ moduleUrl.href
+  ) as typeof import("../api/public-shares-v2.js");
+  const server = createServer((request, response) => {
+    void isolatedModule.default(request, response);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    })
+  };
 }
 
 function ownerCreateBody(sourceNoteId: string, idempotencyKey: string) {
@@ -96,6 +127,35 @@ async function ownerCreateRequest(input: {
   };
 }
 
+async function ownerUpdateRequest(input: {
+  harness: SecureShareApiHarness;
+  idToken: string;
+  idempotencyKey: string;
+  networkSuffix: number;
+  policy: Record<string, unknown>;
+  shareId: string;
+}) {
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=owner-update`
+    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    {
+      method: "PATCH",
+      headers: apiHeaders(input.harness.origin, {
+        authorization: input.idToken,
+        networkSuffix: input.networkSuffix
+      }),
+      body: JSON.stringify({
+        idempotencyKey: input.idempotencyKey,
+        policy: input.policy
+      })
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
+}
+
 async function copyGrantRequest(input: {
   bindingCookie: string;
   csrfToken: string;
@@ -133,18 +193,159 @@ async function accessRequest(input: {
   harness: SecureShareApiHarness;
   networkSuffix: number;
   shareId: string;
+  testClientIp?: string;
 }) {
   const response = await fetch(accessUrl(input.harness.origin, input.shareId), {
     method: "POST",
     headers: apiHeaders(input.harness.origin, {
       authorization: input.authorization,
       bindingCookie: input.bindingCookie,
-      networkSuffix: input.networkSuffix
+      networkSuffix: input.networkSuffix,
+      testClientIp: input.testClientIp
     }),
     body: JSON.stringify(input.body)
   });
   const body = await response.json() as Record<string, unknown>;
   return { body, response };
+}
+
+function enableParticipantFeatures() {
+  Object.assign(process.env, {
+    SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED: "true",
+    SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED: "true"
+  });
+}
+
+function responseCookie(response: Response, marker: "qmsp_" | "qmss_") {
+  const pair = cookiePairs(response).find((candidate) =>
+    candidate.slice(0, candidate.indexOf("=")).includes(marker)
+  );
+  if (!pair) {
+    throw new Error(`Expected ${marker} cookie`);
+  }
+  return pair;
+}
+
+interface ParticipantSession {
+  bindingCookie: string;
+  csrfToken: string;
+  participantCookie?: string;
+  sessionCookie: string;
+}
+
+async function openParticipantSession(input: {
+  harness: SecureShareApiHarness;
+  networkSuffix: number;
+  shareId: string;
+  testClientIp?: string;
+}): Promise<ParticipantSession> {
+  const metadata = await metadataBinding(input.harness.origin, input.shareId, {
+    networkSuffix: input.networkSuffix
+  });
+  const access = await accessRequest({
+    bindingCookie: metadata.bindingCookie,
+    body: {
+      displayName: "Untrusted client label",
+      unlockAttemptId: `participant_access_${input.shareId}_${input.networkSuffix}`
+    },
+    harness: input.harness,
+    networkSuffix: input.networkSuffix,
+    shareId: input.shareId,
+    testClientIp: input.testClientIp
+  });
+  expect(access.response.status).toBe(200);
+  return {
+    bindingCookie: metadata.bindingCookie,
+    csrfToken: String(access.body.csrfToken),
+    participantCookie: responseCookie(access.response, "qmsp_"),
+    sessionCookie: responseCookie(access.response, "qmss_")
+  };
+}
+
+function participantSessionCookies(session: ParticipantSession) {
+  return [
+    session.bindingCookie,
+    session.participantCookie,
+    session.sessionCookie
+  ].filter((value): value is string => Boolean(value)).join("; ");
+}
+
+async function refreshParticipantSession(input: {
+  harness: SecureShareApiHarness;
+  session: ParticipantSession;
+  shareId: string;
+}) {
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=session`
+    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    {
+      headers: apiHeaders(input.harness.origin, {
+        bindingCookie: participantSessionCookies(input.session)
+      })
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
+}
+
+async function participantMeRequest(input: {
+  body?: Record<string, unknown>;
+  harness: SecureShareApiHarness;
+  method?: "GET" | "PATCH";
+  session: ParticipantSession;
+  shareId: string;
+  testClientIp?: string;
+}) {
+  const method = input.method ?? "GET";
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=participant-me`
+    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    {
+      method,
+      headers: apiHeaders(input.harness.origin, {
+        bindingCookie: participantSessionCookies(input.session),
+        csrfToken: method === "PATCH" ? input.session.csrfToken : undefined,
+        testClientIp: input.testClientIp
+      }),
+      ...(input.body ? { body: JSON.stringify(input.body) } : {})
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
+}
+
+async function commentRequest(input: {
+  authorization?: string;
+  body: Record<string, unknown>;
+  harness: SecureShareApiHarness;
+  method?: "GET" | "POST";
+  session: ParticipantSession;
+  shareId: string;
+  testClientIp?: string;
+}) {
+  const method = input.method ?? "POST";
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=comments`
+    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    {
+      method,
+      headers: apiHeaders(input.harness.origin, {
+        authorization: input.authorization,
+        bindingCookie: participantSessionCookies(input.session),
+        csrfToken: method === "POST" ? input.session.csrfToken : undefined,
+        testClientIp: input.testClientIp
+      }),
+      ...(method === "POST" ? { body: JSON.stringify(input.body) } : {})
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
 }
 
 async function emailChallengeRequest(input: {
@@ -470,6 +671,71 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       ok: false,
       error: "source_share_history_too_large"
     });
+  }, 30_000);
+
+  it("moves the cleanup queue expiry atomically with an owner expiration update", async () => {
+    const owner = await createEmulatorOwner(
+      "owner-expiry-update@example.test",
+      "emulator-owner-password"
+    );
+    const sourceNoteId = "source_note_expiry_update_0001";
+    await writeEmulatorDocuments([
+      {
+        path: `users/${owner.localId}`,
+        fields: {
+          displayName: "Expiry Update Owner",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: owner.localId
+        }
+      },
+      {
+        path: `notes/${sourceNoteId}`,
+        fields: {
+          attachmentRevision: 0,
+          isDeleted: false,
+          isPurged: false,
+          ownerUid: owner.localId,
+          revision: 1
+        }
+      }
+    ]);
+    const created = await ownerCreateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "owner_expiry_create_0001",
+      networkSuffix: 96,
+      sourceNoteId
+    });
+    expect(created.response.status).toBe(201);
+    const shareId = String(
+      (created.body.share as Record<string, unknown>).shareId
+    );
+    const initialShare = await readEmulatorDocument(`publicNoteShares/${shareId}`);
+    const initialQueue = await readEmulatorDocument(
+      `publicShareCleanupQueue/${shareId}`
+    );
+    expect(initialQueue?.expiresAt).toBe(initialShare?.expiresAt);
+
+    const updated = await ownerUpdateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "owner_expiry_update_0001",
+      networkSuffix: 97,
+      policy: { expirationPreset: "seven_days" },
+      shareId
+    });
+    expect(updated.response.status).toBe(200);
+
+    const share = await readEmulatorDocument(`publicNoteShares/${shareId}`);
+    const policy = await readEmulatorDocument(`publicSharePolicies/${shareId}`);
+    const queue = await readEmulatorDocument(`publicShareCleanupQueue/${shareId}`);
+    expect(queue?.expiresAt).toBe(share?.expiresAt);
+    expect(policy?.expiresAt).toBe(share?.expiresAt);
+    expect(Date.parse(String(share?.expiresAt))).toBeGreaterThan(
+      Date.parse(String(initialShare?.expiresAt))
+    );
   }, 30_000);
 
   it("replays four parallel creates with one idempotency key as a single share", async () => {
@@ -1173,6 +1439,143 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     });
   }, 15_000);
 
+  it("keeps a signed-in caller on one QuickMemo participant after required OTPs", async () => {
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED: "true",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    const caller = await createEmulatorOwner(
+      "signed-in-otp-caller@example.test",
+      "emulator-owner-password"
+    );
+    await writeEmulatorDocuments([
+      {
+        path: `users/${caller.localId}`,
+        fields: {
+          displayName: "Signed-in OTP caller",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: caller.localId
+        }
+      }
+    ]);
+    const shareId = "signed_in_caller_otp_identity";
+    const emailHash = emailDigest("allowed-otp@example.test");
+    const firstChallengeId = "signed_in_otp_challenge_0001";
+    const secondChallengeId = "signed_in_otp_challenge_0002";
+    const firstOtp = "135790";
+    const secondOtp = "246801";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailHash],
+      challenge: {
+        codeDigest: otpCodeDigest(
+          firstChallengeId,
+          shareId,
+          emailHash,
+          firstOtp
+        ),
+        emailHash,
+        id: firstChallengeId
+      },
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    await writeEmulatorDocuments([
+      {
+        path: `publicShareEmailChallenges/${secondChallengeId}`,
+        fields: {
+          attempts: 0,
+          codeDigest: otpCodeDigest(
+            secondChallengeId,
+            shareId,
+            emailHash,
+            secondOtp
+          ),
+          createdAt: new Date(Date.now() - 5_000),
+          emailHash,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          ownerUid: "owner_user",
+          policyVersion: 1,
+          shareId,
+          status: "pending",
+          updatedAt: new Date(Date.now() - 5_000)
+        }
+      }
+    ]);
+
+    const attempts = [
+      {
+        challengeId: firstChallengeId,
+        networkSuffix: 73,
+        otp: firstOtp,
+        unlockAttemptId: "signed_in_otp_access_0001"
+      },
+      {
+        challengeId: secondChallengeId,
+        networkSuffix: 74,
+        otp: secondOtp,
+        unlockAttemptId: "signed_in_otp_access_0002"
+      }
+    ];
+    const accesses = [];
+    for (const attempt of attempts) {
+      const metadata = await metadataBinding(harness.origin, shareId, {
+        networkSuffix: attempt.networkSuffix
+      });
+      accesses.push(await accessRequest({
+        authorization: caller.idToken,
+        bindingCookie: metadata.bindingCookie,
+        body: {
+          challengeId: attempt.challengeId,
+          displayName: "Untrusted email label",
+          otp: attempt.otp,
+          unlockAttemptId: attempt.unlockAttemptId
+        },
+        harness,
+        networkSuffix: attempt.networkSuffix,
+        shareId
+      }));
+    }
+
+    expect(accesses.every(({ response }) => response.status === 200)).toBe(true);
+    expect(accesses.every(({ body }) => (
+      (body.capabilities as Record<string, unknown>).participantIdentityEnabled === true
+      && (body.capabilities as Record<string, unknown>).participantLimitReached === false
+    ))).toBe(true);
+    expect(accesses.every(({ response }) =>
+      cookiePairs(response).every((cookie) => !cookie.includes("qmsp_"))
+    )).toBe(true);
+    const participants = await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    );
+    expect(participants).toHaveLength(1);
+    expect(participants[0]).toMatchObject({
+      identityType: "quickmemo_user",
+      status: "active"
+    });
+    const sessions = await listEmulatorCollection("publicShareAccessSessions");
+    expect(sessions).toHaveLength(2);
+    expect(sessions.every((session) =>
+      session.authorUid === caller.localId
+      && session.identityType === "quickmemo_user"
+      && session.participantId === participants[0].participantId
+    )).toBe(true);
+    expect(await readEmulatorDocument(
+      `publicShareEmailChallenges/${firstChallengeId}`
+    )).toMatchObject({ status: "consumed" });
+    expect(await readEmulatorDocument(
+      `publicShareEmailChallenges/${secondChallengeId}`
+    )).toMatchObject({ status: "consumed" });
+  }, 30_000);
+
   it("fails closed for an existing email policy and session after email is disabled", async () => {
     Object.assign(process.env, {
       SECURE_SHARE_EMAIL_ENABLED: "true",
@@ -1403,4 +1806,1727 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expectSecretFreeFailure(differentIdentity.body, [seed.cipherSentinel, replacementToken]);
     expect(await listEmulatorCollection("publicShareAccessSessions")).toHaveLength(2);
   }, 30_000);
+
+  it("keeps feature status on the exact backward-compatible two-boolean contract", async () => {
+    enableParticipantFeatures();
+
+    const response = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=feature-status`
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      emailEnabled: false,
+      v2Enabled: true
+    });
+  });
+
+  it("fails a colliding participant HMAC key closed without exposing it", async () => {
+    const shareId = "participant_secret_collision";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 17
+    });
+    const collidedSecret = String(process.env.SHARE_SESSION_HMAC_KEY);
+    process.env.SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED = "true";
+    process.env.SHARE_PARTICIPANT_HMAC_KEY = collidedSecret;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const blocked = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        displayName: "Collision viewer",
+        unlockAttemptId: "participant_collision_access_0001"
+      },
+      harness,
+      networkSuffix: 17,
+      shareId
+    });
+    expect(blocked.response.status).toBe(503);
+    expect(blocked.body).toMatchObject({
+      error: "request_failed",
+      ok: false
+    });
+    expect(JSON.stringify({
+      body: blocked.body,
+      logs: errorSpy.mock.calls
+    })).not.toContain(collidedSecret);
+    errorSpy.mockRestore();
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    )).toHaveLength(0);
+    expect(await listEmulatorCollection("publicShareAccessSessions"))
+      .toHaveLength(0);
+
+    process.env.SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED = "false";
+    const legacy = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        displayName: "Legacy collision-safe viewer",
+        unlockAttemptId: "participant_collision_access_0002"
+      },
+      harness,
+      networkSuffix: 17,
+      shareId
+    });
+    expect(legacy.response.status).toBe(200);
+    expect(legacy.body.capabilities).toMatchObject({
+      canComment: true,
+      participantIdentityEnabled: false,
+      participantLimitReached: false
+    });
+  }, 15_000);
+
+  it("keeps a pre-rollout session on legacy comment semantics after flags turn on", async () => {
+    const shareId = "participant_legacy_session_rollout";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId,
+      showCommenterIpPrefix: true
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 18
+    });
+    const access = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        displayName: "Legacy viewer",
+        unlockAttemptId: "legacy_rollout_access_0001"
+      },
+      harness,
+      networkSuffix: 18,
+      shareId,
+      testClientIp: "203.226.244.27"
+    });
+    expect(access.response.status).toBe(200);
+    expect(access.body.capabilities).toMatchObject({
+      canComment: true,
+      commentIpPrefixEnabled: false,
+      participantIdentityEnabled: false,
+      participantLimitReached: false,
+      permissionLevel: "comment"
+    });
+    expect(cookiePairs(access.response).some((cookie) => cookie.includes("qmsp_")))
+      .toBe(false);
+    const legacySession: ParticipantSession = {
+      bindingCookie: metadata.bindingCookie,
+      csrfToken: String(access.body.csrfToken),
+      sessionCookie: responseCookie(access.response, "qmss_")
+    };
+
+    enableParticipantFeatures();
+    const refreshed = await refreshParticipantSession({
+      harness,
+      session: legacySession,
+      shareId
+    });
+    expect(refreshed.response.status).toBe(200);
+    expect(refreshed.body.capabilities).toMatchObject({
+      canComment: true,
+      commentIpPrefixEnabled: false,
+      participantIdentityEnabled: false,
+      participantLimitReached: false,
+      permissionLevel: "comment"
+    });
+    legacySession.csrfToken = String(refreshed.body.csrfToken);
+    const created = await commentRequest({
+      body: {
+        body: "legacy session comment",
+        clientRequestId: "legacy_rollout_comment_0001"
+      },
+      harness,
+      session: legacySession,
+      shareId,
+      testClientIp: "203.226.244.27"
+    });
+    expect(created.response.status).toBe(201);
+    expect(created.body.comment).not.toHaveProperty("authorParticipantId");
+    expect(created.body.comment).not.toHaveProperty("ipPrefix");
+    const comments = await listEmulatorCollection(
+      `publicShareComments/${shareId}/items`
+    );
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toEqual(expect.objectContaining({
+      authorIdentityHash: expect.any(String)
+    }));
+    expect(comments[0]).not.toHaveProperty("authorParticipantId");
+    expect(comments[0]).not.toHaveProperty("ipPrefixSnapshot");
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    )).toHaveLength(0);
+
+    await writeEmulatorDocuments([{
+      path: `publicShareComments/${shareId}/items/c_legacy_prefixed_snapshot`,
+      fields: {
+        authorBadge: "guest",
+        authorDisplayNameSnapshot: "guest1",
+        authorParticipantId: "p_legacy_removed_participant",
+        body: "기존 Prefix 댓글",
+        createdAt: new Date(Date.now() - 1_000),
+        ipPrefixSnapshot: "203.226",
+        ipPrefixVersion: 1,
+        ownerUid: "owner_user",
+        shareId,
+        updatedAt: new Date(Date.now() - 1_000)
+      }
+    }]);
+    const listed = await commentRequest({
+      body: {},
+      harness,
+      method: "GET",
+      session: legacySession,
+      shareId
+    });
+    expect(listed.response.status).toBe(200);
+    expect(listed.body.items).toHaveLength(2);
+    expect((listed.body.items as Array<Record<string, unknown>>).every(
+      (comment) => !Object.prototype.hasOwnProperty.call(comment, "ipPrefix")
+    )).toBe(true);
+  }, 30_000);
+
+  it("marks only a newly capped participant session read-only for comments", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_limit_capabilities";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId,
+      showCommenterIpPrefix: true
+    });
+    await writeEmulatorDocuments([
+      {
+        path: `publicShareParticipantCounters/${shareId}`,
+        fields: {
+          nextGuestNumber: 1001,
+          ownerUid: "owner_user",
+          participantCount: 1000,
+          schemaVersion: 1,
+          shareId,
+          updatedAt: new Date()
+        }
+      }
+    ]);
+
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 19
+    });
+    const access = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        displayName: "Capped viewer",
+        unlockAttemptId: "participant_cap_access_0001"
+      },
+      harness,
+      networkSuffix: 19,
+      shareId
+    });
+    expect(access.response.status).toBe(200);
+    expect(access.body.capabilities).toMatchObject({
+      canComment: false,
+      participantIdentityEnabled: true,
+      participantLimitReached: true,
+      permissionLevel: "comment"
+    });
+    expect(cookiePairs(access.response).some((cookie) => cookie.includes("qmsp_")))
+      .toBe(false);
+    const cappedSession: ParticipantSession = {
+      bindingCookie: metadata.bindingCookie,
+      csrfToken: String(access.body.csrfToken),
+      sessionCookie: responseCookie(access.response, "qmss_")
+    };
+    const refreshed = await refreshParticipantSession({
+      harness,
+      session: cappedSession,
+      shareId
+    });
+    expect(refreshed.response.status).toBe(200);
+    expect(refreshed.body.capabilities).toMatchObject({
+      canComment: false,
+      participantIdentityEnabled: true,
+      participantLimitReached: true,
+      permissionLevel: "comment"
+    });
+    cappedSession.csrfToken = String(refreshed.body.csrfToken);
+
+    const listed = await commentRequest({
+      body: {},
+      harness,
+      method: "GET",
+      session: cappedSession,
+      shareId
+    });
+    expect(listed.response.status).toBe(200);
+    const blocked = await commentRequest({
+      body: {
+        body: "must not be written",
+        clientRequestId: "participant_cap_comment_0001"
+      },
+      harness,
+      session: cappedSession,
+      shareId
+    });
+    expect(blocked.response.status).toBe(403);
+    expect(blocked.body).toMatchObject({ error: "participant_limit_reached" });
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    )).toHaveLength(0);
+    expect(await listEmulatorCollection(
+      `publicShareComments/${shareId}/items`
+    )).toHaveLength(0);
+  }, 30_000);
+
+  it("allocates one participant for twenty parallel accesses from the same browser identity", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_same_identity_20";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId,
+      showCommenterIpPrefix: true
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 21
+    });
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    )).toHaveLength(0);
+    expect(await readEmulatorDocument(`publicShareParticipantCounters/${shareId}`))
+      .toBeNull();
+
+    const accesses = await Promise.all(
+      Array.from({ length: 20 }, (_, index) => accessRequest({
+        bindingCookie: metadata.bindingCookie,
+        body: {
+          displayName: `Ignored label ${index}`,
+          unlockAttemptId: "same_identity_parallel_0001"
+        },
+        harness,
+        networkSuffix: 21,
+        shareId
+      }))
+    );
+
+    expect(accesses.every(({ response }) => response.status === 200)).toBe(true);
+    const participants = await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    );
+    expect(participants).toHaveLength(1);
+    expect(participants[0]).toMatchObject({
+      displayName: "guest1",
+      guestNumber: 1,
+      identityType: "browser",
+      status: "active"
+    });
+    expect(participants[0]).not.toHaveProperty("expiresAt");
+    const participantCounter = await readEmulatorDocument(
+      `publicShareParticipantCounters/${shareId}`
+    );
+    expect(participantCounter).toMatchObject({
+      nextGuestNumber: 2,
+      participantCount: 1,
+      shareId
+    });
+    expect(participantCounter).not.toHaveProperty("expiresAt");
+    const participantCookies = accesses.map(({ response }) =>
+      responseCookie(response, "qmsp_")
+    );
+    expect(new Set(participantCookies).size).toBe(participantCookies.length);
+    for (const participantCookie of participantCookies) {
+      const rawParticipantToken = participantCookie.slice(
+        participantCookie.indexOf("=") + 1
+      );
+      expect(JSON.stringify(participants)).not.toContain(rawParticipantToken);
+    }
+    const sessions = await listEmulatorCollection("publicShareAccessSessions");
+    expect(sessions).toHaveLength(20);
+    expect(new Set(sessions.map((session) => session.participantId))).toEqual(
+      new Set([participants[0].participantId])
+    );
+
+    const reuses = await Promise.all(
+      participantCookies.slice(0, 3).map((participantCookie, index) =>
+        accessRequest({
+          bindingCookie: `${metadata.bindingCookie}; ${participantCookie}`,
+          body: {
+            displayName: "Ignored reusable cookie label",
+            unlockAttemptId:
+              `same_identity_cookie_reuse_${String(index).padStart(4, "0")}`
+          },
+          harness,
+          networkSuffix: 121 + index,
+          shareId
+        })
+      )
+    );
+    expect(reuses.every(({ response }) => response.status === 200)).toBe(true);
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    )).toHaveLength(1);
+    expect(await readEmulatorDocument(
+      `publicShareParticipantCounters/${shareId}`
+    )).toMatchObject({
+      nextGuestNumber: 2,
+      participantCount: 1
+    });
+    const sessionsAfterReuse = await listEmulatorCollection(
+      "publicShareAccessSessions"
+    );
+    expect(sessionsAfterReuse).toHaveLength(23);
+    expect(new Set(sessionsAfterReuse.map((session) => session.participantId)))
+      .toEqual(new Set([participants[0].participantId]));
+  }, 60_000);
+
+  it("reuses one participant for repeated successful accesses by the same verified email", async () => {
+    enableParticipantFeatures();
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    const shareId = "participant_same_verified_email";
+    const emailHash = emailDigest("same-participant@example.test");
+    const challenges = [
+      {
+        challengeId: "participant_same_email_challenge_0001",
+        networkSuffix: 23,
+        otp: "135790",
+        unlockAttemptId: "participant_same_email_access_0001"
+      },
+      {
+        challengeId: "participant_same_email_challenge_0002",
+        networkSuffix: 24,
+        otp: "246801",
+        unlockAttemptId: "participant_same_email_access_0002"
+      }
+    ];
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailHash],
+      challenge: {
+        codeDigest: otpCodeDigest(
+          challenges[0].challengeId,
+          shareId,
+          emailHash,
+          challenges[0].otp
+        ),
+        emailHash,
+        id: challenges[0].challengeId
+      },
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    await writeEmulatorDocuments([
+      {
+        path: `publicShareEmailChallenges/${challenges[1].challengeId}`,
+        fields: {
+          attempts: 0,
+          codeDigest: otpCodeDigest(
+            challenges[1].challengeId,
+            shareId,
+            emailHash,
+            challenges[1].otp
+          ),
+          createdAt: new Date(Date.now() - 5_000),
+          emailHash,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          ownerUid: "owner_user",
+          policyVersion: 1,
+          shareId,
+          status: "pending",
+          updatedAt: new Date(Date.now() - 5_000)
+        }
+      }
+    ]);
+
+    const accesses = [];
+    for (const challenge of challenges) {
+      const metadata = await metadataBinding(harness.origin, shareId, {
+        networkSuffix: challenge.networkSuffix
+      });
+      accesses.push(await accessRequest({
+        bindingCookie: metadata.bindingCookie,
+        body: {
+          challengeId: challenge.challengeId,
+          displayName: "Untrusted verified email label",
+          otp: challenge.otp,
+          unlockAttemptId: challenge.unlockAttemptId
+        },
+        harness,
+        networkSuffix: challenge.networkSuffix,
+        shareId
+      }));
+    }
+
+    expect(accesses.every(({ response }) => response.status === 200)).toBe(true);
+    expect(accesses.every(({ response }) =>
+      cookiePairs(response).every((cookie) => !cookie.includes("qmsp_"))
+    )).toBe(true);
+    const participants = await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    );
+    expect(participants).toHaveLength(1);
+    expect(participants[0]).toMatchObject({
+      displayName: "guest1",
+      guestNumber: 1,
+      identityType: "verified_email",
+      status: "active"
+    });
+    expect(await readEmulatorDocument(
+      `publicShareParticipantCounters/${shareId}`
+    )).toMatchObject({
+      nextGuestNumber: 2,
+      participantCount: 1
+    });
+    const sessions = await listEmulatorCollection("publicShareAccessSessions");
+    expect(sessions).toHaveLength(2);
+    expect(sessions.every((session) =>
+      session.identityType === "verified_email"
+      && session.participantId === participants[0].participantId
+    )).toBe(true);
+  }, 30_000);
+
+  it("allocates distinct guests after participant-cookie deletion at the same public IP", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_same_ip_distinct_tokens";
+    const publicIp = "8.8.8.8";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 25
+    });
+    const first = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        displayName: "Ignored first anonymous label",
+        unlockAttemptId: "same_ip_distinct_token_access_0001"
+      },
+      harness,
+      networkSuffix: 25,
+      shareId,
+      testClientIp: publicIp
+    });
+    expect(first.response.status).toBe(200);
+    const firstParticipantCookie = responseCookie(first.response, "qmsp_");
+
+    const second = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        displayName: "Ignored second anonymous label",
+        unlockAttemptId: "same_ip_distinct_token_access_0002"
+      },
+      harness,
+      networkSuffix: 25,
+      shareId,
+      testClientIp: publicIp
+    });
+    expect(second.response.status).toBe(200);
+    const secondParticipantCookie = responseCookie(second.response, "qmsp_");
+    expect(secondParticipantCookie).not.toBe(firstParticipantCookie);
+
+    const participants = await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    );
+    expect(participants).toHaveLength(2);
+    expect(participants.map((participant) => participant.guestNumber).sort())
+      .toEqual([1, 2]);
+    expect(new Set(participants.map((participant) => participant.participantId)).size)
+      .toBe(2);
+    expect(participants.every((participant) =>
+      participant.identityType === "browser"
+    )).toBe(true);
+    expect(await readEmulatorDocument(
+      `publicShareParticipantCounters/${shareId}`
+    )).toMatchObject({
+      nextGuestNumber: 3,
+      participantCount: 2
+    });
+  }, 30_000);
+
+  it("reuses the participant cookie across browser-binding and public IP changes without incrementing the counter", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_cookie_ip_change";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 26
+    });
+    const first = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        displayName: "Ignored stable participant label",
+        unlockAttemptId: "participant_ip_change_access_0001"
+      },
+      harness,
+      networkSuffix: 26,
+      shareId,
+      testClientIp: "8.8.8.8"
+    });
+    expect(first.response.status).toBe(200);
+    const participantCookie = responseCookie(first.response, "qmsp_");
+    const firstParticipants = await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    );
+    expect(firstParticipants).toHaveLength(1);
+    const counterPath = `publicShareParticipantCounters/${shareId}`;
+    const initialCounter = await readEmulatorDocument(counterPath);
+    const rotatedMetadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 27
+    });
+    expect(rotatedMetadata.bindingCookie).not.toBe(metadata.bindingCookie);
+
+    const second = await accessRequest({
+      bindingCookie: `${rotatedMetadata.bindingCookie}; ${participantCookie}`,
+      body: {
+        displayName: "Ignored changed network label",
+        unlockAttemptId: "participant_ip_change_access_0002"
+      },
+      harness,
+      networkSuffix: 27,
+      shareId,
+      testClientIp: "1.1.1.1"
+    });
+    expect(second.response.status).toBe(200);
+    expect(cookiePairs(second.response).some((cookie) => cookie.includes("qmsp_")))
+      .toBe(false);
+
+    const participants = await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    );
+    expect(participants).toHaveLength(1);
+    expect(participants[0].participantId).toBe(firstParticipants[0].participantId);
+    const counter = await readEmulatorDocument(counterPath);
+    expect(counter).toMatchObject({
+      nextGuestNumber: 2,
+      participantCount: 1
+    });
+    expect(counter?.__updateTime).toBe(initialCounter?.__updateTime);
+    const sessions = await listEmulatorCollection("publicShareAccessSessions");
+    expect(sessions).toHaveLength(2);
+    expect(new Set(sessions.map((session) => session.participantId))).toEqual(
+      new Set([participants[0].participantId])
+    );
+  }, 30_000);
+
+  it("starts guest numbering independently at guest1 for each share", async () => {
+    enableParticipantFeatures();
+    const shareIds = [
+      "participant_numbering_share_a",
+      "participant_numbering_share_b"
+    ];
+    await Promise.all(shareIds.map((shareId) =>
+      seedSecureShare({
+        oneTimeEnabled: false,
+        permissionLevel: "comment",
+        shareId
+      })
+    ));
+
+    const accesses = [];
+    for (const [index, shareId] of shareIds.entries()) {
+      const networkSuffix = 28 + index;
+      const metadata = await metadataBinding(harness.origin, shareId, {
+        networkSuffix
+      });
+      accesses.push(await accessRequest({
+        bindingCookie: metadata.bindingCookie,
+        body: {
+          displayName: "Ignored share-local label",
+          unlockAttemptId: `participant_share_local_access_000${index + 1}`
+        },
+        harness,
+        networkSuffix,
+        shareId
+      }));
+    }
+    expect(accesses.every(({ response }) => response.status === 200)).toBe(true);
+
+    const participantsByShare = await Promise.all(shareIds.map((shareId) =>
+      listEmulatorCollection(`publicShareParticipants/${shareId}/items`)
+    ));
+    expect(participantsByShare.every((participants) =>
+      participants.length === 1
+      && participants[0].guestNumber === 1
+      && participants[0].displayName === "guest1"
+    )).toBe(true);
+    expect(participantsByShare[0][0].participantId)
+      .not.toBe(participantsByShare[1][0].participantId);
+    const counters = await Promise.all(shareIds.map((shareId) =>
+      readEmulatorDocument(`publicShareParticipantCounters/${shareId}`)
+    ));
+    expect(counters).toEqual([
+      expect.objectContaining({
+        nextGuestNumber: 2,
+        participantCount: 1,
+        shareId: shareIds[0]
+      }),
+      expect.objectContaining({
+        nextGuestNumber: 2,
+        participantCount: 1,
+        shareId: shareIds[1]
+      })
+    ]);
+  }, 30_000);
+
+  it("atomically grants one remaining participant slot and makes every race loser read-only", async () => {
+    enableParticipantFeatures();
+    process.env.SECURE_SHARE_MAX_PARTICIPANTS_PER_SHARE = "2";
+    const cappedHarness = await startConfiguredSecureShareApiHarness(
+      "participant-cap-2"
+    );
+    try {
+      const shareId = "participant_remaining_slot_race";
+      await seedSecureShare({
+        oneTimeEnabled: false,
+        permissionLevel: "comment",
+        shareId
+      });
+      await openParticipantSession({
+        harness: cappedHarness,
+        networkSuffix: 30,
+        shareId
+      });
+
+      const contenderCount = 6;
+      const metadata = await Promise.all(
+        Array.from({ length: contenderCount }, (_, index) =>
+          metadataBinding(cappedHarness.origin, shareId, {
+            networkSuffix: 31 + index
+          })
+        )
+      );
+      const contenders = await Promise.all(
+        metadata.map((candidate, index) => accessRequest({
+          bindingCookie: candidate.bindingCookie,
+          body: {
+            displayName: `Ignored capped contender ${index}`,
+            unlockAttemptId:
+              `participant_remaining_slot_${String(index).padStart(4, "0")}`
+          },
+          harness: cappedHarness,
+          networkSuffix: 31 + index,
+          shareId
+        }))
+      );
+
+      expect(contenders.every(({ response }) => response.status === 200)).toBe(true);
+      const winners = contenders.filter(({ body }) => {
+        const capabilities = body.capabilities as Record<string, unknown>;
+        return capabilities.canComment === true
+          && capabilities.participantLimitReached === false;
+      });
+      const capped = contenders.filter(({ body }) => {
+        const capabilities = body.capabilities as Record<string, unknown>;
+        return capabilities.canComment === false
+          && capabilities.participantIdentityEnabled === true
+          && capabilities.participantLimitReached === true;
+      });
+      expect(winners).toHaveLength(1);
+      expect(capped).toHaveLength(contenderCount - 1);
+      expect(cookiePairs(winners[0].response).filter((cookie) =>
+        cookie.includes("qmsp_")
+      )).toHaveLength(1);
+      expect(capped.every(({ response }) =>
+        cookiePairs(response).every((cookie) => !cookie.includes("qmsp_"))
+      )).toBe(true);
+
+      const participants = await listEmulatorCollection(
+        `publicShareParticipants/${shareId}/items`
+      );
+      expect(participants).toHaveLength(2);
+      expect(participants.map((participant) => participant.guestNumber).sort())
+        .toEqual([1, 2]);
+      expect(new Set(participants.map((participant) => participant.participantId)).size)
+        .toBe(2);
+      const counter = await readEmulatorDocument(
+        `publicShareParticipantCounters/${shareId}`
+      );
+      expect(counter).toMatchObject({
+        nextGuestNumber: 3,
+        participantCount: 2,
+        shareId
+      });
+      expect(counter?.participantCount).toBe(participants.length);
+      const sessions = await listEmulatorCollection("publicShareAccessSessions");
+      expect(sessions).toHaveLength(contenderCount + 1);
+      expect(sessions.filter((session) => session.participantId)).toHaveLength(2);
+      expect(sessions.filter((session) =>
+        session.participantIdentityEnabled === true
+        && session.participantLimitReached === true
+        && !session.participantId
+      )).toHaveLength(contenderCount - 1);
+    } finally {
+      await cappedHarness.close();
+    }
+  }, 90_000);
+
+  it("requires owners and administrators to opt into preview without allocating participants", async () => {
+    enableParticipantFeatures();
+    const owner = await createEmulatorOwner(
+      "participant-preview-owner@example.test",
+      "emulator-owner-password"
+    );
+    const admin = await createEmulatorOwner(
+      "participant-preview-admin@example.test",
+      "emulator-admin-password"
+    );
+    const shareId = "participant_privileged_preview_required";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      ownerUid: owner.localId,
+      permissionLevel: "comment",
+      shareId
+    });
+    await writeEmulatorDocuments([
+      {
+        path: `users/${admin.localId}`,
+        fields: {
+          displayName: "Participant Preview Admin",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: true,
+          uid: admin.localId
+        }
+      }
+    ]);
+
+    const privilegedCallers = [
+      {
+        body: {
+          displayName: "Owner must not become a guest",
+          unlockAttemptId: "participant_owner_preview_required_0001"
+        },
+        idToken: owner.idToken,
+        networkSuffix: 38
+      },
+      {
+        body: {
+          displayName: "Admin must not become a guest",
+          ownerPreview: false,
+          unlockAttemptId: "participant_admin_preview_required_0001"
+        },
+        idToken: admin.idToken,
+        networkSuffix: 39
+      }
+    ];
+    for (const caller of privilegedCallers) {
+      const metadata = await metadataBinding(harness.origin, shareId, {
+        authorization: caller.idToken,
+        networkSuffix: caller.networkSuffix
+      });
+      const access = await accessRequest({
+        authorization: caller.idToken,
+        bindingCookie: metadata.bindingCookie,
+        body: caller.body,
+        harness,
+        networkSuffix: caller.networkSuffix,
+        shareId
+      });
+      expect(access.response.status).toBe(409);
+      expect(access.body).toMatchObject({
+        ok: false,
+        error: "owner_preview_required"
+      });
+      expect(cookiePairs(access.response).some((cookie) =>
+        cookie.includes("qmsp_") || cookie.includes("qmss_")
+      )).toBe(false);
+    }
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    )).toHaveLength(0);
+    expect(await readEmulatorDocument(
+      `publicShareParticipantCounters/${shareId}`
+    )).toBeNull();
+    expect(await listEmulatorCollection("publicShareAccessSessions"))
+      .toHaveLength(0);
+  }, 30_000);
+
+  it("throttles reusable participant last-seen writes without touching its counter", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_last_seen_throttle";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 22
+    });
+    const first = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        displayName: "Last-seen viewer",
+        unlockAttemptId: "participant_last_seen_initial_0001"
+      },
+      harness,
+      networkSuffix: 22,
+      shareId
+    });
+    expect(first.response.status).toBe(200);
+    const participantCookie = responseCookie(first.response, "qmsp_");
+    const reusableCookies = `${metadata.bindingCookie}; ${participantCookie}`;
+    const [createdParticipant] = await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    );
+    const participantPath =
+      `publicShareParticipants/${shareId}/items/${createdParticipant.participantId}`;
+    const counterPath = `publicShareParticipantCounters/${shareId}`;
+    const freshParticipant = await readEmulatorDocument(participantPath);
+    const initialCounter = await readEmulatorDocument(counterPath);
+
+    const freshReuse = await accessRequest({
+      bindingCookie: reusableCookies,
+      body: {
+        displayName: "Ignored fresh label",
+        unlockAttemptId: "participant_last_seen_fresh_0002"
+      },
+      harness,
+      networkSuffix: 22,
+      shareId
+    });
+    expect(freshReuse.response.status).toBe(200);
+    expect((await readEmulatorDocument(participantPath))?.__updateTime)
+      .toBe(freshParticipant?.__updateTime);
+    expect((await readEmulatorDocument(counterPath))?.__updateTime)
+      .toBe(initialCounter?.__updateTime);
+
+    await patchEmulatorDocuments([
+      {
+        path: participantPath,
+        fields: {
+          lastSeenAt: new Date(Date.now() - 61 * 60 * 1000)
+        }
+      }
+    ]);
+    const staleParticipant = await readEmulatorDocument(participantPath);
+    const staleReuse = await accessRequest({
+      bindingCookie: reusableCookies,
+      body: {
+        displayName: "Ignored stale label",
+        unlockAttemptId: "participant_last_seen_stale_0003"
+      },
+      harness,
+      networkSuffix: 22,
+      shareId
+    });
+    expect(staleReuse.response.status).toBe(200);
+    const refreshedParticipant = await readEmulatorDocument(participantPath);
+    expect(refreshedParticipant?.__updateTime).not.toBe(
+      staleParticipant?.__updateTime
+    );
+    expect(Date.parse(String(refreshedParticipant?.lastSeenAt)))
+      .toBeGreaterThan(Date.now() - 60_000);
+    expect((await readEmulatorDocument(counterPath))?.__updateTime)
+      .toBe(initialCounter?.__updateTime);
+
+    await patchEmulatorDocuments([
+      {
+        path: participantPath,
+        fields: {
+          lastSeenAt: new Date(Date.now() - 61 * 60 * 1000)
+        }
+      }
+    ]);
+    const concurrentBaseline = await readEmulatorDocument(participantPath);
+    const concurrent = await Promise.all(
+      Array.from({ length: 8 }, (_, index) => accessRequest({
+        bindingCookie: reusableCookies,
+        body: {
+          displayName: "Ignored concurrent label",
+          unlockAttemptId:
+            `participant_last_seen_concurrent_${String(index).padStart(4, "0")}`
+        },
+        harness,
+        networkSuffix: 22,
+        shareId
+      }))
+    );
+    expect(concurrent.every(({ response }) => response.status === 200)).toBe(true);
+    const concurrentParticipant = await readEmulatorDocument(participantPath);
+    expect(concurrentParticipant?.__updateTime).not.toBe(
+      concurrentBaseline?.__updateTime
+    );
+    expect(Date.parse(String(concurrentParticipant?.lastSeenAt)))
+      .toBeGreaterThan(Date.now() - 60_000);
+    expect((await readEmulatorDocument(counterPath))?.__updateTime)
+      .toBe(initialCounter?.__updateTime);
+    expect(await readEmulatorDocument(counterPath)).toMatchObject({
+      nextGuestNumber: 2,
+      participantCount: 1
+    });
+  }, 60_000);
+
+  it("allocates unique sequential guest numbers for twenty parallel browser identities", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_different_identity_20";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    const metadata = await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        metadataBinding(harness.origin, shareId, { networkSuffix: 40 + index })
+      )
+    );
+    const accesses = await Promise.all(
+      metadata.map((candidate, index) => accessRequest({
+        bindingCookie: candidate.bindingCookie,
+        body: {
+          displayName: `Ignored distinct label ${index}`,
+          unlockAttemptId: `different_identity_${String(index).padStart(4, "0")}`
+        },
+        harness,
+        networkSuffix: 40 + index,
+        shareId
+      }))
+    );
+
+    expect(accesses.every(({ response }) => response.status === 200)).toBe(true);
+    const participants = await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    );
+    expect(participants).toHaveLength(20);
+    expect(
+      participants
+        .map((participant) => Number(participant.guestNumber))
+        .sort((left, right) => left - right)
+    ).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
+    expect(new Set(
+      participants.map((participant) => participant.participantId)
+    ).size).toBe(20);
+    expect(new Set(accesses.map(({ response }) =>
+      responseCookie(response, "qmsp_")
+    )).size).toBe(20);
+    expect(await readEmulatorDocument(
+      `publicShareParticipantCounters/${shareId}`
+    )).toMatchObject({
+      nextGuestNumber: 21,
+      participantCount: 20
+    });
+  }, 90_000);
+
+  it("does not allocate participants for metadata, failed gates, or owner preview", async () => {
+    enableParticipantFeatures();
+
+    const passwordShareId = "participant_failed_password";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      passwordEnabled: true,
+      passwordHashRecord: {
+        ...(await hashSharePassword("correct-password"))
+      },
+      permissionLevel: "comment",
+      shareId: passwordShareId
+    });
+    const passwordMetadata = await metadataBinding(harness.origin, passwordShareId, {
+      networkSuffix: 61
+    });
+    const failedPassword = await accessRequest({
+      bindingCookie: passwordMetadata.bindingCookie,
+      body: {
+        password: "wrong-password",
+        unlockAttemptId: "failed_password_participant_0001"
+      },
+      harness,
+      networkSuffix: 61,
+      shareId: passwordShareId
+    });
+    expect(failedPassword.response.status).toBe(403);
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${passwordShareId}/items`
+    )).toHaveLength(0);
+    expect(await readEmulatorDocument(
+      `publicShareParticipantCounters/${passwordShareId}`
+    )).toBeNull();
+
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    const otpShareId = "participant_failed_otp";
+    const challengeId = "participant_failed_otp_challenge";
+    const emailHash = emailDigest("participant@example.test");
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailHash],
+      challenge: {
+        codeDigest: otpCodeDigest(
+          challengeId,
+          otpShareId,
+          emailHash,
+          "135790"
+        ),
+        emailHash,
+        id: challengeId
+      },
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId: otpShareId
+    });
+    const otpMetadata = await metadataBinding(harness.origin, otpShareId, {
+      networkSuffix: 62
+    });
+    const failedOtp = await accessRequest({
+      bindingCookie: otpMetadata.bindingCookie,
+      body: {
+        challengeId,
+        otp: "000000",
+        unlockAttemptId: "failed_otp_participant_0001"
+      },
+      harness,
+      networkSuffix: 62,
+      shareId: otpShareId
+    });
+    expect(failedOtp.response.status).toBe(403);
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${otpShareId}/items`
+    )).toHaveLength(0);
+
+    const owner = await createEmulatorOwner(
+      "participant-owner@example.test",
+      "owner-password-123"
+    );
+    const ownerShareId = "participant_owner_preview";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      ownerUid: owner.localId,
+      permissionLevel: "comment",
+      shareId: ownerShareId,
+      showCommenterIpPrefix: true
+    });
+    const ownerMetadata = await metadataBinding(harness.origin, ownerShareId, {
+      authorization: owner.idToken,
+      networkSuffix: 63
+    });
+    const preview = await accessRequest({
+      authorization: owner.idToken,
+      bindingCookie: ownerMetadata.bindingCookie,
+      body: {
+        ownerPreview: true,
+        unlockAttemptId: "owner_preview_no_participant_0001"
+      },
+      harness,
+      networkSuffix: 63,
+      shareId: ownerShareId
+    });
+    expect(preview.response.status).toBe(200);
+    expect(preview.body.capabilities).toMatchObject({
+      commentIpPrefixEnabled: true,
+      participantIdentityEnabled: false
+    });
+    expect(cookiePairs(preview.response).some((cookie) => cookie.includes("qmsp_")))
+      .toBe(false);
+    await writeEmulatorDocuments([{
+      path: `publicShareComments/${ownerShareId}/items/c_owner_preview_prefix`,
+      fields: {
+        authorBadge: "guest",
+        authorDisplayNameSnapshot: "guest1",
+        authorParticipantId: "p_removed_owner_preview_guest",
+        body: "Owner preview prefix comment",
+        createdAt: new Date(),
+        ipPrefixSnapshot: "203.226",
+        ipPrefixVersion: 1,
+        ownerUid: owner.localId,
+        shareId: ownerShareId,
+        updatedAt: new Date()
+      }
+    }]);
+    const ownerPreviewSession: ParticipantSession = {
+      bindingCookie: ownerMetadata.bindingCookie,
+      csrfToken: String(preview.body.csrfToken),
+      sessionCookie: responseCookie(preview.response, "qmss_")
+    };
+    const ownerListed = await commentRequest({
+      authorization: owner.idToken,
+      body: {},
+      harness,
+      method: "GET",
+      session: ownerPreviewSession,
+      shareId: ownerShareId
+    });
+    expect(ownerListed.response.status).toBe(200);
+    expect(ownerListed.body.items).toEqual([
+      expect.objectContaining({
+        body: "Owner preview prefix comment",
+        ipPrefix: "203.226"
+      })
+    ]);
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${ownerShareId}/items`
+    )).toHaveLength(0);
+  }, 30_000);
+
+  it("renames transactionally and hydrates old comments while preserving IP snapshots", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_comment_hydration";
+    const firstFullIp = "203.226.244.27";
+    const secondFullIp = "2001:2d8:1234::99";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId,
+      showCommenterIpPrefix: true
+    });
+    const session = await openParticipantSession({
+      harness,
+      networkSuffix: 64,
+      shareId,
+      testClientIp: firstFullIp
+    });
+    const initial = await participantMeRequest({
+      harness,
+      session,
+      shareId,
+      testClientIp: firstFullIp
+    });
+    expect(initial.response.status).toBe(200);
+    expect(initial.body).toMatchObject({
+      participant: {
+        currentIpPrefix: "203.226",
+        displayName: "guest1",
+        guestNumber: 1,
+        isSystemDefaultName: true
+      }
+    });
+    const participantId = String(
+      (initial.body.participant as Record<string, unknown>).participantId
+    );
+
+    const firstRenameBody = {
+      clientRequestId: "rename_tester_a_request_0001",
+      displayName: "테스터가"
+    };
+    const renamed = await participantMeRequest({
+      body: firstRenameBody,
+      harness,
+      method: "PATCH",
+      session,
+      shareId,
+      testClientIp: firstFullIp
+    });
+    expect(renamed.response.status).toBe(200);
+    expect(renamed.body).toMatchObject({
+      participant: { displayName: "테스터가", isSystemDefaultName: false }
+    });
+    const replay = await participantMeRequest({
+      body: firstRenameBody,
+      harness,
+      method: "PATCH",
+      session,
+      shareId,
+      testClientIp: firstFullIp
+    });
+    expect(replay.response.status).toBe(200);
+    const renameRequests = await listEmulatorCollection(
+      `publicShareParticipantRenameRequests/${shareId}/items`
+    );
+    expect(renameRequests).toHaveLength(1);
+    expect(renameRequests[0]).not.toHaveProperty("expiresAt");
+    const participantNames = await listEmulatorCollection(
+      `publicShareParticipantNames/${shareId}/items`
+    );
+    expect(participantNames).toHaveLength(1);
+    expect(participantNames[0]).not.toHaveProperty("expiresAt");
+
+    const firstComment = await commentRequest({
+      body: {
+        body: "첫 번째 댓글",
+        clientRequestId: "participant_comment_request_0001"
+      },
+      harness,
+      session,
+      shareId,
+      testClientIp: firstFullIp
+    });
+    expect(firstComment.response.status).toBe(201);
+    expect(firstComment.body).toMatchObject({
+      comment: {
+        authorParticipantId: participantId,
+        displayName: "테스터가",
+        ipPrefix: "203.226"
+      }
+    });
+
+    await patchEmulatorDocuments([
+      {
+        path: `publicShareParticipants/${shareId}/items/${participantId}`,
+        fields: { lastRenamedAt: new Date(Date.now() - 61_000) }
+      }
+    ]);
+    const secondRename = await participantMeRequest({
+      body: {
+        clientRequestId: "rename_tester_b_request_0002",
+        displayName: "테스터나"
+      },
+      harness,
+      method: "PATCH",
+      session,
+      shareId,
+      testClientIp: secondFullIp
+    });
+    expect(secondRename.response.status).toBe(200);
+
+    const historicalReplay = await participantMeRequest({
+      body: firstRenameBody,
+      harness,
+      method: "PATCH",
+      session,
+      shareId,
+      testClientIp: secondFullIp
+    });
+    expect(historicalReplay.response.status).toBe(200);
+    expect(historicalReplay.body).toMatchObject({
+      participant: { displayName: "테스터나" }
+    });
+    expect(await readEmulatorDocument(
+      `publicShareParticipants/${shareId}/items/${participantId}`
+    )).toMatchObject({
+      displayName: "테스터나",
+      renameCount: 2
+    });
+    const compactedRenameRequests = await listEmulatorCollection(
+      `publicShareParticipantRenameRequests/${shareId}/items`
+    );
+    expect(compactedRenameRequests).toHaveLength(1);
+    expect(compactedRenameRequests[0].recentRequests).toHaveLength(2);
+
+    const secondComment = await commentRequest({
+      body: {
+        body: "두 번째 댓글",
+        clientRequestId: "participant_comment_request_0002"
+      },
+      harness,
+      session,
+      shareId,
+      testClientIp: secondFullIp
+    });
+    expect(secondComment.response.status).toBe(201);
+    expect(secondComment.body).toMatchObject({
+      comment: { displayName: "테스터나", ipPrefix: "2001:2d8" }
+    });
+
+    const listed = await commentRequest({
+      body: {},
+      harness,
+      method: "GET",
+      session,
+      shareId
+    });
+    expect(listed.response.status).toBe(200);
+    const items = listed.body.items as Array<Record<string, unknown>>;
+    expect(items).toHaveLength(2);
+    expect(items.every((item) => item.displayName === "테스터나")).toBe(true);
+    expect(new Set(items.map((item) => item.ipPrefix))).toEqual(
+      new Set(["203.226", "2001:2d8"])
+    );
+
+    const storedComments = await listEmulatorCollection(
+      `publicShareComments/${shareId}/items`
+    );
+    expect(storedComments).toHaveLength(2);
+    expect(storedComments.every((comment) =>
+      comment.authorParticipantId === participantId
+      && !Object.prototype.hasOwnProperty.call(comment, "authorUid")
+      && !Object.prototype.hasOwnProperty.call(comment, "authorIdentityHash")
+    )).toBe(true);
+    const serialized = JSON.stringify(storedComments);
+    expect(serialized).not.toContain(firstFullIp);
+    expect(serialized).not.toContain(secondFullIp);
+    expect(serialized).not.toMatch(/rawForwardedFor|rawVercelIpHeader|carrier|asn/iu);
+  }, 30_000);
+
+  it("charges no-op renames atomically against cooldown and hourly/daily counters", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_noop_rename_limits";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    const session = await openParticipantSession({
+      harness,
+      networkSuffix: 68,
+      shareId
+    });
+    const initial = await participantMeRequest({ harness, session, shareId });
+    expect(initial.response.status).toBe(200);
+    const participant = initial.body.participant as Record<string, unknown>;
+    const participantId = String(participant.participantId);
+    const displayName = "Alice";
+    const participantPath =
+      `publicShareParticipants/${shareId}/items/${participantId}`;
+    const initialRename = await participantMeRequest({
+      body: {
+        clientRequestId: "rename_initial_custom_request_0001",
+        displayName
+      },
+      harness,
+      method: "PATCH",
+      session,
+      shareId
+    });
+    expect(initialRename.response.status).toBe(200);
+    expect(await readEmulatorDocument(participantPath)).toMatchObject({
+      displayName,
+      renameCount: 1,
+      renameDayCount: 1,
+      renameHourCount: 1
+    });
+
+    await patchEmulatorDocuments([
+      {
+        path: participantPath,
+        fields: { lastRenamedAt: new Date(Date.now() - 61_000) }
+      }
+    ]);
+    const firstNoopBody = {
+      clientRequestId: "rename_noop_request_0001",
+      displayName
+    };
+
+    const firstNoop = await participantMeRequest({
+      body: firstNoopBody,
+      harness,
+      method: "PATCH",
+      session,
+      shareId
+    });
+    expect(firstNoop.response.status).toBe(200);
+    expect(firstNoop.body).toMatchObject({
+      participant: { displayName, renameCooldownEndsAt: expect.any(String) }
+    });
+    expect(await readEmulatorDocument(participantPath)).toMatchObject({
+      renameCount: 2,
+      renameDayCount: 2,
+      renameHourCount: 2
+    });
+    const requestsAfterNoop = await listEmulatorCollection(
+      `publicShareParticipantRenameRequests/${shareId}/items`
+    );
+    expect(requestsAfterNoop).toHaveLength(1);
+    expect(requestsAfterNoop[0]).toMatchObject({
+      noChange: true,
+      recentRequests: [
+        expect.objectContaining({ noChange: false, status: "succeeded" }),
+        expect.objectContaining({ noChange: true, status: "succeeded" })
+      ],
+      status: "succeeded"
+    });
+
+    const replay = await participantMeRequest({
+      body: firstNoopBody,
+      harness,
+      method: "PATCH",
+      session,
+      shareId
+    });
+    expect(replay.response.status).toBe(200);
+    expect(await readEmulatorDocument(participantPath)).toMatchObject({
+      renameCount: 2,
+      renameDayCount: 2,
+      renameHourCount: 2
+    });
+
+    const blockedByCooldownBody = {
+      clientRequestId: "rename_noop_request_0003",
+      displayName
+    };
+    const blockedByCooldown = await participantMeRequest({
+      body: blockedByCooldownBody,
+      harness,
+      method: "PATCH",
+      session,
+      shareId
+    });
+    expect(blockedByCooldown.response.status).toBe(429);
+    expect(blockedByCooldown.body).toMatchObject({ error: "rate_limited" });
+    expect(await listEmulatorCollection(
+      `publicShareParticipantRenameRequests/${shareId}/items`
+    )).toHaveLength(1);
+
+    await patchEmulatorDocuments([
+      {
+        path: participantPath,
+        fields: { lastRenamedAt: new Date(Date.now() - 61_000) }
+      }
+    ]);
+    const secondNoop = await participantMeRequest({
+      body: blockedByCooldownBody,
+      harness,
+      method: "PATCH",
+      session,
+      shareId
+    });
+    expect(secondNoop.response.status).toBe(200);
+    expect(await readEmulatorDocument(participantPath)).toMatchObject({
+      renameCount: 3,
+      renameDayCount: 3,
+      renameHourCount: 3
+    });
+    const compactedRequest = (await listEmulatorCollection(
+      `publicShareParticipantRenameRequests/${shareId}/items`
+    ))[0];
+    expect(compactedRequest.__id).toBe(participantId);
+    expect(compactedRequest.recentRequests).toHaveLength(3);
+
+    await patchEmulatorDocuments([
+      {
+        path: participantPath,
+        fields: { lastRenamedAt: new Date(Date.now() - 61_000) }
+      }
+    ]);
+    const blockedByHourlyLimit = await participantMeRequest({
+      body: {
+        clientRequestId: "rename_noop_request_0004",
+        displayName
+      },
+      harness,
+      method: "PATCH",
+      session,
+      shareId
+    });
+    expect(blockedByHourlyLimit.response.status).toBe(429);
+    expect(blockedByHourlyLimit.body).toMatchObject({ error: "rate_limited" });
+    expect(await readEmulatorDocument(participantPath)).toMatchObject({
+      renameCount: 3,
+      renameDayCount: 3,
+      renameHourCount: 3
+    });
+  }, 30_000);
+
+  it("enforces rename ownership, uniqueness, reserved names, and URL rejection", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_rename_security";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    const first = await openParticipantSession({
+      harness,
+      networkSuffix: 65,
+      shareId
+    });
+    const second = await openParticipantSession({
+      harness,
+      networkSuffix: 66,
+      shareId
+    });
+    const firstParticipant = await participantMeRequest({
+      harness,
+      session: first,
+      shareId
+    });
+    const firstParticipantId = String(
+      (firstParticipant.body.participant as Record<string, unknown>).participantId
+    );
+
+    const claimed = await participantMeRequest({
+      body: {
+        clientRequestId: "rename_unique_name_request_0001",
+        displayName: "테스터가"
+      },
+      harness,
+      method: "PATCH",
+      session: first,
+      shareId
+    });
+    expect(claimed.response.status).toBe(200);
+
+    const duplicate = await participantMeRequest({
+      body: {
+        clientRequestId: "rename_duplicate_name_request_0002",
+        displayName: "테스터가"
+      },
+      harness,
+      method: "PATCH",
+      session: second,
+      shareId
+    });
+    expect(duplicate.response.status).toBe(409);
+    expect(duplicate.body).toMatchObject({ error: "display_name_unavailable" });
+
+    const forged = await participantMeRequest({
+      body: {
+        clientRequestId: "rename_forged_participant_0003",
+        displayName: "테스터나",
+        participantId: firstParticipantId
+      },
+      harness,
+      method: "PATCH",
+      session: second,
+      shareId
+    });
+    expect(forged.response.status).toBe(400);
+
+    for (const [displayName, requestId] of [
+      ["emulator owner", "rename_owner_name_casefold_request_0001"],
+      ["Ｅｍｕｌａｔｏｒ　Ｏｗｎｅｒ", "rename_owner_name_nfkc_request_0002"]
+    ]) {
+      const ownerImpersonation = await participantMeRequest({
+        body: { clientRequestId: requestId, displayName },
+        harness,
+        method: "PATCH",
+        session: second,
+        shareId
+      });
+      expect(ownerImpersonation.response.status, displayName).toBe(409);
+      expect(ownerImpersonation.body).toMatchObject({
+        error: "display_name_unavailable"
+      });
+    }
+
+    for (const [displayName, requestId] of [
+      ["guest99", "rename_reserved_guest_request_0004"],
+      ["owner", "rename_reserved_owner_request_0005"],
+      ["www.example.com", "rename_url_like_request_0006"],
+      ["<script>alert(1)</script>", "rename_xss_request_0007"],
+      ["Alice\u034f", "rename_invisible_cgj_request_0008"],
+      ["Alice\u180b", "rename_invisible_mongolian_request_0009"],
+      ["Alice\u17b4", "rename_invisible_khmer_request_0010"],
+      ["8.8.8.8", "rename_ipv4_literal_request_0011"],
+      ["evil.dev", "rename_domain_request_0012"],
+      ["QuickMemo Support", "rename_quickmemo_support_request_0013"],
+      ["Admin Team", "rename_admin_team_request_0014"],
+      ["guest١", "rename_guest_arabic_digit_request_0015"],
+      ["guest۱", "rename_guest_persian_digit_request_0016"],
+      ["guest१", "rename_guest_devanagari_digit_request_0017"],
+      ["guestI", "rename_guest_ascii_i_request_0018"],
+      ["Guestl", "rename_guest_ascii_l_request_0019"],
+      ["guestO", "rename_guest_ascii_o_request_0020"],
+      ["0wner", "rename_owner_ascii_zero_request_0021"],
+      ["adm1n", "rename_admin_ascii_one_request_0022"],
+      ["supp0rt", "rename_support_ascii_zero_request_0023"],
+      ["qu1ckmemo", "rename_quickmemo_ascii_one_request_0024"],
+      ["quickmem0", "rename_quickmemo_ascii_zero_request_0025"],
+      ["systern", "rename_system_ascii_rn_request_0026"],
+      ["테스터Admin", "rename_mixed_admin_request_0027"],
+      ["Quick메모", "rename_mixed_brand_request_0028"],
+      ["所有者", "rename_japanese_owner_request_0029"]
+    ]) {
+      const rejected = await participantMeRequest({
+        body: { clientRequestId: requestId, displayName },
+        harness,
+        method: "PATCH",
+        session: second,
+        shareId
+      });
+      expect(rejected.response.status, displayName).toBe(400);
+    }
+
+    const failedAttemptLimit = await participantMeRequest({
+      body: {
+        clientRequestId: "rename_failed_attempt_limit_request_0030",
+        displayName: "another.dev"
+      },
+      harness,
+      method: "PATCH",
+      session: second,
+      shareId
+    });
+    expect(failedAttemptLimit.response.status).toBe(429);
+    expect(failedAttemptLimit.body).toMatchObject({ error: "rate_limited" });
+    expect(Number(failedAttemptLimit.response.headers.get("retry-after")))
+      .toBeGreaterThan(0);
+  }, 30_000);
+
+  it("omits reserved coarse prefixes from participant DTOs and new comments", async () => {
+    enableParticipantFeatures();
+    const shareId = "participant_reserved_prefix_omission";
+    const reservedIp = "203.0.114.1";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId,
+      showCommenterIpPrefix: true
+    });
+    const session = await openParticipantSession({
+      harness,
+      networkSuffix: 69,
+      shareId,
+      testClientIp: reservedIp
+    });
+    const participantMe = await participantMeRequest({
+      harness,
+      session,
+      shareId,
+      testClientIp: reservedIp
+    });
+    expect(participantMe.response.status).toBe(200);
+    expect(participantMe.body.participant).not.toHaveProperty("currentIpPrefix");
+
+    const created = await commentRequest({
+      body: {
+        body: "reserved prefix must stay absent",
+        clientRequestId: "participant_reserved_prefix_comment_0001"
+      },
+      harness,
+      session,
+      shareId,
+      testClientIp: reservedIp
+    });
+    expect(created.response.status).toBe(201);
+    expect(created.body.comment).not.toHaveProperty("ipPrefix");
+    const comments = await listEmulatorCollection(
+      `publicShareComments/${shareId}/items`
+    );
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).not.toHaveProperty("ipPrefixSnapshot");
+    expect(JSON.stringify({
+      response: participantMe.body,
+      stored: comments
+    })).not.toContain("203.0");
+  }, 15_000);
+
+  it("keeps IP snapshots absent when the independent IP kill switch is off", async () => {
+    process.env.SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED = "true";
+    process.env.SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED = "false";
+    const shareId = "participant_ip_kill_switch";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId,
+      showCommenterIpPrefix: true
+    });
+    const session = await openParticipantSession({
+      harness,
+      networkSuffix: 67,
+      shareId
+    });
+    const created = await commentRequest({
+      body: {
+        body: "prefix disabled",
+        clientRequestId: "participant_comment_no_prefix_0001"
+      },
+      harness,
+      session,
+      shareId,
+      testClientIp: "203.226.244.27"
+    });
+    expect(created.response.status).toBe(201);
+    expect(created.body.comment).not.toHaveProperty("ipPrefix");
+    const comments = await listEmulatorCollection(
+      `publicShareComments/${shareId}/items`
+    );
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).not.toHaveProperty("ipPrefixSnapshot");
+    expect(comments[0]).not.toHaveProperty("ipPrefixVersion");
+  }, 15_000);
 });

@@ -22,6 +22,13 @@ without changing the existing end-to-end content encryption boundary.
 - Email false does not disable Core v2. Existing email-gated policies and
   sessions fail closed with `email_feature_unavailable`; they are never
   downgraded to a link-only or authenticated-users policy.
+- Comment participant identity is independently gated by
+  `SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED=true`. Partial network display
+  additionally requires `SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED=true` and the
+  share owner's `showCommenterIpPrefix` policy. All three checks fail closed.
+- `SECURE_SHARE_MAX_PARTICIPANTS_PER_SHARE` defaults to and is clamped at
+  1,000. Lowering it blocks only new participant allocation; existing
+  participants retain their assigned number and comment capability.
 - Turning the server flag off makes every v2 API fail closed while leaving v1
   shares unchanged.
 
@@ -179,6 +186,55 @@ instead of creating a duplicate. Control, bidi, and zero-width format
 characters used for spoofing are rejected. Successful creation is prepended
 locally and deletion removes the local row without refetching the whole page.
 
+### Comment participants and partial network display
+
+Participant numbers are allocated only after every share access gate succeeds.
+Metadata, `HEAD`, crawlers, failed passwords or OTPs, owner preview, expired
+shares, and revoked shares do not allocate a participant. Within one share the
+identity priority is owner, active QuickMemo UID, verified email, then an
+anonymous share-scoped random cookie. IP addresses are never an identity key.
+The anonymous cookie is `HttpOnly`, `Secure` in Production, `SameSite=Lax`,
+and scoped to the Secure Share API path; its value is not exposed to
+JavaScript or persisted in web storage. Each newly issued cookie contains a
+CSPRNG nonce and a domain-separated server signature. The original browser
+binding and access-attempt ID derive only its idempotent issuance identity, so
+parallel retries converge while a later browser-binding rotation does not
+invalidate the longer-lived participant cookie. When participant identity is
+enabled, unsigned or pre-v2 participant-cookie formats fail closed; with the
+flag disabled, existing Secure Share v1/v2 behavior is unchanged.
+
+The first successful comment-capable access receives `guest1`, then `guest2`,
+without number reuse. Allocation uses one Firestore transaction across the
+share/policy snapshot, participant, and per-share counter. Repeated or
+concurrent access by the same identity converges on one participant. At the
+configured cap a new viewer can still read the share but cannot comment;
+existing participants continue to work. Comment pages are capped at 20 and
+hydrate current participant names through one bounded batch read, not one read
+per comment.
+
+A participant may rename only itself. Names are NFKC-normalized and compared
+case-insensitively per share, contain 1–24 graphemes, and accept Korean,
+English, Japanese, numbers, spaces, `.`, `_`, and `-`. Control, bidi,
+zero-width, HTML/URL-like, excessive combining, `guestN`, owner/admin/system,
+localized owner/official markers, and QuickMemo-impersonation forms are
+rejected. A persistent name registry
+enforces uniqueness. Rename requests use an HMAC-bound `clientRequestId`,
+60-second cooldown, three-per-hour and ten-per-day limits, `Retry-After`, and
+an audit event; exact retries are idempotent. Separate identity and
+share-network attempt buckets bound invalid, unavailable, and otherwise failed
+rename requests before they can repeatedly enter the rename transaction.
+
+When every network-display gate is enabled, a new comment may store only a
+derived public prefix snapshot: the first two IPv4 octets such as `203.226`,
+or the first two normalized IPv6 groups. IPv4-mapped IPv6 is normalized to the
+IPv4 rule. Malformed, private, loopback, link-local, multicast, documentation,
+benchmark, and other non-public ranges yield no prefix. Production accepts
+only Vercel's managed forwarding header; arbitrary forwarded headers and
+multi-hop values are ignored. Full IP values are never stored, returned,
+logged, placed in DOM attributes or accessibility text, or used for
+participant identity. Disabling either the server flag or owner policy omits
+the prefix from API responses, including older comment snapshots.
+
 Save-copy requires both a valid share session and an active, non-anonymous
 QuickMemo login. Decryption and re-encryption stay in the browser. The content
 key is never sent to the server. A copy uses a new note key and independent
@@ -237,6 +293,10 @@ Rules and are accessed only by the server:
 - `publicShareRateLimits`
 - `publicShareComments`
 - `publicShareAuditEvents`
+- `publicShareParticipants`
+- `publicShareParticipantNames`
+- `publicShareParticipantRenameRequests`
+- `publicShareParticipantCounters`
 
 `publicNoteShares/{shareId}` retains the encrypted content and owner metadata.
 For `schemaVersion: 2`, public client reads are denied. Owner display remains
@@ -247,6 +307,13 @@ are denied.
 Session documents contain token and CSRF digests only. They never contain the
 content key, password, OTP, raw email, raw IP, Firebase ID token, cookie, or
 authorization header.
+
+Participant documents contain only server-derived identity HMACs, an opaque
+participant ID, assigned guest number, current/snapshot display names, bounded
+rename counters, and timestamps. The separate name registry contains a
+normalized-name HMAC and participant ID. Participant, registry, rename-request,
+and counter documents have no independent expiry field; they are deleted only
+with the share tree after the current share expiration is rechecked.
 
 Email delivery documents contain only HMAC email identifiers, provider message
 ID hashes, quota bucket IDs, lifecycle status, owner/share IDs, and timestamps.
@@ -441,6 +508,15 @@ from both groups. Generate every secret independently from at least 32 random
 bytes (48–64 recommended), inject it through stdin or an equivalent
 non-logging secret workflow, and report only whether each variable exists.
 
+Comment participant identity additionally requires a distinct server-only
+`SHARE_PARTICIPANT_HMAC_KEY` of at least 32 random bytes. Keep
+`SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED=false` and
+`SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED=false` until that secret and the
+comment/rename Production smoke are verified. Neither flag nor secret uses a
+`VITE_` prefix. Prefix hashing uses `SHARE_RATE_LIMIT_HMAC_KEY`; activation
+fails closed if that key is shorter than 32 bytes or reuses the password
+pepper or session HMAC key.
+
 Email readiness additionally requires all of the following:
 
 - `SHARE_EMAIL_PROVIDER=resend`
@@ -468,6 +544,8 @@ npm run lint
 npm run typecheck
 npm test
 npm run test:rules
+npm run test:integration
+npm run test:e2e
 npm run build
 npm audit
 git diff --check
@@ -481,6 +559,80 @@ all access combinations, OTP delivery, one-time concurrency, refresh,
 download bypass, attachment tampering, comments, save-copy cleanup, policy
 change, revoke, expiry, 320/390 px mobile layout, dark mode, focus, console,
 CSP, and secret-free network responses.
+
+### Opt-in performance benchmark
+
+Run the deterministic local benchmark separately from the default test suite:
+
+```bash
+npm run benchmark:secure-share
+```
+
+The command starts isolated Auth and Firestore emulators, runs 12 sequential
+warm samples by default, and emits `SECURE_SHARE_PERFORMANCE_JSON` plus
+`SECURE_SHARE_REACT_PROFILE_JSON`. Override the sample count with
+`SECURE_SHARE_BENCHMARK_SAMPLES=5..18`; use
+`SECURE_SHARE_BENCHMARK_MODE=legacy` when only the flags-off scenarios are
+needed. The `.benchmark.ts` and `.benchmark.tsx` suffixes are not selected by
+the default Vitest include pattern, and no latency threshold runs in default
+CI.
+
+The counters are emulator request-cost proxies, not Firebase billing exports.
+A point document GET, including a missing document, is one read; `batchGet`
+counts requested documents; query/list counts returned documents with a
+minimum of one read. Writes count successful commit entries, while write
+attempts also count entries in failed commits. HTTP 400/409 transaction commit
+responses and rollback requests are reported separately.
+
+The following raw result was recorded on 2026-07-29 KST. The flags-off current
+rows run the participant and prefix flags as `false` on the feature worktree.
+The flags-on rows run both flags as `true`. The pristine baseline used
+`origin/master` SHA `1b0db91747b6f1cc05f4de88631c1adc3a400a05` with the same
+benchmark harness.
+
+| Worktree / flags | Operation | p50 ms | p95 ms | Reads | Writes | Write attempts | Transaction starts | Conflicts / rollbacks |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| master baseline / off | Access | 25.28 | 49.97 | 10 | 6 | 6 | 0 | 0 / 0 |
+| master baseline / off | Comment create | 22.62 | 33.55 | 11 | 5 | 5 | 1 | 0 / 0 |
+| master baseline / off | Comment list, 20 | 12.43 | 39.83 | 25 | 0 | 0 | 0 | 0 / 0 |
+| master baseline / off | Revoke | 12.78 | 15.68 | 4 | 3 | 3 | 0 | 0 / 0 |
+| current / off | Access | 26.59 | 56.44 | 10 | 6 | 6 | 0 | 0 / 0 |
+| current / off | Comment create | 24.36 | 34.57 | 11 | 5 | 5 | 1 | 0 / 0 |
+| current / off | Comment list, 20 | 12.88 | 39.91 | 25 | 0 | 0 | 0 | 0 / 0 |
+| current / off | Revoke | 12.80 | 15.31 | 4 | 3 | 3 | 0 | 0 / 0 |
+| current / on | First participant access | 21.61 | 23.63 | 15 | 8 | 8 | 1 | 0 / 0 |
+| current / on | Existing participant access | 17.80 | 18.87 | 11 | 6 | 6 | 0 | 0 / 0 |
+| current / on | Participant comment create | 19.54 | 21.47 | 12 | 5 | 5 | 1 | 0 / 0 |
+| current / on | Comment list, same participant 20 | 12.44 | 13.84 | 26 | 0 | 0 | 0 | 0 / 0 |
+| current / on | Comment list, 20 participants | 12.94 | 15.00 | 45 | 0 | 0 | 0 | 0 / 0 |
+| current / on | Participant rename | 17.64 | 30.29 | 14 | 6 | 6 | 1 | 0 / 0 |
+
+Against the pristine flags-off baseline, the current flags-off p50/p95 changes
+were Access `+5.2%/+12.9%`, comment create `+7.7%/+3.0%`, comment list
+`+3.6%/+0.2%`, and revoke `+0.2%/-2.4%`. Firestore operation counts were
+unchanged. One 20-comment page costs one bounded participant `batchGet`: the
+same-author case adds one read and the all-distinct case adds 20, with no
+per-comment request loop.
+
+The paired jsdom React Profiler scenario rendered 20 comments, then renamed
+their participant. It recorded 3 initial commits and 3 rename-response commits.
+The rename caused no additional content decryption (`2` before and after), no
+content refetch (`1` total), and no comment-page refetch (`1` total). Its
+measured render duration is diagnostic only because jsdom timing is not a
+browser performance result.
+
+The same build reported these focused bundle changes:
+
+| Asset | master raw / gzip kB | current raw / gzip kB | gzip change |
+| --- | ---: | ---: | ---: |
+| Secure Public Share Viewer | 29.02 / 9.08 | 37.45 / 11.09 | +2.01 kB |
+| Secure Share service | 23.75 / 7.88 | 30.19 / 10.11 | +2.23 kB |
+| CSS | 261.48 / 40.34 | 263.70 / 40.60 | +0.26 kB |
+
+These warm local emulator results are reproducible regression evidence, but
+they do not prove Production p95 latency or free-tier billing. Validate the
+Production target separately with synthetic, non-sensitive smoke data and
+Vercel/Firebase usage evidence before activation.
 
 ## Production rollout
 
@@ -517,10 +669,16 @@ CSP, and secret-free network responses.
 8. Smoke legacy login, notes, autosave, v1 shares, attachments, dark mode,
    schedule, matrix, cleanup authentication, CSP, and 5xx behavior. Confirm
    official Vercel/Firebase usage remains inside the activation gate.
-9. Enable only Core server/client, keep email false, redeploy the same master
-   SHA, and run the complete Production smoke and synthetic cleanup matrix.
-   If and only if a verified provider is already configured, email may instead
-   be tested separately before its flag is enabled.
+9. Enable only Core server/client, keep email and both participant flags false,
+   redeploy the same master SHA, and run the legacy/Core regression smoke.
+10. Inject `SHARE_PARTICIPANT_HMAC_KEY` through a non-logging server-only
+    workflow, set participant identity and comment IP-prefix flags true, and
+    redeploy that same master SHA. Run only synthetic participant allocation,
+    rename, uniqueness, comment-prefix/policy-off, revoke, cleanup, mobile,
+    accessibility, console, and network-response smoke. Remove every synthetic
+    share/account created by the smoke.
+11. If and only if a verified provider is already configured, email may be
+    tested separately before its independent flag is enabled.
 
 Do not activate Core if an index is building, any P0/P1 issue remains, a
 required check fails, the global counter is absent, or the rollback deployment
@@ -529,10 +687,12 @@ is unknown. An absent email credential blocks only email sharing.
 ## Rollback
 
 First set `VITE_SECURE_SHARE_V2_ENABLED=false`,
-`SECURE_SHARE_V2_ENABLED=false`, and `SECURE_SHARE_EMAIL_ENABLED=false`, then
-redeploy the same guarded SHA. Keep `FREE_TIER_MODE=true` and preserve the
-global counter. This removes v2 UI and makes its API fail closed without
-deleting user data or removing the v1 attachment guard.
+`SECURE_SHARE_V2_ENABLED=false`, `SECURE_SHARE_EMAIL_ENABLED=false`,
+`SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED=false`, and
+`SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED=false`, then redeploy the same guarded
+SHA. Keep `FREE_TIER_MODE=true`, preserve the global and participant counters,
+and do not delete participant/name state. This removes v2 UI and makes its API
+fail closed without deleting user data or removing the v1 attachment guard.
 
 Record the flags-off guarded deployment as the primary rollback candidate
 before enabling Core. Only if the guarded SHA itself breaks compatibility

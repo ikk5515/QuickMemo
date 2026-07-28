@@ -46,7 +46,8 @@ const secureSharePolicyInputFields = new Set([
   "password",
   "passwordEnabled",
   "permissionLevel",
-  "quickCopyButtonVisible"
+  "quickCopyButtonVisible",
+  "showCommenterIpPrefix"
 ]);
 
 const emailLocalPartPattern = /^[\p{L}\p{N}!#$%&'*+/=?^_`{|}~.-]+$/u;
@@ -66,6 +67,7 @@ export interface SecureSharePolicyInput {
   passwordEnabled: boolean;
   permissionLevel: SecureSharePermissionLevel;
   quickCopyButtonVisible: boolean;
+  showCommenterIpPrefix: boolean;
 }
 
 export type SecureSharePolicyField = keyof SecureSharePolicyInput | string;
@@ -164,7 +166,8 @@ export function defaultSecureSharePolicy(): SecureSharePolicyInput {
     oneTimeScope: "global",
     passwordEnabled: false,
     permissionLevel: "view",
-    quickCopyButtonVisible: true
+    quickCopyButtonVisible: true,
+    showCommenterIpPrefix: false
   };
 }
 
@@ -420,6 +423,10 @@ export function validateSecureSharePolicyInput(
   const oneTimeEnabled = requiredBoolean("oneTimeEnabled");
   const downloadAllowed = requiredBoolean("downloadAllowed");
   const quickCopyButtonVisible = requiredBoolean("quickCopyButtonVisible");
+  const requestedShowCommenterIpPrefix = requiredBoolean("showCommenterIpPrefix");
+  const showCommenterIpPrefix = permissionLevel === "comment"
+    ? requestedShowCommenterIpPrefix
+    : false;
   const emailVerificationRequired = accessMode === "allowed_emails"
     ? true
     : requestedEmailVerification;
@@ -561,7 +568,8 @@ export function validateSecureSharePolicyInput(
       ...(password === undefined ? {} : { password }),
       passwordEnabled,
       permissionLevel,
-      quickCopyButtonVisible
+      quickCopyButtonVisible,
+      showCommenterIpPrefix
     }
   };
 }
@@ -617,6 +625,9 @@ export function summarizeSecureSharePolicy(
 
   if (policy.permissionLevel === "comment") {
     clauses.push("접근자는 댓글을 작성할 수 있습니다.");
+    if (policy.showCommenterIpPrefix) {
+      clauses.push("댓글 작성자 이름 옆에 전체 IP가 아닌 일부 네트워크 대역이 표시됩니다.");
+    }
   } else if (policy.permissionLevel === "save_copy") {
     clauses.push("로그인한 접근자는 QuickMemo에 독립된 복사본을 저장할 수 있습니다.");
   } else {

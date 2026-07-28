@@ -98,6 +98,23 @@ export function safeDisplayName(
   allowReserved?: boolean
 ): string;
 
+export function safeParticipantDisplayName(value: unknown): {
+  displayName: string;
+  normalizedDisplayName: string;
+};
+export function safeIpPrefixSnapshot(value: unknown): string | null;
+
+export function participantIdentityHash(
+  shareId: string,
+  identityType: string,
+  identityValue: string
+): string;
+
+export function participantNameRegistryId(
+  shareId: string,
+  normalizedDisplayName: string
+): string;
+
 export function emailChallengeMinimumResponseMilliseconds(
   random?: (minimum: number, maximum: number) => number
 ): number;
@@ -235,13 +252,21 @@ export function issueAccessSession(
     displayName: string;
     identityHash: string;
     identityType: string;
+    participantIdentityHash: string;
+    participantToken: string;
+    participantTokenDigest: string;
+    setParticipantCookie: boolean;
   },
   browserBindingHash: string,
   attemptHash: string,
+  networkHash: string,
   requestId: string
 ): Promise<{
   csrfToken: string;
   expiresAt: string;
+  participantId: string;
+  participantIdentityEnabled: boolean;
+  participantLimitReached: boolean;
   policy: Record<string, unknown>;
   sessionToken: string;
 }>;
@@ -252,13 +277,19 @@ export function resolveAccessIdentity(
   },
   context: { accessToken: string; projectId: string },
   shareId: string,
-  policy: Record<string, unknown>,
+  stateOrPolicy:
+    | Record<string, unknown>
+    | {
+      policy: Record<string, unknown>;
+      share: Record<string, unknown>;
+    },
   body: Record<string, unknown>,
   otpVerificationTiming?: {
     now?: () => number;
     random?: (minimum: number, maximum: number) => number;
     wait?: (milliseconds: number) => Promise<unknown>;
-  }
+  },
+  preverifiedCaller?: Record<string, unknown> | null
 ): Promise<{
   authorUid: string;
   caller: Record<string, unknown> | null;
@@ -266,7 +297,29 @@ export function resolveAccessIdentity(
   displayName: string;
   identityHash: string;
   identityType: string;
+  participantIdentityHash: string;
+  participantToken: string;
+  participantTokenDigest: string;
+  setParticipantCookie: boolean;
 }>;
+
+export function issueAnonymousParticipantToken(
+  shareId: string,
+  browserBinding: string,
+  unlockAttemptId: string
+): {
+  issuanceIdentity: string;
+  token: string;
+  version: 2;
+};
+
+export function verifiedAnonymousParticipantToken(
+  shareId: string,
+  token: string
+): {
+  issuanceIdentity: string;
+  version: 2;
+};
 
 export function readJsonBody(
   request: {

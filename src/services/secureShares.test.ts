@@ -5,7 +5,12 @@ import {
   getSecureShareAttachmentForCopy,
   getSecureShareFeatureStatus,
   getSecureShareMetadata,
+  getSecureShareParticipant,
+  listSecureShareComments,
   listOwnedSecureShares,
+  normalizeSecureShareParticipantDisplayName,
+  parseSecureShareIpPrefix,
+  renameSecureShareParticipant,
   secureShareApiActionContract,
   secureShareApiActions,
   secureShareApiRequest,
@@ -68,6 +73,7 @@ describe("secure share API client", () => {
       "access",
       "session",
       "content",
+      "participant-me",
       "comments",
       "comment-delete",
       "copy-grant",
@@ -76,6 +82,11 @@ describe("secure share API client", () => {
     ]));
     expect(secureShareApiActionContract["owner-update"].methods).toEqual(["PATCH"]);
     expect(secureShareApiActionContract.comments.methods).toEqual(["GET", "POST"]);
+    expect(secureShareApiActionContract["participant-me"]).toMatchObject({
+      auth: "session",
+      csrf: "after_session",
+      methods: ["GET", "PATCH"]
+    });
     expect(secureShareApiActionContract["feature-status"]).toMatchObject({
       auth: "optional",
       csrf: "none",
@@ -264,6 +275,271 @@ describe("secure share API client", () => {
     const headers = new Headers(vi.mocked(fetch).mock.calls[1][1]?.headers);
     expect(headers.get("authorization")).toBe(`Bearer ${idToken}`);
     expect(headers.get("x-csrf-token")).toBe(csrfToken);
+  });
+
+  it("gets and renames only the current session participant through the flat router", async () => {
+    const participant = {
+      participantId: "participant_123456",
+      guestNumber: 1,
+      displayName: "guest1",
+      isSystemDefaultName: true,
+      canRename: true,
+      renameCooldownEndsAt: null,
+      capabilities: {
+        canRename: true,
+        showsCommenterIpPrefix: true
+      },
+      currentIpPrefix: "203.226"
+    };
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        shareId,
+        csrfToken,
+        permissionLevel: "comment"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        participant,
+        requestId: "request_participant_get"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        participant: {
+          ...participant,
+          displayName: "인기",
+          isSystemDefaultName: false,
+          renameCooldownEndsAt: "2026-07-29T01:01:00.000Z"
+        },
+        requestId: "request_participant_patch"
+      }));
+
+    await unlockSecureShare(shareId, {
+      unlockAttemptId: "attempt_participant_123456"
+    });
+    await expect(getSecureShareParticipant(shareId)).resolves.toEqual(participant);
+    await expect(renameSecureShareParticipant(shareId, {
+      displayName: "  인기  ",
+      clientRequestId: "rename-request-123456"
+    })).resolves.toMatchObject({
+      displayName: "인기",
+      currentIpPrefix: "203.226"
+    });
+
+    const getRequest = vi.mocked(fetch).mock.calls[1];
+    const patchRequest = vi.mocked(fetch).mock.calls[2];
+    expect(new URL(String(getRequest[0]), "https://quickmemo.example").searchParams.get("action"))
+      .toBe("participant-me");
+    expect(getRequest[1]?.method).toBe("GET");
+    expect(new URL(String(patchRequest[0]), "https://quickmemo.example").searchParams.get("action"))
+      .toBe("participant-me");
+    expect(patchRequest[1]?.method).toBe("PATCH");
+    expect(new Headers(patchRequest[1]?.headers).get("x-csrf-token")).toBe(csrfToken);
+    expect(JSON.parse(String(patchRequest[1]?.body))).toEqual({
+      displayName: "인기",
+      clientRequestId: "rename-request-123456"
+    });
+  });
+
+  it("never requests more comments than the server page-size contract", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        shareId,
+        csrfToken,
+        permissionLevel: "comment"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        items: [],
+        nextCursor: null,
+        requestId: "request_comments_bounded"
+      }));
+
+    await unlockSecureShare(shareId, {
+      unlockAttemptId: "attempt_comments_bounded_123456"
+    });
+    await listSecureShareComments(shareId, { limit: 100 });
+
+    const commentsUrl = new URL(
+      String(vi.mocked(fetch).mock.calls[1][0]),
+      "https://quickmemo.example"
+    );
+    expect(commentsUrl.searchParams.get("action")).toBe("comments");
+    expect(commentsUrl.searchParams.get("limit")).toBe("20");
+  });
+
+  it("fails closed on unsafe participant fields and accepts only canonical partial prefixes", async () => {
+    const unsafeParticipant = {
+      participantId: "participant_123456",
+      guestNumber: 1,
+      displayName: "guest1",
+      isSystemDefaultName: true,
+      canRename: true,
+      renameCooldownEndsAt: null,
+      capabilities: {
+        canRename: true,
+        showsCommenterIpPrefix: true
+      },
+      currentIpPrefix: "203.226.244.27",
+      identityHash: "must-not-cross-the-client-boundary"
+    };
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      ok: true,
+      participant: unsafeParticipant,
+      requestId: "request_participant_unsafe"
+    }));
+
+    await expect(getSecureShareParticipant(shareId)).rejects.toMatchObject({
+      code: "invalid_response"
+    });
+    expect(parseSecureShareIpPrefix("203.226")).toBe("203.226");
+    expect(parseSecureShareIpPrefix("2001:2d8")).toBe("2001:2d8");
+    expect(parseSecureShareIpPrefix("203.226.244.27")).toBeNull();
+    expect(parseSecureShareIpPrefix("2001:2d8:1:2")).toBeNull();
+    expect(parseSecureShareIpPrefix("0203.226")).toBeNull();
+    expect(parseSecureShareIpPrefix("999.226")).toBeNull();
+    expect(parseSecureShareIpPrefix("2001:2D8")).toBeNull();
+  });
+
+  it("keeps participant display-name validation aligned with the server policy", () => {
+    expect(normalizeSecureShareParticipantDisplayName("Alice 42")).toBe("Alice 42");
+    expect(normalizeSecureShareParticipantDisplayName("  Alice   Bob  ")).toBe("Alice Bob");
+    expect(normalizeSecureShareParticipantDisplayName("  山田 太郎  ")).toBe("山田 太郎");
+    expect(normalizeSecureShareParticipantDisplayName("김인기")).toBe("김인기");
+    expect(normalizeSecureShareParticipantDisplayName("테스터A")).toBe("테스터A");
+    expect(normalizeSecureShareParticipantDisplayName("やまだ太郎")).toBe("やまだ太郎");
+    expect(normalizeSecureShareParticipantDisplayName("テスターB")).toBe("テスターB");
+    expect(normalizeSecureShareParticipantDisplayName("ユーザー")).toBe("ユーザー");
+    expect(normalizeSecureShareParticipantDisplayName("비공식 연구자")).toBe("비공식 연구자");
+    expect(normalizeSecureShareParticipantDisplayName("非公式研究者")).toBe("非公式研究者");
+    expect(normalizeSecureShareParticipantDisplayName("王小明")).toBe("王小明");
+    expect(normalizeSecureShareParticipantDisplayName("李系统")).toBe("李系统");
+
+    for (const displayName of [
+      ". _ -",
+      "ーー",
+      "\u115f",
+      "\u1160",
+      "\u3164",
+      "\uffa0",
+      "A\ufe0f",
+      `A${String.fromCodePoint(0xe0100)}`,
+      "Alice\u034f",
+      "Alice\u180b",
+      "Alice\u17b4",
+      "Alice\nBob",
+      "Alice\tBob",
+      "Alice\u2028Bob",
+      "Alice\u2029Bob",
+      "A\u0338",
+      "admın",
+      "admɪn",
+      "ᴀdmin",
+      "adᴍin",
+      "ᴏwner",
+      "quıckmemo",
+      "quickmem〇",
+      "guest1",
+      "guest١",
+      "guest۱",
+      "guest१",
+      "guestI",
+      "Guestl",
+      "guestO",
+      "0wner",
+      "adm1n",
+      "supp0rt",
+      "qu1ckmemo",
+      "quickmem0",
+      "systern",
+      "테스터Admin",
+      "Support테스터",
+      "퀵Memo",
+      "Quick메모",
+      "クイックMemo",
+      "Quickメモ",
+      "오너",
+      "어드민",
+      "서포트",
+      "アドミン",
+      "サポート",
+      "所有者",
+      "공식",
+      "공식계정",
+      "공식계정1",
+      "공식안내",
+      "公式",
+      "公式アカウント",
+      "公式アカウント1",
+      "公式案内",
+      "管理员",
+      "管理员1",
+      "管理員通知",
+      "系统",
+      "系统通知",
+      "系統通知",
+      "官方",
+      "官方账号1",
+      "官方帳號通知",
+      "Owner",
+      "QuickMemo-Official",
+      "QuickMemo Support",
+      "Admin Team",
+      "official account",
+      "Support Crew",
+      "System Admin",
+      "System Owner",
+      "System X",
+      "운영자",
+      "퀵메모",
+      "친절한운영자팀",
+      "管理者",
+      "クイックメモ",
+      "クイックメモ案内",
+      "evil.dev",
+      "123.com",
+      "1.co",
+      "2026.kr",
+      "8.8.8.8"
+    ]) {
+      expect(
+        () => normalizeSecureShareParticipantDisplayName(displayName),
+        displayName
+      ).toThrow("한글·영문·일본어·숫자");
+    }
+  });
+
+  it("rejects private, loopback, link-local, test, and documentation prefixes", () => {
+    for (const prefix of [
+      "0.1",
+      "10.1",
+      "100.64",
+      "127.0",
+      "169.254",
+      "172.16",
+      "192.0",
+      "192.88",
+      "192.168",
+      "198.18",
+      "198.51",
+      "203.0",
+      "224.0",
+      "0:0",
+      "fc00:1",
+      "fe80:1",
+      "ff00:1",
+      "2001:2",
+      "2001:db8",
+      "3fff:0"
+    ]) {
+      expect(parseSecureShareIpPrefix(prefix), prefix).toBeNull();
+    }
+
+    expect(parseSecureShareIpPrefix("115.161")).toBe("115.161");
+    expect(parseSecureShareIpPrefix("203.226")).toBe("203.226");
+    expect(parseSecureShareIpPrefix("2001:2d8")).toBe("2001:2d8");
+    expect(parseSecureShareIpPrefix("2406:da1c")).toBe("2406:da1c");
   });
 
   it("blocks content keys and fragment-bearing URLs before fetch", async () => {

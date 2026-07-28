@@ -222,6 +222,7 @@ export interface SecureShareOwnerSummary {
   quickCopyButtonVisible: boolean;
   ready: boolean;
   requiresEmailVerification: boolean;
+  showCommenterIpPrefix: boolean;
   revokedAt: string | null;
   schemaVersion: 2;
   shareId: string;

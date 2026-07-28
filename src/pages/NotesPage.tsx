@@ -1596,6 +1596,7 @@ export function parseSecureShareOwnerSummary(value: unknown): SecureShareOwnerSu
     revokedAt,
     schemaVersion,
     shareId,
+    showCommenterIpPrefix,
     sourceAttachmentRevision,
     sourceNoteId,
     sourceRevision,
@@ -1622,6 +1623,10 @@ export function parseSecureShareOwnerSummary(value: unknown): SecureShareOwnerSu
     || typeof oneTimeEnabled !== "boolean"
     || typeof downloadAllowed !== "boolean"
     || typeof quickCopyButtonVisible !== "boolean"
+    || (
+      showCommenterIpPrefix !== undefined
+      && typeof showCommenterIpPrefix !== "boolean"
+    )
     || !Number.isSafeInteger(attachmentCount)
     || Number(attachmentCount) < 0
     || Number(attachmentCount) > publicNoteShareMaxAttachmentCount
@@ -1657,6 +1662,8 @@ export function parseSecureShareOwnerSummary(value: unknown): SecureShareOwnerSu
     revokedAt: optionalSecureShareDateString(revokedAt, "중단 시간"),
     schemaVersion: 2,
     shareId,
+    showCommenterIpPrefix: permissionLevel === "comment"
+      && showCommenterIpPrefix === true,
     sourceAttachmentRevision: sourceAttachmentRevision === undefined
       ? undefined
       : Number(sourceAttachmentRevision),
@@ -1855,7 +1862,9 @@ export function parseSecureShareOwnerDetailsResponse(value: unknown): ParsedSecu
       oneTimeScope: "global",
       passwordEnabled: share.hasPassword,
       permissionLevel: share.permissionLevel,
-      quickCopyButtonVisible: share.quickCopyButtonVisible
+      quickCopyButtonVisible: share.quickCopyButtonVisible,
+      showCommenterIpPrefix: share.permissionLevel === "comment"
+        && share.showCommenterIpPrefix
     }
   };
 }

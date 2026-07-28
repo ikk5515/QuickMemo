@@ -203,6 +203,7 @@ export function SecureShareSettingsModal({
   const passwordHelpId = useId();
   const customExpiryId = useId();
   const customExpiryHelpId = useId();
+  const commenterIpPrefixHelpId = useId();
   const dialogRef = useRef<HTMLElement>(null);
   const firstControlRef = useRef<HTMLInputElement>(null);
   const errorRef = useRef<HTMLDivElement>(null);
@@ -462,6 +463,17 @@ export function SecureShareSettingsModal({
         ? draft.customExpiresAt
           ?? new Date(validationNow.getTime() + 24 * 60 * 60 * 1_000).toISOString()
         : null
+    });
+  }
+
+  function selectPermission(permissionLevel: SecureSharePermissionLevel) {
+    updateDraft({
+      permissionLevel,
+      showCommenterIpPrefix: permissionLevel === "comment"
+        ? mode === "create"
+          ? true
+          : draft.showCommenterIpPrefix
+        : false
     });
   }
 
@@ -1014,7 +1026,7 @@ export function SecureShareSettingsModal({
                         checked={draft.permissionLevel === option.value}
                         disabled={busy}
                         name={`${titleId}-permission`}
-                        onChange={() => updateDraft({ permissionLevel: option.value })}
+                        onChange={() => selectPermission(option.value)}
                         type="radio"
                         value={option.value}
                       />
@@ -1026,6 +1038,28 @@ export function SecureShareSettingsModal({
                   );
                 })}
               </div>
+              {draft.permissionLevel === "comment" && (
+                <label className="secure-share-toggle-row">
+                  <span>
+                    <strong>댓글 작성자의 IP 일부 표시</strong>
+                    <small>
+                      댓글 작성 시 전체 IP가 아닌 앞부분만 작성자 이름 옆에 표시됩니다.
+                    </small>
+                    <small id={commenterIpPrefixHelpId}>
+                      예: guest1 (203.226). 전체 IP 주소는 표시하거나 저장하지 않습니다.
+                    </small>
+                  </span>
+                  <input
+                    aria-describedby={commenterIpPrefixHelpId}
+                    checked={draft.showCommenterIpPrefix}
+                    disabled={busy}
+                    onChange={(event) => updateDraft({
+                      showCommenterIpPrefix: event.target.checked
+                    })}
+                    type="checkbox"
+                  />
+                </label>
+              )}
               {draft.permissionLevel === "save_copy" && !draft.downloadAllowed && (
                 <p className="secure-share-info" role="status">
                   직접 다운로드는 제한되지만 QuickMemo 내부 복사본 저장은 허용됩니다.

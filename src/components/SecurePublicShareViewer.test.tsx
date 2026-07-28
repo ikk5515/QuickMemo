@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   getCopyAttachment: vi.fn(),
   getDownload: vi.fn(),
   getMetadata: vi.fn(),
+  getParticipant: vi.fn(),
   getPreview: vi.fn(),
   extractHwpPreviewHtml: vi.fn(),
   extractHwpxPreviewHtml: vi.fn(),
@@ -21,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   importKey: vi.fn(),
   listComments: vi.fn(),
   refreshSession: vi.fn(),
+  renameParticipant: vi.fn(),
   requestChallenge: vi.fn(),
   requestCopyGrant: vi.fn(),
   renderSafeDocxPreviewSrcDoc: vi.fn(),
@@ -52,8 +54,20 @@ vi.mock("../services/secureShares", () => {
     getSecureShareAttachmentPreview: mocks.getPreview,
     getSecureShareContent: mocks.getContent,
     getSecureShareMetadata: mocks.getMetadata,
+    getSecureShareParticipant: mocks.getParticipant,
     listSecureShareComments: mocks.listComments,
+    normalizeSecureShareParticipantDisplayName: (value: string) =>
+      value.normalize("NFKC").trim().replace(/\s+/gu, " "),
+    parseSecureShareIpPrefix: (value: unknown) =>
+      typeof value === "string"
+      && (
+        /^(?:\d{1,3})\.(?:\d{1,3})$/u.test(value)
+        || /^(?:[0-9a-f]{1,4}):(?:[0-9a-f]{1,4})$/u.test(value)
+      )
+        ? value
+        : null,
     refreshSecureShareSession: mocks.refreshSession,
+    renameSecureShareParticipant: mocks.renameParticipant,
     requestSecureShareCopyGrant: mocks.requestCopyGrant,
     requestSecureShareEmailChallenge: mocks.requestChallenge,
     unlockSecureShare: mocks.unlock
@@ -160,6 +174,23 @@ function session(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function participant(overrides: Record<string, unknown> = {}) {
+  return {
+    participantId: "participant_123456",
+    guestNumber: 1,
+    displayName: "guest1",
+    isSystemDefaultName: true,
+    canRename: true,
+    renameCooldownEndsAt: null,
+    capabilities: {
+      canRename: true,
+      showsCommenterIpPrefix: true
+    },
+    currentIpPrefix: "203.226",
+    ...overrides
+  };
+}
+
 function attachment(overrides: Record<string, unknown> = {}) {
   return {
     id: "attachment_123456",
@@ -232,6 +263,7 @@ beforeEach(() => {
   });
   mocks.getMetadata.mockResolvedValue(metadata());
   mocks.getContent.mockResolvedValue(content());
+  mocks.getParticipant.mockResolvedValue(participant());
   mocks.listComments.mockResolvedValue({
     ok: true,
     items: [],
@@ -255,6 +287,11 @@ beforeEach(() => {
     requestId: "request_123456"
   }));
   mocks.deleteComment.mockResolvedValue({ deleted: true });
+  mocks.renameParticipant.mockResolvedValue(participant({
+    displayName: "인기",
+    isSystemDefaultName: false,
+    renameCooldownEndsAt: "2026-07-29T01:01:00.000Z"
+  }));
   mocks.requestCopyGrant.mockResolvedValue({
     ok: true,
     copyGrant: `${"G".repeat(40)}.${"S".repeat(43)}`,
@@ -478,9 +515,10 @@ describe("SecurePublicShareViewer", () => {
       .mockResolvedValueOnce(session({
         ownerPreview: true,
         capabilities: {
-          permissionLevel: "view",
+          permissionLevel: "comment",
           canComment: true,
           canSaveCopy: false,
+          commentIpPrefixEnabled: true,
           downloadAllowed: false,
           quickCopyButtonVisible: false
         }
@@ -494,6 +532,15 @@ describe("SecurePublicShareViewer", () => {
         badge: "owner",
         createdAt: "2026-07-28T00:00:00.000Z",
         canDelete: true
+      }, {
+        id: "comment_guest_123456",
+        body: "게스트 Prefix 댓글",
+        displayName: "guest1",
+        badge: "guest",
+        createdAt: "2026-07-28T00:01:00.000Z",
+        canDelete: true,
+        authorParticipantId: "participant_guest_123456",
+        ipPrefix: "203.226"
       }],
       nextCursor: null,
       requestId: "request_123456"
@@ -526,6 +573,8 @@ describe("SecurePublicShareViewer", () => {
     expect(screen.getByRole("heading", { name: "댓글" })).toBeInTheDocument();
     expect(screen.getByText("소유자 안내 댓글")).toBeInTheDocument();
     expect(screen.getByText("소유자")).toBeInTheDocument();
+    expect(screen.getByText("guest1, 네트워크 대역 203.226"))
+      .toBeInTheDocument();
     expect(mocks.listComments).toHaveBeenCalledWith(
       shareId,
       expect.objectContaining({ idToken, limit: 20 })
@@ -599,6 +648,202 @@ describe("SecurePublicShareViewer", () => {
     expect(mocks.createComment).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("댓글에는 HTML 태그를 입력할 수 없습니다."))
       .toBeInTheDocument();
+  });
+
+  it("shows the share participant, safely renders a partial prefix, and retries rename idempotently", async () => {
+    const user = userEvent.setup();
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false,
+        participantIdentityEnabled: true,
+        commentIpPrefixEnabled: true
+      }
+    }));
+    mocks.listComments.mockResolvedValue({
+      ok: true,
+      items: [{
+        id: "comment_participant_123456",
+        body: "기존 댓글",
+        displayName: "guest1",
+        badge: "guest",
+        createdAt: "2026-07-28T00:00:00.000Z",
+        canDelete: true,
+        authorParticipantId: "participant_123456",
+        ipPrefix: "203.226"
+      }],
+      nextCursor: null,
+      requestId: "request_participant_comments"
+    });
+    mocks.renameParticipant
+      .mockRejectedValueOnce(new Error("ambiguous response"))
+      .mockResolvedValueOnce(participant({
+        displayName: "인기",
+        isSystemDefaultName: false,
+        renameCooldownEndsAt: "2026-07-29T01:01:00.000Z"
+      }));
+
+    renderViewer();
+
+    expect(await screen.findByText("내 댓글 이름")).toBeInTheDocument();
+    await waitFor(() => expect(mocks.getParticipant).toHaveBeenCalledWith(
+      shareId,
+      { signal: expect.any(AbortSignal) }
+    ));
+    expect(screen.getAllByText("(203.226)").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("guest1, 네트워크 대역 203.226").length)
+      .toBeGreaterThanOrEqual(2);
+    expect(document.body.textContent).not.toContain("203.226.244.27");
+    expect(screen.getByText("전체 IP 주소가 아닌 일부 네트워크 대역만 표시됩니다."))
+      .toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "이름 변경" }));
+    let input = screen.getByLabelText("표시 이름");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByLabelText("표시 이름")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "이름 변경" })).toHaveFocus();
+    await user.click(screen.getByRole("button", { name: "이름 변경" }));
+    input = screen.getByLabelText("표시 이름");
+    await user.clear(input);
+    await user.type(input, "인기");
+    await user.keyboard("{Enter}");
+    expect(await screen.findByText("표시 이름을 변경하지 못했습니다. 다시 시도해주세요."))
+      .toBeInTheDocument();
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(mocks.renameParticipant).toHaveBeenCalledTimes(2));
+    const firstRequest = mocks.renameParticipant.mock.calls[0]?.[1] as {
+      clientRequestId: string;
+    };
+    const retryRequest = mocks.renameParticipant.mock.calls[1]?.[1] as {
+      clientRequestId: string;
+    };
+    expect(retryRequest.clientRequestId).toBe(firstRequest.clientRequestId);
+    expect(mocks.renameParticipant).toHaveBeenLastCalledWith(
+      shareId,
+      {
+        displayName: "인기",
+        clientRequestId: firstRequest.clientRequestId
+      },
+      { signal: expect.any(AbortSignal) }
+    );
+    expect(await screen.findByText("댓글 표시 이름을 변경했습니다.")).toBeInTheDocument();
+    expect(screen.getAllByText("인기").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByRole("button", { name: "이름 변경" })).toHaveFocus();
+  });
+
+  it("keeps existing comments readable when the participant limit blocks new comments", async () => {
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: false,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false,
+        participantIdentityEnabled: true,
+        participantLimitReached: true,
+        commentIpPrefixEnabled: false
+      }
+    }));
+    mocks.listComments.mockResolvedValue({
+      ok: true,
+      items: [{
+        id: "comment_limit_123456",
+        body: "기존 댓글은 계속 읽을 수 있습니다.",
+        displayName: "기존 참여자",
+        badge: "guest",
+        createdAt: "2026-07-28T00:00:00.000Z",
+        canDelete: true
+      }],
+      nextCursor: null,
+      requestId: "request_limit_comments"
+    });
+
+    renderViewer();
+
+    expect(await screen.findByText(
+      "이 공유의 댓글 참여 인원이 많아 새 댓글 작성이 제한되었습니다."
+    )).toBeInTheDocument();
+    expect(screen.getByText("기존 댓글은 계속 읽을 수 있습니다.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("새 댓글")).not.toBeInTheDocument();
+    expect(screen.queryByText("내 댓글 이름")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "기존 참여자 댓글 삭제" }))
+      .not.toBeInTheDocument();
+    expect(mocks.getParticipant).not.toHaveBeenCalled();
+    expect(mocks.listComments).toHaveBeenCalledWith(
+      shareId,
+      {
+        idToken: undefined,
+        limit: 20,
+        signal: expect.any(AbortSignal)
+      }
+    );
+  });
+
+  it.each([
+    ["comment capability is still enabled", true, true],
+    ["participant identity is disabled", false, false]
+  ])("fails closed when a participant-limit session says %s", async (
+    _case,
+    canComment,
+    participantIdentityEnabled
+  ) => {
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false,
+        participantIdentityEnabled,
+        participantLimitReached: true,
+        commentIpPrefixEnabled: false
+      }
+    }));
+
+    renderViewer();
+
+    expect(await screen.findByRole("heading", {
+      name: "이 공유 링크를 사용할 수 없습니다."
+    })).toBeInTheDocument();
+    expect(mocks.getContent).not.toHaveBeenCalled();
+    expect(mocks.listComments).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy comments working and fails closed on a prefix when the capability is off", async () => {
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.listComments.mockResolvedValue({
+      ok: true,
+      items: [{
+        id: "comment_legacy_123456",
+        body: "레거시 댓글",
+        displayName: "기존 사용자",
+        badge: "guest",
+        createdAt: "2026-07-28T00:00:00.000Z",
+        canDelete: false,
+        ipPrefix: "203.226"
+      }],
+      nextCursor: null,
+      requestId: "request_legacy_comments"
+    });
+
+    renderViewer();
+
+    expect(await screen.findByText("댓글 응답을 확인하지 못했습니다.")).toBeInTheDocument();
+    expect(screen.queryByText("(203.226)")).not.toBeInTheDocument();
+    expect(screen.queryByText("내 댓글 이름")).not.toBeInTheDocument();
+    expect(mocks.getParticipant).not.toHaveBeenCalled();
   });
 
   it("reuses the same comment request id after an ambiguous client retry", async () => {

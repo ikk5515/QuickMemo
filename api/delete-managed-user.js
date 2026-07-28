@@ -53,6 +53,10 @@ const secureShareRootStateCollections = [
   {
     collectionId: "publicShareRateLimits",
     counterName: "secureShareRateLimitsDeleted"
+  },
+  {
+    collectionId: "publicShareParticipantCounters",
+    counterName: "secureShareParticipantCountersDeleted"
   }
 ];
 const secureShareChildStateCollections = [
@@ -67,6 +71,18 @@ const secureShareChildStateCollections = [
   {
     counterName: "secureShareAuditEventsDeleted",
     parentCollectionId: "publicShareAuditEvents"
+  },
+  {
+    counterName: "secureShareParticipantsDeleted",
+    parentCollectionId: "publicShareParticipants"
+  },
+  {
+    counterName: "secureShareParticipantNamesDeleted",
+    parentCollectionId: "publicShareParticipantNames"
+  },
+  {
+    counterName: "secureShareParticipantRenameRequestsDeleted",
+    parentCollectionId: "publicShareParticipantRenameRequests"
   }
 ];
 const identityToolkitAccountMethods = {
@@ -2507,6 +2523,10 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
     secureShareCopyGrantRequestsDeleted: 0,
     secureShareEmailChallengesDeleted: 0,
     secureShareEmailDeliveriesDeleted: 0,
+    secureShareParticipantCountersDeleted: 0,
+    secureShareParticipantNamesDeleted: 0,
+    secureShareParticipantRenameRequestsDeleted: 0,
+    secureShareParticipantsDeleted: 0,
     secureSharePoliciesDeleted: 0,
     secureShareRateLimitsDeleted: 0,
     secureShareRecipientsDeleted: 0,
