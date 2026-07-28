@@ -2754,6 +2754,19 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(
       getDocs(query(collection(ownerDb, "publicNoteShares"), where("ownerUid", "==", "user-a"), where("sourceNoteId", "==", "note-a")))
     );
+    await assertSucceeds(
+      getDocs(
+        query(
+          collection(ownerDb, "publicNoteShares"),
+          where("ownerUid", "==", "user-a"),
+          where("version", "==", 1),
+          where("ready", "==", true),
+          where("expiresAt", ">", new Date()),
+          orderBy("expiresAt", "asc"),
+          limit(500)
+        )
+      )
+    );
     await assertFails(
       setDoc(doc(ownerDb, "publicNoteShares/unqueued-share"), publicShareDocument("note-a", "user-a", { expiresAt: shareExpiresAt }))
     );

@@ -117,10 +117,10 @@ Firestore/Storage Emulator는 Java Runtime이 필요합니다.
 VITE_FIREBASE_API_KEY=...
 VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
 VITE_FIREBASE_PROJECT_ID=your-project
-VITE_FIREBASE_STORAGE_BUCKET=your-project.appspot.com
 VITE_FIREBASE_MESSAGING_SENDER_ID=...
 VITE_FIREBASE_APP_ID=...
 VITE_USE_FIREBASE_EMULATORS=false
+VITE_LEGACY_FIREBASE_STORAGE_ENABLED=false
 ```
 
 4. Build > Firestore Database에서 데이터베이스를 만들고 production mode로 시작합니다.
@@ -130,10 +130,16 @@ VITE_USE_FIREBASE_EMULATORS=false
 ```bash
 cp .firebaserc.example .firebaserc
 npx firebase-tools login
-npx firebase-tools deploy --only firestore:rules,firestore:indexes,storage
+npx firebase-tools deploy --only firestore:rules,firestore:indexes
 ```
 
 이 앱은 `src/lib/firebase.ts`에서 `.env.local` 값을 읽어 Firebase 앱, Auth, Firestore를 초기화합니다. Firestore 컬렉션은 앱 사용 중 클라이언트와 Firestore Rules 검증으로 생성됩니다.
+
+운영 첨부파일은 Vercel Blob만 사용합니다. Firebase Storage SDK와 레거시
+삭제 경로는 명시적인 `VITE_LEGACY_FIREBASE_STORAGE_ENABLED=true` /
+`LEGACY_FIREBASE_STORAGE_ENABLED=true` 설정이 없으면 초기화하거나
+호출하지 않습니다. Storage bucket이 없는 Spark 운영이 정상 상태이며,
+이번 구조에서는 Storage 생성이나 Storage Rules 배포를 하지 않습니다.
 
 Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 요금제가 없어도 Firestore Rules·인덱스와 Vercel 앱을 배포할 수 있습니다. 관리자가 다른 사용자의 비밀번호를 강제로 변경하려면 Admin SDK가 실행되는 별도 신뢰 서버가 필요합니다.
 
@@ -148,17 +154,33 @@ Firebase Cloud Functions 없이 동작하도록 구성되어 있으므로 Blaze 
 Vercel 운영 환경에는 아래 값을 설정합니다. `FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON`에는 서비스 계정 JSON 전체를 넣거나, `FIREBASE_CLEANUP_CLIENT_EMAIL`과 `FIREBASE_CLEANUP_PRIVATE_KEY`를 나누어 넣을 수 있습니다. 서비스 계정 JSON을 저장소 파일로 두지 말고 Vercel Environment Variable에만 넣으세요.
 
 ```bash
-CRON_SECRET=at-least-16-random-characters
+CRON_SECRET=
 FIREBASE_CLEANUP_PROJECT_ID=your-firebase-project-id
 FIREBASE_CLEANUP_CLIENT_EMAIL=cleanup-account@your-firebase-project-id.iam.gserviceaccount.com
 FIREBASE_CLEANUP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 PUBLIC_SHARE_CLEANUP_BATCH_SIZE=50
 PUBLIC_SHARE_CLEANUP_MAX_DELETES=1000
+PUBLIC_SHARE_CLEANUP_MAX_RUNTIME_SECONDS=240
 LEGACY_NOTE_BACKFILL_PAGE_SIZE=50
 LEGACY_NOTE_BACKFILL_MAX_SCANNED=500
+LEGACY_FIREBASE_STORAGE_ENABLED=false
+FREE_TIER_MODE=true
 ```
 
-Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의 schedule도 일 1회로 맞춰져 있습니다. 같은 설정에서 Fluid Compute를 명시적으로 활성화하되 함수 실행시간을 더 짧게 덮어쓰지 않아 Vercel의 플랜 기본 제한을 사용합니다. cleanup 함수는 `publicShareCleanupQueue.expiresAt <= now`인 queue 문서를 조회해 해당 공유 첨부 파일, 원본 공유 문서, cleanup queue를 함께 삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제와 Firebase Auth 사용자 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
+`CRON_SECRET`은 빈 예시를 그대로 쓰지 말고 CSPRNG로 48–64 random bytes를
+생성해 비밀 입력 경로로 저장합니다. Blob 용량과 Secure Share 플래그를
+포함한 전체 Production 변수 이름·보수적 기본값은
+[`/.env.example`](.env.example)을 단일 기준으로 사용합니다.
+
+Vercel Hobby 플랜은 Cron이 하루 한 번 실행되므로 `vercel.json`의
+`0 3 * * *` schedule도 일 1회(03:00 UTC, 한국시간 12:00)에 맞춰져
+있습니다. 같은 설정에서 Fluid Compute를 명시적으로 활성화하되 함수
+실행시간을 더 짧게 덮어쓰지 않아 Vercel의 플랜 기본 제한을 사용합니다.
+cleanup 함수는 240초 deadline, 외부 요청 20초 timeout, Firestore lease와
+삭제 예산 안에서 `publicShareCleanupQueue.expiresAt <= now`인 queue 문서를
+조회해 해당 공유 첨부 파일, 원본 공유 문서, cleanup queue를 함께
+삭제합니다. 서비스 계정에는 Firestore 문서 조회/삭제와 Firebase Auth
+사용자 조회/삭제에 필요한 최소 IAM 권한만 부여하세요.
 
 ### 관리자 사용자 삭제
 
@@ -205,11 +227,13 @@ Secure Share v2는 기존 v1 공개 링크와 URL fragment 기반 콘텐츠 키�
 보존하면서 비밀번호, 이메일 OTP, 1회 열람, 댓글, 복사본 저장 및
 첨부파일 다운로드 정책을 서버에서 강제하는 호환 확장입니다.
 
-기능은 기본적으로 꺼져 있으며 `SECURE_SHARE_V2_ENABLED`,
-`SECURE_SHARE_EMAIL_ENABLED`, `VITE_SECURE_SHARE_V2_ENABLED`가 모두
-검증된 Production 설정일 때만 활성화합니다. 이메일 공급자 자격 증명,
-Rules 테스트, 필요한 인덱스 준비, 실제 OTP 및 브라우저 smoke 검증 없이
-활성화하면 안 됩니다.
+기능은 기본적으로 꺼져 있습니다. Core v2는
+`SECURE_SHARE_V2_ENABLED=true`와 `VITE_SECURE_SHARE_V2_ENABLED=true`가
+모두 검증된 Production 설정일 때 활성화합니다.
+`SECURE_SHARE_EMAIL_ENABLED`는 독립 플래그이며, 검증된 이메일 공급자가
+없으면 false를 유지합니다. 이 상태에서도 링크, 로그인 사용자, 비밀번호,
+1회 열람, 댓글, 복사본 저장 등 Core v2는 사용할 수 있고 이메일 정책은
+서버에서 `email_feature_unavailable`로 fail closed합니다.
 
 구조, 환경변수 이름, 로컬 검증, 단계적 배포 및 rollback 절차는
 [`docs/secure-share-v2.md`](docs/secure-share-v2.md)를 참고하세요.
@@ -219,10 +243,12 @@ Rules 테스트, 필요한 인덱스 준비, 실제 OTP 및 브라우저 smoke �
 ```bash
 cp .firebaserc.example .firebaserc
 npm run build
-npx firebase-tools deploy --only firestore:rules,firestore:indexes,hosting
+npx firebase-tools deploy --only firestore:rules,firestore:indexes
 ```
 
-전역 Firebase CLI가 없어도 `npx firebase-tools`로 실행할 수 있습니다. Vercel을 프론트엔드로 사용할 예정이면 Firebase Hosting 배포는 생략하고 Firestore Rules/Indexes를 배포합니다. Firebase Storage를 실제로 활성화한 프로젝트에서만 Storage Rules를 추가로 배포합니다.
+전역 Firebase CLI가 없어도 `npx firebase-tools`로 실행할 수 있습니다.
+이 프로젝트의 운영 프론트엔드는 Vercel이므로 Firebase Hosting과 Storage는
+배포하지 않고 Firestore Rules/Indexes만 배포합니다.
 
 Rules나 Indexes와 프론트엔드가 함께 바뀌는 릴리스는 Firebase Rules/Indexes를 먼저 배포하고 새 복합 인덱스가 `Ready` 상태인지 확인한 뒤 Vercel 프론트엔드를 배포해야 합니다. `.github/workflows/vercel-production.yml`은 Vercel만 배포하므로 이 순서를 자동으로 대신하지 않습니다.
 

@@ -4,6 +4,12 @@ import {
   quotaReleaseAfterAttachmentClaim,
   shouldBumpAttachmentRevisionOnDelete
 } from "./_attachment-policy.js";
+import {
+  GLOBAL_BLOB_USAGE_DOCUMENT_PATH,
+  GLOBAL_BLOB_USAGE_SCHEMA_VERSION,
+  evaluateFreeTierUpload,
+  resolveFreeTierPolicy
+} from "./_free-tier-policy.js";
 import { disconnectGoogleCalendarForManagedUser } from "./_google-calendar-common.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
@@ -318,7 +324,11 @@ async function firestoreRequest(path, accessToken, init = {}) {
 }
 
 async function storageDeleteObject(bucket, objectName, accessToken) {
-  if (!bucket || !objectName) {
+  if (
+    envValue("LEGACY_FIREBASE_STORAGE_ENABLED") !== "true"
+    || !bucket
+    || !objectName
+  ) {
     return false;
   }
 
@@ -1006,6 +1016,13 @@ async function finalizeManagedAttachmentDeletion({
     const quotaDocument = quotaName
       ? await firestoreGetByName(projectId, quotaName, accessToken, ["uid", "attachmentCount", "usedBytes"])
       : null;
+    const globalUsageName = documentNameForPath(projectId, GLOBAL_BLOB_USAGE_DOCUMENT_PATH);
+    const globalUsageDocument = await firestoreGetByName(
+      projectId,
+      globalUsageName,
+      accessToken,
+      ["schemaVersion", "attachmentCount", "usedBytes"]
+    );
     const encryptedSize = Math.max(0, integerField(attachment, "encryptedSize"));
     const quotaReserved = hasField(attachment, "quotaReserved")
       ? boolField(attachment, "quotaReserved")
@@ -1050,6 +1067,47 @@ async function finalizeManagedAttachmentDeletion({
         },
         updateMask: { fieldPaths: ["uid", "attachmentCount", "usedBytes"] },
         currentDocument: { updateTime: claim.quota.quotaUpdateTime },
+        updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+      });
+    }
+
+    const globalSchemaVersion = integerField(globalUsageDocument, "schemaVersion");
+    const globalUsedBytes = integerField(globalUsageDocument, "usedBytes");
+    const globalAttachmentCount = integerField(globalUsageDocument, "attachmentCount");
+    if (
+      (quotaReserved === true || legacyBlobReserved)
+      && globalUsageDocument?.updateTime
+      && globalSchemaVersion === GLOBAL_BLOB_USAGE_SCHEMA_VERSION
+      && hasField(globalUsageDocument, "usedBytes")
+      && hasField(globalUsageDocument, "attachmentCount")
+      && globalUsedBytes >= 0
+      && globalAttachmentCount >= 0
+      && globalUsedBytes >= encryptedSize
+      && globalAttachmentCount >= 1
+    ) {
+      const policy = resolveFreeTierPolicy(process.env);
+      const nextUsedBytes = globalUsedBytes - encryptedSize;
+      const nextAttachmentCount = globalAttachmentCount - 1;
+      const nextDecision = evaluateFreeTierUpload({
+        usedBytes: nextUsedBytes,
+        reservedBytes: 0,
+        requestedBytes: 0
+      }, policy);
+      writes.push({
+        update: {
+          name: globalUsageName,
+          fields: {
+            schemaVersion: { integerValue: String(GLOBAL_BLOB_USAGE_SCHEMA_VERSION) },
+            attachmentCount: { integerValue: String(nextAttachmentCount) },
+            usedBytes: { integerValue: String(nextUsedBytes) },
+            officialCapacityBytes: { integerValue: String(policy.officialCapacityBytes) },
+            operationalCapBytes: { integerValue: String(policy.operationalCapBytes) },
+            hardStopBytes: { integerValue: String(policy.hardStopBytes) },
+            capacityState: stringValue(nextDecision.state),
+            accountingMode: stringValue("ready_and_pending_reservations")
+          }
+        },
+        currentDocument: { updateTime: globalUsageDocument.updateTime },
         updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
       });
     }

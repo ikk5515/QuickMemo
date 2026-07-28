@@ -191,6 +191,12 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     ]);
 
     const otpShareId = "wrong_otp_share";
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test"
+    });
     const challengeId = "challenge_wrong_otp_0001";
     const normalizedEmailHash = emailDigest("viewer@example.test");
     const correctOtp = "135790";
@@ -252,6 +258,94 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(await readEmulatorDocument(`publicShareEmailChallenges/${challengeId}`)).toMatchObject({
       attempts: 1,
       status: "pending"
+    });
+  }, 15_000);
+
+  it("fails closed for an existing email policy and session after email is disabled", async () => {
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test"
+    });
+    const shareId = "email_disabled_existing_share";
+    const challengeId = "email_disabled_challenge_0001";
+    const emailHash = emailDigest("viewer@example.test");
+    const otp = "135790";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailHash],
+      challenge: {
+        codeDigest: otpCodeDigest(challengeId, shareId, emailHash, otp),
+        emailHash,
+        id: challengeId
+      },
+      emailVerificationRequired: true,
+      shareId
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 72
+    });
+    const granted = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        challengeId,
+        displayName: "OTP viewer",
+        oneTimeOpenConfirmed: true,
+        otp,
+        unlockAttemptId: "email_enabled_attempt_0001"
+      },
+      harness,
+      networkSuffix: 72,
+      shareId
+    });
+    expect(granted.response.status).toBe(200);
+    const sessionCookie = cookiePair(granted.response);
+
+    process.env.SECURE_SHARE_EMAIL_ENABLED = "false";
+
+    const blockedMetadata = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=metadata&shareId=${encodeURIComponent(shareId)}`,
+      { headers: apiHeaders(harness.origin, { networkSuffix: 72 }) }
+    );
+    expect(blockedMetadata.status).toBe(503);
+    expect(await blockedMetadata.json()).toMatchObject({
+      ok: false,
+      error: "email_feature_unavailable"
+    });
+
+    const blockedAccess = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        challengeId,
+        displayName: "OTP viewer",
+        oneTimeOpenConfirmed: true,
+        otp,
+        unlockAttemptId: "email_disabled_attempt_0001"
+      },
+      harness,
+      networkSuffix: 72,
+      shareId
+    });
+    expect(blockedAccess.response.status).toBe(503);
+    expect(blockedAccess.body).toMatchObject({
+      ok: false,
+      error: "email_feature_unavailable"
+    });
+
+    const blockedSession = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=session&shareId=${encodeURIComponent(shareId)}`,
+      {
+        headers: apiHeaders(harness.origin, {
+          bindingCookie: `${metadata.bindingCookie}; ${sessionCookie}`,
+          networkSuffix: 72
+        })
+      }
+    );
+    expect(blockedSession.status).toBe(503);
+    expect(await blockedSession.json()).toMatchObject({
+      ok: false,
+      error: "email_feature_unavailable"
     });
   }, 15_000);
 

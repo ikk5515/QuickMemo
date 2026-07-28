@@ -187,7 +187,6 @@ import {
   createPublicShareGeneration,
   createPublicNoteShare,
   createPublicNoteShareAttachment,
-  deleteExpiredPublicSharesForOwner,
   deletePublicNoteShare,
   deletePublicNoteShareAttachments,
   deleteUploadedPublicShareAttachment,
@@ -2899,23 +2898,6 @@ export default function NotesPage() {
     setOwnerSecureShares(shares);
     return shares;
   }, [firebaseUser, profile, secureShareFlags.v2Enabled]);
-
-  useEffect(() => {
-    const uid = profile?.uid;
-
-    if (!uid || !privateKey) {
-      return undefined;
-    }
-
-    const cleanupExpiredShares = () => {
-      void deleteExpiredPublicSharesForOwner(uid).catch(() => undefined);
-    };
-
-    cleanupExpiredShares();
-    const intervalId = window.setInterval(cleanupExpiredShares, 60 * 60 * 1000);
-
-    return () => window.clearInterval(intervalId);
-  }, [privateKey, profile?.uid]);
 
   useEffect(() => {
     if (!profile || !privateKey) {

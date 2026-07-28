@@ -84,7 +84,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("../lib/firebase", () => ({
   db: mocks.db,
-  storage: mocks.storage
+  getLegacyStorage: () => mocks.storage
 }));
 
 vi.mock("firebase/firestore", () => ({
