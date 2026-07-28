@@ -48,6 +48,14 @@ describe("Firestore index retention policies", () => {
     expect(fieldOverride("attachments", "deletionStartedAt")).toMatchObject({
       indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
     });
+    expect(fieldOverride("items", "expiresAt")).toMatchObject({
+      indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
+    });
+    expect(fieldOverride("items", "retentionExpiresAt")).toMatchObject({
+      indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
+    });
+    expect(fieldOverride("items", "expiresAt")?.ttl).toBeUndefined();
+    expect(fieldOverride("items", "retentionExpiresAt")?.ttl).toBeUndefined();
     expect(fieldOverride("publicShareCleanupQueue", "expiresAt")).toBeUndefined();
   });
 
