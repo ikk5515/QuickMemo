@@ -2,7 +2,11 @@ import { initializeApp } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
 import { browserSessionPersistence, connectAuthEmulator, getAuth, setPersistence } from "firebase/auth";
-import { connectFirestoreEmulator, getFirestore } from "firebase/firestore";
+import {
+  connectFirestoreEmulator,
+  getFirestore,
+  initializeFirestore
+} from "firebase/firestore";
 import { connectStorageEmulator, getStorage, type FirebaseStorage } from "firebase/storage";
 
 const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || "quickmemo-demo";
@@ -26,10 +30,21 @@ export const hasFirebaseConfig = Boolean(
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+const useFirebaseEmulators = import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true";
+const forceE2eFirestoreLongPolling =
+  useFirebaseEmulators
+  && import.meta.env.VITE_E2E_FIRESTORE_FORCE_LONG_POLLING === "true";
+export const db = forceE2eFirestoreLongPolling
+  ? initializeFirestore(app, {
+      // WebKit can indefinitely buffer the emulator's WebChannel stream.
+      // The emulator-only E2E gate leaves development and production unchanged.
+      experimentalAutoDetectLongPolling: false,
+      experimentalForceLongPolling: true
+    })
+  : getFirestore(app);
 let legacyStorage: FirebaseStorage | null = null;
 export const legacyFirebaseStorageEnabled =
-  import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true"
+  useFirebaseEmulators
   || import.meta.env.VITE_LEGACY_FIREBASE_STORAGE_ENABLED === "true";
 
 /**
@@ -44,7 +59,7 @@ export function getLegacyStorage() {
   if (legacyStorage) return legacyStorage;
 
   legacyStorage = getStorage(app);
-  if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true") {
+  if (useFirebaseEmulators) {
     connectStorageEmulator(legacyStorage, "127.0.0.1", 9199);
   }
 
@@ -65,7 +80,7 @@ export const analyticsPromise =
         .catch(() => null)
     : Promise.resolve(null);
 
-if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true") {
+if (useFirebaseEmulators) {
   connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
 }

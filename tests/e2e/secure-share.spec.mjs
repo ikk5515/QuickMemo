@@ -9,6 +9,7 @@ import {
   loginDirectly,
   loginRosterUser,
   mutateScenario,
+  navigateWithinApp,
   observePage,
   openV2Share,
   ownerHeaders,
@@ -186,7 +187,7 @@ test("authenticated-only share rejects anonymous access and accepts a verified e
   expect(anonymousResponse.status()).toBe(401);
 
   await page.getByRole("button", { name: "QuickMemo 로그인" }).click();
-  await loginRosterUser(page, fixture.viewerAuth);
+  await loginRosterUser(page, fixture.viewerAuth, diagnostics);
   await expect(page.getByRole("heading", { name: "보안 공유 열기" })).toBeVisible();
   await page.getByRole("button", { name: "보안 공유 열기" }).click();
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
@@ -202,7 +203,7 @@ test("email_verified false account is rejected by an authenticated email policy"
 
   await page.goto(fixture.url);
   await page.getByRole("button", { name: "QuickMemo 로그인" }).click();
-  await loginRosterUser(page, fixture.viewerAuth);
+  await loginRosterUser(page, fixture.viewerAuth, diagnostics);
   await expect(page.getByRole("heading", { name: "보안 공유 열기" })).toBeVisible();
   await page.getByRole("button", { name: "보안 공유 열기" }).click();
   await expect(page.getByRole("alert")).toHaveText("이 공유 링크를 사용할 수 없습니다.");
@@ -331,7 +332,7 @@ test("owner preview can delete a guest comment without consuming a one-time shar
   const ownerContext = await browser.newContext();
   const ownerPage = await ownerContext.newPage();
   await loginDirectly(ownerPage, fixture.ownerAuth);
-  await ownerPage.goto(fixture.url);
+  await navigateWithinApp(ownerPage, fixture.url);
   const ownerDiagnostics = observePage(ownerPage);
   await expect(
     ownerPage.getByText(/소유자\/관리자 미리보기 · 일회성 링크 미소비/u)
@@ -358,7 +359,7 @@ test("save-copy permission creates an independent active note after emulator log
   await unlockV2Share(page, fixture);
   await page.getByRole("button", { name: "QuickMemo에 복사본 저장" }).click();
   await expect(page).toHaveURL(/\/login$/u);
-  await loginRosterUser(page, fixture.viewerAuth);
+  await loginRosterUser(page, fixture.viewerAuth, diagnostics);
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
   await page.getByRole("button", { name: "QuickMemo에 복사본 저장" }).click();
   await expect(
@@ -385,7 +386,7 @@ test("save-copy decrypts, re-encrypts, and activates an attachment with the loca
   await unlockV2Share(page, fixture);
   await page.getByRole("button", { name: "QuickMemo에 복사본 저장" }).click();
   await expect(page).toHaveURL(/\/login$/u);
-  await loginRosterUser(page, fixture.viewerAuth);
+  await loginRosterUser(page, fixture.viewerAuth, diagnostics);
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
   await page.getByRole("button", { name: "QuickMemo에 복사본 저장" }).click();
   await expect(
