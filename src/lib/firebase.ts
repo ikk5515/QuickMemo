@@ -1,6 +1,10 @@
 import { initializeApp } from "firebase/app";
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "firebase/app-check";
-import { browserSessionPersistence, connectAuthEmulator, getAuth, setPersistence } from "firebase/auth";
+import {
+  browserSessionPersistence,
+  connectAuthEmulator,
+  initializeAuth
+} from "firebase/auth";
 import {
   connectFirestoreEmulator,
   getFirestore,
@@ -28,7 +32,11 @@ export const hasFirebaseConfig = Boolean(
 );
 
 export const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
+export const auth = initializeAuth(app, {
+  // QuickMemo uses password credentials only. Omitting the popup/redirect
+  // resolver prevents Firebase Auth from proactively loading GAPI on Safari.
+  persistence: browserSessionPersistence
+});
 const useFirebaseEmulators = import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true";
 const forceE2eFirestoreLongPolling =
   useFirebaseEmulators
@@ -77,4 +85,4 @@ if (useFirebaseEmulators) {
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
 }
 
-export const authPersistenceReady = setPersistence(auth, browserSessionPersistence).catch(() => undefined);
+export const authPersistenceReady = auth.authStateReady().catch(() => undefined);

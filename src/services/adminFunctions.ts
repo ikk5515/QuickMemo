@@ -4,7 +4,8 @@ import {
   connectAuthEmulator,
   createUserWithEmailAndPassword,
   deleteUser,
-  getAuth,
+  initializeAuth,
+  inMemoryPersistence,
   signOut,
   updateProfile
 } from "firebase/auth";
@@ -155,7 +156,11 @@ async function writeNewUserDocuments(
 
 async function createSecondaryAuthUser(displayName: string, loginEmail: string, password: string) {
   const secondaryApp = initializeApp(firebaseConfig, `quickmemo-user-create-${crypto.randomUUID()}`);
-  const secondaryAuth = getAuth(secondaryApp);
+  const secondaryAuth = initializeAuth(secondaryApp, {
+    // Account provisioning never needs a durable browser session or an OAuth
+    // popup resolver. Keeping it memory-only also avoids GAPI startup on Safari.
+    persistence: inMemoryPersistence
+  });
   const secondaryDb = getFirestore(secondaryApp);
 
   if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true") {
