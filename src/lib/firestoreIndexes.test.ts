@@ -69,6 +69,9 @@ describe("Firestore index retention policies", () => {
     expect(fieldOverride("history", "readerUids")).toMatchObject({
       indexes: [{ arrayConfig: "CONTAINS", queryScope: "COLLECTION_GROUP" }]
     });
+    expect(fieldOverride("items", "ownerUid")).toMatchObject({
+      indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
+    });
     expect(fieldOverride("users", "uid")).toMatchObject({
       indexes: [{ order: "ASCENDING", queryScope: "COLLECTION_GROUP" }]
     });
