@@ -25,6 +25,8 @@ import handler, {
   ensureRevisionReadRequest,
   ensureSameOrigin,
   evaluateCopyAttachmentQuota,
+  gmailProviderHealthStateAllowsSend,
+  gmailProviderHealthTransition,
   handleApiError,
   hashSharePassword,
   issueAnonymousParticipantToken,
@@ -38,6 +40,7 @@ import handler, {
   otpVerificationFailureMinimumResponseMilliseconds,
   padEmailChallengeResponse,
   padOtpVerificationFailureResponse,
+  rateLimitWindowStarts,
   readJsonBody,
   revalidateParticipantAllocationChallenge,
   resolveAccessIdentity,
@@ -1506,7 +1509,8 @@ describe("Secure Share v2 email and identity defenses", () => {
       featureEnabled: true,
       providerConfigured: true,
       secretsConfigured: true,
-      senderVerified: true
+      senderVerified: true,
+      freeTierMode: false
     });
     expect(JSON.stringify(secureShareEmailReadiness())).not.toContain("test-key-never-returned");
     vi.stubEnv("SHARE_EMAIL_SENDER_VERIFIED", "false");
@@ -1530,6 +1534,17 @@ describe("Secure Share v2 email and identity defenses", () => {
     });
     expect(verificationEmailText("123456", 600)).toContain("10분 동안 유효");
     expect(verificationEmailText("123456", 301)).toContain("301초 동안 유효");
+    expect(verificationEmailText("123456", 600)).toBe([
+      "QuickMemo 공유 노트를 열기 위한 인증번호입니다.",
+      "",
+      "인증번호: 123456",
+      "",
+      "이 인증번호는 10분 동안 유효합니다.",
+      "본인이 요청하지 않았다면 이 메일을 무시하세요.",
+      "",
+      "서비스 주소:",
+      "https://quickmemo-tan.vercel.app"
+    ].join("\n"));
   });
 
   it("uses a bounded provider adapter retry with an idempotency key", async () => {
@@ -1784,68 +1799,215 @@ describe("Secure Share v2 email and identity defenses", () => {
 
   it("caps email quota configuration below the provider free tier and counts reservations", () => {
     expect(resolveEmailQuotaPolicy({})).toEqual({
-      dailyHardLimit: 80,
-      dailySoftLimit: 64,
-      monthlyHardLimit: 2_400,
-      monthlySoftLimit: 1_920
+      globalHourlyLimit: 20,
+      globalMinuteLimit: 3,
+      rolling24hHardLimit: 30,
+      rolling24hSoftLimit: 20,
+      monthlyHardLimit: 700,
+      monthlySoftLimit: 500
     });
-    expect(resolveEmailQuotaPolicy({
-      SHARE_EMAIL_DAILY_HARD_LIMIT: "999",
-      SHARE_EMAIL_DAILY_SOFT_LIMIT: "999",
+    expect(() => resolveEmailQuotaPolicy({
+      SHARE_EMAIL_GLOBAL_HOURLY_LIMIT: "999",
+      SHARE_EMAIL_GLOBAL_MINUTE_LIMIT: "999",
+      SHARE_EMAIL_ROLLING_24H_HARD_LIMIT: "999",
+      SHARE_EMAIL_ROLLING_24H_SOFT_LIMIT: "999",
       SHARE_EMAIL_MONTHLY_HARD_LIMIT: "9999",
       SHARE_EMAIL_MONTHLY_SOFT_LIMIT: "9999"
+    })).toThrow("free-tier cap");
+    expect(resolveEmailQuotaPolicy({
+      SHARE_EMAIL_GLOBAL_HOURLY_LIMIT: "8",
+      SHARE_EMAIL_GLOBAL_MINUTE_LIMIT: "2",
+      SHARE_EMAIL_ROLLING_24H_HARD_LIMIT: "12",
+      SHARE_EMAIL_ROLLING_24H_SOFT_LIMIT: "10",
+      SHARE_EMAIL_MONTHLY_HARD_LIMIT: "300",
+      SHARE_EMAIL_MONTHLY_SOFT_LIMIT: "200"
     })).toEqual({
-      dailyHardLimit: 80,
-      dailySoftLimit: 80,
-      monthlyHardLimit: 2_400,
-      monthlySoftLimit: 2_400
+      globalHourlyLimit: 8,
+      globalMinuteLimit: 2,
+      rolling24hHardLimit: 12,
+      rolling24hSoftLimit: 10,
+      monthlyHardLimit: 300,
+      monthlySoftLimit: 200
     });
 
-    const [daily, monthly] = emailQuotaPeriods(
+    const [minute, hourly, monthly] = emailQuotaPeriods(
       Date.parse("2026-07-29T12:34:56.000Z")
     );
-    expect(daily).toMatchObject({
-      bucketId: "day_2026-07-29",
-      periodKey: "2026-07-29",
-      scope: "daily",
-      softLimit: 64,
-      hardLimit: 80
+    expect(minute).toMatchObject({
+      bucketId: "minute_2026-07-29T12:34",
+      periodKey: "2026-07-29T12:34",
+      scope: "minute",
+      softLimit: 3,
+      hardLimit: 3
+    });
+    expect(minute.expiresAt.getTime()).toBe(
+      Date.parse("2026-07-29T12:34:00.000Z") + 72 * 60 * 60 * 1000
+    );
+    expect(hourly).toMatchObject({
+      bucketId: "hour_2026-07-29T12",
+      periodKey: "2026-07-29T12",
+      scope: "hourly",
+      softLimit: 20,
+      hardLimit: 20
     });
     expect(monthly).toMatchObject({
       bucketId: "month_2026-07",
       periodKey: "2026-07",
       scope: "monthly",
-      softLimit: 1_920,
-      hardLimit: 2_400
+      softLimit: 500,
+      hardLimit: 700
     });
     expect(emailQuotaExceeded(
-      { reservedCount: 1, sentCount: 79 },
-      daily
+      { ambiguousCount: 1, reservedCount: 1, sentCount: 1 },
+      minute
     )).toMatchObject({
       exceeded: true,
       softLimitReached: true,
-      total: 80
+      total: 3
     });
     expect(emailQuotaExceeded(
-      { reservedCount: 0, sentCount: 2_399 },
+      { failedCount: 3, reservedCount: 0, sentCount: 0 },
+      minute
+    )).toMatchObject({
+      exceeded: true,
+      softLimitReached: true,
+      total: 3
+    });
+    expect(emailQuotaExceeded(
+      { failedCount: 20, reservedCount: 0, sentCount: 0 },
+      hourly
+    )).toMatchObject({
+      exceeded: true,
+      softLimitReached: true,
+      total: 20
+    });
+    expect(emailQuotaExceeded(
+      { failedCount: 700, reservedCount: 0, sentCount: 0 },
+      monthly
+    )).toMatchObject({
+      exceeded: false,
+      total: 0
+    });
+    expect(emailQuotaExceeded(
+      { reservedCount: 0, sentCount: 699 },
       monthly
     )).toMatchObject({
       exceeded: false,
       softLimitReached: true,
-      total: 2_399
+      total: 699
     });
     expect(emailQuotaExceeded(
-      { reservedCount: 1, sentCount: 2_399 },
+      { reservedCount: 1, sentCount: 699 },
       monthly
     )).toMatchObject({
       exceeded: true,
-      total: 2_400
+      total: 700
     });
     expect(emailQuotaPeriods(
-      Date.parse("2026-08-01T00:00:00.000Z")
+      Date.parse("2026-07-31T15:00:00.000Z")
     ).map((period) => period.bucketId)).toEqual([
-      "day_2026-08-01",
+      "minute_2026-07-31T15:00",
+      "hour_2026-07-31T15",
       "month_2026-08"
+    ]);
+  });
+
+  it("preserves an active Gmail hard block across weaker concurrent failures", () => {
+    const now = new Date("2026-07-29T12:00:00.000Z");
+    const existing = {
+      blockedUntil: new Date("2026-07-30T11:59:00.000Z"),
+      consecutiveFailures: 1,
+      lastFailureAt: new Date("2026-07-29T11:59:00.000Z"),
+      lastReasonCode: "auth_error",
+      status: "blocked" as const
+    };
+    expect(gmailProviderHealthStateAllowsSend(
+      existing,
+      now.getTime()
+    )).toBe(false);
+    expect(gmailProviderHealthStateAllowsSend(
+      {
+        consecutiveFailures: 1,
+        status: "blocked"
+      },
+      now.getTime()
+    )).toBe(false);
+    expect(gmailProviderHealthStateAllowsSend(
+      {
+        blockedUntil: "invalid",
+        consecutiveFailures: 1,
+        status: "blocked"
+      },
+      now.getTime()
+    )).toBe(false);
+    expect(gmailProviderHealthStateAllowsSend(
+      {
+        blockedUntil: new Date(now.getTime() - 1),
+        consecutiveFailures: 1,
+        status: "blocked"
+      },
+      now.getTime()
+    )).toBe(true);
+    const connectionFailure = gmailProviderHealthTransition(
+      existing,
+      "failed",
+      {
+        providerBlockedSeconds: 5 * 60,
+        providerReasonCode: "connection_error"
+      },
+      now
+    );
+    expect(connectionFailure).toMatchObject({
+      blockedUntil: existing.blockedUntil,
+      consecutiveFailures: 2,
+      lastReasonCode: "auth_error",
+      status: "blocked"
+    });
+
+    const invalidRecipient = gmailProviderHealthTransition(
+      existing,
+      "failed",
+      {
+        providerBlockedSeconds: 0,
+        providerReasonCode: "invalid_recipient"
+      },
+      now
+    );
+    expect(invalidRecipient).toMatchObject({
+      blockedUntil: existing.blockedUntil,
+      consecutiveFailures: 1,
+      lastReasonCode: "auth_error",
+      status: "blocked"
+    });
+
+    expect(gmailProviderHealthTransition(
+      existing,
+      "sent",
+      null,
+      now
+    )).toMatchObject({
+      blockedUntil: undefined,
+      consecutiveFailures: 0,
+      lastReasonCode: "",
+      status: "healthy"
+    });
+  });
+
+  it("uses conservative hourly shards for the Share and Email rolling limit", () => {
+    const currentHourStart = Date.parse("2026-07-29T12:00:00.000Z") / 1000;
+    const starts = rateLimitWindowStarts(
+      Date.parse("2026-07-29T12:34:56.000Z"),
+      { rollingWindowHours: 24, windowSeconds: 60 * 60 }
+    );
+    expect(starts).toHaveLength(25);
+    expect(starts[0]).toBe(currentHourStart);
+    expect(starts[24]).toBe(currentHourStart - 24 * 60 * 60);
+    expect(new Set(starts).size).toBe(25);
+    expect(rateLimitWindowStarts(
+      Date.parse("2026-07-29T12:34:56.000Z"),
+      { windowSeconds: 15 * 60 }
+    )).toEqual([
+      Date.parse("2026-07-29T12:30:00.000Z") / 1000
     ]);
   });
 
@@ -2950,6 +3112,11 @@ describe("Secure Share v2 transactional source contracts", () => {
     expect(consume).toContain("rateLimitTransactionMaximumAttempts");
     expect(consume).toContain("await waitBeforeOptimisticRetry(attempt)");
     expect(consume).toContain("Rate limit update did not converge");
+    expect(consume).toContain("previousWindowLock");
+    expect(consume).toContain("definition.rollingWindowHours + 2");
+    expect(consume).toContain("states.map(({ current }) => current.path)");
+    expect(backendSource).toContain('"otp_share_email_rolling_24h"');
+    expect(backendSource).not.toContain('"otp_share_email_day"');
     expect(ownerCreate).toContain('"share_create_owner_hour"');
     expect(ownerCreate).toContain('"share_create_owner_day"');
     expect(ownerCreate).toContain("limit: 20");
@@ -2960,17 +3127,19 @@ describe("Secure Share v2 transactional source contracts", () => {
     expect(copyGrant).not.toContain("consumeRateLimits(context");
   });
 
-  it("consumes a conservative distributed token before every provider attempt", () => {
+  it("keeps the production provider server-only and the Resend retry gate test-only", () => {
     const emailChallenge = backendSource.match(
       /async function handleEmailChallenge[\s\S]*?async function incrementChallengeFailure/u
     )?.[0] ?? "";
 
     expect(backendSource).toContain("const emailProviderRequestRateWindowSeconds = 1");
     expect(backendSource).toContain("const emailProviderRequestRateLimit = 2");
-    expect(emailChallenge).toContain("createResendEmailAdapter(");
-    expect(emailChallenge).toContain('"email_provider_request_global_second"');
-    expect(emailChallenge).toContain('keyParts: ["resend"]');
-    expect(emailChallenge).toContain("including the adapter's idempotent retry");
+    expect(backendSource).toContain('provider === "gmail_smtp"');
+    expect(backendSource).toContain("createGmailSmtpEmailAdapter({ environment })");
+    expect(backendSource).toContain('provider === "resend" && environment.NODE_ENV === "test"');
+    expect(backendSource).toContain('"email_provider_request_global_second"');
+    expect(backendSource).toContain('keyParts: ["resend_test_only"]');
+    expect(emailChallenge).toContain("createConfiguredEmailAdapter(context)");
     expect(emailChallenge).toContain("providerAdapter,");
   });
 

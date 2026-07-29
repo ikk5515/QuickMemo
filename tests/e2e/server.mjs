@@ -50,7 +50,7 @@ globalThis.fetch = async (input, init) => {
   if (url === "https://api.resend.com/emails") {
     const payload = JSON.parse(String(init?.body ?? "{}"));
     const recipient = Array.isArray(payload.to) ? payload.to[0] : "";
-    const code = /\n(\d{6})\n/u.exec(String(payload.text ?? ""))?.[1] ?? "";
+    const code = /인증번호:\s*(\d{6})/u.exec(String(payload.text ?? ""))?.[1] ?? "";
 
     if (typeof recipient === "string" && code) {
       mailboxes.set(recipient.toLowerCase(), {

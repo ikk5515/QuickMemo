@@ -165,6 +165,8 @@ class FakeFirestoreRest {
   failCommitContainingOnce = "";
   raceAbortDocumentOnce = "";
   raceCleanupClaimHeartbeatDocumentOnce = "";
+  raceEmailQuotaDocumentOnce = "";
+  raceEmailTreeDeliveryOnce = "";
   raceCleanupClaimReadyUploadOnce: {
     attachmentName: string;
     noteName: string;
@@ -399,6 +401,31 @@ class FakeFirestoreRest {
     }
 
     if (
+      this.raceEmailQuotaDocumentOnce
+      && writes.some((write) =>
+        this.writeDocumentName(write) === this.raceEmailQuotaDocumentOnce
+      )
+    ) {
+      const racingDocument = this.documents.get(this.raceEmailQuotaDocumentOnce);
+      if (racingDocument) {
+        racingDocument.updateTime = this.nextUpdateTime();
+      }
+      this.raceEmailQuotaDocumentOnce = "";
+    }
+
+    if (
+      this.raceEmailTreeDeliveryOnce
+      && writes.some((write) => write.delete === this.raceEmailTreeDeliveryOnce)
+    ) {
+      const racingDocument = this.documents.get(this.raceEmailTreeDeliveryOnce);
+      if (racingDocument) {
+        racingDocument.fields.status = stringValue("reserved");
+        racingDocument.updateTime = this.nextUpdateTime();
+      }
+      this.raceEmailTreeDeliveryOnce = "";
+    }
+
+    if (
       this.failCommitContainingOnce
       && writes.some((write) =>
         this.writeDocumentName(write).includes(this.failCommitContainingOnce)
@@ -497,6 +524,39 @@ function secureShareCopyNote(
   };
 }
 
+function emailQuotaBucketFields(
+  bucketId: string,
+  expiresAt: string,
+  overrides: {
+    ambiguous?: number;
+    failed?: number;
+    reserved?: number;
+    sent?: number;
+  } = {}
+) {
+  const scope = bucketId.startsWith("minute_")
+    ? "minute"
+    : bucketId.startsWith("hour_")
+      ? "hourly"
+      : "monthly";
+  const periodKey = bucketId.slice(bucketId.indexOf("_") + 1);
+  const softLimit = scope === "monthly" ? 500 : scope === "minute" ? 3 : 20;
+  const hardLimit = scope === "monthly" ? 700 : scope === "minute" ? 3 : 20;
+  return {
+    ambiguousCount: integerValue(overrides.ambiguous ?? 0),
+    expiresAt: timestampValue(expiresAt),
+    failedCount: integerValue(overrides.failed ?? 2),
+    hardLimit: integerValue(hardLimit),
+    periodKey: stringValue(periodKey),
+    reservedCount: integerValue(overrides.reserved ?? 1),
+    scope: stringValue(scope),
+    sentCount: integerValue(overrides.sent ?? 4),
+    softLimit: integerValue(softLimit),
+    softLimitReached: booleanValue(false),
+    updatedAt: timestampValue(new Date().toISOString())
+  };
+}
+
 async function callHandler(authorization?: string): Promise<CronResponse> {
   const server = createServer((request, response) => {
     void cleanupHandler(
@@ -543,6 +603,30 @@ async function callHandler(authorization?: string): Promise<CronResponse> {
       server.close((error) => error ? reject(error) : resolve());
     });
   }
+}
+
+async function callHandlerDirect(authorization?: string): Promise<CronResponse> {
+  const headers: Record<string, string> = {};
+  let responseBody = "";
+  const response: CleanupHttpResponse = {
+    end(body = "") {
+      responseBody = body;
+    },
+    setHeader(name, value) {
+      headers[name.toLowerCase()] = value;
+    },
+    statusCode: 0
+  };
+  await cleanupHandler({
+    headers: authorization ? { authorization } : {},
+    method: "POST"
+  } as CleanupHttpRequest, response);
+
+  return {
+    body: JSON.parse(responseBody) as Record<string, unknown>,
+    headers,
+    status: response.statusCode
+  };
 }
 
 function installBackend(backend: FakeFirestoreRest) {
@@ -725,10 +809,12 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
       expiresAt: timestampValue(expired)
     });
     backend.add("publicShareEmailDeliveries/expired-delivery", {
-      expiresAt: timestampValue(expired)
+      expiresAt: timestampValue(expired),
+      status: stringValue("sent")
     });
     backend.add("publicShareEmailQuotaBuckets/expired-day", {
-      expiresAt: timestampValue(expired)
+      expiresAt: timestampValue(expired),
+      reservedCount: integerValue(0)
     });
     backend.add("publicShareAuditEvents/share-fair/items/expired-audit", {
       retentionExpiresAt: timestampValue(expired)
@@ -756,6 +842,232 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     expect(backend.has("publicShareAuditEvents/share-fair/items/expired-audit")).toBe(false);
   });
 
+  it("atomically converts an expired reserved email delivery to ambiguous quota usage", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const challengeId = "challenge_cleanup_reserved_0001";
+    const shareId = "share_cleanup_reserved_0001";
+    const bucketIds = [
+      "minute_2026-07-30T12:34",
+      "hour_2026-07-30T12",
+      "month_2026-07"
+    ];
+
+    completedBackfillCursor(backend);
+    backend.add("publicShareEmailDeliveries/reserved-delivery", {
+      challengeId: stringValue(challengeId),
+      expiresAt: timestampValue(expired),
+      quotaBucketIds: stringArrayValue(bucketIds),
+      shareId: stringValue(shareId),
+      status: stringValue("reserved")
+    });
+    backend.add("publicShareEmailSendAttempts/reserved-attempt", {
+      challengeId: stringValue(challengeId),
+      expiresAt: timestampValue(expired),
+      shareId: stringValue(shareId),
+      state: stringValue("reserved")
+    });
+    for (const bucketId of bucketIds) {
+      backend.add(
+        `publicShareEmailQuotaBuckets/${bucketId}`,
+        emailQuotaBucketFields(bucketId, future, { sent: 0 })
+      );
+    }
+    installBackend(backend);
+
+    const response = await callHandlerDirect(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      documentDeletesAttempted: 2,
+      ok: true,
+      secureShareEmailDeliveriesDeleted: 1,
+      secureShareEmailReservationsReconciled: 1,
+      secureShareEmailSendAttemptsDeleted: 1
+    });
+    expect(backend.has("publicShareEmailDeliveries/reserved-delivery")).toBe(false);
+    expect(backend.has("publicShareEmailSendAttempts/reserved-attempt")).toBe(false);
+    for (const bucketId of bucketIds) {
+      const fields = backend.get(`publicShareEmailQuotaBuckets/${bucketId}`)?.fields;
+      expect(fields?.reservedCount).toEqual(integerValue(0));
+      expect(fields?.ambiguousCount).toEqual(integerValue(1));
+      expect(fields?.sentCount).toEqual(integerValue(0));
+      expect(fields?.failedCount).toEqual(integerValue(2));
+      expect(fields?.softLimitReached).toEqual(
+        booleanValue(bucketId.startsWith("minute_"))
+      );
+    }
+  });
+
+  it("expires an already-ambiguous delivery without counting it twice", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const challengeId = "challenge_cleanup_ambiguous_0001";
+    const shareId = "share_cleanup_ambiguous_0001";
+    const bucketId = "month_2026-07";
+
+    completedBackfillCursor(backend);
+    backend.add("publicShareEmailDeliveries/ambiguous-delivery", {
+      challengeId: stringValue(challengeId),
+      expiresAt: timestampValue(expired),
+      quotaBucketIds: stringArrayValue([bucketId]),
+      shareId: stringValue(shareId),
+      status: stringValue("ambiguous")
+    });
+    backend.add("publicShareEmailSendAttempts/ambiguous-attempt", {
+      challengeId: stringValue(challengeId),
+      expiresAt: timestampValue(expired),
+      shareId: stringValue(shareId),
+      state: stringValue("ambiguous")
+    });
+    backend.add(
+      `publicShareEmailQuotaBuckets/${bucketId}`,
+      emailQuotaBucketFields(bucketId, future, { ambiguous: 1, reserved: 0 })
+    );
+    installBackend(backend);
+
+    const response = await callHandlerDirect(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      documentDeletesAttempted: 2,
+      secureShareEmailDeliveriesDeleted: 1,
+      secureShareEmailReservationsReconciled: 0,
+      secureShareEmailSendAttemptsDeleted: 1
+    });
+    const quotaFields = backend.get(
+      `publicShareEmailQuotaBuckets/${bucketId}`
+    )?.fields;
+    expect(quotaFields?.reservedCount).toEqual(integerValue(0));
+    expect(quotaFields?.ambiguousCount).toEqual(integerValue(1));
+  });
+
+  it("retains the full reservation when a quota precondition conflicts", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const challengeId = "challenge_cleanup_conflict_0001";
+    const shareId = "share_cleanup_conflict_0001";
+    const bucketIds = [
+      "minute_2026-07-30T12:35",
+      "hour_2026-07-30T12",
+      "month_2026-07"
+    ];
+
+    completedBackfillCursor(backend);
+    backend.add("publicShareEmailDeliveries/conflicted-delivery", {
+      challengeId: stringValue(challengeId),
+      expiresAt: timestampValue(expired),
+      quotaBucketIds: stringArrayValue(bucketIds),
+      shareId: stringValue(shareId),
+      status: stringValue("reserved")
+    });
+    backend.add("publicShareEmailSendAttempts/conflicted-attempt", {
+      challengeId: stringValue(challengeId),
+      expiresAt: timestampValue(expired),
+      shareId: stringValue(shareId),
+      state: stringValue("reserved")
+    });
+    for (const bucketId of bucketIds) {
+      backend.add(
+        `publicShareEmailQuotaBuckets/${bucketId}`,
+        emailQuotaBucketFields(bucketId, future)
+      );
+    }
+    backend.raceEmailQuotaDocumentOnce =
+      `${documentRoot}/publicShareEmailQuotaBuckets/${bucketIds[1]}`;
+    installBackend(backend);
+
+    const response = await callHandlerDirect(`Bearer ${cronSecret}`);
+
+    expect(response).toMatchObject({
+      body: { error: "cleanup_failed", ok: false },
+      status: 500
+    });
+    expect(backend.has("publicShareEmailDeliveries/conflicted-delivery")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/conflicted-attempt")).toBe(true);
+    for (const bucketId of bucketIds) {
+      const fields = backend.get(`publicShareEmailQuotaBuckets/${bucketId}`)?.fields;
+      expect(fields?.reservedCount).toEqual(integerValue(1));
+      expect(fields?.ambiguousCount).toEqual(integerValue(0));
+    }
+  });
+
+  it("deletes only finalized expired email deliveries and send attempts", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+
+    completedBackfillCursor(backend);
+    backend.add("publicShareEmailDeliveries/expired-unknown-delivery", {
+      expiresAt: timestampValue(expired),
+      status: stringValue("future_status")
+    });
+    backend.add("publicShareEmailDeliveries/expired-missing-delivery-status", {
+      expiresAt: timestampValue(expired)
+    });
+    for (const state of ["sent", "failed", "reserved", "ambiguous", "future_state"]) {
+      backend.add(`publicShareEmailSendAttempts/expired-${state}-attempt`, {
+        expiresAt: timestampValue(expired),
+        state: stringValue(state)
+      });
+    }
+    backend.add("publicShareEmailSendAttempts/expired-missing-attempt-state", {
+      expiresAt: timestampValue(expired)
+    });
+    installBackend(backend);
+
+    const response = await callHandlerDirect(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      documentDeletesAttempted: 2,
+      secureShareEmailDeliveriesDeleted: 0,
+      secureShareEmailSendAttemptsDeleted: 2
+    });
+    expect(backend.has("publicShareEmailDeliveries/expired-unknown-delivery")).toBe(true);
+    expect(backend.has("publicShareEmailDeliveries/expired-missing-delivery-status")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/expired-sent-attempt")).toBe(false);
+    expect(backend.has("publicShareEmailSendAttempts/expired-failed-attempt")).toBe(false);
+    expect(backend.has("publicShareEmailSendAttempts/expired-reserved-attempt")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/expired-ambiguous-attempt")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/expired-future_state-attempt")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/expired-missing-attempt-state")).toBe(true);
+  });
+
+  it("deletes an expired email quota bucket only when no reservation remains", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+
+    completedBackfillCursor(backend);
+    backend.add("publicShareEmailQuotaBuckets/expired-unreserved", {
+      expiresAt: timestampValue(expired),
+      reservedCount: integerValue(0)
+    });
+    backend.add("publicShareEmailQuotaBuckets/expired-reserved", {
+      expiresAt: timestampValue(expired),
+      reservedCount: integerValue(1)
+    });
+    backend.add("publicShareEmailQuotaBuckets/expired-missing-reserved-count", {
+      expiresAt: timestampValue(expired)
+    });
+    installBackend(backend);
+
+    const response = await callHandlerDirect(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      documentDeletesAttempted: 1,
+      secureShareEmailQuotaBucketsDeleted: 1
+    });
+    expect(backend.has("publicShareEmailQuotaBuckets/expired-unreserved")).toBe(false);
+    expect(backend.has("publicShareEmailQuotaBuckets/expired-reserved")).toBe(true);
+    expect(
+      backend.has("publicShareEmailQuotaBuckets/expired-missing-reserved-count")
+    ).toBe(true);
+  });
+
   it("deletes delivery and copy-request roots with their expired secure share tree", async () => {
     const backend = new FakeFirestoreRest();
     const expired = new Date(Date.now() - 60_000).toISOString();
@@ -770,7 +1082,8 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     backend.add("publicShareEmailDeliveries/tree-delivery", {
       expiresAt: timestampValue(future),
       ownerUid: stringValue("owner-tree"),
-      shareId: stringValue("expired-secure-tree")
+      shareId: stringValue("expired-secure-tree"),
+      status: stringValue("sent")
     });
     backend.add("publicShareCopyGrantRequests/tree-copy-request", {
       expiresAt: timestampValue(future),
@@ -824,6 +1137,162 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     expect(
       backend.has("publicShareParticipantRenameRequests/expired-secure-tree/items/request-a")
     ).toBe(false);
+  });
+
+  it("deletes only finalized email state and blocks tree deletion for all other states", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const shareId = "expired-tree-with-unresolved-email";
+
+    completedBackfillCursor(backend);
+    backend.add(`publicNoteShares/${shareId}`, {
+      expiresAt: timestampValue(expired),
+      ownerUid: stringValue("owner-email-tree"),
+      schemaVersion: integerValue(2),
+      status: stringValue("active")
+    });
+    backend.add(`publicShareCleanupQueue/${shareId}`, {
+      expiresAt: timestampValue(expired),
+      ownerUid: stringValue("owner-email-tree"),
+      shareId: stringValue(shareId)
+    });
+    backend.add("publicShareEmailDeliveries/tree-reserved-delivery", {
+      challengeId: stringValue("challenge_tree_reserved_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      status: stringValue("reserved")
+    });
+    backend.add("publicShareEmailSendAttempts/tree-reserved-attempt", {
+      challengeId: stringValue("challenge_tree_reserved_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      state: stringValue("reserved")
+    });
+    backend.add("publicShareEmailDeliveries/tree-ambiguous-delivery", {
+      challengeId: stringValue("challenge_tree_ambiguous_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      status: stringValue("ambiguous")
+    });
+    backend.add("publicShareEmailSendAttempts/tree-ambiguous-attempt", {
+      challengeId: stringValue("challenge_tree_ambiguous_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      state: stringValue("ambiguous")
+    });
+    backend.add("publicShareEmailDeliveries/tree-sent-delivery", {
+      challengeId: stringValue("challenge_tree_sent_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      status: stringValue("sent")
+    });
+    backend.add("publicShareEmailSendAttempts/tree-sent-attempt", {
+      challengeId: stringValue("challenge_tree_sent_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      state: stringValue("sent")
+    });
+    backend.add("publicShareEmailDeliveries/tree-failed-delivery", {
+      challengeId: stringValue("challenge_tree_failed_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      status: stringValue("failed")
+    });
+    backend.add("publicShareEmailSendAttempts/tree-failed-attempt", {
+      challengeId: stringValue("challenge_tree_failed_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      state: stringValue("failed")
+    });
+    backend.add("publicShareEmailDeliveries/tree-unknown-delivery", {
+      challengeId: stringValue("challenge_tree_unknown_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      status: stringValue("future_status")
+    });
+    backend.add("publicShareEmailSendAttempts/tree-unknown-attempt", {
+      challengeId: stringValue("challenge_tree_unknown_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      state: stringValue("future_state")
+    });
+    backend.add("publicShareEmailDeliveries/tree-missing-delivery-state", {
+      challengeId: stringValue("challenge_tree_missing_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId)
+    });
+    backend.add("publicShareEmailSendAttempts/tree-missing-attempt-state", {
+      challengeId: stringValue("challenge_tree_missing_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId)
+    });
+    installBackend(backend);
+
+    const response = await callHandlerDirect(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      secureShareEmailDeliveriesDeleted: 2,
+      secureShareEmailSendAttemptsDeleted: 2,
+      shareQueuesDeleted: 0,
+      sharesDeleted: 0
+    });
+    expect(backend.has("publicShareEmailDeliveries/tree-reserved-delivery")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/tree-reserved-attempt")).toBe(true);
+    expect(backend.has("publicShareEmailDeliveries/tree-ambiguous-delivery")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/tree-ambiguous-attempt")).toBe(true);
+    expect(backend.has("publicShareEmailDeliveries/tree-sent-delivery")).toBe(false);
+    expect(backend.has("publicShareEmailSendAttempts/tree-sent-attempt")).toBe(false);
+    expect(backend.has("publicShareEmailDeliveries/tree-failed-delivery")).toBe(false);
+    expect(backend.has("publicShareEmailSendAttempts/tree-failed-attempt")).toBe(false);
+    expect(backend.has("publicShareEmailDeliveries/tree-unknown-delivery")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/tree-unknown-attempt")).toBe(true);
+    expect(backend.has("publicShareEmailDeliveries/tree-missing-delivery-state")).toBe(true);
+    expect(backend.has("publicShareEmailSendAttempts/tree-missing-attempt-state")).toBe(true);
+    expect(backend.has(`publicNoteShares/${shareId}`)).toBe(true);
+    expect(backend.has(`publicShareCleanupQueue/${shareId}`)).toBe(true);
+  });
+
+  it("fails closed when a finalized delivery becomes reserved during tree cleanup", async () => {
+    const backend = new FakeFirestoreRest();
+    const expired = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const shareId = "expired-tree-email-state-race";
+    const deliveryPath = "publicShareEmailDeliveries/tree-racing-delivery";
+
+    completedBackfillCursor(backend);
+    backend.add(`publicNoteShares/${shareId}`, {
+      expiresAt: timestampValue(expired),
+      ownerUid: stringValue("owner-email-race"),
+      schemaVersion: integerValue(2),
+      status: stringValue("active")
+    });
+    backend.add(`publicShareCleanupQueue/${shareId}`, {
+      expiresAt: timestampValue(expired),
+      ownerUid: stringValue("owner-email-race"),
+      shareId: stringValue(shareId)
+    });
+    backend.add(deliveryPath, {
+      challengeId: stringValue("challenge_tree_racing_0001"),
+      expiresAt: timestampValue(future),
+      shareId: stringValue(shareId),
+      status: stringValue("sent")
+    });
+    backend.raceEmailTreeDeliveryOnce = `${documentRoot}/${deliveryPath}`;
+    installBackend(backend);
+
+    const response = await callHandlerDirect(`Bearer ${cronSecret}`);
+
+    expect(response).toMatchObject({
+      body: { error: "cleanup_failed", ok: false },
+      status: 500
+    });
+    expect(backend.get(deliveryPath)?.fields.status).toEqual(
+      stringValue("reserved")
+    );
+    expect(backend.has(`publicNoteShares/${shareId}`)).toBe(true);
+    expect(backend.has(`publicShareCleanupQueue/${shareId}`)).toBe(true);
   });
 
   it("retains a renewed share tree when an expired cleanup queue is stale", async () => {
@@ -1078,7 +1547,8 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     backend.add("publicShareEmailDeliveries/expired-delivery", {
       expiresAt: timestampValue(expired),
       ownerUid: stringValue("owner-a"),
-      shareId: stringValue("share-a")
+      shareId: stringValue("share-a"),
+      status: stringValue("sent")
     });
     backend.add("publicShareEmailDeliveries/active-delivery", {
       expiresAt: timestampValue(future),
@@ -1086,7 +1556,8 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
       shareId: stringValue("share-a")
     });
     backend.add("publicShareEmailQuotaBuckets/expired-day", {
-      expiresAt: timestampValue(expired)
+      expiresAt: timestampValue(expired),
+      reservedCount: integerValue(0)
     });
     backend.add("publicShareEmailQuotaBuckets/active-month", {
       expiresAt: timestampValue(future)

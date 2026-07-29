@@ -22,6 +22,7 @@
     "test:e2e": "playwright test",
     "test:e2e:chromium": "playwright test --project=chromium-desktop --project=chromium-mobile-390 --project=chromium-mobile-320",
     "test:e2e:webkit": "playwright test --project=webkit-desktop --project=webkit-mobile-390",
+    "verify:gmail-smtp-production": "node scripts/verify-gmail-smtp-production.mjs",
     "emulators": "npx --yes firebase-tools@15.24.0 emulators:start --only auth,firestore,storage,hosting"
   },
   "overrides": {
@@ -66,6 +67,7 @@
     "fflate": "^0.8.3",
     "firebase": "^12.6.0",
     "lucide-react": "^0.555.0",
+    "nodemailer": "9.0.3",
     "pdfjs-dist": "^5.7.284",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

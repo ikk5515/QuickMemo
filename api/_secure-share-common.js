@@ -175,7 +175,7 @@ export function secureShareCommentIpPrefixEnabled() {
   return true;
 }
 
-function configuredEmailSender(value) {
+function configuredEmailSenderAddress(value) {
   const hasControlCharacter = typeof value === "string"
     && Array.from(value).some((character) => {
       const codePoint = character.codePointAt(0) ?? 0;
@@ -187,34 +187,166 @@ function configuredEmailSender(value) {
     || value.length > 320
     || hasControlCharacter
   ) {
-    return false;
+    return "";
   }
   const mailbox = /^(?:[^<>]{1,120}<([^<>]+)>|([^<>]+))$/u.exec(value);
   const address = mailbox?.[1] ?? mailbox?.[2] ?? "";
   try {
-    return normalizeEmail(address) === address.trim().normalize("NFKC").toLowerCase();
+    const normalized = normalizeEmail(address);
+    return normalized === address.trim().normalize("NFKC").toLowerCase()
+      ? normalized
+      : "";
   } catch {
-    return false;
+    return "";
   }
 }
 
-export function secureShareEmailReadiness() {
-  const v2Enabled = secureShareV2Enabled();
-  const featureEnabled = exactFeatureFlag("SECURE_SHARE_EMAIL_ENABLED");
-  const provider = envValue("SHARE_EMAIL_PROVIDER").toLowerCase();
-  const providerConfigured =
-    provider === "resend"
-    && envValue("SHARE_EMAIL_API_KEY").length >= 16
-    && configuredEmailSender(envValue("SHARE_EMAIL_FROM"));
+function environmentValue(environment, name) {
+  const value = environment?.[name];
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function configuredBoolean(environment, name) {
+  return environmentValue(environment, name).toLowerCase() === "true";
+}
+
+function configuredBoundedInteger(environment, name, fallback, minimum, maximum) {
+  const value = Number.parseInt(environmentValue(environment, name), 10);
+  return Number.isSafeInteger(value)
+    ? Math.min(Math.max(value, minimum), maximum)
+    : fallback;
+}
+
+function emailConfigurationError() {
+  return new HttpError(
+    503,
+    "email_feature_unavailable",
+    "Gmail SMTP configuration is unavailable",
+    { expose: false }
+  );
+}
+
+export function gmailSmtpConfiguration(environment = process.env) {
+  const host = environmentValue(environment, "SHARE_SMTP_HOST").toLowerCase();
+  const port = Number.parseInt(environmentValue(environment, "SHARE_SMTP_PORT"), 10);
+  const secure = configuredBoolean(environment, "SHARE_SMTP_SECURE");
+  const requireTls = configuredBoolean(environment, "SHARE_SMTP_REQUIRE_TLS");
+  let username;
+  let replyTo = "";
+  try {
+    username = normalizeEmail(environmentValue(environment, "SHARE_SMTP_USERNAME"));
+    const replyToValue = environmentValue(environment, "SHARE_EMAIL_REPLY_TO");
+    replyTo = replyToValue ? normalizeEmail(replyToValue) : "";
+  } catch {
+    throw emailConfigurationError();
+  }
+  const appPassword = environmentValue(environment, "SHARE_SMTP_APP_PASSWORD");
+  const fromAddress = configuredEmailSenderAddress(
+    environmentValue(environment, "SHARE_EMAIL_FROM")
+  );
+  const fromName = environmentValue(environment, "SHARE_EMAIL_FROM_NAME") || "QuickMemo";
+  const gmailProvider =
+    environmentValue(environment, "SHARE_EMAIL_PROVIDER").toLowerCase() === "gmail_smtp";
+  const validTransport =
+    host === "smtp.gmail.com"
+    && (
+      (port === 465 && secure)
+      || (port === 587 && !secure && requireTls)
+    );
+  const validCredentials =
+    username.endsWith("@gmail.com")
+    && /^[A-Za-z0-9]{16}$/u.test(appPassword);
+  const validSender =
+    fromName === "QuickMemo"
+    && fromAddress === username
+    && (!replyTo || !replyTo.endsWith("@quickmemo-tan.vercel.app"));
+  if (
+    !gmailProvider
+    || !validTransport
+    || !validCredentials
+    || !validSender
+    || !configuredBoolean(environment, "SHARE_EMAIL_FREE_TIER_MODE")
+  ) {
+    throw emailConfigurationError();
+  }
+  return Object.freeze({
+    appPassword,
+    connectionTimeout: configuredBoundedInteger(
+      environment,
+      "SHARE_EMAIL_CONNECTION_TIMEOUT_MS",
+      10_000,
+      1_000,
+      10_000
+    ),
+    fromAddress,
+    fromName,
+    greetingTimeout: configuredBoundedInteger(
+      environment,
+      "SHARE_EMAIL_GREETING_TIMEOUT_MS",
+      10_000,
+      1_000,
+      10_000
+    ),
+    healthCacheSeconds: configuredBoundedInteger(
+      environment,
+      "SHARE_EMAIL_PROVIDER_HEALTH_CACHE_SECONDS",
+      600,
+      30,
+      600
+    ),
+    host,
+    port,
+    replyTo,
+    requireTls,
+    secure,
+    socketTimeout: configuredBoundedInteger(
+      environment,
+      "SHARE_EMAIL_SOCKET_TIMEOUT_MS",
+      15_000,
+      1_000,
+      15_000
+    ),
+    username
+  });
+}
+
+export function secureShareEmailReadiness(environment = process.env) {
+  const v2Enabled = configuredBoolean(environment, "SECURE_SHARE_V2_ENABLED");
+  const featureEnabled = configuredBoolean(environment, "SECURE_SHARE_EMAIL_ENABLED");
+  const provider = environmentValue(environment, "SHARE_EMAIL_PROVIDER").toLowerCase();
+  let providerConfigured = false;
+  if (provider === "gmail_smtp") {
+    try {
+      gmailSmtpConfiguration(environment);
+      providerConfigured = true;
+    } catch {
+      providerConfigured = false;
+    }
+  } else if (provider === "resend" && environmentValue(environment, "NODE_ENV") === "test") {
+    providerConfigured =
+      environmentValue(environment, "SHARE_EMAIL_API_KEY").length >= 16
+      && Boolean(configuredEmailSenderAddress(environmentValue(environment, "SHARE_EMAIL_FROM")));
+  }
   const requiredEmailSecrets = [
     "SHARE_OTP_HMAC_KEY",
     "SHARE_EMAIL_HMAC_KEY",
     "SHARE_RATE_LIMIT_HMAC_KEY"
-  ].map((name) => envValue(name));
+  ].map((name) => environmentValue(environment, name));
   const secretsConfigured =
     requiredEmailSecrets.every((value) => Buffer.byteLength(value, "utf8") >= 32)
-    && new Set(requiredEmailSecrets).size === requiredEmailSecrets.length;
-  const senderVerified = exactFeatureFlag("SHARE_EMAIL_SENDER_VERIFIED");
+    && new Set(requiredEmailSecrets).size === requiredEmailSecrets.length
+    && ![
+      "SHARE_PASSWORD_PEPPER",
+      "SHARE_SESSION_HMAC_KEY",
+      "SHARE_COOKIE_NAME_HMAC_KEY",
+      "SHARE_CSRF_HMAC_KEY",
+      "SHARE_PARTICIPANT_HMAC_KEY"
+    ].map((name) => environmentValue(environment, name))
+      .filter(Boolean)
+      .some((otherSecret) => requiredEmailSecrets.includes(otherSecret));
+  const senderVerified = provider === "gmail_smtp"
+    ? providerConfigured
+    : configuredBoolean(environment, "SHARE_EMAIL_SENDER_VERIFIED");
   return {
     ready:
       v2Enabled
@@ -226,7 +358,8 @@ export function secureShareEmailReadiness() {
     featureEnabled,
     providerConfigured,
     secretsConfigured,
-    senderVerified
+    senderVerified,
+    freeTierMode: configuredBoolean(environment, "SHARE_EMAIL_FREE_TIER_MODE")
   };
 }
 
@@ -1697,12 +1830,15 @@ export function verificationEmailText(code, ttlSeconds) {
     ? `${ttlSeconds / 60}분`
     : `${ttlSeconds}초`;
   return [
-    "QuickMemo 보안 공유 인증 코드입니다.",
+    "QuickMemo 공유 노트를 열기 위한 인증번호입니다.",
     "",
-    code,
+    `인증번호: ${code}`,
     "",
-    `코드는 ${validity} 동안 유효합니다.`,
-    "본인이 요청하지 않았다면 이 메일을 무시하세요."
+    `이 인증번호는 ${validity} 동안 유효합니다.`,
+    "본인이 요청하지 않았다면 이 메일을 무시하세요.",
+    "",
+    "서비스 주소:",
+    "https://quickmemo-tan.vercel.app"
   ].join("\n");
 }
 
@@ -1768,7 +1904,7 @@ export function createResendEmailAdapter(
           body: JSON.stringify({
             from,
             to: [to],
-            subject: "QuickMemo 공유 인증 코드",
+            subject: "QuickMemo 공유 노트 인증번호",
             text
           }),
           signal: AbortSignal.timeout(remainingMilliseconds)
@@ -1901,7 +2037,7 @@ export async function sendVerificationEmail(
   code,
   ttlSeconds,
   idempotencyKey,
-  adapter = createResendEmailAdapter(),
+  adapter,
   timeoutMilliseconds = emailProviderTotalTimeoutMilliseconds
 ) {
   if (!secureShareEmailEnabled()) {
@@ -1910,6 +2046,8 @@ export async function sendVerificationEmail(
   if (
     typeof idempotencyKey !== "string"
     || !/^[A-Za-z0-9_-]{16,200}$/u.test(idempotencyKey)
+    || !adapter
+    || typeof adapter.send !== "function"
   ) {
     throw new HttpError(500, "internal_error", "Invalid email idempotency key", {
       expose: false

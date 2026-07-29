@@ -39,6 +39,7 @@ const secureShareRootStateCollections = [
   "publicShareAccessSessions",
   "publicShareEmailChallenges",
   "publicShareEmailDeliveries",
+  "publicShareEmailSendAttempts",
   "publicShareCopyGrantRequests",
   "publicShareSourceGuards",
   "publicShareUnlockGrants",
@@ -374,6 +375,42 @@ async function deleteDocumentNames(documentNames, accessToken, stats, counterNam
   stats[counterName] += deletedCount;
 
   return deletedCount;
+}
+
+async function deleteDocumentSnapshots(documents, accessToken, stats, counterName) {
+  const remainingDeletes = Math.max(
+    0,
+    stats.maxDocumentDeletes - stats.documentDeletesAttempted
+  );
+  const snapshots = documents.slice(0, remainingDeletes);
+
+  if (!snapshots.length) {
+    return 0;
+  }
+  if (snapshots.some((document) => !document?.name || !document.updateTime)) {
+    throw new Error("A Firestore delete precondition is required");
+  }
+
+  for (let index = 0; index < snapshots.length; index += firestoreCommitWriteLimit) {
+    const chunk = snapshots.slice(index, index + firestoreCommitWriteLimit);
+    await firestoreRequest(
+      firestoreCommitPathFromDocumentName(chunk[0].name),
+      accessToken,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          writes: chunk.map((document) => ({
+            delete: document.name,
+            currentDocument: { updateTime: document.updateTime }
+          }))
+        })
+      }
+    );
+  }
+
+  stats.documentDeletesAttempted += snapshots.length;
+  stats[counterName] += snapshots.length;
+  return snapshots.length;
 }
 
 async function queryExpiredShareQueues({ accessToken, projectId, nowIso, limit }) {
@@ -1764,6 +1801,8 @@ function secureShareRootStateCounterName(collectionId) {
       return "secureShareEmailChallengesDeleted";
     case "publicShareEmailDeliveries":
       return "secureShareEmailDeliveriesDeleted";
+    case "publicShareEmailSendAttempts":
+      return "secureShareEmailSendAttemptsDeleted";
     case "publicShareCopyGrantRequests":
       return "secureShareCopyGrantRequestsDeleted";
     case "publicShareSourceGuards":
@@ -1844,6 +1883,87 @@ async function secureShareStateRemains(shareId, accessToken, projectId) {
   return false;
 }
 
+async function secureShareRootDocumentsEligibleForTreeDeletion(
+  collectionId,
+  documents,
+  accessToken
+) {
+  const stateField = collectionId === "publicShareEmailDeliveries"
+    ? "status"
+    : collectionId === "publicShareEmailSendAttempts"
+      ? "state"
+      : "";
+
+  if (!stateField) {
+    return documents;
+  }
+
+  const currentDocuments = await Promise.all(documents.map((document) =>
+    getDocumentByName(document.name, accessToken, [stateField])
+  ));
+  return currentDocuments.filter((document) => {
+    if (!document) {
+      return false;
+    }
+    const state = stringField(document, stateField);
+    return state === "sent" || state === "failed";
+  });
+}
+
+async function finalizedExpiredEmailSendAttempts(
+  documents,
+  fieldPath,
+  config
+) {
+  const nowMilliseconds = Date.parse(config.nowIso);
+  const currentDocuments = await Promise.all(documents.map((document) =>
+    getDocumentByName(
+      document.name,
+      config.accessToken,
+      ["state", fieldPath]
+    )
+  ));
+  return currentDocuments.filter((document) => {
+    if (!document) {
+      return false;
+    }
+    const state = stringField(document, "state");
+    const expiresAt = timestampFieldMillis(document, fieldPath);
+    return (
+      (state === "sent" || state === "failed")
+      && Number.isFinite(expiresAt)
+      && expiresAt <= nowMilliseconds
+    );
+  });
+}
+
+async function unreservedExpiredEmailQuotaBuckets(
+  documents,
+  fieldPath,
+  config
+) {
+  const nowMilliseconds = Date.parse(config.nowIso);
+  const currentDocuments = await Promise.all(documents.map((document) =>
+    getDocumentByName(
+      document.name,
+      config.accessToken,
+      ["reservedCount", fieldPath]
+    )
+  ));
+  return currentDocuments.filter((document) => {
+    if (!document) {
+      return false;
+    }
+    const reservedCount = nonNegativeIntegerField(document, "reservedCount");
+    const expiresAt = timestampFieldMillis(document, fieldPath);
+    return (
+      reservedCount === 0
+      && Number.isFinite(expiresAt)
+      && expiresAt <= nowMilliseconds
+    );
+  });
+}
+
 async function deleteSecureShareStateByShareId(shareId, accessToken, stats, projectId) {
   if (!shareId || !cleanupStatsCanContinue(stats)) {
     return false;
@@ -1863,12 +1983,30 @@ async function deleteSecureShareStateByShareId(shareId, accessToken, stats, proj
       projectId,
       shareId
     });
-    await deleteDocumentNames(
-      documents.map((document) => document.name),
-      accessToken,
-      stats,
-      secureShareRootStateCounterName(collectionId)
+    const eligibleDocuments = await secureShareRootDocumentsEligibleForTreeDeletion(
+      collectionId,
+      documents,
+      accessToken
     );
+    const counterName = secureShareRootStateCounterName(collectionId);
+    if (
+      collectionId === "publicShareEmailDeliveries"
+      || collectionId === "publicShareEmailSendAttempts"
+    ) {
+      await deleteDocumentSnapshots(
+        eligibleDocuments,
+        accessToken,
+        stats,
+        counterName
+      );
+    } else {
+      await deleteDocumentNames(
+        eligibleDocuments.map((document) => document.name),
+        accessToken,
+        stats,
+        counterName
+      );
+    }
   }
 
   for (const definition of secureShareChildStateCollections) {
@@ -2003,6 +2141,40 @@ async function deleteExpiredSecureShareQueueDocuments(
     limit
   });
 
+  if (
+    !queue.allDescendants
+    && queue.collectionId === "publicShareEmailQuotaBuckets"
+  ) {
+    const eligibleDocuments = await unreservedExpiredEmailQuotaBuckets(
+      documents,
+      fieldPath,
+      config
+    );
+    return deleteDocumentSnapshots(
+      eligibleDocuments,
+      config.accessToken,
+      stats,
+      queue.counterName
+    );
+  }
+
+  if (
+    !queue.allDescendants
+    && queue.collectionId === "publicShareEmailSendAttempts"
+  ) {
+    const eligibleDocuments = await finalizedExpiredEmailSendAttempts(
+      documents,
+      fieldPath,
+      config
+    );
+    return deleteDocumentSnapshots(
+      eligibleDocuments,
+      config.accessToken,
+      stats,
+      queue.counterName
+    );
+  }
+
   if (!queue.allDescendants) {
     return deleteDocumentNames(
       documents.map((document) => document.name),
@@ -2081,6 +2253,301 @@ async function deleteExpiredSecureShareQueueDocuments(
   return deletedTotal;
 }
 
+function emailQuotaBucketIdentity(bucketId) {
+  const match = /^(minute_(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})|hour_(\d{4}-\d{2}-\d{2}T\d{2})|month_(\d{4}-\d{2}))$/u
+    .exec(bucketId);
+
+  if (!match) {
+    return null;
+  }
+  if (match[2]) {
+    return { periodKey: match[2], scope: "minute" };
+  }
+  if (match[3]) {
+    return { periodKey: match[3], scope: "hourly" };
+  }
+  return { periodKey: match[4], scope: "monthly" };
+}
+
+function emailQuotaReconciliationWrite(document, bucketId, config) {
+  const identity = emailQuotaBucketIdentity(bucketId);
+  const reservedCount = nonNegativeIntegerField(document, "reservedCount");
+  const sentCount = nonNegativeIntegerField(document, "sentCount");
+  const failedCount = nonNegativeIntegerField(document, "failedCount");
+  const ambiguousCount = nonNegativeIntegerField(document, "ambiguousCount");
+  const softLimit = nonNegativeIntegerField(document, "softLimit");
+  const hardLimit = nonNegativeIntegerField(document, "hardLimit");
+  const expiresAt = document?.fields?.expiresAt?.timestampValue;
+  const expectedName = documentNameForPath(
+    config.projectId,
+    `publicShareEmailQuotaBuckets/${bucketId}`
+  );
+
+  if (
+    !identity
+    || document?.name !== expectedName
+    || !document.updateTime
+    || stringField(document, "scope") !== identity.scope
+    || stringField(document, "periodKey") !== identity.periodKey
+    || reservedCount === null
+    || reservedCount < 1
+    || sentCount === null
+    || failedCount === null
+    || ambiguousCount === null
+    || softLimit === null
+    || softLimit < 1
+    || hardLimit === null
+    || hardLimit < softLimit
+    || typeof expiresAt !== "string"
+    || !Number.isFinite(Date.parse(expiresAt))
+  ) {
+    throw new Error("Invalid secure-share email quota reservation");
+  }
+
+  const nextReservedCount = reservedCount - 1;
+  const nextAmbiguousCount = ambiguousCount + 1;
+  return {
+    update: {
+      name: expectedName,
+      fields: {
+        scope: { stringValue: identity.scope },
+        periodKey: { stringValue: identity.periodKey },
+        reservedCount: integerValue(nextReservedCount),
+        sentCount: integerValue(sentCount),
+        failedCount: integerValue(failedCount),
+        ambiguousCount: integerValue(nextAmbiguousCount),
+        softLimit: integerValue(softLimit),
+        hardLimit: integerValue(hardLimit),
+        softLimitReached: {
+          booleanValue:
+            nextReservedCount
+            + sentCount
+            + nextAmbiguousCount
+            + (identity.scope === "minute" || identity.scope === "hourly"
+              ? failedCount
+              : 0)
+            >= softLimit
+        },
+        updatedAt: { timestampValue: config.nowIso },
+        expiresAt: { timestampValue: expiresAt }
+      }
+    },
+    updateMask: {
+      fieldPaths: [
+        "scope",
+        "periodKey",
+        "reservedCount",
+        "sentCount",
+        "failedCount",
+        "ambiguousCount",
+        "softLimit",
+        "hardLimit",
+        "softLimitReached",
+        "updatedAt",
+        "expiresAt"
+      ]
+    },
+    currentDocument: { updateTime: document.updateTime }
+  };
+}
+
+async function queryEmailSendAttemptsByChallengeId(config, challengeId) {
+  const runQueryPath = `projects/${encodeURIComponent(config.projectId)}/databases/${encodeURIComponent(databaseId)}/documents:runQuery`;
+  const result = await firestoreRequest(runQueryPath, config.accessToken, {
+    method: "POST",
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId: "publicShareEmailSendAttempts" }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "challengeId" },
+            op: "EQUAL",
+            value: { stringValue: challengeId }
+          }
+        },
+        limit: 2
+      }
+    })
+  });
+
+  return result.flatMap((entry) => (entry.document ? [entry.document] : []));
+}
+
+function matchingExpiredEmailSendAttempt(attempts, delivery, status, config) {
+  if (attempts.length > 1) {
+    throw new Error("Duplicate secure-share email send attempts");
+  }
+  const attempt = attempts[0] ?? null;
+
+  if (!attempt) {
+    return null;
+  }
+
+  const prefix = `${documentNameForPath(
+    config.projectId,
+    "publicShareEmailSendAttempts"
+  )}/`;
+  const expiresAt = timestampFieldMillis(attempt, "expiresAt");
+  if (
+    !attempt.name?.startsWith(prefix)
+    || attempt.name.slice(prefix.length).includes("/")
+    || !attempt.updateTime
+    || stringField(attempt, "challengeId") !== stringField(delivery, "challengeId")
+    || stringField(attempt, "shareId") !== stringField(delivery, "shareId")
+    || stringField(attempt, "state") !== status
+    || !Number.isFinite(expiresAt)
+    || expiresAt > Date.parse(config.nowIso)
+  ) {
+    throw new Error("Invalid secure-share email send attempt");
+  }
+
+  return attempt;
+}
+
+async function reconcileExpiredEmailDelivery(
+  documentName,
+  remainingDeleteBudget,
+  config,
+  stats
+) {
+  const delivery = await getDocumentByName(documentName, config.accessToken);
+
+  if (!delivery) {
+    return 0;
+  }
+
+  const expectedPrefix = `${documentNameForPath(
+    config.projectId,
+    "publicShareEmailDeliveries"
+  )}/`;
+  const expiresAt = timestampFieldMillis(delivery, "expiresAt");
+  if (
+    delivery.name !== documentName
+    || !delivery.name.startsWith(expectedPrefix)
+    || delivery.name.slice(expectedPrefix.length).includes("/")
+    || !delivery.updateTime
+    || !Number.isFinite(expiresAt)
+    || expiresAt > Date.parse(config.nowIso)
+  ) {
+    return 0;
+  }
+
+  const status = stringField(delivery, "status");
+  if (status === "sent" || status === "failed") {
+    return deleteDocumentSnapshots(
+      [delivery],
+      config.accessToken,
+      stats,
+      "secureShareEmailDeliveriesDeleted"
+    );
+  }
+  if (status !== "reserved" && status !== "ambiguous") {
+    return 0;
+  }
+
+  const challengeId = stringField(delivery, "challengeId");
+  const shareId = stringField(delivery, "shareId");
+  if (
+    !/^[A-Za-z0-9_-]{1,160}$/u.test(challengeId)
+    || !/^[A-Za-z0-9_-]{1,160}$/u.test(shareId)
+  ) {
+    throw new Error("Invalid secure-share email delivery identity");
+  }
+
+  const attempts = await queryEmailSendAttemptsByChallengeId(config, challengeId);
+  const attempt = matchingExpiredEmailSendAttempt(
+    attempts,
+    delivery,
+    status,
+    config
+  );
+  const requiredDeletes = 1 + (attempt ? 1 : 0);
+  if (
+    requiredDeletes > remainingDeleteBudget
+    ||
+    stats.documentDeletesAttempted + requiredDeletes > stats.maxDocumentDeletes
+    || !cleanupCanContinue(config, stats)
+  ) {
+    return 0;
+  }
+
+  const writes = [];
+  if (status === "reserved") {
+    const bucketIds = stringArrayField(delivery, "quotaBucketIds");
+    if (
+      bucketIds.length !== 3
+      || new Set(bucketIds).size !== 3
+      || bucketIds.some((bucketId) => !emailQuotaBucketIdentity(bucketId))
+    ) {
+      throw new Error("Invalid secure-share email delivery reservation");
+    }
+    const quotaDocuments = await Promise.all(bucketIds.map((bucketId) =>
+      getDocumentByName(
+        documentNameForPath(
+          config.projectId,
+          `publicShareEmailQuotaBuckets/${bucketId}`
+        ),
+        config.accessToken
+      )
+    ));
+    writes.push(...quotaDocuments.map((quotaDocument, index) =>
+      emailQuotaReconciliationWrite(quotaDocument, bucketIds[index], config)
+    ));
+  }
+
+  if (attempt) {
+    writes.push({
+      delete: attempt.name,
+      currentDocument: { updateTime: attempt.updateTime }
+    });
+  }
+  writes.push({
+    delete: delivery.name,
+    currentDocument: { updateTime: delivery.updateTime }
+  });
+
+  await firestoreRequest(
+    firestoreCommitPathFromDocumentName(delivery.name),
+    config.accessToken,
+    {
+      method: "POST",
+      body: JSON.stringify({ writes })
+    }
+  );
+
+  stats.documentDeletesAttempted += requiredDeletes;
+  stats.secureShareEmailDeliveriesDeleted += 1;
+  stats.secureShareEmailSendAttemptsDeleted += attempt ? 1 : 0;
+  stats.secureShareEmailReservationsReconciled += status === "reserved" ? 1 : 0;
+  return requiredDeletes;
+}
+
+async function cleanupExpiredEmailDeliveries(limit, config, stats) {
+  if (limit <= 0 || !cleanupCanContinue(config, stats)) {
+    return 0;
+  }
+  const documents = await queryExpiredSecureShareDocuments({
+    ...config,
+    collectionId: "publicShareEmailDeliveries",
+    fieldPath: "expiresAt",
+    limit
+  });
+  let deletedTotal = 0;
+
+  for (const document of documents) {
+    if (deletedTotal >= limit || !cleanupCanContinue(config, stats)) {
+      break;
+    }
+    deletedTotal += await reconcileExpiredEmailDelivery(
+      document.name,
+      limit - deletedTotal,
+      config,
+      stats
+    );
+  }
+  return deletedTotal;
+}
+
 async function cleanupSecureShareRetentionQueue(queue, limit, config, stats) {
   const fieldPaths = ["expiresAt", "retentionExpiresAt"];
   const perFieldFairShare = Math.max(1, Math.floor(limit / fieldPaths.length));
@@ -2130,13 +2597,7 @@ async function cleanupExpiredSecureShareState(config, stats) {
     Math.max(0, stats.maxDocumentDeletes - stats.documentDeletesAttempted)
   );
   if (deliveryBudget > 0 && cleanupCanContinue(config, stats)) {
-    await deleteExpiredSecureShareQueueDocuments(
-      {
-        allDescendants: false,
-        collectionId: "publicShareEmailDeliveries",
-        counterName: "secureShareEmailDeliveriesDeleted"
-      },
-      "expiresAt",
+    await cleanupExpiredEmailDeliveries(
       deliveryBudget,
       config,
       stats
@@ -3414,6 +3875,8 @@ async function cleanupExpiredPublicShares({
     secureShareCopyGrantRequestsDeleted: 0,
     secureShareEmailChallengesDeleted: 0,
     secureShareEmailDeliveriesDeleted: 0,
+    secureShareEmailReservationsReconciled: 0,
+    secureShareEmailSendAttemptsDeleted: 0,
     secureShareEmailQuotaBucketsDeleted: 0,
     secureShareParticipantCountersDeleted: 0,
     secureShareParticipantNamesDeleted: 0,
@@ -3680,6 +4143,9 @@ async function cleanupExpiredPublicShares({
     secureShareCopyGrantRequestsDeleted: stats.secureShareCopyGrantRequestsDeleted,
     secureShareEmailChallengesDeleted: stats.secureShareEmailChallengesDeleted,
     secureShareEmailDeliveriesDeleted: stats.secureShareEmailDeliveriesDeleted,
+    secureShareEmailReservationsReconciled:
+      stats.secureShareEmailReservationsReconciled,
+    secureShareEmailSendAttemptsDeleted: stats.secureShareEmailSendAttemptsDeleted,
     secureShareEmailQuotaBucketsDeleted: stats.secureShareEmailQuotaBucketsDeleted,
     secureShareParticipantCountersDeleted: stats.secureShareParticipantCountersDeleted,
     secureShareParticipantNamesDeleted: stats.secureShareParticipantNamesDeleted,
