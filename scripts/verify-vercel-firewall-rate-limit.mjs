@@ -155,7 +155,9 @@ export function inspectRevisionRateLimit(config) {
     const requestsPerMinute = limit * 60 / windowSeconds;
     if (
       normalizedString(mitigation?.action) !== "rate_limit"
-      || normalizedString(rateLimit?.action) !== "deny"
+      // Vercel's active-config API represents the Dashboard's 429 threshold
+      // behavior with the canonical rate_limit enum at both action levels.
+      || normalizedString(rateLimit?.action) !== "rate_limit"
       || normalizedString(rateLimit?.algo) !== "fixed_window"
       || !Number.isFinite(windowSeconds)
       || windowSeconds < 10

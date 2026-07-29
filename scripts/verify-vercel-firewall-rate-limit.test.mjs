@@ -18,7 +18,7 @@ function validRule(overrides = {}) {
       mitigate: {
         action: "rate_limit",
         rateLimit: {
-          action: "deny",
+          action: "rate_limit",
           algo: "fixed_window",
           window: 60,
           limit: 120,
@@ -155,6 +155,23 @@ describe("Vercel revision WAF preflight", () => {
         }
       })]
     }],
+    ["non-canonical deny threshold action", {
+      firewallEnabled: true,
+      rules: [validRule({
+        action: {
+          mitigate: {
+            action: "rate_limit",
+            rateLimit: {
+              action: "deny",
+              algo: "fixed_window",
+              window: 60,
+              limit: 60,
+              keys: ["ip"]
+            }
+          }
+        }
+      })]
+    }],
     ["preceding active bypass rule", {
       firewallEnabled: true,
       rules: [
@@ -207,7 +224,7 @@ describe("Vercel revision WAF preflight", () => {
           }]
         }],
         mitigationAction: "rate_limit",
-        rateLimitAction: "deny",
+        rateLimitAction: "rate_limit",
         algorithm: "fixed_window",
         window: 60,
         limit: 120,
