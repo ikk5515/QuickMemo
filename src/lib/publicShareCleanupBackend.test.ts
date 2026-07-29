@@ -85,7 +85,10 @@ describe("public share backend cleanup", () => {
     expect(cleanupFunctionSource).toContain("function authorizedCleanupRequest");
     expect(cleanupFunctionSource).toContain("timingSafeStringEqual(authorizationHeader(request)");
     expect(cleanupFunctionSource).toContain("function safeErrorSummary(error)");
-    expect(cleanupFunctionSource).toContain("redactLogMessage(error.message)");
+    expect(cleanupFunctionSource).toContain('kind: error instanceof Error ? "error" : "non_error"');
+    expect(cleanupFunctionSource.match(
+      /function errorNumberField[\s\S]*?function sha256/u
+    )?.[0] ?? "").not.toContain("error.message");
     expect(cleanupFunctionSource).toContain('console.error("public share cleanup failed", safeErrorSummary(error))');
     expect(cleanupFunctionSource).toContain('console.error("public share cleanup denied", { reason: "cron_auth_unavailable" })');
     expect(cleanupFunctionSource).not.toContain('error: "cleanup_not_configured"');

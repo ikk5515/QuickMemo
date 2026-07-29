@@ -26,9 +26,46 @@ describe("managed user backend deletion", () => {
     expect(invalidTokenResponseIndex).toBeLessThan(credentialsIndex);
   });
 
-  it("logs redacted backend error summaries instead of raw exception objects", () => {
+  it("rejects disabled callers and requires recent authentication before cleanup", () => {
+    const lookupSource = deleteManagedUserSource.match(
+      /async function lookupCallerUid[\s\S]*?async function deleteAuthUser/u
+    )?.[0] ?? "";
+    const handlerSource = deleteManagedUserSource.match(
+      /export default async function handler[\s\S]*$/u
+    )?.[0] ?? "";
+
+    expect(deleteManagedUserSource).toContain("const identityToolkitRequestTimeoutMs = 8_000");
+    expect(deleteManagedUserSource).toContain(
+      "const recentAdminAuthenticationMaxAgeMs = 15 * 60 * 1000"
+    );
+    expect(lookupSource).toContain("AbortSignal.timeout(identityToolkitRequestTimeoutMs)");
+    expect(lookupSource).toContain('responseBody.includes("USER_DISABLED")');
+    expect(lookupSource).toContain("user.disabled !== true");
+    expect(deleteManagedUserSource).toContain("function idTokenHasRecentAuthentication(");
+    expect(handlerSource).toContain("if (!idTokenHasRecentAuthentication(");
+    expect(handlerSource).toContain("credentials.projectId");
+    expect(handlerSource).toContain('error: "recent_auth_required"');
+    expect(handlerSource.indexOf("await lookupCallerUid(idToken)")).toBeLessThan(
+      handlerSource.indexOf("idTokenHasRecentAuthentication(")
+    );
+    expect(handlerSource.indexOf("const credentials = firebaseCredentials()")).toBeLessThan(
+      handlerSource.indexOf("idTokenHasRecentAuthentication(")
+    );
+    expect(handlerSource.indexOf("idTokenHasRecentAuthentication(")).toBeLessThan(
+      handlerSource.indexOf("const accessToken = await fetchAccessToken(credentials)")
+    );
+  });
+
+  it("logs metadata-only backend error summaries instead of exception messages", () => {
+    const summarySource = deleteManagedUserSource.match(
+      /function errorNumberField[\s\S]*?function parseJsonCredential/u
+    )?.[0] ?? "";
+
     expect(deleteManagedUserSource).toContain("function safeErrorSummary(error)");
-    expect(deleteManagedUserSource).toContain("redactLogMessage(error.message)");
+    expect(summarySource).toContain('kind: error instanceof Error ? "error" : "non_error"');
+    expect(summarySource).toContain("value >= 100 && value <= 599");
+    expect(summarySource).not.toContain("error.message");
+    expect(summarySource).not.toContain("error.name");
     expect(deleteManagedUserSource).toContain('console.error("managed user delete failed", safeErrorSummary(error))');
     expect(deleteManagedUserSource).not.toContain('console.error("managed user delete failed", error)');
   });

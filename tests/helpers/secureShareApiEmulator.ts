@@ -50,6 +50,7 @@ export interface SecureShareSeedOptions {
     codeDigest: string;
     emailHash: string;
     id: string;
+    sendAttemptId?: string;
     status?: "consumed" | "pending";
   };
   emailVerificationRequired?: boolean;
@@ -414,6 +415,8 @@ export async function seedSecureShare(options: SecureShareSeedOptions) {
         expiresAt: new Date(now + 10 * 60 * 1000),
         ownerUid,
         policyVersion: 1,
+        sendAttemptId: options.challenge.sendAttemptId
+          ?? `send_${options.challenge.id}`,
         shareId: options.shareId,
         status: options.challenge.status ?? "pending",
         updatedAt: new Date(now - 5_000)

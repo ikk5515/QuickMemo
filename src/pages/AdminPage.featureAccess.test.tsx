@@ -1,5 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserProfile } from "../types";
 import {
@@ -13,6 +15,7 @@ import {
 const { updateUserMock } = vi.hoisted(() => ({
   updateUserMock: vi.fn()
 }));
+const adminPageSource = readFileSync(join(process.cwd(), "src/pages/AdminPage.tsx"), "utf8");
 
 vi.mock("../services/adminFunctions", () => ({
   createUser: vi.fn(),
@@ -111,6 +114,45 @@ describe("AdminPage feature access editing", () => {
       expect(checkbox).toBeDisabled();
     }
     expect(screen.getByText("관리자는 계정 운영을 위해 모든 기능을 사용합니다.")).toBeInTheDocument();
+  });
+
+  it("blocks the signed-in administrator from demoting or deactivating itself", () => {
+    const profile = userProfile({
+      uid: "admin-a",
+      isAdmin: true,
+      role: "admin"
+    });
+
+    render(
+      <EditableUserCard
+        activeAdminCount={1}
+        currentUid="admin-a"
+        index={0}
+        total={1}
+        user={profile}
+        users={[profile]}
+      />
+    );
+
+    expect(screen.getByRole("checkbox", { name: "관리자" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "활성" })).toBeDisabled();
+    expect(
+      screen.getByText("현재 로그인한 관리자의 관리자·활성 상태는 다른 관리자가 변경할 수 있습니다.")
+    ).toBeInTheDocument();
+  });
+
+  it("loads and decrypts the full admin note collection only on the notes tab", () => {
+    const subscriptionEffect = adminPageSource.match(
+      /useEffect\(\(\) => \{\n {4}if \(!profile\?\.isAdmin[\s\S]*?\}, \[activeAdminTab, profile\?\.isAdmin\]\);/u
+    )?.[0] ?? "";
+    const decryptEffect = adminPageSource.match(
+      /useEffect\(\(\) => \{\n {4}let cancelled = false;[\s\S]*?\}, \[activeAdminTab, notes, privateKey, profile\]\);/u
+    )?.[0] ?? "";
+
+    expect(subscriptionEffect).toContain('activeAdminTab !== "notes"');
+    expect(subscriptionEffect).toContain("subscribeAllNotesForAdmin");
+    expect(decryptEffect).toContain('if (activeAdminTab !== "notes")');
+    expect(decryptEffect).toContain("setAdminNoteViews([])");
   });
 
   it("이전 권한 저장 중 다시 원래 선택으로 돌려도 마지막 선택을 후속 저장한다", async () => {

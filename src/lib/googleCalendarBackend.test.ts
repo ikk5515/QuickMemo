@@ -2203,12 +2203,18 @@ describe("Google Calendar backend security", () => {
     expect(commonSource).toContain('timeZone: document ? readString(document, "timeZone") || null : null');
   });
 
-  it("routes all backend failures through redacted summaries without credential logging", () => {
+  it("routes backend failures through metadata-only summaries without credential logging", () => {
     expect(authSource).toContain('console.error("google calendar callback failed", safeErrorSummary(error))');
     expect(connectionSource).toContain('console.error("google calendar connection failed", safeErrorSummary(error))');
     expect(authSource).not.toContain("console.log");
     expect(connectionSource).not.toContain("console.log");
-    expect(commonSource).toContain("access_token|refresh_token|id_token|code|code_verifier|state");
+    const summarySource = commonSource.match(
+      /function errorNumberField[\s\S]*?function parseJsonCredential/u
+    )?.[0] ?? "";
+    expect(summarySource).toContain('kind: error instanceof Error ? "error" : "non_error"');
+    expect(summarySource).toContain("value >= 100 && value <= 599");
+    expect(summarySource).not.toContain("error.message");
+    expect(summarySource).not.toContain("error.name");
   });
 
   it("documents server-only secrets without exposing them through VITE-prefixed variables", () => {

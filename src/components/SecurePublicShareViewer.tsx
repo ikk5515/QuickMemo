@@ -1489,7 +1489,7 @@ export function SecurePublicShareViewer({
     setBusyAction("access");
     setAccessError("");
     try {
-      await unlockSecureShare(
+      const accessSession = parseSessionDto(await unlockSecureShare(
         shareId,
         {
           ...(requiresEmailChallenge
@@ -1503,12 +1503,15 @@ export function SecurePublicShareViewer({
           unlockAttemptId
         },
         { idToken, signal: lifecycle.signal }
-      );
+      ));
+      if (!accessSession) {
+        throw new Error("invalid_session");
+      }
       if (!lifecycleIsCurrent(lifecycle)) {
         return;
       }
       await loadGrantedContent(
-        undefined,
+        accessSession,
         lifecycle.signal,
         metadata.ownerPreview,
         lifecycle.generation

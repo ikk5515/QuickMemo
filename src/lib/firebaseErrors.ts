@@ -1,3 +1,5 @@
+import { minimumNewPasswordLength } from "./passwordPolicy";
+
 const authErrorMessages: Record<string, string> = {
   "auth/configuration-not-found":
     "Firebase Authentication 설정을 찾지 못했습니다. Firebase Console > Build > Authentication에서 시작하기를 누르고, Sign-in method에서 Email/Password를 활성화한 뒤 다시 시도하세요.",
@@ -12,7 +14,7 @@ const authErrorMessages: Record<string, string> = {
   "auth/network-request-failed": "네트워크 연결을 확인한 뒤 다시 시도하세요.",
   "auth/too-many-requests": "짧은 시간에 요청이 너무 많았습니다. 잠시 뒤 다시 시도하세요.",
   "auth/user-disabled": "비활성화된 사용자입니다.",
-  "auth/weak-password": "비밀번호는 6자 이상이어야 합니다.",
+  "auth/weak-password": `비밀번호는 ${minimumNewPasswordLength}자 이상이어야 합니다.`,
   "auth/wrong-password": "비밀번호를 확인해주세요."
 };
 

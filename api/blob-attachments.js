@@ -1,4 +1,4 @@
-/* global Buffer, URL, URLSearchParams, console, crypto, fetch, process */
+/* global AbortSignal, Buffer, URL, URLSearchParams, console, crypto, fetch, process */
 
 import { del, get, head } from "@vercel/blob";
 import { handleUpload } from "@vercel/blob/client";
@@ -41,6 +41,8 @@ const maxChunkedEncryptedAttachmentBytes = maxAttachmentFileBytes + maxEncrypted
 const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
 const userBlobAttachmentCountLimit = 500;
 const attachmentCountPolicyVersion = 1;
+const oauthRequestTimeoutMs = 8_000;
+const accessTokenRefreshSkewMs = 60_000;
 const tokenTtlMs = 10 * 60 * 1000;
 const pendingDeletionGraceMs = tokenTtlMs + 60 * 1000;
 const reservationTtlMs = 2 * 60 * 60 * 1000;
@@ -88,6 +90,8 @@ const publicShareAttachmentMimeTypes = {
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   zip: "application/zip"
 };
+let cachedAccessToken = null;
+let pendingAccessTokenRequest = null;
 
 class HttpError extends Error {
   constructor(statusCode, publicMessage, internalMessage = publicMessage) {
@@ -109,51 +113,26 @@ function jsonResponse(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
-const sensitiveLogPatterns = [
-  /Bearer\s+[A-Za-z0-9._~+/=-]+/giu,
-  /"access_token"\s*:\s*"[^"]+"/giu,
-  /"idToken"\s*:\s*"[^"]+"/giu,
-  /"private_key"\s*:\s*"[^"]+"/giu,
-  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu,
-  /AIza[0-9A-Za-z_-]{35}/gu,
-  /gh[pousr]_[A-Za-z0-9_]{36,}/gu,
-  /xox[baprs]-[A-Za-z0-9-]{20,}/gu
-];
-
-function redactLogMessage(value) {
-  return String(value)
-    .replace(sensitiveLogPatterns[0], "Bearer [redacted]")
-    .replace(sensitiveLogPatterns[1], '"access_token":"[redacted]"')
-    .replace(sensitiveLogPatterns[2], '"idToken":"[redacted]"')
-    .replace(sensitiveLogPatterns[3], '"private_key":"[redacted]"')
-    .replace(sensitiveLogPatterns[4], "[redacted private key]")
-    .replace(sensitiveLogPatterns[5], "[redacted api key]")
-    .replace(sensitiveLogPatterns[6], "[redacted github token]")
-    .replace(sensitiveLogPatterns[7], "[redacted slack token]")
-    .slice(0, 1000);
-}
-
 function errorNumberField(error, fieldName) {
   if (!error || typeof error !== "object") {
     return undefined;
   }
 
-  const value = error[fieldName];
-  return Number.isInteger(value) ? value : undefined;
+  try {
+    const value = error[fieldName];
+    return Number.isInteger(value) && value >= 100 && value <= 599
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
-function safeErrorSummary(error) {
-  if (error instanceof Error) {
-    return {
-      message: redactLogMessage(error.message),
-      name: error.name,
-      status: errorNumberField(error, "status"),
-      statusCode: errorNumberField(error, "statusCode")
-    };
-  }
-
+export function safeErrorSummary(error) {
   return {
-    message: redactLogMessage(error)
+    kind: error instanceof Error ? "error" : "non_error",
+    status: errorNumberField(error, "status"),
+    statusCode: errorNumberField(error, "statusCode")
   };
 }
 
@@ -240,7 +219,11 @@ async function signJwt(privateKey, unsignedJwt) {
   return base64UrlEncode(Buffer.from(signature));
 }
 
-async function fetchAccessToken(credentials) {
+function accessTokenCacheKey(credentials) {
+  return `${credentials.projectId}\u0000${credentials.clientEmail}`;
+}
+
+async function requestAccessToken(credentials) {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const header = base64UrlEncode(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const claims = base64UrlEncode(
@@ -260,24 +243,65 @@ async function fetchAccessToken(credentials) {
     body: new URLSearchParams({
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
       assertion
-    })
+    }),
+    signal: AbortSignal.timeout(oauthRequestTimeoutMs)
   });
 
   if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`OAuth token request failed: ${response.status} ${text.slice(0, 300)}`);
+    throw new Error(`OAuth token request failed with status ${response.status}`);
   }
 
   const token = await response.json();
+  const expiresInSeconds = Number(token.expires_in);
 
-  if (typeof token.access_token !== "string" || !token.access_token) {
-    throw new Error("OAuth token response did not include an access token");
+  if (
+    typeof token.access_token !== "string"
+    || !token.access_token
+    || !Number.isFinite(expiresInSeconds)
+    || expiresInSeconds < 60
+    || expiresInSeconds > 7_200
+  ) {
+    throw new Error("OAuth token response was invalid");
   }
 
-  return token.access_token;
+  return {
+    accessToken: token.access_token,
+    expiresAt: Date.now() + expiresInSeconds * 1000
+  };
 }
 
-async function lookupCallerUid(idToken) {
+async function fetchAccessToken(credentials) {
+  const cacheKey = accessTokenCacheKey(credentials);
+  const now = Date.now();
+
+  if (
+    cachedAccessToken?.cacheKey === cacheKey
+    && cachedAccessToken.expiresAt - accessTokenRefreshSkewMs > now
+  ) {
+    return cachedAccessToken.accessToken;
+  }
+
+  if (pendingAccessTokenRequest?.cacheKey === cacheKey) {
+    return pendingAccessTokenRequest.promise;
+  }
+
+  let requestPromise;
+  requestPromise = requestAccessToken(credentials)
+    .then(({ accessToken, expiresAt }) => {
+      cachedAccessToken = { accessToken, cacheKey, expiresAt };
+      return accessToken;
+    })
+    .finally(() => {
+      if (pendingAccessTokenRequest?.promise === requestPromise) {
+        pendingAccessTokenRequest = null;
+      }
+    });
+  pendingAccessTokenRequest = { cacheKey, promise: requestPromise };
+
+  return requestPromise;
+}
+
+export async function lookupCallerUid(idToken) {
   const apiKey = firebaseWebApiKey();
 
   if (!apiKey) {
@@ -287,7 +311,8 @@ async function lookupCallerUid(idToken) {
   const response = await fetch(`${identityToolkitBaseUrl}/accounts:lookup?key=${encodeURIComponent(apiKey)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ idToken })
+    body: JSON.stringify({ idToken }),
+    signal: AbortSignal.timeout(oauthRequestTimeoutMs)
   });
 
   if (!response.ok) {
@@ -295,9 +320,10 @@ async function lookupCallerUid(idToken) {
   }
 
   const result = await response.json();
-  const uid = result.users?.[0]?.localId;
+  const user = result.users?.[0];
+  const uid = user?.localId;
 
-  return typeof uid === "string" ? uid : "";
+  return typeof uid === "string" && user?.disabled !== true ? uid : "";
 }
 
 async function readJsonBody(request, maxBytes = 65536) {

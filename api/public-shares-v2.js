@@ -1,6 +1,5 @@
-/* global Buffer, console, process */
+/* global AbortController, Buffer, clearTimeout, console, process, setTimeout */
 
-import { get } from "@vercel/blob";
 import { randomInt } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -60,6 +59,7 @@ import {
   requireSecureShareV2,
   requiredSecret,
   safeId,
+  safeErrorSummary,
   safeUnlockAttemptId,
   secureShareEmailEnabled,
   secureShareEmailReadiness,
@@ -120,7 +120,12 @@ const copyGrantRetryMaximumDelayMilliseconds = 250;
 const emailProviderRequestRateWindowSeconds = 1;
 const emailProviderRequestRateLimit = 2;
 const sessionLastSeenWriteIntervalMilliseconds = 60 * 60 * 1000;
-const participantAllocationMaximumAttempts = 24;
+const participantAllocationMaximumAttempts = 32;
+const participantAllocationQueueMaximumEntriesPerShare = 32;
+const participantAllocationQueueMaximumShareKeys = 64;
+const participantAllocationQueueMaximumTotalEntries = 256;
+const participantAllocationQueueWaitMilliseconds = 15_000;
+const supportedOwnerWrappedKeyByteLengths = new Set([256, 384]);
 const participantRenameMaximumAttempts = 8;
 const participantIpPrefixVersion = 1;
 const participantTokenPartLength = 43;
@@ -132,6 +137,8 @@ const maximumParticipantsPerShare = configuredInteger(
   1,
   1000
 );
+const participantAllocationQueues = new Map();
+let participantAllocationQueueTotalEntries = 0;
 const validActions = new Set([
   "feature-status",
   "owner-list",
@@ -244,7 +251,7 @@ function wrappedShareKey(value) {
     value.version !== 1
     || value.algorithm !== "RSA-OAEP"
     || typeof value.wrappedKey !== "string"
-    || wrappedKeyBytes !== 256
+    || !supportedOwnerWrappedKeyByteLengths.has(wrappedKeyBytes)
   ) {
     throw new HttpError(400, "invalid_request", "Invalid ownerWrappedShareKey");
   }
@@ -2405,6 +2412,16 @@ async function commitEmailChallenge({
       )
     : "";
   const deliveryPath = deliveryId ? `publicShareEmailDeliveries/${deliveryId}` : "";
+  if (
+    !eligible
+    && state?.policy?.oneTimeEnabled === true
+    && (
+      state.share.status === "consumed"
+      || Boolean(state.policy.consumedAt)
+    )
+  ) {
+    return { committed: false, deliveryId, deliveryPath, duplicate: true };
+  }
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const now = new Date();
     const [quotaStates, delivery] = await Promise.all([
@@ -2457,13 +2474,8 @@ async function commitEmailChallenge({
       const currentState = transactionSnapshot.state;
       const validSnapshot =
         shareMutationSnapshotMatches(currentState, state)
-        && (
-          !eligible
-          || (
-            currentState.share.status !== "consumed"
-            && !currentState.policy.consumedAt
-          )
-        );
+        && currentState.share.status !== "consumed"
+        && !currentState.policy.consumedAt;
       if (!validSnapshot) {
         await rollbackShareMutation(context, transactionSnapshot.transaction);
         return { committed: false, deliveryId, deliveryPath, duplicate: true };
@@ -2548,8 +2560,11 @@ async function finalizeEmailDelivery(
     );
     const challengeMatches =
       latestChallenge
+      && latestChallenge.status === "pending"
+      && latestChallenge.deliveryStatus === "reserved"
       && latestChallenge.codeDigest === challenge.codeDigest
-      && latestChallenge.policyVersion === challenge.policyVersion;
+      && latestChallenge.policyVersion === challenge.policyVersion
+      && latestChallenge.sendAttemptId === challenge.sendAttemptId;
     const releaseReservation = outcome !== "ambiguous";
     const accepted = outcome === "sent";
     const providerMessageIdHash = accepted && providerMessageId
@@ -2793,9 +2808,10 @@ async function handleEmailChallenge(request, response, id, shareId) {
           error instanceof HttpError && error.deliveryAmbiguous ? "ambiguous" : "failed"
         );
       } catch (finalizeError) {
-        console.error("secure share email delivery finalization failed", {
-          error: finalizeError instanceof Error ? finalizeError.name : "unknown"
-        });
+        console.error(
+          "secure share email delivery finalization failed",
+          safeErrorSummary(finalizeError)
+        );
       }
     }
     if (delivery) {
@@ -2809,9 +2825,10 @@ async function handleEmailChallenge(request, response, id, shareId) {
           delivery.messageId
         );
       } catch (error) {
-        console.error("secure share accepted email accounting finalization failed", {
-          error: error instanceof Error ? error.name : "unknown"
-        });
+        console.error(
+          "secure share accepted email accounting finalization failed",
+          safeErrorSummary(error)
+        );
       }
     }
   }
@@ -2892,6 +2909,8 @@ async function verifiedChallengeIdentity(context, shareId, policy, body, timing 
     && challenge.shareId === shareId
     && challenge.policyVersion === policy.policyVersion
     && typeof challenge.emailHash === "string"
+    && typeof challenge.sendAttemptId === "string"
+    && /^[A-Za-z0-9_-]{1,160}$/u.test(challenge.sendAttemptId)
     && timestampMilliseconds(challenge.expiresAt) > Date.now()
     && attempts < 5
     && new Set(["pending", "consumed"]).has(challenge.status);
@@ -2913,9 +2932,10 @@ async function verifiedChallengeIdentity(context, shareId, policy, body, timing 
     try {
       await incrementChallengeFailure(context, challengeId);
     } catch (error) {
-      console.error("secure share challenge failure update failed", {
-        error: error instanceof Error ? error.name : "unknown"
-      });
+      console.error(
+        "secure share challenge failure update failed",
+        safeErrorSummary(error)
+      );
     }
     return rejectVerification();
   }
@@ -3363,6 +3383,9 @@ function sessionFields({
     oneTimeGrant: !ownerPreview && policy.oneTimeEnabled === true,
     ownerPreview,
     unlockAttemptHash: attemptHash,
+    challengeSendAttemptId: identity.challenge
+      ? safeId(identity.challenge.sendAttemptId, "sendAttemptId")
+      : "",
     csrfDigest,
     createdAt: new Date(),
     expiresAt,
@@ -3453,6 +3476,411 @@ async function issueOwnerPreviewSession(
   return { sessionToken, csrfToken, expiresAt: expiresAt.toISOString() };
 }
 
+function participantAllocationQueueRetryAfter() {
+  return randomInt(2, 6);
+}
+
+function participantAllocationQueueError(message) {
+  return new HttpError(429, "rate_limited", message, {
+    retryAfter: participantAllocationQueueRetryAfter()
+  });
+}
+
+function participantAllocationRequestDisconnected(request, response) {
+  return (
+    request?.aborted === true
+    && request?.complete !== true
+  )
+    || (
+      request?.destroyed === true
+      && request?.complete !== true
+    )
+    || (
+      request?.signal?.aborted === true
+      && request?.complete !== true
+    )
+    || (
+      response?.destroyed === true
+      && response?.writableEnded !== true
+    );
+}
+
+function removeParticipantAllocationRequestListeners(entry) {
+  for (const remove of entry.removeRequestListeners) {
+    remove();
+  }
+  entry.removeRequestListeners = [];
+}
+
+function participantAllocationQueueSnapshot() {
+  return {
+    liveShareKeys: participantAllocationQueues.size,
+    totalEntries: participantAllocationQueueTotalEntries
+  };
+}
+
+function deleteParticipantAllocationQueueIfEmpty(queueKey, queue) {
+  if (
+    queue.entryCount === 0
+    && queue.active === null
+    && queue.pending.length === 0
+    && participantAllocationQueues.get(queueKey) === queue
+  ) {
+    participantAllocationQueues.delete(queueKey);
+  }
+}
+
+function settleParticipantAllocationEntry(entry, disposition, value) {
+  if (entry.publicSettled) {
+    return;
+  }
+  entry.publicSettled = true;
+  if (disposition === "resolve") {
+    entry.resolve(value);
+  } else {
+    entry.reject(value);
+  }
+}
+
+function removePendingParticipantAllocationEntry(queueKey, queue, entry, error) {
+  if (entry.started || entry.removed) {
+    return false;
+  }
+  const index = queue.pending.indexOf(entry);
+  if (index < 0) {
+    return false;
+  }
+  queue.pending.splice(index, 1);
+  entry.removed = true;
+  clearTimeout(entry.waitTimer);
+  entry.abortController.abort();
+  removeParticipantAllocationRequestListeners(entry);
+  queue.entryCount -= 1;
+  participantAllocationQueueTotalEntries -= 1;
+  settleParticipantAllocationEntry(entry, "reject", error);
+  deleteParticipantAllocationQueueIfEmpty(queueKey, queue);
+  return true;
+}
+
+function startNextParticipantAllocationEntry(queueKey, queue) {
+  if (queue.active !== null) {
+    return;
+  }
+  const entry = queue.pending.shift();
+  if (!entry) {
+    deleteParticipantAllocationQueueIfEmpty(queueKey, queue);
+    return;
+  }
+  if (entry.removed) {
+    startNextParticipantAllocationEntry(queueKey, queue);
+    return;
+  }
+  entry.started = true;
+  queue.active = entry;
+  clearTimeout(entry.waitTimer);
+  removeParticipantAllocationRequestListeners(entry);
+
+  // This queue only suppresses same-isolate contention. Every operation keeps
+  // its Firestore transaction as the cross-isolate authorization authority.
+  Promise.resolve()
+    .then(() => entry.operation({
+      enqueuedAt: entry.enqueuedAt,
+      signal: entry.abortController.signal
+    }))
+    .then(
+      (value) => settleParticipantAllocationEntry(entry, "resolve", value),
+      (error) => settleParticipantAllocationEntry(entry, "reject", error)
+    )
+    .finally(() => {
+      queue.active = null;
+      queue.entryCount -= 1;
+      participantAllocationQueueTotalEntries -= 1;
+      startNextParticipantAllocationEntry(queueKey, queue);
+    });
+}
+
+function withParticipantAllocationQueue(shareId, operation, request, response) {
+  const queueKey = safeId(shareId, "shareId");
+  if (typeof operation !== "function") {
+    throw new TypeError("Participant allocation operation is required");
+  }
+  if (participantAllocationRequestDisconnected(request, response)) {
+    return Promise.reject(
+      participantAllocationQueueError("Participant allocation request disconnected")
+    );
+  }
+
+  let queue = participantAllocationQueues.get(queueKey);
+  if (
+    queue
+    && queue.entryCount >= participantAllocationQueueMaximumEntriesPerShare
+  ) {
+    return Promise.reject(
+      participantAllocationQueueError("Participant allocation queue is full")
+    );
+  }
+  if (
+    !queue
+    && participantAllocationQueues.size >= participantAllocationQueueMaximumShareKeys
+  ) {
+    return Promise.reject(
+      participantAllocationQueueError("Participant allocation share capacity is full")
+    );
+  }
+  if (
+    participantAllocationQueueTotalEntries
+      >= participantAllocationQueueMaximumTotalEntries
+  ) {
+    return Promise.reject(
+      participantAllocationQueueError("Participant allocation capacity is full")
+    );
+  }
+
+  if (!queue) {
+    queue = {
+      active: null,
+      entryCount: 0,
+      pending: []
+    };
+    participantAllocationQueues.set(queueKey, queue);
+  }
+
+  const enqueuedAt = Date.now();
+  let resolveEntry = () => undefined;
+  let rejectEntry = () => undefined;
+  const promise = new Promise((resolve, reject) => {
+    resolveEntry = resolve;
+    rejectEntry = reject;
+  });
+  const entry = {
+    abortController: new AbortController(),
+    enqueuedAt,
+    operation,
+    publicSettled: false,
+    reject: rejectEntry,
+    removeRequestListeners: [],
+    removed: false,
+    resolve: resolveEntry,
+    started: false,
+    waitTimer: null
+  };
+  queue.pending.push(entry);
+  queue.entryCount += 1;
+  participantAllocationQueueTotalEntries += 1;
+
+  const cancelPending = () => {
+    removePendingParticipantAllocationEntry(
+      queueKey,
+      queue,
+      entry,
+      participantAllocationQueueError("Participant allocation request disconnected")
+    );
+  };
+  if (request && typeof request.once === "function") {
+    const onAborted = () => cancelPending();
+    const onClose = () => {
+      if (participantAllocationRequestDisconnected(request)) {
+        cancelPending();
+      }
+    };
+    request.once("aborted", onAborted);
+    request.once("close", onClose);
+    const removeListener = typeof request.removeListener === "function"
+      ? request.removeListener.bind(request)
+      : typeof request.off === "function"
+        ? request.off.bind(request)
+        : null;
+    if (removeListener) {
+      entry.removeRequestListeners.push(
+        () => removeListener("aborted", onAborted),
+        () => removeListener("close", onClose)
+      );
+    }
+  }
+  if (request?.signal && typeof request.signal.addEventListener === "function") {
+    const onSignalAbort = () => cancelPending();
+    request.signal.addEventListener("abort", onSignalAbort, { once: true });
+    entry.removeRequestListeners.push(() =>
+      request.signal.removeEventListener("abort", onSignalAbort)
+    );
+  }
+  if (response && typeof response.once === "function") {
+    const onResponseClose = () => {
+      if (response.writableEnded !== true) {
+        cancelPending();
+      }
+    };
+    response.once("close", onResponseClose);
+    const removeResponseListener = typeof response.removeListener === "function"
+      ? response.removeListener.bind(response)
+      : typeof response.off === "function"
+        ? response.off.bind(response)
+        : null;
+    if (removeResponseListener) {
+      entry.removeRequestListeners.push(
+        () => removeResponseListener("close", onResponseClose)
+      );
+    }
+  }
+
+  entry.waitTimer = setTimeout(() => {
+    removePendingParticipantAllocationEntry(
+      queueKey,
+      queue,
+      entry,
+      participantAllocationQueueError("Participant allocation queue wait exceeded")
+    );
+  }, participantAllocationQueueWaitMilliseconds);
+
+  if (participantAllocationRequestDisconnected(request, response)) {
+    cancelPending();
+  } else {
+    startNextParticipantAllocationEntry(queueKey, queue);
+  }
+  return promise;
+}
+
+function requireParticipantAllocationExecution(execution) {
+  if (execution?.signal?.aborted === true) {
+    throw participantAllocationQueueError("Participant allocation request cancelled");
+  }
+}
+
+async function revalidateParticipantAllocationChallenge(
+  context,
+  shareId,
+  verifiedPolicyVersion,
+  identity,
+  attemptHash
+) {
+  if (!identity.challenge) {
+    return identity;
+  }
+  const original = identity.challenge;
+  const challengeId = safeId(original.__id, "challengeId");
+  const challenge = await firestoreGet(
+    context,
+    `publicShareEmailChallenges/${challengeId}`
+  );
+  const attempts = Number.isSafeInteger(challenge?.attempts) ? challenge.attempts : 0;
+  const immutableFieldsMatch = Boolean(challenge)
+    && challenge.shareId === shareId
+    && challenge.policyVersion === verifiedPolicyVersion
+    && challenge.emailHash === original.emailHash
+    && challenge.codeDigest === original.codeDigest
+    && challenge.sendAttemptId === original.sendAttemptId;
+  const statusAllowsAttempt = challenge?.status === "pending"
+    || (
+      challenge?.status === "consumed"
+      && challenge.consumedAttemptHash === attemptHash
+    );
+  if (
+    !immutableFieldsMatch
+    || !statusAllowsAttempt
+    || attempts >= 5
+    || timestampMilliseconds(challenge.expiresAt) <= Date.now()
+  ) {
+    throw new HttpError(409, "access_denied", "Challenge was already consumed");
+  }
+  return {
+    ...identity,
+    challenge
+  };
+}
+
+function idempotentChallengeSessionCredentials(
+  shareId,
+  policyVersion,
+  identityHash,
+  browserBindingHash,
+  attemptHash,
+  challengeSendAttemptId
+) {
+  const issuanceId = safeId(challengeSendAttemptId, "sendAttemptId");
+  const sessionToken = hmacDigest(
+    requiredSecret("SHARE_SESSION_HMAC_KEY"),
+    "quickmemo/secure-share/idempotent-challenge-session/v2",
+    shareId,
+    policyVersion,
+    identityHash,
+    browserBindingHash,
+    attemptHash,
+    issuanceId
+  );
+  const sessionDigest = sessionTokenDigest(sessionToken);
+  const csrfToken = hmacDigest(
+    requiredSecret("SHARE_CSRF_HMAC_KEY"),
+    "quickmemo/secure-share/idempotent-challenge-csrf/v2",
+    shareId,
+    policyVersion,
+    identityHash,
+    browserBindingHash,
+    attemptHash,
+    issuanceId,
+    sessionDigest
+  );
+  return {
+    csrfToken,
+    sessionDigest,
+    sessionToken
+  };
+}
+
+async function recoverConsumedChallengeSession(
+  context,
+  state,
+  identity,
+  browserBindingHash,
+  attemptHash,
+  credentials
+) {
+  const session = await firestoreGet(
+    context,
+    `publicShareAccessSessions/${credentials.sessionDigest}`
+  );
+  const expectedCsrfDigest = csrfTokenDigest(
+    credentials.csrfToken,
+    credentials.sessionDigest
+  );
+  const validSession = Boolean(session)
+    && session.shareId === state.share.__id
+    && session.policyVersion === state.policy.policyVersion
+    && session.ownerPreview !== true
+    && !session.revokedAt
+    && timestampMilliseconds(session.expiresAt) > Date.now()
+    && typeof session.identityHash === "string"
+    && constantTimeStringEqual(session.identityHash, identity.identityHash)
+    && typeof session.browserBindingHash === "string"
+    && constantTimeStringEqual(session.browserBindingHash, browserBindingHash)
+    && typeof session.unlockAttemptHash === "string"
+    && constantTimeStringEqual(session.unlockAttemptHash, attemptHash)
+    && typeof session.challengeSendAttemptId === "string"
+    && constantTimeStringEqual(
+      session.challengeSendAttemptId,
+      identity.challenge.sendAttemptId
+    )
+    && typeof session.csrfDigest === "string"
+    && constantTimeStringEqual(session.csrfDigest, expectedCsrfDigest);
+  if (!validSession) {
+    throw new HttpError(
+      409,
+      "access_denied",
+      "Consumed challenge has no recoverable access session"
+    );
+  }
+  return {
+    sessionToken: credentials.sessionToken,
+    csrfToken: credentials.csrfToken,
+    expiresAt: new Date(timestampMilliseconds(session.expiresAt)).toISOString(),
+    policy: state.policy,
+    participantId: typeof session.participantId === "string"
+      ? session.participantId
+      : "",
+    participantIdentityEnabled: session.participantIdentityEnabled === true,
+    participantLimitReached: session.participantLimitReached === true
+  };
+}
+
 async function issueAccessSession(
   request,
   context,
@@ -3462,9 +3890,29 @@ async function issueAccessSession(
   browserBindingHash,
   attemptHash,
   networkHash,
-  id
+  id,
+  participantAllocationExecution
 ) {
+  requireParticipantAllocationExecution(participantAllocationExecution);
+  identity = await revalidateParticipantAllocationChallenge(
+    context,
+    shareId,
+    verifiedPolicyVersion,
+    identity,
+    attemptHash
+  );
+  const idempotentCredentials = identity.challenge
+    ? idempotentChallengeSessionCredentials(
+        shareId,
+        verifiedPolicyVersion,
+        identity.identityHash,
+        browserBindingHash,
+        attemptHash,
+        identity.challenge.sendAttemptId
+      )
+    : null;
   for (let attempt = 0; attempt < participantAllocationMaximumAttempts; attempt += 1) {
+    requireParticipantAllocationExecution(participantAllocationExecution);
     const state = await loadShareState(context, shareId);
     assertPublicShareAvailable(state);
     assertEmailPolicyAvailable(state.policy);
@@ -3473,10 +3921,20 @@ async function issueAccessSession(
     }
     await requireSourceAvailable(context, state.share);
     const now = Date.now();
-    const sessionToken = randomToken(32);
-    const digest = sessionTokenDigest(sessionToken);
-    const csrfToken = randomToken(32);
+    const sessionToken = idempotentCredentials?.sessionToken ?? randomToken(32);
+    const digest = idempotentCredentials?.sessionDigest ?? sessionTokenDigest(sessionToken);
+    const csrfToken = idempotentCredentials?.csrfToken ?? randomToken(32);
     const csrfDigest = csrfTokenDigest(csrfToken, digest);
+    if (identity.challenge?.status === "consumed") {
+      return recoverConsumedChallengeSession(
+        context,
+        state,
+        identity,
+        browserBindingHash,
+        attemptHash,
+        idempotentCredentials
+      );
+    }
     const ttlSeconds = sessionTtlSeconds(state.policy.oneTimeEnabled === true);
     const expiresAtMilliseconds = Math.min(
       timestampMilliseconds(state.share.expiresAt),
@@ -3623,22 +4081,29 @@ async function issueAccessSession(
         }
       }
       if (identity.challenge) {
-        if (identity.challenge.status !== "pending") {
+        const challengeCanBeConsumed = identity.challenge.status === "pending";
+        const challengeWasConsumedByThisAttempt = (
+          identity.challenge.status === "consumed"
+          && identity.challenge.consumedAttemptHash === attemptHash
+        );
+        if (!challengeCanBeConsumed && !challengeWasConsumedByThisAttempt) {
           throw new HttpError(409, "access_denied", "Challenge was already consumed");
         }
-        writes.push(updateDocumentWrite(
-          context.projectId,
-          `publicShareEmailChallenges/${identity.challenge.__id}`,
-          {
-            status: "consumed",
-            verifiedAt: new Date(now),
-            consumedAt: new Date(now),
-            consumedAttemptHash: attemptHash,
-            updatedAt: new Date(now)
-          },
-          ["status", "verifiedAt", "consumedAt", "consumedAttemptHash", "updatedAt"],
-          identity.challenge.__updateTime
-        ));
+        if (challengeCanBeConsumed) {
+          writes.push(updateDocumentWrite(
+            context.projectId,
+            `publicShareEmailChallenges/${identity.challenge.__id}`,
+            {
+              status: "consumed",
+              verifiedAt: new Date(now),
+              consumedAt: new Date(now),
+              consumedAttemptHash: attemptHash,
+              updatedAt: new Date(now)
+            },
+            ["status", "verifiedAt", "consumedAt", "consumedAttemptHash", "updatedAt"],
+            identity.challenge.__updateTime
+          ));
+        }
       }
     }
     const participantAllocation = await beginParticipantAllocation(
@@ -3646,6 +4111,12 @@ async function issueAccessSession(
       state,
       identity
     );
+    try {
+      requireParticipantAllocationExecution(participantAllocationExecution);
+    } catch (error) {
+      await rollbackShareMutation(context, participantAllocation.transaction);
+      throw error;
+    }
     if (
       state.policy.oneTimeEnabled === true
       && consumed
@@ -3696,6 +4167,7 @@ async function issueAccessSession(
       userAgentHash: userAgentDigest(request)
     }));
     try {
+      requireParticipantAllocationExecution(participantAllocationExecution);
       await firestoreCommit(context, writes, participantAllocation.transaction);
       return {
         sessionToken,
@@ -3716,6 +4188,14 @@ async function issueAccessSession(
       ) {
         throw error;
       }
+      requireParticipantAllocationExecution(participantAllocationExecution);
+      identity = await revalidateParticipantAllocationChallenge(
+        context,
+        shareId,
+        verifiedPolicyVersion,
+        identity,
+        attemptHash
+      );
       await waitBeforeOptimisticRetry(Math.min(attempt, 8));
     }
   }
@@ -3914,7 +4394,7 @@ async function handleAccess(request, response, id, shareId) {
   ) {
     throw new HttpError(409, "access_denied", "Challenge was already consumed");
   }
-  const grant = await issueAccessSession(
+  const issueSession = (participantAllocationExecution) => issueAccessSession(
     request,
     context,
     shareId,
@@ -3923,8 +4403,15 @@ async function handleAccess(request, response, id, shareId) {
     browserBindingHash,
     attemptHash,
     networkHash,
-    id
+    id,
+    participantAllocationExecution
   );
+  const grant = (
+    secureShareParticipantIdentityEnabled()
+    && state.policy.permissionLevel === "comment"
+  )
+    ? await withParticipantAllocationQueue(shareId, issueSession, request, response)
+    : await issueSession();
   jsonResponse(response, 200, {
     ok: true,
     csrfToken: grant.csrfToken,
@@ -6117,6 +6604,7 @@ async function streamAttachment(request, response, id, shareId, attachmentId, di
     if (attachment.blobPath !== expectedBlobPath) {
       throw new HttpError(404, "not_found", "Private Blob attachment is unavailable");
     }
+    const { get } = await import("@vercel/blob");
     const blob = await get(attachment.blobPath, { access: "private", useCache: false });
     if (!blob || blob.statusCode !== 200 || !blob.stream) {
       throw new HttpError(404, "not_found", "Private Blob is unavailable");
@@ -6245,6 +6733,9 @@ export {
   hashSharePassword,
   handleApiError,
   issueAccessSession,
+  participantAllocationQueueSnapshot,
+  revalidateParticipantAllocationChallenge,
+  withParticipantAllocationQueue,
   normalizeAllowedEmails,
   normalizeEmail,
   otpCodeDigest,
