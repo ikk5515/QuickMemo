@@ -155,7 +155,7 @@ test("email quota hard stop fails closed without provider delivery", async ({
   await page.getByLabel("인증 이메일").fill(fixture.allowedEmail);
   await page.getByRole("button", { name: "인증 코드 보내기" }).click();
   await expect(page.getByRole("alert")).toHaveText(
-    "요청이 너무 많습니다. 잠시 후 다시 시도해주세요."
+    "현재 무료 이메일 발송 한도에 도달해 이메일 인증을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요."
   );
   expect(await deliveredOtp(request, fixture.allowedEmail)).toBeNull();
   await resetEmulators(request);
