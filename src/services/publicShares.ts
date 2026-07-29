@@ -72,6 +72,8 @@ interface CreatePublicNoteShareAttachmentInput {
   ownerUid: string;
   originalSize: number;
   sourceAttachmentId?: string;
+  sourceAttachmentDigest?: string;
+  sourceEncryptionVersion?: 1 | 2;
 }
 
 type StoredPublicShareAttachmentDocument = Pick<
@@ -270,7 +272,9 @@ export async function createPublicNoteShareAttachment(shareId: string, input: Cr
       encryptedBlob: input.encryptedBlob,
       encryption: input.encryption,
       onUploadProgress: input.onUploadProgress,
-      sourceAttachmentId: input.sourceAttachmentId
+      sourceAttachmentId: input.sourceAttachmentId,
+      sourceAttachmentDigest: input.sourceAttachmentDigest,
+      sourceEncryptionVersion: input.sourceEncryptionVersion
     },
     input.ownerUid
   );

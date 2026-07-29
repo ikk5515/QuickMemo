@@ -3125,7 +3125,7 @@ describeRules("firestore security rules", () => {
     }
   });
 
-  it("fails public reads closed on source revision drift and permits only backend staging before an owner flip", async () => {
+  it("preserves the last-good v1 snapshot on source revision drift while keeping owner flips revision-bound", async () => {
     const expiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
 
     await testEnv.withSecurityRulesDisabled(async (context) => {
@@ -3180,7 +3180,10 @@ describeRules("firestore security rules", () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await updateDoc(doc(context.firestore(), "notes/note-a"), { attachmentRevision: 3 });
     });
-    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
+    await assertSucceeds(
+      getDoc(doc(publicDb, "publicNoteShares/share-revision-bound/attachments/generation-a"))
+    );
     await assertFails(
       updateDoc(shareRef, {
         encryptedBody: { ...encryptedPayload, cipherText: "unsafe-revision-only-flip" },
@@ -3225,7 +3228,7 @@ describeRules("firestore security rules", () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await updateDoc(doc(context.firestore(), "notes/note-a"), { revision: 6 });
     });
-    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
+    await assertSucceeds(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
     await assertSucceeds(
       updateDoc(shareRef, {
         encryptedBody: { ...encryptedPayload, cipherText: "content-revision-6" },
@@ -3262,6 +3265,7 @@ describeRules("firestore security rules", () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await updateDoc(doc(context.firestore(), "notes/note-a"), { isDeleted: true });
     });
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
     await assertFails(
       updateDoc(doc(ownerDb, "publicNoteShares/share-revision-bound/attachments/pending-ready"), { isReady: true })
     );
@@ -3271,6 +3275,7 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(
       updateDoc(shareRef, { revokedAt: serverTimestamp(), revokedBy: "user-a", updatedAt: serverTimestamp() })
     );
+    await assertFails(getDoc(doc(publicDb, "publicNoteShares/share-revision-bound")));
     await assertFails(
       updateDoc(doc(ownerDb, "publicNoteShares/share-revision-bound/attachments/pending-ready"), { isReady: true })
     );

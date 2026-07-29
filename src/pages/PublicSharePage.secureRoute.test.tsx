@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     profile: null
   } as Record<string, unknown>,
   getSecureShareFeatureStatus: vi.fn(),
+  getSecureShareLiveSyncStatus: vi.fn(),
   secureViewerProps: null as null | Record<string, unknown>,
   saveSecureShareCopy: vi.fn(),
   subscribePublicNoteShare: vi.fn()
@@ -70,7 +71,8 @@ vi.mock("../services/publicShares", () => ({
 }));
 
 vi.mock("../services/secureShares", () => ({
-  getSecureShareFeatureStatus: mocks.getSecureShareFeatureStatus
+  getSecureShareFeatureStatus: mocks.getSecureShareFeatureStatus,
+  getSecureShareLiveSyncStatus: mocks.getSecureShareLiveSyncStatus
 }));
 
 function LoginStateProbe() {
@@ -107,6 +109,8 @@ describe("PublicSharePage Secure Share v2 route wrapper", () => {
       emailEnabled: false,
       v2Enabled: true
     });
+    mocks.getSecureShareLiveSyncStatus.mockReset();
+    mocks.getSecureShareLiveSyncStatus.mockResolvedValue({ enabled: true });
     mocks.secureViewerProps = null;
     mocks.saveSecureShareCopy.mockReset();
     mocks.subscribePublicNoteShare.mockReset();
@@ -126,6 +130,7 @@ describe("PublicSharePage Secure Share v2 route wrapper", () => {
     expect(mocks.secureViewerProps).toMatchObject({
       contentKey,
       isAuthenticated: false,
+      liveContentSyncEnabled: true,
       shareId: "ss2_secure_123456"
     });
     expect(mocks.getSecureShareFeatureStatus).toHaveBeenCalledWith(expect.any(AbortSignal));
@@ -146,6 +151,19 @@ describe("PublicSharePage Secure Share v2 route wrapper", () => {
       expect(mocks.getSecureShareFeatureStatus).toHaveBeenCalledTimes(1);
     });
     expect(screen.queryByText("secure-viewer")).not.toBeInTheDocument();
+  });
+
+  it("keeps v2 available but defaults live sync off against an older server", async () => {
+    mocks.getSecureShareLiveSyncStatus.mockRejectedValue(
+      new Error("old server action not found")
+    );
+    renderRoute(`/share/ss2_secure_123456#key=${"L".repeat(43)}`);
+
+    expect(await screen.findByText("secure-viewer")).toBeInTheDocument();
+    expect(mocks.secureViewerProps).toMatchObject({
+      liveContentSyncEnabled: false,
+      shareId: "ss2_secure_123456"
+    });
   });
 
   it("shows a neutral loading state while the server feature gate is pending", async () => {

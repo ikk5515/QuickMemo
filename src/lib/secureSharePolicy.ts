@@ -1,3 +1,5 @@
+import { resolveProductionStagedFeatureFlag } from "./productionStagedFeatureFlag";
+
 export const secureShareAccessModes = [
   "anyone_with_link",
   "allowed_emails",
@@ -108,11 +110,13 @@ export interface AllowedEmailParseResult {
 export interface SecureShareFeatureFlags {
   clientV2Enabled: boolean;
   emailEnabled: boolean;
+  liveContentSyncEnabled: boolean;
   v2Enabled: boolean;
 }
 
 export interface SecureShareFeatureFlagSource {
   emailEnabled?: unknown;
+  liveContentSyncEnabled?: unknown;
   v2Enabled?: unknown;
 }
 
@@ -175,6 +179,38 @@ export function isSecureShareFeatureFlagEnabled(value: unknown) {
   return value === true || value === "true";
 }
 
+const secureShareDirectEntryProductionDefault = false;
+const secureShareLiveContentSyncProductionDefault = false;
+
+function isSecureShareDefaultOnFeatureEnabled(
+  value: unknown,
+  productionDefault: boolean
+) {
+  return resolveProductionStagedFeatureFlag(
+    value,
+    productionDefault,
+    import.meta.env.PROD
+  );
+}
+
+export function isSecureShareDirectEntryEnabled(
+  value: unknown = import.meta.env.VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED
+) {
+  return isSecureShareDefaultOnFeatureEnabled(
+    value,
+    secureShareDirectEntryProductionDefault
+  );
+}
+
+export function isSecureShareLiveContentSyncEnabled(
+  value: unknown = import.meta.env.VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED
+) {
+  return isSecureShareDefaultOnFeatureEnabled(
+    value,
+    secureShareLiveContentSyncProductionDefault
+  );
+}
+
 export function resolveSecureShareFeatureFlags(
   serverFlags: SecureShareFeatureFlagSource = {},
   clientFlag: unknown = import.meta.env.VITE_SECURE_SHARE_V2_ENABLED
@@ -186,7 +222,11 @@ export function resolveSecureShareFeatureFlags(
   return {
     clientV2Enabled,
     v2Enabled,
-    emailEnabled: v2Enabled && isSecureShareFeatureFlagEnabled(serverFlags.emailEnabled)
+    emailEnabled: v2Enabled && isSecureShareFeatureFlagEnabled(serverFlags.emailEnabled),
+    liveContentSyncEnabled:
+      v2Enabled
+      && isSecureShareLiveContentSyncEnabled()
+      && isSecureShareFeatureFlagEnabled(serverFlags.liveContentSyncEnabled)
   };
 }
 

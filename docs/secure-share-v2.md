@@ -13,6 +13,27 @@ without changing the existing end-to-end content encryption boundary.
 - `SECURE_SHARE_V2_ENABLED=true` is required before any v2 server operation.
 - `VITE_SECURE_SHARE_V2_ENABLED=true` is also required before the owner UI is
   shown.
+- `VITE_READONLY_NOTE_RENDERER_V2_ENABLED`,
+  `VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED`,
+  and `VITE_UNIFIED_SELECT_UI_ENABLED` are client rollback flags. Their
+  reviewed Production source defaults are enabled after their staged rollout;
+  exact `false` remains a rollback. A staged-off Production source default is
+  a hard lock, so an older Vercel environment value cannot turn a feature on
+  before its guarded release commit. Because `VITE_` values are embedded at
+  build time, changing a flag requires a new Production deployment.
+- Live sync requires both
+  `VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED` and the server-only
+  `SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED`. Its reviewed Production source
+  defaults in the client, Secure Share API, and Blob attachment API remain
+  false until the active Vercel WAF rule is verified. All three literal source
+  locks must be enabled together. A true environment value cannot bypass an
+  off source default; exact false can still roll back a source-enabled
+  release.
+- Disabling the read-only renderer flag keeps the sanitizer, element
+  allowlist, and size/depth/node limits active, but restores legacy empty
+  paragraph rendering. Disabling the select flag keeps the native
+  `<select>` behavior and caller classes, but removes the unified
+  `app-select` theme class.
 - `SECURE_SHARE_EMAIL_ENABLED=true` is required before OTP delivery is
   available. It must remain false until the Production email provider, sender
   domain, and approved smoke-test mailbox are verified.
@@ -53,6 +74,140 @@ login address is not proof of mailbox ownership and must not silently satisfy
 an OTP requirement. For `anyone_with_link` and `allowed_emails`, enabling email
 verification always requires the share OTP even when the browser also has a
 verified Firebase user session.
+
+## Direct entry and live content synchronization
+
+When `VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED` is enabled, a link-only share
+with no remaining user gate opens its encrypted body automatically after
+metadata validation. An authenticated owner or administrator preview also
+opens automatically without consuming a one-time share. Direct entry does not
+weaken or skip a gate: password and OTP fields and the QuickMemo login action
+are shown immediately and still require the corresponding user action. A
+one-time link no longer has a separate client confirmation checkbox; the
+server still grants and consumes its one-time access atomically. After a
+required login completes, access may continue automatically only after the
+server rechecks the authenticated policy.
+
+Setting `VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED=false` restores the explicit
+viewer open action for otherwise automatic link-only and owner-preview paths.
+It does not disable Core v2, change server authorization, or downgrade a
+password, OTP, login, or one-time policy.
+
+`VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED` gates both the owner's active
+share-content refresh path and the open viewer's revision checks, while
+`SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED` independently rejects the live-only
+owner update and revision API actions when the server gate is off. The viewer
+starts with four nominal 2.5-second revision intervals while the document is
+visible. Consecutive unchanged checks then back off through four 15-second
+intervals, four 30-second intervals, and a steady 60-second interval. Each
+scheduled delay has bounded plus or minus 10 percent jitter to avoid
+synchronized bursts. Polling stops completely while the document is hidden or
+the browser is offline. A content change, focus, `online` event, or transition
+back to visible resets the rapid window; focus, `online`, and visible
+transitions also trigger an immediate deduplicated check.
+
+The current revision endpoint performs four Firestore document reads per
+normal viewer or owner-preview check; an administrator preview of another
+owner's share needs one additional source-owner profile read. At the steady
+unchanged 60-second interval, one continuously visible normal tab uses about
+5,760 reads per day, plus a small initial backoff allowance (at most about
+6,400 reads if every jitter sample were at the shortest bound). This is below
+the current [50,000-document-read daily free quota](https://firebase.google.com/docs/firestore/pricing)
+for one otherwise idle tab, but the quota is shared by all QuickMemo traffic
+and multiple open tabs or continuous content changes multiply the usage.
+Production monitoring and the live-sync rollback flag remain required. The
+adaptive client schedule is a budget guard, not an abuse-proof server quota or
+a quota reservation.
+
+When live sync is enabled, the server rejects the legacy
+`source_changed_<uuid>` automatic revoke emitted by an older owner tab while
+the source note is still active. Explicit owner revocation remains available,
+and deleted, purged, or missing sources may still be revoked and cleaned up.
+The current client uses a distinct `source_deleted_<uuid>` mutation for note
+deletion so mixed old/new browser bundles cannot turn an ordinary edit into a
+destructive share revocation.
+
+Before Production live-sync activation, the deployment workflow reads the
+active Vercel Firewall configuration without changing it. It requires an
+active, valid, blocking fixed-window rule scoped to
+the entire exact `/api/public-shares-v2` path, with no client-controlled
+narrowing condition, one IP-only bucket key, and no more than 120 allowed
+requests per minute. It must be the first active valid custom rule so an
+earlier bypass cannot skip it. The whole path is required because a marker or
+query condition could be omitted while still spending a Vercel invocation.
+The workflow fails before deploy if this proof is absent or its schema drifts.
+Do not silently replace an existing higher-priority rule. Without that
+verified platform rule, the trusted client and server Production source
+defaults must remain false. While those defaults are off, the same workflow
+performs a non-blocking read-only readiness probe so a later live-sync rollout
+can be decided from the sanitized deployment log without changing firewall state.
+The preflight parses exact literal defaults from all three source gates and
+fails closed if a gate is renamed, duplicated, or changed to unknown syntax.
+
+The rapid window normally detects a change within one 2.5-second interval
+(2.25 to 2.75 seconds with jitter). After a long unchanged period, the
+free-tier backoff deliberately trades immediacy for cost and may take up to
+66 seconds to detect the first unexpected change. Focus, visibility, and
+connectivity recovery still force an immediate check.
+
+Legacy v1 shares keep their last successfully encrypted snapshot when an
+ordinary source-note edit cannot be synchronized or the owner-wrapped key is
+not recoverable. Anonymous reads still require an active owner and source
+note, a non-revoked unexpired share, and the existing password metadata.
+Owner content/generation writes remain bound to the current source revision.
+The corresponding Firestore Rules must be deployed before the Vercel client
+change; otherwise a revision-drifted v1 snapshot remains unreadable even
+though the client no longer revokes it. Current Vercel Blob attachments follow
+the same lifecycle-only read rule. Legacy Firebase Storage-only attachments
+are outside this rollout because Production Storage Rules are not changed.
+
+Revision checks send a non-secret
+`X-QuickMemo-Secure-Share-Revision: 1` marker and the last applied revision
+ETag. The custom header forces a cross-origin browser request to preflight,
+while the API independently requires `Sec-Fetch-Site: same-origin`, validates
+an allowlisted `Origin` when one is present, and retains the bound session and
+App Check controls. A normal same-origin GET may omit `Origin`.
+
+A `304 Not Modified` response ends the cycle without a content download or
+decryption. Only a changed revision causes the viewer to request the encrypted
+content and decrypt the new revision in memory. The ETag is committed only
+after the new ciphertext is validated, decrypted, and applied; a failed
+content refresh therefore retries the same changed revision. The content key
+remains in the URL fragment and is never included in the revision or content
+request. Polling uses the existing server session and does not add a public
+Firestore listener or permit direct client reads of v2 share documents.
+
+A failed revision or content refresh keeps the last successfully decrypted
+body visible and retries on a later polling opportunity; it must not replace
+the body with partial ciphertext or persist decrypted content. A later
+successful unchanged check clears only the transient delayed-check message,
+not a prior content-updated announcement. The server continues to reject an
+invalidated session after revoke, expiration, or policy change. On session or
+policy invalidation, the viewer removes the stale body, reloads metadata, and
+shows the current password, OTP, or login gate before another unlock attempt.
+The same browser identity may trigger only one consecutive policy-bootstrap
+restart; a second automatic 401 stops on a generic unavailable/login-refresh
+state instead of causing an access-request loop. A successful content load or
+an actual identity change resets that guard. It does not restore the removed
+intermediate confirmation screen, and the fragment key remains browser-local.
+Setting
+`VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED=false` stops the owner
+live-refresh path and viewer polling. Setting
+`SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED=false` also makes both live-only API
+actions fail closed. Either rollback preserves existing shares, sessions,
+comments, and stored revisions.
+
+Owner content updates keep the share ID, content key envelope, policy,
+sessions, comments, and participants unchanged. They use payload-bound
+idempotency plus expected content/source revisions and increment only
+`contentRevision`. Exact replays return before throttling. A new update less
+than 500 ms after the prior committed `contentUpdatedAt` receives `429` with a
+bounded `Retry-After`; this uses the share write already required for the
+content update and does not create another Firestore rate-bucket write. If a
+newer source revision loses a content CAS race, the owner client forces one
+owner-details refresh and makes at most one rebased CAS attempt. A second
+conflict, an older target source revision, or an inconsistent refresh stops
+and waits for the next note save.
 
 ## Password boundary
 
@@ -479,6 +634,9 @@ Default server-side buckets:
 - OTP verify: 5 per challenge,
 - comments: session and share, 5 per minute and 50 per day,
 - copy grant: session, 3 per minute,
+- owner content update: one newly committed share revision per 500 ms, derived
+  from the transaction-checked share `contentUpdatedAt` after exact replay
+  detection,
 - share create: owner, 20 per hour and 100 per day.
 
 Successful password checks release only the current request's password-failure
@@ -529,6 +687,22 @@ Email readiness additionally requires all of the following:
 
 The committed example deliberately keeps `SECURE_SHARE_EMAIL_ENABLED=false`
 and `SHARE_EMAIL_SENDER_VERIFIED=false`.
+
+The client behavior flags have non-secret defaults:
+
+- `VITE_READONLY_NOTE_RENDERER_V2_ENABLED=false`
+- `VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED=false`
+- `VITE_UNIFIED_SELECT_UI_ENABLED=false`
+- `VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED=false`
+- `SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED=false`
+
+This Stage 0 package hard-locks all new Production surfaces off in source.
+The first three defaults are changed to true only in their individual guarded
+source-enable commits. Live sync remains source-locked off until the WAF
+preflight succeeds; changing only an environment value cannot bypass that
+lock. After a reviewed source-enable commit, exact lower-case `false` remains
+the intentional rollback. Record the resulting deployment SHA, and do not
+treat a mixed old/new browser bundle as proof that the flag changed.
 
 Changing a Vercel environment variable requires a new Production deployment
 before runtime behavior changes.
@@ -639,10 +813,11 @@ Vercel/Firebase usage evidence before activation.
 1. Verify the exact GitHub repository, master SHA, Vercel Hobby usage,
    team/project/domain, Firebase Spark project, billing-disabled state, and
    rollback candidate.
-2. Deploy only changed additive Firestore indexes to the explicitly verified
-   Firebase project and wait until every new index is READY. Do not initialize
-   or deploy Firebase Storage. This must precede the frontend because the
-   legacy v1 listener uses the new bounded index regardless of Core flags.
+2. Deploy the changed Firestore Rules to the explicitly verified Firebase
+   project before the frontend so v1 last-good snapshots remain readable
+   across source revision drift. Deploy only changed additive indexes when
+   present and wait until each is READY; this release adds no index. Do not
+   initialize or deploy Firebase Storage.
 3. Keep Core server/client and email flags false. Set both legacy Storage flags
    false. After confirming `CRON_SECRET` has no external consumer, generate or
    rotate it together with the distinct Core secrets, exact origin, cleanup
@@ -671,13 +846,25 @@ Vercel/Firebase usage evidence before activation.
    official Vercel/Firebase usage remains inside the activation gate.
 9. Enable only Core server/client, keep email and both participant flags false,
    redeploy the same master SHA, and run the legacy/Core regression smoke.
-10. Inject `SHARE_PARTICIPANT_HMAC_KEY` through a non-logging server-only
+10. For the first guarded rollout, build one Production deployment with all
+    four client rollback flags false and smoke the legacy-compatible paths.
+    Enable and redeploy one surface at a time in this order: read-only
+    renderer, direct entry, unified select UI, then live synchronization.
+    After direct entry, verify link-only, password, OTP, login, one-time, and
+    owner-preview paths. After live synchronization, verify changed and
+    unchanged ETags, the visible 2.5-second rapid window and 15/30/60-second
+    adaptive backoff, hidden/offline pause, focus/online/visible reset,
+    bounded jitter, request deduplication, and transient-failure body
+    retention. Each reviewed source-enable commit turns its Production default
+    on when the environment value is absent, so an environment-driven canary
+    that intends an enabled source flag to remain off must set exact `false`.
+11. Inject `SHARE_PARTICIPANT_HMAC_KEY` through a non-logging server-only
     workflow, set participant identity and comment IP-prefix flags true, and
     redeploy that same master SHA. Run only synthetic participant allocation,
     rename, uniqueness, comment-prefix/policy-off, revoke, cleanup, mobile,
     accessibility, console, and network-response smoke. Remove every synthetic
     share/account created by the smoke.
-11. If and only if a verified provider is already configured, email may be
+12. If and only if a verified provider is already configured, email may be
     tested separately before its independent flag is enabled.
 
 Do not activate Core if an index is building, any P0/P1 issue remains, a
@@ -686,7 +873,25 @@ is unknown. An absent email credential blocks only email sharing.
 
 ## Rollback
 
-First set `VITE_SECURE_SHARE_V2_ENABLED=false`,
+If the issue is limited to automatic entry, first set
+`VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED=false` and redeploy the same guarded
+SHA. If the issue is live-update correctness, request volume, or polling,
+set both `VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED=false` and
+`SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED=false`, then redeploy. Confirm the
+resulting bundle makes no revision polling request and that the live-only API
+returns its generic disabled response. These rollbacks preserve Core v2
+server authorization, share data, comments, sessions, and revisions; they
+require no Firestore Rules or index rollback.
+
+For a read-only formatting regression, set
+`VITE_READONLY_NOTE_RENDERER_V2_ENABLED=false`; the sanitizer and renderer
+budgets remain enforced. For a select-theme regression, set
+`VITE_UNIFIED_SELECT_UI_ENABLED=false`; controls remain native accessible
+selects with their caller-provided classes. Redeploy and verify the exact
+Production source SHA after either build-time rollback.
+
+If the issue remains outside those client behaviors, set
+`VITE_SECURE_SHARE_V2_ENABLED=false`,
 `SECURE_SHARE_V2_ENABLED=false`, `SECURE_SHARE_EMAIL_ENABLED=false`,
 `SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED=false`, and
 `SECURE_SHARE_COMMENT_IP_PREFIX_ENABLED=false`, then redeploy the same guarded
@@ -700,10 +905,12 @@ should the previously recorded pre-guard Vercel deployment be restored; that
 exceptional rollback also removes the global upload guard and therefore
 requires an upload maintenance window and close monitoring.
 
-This release adds deny-only Firestore Rules for email quota and delivery state
-but changes no Storage configuration. Keep those deny rules and the additive
-index in place during rollback; do not deploy older Rules or index files,
-because that can expose server state or request an unnecessary index deletion.
+This release changes the v1 public-read rule from source-revision equality to
+source lifecycle validation so a failed synchronization can serve only the
+last successful encrypted snapshot. Owner writes remain revision-bound, and
+v2 server-only collections remain denied. It changes no Storage configuration
+and adds no index. Keep the reviewed Rules in place during feature rollback;
+do not deploy older Rules merely to disable client behavior.
 
 Do not delete v2 documents, comments, copied notes, or indexes as an emergency
 rollback shortcut. Confirm login, notes, v1 share, attachments, and the

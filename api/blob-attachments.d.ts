@@ -23,6 +23,11 @@ export function claimAttachmentDeletion(
   extraDeletePaths?: string[]
 ): Promise<BlobAttachmentFirestoreDocument | null>;
 
+export function publicShareAttachmentIsCurrent(
+  share: BlobAttachmentFirestoreDocument,
+  attachment: BlobAttachmentFirestoreDocument
+): boolean;
+
 export function lookupCallerUid(idToken: string): Promise<string>;
 
 export function safeErrorSummary(error: unknown): {

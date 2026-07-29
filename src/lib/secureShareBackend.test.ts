@@ -7,6 +7,9 @@ import handler, {
   assertOnlyKeys,
   assertEmailPolicyAvailable,
   buildPolicySettings,
+  contentUpdateDisposition,
+  contentUpdateRetryAfterSeconds,
+  contentUpdateRequestDigest,
   copyGrantAuthorizesDownload,
   copyGrantAuditEventId,
   copyGrantRequestDisposition,
@@ -18,14 +21,18 @@ import handler, {
   emailDigest,
   emailQuotaExceeded,
   emailQuotaPeriods,
+  etagMatches,
+  ensureRevisionReadRequest,
   ensureSameOrigin,
   evaluateCopyAttachmentQuota,
   handleApiError,
   hashSharePassword,
   issueAnonymousParticipantToken,
   issueAccessSession,
+  legacyAutomaticSourceRevokeBlocked,
   normalizeAllowedEmails,
   normalizeEmail,
+  ownerAttachmentReuseManifest,
   otpCodeDigest,
   participantAllocationQueueSnapshot,
   otpVerificationFailureMinimumResponseMilliseconds,
@@ -35,18 +42,26 @@ import handler, {
   revalidateParticipantAllocationChallenge,
   resolveAccessIdentity,
   resolveEmailQuotaPolicy,
+  resolveSecureShareLiveContentSyncServerFlag,
   safeDisplayName,
   safeParticipantDisplayName,
   secureShareAttachmentBlobPath,
   secureShareEmailReadiness,
+  secureShareLiveContentSyncEnabled,
+  secureShareLiveContentSyncServerProductionDefault,
   shareManagedBy,
   shareOwnedBy,
   signedOpaqueToken,
   sourceShareGuardId,
+  sourceLifecycleAvailable,
+  sourceReadAvailable,
+  sourceRevisionMatches,
   sourceSnapshotAvailable,
+  secureShareRevisionEtag,
   validateCommentBody,
   verificationEmailText,
   verifiedAnonymousParticipantToken,
+  verifyDocumentSnapshotWrite,
   verifySharePassword,
   verifySignedOpaqueToken,
   withParticipantAllocationQueue
@@ -1139,6 +1154,60 @@ describe("Secure Share participant allocation queue", () => {
 });
 
 describe("Secure Share v2 request boundary", () => {
+  it("hard-locks live sync off until the trusted server default is enabled", async () => {
+    expect(secureShareLiveContentSyncServerProductionDefault).toBe(false);
+    expect(secureShareLiveContentSyncEnabled("true")).toBe(false);
+    expect(resolveSecureShareLiveContentSyncServerFlag(false, "true")).toBe(false);
+    expect(resolveSecureShareLiveContentSyncServerFlag(true, undefined)).toBe(true);
+    expect(resolveSecureShareLiveContentSyncServerFlag(true, "true")).toBe(true);
+    expect(resolveSecureShareLiveContentSyncServerFlag(true, "false")).toBe(false);
+    expect(resolveSecureShareLiveContentSyncServerFlag(true, "TRUE")).toBe(false);
+
+    vi.stubEnv("NODE_ENV", "test");
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("QUICKMEMO_SECURE_SHARE_EMULATOR_LIVE_SYNC", "enabled");
+    vi.stubEnv("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080");
+    vi.stubEnv("FIREBASE_AUTH_EMULATOR_HOST", "localhost:9099");
+    expect(secureShareLiveContentSyncEnabled("true")).toBe(true);
+    vi.stubEnv("VERCEL_ENV", "production");
+    expect(secureShareLiveContentSyncEnabled("true")).toBe(false);
+    vi.stubEnv("VERCEL_ENV", "preview");
+    vi.stubEnv("FIRESTORE_EMULATOR_HOST", "firestore.example.test:8080");
+    expect(secureShareLiveContentSyncEnabled("true")).toBe(false);
+
+    vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
+    vi.stubEnv("SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED", "true");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const statusResponse = testResponse();
+    await handler({
+      method: "GET",
+      url: "/api/public-shares-v2?action=live-sync-status",
+      headers: {}
+    }, statusResponse);
+    expect(statusResponse.statusCode).toBe(200);
+    expect(JSON.parse(statusResponse.body)).toEqual({ enabled: false });
+
+    for (const action of ["revision", "owner-content-update"]) {
+      const response = testResponse();
+      await handler({
+        method: action === "revision" ? "GET" : "PATCH",
+        url:
+          `/api/public-shares-v2?action=${action}`
+          + "&shareId=ss2_live_gate_123456",
+        headers: {}
+      }, response);
+
+      expect(response.statusCode).toBe(404);
+      expect(JSON.parse(response.body)).toMatchObject({
+        ok: false,
+        error: "not_found"
+      });
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("serves feature status with all other backend configuration absent", async () => {
     vi.stubEnv("SECURE_SHARE_V2_ENABLED", "false");
     vi.stubEnv("SECURE_SHARE_EMAIL_ENABLED", "true");
@@ -1202,6 +1271,34 @@ describe("Secure Share v2 request boundary", () => {
       headers: {
         origin: "https://evil.example",
         "sec-fetch-site": "cross-site"
+      }
+      })).toThrowError(expect.objectContaining({ statusCode: 403 }));
+  });
+
+  it("requires the revision marker and same-origin fetch metadata without requiring Origin", () => {
+    vi.stubEnv("SECURE_SHARE_ALLOWED_ORIGINS", "https://quickmemo.example");
+    expect(() => ensureRevisionReadRequest({
+      headers: {
+        "sec-fetch-site": "same-origin",
+        "x-quickmemo-secure-share-revision": "1"
+      }
+    })).not.toThrow();
+    expect(() => ensureRevisionReadRequest({
+      headers: {
+        "sec-fetch-site": "same-origin"
+      }
+    })).toThrowError(expect.objectContaining({ statusCode: 403 }));
+    expect(() => ensureRevisionReadRequest({
+      headers: {
+        "sec-fetch-site": "cross-site",
+        "x-quickmemo-secure-share-revision": "1"
+      }
+    })).toThrowError(expect.objectContaining({ statusCode: 403 }));
+    expect(() => ensureRevisionReadRequest({
+      headers: {
+        origin: "https://evil.example",
+        "sec-fetch-site": "same-origin",
+        "x-quickmemo-secure-share-revision": "1"
       }
     })).toThrowError(expect.objectContaining({ statusCode: 403 }));
   });
@@ -1935,7 +2032,40 @@ describe("Secure Share v2 owner, source, quota, and attachment policy", () => {
     expect(shareManagedBy(state, { uid: "user-b" })).toBe(false);
   });
 
-  it("binds every read to the active owner and exact source revisions", () => {
+  it("projects only the owner attachment reuse fingerprint and verifies uploaded snapshots", () => {
+    const manifest = ownerAttachmentReuseManifest({
+      __id: "attachment_public_123456",
+      sourceAttachmentId: "attachment_source_123456",
+      sourceAttachmentDigest: "D".repeat(43),
+      sourceEncryptionVersion: 2,
+      blobPath: "users/owner/private",
+      encryptedFileName: { cipherText: "private" },
+      storagePath: "private/path"
+    });
+
+    expect(manifest).toEqual({
+      id: "attachment_public_123456",
+      sourceAttachmentId: "attachment_source_123456",
+      digest: "D".repeat(43),
+      sourceEncryptionVersion: 2
+    });
+    expect(ownerAttachmentReuseManifest({
+      __id: "attachment_legacy_123456",
+      sourceAttachmentId: "attachment_source_123456"
+    })).toEqual({ id: "attachment_legacy_123456" });
+    expect(verifyDocumentSnapshotWrite(
+      "test-project",
+      "publicNoteShares/share_123456/attachments/attachment_123456",
+      "2026-07-29T00:00:00.000000Z"
+    )).toEqual({
+      verify:
+        "projects/test-project/databases/(default)/documents/"
+        + "publicNoteShares/share_123456/attachments/attachment_123456",
+      currentDocument: { updateTime: "2026-07-29T00:00:00.000000Z" }
+    });
+  });
+
+  it("keeps reads bound to the source lifecycle while checking revisions separately", () => {
     const share = {
       ownerUid: "owner-a",
       sourceRevision: 9,
@@ -1954,12 +2084,175 @@ describe("Secure Share v2 owner, source, quota, and attachment policy", () => {
     };
 
     expect(sourceSnapshotAvailable(share, note, profile)).toBe(true);
-    expect(sourceSnapshotAvailable(share, { ...note, revision: 10 }, profile)).toBe(false);
+    expect(sourceLifecycleAvailable(share, { ...note, revision: 10 }, profile)).toBe(true);
+    expect(sourceSnapshotAvailable(share, { ...note, revision: 10 }, profile)).toBe(true);
+    expect(sourceRevisionMatches(share, note)).toBe(true);
+    expect(sourceRevisionMatches(share, { ...note, revision: 10 })).toBe(false);
+    expect(sourceReadAvailable(share, note, profile, false)).toBe(true);
+    expect(sourceReadAvailable(
+      share,
+      { ...note, revision: 10 },
+      profile,
+      false
+    )).toBe(false);
+    expect(sourceReadAvailable(
+      share,
+      { ...note, revision: 10 },
+      profile,
+      true
+    )).toBe(true);
+    expect(sourceReadAvailable(
+      share,
+      { ...note, attachmentRevision: 5 },
+      profile,
+      false
+    )).toBe(false);
     expect(sourceSnapshotAvailable(share, note, { ...profile, isActive: false })).toBe(false);
     expect(sourceSnapshotAvailable(share, note, {
       ...profile,
       featureAccess: { notes: false }
     })).toBe(false);
+  });
+
+  it("blocks only legacy automatic revokes for active live-sync sources", () => {
+    const share = { ownerUid: "owner-a" };
+    const note = {
+      ownerUid: "owner-a",
+      isDeleted: false,
+      isPurged: false
+    };
+    const profile = {
+      isActive: true,
+      featureAccess: { notes: true }
+    };
+    const legacyKey = `source_changed_${"a".repeat(32)}`;
+
+    expect(legacyAutomaticSourceRevokeBlocked(
+      legacyKey,
+      share,
+      note,
+      profile,
+      true
+    )).toBe(true);
+    expect(legacyAutomaticSourceRevokeBlocked(
+      legacyKey,
+      share,
+      { ...note, isDeleted: true },
+      profile,
+      true
+    )).toBe(false);
+    expect(legacyAutomaticSourceRevokeBlocked(
+      legacyKey,
+      share,
+      { ...note, isPurged: true },
+      profile,
+      true
+    )).toBe(false);
+    expect(legacyAutomaticSourceRevokeBlocked(
+      legacyKey,
+      share,
+      null,
+      profile,
+      true
+    )).toBe(false);
+    expect(legacyAutomaticSourceRevokeBlocked(
+      `revoke_${"b".repeat(32)}`,
+      share,
+      note,
+      profile,
+      true
+    )).toBe(false);
+    expect(legacyAutomaticSourceRevokeBlocked(
+      legacyKey,
+      share,
+      note,
+      profile,
+      false
+    )).toBe(false);
+  });
+
+  it("uses monotonic content/source CAS and payload-bound idempotency", () => {
+    const input = {
+      attachmentCount: 0,
+      encryptedBody: {
+        version: 1,
+        algorithm: "AES-GCM",
+        cipherText: "Ym9keS1jaXBoZXJ0ZXh0",
+        iv: "MDEyMzQ1Njc4OWFi"
+      },
+      encryptedTitle: {
+        version: 1,
+        algorithm: "AES-GCM",
+        cipherText: "dGl0bGUtY2lwaGVydGV4dA==",
+        iv: "MDEyMzQ1Njc4OWFi"
+      },
+      expectedContentRevision: 7,
+      expectedSourceAttachmentRevision: 3,
+      expectedSourceRevision: 11,
+      generation: "generation_123456",
+      idempotencyKey: "content-update-request-123456",
+      retainedAttachmentIds: ["attachment_retained_123456"],
+      sourceAttachmentRevision: 3,
+      sourceRevision: 12
+    };
+    const digest = contentUpdateRequestDigest(input);
+    const share = {
+      contentRevision: 7,
+      sourceAttachmentRevision: 3,
+      sourceRevision: 11
+    };
+
+    expect(contentUpdateDisposition(share, input, digest)).toBe("apply");
+    expect(contentUpdateDisposition({ ...share, contentRevision: 8 }, input, digest))
+      .toBe("stale");
+    expect(contentUpdateDisposition({
+      ...share,
+      lastContentMutationId: input.idempotencyKey,
+      lastContentMutationDigest: digest
+    }, input, digest)).toBe("replay");
+    expect(contentUpdateDisposition({
+      ...share,
+      lastContentMutationId: input.idempotencyKey,
+      lastContentMutationDigest: "different-request-digest"
+    }, input, digest)).toBe("conflict");
+    expect(contentUpdateRequestDigest({
+      ...input,
+      retainedAttachmentIds: ["attachment_other_123456"]
+    })).not.toBe(digest);
+    expect(contentUpdateRequestDigest({
+      ...input,
+      encryptedBody: {
+        ...input.encryptedBody,
+        cipherText: "ZGlmZmVyZW50LWNpcGhlcnRleHQ="
+      }
+    })).not.toBe(digest);
+  });
+
+  it("derives a write-free owner content-update throttle from contentUpdatedAt", () => {
+    const now = Date.parse("2026-07-29T00:00:00.000Z");
+
+    expect(contentUpdateRetryAfterSeconds({}, now)).toBe(0);
+    expect(contentUpdateRetryAfterSeconds({
+      contentUpdatedAt: "2026-07-28T23:59:59.499Z"
+    }, now)).toBe(0);
+    expect(contentUpdateRetryAfterSeconds({
+      contentUpdatedAt: "2026-07-28T23:59:59.501Z"
+    }, now)).toBe(1);
+    expect(contentUpdateRetryAfterSeconds({
+      contentUpdatedAt: "2026-07-29T00:00:00.000Z"
+    }, now)).toBe(1);
+  });
+
+  it("uses a bounded revision ETag with weak conditional GET comparison", () => {
+    const etag = secureShareRevisionEtag({ contentRevision: 7, policyVersion: 3 });
+
+    expect(etag).toBe("\"ss2-r7-p3\"");
+    expect(secureShareRevisionEtag({ policyVersion: 3 })).toBe("\"ss2-r1-p3\"");
+    expect(etagMatches(etag, etag)).toBe(true);
+    expect(etagMatches(`W/${etag}`, etag)).toBe(true);
+    expect(etagMatches(`"other", ${etag}`, etag)).toBe(true);
+    expect(etagMatches("\"ss2-r8-p3\"", etag)).toBe(false);
+    expect(etagMatches("x".repeat(1025), etag)).toBe(false);
   });
 
   it("preflights the same user and global boundaries enforced by final uploads", () => {
@@ -2429,6 +2722,74 @@ describe("Secure Share v2 transactional source contracts", () => {
     expect(ownerUpdate.indexOf("cleanupQueuePath")).toBeLessThan(
       ownerUpdate.indexOf("await firestoreCommit(user.context, writes)")
     );
+  });
+
+  it("updates encrypted content with lifecycle checks, revision CAS, and one transaction", () => {
+    const contentUpdate = backendSource.match(
+      /function validateContentUpdateBody[\s\S]*?async function handleOwnerActivate/u
+    )?.[0] ?? "";
+
+    expect(contentUpdate).toContain('requireMethod(request, ["PATCH"])');
+    expect(contentUpdate).toContain("ensureSameOrigin(request)");
+    expect(contentUpdate).toContain("contentUpdateRequestDigest(input)");
+    expect(contentUpdate).toContain("expectedContentRevision");
+    expect(contentUpdate).toContain("expectedSourceRevision");
+    expect(contentUpdate).toContain("expectedSourceAttachmentRevision");
+    expect(contentUpdate).toContain("sourceNoteMatchesContentUpdate(");
+    expect(contentUpdate).toContain("contentUpdateAttachmentSnapshot(");
+    expect(contentUpdate).toContain("firestoreBatchGetNewTransaction(");
+    expect(contentUpdate).toContain("`notes/${sourceNoteId}`");
+    expect(contentUpdate).toContain("`users/${ownerUid}`");
+    expect(contentUpdate).toContain("contentRevisionValue(state.share) + 1");
+    expect(contentUpdate).toContain("assertContentUpdateRate(initialState.share)");
+    expect(contentUpdate).toContain("assertContentUpdateRate(state.share)");
+    expect(contentUpdate).toContain("lastContentMutationDigest: requestDigest");
+    expect(contentUpdate).toContain("retiredAttachmentIds");
+    expect(contentUpdate).toContain("firestoreCommit(");
+    expect(contentUpdate).toContain("transactionSnapshot.transaction");
+    expect(contentUpdate).not.toContain("consumeRateLimits(");
+    expect(contentUpdate).not.toContain("ownerWrappedShareKey");
+    expect(contentUpdate).not.toContain("contentKey");
+  });
+
+  it("serves conditional revisions without attachment reads and exposes content revisions", () => {
+    const revision = backendSource.match(
+      /async function handleRevision[\s\S]*?async function handleContent/u
+    )?.[0] ?? "";
+    const revisionValidation = backendSource.match(
+      /async function validatedRevisionSession[\s\S]*?async function handleSession/u
+    )?.[0] ?? "";
+    const content = backendSource.match(
+      /async function handleContent[\s\S]*?function participantPublicDto/u
+    )?.[0] ?? "";
+    const access = backendSource.match(
+      /async function handleAccess[\s\S]*?async function validatedSession/u
+    )?.[0] ?? "";
+    const metadata = backendSource.match(
+      /async function handleMetadata[\s\S]*?async function emailChallengeEligibility/u
+    )?.[0] ?? "";
+
+    expect(revision).toContain("validatedRevisionSession(request, context, shareId)");
+    expect(revision).toContain("ensureRevisionReadRequest(request)");
+    expect(revision).toContain('response.setHeader("etag", etag)');
+    expect(revision).toContain("response.statusCode = 304");
+    expect(revision).not.toContain("currentAttachments(");
+    expect(revisionValidation).toContain(
+      "firestoreGet(context, `publicNoteShares/${shareId}`)"
+    );
+    expect(revisionValidation).toContain(
+      "requireSourceAvailable(context, share, validatedOwner)"
+    );
+    expect(backendSource.match(
+      /async function requireSourceAvailable[\s\S]*?function publicShareAvailable/u
+    )?.[0]).toContain("sourceReadAvailable(share, note, ownerProfile)");
+    expect(revisionValidation).not.toContain("loadShareState(");
+    expect(revisionValidation).not.toContain("publicSharePolicies/");
+    expect(content).toContain("contentRevision: contentRevisionValue(state.share)");
+    expect(content).toContain("policyVersion: state.policy.policyVersion");
+    expect(content).toContain('response.setHeader("etag", secureShareRevisionEtag(state.share))');
+    expect(access).not.toContain("one_time_confirmation_required");
+    expect(metadata).toContain("hasSessionCandidate: Boolean(sessionTokenFromRequest(request, shareId))");
   });
 
   it("allows only the bound same-attempt grace replacement and revokes its prior session", () => {
@@ -3037,13 +3398,19 @@ describe("Secure Share v2 participant identity and coarse network contracts", ()
     expect(deletion).toContain("!comment.authorParticipantId");
   });
 
-  it("keeps feature status on the exact backward-compatible two-boolean contract", () => {
+  it("keeps legacy feature status exact and exposes live sync separately", () => {
     const featureStatus = backendSource.match(
       /if \(action === "feature-status"\)[\s\S]*?return;/u
+    )?.[0] ?? "";
+    const liveSyncStatus = backendSource.match(
+      /if \(action === "live-sync-status"\)[\s\S]*?return;/u
     )?.[0] ?? "";
 
     expect(featureStatus).toContain("v2Enabled: secureShareV2Enabled()");
     expect(featureStatus).toContain("emailEnabled: secureShareEmailEnabled()");
+    expect(featureStatus).not.toContain("liveContentSyncEnabled");
+    expect(liveSyncStatus).toContain("secureShareLiveContentSyncEnabled()");
+    expect(liveSyncStatus).toContain("secureShareV2Enabled()");
     expect(featureStatus).not.toContain("participantIdentityEnabled");
     expect(featureStatus).not.toContain("commentIpPrefixEnabled");
   });

@@ -1,12 +1,43 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { publicShareAttachmentIsCurrent } from "../../api/blob-attachments.js";
 
 const blobAttachmentApiSource = readFileSync(join(process.cwd(), "api/blob-attachments.js"), "utf8");
 const blobAttachmentClientSource = readFileSync(join(process.cwd(), "src/services/blobAttachments.ts"), "utf8");
 const firestoreRulesSource = readFileSync(join(process.cwd(), "firestore.rules"), "utf8");
 
 describe("blob attachment backend", () => {
+  it("streams both newly uploaded and retained current-generation attachments", () => {
+    const document = (fields: Record<string, unknown>) => ({ fields });
+    const share = document({
+      currentGeneration: { stringValue: "generation-next" }
+    });
+
+    expect(publicShareAttachmentIsCurrent(
+      share,
+      document({ generation: { stringValue: "generation-next" } })
+    )).toBe(true);
+    expect(publicShareAttachmentIsCurrent(
+      share,
+      document({
+        generation: { stringValue: "generation-old" },
+        generations: {
+          arrayValue: {
+            values: [
+              { stringValue: "generation-old" },
+              { stringValue: "generation-next" }
+            ]
+          }
+        }
+      })
+    )).toBe(true);
+    expect(publicShareAttachmentIsCurrent(
+      share,
+      document({ generation: { stringValue: "generation-old" } })
+    )).toBe(false);
+  });
+
   it("uses authenticated Vercel Blob client uploads with a 1 GB user quota", () => {
     expect(blobAttachmentApiSource).toContain("handleUpload");
     expect(blobAttachmentApiSource).toContain("BLOB_READ_WRITE_TOKEN");
@@ -56,6 +87,9 @@ describe("blob attachment backend", () => {
     const sourceCheck = blobAttachmentApiSource.match(
       /async function publicShareSourceAvailable[\s\S]*?async function reserveUserAttachmentBytes/u
     )?.[0] ?? "";
+    const sourceGate = blobAttachmentApiSource.match(
+      /function secureShareLiveContentSyncEnabled[\s\S]*?async function publicShareSourceAvailable/u
+    )?.[0] ?? "";
     const reservationSource = blobAttachmentApiSource.match(
       /async function createPublicShareAttachmentReservation[\s\S]*?function callbackUrlForRequest/u
     )?.[0] ?? "";
@@ -75,12 +109,25 @@ describe("blob attachment backend", () => {
     expect(sourceCheck).toContain('noteRevision: valueInteger(sourceNote, "revision")');
     expect(sourceCheck).toContain('shareSourceAttachmentRevision: valueInteger(share, "sourceAttachmentRevision")');
     expect(sourceCheck).toContain('noteAttachmentRevision: valueInteger(sourceNote, "attachmentRevision")');
+    expect(sourceCheck).toContain(
+      "requireMatchingRevision = publicShareSourceRequiresMatchingRevision(share)"
+    );
+    expect(sourceGate).toContain(
+      'valueInteger(share, "schemaVersion") === 2'
+    );
+    expect(sourceGate).toContain("!secureShareLiveContentSyncEnabled()");
+    expect(blobAttachmentApiSource).toContain(
+      "const secureShareLiveContentSyncServerProductionDefault = false"
+    );
     expect(reservationSource).toContain("publicShareSourceAvailable(projectId, share, accessToken)");
     expect(reservationSource).toContain("generation: stringValue(payload.generation)");
     expect(markReadySource).toContain("publicShareSourceAvailable(projectId, share, accessToken)");
     expect(markReadySource).toContain('share?.fields?.revokedAt');
     expect(markReadySource).toContain('Number.isFinite(valueTimestampMillis(share, "expiresAt"))');
     expect(streamSource).toContain("publicShareSourceActive(credentials.projectId, share, accessToken)");
+    expect(sourceCheck).toContain(
+      "return publicShareSourceAvailable(projectId, share, accessToken)"
+    );
     expect(streamSource).toContain("publicShareAttachmentIsCurrent(publicShare, attachment)");
     expect(streamSource).toContain('valueInteger(share, "schemaVersion") === 2');
   });
@@ -248,6 +295,28 @@ describe("blob attachment backend", () => {
       deleteSource.indexOf("await deleteAttachmentObjects(")
     );
     expect(deleteSource).toContain("claimAttachmentDeletion");
+  });
+
+  it("makes an authorized public attachment delete replay idempotent", () => {
+    const deleteSource = blobAttachmentApiSource.match(
+      /async function deleteAttachment[\s\S]*?function handleError/u
+    )?.[0] ?? "";
+    const publicDelete = deleteSource.slice(
+      deleteSource.indexOf('if (scope === "publicShare")')
+    );
+    const ownerCheckIndex = publicDelete.indexOf(
+      'valueString(share, "ownerUid") !== uid'
+    );
+    const absentReplayIndex = publicDelete.indexOf("if (!attachment)");
+    const deletionIndex = publicDelete.indexOf(
+      "const deletingAttachment = await beginAttachmentDeletion"
+    );
+
+    expect(ownerCheckIndex).toBeGreaterThanOrEqual(0);
+    expect(absentReplayIndex).toBeGreaterThan(ownerCheckIndex);
+    expect(publicDelete.slice(absentReplayIndex, deletionIndex))
+      .toContain("jsonResponse(response, 200, { ok: true })");
+    expect(deletionIndex).toBeGreaterThan(absentReplayIndex);
   });
 
   it("claims attachment metadata and quota atomically with preconditions", () => {

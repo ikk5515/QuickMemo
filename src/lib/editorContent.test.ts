@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  copyTextFromEditorHtml,
   imageHtml,
   linkifyEditorHtml,
+  normalizePlainTextLineEndings,
   parseEditorContent,
+  parseReadonlyEditorContent,
   plainTextToEditorHtml,
   previewTextFromHtml,
   sanitizeEditorHtml,
@@ -14,7 +17,42 @@ const safePngDataUrl =
 
 describe("editor content helpers", () => {
   it("wraps plain text as editable HTML", () => {
-    expect(parseEditorContent("hello\nworld").html).toBe("<p>hello<br>world</p>");
+    expect(parseEditorContent("hello\nworld").html).toBe("<p>hello</p><p>world</p>");
+  });
+
+  it("normalizes legacy line endings once and preserves every leading, empty, and trailing line", () => {
+    const source = "\r\n첫 번째\r두 번째\r\n\r\n마지막\r\n";
+
+    expect(normalizePlainTextLineEndings(source)).toBe("\n첫 번째\n두 번째\n\n마지막\n");
+    expect(plainTextToEditorHtml(source)).toBe(
+      "<p><br></p><p>첫 번째</p><p>두 번째</p><p><br></p><p>마지막</p><p><br></p>"
+    );
+  });
+
+  it("keeps unversioned legacy plain text as text for read-only rendering", () => {
+    expect(parseReadonlyEditorContent("<script>alert(1)</script>\r\n<br>\r마지막")).toEqual({
+      content: "<script>alert(1)</script>\n<br>\n마지막",
+      contentFormat: "plain-text",
+      fontSize: 17
+    });
+    expect(parseReadonlyEditorContent("\r\n\r\n")).toEqual({
+      content: "\n\n",
+      contentFormat: "plain-text",
+      fontSize: 17
+    });
+  });
+
+  it("recognizes serialized and legacy structural editor HTML for read-only rendering", () => {
+    expect(parseReadonlyEditorContent(serializeEditorContent("<p>현재 본문</p>", 20))).toEqual({
+      content: "<p>현재 본문</p>",
+      contentFormat: "html",
+      fontSize: 20
+    });
+    expect(parseReadonlyEditorContent("<h1>이전 HTML 본문</h1>")).toEqual({
+      content: "<h1>이전 HTML 본문</h1>",
+      contentFormat: "html",
+      fontSize: 17
+    });
   });
 
   it("preserves tab characters when converting plain text to editor HTML", () => {
@@ -24,7 +62,7 @@ describe("editor content helpers", () => {
     expect(plainTextToEditorHtml("a\tb")).toBe("<p>a\tb</p>");
     expect(plainTextToEditorHtml("\titem")).toBe("<p>\titem</p>");
     expect(plainTextToEditorHtml("\t\titem")).toBe("<p>\t\titem</p>");
-    expect(plainTextToEditorHtml(outline)).toContain("<br>\t\t하위 항목 1-1");
+    expect(plainTextToEditorHtml(outline)).toContain("<p>\t\t하위 항목 1-1</p>");
     expect(plainTextToEditorHtml(tsv)).toContain("이름\t나이\t메모");
   });
 
@@ -82,6 +120,22 @@ describe("editor content helpers", () => {
 
   it("strips unsafe HTML from previews", () => {
     expect(previewTextFromHtml('<script>alert(1)</script><p>safe</p>')).toBe("safe");
+  });
+
+  it("creates semantic Quick Copy text without collapsing paragraph, hard-break, code, or tab whitespace", () => {
+    const html =
+      "<p></p><p>첫 번째<br>두 번째</p><p></p><pre><code>line 1\n\tline 2</code></pre><p></p>";
+
+    expect(copyTextFromEditorHtml(html)).toBe(
+      "\n첫 번째\n두 번째\n\nline 1\n\tline 2\n"
+    );
+  });
+
+  it("copies lists and tables with stable semantic separators after sanitizing active content", () => {
+    const html =
+      '<script>alert(1)</script><ul><li><p>하나</p></li><li><p>둘<br>계속</p></li></ul><table><tbody><tr><td><p>A</p></td><td><p>B</p></td></tr><tr><td><p>C</p></td><td><p>D</p></td></tr></tbody></table>';
+
+    expect(copyTextFromEditorHtml(html)).toBe("하나\n둘\n계속\nA\tB\nC\tD");
   });
 
   it("allows inline image data URLs", () => {

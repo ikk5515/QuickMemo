@@ -44,6 +44,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
+import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
 import PublicAttachmentPreviewModal from "../components/PublicAttachmentPreviewModal";
 import { UnlockPanel } from "../components/UnlockPanel";
@@ -2615,12 +2616,12 @@ export default function LibraryPage() {
               <label className="library-sort-control">
                 <ListFilter aria-hidden="true" size={16} />
                 <span className="sr-only">자료 정렬</span>
-                <select aria-label="자료 정렬" onChange={(event) => setSort(event.target.value as LibrarySort)} value={sort}>
+                <AppSelect aria-label="자료 정렬" onChange={(event) => setSort(event.target.value as LibrarySort)} value={sort}>
                   <option value="updated">최근 변경순</option>
                   <option value="created">최근 추가순</option>
                   <option value="opened">최근 열람순</option>
                   <option value="title">제목순</option>
-                </select>
+                </AppSelect>
               </label>
             </header>
 
@@ -2838,35 +2839,35 @@ function LibraryFilterPanel({
       </div>
       <label>
         종류
-        <select onChange={(event) => onKindChange(event.target.value as LibraryKindFilter)} value={kindFilter}>
+        <AppSelect onChange={(event) => onKindChange(event.target.value as LibraryKindFilter)} value={kindFilter}>
           <option value="all">전체 종류</option>
           <option value="link">링크</option>
           <option value="clip">클립</option>
           <option value="attachment">파일</option>
-        </select>
+        </AppSelect>
       </label>
       <label>
         상태
-        <select onChange={(event) => onStatusChange(event.target.value as LibraryStatusFilter)} value={statusFilter}>
+        <AppSelect onChange={(event) => onStatusChange(event.target.value as LibraryStatusFilter)} value={statusFilter}>
           <option value="all">전체 상태</option>
           <option value="inbox">미분류</option>
           <option value="reading">읽는 중</option>
           <option value="archived">보관됨</option>
-        </select>
+        </AppSelect>
       </label>
       <label>
         컬렉션
-        <select onChange={(event) => onCollectionChange(event.target.value)} value={collectionFilter}>
+        <AppSelect onChange={(event) => onCollectionChange(event.target.value)} value={collectionFilter}>
           <option value="all">전체 컬렉션</option>
           {collections.map((collection) => <option key={collection} value={collection}>{collection}</option>)}
-        </select>
+        </AppSelect>
       </label>
       <label>
         태그
-        <select onChange={(event) => onTagChange(event.target.value)} value={tagFilter}>
+        <AppSelect onChange={(event) => onTagChange(event.target.value)} value={tagFilter}>
           <option value="all">전체 태그</option>
           {tags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
-        </select>
+        </AppSelect>
       </label>
       <label className="library-favorite-filter">
         <input checked={favoriteOnly} onChange={(event) => onFavoriteChange(event.target.checked)} type="checkbox" />
@@ -3411,9 +3412,9 @@ function LibraryReader({
                 <blockquote>{pendingHighlight.quote}</blockquote>
                 <label>
                   색상
-                  <select onChange={(event) => onHighlightColorChange(event.target.value as LibraryHighlightColor)} value={highlightColor}>
+                  <AppSelect onChange={(event) => onHighlightColorChange(event.target.value as LibraryHighlightColor)} value={highlightColor}>
                     {Object.entries(highlightColorLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-                  </select>
+                  </AppSelect>
                 </label>
                 <label>
                   메모

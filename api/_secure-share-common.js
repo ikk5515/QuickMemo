@@ -59,7 +59,7 @@ export function envValue(name) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-function loopbackEmulatorHost(name) {
+export function loopbackEmulatorHost(name) {
   const configuredHost = envValue(name);
   if (!configuredHost) {
     return "";

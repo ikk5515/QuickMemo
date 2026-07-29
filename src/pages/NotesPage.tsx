@@ -70,7 +70,9 @@ import {
   useState
 } from "react";
 import { Timestamp } from "firebase/firestore";
+import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
+import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { SecureShareSettingsModal } from "../components/SecureShareSettingsModal";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
@@ -110,9 +112,14 @@ import {
   type SecureSharePolicyInput
 } from "../lib/secureSharePolicy";
 import {
+  secureShareSourceAttachmentFingerprint,
+  selectSecureShareAttachmentReuse
+} from "../lib/secureShareAttachmentReuse";
+import {
   imageHtml,
   linkifyEditorHtml,
   parseEditorContent,
+  parseReadonlyEditorContent,
   plainTextToEditorHtml,
   previewTextFromHtml,
   sanitizeEditorHtml,
@@ -201,13 +208,18 @@ import {
   type PublicNoteShareSnapshot
 } from "../services/publicShares";
 import {
+  SecureShareApiError,
   activateSecureShare,
   createSecureShare,
   getSecureShareFeatureStatus,
+  getSecureShareLiveSyncStatus,
   getSecureShareOwnerDetails,
   listOwnedSecureShares,
   revokeSecureShare,
-  updateSecureShare
+  updateSecureShare,
+  updateSecureShareContent,
+  type SecureShareAttachmentReuseManifest,
+  type SecureShareOwnerContentUpdateInput
 } from "../services/secureShares";
 import { subscribeUsers } from "../services/users";
 import type {
@@ -789,25 +801,11 @@ function sharedAttributionHtml(
     const label = sharedAttributionLabel(safeAuthors, finalLastEditorUid, usersByUid);
     clearSharedAttributionAttributes(block);
     block.dataset.qmAttributionLabel = label;
-    renderSharedAttributionNote(block, label);
   });
 
   const container = document.createElement("div");
   container.appendChild(template.content);
   return container.innerHTML;
-}
-
-function renderSharedAttributionNote(block: HTMLElement, label: string) {
-  const noteElement = document.createElement("small");
-  noteElement.className = "qm-attribution-note";
-  noteElement.textContent = label;
-
-  if (block.tagName === "P" && block.parentNode) {
-    block.parentNode.insertBefore(noteElement, block.nextSibling);
-    return;
-  }
-
-  block.appendChild(noteElement);
 }
 
 function sharedAttributionLabel(authorUids: string[], lastEditorUid: string, usersByUid: Map<string, UserProfile>) {
@@ -1581,8 +1579,10 @@ export function parseSecureShareOwnerSummary(value: unknown): SecureShareOwnerSu
   const {
     accessMode,
     attachmentCount,
+    contentRevision,
     consumedAt,
     createdAt,
+    currentGeneration,
     downloadAllowed,
     expiresAt,
     hasPassword,
@@ -1630,6 +1630,20 @@ export function parseSecureShareOwnerSummary(value: unknown): SecureShareOwnerSu
     || !Number.isSafeInteger(attachmentCount)
     || Number(attachmentCount) < 0
     || Number(attachmentCount) > publicNoteShareMaxAttachmentCount
+    || (
+      contentRevision !== undefined
+      && (!Number.isSafeInteger(contentRevision) || Number(contentRevision) < 1)
+    )
+    || (
+      currentGeneration !== undefined
+      && (
+        typeof currentGeneration !== "string"
+        || (
+          currentGeneration.length > 0
+          && !secureShareIdentifierPattern.test(currentGeneration)
+        )
+      )
+    )
     || !Number.isSafeInteger(policyVersion)
     || Number(policyVersion) < 1
     || !Number.isSafeInteger(successfulAccessCount)
@@ -1646,8 +1660,10 @@ export function parseSecureShareOwnerSummary(value: unknown): SecureShareOwnerSu
   return {
     accessMode: accessMode as SecureShareOwnerSummary["accessMode"],
     attachmentCount: Number(attachmentCount),
+    contentRevision: contentRevision === undefined ? 1 : Number(contentRevision),
     consumedAt: optionalSecureShareDateString(consumedAt, "사용 완료 시간"),
     createdAt: secureShareDateString(createdAt, "생성 시간"),
+    currentGeneration: typeof currentGeneration === "string" ? currentGeneration : "",
     downloadAllowed,
     expiresAt: secureShareDateString(expiresAt, "만료 시간"),
     hasPassword,
@@ -1698,7 +1714,7 @@ export function parseSecureShareListResponse(value: unknown) {
 export const secureShareOwnerPageSize = 20;
 export const secureShareOwnerSourcePageSize = 100;
 export const secureSharePostCommitCleanupMessage =
-  "변경 사항은 저장됐고 기존 보안 공유 링크는 원본 버전 검증으로 이미 차단되었습니다. 보안 공유 관리에서 링크 중단을 다시 시도해주세요.";
+  "변경 사항은 저장됐고 비활성화된 원본에 대한 공유 접근은 차단되었습니다. 보안 공유 관리에서 링크 중단을 다시 시도해주세요.";
 
 export interface SecureShareOwnerOperationContext {
   generation: number;
@@ -1724,6 +1740,52 @@ export class SecureSharePostCommitCleanupError extends Error {
     super(secureSharePostCommitCleanupMessage, { cause });
     this.name = "SecureSharePostCommitCleanupError";
   }
+}
+
+export const secureShareAttachmentCleanupPendingMessage =
+  "변경 사항은 저장됐습니다. 일부 이전 첨부파일은 서버 정리 대기열에서 계속 처리됩니다.";
+
+export async function cleanupSecureShareAttachmentIdsWithRetry(
+  attachmentIds: string[],
+  cleanup: (attachmentId: string) => Promise<void>,
+  wait: (milliseconds: number) => Promise<void> = (milliseconds) =>
+    new Promise((resolve) => {
+      window.setTimeout(resolve, milliseconds);
+    })
+) {
+  let pending = Array.from(new Set(attachmentIds));
+
+  if (
+    pending.length > publicNoteShareMaxAttachmentCount
+    || pending.some((attachmentId) => !secureShareIdentifierPattern.test(attachmentId))
+  ) {
+    throw new TypeError("Invalid Secure Share attachment cleanup list");
+  }
+
+  for (let attempt = 0; attempt < 3 && pending.length > 0; attempt += 1) {
+    const failed: string[] = [];
+
+    for (let offset = 0; offset < pending.length; offset += 8) {
+      const batch = pending.slice(offset, offset + 8);
+      const results = await Promise.allSettled(batch.map(cleanup));
+
+      results.forEach((result, index) => {
+        if (result.status === "rejected") {
+          if (result.reason instanceof SecureShareOwnerOperationStaleError) {
+            throw result.reason;
+          }
+          failed.push(batch[index]);
+        }
+      });
+    }
+
+    pending = failed;
+    if (pending.length > 0 && attempt < 2) {
+      await wait(150 * (2 ** attempt));
+    }
+  }
+
+  return pending;
 }
 
 export async function runPublicShareCleanupWithCommitBoundary(
@@ -1783,7 +1845,17 @@ export function mergeSecureShareOwnerSummaries(
   incoming: SecureShareOwnerSummary[]
 ) {
   const incomingById = new Map(incoming.map((share) => [share.shareId, share]));
-  const merged = current.map((share) => incomingById.get(share.shareId) ?? share);
+  const merged = current.map((share) => {
+    const nextShare = incomingById.get(share.shareId);
+
+    return nextShare
+      ? {
+          ...nextShare,
+          ownerWrappedShareKey:
+            nextShare.ownerWrappedShareKey ?? share.ownerWrappedShareKey
+        }
+      : share;
+  });
   const knownShareIds = new Set(current.map((share) => share.shareId));
 
   incoming.forEach((share) => {
@@ -1809,17 +1881,102 @@ export function parseSecureShareMutationResponse(value: unknown, expectedShareId
   return share;
 }
 
+export function parseSecureShareContentUpdateResponse(
+  value: unknown,
+  expectedShareId: string
+) {
+  const share = parseSecureShareMutationResponse(value, expectedShareId);
+  const retiredAttachmentIds = plainRecord(value)
+    && Array.isArray(value.retiredAttachmentIds)
+    && value.retiredAttachmentIds.length <= publicNoteShareMaxAttachmentCount
+    && value.retiredAttachmentIds.every(
+      (attachmentId) =>
+        typeof attachmentId === "string"
+        && secureShareIdentifierPattern.test(attachmentId)
+    )
+      ? Array.from(new Set(value.retiredAttachmentIds))
+      : null;
+
+  if (!retiredAttachmentIds) {
+    throw new Error("보안 공유 첨부파일 정리 응답이 올바르지 않습니다.");
+  }
+
+  return { retiredAttachmentIds, share };
+}
+
 interface ParsedSecureShareOwnerDetails {
+  attachmentReuseManifests: SecureShareAttachmentReuseManifest[];
   initialPolicy: SecureSharePolicyInput;
   share: SecureShareOwnerSummary;
 }
 
+const secureShareSourceAttachmentDigestPattern = /^[A-Za-z0-9_-]{43}$/u;
+
+function parseSecureShareAttachmentReuseManifest(
+  value: unknown
+): SecureShareAttachmentReuseManifest | null {
+  if (
+    !plainRecord(value)
+    || Object.keys(value).some(
+      (field) =>
+        field !== "id"
+        && field !== "sourceAttachmentId"
+        && field !== "digest"
+        && field !== "sourceEncryptionVersion"
+    )
+    || typeof value.id !== "string"
+    || !secureShareIdentifierPattern.test(value.id)
+  ) {
+    return null;
+  }
+
+  const hasSourceAttachmentId = Object.prototype.hasOwnProperty.call(
+    value,
+    "sourceAttachmentId"
+  );
+  const hasDigest = Object.prototype.hasOwnProperty.call(value, "digest");
+  const hasSourceEncryptionVersion = Object.prototype.hasOwnProperty.call(
+    value,
+    "sourceEncryptionVersion"
+  );
+  if (!hasSourceAttachmentId && !hasDigest && !hasSourceEncryptionVersion) {
+    return { id: value.id };
+  }
+  if (
+    !hasSourceAttachmentId
+    || !hasDigest
+    || !hasSourceEncryptionVersion
+    || typeof value.sourceAttachmentId !== "string"
+    || !secureShareIdentifierPattern.test(value.sourceAttachmentId)
+    || typeof value.digest !== "string"
+    || !secureShareSourceAttachmentDigestPattern.test(value.digest)
+    || (value.sourceEncryptionVersion !== 1 && value.sourceEncryptionVersion !== 2)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    sourceAttachmentId: value.sourceAttachmentId,
+    digest: value.digest,
+    sourceEncryptionVersion: value.sourceEncryptionVersion
+  };
+}
+
 export function parseSecureShareOwnerDetailsResponse(value: unknown): ParsedSecureShareOwnerDetails {
-  if (!plainRecord(value) || value.ok !== true || !plainRecord(value.policy)) {
+  if (
+    !plainRecord(value)
+    || value.ok !== true
+    || !plainRecord(value.policy)
+    || !Array.isArray(value.attachmentReuseManifests)
+    || value.attachmentReuseManifests.length > publicNoteShareMaxAttachmentCount
+  ) {
     throw new Error("보안 공유 상세 응답이 올바르지 않습니다.");
   }
 
   const share = parseSecureShareOwnerSummary(value.share);
+  const attachmentReuseManifests = value.attachmentReuseManifests.map(
+    parseSecureShareAttachmentReuseManifest
+  );
   const policy = value.policy;
   const allowedEmails = policy.allowedEmails === undefined
     ? []
@@ -1829,6 +1986,15 @@ export function parseSecureShareOwnerDetailsResponse(value: unknown): ParsedSecu
   const expirationPreset = policy.expirationPreset;
   const customExpiresAt = policy.customExpiresAt;
 
+  if (
+    attachmentReuseManifests.some((manifest) => manifest === null)
+    || new Set(
+      attachmentReuseManifests.map((manifest) => manifest?.id)
+    ).size !== attachmentReuseManifests.length
+    || attachmentReuseManifests.length !== share.attachmentCount
+  ) {
+    throw new Error("보안 공유 첨부파일 상세 응답이 올바르지 않습니다.");
+  }
   if (
     allowedEmails === null
     || (
@@ -1842,6 +2008,7 @@ export function parseSecureShareOwnerDetailsResponse(value: unknown): ParsedSecu
 
   return {
     share,
+    attachmentReuseManifests: attachmentReuseManifests as SecureShareAttachmentReuseManifest[],
     initialPolicy: {
       accessMode: share.accessMode,
       allowedEmails,
@@ -1865,6 +2032,40 @@ export function parseSecureShareOwnerDetailsResponse(value: unknown): ParsedSecu
       quickCopyButtonVisible: share.quickCopyButtonVisible,
       showCommenterIpPrefix: share.permissionLevel === "comment"
         && share.showCommenterIpPrefix
+    }
+  };
+}
+
+export function rebaseSecureShareContentUpdateAfterConflict(
+  input: SecureShareOwnerContentUpdateInput,
+  latestShare: SecureShareOwnerSummary
+):
+  | { kind: "already_current" }
+  | { kind: "retry"; input: SecureShareOwnerContentUpdateInput }
+  | { kind: "stale" } {
+  const latestSourceRevision = latestShare.sourceRevision ?? 0;
+  const latestSourceAttachmentRevision = latestShare.sourceAttachmentRevision ?? 0;
+
+  if (
+    latestShare.contentRevision <= input.expectedContentRevision
+    || latestSourceRevision > input.sourceRevision
+    || latestSourceAttachmentRevision > input.sourceAttachmentRevision
+  ) {
+    return { kind: "stale" };
+  }
+  if (
+    latestSourceRevision === input.sourceRevision
+    && latestSourceAttachmentRevision === input.sourceAttachmentRevision
+  ) {
+    return { kind: "already_current" };
+  }
+  return {
+    kind: "retry",
+    input: {
+      ...input,
+      expectedContentRevision: latestShare.contentRevision,
+      expectedSourceAttachmentRevision: latestSourceAttachmentRevision,
+      expectedSourceRevision: latestSourceRevision
     }
   };
 }
@@ -2984,8 +3185,15 @@ export default function NotesPage() {
 
     void (async () => {
       try {
-        const serverStatus = await getSecureShareFeatureStatus(controller.signal);
-        const nextFlags = resolveSecureShareFeatureFlags(serverStatus);
+        const [serverStatus, liveSyncStatus] = await Promise.all([
+          getSecureShareFeatureStatus(controller.signal),
+          getSecureShareLiveSyncStatus(controller.signal)
+            .catch(() => ({ enabled: false }))
+        ]);
+        const nextFlags = resolveSecureShareFeatureFlags({
+          ...serverStatus,
+          liveContentSyncEnabled: liveSyncStatus.enabled
+        });
 
         if (
           controller.signal.aborted
@@ -3133,9 +3341,17 @@ export default function NotesPage() {
         return current;
       }
       const sourceShareIds = new Set(shares.map((share) => share.shareId));
+      const currentById = new Map(
+        current.map((share) => [share.shareId, share] as const)
+      );
 
       return [
-        ...shares,
+        ...shares.map((share) => ({
+          ...share,
+          ownerWrappedShareKey:
+            share.ownerWrappedShareKey
+            ?? currentById.get(share.shareId)?.ownerWrappedShareKey
+        })),
         ...current.filter(
           (share) =>
             share.sourceNoteId !== sourceNoteId
@@ -4666,6 +4882,8 @@ export default function NotesPage() {
       const generation = createPublicShareGeneration();
 
       for (const attachment of noteAttachments) {
+        const sourceFingerprint =
+          await secureShareSourceAttachmentFingerprint(attachment);
         const encryptedAttachmentSource = await getEncryptedNoteAttachmentSource(attachment);
         assertCurrentSecureShareOwnerOperation(operation);
         const [encryptedAttachment, encryptedFileName] = await Promise.all([
@@ -4683,7 +4901,9 @@ export default function NotesPage() {
           encryptedBlob: encryptedAttachment.blob,
           encryption: encryptedAttachment.metadata,
           expiresAt: new Date(pendingShare.expiresAt),
-          sourceAttachmentId: attachment.id
+          sourceAttachmentId: attachment.id,
+          sourceAttachmentDigest: sourceFingerprint?.digest,
+          sourceEncryptionVersion: sourceFingerprint?.encryptionVersion
         });
         assertCurrentSecureShareOwnerOperation(operation);
         uploadedAttachmentIds.push(attachmentRef.id);
@@ -4714,7 +4934,7 @@ export default function NotesPage() {
           return current;
         }
         return [
-          activeShare,
+          { ...activeShare, ownerWrappedShareKey },
           ...current.filter((share) => share.shareId !== activeShare.shareId)
         ];
       });
@@ -5258,34 +5478,422 @@ export default function NotesPage() {
     return importAesKeyBase64Url(shareKeyValue);
   }
 
-  async function failClosedPublicShare(share: PublicNoteShareSnapshot) {
-    let stopped = false;
+  async function secureShareWithOwnerKey(
+    share: SecureShareOwnerSummary,
+    idToken: string,
+    operation: SecureShareOwnerOperationContext
+  ) {
+    if (share.ownerWrappedShareKey) {
+      return share;
+    }
 
-    try {
-      await revokePublicNoteShare(share.id, unlockedProfile.uid);
-      stopped = true;
-    } catch {
+    const response = await getSecureShareOwnerDetails(share.shareId, idToken);
+    assertCurrentSecureShareOwnerOperation(operation);
+    const details = parseSecureShareOwnerDetailsResponse(response);
+
+    if (
+      details.share.shareId !== share.shareId
+      || details.share.sourceNoteId !== share.sourceNoteId
+      || !details.share.ownerWrappedShareKey
+    ) {
+      throw new Error("보안 공유 암호화 키를 안전하게 확인하지 못했습니다.");
+    }
+
+    setOwnerSecureShares((current) => {
       try {
-        await deletePublicNoteShare(share.id);
-        stopped = true;
+        assertCurrentSecureShareOwnerOperation(operation);
       } catch {
-        // A revision-bound share remains unreadable after a note content mutation even if cleanup is temporarily unavailable.
+        return current;
+      }
+      return current.map((currentShare) =>
+        currentShare.shareId === details.share.shareId
+          ? details.share
+          : currentShare
+      );
+    });
+    return details.share;
+  }
+
+  function secureShareContentUpdateRetryable(error: unknown) {
+    return !(error instanceof SecureShareApiError)
+      || error.status === 0
+      || error.status === 429
+      || error.status >= 500;
+  }
+
+  async function updateSecureShareContentWithRetry(
+    shareId: string,
+    input: Parameters<typeof updateSecureShareContent>[1],
+    idToken: string,
+    operation: SecureShareOwnerOperationContext
+  ) {
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const response = await updateSecureShareContent(shareId, input, idToken);
+        assertCurrentSecureShareOwnerOperation(operation);
+        return response;
+      } catch (caught) {
+        lastError = caught;
+        if (
+          !secureShareContentUpdateRetryable(caught)
+          || attempt === 2
+        ) {
+          throw caught;
+        }
+
+        const retryAfterMilliseconds = caught instanceof SecureShareApiError
+          && caught.retryAfterSeconds
+          ? Math.min(5_000, caught.retryAfterSeconds * 1_000)
+          : 0;
+        const backoffMilliseconds = Math.max(
+          retryAfterMilliseconds,
+          300 * (2 ** attempt) + Math.floor(Math.random() * 150)
+        );
+        await new Promise((resolve) => {
+          window.setTimeout(resolve, backoffMilliseconds);
+        });
+        assertCurrentSecureShareOwnerOperation(operation);
       }
     }
 
-    removeStoredPublicShareUrl(unlockedProfile.uid, share.id);
-    removeStoredPublicShareContentKey(unlockedProfile.uid, share.id);
-    setPublicShareUrlById((current) => {
-      if (!(share.id in current)) {
-        return current;
+    throw lastError;
+  }
+
+  async function syncSecureShareContentFromNote(
+    listedShare: SecureShareOwnerSummary,
+    noteId: string,
+    noteKey: CryptoKey,
+    draft: NoteDraft,
+    sourceState: { attachmentRevision: number; revision: number },
+    syncAttachments: boolean,
+    idToken: string,
+    operation: SecureShareOwnerOperationContext
+  ) {
+    const share = await secureShareWithOwnerKey(listedShare, idToken, operation);
+    assertCurrentSecureShareOwnerOperation(operation);
+    const wrappedShareKey = share.ownerWrappedShareKey;
+
+    if (!wrappedShareKey) {
+      throw new Error("보안 공유 암호화 키를 찾지 못했습니다.");
+    }
+
+    const shareKey = await unwrapNoteKey(wrappedShareKey, unlockedPrivateKey);
+    assertCurrentSecureShareOwnerOperation(operation);
+    const [encryptedTitle, encryptedBody] = await Promise.all([
+      encryptText(draft.title.trim() || "제목 없음", shareKey),
+      encryptText(serializeEditorContent(draft.body, draft.fontSize), shareKey)
+    ]);
+    assertCurrentSecureShareOwnerOperation(operation);
+
+    const expectedSourceRevision = share.sourceRevision ?? 0;
+    const expectedSourceAttachmentRevision = share.sourceAttachmentRevision ?? 0;
+    const attachmentsNeedSync =
+      syncAttachments
+      || expectedSourceAttachmentRevision !== sourceState.attachmentRevision
+      || (share.attachmentCount > 0 && !share.currentGeneration);
+    let attachmentCount = share.attachmentCount;
+    let generation = share.currentGeneration;
+    let retainedAttachmentIds: string[] = [];
+    const uploadedAttachmentIds: string[] = [];
+    let contentUpdateAttempted = false;
+    let attachmentCleanupPending = false;
+
+    try {
+      if (attachmentsNeedSync) {
+        const noteAttachments = await getNoteAttachments(noteId);
+        assertCurrentSecureShareOwnerOperation(operation);
+
+        if (noteAttachments.length > publicNoteShareMaxAttachmentCount) {
+          throw new Error(
+            `보안 공유에는 첨부파일을 최대 ${publicNoteShareMaxAttachmentCount}개까지 포함할 수 있습니다.`
+          );
+        }
+
+        const [fingerprintedAttachments, currentOwnerDetailsResponse] = await Promise.all([
+          Promise.all(noteAttachments.map(async (attachment) => ({
+            attachment,
+            fingerprint: await secureShareSourceAttachmentFingerprint(attachment)
+          }))),
+          share.currentGeneration && share.attachmentCount > 0
+            ? getSecureShareOwnerDetails(share.shareId, idToken)
+            : Promise.resolve(null)
+        ]);
+        assertCurrentSecureShareOwnerOperation(operation);
+        const currentOwnerDetails = currentOwnerDetailsResponse
+          ? parseSecureShareOwnerDetailsResponse(currentOwnerDetailsResponse)
+          : null;
+        if (
+          currentOwnerDetails
+          && (
+            currentOwnerDetails.share.shareId !== share.shareId
+            || currentOwnerDetails.share.sourceNoteId !== share.sourceNoteId
+            || currentOwnerDetails.share.contentRevision !== share.contentRevision
+            || currentOwnerDetails.share.currentGeneration !== share.currentGeneration
+            || currentOwnerDetails.share.attachmentCount !== share.attachmentCount
+            || currentOwnerDetails.share.sourceAttachmentRevision
+              !== share.sourceAttachmentRevision
+          )
+        ) {
+          throw new Error("보안 공유 첨부파일 상태가 변경되어 동기화를 다시 시도해야 합니다.");
+        }
+        const reuseSelection = selectSecureShareAttachmentReuse(
+          fingerprintedAttachments,
+          currentOwnerDetails?.attachmentReuseManifests ?? [],
+          share.attachmentCount
+        );
+
+        const expiresAt = new Date(share.expiresAt);
+        if (!Number.isFinite(expiresAt.getTime())) {
+          throw new Error("보안 공유 만료 시간을 확인하지 못했습니다.");
+        }
+
+        generation = createPublicShareGeneration();
+        attachmentCount = noteAttachments.length;
+        retainedAttachmentIds = reuseSelection.retainedAttachmentIds;
+
+        for (const {
+          attachment,
+          fingerprint
+        } of reuseSelection.attachmentsToUpload) {
+          const encryptedAttachmentSource =
+            await getEncryptedNoteAttachmentSource(attachment);
+          assertCurrentSecureShareOwnerOperation(operation);
+          const [encryptedAttachment, encryptedFileName] = await Promise.all([
+            reencryptAttachmentBlob(
+              attachment,
+              noteKey,
+              shareKey,
+              encryptedAttachmentSource
+            ),
+            encryptText(attachmentDownloadName(attachment), shareKey)
+          ]);
+          assertCurrentSecureShareOwnerOperation(operation);
+          const attachmentRef = await createPublicNoteShareAttachment(
+            share.shareId,
+            {
+              encryptedFileName,
+              extension: attachment.extension,
+              generation,
+              mimeType: safePublicShareAttachmentMimeType(attachment.extension),
+              ownerUid: operation.uid,
+              originalSize: attachment.originalSize,
+              encryptedBlob: encryptedAttachment.blob,
+              encryption: encryptedAttachment.metadata,
+              expiresAt,
+              sourceAttachmentId: attachment.id,
+              sourceAttachmentDigest: fingerprint?.digest,
+              sourceEncryptionVersion: fingerprint?.encryptionVersion
+            }
+          );
+          assertCurrentSecureShareOwnerOperation(operation);
+          uploadedAttachmentIds.push(attachmentRef.id);
+        }
       }
 
-      const nextUrls = { ...current };
-      delete nextUrls[share.id];
-      return nextUrls;
-    });
+      const idempotencyKey = secureShareIdempotencyKey(
+        `content_${sourceState.revision}_${sourceState.attachmentRevision}`
+      );
+      const updateInput: SecureShareOwnerContentUpdateInput = {
+        attachmentCount,
+        encryptedBody,
+        encryptedTitle,
+        expectedContentRevision: share.contentRevision,
+        expectedSourceAttachmentRevision,
+        expectedSourceRevision,
+        generation,
+        idempotencyKey,
+        retainedAttachmentIds,
+        sourceAttachmentRevision: sourceState.attachmentRevision,
+        sourceRevision: sourceState.revision
+      };
+      contentUpdateAttempted = true;
+      let parsed: ReturnType<typeof parseSecureShareContentUpdateResponse>;
+      try {
+        const response = await updateSecureShareContentWithRetry(
+          share.shareId,
+          updateInput,
+          idToken,
+          operation
+        );
+        parsed = parseSecureShareContentUpdateResponse(response, share.shareId);
+      } catch (caught) {
+        if (
+          !(caught instanceof SecureShareApiError)
+          || caught.code !== "content_revision_conflict"
+          || caught.status !== 409
+        ) {
+          throw caught;
+        }
 
-    return stopped;
+        const refreshedDetails = parseSecureShareOwnerDetailsResponse(
+          await getSecureShareOwnerDetails(share.shareId, idToken)
+        );
+        assertCurrentSecureShareOwnerOperation(operation);
+        if (
+          refreshedDetails.share.shareId !== share.shareId
+          || refreshedDetails.share.sourceNoteId !== noteId
+        ) {
+          throw new Error("보안 공유 동기화 충돌 대상을 확인하지 못했습니다.");
+        }
+        const resolution = rebaseSecureShareContentUpdateAfterConflict(
+          updateInput,
+          refreshedDetails.share
+        );
+        if (resolution.kind === "stale") {
+          throw caught;
+        }
+        if (resolution.kind === "already_current") {
+          const pendingCleanupIds = await cleanupSecureShareAttachmentIdsWithRetry(
+            uploadedAttachmentIds,
+            (attachmentId) =>
+              deleteUploadedPublicShareAttachment(share.shareId, attachmentId)
+          );
+          attachmentCleanupPending = pendingCleanupIds.length > 0;
+          uploadedAttachmentIds.length = 0;
+          parsed = {
+            retiredAttachmentIds: [],
+            share: refreshedDetails.share
+          };
+        } else {
+          const response = await updateSecureShareContentWithRetry(
+            share.shareId,
+            resolution.input,
+            idToken,
+            operation
+          );
+          parsed = parseSecureShareContentUpdateResponse(response, share.shareId);
+        }
+      }
+      assertCurrentSecureShareOwnerOperation(operation);
+      const updatedShare = {
+        ...parsed.share,
+        ownerWrappedShareKey: wrappedShareKey
+      };
+
+      setOwnerSecureShares((current) => {
+        try {
+          assertCurrentSecureShareOwnerOperation(operation);
+        } catch {
+          return current;
+        }
+        return current.map((currentShare) =>
+          currentShare.shareId === updatedShare.shareId
+            ? updatedShare
+            : currentShare
+        );
+      });
+      const pendingRetiredAttachmentIds = await cleanupSecureShareAttachmentIdsWithRetry(
+        parsed.retiredAttachmentIds,
+        (attachmentId) =>
+          deleteUploadedPublicShareAttachment(share.shareId, attachmentId)
+      );
+      attachmentCleanupPending =
+        attachmentCleanupPending || pendingRetiredAttachmentIds.length > 0;
+      if (attachmentCleanupPending) {
+        setPublicShareError(secureShareAttachmentCleanupPendingMessage);
+      }
+      assertCurrentSecureShareOwnerOperation(operation);
+    } catch (caught) {
+      const updateWasDefinitivelyRejected =
+        caught instanceof SecureShareApiError
+        && caught.status >= 400
+        && caught.status < 500;
+
+      // Once an update request may have reached the server, a network/5xx
+      // result is ambiguous. Keep the uploaded generation so an idempotent
+      // replay cannot point at deleted ciphertext.
+      if (!contentUpdateAttempted || updateWasDefinitivelyRejected) {
+        await cleanupSecureShareAttachmentIdsWithRetry(
+          uploadedAttachmentIds,
+          (attachmentId) =>
+            deleteUploadedPublicShareAttachment(share.shareId, attachmentId)
+        );
+      }
+      throw caught;
+    }
+  }
+
+  async function syncSecureSharesForNote(
+    noteId: string,
+    noteKey: CryptoKey,
+    draft: NoteDraft,
+    sourceState: { attachmentRevision: number; revision: number },
+    syncAttachments: boolean
+  ) {
+    if (
+      !secureShareFlags.v2Enabled
+      || !secureShareFlags.liveContentSyncEnabled
+    ) {
+      return;
+    }
+
+    const operation = captureSecureShareOwnerOperation(unlockedProfile.uid);
+    const checkedShares = await loadCompleteSecureSharesForNote(
+      noteId,
+      operation
+    );
+    assertCurrentSecureShareOwnerOperation(operation);
+    const sharesToSync = checkedShares.filter(
+      (share) =>
+        share.ready
+        && (share.status === "active" || share.status === "consumed")
+        && !share.revokedAt
+        && Date.parse(share.expiresAt) > Date.now()
+        && (
+          share.sourceRevision !== sourceState.revision
+          || share.sourceAttachmentRevision !== sourceState.attachmentRevision
+        )
+    );
+
+    if (!sharesToSync.length) {
+      return;
+    }
+
+    const idToken = await secureShareOwnerIdToken(operation);
+    assertCurrentSecureShareOwnerOperation(operation);
+    const failures: unknown[] = [];
+    let nextIndex = 0;
+
+    async function worker() {
+      while (nextIndex < sharesToSync.length) {
+        const share = sharesToSync[nextIndex];
+        nextIndex += 1;
+        try {
+          await syncSecureShareContentFromNote(
+            share,
+            noteId,
+            noteKey,
+            draft,
+            sourceState,
+            syncAttachments,
+            idToken,
+            operation
+          );
+        } catch (caught) {
+          if (caught instanceof SecureShareOwnerOperationStaleError) {
+            throw caught;
+          }
+          failures.push(caught);
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from(
+        { length: Math.min(2, sharesToSync.length) },
+        () => worker()
+      )
+    );
+    assertCurrentSecureShareOwnerOperation(operation);
+
+    if (failures.length) {
+      throw new Error(
+        "보안 공유 내용 업데이트가 지연되고 있습니다. 기존 링크는 유지되며 다음 저장 때 다시 시도합니다.",
+        { cause: failures[0] }
+      );
+    }
   }
 
   async function failClosedSecureSharesForNote(
@@ -5328,7 +5936,7 @@ export default function NotesPage() {
         const response = await revokeSecureShare(
           share.shareId,
           idToken,
-          secureShareIdempotencyKey("source_changed")
+          secureShareIdempotencyKey("source_deleted")
         );
         assertCurrentSecureShareOwnerOperation(operation!);
         const revokedShare = parseSecureShareMutationResponse(response, share.shareId);
@@ -5379,37 +5987,43 @@ export default function NotesPage() {
     syncAttachments = false,
     sourceRevision?: number
   ) {
-    try {
-      await failClosedSecureSharesForNote(noteId);
-    } catch (error) {
-      if (error instanceof SecureShareOwnerOperationStaleError) {
-        throw error;
-      }
-      throw new SecureSharePostCommitCleanupError(error);
-    }
-
     const sharesToSync = ownerPublicShares.filter(
       (share) => share.sourceNoteId === noteId && share.ownerUid === unlockedProfile.uid && publicShareActive(share)
     );
+    const sourceState = await getNoteRevisionState(noteId);
+    const expectedSourceRevision =
+      sourceRevision
+      ?? [...notes, ...deletedNotes].find((note) => note.id === noteId)?.revision
+      ?? sourceState.revision;
+
+    if (sourceState.revision !== expectedSourceRevision) {
+      throw new NoteRevisionConflictError(expectedSourceRevision, sourceState.revision);
+    }
+
+    try {
+      await syncSecureSharesForNote(
+        noteId,
+        noteKey,
+        draft,
+        sourceState,
+        syncAttachments
+      );
+    } catch (caught) {
+      if (caught instanceof SecureShareOwnerOperationStaleError) {
+        throw caught;
+      }
+      const message = caught instanceof Error
+        ? caught.message
+        : "보안 공유 내용 업데이트가 지연되고 있습니다. 기존 링크는 유지됩니다.";
+      setPublicShareError(message);
+      setError(message);
+    }
 
     if (!sharesToSync.length) {
       return;
     }
 
-    const expectedSourceRevision =
-      sourceRevision
-      ?? [...notes, ...deletedNotes].find((note) => note.id === noteId)?.revision
-      ?? 0;
-    const sourceState = await getNoteRevisionState(noteId);
-
-    if (sourceState.revision !== expectedSourceRevision) {
-      for (const share of sharesToSync) {
-        await failClosedPublicShare(share);
-      }
-      throw new NoteRevisionConflictError(expectedSourceRevision, sourceState.revision);
-    }
-
-    let stoppedPasswordProtectedShare = false;
+    let legacySnapshotWithoutKey = false;
     let syncFailed = false;
 
     for (const share of sharesToSync) {
@@ -5417,8 +6031,7 @@ export default function NotesPage() {
         const contentKey = await publicShareContentKeyForSync(share);
 
         if (!contentKey) {
-          stoppedPasswordProtectedShare = Boolean(share.passwordHash) || stoppedPasswordProtectedShare;
-          await failClosedPublicShare(share);
+          legacySnapshotWithoutKey = true;
           continue;
         }
 
@@ -5448,16 +6061,19 @@ export default function NotesPage() {
         }
       } catch {
         syncFailed = true;
-        await failClosedPublicShare(share);
       }
     }
 
-    if (stoppedPasswordProtectedShare) {
-      setPublicShareError("자동 업데이트 키가 없는 비밀번호 공유 링크를 안전을 위해 중단했습니다. 새 링크를 만들어주세요.");
+    if (legacySnapshotWithoutKey) {
+      setPublicShareError(
+        "자동 업데이트 키가 없는 기존 공유 링크는 마지막으로 성공한 내용을 유지합니다."
+      );
     }
 
     if (syncFailed) {
-      setPublicShareError("공유 링크 업데이트에 실패해 이전 내용이 노출되지 않도록 링크를 중단했습니다.");
+      setPublicShareError(
+        "공유 링크 업데이트가 지연되고 있습니다. 기존 링크에는 마지막으로 성공한 내용이 유지됩니다."
+      );
     }
   }
 
@@ -6713,7 +7329,7 @@ export default function NotesPage() {
               {currentType === "personal" && (
                 <label className="font-size-control folder-control">
                   폴더
-                  <select
+                  <AppSelect
                     aria-label="개인 노트 폴더"
                     onChange={(event) => void updateEditorFolder(event.target.value || null)}
                     value={editor.folderId ?? ""}
@@ -6724,7 +7340,7 @@ export default function NotesPage() {
                         {folder.name}
                       </option>
                     ))}
-                  </select>
+                  </AppSelect>
                 </label>
               )}
               {activeRemoteNote && (
@@ -10059,7 +10675,7 @@ function NoteDrawer({
         <div className="note-sort-controls">
           <label className="font-size-control">
             정렬
-            <select
+            <AppSelect
               aria-label="노트 목록 정렬 기준"
               onChange={(event) => onSortChange({ ...sortSetting, field: event.target.value as NoteSortField })}
               value={sortSetting.field}
@@ -10067,7 +10683,7 @@ function NoteDrawer({
               <option value="createdAt">생성일</option>
               <option value="updatedAt">수정일</option>
               <option value="title">제목</option>
-            </select>
+            </AppSelect>
           </label>
           <button
             className="secondary-button note-sort-direction"
@@ -10611,7 +11227,7 @@ function PersonalOverview({
                     {note.type === "personal" ? (
                       <label className="overview-folder-select">
                         <span className="sr-only">폴더 지정</span>
-                        <select
+                        <AppSelect
                           onChange={(event) => onUpdateNoteFolder(note, event.target.value || null)}
                           value={note.folderId && foldersById.has(note.folderId) ? note.folderId : ""}
                         >
@@ -10621,7 +11237,7 @@ function PersonalOverview({
                               {folderOption.name}
                             </option>
                           ))}
-                        </select>
+                        </AppSelect>
                       </label>
                     ) : (
                       <span className="overview-shared-label">
@@ -11532,15 +12148,27 @@ function NotePreviewModal({
       }
     }
 
-    const bodyHtml = draft.body || "<p>내용 없음</p>";
+  const bodyHtml = draft.body || "<p>내용 없음</p>";
+  const storedReadonlyBody = useMemo(
+    () => parseReadonlyEditorContent(note.body),
+    [note.body]
+  );
+  const draftMatchesStoredBody = useMemo(
+    () => draft.body === parseEditorContent(note.body).html,
+    [draft.body, note.body]
+  );
+  const renderLegacyPlainText =
+    storedReadonlyBody.contentFormat === "plain-text" && draftMatchesStoredBody;
   const trustedAttributionBlocks = useMemo(
     () => (note.type === "shared" ? trustedSharedBlockMetadataFromHistory(note, history, historySnapshots) : []),
     [history, historySnapshots, note]
   );
-  const renderedBodyHtml =
-    note.type === "shared"
+  const renderedBodyContent =
+    renderLegacyPlainText
+      ? storedReadonlyBody.content
+      : note.type === "shared"
       ? sharedAttributionHtml(bodyHtml, note, historyUsers, trustedAttributionBlocks)
-      : linkifyEditorHtml(sanitizeEditorHtml(bodyHtml));
+      : bodyHtml;
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={() => void requestClose()}>
@@ -11677,10 +12305,12 @@ function NotePreviewModal({
             />
           </div>
         ) : (
-          <div
+          <ReadonlyNoteRenderer
             className="note-preview-body"
-            style={{ fontSize: draft.fontSize }}
-            dangerouslySetInnerHTML={{ __html: renderedBodyHtml }}
+            content={renderedBodyContent}
+            contentFormat={renderLegacyPlainText ? "plain-text" : "html"}
+            fontSize={draft.fontSize}
+            showAttribution={note.type === "shared" && !renderLegacyPlainText}
           />
         )}
         {modalError && <p className="form-error" role="alert">{modalError}</p>}

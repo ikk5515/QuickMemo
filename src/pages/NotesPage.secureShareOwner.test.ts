@@ -41,6 +41,12 @@ const validSummary = {
   successfulAccessCount: 0,
   updatedAt: "2026-07-28T00:00:01.000Z"
 };
+const validAttachmentReuseManifest = {
+  id: "attachment_public_123456",
+  sourceAttachmentId: "attachment_source_123456",
+  digest: "D".repeat(43),
+  sourceEncryptionVersion: 2
+};
 
 describe("Secure Share v2 owner DTO boundary", () => {
   it("accepts a complete server-authoritative owner summary", () => {
@@ -104,7 +110,8 @@ describe("Secure Share v2 owner DTO boundary", () => {
         allowedEmails: ["viewer@example.com"],
         customExpiresAt: validSummary.expiresAt,
         expirationPreset: "custom"
-      }
+      },
+      attachmentReuseManifests: [validAttachmentReuseManifest]
     });
 
     expect(details.initialPolicy).toMatchObject({
@@ -126,10 +133,40 @@ describe("Secure Share v2 owner DTO boundary", () => {
       policy: {
         allowedEmails: [],
         expirationPreset: "seven_days"
-      }
+      },
+      attachmentReuseManifests: [validAttachmentReuseManifest]
     });
 
     expect(details.initialPolicy.showCommenterIpPrefix).toBe(false);
+  });
+
+  it("accepts only minimal owner attachment reuse manifests", () => {
+    const details = parseSecureShareOwnerDetailsResponse({
+      ok: true,
+      share: validSummary,
+      policy: { allowedEmails: [], expirationPreset: "seven_days" },
+      attachmentReuseManifests: [validAttachmentReuseManifest]
+    });
+
+    expect(details.attachmentReuseManifests).toEqual([validAttachmentReuseManifest]);
+    expect(() => parseSecureShareOwnerDetailsResponse({
+      ok: true,
+      share: validSummary,
+      policy: { allowedEmails: [], expirationPreset: "seven_days" },
+      attachmentReuseManifests: [{
+        ...validAttachmentReuseManifest,
+        blobUrl: "https://blob.example/private"
+      }]
+    })).toThrow(/상세 응답/);
+    expect(() => parseSecureShareOwnerDetailsResponse({
+      ok: true,
+      share: validSummary,
+      policy: { allowedEmails: [], expirationPreset: "seven_days" },
+      attachmentReuseManifests: [{
+        id: validAttachmentReuseManifest.id,
+        sourceAttachmentId: validAttachmentReuseManifest.sourceAttachmentId
+      }]
+    })).toThrow(/첨부파일 상세 응답/);
   });
 
   it("derives display status and action availability from server state plus expiration", () => {

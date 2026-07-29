@@ -22,6 +22,10 @@ import {
   evaluateFreeTierUpload,
   resolveFreeTierPolicy
 } from "./_free-tier-policy.js";
+import {
+  sourceAttachmentFingerprintMatches,
+  validSourceAttachmentFingerprint
+} from "./_secure-share-attachment-reuse.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
@@ -46,6 +50,7 @@ const accessTokenRefreshSkewMs = 60_000;
 const tokenTtlMs = 10 * 60 * 1000;
 const pendingDeletionGraceMs = tokenTtlMs + 60 * 1000;
 const reservationTtlMs = 2 * 60 * 60 * 1000;
+const secureShareLiveContentSyncServerProductionDefault = false;
 const secureShareCopyCleanupClaimIdField = "secureShareCopyCleanupClaimId";
 const secureShareCopyCleanupClaimedAtField = "secureShareCopyCleanupClaimedAt";
 const allowedAttachmentExtensions = new Set([
@@ -641,6 +646,36 @@ function parseClientPayload(clientPayload) {
     throw new HttpError(400, "공유 첨부파일 이름이 올바르지 않습니다.", "Public attachment fileName must be generic");
   }
 
+  const sourceAttachmentId =
+    scope === "publicShare" && typeof parsed.sourceAttachmentId === "string"
+      ? safeId(parsed.sourceAttachmentId, "sourceAttachmentId")
+      : "";
+  const sourceAttachmentDigest =
+    scope === "publicShare" && typeof parsed.sourceAttachmentDigest === "string"
+      ? parsed.sourceAttachmentDigest
+      : "";
+  const sourceEncryptionVersion =
+    scope === "publicShare" && Number.isSafeInteger(parsed.sourceEncryptionVersion)
+      ? parsed.sourceEncryptionVersion
+      : 0;
+  const hasSourceFingerprint =
+    sourceAttachmentDigest.length > 0 || sourceEncryptionVersion !== 0;
+
+  if (
+    hasSourceFingerprint
+    && !validSourceAttachmentFingerprint({
+      sourceAttachmentId,
+      sourceAttachmentDigest,
+      sourceEncryptionVersion
+    })
+  ) {
+    throw new HttpError(
+      400,
+      "공유 첨부파일 원본 지문이 올바르지 않습니다.",
+      "Invalid public attachment source fingerprint"
+    );
+  }
+
   return {
     scope,
     attachmentId: safeId(parsed.attachmentId, "attachmentId"),
@@ -664,10 +699,9 @@ function parseClientPayload(clientPayload) {
         ? safeId(parsed.secureShareCopyJobId, "secureShareCopyJobId")
         : "",
     generation: scope === "publicShare" ? safeId(parsed.generation, "generation") : "",
-    sourceAttachmentId:
-      scope === "publicShare" && typeof parsed.sourceAttachmentId === "string"
-        ? safeId(parsed.sourceAttachmentId, "sourceAttachmentId")
-        : ""
+    sourceAttachmentId,
+    sourceAttachmentDigest,
+    sourceEncryptionVersion
   };
 }
 
@@ -794,13 +828,36 @@ function publicShareActive(share, now = Date.now()) {
 function publicShareAttachmentIsCurrent(share, attachment) {
   const currentGeneration = valueString(share, "currentGeneration");
   const attachmentGeneration = valueString(attachment, "generation");
+  const retainedGenerations = valueStringArray(attachment, "generations");
 
   return currentGeneration
-    ? attachmentGeneration === currentGeneration
+    ? (
+        attachmentGeneration === currentGeneration
+        || retainedGenerations.includes(currentGeneration)
+      )
     : !attachmentGeneration;
 }
 
-async function publicShareSourceAvailable(projectId, share, accessToken, requireMatchingRevision = false) {
+function secureShareLiveContentSyncEnabled(
+  configuredValue = process.env.SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED
+) {
+  if (secureShareLiveContentSyncServerProductionDefault !== true) {
+    return false;
+  }
+  return configuredValue === undefined || configuredValue === "true";
+}
+
+function publicShareSourceRequiresMatchingRevision(share) {
+  return valueInteger(share, "schemaVersion") === 2
+    && !secureShareLiveContentSyncEnabled();
+}
+
+async function publicShareSourceAvailable(
+  projectId,
+  share,
+  accessToken,
+  requireMatchingRevision = publicShareSourceRequiresMatchingRevision(share)
+) {
   const sourceNoteId = valueString(share, "sourceNoteId");
   const ownerUid = valueString(share, "ownerUid");
 
@@ -830,7 +887,7 @@ async function publicShareSourceAvailable(projectId, share, accessToken, require
 }
 
 async function publicShareSourceActive(projectId, share, accessToken) {
-  return publicShareSourceAvailable(projectId, share, accessToken, true);
+  return publicShareSourceAvailable(projectId, share, accessToken);
 }
 
 function nonNegativeIntegerField(document, fieldName) {
@@ -1284,6 +1341,38 @@ async function createPublicShareAttachmentReservation(projectId, accessToken, ui
     throw new HttpError(400, "공유 첨부파일 저장 경로가 올바르지 않습니다.", "Public share pathname mismatch");
   }
 
+  if (payload.sourceAttachmentDigest || payload.sourceEncryptionVersion) {
+    const sourceNoteId = valueString(share, "sourceNoteId");
+    const sourceAttachment = sourceNoteId && payload.sourceAttachmentId
+      ? await firestoreGetDocument(
+          projectId,
+          `notes/${sourceNoteId}/attachments/${payload.sourceAttachmentId}`,
+          accessToken
+        )
+      : null;
+
+    if (!sourceAttachmentFingerprintMatches(
+      {
+        sourceAttachmentId: payload.sourceAttachmentId,
+        sourceAttachmentDigest: payload.sourceAttachmentDigest,
+        sourceEncryptionVersion: payload.sourceEncryptionVersion
+      },
+      sourceAttachment
+        ? {
+            __id: payload.sourceAttachmentId,
+            blobEtag: valueString(sourceAttachment, "blobEtag"),
+            version: valueInteger(sourceAttachment, "version")
+          }
+        : null
+    )) {
+      throw new HttpError(
+        409,
+        "공유 첨부파일 원본이 변경되었습니다.",
+        "Public attachment source fingerprint mismatch"
+      );
+    }
+  }
+
   const attachmentPath = `publicNoteShares/${payload.shareId}/attachments/${payload.attachmentId}`;
   const cleanupPath = `publicShareCleanupQueue/${payload.shareId}/publicShareAttachmentCleanupQueue/${payload.attachmentId}`;
   const fields = {
@@ -1297,6 +1386,10 @@ async function createPublicShareAttachmentReservation(projectId, accessToken, ui
 
   if (payload.sourceAttachmentId) {
     fields.sourceAttachmentId = stringValue(payload.sourceAttachmentId);
+  }
+  if (payload.sourceAttachmentDigest) {
+    fields.sourceAttachmentDigest = stringValue(payload.sourceAttachmentDigest);
+    fields.sourceEncryptionVersion = integerValue(payload.sourceEncryptionVersion);
   }
 
   await reserveUserAttachmentBytes(projectId, accessToken, uid, payload.encryptedSize, [
@@ -2020,8 +2113,12 @@ async function deleteAttachment(request, response) {
     const attachment = await firestoreGetDocument(credentials.projectId, attachmentPath, accessToken);
     const callerProfile = await userProfile(credentials.projectId, uid, accessToken);
 
-    if (!share || !attachment || !callerProfile.isActive || valueString(share, "ownerUid") !== uid) {
+    if (!share || !callerProfile.isActive || valueString(share, "ownerUid") !== uid) {
       throw new HttpError(403, "공유 첨부파일 삭제 권한이 없습니다.", "Cannot delete public share attachment");
+    }
+    if (!attachment) {
+      jsonResponse(response, 200, { ok: true });
+      return;
     }
 
     const deletingAttachment = await beginAttachmentDeletion(credentials.projectId, accessToken, attachmentPath);
@@ -2057,6 +2154,7 @@ function handleError(error, response) {
 
 export {
   claimAttachmentDeletion,
+  publicShareAttachmentIsCurrent,
   reserveUserAttachmentBytes
 };
 

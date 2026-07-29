@@ -4,8 +4,11 @@ import {
   createSecureShareComment,
   getSecureShareAttachmentForCopy,
   getSecureShareFeatureStatus,
+  getSecureShareLiveSyncStatus,
   getSecureShareMetadata,
+  getSecureShareOwnerDetails,
   getSecureShareParticipant,
+  getSecureShareRevision,
   listSecureShareComments,
   listOwnedSecureShares,
   normalizeSecureShareParticipantDisplayName,
@@ -14,6 +17,7 @@ import {
   secureShareApiActionContract,
   secureShareApiActions,
   secureShareApiRequest,
+  updateSecureShareContent,
   unlockSecureShare
 } from "./secureShares";
 
@@ -62,16 +66,19 @@ describe("secure share API client", () => {
   it("exports the complete flat-router action contract", () => {
     expect(secureShareApiActions).toEqual(expect.arrayContaining([
       "feature-status",
+      "live-sync-status",
       "owner-list",
       "owner-details",
       "owner-create",
       "owner-update",
+      "owner-content-update",
       "owner-activate",
       "owner-revoke",
       "metadata",
       "email-challenge",
       "access",
       "session",
+      "revision",
       "content",
       "participant-me",
       "comments",
@@ -81,6 +88,14 @@ describe("secure share API client", () => {
       "attachment-download"
     ]));
     expect(secureShareApiActionContract["owner-update"].methods).toEqual(["PATCH"]);
+    expect(secureShareApiActionContract["owner-content-update"]).toMatchObject({
+      auth: "owner",
+      methods: ["PATCH"]
+    });
+    expect(secureShareApiActionContract.revision).toMatchObject({
+      auth: "session",
+      methods: ["GET"]
+    });
     expect(secureShareApiActionContract.comments.methods).toEqual(["GET", "POST"]);
     expect(secureShareApiActionContract["participant-me"]).toMatchObject({
       auth: "session",
@@ -120,6 +135,117 @@ describe("secure share API client", () => {
       referrerPolicy: "no-referrer"
     });
     expect(headers.get("authorization")).toBe(`Bearer ${idToken}`);
+  });
+
+  it("reads owner attachment reuse manifests only through authenticated owner-details", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      ok: true,
+      share: { shareId },
+      policy: {},
+      attachmentReuseManifests: []
+    }));
+
+    await getSecureShareOwnerDetails(shareId, idToken);
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    const parsedUrl = new URL(String(url), "https://quickmemo.example");
+    const headers = new Headers(init?.headers);
+
+    expect(parsedUrl.pathname).toBe("/api/public-shares-v2");
+    expect(parsedUrl.searchParams.get("action")).toBe("owner-details");
+    expect(parsedUrl.searchParams.get("shareId")).toBe(shareId);
+    expect(init?.method).toBe("GET");
+    expect(headers.get("authorization")).toBe(`Bearer ${idToken}`);
+  });
+
+  it("sends only encrypted content and revision CAS fields for owner content updates", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      ok: true,
+      share: {
+        shareId,
+        contentRevision: 8
+      },
+      retiredAttachmentIds: ["attachment_retired_123456"]
+    }));
+    const encryptedTitle = {
+      version: 1 as const,
+      algorithm: "AES-GCM" as const,
+      cipherText: "Y2lwaGVydGV4dA==",
+      iv: "MDEyMzQ1Njc4OWFi"
+    };
+    const encryptedBody = {
+      ...encryptedTitle,
+      cipherText: "Ym9keS1jaXBoZXJ0ZXh0"
+    };
+
+    await updateSecureShareContent(shareId, {
+      attachmentCount: 1,
+      encryptedBody,
+      encryptedTitle,
+      expectedContentRevision: 7,
+      expectedSourceAttachmentRevision: 3,
+      expectedSourceRevision: 11,
+      generation: "generation_123456",
+      idempotencyKey: "content-update-request-123456",
+      retainedAttachmentIds: ["attachment_retained_123456"],
+      sourceAttachmentRevision: 4,
+      sourceRevision: 12
+    }, idToken);
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    const body = JSON.parse(String(init?.body));
+    expect(new URL(String(url), "https://quickmemo.example").searchParams.get("action"))
+      .toBe("owner-content-update");
+    expect(init?.method).toBe("PATCH");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${idToken}`);
+    expect(body).toEqual({
+      attachmentCount: 1,
+      encryptedBody,
+      encryptedTitle,
+      expectedContentRevision: 7,
+      expectedSourceAttachmentRevision: 3,
+      expectedSourceRevision: 11,
+      generation: "generation_123456",
+      idempotencyKey: "content-update-request-123456",
+      retainedAttachmentIds: ["attachment_retained_123456"],
+      sourceAttachmentRevision: 4,
+      sourceRevision: 12
+    });
+    expect(JSON.stringify(body).toLowerCase()).not.toContain("contentkey");
+    expect(JSON.stringify(body).toLowerCase()).not.toContain("sharekey");
+  });
+
+  it("treats a conditional revision 304 as a successful unchanged result", async () => {
+    const etag = "\"ss2-r7-p3\"";
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        contentRevision: 7,
+        policyVersion: 3,
+        requestId: "request_revision_123456"
+      }, 200, { etag }))
+      .mockResolvedValueOnce(new Response(null, {
+        status: 304,
+        headers: { etag }
+      }));
+
+    await expect(getSecureShareRevision(shareId)).resolves.toEqual({
+      notModified: false,
+      etag,
+      contentRevision: 7,
+      policyVersion: 3
+    });
+    await expect(getSecureShareRevision(shareId, { etag })).resolves.toEqual({
+      notModified: true,
+      etag
+    });
+
+    const secondHeaders = new Headers(vi.mocked(fetch).mock.calls[1][1]?.headers);
+    expect(secondHeaders.get("if-none-match")).toBe(etag);
+    expect(secondHeaders.get("x-quickmemo-secure-share-revision")).toBe("1");
+    const firstHeaders = new Headers(vi.mocked(fetch).mock.calls[0][1]?.headers);
+    expect(firstHeaders.get("x-quickmemo-secure-share-revision")).toBe("1");
+    expect(vi.mocked(fetch).mock.calls[1][1]?.body).toBeUndefined();
   });
 
   it("rejects an invalid owner-list source note identifier before making a request", () => {
@@ -212,6 +338,7 @@ describe("secure share API client", () => {
       .mockResolvedValueOnce(jsonResponse({ commentId: "comment_123456" }));
 
     const accessResult = await unlockSecureShare(shareId, {
+      oneTimeOpenConfirmed: true,
       password: " 123456 ",
       unlockAttemptId: "attempt_1234567890"
     });
@@ -226,6 +353,9 @@ describe("secure share API client", () => {
     expect(JSON.parse(String(firstRequest[1]?.body))).toMatchObject({
       password: " 123456 "
     });
+    expect(JSON.parse(String(firstRequest[1]?.body))).not.toHaveProperty(
+      "oneTimeOpenConfirmed"
+    );
 
     await createSecureShareComment(shareId, {
       body: "안전한 댓글",
@@ -575,14 +705,15 @@ describe("secure share API client", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("strictly accepts only the two public feature-status booleans", async () => {
+  it("preserves the exact two-field feature status and validates live status separately", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(jsonResponse({ v2Enabled: true, emailEnabled: false }))
       .mockResolvedValueOnce(jsonResponse({
         v2Enabled: true,
         emailEnabled: true,
         secretConfigured: true
-      }));
+      }))
+      .mockResolvedValueOnce(jsonResponse({ enabled: false }));
 
     await expect(getSecureShareFeatureStatus()).resolves.toEqual({
       v2Enabled: true,
@@ -591,6 +722,15 @@ describe("secure share API client", () => {
     await expect(getSecureShareFeatureStatus()).rejects.toMatchObject({
       code: "invalid_response"
     });
+    await expect(getSecureShareLiveSyncStatus()).resolves.toEqual({
+      enabled: false
+    });
+
+    const lastUrl = new URL(
+      String(vi.mocked(fetch).mock.calls.at(-1)?.[0]),
+      "https://quickmemo.example"
+    );
+    expect(lastUrl.searchParams.get("action")).toBe("live-sync-status");
   });
 
   it("returns safe retry information without exposing request data", async () => {
