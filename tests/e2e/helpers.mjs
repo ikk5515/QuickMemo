@@ -54,13 +54,17 @@ export function apiPath(action, shareId, query = {}) {
 
 export async function openV2Share(page, fixture) {
   await page.goto(fixture.url);
-  await expect(page.getByRole("heading", { name: "보안 공유 열기" })).toBeVisible();
+  await expect(
+    page.locator(
+      ".secure-public-share-access, .secure-public-share-viewer, .secure-public-share-state.error"
+    )
+  ).toBeVisible({ timeout: 35_000 });
 }
 
 export async function unlockV2Share(page, fixture) {
   await openV2Share(page, fixture);
-  await page.getByRole("button", { name: "보안 공유 열기" }).click();
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
+  await expect(page.getByRole("button", { name: "보안 공유 열기" })).toHaveCount(0);
 }
 
 export async function loginRosterUser(page, user, diagnostics) {

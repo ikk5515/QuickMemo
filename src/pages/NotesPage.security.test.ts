@@ -163,7 +163,7 @@ describe("NotesPage security controls", () => {
 
   it("renders shared attribution from authenticated history actors instead of body attributes", () => {
     const previewHelper =
-      notesPageSource.match(/function sharedAttributionHtml[\s\S]*?function renderSharedAttributionNote/)?.[0] ?? "";
+      notesPageSource.match(/function sharedAttributionHtml[\s\S]*?function sharedAttributionLabel/)?.[0] ?? "";
     const historyHelper =
       notesPageSource.match(/function trustedSharedBlockMetadataFromHistory[\s\S]*?function sharedAttributionBlocks/)?.[0] ?? "";
 
@@ -212,6 +212,21 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).not.toContain("window.localStorage.getItem(publicShareUrlStorageKey");
     expect(notesPageSource).not.toContain("window.localStorage.setItem(publicShareContentKeyStorageKey");
     expect(notesPageSource).not.toContain("window.localStorage.getItem(publicShareContentKeyStorageKey");
+  });
+
+  it("keeps the last-good v1 snapshot when an edit cannot be synchronized", () => {
+    const syncFlow =
+      notesPageSource.match(/async function syncPublicSharesForNote[\s\S]*?async function migrateLegacyPublicShare/)?.[0] ?? "";
+
+    expect(syncFlow).toContain("throw new NoteRevisionConflictError(expectedSourceRevision, sourceState.revision)");
+    expect(syncFlow).toContain("legacySnapshotWithoutKey = true");
+    expect(syncFlow).toContain("마지막으로 성공한 내용을 유지합니다.");
+    expect(syncFlow).not.toContain("failClosedPublicShare");
+    expect(syncFlow).not.toContain("revokePublicNoteShare");
+    expect(syncFlow).not.toContain("deletePublicNoteShare");
+    expect(syncFlow).not.toContain("removeStoredPublicShareUrl");
+    expect(syncFlow).not.toContain("removeStoredPublicShareContentKey");
+    expect(notesPageSource).not.toContain("async function failClosedPublicShare");
   });
 
   it("fails closed instead of creating a legacy share while v2 is required", () => {

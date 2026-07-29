@@ -165,6 +165,31 @@ async function ownerUpdateRequest(input: {
   };
 }
 
+async function ownerContentUpdateRequest(input: {
+  body: Record<string, unknown>;
+  harness: SecureShareApiHarness;
+  idToken: string;
+  networkSuffix: number;
+  shareId: string;
+}) {
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=owner-content-update`
+    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    {
+      method: "PATCH",
+      headers: apiHeaders(input.harness.origin, {
+        authorization: input.idToken,
+        networkSuffix: input.networkSuffix
+      }),
+      body: JSON.stringify(input.body)
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
+}
+
 async function copyGrantRequest(input: {
   bindingCookie: string;
   csrfToken: string;
@@ -525,6 +550,288 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(response.status).toBe(201);
     expect(body).toMatchObject({ ok: true });
   });
+
+  it("updates encrypted content idempotently while preserving the URL session and policy", async () => {
+    const owner = await createEmulatorOwner(
+      "content-update-owner@example.test",
+      "emulator-owner-password"
+    );
+    const shareId = "content_update_share_0001";
+    const seed = await seedSecureShare({
+      oneTimeEnabled: false,
+      ownerUid: owner.localId,
+      shareId
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 74
+    });
+    expect(metadata.body).toMatchObject({
+      metadata: { hasSessionCandidate: false }
+    });
+    const granted = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: { unlockAttemptId: "content_update_access_0001" },
+      harness,
+      networkSuffix: 74,
+      shareId
+    });
+    expect(granted.response.status).toBe(200);
+    const sessionCookie = responseCookie(granted.response, "qmss_");
+    const viewerCookies = `${metadata.bindingCookie}; ${sessionCookie}`;
+
+    await patchEmulatorDocuments([
+      {
+        path: `notes/${seed.noteId}`,
+        fields: { revision: 2 }
+      }
+    ]);
+
+    const stillAvailable = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 75
+    });
+    expect(stillAvailable.response.status).toBe(200);
+    const staleContentResponse = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=content`
+      + `&shareId=${encodeURIComponent(shareId)}`,
+      {
+        headers: apiHeaders(harness.origin, {
+          bindingCookie: viewerCookies,
+          networkSuffix: 74
+        })
+      }
+    );
+    expect(staleContentResponse.status).toBe(200);
+    expect(await staleContentResponse.json()).toMatchObject({
+      contentRevision: 1,
+      policyVersion: 1
+    });
+
+    const encryptedTitle = {
+      version: 1,
+      algorithm: "AES-GCM",
+      cipherText: Buffer.alloc(24, 7).toString("base64"),
+      iv: Buffer.alloc(12, 8).toString("base64")
+    };
+    const encryptedBody = {
+      version: 1,
+      algorithm: "AES-GCM",
+      cipherText: Buffer.alloc(48, 9).toString("base64"),
+      iv: Buffer.alloc(12, 10).toString("base64")
+    };
+    const updateBody = {
+      attachmentCount: 0,
+      encryptedBody,
+      encryptedTitle,
+      expectedContentRevision: 1,
+      expectedSourceAttachmentRevision: 0,
+      expectedSourceRevision: 1,
+      generation: "generation_content_update_0001",
+      idempotencyKey: "content_update_request_0001",
+      sourceAttachmentRevision: 0,
+      sourceRevision: 2
+    };
+    const updated = await ownerContentUpdateRequest({
+      body: updateBody,
+      harness,
+      idToken: owner.idToken,
+      networkSuffix: 76,
+      shareId
+    });
+    expect(updated.response.status).toBe(200);
+    expect(updated.body).toMatchObject({
+      ok: true,
+      retiredAttachmentIds: [],
+      share: {
+        contentRevision: 2,
+        policyVersion: 1,
+        sourceRevision: 2
+      }
+    });
+    const replayed = await ownerContentUpdateRequest({
+      body: updateBody,
+      harness,
+      idToken: owner.idToken,
+      networkSuffix: 76,
+      shareId
+    });
+    expect(replayed.response.status).toBe(200);
+    expect(replayed.body).toMatchObject({
+      share: { contentRevision: 2, policyVersion: 1 }
+    });
+    const conflictingReplay = await ownerContentUpdateRequest({
+      body: {
+        ...updateBody,
+        encryptedBody: {
+          ...encryptedBody,
+          cipherText: Buffer.alloc(48, 11).toString("base64")
+        }
+      },
+      harness,
+      idToken: owner.idToken,
+      networkSuffix: 76,
+      shareId
+    });
+    expect(conflictingReplay.response.status).toBe(409);
+    expect(conflictingReplay.body).toMatchObject({
+      ok: false,
+      error: "request_conflict"
+    });
+    const staleCas = await ownerContentUpdateRequest({
+      body: {
+        ...updateBody,
+        idempotencyKey: "content_update_request_stale_0001"
+      },
+      harness,
+      idToken: owner.idToken,
+      networkSuffix: 76,
+      shareId
+    });
+    expect(staleCas.response.status).toBe(409);
+    expect(staleCas.body).toMatchObject({
+      ok: false,
+      error: "content_revision_conflict"
+    });
+
+    const revision = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=revision`
+      + `&shareId=${encodeURIComponent(shareId)}`,
+      {
+        headers: {
+          ...apiHeaders(harness.origin, {
+            bindingCookie: viewerCookies,
+            networkSuffix: 74
+          }),
+          "x-quickmemo-secure-share-revision": "1"
+        }
+      }
+    );
+    expect(revision.status).toBe(200);
+    const etag = revision.headers.get("etag");
+    expect(etag).toBe("\"ss2-r2-p1\"");
+    expect(await revision.json()).toMatchObject({
+      contentRevision: 2,
+      policyVersion: 1
+    });
+    const unchanged = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=revision`
+      + `&shareId=${encodeURIComponent(shareId)}`,
+      {
+        headers: {
+          ...apiHeaders(harness.origin, {
+            bindingCookie: viewerCookies,
+            networkSuffix: 74
+          }),
+          "if-none-match": etag ?? "",
+          "x-quickmemo-secure-share-revision": "1"
+        }
+      }
+    );
+    expect(unchanged.status).toBe(304);
+    expect(unchanged.headers.get("etag")).toBe(etag);
+    expect(await unchanged.text()).toBe("");
+
+    const content = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=content`
+      + `&shareId=${encodeURIComponent(shareId)}`,
+      {
+        headers: apiHeaders(harness.origin, {
+          bindingCookie: viewerCookies,
+          networkSuffix: 74
+        })
+      }
+    );
+    expect(content.status).toBe(200);
+    expect(content.headers.get("etag")).toBe(etag);
+    expect(await content.json()).toMatchObject({
+      contentRevision: 2,
+      encryptedBody,
+      encryptedTitle,
+      policyVersion: 1
+    });
+    expect(await readEmulatorDocument(`publicNoteShares/${shareId}`)).toMatchObject({
+      contentRevision: 2,
+      policyVersion: 1,
+      sourceRevision: 2
+    });
+    const updateAudits = (await listEmulatorCollection("publicShareAuditEvents"))
+      .filter((event) => event.eventType === "owner_content_update");
+    expect(updateAudits).toHaveLength(1);
+  }, 30_000);
+
+  it("rejects legacy automatic source-change revokes without blocking explicit or deleted-source revokes", async () => {
+    const owner = await createEmulatorOwner(
+      "legacy-revoke-compat-owner@example.test",
+      "emulator-owner-password"
+    );
+    const activeShareId = "legacy_revoke_active_0001";
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      ownerUid: owner.localId,
+      shareId: activeShareId
+    });
+    const revoke = (shareId: string, idempotencyKey: string, networkSuffix: number) =>
+      fetch(
+        `${harness.origin}/api/public-shares-v2?action=owner-revoke`
+        + `&shareId=${encodeURIComponent(shareId)}`,
+        {
+          method: "POST",
+          headers: apiHeaders(harness.origin, {
+            authorization: owner.idToken,
+            networkSuffix
+          }),
+          body: JSON.stringify({ idempotencyKey })
+        }
+      );
+
+    const legacyActive = await revoke(
+      activeShareId,
+      `source_changed_${"a".repeat(32)}`,
+      77
+    );
+    expect(legacyActive.status).toBe(409);
+    expect(await legacyActive.json()).toMatchObject({
+      ok: false,
+      error: "content_sync_required"
+    });
+    expect(await readEmulatorDocument(`publicNoteShares/${activeShareId}`)).toMatchObject({
+      policyVersion: 1,
+      status: "active"
+    });
+
+    const explicit = await revoke(
+      activeShareId,
+      `revoke_${"b".repeat(32)}`,
+      78
+    );
+    expect(explicit.status).toBe(200);
+    expect(await readEmulatorDocument(`publicNoteShares/${activeShareId}`)).toMatchObject({
+      policyVersion: 2,
+      status: "revoked"
+    });
+
+    const deletedShareId = "legacy_revoke_deleted_0001";
+    const deletedSeed = await seedSecureShare({
+      oneTimeEnabled: false,
+      ownerUid: owner.localId,
+      shareId: deletedShareId
+    });
+    await patchEmulatorDocuments([
+      {
+        path: `notes/${deletedSeed.noteId}`,
+        fields: { isDeleted: true }
+      }
+    ]);
+    const legacyDeleted = await revoke(
+      deletedShareId,
+      `source_changed_${"c".repeat(32)}`,
+      79
+    );
+    expect(legacyDeleted.status).toBe(200);
+    expect(await readEmulatorDocument(`publicNoteShares/${deletedShareId}`)).toMatchObject({
+      policyVersion: 2,
+      status: "revoked"
+    });
+  }, 30_000);
 
   it("creates at most one live share per source note and replaces stale guards safely", async () => {
     const owner = await createEmulatorOwner(

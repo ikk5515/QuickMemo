@@ -28,11 +28,16 @@ test("secure share is keyboard-accessible without horizontal overflow in dark mo
   expect(
     await page.evaluate(() => window.matchMedia("(prefers-color-scheme: dark)").matches)
   ).toBe(true);
-  const openButton = page.getByRole("button", { name: "보안 공유 열기" });
-  await openButton.focus();
-  await expect(openButton).toBeFocused();
-  await page.keyboard.press("Enter");
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
+  await expect(page.getByRole("button", { name: "보안 공유 열기" })).toHaveCount(0);
+  const renameButton = page.getByRole("button", { name: "이름 변경" });
+  await renameButton.focus();
+  await expect(renameButton).toBeFocused();
+  await page.keyboard.press("Enter");
+  const renameInput = page.getByLabel("표시 이름");
+  await expect(renameInput).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(renameButton).toBeFocused();
   await expect(page.getByText("내 댓글 이름")).toBeVisible();
   await expect(page.getByText("guest1, 네트워크 대역 203.226")).toBeVisible();
   await expect(

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   defaultSecureSharePolicy,
+  isSecureShareDirectEntryEnabled,
+  isSecureShareLiveContentSyncEnabled,
   normalizeSecureShareEmail,
   parseAllowedEmailChips,
   resolveSecureShareExpiresAt,
@@ -337,23 +339,29 @@ describe("secure share summary and feature flags", () => {
     }))).not.toContain("일부 네트워크 대역");
   });
 
-  it("requires both client and server v2 flags and gates email separately", () => {
+  it("requires client and server flags for v2, email, and live sync", () => {
     expect(resolveSecureShareFeatureFlags(
-      { v2Enabled: true, emailEnabled: true },
+      { v2Enabled: true, emailEnabled: true, liveContentSyncEnabled: true },
       "false"
     )).toEqual({
       clientV2Enabled: false,
       v2Enabled: false,
-      emailEnabled: false
+      emailEnabled: false,
+      liveContentSyncEnabled: false
     });
 
     expect(resolveSecureShareFeatureFlags(
-      { v2Enabled: "true", emailEnabled: "true" },
+      {
+        v2Enabled: "true",
+        emailEnabled: "true",
+        liveContentSyncEnabled: "true"
+      },
       "true"
     )).toEqual({
       clientV2Enabled: true,
       v2Enabled: true,
-      emailEnabled: true
+      emailEnabled: true,
+      liveContentSyncEnabled: true
     });
 
     expect(resolveSecureShareFeatureFlags(
@@ -361,4 +369,25 @@ describe("secure share summary and feature flags", () => {
       true
     ).emailEnabled).toBe(false);
   });
+
+  it.each([
+    undefined,
+    null,
+    "",
+    true,
+    "true",
+    "FALSE",
+    0
+  ])("keeps direct entry and live content sync on by default for %j", (value) => {
+    expect(isSecureShareDirectEntryEnabled(value)).toBe(true);
+    expect(isSecureShareLiveContentSyncEnabled(value)).toBe(true);
+  });
+
+  it.each([false, "false"])(
+    "turns direct entry and live content sync off only for explicit %j",
+    (value) => {
+      expect(isSecureShareDirectEntryEnabled(value)).toBe(false);
+      expect(isSecureShareLiveContentSyncEnabled(value)).toBe(false);
+    }
+  );
 });

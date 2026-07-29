@@ -59,6 +59,9 @@ jobs:
       - name: Secure Share API emulator integration
         run: npm run test:integration
 
+      - name: Secure Share performance benchmark
+        run: npm run test:performance
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium webkit
 

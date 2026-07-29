@@ -5,13 +5,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SecureShareOwnerSummary } from "../types";
 import {
   assertSecureShareOwnerOperationCurrent,
+  cleanupSecureShareAttachmentIdsWithRetry,
   mergeSecureShareOwnerSummaries,
   parseCompleteSecureShareSourcePage,
+  parseSecureShareContentUpdateResponse,
+  rebaseSecureShareContentUpdateAfterConflict,
   runPublicShareCleanupWithCommitBoundary,
   SecureShareOwnerOperationStaleError,
   SecureSharePostCommitCleanupError,
   secureShareOwnerPageSize,
   secureShareOwnerSourcePageSize,
+  secureShareAttachmentCleanupPendingMessage,
   secureSharePostCommitCleanupMessage,
   SecureShareOwnerModal
 } from "./NotesPage";
@@ -25,8 +29,10 @@ function secureShare(
   return {
     accessMode: "anyone_with_link",
     attachmentCount: 2,
+    contentRevision: 1,
     consumedAt: null,
     createdAt: "2026-07-28T00:00:00.000Z",
+    currentGeneration: "gen_123456",
     downloadAllowed: false,
     expiresAt: "2026-07-29T00:00:00.000Z",
     hasPassword: true,
@@ -139,6 +145,103 @@ describe("secure share owner pagination", () => {
     ]);
   });
 
+  it("preserves the owner key envelope across list refreshes and validates content cleanup ids", () => {
+    const ownerWrappedShareKey = {
+      version: 1 as const,
+      algorithm: "RSA-OAEP" as const,
+      wrappedKey: "wrapped-share-key-value"
+    };
+    const hydrated = {
+      ...activeShare,
+      ownerWrappedShareKey
+    };
+    const refreshed = {
+      ...activeShare,
+      contentRevision: 2,
+      ownerWrappedShareKey: undefined
+    };
+
+    expect(mergeSecureShareOwnerSummaries([hydrated], [refreshed])[0])
+      .toEqual(expect.objectContaining({
+        contentRevision: 2,
+        ownerWrappedShareKey
+      }));
+
+    expect(parseSecureShareContentUpdateResponse({
+      ok: true,
+      share: refreshed,
+      retiredAttachmentIds: [
+        "attachment_old_123456",
+        "attachment_old_123456"
+      ]
+    }, refreshed.shareId)).toEqual({
+      share: refreshed,
+      retiredAttachmentIds: ["attachment_old_123456"]
+    });
+
+    expect(() => parseSecureShareContentUpdateResponse({
+      ok: true,
+      share: refreshed,
+      retiredAttachmentIds: ["../unsafe"]
+    }, refreshed.shareId)).toThrow(/첨부파일 정리 응답/);
+  });
+
+  it("rebases one newer source revision after a definitive content CAS conflict", () => {
+    const input = {
+      attachmentCount: 0,
+      encryptedBody: {
+        version: 1 as const,
+        algorithm: "AES-GCM" as const,
+        cipherText: "Ym9keQ==",
+        iv: "MDEyMzQ1Njc4OWFi"
+      },
+      encryptedTitle: {
+        version: 1 as const,
+        algorithm: "AES-GCM" as const,
+        cipherText: "dGl0bGU=",
+        iv: "MDEyMzQ1Njc4OWFi"
+      },
+      expectedContentRevision: 1,
+      expectedSourceAttachmentRevision: 3,
+      expectedSourceRevision: 9,
+      generation: "generation_123456",
+      idempotencyKey: "content_update_revision_11",
+      retainedAttachmentIds: [],
+      sourceAttachmentRevision: 4,
+      sourceRevision: 11
+    };
+    const latest = secureShare("ss2_conflict_share_123456", {
+      attachmentCount: 0,
+      contentRevision: 2,
+      currentGeneration: "",
+      sourceAttachmentRevision: 3,
+      sourceRevision: 10
+    });
+
+    expect(rebaseSecureShareContentUpdateAfterConflict(input, latest)).toEqual({
+      kind: "retry",
+      input: {
+        ...input,
+        expectedContentRevision: 2,
+        expectedSourceAttachmentRevision: 3,
+        expectedSourceRevision: 10
+      }
+    });
+    expect(rebaseSecureShareContentUpdateAfterConflict(input, {
+      ...latest,
+      sourceAttachmentRevision: 4,
+      sourceRevision: 11
+    })).toEqual({ kind: "already_current" });
+    expect(rebaseSecureShareContentUpdateAfterConflict(input, {
+      ...latest,
+      sourceRevision: 12
+    })).toEqual({ kind: "stale" });
+    expect(rebaseSecureShareContentUpdateAfterConflict(input, {
+      ...latest,
+      contentRevision: 1
+    })).toEqual({ kind: "stale" });
+  });
+
   it("requires a complete source-note-specific page before using its history", () => {
     expect(secureShareOwnerSourcePageSize).toBe(100);
     expect(parseCompleteSecureShareSourcePage({
@@ -231,6 +334,38 @@ describe("secure share owner operation lifecycle", () => {
       cause: cleanupFailure,
       message: secureSharePostCommitCleanupMessage
     });
+  });
+
+  it("retries attachment cleanup in bounded rounds and returns durable queue leftovers", async () => {
+    const attempts = new Map<string, number>();
+    const wait = vi.fn(async () => undefined);
+    const cleanupAttachment = vi.fn(async (attachmentId: string) => {
+      const attempt = (attempts.get(attachmentId) ?? 0) + 1;
+      attempts.set(attachmentId, attempt);
+      if (attachmentId === "attachment_retry_123456" && attempt < 2) {
+        throw new Error("temporary cleanup failure");
+      }
+      if (attachmentId === "attachment_pending_123456") {
+        throw new Error("persistent cleanup failure");
+      }
+    });
+
+    const pending = await cleanupSecureShareAttachmentIdsWithRetry(
+      [
+        "attachment_retry_123456",
+        "attachment_pending_123456",
+        "attachment_retry_123456"
+      ],
+      cleanupAttachment,
+      wait
+    );
+
+    expect(pending).toEqual(["attachment_pending_123456"]);
+    expect(attempts.get("attachment_retry_123456")).toBe(2);
+    expect(attempts.get("attachment_pending_123456")).toBe(3);
+    expect(wait).toHaveBeenNthCalledWith(1, 150);
+    expect(wait).toHaveBeenNthCalledWith(2, 300);
+    expect(secureShareAttachmentCleanupPendingMessage).toMatch(/서버 정리 대기열/);
   });
 });
 

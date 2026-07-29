@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   getMetadata: vi.fn(),
   getParticipant: vi.fn(),
   getPreview: vi.fn(),
+  getRevision: vi.fn(),
   extractHwpPreviewHtml: vi.fn(),
   extractHwpxPreviewHtml: vi.fn(),
   extractXlsxPreviewHtml: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock("../services/secureShares", () => {
     getSecureShareContent: mocks.getContent,
     getSecureShareMetadata: mocks.getMetadata,
     getSecureShareParticipant: mocks.getParticipant,
+    getSecureShareRevision: mocks.getRevision,
     listSecureShareComments: mocks.listComments,
     normalizeSecureShareParticipantDisplayName: (value: string) =>
       value.normalize("NFKC").trim().replace(/\s+/gu, " "),
@@ -121,11 +123,13 @@ const iv = "AAAAAAAAAAAAAAAA";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
 
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function encrypted(cipherText: string) {
@@ -151,6 +155,7 @@ function metadata(overrides: Record<string, unknown> = {}) {
       oneTimeEnabled: false,
       oneTimeScope: "global",
       ownerPreview: false,
+      hasSessionCandidate: true,
       ...overrides
     },
     requestId: "request_123456"
@@ -207,13 +212,19 @@ function attachment(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function content(attachments: unknown[] = []) {
+function content(
+  attachments: unknown[] = [],
+  overrides: Record<string, unknown> = {}
+) {
   return {
     ok: true,
     schemaVersion: 2,
     encryptedTitle: encrypted("dGl0bGU="),
     encryptedBody: encrypted("Ym9keQ=="),
     attachments,
+    contentRevision: 1,
+    policyVersion: 1,
+    ...overrides,
     requestId: "request_123456"
   };
 }
@@ -259,10 +270,17 @@ beforeEach(() => {
     if (payload.cipherText === "ZmlsZQ==") {
       return "안전한 이미지";
     }
+    if (payload.cipherText === "Ym9keV92Mg==") {
+      return "<p>업데이트된 본문</p>";
+    }
     return "<p onclick=\"alert(1)\">안전한 본문 <a href=\"javascript:alert(1)\">위험 링크</a></p><script>window.evil=true</script>";
   });
   mocks.getMetadata.mockResolvedValue(metadata());
   mocks.getContent.mockResolvedValue(content());
+  mocks.getRevision.mockResolvedValue({
+    notModified: true,
+    etag: "\"ss2-r1-p1\""
+  });
   mocks.getParticipant.mockResolvedValue(participant());
   mocks.listComments.mockResolvedValue({
     ok: true,
@@ -327,21 +345,18 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("SecurePublicShareViewer", () => {
-  it("opens through the server session, decrypts locally, and sanitizes rich-content XSS", async () => {
-    const user = userEvent.setup();
+  it("skips a missing session candidate, opens directly, and sanitizes rich-content XSS", async () => {
     const storageSpy = vi.spyOn(Storage.prototype, "setItem");
-    mocks.refreshSession
-      .mockRejectedValueOnce(new SecureShareApiError("session_required", "missing", 401))
-      .mockResolvedValueOnce(session());
+    mocks.getMetadata.mockResolvedValue(metadata({ hasSessionCandidate: false }));
 
     renderViewer();
 
-    await user.click(await screen.findByRole("button", { name: "보안 공유 열기" }));
     expect(await screen.findByRole("heading", { name: "보안 제목" })).toBeInTheDocument();
     expect(screen.getByText(/안전한 본문/)).toBeInTheDocument();
 
@@ -351,7 +366,12 @@ describe("SecurePublicShareViewer", () => {
     const sanitizedHref = body?.querySelector("a")?.getAttribute("href") ?? "";
     expect(sanitizedHref).not.toMatch(/^javascript:/iu);
     expect(storageSpy).not.toHaveBeenCalled();
-    expect(mocks.refreshSession).toHaveBeenCalledTimes(1);
+    expect(mocks.refreshSession).not.toHaveBeenCalled();
+    expect(mocks.unlock).toHaveBeenCalledTimes(1);
+    expect(mocks.unlock.mock.calls[0][1]).toEqual({
+      unlockAttemptId: expect.any(String)
+    });
+    expect(mocks.unlock.mock.calls[0][1]).not.toHaveProperty("oneTimeOpenConfirmed");
 
     const allServiceArguments = [
       ...mocks.getMetadata.mock.calls,
@@ -363,7 +383,7 @@ describe("SecurePublicShareViewer", () => {
     expect(mocks.importKey).toHaveBeenCalledWith(contentKey);
   });
 
-  it("combines password, email OTP, and explicit one-time confirmation", async () => {
+  it("combines password and email OTP without a separate one-time confirmation", async () => {
     const user = userEvent.setup();
     const idToken = "header.payload.signature-for-viewer";
     mocks.getMetadata.mockResolvedValue(metadata({
@@ -391,21 +411,41 @@ describe("SecurePublicShareViewer", () => {
     expect(screen.getByRole("button", { name: /60초 후 재전송/ })).toBeDisabled();
 
     await user.type(screen.getByLabelText("6자리 인증 코드"), "123456");
-    await user.click(screen.getByRole("checkbox", { name: /이 링크를 지금 한 번 열겠습니다/ }));
-    await user.click(screen.getByRole("button", { name: "보안 공유 열기" }));
+    expect(screen.queryByRole("checkbox", { name: /한 번 열겠습니다/ }))
+      .not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "열기" }));
 
     await screen.findByRole("heading", { name: "보안 제목" });
     expect(mocks.unlock).toHaveBeenCalledTimes(1);
     expect(mocks.unlock.mock.calls[0][1]).toEqual(expect.objectContaining({
       challengeId: "challenge_123456",
-      oneTimeOpenConfirmed: true,
       otp: "123456",
       password: " 123456 "
     }));
+    expect(mocks.unlock.mock.calls[0][1]).not.toHaveProperty("oneTimeOpenConfirmed");
     expect(mocks.unlock.mock.calls[0][2]).toEqual({
       idToken,
       signal: expect.any(AbortSignal)
     });
+  });
+
+  it("opens a one-time link directly without sending a client confirmation field", async () => {
+    mocks.getMetadata.mockResolvedValue(metadata({
+      hasSessionCandidate: false,
+      oneTimeEnabled: true
+    }));
+
+    renderViewer();
+
+    expect(await screen.findByRole("heading", { name: "보안 제목" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /한 번 열겠습니다/ }))
+      .not.toBeInTheDocument();
+    expect(mocks.refreshSession).not.toHaveBeenCalled();
+    expect(mocks.unlock).toHaveBeenCalledTimes(1);
+    expect(mocks.unlock.mock.calls[0][1]).toEqual({
+      unlockAttemptId: expect.any(String)
+    });
+    expect(mocks.unlock.mock.calls[0][1]).not.toHaveProperty("oneTimeOpenConfirmed");
   });
 
   it("uses Firebase authentication without a redundant OTP challenge", async () => {
@@ -427,7 +467,7 @@ describe("SecurePublicShareViewer", () => {
     await user.type(await screen.findByLabelText(/^공유 비밀번호/u), "12345678");
     expect(screen.queryByLabelText("인증 이메일")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("6자리 인증 코드")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "보안 공유 열기" }));
+    await user.click(screen.getByRole("button", { name: "열기" }));
     await screen.findByRole("heading", { name: "보안 제목" });
 
     expect(mocks.unlock).toHaveBeenCalledWith(
@@ -459,7 +499,7 @@ describe("SecurePublicShareViewer", () => {
     });
 
     await user.type(await screen.findByLabelText(/^공유 비밀번호/u), "12345678");
-    await user.click(screen.getByRole("button", { name: "보안 공유 열기" }));
+    await user.click(screen.getByRole("button", { name: "열기" }));
     await waitFor(() => expect(mocks.unlock).toHaveBeenCalledTimes(1));
     const staleSignal = mocks.unlock.mock.calls[0]?.[2]?.signal as AbortSignal;
 
@@ -500,7 +540,7 @@ describe("SecurePublicShareViewer", () => {
     expect(JSON.stringify(onRequireLogin.mock.calls)).not.toContain(contentKey);
   });
 
-  it("uses only server-reported owner preview and hides disabled capabilities", async () => {
+  it("opens a server-reported owner preview directly and hides disabled capabilities", async () => {
     const user = userEvent.setup();
     const idToken = "header.payload.signature-for-owner";
     mocks.getMetadata.mockResolvedValue(metadata({
@@ -509,21 +549,9 @@ describe("SecurePublicShareViewer", () => {
       requiresEmailVerification: true,
       emailChallengeRequired: true,
       oneTimeEnabled: true,
-      ownerPreview: true
+      ownerPreview: true,
+      hasSessionCandidate: false
     }));
-    mocks.refreshSession
-      .mockRejectedValueOnce(new SecureShareApiError("session_required", "missing", 401))
-      .mockResolvedValueOnce(session({
-        ownerPreview: true,
-        capabilities: {
-          permissionLevel: "comment",
-          canComment: true,
-          canSaveCopy: false,
-          commentIpPrefixEnabled: true,
-          downloadAllowed: false,
-          quickCopyButtonVisible: false
-        }
-      }));
     mocks.unlock.mockResolvedValueOnce(session({
       ownerPreview: true,
       capabilities: {
@@ -560,22 +588,18 @@ describe("SecurePublicShareViewer", () => {
 
     renderViewer({ idToken, isAuthenticated: true });
 
-    expect(await screen.findByText(/소유자\/관리자 미리보기 · 일회성 링크 미소비/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "보안 제목" })).toBeInTheDocument();
+    expect(screen.getByText("소유자/관리자 미리보기")).toBeInTheDocument();
     expect(screen.queryByLabelText("공유 비밀번호")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("인증 이메일")).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: /한 번 열겠습니다/ })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "소유자/관리자 미리보기 열기" }));
-    await screen.findByRole("heading", { name: "보안 제목" });
+    expect(screen.queryByRole("button", { name: "미리보기 열기" })).not.toBeInTheDocument();
 
     expect(mocks.unlock.mock.calls[0][1]).toEqual(expect.objectContaining({
       ownerPreview: true
     }));
     expect(mocks.unlock.mock.calls[0][1]).not.toHaveProperty("oneTimeOpenConfirmed");
-    expect(mocks.refreshSession).toHaveBeenCalledWith(
-      shareId,
-      expect.objectContaining({ idToken })
-    );
+    expect(mocks.refreshSession).not.toHaveBeenCalled();
     expect(mocks.getContent).toHaveBeenCalledWith(
       shareId,
       expect.objectContaining({ idToken })
@@ -602,6 +626,350 @@ describe("SecurePublicShareViewer", () => {
       },
       { idToken }
     ));
+  });
+
+  it("refreshes only changed content while preserving an in-progress comment draft", async () => {
+    const user = userEvent.setup();
+    const firstRevision = deferred<{
+      etag: string;
+      notModified: true;
+    }>();
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.getContent
+      .mockResolvedValueOnce(content())
+      .mockResolvedValueOnce(content([], {
+        contentRevision: 2,
+        encryptedBody: encrypted("Ym9keV92Mg=="),
+        policyVersion: 1
+      }));
+    mocks.getRevision
+      .mockImplementationOnce(() => firstRevision.promise)
+      .mockResolvedValueOnce({
+        contentRevision: 2,
+        etag: "\"ss2-r2-p1\"",
+        notModified: false,
+        policyVersion: 1
+      });
+
+    renderViewer();
+
+    expect(await screen.findByText(/안전한 본문/u)).toBeInTheDocument();
+    const commentDraft = await screen.findByLabelText("새 댓글");
+    await user.type(commentDraft, "작성 중인 댓글");
+
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(mocks.getRevision).toHaveBeenCalledTimes(1));
+    expect(mocks.getContent).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      firstRevision.resolve({
+        etag: "\"ss2-r1-p1\"",
+        notModified: true
+      });
+      await firstRevision.promise;
+    });
+    expect(mocks.getContent).toHaveBeenCalledTimes(1);
+    expect(commentDraft).toHaveValue("작성 중인 댓글");
+
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+
+    expect(await screen.findByText("업데이트된 본문")).toBeInTheDocument();
+    expect(await screen.findByText("내용이 업데이트되었습니다.")).toBeInTheDocument();
+    expect(screen.queryByText(/안전한 본문/u)).not.toBeInTheDocument();
+    expect(commentDraft).toHaveValue("작성 중인 댓글");
+    expect(mocks.getContent).toHaveBeenCalledTimes(2);
+    expect(mocks.decryptText).toHaveBeenCalledTimes(4);
+    expect(mocks.listComments).toHaveBeenCalledTimes(1);
+    expect(mocks.refreshSession).toHaveBeenCalledTimes(1);
+    expect(mocks.unlock).not.toHaveBeenCalled();
+    expect(mocks.getRevision.mock.calls[1][1]).toEqual(expect.objectContaining({
+      etag: "\"ss2-r1-p1\"",
+      signal: expect.any(AbortSignal)
+    }));
+  });
+
+  it("keeps current content when revision or refreshed-content requests fail", async () => {
+    const revisionFailure = deferred<never>();
+    const contentFailure = deferred<never>();
+    mocks.refreshSession.mockResolvedValue(session());
+    mocks.getContent
+      .mockResolvedValueOnce(content())
+      .mockImplementationOnce(() => contentFailure.promise);
+    mocks.getRevision
+      .mockImplementationOnce(() => revisionFailure.promise)
+      .mockResolvedValueOnce({
+        contentRevision: 2,
+        etag: "\"ss2-r2-p1\"",
+        notModified: false,
+        policyVersion: 1
+      });
+
+    renderViewer();
+
+    expect(await screen.findByText(/안전한 본문/u)).toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(mocks.getRevision).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      revisionFailure.reject(new Error("revision network failure"));
+      await revisionFailure.promise.catch(() => undefined);
+    });
+
+    expect(await screen.findByText(
+      "최신 내용 확인이 지연되고 있습니다. 현재 내용은 그대로 유지됩니다."
+    )).toBeInTheDocument();
+    expect(screen.getByText(/안전한 본문/u)).toBeInTheDocument();
+    expect(mocks.getContent).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(mocks.getContent).toHaveBeenCalledTimes(2));
+    expect(screen.getByText(/안전한 본문/u)).toBeInTheDocument();
+
+    await act(async () => {
+      contentFailure.reject(new Error("content network failure"));
+      await contentFailure.promise.catch(() => undefined);
+    });
+
+    expect(screen.getByText(/안전한 본문/u)).toBeInTheDocument();
+    expect(screen.getByText(
+      "최신 내용 확인이 지연되고 있습니다. 현재 내용은 그대로 유지됩니다."
+    )).toBeInTheDocument();
+    expect(mocks.decryptText).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a changed revision when the encrypted-content refresh fails", async () => {
+    mocks.refreshSession.mockResolvedValue(session());
+    mocks.getContent
+      .mockResolvedValueOnce(content())
+      .mockRejectedValueOnce(new Error("content network failure"))
+      .mockResolvedValueOnce(content([], {
+        contentRevision: 2,
+        encryptedBody: encrypted("Ym9keV92Mg=="),
+        policyVersion: 1
+      }));
+    mocks.getRevision
+      .mockResolvedValueOnce({
+        etag: "\"ss2-r1-p1\"",
+        notModified: true
+      })
+      .mockResolvedValue({
+        contentRevision: 2,
+        etag: "\"ss2-r2-p1\"",
+        notModified: false,
+        policyVersion: 1
+      });
+
+    renderViewer();
+    expect(await screen.findByText(/안전한 본문/u)).toBeInTheDocument();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    act(() => window.dispatchEvent(new Event("online")));
+    await waitFor(() => expect(mocks.getRevision).toHaveBeenCalledTimes(1));
+
+    act(() => window.dispatchEvent(new Event("online")));
+    expect(await screen.findByText(
+      "최신 내용 확인이 지연되고 있습니다. 현재 내용은 그대로 유지됩니다."
+    )).toBeInTheDocument();
+    expect(mocks.getContent).toHaveBeenCalledTimes(2);
+
+    act(() => window.dispatchEvent(new Event("online")));
+    expect(await screen.findByText("업데이트된 본문")).toBeInTheDocument();
+    expect(mocks.getContent).toHaveBeenCalledTimes(3);
+    expect(mocks.getRevision.mock.calls[1][1]).toEqual(expect.objectContaining({
+      etag: "\"ss2-r1-p1\""
+    }));
+    expect(mocks.getRevision.mock.calls[2][1]).toEqual(expect.objectContaining({
+      etag: "\"ss2-r1-p1\""
+    }));
+  });
+
+  it("clears only the transient polling-delay status after a successful unchanged check", async () => {
+    mocks.refreshSession.mockResolvedValue(session());
+    mocks.getRevision
+      .mockRejectedValueOnce(new Error("revision network failure"))
+      .mockResolvedValueOnce({
+        etag: "\"ss2-r1-p1\"",
+        notModified: true
+      });
+
+    renderViewer();
+    expect(await screen.findByText(/안전한 본문/u)).toBeInTheDocument();
+
+    act(() => window.dispatchEvent(new Event("online")));
+    expect(await screen.findByText(
+      "최신 내용 확인이 지연되고 있습니다. 현재 내용은 그대로 유지됩니다."
+    )).toBeInTheDocument();
+
+    act(() => window.dispatchEvent(new Event("online")));
+    await waitFor(() => expect(mocks.getRevision).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(
+      "최신 내용 확인이 지연되고 있습니다. 현재 내용은 그대로 유지됩니다."
+    )).not.toBeInTheDocument());
+    expect(screen.getByText(/안전한 본문/u)).toBeInTheDocument();
+  });
+
+  it("reloads metadata after revision session invalidation before showing the new gate", async () => {
+    const idToken = "header.payload.signature-for-policy-refresh";
+    mocks.getMetadata
+      .mockResolvedValueOnce(metadata())
+      .mockResolvedValueOnce(metadata({
+        hasPassword: true,
+        requiresPassword: true,
+        hasSessionCandidate: true
+      }));
+    mocks.refreshSession
+      .mockResolvedValueOnce(session())
+      .mockRejectedValueOnce(
+        new SecureShareApiError("session_expired", "expired", 401)
+      );
+    mocks.getRevision.mockRejectedValueOnce(
+      new SecureShareApiError("session_expired", "expired", 401)
+    );
+
+    renderViewer({ idToken, isAuthenticated: true });
+    expect(await screen.findByText(/안전한 본문/u)).toBeInTheDocument();
+
+    act(() => window.dispatchEvent(new Event("online")));
+
+    expect(await screen.findByLabelText(/^공유 비밀번호/u)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "열기" })).toBeDisabled();
+    expect(screen.queryByText(/안전한 본문/u)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /한 번 열겠습니다/u }))
+      .not.toBeInTheDocument();
+    expect(mocks.getMetadata).toHaveBeenCalledTimes(2);
+    expect(mocks.refreshSession).toHaveBeenCalledTimes(2);
+    expect(mocks.unlock).not.toHaveBeenCalled();
+    expect(mocks.importKey).toHaveBeenCalledTimes(2);
+    expect(mocks.importKey).toHaveBeenNthCalledWith(2, contentKey);
+    expect(JSON.stringify(mocks.getMetadata.mock.calls)).not.toContain(contentKey);
+  });
+
+  it("bounds repeated authenticated auto-access 401 bootstrap retries for one identity", async () => {
+    const idToken = "header.payload.expired-signature-for-viewer";
+    mocks.getMetadata.mockResolvedValue(metadata({
+      accessMode: "authenticated_users",
+      hasSessionCandidate: false,
+      requiresAuthentication: true
+    }));
+    mocks.unlock.mockRejectedValue(
+      new SecureShareApiError("login_required", "expired", 401)
+    );
+
+    renderViewer({ idToken, isAuthenticated: true });
+
+    expect(await screen.findByText(
+      "공유 접근 정보를 다시 확인하지 못했습니다. 로그인 상태를 갱신하거나 링크를 다시 열어주세요."
+    )).toBeInTheDocument();
+    expect(screen.getByRole("heading", {
+      name: "이 공유 링크를 사용할 수 없습니다."
+    })).toBeInTheDocument();
+    expect(mocks.getMetadata).toHaveBeenCalledTimes(2);
+    expect(mocks.unlock).toHaveBeenCalledTimes(2);
+    expect(mocks.getContent).not.toHaveBeenCalled();
+    expect(mocks.importKey).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("checkbox", { name: /한 번 열겠습니다/u }))
+      .not.toBeInTheDocument();
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.getMetadata).toHaveBeenCalledTimes(2);
+    expect(mocks.unlock).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts polling while hidden and deduplicates visible, focus, and online resets", async () => {
+    let visibilityState: DocumentVisibilityState = "visible";
+    const visibilitySpy = vi.spyOn(document, "visibilityState", "get")
+      .mockImplementation(() => visibilityState);
+    const firstSignal = deferred<AbortSignal>();
+    const secondRevision = deferred<{
+      etag: string;
+      notModified: true;
+    }>();
+    mocks.refreshSession.mockResolvedValue(session());
+    mocks.getRevision
+      .mockImplementationOnce((_shareId, options: { signal?: AbortSignal }) => {
+        const signal = options.signal as AbortSignal;
+        firstSignal.resolve(signal);
+        return new Promise((resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true }
+          );
+          void resolve;
+        });
+      })
+      .mockImplementationOnce(() => secondRevision.promise);
+
+    renderViewer();
+    expect(await screen.findByText(/안전한 본문/u)).toBeInTheDocument();
+
+    act(() => window.dispatchEvent(new Event("online")));
+    const inFlightSignal = await firstSignal.promise;
+    expect(mocks.getRevision).toHaveBeenCalledTimes(1);
+
+    visibilityState = "hidden";
+    act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await waitFor(() => expect(inFlightSignal.aborted).toBe(true));
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(mocks.getRevision).toHaveBeenCalledTimes(1);
+
+    visibilityState = "visible";
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("online"));
+    });
+    await waitFor(() => expect(mocks.getRevision).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      secondRevision.resolve({
+        etag: "\"ss2-r1-p1\"",
+        notModified: true
+      });
+      await secondRevision.promise;
+    });
+    expect(mocks.getRevision).toHaveBeenCalledTimes(2);
+    visibilitySpy.mockRestore();
+  });
+
+  it("does not poll when the live-sync rollback flag is disabled", async () => {
+    vi.stubEnv("VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED", "false");
+    mocks.refreshSession.mockResolvedValue(session());
+
+    renderViewer();
+    expect(await screen.findByText(/안전한 본문/u)).toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(mocks.getRevision).not.toHaveBeenCalled();
   });
 
   it("renders comments as plain text and sends only trimmed plain text", async () => {

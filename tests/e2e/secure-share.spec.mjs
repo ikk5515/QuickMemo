@@ -188,8 +188,6 @@ test("authenticated-only share rejects anonymous access and accepts a verified e
 
   await page.getByRole("button", { name: "QuickMemo 로그인" }).click();
   await loginRosterUser(page, fixture.viewerAuth, diagnostics);
-  await expect(page.getByRole("heading", { name: "보안 공유 열기" })).toBeVisible();
-  await page.getByRole("button", { name: "보안 공유 열기" }).click();
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
   await expectCleanRuntime(diagnostics, fixture);
 });
@@ -204,8 +202,6 @@ test("email_verified false account is rejected by an authenticated email policy"
   await page.goto(fixture.url);
   await page.getByRole("button", { name: "QuickMemo 로그인" }).click();
   await loginRosterUser(page, fixture.viewerAuth, diagnostics);
-  await expect(page.getByRole("heading", { name: "보안 공유 열기" })).toBeVisible();
-  await page.getByRole("button", { name: "보안 공유 열기" }).click();
   await expect(page.getByRole("alert")).toHaveText("이 공유 링크를 사용할 수 없습니다.");
   expect(diagnostics.apiPayloads.some(({ status }) => status === 403)).toBe(true);
   await expectCleanRuntime(diagnostics, fixture);
@@ -430,11 +426,13 @@ test("owner preview can delete a guest comment without consuming a one-time shar
   await loginDirectly(ownerPage, fixture.ownerAuth);
   await navigateWithinApp(ownerPage, fixture.url);
   const ownerDiagnostics = observePage(ownerPage);
-  await expect(
-    ownerPage.getByText(/소유자\/관리자 미리보기 · 일회성 링크 미소비/u)
-  ).toBeVisible({ timeout: 35_000 });
-  await ownerPage.getByRole("button", { name: "소유자/관리자 미리보기 열기" }).click();
   await expect(ownerPage.getByRole("heading", { name: fixture.title })).toBeVisible();
+  await expect(
+    ownerPage.getByText("소유자/관리자 미리보기", { exact: true })
+  ).toBeVisible();
+  await expect(
+    ownerPage.getByRole("button", { name: "소유자/관리자 미리보기 열기" })
+  ).toHaveCount(0);
   await expect(ownerPage.getByText(guestComment)).toBeVisible();
   await ownerPage.getByRole("button", { name: /guest1 댓글 삭제/iu }).click();
   await expect(ownerPage.getByText(guestComment)).toHaveCount(0);
