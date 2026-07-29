@@ -64,7 +64,7 @@ export async function openV2Share(page, fixture) {
 export async function unlockV2Share(page, fixture) {
   await openV2Share(page, fixture);
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
-  await expect(page.getByRole("button", { name: "보안 공유 열기" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "열기", exact: true })).toHaveCount(0);
 }
 
 export async function loginRosterUser(page, user, diagnostics) {

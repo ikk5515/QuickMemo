@@ -29,7 +29,7 @@ test("secure share is keyboard-accessible without horizontal overflow in dark mo
     await page.evaluate(() => window.matchMedia("(prefers-color-scheme: dark)").matches)
   ).toBe(true);
   await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
-  await expect(page.getByRole("button", { name: "보안 공유 열기" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "열기", exact: true })).toHaveCount(0);
   const renameButton = page.getByRole("button", { name: "이름 변경" });
   await renameButton.focus();
   await expect(renameButton).toBeFocused();
