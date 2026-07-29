@@ -1796,9 +1796,14 @@ describe("SecurePublicShareViewer", () => {
 
     renderViewer();
 
-    expect(await screen.findByRole("heading", {
+    const unavailableHeading = await screen.findByRole("heading", {
       name: "이 공유 링크를 사용할 수 없습니다."
-    })).toBeInTheDocument();
+    });
+    expect(unavailableHeading).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      /^이 공유 링크를 사용할 수 없습니다\.$/u
+    );
+    await waitFor(() => expect(document.activeElement).toBe(unavailableHeading));
     expect(mocks.refreshSession).not.toHaveBeenCalled();
   });
 });

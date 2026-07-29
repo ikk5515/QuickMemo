@@ -103,6 +103,7 @@ const commentDateFormatter = new Intl.DateTimeFormat("ko-KR", {
 });
 const contentSyncDelayedMessage =
   "최신 내용 확인이 지연되고 있습니다. 현재 내용은 그대로 유지됩니다.";
+const unavailableTitle = "이 공유 링크를 사용할 수 없습니다.";
 const previewExtensions = new Set([
   ...previewableAttachmentExtensions,
   "png",
@@ -875,7 +876,7 @@ function viewerErrorMessage(caught: unknown) {
     }
   }
 
-  return "이 공유 링크를 사용할 수 없습니다.";
+  return unavailableTitle;
 }
 
 function participantRenameErrorMessage(caught: unknown) {
@@ -1023,6 +1024,7 @@ export function SecurePublicShareViewer({
     shareId: string;
   } | null>(null);
   const accessErrorRef = useRef<HTMLParagraphElement | null>(null);
+  const unavailableTitleRef = useRef<HTMLHeadingElement | null>(null);
   const keyRef = useRef<CryptoKey | null>(null);
   const contentRevisionRef = useRef(0);
   const policyVersionRef = useRef(0);
@@ -1187,7 +1189,7 @@ export function SecurePublicShareViewer({
 
   useEffect(() => {
     if (accessError) {
-      accessErrorRef.current?.focus();
+      (accessErrorRef.current ?? unavailableTitleRef.current)?.focus();
     }
   }, [accessError, phase]);
 
@@ -1461,7 +1463,7 @@ export function SecurePublicShareViewer({
 
       if (!shareIdentifierPattern.test(shareId) || !contentKeyPattern.test(contentKey)) {
         setPhase("unavailable");
-        setAccessError("이 공유 링크를 사용할 수 없습니다.");
+        setAccessError(unavailableTitle);
         return;
       }
 
@@ -1790,7 +1792,7 @@ export function SecurePublicShareViewer({
           policyVersionRef.current = 0;
           revisionEtagRef.current = "";
           setPhase("unavailable");
-          setAccessError("이 공유 링크를 사용할 수 없습니다.");
+          setAccessError(unavailableTitle);
           return;
         }
 
@@ -2527,13 +2529,21 @@ export function SecurePublicShareViewer({
   }
 
   if (phase === "unavailable" || !metadata) {
+    const genericUnavailableError = accessError === unavailableTitle;
     return (
       <section className="secure-public-share-state error" role="alert">
         <LockKeyhole aria-hidden="true" size={24} />
-        <h1>이 공유 링크를 사용할 수 없습니다.</h1>
-        <p ref={accessErrorRef} tabIndex={-1}>
-          {accessError || "만료, 공유 해제 또는 일회성 링크 사용 완료 여부를 확인해주세요."}
-        </p>
+        <h1
+          ref={genericUnavailableError ? unavailableTitleRef : undefined}
+          tabIndex={genericUnavailableError ? -1 : undefined}
+        >
+          {unavailableTitle}
+        </h1>
+        {!genericUnavailableError && (
+          <p ref={accessErrorRef} tabIndex={-1}>
+            {accessError || "만료, 공유 해제 또는 일회성 링크 사용 완료 여부를 확인해주세요."}
+          </p>
+        )}
       </section>
     );
   }
