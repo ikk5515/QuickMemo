@@ -753,7 +753,9 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       policyVersion: 1,
       sourceRevision: 2
     });
-    const updateAudits = (await listEmulatorCollection("publicShareAuditEvents"))
+    const updateAudits = (await listEmulatorCollection(
+      `publicShareAuditEvents/${shareId}/items`
+    ))
       .filter((event) => event.eventType === "owner_content_update");
     expect(updateAudits).toHaveLength(1);
   }, 30_000);
