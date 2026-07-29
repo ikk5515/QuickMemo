@@ -1,6 +1,6 @@
 import { resolveProductionStagedFeatureFlag } from "./productionStagedFeatureFlag";
 
-const readonlyNoteRendererV2ProductionDefault = false;
+const readonlyNoteRendererV2ProductionDefault = true;
 const unifiedSelectUiProductionDefault = false;
 
 function isDefaultOnFeatureEnabled(
