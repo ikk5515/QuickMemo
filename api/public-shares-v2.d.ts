@@ -40,6 +40,13 @@ export const secureShareScryptParameters: Readonly<{
   r: 8;
 }>;
 
+export const secureShareLiveContentSyncServerProductionDefault: false;
+export function secureShareLiveContentSyncEnabled(configuredValue?: string): boolean;
+export function resolveSecureShareLiveContentSyncServerFlag(
+  productionDefault: boolean,
+  configuredValue?: string
+): boolean;
+
 export function normalizeEmail(value: string): string;
 export function normalizeAllowedEmails(values: string[]): string[];
 export function assertOnlyKeys(value: unknown, allowedKeys: string[]): void;
@@ -77,6 +84,26 @@ export function verifySharePassword(
   pepper?: string,
   pepperVersion?: string
 ): Promise<boolean>;
+
+export function ownerAttachmentReuseManifest(
+  attachment: Record<string, unknown>
+):
+  | { id: string }
+  | {
+      digest: string;
+      id: string;
+      sourceAttachmentId: string;
+      sourceEncryptionVersion: 1 | 2;
+    };
+
+export function verifyDocumentSnapshotWrite(
+  projectId: string,
+  documentPath: string,
+  updateTime: string
+): {
+  currentDocument: { updateTime: string };
+  verify: string;
+};
 
 export function consumeRateLimits(
   context: { accessToken: string; projectId: string },
@@ -220,6 +247,70 @@ export function sourceSnapshotAvailable(
   note: Record<string, unknown> | null,
   ownerProfile: Record<string, unknown> | null
 ): boolean;
+
+export function sourceLifecycleAvailable(
+  share: Record<string, unknown>,
+  note: Record<string, unknown> | null,
+  ownerProfile: Record<string, unknown> | null
+): boolean;
+
+export function legacyAutomaticSourceRevokeBlocked(
+  idempotencyKey: string,
+  share: Record<string, unknown>,
+  note: Record<string, unknown> | null,
+  ownerProfile: Record<string, unknown> | null,
+  liveContentSyncEnabled?: boolean
+): boolean;
+
+export function sourceReadAvailable(
+  share: Record<string, unknown>,
+  note: Record<string, unknown> | null,
+  ownerProfile: Record<string, unknown> | null,
+  liveContentSyncEnabled?: boolean
+): boolean;
+
+export function sourceRevisionMatches(
+  share: Record<string, unknown>,
+  note: Record<string, unknown> | null
+): boolean;
+
+export function contentUpdateRequestDigest(input: {
+  attachmentCount: number;
+  encryptedBody: Record<string, unknown>;
+  encryptedTitle: Record<string, unknown>;
+  expectedContentRevision: number;
+  expectedSourceAttachmentRevision: number;
+  expectedSourceRevision: number;
+  generation: string;
+  idempotencyKey: string;
+  retainedAttachmentIds?: string[];
+  sourceAttachmentRevision: number;
+  sourceRevision: number;
+}): string;
+
+export function contentUpdateDisposition(
+  share: Record<string, unknown>,
+  input: {
+    expectedContentRevision: number;
+    expectedSourceAttachmentRevision: number;
+    expectedSourceRevision: number;
+    idempotencyKey: string;
+  },
+  requestDigest: string
+): "apply" | "conflict" | "replay" | "stale";
+
+export function contentUpdateRetryAfterSeconds(
+  share: Record<string, unknown>,
+  nowMilliseconds?: number
+): number;
+
+export function secureShareRevisionEtag(share: Record<string, unknown>): string;
+export function etagMatches(value: unknown, expected: string): boolean;
+
+export function ensureRevisionReadRequest(request: {
+  headers?: Record<string, string | string[] | undefined>;
+  url?: string;
+}): void;
 
 export function ensureSameOrigin(request: {
   headers?: Record<string, string | string[] | undefined>;

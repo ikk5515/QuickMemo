@@ -158,6 +158,7 @@ export interface PublicNoteShareDocument {
   sourceNoteId: string;
   sourceRevision?: number;
   sourceAttachmentRevision?: number;
+  contentRevision?: number;
   ownerUid: string;
   version: 1 | 2;
   currentGeneration?: string;
@@ -169,6 +170,7 @@ export interface PublicNoteShareDocument {
   ready: boolean;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
+  contentUpdatedAt?: Timestamp;
   expiresAt: Timestamp;
   revokedAt?: Timestamp;
   revokedBy?: string;
@@ -179,6 +181,7 @@ export interface PublicNoteShareAttachmentDocument {
   privacyVersion?: 1;
   algorithm: "AES-GCM" | "AES-GCM-CHUNKED";
   generation?: string;
+  generations?: string[];
   fileName: string;
   encryptedFileName?: EncryptedPayload;
   extension: string;
@@ -200,6 +203,8 @@ export interface PublicNoteShareAttachmentDocument {
   chunkIvs?: Bytes[];
   ownerUid?: string;
   sourceAttachmentId?: string;
+  sourceAttachmentDigest?: string;
+  sourceEncryptionVersion?: 1 | 2;
   expiresAt: Timestamp;
   createdAt?: Timestamp;
 }
@@ -209,8 +214,10 @@ export type SecureShareOwnerStatus = "active" | "consumed" | "expired" | "pendin
 export interface SecureShareOwnerSummary {
   accessMode: "allowed_emails" | "anyone_with_link" | "authenticated_users";
   attachmentCount: number;
+  contentRevision: number;
   consumedAt: string | null;
   createdAt: string;
+  currentGeneration: string;
   downloadAllowed: boolean;
   expiresAt: string;
   hasPassword: boolean;

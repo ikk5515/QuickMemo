@@ -42,6 +42,8 @@ export interface PublicShareBlobAttachmentUploadInput extends BaseBlobAttachment
   generation: string;
   shareId: string;
   sourceAttachmentId?: string;
+  sourceAttachmentDigest?: string;
+  sourceEncryptionVersion?: 1 | 2;
 }
 
 interface CompletedBlobAttachmentUploadInput {
@@ -318,6 +320,8 @@ export async function uploadPublicShareAttachmentBlob(
     mimeType: input.mimeType,
     originalSize: input.originalSize,
     sourceAttachmentId: input.sourceAttachmentId ?? null,
+    sourceAttachmentDigest: input.sourceAttachmentDigest ?? null,
+    sourceEncryptionVersion: input.sourceEncryptionVersion ?? null,
     ...encryptionPayloadFields(input.encryption)
   };
   let hasReservation = false;

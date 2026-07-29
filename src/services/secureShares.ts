@@ -12,16 +12,19 @@ export const secureShareApiPath = "/api/public-shares-v2";
 
 export const secureShareApiActions = [
   "feature-status",
+  "live-sync-status",
   "owner-list",
   "owner-details",
   "owner-create",
   "owner-update",
+  "owner-content-update",
   "owner-activate",
   "owner-revoke",
   "metadata",
   "email-challenge",
   "access",
   "session",
+  "revision",
   "content",
   "participant-me",
   "comments",
@@ -50,16 +53,19 @@ export const secureShareApiActionContract: Record<
   SecureShareApiActionContractEntry
 > = {
   "feature-status": { auth: "optional", csrf: "none", methods: ["GET"] },
+  "live-sync-status": { auth: "optional", csrf: "none", methods: ["GET"] },
   "owner-list": { auth: "owner", csrf: "none", methods: ["GET"] },
   "owner-details": { auth: "owner", csrf: "none", methods: ["GET"] },
   "owner-create": { auth: "owner", csrf: "if_available", methods: ["POST"] },
   "owner-update": { auth: "owner", csrf: "if_available", methods: ["PATCH"] },
+  "owner-content-update": { auth: "owner", csrf: "if_available", methods: ["PATCH"] },
   "owner-activate": { auth: "owner", csrf: "if_available", methods: ["POST"] },
   "owner-revoke": { auth: "owner", csrf: "if_available", methods: ["POST"] },
   metadata: { auth: "optional", csrf: "none", methods: ["GET"] },
   "email-challenge": { auth: "optional", csrf: "none", methods: ["POST"] },
   access: { auth: "optional", csrf: "none", methods: ["POST"] },
   session: { auth: "session", csrf: "none", methods: ["GET"] },
+  revision: { auth: "session", csrf: "none", methods: ["GET"] },
   content: { auth: "session", csrf: "none", methods: ["GET"] },
   "participant-me": { auth: "session", csrf: "after_session", methods: ["GET", "PATCH"] },
   comments: { auth: "session", csrf: "after_session", methods: ["GET", "POST"] },
@@ -72,6 +78,7 @@ export const secureShareApiActionContract: Record<
 const secureShareIdentifierPattern = /^[A-Za-z0-9_-]{6,128}$/u;
 const csrfTokenPattern = /^[A-Za-z0-9_-]{32,512}$/u;
 const copyGrantPattern = /^[A-Za-z0-9_-]{20,2000}\.[A-Za-z0-9_-]{40,64}$/u;
+const secureShareRevisionEtagPattern = /^"ss2-r[1-9][0-9]{0,9}-p[1-9][0-9]{0,9}"$/u;
 const forbiddenContentKeyFields = new Set([
   "contentkey",
   "fragment",
@@ -103,6 +110,20 @@ export interface SecureShareOwnerUpdateInput {
   policy: unknown;
 }
 
+export interface SecureShareOwnerContentUpdateInput {
+  attachmentCount: number;
+  encryptedBody: EncryptedPayload;
+  encryptedTitle: EncryptedPayload;
+  expectedContentRevision: number;
+  expectedSourceAttachmentRevision: number;
+  expectedSourceRevision: number;
+  generation: string;
+  idempotencyKey: string;
+  retainedAttachmentIds?: string[];
+  sourceAttachmentRevision: number;
+  sourceRevision: number;
+}
+
 export interface SecureShareOwnerActivateInput {
   attachmentCount: number;
   generation: string;
@@ -120,6 +141,24 @@ export interface SecureShareFeatureStatus {
   emailEnabled: boolean;
   v2Enabled: boolean;
 }
+
+export interface SecureShareLiveSyncStatus {
+  enabled: boolean;
+}
+
+export type SecureShareAttachmentReuseManifest =
+  | {
+      id: string;
+      digest?: undefined;
+      sourceAttachmentId?: undefined;
+      sourceEncryptionVersion?: undefined;
+    }
+  | {
+      digest: string;
+      id: string;
+      sourceAttachmentId: string;
+      sourceEncryptionVersion: 1 | 2;
+    };
 
 export interface SecureShareAccessInput {
   challengeId?: string;
@@ -161,11 +200,28 @@ export interface SecureShareViewerRequestOptions {
   signal?: AbortSignal;
 }
 
+export interface SecureShareRevisionRequestOptions extends SecureShareViewerRequestOptions {
+  etag?: string;
+}
+
+export type SecureShareRevisionResult =
+  | {
+      etag: string;
+      notModified: true;
+    }
+  | {
+      contentRevision: number;
+      etag: string;
+      notModified: false;
+      policyVersion: number;
+    };
+
 export interface SecureShareRequestOptions {
   action: SecureShareApiAction;
   body?: unknown;
   copyGrant?: string;
   idToken?: string;
+  ifNoneMatch?: string;
   method: SecureShareApiMethod;
   query?: Record<string, boolean | number | string | null | undefined>;
   shareId?: string;
@@ -707,6 +763,19 @@ async function parseJsonResponse(response: Response) {
   }
 }
 
+function secureShareResponseError(response: Response, payload: unknown) {
+  const errorPayload = isPlainRecord(payload) ? payload : {};
+  const code = typeof errorPayload.error === "string" && errorPayload.error.length <= 80
+    ? errorPayload.error
+    : `secure_share_${response.status}`;
+  return new SecureShareApiError(
+    code,
+    errorMessage(response.status, errorPayload),
+    response.status,
+    safeRetryAfter(response)
+  );
+}
+
 function rememberAndRedactCsrfToken(payload: unknown, requestedShareId?: string) {
   if (!isPlainRecord(payload) || !Object.prototype.hasOwnProperty.call(payload, "csrfToken")) {
     return payload;
@@ -763,6 +832,18 @@ async function fetchSecureShareResponse(options: SecureShareRequestOptions) {
     }
     assertIdToken(options.idToken);
   }
+  if (options.ifNoneMatch !== undefined) {
+    if (
+      options.action !== "revision"
+      || options.method !== "GET"
+      || !secureShareRevisionEtagPattern.test(options.ifNoneMatch)
+    ) {
+      throw new SecureShareApiError(
+        "invalid_request",
+        "보안 공유 콘텐츠 버전 정보가 올바르지 않습니다."
+      );
+    }
+  }
 
   assertNoContentKey(options.query);
   assertNoContentKey(options.body);
@@ -777,6 +858,15 @@ async function fetchSecureShareResponse(options: SecureShareRequestOptions) {
   }
   if (options.copyGrant) {
     headers.set("x-secure-share-copy-grant", options.copyGrant);
+  }
+  if (options.ifNoneMatch) {
+    headers.set("if-none-match", options.ifNoneMatch);
+  }
+  if (options.action === "revision") {
+    // Non-secret marker: a cross-origin browser request must preflight before
+    // it can send this header, while the server separately requires
+    // Sec-Fetch-Site: same-origin and the bound share session.
+    headers.set("x-quickmemo-secure-share-revision", "1");
   }
   if (options.body !== undefined) {
     headers.set("content-type", "application/json");
@@ -828,17 +918,7 @@ export async function secureShareApiRequest<T = unknown>(
   const payload = await parseJsonResponse(response);
 
   if (!response.ok) {
-    const errorPayload = isPlainRecord(payload) ? payload : {};
-    const code = typeof errorPayload.error === "string" && errorPayload.error.length <= 80
-      ? errorPayload.error
-      : `secure_share_${response.status}`;
-
-    throw new SecureShareApiError(
-      code,
-      errorMessage(response.status, errorPayload),
-      response.status,
-      safeRetryAfter(response)
-    );
+    throw secureShareResponseError(response, payload);
   }
 
   return rememberAndRedactCsrfToken(payload, options.shareId) as T;
@@ -877,6 +957,28 @@ export async function getSecureShareFeatureStatus(
     v2Enabled: payload.v2Enabled,
     emailEnabled: payload.emailEnabled
   };
+}
+
+export async function getSecureShareLiveSyncStatus(
+  signal?: AbortSignal
+): Promise<SecureShareLiveSyncStatus> {
+  const payload = await secureShareApiRequest<unknown>({
+    action: "live-sync-status",
+    method: "GET",
+    signal
+  });
+
+  if (
+    !isPlainRecord(payload)
+    || Object.keys(payload).some((field) => field !== "enabled")
+    || typeof payload.enabled !== "boolean"
+  ) {
+    throw new SecureShareApiError(
+      "invalid_response",
+      "보안 공유 실시간 동기화 상태를 확인하지 못했습니다."
+    );
+  }
+  return { enabled: payload.enabled };
 }
 
 export function listOwnedSecureShares(idToken: string, options: SecureShareListOptions = {}) {
@@ -971,6 +1073,32 @@ export function updateSecureShare(
   });
 }
 
+export function updateSecureShareContent(
+  shareId: string,
+  input: SecureShareOwnerContentUpdateInput,
+  idToken: string
+) {
+  return secureShareApiRequest({
+    action: "owner-content-update",
+    method: "PATCH",
+    idToken,
+    shareId,
+    body: {
+      attachmentCount: input.attachmentCount,
+      encryptedBody: input.encryptedBody,
+      encryptedTitle: input.encryptedTitle,
+      expectedContentRevision: input.expectedContentRevision,
+      expectedSourceAttachmentRevision: input.expectedSourceAttachmentRevision,
+      expectedSourceRevision: input.expectedSourceRevision,
+      generation: input.generation,
+      idempotencyKey: input.idempotencyKey,
+      retainedAttachmentIds: input.retainedAttachmentIds ?? [],
+      sourceAttachmentRevision: input.sourceAttachmentRevision,
+      sourceRevision: input.sourceRevision
+    }
+  });
+}
+
 export function activateSecureShare(
   shareId: string,
   input: SecureShareOwnerActivateInput,
@@ -1050,7 +1178,6 @@ export function unlockSecureShare(
     signal: options.signal,
     body: {
       challengeId: input.challengeId,
-      oneTimeOpenConfirmed: input.oneTimeOpenConfirmed,
       otp: input.otp,
       ownerPreview: input.ownerPreview,
       password: input.password,
@@ -1070,6 +1197,58 @@ export function refreshSecureShareSession(
     shareId,
     signal: options.signal
   });
+}
+
+export async function getSecureShareRevision(
+  shareId: string,
+  options: SecureShareRevisionRequestOptions = {}
+): Promise<SecureShareRevisionResult> {
+  const response = await fetchSecureShareResponse({
+    action: "revision",
+    method: "GET",
+    idToken: options.idToken,
+    ifNoneMatch: options.etag,
+    shareId,
+    signal: options.signal
+  });
+  const etag = response.headers.get("etag") ?? "";
+  if (response.status === 304) {
+    if (!secureShareRevisionEtagPattern.test(etag)) {
+      throw new SecureShareApiError(
+        "invalid_response",
+        "보안 공유 콘텐츠 버전을 확인하지 못했습니다.",
+        response.status
+      );
+    }
+    return { notModified: true, etag };
+  }
+  const payload = await parseJsonResponse(response);
+  if (!response.ok) {
+    throw secureShareResponseError(response, payload);
+  }
+  if (
+    !secureShareRevisionEtagPattern.test(etag)
+    || !isPlainRecord(payload)
+    || payload.ok !== true
+    || !Number.isSafeInteger(payload.contentRevision)
+    || Number(payload.contentRevision) < 1
+    || Number(payload.contentRevision) > 1_000_000_000
+    || !Number.isSafeInteger(payload.policyVersion)
+    || Number(payload.policyVersion) < 1
+    || Number(payload.policyVersion) > 1_000_000_000
+  ) {
+    throw new SecureShareApiError(
+      "invalid_response",
+      "보안 공유 콘텐츠 버전을 확인하지 못했습니다.",
+      response.status
+    );
+  }
+  return {
+    notModified: false,
+    etag,
+    contentRevision: Number(payload.contentRevision),
+    policyVersion: Number(payload.policyVersion)
+  };
 }
 
 export function getSecureShareContent(

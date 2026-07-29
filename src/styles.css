@@ -296,6 +296,44 @@ textarea:focus {
   box-shadow: 0 0 0 3px var(--color-focus-ring);
 }
 
+.app-select {
+  cursor: pointer;
+}
+
+.app-select:not(:disabled):hover {
+  border-color: color-mix(in srgb, var(--teal) 44%, var(--line));
+}
+
+.app-select:focus-visible {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
+}
+
+.app-select:disabled {
+  background: var(--color-surface-muted);
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.app-select[aria-busy="true"] {
+  cursor: progress;
+}
+
+.app-select[aria-invalid="true"] {
+  border-color: var(--coral);
+}
+
+.app-select[aria-invalid="true"]:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--coral) 24%, transparent);
+}
+
+.app-select option,
+.app-select optgroup {
+  background: var(--color-input-bg);
+  color: var(--ink);
+}
+
 button:focus-visible,
 a:focus-visible,
 [role="button"]:focus-visible {
@@ -3916,6 +3954,37 @@ textarea {
   padding: 0 10px;
 }
 
+.note-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.note-content--readonly {
+  font-size: var(--editor-font-size, 17px);
+}
+
+.note-content--readonly pre {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.note-content--readonly pre code {
+  overflow-wrap: normal;
+  white-space: inherit;
+  word-break: normal;
+}
+
+.note-content--plain {
+  overflow-wrap: anywhere;
+  tab-size: 4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .note-preview-body {
   flex: 1 1 auto;
   line-height: 1;
@@ -4018,10 +4087,10 @@ textarea {
   min-height: 30svh;
   overflow: visible;
   padding: 0;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
   tab-size: 4;
   white-space: pre-wrap;
-  word-break: keep-all;
+  word-break: break-word;
 }
 
 .public-share-attachments {

@@ -5,6 +5,12 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import {
+  attachmentGenerationIncludes,
+  retainedAttachmentGenerations,
+  sourceAttachmentFingerprintMatches,
+  validSourceAttachmentFingerprint
+} from "./_secure-share-attachment-reuse.js";
+import {
   HttpError,
   activeUserFromRequest,
   applySecureResponseHeaders,
@@ -26,6 +32,7 @@ import {
   firestoreBatchGet,
   firestoreCommit,
   deleteDocumentWrite,
+  firestoreDocumentName,
   firestoreGet,
   firestoreIntegerValue,
   firestoreListCollection,
@@ -42,6 +49,7 @@ import {
   identityDigest,
   isPlainRecord,
   jsonResponse,
+  loopbackEmulatorHost,
   normalizeAllowedEmails,
   normalizeEmail,
   oneTimeGraceSeconds,
@@ -119,6 +127,7 @@ const copyGrantTransactionMaximumAttempts = 8;
 const copyGrantRetryMaximumDelayMilliseconds = 250;
 const emailProviderRequestRateWindowSeconds = 1;
 const emailProviderRequestRateLimit = 2;
+const ownerContentUpdateMinimumIntervalMilliseconds = 500;
 const sessionLastSeenWriteIntervalMilliseconds = 60 * 60 * 1000;
 const participantAllocationMaximumAttempts = 32;
 const participantAllocationQueueMaximumEntriesPerShare = 32;
@@ -139,18 +148,23 @@ const maximumParticipantsPerShare = configuredInteger(
 );
 const participantAllocationQueues = new Map();
 let participantAllocationQueueTotalEntries = 0;
+const secureShareLiveContentSyncServerProductionDefault = false;
+const legacyAutomaticSourceRevokePattern = /^source_changed_[0-9a-f]{32}$/u;
 const validActions = new Set([
   "feature-status",
+  "live-sync-status",
   "owner-list",
   "owner-details",
   "owner-create",
   "owner-update",
+  "owner-content-update",
   "owner-activate",
   "owner-revoke",
   "metadata",
   "email-challenge",
   "access",
   "session",
+  "revision",
   "content",
   "participant-me",
   "comments",
@@ -159,6 +173,51 @@ const validActions = new Set([
   "attachment-preview",
   "attachment-download"
 ]);
+
+function resolveSecureShareLiveContentSyncServerFlag(
+  productionDefault,
+  configuredValue
+) {
+  if (productionDefault !== true) {
+    return false;
+  }
+  return configuredValue === undefined
+    || configuredValue === "true";
+}
+
+function secureShareLiveContentSyncEmulatorHarnessEnabled(configuredValue) {
+  if (
+    configuredValue !== "true"
+    || process.env.QUICKMEMO_SECURE_SHARE_EMULATOR_LIVE_SYNC !== "enabled"
+    || process.env.NODE_ENV !== "test"
+    || process.env.VERCEL_ENV === "production"
+  ) {
+    return false;
+  }
+  try {
+    return Boolean(
+      loopbackEmulatorHost("FIRESTORE_EMULATOR_HOST")
+      && loopbackEmulatorHost("FIREBASE_AUTH_EMULATOR_HOST")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function secureShareLiveContentSyncEnabled(
+  configuredValue = process.env.SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED
+) {
+  return resolveSecureShareLiveContentSyncServerFlag(
+    secureShareLiveContentSyncServerProductionDefault,
+    configuredValue
+  ) || secureShareLiveContentSyncEmulatorHarnessEnabled(configuredValue);
+}
+
+function requireSecureShareLiveContentSync() {
+  if (!secureShareLiveContentSyncEnabled()) {
+    throw new HttpError(404, "not_found", "Secure Share live content sync is disabled");
+  }
+}
 
 function requireMethod(request, methods) {
   if (!methods.includes(request.method)) {
@@ -571,6 +630,9 @@ function shareSummary(share) {
     sourceAttachmentRevision: Number.isSafeInteger(share.sourceAttachmentRevision)
       ? share.sourceAttachmentRevision
       : 0,
+    contentRevision: Number.isSafeInteger(share.contentRevision) && share.contentRevision >= 1
+      ? share.contentRevision
+      : 1,
     currentGeneration: share.currentGeneration ?? "",
     status: share.status,
     ready: share.ready === true,
@@ -599,6 +661,7 @@ const ownerShareSummaryFieldPaths = [
   "sourceNoteId",
   "sourceRevision",
   "sourceAttachmentRevision",
+  "contentRevision",
   "currentGeneration",
   "ownerUid",
   "status",
@@ -809,13 +872,7 @@ function requireShareManager(state, user) {
   }
 }
 
-function sourceSnapshotAvailable(share, note, ownerProfile) {
-  const noteRevision = Number.isSafeInteger(note?.revision) ? note.revision : 0;
-  const noteAttachmentRevision = Number.isSafeInteger(note?.attachmentRevision) ? note.attachmentRevision : 0;
-  const shareRevision = Number.isSafeInteger(share?.sourceRevision) ? share.sourceRevision : 0;
-  const shareAttachmentRevision = Number.isSafeInteger(share?.sourceAttachmentRevision)
-    ? share.sourceAttachmentRevision
-    : 0;
+function sourceLifecycleAvailable(share, note, ownerProfile) {
   return sourceNoteActive(note)
     && ownerProfile?.isActive === true
     && (
@@ -823,17 +880,135 @@ function sourceSnapshotAvailable(share, note, ownerProfile) {
       || !isPlainRecord(ownerProfile?.featureAccess)
       || ownerProfile.featureAccess.notes === true
     )
-    && note.ownerUid === share?.ownerUid
-    && noteRevision === shareRevision
+    && note.ownerUid === share?.ownerUid;
+}
+
+function legacyAutomaticSourceRevokeBlocked(
+  idempotencyKey,
+  share,
+  note,
+  ownerProfile,
+  liveContentSyncEnabled = secureShareLiveContentSyncEnabled()
+) {
+  return liveContentSyncEnabled === true
+    && legacyAutomaticSourceRevokePattern.test(idempotencyKey)
+    && sourceLifecycleAvailable(share, note, ownerProfile);
+}
+
+function sourceRevisionMatches(share, note) {
+  const noteRevision = Number.isSafeInteger(note?.revision) ? note.revision : 0;
+  const noteAttachmentRevision = Number.isSafeInteger(note?.attachmentRevision) ? note.attachmentRevision : 0;
+  const shareRevision = Number.isSafeInteger(share?.sourceRevision) ? share.sourceRevision : 0;
+  const shareAttachmentRevision = Number.isSafeInteger(share?.sourceAttachmentRevision)
+    ? share.sourceAttachmentRevision
+    : 0;
+  return noteRevision === shareRevision
     && noteAttachmentRevision === shareAttachmentRevision;
 }
 
-async function requireSourceAvailable(context, share) {
+function sourceReadAvailable(
+  share,
+  note,
+  ownerProfile,
+  liveContentSyncEnabled = secureShareLiveContentSyncEnabled()
+) {
+  return sourceLifecycleAvailable(share, note, ownerProfile)
+    && (
+      liveContentSyncEnabled === true
+      || sourceRevisionMatches(share, note)
+    );
+}
+
+// Retained as a compatibility export for lifecycle-only callers.
+function sourceSnapshotAvailable(share, note, ownerProfile) {
+  return sourceLifecycleAvailable(share, note, ownerProfile);
+}
+
+function contentRevisionValue(share) {
+  return Number.isSafeInteger(share?.contentRevision) && share.contentRevision >= 1
+    ? share.contentRevision
+    : 1;
+}
+
+function contentUpdateRequestDigest(input) {
+  return sha256Digest(JSON.stringify({
+    idempotencyKey: input.idempotencyKey,
+    expectedContentRevision: input.expectedContentRevision,
+    expectedSourceRevision: input.expectedSourceRevision,
+    expectedSourceAttachmentRevision: input.expectedSourceAttachmentRevision,
+    sourceRevision: input.sourceRevision,
+    sourceAttachmentRevision: input.sourceAttachmentRevision,
+    generation: input.generation,
+    attachmentCount: input.attachmentCount,
+    retainedAttachmentIds: input.retainedAttachmentIds,
+    encryptedTitle: input.encryptedTitle,
+    encryptedBody: input.encryptedBody
+  }));
+}
+
+function contentUpdateDisposition(share, input, requestDigest) {
+  if (share?.lastContentMutationId === input.idempotencyKey) {
+    return typeof share.lastContentMutationDigest === "string"
+      && constantTimeStringEqual(share.lastContentMutationDigest, requestDigest)
+      ? "replay"
+      : "conflict";
+  }
+  if (
+    contentRevisionValue(share) !== input.expectedContentRevision
+    || (Number.isSafeInteger(share?.sourceRevision) ? share.sourceRevision : 0)
+      !== input.expectedSourceRevision
+    || (Number.isSafeInteger(share?.sourceAttachmentRevision)
+      ? share.sourceAttachmentRevision
+      : 0) !== input.expectedSourceAttachmentRevision
+  ) {
+    return "stale";
+  }
+  return "apply";
+}
+
+function secureShareRevisionEtag(share) {
+  const policyVersion = Number.isSafeInteger(share?.policyVersion) && share.policyVersion >= 1
+    ? share.policyVersion
+    : 1;
+  return `"ss2-r${contentRevisionValue(share)}-p${policyVersion}"`;
+}
+
+function etagMatches(value, expected) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 1024) {
+    return false;
+  }
+  const normalizedExpected = expected.replace(/^W\//u, "");
+  return value.split(",").some((candidate) => {
+    const normalized = candidate.trim().replace(/^W\//u, "");
+    return normalized === "*" || constantTimeStringEqual(normalized, normalizedExpected);
+  });
+}
+
+function ensureRevisionReadRequest(request) {
+  if (headerValue(request, "x-quickmemo-secure-share-revision").trim() !== "1") {
+    throw new HttpError(403, "request_rejected", "Revision request marker is missing");
+  }
+  if (headerValue(request, "sec-fetch-site").trim().toLowerCase() !== "same-origin") {
+    throw new HttpError(403, "request_rejected", "Cross-site revision request rejected");
+  }
+  if (headerValue(request, "origin")) {
+    ensureSameOrigin(request);
+  }
+}
+
+async function requireSourceAvailable(context, share, validatedOwner = null) {
+  const ownerAlreadyValidated = validatedOwner?.uid === share?.ownerUid;
   const [note, ownerProfile] = await Promise.all([
     firestoreGet(context, `notes/${safeId(share.sourceNoteId, "sourceNoteId")}`),
-    firestoreGet(context, `users/${safeId(share.ownerUid, "ownerUid")}`)
+    ownerAlreadyValidated
+      ? Promise.resolve({
+          isActive: true,
+          isAdmin: validatedOwner.isAdmin === true,
+          featureAccess: { notes: true }
+        })
+      : firestoreGet(context, `users/${safeId(share.ownerUid, "ownerUid")}`)
   ]);
-  if (!sourceSnapshotAvailable(share, note, ownerProfile)) {
+  if (!sourceReadAvailable(share, note, ownerProfile)) {
     throw new HttpError(404, "share_unavailable", "Source note is unavailable");
   }
   return note;
@@ -1309,11 +1484,13 @@ async function handleOwnerCreate(request, response, id) {
     sourceNoteId: input.sourceNoteId,
     sourceRevision: input.sourceRevision,
     sourceAttachmentRevision: input.sourceAttachmentRevision,
+    contentRevision: 1,
     ownerUid: user.uid,
     status: "pending",
     ready: false,
     createdAt: now,
     updatedAt: now,
+    contentUpdatedAt: now,
     expiresAt,
     policyVersion,
     encryptedTitle: input.encryptedTitle,
@@ -1680,12 +1857,15 @@ async function handleOwnerDetails(request, response, id, shareId) {
   const user = await ownerContext(request);
   const state = await loadShareState(user.context, shareId);
   requireOwner(state, user);
-  const recipients = await firestoreListCollection(
-    user.context,
-    `publicShareRecipients/${shareId}`,
-    "items",
-    110
-  );
+  const [recipients, attachments] = await Promise.all([
+    firestoreListCollection(
+      user.context,
+      `publicShareRecipients/${shareId}`,
+      "items",
+      110
+    ),
+    currentAttachments(user.context, state.share)
+  ]);
   jsonResponse(response, 200, {
     ok: true,
     share: {
@@ -1703,8 +1883,24 @@ async function handleOwnerDetails(request, response, id, shareId) {
         .map((recipient) => recipient.ownerVisibleEmail)
         .sort()
     },
+    attachmentReuseManifests: attachments.map(ownerAttachmentReuseManifest),
     requestId: id
   });
+}
+
+function ownerAttachmentReuseManifest(attachment) {
+  const manifest = {
+    id: safeId(attachment?.__id, "attachmentId")
+  };
+  if (!validSourceAttachmentFingerprint(attachment)) {
+    return manifest;
+  }
+  return {
+    ...manifest,
+    sourceAttachmentId: attachment.sourceAttachmentId,
+    digest: attachment.sourceAttachmentDigest,
+    sourceEncryptionVersion: attachment.sourceEncryptionVersion
+  };
 }
 
 function validateUpdateBody(body) {
@@ -1921,6 +2117,541 @@ async function handleOwnerUpdate(request, response, id, shareId) {
   }
 }
 
+function validateContentUpdateBody(body) {
+  assertOnlyKeys(body, [
+    "encryptedTitle",
+    "encryptedBody",
+    "attachmentCount",
+    "generation",
+    "sourceRevision",
+    "sourceAttachmentRevision",
+    "expectedContentRevision",
+    "expectedSourceRevision",
+    "expectedSourceAttachmentRevision",
+    "retainedAttachmentIds",
+    "idempotencyKey"
+  ]);
+  const attachmentCount = boundedInteger(
+    body.attachmentCount,
+    "attachmentCount",
+    0,
+    100
+  );
+  const generation = body.generation ? safeId(body.generation, "generation") : "";
+  if (attachmentCount > 0 && !generation) {
+    throw new HttpError(400, "invalid_request", "generation is required");
+  }
+  const retainedAttachmentIds = body.retainedAttachmentIds === undefined
+    ? []
+    : Array.isArray(body.retainedAttachmentIds)
+      && body.retainedAttachmentIds.length <= 100
+      ? body.retainedAttachmentIds.map((attachmentId) =>
+          safeId(attachmentId, "retainedAttachmentId")
+        )
+      : null;
+  if (
+    !retainedAttachmentIds
+    || new Set(retainedAttachmentIds).size !== retainedAttachmentIds.length
+    || retainedAttachmentIds.length > attachmentCount
+  ) {
+    throw new HttpError(400, "invalid_request", "Invalid retainedAttachmentIds");
+  }
+  return {
+    encryptedTitle: encryptedPayload(body.encryptedTitle, "encryptedTitle", 64 * 1024),
+    encryptedBody: encryptedPayload(body.encryptedBody, "encryptedBody", 2 * 1024 * 1024),
+    attachmentCount,
+    generation,
+    retainedAttachmentIds,
+    sourceRevision: boundedInteger(
+      body.sourceRevision,
+      "sourceRevision",
+      0,
+      1_000_000_000
+    ),
+    sourceAttachmentRevision: boundedInteger(
+      body.sourceAttachmentRevision,
+      "sourceAttachmentRevision",
+      0,
+      1_000_000_000
+    ),
+    expectedContentRevision: boundedInteger(
+      body.expectedContentRevision,
+      "expectedContentRevision",
+      1,
+      1_000_000_000
+    ),
+    expectedSourceRevision: boundedInteger(
+      body.expectedSourceRevision,
+      "expectedSourceRevision",
+      0,
+      1_000_000_000
+    ),
+    expectedSourceAttachmentRevision: boundedInteger(
+      body.expectedSourceAttachmentRevision,
+      "expectedSourceAttachmentRevision",
+      0,
+      1_000_000_000
+    ),
+    idempotencyKey: safeUnlockAttemptId(body.idempotencyKey)
+  };
+}
+
+function assertOwnerContentMutable(state) {
+  if (
+    !state
+    || !new Set(["pending", "active", "consumed"]).has(state.share.status)
+    || state.share.revokedAt
+    || state.share.cleanupStartedAt
+    || timestampMilliseconds(state.share.expiresAt) <= Date.now()
+    || state.share.policyVersion !== state.policy.policyVersion
+  ) {
+    throw new HttpError(409, "share_unavailable");
+  }
+}
+
+function contentUpdateReplayAttachmentIds(share) {
+  if (
+    !Array.isArray(share?.lastContentMutationRetiredAttachmentIds)
+    || share.lastContentMutationRetiredAttachmentIds.length > 100
+  ) {
+    return [];
+  }
+  try {
+    return share.lastContentMutationRetiredAttachmentIds.map((attachmentId) =>
+      safeId(attachmentId, "attachmentId")
+    );
+  } catch {
+    return [];
+  }
+}
+
+function contentUpdateRetryAfterSeconds(share, nowMilliseconds = Date.now()) {
+  const contentUpdatedAt = timestampMilliseconds(share?.contentUpdatedAt);
+  if (
+    !Number.isFinite(contentUpdatedAt)
+    || contentUpdatedAt <= nowMilliseconds - ownerContentUpdateMinimumIntervalMilliseconds
+  ) {
+    return 0;
+  }
+  return Math.max(
+    1,
+    Math.ceil(
+      (
+        contentUpdatedAt
+        + ownerContentUpdateMinimumIntervalMilliseconds
+        - nowMilliseconds
+      ) / 1_000
+    )
+  );
+}
+
+function assertContentUpdateRate(share) {
+  const retryAfter = contentUpdateRetryAfterSeconds(share);
+  if (retryAfter > 0) {
+    throw new HttpError(
+      429,
+      "rate_limited",
+      "Secure share content updates are too frequent",
+      { retryAfter }
+    );
+  }
+}
+
+function assertContentUpdateDisposition(state, input, requestDigest) {
+  const disposition = contentUpdateDisposition(state.share, input, requestDigest);
+  if (disposition === "conflict") {
+    throw new HttpError(
+      409,
+      "request_conflict",
+      "Content update idempotency key was reused with another payload"
+    );
+  }
+  if (disposition === "stale") {
+    throw new HttpError(409, "content_revision_conflict", "Secure share content changed");
+  }
+  return disposition;
+}
+
+function sourceNoteMatchesContentUpdate(state, note, ownerProfile, input) {
+  const noteRevision = Number.isSafeInteger(note?.revision) ? note.revision : 0;
+  const noteAttachmentRevision = Number.isSafeInteger(note?.attachmentRevision)
+    ? note.attachmentRevision
+    : 0;
+  return sourceLifecycleAvailable(state.share, note, ownerProfile)
+    && noteRevision === input.sourceRevision
+    && noteAttachmentRevision === input.sourceAttachmentRevision
+    && input.sourceRevision >= input.expectedSourceRevision
+    && input.sourceAttachmentRevision >= input.expectedSourceAttachmentRevision;
+}
+
+async function contentUpdateAttachmentSnapshot(context, state, input, transaction) {
+  const currentGeneration = state.share.currentGeneration ?? "";
+  if (
+    input.sourceAttachmentRevision !== input.expectedSourceAttachmentRevision
+    && input.generation === currentGeneration
+  ) {
+    throw new HttpError(
+      409,
+      "attachment_generation_required",
+      "Attachment changes require a new generation"
+    );
+  }
+  if (
+    input.retainedAttachmentIds.length > 0
+    && (!currentGeneration || input.generation === currentGeneration)
+  ) {
+    throw new HttpError(
+      409,
+      "attachment_generation_required",
+      "Retained attachments require a new generation"
+    );
+  }
+  const retainedIdSet = new Set(input.retainedAttachmentIds);
+  const expectedCurrentAttachmentCount = Number.isSafeInteger(state.share.attachmentCount)
+    ? state.share.attachmentCount
+    : 0;
+  if (
+    expectedCurrentAttachmentCount < 0
+    || expectedCurrentAttachmentCount > 100
+  ) {
+    throw new HttpError(409, "attachment_state_changed");
+  }
+  const currentCandidates = await attachmentGenerationSnapshot(
+    context,
+    state.share.__id,
+    currentGeneration,
+    transaction,
+    expectedCurrentAttachmentCount
+  );
+  const current = currentCandidates.filter((attachment) =>
+    attachmentCurrent(attachment, state.share)
+  );
+  if (current.length !== expectedCurrentAttachmentCount) {
+    throw new HttpError(409, "attachment_state_changed");
+  }
+  const currentById = new Map(current.map((attachment) => [
+    safeId(attachment.__id, "attachmentId"),
+    attachment
+  ]));
+  const retained = input.retainedAttachmentIds.map((attachmentId) =>
+    currentById.get(attachmentId)
+  );
+  if (retained.some((attachment) => !attachment)) {
+    throw new HttpError(
+      409,
+      "attachment_state_changed",
+      "A retained attachment is not in the current generation"
+    );
+  }
+  const expectedUploadedAttachmentCount =
+    input.attachmentCount - retained.length;
+  const candidateCandidates = input.generation === currentGeneration
+    ? currentCandidates
+    : await attachmentGenerationSnapshot(
+        context,
+        state.share.__id,
+        input.generation,
+        transaction,
+        expectedUploadedAttachmentCount
+      );
+  if (candidateCandidates.length !== expectedUploadedAttachmentCount) {
+    throw new HttpError(409, "attachment_state_changed");
+  }
+  const candidateShare = {
+    ...state.share,
+    currentGeneration: input.generation,
+    attachmentCount: input.attachmentCount
+  };
+  const uploaded = candidateCandidates.filter((attachment) =>
+    !retainedIdSet.has(attachment.__id)
+    && attachmentCurrent(attachment, candidateShare)
+  );
+  const target = [...uploaded, ...retained];
+  if (target.length !== input.attachmentCount) {
+    throw new HttpError(409, "attachment_state_changed", "Ready attachment count mismatch");
+  }
+  uploaded.forEach((attachment) => validateAttachmentRecord(attachment, candidateShare));
+  retained.forEach((attachment) => {
+    validateAttachmentRecord(attachment, state.share);
+    validateAttachmentRecord({
+      ...attachment,
+      generations: retainedAttachmentGenerations(
+        currentGeneration,
+        input.generation
+      )
+    }, candidateShare);
+  });
+
+  const sourceAttachments = input.attachmentCount > 0
+    ? await firestoreRunQuery(
+        context,
+        {
+          from: [{ collectionId: "attachments" }],
+          limit: 101
+        },
+        `notes/${safeId(state.share.sourceNoteId, "sourceNoteId")}`,
+        transaction
+      )
+    : [];
+  if (sourceAttachments.length > 100) {
+    throw new HttpError(409, "attachment_state_changed", "Source attachment list is incomplete");
+  }
+  const readySourceAttachments = sourceAttachments.filter(
+    (attachment) => attachment.isReady !== false
+  );
+  const sourceById = new Map(readySourceAttachments.map((attachment) => [
+    safeId(attachment.__id, "sourceAttachmentId"),
+    attachment
+  ]));
+  const targetSourceIds = target.map((attachment) =>
+    safeId(attachment.sourceAttachmentId, "sourceAttachmentId")
+  );
+  if (
+    readySourceAttachments.length !== input.attachmentCount
+    || new Set(targetSourceIds).size !== targetSourceIds.length
+    || targetSourceIds.some((sourceAttachmentId) => !sourceById.has(sourceAttachmentId))
+  ) {
+    throw new HttpError(
+      409,
+      "attachment_state_changed",
+      "Target attachments do not match the source attachment manifest"
+    );
+  }
+  retained.forEach((attachment) => {
+    if (!sourceAttachmentFingerprintMatches(
+      attachment,
+      sourceById.get(attachment.sourceAttachmentId)
+    )) {
+      throw new HttpError(
+        409,
+        "attachment_source_changed",
+        "A retained attachment no longer matches its source ciphertext"
+      );
+    }
+  });
+
+  const retiredAttachments = input.generation === currentGeneration
+    ? []
+    : current
+      .filter((attachment) => !retainedIdSet.has(attachment.__id));
+  if (retiredAttachments.length > 100) {
+    throw new HttpError(409, "attachment_state_changed");
+  }
+  return {
+    uploadedAttachments: uploaded.map((attachment) => ({
+      attachmentId: safeId(attachment.__id, "attachmentId"),
+      updateTime: attachment.__updateTime
+    })),
+    retainedAttachments: retained.map((attachment) => ({
+      attachmentId: safeId(attachment.__id, "attachmentId"),
+      generations: retainedAttachmentGenerations(
+        currentGeneration,
+        input.generation
+      ),
+      updateTime: attachment.__updateTime
+    })),
+    retiredAttachments: retiredAttachments.map((attachment) => ({
+      attachmentId: safeId(attachment.__id, "attachmentId"),
+      updateTime: attachment.__updateTime
+    })),
+    retiredAttachmentIds: retiredAttachments.map((attachment) =>
+      safeId(attachment.__id, "attachmentId")
+    )
+  };
+}
+
+function verifyDocumentSnapshotWrite(projectId, documentPath, updateTime) {
+  if (typeof updateTime !== "string" || !updateTime) {
+    throw new TypeError("A verify precondition is required");
+  }
+  return {
+    verify: firestoreDocumentName(projectId, documentPath),
+    currentDocument: { updateTime }
+  };
+}
+
+async function beginContentUpdateTransaction(context, state) {
+  const sourceNoteId = safeId(state.share.sourceNoteId, "sourceNoteId");
+  const ownerUid = safeId(state.share.ownerUid, "ownerUid");
+  const { documents, transaction } = await firestoreBatchGetNewTransaction(
+    context,
+    [
+      `publicNoteShares/${state.share.__id}`,
+      `publicSharePolicies/${state.share.__id}`,
+      `notes/${sourceNoteId}`,
+      `users/${ownerUid}`
+    ]
+  );
+  const [share, policy, note, ownerProfile] = documents;
+  const transactionState = share
+    && policy
+    && share.schemaVersion === 2
+    && policy.schemaVersion === 2
+      ? { share, policy }
+      : null;
+  return { state: transactionState, note, ownerProfile, transaction };
+}
+
+async function handleOwnerContentUpdate(request, response, id, shareId) {
+  requireMethod(request, ["PATCH"]);
+  ensureSameOrigin(request);
+  const body = await readJsonBody(request);
+  const input = validateContentUpdateBody(body);
+  const requestDigest = contentUpdateRequestDigest(input);
+  const user = await ownerContext(request);
+
+  // Do not add a distributed rate-limit write to this autosave path. The
+  // committed share contentUpdatedAt provides a transaction-checked 500 ms
+  // minimum interval after replay detection, while owner authentication,
+  // same-origin/App Check, bounded payloads, CAS, and idempotency provide the
+  // remaining boundary without another free-tier write per save.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const initialState = await loadShareState(user.context, shareId);
+    requireOwner(initialState, user);
+    assertOwnerContentMutable(initialState);
+    const initialDisposition = assertContentUpdateDisposition(
+      initialState,
+      input,
+      requestDigest
+    );
+    if (initialDisposition === "replay") {
+      jsonResponse(response, 200, {
+        ok: true,
+        share: shareSummary(initialState.share),
+        retiredAttachmentIds: contentUpdateReplayAttachmentIds(initialState.share),
+        requestId: id
+      });
+      return;
+    }
+    assertContentUpdateRate(initialState.share);
+
+    const transactionSnapshot = await beginContentUpdateTransaction(
+      user.context,
+      initialState
+    );
+    try {
+      const state = transactionSnapshot.state;
+      requireOwner(state, user);
+      assertOwnerContentMutable(state);
+      if (
+        state.share.sourceNoteId !== initialState.share.sourceNoteId
+        || state.share.ownerUid !== initialState.share.ownerUid
+      ) {
+        throw new HttpError(409, "request_conflict", "Secure share source changed");
+      }
+      const disposition = assertContentUpdateDisposition(state, input, requestDigest);
+      if (disposition === "replay") {
+        await rollbackShareMutation(user.context, transactionSnapshot.transaction);
+        jsonResponse(response, 200, {
+          ok: true,
+          share: shareSummary(state.share),
+          retiredAttachmentIds: contentUpdateReplayAttachmentIds(state.share),
+          requestId: id
+        });
+        return;
+      }
+      assertContentUpdateRate(state.share);
+      if (!sourceNoteMatchesContentUpdate(
+        state,
+        transactionSnapshot.note,
+        transactionSnapshot.ownerProfile,
+        input
+      )) {
+        throw new HttpError(
+          409,
+          "source_revision_conflict",
+          "Source note changed before secure share content update"
+        );
+      }
+      const attachmentSnapshot = await contentUpdateAttachmentSnapshot(
+        user.context,
+        state,
+        input,
+        transactionSnapshot.transaction
+      );
+      const now = new Date();
+      const fields = {
+        encryptedTitle: input.encryptedTitle,
+        encryptedBody: input.encryptedBody,
+        attachmentCount: input.attachmentCount,
+        currentGeneration: input.generation,
+        sourceRevision: input.sourceRevision,
+        sourceAttachmentRevision: input.sourceAttachmentRevision,
+        contentRevision: boundedInteger(
+          contentRevisionValue(state.share) + 1,
+          "contentRevision",
+          2,
+          1_000_000_000
+        ),
+        contentUpdatedAt: now,
+        updatedAt: now,
+        lastContentMutationId: input.idempotencyKey,
+        lastContentMutationDigest: requestDigest,
+        lastContentMutationRetiredAttachmentIds: attachmentSnapshot.retiredAttachmentIds
+      };
+      await firestoreCommit(
+        user.context,
+        [
+          updateDocumentWrite(
+            user.context.projectId,
+            `publicNoteShares/${shareId}`,
+            fields,
+            Object.keys(fields),
+            state.share.__updateTime
+          ),
+          ...attachmentSnapshot.uploadedAttachments.map((attachment) =>
+            verifyDocumentSnapshotWrite(
+              user.context.projectId,
+              `publicNoteShares/${shareId}/attachments/${attachment.attachmentId}`,
+              attachment.updateTime
+            )
+          ),
+          ...attachmentSnapshot.retainedAttachments.map((attachment) =>
+            updateDocumentWrite(
+              user.context.projectId,
+              `publicNoteShares/${shareId}/attachments/${attachment.attachmentId}`,
+              { generations: attachment.generations },
+              ["generations"],
+              attachment.updateTime
+            )
+          ),
+          ...attachmentSnapshot.retiredAttachments.map((attachment) =>
+            updateDocumentWrite(
+              user.context.projectId,
+              `publicNoteShares/${shareId}/attachments/${attachment.attachmentId}`,
+              {
+                deletionStarted: true,
+                deletionStartedAt: now
+              },
+              ["deletionStarted", "deletionStartedAt"],
+              attachment.updateTime
+            )
+          ),
+          createAuditWrite(user.context, state.share, "owner_content_update", "success", {
+            requestId: id,
+            identityType: "quickmemo_user",
+            identityHash: identityDigest("uid", user.uid)
+          })
+        ],
+        transactionSnapshot.transaction
+      );
+      jsonResponse(response, 200, {
+        ok: true,
+        share: shareSummary({ ...state.share, ...fields, __id: shareId }),
+        retiredAttachmentIds: attachmentSnapshot.retiredAttachmentIds,
+        requestId: id
+      });
+      return;
+    } catch (error) {
+      await rollbackShareMutation(user.context, transactionSnapshot.transaction);
+      if (!isOptimisticConflict(error) || attempt === 2) {
+        throw error;
+      }
+      await waitBeforeOptimisticRetry(attempt);
+    }
+  }
+}
+
 async function handleOwnerActivate(request, response, id, shareId) {
   requireMethod(request, ["POST"]);
   ensureSameOrigin(request);
@@ -2037,6 +2768,41 @@ async function handleOwnerRevoke(request, response, id, shareId) {
       }
       jsonResponse(response, 200, { ok: true, share: shareSummary(state.share), requestId: id });
       return;
+    }
+    if (
+      secureShareLiveContentSyncEnabled()
+      && legacyAutomaticSourceRevokePattern.test(idempotencyKey)
+    ) {
+      const ownerIsCaller = user.uid === state.share.ownerUid;
+      const [sourceNote, ownerProfile] = await Promise.all([
+        firestoreGet(
+          user.context,
+          `notes/${safeId(state.share.sourceNoteId, "sourceNoteId")}`
+        ),
+        ownerIsCaller
+          ? Promise.resolve({
+              isActive: true,
+              isAdmin: user.isAdmin === true,
+              featureAccess: { notes: true }
+            })
+          : firestoreGet(
+              user.context,
+              `users/${safeId(state.share.ownerUid, "ownerUid")}`
+            )
+      ]);
+      if (legacyAutomaticSourceRevokeBlocked(
+        idempotencyKey,
+        state.share,
+        sourceNote,
+        ownerProfile,
+        true
+      )) {
+        throw new HttpError(
+          409,
+          "content_sync_required",
+          "Legacy automatic source-change revoke rejected"
+        );
+      }
     }
     const now = new Date();
     const policyVersion = state.policy.policyVersion + 1;
@@ -2162,7 +2928,8 @@ async function handleMetadata(request, response, id, shareId) {
       requiresAuthentication: state.policy.accessMode === "authenticated_users",
       oneTimeEnabled: state.policy.oneTimeEnabled === true,
       oneTimeScope: "global",
-      ownerPreview
+      ownerPreview,
+      hasSessionCandidate: Boolean(sessionTokenFromRequest(request, shareId))
     },
     requestId: id
   }, { setCookies, head: request.method === "HEAD" });
@@ -4289,9 +5056,6 @@ async function handleAccess(request, response, id, shareId) {
   assertPublicShareAvailable(state);
   assertEmailPolicyAvailable(state.policy);
   await requireSourceAvailable(context, state.share);
-  if (state.policy.oneTimeEnabled === true && body.oneTimeOpenConfirmed !== true) {
-    throw new HttpError(400, "one_time_confirmation_required");
-  }
   const networkHash = networkIdentity.digest;
   const accessLimits = [
     {
@@ -4443,28 +5207,7 @@ async function handleAccess(request, response, id, shareId) {
 }
 
 async function validatedSession(request, context, shareId) {
-  const token = sessionTokenFromRequest(request, shareId);
-  if (!token) {
-    throw new HttpError(401, "session_required");
-  }
-  const digest = sessionTokenDigest(token);
-  const session = await firestoreGet(context, `publicShareAccessSessions/${digest}`);
-  if (
-    !session
-    || session.shareId !== shareId
-    || session.revokedAt
-    || timestampMilliseconds(session.expiresAt) <= Date.now()
-  ) {
-    throw new HttpError(401, "session_expired");
-  }
-  const binding = browserBindingFromRequest(request, shareId);
-  if (
-    !binding
-    || typeof session.browserBindingHash !== "string"
-    || !constantTimeStringEqual(identityDigest("browser-binding", binding), session.browserBindingHash)
-  ) {
-    throw new HttpError(401, "session_expired");
-  }
+  const session = await validatedBoundSession(request, context, shareId);
   const state = await loadShareState(context, shareId);
   if (session.ownerPreview === true) {
     const owner = await activeUserFromRequest(request, context);
@@ -4492,8 +5235,84 @@ async function validatedSession(request, context, shareId) {
     assertEmailPolicyAvailable(state.policy);
   }
   await requireSourceAvailable(context, state.share);
-  session.__sessionDigest = digest;
   return { session, state };
+}
+
+async function validatedBoundSession(request, context, shareId) {
+  const token = sessionTokenFromRequest(request, shareId);
+  if (!token) {
+    throw new HttpError(401, "session_required");
+  }
+  const digest = sessionTokenDigest(token);
+  const session = await firestoreGet(context, `publicShareAccessSessions/${digest}`);
+  if (
+    !session
+    || session.shareId !== shareId
+    || session.revokedAt
+    || timestampMilliseconds(session.expiresAt) <= Date.now()
+  ) {
+    throw new HttpError(401, "session_expired");
+  }
+  const binding = browserBindingFromRequest(request, shareId);
+  if (
+    !binding
+    || typeof session.browserBindingHash !== "string"
+    || !constantTimeStringEqual(identityDigest("browser-binding", binding), session.browserBindingHash)
+  ) {
+    throw new HttpError(401, "session_expired");
+  }
+  session.__sessionDigest = digest;
+  return session;
+}
+
+async function validatedRevisionSession(request, context, shareId) {
+  const session = await validatedBoundSession(request, context, shareId);
+  const share = await firestoreGet(context, `publicNoteShares/${shareId}`);
+  let validatedOwner = null;
+  if (session.ownerPreview === true) {
+    const owner = await activeUserFromRequest(request, context);
+    requireShareManager(share ? { share } : null, owner);
+    if (owner.uid === share?.ownerUid) {
+      validatedOwner = owner;
+    }
+    if (
+      !share
+      || share.schemaVersion !== 2
+      || share.revokedAt
+      || share.status === "revoked"
+      || timestampMilliseconds(share.expiresAt) <= Date.now()
+      || session.policyVersion !== share.policyVersion
+    ) {
+      throw new HttpError(401, "session_expired");
+    }
+  } else {
+    if (
+      !share
+      || share.schemaVersion !== 2
+      || share.ready !== true
+      || !new Set(["active", "consumed"]).has(share.status)
+      || share.revokedAt
+      || timestampMilliseconds(share.expiresAt) <= Date.now()
+      || session.policyVersion !== share.policyVersion
+      || (
+        share.status === "consumed"
+        && (share.oneTimeEnabled !== true || session.oneTimeGrant !== true)
+      )
+    ) {
+      throw new HttpError(401, "session_expired");
+    }
+    assertEmailPolicyAvailable({
+      accessMode: share.accessModePublicHint,
+      emailVerificationRequired: share.requiresEmailVerification === true
+    });
+  }
+  // The high-frequency revision path intentionally avoids a policy-document
+  // read. Every authorization-affecting policy mutation mirrors policyVersion
+  // and public gate hints onto the share in the same atomic commit. The
+  // session, share, source note, and source-owner lifecycle checks remain
+  // mandatory; an already validated owner profile is reused when possible.
+  await requireSourceAvailable(context, share, validatedOwner);
+  return { session, share };
 }
 
 async function handleSession(request, response, id, shareId) {
@@ -4538,12 +5357,12 @@ async function handleSession(request, response, id, shareId) {
   });
 }
 
-function safeAttachmentMetadata(attachment) {
+function safeAttachmentMetadata(attachment, currentGeneration) {
   return {
     id: attachment.__id,
     version: attachment.version,
     algorithm: attachment.algorithm,
-    generation: attachment.generation ?? "",
+    generation: currentGeneration,
     encryptedFileName: attachment.encryptedFileName,
     extension: attachment.extension,
     mimeType: attachment.mimeType,
@@ -4563,42 +5382,150 @@ function safeAttachmentMetadata(attachment) {
 function attachmentCurrent(attachment, share) {
   return attachment?.isReady === true
     && attachment.privacyVersion === 1
-    && (
-      share.currentGeneration
-        ? attachment.generation === share.currentGeneration
-        : !attachment.generation
+    && attachmentGenerationIncludes(attachment, share.currentGeneration ?? "");
+}
+
+async function attachmentGenerationSnapshot(
+  context,
+  shareId,
+  generation,
+  transaction = "",
+  maximumCount = 100
+) {
+  if (
+    !Number.isSafeInteger(maximumCount)
+    || maximumCount < 0
+    || maximumCount > 100
+  ) {
+    throw new TypeError("Invalid attachment generation read bound");
+  }
+  if (!generation) {
+    return [];
+  }
+  const safeShareId = safeId(shareId, "shareId");
+  const safeGeneration = safeId(generation, "generation");
+  const parentPath = `publicNoteShares/${safeShareId}`;
+  const generationQuery = (fieldPath, op) => ({
+    from: [{ collectionId: "attachments" }],
+    where: {
+      fieldFilter: {
+        field: { fieldPath },
+        op,
+        value: firestoreStringValue(safeGeneration)
+      }
+    },
+    limit: maximumCount + 1
+  });
+  const [direct, membership] = await Promise.all([
+    firestoreRunQuery(
+      context,
+      generationQuery("generation", "EQUAL"),
+      parentPath,
+      transaction
+    ),
+    firestoreRunQuery(
+      context,
+      generationQuery("generations", "ARRAY_CONTAINS"),
+      parentPath,
+      transaction
+    )
+  ]);
+  if (direct.length > maximumCount || membership.length > maximumCount) {
+    throw new HttpError(
+      409,
+      "attachment_state_changed",
+      "Current attachment generation exceeded its complete-read bound"
     );
+  }
+  const attachmentsById = new Map();
+  [...direct, ...membership].forEach((attachment) => {
+    const attachmentId = safeId(attachment.__id, "attachmentId");
+    const existing = attachmentsById.get(attachmentId);
+    if (
+      typeof attachment.__updateTime !== "string"
+      || !attachment.__updateTime
+      || !attachmentGenerationIncludes(attachment, safeGeneration)
+      || attachment.isReady !== true
+      || attachment.privacyVersion !== 1
+      || (
+        existing
+        && (
+          existing.__name !== attachment.__name
+          || existing.__updateTime !== attachment.__updateTime
+        )
+      )
+    ) {
+      throw new HttpError(409, "attachment_state_changed");
+    }
+    attachmentsById.set(attachmentId, attachment);
+  });
+  if (attachmentsById.size > maximumCount) {
+    throw new HttpError(409, "attachment_state_changed");
+  }
+  return [...attachmentsById.values()];
 }
 
 async function currentAttachments(context, share) {
-  const attachments = await firestoreListCollection(
+  const expectedAttachmentCount = Number.isSafeInteger(share.attachmentCount)
+    ? share.attachmentCount
+    : 0;
+  if (expectedAttachmentCount < 0 || expectedAttachmentCount > 100) {
+    throw new HttpError(409, "attachment_state_changed");
+  }
+  const attachments = await attachmentGenerationSnapshot(
     context,
-    `publicNoteShares/${share.__id}`,
-    "attachments",
-    150
+    share.__id,
+    share.currentGeneration ?? "",
+    "",
+    expectedAttachmentCount
   );
   const current = attachments.filter((attachment) => attachmentCurrent(attachment, share));
   if (
     current.length > 100
-    || current.length !== (Number.isSafeInteger(share.attachmentCount) ? share.attachmentCount : 0)
+    || current.length !== expectedAttachmentCount
   ) {
     throw new HttpError(409, "attachment_state_changed");
   }
   return current;
 }
 
+async function handleRevision(request, response, id, shareId) {
+  requireMethod(request, ["GET"]);
+  ensureRevisionReadRequest(request);
+  const context = await secureContext(request);
+  const { share } = await validatedRevisionSession(request, context, shareId);
+  const etag = secureShareRevisionEtag(share);
+  response.setHeader("etag", etag);
+  if (etagMatches(headerValue(request, "if-none-match"), etag)) {
+    response.statusCode = 304;
+    response.end();
+    return;
+  }
+  jsonResponse(response, 200, {
+    ok: true,
+    contentRevision: contentRevisionValue(share),
+    policyVersion: share.policyVersion,
+    requestId: id
+  });
+}
+
 async function handleContent(request, response, id, shareId) {
   requireMethod(request, ["GET"]);
   const context = await secureContext(request);
   const { state } = await validatedSession(request, context, shareId);
+  response.setHeader("etag", secureShareRevisionEtag(state.share));
   const attachments = await currentAttachments(context, state.share);
   attachments.forEach((attachment) => validateAttachmentRecord(attachment, state.share));
   jsonResponse(response, 200, {
     ok: true,
     schemaVersion: 2,
+    contentRevision: contentRevisionValue(state.share),
+    policyVersion: state.policy.policyVersion,
     encryptedTitle: state.share.encryptedTitle,
     encryptedBody: state.share.encryptedBody,
-    attachments: attachments.map((attachment) => safeAttachmentMetadata(attachment)),
+    attachments: attachments.map((attachment) =>
+      safeAttachmentMetadata(attachment, state.share.currentGeneration ?? "")
+    ),
     requestId: id
   });
 }
@@ -6653,8 +7580,21 @@ async function dispatch(request, response, id) {
     });
     return;
   }
+  if (action === "live-sync-status") {
+    assertQueryKeys(url, ["action"]);
+    requireMethod(request, ["GET"]);
+    jsonResponse(response, 200, {
+      enabled:
+        secureShareV2Enabled()
+        && secureShareLiveContentSyncEnabled()
+    });
+    return;
+  }
 
   requireSecureShareV2();
+  if (action === "owner-content-update" || action === "revision") {
+    requireSecureShareLiveContentSync();
+  }
   if (action === "owner-list") {
     assertQueryKeys(url, ["action", "cursor", "limit", "sourceNoteId", "status"]);
   } else if (action === "comments" && request.method === "GET") {
@@ -6676,6 +7616,8 @@ async function dispatch(request, response, id) {
     await handleOwnerCreate(request, response, id);
   } else if (action === "owner-update") {
     await handleOwnerUpdate(request, response, id, shareId);
+  } else if (action === "owner-content-update") {
+    await handleOwnerContentUpdate(request, response, id, shareId);
   } else if (action === "owner-activate") {
     await handleOwnerActivate(request, response, id, shareId);
   } else if (action === "owner-revoke") {
@@ -6688,6 +7630,8 @@ async function dispatch(request, response, id) {
     await handleAccess(request, response, id, shareId);
   } else if (action === "session") {
     await handleSession(request, response, id, shareId);
+  } else if (action === "revision") {
+    await handleRevision(request, response, id, shareId);
   } else if (action === "content") {
     await handleContent(request, response, id, shareId);
   } else if (action === "participant-me") {
@@ -6722,12 +7666,17 @@ export {
   copyGrantRequestDisposition,
   copyGrantRequestKeyHash,
   copyGrantTokenHash,
+  contentUpdateDisposition,
+  contentUpdateRetryAfterSeconds,
+  contentUpdateRequestDigest,
   consumeRateLimits,
   createResendEmailAdapter,
   emailQuotaExceeded,
   emailQuotaPeriods,
   emailDigest,
   emailChallengeMinimumResponseMilliseconds,
+  etagMatches,
+  ensureRevisionReadRequest,
   ensureSameOrigin,
   evaluateCopyAttachmentQuota,
   hashSharePassword,
@@ -6738,12 +7687,14 @@ export {
   withParticipantAllocationQueue,
   normalizeAllowedEmails,
   normalizeEmail,
+  ownerAttachmentReuseManifest,
   otpCodeDigest,
   otpVerificationFailureMinimumResponseMilliseconds,
   padEmailChallengeResponse,
   padOtpVerificationFailureResponse,
   readJsonBody,
   resolveEmailQuotaPolicy,
+  resolveSecureShareLiveContentSyncServerFlag,
   resolveAccessIdentity,
   safeDisplayName,
   safeIpPrefixSnapshot,
@@ -6751,20 +7702,28 @@ export {
   secureShareScryptParameters,
   secureShareAttachmentBlobPath,
   secureShareEmailReadiness,
+  secureShareLiveContentSyncEnabled,
+  secureShareLiveContentSyncServerProductionDefault,
   sessionTokenDigest,
   shareOwnedBy,
   shareManagedBy,
   signedOpaqueToken,
   sourceShareGuardId,
+  sourceLifecycleAvailable,
+  sourceReadAvailable,
+  sourceRevisionMatches,
   sourceSnapshotAvailable,
+  secureShareRevisionEtag,
   participantIdentityHash,
   issueAnonymousParticipantToken,
+  legacyAutomaticSourceRevokeBlocked,
   participantNameRegistryId,
   participantRenameSnapshotMatches,
   renameParticipant,
   verifiedAnonymousParticipantToken,
   unlockAttemptDigest,
   validateCommentBody,
+  verifyDocumentSnapshotWrite,
   verificationEmailText,
   verifySignedOpaqueToken,
   verifySharePassword

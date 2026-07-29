@@ -30,6 +30,7 @@ import {
   type SaveUserPreferencesInput
 } from "../services/userPreferences";
 import type { DefaultHomeView, FeatureAccess, MatrixLabels, ThemePreference, UserPreferencesDocument } from "../types";
+import { AppSelect } from "./AppSelect";
 
 export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
   const { changePassword, profile, signOut } = useAuth();
@@ -336,14 +337,14 @@ export function SettingsModal({
             {availableDefaultHomes.length > 0 ? (
               <label>
                 작업 시작 기본 화면
-                <select
+                <AppSelect
                   onChange={(event) => setDefaultHome(event.target.value as DefaultHomeView)}
                   value={defaultHome ?? ""}
                 >
                   {featureAccess.notes && <option value="notes">노트</option>}
                   {featureAccess.library && <option value="library">자료실</option>}
                   {featureAccess.schedule && <option value="schedule">일정관리</option>}
-                </select>
+                </AppSelect>
               </label>
             ) : (
               <p className="settings-access-note" role="status">
@@ -353,7 +354,7 @@ export function SettingsModal({
             {featureAccess.schedule && (
               <label>
                 일정관리 기본 화면
-                <select
+                <AppSelect
                   onChange={(event) => setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"])}
                   value={scheduleDefaultView}
                 >
@@ -361,7 +362,7 @@ export function SettingsModal({
                   <option value="calendar">달력</option>
                   <option value="matrix">매트릭스</option>
                   <option value="recurring">반복 업무</option>
-                </select>
+                </AppSelect>
               </label>
             )}
           </section>

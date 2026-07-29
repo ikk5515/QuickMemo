@@ -3,6 +3,8 @@ import { safeRasterDataUrl } from "./safeRasterImage";
 const fontSizePattern = /^<!--qm-font-size:(\d+)-->/;
 const htmlTagPattern =
   /<(a|p|div|br|strong|b|em|i|u|s|del|strike|span|img|figure|h[1-6]|hr|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
+const readonlyHtmlTagPattern =
+  /<(a|p|div|strong|b|em|i|u|s|del|strike|span|img|figure|h[1-6]|hr|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
 const linkableUrlPattern = /\b(?:https?:\/\/|www\.)[^\s<>"']+/gi;
 const trailingUrlPunctuationPattern = /[.,!?;:]+$/;
 const imageWidthOptions = new Set([25, 50, 75, 100]);
@@ -69,6 +71,14 @@ export interface ParsedEditorContent {
   fontSize: number;
 }
 
+export type ReadonlyEditorContentFormat = "html" | "plain-text";
+
+export interface ParsedReadonlyEditorContent {
+  content: string;
+  contentFormat: ReadonlyEditorContentFormat;
+  fontSize: number;
+}
+
 export function parseEditorContent(storedValue: string, fallbackFontSize = 17): ParsedEditorContent {
   const fontSizeMatch = storedValue.match(fontSizePattern);
   const fontSize = clampFontSize(fontSizeMatch ? Number(fontSizeMatch[1]) : fallbackFontSize);
@@ -76,6 +86,30 @@ export function parseEditorContent(storedValue: string, fallbackFontSize = 17): 
 
   return {
     html: body.trim() ? normalizeEditorHtml(body) : "",
+    fontSize
+  };
+}
+
+export function parseReadonlyEditorContent(
+  storedValue: string,
+  fallbackFontSize = 17
+): ParsedReadonlyEditorContent {
+  const fontSizeMatch = storedValue.match(fontSizePattern);
+  const fontSize = clampFontSize(fontSizeMatch ? Number(fontSizeMatch[1]) : fallbackFontSize);
+  const body = fontSizeMatch ? storedValue.replace(fontSizePattern, "") : storedValue;
+
+  if (!body) {
+    return { content: "", contentFormat: "html", fontSize };
+  }
+
+  const contentFormat: ReadonlyEditorContentFormat =
+    fontSizeMatch || readonlyHtmlTagPattern.test(body) ? "html" : "plain-text";
+
+  return {
+    content: contentFormat === "html"
+      ? sanitizeEditorHtml(body)
+      : normalizePlainTextLineEndings(body),
+    contentFormat,
     fontSize
   };
 }
@@ -93,13 +127,14 @@ export function normalizeEditorHtml(value: string) {
 }
 
 export function plainTextToEditorHtml(value: string) {
-  return value
-    .split(/\n{2,}/)
-    .map((paragraph) => {
-      const lines = paragraph.split(/\n/).map(escapeHtml).join("<br>");
-      return `<p>${lines || "<br>"}</p>`;
-    })
+  return normalizePlainTextLineEndings(value)
+    .split("\n")
+    .map((line) => `<p>${escapeHtml(line) || "<br>"}</p>`)
     .join("");
+}
+
+export function normalizePlainTextLineEndings(value: string) {
+  return value.replace(/\r\n?/g, "\n");
 }
 
 export function previewTextFromHtml(value: string) {
@@ -112,6 +147,16 @@ export function previewTextFromHtml(value: string) {
   const container = document.createElement("div");
   container.innerHTML = sanitizeEditorHtml(html);
   return (container.textContent ?? "").replace(/\s+/g, " ").trim();
+}
+
+export function copyTextFromEditorHtml(value: string) {
+  if (typeof document === "undefined") {
+    return "";
+  }
+
+  const template = document.createElement("template");
+  template.innerHTML = sanitizeEditorHtml(value);
+  return normalizePlainTextLineEndings(semanticTextFromChildren(template.content));
 }
 
 export function sanitizeEditorHtml(html: string) {
@@ -234,6 +279,103 @@ function sanitizeNode(node: Node): Node | null {
   });
 
   return element;
+}
+
+const semanticBlockTags = new Set([
+  "BLOCKQUOTE",
+  "DIV",
+  "FIGURE",
+  "H1",
+  "H2",
+  "H3",
+  "H4",
+  "H5",
+  "H6",
+  "HR",
+  "LI",
+  "OL",
+  "P",
+  "PRE",
+  "TABLE",
+  "TBODY",
+  "TD",
+  "TH",
+  "THEAD",
+  "TR",
+  "UL"
+]);
+
+function semanticTextFromNode(node: Node): string {
+  if (node.nodeType === Node.TEXT_NODE) {
+    return node.textContent ?? "";
+  }
+
+  if (!(node instanceof HTMLElement)) {
+    return "";
+  }
+
+  if (node.tagName === "BR") {
+    return "\n";
+  }
+
+  if (node.tagName === "INPUT" || node.tagName === "IMG" || node.tagName === "HR") {
+    return "";
+  }
+
+  if (node.tagName === "TR") {
+    return Array.from(node.children)
+      .filter((child) => child.tagName === "TD" || child.tagName === "TH")
+      .map((child) => semanticTextFromChildren(child))
+      .join("\t");
+  }
+
+  if (node.tagName === "TABLE" || node.tagName === "TBODY" || node.tagName === "THEAD") {
+    const rows = Array.from(node.querySelectorAll(":scope > tr, :scope > thead > tr, :scope > tbody > tr"));
+    return rows.map((row) => semanticTextFromNode(row)).join("\n");
+  }
+
+  if (node.tagName === "UL" || node.tagName === "OL") {
+    return Array.from(node.children)
+      .filter((child) => child.tagName === "LI")
+      .map((child) => semanticTextFromNode(child))
+      .join("\n");
+  }
+
+  return semanticTextFromChildren(node);
+}
+
+function semanticTextFromChildren(parent: ParentNode) {
+  const children = Array.from(parent.childNodes);
+  const hasBlockChild = children.some(
+    (child) => child instanceof HTMLElement && semanticBlockTags.has(child.tagName)
+  );
+
+  if (!hasBlockChild) {
+    return children.map(semanticTextFromNode).join("");
+  }
+
+  const segments: string[] = [];
+  let inlineText = "";
+
+  const flushInlineText = () => {
+    if (inlineText && (!segments.length || inlineText.trim())) {
+      segments.push(inlineText);
+    }
+    inlineText = "";
+  };
+
+  children.forEach((child) => {
+    if (child instanceof HTMLElement && semanticBlockTags.has(child.tagName)) {
+      flushInlineText();
+      segments.push(semanticTextFromNode(child));
+      return;
+    }
+
+    inlineText += semanticTextFromNode(child);
+  });
+  flushInlineText();
+
+  return segments.join("\n");
 }
 
 function sanitizeCheckbox(node: HTMLElement): Node | null {

@@ -2,7 +2,6 @@ import { AlertTriangle, Download, Eye, File, Loader2, LockKeyhole } from "lucide
 import {
   lazy,
   Suspense,
-  type CSSProperties,
   type FormEvent,
   useCallback,
   useEffect,
@@ -12,6 +11,7 @@ import {
   useState
 } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { useAuth } from "../context/AuthContext";
 import {
   attachmentDownloadName,
@@ -32,7 +32,10 @@ import {
   importAesKeyBase64Url,
   verifyPublicSharePassword
 } from "../lib/crypto";
-import { linkifyEditorHtml, parseEditorContent, sanitizeEditorHtml } from "../lib/editorContent";
+import {
+  parseReadonlyEditorContent,
+  type ReadonlyEditorContentFormat
+} from "../lib/editorContent";
 import { safeRasterImageBytes } from "../lib/safeRasterImage";
 import { resolveSecureShareFeatureFlags } from "../lib/secureSharePolicy";
 import {
@@ -58,7 +61,10 @@ import {
   type PublicNoteShareAttachmentSnapshot,
   type PublicNoteShareSnapshot
 } from "../services/publicShares";
-import { getSecureShareFeatureStatus } from "../services/secureShares";
+import {
+  getSecureShareFeatureStatus,
+  getSecureShareLiveSyncStatus
+} from "../services/secureShares";
 import type { SecurePublicShareCopyPayload } from "../components/SecurePublicShareViewer";
 interface PublicShareAttachmentView {
   id: string;
@@ -79,6 +85,7 @@ const secureShareV2IdentifierPattern = /^ss2_[A-Za-z0-9_-]{2,124}$/u;
 
 interface PublicShareContent {
   attachments: PublicShareAttachmentView[];
+  bodyFormat: ReadonlyEditorContentFormat;
   bodyHtml: string;
   fontSize: number;
   title: string;
@@ -103,6 +110,7 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
     [location.hash]
   );
   const [featureGateState, setFeatureGateState] = useState<SecureShareFeatureGateState>("checking");
+  const [liveContentSyncEnabled, setLiveContentSyncEnabled] = useState(false);
   const [idTokenState, setIdTokenState] = useState<{ token: string; uid: string } | null>(null);
   const [tokenError, setTokenError] = useState("");
   const [copyProgress, setCopyProgress] = useState<SecureShareSaveCopyProgress | null>(null);
@@ -156,25 +164,35 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
     const clientFlags = resolveSecureShareFeatureFlags();
 
     if (!clientFlags.clientV2Enabled) {
+      setLiveContentSyncEnabled(false);
       setFeatureGateState("unavailable");
       return undefined;
     }
 
     const controller = new AbortController();
+    setLiveContentSyncEnabled(false);
     setFeatureGateState("checking");
 
-    void getSecureShareFeatureStatus(controller.signal)
-      .then((serverStatus) => {
+    void Promise.all([
+      getSecureShareFeatureStatus(controller.signal),
+      getSecureShareLiveSyncStatus(controller.signal)
+        .catch(() => ({ enabled: false }))
+    ])
+      .then(([serverStatus, liveSyncStatus]) => {
         if (!controller.signal.aborted) {
+          const flags = resolveSecureShareFeatureFlags({
+            ...serverStatus,
+            liveContentSyncEnabled: liveSyncStatus.enabled
+          });
+          setLiveContentSyncEnabled(flags.liveContentSyncEnabled);
           setFeatureGateState(
-            resolveSecureShareFeatureFlags(serverStatus).v2Enabled
-              ? "enabled"
-              : "unavailable"
+            flags.v2Enabled ? "enabled" : "unavailable"
           );
         }
       })
       .catch(() => {
         if (!controller.signal.aborted) {
+          setLiveContentSyncEnabled(false);
           setFeatureGateState("unavailable");
         }
       });
@@ -442,6 +460,7 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
           contentKey={parsedFragment.contentKey}
           idToken={idToken}
           isAuthenticated={Boolean(authenticatedProfile && idToken)}
+          liveContentSyncEnabled={liveContentSyncEnabled}
           onRequireLogin={requireLogin}
           onSaveCopy={saveCopy}
           shareId={shareId}
@@ -495,6 +514,7 @@ function secureShareCopyProgressLabel(progress: SecureShareSaveCopyProgress) {
 function LegacyPublicSharePage() {
   const { shareId } = useParams();
   const [title, setTitle] = useState("");
+  const [bodyFormat, setBodyFormat] = useState<ReadonlyEditorContentFormat>("html");
   const [bodyHtml, setBodyHtml] = useState("");
   const [fontSize, setFontSize] = useState(17);
   const [attachments, setAttachments] = useState<PublicShareAttachmentView[]>([]);
@@ -534,6 +554,7 @@ function LegacyPublicSharePage() {
     revokeAttachmentUrls();
     revokeDownloadUrls();
     setTitle(content.title);
+    setBodyFormat(content.bodyFormat);
     setBodyHtml(content.bodyHtml);
     setFontSize(content.fontSize);
     setAttachments(content.attachments);
@@ -547,6 +568,7 @@ function LegacyPublicSharePage() {
     revokeAttachmentUrls();
     revokeDownloadUrls();
     setTitle("");
+    setBodyFormat("html");
     setBodyHtml("");
     setAttachments([]);
     setAttachmentPreview(null);
@@ -1071,10 +1093,12 @@ function LegacyPublicSharePage() {
             <header className="public-share-header">
               <h1>{title}</h1>
             </header>
-            <article
+            <ReadonlyNoteRenderer
+              as="article"
               className="note-preview-body public-share-body"
-              style={{ "--editor-font-size": `${fontSize}px` } as CSSProperties}
-              dangerouslySetInnerHTML={{ __html: bodyHtml }}
+              content={bodyHtml}
+              contentFormat={bodyFormat}
+              fontSize={fontSize}
             />
             {attachments.length > 0 && (
               <section className="public-share-attachments" aria-label="공유 첨부파일">
@@ -1186,7 +1210,7 @@ async function decryptPublicShareContent(shareId: string, share: PublicNoteShare
     decryptText(share.encryptedBody, shareKey),
     getPublicNoteShareAttachments(shareId, share.currentGeneration)
   ]);
-  const parsedBody = parseEditorContent(decryptedBody);
+  const readonlyBody = parseReadonlyEditorContent(decryptedBody);
   const attachments: PublicShareAttachmentView[] = [];
 
   for (const attachment of encryptedAttachments) {
@@ -1199,8 +1223,9 @@ async function decryptPublicShareContent(shareId: string, share: PublicNoteShare
 
   return {
     title: decryptedTitle || "제목 없음",
-    bodyHtml: linkifyEditorHtml(sanitizeEditorHtml(parsedBody.html || "<p>내용 없음</p>")),
-    fontSize: parsedBody.fontSize,
+    bodyFormat: readonlyBody.contentFormat,
+    bodyHtml: readonlyBody.content,
+    fontSize: readonlyBody.fontSize,
     attachments
   };
 }

@@ -60,6 +60,7 @@ import { createPortal } from "react-dom";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
 import { serverTimestamp } from "firebase/firestore";
 import { useLocation, useNavigate } from "react-router-dom";
+import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
 import {
   GoogleCalendarSyncDialog,
@@ -4976,7 +4977,7 @@ function ScheduleCreateForm({
         )}
         <label>
           <span>시간</span>
-          <select
+          <AppSelect
             onChange={(event) => {
               const nextMode = event.target.value as CreateTaskDraft["timeMode"];
               setDraft((current) => applyScheduleTimeMode(current, nextMode));
@@ -4986,7 +4987,7 @@ function ScheduleCreateForm({
             <option value="none">시간 없음</option>
             <option value="point">시각</option>
             <option value="range">시간 범위</option>
-          </select>
+          </AppSelect>
         </label>
         {draft.timeMode !== "none" && (
           <TimePickerField
@@ -6676,13 +6677,13 @@ function CompletedView({
         </label>
         <label className="completed-filter-control">
           <span>조회 기간</span>
-          <select onChange={(event) => onMonthsChange(event.target.value as CompletedMonthsFilter)} value={months}>
+          <AppSelect onChange={(event) => onMonthsChange(event.target.value as CompletedMonthsFilter)} value={months}>
             <option value="1">1개월</option>
             <option value="3">3개월</option>
             <option value="6">6개월</option>
             <option value="12">12개월</option>
             <option value="all">전체</option>
-          </select>
+          </AppSelect>
         </label>
         <DatePickerField
           className="completed-filter-control"
@@ -6692,7 +6693,7 @@ function CompletedView({
         />
         <label className="completed-filter-control">
           <span>중요/긴급</span>
-          <select
+          <AppSelect
             onChange={(event) => onPriorityFilterChange(event.target.value as CompletedPriorityFilter)}
             value={priorityFilter}
           >
@@ -6700,15 +6701,15 @@ function CompletedView({
             <option value="important">중요</option>
             <option value="urgent">긴급</option>
             <option value="importantUrgent">중요 + 긴급</option>
-          </select>
+          </AppSelect>
         </label>
         <label className="completed-filter-control">
           <span>내용 필터</span>
-          <select onChange={(event) => onContentFilterChange(event.target.value as CompletedContentFilter)} value={contentFilter}>
+          <AppSelect onChange={(event) => onContentFilterChange(event.target.value as CompletedContentFilter)} value={contentFilter}>
             <option value="all">전체</option>
             <option value="hasDescription">내용 있음</option>
             <option value="hasChecklist">체크리스트 있음</option>
-          </select>
+          </AppSelect>
         </label>
       </div>
       <PagedTaskList
@@ -7624,7 +7625,7 @@ function RecurringHabitModal({
           <div className="recurring-edit-grid">
             <label>
               구분
-              <select
+              <AppSelect
                 onChange={(event) => setDraft((current) => ({ ...current, slot: event.target.value as RecurringHabitSlot }))}
                 value={draft.slot}
               >
@@ -7633,7 +7634,7 @@ function RecurringHabitModal({
                     {slot.label}
                   </option>
                 ))}
-              </select>
+              </AppSelect>
             </label>
             <ScheduleColorPicker
               value={draft.color}
@@ -9140,7 +9141,7 @@ function TaskDetailModal({
           <div className="schedule-time-grid">
             <label>
               시간 방식
-              <select
+              <AppSelect
                 onChange={(event) => {
                   const nextMode = event.target.value as TaskDraft["timeMode"];
                   setDraft((current) => applyScheduleTimeMode(current, nextMode));
@@ -9150,7 +9151,7 @@ function TaskDetailModal({
                 <option value="none">시간 없음</option>
                 <option value="point">시각</option>
                 <option value="range">시간 범위</option>
-              </select>
+              </AppSelect>
             </label>
             {draft.timeMode !== "none" && (
               <TimePickerField

@@ -2325,7 +2325,7 @@ service cloud.firestore {
         && publicShareNotRevoked(data)
         && data.expiresAt > request.time
         && validPublicSharePassword(data)
-        && publicShareSourceActive(data);
+        && publicShareSourceAvailable(data);
     }
 
     function publicShareOwner(data) {

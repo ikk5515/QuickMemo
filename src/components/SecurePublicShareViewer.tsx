@@ -11,7 +11,6 @@ import {
   Pencil,
   Save,
   Send,
-  ShieldCheck,
   Trash2,
   X
 } from "lucide-react";
@@ -42,12 +41,20 @@ import {
 } from "../lib/attachmentCrypto";
 import { decryptText, importAesKeyBase64Url } from "../lib/crypto";
 import {
-  linkifyEditorHtml,
+  copyTextFromEditorHtml,
   parseEditorContent,
-  previewTextFromHtml,
-  sanitizeEditorHtml,
+  parseReadonlyEditorContent,
   serializeEditorContent
 } from "../lib/editorContent";
+import type { ReadonlyEditorContentFormat } from "../lib/editorContent";
+import {
+  isSecureShareDirectEntryEnabled,
+  isSecureShareLiveContentSyncEnabled
+} from "../lib/secureSharePolicy";
+import {
+  incrementSecureSharePollingUnchangedCount,
+  secureSharePollingDelayMs
+} from "../lib/secureSharePolling";
 import {
   decodeTextAttachmentPreview,
   legacyBinaryPreviewAttachmentExtensions,
@@ -67,6 +74,7 @@ import {
   getSecureShareContent,
   getSecureShareMetadata,
   getSecureShareParticipant,
+  getSecureShareRevision,
   listSecureShareComments,
   normalizeSecureShareParticipantDisplayName,
   parseSecureShareIpPrefix,
@@ -78,6 +86,7 @@ import {
   type SecureShareParticipantDto
 } from "../services/secureShares";
 import type { EncryptedPayload } from "../types";
+import { ReadonlyNoteRenderer } from "./ReadonlyNoteRenderer";
 
 const PublicAttachmentPreviewModal = lazy(() => import("./PublicAttachmentPreviewModal"));
 
@@ -92,6 +101,8 @@ const commentDateFormatter = new Intl.DateTimeFormat("ko-KR", {
   dateStyle: "medium",
   timeStyle: "short"
 });
+const contentSyncDelayedMessage =
+  "최신 내용 확인이 지연되고 있습니다. 현재 내용은 그대로 유지됩니다.";
 const previewExtensions = new Set([
   ...previewableAttachmentExtensions,
   "png",
@@ -121,6 +132,7 @@ export interface SecurePublicShareViewerProps {
   contentKey: string;
   idToken?: string;
   isAuthenticated: boolean;
+  liveContentSyncEnabled?: boolean;
   onRequireLogin: () => void;
   onSaveCopy?: (payload: SecurePublicShareCopyPayload) => Promise<void> | void;
   shareId: string;
@@ -129,6 +141,7 @@ export interface SecurePublicShareViewerProps {
 export interface SecureShareViewerMetadataDto {
   accessMode: "allowed_emails" | "anyone_with_link" | "authenticated_users";
   emailChallengeRequired: boolean;
+  hasSessionCandidate: boolean;
   hasPassword: boolean;
   oneTimeEnabled: boolean;
   oneTimeScope: "global";
@@ -171,8 +184,10 @@ export interface SecurePublicShareAttachmentMetadata {
 
 export interface SecureShareViewerContentDto {
   attachments: unknown[];
+  contentRevision: number;
   encryptedBody: EncryptedPayload;
   encryptedTitle: EncryptedPayload;
+  policyVersion: number;
   schemaVersion: 2;
 }
 
@@ -192,8 +207,10 @@ export interface SecurePublicShareCopyPayload {
 interface DecryptedSecureShareContent {
   attachments: SecurePublicShareAttachmentMetadata[];
   body: string;
+  bodyFormat: ReadonlyEditorContentFormat;
   bodyHtml: string;
   bodyPlainText: string;
+  bodyRenderContent: string;
   fontSize: number;
   title: string;
 }
@@ -380,6 +397,7 @@ function parseMetadataDto(value: unknown): SecureShareViewerMetadataDto | null {
   const requiresAuthentication = metadata.requiresAuthentication;
   const oneTimeEnabled = metadata.oneTimeEnabled;
   const ownerPreview = metadata.ownerPreview;
+  const hasSessionCandidate = metadata.hasSessionCandidate;
 
   if (
     metadata.schemaVersion !== 2
@@ -395,6 +413,10 @@ function parseMetadataDto(value: unknown): SecureShareViewerMetadataDto | null {
     || typeof oneTimeEnabled !== "boolean"
     || metadata.oneTimeScope !== "global"
     || typeof ownerPreview !== "boolean"
+    || (
+      hasSessionCandidate !== undefined
+      && typeof hasSessionCandidate !== "boolean"
+    )
     || emailChallengeRequired !== (
       requiresEmailVerification && accessMode !== "authenticated_users"
     )
@@ -406,6 +428,10 @@ function parseMetadataDto(value: unknown): SecureShareViewerMetadataDto | null {
   return {
     schemaVersion: 2,
     accessMode: accessMode as SecureShareViewerMetadataDto["accessMode"],
+    // An absent hint keeps compatibility with a backend deployed before this
+    // optimization by checking the session once. New responses explicitly
+    // return false so first-time viewers skip the expected 401 waterfall.
+    hasSessionCandidate: hasSessionCandidate !== false,
     hasPassword,
     requiresPassword,
     requiresEmailVerification,
@@ -567,15 +593,29 @@ function parseContentDto(value: unknown) {
   const encryptedTitle = parseEncryptedPayload(value.encryptedTitle);
   const encryptedBody = parseEncryptedPayload(value.encryptedBody);
   const attachments = value.attachments.map(parseInternalAttachment);
+  const contentRevision = value.contentRevision ?? 1;
+  const policyVersion = value.policyVersion ?? 1;
 
-  if (!encryptedTitle || !encryptedBody || attachments.some((attachment) => !attachment)) {
+  if (
+    !encryptedTitle
+    || !encryptedBody
+    || attachments.some((attachment) => !attachment)
+    || !Number.isSafeInteger(contentRevision)
+    || Number(contentRevision) < 1
+    || Number(contentRevision) > 1_000_000_000
+    || !Number.isSafeInteger(policyVersion)
+    || Number(policyVersion) < 1
+    || Number(policyVersion) > 1_000_000_000
+  ) {
     return null;
   }
 
   return {
     schemaVersion: 2 as const,
+    contentRevision: Number(contentRevision),
     encryptedTitle,
     encryptedBody,
+    policyVersion: Number(policyVersion),
     attachments: attachments as InternalAttachment[]
   };
 }
@@ -798,15 +838,18 @@ async function decryptContent(
   }
 
   const parsedBody = parseEditorContent(bodyValue);
-  const bodyHtml = linkifyEditorHtml(
-    sanitizeEditorHtml(parsedBody.html || "<p>내용 없음</p>")
-  );
+  const readonlyBody = parseReadonlyEditorContent(bodyValue);
+  const bodyHtml = parsedBody.html || "<p>내용 없음</p>";
 
   return {
     title: titleValue || "제목 없음",
     body: serializeEditorContent(bodyHtml, parsedBody.fontSize),
+    bodyFormat: readonlyBody.contentFormat,
     bodyHtml,
-    bodyPlainText: previewTextFromHtml(bodyHtml),
+    bodyPlainText: readonlyBody.contentFormat === "plain-text"
+      ? readonlyBody.content
+      : copyTextFromEditorHtml(bodyHtml),
+    bodyRenderContent: readonlyBody.content,
     fontSize: parsedBody.fontSize,
     attachments
   };
@@ -902,10 +945,37 @@ function canPreviewAttachment(attachment: SecurePublicShareAttachmentMetadata) {
     && previewExtensions.has(attachment.extension);
 }
 
+function waitForVisibleDocument(signal?: AbortSignal) {
+  if (
+    typeof document === "undefined"
+    || document.visibilityState === "visible"
+    || signal?.aborted
+  ) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        finish();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    signal?.addEventListener("abort", finish, { once: true });
+  });
+}
+
 export function SecurePublicShareViewer({
   contentKey,
   idToken,
   isAuthenticated,
+  liveContentSyncEnabled: liveContentSyncEnabledFromServer,
   onRequireLogin,
   onSaveCopy,
   shareId
@@ -918,10 +988,10 @@ export function SecurePublicShareViewer({
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [challengeId, setChallengeId] = useState<string | null>(null);
-  const [oneTimeConfirmed, setOneTimeConfirmed] = useState(false);
   const [resendSeconds, setResendSeconds] = useState(0);
   const [accessError, setAccessError] = useState("");
   const [notice, setNotice] = useState("");
+  const [contentSyncStatus, setContentSyncStatus] = useState("");
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [preview, setPreview] = useState<PublicAttachmentPreviewState | null>(null);
   const [attachmentPreviewReturnFocus, setAttachmentPreviewReturnFocus] =
@@ -940,6 +1010,7 @@ export function SecurePublicShareViewer({
   const [renameError, setRenameError] = useState("");
   const [restoreRenameFocus, setRestoreRenameFocus] = useState(false);
   const [participantClock, setParticipantClock] = useState(() => Date.now());
+  const [bootstrapEpoch, setBootstrapEpoch] = useState(0);
   const commentRequestRef = useRef<{ body: string; clientRequestId: string } | null>(null);
   const renameRequestRef = useRef<{
     clientRequestId: string;
@@ -953,6 +1024,10 @@ export function SecurePublicShareViewer({
   } | null>(null);
   const accessErrorRef = useRef<HTMLParagraphElement | null>(null);
   const keyRef = useRef<CryptoKey | null>(null);
+  const contentRevisionRef = useRef(0);
+  const policyVersionRef = useRef(0);
+  const revisionEtagRef = useRef("");
+  const policyBootstrapRestartCountRef = useRef(0);
   const mountedRef = useRef(true);
   const loadGenerationRef = useRef(0);
   const lifecycleControllerRef = useRef<AbortController | null>(null);
@@ -964,13 +1039,17 @@ export function SecurePublicShareViewer({
   });
   const objectUrlsRef = useRef(new Set<string>());
   const cleanupTimersRef = useRef(new Set<number>());
+  const autoAccessGenerationRef = useRef<number | null>(null);
   const [unlockAttemptId] = useState(() => crypto.randomUUID());
+  const directEntryEnabled = isSecureShareDirectEntryEnabled();
+  const liveContentSyncEnabled =
+    liveContentSyncEnabledFromServer ?? isSecureShareLiveContentSyncEnabled();
   const requiresLogin = metadata?.accessMode === "authenticated_users"
     && !metadata.ownerPreview
     && (!isAuthenticated || !idToken);
   const requiresPassword = Boolean(metadata?.hasPassword && !metadata.ownerPreview);
   const requiresEmailChallenge = Boolean(metadata?.emailChallengeRequired && !metadata.ownerPreview);
-  const requiresOneTimeConfirmation = Boolean(metadata?.oneTimeEnabled && !metadata.ownerPreview);
+  const requiresInteractiveAccess = requiresLogin || requiresPassword || requiresEmailChallenge;
   const canSubmitAccess = Boolean(
     metadata
     && !requiresLogin
@@ -979,7 +1058,6 @@ export function SecurePublicShareViewer({
       || (unicodeLength(password) >= 8 && unicodeLength(password) <= 128)
     )
     && (!requiresEmailChallenge || (challengeId && otpPattern.test(otp)))
-    && (!requiresOneTimeConfirmation || oneTimeConfirmed)
   );
   const renameCooldownMilliseconds = participant?.renameCooldownEndsAt
     ? Date.parse(participant.renameCooldownEndsAt)
@@ -1027,12 +1105,37 @@ export function SecurePublicShareViewer({
     objectUrlsRef.current.clear();
   }, []);
 
+  const restartPolicyBootstrap = useCallback(() => {
+    autoAccessGenerationRef.current = null;
+    setPhase("loading");
+    setMetadata(null);
+    setSession(null);
+    setContent(null);
+    contentRevisionRef.current = 0;
+    policyVersionRef.current = 0;
+    revisionEtagRef.current = "";
+    revokeObjectUrls();
+    if (policyBootstrapRestartCountRef.current >= 1) {
+      setPhase("unavailable");
+      setAccessError(
+        "공유 접근 정보를 다시 확인하지 못했습니다. 로그인 상태를 갱신하거나 링크를 다시 열어주세요."
+      );
+      return;
+    }
+    policyBootstrapRestartCountRef.current += 1;
+    setBootstrapEpoch((current) => current + 1);
+  }, [revokeObjectUrls]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
   }, []);
+
+  useLayoutEffect(() => {
+    policyBootstrapRestartCountRef.current = 0;
+  }, [contentKey, idToken, isAuthenticated, shareId]);
 
   useEffect(() => {
     saveCopyRequestRef.current = null;
@@ -1197,10 +1300,14 @@ export function SecurePublicShareViewer({
 
       setSession(nextSession);
       setContent(decrypted);
+      contentRevisionRef.current = contentPayload.contentRevision;
+      policyVersionRef.current = contentPayload.policyVersion;
+      policyBootstrapRestartCountRef.current = 0;
       setPhase("ready");
       setPassword("");
       setOtp("");
       setNotice("");
+      setContentSyncStatus("");
 
       const postLoadTasks: Promise<void>[] = [];
 
@@ -1302,14 +1409,13 @@ export function SecurePublicShareViewer({
       setContent(null);
       setSession(null);
       if (isSessionMissing(caught)) {
-        setPhase("access");
-        setAccessError("공유 세션이 만료되었습니다. 다시 인증해주세요.");
+        restartPolicyBootstrap();
       } else {
         setPhase("unavailable");
         setAccessError(viewerErrorMessage(caught));
       }
     }
-  }, [idToken, shareId]);
+  }, [idToken, restartPolicyBootstrap, shareId]);
 
   useLayoutEffect(() => {
     const controller = new AbortController();
@@ -1343,12 +1449,15 @@ export function SecurePublicShareViewer({
       setPassword("");
       setEmail("");
       setOtp("");
-      setOneTimeConfirmed(false);
       setAccessError("");
       setNotice("");
+      setContentSyncStatus("");
       setAttachmentError("");
       revokeObjectUrls();
       keyRef.current = null;
+      contentRevisionRef.current = 0;
+      policyVersionRef.current = 0;
+      revisionEtagRef.current = "";
 
       if (!shareIdentifierPattern.test(shareId) || !contentKeyPattern.test(contentKey)) {
         setPhase("unavailable");
@@ -1378,6 +1487,11 @@ export function SecurePublicShareViewer({
           && !parsedMetadata.ownerPreview
           && (!isAuthenticated || !idToken)
         ) {
+          setPhase("access");
+          return;
+        }
+
+        if (!parsedMetadata.hasSessionCandidate) {
           setPhase("access");
           return;
         }
@@ -1432,9 +1546,308 @@ export function SecurePublicShareViewer({
       }
       loadGenerationRef.current += 1;
       keyRef.current = null;
+      contentRevisionRef.current = 0;
+      policyVersionRef.current = 0;
+      revisionEtagRef.current = "";
       revokeObjectUrls();
     };
-  }, [contentKey, idToken, isAuthenticated, loadGrantedContent, revokeObjectUrls, shareId]);
+  }, [
+    bootstrapEpoch,
+    contentKey,
+    idToken,
+    isAuthenticated,
+    loadGrantedContent,
+    revokeObjectUrls,
+    shareId
+  ]);
+
+  useEffect(() => {
+    if (
+      phase !== "access"
+      || !metadata
+      || !directEntryEnabled
+      || requiresInteractiveAccess
+      || !keyRef.current
+    ) {
+      return undefined;
+    }
+
+    const generation = loadGenerationRef.current;
+    if (autoAccessGenerationRef.current === generation) {
+      return undefined;
+    }
+    autoAccessGenerationRef.current = generation;
+    const signal = lifecycleControllerRef.current?.signal;
+
+    void (async () => {
+      try {
+        if (metadata.oneTimeEnabled && !metadata.ownerPreview) {
+          await waitForVisibleDocument(signal);
+        }
+        if (
+          !mountedRef.current
+          || signal?.aborted
+          || generation !== loadGenerationRef.current
+        ) {
+          return;
+        }
+
+        const accessSession = parseSessionDto(await unlockSecureShare(
+          shareId,
+          {
+            ...(metadata.ownerPreview ? { ownerPreview: true } : {}),
+            unlockAttemptId
+          },
+          { idToken, signal }
+        ));
+
+        if (!accessSession || accessSession.ownerPreview !== metadata.ownerPreview) {
+          throw new Error("invalid_session");
+        }
+        if (
+          !mountedRef.current
+          || signal?.aborted
+          || generation !== loadGenerationRef.current
+        ) {
+          return;
+        }
+
+        await loadGrantedContent(
+          accessSession,
+          signal,
+          metadata.ownerPreview,
+          generation
+        );
+      } catch (caught) {
+        if (
+          mountedRef.current
+          && !signal?.aborted
+          && generation === loadGenerationRef.current
+        ) {
+          if (isSessionMissing(caught)) {
+            restartPolicyBootstrap();
+          } else {
+            setPhase("unavailable");
+            setAccessError(viewerErrorMessage(caught));
+          }
+        }
+      } finally {
+        if (autoAccessGenerationRef.current === generation) {
+          autoAccessGenerationRef.current = null;
+        }
+      }
+    })();
+
+    return undefined;
+  }, [
+    idToken,
+    directEntryEnabled,
+    loadGrantedContent,
+    metadata,
+    phase,
+    requiresInteractiveAccess,
+    restartPolicyBootstrap,
+    shareId,
+    unlockAttemptId
+  ]);
+
+  useEffect(() => {
+    if (
+      !liveContentSyncEnabled
+      || phase !== "ready"
+      || !session
+      || contentRevisionRef.current < 1
+    ) {
+      return undefined;
+    }
+
+    const generation = loadGenerationRef.current;
+    let stopped = false;
+    let timer: number | null = null;
+    let requestController: AbortController | null = null;
+    let unchangedCount = 0;
+
+    const online = () =>
+      typeof navigator === "undefined" || navigator.onLine !== false;
+    const visible = () =>
+      typeof document === "undefined" || document.visibilityState !== "hidden";
+
+    const clearTimer = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const lifecycleCurrent = () =>
+      !stopped
+      && mountedRef.current
+      && generation === loadGenerationRef.current;
+
+    const schedule = () => {
+      clearTimer();
+      if (!lifecycleCurrent() || !online() || !visible()) {
+        return;
+      }
+      const delay = secureSharePollingDelayMs(unchangedCount);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void poll();
+      }, delay);
+    };
+
+    const poll = async () => {
+      if (
+        !lifecycleCurrent()
+        || !online()
+        || !visible()
+        || requestController
+      ) {
+        return;
+      }
+
+      const controller = new AbortController();
+      requestController = controller;
+
+      try {
+        const revision = await getSecureShareRevision(shareId, {
+          etag: revisionEtagRef.current || undefined,
+          idToken: session.ownerPreview ? idToken : undefined,
+          signal: controller.signal
+        });
+
+        if (!lifecycleCurrent() || controller.signal.aborted) {
+          return;
+        }
+        if (
+          revision.notModified
+          || (
+            revision.contentRevision <= contentRevisionRef.current
+            && revision.policyVersion === policyVersionRef.current
+          )
+        ) {
+          revisionEtagRef.current = revision.etag;
+          unchangedCount = incrementSecureSharePollingUnchangedCount(unchangedCount);
+          setContentSyncStatus((current) =>
+            current === contentSyncDelayedMessage ? "" : current
+          );
+          return;
+        }
+
+        const contentPayload = parseContentDto(
+          await getSecureShareContent(shareId, {
+            idToken: session.ownerPreview ? idToken : undefined,
+            signal: controller.signal
+          })
+        );
+        const key = keyRef.current;
+
+        if (
+          !contentPayload
+          || !key
+          || contentPayload.contentRevision < revision.contentRevision
+          || contentPayload.policyVersion !== revision.policyVersion
+        ) {
+          throw new Error("invalid_content_revision");
+        }
+
+        const decrypted = await decryptContent(contentPayload, key);
+        if (
+          !lifecycleCurrent()
+          || controller.signal.aborted
+          || contentPayload.contentRevision <= contentRevisionRef.current
+        ) {
+          unchangedCount = incrementSecureSharePollingUnchangedCount(unchangedCount);
+          return;
+        }
+
+        revokeObjectUrls();
+        setPreview(null);
+        setAttachmentError("");
+        setContent(decrypted);
+        contentRevisionRef.current = contentPayload.contentRevision;
+        policyVersionRef.current = contentPayload.policyVersion;
+        revisionEtagRef.current = revision.etag;
+        unchangedCount = 0;
+        setContentSyncStatus("내용이 업데이트되었습니다.");
+      } catch (caught) {
+        if (!lifecycleCurrent() || controller.signal.aborted) {
+          return;
+        }
+
+        if (isSessionMissing(caught)) {
+          restartPolicyBootstrap();
+          return;
+        }
+
+        if (
+          caught instanceof SecureShareApiError
+          && (caught.status === 404 || caught.status === 410)
+        ) {
+          setContent(null);
+          setSession(null);
+          contentRevisionRef.current = 0;
+          policyVersionRef.current = 0;
+          revisionEtagRef.current = "";
+          setPhase("unavailable");
+          setAccessError("이 공유 링크를 사용할 수 없습니다.");
+          return;
+        }
+
+        unchangedCount = incrementSecureSharePollingUnchangedCount(unchangedCount);
+        setContentSyncStatus(contentSyncDelayedMessage);
+      } finally {
+        if (requestController === controller) {
+          requestController = null;
+        }
+        schedule();
+      }
+    };
+
+    const resetAndPollImmediately = () => {
+      unchangedCount = 0;
+      clearTimer();
+      if (online() && visible() && !requestController) {
+        void poll();
+      }
+    };
+    const handleOffline = () => {
+      clearTimer();
+      requestController?.abort();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        resetAndPollImmediately();
+      } else {
+        clearTimer();
+        requestController?.abort();
+      }
+    };
+
+    window.addEventListener("focus", resetAndPollImmediately);
+    window.addEventListener("online", resetAndPollImmediately);
+    window.addEventListener("offline", handleOffline);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    schedule();
+
+    return () => {
+      stopped = true;
+      clearTimer();
+      requestController?.abort();
+      window.removeEventListener("focus", resetAndPollImmediately);
+      window.removeEventListener("online", resetAndPollImmediately);
+      window.removeEventListener("offline", handleOffline);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [
+    idToken,
+    liveContentSyncEnabled,
+    phase,
+    restartPolicyBootstrap,
+    revokeObjectUrls,
+    session,
+    shareId
+  ]);
 
   async function sendEmailChallenge() {
     if (!metadata || !email.trim() || resendSeconds > 0) {
@@ -1494,9 +1907,6 @@ export function SecurePublicShareViewer({
         {
           ...(requiresEmailChallenge
             ? { challengeId: challengeId ?? undefined, otp }
-            : {}),
-          ...(requiresOneTimeConfirmation
-            ? { oneTimeOpenConfirmed: oneTimeConfirmed }
             : {}),
           ...(metadata.ownerPreview ? { ownerPreview: true } : {}),
           ...(requiresPassword ? { password } : {}),
@@ -2098,7 +2508,15 @@ export function SecurePublicShareViewer({
     }
   }
 
-  if (phase === "loading" || phase === "loading_content") {
+  if (
+    phase === "loading"
+    || phase === "loading_content"
+    || (
+      phase === "access"
+      && directEntryEnabled
+      && !requiresInteractiveAccess
+    )
+  ) {
     return (
       <section className="secure-public-share-state" aria-live="polite">
         <Loader2 aria-hidden="true" className="spin" size={22} />
@@ -2123,18 +2541,6 @@ export function SecurePublicShareViewer({
   if (phase === "access") {
     return (
       <section className="secure-public-share-access">
-        <header>
-          <span className="section-kicker">
-            <ShieldCheck aria-hidden="true" size={17} />
-            Secure Share v2
-          </span>
-          <h1>보안 공유 열기</h1>
-          <p>필요한 조건을 확인한 뒤 암호화된 내용을 브라우저에서 엽니다.</p>
-          {metadata.ownerPreview && (
-            <span className="secure-public-share-owner-badge">소유자/관리자 미리보기 · 일회성 링크 미소비</span>
-          )}
-        </header>
-
         {requiresLogin ? (
           <div className="secure-public-share-login">
             <p>이 공유는 로그인한 QuickMemo 사용자만 열 수 있습니다.</p>
@@ -2203,23 +2609,6 @@ export function SecurePublicShareViewer({
               </div>
             )}
 
-            {requiresOneTimeConfirmation && (
-              <label className="secure-public-share-one-time">
-                <input
-                  checked={oneTimeConfirmed}
-                  disabled={busyAction !== null}
-                  onChange={(event) => setOneTimeConfirmed(event.target.checked)}
-                  type="checkbox"
-                />
-                <span>
-                  <strong>이 링크를 지금 한 번 열겠습니다.</strong>
-                  <small>
-                    인증에 성공하면 이 브라우저 세션에만 접근 권한이 발급되고 다른 사람은 새로 열 수 없습니다.
-                  </small>
-                </span>
-              </label>
-            )}
-
             {notice && <p className="secure-public-share-notice" role="status">{notice}</p>}
             {accessError && (
               <p
@@ -2236,7 +2625,7 @@ export function SecurePublicShareViewer({
               {busyAction === "access"
                 ? <Loader2 aria-hidden="true" className="spin" size={17} />
                 : <Eye aria-hidden="true" size={17} />}
-              {metadata.ownerPreview ? "소유자/관리자 미리보기 열기" : "보안 공유 열기"}
+              {metadata.ownerPreview ? "미리보기 열기" : "열기"}
             </button>
           </form>
         )}
@@ -2285,11 +2674,17 @@ export function SecurePublicShareViewer({
       </header>
 
       {notice && <p className="secure-public-share-notice" role="status">{notice}</p>}
+      {contentSyncStatus && (
+        <p className="secure-public-share-notice" role="status">
+          {contentSyncStatus}
+        </p>
+      )}
 
-      <div
+      <ReadonlyNoteRenderer
         className="note-preview-body public-share-body secure-public-share-body"
-        style={{ "--editor-font-size": `${content.fontSize}px` } as React.CSSProperties}
-        dangerouslySetInnerHTML={{ __html: content.bodyHtml }}
+        content={content.bodyRenderContent}
+        contentFormat={content.bodyFormat}
+        fontSize={content.fontSize}
       />
 
       {content.attachments.length > 0 && (

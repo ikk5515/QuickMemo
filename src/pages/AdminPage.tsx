@@ -21,11 +21,18 @@ import {
 import type { Timestamp } from "firebase/firestore";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
+import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { decryptText, generateUserKeyBundle, unwrapNoteKey } from "../lib/crypto";
-import { linkifyEditorHtml, parseEditorContent, previewTextFromHtml } from "../lib/editorContent";
+import {
+  parseEditorContent,
+  parseReadonlyEditorContent,
+  previewTextFromHtml,
+  type ReadonlyEditorContentFormat
+} from "../lib/editorContent";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { defaultFeatureAccess, normalizeFeatureAccess } from "../lib/featureAccess";
 import { initialsFromName } from "../lib/roster";
@@ -71,6 +78,7 @@ type AdminTab = "create" | "users" | "notes";
 type UserStatusFilter = "all" | "active" | "inactive" | "admin";
 
 interface AdminNoteView extends NoteSnapshot {
+  bodyFormat: ReadonlyEditorContentFormat;
   title: string;
   bodyHtml: string;
   bodyPreview: string;
@@ -353,6 +361,7 @@ function AdminDashboard() {
           const fallback: AdminNoteView = {
             ...note,
             title: "암호화된 노트",
+            bodyFormat: "html",
             bodyHtml: "",
             bodyPreview: lockedReason,
             bodySearchText: lockedReason,
@@ -378,13 +387,15 @@ function AdminDashboard() {
               decryptText(note.encryptedBody, noteKey)
             ]);
             const parsedBody = parseEditorContent(body);
+            const readonlyBody = parseReadonlyEditorContent(body);
             const previewText = previewTextFromHtml(body);
             const emptyPreviewText = /<img\b/i.test(parsedBody.html) ? "이미지가 포함된 노트" : "본문 없음";
 
             return {
               ...note,
               title,
-              bodyHtml: parsedBody.html,
+              bodyFormat: readonlyBody.contentFormat,
+              bodyHtml: readonlyBody.content,
               bodyPreview: adminNotePreviewText(previewText) || emptyPreviewText,
               bodySearchText: previewText || emptyPreviewText,
               fontSize: parsedBody.fontSize,
@@ -839,7 +850,7 @@ function AdminDashboard() {
               </label>
               <label>
                 상태
-                <select
+                <AppSelect
                   onChange={(event) => setUserStatusFilter(event.target.value as UserStatusFilter)}
                   value={userStatusFilter}
                 >
@@ -847,7 +858,7 @@ function AdminDashboard() {
                   <option value="active">활성</option>
                   <option value="inactive">비활성</option>
                   <option value="admin">관리자</option>
-                </select>
+                </AppSelect>
               </label>
             </div>
             <div className="admin-user-card-list">
@@ -892,25 +903,25 @@ function AdminDashboard() {
           <div className="admin-note-toolbar">
             <label>
               작성자
-              <select value={noteOwnerFilter} onChange={(event) => setNoteOwnerFilter(event.target.value)}>
+              <AppSelect value={noteOwnerFilter} onChange={(event) => setNoteOwnerFilter(event.target.value)}>
                 <option value="all">전체 사용자</option>
                 {users.map((user) => (
                   <option key={user.uid} value={user.uid}>
                     {user.displayName}
                   </option>
                 ))}
-              </select>
+              </AppSelect>
             </label>
             <label>
               노트 종류
-              <select
+              <AppSelect
                 value={noteTypeFilter}
                 onChange={(event) => setNoteTypeFilter(event.target.value as AdminNoteTypeFilter)}
               >
                 <option value="all">전체</option>
                 <option value="personal">개인 노트</option>
                 <option value="shared">공유 노트</option>
-              </select>
+              </AppSelect>
             </label>
             <label className="admin-search-field">
               검색
@@ -1018,12 +1029,12 @@ function AdminDashboard() {
               </header>
               <div className="note-preview-body">
                 {selectedAdminNote.canReadContent ? (
-                  <div
+                  <ReadonlyNoteRenderer
                     className="admin-note-view-body"
-                    style={{ fontSize: selectedAdminNote.fontSize }}
-                    dangerouslySetInnerHTML={{
-                      __html: linkifyEditorHtml(selectedAdminNote.bodyHtml || "<p>본문 없음</p>")
-                    }}
+                    content={selectedAdminNote.bodyHtml}
+                    contentFormat={selectedAdminNote.bodyFormat}
+                    emptyText="본문 없음"
+                    fontSize={selectedAdminNote.fontSize}
                   />
                 ) : (
                   <div className="admin-note-locked">
