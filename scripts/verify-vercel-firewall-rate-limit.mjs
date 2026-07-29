@@ -53,14 +53,93 @@ function recognizedIpKey(value) {
     || normalized === "ip_address";
 }
 
+function valueShape(value) {
+  if (Array.isArray(value)) {
+    return "array";
+  }
+  if (value === null) {
+    return "null";
+  }
+  return typeof value;
+}
+
+function summarizeRule(rule) {
+  const conditionGroups = Array.isArray(rule?.conditionGroup)
+    ? rule.conditionGroup
+    : [];
+  const mitigation = rule?.action?.mitigate;
+  const rateLimit = mitigation?.rateLimit;
+  const keys = Array.isArray(rateLimit?.keys) ? rateLimit.keys : [];
+  return {
+    active: rule?.active === true,
+    valid: rule?.valid === true
+      ? "true"
+      : rule?.valid === false
+        ? "false"
+        : valueShape(rule?.valid),
+    conditionGroupShape: valueShape(rule?.conditionGroup),
+    conditionGroupCount: conditionGroups.length,
+    conditionGroups: conditionGroups.slice(0, 4).map((group) => {
+      const conditions = Array.isArray(group?.conditions)
+        ? group.conditions
+        : [];
+      return {
+        conditionShape: valueShape(group?.conditions),
+        conditionCount: conditions.length,
+        conditions: conditions.slice(0, 4).map((condition) => ({
+          type: normalizedString(condition?.type) || valueShape(condition?.type),
+          operation: normalizedString(condition?.op) || valueShape(condition?.op),
+          negated: condition?.neg === true,
+          coversRevision: pathConditionCoversRevision(condition)
+        }))
+      };
+    }),
+    mitigationAction: normalizedString(mitigation?.action)
+      || valueShape(mitigation?.action),
+    rateLimitShape: valueShape(rateLimit),
+    rateLimitAction: normalizedString(rateLimit?.action)
+      || valueShape(rateLimit?.action),
+    algorithm: normalizedString(rateLimit?.algo)
+      || valueShape(rateLimit?.algo),
+    windowShape: valueShape(rateLimit?.window),
+    window: Number.isFinite(Number(rateLimit?.window))
+      ? Number(rateLimit.window)
+      : null,
+    limitShape: valueShape(rateLimit?.limit),
+    limit: Number.isFinite(Number(rateLimit?.limit))
+      ? Number(rateLimit.limit)
+      : null,
+    keysShape: valueShape(rateLimit?.keys),
+    keyCount: keys.length,
+    keyKinds: keys.slice(0, 4).map((key) => (
+      recognizedIpKey(key) ? "ip" : valueShape(key)
+    ))
+  };
+}
+
+export function summarizeRevisionRateLimitConfig(config) {
+  const rules = Array.isArray(config?.rules) ? config.rules : [];
+  return {
+    firewallEnabled: config?.firewallEnabled === true,
+    rulesShape: valueShape(config?.rules),
+    ruleCount: rules.length,
+    rules: rules.slice(0, 10).map(summarizeRule),
+    rulesTruncated: rules.length > 10
+  };
+}
+
 export function inspectRevisionRateLimit(config) {
   if (!config || config.firewallEnabled !== true || !Array.isArray(config.rules)) {
-    return { ok: false, reason: "firewall_not_enabled" };
+    return {
+      ok: false,
+      reason: "firewall_not_enabled",
+      diagnostic: summarizeRevisionRateLimitConfig(config)
+    };
   }
 
   const activeRules = config.rules.filter(
     (rule) => rule?.active === true
-      && (rule?.valid === undefined || rule?.valid === true)
+      && rule?.valid === true
   );
   const rule = activeRules[0];
   if (
@@ -87,7 +166,11 @@ export function inspectRevisionRateLimit(config) {
       || keys.length !== 1
       || !recognizedIpKey(keys[0])
     ) {
-      return { ok: false, reason: "revision_rate_limit_not_found" };
+      return {
+        ok: false,
+        reason: "revision_rate_limit_not_found",
+        diagnostic: summarizeRevisionRateLimitConfig(config)
+      };
     }
 
     return {
@@ -98,7 +181,11 @@ export function inspectRevisionRateLimit(config) {
     };
   }
 
-  return { ok: false, reason: "revision_rate_limit_not_found" };
+  return {
+    ok: false,
+    reason: "revision_rate_limit_not_found",
+    diagnostic: summarizeRevisionRateLimitConfig(config)
+  };
 }
 
 export function liveSyncProductionDefaultsEnabled(
@@ -225,7 +312,8 @@ export async function verifyProductionFirewall({
         enforced: false,
         ok: true,
         readinessChecked: true,
-        readinessReason: result.reason
+        readinessReason: result.reason,
+        readinessDiagnostic: result.diagnostic
       };
     }
     throw new Error(
@@ -252,6 +340,11 @@ async function main() {
       console.log(
         `Secure Share live sync remains gated; WAF readiness not verified (${result.readinessReason}).`
       );
+      if (result.readinessDiagnostic) {
+        console.log(
+          `Secure Share WAF structural diagnostic: ${JSON.stringify(result.readinessDiagnostic)}`
+        );
+      }
     } else if (result.readinessReason) {
       console.log(
         `Secure Share live sync remains gated; WAF readiness check unavailable (${result.readinessReason}).`

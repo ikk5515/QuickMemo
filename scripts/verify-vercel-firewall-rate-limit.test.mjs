@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   inspectRevisionRateLimit,
-  liveSyncProductionDefaultsEnabled
+  liveSyncProductionDefaultsEnabled,
+  summarizeRevisionRateLimitConfig
 } from "./verify-vercel-firewall-rate-limit.mjs";
 
 function validRule(overrides = {}) {
@@ -42,20 +43,12 @@ describe("Vercel revision WAF preflight", () => {
     });
   });
 
-  it("accepts an active rule when the active-config API omits a validation marker", () => {
-    expect(inspectRevisionRateLimit({
-      firewallEnabled: true,
-      rules: [validRule({ valid: undefined })]
-    })).toMatchObject({
-      ok: true,
-      limit: 120,
-      requestsPerMinute: 120,
-      windowSeconds: 60
-    });
-  });
-
   it.each([
     ["disabled firewall", { firewallEnabled: false, rules: [validRule()] }],
+    ["missing validation marker", {
+      firewallEnabled: true,
+      rules: [validRule({ valid: undefined })]
+    }],
     ["explicitly invalid rule", {
       firewallEnabled: true,
       rules: [validRule({ valid: false })]
@@ -178,6 +171,53 @@ describe("Vercel revision WAF preflight", () => {
     }]
   ])("rejects %s", (_name, config) => {
     expect(inspectRevisionRateLimit(config).ok).toBe(false);
+  });
+
+  it("summarizes rule structure without logging identifiers or condition values", () => {
+    const diagnostic = summarizeRevisionRateLimitConfig({
+      firewallEnabled: true,
+      rules: [validRule({
+        id: "secret-rule-id",
+        name: "secret-rule-name",
+        conditionGroup: [{
+          conditions: [{
+            type: "header",
+            key: "x-secret-header",
+            op: "eq",
+            value: "secret-condition-value"
+          }]
+        }]
+      })]
+    });
+    expect(diagnostic).toMatchObject({
+      firewallEnabled: true,
+      rulesShape: "array",
+      ruleCount: 1,
+      rules: [{
+        active: true,
+        valid: "true",
+        conditionGroupShape: "array",
+        conditionGroupCount: 1,
+        conditionGroups: [{
+          conditionCount: 1,
+          conditions: [{
+            type: "header",
+            operation: "eq",
+            coversRevision: false
+          }]
+        }],
+        mitigationAction: "rate_limit",
+        rateLimitAction: "deny",
+        algorithm: "fixed_window",
+        window: 60,
+        limit: 120,
+        keyKinds: ["ip"]
+      }]
+    });
+    const serialized = JSON.stringify(diagnostic);
+    expect(serialized).not.toContain("secret-rule");
+    expect(serialized).not.toContain("x-secret-header");
+    expect(serialized).not.toContain("secret-condition-value");
   });
 
   it("requires both trusted Production defaults before enforcement", () => {
