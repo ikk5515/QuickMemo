@@ -3,6 +3,7 @@ import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "re
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
+import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
 import { hasFirebaseConfig } from "../lib/firebase";
 import { appFeatures, defaultFeatureAccess, normalizeFeatureAccess, resolveAccessibleHome } from "../lib/featureAccess";
 import {
@@ -447,8 +448,8 @@ function PasswordChangeModal({
     setError(null);
     setMessage(null);
 
-    if (nextPassword.length < 6) {
-      setError("새 비밀번호는 6자 이상이어야 합니다.");
+    if (!newPasswordMeetsMinimum(nextPassword)) {
+      setError(`새 비밀번호는 ${minimumNewPasswordLength}자 이상이어야 합니다.`);
       return;
     }
 
@@ -504,6 +505,7 @@ function PasswordChangeModal({
             새 비밀번호
             <input
               autoComplete="new-password"
+              minLength={minimumNewPasswordLength}
               onChange={(event) => setNextPassword(event.target.value)}
               required
               type="password"
@@ -514,6 +516,7 @@ function PasswordChangeModal({
             새 비밀번호 확인
             <input
               autoComplete="new-password"
+              minLength={minimumNewPasswordLength}
               onChange={(event) => setConfirmPassword(event.target.value)}
               required
               type="password"

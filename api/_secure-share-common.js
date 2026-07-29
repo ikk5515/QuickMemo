@@ -304,41 +304,26 @@ export function jsonResponse(response, statusCode, body, options = {}) {
   response.end(JSON.stringify(body));
 }
 
-const sensitiveLogPatterns = [
-  /Bearer\s+[A-Za-z0-9._~+/=-]+/giu,
-  /"(?:access_token|idToken|sessionToken|csrfToken|otp|password)"\s*:\s*"[^"]*"/giu,
-  /"private_key"\s*:\s*"[^"]+"/giu,
-  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu,
-  /AIza[0-9A-Za-z_-]{35}/gu,
-  /re_[A-Za-z0-9_-]{20,}/gu
-];
-
-export function redactLogMessage(value) {
-  return String(value)
-    .replace(sensitiveLogPatterns[0], "Bearer [redacted]")
-    .replace(sensitiveLogPatterns[1], '"sensitive":"[redacted]"')
-    .replace(sensitiveLogPatterns[2], '"private_key":"[redacted]"')
-    .replace(sensitiveLogPatterns[3], "[redacted private key]")
-    .replace(sensitiveLogPatterns[4], "[redacted api key]")
-    .replace(sensitiveLogPatterns[5], "[redacted email api key]")
-    .slice(0, 800);
-}
-
 function errorNumberField(error, fieldName) {
-  const value = error && typeof error === "object" ? error[fieldName] : undefined;
-  return Number.isInteger(value) ? value : undefined;
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+  try {
+    const value = error[fieldName];
+    return Number.isInteger(value) && value >= 100 && value <= 599
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function safeErrorSummary(error) {
-  if (error instanceof Error) {
-    return {
-      name: error.name,
-      message: redactLogMessage(error.message),
-      statusCode: errorNumberField(error, "statusCode"),
-      upstreamStatus: errorNumberField(error, "upstreamStatus")
-    };
-  }
-  return { message: redactLogMessage(error) };
+  return {
+    kind: error instanceof Error ? "error" : "non_error",
+    statusCode: errorNumberField(error, "statusCode"),
+    upstreamStatus: errorNumberField(error, "upstreamStatus")
+  };
 }
 
 export function handleApiError(error, response, id) {

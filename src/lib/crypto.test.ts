@@ -70,6 +70,10 @@ describe("client encryption", () => {
   it("locks a private key with a password and unwraps note keys", async () => {
     const password = "strong-password";
     const bundle = await generateUserKeyBundle(password);
+    const modulus = bundle.publicKeyJwk.n;
+
+    expect(bundle.kdfIterations).toBe(600_000);
+    expect(typeof modulus === "string" ? modulus.length : 0).toBe(512);
     const keyDocument: UserKeyDocument = {
       uid: "user-1",
       ...bundle

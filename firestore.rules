@@ -682,7 +682,10 @@ service cloud.firestore {
 
     function validLibraryWrappedKey(payload) {
       return wrappedAesKeyPayload(payload)
-        && payload.wrappedKey.size() == 344;
+        && (
+          payload.wrappedKey.size() == 344
+          || payload.wrappedKey.size() == 512
+        );
     }
 
     function validLibraryWrappedKeys(data) {
@@ -1828,6 +1831,11 @@ service cloud.firestore {
         && !existsAfter(quickLoginKeyPath(get(userPath(uid)).data.quickKey));
     }
 
+    function requestingAdminRemainsActive(data, uid) {
+      return uid != request.auth.uid
+        || (data.isAdmin == true && data.isActive == true);
+    }
+
     function validBootstrapTokenHash(value) {
       return value is string && value.size() == 64;
     }
@@ -2449,6 +2457,7 @@ service cloud.firestore {
         && (firstAdminCreate(uid) || adminCreatesUser(uid));
       allow update: if adminUser()
         && validUserProfile(request.resource.data, uid)
+        && requestingAdminRemainsActive(request.resource.data, uid)
         && userMatchesRoster(request.resource.data, uid)
         && request.resource.data.diff(resource.data).changedKeys().hasOnly([
           "displayName",

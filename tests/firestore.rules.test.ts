@@ -132,6 +132,7 @@ function userPreferences(uid: string, overrides: Record<string, unknown> = {}) {
 }
 
 const validLibraryWrappedKey = "A".repeat(342) + "==";
+const validLibraryWrappedKey3072 = "B".repeat(512);
 const validLibraryUrlFingerprint = "F".repeat(43);
 const validLibraryEncryptedPayload = {
   ...encryptedPayload,
@@ -765,6 +766,61 @@ describeRules("firestore security rules", () => {
 
     await assertSucceeds(updateDoc(doc(adminDb, "users/user-b"), { allowedShareTargetUids: ["user-b", "admin-a"] }));
     await assertFails(updateDoc(doc(adminDb, "users/user-b"), { loginEmail: "changed@quickmemo.local" }));
+  });
+
+  it("prevents an administrator from demoting or deactivating itself", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "system/bootstrap"), { adminUid: "admin-a" });
+      await setDoc(doc(db, "quickLoginKeys/1"), quickLoginKey("admin-a", 1));
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", {
+        isAdmin: true,
+        role: "admin"
+      }));
+      await setDoc(doc(db, "publicLoginRoster/admin-a"), rosterProfile("admin-a", {
+        isAdmin: true,
+        role: "admin"
+      }));
+      await setDoc(doc(db, "quickLoginKeys/2"), quickLoginKey("admin-b", 2));
+      await setDoc(doc(db, "users/admin-b"), userProfile("admin-b", {
+        isAdmin: true,
+        order: 2,
+        quickKey: 2,
+        role: "admin"
+      }));
+      await setDoc(doc(db, "publicLoginRoster/admin-b"), rosterProfile("admin-b", {
+        isAdmin: true,
+        order: 2,
+        quickKey: 2,
+        role: "admin"
+      }));
+    });
+
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const selfDemotion = writeBatch(adminDb);
+    selfDemotion.update(doc(adminDb, "users/admin-a"), {
+      isAdmin: false,
+      role: "user"
+    });
+    selfDemotion.update(doc(adminDb, "publicLoginRoster/admin-a"), {
+      isAdmin: false
+    });
+    await assertFails(selfDemotion.commit());
+
+    const selfDeactivation = writeBatch(adminDb);
+    selfDeactivation.update(doc(adminDb, "users/admin-a"), { isActive: false });
+    selfDeactivation.update(doc(adminDb, "publicLoginRoster/admin-a"), { isActive: false });
+    await assertFails(selfDeactivation.commit());
+
+    const otherAdminDemotion = writeBatch(adminDb);
+    otherAdminDemotion.update(doc(adminDb, "users/admin-b"), {
+      isAdmin: false,
+      role: "user"
+    });
+    otherAdminDemotion.update(doc(adminDb, "publicLoginRoster/admin-b"), {
+      isAdmin: false
+    });
+    await assertSucceeds(otherAdminDemotion.commit());
   });
 
   it("allows only admins to persist a strictly shaped per-user feature access map", async () => {
@@ -1428,6 +1484,20 @@ describeRules("firestore security rules", () => {
         })
       )
     );
+    await assertSucceeds(
+      setDoc(
+        doc(ownerDb, "libraryItems/rsa-3072-key"),
+        libraryItem("user-a", {
+          wrappedKeys: {
+            "user-a": {
+              version: 1,
+              algorithm: "RSA-OAEP",
+              wrappedKey: validLibraryWrappedKey3072
+            }
+          }
+        })
+      )
+    );
     await assertFails(
       setDoc(
         doc(ownerDb, "libraryItems/oversized"),
@@ -1492,6 +1562,7 @@ describeRules("firestore security rules", () => {
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const secondOwnerDb = testEnv.authenticatedContext("user-b").firestore();
     const outsiderDb = testEnv.authenticatedContext("user-b").firestore();
     const adminDb = testEnv.authenticatedContext("admin-a").firestore();
     const inactiveDb = testEnv.authenticatedContext("user-inactive").firestore();
@@ -1507,6 +1578,18 @@ describeRules("firestore security rules", () => {
       }
     }));
     await assertSucceeds(getDoc(vaultRef));
+    await assertSucceeds(
+      setDoc(
+        doc(secondOwnerDb, "libraryVaults/user-b"),
+        libraryVault("user-b", {
+          wrappedKey: {
+            version: 1,
+            algorithm: "RSA-OAEP",
+            wrappedKey: validLibraryWrappedKey3072
+          }
+        })
+      )
+    );
     await assertFails(getDocs(collection(ownerDb, "libraryVaults")));
     await assertFails(getDoc(doc(outsiderDb, "libraryVaults/user-a")));
     await assertFails(getDoc(doc(adminDb, "libraryVaults/user-a")));

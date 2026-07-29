@@ -270,7 +270,7 @@ beforeEach(() => {
     nextCursor: null,
     requestId: "request_123456"
   });
-  mocks.unlock.mockResolvedValue({ granted: true });
+  mocks.unlock.mockResolvedValue(session());
   mocks.createComment.mockImplementation(async (
     _shareId: string,
     input: { body: string }
@@ -351,6 +351,7 @@ describe("SecurePublicShareViewer", () => {
     const sanitizedHref = body?.querySelector("a")?.getAttribute("href") ?? "";
     expect(sanitizedHref).not.toMatch(/^javascript:/iu);
     expect(storageSpy).not.toHaveBeenCalled();
+    expect(mocks.refreshSession).toHaveBeenCalledTimes(1);
 
     const allServiceArguments = [
       ...mocks.getMetadata.mock.calls,
@@ -523,6 +524,17 @@ describe("SecurePublicShareViewer", () => {
           quickCopyButtonVisible: false
         }
       }));
+    mocks.unlock.mockResolvedValueOnce(session({
+      ownerPreview: true,
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        commentIpPrefixEnabled: true,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
     mocks.listComments.mockResolvedValue({
       ok: true,
       items: [{

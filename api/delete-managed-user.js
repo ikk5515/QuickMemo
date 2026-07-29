@@ -1,4 +1,4 @@
-/* global Buffer, URLSearchParams, console, crypto, fetch, process */
+/* global AbortSignal, Buffer, URLSearchParams, console, crypto, fetch, process */
 import { del } from "@vercel/blob";
 import {
   quotaReleaseAfterAttachmentClaim,
@@ -18,6 +18,9 @@ const storageBaseUrl = "https://storage.googleapis.com/storage/v1";
 const oauthTokenUrl = "https://oauth2.googleapis.com/token";
 const databaseId = "(default)";
 const cloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform";
+const identityToolkitRequestTimeoutMs = 8_000;
+const recentAdminAuthenticationMaxAgeMs = 15 * 60 * 1000;
+const recentAdminAuthenticationFutureSkewMs = 60 * 1000;
 const managedUserDeleteQueryLimit = 300;
 const maxManagedUserDeleteIterations = 50;
 const firestoreCommitWriteLimit = 500;
@@ -108,51 +111,26 @@ function jsonResponse(response, statusCode, body) {
   response.end(JSON.stringify(body));
 }
 
-const sensitiveLogPatterns = [
-  /Bearer\s+[A-Za-z0-9._~+/=-]+/giu,
-  /"access_token"\s*:\s*"[^"]+"/giu,
-  /"idToken"\s*:\s*"[^"]+"/giu,
-  /"private_key"\s*:\s*"[^"]+"/giu,
-  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu,
-  /AIza[0-9A-Za-z_-]{35}/gu,
-  /gh[pousr]_[A-Za-z0-9_]{36,}/gu,
-  /xox[baprs]-[A-Za-z0-9-]{20,}/gu
-];
-
-function redactLogMessage(value) {
-  return String(value)
-    .replace(sensitiveLogPatterns[0], "Bearer [redacted]")
-    .replace(sensitiveLogPatterns[1], '"access_token":"[redacted]"')
-    .replace(sensitiveLogPatterns[2], '"idToken":"[redacted]"')
-    .replace(sensitiveLogPatterns[3], '"private_key":"[redacted]"')
-    .replace(sensitiveLogPatterns[4], "[redacted private key]")
-    .replace(sensitiveLogPatterns[5], "[redacted api key]")
-    .replace(sensitiveLogPatterns[6], "[redacted github token]")
-    .replace(sensitiveLogPatterns[7], "[redacted slack token]")
-    .slice(0, 1000);
-}
-
 function errorNumberField(error, fieldName) {
   if (!error || typeof error !== "object") {
     return undefined;
   }
 
-  const value = error[fieldName];
-  return Number.isInteger(value) ? value : undefined;
+  try {
+    const value = error[fieldName];
+    return Number.isInteger(value) && value >= 100 && value <= 599
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
-function safeErrorSummary(error) {
-  if (error instanceof Error) {
-    return {
-      message: redactLogMessage(error.message),
-      name: error.name,
-      status: errorNumberField(error, "status"),
-      statusCode: errorNumberField(error, "statusCode")
-    };
-  }
-
+export function safeErrorSummary(error) {
   return {
-    message: redactLogMessage(error)
+    kind: error instanceof Error ? "error" : "non_error",
+    status: errorNumberField(error, "status"),
+    statusCode: errorNumberField(error, "statusCode")
   };
 }
 
@@ -1265,7 +1243,8 @@ async function identityToolkitRequest(projectId, method, accessToken, body) {
         authorization: `Bearer ${accessToken}`,
         "content-type": "application/json"
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(identityToolkitRequestTimeoutMs)
     }
   );
   const responseBody = await response.text();
@@ -1280,7 +1259,7 @@ async function identityToolkitRequest(projectId, method, accessToken, body) {
   return responseBody ? JSON.parse(responseBody) : {};
 }
 
-async function lookupCallerUid(idToken) {
+export async function lookupCallerUid(idToken) {
   const apiKey = firebaseWebApiKey();
 
   if (!apiKey) {
@@ -1290,7 +1269,8 @@ async function lookupCallerUid(idToken) {
   const response = await fetch(`${identityToolkitBaseUrl}/accounts:lookup?key=${encodeURIComponent(apiKey)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ idToken })
+    body: JSON.stringify({ idToken }),
+    signal: AbortSignal.timeout(identityToolkitRequestTimeoutMs)
   });
   const responseBody = await response.text();
 
@@ -1298,7 +1278,8 @@ async function lookupCallerUid(idToken) {
     if (
       responseBody.includes("INVALID_ID_TOKEN") ||
       responseBody.includes("USER_NOT_FOUND") ||
-      responseBody.includes("TOKEN_EXPIRED")
+      responseBody.includes("TOKEN_EXPIRED") ||
+      responseBody.includes("USER_DISABLED")
     ) {
       return "";
     }
@@ -1312,7 +1293,58 @@ async function lookupCallerUid(idToken) {
   const result = responseBody ? JSON.parse(responseBody) : {};
 
   const [user] = result.users ?? [];
-  return typeof user?.localId === "string" ? user.localId : "";
+  return typeof user?.localId === "string" && user.disabled !== true ? user.localId : "";
+}
+
+export function idTokenHasRecentAuthentication(
+  idToken,
+  expectedUid,
+  expectedProjectId,
+  now = Date.now()
+) {
+  const tokenParts = typeof idToken === "string" ? idToken.split(".") : [];
+  const encodedPayload = tokenParts[1] ?? "";
+  if (
+    tokenParts.length !== 3
+    || !tokenParts.every((part) => /^[A-Za-z0-9_-]+$/u.test(part))
+    || encodedPayload.length > 8_192
+  ) {
+    return false;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+    const authTimeSeconds = payload?.auth_time;
+    const issuedAtSeconds = payload?.iat;
+    const expiresAtSeconds = payload?.exp;
+    if (
+      !payload
+      || typeof payload !== "object"
+      || payload.sub !== expectedUid
+      || payload.aud !== expectedProjectId
+      || payload.iss !== `https://securetoken.google.com/${expectedProjectId}`
+      || !Number.isSafeInteger(authTimeSeconds)
+      || !Number.isSafeInteger(issuedAtSeconds)
+      || !Number.isSafeInteger(expiresAtSeconds)
+      || authTimeSeconds <= 0
+      || issuedAtSeconds <= 0
+      || expiresAtSeconds <= 0
+    ) {
+      return false;
+    }
+    const authTimeMilliseconds = authTimeSeconds * 1000;
+    const issuedAtMilliseconds = issuedAtSeconds * 1000;
+    const expiresAtMilliseconds = expiresAtSeconds * 1000;
+    return (
+      authTimeMilliseconds <= now + recentAdminAuthenticationFutureSkewMs
+      && authTimeMilliseconds >= now - recentAdminAuthenticationMaxAgeMs
+      && issuedAtMilliseconds <= now + recentAdminAuthenticationFutureSkewMs
+      && authTimeMilliseconds <= issuedAtMilliseconds + recentAdminAuthenticationFutureSkewMs
+      && expiresAtMilliseconds > now
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function deleteAuthUser(projectId, accessToken, uid) {
@@ -2658,6 +2690,19 @@ export default async function handler(request, response) {
     }
 
     const credentials = firebaseCredentials();
+
+    // accounts:lookup above is the authority for token validity. Only inspect
+    // signed Firebase claims after that validation, binding them to the lookup
+    // identity and configured project before enforcing step-up freshness.
+    if (!idTokenHasRecentAuthentication(
+      idToken,
+      callerUid,
+      credentials.projectId
+    )) {
+      jsonResponse(response, 401, { ok: false, error: "recent_auth_required" });
+      return;
+    }
+
     const accessToken = await fetchAccessToken(credentials);
 
     const result = await deleteManagedUser({

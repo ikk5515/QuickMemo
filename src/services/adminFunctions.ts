@@ -14,6 +14,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   orderBy,
   query,
   runTransaction,
@@ -25,6 +26,7 @@ import {
 } from "firebase/firestore";
 import { normalizeFeatureAccess } from "../lib/featureAccess";
 import { appCheckSiteKey, auth, db, firebaseConfig } from "../lib/firebase";
+import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
 import type { FeatureAccess, NewUserPayload, PublicRosterUser, UserProfile } from "../types";
 
 export interface BootstrapState {
@@ -67,13 +69,21 @@ export interface ManagedUserDeleteProgress {
 
 const managedUserDeleteMaxAttempts = 30;
 
+function assertNewPasswordPolicy(password: string) {
+  if (!newPasswordMeetsMinimum(password)) {
+    throw new Error(`비밀번호는 ${minimumNewPasswordLength}자 이상이어야 합니다.`);
+  }
+}
+
 function makeLoginEmail() {
   const alias = `qm_${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`;
   return `${alias}@quickmemo.local`;
 }
 
 async function nextOrder() {
-  const snapshot = await getDocs(query(collection(db, "users"), orderBy("order", "desc")));
+  const snapshot = await getDocs(
+    query(collection(db, "users"), orderBy("order", "desc"), limit(1))
+  );
   const [lastUser] = snapshot.docs;
   return lastUser ? Number(lastUser.get("order") ?? 0) + 1 : 1;
 }
@@ -196,6 +206,7 @@ export async function getBootstrapState(): Promise<BootstrapState> {
 }
 
 export async function createFirstAdmin(payload: FirstAdminPayload): Promise<CreatedUserResult> {
+  assertNewPasswordPolicy(payload.password);
   const loginEmail = makeLoginEmail();
   const created = await createSecondaryAuthUser(payload.displayName, loginEmail, payload.password);
 
@@ -232,6 +243,7 @@ export async function createFirstAdmin(payload: FirstAdminPayload): Promise<Crea
 }
 
 export async function createUser(payload: NewUserPayload): Promise<CreatedUserResult> {
+  assertNewPasswordPolicy(payload.password);
   const loginEmail = makeLoginEmail();
   const created = await createSecondaryAuthUser(payload.displayName, loginEmail, payload.password);
 
@@ -247,6 +259,13 @@ export async function createUser(payload: NewUserPayload): Promise<CreatedUserRe
 }
 
 export async function updateUser(payload: UpdateUserPayload) {
+  if (
+    payload.uid === auth.currentUser?.uid
+    && (!payload.isAdmin || !payload.isActive)
+  ) {
+    throw new Error("현재 로그인한 관리자의 관리자·활성 상태는 해제할 수 없습니다.");
+  }
+
   await runTransaction(db, async (transaction) => {
     const userReference = doc(db, "users", payload.uid);
     const rosterReference = doc(db, "publicLoginRoster", payload.uid);
@@ -318,14 +337,14 @@ export async function deleteManagedUserDocuments(
   user: Pick<UserProfile, "uid" | "quickKey">,
   onProgress?: (progress: ManagedUserDeleteProgress) => void
 ) {
+  const idToken = await auth.currentUser?.getIdToken(true);
+
+  if (!idToken) {
+    throw new Error("관리자 인증을 확인할 수 없습니다.");
+  }
+
   for (let attempt = 1; attempt <= managedUserDeleteMaxAttempts; attempt += 1) {
     onProgress?.({ attempt, maxAttempts: managedUserDeleteMaxAttempts });
-
-    const idToken = await auth.currentUser?.getIdToken();
-
-    if (!idToken) {
-      throw new Error("관리자 인증을 확인할 수 없습니다.");
-    }
 
     const response = await fetch("/api/delete-managed-user", {
       method: "POST",
@@ -346,6 +365,9 @@ export async function deleteManagedUserDocuments(
     }
 
     if (!response.ok) {
+      if (result?.error === "recent_auth_required") {
+        throw new Error("관리자 중요 작업을 계속하려면 로그아웃 후 다시 로그인해주세요.");
+      }
       throw new Error(result?.error ?? "사용자를 삭제하지 못했습니다.");
     }
 

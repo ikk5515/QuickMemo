@@ -65,7 +65,11 @@ async function startConfiguredSecureShareApiHarness(
   };
 }
 
-function ownerCreateBody(sourceNoteId: string, idempotencyKey: string) {
+function ownerCreateBody(
+  sourceNoteId: string,
+  idempotencyKey: string,
+  wrappedKeyBytes = 256
+) {
   return {
     sourceNoteId,
     sourceRevision: 1,
@@ -85,7 +89,7 @@ function ownerCreateBody(sourceNoteId: string, idempotencyKey: string) {
     ownerWrappedShareKey: {
       version: 1,
       algorithm: "RSA-OAEP",
-      wrappedKey: Buffer.alloc(256, 5).toString("base64")
+      wrappedKey: Buffer.alloc(wrappedKeyBytes, 5).toString("base64")
     },
     attachmentCount: 0,
     idempotencyKey,
@@ -109,6 +113,7 @@ async function ownerCreateRequest(input: {
   idempotencyKey: string;
   networkSuffix: number;
   sourceNoteId: string;
+  wrappedKeyBytes?: number;
 }) {
   const response = await fetch(
     `${input.harness.origin}/api/public-shares-v2?action=owner-create`,
@@ -118,7 +123,11 @@ async function ownerCreateRequest(input: {
         authorization: input.idToken,
         networkSuffix: input.networkSuffix
       }),
-      body: JSON.stringify(ownerCreateBody(input.sourceNoteId, input.idempotencyKey))
+      body: JSON.stringify(ownerCreateBody(
+        input.sourceNoteId,
+        input.idempotencyKey,
+        input.wrappedKeyBytes
+      ))
     }
   );
   return {
@@ -473,6 +482,48 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     } finally {
       process.env.NODE_ENV = "test";
     }
+  });
+
+  it("creates a share with a new RSA-3072 owner-wrapped content key", async () => {
+    const owner = await createEmulatorOwner(
+      "rsa-3072-owner@example.test",
+      "emulator-owner-password"
+    );
+    const sourceNoteId = "source_note_rsa_3072";
+    await writeEmulatorDocuments([
+      {
+        path: `users/${owner.localId}`,
+        fields: {
+          displayName: "RSA 3072 Owner",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: owner.localId
+        }
+      },
+      {
+        path: `notes/${sourceNoteId}`,
+        fields: {
+          attachmentRevision: 0,
+          isDeleted: false,
+          isPurged: false,
+          ownerUid: owner.localId,
+          revision: 1
+        }
+      }
+    ]);
+
+    const { body, response } = await ownerCreateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "rsa_3072_create_attempt",
+      networkSuffix: 79,
+      sourceNoteId,
+      wrappedKeyBytes: 384
+    });
+
+    expect(response.status).toBe(201);
+    expect(body).toMatchObject({ ok: true });
   });
 
   it("creates at most one live share per source note and replaces stale guards safely", async () => {
@@ -1439,6 +1490,397 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     });
   }, 15_000);
 
+  it("recovers the same bound OTP attempt without duplicating its participant", async () => {
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SECURE_SHARE_PARTICIPANT_IDENTITY_ENABLED: "true",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    const shareId = "otp_same_attempt_recovery";
+    const challengeId = "otp_same_attempt_challenge";
+    const emailHash = emailDigest("otp-recovery@example.test");
+    const otp = "135790";
+    const unlockAttemptId = "otp_recovery_attempt_0001";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailHash],
+      challenge: {
+        codeDigest: otpCodeDigest(challengeId, shareId, emailHash, otp),
+        emailHash,
+        id: challengeId
+      },
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      permissionLevel: "comment",
+      shareId
+    });
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 72
+    });
+    const body = {
+      challengeId,
+      displayName: "OTP recovery viewer",
+      otp,
+      unlockAttemptId
+    };
+
+    const first = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body,
+      harness,
+      networkSuffix: 72,
+      shareId
+    });
+    expect(first.response.status).toBe(200);
+    const firstSessionCookie = responseCookie(first.response, "qmss_");
+    const consumedChallenge = await readEmulatorDocument(
+      `publicShareEmailChallenges/${challengeId}`
+    );
+    expect(consumedChallenge).toMatchObject({
+      status: "consumed"
+    });
+
+    const recovered = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body,
+      harness,
+      networkSuffix: 72,
+      shareId
+    });
+    expect(recovered.response.status).toBe(200);
+    expect(responseCookie(recovered.response, "qmss_")).toBe(firstSessionCookie);
+    expect(recovered.body.csrfToken).toBe(first.body.csrfToken);
+    expect(await readEmulatorDocument(
+      `publicShareEmailChallenges/${challengeId}`
+    )).toMatchObject({
+      __updateTime: consumedChallenge?.__updateTime,
+      consumedAttemptHash: consumedChallenge?.consumedAttemptHash,
+      status: "consumed"
+    });
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    )).toHaveLength(1);
+    expect(await listEmulatorCollection("publicShareAccessSessions")).toHaveLength(1);
+    expect(await readEmulatorDocument(`publicNoteShares/${shareId}`)).toMatchObject({
+      successfulAccessCount: 1
+    });
+    expect((await listEmulatorCollection(
+      `publicShareAuditEvents/${shareId}/items`
+    )).filter((event) => event.eventType === "viewer_access")).toHaveLength(1);
+
+    const refreshed = await refreshParticipantSession({
+      harness,
+      session: {
+        bindingCookie: metadata.bindingCookie,
+        csrfToken: String(first.body.csrfToken),
+        sessionCookie: firstSessionCookie
+      },
+      shareId
+    });
+    expect(refreshed.response.status).toBe(200);
+    const reusedAfterCsrfRotation = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body,
+      harness,
+      networkSuffix: 72,
+      shareId
+    });
+    expect(reusedAfterCsrfRotation.response.status).toBe(409);
+    expect(reusedAfterCsrfRotation.body).toMatchObject({
+      error: "access_denied",
+      ok: false
+    });
+
+    const differentAttempt = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        ...body,
+        unlockAttemptId: "otp_recovery_attempt_0002"
+      },
+      harness,
+      networkSuffix: 72,
+      shareId
+    });
+    expect(differentAttempt.response.status).toBe(409);
+    expect(differentAttempt.body).toMatchObject({
+      error: "access_denied",
+      ok: false
+    });
+    expect(await listEmulatorCollection("publicShareAccessSessions")).toHaveLength(1);
+
+    const reissuedOtp = "246801";
+    const reissuedSendAttemptId = "send_otp_recovery_reissued_0002";
+    await writeEmulatorDocuments([
+      {
+        path: `publicShareEmailChallenges/${challengeId}`,
+        fields: {
+          attempts: 0,
+          codeDigest: otpCodeDigest(
+            challengeId,
+            shareId,
+            emailHash,
+            reissuedOtp
+          ),
+          createdAt: new Date(),
+          emailHash,
+          expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          ownerUid: "owner_user",
+          policyVersion: 1,
+          sendAttemptId: reissuedSendAttemptId,
+          shareId,
+          status: "pending",
+          updatedAt: new Date()
+        }
+      }
+    ]);
+    const reissued = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: {
+        ...body,
+        otp: reissuedOtp
+      },
+      harness,
+      networkSuffix: 72,
+      shareId
+    });
+    expect(reissued.response.status).toBe(200);
+    expect(responseCookie(reissued.response, "qmss_")).not.toBe(firstSessionCookie);
+    expect(reissued.body.csrfToken).not.toBe(first.body.csrfToken);
+    expect(await listEmulatorCollection(
+      `publicShareParticipants/${shareId}/items`
+    )).toHaveLength(1);
+    expect(await listEmulatorCollection("publicShareAccessSessions")).toHaveLength(2);
+    expect(await readEmulatorDocument(`publicNoteShares/${shareId}`)).toMatchObject({
+      successfulAccessCount: 2
+    });
+    expect((await listEmulatorCollection(
+      `publicShareAuditEvents/${shareId}/items`
+    )).filter((event) => event.eventType === "viewer_access")).toHaveLength(2);
+  }, 30_000);
+
+  it("preserves a consumed one-time OTP issuance when another email request arrives", async () => {
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    const shareId = "otp_consumed_issuance_preserved";
+    const email = "otp-consumed-preserved@example.test";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailDigest(email)],
+      emailVerificationRequired: true,
+      oneTimeEnabled: true,
+      shareId
+    });
+
+    const realFetch = globalThis.fetch.bind(globalThis);
+    let issuedOtp = "";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: URL | RequestInfo, init?: RequestInit) => {
+        if (String(input) === "https://api.resend.com/emails") {
+          const payload = JSON.parse(String(init?.body)) as { text?: string };
+          issuedOtp = /\n\n(\d{6})\n\n/u.exec(payload.text ?? "")?.[1] ?? "";
+          return new Response(JSON.stringify({ id: "one_time_message_0001" }), {
+            headers: { "content-type": "application/json" },
+            status: 200
+          });
+        }
+        return realFetch(input, init);
+      }
+    );
+    let challengeResponse: Awaited<ReturnType<typeof emailChallengeRequest>>;
+    try {
+      challengeResponse = await emailChallengeRequest({
+        email,
+        harness,
+        networkSuffix: 79,
+        shareId
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+    expect(challengeResponse.response.status).toBe(202);
+    expect(issuedOtp).toMatch(/^\d{6}$/u);
+    const challengeId = String(challengeResponse.body.challengeId);
+    const metadata = await metadataBinding(harness.origin, shareId, {
+      networkSuffix: 80
+    });
+    const body = {
+      challengeId,
+      oneTimeOpenConfirmed: true,
+      otp: issuedOtp,
+      unlockAttemptId: "otp_consumed_preserved_attempt_0001"
+    };
+    const first = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body,
+      harness,
+      networkSuffix: 80,
+      shareId
+    });
+    expect(first.response.status).toBe(200);
+    const firstSessionCookie = responseCookie(first.response, "qmss_");
+
+    await patchEmulatorDocuments([
+      {
+        path: `publicShareEmailChallenges/${challengeId}`,
+        fields: {
+          resendNotBefore: new Date(Date.now() - 1_000)
+        }
+      }
+    ]);
+    const protectedChallenge = await readEmulatorDocument(
+      `publicShareEmailChallenges/${challengeId}`
+    );
+    expect(protectedChallenge).toMatchObject({
+      status: "consumed"
+    });
+    const suppressedRetry = await emailChallengeRequest({
+      email,
+      harness,
+      networkSuffix: 81,
+      shareId
+    });
+    expect(suppressedRetry.response.status).toBe(202);
+    expect(await readEmulatorDocument(
+      `publicShareEmailChallenges/${challengeId}`
+    )).toMatchObject({
+      __updateTime: protectedChallenge?.__updateTime,
+      consumedAttemptHash: protectedChallenge?.consumedAttemptHash,
+      sendAttemptId: protectedChallenge?.sendAttemptId,
+      status: "consumed"
+    });
+
+    const recovered = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body,
+      harness,
+      networkSuffix: 80,
+      shareId
+    });
+    expect(recovered.response.status).toBe(200);
+    expect(responseCookie(recovered.response, "qmss_")).toBe(firstSessionCookie);
+    expect(recovered.body.csrfToken).toBe(first.body.csrfToken);
+    expect(await listEmulatorCollection("publicShareAccessSessions")).toHaveLength(1);
+    expect(await readEmulatorDocument(`publicNoteShares/${shareId}`)).toMatchObject({
+      successfulAccessCount: 1
+    });
+  }, 30_000);
+
+  it("does not reopen an OTP challenge consumed while its provider result is pending", async () => {
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    const shareId = "otp_provider_finalize_consumed_race";
+    const email = "otp-finalize-race@example.test";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailDigest(email)],
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      shareId
+    });
+
+    const realFetch = globalThis.fetch.bind(globalThis);
+    let issuedOtp = "";
+    let signalProviderStarted: () => void = () => undefined;
+    const providerStarted = new Promise<void>((resolve) => {
+      signalProviderStarted = resolve;
+    });
+    let resolveProvider: (response: Response) => void = () => undefined;
+    const providerResult = new Promise<Response>((resolve) => {
+      resolveProvider = resolve;
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: URL | RequestInfo, init?: RequestInit) => {
+        if (String(input) === "https://api.resend.com/emails") {
+          const payload = JSON.parse(String(init?.body)) as { text?: string };
+          issuedOtp = /\n\n(\d{6})\n\n/u.exec(payload.text ?? "")?.[1] ?? "";
+          signalProviderStarted();
+          return providerResult;
+        }
+        return realFetch(input, init);
+      }
+    );
+    const pendingChallenge = emailChallengeRequest({
+      email,
+      harness,
+      networkSuffix: 82,
+      shareId
+    });
+    try {
+      await providerStarted;
+      expect(issuedOtp).toMatch(/^\d{6}$/u);
+      const challenge = (await listEmulatorCollection(
+        "publicShareEmailChallenges"
+      ))[0];
+      expect(challenge).toMatchObject({
+        deliveryStatus: "reserved",
+        status: "pending"
+      });
+      const metadata = await metadataBinding(harness.origin, shareId, {
+        networkSuffix: 83
+      });
+      const access = await accessRequest({
+        bindingCookie: metadata.bindingCookie,
+        body: {
+          challengeId: challenge.__id,
+          otp: issuedOtp,
+          unlockAttemptId: "otp_finalize_race_attempt_0001"
+        },
+        harness,
+        networkSuffix: 83,
+        shareId
+      });
+      expect(access.response.status).toBe(200);
+      expect(await readEmulatorDocument(
+        `publicShareEmailChallenges/${challenge.__id}`
+      )).toMatchObject({
+        status: "consumed"
+      });
+
+      resolveProvider(new Response(JSON.stringify({
+        id: "finalize_race_message_0001"
+      }), {
+        headers: { "content-type": "application/json" },
+        status: 200
+      }));
+      const challengeResponse = await pendingChallenge;
+      expect(challengeResponse.response.status).toBe(202);
+      expect(await readEmulatorDocument(
+        `publicShareEmailChallenges/${challenge.__id}`
+      )).toMatchObject({
+        consumedAttemptHash: expect.any(String),
+        deliveryStatus: "reserved",
+        status: "consumed"
+      });
+      expect((await listEmulatorCollection(
+        "publicShareEmailDeliveries"
+      ))[0]).toMatchObject({
+        status: "sent"
+      });
+      expect((await listEmulatorCollection(
+        "publicShareEmailQuotaBuckets"
+      )).every((bucket) => (
+        bucket.reservedCount === 0
+        && bucket.sentCount === 1
+      ))).toBe(true);
+    } finally {
+      resolveProvider(new Response("{}", { status: 503 }));
+      fetchSpy.mockRestore();
+    }
+  }, 30_000);
+
   it("keeps a signed-in caller on one QuickMemo participant after required OTPs", async () => {
     Object.assign(process.env, {
       SECURE_SHARE_EMAIL_ENABLED: "true",
@@ -1504,6 +1946,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
           expiresAt: new Date(Date.now() + 10 * 60 * 1000),
           ownerUid: "owner_user",
           policyVersion: 1,
+          sendAttemptId: "send_signed_in_otp_challenge_0002",
           shareId,
           status: "pending",
           updatedAt: new Date(Date.now() - 5_000)
@@ -2238,6 +2681,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
           expiresAt: new Date(Date.now() + 10 * 60 * 1000),
           ownerUid: "owner_user",
           policyVersion: 1,
+          sendAttemptId: "send_participant_same_email_challenge_0002",
           shareId,
           status: "pending",
           updatedAt: new Date(Date.now() - 5_000)
@@ -2794,7 +3238,15 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       }))
     );
 
-    expect(accesses.every(({ response }) => response.status === 200)).toBe(true);
+    expect(accesses.map(({ body, response }) => ({
+      body,
+      retryAfter: response.headers.get("retry-after"),
+      status: response.status
+    }))).toEqual(Array.from({ length: 20 }, () => ({
+      body: expect.objectContaining({ ok: true }),
+      retryAfter: null,
+      status: 200
+    })));
     const participants = await listEmulatorCollection(
       `publicShareParticipants/${shareId}/items`
     );

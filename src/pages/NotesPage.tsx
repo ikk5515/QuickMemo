@@ -4154,6 +4154,17 @@ export default function NotesPage() {
     let checkedSecureShares = secureShares;
     let operation: SecureShareOwnerOperationContext | null = null;
 
+    if (
+      secureShareFlags.clientV2Enabled
+      && !secureShareFlags.v2Enabled
+      && !activePublicShare
+    ) {
+      const message = "보안 공유 기능 상태를 확인하지 못해 새 공유 링크 생성을 차단했습니다.";
+      setPublicShareError(message);
+      setStatus(message);
+      return;
+    }
+
     if (secureShareFlags.v2Enabled && !activePublicShare) {
       try {
         operation = captureSecureShareOwnerOperation();
@@ -4881,6 +4892,11 @@ export default function NotesPage() {
 
   async function createCurrentPublicShare(password = "") {
     if (publicShareBusy) {
+      return;
+    }
+
+    if (secureShareFlags.clientV2Enabled) {
+      setPublicShareError("보안 공유 v2 환경에서는 기존 방식의 공유 링크를 새로 만들 수 없습니다.");
       return;
     }
 

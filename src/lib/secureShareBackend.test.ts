@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import handler, {
@@ -26,10 +27,12 @@ import handler, {
   normalizeAllowedEmails,
   normalizeEmail,
   otpCodeDigest,
+  participantAllocationQueueSnapshot,
   otpVerificationFailureMinimumResponseMilliseconds,
   padEmailChallengeResponse,
   padOtpVerificationFailureResponse,
   readJsonBody,
+  revalidateParticipantAllocationChallenge,
   resolveAccessIdentity,
   resolveEmailQuotaPolicy,
   safeDisplayName,
@@ -45,7 +48,8 @@ import handler, {
   verificationEmailText,
   verifiedAnonymousParticipantToken,
   verifySharePassword,
-  verifySignedOpaqueToken
+  verifySignedOpaqueToken,
+  withParticipantAllocationQueue
 } from "../../api/public-shares-v2.js";
 
 const backendSource = readFileSync(join(process.cwd(), "api/public-shares-v2.js"), "utf8");
@@ -449,6 +453,7 @@ describe("Secure Share v2 cryptographic primitives", () => {
           emailHash: firstEmailHash,
           expiresAt: new Date(Date.now() + 10 * 60 * 1000),
           policyVersion: 3,
+          sendAttemptId: "send_caller_otp_a",
           shareId,
           status: "pending"
         })
@@ -466,6 +471,7 @@ describe("Secure Share v2 cryptographic primitives", () => {
           emailHash: secondEmailHash,
           expiresAt: new Date(Date.now() + 10 * 60 * 1000),
           policyVersion: 3,
+          sendAttemptId: "send_caller_otp_b",
           shareId,
           status: "pending"
         })
@@ -761,6 +767,374 @@ describe("Secure Share v2 cryptographic primitives", () => {
       now
     )).toBeNull();
     expect(verifySignedOpaqueToken(token, purpose, secret, now + 301)).toBeNull();
+  });
+});
+
+describe("Secure Share participant allocation queue", () => {
+  it("serializes one share, keeps different shares parallel, and advances after predecessor failure", async () => {
+    let sameShareActive = 0;
+    let sameShareMaximum = 0;
+    const completionOrder: number[] = [];
+    const sameShareResults = await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        withParticipantAllocationQueue("queue_same_share", async () => {
+          sameShareActive += 1;
+          sameShareMaximum = Math.max(sameShareMaximum, sameShareActive);
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          completionOrder.push(index);
+          sameShareActive -= 1;
+          return index;
+        })
+      )
+    );
+    expect(sameShareMaximum).toBe(1);
+    expect(completionOrder).toEqual(Array.from({ length: 20 }, (_, index) => index));
+    expect(sameShareResults).toEqual(completionOrder);
+
+    let differentShareActive = 0;
+    let differentShareMaximum = 0;
+    await Promise.all(["queue_share_a", "queue_share_b"].map((shareId) =>
+      withParticipantAllocationQueue(shareId, async () => {
+        differentShareActive += 1;
+        differentShareMaximum = Math.max(
+          differentShareMaximum,
+          differentShareActive
+        );
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        differentShareActive -= 1;
+      })
+    ));
+    expect(differentShareMaximum).toBe(2);
+
+    let rejectPredecessor: (error: Error) => void = () => undefined;
+    const predecessorBlocker = new Promise<never>((_resolve, reject) => {
+      rejectPredecessor = reject;
+    });
+    const predecessor = withParticipantAllocationQueue(
+      "queue_error_release",
+      async () => {
+        await predecessorBlocker;
+      }
+    );
+    let successorStarted = false;
+    const successor = withParticipantAllocationQueue(
+      "queue_error_release",
+      async () => {
+        successorStarted = true;
+        return "released";
+      }
+    );
+    rejectPredecessor(new Error("synthetic queue failure"));
+    await expect(predecessor).rejects.toThrow("synthetic queue failure");
+    await expect(successor).resolves.toBe("released");
+    expect(successorStarted).toBe(true);
+    expect(participantAllocationQueueSnapshot()).toEqual({
+      liveShareKeys: 0,
+      totalEntries: 0
+    });
+  });
+
+  it("caps each share at 32 entries including active and returns a randomized Retry-After", async () => {
+    let releaseFirst: () => void = () => undefined;
+    const firstBlocker = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const queued = Array.from({ length: 32 }, (_, index) =>
+      withParticipantAllocationQueue("queue_pending_cap", async () => {
+        if (index === 0) {
+          await firstBlocker;
+        }
+        return index;
+      })
+    );
+
+    await expect(withParticipantAllocationQueue(
+      "queue_pending_cap",
+      async () => 33
+    )).rejects.toSatisfy((error: unknown) =>
+      error instanceof HttpError
+      && error.statusCode === 429
+      && error.code === "rate_limited"
+      && Number.isInteger(error.retryAfter)
+      && (error.retryAfter ?? 0) >= 2
+      && (error.retryAfter ?? 0) <= 5
+    );
+    releaseFirst();
+    await expect(Promise.all(queued)).resolves.toEqual(
+      Array.from({ length: 32 }, (_, index) => index)
+    );
+    expect(participantAllocationQueueSnapshot()).toEqual({
+      liveShareKeys: 0,
+      totalEntries: 0
+    });
+  });
+
+  it("caps live share keys at 64 and total queued plus active work at 256", async () => {
+    let releaseShareCap: () => void = () => undefined;
+    const shareCapBlocker = new Promise<void>((resolve) => {
+      releaseShareCap = resolve;
+    });
+    const liveShares = Array.from({ length: 64 }, (_, index) =>
+      withParticipantAllocationQueue(`queue_live_share_${index}`, async () => {
+        await shareCapBlocker;
+        return index;
+      })
+    );
+    expect(participantAllocationQueueSnapshot()).toEqual({
+      liveShareKeys: 64,
+      totalEntries: 64
+    });
+    await expect(withParticipantAllocationQueue(
+      "queue_live_share_overflow",
+      async () => "overflow"
+    )).rejects.toMatchObject({
+      code: "rate_limited",
+      statusCode: 429
+    });
+    releaseShareCap();
+    await Promise.all(liveShares);
+
+    let releaseTotalCap: () => void = () => undefined;
+    const totalCapBlocker = new Promise<void>((resolve) => {
+      releaseTotalCap = resolve;
+    });
+    const totalEntries = Array.from({ length: 8 }, (_, shareIndex) =>
+      Array.from({ length: 32 }, (_, entryIndex) =>
+        withParticipantAllocationQueue(
+          `queue_total_share_${shareIndex}`,
+          async () => {
+            if (entryIndex === 0) {
+              await totalCapBlocker;
+            }
+            return `${shareIndex}:${entryIndex}`;
+          }
+        )
+      )
+    ).flat();
+    expect(participantAllocationQueueSnapshot()).toEqual({
+      liveShareKeys: 8,
+      totalEntries: 256
+    });
+    await expect(withParticipantAllocationQueue(
+      "queue_total_overflow",
+      async () => "overflow"
+    )).rejects.toMatchObject({
+      code: "rate_limited",
+      statusCode: 429
+    });
+    releaseTotalCap();
+    await Promise.all(totalEntries);
+    expect(participantAllocationQueueSnapshot()).toEqual({
+      liveShareKeys: 0,
+      totalEntries: 0
+    });
+  });
+
+  it("removes disconnected pending request/response work without cancelling active work", async () => {
+    let releaseActive: () => void = () => undefined;
+    const activeBlocker = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    const active = withParticipantAllocationQueue(
+      "queue_disconnect",
+      async () => {
+        await activeBlocker;
+        return "active-finished";
+      }
+    );
+    const request = Object.assign(new EventEmitter(), {
+      aborted: false,
+      complete: false,
+      destroyed: false
+    });
+    let requestPendingStarted = false;
+    const requestPending = withParticipantAllocationQueue(
+      "queue_disconnect",
+      async () => {
+        requestPendingStarted = true;
+        return "should-not-run";
+      },
+      request
+    );
+    const response = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      writableEnded: false
+    });
+    let responsePendingStarted = false;
+    const responsePending = withParticipantAllocationQueue(
+      "queue_disconnect",
+      async () => {
+        responsePendingStarted = true;
+        return "should-not-run";
+      },
+      undefined,
+      response
+    );
+    request.aborted = true;
+    request.destroyed = true;
+    request.emit("aborted");
+    response.destroyed = true;
+    response.emit("close");
+    await expect(requestPending).rejects.toMatchObject({
+      code: "rate_limited",
+      statusCode: 429
+    });
+    await expect(responsePending).rejects.toMatchObject({
+      code: "rate_limited",
+      statusCode: 429
+    });
+    expect(requestPendingStarted).toBe(false);
+    expect(responsePendingStarted).toBe(false);
+    expect(participantAllocationQueueSnapshot()).toEqual({
+      liveShareKeys: 1,
+      totalEntries: 1
+    });
+    releaseActive();
+    await expect(active).resolves.toBe("active-finished");
+    expect(participantAllocationQueueSnapshot()).toEqual({
+      liveShareKeys: 0,
+      totalEntries: 0
+    });
+  });
+
+  it("times pending work out after 15 seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseActive: () => void = () => undefined;
+      const activeBlocker = new Promise<void>((resolve) => {
+        releaseActive = resolve;
+      });
+      const active = withParticipantAllocationQueue(
+        "queue_wait_timeout",
+        async () => {
+          await activeBlocker;
+          return "active";
+        }
+      );
+      const pending = withParticipantAllocationQueue(
+        "queue_wait_timeout",
+        async () => "pending"
+      );
+      const pendingResult = expect(pending).rejects.toMatchObject({
+        code: "rate_limited",
+        statusCode: 429
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await pendingResult;
+      expect(participantAllocationQueueSnapshot()).toEqual({
+        liveShareKeys: 1,
+        totalEntries: 1
+      });
+      releaseActive();
+      await expect(active).resolves.toBe("active");
+      expect(participantAllocationQueueSnapshot()).toEqual({
+        liveShareKeys: 0,
+        totalEntries: 0
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never reports a timeout while active work may still commit and holds the gate", async () => {
+    vi.useFakeTimers();
+    try {
+      let releaseActive: () => void = () => undefined;
+      const activeBlocker = new Promise<void>((resolve) => {
+        releaseActive = resolve;
+      });
+      let activeSignal: AbortSignal | undefined;
+      const active = withParticipantAllocationQueue(
+        "queue_settlement_budget",
+        async ({ signal }) => {
+          activeSignal = signal;
+          await activeBlocker;
+          return "late-success";
+        }
+      );
+      let activeSettled = false;
+      void active.then(
+        () => {
+          activeSettled = true;
+        },
+        () => {
+          activeSettled = true;
+        }
+      );
+      await vi.advanceTimersByTimeAsync(14_000);
+      let successorStarted = false;
+      const successor = withParticipantAllocationQueue(
+        "queue_settlement_budget",
+        async () => {
+          successorStarted = true;
+          return "successor";
+        }
+      );
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(activeSettled).toBe(false);
+      expect(successorStarted).toBe(false);
+      expect(activeSignal?.aborted).toBe(false);
+      expect(participantAllocationQueueSnapshot()).toEqual({
+        liveShareKeys: 1,
+        totalEntries: 2
+      });
+      releaseActive();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(active).resolves.toBe("late-success");
+      await expect(successor).resolves.toBe("successor");
+      expect(successorStarted).toBe(true);
+      expect(participantAllocationQueueSnapshot()).toEqual({
+        liveShareKeys: 0,
+        totalEntries: 0
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("revalidates queued policy state at execution time and documents cross-isolate authority", async () => {
+    let releasePredecessor: () => void = () => undefined;
+    const predecessorBlocker = new Promise<void>((resolve) => {
+      releasePredecessor = resolve;
+    });
+    const predecessor = withParticipantAllocationQueue(
+      "queue_policy_change",
+      async () => {
+        await predecessorBlocker;
+      }
+    );
+    let policyActive = true;
+    const successor = withParticipantAllocationQueue(
+      "queue_policy_change",
+      async () => {
+        if (!policyActive) {
+          throw new HttpError(404, "share_unavailable");
+        }
+        return "unsafe-success";
+      }
+    );
+    policyActive = false;
+    releasePredecessor();
+    await predecessor;
+    await expect(successor).rejects.toMatchObject({
+      code: "share_unavailable",
+      statusCode: 404
+    });
+
+    const queueSource = backendSource.match(
+      /function participantAllocationQueueRetryAfter[\s\S]*?async function issueAccessSession/u
+    )?.[0] ?? "";
+    const issueSource = backendSource.match(
+      /async function issueAccessSession[\s\S]*?async function handleAccess/u
+    )?.[0] ?? "";
+    expect(queueSource).toContain(
+      "Every operation keeps\n  // its Firestore transaction as the cross-isolate authorization authority."
+    );
+    expect(issueSource).toContain("const state = await loadShareState(context, shareId)");
+    expect(issueSource).toContain("assertPublicShareAvailable(state)");
+    expect(issueSource).toContain(
+      "firestoreCommit(context, writes, participantAllocation.transaction)"
+    );
   });
 });
 
@@ -1398,6 +1772,25 @@ describe("Secure Share v2 email and identity defenses", () => {
     ]);
   });
 
+  it("binds email finalization and consumed one-time preservation to the issuance", () => {
+    const commitSource = backendSource.match(
+      /async function commitEmailChallenge[\s\S]*?async function finalizeEmailDelivery/u
+    )?.[0] ?? "";
+    const finalizerSource = backendSource.match(
+      /async function finalizeEmailDelivery[\s\S]*?function emailChallengeMinimumResponseMilliseconds/u
+    )?.[0] ?? "";
+
+    expect(commitSource).toContain("state?.policy?.oneTimeEnabled === true");
+    expect(commitSource).toContain('state.share.status === "consumed"');
+    expect(finalizerSource).toContain('latestChallenge.status === "pending"');
+    expect(finalizerSource).toContain(
+      'latestChallenge.deliveryStatus === "reserved"'
+    );
+    expect(finalizerSource).toContain(
+      "latestChallenge.sendAttemptId === challenge.sendAttemptId"
+    );
+  });
+
   it("normalizes display names before blocking controls, bidi marks, and reserved impersonation", () => {
     expect(safeDisplayName("  Ａｌｉｃｅ   Kim  ")).toBe("Alice Kim");
     expect(() => safeDisplayName("Quick\u200BMemo")).toThrowError(
@@ -1640,6 +2033,113 @@ describe("Secure Share v2 owner, source, quota, and attachment policy", () => {
 });
 
 describe("Secure Share v2 transactional source contracts", () => {
+  it("accepts a consumed OTP only when the same bound attempt is recovering", async () => {
+    const challengeId = "queue_otp_recovery";
+    const attemptHash = "same-bound-attempt";
+    const challenge = {
+      __id: challengeId,
+      __updateTime: "2026-07-29T00:00:00.000000Z",
+      attempts: 0,
+      codeDigest: "otp-code-digest",
+      consumedAttemptHash: attemptHash,
+      emailHash: "email-hash",
+      expiresAt: new Date(Date.now() + 60_000),
+      policyVersion: 7,
+      shareId: "share-a",
+      status: "consumed"
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => fetchResponse(
+      200,
+      firestoreDocument(`publicShareEmailChallenges/${challengeId}`, challenge)
+    )));
+
+    await expect(revalidateParticipantAllocationChallenge(
+      { accessToken: "management-token", projectId: "test-project" },
+      "share-a",
+      7,
+      {
+        challenge,
+        identityHash: "verified-email-identity"
+      },
+      attemptHash
+    )).resolves.toMatchObject({
+      challenge: {
+        consumedAttemptHash: attemptHash,
+        status: "consumed"
+      }
+    });
+  });
+
+  it("revalidates an OTP challenge at the queue head and stops on a consumed predecessor", async () => {
+    const challengeId = "queue_otp_challenge";
+    const originalChallenge = {
+      __id: challengeId,
+      __updateTime: "2026-07-29T00:00:00.000000Z",
+      attempts: 0,
+      codeDigest: "otp-code-digest",
+      emailHash: "email-hash",
+      expiresAt: new Date(Date.now() + 60_000),
+      policyVersion: 7,
+      shareId: "share-a",
+      status: "pending"
+    };
+    const fetchMock = vi.fn(async () => fetchResponse(200, firestoreDocument(
+      `publicShareEmailChallenges/${challengeId}`,
+      {
+        ...originalChallenge,
+        consumedAttemptHash: "different-attempt",
+        status: "consumed"
+      }
+    )));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(revalidateParticipantAllocationChallenge(
+      { accessToken: "management-token", projectId: "test-project" },
+      "share-a",
+      7,
+      {
+        challenge: originalChallenge,
+        identityHash: "verified-email-identity"
+      },
+      "current-attempt"
+    )).rejects.toMatchObject({
+      code: "access_denied",
+      statusCode: 409
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const issueSource = backendSource.match(
+      /async function issueAccessSession[\s\S]*?async function handleAccess/u
+    )?.[0] ?? "";
+    const firstRevalidation = issueSource.indexOf(
+      "identity = await revalidateParticipantAllocationChallenge("
+    );
+    const retryRevalidation = issueSource.lastIndexOf(
+      "identity = await revalidateParticipantAllocationChallenge("
+    );
+    expect(firstRevalidation).toBeGreaterThanOrEqual(0);
+    expect(firstRevalidation).toBeLessThan(
+      issueSource.indexOf(
+        "for (let attempt = 0; attempt < participantAllocationMaximumAttempts; attempt += 1)"
+      )
+    );
+    expect(retryRevalidation).toBeGreaterThan(
+      issueSource.indexOf("isOptimisticConflict(error)")
+    );
+    expect(retryRevalidation).toBeLessThan(
+      issueSource.indexOf("await waitBeforeOptimisticRetry", retryRevalidation)
+    );
+    expect(issueSource).toContain(
+      "identity.challenge.consumedAttemptHash === attemptHash"
+    );
+    expect(issueSource).toContain("if (challengeCanBeConsumed)");
+    expect(issueSource).toContain("idempotentChallengeSessionCredentials(");
+    expect(issueSource).toContain("return recoverConsumedChallengeSession(");
+    expect(issueSource.indexOf("return recoverConsumedChallengeSession(")).toBeLessThan(
+      issueSource.indexOf("const participantAllocation = await beginParticipantAllocation")
+    );
+  });
+
   it("gives one concurrent one-time attempt the initial grant and permits only its grace replacement", async () => {
     const concurrentAttemptCount = 20;
     vi.stubEnv("SHARE_SESSION_HMAC_KEY", "s".repeat(48));
@@ -1893,7 +2393,7 @@ describe("Secure Share v2 transactional source contracts", () => {
     const issue = backendSource.match(
       /async function issueAccessSession[\s\S]*?async function handleAccess/u
     )?.[0] ?? "";
-    expect(backendSource).toContain("const participantAllocationMaximumAttempts = 24");
+    expect(backendSource).toContain("const participantAllocationMaximumAttempts = 32");
     expect(issue).toContain(
       "for (let attempt = 0; attempt < participantAllocationMaximumAttempts; attempt += 1)"
     );
@@ -1948,7 +2448,7 @@ describe("Secure Share v2 transactional source contracts", () => {
       /async function validatedSession[\s\S]*?async function handleSession/u
     )?.[0] ?? "";
     const ownerPreview = backendSource.match(
-      /async function issueOwnerPreviewSession[\s\S]*?async function issueAccessSession/u
+      /async function issueOwnerPreviewSession[\s\S]*?function participantAllocationQueueRetryAfter/u
     )?.[0] ?? "";
     expect(validation).toContain("state.share.status === \"revoked\"");
     expect(validation).toContain("session.policyVersion !== state.policy.policyVersion");
@@ -2007,13 +2507,28 @@ describe("Secure Share v2 transactional source contracts", () => {
       /async function streamAttachment[\s\S]*?async function dispatch/u
     )?.[0] ?? "";
     const headersIndex = stream.indexOf("response.statusCode = 200");
+    expect(backendSource).not.toContain('import { get } from "@vercel/blob"');
     expect(stream.indexOf("Inline attachment size mismatch")).toBeLessThan(headersIndex);
     expect(stream.indexOf("Private Blob metadata mismatch")).toBeLessThan(headersIndex);
+    expect(stream).toContain('const { get } = await import("@vercel/blob")');
     expect(stream.indexOf("const blob = await get(")).toBeLessThan(headersIndex);
     expect(stream).toContain("await pipeline(Readable.fromWeb(privateBlobStream), response)");
     expect(stream).toContain("upstream_stream_failed");
     expect(commonSource).toContain("if (response.headersSent)");
     expect(commonSource).toContain("response.destroy()");
+  });
+
+  it("accepts legacy RSA-2048 and new RSA-3072 owner-wrapped keys only", () => {
+    const wrappedKeyParser = backendSource.match(
+      /function wrappedShareKey[\s\S]*?function safeDisplayName/u
+    )?.[0] ?? "";
+
+    expect(backendSource).toContain(
+      "const supportedOwnerWrappedKeyByteLengths = new Set([256, 384])"
+    );
+    expect(wrappedKeyParser).toContain(
+      "!supportedOwnerWrappedKeyByteLengths.has(wrappedKeyBytes)"
+    );
   });
 
   it("filters owner pagination by schema and uses a document-name tie breaker", () => {

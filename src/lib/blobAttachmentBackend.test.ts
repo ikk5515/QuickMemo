@@ -85,11 +85,44 @@ describe("blob attachment backend", () => {
     expect(streamSource).toContain('valueInteger(share, "schemaVersion") === 2');
   });
 
-  it("logs redacted backend error summaries instead of raw exception objects", () => {
+  it("logs metadata-only backend error summaries instead of exception messages", () => {
+    const summarySource = blobAttachmentApiSource.match(
+      /function errorNumberField[\s\S]*?function parseJsonCredential/u
+    )?.[0] ?? "";
+
     expect(blobAttachmentApiSource).toContain("function safeErrorSummary(error)");
-    expect(blobAttachmentApiSource).toContain("redactLogMessage(error.message)");
+    expect(summarySource).toContain('kind: error instanceof Error ? "error" : "non_error"');
+    expect(summarySource).toContain("value >= 100 && value <= 599");
+    expect(summarySource).not.toContain("error.message");
+    expect(summarySource).not.toContain("error.name");
     expect(blobAttachmentApiSource).toContain('console.error("blob attachment request failed", safeErrorSummary(error))');
     expect(blobAttachmentApiSource).not.toContain('console.error("blob attachment request failed", error)');
+  });
+
+  it("reuses warm Firebase management tokens and deduplicates cold OAuth requests", () => {
+    const tokenSource = blobAttachmentApiSource.match(
+      /function accessTokenCacheKey[\s\S]*?async function lookupCallerUid/u
+    )?.[0] ?? "";
+
+    expect(blobAttachmentApiSource).toContain("const oauthRequestTimeoutMs = 8_000");
+    expect(blobAttachmentApiSource).toContain("const accessTokenRefreshSkewMs = 60_000");
+    expect(blobAttachmentApiSource).toContain("let cachedAccessToken = null");
+    expect(blobAttachmentApiSource).toContain("let pendingAccessTokenRequest = null");
+    expect(tokenSource).toContain("AbortSignal.timeout(oauthRequestTimeoutMs)");
+    expect(tokenSource).toContain("cachedAccessToken?.cacheKey === cacheKey");
+    expect(tokenSource).toContain("pendingAccessTokenRequest?.cacheKey === cacheKey");
+    expect(tokenSource).toContain("pendingAccessTokenRequest?.promise === requestPromise");
+    expect(tokenSource).not.toContain("await response.text()");
+    expect(tokenSource).not.toContain("token.access_token}`");
+  });
+
+  it("rejects disabled callers and bounds Identity Toolkit lookup time", () => {
+    const lookupSource = blobAttachmentApiSource.match(
+      /async function lookupCallerUid[\s\S]*?async function readJsonBody/u
+    )?.[0] ?? "";
+
+    expect(lookupSource).toContain("AbortSignal.timeout(oauthRequestTimeoutMs)");
+    expect(lookupSource).toContain("user?.disabled !== true");
   });
 
   it("validates metadata from the streaming Blob response without a duplicate head operation", () => {

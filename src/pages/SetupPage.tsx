@@ -5,6 +5,7 @@ import { AvatarButton } from "../components/AvatarButton";
 import { useAuth } from "../context/AuthContext";
 import { generateUserKeyBundle } from "../lib/crypto";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
+import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
 import { createFirstAdmin, getBootstrapState } from "../services/adminFunctions";
 import type { PublicRosterUser } from "../types";
 
@@ -91,6 +92,10 @@ export default function SetupPage() {
     setError(null);
 
     try {
+      if (!newPasswordMeetsMinimum(password)) {
+        throw new Error(`비밀번호는 ${minimumNewPasswordLength}자 이상이어야 합니다.`);
+      }
+
       const [keyBundle, setupTokenHash] = await Promise.all([
         generateUserKeyBundle(password),
         sha256Hex(setupCode.trim())
@@ -175,7 +180,7 @@ export default function SetupPage() {
             비밀번호
             <input
               autoComplete="new-password"
-              minLength={6}
+              minLength={minimumNewPasswordLength}
               onChange={(event) => setPassword(event.target.value)}
               required
               type="password"

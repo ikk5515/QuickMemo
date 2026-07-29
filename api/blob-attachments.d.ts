@@ -23,6 +23,14 @@ export function claimAttachmentDeletion(
   extraDeletePaths?: string[]
 ): Promise<BlobAttachmentFirestoreDocument | null>;
 
+export function lookupCallerUid(idToken: string): Promise<string>;
+
+export function safeErrorSummary(error: unknown): {
+  kind: "error" | "non_error";
+  status?: number;
+  statusCode?: number;
+};
+
 export default function handler(
   request: {
     body?: unknown;

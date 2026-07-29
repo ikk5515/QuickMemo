@@ -9,7 +9,7 @@ import type {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const KDF_ITERATIONS = 210_000;
+const KDF_ITERATIONS = 600_000;
 const PUBLIC_SHARE_PASSWORD_HASH_VERSION = 2;
 const PUBLIC_SHARE_PASSWORD_VERIFIER_PURPOSE = "quickmemo/public-share/password-verifier/v2";
 const PUBLIC_SHARE_CONTENT_KEY_PURPOSE = "quickmemo/public-share/content-key/v2";
@@ -236,7 +236,7 @@ export async function generateUserKeyBundle(password: string): Promise<UserKeyBu
   const keyPair = await crypto.subtle.generateKey(
     {
       name: "RSA-OAEP",
-      modulusLength: 2048,
+      modulusLength: 3072,
       publicExponent: new Uint8Array([1, 0, 1]),
       hash: "SHA-256"
     },

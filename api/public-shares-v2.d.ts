@@ -239,6 +239,49 @@ export function handleApiError(
   requestId: string
 ): void;
 
+export function withParticipantAllocationQueue<T>(
+  shareId: string,
+  operation: (execution: {
+    enqueuedAt: number;
+    signal: AbortSignal;
+  }) => Promise<T> | T,
+  request?: {
+    aborted?: boolean;
+    complete?: boolean;
+    destroyed?: boolean;
+    off?(eventName: string, listener: () => void): void;
+    once?(eventName: string, listener: () => void): void;
+    removeListener?(eventName: string, listener: () => void): void;
+    signal?: AbortSignal;
+  },
+  response?: {
+    destroyed?: boolean;
+    off?(eventName: string, listener: () => void): void;
+    once?(eventName: string, listener: () => void): void;
+    removeListener?(eventName: string, listener: () => void): void;
+    writableEnded?: boolean;
+  }
+): Promise<T>;
+
+export function participantAllocationQueueSnapshot(): {
+  liveShareKeys: number;
+  totalEntries: number;
+};
+
+export function revalidateParticipantAllocationChallenge(
+  context: { accessToken: string; projectId: string },
+  shareId: string,
+  verifiedPolicyVersion: number,
+  identity: {
+    challenge: Record<string, unknown> | null;
+    [key: string]: unknown;
+  },
+  attemptHash: string
+): Promise<{
+  challenge: Record<string, unknown> | null;
+  [key: string]: unknown;
+}>;
+
 export function issueAccessSession(
   request: {
     headers?: Record<string, string | string[] | undefined>;
@@ -260,7 +303,11 @@ export function issueAccessSession(
   browserBindingHash: string,
   attemptHash: string,
   networkHash: string,
-  requestId: string
+  requestId: string,
+  participantAllocationExecution?: {
+    enqueuedAt: number;
+    signal: AbortSignal;
+  }
 ): Promise<{
   csrfToken: string;
   expiresAt: string;

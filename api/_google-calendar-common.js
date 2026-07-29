@@ -103,35 +103,26 @@ export function googleCalendarResultRedirect(response, kind) {
   response.end();
 }
 
-const sensitiveLogPatterns = [
-  /Bearer\s+[A-Za-z0-9._~+/=-]+/giu,
-  /"(?:access_token|refresh_token|id_token|code|code_verifier|state)"\s*:\s*"[^"]+"/giu,
-  /"(?:idToken|private_key)"\s*:\s*"[^"]+"/giu,
-  /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gu,
-  /AIza[0-9A-Za-z_-]{35}/gu
-];
-
-export function redactLogMessage(value) {
-  return String(value)
-    .replace(sensitiveLogPatterns[0], "Bearer [redacted]")
-    .replace(sensitiveLogPatterns[1], '"credential":"[redacted]"')
-    .replace(sensitiveLogPatterns[2], '"credential":"[redacted]"')
-    .replace(sensitiveLogPatterns[3], "[redacted private key]")
-    .replace(sensitiveLogPatterns[4], "[redacted api key]")
-    .slice(0, 700);
+function errorNumberField(error, fieldName) {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+  try {
+    const value = error[fieldName];
+    return Number.isInteger(value) && value >= 100 && value <= 599
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function safeErrorSummary(error) {
-  if (error instanceof Error) {
-    return {
-      name: error.name,
-      message: redactLogMessage(error.message),
-      statusCode: Number.isInteger(error.statusCode) ? error.statusCode : undefined,
-      upstreamStatus: Number.isInteger(error.upstreamStatus) ? error.upstreamStatus : undefined
-    };
-  }
-
-  return { message: redactLogMessage(error) };
+  return {
+    kind: error instanceof Error ? "error" : "non_error",
+    statusCode: errorNumberField(error, "statusCode"),
+    upstreamStatus: errorNumberField(error, "upstreamStatus")
+  };
 }
 
 function parseJsonCredential(value) {

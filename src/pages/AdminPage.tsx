@@ -29,6 +29,7 @@ import { linkifyEditorHtml, parseEditorContent, previewTextFromHtml } from "../l
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { defaultFeatureAccess, normalizeFeatureAccess } from "../lib/featureAccess";
 import { initialsFromName } from "../lib/roster";
+import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
 import { createUser, deleteManagedUserDocuments, updateUser } from "../services/adminFunctions";
 import { deleteNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
 import { subscribeUsers } from "../services/users";
@@ -213,8 +214,8 @@ function createUserValidationError(draft: DraftUser, users: UserProfile[], fallb
     return "빠른 로그인 번호는 1부터 99까지 입력해주세요.";
   }
 
-  if (draft.password.length < 6) {
-    return "초기 비밀번호는 6자 이상 입력해주세요.";
+  if (!newPasswordMeetsMinimum(draft.password)) {
+    return `초기 비밀번호는 ${minimumNewPasswordLength}자 이상 입력해주세요.`;
   }
 
   if (users.some((user) => user.displayName.trim().toLowerCase() === displayName.toLowerCase())) {
@@ -327,16 +328,21 @@ function AdminDashboard() {
   }, []);
 
   useEffect(() => {
-    if (!profile?.isAdmin) {
+    if (!profile?.isAdmin || activeAdminTab !== "notes") {
       setNotes([]);
       return undefined;
     }
 
     return subscribeAllNotesForAdmin(setNotes, () => setNoteError("노트 목록을 불러오지 못했습니다."));
-  }, [profile?.isAdmin]);
+  }, [activeAdminTab, profile?.isAdmin]);
 
   useEffect(() => {
     let cancelled = false;
+
+    if (activeAdminTab !== "notes") {
+      setAdminNoteViews([]);
+      return undefined;
+    }
 
     async function decryptAdminNotes() {
       const nextNotes = await Promise.all(
@@ -407,7 +413,7 @@ function AdminDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [notes, privateKey, profile]);
+  }, [activeAdminTab, notes, privateKey, profile]);
 
   useEffect(() => {
     if (selectedNoteId && !adminNoteViews.some((note) => note.id === selectedNoteId)) {
@@ -743,7 +749,7 @@ function AdminDashboard() {
                 초기 비밀번호
                 <input
                   autoComplete="new-password"
-                  minLength={6}
+                  minLength={minimumNewPasswordLength}
                   onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))}
                   required
                   type="password"
@@ -1345,6 +1351,7 @@ export function EditableUserCard({
         <label className="checkbox-row">
           <input
             checked={draft.isAdmin}
+            disabled={pending || user.uid === currentUid}
             onChange={(event) =>
               updateDraft(
                 (current) => ({
@@ -1366,12 +1373,16 @@ export function EditableUserCard({
         <label className="checkbox-row">
           <input
             checked={draft.isActive}
+            disabled={pending || user.uid === currentUid}
             onChange={(event) => updateDraft((current) => ({ ...current, isActive: event.target.checked }), "immediate")}
             type="checkbox"
           />
           활성
         </label>
       </div>
+      {user.uid === currentUid && (
+        <p className="admin-share-note">현재 로그인한 관리자의 관리자·활성 상태는 다른 관리자가 변경할 수 있습니다.</p>
+      )}
 
       <div className="permission-editor">
         <FeatureAccessFields

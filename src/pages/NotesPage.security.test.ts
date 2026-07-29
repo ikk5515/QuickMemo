@@ -214,6 +214,25 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).not.toContain("window.localStorage.getItem(publicShareContentKeyStorageKey");
   });
 
+  it("fails closed instead of creating a legacy share while v2 is required", () => {
+    const openShareDialog =
+      notesPageSource.match(/async function openPublicShareDialog\(\)[\s\S]*?async function secureShareOwnerIdToken/)?.[0] ?? "";
+    const createLegacyShare =
+      notesPageSource.match(/async function createCurrentPublicShare\(password = ""\)[\s\S]*?async function copyPublicShareUrl/)?.[0] ?? "";
+
+    expect(openShareDialog).toContain("secureShareFlags.clientV2Enabled");
+    expect(openShareDialog).toContain("!secureShareFlags.v2Enabled");
+    expect(openShareDialog).toContain("새 공유 링크 생성을 차단했습니다.");
+    expect(openShareDialog.indexOf("새 공유 링크 생성을 차단했습니다.")).toBeLessThan(
+      openShareDialog.indexOf("setPublicShareOpen(true)")
+    );
+    expect(createLegacyShare).toContain("if (secureShareFlags.clientV2Enabled)");
+    expect(createLegacyShare).toContain("기존 방식의 공유 링크를 새로 만들 수 없습니다.");
+    expect(createLegacyShare.indexOf("if (secureShareFlags.clientV2Enabled)")).toBeLessThan(
+      createLegacyShare.indexOf("const shareId = await createPublicNoteShare")
+    );
+  });
+
   it("keeps attachment upload, preview, download, and delete pending states independent", () => {
     expect(notesPageSource).toContain("interface AttachmentActionBusyState");
     expect(notesPageSource).toContain("deletingIds: string[];");
