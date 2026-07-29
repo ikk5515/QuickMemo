@@ -383,6 +383,25 @@ describe("SecurePublicShareViewer", () => {
     expect(mocks.importKey).toHaveBeenCalledWith(contentKey);
   });
 
+  it("keeps the explicit open rollback without restoring the removed intro screen", async () => {
+    const user = userEvent.setup();
+    vi.stubEnv("VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED", "false");
+    mocks.getMetadata.mockResolvedValue(metadata({ hasSessionCandidate: false }));
+
+    renderViewer();
+
+    const openButton = await screen.findByRole("button", { name: "열기" });
+    expect(screen.queryByRole("heading", { name: "보안 제목" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Secure Share v2")).not.toBeInTheDocument();
+    expect(screen.queryByText("보안 공유 열기")).not.toBeInTheDocument();
+    expect(mocks.unlock).not.toHaveBeenCalled();
+
+    await user.click(openButton);
+
+    expect(await screen.findByRole("heading", { name: "보안 제목" })).toBeInTheDocument();
+    expect(mocks.unlock).toHaveBeenCalledTimes(1);
+  });
+
   it("combines password and email OTP without a separate one-time confirmation", async () => {
     const user = userEvent.setup();
     const idToken = "header.payload.signature-for-viewer";
