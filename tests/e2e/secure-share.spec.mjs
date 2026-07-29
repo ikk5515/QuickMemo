@@ -427,7 +427,7 @@ test("owner preview can delete a guest comment without consuming a one-time shar
     ownerPage.getByText("소유자/관리자 미리보기", { exact: true })
   ).toBeVisible();
   await expect(
-    ownerPage.getByRole("button", { name: "소유자/관리자 미리보기 열기" })
+    ownerPage.getByRole("button", { name: "미리보기 열기", exact: true })
   ).toHaveCount(0);
   await expect(ownerPage.getByText(guestComment)).toBeVisible();
   await ownerPage.getByRole("button", { name: /guest1 댓글 삭제/iu }).click();
