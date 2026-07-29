@@ -58,10 +58,11 @@ export function inspectRevisionRateLimit(config) {
     return { ok: false, reason: "firewall_not_enabled" };
   }
 
-  const activeValidRules = config.rules.filter(
-    (rule) => rule?.active === true && rule?.valid === true
+  const activeRules = config.rules.filter(
+    (rule) => rule?.active === true
+      && (rule?.valid === undefined || rule?.valid === true)
   );
-  const rule = activeValidRules[0];
+  const rule = activeRules[0];
   if (
     rule
     && Array.isArray(rule.conditionGroup)
