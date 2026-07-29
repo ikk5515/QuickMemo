@@ -180,7 +180,7 @@ export function isSecureShareFeatureFlagEnabled(value: unknown) {
 }
 
 const secureShareDirectEntryProductionDefault = true;
-const secureShareLiveContentSyncProductionDefault = false;
+const secureShareLiveContentSyncProductionDefault = true;
 
 function isSecureShareDefaultOnFeatureEnabled(
   value: unknown,

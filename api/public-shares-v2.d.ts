@@ -40,7 +40,7 @@ export const secureShareScryptParameters: Readonly<{
   r: 8;
 }>;
 
-export const secureShareLiveContentSyncServerProductionDefault: false;
+export const secureShareLiveContentSyncServerProductionDefault: true;
 export function secureShareLiveContentSyncEnabled(configuredValue?: string): boolean;
 export function resolveSecureShareLiveContentSyncServerFlag(
   productionDefault: boolean,

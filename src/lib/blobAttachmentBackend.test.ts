@@ -117,7 +117,7 @@ describe("blob attachment backend", () => {
     );
     expect(sourceGate).toContain("!secureShareLiveContentSyncEnabled()");
     expect(blobAttachmentApiSource).toContain(
-      "const secureShareLiveContentSyncServerProductionDefault = false"
+      "const secureShareLiveContentSyncServerProductionDefault = true"
     );
     expect(reservationSource).toContain("publicShareSourceAvailable(projectId, share, accessToken)");
     expect(reservationSource).toContain("generation: stringValue(payload.generation)");

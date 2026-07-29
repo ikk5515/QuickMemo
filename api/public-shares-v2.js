@@ -148,7 +148,7 @@ const maximumParticipantsPerShare = configuredInteger(
 );
 const participantAllocationQueues = new Map();
 let participantAllocationQueueTotalEntries = 0;
-const secureShareLiveContentSyncServerProductionDefault = false;
+const secureShareLiveContentSyncServerProductionDefault = true;
 const legacyAutomaticSourceRevokePattern = /^source_changed_[0-9a-f]{32}$/u;
 const validActions = new Set([
   "feature-status",

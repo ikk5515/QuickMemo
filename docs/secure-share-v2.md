@@ -24,11 +24,10 @@ without changing the existing end-to-end content encryption boundary.
 - Live sync requires both
   `VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED` and the server-only
   `SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED`. Its reviewed Production source
-  defaults in the client, Secure Share API, and Blob attachment API remain
-  false until the active Vercel WAF rule is verified. All three literal source
-  locks must be enabled together. A true environment value cannot bypass an
-  off source default; exact false can still roll back a source-enabled
-  release.
+  defaults in the client, Secure Share API, and Blob attachment API are
+  enabled together only after the active Vercel WAF rule is verified. A true
+  environment value cannot bypass an off source default; exact false can
+  still roll back a source-enabled release.
 - Disabling the read-only renderer flag keeps the sanitizer, element
   allowlist, and size/depth/node limits active, but restores legacy empty
   paragraph rendering. Disabling the select flag keeps the native
@@ -696,13 +695,14 @@ The client behavior flags have non-secret defaults:
 - `VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED=false`
 - `SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED=false`
 
-This Stage 0 package hard-locks all new Production surfaces off in source.
-The first three defaults are changed to true only in their individual guarded
-source-enable commits. Live sync remains source-locked off until the WAF
-preflight succeeds; changing only an environment value cannot bypass that
-lock. After a reviewed source-enable commit, exact lower-case `false` remains
-the intentional rollback. Record the resulting deployment SHA, and do not
-treat a mixed old/new browser bundle as proof that the flag changed.
+The guarded Stage 0 deployment hard-locked all new Production surfaces off in
+source. The renderer, direct entry, and unified select defaults were then
+enabled in individual guarded source commits and Production deployments. Live
+sync was enabled only after the WAF preflight succeeded, with the client,
+Secure Share API, and Blob API source locks changed together. Exact lower-case
+`false` remains the intentional rollback after each source-enable commit.
+Record the resulting deployment SHA, and do not treat a mixed old/new browser
+bundle as proof that the flag changed.
 
 Changing a Vercel environment variable requires a new Production deployment
 before runtime behavior changes.

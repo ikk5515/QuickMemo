@@ -1154,31 +1154,19 @@ describe("Secure Share participant allocation queue", () => {
 });
 
 describe("Secure Share v2 request boundary", () => {
-  it("hard-locks live sync off until the trusted server default is enabled", async () => {
-    expect(secureShareLiveContentSyncServerProductionDefault).toBe(false);
-    expect(secureShareLiveContentSyncEnabled("true")).toBe(false);
+  it("enables live sync from the trusted source default with exact false rollback", async () => {
+    expect(secureShareLiveContentSyncServerProductionDefault).toBe(true);
+    expect(secureShareLiveContentSyncEnabled()).toBe(true);
+    expect(secureShareLiveContentSyncEnabled("true")).toBe(true);
+    expect(secureShareLiveContentSyncEnabled("false")).toBe(false);
     expect(resolveSecureShareLiveContentSyncServerFlag(false, "true")).toBe(false);
     expect(resolveSecureShareLiveContentSyncServerFlag(true, undefined)).toBe(true);
     expect(resolveSecureShareLiveContentSyncServerFlag(true, "true")).toBe(true);
     expect(resolveSecureShareLiveContentSyncServerFlag(true, "false")).toBe(false);
     expect(resolveSecureShareLiveContentSyncServerFlag(true, "TRUE")).toBe(false);
 
-    vi.stubEnv("NODE_ENV", "test");
-    vi.stubEnv("VERCEL_ENV", "preview");
-    vi.stubEnv("QUICKMEMO_SECURE_SHARE_EMULATOR_LIVE_SYNC", "enabled");
-    vi.stubEnv("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080");
-    vi.stubEnv("FIREBASE_AUTH_EMULATOR_HOST", "localhost:9099");
-    expect(secureShareLiveContentSyncEnabled("true")).toBe(true);
-    vi.stubEnv("VERCEL_ENV", "production");
-    expect(secureShareLiveContentSyncEnabled("true")).toBe(false);
-    vi.stubEnv("VERCEL_ENV", "preview");
-    vi.stubEnv("FIRESTORE_EMULATOR_HOST", "firestore.example.test:8080");
-    expect(secureShareLiveContentSyncEnabled("true")).toBe(false);
-
     vi.stubEnv("SECURE_SHARE_V2_ENABLED", "true");
     vi.stubEnv("SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED", "true");
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
 
     const statusResponse = testResponse();
     await handler({
@@ -1187,25 +1175,17 @@ describe("Secure Share v2 request boundary", () => {
       headers: {}
     }, statusResponse);
     expect(statusResponse.statusCode).toBe(200);
-    expect(JSON.parse(statusResponse.body)).toEqual({ enabled: false });
+    expect(JSON.parse(statusResponse.body)).toEqual({ enabled: true });
 
-    for (const action of ["revision", "owner-content-update"]) {
-      const response = testResponse();
-      await handler({
-        method: action === "revision" ? "GET" : "PATCH",
-        url:
-          `/api/public-shares-v2?action=${action}`
-          + "&shareId=ss2_live_gate_123456",
-        headers: {}
-      }, response);
-
-      expect(response.statusCode).toBe(404);
-      expect(JSON.parse(response.body)).toMatchObject({
-        ok: false,
-        error: "not_found"
-      });
-    }
-    expect(fetchMock).not.toHaveBeenCalled();
+    vi.stubEnv("SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED", "false");
+    const rollbackStatusResponse = testResponse();
+    await handler({
+      method: "GET",
+      url: "/api/public-shares-v2?action=live-sync-status",
+      headers: {}
+    }, rollbackStatusResponse);
+    expect(rollbackStatusResponse.statusCode).toBe(200);
+    expect(JSON.parse(rollbackStatusResponse.body)).toEqual({ enabled: false });
   });
 
   it("serves feature status with all other backend configuration absent", async () => {
