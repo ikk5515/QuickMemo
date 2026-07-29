@@ -21,12 +21,12 @@ const describeEmulator =
 const benchmarkMode =
   process.env.SECURE_SHARE_BENCHMARK_MODE === "legacy" ? "legacy" : "current";
 const configuredSampleCount = Number.parseInt(
-  process.env.SECURE_SHARE_BENCHMARK_SAMPLES ?? "12",
+  process.env.SECURE_SHARE_BENCHMARK_SAMPLES ?? "20",
   10
 );
 const sampleCount = Number.isSafeInteger(configuredSampleCount)
-  ? Math.min(18, Math.max(5, configuredSampleCount))
-  : 12;
+  ? Math.min(40, Math.max(20, configuredSampleCount))
+  : 20;
 
 interface FirestoreMetrics {
   conflictResponses: number;
@@ -60,26 +60,36 @@ interface ParticipantSession {
 interface BenchmarkSummary {
   latencyMilliseconds: {
     p50: number;
+    p75: number;
     p95: number;
+    p99: number;
   };
   reads: {
     p50: number;
+    p75: number;
     p95: number;
+    p99: number;
   };
   rollbacks: number;
   samples: number;
   transactionConflicts: number;
   transactionStarts: {
     p50: number;
+    p75: number;
     p95: number;
+    p99: number;
   };
   writeAttempts: {
     p50: number;
+    p75: number;
     p95: number;
+    p99: number;
   };
   writes: {
     p50: number;
+    p75: number;
     p95: number;
+    p99: number;
   };
 }
 
@@ -239,11 +249,15 @@ function summarize(samples: BenchmarkSample[]): BenchmarkSummary {
   return {
     latencyMilliseconds: {
       p50: rounded(quantile(samples.map((sample) => sample.latencyMilliseconds), 0.5)),
-      p95: rounded(quantile(samples.map((sample) => sample.latencyMilliseconds), 0.95))
+      p75: rounded(quantile(samples.map((sample) => sample.latencyMilliseconds), 0.75)),
+      p95: rounded(quantile(samples.map((sample) => sample.latencyMilliseconds), 0.95)),
+      p99: rounded(quantile(samples.map((sample) => sample.latencyMilliseconds), 0.99))
     },
     reads: {
       p50: quantile(samples.map((sample) => sample.documentReads), 0.5),
-      p95: quantile(samples.map((sample) => sample.documentReads), 0.95)
+      p75: quantile(samples.map((sample) => sample.documentReads), 0.75),
+      p95: quantile(samples.map((sample) => sample.documentReads), 0.95),
+      p99: quantile(samples.map((sample) => sample.documentReads), 0.99)
     },
     rollbacks: samples.reduce((total, sample) => total + sample.rollbackRequests, 0),
     samples: samples.length,
@@ -253,15 +267,21 @@ function summarize(samples: BenchmarkSample[]): BenchmarkSummary {
     ),
     transactionStarts: {
       p50: quantile(samples.map((sample) => sample.transactionStarts), 0.5),
-      p95: quantile(samples.map((sample) => sample.transactionStarts), 0.95)
+      p75: quantile(samples.map((sample) => sample.transactionStarts), 0.75),
+      p95: quantile(samples.map((sample) => sample.transactionStarts), 0.95),
+      p99: quantile(samples.map((sample) => sample.transactionStarts), 0.99)
     },
     writeAttempts: {
       p50: quantile(samples.map((sample) => sample.writeAttempts), 0.5),
-      p95: quantile(samples.map((sample) => sample.writeAttempts), 0.95)
+      p75: quantile(samples.map((sample) => sample.writeAttempts), 0.75),
+      p95: quantile(samples.map((sample) => sample.writeAttempts), 0.95),
+      p99: quantile(samples.map((sample) => sample.writeAttempts), 0.99)
     },
     writes: {
       p50: quantile(samples.map((sample) => sample.successfulWrites), 0.5),
-      p95: quantile(samples.map((sample) => sample.successfulWrites), 0.95)
+      p75: quantile(samples.map((sample) => sample.successfulWrites), 0.75),
+      p95: quantile(samples.map((sample) => sample.successfulWrites), 0.95),
+      p99: quantile(samples.map((sample) => sample.successfulWrites), 0.99)
     }
   };
 }
@@ -379,6 +399,7 @@ async function commentRequest(input: {
   body?: Record<string, unknown>;
   harness: SecureShareApiHarness;
   method: "GET" | "POST";
+  networkSuffix?: number;
   session: ParticipantSession;
   shareId: string;
 }) {
@@ -389,7 +410,8 @@ async function commentRequest(input: {
       method: input.method,
       headers: apiHeaders(input.harness.origin, {
         bindingCookie: sessionCookies(input.session),
-        csrfToken: input.method === "POST" ? input.session.csrfToken : undefined
+        csrfToken: input.method === "POST" ? input.session.csrfToken : undefined,
+        networkSuffix: input.networkSuffix
       }),
       ...(input.body ? { body: JSON.stringify(input.body) } : {})
     }
@@ -616,6 +638,7 @@ describeEmulator("Secure Share opt-in performance benchmark", () => {
           },
           harness,
           method: "POST",
+          networkSuffix: 40 + index,
           session,
           shareId
         });
@@ -691,36 +714,39 @@ describeEmulator("Secure Share opt-in performance benchmark", () => {
         };
       });
 
-      const reuseShareId = "bench_participant_reuse";
-      await seedSecureShare({
-        oneTimeEnabled: false,
-        permissionLevel: "comment",
-        shareId: reuseShareId
-      });
-      const reuseMetadata = await metadataBinding(harness.origin, reuseShareId, {
-        networkSuffix: 120
-      });
-      const firstAccess = await accessRequest({
-        bindingCookie: reuseMetadata.bindingCookie,
-        harness,
-        networkSuffix: 120,
-        shareId: reuseShareId,
-        unlockAttemptId: "bench_participant_reuse_initial"
-      });
-      const reuseParticipantCookie = responseCookie(firstAccess.response, "qmsp_");
-      if (!reuseParticipantCookie) {
-        throw new Error("Reusable participant cookie was not issued");
-      }
-      operations.participantReuse = await runPreparedSamples(async (index) => async () => {
-        setParticipantFeatures(true);
-        await accessRequest({
-          bindingCookie: reuseMetadata.bindingCookie,
-          harness,
-          networkSuffix: 120,
-          participantCookie: reuseParticipantCookie,
-          shareId: reuseShareId,
-          unlockAttemptId: `bench_participant_reuse_attempt_${String(index).padStart(3, "0")}`
+      operations.participantReuse = await runPreparedSamples(async (index) => {
+        const shareId = `bench_participant_reuse_${String(index).padStart(3, "0")}`;
+        const networkSuffix = 120 + index;
+        await seedSecureShare({
+          oneTimeEnabled: false,
+          permissionLevel: "comment",
+          shareId
         });
+        const metadata = await metadataBinding(harness.origin, shareId, {
+          networkSuffix
+        });
+        const firstAccess = await accessRequest({
+          bindingCookie: metadata.bindingCookie,
+          harness,
+          networkSuffix,
+          shareId,
+          unlockAttemptId: `bench_participant_reuse_initial_${String(index).padStart(3, "0")}`
+        });
+        const participantCookie = responseCookie(firstAccess.response, "qmsp_");
+        if (!participantCookie) {
+          throw new Error("Reusable participant cookie was not issued");
+        }
+        return async () => {
+          setParticipantFeatures(true);
+          await accessRequest({
+            bindingCookie: metadata.bindingCookie,
+            harness,
+            networkSuffix,
+            participantCookie,
+            shareId,
+            unlockAttemptId: `bench_participant_reuse_attempt_${String(index).padStart(3, "0")}`
+          });
+        };
       });
 
       operations.commentCreateParticipant = await runPreparedSamples(async (index) => {
@@ -746,6 +772,7 @@ describeEmulator("Secure Share opt-in performance benchmark", () => {
             },
             harness,
             method: "POST",
+            networkSuffix: 130 + index,
             session,
             shareId
           });

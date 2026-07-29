@@ -6,6 +6,10 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          if (id === "\0commonjs-dynamic-modules") {
+            return "commonjs-runtime";
+          }
+
           if (!id.includes("node_modules")) {
             return undefined;
           }

@@ -17,6 +17,9 @@ describe("CI/CD security controls", () => {
 
   it("deploys production only from trusted master push workflow runs", () => {
     const deployCondition = vercelWorkflowSource.match(/if: \$\{\{[\s\S]*?\}\}/)?.[0] ?? "";
+    const jobsIndex = vercelWorkflowSource.indexOf("\njobs:");
+    const workflowScope = vercelWorkflowSource.slice(0, jobsIndex);
+    const deployJob = vercelWorkflowSource.slice(jobsIndex);
 
     expect(deployCondition).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(deployCondition).toContain("github.event.workflow_run.event == 'push'");
@@ -27,6 +30,18 @@ describe("CI/CD security controls", () => {
     expect(vercelWorkflowSource).toContain("uses: actions/checkout@v6");
     expect(vercelWorkflowSource).toContain("uses: actions/setup-node@v6");
     expect(vercelWorkflowSource).toContain("persist-credentials: false");
+    expect(workflowScope).not.toContain("\nconcurrency:");
+    expect(deployJob).toContain(
+      "concurrency:\n      group: vercel-production-${{ github.event.workflow_run.head_branch }}"
+    );
+    expect(deployJob).toContain("cancel-in-progress: true");
+    expect(vercelWorkflowSource).toContain("git ls-remote --exit-code origin refs/heads/master");
+    expect(vercelWorkflowSource).toContain("steps.master_at_start.outputs.current == 'true'");
+    expect(vercelWorkflowSource).toContain("steps.master_before_deploy.outputs.current == 'true'");
+    expect(vercelWorkflowSource.match(/git ls-remote --exit-code origin refs\/heads\/master/g)).toHaveLength(2);
+    expect(vercelWorkflowSource.indexOf("Revalidate master immediately before deployment")).toBeLessThan(
+      vercelWorkflowSource.indexOf("      - name: Deploy")
+    );
   });
 
   it("uses an explicitly versioned Vercel CLI without putting its token in argv", () => {
