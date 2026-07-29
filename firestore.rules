@@ -2963,6 +2963,14 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /publicShareEmailSendAttempts/{attemptId} {
+      allow read, write: if false;
+    }
+
+    match /publicShareEmailProviderHealth/{providerId} {
+      allow read, write: if false;
+    }
+
     match /publicShareCopyGrantRequests/{requestId} {
       allow read, write: if false;
     }

@@ -448,6 +448,54 @@ describe("SecurePublicShareViewer", () => {
     });
   });
 
+  it("shows only the generic free-tier message when an email quota is exhausted", async () => {
+    const user = userEvent.setup();
+    mocks.getMetadata.mockResolvedValue(metadata({
+      requiresEmailVerification: true,
+      emailChallengeRequired: true,
+      hasSessionCandidate: false
+    }));
+    mocks.requestChallenge.mockRejectedValue(
+      new SecureShareApiError("rate_limited", "private quota detail", 429, 3_600)
+    );
+
+    renderViewer();
+
+    await user.type(await screen.findByLabelText("인증 이메일"), "user@example.com");
+    await user.click(screen.getByRole("button", { name: "인증 코드 보내기" }));
+    expect(await screen.findByText(
+      "현재 무료 이메일 발송 한도에 도달해 이메일 인증을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요."
+    )).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("private quota detail");
+  });
+
+  it("shows only the generic outage message when Gmail delivery is unavailable", async () => {
+    const user = userEvent.setup();
+    mocks.getMetadata.mockResolvedValue(metadata({
+      requiresEmailVerification: true,
+      emailChallengeRequired: true,
+      hasSessionCandidate: false
+    }));
+    mocks.requestChallenge.mockRejectedValue(
+      new SecureShareApiError(
+        "email_feature_unavailable",
+        "private SMTP authentication detail",
+        503
+      )
+    );
+
+    renderViewer();
+
+    await user.type(await screen.findByLabelText("인증 이메일"), "user@example.com");
+    await user.click(screen.getByRole("button", { name: "인증 코드 보내기" }));
+    expect(await screen.findByText(
+      "현재 이메일 인증번호를 보낼 수 없습니다. 잠시 후 다시 시도해 주세요."
+    )).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(
+      "private SMTP authentication detail"
+    );
+  });
+
   it("opens a one-time link directly without sending a client confirmation field", async () => {
     mocks.getMetadata.mockResolvedValue(metadata({
       hasSessionCandidate: false,

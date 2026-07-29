@@ -1146,6 +1146,7 @@ export function getSecureShareMetadata(
 export function requestSecureShareEmailChallenge(
   shareId: string,
   email: string,
+  clientRequestId: string,
   signal?: AbortSignal
 ) {
   const normalizedEmail = normalizeSecureShareEmail(email);
@@ -1153,13 +1154,14 @@ export function requestSecureShareEmailChallenge(
   if (!normalizedEmail) {
     throw new SecureShareApiError("invalid_email", "올바른 이메일 주소를 입력해주세요.");
   }
+  assertIdentifier(clientRequestId, "clientRequestId");
 
   return secureShareApiRequest({
     action: "email-challenge",
     method: "POST",
     shareId,
     signal,
-    body: { email: normalizedEmail }
+    body: { clientRequestId, email: normalizedEmail }
   });
 }
 

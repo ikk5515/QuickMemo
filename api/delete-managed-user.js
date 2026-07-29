@@ -42,6 +42,10 @@ const secureShareRootStateCollections = [
     counterName: "secureShareEmailDeliveriesDeleted"
   },
   {
+    collectionId: "publicShareEmailSendAttempts",
+    counterName: "secureShareEmailSendAttemptsDeleted"
+  },
+  {
     collectionId: "publicShareCopyGrantRequests",
     counterName: "secureShareCopyGrantRequestsDeleted"
   },
@@ -722,7 +726,12 @@ async function querySecureShareRootStateByShareId(
     collectionId,
     "shareId",
     shareId,
-    accessToken
+    accessToken,
+    {
+      selectFieldPaths: secureShareEmailStateField(collectionId)
+        ? ["__name__", secureShareEmailStateField(collectionId)]
+        : ["__name__"]
+    }
   );
 }
 
@@ -737,7 +746,12 @@ async function queryOwnedSecureShareRootState(
     collectionId,
     "ownerUid",
     ownerUid,
-    accessToken
+    accessToken,
+    {
+      selectFieldPaths: secureShareEmailStateField(collectionId)
+        ? ["__name__", secureShareEmailStateField(collectionId)]
+        : ["__name__"]
+    }
   );
 }
 
@@ -1434,6 +1448,65 @@ async function deleteRepeatedQueryDocuments(queryDocuments, accessToken, stats, 
   throw new ManagedUserCleanupInProgressError(errorMessage);
 }
 
+function secureShareEmailStateField(collectionId) {
+  if (collectionId === "publicShareEmailDeliveries") {
+    return "status";
+  }
+  if (collectionId === "publicShareEmailSendAttempts") {
+    return "state";
+  }
+  return "";
+}
+
+async function deleteSecureShareEmailStateRepeatedly({
+  accessToken,
+  collectionId,
+  counterName,
+  errorMessage,
+  queryDocuments,
+  stats
+}) {
+  const stateField = secureShareEmailStateField(collectionId);
+  if (!stateField) {
+    throw new ManagedUserCleanupInProgressError(
+      "Invalid secure share email cleanup scope"
+    );
+  }
+
+  let deleted = 0;
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const documents = await queryDocuments();
+    const hasUnresolvedDelivery = documents.some((document) => {
+      const state = stringField(document, stateField);
+      return state !== "sent" && state !== "failed";
+    });
+
+    if (hasUnresolvedDelivery) {
+      throw new ManagedUserCleanupInProgressError(
+        "Secure share email quota reconciliation is still in progress"
+      );
+    }
+    if (documents.length === 0) {
+      return deleted;
+    }
+
+    for (const document of documents) {
+      deleted += await deleteProjectedDocumentForStat(
+        document,
+        accessToken,
+        stats,
+        counterName
+      );
+    }
+
+    if (documents.length < managedUserDeleteQueryLimit) {
+      return deleted;
+    }
+  }
+
+  throw new ManagedUserCleanupInProgressError(errorMessage);
+}
+
 async function deleteChildDocumentsRepeatedly({
   accessToken,
   batchSize = historyCleanupBatchSize,
@@ -1775,18 +1848,32 @@ async function deleteSecureShareStateByShareId(
   }
 
   for (const definition of secureShareRootStateCollections) {
-    await deleteRepeatedQueryDocuments(
-      () => querySecureShareRootStateByShareId(
-        projectId,
-        definition.collectionId,
-        shareId,
-        accessToken
-      ),
-      accessToken,
-      stats,
-      definition.counterName,
-      `Too many ${definition.collectionId} documents to delete in one request`
+    const queryDocuments = () => querySecureShareRootStateByShareId(
+      projectId,
+      definition.collectionId,
+      shareId,
+      accessToken
     );
+    const errorMessage =
+      `Too many ${definition.collectionId} documents to delete in one request`;
+    if (secureShareEmailStateField(definition.collectionId)) {
+      await deleteSecureShareEmailStateRepeatedly({
+        accessToken,
+        collectionId: definition.collectionId,
+        counterName: definition.counterName,
+        errorMessage,
+        queryDocuments,
+        stats
+      });
+    } else {
+      await deleteRepeatedQueryDocuments(
+        queryDocuments,
+        accessToken,
+        stats,
+        definition.counterName,
+        errorMessage
+      );
+    }
   }
 
   for (const definition of secureShareChildStateCollections) {
@@ -2067,18 +2154,32 @@ async function deleteOwnedSecureShareContainers(
 
 async function deleteOwnedSecureShareOrphanState(projectId, ownerUid, accessToken, stats) {
   for (const definition of secureShareRootStateCollections) {
-    await deleteRepeatedQueryDocuments(
-      () => queryOwnedSecureShareRootState(
-        projectId,
-        definition.collectionId,
-        ownerUid,
-        accessToken
-      ),
-      accessToken,
-      stats,
-      definition.counterName,
-      `Too many owner-scoped ${definition.collectionId} documents to delete in one request`
+    const queryDocuments = () => queryOwnedSecureShareRootState(
+      projectId,
+      definition.collectionId,
+      ownerUid,
+      accessToken
     );
+    const errorMessage =
+      `Too many owner-scoped ${definition.collectionId} documents to delete in one request`;
+    if (secureShareEmailStateField(definition.collectionId)) {
+      await deleteSecureShareEmailStateRepeatedly({
+        accessToken,
+        collectionId: definition.collectionId,
+        counterName: definition.counterName,
+        errorMessage,
+        queryDocuments,
+        stats
+      });
+    } else {
+      await deleteRepeatedQueryDocuments(
+        queryDocuments,
+        accessToken,
+        stats,
+        definition.counterName,
+        errorMessage
+      );
+    }
   }
 
   for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
@@ -2555,6 +2656,7 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
     secureShareCopyGrantRequestsDeleted: 0,
     secureShareEmailChallengesDeleted: 0,
     secureShareEmailDeliveriesDeleted: 0,
+    secureShareEmailSendAttemptsDeleted: 0,
     secureShareParticipantCountersDeleted: 0,
     secureShareParticipantNamesDeleted: 0,
     secureShareParticipantRenameRequestsDeleted: 0,

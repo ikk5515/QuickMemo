@@ -1,11 +1,13 @@
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetGmailSmtpTransportForTests } from "../api/_secure-share-gmail-smtp.js";
 import {
   copyGrantAuthorizesDownload,
   emailDigest,
   hashSharePassword,
   otpCodeDigest,
+  rateLimitBucketDigest,
   sessionTokenDigest,
   sourceShareGuardId,
   verifySignedOpaqueToken
@@ -26,6 +28,19 @@ import {
   type SecureShareApiHarness,
   writeEmulatorDocuments
 } from "./helpers/secureShareApiEmulator.js";
+
+const gmailTransportMock = vi.hoisted(() => ({
+  close: vi.fn(),
+  createTransport: vi.fn(),
+  sendMail: vi.fn(),
+  verify: vi.fn()
+}));
+
+vi.mock("nodemailer", () => ({
+  default: {
+    createTransport: gmailTransportMock.createTransport
+  }
+}));
 
 const describeEmulator =
   process.env.FIRESTORE_EMULATOR_HOST && process.env.FIREBASE_AUTH_EMULATOR_HOST
@@ -383,6 +398,7 @@ async function commentRequest(input: {
 }
 
 async function emailChallengeRequest(input: {
+  clientRequestId?: string;
   email: string;
   harness: SecureShareApiHarness;
   networkSuffix: number;
@@ -396,7 +412,10 @@ async function emailChallengeRequest(input: {
       headers: apiHeaders(input.harness.origin, {
         networkSuffix: input.networkSuffix
       }),
-      body: JSON.stringify({ email: input.email })
+      body: JSON.stringify({
+        clientRequestId: input.clientRequestId ?? crypto.randomUUID(),
+        email: input.email
+      })
     }
   );
   return {
@@ -457,6 +476,33 @@ async function runEmailDeliveryScenario(
   };
 }
 
+function quotaBucketsWithUsage(
+  buckets: Array<Record<string, unknown>>
+) {
+  return buckets.filter((bucket) =>
+    ["reservedCount", "sentCount", "failedCount", "ambiguousCount"]
+      .some((field) => Number(bucket[field] ?? 0) > 0)
+  );
+}
+
+function enableGmailSmtpEmail() {
+  Object.assign(process.env, {
+    SECURE_SHARE_EMAIL_ENABLED: "true",
+    SHARE_EMAIL_FREE_TIER_MODE: "true",
+    SHARE_EMAIL_FROM: "QuickMemo <quickmemo.smtp.test@gmail.com>",
+    SHARE_EMAIL_FROM_NAME: "QuickMemo",
+    SHARE_EMAIL_PROVIDER: "gmail_smtp",
+    SHARE_EMAIL_PROVIDER_HEALTH_CACHE_SECONDS: "60",
+    SHARE_EMAIL_REPLY_TO: "",
+    SHARE_SMTP_APP_PASSWORD: "abcdefghijklmnop",
+    SHARE_SMTP_HOST: "smtp.gmail.com",
+    SHARE_SMTP_PORT: "465",
+    SHARE_SMTP_REQUIRE_TLS: "true",
+    SHARE_SMTP_SECURE: "true",
+    SHARE_SMTP_USERNAME: "quickmemo.smtp.test@gmail.com"
+  });
+}
+
 function sessionTokenFromCookie(cookie: string) {
   const separator = cookie.indexOf("=");
   return separator > 0 ? cookie.slice(separator + 1) : "";
@@ -486,6 +532,26 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
 
   beforeEach(async () => {
     configureSecureShareApiEmulatorEnvironment();
+    resetGmailSmtpTransportForTests();
+    gmailTransportMock.close.mockReset();
+    gmailTransportMock.createTransport.mockReset();
+    gmailTransportMock.sendMail.mockReset();
+    gmailTransportMock.verify.mockReset();
+    gmailTransportMock.verify.mockResolvedValue(true);
+    gmailTransportMock.sendMail.mockImplementation(
+      async (message: { to?: string }) => ({
+        accepted: [message.to],
+        rejected: [],
+        pending: [],
+        response: "250 2.0.0 OK",
+        messageId: "<quickmemo-emulator-message@gmail.com>"
+      })
+    );
+    gmailTransportMock.createTransport.mockReturnValue({
+      close: gmailTransportMock.close,
+      sendMail: gmailTransportMock.sendMail,
+      verify: gmailTransportMock.verify
+    });
     await clearSecureShareEmulators();
   });
 
@@ -1484,7 +1550,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(grants).toHaveLength(0);
   });
 
-  it("keeps ambiguous provider outcomes reserved and releases only definitive failures", async () => {
+  it("accounts ambiguous provider outcomes without treating them as successful sends", async () => {
     const concurrent = await runEmailDeliveryScenario(
       harness,
       "email_concurrent_409_share",
@@ -1502,11 +1568,14 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(concurrent.deliveries[0]).toMatchObject({ status: "ambiguous" });
     expect(concurrent.challenges[0]).toMatchObject({
       deliveryStatus: "ambiguous",
-      status: "pending"
+      status: "ambiguous"
     });
-    expect(concurrent.quotaBuckets).toHaveLength(2);
-    expect(concurrent.quotaBuckets.every((bucket) =>
-      bucket.reservedCount === 1 && bucket.sentCount === 0
+    expect(concurrent.quotaBuckets).toHaveLength(4);
+    expect(quotaBucketsWithUsage(concurrent.quotaBuckets)).toHaveLength(3);
+    expect(quotaBucketsWithUsage(concurrent.quotaBuckets).every((bucket) =>
+      bucket.ambiguousCount === 1
+      && bucket.reservedCount === 0
+      && bucket.sentCount === 0
     )).toBe(true);
 
     await clearSecureShareEmulators();
@@ -1529,9 +1598,12 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       deliveryStatus: "failed",
       status: "send_failed"
     });
-    expect(invalid.quotaBuckets).toHaveLength(2);
-    expect(invalid.quotaBuckets.every((bucket) =>
-      bucket.reservedCount === 0 && bucket.sentCount === 0
+    expect(invalid.quotaBuckets).toHaveLength(4);
+    expect(quotaBucketsWithUsage(invalid.quotaBuckets)).toHaveLength(3);
+    expect(quotaBucketsWithUsage(invalid.quotaBuckets).every((bucket) =>
+      bucket.failedCount === 1
+      && bucket.reservedCount === 0
+      && bucket.sentCount === 0
     )).toBe(true);
 
     await clearSecureShareEmulators();
@@ -1548,11 +1620,483 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(malformedSuccess.deliveries[0]).toMatchObject({ status: "ambiguous" });
     expect(malformedSuccess.challenges[0]).toMatchObject({
       deliveryStatus: "ambiguous",
-      status: "pending"
+      status: "ambiguous"
     });
-    expect(malformedSuccess.quotaBuckets.every((bucket) =>
-      bucket.reservedCount === 1 && bucket.sentCount === 0
+    expect(quotaBucketsWithUsage(malformedSuccess.quotaBuckets)).toHaveLength(3);
+    expect(quotaBucketsWithUsage(malformedSuccess.quotaBuckets).every((bucket) =>
+      bucket.ambiguousCount === 1
+      && bucket.reservedCount === 0
+      && bucket.sentCount === 0
     )).toBe(true);
+  }, 30_000);
+
+  it("sends at most once when the same client request is retried concurrently", async () => {
+    const shareId = "email_client_request_replay_share";
+    const email = "email-client-request-replay@example.test";
+    const clientRequestId = "email_client_request_replay_0001";
+    Object.assign(process.env, {
+      SECURE_SHARE_EMAIL_ENABLED: "true",
+      SHARE_EMAIL_PROVIDER: "resend",
+      SHARE_EMAIL_API_KEY: "emulator-provider-key",
+      SHARE_EMAIL_FROM: "sender@example.test",
+      SHARE_EMAIL_SENDER_VERIFIED: "true"
+    });
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailDigest(email)],
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      shareId
+    });
+
+    const realFetch = globalThis.fetch.bind(globalThis);
+    let providerCalls = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: URL | RequestInfo, init?: RequestInit) => {
+        if (String(input) === "https://api.resend.com/emails") {
+          providerCalls += 1;
+          return new Response(JSON.stringify({
+            id: "client_request_replay_message_0001"
+          }), {
+            headers: { "content-type": "application/json" },
+            status: 200
+          });
+        }
+        return realFetch(input, init);
+      }
+    );
+    let results: Awaited<ReturnType<typeof emailChallengeRequest>>[];
+    try {
+      results = await Promise.all([
+        emailChallengeRequest({
+          clientRequestId,
+          email,
+          harness,
+          networkSuffix: 79,
+          shareId
+        }),
+        emailChallengeRequest({
+          clientRequestId,
+          email,
+          harness,
+          networkSuffix: 79,
+          shareId
+        })
+      ]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+
+    expect(results.every(({ response }) => response.status === 202)).toBe(true);
+    expect(providerCalls).toBe(1);
+    expect(await listEmulatorCollection("publicShareEmailChallenges")).toHaveLength(1);
+    expect(await listEmulatorCollection("publicShareEmailDeliveries")).toHaveLength(1);
+    expect(await listEmulatorCollection("publicShareEmailSendAttempts")).toEqual([
+      expect.objectContaining({ state: "sent" })
+    ]);
+    const quotaBuckets = await listEmulatorCollection("publicShareEmailQuotaBuckets");
+    expect(quotaBucketsWithUsage(quotaBuckets)).toHaveLength(3);
+    expect(quotaBucketsWithUsage(quotaBuckets).every((bucket) =>
+      bucket.reservedCount === 0
+      && bucket.sentCount === 1
+    )).toBe(true);
+  }, 30_000);
+
+  it("uses the Gmail adapter at runtime and records only redacted provider health", async () => {
+    enableGmailSmtpEmail();
+    const shareId = "gmail_smtp_health_success_share";
+    const email = "gmail-smtp-health-success@example.test";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailDigest(email)],
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      shareId
+    });
+
+    const result = await emailChallengeRequest({
+      email,
+      harness,
+      networkSuffix: 80,
+      shareId
+    });
+
+    expect(result.response.status).toBe(202);
+    expect(gmailTransportMock.createTransport).toHaveBeenCalledTimes(1);
+    expect(gmailTransportMock.verify).not.toHaveBeenCalled();
+    expect(gmailTransportMock.sendMail).toHaveBeenCalledTimes(1);
+    expect(gmailTransportMock.sendMail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subject: "QuickMemo 공유 노트 인증번호",
+        to: email
+      })
+    );
+    const health = await readEmulatorDocument(
+      "publicShareEmailProviderHealth/gmail-smtp"
+    );
+    expect(health).toMatchObject({
+      consecutiveFailures: 0,
+      lastReasonCode: "",
+      status: "healthy"
+    });
+    const serializedHealth = JSON.stringify(health);
+    expect(serializedHealth).not.toContain(email);
+    expect(serializedHealth).not.toContain("quickmemo.smtp.test@gmail.com");
+    expect(serializedHealth).not.toContain("abcdefghijklmnop");
+    expect(await listEmulatorCollection("publicShareEmailSendAttempts")).toEqual([
+      expect.objectContaining({ state: "sent" })
+    ]);
+  }, 15_000);
+
+  it("blocks Gmail after authentication failure without exposing or retrying it", async () => {
+    enableGmailSmtpEmail();
+    const firstShareId = "gmail_smtp_auth_failure_share";
+    const secondShareId = "gmail_smtp_auth_blocked_share";
+    const firstEmail = "gmail-smtp-auth-failure@example.test";
+    const secondEmail = "gmail-smtp-auth-blocked@example.test";
+    for (const [shareId, email] of [
+      [firstShareId, firstEmail],
+      [secondShareId, secondEmail]
+    ]) {
+      await seedSecureShare({
+        accessMode: "allowed_emails",
+        allowedEmailHashes: [emailDigest(email)],
+        emailVerificationRequired: true,
+        oneTimeEnabled: false,
+        shareId
+      });
+    }
+    gmailTransportMock.sendMail.mockRejectedValue(Object.assign(
+      new Error("private SMTP authentication detail"),
+      {
+        code: "EAUTH",
+        response: "535 private SMTP authentication detail",
+        responseCode: 535
+      }
+    ));
+
+    const first = await emailChallengeRequest({
+      email: firstEmail,
+      harness,
+      networkSuffix: 81,
+      shareId: firstShareId
+    });
+    const second = await emailChallengeRequest({
+      email: secondEmail,
+      harness,
+      networkSuffix: 82,
+      shareId: secondShareId
+    });
+
+    expect(first.response.status).toBe(202);
+    expect(second.response.status).toBe(202);
+    expect(gmailTransportMock.sendMail).toHaveBeenCalledTimes(1);
+    expect(await readEmulatorDocument(
+      "publicShareEmailProviderHealth/gmail-smtp"
+    )).toMatchObject({
+      consecutiveFailures: 1,
+      lastReasonCode: "auth_error",
+      status: "blocked"
+    });
+    expect(await listEmulatorCollection("publicShareEmailDeliveries")).toEqual([
+      expect.objectContaining({ status: "failed" })
+    ]);
+    expect(await listEmulatorCollection("publicShareEmailSendAttempts")).toEqual([
+      expect.objectContaining({ state: "failed" })
+    ]);
+    const challenges = await listEmulatorCollection("publicShareEmailChallenges");
+    expect(challenges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ shareId: firstShareId, status: "send_failed" }),
+      expect.objectContaining({ shareId: secondShareId, status: "suppressed" })
+    ]));
+    const serialized = JSON.stringify({
+      challenges,
+      health: await readEmulatorDocument(
+        "publicShareEmailProviderHealth/gmail-smtp"
+      )
+    });
+    expect(serialized).not.toContain(firstEmail);
+    expect(serialized).not.toContain(secondEmail);
+    expect(serialized).not.toContain("private SMTP authentication detail");
+    expect(serialized).not.toContain("abcdefghijklmnop");
+  }, 15_000);
+
+  it("preserves an authentication hard block after a concurrent connection failure", async () => {
+    enableGmailSmtpEmail();
+    const scenarios = [
+      {
+        email: "gmail-smtp-concurrent-auth@example.test",
+        shareId: "gmail_smtp_concurrent_auth_share"
+      },
+      {
+        email: "gmail-smtp-concurrent-connection@example.test",
+        shareId: "gmail_smtp_concurrent_connection_share"
+      }
+    ];
+    for (const scenario of scenarios) {
+      await seedSecureShare({
+        accessMode: "allowed_emails",
+        allowedEmailHashes: [emailDigest(scenario.email)],
+        emailVerificationRequired: true,
+        oneTimeEnabled: false,
+        shareId: scenario.shareId
+      });
+    }
+
+    const rejectors: Array<(reason?: unknown) => void> = [];
+    gmailTransportMock.sendMail.mockImplementation(() =>
+      new Promise((_, reject) => {
+        rejectors.push(reject);
+      })
+    );
+    const startedAt = Date.now();
+    const pendingResults = Promise.all(scenarios.map((scenario, index) =>
+      emailChallengeRequest({
+        ...scenario,
+        harness,
+        networkSuffix: 83 + index
+      })
+    ));
+    await vi.waitFor(() => {
+      expect(gmailTransportMock.sendMail).toHaveBeenCalledTimes(2);
+      expect(rejectors).toHaveLength(2);
+    }, { timeout: 10_000 });
+
+    rejectors[0](Object.assign(new Error("private auth detail"), {
+      code: "EAUTH",
+      responseCode: 535
+    }));
+    await vi.waitFor(async () => {
+      expect(await readEmulatorDocument(
+        "publicShareEmailProviderHealth/gmail-smtp"
+      )).toMatchObject({
+        lastReasonCode: "auth_error",
+        status: "blocked"
+      });
+    }, { timeout: 10_000 });
+    rejectors[1](Object.assign(new Error("private connection detail"), {
+      code: "ECONNECTION"
+    }));
+
+    const results = await pendingResults;
+    expect(results.every(({ response }) => response.status === 202)).toBe(true);
+    const health = await readEmulatorDocument(
+      "publicShareEmailProviderHealth/gmail-smtp"
+    );
+    expect(health).toMatchObject({
+      consecutiveFailures: 2,
+      lastReasonCode: "auth_error",
+      status: "blocked"
+    });
+    expect(Date.parse(String(health?.blockedUntil))).toBeGreaterThan(
+      startedAt + 23 * 60 * 60 * 1000
+    );
+    expect(gmailTransportMock.sendMail).toHaveBeenCalledTimes(2);
+  }, 30_000);
+
+  it("never exceeds the global minute quota under twenty concurrent Gmail requests", async () => {
+    enableGmailSmtpEmail();
+    const scenarios = Array.from({ length: 20 }, (_, index) => ({
+      email: `gmail-quota-${index}@example.test`,
+      shareId: `gmail_global_quota_share_${String(index).padStart(2, "0")}`
+    }));
+    for (const scenario of scenarios) {
+      await seedSecureShare({
+        accessMode: "allowed_emails",
+        allowedEmailHashes: [emailDigest(scenario.email)],
+        emailVerificationRequired: true,
+        oneTimeEnabled: false,
+        shareId: scenario.shareId
+      });
+    }
+
+    const results = await Promise.all(scenarios.map((scenario, index) =>
+      emailChallengeRequest({
+        ...scenario,
+        harness,
+        networkSuffix: 100 + index
+      })
+    ));
+
+    expect(gmailTransportMock.sendMail).toHaveBeenCalledTimes(3);
+    expect(results.filter(({ response }) => response.status === 202)).toHaveLength(3);
+    expect(results.filter(({ response }) => response.status === 429)).toHaveLength(17);
+    expect(await listEmulatorCollection("publicShareEmailDeliveries")).toHaveLength(3);
+    expect(await listEmulatorCollection("publicShareEmailSendAttempts")).toHaveLength(3);
+    const quotaBuckets = await listEmulatorCollection("publicShareEmailQuotaBuckets");
+    expect(quotaBucketsWithUsage(quotaBuckets)).toHaveLength(3);
+    expect(quotaBucketsWithUsage(quotaBuckets).every((bucket) =>
+      bucket.reservedCount === 0
+      && bucket.sentCount === 3
+    )).toBe(true);
+  }, 60_000);
+
+  it("does not refund the global minute quota after clear Gmail recipient failures", async () => {
+    enableGmailSmtpEmail();
+    gmailTransportMock.sendMail.mockRejectedValue(Object.assign(
+      new Error("private invalid-recipient detail"),
+      {
+        code: "EENVELOPE",
+        response: "550 5.1.1 invalid recipient",
+        responseCode: 550
+      }
+    ));
+    const scenarios = Array.from({ length: 20 }, (_, index) => ({
+      email: `gmail-invalid-quota-${index}@example.test`,
+      shareId: `gmail_invalid_global_quota_share_${String(index).padStart(2, "0")}`
+    }));
+    for (const scenario of scenarios) {
+      await seedSecureShare({
+        accessMode: "allowed_emails",
+        allowedEmailHashes: [emailDigest(scenario.email)],
+        emailVerificationRequired: true,
+        oneTimeEnabled: false,
+        shareId: scenario.shareId
+      });
+    }
+
+    const results = await Promise.all(scenarios.map((scenario, index) =>
+      emailChallengeRequest({
+        ...scenario,
+        harness,
+        networkSuffix: 130 + index
+      })
+    ));
+
+    expect(gmailTransportMock.sendMail).toHaveBeenCalledTimes(3);
+    expect(results.filter(({ response }) => response.status === 202)).toHaveLength(3);
+    expect(results.filter(({ response }) => response.status === 429)).toHaveLength(17);
+    const quotaBuckets = await listEmulatorCollection("publicShareEmailQuotaBuckets");
+    expect(quotaBucketsWithUsage(quotaBuckets)).toHaveLength(3);
+    expect(quotaBucketsWithUsage(quotaBuckets).every((bucket) =>
+      bucket.failedCount === 3
+      && bucket.reservedCount === 0
+      && bucket.sentCount === 0
+    )).toBe(true);
+  }, 60_000);
+
+  it("enforces the Share and Email rolling limit across hourly boundaries", async () => {
+    enableGmailSmtpEmail();
+    const shareId = "gmail_share_email_rolling_limit_share";
+    const email = "gmail-share-email-rolling-limit@example.test";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailDigest(email)],
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      shareId
+    });
+    const currentHourStartSeconds =
+      Math.floor(Date.now() / 1000 / (60 * 60)) * 60 * 60;
+    const historicalHourStartSeconds = currentHourStartSeconds - 23 * 60 * 60;
+    const bucketId = rateLimitBucketDigest(
+      "otp_share_email_rolling_24h",
+      [shareId, emailDigest(email), String(historicalHourStartSeconds)]
+    );
+    await writeEmulatorDocuments([{
+      path: `publicShareRateLimits/${bucketId}`,
+      fields: {
+        count: 10,
+        expiresAt: new Date((currentHourStartSeconds + 3 * 60 * 60) * 1000),
+        limitType: "otp_share_email_rolling_24h",
+        ownerUid: "",
+        shareId,
+        updatedAt: new Date(),
+        windowStart: new Date(historicalHourStartSeconds * 1000)
+      }
+    }]);
+
+    const result = await emailChallengeRequest({
+      email,
+      harness,
+      networkSuffix: 151,
+      shareId
+    });
+    expect(result.response.status).toBe(429);
+    expect(gmailTransportMock.sendMail).not.toHaveBeenCalled();
+  }, 30_000);
+
+  it("enforces both the KST monthly and conservative rolling 24-hour hard stops", async () => {
+    enableGmailSmtpEmail();
+    const monthlyShareId = "gmail_monthly_hard_stop_share";
+    const monthlyEmail = "gmail-monthly-hard-stop@example.test";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailDigest(monthlyEmail)],
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      shareId: monthlyShareId
+    });
+    const seoulMonth = new Date(Date.now() + 9 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 7);
+    await writeEmulatorDocuments([{
+      path: `publicShareEmailQuotaBuckets/month_${seoulMonth}`,
+      fields: {
+        ambiguousCount: 0,
+        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+        failedCount: 0,
+        hardLimit: 700,
+        periodKey: seoulMonth,
+        reservedCount: 0,
+        scope: "monthly",
+        sentCount: 700,
+        softLimit: 500,
+        softLimitReached: true,
+        updatedAt: new Date()
+      }
+    }]);
+
+    const monthly = await emailChallengeRequest({
+      email: monthlyEmail,
+      harness,
+      networkSuffix: 120,
+      shareId: monthlyShareId
+    });
+    expect(monthly.response.status).toBe(429);
+    expect(gmailTransportMock.sendMail).not.toHaveBeenCalled();
+
+    await clearSecureShareEmulators();
+    const rollingShareId = "gmail_rolling_hard_stop_share";
+    const rollingEmail = "gmail-rolling-hard-stop@example.test";
+    await seedSecureShare({
+      accessMode: "allowed_emails",
+      allowedEmailHashes: [emailDigest(rollingEmail)],
+      emailVerificationRequired: true,
+      oneTimeEnabled: false,
+      shareId: rollingShareId
+    });
+    const hourStart = new Date();
+    hourStart.setUTCMinutes(0, 0, 0);
+    await writeEmulatorDocuments([1, 2].map((hoursAgo) => {
+      const start = new Date(hourStart.getTime() - hoursAgo * 60 * 60 * 1000);
+      const periodKey = start.toISOString().slice(0, 13);
+      return {
+        path: `publicShareEmailQuotaBuckets/hour_${periodKey}`,
+        fields: {
+          ambiguousCount: 0,
+          expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000),
+          failedCount: 0,
+          hardLimit: 20,
+          periodKey,
+          reservedCount: 0,
+          scope: "hourly",
+          sentCount: 15,
+          softLimit: 20,
+          softLimitReached: false,
+          updatedAt: new Date()
+        }
+      };
+    }));
+
+    const rolling = await emailChallengeRequest({
+      email: rollingEmail,
+      harness,
+      networkSuffix: 121,
+      shareId: rollingShareId
+    });
+    expect(rolling.response.status).toBe(429);
+    expect(gmailTransportMock.sendMail).not.toHaveBeenCalled();
   }, 30_000);
 
   it("keeps quota reserved when an accepted delivery cannot be finalized", async () => {
@@ -1627,7 +2171,8 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       deliveryStatus: "reserved",
       status: "pending"
     });
-    expect(quotaBuckets.every((bucket) =>
+    expect(quotaBucketsWithUsage(quotaBuckets)).toHaveLength(3);
+    expect(quotaBucketsWithUsage(quotaBuckets).every((bucket) =>
       bucket.reservedCount === 1 && bucket.sentCount === 0
     )).toBe(true);
   }, 15_000);
@@ -1692,7 +2237,8 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(deliveries.filter((delivery) => delivery.status === "sent")).toHaveLength(2);
     expect(deliveries.filter((delivery) => delivery.status === "failed")).toHaveLength(1);
     const quotaBuckets = await listEmulatorCollection("publicShareEmailQuotaBuckets");
-    expect(quotaBuckets.every((bucket) =>
+    expect(quotaBucketsWithUsage(quotaBuckets)).toHaveLength(3);
+    expect(quotaBucketsWithUsage(quotaBuckets).every((bucket) =>
       bucket.reservedCount === 0 && bucket.sentCount === 2
     )).toBe(true);
   }, 15_000);
@@ -1994,7 +2540,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       async (input: URL | RequestInfo, init?: RequestInit) => {
         if (String(input) === "https://api.resend.com/emails") {
           const payload = JSON.parse(String(init?.body)) as { text?: string };
-          issuedOtp = /\n\n(\d{6})\n\n/u.exec(payload.text ?? "")?.[1] ?? "";
+          issuedOtp = /인증번호:\s*(\d{6})/u.exec(payload.text ?? "")?.[1] ?? "";
           return new Response(JSON.stringify({ id: "one_time_message_0001" }), {
             headers: { "content-type": "application/json" },
             status: 200
@@ -2114,7 +2660,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       async (input: URL | RequestInfo, init?: RequestInit) => {
         if (String(input) === "https://api.resend.com/emails") {
           const payload = JSON.parse(String(init?.body)) as { text?: string };
-          issuedOtp = /\n\n(\d{6})\n\n/u.exec(payload.text ?? "")?.[1] ?? "";
+          issuedOtp = /인증번호:\s*(\d{6})/u.exec(payload.text ?? "")?.[1] ?? "";
           signalProviderStarted();
           return providerResult;
         }
@@ -2178,9 +2724,11 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       ))[0]).toMatchObject({
         status: "sent"
       });
-      expect((await listEmulatorCollection(
+      const quotaBuckets = await listEmulatorCollection(
         "publicShareEmailQuotaBuckets"
-      )).every((bucket) => (
+      );
+      expect(quotaBucketsWithUsage(quotaBuckets)).toHaveLength(3);
+      expect(quotaBucketsWithUsage(quotaBuckets).every((bucket) => (
         bucket.reservedCount === 0
         && bucket.sentCount === 1
       ))).toBe(true);

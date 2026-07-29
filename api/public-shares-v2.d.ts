@@ -112,10 +112,56 @@ export function consumeRateLimits(
     limit: number;
     limitType: string;
     ownerUid?: string;
+    rollingWindowHours?: number;
     shareId: string;
     windowSeconds: number;
   }>
 ): Promise<string[]>;
+
+export function rateLimitWindowStarts(
+  nowMilliseconds: number,
+  definition: {
+    rollingWindowHours?: number;
+    windowSeconds: number;
+  }
+): number[];
+
+export function rateLimitBucketDigest(limitType: string, parts: string[]): string;
+
+export function gmailProviderHealthStateAllowsSend(
+  health: {
+    blockedUntil?: Date | string;
+    consecutiveFailures?: number;
+    status?: "unknown" | "healthy" | "degraded" | "blocked";
+  } | null,
+  nowMilliseconds?: number
+): boolean;
+
+export function gmailProviderHealthTransition(
+  existing: {
+    blockedUntil?: Date | string;
+    consecutiveFailures?: number;
+    lastFailureAt?: Date | string;
+    lastReasonCode?: string;
+    lastSuccessfulSendAt?: Date | string;
+    status?: "unknown" | "healthy" | "degraded" | "blocked";
+  } | null,
+  outcome: "sent" | "failed",
+  error?: {
+    providerBlockedSeconds?: number;
+    providerReasonCode?: string;
+  } | null,
+  now?: Date
+): {
+  blockedUntil?: Date;
+  consecutiveFailures: number;
+  lastFailureAt?: Date | string;
+  lastReasonCode: string;
+  lastSuccessfulSendAt?: Date | string;
+  schemaVersion: 1;
+  status: "unknown" | "healthy" | "degraded" | "blocked";
+  updatedAt: Date;
+};
 
 export const auditRetentionDays: number;
 
@@ -483,13 +529,16 @@ export function verifySignedOpaqueToken(
   nowSeconds?: number
 ): Record<string, unknown> | null;
 
-export function secureShareEmailReadiness(): {
+export function secureShareEmailReadiness(
+  environment?: Record<string, string | undefined>
+): {
   ready: boolean;
   v2Enabled: boolean;
   featureEnabled: boolean;
   providerConfigured: boolean;
   secretsConfigured: boolean;
   senderVerified: boolean;
+  freeTierMode: boolean;
 };
 
 export function verificationEmailText(code: string, ttlSeconds: number): string;
@@ -520,10 +569,12 @@ export function createResendEmailAdapter(
 };
 
 export function resolveEmailQuotaPolicy(environment?: Record<string, string | undefined>): {
-  dailyHardLimit: number;
-  dailySoftLimit: number;
+  globalHourlyLimit: number;
+  globalMinuteLimit: number;
   monthlyHardLimit: number;
   monthlySoftLimit: number;
+  rolling24hHardLimit: number;
+  rolling24hSoftLimit: number;
 };
 
 export interface SecureShareEmailQuotaPeriod {
@@ -531,7 +582,7 @@ export interface SecureShareEmailQuotaPeriod {
   expiresAt: Date;
   hardLimit: number;
   periodKey: string;
-  scope: "daily" | "monthly";
+  scope: "minute" | "hourly" | "monthly";
   softLimit: number;
 }
 
@@ -541,10 +592,17 @@ export function emailQuotaPeriods(
 ): SecureShareEmailQuotaPeriod[];
 
 export function emailQuotaExceeded(
-  document: { reservedCount: number; sentCount: number } | null,
+  document: {
+    ambiguousCount?: number;
+    failedCount?: number;
+    reservedCount: number;
+    sentCount: number;
+  } | null,
   period: SecureShareEmailQuotaPeriod
 ): {
+  ambiguousCount: number;
   exceeded: boolean;
+  failedCount: number;
   reservedCount: number;
   sentCount: number;
   softLimitReached: boolean;

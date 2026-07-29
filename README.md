@@ -230,10 +230,11 @@ Secure Share v2는 기존 v1 공개 링크와 URL fragment 기반 콘텐츠 키�
 기능은 기본적으로 꺼져 있습니다. Core v2는
 `SECURE_SHARE_V2_ENABLED=true`와 `VITE_SECURE_SHARE_V2_ENABLED=true`가
 모두 검증된 Production 설정일 때 활성화합니다.
-`SECURE_SHARE_EMAIL_ENABLED`는 독립 플래그이며, 검증된 이메일 공급자가
-없으면 false를 유지합니다. 이 상태에서도 링크, 로그인 사용자, 비밀번호,
-1회 열람, 댓글, 복사본 저장 등 Core v2는 사용할 수 있고 이메일 정책은
-서버에서 `email_feature_unavailable`로 fail closed합니다.
+`SECURE_SHARE_EMAIL_ENABLED`는 독립 플래그이며, Production Gmail SMTP와
+자동 수신 Smoke가 모두 검증되지 않았으면 false를 유지합니다. 이 상태에서도
+링크, 로그인 사용자, 비밀번호, 1회 열람, 댓글, 복사본 저장 등 Core v2는
+사용할 수 있고 이메일 정책은 서버에서 `email_feature_unavailable`로
+fail closed합니다.
 
 댓글 공유는 별도의 서버 플래그로 참여자별 `guestN` identity와 본인 이름
 변경을 활성화합니다. IP는 identity로 사용하지 않으며, Owner 정책과
@@ -242,21 +243,43 @@ Secure Share v2는 기존 v1 공개 링크와 URL fragment 기반 콘텐츠 키�
 않습니다. 참여자 HMAC key와 두 플래그는 초기 배포에서 false로 유지한
 뒤 동일한 검증 SHA로 단계적으로 활성화합니다.
 
-이메일 OTP는 `SHARE_EMAIL_PROVIDER=resend`, API key, 검증된 발신자 주소와
-서로 다른 32바이트 이상의 OTP/email/rate-limit HMAC key가 모두 준비된
-뒤에만 활성화합니다. Resend에서 발신 도메인 또는 발신자 검증을 실제로
-확인한 후 `SHARE_EMAIL_SENDER_VERIFIED=true`를 설정해야 하며, 확인 전에는
-이 값과 `SECURE_SHARE_EMAIL_ENABLED`를 모두 false로 유지합니다.
-현재 저장소에는 Resend signed webhook의 bounce/complaint suppression
-경로가 아직 없으므로, 실제 Provider·발신자·수신함 검증과 해당 경로의
-구현·검증 전에도 `SECURE_SHARE_EMAIL_ENABLED=false`를 유지합니다.
+Production 이메일 OTP는 `SHARE_EMAIL_PROVIDER=gmail_smtp`와 server-only
+Nodemailer adapter만 사용합니다. 기본 연결은 `smtp.gmail.com:465`,
+implicit TLS(`secure=true`)이며, 587/STARTTLS는 실제 Vercel 환경에서
+`requireTLS=true`로 사전 검증된 경우에만 사용합니다. 전용 개인 Gmail
+주소와 Google 앱 비밀번호는 Vercel Production Secret에만 저장하고,
+`From`과 envelope sender는 인증한 Gmail 주소와 일치시킵니다. 표시 이름은
+`QuickMemo`이며 `quickmemo-tan.vercel.app`는 서비스 주소일 뿐 발신 주소나
+위조 별칭으로 사용하지 않습니다.
 
-무료 등급 보호 기본값은 일 64/80건(soft/hard), 월 1,920/2,400건입니다.
-Resend Free의 일 100건·월 3,000건 한도보다 20% 여유를 남기며, 전역
-`reservedCount + sentCount`를 UTC 일/월 bucket에서 원자적으로 검사합니다.
-`publicShareEmailQuotaBuckets`와 `publicShareEmailDeliveries`는 모든 Firebase
-클라이언트 접근을 차단한 서버 전용 컬렉션이고, 만료 문서는 기존 일일
-cleanup이 제한된 배치로 정리합니다.
+브라우저는 한 논리 요청의 `clientRequestId`를 재사용하고, 서버는 그 HMAC과
+`sendAttemptId`를 서버 전용 발송 시도 문서에 기록해 Strict Mode, 네트워크
+재시도 및 API 재전송이 두 번째 메일을 만들지 않게 합니다. OTP·이메일·
+rate-limit HMAC key는 각각 32바이트 이상이며 password/session/participant
+key와도 재사용하지 않습니다. OTP 원문, Gmail 주소, 앱 비밀번호, Raw IP,
+SMTP 응답 원문은 Firestore나 일반 로그에 저장하지 않습니다.
+
+무료 운영 보호 기본값은 Rolling 24시간 20/30건(soft/hard), Asia/Seoul
+기준 월 500/700건(soft/hard), 전역 1분 3건·1시간 20건입니다. 값은 더
+낮출 수만 있고 높인 설정은 fail closed합니다.
+Share+Email의 24시간 10회 제한과 전역 Rolling 제한은 보수적인 시간별
+shard로 집계하며, 명확한 SMTP 실패도 1분·1시간 전송 시도 한도에서는
+환급하지 않습니다.
+`publicShareEmailQuotaBuckets`, `publicShareEmailDeliveries`,
+`publicShareEmailSendAttempts`, `publicShareEmailProviderHealth`는 Firebase
+클라이언트 접근을 차단한 서버 전용 컬렉션입니다. 예약·성공·명확한 실패·
+불명확한 발송을 분리 집계하고, Gmail 인증·TLS·rate/quota 오류의 제한된
+health/`blockedUntil` 상태만 저장합니다.
+
+`SECURE_SHARE_EMAIL_ENABLED`는 SMTP `verify()` 성공만으로 켜지 않습니다.
+실제 전용 Smoke 수신함에서 자동으로 메일 도착과 OTP를 확인하고 오답·정답·
+재사용·만료·재전송 및 합성 데이터 정리까지 완료한 동일 Production SHA에서만
+활성화합니다. 자동 수신 API 또는 IMAP 읽기 자격증명이 없으면 false를
+유지합니다. Resend adapter는 로컬·CI의 `NODE_ENV=test` 호환 mock 경로일
+뿐 Production fallback이 아니며, 장애나 한도 도달 시 자동 유료 전환이나
+Provider 전환을 하지 않습니다. 개인 Gmail 운영은 개인·비상업·소규모
+베타에 한정하고 발송량이 늘면 별도 검토 후 전문 Transactional Email
+Provider로 수동 이전합니다.
 
 구조, 환경변수 이름, 로컬 검증, 단계적 배포 및 rollback 절차는
 [`docs/secure-share-v2.md`](docs/secure-share-v2.md)를 참고하세요.
@@ -283,6 +306,7 @@ Firestore Rules에는 다음 주요 컬렉션의 owner-only 접근과 데이터 
 - Secure Share 서버 상태: `publicSharePolicies`, `publicShareRecipients`,
   `publicShareAccessSessions`, `publicShareEmailChallenges`,
   `publicShareEmailQuotaBuckets`, `publicShareEmailDeliveries`,
+  `publicShareEmailSendAttempts`, `publicShareEmailProviderHealth`,
   `publicShareCopyGrantRequests`, `publicShareSourceGuards`,
   `publicShareUnlockGrants`, `publicShareRateLimits`, `publicShareComments`,
   `publicShareAuditEvents`, `publicShareParticipants`,

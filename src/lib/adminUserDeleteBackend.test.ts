@@ -164,6 +164,51 @@ describe("managed user backend deletion", () => {
     );
   });
 
+  it("deletes only finalized email quota state during managed-user cleanup", () => {
+    const helperSource = deleteManagedUserSource.match(
+      /async function deleteSecureShareEmailStateRepeatedly[\s\S]*?async function deleteChildDocumentsRepeatedly/u
+    )?.[0] ?? "";
+    const shareStateSource = deleteManagedUserSource.match(
+      /async function deleteSecureShareStateByShareId[\s\S]*?async function finalizePublicShareTreeDeletion/u
+    )?.[0] ?? "";
+    const orphanStateSource = deleteManagedUserSource.match(
+      /async function deleteOwnedSecureShareOrphanState[\s\S]*?async function deleteSecureShareCopyGrantRequestsByRequester/u
+    )?.[0] ?? "";
+    const querySource = deleteManagedUserSource.match(
+      /async function querySecureShareRootStateByShareId[\s\S]*?async function querySecureShareCopyGrantRequestsByRequester/u
+    )?.[0] ?? "";
+
+    expect(deleteManagedUserSource).toContain(
+      'collectionId === "publicShareEmailDeliveries"'
+    );
+    expect(deleteManagedUserSource).toContain(
+      'collectionId === "publicShareEmailSendAttempts"'
+    );
+    expect(querySource).toContain(
+      '["__name__", secureShareEmailStateField(collectionId)]'
+    );
+    expect(helperSource).toContain('state !== "sent" && state !== "failed"');
+    expect(helperSource).toContain(
+      "Secure share email quota reconciliation is still in progress"
+    );
+    expect(helperSource.indexOf("hasUnresolvedDelivery")).toBeLessThan(
+      helperSource.indexOf("deleteProjectedDocumentForStat(")
+    );
+    expect(shareStateSource).toContain(
+      "await deleteSecureShareEmailStateRepeatedly({"
+    );
+    expect(orphanStateSource).toContain(
+      "await deleteSecureShareEmailStateRepeatedly({"
+    );
+    expect(helperSource).toContain("deleteProjectedDocumentForStat(");
+    expect(deleteManagedUserSource).toContain(
+      "{ delete: document.name, currentDocument: { updateTime: document.updateTime } }"
+    );
+    expect(deleteManagedUserSource).toContain(
+      'throw new ManagedUserCleanupInProgressError("Concurrent Firestore delete requires a fresh cleanup pass")'
+    );
+  });
+
   it("deletes owner-scoped library items and the target user's immutable vault", () => {
     expect(deleteManagedUserSource).toContain(
       'queryDocumentsByStringField(projectId, "libraryItems", "ownerUid", ownerUid, accessToken)'

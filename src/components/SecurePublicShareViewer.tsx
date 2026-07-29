@@ -879,6 +879,18 @@ function viewerErrorMessage(caught: unknown) {
   return unavailableTitle;
 }
 
+function emailChallengeErrorMessage(caught: unknown) {
+  if (caught instanceof SecureShareApiError) {
+    if (caught.status === 429) {
+      return "현재 무료 이메일 발송 한도에 도달해 이메일 인증을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.";
+    }
+    if (caught.code === "email_feature_unavailable" || caught.status >= 500) {
+      return "현재 이메일 인증번호를 보낼 수 없습니다. 잠시 후 다시 시도해 주세요.";
+    }
+  }
+  return viewerErrorMessage(caught);
+}
+
 function participantRenameErrorMessage(caught: unknown) {
   if (caught instanceof SecureShareApiError) {
     if (caught.code === "display_name_unavailable") {
@@ -1012,6 +1024,7 @@ export function SecurePublicShareViewer({
   const [restoreRenameFocus, setRestoreRenameFocus] = useState(false);
   const [participantClock, setParticipantClock] = useState(() => Date.now());
   const [bootstrapEpoch, setBootstrapEpoch] = useState(0);
+  const emailRequestRef = useRef<{ clientRequestId: string; email: string } | null>(null);
   const commentRequestRef = useRef<{ body: string; clientRequestId: string } | null>(null);
   const renameRequestRef = useRef<{
     clientRequestId: string;
@@ -1140,6 +1153,7 @@ export function SecurePublicShareViewer({
   }, [contentKey, idToken, isAuthenticated, shareId]);
 
   useEffect(() => {
+    emailRequestRef.current = null;
     saveCopyRequestRef.current = null;
     renameRequestRef.current = null;
   }, [shareId]);
@@ -1445,6 +1459,7 @@ export function SecurePublicShareViewer({
       setParticipantClock(Date.now());
       setBusyAction(null);
       commentRequestRef.current = null;
+      emailRequestRef.current = null;
       renameRequestRef.current = null;
       saveCopyRequestRef.current = null;
       setChallengeId(null);
@@ -1859,9 +1874,22 @@ export function SecurePublicShareViewer({
     const lifecycle = captureLifecycle();
     setBusyAction("email");
     setAccessError("");
+    const normalizedEmail = email.trim().toLowerCase();
+    const pendingRequest = emailRequestRef.current?.email === normalizedEmail
+      ? emailRequestRef.current
+      : {
+          clientRequestId: crypto.randomUUID(),
+          email: normalizedEmail
+        };
+    emailRequestRef.current = pendingRequest;
     try {
       const challenge = parseEmailChallengeDto(
-        await requestSecureShareEmailChallenge(shareId, email, lifecycle.signal)
+        await requestSecureShareEmailChallenge(
+          shareId,
+          email,
+          pendingRequest.clientRequestId,
+          lifecycle.signal
+        )
       );
 
       if (!lifecycleIsCurrent(lifecycle)) {
@@ -1874,6 +1902,9 @@ export function SecurePublicShareViewer({
       setResendSeconds(challenge.resendAfterSeconds);
       setNotice("인증 가능한 이메일인 경우 코드를 전송했습니다.");
       setOtp("");
+      if (emailRequestRef.current === pendingRequest) {
+        emailRequestRef.current = null;
+      }
     } catch (caught) {
       if (!lifecycleIsCurrent(lifecycle)) {
         return;
@@ -1885,7 +1916,7 @@ export function SecurePublicShareViewer({
       ) {
         setResendSeconds(Math.min(3_600, caught.retryAfterSeconds));
       }
-      setAccessError(viewerErrorMessage(caught));
+      setAccessError(emailChallengeErrorMessage(caught));
     } finally {
       if (lifecycleIsCurrent(lifecycle)) {
         setBusyAction(null);
@@ -2586,6 +2617,7 @@ export function SecurePublicShareViewer({
                     inputMode="email"
                     onChange={(event) => {
                       setEmail(event.target.value);
+                      emailRequestRef.current = null;
                       setChallengeId(null);
                       setOtp("");
                     }}

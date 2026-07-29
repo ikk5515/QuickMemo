@@ -10,6 +10,7 @@ import {
   sourceAttachmentFingerprintMatches,
   validSourceAttachmentFingerprint
 } from "./_secure-share-attachment-reuse.js";
+import { createGmailSmtpEmailAdapter } from "./_secure-share-gmail-smtp.js";
 import {
   HttpError,
   activeUserFromRequest,
@@ -116,6 +117,7 @@ const maximumPageSize = 50;
 const maximumSourceShareHistory = 100;
 const rateLimitTransactionMaximumAttempts = 8;
 const sourceCreateTransactionMaximumAttempts = 8;
+const emailQuotaReservationMaximumAttempts = 8;
 const optimisticRetryMaximumDelayMilliseconds = 250;
 const copyGrantPurpose = "quickmemo/secure-share/copy-grant/v1";
 const copyGrantTtlSeconds = 5 * 60;
@@ -173,6 +175,47 @@ const validActions = new Set([
   "attachment-preview",
   "attachment-download"
 ]);
+
+function configuredEmailProviderName(environment = process.env) {
+  const provider = typeof environment.SHARE_EMAIL_PROVIDER === "string"
+    ? environment.SHARE_EMAIL_PROVIDER.trim().toLowerCase()
+    : "";
+  if (provider === "gmail_smtp") {
+    return provider;
+  }
+  if (provider === "resend" && environment.NODE_ENV === "test") {
+    return provider;
+  }
+  throw new HttpError(
+    503,
+    "email_feature_unavailable",
+    "Secure Share email provider is unavailable",
+    { expose: false }
+  );
+}
+
+function createConfiguredEmailAdapter(context, environment = process.env) {
+  const provider = configuredEmailProviderName(environment);
+  if (provider === "gmail_smtp") {
+    return createGmailSmtpEmailAdapter({ environment });
+  }
+  return createResendEmailAdapter(
+    undefined,
+    delay,
+    async () => {
+      await consumeRateLimits(context, [
+        {
+          limitType: "email_provider_request_global_second",
+          keyParts: ["resend_test_only"],
+          shareId: "email_provider_global",
+          ownerUid: "",
+          windowSeconds: emailProviderRequestRateWindowSeconds,
+          limit: emailProviderRequestRateLimit
+        }
+      ]);
+    }
+  );
+}
 
 function resolveSecureShareLiveContentSyncServerFlag(
   productionDefault,
@@ -1060,6 +1103,38 @@ function createAuditWrite(context, share, eventType, result, details = {}) {
   );
 }
 
+function rateLimitWindowStarts(nowMilliseconds, definition) {
+  if (
+    !Number.isSafeInteger(nowMilliseconds)
+    || nowMilliseconds < 0
+    || !Number.isSafeInteger(definition?.windowSeconds)
+    || definition.windowSeconds < 1
+  ) {
+    throw new HttpError(503, "service_unavailable", "Rate limit window is invalid", {
+      expose: false
+    });
+  }
+  const windowStartSeconds =
+    Math.floor(nowMilliseconds / 1000 / definition.windowSeconds) * definition.windowSeconds;
+  if (definition.rollingWindowHours === undefined) {
+    return [windowStartSeconds];
+  }
+  if (
+    definition.windowSeconds !== 60 * 60
+    || !Number.isSafeInteger(definition.rollingWindowHours)
+    || definition.rollingWindowHours < 1
+    || definition.rollingWindowHours > 168
+  ) {
+    throw new HttpError(503, "service_unavailable", "Rolling rate limit window is invalid", {
+      expose: false
+    });
+  }
+  return Array.from(
+    { length: definition.rollingWindowHours + 1 },
+    (_, index) => windowStartSeconds - index * definition.windowSeconds
+  );
+}
+
 async function consumeRateLimits(context, definitions) {
   if (!definitions.length) {
     return [];
@@ -1067,44 +1142,94 @@ async function consumeRateLimits(context, definitions) {
   for (let attempt = 0; attempt < rateLimitTransactionMaximumAttempts; attempt += 1) {
     const nowMilliseconds = Date.now();
     const states = await Promise.all(definitions.map(async (definition) => {
-      const windowStartSeconds =
-        Math.floor(nowMilliseconds / 1000 / definition.windowSeconds) * definition.windowSeconds;
-      const bucketId = rateLimitBucketDigest(
-        definition.limitType,
-        [...definition.keyParts, String(windowStartSeconds)]
+      const windowStarts = rateLimitWindowStarts(nowMilliseconds, definition);
+      const buckets = await Promise.all(windowStarts.map(async (windowStartSeconds) => {
+        const bucketId = rateLimitBucketDigest(
+          definition.limitType,
+          [...definition.keyParts, String(windowStartSeconds)]
+        );
+        const path = `publicShareRateLimits/${bucketId}`;
+        const document = await firestoreGet(context, path);
+        if (
+          document
+          && (
+            !Number.isSafeInteger(document.count)
+            || document.count < 0
+          )
+        ) {
+          throw new HttpError(
+            503,
+            "service_unavailable",
+            "Rate limit state is invalid",
+            { expose: false }
+          );
+        }
+        return {
+          bucketId,
+          count: document?.count ?? 0,
+          document,
+          path,
+          windowStartSeconds
+        };
+      }));
+      const current = buckets[0];
+      const enforcementCount = buckets.reduce(
+        (total, bucket) => total + bucket.count,
+        0
       );
-      const path = `publicShareRateLimits/${bucketId}`;
-      const document = await firestoreGet(context, path);
-      const count = Number.isSafeInteger(document?.count) ? document.count : 0;
-      if (count >= definition.limit) {
-        const retryAfter = Math.max(1, windowStartSeconds + definition.windowSeconds - Math.floor(nowMilliseconds / 1000));
+      if (enforcementCount >= definition.limit) {
+        const retryAfter = Math.max(
+          1,
+          current.windowStartSeconds
+            + definition.windowSeconds
+            - Math.floor(nowMilliseconds / 1000)
+        );
         throw new HttpError(429, "rate_limited", "Rate limit exceeded", { retryAfter });
       }
-      return { definition, windowStartSeconds, bucketId, path, document, count };
+      return {
+        buckets,
+        current,
+        definition,
+        enforcementCount,
+        previousWindowLock: definition.rollingWindowHours === undefined
+          ? null
+          : buckets[1]
+      };
     }));
-    const writes = states.map(({ definition, windowStartSeconds, path, document, count }) => {
+    const bucketWrite = (definition, bucket, count) => {
+      const retentionWindows = definition.rollingWindowHours === undefined
+        ? 2
+        : definition.rollingWindowHours + 2;
       const fields = {
         shareId: definition.shareId,
         ownerUid: definition.ownerUid ?? "",
         limitType: definition.limitType,
-        windowStart: new Date(windowStartSeconds * 1000),
-        count: count + 1,
+        windowStart: new Date(bucket.windowStartSeconds * 1000),
+        count,
         updatedAt: new Date(nowMilliseconds),
-        expiresAt: new Date((windowStartSeconds + definition.windowSeconds * 2) * 1000)
+        expiresAt: new Date((
+          bucket.windowStartSeconds + definition.windowSeconds * retentionWindows
+        ) * 1000)
       };
-      return document
+      return bucket.document
         ? updateDocumentWrite(
           context.projectId,
-          path,
+          bucket.path,
           fields,
           ["shareId", "ownerUid", "limitType", "windowStart", "count", "updatedAt", "expiresAt"],
-          document.__updateTime
+          bucket.document.__updateTime
         )
-        : createDocumentWrite(context.projectId, path, fields);
-    });
+        : createDocumentWrite(context.projectId, bucket.path, fields);
+    };
+    const writes = states.flatMap(({ current, definition, previousWindowLock }) => [
+      bucketWrite(definition, current, current.count + 1),
+      ...(previousWindowLock
+        ? [bucketWrite(definition, previousWindowLock, previousWindowLock.count)]
+        : [])
+    ]);
     try {
       await firestoreCommit(context, writes);
-      return states.map(({ path }) => path);
+      return states.map(({ current }) => current.path);
     } catch (error) {
       if (!isOptimisticConflict(error)) {
         throw error;
@@ -2959,56 +3084,282 @@ async function emailChallengeEligibility(context, state, emailHash) {
   }
 }
 
+const gmailSmtpProviderHealthPath = "publicShareEmailProviderHealth/gmail-smtp";
+const gmailProviderHealthReasonCodes = new Set([
+  "ambiguous_delivery",
+  "auth_error",
+  "configuration_error",
+  "connection_error",
+  "invalid_recipient",
+  "permanent_provider_error",
+  "quota_exceeded",
+  "rate_limited",
+  "temporary_provider_error",
+  "timeout",
+  "tls_error"
+]);
+const gmailProviderHardBlockReasonCodes = new Set([
+  "auth_error",
+  "configuration_error",
+  "quota_exceeded",
+  "rate_limited"
+]);
+
+function gmailProviderFailureReason(error) {
+  if (!error || typeof error !== "object") {
+    return "permanent_provider_error";
+  }
+  try {
+    return gmailProviderHealthReasonCodes.has(error.providerReasonCode)
+      ? error.providerReasonCode
+      : "permanent_provider_error";
+  } catch {
+    return "permanent_provider_error";
+  }
+}
+
+function gmailProviderHealthStateAllowsSend(health, nowMilliseconds = Date.now()) {
+  if (!health) {
+    return true;
+  }
+  if (
+    !Number.isSafeInteger(nowMilliseconds)
+    || nowMilliseconds < 0
+    || !new Set(["unknown", "healthy", "degraded", "blocked"]).has(health.status)
+    || !Number.isSafeInteger(health.consecutiveFailures)
+    || health.consecutiveFailures < 0
+    || health.consecutiveFailures > 1_000
+  ) {
+    return false;
+  }
+  if (health.status !== "blocked") {
+    return true;
+  }
+  const blockedUntilMilliseconds = timestampMilliseconds(health.blockedUntil);
+  return (
+    Number.isFinite(blockedUntilMilliseconds)
+    && blockedUntilMilliseconds <= nowMilliseconds
+  );
+}
+
+async function gmailProviderHealthAllowsSend(context, nowMilliseconds = Date.now()) {
+  if (configuredEmailProviderName() !== "gmail_smtp") {
+    return true;
+  }
+  const health = await firestoreGet(context, gmailSmtpProviderHealthPath);
+  return gmailProviderHealthStateAllowsSend(health, nowMilliseconds);
+}
+
+function gmailProviderHealthTransition(existing, outcome, error = null, now = new Date()) {
+  const nowMilliseconds = timestampMilliseconds(now);
+  if (!Number.isFinite(nowMilliseconds)) {
+    throw new HttpError(503, "service_unavailable", "Provider health time is invalid", {
+      expose: false
+    });
+  }
+  const currentFailures = Number.isSafeInteger(existing?.consecutiveFailures)
+    ? Math.max(0, existing.consecutiveFailures)
+    : 0;
+  const reasonCode = outcome === "sent"
+    ? ""
+    : gmailProviderFailureReason(error);
+  const invalidRecipient = reasonCode === "invalid_recipient";
+  const consecutiveFailures = outcome === "sent"
+    ? 0
+    : invalidRecipient
+      ? currentFailures
+      : Math.min(currentFailures + 1, 1_000);
+  const hardBlocked = gmailProviderHardBlockReasonCodes.has(reasonCode);
+  const thresholdBlocked = !invalidRecipient && consecutiveFailures >= 3;
+  const existingBlockedUntilMilliseconds = timestampMilliseconds(existing?.blockedUntil);
+  const activeExistingBlock =
+    outcome !== "sent"
+    && existing?.status === "blocked"
+    && existingBlockedUntilMilliseconds > nowMilliseconds;
+  const proposedStatus = outcome === "sent"
+    ? "healthy"
+    : invalidRecipient
+      ? existing?.status === "blocked"
+        ? "degraded"
+        : existing?.status ?? "unknown"
+      : hardBlocked || thresholdBlocked
+        ? "blocked"
+        : "degraded";
+  const status = activeExistingBlock ? "blocked" : proposedStatus;
+  const requestedBlockedSeconds =
+    error && typeof error === "object" && Number.isSafeInteger(error.providerBlockedSeconds)
+      ? error.providerBlockedSeconds
+      : 0;
+  const proposedBlockedSeconds = proposedStatus === "blocked"
+    ? Math.max(
+        requestedBlockedSeconds,
+        hardBlocked ? 60 * 60 : 10 * 60
+      )
+    : 0;
+  const proposedBlockedUntilMilliseconds = proposedBlockedSeconds
+    ? nowMilliseconds + Math.min(proposedBlockedSeconds, 24 * 60 * 60) * 1000
+    : 0;
+  const blockedUntilMilliseconds = status === "blocked"
+    ? Math.max(
+        proposedBlockedUntilMilliseconds,
+        activeExistingBlock ? existingBlockedUntilMilliseconds : 0
+      )
+    : 0;
+  const existingReasonCode =
+    typeof existing?.lastReasonCode === "string"
+    && gmailProviderHealthReasonCodes.has(existing.lastReasonCode)
+      ? existing.lastReasonCode
+      : "";
+  return {
+    schemaVersion: 1,
+    status,
+    consecutiveFailures,
+    blockedUntil: blockedUntilMilliseconds
+      ? new Date(blockedUntilMilliseconds)
+      : undefined,
+    lastReasonCode: activeExistingBlock && !hardBlocked && existingReasonCode
+      ? existingReasonCode
+      : reasonCode,
+    lastSuccessfulSendAt: outcome === "sent"
+      ? new Date(nowMilliseconds)
+      : existing?.lastSuccessfulSendAt,
+    lastFailureAt: outcome === "sent"
+      ? existing?.lastFailureAt
+      : new Date(nowMilliseconds),
+    updatedAt: new Date(nowMilliseconds)
+  };
+}
+
+async function recordGmailProviderHealth(context, outcome, error = null) {
+  if (configuredEmailProviderName() !== "gmail_smtp") {
+    return;
+  }
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const now = new Date();
+    const existing = await firestoreGet(context, gmailSmtpProviderHealthPath);
+    const fields = gmailProviderHealthTransition(existing, outcome, error, now);
+    const write = existing
+      ? updateDocumentWrite(
+        context.projectId,
+        gmailSmtpProviderHealthPath,
+        fields,
+        Object.keys(fields),
+        existing.__updateTime
+      )
+      : createDocumentWrite(context.projectId, gmailSmtpProviderHealthPath, fields);
+    try {
+      await firestoreCommit(context, [write]);
+      return;
+    } catch (writeError) {
+      if (!isOptimisticConflict(writeError) || attempt === 4) {
+        throw writeError;
+      }
+    }
+  }
+}
+
 function resolveEmailQuotaPolicy(environment = process.env) {
   const configured = (name, fallback, minimum, maximum) => {
     const parsed = Number.parseInt(environment[name], 10);
+    if (Number.isSafeInteger(parsed) && parsed > maximum) {
+      throw new HttpError(
+        503,
+        "email_feature_unavailable",
+        "Secure Share email quota configuration exceeds the free-tier cap",
+        { expose: false }
+      );
+    }
     return Number.isSafeInteger(parsed)
       ? Math.min(Math.max(parsed, minimum), maximum)
       : fallback;
   };
-  const dailyHardLimit = configured("SHARE_EMAIL_DAILY_HARD_LIMIT", 80, 1, 80);
-  const monthlyHardLimit = configured("SHARE_EMAIL_MONTHLY_HARD_LIMIT", 2_400, 1, 2_400);
+  const rolling24hHardLimit = configured(
+    "SHARE_EMAIL_ROLLING_24H_HARD_LIMIT",
+    30,
+    1,
+    30
+  );
+  const monthlyHardLimit = configured("SHARE_EMAIL_MONTHLY_HARD_LIMIT", 700, 1, 700);
   return {
-    dailyHardLimit,
-    dailySoftLimit: Math.min(
-      configured("SHARE_EMAIL_DAILY_SOFT_LIMIT", 64, 1, 80),
-      dailyHardLimit
+    globalHourlyLimit: configured("SHARE_EMAIL_GLOBAL_HOURLY_LIMIT", 20, 1, 20),
+    globalMinuteLimit: configured("SHARE_EMAIL_GLOBAL_MINUTE_LIMIT", 3, 1, 3),
+    rolling24hHardLimit,
+    rolling24hSoftLimit: Math.min(
+      configured("SHARE_EMAIL_ROLLING_24H_SOFT_LIMIT", 20, 1, 20),
+      rolling24hHardLimit
     ),
     monthlyHardLimit,
     monthlySoftLimit: Math.min(
-      configured("SHARE_EMAIL_MONTHLY_SOFT_LIMIT", 1_920, 1, 2_400),
+      configured("SHARE_EMAIL_MONTHLY_SOFT_LIMIT", 500, 1, 500),
       monthlyHardLimit
     )
   };
 }
 
-function emailQuotaPeriods(nowMilliseconds = Date.now(), policy = resolveEmailQuotaPolicy()) {
+function emailQuotaClockParts(nowMilliseconds) {
   const now = new Date(nowMilliseconds);
   if (!Number.isFinite(now.getTime())) {
     throw new HttpError(500, "internal_error", "Invalid email quota clock", { expose: false });
   }
-  const dayKey = now.toISOString().slice(0, 10);
-  const monthKey = now.toISOString().slice(0, 7);
-  const nextDay = Date.UTC(
+  const utcHourStart = Date.UTC(
     now.getUTCFullYear(),
     now.getUTCMonth(),
-    now.getUTCDate() + 1
+    now.getUTCDate(),
+    now.getUTCHours()
   );
-  const nextMonth = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+  const utcMinuteStart = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    now.getUTCHours(),
+    now.getUTCMinutes()
+  );
+  const seoul = new Date(nowMilliseconds + 9 * 60 * 60 * 1000);
+  const seoulMonthKey = seoul.toISOString().slice(0, 7);
+  const seoulNextMonthUtc = Date.UTC(
+    seoul.getUTCFullYear(),
+    seoul.getUTCMonth() + 1,
+    1
+  ) - 9 * 60 * 60 * 1000;
+  return {
+    now,
+    seoulMonthKey,
+    seoulNextMonthUtc,
+    utcHourStart,
+    utcMinuteStart
+  };
+}
+
+function emailHourPeriod(hourStartMilliseconds, policy) {
+  const key = new Date(hourStartMilliseconds).toISOString().slice(0, 13);
+  return {
+    bucketId: `hour_${key}`,
+    expiresAt: new Date(hourStartMilliseconds + 32 * 24 * 60 * 60 * 1000),
+    hardLimit: policy.globalHourlyLimit,
+    periodKey: key,
+    scope: "hourly",
+    softLimit: policy.globalHourlyLimit
+  };
+}
+
+function emailQuotaPeriods(nowMilliseconds = Date.now(), policy = resolveEmailQuotaPolicy()) {
+  const parts = emailQuotaClockParts(nowMilliseconds);
+  const minuteKey = parts.now.toISOString().slice(0, 16);
   return [
     {
-      bucketId: `day_${dayKey}`,
-      expiresAt: new Date(nextDay + 45 * 24 * 60 * 60 * 1000),
-      hardLimit: policy.dailyHardLimit,
-      periodKey: dayKey,
-      scope: "daily",
-      softLimit: policy.dailySoftLimit
+      bucketId: `minute_${minuteKey}`,
+      expiresAt: new Date(parts.utcMinuteStart + 72 * 60 * 60 * 1000),
+      hardLimit: policy.globalMinuteLimit,
+      periodKey: minuteKey,
+      scope: "minute",
+      softLimit: policy.globalMinuteLimit
     },
+    emailHourPeriod(parts.utcHourStart, policy),
     {
-      bucketId: `month_${monthKey}`,
-      expiresAt: new Date(nextMonth + 400 * 24 * 60 * 60 * 1000),
+      bucketId: `month_${parts.seoulMonthKey}`,
+      expiresAt: new Date(parts.seoulNextMonthUtc + 400 * 24 * 60 * 60 * 1000),
       hardLimit: policy.monthlyHardLimit,
-      periodKey: monthKey,
+      periodKey: parts.seoulMonthKey,
       scope: "monthly",
       softLimit: policy.monthlySoftLimit
     }
@@ -3022,60 +3373,159 @@ function emailQuotaCount(document) {
   const sentCount = document
     ? document.sentCount
     : 0;
+  const ambiguousCount = document
+    ? document.ambiguousCount ?? 0
+    : 0;
+  const failedCount = document
+    ? document.failedCount ?? 0
+    : 0;
   if (
     !Number.isSafeInteger(reservedCount)
     || reservedCount < 0
     || !Number.isSafeInteger(sentCount)
     || sentCount < 0
+    || !Number.isSafeInteger(ambiguousCount)
+    || ambiguousCount < 0
+    || !Number.isSafeInteger(failedCount)
+    || failedCount < 0
   ) {
     throw new HttpError(503, "email_feature_unavailable", "Email quota state is invalid", {
       expose: false
     });
   }
-  return { reservedCount, sentCount, total: reservedCount + sentCount };
+  return {
+    ambiguousCount,
+    failedCount,
+    reservedCount,
+    sentCount,
+    total: reservedCount + sentCount + ambiguousCount
+  };
+}
+
+function emailQuotaEnforcementTotal(counts, period) {
+  const deliveryTotal =
+    counts.reservedCount + counts.sentCount + counts.ambiguousCount;
+  return deliveryTotal + (
+    new Set(["minute", "hourly"]).has(period.scope)
+      ? counts.failedCount
+      : 0
+  );
 }
 
 function emailQuotaExceeded(document, period) {
   const counts = emailQuotaCount(document);
+  const total = emailQuotaEnforcementTotal(counts, period);
   return {
     ...counts,
-    exceeded: counts.total >= period.hardLimit,
-    softLimitReached: counts.total >= period.softLimit
+    total,
+    exceeded: total >= period.hardLimit,
+    softLimitReached: total >= period.softLimit
   };
 }
 
 async function readEmailQuotaStates(context, nowMilliseconds) {
-  const periods = emailQuotaPeriods(nowMilliseconds);
-  const documents = await Promise.all(periods.map((period) =>
-    firestoreGet(context, `publicShareEmailQuotaBuckets/${period.bucketId}`)
-  ));
-  return periods.map((period, index) => ({
-    document: documents[index],
-    path: `publicShareEmailQuotaBuckets/${period.bucketId}`,
-    period,
-    ...emailQuotaExceeded(documents[index], period)
+  const policy = resolveEmailQuotaPolicy();
+  const periods = emailQuotaPeriods(nowMilliseconds, policy);
+  const currentStates = await Promise.all(periods.map(async (period) => {
+    const document = await firestoreGet(
+      context,
+      `publicShareEmailQuotaBuckets/${period.bucketId}`
+    );
+    return {
+      document,
+      path: `publicShareEmailQuotaBuckets/${period.bucketId}`,
+      period,
+      ...emailQuotaExceeded(document, period)
+    };
   }));
+  const currentHourStart = emailQuotaClockParts(nowMilliseconds).utcHourStart;
+  const historicalHourPeriods = Array.from({ length: 24 }, (_, index) =>
+    emailHourPeriod(currentHourStart - (index + 1) * 60 * 60 * 1000, policy)
+  );
+  const historicalHourDocuments = await Promise.all(
+    historicalHourPeriods.map((period) =>
+      firestoreGet(context, `publicShareEmailQuotaBuckets/${period.bucketId}`)
+    )
+  );
+  const historicalHourStates = historicalHourPeriods.map((period, index) => {
+    const document = historicalHourDocuments[index];
+    return {
+      document,
+      path: `publicShareEmailQuotaBuckets/${period.bucketId}`,
+      period,
+      ...emailQuotaExceeded(document, period)
+    };
+  });
+  const rollingCounts = [
+    currentStates[1],
+    ...historicalHourStates
+  ].reduce((totals, state) => ({
+    ambiguousCount: totals.ambiguousCount + state.ambiguousCount,
+    failedCount: totals.failedCount + state.failedCount,
+    reservedCount: totals.reservedCount + state.reservedCount,
+    sentCount: totals.sentCount + state.sentCount,
+    total:
+      totals.total
+      + state.reservedCount
+      + state.sentCount
+      + state.ambiguousCount
+  }), {
+    ambiguousCount: 0,
+    failedCount: 0,
+    reservedCount: 0,
+    sentCount: 0,
+    total: 0
+  });
+  const rollingPeriod = {
+    bucketId: "rolling_24h",
+    expiresAt: new Date(currentHourStart + 60 * 60 * 1000),
+    hardLimit: policy.rolling24hHardLimit,
+    periodKey: new Date(currentHourStart).toISOString(),
+    scope: "rolling24h",
+    softLimit: policy.rolling24hSoftLimit
+  };
+  return {
+    enforcementStates: [
+      ...currentStates,
+      {
+        document: null,
+        path: "",
+        period: rollingPeriod,
+        ...rollingCounts,
+        exceeded: rollingCounts.total >= rollingPeriod.hardLimit,
+        softLimitReached: rollingCounts.total >= rollingPeriod.softLimit
+      }
+    ],
+    lockStates: historicalHourStates.slice(0, 1),
+    writeStates: currentStates
+  };
 }
 
 function storedEmailQuotaState(document, bucketId) {
-  const expectedScope = bucketId.startsWith("day_")
-    ? "daily"
-    : bucketId.startsWith("month_")
-      ? "monthly"
-      : "";
-  const expectedPeriodKey = expectedScope === "daily"
-    ? bucketId.slice("day_".length)
-    : bucketId.slice("month_".length);
+  const expectedScope = bucketId.startsWith("minute_")
+    ? "minute"
+    : bucketId.startsWith("hour_")
+      ? "hourly"
+      : bucketId.startsWith("month_")
+        ? "monthly"
+        : "";
+  const expectedPeriodKey = expectedScope === "minute"
+    ? bucketId.slice("minute_".length)
+    : expectedScope === "hourly"
+      ? bucketId.slice("hour_".length)
+      : bucketId.slice("month_".length);
   if (
     !document
-    || !new Set(["daily", "monthly"]).has(document.scope)
+    || !new Set(["minute", "hourly", "monthly"]).has(document.scope)
     || document.scope !== expectedScope
     || typeof document.periodKey !== "string"
     || document.periodKey !== expectedPeriodKey
     || (
-      document.scope === "daily"
-        ? !/^\d{4}-\d{2}-\d{2}$/u.test(document.periodKey)
-        : !/^\d{4}-\d{2}$/u.test(document.periodKey)
+      document.scope === "minute"
+        ? !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/u.test(document.periodKey)
+        : document.scope === "hourly"
+          ? !/^\d{4}-\d{2}-\d{2}T\d{2}$/u.test(document.periodKey)
+          : !/^\d{4}-\d{2}$/u.test(document.periodKey)
     )
     || !Number.isSafeInteger(document.softLimit)
     || !Number.isSafeInteger(document.hardLimit)
@@ -3088,6 +3538,9 @@ function storedEmailQuotaState(document, bucketId) {
     });
   }
   const counts = emailQuotaCount(document);
+  const total = emailQuotaEnforcementTotal(counts, {
+    scope: document.scope
+  });
   return {
     document,
     path: `publicShareEmailQuotaBuckets/${bucketId}`,
@@ -3100,8 +3553,9 @@ function storedEmailQuotaState(document, bucketId) {
       softLimit: document.softLimit
     },
     ...counts,
-    exceeded: counts.total >= document.hardLimit,
-    softLimitReached: counts.total >= document.softLimit
+    total,
+    exceeded: total >= document.hardLimit,
+    softLimitReached: total >= document.softLimit
   };
 }
 
@@ -3113,22 +3567,35 @@ function assertEmailQuotaAvailable(states) {
   }
 }
 
-function emailQuotaBucketWrite(context, state, reservedDelta, sentDelta, now) {
-  const reservedCount = state.reservedCount + reservedDelta;
-  const sentCount = state.sentCount + sentDelta;
-  if (reservedCount < 0 || sentCount < 0) {
+function emailQuotaBucketWrite(context, state, deltas, now) {
+  const reservedCount = state.reservedCount + (deltas.reserved ?? 0);
+  const sentCount = state.sentCount + (deltas.sent ?? 0);
+  const failedCount = state.failedCount + (deltas.failed ?? 0);
+  const ambiguousCount = state.ambiguousCount + (deltas.ambiguous ?? 0);
+  if (
+    reservedCount < 0
+    || sentCount < 0
+    || failedCount < 0
+    || ambiguousCount < 0
+  ) {
     throw new HttpError(503, "email_feature_unavailable", "Email quota release underflow", {
       expose: false
     });
   }
+  const enforcementTotal = emailQuotaEnforcementTotal(
+    { ambiguousCount, failedCount, reservedCount, sentCount },
+    state.period
+  );
   const fields = {
     scope: state.period.scope,
     periodKey: state.period.periodKey,
     reservedCount,
     sentCount,
+    failedCount,
+    ambiguousCount,
     softLimit: state.period.softLimit,
     hardLimit: state.period.hardLimit,
-    softLimitReached: reservedCount + sentCount >= state.period.softLimit,
+    softLimitReached: enforcementTotal >= state.period.softLimit,
     updatedAt: now,
     expiresAt: state.period.expiresAt
   };
@@ -3142,6 +3609,8 @@ function emailQuotaBucketWrite(context, state, reservedDelta, sentDelta, now) {
         "periodKey",
         "reservedCount",
         "sentCount",
+        "failedCount",
+        "ambiguousCount",
         "softLimit",
         "hardLimit",
         "softLimitReached",
@@ -3169,6 +3638,7 @@ async function commitEmailChallenge({
   context,
   eligible,
   existing,
+  sendAttemptPath,
   state
 }) {
   const deliveryId = eligible
@@ -3189,16 +3659,21 @@ async function commitEmailChallenge({
   ) {
     return { committed: false, deliveryId, deliveryPath, duplicate: true };
   }
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < emailQuotaReservationMaximumAttempts;
+    attempt += 1
+  ) {
     const now = new Date();
-    const [quotaStates, delivery] = await Promise.all([
+    const [quotaStateSet, delivery, sendAttempt] = await Promise.all([
       readEmailQuotaStates(context, now.getTime()),
-      deliveryPath ? firestoreGet(context, deliveryPath) : Promise.resolve(null)
+      deliveryPath ? firestoreGet(context, deliveryPath) : Promise.resolve(null),
+      eligible ? firestoreGet(context, sendAttemptPath) : Promise.resolve(null)
     ]);
-    if (delivery) {
+    if (delivery || sendAttempt) {
       return { committed: false, deliveryId, deliveryPath, duplicate: true };
     }
-    assertEmailQuotaAvailable(quotaStates);
+    assertEmailQuotaAvailable(quotaStateSet.enforcementStates);
     const challengeFields = { ...challenge };
     delete challengeFields.__challengeId;
     const challengeWrite = existing
@@ -3219,16 +3694,30 @@ async function commitEmailChallenge({
           challengeId: challenge.__challengeId,
           emailHash: challenge.emailHash,
           policyVersion: state.policy.policyVersion,
-          provider: "resend",
+          provider: configuredEmailProviderName(),
           status: "reserved",
-          dailyBucketId: quotaStates[0].period.bucketId,
-          monthlyBucketId: quotaStates[1].period.bucketId,
+          quotaBucketIds: quotaStateSet.writeStates.map(
+            (quotaState) => quotaState.period.bucketId
+          ),
           createdAt: now,
           updatedAt: now,
           expiresAt: new Date(now.getTime() + 48 * 60 * 60 * 1000)
         }),
-        ...quotaStates.map((quotaState) =>
-          emailQuotaBucketWrite(context, quotaState, 1, 0, now)
+        createDocumentWrite(context.projectId, sendAttemptPath, {
+          challengeId: challenge.__challengeId,
+          ownerUid: state.share.ownerUid,
+          shareId: state.share.__id,
+          requestIdHash: challenge.clientRequestIdHash,
+          state: "reserved",
+          reservedAt: now,
+          updatedAt: now,
+          expiresAt: new Date(now.getTime() + 48 * 60 * 60 * 1000)
+        }),
+        ...quotaStateSet.writeStates.map((quotaState) =>
+          emailQuotaBucketWrite(context, quotaState, { reserved: 1 }, now)
+        ),
+        ...quotaStateSet.lockStates.map((quotaState) =>
+          emailQuotaBucketWrite(context, quotaState, {}, now)
         )
       );
     }
@@ -3252,7 +3741,7 @@ async function commitEmailChallenge({
     try {
       await firestoreCommit(context, writes, transaction);
       if (eligible) {
-        for (const quotaState of quotaStates) {
+        for (const quotaState of quotaStateSet.enforcementStates) {
           if (quotaState.total + 1 === quotaState.period.softLimit) {
             console.warn("secure share email quota soft limit reached", {
               hardLimit: quotaState.period.hardLimit,
@@ -3262,7 +3751,13 @@ async function commitEmailChallenge({
           }
         }
       }
-      return { committed: true, deliveryId, deliveryPath, duplicate: false };
+      return {
+        committed: true,
+        deliveryId,
+        deliveryPath,
+        duplicate: false,
+        sendAttemptPath
+      };
     } catch (error) {
       if (transaction) {
         await rollbackShareMutation(context, transaction);
@@ -3271,6 +3766,12 @@ async function commitEmailChallenge({
         throw error;
       }
       const latest = await firestoreGet(context, challengePath);
+      const latestAttempt = eligible
+        ? await firestoreGet(context, sendAttemptPath)
+        : null;
+      if (latestAttempt) {
+        return { committed: false, deliveryId, deliveryPath, duplicate: true };
+      }
       if (
         latest
         && (
@@ -3281,9 +3782,10 @@ async function commitEmailChallenge({
       ) {
         return { committed: false, deliveryId, deliveryPath, duplicate: true };
       }
-      if (attempt === 4) {
+      if (attempt === emailQuotaReservationMaximumAttempts - 1) {
         throw new HttpError(409, "request_conflict", "Email challenge reservation conflict");
       }
+      await waitBeforeOptimisticRetry(attempt);
     }
   }
   throw new HttpError(409, "request_conflict");
@@ -3302,17 +3804,24 @@ async function finalizeEmailDelivery(
   }
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const now = new Date();
-    const [delivery, latestChallenge] = await Promise.all([
+    const [delivery, latestChallenge, sendAttempt] = await Promise.all([
       firestoreGet(context, reservation.deliveryPath),
-      firestoreGet(context, challengePath)
+      firestoreGet(context, challengePath),
+      reservation.sendAttemptPath
+        ? firestoreGet(context, reservation.sendAttemptPath)
+        : Promise.resolve(null)
     ]);
     if (!delivery || delivery.status !== "reserved") {
       return;
     }
-    const bucketIds = [delivery.dailyBucketId, delivery.monthlyBucketId];
+    const bucketIds = delivery.quotaBucketIds;
     if (
-      bucketIds.some((bucketId) =>
-        typeof bucketId !== "string" || !/^(?:day|month)_[0-9-]{7,10}$/u.test(bucketId)
+      !Array.isArray(bucketIds)
+      || bucketIds.length !== 3
+      || new Set(bucketIds).size !== 3
+      || bucketIds.some((bucketId) =>
+        typeof bucketId !== "string"
+        || !/^(?:minute_\d{4}-\d{2}-\d{2}T\d{2}:\d{2}|hour_\d{4}-\d{2}-\d{2}T\d{2}|month_\d{4}-\d{2})$/u.test(bucketId)
       )
     ) {
       throw new HttpError(503, "email_feature_unavailable", "Email delivery bucket is invalid", {
@@ -3332,7 +3841,6 @@ async function finalizeEmailDelivery(
       && latestChallenge.codeDigest === challenge.codeDigest
       && latestChallenge.policyVersion === challenge.policyVersion
       && latestChallenge.sendAttemptId === challenge.sendAttemptId;
-    const releaseReservation = outcome !== "ambiguous";
     const accepted = outcome === "sent";
     const providerMessageIdHash = accepted && providerMessageId
       ? sha256Digest(providerMessageId)
@@ -3345,23 +3853,44 @@ async function finalizeEmailDelivery(
           status: outcome,
           providerMessageIdHash,
           updatedAt: now,
-          completedAt: outcome === "ambiguous" ? undefined : now
+          completedAt: now
         },
         ["status", "providerMessageIdHash", "updatedAt", "completedAt"],
         delivery.__updateTime
       )
     ];
-    if (releaseReservation) {
-      writes.push(...quotaStates.map((quotaState) =>
-        emailQuotaBucketWrite(context, quotaState, -1, accepted ? 1 : 0, now)
+    if (sendAttempt) {
+      writes.push(updateDocumentWrite(
+        context.projectId,
+        reservation.sendAttemptPath,
+        {
+          state: outcome,
+          providerMessageIdHash,
+          updatedAt: now,
+          completedAt: now
+        },
+        ["state", "providerMessageIdHash", "updatedAt", "completedAt"],
+        sendAttempt.__updateTime
       ));
     }
+    writes.push(...quotaStates.map((quotaState) =>
+      emailQuotaBucketWrite(context, quotaState, {
+        reserved: -1,
+        sent: accepted ? 1 : 0,
+        failed: outcome === "failed" ? 1 : 0,
+        ambiguous: outcome === "ambiguous" ? 1 : 0
+      }, now)
+    ));
     if (challengeMatches) {
       writes.push(updateDocumentWrite(
         context.projectId,
         challengePath,
         {
-          status: accepted || outcome === "ambiguous" ? "pending" : "send_failed",
+          status: accepted
+            ? "pending"
+            : outcome === "ambiguous"
+              ? "ambiguous"
+              : "send_failed",
           deliveryStatus: outcome,
           providerMessageIdHash,
           updatedAt: now
@@ -3444,9 +3973,14 @@ async function handleEmailChallenge(request, response, id, shareId) {
     throw new HttpError(503, "email_feature_unavailable", "Secure Share email is unavailable");
   }
   const body = await readJsonBody(request, 16 * 1024);
-  assertOnlyKeys(body, ["email"]);
+  assertOnlyKeys(body, ["clientRequestId", "email"]);
   const normalizedEmail = normalizeEmail(body.email);
-  const code = generateOtpCode();
+  if (
+    typeof body.clientRequestId !== "string"
+    || !/^[A-Za-z0-9_-]{16,128}$/u.test(body.clientRequestId)
+  ) {
+    throw new HttpError(400, "invalid_request", "Invalid email challenge request");
+  }
   const timingStartedAt = Date.now();
   const minimumResponseMilliseconds = emailChallengeMinimumResponseMilliseconds();
   const challengeTtlSeconds = otpTtlSeconds();
@@ -3455,6 +3989,42 @@ async function handleEmailChallenge(request, response, id, shareId) {
   const state = await loadShareState(context, shareId);
   const ownerUid = state?.share?.ownerUid ?? "";
   const networkHash = clientNetworkDigest(request);
+  const challengeId = `ch_${hmacDigest(
+    requiredSecret("SHARE_OTP_HMAC_KEY"),
+    "quickmemo/secure-share/challenge-id/v1",
+    shareId,
+    hashedEmail
+  ).slice(0, 40)}`;
+  const clientRequestIdHash = hmacDigest(
+    requiredSecret("SHARE_OTP_HMAC_KEY"),
+    "quickmemo/secure-share/email-client-request/v1",
+    shareId,
+    hashedEmail,
+    body.clientRequestId
+  );
+  const path = `publicShareEmailChallenges/${challengeId}`;
+  const sendAttemptPath =
+    `publicShareEmailSendAttempts/attempt_${clientRequestIdHash.slice(0, 48)}`;
+  const [existing, existingSendAttempt] = await Promise.all([
+    firestoreGet(context, path),
+    firestoreGet(context, sendAttemptPath)
+  ]);
+  if (existingSendAttempt || existing?.clientRequestIdHash === clientRequestIdHash) {
+    await padEmailChallengeResponse(timingStartedAt, minimumResponseMilliseconds);
+    jsonResponse(response, 202, {
+      ok: true,
+      challengeId,
+      resendAfterSeconds: Math.max(
+        1,
+        Math.min(
+          60,
+          Math.ceil((timestampMilliseconds(existing?.resendNotBefore) - Date.now()) / 1000)
+        )
+      ),
+      requestId: id
+    });
+    return;
+  }
 
   await consumeRateLimits(context, [
     {
@@ -3466,11 +4036,12 @@ async function handleEmailChallenge(request, response, id, shareId) {
       limit: 3
     },
     {
-      limitType: "otp_share_email_day",
+      limitType: "otp_share_email_rolling_24h",
       keyParts: [shareId, hashedEmail],
       shareId,
       ownerUid,
-      windowSeconds: 24 * 60 * 60,
+      windowSeconds: 60 * 60,
+      rollingWindowHours: 24,
       limit: 10
     },
     {
@@ -3480,17 +4051,17 @@ async function handleEmailChallenge(request, response, id, shareId) {
       ownerUid,
       windowSeconds: 60 * 60,
       limit: 20
+    },
+    {
+      limitType: "otp_share_hour",
+      keyParts: [shareId],
+      shareId,
+      ownerUid,
+      windowSeconds: 60 * 60,
+      limit: 20
     }
   ]);
 
-  const challengeId = `ch_${hmacDigest(
-    requiredSecret("SHARE_OTP_HMAC_KEY"),
-    "quickmemo/secure-share/challenge-id/v1",
-    shareId,
-    hashedEmail
-  ).slice(0, 40)}`;
-  const path = `publicShareEmailChallenges/${challengeId}`;
-  const existing = await firestoreGet(context, path);
   const now = Date.now();
   if (timestampMilliseconds(existing?.resendNotBefore) > now) {
     throw new HttpError(429, "rate_limited", "Challenge resend cooldown", {
@@ -3498,7 +4069,12 @@ async function handleEmailChallenge(request, response, id, shareId) {
     });
   }
 
-  const eligible = await emailChallengeEligibility(context, state, hashedEmail);
+  const code = generateOtpCode();
+  const [policyEligible, providerHealthy] = await Promise.all([
+    emailChallengeEligibility(context, state, hashedEmail),
+    gmailProviderHealthAllowsSend(context)
+  ]);
+  const eligible = policyEligible && providerHealthy;
   const challenge = {
     __challengeId: challengeId,
     shareId,
@@ -3513,9 +4089,16 @@ async function handleEmailChallenge(request, response, id, shareId) {
     expiresAt: new Date(now + challengeTtlSeconds * 1000),
     resendNotBefore: new Date(now + 60 * 1000),
     requestIpHash: networkHash,
+    clientRequestIdHash,
     status: eligible ? "pending" : "suppressed",
     deliveryStatus: eligible ? "reserved" : "suppressed",
-    sendAttemptId: `send_${randomToken(18)}`,
+    sendAttemptId: `send_${hmacDigest(
+      requiredSecret("SHARE_OTP_HMAC_KEY"),
+      "quickmemo/secure-share/email-send-attempt/v1",
+      shareId,
+      hashedEmail,
+      body.clientRequestId
+    ).slice(0, 40)}`,
     providerMessageIdHash: "",
     verifiedAt: undefined,
     consumedAt: undefined,
@@ -3527,6 +4110,7 @@ async function handleEmailChallenge(request, response, id, shareId) {
     context,
     eligible,
     existing,
+    sendAttemptPath,
     state
   });
 
@@ -3538,25 +4122,7 @@ async function handleEmailChallenge(request, response, id, shareId) {
         1,
         Math.min(2_500, minimumResponseMilliseconds - elapsedMilliseconds - 250)
       );
-      const providerAdapter = createResendEmailAdapter(
-        undefined,
-        delay,
-        async () => {
-          // Consume a distributed token before every real provider request,
-          // including the adapter's idempotent retry. Two requests in each
-          // fixed UTC second also cap any rolling one-second boundary at four.
-          await consumeRateLimits(context, [
-            {
-              limitType: "email_provider_request_global_second",
-              keyParts: ["resend"],
-              shareId: "email_provider_global",
-              ownerUid: "",
-              windowSeconds: emailProviderRequestRateWindowSeconds,
-              limit: emailProviderRequestRateLimit
-            }
-          ]);
-        }
-      );
+      const providerAdapter = createConfiguredEmailAdapter(context);
       delivery = await sendVerificationEmail(
         normalizedEmail,
         code,
@@ -3566,6 +4132,14 @@ async function handleEmailChallenge(request, response, id, shareId) {
         deliveryBudgetMilliseconds
       );
     } catch (error) {
+      try {
+        await recordGmailProviderHealth(context, "failed", error);
+      } catch (healthError) {
+        console.error(
+          "secure share email provider health update failed",
+          safeErrorSummary(healthError)
+        );
+      }
       try {
         await finalizeEmailDelivery(
           context,
@@ -3582,6 +4156,14 @@ async function handleEmailChallenge(request, response, id, shareId) {
       }
     }
     if (delivery) {
+      try {
+        await recordGmailProviderHealth(context, "sent");
+      } catch (healthError) {
+        console.error(
+          "secure share email provider health update failed",
+          safeErrorSummary(healthError)
+        );
+      }
       try {
         await finalizeEmailDelivery(
           context,
@@ -7679,6 +8261,8 @@ export {
   ensureRevisionReadRequest,
   ensureSameOrigin,
   evaluateCopyAttachmentQuota,
+  gmailProviderHealthStateAllowsSend,
+  gmailProviderHealthTransition,
   hashSharePassword,
   handleApiError,
   issueAccessSession,
@@ -7693,6 +8277,8 @@ export {
   padEmailChallengeResponse,
   padOtpVerificationFailureResponse,
   readJsonBody,
+  rateLimitBucketDigest,
+  rateLimitWindowStarts,
   resolveEmailQuotaPolicy,
   resolveSecureShareLiveContentSyncServerFlag,
   resolveAccessIdentity,

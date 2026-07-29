@@ -3041,6 +3041,13 @@ describeRules("firestore security rules", () => {
         ownerUid: "user-a",
         shareId: "secure-v2"
       });
+      await setDoc(doc(db, "publicShareEmailSendAttempts/attempt-a"), {
+        ownerUid: "user-a",
+        shareId: "secure-v2"
+      });
+      await setDoc(doc(db, "publicShareEmailProviderHealth/gmail-smtp"), {
+        status: "healthy"
+      });
       await setDoc(doc(db, "publicShareCopyGrantRequests/request-a"), {
         ownerUid: "user-a",
         requesterUid: "user-b",
@@ -3108,6 +3115,8 @@ describeRules("firestore security rules", () => {
       "publicShareEmailChallenges/challenge-a",
       "publicShareEmailQuotaBuckets/day-2026-07-29",
       "publicShareEmailDeliveries/delivery-a",
+      "publicShareEmailSendAttempts/attempt-a",
+      "publicShareEmailProviderHealth/gmail-smtp",
       "publicShareCopyGrantRequests/request-a",
       "publicShareSourceGuards/source-a",
       "publicShareUnlockGrants/grant-a",

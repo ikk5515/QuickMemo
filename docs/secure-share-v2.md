@@ -34,11 +34,9 @@ without changing the existing end-to-end content encryption boundary.
   `<select>` behavior and caller classes, but removes the unified
   `app-select` theme class.
 - `SECURE_SHARE_EMAIL_ENABLED=true` is required before OTP delivery is
-  available. It must remain false until the Production email provider, sender
-  domain, and approved smoke-test mailbox are verified.
-- `SHARE_EMAIL_SENDER_VERIFIED=true` is a separate exact flag. Keep it false
-  until the configured `SHARE_EMAIL_FROM` domain or sender is shown as verified
-  by the provider. It is not inferred from the presence of an API key.
+  available. It must remain false until the Gmail SMTP account, Google app
+  password, matching From address, provider health, and automated real-mailbox
+  delivery smoke are all verified on the exact Production SHA.
 - Email false does not disable Core v2. Existing email-gated policies and
   sessions fail closed with `email_feature_unavailable`; they are never
   downgraded to a link-only or authenticated-users policy.
@@ -230,60 +228,147 @@ generator.
 
 - Lifetime: 10 minutes.
 - Maximum verification attempts: 5.
-- Resend cooldown: 60 seconds.
+- Challenge resend cooldown: 60 seconds.
 - A new challenge invalidates an older challenge for the same share and email.
 - Only an HMAC digest of the code is stored.
 - Public send responses are generic, whether or not an address is allowed.
 - A disallowed address is never sent an email.
 - Raw addresses are never written to audit logs or viewer responses.
 
+The browser reuses one `clientRequestId` for a logical send attempt. The server
+HMACs that identifier and atomically reserves a challenge, delivery, quota,
+and `publicShareEmailSendAttempts` record before invoking SMTP outside the
+transaction. An exact replay returns the existing generic result without
+calling `sendMail` again. A new challenge receives a new OTP and invalidates
+the previous code. The stored send-attempt and delivery documents contain only
+digests and bounded state; they never contain the raw address, OTP, or SMTP
+credentials.
+
 Eligible and suppressed requests return the same `202` shape. An independent
 2.8–3.2 second response envelope supplies the email adapter only the remaining
-time inside that envelope (up to 2.5 seconds). The OTP value never determines
-the delay; provider failure still fails closed and must pass Production health
-and delivery smoke tests before email sharing is enabled.
+time inside that envelope (up to 2.5 seconds). A provider timeout after SMTP
+DATA is ambiguous: it is not automatically retried, the reservation moves to
+the ambiguous counter, and the user may request a new challenge only after the
+cooldown. The OTP value and allowlist result never determine the response
+delay. Provider failure remains fail closed and never downgrades the policy.
 
-The provider interface currently targets a server-side HTTPS email provider.
-Production activation requires:
+### Gmail SMTP provider
 
-- a verified sender domain,
-- a server-only API credential,
-- `SHARE_EMAIL_FROM`,
-- `SHARE_EMAIL_SENDER_VERIFIED=true` only after that sender verification is
-  confirmed,
-- a signed Resend webhook with replay-safe bounce/complaint suppression,
-- an approved operator-controlled smoke-test mailbox (do not persist it as an
-  application environment variable),
-- a real delivery and wrong-code/reuse smoke test.
+Production accepts only `SHARE_EMAIL_PROVIDER=gmail_smtp`. Nodemailer and the
+Gmail adapter stay inside the server API boundary and must not enter a browser
+bundle. The default transport is:
 
-The signed webhook and suppression path is not implemented in this release.
-That is an Email activation blocker, not a reason to weaken an existing email
-policy or downgrade it to link-only access. Keep `SECURE_SHARE_EMAIL_ENABLED`
-false until the path and its provider-side endpoint are both verified.
+- `smtp.gmail.com` on port 465,
+- implicit TLS with `secure=true`,
+- certificate verification enabled and TLS 1.2 or newer,
+- `pool=false`, `logger=false`, and `debug=false`,
+- file and URL access disabled,
+- exactly one recipient and no attachments.
+
+Port 587 is allowed only after a non-interactive preflight proves STARTTLS from
+the actual Vercel Production environment. That configuration must use
+`secure=false` and `requireTLS=true`. Port 25, plaintext SMTP, disabled
+certificate verification, and automatic 465-to-587 fallback are prohibited.
+
+Use a dedicated personal Gmail account with two-step verification and a
+Google-generated app password. Never use the Google account password. The
+app password is stored only as `SHARE_SMTP_APP_PASSWORD` in an approved
+server-only Production secret; it is never a `VITE_` value, CLI argument, log
+field, or committed example. `SHARE_SMTP_USERNAME`, `SHARE_EMAIL_FROM`, and
+the SMTP envelope sender must resolve to the same Gmail address. The display
+name is exactly `QuickMemo`. `quickmemo-tan.vercel.app` is the application and
+share origin, not a mail domain or From alias.
+
+The fixed subject is `QuickMemo 공유 노트 인증번호`. The plain-text body contains
+only the six-digit code, its ten-minute lifetime, the ignore-if-unrequested
+notice, and `https://quickmemo-tan.vercel.app`. It contains no OTP link, note
+title, note body, attachment, recipient list, or user-controlled HTML.
+
+The legacy Resend adapter is reachable only under `NODE_ENV=test` as a
+local/CI compatibility mock. It is not a Production provider, fallback, or
+automatic migration path.
+
+### Provider health
+
+`publicShareEmailProviderHealth/gmail-smtp` is server-only and stores only a
+bounded status (`unknown`, `healthy`, `degraded`, or `blocked`), timestamps,
+failure count, `blockedUntil`, and a redacted reason code. It never stores a
+Gmail address, app password, recipient, OTP, message body, session token, or
+raw SMTP response.
+
+Run `transporter.verify()` during the non-interactive Production preflight and
+post-deploy smoke, not before every OTP. Runtime `sendMail` results update
+health: success recovers health, an authentication failure blocks sending, and
+temporary/rate/quota failures set a bounded degraded or blocked interval.
+While blocked, email OTP fails closed without bypassing email verification or
+switching providers. User responses and logs do not expose the Gmail or SMTP
+failure detail.
 
 ### Email quota guard
 
-Resend Free currently provides 100 transactional emails per day and 3,000 per
-month. QuickMemo defaults to lower UTC limits so provider usage, inbound mail,
-and operational retries retain headroom:
+QuickMemo deliberately stays far below any Gmail account maximum:
 
-- `SHARE_EMAIL_DAILY_SOFT_LIMIT=64`
-- `SHARE_EMAIL_DAILY_HARD_LIMIT=80`
-- `SHARE_EMAIL_MONTHLY_SOFT_LIMIT=1920`
-- `SHARE_EMAIL_MONTHLY_HARD_LIMIT=2400`
+- rolling 24 hours: soft 20, hard 30,
+- Asia/Seoul calendar month: soft 500, hard 700,
+- global burst: 3 SMTP attempts per minute and 20 per hour.
 
-The server clamps configured hard limits to 80 daily and 2,400 monthly and
-clamps each soft limit to its hard limit. Both `reservedCount` and `sentCount`
-count toward the hard stop. Reservation, challenge, delivery idempotency
-record, and both UTC quota buckets commit together; a definite provider
-failure releases the reservation, while an ambiguous delivery remains
-reserved to prevent oversending. Provider `429` remains fail closed.
+The corresponding environment values may lower these limits but may not raise
+them. An upward override fails closed instead of silently expanding the cap.
+Conservative hourly shards enforce the rolling windows, and the KST month key
+changes at 00:00 Asia/Seoul. The share-and-email 10-per-24-hour guard commits
+its current shard together with a preconditioned previous-shard boundary lock,
+so concurrent requests cannot cross an hour boundary unnoticed. Reservation
+checks include in-flight and ambiguous outcomes so concurrent requests cannot
+cross a hard stop. A definite failure moves the reservation to `failedCount`;
+an uncertain post-DATA outcome moves it to `ambiguousCount`. Definite failures
+do not consume the rolling-delivery or monthly-delivery caps, but the global
+minute/hour SMTP-attempt guard is never refunded merely because Gmail later
+rejects or times out.
 
-These defaults leave 20% below the published Resend Free limits. Re-check the
-[official Resend account quotas](https://resend.com/docs/knowledge-base/account-quotas-and-limits)
-before activation because provider limits can change. If another application
-or inbound email shares the same Resend team, reduce QuickMemo's limits rather
-than raising them.
+Minute quota buckets are retained for 72 hours, longer than the 48-hour
+delivery and send-attempt reservation lifetime. Cleanup therefore cannot
+remove a minute bucket in the boundary seconds before its final reserved
+delivery becomes eligible for atomic reconciliation. Every expired quota
+bucket is also re-read and deleted with an update-time precondition only when
+`reservedCount` is exactly zero, so a delayed or backlogged reservation keeps
+all accounting buckets intact.
+
+Challenge, send-attempt, delivery, and the current quota buckets commit
+together before the single SMTP call. SMTP is never called inside a Firestore
+transaction retry. Finalization decreases `reservedCount` exactly once and
+increments exactly one outcome counter. Expired challenges, send attempts,
+rate buckets, quota buckets, and stale reserved deliveries are reconciled by
+the existing bounded Vercel Cron cleanup; clients cannot read or write any of
+these collections.
+
+### Staged activation and free-operation boundary
+
+The committed default remains `SECURE_SHARE_EMAIL_ENABLED=false`. Code,
+Rules, and disabled Production deployment may ship without Gmail credentials,
+but the flag must not become true until all of the following pass on the exact
+CI-green Production SHA:
+
+1. The dedicated Gmail account, two-step verification, app password, exact
+   From match, port 465 TLS, and provider health are verified without printing
+   values.
+2. An automated smoke mailbox API or read-only IMAP credential confirms actual
+   receipt, subject, freshness, and OTP extraction. SMTP `verify()` or an
+   accepted response alone is insufficient.
+3. Synthetic wrong-code, correct-code, reuse, expiry, resend, quota, revoke,
+   and cleanup checks pass without using a real user note.
+4. Synthetic shares, challenges, isolated attempts, mailbox test messages
+   where supported, and temporary accounts are removed or verified under
+   bounded retention. Never decrement or zero a shared usage bucket to erase a
+   real smoke send; that minimal usage remains part of quota accounting.
+
+If automated mailbox credentials are absent, receipt cannot be confirmed, or
+any provider/health/quota check is uncertain, keep the flag false and report
+email activation as blocked. Core v2 remains active and is never downgraded.
+
+Personal Gmail SMTP is for personal, non-commercial, low-volume beta operation
+only. QuickMemo never purchases a plan, connects billing, raises its caps,
+or switches providers automatically. Increased usage requires a separate
+review and a manual migration to a transactional email provider.
 
 ## One-time semantics
 
@@ -625,11 +710,10 @@ restores a bounded complete history.
 Default server-side buckets:
 
 - password: share and IP, 5 attempts per 15 minutes; IP, 20 per hour,
-- OTP send: share and email, 3 per 15 minutes and 10 per day; IP, 20 per hour,
-- email provider API requests: 2 globally per fixed UTC second, with a
-  distributed token consumed immediately before every provider attempt,
-  including an idempotent retry; this also caps a rolling one-second boundary
-  at four requests beneath a five-request operational ceiling,
+- OTP send: share and email, 3 per 15 minutes and a conservative hourly-sharded
+  10 per rolling 24 hours; IP, 20 per hour; share total, 20 per hour,
+- Gmail SMTP attempts: 3 globally per minute and 20 per hour, plus the
+  rolling-24-hour and KST-month hard stops described above,
 - OTP verify: 5 per challenge,
 - comments: session and share, 5 per minute and 50 per day,
 - copy grant: session, 3 per minute,
@@ -653,7 +737,7 @@ defaults only. Secret values belong in the approved Vercel Production secret
 workflow.
 
 Never use a `VITE_` prefix for a password pepper, session/cookie/CSRF/OTP/email
-or rate-limit HMAC key, or an email API credential.
+or rate-limit HMAC key, Gmail/IMAP credential, or mailbox address.
 
 Core requires distinct server-only values for `SHARE_PASSWORD_PEPPER`,
 `SHARE_SESSION_HMAC_KEY`, `SHARE_COOKIE_NAME_HMAC_KEY`,
@@ -661,9 +745,11 @@ Core requires distinct server-only values for `SHARE_PASSWORD_PEPPER`,
 `SECURE_SHARE_ALLOWED_ORIGINS` allowlist. `SHARE_OTP_HMAC_KEY`,
 `SHARE_EMAIL_HMAC_KEY`, provider credentials, and sender configuration are
 email-only while `SECURE_SHARE_EMAIL_ENABLED=false`. `CRON_SECRET` is separate
-from both groups. Generate every secret independently from at least 32 random
-bytes (48–64 recommended), inject it through stdin or an equivalent
-non-logging secret workflow, and report only whether each variable exists.
+from both groups. Generate every application HMAC/pepper independently from at
+least 32 random bytes (48–64 recommended). Keep the provider-issued Gmail app
+password exactly as issued; do not transform it into an application key.
+Inject secrets through stdin or an equivalent non-logging workflow, and report
+only whether each variable exists.
 
 Comment participant identity additionally requires a distinct server-only
 `SHARE_PARTICIPANT_HMAC_KEY` of at least 32 random bytes. Keep
@@ -676,16 +762,26 @@ pepper or session HMAC key.
 
 Email readiness additionally requires all of the following:
 
-- `SHARE_EMAIL_PROVIDER=resend`
-- non-empty `SHARE_EMAIL_API_KEY` and `SHARE_EMAIL_FROM`
-- exact `SHARE_EMAIL_SENDER_VERIFIED=true`
+- `SHARE_EMAIL_PROVIDER=gmail_smtp`
+- `SHARE_SMTP_HOST=smtp.gmail.com`
+- port 465 with `SHARE_SMTP_SECURE=true`, or verified port 587 with
+  `SHARE_SMTP_SECURE=false` and `SHARE_SMTP_REQUIRE_TLS=true`
+- non-empty server-only `SHARE_SMTP_USERNAME` and
+  `SHARE_SMTP_APP_PASSWORD`
+- `SHARE_EMAIL_FROM` matching `SHARE_SMTP_USERNAME` and
+  `SHARE_EMAIL_FROM_NAME=QuickMemo`
+- exact `SHARE_EMAIL_FREE_TIER_MODE=true`
 - distinct `SHARE_OTP_HMAC_KEY`, `SHARE_EMAIL_HMAC_KEY`, and
-  `SHARE_RATE_LIMIT_HMAC_KEY` values of at least 32 bytes
-- daily/monthly soft and hard limits reviewed against the current provider
-  account quota
+  `SHARE_RATE_LIMIT_HMAC_KEY` values of at least 32 bytes, with no reuse of
+  password/session/cookie/CSRF/participant secrets
+- rolling-24-hour 20/30, KST-month 500/700, and global 3/minute and 20/hour
+  caps, or reviewed lower values
+- an automated actual-delivery smoke using `SHARE_SMOKE_TEST_EMAIL` and an
+  approved mailbox API or server-only IMAP credential
 
 The committed example deliberately keeps `SECURE_SHARE_EMAIL_ENABLED=false`
-and `SHARE_EMAIL_SENDER_VERIFIED=false`.
+and all credential values empty. Do not enable email merely because the
+configuration parser or `transporter.verify()` succeeds.
 
 The client behavior flags have non-secret defaults:
 
@@ -864,14 +960,28 @@ Vercel/Firebase usage evidence before activation.
     rename, uniqueness, comment-prefix/policy-off, revoke, cleanup, mobile,
     accessibility, console, and network-response smoke. Remove every synthetic
     share/account created by the smoke.
-12. If and only if a verified provider is already configured, email may be
-    tested separately before its independent flag is enabled.
+12. Keep `SECURE_SHARE_EMAIL_ENABLED=false` while verifying Gmail SMTP port
+    465, provider health, and one minimal automated real-mailbox delivery.
+    Use port 587 only if the same Vercel environment proves STARTTLS and 465
+    fails. Run synthetic OTP wrong/correct/reuse/expiry/resend/quota checks,
+    remove the synthetic data, then enable the independent email flag and
+    redeploy only if every gate passed. Without automated mailbox receipt
+    credentials, leave the flag false.
 
 Do not activate Core if an index is building, any P0/P1 issue remains, a
 required check fails, the global counter is absent, or the rollback deployment
 is unknown. An absent email credential blocks only email sharing.
 
 ## Rollback
+
+For an email-only incident, quota uncertainty, Gmail authentication change, or
+mailbox-smoke failure, first set `SECURE_SHARE_EMAIL_ENABLED=false` and
+redeploy the last CI-green SHA. Do not weaken an email policy, change it to
+link-only, raise a quota, or enable a paid/fallback provider. Keep the
+server-only Rules and accounting documents in place. Rotate the Gmail app
+password only through the approved secret workflow when exposure is suspected,
+and re-enable email only after provider health and automated receipt pass
+again.
 
 If the issue is limited to automatic entry, first set
 `VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED=false` and redeploy the same guarded
