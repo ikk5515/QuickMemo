@@ -42,11 +42,31 @@ describe("Vercel revision WAF preflight", () => {
     });
   });
 
-  it.each([
-    ["disabled firewall", { firewallEnabled: false, rules: [validRule()] }],
-    ["unvalidated rule", {
+  it("accepts an active rule when the active-config API omits a validation marker", () => {
+    expect(inspectRevisionRateLimit({
       firewallEnabled: true,
       rules: [validRule({ valid: undefined })]
+    })).toMatchObject({
+      ok: true,
+      limit: 120,
+      requestsPerMinute: 120,
+      windowSeconds: 60
+    });
+  });
+
+  it.each([
+    ["disabled firewall", { firewallEnabled: false, rules: [validRule()] }],
+    ["explicitly invalid rule", {
+      firewallEnabled: true,
+      rules: [validRule({ valid: false })]
+    }],
+    ["null validation marker", {
+      firewallEnabled: true,
+      rules: [validRule({ valid: null })]
+    }],
+    ["string validation marker", {
+      firewallEnabled: true,
+      rules: [validRule({ valid: "true" })]
     }],
     ["client-controlled narrowing condition", {
       firewallEnabled: true,
