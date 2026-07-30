@@ -248,6 +248,27 @@ describe("NotesPage security controls", () => {
     );
   });
 
+  it("refreshes server feature readiness before opening secure share settings", () => {
+    const refreshHelper =
+      notesPageSource.match(/async function refreshSecureShareSettingsFeatureFlags[\s\S]*?async function openSecureShareSettingsForCreate/)?.[0] ?? "";
+    const createFlow =
+      notesPageSource.match(/async function openSecureShareSettingsForCreate[\s\S]*?async function selectSecureShareForManagement/)?.[0] ?? "";
+    const editFlow =
+      notesPageSource.match(/async function openSecureShareSettingsForEdit[\s\S]*?async function saveSecureShareSettings/)?.[0] ?? "";
+
+    expect(refreshHelper).toContain("await getSecureShareFeatureStatus()");
+    expect(refreshHelper).toContain("assertCurrentSecureShareOwnerOperation(operation)");
+    expect(refreshHelper).toContain("if (!nextFlags.v2Enabled)");
+    expect(refreshHelper.indexOf("setSecureShareFlags(nextFlags)"))
+      .toBeLessThan(refreshHelper.indexOf("if (!nextFlags.v2Enabled)"));
+    expect(createFlow).toContain("await refreshSecureShareSettingsFeatureFlags(operation)");
+    expect(createFlow.indexOf("await refreshSecureShareSettingsFeatureFlags(operation)"))
+      .toBeLessThan(createFlow.indexOf("setSecureShareSettingsOpen(true)"));
+    expect(editFlow).toContain("await refreshSecureShareSettingsFeatureFlags(operation)");
+    expect(editFlow.indexOf("await refreshSecureShareSettingsFeatureFlags(operation)"))
+      .toBeLessThan(editFlow.indexOf("setSecureShareSettingsOpen(true)"));
+  });
+
   it("keeps attachment upload, preview, download, and delete pending states independent", () => {
     expect(notesPageSource).toContain("interface AttachmentActionBusyState");
     expect(notesPageSource).toContain("deletingIds: string[];");

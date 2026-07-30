@@ -109,6 +109,7 @@ import {
 import {
   defaultSecureSharePolicy,
   resolveSecureShareFeatureFlags,
+  type SecureShareFeatureFlags,
   type SecureSharePolicyInput
 } from "../lib/secureSharePolicy";
 import { parseSecureShareUrl } from "../lib/secureShareUrl";
@@ -220,6 +221,7 @@ import {
   updateSecureShare,
   updateSecureShareContent,
   type SecureShareAttachmentReuseManifest,
+  type SecureShareFeatureStatus,
   type SecureShareOwnerContentUpdateInput
 } from "../services/secureShares";
 import { subscribeUsers } from "../services/users";
@@ -2492,6 +2494,24 @@ function nextAttachmentUploadRunId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+export function refreshedSecureShareSettingsFlags(
+  currentFlags: SecureShareFeatureFlags,
+  serverStatus: SecureShareFeatureStatus
+) {
+  const v2Enabled =
+    currentFlags.clientV2Enabled
+    && serverStatus.v2Enabled;
+
+  return {
+    clientV2Enabled: currentFlags.clientV2Enabled,
+    emailEnabled: v2Enabled && serverStatus.emailEnabled,
+    liveContentSyncEnabled:
+      v2Enabled
+      && currentFlags.liveContentSyncEnabled,
+    v2Enabled
+  };
+}
+
 export default function NotesPage() {
   const { firebaseUser, profile, privateKey } = useAuth();
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
@@ -4524,6 +4544,25 @@ export default function NotesPage() {
     return rememberSecureShareUrl(share.shareId, shareKeyValue, operation);
   }
 
+  async function refreshSecureShareSettingsFeatureFlags(
+    operation: SecureShareOwnerOperationContext
+  ) {
+    assertCurrentSecureShareOwnerOperation(operation);
+    const serverStatus = await getSecureShareFeatureStatus();
+    assertCurrentSecureShareOwnerOperation(operation);
+    const nextFlags = refreshedSecureShareSettingsFlags(
+      secureShareFlags,
+      serverStatus
+    );
+
+    setSecureShareFlags(nextFlags);
+    if (!nextFlags.v2Enabled) {
+      throw new Error("보안 공유 기능 상태를 확인하지 못해 설정 창을 열지 않았습니다.");
+    }
+
+    return nextFlags;
+  }
+
   async function openSecureShareSettingsForCreate(
     returnToOwner: boolean,
     verifiedShares?: readonly SecureShareOwnerSummary[],
@@ -4537,33 +4576,34 @@ export default function NotesPage() {
     assertCurrentSecureShareOwnerOperation(operation);
     let checkedShares = verifiedShares ?? secureShares;
 
-    if (
-      verifiedShares === undefined
-      && secureShareFlags.v2Enabled
-      && editor.noteId
-    ) {
-      try {
+    try {
+      await refreshSecureShareSettingsFeatureFlags(operation);
+
+      if (
+        verifiedShares === undefined
+        && editor.noteId
+      ) {
         checkedShares = await loadCompleteSecureSharesForNote(
           editor.noteId,
           operation
         );
         assertCurrentSecureShareOwnerOperation(operation);
-      } catch (caught) {
-        if (caught instanceof SecureShareOwnerOperationStaleError) {
-          return;
-        }
-        try {
-          assertCurrentSecureShareOwnerOperation(operation);
-        } catch {
-          return;
-        }
-        setPublicShareError(
-          caught instanceof Error
-            ? caught.message
-            : "이 노트의 보안 공유 상태를 안전하게 확인하지 못했습니다."
-        );
+      }
+    } catch (caught) {
+      if (caught instanceof SecureShareOwnerOperationStaleError) {
         return;
       }
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return;
+      }
+      setPublicShareError(
+        caught instanceof Error
+          ? caught.message
+          : "이 노트의 보안 공유 상태를 안전하게 확인하지 못했습니다."
+      );
+      return;
     }
 
     if (
@@ -4666,6 +4706,7 @@ export default function NotesPage() {
     setPublicShareError(null);
 
     try {
+      await refreshSecureShareSettingsFeatureFlags(operation);
       const idToken = await secureShareOwnerIdToken(operation);
       assertCurrentSecureShareOwnerOperation(operation);
       const response = await getSecureShareOwnerDetails(share.shareId, idToken);
