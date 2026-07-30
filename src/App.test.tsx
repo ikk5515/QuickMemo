@@ -27,6 +27,7 @@ vi.mock("./services/secureShareCopyJobs", () => recoveryMocks);
 vi.mock("./pages/HomeRedirectPage", () => ({ default: () => <span>홈 화면</span> }));
 vi.mock("./pages/LibraryPage", () => ({ default: () => <span>자료실 화면</span> }));
 vi.mock("./pages/NotesPage", () => ({ default: () => <span>노트 화면</span> }));
+vi.mock("./pages/PublicSharePage", () => ({ default: () => <span>보안 공유 화면</span> }));
 vi.mock("./pages/RecurringPage", () => ({ default: () => <span>반복 업무 화면</span> }));
 vi.mock("./pages/SchedulePage", () => ({ default: () => <span>일정 화면</span> }));
 
@@ -167,6 +168,22 @@ describe("RequireAuth feature access", () => {
     );
 
     expect(await screen.findByText(expectedText)).toBeInTheDocument();
+  });
+
+  it.each([
+    "/share/ss2_existing_share_123456",
+    "/s/Abcdefghijklmnopqrstuvwx"
+  ])("routes %s to the public share page without authentication", async (path) => {
+    authState.firebaseUser = null;
+    authState.profile = null;
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("보안 공유 화면")).toBeInTheDocument();
   });
 
   it("keeps the safe home available when every feature is denied", async () => {

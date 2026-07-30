@@ -80,6 +80,187 @@ async function startConfiguredSecureShareApiHarness(
   };
 }
 
+async function startAdminEmailSettingsHarness(
+  moduleTag: string
+): Promise<SecureShareApiHarness> {
+  const moduleUrl = new URL("../api/admin-email-settings.js", import.meta.url);
+  moduleUrl.searchParams.set("integration-instance", moduleTag);
+  const isolatedModule = await import(
+    /* @vite-ignore */ moduleUrl.href
+  ) as typeof import("../api/admin-email-settings.js");
+  const server = createServer((request, response) => {
+    void isolatedModule.default(request, response);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    })
+  };
+}
+
+async function adminEmailSettingsRequest(input: {
+  body: Record<string, unknown>;
+  harness: SecureShareApiHarness;
+  idToken: string;
+}) {
+  const response = await fetch(
+    `${input.harness.origin}/api/admin-email-settings`,
+    {
+      method: "POST",
+      headers: {
+        ...apiHeaders(input.harness.origin, {
+          authorization: input.idToken
+        }),
+        "x-quickmemo-admin-email-settings": "1"
+      },
+      body: JSON.stringify(input.body)
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
+}
+
+async function createEmailSettingsAdmin(emailSuffix: string) {
+  const admin = await createEmulatorOwner(
+    `email-settings-${emailSuffix}@example.test`,
+    "emulator-admin-password"
+  );
+  await writeEmulatorDocuments([
+    {
+      path: `users/${admin.localId}`,
+      fields: {
+        displayName: "Email settings admin",
+        featureAccess: { notes: true },
+        isActive: true,
+        isAdmin: true,
+        uid: admin.localId
+      }
+    }
+  ]);
+  return admin;
+}
+
+function emailSettingsQuotaPeriods(nowMilliseconds = Date.now()) {
+  const now = new Date(nowMilliseconds);
+  const minuteKey = now.toISOString().slice(0, 16);
+  const hourKey = now.toISOString().slice(0, 13);
+  const seoul = new Date(nowMilliseconds + 9 * 60 * 60 * 1000);
+  const monthKey = seoul.toISOString().slice(0, 7);
+  return [
+    {
+      bucketId: `minute_${minuteKey}`,
+      hardLimit: 3,
+      periodKey: minuteKey,
+      scope: "minute",
+      softLimit: 3
+    },
+    {
+      bucketId: `hour_${hourKey}`,
+      hardLimit: 20,
+      periodKey: hourKey,
+      scope: "hourly",
+      softLimit: 20
+    },
+    {
+      bucketId: `month_${monthKey}`,
+      hardLimit: 700,
+      periodKey: monthKey,
+      scope: "monthly",
+      softLimit: 500
+    }
+  ];
+}
+
+async function forcePendingEmailTestSending(
+  testExpiresAt: Date
+) {
+  const settings = await readEmulatorDocument(
+    "secureShareEmailSettings/current"
+  );
+  const pending = settings?.pending as Record<string, unknown> | undefined;
+  if (!pending || typeof pending.generation !== "string") {
+    throw new Error("Expected staged email settings");
+  }
+  const now = Date.now();
+  const periods = emailSettingsQuotaPeriods(now);
+  const currentBuckets = await Promise.all(periods.map((period) =>
+    readEmulatorDocument(`publicShareEmailQuotaBuckets/${period.bucketId}`)
+  ));
+  await writeEmulatorDocuments(periods.map((period, index) => {
+    const current = currentBuckets[index];
+    return {
+      path: `publicShareEmailQuotaBuckets/${period.bucketId}`,
+      fields: {
+        schemaVersion: 1,
+        scope: period.scope,
+        periodKey: period.periodKey,
+        reservedCount: Number(current?.reservedCount ?? 0) + 1,
+        sentCount: Number(current?.sentCount ?? 0),
+        failedCount: Number(current?.failedCount ?? 0),
+        ambiguousCount: Number(current?.ambiguousCount ?? 0),
+        softLimit: period.softLimit,
+        hardLimit: period.hardLimit,
+        softLimitReached: false,
+        updatedAt: new Date(now),
+        expiresAt: new Date(now + 400 * 24 * 60 * 60 * 1000)
+      }
+    };
+  }));
+  await patchEmulatorDocuments([
+    {
+      path: "secureShareEmailSettings/current",
+      fields: {
+        pending: {
+          ...pending,
+          testState: "sending",
+          testCodeDigest: "a".repeat(64),
+          testRequestHash: "b".repeat(64),
+          testSentAt: new Date(now - 60_000),
+          testExpiresAt,
+          testQuotaBucketIds: periods.map((period) => period.bucketId),
+          testQuotaState: "reserved"
+        }
+      }
+    }
+  ]);
+  return {
+    bucketIds: periods.map((period) => period.bucketId),
+    generation: pending.generation
+  };
+}
+
+async function patchPendingEmailTestDeadline(testExpiresAt: Date) {
+  const settings = await readEmulatorDocument(
+    "secureShareEmailSettings/current"
+  );
+  const pending = settings?.pending as Record<string, unknown> | undefined;
+  if (!pending) {
+    throw new Error("Expected pending email settings");
+  }
+  await patchEmulatorDocuments([
+    {
+      path: "secureShareEmailSettings/current",
+      fields: {
+        pending: {
+          ...pending,
+          testExpiresAt
+        }
+      }
+    }
+  ]);
+}
+
 function ownerCreateBody(
   sourceNoteId: string,
   idempotencyKey: string,
@@ -523,15 +704,23 @@ function expectSecretFreeFailure(
 }
 
 describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
+  let adminEmailHarness: SecureShareApiHarness;
   let harness: SecureShareApiHarness;
 
   beforeAll(async () => {
     configureSecureShareApiEmulatorEnvironment();
+    process.env.SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1 =
+      Buffer.alloc(32, 0x39).toString("base64url");
     harness = await startSecureShareApiHarness();
+    adminEmailHarness = await startAdminEmailSettingsHarness(
+      `admin-email-${Date.now()}`
+    );
   });
 
   beforeEach(async () => {
     configureSecureShareApiEmulatorEnvironment();
+    process.env.SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1 =
+      Buffer.alloc(32, 0x39).toString("base64url");
     resetGmailSmtpTransportForTests();
     gmailTransportMock.close.mockReset();
     gmailTransportMock.createTransport.mockReset();
@@ -556,7 +745,10 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
   });
 
   afterAll(async () => {
-    await harness?.close();
+    await Promise.all([
+      harness?.close(),
+      adminEmailHarness?.close()
+    ]);
   });
 
   it("fails closed instead of following emulator variables in production mode", async () => {
@@ -574,6 +766,332 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       process.env.NODE_ENV = "test";
     }
   });
+
+  it("replays an admin mutation only for the same unexpired canonical payload", async () => {
+    const admin = await createEmailSettingsAdmin("idempotency");
+    const idempotencyKey = "admin_stage_replay_0001";
+    const firstBody = {
+      action: "stage",
+      username: "quickmemo.admin.replay@gmail.com",
+      appPassword: "abcd efgh ijkl mnop",
+      replyTo: "reply@example.test",
+      idempotencyKey
+    };
+
+    const first = await adminEmailSettingsRequest({
+      body: firstBody,
+      harness: adminEmailHarness,
+      idToken: admin.idToken
+    });
+    expect(first.response.status).toBe(200);
+    expect(first.body).toMatchObject({
+      ok: true,
+      settings: {
+        pending: {
+          present: true,
+          usernameMasked: "q***y@gmail.com"
+        }
+      }
+    });
+
+    const replay = await adminEmailSettingsRequest({
+      body: {
+        ...firstBody,
+        username: " QuickMemo.Admin.Replay@Gmail.com ",
+        appPassword: "abcdefghijklmnop",
+        replyTo: " reply@example.test "
+      },
+      harness: adminEmailHarness,
+      idToken: admin.idToken
+    });
+    expect(replay.response.status).toBe(200);
+    expect(replay.body).toMatchObject({ ok: true, replayed: true });
+    expect(gmailTransportMock.verify).toHaveBeenCalledTimes(1);
+
+    const changedPayload = await adminEmailSettingsRequest({
+      body: {
+        ...firstBody,
+        appPassword: "ponmlkjihgfedcba"
+      },
+      harness: adminEmailHarness,
+      idToken: admin.idToken
+    });
+    expect(changedPayload.response.status).toBe(409);
+    expect(changedPayload.body).toMatchObject({
+      ok: false,
+      error: "conflict"
+    });
+    expect(gmailTransportMock.verify).toHaveBeenCalledTimes(1);
+
+    const idempotencyDocuments = await listEmulatorCollection(
+      "secureShareEmailAdminIdempotency"
+    );
+    expect(idempotencyDocuments).toHaveLength(1);
+    const serialized = JSON.stringify(idempotencyDocuments);
+    expect(serialized).not.toContain("quickmemo.admin.replay@gmail.com");
+    expect(serialized).not.toContain("abcdefghijklmnop");
+    expect(serialized).not.toContain("reply@example.test");
+    await patchEmulatorDocuments([
+      {
+        path:
+          `secureShareEmailAdminIdempotency/${idempotencyDocuments[0].__id}`,
+        fields: {
+          expiresAt: new Date(Date.now() - 1_000)
+        }
+      }
+    ]);
+
+    const expiredReplay = await adminEmailSettingsRequest({
+      body: firstBody,
+      harness: adminEmailHarness,
+      idToken: admin.idToken
+    });
+    expect(expiredReplay.response.status).toBe(409);
+    expect(expiredReplay.body).toMatchObject({
+      ok: false,
+      error: "conflict"
+    });
+    expect(gmailTransportMock.verify).toHaveBeenCalledTimes(1);
+  }, 20_000);
+
+  it("recovers expired admin test reservations before stage, discard, and remove", async () => {
+    const admin = await createEmailSettingsAdmin("stuck-recovery");
+    const request = (body: Record<string, unknown>) =>
+      adminEmailSettingsRequest({
+        body,
+        harness: adminEmailHarness,
+        idToken: admin.idToken
+      });
+    const activeStage = await request({
+      action: "stage",
+      username: "quickmemo.admin.active@gmail.com",
+      appPassword: "abcdefghijklmnop",
+      idempotencyKey: "admin_active_stage_0001"
+    });
+    expect(activeStage.response.status).toBe(200);
+    const activeStagedDocument = await readEmulatorDocument(
+      "secureShareEmailSettings/current"
+    );
+    const activePending = activeStagedDocument?.pending as
+      | Record<string, unknown>
+      | undefined;
+    const activeGeneration = String(activePending?.generation ?? "");
+    expect(activeGeneration).toMatch(/^[A-Za-z0-9_-]{16,64}$/u);
+
+    const send = await request({
+      action: "send-test",
+      generation: activeGeneration,
+      idempotencyKey: "admin_active_send_test_0002"
+    });
+    expect(send.response.status).toBe(200);
+    const message = gmailTransportMock.sendMail.mock.calls.at(-1)?.[0] as
+      | { text?: string }
+      | undefined;
+    const code = /확인 코드: ([0-9]{6})/u.exec(message?.text ?? "")?.[1] ?? "";
+    expect(code).toMatch(/^[0-9]{6}$/u);
+    const confirm = await request({
+      action: "confirm-test",
+      generation: activeGeneration,
+      code,
+      idempotencyKey: "admin_active_confirm_0003"
+    });
+    expect(confirm.response.status).toBe(200);
+
+    const pendingStage = await request({
+      action: "stage",
+      username: "quickmemo.admin.pending@gmail.com",
+      appPassword: "ponmlkjihgfedcba",
+      idempotencyKey: "admin_pending_stage_0004"
+    });
+    expect(pendingStage.response.status).toBe(200);
+    const futureReservation = await forcePendingEmailTestSending(
+      new Date(Date.now() + 60_000)
+    );
+    const blockedStage = await request({
+      action: "stage",
+      username: "quickmemo.admin.blocked@gmail.com",
+      appPassword: "aaaabbbbccccdddd",
+      idempotencyKey: "admin_blocked_stage_0005"
+    });
+    expect(blockedStage.response.status).toBe(409);
+    expect(blockedStage.body).toMatchObject({
+      ok: false,
+      error: "conflict"
+    });
+    expect(gmailTransportMock.verify).toHaveBeenCalledTimes(2);
+    for (const bucketId of futureReservation.bucketIds) {
+      expect(await readEmulatorDocument(
+        `publicShareEmailQuotaBuckets/${bucketId}`
+      )).toMatchObject({
+        reservedCount: 1
+      });
+    }
+
+    await patchPendingEmailTestDeadline(new Date(Date.now() - 1_000));
+    const replacementStage = await request({
+      action: "stage",
+      username: "quickmemo.admin.replacement@gmail.com",
+      appPassword: "aaaabbbbccccdddd",
+      idempotencyKey: "admin_replacement_stage_0006"
+    });
+    expect(replacementStage.response.status).toBe(200);
+    let settings = await readEmulatorDocument(
+      "secureShareEmailSettings/current"
+    );
+    expect((settings?.active as Record<string, unknown>)?.generation).toBe(
+      activeGeneration
+    );
+    expect((settings?.pending as Record<string, unknown>)?.generation).not.toBe(
+      futureReservation.generation
+    );
+    for (const bucketId of futureReservation.bucketIds) {
+      expect(await readEmulatorDocument(
+        `publicShareEmailQuotaBuckets/${bucketId}`
+      )).toMatchObject({
+        ambiguousCount: 1,
+        reservedCount: 0
+      });
+    }
+
+    const discardReservation = await forcePendingEmailTestSending(
+      new Date(Date.now() - 1_000)
+    );
+    const discard = await request({
+      action: "discard-pending",
+      generation: discardReservation.generation,
+      idempotencyKey: "admin_recovery_discard_0007"
+    });
+    expect(discard.response.status).toBe(200);
+    settings = await readEmulatorDocument(
+      "secureShareEmailSettings/current"
+    );
+    expect(settings?.pending).toBeUndefined();
+    expect((settings?.active as Record<string, unknown>)?.generation).toBe(
+      activeGeneration
+    );
+
+    const removableStage = await request({
+      action: "stage",
+      username: "quickmemo.admin.remove@gmail.com",
+      appPassword: "ddddeeeeffffgggg",
+      idempotencyKey: "admin_removable_stage_0008"
+    });
+    expect(removableStage.response.status).toBe(200);
+    const removeReservation = await forcePendingEmailTestSending(
+      new Date(Date.now() - 1_000)
+    );
+    const remove = await request({
+      action: "remove",
+      target: "pending",
+      generation: removeReservation.generation,
+      idempotencyKey: "admin_recovery_remove_0009"
+    });
+    expect(remove.response.status).toBe(200);
+    settings = await readEmulatorDocument(
+      "secureShareEmailSettings/current"
+    );
+    expect(settings?.pending).toBeUndefined();
+    expect((settings?.active as Record<string, unknown>)?.generation).toBe(
+      activeGeneration
+    );
+    const recoveryAudits = (
+      await listEmulatorCollection("secureShareEmailAdminAudit")
+    ).filter((document) => document.action === "recover-stuck-test");
+    expect(recoveryAudits).toHaveLength(3);
+  }, 30_000);
+
+  it("accounts a finalizer-versus-recovery race exactly once", async () => {
+    const admin = await createEmailSettingsAdmin("recovery-race");
+    const request = (body: Record<string, unknown>) =>
+      adminEmailSettingsRequest({
+        body,
+        harness: adminEmailHarness,
+        idToken: admin.idToken
+      });
+    const staged = await request({
+      action: "stage",
+      username: "quickmemo.admin.race@gmail.com",
+      appPassword: "abcdefghijklmnop",
+      idempotencyKey: "admin_race_stage_0001"
+    });
+    expect(staged.response.status).toBe(200);
+    const stagedDocument = await readEmulatorDocument(
+      "secureShareEmailSettings/current"
+    );
+    const generation = String(
+      (stagedDocument?.pending as Record<string, unknown>)?.generation ?? ""
+    );
+    let releaseSend = () => {};
+    const sendRelease = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    let markSendStarted = () => {};
+    const sendStarted = new Promise<void>((resolve) => {
+      markSendStarted = resolve;
+    });
+    gmailTransportMock.sendMail.mockImplementationOnce(
+      async (message: { to?: string }) => {
+        markSendStarted();
+        await sendRelease;
+        return {
+          accepted: [message.to],
+          rejected: [],
+          pending: [],
+          response: "250 2.0.0 OK",
+          messageId: "<quickmemo-race-message@gmail.com>"
+        };
+      }
+    );
+    const sendPromise = request({
+      action: "send-test",
+      generation,
+      idempotencyKey: "admin_race_send_test_0002"
+    });
+    await sendStarted;
+    const reserved = await readEmulatorDocument(
+      "secureShareEmailSettings/current"
+    );
+    const reservedPending = reserved?.pending as
+      | Record<string, unknown>
+      | undefined;
+    const bucketIds = reservedPending?.testQuotaBucketIds as
+      | string[]
+      | undefined;
+    expect(bucketIds).toHaveLength(3);
+    await patchPendingEmailTestDeadline(new Date(Date.now() - 1_000));
+
+    const recoveryPromise = request({
+      action: "stage",
+      username: "quickmemo.admin.after.race@gmail.com",
+      appPassword: "ponmlkjihgfedcba",
+      idempotencyKey: "admin_race_recovery_stage_0003"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    releaseSend();
+    const [sendResult, recoveryResult] = await Promise.all([
+      sendPromise,
+      recoveryPromise
+    ]);
+
+    expect(recoveryResult.response.status).toBe(200);
+    expect(new Set([200, 409])).toContain(sendResult.response.status);
+    const finalSettings = await readEmulatorDocument(
+      "secureShareEmailSettings/current"
+    );
+    expect(
+      (finalSettings?.pending as Record<string, unknown>)?.generation
+    ).not.toBe(generation);
+    for (const bucketId of bucketIds ?? []) {
+      const bucket = await readEmulatorDocument(
+        `publicShareEmailQuotaBuckets/${bucketId}`
+      );
+      expect(bucket?.reservedCount).toBe(0);
+      expect(
+        Number(bucket?.sentCount ?? 0)
+        + Number(bucket?.ambiguousCount ?? 0)
+      ).toBe(1);
+    }
+  }, 20_000);
 
   it("creates a share with a new RSA-3072 owner-wrapped content key", async () => {
     const owner = await createEmulatorOwner(
@@ -1214,7 +1732,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     const shareIds = new Set(shares.map((share) => String(share.shareId)));
     expect(shareIds.size).toBe(1);
     const [shareId] = shareIds;
-    expect(shareId).toMatch(/^ss2_[A-Za-z0-9_-]{40}$/u);
+    expect(shareId).toMatch(/^ss2_[A-Za-z0-9_-]{24}$/u);
     expect(await listEmulatorCollection("publicNoteShares")).toHaveLength(1);
     expect(await listEmulatorCollection("publicSharePolicies")).toHaveLength(1);
     expect(await listEmulatorCollection("publicShareSourceGuards")).toHaveLength(1);

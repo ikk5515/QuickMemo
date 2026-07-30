@@ -19,6 +19,7 @@ import { getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
 import { db, getLegacyStorage } from "../lib/firebase";
+import { buildSecureShareUrl } from "../lib/secureShareUrl";
 import {
   deleteBlobAttachment,
   fetchBlobAttachmentBytes,
@@ -153,8 +154,13 @@ export function createPublicShareGeneration() {
   return `gen_${randomValue.slice(0, 48)}`;
 }
 
-export function publicShareUrl(shareId: string, shareKey: string, origin = window.location.origin) {
-  return `${origin}/share/${encodeURIComponent(shareId)}#key=${encodeURIComponent(shareKey)}`;
+export function publicShareUrl(
+  shareId: string,
+  shareKey: string,
+  origin = window.location.origin,
+  compactEnabled?: boolean
+) {
+  return buildSecureShareUrl(shareId, shareKey, origin, compactEnabled);
 }
 
 function publicShareCleanupQueueRef(shareId: string) {

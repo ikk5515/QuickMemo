@@ -53,10 +53,11 @@ export function assertOnlyKeys(value: unknown, allowedKeys: string[]): void;
 export function assertEmailPolicyAvailable(policy: {
   accessMode?: string;
   emailVerificationRequired?: boolean;
-} | null): void;
+} | null, runtimeSnapshot?: { ready?: boolean } | null): void;
 export function buildPolicySettings(
   body: Record<string, unknown>,
-  existingPolicy?: Record<string, unknown> | null
+  existingPolicy?: Record<string, unknown> | null,
+  context?: { projectId: string; accessToken: string } | null
 ): Promise<Record<string, unknown>>;
 export function emailDigest(normalizedEmail: string, secret?: string): string;
 export function otpCodeDigest(
@@ -132,9 +133,11 @@ export function gmailProviderHealthStateAllowsSend(
   health: {
     blockedUntil?: Date | string;
     consecutiveFailures?: number;
+    settingsGeneration?: string;
     status?: "unknown" | "healthy" | "degraded" | "blocked";
   } | null,
-  nowMilliseconds?: number
+  nowMilliseconds?: number,
+  settingsGeneration?: string
 ): boolean;
 
 export function gmailProviderHealthTransition(
@@ -144,6 +147,7 @@ export function gmailProviderHealthTransition(
     lastFailureAt?: Date | string;
     lastReasonCode?: string;
     lastSuccessfulSendAt?: Date | string;
+    settingsGeneration?: string;
     status?: "unknown" | "healthy" | "degraded" | "blocked";
   } | null,
   outcome: "sent" | "failed",
@@ -151,7 +155,8 @@ export function gmailProviderHealthTransition(
     providerBlockedSeconds?: number;
     providerReasonCode?: string;
   } | null,
-  now?: Date
+  now?: Date,
+  settingsGeneration?: string
 ): {
   blockedUntil?: Date;
   consecutiveFailures: number;
@@ -159,9 +164,22 @@ export function gmailProviderHealthTransition(
   lastReasonCode: string;
   lastSuccessfulSendAt?: Date | string;
   schemaVersion: 1;
+  settingsGeneration?: string;
   status: "unknown" | "healthy" | "degraded" | "blocked";
   updatedAt: Date;
 };
+
+export function recordGmailProviderHealth(
+  context: { accessToken: string; projectId: string },
+  runtimeSnapshot: {
+    environment: Record<string, string | undefined>;
+    generation: string;
+    provider: "gmail_smtp";
+    ready: true;
+  },
+  outcome: "failed" | "sent",
+  error?: unknown
+): Promise<void>;
 
 export const auditRetentionDays: number;
 

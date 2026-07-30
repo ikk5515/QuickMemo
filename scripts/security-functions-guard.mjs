@@ -75,6 +75,21 @@ for (const path of sourceFiles) {
   }
 }
 
+const clientSourceFiles = collectFiles(join(root, "src")).filter(shouldScan);
+for (const path of clientSourceFiles) {
+  const content = readFileSync(path, "utf8");
+  if (content.includes("SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1")) {
+    errors.push(
+      `${path.slice(root.length + 1)} references the server-only email settings encryption key`
+    );
+  }
+  if (content.includes("_secure-share-email-settings")) {
+    errors.push(
+      `${path.slice(root.length + 1)} imports the server-only email settings module`
+    );
+  }
+}
+
 const lock = JSON.parse(readFileSync(join(root, "package-lock.json"), "utf8"));
 const staleFunctionsPackage = lock.packages?.functions;
 const rootPackage = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));

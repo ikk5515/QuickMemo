@@ -693,6 +693,27 @@ describe("secure share API client", () => {
       }
     })).rejects.toMatchObject({ code: "content_key_blocked" });
 
+    await expect(secureShareApiRequest({
+      action: "access",
+      method: "POST",
+      shareId,
+      body: {
+        returnUrl: `https://quickmemo.example/s/${"T".repeat(24)}#${"B".repeat(43)}`,
+        unlockAttemptId: "attempt_1234567890"
+      }
+    })).rejects.toMatchObject({ code: "content_key_blocked" });
+
+    await expect(secureShareApiRequest({
+      action: "access",
+      method: "POST",
+      shareId,
+      body: {
+        encodedReturnUrl:
+          `https%3A%2F%2Fquickmemo.example%2Fs%2F${"T".repeat(24)}%23${"B".repeat(43)}`,
+        unlockAttemptId: "attempt_1234567890"
+      }
+    })).rejects.toMatchObject({ code: "content_key_blocked" });
+
     expect(fetch).not.toHaveBeenCalled();
   });
 

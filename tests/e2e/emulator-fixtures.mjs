@@ -310,6 +310,7 @@ function scenarioOptions(scenario) {
     quickCopyButtonVisible: true,
     schemaVersion: 2,
     showCommenterIpPrefix: false,
+    standardV2Url: false,
     viewerAuth: null,
     withAttachment: false
   };
@@ -323,6 +324,9 @@ function scenarioOptions(scenario) {
     options.emailVerificationRequired = true;
   } else if (scenario === "one-time") {
     options.oneTimeEnabled = true;
+  } else if (scenario === "standard-v2-one-time") {
+    options.oneTimeEnabled = true;
+    options.standardV2Url = true;
   } else if (scenario === "view-attachment") {
     options.downloadAllowed = false;
     options.quickCopyButtonVisible = false;
@@ -429,7 +433,9 @@ export async function seedE2eScenario(scenario) {
   const suffix = randomSuffix();
   const shareId = options.schemaVersion === 1
     ? `legacy_${suffix}`
-    : `ss2_e2e_${suffix}`;
+    : options.standardV2Url
+      ? `ss2_e2e_standard_${suffix}`
+      : `ss2_e2e_${suffix}`;
   const noteId = `note_${suffix}`;
   const content = await createShareContent(scenario);
   const ownerAuth = options.ownerAuth
@@ -566,7 +572,9 @@ export async function seedE2eScenario(scenario) {
     shareId,
     sourceAttachmentCipherDigest,
     title: content.title,
-    url: `/share/${shareId}#key=${content.contentKey}`,
+    url: options.schemaVersion === 2 && !options.standardV2Url
+      ? `/s/${shareId.slice(4)}#${content.contentKey}`
+      : `/share/${shareId}#key=${content.contentKey}`,
     viewerAuth
   };
 }

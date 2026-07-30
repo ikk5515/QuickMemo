@@ -72,14 +72,26 @@ describe("hosting security headers", () => {
     const firebaseShareHeaders = headersByKey(
       firebaseConfig.hosting.headers?.find((rule) => rule.source === "/share/**")?.headers ?? []
     );
+    const firebaseCompactShareHeaders = headersByKey(
+      firebaseConfig.hosting.headers?.find((rule) => rule.source === "/s/**")?.headers ?? []
+    );
     const vercelShareHeaders = headersByKey(
       vercelConfig.headers?.find((rule) => rule.source === "/share/(.*)")?.headers ?? []
+    );
+    const vercelCompactShareHeaders = headersByKey(
+      vercelConfig.headers?.find((rule) => rule.source === "/s/(.*)")?.headers ?? []
     );
     const vercelApiHeaders = headersByKey(
       vercelConfig.headers?.find((rule) => rule.source === "/api/public-shares-v2")?.headers ?? []
     );
 
-    for (const headers of [firebaseShareHeaders, vercelShareHeaders, vercelApiHeaders]) {
+    for (const headers of [
+      firebaseShareHeaders,
+      firebaseCompactShareHeaders,
+      vercelShareHeaders,
+      vercelCompactShareHeaders,
+      vercelApiHeaders
+    ]) {
       expect(headers.get("cache-control")).toContain("no-store");
       expect(headers.get("referrer-policy")).toBe("no-referrer");
       expect(headers.get("x-robots-tag")).toContain("noindex");

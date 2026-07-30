@@ -2971,6 +2971,22 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /secureShareEmailSettings/{settingsId} {
+      allow read, write: if false;
+    }
+
+    match /secureShareEmailAdminAudit/{eventId} {
+      allow read, write: if false;
+    }
+
+    match /secureShareEmailAdminRateLimits/{bucketId} {
+      allow read, write: if false;
+    }
+
+    match /secureShareEmailAdminIdempotency/{requestId} {
+      allow read, write: if false;
+    }
+
     match /publicShareCopyGrantRequests/{requestId} {
       allow read, write: if false;
     }

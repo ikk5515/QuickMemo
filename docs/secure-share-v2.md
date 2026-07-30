@@ -7,20 +7,37 @@ without changing the existing end-to-end content encryption boundary.
 
 - Existing shares without `schemaVersion: 2` remain legacy v1 shares.
 - New v2 shares are never bulk-migrated from v1.
-- The content key remains in the URL fragment as `#key=...`. Fragments are not
-  sent in HTTP requests and must not be copied into a query string, path,
-  cookie, log, `localStorage`, or `sessionStorage`.
+- The content key remains in the URL fragment. Standard links use
+  `/share/{shareId}#key={43-character-key}` and compact links use
+  `/s/{24-character-token}#{43-character-key}`. Fragments are not sent in HTTP
+  requests and must not be copied into a query string, path, cookie, log,
+  `localStorage`, `sessionStorage`, server database, or external URL shortener.
+- `VITE_SECURE_SHARE_COMPACT_URL_ENABLED=true` changes only newly reconstructed
+  links whose internal ID is exactly `ss2_` plus a 24-character base64url
+  token. The compact parser is always present so turning the generation flag
+  off does not break links already issued. Existing long v2 and all legacy v1
+  links remain on `/share/` and keep the `#key=` fragment.
+- Browsers normalize dot segments, backslashes, and an empty query delimiter
+  before the SPA can inspect `location`. QuickMemo therefore enforces the
+  canonical final pathname, one exact 24-character compact token, no non-empty
+  query, and one exact fragment form. Such browser-equivalent spellings can
+  resolve only to that same final share ID; they cannot escape the application
+  origin, select an unvalidated ID, move the content key out of the fragment,
+  or weaken the server access policy. Generated links always use the canonical
+  form.
 - `SECURE_SHARE_V2_ENABLED=true` is required before any v2 server operation.
 - `VITE_SECURE_SHARE_V2_ENABLED=true` is also required before the owner UI is
   shown.
 - `VITE_READONLY_NOTE_RENDERER_V2_ENABLED`,
-  `VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED`,
-  and `VITE_UNIFIED_SELECT_UI_ENABLED` are client rollback flags. Their
-  reviewed Production source defaults are enabled after their staged rollout;
-  exact `false` remains a rollback. A staged-off Production source default is
-  a hard lock, so an older Vercel environment value cannot turn a feature on
-  before its guarded release commit. Because `VITE_` values are embedded at
-  build time, changing a flag requires a new Production deployment.
+  `VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED`, and
+  `VITE_UNIFIED_SELECT_UI_ENABLED` are default-on Production rollback flags
+  after their staged rollout; exact `false` remains a rollback.
+- `VITE_SECURE_SHARE_COMPACT_URL_ENABLED` is intentionally stricter: only the
+  exact build-time value `true` generates new compact links. Missing or
+  `false` keeps standard `/share/` generation while the always-present parser
+  continues to accept compact links already issued. Because `VITE_` values are
+  embedded at build time, changing this flag requires a new Production
+  deployment.
 - Live sync requires both
   `VITE_SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED` and the server-only
   `SECURE_SHARE_LIVE_CONTENT_SYNC_ENABLED`. Its reviewed Production source
@@ -35,8 +52,10 @@ without changing the existing end-to-end content encryption boundary.
   `app-select` theme class.
 - `SECURE_SHARE_EMAIL_ENABLED=true` is required before OTP delivery is
   available. It must remain false until the Gmail SMTP account, Google app
-  password, matching From address, provider health, and automated real-mailbox
-  delivery smoke are all verified on the exact Production SHA.
+  password, matching From address, provider health, and actual receipt are
+  verified on the exact Production SHA. The normal proof is the in-app
+  `stage` → `send-test` → six-digit `confirm-test` flow; an approved automated
+  mailbox smoke is optional.
 - Email false does not disable Core v2. Existing email-gated policies and
   sessions fail closed with `email_feature_unavailable`; they are never
   downgraded to a link-only or authenticated-users policy.
@@ -265,18 +284,20 @@ bundle. The default transport is:
 - file and URL access disabled,
 - exactly one recipient and no attachments.
 
-Port 587 is allowed only after a non-interactive preflight proves STARTTLS from
-the actual Vercel Production environment. That configuration must use
-`secure=false` and `requireTLS=true`. Port 25, plaintext SMTP, disabled
-certificate verification, and automatic 465-to-587 fallback are prohibited.
+The administrator-managed Production path is fixed to port 465 and does not
+offer port selection or fallback. Port 587/STARTTLS variables remain only for
+local/CI legacy compatibility and are not a Production activation path. Port
+25, plaintext SMTP, disabled certificate verification, and automatic
+465-to-587 fallback are prohibited.
 
 Use a dedicated personal Gmail account with two-step verification and a
-Google-generated app password. Never use the Google account password. The
-app password is stored only as `SHARE_SMTP_APP_PASSWORD` in an approved
-server-only Production secret; it is never a `VITE_` value, CLI argument, log
-field, or committed example. `SHARE_SMTP_USERNAME`, `SHARE_EMAIL_FROM`, and
-the SMTP envelope sender must resolve to the same Gmail address. The display
-name is exactly `QuickMemo`. `quickmemo-tan.vercel.app` is the application and
+Google-generated app password. Never use the Google account password. An
+administrator stages the address and app password through the in-app email
+settings page. The server encrypts the credential before storing it and never
+returns it to the browser. It is never a `VITE_` value, CLI argument, log
+field, committed example, or Vercel API mutation. The Gmail username, From,
+and SMTP envelope sender resolve to the same Gmail address. The display name
+is exactly `QuickMemo`. `quickmemo-tan.vercel.app` is the application and
 share origin, not a mail domain or From alias.
 
 The fixed subject is `QuickMemo 공유 노트 인증번호`. The plain-text body contains
@@ -288,9 +309,115 @@ The legacy Resend adapter is reachable only under `NODE_ENV=test` as a
 local/CI compatibility mock. It is not a Production provider, fallback, or
 automatic migration path.
 
+### Administrator-managed Gmail settings
+
+`POST /api/admin-email-settings` accepts only JSON and the explicit actions
+`status`, `stage`, `send-test`, `confirm-test`, `disable`,
+`discard-pending`, and `remove`. Every request requires:
+
+- the exact configured same-origin `Origin` and same-site fetch context,
+- a Firebase Bearer ID token validated by Identity Toolkit,
+- a currently active server-side administrator profile,
+- Firebase App Check according to the existing global
+  `off`/`monitor`/`enforce` policy (a valid token is mandatory in `enforce`),
+  and
+- the dedicated admin-email-settings request marker.
+
+Mutations additionally require an `auth_time` no older than five minutes and
+an idempotency key, and consume a preconditioned, distributed Firestore rate
+bucket. The read-only `status` action does not force a fresh sign-in. The
+server writes a bounded redacted audit event containing the actor UID, action,
+generation, result, request ID, and retention timestamps only. It never
+writes the Gmail address, app password, test code, message text, or raw SMTP
+response to audit or rate-limit state.
+
+An admin idempotency key is replayable only for the same unexpired canonical
+request. A server-secret HMAC binds it to the actor UID, action, and the
+normalized action payload: staged Gmail credentials, test generation,
+confirmation code, or removal target/generation as applicable. Firestore
+stores only that fixed-length digest, never the raw credential or code. A
+malformed or expired record, or reuse of the key with a different actor,
+action, or payload, fails with `409 conflict`; the administrator must retry
+with a new idempotency key.
+
+Every successful action returns the same bounded
+`{ ok, settings: { enabled, active, pending }, requestId }` contract.
+`settings.enabled` is the effective no-cache runtime readiness, not merely the
+stored enable intent: a confirmed `active` slot can therefore be present while
+`enabled` remains false when the independent Vercel master switch is off.
+
+The server-only
+`SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1` value is a canonical base64url
+encoding of exactly 32 random bytes. It is configured once as a protected
+Production environment secret and must not be a `VITE_` value. Each Gmail
+credential slot is encrypted with AES-256-GCM using a fresh 96-bit nonce. The
+authenticated additional data binds the ciphertext to the Firebase project
+ID, slot (`pending` or `active`), and random generation. Moving ciphertext
+between projects, slots, or generations therefore fails authentication.
+
+`secureShareEmailSettings/current` contains separate `pending` and `active`
+slots. Client responses contain only presence, generation, bounded
+timestamps, attempt counts, and masked addresses. `stage` validates a Gmail
+address, a 16-character Google app password (ASCII display spaces may be
+removed; hyphens and other whitespace are rejected), and an optional
+Reply-To, then calls `transporter.verify()`. A stage or verify failure never
+replaces the active slot.
+
+`send-test` sends exactly one message to the pending Gmail account itself and
+stores only an HMAC of its six-digit code. `confirm-test` accepts that code
+only for the same pending generation and therefore verifies access to the
+configured Gmail mailbox before promotion. It uses an
+update-time/generation compare-and-set, a ten-minute expiry, and a five-attempt
+limit before re-encrypting the pending credential for the active slot. The
+provider-health record is reset and bound to that exact active generation.
+Runtime sending rejects missing or mismatched health generations.
+
+Admin test messages reserve and finalize the same global Gmail minute, hour,
+rolling-24-hour, and monthly counters as public OTP delivery. A pending
+generation permits at most five test messages with a minimum 60-second resend
+cooldown. A concurrent `sending` state and any ambiguous SMTP delivery block
+another send. Definite failures count against the minute/hour burst guard;
+ambiguous delivery counts conservatively against every delivery cap.
+Finalization clears the pending quota references atomically. If a process
+stops after reservation, an authorized `stage`, `discard-pending`, or pending
+`remove` request can recover the reservation only after its bounded test
+deadline. Recovery uses the settings update-time precondition to atomically
+convert all three reserved quota buckets to ambiguous, clear the reservation
+references, and write a redacted recovery audit. A still-live deadline remains
+blocked, the confirmed active slot is preserved, and a racing SMTP finalizer
+and recovery cannot both account the reservation. The 24-hour cleanup remains
+a safety backstop and performs the same conservative accounting before
+removing only an expired pending slot.
+
+`disable` keeps the encrypted active slot for a reversible rollback while
+turning off effective delivery. `discard-pending` removes only the staged
+slot. `remove` can delete the active, pending, or both slots; deleting active
+also disables delivery and deletes its provider-health state.
+An in-flight pending test cannot be replaced, discarded, or removed before
+its deadline.
+Unconfirmed pending credentials expire after 24 hours; the active slot is
+never automatically deleted.
+
+The Firestore settings, audit, admin rate-limit, and idempotency collections
+are explicitly unreadable and unwritable from client Rules. Only the
+server-side REST context can access them.
+The existing bounded cleanup cron removes expired admin idempotency, rate, and
+audit records. No Firebase TTL or additional paid service is required.
+
+Effective email delivery requires both the active, confirmed Firestore slot
+and the independent Vercel master kill switch
+`SECURE_SHARE_EMAIL_ENABLED=true`. The admin test flow remains usable while
+the master switch is false, but public email policies stay fail closed. This
+allows a credential to be verified before activation and makes changing the
+master flag to false an immediate rollback. Missing/corrupt settings, a
+missing encryption key, failed decryption, missing prerequisites, or
+Firestore uncertainty disables only email; Core link/password sharing remains
+available.
+
 ### Provider health
 
-`publicShareEmailProviderHealth/gmail-smtp` is server-only and stores only a
+`publicShareEmailProviderHealth/gmail-smtp` is server-only and stores only the
+active settings generation plus a
 bounded status (`unknown`, `healthy`, `degraded`, or `blocked`), timestamps,
 failure count, `blockedUntil`, and a redacted reason code. It never stores a
 Gmail address, app password, recipient, OTP, message body, session token, or
@@ -303,6 +430,12 @@ temporary/rate/quota failures set a bounded degraded or blocked interval.
 While blocked, email OTP fails closed without bypassing email verification or
 switching providers. User responses and logs do not expose the Gmail or SMTP
 failure detail.
+
+An SMTP request that began under an older credential generation cannot update
+provider health after a rotation. Health finalization re-reads the record,
+requires the existing generation to match the send's generation, and uses an
+update-time precondition. A late result is ignored after rotation, and a
+deleted health record is never recreated by an in-flight request.
 
 ### Email quota guard
 
@@ -345,25 +478,33 @@ these collections.
 
 The committed default remains `SECURE_SHARE_EMAIL_ENABLED=false`. Code,
 Rules, and disabled Production deployment may ship without Gmail credentials,
-but the flag must not become true until all of the following pass on the exact
-CI-green Production SHA:
+but effective delivery must not become active until all pre-activation checks
+pass on the exact CI-green Production SHA:
 
 1. The dedicated Gmail account, two-step verification, app password, exact
    From match, port 465 TLS, and provider health are verified without printing
    values.
-2. An automated smoke mailbox API or read-only IMAP credential confirms actual
-   receipt, subject, freshness, and OTP extraction. SMTP `verify()` or an
-   accepted response alone is insufficient.
-3. Synthetic wrong-code, correct-code, reuse, expiry, resend, quota, revoke,
-   and cleanup checks pass without using a real user note.
-4. Synthetic shares, challenges, isolated attempts, mailbox test messages
-   where supported, and temporary accounts are removed or verified under
-   bounded retention. Never decrement or zero a shared usage bucket to erase a
-   real smoke send; that minimal usage remains part of quota accounting.
+2. Actual receipt is proven either by the in-app administrator flow
+   (`stage` → `send-test` to that same Gmail account → six-digit
+   `confirm-test` for the same generation) or by an automated smoke mailbox API
+   or read-only IMAP credential that confirms subject, freshness, and OTP
+   extraction. SMTP `verify()` or an accepted response alone is insufficient.
+3. Static, unit, Rules, quota, concurrency, and cleanup checks pass without
+   using a real user note.
 
-If automated mailbox credentials are absent, receipt cannot be confirmed, or
-any provider/health/quota check is uncertain, keep the flag false and report
-email activation as blocked. Core v2 remains active and is never downgraded.
+After receipt confirmation, an operator may enable the independent Vercel
+master switch. Immediately run a synthetic public-share smoke covering wrong
+code, correct code, reuse, expiry, resend, quota, revoke, and cleanup. If that
+post-activation smoke, provider health, or quota state is uncertain, turn the
+master switch off again. Synthetic shares, challenges, isolated attempts,
+mailbox test messages where supported, and temporary accounts are removed or
+verified under bounded retention. Never decrement or zero a shared usage
+bucket to erase a real smoke send; that minimal usage remains part of quota
+accounting.
+
+If neither the in-app six-digit confirmation nor automated mailbox evidence
+is available, keep the flag false and report email activation as blocked.
+Core v2 remains active and is never downgraded.
 
 Personal Gmail SMTP is for personal, non-commercial, low-volume beta operation
 only. QuickMemo never purchases a plan, connects billing, raises its caps,
@@ -737,19 +878,29 @@ defaults only. Secret values belong in the approved Vercel Production secret
 workflow.
 
 Never use a `VITE_` prefix for a password pepper, session/cookie/CSRF/OTP/email
-or rate-limit HMAC key, Gmail/IMAP credential, or mailbox address.
+or rate-limit HMAC key, the email-settings encryption key, a Gmail/IMAP
+credential, or a mailbox address.
 
 Core requires distinct server-only values for `SHARE_PASSWORD_PEPPER`,
 `SHARE_SESSION_HMAC_KEY`, `SHARE_COOKIE_NAME_HMAC_KEY`,
 `SHARE_CSRF_HMAC_KEY`, and `SHARE_RATE_LIMIT_HMAC_KEY`, plus an exact
 `SECURE_SHARE_ALLOWED_ORIGINS` allowlist. `SHARE_OTP_HMAC_KEY`,
-`SHARE_EMAIL_HMAC_KEY`, provider credentials, and sender configuration are
+`SHARE_EMAIL_HMAC_KEY`, and `SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1` are
 email-only while `SECURE_SHARE_EMAIL_ENABLED=false`. `CRON_SECRET` is separate
 from both groups. Generate every application HMAC/pepper independently from at
-least 32 random bytes (48–64 recommended). Keep the provider-issued Gmail app
-password exactly as issued; do not transform it into an application key.
-Inject secrets through stdin or an equivalent non-logging workflow, and report
+least 32 random bytes (48–64 recommended). The encryption key is the canonical
+base64url encoding of exactly 32 random bytes. Configure those application
+secrets through stdin or an equivalent non-logging Vercel workflow, and report
 only whether each variable exists.
+
+Do not copy the Gmail address, app password, From, or Reply-To into Vercel
+Production environment variables. Enter them only in the administrator email
+settings page. The server fixes Gmail to `smtp.gmail.com:465` with implicit TLS,
+normalizes the address, strips only ASCII spaces from the 16-character app
+password, verifies the transport, and encrypts the pending slot before it is
+stored. The `SHARE_SMTP_*`, `SHARE_EMAIL_FROM*`, and
+`SHARE_EMAIL_REPLY_TO` names in `.env.example` exist only for local/CI
+compatibility tests and remain empty in Production.
 
 Comment participant identity additionally requires a distinct server-only
 `SHARE_PARTICIPANT_HMAC_KEY` of at least 32 random bytes. Keep
@@ -762,25 +913,28 @@ pepper or session HMAC key.
 
 Email readiness additionally requires all of the following:
 
-- `SHARE_EMAIL_PROVIDER=gmail_smtp`
-- `SHARE_SMTP_HOST=smtp.gmail.com`
-- port 465 with `SHARE_SMTP_SECURE=true`, or verified port 587 with
-  `SHARE_SMTP_SECURE=false` and `SHARE_SMTP_REQUIRE_TLS=true`
-- non-empty server-only `SHARE_SMTP_USERNAME` and
-  `SHARE_SMTP_APP_PASSWORD`
-- `SHARE_EMAIL_FROM` matching `SHARE_SMTP_USERNAME` and
-  `SHARE_EMAIL_FROM_NAME=QuickMemo`
-- exact `SHARE_EMAIL_FREE_TIER_MODE=true`
+- exact `SECURE_SHARE_V2_ENABLED=true`
+- exact `SECURE_SHARE_EMAIL_ENABLED=true` as the independent Vercel master
+  switch, enabled only after the in-app receipt confirmation below
+- the protected `SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1` secret
 - distinct `SHARE_OTP_HMAC_KEY`, `SHARE_EMAIL_HMAC_KEY`, and
   `SHARE_RATE_LIMIT_HMAC_KEY` values of at least 32 bytes, with no reuse of
   password/session/cookie/CSRF/participant secrets
+- a schema-valid `secureShareEmailSettings/current` document whose stored
+  enable intent is true and whose confirmed `active` slot decrypts and
+  authenticates for the current project, slot, and generation
+- an active slot that resolves to the fixed Gmail transport
+  `smtp.gmail.com:465`, implicit TLS, the same Gmail username/From/envelope
+  sender, display name `QuickMemo`, and exact free-tier mode
 - rolling-24-hour 20/30, KST-month 500/700, and global 3/minute and 20/hour
   caps, or reviewed lower values
-- an automated actual-delivery smoke using `SHARE_SMOKE_TEST_EMAIL` and an
-  approved mailbox API or server-only IMAP credential
+- actual receipt proven by `stage` → `send-test` to the staged Gmail address →
+  six-digit `confirm-test` for the same generation; an approved automated
+  mailbox API or read-only IMAP smoke is optional
 
 The committed example deliberately keeps `SECURE_SHARE_EMAIL_ENABLED=false`
-and all credential values empty. Do not enable email merely because the
+and all raw credential values empty. A confirmed active slot may exist safely
+while that switch is false. Do not enable email merely because the
 configuration parser or `transporter.verify()` succeeds.
 
 The client behavior flags have non-secret defaults:
@@ -960,17 +1114,21 @@ Vercel/Firebase usage evidence before activation.
     rename, uniqueness, comment-prefix/policy-off, revoke, cleanup, mobile,
     accessibility, console, and network-response smoke. Remove every synthetic
     share/account created by the smoke.
-12. Keep `SECURE_SHARE_EMAIL_ENABLED=false` while verifying Gmail SMTP port
-    465, provider health, and one minimal automated real-mailbox delivery.
-    Use port 587 only if the same Vercel environment proves STARTTLS and 465
-    fails. Run synthetic OTP wrong/correct/reuse/expiry/resend/quota checks,
-    remove the synthetic data, then enable the independent email flag and
-    redeploy only if every gate passed. Without automated mailbox receipt
-    credentials, leave the flag false.
+12. Keep `SECURE_SHARE_EMAIL_ENABLED=false` while an administrator uses the
+    in-app email settings page to stage the dedicated Gmail address and app
+    password, send one test through the fixed port-465 TLS transport to that
+    same mailbox, and confirm the received six-digit code for the same
+    generation. An approved mailbox API or read-only IMAP check may automate
+    this receipt proof but is not required. Enable the independent email flag
+    and redeploy only after that confirmation and provider-health checks pass.
+    Then run synthetic OTP wrong/correct/reuse/expiry/resend/quota checks and
+    remove the synthetic data. Without either the in-app receipt confirmation
+    or equivalent automated receipt evidence, leave the flag false.
 
 Do not activate Core if an index is building, any P0/P1 issue remains, a
 required check fails, the global counter is absent, or the rollback deployment
-is unknown. An absent email credential blocks only email sharing.
+is unknown. An absent confirmed email-settings active slot blocks only email
+sharing.
 
 ## Rollback
 
@@ -979,9 +1137,11 @@ mailbox-smoke failure, first set `SECURE_SHARE_EMAIL_ENABLED=false` and
 redeploy the last CI-green SHA. Do not weaken an email policy, change it to
 link-only, raise a quota, or enable a paid/fallback provider. Keep the
 server-only Rules and accounting documents in place. Rotate the Gmail app
-password only through the approved secret workflow when exposure is suspected,
-and re-enable email only after provider health and automated receipt pass
-again.
+password only through the administrator email settings page when exposure is
+suspected. Preserve the existing active slot until the replacement generation
+passes `send-test` and in-app six-digit confirmation, or equivalent approved
+automated receipt evidence. Re-enable email only after that proof and provider
+health pass again.
 
 If the issue is limited to automatic entry, first set
 `VITE_SECURE_SHARE_DIRECT_ENTRY_ENABLED=false` and redeploy the same guarded

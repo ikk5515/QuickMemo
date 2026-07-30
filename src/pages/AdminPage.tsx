@@ -7,6 +7,7 @@ import {
   KeyRound,
   LibraryBig,
   LockKeyhole,
+  Mail,
   NotebookPen,
   Plus,
   Search,
@@ -20,7 +21,8 @@ import {
 } from "lucide-react";
 import type { Timestamp } from "firebase/firestore";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
+import { AdminEmailSettingsPanel } from "../components/AdminEmailSettingsPanel";
 import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
@@ -74,8 +76,97 @@ const initialDraft: DraftUser = {
 };
 
 type AdminNoteTypeFilter = "all" | NoteKind;
-type AdminTab = "create" | "users" | "notes";
+export type AdminTab = "create" | "users" | "notes" | "email";
 type UserStatusFilter = "all" | "active" | "inactive" | "admin";
+
+export const adminTabIds: Readonly<Record<AdminTab, { panelId: string; tabId: string }>> = {
+  create: {
+    panelId: "admin-create-panel",
+    tabId: "admin-create-tab"
+  },
+  users: {
+    panelId: "admin-users-panel",
+    tabId: "admin-users-tab"
+  },
+  notes: {
+    panelId: "admin-notes-panel",
+    tabId: "admin-notes-tab"
+  },
+  email: {
+    panelId: "admin-email-settings-panel",
+    tabId: "admin-email-settings-tab"
+  }
+};
+
+const adminTabs = [
+  { icon: Plus, label: "사용자 추가", tab: "create" },
+  { icon: UserRoundCog, label: "사용자 목록", tab: "users" },
+  { icon: FileText, label: "노트 관리", tab: "notes" },
+  { icon: Mail, label: "이메일 설정", tab: "email" }
+] as const;
+
+interface AdminTabsProps {
+  activeTab: AdminTab;
+  onSelect: (tab: AdminTab) => void;
+}
+
+export function AdminTabs({ activeTab, onSelect }: AdminTabsProps) {
+  const tabRefs = useRef<Partial<Record<AdminTab, HTMLButtonElement | null>>>({});
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, currentTab: AdminTab) {
+    const currentIndex = adminTabs.findIndex(({ tab }) => tab === currentTab);
+    let nextIndex: number | null = null;
+
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % adminTabs.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + adminTabs.length) % adminTabs.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = adminTabs.length - 1;
+    }
+
+    if (currentIndex < 0 || nextIndex === null) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextTab = adminTabs[nextIndex].tab;
+    onSelect(nextTab);
+    tabRefs.current[nextTab]?.focus();
+  }
+
+  return (
+    <div className="admin-tabs" role="tablist" aria-label="관리자 기능">
+      {adminTabs.map(({ icon: Icon, label, tab }) => {
+        const selected = activeTab === tab;
+        const ids = adminTabIds[tab];
+
+        return (
+          <button
+            aria-controls={ids.panelId}
+            aria-selected={selected}
+            className={selected ? "active" : ""}
+            id={ids.tabId}
+            key={tab}
+            onClick={() => onSelect(tab)}
+            onKeyDown={(event) => handleKeyDown(event, tab)}
+            ref={(element) => {
+              tabRefs.current[tab] = element;
+            }}
+            role="tab"
+            tabIndex={selected ? 0 : -1}
+            type="button"
+          >
+            <Icon aria-hidden="true" size={16} />
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 interface AdminNoteView extends NoteSnapshot {
   bodyFormat: ReadonlyEditorContentFormat;
@@ -667,43 +758,17 @@ function AdminDashboard() {
           <AdminStat icon={<KeyRound size={18} />} label="공유 허용" value={adminStats.shareLinks} />
         </section>
 
-        <div className="admin-tabs" role="tablist" aria-label="관리자 기능">
-          <button
-            aria-selected={activeAdminTab === "create"}
-            className={activeAdminTab === "create" ? "active" : ""}
-            onClick={() => setActiveAdminTab("create")}
-            role="tab"
-            type="button"
-          >
-            <Plus size={16} />
-            사용자 추가
-          </button>
-          <button
-            aria-selected={activeAdminTab === "users"}
-            className={activeAdminTab === "users" ? "active" : ""}
-            onClick={() => setActiveAdminTab("users")}
-            role="tab"
-            type="button"
-          >
-            <UserRoundCog size={16} />
-            사용자 목록
-          </button>
-          <button
-            aria-selected={activeAdminTab === "notes"}
-            className={activeAdminTab === "notes" ? "active" : ""}
-            onClick={() => setActiveAdminTab("notes")}
-            role="tab"
-            type="button"
-          >
-            <FileText size={16} />
-            노트 관리
-          </button>
-        </div>
+        <AdminTabs activeTab={activeAdminTab} onSelect={setActiveAdminTab} />
 
-        {activeAdminTab !== "notes" && (
+        {(activeAdminTab === "create" || activeAdminTab === "users") && (
           <div className={`admin-management-grid ${activeAdminTab === "users" ? "single-panel" : ""}`}>
             {activeAdminTab === "create" && (
-              <section className="panel admin-create-panel">
+              <section
+                aria-labelledby={adminTabIds.create.tabId}
+                className="panel admin-create-panel"
+                id={adminTabIds.create.panelId}
+                role="tabpanel"
+              >
             <div className="admin-section-header">
               <h2>
                 <Plus size={20} />
@@ -828,7 +893,12 @@ function AdminDashboard() {
             )}
 
             {activeAdminTab === "users" && (
-              <section className="panel admin-users-panel">
+              <section
+                aria-labelledby={adminTabIds.users.tabId}
+                className="panel admin-users-panel"
+                id={adminTabIds.users.panelId}
+                role="tabpanel"
+              >
             <div className="admin-section-header">
               <h2>
                 <UserRoundCog size={20} />
@@ -888,7 +958,12 @@ function AdminDashboard() {
         )}
 
         {activeAdminTab === "notes" && (
-          <section className="panel wide-panel admin-note-panel">
+          <section
+            aria-labelledby={adminTabIds.notes.tabId}
+            className="panel wide-panel admin-note-panel"
+            id={adminTabIds.notes.panelId}
+            role="tabpanel"
+          >
           <div className="admin-section-header">
             <h2>
               <FileText size={20} />
@@ -993,6 +1068,7 @@ function AdminDashboard() {
           </div>
           </section>
         )}
+        {activeAdminTab === "email" && <AdminEmailSettingsPanel />}
         {selectedAdminNote && (
           <div className="modal-backdrop" role="presentation">
             <article
