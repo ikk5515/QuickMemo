@@ -41,7 +41,8 @@ export function idTokenHasRecentAdminAuthentication(
   idToken: string,
   expectedUid: string,
   expectedProjectId: string,
-  now?: number
+  now?: number,
+  environment?: Record<string, string | undefined>
 ): boolean;
 
 export function assertEmailSettingsTestSendAvailable(

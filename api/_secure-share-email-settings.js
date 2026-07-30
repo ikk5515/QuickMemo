@@ -7,6 +7,7 @@ import {
   randomBytes,
   timingSafeEqual
 } from "node:crypto";
+import { URL } from "node:url";
 import {
   HttpError,
   createDocumentWrite,
@@ -48,6 +49,7 @@ const exactEncryptionKeyPattern = /^[A-Za-z0-9_-]{43}$/u;
 const runtimeCache = new Map();
 const recentAuthenticationMaximumAgeMilliseconds = 5 * 60 * 1000;
 const recentAuthenticationFutureSkewMilliseconds = 60 * 1000;
+const jwtSegmentPattern = /^[A-Za-z0-9_-]+$/u;
 
 function settingsUnavailable(message = "Secure Share email settings are unavailable") {
   return new HttpError(503, "email_settings_unavailable", message);
@@ -55,6 +57,31 @@ function settingsUnavailable(message = "Secure Share email settings are unavaila
 
 function conflict(message = "Secure Share email settings changed concurrently") {
   return new HttpError(409, "conflict", message);
+}
+
+function localAuthEmulatorAllowsUnsignedToken(environment) {
+  if (
+    String(environment?.NODE_ENV ?? "").trim().toLowerCase() !== "test"
+  ) {
+    return false;
+  }
+  const configuredHost =
+    String(environment?.FIREBASE_AUTH_EMULATOR_HOST ?? "").trim();
+  let url;
+  try {
+    url = new URL(`http://${configuredHost}`);
+  } catch {
+    return false;
+  }
+  return (
+    new Set(["127.0.0.1", "[::1]", "localhost"]).has(url.hostname)
+    && Boolean(url.port)
+    && !url.username
+    && !url.password
+    && url.pathname === "/"
+    && !url.search
+    && !url.hash
+  );
 }
 
 function normalizedTimestamp(value) {
@@ -153,18 +180,41 @@ export function idTokenHasRecentAdminAuthentication(
   idToken,
   expectedUid,
   expectedProjectId,
-  now = Date.now()
+  now = Date.now(),
+  environment = process.env
 ) {
   const parts = typeof idToken === "string" ? idToken.split(".") : [];
+  const unsignedEmulatorToken =
+    parts.length === 3
+    && jwtSegmentPattern.test(parts[0] ?? "")
+    && jwtSegmentPattern.test(parts[1] ?? "")
+    && parts[2] === ""
+    && localAuthEmulatorAllowsUnsignedToken(environment);
   const encodedPayload = parts[1] ?? "";
   if (
     parts.length !== 3
-    || !parts.every((part) => /^[A-Za-z0-9_-]+$/u.test(part))
+    || (
+      !unsignedEmulatorToken
+      && !parts.every((part) => jwtSegmentPattern.test(part))
+    )
     || encodedPayload.length > 8_192
   ) {
     return false;
   }
   try {
+    const header = JSON.parse(
+      Buffer.from(parts[0], "base64url").toString("utf8")
+    );
+    if (
+      unsignedEmulatorToken
+      && (
+        !header
+        || typeof header !== "object"
+        || header.alg !== "none"
+      )
+    ) {
+      return false;
+    }
     const payload = JSON.parse(
       Buffer.from(encodedPayload, "base64url").toString("utf8")
     );

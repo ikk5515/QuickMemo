@@ -550,5 +550,60 @@ describe("Secure Share administrator email settings", () => {
       projectId,
       now
     )).toBe(false);
+
+    const unsignedEmulatorToken = [
+      Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" }))
+        .toString("base64url"),
+      Buffer.from(JSON.stringify({
+        aud: projectId,
+        auth_time: nowSeconds - 30,
+        exp: nowSeconds + 60 * 60,
+        iat: nowSeconds - 30,
+        iss: `https://securetoken.google.com/${projectId}`,
+        sub: "admin-user"
+      })).toString("base64url"),
+      ""
+    ].join(".");
+    const loopbackEmulatorEnvironment = {
+      FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9099",
+      NODE_ENV: "test"
+    };
+    expect(idTokenHasRecentAdminAuthentication(
+      unsignedEmulatorToken,
+      "admin-user",
+      projectId,
+      now,
+      loopbackEmulatorEnvironment
+    )).toBe(true);
+    expect(idTokenHasRecentAdminAuthentication(
+      unsignedEmulatorToken,
+      "admin-user",
+      projectId,
+      now,
+      { ...loopbackEmulatorEnvironment, NODE_ENV: "production" }
+    )).toBe(false);
+    expect(idTokenHasRecentAdminAuthentication(
+      unsignedEmulatorToken,
+      "admin-user",
+      projectId,
+      now,
+      {
+        ...loopbackEmulatorEnvironment,
+        FIREBASE_AUTH_EMULATOR_HOST: "auth-emulator.example.test:9099"
+      }
+    )).toBe(false);
+    const unsignedRsaToken = [
+      Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" }))
+        .toString("base64url"),
+      unsignedEmulatorToken.split(".")[1],
+      ""
+    ].join(".");
+    expect(idTokenHasRecentAdminAuthentication(
+      unsignedRsaToken,
+      "admin-user",
+      projectId,
+      now,
+      loopbackEmulatorEnvironment
+    )).toBe(false);
   });
 });
