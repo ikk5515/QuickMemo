@@ -90,6 +90,19 @@ describe("Secure Share administrator email settings", () => {
     expect(emailTestCodeMatches(generation, code, digest)).toBe(true);
     expect(emailTestCodeMatches(generation, "012346", digest)).toBe(false);
     expect(emailTestCodeMatches(generation, code, "a".repeat(64))).toBe(false);
+    const alphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const finalIndex = alphabet.indexOf(digest.at(-1));
+    const nonCanonicalDigest =
+      `${digest.slice(0, -1)}${alphabet[finalIndex + 1]}`;
+    expect(Buffer.from(nonCanonicalDigest, "base64url")).toEqual(
+      Buffer.from(digest, "base64url")
+    );
+    expect(emailTestCodeMatches(
+      generation,
+      code,
+      nonCanonicalDigest
+    )).toBe(false);
   });
 
   it("binds every admin idempotency action to its canonical normalized payload", () => {

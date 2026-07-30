@@ -511,7 +511,12 @@ export function emailTestCodeMatches(generation, code, expectedDigest) {
     "base64url"
   );
   const expected = Buffer.from(expectedDigest, "base64url");
-  return actual.byteLength === expected.byteLength && timingSafeEqual(actual, expected);
+  return (
+    actual.byteLength === 32
+    && expected.byteLength === actual.byteLength
+    && expected.toString("base64url") === expectedDigest
+    && timingSafeEqual(actual, expected)
+  );
 }
 
 export function nextTestWindow(now = new Date()) {
