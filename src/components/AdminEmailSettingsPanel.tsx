@@ -9,6 +9,8 @@ import {
   removeAdminEmailSettings,
   sendAdminEmailSettingsTest,
   stageAdminEmailSettings,
+  type AdminEmailSettingsSecurityMode,
+  type AdminEmailSettingsSmtpPort,
   type AdminEmailSettingsStatus
 } from "../services/adminEmailSettings";
 
@@ -22,6 +24,26 @@ type PendingAction =
   | "remove"
   | null;
 
+type SmtpPreset = "gmail" | "outlook" | "microsoft365";
+
+const smtpPresets = {
+  gmail: {
+    host: "smtp.gmail.com",
+    port: 465 as const,
+    securityMode: "implicit_tls" as const
+  },
+  outlook: {
+    host: "smtp-mail.outlook.com",
+    port: 587 as const,
+    securityMode: "starttls" as const
+  },
+  microsoft365: {
+    host: "smtp.office365.com",
+    port: 587 as const,
+    securityMode: "starttls" as const
+  }
+};
+
 const statusRefreshRequiredErrorCodes = new Set([
   "attempts_exhausted",
   "conflict",
@@ -29,7 +51,6 @@ const statusRefreshRequiredErrorCodes = new Set([
   "invalid_test_code",
   "network_error",
   "request_timeout",
-  "smtp_verification_failed",
   "test_expired"
 ]);
 
@@ -53,6 +74,14 @@ function formatStatusDate(value: string | null) {
   }).format(date);
 }
 
+function formatSecurityMode(value: AdminEmailSettingsSecurityMode | null) {
+  return value === "implicit_tls"
+    ? "Implicit TLS"
+    : value === "starttls"
+      ? "필수 STARTTLS"
+      : "";
+}
+
 function visibleError(caught: unknown) {
   if (caught instanceof AdminEmailSettingsError) {
     return caught.message;
@@ -62,8 +91,14 @@ function visibleError(caught: unknown) {
 
 export function AdminEmailSettingsPanel() {
   const [settings, setSettings] = useState<AdminEmailSettingsStatus | null>(null);
+  const [preset, setPreset] = useState<SmtpPreset>("gmail");
+  const [host, setHost] = useState(smtpPresets.gmail.host);
+  const [port, setPort] = useState<AdminEmailSettingsSmtpPort>(smtpPresets.gmail.port);
+  const [securityMode, setSecurityMode] = useState<AdminEmailSettingsSecurityMode>(
+    smtpPresets.gmail.securityMode
+  );
   const [username, setUsername] = useState("");
-  const [appPassword, setAppPassword] = useState("");
+  const [smtpPassword, setSmtpPassword] = useState("");
   const [replyTo, setReplyTo] = useState("");
   const [verificationCode, setVerificationCode] = useState("");
   const [pendingAction, setPendingAction] = useState<PendingAction>("status");
@@ -140,12 +175,15 @@ export function AdminEmailSettingsPanel() {
     let stageRequest: ReturnType<typeof stageAdminEmailSettings>;
     try {
       stageRequest = stageAdminEmailSettings({
+        host,
+        port,
+        securityMode,
         username,
-        appPassword,
+        password: smtpPassword,
         replyTo
       });
     } catch (caught) {
-      setAppPassword("");
+      setSmtpPassword("");
       showError(caught);
       setPendingAction(null);
       return;
@@ -153,7 +191,7 @@ export function AdminEmailSettingsPanel() {
 
     // The app password must leave React state immediately after it is handed
     // to the one-time request. It is never written to browser storage.
-    setAppPassword("");
+    setSmtpPassword("");
 
     try {
       const nextSettings = await stageRequest;
@@ -194,9 +232,15 @@ export function AdminEmailSettingsPanel() {
       }
       setSettings(nextSettings);
       setStatusRefreshRequired(false);
-      setNotice("설정한 Gmail 주소로 테스트 메일을 보냈습니다. 메일의 6자리 코드를 입력해주세요.");
+      setNotice("설정한 SMTP 사용자 이메일로 테스트 메일을 보냈습니다. 메일의 6자리 코드를 입력해주세요.");
       requestAnimationFrame(() => codeInputRef.current?.focus());
     } catch (caught) {
+      if (
+        caught instanceof AdminEmailSettingsError
+        && caught.code === "smtp_verification_failed"
+      ) {
+        setStatusRefreshRequired(true);
+      }
       showError(caught);
     } finally {
       if (mountedRef.current) {
@@ -313,7 +357,7 @@ export function AdminEmailSettingsPanel() {
   async function handleRemoveAll() {
     if (
       !window.confirm(
-        "저장된 Gmail SMTP 설정을 모두 삭제할까요?\n이 작업은 되돌릴 수 없으며 이메일 공유가 즉시 중지됩니다."
+        "저장된 SMTP 설정을 모두 삭제할까요?\n이 작업은 되돌릴 수 없으며 이메일 공유가 즉시 중지됩니다."
       )
     ) {
       return;
@@ -322,7 +366,7 @@ export function AdminEmailSettingsPanel() {
     setPendingAction("remove");
     setNotice(null);
     setError(null);
-    setAppPassword("");
+    setSmtpPassword("");
     setVerificationCode("");
 
     try {
@@ -355,6 +399,41 @@ export function AdminEmailSettingsPanel() {
     && pending.attemptsRemaining !== null
     && pending.attemptsRemaining > 0
   );
+  const isGmailTransport = host.trim().toLowerCase() === smtpPresets.gmail.host;
+  const isOutlookTransport = new Set([
+    smtpPresets.outlook.host,
+    "smtp.office365.com"
+  ]).has(host.trim().toLowerCase());
+  const passwordReady = isGmailTransport
+    ? (
+      /^[A-Za-z0-9]{16}$/u.test(smtpPassword)
+      || /^[A-Za-z0-9]{4}( [A-Za-z0-9]{4}){3}$/u.test(smtpPassword)
+    )
+    : smtpPassword.length >= 8 && smtpPassword.length <= 256;
+  const securityModeLabel = securityMode === "implicit_tls"
+    ? "Implicit TLS"
+    : "필수 STARTTLS";
+
+  function applyPreset(nextPreset: SmtpPreset) {
+    setPreset(nextPreset);
+    setSmtpPassword("");
+    const next = smtpPresets[nextPreset];
+    setHost(next.host);
+    setPort(next.port);
+    setSecurityMode(next.securityMode);
+  }
+
+  function updatePort(nextPort: AdminEmailSettingsSmtpPort) {
+    setPort(nextPort);
+    setSecurityMode(nextPort === 465 ? "implicit_tls" : "starttls");
+    setSmtpPassword("");
+  }
+
+  function updateSecurityMode(nextMode: AdminEmailSettingsSecurityMode) {
+    setSecurityMode(nextMode);
+    setPort(nextMode === "implicit_tls" ? 465 : 587);
+    setSmtpPassword("");
+  }
 
   return (
     <section
@@ -370,7 +449,7 @@ export function AdminEmailSettingsPanel() {
             <Mail size={20} />
             이메일 설정
           </h2>
-          <p>Secure Share 이메일·OTP를 위한 Gmail SMTP를 안전하게 설정합니다.</p>
+          <p>Secure Share 이메일·OTP를 위한 SMTP 연결을 안전하게 설정합니다.</p>
         </div>
         <button
           aria-label="이메일 설정 상태 새로고침"
@@ -387,8 +466,8 @@ export function AdminEmailSettingsPanel() {
       <div className="admin-email-security-note">
         <ShieldAlert aria-hidden="true" size={18} />
         <p>
-          QuickMemo 로그인 비밀번호가 아닌 <strong>Google 앱 비밀번호 16자리</strong>만 사용합니다.
-          입력값은 이 요청에만 사용되며 브라우저 저장소나 화면 상태 응답에 보관하지 않습니다.
+          QuickMemo 로그인 비밀번호가 아닌 <strong>메일 공급자가 허용한 SMTP 비밀번호 또는 앱 비밀번호</strong>를 사용합니다.
+          비밀번호는 이 요청에만 사용되며 브라우저 저장소나 화면 상태 응답에 보관하지 않습니다.
           브라우저나 확장 프로그램이 비밀번호 저장을 제안하면 거부하세요.
         </p>
       </div>
@@ -416,7 +495,19 @@ export function AdminEmailSettingsPanel() {
             {active?.present ? (
               <>
                 <dl>
-                  <div><dt>Gmail</dt><dd>{active.usernameMasked ?? "마스킹됨"}</dd></div>
+                  <div><dt>SMTP 계정</dt><dd>{active.usernameMasked ?? "마스킹됨"}</dd></div>
+                  {active.host && (
+                    <div>
+                      <dt>연결</dt>
+                      <dd>
+                        {active.host}
+                        {active.port ? `:${active.port}` : ""}
+                        {active.securityMode
+                          ? ` · ${formatSecurityMode(active.securityMode)}`
+                          : ""}
+                      </dd>
+                    </div>
+                  )}
                   <div><dt>Reply-To</dt><dd>{active.replyToMasked ?? "설정 안 함"}</dd></div>
                   <div><dt>검증 완료</dt><dd>{formatStatusDate(active.verifiedAt)}</dd></div>
                 </dl>
@@ -444,7 +535,19 @@ export function AdminEmailSettingsPanel() {
             {pending?.present ? (
               <>
                 <dl>
-                  <div><dt>Gmail</dt><dd>{pending.usernameMasked ?? "마스킹됨"}</dd></div>
+                  <div><dt>SMTP 계정</dt><dd>{pending.usernameMasked ?? "마스킹됨"}</dd></div>
+                  {pending.host && (
+                    <div>
+                      <dt>연결</dt>
+                      <dd>
+                        {pending.host}
+                        {pending.port ? `:${pending.port}` : ""}
+                        {pending.securityMode
+                          ? ` · ${formatSecurityMode(pending.securityMode)}`
+                          : ""}
+                      </dd>
+                    </div>
+                  )}
                   <div><dt>임시 저장</dt><dd>{formatStatusDate(pending.stagedAt)}</dd></div>
                   <div><dt>테스트 만료</dt><dd>{formatStatusDate(pending.testExpiresAt)}</dd></div>
                   <div><dt>남은 시도</dt><dd>{pending.attemptsRemaining ?? "확인 전"}</dd></div>
@@ -461,10 +564,10 @@ export function AdminEmailSettingsPanel() {
       )}
 
       <div className="admin-email-provider">
-        <strong>고정 보안 연결</strong>
-        <span>smtp.gmail.com</span>
-        <span>포트 465</span>
-        <span>Implicit TLS · TLS 1.2 이상</span>
+        <strong>선택한 보안 연결</strong>
+        <span>{host || "SMTP 서버 미입력"}</span>
+        <span>포트 {port}</span>
+        <span>{securityModeLabel} · TLS 1.2 이상</span>
       </div>
 
       <form
@@ -477,13 +580,69 @@ export function AdminEmailSettingsPanel() {
       >
         <div className="admin-section-header">
           <div>
-            <h3>{active?.present ? "새 Gmail 설정으로 변경" : "Gmail SMTP 등록"}</h3>
+            <h3>{active?.present ? "새 SMTP 설정으로 변경" : "SMTP 설정 등록"}</h3>
             <p>새 설정은 테스트 메일 인증 후 적용되며 실제 발송 여부는 운영 스위치 상태에 따릅니다.</p>
           </div>
         </div>
         <div className="admin-email-form-grid">
           <label>
-            Gmail 주소
+            빠른 설정
+            <select
+              disabled={mutationControlsDisabled}
+              onChange={(event) => applyPreset(event.target.value as SmtpPreset)}
+              value={preset}
+            >
+              <option value="gmail">Gmail / Google Workspace</option>
+              <option value="outlook">Outlook.com</option>
+              <option value="microsoft365">Microsoft 365 비즈니스·학교</option>
+            </select>
+          </label>
+          <label>
+            SMTP 서버
+            <select
+              disabled={mutationControlsDisabled}
+              onChange={(event) => {
+                const nextHost = event.target.value;
+                const nextPreset = Object.entries(smtpPresets).find(
+                  ([, configuration]) => configuration.host === nextHost
+                )?.[0] as SmtpPreset | undefined;
+                if (nextPreset) {
+                  applyPreset(nextPreset);
+                }
+              }}
+              value={host}
+            >
+              <option value="smtp.gmail.com">smtp.gmail.com</option>
+              <option value="smtp-mail.outlook.com">smtp-mail.outlook.com</option>
+              <option value="smtp.office365.com">smtp.office365.com</option>
+            </select>
+          </label>
+          <label>
+            SMTP 포트
+            <select
+              disabled={mutationControlsDisabled}
+              onChange={(event) => updatePort(Number(event.target.value) as AdminEmailSettingsSmtpPort)}
+              value={port}
+            >
+              {isGmailTransport && <option value={465}>465</option>}
+              <option value={587}>587</option>
+            </select>
+          </label>
+          <label>
+            TLS 보안 방식
+            <select
+              disabled={mutationControlsDisabled}
+              onChange={(event) => updateSecurityMode(event.target.value as AdminEmailSettingsSecurityMode)}
+              value={securityMode}
+            >
+              {isGmailTransport && (
+                <option value="implicit_tls">Implicit TLS (포트 465)</option>
+              )}
+              <option value="starttls">필수 STARTTLS (포트 587)</option>
+            </select>
+          </label>
+          <label>
+            SMTP 사용자 이메일
             <input
               autoCapitalize="none"
               autoComplete="off"
@@ -491,7 +650,7 @@ export function AdminEmailSettingsPanel() {
               inputMode="email"
               maxLength={254}
               onChange={(event) => setUsername(event.target.value)}
-              placeholder="example@gmail.com"
+              placeholder="name@school.ac.kr"
               required
               spellCheck={false}
               type="email"
@@ -499,23 +658,25 @@ export function AdminEmailSettingsPanel() {
             />
           </label>
           <label>
-            Google 앱 비밀번호
+            SMTP 비밀번호 / 앱 비밀번호
             <input
               aria-describedby="admin-email-app-password-help"
               autoCapitalize="none"
               autoComplete="new-password"
               data-1p-ignore="true"
               data-bwignore="true"
+              data-form-type="other"
               data-lpignore="true"
               disabled={mutationControlsDisabled}
-              maxLength={24}
-              minLength={16}
-              onChange={(event) => setAppPassword(event.target.value)}
-              placeholder="16자리 앱 비밀번호"
+              maxLength={256}
+              minLength={isGmailTransport ? 16 : 8}
+              name="quickmemo-smtp-one-time-secret"
+              onChange={(event) => setSmtpPassword(event.target.value)}
+              placeholder={isGmailTransport ? "Google 앱 비밀번호 16자리" : "SMTP 비밀번호 또는 앱 비밀번호"}
               required
               spellCheck={false}
               type="password"
-              value={appPassword}
+              value={smtpPassword}
             />
           </label>
           <label className="admin-email-reply-to">
@@ -534,10 +695,23 @@ export function AdminEmailSettingsPanel() {
             />
           </label>
         </div>
-        <p className="admin-email-field-help" id="admin-email-app-password-help">
-          Google 계정의 2단계 인증에서 발급한 앱 비밀번호를 사용하세요. QuickMemo 계정 비밀번호는 입력하지 마세요.
+        <p className="admin-email-field-help">
+          서버 측 요청 위조와 내부망 접근을 막기 위해 검증된 Gmail·Outlook SMTP 서버 3개만 선택할 수 있습니다.
         </p>
-        <button disabled={mutationControlsDisabled || appPassword.length < 16} type="submit">
+        <p className="admin-email-field-help" id="admin-email-app-password-help">
+          {isGmailTransport
+            ? "Gmail과 Google Workspace는 2단계 인증에서 발급한 Google 앱 비밀번호 16자리를 사용하세요."
+            : "메일 공급자가 SMTP 인증에 허용한 비밀번호 또는 전용 앱 비밀번호를 사용하세요."}
+          {" "}QuickMemo 로그인 비밀번호는 입력하지 마세요.
+        </p>
+        {isOutlookTransport && (
+          <p className="admin-email-field-help" role="note">
+            Outlook.com 사전 설정은 smtp-mail.outlook.com:587과 필수 STARTTLS를 사용합니다.
+            Microsoft 365 비즈니스·학교 계정은 별도 사전 설정의 smtp.office365.com을 선택하세요.
+            이 화면은 OAuth2(Modern Auth)를 지원하지 않으므로 SMTP AUTH가 비활성화됐거나 Modern Auth가 필수인 계정은 연결할 수 없습니다.
+          </p>
+        )}
+        <button disabled={mutationControlsDisabled || !passwordReady} type="submit">
           {pendingAction === "stage" ? "안전하게 저장 중" : "새 설정 임시 저장"}
         </button>
       </form>
@@ -547,7 +721,7 @@ export function AdminEmailSettingsPanel() {
           <div>
             <h3 id="admin-email-verification-title">테스트 메일 인증</h3>
             <p>
-              테스트 메일은 위에 표시된 설정 Gmail 주소로만 전송됩니다. 코드는 6자리이며 제한 시간과 입력 횟수가 있습니다.
+              테스트 메일은 위에 표시된 SMTP 사용자 이메일로만 전송됩니다. 코드는 6자리이며 제한 시간과 입력 횟수가 있습니다.
             </p>
           </div>
           <button
@@ -556,7 +730,7 @@ export function AdminEmailSettingsPanel() {
             onClick={() => void handleSendTest()}
             type="button"
           >
-            {pendingAction === "send-test" ? "테스트 발송 중" : "내 Gmail로 테스트 발송"}
+            {pendingAction === "send-test" ? "테스트 발송 중" : "설정 주소로 테스트 발송"}
           </button>
           {pendingTestReady ? (
             <form onSubmit={handleConfirmTest}>

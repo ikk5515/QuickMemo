@@ -362,7 +362,7 @@ export function emailSettingsSendingRecoveryState(
     throw new HttpError(
       503,
       "email_settings_unavailable",
-      "Pending Gmail test reservation is invalid"
+      "Pending SMTP test reservation is invalid"
     );
   }
   const deadline = Date.parse(pending.testExpiresAt ?? "");
@@ -374,7 +374,7 @@ export function emailSettingsSendingRecoveryState(
     throw new HttpError(
       503,
       "email_settings_unavailable",
-      "Pending Gmail test deadline is invalid"
+      "Pending SMTP test deadline is invalid"
     );
   }
   return deadline <= nowMilliseconds ? "expired" : "in_flight";
@@ -645,9 +645,38 @@ async function handleStatus(response, id, user) {
   );
 }
 
+function smtpVerificationErrorCode(error) {
+  let reasonCode = "";
+  try {
+    reasonCode =
+      typeof error?.providerReasonCode === "string"
+        ? error.providerReasonCode
+        : "";
+  } catch {
+    reasonCode = "";
+  }
+  if (reasonCode === "auth_error") {
+    return "smtp_auth_failed";
+  }
+  if (reasonCode === "tls_error") {
+    return "smtp_tls_failed";
+  }
+  if (new Set([
+    "connection_error",
+    "timeout",
+    "temporary_provider_error"
+  ]).has(reasonCode)) {
+    return "smtp_connection_failed";
+  }
+  return "smtp_verification_failed";
+}
+
 async function handleStage(request, response, id, user, body) {
   assertOnlyKeys(body, [
     "action",
+    "host",
+    "port",
+    "securityMode",
     "username",
     "appPassword",
     "replyTo",
@@ -687,11 +716,11 @@ async function handleStage(request, response, id, user, body) {
       environment: decrypted.environment
     });
     await adapter.verifyConfiguration();
-  } catch {
+  } catch (error) {
     throw new HttpError(
       422,
-      "smtp_verification_failed",
-      "Gmail SMTP configuration verification failed"
+      smtpVerificationErrorCode(error),
+      "SMTP configuration verification failed"
     );
   }
   const document = await commitMutation(
@@ -865,7 +894,7 @@ async function handleSendTest(request, response, id, user, body) {
     });
     await adapter.send({
       text:
-        "QuickMemo Secure Share Gmail 설정 확인 코드입니다.\n\n"
+        "QuickMemo Secure Share SMTP 설정 확인 코드입니다.\n\n"
         + `확인 코드: ${code}\n`
         + "이 코드는 10분 후 만료됩니다.",
       timeoutMilliseconds: 10_000,
@@ -893,7 +922,7 @@ async function handleSendTest(request, response, id, user, body) {
     throw new HttpError(
       503,
       "smtp_verification_failed",
-      "Gmail SMTP test delivery failed"
+      "SMTP test delivery failed"
     );
   }
   const document = await finalizeTestState(

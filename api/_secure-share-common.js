@@ -206,6 +206,11 @@ function environmentValue(environment, name) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function rawEnvironmentValue(environment, name) {
+  const value = environment?.[name];
+  return typeof value === "string" ? value : "";
+}
+
 function configuredBoolean(environment, name) {
   return environmentValue(environment, name).toLowerCase() === "true";
 }
@@ -221,16 +226,105 @@ function emailConfigurationError() {
   return new HttpError(
     503,
     "email_feature_unavailable",
-    "Gmail SMTP configuration is unavailable",
+    "SMTP configuration is unavailable",
     { expose: false }
   );
 }
 
+const prohibitedSmtpHostSuffixes = Object.freeze([
+  ".example",
+  ".home",
+  ".internal",
+  ".invalid",
+  ".lan",
+  ".local",
+  ".localhost",
+  ".test"
+]);
+const trustedSmtpTransportProfiles = new Map([
+  ["smtp.gmail.com", new Map([
+    [465, "implicit_tls"],
+    [587, "starttls"]
+  ])],
+  ["smtp-mail.outlook.com", new Map([
+    [587, "starttls"]
+  ])],
+  ["smtp.office365.com", new Map([
+    [587, "starttls"]
+  ])]
+]);
+
+export function normalizeSmtpHost(value) {
+  if (typeof value !== "string") {
+    throw new TypeError("Invalid SMTP host");
+  }
+  const trimmed = value.trim().normalize("NFKC").toLowerCase();
+  const asciiHost = domainToASCII(trimmed);
+  if (
+    !asciiHost
+    || asciiHost.length > 253
+    || asciiHost !== asciiHost.toLowerCase()
+    || !asciiHost.includes(".")
+    || asciiHost.endsWith(".")
+    || isIP(asciiHost) !== 0
+    || prohibitedSmtpHostSuffixes.some((suffix) => (
+      asciiHost === suffix.slice(1) || asciiHost.endsWith(suffix)
+    ))
+    || asciiHost.split(".").some((label) => (
+      !/^(?!-)[a-z0-9-]{1,63}(?<!-)$/u.test(label)
+    ))
+  ) {
+    throw new TypeError("Invalid SMTP host");
+  }
+  return asciiHost;
+}
+
+export function normalizeSmtpTransport(hostValue, portValue, securityModeValue) {
+  const host = normalizeSmtpHost(hostValue);
+  const port = Number(portValue);
+  const securityMode = typeof securityModeValue === "string"
+    ? securityModeValue
+    : "";
+  if (
+    !Number.isSafeInteger(port)
+    || trustedSmtpTransportProfiles.get(host)?.get(port) !== securityMode
+  ) {
+    throw new TypeError("Unsupported SMTP transport");
+  }
+  return Object.freeze({ host, port, securityMode });
+}
+
+function validSmtpPassword(value) {
+  if (
+    typeof value !== "string"
+    || value.length < 8
+    || value.length > 256
+    || Buffer.byteLength(value, "utf8") > 512
+  ) {
+    return false;
+  }
+  return !Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+  });
+}
+
 export function gmailSmtpConfiguration(environment = process.env) {
-  const host = environmentValue(environment, "SHARE_SMTP_HOST").toLowerCase();
-  const port = Number.parseInt(environmentValue(environment, "SHARE_SMTP_PORT"), 10);
+  let transport;
+  const portText = environmentValue(environment, "SHARE_SMTP_PORT");
+  const port = /^\d{1,5}$/u.test(portText) ? Number(portText) : Number.NaN;
   const secure = configuredBoolean(environment, "SHARE_SMTP_SECURE");
   const requireTls = configuredBoolean(environment, "SHARE_SMTP_REQUIRE_TLS");
+  try {
+    transport = normalizeSmtpTransport(
+      environmentValue(environment, "SHARE_SMTP_HOST"),
+      port,
+      port === 465 && secure ? "implicit_tls" : "starttls"
+    );
+  } catch {
+    throw emailConfigurationError();
+  }
+  const { host, securityMode } = transport;
   let username;
   let replyTo = "";
   try {
@@ -240,7 +334,10 @@ export function gmailSmtpConfiguration(environment = process.env) {
   } catch {
     throw emailConfigurationError();
   }
-  const appPassword = environmentValue(environment, "SHARE_SMTP_APP_PASSWORD");
+  const appPassword = rawEnvironmentValue(
+    environment,
+    "SHARE_SMTP_APP_PASSWORD"
+  );
   const fromAddress = configuredEmailSenderAddress(
     environmentValue(environment, "SHARE_EMAIL_FROM")
   );
@@ -248,14 +345,15 @@ export function gmailSmtpConfiguration(environment = process.env) {
   const gmailProvider =
     environmentValue(environment, "SHARE_EMAIL_PROVIDER").toLowerCase() === "gmail_smtp";
   const validTransport =
-    host === "smtp.gmail.com"
-    && (
-      (port === 465 && secure)
-      || (port === 587 && !secure && requireTls)
-    );
+    (securityMode === "implicit_tls" && secure && !requireTls)
+    || (securityMode === "starttls" && !secure && requireTls);
   const validCredentials =
-    username.endsWith("@gmail.com")
-    && /^[A-Za-z0-9]{16}$/u.test(appPassword);
+    Boolean(username)
+    && (
+      host === "smtp.gmail.com"
+        ? /^[A-Za-z0-9]{16}$/u.test(appPassword)
+        : validSmtpPassword(appPassword)
+    );
   const validSender =
     fromName === "QuickMemo"
     && fromAddress === username
@@ -298,6 +396,7 @@ export function gmailSmtpConfiguration(environment = process.env) {
     port,
     replyTo,
     requireTls,
+    securityMode,
     secure,
     socketTimeout: configuredBoundedInteger(
       environment,

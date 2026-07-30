@@ -1,4 +1,7 @@
 export interface SecureShareEmailSettingsInput {
+  host?: string;
+  port?: 465 | 587;
+  securityMode?: "implicit_tls" | "starttls";
   username: string;
   appPassword: string;
   replyTo?: string;
@@ -11,6 +14,9 @@ export interface SecureShareEmailRuntimeSnapshot {
   provider: "" | "gmail_smtp" | "resend";
   reason: string;
   configuration: null | {
+    host: string;
+    port: 465 | 587;
+    securityMode: "implicit_tls" | "starttls";
     username: string;
     fromAddress: string;
     replyTo: string;
@@ -60,6 +66,10 @@ export function emailSettingsTestFailureDisposition(
 };
 
 export function normalizeGmailSettingsInput(
+  input: SecureShareEmailSettingsInput
+): Readonly<Required<SecureShareEmailSettingsInput>>;
+
+export function normalizeSmtpSettingsInput(
   input: SecureShareEmailSettingsInput
 ): Readonly<Required<SecureShareEmailSettingsInput>>;
 
