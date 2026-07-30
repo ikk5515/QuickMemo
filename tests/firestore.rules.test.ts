@@ -3048,6 +3048,19 @@ describeRules("firestore security rules", () => {
       await setDoc(doc(db, "publicShareEmailProviderHealth/gmail-smtp"), {
         status: "healthy"
       });
+      await setDoc(doc(db, "secureShareEmailSettings/current"), {
+        enabled: false,
+        schemaVersion: 1
+      });
+      await setDoc(doc(db, "secureShareEmailAdminAudit/event-a"), {
+        action: "stage"
+      });
+      await setDoc(doc(db, "secureShareEmailAdminRateLimits/rate-a"), {
+        count: 1
+      });
+      await setDoc(doc(db, "secureShareEmailAdminIdempotency/request-a"), {
+        action: "stage"
+      });
       await setDoc(doc(db, "publicShareCopyGrantRequests/request-a"), {
         ownerUid: "user-a",
         requesterUid: "user-b",
@@ -3117,6 +3130,10 @@ describeRules("firestore security rules", () => {
       "publicShareEmailDeliveries/delivery-a",
       "publicShareEmailSendAttempts/attempt-a",
       "publicShareEmailProviderHealth/gmail-smtp",
+      "secureShareEmailSettings/current",
+      "secureShareEmailAdminAudit/event-a",
+      "secureShareEmailAdminRateLimits/rate-a",
+      "secureShareEmailAdminIdempotency/request-a",
       "publicShareCopyGrantRequests/request-a",
       "publicShareSourceGuards/source-a",
       "publicShareUnlockGrants/grant-a",

@@ -8,6 +8,7 @@ import {
 } from "./shareLoginReturn";
 
 const shareId = "share_id-1234567890";
+const compactToken = "Abcdefghijklmnopqrstuvwx";
 const contentKey = "A".repeat(43);
 
 describe("secure share login return handoff", () => {
@@ -52,8 +53,31 @@ describe("secure share login return handoff", () => {
     });
     expect(parseSecureShareContentKeyFragment(`#key=${contentKey}&next=/admin`)).toBeNull();
     expect(parseSecureShareContentKeyFragment(`#other=${contentKey}`)).toBeNull();
+    expect(parseSecureShareContentKeyFragment(`#${contentKey}`)).toBeNull();
+    expect(parseSecureShareContentKeyFragment(`#key=${contentKey.replace("A", "%41")}`)).toBeNull();
     expect(parseSecureShareContentKeyFragment("#key=short")).toBeNull();
     expect(parseSecureShareContentKeyFragment(`?key=${contentKey}`)).toBeNull();
+  });
+
+  it("keeps the compact bare fragment in memory-only router state", () => {
+    const state = createSecureShareLoginReturnState(
+      `/s/${compactToken}`,
+      `#${contentKey}`
+    );
+
+    expect(state).toEqual({
+      kind: "secure_share_v2",
+      returnTo: `/s/${compactToken}`,
+      shareFragment: `#${contentKey}`
+    });
+    expect(secureShareLoginDestination(state)).toEqual({
+      pathname: `/s/${compactToken}`,
+      hash: `#${contentKey}`
+    });
+    expect(createSecureShareLoginReturnState(
+      `/s/${compactToken}`,
+      `#key=${contentKey}`
+    )).toBeNull();
   });
 
   it("rejects unknown or attacker-controlled history-state fields", () => {

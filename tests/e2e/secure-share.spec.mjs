@@ -1,4 +1,4 @@
-/* global window */
+/* global URL, window */
 
 import { expect, test } from "@playwright/test";
 import {
@@ -234,6 +234,60 @@ test("global one-time share survives same-session refresh and rejects a new cont
   await expectCleanRuntime(secondDiagnostics, fixture);
   await secondContext.close();
   await expectCleanRuntime(diagnostics, fixture);
+});
+
+test("existing long v2 standard URL decrypts and preserves one-time consumption", async ({
+  browser,
+  page,
+  request
+}) => {
+  const fixture = await seedScenario(request, "standard-v2-one-time");
+  const diagnostics = observePage(page);
+
+  expect(fixture.shareId).toMatch(/^ss2_[A-Za-z0-9_-]{25,124}$/u);
+  expect(fixture.url).toBe(
+    `/share/${fixture.shareId}#key=${fixture.contentKey}`
+  );
+
+  await page.goto(fixture.url);
+  await expect(page).toHaveURL((url) =>
+    url.pathname === `/share/${fixture.shareId}`
+    && url.search === ""
+    && url.hash === `#key=${fixture.contentKey}`
+  );
+  await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible({
+    timeout: 35_000
+  });
+  await expect(page.getByText(fixture.bodyText)).toBeVisible();
+
+  const consumed = await scenarioState(request, fixture);
+  expect(consumed.share.consumedAt).not.toBeNull();
+  expect(consumed.share.successfulAccessCount).toBe(1);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: fixture.title })).toBeVisible();
+
+  const secondContext = await browser.newContext();
+  const secondPage = await secondContext.newPage();
+  const secondDiagnostics = observePage(secondPage);
+  await secondPage.goto(fixture.url);
+  await expect(
+    secondPage.getByRole("heading", { name: "이 공유 링크를 사용할 수 없습니다." })
+  ).toBeVisible();
+  await expectCleanRuntime(secondDiagnostics, fixture);
+  await secondContext.close();
+
+  await expectCleanRuntime(diagnostics, fixture);
+  const successfulActions = new Set(
+    diagnostics.apiPayloads
+      .filter(({ status }) => status >= 200 && status < 300)
+      .map(({ url }) => new URL(url).searchParams.get("action"))
+  );
+  expect(successfulActions.has("metadata")).toBe(true);
+  expect(successfulActions.has("access")).toBe(true);
+  expect(successfulActions.has("content")).toBe(true);
+  const finalState = await scenarioState(request, fixture);
+  expect(finalState.share.successfulAccessCount).toBe(1);
 });
 
 test("download-disabled attachment hides controls, previews safely, and blocks tampering", async ({

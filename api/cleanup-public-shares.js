@@ -54,6 +54,21 @@ const secureShareGlobalRetentionCollections = [
     allDescendants: false,
     collectionId: "publicShareEmailQuotaBuckets",
     counterName: "secureShareEmailQuotaBucketsDeleted"
+  },
+  {
+    allDescendants: false,
+    collectionId: "secureShareEmailAdminIdempotency",
+    counterName: "secureShareRateLimitsDeleted"
+  },
+  {
+    allDescendants: false,
+    collectionId: "secureShareEmailAdminRateLimits",
+    counterName: "secureShareRateLimitsDeleted"
+  },
+  {
+    allDescendants: false,
+    collectionId: "secureShareEmailAdminAudit",
+    counterName: "secureShareAuditEventsDeleted"
   }
 ];
 const secureShareChildStateCollections = [
@@ -2104,6 +2119,108 @@ function cleanupCanContinue(config, stats) {
   return config.deadlineAt === stats.deadlineAt && cleanupStatsCanContinue(stats);
 }
 
+async function discardExpiredPendingEmailSettings(config, stats) {
+  const limit = Math.min(
+    10,
+    Math.floor(
+      Math.max(
+        0,
+        stats.maxDocumentDeletes - stats.documentDeletesAttempted
+      ) / 4
+    )
+  );
+  if (limit <= 0 || !cleanupCanContinue(config, stats)) {
+    return;
+  }
+  const documents = await queryExpiredSecureShareDocuments({
+    accessToken: config.accessToken,
+    collectionId: "secureShareEmailSettings",
+    fieldPath: "pending.expiresAt",
+    limit,
+    nowIso: config.nowIso,
+    projectId: config.projectId
+  });
+  if (!documents.length) {
+    return;
+  }
+  for (const candidate of documents) {
+    if (!cleanupCanContinue(config, stats)) {
+      return;
+    }
+    const current = await getDocumentByName(
+      candidate.name,
+      config.accessToken,
+      [
+        "pending.expiresAt",
+        "pending.testState",
+        "pending.testQuotaState",
+        "pending.testQuotaBucketIds"
+      ]
+    );
+    const pendingFields = current?.fields?.pending?.mapValue?.fields;
+    const pending = pendingFields ? { fields: pendingFields } : null;
+    const expiresAt = pending?.fields?.expiresAt?.timestampValue;
+    if (
+      !current?.updateTime
+      || typeof expiresAt !== "string"
+      || !Number.isFinite(Date.parse(expiresAt))
+      || Date.parse(expiresAt) > Date.parse(config.nowIso)
+    ) {
+      continue;
+    }
+    const bucketIds = stringArrayField(pending, "testQuotaBucketIds");
+    const sending = stringField(pending, "testState") === "sending";
+    const quotaReserved =
+      stringField(pending, "testQuotaState") === "reserved";
+    if (sending && (!quotaReserved || bucketIds.length !== 3)) {
+      throw new Error("Invalid pending Gmail test quota reservation");
+    }
+    const hasUnresolvedReservation =
+      sending
+      && quotaReserved
+      && bucketIds.length === 3;
+    const writes = [];
+    if (hasUnresolvedReservation) {
+      const quotaDocuments = await Promise.all(bucketIds.map((bucketId) =>
+        getDocumentByName(
+          documentNameForPath(
+            config.projectId,
+            `publicShareEmailQuotaBuckets/${bucketId}`
+          ),
+          config.accessToken
+        )
+      ));
+      writes.push(...quotaDocuments.map((quotaDocument, index) =>
+        emailQuotaReconciliationWrite(
+          quotaDocument,
+          bucketIds[index],
+          config
+        )
+      ));
+    }
+    writes.push({
+      update: {
+        name: current.name,
+        fields: {}
+      },
+      updateMask: { fieldPaths: ["pending"] },
+      currentDocument: { updateTime: current.updateTime }
+    });
+    await firestoreRequest(
+      firestoreCommitPathFromDocumentName(current.name),
+      config.accessToken,
+      {
+        method: "POST",
+        body: JSON.stringify({ writes })
+      }
+    );
+    stats.documentDeletesAttempted += writes.length;
+    if (hasUnresolvedReservation) {
+      stats.secureShareEmailReservationsReconciled += 1;
+    }
+  }
+}
+
 function secureShareRetentionQueues() {
   return [
     ...secureShareRootRetentionCollections
@@ -2592,6 +2709,7 @@ async function cleanupSecureShareRetentionQueue(queue, limit, config, stats) {
 }
 
 async function cleanupExpiredSecureShareState(config, stats) {
+  await discardExpiredPendingEmailSettings(config, stats);
   const deliveryBudget = Math.min(
     secureShareEmailDeliveryCleanupLimit,
     Math.max(0, stats.maxDocumentDeletes - stats.documentDeletesAttempted)

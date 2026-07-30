@@ -4837,6 +4837,322 @@ textarea {
   grid-column: 1 / -1;
 }
 
+.admin-email-settings-panel {
+  box-shadow: 0 14px 38px rgb(20 33 31 / 6%);
+  display: grid;
+  gap: 18px;
+  margin-inline: auto;
+  max-width: 1080px;
+  width: 100%;
+}
+
+.admin-email-settings-heading {
+  align-items: flex-start;
+}
+
+.admin-email-settings-heading > div,
+.admin-email-settings-form .admin-section-header > div {
+  display: grid;
+  gap: 6px;
+}
+
+.admin-email-settings-heading h2,
+.admin-email-settings-form h3,
+.admin-email-settings-heading p,
+.admin-email-settings-form .admin-section-header p {
+  margin: 0;
+}
+
+.admin-email-settings-heading p,
+.admin-email-settings-form .admin-section-header p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.admin-email-security-note {
+  align-items: flex-start;
+  background: color-mix(in srgb, var(--blue) 7%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--blue) 22%, var(--line));
+  border-radius: var(--radius-card);
+  color: var(--ink);
+  display: flex;
+  gap: 10px;
+  padding: 13px 14px;
+}
+
+.admin-email-security-note > svg {
+  color: var(--blue);
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.admin-email-security-note p,
+.admin-email-loading {
+  line-height: 1.6;
+  margin: 0;
+}
+
+.admin-email-status-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.admin-email-status-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  display: grid;
+  gap: 13px;
+  min-width: 0;
+  padding: 15px;
+}
+
+.admin-email-status-card.pending {
+  background: color-mix(in srgb, var(--panel) 92%, var(--blue));
+}
+
+.admin-email-status-card > header {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.admin-email-status-card > header > div {
+  display: grid;
+  gap: 7px;
+}
+
+.admin-email-status-card h3,
+.admin-email-status-card p {
+  margin: 0;
+}
+
+.admin-email-status-card > header > svg {
+  color: var(--teal);
+  flex: 0 0 auto;
+}
+
+.admin-email-status-badge {
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 900;
+  justify-self: start;
+  line-height: 1;
+  padding: 5px 8px;
+}
+
+.admin-email-status-badge.enabled {
+  background: color-mix(in srgb, var(--teal) 12%, var(--panel));
+  border-color: color-mix(in srgb, var(--teal) 24%, var(--line));
+  color: var(--teal);
+}
+
+.admin-email-status-badge.disabled,
+.admin-email-status-badge.empty {
+  background: var(--panel);
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+.admin-email-status-badge.pending {
+  background: color-mix(in srgb, var(--blue) 12%, var(--panel));
+  border-color: color-mix(in srgb, var(--blue) 24%, var(--line));
+  color: var(--blue);
+}
+
+.admin-email-status-card dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.admin-email-status-card dl > div {
+  align-items: baseline;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(88px, 0.35fr) minmax(0, 1fr);
+}
+
+.admin-email-status-card dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.admin-email-status-card dd {
+  font-weight: 800;
+  margin: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.admin-email-preserve-note {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  padding-top: 10px;
+}
+
+.admin-email-provider {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 11px 13px;
+}
+
+.admin-email-provider strong {
+  margin-right: 4px;
+}
+
+.admin-email-provider span {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  padding: 5px 8px;
+}
+
+.admin-email-settings-form,
+.admin-email-verification,
+.admin-email-danger-zone {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.admin-email-settings-form {
+  background: var(--panel);
+}
+
+.admin-email-form-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.admin-email-form-grid label,
+.admin-email-verification label {
+  color: var(--muted);
+  display: grid;
+  font-size: 12px;
+  font-weight: 900;
+  gap: 6px;
+}
+
+.admin-email-form-grid label > span {
+  font-weight: 750;
+}
+
+.admin-email-settings-panel input:disabled {
+  -webkit-text-fill-color: var(--color-text-secondary);
+  background: var(--color-surface-muted);
+  border-color: color-mix(in srgb, var(--line) 82%, var(--ink));
+  color: var(--color-text-secondary);
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.admin-email-settings-panel input:disabled::placeholder {
+  color: var(--color-text-secondary);
+  opacity: 1;
+}
+
+.admin-email-form-grid .admin-email-reply-to {
+  grid-column: 1 / -1;
+}
+
+.admin-email-field-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: -3px 0 0;
+}
+
+.admin-email-settings-form > button {
+  justify-self: start;
+}
+
+.admin-email-verification {
+  background: color-mix(in srgb, var(--teal) 5%, var(--panel));
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.admin-email-verification > div {
+  display: grid;
+  gap: 5px;
+}
+
+.admin-email-verification h3,
+.admin-email-verification p {
+  margin: 0;
+}
+
+.admin-email-verification p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.admin-email-verification > form {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(180px, 280px) auto;
+}
+
+.admin-email-verification-wait {
+  grid-column: 1 / -1;
+}
+
+.admin-email-verification > .danger {
+  justify-self: start;
+}
+
+.admin-email-feedback {
+  margin: 0;
+}
+
+.admin-email-feedback:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--teal) 40%, transparent);
+  outline-offset: 3px;
+}
+
+.admin-email-danger-zone {
+  align-items: center;
+  background: color-mix(in srgb, var(--coral) 4%, var(--panel));
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.admin-email-danger-zone > div {
+  display: grid;
+  gap: 5px;
+}
+
+.admin-email-danger-zone h3,
+.admin-email-danger-zone p {
+  margin: 0;
+}
+
+.admin-email-danger-zone p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .admin-user-toolbar {
   align-items: end;
   display: grid;
@@ -13296,6 +13612,41 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
 }
 
 @media (max-width: 700px) {
+  .admin-email-settings-heading {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .admin-email-settings-heading > button {
+    justify-self: stretch;
+  }
+
+  .admin-email-status-grid,
+  .admin-email-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-email-form-grid .admin-email-reply-to {
+    grid-column: auto;
+  }
+
+  .admin-email-verification,
+  .admin-email-danger-zone {
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-email-verification > form {
+    grid-column: auto;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-email-verification > button,
+  .admin-email-danger-zone > button,
+  .admin-email-settings-form > button {
+    justify-self: stretch;
+  }
+
   .secure-public-share-document-header {
     display: grid;
   }
@@ -13323,6 +13674,25 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
 }
 
 @media (max-width: 440px) {
+  .admin-email-settings-panel {
+    gap: 14px;
+  }
+
+  .admin-email-provider {
+    align-items: stretch;
+    display: grid;
+  }
+
+  .admin-email-status-card dl > div {
+    align-items: start;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+  }
+
+  .admin-email-status-card dd {
+    text-align: left;
+  }
+
   .secure-public-share-access {
     border-left: 0;
     border-radius: 0;

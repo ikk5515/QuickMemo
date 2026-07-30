@@ -54,6 +54,11 @@ export function apiPath(action, shareId, query = {}) {
 
 export async function openV2Share(page, fixture) {
   await page.goto(fixture.url);
+  await expect(page).toHaveURL((url) =>
+    url.pathname === `/s/${fixture.shareId.slice(4)}`
+    && url.search === ""
+    && url.hash === `#${fixture.contentKey}`
+  );
   await expect(
     page.locator(
       ".secure-public-share-access, .secure-public-share-viewer, .secure-public-share-state.error"

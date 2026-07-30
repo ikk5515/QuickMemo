@@ -61,6 +61,7 @@ function renderLogin(initialEntry: Parameters<typeof MemoryRouter>[0]["initialEn
         <Route path="/login" element={<LoginPage />} />
         <Route path="/library" element={<span>자료실</span>} />
         <Route path="/share/:shareId" element={<span>보안 공유</span>} />
+        <Route path="/s/:compactToken" element={<span>보안 공유</span>} />
         <Route path="/home" element={<span>홈</span>} />
       </Routes>
     </MemoryRouter>
@@ -180,6 +181,31 @@ describe("LoginPage library capture handoff", () => {
     await waitFor(() => {
       expect(screen.getByTestId("location")).toHaveTextContent(
         `/share/${shareId}#key=${contentKey}`
+      );
+    });
+    expect(screen.getByTestId("location-state")).toBeEmptyDOMElement();
+  });
+
+  it("returns a validated compact bare fragment from Router state after login", async () => {
+    const user = userEvent.setup();
+    const compactToken = "Abcdefghijklmnopqrstuvwx";
+    const contentKey = "D".repeat(43);
+    renderLogin([{
+      pathname: "/login",
+      state: {
+        kind: "secure_share_v2",
+        returnTo: `/s/${compactToken}`,
+        shareFragment: `#${contentKey}`
+      }
+    }]);
+
+    await user.click(await screen.findByRole("button", { name: "사용자 사용자 선택" }));
+    await user.type(screen.getByLabelText("비밀번호"), "password");
+    await user.click(screen.getByRole("button", { name: "로그인" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("location")).toHaveTextContent(
+        `/s/${compactToken}#${contentKey}`
       );
     });
     expect(screen.getByTestId("location-state")).toBeEmptyDOMElement();

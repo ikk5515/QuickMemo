@@ -606,7 +606,10 @@ function assertIdToken(idToken: string | undefined) {
 
 function assertNoContentKey(value: unknown, seen = new WeakSet<object>(), field = "request") {
   if (typeof value === "string") {
-    if (/(?:#|%23|[?&])key(?:=|%3d)/iu.test(value)) {
+    if (
+      /(?:#|%23|[?&])key(?:=|%3d)/iu.test(value)
+      || /(?:#|%23)[A-Za-z0-9_-]{43}(?:$|[?&])/iu.test(value)
+    ) {
       throw new SecureShareApiError(
         "content_key_blocked",
         "공유 콘텐츠 키는 서버 요청에 포함할 수 없습니다."

@@ -37,6 +37,7 @@ Object.assign(process.env, {
   VITE_USE_FIREBASE_EMULATORS: "true",
   VITE_E2E_FIRESTORE_FORCE_LONG_POLLING: "true",
   VITE_E2E_NAVIGATION_BRIDGE: "true",
+  VITE_SECURE_SHARE_COMPACT_URL_ENABLED: "true",
   VITE_SECURE_SHARE_V2_ENABLED: "true"
 });
 
@@ -85,6 +86,7 @@ Object.assign(process.env, {
   VITE_USE_FIREBASE_EMULATORS: "true",
   VITE_E2E_FIRESTORE_FORCE_LONG_POLLING: "true",
   VITE_E2E_NAVIGATION_BRIDGE: "true",
+  VITE_SECURE_SHARE_COMPACT_URL_ENABLED: "true",
   VITE_SECURE_SHARE_V2_ENABLED: "true"
 });
 
@@ -171,6 +173,7 @@ const allowedScenarios = new Set([
   "responsive",
   "save-copy",
   "save-copy-attachment",
+  "standard-v2-one-time",
   "view-attachment"
 ]);
 
@@ -420,7 +423,14 @@ const server = createServer((request, response) => {
     return;
   }
 
-  response.setHeader("cache-control", url.pathname.startsWith("/share/") ? "no-store" : "no-cache");
+  const secureShareDocument =
+    url.pathname.startsWith("/share/") || url.pathname.startsWith("/s/");
+  response.setHeader("cache-control", secureShareDocument ? "no-store" : "no-cache");
+  if (secureShareDocument) {
+    response.setHeader("cross-origin-resource-policy", "same-origin");
+    response.setHeader("referrer-policy", "no-referrer");
+    response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
+  }
   vite.middlewares(request, response, (error) => {
     if (error) {
       console.error("QuickMemo E2E Vite request failed", {

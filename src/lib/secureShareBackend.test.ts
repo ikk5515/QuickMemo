@@ -41,6 +41,7 @@ import handler, {
   padEmailChallengeResponse,
   padOtpVerificationFailureResponse,
   rateLimitWindowStarts,
+  recordGmailProviderHealth,
   readJsonBody,
   revalidateParticipantAllocationChallenge,
   resolveAccessIdentity,
@@ -419,6 +420,9 @@ describe("Secure Share v2 cryptographic primitives", () => {
           isActive: true
         }));
       }
+      if (url.includes("/documents/secureShareEmailSettings/current")) {
+        return fetchResponse(404);
+      }
       throw new Error(`Unexpected identity request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -443,7 +447,7 @@ describe("Secure Share v2 cryptographic primitives", () => {
       )).rejects.toMatchObject({ statusCode: 403, code: "access_denied" });
     }
 
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
   });
 
   it("prefers an active QuickMemo caller identity after the required OTP succeeds", async () => {
@@ -1480,7 +1484,11 @@ describe("Secure Share v2 email and identity defenses", () => {
       "share-a",
       policy,
       { challengeId: pendingChallengeId, otp: "000000" },
-      { now: () => 0, random: () => 3_000, wait: pendingWait }
+      {
+        now: () => 0,
+        random: () => 3_000,
+        wait: pendingWait
+      }
     )).rejects.toMatchObject({ statusCode: 403, code: "access_denied" });
     await expect(resolveAccessIdentity(
       request,
@@ -1488,12 +1496,16 @@ describe("Secure Share v2 email and identity defenses", () => {
       "share-a",
       policy,
       { challengeId: suppressedChallengeId, otp: "000000" },
-      { now: () => 0, random: () => 3_000, wait: suppressedWait }
+      {
+        now: () => 0,
+        random: () => 3_000,
+        wait: suppressedWait
+      }
     )).rejects.toMatchObject({ statusCode: 403, code: "access_denied" });
 
     expect(pendingWait).toHaveBeenCalledExactlyOnceWith(3_000);
     expect(suppressedWait).toHaveBeenCalledExactlyOnceWith(3_000);
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(fetchMock).toHaveBeenCalledTimes(8);
     expect(commitBodies).toHaveLength(2);
     expect(commitBodies[0]?.writes[0]?.update?.fields?.status?.stringValue).toBe("pending");
     expect(commitBodies[1]?.writes[0]?.update?.fields?.status?.stringValue).toBe("suppressed");
@@ -1944,10 +1956,26 @@ describe("Secure Share v2 email and identity defenses", () => {
       {
         blockedUntil: new Date(now.getTime() - 1),
         consecutiveFailures: 1,
+        settingsGeneration: "generation-current",
         status: "blocked"
       },
-      now.getTime()
+      now.getTime(),
+      "generation-current"
     )).toBe(true);
+    expect(gmailProviderHealthStateAllowsSend(
+      {
+        consecutiveFailures: 0,
+        settingsGeneration: "generation-old",
+        status: "healthy"
+      },
+      now.getTime(),
+      "generation-current"
+    )).toBe(false);
+    expect(gmailProviderHealthStateAllowsSend(
+      null,
+      now.getTime(),
+      "generation-current"
+    )).toBe(false);
     const connectionFailure = gmailProviderHealthTransition(
       existing,
       "failed",
@@ -1991,6 +2019,88 @@ describe("Secure Share v2 email and identity defenses", () => {
       lastReasonCode: "",
       status: "healthy"
     });
+  });
+
+  it("does not let a stale in-flight SMTP result overwrite rotated or removed provider health", async () => {
+    const context = {
+      accessToken: "management-token",
+      projectId: "test-project"
+    };
+    const staleRuntime = {
+      environment: {},
+      generation: "generation_g1_stale",
+      provider: "gmail_smtp" as const,
+      ready: true as const
+    };
+    const rotatedHealth = firestoreDocument(
+      "publicShareEmailProviderHealth/gmail-smtp",
+      {
+        consecutiveFailures: 0,
+        settingsGeneration: "generation_g2_current",
+        status: "healthy",
+        updatedAt: new Date("2026-07-30T00:00:00.000Z")
+      }
+    );
+    const rotatedFetch = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          throw new Error("stale health must not be committed");
+        }
+        return fetchResponse(200, rotatedHealth);
+      }
+    );
+    vi.stubGlobal("fetch", rotatedFetch);
+
+    await recordGmailProviderHealth(context, staleRuntime, "sent");
+
+    expect(rotatedFetch).toHaveBeenCalledTimes(1);
+
+    const removedFetch = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          throw new Error("removed health must not be recreated");
+        }
+        return fetchResponse(404);
+      }
+    );
+    vi.stubGlobal("fetch", removedFetch);
+
+    await recordGmailProviderHealth(
+      context,
+      staleRuntime,
+      "failed",
+      { providerReasonCode: "connection_error" }
+    );
+
+    expect(removedFetch).toHaveBeenCalledTimes(1);
+
+    const legacyCommitBodies: Array<Record<string, unknown>> = [];
+    const legacyFetch = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          legacyCommitBodies.push(JSON.parse(String(init.body)));
+          return fetchResponse(200, {
+            commitTime: "2026-07-30T00:00:00.000Z"
+          });
+        }
+        return fetchResponse(404);
+      }
+    );
+    vi.stubGlobal("fetch", legacyFetch);
+
+    await recordGmailProviderHealth(
+      context,
+      {
+        environment: { NODE_ENV: "test" },
+        generation: "",
+        provider: "gmail_smtp",
+        ready: true
+      },
+      "sent"
+    );
+
+    expect(legacyFetch).toHaveBeenCalledTimes(2);
+    expect(legacyCommitBodies).toHaveLength(1);
   });
 
   it("uses conservative hourly shards for the Share and Email rolling limit", () => {
@@ -3135,11 +3245,13 @@ describe("Secure Share v2 transactional source contracts", () => {
     expect(backendSource).toContain("const emailProviderRequestRateWindowSeconds = 1");
     expect(backendSource).toContain("const emailProviderRequestRateLimit = 2");
     expect(backendSource).toContain('provider === "gmail_smtp"');
-    expect(backendSource).toContain("createGmailSmtpEmailAdapter({ environment })");
+    expect(backendSource).toContain("createGmailSmtpEmailAdapter({");
+    expect(backendSource).toContain("runtimeSnapshot?.environment ?? environment");
     expect(backendSource).toContain('provider === "resend" && environment.NODE_ENV === "test"');
     expect(backendSource).toContain('"email_provider_request_global_second"');
     expect(backendSource).toContain('keyParts: ["resend_test_only"]');
-    expect(emailChallenge).toContain("createConfiguredEmailAdapter(context)");
+    expect(emailChallenge).toContain("createConfiguredEmailAdapter(");
+    expect(emailChallenge).toContain("currentEmailRuntime");
     expect(emailChallenge).toContain("providerAdapter,");
   });
 
@@ -3556,7 +3668,9 @@ describe("Secure Share v2 participant identity and coarse network contracts", ()
     )?.[0] ?? "";
 
     expect(featureStatus).toContain("v2Enabled: secureShareV2Enabled()");
-    expect(featureStatus).toContain("emailEnabled: secureShareEmailEnabled()");
+    expect(featureStatus).toContain("emailEnabled");
+    expect(featureStatus).toContain("safeSecureShareEmailRuntimeSnapshot");
+    expect(featureStatus).not.toContain("secureShareEmailEnabled()");
     expect(featureStatus).not.toContain("liveContentSyncEnabled");
     expect(liveSyncStatus).toContain("secureShareLiveContentSyncEnabled()");
     expect(liveSyncStatus).toContain("secureShareV2Enabled()");

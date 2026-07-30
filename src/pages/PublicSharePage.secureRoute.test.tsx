@@ -85,6 +85,7 @@ function TestRoute({ entry }: { entry: string }) {
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/share/:shareId" element={<PublicSharePage />} />
+        <Route path="/s/:compactToken" element={<PublicSharePage />} />
         <Route path="/login" element={<LoginStateProbe />} />
       </Routes>
     </MemoryRouter>
@@ -136,6 +137,34 @@ describe("PublicSharePage Secure Share v2 route wrapper", () => {
     expect(mocks.getSecureShareFeatureStatus).toHaveBeenCalledWith(expect.any(AbortSignal));
     expect(JSON.stringify(mocks.getSecureShareFeatureStatus.mock.calls)).not.toContain(contentKey);
     expect(mocks.subscribePublicNoteShare).not.toHaveBeenCalled();
+  });
+
+  it("maps one exact compact token to the internal v2 ID without sending the key", async () => {
+    const compactToken = "Abcdefghijklmnopqrstuvwx";
+    const contentKey = "K".repeat(43);
+    renderRoute(`/s/${compactToken}#${contentKey}`);
+
+    expect(await screen.findByText("secure-viewer")).toBeInTheDocument();
+    expect(mocks.secureViewerProps).toMatchObject({
+      contentKey,
+      shareId: `ss2_${compactToken}`
+    });
+    expect(JSON.stringify(mocks.getSecureShareFeatureStatus.mock.calls)).not.toContain(contentKey);
+  });
+
+  it.each([
+    `/s/Abcdefghijklmnopqrstuvwx#key=${"M".repeat(43)}`,
+    `/s/Abcdefghijklmnopqrstuvwx?next=/admin#${"M".repeat(43)}`,
+    `/s/Abcdefghijklmnopqrstuvwx#${"M".repeat(43)}&next=/admin`,
+    `/share/ss2_secure_123456#${"M".repeat(43)}`
+  ])("rejects mixed fragment forms and query-bearing share routes before API access", async (entry) => {
+    renderRoute(entry);
+
+    expect(await screen.findByRole("heading", {
+      name: "보안 공유 링크가 올바르지 않습니다."
+    })).toBeInTheDocument();
+    expect(mocks.getSecureShareFeatureStatus).not.toHaveBeenCalled();
+    expect(screen.queryByText("secure-viewer")).not.toBeInTheDocument();
   });
 
   it("fails closed with one generic state when either feature gate is unavailable", async () => {
@@ -202,6 +231,25 @@ describe("PublicSharePage Secure Share v2 route wrapper", () => {
           kind: "secure_share_v2",
           returnTo: "/share/ss2_secure_123456",
           shareFragment: `#key=${contentKey}`
+        }
+      });
+    });
+  });
+
+  it("preserves a compact bare fragment only in login Router state", async () => {
+    const compactToken = "Abcdefghijklmnopqrstuvwx";
+    const contentKey = "N".repeat(43);
+    renderRoute(`/s/${compactToken}#${contentKey}`);
+    fireEvent.click(await screen.findByRole("button", { name: "secure-login" }));
+
+    await waitFor(() => {
+      const state = JSON.parse(screen.getByText(/secure_share_v2/u).textContent ?? "{}");
+      expect(state).toEqual({
+        hash: "",
+        state: {
+          kind: "secure_share_v2",
+          returnTo: `/s/${compactToken}`,
+          shareFragment: `#${contentKey}`
         }
       });
     });

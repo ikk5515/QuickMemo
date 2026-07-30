@@ -111,6 +111,7 @@ import {
   resolveSecureShareFeatureFlags,
   type SecureSharePolicyInput
 } from "../lib/secureSharePolicy";
+import { parseSecureShareUrl } from "../lib/secureShareUrl";
 import {
   secureShareSourceAttachmentFingerprint,
   selectSecureShareAttachmentReuse
@@ -1447,13 +1448,12 @@ function publicShareContentKeyStorageKey(uid: string, shareId: string) {
 }
 
 function publicShareKeyFromUrl(url: string) {
-  try {
-    const hash = new URL(url).hash.replace(/^#/, "");
+  const parsed = parseSecureShareUrl(
+    url,
+    typeof window === "undefined" ? undefined : window.location.origin
+  );
 
-    return hash ? new URLSearchParams(hash).get("key") : null;
-  } catch {
-    return null;
-  }
+  return parsed?.contentKey ?? null;
 }
 
 const secureShareOwnerStatuses = new Set(["active", "consumed", "expired", "pending", "revoked"]);

@@ -2038,13 +2038,22 @@ export async function sendVerificationEmail(
   ttlSeconds,
   idempotencyKey,
   adapter,
-  timeoutMilliseconds = emailProviderTotalTimeoutMilliseconds
+  timeoutMilliseconds = emailProviderTotalTimeoutMilliseconds,
+  runtime = null
 ) {
-  if (!secureShareEmailEnabled()) {
+  const runtimeEnabled = runtime
+    ? runtime.enabled === true
+    : envValue("NODE_ENV") === "test"
+      && secureShareEmailEnabled();
+  if (!runtimeEnabled) {
     throw new HttpError(503, "email_feature_unavailable", "Email delivery is disabled");
   }
+  const from = runtime
+    ? configuredEmailSenderAddress(runtime.from)
+    : envValue("SHARE_EMAIL_FROM");
   if (
-    typeof idempotencyKey !== "string"
+    !from
+    || typeof idempotencyKey !== "string"
     || !/^[A-Za-z0-9_-]{16,200}$/u.test(idempotencyKey)
     || !adapter
     || typeof adapter.send !== "function"
@@ -2054,7 +2063,7 @@ export async function sendVerificationEmail(
     });
   }
   return adapter.send({
-    from: envValue("SHARE_EMAIL_FROM"),
+    from,
     idempotencyKey,
     text: verificationEmailText(code, ttlSeconds),
     timeoutMilliseconds,

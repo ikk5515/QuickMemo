@@ -139,6 +139,7 @@ export default function App() {
         <Route path="/setup" element={<SetupPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/share/:shareId" element={<PublicSharePage />} />
+        <Route path="/s/:compactToken" element={<PublicSharePage />} />
         <Route
           path="/home"
           element={

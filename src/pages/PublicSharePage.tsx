@@ -10,7 +10,7 @@ import {
   useRef,
   useState
 } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -39,9 +39,14 @@ import {
 import { safeRasterImageBytes } from "../lib/safeRasterImage";
 import { resolveSecureShareFeatureFlags } from "../lib/secureSharePolicy";
 import {
-  createSecureShareLoginReturnState,
-  parseSecureShareContentKeyFragment
+  createSecureShareLoginReturnState
 } from "../lib/shareLoginReturn";
+import {
+  isSecureShareV2Identifier,
+  parseSecureShareContentKeyFragment,
+  parseSecureSharePath,
+  type SecureShareRouteKind
+} from "../lib/secureShareUrl";
 import {
   type SecureShareSaveCopyProgress
 } from "../lib/secureShareSaveCopy";
@@ -81,8 +86,6 @@ const SecurePublicShareViewer = lazy(() =>
     default: module.SecurePublicShareViewer
   }))
 );
-const secureShareV2IdentifierPattern = /^ss2_[A-Za-z0-9_-]{2,124}$/u;
-
 interface PublicShareContent {
   attachments: PublicShareAttachmentView[];
   bodyFormat: ReadonlyEditorContentFormat;
@@ -94,20 +97,42 @@ interface PublicShareContent {
 type SecureShareFeatureGateState = "checking" | "enabled" | "unavailable";
 
 export default function PublicSharePage() {
-  const { shareId } = useParams();
+  const location = useLocation();
+  const parsedPath = useMemo(
+    () => parseSecureSharePath(location.pathname),
+    [location.pathname]
+  );
 
-  return shareId && secureShareV2IdentifierPattern.test(shareId)
-    ? <SecurePublicShareRoute key={shareId} shareId={shareId} />
-    : <LegacyPublicSharePage />;
+  if (!parsedPath || location.search) {
+    return <InvalidPublicShareRoute />;
+  }
+
+  return isSecureShareV2Identifier(parsedPath.shareId)
+    ? (
+        <SecurePublicShareRoute
+          key={parsedPath.shareId}
+          routeKind={parsedPath.routeKind}
+          shareId={parsedPath.shareId}
+        />
+      )
+    : parsedPath.routeKind === "standard"
+      ? <LegacyPublicSharePage shareId={parsedPath.shareId} />
+      : <InvalidPublicShareRoute />;
 }
 
-function SecurePublicShareRoute({ shareId }: { shareId: string }) {
+function SecurePublicShareRoute({
+  routeKind,
+  shareId
+}: {
+  routeKind: SecureShareRouteKind;
+  shareId: string;
+}) {
   const location = useLocation();
   const navigate = useNavigate();
   const { firebaseUser, loading: authLoading, privateKey, profile } = useAuth();
   const parsedFragment = useMemo(
-    () => parseSecureShareContentKeyFragment(location.hash),
-    [location.hash]
+    () => parseSecureShareContentKeyFragment(location.hash, routeKind),
+    [location.hash, routeKind]
   );
   const [featureGateState, setFeatureGateState] = useState<SecureShareFeatureGateState>("checking");
   const [liveContentSyncEnabled, setLiveContentSyncEnabled] = useState(false);
@@ -161,6 +186,10 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
   ]);
 
   useEffect(() => {
+    if (!parsedFragment) {
+      return undefined;
+    }
+
     const clientFlags = resolveSecureShareFeatureFlags();
 
     if (!clientFlags.clientV2Enabled) {
@@ -198,7 +227,7 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
       });
 
     return () => controller.abort();
-  }, [shareId]);
+  }, [parsedFragment, shareId]);
 
   useEffect(() => {
     let active = true;
@@ -376,6 +405,10 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
     shareId
   ]);
 
+  if (!parsedFragment) {
+    return <InvalidPublicShareRoute />;
+  }
+
   if (featureGateState === "checking") {
     return (
       <main className="public-share-page">
@@ -390,18 +423,6 @@ function SecurePublicShareRoute({ shareId }: { shareId: string }) {
 
   if (featureGateState === "unavailable") {
     return <SecureShareUnavailableState />;
-  }
-
-  if (!parsedFragment) {
-    return (
-      <main className="public-share-page">
-        <section className="secure-public-share-state error" role="alert">
-          <AlertTriangle aria-hidden="true" size={28} />
-          <h1>보안 공유 링크가 올바르지 않습니다.</h1>
-          <p>주소의 암호화 키 조각을 확인해주세요.</p>
-        </section>
-      </main>
-    );
   }
 
   if (
@@ -482,6 +503,18 @@ function SecureShareUnavailableState() {
   );
 }
 
+function InvalidPublicShareRoute() {
+  return (
+    <main className="public-share-page">
+      <section className="secure-public-share-state error" role="alert">
+        <AlertTriangle aria-hidden="true" size={28} />
+        <h1>보안 공유 링크가 올바르지 않습니다.</h1>
+        <p>전달받은 주소 전체를 다시 확인해주세요.</p>
+      </section>
+    </main>
+  );
+}
+
 function secureShareCopyProgressLabel(progress: SecureShareSaveCopyProgress) {
   if (progress.phase === "preparing") {
     return "복사본 저장을 준비하는 중입니다.";
@@ -511,8 +544,7 @@ function secureShareCopyProgressLabel(progress: SecureShareSaveCopyProgress) {
   return `${fileLabel} · ${phaseLabel}`;
 }
 
-function LegacyPublicSharePage() {
-  const { shareId } = useParams();
+function LegacyPublicSharePage({ shareId }: { shareId: string }) {
   const [title, setTitle] = useState("");
   const [bodyFormat, setBodyFormat] = useState<ReadonlyEditorContentFormat>("html");
   const [bodyHtml, setBodyHtml] = useState("");
@@ -1231,8 +1263,7 @@ async function decryptPublicShareContent(shareId: string, share: PublicNoteShare
 }
 
 function shareKeyFromHash() {
-  const hash = window.location.hash.replace(/^#/, "");
-  return new URLSearchParams(hash).get("key");
+  return parseSecureShareContentKeyFragment(window.location.hash, "standard")?.contentKey ?? null;
 }
 
 function isImageAttachment(attachment: PublicShareAttachmentView) {

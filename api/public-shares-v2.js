@@ -12,6 +12,9 @@ import {
 } from "./_secure-share-attachment-reuse.js";
 import { createGmailSmtpEmailAdapter } from "./_secure-share-gmail-smtp.js";
 import {
+  safeSecureShareEmailRuntimeSnapshot
+} from "./_secure-share-email-settings.js";
+import {
   HttpError,
   activeUserFromRequest,
   applySecureResponseHeaders,
@@ -70,7 +73,6 @@ import {
   safeId,
   safeErrorSummary,
   safeUnlockAttemptId,
-  secureShareEmailEnabled,
   secureShareEmailReadiness,
   secureShareCommentIpPrefixEnabled,
   secureShareParticipantIdentityEnabled,
@@ -176,7 +178,31 @@ const validActions = new Set([
   "attachment-download"
 ]);
 
-function configuredEmailProviderName(environment = process.env) {
+function configuredEmailProviderName(
+  runtimeSnapshot = null,
+  environment = process.env
+) {
+  if (runtimeSnapshot) {
+    if (
+      runtimeSnapshot.ready === true
+      && runtimeSnapshot.environment
+      && (
+        runtimeSnapshot.provider === "gmail_smtp"
+        || (
+          runtimeSnapshot.provider === "resend"
+          && runtimeSnapshot.environment.NODE_ENV === "test"
+        )
+      )
+    ) {
+      return runtimeSnapshot.provider;
+    }
+    throw new HttpError(
+      503,
+      "email_feature_unavailable",
+      "Secure Share email provider is unavailable",
+      { expose: false }
+    );
+  }
   const provider = typeof environment.SHARE_EMAIL_PROVIDER === "string"
     ? environment.SHARE_EMAIL_PROVIDER.trim().toLowerCase()
     : "";
@@ -194,10 +220,16 @@ function configuredEmailProviderName(environment = process.env) {
   );
 }
 
-function createConfiguredEmailAdapter(context, environment = process.env) {
-  const provider = configuredEmailProviderName(environment);
+function createConfiguredEmailAdapter(
+  context,
+  runtimeSnapshot = null,
+  environment = process.env
+) {
+  const provider = configuredEmailProviderName(runtimeSnapshot, environment);
   if (provider === "gmail_smtp") {
-    return createGmailSmtpEmailAdapter({ environment });
+    return createGmailSmtpEmailAdapter({
+      environment: runtimeSnapshot?.environment ?? environment
+    });
   }
   return createResendEmailAdapter(
     undefined,
@@ -754,13 +786,20 @@ function persistedPolicySettings(settings) {
   return persisted;
 }
 
-function assertEmailPolicyAvailable(policy) {
+function emailPolicyRequiresRuntime(policy) {
+  return Boolean(
+    policy?.accessMode === "allowed_emails"
+    || policy?.emailVerificationRequired === true
+  );
+}
+
+function assertEmailPolicyAvailable(
+  policy,
+  runtimeSnapshot = secureShareEmailReadiness()
+) {
   if (
-    (
-      policy?.accessMode === "allowed_emails"
-      || policy?.emailVerificationRequired === true
-    )
-    && !secureShareEmailEnabled()
+    emailPolicyRequiresRuntime(policy)
+    && runtimeSnapshot?.ready !== true
   ) {
     throw new HttpError(
       503,
@@ -768,6 +807,17 @@ function assertEmailPolicyAvailable(policy) {
       "Secure Share email is unavailable"
     );
   }
+}
+
+async function emailRuntimeForPolicy(context, policy) {
+  if (!emailPolicyRequiresRuntime(policy)) {
+    return null;
+  }
+  const runtimeSnapshot = await safeSecureShareEmailRuntimeSnapshot(context, {
+    allowCache: false
+  });
+  assertEmailPolicyAvailable(policy, runtimeSnapshot);
+  return runtimeSnapshot;
 }
 
 async function secureContext(request) {
@@ -1313,7 +1363,7 @@ function policyInputKeys() {
   ];
 }
 
-async function buildPolicySettings(body, existingPolicy = null) {
+async function buildPolicySettings(body, existingPolicy = null, context = null) {
   const accessMode = body.accessMode ?? existingPolicy?.accessMode ?? "anyone_with_link";
   if (!accessModes.has(accessMode)) {
     throw new HttpError(400, "invalid_request", "Invalid accessMode");
@@ -1355,8 +1405,18 @@ async function buildPolicySettings(body, existingPolicy = null) {
       existingPolicy?.emailVerificationRequired === true,
       "emailVerificationRequired"
     );
-  if (emailVerificationRequired && !secureShareEmailEnabled()) {
-    throw new HttpError(503, "email_feature_unavailable", "Email verification is not configured");
+  if (emailVerificationRequired) {
+    if (!context) {
+      throw new HttpError(
+        503,
+        "email_feature_unavailable",
+        "Email verification is not configured"
+      );
+    }
+    await emailRuntimeForPolicy(context, {
+      accessMode,
+      emailVerificationRequired
+    });
   }
 
   let allowedEmails = null;
@@ -1560,8 +1620,8 @@ async function handleOwnerCreate(request, response, id) {
       "quickmemo/secure-share/create-idempotency/v1",
       user.uid,
       input.idempotencyKey
-    ).slice(0, 40)}`
-    : `ss2_${randomToken(30)}`;
+    ).slice(0, 24)}`
+    : `ss2_${randomToken(18)}`;
   const existing = await loadShareState(context, shareId);
   if (existing) {
     requireOwner(existing, user);
@@ -1598,7 +1658,7 @@ async function handleOwnerCreate(request, response, id) {
       limit: 100
     }
   ]);
-  const policySettings = await buildPolicySettings(body.policy);
+  const policySettings = await buildPolicySettings(body.policy, null, context);
   const expiresAt = computeExpiresAt(body.policy);
 
   const now = new Date();
@@ -2074,7 +2134,11 @@ async function handleOwnerUpdate(request, response, id, shareId) {
       throw new HttpError(409, "share_unavailable", "Consumed one-time shares cannot be edited");
     }
     await requireSourceAvailable(user.context, state.share);
-    const policySettings = await buildPolicySettings(updateInput.policy, state.policy);
+    const policySettings = await buildPolicySettings(
+      updateInput.policy,
+      state.policy,
+      user.context
+    );
     const expiresAt = computeExpiresAt(updateInput.policy, state.share.expiresAt);
     const policyVersion = boundedInteger(state.policy.policyVersion + 1, "policyVersion", 2, 1_000_000_000);
     const now = new Date();
@@ -3008,7 +3072,7 @@ async function handleMetadata(request, response, id, shareId) {
   }
   if (!ownerPreview) {
     assertPublicShareAvailable(state);
-    assertEmailPolicyAvailable(state.policy);
+    await emailRuntimeForPolicy(context, state.policy);
   } else if (
     !state
     || state.share.revokedAt
@@ -3118,13 +3182,21 @@ function gmailProviderFailureReason(error) {
   }
 }
 
-function gmailProviderHealthStateAllowsSend(health, nowMilliseconds = Date.now()) {
+function gmailProviderHealthStateAllowsSend(
+  health,
+  nowMilliseconds = Date.now(),
+  settingsGeneration = ""
+) {
   if (!health) {
-    return true;
+    return !settingsGeneration;
   }
   if (
     !Number.isSafeInteger(nowMilliseconds)
     || nowMilliseconds < 0
+    || (
+      settingsGeneration
+      && health.settingsGeneration !== settingsGeneration
+    )
     || !new Set(["unknown", "healthy", "degraded", "blocked"]).has(health.status)
     || !Number.isSafeInteger(health.consecutiveFailures)
     || health.consecutiveFailures < 0
@@ -3142,22 +3214,40 @@ function gmailProviderHealthStateAllowsSend(health, nowMilliseconds = Date.now()
   );
 }
 
-async function gmailProviderHealthAllowsSend(context, nowMilliseconds = Date.now()) {
-  if (configuredEmailProviderName() !== "gmail_smtp") {
+async function gmailProviderHealthAllowsSend(
+  context,
+  runtimeSnapshot,
+  nowMilliseconds = Date.now()
+) {
+  if (configuredEmailProviderName(runtimeSnapshot) !== "gmail_smtp") {
     return true;
   }
   const health = await firestoreGet(context, gmailSmtpProviderHealthPath);
-  return gmailProviderHealthStateAllowsSend(health, nowMilliseconds);
+  return gmailProviderHealthStateAllowsSend(
+    health,
+    nowMilliseconds,
+    runtimeSnapshot.generation
+  );
 }
 
-function gmailProviderHealthTransition(existing, outcome, error = null, now = new Date()) {
+function gmailProviderHealthTransition(
+  existing,
+  outcome,
+  error = null,
+  now = new Date(),
+  settingsGeneration = ""
+) {
   const nowMilliseconds = timestampMilliseconds(now);
   if (!Number.isFinite(nowMilliseconds)) {
     throw new HttpError(503, "service_unavailable", "Provider health time is invalid", {
       expose: false
     });
   }
-  const currentFailures = Number.isSafeInteger(existing?.consecutiveFailures)
+  const sameGeneration =
+    !settingsGeneration
+    || existing?.settingsGeneration === settingsGeneration;
+  const currentFailures = sameGeneration
+    && Number.isSafeInteger(existing?.consecutiveFailures)
     ? Math.max(0, existing.consecutiveFailures)
     : 0;
   const reasonCode = outcome === "sent"
@@ -3174,6 +3264,7 @@ function gmailProviderHealthTransition(existing, outcome, error = null, now = ne
   const existingBlockedUntilMilliseconds = timestampMilliseconds(existing?.blockedUntil);
   const activeExistingBlock =
     outcome !== "sent"
+    && sameGeneration
     && existing?.status === "blocked"
     && existingBlockedUntilMilliseconds > nowMilliseconds;
   const proposedStatus = outcome === "sent"
@@ -3206,12 +3297,14 @@ function gmailProviderHealthTransition(existing, outcome, error = null, now = ne
       )
     : 0;
   const existingReasonCode =
-    typeof existing?.lastReasonCode === "string"
+    sameGeneration
+    && typeof existing?.lastReasonCode === "string"
     && gmailProviderHealthReasonCodes.has(existing.lastReasonCode)
       ? existing.lastReasonCode
       : "";
   return {
     schemaVersion: 1,
+    ...(settingsGeneration ? { settingsGeneration } : {}),
     status,
     consecutiveFailures,
     blockedUntil: blockedUntilMilliseconds
@@ -3222,22 +3315,55 @@ function gmailProviderHealthTransition(existing, outcome, error = null, now = ne
       : reasonCode,
     lastSuccessfulSendAt: outcome === "sent"
       ? new Date(nowMilliseconds)
-      : existing?.lastSuccessfulSendAt,
+      : sameGeneration ? existing?.lastSuccessfulSendAt : undefined,
     lastFailureAt: outcome === "sent"
-      ? existing?.lastFailureAt
+      ? sameGeneration ? existing?.lastFailureAt : undefined
       : new Date(nowMilliseconds),
     updatedAt: new Date(nowMilliseconds)
   };
 }
 
-async function recordGmailProviderHealth(context, outcome, error = null) {
-  if (configuredEmailProviderName() !== "gmail_smtp") {
+async function recordGmailProviderHealth(
+  context,
+  runtimeSnapshot,
+  outcome,
+  error = null
+) {
+  if (configuredEmailProviderName(runtimeSnapshot) !== "gmail_smtp") {
     return;
   }
+  const legacyTestRuntime =
+    !runtimeSnapshot.generation
+    && runtimeSnapshot.environment?.NODE_ENV === "test";
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const now = new Date();
     const existing = await firestoreGet(context, gmailSmtpProviderHealthPath);
-    const fields = gmailProviderHealthTransition(existing, outcome, error, now);
+    if (
+      (!existing && !legacyTestRuntime)
+      || (
+        existing
+        && runtimeSnapshot.generation
+        && existing.settingsGeneration !== runtimeSnapshot.generation
+      )
+      || (
+        existing
+        && legacyTestRuntime
+        && Boolean(existing.settingsGeneration)
+      )
+    ) {
+      // A confirm/remove may rotate or delete provider health while an older
+      // SMTP request is in flight. Never recreate the record or overwrite the
+      // new generation with a stale delivery outcome. Empty-generation health
+      // exists only for the local NODE_ENV=test compatibility provider.
+      return;
+    }
+    const fields = gmailProviderHealthTransition(
+      existing,
+      outcome,
+      error,
+      now,
+      runtimeSnapshot.generation
+    );
     const write = existing
       ? updateDocumentWrite(
         context.projectId,
@@ -3636,6 +3762,7 @@ async function commitEmailChallenge({
   challenge,
   challengePath,
   context,
+  emailRuntime,
   eligible,
   existing,
   sendAttemptPath,
@@ -3694,7 +3821,8 @@ async function commitEmailChallenge({
           challengeId: challenge.__challengeId,
           emailHash: challenge.emailHash,
           policyVersion: state.policy.policyVersion,
-          provider: configuredEmailProviderName(),
+          provider: configuredEmailProviderName(emailRuntime),
+          settingsGeneration: emailRuntime.generation,
           status: "reserved",
           quotaBucketIds: quotaStateSet.writeStates.map(
             (quotaState) => quotaState.period.bucketId
@@ -3969,7 +4097,11 @@ async function padOtpVerificationFailureResponse(
 async function handleEmailChallenge(request, response, id, shareId) {
   requireMethod(request, ["POST"]);
   ensureSameOrigin(request);
-  if (!secureShareEmailEnabled()) {
+  const context = await secureContext(request);
+  const emailRuntime = await safeSecureShareEmailRuntimeSnapshot(context, {
+    allowCache: false
+  });
+  if (emailRuntime.ready !== true) {
     throw new HttpError(503, "email_feature_unavailable", "Secure Share email is unavailable");
   }
   const body = await readJsonBody(request, 16 * 1024);
@@ -3985,7 +4117,6 @@ async function handleEmailChallenge(request, response, id, shareId) {
   const minimumResponseMilliseconds = emailChallengeMinimumResponseMilliseconds();
   const challengeTtlSeconds = otpTtlSeconds();
   const hashedEmail = emailDigest(normalizedEmail);
-  const context = await secureContext(request);
   const state = await loadShareState(context, shareId);
   const ownerUid = state?.share?.ownerUid ?? "";
   const networkHash = clientNetworkDigest(request);
@@ -4072,7 +4203,7 @@ async function handleEmailChallenge(request, response, id, shareId) {
   const code = generateOtpCode();
   const [policyEligible, providerHealthy] = await Promise.all([
     emailChallengeEligibility(context, state, hashedEmail),
-    gmailProviderHealthAllowsSend(context)
+    gmailProviderHealthAllowsSend(context, emailRuntime)
   ]);
   const eligible = policyEligible && providerHealthy;
   const challenge = {
@@ -4108,6 +4239,7 @@ async function handleEmailChallenge(request, response, id, shareId) {
     challenge,
     challengePath: path,
     context,
+    emailRuntime,
     eligible,
     existing,
     sendAttemptPath,
@@ -4116,29 +4248,59 @@ async function handleEmailChallenge(request, response, id, shareId) {
 
   if (eligible && reservation.committed) {
     let delivery = null;
+    let providerRuntimeValidated = false;
     try {
       const elapsedMilliseconds = Math.max(0, Date.now() - timingStartedAt);
       const deliveryBudgetMilliseconds = Math.max(
         1,
         Math.min(2_500, minimumResponseMilliseconds - elapsedMilliseconds - 250)
       );
-      const providerAdapter = createConfiguredEmailAdapter(context);
+      const currentEmailRuntime =
+        await safeSecureShareEmailRuntimeSnapshot(context, {
+          allowCache: false
+        });
+      if (
+        currentEmailRuntime.ready !== true
+        || currentEmailRuntime.generation !== emailRuntime.generation
+      ) {
+        throw new HttpError(
+          503,
+          "email_feature_unavailable",
+          "Secure Share email settings changed before delivery"
+        );
+      }
+      providerRuntimeValidated = true;
+      const providerAdapter = createConfiguredEmailAdapter(
+        context,
+        currentEmailRuntime
+      );
       delivery = await sendVerificationEmail(
         normalizedEmail,
         code,
         challengeTtlSeconds,
         reservation.deliveryId,
         providerAdapter,
-        deliveryBudgetMilliseconds
+        deliveryBudgetMilliseconds,
+        {
+          enabled: emailRuntime.ready === true,
+          from: currentEmailRuntime.configuration.fromAddress
+        }
       );
     } catch (error) {
-      try {
-        await recordGmailProviderHealth(context, "failed", error);
-      } catch (healthError) {
-        console.error(
-          "secure share email provider health update failed",
-          safeErrorSummary(healthError)
-        );
+      if (providerRuntimeValidated) {
+        try {
+          await recordGmailProviderHealth(
+            context,
+            emailRuntime,
+            "failed",
+            error
+          );
+        } catch (healthError) {
+          console.error(
+            "secure share email provider health update failed",
+            safeErrorSummary(healthError)
+          );
+        }
       }
       try {
         await finalizeEmailDelivery(
@@ -4157,7 +4319,11 @@ async function handleEmailChallenge(request, response, id, shareId) {
     }
     if (delivery) {
       try {
-        await recordGmailProviderHealth(context, "sent");
+        await recordGmailProviderHealth(
+          context,
+          emailRuntime,
+          "sent"
+        );
       } catch (healthError) {
         console.error(
           "secure share email provider health update failed",
@@ -4316,7 +4482,7 @@ async function resolveAccessIdentity(
     ? stateOrPolicy
     : null;
   const policy = state?.policy ?? stateOrPolicy;
-  assertEmailPolicyAvailable(policy);
+  await emailRuntimeForPolicy(context, policy);
   let caller = preverifiedCaller === undefined ? null : preverifiedCaller;
   if (preverifiedCaller === undefined && authorizationToken(request)) {
     caller = await activeUserFromRequest(request, context);
@@ -5264,7 +5430,7 @@ async function issueAccessSession(
     requireParticipantAllocationExecution(participantAllocationExecution);
     const state = await loadShareState(context, shareId);
     assertPublicShareAvailable(state);
-    assertEmailPolicyAvailable(state.policy);
+    await emailRuntimeForPolicy(context, state.policy);
     if (state.policy.policyVersion !== verifiedPolicyVersion) {
       throw new HttpError(409, "policy_changed");
     }
@@ -5636,7 +5802,7 @@ async function handleAccess(request, response, id, shareId) {
   }
 
   assertPublicShareAvailable(state);
-  assertEmailPolicyAvailable(state.policy);
+  await emailRuntimeForPolicy(context, state.policy);
   await requireSourceAvailable(context, state.share);
   const networkHash = networkIdentity.digest;
   const accessLimits = [
@@ -5814,7 +5980,7 @@ async function validatedSession(request, context, shareId) {
     ) {
       throw new HttpError(401, "session_expired");
     }
-    assertEmailPolicyAvailable(state.policy);
+    await emailRuntimeForPolicy(context, state.policy);
   }
   await requireSourceAvailable(context, state.share);
   return { session, state };
@@ -5883,7 +6049,7 @@ async function validatedRevisionSession(request, context, shareId) {
     ) {
       throw new HttpError(401, "session_expired");
     }
-    assertEmailPolicyAvailable({
+    await emailRuntimeForPolicy(context, {
       accessMode: share.accessModePublicHint,
       emailVerificationRequired: share.requiresEmailVerification === true
     });
@@ -8156,9 +8322,19 @@ async function dispatch(request, response, id) {
   if (action === "feature-status") {
     assertQueryKeys(url, ["action"]);
     requireMethod(request, ["GET"]);
+    let emailEnabled = false;
+    if (secureShareV2Enabled()) {
+      try {
+        const context = await createFirestoreContext();
+        const emailRuntime = await safeSecureShareEmailRuntimeSnapshot(context);
+        emailEnabled = emailRuntime.ready === true;
+      } catch {
+        emailEnabled = false;
+      }
+    }
     jsonResponse(response, 200, {
       v2Enabled: secureShareV2Enabled(),
-      emailEnabled: secureShareEmailEnabled()
+      emailEnabled
     });
     return;
   }
@@ -8263,6 +8439,7 @@ export {
   evaluateCopyAttachmentQuota,
   gmailProviderHealthStateAllowsSend,
   gmailProviderHealthTransition,
+  recordGmailProviderHealth,
   hashSharePassword,
   handleApiError,
   issueAccessSession,

@@ -137,6 +137,7 @@ const forbiddenContentRules = [
         "SHARE_EMAIL_FROM",
         "SHARE_EMAIL_HMAC_KEY",
         "SHARE_EMAIL_REPLY_TO",
+        "SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1",
         "SHARE_OTP_HMAC_KEY",
         "SHARE_RATE_LIMIT_HMAC_KEY",
         "SHARE_SMOKE_IMAP_APP_PASSWORD",
