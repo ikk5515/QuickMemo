@@ -502,12 +502,15 @@ export function emailTestCodeMatches(generation, code, expectedDigest) {
   if (
     !/^[0-9]{6}$/u.test(code)
     || typeof expectedDigest !== "string"
-    || !/^[a-f0-9]{64}$/u.test(expectedDigest)
+    || !requestHashPattern.test(expectedDigest)
   ) {
     return false;
   }
-  const actual = Buffer.from(emailTestCodeDigest(generation, code), "hex");
-  const expected = Buffer.from(expectedDigest, "hex");
+  const actual = Buffer.from(
+    emailTestCodeDigest(generation, code),
+    "base64url"
+  );
+  const expected = Buffer.from(expectedDigest, "base64url");
   return actual.byteLength === expected.byteLength && timingSafeEqual(actual, expected);
 }
 

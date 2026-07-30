@@ -10,6 +10,8 @@ import {
   createPendingEmailSettingsSlot,
   decryptEmailSettingsSlot,
   emailSettingsTestFailureDisposition,
+  emailTestCodeDigest,
+  emailTestCodeMatches,
   encryptEmailSettingsSlot,
   gmailRuntimeEnvironment,
   idTokenHasRecentAdminAuthentication,
@@ -75,6 +77,19 @@ describe("Secure Share administrator email settings", () => {
       code: "invalid_request",
       statusCode: 400
     }));
+  });
+
+  it("verifies administrator receipt codes using the canonical HMAC encoding", () => {
+    vi.stubEnv(
+      "SHARE_OTP_HMAC_KEY",
+      baseEnvironment.SHARE_OTP_HMAC_KEY
+    );
+    const code = "012345";
+    const digest = emailTestCodeDigest(generation, code);
+    expect(digest).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(emailTestCodeMatches(generation, code, digest)).toBe(true);
+    expect(emailTestCodeMatches(generation, "012346", digest)).toBe(false);
+    expect(emailTestCodeMatches(generation, code, "a".repeat(64))).toBe(false);
   });
 
   it("binds every admin idempotency action to its canonical normalized payload", () => {
