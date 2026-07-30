@@ -5,6 +5,7 @@ import {
   parseSecureShareMutationResponse,
   parseSecureShareOwnerDetailsResponse,
   parseSecureShareOwnerSummary,
+  refreshedSecureShareSettingsFlags,
   resolveSecureShareManagementSelection,
   secureShareManagementCapabilities,
   secureShareManagementStatus
@@ -49,6 +50,35 @@ const validAttachmentReuseManifest = {
 };
 
 describe("Secure Share v2 owner DTO boundary", () => {
+  it("refreshes email readiness before opening secure share settings", () => {
+    const currentFlags = {
+      clientV2Enabled: true,
+      emailEnabled: false,
+      liveContentSyncEnabled: true,
+      v2Enabled: true
+    };
+
+    expect(refreshedSecureShareSettingsFlags(currentFlags, {
+      emailEnabled: true,
+      v2Enabled: true
+    })).toEqual({
+      clientV2Enabled: true,
+      emailEnabled: true,
+      liveContentSyncEnabled: true,
+      v2Enabled: true
+    });
+
+    expect(refreshedSecureShareSettingsFlags(currentFlags, {
+      emailEnabled: true,
+      v2Enabled: false
+    })).toEqual({
+      clientV2Enabled: true,
+      emailEnabled: false,
+      liveContentSyncEnabled: false,
+      v2Enabled: false
+    });
+  });
+
   it("accepts a complete server-authoritative owner summary", () => {
     expect(parseSecureShareOwnerSummary(validSummary)).toMatchObject({
       schemaVersion: 2,
