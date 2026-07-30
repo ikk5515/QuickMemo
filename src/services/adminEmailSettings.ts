@@ -5,18 +5,32 @@ const adminEmailSettingsApiPath = "/api/admin-email-settings";
 const maximumResponseCharacters = 32_768;
 const maximumRetryAfterSeconds = 86_400;
 const requestTimeoutMs = 20_000;
-const gmailAddressPattern = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@gmail\.com$/iu;
+const emailAddressPattern =
+  /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/iu;
+const smtpHostPattern =
+  /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/iu;
 const replyToAddressPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const appPasswordPattern = /^[A-Za-z0-9]{16}$/u;
 const verificationCodePattern = /^\d{6}$/u;
 const safeGenerationPattern = /^[A-Za-z0-9_-]{16,64}$/u;
+const supportedSmtpPorts = new Set([465, 587]);
+const trustedSmtpHosts = new Set([
+  "smtp.gmail.com",
+  "smtp-mail.outlook.com",
+  "smtp.office365.com"
+]);
 
 export type AdminEmailSettingsGeneration = string;
 export type AdminEmailSettingsRemoveTarget = "active" | "pending" | "all";
+export type AdminEmailSettingsSecurityMode = "implicit_tls" | "starttls";
+export type AdminEmailSettingsSmtpPort = 465 | 587;
 
 export interface AdminEmailSettingsSlot {
   present: boolean;
   generation: AdminEmailSettingsGeneration | null;
+  host: string | null;
+  port: AdminEmailSettingsSmtpPort | null;
+  securityMode: AdminEmailSettingsSecurityMode | null;
   usernameMasked: string | null;
   replyToMasked: string | null;
   verifiedAt: string | null;
@@ -41,9 +55,17 @@ interface RequestOptions {
   signal?: AbortSignal;
 }
 
-interface StageAdminEmailSettingsInput {
+export interface StageAdminEmailSettingsInput {
+  host?: string;
+  port?: AdminEmailSettingsSmtpPort;
+  securityMode?: AdminEmailSettingsSecurityMode;
   username: string;
-  appPassword: string;
+  password?: string;
+  /**
+   * Legacy client-only alias. New callers should use `password`; the wire
+   * contract continues to use `appPassword` so the secret is never duplicated.
+   */
+  appPassword?: string;
   replyTo?: string;
 }
 
@@ -62,7 +84,15 @@ interface RemoveAdminEmailSettingsInput {
 
 type AdminEmailSettingsRequestBody =
   | { action: "status" }
-  | ({ action: "stage"; username: string; appPassword: string; replyTo?: string } & IdempotentRequest)
+  | ({
+      action: "stage";
+      host: string;
+      port: AdminEmailSettingsSmtpPort;
+      securityMode: AdminEmailSettingsSecurityMode;
+      username: string;
+      appPassword: string;
+      replyTo?: string;
+    } & IdempotentRequest)
   | ({ action: "send-test"; generation: AdminEmailSettingsGeneration } & IdempotentRequest)
   | ({ action: "confirm-test"; generation: AdminEmailSettingsGeneration; code: string } & IdempotentRequest)
   | ({ action: "disable" } & IdempotentRequest)
@@ -99,18 +129,62 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function containsControl(value: string) {
   return Array.from(value).some((character) => {
     const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 31 || codePoint === 127;
+    return codePoint <= 31 || (codePoint >= 127 && codePoint <= 159);
   });
 }
 
-function normalizeGmailAddress(value: string) {
+function normalizeEmailAddress(value: string) {
   const normalized = value.trim().toLowerCase();
 
-  if (normalized.length > 254 || !gmailAddressPattern.test(normalized) || containsControl(normalized)) {
-    throw new AdminEmailSettingsError("invalid_request", "유효한 Gmail 주소를 입력해주세요.");
+  if (normalized.length > 254 || !emailAddressPattern.test(normalized) || containsControl(normalized)) {
+    throw new AdminEmailSettingsError("invalid_request", "유효한 SMTP 사용자 이메일을 입력해주세요.");
   }
 
   return normalized;
+}
+
+function normalizeSmtpHost(value: string | undefined) {
+  const normalized = (value ?? "smtp.gmail.com").trim().toLowerCase();
+
+  if (
+    normalized.length > 253
+    || !smtpHostPattern.test(normalized)
+    || containsControl(normalized)
+    || !trustedSmtpHosts.has(normalized)
+  ) {
+    throw new AdminEmailSettingsError(
+      "invalid_request",
+      "허용된 Gmail 또는 Outlook SMTP 서버를 선택해주세요."
+    );
+  }
+
+  return normalized;
+}
+
+function normalizeSmtpTransport(
+  host: string,
+  portValue: AdminEmailSettingsSmtpPort | undefined,
+  securityModeValue: AdminEmailSettingsSecurityMode | undefined
+) {
+  const port = portValue ?? 465;
+  const securityMode = securityModeValue ?? "implicit_tls";
+
+  if (
+    !supportedSmtpPorts.has(port)
+    || (port === 465 && securityMode !== "implicit_tls")
+    || (port === 587 && securityMode !== "starttls")
+    || (host !== "smtp.gmail.com" && port !== 587)
+  ) {
+    throw new AdminEmailSettingsError(
+      "invalid_request",
+      "Gmail 465는 Implicit TLS, Gmail·Outlook 587은 필수 STARTTLS로 설정해주세요."
+    );
+  }
+
+  return {
+    port: port as AdminEmailSettingsSmtpPort,
+    securityMode
+  };
 }
 
 function normalizeReplyTo(value: string | undefined) {
@@ -127,14 +201,37 @@ function normalizeReplyTo(value: string | undefined) {
   return normalized;
 }
 
-function normalizeAppPassword(value: string) {
-  const normalized = value.replace(/ /gu, "");
+function normalizeSmtpPassword(
+  value: string,
+  host: string
+) {
+  const gmailAppPassword =
+    /^[A-Za-z0-9]{4}( [A-Za-z0-9]{4}){3}$/u.test(value)
+      ? value.replace(/ /gu, "")
+      : value;
 
-  if (!appPasswordPattern.test(normalized)) {
-    throw new AdminEmailSettingsError("invalid_request", "Gmail 앱 비밀번호 16자리를 입력해주세요.");
+  if (host === "smtp.gmail.com") {
+    if (!appPasswordPattern.test(gmailAppPassword)) {
+      throw new AdminEmailSettingsError(
+        "invalid_request",
+        "Gmail·Google Workspace는 Google 앱 비밀번호 16자리를 입력해주세요."
+      );
+    }
+    return gmailAppPassword;
   }
 
-  return normalized;
+  if (
+    value.length < 8
+    || value.length > 256
+    || containsControl(value)
+  ) {
+    throw new AdminEmailSettingsError(
+      "invalid_request",
+      "SMTP 비밀번호 또는 앱 비밀번호를 8~256자로 입력해주세요."
+    );
+  }
+
+  return value;
 }
 
 function assertGeneration(value: AdminEmailSettingsGeneration) {
@@ -175,6 +272,28 @@ function parseGeneration(value: unknown) {
   return null;
 }
 
+function parseSmtpHost(value: unknown) {
+  if (
+    typeof value === "string"
+    && value.length <= 253
+    && smtpHostPattern.test(value)
+    && value === value.toLowerCase()
+    && !containsControl(value)
+    && trustedSmtpHosts.has(value)
+  ) {
+    return value;
+  }
+  return null;
+}
+
+function parseSmtpPort(value: unknown): AdminEmailSettingsSmtpPort | null {
+  return value === 465 || value === 587 ? value : null;
+}
+
+function parseSecurityMode(value: unknown): AdminEmailSettingsSecurityMode | null {
+  return value === "implicit_tls" || value === "starttls" ? value : null;
+}
+
 function parseSlot(value: unknown): AdminEmailSettingsSlot {
   if (!isRecord(value) || typeof value.present !== "boolean") {
     throw new AdminEmailSettingsError("invalid_response", "이메일 설정 응답을 확인하지 못했습니다.");
@@ -191,6 +310,9 @@ function parseSlot(value: unknown): AdminEmailSettingsSlot {
   return {
     present: value.present,
     generation: parseGeneration(value.generation),
+    host: parseSmtpHost(value.host),
+    port: parseSmtpPort(value.port),
+    securityMode: parseSecurityMode(value.securityMode),
     usernameMasked: safeMaskedEmail(value.usernameMasked),
     replyToMasked: safeMaskedEmail(value.replyToMasked),
     verifiedAt: safeDateString(value.verifiedAt),
@@ -239,7 +361,10 @@ const errorMessages: Readonly<Record<string, string>> = {
   rate_limited: "요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
   conflict: "다른 관리자가 설정을 변경했습니다. 상태를 새로고침한 후 다시 시도해주세요.",
   email_settings_unavailable: "이메일 설정 서비스를 사용할 수 없습니다.",
-  smtp_verification_failed: "Gmail SMTP 연결을 확인하지 못했습니다. 상태를 새로고침한 뒤 Gmail 보안 설정을 확인해주세요.",
+  smtp_auth_failed: "SMTP 인증에 실패했습니다. 사용자 이메일과 비밀번호·앱 비밀번호를 확인해주세요.",
+  smtp_connection_failed: "SMTP 서버에 연결하지 못했습니다. 서버 주소와 포트가 올바른지 확인해주세요.",
+  smtp_tls_failed: "SMTP TLS 보안 연결에 실패했습니다. 포트 465는 Implicit TLS, 587은 필수 STARTTLS를 사용해주세요.",
+  smtp_verification_failed: "SMTP 연결을 확인하지 못했습니다. 서버 주소, 포트, TLS 방식과 계정 보안 설정을 확인해주세요.",
   test_required: "먼저 테스트 메일을 발송해주세요.",
   test_expired: "테스트 인증 코드가 만료되었습니다. 상태를 새로고침한 뒤 다시 발송해주세요.",
   invalid_test_code: "인증 코드가 올바르지 않습니다. 상태를 새로고침해 남은 횟수를 확인해주세요.",
@@ -425,12 +550,37 @@ export function getAdminEmailSettingsStatus(options?: RequestOptions) {
 }
 
 export function stageAdminEmailSettings(input: StageAdminEmailSettingsInput, options?: RequestOptions) {
-  const username = normalizeGmailAddress(input.username);
-  const appPassword = normalizeAppPassword(input.appPassword);
+  const host = normalizeSmtpHost(input.host);
+  const { port, securityMode } = normalizeSmtpTransport(
+    host,
+    input.port,
+    input.securityMode
+  );
+  const username = normalizeEmailAddress(input.username);
+  if (
+    input.password !== undefined
+    && input.appPassword !== undefined
+  ) {
+    throw new AdminEmailSettingsError(
+      "invalid_request",
+      "SMTP 비밀번호 입력이 중복되었습니다."
+    );
+  }
+  const suppliedPassword = input.password ?? input.appPassword;
+  if (typeof suppliedPassword !== "string") {
+    throw new AdminEmailSettingsError(
+      "invalid_request",
+      "SMTP 비밀번호 또는 앱 비밀번호를 입력해주세요."
+    );
+  }
+  const appPassword = normalizeSmtpPassword(suppliedPassword, host);
   const replyTo = normalizeReplyTo(input.replyTo);
 
   return requestAdminEmailSettings({
     action: "stage",
+    host,
+    port,
+    securityMode,
     username,
     appPassword,
     ...(replyTo ? { replyTo } : {}),

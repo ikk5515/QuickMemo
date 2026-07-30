@@ -51,9 +51,9 @@ without changing the existing end-to-end content encryption boundary.
   `<select>` behavior and caller classes, but removes the unified
   `app-select` theme class.
 - `SECURE_SHARE_EMAIL_ENABLED=true` is required before OTP delivery is
-  available. It must remain false until the Gmail SMTP account, Google app
-  password, matching From address, provider health, and actual receipt are
-  verified on the exact Production SHA. The normal proof is the in-app
+  available. It must remain false until the selected SMTP account,
+  password/app password, matching From address, provider health, and actual
+  receipt are verified on the exact Production SHA. The normal proof is the in-app
   `stage` → `send-test` → six-digit `confirm-test` flow; an approved automated
   mailbox smoke is optional.
 - Email false does not disable Core v2. Existing email-gated policies and
@@ -271,34 +271,44 @@ the ambiguous counter, and the user may request a new challenge only after the
 cooldown. The OTP value and allowlist result never determine the response
 delay. Provider failure remains fail closed and never downgrades the policy.
 
-### Gmail SMTP provider
+### Managed SMTP provider
 
 Production accepts only `SHARE_EMAIL_PROVIDER=gmail_smtp`. Nodemailer and the
-Gmail adapter stay inside the server API boundary and must not enter a browser
-bundle. The default transport is:
+SMTP adapter stay inside the server API boundary and must not enter a browser
+bundle. The provider ID and health-document path retain their legacy Gmail
+names for data compatibility. Administrator-managed transport is restricted to:
 
-- `smtp.gmail.com` on port 465,
-- implicit TLS with `secure=true`,
+- `smtp.gmail.com` on port 465 with implicit TLS, or port 587 with mandatory
+  STARTTLS,
+- `smtp-mail.outlook.com` on port 587 with mandatory STARTTLS, or
+- `smtp.office365.com` on port 587 with mandatory STARTTLS.
+
+Every profile uses:
+
 - certificate verification enabled and TLS 1.2 or newer,
 - `pool=false`, `logger=false`, and `debug=false`,
 - file and URL access disabled,
 - exactly one recipient and no attachments.
 
-The administrator-managed Production path is fixed to port 465 and does not
-offer port selection or fallback. Port 587/STARTTLS variables remain only for
-local/CI legacy compatibility and are not a Production activation path. Port
-25, plaintext SMTP, disabled certificate verification, and automatic
-465-to-587 fallback are prohibited.
+An administrator may select only those exact host/port/TLS profiles. Arbitrary
+hosts, IP literals, private or metadata endpoints, port 25, plaintext SMTP,
+disabled certificate verification, opportunistic downgrade, and automatic
+465-to-587 fallback are prohibited. This allowlist prevents the settings API
+from becoming an SSRF or port-scanning primitive.
 
-Use a dedicated personal Gmail account with two-step verification and a
-Google-generated app password. Never use the Google account password. An
-administrator stages the address and app password through the in-app email
-settings page. The server encrypts the credential before storing it and never
-returns it to the browser. It is never a `VITE_` value, CLI argument, log
-field, committed example, or Vercel API mutation. The Gmail username, From,
-and SMTP envelope sender resolve to the same Gmail address. The display name
-is exactly `QuickMemo`. `quickmemo-tan.vercel.app` is the application and
-share origin, not a mail domain or From alias.
+For Gmail, use two-step verification and a Google-generated app password.
+The authenticated username may be either `@gmail.com` or a complete Google
+Workspace address such as a school domain; Workspace policy must permit app
+passwords. For Outlook.com and Microsoft 365, password-based SMTP is a
+compatibility path only: Microsoft may require Modern Auth or disable SMTP
+AUTH for the account or tenant. An administrator stages the account and
+password/app password through the in-app email settings page. The server
+encrypts the credential before storing it and never returns it to the browser.
+It is never a `VITE_` value, CLI argument, log field, committed example, or
+Vercel API mutation. The authenticated username, From, and SMTP envelope sender
+must resolve to the same normalized address. The display name is exactly
+`QuickMemo`. `quickmemo-tan.vercel.app` is the application and share origin,
+not a mail domain or From alias.
 
 The fixed subject is `QuickMemo 공유 노트 인증번호`. The plain-text body contains
 only the six-digit code, its ten-minute lifetime, the ignore-if-unrequested
@@ -309,7 +319,7 @@ The legacy Resend adapter is reachable only under `NODE_ENV=test` as a
 local/CI compatibility mock. It is not a Production provider, fallback, or
 automatic migration path.
 
-### Administrator-managed Gmail settings
+### Administrator-managed SMTP settings
 
 `POST /api/admin-email-settings` accepts only JSON and the explicit actions
 `status`, `stage`, `send-test`, `confirm-test`, `disable`,
@@ -328,13 +338,13 @@ an idempotency key, and consume a preconditioned, distributed Firestore rate
 bucket. The read-only `status` action does not force a fresh sign-in. The
 server writes a bounded redacted audit event containing the actor UID, action,
 generation, result, request ID, and retention timestamps only. It never
-writes the Gmail address, app password, test code, message text, or raw SMTP
+writes the SMTP account, password, test code, message text, or raw SMTP
 response to audit or rate-limit state.
 
 An admin idempotency key is replayable only for the same unexpired canonical
 request. A server-secret HMAC binds it to the actor UID, action, and the
-normalized action payload: staged Gmail credentials, test generation,
-confirmation code, or removal target/generation as applicable. Firestore
+normalized action payload: staged host, port, TLS mode and credentials, test
+generation, confirmation code, or removal target/generation as applicable. Firestore
 stores only that fixed-length digest, never the raw credential or code. A
 malformed or expired record, or reuse of the key with a different actor,
 action, or payload, fails with `409 conflict`; the administrator must retry
@@ -349,24 +359,28 @@ stored enable intent: a confirmed `active` slot can therefore be present while
 The server-only
 `SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1` value is a canonical base64url
 encoding of exactly 32 random bytes. It is configured once as a protected
-Production environment secret and must not be a `VITE_` value. Each Gmail
-credential slot is encrypted with AES-256-GCM using a fresh 96-bit nonce. The
-authenticated additional data binds the ciphertext to the Firebase project
-ID, slot (`pending` or `active`), and random generation. Moving ciphertext
-between projects, slots, or generations therefore fails authentication.
+Production environment secret and must not be a `VITE_` value. Each credential
+slot is encrypted with AES-256-GCM using a fresh 96-bit nonce. The authenticated
+additional data binds the ciphertext version to the Firebase project ID, slot
+(`pending` or `active`), and random generation. Existing fixed-Gmail version 1
+ciphertexts remain readable without reinterpretation; new managed SMTP slots
+use version 2. Moving either version between projects, slots, or generations
+therefore fails authentication.
 
 `secureShareEmailSettings/current` contains separate `pending` and `active`
-slots. Client responses contain only presence, generation, bounded
-timestamps, attempt counts, and masked addresses. `stage` validates a Gmail
-address, a 16-character Google app password (ASCII display spaces may be
-removed; hyphens and other whitespace are rejected), and an optional
-Reply-To, then calls `transporter.verify()`. A stage or verify failure never
-replaces the active slot.
+slots. Client responses contain only presence, generation, bounded timestamps,
+attempt counts, selected non-secret host/port/TLS mode, and masked addresses.
+`stage` validates an allowlisted transport, a normalized email account, a
+bounded password/app password with no control characters, and an optional
+Reply-To, then calls `transporter.verify()`. For Gmail only, the common
+four-groups-of-four display form of an app password has its three ASCII spaces
+removed. Other passwords are preserved exactly. A stage or verify failure
+never replaces the active slot.
 
-`send-test` sends exactly one message to the pending Gmail account itself and
+`send-test` sends exactly one message to the pending SMTP account itself and
 stores only an HMAC of its six-digit code. `confirm-test` accepts that code
 only for the same pending generation and therefore verifies access to the
-configured Gmail mailbox before promotion. It uses an
+configured mailbox before promotion. It uses an
 update-time/generation compare-and-set, a ten-minute expiry, and a five-attempt
 limit before re-encrypting the pending credential for the active slot. The
 provider-health record is reset and bound to that exact active generation.
@@ -853,7 +867,7 @@ Default server-side buckets:
 - password: share and IP, 5 attempts per 15 minutes; IP, 20 per hour,
 - OTP send: share and email, 3 per 15 minutes and a conservative hourly-sharded
   10 per rolling 24 hours; IP, 20 per hour; share total, 20 per hour,
-- Gmail SMTP attempts: 3 globally per minute and 20 per hour, plus the
+- SMTP attempts: 3 globally per minute and 20 per hour, plus the
   rolling-24-hour and KST-month hard stops described above,
 - OTP verify: 5 per challenge,
 - comments: session and share, 5 per minute and 50 per day,
@@ -893,12 +907,12 @@ base64url encoding of exactly 32 random bytes. Configure those application
 secrets through stdin or an equivalent non-logging Vercel workflow, and report
 only whether each variable exists.
 
-Do not copy the Gmail address, app password, From, or Reply-To into Vercel
-Production environment variables. Enter them only in the administrator email
-settings page. The server fixes Gmail to `smtp.gmail.com:465` with implicit TLS,
-normalizes the address, strips only ASCII spaces from the 16-character app
-password, verifies the transport, and encrypts the pending slot before it is
-stored. The `SHARE_SMTP_*`, `SHARE_EMAIL_FROM*`, and
+Do not copy an SMTP account, password/app password, From, or Reply-To into
+Vercel Production environment variables. Enter them only in the administrator
+email settings page. The server accepts only the three reviewed Gmail,
+Outlook.com, and Microsoft 365 profiles above, requires their matching TLS
+mode, normalizes the address, verifies the transport, and encrypts the pending
+slot before it is stored. The `SHARE_SMTP_*`, `SHARE_EMAIL_FROM*`, and
 `SHARE_EMAIL_REPLY_TO` names in `.env.example` exist only for local/CI
 compatibility tests and remain empty in Production.
 
@@ -923,12 +937,12 @@ Email readiness additionally requires all of the following:
 - a schema-valid `secureShareEmailSettings/current` document whose stored
   enable intent is true and whose confirmed `active` slot decrypts and
   authenticates for the current project, slot, and generation
-- an active slot that resolves to the fixed Gmail transport
-  `smtp.gmail.com:465`, implicit TLS, the same Gmail username/From/envelope
-  sender, display name `QuickMemo`, and exact free-tier mode
+- an active slot that resolves to one allowlisted host/port/TLS profile, the
+  same normalized SMTP username/From/envelope sender, display name `QuickMemo`,
+  and exact free-tier mode
 - rolling-24-hour 20/30, KST-month 500/700, and global 3/minute and 20/hour
   caps, or reviewed lower values
-- actual receipt proven by `stage` → `send-test` to the staged Gmail address →
+- actual receipt proven by `stage` → `send-test` to the staged SMTP address →
   six-digit `confirm-test` for the same generation; an approved automated
   mailbox API or read-only IMAP smoke is optional
 
@@ -1115,12 +1129,12 @@ Vercel/Firebase usage evidence before activation.
     accessibility, console, and network-response smoke. Remove every synthetic
     share/account created by the smoke.
 12. Keep `SECURE_SHARE_EMAIL_ENABLED=false` while an administrator uses the
-    in-app email settings page to stage the dedicated Gmail address and app
-    password, send one test through the fixed port-465 TLS transport to that
-    same mailbox, and confirm the received six-digit code for the same
-    generation. An approved mailbox API or read-only IMAP check may automate
-    this receipt proof but is not required. Enable the independent email flag
-    and redeploy only after that confirmation and provider-health checks pass.
+    in-app email settings page to stage an allowlisted SMTP profile, account and
+    password/app password, send one test to that same mailbox, and confirm the
+    received six-digit code for the same generation. An approved mailbox API or
+    read-only mailbox check may automate this receipt proof but is not required.
+    Enable the independent email flag and redeploy only after that confirmation
+    and provider-health checks pass.
     Then run synthetic OTP wrong/correct/reuse/expiry/resend/quota checks and
     remove the synthetic data. Without either the in-app receipt confirmation
     or equivalent automated receipt evidence, leave the flag false.
@@ -1132,7 +1146,7 @@ sharing.
 
 ## Rollback
 
-For an email-only incident, quota uncertainty, Gmail authentication change, or
+For an email-only incident, quota uncertainty, SMTP authentication change, or
 mailbox-smoke failure, first set `SECURE_SHARE_EMAIL_ENABLED=false` and
 redeploy the last CI-green SHA. Do not weaken an email policy, change it to
 link-only, raise a quota, or enable a paid/fallback provider. Keep the

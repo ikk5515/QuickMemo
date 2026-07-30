@@ -38,6 +38,9 @@ function settings(overrides: Partial<AdminEmailSettingsStatus> = {}): AdminEmail
     active: {
       present: false,
       generation: null,
+      host: null,
+      port: null,
+      securityMode: null,
       usernameMasked: null,
       replyToMasked: null,
       verifiedAt: null,
@@ -49,6 +52,9 @@ function settings(overrides: Partial<AdminEmailSettingsStatus> = {}): AdminEmail
     pending: {
       present: false,
       generation: null,
+      host: null,
+      port: null,
+      securityMode: null,
       usernameMasked: null,
       replyToMasked: null,
       verifiedAt: null,
@@ -69,15 +75,15 @@ describe("AdminEmailSettingsPanel", () => {
     serviceMocks.getStatus.mockResolvedValue(settings());
   });
 
-  it("presents fixed TLS settings and never asks for the QuickMemo password", async () => {
+  it("defaults to the trusted Gmail TLS profile and never asks for the QuickMemo password", async () => {
     render(<AdminEmailSettingsPanel />);
 
-    expect(await screen.findByText("smtp.gmail.com")).toBeInTheDocument();
+    expect(await screen.findByLabelText("SMTP 서버")).toHaveValue("smtp.gmail.com");
     expect(screen.getByRole("tabpanel")).toHaveAttribute("id", "admin-email-settings-panel");
     expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", "admin-email-settings-tab");
     expect(screen.getByText("포트 465")).toBeInTheDocument();
     expect(screen.getByText("Implicit TLS · TLS 1.2 이상")).toBeInTheDocument();
-    const passwordInput = screen.getByLabelText("Google 앱 비밀번호");
+    const passwordInput = screen.getByLabelText("SMTP 비밀번호 / 앱 비밀번호");
     const settingsForm = passwordInput.closest("form");
     expect(passwordInput).toHaveAttribute("type", "password");
     expect(passwordInput).toHaveAttribute("autocomplete", "new-password");
@@ -85,6 +91,7 @@ describe("AdminEmailSettingsPanel", () => {
     expect(settingsForm).toHaveAttribute("autocomplete", "off");
     expect(settingsForm).toHaveAttribute("data-bwignore", "true");
     expect(screen.getByText(/비밀번호 저장을 제안하면 거부/u)).toBeInTheDocument();
+    expect(screen.getByText(/검증된 Gmail·Outlook SMTP 서버 3개만/u)).toBeInTheDocument();
     expect(screen.queryByLabelText("QuickMemo 비밀번호")).not.toBeInTheDocument();
   });
 
@@ -99,6 +106,32 @@ describe("AdminEmailSettingsPanel", () => {
     expect(disabledInputRule).toContain("opacity: 1");
   });
 
+  it("offers only trusted Gmail and Outlook profiles and explains the Modern Auth limit", async () => {
+    const user = userEvent.setup();
+    render(<AdminEmailSettingsPanel />);
+
+    const preset = await screen.findByLabelText("빠른 설정");
+    await waitFor(() => expect(preset).not.toBeDisabled());
+    expect(screen.getByLabelText("SMTP 서버")).toHaveValue("smtp.gmail.com");
+
+    await user.type(
+      screen.getByLabelText("SMTP 비밀번호 / 앱 비밀번호"),
+      "abcdefghijklmnop"
+    );
+    await user.selectOptions(preset, "outlook");
+
+    expect(screen.getByLabelText("SMTP 서버")).toHaveValue("smtp-mail.outlook.com");
+    expect(screen.getByLabelText("SMTP 포트")).toHaveValue("587");
+    expect(screen.getByLabelText("TLS 보안 방식")).toHaveValue("starttls");
+    expect(screen.getByLabelText("SMTP 비밀번호 / 앱 비밀번호")).toHaveValue("");
+    expect(screen.getByText(/OAuth2\(Modern Auth\)를 지원하지 않으므로/u)).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /직접 입력/u })).not.toBeInTheDocument();
+
+    await user.selectOptions(preset, "microsoft365");
+    expect(screen.getByLabelText("SMTP 서버")).toHaveValue("smtp.office365.com");
+    expect(screen.getByLabelText("SMTP 포트")).toHaveValue("587");
+  });
+
   it("clears the app password from React-controlled DOM immediately after staging starts", async () => {
     let resolveStage: ((value: AdminEmailSettingsStatus) => void) | undefined;
     serviceMocks.stage.mockImplementation(() => new Promise<AdminEmailSettingsStatus>((resolve) => {
@@ -107,20 +140,23 @@ describe("AdminEmailSettingsPanel", () => {
     const user = userEvent.setup();
 
     render(<AdminEmailSettingsPanel />);
-    await waitFor(() => expect(screen.getByLabelText("Gmail 주소")).not.toBeDisabled());
+    await waitFor(() => expect(screen.getByLabelText("SMTP 사용자 이메일")).not.toBeDisabled());
 
-    await user.type(screen.getByLabelText("Gmail 주소"), "quickmemo.test@gmail.com");
-    await user.type(screen.getByLabelText("Google 앱 비밀번호"), "abcdefghijklmnop");
+    await user.type(screen.getByLabelText("SMTP 사용자 이메일"), "quickmemo.test@gmail.com");
+    await user.type(screen.getByLabelText("SMTP 비밀번호 / 앱 비밀번호"), "abcdefghijklmnop");
     await user.type(screen.getByLabelText(/Reply-To/u), "reply@example.com");
     await user.click(screen.getByRole("button", { name: "새 설정 임시 저장" }));
 
     expect(serviceMocks.stage).toHaveBeenCalledWith({
+      host: "smtp.gmail.com",
+      port: 465,
+      securityMode: "implicit_tls",
       username: "quickmemo.test@gmail.com",
-      appPassword: "abcdefghijklmnop",
+      password: "abcdefghijklmnop",
       replyTo: "reply@example.com"
     });
-    expect(screen.getByLabelText("Google 앱 비밀번호")).toHaveValue("");
-    expect(screen.getByLabelText("Gmail 주소")).toBeDisabled();
+    expect(screen.getByLabelText("SMTP 비밀번호 / 앱 비밀번호")).toHaveValue("");
+    expect(screen.getByLabelText("SMTP 사용자 이메일")).toBeDisabled();
 
     resolveStage?.(settings({
       pending: {
@@ -131,9 +167,9 @@ describe("AdminEmailSettingsPanel", () => {
       }
     }));
     await screen.findByText(/새 설정을 임시 저장했습니다/u);
-    expect(screen.getByLabelText("Gmail 주소")).toHaveValue("");
+    expect(screen.getByLabelText("SMTP 사용자 이메일")).toHaveValue("");
     expect(screen.getByLabelText(/Reply-To/u)).toHaveValue("");
-    expect(screen.getByLabelText("Gmail 주소")).not.toBeDisabled();
+    expect(screen.getByLabelText("SMTP 사용자 이메일")).not.toBeDisabled();
   });
 
   it("sends the test only through the pending generation and activates after a six-digit code", async () => {
@@ -171,10 +207,10 @@ describe("AdminEmailSettingsPanel", () => {
     render(<AdminEmailSettingsPanel />);
     expect(await screen.findByText(/테스트 메일 발송이 완료되면/u)).toBeInTheDocument();
     expect(screen.queryByLabelText("6자리 인증 코드")).not.toBeInTheDocument();
-    await user.click(await screen.findByRole("button", { name: "내 Gmail로 테스트 발송" }));
+    await user.click(await screen.findByRole("button", { name: "설정 주소로 테스트 발송" }));
 
     expect(serviceMocks.sendTest).toHaveBeenCalledWith({ generation: "pending_012345678" });
-    expect(await screen.findByText(/설정한 Gmail 주소로 테스트 메일/u)).toBeInTheDocument();
+    expect(await screen.findByText(/설정한 SMTP 사용자 이메일로 테스트 메일/u)).toBeInTheDocument();
 
     const codeInput = screen.getByLabelText("6자리 인증 코드");
     await user.type(codeInput, "123456");
@@ -256,7 +292,7 @@ describe("AdminEmailSettingsPanel", () => {
 
     expect(codeInput).toHaveValue("");
     expect(codeInput).toBeDisabled();
-    expect(screen.getByRole("button", { name: "내 Gmail로 테스트 발송" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "설정 주소로 테스트 발송" })).toBeDisabled();
 
     resolveConfirm?.(pendingSettings);
     await waitFor(() => expect(codeInput).not.toBeDisabled());
@@ -297,6 +333,43 @@ describe("AdminEmailSettingsPanel", () => {
     expect(serviceMocks.getStatus).toHaveBeenCalledTimes(2);
   });
 
+  it("requires a status refresh after SMTP test delivery fails", async () => {
+    const pendingSettings = settings({
+      pending: {
+        ...settings().pending,
+        present: true,
+        generation: "pending_012345678",
+        usernameMasked: "q***@gmail.com",
+        attemptsRemaining: 5
+      }
+    });
+    serviceMocks.getStatus.mockResolvedValue(pendingSettings);
+    serviceMocks.sendTest.mockRejectedValue(new AdminEmailSettingsError(
+      "smtp_verification_failed",
+      "SMTP 연결을 확인하지 못했습니다.",
+      503
+    ));
+    const user = userEvent.setup();
+
+    render(<AdminEmailSettingsPanel />);
+    const sendButton = await screen.findByRole("button", {
+      name: "설정 주소로 테스트 발송"
+    });
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    await user.click(sendButton);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "SMTP 연결을 확인하지 못했습니다."
+    );
+    expect(sendButton).toBeDisabled();
+
+    await user.click(screen.getByRole("button", {
+      name: "이메일 설정 상태 새로고침"
+    }));
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    expect(serviceMocks.getStatus).toHaveBeenCalledTimes(2);
+  });
+
   it("shows a safe re-login instruction and does not echo server content", async () => {
     serviceMocks.stage.mockRejectedValue(new AdminEmailSettingsError(
       "recent_auth_required",
@@ -306,12 +379,12 @@ describe("AdminEmailSettingsPanel", () => {
     const user = userEvent.setup();
 
     render(<AdminEmailSettingsPanel />);
-    await waitFor(() => expect(screen.getByLabelText("Gmail 주소")).not.toBeDisabled());
-    await user.type(screen.getByLabelText("Gmail 주소"), "quickmemo.test@gmail.com");
-    await user.type(screen.getByLabelText("Google 앱 비밀번호"), "abcdefghijklmnop");
+    await waitFor(() => expect(screen.getByLabelText("SMTP 사용자 이메일")).not.toBeDisabled());
+    await user.type(screen.getByLabelText("SMTP 사용자 이메일"), "quickmemo.test@gmail.com");
+    await user.type(screen.getByLabelText("SMTP 비밀번호 / 앱 비밀번호"), "abcdefghijklmnop");
     await user.click(screen.getByRole("button", { name: "새 설정 임시 저장" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("보안을 위해 다시 로그인 후 시도해주세요.");
-    await waitFor(() => expect(screen.getByLabelText("Google 앱 비밀번호")).toHaveValue(""));
+    await waitFor(() => expect(screen.getByLabelText("SMTP 비밀번호 / 앱 비밀번호")).toHaveValue(""));
   });
 });

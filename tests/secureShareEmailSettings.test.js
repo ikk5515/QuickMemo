@@ -1,6 +1,7 @@
 /* global Buffer, process */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createCipheriv } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -16,6 +17,7 @@ import {
   gmailRuntimeEnvironment,
   idTokenHasRecentAdminAuthentication,
   loadSecureShareEmailRuntimeSnapshot,
+  normalizeSmtpSettingsInput,
   normalizeGmailSettingsInput,
   publicEmailSettingsStatus
 } from "../api/_secure-share-email-settings.js";
@@ -40,10 +42,55 @@ const baseEnvironment = {
   SHARE_PARTICIPANT_HMAC_KEY: "i".repeat(48)
 };
 const gmailSettings = {
+  host: "smtp.gmail.com",
+  port: 465,
+  securityMode: "implicit_tls",
   username: "quickmemo.settings.test@gmail.com",
   appPassword: "abcdefghijklmnop",
   replyTo: "reply@example.com"
 };
+
+function legacyEncryptedSettingsSlot(
+  settings,
+  { generation: boundGeneration, projectId: boundProjectId, slot }
+) {
+  const iv = Buffer.alloc(12, 0x33);
+  const plaintext = Buffer.from(JSON.stringify({
+    provider: "gmail_smtp",
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    requireTls: true,
+    username: settings.username,
+    appPassword: settings.appPassword,
+    fromAddress: settings.username,
+    fromName: "QuickMemo",
+    replyTo: settings.replyTo,
+    freeTierMode: true
+  }), "utf8");
+  const cipher = createCipheriv(
+    "aes-256-gcm",
+    Buffer.from(encryptionKey, "base64url"),
+    iv
+  );
+  cipher.setAAD(Buffer.from(JSON.stringify({
+    purpose: "quickmemo/secure-share/email-settings/v1",
+    projectId: boundProjectId,
+    slot,
+    generation: boundGeneration
+  }), "utf8"));
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  plaintext.fill(0);
+  return {
+    version: 1,
+    algorithm: "AES-256-GCM",
+    keyVersion: 1,
+    iv: iv.toString("base64url"),
+    ciphertext: ciphertext.toString("base64url"),
+    authTag: authTag.toString("base64url")
+  };
+}
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -51,18 +98,26 @@ afterEach(() => {
 });
 
 describe("Secure Share administrator email settings", () => {
-  it("normalizes only ASCII display spaces in an app password and rejects hyphens", () => {
+  it("normalizes Gmail display spaces but preserves generic SMTP passwords exactly", () => {
     expect(normalizeGmailSettingsInput({
       ...gmailSettings,
       appPassword: "abcd efgh ijkl mnop"
     }).appPassword).toBe("abcdefghijklmnop");
-    expect(() => normalizeGmailSettingsInput({
+    expect(normalizeSmtpSettingsInput({
       ...gmailSettings,
+      host: "smtp-mail.outlook.com",
+      port: 587,
+      securityMode: "starttls",
       appPassword: "abcd-efgh-ijkl-mnop"
-    })).toThrowError(expect.objectContaining({
-      code: "invalid_request",
-      statusCode: 400
-    }));
+    }).appPassword).toBe("abcd-efgh-ijkl-mnop");
+    const genericPassword = "  exact $mtp password  ";
+    expect(normalizeSmtpSettingsInput({
+      ...gmailSettings,
+      host: "smtp-mail.outlook.com",
+      port: 587,
+      securityMode: "starttls",
+      appPassword: genericPassword
+    }).appPassword).toBe(genericPassword);
     expect(() => normalizeGmailSettingsInput({
       ...gmailSettings,
       appPassword: "abcd\tefghijklmnop"
@@ -70,9 +125,69 @@ describe("Secure Share administrator email settings", () => {
       code: "invalid_request",
       statusCode: 400
     }));
-    expect(() => normalizeGmailSettingsInput({
+    expect(() => normalizeSmtpSettingsInput({
       ...gmailSettings,
-      username: "사용자@gmail.com"
+      appPassword: "x".repeat(257)
+    })).toThrowError(expect.objectContaining({
+      code: "invalid_request",
+      statusCode: 400
+    }));
+  });
+
+  it.each(["itc.ac.kr", "knou.ac.kr"])(
+    "accepts a Google Workspace school username at %s",
+    (domain) => {
+      expect(normalizeSmtpSettingsInput({
+        ...gmailSettings,
+        username: `student@${domain}`
+      })).toMatchObject({
+        host: "smtp.gmail.com",
+        port: 465,
+        securityMode: "implicit_tls",
+        username: `student@${domain}`
+      });
+    }
+  );
+
+  it.each([
+    ["arbitrary host", { host: "smtp.mailgun.org" }],
+    ["IPv4 host", { host: "127.0.0.1" }],
+    ["private IPv4 host", { host: "10.0.0.1" }],
+    ["IPv6 host", { host: "::1" }],
+    ["localhost", { host: "localhost" }],
+    ["private suffix", { host: "smtp.corp.internal" }],
+    ["trailing dot", { host: "smtp.gmail.com." }],
+    ["URL scheme", { host: "smtps://smtp.gmail.com" }],
+    ["port 25", { port: 25 }],
+    ["port 2525", { port: 2525 }],
+    [
+      "Gmail 465 with STARTTLS mode",
+      { port: 465, securityMode: "starttls" }
+    ],
+    [
+      "Gmail 587 with implicit TLS mode",
+      { port: 587, securityMode: "implicit_tls" }
+    ],
+    [
+      "Outlook 465 implicit TLS profile",
+      {
+        host: "smtp-mail.outlook.com",
+        port: 465,
+        securityMode: "implicit_tls"
+      }
+    ],
+    [
+      "Microsoft 365 465 implicit TLS profile",
+      {
+        host: "smtp.office365.com",
+        port: 465,
+        securityMode: "implicit_tls"
+      }
+    ]
+  ])("rejects an unsafe SMTP stage payload: %s", (_label, override) => {
+    expect(() => normalizeSmtpSettingsInput({
+      ...gmailSettings,
+      ...override
     })).toThrowError(expect.objectContaining({
       code: "invalid_request",
       statusCode: 400
@@ -241,6 +356,57 @@ describe("Secure Share administrator email settings", () => {
     }
   });
 
+  it("binds SMTP host, port, and security mode into the stage idempotency hash", () => {
+    vi.stubEnv(
+      "SHARE_RATE_LIMIT_HMAC_KEY",
+      baseEnvironment.SHARE_RATE_LIMIT_HMAC_KEY
+    );
+    const actorUid = "admin-user";
+    const common = {
+      action: "stage",
+      username: "student@knou.ac.kr",
+      appPassword: "abcdefghijklmnop",
+      replyTo: ""
+    };
+    const profiles = [
+      {
+        ...common,
+        host: "smtp.gmail.com",
+        port: 465,
+        securityMode: "implicit_tls"
+      },
+      {
+        ...common,
+        host: "smtp.gmail.com",
+        port: 587,
+        securityMode: "starttls"
+      },
+      {
+        ...common,
+        host: "smtp-mail.outlook.com",
+        port: 587,
+        securityMode: "starttls"
+      },
+      {
+        ...common,
+        host: "smtp.office365.com",
+        port: 587,
+        securityMode: "starttls"
+      }
+    ];
+    const hashes = profiles.map((body) => (
+      adminEmailSettingsRequestHash(actorUid, body)
+    ));
+
+    expect(new Set(hashes).size).toBe(profiles.length);
+    expect(adminEmailSettingsRequestHash(actorUid, {
+      ...profiles[0],
+      host: "SMTP.GMAIL.COM"
+    })).toBe(hashes[0]);
+    expect(JSON.stringify(hashes)).not.toContain(common.username);
+    expect(JSON.stringify(hashes)).not.toContain(common.appPassword);
+  });
+
   it("recovers only a structurally valid sending reservation after its deadline", () => {
     const now = Date.parse("2026-07-30T00:10:00.000Z");
     const pending = {
@@ -280,6 +446,7 @@ describe("Secure Share administrator email settings", () => {
       projectId,
       slot: "pending"
     });
+    expect(encrypted.version).toBe(2);
     const decrypted = decryptEmailSettingsSlot(encrypted, {
       environment: baseEnvironment,
       generation,
@@ -306,6 +473,73 @@ describe("Secure Share administrator email settings", () => {
         statusCode: 503
       }));
     }
+  });
+
+  it("round-trips v2 Outlook settings without changing the password", () => {
+    const settings = {
+      host: "smtp-mail.outlook.com",
+      port: 587,
+      securityMode: "starttls",
+      username: "student@itc.ac.kr",
+      appPassword: "  exact $mtp password  ",
+      replyTo: "reply@example.com"
+    };
+    const encrypted = encryptEmailSettingsSlot(settings, {
+      environment: baseEnvironment,
+      generation,
+      projectId,
+      slot: "pending"
+    });
+    const decrypted = decryptEmailSettingsSlot(encrypted, {
+      environment: baseEnvironment,
+      generation,
+      projectId,
+      slot: "pending"
+    });
+
+    expect(encrypted.version).toBe(2);
+    expect(decrypted.settings).toEqual(settings);
+    expect(decrypted.configuration).toMatchObject({
+      host: settings.host,
+      port: settings.port,
+      securityMode: settings.securityMode,
+      secure: false,
+      requireTls: true,
+      username: settings.username,
+      appPassword: settings.appPassword
+    });
+  });
+
+  it("decrypts an existing v1 Gmail slot and keeps its AAD binding", () => {
+    const encrypted = legacyEncryptedSettingsSlot(gmailSettings, {
+      generation,
+      projectId,
+      slot: "active"
+    });
+    const decrypted = decryptEmailSettingsSlot(encrypted, {
+      environment: baseEnvironment,
+      generation,
+      projectId,
+      slot: "active"
+    });
+
+    expect(decrypted.settings).toEqual(gmailSettings);
+    expect(decrypted.configuration).toMatchObject({
+      host: "smtp.gmail.com",
+      port: 465,
+      securityMode: "implicit_tls",
+      secure: true,
+      username: gmailSettings.username
+    });
+    expect(() => decryptEmailSettingsSlot(encrypted, {
+      environment: baseEnvironment,
+      generation,
+      projectId,
+      slot: "pending"
+    })).toThrowError(expect.objectContaining({
+      code: "email_settings_unavailable",
+      statusCode: 503
+    }));
   });
 
   it("requires a canonical base64url key encoding exactly 32 bytes", () => {
@@ -347,14 +581,19 @@ describe("Secure Share administrator email settings", () => {
         present: true,
         generation,
         usernameMasked: "q***t@gmail.com",
-        replyToMasked: "r***y@example.com"
+        replyToMasked: "r***y@example.com",
+        host: "smtp.gmail.com",
+        port: 465,
+        securityMode: "implicit_tls"
       }
     });
     const serialized = JSON.stringify(status);
     expect(serialized).not.toContain(gmailSettings.username);
     expect(serialized).not.toContain(gmailSettings.appPassword);
     expect(serialized).not.toContain(pending.encrypted.ciphertext);
+    expect(serialized).not.toContain(pending.encrypted.authTag);
     expect(serialized).not.toContain("encrypted");
+    expect(serialized).not.toContain("appPassword");
     expect(Date.parse(pending.expiresAt) - Date.parse(pending.stagedAt)).toBe(
       24 * 60 * 60 * 1000
     );

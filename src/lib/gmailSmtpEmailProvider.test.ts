@@ -132,48 +132,86 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("Gmail SMTP configuration", () => {
+describe("Managed SMTP configuration", () => {
   it.each([
     {
-      label: "implicit TLS on port 465",
+      label: "Gmail implicit TLS on port 465",
       environment: gmailEnvironment(),
       expected: {
+        host: "smtp.gmail.com",
         port: 465,
         requireTLS: false,
-        secure: true
+        secure: true,
+        username: smtpUsername
       }
     },
     {
-      label: "STARTTLS on port 587",
+      label: "Gmail mandatory STARTTLS on port 587",
       environment: gmailEnvironment({
         SHARE_SMTP_PORT: "587",
         SHARE_SMTP_REQUIRE_TLS: "true",
         SHARE_SMTP_SECURE: "false"
       }),
       expected: {
+        host: "smtp.gmail.com",
         port: 587,
         requireTLS: true,
-        secure: false
+        secure: false,
+        username: smtpUsername
+      }
+    },
+    {
+      label: "Outlook.com mandatory STARTTLS on port 587",
+      environment: gmailEnvironment({
+        SHARE_SMTP_HOST: "smtp-mail.outlook.com",
+        SHARE_SMTP_PORT: "587",
+        SHARE_SMTP_REQUIRE_TLS: "true",
+        SHARE_SMTP_SECURE: "false"
+      }),
+      expected: {
+        host: "smtp-mail.outlook.com",
+        port: 587,
+        requireTLS: true,
+        secure: false,
+        username: smtpUsername
+      }
+    },
+    {
+      label: "Microsoft 365 mandatory STARTTLS on port 587",
+      environment: gmailEnvironment({
+        SHARE_SMTP_HOST: "smtp.office365.com",
+        SHARE_SMTP_PORT: "587",
+        SHARE_SMTP_REQUIRE_TLS: "true",
+        SHARE_SMTP_SECURE: "false"
+      }),
+      expected: {
+        host: "smtp.office365.com",
+        port: 587,
+        requireTLS: true,
+        secure: false,
+        username: smtpUsername
       }
     }
-  ])("uses the locked Gmail transport for $label", ({ environment, expected }) => {
+  ])("uses a locked transport profile for $label", ({ environment, expected }) => {
     const transport = injectedTransport();
     const createTransport = vi.fn(() => transport);
 
     createGmailSmtpEmailAdapter({ createTransport, environment });
 
     expect(createTransport).toHaveBeenCalledExactlyOnceWith({
-      host: "smtp.gmail.com",
+      host: expected.host,
       port: expected.port,
       secure: expected.secure,
       requireTLS: expected.requireTLS,
+      ignoreTLS: false,
+      opportunisticTLS: false,
       pool: false,
       auth: {
-        user: smtpUsername,
+        user: expected.username,
         pass: smtpAppPassword
       },
       tls: {
-        servername: "smtp.gmail.com",
+        servername: expected.host,
         rejectUnauthorized: true,
         minVersion: "TLSv1.2"
       },
@@ -187,10 +225,74 @@ describe("Gmail SMTP configuration", () => {
     });
   });
 
+  it.each(["itc.ac.kr", "knou.ac.kr"])(
+    "accepts a Google Workspace school account at %s",
+    (domain) => {
+      const username = `student@${domain}`;
+      const createTransport = vi.fn(() => injectedTransport());
+
+      createGmailSmtpEmailAdapter({
+        createTransport,
+        environment: gmailEnvironment({
+          SHARE_EMAIL_FROM: `QuickMemo <${username}>`,
+          SHARE_SMTP_PORT: "587",
+          SHARE_SMTP_REQUIRE_TLS: "true",
+          SHARE_SMTP_SECURE: "false",
+          SHARE_SMTP_USERNAME: username
+        })
+      });
+
+      expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({
+        auth: {
+          user: username,
+          pass: smtpAppPassword
+        },
+        host: "smtp.gmail.com",
+        port: 587,
+        requireTLS: true,
+        secure: false
+      }));
+    }
+  );
+
+  it("preserves a generic SMTP password byte-for-byte", () => {
+    const password = "  exact $mtp password  ";
+    const createTransport = vi.fn(() => injectedTransport());
+
+    createGmailSmtpEmailAdapter({
+      createTransport,
+      environment: gmailEnvironment({
+        SHARE_SMTP_APP_PASSWORD: password,
+        SHARE_SMTP_HOST: "smtp-mail.outlook.com",
+        SHARE_SMTP_PORT: "587",
+        SHARE_SMTP_REQUIRE_TLS: "true",
+        SHARE_SMTP_SECURE: "false"
+      })
+    });
+
+    expect(createTransport).toHaveBeenCalledWith(expect.objectContaining({
+      auth: {
+        user: smtpUsername,
+        pass: password
+      }
+    }));
+  });
+
   it.each([
-    ["missing Gmail host", { SHARE_SMTP_HOST: undefined }],
-    ["non-Gmail host", { SHARE_SMTP_HOST: "smtp.example.com" }],
+    ["missing SMTP host", { SHARE_SMTP_HOST: undefined }],
+    ["an arbitrary public SMTP host", { SHARE_SMTP_HOST: "smtp.mailgun.org" }],
+    ["an IPv4 literal", { SHARE_SMTP_HOST: "127.0.0.1" }],
+    ["a private IPv4 literal", { SHARE_SMTP_HOST: "10.0.0.1" }],
+    ["an IPv6 literal", { SHARE_SMTP_HOST: "::1" }],
+    ["localhost", { SHARE_SMTP_HOST: "localhost" }],
+    ["a local suffix", { SHARE_SMTP_HOST: "mail.corp.internal" }],
+    ["a trailing dot", { SHARE_SMTP_HOST: "smtp.gmail.com." }],
+    ["a URL scheme", { SHARE_SMTP_HOST: "smtps://smtp.gmail.com" }],
     ["port 465 without implicit TLS", { SHARE_SMTP_SECURE: "false" }],
+    [
+      "port 465 with contradictory STARTTLS requirement",
+      { SHARE_SMTP_REQUIRE_TLS: "true" }
+    ],
     [
       "port 587 without mandatory STARTTLS",
       {
@@ -208,18 +310,19 @@ describe("Gmail SMTP configuration", () => {
       }
     ],
     ["unsupported SMTP port", { SHARE_SMTP_PORT: "25" }],
+    ["alternate unsupported SMTP port", { SHARE_SMTP_PORT: "2525" }],
     ["missing SMTP username", { SHARE_SMTP_USERNAME: undefined }],
-    ["non-Gmail username", { SHARE_SMTP_USERNAME: "sender@example.com" }],
     [
       "SMTP username header injection",
       { SHARE_SMTP_USERNAME: "quickmemo.sender@gmail.com\r\nMAIL FROM:<attacker@example.com>" }
     ],
     ["missing app password", { SHARE_SMTP_APP_PASSWORD: undefined }],
-    ["short app password", { SHARE_SMTP_APP_PASSWORD: "short-password" }],
-    ["spaced app password", { SHARE_SMTP_APP_PASSWORD: "abcd efgh ijkl mnop" }],
+    ["short SMTP password", { SHARE_SMTP_APP_PASSWORD: "short" }],
+    ["oversized SMTP password", { SHARE_SMTP_APP_PASSWORD: "x".repeat(257) }],
+    ["SMTP password control character", { SHARE_SMTP_APP_PASSWORD: "validpass\tword" }],
     ["missing From address", { SHARE_EMAIL_FROM: undefined }],
     [
-      "From address different from the authenticated Gmail account",
+      "From address different from the authenticated SMTP account",
       { SHARE_EMAIL_FROM: "QuickMemo <different@gmail.com>" }
     ],
     [
@@ -235,7 +338,7 @@ describe("Gmail SMTP configuration", () => {
       "reply-to header injection",
       { SHARE_EMAIL_REPLY_TO: "support@example.com\r\nBcc: attacker@example.com" }
     ],
-    ["non-Gmail provider", { SHARE_EMAIL_PROVIDER: "resend" }],
+    ["unsupported provider", { SHARE_EMAIL_PROVIDER: "resend" }],
     ["free-tier mode disabled", { SHARE_EMAIL_FREE_TIER_MODE: "false" }]
   ])("fails closed for %s", (_label, overrides) => {
     const createTransport = vi.fn(() => injectedTransport());
@@ -243,7 +346,7 @@ describe("Gmail SMTP configuration", () => {
     expect(() => createGmailSmtpEmailAdapter({
       createTransport,
       environment: gmailEnvironment(overrides)
-    })).toThrowError("Gmail SMTP configuration is unavailable");
+    })).toThrowError("SMTP configuration is unavailable");
     expect(createTransport).not.toHaveBeenCalled();
   });
 

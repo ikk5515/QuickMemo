@@ -17,6 +17,7 @@ import {
   gmailSmtpConfiguration,
   hmacDigest,
   normalizeEmail,
+  normalizeSmtpTransport,
   randomToken,
   requiredSecret,
   secureShareEmailReadiness,
@@ -27,7 +28,8 @@ export const secureShareEmailSettingsPath = "secureShareEmailSettings/current";
 export const secureShareEmailProviderHealthPath =
   "publicShareEmailProviderHealth/gmail-smtp";
 const settingsSchemaVersion = 1;
-const encryptedSlotVersion = 1;
+const encryptedSlotVersion = 2;
+const legacyEncryptedSlotVersion = 1;
 const encryptionKeyVersion = 1;
 const runtimeCacheMilliseconds = 5_000;
 const testCodeTtlMilliseconds = 10 * 60 * 1000;
@@ -41,9 +43,6 @@ const adminAuditRetentionMilliseconds = 180 * 24 * 60 * 60 * 1000;
 const generationPattern = /^[A-Za-z0-9_-]{16,64}$/u;
 const idempotencyPattern = /^[A-Za-z0-9_-]{16,128}$/u;
 const requestHashPattern = /^[A-Za-z0-9_-]{43}$/u;
-const gmailAppPasswordPattern = /^[A-Za-z0-9]{16}$/u;
-const gmailAddressPattern =
-  /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@gmail\.com$/u;
 const encryptedTextPattern = /^[A-Za-z0-9_-]{16,8192}$/u;
 const exactEncryptionKeyPattern = /^[A-Za-z0-9_-]{43}$/u;
 const runtimeCache = new Map();
@@ -121,17 +120,18 @@ function encryptionKey(environment = process.env) {
   return decoded;
 }
 
-function encryptionAad(projectId, slot, generation) {
+function encryptionAad(projectId, slot, generation, version) {
   if (
     !/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u.test(projectId)
     || !new Set(["active", "pending"]).has(slot)
     || !generationPattern.test(generation)
+    || !new Set([legacyEncryptedSlotVersion, encryptedSlotVersion]).has(version)
   ) {
     throw settingsUnavailable();
   }
   return Buffer.from(
     JSON.stringify({
-      purpose: "quickmemo/secure-share/email-settings/v1",
+      purpose: `quickmemo/secure-share/email-settings/v${version}`,
       projectId,
       slot,
       generation
@@ -148,32 +148,77 @@ function hasControlCharacter(value) {
     });
 }
 
-export function normalizeGmailSettingsInput(input) {
+function normalizedSmtpPassword(value, host) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  if (
+    host === "smtp.gmail.com"
+    && /^[A-Za-z0-9]{4}( [A-Za-z0-9]{4}){3}$/u.test(value)
+  ) {
+    return value.split(" ").join("");
+  }
+  return value;
+}
+
+function validSmtpPassword(value) {
+  return (
+    typeof value === "string"
+    && value.length >= 8
+    && value.length <= 256
+    && Buffer.byteLength(value, "utf8") <= 512
+    && !hasControlCharacter(value)
+  );
+}
+
+export function normalizeSmtpSettingsInput(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
-    throw new HttpError(400, "invalid_request", "Invalid Gmail settings");
+    throw new HttpError(400, "invalid_request", "Invalid SMTP settings");
   }
   let username;
   let replyTo = "";
+  let transport;
   try {
     username = normalizeEmail(input.username);
     replyTo = input.replyTo ? normalizeEmail(input.replyTo) : "";
+    const port = input.port === undefined ? 465 : Number(input.port);
+    const securityMode = input.securityMode
+      ?? (port === 587 ? "starttls" : "implicit_tls");
+    transport = normalizeSmtpTransport(
+      input.host ?? "smtp.gmail.com",
+      port,
+      securityMode
+    );
   } catch {
-    throw new HttpError(400, "invalid_request", "Invalid Gmail settings");
+    throw new HttpError(400, "invalid_request", "Invalid SMTP settings");
   }
+  const { host, port, securityMode } = transport;
   const appPassword =
-    typeof input.appPassword === "string"
-      ? input.appPassword.split(" ").join("")
-      : "";
+    normalizedSmtpPassword(input.appPassword, host);
   if (
-    !gmailAddressPattern.test(username)
-    || hasControlCharacter(username)
-    || !gmailAppPasswordPattern.test(appPassword)
+    hasControlCharacter(username)
+    || (
+      host === "smtp.gmail.com"
+        ? !/^[A-Za-z0-9]{16}$/u.test(appPassword)
+        : !validSmtpPassword(appPassword)
+    )
     || (replyTo && hasControlCharacter(replyTo))
     || replyTo.endsWith("@quickmemo-tan.vercel.app")
   ) {
-    throw new HttpError(400, "invalid_request", "Invalid Gmail settings");
+    throw new HttpError(400, "invalid_request", "Invalid SMTP settings");
   }
-  return Object.freeze({ username, appPassword, replyTo });
+  return Object.freeze({
+    host,
+    port,
+    securityMode,
+    username,
+    appPassword,
+    replyTo
+  });
+}
+
+export function normalizeGmailSettingsInput(input) {
+  return normalizeSmtpSettingsInput(input);
 }
 
 export function idTokenHasRecentAdminAuthentication(
@@ -253,7 +298,7 @@ export function idTokenHasRecentAdminAuthentication(
 }
 
 export function gmailRuntimeEnvironment(settings, environment = process.env) {
-  const normalized = normalizeGmailSettingsInput(settings);
+  const normalized = normalizeSmtpSettingsInput(settings);
   return Object.freeze({
     ...environment,
     SHARE_EMAIL_PROVIDER: "gmail_smtp",
@@ -261,10 +306,12 @@ export function gmailRuntimeEnvironment(settings, environment = process.env) {
     SHARE_EMAIL_FROM: normalized.username,
     SHARE_EMAIL_FROM_NAME: "QuickMemo",
     SHARE_EMAIL_REPLY_TO: normalized.replyTo,
-    SHARE_SMTP_HOST: "smtp.gmail.com",
-    SHARE_SMTP_PORT: "465",
-    SHARE_SMTP_SECURE: "true",
-    SHARE_SMTP_REQUIRE_TLS: "true",
+    SHARE_SMTP_HOST: normalized.host,
+    SHARE_SMTP_PORT: String(normalized.port),
+    SHARE_SMTP_SECURE:
+      normalized.securityMode === "implicit_tls" ? "true" : "false",
+    SHARE_SMTP_REQUIRE_TLS:
+      normalized.securityMode === "starttls" ? "true" : "false",
     SHARE_SMTP_USERNAME: normalized.username,
     SHARE_SMTP_APP_PASSWORD: normalized.appPassword
   });
@@ -293,14 +340,15 @@ export function encryptEmailSettingsSlot(
   settings,
   { environment = process.env, generation, projectId, slot }
 ) {
-  const normalized = normalizeGmailSettingsInput(settings);
+  const normalized = normalizeSmtpSettingsInput(settings);
   const configuration = gmailSmtpConfiguration(
     gmailRuntimeEnvironment(normalized, environment)
   );
   const plaintext = Buffer.from(JSON.stringify({
-    provider: "gmail_smtp",
+    provider: "smtp",
     host: configuration.host,
     port: configuration.port,
+    securityMode: configuration.securityMode,
     secure: configuration.secure,
     requireTls: configuration.requireTls,
     username: configuration.username,
@@ -312,7 +360,12 @@ export function encryptEmailSettingsSlot(
   }), "utf8");
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(environment), iv);
-  cipher.setAAD(encryptionAad(projectId, slot, generation));
+  cipher.setAAD(encryptionAad(
+    projectId,
+    slot,
+    generation,
+    encryptedSlotVersion
+  ));
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const authTag = cipher.getAuthTag();
   plaintext.fill(0);
@@ -330,7 +383,8 @@ function validEncryptedSlot(value) {
   return Boolean(
     value
     && typeof value === "object"
-    && value.version === encryptedSlotVersion
+    && new Set([legacyEncryptedSlotVersion, encryptedSlotVersion])
+      .has(value.version)
     && value.algorithm === "AES-256-GCM"
     && value.keyVersion === encryptionKeyVersion
     && /^[A-Za-z0-9_-]{16}$/u.test(value.iv)
@@ -353,7 +407,12 @@ export function decryptEmailSettingsSlot(
       encryptionKey(environment),
       Buffer.from(encrypted.iv, "base64url")
     );
-    decipher.setAAD(encryptionAad(projectId, slot, generation));
+    decipher.setAAD(encryptionAad(
+      projectId,
+      slot,
+      generation,
+      encrypted.version
+    ));
     decipher.setAuthTag(Buffer.from(encrypted.authTag, "base64url"));
     plaintext = Buffer.concat([
       decipher.update(Buffer.from(encrypted.ciphertext, "base64url")),
@@ -363,15 +422,36 @@ export function decryptEmailSettingsSlot(
       throw settingsUnavailable();
     }
     const parsed = JSON.parse(plaintext.toString("utf8"));
-    const normalized = normalizeGmailSettingsInput(parsed);
+    const legacy = encrypted.version === legacyEncryptedSlotVersion;
+    const normalized = normalizeSmtpSettingsInput({
+      appPassword: parsed.appPassword,
+      host: parsed.host,
+      port: parsed.port,
+      replyTo: parsed.replyTo,
+      securityMode: legacy
+        ? "implicit_tls"
+        : parsed.securityMode,
+      username: parsed.username
+    });
     const runtimeEnvironment = gmailRuntimeEnvironment(normalized, environment);
     const configuration = gmailSmtpConfiguration(runtimeEnvironment);
+    const validLegacyPayload =
+      legacy
+      && parsed.provider === "gmail_smtp"
+      && parsed.host === "smtp.gmail.com"
+      && parsed.port === 465
+      && parsed.secure === true
+      && parsed.requireTls === true;
+    const validCurrentPayload =
+      !legacy
+      && parsed.provider === "smtp"
+      && parsed.host === configuration.host
+      && parsed.port === configuration.port
+      && parsed.securityMode === configuration.securityMode
+      && parsed.secure === configuration.secure
+      && parsed.requireTls === configuration.requireTls;
     if (
-      parsed.provider !== "gmail_smtp"
-      || parsed.host !== "smtp.gmail.com"
-      || parsed.port !== 465
-      || parsed.secure !== true
-      || parsed.requireTls !== true
+      (!validLegacyPayload && !validCurrentPayload)
       || parsed.fromAddress !== configuration.username
       || parsed.fromName !== "QuickMemo"
       || parsed.freeTierMode !== true
@@ -398,6 +478,19 @@ function validGeneration(value) {
 }
 
 function slotMetadata(slot) {
+  let metadataTransportValid = true;
+  if (slot?.encrypted?.version === encryptedSlotVersion) {
+    try {
+      metadataTransportValid =
+        normalizeSmtpTransport(
+          slot.host,
+          slot.port,
+          slot.securityMode
+        ).host === slot.host;
+    } catch {
+      metadataTransportValid = false;
+    }
+  }
   if (
     !slot
     || typeof slot !== "object"
@@ -407,6 +500,7 @@ function slotMetadata(slot) {
     || slot.usernameMasked.length > 320
     || typeof slot.replyToMasked !== "string"
     || slot.replyToMasked.length > 320
+    || !metadataTransportValid
   ) {
     return null;
   }
@@ -421,6 +515,9 @@ function publicSlot(slot) {
       generation: null,
       usernameMasked: null,
       replyToMasked: null,
+      host: null,
+      port: null,
+      securityMode: null,
       verifiedAt: null,
       stagedAt: null,
       testSentAt: null,
@@ -436,6 +533,16 @@ function publicSlot(slot) {
     generation: normalized.generation,
     usernameMasked: normalized.usernameMasked,
     replyToMasked: normalized.replyToMasked || null,
+    host: normalized.encrypted.version === legacyEncryptedSlotVersion
+      ? "smtp.gmail.com"
+      : normalized.host,
+    port: normalized.encrypted.version === legacyEncryptedSlotVersion
+      ? 465
+      : normalized.port,
+    securityMode:
+      normalized.encrypted.version === legacyEncryptedSlotVersion
+        ? "implicit_tls"
+        : normalized.securityMode,
     verifiedAt: normalizedTimestamp(normalized.verifiedAt) || null,
     stagedAt: normalizedTimestamp(normalized.stagedAt) || null,
     testSentAt: normalizedTimestamp(normalized.testSentAt) || null,
@@ -463,7 +570,7 @@ export function createPendingEmailSettingsSlot(
   settings,
   { environment = process.env, generation = randomToken(18), now = new Date(), projectId }
 ) {
-  const normalized = normalizeGmailSettingsInput(settings);
+  const normalized = normalizeSmtpSettingsInput(settings);
   return {
     generation,
     encrypted: encryptEmailSettingsSlot(normalized, {
@@ -474,6 +581,9 @@ export function createPendingEmailSettingsSlot(
     }),
     usernameMasked: maskEmailAddress(normalized.username),
     replyToMasked: normalized.replyTo ? maskEmailAddress(normalized.replyTo) : "",
+    host: normalized.host,
+    port: normalized.port,
+    securityMode: normalized.securityMode,
     stagedAt: now,
     expiresAt: new Date(now.getTime() + 24 * 60 * 60 * 1000),
     verifiedAt: undefined,
@@ -534,7 +644,7 @@ export function assertEmailSettingsTestSendAvailable(
   nowMilliseconds = Date.now()
 ) {
   if (!pending || typeof pending !== "object") {
-    throw conflict("Pending Gmail settings are unavailable");
+    throw conflict("Pending SMTP settings are unavailable");
   }
   if (pending.testState === "sending" || pending.testState === "ambiguous") {
     throw conflict("A test delivery is unresolved");
@@ -662,9 +772,12 @@ export function adminEmailSettingsRequestHash(actorUid, body) {
   }
   let canonicalPayload;
   if (body.action === "stage") {
-    const settings = normalizeGmailSettingsInput(body);
+    const settings = normalizeSmtpSettingsInput(body);
     canonicalPayload = [
       body.action,
+      settings.host,
+      settings.port,
+      settings.securityMode,
       settings.username,
       settings.appPassword,
       settings.replyTo
@@ -1009,13 +1122,23 @@ export async function safeSecureShareEmailRuntimeSnapshot(
 export function promotedActiveSlot(pending, now = new Date()) {
   const normalized = slotMetadata(pending);
   if (!normalized) {
-    throw conflict("Pending Gmail settings are unavailable");
+    throw conflict("Pending SMTP settings are unavailable");
   }
   return {
     generation: normalized.generation,
     encrypted: normalized.encrypted,
     usernameMasked: normalized.usernameMasked,
     replyToMasked: normalized.replyToMasked,
+    host: normalized.encrypted.version === legacyEncryptedSlotVersion
+      ? "smtp.gmail.com"
+      : normalized.host,
+    port: normalized.encrypted.version === legacyEncryptedSlotVersion
+      ? 465
+      : normalized.port,
+    securityMode:
+      normalized.encrypted.version === legacyEncryptedSlotVersion
+        ? "implicit_tls"
+        : normalized.securityMode,
     stagedAt: normalized.stagedAt,
     verifiedAt: now
   };
@@ -1027,7 +1150,7 @@ export function activeSlotForProject(
 ) {
   const normalized = slotMetadata(pending);
   if (!normalized) {
-    throw conflict("Pending Gmail settings are unavailable");
+    throw conflict("Pending SMTP settings are unavailable");
   }
   const decrypted = decryptEmailSettingsSlot(normalized.encrypted, {
     environment,

@@ -94,7 +94,10 @@ describe("admin email settings API client", () => {
     expect(headers.get("x-quickmemo-admin-email-settings")).toBe("1");
     expect(status.active).toMatchObject({
       present: true,
-      usernameMasked: "q***@gmail.com"
+      usernameMasked: "q***@gmail.com",
+      host: null,
+      port: null,
+      securityMode: null
     });
   });
 
@@ -117,7 +120,7 @@ describe("admin email settings API client", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("normalizes Gmail app-password grouping and sends it only in the stage body", async () => {
+  it("keeps the legacy Gmail input compatible while sending the locked transport contract", async () => {
     await stageAdminEmailSettings({
       username: " QuickMemo.Test@Gmail.com ",
       appPassword: "abcd efgh ijkl mnop",
@@ -129,6 +132,9 @@ describe("admin email settings API client", () => {
 
     expect(request).toMatchObject({
       action: "stage",
+      host: "smtp.gmail.com",
+      port: 465,
+      securityMode: "implicit_tls",
       username: "quickmemo.test@gmail.com",
       appPassword: "abcdefghijklmnop",
       replyTo: "reply@example.com"
@@ -137,10 +143,68 @@ describe("admin email settings API client", () => {
     expect(JSON.stringify(baseSettings)).not.toContain("abcdefghijklmnop");
   });
 
-  it("rejects invalid credentials before making a request", async () => {
+  it("accepts a Google Workspace school-domain username with required STARTTLS", async () => {
+    await stageAdminEmailSettings({
+      host: "smtp.gmail.com",
+      port: 587,
+      securityMode: "starttls",
+      username: " QuickMemo@School.Ac.Kr ",
+      password: "abcd efgh ijkl mnop"
+    });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(request).toMatchObject({
+      action: "stage",
+      host: "smtp.gmail.com",
+      port: 587,
+      securityMode: "starttls",
+      username: "quickmemo@school.ac.kr",
+      appPassword: "abcdefghijklmnop"
+    });
+    expect(request).not.toHaveProperty("password");
+  });
+
+  it("preserves a general Outlook SMTP password only in the one-time wire field", async () => {
+    const smtpPassword = "Outlook! smtp passphrase 2026";
+    await stageAdminEmailSettings({
+      host: "smtp-mail.outlook.com",
+      port: 587,
+      securityMode: "starttls",
+      username: " QuickMemo@Outlook.com ",
+      password: smtpPassword
+    });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    const request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    expect(request).toMatchObject({
+      host: "smtp-mail.outlook.com",
+      port: 587,
+      securityMode: "starttls",
+      username: "quickmemo@outlook.com",
+      appPassword: smtpPassword
+    });
+    expect(request).not.toHaveProperty("password");
+    expect(JSON.stringify(baseSettings)).not.toContain(smtpPassword);
+  });
+
+  it("rejects untrusted hosts and invalid TLS pairings before making a request", async () => {
     expect(() => stageAdminEmailSettings({
+      host: "smtp.attacker.example",
+      port: 587,
+      securityMode: "starttls",
       username: "admin@example.com",
-      appPassword: "not-an-app-password"
+      password: "long-enough-password"
+    })).toThrow(expect.objectContaining({
+      code: "invalid_request"
+    }));
+
+    expect(() => stageAdminEmailSettings({
+      host: "smtp.office365.com",
+      port: 465,
+      securityMode: "implicit_tls",
+      username: "admin@school.ac.kr",
+      password: "long-enough-password"
     })).toThrow(expect.objectContaining({
       code: "invalid_request"
     }));
@@ -171,6 +235,27 @@ describe("admin email settings API client", () => {
       code: "recent_auth_required",
       message: "보안을 위해 다시 로그인 후 시도해주세요."
     }));
+  });
+
+  it.each([
+    ["smtp_auth_failed", "SMTP 인증에 실패했습니다"],
+    ["smtp_connection_failed", "SMTP 서버에 연결하지 못했습니다"],
+    ["smtp_tls_failed", "SMTP TLS 보안 연결에 실패했습니다"],
+    ["smtp_verification_failed", "SMTP 연결을 확인하지 못했습니다"]
+  ])("maps %s to bounded guidance without echoing provider detail", async (code, message) => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      ok: false,
+      error: code,
+      message: "smtp.internal.example secret-password 535 private response"
+    }, 422));
+
+    const caught = await getAdminEmailSettingsStatus().catch((error: unknown) => error);
+    expect(caught).toEqual(expect.objectContaining({
+      code,
+      message: expect.stringContaining(message)
+    }));
+    expect((caught as Error).message).not.toContain("smtp.internal.example");
+    expect((caught as Error).message).not.toContain("secret-password");
   });
 
   it("parses bounded integer Retry-After seconds into minute and hour guidance", async () => {
@@ -242,6 +327,35 @@ describe("admin email settings API client", () => {
 
     await expect(getAdminEmailSettingsStatus()).rejects.toMatchObject({
       code: "invalid_response"
+    });
+  });
+
+  it("parses new transport metadata while keeping legacy status responses valid", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      ok: true,
+      settings: {
+        enabled: true,
+        active: {
+          ...baseSettings.active,
+          host: "smtp.office365.com",
+          port: 587,
+          securityMode: "starttls"
+        },
+        pending: { present: false }
+      }
+    }));
+
+    const status = await getAdminEmailSettingsStatus();
+    expect(status.active).toMatchObject({
+      host: "smtp.office365.com",
+      port: 587,
+      securityMode: "starttls"
+    });
+    expect(status.pending).toMatchObject({
+      present: false,
+      host: null,
+      port: null,
+      securityMode: null
     });
   });
 });

@@ -18,7 +18,7 @@ function productionEnvironment(overrides = {}) {
     SHARE_SMTP_HOST: "smtp.gmail.com",
     SHARE_SMTP_PORT: "465",
     SHARE_SMTP_SECURE: "true",
-    SHARE_SMTP_REQUIRE_TLS: "true",
+    SHARE_SMTP_REQUIRE_TLS: "false",
     SHARE_SMTP_USERNAME: "quickmemo.sender@gmail.com",
     SHARE_SMTP_APP_PASSWORD: "abcdefghijklmnop",
     SHARE_EMAIL_FROM: "quickmemo.sender@gmail.com",

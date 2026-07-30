@@ -48,7 +48,7 @@ function smtpFailure(reasonCode, options = {}) {
   const error = new HttpError(
     503,
     "email_feature_unavailable",
-    "Gmail SMTP delivery is unavailable",
+    "SMTP delivery is unavailable",
     {
       deliveryAmbiguous: options.deliveryAmbiguous === true,
       expose: false,
@@ -138,7 +138,14 @@ export function classifyGmailSmtpError(error) {
       responseCode
     };
   }
-  if (code === "EDNS" || code === "ECONNECTION" || code === "ECONNREFUSED" || code === "ESOCKET") {
+  if (
+    code === "EDNS"
+    || code === "EAI_AGAIN"
+    || code === "ENOTFOUND"
+    || code === "ECONNECTION"
+    || code === "ECONNREFUSED"
+    || code === "ESOCKET"
+  ) {
     return {
       blockedSeconds: 5 * 60,
       deliveryAmbiguous,
@@ -178,14 +185,16 @@ function transporterOptions(configuration) {
     host: configuration.host,
     port: configuration.port,
     secure: configuration.secure,
-    requireTLS: configuration.port === 587,
+    requireTLS: configuration.requireTls,
+    ignoreTLS: false,
+    opportunisticTLS: false,
     pool: false,
     auth: {
       user: configuration.username,
       pass: configuration.appPassword
     },
     tls: {
-      servername: "smtp.gmail.com",
+      servername: configuration.host,
       rejectUnauthorized: true,
       minVersion: "TLSv1.2"
     },
