@@ -13419,7 +13419,8 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
 }
 
 .secure-public-share-attachments > div,
-.secure-public-share-comment-list {
+.secure-public-share-comment-list,
+.secure-share-comment-list {
   display: grid;
   gap: 10px;
 }
@@ -13530,7 +13531,8 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   gap: 7px;
 }
 
-.secure-public-share-author-identity {
+.secure-public-share-author-identity,
+.secure-share-comment-author-identity {
   align-items: baseline;
   display: inline-flex;
   flex-wrap: wrap;
@@ -13539,11 +13541,13 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   min-width: 0;
 }
 
-.secure-public-share-author-identity strong {
+.secure-public-share-author-identity strong,
+.secure-share-comment-author-identity strong {
   overflow-wrap: anywhere;
 }
 
-.secure-public-share-ip-prefix {
+.secure-public-share-ip-prefix,
+.secure-share-comment-ip-prefix {
   color: var(--muted);
   font-size: 0.78em;
   font-weight: 650;
@@ -13610,7 +13614,8 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   font-weight: 750;
 }
 
-.secure-public-share-comment-list > article {
+.secure-public-share-comment-list > article,
+.secure-share-comment-list > article {
   background: var(--color-surface);
   border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-card);
@@ -13621,14 +13626,16 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   padding: 14px;
 }
 
-.secure-public-share-comment-list article > header {
+.secure-public-share-comment-list article > header,
+.secure-share-comment-list article > header {
   align-items: flex-start;
   display: flex;
   gap: 12px;
   justify-content: space-between;
 }
 
-.secure-public-share-comment-list article > header > div {
+.secure-public-share-comment-list article > header > div,
+.secure-share-comment-list article > header > div {
   align-items: center;
   display: flex;
   flex-wrap: wrap;
@@ -13636,7 +13643,8 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   min-width: 0;
 }
 
-.secure-public-share-author-badge {
+.secure-public-share-author-badge,
+.secure-share-comment-author-badge {
   background: var(--color-primary-subtle);
   border-radius: var(--radius-pill);
   color: var(--teal);
@@ -13645,20 +13653,23 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   padding: 4px 7px;
 }
 
-.secure-public-share-comment-list time {
+.secure-public-share-comment-list time,
+.secure-share-comment-list time {
   color: var(--muted);
   flex: 0 0 auto;
   font-size: 12px;
 }
 
-.secure-public-share-comment-list p {
+.secure-public-share-comment-list p,
+.secure-share-comment-list p {
   line-height: 1.6;
   margin: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
-.secure-public-share-comment-list article > button {
+.secure-public-share-comment-list article > button,
+.secure-share-comment-list article > button {
   justify-self: start;
   min-height: 36px;
 }
@@ -13794,7 +13805,8 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .secure-public-share-comment-list article > header {
+  .secure-public-share-comment-list article > header,
+  .secure-share-comment-list article > header {
     display: grid;
   }
 
@@ -13819,7 +13831,8 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
     width: 100%;
   }
 
-  .secure-public-share-comment-list time {
+  .secure-public-share-comment-list time,
+  .secure-share-comment-list time {
     white-space: normal;
   }
 }

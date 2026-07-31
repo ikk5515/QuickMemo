@@ -60,6 +60,7 @@ import {
 import { decryptAttachmentToBlob, decryptAttachmentToBytes } from "../lib/attachmentCrypto";
 import { decryptText, unwrapNoteKey } from "../lib/crypto";
 import { hasFeatureAccess } from "../lib/featureAccess";
+import { mapWithConcurrency } from "../lib/mapWithConcurrency";
 import {
   extractLibraryAttachmentText,
   libraryAttachmentExtractionMode,
@@ -401,21 +402,6 @@ function libraryKindIcon(item: LibraryViewItem) {
   }
 
   return <File size={19} />;
-}
-
-function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>) {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-
-  async function runWorker() {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await worker(items[index]);
-    }
-  }
-
-  return Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, runWorker)).then(() => results);
 }
 
 function safeReaderChunkLength(value: string, offset: number, maximum: number) {

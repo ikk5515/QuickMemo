@@ -821,6 +821,11 @@ async function fetchSecureShareResponse(options: SecureShareRequestOptions) {
   assertNoContentKey(options.body);
 
   const headers = new Headers({ accept: "application/json" });
+  const ownerAuthenticatedCommentRead = (
+    options.action === "comments"
+    && options.method === "GET"
+    && Boolean(options.idToken)
+  );
   const csrfToken = options.shareId
     ? csrfTokensByShareId.get(options.shareId)
     : undefined;
@@ -843,7 +848,7 @@ async function fetchSecureShareResponse(options: SecureShareRequestOptions) {
   if (options.body !== undefined) {
     headers.set("content-type", "application/json");
   }
-  if (csrfToken && contract.csrf !== "none") {
+  if (csrfToken && contract.csrf !== "none" && !ownerAuthenticatedCommentRead) {
     headers.set("x-csrf-token", csrfToken);
   } else if (contract.csrf === "after_session" && options.method !== "GET") {
     throw new SecureShareApiError(
@@ -863,7 +868,7 @@ async function fetchSecureShareResponse(options: SecureShareRequestOptions) {
       method: options.method,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       cache: "no-store",
-      credentials: "include",
+      credentials: ownerAuthenticatedCommentRead ? "omit" : "include",
       headers,
       redirect: "error",
       referrerPolicy: "no-referrer",

@@ -1,4 +1,5 @@
 const secureShareIdentifierPattern = /^[A-Za-z0-9_-]{6,128}$/u;
+const secureShareCommentCursorPattern = /^[A-Za-z0-9_-]{1,1000}$/u;
 
 export type SecureShareCommentBadge =
   | "admin"
@@ -192,9 +193,12 @@ export function parseSecureShareCommentsResponse(
 
   const nextCursor = value.nextCursor === null
     ? null
-    : safeString(value.nextCursor, 256);
+    : safeString(value.nextCursor, 1_000);
 
-  if (value.nextCursor !== null && !nextCursor) {
+  if (
+    value.nextCursor !== null
+    && (!nextCursor || !secureShareCommentCursorPattern.test(nextCursor))
+  ) {
     return null;
   }
 
@@ -224,7 +228,7 @@ export function mergeSecureShareComments(
   }
 
   return [
-    ...current.filter((comment) => !incomingIds.has(comment.id)),
-    ...uniqueIncoming
-  ];
+    ...uniqueIncoming,
+    ...current.filter((comment) => !incomingIds.has(comment.id))
+  ].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }

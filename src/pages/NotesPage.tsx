@@ -27,7 +27,6 @@ import {
   LockKeyhole,
   Loader2,
   Mail,
-  MessageCircle,
   PanelLeftOpen,
   PaintBucket,
   Paperclip,
@@ -74,11 +73,16 @@ import {
 import { Timestamp } from "firebase/firestore";
 import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
+import AttachmentPreviewModal from "../components/PublicAttachmentPreviewModal";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
+import {
+  SecureShareOwnerCommentsPanel,
+  type SecureShareOwnerCommentLoader,
+  type SecureShareOwnerCommentTarget
+} from "../components/SecureShareOwnerCommentsPanel";
 import { SecureShareSettingsModal } from "../components/SecureShareSettingsModal";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import {
   allowedAttachmentExtensions,
   attachmentDownloadName,
@@ -136,14 +140,8 @@ import {
   sanitizeEditorHtml,
   serializeEditorContent
 } from "../lib/editorContent";
-import {
-  maxPdfPreviewCanvasPixels,
-  maxPdfPreviewImagePixels,
-  maxPdfPreviewPageCssWidth,
-  maxPdfPreviewPages,
-  maxPdfPreviewTotalCanvasPixels,
-  pdfPreviewCanvasLayout
-} from "../lib/pdfPreviewCanvas";
+import type { PublicAttachmentPreviewState } from "../lib/publicAttachmentPreview";
+import { mapWithConcurrency } from "../lib/mapWithConcurrency";
 import {
   editorCellColors,
   editorImagePixelWidthBounds,
@@ -167,9 +165,7 @@ import {
 } from "../lib/documentPreview";
 import { safeRasterImageBytes } from "../lib/safeRasterImage";
 import {
-  mergeSecureShareComments,
   parseSecureShareCommentsResponse,
-  type SecureShareCommentDto,
   type SecureShareCommentsPage
 } from "../lib/secureShareComments";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
@@ -270,18 +266,6 @@ interface NoteDraft {
   fontSize: number;
 }
 
-interface SecureShareOwnerCommentTarget {
-  policyVersion: number;
-  shareId: string;
-  sourceNoteId: string;
-}
-
-type SecureShareOwnerCommentLoader = (
-  target: SecureShareOwnerCommentTarget,
-  cursor: string | null,
-  signal: AbortSignal
-) => Promise<SecureShareCommentsPage>;
-
 interface PersistedNoteResult {
   noteId: string;
   noteKey: CryptoKey;
@@ -301,17 +285,7 @@ interface PreviewNoteSaveResult {
   revision: number | null;
 }
 
-export interface AttachmentPreviewState {
-  bytes?: Uint8Array;
-  fileName: string;
-  fallbackHtml?: string;
-  html?: string;
-  kind: "docx" | "html" | "hwp" | "image" | "pdf" | "text" | "unsupported";
-  label: string;
-  srcDoc?: string;
-  text?: string;
-  url?: string;
-}
+export type AttachmentPreviewState = PublicAttachmentPreviewState;
 
 const blankEditor = (uid: string): EditorState => ({
   noteId: null,
@@ -422,6 +396,7 @@ const deletedNoteRetentionDays = 30;
 const historySummaryMaxLength = 420;
 const cursorPublishDelayMs = 220;
 const remoteCursorFreshMs = 15_000;
+const maxBrowserTimeoutMs = 2_147_483_647;
 const activeNoteClientStorageKey = "quickmemo-active-note-client-id";
 const noteSortStoragePrefix = "quickmemo-note-sort:";
 const noteFilterStoragePrefix = "quickmemo-note-filter:";
@@ -1202,6 +1177,44 @@ function freshRemoteCursorTimestamp(updatedAt: Date | null, clockMs: number) {
   return ageMs >= 0 && ageMs <= remoteCursorFreshMs;
 }
 
+export function scheduleNotesPageClockDeadline(
+  deadlineMilliseconds: number | null,
+  onDeadline: () => void
+) {
+  if (deadlineMilliseconds === null || !Number.isFinite(deadlineMilliseconds)) {
+    return () => undefined;
+  }
+
+  let cancelled = false;
+  let timeoutId: number | null = null;
+
+  const scheduleNext = () => {
+    const remainingMilliseconds = Math.max(0, deadlineMilliseconds - Date.now());
+    const delayMilliseconds = Math.min(maxBrowserTimeoutMs, remainingMilliseconds);
+
+    timeoutId = window.setTimeout(() => {
+      if (cancelled) {
+        return;
+      }
+
+      if (remainingMilliseconds > maxBrowserTimeoutMs) {
+        scheduleNext();
+        return;
+      }
+
+      onDeadline();
+    }, delayMilliseconds);
+  };
+
+  scheduleNext();
+  return () => {
+    cancelled = true;
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  };
+}
+
 function nextParticipantList(currentParticipantUids: string[], selectedUid: string, checked: boolean, ownerUid: string) {
   const participantUids = checked
     ? Array.from(new Set([...currentParticipantUids, selectedUid, ownerUid]))
@@ -1467,6 +1480,25 @@ function clearStoredPublicShareSecrets(uid?: string) {
       publicShareContentKeyMemoryCache.delete(key);
     }
   }
+}
+
+export function usePublicShareSecretCleanup(
+  unlockedUid: string | null,
+  clearSecrets: (uid?: string) => void = clearStoredPublicShareSecrets
+) {
+  const clearSecretsRef = useRef(clearSecrets);
+
+  useEffect(() => {
+    clearSecretsRef.current = clearSecrets;
+  }, [clearSecrets]);
+
+  useEffect(() => {
+    if (!unlockedUid) {
+      return undefined;
+    }
+
+    return () => clearSecretsRef.current(unlockedUid);
+  }, [unlockedUid]);
 }
 
 function publicShareUrlStorageKey(uid: string, shareId: string) {
@@ -2393,22 +2425,6 @@ function wrappedKeyMatches(
   return left.version === right.version && left.algorithm === right.algorithm && left.wrappedKey === right.wrappedKey;
 }
 
-async function mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T) => Promise<R>) {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-
-  async function runWorker() {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await worker(items[index]);
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, runWorker));
-  return results;
-}
-
 const dialogFocusableSelector = [
   "a[href]",
   "button:not([disabled])",
@@ -2602,6 +2618,7 @@ export function refreshedSecureShareSettingsFlags(
 
 export default function NotesPage() {
   const { firebaseUser, profile, privateKey } = useAuth();
+  const unlockedUid = profile && privateKey ? profile.uid : null;
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [deletedNotes, setDeletedNotes] = useState<NoteSnapshot[]>([]);
   const [decryptedNotes, setDecryptedNotes] = useState<DecryptedNote[]>([]);
@@ -2756,15 +2773,7 @@ export default function NotesPage() {
     latestEditorRef.current = editor;
   }, [editor]);
 
-  useEffect(() => {
-    const uid = profile?.uid;
-
-    if (!uid || !privateKey) {
-      return undefined;
-    }
-
-    return () => clearStoredPublicShareSecrets(uid);
-  }, [privateKey, profile]);
+  usePublicShareSecretCleanup(unlockedUid);
 
   useEffect(() => {
     if (profile && privateKey) {
@@ -3195,6 +3204,16 @@ export default function NotesPage() {
     () => (editor.noteId ? ownerSecureShares.filter((share) => share.sourceNoteId === editor.noteId) : []),
     [editor.noteId, ownerSecureShares]
   );
+  const nextShareExpirationAt = useMemo(() => {
+    const expirationTimes = [
+      ...ownerPublicShares.map((share) => dateFromTimestamp(share.expiresAt)?.getTime() ?? Number.NaN),
+      ...ownerSecureShares
+        .filter((share) => !share.revokedAt && share.status !== "revoked")
+        .map((share) => Date.parse(share.expiresAt))
+    ].filter((expirationTime) => Number.isFinite(expirationTime) && expirationTime > cursorClock);
+
+    return expirationTimes.length ? Math.min(...expirationTimes) : null;
+  }, [cursorClock, ownerPublicShares, ownerSecureShares]);
   const activePublicShare = useMemo(
     () =>
       publicShares.find(
@@ -3836,10 +3855,7 @@ export default function NotesPage() {
   }, [activeCursorNoteId, privateKey]);
 
   useEffect(() => {
-    if (
-      !privateKey
-      || (!activeCursorNoteId && secureShares.length === 0 && !secureShareOwnerOpen)
-    ) {
+    if (!privateKey || !activeCursorNoteId) {
       return undefined;
     }
 
@@ -3849,7 +3865,18 @@ export default function NotesPage() {
       window.clearTimeout(initialTimeoutId);
       window.clearInterval(intervalId);
     };
-  }, [activeCursorNoteId, privateKey, secureShareOwnerOpen, secureShares.length]);
+  }, [activeCursorNoteId, privateKey]);
+
+  useEffect(() => {
+    if (!privateKey || nextShareExpirationAt === null) {
+      return undefined;
+    }
+
+    return scheduleNotesPageClockDeadline(
+      nextShareExpirationAt,
+      () => setCursorClock(Date.now())
+    );
+  }, [nextShareExpirationAt, privateKey]);
 
   useEffect(() => {
     if (!activeRemoteNote || !profile) {
@@ -8160,336 +8187,6 @@ function secureShareSecurityBadges(share: SecureShareOwnerSummary) {
   return badges;
 }
 
-const secureShareOwnerCommentDateFormatter = new Intl.DateTimeFormat("ko-KR", {
-  dateStyle: "medium",
-  timeStyle: "short"
-});
-
-interface SecureShareOwnerCommentsState {
-  error: string;
-  items: SecureShareCommentDto[];
-  loading: boolean;
-  loadingMore: boolean;
-  nextCursor: string | null;
-  policyVersion: number;
-  shareId: string;
-  status: "loading" | "ready";
-}
-
-function initialSecureShareOwnerCommentsState(
-  target: SecureShareOwnerCommentTarget
-): SecureShareOwnerCommentsState {
-  return {
-    error: "",
-    items: [],
-    loading: true,
-    loadingMore: false,
-    nextCursor: null,
-    policyVersion: target.policyVersion,
-    shareId: target.shareId,
-    status: "loading"
-  };
-}
-
-function secureShareCommentBadgeLabel(badge: SecureShareCommentDto["badge"]) {
-  if (badge === "admin") {
-    return "관리자";
-  }
-  if (badge === "owner") {
-    return "소유자";
-  }
-  if (badge === "quickmemo_user") {
-    return "QuickMemo 사용자";
-  }
-  if (badge === "email_verified") {
-    return "이메일 인증됨";
-  }
-  return "게스트";
-}
-
-function SecureShareOwnerCommentIdentity({
-  displayName,
-  ipPrefix
-}: {
-  displayName: string;
-  ipPrefix?: string;
-}) {
-  if (!ipPrefix) {
-    return <strong>{displayName}</strong>;
-  }
-
-  return (
-    <span className="secure-public-share-author-identity">
-      <span className="sr-only">{displayName}, 네트워크 대역 {ipPrefix}</span>
-      <strong aria-hidden="true">{displayName}</strong>
-      <span aria-hidden="true" className="secure-public-share-ip-prefix">
-        ({ipPrefix})
-      </span>
-    </span>
-  );
-}
-
-function SecureShareOwnerCommentsPanel({
-  disabled,
-  onLoadComments,
-  share
-}: {
-  disabled: boolean;
-  onLoadComments: SecureShareOwnerCommentLoader;
-  share: SecureShareOwnerSummary;
-}) {
-  const target = useMemo<SecureShareOwnerCommentTarget>(() => ({
-    policyVersion: share.policyVersion,
-    shareId: share.shareId,
-    sourceNoteId: share.sourceNoteId
-  }), [share.policyVersion, share.shareId, share.sourceNoteId]);
-  const [reloadEpoch, setReloadEpoch] = useState(0);
-  const [state, setState] = useState<SecureShareOwnerCommentsState>(() =>
-    initialSecureShareOwnerCommentsState(target)
-  );
-  const activeControllerRef = useRef<AbortController | null>(null);
-  const requestGenerationRef = useRef(0);
-  const targetRef = useRef(target);
-  const onLoadCommentsRef = useRef(onLoadComments);
-
-  useEffect(() => {
-    targetRef.current = target;
-    onLoadCommentsRef.current = onLoadComments;
-  }, [onLoadComments, target]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const generation = requestGenerationRef.current + 1;
-    requestGenerationRef.current = generation;
-    activeControllerRef.current?.abort();
-    activeControllerRef.current = controller;
-    setState(initialSecureShareOwnerCommentsState(target));
-
-    void (async () => {
-      try {
-        const page = await onLoadCommentsRef.current(target, null, controller.signal);
-
-        if (
-          controller.signal.aborted
-          || requestGenerationRef.current !== generation
-          || targetRef.current.shareId !== target.shareId
-          || targetRef.current.sourceNoteId !== target.sourceNoteId
-          || targetRef.current.policyVersion !== target.policyVersion
-        ) {
-          return;
-        }
-
-        setState({
-          error: "",
-          items: mergeSecureShareComments([], page.items, false),
-          loading: false,
-          loadingMore: false,
-          nextCursor: page.nextCursor,
-          policyVersion: target.policyVersion,
-          shareId: target.shareId,
-          status: "ready"
-        });
-      } catch {
-        if (
-          controller.signal.aborted
-          || requestGenerationRef.current !== generation
-          || targetRef.current.shareId !== target.shareId
-          || targetRef.current.policyVersion !== target.policyVersion
-        ) {
-          return;
-        }
-
-        setState({
-          error: "댓글을 불러오지 못했습니다. 다시 시도해주세요.",
-          items: [],
-          loading: false,
-          loadingMore: false,
-          nextCursor: null,
-          policyVersion: target.policyVersion,
-          shareId: target.shareId,
-          status: "ready"
-        });
-      } finally {
-        if (activeControllerRef.current === controller) {
-          activeControllerRef.current = null;
-        }
-      }
-    })();
-
-    return () => {
-      controller.abort();
-      if (activeControllerRef.current === controller) {
-        activeControllerRef.current = null;
-      }
-    };
-  }, [reloadEpoch, target]);
-
-  const currentState = state.shareId === target.shareId
-    && state.policyVersion === target.policyVersion
-    ? state
-    : initialSecureShareOwnerCommentsState(target);
-
-  function refreshComments() {
-    activeControllerRef.current?.abort();
-    setState(initialSecureShareOwnerCommentsState(target));
-    setReloadEpoch((current) => current + 1);
-  }
-
-  async function loadMoreComments() {
-    if (
-      disabled
-      || currentState.loading
-      || currentState.loadingMore
-      || !currentState.nextCursor
-    ) {
-      return;
-    }
-
-    const cursor = currentState.nextCursor;
-    const controller = new AbortController();
-    const generation = requestGenerationRef.current + 1;
-    requestGenerationRef.current = generation;
-    activeControllerRef.current?.abort();
-    activeControllerRef.current = controller;
-    setState((current) => current.shareId === target.shareId
-      && current.policyVersion === target.policyVersion
-      ? { ...current, error: "", loadingMore: true }
-      : initialSecureShareOwnerCommentsState(target));
-
-    try {
-      const page = await onLoadCommentsRef.current(target, cursor, controller.signal);
-
-      if (
-        controller.signal.aborted
-        || requestGenerationRef.current !== generation
-        || targetRef.current.shareId !== target.shareId
-        || targetRef.current.sourceNoteId !== target.sourceNoteId
-        || targetRef.current.policyVersion !== target.policyVersion
-      ) {
-        return;
-      }
-
-      setState((current) => current.shareId === target.shareId
-        && current.policyVersion === target.policyVersion
-        ? {
-            ...current,
-            error: "",
-            items: mergeSecureShareComments(current.items, page.items, true),
-            loading: false,
-            loadingMore: false,
-            nextCursor: page.nextCursor,
-            status: "ready"
-          }
-        : current);
-    } catch {
-      if (
-        controller.signal.aborted
-        || requestGenerationRef.current !== generation
-        || targetRef.current.shareId !== target.shareId
-        || targetRef.current.policyVersion !== target.policyVersion
-      ) {
-        return;
-      }
-
-      setState((current) => current.shareId === target.shareId
-        && current.policyVersion === target.policyVersion
-        ? {
-            ...current,
-            error: "댓글을 더 불러오지 못했습니다. 다시 시도해주세요.",
-            loadingMore: false
-          }
-        : current);
-    } finally {
-      if (activeControllerRef.current === controller) {
-        activeControllerRef.current = null;
-      }
-    }
-  }
-
-  const commentListId = `secure-share-owner-comment-list-${share.shareId}`;
-  const requestBusy = currentState.loading || currentState.loadingMore;
-
-  return (
-    <section
-      aria-busy={requestBusy ? "true" : undefined}
-      aria-labelledby="secure-share-owner-comments-title"
-      className="secure-share-owner-comments"
-    >
-      <header>
-        <div>
-          <h4 id="secure-share-owner-comments-title">
-            <MessageCircle aria-hidden="true" size={16} />
-            댓글
-          </h4>
-          <span>읽기 전용</span>
-        </div>
-        <button
-          aria-controls={commentListId}
-          className="secondary-button"
-          disabled={disabled || requestBusy}
-          onClick={refreshComments}
-          type="button"
-        >
-          <RotateCcw aria-hidden="true" className={currentState.loading ? "spin" : undefined} size={14} />
-          새로고침
-        </button>
-      </header>
-      <p className="secure-share-owner-comments-help">
-        공유 URL을 열지 않고 소유자 권한으로 확인합니다. 댓글 작성과 삭제는 공유 화면에서만 가능합니다.
-      </p>
-      {currentState.loading && (
-        <p aria-live="polite" className="public-share-status" role="status">
-          댓글을 불러오는 중...
-        </p>
-      )}
-      {currentState.error && (
-        <p className="form-error" role="alert">{currentState.error}</p>
-      )}
-      <div className="secure-public-share-comment-list" id={commentListId}>
-        {currentState.items.map((comment) => (
-          <article key={comment.id}>
-            <header>
-              <div>
-                <SecureShareOwnerCommentIdentity
-                  displayName={comment.displayName}
-                  ipPrefix={comment.ipPrefix}
-                />
-                <span className="secure-public-share-author-badge">
-                  {secureShareCommentBadgeLabel(comment.badge)}
-                </span>
-              </div>
-              <time dateTime={comment.createdAt}>
-                {secureShareOwnerCommentDateFormatter.format(new Date(comment.createdAt))}
-              </time>
-            </header>
-            <p>{comment.body}</p>
-          </article>
-        ))}
-        {!currentState.loading
-          && currentState.status === "ready"
-          && !currentState.error
-          && currentState.items.length === 0 && (
-            <p className="secure-share-owner-comments-empty">아직 댓글이 없습니다.</p>
-          )}
-      </div>
-      {currentState.nextCursor && (
-        <button
-          aria-controls={commentListId}
-          className="secondary-button secure-share-owner-comments-more"
-          disabled={disabled || requestBusy}
-          onClick={() => void loadMoreComments()}
-          type="button"
-        >
-          {currentState.loadingMore
-            ? <Loader2 aria-hidden="true" className="spin" size={14} />
-            : <MessageCircle aria-hidden="true" size={14} />}
-          {currentState.loadingMore ? "댓글 불러오는 중..." : "댓글 더 보기"}
-        </button>
-      )}
-    </section>
-  );
-}
-
 export function SecureShareOwnerModal({
   busy,
   canComposeEmail,
@@ -9052,7 +8749,7 @@ function SecureShareRevokeConfirmDialog({
   );
 }
 
-function RichMemoEditor({
+export function RichMemoEditor({
   editorRef,
   fontSize,
   onCursorChange,
@@ -9074,6 +8771,7 @@ function RichMemoEditor({
   const imageResizeCleanupRef = useRef<(() => void) | null>(null);
   const imageWidthControlRef = useRef<HTMLLabelElement | null>(null);
   const tableResizeCleanupRef = useRef<(() => void) | null>(null);
+  const latestOnChangeRef = useRef(onChange);
   const lastEditorSelectionRef = useRef<StoredEditorSelectionRange | null>(null);
   const fileDragDepthRef = useRef(0);
   const [selectedImageWidthPx, setSelectedImageWidthPx] = useState<number | null>(null);
@@ -9087,6 +8785,11 @@ function RichMemoEditor({
   const controlIdPrefix = useId();
   const selectionFontSizeListId = `${controlIdPrefix}-selection-font-sizes`;
   const selectionLineHeightListId = `${controlIdPrefix}-selection-line-heights`;
+
+  useEffect(() => {
+    latestOnChangeRef.current = onChange;
+  }, [onChange]);
+
   const editor = useEditor({
     extensions: richEditorExtensions,
     content: value || "",
@@ -9153,7 +8856,7 @@ function RichMemoEditor({
     },
     onUpdate: ({ editor: nextEditor }) => {
       rememberEditorSelection(nextEditor);
-      onChange(nextEditor.getHTML());
+      latestOnChangeRef.current(nextEditor.getHTML());
       setToolbarVersion((version) => version + 1);
       emitCursorPosition(true);
     }
@@ -9259,7 +8962,7 @@ function RichMemoEditor({
         if (resizeHit.kind === "column" && typeof resizeHit.columnIndex === "number") {
           const nextWidth = clampTableColumnPixelWidth(startColumnWidth + moveEvent.clientX - startX);
           if (resizeSession && updateTableColumnWidthFromSession(editor, resizeSession, resizeHit.columnIndex, nextWidth)) {
-            onChange(editor.getHTML());
+            latestOnChangeRef.current(editor.getHTML());
             setToolbarVersion((version) => version + 1);
           }
           return;
@@ -9268,7 +8971,7 @@ function RichMemoEditor({
         if (resizeHit.kind === "row" && resizeSession?.rowTarget) {
           const nextHeight = clampTableRowPixelHeight(startRowHeight + moveEvent.clientY - startY);
           if (dispatchNodeAttributeUpdates(editor, [{ target: resizeSession.rowTarget, attrs: { qmHeightPx: nextHeight } }])) {
-            onChange(editor.getHTML());
+            latestOnChangeRef.current(editor.getHTML());
             setToolbarVersion((version) => version + 1);
           }
           return;
@@ -9291,7 +8994,7 @@ function RichMemoEditor({
 
         if (Object.keys(nextAttributes).length) {
           if (dispatchNodeAttributeUpdates(editor, [{ target: resizeSession.tableTarget, attrs: nextAttributes }])) {
-            onChange(editor.getHTML());
+            latestOnChangeRef.current(editor.getHTML());
             setToolbarVersion((version) => version + 1);
           }
         }
@@ -9313,7 +9016,7 @@ function RichMemoEditor({
       editorElement.removeEventListener("mousedown", handleMouseDown, true);
       setResizeCursor(null);
     };
-  }, [editor, onChange]);
+  }, [editor]);
 
   useEffect(() => {
     if (!editor) {
@@ -9506,7 +9209,7 @@ function RichMemoEditor({
     editor.chain().setNodeSelection(position).updateAttributes("image", { qmWidth: null, qmWidthPx: safeWidth }).run();
     selectedImageRef.current = imageElementAtPosition(editor, position, image.currentSrc || image.src) ?? image;
     setSelectedImageWidthPx(safeWidth);
-    onChange(editor.getHTML());
+    latestOnChangeRef.current(editor.getHTML());
   }
 
   function beginImageWidthDrag(event: ReactPointerEvent<HTMLLabelElement>) {
@@ -9666,7 +9369,7 @@ function RichMemoEditor({
     }
 
     if (dispatchNodeAttributeUpdates(editor, updatesFromState(tableState))) {
-      onChange(editor.getHTML());
+      latestOnChangeRef.current(editor.getHTML());
       setToolbarVersion((version) => version + 1);
     }
   }
@@ -12236,252 +11939,6 @@ function AttachmentListModal({
           />
         </div>
       </section>
-    </div>
-  );
-}
-
-export function AttachmentPreviewModal({
-  onClose,
-  preview
-}: {
-  onClose: () => void;
-  preview: AttachmentPreviewState;
-}) {
-  const dialogRef = useRef<HTMLElement | null>(null);
-
-  useDialogFocus(dialogRef);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  return (
-    <div className="modal-backdrop pdf-preview-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        aria-labelledby="pdf-preview-title"
-        aria-modal="true"
-        className="pdf-preview-modal"
-        ref={dialogRef}
-        role="dialog"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <header className="pdf-preview-header">
-          <div className="pdf-preview-title">
-            <span>{preview.label}</span>
-            <h2 id="pdf-preview-title">{preview.fileName}</h2>
-          </div>
-          <div className="pdf-preview-actions">
-            {preview.url && (
-              <a className="secondary-button pdf-preview-download" download={preview.fileName} href={preview.url}>
-                <Download size={14} />
-                다운로드
-              </a>
-            )}
-            <button className="icon-button pdf-preview-close" type="button" onClick={onClose} aria-label="파일 미리보기 닫기">
-              <X size={16} />
-            </button>
-          </div>
-        </header>
-        {preview.kind === "image" && preview.url ? (
-          <div className="public-image-preview-frame">
-            <img src={preview.url} alt={preview.fileName} />
-          </div>
-        ) : preview.kind === "pdf" && preview.bytes ? (
-          <PdfCanvasPreview bytes={preview.bytes} fileName={preview.fileName} />
-        ) : preview.kind === "docx" ? (
-          <div className="docx-preview-frame">
-            <iframe
-              className="docx-preview-sandbox"
-              referrerPolicy="no-referrer"
-              sandbox=""
-              srcDoc={preview.srcDoc ?? ""}
-              title={`${preview.fileName} DOCX 미리보기`}
-            />
-          </div>
-        ) : preview.kind === "hwp" ? (
-          <div className="document-preview-frame">
-            <div
-              className="document-preview-page hwp-fallback-preview"
-              dangerouslySetInnerHTML={{ __html: sanitizeEditorHtml(preview.fallbackHtml ?? "") }}
-            />
-          </div>
-        ) : preview.kind === "html" ? (
-          <div className="document-preview-frame">
-            <div className="document-preview-page" dangerouslySetInnerHTML={{ __html: preview.html ?? "" }} />
-          </div>
-        ) : (
-          <pre className={`file-text-preview ${preview.kind === "unsupported" ? "unsupported" : ""}`}>{preview.text}</pre>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function PdfCanvasPreview({ bytes, fileName }: { bytes: Uint8Array; fileName: string }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [state, setState] = useState<{ error: string | null; pageCount: number; renderedCount: number; status: "loading" | "ready" | "error" }>({
-    error: null,
-    pageCount: 0,
-    renderedCount: 0,
-    status: "loading"
-  });
-
-  useEffect(() => {
-    const container = containerRef.current;
-
-    if (!container) {
-      return undefined;
-    }
-
-    const previewContainer: HTMLDivElement = container;
-    let cancelled = false;
-    let loadingTask: { destroy: () => Promise<void>; promise: Promise<any> } | null = null;
-    let pdfDocument: { destroy: () => Promise<void> } | null = null;
-    const renderTasks: Array<{ cancel: () => void; promise: Promise<void> }> = [];
-    let retainedCanvasPixels = 0;
-
-    previewContainer.replaceChildren();
-    setState({ error: null, pageCount: 0, renderedCount: 0, status: "loading" });
-
-    async function renderPdf() {
-      try {
-        const pdfjs = await import("pdfjs-dist");
-
-        pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
-        loadingTask = pdfjs.getDocument({
-          canvasMaxAreaInBytes: maxPdfPreviewCanvasPixels,
-          data: bytes.slice(),
-          disableAutoFetch: true,
-          disableFontFace: true,
-          disableRange: true,
-          disableStream: true,
-          enableXfa: false,
-          isImageDecoderSupported: false,
-          maxImageSize: maxPdfPreviewImagePixels,
-          stopAtErrors: true,
-          useSystemFonts: false,
-          useWorkerFetch: false
-        });
-
-        const pdf = await loadingTask.promise;
-        pdfDocument = pdf;
-        const pageCount = pdf.numPages;
-        const pagesToRender = Math.min(pageCount, maxPdfPreviewPages);
-        let renderedPages = 0;
-
-        if (!cancelled) {
-          setState({ error: null, pageCount, renderedCount: 0, status: "loading" });
-        }
-
-        for (let pageNumber = 1; pageNumber <= pagesToRender; pageNumber += 1) {
-          if (cancelled) {
-            return;
-          }
-
-          const page = await pdf.getPage(pageNumber);
-          const baseViewport = page.getViewport({ scale: 1 });
-          const containerWidth = previewContainer.clientWidth || maxPdfPreviewPageCssWidth;
-          const remainingCanvasPixels = maxPdfPreviewTotalCanvasPixels - retainedCanvasPixels;
-          const layout = pdfPreviewCanvasLayout({
-            baseHeight: baseViewport.height,
-            baseWidth: baseViewport.width,
-            containerWidth,
-            devicePixelRatio: window.devicePixelRatio || 1,
-            remainingCanvasPixels
-          });
-
-          if (!layout) {
-            break;
-          }
-
-          if (layout.canvasPixels > maxPdfPreviewCanvasPixels || layout.canvasPixels > remainingCanvasPixels) {
-            throw new Error("PDF preview canvas budget exceeded.");
-          }
-
-          const renderViewport = page.getViewport({ scale: layout.cssScale * layout.outputScale });
-          const canvas = document.createElement("canvas");
-
-          canvas.className = "pdf-preview-canvas-page";
-          canvas.width = layout.canvasWidth;
-          canvas.height = layout.canvasHeight;
-          canvas.style.width = `${layout.cssWidth}px`;
-          canvas.style.height = `${layout.cssHeight}px`;
-          canvas.setAttribute("aria-label", `${fileName} ${pageNumber}쪽`);
-          previewContainer.append(canvas);
-          retainedCanvasPixels += layout.canvasPixels;
-
-          const renderTask = page.render({
-            annotationMode: pdfjs.AnnotationMode.DISABLE,
-            background: "#ffffff",
-            canvas,
-            viewport: renderViewport
-          });
-
-          renderTasks.push(renderTask);
-          await renderTask.promise;
-          renderedPages += 1;
-
-          if (!cancelled) {
-            setState({ error: null, pageCount, renderedCount: renderedPages, status: "loading" });
-          }
-        }
-
-        if (pagesToRender > 0 && renderedPages === 0) {
-          throw new Error("PDF preview has no safe renderable pages.");
-        }
-
-        if (!cancelled) {
-          setState({ error: null, pageCount, renderedCount: renderedPages, status: "ready" });
-        }
-      } catch {
-        if (!cancelled) {
-          previewContainer.replaceChildren();
-          setState({
-            error: "PDF 미리보기를 안전하게 렌더링하지 못했습니다. 원본 파일은 다운로드해서 확인해주세요.",
-            pageCount: 0,
-            renderedCount: 0,
-            status: "error"
-          });
-        }
-      }
-    }
-
-    void renderPdf();
-
-    return () => {
-      cancelled = true;
-      renderTasks.forEach((task) => task.cancel());
-      previewContainer.replaceChildren();
-      void pdfDocument?.destroy().catch(() => undefined);
-      void loadingTask?.destroy().catch(() => undefined);
-    };
-  }, [bytes, fileName]);
-
-  const expectedRenderedPages = Math.min(state.pageCount, maxPdfPreviewPages);
-  const truncated = state.status === "ready" && (state.pageCount > maxPdfPreviewPages || state.renderedCount < expectedRenderedPages);
-
-  return (
-    <div className="pdf-preview-canvas-frame" aria-label={`${fileName} PDF 미리보기`}>
-      <div ref={containerRef} className="pdf-preview-canvas-pages" />
-      {state.status === "loading" && (
-        <p className="pdf-preview-status">
-          {state.pageCount ? `${state.renderedCount}/${Math.min(state.pageCount, maxPdfPreviewPages)}쪽 렌더링 중...` : "PDF 미리보기를 준비하는 중..."}
-        </p>
-      )}
-      {state.error && <p className="file-preview-error">{state.error}</p>}
-      {truncated && (
-        <p className="pdf-preview-status">
-          안전한 미리보기를 위해 {state.renderedCount}/{expectedRenderedPages}쪽만 표시했습니다. 전체 파일은 다운로드해서 확인해주세요.
-        </p>
-      )}
     </div>
   );
 }

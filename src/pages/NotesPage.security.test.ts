@@ -3,6 +3,14 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const notesPageSource = readFileSync(join(process.cwd(), "src/pages/NotesPage.tsx"), "utf8");
+const attachmentPreviewSource = readFileSync(
+  join(process.cwd(), "src/components/PublicAttachmentPreviewModal.tsx"),
+  "utf8"
+);
+const publicPdfPreviewSource = readFileSync(
+  join(process.cwd(), "src/components/PublicPdfCanvasPreview.tsx"),
+  "utf8"
+);
 const documentPreviewSource = readFileSync(join(process.cwd(), "src/lib/documentPreview.ts"), "utf8");
 const pdfPreviewCanvasSource = readFileSync(join(process.cwd(), "src/lib/pdfPreviewCanvas.ts"), "utf8");
 
@@ -18,33 +26,35 @@ describe("NotesPage security controls", () => {
   });
 
   it("renders PDF previews through bounded canvas rendering without plugin or iframe surfaces", () => {
-    const pdfPreviewBranch = notesPageSource.match(/preview\.kind === "pdf" && preview\.bytes \? \([\s\S]*?\) : preview\.kind === "docx"/)?.[0] ?? "";
+    const pdfPreviewBranch = attachmentPreviewSource.match(/preview\.kind === "pdf" && preview\.bytes \? \([\s\S]*?\) : preview\.kind === "docx"/)?.[0] ?? "";
 
-    expect(pdfPreviewBranch).toContain("<PdfCanvasPreview");
+    expect(notesPageSource).toContain('import AttachmentPreviewModal from "../components/PublicAttachmentPreviewModal"');
+    expect(notesPageSource).not.toContain("function PdfCanvasPreview");
+    expect(pdfPreviewBranch).toContain("<PublicPdfCanvasPreview");
     expect(pdfPreviewBranch).toContain("bytes={preview.bytes}");
     expect(pdfPreviewBranch).not.toContain("<iframe");
     expect(pdfPreviewBranch).not.toContain("<object");
     expect(pdfPreviewBranch).not.toContain("<embed");
-    expect(notesPageSource).toContain("maxPdfPreviewPages");
-    expect(notesPageSource).toContain("maxPdfPreviewCanvasPixels");
-    expect(notesPageSource).toContain("maxPdfPreviewTotalCanvasPixels");
-    expect(notesPageSource).toContain("retainedCanvasPixels");
-    expect(notesPageSource).toContain("remainingCanvasPixels");
-    expect(notesPageSource).toContain("pdfPreviewCanvasLayout");
-    expect(notesPageSource).toContain("layout.canvasPixels > maxPdfPreviewCanvasPixels");
-    expect(notesPageSource).toContain("layout.canvasPixels > remainingCanvasPixels");
-    expect(notesPageSource).toContain("disableFontFace: true");
-    expect(notesPageSource).toContain("enableXfa: false");
-    expect(notesPageSource).toContain("useWorkerFetch: false");
-    expect(notesPageSource).toContain("annotationMode: pdfjs.AnnotationMode.DISABLE");
+    expect(attachmentPreviewSource).toContain('lazy(() => import("./PublicPdfCanvasPreview"))');
+    expect(publicPdfPreviewSource).toContain("maxPdfPreviewCanvasPixels");
+    expect(publicPdfPreviewSource).toContain("retainedCanvasPixels");
+    expect(publicPdfPreviewSource).toContain("remainingCanvasPixels");
+    expect(publicPdfPreviewSource).toContain("pdfPreviewCanvasLayout");
+    expect(publicPdfPreviewSource).toContain("layout.canvasPixels > maxPdfPreviewCanvasPixels");
+    expect(publicPdfPreviewSource).toContain("layout.canvasPixels > remainingCanvasPixels");
+    expect(publicPdfPreviewSource).toContain("disableFontFace: true");
+    expect(publicPdfPreviewSource).toContain("enableXfa: false");
+    expect(publicPdfPreviewSource).toContain("useWorkerFetch: false");
+    expect(publicPdfPreviewSource).toContain("annotationMode: pdfjs.AnnotationMode.DISABLE");
+    expect(publicPdfPreviewSource).toContain("releaseCanvases");
+    expect(publicPdfPreviewSource).toContain("page.cleanup()");
     expect(pdfPreviewCanvasSource).toContain("maxPdfPreviewPageCssHeight");
     expect(pdfPreviewCanvasSource).toContain("maxPdfPreviewTotalCanvasPixels");
     expect(pdfPreviewCanvasSource).not.toContain("Math.max(0.25");
-    expect(notesPageSource).not.toContain("dangerouslySetInnerHTML={preview");
   });
 
   it("renders DOCX previews through sanitized sandboxed srcDoc instead of the live app DOM", () => {
-    const docxPreviewBranch = notesPageSource.match(/preview\.kind === "docx" \? \([\s\S]*?\) : preview\.kind === "hwp"/)?.[0] ?? "";
+    const docxPreviewBranch = attachmentPreviewSource.match(/preview\.kind === "docx" \? \([\s\S]*?\) : preview\.kind === "hwp"/)?.[0] ?? "";
     const docxRenderHelper = documentPreviewSource.match(/async function renderSafeDocxPreviewSrcDoc[\s\S]*?function docxSandboxSrcDoc/)?.[0] ?? "";
     const docxSrcDocHelper = documentPreviewSource.match(/function docxSandboxSrcDoc[\s\S]*?function sanitizeDocxPreviewTree/)?.[0] ?? "";
 
@@ -61,6 +71,14 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain('document.documentElement.dataset.theme === "dark" ? "dark" : "light"');
     expect(docxSrcDocHelper).toContain("data-theme=\"${theme}\"");
     expect(docxSrcDocHelper).toContain("background:#09090b");
+  });
+
+  it("sanitizes rich attachment preview HTML at the shared rendering boundary", () => {
+    const htmlPreviewBranch = attachmentPreviewSource.match(/preview\.kind === "html" \? \([\s\S]*?\) : \(/)?.[0] ?? "";
+
+    expect(htmlPreviewBranch).toContain("sanitizeEditorHtml(preview.html ?? \"\")");
+    expect(htmlPreviewBranch).not.toContain("__html: preview.html");
+    expect(notesPageSource).not.toContain("dangerouslySetInnerHTML");
   });
 
   it("filters active DOCX preview links, resources, and event attributes before sandboxing", () => {

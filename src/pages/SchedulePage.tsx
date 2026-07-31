@@ -73,6 +73,7 @@ import { groupChecklistItems } from "../lib/checklist";
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../lib/crypto";
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import { defaultMatrixLabels } from "../lib/matrixLabels";
+import { mapWithConcurrency } from "../lib/mapWithConcurrency";
 import {
   normalizePrimaryScheduleView,
   scheduleViewFromSearch,
@@ -255,28 +256,6 @@ type DecryptedHabitCache = Map<string, {
 }>;
 
 const scheduleDecryptConcurrency = 6;
-
-async function mapWithConcurrency<TItem, TResult>(
-  items: TItem[],
-  concurrency: number,
-  mapper: (item: TItem, index: number) => Promise<TResult>
-) {
-  const results = new Array<TResult>(items.length);
-  let nextIndex = 0;
-
-  async function worker() {
-    while (nextIndex < items.length) {
-      const index = nextIndex;
-      nextIndex += 1;
-      results[index] = await mapper(items[index], index);
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => worker())
-  );
-  return results;
-}
 
 function sameEncryptedPayload(
   left: ScheduleTaskSnapshot["encryptedTitle"],

@@ -878,6 +878,7 @@ export function SecurePublicShareViewer({
   const [attachmentError, setAttachmentError] = useState("");
   const [comments, setComments] = useState<SecureShareCommentDto[]>([]);
   const [commentCursor, setCommentCursor] = useState<string | null>(null);
+  const [commentPageLoading, setCommentPageLoading] = useState(false);
   const [commentBody, setCommentBody] = useState("");
   const [commentError, setCommentError] = useState("");
   const [participant, setParticipant] = useState<SecureShareParticipantDto | null>(null);
@@ -912,6 +913,10 @@ export function SecurePublicShareViewer({
   const mountedRef = useRef(true);
   const loadGenerationRef = useRef(0);
   const lifecycleControllerRef = useRef<AbortController | null>(null);
+  const commentsRef = useRef<SecureShareCommentDto[]>([]);
+  const commentPageRequestRef = useRef<{
+    controller: AbortController;
+  } | null>(null);
   const lifecycleIdentityRef = useRef({
     contentKey,
     idToken,
@@ -956,6 +961,10 @@ export function SecurePublicShareViewer({
     };
   }, [contentKey, idToken, isAuthenticated, shareId]);
 
+  useLayoutEffect(() => {
+    commentsRef.current = comments;
+  }, [comments]);
+
   function captureLifecycle(): SecureShareViewerLifecycle {
     return {
       contentKey,
@@ -986,6 +995,16 @@ export function SecurePublicShareViewer({
     objectUrlsRef.current.clear();
   }, []);
 
+  const abortCommentPageRequest = useCallback(() => {
+    const request = commentPageRequestRef.current;
+    if (!request) {
+      return;
+    }
+
+    commentPageRequestRef.current = null;
+    request.controller.abort();
+  }, []);
+
   const restartPolicyBootstrap = useCallback(() => {
     autoAccessGenerationRef.current = null;
     setPhase("loading");
@@ -1013,6 +1032,15 @@ export function SecurePublicShareViewer({
       mountedRef.current = false;
     };
   }, []);
+
+  useLayoutEffect(() => {
+    abortCommentPageRequest();
+    setCommentPageLoading(false);
+  }, [abortCommentPageRequest, session, shareId]);
+
+  useEffect(() => () => {
+    abortCommentPageRequest();
+  }, [abortCommentPageRequest]);
 
   useLayoutEffect(() => {
     policyBootstrapRestartCountRef.current = 0;
@@ -1084,14 +1112,34 @@ export function SecurePublicShareViewer({
       return;
     }
 
+    if (commentPageRequestRef.current) {
+      return;
+    }
+
     const generation = loadGenerationRef.current;
+    const controller = new AbortController();
+    const request = { controller };
+    const commentsAtRequestStart = append
+      ? null
+      : new Set(commentsRef.current.map((comment) => comment.id));
+    const lifecycleSignal = lifecycleControllerRef.current?.signal;
+    const abortFromLifecycle = () => controller.abort();
+
+    if (lifecycleSignal?.aborted) {
+      return;
+    }
+
+    commentPageRequestRef.current = request;
+    setCommentPageLoading(true);
+    lifecycleSignal?.addEventListener("abort", abortFromLifecycle, { once: true });
 
     try {
       const parsed = parseSecureShareCommentsResponse(
         await listSecureShareComments(shareId, {
           cursor: cursor ?? undefined,
           idToken: session.ownerPreview ? idToken : undefined,
-          limit: 20
+          limit: 20,
+          signal: controller.signal
         }),
         session.capabilities.commentIpPrefixEnabled
       );
@@ -1099,11 +1147,13 @@ export function SecurePublicShareViewer({
       if (
         !parsed
         || !mountedRef.current
+        || controller.signal.aborted
         || generation !== loadGenerationRef.current
       ) {
         if (
           !parsed
           && mountedRef.current
+          && !controller.signal.aborted
           && generation === loadGenerationRef.current
         ) {
           setCommentError("댓글 응답을 확인하지 못했습니다.");
@@ -1111,12 +1161,30 @@ export function SecurePublicShareViewer({
         return;
       }
 
-      setComments((current) => mergeSecureShareComments(current, parsed.items, append));
+      setComments((current) => mergeSecureShareComments(
+        commentsAtRequestStart
+          ? current.filter((comment) => !commentsAtRequestStart.has(comment.id))
+          : current,
+        parsed.items,
+        append
+      ));
       setCommentCursor(parsed.nextCursor);
       setCommentError("");
     } catch {
-      if (mountedRef.current && generation === loadGenerationRef.current) {
+      if (
+        mountedRef.current
+        && !controller.signal.aborted
+        && generation === loadGenerationRef.current
+      ) {
         setCommentError("댓글을 불러오지 못했습니다.");
+      }
+    } finally {
+      lifecycleSignal?.removeEventListener("abort", abortFromLifecycle);
+      if (commentPageRequestRef.current === request) {
+        commentPageRequestRef.current = null;
+        if (mountedRef.current && generation === loadGenerationRef.current) {
+          setCommentPageLoading(false);
+        }
       }
     }
   }
@@ -1241,6 +1309,9 @@ export function SecurePublicShareViewer({
         nextSession.capabilities.canComment
         || nextSession.capabilities.participantLimitReached
       ) {
+        const commentsAtRequestStart = new Set(
+          commentsRef.current.map((comment) => comment.id)
+        );
         postLoadTasks.push((async () => {
           try {
             const parsedComments = parseSecureShareCommentsResponse(
@@ -1258,9 +1329,11 @@ export function SecurePublicShareViewer({
               && !signal?.aborted
               && generation === loadGenerationRef.current
             ) {
-              setComments((current) =>
-                mergeSecureShareComments(current, parsedComments.items, false)
-              );
+              setComments((current) => mergeSecureShareComments(
+                current.filter((comment) => !commentsAtRequestStart.has(comment.id)),
+                parsedComments.items,
+                false
+              ));
               setCommentCursor(parsedComments.nextCursor);
               setCommentError("");
             } else if (
@@ -1311,7 +1384,9 @@ export function SecurePublicShareViewer({
       setSession(null);
       setContent(null);
       setComments([]);
+      commentsRef.current = [];
       setCommentCursor(null);
+      setCommentPageLoading(false);
       setCommentBody("");
       setCommentError("");
       setParticipant(null);
@@ -1423,6 +1498,7 @@ export function SecurePublicShareViewer({
     void initialize();
 
     return () => {
+      abortCommentPageRequest();
       controller.abort();
       if (lifecycleControllerRef.current === controller) {
         lifecycleControllerRef.current = null;
@@ -1436,6 +1512,7 @@ export function SecurePublicShareViewer({
     };
   }, [
     bootstrapEpoch,
+    abortCommentPageRequest,
     contentKey,
     idToken,
     isAuthenticated,
@@ -2884,11 +2961,15 @@ export function SecurePublicShareViewer({
           </div>
           {commentCursor && (
             <button
+              aria-busy={commentPageLoading}
               className="secondary-button"
-              disabled={busyAction !== null}
+              disabled={busyAction !== null || commentPageLoading}
               onClick={() => void loadComments(commentCursor, true)}
               type="button"
             >
+              {commentPageLoading && (
+                <Loader2 aria-hidden="true" className="spin" size={15} />
+              )}
               댓글 더 보기
             </button>
           )}

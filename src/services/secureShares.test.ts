@@ -502,12 +502,23 @@ describe("secure share API client", () => {
   });
 
   it("lists owner comments with bearer auth and no share-session mutation data", async () => {
-    vi.mocked(fetch).mockResolvedValue(jsonResponse({
-      ok: true,
-      items: [],
-      nextCursor: null,
-      requestId: "request_owner_comments"
-    }));
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        shareId,
+        csrfToken,
+        permissionLevel: "comment"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        items: [],
+        nextCursor: null,
+        requestId: "request_owner_comments"
+      }));
+
+    await unlockSecureShare(shareId, {
+      unlockAttemptId: "attempt_owner_comments_123456"
+    });
 
     await listSecureShareComments(shareId, {
       cursor: "owner_comments_cursor",
@@ -515,7 +526,7 @@ describe("secure share API client", () => {
       limit: 20
     });
 
-    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    const [url, init] = vi.mocked(fetch).mock.calls[1];
     const parsedUrl = new URL(String(url), "https://quickmemo.example");
     const headers = new Headers(init?.headers);
 
@@ -525,6 +536,7 @@ describe("secure share API client", () => {
     expect(parsedUrl.hash).toBe("");
     expect(headers.get("authorization")).toBe(`Bearer ${idToken}`);
     expect(headers.has("x-csrf-token")).toBe(false);
+    expect(init?.credentials).toBe("omit");
     expect(init?.body).toBeUndefined();
   });
 
@@ -562,6 +574,14 @@ describe("secure share API client", () => {
       ...response,
       items: [{ ...firstComment, authorUid: "must-not-cross" }]
     }, true)).toBeNull();
+    expect(parseSecureShareCommentsResponse({
+      ...response,
+      nextCursor: "A".repeat(900)
+    }, true)?.nextCursor).toBe("A".repeat(900));
+    expect(parseSecureShareCommentsResponse({
+      ...response,
+      nextCursor: `unsafe+${"A".repeat(300)}`
+    }, true)).toBeNull();
 
     const secondComment = {
       ...firstComment,
@@ -578,6 +598,29 @@ describe("secure share API client", () => {
     ).map((comment) => comment.id)).toEqual([
       "comment_owner_123456",
       "comment_owner_654321"
+    ]);
+
+    const newestComment = {
+      ...firstComment,
+      id: "comment_owner_999999",
+      body: "새 댓글",
+      createdAt: "2026-07-31T18:02:00.000Z"
+    };
+    const oldestComment = {
+      ...firstComment,
+      id: "comment_owner_000001",
+      body: "이전 페이지 댓글",
+      createdAt: "2026-07-31T17:59:00.000Z"
+    };
+    expect(mergeSecureShareComments(
+      [oldestComment, newestComment],
+      [firstComment, secondComment],
+      false
+    ).map((comment) => comment.id)).toEqual([
+      "comment_owner_999999",
+      "comment_owner_123456",
+      "comment_owner_654321",
+      "comment_owner_000001"
     ]);
   });
 

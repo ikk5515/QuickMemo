@@ -28,13 +28,13 @@ import { AppShell } from "../components/AppShell";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
-import { decryptText, generateUserKeyBundle, unwrapNoteKey } from "../lib/crypto";
 import {
-  parseEditorContent,
-  parseReadonlyEditorContent,
-  previewTextFromHtml,
-  type ReadonlyEditorContentFormat
-} from "../lib/editorContent";
+  AdminNoteDecryptionCache,
+  lockedAdminNoteView,
+  resolveAdminNoteViews,
+  type AdminNoteView
+} from "../lib/adminNoteDecryption";
+import { generateUserKeyBundle } from "../lib/crypto";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { defaultFeatureAccess, normalizeFeatureAccess } from "../lib/featureAccess";
 import { initialsFromName } from "../lib/roster";
@@ -46,7 +46,6 @@ import type { AppFeature, FeatureAccess, NoteKind, UserProfile } from "../types"
 
 const palette = ["#2f7d70", "#c75146", "#7c5b9e", "#b9822f", "#3f6fb5", "#65707a"];
 const AUTO_SAVE_DELAY_MS = 550;
-const adminNotePreviewMaxCharacters = 240;
 const featureAccessOptions = [
   { feature: "notes", label: "노트", icon: NotebookPen },
   { feature: "library", label: "자료실", icon: LibraryBig },
@@ -166,27 +165,6 @@ export function AdminTabs({ activeTab, onSelect }: AdminTabsProps) {
       })}
     </div>
   );
-}
-
-interface AdminNoteView extends NoteSnapshot {
-  bodyFormat: ReadonlyEditorContentFormat;
-  title: string;
-  bodyHtml: string;
-  bodyPreview: string;
-  bodySearchText: string;
-  fontSize: number;
-  canReadContent: boolean;
-  unavailableReason: string | null;
-}
-
-function adminNotePreviewText(value: string) {
-  const normalizedValue = value.replace(/\s+/g, " ").trim();
-
-  if (normalizedValue.length <= adminNotePreviewMaxCharacters) {
-    return normalizedValue;
-  }
-
-  return `${normalizedValue.slice(0, adminNotePreviewMaxCharacters).trimEnd()}...`;
 }
 
 function timestampToDate(value: Timestamp | Date | null | undefined) {
@@ -404,6 +382,7 @@ export default function AdminPage() {
 
 function AdminDashboard() {
   const { profile, privateKey } = useAuth();
+  const adminUid = profile?.uid;
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [adminNoteViews, setAdminNoteViews] = useState<AdminNoteView[]>([]);
@@ -421,6 +400,8 @@ function AdminDashboard() {
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const adminNoteDecryptCache = useRef(new AdminNoteDecryptionCache());
+  const adminNoteDecryptGeneration = useRef(0);
 
   useEffect(() => {
     return subscribeUsers(setUsers, () => setError("사용자 목록을 불러오지 못했습니다."));
@@ -436,86 +417,48 @@ function AdminDashboard() {
   }, [activeAdminTab, profile?.isAdmin]);
 
   useEffect(() => {
+    const generation = adminNoteDecryptGeneration.current + 1;
+    adminNoteDecryptGeneration.current = generation;
     let cancelled = false;
 
     if (activeAdminTab !== "notes") {
+      adminNoteDecryptCache.current.clear();
       setAdminNoteViews([]);
       return undefined;
     }
 
-    async function decryptAdminNotes() {
-      const nextNotes = await Promise.all(
-        notes.map(async (note) => {
-          const lockedReason = privateKey
-            ? "관리자가 공유 대상에 포함되지 않아 본문을 복호화할 수 없습니다."
-            : "암호화 키가 잠겨 있어 본문을 표시할 수 없습니다.";
-          const fallback: AdminNoteView = {
-            ...note,
-            title: "암호화된 노트",
-            bodyFormat: "html",
-            bodyHtml: "",
-            bodyPreview: lockedReason,
-            bodySearchText: lockedReason,
-            fontSize: 17,
-            canReadContent: false,
-            unavailableReason: lockedReason
-          };
-
-          if (!profile || !privateKey) {
-            return fallback;
-          }
-
-          const wrappedKey = note.wrappedKeys[profile.uid];
-
-          if (!wrappedKey) {
-            return fallback;
-          }
-
-          try {
-            const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
-            const [title, body] = await Promise.all([
-              decryptText(note.encryptedTitle, noteKey),
-              decryptText(note.encryptedBody, noteKey)
-            ]);
-            const parsedBody = parseEditorContent(body);
-            const readonlyBody = parseReadonlyEditorContent(body);
-            const previewText = previewTextFromHtml(body);
-            const emptyPreviewText = /<img\b/i.test(parsedBody.html) ? "이미지가 포함된 노트" : "본문 없음";
-
-            return {
-              ...note,
-              title,
-              bodyFormat: readonlyBody.contentFormat,
-              bodyHtml: readonlyBody.content,
-              bodyPreview: adminNotePreviewText(previewText) || emptyPreviewText,
-              bodySearchText: previewText || emptyPreviewText,
-              fontSize: parsedBody.fontSize,
-              canReadContent: true,
-              unavailableReason: null
-            } satisfies AdminNoteView;
-          } catch {
-            return {
-              ...fallback,
-              title: "복호화할 수 없는 노트",
-              bodyPreview: "키가 변경되었거나 이 계정으로 열 수 없는 노트입니다.",
-              bodySearchText: "키가 변경되었거나 이 계정으로 열 수 없는 노트입니다.",
-              unavailableReason: "키가 변경되었거나 이 계정으로 열 수 없는 노트입니다."
-            };
-          }
-        })
-      );
-
-      if (!cancelled) {
-        setAdminNoteViews(nextNotes);
-      }
+    if (!adminUid || !privateKey) {
+      adminNoteDecryptCache.current.clear();
+      setAdminNoteViews(notes.map((note) => lockedAdminNoteView(note, Boolean(privateKey))));
+      return undefined;
     }
 
-    void decryptAdminNotes();
+    void resolveAdminNoteViews({
+      cache: adminNoteDecryptCache.current,
+      notes,
+      onPending: (pendingViews) => {
+        if (!cancelled && adminNoteDecryptGeneration.current === generation) {
+          setAdminNoteViews(pendingViews);
+        }
+      },
+      privateKey,
+      uid: adminUid
+    }).then((nextNotes) => {
+      if (!cancelled && adminNoteDecryptGeneration.current === generation) {
+        setAdminNoteViews(nextNotes);
+      }
+    }).catch(() => {
+      if (!cancelled && adminNoteDecryptGeneration.current === generation) {
+        adminNoteDecryptCache.current.clear();
+        setAdminNoteViews(notes.map((note) => lockedAdminNoteView(note, true)));
+        setNoteError("노트 본문을 복호화하지 못했습니다. 잠시 후 다시 시도해주세요.");
+      }
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [activeAdminTab, notes, privateKey, profile]);
+  }, [activeAdminTab, adminUid, notes, privateKey]);
 
   useEffect(() => {
     if (selectedNoteId && !adminNoteViews.some((note) => note.id === selectedNoteId)) {

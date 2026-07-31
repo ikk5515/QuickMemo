@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -516,6 +516,42 @@ describe("SecureShareOwnerModal management history", () => {
       "comments_cursor_123456",
       expect.any(Object)
     );
+  });
+
+  it("aborts an in-flight comment page when the management dialog unmounts", async () => {
+    const user = userEvent.setup();
+    let loadMoreSignal: AbortSignal | undefined;
+    let resolveLoadMore: (page: SecureShareCommentsPage) => void = () => undefined;
+    const pendingLoadMore = new Promise<SecureShareCommentsPage>((resolve) => {
+      resolveLoadMore = resolve;
+    });
+    const first = secureShareComment("comment_unmount_first_123456", {
+      body: "닫기 전 댓글"
+    });
+    const onLoadComments = vi.fn((
+      _target: { shareId: string },
+      cursor: string | null,
+      signal: AbortSignal
+    ) => {
+      if (!cursor) {
+        return Promise.resolve({ items: [first], nextCursor: "comments_cursor_unmount" });
+      }
+      loadMoreSignal = signal;
+      return pendingLoadMore;
+    });
+
+    const view = render(<ManagementHarness onLoadComments={onLoadComments} />);
+    expect(await screen.findByText("닫기 전 댓글")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "댓글 더 보기" }));
+    await waitFor(() => expect(loadMoreSignal).toBeDefined());
+
+    view.unmount();
+    expect(loadMoreSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveLoadMore({ items: [], nextCursor: null });
+      await pendingLoadMore;
+    });
   });
 
   it("offers an explicit same-browser retry for an allowed-email invitation draft", async () => {
