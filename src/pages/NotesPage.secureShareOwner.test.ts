@@ -6,7 +6,10 @@ import {
   parseSecureShareOwnerDetailsResponse,
   parseSecureShareOwnerSummary,
   refreshedSecureShareSettingsFlags,
+  requestSecureShareEmailDraftWithoutRollback,
   resolveSecureShareManagementSelection,
+  secureShareNewEmailRecipients,
+  secureShareEmailRecipientMemoryKey,
   secureShareManagementCapabilities,
   secureShareManagementStatus
 } from "./NotesPage";
@@ -151,6 +154,93 @@ describe("Secure Share v2 owner DTO boundary", () => {
       permissionLevel: "comment",
       showCommenterIpPrefix: true
     });
+  });
+
+  it("rejects non-canonical or duplicate owner-only recipient addresses", () => {
+    const emailShare = {
+      ...validSummary,
+      accessMode: "allowed_emails",
+      requiresEmailVerification: true
+    };
+
+    for (const allowedEmails of [
+      ["Viewer@Example.com"],
+      ["viewer@example.com", "viewer@example.com"],
+      ["not an email"]
+    ]) {
+      expect(() => parseSecureShareOwnerDetailsResponse({
+        ok: true,
+        share: emailShare,
+        policy: { allowedEmails, expirationPreset: "seven_days" },
+        attachmentReuseManifests: [validAttachmentReuseManifest]
+      })).toThrow(/정책 응답/);
+    }
+  });
+
+  it("targets only newly added canonical recipients after an edit", () => {
+    const previousPolicy = {
+      accessMode: "allowed_emails" as const,
+      allowedEmails: ["existing@example.com"],
+      customExpiresAt: null,
+      downloadAllowed: false,
+      emailVerificationRequired: true,
+      expirationPreset: "seven_days" as const,
+      oneTimeEnabled: false,
+      oneTimeScope: "global" as const,
+      passwordEnabled: false,
+      permissionLevel: "view" as const,
+      quickCopyButtonVisible: false,
+      showCommenterIpPrefix: false
+    };
+
+    expect(secureShareNewEmailRecipients(previousPolicy, {
+      ...previousPolicy,
+      allowedEmails: ["existing@example.com", "new@example.com"]
+    })).toEqual(["new@example.com"]);
+    expect(secureShareNewEmailRecipients(previousPolicy, {
+      ...previousPolicy,
+      accessMode: "authenticated_users",
+      allowedEmails: []
+    })).toEqual([]);
+  });
+
+  it("keeps a committed share intact when the external composer request fails", () => {
+    const shareId = `ss2_${"S".repeat(40)}`;
+    const contentKey = "K".repeat(43);
+    const shareUrl = `https://quickmemo.example/share/${shareId}#key=${contentKey}`;
+    const input = {
+      expectedOrigin: "https://quickmemo.example",
+      expectedShareId: shareId,
+      recipients: ["viewer@example.com"],
+      shareUrl
+    };
+
+    expect(requestSecureShareEmailDraftWithoutRollback(input, () => {
+      throw new Error(`external handler failed: ${shareUrl}`);
+    })).toBe(false);
+    expect(requestSecureShareEmailDraftWithoutRollback(input, () => undefined)).toBe(true);
+    expect(requestSecureShareEmailDraftWithoutRollback({
+      ...input,
+      recipients: Array.from({ length: 100 }, (_, index) => (
+        `${String(index).padStart(3, "0")}${"x".repeat(58)}@${"d".repeat(50)}.example`
+      ))
+    }, () => undefined)).toBe(false);
+  });
+
+  it("never resolves account A invitation recipients from account B", () => {
+    const recipients = new Map<string, string[]>();
+    const shareId = "ss2_same_share_id_123456";
+
+    recipients.set(
+      secureShareEmailRecipientMemoryKey("owner-a", shareId),
+      ["private-a@example.com"]
+    );
+
+    expect(recipients.get(
+      secureShareEmailRecipientMemoryKey("owner-b", shareId)
+    )).toBeUndefined();
+    recipients.clear();
+    expect(recipients.size).toBe(0);
   });
 
   it("maps a missing legacy prefix policy to false in the settings contract", () => {

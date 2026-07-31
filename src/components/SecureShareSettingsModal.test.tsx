@@ -80,10 +80,19 @@ describe("SecureShareSettingsModal", () => {
 
     await user.click(screen.getByRole("radio", { name: /지정한 이메일만/ }));
     const emailVerification = screen.getByRole("checkbox", { name: /이메일 인증 필요/ });
-    const emailInput = screen.getByLabelText("허용 이메일");
+    const emailInput = screen.getByLabelText("받는 사람 이메일");
 
     expect(emailVerification).toBeChecked();
     expect(emailVerification).toBeDisabled();
+    expect(emailInput).toHaveAccessibleDescription(
+      /QuickMemo는 메일을 자동 전송하지 않으므로 내용을 확인한 뒤 직접 보내주세요\./
+    );
+    expect(emailInput).toHaveAccessibleDescription(
+      /콘텐츠 키는 링크의 fragment에만 포함되며 QuickMemo 서버로 전송되지 않습니다\./
+    );
+    expect(emailInput).toHaveAccessibleDescription(
+      /메일 앱과 전송에 사용하는 메일 서비스에는 전체 링크가 전달됩니다\./
+    );
 
     await user.type(emailInput, "First@Example.com{Enter}");
     await user.type(emailInput, "second@example.com{Enter}");
@@ -93,7 +102,7 @@ describe("SecureShareSettingsModal", () => {
     expect(screen.getByText("second@example.com")).toBeInTheDocument();
     expect(screen.getByText("2/100")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "보안 공유 만들기" }));
+    await user.click(screen.getByRole("button", { name: "보안 공유 만들고 메일 작성" }));
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
       accessMode: "allowed_emails",
@@ -102,8 +111,40 @@ describe("SecureShareSettingsModal", () => {
     }));
 
     await user.click(screen.getByRole("radio", { name: /로그인한 QuickMemo 사용자만/ }));
-    expect(screen.queryByLabelText("허용 이메일")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("받는 사람 이메일")).not.toBeInTheDocument();
     expect(screen.queryByText("first@example.com")).not.toBeInTheDocument();
+  });
+
+  it("offers a mail draft only for recipients newly added while editing", async () => {
+    const user = userEvent.setup();
+    renderModal({
+      initialValue: {
+        ...defaultSecureSharePolicy(),
+        accessMode: "allowed_emails",
+        allowedEmails: ["existing@example.com"],
+        emailVerificationRequired: true
+      },
+      mode: "edit"
+    });
+
+    expect(screen.getByRole("button", { name: "설정 저장" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /메일 전송/ })).not.toBeInTheDocument();
+
+    const emailInput = screen.getByLabelText("받는 사람 이메일");
+    await user.type(emailInput, "NEW@Example.com");
+
+    expect(screen.getByRole("button", {
+      name: "설정 저장하고 새 받는 사람 메일 작성"
+    })).toBeInTheDocument();
+
+    await user.type(emailInput, "{Enter}");
+
+    expect(screen.getByRole("button", {
+      name: "설정 저장하고 새 받는 사람 메일 작성"
+    })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "new@example.com 삭제" }));
+    expect(screen.getByRole("button", { name: "설정 저장" })).toBeInTheDocument();
   });
 
   it("disables email-dependent controls when the server email feature is unavailable", () => {
@@ -307,5 +348,25 @@ describe("SecureShareSettingsModal", () => {
 
     expect(alert).toHaveTextContent("서버에서 설정을 저장하지 못했습니다.");
     expect(alert).toHaveFocus();
+  });
+
+  it("deduplicates synchronous double submit before an async save settles", async () => {
+    let resolveSave: () => void = () => undefined;
+    const onSave = vi.fn(() => new Promise<void>((resolve) => {
+      resolveSave = resolve;
+    }));
+    renderModal({ onSave });
+    const form = screen.getByRole("dialog", { name: "보안 공유 만들기" })
+      .querySelector("form");
+
+    expect(form).not.toBeNull();
+    fireEvent.submit(form!);
+    fireEvent.submit(form!);
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+
+    resolveSave();
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "보안 공유 만들기" })
+    ).toBeEnabled());
   });
 });

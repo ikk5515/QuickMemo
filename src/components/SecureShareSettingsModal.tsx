@@ -197,6 +197,7 @@ export function SecureShareSettingsModal({
   const descriptionId = useId();
   const emailInputId = useId();
   const emailHelpId = useId();
+  const emailDeliveryHelpId = useId();
   const emailErrorId = useId();
   const passwordInputId = useId();
   const passwordConfirmId = useId();
@@ -210,9 +211,13 @@ export function SecureShareSettingsModal({
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   const busyRef = useRef(false);
+  const submitInFlightRef = useRef(false);
   const focusLifecycleRef = useRef(0);
   const mountedRef = useRef(true);
   const initialPolicy = initialValue ?? defaultSecureSharePolicy();
+  const [initialAllowedEmailSet] = useState(() => new Set(
+    initialPolicy.allowedEmails.map((email) => email.trim().toLowerCase())
+  ));
   const [draft, setDraft] = useState<SecureSharePolicyInput>(() => ({
     ...initialPolicy,
     allowedEmails: [...initialPolicy.allowedEmails],
@@ -255,6 +260,19 @@ export function SecureShareSettingsModal({
     () => summarizeSecureSharePolicy(draft, { locale: "ko-KR", timeZone }),
     [draft, timeZone]
   );
+  const pendingAllowedEmailIntent = useMemo(
+    () => draft.accessMode === "allowed_emails" && emailInput.trim()
+      ? parseAllowedEmailChips(emailInput, draft.allowedEmails)
+      : null,
+    [draft.accessMode, draft.allowedEmails, emailInput]
+  );
+  const hasNewAllowedEmailRecipient = mode === "edit"
+    && draft.accessMode === "allowed_emails"
+    && !pendingAllowedEmailIntent?.invalid.length
+    && !pendingAllowedEmailIntent?.overflow.length
+    && (pendingAllowedEmailIntent?.emails ?? draft.allowedEmails).some(
+      (email) => !initialAllowedEmailSet.has(email.trim().toLowerCase())
+    );
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -376,7 +394,7 @@ export function SecureShareSettingsModal({
 
     updateDraft({ allowedEmails: parsed.emails });
     if (parsed.overflow.length > 0) {
-      setEmailInputError(`허용 이메일은 최대 ${secureShareAllowedEmailLimit}개까지 추가할 수 있습니다.`);
+      setEmailInputError(`받는 사람 이메일은 최대 ${secureShareAllowedEmailLimit}개까지 추가할 수 있습니다.`);
     } else if (parsed.invalid.length > 0) {
       setEmailInputError(`올바르지 않은 이메일: ${parsed.invalid.join(", ")}`);
     } else {
@@ -479,7 +497,7 @@ export function SecureShareSettingsModal({
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy) {
+    if (busy || submitInFlightRef.current) {
       return;
     }
 
@@ -489,7 +507,7 @@ export function SecureShareSettingsModal({
     const allowedEmails = pendingEmails?.emails ?? draft.allowedEmails;
 
     if (pendingEmails && (pendingEmails.invalid.length > 0 || pendingEmails.overflow.length > 0)) {
-      setLocalError("허용 이메일 입력을 확인해주세요.");
+      setLocalError("받는 사람 이메일 입력을 확인해주세요.");
       return;
     }
 
@@ -526,6 +544,7 @@ export function SecureShareSettingsModal({
     }
 
     setLocalError("");
+    submitInFlightRef.current = true;
     setInternalSaving(true);
     try {
       await onSave(validation.value);
@@ -534,6 +553,7 @@ export function SecureShareSettingsModal({
         setLocalError(errorMessage(caught));
       }
     } finally {
+      submitInFlightRef.current = false;
       if (mountedRef.current) {
         setInternalSaving(false);
       }
@@ -629,9 +649,8 @@ export function SecureShareSettingsModal({
 
               {draft.accessMode === "allowed_emails" && (
                 <div className="secure-share-email-editor">
-                  <label htmlFor={emailInputId}>허용 이메일</label>
+                  <label htmlFor={emailInputId}>받는 사람 이메일</label>
                   <div
-                    aria-describedby={`${emailHelpId}${emailInputError ? ` ${emailErrorId}` : ""}`}
                     className="secure-share-email-chips"
                   >
                     {draft.allowedEmails.map((email) => (
@@ -651,6 +670,7 @@ export function SecureShareSettingsModal({
                     ))}
                     <input
                       id={emailInputId}
+                      aria-describedby={`${emailHelpId} ${emailDeliveryHelpId}${emailInputError ? ` ${emailErrorId}` : ""}`}
                       aria-invalid={Boolean(emailInputError)}
                       disabled={busy}
                       onBlur={() => {
@@ -678,10 +698,16 @@ export function SecureShareSettingsModal({
                   </div>
                   <div className="secure-share-email-meta">
                     <small id={emailHelpId}>
-                      Enter, 쉼표, 세미콜론 또는 줄바꿈으로 추가합니다. 목록은 접근자에게 공개되지 않습니다.
+                      Enter, 쉼표, 세미콜론 또는 줄바꿈으로 추가합니다. 받는 사람 목록은 접근자에게 공개되지 않습니다.
                     </small>
                     <span>{draft.allowedEmails.length}/{secureShareAllowedEmailLimit}</span>
                   </div>
+                  <p className="secure-share-info" id={emailDeliveryHelpId}>
+                    공유를 저장하면 받는 사람과 보안 링크가 채워진 기본 메일 앱의 작성창 열기를 요청합니다.
+                    {" "}QuickMemo는 메일을 자동 전송하지 않으므로 내용을 확인한 뒤 직접 보내주세요.
+                    {" "}콘텐츠 키는 링크의 fragment에만 포함되며 QuickMemo 서버로 전송되지 않습니다.
+                    {" "}메일 앱과 전송에 사용하는 메일 서비스에는 전체 링크가 전달됩니다.
+                  </p>
                   {emailInputError && (
                     <p className="secure-share-inline-error" id={emailErrorId} role="alert">
                       {emailInputError}
@@ -1087,7 +1113,15 @@ export function SecureShareSettingsModal({
               취소
             </button>
             <button disabled={busy} type="submit">
-              {busy ? "저장 중…" : mode === "edit" ? "설정 저장" : "보안 공유 만들기"}
+              {busy
+                ? "저장 중…"
+                : mode === "edit"
+                  ? hasNewAllowedEmailRecipient
+                    ? "설정 저장하고 새 받는 사람 메일 작성"
+                    : "설정 저장"
+                  : draft.accessMode === "allowed_emails"
+                    ? "보안 공유 만들고 메일 작성"
+                    : "보안 공유 만들기"}
             </button>
           </footer>
         </form>

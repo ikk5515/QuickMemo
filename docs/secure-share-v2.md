@@ -271,6 +271,37 @@ the ambiguous counter, and the user may request a new challenge only after the
 cooldown. The OTP value and allowlist result never determine the response
 delay. Provider failure remains fail closed and never downgrades the policy.
 
+### Client-side invitation draft
+
+For an `allowed_emails` share, the owner UI requests the operating system's
+default mail composer after a share is activated. Editing an existing share
+does this only for newly added normalized recipients. The owner management
+dialog also provides an explicit `초대 메일 작성` retry action. One recipient
+is placed in `To`; two or more recipients are placed only in `Bcc` so the
+addresses are not disclosed to one another.
+
+This is a client-only `mailto:` handoff, not a QuickMemo invitation-delivery
+API. The composer accepts only a canonical same-origin Secure Share URL whose
+parsed share ID matches the selected share. Its fixed plain-text subject and
+body contain the full encrypted-share URL, but never the note title, body,
+attachments, password, OTP, or other user-controlled HTML. The mail-compose
+path does not fetch, persist, or log that URL, and the URL/content key is never
+sent to the QuickMemo server by this handoff. The selected mail application,
+mail provider, and eventual recipients necessarily receive the full link, so
+the owner must review the recipients before sending it.
+
+A composer request is not proof that the message was sent or delivered. The UI
+therefore asks the owner to confirm and send in the mail application and keeps
+`URL 복사` as a fallback. A missing mail handler, rejected external-protocol
+request, oversized `mailto:` URL, or other composer failure never rolls back,
+revokes, or weakens the already committed share policy. Recipient lists used
+for the retry button are held only in the current unlocked owner lifecycle and
+are cleared on account/key changes.
+
+Opening the shared URL still shows the normal email field and explicit OTP send
+action. Page load, link preview, crawler access, and mail-provider prefetch must
+never request an OTP automatically.
+
 ### Managed SMTP provider
 
 Production accepts only `SHARE_EMAIL_PROVIDER=gmail_smtp`. Nodemailer and the
