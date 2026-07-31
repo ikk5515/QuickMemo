@@ -3598,6 +3598,69 @@ textarea {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.secure-share-owner-comments {
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding-top: 14px;
+}
+
+.secure-share-owner-comments > header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.secure-share-owner-comments > header > div {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.secure-share-owner-comments h4 {
+  align-items: center;
+  display: inline-flex;
+  font-size: 14px;
+  gap: 7px;
+  margin: 0;
+}
+
+.secure-share-owner-comments > header span {
+  background: var(--color-surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  padding: 4px 7px;
+}
+
+.secure-share-owner-comments > header button,
+.secure-share-owner-comments-more {
+  min-height: 36px;
+}
+
+.secure-share-owner-comments-help,
+.secure-share-owner-comments-empty {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.secure-share-owner-comments > .form-error,
+.secure-share-owner-comments > .public-share-status {
+  margin: 0;
+}
+
+.secure-share-owner-comments-more {
+  justify-self: start;
+}
+
 .secure-share-revoke-backdrop {
   z-index: 14;
 }

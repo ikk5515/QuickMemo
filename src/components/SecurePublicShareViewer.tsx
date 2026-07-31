@@ -65,6 +65,11 @@ import {
 } from "../lib/publicAttachmentPreview";
 import { safeRasterImageBytes } from "../lib/safeRasterImage";
 import {
+  mergeSecureShareComments,
+  parseSecureShareCommentsResponse,
+  type SecureShareCommentDto
+} from "../lib/secureShareComments";
+import {
   SecureShareApiError,
   createSecureShareComment,
   deleteSecureShareComment,
@@ -77,7 +82,6 @@ import {
   getSecureShareRevision,
   listSecureShareComments,
   normalizeSecureShareParticipantDisplayName,
-  parseSecureShareIpPrefix,
   refreshSecureShareSession,
   renameSecureShareParticipant,
   requestSecureShareCopyGrant,
@@ -96,7 +100,6 @@ const otpPattern = /^\d{6}$/u;
 const base64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 const accessModes = new Set(["anyone_with_link", "allowed_emails", "authenticated_users"]);
 const permissionLevels = new Set(["view", "comment", "save_copy"]);
-const commentBadges = new Set(["guest", "email_verified", "quickmemo_user", "owner", "admin"]);
 const commentDateFormatter = new Intl.DateTimeFormat("ko-KR", {
   dateStyle: "medium",
   timeStyle: "short"
@@ -216,17 +219,6 @@ interface DecryptedSecureShareContent {
   title: string;
 }
 
-interface SecureShareComment {
-  authorParticipantId?: string;
-  badge: "admin" | "email_verified" | "guest" | "owner" | "quickmemo_user";
-  body: string;
-  canDelete: boolean;
-  createdAt: string;
-  displayName: string;
-  id: string;
-  ipPrefix?: string;
-}
-
 interface InternalAttachment extends SecurePublicShareAttachmentMetadata {
   encryptedFileName: EncryptedPayload;
 }
@@ -253,14 +245,6 @@ function safeString(value: unknown, maximumLength: number) {
 
 function unicodeLength(value: string) {
   return Array.from(value).length;
-}
-
-function safeUnicodeString(value: unknown, maximumLength: number) {
-  return typeof value === "string"
-    && value.length > 0
-    && unicodeLength(value) <= maximumLength
-    ? value
-    : null;
 }
 
 function safeDateString(value: unknown) {
@@ -647,96 +631,6 @@ function parseEmailChallengeDto(value: unknown) {
   return { challengeId, resendAfterSeconds };
 }
 
-function parseCommentsDto(value: unknown, allowIpPrefix = false) {
-  if (
-    !isPlainRecord(value)
-    || !hasOnlyKeys(value, ["ok", "items", "nextCursor", "requestId"])
-    || value.ok !== true
-    || !safeString(value.requestId, 128)
-    || !Array.isArray(value.items)
-    || value.items.length > 20
-  ) {
-    return null;
-  }
-
-  const items: SecureShareComment[] = [];
-
-  for (const rawItem of value.items) {
-    if (!isPlainRecord(rawItem)) {
-      return null;
-    }
-    if (!hasOnlyKeys(rawItem, [
-      "id",
-      "displayName",
-      "badge",
-      "body",
-      "createdAt",
-      "canDelete",
-      "authorParticipantId",
-      "ipPrefix"
-    ])) {
-      return null;
-    }
-
-    const id = safeString(rawItem.id, 128);
-    const body = safeUnicodeString(rawItem.body, 2_000);
-    const displayName = safeUnicodeString(rawItem.displayName, 72);
-    const createdAt = safeDateString(rawItem.createdAt);
-    const badge = rawItem.badge;
-    const authorParticipantId = Object.prototype.hasOwnProperty.call(
-      rawItem,
-      "authorParticipantId"
-    )
-      ? safeString(rawItem.authorParticipantId, 128)
-      : undefined;
-    const ipPrefix = Object.prototype.hasOwnProperty.call(rawItem, "ipPrefix")
-      ? parseSecureShareIpPrefix(rawItem.ipPrefix)
-      : undefined;
-
-    if (
-      !id
-      || !shareIdentifierPattern.test(id)
-      || !body
-      || !displayName
-      || !createdAt
-      || typeof badge !== "string"
-      || !commentBadges.has(badge)
-      || typeof rawItem.canDelete !== "boolean"
-      || (
-        Object.prototype.hasOwnProperty.call(rawItem, "authorParticipantId")
-        && (!authorParticipantId || !shareIdentifierPattern.test(authorParticipantId))
-      )
-      || (
-        Object.prototype.hasOwnProperty.call(rawItem, "ipPrefix")
-        && (!allowIpPrefix || !ipPrefix)
-      )
-    ) {
-      return null;
-    }
-
-    items.push({
-      id,
-      body,
-      displayName,
-      createdAt,
-      badge: badge as SecureShareComment["badge"],
-      canDelete: rawItem.canDelete,
-      ...(authorParticipantId ? { authorParticipantId } : {}),
-      ...(ipPrefix ? { ipPrefix } : {})
-    });
-  }
-
-  const nextCursor = value.nextCursor === null
-    ? null
-    : safeString(value.nextCursor, 256);
-
-  if (value.nextCursor !== null && !nextCursor) {
-    return null;
-  }
-
-  return { items, nextCursor };
-}
-
 function parseCommentMutationDto(value: unknown, allowIpPrefix = false) {
   if (
     !isPlainRecord(value)
@@ -746,41 +640,13 @@ function parseCommentMutationDto(value: unknown, allowIpPrefix = false) {
   ) {
     return null;
   }
-  const parsed = parseCommentsDto({
+  const parsed = parseSecureShareCommentsResponse({
     ok: true,
     items: [value.comment],
     nextCursor: null,
     requestId: value.requestId
   }, allowIpPrefix);
   return parsed?.items[0] ?? null;
-}
-
-function mergeCommentPage(
-  current: SecureShareComment[],
-  incoming: SecureShareComment[],
-  append: boolean
-) {
-  const incomingIds = new Set<string>();
-  const uniqueIncoming = incoming.filter((comment) => {
-    if (incomingIds.has(comment.id)) {
-      return false;
-    }
-    incomingIds.add(comment.id);
-    return true;
-  });
-
-  if (append) {
-    const currentIds = new Set(current.map((comment) => comment.id));
-    return [
-      ...current,
-      ...uniqueIncoming.filter((comment) => !currentIds.has(comment.id))
-    ];
-  }
-
-  return [
-    ...current.filter((comment) => !incomingIds.has(comment.id)),
-    ...uniqueIncoming
-  ];
 }
 
 function parseCopyGrantDto(value: unknown) {
@@ -911,7 +777,7 @@ function participantRenameErrorMessage(caught: unknown) {
   return "표시 이름을 변경하지 못했습니다. 다시 시도해주세요.";
 }
 
-function badgeLabel(badge: SecureShareComment["badge"]) {
+function badgeLabel(badge: SecureShareCommentDto["badge"]) {
   if (badge === "admin") {
     return "관리자";
   }
@@ -1010,7 +876,7 @@ export function SecurePublicShareViewer({
   const [attachmentPreviewReturnFocus, setAttachmentPreviewReturnFocus] =
     useState<HTMLButtonElement | null>(null);
   const [attachmentError, setAttachmentError] = useState("");
-  const [comments, setComments] = useState<SecureShareComment[]>([]);
+  const [comments, setComments] = useState<SecureShareCommentDto[]>([]);
   const [commentCursor, setCommentCursor] = useState<string | null>(null);
   const [commentBody, setCommentBody] = useState("");
   const [commentError, setCommentError] = useState("");
@@ -1221,7 +1087,7 @@ export function SecurePublicShareViewer({
     const generation = loadGenerationRef.current;
 
     try {
-      const parsed = parseCommentsDto(
+      const parsed = parseSecureShareCommentsResponse(
         await listSecureShareComments(shareId, {
           cursor: cursor ?? undefined,
           idToken: session.ownerPreview ? idToken : undefined,
@@ -1245,7 +1111,7 @@ export function SecurePublicShareViewer({
         return;
       }
 
-      setComments((current) => mergeCommentPage(current, parsed.items, append));
+      setComments((current) => mergeSecureShareComments(current, parsed.items, append));
       setCommentCursor(parsed.nextCursor);
       setCommentError("");
     } catch {
@@ -1377,7 +1243,7 @@ export function SecurePublicShareViewer({
       ) {
         postLoadTasks.push((async () => {
           try {
-            const parsedComments = parseCommentsDto(
+            const parsedComments = parseSecureShareCommentsResponse(
               await listSecureShareComments(shareId, {
                 idToken: nextSession.ownerPreview ? idToken : undefined,
                 limit: 20,
@@ -1393,7 +1259,7 @@ export function SecurePublicShareViewer({
               && generation === loadGenerationRef.current
             ) {
               setComments((current) =>
-                mergeCommentPage(current, parsedComments.items, false)
+                mergeSecureShareComments(current, parsedComments.items, false)
               );
               setCommentCursor(parsedComments.nextCursor);
               setCommentError("");
