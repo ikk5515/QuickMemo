@@ -43,5 +43,11 @@ export default tseslint.config(
       "react-refresh/only-export-components": "off",
       "@typescript-eslint/no-explicit-any": "off"
     }
+  },
+  {
+    files: ["src/**/*.{ts,tsx}"],
+    rules: {
+      "no-console": "error"
+    }
   }
 );

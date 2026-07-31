@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SecureShareApiError } from "../services/secureShares";
@@ -1376,6 +1376,181 @@ describe("SecurePublicShareViewer", () => {
 
     expect(screen.getByText("방금 작성한 댓글")).toBeInTheDocument();
     expect(screen.getByText("기존 댓글")).toBeInTheDocument();
+    expect(Array.from(
+      document.querySelectorAll(".secure-public-share-comment-list article p")
+    ).map((element) => element.textContent)).toEqual([
+      "방금 작성한 댓글",
+      "기존 댓글"
+    ]);
+  });
+
+  it("deduplicates an in-flight comment page and allows the next page after completion", async () => {
+    const user = userEvent.setup();
+    const pendingPage = deferred<unknown>();
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.listComments
+      .mockResolvedValueOnce({
+        ok: true,
+        items: [{
+          id: "comment_page_1",
+          body: "첫 페이지 댓글",
+          displayName: "첫 사용자",
+          badge: "guest",
+          createdAt: "2026-07-28T00:02:00.000Z",
+          canDelete: false
+        }],
+        nextCursor: "cursor_page_2",
+        requestId: "request_page_1"
+      })
+      .mockImplementationOnce(() => pendingPage.promise)
+      .mockResolvedValueOnce({
+        ok: true,
+        items: [{
+          id: "comment_page_3",
+          body: "세 번째 페이지 댓글",
+          displayName: "세 번째 사용자",
+          badge: "guest",
+          createdAt: "2026-07-28T00:00:00.000Z",
+          canDelete: false
+        }],
+        nextCursor: null,
+        requestId: "request_page_3"
+      });
+
+    renderViewer();
+
+    expect(await screen.findByText("첫 페이지 댓글")).toBeInTheDocument();
+    const loadMoreButton = screen.getByRole("button", { name: "댓글 더 보기" });
+    act(() => {
+      fireEvent.click(loadMoreButton);
+      fireEvent.click(loadMoreButton);
+    });
+
+    expect(mocks.listComments).toHaveBeenCalledTimes(2);
+    expect(mocks.listComments.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      cursor: "cursor_page_2",
+      signal: expect.any(AbortSignal)
+    }));
+    expect(loadMoreButton).toBeDisabled();
+    expect(loadMoreButton).toHaveAttribute("aria-busy", "true");
+
+    await act(async () => {
+      pendingPage.resolve({
+        ok: true,
+        items: [{
+          id: "comment_page_2",
+          body: "두 번째 페이지 댓글",
+          displayName: "두 번째 사용자",
+          badge: "guest",
+          createdAt: "2026-07-28T00:01:00.000Z",
+          canDelete: false
+        }],
+        nextCursor: "cursor_page_3",
+        requestId: "request_page_2"
+      });
+      await pendingPage.promise;
+    });
+
+    expect(await screen.findByText("두 번째 페이지 댓글")).toBeInTheDocument();
+    const nextPageButton = screen.getByRole("button", { name: "댓글 더 보기" });
+    await waitFor(() => expect(nextPageButton).toBeEnabled());
+    expect(nextPageButton).toHaveAttribute("aria-busy", "false");
+
+    await user.click(nextPageButton);
+
+    expect(await screen.findByText("세 번째 페이지 댓글")).toBeInTheDocument();
+    expect(mocks.listComments).toHaveBeenCalledTimes(3);
+    expect(mocks.listComments.mock.calls[2]?.[1]).toEqual(expect.objectContaining({
+      cursor: "cursor_page_3",
+      signal: expect.any(AbortSignal)
+    }));
+    expect(screen.queryByRole("button", { name: "댓글 더 보기" })).not.toBeInTheDocument();
+  });
+
+  it("aborts comment pagination on session identity changes and unmount", async () => {
+    const user = userEvent.setup();
+    const stalePage = deferred<unknown>();
+    const unmountedPage = deferred<unknown>();
+    let staleSignal: AbortSignal | undefined;
+    let unmountedSignal: AbortSignal | undefined;
+    mocks.refreshSession.mockResolvedValue(session({
+      capabilities: {
+        permissionLevel: "comment",
+        canComment: true,
+        canSaveCopy: false,
+        downloadAllowed: false,
+        quickCopyButtonVisible: false
+      }
+    }));
+    mocks.listComments
+      .mockResolvedValueOnce({
+        ok: true,
+        items: [],
+        nextCursor: "cursor_stale",
+        requestId: "request_before_session_change"
+      })
+      .mockImplementationOnce((_requestedShareId, options) => {
+        staleSignal = options.signal;
+        return stalePage.promise;
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        items: [],
+        nextCursor: "cursor_unmount",
+        requestId: "request_after_session_change"
+      })
+      .mockImplementationOnce((_requestedShareId, options) => {
+        unmountedSignal = options.signal;
+        return unmountedPage.promise;
+      });
+
+    const { props, rerender, unmount } = renderViewer();
+    await user.click(await screen.findByRole("button", { name: "댓글 더 보기" }));
+    expect(staleSignal?.aborted).toBe(false);
+
+    rerender(
+      <SecurePublicShareViewer
+        {...props}
+        idToken="header.payload.signature-after-session-change"
+        isAuthenticated
+      />
+    );
+
+    await waitFor(() => expect(staleSignal?.aborted).toBe(true));
+    await act(async () => {
+      stalePage.resolve({
+        ok: true,
+        items: [],
+        nextCursor: null,
+        requestId: "request_stale_result"
+      });
+      await stalePage.promise;
+    });
+    await waitFor(() => expect(mocks.listComments).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText("댓글을 불러오지 못했습니다.")).not.toBeInTheDocument();
+
+    await user.click(await screen.findByRole("button", { name: "댓글 더 보기" }));
+    expect(unmountedSignal?.aborted).toBe(false);
+    unmount();
+    expect(unmountedSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      unmountedPage.resolve({
+        ok: true,
+        items: [],
+        nextCursor: null,
+        requestId: "request_unmounted_result"
+      });
+      await unmountedPage.promise;
+    });
   });
 
   it("ignores a stale comment mutation without clearing the next share's busy state", async () => {

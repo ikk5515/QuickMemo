@@ -1,12 +1,24 @@
 import { getToken as getAppCheckToken } from "firebase/app-check";
 import type { EncryptedPayload, WrappedNoteKey } from "../types";
 import { appCheck } from "../lib/firebase";
+import { parseSecureShareIpPrefix } from "../lib/secureShareComments";
 import {
   normalizeSecureShareEmail,
   validateSecureSharePolicyInput,
   type SecureSharePolicyInput,
   type SecureSharePolicyValidationOptions
 } from "../lib/secureSharePolicy";
+
+export {
+  mergeSecureShareComments,
+  parseSecureShareCommentsResponse,
+  parseSecureShareIpPrefix
+} from "../lib/secureShareComments";
+export type {
+  SecureShareCommentBadge,
+  SecureShareCommentDto,
+  SecureShareCommentsPage
+} from "../lib/secureShareComments";
 
 export const secureShareApiPath = "/api/public-shares-v2";
 
@@ -429,49 +441,6 @@ export function normalizeSecureShareParticipantDisplayName(value: string) {
   return displayName;
 }
 
-export function parseSecureShareIpPrefix(value: unknown) {
-  if (typeof value !== "string" || value.length > 16) {
-    return null;
-  }
-
-  const ipv4 = /^(\d{1,3})\.(\d{1,3})$/u.exec(value);
-  if (ipv4) {
-    const first = Number.parseInt(ipv4[1], 10);
-    const second = Number.parseInt(ipv4[2], 10);
-    const canonical = `${first}.${second}`;
-    const reserved = (
-      first === 0
-      || first === 10
-      || first === 127
-      || first >= 224
-      || (first === 100 && second >= 64 && second <= 127)
-      || (first === 169 && second === 254)
-      || (first === 172 && second >= 16 && second <= 31)
-      || (first === 192 && (second === 0 || second === 88 || second === 168))
-      || (first === 198 && (second === 18 || second === 19 || second === 51))
-      || (first === 203 && second === 0)
-    );
-
-    return first <= 255 && second <= 255 && canonical === value && !reserved
-      ? canonical
-      : null;
-  }
-
-  const ipv6 = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u.exec(value);
-  if (!ipv6) {
-    return null;
-  }
-  const first = Number.parseInt(ipv6[1], 16);
-  const second = Number.parseInt(ipv6[2], 16);
-  const canonical = `${first.toString(16)}:${second.toString(16)}`;
-  const reserved = (
-    (first & 0xe000) !== 0x2000
-    || (first === 0x2001 && (second === 0x0002 || second === 0x0db8))
-    || (first === 0x3fff && (second & 0xf000) === 0)
-  );
-  return canonical === value && !reserved ? canonical : null;
-}
-
 export function parseSecureShareParticipantDto(
   value: unknown
 ): SecureShareParticipantDto | null {
@@ -852,6 +821,11 @@ async function fetchSecureShareResponse(options: SecureShareRequestOptions) {
   assertNoContentKey(options.body);
 
   const headers = new Headers({ accept: "application/json" });
+  const ownerAuthenticatedCommentRead = (
+    options.action === "comments"
+    && options.method === "GET"
+    && Boolean(options.idToken)
+  );
   const csrfToken = options.shareId
     ? csrfTokensByShareId.get(options.shareId)
     : undefined;
@@ -874,7 +848,7 @@ async function fetchSecureShareResponse(options: SecureShareRequestOptions) {
   if (options.body !== undefined) {
     headers.set("content-type", "application/json");
   }
-  if (csrfToken && contract.csrf !== "none") {
+  if (csrfToken && contract.csrf !== "none" && !ownerAuthenticatedCommentRead) {
     headers.set("x-csrf-token", csrfToken);
   } else if (contract.csrf === "after_session" && options.method !== "GET") {
     throw new SecureShareApiError(
@@ -894,7 +868,7 @@ async function fetchSecureShareResponse(options: SecureShareRequestOptions) {
       method: options.method,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       cache: "no-store",
-      credentials: "include",
+      credentials: ownerAuthenticatedCommentRead ? "omit" : "include",
       headers,
       redirect: "error",
       referrerPolicy: "no-referrer",

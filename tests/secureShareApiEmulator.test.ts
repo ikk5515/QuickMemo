@@ -551,22 +551,35 @@ async function participantMeRequest(input: {
 async function commentRequest(input: {
   authorization?: string;
   body: Record<string, unknown>;
+  cursor?: string;
   harness: SecureShareApiHarness;
+  limit?: number;
   method?: "GET" | "POST";
-  session: ParticipantSession;
+  session?: ParticipantSession;
   shareId: string;
   testClientIp?: string;
 }) {
   const method = input.method ?? "POST";
+  const query = new URLSearchParams({
+    action: "comments",
+    shareId: input.shareId
+  });
+  if (input.cursor) {
+    query.set("cursor", input.cursor);
+  }
+  if (input.limit !== undefined) {
+    query.set("limit", String(input.limit));
+  }
   const response = await fetch(
-    `${input.harness.origin}/api/public-shares-v2?action=comments`
-    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    `${input.harness.origin}/api/public-shares-v2?${query.toString()}`,
     {
       method,
       headers: apiHeaders(input.harness.origin, {
         authorization: input.authorization,
-        bindingCookie: participantSessionCookies(input.session),
-        csrfToken: method === "POST" ? input.session.csrfToken : undefined,
+        bindingCookie: input.session
+          ? participantSessionCookies(input.session)
+          : undefined,
+        csrfToken: method === "POST" ? input.session?.csrfToken : undefined,
         testClientIp: input.testClientIp
       }),
       ...(method === "POST" ? { body: JSON.stringify(input.body) } : {})
@@ -3803,6 +3816,174 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect((listed.body.items as Array<Record<string, unknown>>).every(
       (comment) => !Object.prototype.hasOwnProperty.call(comment, "ipPrefix")
     )).toBe(true);
+  }, 30_000);
+
+  it("lists owner comments with bearer auth only and hides them from unrelated users", async () => {
+    enableParticipantFeatures();
+    const owner = await createEmulatorOwner(
+      "owner-direct-comments@example.test",
+      "owner-password-123"
+    );
+    const outsider = await createEmulatorOwner(
+      "outsider-direct-comments@example.test",
+      "outsider-password-123"
+    );
+    const shareId = "owner_direct_comment_list";
+    const commentId = "comment_owner_direct_123456";
+
+    await seedSecureShare({
+      oneTimeEnabled: true,
+      ownerUid: owner.localId,
+      permissionLevel: "comment",
+      shareId,
+      showCommenterIpPrefix: true
+    });
+    await writeEmulatorDocuments([
+      {
+        path: `users/${outsider.localId}`,
+        fields: {
+          displayName: "Unrelated User",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: outsider.localId
+        }
+      },
+      {
+        path: `publicShareComments/${shareId}/items/${commentId}`,
+        fields: {
+          authorBadge: "guest",
+          authorDisplayNameSnapshot: "guest7",
+          authorIdentityHash: "must-not-cross-identity-hash",
+          authorParticipantId: "participant_owner_direct_123456",
+          authorUid: "must-not-cross-author-uid",
+          body: "URL 없이 관리 화면에서 보는 댓글",
+          carrier: "must-not-cross-carrier",
+          createdAt: new Date(),
+          email: "must-not-cross@example.test",
+          ipAddress: "203.226.244.27",
+          ipPrefixSnapshot: "203.226",
+          ipPrefixVersion: 1,
+          ownerUid: owner.localId,
+          shareId,
+          updatedAt: new Date()
+        }
+      }
+    ]);
+
+    const shareBefore = await readEmulatorDocument(`publicNoteShares/${shareId}`);
+    expect(await listEmulatorCollection("publicShareAccessSessions")).toHaveLength(0);
+
+    const ownerListed = await commentRequest({
+      authorization: owner.idToken,
+      body: {},
+      harness,
+      method: "GET",
+      shareId
+    });
+    expect(ownerListed.response.status).toBe(200);
+    expect(ownerListed.response.headers.get("cache-control")).toContain("no-store");
+    expect(cookiePairs(ownerListed.response)).toHaveLength(0);
+    expect(ownerListed.body.items).toEqual([
+      {
+        authorParticipantId: "participant_owner_direct_123456",
+        badge: "guest",
+        body: "URL 없이 관리 화면에서 보는 댓글",
+        canDelete: true,
+        createdAt: expect.any(String),
+        displayName: "guest7",
+        id: commentId,
+        ipPrefix: "203.226"
+      }
+    ]);
+    expect(JSON.stringify(ownerListed.body)).not.toMatch(
+      /must-not-cross|authorUid|identityHash|ipAddress|carrier|email/iu
+    );
+
+    const outsiderListed = await commentRequest({
+      authorization: outsider.idToken,
+      body: {},
+      harness,
+      method: "GET",
+      shareId
+    });
+    expect(outsiderListed.response.status).toBe(404);
+    expectSecretFreeFailure(outsiderListed.body, [
+      commentId,
+      "URL 없이 관리 화면에서 보는 댓글",
+      "guest7",
+      "203.226"
+    ]);
+
+    expect(await readEmulatorDocument(`publicNoteShares/${shareId}`))
+      .toEqual(shareBefore);
+    expect(await listEmulatorCollection("publicShareAccessSessions")).toHaveLength(0);
+  }, 30_000);
+
+  it("paginates owner comments with the full server cursor contract", async () => {
+    enableParticipantFeatures();
+    const owner = await createEmulatorOwner(
+      "owner-comment-pagination@example.test",
+      "owner-password-123"
+    );
+    const shareId = `ss2_${"p".repeat(80)}`;
+    const baseTime = Date.now();
+    const commentIds = Array.from(
+      { length: 21 },
+      (_, index) => `comment_${String(index).padStart(2, "0")}_${"c".repeat(48)}`
+    );
+
+    await seedSecureShare({
+      oneTimeEnabled: false,
+      ownerUid: owner.localId,
+      permissionLevel: "comment",
+      shareId,
+      showCommenterIpPrefix: true
+    });
+    await writeEmulatorDocuments(commentIds.map((commentId, index) => ({
+      path: `publicShareComments/${shareId}/items/${commentId}`,
+      fields: {
+        authorBadge: "guest",
+        authorDisplayNameSnapshot: `guest${index + 1}`,
+        body: `페이지네이션 댓글 ${index + 1}`,
+        createdAt: new Date(baseTime - index * 1_000),
+        ownerUid: owner.localId,
+        shareId,
+        updatedAt: new Date(baseTime - index * 1_000)
+      }
+    })));
+
+    const firstPage = await commentRequest({
+      authorization: owner.idToken,
+      body: {},
+      harness,
+      limit: 20,
+      method: "GET",
+      shareId
+    });
+    expect(firstPage.response.status).toBe(200);
+    expect(firstPage.body.items).toHaveLength(20);
+    expect((firstPage.body.items as Array<{ id: string }>).map(({ id }) => id))
+      .toEqual(commentIds.slice(0, 20));
+    const nextCursor = String(firstPage.body.nextCursor);
+    expect(nextCursor).toMatch(/^[A-Za-z0-9_-]+$/u);
+    expect(nextCursor.length).toBeGreaterThan(256);
+    expect(nextCursor.length).toBeLessThanOrEqual(1_000);
+
+    const secondPage = await commentRequest({
+      authorization: owner.idToken,
+      body: {},
+      cursor: nextCursor,
+      harness,
+      limit: 20,
+      method: "GET",
+      shareId
+    });
+    expect(secondPage.response.status).toBe(200);
+    expect(secondPage.body.items).toEqual([
+      expect.objectContaining({ id: commentIds[20] })
+    ]);
+    expect(secondPage.body.nextCursor).toBeNull();
   }, 30_000);
 
   it("marks only a newly capped participant session read-only for comments", async () => {

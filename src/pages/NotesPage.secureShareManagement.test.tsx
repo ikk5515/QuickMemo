@@ -1,7 +1,11 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+  SecureShareCommentDto,
+  SecureShareCommentsPage
+} from "../services/secureShares";
 import type { SecureShareOwnerSummary } from "../types";
 import {
   assertSecureShareOwnerOperationCurrent,
@@ -72,24 +76,48 @@ const revokedShare = secureShare("ss2_revoked_share_123456", {
 });
 const shares = [activeShare, consumedShare, expiredShare, revokedShare];
 
+function secureShareComment(
+  id: string,
+  overrides: Partial<SecureShareCommentDto> = {}
+): SecureShareCommentDto {
+  return {
+    badge: "guest",
+    body: "관리 화면 댓글",
+    canDelete: true,
+    createdAt: "2026-07-28T00:50:00.000Z",
+    displayName: "guest1",
+    id,
+    ipPrefix: "203.226",
+    ...overrides
+  };
+}
+
 function ManagementHarness({
   busy = false,
   hasMore = false,
   loadingMore = false,
   onClose = vi.fn(),
   onComposeEmail = vi.fn(),
+  onLoadComments = vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
   onLoadMore = vi.fn(),
   onRevoke = vi.fn().mockResolvedValue(true),
-  onSelect = vi.fn()
+  onSelect = vi.fn(),
+  shareUrl
 }: {
   busy?: boolean;
   hasMore?: boolean;
   loadingMore?: boolean;
   onClose?: () => void;
   onComposeEmail?: (share: SecureShareOwnerSummary) => void;
+  onLoadComments?: (
+    target: { shareId: string; sourceNoteId: string },
+    cursor: string | null,
+    signal: AbortSignal
+  ) => Promise<SecureShareCommentsPage>;
   onLoadMore?: () => void;
   onRevoke?: (share: SecureShareOwnerSummary) => Promise<boolean>;
   onSelect?: (share: SecureShareOwnerSummary) => void;
+  shareUrl?: string | null;
 }) {
   const [selectedId, setSelectedId] = useState(activeShare.shareId);
   const selected = shares.find((share) => share.shareId === selectedId) ?? activeShare;
@@ -111,6 +139,7 @@ function ManagementHarness({
       onCopy={vi.fn()}
       onCreate={vi.fn()}
       onEdit={vi.fn()}
+      onLoadComments={onLoadComments}
       onLoadMore={onLoadMore}
       onRevoke={onRevoke}
       onSelect={(share) => {
@@ -119,7 +148,9 @@ function ManagementHarness({
       }}
       share={selected}
       shares={shares}
-      shareUrl={`https://quickmemo.example/share/${selected.shareId}#key=test`}
+      shareUrl={shareUrl === undefined
+        ? `https://quickmemo.example/share/${selected.shareId}#key=test`
+        : shareUrl}
     />
   );
 }
@@ -386,6 +417,143 @@ describe("SecureShareOwnerModal management history", () => {
     expect(within(dialog).getByRole("button", { name: "공유 중단" })).toBeDisabled();
   });
 
+  it("shows owner comments without a share URL and renders comment bodies as text only", async () => {
+    const unsafeLookingBody = '<img src="x" onerror="alert(1)">';
+    const onLoadComments = vi.fn().mockResolvedValue({
+      items: [secureShareComment("comment_owner_direct_123456", {
+        body: unsafeLookingBody
+      })],
+      nextCursor: null
+    });
+
+    render(
+      <ManagementHarness
+        onLoadComments={onLoadComments}
+        shareUrl={null}
+      />
+    );
+
+    await waitFor(() => expect(onLoadComments).toHaveBeenCalledWith(
+      {
+        policyVersion: activeShare.policyVersion,
+        shareId: activeShare.shareId,
+        sourceNoteId: activeShare.sourceNoteId
+      },
+      null,
+      expect.any(Object)
+    ));
+    expect(await screen.findByText(unsafeLookingBody)).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    expect(screen.getByText(/공유 URL을 열지 않고 소유자 권한으로 확인/)).toBeInTheDocument();
+    expect(screen.getByText(/공유 키를 복구할 수 없어 URL을 표시하지 않습니다/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /댓글 삭제/ })).not.toBeInTheDocument();
+    expect(screen.getByText("읽기 전용")).toBeInTheDocument();
+  });
+
+  it("drops a late comment response after selecting another share", async () => {
+    const user = userEvent.setup();
+    let resolveActive: (page: SecureShareCommentsPage) => void = () => undefined;
+    let resolveConsumed: (page: SecureShareCommentsPage) => void = () => undefined;
+    const activeResponse = new Promise<SecureShareCommentsPage>((resolve) => {
+      resolveActive = resolve;
+    });
+    const consumedResponse = new Promise<SecureShareCommentsPage>((resolve) => {
+      resolveConsumed = resolve;
+    });
+    const onLoadComments = vi.fn((target: { shareId: string }) =>
+      target.shareId === activeShare.shareId ? activeResponse : consumedResponse
+    );
+
+    render(<ManagementHarness onLoadComments={onLoadComments} />);
+    await waitFor(() => expect(onLoadComments).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("button", { name: /사용 완료/ }));
+    await waitFor(() => expect(onLoadComments).toHaveBeenCalledTimes(2));
+
+    resolveConsumed({
+      items: [secureShareComment("comment_consumed_123456", {
+        body: "선택한 공유의 댓글"
+      })],
+      nextCursor: null
+    });
+    expect(await screen.findByText("선택한 공유의 댓글")).toBeInTheDocument();
+
+    resolveActive({
+      items: [secureShareComment("comment_stale_123456", {
+        body: "이전 공유의 늦은 댓글"
+      })],
+      nextCursor: null
+    });
+    await waitFor(() => expect(screen.queryByText("이전 공유의 늦은 댓글"))
+      .not.toBeInTheDocument());
+    expect(screen.getByText("선택한 공유의 댓글")).toBeInTheDocument();
+  });
+
+  it("loads comment cursor pages explicitly and removes duplicate ids", async () => {
+    const user = userEvent.setup();
+    const first = secureShareComment("comment_page_first_123456", {
+      body: "첫 페이지 댓글"
+    });
+    const second = secureShareComment("comment_page_second_123456", {
+      body: "두 번째 페이지 댓글"
+    });
+    const onLoadComments = vi.fn((
+      _target: { shareId: string },
+      cursor: string | null
+    ) => Promise.resolve(cursor
+      ? { items: [first, second], nextCursor: null }
+      : { items: [first], nextCursor: "comments_cursor_123456" }
+    ));
+
+    render(<ManagementHarness onLoadComments={onLoadComments} />);
+    expect(await screen.findByText("첫 페이지 댓글")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "댓글 더 보기" }));
+    expect(await screen.findByText("두 번째 페이지 댓글")).toBeInTheDocument();
+    expect(screen.getAllByText("첫 페이지 댓글")).toHaveLength(1);
+    expect(onLoadComments).toHaveBeenLastCalledWith(
+      expect.objectContaining({ shareId: activeShare.shareId }),
+      "comments_cursor_123456",
+      expect.any(Object)
+    );
+  });
+
+  it("aborts an in-flight comment page when the management dialog unmounts", async () => {
+    const user = userEvent.setup();
+    let loadMoreSignal: AbortSignal | undefined;
+    let resolveLoadMore: (page: SecureShareCommentsPage) => void = () => undefined;
+    const pendingLoadMore = new Promise<SecureShareCommentsPage>((resolve) => {
+      resolveLoadMore = resolve;
+    });
+    const first = secureShareComment("comment_unmount_first_123456", {
+      body: "닫기 전 댓글"
+    });
+    const onLoadComments = vi.fn((
+      _target: { shareId: string },
+      cursor: string | null,
+      signal: AbortSignal
+    ) => {
+      if (!cursor) {
+        return Promise.resolve({ items: [first], nextCursor: "comments_cursor_unmount" });
+      }
+      loadMoreSignal = signal;
+      return pendingLoadMore;
+    });
+
+    const view = render(<ManagementHarness onLoadComments={onLoadComments} />);
+    expect(await screen.findByText("닫기 전 댓글")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "댓글 더 보기" }));
+    await waitFor(() => expect(loadMoreSignal).toBeDefined());
+
+    view.unmount();
+    expect(loadMoreSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveLoadMore({ items: [], nextCursor: null });
+      await pendingLoadMore;
+    });
+  });
+
   it("offers an explicit same-browser retry for an allowed-email invitation draft", async () => {
     const user = userEvent.setup();
     const onComposeEmail = vi.fn();
@@ -408,6 +576,7 @@ describe("SecureShareOwnerModal management history", () => {
       onCopy: vi.fn(),
       onCreate: vi.fn(),
       onEdit: vi.fn(),
+      onLoadComments: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       onLoadMore: vi.fn(),
       onRevoke: vi.fn().mockResolvedValue(true),
       onSelect: vi.fn(),
@@ -543,6 +712,7 @@ describe("SecureShareOwnerModal management history", () => {
       onCopy: vi.fn(),
       onCreate: vi.fn(),
       onEdit: vi.fn(),
+      onLoadComments: vi.fn().mockResolvedValue({ items: [], nextCursor: null }),
       onLoadMore,
       onRevoke: vi.fn().mockResolvedValue(true),
       onSelect: vi.fn(),

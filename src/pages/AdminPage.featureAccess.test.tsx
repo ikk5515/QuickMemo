@@ -150,18 +150,21 @@ describe("AdminPage feature access editing", () => {
     ).toBeInTheDocument();
   });
 
-  it("loads and decrypts the full admin note collection only on the notes tab", () => {
+  it("loads admin notes only on the notes tab and uses the scoped incremental decrypt cache", () => {
     const subscriptionEffect = adminPageSource.match(
       /useEffect\(\(\) => \{\n {4}if \(!profile\?\.isAdmin[\s\S]*?\}, \[activeAdminTab, profile\?\.isAdmin\]\);/u
     )?.[0] ?? "";
     const decryptEffect = adminPageSource.match(
-      /useEffect\(\(\) => \{\n {4}let cancelled = false;[\s\S]*?\}, \[activeAdminTab, notes, privateKey, profile\]\);/u
+      /useEffect\(\(\) => \{\n {4}const generation = adminNoteDecryptGeneration[\s\S]*?\}, \[activeAdminTab, adminUid, notes, privateKey\]\);/u
     )?.[0] ?? "";
 
     expect(subscriptionEffect).toContain('activeAdminTab !== "notes"');
     expect(subscriptionEffect).toContain("subscribeAllNotesForAdmin");
     expect(decryptEffect).toContain('if (activeAdminTab !== "notes")');
     expect(decryptEffect).toContain("setAdminNoteViews([])");
+    expect(decryptEffect).toContain("resolveAdminNoteViews");
+    expect(decryptEffect).toContain("adminNoteDecryptCache.current.clear()");
+    expect(decryptEffect).not.toContain("Promise.all(");
   });
 
   it("exposes the protected Gmail SMTP settings as a dedicated admin tab", () => {

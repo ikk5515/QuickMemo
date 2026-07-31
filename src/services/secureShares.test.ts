@@ -11,7 +11,9 @@ import {
   getSecureShareRevision,
   listSecureShareComments,
   listOwnedSecureShares,
+  mergeSecureShareComments,
   normalizeSecureShareParticipantDisplayName,
+  parseSecureShareCommentsResponse,
   parseSecureShareIpPrefix,
   renameSecureShareParticipant,
   secureShareApiActionContract,
@@ -497,6 +499,129 @@ describe("secure share API client", () => {
     );
     expect(commentsUrl.searchParams.get("action")).toBe("comments");
     expect(commentsUrl.searchParams.get("limit")).toBe("20");
+  });
+
+  it("lists owner comments with bearer auth and no share-session mutation data", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        shareId,
+        csrfToken,
+        permissionLevel: "comment"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        ok: true,
+        items: [],
+        nextCursor: null,
+        requestId: "request_owner_comments"
+      }));
+
+    await unlockSecureShare(shareId, {
+      unlockAttemptId: "attempt_owner_comments_123456"
+    });
+
+    await listSecureShareComments(shareId, {
+      cursor: "owner_comments_cursor",
+      idToken,
+      limit: 20
+    });
+
+    const [url, init] = vi.mocked(fetch).mock.calls[1];
+    const parsedUrl = new URL(String(url), "https://quickmemo.example");
+    const headers = new Headers(init?.headers);
+
+    expect(parsedUrl.searchParams.get("action")).toBe("comments");
+    expect(parsedUrl.searchParams.get("shareId")).toBe(shareId);
+    expect(parsedUrl.searchParams.get("cursor")).toBe("owner_comments_cursor");
+    expect(parsedUrl.hash).toBe("");
+    expect(headers.get("authorization")).toBe(`Bearer ${idToken}`);
+    expect(headers.has("x-csrf-token")).toBe(false);
+    expect(init?.credentials).toBe("omit");
+    expect(init?.body).toBeUndefined();
+  });
+
+  it("strictly parses and merges only the public comment DTO fields", () => {
+    const firstComment = {
+      id: "comment_owner_123456",
+      displayName: "guest1",
+      badge: "guest" as const,
+      body: "<img src=x onerror=alert(1)>",
+      createdAt: "2026-07-31T18:00:00.000Z",
+      canDelete: true,
+      authorParticipantId: "participant_owner_123456",
+      ipPrefix: "203.226"
+    };
+    const response = {
+      ok: true,
+      items: [firstComment],
+      nextCursor: "next_owner_comments_cursor",
+      requestId: "request_owner_comments_parse"
+    };
+
+    expect(parseSecureShareCommentsResponse(response, true)).toEqual({
+      items: [{
+        ...firstComment,
+        createdAt: "2026-07-31T18:00:00.000Z"
+      }],
+      nextCursor: "next_owner_comments_cursor"
+    });
+    expect(parseSecureShareCommentsResponse(response, false)).toBeNull();
+    expect(parseSecureShareCommentsResponse({
+      ...response,
+      items: [{ ...firstComment, ipPrefix: "203.226.244.27" }]
+    }, true)).toBeNull();
+    expect(parseSecureShareCommentsResponse({
+      ...response,
+      items: [{ ...firstComment, authorUid: "must-not-cross" }]
+    }, true)).toBeNull();
+    expect(parseSecureShareCommentsResponse({
+      ...response,
+      nextCursor: "A".repeat(900)
+    }, true)?.nextCursor).toBe("A".repeat(900));
+    expect(parseSecureShareCommentsResponse({
+      ...response,
+      nextCursor: `unsafe+${"A".repeat(300)}`
+    }, true)).toBeNull();
+
+    const secondComment = {
+      ...firstComment,
+      id: "comment_owner_654321",
+      body: "두 번째 댓글"
+    };
+    expect(mergeSecureShareComments(
+      [{ ...firstComment, createdAt: "2026-07-31T18:00:00.000Z" }],
+      [
+        { ...firstComment, createdAt: "2026-07-31T18:00:00.000Z" },
+        { ...secondComment, createdAt: "2026-07-31T18:00:00.000Z" }
+      ],
+      true
+    ).map((comment) => comment.id)).toEqual([
+      "comment_owner_123456",
+      "comment_owner_654321"
+    ]);
+
+    const newestComment = {
+      ...firstComment,
+      id: "comment_owner_999999",
+      body: "새 댓글",
+      createdAt: "2026-07-31T18:02:00.000Z"
+    };
+    const oldestComment = {
+      ...firstComment,
+      id: "comment_owner_000001",
+      body: "이전 페이지 댓글",
+      createdAt: "2026-07-31T17:59:00.000Z"
+    };
+    expect(mergeSecureShareComments(
+      [oldestComment, newestComment],
+      [firstComment, secondComment],
+      false
+    ).map((comment) => comment.id)).toEqual([
+      "comment_owner_999999",
+      "comment_owner_123456",
+      "comment_owner_654321",
+      "comment_owner_000001"
+    ]);
   });
 
   it("fails closed on unsafe participant fields and accepts only canonical partial prefixes", async () => {
