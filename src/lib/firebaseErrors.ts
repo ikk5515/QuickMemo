@@ -42,5 +42,5 @@ export function firebaseAuthErrorMessage(error: unknown, fallback: string) {
     return authErrorMessages["auth/configuration-not-found"];
   }
 
-  return message || fallback;
+  return fallback;
 }

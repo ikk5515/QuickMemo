@@ -44,6 +44,11 @@ function E2eNavigationBridge() {
   );
 }
 
+const e2eNavigationBridgeEnabled =
+  !import.meta.env.PROD
+  && import.meta.env.MODE === "test"
+  && import.meta.env.VITE_E2E_NAVIGATION_BRIDGE === "true";
+
 function SecureShareCopyRecovery() {
   const { firebaseUser, profile } = useAuth();
   const lastRunAtRef = useRef(0);
@@ -132,7 +137,7 @@ export function RequireAuth({
 export default function App() {
   return (
     <Suspense fallback={<PageLoadingFallback />}>
-      {import.meta.env.VITE_E2E_NAVIGATION_BRIDGE === "true" && <E2eNavigationBridge />}
+      {e2eNavigationBridgeEnabled && <E2eNavigationBridge />}
       <SecureShareCopyRecovery />
       <Routes>
         <Route path="/" element={<Navigate to="/login" replace />} />

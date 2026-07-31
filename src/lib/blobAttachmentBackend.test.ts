@@ -1,13 +1,64 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { publicShareAttachmentIsCurrent } from "../../api/blob-attachments.js";
+import {
+  canonicalNoteAttachmentMimeType,
+  publicShareAttachmentIsCurrent,
+  safeAttachmentMimeType,
+  safeFileName
+} from "../../api/blob-attachments.js";
 
 const blobAttachmentApiSource = readFileSync(join(process.cwd(), "api/blob-attachments.js"), "utf8");
 const blobAttachmentClientSource = readFileSync(join(process.cwd(), "src/services/blobAttachments.ts"), "utf8");
 const firestoreRulesSource = readFileSync(join(process.cwd(), "firestore.rules"), "utf8");
 
 describe("blob attachment backend", () => {
+  it.each([
+    "report\u0000name",
+    "report\u0085name",
+    "report\u061Cname",
+    "report\u200Bname",
+    "report\u202Ename",
+    "report\u2066name",
+    "report\uFEFFname"
+  ])("rejects filename control characters before reserving an upload", (fileName) => {
+    expect(() => safeFileName(fileName)).toThrow("Invalid fileName");
+  });
+
+  it("accepts normal Unicode attachment names", () => {
+    expect(safeFileName("회의 자료")).toBe("회의 자료");
+    expect(safeFileName("ｒｅｐｏｒｔ")).toBe("report");
+  });
+
+  it.each(["report／name", "report：name", "report＼name"])(
+    "normalizes compatibility characters before rejecting dangerous filename characters",
+    (fileName) => {
+      expect(() => safeFileName(fileName)).toThrow("Invalid fileName");
+    }
+  );
+
+  it("checks the filename length after compatibility normalization", () => {
+    expect(() => safeFileName("㍿".repeat(34))).toThrow("Invalid fileName");
+  });
+
+  it("canonicalizes note MIME while strictly validating public-share MIME", () => {
+    const payloadParser = blobAttachmentApiSource.match(
+      /function parseClientPayload[\s\S]*?function noteBlobPath/u
+    )?.[0] ?? "";
+
+    expect(safeAttachmentMimeType("pdf", "application/pdf")).toBe("application/pdf");
+    expect(safeAttachmentMimeType("jpg", "IMAGE/JPEG")).toBe("image/jpeg");
+    expect(() => safeAttachmentMimeType("pdf", "text/html")).toThrow("Attachment MIME/extension mismatch");
+    expect(() => safeAttachmentMimeType("png", "image/jpeg")).toThrow("Attachment MIME/extension mismatch");
+    expect(canonicalNoteAttachmentMimeType("pdf", "text/html")).toBe("application/pdf");
+    expect(canonicalNoteAttachmentMimeType("hwp", "")).toBe("application/x-hwp");
+    expect(() => canonicalNoteAttachmentMimeType("exe", "application/octet-stream")).toThrow("Invalid extension");
+    expect(() => canonicalNoteAttachmentMimeType("pdf", "x".repeat(121))).toThrow("Invalid mimeType");
+    expect(payloadParser).toContain('scope === "publicShare"');
+    expect(payloadParser).toContain("? safeAttachmentMimeType(extension, parsed.mimeType)");
+    expect(payloadParser).toContain(": canonicalNoteAttachmentMimeType(extension, parsed.mimeType)");
+  });
+
   it("streams both newly uploaded and retained current-generation attachments", () => {
     const document = (fields: Record<string, unknown>) => ({ fields });
     const share = document({
@@ -387,10 +438,11 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentClientSource).toContain("chunkIvBase64List: encryption.chunkIvs.map");
   });
 
-  it("enforces public share MIME/extension invariants in the service-account Blob API", () => {
+  it("enforces public-share MIME invariants and canonicalizes note MIME in the Blob API", () => {
     expect(blobAttachmentApiSource).toContain("const publicShareAttachmentMimeTypes = {");
-    expect(blobAttachmentApiSource).toContain("function safePublicShareMimeType(extension, mimeType)");
-    expect(blobAttachmentApiSource).toContain("Public share MIME/extension mismatch");
-    expect(blobAttachmentApiSource).toContain('scope === "publicShare" ? safePublicShareMimeType(extension, parsed.mimeType) : safeMimeType(parsed.mimeType)');
+    expect(blobAttachmentApiSource).toContain("function safeAttachmentMimeType(extension, mimeType)");
+    expect(blobAttachmentApiSource).toContain("Attachment MIME/extension mismatch");
+    expect(blobAttachmentApiSource).toContain("function canonicalNoteAttachmentMimeType(extension, mimeType)");
+    expect(blobAttachmentApiSource).toContain(": canonicalNoteAttachmentMimeType(extension, parsed.mimeType)");
   });
 });

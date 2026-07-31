@@ -37,7 +37,7 @@ import {
   updateScheduleTask,
   type ScheduleTaskSnapshot
 } from "../services/scheduleTasks";
-import SchedulePage from "./SchedulePage";
+import SchedulePage, { scheduleActionError } from "./SchedulePage";
 
 function schedulePageElement(routeView?: "recurring", initialEntry?: string) {
   return (
@@ -335,6 +335,18 @@ vi.mock("../services/recurringHabits", () => ({
 }));
 
 describe("SchedulePage quick work panel", () => {
+  it("does not expose unknown Firestore error details", () => {
+    expect(scheduleActionError(
+      {
+        code: "firestore/internal",
+        message: "projects/example/databases/(default)/documents/privateCollection"
+      },
+      "일정 작업에 실패했습니다."
+    )).toBe("일정 작업에 실패했습니다.");
+    expect(scheduleActionError(null, "일정 작업에 실패했습니다."))
+      .toBe("일정 작업에 실패했습니다.");
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     testData.privateKey = {} as CryptoKey;
@@ -3071,7 +3083,10 @@ describe("SchedulePage quick work panel", () => {
       return vi.fn();
     });
     vi.mocked(updateScheduleTask).mockRejectedValueOnce(
-      new Error("일정이 다른 곳에서 변경되었습니다. 최신 내용을 확인한 뒤 다시 저장해주세요.")
+      Object.assign(new Error("untrusted schedule task conflict detail"), {
+        code: "schedule-task/revision-conflict",
+        reason: "revision-mismatch"
+      })
     );
 
     renderSchedulePage();
@@ -3314,7 +3329,9 @@ describe("SchedulePage quick work panel", () => {
     await user.click(within(editDialog).getByRole("button", { name: "시작일 지우기" }));
     await user.click(within(editDialog).getByRole("button", { name: "저장" }));
 
-    expect(await within(editDialog).findByRole("alert")).toHaveTextContent(/firestore save failed/);
+    const alert = await within(editDialog).findByRole("alert");
+    expect(alert).toHaveTextContent("일정을 저장하지 못했습니다.");
+    expect(alert).not.toHaveTextContent("firestore save failed");
     expect(deleteGoogleCalendarTask).not.toHaveBeenCalled();
     expect(upsertGoogleCalendarTask).not.toHaveBeenCalled();
   });

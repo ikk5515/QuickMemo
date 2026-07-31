@@ -5,6 +5,14 @@ import { describe, expect, it } from "vitest";
 const publicSharePageSource = readFileSync(join(process.cwd(), "src/pages/PublicSharePage.tsx"), "utf8");
 
 describe("PublicSharePage security controls", () => {
+  it("does not render legacy Firestore or decryption error internals", () => {
+    expect(publicSharePageSource).not.toContain("shareError.message");
+    expect(publicSharePageSource).not.toContain("loadError.message");
+    expect(publicSharePageSource).toContain('setError("공유 노트를 열 수 없습니다.")');
+    expect(publicSharePageSource).toContain("legacyPublicShareLoadError(loadError)");
+    expect(publicSharePageSource).toContain('? "공유 링크가 올바르지 않습니다."');
+  });
+
   it("does not expose public attachment bytes through attacker-controlled MIME blob documents", () => {
     expect(publicSharePageSource).toContain("\"application/octet-stream\"");
     expect(publicSharePageSource).toContain("publicShareAttachmentMimeMatchesExtension(attachment.extension, attachment.mimeType)");

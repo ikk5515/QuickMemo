@@ -556,23 +556,63 @@ describeRules("firestore security rules", () => {
     await testEnv.cleanup();
   });
 
-  it("allows public roster reads without authentication", async () => {
+  it("allows only bounded active public roster listings and reserves direct reads for admins", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), "publicLoginRoster/user-a"), {
-        uid: "user-a",
-        displayName: "Alpha",
-        avatarText: "A",
-        color: "#2f7d70",
-        order: 1,
-        quickKey: 1,
-        loginEmail: "a@quickmemo.local",
-        isActive: true,
-        isAdmin: false
-      });
+      const db = context.firestore();
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true }));
+      await setDoc(doc(db, "publicLoginRoster/user-a"), rosterProfile("user-a"));
+      await setDoc(
+        doc(db, "publicLoginRoster/user-b"),
+        rosterProfile("user-b", { isActive: false, order: 2, quickKey: 2 })
+      );
     });
 
     const publicDb = testEnv.unauthenticatedContext().firestore();
-    await assertSucceeds(getDoc(doc(publicDb, "publicLoginRoster/user-a")));
+    const roster = collection(publicDb, "publicLoginRoster");
+
+    await assertFails(getDoc(doc(publicDb, "publicLoginRoster/user-a")));
+    await assertFails(getDoc(doc(publicDb, "publicLoginRoster/user-b")));
+    await assertFails(getDocs(roster));
+    await assertFails(getDocs(query(roster, limit(100))));
+    await assertFails(getDocs(query(roster, where("isActive", "==", true))));
+    await assertFails(getDocs(query(roster, where("isActive", "==", true), limit(101))));
+
+    const activeRoster = await assertSucceeds(
+      getDocs(query(roster, where("isActive", "==", true), limit(100)))
+    );
+    expect(activeRoster.docs.map((snapshot) => snapshot.id)).toEqual(["user-a"]);
+
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    await assertSucceeds(getDoc(doc(adminDb, "publicLoginRoster/user-a")));
+    await assertSucceeds(getDoc(doc(adminDb, "publicLoginRoster/user-b")));
+  });
+
+  it("requires active users and bounded queries for user profile listings", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b", { order: 2, quickKey: 2 }));
+      await setDoc(
+        doc(db, "users/inactive-user"),
+        userProfile("inactive-user", { isActive: false, order: 3, quickKey: 3 })
+      );
+    });
+
+    const publicDb = testEnv.unauthenticatedContext().firestore();
+    await assertFails(getDocs(query(collection(publicDb, "users"), limit(100))));
+
+    const activeDb = testEnv.authenticatedContext("user-a").firestore();
+    const users = collection(activeDb, "users");
+    await assertSucceeds(getDoc(doc(activeDb, "users/user-b")));
+    await assertFails(getDocs(users));
+    await assertFails(getDocs(query(users, orderBy("order", "asc"), limit(101))));
+
+    const boundedUsers = await assertSucceeds(getDocs(query(users, orderBy("order", "asc"), limit(100))));
+    expect(boundedUsers.size).toBe(3);
+
+    const inactiveDb = testEnv.authenticatedContext("inactive-user").firestore();
+    await assertSucceeds(getDoc(doc(inactiveDb, "users/inactive-user")));
+    await assertFails(getDocs(query(collection(inactiveDb, "users"), orderBy("order", "asc"), limit(100))));
   });
 
   it("blocks every client from Google Calendar server-only collections", async () => {

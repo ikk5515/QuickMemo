@@ -3,8 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { StrictMode, type PropsWithChildren } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { LibraryCaptureValidationError } from "../lib/libraryCapture";
+import { LibraryPdfTextError } from "../lib/libraryPdfText";
 import type { LibraryItemContent } from "../types";
-import LibraryPage from "./LibraryPage";
+import LibraryPage, { libraryPageErrorMessage } from "./LibraryPage";
 
 const testData = vi.hoisted(() => {
   const profile = {
@@ -90,6 +92,7 @@ vi.mock("../services/library", () => ({
   getNextLibraryItemsPage: serviceMocks.getNextLibraryItemsPage,
   libraryInitialSubscriptionLimit: 120,
   librarySubscriptionStep: 120,
+  DuplicateLibraryItemError: class DuplicateLibraryItemError extends Error {},
   LibraryItemRevisionConflictError: class LibraryItemRevisionConflictError extends Error {
     constructor() {
       super("자료가 다른 곳에서 변경되었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.");
@@ -362,6 +365,23 @@ beforeEach(() => {
 });
 
 describe("LibraryPage", () => {
+  it("keeps trusted local validation details but hides backend error internals", () => {
+    const fallback = "자료를 불러오지 못했습니다.";
+
+    expect(libraryPageErrorMessage(
+      new Error("projects/example/databases/(default)/documents/privateLibrary"),
+      fallback
+    )).toBe(fallback);
+    expect(libraryPageErrorMessage(
+      new LibraryCaptureValidationError("캡처 데이터 형식이 올바르지 않습니다."),
+      fallback
+    )).toBe("캡처 데이터 형식이 올바르지 않습니다.");
+    expect(libraryPageErrorMessage(
+      new LibraryPdfTextError("PDF 파일은 25MB 이하만 텍스트를 추출할 수 있습니다."),
+      fallback
+    )).toBe("PDF 파일은 25MB 이하만 텍스트를 추출할 수 있습니다.");
+  });
+
   it("keeps saved library items usable without reading note data when Notes is denied", async () => {
     testData.auth.profile.featureAccess = { notes: false, library: true, schedule: false };
 

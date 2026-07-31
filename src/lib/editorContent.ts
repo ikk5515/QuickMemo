@@ -914,7 +914,7 @@ function normalizedHttpHref(value: string) {
       return null;
     }
 
-    if (!url.hostname) {
+    if (!url.hostname || url.username || url.password) {
       return null;
     }
 

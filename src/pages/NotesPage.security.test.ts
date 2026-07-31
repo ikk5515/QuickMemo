@@ -86,6 +86,8 @@ describe("NotesPage security controls", () => {
     expect(documentPreviewSource).toContain("attributeName.startsWith(\"on\")");
     expect(documentPreviewSource).toContain("function safeDocxPreviewHref");
     expect(documentPreviewSource).toContain("url.protocol === \"http:\" || url.protocol === \"https:\"");
+    expect(documentPreviewSource).toContain("!url.username");
+    expect(documentPreviewSource).toContain("!url.password");
     expect(documentPreviewSource).toContain("function safeDocxPreviewImageSrc");
     expect(documentPreviewSource).toContain("return safeRasterDataUrl(trimmedValue)");
     expect(documentPreviewSource).toContain("sanitizeDocxPreviewCss");
@@ -329,6 +331,8 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("attachmentUploadInFlightRef");
     expect(notesPageSource).not.toContain("disabled={Boolean(busyId)}");
     expect(notesPageSource).not.toContain("setAttachmentBusyId(\"upload\")");
+    expect(notesPageSource).toContain("mimeType: safePublicShareAttachmentMimeType(extension)");
+    expect(notesPageSource).not.toContain('mimeType: (file.type || "application/octet-stream")');
   });
 
   it("serializes autosaves and flushes pending dirty drafts on lifecycle changes", () => {

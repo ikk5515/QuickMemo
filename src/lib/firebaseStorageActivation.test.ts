@@ -3,6 +3,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const firebaseSource = readFileSync(join(process.cwd(), "src/lib/firebase.ts"), "utf8");
+const appSource = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+const adminFunctionsSource = readFileSync(
+  join(process.cwd(), "src/services/adminFunctions.ts"),
+  "utf8"
+);
 const notesSource = readFileSync(join(process.cwd(), "src/services/notes.ts"), "utf8");
 const publicSharesSource = readFileSync(
   join(process.cwd(), "src/services/publicShares.ts"),
@@ -18,6 +23,25 @@ const managedUserDeleteSource = readFileSync(
 );
 
 describe("Firebase Storage activation boundary", () => {
+  it("keeps test-only browser integrations disabled in production", () => {
+    const emulatorDeclaration = firebaseSource.match(
+      /export const firebaseEmulatorsEnabled =[^;]+;/u
+    )?.[0] ?? "";
+    const e2eBridgeDeclaration = appSource.match(
+      /const e2eNavigationBridgeEnabled =[^;]+;/u
+    )?.[0] ?? "";
+
+    expect(emulatorDeclaration).toContain("!import.meta.env.PROD");
+    expect(emulatorDeclaration).toContain('VITE_USE_FIREBASE_EMULATORS === "true"');
+    expect(firebaseSource).toContain("appCheckSiteKey && !firebaseEmulatorsEnabled");
+    expect(adminFunctionsSource).toContain("if (firebaseEmulatorsEnabled)");
+    expect(adminFunctionsSource).not.toContain(
+      'if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true")'
+    );
+    expect(e2eBridgeDeclaration).toContain("!import.meta.env.PROD");
+    expect(e2eBridgeDeclaration).toContain('import.meta.env.MODE === "test"');
+  });
+
   it("does not initialize the legacy client SDK at module load", () => {
     expect(firebaseSource).not.toContain("export const storage = getStorage(app)");
     const getter = firebaseSource.match(

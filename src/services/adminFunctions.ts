@@ -25,7 +25,13 @@ import {
   writeBatch
 } from "firebase/firestore";
 import { normalizeFeatureAccess } from "../lib/featureAccess";
-import { appCheckSiteKey, auth, db, firebaseConfig } from "../lib/firebase";
+import {
+  appCheckSiteKey,
+  auth,
+  db,
+  firebaseConfig,
+  firebaseEmulatorsEnabled
+} from "../lib/firebase";
 import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
 import type { FeatureAccess, NewUserPayload, PublicRosterUser, UserProfile } from "../types";
 
@@ -173,7 +179,7 @@ async function createSecondaryAuthUser(displayName: string, loginEmail: string, 
   });
   const secondaryDb = getFirestore(secondaryApp);
 
-  if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true") {
+  if (firebaseEmulatorsEnabled) {
     connectAuthEmulator(secondaryAuth, "http://127.0.0.1:9099", { disableWarnings: true });
     connectFirestoreEmulator(secondaryDb, "127.0.0.1", 8080);
   } else if (appCheckSiteKey) {

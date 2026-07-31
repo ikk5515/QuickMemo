@@ -109,6 +109,51 @@ const forbiddenTrackedPathRules = [
   }
 ];
 
+const sensitiveEnvNames = [
+  "BLOB_READ_WRITE_TOKEN",
+  "CRON_SECRET",
+  "FIREBASE_CLEANUP_PRIVATE_KEY",
+  "FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON",
+  "GOOGLE_CALENDAR_CLIENT_SECRET",
+  "GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY",
+  "SHARE_COOKIE_NAME_HMAC_KEY",
+  "SHARE_CSRF_HMAC_KEY",
+  "SHARE_EMAIL_API_KEY",
+  "SHARE_EMAIL_FROM",
+  "SHARE_EMAIL_HMAC_KEY",
+  "SHARE_EMAIL_REPLY_TO",
+  "SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1",
+  "SHARE_OTP_HMAC_KEY",
+  "SHARE_PARTICIPANT_HMAC_KEY",
+  "SHARE_PASSWORD_PEPPER",
+  "SHARE_RATE_LIMIT_HMAC_KEY",
+  "SHARE_SESSION_HMAC_KEY",
+  "SHARE_SMOKE_IMAP_APP_PASSWORD",
+  "SHARE_SMOKE_IMAP_USERNAME",
+  "SHARE_SMOKE_TEST_EMAIL",
+  "SHARE_SMTP_APP_PASSWORD",
+  "SHARE_SMTP_USERNAME",
+  "VERCEL_OIDC_TOKEN",
+  "VERCEL_ORG_ID",
+  "VERCEL_PROJECT_ID",
+  "VERCEL_TOKEN"
+];
+const allowedPublicViteEnvNames = new Set([
+  "VITE_FIREBASE_API_KEY",
+  "VITE_FIREBASE_APP_ID",
+  "VITE_FIREBASE_AUTH_DOMAIN",
+  "VITE_FIREBASE_MEASUREMENT_ID",
+  "VITE_FIREBASE_MESSAGING_SENDER_ID",
+  "VITE_FIREBASE_PROJECT_ID",
+  "VITE_FIREBASE_STORAGE_BUCKET",
+  "VITE_RECAPTCHA_ENTERPRISE_SITE_KEY"
+]);
+const sensitiveViteEnvNames = new Set(
+  sensitiveEnvNames.map((name) => `VITE_${name}`)
+);
+const privilegedViteKeywordPattern =
+  /(?:^|_)(?:ADMIN_KEY|API_KEY|AUTH_KEY|CREDENTIALS?|ENCRYPTION_KEY|HMAC_KEY|MASTER_KEY|PASSWORD|PASSWD|PEPPER|PRIVATE(?:_KEY)?|SECRET|SERVICE_ACCOUNT(?:_JSON)?|SIGNING_KEY|TOKEN)(?:_|$)/u;
+
 const forbiddenContentRules = [
   {
     label: "private key block",
@@ -126,29 +171,12 @@ const forbiddenContentRules = [
     pattern: /firebase-adminsdk-[A-Za-z0-9_-]+@[^\s"']+\.iam\.gserviceaccount\.com/
   },
   {
+    label: "privileged server value exposed through a VITE_ identifier",
+    test: (content) => hasPrivilegedViteEnvUsage(content)
+  },
+  {
     label: "non-placeholder secret env assignment",
-    test: (content) =>
-      hasNonPlaceholderEnvValue(content, [
-        "CRON_SECRET",
-        "FIREBASE_CLEANUP_PRIVATE_KEY",
-        "FIREBASE_CLEANUP_SERVICE_ACCOUNT_JSON",
-        "GOOGLE_CALENDAR_CLIENT_SECRET",
-        "GOOGLE_CALENDAR_TOKEN_ENCRYPTION_KEY",
-        "SHARE_EMAIL_FROM",
-        "SHARE_EMAIL_HMAC_KEY",
-        "SHARE_EMAIL_REPLY_TO",
-        "SHARE_EMAIL_SETTINGS_ENCRYPTION_KEY_V1",
-        "SHARE_OTP_HMAC_KEY",
-        "SHARE_RATE_LIMIT_HMAC_KEY",
-        "SHARE_SMOKE_IMAP_APP_PASSWORD",
-        "SHARE_SMOKE_IMAP_USERNAME",
-        "SHARE_SMOKE_TEST_EMAIL",
-        "SHARE_SMTP_APP_PASSWORD",
-        "SHARE_SMTP_USERNAME",
-        "VERCEL_TOKEN",
-        "VERCEL_ORG_ID",
-        "VERCEL_PROJECT_ID"
-      ])
+    test: (content) => hasNonPlaceholderEnvValue(content, sensitiveEnvNames)
   },
   {
     label: "Google API key",
@@ -233,16 +261,72 @@ function hasNonPlaceholderEnvValue(content, names) {
 
 function isPlaceholderSecretValue(value) {
   const normalizedValue = value.toLowerCase();
+  const explicitPlaceholders = new Set([
+    "...",
+    "at-least-16-random-characters",
+    "false",
+    "placeholder",
+    "true",
+    "your-base64-encoded-32-byte-random-key",
+    "your-google-oauth-client-secret"
+  ]);
 
-  return (
-    normalizedValue === "false" ||
-    normalizedValue === "true" ||
-    normalizedValue.includes("...") ||
-    normalizedValue.includes("your-") ||
-    normalizedValue.includes("example") ||
-    normalizedValue.includes("placeholder") ||
-    normalizedValue.includes("at-least-16-random-characters")
-  );
+  return explicitPlaceholders.has(normalizedValue)
+    || /^-----begin private key-----\\n\.\.\.\\n-----end private key-----\\n?$/u.test(normalizedValue);
+}
+
+function hasPrivilegedViteEnvUsage(content) {
+  const viteIdentifierPattern = /\bVITE_[A-Z][A-Z0-9_]*\b/gu;
+
+  for (const match of content.matchAll(viteIdentifierPattern)) {
+    const name = match[0];
+
+    if (
+      !allowedPublicViteEnvNames.has(name)
+      && (
+        sensitiveViteEnvNames.has(name)
+        || privilegedViteKeywordPattern.test(name.slice("VITE_".length))
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function viteEnvName(...segments) {
+  return ["VITE", ...segments].join("_");
+}
+
+function assertPrivilegedViteIdentifierScanner() {
+  const cronSecret = viteEnvName("CRON", "SECRET");
+  const blobToken = viteEnvName("BLOB", "READ", "WRITE", "TOKEN");
+  const unrelatedAdminKey = viteEnvName("UNRELATED", "ADMIN", "KEY");
+  const signingKey = viteEnvName("PAYMENT", "SIGNING", "KEY");
+  const sharePasswordPepper = viteEnvName("SHARE", "PASSWORD", "PEPPER");
+
+  for (const usage of [
+    `${cronSecret}=synthetic-sensitive-value`,
+    `export ${blobToken}=synthetic-sensitive-value`,
+    `import.meta.env.${sharePasswordPepper}`,
+    `import.meta.env.${signingKey}`,
+    `process.env[${JSON.stringify(unrelatedAdminKey)}]`
+  ]) {
+    if (!hasPrivilegedViteEnvUsage(usage)) {
+      errors.push("privileged VITE_ identifier scanner missed a server-only value");
+    }
+  }
+
+  for (const usage of [
+    `${viteEnvName("FIREBASE", "API", "KEY")}=public-browser-config`,
+    `import.meta.env.${viteEnvName("RECAPTCHA", "ENTERPRISE", "SITE", "KEY")}`,
+    `import.meta.env.${viteEnvName("SECURE", "SHARE", "V2", "ENABLED")}`
+  ]) {
+    if (hasPrivilegedViteEnvUsage(usage)) {
+      errors.push("privileged VITE_ identifier scanner rejected an allowed public value");
+    }
+  }
 }
 
 function assertSecretEnvAssignmentScanner() {
@@ -264,14 +348,27 @@ function assertSecretEnvAssignmentScanner() {
     errors.push("secret env assignment scanner rejected an allowed placeholder value");
   }
 
+  for (const secretLikeValue of ["real-example-secret", "real-placeholder-secret", "prefix...suffix"]) {
+    if (!hasNonPlaceholderEnvValue(`${cronSecretName}=${secretLikeValue}`, [cronSecretName])) {
+      errors.push("secret env assignment scanner accepted a partial placeholder match");
+    }
+  }
+
   if (!hasNonPlaceholderEnvValue(
     `${googleClientSecretName}=real-client-secret\n${googleEncryptionKeyName}=real-encryption-key`,
     [googleClientSecretName, googleEncryptionKeyName]
   )) {
     errors.push("secret env assignment scanner failed to detect Google Calendar secrets");
   }
+
+  for (const name of sensitiveEnvNames) {
+    if (!hasNonPlaceholderEnvValue(`${name}=synthetic-sensitive-value`, sensitiveEnvNames)) {
+      errors.push(`secret env assignment scanner does not cover ${name}`);
+    }
+  }
 }
 
+assertPrivilegedViteIdentifierScanner();
 assertSecretEnvAssignmentScanner();
 assertRequiredPatterns(".gitignore", requiredGitignorePatterns);
 assertRequiredPatterns(".vercelignore", requiredVercelignorePatterns);

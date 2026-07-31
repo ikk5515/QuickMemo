@@ -9457,9 +9457,18 @@ function scheduleDashboardStats(tasks: DecryptedScheduleTask[], habits: Decrypte
   };
 }
 
-function scheduleActionError(caught: unknown, fallback: string) {
-  const error = caught as { code?: unknown; message?: unknown };
+export function scheduleActionError(caught: unknown, fallback: string) {
+  const error = typeof caught === "object" && caught !== null
+    ? caught as { code?: unknown; reason?: unknown }
+    : {};
   const code = typeof error.code === "string" ? error.code : "";
+
+  if (code === "schedule-task/revision-conflict") {
+    const conflictMessage = error.reason === "revision-mismatch"
+      ? "일정이 다른 곳에서 변경되었습니다. 최신 내용을 확인한 뒤 다시 저장해주세요."
+      : "일정이 삭제되었거나 접근 권한이 변경되었습니다. 목록을 새로고침한 뒤 다시 시도해주세요.";
+    return `${fallback} ${conflictMessage}`;
+  }
 
   if (code.includes("permission-denied")) {
     return `${fallback} Firestore 권한이 거부되었습니다. 규칙 배포 상태와 사용자 활성 상태를 확인해주세요.`;
@@ -9467,10 +9476,6 @@ function scheduleActionError(caught: unknown, fallback: string) {
 
   if (code.includes("failed-precondition")) {
     return `${fallback} Firestore 인덱스 또는 쿼리 조건을 확인해주세요.`;
-  }
-
-  if (typeof error.message === "string" && error.message) {
-    return `${fallback} ${error.message}`;
   }
 
   return fallback;

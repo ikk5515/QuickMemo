@@ -188,8 +188,15 @@ describe("editor content helpers", () => {
 
   it("keeps unsafe anchor hrefs out of memo HTML", () => {
     const html = sanitizeEditorHtml('<p><a href="javascript:alert(1)">bad</a></p>');
+    const credentialHtml = sanitizeEditorHtml(
+      '<p><a href="https://trusted.example:secret@evil.example/path">credential</a></p>'
+    );
 
     expect(html).toBe("<p>bad</p>");
+    expect(credentialHtml).toBe("<p>credential</p>");
+    expect(linkifyEditorHtml("<p>https://user:password@evil.example/path</p>")).toBe(
+      "<p>https://user:password@evil.example/path</p>"
+    );
   });
 
   it("preserves underline and strike formatting", () => {

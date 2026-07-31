@@ -12,7 +12,12 @@ describe("Firebase error messages", () => {
     expect(firebaseAuthErrorMessage(new Error("CONFIGURATION_NOT_FOUND"), "fallback")).toContain("Email/Password");
   });
 
-  it("falls back to the original error message", () => {
-    expect(firebaseAuthErrorMessage(new Error("custom failure"), "fallback")).toBe("custom failure");
+  it("does not expose an unknown provider error message", () => {
+    expect(
+      firebaseAuthErrorMessage(
+        new Error("internal endpoint /projects/example/databases/(default) failed"),
+        "fallback"
+      )
+    ).toBe("fallback");
   });
 });

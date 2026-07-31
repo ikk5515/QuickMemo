@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  attachmentDownloadName,
   attachmentValidationError,
   isPublicShareRasterImageExtension,
   maxAttachmentFileBytes,
   maxAttachmentStorageBytes,
   publicShareAttachmentMimeMatchesExtension,
+  safeAttachmentBaseName,
   safePublicShareAttachmentMimeType
 } from "./attachments";
 
@@ -52,5 +54,31 @@ describe("public share attachment MIME helpers", () => {
 
   it("keeps per-user blob attachment storage capped at 1 GB", () => {
     expect(maxAttachmentStorageBytes).toBe(1024 * 1024 * 1024);
+  });
+
+  it.each([
+    "invoice\u202Efdp.exe.pdf",
+    "isolated\u2066name\u2069.pdf",
+    "zero\u200Bwidth.pdf",
+    "control\u0085name.pdf",
+    "line\nbreak.pdf"
+  ])("removes invisible and directional control characters from attachment names", (fileName) => {
+    const hasUnsafeControlCharacter = Array.from(safeAttachmentBaseName(fileName)).some((character) => {
+      const codePoint = character.charCodeAt(0);
+      return codePoint <= 31
+        || (codePoint >= 127 && codePoint <= 159)
+        || /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u.test(character);
+    });
+
+    expect(hasUnsafeControlCharacter).toBe(false);
+  });
+
+  it("sanitizes legacy attachment names again at the download boundary", () => {
+    const downloadName = attachmentDownloadName({
+      extension: "pdf",
+      fileName: "invoice\u202Efdp.exe"
+    });
+
+    expect(downloadName).toBe("invoice_fdp.exe.pdf");
   });
 });

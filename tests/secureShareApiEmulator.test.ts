@@ -679,6 +679,17 @@ function quotaBucketsWithUsage(
   );
 }
 
+async function waitForStableEmailQuotaMinute() {
+  const minuteMilliseconds = 60_000;
+  const remainingMilliseconds =
+    minuteMilliseconds - (Date.now() % minuteMilliseconds);
+  if (remainingMilliseconds < 10_000) {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, remainingMilliseconds + 100);
+    });
+  }
+}
+
 function enableGmailSmtpEmail() {
   Object.assign(process.env, {
     SECURE_SHARE_EMAIL_ENABLED: "true",
@@ -2441,6 +2452,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       });
     }
 
+    await waitForStableEmailQuotaMinute();
     const results = await Promise.all(scenarios.map((scenario, index) =>
       emailChallengeRequest({
         ...scenario,
@@ -2486,6 +2498,7 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
       });
     }
 
+    await waitForStableEmailQuotaMinute();
     const results = await Promise.all(scenarios.map((scenario, index) =>
       emailChallengeRequest({
         ...scenario,
