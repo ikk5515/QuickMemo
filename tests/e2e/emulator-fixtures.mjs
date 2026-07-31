@@ -26,19 +26,26 @@ function randomSuffix() {
   return crypto.randomUUID().replaceAll("-", "").slice(0, 20);
 }
 
+export function e2eSeoulEmailQuotaMonthWindow(now) {
+  const seoulNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+  const monthKey = seoulNow.toISOString().slice(0, 7);
+  const nextMonth = new Date(Date.UTC(
+    seoulNow.getUTCFullYear(),
+    seoulNow.getUTCMonth() + 1,
+    1
+  ) - 9 * 60 * 60 * 1000);
+
+  return { monthKey, nextMonth };
+}
+
 export async function seedE2eEmailQuotaAtHardLimit() {
   const now = new Date();
   const dayKey = now.toISOString().slice(0, 10);
-  const monthKey = now.toISOString().slice(0, 7);
+  const { monthKey, nextMonth } = e2eSeoulEmailQuotaMonthWindow(now);
   const nextDay = new Date(Date.UTC(
     now.getUTCFullYear(),
     now.getUTCMonth(),
     now.getUTCDate() + 1
-  ));
-  const nextMonth = new Date(Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth() + 1,
-    1
   ));
   await writeEmulatorDocuments([
     {
