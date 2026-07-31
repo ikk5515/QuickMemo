@@ -436,6 +436,10 @@ describe("SecureShareOwnerModal management history", () => {
     );
     expect(screen.getByRole("button", { name: "초대 메일 작성" }))
       .toHaveAttribute("title", expect.stringMatching(/운영 이메일 인증이 준비된 뒤/));
+    expect(screen.getByRole("button", { name: "초대 메일 작성" }))
+      .toHaveAccessibleDescription(/URL 복사는 계속 사용할 수 있습니다/);
+    expect(screen.getByText(/운영 이메일 인증이 준비된 뒤 초대 메일을 작성할 수 있습니다/))
+      .toBeInTheDocument();
 
     for (const unavailableShare of [
       { ...emailShare, consumedAt: "2026-07-28T00:30:00.000Z", status: "consumed" as const },

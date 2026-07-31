@@ -8456,6 +8456,11 @@ export function SecureShareOwnerModal({
                   </button>
                   {share.accessMode === "allowed_emails" && (
                     <button
+                      aria-describedby={
+                        !emailFeatureEnabled
+                          ? "secure-share-compose-email-disabled-reason"
+                          : undefined
+                      }
                       className="secondary-button"
                       disabled={
                         interactionBusy
@@ -8517,6 +8522,15 @@ export function SecureShareOwnerModal({
                     공유 중단
                   </button>
                 </div>
+
+                {share.accessMode === "allowed_emails" && !emailFeatureEnabled && (
+                  <p
+                    className="public-share-missing-key"
+                    id="secure-share-compose-email-disabled-reason"
+                  >
+                    운영 이메일 인증이 준비된 뒤 초대 메일을 작성할 수 있습니다. URL 복사는 계속 사용할 수 있습니다.
+                  </p>
+                )}
 
                 {busy && (
                   <p aria-live="polite" className="public-share-status">

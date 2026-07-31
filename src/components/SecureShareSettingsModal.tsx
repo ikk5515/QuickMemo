@@ -703,7 +703,7 @@ export function SecureShareSettingsModal({
                     <span>{draft.allowedEmails.length}/{secureShareAllowedEmailLimit}</span>
                   </div>
                   <p className="secure-share-info" id={emailDeliveryHelpId}>
-                    공유를 저장하면 받는 사람과 보안 링크가 채워진 기본 메일 앱의 작성창 열기를 요청합니다.
+                    새 공유를 만들거나 새 받는 사람을 추가해 저장하면 받는 사람과 보안 링크가 채워진 기본 메일 앱의 작성창 열기를 요청합니다.
                     {" "}QuickMemo는 메일을 자동 전송하지 않으므로 내용을 확인한 뒤 직접 보내주세요.
                     {" "}콘텐츠 키는 링크의 fragment에만 포함되며 QuickMemo 서버로 전송되지 않습니다.
                     {" "}메일 앱과 전송에 사용하는 메일 서비스에는 전체 링크가 전달됩니다.
