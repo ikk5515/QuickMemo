@@ -26,6 +26,7 @@ import {
   ListTodo,
   LockKeyhole,
   Loader2,
+  Mail,
   PanelLeftOpen,
   PaintBucket,
   Paperclip,
@@ -108,10 +109,17 @@ import {
 } from "../lib/crypto";
 import {
   defaultSecureSharePolicy,
+  normalizeSecureShareEmail,
   resolveSecureShareFeatureFlags,
+  secureShareAllowedEmailLimit,
   type SecureShareFeatureFlags,
   type SecureSharePolicyInput
 } from "../lib/secureSharePolicy";
+import {
+  launchSecureShareEmailDraft,
+  type SecureShareEmailDraftInput,
+  type SecureShareEmailDraftLauncher
+} from "../lib/secureShareEmailDraft";
 import { parseSecureShareUrl } from "../lib/secureShareUrl";
 import {
   secureShareSourceAttachmentFingerprint,
@@ -1912,6 +1920,68 @@ interface ParsedSecureShareOwnerDetails {
   share: SecureShareOwnerSummary;
 }
 
+function canonicalSecureShareAllowedEmails(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > secureShareAllowedEmailLimit) {
+    return null;
+  }
+
+  const emails: string[] = [];
+  const seen = new Set<string>();
+
+  for (const email of value) {
+    const normalized = normalizeSecureShareEmail(email);
+
+    if (!normalized || normalized !== email || seen.has(normalized)) {
+      return null;
+    }
+
+    seen.add(normalized);
+    emails.push(normalized);
+  }
+
+  return emails;
+}
+
+export function secureShareNewEmailRecipients(
+  previousPolicy: SecureSharePolicyInput | null,
+  nextPolicy: SecureSharePolicyInput
+) {
+  if (nextPolicy.accessMode !== "allowed_emails") {
+    return [];
+  }
+
+  const nextEmails = canonicalSecureShareAllowedEmails(nextPolicy.allowedEmails);
+  const previousEmails = previousPolicy?.accessMode === "allowed_emails"
+    ? canonicalSecureShareAllowedEmails(previousPolicy.allowedEmails)
+    : [];
+
+  if (!nextEmails || !previousEmails) {
+    throw new Error("받는 사람 이메일 목록을 안전하게 확인하지 못했습니다.");
+  }
+
+  const previousEmailSet = new Set(previousEmails);
+  return nextEmails.filter((email) => !previousEmailSet.has(email));
+}
+
+export function requestSecureShareEmailDraftWithoutRollback(
+  input: SecureShareEmailDraftInput,
+  launcher?: SecureShareEmailDraftLauncher
+) {
+  try {
+    launchSecureShareEmailDraft(input, launcher);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function secureShareEmailRecipientMemoryKey(
+  ownerUid: string,
+  shareId: string
+) {
+  return `${ownerUid}\u0000${shareId}`;
+}
+
 const secureShareSourceAttachmentDigestPattern = /^[A-Za-z0-9_-]{43}$/u;
 
 function parseSecureShareAttachmentReuseManifest(
@@ -1982,9 +2052,7 @@ export function parseSecureShareOwnerDetailsResponse(value: unknown): ParsedSecu
   const policy = value.policy;
   const allowedEmails = policy.allowedEmails === undefined
     ? []
-    : Array.isArray(policy.allowedEmails) && policy.allowedEmails.every((email) => typeof email === "string")
-      ? [...policy.allowedEmails]
-      : null;
+    : canonicalSecureShareAllowedEmails(policy.allowedEmails);
   const expirationPreset = policy.expirationPreset;
   const customExpiresAt = policy.customExpiresAt;
 
@@ -2582,6 +2650,7 @@ export default function NotesPage() {
   const migratingLegacyPublicShares = useRef(new Set<string>());
   const inspectedPublicShareFilenameGenerations = useRef(new Set<string>());
   const revokingSecureShares = useRef(new Set<string>());
+  const secureShareEmailRecipientsById = useRef(new Map<string, string[]>());
   const secureShareOwnerLoadMoreInFlight = useRef(false);
   const secureShareOwnerPageGeneration = useRef(0);
   const secureShareOwnerIdentity = useRef({
@@ -2726,6 +2795,7 @@ export default function NotesPage() {
     migratingLegacyPublicShares.current.clear();
     inspectedPublicShareFilenameGenerations.current.clear();
     revokingSecureShares.current.clear();
+    secureShareEmailRecipientsById.current.clear();
 
     setNotes([]);
     setDeletedNotes([]);
@@ -3178,7 +3248,9 @@ export default function NotesPage() {
 
   useEffect(() => {
     const pageGeneration = secureShareOwnerPageGeneration.current + 1;
+    const emailRecipientMemory = secureShareEmailRecipientsById.current;
     secureShareOwnerPageGeneration.current = pageGeneration;
+    emailRecipientMemory.clear();
     secureShareOwnerLoadMoreInFlight.current = false;
     setSecureShareOwnerLoadingMore(false);
     const clientFlags = resolveSecureShareFeatureFlags();
@@ -3265,6 +3337,7 @@ export default function NotesPage() {
 
     return () => {
       controller.abort();
+      emailRecipientMemory.clear();
       if (secureShareOwnerPageGeneration.current === pageGeneration) {
         secureShareOwnerPageGeneration.current += 1;
       }
@@ -4497,6 +4570,75 @@ export default function NotesPage() {
     return nextUrl;
   }
 
+  function rememberSecureShareEmailRecipients(
+    shareId: string,
+    policy: SecureSharePolicyInput,
+    operation: SecureShareOwnerOperationContext
+  ) {
+    assertCurrentSecureShareOwnerOperation(operation);
+    const recipients = policy.accessMode === "allowed_emails"
+      ? canonicalSecureShareAllowedEmails(policy.allowedEmails)
+      : [];
+
+    if (!recipients || (policy.accessMode === "allowed_emails" && recipients.length === 0)) {
+      throw new Error("받는 사람 이메일 목록을 안전하게 확인하지 못했습니다.");
+    }
+
+    if (recipients.length > 0) {
+      secureShareEmailRecipientsById.current.set(
+        secureShareEmailRecipientMemoryKey(operation.uid, shareId),
+        recipients
+      );
+    } else {
+      secureShareEmailRecipientsById.current.delete(
+        secureShareEmailRecipientMemoryKey(operation.uid, shareId)
+      );
+    }
+  }
+
+  function requestSecureShareEmailDraft(
+    shareId: string,
+    shareUrl: string,
+    recipients: readonly string[],
+    operation: SecureShareOwnerOperationContext
+  ) {
+    try {
+      assertCurrentSecureShareOwnerOperation(operation);
+      const requested = requestSecureShareEmailDraftWithoutRollback({
+        expectedOrigin: window.location.origin,
+        expectedShareId: shareId,
+        recipients,
+        shareUrl
+      });
+
+      if (!requested) {
+        setPublicShareError(
+          "메일 작성 창 열기를 요청하지 못했습니다. 보안 공유는 그대로 유지됩니다. URL 복사를 이용해주세요."
+        );
+        return false;
+      }
+
+      assertCurrentSecureShareOwnerOperation(operation);
+      setPublicShareCopied(false);
+      setPublicShareError(null);
+      setStatus("메일 작성 창 열기를 요청했습니다. 메일 앱에서 내용을 확인한 뒤 직접 보내주세요.");
+      return true;
+    } catch (caught) {
+      if (caught instanceof SecureShareOwnerOperationStaleError) {
+        return false;
+      }
+      try {
+        assertCurrentSecureShareOwnerOperation(operation);
+      } catch {
+        return false;
+      }
+      setPublicShareError(
+        "메일 작성 창 열기를 요청하지 못했습니다. 보안 공유는 그대로 유지됩니다. URL 복사를 이용해주세요."
+      );
+      return false;
+    }
+  }
+
   function forgetSecureShareUrl(
     shareId: string,
     operation: SecureShareOwnerOperationContext
@@ -4504,6 +4646,9 @@ export default function NotesPage() {
     assertCurrentSecureShareOwnerOperation(operation);
     removeStoredPublicShareUrl(operation.uid, shareId);
     removeStoredPublicShareContentKey(operation.uid, shareId);
+    secureShareEmailRecipientsById.current.delete(
+      secureShareEmailRecipientMemoryKey(operation.uid, shareId)
+    );
     assertCurrentSecureShareOwnerOperation(operation);
     setPublicShareUrlById((current) => {
       try {
@@ -4655,6 +4800,12 @@ export default function NotesPage() {
         throw new Error("보안 공유 상세 대상이 일치하지 않습니다.");
       }
 
+      rememberSecureShareEmailRecipients(
+        details.share.shareId,
+        details.initialPolicy,
+        operation
+      );
+
       setOwnerSecureShares((current) => {
         try {
           assertCurrentSecureShareOwnerOperation(operation);
@@ -4723,6 +4874,12 @@ export default function NotesPage() {
         throw new Error("허용 이메일 목록을 안전하게 불러오지 못해 설정 변경을 중단했습니다.");
       }
 
+      rememberSecureShareEmailRecipients(
+        details.share.shareId,
+        details.initialPolicy,
+        operation
+      );
+
       setOwnerSecureShares((current) => {
         try {
           assertCurrentSecureShareOwnerOperation(operation);
@@ -4784,6 +4941,18 @@ export default function NotesPage() {
       }
 
       try {
+        const newEmailRecipients = secureShareNewEmailRecipients(
+          secureShareInitialPolicy,
+          policy
+        );
+        const allEmailRecipients = policy.accessMode === "allowed_emails"
+          ? canonicalSecureShareAllowedEmails(policy.allowedEmails)
+          : [];
+
+        if (!allEmailRecipients) {
+          throw new Error("받는 사람 이메일 목록을 안전하게 확인하지 못했습니다.");
+        }
+
         const idToken = await secureShareOwnerIdToken(operation);
         assertCurrentSecureShareOwnerOperation(operation);
         const response = await updateSecureShare(
@@ -4801,6 +4970,17 @@ export default function NotesPage() {
         assertCurrentSecureShareOwnerOperation(operation);
         const updatedShare = parseSecureShareMutationResponse(response, shareId);
 
+        if (allEmailRecipients.length > 0) {
+          secureShareEmailRecipientsById.current.set(
+            secureShareEmailRecipientMemoryKey(operation.uid, shareId),
+            allEmailRecipients
+          );
+        } else {
+          secureShareEmailRecipientsById.current.delete(
+            secureShareEmailRecipientMemoryKey(operation.uid, shareId)
+          );
+        }
+
         setOwnerSecureShares((current) => {
           try {
             assertCurrentSecureShareOwnerOperation(operation);
@@ -4817,6 +4997,23 @@ export default function NotesPage() {
         setSecureShareSettingsReturnToOwner(false);
         setSecureShareOwnerOpen(true);
         setStatus("보안 공유 설정을 저장했습니다.");
+        if (newEmailRecipients.length > 0) {
+          const shareUrl = publicShareUrlById[shareId]
+            ?? readStoredPublicShareUrl(operation.uid, shareId);
+
+          if (shareUrl) {
+            requestSecureShareEmailDraft(
+              shareId,
+              shareUrl,
+              newEmailRecipients,
+              operation
+            );
+          } else {
+            setPublicShareError(
+              "설정은 저장했지만 이 브라우저에서 공유 URL을 복구하지 못했습니다. URL 복사를 확인해주세요."
+            );
+          }
+        }
       } catch (caught) {
         if (caught instanceof SecureShareOwnerOperationStaleError) {
           throw caught;
@@ -4844,6 +5041,14 @@ export default function NotesPage() {
     const uploadedAttachmentIds: string[] = [];
 
     try {
+      const emailRecipients = policy.accessMode === "allowed_emails"
+        ? canonicalSecureShareAllowedEmails(policy.allowedEmails)
+        : [];
+
+      if (!emailRecipients || (policy.accessMode === "allowed_emails" && emailRecipients.length === 0)) {
+        throw new Error("받는 사람 이메일 목록을 안전하게 확인하지 못했습니다.");
+      }
+
       const savedNote = await persistCurrentNote(false, false);
       assertCurrentSecureShareOwnerOperation(operation);
 
@@ -4966,8 +5171,18 @@ export default function NotesPage() {
         throw new Error("보안 공유 활성화 상태를 확인하지 못했습니다.");
       }
 
-      rememberSecureShareUrl(createdShareId, shareKeyValue, operation);
+      const createdShareUrl = rememberSecureShareUrl(
+        createdShareId,
+        shareKeyValue,
+        operation
+      );
       assertCurrentSecureShareOwnerOperation(operation);
+      if (emailRecipients.length > 0) {
+        secureShareEmailRecipientsById.current.set(
+          secureShareEmailRecipientMemoryKey(operation.uid, createdShareId),
+          emailRecipients
+        );
+      }
       setOwnerSecureShares((current) => {
         try {
           assertCurrentSecureShareOwnerOperation(operation);
@@ -4987,6 +5202,14 @@ export default function NotesPage() {
       setSecureShareSettingsReturnToOwner(false);
       setSecureShareOwnerOpen(true);
       setStatus("보안 공유 링크를 만들었습니다.");
+      if (emailRecipients.length > 0) {
+        requestSecureShareEmailDraft(
+          createdShareId,
+          createdShareUrl,
+          emailRecipients,
+          operation
+        );
+      }
       await refreshSecureOwnerShares(operation).catch(() => undefined);
     } catch (caught) {
       const rollbackShareId = createdShareId;
@@ -5009,6 +5232,9 @@ export default function NotesPage() {
         }
         removeStoredPublicShareUrl(operation.uid, rollbackShareId);
         removeStoredPublicShareContentKey(operation.uid, rollbackShareId);
+        secureShareEmailRecipientsById.current.delete(
+          secureShareEmailRecipientMemoryKey(operation.uid, rollbackShareId)
+        );
         try {
           assertCurrentSecureShareOwnerOperation(operation);
           setPublicShareUrlById((current) => {
@@ -5043,6 +5269,48 @@ export default function NotesPage() {
         // The new account lifecycle owns its own busy state.
       }
     }
+  }
+
+  function composeSecureShareEmail(share: SecureShareOwnerSummary) {
+    const capabilities = secureShareManagementCapabilities(share, Date.now());
+
+    if (
+      publicShareBusy
+      || !secureShareFlags.emailEnabled
+      || share.accessMode !== "allowed_emails"
+      || !capabilities.canCopy
+    ) {
+      setPublicShareError("초대 메일을 작성할 수 있는 활성 보안 공유를 찾을 수 없습니다.");
+      return;
+    }
+
+    let operation: SecureShareOwnerOperationContext;
+
+    try {
+      operation = captureSecureShareOwnerOperation();
+    } catch {
+      return;
+    }
+
+    const shareUrl = publicShareUrlById[share.shareId]
+      ?? readStoredPublicShareUrl(operation.uid, share.shareId);
+    const recipients = secureShareEmailRecipientsById.current.get(
+      secureShareEmailRecipientMemoryKey(operation.uid, share.shareId)
+    );
+
+    if (!shareUrl || !recipients?.length) {
+      setPublicShareError(
+        "받는 사람 또는 공유 URL을 이 브라우저에서 확인하지 못했습니다. 설정 변경이나 URL 복사를 확인해주세요."
+      );
+      return;
+    }
+
+    requestSecureShareEmailDraft(
+      share.shareId,
+      shareUrl,
+      recipients,
+      operation
+    );
   }
 
   async function copySecureShareUrl(share: SecureShareOwnerSummary) {
@@ -7526,14 +7794,25 @@ export default function NotesPage() {
         {secureShareOwnerOpen && secureShareFlags.v2Enabled && (
           <SecureShareOwnerModal
             busy={publicShareBusy}
+            canComposeEmail={Boolean(
+              secureShareFlags.emailEnabled
+              &&
+              selectedSecureShare
+              && profile
+              && secureShareEmailRecipientsById.current.get(
+                secureShareEmailRecipientMemoryKey(profile.uid, selectedSecureShare.shareId)
+              )?.length
+            )}
             canCreate={secureShareCreationAllowed}
             copied={publicShareCopied}
             error={publicShareError}
+            emailFeatureEnabled={secureShareFlags.emailEnabled}
             hasMore={false}
             loadingMore={secureShareOwnerLoadingMore}
             noteTitle={editor.title.trim() || "제목 없음"}
             nowMilliseconds={cursorClock}
             onClose={() => setSecureShareOwnerOpen(false)}
+            onComposeEmail={composeSecureShareEmail}
             onCopy={(share) => void copySecureShareUrl(share)}
             onCreate={() => void openSecureShareSettingsForCreate(true)}
             onEdit={(share) => void openSecureShareSettingsForEdit(share)}
@@ -7822,14 +8101,17 @@ function secureShareSecurityBadges(share: SecureShareOwnerSummary) {
 
 export function SecureShareOwnerModal({
   busy,
+  canComposeEmail,
   canCreate,
   copied,
+  emailFeatureEnabled,
   error,
   hasMore,
   loadingMore,
   noteTitle,
   nowMilliseconds,
   onClose,
+  onComposeEmail,
   onCopy,
   onCreate,
   onEdit,
@@ -7841,14 +8123,17 @@ export function SecureShareOwnerModal({
   shareUrl
 }: {
   busy: boolean;
+  canComposeEmail: boolean;
   canCreate: boolean;
   copied: boolean;
+  emailFeatureEnabled: boolean;
   error: string | null;
   hasMore: boolean;
   loadingMore: boolean;
   noteTitle: string;
   nowMilliseconds: number;
   onClose: () => void;
+  onComposeEmail: (share: SecureShareOwnerSummary) => void;
   onCopy: (share: SecureShareOwnerSummary) => void;
   onCreate: () => void;
   onEdit: (share: SecureShareOwnerSummary) => void;
@@ -8169,6 +8454,35 @@ export function SecureShareOwnerModal({
                     {copied ? <CheckCircle2 aria-hidden="true" size={16} /> : <Copy aria-hidden="true" size={16} />}
                     {copied ? "복사됨" : "URL 복사"}
                   </button>
+                  {share.accessMode === "allowed_emails" && (
+                    <button
+                      aria-describedby={
+                        !emailFeatureEnabled
+                          ? "secure-share-compose-email-disabled-reason"
+                          : undefined
+                      }
+                      className="secondary-button"
+                      disabled={
+                        interactionBusy
+                        || !emailFeatureEnabled
+                        || !canComposeEmail
+                        || !capabilities.canCopy
+                        || !shareUrl
+                      }
+                      onClick={() => onComposeEmail(share)}
+                      title={
+                        !emailFeatureEnabled
+                          ? "운영 이메일 인증이 준비된 뒤 초대 메일을 작성할 수 있습니다."
+                          : canComposeEmail
+                          ? "받는 사람과 보안 링크를 기본 메일 앱에 채웁니다. 전송은 메일 앱에서 직접 확인합니다."
+                          : "받는 사람 정보를 안전하게 불러온 뒤 사용할 수 있습니다."
+                      }
+                      type="button"
+                    >
+                      <Mail aria-hidden="true" size={16} />
+                      초대 메일 작성
+                    </button>
+                  )}
                   {!interactionBusy && capabilities.canPreview && shareUrl ? (
                     <a
                       className="secondary-button public-share-open-link"
@@ -8208,6 +8522,15 @@ export function SecureShareOwnerModal({
                     공유 중단
                   </button>
                 </div>
+
+                {share.accessMode === "allowed_emails" && !emailFeatureEnabled && (
+                  <p
+                    className="public-share-missing-key"
+                    id="secure-share-compose-email-disabled-reason"
+                  >
+                    운영 이메일 인증이 준비된 뒤 초대 메일을 작성할 수 있습니다. URL 복사는 계속 사용할 수 있습니다.
+                  </p>
+                )}
 
                 {busy && (
                   <p aria-live="polite" className="public-share-status">

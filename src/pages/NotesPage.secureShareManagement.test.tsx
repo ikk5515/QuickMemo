@@ -77,6 +77,7 @@ function ManagementHarness({
   hasMore = false,
   loadingMore = false,
   onClose = vi.fn(),
+  onComposeEmail = vi.fn(),
   onLoadMore = vi.fn(),
   onRevoke = vi.fn().mockResolvedValue(true),
   onSelect = vi.fn()
@@ -85,6 +86,7 @@ function ManagementHarness({
   hasMore?: boolean;
   loadingMore?: boolean;
   onClose?: () => void;
+  onComposeEmail?: (share: SecureShareOwnerSummary) => void;
   onLoadMore?: () => void;
   onRevoke?: (share: SecureShareOwnerSummary) => Promise<boolean>;
   onSelect?: (share: SecureShareOwnerSummary) => void;
@@ -95,14 +97,17 @@ function ManagementHarness({
   return (
     <SecureShareOwnerModal
       busy={busy}
+      canComposeEmail
       canCreate={false}
       copied={false}
+      emailFeatureEnabled
       error={null}
       hasMore={hasMore}
       loadingMore={loadingMore}
       noteTitle="분기 보안 계획"
       nowMilliseconds={nowMilliseconds}
       onClose={onClose}
+      onComposeEmail={onComposeEmail}
       onCopy={vi.fn()}
       onCreate={vi.fn()}
       onEdit={vi.fn()}
@@ -381,6 +386,78 @@ describe("SecureShareOwnerModal management history", () => {
     expect(within(dialog).getByRole("button", { name: "공유 중단" })).toBeDisabled();
   });
 
+  it("offers an explicit same-browser retry for an allowed-email invitation draft", async () => {
+    const user = userEvent.setup();
+    const onComposeEmail = vi.fn();
+    const emailShare = secureShare("ss2_email_share_123456", {
+      accessMode: "allowed_emails",
+      requiresEmailVerification: true
+    });
+    const commonProps = {
+      busy: false,
+      canCreate: false,
+      copied: false,
+      emailFeatureEnabled: true,
+      error: null,
+      hasMore: false,
+      loadingMore: false,
+      noteTitle: "초대 메일 보안 계획",
+      nowMilliseconds,
+      onClose: vi.fn(),
+      onComposeEmail,
+      onCopy: vi.fn(),
+      onCreate: vi.fn(),
+      onEdit: vi.fn(),
+      onLoadMore: vi.fn(),
+      onRevoke: vi.fn().mockResolvedValue(true),
+      onSelect: vi.fn(),
+      share: emailShare,
+      shares: [emailShare],
+      shareUrl: `https://quickmemo.example/share/${emailShare.shareId}#key=test`
+    };
+    const { rerender } = render(
+      <SecureShareOwnerModal {...commonProps} canComposeEmail />
+    );
+
+    const composeButton = screen.getByRole("button", { name: "초대 메일 작성" });
+    expect(composeButton).toBeEnabled();
+    await user.click(composeButton);
+    expect(onComposeEmail).toHaveBeenCalledWith(emailShare);
+
+    rerender(<SecureShareOwnerModal {...commonProps} canComposeEmail={false} />);
+    expect(screen.getByRole("button", { name: "초대 메일 작성" })).toBeDisabled();
+
+    rerender(
+      <SecureShareOwnerModal
+        {...commonProps}
+        canComposeEmail
+        emailFeatureEnabled={false}
+      />
+    );
+    expect(screen.getByRole("button", { name: "초대 메일 작성" }))
+      .toHaveAttribute("title", expect.stringMatching(/운영 이메일 인증이 준비된 뒤/));
+    expect(screen.getByRole("button", { name: "초대 메일 작성" }))
+      .toHaveAccessibleDescription(/URL 복사는 계속 사용할 수 있습니다/);
+    expect(screen.getByText(/운영 이메일 인증이 준비된 뒤 초대 메일을 작성할 수 있습니다/))
+      .toBeInTheDocument();
+
+    for (const unavailableShare of [
+      { ...emailShare, consumedAt: "2026-07-28T00:30:00.000Z", status: "consumed" as const },
+      { ...emailShare, expiresAt: "2026-07-28T00:30:00.000Z" },
+      { ...emailShare, revokedAt: "2026-07-28T00:30:00.000Z", status: "revoked" as const }
+    ]) {
+      rerender(
+        <SecureShareOwnerModal
+          {...commonProps}
+          canComposeEmail
+          share={unavailableShare}
+          shares={[unavailableShare]}
+        />
+      );
+      expect(screen.getByRole("button", { name: "초대 메일 작성" })).toBeDisabled();
+    }
+  });
+
   it("shows full history and switches detail/action availability by effective state", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
@@ -454,12 +531,15 @@ describe("SecureShareOwnerModal management history", () => {
     const onLoadMore = vi.fn();
     const modalProps = {
       busy: false,
+      canComposeEmail: false,
       canCreate: false,
       copied: false,
+      emailFeatureEnabled: true,
       error: null,
       noteTitle: "오래된 공유가 있는 노트",
       nowMilliseconds,
       onClose: vi.fn(),
+      onComposeEmail: vi.fn(),
       onCopy: vi.fn(),
       onCreate: vi.fn(),
       onEdit: vi.fn(),

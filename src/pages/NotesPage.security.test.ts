@@ -269,6 +269,40 @@ describe("NotesPage security controls", () => {
       .toBeLessThan(editFlow.indexOf("setSecureShareSettingsOpen(true)"));
   });
 
+  it("keeps email draft handoff client-only, fail-closed, and outside share rollback", () => {
+    const draftBoundary =
+      notesPageSource.match(/function requestSecureShareEmailDraft\([\s\S]*?function forgetSecureShareUrl/)?.[0] ?? "";
+    const saveFlow =
+      notesPageSource.match(/async function saveSecureShareSettings[\s\S]*?function composeSecureShareEmail/)?.[0] ?? "";
+    const composeFlow =
+      notesPageSource.match(/function composeSecureShareEmail[\s\S]*?async function copySecureShareUrl/)?.[0] ?? "";
+
+    expect(draftBoundary).toContain("requestSecureShareEmailDraftWithoutRollback");
+    expect(draftBoundary).toContain("expectedOrigin: window.location.origin");
+    expect(draftBoundary).toContain("expectedShareId: shareId");
+    expect(draftBoundary).not.toContain("caught.message");
+    expect(draftBoundary).not.toContain("console.");
+    expect(saveFlow).toContain("requestSecureShareEmailDraft(");
+    expect(saveFlow).not.toContain("launchSecureShareEmailDraft(");
+    expect(saveFlow.indexOf("const updatedShare = parseSecureShareMutationResponse"))
+      .toBeLessThan(saveFlow.indexOf("requestSecureShareEmailDraft("));
+    expect(saveFlow.lastIndexOf("const activeShare = parseSecureShareMutationResponse"))
+      .toBeLessThan(saveFlow.lastIndexOf("requestSecureShareEmailDraft("));
+    expect(composeFlow).toContain("!secureShareFlags.emailEnabled");
+    expect(composeFlow).not.toContain("getSecureShareOwnerDetails");
+  });
+
+  it("clears transient invitation recipients across every owner identity lifecycle", () => {
+    const ownerLifecycle =
+      notesPageSource.match(/useEffect\(\(\) => {\n {4}const pageGeneration = secureShareOwnerPageGeneration\.current \+ 1;[\s\S]*?\}, \[firebaseUser, privateKey, profile\?\.uid\]\);/)?.[0] ?? "";
+
+    expect(ownerLifecycle).toContain("const emailRecipientMemory = secureShareEmailRecipientsById.current");
+    expect(ownerLifecycle.indexOf("emailRecipientMemory.clear()"))
+      .toBeLessThan(ownerLifecycle.indexOf("if ("));
+    expect(ownerLifecycle.lastIndexOf("emailRecipientMemory.clear()"))
+      .toBeGreaterThan(ownerLifecycle.indexOf("controller.abort()"));
+  });
+
   it("keeps attachment upload, preview, download, and delete pending states independent", () => {
     expect(notesPageSource).toContain("interface AttachmentActionBusyState");
     expect(notesPageSource).toContain("deletingIds: string[];");
