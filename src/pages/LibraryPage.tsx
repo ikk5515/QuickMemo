@@ -66,11 +66,13 @@ import {
   libraryAttachmentExtractionMode,
   type LibraryAttachmentExtractionMode
 } from "../lib/libraryAttachmentExtraction";
+import { LibraryPdfTextError } from "../lib/libraryPdfText";
 import { createLibraryCaptureBookmarkletUrl } from "../lib/libraryBookmarklet";
 import {
   consumeLibraryBookmarkletCaptureHandoff,
   consumeLibraryCaptureHandoff,
   libraryCaptureFromPaste,
+  LibraryCaptureValidationError,
   takeLibraryCaptureHandoffFromLocation,
   type LibraryCapturePayload
 } from "../lib/libraryCapture";
@@ -95,6 +97,7 @@ import {
   createLibraryItem,
   decryptLibraryItems,
   deleteLibraryItem,
+  DuplicateLibraryItemError,
   getNextLibraryItemsPage,
   libraryInitialSubscriptionLimit,
   librarySubscriptionStep,
@@ -134,6 +137,19 @@ type LibraryQuickView = "all" | "today" | "favorites" | "archived";
 type LibraryKindFilter = "all" | LibraryItemKind;
 type LibraryStatusFilter = "all" | LibraryItemStatus;
 type LibrarySort = "updated" | "created" | "opened" | "title";
+
+export function libraryPageErrorMessage(caught: unknown, fallback: string) {
+  if (
+    caught instanceof DuplicateLibraryItemError
+    || caught instanceof LibraryCaptureValidationError
+    || caught instanceof LibraryItemRevisionConflictError
+    || caught instanceof LibraryPdfTextError
+  ) {
+    return caught.message;
+  }
+
+  return fallback;
+}
 
 interface AttachmentGroup {
   attachments: NoteAttachmentSnapshot[];
@@ -752,7 +768,7 @@ export default function LibraryPage() {
     } catch (caught) {
       setCaptureDraft(emptyCaptureDraft);
       setCaptureOpen(true);
-      setError(caught instanceof Error ? caught.message : "캡처 핸드오프 주소를 확인하지 못했습니다.");
+      setError(libraryPageErrorMessage(caught, "캡처 핸드오프 주소를 확인하지 못했습니다."));
       return;
     }
 
@@ -778,7 +794,7 @@ export default function LibraryPage() {
       (caught: unknown) => {
         setCaptureHandoffBusy(false);
         setCaptureHandoffSource(null);
-        setError(caught instanceof Error ? caught.message : "브라우저 캡처를 가져오지 못했습니다.");
+        setError(libraryPageErrorMessage(caught, "브라우저 캡처를 가져오지 못했습니다."));
       }
     );
   }, []);
@@ -1731,7 +1747,7 @@ export default function LibraryPage() {
       setLibraryHasMore(page.hasMore);
     } catch (caught) {
       if (libraryPaginationRequestGeneration.current === requestGeneration) {
-        setError(caught instanceof Error ? caught.message : "이전 자료를 불러오지 못했습니다.");
+        setError(libraryPageErrorMessage(caught, "이전 자료를 불러오지 못했습니다."));
       }
     } finally {
       if (libraryPaginationRequestGeneration.current === requestGeneration) {
@@ -1794,7 +1810,10 @@ export default function LibraryPage() {
       })
       .catch((caught) => {
         if (!options.quiet) {
-          setError(caught instanceof Error ? caught.message : options.errorMessage ?? "자료를 변경하지 못했습니다.");
+          setError(libraryPageErrorMessage(
+            caught,
+            options.errorMessage ?? "자료를 변경하지 못했습니다."
+          ));
         }
       })
       .finally(() => {
@@ -1842,6 +1861,7 @@ export default function LibraryPage() {
       (current) => updateLibraryItem(current, current.ownerUid, { isFavorite: nextFavorite }),
       (current, revision) => ({ ...current, isFavorite: nextFavorite, revision }),
       {
+        errorMessage: "암호화 자료를 변경하지 못했습니다.",
         onSuccess: () => setStatusMessage(nextFavorite ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제거했습니다.")
       }
     );
@@ -1955,7 +1975,7 @@ export default function LibraryPage() {
       setKindFilter(captureDraft.kind);
       setStatusMessage(captureDraft.kind === "link" ? "링크를 암호화해 저장했습니다." : "클립을 암호화해 저장했습니다.");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "자료를 저장하지 못했습니다.");
+      setError(libraryPageErrorMessage(caught, "자료를 저장하지 못했습니다."));
     } finally {
       setCaptureBusy(false);
     }
@@ -1973,7 +1993,7 @@ export default function LibraryPage() {
       setError(null);
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "붙여넣은 캡처 내용을 가져오지 못했습니다.");
+      setError(libraryPageErrorMessage(caught, "붙여넣은 캡처 내용을 가져오지 못했습니다."));
       return false;
     }
   }
@@ -2003,7 +2023,7 @@ export default function LibraryPage() {
       setDeleteTarget(null);
       setStatusMessage("자료를 삭제했습니다.");
     } catch (caught) {
-      setDeleteError(caught instanceof Error ? caught.message : "자료를 삭제하지 못했습니다.");
+      setDeleteError(libraryPageErrorMessage(caught, "자료를 삭제하지 못했습니다."));
     } finally {
       setDeleteBusy(false);
     }
@@ -2140,7 +2160,7 @@ export default function LibraryPage() {
       }
     } catch (caught) {
       if (!controller.signal.aborted && attachmentActionGeneration.current === generation) {
-        setError(caught instanceof Error ? caught.message : "첨부파일 미리보기를 열지 못했습니다.");
+        setError(libraryPageErrorMessage(caught, "첨부파일 미리보기를 열지 못했습니다."));
       }
     } finally {
       if (attachmentActionGeneration.current === generation) {
@@ -2190,7 +2210,7 @@ export default function LibraryPage() {
       setStatusMessage("첨부파일 다운로드를 시작했습니다.");
     } catch (caught) {
       if (attachmentActionGeneration.current === generation) {
-        setError(caught instanceof Error ? caught.message : "첨부파일을 다운로드하지 못했습니다.");
+        setError(libraryPageErrorMessage(caught, "첨부파일을 다운로드하지 못했습니다."));
       }
     } finally {
       if (attachmentActionGeneration.current === generation) {
@@ -2371,7 +2391,7 @@ export default function LibraryPage() {
         && attachmentActionGeneration.current === generation
         && (!(caught instanceof Error) || caught.name !== "AbortError")
       ) {
-        setError(caught instanceof Error ? caught.message : "첨부파일에서 텍스트를 추출하지 못했습니다.");
+        setError(libraryPageErrorMessage(caught, "첨부파일에서 텍스트를 추출하지 못했습니다."));
       }
     } finally {
       if (attachmentActionGeneration.current === generation) {

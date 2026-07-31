@@ -96,6 +96,19 @@ interface PublicShareContent {
 
 type SecureShareFeatureGateState = "checking" | "enabled" | "unavailable";
 
+class InvalidLegacyPublicShareRouteError extends Error {
+  constructor() {
+    super("Invalid legacy public share route");
+    this.name = "InvalidLegacyPublicShareRouteError";
+  }
+}
+
+export function legacyPublicShareLoadError(caught: unknown) {
+  return caught instanceof InvalidLegacyPublicShareRouteError
+    ? "공유 링크가 올바르지 않습니다."
+    : "공유 노트를 열 수 없습니다.";
+}
+
 export default function PublicSharePage() {
   const location = useLocation();
   const parsedPath = useMemo(
@@ -670,7 +683,7 @@ function LegacyPublicSharePage({ shareId }: { shareId: string }) {
         const shareKeyValue = shareKeyFromHash();
 
         if (!shareId || !shareKeyValue) {
-          throw new Error("공유 링크가 올바르지 않습니다.");
+          throw new InvalidLegacyPublicShareRouteError();
         }
 
         const shareKey = await importAesKeyBase64Url(shareKeyValue);
@@ -697,10 +710,10 @@ function LegacyPublicSharePage({ shareId }: { shareId: string }) {
                   setLoading(false);
                 }
               })
-              .catch((shareError) => {
+              .catch(() => {
                 if (active) {
                   clearShareContent();
-                  setError(shareError instanceof Error ? shareError.message : "공유 노트를 열 수 없습니다.");
+                  setError("공유 노트를 열 수 없습니다.");
                   setLoading(false);
                 }
               });
@@ -726,7 +739,7 @@ function LegacyPublicSharePage({ shareId }: { shareId: string }) {
           setShareKeyValue(null);
           contentKeyRef.current = null;
           passwordSignatureRef.current = null;
-          setError(loadError instanceof Error ? loadError.message : "공유 노트를 열 수 없습니다.");
+          setError(legacyPublicShareLoadError(loadError));
           setLoading(false);
         }
       }

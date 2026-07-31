@@ -11,6 +11,7 @@ import {
   editableUserDraft,
   EditableUserCard,
   FeatureAccessFields,
+  managedUserDeleteUiError,
   stableEditableSignature,
   type AdminTab,
   updatePayloadFromDraft
@@ -53,6 +54,15 @@ function userProfile(overrides: Partial<UserProfile> = {}): UserProfile {
 describe("AdminPage feature access editing", () => {
   beforeEach(() => {
     updateUserMock.mockReset();
+  });
+
+  it("does not expose Firebase Auth or server error internals during user deletion", () => {
+    expect(managedUserDeleteUiError(
+      new Error("FirebaseError: projects/example/databases/(default)/documents/users")
+    )).toBe("사용자를 삭제하지 못했습니다.");
+    expect(managedUserDeleteUiError(
+      new Error("관리자 중요 작업을 계속하려면 로그아웃 후 다시 로그인해주세요.")
+    )).toBe("관리자 중요 작업을 계속하려면 로그아웃 후 다시 로그인해주세요.");
   });
 
   it("materializes legacy users as fully enabled without making the draft dirty", () => {

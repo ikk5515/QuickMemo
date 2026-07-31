@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { SecureShareApiError } from "../services/secureShares";
 import {
   canCreateSecureShareFromHistory,
   parseSecureShareListResponse,
   parseSecureShareMutationResponse,
   parseSecureShareOwnerDetailsResponse,
   parseSecureShareOwnerSummary,
+  notesPageUiErrorMessage,
   refreshedSecureShareSettingsFlags,
   requestSecureShareEmailDraftWithoutRollback,
   resolveSecureShareManagementSelection,
@@ -53,6 +55,19 @@ const validAttachmentReuseManifest = {
 };
 
 describe("Secure Share v2 owner DTO boundary", () => {
+  it("keeps typed API guidance but hides unknown SDK error internals", () => {
+    const fallback = "보안 공유 링크를 만들지 못했습니다.";
+
+    expect(notesPageUiErrorMessage(
+      new Error("projects/example/databases/(default)/documents/privateNotes"),
+      fallback
+    )).toBe(fallback);
+    expect(notesPageUiErrorMessage(
+      new SecureShareApiError("permission_denied", "이 공유 작업을 수행할 권한이 없습니다.", 403),
+      fallback
+    )).toBe("이 공유 작업을 수행할 권한이 없습니다.");
+  });
+
   it("refreshes email readiness before opening secure share settings", () => {
     const currentFlags = {
       clientV2Enabled: true,

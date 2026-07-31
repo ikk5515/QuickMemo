@@ -38,6 +38,7 @@ export const allowedAttachmentExtensions = [
 
 const allowedAttachmentExtensionSet = new Set<string>(allowedAttachmentExtensions);
 const dangerousFileNameCharactersPattern = /[<>:"/\\|?*]/g;
+const unsafeFileNameFormattingPattern = /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/gu;
 const publicShareAttachmentMimeTypes: Record<string, string> = {
   csv: "text/csv",
   doc: "application/msword",
@@ -112,8 +113,12 @@ export function safeAttachmentBaseName(fileName: string) {
   const safeName = baseName
     .normalize("NFKC")
     .replace(dangerousFileNameCharactersPattern, "_")
+    .replace(unsafeFileNameFormattingPattern, "_")
     .split("")
-    .map((character) => (character.charCodeAt(0) < 32 ? "_" : character))
+    .map((character) => {
+      const codePoint = character.charCodeAt(0);
+      return codePoint <= 31 || (codePoint >= 127 && codePoint <= 159) ? "_" : character;
+    })
     .join("")
     .replace(/\s+/g, " ")
     .trim()

@@ -2440,7 +2440,10 @@ service cloud.firestore {
     }
 
     match /publicLoginRoster/{uid} {
-      allow read: if true;
+      allow get: if adminUser();
+      allow list: if resource.data.isActive == true
+        && request.query.limit != null
+        && request.query.limit <= 100;
       allow create: if validRoster(request.resource.data, uid)
         && (firstAdminCreate(uid) || adminCreatesUser(uid));
       allow update: if adminUser()
@@ -2452,7 +2455,10 @@ service cloud.firestore {
     }
 
     match /users/{uid} {
-      allow read: if activeSignedInUser() || (signedIn() && request.auth.uid == uid);
+      allow get: if activeSignedInUser() || (signedIn() && request.auth.uid == uid);
+      allow list: if activeSignedInUser()
+        && request.query.limit != null
+        && request.query.limit <= 100;
       allow create: if validUserProfile(request.resource.data, uid)
         && (firstAdminCreate(uid) || adminCreatesUser(uid));
       allow update: if adminUser()

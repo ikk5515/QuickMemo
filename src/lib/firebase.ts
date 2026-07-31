@@ -37,9 +37,11 @@ export const auth = initializeAuth(app, {
   // resolver prevents Firebase Auth from proactively loading GAPI on Safari.
   persistence: browserSessionPersistence
 });
-const useFirebaseEmulators = import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true";
+export const firebaseEmulatorsEnabled =
+  !import.meta.env.PROD
+  && import.meta.env.VITE_USE_FIREBASE_EMULATORS === "true";
 const forceE2eFirestoreLongPolling =
-  useFirebaseEmulators
+  firebaseEmulatorsEnabled
   && import.meta.env.VITE_E2E_FIRESTORE_FORCE_LONG_POLLING === "true";
 export const db = forceE2eFirestoreLongPolling
   ? initializeFirestore(app, {
@@ -51,7 +53,7 @@ export const db = forceE2eFirestoreLongPolling
   : getFirestore(app);
 let legacyStorage: FirebaseStorage | null = null;
 export const legacyFirebaseStorageEnabled =
-  useFirebaseEmulators
+  firebaseEmulatorsEnabled
   || import.meta.env.VITE_LEGACY_FIREBASE_STORAGE_ENABLED === "true";
 
 /**
@@ -66,7 +68,7 @@ export function getLegacyStorage() {
   if (legacyStorage) return legacyStorage;
 
   legacyStorage = getStorage(app);
-  if (useFirebaseEmulators) {
+  if (firebaseEmulatorsEnabled) {
     connectStorageEmulator(legacyStorage, "127.0.0.1", 9199);
   }
 
@@ -74,13 +76,13 @@ export function getLegacyStorage() {
 }
 export const appCheckSiteKey = import.meta.env.VITE_RECAPTCHA_ENTERPRISE_SITE_KEY;
 export const appCheck =
-  appCheckSiteKey && import.meta.env.VITE_USE_FIREBASE_EMULATORS !== "true"
+  appCheckSiteKey && !firebaseEmulatorsEnabled
     ? initializeAppCheck(app, {
         provider: new ReCaptchaEnterpriseProvider(appCheckSiteKey),
         isTokenAutoRefreshEnabled: true
       })
     : null;
-if (useFirebaseEmulators) {
+if (firebaseEmulatorsEnabled) {
   connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
 }

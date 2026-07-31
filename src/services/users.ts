@@ -1,10 +1,22 @@
-import { collection, deleteField, doc, getDoc, onSnapshot, orderBy, query, serverTimestamp, updateDoc } from "firebase/firestore";
+import {
+  collection,
+  deleteField,
+  doc,
+  getDoc,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  updateDoc,
+  where
+} from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { sortRoster } from "../lib/roster";
 import type { PublicRosterUser, UserKeyBundle, UserKeyDocument, UserProfile } from "../types";
 
 export function subscribeRoster(callback: (users: PublicRosterUser[]) => void, onError?: (error: Error) => void) {
-  const rosterQuery = query(collection(db, "publicLoginRoster"), orderBy("order", "asc"));
+  const rosterQuery = query(collection(db, "publicLoginRoster"), where("isActive", "==", true), limit(100));
 
   return onSnapshot(
     rosterQuery,
@@ -19,7 +31,7 @@ export function subscribeRoster(callback: (users: PublicRosterUser[]) => void, o
 }
 
 export function subscribeUsers(callback: (users: UserProfile[]) => void, onError?: (error: Error) => void) {
-  const usersQuery = query(collection(db, "users"), orderBy("order", "asc"));
+  const usersQuery = query(collection(db, "users"), orderBy("order", "asc"), limit(100));
 
   return onSnapshot(
     usersQuery,

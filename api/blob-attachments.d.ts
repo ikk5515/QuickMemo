@@ -28,6 +28,12 @@ export function publicShareAttachmentIsCurrent(
   attachment: BlobAttachmentFirestoreDocument
 ): boolean;
 
+export function safeAttachmentMimeType(extension: string, mimeType: string): string;
+
+export function canonicalNoteAttachmentMimeType(extension: string, mimeType: string): string;
+
+export function safeFileName(value: string): string;
+
 export function lookupCallerUid(idToken: string): Promise<string>;
 
 export function safeErrorSummary(error: unknown): {

@@ -175,8 +175,15 @@ function passwordStrength(password: string) {
   };
 }
 
+export class SecureShareSettingsSaveError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SecureShareSettingsSaveError";
+  }
+}
+
 function errorMessage(caught: unknown) {
-  return caught instanceof Error && caught.message
+  return caught instanceof SecureShareSettingsSaveError && caught.message
     ? caught.message
     : "보안 공유 설정을 저장하지 못했습니다. 다시 시도해주세요.";
 }

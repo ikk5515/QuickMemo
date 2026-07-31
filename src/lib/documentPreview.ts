@@ -272,7 +272,7 @@ function safeDocxPreviewHref(value: string) {
   try {
     const url = new URL(value, "https://quickmemo.invalid");
 
-    if (url.protocol === "http:" || url.protocol === "https:") {
+    if ((url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password) {
       return url.href;
     }
   } catch {

@@ -3,7 +3,10 @@ import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultSecureSharePolicy } from "../lib/secureSharePolicy";
-import { SecureShareSettingsModal } from "./SecureShareSettingsModal";
+import {
+  SecureShareSettingsModal,
+  SecureShareSettingsSaveError
+} from "./SecureShareSettingsModal";
 
 type ModalProps = ComponentProps<typeof SecureShareSettingsModal>;
 
@@ -337,17 +340,33 @@ describe("SecureShareSettingsModal", () => {
     }));
   });
 
-  it("keeps the dialog busy and moves focus to a save failure", async () => {
+  it("hides unknown save internals and moves focus to the failure", async () => {
     const user = userEvent.setup();
     renderModal({
-      onSave: vi.fn().mockRejectedValue(new Error("서버에서 설정을 저장하지 못했습니다."))
+      onSave: vi.fn().mockRejectedValue(
+        new Error("projects/example/databases/(default)/documents/privateShares")
+      )
     });
 
     await user.click(screen.getByRole("button", { name: "보안 공유 만들기" }));
     const alert = await screen.findByRole("alert");
 
-    expect(alert).toHaveTextContent("서버에서 설정을 저장하지 못했습니다.");
+    expect(alert).toHaveTextContent("보안 공유 설정을 저장하지 못했습니다. 다시 시도해주세요.");
+    expect(alert).not.toHaveTextContent("projects/example");
     expect(alert).toHaveFocus();
+  });
+
+  it("keeps a caller-sanitized typed save message", async () => {
+    const user = userEvent.setup();
+    renderModal({
+      onSave: vi.fn().mockRejectedValue(
+        new SecureShareSettingsSaveError("이 공유 작업을 수행할 권한이 없습니다.")
+      )
+    });
+
+    await user.click(screen.getByRole("button", { name: "보안 공유 만들기" }));
+    expect(await screen.findByRole("alert"))
+      .toHaveTextContent("이 공유 작업을 수행할 권한이 없습니다.");
   });
 
   it("deduplicates synchronous double submit before an async save settles", async () => {

@@ -46,6 +46,12 @@ import type { AppFeature, FeatureAccess, NoteKind, UserProfile } from "../types"
 
 const palette = ["#2f7d70", "#c75146", "#7c5b9e", "#b9822f", "#3f6fb5", "#65707a"];
 const AUTO_SAVE_DELAY_MS = 550;
+const managedUserDeleteUiMessages = new Set([
+  "관리자 인증을 확인할 수 없습니다.",
+  "첨부파일 정리가 오래 걸리고 있습니다. 잠시 후 사용자 삭제를 다시 시도해주세요.",
+  "관리자 중요 작업을 계속하려면 로그아웃 후 다시 로그인해주세요.",
+  "사용자를 삭제하지 못했습니다."
+]);
 const featureAccessOptions = [
   { feature: "notes", label: "노트", icon: NotebookPen },
   { feature: "library", label: "자료실", icon: LibraryBig },
@@ -77,6 +83,12 @@ const initialDraft: DraftUser = {
 type AdminNoteTypeFilter = "all" | NoteKind;
 export type AdminTab = "create" | "users" | "notes" | "email";
 type UserStatusFilter = "all" | "active" | "inactive" | "admin";
+
+export function managedUserDeleteUiError(error: unknown) {
+  return error instanceof Error && managedUserDeleteUiMessages.has(error.message)
+    ? error.message
+    : "사용자를 삭제하지 못했습니다.";
+}
 
 export const adminTabIds: Readonly<Record<AdminTab, { panelId: string; tabId: string }>> = {
   create: {
@@ -1283,7 +1295,7 @@ export function EditableUserCard({
       setDirty(false);
       setMessage("삭제됨");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "삭제 실패");
+      setMessage(managedUserDeleteUiError(error));
     } finally {
       setPending(false);
     }

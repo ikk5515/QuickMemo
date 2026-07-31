@@ -492,17 +492,27 @@ function safeId(value, fieldName) {
 }
 
 function safeFileName(value) {
+  if (typeof value !== "string") {
+    throw new HttpError(400, "첨부파일 이름이 올바르지 않습니다.", "Invalid fileName");
+  }
+
+  const normalizedValue = value.normalize("NFKC");
+
   if (
-    typeof value !== "string"
-    || value.length <= 0
-    || value.length > 100
-    || /[<>:"/\\|?*]/u.test(value)
-    || value.split("").some((character) => character.charCodeAt(0) < 32)
+    normalizedValue.length <= 0
+    || normalizedValue.length > 100
+    || /[<>:"/\\|?*]/u.test(normalizedValue)
+    || Array.from(normalizedValue).some((character) => {
+      const codePoint = character.charCodeAt(0);
+      return codePoint <= 31
+        || (codePoint >= 127 && codePoint <= 159)
+        || /[\u061C\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/u.test(character);
+    })
   ) {
     throw new HttpError(400, "첨부파일 이름이 올바르지 않습니다.", "Invalid fileName");
   }
 
-  return value;
+  return normalizedValue;
 }
 
 function safeExtension(value) {
@@ -534,14 +544,25 @@ function safeEncryptedFileName(value) {
   };
 }
 
-function safePublicShareMimeType(extension, mimeType) {
+function safeAttachmentMimeType(extension, mimeType) {
   const normalizedMimeType = safeMimeType(mimeType).trim().toLowerCase();
 
   if (normalizedMimeType !== publicShareAttachmentMimeTypes[extension]) {
-    throw new HttpError(400, "공유 첨부파일 MIME 타입이 올바르지 않습니다.", "Public share MIME/extension mismatch");
+    throw new HttpError(400, "첨부파일 MIME 타입이 확장자와 일치하지 않습니다.", "Attachment MIME/extension mismatch");
   }
 
   return normalizedMimeType;
+}
+
+function canonicalNoteAttachmentMimeType(extension, mimeType) {
+  safeMimeType(mimeType);
+  const canonicalMimeType = publicShareAttachmentMimeTypes[extension];
+
+  if (!canonicalMimeType) {
+    throw new HttpError(400, "허용되지 않는 파일 형식입니다.", "Invalid extension");
+  }
+
+  return canonicalMimeType;
 }
 
 function safePositiveInteger(value, fieldName) {
@@ -684,7 +705,9 @@ function parseClientPayload(clientPayload) {
     fileName,
     encryptedFileName: scope === "publicShare" ? safeEncryptedFileName(parsed.encryptedFileName) : null,
     extension,
-    mimeType: scope === "publicShare" ? safePublicShareMimeType(extension, parsed.mimeType) : safeMimeType(parsed.mimeType),
+    mimeType: scope === "publicShare"
+      ? safeAttachmentMimeType(extension, parsed.mimeType)
+      : canonicalNoteAttachmentMimeType(extension, parsed.mimeType),
     originalSize,
     encryptedSize,
     version,
@@ -2153,9 +2176,12 @@ function handleError(error, response) {
 }
 
 export {
+  canonicalNoteAttachmentMimeType,
   claimAttachmentDeletion,
   publicShareAttachmentIsCurrent,
-  reserveUserAttachmentBytes
+  reserveUserAttachmentBytes,
+  safeAttachmentMimeType,
+  safeFileName
 };
 
 export default async function handler(request, response) {

@@ -4,8 +4,46 @@ import { describe, expect, it } from "vitest";
 
 const ciWorkflowSource = readFileSync(join(process.cwd(), ".github/workflows/ci.yml"), "utf8");
 const vercelWorkflowSource = readFileSync(join(process.cwd(), ".github/workflows/vercel-production.yml"), "utf8");
+const sensitiveFileGuardSource = readFileSync(
+  join(process.cwd(), "scripts/security-gitignore-guard.mjs"),
+  "utf8"
+);
 
 describe("CI/CD security controls", () => {
+  it("scans every privileged runtime credential name before release", () => {
+    const sensitiveEnvNames = sensitiveFileGuardSource.match(
+      /const sensitiveEnvNames = \[[\s\S]*?\n\];/u
+    )?.[0] ?? "";
+    const allowedPublicViteEnvNames = sensitiveFileGuardSource.match(
+      /const allowedPublicViteEnvNames = new Set\(\[[\s\S]*?\n\]\);/u
+    )?.[0] ?? "";
+
+    for (const name of [
+      "BLOB_READ_WRITE_TOKEN",
+      "VERCEL_OIDC_TOKEN",
+      "SHARE_EMAIL_API_KEY",
+      "SHARE_PASSWORD_PEPPER",
+      "SHARE_SESSION_HMAC_KEY",
+      "SHARE_PARTICIPANT_HMAC_KEY",
+      "SHARE_COOKIE_NAME_HMAC_KEY",
+      "SHARE_CSRF_HMAC_KEY"
+    ]) {
+      expect(sensitiveEnvNames).toContain(`"${name}"`);
+    }
+
+    expect(sensitiveFileGuardSource).toContain(
+      "sensitiveEnvNames.map((name) => `VITE_${name}`)"
+    );
+    const syntheticPrivilegedViteName = ["VITE", "SHARE", "PASSWORD", "PEPPER"].join("_");
+
+    expect(sensitiveFileGuardSource).toContain("hasPrivilegedViteEnvUsage");
+    expect(sensitiveFileGuardSource).toContain("content.matchAll(viteIdentifierPattern)");
+    expect(sensitiveFileGuardSource).toContain("assertPrivilegedViteIdentifierScanner();");
+    expect(sensitiveFileGuardSource).not.toContain(JSON.stringify(syntheticPrivilegedViteName));
+    expect(allowedPublicViteEnvNames).toContain('"VITE_FIREBASE_API_KEY"');
+    expect(allowedPublicViteEnvNames).toContain('"VITE_RECAPTCHA_ENTERPRISE_SITE_KEY"');
+  });
+
   it("keeps CI token permissions read-only", () => {
     expect(ciWorkflowSource).toContain("permissions:\n  contents: read");
     expect(ciWorkflowSource).not.toContain("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24");

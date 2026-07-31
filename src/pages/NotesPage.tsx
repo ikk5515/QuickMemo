@@ -80,7 +80,10 @@ import {
   type SecureShareOwnerCommentLoader,
   type SecureShareOwnerCommentTarget
 } from "../components/SecureShareOwnerCommentsPanel";
-import { SecureShareSettingsModal } from "../components/SecureShareSettingsModal";
+import {
+  SecureShareSettingsModal,
+  SecureShareSettingsSaveError
+} from "../components/SecureShareSettingsModal";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import {
@@ -169,6 +172,7 @@ import {
   type SecureShareCommentsPage
 } from "../lib/secureShareComments";
 import { publishActiveNote, subscribeActiveNote } from "../services/activeNotes";
+import { BlobAttachmentReservationCleanupError } from "../services/blobAttachments";
 import {
   confirmNoteRead,
   createRevisionedEncryptedNote,
@@ -2204,6 +2208,22 @@ function noteMutationErrorMessage(error: unknown, fallback: string) {
   return error instanceof NoteRevisionConflictError ? noteRevisionConflictMessage : fallback;
 }
 
+export function notesPageUiErrorMessage(caught: unknown, fallback: string) {
+  if (
+    caught instanceof BlobAttachmentReservationCleanupError
+    || caught instanceof SecureShareApiError
+    || caught instanceof SecureSharePostCommitCleanupError
+  ) {
+    return caught.message;
+  }
+
+  if (caught instanceof NoteRevisionConflictError) {
+    return noteRevisionConflictMessage;
+  }
+
+  return fallback;
+}
+
 function noteSyncSignature(note: DecryptedNote) {
   const updatedAt = note.updatedAt ? `${note.updatedAt.seconds}:${note.updatedAt.nanoseconds}` : "pending";
 
@@ -3533,11 +3553,10 @@ export default function NotesPage() {
       setOwnerSecureSharesNextCursor(page.nextCursor);
     } catch (caught) {
       if (secureShareOwnerPageGeneration.current === pageGeneration) {
-        setPublicShareError(
-          caught instanceof Error
-            ? caught.message
-            : "보안 공유 이력을 더 불러오지 못했습니다."
-        );
+        setPublicShareError(notesPageUiErrorMessage(
+          caught,
+          "보안 공유 이력을 더 불러오지 못했습니다."
+        ));
       }
     } finally {
       if (secureShareOwnerPageGeneration.current === pageGeneration) {
@@ -4543,9 +4562,10 @@ export default function NotesPage() {
         } catch {
           return;
         }
-        const message = caught instanceof Error
-          ? caught.message
-          : "이 노트의 보안 공유 상태를 안전하게 확인하지 못했습니다.";
+        const message = notesPageUiErrorMessage(
+          caught,
+          "이 노트의 보안 공유 상태를 안전하게 확인하지 못했습니다."
+        );
 
         setPublicShareError(message);
         setStatus(message);
@@ -4830,11 +4850,10 @@ export default function NotesPage() {
       } catch {
         return;
       }
-      setPublicShareError(
-        caught instanceof Error
-          ? caught.message
-          : "이 노트의 보안 공유 상태를 안전하게 확인하지 못했습니다."
-      );
+      setPublicShareError(notesPageUiErrorMessage(
+        caught,
+        "이 노트의 보안 공유 상태를 안전하게 확인하지 못했습니다."
+      ));
       return;
     }
 
@@ -4918,9 +4937,10 @@ export default function NotesPage() {
       } catch {
         return;
       }
-      setPublicShareError(
-        caught instanceof Error ? caught.message : "보안 공유 상태를 불러오지 못했습니다."
-      );
+      setPublicShareError(notesPageUiErrorMessage(
+        caught,
+        "보안 공유 상태를 불러오지 못했습니다."
+      ));
     } finally {
       try {
         assertCurrentSecureShareOwnerOperation(operation);
@@ -4995,9 +5015,10 @@ export default function NotesPage() {
       } catch {
         return;
       }
-      setPublicShareError(
-        caught instanceof Error ? caught.message : "보안 공유 설정을 불러오지 못했습니다."
-      );
+      setPublicShareError(notesPageUiErrorMessage(
+        caught,
+        "보안 공유 설정을 불러오지 못했습니다."
+      ));
     } finally {
       try {
         assertCurrentSecureShareOwnerOperation(operation);
@@ -5106,11 +5127,12 @@ export default function NotesPage() {
           throw caught;
         }
         assertCurrentSecureShareOwnerOperation(operation);
-        const message = caught instanceof Error
-          ? caught.message
-          : "보안 공유 설정을 저장하지 못했습니다.";
+        const message = notesPageUiErrorMessage(
+          caught,
+          "보안 공유 설정을 저장하지 못했습니다."
+        );
         setPublicShareError(message);
-        throw new Error(message);
+        throw new SecureShareSettingsSaveError(message);
       } finally {
         try {
           assertCurrentSecureShareOwnerOperation(operation);
@@ -5343,11 +5365,12 @@ export default function NotesPage() {
         throw caught;
       }
       assertCurrentSecureShareOwnerOperation(operation);
-      const message = caught instanceof Error
-        ? caught.message
-        : "보안 공유 링크를 만들지 못했습니다.";
+      const message = notesPageUiErrorMessage(
+        caught,
+        "보안 공유 링크를 만들지 못했습니다."
+      );
       setPublicShareError(message);
-      throw new Error(message);
+      throw new SecureShareSettingsSaveError(message);
     } finally {
       try {
         assertCurrentSecureShareOwnerOperation(operation);
@@ -5492,9 +5515,10 @@ export default function NotesPage() {
       } catch {
         return false;
       }
-      setPublicShareError(
-        caught instanceof Error ? caught.message : "보안 공유 링크를 중단하지 못했습니다."
-      );
+      setPublicShareError(notesPageUiErrorMessage(
+        caught,
+        "보안 공유 링크를 중단하지 못했습니다."
+      ));
       return false;
     } finally {
       try {
@@ -5618,7 +5642,10 @@ export default function NotesPage() {
           .catch(() => undefined);
       }
 
-      setPublicShareError(shareError instanceof Error ? shareError.message : "공유 링크를 만들지 못했습니다.");
+      setPublicShareError(notesPageUiErrorMessage(
+        shareError,
+        "공유 링크를 만들지 못했습니다."
+      ));
     } finally {
       setPublicShareBusy(false);
     }
@@ -6408,9 +6435,10 @@ export default function NotesPage() {
       if (caught instanceof SecureShareOwnerOperationStaleError) {
         throw caught;
       }
-      const message = caught instanceof Error
-        ? caught.message
-        : "보안 공유 내용 업데이트가 지연되고 있습니다. 기존 링크는 유지됩니다.";
+      const message = notesPageUiErrorMessage(
+        caught,
+        "보안 공유 내용 업데이트가 지연되고 있습니다. 기존 링크는 유지됩니다."
+      );
       setPublicShareError(message);
       setError(message);
     }
@@ -6880,11 +6908,13 @@ export default function NotesPage() {
             : current
         );
 
+        const extension = attachmentExtension(file.name);
+
         await createNoteAttachment({
           noteId: noteTarget.noteId,
           fileName: safeAttachmentBaseName(file.name),
-          extension: attachmentExtension(file.name),
-          mimeType: (file.type || "application/octet-stream").slice(0, 120),
+          extension,
+          mimeType: safePublicShareAttachmentMimeType(extension),
           originalSize: file.size,
           encryptedBlob: encryptedFile.blob,
           encryption: encryptedFile.metadata,
@@ -6979,7 +7009,7 @@ export default function NotesPage() {
         return;
       }
       setAttachmentUploadProgress((current) => (current?.runId === runId ? { ...current, phase: "failed" } : current));
-      setError(error instanceof Error ? error.message : "첨부파일을 업로드하지 못했습니다.");
+      setError(notesPageUiErrorMessage(error, "첨부파일을 업로드하지 못했습니다."));
       } finally {
         attachmentUploadInFlightRef.current = false;
         window.setTimeout(
