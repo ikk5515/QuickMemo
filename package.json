@@ -21,13 +21,13 @@
     "benchmark:secure-share": "npx --yes firebase-tools@15.24.0 emulators:exec --project quickmemo-share-api-test --only auth,firestore \"vitest run --config vitest.performance.config.ts --disableConsoleIntercept\"",
     "test:e2e": "playwright test",
     "test:e2e:chromium": "playwright test --project=chromium-desktop --project=chromium-mobile-390 --project=chromium-mobile-320",
-    "test:e2e:webkit": "playwright test --project=webkit-desktop --project=webkit-mobile-390",
+    "test:e2e:webkit": "playwright test --project=webkit-desktop --project=webkit-mobile-390 --project=webkit-mobile-320",
     "verify:gmail-smtp-production": "node scripts/verify-gmail-smtp-production.mjs",
     "emulators": "npx --yes firebase-tools@15.24.0 emulators:start --only auth,firestore,storage,hosting"
   },
   "overrides": {
     "@hono/node-server": "^2.0.11",
-    "brace-expansion": "^5.0.8",
+    "brace-expansion": "^5.0.9",
     "tmp": "^0.2.6",
     "gaxios@6.7.1": {
       "uuid": "^11.1.1"
@@ -37,7 +37,7 @@
       "@opentelemetry/core": "^2.8.0"
     },
     "esbuild": "^0.28.1",
-    "undici": "^6.27.0",
+    "undici": "^6.28.0",
     "universal-analytics": {
       "uuid": "14.0.0"
     }

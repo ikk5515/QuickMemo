@@ -99,6 +99,10 @@ import {
   evaluateFreeTierUpload,
   resolveFreeTierPolicy
 } from "./_free-tier-policy.js";
+import {
+  storedBlobMetadataMatchesAttachment,
+  streamedBlobMetadataMatchesAttachment
+} from "./_blob-download-policy.js";
 
 const accessModes = new Set(["anyone_with_link", "allowed_emails", "authenticated_users"]);
 const permissionLevels = new Set(["view", "comment", "save_copy"]);
@@ -8162,6 +8166,20 @@ function secureShareAttachmentBlobPath(ownerUid, shareId, attachmentId) {
   )}/attachments/${safeId(attachmentId, "attachmentId")}/data`;
 }
 
+async function headPrivateBlobIfPresent(blobPath) {
+  const { head } = await import("@vercel/blob");
+
+  try {
+    return await head(blobPath);
+  } catch (error) {
+    if (error?.constructor?.name === "BlobNotFoundError") {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
 const attachmentMimeTypes = new Map([
   ["csv", "text/csv"],
   ["doc", "application/msword"],
@@ -8279,18 +8297,18 @@ async function streamAttachment(request, response, id, shareId, attachmentId, di
     if (attachment.blobPath !== expectedBlobPath) {
       throw new HttpError(404, "not_found", "Private Blob attachment is unavailable");
     }
+    const blobMetadata = await headPrivateBlobIfPresent(attachment.blobPath);
+    if (!storedBlobMetadataMatchesAttachment(blobMetadata, attachment.blobPath, encryptedSize)) {
+      throw new HttpError(404, "not_found", "Private Blob metadata mismatch");
+    }
     const { get } = await import("@vercel/blob");
     const blob = await get(attachment.blobPath, { access: "private", useCache: false });
     if (!blob || blob.statusCode !== 200 || !blob.stream) {
       throw new HttpError(404, "not_found", "Private Blob is unavailable");
     }
-    if (
-      blob.blob.pathname !== attachment.blobPath
-      || blob.blob.size !== encryptedSize
-      || blob.blob.contentType !== "application/octet-stream"
-    ) {
+    if (!streamedBlobMetadataMatchesAttachment(blob.blob, attachment.blobPath, encryptedSize)) {
       await blob.stream.cancel().catch(() => undefined);
-      throw new HttpError(404, "not_found", "Private Blob metadata mismatch");
+      throw new HttpError(404, "not_found", "Private Blob stream metadata mismatch");
     }
     privateBlobStream = blob.stream;
   }

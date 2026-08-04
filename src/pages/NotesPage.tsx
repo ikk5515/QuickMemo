@@ -96,6 +96,7 @@ import {
   maxAttachmentPreviewBytes,
   maxAttachmentPreviewLabel,
   safeAttachmentBaseName,
+  isPublicShareRasterImageExtension,
   safePublicShareAttachmentMimeType
 } from "../lib/attachments";
 import {
@@ -412,7 +413,10 @@ const defaultNoteSort: NoteSortSetting = { field: "createdAt", direction: "desc"
 const defaultNoteFilter: NoteListFilter = "all";
 const folderColorOptions = ["#2f7d70", "#3f6fb5", "#b9822f", "#c75146", "#64748b", "#7c3aed"];
 const attachmentInputAccept = allowedAttachmentExtensions.map((extension) => `.${extension}`).join(",");
-export const previewableAttachmentExtensions = new Set(["pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx"]);
+export const previewableAttachmentExtensions = new Set([
+  "pdf", "txt", "md", "csv", "json", "doc", "docx", "hwp", "hwpx", "xlsx",
+  "png", "jpg", "jpeg", "webp"
+]);
 export const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "json"]);
 export const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 const attachmentUploadToastClearDelayMs = 900;
@@ -7090,6 +7094,21 @@ export default function NotesPage() {
         attachmentPreviewUrl.current = url;
         setAttachmentPreview({ bytes: plainBytes, fileName, kind: "pdf", label: "PDF 미리보기", url });
         setStatus("PDF 미리보기를 열었습니다.");
+        return;
+      }
+
+      if (isPublicShareRasterImageExtension(attachment.extension) && attachment.extension !== "gif") {
+        const mimeType = safePublicShareAttachmentMimeType(attachment.extension);
+
+        if (!safeRasterImageBytes(plainBytes, mimeType)) {
+          throw new Error("Unsafe raster attachment preview");
+        }
+
+        const url = URL.createObjectURL(new Blob([plainBytes], { type: mimeType }));
+
+        attachmentPreviewUrl.current = url;
+        setAttachmentPreview({ fileName, kind: "image", label: "이미지 미리보기", url });
+        setStatus("이미지 미리보기를 열었습니다.");
         return;
       }
 

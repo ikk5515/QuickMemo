@@ -3120,11 +3120,26 @@ describe("Secure Share v2 transactional source contracts", () => {
       /async function streamAttachment[\s\S]*?async function dispatch/u
     )?.[0] ?? "";
     const headersIndex = stream.indexOf("response.statusCode = 200");
+    const metadataIndex = stream.indexOf(
+      "const blobMetadata = await headPrivateBlobIfPresent(attachment.blobPath)"
+    );
+    const streamIndex = stream.indexOf("const blob = await get(attachment.blobPath");
     expect(backendSource).not.toContain('import { get } from "@vercel/blob"');
+    expect(backendSource).toContain("async function headPrivateBlobIfPresent(blobPath)");
     expect(stream.indexOf("Inline attachment size mismatch")).toBeLessThan(headersIndex);
     expect(stream.indexOf("Private Blob metadata mismatch")).toBeLessThan(headersIndex);
+    expect(stream).toContain(
+      "storedBlobMetadataMatchesAttachment(blobMetadata, attachment.blobPath, encryptedSize)"
+    );
+    expect(metadataIndex).toBeGreaterThanOrEqual(0);
+    expect(metadataIndex).toBeLessThan(streamIndex);
     expect(stream).toContain('const { get } = await import("@vercel/blob")');
     expect(stream.indexOf("const blob = await get(")).toBeLessThan(headersIndex);
+    expect(stream).toContain(
+      "streamedBlobMetadataMatchesAttachment(blob.blob, attachment.blobPath, encryptedSize)"
+    );
+    expect(stream).toContain("await blob.stream.cancel()");
+    expect(stream).not.toContain("blob.blob.size");
     expect(stream).toContain("await pipeline(Readable.fromWeb(privateBlobStream), response)");
     expect(stream).toContain("upstream_stream_failed");
     expect(commonSource).toContain("if (response.headersSent)");

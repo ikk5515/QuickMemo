@@ -1,6 +1,6 @@
 /* global process */
 
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = "http://127.0.0.1:4173";
 const firebaseEmulatorHubUrl = "http://127.0.0.1:4400/emulators";
@@ -63,18 +63,20 @@ export default defineConfig({
     },
     {
       name: "chromium-mobile-390",
-      testMatch: ["**/responsive.spec.mjs"],
+      testMatch: ["**/attachment.spec.mjs", "**/responsive.spec.mjs"],
       use: {
-        browserName: "chromium",
-        viewport: { width: 390, height: 844 }
+        ...devices["Pixel 5"],
+        browserName: "chromium"
       }
     },
     {
       name: "chromium-mobile-320",
-      testMatch: ["**/responsive.spec.mjs"],
+      testMatch: ["**/attachment.spec.mjs", "**/responsive.spec.mjs"],
       use: {
+        ...devices["Pixel 5"],
         browserName: "chromium",
-        viewport: { width: 320, height: 700 }
+        screen: { width: 320, height: 568 },
+        viewport: { width: 320, height: 568 }
       }
     },
     {
@@ -87,10 +89,18 @@ export default defineConfig({
     },
     {
       name: "webkit-mobile-390",
-      testMatch: ["**/responsive.spec.mjs"],
+      testMatch: ["**/attachment.spec.mjs", "**/responsive.spec.mjs"],
       use: {
-        browserName: "webkit",
-        viewport: { width: 390, height: 844 }
+        ...devices["iPhone 13"],
+        browserName: "webkit"
+      }
+    },
+    {
+      name: "webkit-mobile-320",
+      testMatch: ["**/attachment.spec.mjs", "**/responsive.spec.mjs"],
+      use: {
+        ...devices["iPhone SE"],
+        browserName: "webkit"
       }
     }
   ]

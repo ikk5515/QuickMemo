@@ -196,6 +196,13 @@ function quotaCounts(document) {
   return counts;
 }
 
+class EmailTestQuotaSnapshotConflict extends Error {
+  constructor() {
+    super("Email test quota snapshot changed concurrently");
+    this.name = "EmailTestQuotaSnapshotConflict";
+  }
+}
+
 function quotaEnforcementTotal(document, scope) {
   const counts = quotaCounts(document);
   return (
@@ -326,6 +333,9 @@ async function finalizedEmailTestQuotaWrites(context, bucketIds, outcome) {
         "email_settings_unavailable",
         "Email quota reservation disappeared"
       );
+    }
+    if (quotaCounts(document).reservedCount === 0) {
+      throw new EmailTestQuotaSnapshotConflict();
     }
     const bucketId = bucketIds[index];
     const period = periodsById.get(bucketId) ?? {
@@ -788,11 +798,30 @@ async function finalizeTestState(
       actorUid: user.uid,
       idempotencyKey
     });
-    const quotaWrites = await finalizedEmailTestQuotaWrites(
-      user.context,
-      pending.testQuotaBucketIds,
-      quotaOutcome
-    );
+    let quotaWrites;
+    try {
+      quotaWrites = await finalizedEmailTestQuotaWrites(
+        user.context,
+        pending.testQuotaBucketIds,
+        quotaOutcome
+      );
+    } catch (error) {
+      if (!(error instanceof EmailTestQuotaSnapshotConflict)) {
+        throw error;
+      }
+      const latest = await currentSettings(user.context);
+      if (
+        typeof current?.__updateTime !== "string"
+        || latest?.__updateTime === current.__updateTime
+      ) {
+        throw new HttpError(
+          503,
+          "email_settings_unavailable",
+          "Email quota accounting underflow"
+        );
+      }
+      continue;
+    }
     const writes = [
       settingsDocumentWrite(user.context, current, {
         enabled: current.enabled === true,

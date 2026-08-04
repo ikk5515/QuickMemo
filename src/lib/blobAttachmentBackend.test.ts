@@ -223,14 +223,32 @@ describe("blob attachment backend", () => {
     expect(lookupSource).toContain("user?.disabled !== true");
   });
 
-  it("validates metadata from the streaming Blob response without a duplicate head operation", () => {
+  it("validates authoritative Blob metadata before opening the download stream", () => {
     const streamSource = blobAttachmentApiSource.match(/async function streamBlobAttachment[\s\S]*?async function deleteBlobIfPresent/u)?.[0] ?? "";
+    const metadataIndex = streamSource.indexOf("const blobMetadata = await headBlobIfPresent(blobPath)");
+    const streamIndex = streamSource.indexOf("const blob = await get(blobPath");
 
-    expect(streamSource).not.toContain("headBlobIfPresent");
-    expect(streamSource).toContain("blobMetadataMatchesAttachment(blob.blob, blobPath, encryptedSize)");
+    expect(blobAttachmentApiSource).toContain("async function headBlobIfPresent(blobPath)");
+    expect(streamSource).toContain("storedBlobMetadataMatchesAttachment(blobMetadata, blobPath, encryptedSize)");
+    expect(metadataIndex).toBeGreaterThanOrEqual(0);
+    expect(metadataIndex).toBeLessThan(streamIndex);
+    expect(streamSource).toContain("streamedBlobMetadataMatchesAttachment(blob.blob, blobPath, encryptedSize)");
     expect(streamSource).toContain("await blob.stream.cancel()");
+    expect(streamSource).toContain('response.setHeader("content-length", String(blobMetadata.size))');
     expect(streamSource).toContain("await pipeline(Readable.fromWeb(blob.stream), response)");
     expect(streamSource).not.toContain("Readable.fromWeb(blob.stream).pipe(response)");
+  });
+
+  it("destroys a partially streamed response instead of writing a second header block", () => {
+    const errorSource = blobAttachmentApiSource.match(
+      /function handleError[\s\S]*?export \{/u
+    )?.[0] ?? "";
+
+    expect(errorSource).toContain("if (response.headersSent)");
+    expect(errorSource).toContain("response.destroy()");
+    expect(errorSource.indexOf("if (response.headersSent)")).toBeLessThan(
+      errorSource.indexOf("jsonResponse(response, statusCode")
+    );
   });
 
   it("prevents client-side metadata spoofing by validating the reserved path and uploaded blob", () => {

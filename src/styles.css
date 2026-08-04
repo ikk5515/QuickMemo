@@ -6069,7 +6069,11 @@ textarea {
 
   .modal-backdrop {
     align-items: end;
-    padding: 14px;
+    padding:
+      max(14px, env(safe-area-inset-top))
+      max(14px, env(safe-area-inset-right))
+      max(14px, env(safe-area-inset-bottom))
+      max(14px, env(safe-area-inset-left));
   }
 
   .password-modal {
@@ -6171,7 +6175,12 @@ textarea {
   }
 
   .pdf-preview-download {
+    grid-column: 1;
     width: 100%;
+  }
+
+  .pdf-preview-close {
+    grid-column: 2;
   }
 
   .pdf-preview-canvas-frame {
