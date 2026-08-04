@@ -1,4 +1,6 @@
 import { render, screen } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import PublicAttachmentPreviewModal from "./PublicAttachmentPreviewModal";
 
@@ -38,5 +40,15 @@ describe("PublicAttachmentPreviewModal download capability", () => {
     );
 
     expect(screen.getByRole("link", { name: "다운로드" })).toHaveAttribute("href", "blob:download-authorized");
+  });
+
+  it("keeps the mobile close action in the trailing column and preserves safe areas", () => {
+    const styles = readFileSync(join(process.cwd(), "src/styles.css"), "utf8");
+    const mobileStyles = styles.slice(styles.indexOf("@media (max-width: 680px)"));
+
+    expect(mobileStyles).toMatch(
+      /\.modal-backdrop \{[\s\S]*?max\(14px, env\(safe-area-inset-bottom\)\)/u
+    );
+    expect(mobileStyles).toMatch(/\.pdf-preview-close \{\s*grid-column: 2;/u);
   });
 });

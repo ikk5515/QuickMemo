@@ -146,6 +146,15 @@ describe("NotesPage security controls", () => {
     );
   });
 
+  it("allows only validated static raster attachments in the note preview", () => {
+    expect(notesPageSource).toContain('"png", "jpg", "jpeg", "webp"');
+    expect(notesPageSource).toContain(
+      'isPublicShareRasterImageExtension(attachment.extension) && attachment.extension !== "gif"'
+    );
+    expect(notesPageSource).toContain("safeRasterImageBytes(plainBytes, mimeType)");
+    expect(notesPageSource).toContain('kind: "image"');
+  });
+
   it("bounds XLSX XML parsing and shared-string enumeration after safe unzip", () => {
     const xlsxXmlHelper =
       documentPreviewSource.match(/function xlsxXmlDocument[\s\S]*?function xlsxEntryText/)?.[0] ?? "";

@@ -671,6 +671,12 @@ describe("Secure Share administrator email settings", () => {
     expect(finalizationSource).toContain(
       "adminIdempotencyOutcomeWrite("
     );
+    expect(finalizationSource).toContain(
+      "error instanceof EmailTestQuotaSnapshotConflict"
+    );
+    expect(finalizationSource).toContain(
+      "latest?.__updateTime === current.__updateTime"
+    );
     expect(finalizationSource).toContain("...quotaWrites");
     expect(stageSource).toContain(
       'current?.pending?.testState === "sending"'
