@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { User } from "firebase/auth";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -219,5 +219,41 @@ describe("LoginPage library capture handoff", () => {
       expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
     });
     expect(screen.getByTestId("location-state")).toBeEmptyDOMElement();
+  });
+
+  it("contains password-dialog focus and restores the selected user trigger", async () => {
+    const user = userEvent.setup();
+    renderLogin(["/login"]);
+
+    const trigger = await screen.findByRole("button", { name: "사용자 사용자 선택" });
+    fireEvent.click(trigger);
+
+    const passwordInput = screen.getByLabelText("비밀번호");
+    await waitFor(() => expect(passwordInput).toHaveFocus());
+
+    const cancelButton = screen.getByRole("button", { name: "취소" });
+    cancelButton.focus();
+    await user.tab();
+    expect(passwordInput).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("announces a rejected login and clears the stale error when the password changes", async () => {
+    const user = userEvent.setup();
+    mocks.loginRosterUser.mockRejectedValueOnce(new Error("invalid password"));
+    renderLogin(["/login"]);
+
+    await user.click(await screen.findByRole("button", { name: "사용자 사용자 선택" }));
+    const passwordInput = screen.getByLabelText("비밀번호");
+    await user.type(passwordInput, "wrong-password");
+    await user.click(screen.getByRole("button", { name: "로그인" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("비밀번호를 확인해주세요.");
+
+    await user.type(passwordInput, "x");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

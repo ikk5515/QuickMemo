@@ -1,5 +1,3 @@
-@import "./styles/library.css";
-
 :root {
   color: #17211f;
   background: #f6f7f4;
@@ -25,8 +23,8 @@
   --color-input-bg: #ffffff;
   --color-modal-bg: #ffffff;
   --color-popover-bg: #ffffff;
-  --color-danger: #c75146;
-  --color-warning: #b9822f;
+  --color-danger: #a63f36;
+  --color-warning: #805b21;
   --color-success: #2f7d70;
   --color-info: #3f6fb5;
   --schedule-category-work: #2f5f9f;
@@ -204,9 +202,14 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html {
   background: var(--color-app-bg);
   overflow-x: hidden;
+  scrollbar-gutter: stable;
   width: 100%;
 }
 
@@ -219,6 +222,10 @@ body {
   min-height: 100svh;
   overflow-x: hidden;
   width: 100%;
+}
+
+body:has([aria-modal="true"]:not([hidden])) {
+  overflow: hidden;
 }
 
 #root {
@@ -302,6 +309,7 @@ textarea:focus {
 
 .app-select {
   cursor: pointer;
+  font-size: var(--type-helper);
 }
 
 .app-select:not(:disabled):hover {
@@ -6002,6 +6010,20 @@ textarea {
   .admin-user-fields {
     grid-template-columns: minmax(150px, 1fr) 74px 86px 54px;
   }
+
+  .admin-user-card {
+    grid-template-areas:
+      "identity"
+      "fields"
+      "switches"
+      "permission"
+      "footer";
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-user-switches {
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 900px) {
@@ -6527,17 +6549,25 @@ textarea {
   }
 
   .topbar {
-    grid-template-columns: 1fr;
+    gap: 6px;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .topbar-user {
-    justify-content: space-between;
-    width: 100%;
+    gap: 6px;
+    justify-content: flex-end;
+    width: auto;
+  }
+
+  .topbar-user .mini-avatar {
+    display: none;
   }
 
   .nav-links a {
-    flex-basis: 0;
-    min-width: 0;
+    flex: 1 0 max-content;
+    gap: 6px;
+    padding-inline: 8px;
+    white-space: nowrap;
   }
 
   .editor-primary-actions,
@@ -6552,6 +6582,12 @@ textarea {
   .editor-footer {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 360px) {
+  .topbar > .brand > span:last-child {
+    display: none;
   }
 }
 
@@ -6793,10 +6829,15 @@ textarea {
   }
 
   .table-insert-control,
-  .selection-font-control,
+  .selection-font-control {
+    flex: 0 0 auto;
+  }
+
   .cell-color-palette,
   .text-color-palette {
-    flex: 0 0 auto;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    max-width: 100%;
   }
 
   .format-quick-dock {
@@ -6937,6 +6978,7 @@ textarea {
   max-height: min(760px, calc(100vh - 32px));
   max-width: 560px;
   overflow: auto;
+  position: relative;
   text-align: left;
   width: min(100%, 560px);
 }
@@ -7225,7 +7267,7 @@ textarea {
 }
 
 .date-picker-day.muted {
-  color: #9aa3aa;
+  color: var(--muted);
 }
 
 .date-picker-day.today span {
@@ -7513,6 +7555,10 @@ textarea {
   padding: 0;
 }
 
+.schedule-create-modal .schedule-create-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .todo-groups {
   display: grid;
   gap: 14px;
@@ -7713,7 +7759,7 @@ textarea {
 
 .schedule-category-badge.compact {
   flex: 0 0 auto;
-  font-size: 9px;
+  font-size: 10px;
   min-height: 16px;
   padding: 2px 4px;
 }
@@ -7842,7 +7888,7 @@ textarea {
 
 .calendar-day.muted {
   background: var(--calendar-day-muted-bg);
-  color: #9aa3aa;
+  color: var(--muted);
 }
 
 .calendar-day-head {
@@ -9522,7 +9568,7 @@ textarea {
 }
 
 .recurring-month-grid button.muted {
-  color: #aeb7bd;
+  color: var(--muted);
 }
 
 .recurring-month-grid button svg {
@@ -9791,6 +9837,10 @@ textarea {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .schedule-create-modal .schedule-create-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .date-picker-popover,
   .time-picker-popover {
     max-width: none;
@@ -9810,9 +9860,20 @@ textarea {
     padding: 18px;
   }
 
-  .schedule-section,
+  .schedule-section {
+    min-height: 160px;
+  }
+
   .matrix-section {
     min-height: 330px;
+  }
+
+  .schedule-category-badge.compact > span {
+    display: block;
+    max-width: 1em;
+    overflow: hidden;
+    white-space: nowrap;
+    width: 1em;
   }
 
   .matrix-grid {
@@ -10249,6 +10310,10 @@ button,
 
 .home-action-card.schedule {
   --home-accent: var(--blue);
+}
+
+.home-action-card.library {
+  --home-accent: #7c5cb3;
 }
 
 .home-action-card.admin {
@@ -11101,6 +11166,11 @@ html[data-theme="dark"] .schedule-empty {
   color: var(--muted);
 }
 
+html[data-theme="dark"] .home-action-card.library > span:first-child {
+  background: color-mix(in srgb, #bda6e8 15%, var(--color-surface));
+  border-color: color-mix(in srgb, #bda6e8 26%, var(--line));
+}
+
 html[data-theme="dark"] .note-list-item.deleted:hover,
 html[data-theme="dark"] .note-list-item.deleted:focus-within {
   background: var(--color-surface-hover);
@@ -11897,9 +11967,12 @@ html[data-theme="dark"] .document-preview-page .xlsx-preview-table td {
     align-items: stretch;
     display: grid;
     gap: 6px;
+    grid-template-columns: minmax(0, 1fr);
+    justify-content: stretch;
   }
 
   .schedule-category-filter {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     justify-self: stretch;
     width: 100%;
   }
@@ -11987,8 +12060,23 @@ html[data-theme="dark"] .document-preview-page .xlsx-preview-table td {
 
   .schedule-header-actions {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: 40px 40px minmax(0, 1fr) 40px;
     width: 100%;
+  }
+
+  .schedule-header-actions.recurring {
+    grid-template-columns: minmax(0, 1fr) 40px;
+  }
+
+  .schedule-header-actions .schedule-primary-action {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .schedule-header-actions > .icon-button,
+  .schedule-header-actions > .schedule-tool-menu,
+  .schedule-header-actions .schedule-tool-menu-trigger {
+    width: 40px;
   }
 
   .schedule-query-result {
@@ -13992,5 +14080,81 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   .secure-public-share-comment-list time,
   .secure-share-comment-list time {
     white-space: normal;
+  }
+}
+
+@media (hover: none) and (pointer: coarse) and (max-width: 680px) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  .icon-button,
+  .date-picker-popover .icon-button,
+  .editor-toolbar .icon-button,
+  .note-list-quick-actions .icon-button,
+  .rich-editor-toolbar .icon-button,
+  .task-pager .icon-button,
+  .topbar-password-button {
+    block-size: 40px;
+    flex-basis: 40px;
+    inline-size: 40px;
+    max-height: 40px;
+    max-width: 40px;
+    min-height: 40px;
+    min-width: 40px;
+    width: 40px;
+  }
+
+  .task-row {
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+  }
+
+  .matrix-task-row {
+    grid-template-columns: 40px 40px minmax(0, 1fr) 38px;
+  }
+
+  .task-check {
+    background: transparent;
+    border: 0;
+    height: 40px;
+    margin-top: 0;
+    min-height: 40px;
+    position: relative;
+    width: 40px;
+  }
+
+  .task-check::before {
+    background: var(--color-surface-elevated);
+    border: 1.5px solid var(--line);
+    border-radius: 6px;
+    content: "";
+    height: 20px;
+    position: absolute;
+    width: 20px;
+  }
+
+  .task-check svg {
+    position: relative;
+    z-index: 1;
+  }
+
+  .task-drag-handle,
+  .recurring-drag-handle,
+  .recurring-check-button {
+    height: 40px;
+    margin-top: 0;
+    min-height: 40px;
+    min-width: 40px;
+    width: 40px;
+  }
+
+  .recurring-date-strip {
+    scrollbar-width: none;
+  }
+
+  .recurring-date-strip::-webkit-scrollbar {
+    display: none;
   }
 }

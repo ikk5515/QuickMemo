@@ -13,6 +13,7 @@ import {
   type AdminEmailSettingsSmtpPort,
   type AdminEmailSettingsStatus
 } from "../services/adminEmailSettings";
+import { AppSelect } from "./AppSelect";
 
 type PendingAction =
   | "status"
@@ -587,7 +588,7 @@ export function AdminEmailSettingsPanel() {
         <div className="admin-email-form-grid">
           <label>
             빠른 설정
-            <select
+            <AppSelect
               disabled={mutationControlsDisabled}
               onChange={(event) => applyPreset(event.target.value as SmtpPreset)}
               value={preset}
@@ -595,11 +596,11 @@ export function AdminEmailSettingsPanel() {
               <option value="gmail">Gmail / Google Workspace</option>
               <option value="outlook">Outlook.com</option>
               <option value="microsoft365">Microsoft 365 비즈니스·학교</option>
-            </select>
+            </AppSelect>
           </label>
           <label>
             SMTP 서버
-            <select
+            <AppSelect
               disabled={mutationControlsDisabled}
               onChange={(event) => {
                 const nextHost = event.target.value;
@@ -615,22 +616,22 @@ export function AdminEmailSettingsPanel() {
               <option value="smtp.gmail.com">smtp.gmail.com</option>
               <option value="smtp-mail.outlook.com">smtp-mail.outlook.com</option>
               <option value="smtp.office365.com">smtp.office365.com</option>
-            </select>
+            </AppSelect>
           </label>
           <label>
             SMTP 포트
-            <select
+            <AppSelect
               disabled={mutationControlsDisabled}
               onChange={(event) => updatePort(Number(event.target.value) as AdminEmailSettingsSmtpPort)}
               value={port}
             >
               {isGmailTransport && <option value={465}>465</option>}
               <option value={587}>587</option>
-            </select>
+            </AppSelect>
           </label>
           <label>
             TLS 보안 방식
-            <select
+            <AppSelect
               disabled={mutationControlsDisabled}
               onChange={(event) => updateSecurityMode(event.target.value as AdminEmailSettingsSecurityMode)}
               value={securityMode}
@@ -639,7 +640,7 @@ export function AdminEmailSettingsPanel() {
                 <option value="implicit_tls">Implicit TLS (포트 465)</option>
               )}
               <option value="starttls">필수 STARTTLS (포트 587)</option>
-            </select>
+            </AppSelect>
           </label>
           <label>
             SMTP 사용자 이메일

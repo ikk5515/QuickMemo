@@ -75,6 +75,7 @@ import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey }
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import { defaultMatrixLabels } from "../lib/matrixLabels";
 import { mapWithConcurrency } from "../lib/mapWithConcurrency";
+import { useModalFocus } from "../lib/useModalFocus";
 import {
   defaultScheduleCategoryFilter,
   defaultScheduleTaskCategory,
@@ -227,7 +228,7 @@ const scheduleTabs: Array<{ view: PrimaryScheduleView; label: string; shortLabel
   { view: "todo", label: "할 일", shortLabel: "할 일", Icon: ListTodo },
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
   { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 },
-  { view: "recurring", label: "반복 업무", shortLabel: "반복업무", Icon: Repeat2 }
+  { view: "recurring", label: "반복 업무", shortLabel: "반복 업무", Icon: Repeat2 }
 ];
 
 const scheduleCategoryFilters: Array<{ value: ScheduleCategoryFilter; label: string }> = [
@@ -1123,12 +1124,16 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const [recurringCheckIns, setRecurringCheckIns] = useState<RecurringHabitCheckInSnapshot[]>([]);
   const [viewTaskId, setViewTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const createDialogReturnFocusRef = useRef<HTMLElement | null>(null);
+  const taskModalReturnFocusRef = useRef<HTMLElement | null>(null);
+  const taskDeleteConfirmReturnFocusRef = useRef<HTMLElement | null>(null);
   const [deleteConfirmationTask, setDeleteConfirmationTask] = useState<DecryptedScheduleTask | null>(null);
   const [taskDeletionPending, setTaskDeletionPending] = useState(false);
   const [taskDeletionError, setTaskDeletionError] = useState<string | null>(null);
   const [taskDuplicationPending, setTaskDuplicationPending] = useState(false);
   const [viewRecurringHabitId, setViewRecurringHabitId] = useState<string | null>(null);
   const [readRecurringHabitId, setReadRecurringHabitId] = useState<string | null>(null);
+  const recurringHabitModalReturnFocusRef = useRef<HTMLElement | null>(null);
   const [recurringHabitDialog, setRecurringHabitDialog] = useState<RecurringHabitDialogState | null>(null);
   const [recurringOverviewOpen, setRecurringOverviewOpen] = useState(false);
   const [todayPanelOpen, setTodayPanelOpen] = useState(false);
@@ -1180,6 +1185,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const todayPanelId = useId();
   const todayPanelRef = useRef<HTMLElement | null>(null);
   const todayWorkTriggerRef = useRef<HTMLButtonElement>(null);
+  const schedulePrimaryActionRef = useRef<HTMLButtonElement>(null);
   const googleCalendarPopupRef = useRef<Window | null>(null);
   const googleCalendarAttemptRef = useRef(0);
   const googleCalendarStatusRequestRef = useRef(0);
@@ -3738,12 +3744,13 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     }
   }
 
-  function requestTaskDeletion(task: DecryptedScheduleTask) {
+  function requestTaskDeletion(task: DecryptedScheduleTask, trigger: HTMLElement) {
     if (taskDeletionPending) {
       return;
     }
 
     setTaskDeletionError(null);
+    taskDeleteConfirmReturnFocusRef.current = trigger;
     setDeleteConfirmationTask(task);
   }
 
@@ -4686,7 +4693,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
               </button>
             ))}
           </nav>
-          <div className="schedule-header-actions">
+          <div className={`schedule-header-actions ${isRecurringPage ? "recurring" : ""}`}>
             {scheduleQuery.trim() && (
               <span className="schedule-query-result">
                 검색 결과 {searchResultCount}개
@@ -4723,9 +4730,18 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
               </button>
             )}
             <button
+              ref={schedulePrimaryActionRef}
               className="schedule-primary-action"
               type="button"
-              onClick={isRecurringPage ? () => setRecurringHabitDialog({ mode: "create" }) : openQuickTaskDialog}
+              onClick={(event) => {
+                if (isRecurringPage) {
+                  recurringHabitModalReturnFocusRef.current = event.currentTarget;
+                  setRecurringHabitDialog({ mode: "create" });
+                  return;
+                }
+                createDialogReturnFocusRef.current = event.currentTarget;
+                openQuickTaskDialog();
+              }}
             >
               <Plus size={16} />
               {isRecurringPage ? "새 반복 업무" : "새 일정"}
@@ -4789,6 +4805,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             summary={todayWorkSummary}
             today={today}
             onAddTask={() => {
+              createDialogReturnFocusRef.current = todayWorkTriggerRef.current;
               setTodayPanelOpen(false);
               setCreateDialog({
                 defaults: {
@@ -4802,10 +4819,12 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             }}
             onClose={() => closeTodayWorkPanel()}
             onOpenHabit={(habitId) => {
+              recurringHabitModalReturnFocusRef.current = todayWorkTriggerRef.current;
               setReadRecurringHabitId(habitId);
               setTodayPanelOpen(false);
             }}
             onOpenTask={(taskId) => {
+              taskModalReturnFocusRef.current = todayWorkTriggerRef.current;
               setViewTaskId(taskId);
               setTodayPanelOpen(false);
             }}
@@ -4913,10 +4932,11 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       {viewTask && (
         <TaskReadModal
           duplicationPending={taskDuplicationPending}
+          fallbackFocusRef={schedulePrimaryActionRef}
           inactive={deleteConfirmationTask !== null}
           task={viewTask}
           onClose={() => setViewTaskId(null)}
-          onDelete={() => requestTaskDeletion(viewTask)}
+          onDelete={(trigger) => requestTaskDeletion(viewTask, trigger)}
           onDuplicate={() => void duplicateTask(viewTask)}
           onEdit={() => {
             setEditingTaskId(viewTask.id);
@@ -4925,27 +4945,32 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
           onUpdateProgress={(percent) => updateTaskProgress(viewTask, percent)}
           onUpdateDetails={(updateDetails) => updateTaskDetails(viewTask, updateDetails, "일정 상세 내용을 저장하지 못했습니다.")}
           onToggleChecklist={(itemId) => toggleTaskChecklistItem(viewTask, itemId)}
+          returnFocusRef={taskModalReturnFocusRef}
         />
       )}
 
       {editingTask && (
         <TaskDetailModal
           key={editingTask.id}
+          fallbackFocusRef={schedulePrimaryActionRef}
           inactive={deleteConfirmationTask !== null}
           task={editingTask}
           onClose={() => setEditingTaskId(null)}
-          onDelete={() => requestTaskDeletion(editingTask)}
+          onDelete={(trigger) => requestTaskDeletion(editingTask, trigger)}
           onSave={(draft, expectedUpdatedAt) => saveTask(editingTask, draft, expectedUpdatedAt)}
+          returnFocusRef={taskModalReturnFocusRef}
         />
       )}
 
       {deleteConfirmationTask && (
         <TaskDeleteConfirmDialog
           error={taskDeletionError}
+          fallbackFocusRef={schedulePrimaryActionRef}
           pending={taskDeletionPending}
           task={deleteConfirmationTask}
           onCancel={cancelTaskDeletion}
           onConfirm={() => void confirmTaskDeletion()}
+          returnFocusRef={taskDeleteConfirmReturnFocusRef}
         />
       )}
 
@@ -4956,6 +4981,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             recurringCheckInId(readRecurringHabit.id, selectedRecurringDate)
           ] === true}
           habit={readRecurringHabit}
+          fallbackFocusRef={schedulePrimaryActionRef}
           selectedDate={selectedRecurringDate}
           today={today}
           onClose={() => setReadRecurringHabitId(null)}
@@ -4969,6 +4995,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             updateRecurringHabitDetails(readRecurringHabit, updateDetails, "반복 업무 상세 내용을 저장하지 못했습니다.")
           }
           onUpdateProgress={(percent) => updateRecurringHabitProgress(readRecurringHabit, selectedRecurringDate, percent)}
+          returnFocusRef={recurringHabitModalReturnFocusRef}
         />
       )}
 
@@ -4976,19 +5003,23 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         <ScheduleCreateDialog
           allowPriority={createDialog.allowPriority}
           defaults={createDialog.defaults}
+          fallbackFocusRef={schedulePrimaryActionRef}
           title={createDialog.title}
           onClose={() => setCreateDialog(null)}
           onCreate={createTask}
+          returnFocusRef={createDialogReturnFocusRef}
         />
       )}
 
       {recurringHabitDialog && (recurringHabitDialog.mode === "create" || editingRecurringHabit) && (
         <RecurringHabitModal
+          fallbackFocusRef={schedulePrimaryActionRef}
           habit={recurringHabitDialog.mode === "edit" ? editingRecurringHabit : null}
           onClose={() => setRecurringHabitDialog(null)}
           onCreate={createRecurringHabitFromDraft}
           onDelete={(habit) => void removeRecurringHabit(habit)}
           onSave={(habit, draft) => saveRecurringHabit(habit, draft)}
+          returnFocusRef={recurringHabitModalReturnFocusRef}
         />
       )}
 
@@ -5143,6 +5174,7 @@ function ScheduleCreateForm({
           <span>{label}</span>
           <input
             autoFocus={autoFocus}
+            data-dialog-initial-focus={autoFocus || undefined}
             id={titleId}
             onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
             placeholder="일정 제목"
@@ -5335,7 +5367,7 @@ function ScheduleCreateForm({
           </label>
         </div>
       )}
-      {localError && <p className="form-error">{localError}</p>}
+      {localError && <p className="form-error" role="alert">{localError}</p>}
       <div className="schedule-create-actions">
         <button disabled={isCreating} type="submit">
           <Plus size={18} />
@@ -5349,18 +5381,25 @@ function ScheduleCreateForm({
 function ScheduleCreateDialog({
   allowPriority = true,
   defaults,
+  fallbackFocusRef,
   onClose,
   onCreate,
+  returnFocusRef,
   title
 }: {
   allowPriority?: boolean;
   defaults: QuickDefaults;
+  fallbackFocusRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   onCreate: (draft: CreateTaskDraft) => Promise<boolean>;
+  returnFocusRef: RefObject<HTMLElement | null>;
   title: string;
 }) {
   const titleId = useId();
   const descriptionId = useId();
+  const dialogRef = useRef<HTMLElement>(null);
+
+  useModalFocus(dialogRef, { fallbackFocusRef, returnFocusRef });
 
 	  useEffect(() => {
 	    function handleKeyDown(event: KeyboardEvent) {
@@ -5382,6 +5421,8 @@ function ScheduleCreateDialog({
         aria-labelledby={titleId}
         aria-describedby={!allowPriority ? descriptionId : undefined}
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        tabIndex={-1}
       >
         <header>
           <div>
@@ -5566,6 +5607,7 @@ function DatePickerField({
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [open, setOpen] = useState(false);
+  const [modalFocusOwner, setModalFocusOwner] = useState<string | null>(null);
   const [cursor, setCursor] = useState(() => datePickerCursor(value || min || todayString));
   const [popoverStyle, setPopoverStyle] = useState<CSSProperties | null>(null);
   const weeks = useMemo(() => buildCalendarMonth(cursor.getFullYear(), cursor.getMonth(), todayString), [cursor, todayString]);
@@ -5638,6 +5680,8 @@ function DatePickerField({
   const popover = open ? (
     <div
       className="date-picker-popover"
+      data-modal-focus-owner={modalFocusOwner ?? undefined}
+      data-modal-focus-portal={modalFocusOwner ? "true" : undefined}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           consumeNestedEscape(event);
@@ -5725,7 +5769,14 @@ function DatePickerField({
         <button
           aria-expanded={open}
           className={`date-picker-trigger ${value ? "" : "empty"}`}
-          onClick={() => setOpen((current) => !current)}
+          onClick={() => setOpen((current) => {
+            if (!current) {
+              setModalFocusOwner(
+                fieldRef.current?.closest<HTMLElement>("[data-modal-focus-scope]")?.dataset.modalFocusScope ?? null
+              );
+            }
+            return !current;
+          })}
           type="button"
         >
           <CalendarDays size={16} />
@@ -7053,7 +7104,7 @@ function ScheduleCategoryBadge({
       title={label}
     >
       {!compact && <Icon aria-hidden="true" size={12} />}
-      <span aria-hidden="true">{compact ? label.slice(0, 1) : label}</span>
+      <span aria-hidden="true">{label}</span>
     </span>
   );
 }
@@ -7765,21 +7816,29 @@ function MonthPicker({
 }
 
 function RecurringHabitModal({
+  fallbackFocusRef,
   habit,
   onClose,
   onCreate,
   onDelete,
-  onSave
+  onSave,
+  returnFocusRef
 }: {
+  fallbackFocusRef: RefObject<HTMLElement | null>;
   habit: DecryptedRecurringHabit | null;
   onClose: () => void;
   onCreate: (draft: RecurringHabitDraft) => Promise<boolean>;
   onDelete: (habit: DecryptedRecurringHabit) => void;
   onSave: (habit: DecryptedRecurringHabit, draft: RecurringHabitDraft) => Promise<boolean>;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLElement>(null);
   const [draft, setDraft] = useState<RecurringHabitDraft>(() => recurringDraftFromHabit(habit));
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  useModalFocus(dialogRef, { fallbackFocusRef, returnFocusRef });
 
   useEffect(() => {
     setDraft(recurringDraftFromHabit(habit));
@@ -7820,14 +7879,22 @@ function RecurringHabitModal({
 
   return (
     <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="recurring-edit-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+      <section
+        aria-labelledby={titleId}
+        aria-modal="true"
+        className="recurring-edit-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+      >
         <header>
           <div>
             <p className="section-kicker">
               <Repeat2 size={15} />
               반복 업무
             </p>
-            <h2>{habit ? "반복 업무 수정" : "반복 업무 추가"}</h2>
+            <h2 id={titleId}>{habit ? "반복 업무 수정" : "반복 업무 추가"}</h2>
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
             <X size={18} />
@@ -7838,6 +7905,7 @@ function RecurringHabitModal({
             이름
             <input
               autoFocus
+              data-dialog-initial-focus
               maxLength={recurringHabitTitleMaxLength}
               onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
               placeholder="반복 업무 이름"
@@ -7889,7 +7957,7 @@ function RecurringHabitModal({
               ))}
             </div>
           </fieldset>
-          {localError && <p className="form-error">{localError}</p>}
+          {localError && <p className="form-error" role="alert">{localError}</p>}
           <footer>
             {habit ? (
               <button className="danger-button" type="button" onClick={() => onDelete(habit)}>
@@ -7927,8 +7995,12 @@ function RecurringOverviewModal({
   onOpenHabit: (habitId: string) => void;
   today: string;
 }) {
+  const titleId = useId();
+  const dialogRef = useRef<HTMLElement>(null);
   const safeMonth = normalizeMonthString(month, today.slice(0, 7));
   const summaries = buildRecurringMonthlySummaries(habits, checkIns, safeMonth, today, today);
+
+  useModalFocus(dialogRef);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -7943,14 +8015,22 @@ function RecurringOverviewModal({
 
   return (
     <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="recurring-overview-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+      <section
+        aria-labelledby={titleId}
+        aria-modal="true"
+        className="recurring-overview-modal"
+        onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+      >
         <header>
           <div>
             <p className="section-kicker">
               <LayoutGrid size={15} />
               월별 반복 조회
             </p>
-            <h2>{recurringMonthLabel(safeMonth)}</h2>
+            <h2 id={titleId}>{recurringMonthLabel(safeMonth)}</h2>
           </div>
           <div>
             <button className="icon-button" type="button" aria-label="이전 달" onClick={() => onMonthChange(recurringMonthOffset(safeMonth, -1))}>
@@ -8139,6 +8219,7 @@ function recurringMonthLabel(month: string) {
 function RecurringHabitReadModal({
   checkIns,
   dayStatePending,
+  fallbackFocusRef,
   habit,
   onClose,
   onDelete,
@@ -8146,11 +8227,13 @@ function RecurringHabitReadModal({
   onToggleChecklist,
   onUpdateDetails,
   onUpdateProgress,
+  returnFocusRef,
   selectedDate,
   today
 }: {
   checkIns: RecurringHabitCheckInSnapshot[];
   dayStatePending: boolean;
+  fallbackFocusRef: RefObject<HTMLElement | null>;
   habit: DecryptedRecurringHabit;
   onClose: () => void;
   onDelete: () => void;
@@ -8158,10 +8241,12 @@ function RecurringHabitReadModal({
   onToggleChecklist: (itemId: string) => void | Promise<void>;
   onUpdateDetails: (updateDetails: RecurringHabitDetailsUpdater) => boolean | Promise<boolean>;
   onUpdateProgress: (percent: number) => void | Promise<void>;
+  returnFocusRef: RefObject<HTMLElement | null>;
   selectedDate: string;
   today: string;
 }) {
   const titleId = useId();
+  const dialogRef = useRef<HTMLElement>(null);
   const details = habit.details ?? { description: "", checklist: [] };
   const checkedItemIds = recurringHabitDayCheckedItemIds(checkIns, habit.id, selectedDate);
   const dailyProgressPercent = recurringHabitDayProgressPercent(habit, checkIns, selectedDate);
@@ -8182,6 +8267,8 @@ function RecurringHabitReadModal({
   const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
   const detailsMutationPending = pendingDetailsAction !== null || pendingChecklistItemId !== null;
   const dayMutationPending = dayStatePending || pendingProgress || pendingChecklistItemId !== null;
+
+  useModalFocus(dialogRef, { fallbackFocusRef, returnFocusRef });
 
   useEffect(() => {
     setProgressPercent(normalizeTaskProgressPercent(dailyProgressPercent));
@@ -8336,6 +8423,8 @@ function RecurringHabitReadModal({
         aria-modal="true"
         aria-labelledby={titleId}
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        tabIndex={-1}
       >
         <header>
           <div className="recurring-read-title">
@@ -8607,36 +8696,28 @@ function RecurringHabitReadModal({
 
 function TaskDeleteConfirmDialog({
   error,
+  fallbackFocusRef,
   onCancel,
   onConfirm,
   pending,
+  returnFocusRef,
   task
 }: {
   error: string | null;
+  fallbackFocusRef: RefObject<HTMLElement | null>;
   onCancel: () => void;
   onConfirm: () => void;
   pending: boolean;
+  returnFocusRef: RefObject<HTMLElement | null>;
   task: DecryptedScheduleTask;
 }) {
   const titleId = useId();
   const descriptionId = useId();
   const targetId = useId();
-  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
   const displayTitle = task.title.trim() || "제목 없는 일정";
 
-  useLayoutEffect(() => {
-    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-
-    cancelButtonRef.current?.focus({ preventScroll: true });
-
-    return () => {
-      window.setTimeout(() => {
-        if (previouslyFocused?.isConnected) {
-          previouslyFocused.focus({ preventScroll: true });
-        }
-      }, 0);
-    };
-  }, []);
+  useModalFocus(dialogRef, { fallbackFocusRef, returnFocusRef });
 
   function handleKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
     if (event.key === "Escape") {
@@ -8649,28 +8730,6 @@ function TaskDeleteConfirmDialog({
       return;
     }
 
-    if (event.key !== "Tab") {
-      return;
-    }
-
-    const focusableElements = Array.from(
-      event.currentTarget.querySelectorAll<HTMLElement>("button:not(:disabled)")
-    );
-    const firstFocusableElement = focusableElements[0];
-    const lastFocusableElement = focusableElements.at(-1);
-
-    if (!firstFocusableElement || !lastFocusableElement) {
-      event.preventDefault();
-      return;
-    }
-
-    if (event.shiftKey && document.activeElement === firstFocusableElement) {
-      event.preventDefault();
-      lastFocusableElement.focus();
-    } else if (!event.shiftKey && document.activeElement === lastFocusableElement) {
-      event.preventDefault();
-      firstFocusableElement.focus();
-    }
   }
 
   return createPortal(
@@ -8691,7 +8750,9 @@ function TaskDeleteConfirmDialog({
         aria-labelledby={titleId}
         aria-modal="true"
         className="schedule-delete-confirm-modal"
+        ref={dialogRef}
         role="alertdialog"
+        tabIndex={-1}
         onKeyDown={handleKeyDown}
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -8735,8 +8796,8 @@ function TaskDeleteConfirmDialog({
         <footer className="schedule-delete-confirm-actions">
           <button
             className="secondary-button"
+            data-dialog-initial-focus
             disabled={pending}
-            ref={cancelButtonRef}
             type="button"
             onClick={onCancel}
           >
@@ -8760,6 +8821,7 @@ function TaskDeleteConfirmDialog({
 
 function TaskReadModal({
   duplicationPending,
+  fallbackFocusRef,
   inactive,
   onClose,
   onDelete,
@@ -8768,19 +8830,23 @@ function TaskReadModal({
   onToggleChecklist,
   onUpdateDetails,
   onUpdateProgress,
+  returnFocusRef,
   task
 }: {
   duplicationPending: boolean;
+  fallbackFocusRef: RefObject<HTMLElement | null>;
   inactive: boolean;
   onClose: () => void;
-  onDelete: () => void;
+  onDelete: (trigger: HTMLElement) => void;
   onDuplicate: () => void;
   onEdit: () => void;
   onToggleChecklist: (itemId: string) => void | Promise<void>;
   onUpdateDetails: (updateDetails: TaskDetailsUpdater) => boolean | Promise<boolean>;
   onUpdateProgress: (percent: number) => void | Promise<void>;
+  returnFocusRef: RefObject<HTMLElement | null>;
   task: DecryptedScheduleTask;
 }) {
+  const dialogRef = useRef<HTMLElement>(null);
   const details = task.details ?? emptyScheduleDetails;
   const hasChecklist = details.checklist.length > 0;
   const checklistGroups = checklistDisplayGroups(details.checklist);
@@ -8796,6 +8862,8 @@ function TaskReadModal({
   const [isChecklistComposing, setIsChecklistComposing] = useState(false);
   const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
   const detailsMutationPending = pendingDetailsAction !== null || pendingChecklistItemId !== null;
+
+  useModalFocus(dialogRef, { enabled: !inactive, fallbackFocusRef, returnFocusRef });
 
   useEffect(() => {
     setProgressPercent(normalizeTaskProgressPercent(task.progressPercent));
@@ -8952,6 +9020,8 @@ function TaskReadModal({
         aria-modal="true"
         aria-labelledby="schedule-read-title"
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        tabIndex={-1}
       >
         <header>
           <div>
@@ -9200,7 +9270,7 @@ function TaskReadModal({
         </section>
 
         <footer className="task-read-actions">
-          <button className="danger-button" type="button" onClick={onDelete}>
+          <button className="danger-button" type="button" onClick={(event) => onDelete(event.currentTarget)}>
             <Trash2 size={17} />
             삭제
           </button>
@@ -9226,21 +9296,26 @@ function TaskReadModal({
 }
 
 function TaskDetailModal({
+  fallbackFocusRef,
   inactive,
   onClose,
   onDelete,
   onSave,
+  returnFocusRef,
   task
 }: {
+  fallbackFocusRef: RefObject<HTMLElement | null>;
   inactive: boolean;
   onClose: () => void;
-  onDelete: () => void;
+  onDelete: (trigger: HTMLElement) => void;
   onSave: (
     draft: TaskDraft,
     expectedUpdatedAt: DecryptedScheduleTask["updatedAt"]
   ) => Promise<string | null>;
+  returnFocusRef: RefObject<HTMLElement | null>;
   task: DecryptedScheduleTask;
 }) {
+  const dialogRef = useRef<HTMLElement>(null);
   const [draft, setDraft] = useState<TaskDraft>(() => draftFromTask(task));
   const draftBaselineUpdatedAtRef = useRef(task.updatedAt);
   const [checklistText, setChecklistText] = useState("");
@@ -9249,6 +9324,8 @@ function TaskDetailModal({
   const [isSaving, setIsSaving] = useState(false);
   const isSavingRef = useRef(false);
   const checklistGroups = useMemo(() => checklistDisplayGroups(draft.checklist), [draft.checklist]);
+
+  useModalFocus(dialogRef, { enabled: !inactive, fallbackFocusRef, returnFocusRef });
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -9338,6 +9415,8 @@ function TaskDetailModal({
         role="dialog"
         aria-modal="true"
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        tabIndex={-1}
       >
         <header>
           <button className="icon-button" disabled={isSaving} type="button" onClick={onClose} aria-label="닫기">
@@ -9349,6 +9428,7 @@ function TaskDetailModal({
             제목
             <input
               autoFocus
+              data-dialog-initial-focus
               onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
               required
               value={draft.title}
@@ -9555,7 +9635,12 @@ function TaskDetailModal({
           </section>
           {localError && <p className="form-error" role="alert">{localError}</p>}
           <footer>
-            <button className="danger-button" disabled={isSaving} type="button" onClick={onDelete}>
+            <button
+              className="danger-button"
+              disabled={isSaving}
+              type="button"
+              onClick={(event) => onDelete(event.currentTarget)}
+            >
               <Trash2 size={17} />
               삭제
             </button>

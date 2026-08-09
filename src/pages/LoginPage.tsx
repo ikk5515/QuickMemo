@@ -1,5 +1,5 @@
 import { LockKeyhole } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { AvatarButton } from "../components/AvatarButton";
 import { useAuth } from "../context/AuthContext";
@@ -7,6 +7,7 @@ import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { parseLibraryCaptureLoginState } from "../lib/libraryCapture";
 import { findRosterByShortcut } from "../lib/roster";
 import { secureShareLoginDestination } from "../lib/shareLoginReturn";
+import { useModalFocus } from "../lib/useModalFocus";
 import { subscribeRoster } from "../services/users";
 import type { PublicRosterUser } from "../types";
 
@@ -20,6 +21,8 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const passwordDialogRef = useRef<HTMLElement>(null);
+  const passwordDialogTriggerRef = useRef<HTMLElement>(null);
   const captureLoginState = useMemo(() => {
     try {
       return parseLibraryCaptureLoginState(location.state);
@@ -35,6 +38,25 @@ export default function LoginPage() {
     [location.state]
   );
   const redirectTarget = secureShareRedirectTarget ?? captureRedirectTarget ?? "/home";
+
+  useModalFocus(passwordDialogRef, {
+    enabled: selectedUser !== null,
+    returnFocusRef: passwordDialogTriggerRef
+  });
+
+  const rosterButtonFor = useCallback((user: PublicRosterUser) => {
+    const activeUserIndex = roster.filter((candidate) => candidate.isActive).findIndex((candidate) => candidate.uid === user.uid);
+    return activeUserIndex >= 0
+      ? document.querySelectorAll<HTMLElement>(".roster-grid .avatar-button").item(activeUserIndex)
+      : null;
+  }, [roster]);
+
+  const openPasswordDialog = useCallback((user: PublicRosterUser, trigger?: HTMLElement | null) => {
+    passwordDialogTriggerRef.current = trigger ?? rosterButtonFor(user);
+    setSelectedUser(user);
+    setPassword("");
+    setError(null);
+  }, [rosterButtonFor]);
 
   useEffect(() => {
     if (location.hash) {
@@ -70,15 +92,15 @@ export default function LoginPage() {
 
       if (shortcutUser) {
         event.preventDefault();
-        setSelectedUser(shortcutUser);
-        setPassword("");
-        setError(null);
+        const trigger = rosterButtonFor(shortcutUser);
+        trigger?.focus({ preventScroll: true });
+        openPasswordDialog(shortcutUser, trigger);
       }
     }
 
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [roster, selectedUser]);
+  }, [openPasswordDialog, roster, rosterButtonFor, selectedUser]);
 
   useEffect(() => {
     if (!selectedUser) {
@@ -143,7 +165,7 @@ export default function LoginPage() {
           <LockKeyhole size={18} />
           빠른 로그인
         </div>
-        {error && !selectedUser && <p className="form-error login-error">{error}</p>}
+        {error && !selectedUser && <p className="form-error login-error" role="alert">{error}</p>}
         {rosterLoading ? (
           <div className="empty-state" role="status" aria-live="polite">
             <p>사용자 목록을 불러오는 중...</p>
@@ -160,11 +182,7 @@ export default function LoginPage() {
                 user={user}
                 selected={selectedUser?.uid === user.uid}
                 showRole={false}
-                onClick={() => {
-                  setSelectedUser(user);
-                  setPassword("");
-                  setError(null);
-                }}
+                onClick={() => openPasswordDialog(user, rosterButtonFor(user))}
               />
             ))}
           </div>
@@ -178,6 +196,8 @@ export default function LoginPage() {
             aria-labelledby="password-modal-title"
             aria-modal="true"
             onMouseDown={(event) => event.stopPropagation()}
+            ref={passwordDialogRef}
+            tabIndex={-1}
           >
             <span className="avatar-circle modal-avatar" style={{ background: selectedUser.color }}>
               {selectedUser.avatarText}
@@ -198,15 +218,19 @@ export default function LoginPage() {
                 <input
                   autoFocus
                   autoComplete="current-password"
+                  data-dialog-initial-focus
                   minLength={6}
                   name="password"
-                  onChange={(event) => setPassword(event.target.value)}
+                  onChange={(event) => {
+                    setPassword(event.target.value);
+                    setError(null);
+                  }}
                   required
                   type="password"
                   value={password}
                 />
               </label>
-              {error && <p className="form-error">{error}</p>}
+              {error && <p className="form-error" role="alert">{error}</p>}
               <button disabled={pending} type="submit">
                 {pending ? "로그인 중" : "로그인"}
               </button>

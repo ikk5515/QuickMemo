@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const selectCallSites = [
+  ["src/components/AdminEmailSettingsPanel.tsx", 4],
   ["src/components/AppShell.tsx", 3],
   ["src/pages/AdminPage.tsx", 3],
   ["src/pages/LibraryPage.tsx", 6],

@@ -11624,22 +11624,20 @@ function PersonalOverview({
               {feedbackError ?? feedbackStatus}
             </p>
           )}
-          <div className="folder-filter-chips" role="tablist" aria-label="노트 폴더 필터">
+          <div className="folder-filter-chips" role="group" aria-label="노트 폴더 필터">
             <button
-              aria-selected={activeFolderFilter === "all"}
+              aria-pressed={activeFolderFilter === "all"}
               className={`folder-filter-button ${activeFolderFilter === "all" ? "active" : ""}`}
               onClick={() => onFolderFilterChange("all")}
-              role="tab"
               type="button"
             >
               <span>전체</span>
               <strong>{notes.length}</strong>
             </button>
             <button
-              aria-selected={activeFolderFilter === "shared"}
+              aria-pressed={activeFolderFilter === "shared"}
               className={`folder-filter-button shared-filter ${activeFolderFilter === "shared" ? "active" : ""}`}
               onClick={() => onFolderFilterChange("shared")}
-              role="tab"
               type="button"
             >
               <span className="filter-label-with-badge">
@@ -11649,10 +11647,9 @@ function PersonalOverview({
               <strong>{sharedNotes.length}</strong>
             </button>
             <button
-              aria-selected={activeFolderFilter === "unfiled"}
+              aria-pressed={activeFolderFilter === "unfiled"}
               className={`folder-filter-button ${activeFolderFilter === "unfiled" ? "active" : ""}`}
               onClick={() => onFolderFilterChange("unfiled")}
-              role="tab"
               type="button"
             >
               <span>미분류</span>
@@ -11664,10 +11661,9 @@ function PersonalOverview({
               return (
                 <div className="folder-filter-row" key={folder.id} style={{ "--folder-color": folder.color } as CSSProperties}>
                   <button
-                    aria-selected={activeFolderFilter === folder.id}
+                    aria-pressed={activeFolderFilter === folder.id}
                     className={`folder-filter-button ${activeFolderFilter === folder.id ? "active" : ""}`}
                     onClick={() => onFolderFilterChange(folder.id)}
-                    role="tab"
                     type="button"
                   >
                     <span className="folder-chip-name">{folder.name}</span>
