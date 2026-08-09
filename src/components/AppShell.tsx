@@ -1,5 +1,5 @@
 import { CalendarDays, KeyRound, LibraryBig, LogOut, Moon, NotebookPen, Settings, Shield, Sun, X } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
@@ -24,6 +24,7 @@ import {
   validateMatrixLabels
 } from "../lib/matrixLabels";
 import { normalizeScheduleCategoryFilter } from "../lib/scheduleCategory";
+import { useModalFocus } from "../lib/useModalFocus";
 import {
   getCachedUserPreferences,
   saveUserPreferences,
@@ -44,6 +45,8 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
   const { changePassword, profile, signOut } = useAuth();
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const passwordModalTriggerRef = useRef<HTMLButtonElement>(null);
+  const settingsModalTriggerRef = useRef<HTMLButtonElement>(null);
   const [preferences, setPreferences] = useState<UserPreferencesDocument | null>(() =>
     profile ? getCachedUserPreferences(profile.uid) : null
   );
@@ -118,7 +121,7 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
         </div>
       )}
       <header className="topbar">
-        <Link className="brand" to="/home" onClick={onNavigateHome}>
+        <Link aria-label="QuickMemo 홈" className="brand" to="/home" onClick={onNavigateHome}>
           <span className="brand-mark">Q</span>
           <span>QuickMemo</span>
         </Link>
@@ -156,9 +159,12 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           )}
           {profile && (
             <button
+              aria-label="비밀번호 변경"
               className="secondary-button topbar-password-button"
-              type="button"
               onClick={() => setPasswordModalOpen(true)}
+              ref={passwordModalTriggerRef}
+              title="비밀번호 변경"
+              type="button"
             >
               <KeyRound size={16} />
               <span>비밀번호 변경</span>
@@ -166,7 +172,13 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           )}
           <ThemeToggleButton onToggle={() => void toggleTheme()} resolvedTheme={resolvedTheme} />
           {profile && (
-            <button className="icon-button" type="button" onClick={() => setSettingsModalOpen(true)} aria-label="설정">
+            <button
+              aria-label="설정"
+              className="icon-button"
+              onClick={() => setSettingsModalOpen(true)}
+              ref={settingsModalTriggerRef}
+              type="button"
+            >
               <Settings size={18} />
             </button>
           )}
@@ -185,6 +197,7 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
         <PasswordChangeModal
           onChangePassword={changePassword}
           onClose={() => setPasswordModalOpen(false)}
+          returnFocusRef={passwordModalTriggerRef}
         />
       )}
       {settingsModalOpen && profile && (
@@ -193,6 +206,7 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           preferences={preferences}
           onClose={() => setSettingsModalOpen(false)}
           onSave={(nextPreferences) => saveUserPreferences(profile.uid, nextPreferences)}
+          returnFocusRef={settingsModalTriggerRef}
         />
       )}
     </div>
@@ -228,13 +242,16 @@ export function SettingsModal({
   featureAccess = defaultFeatureAccess,
   onClose,
   onSave,
-  preferences
+  preferences,
+  returnFocusRef
 }: {
   featureAccess?: FeatureAccess;
   onClose: () => void;
   onSave: (preferences: SaveUserPreferencesInput) => Promise<void>;
   preferences: UserPreferencesDocument | null;
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
+  const dialogRef = useRef<HTMLElement>(null);
   const preferredDefaultHome = preferences?.defaultHome ?? "notes";
   const savedAccessibleHome = resolveAccessibleHome({ featureAccess }, preferredDefaultHome);
   const [defaultHome, setDefaultHome] = useState<DefaultHomeView | null>(savedAccessibleHome);
@@ -260,6 +277,8 @@ export function SettingsModal({
       && scheduleDefaultCategory !== normalizeScheduleCategoryFilter(preferences?.scheduleDefaultCategory)
     )
     || (featureAccess.schedule && !sameMatrixLabels(nextMatrixLabels, savedMatrixLabels));
+
+  useModalFocus(dialogRef, { returnFocusRef });
 
   useEffect(() => {
     if (settingsEditedRef.current) {
@@ -348,6 +367,8 @@ export function SettingsModal({
         aria-describedby="settings-modal-description"
         aria-modal="true"
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        tabIndex={-1}
       >
         <button className="icon-button password-change-close" type="button" onClick={onClose} aria-label="설정 닫기">
           <X size={16} />
@@ -457,8 +478,8 @@ export function SettingsModal({
               {hasChanges ? "변경사항 있음" : "저장된 설정과 같습니다."}
             </p>
           </section>}
-          {error && <p className="form-error">{error}</p>}
-          {message && <p className="form-success">{message}</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          {message && <p className="form-success" role="status">{message}</p>}
           <button disabled={busy || !hasChanges} type="submit">
             {busy ? "저장 중..." : "저장"}
           </button>
@@ -474,17 +495,22 @@ function sameMatrixLabels(left: MatrixLabels, right: MatrixLabels) {
 
 function PasswordChangeModal({
   onChangePassword,
-  onClose
+  onClose,
+  returnFocusRef
 }: {
   onChangePassword: (currentPassword: string, nextPassword: string) => Promise<void>;
   onClose: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
+  const dialogRef = useRef<HTMLElement>(null);
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useModalFocus(dialogRef, { returnFocusRef });
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -536,6 +562,8 @@ function PasswordChangeModal({
         aria-describedby="password-change-description"
         aria-modal="true"
         onMouseDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        tabIndex={-1}
       >
         <button className="icon-button password-change-close" type="button" onClick={onClose} aria-label="비밀번호 변경 닫기">
           <X size={16} />
@@ -549,6 +577,7 @@ function PasswordChangeModal({
             현재 비밀번호
             <input
               autoComplete="current-password"
+              data-dialog-initial-focus
               onChange={(event) => setCurrentPassword(event.target.value)}
               required
               type="password"
@@ -577,8 +606,8 @@ function PasswordChangeModal({
               value={confirmPassword}
             />
           </label>
-          {error && <p className="form-error">{error}</p>}
-          {message && <p className="form-success">{message}</p>}
+          {error && <p className="form-error" role="alert">{error}</p>}
+          {message && <p className="form-success" role="status">{message}</p>}
           <button disabled={busy} type="submit">
             {busy ? "변경 중..." : "변경"}
           </button>

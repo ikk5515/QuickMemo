@@ -69,7 +69,7 @@ describe("SettingsModal", () => {
     await user.clear(screen.getByLabelText(/^중요 업무/));
     await user.click(screen.getByRole("button", { name: "저장" }));
 
-    expect(screen.getByText("중요 업무 명칭을 입력해 주세요.")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("중요 업무 명칭을 입력해 주세요.");
     expect(onSave).not.toHaveBeenCalled();
   });
 
@@ -192,7 +192,7 @@ describe("SettingsModal", () => {
 
     await user.selectOptions(categorySelect, "personal");
     await user.click(screen.getByRole("button", { name: "저장" }));
-    expect(await screen.findByText("설정을 저장했습니다.")).toBeInTheDocument();
+    expect(await screen.findByText("설정을 저장했습니다.")).toHaveAttribute("role", "status");
 
     await user.selectOptions(categorySelect, "work");
     expect(screen.queryByText("설정을 저장했습니다.")).not.toBeInTheDocument();

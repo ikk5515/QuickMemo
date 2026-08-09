@@ -64,6 +64,7 @@ export default defineConfig({
     {
       name: "chromium-mobile-390",
       testMatch: [
+        "**/app-layout.spec.mjs",
         "**/attachment.spec.mjs",
         "**/responsive.spec.mjs",
         "**/schedule-category.spec.mjs"
@@ -76,6 +77,7 @@ export default defineConfig({
     {
       name: "chromium-mobile-320",
       testMatch: [
+        "**/app-layout.spec.mjs",
         "**/attachment.spec.mjs",
         "**/responsive.spec.mjs",
         "**/schedule-category.spec.mjs"
@@ -98,6 +100,7 @@ export default defineConfig({
     {
       name: "webkit-mobile-390",
       testMatch: [
+        "**/app-layout.spec.mjs",
         "**/attachment.spec.mjs",
         "**/responsive.spec.mjs",
         "**/schedule-category.spec.mjs"
@@ -110,6 +113,7 @@ export default defineConfig({
     {
       name: "webkit-mobile-320",
       testMatch: [
+        "**/app-layout.spec.mjs",
         "**/attachment.spec.mjs",
         "**/responsive.spec.mjs",
         "**/schedule-category.spec.mjs"

@@ -251,11 +251,11 @@ export async function expectNoHorizontalOverflow(page) {
       return rectangle.right > root.clientWidth + 1 || rectangle.left < -1;
     });
     return {
-      body: body.scrollWidth - body.clientWidth,
+      body: Math.max(0, body.scrollWidth - body.clientWidth),
       element: overflowingElement
         ? `${overflowingElement.tagName}.${overflowingElement.className}`
         : null,
-      root: root.scrollWidth - root.clientWidth
+      root: Math.max(0, root.scrollWidth - root.clientWidth)
     };
   });
 

@@ -19,11 +19,13 @@ async function createTask(page, title, category) {
   await dialog.getByLabel("일정 분류").selectOption(category);
   await dialog.locator('button[type="submit"]').click();
   await expect(dialog).toBeHidden();
-  await expect(page.getByText(title, { exact: true }).first()).toBeVisible();
+  await expect(page.getByText(title, { exact: true }).filter({ visible: true }).first()).toBeVisible();
 }
 
 async function expectFilteredTasks(page, visibleTitle, hiddenTitle) {
-  await expect(page.getByText(visibleTitle, { exact: true }).first()).toBeVisible();
+  await expect(
+    page.getByText(visibleTitle, { exact: true }).filter({ visible: true }).first()
+  ).toBeVisible();
   await expect(page.getByText(hiddenTitle, { exact: true })).toHaveCount(0);
 }
 

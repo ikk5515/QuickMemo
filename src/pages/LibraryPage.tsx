@@ -30,6 +30,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import "../styles/library.css";
 import {
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,

@@ -487,7 +487,7 @@ describe("SchedulePage quick work panel", () => {
     expect(screen.getByRole("button", { name: /빠른 업무 패널 닫기/ })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("지연 업무")).toBeInTheDocument();
     expect(screen.getByText("오늘 일정")).toBeInTheDocument();
-    expect(screen.getByText("반복 업무")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "반복 업무", level: 3 })).toBeInTheDocument();
     expect(todoTab).toHaveAttribute("aria-pressed", "true");
     expect(subscribeRecurringHabits).toHaveBeenCalledTimes(1);
     expect(vi.mocked(subscribeRecurringHabitCheckIns).mock.calls[0]?.[3]).toEqual({ date: expect.any(String) });
@@ -826,16 +826,50 @@ describe("SchedulePage quick work panel", () => {
     expect(quickPanelButton).toHaveAttribute("aria-expanded", "false");
   });
 
+  it("returns focus to the today-work trigger after opening a create dialog from the panel", async () => {
+    const user = userEvent.setup();
+
+    renderSchedulePage();
+
+    const quickPanelButton = await screen.findByRole("button", { name: /빠른 업무 패널 열기/ });
+    await user.click(quickPanelButton);
+    await user.click(screen.getByRole("button", { name: "오늘 일정 추가" }));
+
+    const createDialog = await screen.findByRole("dialog", { name: "오늘 일정 추가" });
+    await user.click(within(createDialog).getByRole("button", { name: "닫기" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(quickPanelButton).toHaveFocus());
+  });
+
   it("keeps the create dialog open when Escape closes a nested date picker", async () => {
     const user = userEvent.setup();
     const { container } = renderSchedulePage();
 
     await user.click(await screen.findByRole("button", { name: "새 일정" }));
 
-    expect(screen.getByRole("dialog", { name: "새 일정 추가" })).toBeInTheDocument();
+    const createDialog = screen.getByRole("dialog", { name: "새 일정 추가" });
+    const titleInput = within(createDialog).getByPlaceholderText("일정 제목");
+    const closeButton = within(createDialog).getByRole("button", { name: "닫기" });
+    const submitButton = createDialog.querySelector<HTMLButtonElement>('button[type="submit"]');
+
+    expect(titleInput).toHaveFocus();
+    expect(submitButton).not.toBeNull();
+    submitButton!.focus();
+    await user.tab();
+    expect(closeButton).toHaveFocus();
 
     const dateTrigger = container.querySelector<HTMLButtonElement>(".date-picker-trigger");
     expect(dateTrigger).not.toBeNull();
+
+    await user.click(dateTrigger!);
+    const datePopover = document.querySelector<HTMLElement>(".date-picker-popover");
+    expect(datePopover).toBeInTheDocument();
+
+    const dateButtons = within(datePopover!).getAllByRole("button");
+    dateButtons.at(-1)!.focus();
+    await user.tab();
+    expect(closeButton).toHaveFocus();
 
     await user.click(dateTrigger!);
     expect(document.querySelector(".date-picker-popover")).toBeInTheDocument();
@@ -1048,16 +1082,25 @@ describe("SchedulePage quick work panel", () => {
 
   it("uses an accessible confirmation dialog before deleting from read or edit", async () => {
     const user = userEvent.setup();
+    let emitTasks!: (tasks: ScheduleTaskSnapshot[]) => void;
+    let resolveDelete!: () => void;
+    const nextTask = datedScheduleTaskSnapshot("matrix-task-b", "next matrix task");
 
     vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
-      onNext([scheduleTaskSnapshot()]);
+      emitTasks = onNext;
+      onNext([scheduleTaskSnapshot(), nextTask]);
       return vi.fn();
     });
+    vi.mocked(deleteScheduleTask).mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveDelete = resolve;
+      emitTasks([nextTask]);
+    }));
 
     renderSchedulePage();
 
     const taskTitle = await screen.findByText("matrix drag task");
     const taskOpenButton = taskTitle.closest<HTMLButtonElement>(".task-open-button");
+    const stableFallbackButton = screen.getByRole("button", { name: "새 일정" });
 
     expect(taskOpenButton).not.toBeNull();
     await user.click(taskOpenButton!);
@@ -1101,8 +1144,48 @@ describe("SchedulePage quick work panel", () => {
 
     await waitFor(() => expect(deleteScheduleTask).toHaveBeenCalledOnce());
     expect(deleteScheduleTask).toHaveBeenCalledWith("matrix-task-a");
+    await waitFor(() => expect(taskOpenButton).not.toBeInTheDocument());
+    expect(screen.getByRole("alertdialog", { name: "이 일정을 삭제할까요?" })).toBeInTheDocument();
+
+    await act(async () => resolveDelete());
+
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(stableFallbackButton).toHaveFocus());
+
+    const nextTaskOpenButton = (await screen.findByText("next matrix task"))
+      .closest<HTMLButtonElement>(".task-open-button");
+
+    expect(nextTaskOpenButton).not.toBeNull();
+    await user.click(nextTaskOpenButton!);
+    await user.click(within(await screen.findByRole("dialog", { name: "next matrix task" }))
+      .getByRole("button", { name: "닫기" }));
+    await waitFor(() => expect(nextTaskOpenButton).toHaveFocus());
+  });
+
+  it("returns focus to the originating task after replacing read with edit", async () => {
+    const user = userEvent.setup();
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([scheduleTaskSnapshot()]);
+      return vi.fn();
+    });
+
+    renderSchedulePage();
+
+    const taskOpenButton = (await screen.findByText("matrix drag task"))
+      .closest<HTMLButtonElement>(".task-open-button");
+
+    expect(taskOpenButton).not.toBeNull();
+    await user.click(taskOpenButton!);
+    await user.click(within(await screen.findByRole("dialog", { name: "matrix drag task" }))
+      .getByRole("button", { name: "수정" }));
+
+    const editDialog = await screen.findByRole("dialog", { name: "matrix drag task 수정" });
+    await user.click(within(editDialog).getByRole("button", { name: "닫기" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(taskOpenButton).toHaveFocus());
   });
 
   it("opens the Google Calendar popup with a clear synced state and privacy explanation", async () => {
