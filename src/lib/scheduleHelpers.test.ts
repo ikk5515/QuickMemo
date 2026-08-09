@@ -14,6 +14,7 @@ import {
   isSafeScheduleDateRange,
   tasksByDate,
   matrixQuadrantForTask,
+  normalizeScheduleDetails,
   normalizeScheduleTaskColor,
   scheduleDateRangeDays,
   scheduleTaskColorPalette,
@@ -43,12 +44,34 @@ function task(id: string, overrides: Partial<DecryptedScheduleTask> = {}): Decry
     createdBy: "user-a",
     updatedBy: "user-a",
     title: id,
-    details: { description: "", checklist: [] },
+    details: { category: "work", description: "", checklist: [] },
     ...overrides
   };
 }
 
 describe("schedule helpers", () => {
+  it("normalizes encrypted task details while preserving valid categories", () => {
+    expect(normalizeScheduleDetails({
+      category: "personal",
+      description: "개인 일정",
+      checklist: []
+    })).toEqual({
+      category: "personal",
+      description: "개인 일정",
+      checklist: []
+    });
+    expect(normalizeScheduleDetails({ description: "기존 일정", checklist: [] })).toEqual({
+      category: "work",
+      description: "기존 일정",
+      checklist: []
+    });
+    expect(normalizeScheduleDetails({ category: "invalid", checklist: [] })).toEqual({
+      category: "work",
+      description: "",
+      checklist: []
+    });
+  });
+
   it("groups active and completed tasks by todo date", () => {
     const groups = groupTasksByTodoDate(
       [

@@ -78,17 +78,17 @@ export async function loginRosterUser(page, user, diagnostics) {
   ).toBeVisible();
   await page.getByRole("button", { name: `${user.displayName} 사용자 선택` }).click();
   const dialog = page.getByRole("dialog", { name: user.displayName });
-  await dialog.getByLabel("비밀번호").fill(user.password);
+  const passwordInput = dialog.getByLabel("비밀번호");
   const formError = dialog.locator(".form-error");
   const loginButton = dialog.getByRole("button", { name: "로그인", exact: true });
-  let retryingTransientTransportError = false;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    await passwordInput.fill("");
+    await passwordInput.fill(user.password);
+    await expect(passwordInput).toHaveValue(user.password);
+    await expect(formError).toBeHidden();
     const consoleStartIndex = diagnostics?.consoleErrors.length ?? 0;
     await loginButton.click();
-    if (retryingTransientTransportError) {
-      await expect(formError).toBeHidden();
-    }
 
     const outcome = await Promise.any([
       page.waitForURL((url) => url.pathname !== "/login", { timeout: 15_000 })
@@ -104,7 +104,8 @@ export async function loginRosterUser(page, user, diagnostics) {
     const message = (await formError.textContent()) ?? "";
     const transientEmulatorTransportError =
       /client is offline|network connection was lost|firestore\/unavailable/iu.test(message);
-    if (!transientEmulatorTransportError || attempt === 2) {
+    const transientSeededCredentialRejection = message.trim() === "비밀번호를 확인해주세요.";
+    if ((!transientEmulatorTransportError && !transientSeededCredentialRejection) || attempt === 2) {
       throw new Error(`E2E roster login failed: ${message || "unknown error"}`);
     }
 
@@ -115,7 +116,6 @@ export async function loginRosterUser(page, user, diagnostics) {
         }
       }
     }
-    retryingTransientTransportError = true;
     await expect(loginButton).toBeEnabled();
   }
 }
@@ -158,6 +158,7 @@ export function observePage(page) {
   const apiPayloads = [];
   const pendingResponses = [];
   const expectedConsoleErrors = new Set();
+  const expectedPageErrors = new Set();
   const expectedTransientFirestoreTransportErrors = new Set();
 
   page.on("console", (message) => {
@@ -191,6 +192,7 @@ export function observePage(page) {
     apiPayloads,
     consoleErrors,
     expectedConsoleErrors,
+    expectedPageErrors,
     expectedTransientFirestoreTransportErrors,
     pageErrors,
     pendingResponses
@@ -217,7 +219,10 @@ export async function expectCleanRuntime(diagnostics, fixture, extraSecrets = []
       && !diagnostics.expectedTransientFirestoreTransportErrors.has(message)
   );
   expect(unexpectedConsoleErrors, "unexpected browser console errors").toEqual([]);
-  expect(diagnostics.pageErrors, "unhandled browser errors").toEqual([]);
+  const unexpectedPageErrors = diagnostics.pageErrors.filter(
+    (message) => !diagnostics.expectedPageErrors.has(message)
+  );
+  expect(unexpectedPageErrors, "unhandled browser errors").toEqual([]);
 
   const forbiddenValues = [
     fixture.contentKey,

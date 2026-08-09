@@ -39,6 +39,19 @@ describe("schedule UI styles", () => {
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-feedback:not\(\.error\) \{[\s\S]*background: var\(--color-success-subtle\);/);
   });
 
+  it("keeps category filters and text badges usable across themes and mobile widths", () => {
+    expect(stylesSource).toMatch(/\.schedule-category-filter \{[\s\S]*grid-template-columns: repeat\(3, minmax\(64px, 1fr\)\);/);
+    expect(stylesSource).toContain("--schedule-category-work: #2f5f9f");
+    expect(stylesSource).toContain("--schedule-category-personal: #a63f36");
+    expect(stylesSource).toMatch(/\.schedule-category-filter button\.active \{[\s\S]*color: var\(--color-primary-hover\);/);
+    expect(stylesSource).toMatch(/\.schedule-category-badge\.work \{[\s\S]*--category-color: var\(--schedule-category-work\);/);
+    expect(stylesSource).toMatch(/\.schedule-category-badge\.personal \{[\s\S]*--category-color: var\(--schedule-category-personal\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-category-badge \{[\s\S]*var\(--color-surface-elevated\)/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.schedule-category-filter \{[\s\S]*width: 100%;/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-task-time \{[\s\S]*display: none;/);
+    expect(stylesSource).toMatch(/@media \(max-width: 380px\) \{[\s\S]*\.calendar-task-pill \{[\s\S]*justify-content: flex-start;[\s\S]*\.calendar-task-title \{[\s\S]*flex: 1 1 8px;/);
+  });
+
   it("keeps the dark theme on neutral graphite tokens instead of navy surfaces", () => {
     const darkBlock = stylesSource.match(/:root\[data-theme="dark"\] \{[\s\S]*?\n\}/)?.[0] ?? "";
 

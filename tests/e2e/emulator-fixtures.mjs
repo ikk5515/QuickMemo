@@ -331,6 +331,8 @@ function scenarioOptions(scenario) {
     options.emailVerificationRequired = true;
   } else if (scenario === "one-time") {
     options.oneTimeEnabled = true;
+  } else if (scenario === "pdf-attachment") {
+    options.withAttachment = true;
   } else if (scenario === "standard-v2-one-time") {
     options.oneTimeEnabled = true;
     options.standardV2Url = true;
@@ -404,11 +406,44 @@ async function sourceDocuments(ownerUid, noteId) {
   ];
 }
 
-async function attachmentDocument(content, shareId, generation, expiresAt) {
+function minimalPdfAttachmentBytes() {
+  const pageContent = "BT /F1 18 Tf 36 80 Td (QuickMemo PDF worker canvas smoke) Tj ET\n";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${pageContent.length} >>\nstream\n${pageContent}endstream`
+  ];
+  const offsets = [0];
+  let source = "%PDF-1.4\n";
+
+  objects.forEach((object, index) => {
+    offsets.push(source.length);
+    source += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+
+  const xrefOffset = source.length;
+  source += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  offsets.slice(1).forEach((offset) => {
+    source += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  });
+  source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+
+  return encoder.encode(source);
+}
+
+async function attachmentDocument(content, shareId, generation, expiresAt, scenario) {
   const attachmentId = `att_${randomSuffix()}`;
-  const plainBytes = encoder.encode("E2E 독립 첨부파일 본문");
+  const pdfAttachment = scenario === "pdf-attachment";
+  const plainBytes = pdfAttachment
+    ? minimalPdfAttachmentBytes()
+    : encoder.encode("E2E 독립 첨부파일 본문");
   const encrypted = await encryptBytes(plainBytes, content.key);
-  const encryptedFileName = await encryptText("e2e-attachment", content.key);
+  const encryptedFileName = await encryptText(
+    pdfAttachment ? "e2e-worker-canvas" : "e2e-attachment",
+    content.key
+  );
   return {
     attachmentId,
     cipherDigest: createHash("sha256").update(encrypted.cipherBytes).digest("hex"),
@@ -418,10 +453,10 @@ async function attachmentDocument(content, shareId, generation, expiresAt) {
         version: 1,
         privacyVersion: 1,
         algorithm: "AES-GCM",
-        fileName: "shared-txt-attachment",
+        fileName: pdfAttachment ? "shared-pdf-attachment" : "shared-txt-attachment",
         encryptedFileName,
-        extension: "txt",
-        mimeType: "text/plain",
+        extension: pdfAttachment ? "pdf" : "txt",
+        mimeType: pdfAttachment ? "application/pdf" : "text/plain",
         originalSize: plainBytes.byteLength,
         encryptedSize: encrypted.cipherBytes.byteLength,
         encryptedData: toBase64(encrypted.cipherBytes),
@@ -492,7 +527,7 @@ export async function seedE2eScenario(scenario) {
       ? [emailDigest(defaultAllowedEmail)]
       : [];
     const attachment = options.withAttachment
-      ? await attachmentDocument(content, shareId, generation, expiresAt)
+      ? await attachmentDocument(content, shareId, generation, expiresAt, scenario)
       : null;
     attachmentId = attachment?.attachmentId ?? null;
     sourceAttachmentCipherDigest = attachment?.cipherDigest ?? null;

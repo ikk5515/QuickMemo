@@ -1128,6 +1128,7 @@ describeRules("firestore security rules", () => {
             waiting: "대기 업무"
           },
           scheduleDefaultView: "matrix",
+          scheduleDefaultCategory: "all",
           theme: "dark"
         })
       )
@@ -1138,6 +1139,9 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "calendar", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "completed", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultView: "recurring", updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultCategory: "work", updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultCategory: "personal", updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultCategory: "all", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "light", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "system", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
@@ -1202,10 +1206,13 @@ describeRules("firestore security rules", () => {
       updateDoc(doc(ownerDb, "userPreferences/user-a"), {
         defaultHome: "schedule",
         scheduleDefaultView: "matrix",
+        scheduleDefaultCategory: "personal",
         updatedAt: serverTimestamp()
       })
     );
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { defaultHome: "admin", updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultCategory: "shared", updatedAt: serverTimestamp() }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { scheduleDefaultCategory: null, updatedAt: serverTimestamp() }));
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "midnight", updatedAt: serverTimestamp() }));
     await assertFails(setDoc(doc(otherDb, "userPreferences/user-a"), userPreferences("user-a")));
   });
@@ -1650,6 +1657,11 @@ describeRules("firestore security rules", () => {
 
     await assertSucceeds(setDoc(doc(ownerDb, "scheduleTasks/task-a"), scheduleTask("user-a")));
     await assertSucceeds(getDoc(doc(ownerDb, "scheduleTasks/task-a")));
+    await assertSucceeds(updateDoc(doc(ownerDb, "scheduleTasks/task-a"), {
+      encryptedCategory: JSON.stringify(encryptedPayload),
+      updatedBy: "user-a",
+      updatedAt: serverTimestamp()
+    }));
     await assertSucceeds(
       getDocs(query(collection(ownerDb, "scheduleTasks"), where("ownerUid", "==", "user-a")))
     );

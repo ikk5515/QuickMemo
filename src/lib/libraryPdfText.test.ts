@@ -20,7 +20,6 @@ function createPdfFixture(
     cleanup: vi.fn(),
     getTextContent: vi.fn(async () => ({ items }))
   } satisfies LibraryPdfPageAdapter));
-  const destroyDocument = vi.fn(async () => undefined);
   const getPage = options.getPage ?? vi.fn(async (pageNumber: number) => {
     const page = pages[pageNumber - 1];
     if (!page) {
@@ -30,7 +29,6 @@ function createPdfFixture(
   });
   const documentAdapter: LibraryPdfDocumentAdapter = {
     numPages: options.numPages ?? pages.length,
-    destroy: destroyDocument,
     getPage
   };
   const destroyLoadingTask = vi.fn(async () => undefined);
@@ -47,7 +45,6 @@ function createPdfFixture(
   return {
     pages,
     getPage,
-    destroyDocument,
     destroyLoadingTask,
     getDocument,
     loadPdfJs,
@@ -56,7 +53,71 @@ function createPdfFixture(
   };
 }
 
+function createMinimalTextPdf(text: string) {
+  const content = `BT /F1 18 Tf 36 80 Td (${text}) Tj ET\n`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${content.length} >>\nstream\n${content}endstream`
+  ];
+  const offsets = [0];
+  let source = "%PDF-1.4\n";
+
+  objects.forEach((object, index) => {
+    offsets.push(source.length);
+    source += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+
+  const xrefOffset = source.length;
+  source += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  offsets.slice(1).forEach((offset) => {
+    source += `${String(offset).padStart(10, "0")} 00000 n \n`;
+  });
+  source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+
+  return new TextEncoder().encode(source);
+}
+
 describe("extractLibraryPdfText", () => {
+  it("extracts text through the installed PDF.js runtime from a real PDF", async () => {
+    const result = await extractLibraryPdfText(createMinimalTextPdf("QuickMemo PDF smoke"), {
+      loadPdfJs: async () => {
+        const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+
+        return {
+          getDocument: (options) => {
+            const loadingTask = pdfjs.getDocument(options);
+
+            return {
+              destroy: () => loadingTask.destroy(),
+              promise: loadingTask.promise.then((document) => ({
+                numPages: document.numPages,
+                getPage: async (pageNumber) => {
+                  const page = await document.getPage(pageNumber);
+
+                  return {
+                    cleanup: () => {
+                      page.cleanup();
+                    },
+                    getTextContent: (textOptions) => page.getTextContent(textOptions)
+                  };
+                }
+              }))
+            };
+          }
+        };
+      }
+    });
+
+    expect(result).toMatchObject({
+      pageCount: 1,
+      processedPageCount: 1,
+      text: "QuickMemo PDF smoke"
+    });
+  });
+
   it("extracts ordered page text with hardened PDF.js options and releases every resource", async () => {
     const fixture = createPdfFixture([
       [{ str: "첫 페이지", hasEOL: true }, { str: "둘째 줄" }],
@@ -93,8 +154,7 @@ describe("extractLibraryPdfText", () => {
     expect(passedBytes).not.toBe(source);
     expect(fixture.pages[0]?.cleanup).toHaveBeenCalledTimes(1);
     expect(fixture.pages[1]?.cleanup).toHaveBeenCalledTimes(1);
-    expect(fixture.destroyDocument).toHaveBeenCalledTimes(1);
-    expect(fixture.destroyLoadingTask).not.toHaveBeenCalled();
+    expect(fixture.destroyLoadingTask).toHaveBeenCalledTimes(1);
   });
 
   it("marks pages without meaningful embedded text as likely scanned", async () => {
@@ -185,7 +245,7 @@ describe("extractLibraryPdfText", () => {
 
     await expect(extraction).rejects.toMatchObject({ name: "AbortError" });
     expect(page.cleanup).toHaveBeenCalledTimes(1);
-    expect(fixture.destroyDocument).toHaveBeenCalledTimes(1);
+    expect(fixture.destroyLoadingTask).toHaveBeenCalledTimes(1);
   });
 
   it("times out a stalled text layer and destroys the PDF resources", async () => {
@@ -203,7 +263,7 @@ describe("extractLibraryPdfText", () => {
       timeoutMs: 100
     })).rejects.toThrow("시간이 초과");
     expect(page.cleanup).toHaveBeenCalledTimes(1);
-    expect(fixture.destroyDocument).toHaveBeenCalledTimes(1);
+    expect(fixture.destroyLoadingTask).toHaveBeenCalledTimes(1);
   });
 
   it("cleans up after a PDF text parsing failure", async () => {
@@ -222,7 +282,7 @@ describe("extractLibraryPdfText", () => {
       extractLibraryPdfText(new Uint8Array([1]), { loadPdfJs: fixture.loadPdfJs })
     ).rejects.toThrow("broken text stream");
     expect(page.cleanup).toHaveBeenCalledTimes(1);
-    expect(fixture.destroyDocument).toHaveBeenCalledTimes(1);
+    expect(fixture.destroyLoadingTask).toHaveBeenCalledTimes(1);
   });
 
   it("destroys the loading task when document loading fails", async () => {
@@ -233,6 +293,5 @@ describe("extractLibraryPdfText", () => {
       extractLibraryPdfText(new Uint8Array([1]), { loadPdfJs: fixture.loadPdfJs })
     ).rejects.toThrow("invalid pdf");
     expect(fixture.destroyLoadingTask).toHaveBeenCalledTimes(1);
-    expect(fixture.destroyDocument).not.toHaveBeenCalled();
   });
 });
