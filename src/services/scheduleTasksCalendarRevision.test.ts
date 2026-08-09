@@ -65,6 +65,7 @@ describe("schedule task Google Calendar revisions", () => {
     await createScheduleTask({
       ownerUid: "user-a",
       title: encrypted,
+      encryptedCategory: JSON.stringify(encrypted),
       details: encrypted,
       wrappedKey: wrapped,
       dueDate: "2026-07-22",
@@ -77,6 +78,7 @@ describe("schedule task Google Calendar revisions", () => {
       { parts: [firestoreMocks.db, "scheduleTasks"] },
       expect.objectContaining({
         calendarUpdatedAt: { __type: "serverTimestamp" },
+        encryptedCategory: JSON.stringify(encrypted),
         updatedAt: { __type: "serverTimestamp" }
       })
     );

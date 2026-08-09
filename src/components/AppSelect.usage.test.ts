@@ -3,11 +3,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const selectCallSites = [
-  ["src/components/AppShell.tsx", 2],
+  ["src/components/AppShell.tsx", 3],
   ["src/pages/AdminPage.tsx", 3],
   ["src/pages/LibraryPage.tsx", 6],
   ["src/pages/NotesPage.tsx", 3],
-  ["src/pages/SchedulePage.tsx", 6]
+  ["src/pages/SchedulePage.tsx", 8]
 ] as const;
 
 function source(filePath: string) {

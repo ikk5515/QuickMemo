@@ -1,5 +1,6 @@
 import type { DecryptedScheduleTask, MatrixLabels, ScheduleTaskDetails } from "../types";
 import { matrixLabelForSectionKey } from "./matrixLabels";
+import { defaultScheduleTaskCategory, normalizeScheduleTaskCategory } from "./scheduleCategory";
 import { normalizeSchedulePriorityFlags, type SchedulePrioritySource } from "./schedulePriority";
 
 export type TodoGroupKey = "today" | "tomorrow" | "next7" | "later" | "noDate" | "completed";
@@ -75,6 +76,7 @@ export const scheduleTaskColorPalette = [
 ];
 
 export const emptyScheduleDetails: ScheduleTaskDetails = {
+  category: defaultScheduleTaskCategory,
   description: "",
   checklist: []
 };
@@ -906,7 +908,7 @@ export function normalizeScheduleDetails(value: unknown) {
     return emptyScheduleDetails;
   }
 
-  const details = value as { description?: unknown; checklist?: unknown };
+  const details = value as { category?: unknown; description?: unknown; checklist?: unknown };
   const checklist = Array.isArray(details.checklist)
     ? details.checklist
         .filter((item): item is { id?: unknown; text?: unknown; checked?: unknown } => Boolean(item) && typeof item === "object")
@@ -919,6 +921,7 @@ export function normalizeScheduleDetails(value: unknown) {
     : [];
 
   return {
+    category: normalizeScheduleTaskCategory(details.category),
     description: typeof details.description === "string" ? details.description : "",
     checklist
   };

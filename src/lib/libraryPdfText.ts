@@ -33,7 +33,6 @@ export interface LibraryPdfPageAdapter {
 
 export interface LibraryPdfDocumentAdapter {
   numPages: number;
-  destroy: () => void | Promise<void>;
   getPage: (pageNumber: number) => Promise<LibraryPdfPageAdapter>;
 }
 
@@ -358,10 +357,7 @@ export async function extractLibraryPdfText(
   } finally {
     clearTimeout(timeoutId);
     options.signal?.removeEventListener("abort", externalAbortHandler);
-    if (pdfDocument) {
-      const documentToDestroy = pdfDocument;
-      await ignoreCleanupFailure(() => documentToDestroy.destroy());
-    } else if (loadingTask) {
+    if (loadingTask) {
       const taskToDestroy = loadingTask;
       await ignoreCleanupFailure(() => taskToDestroy.destroy());
     }

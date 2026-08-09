@@ -7,6 +7,7 @@ describe("schedule task encryption", () => {
   it("encrypts and decrypts schedule title and details", async () => {
     const key = await generateNoteKey();
     const details: ScheduleTaskDetails = {
+      category: "personal",
       description: "오후 회의 준비",
       checklist: [{ id: "item-1", text: "자료 확인", checked: false }]
     };

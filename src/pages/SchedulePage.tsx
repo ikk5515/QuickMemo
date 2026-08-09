@@ -51,6 +51,7 @@ import {
   Search,
   Sparkles,
   Trash2,
+  UserRound,
   Zap,
   X
 } from "lucide-react";
@@ -74,6 +75,14 @@ import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey }
 import { getKoreanHolidayMapForDates, type KoreanHoliday } from "../lib/koreanHolidays";
 import { defaultMatrixLabels } from "../lib/matrixLabels";
 import { mapWithConcurrency } from "../lib/mapWithConcurrency";
+import {
+  defaultScheduleCategoryFilter,
+  defaultScheduleTaskCategory,
+  scheduleCategoryEncryptionValue,
+  scheduleCategoryFromEncryptionValue,
+  scheduleCategoryLabel,
+  scheduleTaskMatchesCategory
+} from "../lib/scheduleCategory";
 import {
   normalizePrimaryScheduleView,
   scheduleViewFromSearch,
@@ -202,12 +211,15 @@ import {
 import type {
   DecryptedRecurringHabit,
   DecryptedScheduleTask,
+  EncryptedPayload,
   MatrixLabels,
   RecurringHabitDetails,
   RecurringHabitIcon,
   RecurringHabitSlot,
   ScheduleChecklistItem,
+  ScheduleCategoryFilter,
   ScheduleTaskDetails,
+  ScheduleTaskCategory,
   ScheduleView
 } from "../types";
 
@@ -216,6 +228,12 @@ const scheduleTabs: Array<{ view: PrimaryScheduleView; label: string; shortLabel
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
   { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 },
   { view: "recurring", label: "반복 업무", shortLabel: "반복업무", Icon: Repeat2 }
+];
+
+const scheduleCategoryFilters: Array<{ value: ScheduleCategoryFilter; label: string }> = [
+  { value: "all", label: "전체" },
+  { value: "work", label: "업무" },
+  { value: "personal", label: "개인" }
 ];
 
 const scheduleViewTitles: Record<ScheduleView, string> = {
@@ -229,6 +247,11 @@ const scheduleViewTitles: Record<ScheduleView, string> = {
 const taskPageSize = 5;
 const completedPageSize = 10;
 const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야 하고 같은 연도 안에서 최대 ${maxScheduleTaskRangeDays}일까지 선택할 수 있습니다.`;
+
+function categoryForNewTask(filter: ScheduleCategoryFilter): ScheduleTaskCategory {
+  return filter === "personal" ? "personal" : defaultScheduleTaskCategory;
+}
+
 const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; color: string; label: string }> = {
   work: { Icon: BriefcaseBusiness, color: "#2563eb", label: recurringHabitIconLabels.work },
   study: { Icon: GraduationCap, color: "#7c3aed", label: recurringHabitIconLabels.study },
@@ -242,6 +265,7 @@ const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; col
 
 type DecryptedTaskCache = Map<string, {
   details: ScheduleTaskDetails;
+  encryptedCategory: ScheduleTaskSnapshot["encryptedCategory"];
   encryptedDetails: ScheduleTaskSnapshot["encryptedDetails"];
   encryptedTitle: ScheduleTaskSnapshot["encryptedTitle"];
   title: string;
@@ -265,6 +289,58 @@ function sameEncryptedPayload(
     && left.algorithm === right.algorithm
     && left.iv === right.iv
     && left.cipherText === right.cipherText;
+}
+
+function parseEncryptedScheduleCategory(value: string): EncryptedPayload {
+  if (value.length === 0 || value.length > 1024) {
+    throw new Error("schedule-task/invalid-encrypted-category");
+  }
+
+  const parsed = JSON.parse(value) as unknown;
+  const allowedKeys = new Set(["version", "algorithm", "cipherText", "iv"]);
+
+  if (
+    !parsed
+    || typeof parsed !== "object"
+    || Object.keys(parsed).length !== allowedKeys.size
+    || Object.keys(parsed).some((key) => !allowedKeys.has(key))
+    || (parsed as { version?: unknown }).version !== 1
+    || (parsed as { algorithm?: unknown }).algorithm !== "AES-GCM"
+    || typeof (parsed as { cipherText?: unknown }).cipherText !== "string"
+    || typeof (parsed as { iv?: unknown }).iv !== "string"
+    || (parsed as { cipherText: string }).cipherText.length === 0
+    || (parsed as { cipherText: string }).cipherText.length > 512
+    || (parsed as { iv: string }).iv.length === 0
+    || (parsed as { iv: string }).iv.length > 256
+  ) {
+    throw new Error("schedule-task/invalid-encrypted-category");
+  }
+
+  return parsed as EncryptedPayload;
+}
+
+async function decryptScheduleTaskDetails(
+  task: Pick<ScheduleTaskSnapshot, "encryptedCategory" | "encryptedDetails">,
+  taskKey: CryptoKey
+) {
+  const [detailsJson, encryptedCategoryValue] = await Promise.all([
+    decryptText(task.encryptedDetails, taskKey),
+    task.encryptedCategory
+      ? decryptText(parseEncryptedScheduleCategory(task.encryptedCategory), taskKey)
+      : Promise.resolve(null)
+  ]);
+  const details = normalizeScheduleDetails(JSON.parse(detailsJson) as unknown);
+
+  return task.encryptedCategory
+    ? { ...details, category: scheduleCategoryFromEncryptionValue(encryptedCategoryValue) }
+    : details;
+}
+
+function scheduleTaskDetailsEncryptionValue(details: ScheduleTaskDetails) {
+  return JSON.stringify({
+    description: details.description,
+    checklist: details.checklist
+  });
 }
 
 function sameWrappedKey(
@@ -340,6 +416,7 @@ type TaskDetailsUpdater = (details: ScheduleTaskDetails) => ScheduleTaskDetails;
 type RecurringHabitDetailsUpdater = (details: RecurringHabitDetails) => RecurringHabitDetails;
 
 interface QuickDefaults {
+  category?: ScheduleTaskCategory;
   startDate?: string | null;
   endDate?: string | null;
   startTimeMinutes?: number | null;
@@ -350,6 +427,7 @@ interface QuickDefaults {
 }
 
 interface TaskDraft {
+  category: ScheduleTaskCategory;
   title: string;
   description: string;
   checklist: ScheduleChecklistItem[];
@@ -366,6 +444,7 @@ interface TaskDraft {
 }
 
 interface CreateTaskDraft {
+  category: ScheduleTaskCategory;
   title: string;
   description: string;
   checklist: ScheduleChecklistItem[];
@@ -1028,6 +1107,14 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() =>
     profile ? getCachedUserPreferences(profile.uid)?.matrixLabels ?? defaultMatrixLabels : defaultMatrixLabels
   );
+  const [scheduleCategoryFilter, setScheduleCategoryFilter] = useState<ScheduleCategoryFilter>(() =>
+    profile
+      ? getCachedUserPreferences(profile.uid)?.scheduleDefaultCategory ?? defaultScheduleCategoryFilter
+      : defaultScheduleCategoryFilter
+  );
+  const scheduleDefaultCategoryRef = useRef<ScheduleCategoryFilter | null>(null);
+  const scheduleCategoryPreferenceResolvedRef = useRef(false);
+  const scheduleCategoryTouchedBeforePreferenceRef = useRef(false);
   const [tasks, setTasks] = useState<ScheduleTaskSnapshot[]>([]);
   const [scheduleTasksLoaded, setScheduleTasksLoaded] = useState(false);
   const [decryptedTasks, setDecryptedTasks] = useState<DecryptedScheduleTask[]>([]);
@@ -1405,17 +1492,44 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   useEffect(() => {
     if (!profile || isRecurringPage) {
       setMatrixLabels(defaultMatrixLabels);
+      setScheduleCategoryFilter(defaultScheduleCategoryFilter);
+      scheduleDefaultCategoryRef.current = null;
+      scheduleCategoryPreferenceResolvedRef.current = false;
+      scheduleCategoryTouchedBeforePreferenceRef.current = false;
       return undefined;
     }
 
     const cachedPreferences = getCachedUserPreferences(profile.uid);
+    const cachedDefaultCategory = cachedPreferences?.scheduleDefaultCategory ?? defaultScheduleCategoryFilter;
 
     setMatrixLabels(cachedPreferences?.matrixLabels ?? defaultMatrixLabels);
+    setScheduleCategoryFilter(cachedDefaultCategory);
+    scheduleDefaultCategoryRef.current = cachedDefaultCategory;
+    scheduleCategoryPreferenceResolvedRef.current = false;
+    scheduleCategoryTouchedBeforePreferenceRef.current = false;
 
     return subscribeUserPreferences(
       profile.uid,
-      (preferences) => setMatrixLabels(preferences.matrixLabels),
-      () => setMatrixLabels(cachedPreferences?.matrixLabels ?? defaultMatrixLabels)
+      (preferences) => {
+        setMatrixLabels(preferences.matrixLabels);
+        const defaultCategoryChanged = scheduleDefaultCategoryRef.current !== preferences.scheduleDefaultCategory;
+        const userSelectedBeforeInitialPreference = scheduleCategoryTouchedBeforePreferenceRef.current;
+
+        scheduleDefaultCategoryRef.current = preferences.scheduleDefaultCategory;
+        if (
+          defaultCategoryChanged
+          && (scheduleCategoryPreferenceResolvedRef.current || !userSelectedBeforeInitialPreference)
+        ) {
+          setScheduleCategoryFilter(preferences.scheduleDefaultCategory);
+        }
+        scheduleCategoryPreferenceResolvedRef.current = true;
+        scheduleCategoryTouchedBeforePreferenceRef.current = false;
+      },
+      () => {
+        setMatrixLabels(cachedPreferences?.matrixLabels ?? defaultMatrixLabels);
+        scheduleCategoryPreferenceResolvedRef.current = true;
+        scheduleCategoryTouchedBeforePreferenceRef.current = false;
+      }
     );
   }, [isRecurringPage, profile]);
 
@@ -1573,11 +1687,13 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
           if (
             cached
             && sameEncryptedPayload(cached.encryptedTitle, task.encryptedTitle)
+            && cached.encryptedCategory === task.encryptedCategory
             && sameEncryptedPayload(cached.encryptedDetails, task.encryptedDetails)
             && sameWrappedKey(cached.wrappedKey, wrappedKey)
           ) {
             decryptedTaskCacheRef.current.set(task.id, {
               ...cached,
+              encryptedCategory: task.encryptedCategory,
               encryptedDetails: task.encryptedDetails,
               encryptedTitle: task.encryptedTitle,
               wrappedKey
@@ -1592,16 +1708,15 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
 
           try {
             const taskKey = await unwrapNoteKey(wrappedKey, safePrivateKey);
-            const [title, detailsJson] = await Promise.all([
+            const [title, details] = await Promise.all([
               decryptText(task.encryptedTitle, taskKey),
-              decryptText(task.encryptedDetails, taskKey)
+              decryptScheduleTaskDetails(task, taskKey)
             ]);
-            const parsedDetails = JSON.parse(detailsJson) as unknown;
 
             const decryptedTask = {
               ...task,
               title,
-              details: normalizeScheduleDetails(parsedDetails)
+              details
             } satisfies DecryptedScheduleTask;
 
             if (!ownsCurrentCache()) {
@@ -1610,6 +1725,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
 
             decryptedTaskCacheRef.current.set(task.id, {
               details: decryptedTask.details,
+              encryptedCategory: task.encryptedCategory,
               encryptedDetails: task.encryptedDetails,
               encryptedTitle: task.encryptedTitle,
               title: decryptedTask.title,
@@ -1750,13 +1866,20 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   }, [decryptedRecurringHabits]);
 
   const sortedTasks = useMemo(() => [...decryptedTasks].sort(compareTaskSchedule), [decryptedTasks]);
+  const categoryViewActive = activeView === "todo" || activeView === "calendar" || activeView === "matrix";
+  const categoryFilteredTasks = useMemo(
+    () => categoryViewActive
+      ? sortedTasks.filter((task) => scheduleTaskMatchesCategory(task, scheduleCategoryFilter))
+      : sortedTasks,
+    [categoryViewActive, scheduleCategoryFilter, sortedTasks]
+  );
   const eligibleGoogleCalendarTasks = useMemo(
     () => sortedTasks.filter(isEligibleExistingGoogleCalendarTask),
     [sortedTasks]
   );
   const displayedTasks = useMemo(
-    () => sortedTasks.filter((task) => scheduleTaskMatchesQuery(task, scheduleQuery)),
-    [scheduleQuery, sortedTasks]
+    () => categoryFilteredTasks.filter((task) => scheduleTaskMatchesQuery(task, scheduleQuery)),
+    [categoryFilteredTasks, scheduleQuery]
   );
   const displayedRecurringHabits = useMemo(
     () => decryptedRecurringHabits.filter(
@@ -1771,8 +1894,8 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const scheduleStats = useMemo(
     () => isRecurringPage
       ? { active: 0, completed: 0, overdue: 0, recurring: 0, today: 0 }
-      : scheduleDashboardStats(sortedTasks, decryptedRecurringHabits, today),
-    [decryptedRecurringHabits, isRecurringPage, sortedTasks, today]
+      : scheduleDashboardStats(categoryFilteredTasks, decryptedRecurringHabits, today),
+    [categoryFilteredTasks, decryptedRecurringHabits, isRecurringPage, today]
   );
   const viewTask = useMemo(
     () => sortedTasks.find((task) => task.id === viewTaskId) ?? null,
@@ -1815,8 +1938,8 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     [activeView, displayedTasks, matrixLabels, today]
   );
   const activeMatrixTaskCount = useMemo(
-    () => activeView === "matrix" ? sortedTasks.filter((task) => task.status !== "completed").length : 0,
-    [activeView, sortedTasks]
+    () => activeView === "matrix" ? categoryFilteredTasks.filter((task) => task.status !== "completed").length : 0,
+    [activeView, categoryFilteredTasks]
   );
   const visibleMatrixTaskCount = useMemo(
     () => activeView === "matrix" ? displayedTasks.filter((task) => task.status !== "completed").length : 0,
@@ -1854,13 +1977,13 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       return { overdueTasks: [], recurringHabits: [], todayTasks: [] };
     }
 
-    const activeTasks = sortedTasks.filter((task) => task.status !== "completed");
+    const activeTasks = categoryFilteredTasks.filter((task) => task.status !== "completed");
     const overdueTasks = activeTasks.filter((task) => isTaskScheduleOverdue(task, today));
     const todayTasks = activeTasks.filter((task) => taskCoversDate(task, today) && !isTaskScheduleOverdue(task, today));
     const recurringHabitsForToday = decryptedRecurringHabits.filter((habit) => habit.status === "active");
 
     return { overdueTasks, recurringHabits: recurringHabitsForToday, todayTasks };
-  }, [decryptedRecurringHabits, isRecurringPage, sortedTasks, today]);
+  }, [categoryFilteredTasks, decryptedRecurringHabits, isRecurringPage, today]);
 
   useEffect(() => {
     const habitIsUnavailable = (habitId: string) => {
@@ -3182,7 +3305,8 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   async function encryptTaskFields(title: string, details: ScheduleTaskDetails, taskKey: CryptoKey) {
     return Promise.all([
       encryptText(title.trim() || "제목 없음", taskKey),
-      encryptText(JSON.stringify(details), taskKey)
+      encryptText(scheduleTaskDetailsEncryptionValue(details), taskKey),
+      encryptText(scheduleCategoryEncryptionValue(details.category), taskKey)
     ]);
   }
 
@@ -3206,17 +3330,19 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       const endTimeMinutes = draft.timeMode === "range" ? timeInputToMinutes(draft.endTime) : null;
       const taskKey = await generateNoteKey();
       const details: ScheduleTaskDetails = {
+        category: draft.category,
         description: draft.description,
         checklist: draft.checklist
           .map((item) => ({ ...item, text: item.text.trim() }))
           .filter((item) => item.text)
       };
-      const [encryptedTitle, encryptedDetails] = await encryptTaskFields(trimmedTitle, details, taskKey);
+      const [encryptedTitle, encryptedDetails, encryptedCategory] = await encryptTaskFields(trimmedTitle, details, taskKey);
       const wrappedKey = await wrapNoteKey(taskKey, unlockedProfile.publicKeyJwk);
 
       const createdTask = await createScheduleTask({
         ownerUid: unlockedProfile.uid,
         title: encryptedTitle,
+        encryptedCategory: JSON.stringify(encryptedCategory),
         details: encryptedDetails,
         wrappedKey,
         dueDate: startDate,
@@ -3281,14 +3407,16 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       const normalizedTitle = draft.title.trim() || "제목 없음";
       const titleChanged = normalizedTitle !== task.title;
       const details: ScheduleTaskDetails = {
+        category: draft.category,
         description: draft.description,
         checklist: draft.checklist
           .map((item) => ({ ...item, text: item.text.trim() }))
           .filter((item) => item.text)
       };
-      const [encryptedTitle, encryptedDetails] = await Promise.all([
+      const [encryptedTitle, encryptedDetails, encryptedCategory] = await Promise.all([
         titleChanged ? encryptText(normalizedTitle, taskKey) : Promise.resolve(task.encryptedTitle),
-        encryptText(JSON.stringify(details), taskKey)
+        encryptText(scheduleTaskDetailsEncryptionValue(details), taskKey),
+        encryptText(scheduleCategoryEncryptionValue(details.category), taskKey)
       ]);
       const nextCompleted = draft.status === "completed";
       const startDate = draft.startDate || null;
@@ -3308,6 +3436,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
 
       await updateScheduleTask(task.id, unlockedProfile.uid, {
         ...(titleChanged ? { encryptedTitle } : {}),
+        encryptedCategory: JSON.stringify(encryptedCategory),
         encryptedDetails,
         dueDate: startDate,
         dueTimeMinutes: startTimeMinutes,
@@ -3342,29 +3471,25 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     }
   }
 
-  function currentTaskDetails(task: DecryptedScheduleTask) {
-    return decryptedTasksRef.current.find((currentTask) => currentTask.id === task.id)?.details ?? task.details ?? emptyScheduleDetails;
-  }
+  async function latestTaskDetails(task: DecryptedScheduleTask, taskKey: CryptoKey) {
+    const latestTask = await getScheduleTask(task.id);
 
-  async function latestTaskDetails(task: DecryptedScheduleTask, taskKey: CryptoKey, fallback: ScheduleTaskDetails) {
-    try {
-      const latestTask = await getScheduleTask(task.id);
-
-      if (!latestTask || latestTask.ownerUid !== unlockedProfile.uid) {
-        return fallback;
-      }
-
-      const latestDetailsJson = await decryptText(latestTask.encryptedDetails, taskKey);
-      return normalizeScheduleDetails(JSON.parse(latestDetailsJson) as unknown);
-    } catch {
-      return fallback;
+    if (!latestTask || latestTask.ownerUid !== unlockedProfile.uid || !latestTask.updatedAt) {
+      throw new Error("schedule-task/latest-details-unavailable");
     }
+
+    return {
+      details: await decryptScheduleTaskDetails(latestTask, taskKey),
+      needsCategoryMigration: !latestTask.encryptedCategory,
+      updatedAt: latestTask.updatedAt
+    };
   }
 
   function normalizeMutableTaskDetails(details: ScheduleTaskDetails): ScheduleTaskDetails {
     const normalizedDetails = normalizeScheduleDetails(details);
 
     return {
+      category: normalizedDetails.category,
       description: normalizedDetails.description,
       checklist: normalizedDetails.checklist
         .map((item) => ({ ...item, text: item.text.trim() }))
@@ -3380,18 +3505,48 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       return false;
     }
 
-    const queuedUpdate = taskDetailsUpdateQueueRef.current[task.id];
-    const previousUpdate = queuedUpdate ?? Promise.resolve(currentTaskDetails(task));
+    const previousUpdate = taskDetailsUpdateQueueRef.current[task.id] ?? Promise.resolve(task.details);
     const nextUpdate = previousUpdate
-      .catch(() => currentTaskDetails(task))
-      .then(async (queuedDetails) => {
+      .catch(() => task.details)
+      .then(async () => {
         const taskKey = await unwrapNoteKey(wrappedKey, unlockedPrivateKey);
-        const baseDetails = queuedUpdate ? queuedDetails : await latestTaskDetails(task, taskKey, queuedDetails);
-        const nextDetails = normalizeMutableTaskDetails(updateDetails(baseDetails));
-        const encryptedDetails = await encryptText(JSON.stringify(nextDetails), taskKey);
 
-        await updateScheduleTask(task.id, unlockedProfile.uid, { encryptedDetails });
-        return nextDetails;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const latest = await latestTaskDetails(task, taskKey);
+          const nextDetails = normalizeMutableTaskDetails(updateDetails(latest.details));
+          const [encryptedDetails, encryptedCategory] = await Promise.all([
+            encryptText(scheduleTaskDetailsEncryptionValue(nextDetails), taskKey),
+            latest.needsCategoryMigration
+              ? encryptText(scheduleCategoryEncryptionValue(nextDetails.category), taskKey)
+              : Promise.resolve(null)
+          ]);
+
+          try {
+            await updateScheduleTask(
+              task.id,
+              unlockedProfile.uid,
+              {
+                ...(encryptedCategory ? { encryptedCategory: JSON.stringify(encryptedCategory) } : {}),
+                encryptedDetails
+              },
+              { expectedUpdatedAt: latest.updatedAt, googleCalendarChanged: false }
+            );
+            return nextDetails;
+          } catch (caught) {
+            if (
+              attempt === 0
+              && typeof caught === "object"
+              && caught !== null
+              && "code" in caught
+              && caught.code === "schedule-task/revision-conflict"
+            ) {
+              continue;
+            }
+            throw caught;
+          }
+        }
+
+        throw new Error("schedule-task/details-update-conflict");
       });
 
     taskDetailsUpdateQueueRef.current[task.id] = nextUpdate;
@@ -3414,6 +3569,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     await updateTaskDetails(
       task,
       (details) => ({
+        category: details.category,
         description: details.description,
         checklist: details.checklist.map((item) =>
           item.id === itemId ? { ...item, checked: !item.checked } : item
@@ -3445,6 +3601,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     try {
       const details = task.details ?? emptyScheduleDetails;
       const copiedDetails: ScheduleTaskDetails = {
+        category: details.category,
         description: details.description,
         checklist: details.checklist.map((item) => ({
           id: crypto.randomUUID(),
@@ -3456,12 +3613,13 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       const endDate = taskEndDate(task);
       const startTimeMinutes = taskStartTime(task);
       const taskKey = await generateNoteKey();
-      const [encryptedTitle, encryptedDetails] = await encryptTaskFields(task.title, copiedDetails, taskKey);
+      const [encryptedTitle, encryptedDetails, encryptedCategory] = await encryptTaskFields(task.title, copiedDetails, taskKey);
       const wrappedKey = await wrapNoteKey(taskKey, unlockedProfile.publicKeyJwk);
 
       const copiedTask = await createScheduleTask({
         ownerUid: unlockedProfile.uid,
         title: encryptedTitle,
+        encryptedCategory: JSON.stringify(encryptedCategory),
         details: encryptedDetails,
         wrappedKey,
         dueDate: startDate,
@@ -3555,7 +3713,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   }
 
   async function reorderTasksWithinDate(activeTaskId: string, overTaskId: string) {
-    const updates = buildScheduleTaskOrderUpdates(sortedTasks, activeTaskId, overTaskId);
+    const updates = buildScheduleTaskOrderUpdates(categoryFilteredTasks, activeTaskId, overTaskId);
 
     if (updates == null) {
       setError("동일한 날짜 내에서만 순서를 변경할 수 있습니다.");
@@ -3563,6 +3721,11 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     }
 
     if (!updates.length) {
+      return;
+    }
+
+    if (updates.length > 450) {
+      setError("한 날짜의 일정이 너무 많아 순서를 한 번에 저장할 수 없습니다. 분류를 선택한 뒤 다시 시도해주세요.");
       return;
     }
 
@@ -4358,7 +4521,14 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
 
     if (activeView === "matrix") {
       setCreateDialog({
-        defaults: { startDate: currentToday, endDate: currentToday, color: nextScheduleTaskColor(decryptedTasks), isImportant: true, isUrgent: true },
+        defaults: {
+          category: categoryForNewTask(scheduleCategoryFilter),
+          startDate: currentToday,
+          endDate: currentToday,
+          color: nextScheduleTaskColor(decryptedTasks),
+          isImportant: true,
+          isUrgent: true
+        },
         title: "매트릭스 일정 추가"
       });
       return;
@@ -4370,7 +4540,12 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     }
 
     setCreateDialog({
-      defaults: { startDate: currentToday, endDate: currentToday, color: nextScheduleTaskColor(decryptedTasks) },
+      defaults: {
+        category: categoryForNewTask(scheduleCategoryFilter),
+        startDate: currentToday,
+        endDate: currentToday,
+        color: nextScheduleTaskColor(decryptedTasks)
+      },
       title: "새 일정 추가"
     });
   }
@@ -4386,10 +4561,22 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     navigate(scheduleViewHref(view));
   }
 
+  function selectScheduleCategoryFilter(value: ScheduleCategoryFilter) {
+    if (!scheduleCategoryPreferenceResolvedRef.current) {
+      scheduleCategoryTouchedBeforePreferenceRef.current = true;
+    }
+    setScheduleCategoryFilter(value);
+  }
+
   function openCalendarCreateDialog(dateString: string) {
     setSelectedCalendarDate(dateString);
     setCreateDialog({
-      defaults: { startDate: dateString, endDate: dateString, color: nextScheduleTaskColor(decryptedTasks) },
+      defaults: {
+        category: categoryForNewTask(scheduleCategoryFilter),
+        startDate: dateString,
+        endDate: dateString,
+        color: nextScheduleTaskColor(decryptedTasks)
+      },
       title: `${formatDateLabel(dateString)} 일정 추가`
     });
   }
@@ -4401,6 +4588,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     setCreateDialog({
       allowPriority: false,
       defaults: {
+        category: categoryForNewTask(scheduleCategoryFilter),
         startDate: defaultDate,
         endDate: defaultDate,
         color: nextScheduleTaskColor(decryptedTasks),
@@ -4571,6 +4759,27 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
           </div>
         </header>
 
+        {categoryViewActive && (
+          <div className="schedule-category-toolbar">
+            <span className="schedule-category-toolbar-label">분류</span>
+            <div className="schedule-category-filter" role="group" aria-label="일정 분류">
+              {scheduleCategoryFilters.map(({ label, value }) => (
+                <button
+                  aria-label={`${label} 일정 보기`}
+                  aria-pressed={scheduleCategoryFilter === value}
+                  className={scheduleCategoryFilter === value ? "active" : ""}
+                  key={value}
+                  onClick={() => selectScheduleCategoryFilter(value)}
+                  type="button"
+                >
+                  {scheduleCategoryFilter === value && <Check aria-hidden="true" size={13} />}
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {!isRecurringPage && todayPanelOpen && (
           <TodayWorkPanel
             checkIns={recurringCheckIns}
@@ -4582,7 +4791,12 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             onAddTask={() => {
               setTodayPanelOpen(false);
               setCreateDialog({
-                defaults: { startDate: today, endDate: today, color: nextScheduleTaskColor(decryptedTasks) },
+                defaults: {
+                  category: categoryForNewTask(scheduleCategoryFilter),
+                  startDate: today,
+                  endDate: today,
+                  color: nextScheduleTaskColor(decryptedTasks)
+                },
                 title: "오늘 일정 추가"
               });
             }}
@@ -4934,6 +5148,20 @@ function ScheduleCreateForm({
             placeholder="일정 제목"
             value={draft.title}
           />
+        </label>
+        <label>
+          <span>분류</span>
+          <AppSelect
+            aria-label="일정 분류"
+            onChange={(event) => setDraft((current) => ({
+              ...current,
+              category: event.target.value as ScheduleTaskCategory
+            }))}
+            value={draft.category}
+          >
+            <option value="work">업무</option>
+            <option value="personal">개인</option>
+          </AppSelect>
         </label>
         <DatePickerField
           label="시작일"
@@ -5792,7 +6020,7 @@ function CalendarView({
                   type="button"
                   onClick={() => onSelectDate(day.dateString)}
                   onDoubleClick={() => onAddDate(day.dateString)}
-                  aria-label={`${formatDateLabel(day.dateString)} 선택`}
+                  aria-label={calendarDayAriaLabel(day.dateString, dayTasks)}
                 >
                   <span className="calendar-day-head">
                     <strong>{day.dayNumber}</strong>
@@ -5822,8 +6050,9 @@ function CalendarView({
                             .join(" ")}
                           key={task.id}
                           style={{ "--schedule-task-color": color } as CSSProperties}
-                          title={`${task.title}${timeLabel ? ` · ${timeLabel}` : ""}`}
+                          title={`${scheduleCategoryLabel(task.details.category)} · ${task.title}${timeLabel ? ` · ${timeLabel}` : ""}`}
                         >
+                          <ScheduleCategoryBadge category={task.details.category} compact />
                           {showLabel && (
                             <>
                               <span className="calendar-task-title">{task.title}</span>
@@ -6217,6 +6446,7 @@ function MatrixTaskRowContent({
       </button>
       <button className="task-main task-open-button" type="button" onClick={() => onOpen?.(task.id)}>
         <strong>{task.title}</strong>
+        <ScheduleCategoryBadge category={task.details.category} />
         <span className={isOverdue ? "task-meta overdue" : "task-meta"}>{formatTaskMeta(task)}</span>
         <span
           aria-label={`${task.title} 진행률 ${progressPercent}%`}
@@ -6777,6 +7007,7 @@ function TaskListRow({
       </button>
       <button className="task-main task-open-button" type="button" onClick={() => onOpen(task.id)}>
         <strong>{task.title}</strong>
+        <ScheduleCategoryBadge category={task.details.category} />
         <span className={isTaskScheduleOverdue(task, today) ? "task-meta overdue" : "task-meta"}>
           {getMeta ? getMeta(task) : formatTaskMeta(task)}
         </span>
@@ -6802,6 +7033,28 @@ function TaskListRow({
         {task.isUrgent && <Clock size={15} aria-label="긴급" />}
       </span>
     </div>
+  );
+}
+
+function ScheduleCategoryBadge({
+  category,
+  compact = false
+}: {
+  category: ScheduleTaskCategory;
+  compact?: boolean;
+}) {
+  const label = scheduleCategoryLabel(category);
+  const Icon = category === "personal" ? UserRound : BriefcaseBusiness;
+
+  return (
+    <span
+      aria-label={`분류 ${label}`}
+      className={`schedule-category-badge ${category} ${compact ? "compact" : ""}`}
+      title={label}
+    >
+      {!compact && <Icon aria-hidden="true" size={12} />}
+      <span aria-hidden="true">{compact ? label.slice(0, 1) : label}</span>
+    </span>
   );
 }
 
@@ -8336,7 +8589,7 @@ function RecurringHabitReadModal({
         </section>
 
         <footer className="task-read-actions">
-          <button className="danger-button" type="button" onClick={onDelete}>
+          <button className="danger-button" disabled={detailsMutationPending} type="button" onClick={onDelete}>
             <Trash2 size={17} />
             삭제
           </button>
@@ -8587,6 +8840,7 @@ function TaskReadModal({
   async function saveDescription() {
     const didSave = await saveInlineDetails(
       (currentDetails) => ({
+        category: currentDetails.category,
         description: descriptionDraft,
         checklist: currentDetails.checklist
       }),
@@ -8607,6 +8861,7 @@ function TaskReadModal({
 
     const didSave = await saveInlineDetails(
       (currentDetails) => ({
+        category: currentDetails.category,
         description: currentDetails.description,
         checklist: [...currentDetails.checklist, { id: crypto.randomUUID(), text, checked: false }]
       }),
@@ -8633,6 +8888,7 @@ function TaskReadModal({
 
     const didSave = await saveInlineDetails(
       (currentDetails) => ({
+        category: currentDetails.category,
         description: currentDetails.description,
         checklist: currentDetails.checklist.map((item) => (item.id === itemId ? { ...item, text } : item))
       }),
@@ -8648,6 +8904,7 @@ function TaskReadModal({
   async function deleteChecklistItem(itemId: string) {
     const didSave = await saveInlineDetails(
       (currentDetails) => ({
+        category: currentDetails.category,
         description: currentDetails.description,
         checklist: currentDetails.checklist.filter((item) => item.id !== itemId)
       }),
@@ -8710,6 +8967,7 @@ function TaskReadModal({
         </header>
 
         <div className="task-read-meta">
+          <ScheduleCategoryBadge category={task.details.category} />
           <span>{formatTaskDateDisplay(task)}</span>
           {formatScheduleTimeRange(task) && <span>{formatScheduleTimeRange(task)}</span>}
           {task.status === "completed" && <span>완료</span>}
@@ -8949,14 +9207,14 @@ function TaskReadModal({
           <div>
             <button
               className="secondary-button"
-              disabled={duplicationPending}
+              disabled={detailsMutationPending || duplicationPending}
               type="button"
               onClick={onDuplicate}
             >
               {duplicationPending ? <LoaderCircle aria-hidden="true" className="spin" size={17} /> : <Copy size={17} />}
               {duplicationPending ? "복사 중" : "복사"}
             </button>
-            <button type="button" onClick={onEdit}>
+            <button disabled={detailsMutationPending} type="button" onClick={onEdit}>
               <Pencil size={17} />
               수정
             </button>
@@ -9095,6 +9353,19 @@ function TaskDetailModal({
               required
               value={draft.title}
             />
+          </label>
+          <label>
+            분류
+            <AppSelect
+              onChange={(event) => setDraft((current) => ({
+                ...current,
+                category: event.target.value as ScheduleTaskCategory
+              }))}
+              value={draft.category}
+            >
+              <option value="work">업무</option>
+              <option value="personal">개인</option>
+            </AppSelect>
           </label>
           <div className="schedule-detail-grid">
             <DatePickerField
@@ -9305,6 +9576,7 @@ function draftFromTask(task: DecryptedScheduleTask): TaskDraft {
   const endTime = task.endTimeMinutes ?? null;
 
   return {
+    category: task.details.category,
     title: task.title,
     description: details.description,
     checklist: details.checklist,
@@ -9327,6 +9599,7 @@ function createDraftFromDefaults(defaults: QuickDefaults): CreateTaskDraft {
   const hasStartTime = defaults.startTimeMinutes != null;
 
   return {
+    category: defaults.category ?? defaultScheduleTaskCategory,
     title: "",
     description: "",
     checklist: [],
@@ -9416,6 +9689,7 @@ function scheduleTaskMatchesQuery(task: DecryptedScheduleTask, query: string) {
     task.title,
     task.details.description,
     task.details.checklist.map((item) => item.text).join(" "),
+    scheduleCategoryLabel(task.details.category),
     formatTaskDateDisplay(task),
     task.isImportant ? "중요" : "",
     task.isUrgent ? "긴급" : "",
@@ -9600,6 +9874,22 @@ function shouldShowCalendarTaskLabel(task: DecryptedScheduleTask, dateString: st
   }
 
   return dateString === firstVisibleDate || !taskCoversDate(task, addDays(dateString, -1));
+}
+
+function calendarDayAriaLabel(dateString: string, tasks: DecryptedScheduleTask[]) {
+  const dateLabel = formatDateLabel(dateString);
+
+  if (tasks.length === 0) {
+    return `${dateLabel} 선택. 일정 없음`;
+  }
+
+  const visibleTaskLabels = tasks.slice(0, 3).map(
+    (task) => `${scheduleCategoryLabel(task.details.category)} ${task.title}`
+  );
+  const remainingCount = tasks.length - visibleTaskLabels.length;
+  const remainingLabel = remainingCount > 0 ? ` 외 ${remainingCount}개` : "";
+
+  return `${dateLabel} 선택. 일정 ${tasks.length}개: ${visibleTaskLabels.join(", ")}${remainingLabel}`;
 }
 
 function taskCoversDate(task: DecryptedScheduleTask, dateString: string) {

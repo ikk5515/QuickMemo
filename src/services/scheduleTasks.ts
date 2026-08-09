@@ -14,6 +14,7 @@ import {
 } from "firebase/firestore";
 import type { FieldValue } from "firebase/firestore";
 import { db } from "../lib/firebase";
+import { defaultScheduleTaskCategory } from "../lib/scheduleCategory";
 import { normalizeSchedulePriorityFlags, type SchedulePrioritySource } from "../lib/schedulePriority";
 import type {
   EncryptedPayload,
@@ -34,6 +35,7 @@ type RawScheduleTaskDocument = Omit<ScheduleTaskDocument, "status"> & SchedulePr
 export interface CreateScheduleTaskInput {
   ownerUid: string;
   title: EncryptedPayload;
+  encryptedCategory?: string;
   details: EncryptedPayload;
   wrappedKey: WrappedNoteKey;
   dueDate: string | null;
@@ -51,6 +53,7 @@ export interface CreateScheduleTaskInput {
 
 export interface UpdateScheduleTaskInput {
   encryptedTitle?: EncryptedPayload;
+  encryptedCategory?: string;
   encryptedDetails?: EncryptedPayload;
   dueDate?: string | null;
   dueTimeMinutes?: number | null;
@@ -135,6 +138,7 @@ function timestampRevisionsMatch(current: unknown, expected: Timestamp) {
 }
 
 export const defaultScheduleDetails: ScheduleTaskDetails = {
+  category: defaultScheduleTaskCategory,
   description: "",
   checklist: []
 };
@@ -186,6 +190,7 @@ export async function createScheduleTask(input: CreateScheduleTaskInput) {
     isImportant: input.isImportant,
     isUrgent: input.isUrgent,
     encryptedTitle: input.title,
+    ...(input.encryptedCategory ? { encryptedCategory: input.encryptedCategory } : {}),
     encryptedDetails: input.details,
     wrappedKeys: {
       [input.ownerUid]: input.wrappedKey

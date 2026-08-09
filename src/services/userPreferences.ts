@@ -1,12 +1,24 @@
 import { doc, getDoc, onSnapshot, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { defaultMatrixLabels, normalizeMatrixLabels, sanitizeMatrixLabelsForSave } from "../lib/matrixLabels";
+import { defaultScheduleCategoryFilter, normalizeScheduleCategoryFilter } from "../lib/scheduleCategory";
 import { normalizeThemePreference } from "../lib/theme";
-import type { DefaultHomeView, MatrixLabels, ScheduleView, ThemePreference, UserPreferencesDocument } from "../types";
+import type {
+  DefaultHomeView,
+  MatrixLabels,
+  ScheduleCategoryFilter,
+  ScheduleView,
+  ThemePreference,
+  UserPreferencesDocument
+} from "../types";
 
-export const defaultUserPreferences: Pick<UserPreferencesDocument, "defaultHome" | "matrixLabels" | "scheduleDefaultView" | "theme"> = {
+export const defaultUserPreferences: Pick<
+  UserPreferencesDocument,
+  "defaultHome" | "matrixLabels" | "scheduleDefaultCategory" | "scheduleDefaultView" | "theme"
+> = {
   defaultHome: "notes",
   matrixLabels: defaultMatrixLabels,
+  scheduleDefaultCategory: defaultScheduleCategoryFilter,
   scheduleDefaultView: "todo",
   theme: "system"
 };
@@ -18,6 +30,7 @@ const validThemes = new Set<ThemePreference>(["light", "dark", "system"]);
 export interface SaveUserPreferencesInput {
   defaultHome?: UserPreferencesDocument["defaultHome"];
   matrixLabels?: Partial<MatrixLabels>;
+  scheduleDefaultCategory?: ScheduleCategoryFilter;
   scheduleDefaultView?: ScheduleView;
   theme?: ThemePreference;
 }
@@ -45,6 +58,7 @@ function normalizeUserPreferences(uid: string, value: Partial<UserPreferencesDoc
   const scheduleDefaultView = validScheduleViews.has(value?.scheduleDefaultView as ScheduleView)
     ? (value?.scheduleDefaultView as ScheduleView)
     : defaultUserPreferences.scheduleDefaultView;
+  const scheduleDefaultCategory = normalizeScheduleCategoryFilter(value?.scheduleDefaultCategory);
   const matrixLabels = normalizeMatrixLabels(value?.matrixLabels);
   const theme = validThemes.has(value?.theme as ThemePreference)
     ? normalizeThemePreference(value?.theme)
@@ -54,6 +68,7 @@ function normalizeUserPreferences(uid: string, value: Partial<UserPreferencesDoc
     uid,
     defaultHome,
     matrixLabels,
+    scheduleDefaultCategory,
     scheduleDefaultView,
     theme,
     createdAt: value?.createdAt,
@@ -75,7 +90,10 @@ export function getCachedUserPreferences(uid: string) {
 }
 
 function writeCachedUserPreferences(
-  preferences: Pick<UserPreferencesDocument, "defaultHome" | "matrixLabels" | "scheduleDefaultView" | "theme" | "uid">
+  preferences: Pick<
+    UserPreferencesDocument,
+    "defaultHome" | "matrixLabels" | "scheduleDefaultCategory" | "scheduleDefaultView" | "theme" | "uid"
+  >
 ) {
   if (!storageAvailable()) {
     return;
@@ -87,6 +105,7 @@ function writeCachedUserPreferences(
       JSON.stringify({
         defaultHome: preferences.defaultHome,
         matrixLabels: preferences.matrixLabels,
+        scheduleDefaultCategory: preferences.scheduleDefaultCategory,
         scheduleDefaultView: preferences.scheduleDefaultView,
         theme: preferences.theme
       })
@@ -140,20 +159,22 @@ export async function saveUserPreferences(uid: string, input: SaveUserPreference
   const payload = {
     defaultHome: input.defaultHome ?? current.defaultHome,
     matrixLabels: input.matrixLabels ? sanitizeMatrixLabelsForSave(input.matrixLabels) : current.matrixLabels,
+    scheduleDefaultCategory: normalizeScheduleCategoryFilter(
+      input.scheduleDefaultCategory ?? current.scheduleDefaultCategory
+    ),
     scheduleDefaultView: input.scheduleDefaultView ?? current.scheduleDefaultView,
     theme: input.theme ? normalizeThemePreference(input.theme) : current.theme,
     updatedAt: serverTimestamp()
   };
-  writeCachedUserPreferences({ uid, ...payload });
-
   if (snapshot.exists()) {
     await updateDoc(preferencesRef(uid), payload);
-    return;
+  } else {
+    await setDoc(preferencesRef(uid), {
+      uid,
+      ...payload,
+      createdAt: serverTimestamp()
+    });
   }
 
-  await setDoc(preferencesRef(uid), {
-    uid,
-    ...payload,
-    createdAt: serverTimestamp()
-  });
+  writeCachedUserPreferences({ uid, ...payload });
 }

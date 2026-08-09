@@ -28,6 +28,8 @@ export interface UserProfile extends PublicRosterUser {
 
 export type DefaultHomeView = "notes" | "library" | "schedule";
 export type ScheduleView = "todo" | "calendar" | "matrix" | "recurring" | "completed";
+export type ScheduleTaskCategory = "work" | "personal";
+export type ScheduleCategoryFilter = "all" | ScheduleTaskCategory;
 export type ThemePreference = "light" | "dark" | "system";
 export type MatrixLabelKey = "todayOverdue" | "importantUrgent" | "urgent" | "important" | "waiting";
 export type MatrixLabels = Record<MatrixLabelKey, string>;
@@ -36,6 +38,7 @@ export interface UserPreferencesDocument {
   uid: string;
   defaultHome: DefaultHomeView;
   matrixLabels: MatrixLabels;
+  scheduleDefaultCategory: ScheduleCategoryFilter;
   scheduleDefaultView: ScheduleView;
   theme: ThemePreference;
   createdAt?: Timestamp;
@@ -359,6 +362,7 @@ export interface ScheduleChecklistItem {
 }
 
 export interface ScheduleTaskDetails {
+  category: ScheduleTaskCategory;
   description: string;
   checklist: ScheduleChecklistItem[];
 }
@@ -378,6 +382,7 @@ export interface ScheduleTaskDocument {
   isImportant: boolean;
   isUrgent: boolean;
   encryptedTitle: EncryptedPayload;
+  encryptedCategory?: string;
   encryptedDetails: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
   createdBy: string;

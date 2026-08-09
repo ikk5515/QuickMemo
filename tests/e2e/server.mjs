@@ -170,6 +170,7 @@ const allowedScenarios = new Set([
   "otp-disallowed",
   "owner-preview",
   "password",
+  "pdf-attachment",
   "responsive",
   "save-copy",
   "save-copy-attachment",

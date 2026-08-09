@@ -2,6 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { defaultMatrixLabels } from "../lib/matrixLabels";
+import { defaultUserPreferences, getCachedUserPreferences } from "../services/userPreferences";
 import type { MatrixLabels, UserPreferencesDocument } from "../types";
 import { SettingsModal, ThemeToggleButton } from "./AppShell";
 
@@ -10,6 +11,7 @@ function preferences(matrixLabels: MatrixLabels = defaultMatrixLabels): UserPref
     uid: "user-a",
     defaultHome: "notes",
     matrixLabels,
+    scheduleDefaultCategory: "all",
     scheduleDefaultView: "todo",
     theme: "system"
   };
@@ -47,6 +49,7 @@ describe("SettingsModal", () => {
         ...defaultMatrixLabels,
         urgent: "위임 업무"
       },
+      scheduleDefaultCategory: "all",
       scheduleDefaultView: "todo"
     });
   });
@@ -94,6 +97,7 @@ describe("SettingsModal", () => {
     expect(onSave).toHaveBeenCalledWith({
       defaultHome: "notes",
       matrixLabels: defaultMatrixLabels,
+      scheduleDefaultCategory: "all",
       scheduleDefaultView: "todo"
     });
   });
@@ -117,6 +121,83 @@ describe("SettingsModal", () => {
     expect(screen.queryByRole("option", { name: "완료" })).not.toBeInTheDocument();
   });
 
+  it("normalizes an invalid saved category to all and saves a changed default category", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <SettingsModal
+        preferences={{ ...preferences(), scheduleDefaultCategory: "unexpected" as never }}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />
+    );
+
+    const categorySelect = screen.getByLabelText("일정 기본 분류 보기") as HTMLSelectElement;
+    const saveButton = screen.getByRole("button", { name: "저장" });
+
+    expect(categorySelect.value).toBe("all");
+    expect(saveButton).toBeDisabled();
+    expect(screen.getByRole("option", { name: "전체" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "업무" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "개인" })).toBeInTheDocument();
+
+    await user.selectOptions(categorySelect, "personal");
+    expect(saveButton).toBeEnabled();
+    await user.click(saveButton);
+
+    expect(onSave).toHaveBeenCalledWith({
+      defaultHome: "notes",
+      matrixLabels: defaultMatrixLabels,
+      scheduleDefaultCategory: "personal",
+      scheduleDefaultView: "todo"
+    });
+  });
+
+  it("keeps an unsaved category selection when a preference snapshot refreshes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <SettingsModal
+        preferences={preferences()}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />
+    );
+
+    await user.selectOptions(screen.getByLabelText("일정 기본 분류 보기"), "personal");
+    rerender(
+      <SettingsModal
+        preferences={{ ...preferences(), scheduleDefaultCategory: "work" }}
+        onClose={vi.fn()}
+        onSave={onSave}
+      />
+    );
+
+    expect(screen.getByLabelText("일정 기본 분류 보기")).toHaveValue("personal");
+  });
+
+  it("clears a stale save-success message when the category changes again", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SettingsModal
+        preferences={preferences()}
+        onClose={vi.fn()}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />
+    );
+
+    const categorySelect = screen.getByLabelText("일정 기본 분류 보기");
+
+    await user.selectOptions(categorySelect, "personal");
+    await user.click(screen.getByRole("button", { name: "저장" }));
+    expect(await screen.findByText("설정을 저장했습니다.")).toBeInTheDocument();
+
+    await user.selectOptions(categorySelect, "work");
+    expect(screen.queryByText("설정을 저장했습니다.")).not.toBeInTheDocument();
+  });
+
   it("offers the encrypted library as a default start screen", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
@@ -136,6 +217,7 @@ describe("SettingsModal", () => {
     expect(onSave).toHaveBeenCalledWith({
       defaultHome: "library",
       matrixLabels: defaultMatrixLabels,
+      scheduleDefaultCategory: "all",
       scheduleDefaultView: "todo"
     });
   });
@@ -155,6 +237,7 @@ describe("SettingsModal", () => {
     expect(screen.getByRole("option", { name: "자료실" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "노트" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("일정관리 기본 화면")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("일정 기본 분류 보기")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "매트릭스 명칭 설정" })).not.toBeInTheDocument();
   });
 
@@ -171,6 +254,43 @@ describe("SettingsModal", () => {
     expect(screen.getByText("현재 사용할 수 있는 작업 기능이 없습니다. 관리자에게 권한을 요청해 주세요.")).toBeInTheDocument();
     expect(screen.queryByLabelText("작업 시작 기본 화면")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "저장" })).toBeDisabled();
+  });
+});
+
+describe("schedule category preferences", () => {
+  it("defaults missing or invalid cached categories to all while preserving valid values", () => {
+    const uid = "category-cache-user";
+    const cacheKey = `quickmemo:userPreferences:${uid}`;
+
+    expect(defaultUserPreferences.scheduleDefaultCategory).toBe("all");
+
+    window.localStorage.setItem(cacheKey, JSON.stringify({
+      defaultHome: "schedule",
+      matrixLabels: defaultMatrixLabels,
+      scheduleDefaultView: "calendar",
+      theme: "system"
+    }));
+    expect(getCachedUserPreferences(uid)?.scheduleDefaultCategory).toBe("all");
+
+    window.localStorage.setItem(cacheKey, JSON.stringify({
+      defaultHome: "schedule",
+      matrixLabels: defaultMatrixLabels,
+      scheduleDefaultCategory: "unexpected",
+      scheduleDefaultView: "calendar",
+      theme: "system"
+    }));
+    expect(getCachedUserPreferences(uid)?.scheduleDefaultCategory).toBe("all");
+
+    window.localStorage.setItem(cacheKey, JSON.stringify({
+      defaultHome: "schedule",
+      matrixLabels: defaultMatrixLabels,
+      scheduleDefaultCategory: "personal",
+      scheduleDefaultView: "calendar",
+      theme: "system"
+    }));
+    expect(getCachedUserPreferences(uid)?.scheduleDefaultCategory).toBe("personal");
+
+    window.localStorage.removeItem(cacheKey);
   });
 });
 

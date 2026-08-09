@@ -37,6 +37,7 @@ import {
   updateScheduleTask,
   type ScheduleTaskSnapshot
 } from "../services/scheduleTasks";
+import { subscribeUserPreferences } from "../services/userPreferences";
 import SchedulePage, { scheduleActionError } from "./SchedulePage";
 
 function schedulePageElement(routeView?: "recurring", initialEntry?: string) {
@@ -85,6 +86,23 @@ function datedScheduleTaskSnapshot(id: string, title: string, date = "2099-01-10
   };
 }
 
+function categorizedScheduleTaskSnapshot(
+  id: string,
+  title: string,
+  category: "work" | "personal",
+  date: string
+): ScheduleTaskSnapshot {
+  return {
+    ...datedScheduleTaskSnapshot(id, title, date),
+    encryptedDetails: {
+      version: 1,
+      algorithm: "AES-GCM",
+      cipherText: `details:${category}`,
+      iv: "iv"
+    }
+  };
+}
+
 const testData = vi.hoisted(() => {
   const matrixLabels = {
     important: "중요 업무",
@@ -97,6 +115,7 @@ const testData = vi.hoisted(() => {
   return {
     matrixLabels,
     privateKey: {} as CryptoKey | null,
+    scheduleDefaultCategory: "all" as "all" | "work" | "personal",
     userProfile: {
       allowedShareTargetUids: [],
       avatarText: "김",
@@ -121,6 +140,16 @@ const cryptoMocks = vi.hoisted(() => ({
     }
     if (payload.cipherText.startsWith("plain:")) {
       return payload.cipherText.slice("plain:".length);
+    }
+    if (payload.cipherText.startsWith("details:")) {
+      return JSON.stringify({
+        category: payload.cipherText.slice("details:".length),
+        checklist: [],
+        description: ""
+      });
+    }
+    if (payload.cipherText.startsWith("category:")) {
+      return payload.cipherText.slice("category:".length);
     }
     return JSON.stringify({ checklist: [], description: "" });
   }),
@@ -275,6 +304,7 @@ vi.mock("../services/userPreferences", () => ({
   defaultUserPreferences: {
     defaultHome: "notes",
     matrixLabels: testData.matrixLabels,
+    scheduleDefaultCategory: "all",
     scheduleDefaultView: "todo",
     theme: "system",
     uid: "user-a"
@@ -282,6 +312,7 @@ vi.mock("../services/userPreferences", () => ({
   getCachedUserPreferences: vi.fn(() => ({
     defaultHome: "notes",
     matrixLabels: testData.matrixLabels,
+    scheduleDefaultCategory: testData.scheduleDefaultCategory,
     scheduleDefaultView: "todo",
     theme: "system",
     uid: "user-a"
@@ -289,6 +320,7 @@ vi.mock("../services/userPreferences", () => ({
   getUserPreferences: vi.fn().mockResolvedValue({
     defaultHome: "notes",
     matrixLabels: testData.matrixLabels,
+    scheduleDefaultCategory: testData.scheduleDefaultCategory,
     scheduleDefaultView: "todo",
     theme: "system",
     uid: "user-a"
@@ -297,6 +329,7 @@ vi.mock("../services/userPreferences", () => ({
     onNext({
       defaultHome: "notes",
       matrixLabels: testData.matrixLabels,
+      scheduleDefaultCategory: testData.scheduleDefaultCategory,
       scheduleDefaultView: "todo",
       theme: "system",
       uid: "user-a"
@@ -350,6 +383,7 @@ describe("SchedulePage quick work panel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     testData.privateKey = {} as CryptoKey;
+    testData.scheduleDefaultCategory = "all";
     vi.mocked(getGoogleCalendarConnectionStatus).mockResolvedValue(googleCalendarTestData.disconnected);
     vi.mocked(deleteGoogleCalendarTask).mockResolvedValue({
       eventId: "event-a",
@@ -463,6 +497,309 @@ describe("SchedulePage quick work panel", () => {
     expect(screen.getByRole("button", { name: /빠른 업무 패널 열기/ })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("지연 업무")).not.toBeInTheDocument();
     expect(todoTab).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("filters work and personal schedules consistently across todo, calendar, and matrix views", async () => {
+    const user = userEvent.setup();
+    const now = new Date();
+    const today = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0")
+    ].join("-");
+    const workTask = categorizedScheduleTaskSnapshot("work-task", "업무 일정", "work", today);
+    const personalTask = categorizedScheduleTaskSnapshot("personal-task", "개인 일정", "personal", today);
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([workTask, personalTask]);
+      return vi.fn();
+    });
+
+    renderSchedulePage();
+
+    expect(await screen.findByRole("group", { name: "일정 분류" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "전체 일정 보기" })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByText("업무 일정")).toBeInTheDocument();
+    expect(await screen.findByText("개인 일정")).toBeInTheDocument();
+    expect(screen.getByLabelText("분류 업무")).toBeInTheDocument();
+    expect(screen.getByLabelText("분류 개인")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "개인 일정 보기" }));
+
+    await waitFor(() => expect(screen.queryByText("업무 일정")).not.toBeInTheDocument());
+    expect(screen.getByText("개인 일정")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /빠른 업무 패널 열기/ }));
+    const todaySection = screen.getByRole("heading", { name: "오늘 일정" }).closest(".today-work-section");
+
+    expect(todaySection).not.toBeNull();
+    expect(within(todaySection as HTMLElement).queryByText("업무 일정")).not.toBeInTheDocument();
+    expect(within(todaySection as HTMLElement).getByText("개인 일정")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "오늘 업무 닫기" }));
+
+    await user.click(screen.getByRole("button", { name: "달력" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "달력" })).toHaveAttribute("aria-pressed", "true"));
+    expect(screen.queryByText("업무 일정")).not.toBeInTheDocument();
+    expect(screen.getAllByText("개인 일정").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "매트릭스" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "매트릭스" })).toHaveAttribute("aria-pressed", "true"));
+    expect(screen.queryByText("업무 일정")).not.toBeInTheDocument();
+    expect(screen.getByText("개인 일정")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "개인 일정 보기" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("opens schedule views with the saved default category", async () => {
+    const now = new Date();
+    const today = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0")
+    ].join("-");
+    testData.scheduleDefaultCategory = "personal";
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([
+        categorizedScheduleTaskSnapshot("work-task", "기본 업무 일정", "work", today),
+        categorizedScheduleTaskSnapshot("personal-task", "기본 개인 일정", "personal", today)
+      ]);
+      return vi.fn();
+    });
+
+    renderSchedulePage();
+
+    expect(await screen.findByRole("button", { name: "개인 일정 보기" })).toHaveAttribute("aria-pressed", "true");
+    expect(await screen.findByText("기본 개인 일정")).toBeInTheDocument();
+    expect(screen.queryByText("기본 업무 일정")).not.toBeInTheDocument();
+  });
+
+  it("keeps the separately encrypted category when legacy details omit it", async () => {
+    const now = new Date();
+    const today = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0")
+    ].join("-");
+    const task = datedScheduleTaskSnapshot("protected-personal", "보존된 개인 일정", today);
+
+    task.encryptedCategory = JSON.stringify({
+      version: 1,
+      algorithm: "AES-GCM",
+      cipherText: "category:personal",
+      iv: "iv"
+    });
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([task]);
+      return vi.fn();
+    });
+
+    const user = userEvent.setup();
+
+    renderSchedulePage();
+    await user.click(await screen.findByRole("button", { name: "개인 일정 보기" }));
+
+    expect(await screen.findByText("보존된 개인 일정")).toBeInTheDocument();
+  });
+
+  it("fails closed instead of rendering malformed encrypted category envelopes", async () => {
+    const invalidCategoryValues = [
+      "personal",
+      "x".repeat(1025),
+      JSON.stringify({
+        version: 1,
+        algorithm: "AES-GCM",
+        cipherText: "category:personal",
+        iv: "iv",
+        plaintextCategory: "personal"
+      })
+    ];
+    const invalidTasks = invalidCategoryValues.map((encryptedCategory, index) => ({
+      ...datedScheduleTaskSnapshot(`invalid-category-${index}`, `노출되면 안 되는 일정 ${index}`, "2099-01-10"),
+      encryptedCategory
+    }));
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext(invalidTasks);
+      return vi.fn();
+    });
+
+    renderSchedulePage();
+
+    expect((await screen.findAllByText("표시할 일정이 없습니다.")).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/노출되면 안 되는 일정/u)).not.toBeInTheDocument();
+  });
+
+  it("does not overwrite a category selected before the initial server preference arrives", async () => {
+    const user = userEvent.setup();
+    let deliverPreferences: ((preferences: Parameters<Parameters<typeof subscribeUserPreferences>[1]>[0]) => void) | null = null;
+
+    vi.mocked(subscribeUserPreferences).mockImplementationOnce((_uid, onNext) => {
+      deliverPreferences = onNext;
+      return vi.fn();
+    });
+
+    renderSchedulePage();
+    await user.click(await screen.findByRole("button", { name: "개인 일정 보기" }));
+
+    act(() => {
+      deliverPreferences?.({
+        defaultHome: "notes",
+        matrixLabels: testData.matrixLabels,
+        scheduleDefaultCategory: "work",
+        scheduleDefaultView: "todo",
+        theme: "system",
+        uid: "user-a"
+      });
+    });
+
+    expect(screen.getByRole("button", { name: "개인 일정 보기" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "업무 일정 보기" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("encrypts a new schedule category instead of storing it as plaintext metadata", async () => {
+    const user = userEvent.setup();
+
+    renderSchedulePage();
+    await user.click(await screen.findByRole("button", { name: "개인 일정 보기" }));
+    await user.click(screen.getByRole("button", { name: "새 일정" }));
+    const createDialog = await screen.findByRole("dialog", { name: "새 일정 추가" });
+    const categorySelect = within(createDialog).getByLabelText("일정 분류") as HTMLSelectElement;
+
+    expect(categorySelect.value).toBe("personal");
+    await user.type(within(createDialog).getByPlaceholderText("일정 제목"), "암호화 개인 일정");
+    await user.click(createDialog.querySelector<HTMLButtonElement>('button[type="submit"]')!);
+
+    await waitFor(() => expect(createScheduleTask).toHaveBeenCalledOnce());
+    expect(cryptoMocks.encryptText).not.toHaveBeenCalledWith(
+      expect.stringContaining('"category"'),
+      expect.anything()
+    );
+    expect(vi.mocked(createScheduleTask).mock.calls[0]?.[0]).not.toHaveProperty("category");
+    expect(JSON.parse(vi.mocked(createScheduleTask).mock.calls[0]?.[0].encryptedCategory ?? "null"))
+      .toEqual(expect.objectContaining({ algorithm: "AES-GCM" }));
+    expect(cryptoMocks.encryptText).toHaveBeenCalledWith("personal", expect.anything());
+  });
+
+  it("changes an existing schedule category through the edit dialog", async () => {
+    const user = userEvent.setup();
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([scheduleTaskSnapshot()]);
+      return vi.fn();
+    });
+
+    renderSchedulePage();
+    await user.click(await screen.findByText("matrix drag task"));
+    const readDialog = await screen.findByRole("dialog", { name: "matrix drag task" });
+    await user.click(within(readDialog).getByRole("button", { name: "수정" }));
+    const editDialog = await screen.findByRole("dialog", { name: "matrix drag task 수정" });
+
+    await user.selectOptions(within(editDialog).getByLabelText("분류"), "personal");
+    await user.click(editDialog.querySelector<HTMLButtonElement>('button[type="submit"]')!);
+
+    await waitFor(() => expect(updateScheduleTask).toHaveBeenCalledOnce());
+    expect(cryptoMocks.encryptText).toHaveBeenCalledWith("personal", expect.anything());
+    expect(updateScheduleTask).toHaveBeenCalledWith(
+      "matrix-task-a",
+      "user-a",
+      expect.objectContaining({ encryptedCategory: expect.any(String) }),
+      expect.objectContaining({ googleCalendarChanged: false })
+    );
+    expect(upsertGoogleCalendarTask).not.toHaveBeenCalled();
+  });
+
+  it("retries an inline details edit against the latest encrypted category revision", async () => {
+    const user = userEvent.setup();
+    const originalTask = scheduleTaskSnapshot();
+    const latestTask = {
+      ...originalTask,
+      encryptedCategory: JSON.stringify({
+        version: 1 as const,
+        algorithm: "AES-GCM" as const,
+        cipherText: "category:personal",
+        iv: "iv"
+      })
+    };
+    const retriedTask = {
+      ...latestTask,
+      updatedAt: { seconds: 1_753_142_401, nanoseconds: 0 } as ScheduleTaskSnapshot["updatedAt"]
+    };
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([latestTask]);
+      return vi.fn();
+    });
+    vi.mocked(getScheduleTask)
+      .mockResolvedValueOnce(latestTask)
+      .mockResolvedValueOnce(retriedTask);
+    vi.mocked(updateScheduleTask)
+      .mockRejectedValueOnce({ code: "schedule-task/revision-conflict" })
+      .mockResolvedValueOnce(undefined);
+
+    renderSchedulePage();
+    await user.click((await screen.findByText("matrix drag task")).closest<HTMLButtonElement>(".task-open-button")!);
+    const readDialog = await screen.findByRole("dialog", { name: "matrix drag task" });
+
+    expect(within(readDialog).getByLabelText("분류 개인")).toBeInTheDocument();
+    await user.click(within(readDialog).getByRole("button", { name: "내용 수정" }));
+    await user.type(within(readDialog).getByRole("textbox"), "최신 분류를 보존하는 내용");
+    await user.click(within(readDialog).getByRole("button", { name: "내용 저장" }));
+
+    await waitFor(() => expect(updateScheduleTask).toHaveBeenCalledTimes(2));
+    expect(getScheduleTask).toHaveBeenCalledTimes(2);
+    expect(updateScheduleTask).toHaveBeenLastCalledWith(
+      "matrix-task-a",
+      "user-a",
+      expect.objectContaining({ encryptedDetails: expect.any(Object) }),
+      {
+        expectedUpdatedAt: expect.objectContaining({ seconds: 1_753_142_401 }),
+        googleCalendarChanged: false
+      }
+    );
+    expect(cryptoMocks.encryptText).not.toHaveBeenCalledWith(
+      expect.stringContaining('"category"'),
+      expect.anything()
+    );
+    expect(vi.mocked(updateScheduleTask).mock.calls.at(-1)?.[2]).not.toHaveProperty("encryptedCategory");
+  });
+
+  it("migrates an embedded legacy personal category during an inline details edit", async () => {
+    const user = userEvent.setup();
+    const legacyTask = categorizedScheduleTaskSnapshot(
+      "legacy-personal-task",
+      "레거시 개인 일정",
+      "personal",
+      "2099-01-10"
+    );
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([legacyTask]);
+      return vi.fn();
+    });
+    vi.mocked(getScheduleTask).mockResolvedValue(legacyTask);
+
+    renderSchedulePage();
+    await user.click((await screen.findByText("레거시 개인 일정")).closest<HTMLButtonElement>(".task-open-button")!);
+    const readDialog = await screen.findByRole("dialog", { name: "레거시 개인 일정" });
+
+    expect(within(readDialog).getByLabelText("분류 개인")).toBeInTheDocument();
+    await user.click(within(readDialog).getByRole("button", { name: "내용 수정" }));
+    await user.type(within(readDialog).getByRole("textbox"), "분류 승격 내용");
+    await user.click(within(readDialog).getByRole("button", { name: "내용 저장" }));
+
+    await waitFor(() => expect(updateScheduleTask).toHaveBeenCalledOnce());
+    expect(cryptoMocks.encryptText).toHaveBeenCalledWith("personal", expect.anything());
+    expect(updateScheduleTask).toHaveBeenCalledWith(
+      "legacy-personal-task",
+      "user-a",
+      expect.objectContaining({
+        encryptedCategory: expect.any(String),
+        encryptedDetails: expect.any(Object)
+      }),
+      {
+        expectedUpdatedAt: legacyTask.updatedAt,
+        googleCalendarChanged: false
+      }
+    );
   });
 
   it("closes the quick panel with Escape and outside pointer input", async () => {
@@ -4007,6 +4344,9 @@ describe("SchedulePage quick work panel", () => {
     await user.dblClick(duplicateButton);
 
     await waitFor(() => expect(createScheduleTask).toHaveBeenCalledTimes(1));
+    expect(createScheduleTask).toHaveBeenCalledWith(expect.objectContaining({
+      encryptedCategory: expect.any(String)
+    }));
     expect(within(readDialog).getByRole("button", { name: "복사 중" })).toBeDisabled();
     resolveCreate({ id: "copied-task" } as Awaited<ReturnType<typeof createScheduleTask>>);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "matrix drag task" })).not.toBeInTheDocument());

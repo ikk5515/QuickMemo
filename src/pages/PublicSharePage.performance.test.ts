@@ -36,7 +36,7 @@ describe("PublicSharePage preview resource boundaries", () => {
     expect(publicSharePageSource).toContain("downloadCleanupTimersRef");
     expect(publicSharePageSource).toContain("revokeDownloadUrls");
     expect(pdfPreviewSource).toContain("task.cancel()");
-    expect(pdfPreviewSource).toContain("pdfDocument.destroy()");
+    expect(pdfPreviewSource).toContain("loadingTask?.destroy()");
     expect(pdfPreviewSource).toContain("canvas.width = 0");
     expect(pdfPreviewSource).toContain("canvas.height = 0");
   });

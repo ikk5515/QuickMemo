@@ -1,5 +1,5 @@
 import { CalendarDays, KeyRound, LibraryBig, LogOut, Moon, NotebookPen, Settings, Shield, Sun, X } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
@@ -23,13 +23,21 @@ import {
   sanitizeMatrixLabelsForSave,
   validateMatrixLabels
 } from "../lib/matrixLabels";
+import { normalizeScheduleCategoryFilter } from "../lib/scheduleCategory";
 import {
   getCachedUserPreferences,
   saveUserPreferences,
   subscribeUserPreferences,
   type SaveUserPreferencesInput
 } from "../services/userPreferences";
-import type { DefaultHomeView, FeatureAccess, MatrixLabels, ThemePreference, UserPreferencesDocument } from "../types";
+import type {
+  DefaultHomeView,
+  FeatureAccess,
+  MatrixLabels,
+  ScheduleCategoryFilter,
+  ThemePreference,
+  UserPreferencesDocument
+} from "../types";
 import { AppSelect } from "./AppSelect";
 
 export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
@@ -233,21 +241,34 @@ export function SettingsModal({
   const [scheduleDefaultView, setScheduleDefaultView] = useState<UserPreferencesDocument["scheduleDefaultView"]>(
     normalizePrimaryScheduleView(preferences?.scheduleDefaultView)
   );
+  const [scheduleDefaultCategory, setScheduleDefaultCategory] = useState<ScheduleCategoryFilter>(
+    normalizeScheduleCategoryFilter(preferences?.scheduleDefaultCategory)
+  );
   const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() => normalizeMatrixLabels(preferences?.matrixLabels));
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const settingsEditedRef = useRef(false);
   const savedMatrixLabels = useMemo(() => normalizeMatrixLabels(preferences?.matrixLabels), [preferences]);
   const nextMatrixLabels = useMemo(() => sanitizeMatrixLabelsForSave(matrixLabels), [matrixLabels]);
   const availableDefaultHomes = appFeatures.filter((feature) => featureAccess[feature]);
   const hasChanges =
     defaultHome !== savedAccessibleHome
     || (featureAccess.schedule && scheduleDefaultView !== normalizePrimaryScheduleView(preferences?.scheduleDefaultView))
+    || (
+      featureAccess.schedule
+      && scheduleDefaultCategory !== normalizeScheduleCategoryFilter(preferences?.scheduleDefaultCategory)
+    )
     || (featureAccess.schedule && !sameMatrixLabels(nextMatrixLabels, savedMatrixLabels));
 
   useEffect(() => {
+    if (settingsEditedRef.current) {
+      return;
+    }
+
     setDefaultHome(resolveAccessibleHome({ featureAccess }, preferences?.defaultHome ?? "notes"));
     setScheduleDefaultView(normalizePrimaryScheduleView(preferences?.scheduleDefaultView));
+    setScheduleDefaultCategory(normalizeScheduleCategoryFilter(preferences?.scheduleDefaultCategory));
     setMatrixLabels(normalizeMatrixLabels(preferences?.matrixLabels));
   }, [featureAccess, preferences]);
 
@@ -284,10 +305,12 @@ export function SettingsModal({
       }
       if (featureAccess.schedule) {
         nextPreferences.matrixLabels = nextMatrixLabels;
+        nextPreferences.scheduleDefaultCategory = scheduleDefaultCategory;
         nextPreferences.scheduleDefaultView = scheduleDefaultView;
       }
 
       await onSave(nextPreferences);
+      settingsEditedRef.current = false;
       setMessage("설정을 저장했습니다.");
     } catch {
       setError("설정을 저장하지 못했습니다.");
@@ -297,6 +320,7 @@ export function SettingsModal({
   }
 
   function updateMatrixLabel(key: keyof MatrixLabels, value: string) {
+    settingsEditedRef.current = true;
     setError(null);
     setMessage(null);
     setMatrixLabels((current) => ({ ...current, [key]: value }));
@@ -305,6 +329,7 @@ export function SettingsModal({
   function resetMatrixLabels() {
     const nextDefaultLabels = { ...defaultMatrixLabels };
 
+    settingsEditedRef.current = true;
     setError(null);
     setMessage(
       sameMatrixLabels(nextDefaultLabels, savedMatrixLabels)
@@ -329,7 +354,7 @@ export function SettingsModal({
         </button>
         <h2 id="settings-modal-title">설정</h2>
         <p id="settings-modal-description" className="settings-modal-description">
-          작업 시작 화면, 일정관리 기본 탭, 매트릭스 표시 명칭을 설정합니다.
+          작업 시작 화면, 일정관리 기본 탭과 분류 보기, 매트릭스 표시 명칭을 설정합니다.
         </p>
         <form className="form-grid compact" onSubmit={(event) => void submitSettings(event)}>
           <section className="settings-form-section" aria-labelledby="settings-workspace-title">
@@ -338,7 +363,12 @@ export function SettingsModal({
               <label>
                 작업 시작 기본 화면
                 <AppSelect
-                  onChange={(event) => setDefaultHome(event.target.value as DefaultHomeView)}
+                  onChange={(event) => {
+                    settingsEditedRef.current = true;
+                    setError(null);
+                    setMessage(null);
+                    setDefaultHome(event.target.value as DefaultHomeView);
+                  }}
                   value={defaultHome ?? ""}
                 >
                   {featureAccess.notes && <option value="notes">노트</option>}
@@ -355,13 +385,36 @@ export function SettingsModal({
               <label>
                 일정관리 기본 화면
                 <AppSelect
-                  onChange={(event) => setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"])}
+                  onChange={(event) => {
+                    settingsEditedRef.current = true;
+                    setError(null);
+                    setMessage(null);
+                    setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"]);
+                  }}
                   value={scheduleDefaultView}
                 >
                   <option value="todo">할 일</option>
                   <option value="calendar">달력</option>
                   <option value="matrix">매트릭스</option>
                   <option value="recurring">반복 업무</option>
+                </AppSelect>
+              </label>
+            )}
+            {featureAccess.schedule && (
+              <label>
+                일정 기본 분류 보기
+                <AppSelect
+                  onChange={(event) => {
+                    settingsEditedRef.current = true;
+                    setError(null);
+                    setMessage(null);
+                    setScheduleDefaultCategory(event.target.value as ScheduleCategoryFilter);
+                  }}
+                  value={scheduleDefaultCategory}
+                >
+                  <option value="all">전체</option>
+                  <option value="work">업무</option>
+                  <option value="personal">개인</option>
                 </AppSelect>
               </label>
             )}

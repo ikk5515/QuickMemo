@@ -63,7 +63,11 @@ export default defineConfig({
     },
     {
       name: "chromium-mobile-390",
-      testMatch: ["**/attachment.spec.mjs", "**/responsive.spec.mjs"],
+      testMatch: [
+        "**/attachment.spec.mjs",
+        "**/responsive.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
       use: {
         ...devices["Pixel 5"],
         browserName: "chromium"
@@ -71,7 +75,11 @@ export default defineConfig({
     },
     {
       name: "chromium-mobile-320",
-      testMatch: ["**/attachment.spec.mjs", "**/responsive.spec.mjs"],
+      testMatch: [
+        "**/attachment.spec.mjs",
+        "**/responsive.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
       use: {
         ...devices["Pixel 5"],
         browserName: "chromium",
@@ -89,7 +97,11 @@ export default defineConfig({
     },
     {
       name: "webkit-mobile-390",
-      testMatch: ["**/attachment.spec.mjs", "**/responsive.spec.mjs"],
+      testMatch: [
+        "**/attachment.spec.mjs",
+        "**/responsive.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
       use: {
         ...devices["iPhone 13"],
         browserName: "webkit"
@@ -97,7 +109,11 @@ export default defineConfig({
     },
     {
       name: "webkit-mobile-320",
-      testMatch: ["**/attachment.spec.mjs", "**/responsive.spec.mjs"],
+      testMatch: [
+        "**/attachment.spec.mjs",
+        "**/responsive.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
       use: {
         ...devices["iPhone SE"],
         browserName: "webkit"

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import {
   maxPdfPreviewCanvasPixels,
@@ -35,7 +35,6 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
     const previewContainer: HTMLDivElement = container;
     let cancelled = false;
     let loadingTask: PDFDocumentLoadingTask | null = null;
-    let pdfDocument: PDFDocumentProxy | null = null;
     const renderTasks = new Set<RenderTask>();
     const retainedPages = new Set<PDFPageProxy>();
     let retainedCanvasPixels = 0;
@@ -76,7 +75,6 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
         });
 
         const pdf = await loadingTask.promise;
-        pdfDocument = pdf;
 
         if (cancelled) {
           return;
@@ -207,11 +205,7 @@ export default function PublicPdfCanvasPreview({ bytes, fileName }: { bytes: Uin
       retainedPages.clear();
       releaseCanvases();
 
-      if (pdfDocument) {
-        void pdfDocument.destroy().catch(() => undefined);
-      } else {
-        void loadingTask?.destroy().catch(() => undefined);
-      }
+      void loadingTask?.destroy().catch(() => undefined);
     };
   }, [bytes, fileName]);
 

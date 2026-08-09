@@ -509,6 +509,11 @@
     },
     {
       "collectionGroup": "scheduleTasks",
+      "fieldPath": "encryptedCategory",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "scheduleTasks",
       "fieldPath": "wrappedKeys",
       "indexes": []
     },
