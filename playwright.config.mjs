@@ -90,6 +90,36 @@ export default defineConfig({
       }
     },
     {
+      name: "chromium-tablet-768",
+      testMatch: [
+        "**/app-layout.spec.mjs",
+        "**/attachment.spec.mjs",
+        "**/responsive.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
+      use: {
+        ...devices["Galaxy Tab S9"],
+        browserName: "chromium",
+        screen: { width: 768, height: 1024 },
+        viewport: { width: 768, height: 1024 }
+      }
+    },
+    {
+      name: "chromium-tablet-1024-landscape",
+      testMatch: [
+        "**/app-layout.spec.mjs",
+        "**/attachment.spec.mjs",
+        "**/responsive.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
+      use: {
+        ...devices["Galaxy Tab S9 landscape"],
+        browserName: "chromium",
+        screen: { width: 1024, height: 768 },
+        viewport: { width: 1024, height: 768 }
+      }
+    },
+    {
       name: "webkit-desktop",
       testMatch: ["**/*.spec.mjs"],
       use: {
@@ -120,6 +150,32 @@ export default defineConfig({
       ],
       use: {
         ...devices["iPhone SE"],
+        browserName: "webkit"
+      }
+    },
+    {
+      name: "webkit-tablet-768",
+      testMatch: [
+        "**/app-layout.spec.mjs",
+        "**/attachment.spec.mjs",
+        "**/responsive.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
+      use: {
+        ...devices["iPad Mini"],
+        browserName: "webkit"
+      }
+    },
+    {
+      name: "webkit-tablet-1024-landscape",
+      testMatch: [
+        "**/app-layout.spec.mjs",
+        "**/attachment.spec.mjs",
+        "**/responsive.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
+      use: {
+        ...devices["iPad Mini landscape"],
         browserName: "webkit"
       }
     }

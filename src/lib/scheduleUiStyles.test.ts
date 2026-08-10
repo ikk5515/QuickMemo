@@ -48,8 +48,27 @@ describe("schedule UI styles", () => {
     expect(stylesSource).toMatch(/\.schedule-category-badge\.personal \{[\s\S]*--category-color: var\(--schedule-category-personal\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-category-badge \{[\s\S]*var\(--color-surface-elevated\)/);
     expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.schedule-category-filter \{[\s\S]*width: 100%;/);
-    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-task-time \{[\s\S]*display: none;/);
-    expect(stylesSource).toMatch(/@media \(max-width: 380px\) \{[\s\S]*\.calendar-task-pill \{[\s\S]*justify-content: flex-start;[\s\S]*\.calendar-task-title \{[\s\S]*flex: 1 1 8px;/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-task-pill > \*,[\s\S]*\.calendar-task-spacer,[\s\S]*\.calendar-more \{[\s\S]*display: none;/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-task-pill\.show-category > \.schedule-category-badge\.compact \{[\s\S]*display: inline-flex;/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-task-count \{[\s\S]*display: inline-flex;/);
+  });
+
+  it("reflows matrix controls and panels across tablet and mobile widths", () => {
+    const tabletStyles = stylesSource.slice(stylesSource.lastIndexOf("@media (max-width: 1024px)"));
+    const mobileStyles = stylesSource.slice(stylesSource.lastIndexOf("@media (max-width: 640px)"));
+
+    expect(stylesSource).toContain("@media (hover: none) and (pointer: coarse) and (max-width: 1024px)");
+    expect(stylesSource).toMatch(/\.matrix-task-row \{[\s\S]*cursor: default;/);
+    expect(stylesSource).toMatch(/\.task-drag-handle \{[\s\S]*cursor: grab;/);
+    expect(tabletStyles).toMatch(/\.matrix-layout \{[\s\S]*--matrix-section-height: auto;/);
+    expect(tabletStyles).toMatch(/\.matrix-grid \{[\s\S]*grid-auto-rows: auto;/);
+    expect(tabletStyles).toMatch(/\.matrix-today-rail \.matrix-section \{[\s\S]*height: auto;[\s\S]*min-height: 140px;/);
+    expect(tabletStyles).toMatch(/\.matrix-section > \.matrix-date-groups \{[\s\S]*max-height: none;[\s\S]*overflow-y: visible;/);
+    expect(tabletStyles).toMatch(/\.matrix-date-group\.empty \{[\s\S]*display: none;/);
+    expect(tabletStyles).toMatch(/\.matrix-task-row \{[\s\S]*grid-template-areas:[\s\S]*"drag main flags"[\s\S]*"check main flags";[\s\S]*grid-template-columns: 40px minmax\(0, 1fr\) auto;/);
+    expect(mobileStyles).toMatch(/\.matrix-today-rail \.matrix-section \{[\s\S]*min-height: 112px;/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-day \{[\s\S]*min-height: 76px;[\s\S]*padding: 5px 3px;/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-task-pill \{[\s\S]*border-radius: 999px;[\s\S]*height: 8px;[\s\S]*width: 8px;/);
   });
 
   it("keeps the dark theme on neutral graphite tokens instead of navy surfaces", () => {

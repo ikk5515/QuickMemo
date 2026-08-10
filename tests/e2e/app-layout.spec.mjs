@@ -4,6 +4,7 @@ import { expect, test } from "@playwright/test";
 import {
   loginDirectly,
   navigateWithinApp,
+  resetEmulators,
   seedScenario
 } from "./helpers.mjs";
 
@@ -167,6 +168,7 @@ test("authenticated app layouts keep controls contained across primary routes", 
   const fixture = await seedScenario(request, "authenticated-verified");
   const viewportWidth = page.viewportSize()?.width ?? 1280;
   const mobileLayout = viewportWidth <= 520;
+  const touchLayout = viewportWidth <= 1024;
 
   await loginDirectly(page, fixture.viewerAuth);
 
@@ -176,6 +178,8 @@ test("authenticated app layouts keep controls contained across primary routes", 
   await expectInside(page, ".home-dashboard", ".home-hero", "home hero");
   if (mobileLayout) {
     await expectNavigationLabelsOnOneLine(page);
+  }
+  if (touchLayout) {
     await expectTopbarControlsDoNotOverlap(page);
   }
 
@@ -230,7 +234,7 @@ test("authenticated app layouts keep controls contained across primary routes", 
     ".schedule-category-filter",
     "schedule category filter"
   );
-  if (mobileLayout) {
+  if (touchLayout) {
     await expectScheduleActionsOnOneRow(page);
   }
 
@@ -259,4 +263,47 @@ test("authenticated app layouts keep controls contained across primary routes", 
     ".recurring-date-strip",
     "recurring date strip"
   );
+});
+
+test("setup, login, and admin layouts stay contained across responsive widths", async ({
+  page,
+  request
+}) => {
+  test.setTimeout(90_000);
+  await resetEmulators(request);
+  const setupPage = await page.context().newPage();
+
+  await setupPage.goto("/setup");
+  await expect(
+    setupPage.getByRole("heading", { name: "초기 설정 상태 확인", exact: true })
+  ).toBeVisible();
+  await expect(setupPage.getByRole("button", { name: "다시 확인", exact: true })).toBeVisible();
+  await expectNoHorizontalOverflow(setupPage);
+  await expectInside(setupPage, ".auth-page", ".setup-panel", "setup panel");
+  await setupPage.close();
+
+  const fixture = await seedScenario(request, "admin-layout");
+  await page.goto("/login");
+  await expect(
+    page.getByRole("heading", { name: /사용자를 선택하고/u })
+  ).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await expectInside(page, ".login-layout", ".login-copy", "login copy");
+  await expectInside(page, ".login-layout", ".roster-panel", "login roster");
+
+  await loginDirectly(page, fixture.viewerAuth);
+  await navigateWithinApp(page, "/admin");
+  await expect(
+    page.getByRole("heading", { name: "사용자, 공유 권한, 노트를 관리합니다", exact: true })
+  ).toBeVisible();
+  await expect(page.getByRole("tablist", { name: "관리자 기능" })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
+  await expectInside(page, ".admin-workspace", ".workspace-heading", "admin heading");
+  await expectInside(page, ".admin-workspace", ".admin-stats-grid", "admin stats");
+  await expect(
+    page.getByRole("heading", { name: fixture.viewerAuth.displayName, exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByText("사용자 목록을 불러오지 못했습니다.", { exact: true })
+  ).toHaveCount(0);
 });

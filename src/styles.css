@@ -8054,6 +8054,10 @@ textarea {
   font-weight: 800;
 }
 
+.calendar-task-count {
+  display: none;
+}
+
 .calendar-agenda {
   align-self: start;
 }
@@ -8395,7 +8399,7 @@ textarea {
 
 .matrix-task-row {
   align-items: start;
-  cursor: grab;
+  cursor: default;
   grid-template-columns: 24px 24px minmax(0, 1fr) 38px;
   min-height: 54px;
   padding: 6px 8px;
@@ -8444,10 +8448,6 @@ textarea {
 
 .matrix-date-group .schedule-empty {
   margin: 8px 0 0;
-}
-
-.matrix-task-row:active {
-  cursor: grabbing;
 }
 
 .matrix-task-row.dragging {
@@ -9885,6 +9885,12 @@ textarea {
     min-width: 0;
   }
 
+  .calendar-panel {
+    min-width: 0;
+    overflow-x: hidden;
+    width: 100%;
+  }
+
   .schedule-create-title,
   .schedule-create-form.compact .schedule-create-title {
     grid-column: auto;
@@ -9899,31 +9905,104 @@ textarea {
   }
 
   .calendar-day {
-    gap: 4px;
-    min-height: 92px;
-    padding: 7px;
+    gap: 5px;
+    min-height: 76px;
+    padding: 5px 3px;
     place-items: stretch;
-    text-align: left;
+    text-align: center;
+  }
+
+  .calendar-day-head {
+    gap: 2px;
+    justify-content: center;
+  }
+
+  .calendar-day-head strong {
+    flex-basis: 24px;
+    height: 24px;
+    width: 24px;
+  }
+
+  .calendar-holiday-label {
+    align-items: center;
+    display: inline-flex;
+    flex: 0 0 10px;
+    font-size: 0;
+    justify-content: center;
+    overflow: visible;
+    width: 10px;
+  }
+
+  .calendar-holiday-label::after {
+    content: "휴";
+    font-size: 8px;
+    line-height: 1;
   }
 
   .calendar-task-stack {
-    display: grid;
+    align-content: start;
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
     gap: 3px;
+    justify-content: center;
     min-height: 0;
   }
 
   .calendar-task-pill {
-    font-size: 11px;
-    min-height: 20px;
-    padding: 2px 5px;
+    background: var(--schedule-task-color, var(--teal));
+    border-color: color-mix(in srgb, var(--schedule-task-color, var(--teal)) 72%, var(--calendar-day-bg));
+    border-radius: 999px;
+    flex: 0 0 8px;
+    gap: 0;
+    height: 8px;
+    margin: 0;
+    min-height: 8px;
+    padding: 0;
+    width: 8px;
   }
 
-  .calendar-task-time {
+  .calendar-task-pill.range-start,
+  .calendar-task-pill.range-middle,
+  .calendar-task-pill.range-end,
+  .calendar-task-pill.week-start,
+  .calendar-task-pill.week-end {
+    border-radius: 999px;
+    margin: 0;
+    padding: 0;
+  }
+
+  .calendar-task-pill > *,
+  .calendar-task-spacer,
+  .calendar-more {
     display: none;
   }
 
-  .calendar-more {
-    font-size: 11px;
+  .calendar-task-pill.show-category {
+    background: transparent;
+    border: 0;
+    flex-basis: 16px;
+    height: 14px;
+    min-height: 14px;
+    width: 16px;
+  }
+
+  .calendar-task-pill.show-category > .schedule-category-badge.compact {
+    display: inline-flex;
+    font-size: 8px;
+    min-height: 14px;
+    padding: 1px 2px;
+    width: 16px;
+  }
+
+  .calendar-task-count {
+    color: var(--muted);
+    display: inline-flex;
+    flex: 0 0 100%;
+    font-size: 9px;
+    font-weight: 800;
+    justify-content: center;
+    line-height: 1;
   }
 
   .schedule-detail-backdrop {
@@ -14083,7 +14162,7 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   }
 }
 
-@media (hover: none) and (pointer: coarse) and (max-width: 680px) {
+@media (hover: none) and (pointer: coarse) and (max-width: 1024px) {
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):not([type="file"]),
   select,
   textarea {
@@ -14157,4 +14236,114 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   .recurring-date-strip::-webkit-scrollbar {
     display: none;
   }
+}
+
+@media (max-width: 1024px) {
+  .matrix-layout {
+    --matrix-section-height: auto;
+  }
+
+  .matrix-grid {
+    grid-auto-rows: auto;
+  }
+
+  .matrix-section,
+  .matrix-grid .matrix-section,
+  .matrix-today-rail .matrix-section {
+    height: auto;
+    min-height: 140px;
+  }
+
+  .matrix-section > .matrix-task-list,
+  .matrix-section > .matrix-date-groups {
+    max-height: none;
+    overflow-y: visible;
+    padding-right: 0;
+    scrollbar-gutter: auto;
+  }
+
+  .matrix-date-group.empty {
+    display: none;
+  }
+
+  .matrix-task-row {
+    align-items: start;
+    column-gap: 8px;
+    grid-template-areas:
+      "drag main flags"
+      "check main flags";
+    grid-template-columns: 40px minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    min-height: 72px;
+    row-gap: 2px;
+  }
+
+  .matrix-task-row > .task-drag-handle {
+    grid-area: drag;
+    justify-self: center;
+  }
+
+  .matrix-task-row > .task-check {
+    grid-area: check;
+    justify-self: center;
+  }
+
+  .matrix-task-row > .task-main {
+    align-self: stretch;
+    grid-area: main;
+    min-width: 0;
+    padding-block: 2px;
+  }
+
+  .matrix-task-row > .task-flags {
+    align-self: start;
+    grid-area: flags;
+  }
+}
+
+@media (max-width: 640px) {
+  .schedule-workspace {
+    padding:
+      12px max(12px, env(safe-area-inset-right))
+      max(16px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  }
+
+  .schedule-header {
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .schedule-header .section-kicker {
+    display: none;
+  }
+
+  .schedule-header h1 {
+    font-size: 24px;
+    margin: 0;
+  }
+
+  .schedule-view-tabs {
+    gap: 4px;
+    padding: 5px;
+  }
+
+  .schedule-view-tabs button {
+    min-height: 50px;
+    padding-block: 5px;
+  }
+
+  .schedule-category-toolbar {
+    margin: 0 0 12px;
+  }
+
+  .matrix-section,
+  .matrix-grid .matrix-section,
+  .matrix-today-rail .matrix-section {
+    min-height: 112px;
+  }
+
+  .matrix-date-group + .matrix-date-group {
+    margin-top: 6px;
+  }
+
 }

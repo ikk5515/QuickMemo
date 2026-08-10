@@ -507,8 +507,8 @@ describe("SchedulePage quick work panel", () => {
       String(now.getMonth() + 1).padStart(2, "0"),
       String(now.getDate()).padStart(2, "0")
     ].join("-");
-    const workTask = categorizedScheduleTaskSnapshot("work-task", "업무 일정", "work", today);
-    const personalTask = categorizedScheduleTaskSnapshot("personal-task", "개인 일정", "personal", today);
+    const workTask = categorizedScheduleTaskSnapshot("work-task", "팀 회의", "work", today);
+    const personalTask = categorizedScheduleTaskSnapshot("personal-task", "저녁 산책", "personal", today);
 
     vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
       onNext([workTask, personalTask]);
@@ -519,34 +519,94 @@ describe("SchedulePage quick work panel", () => {
 
     expect(await screen.findByRole("group", { name: "일정 분류" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "전체 일정 보기" })).toHaveAttribute("aria-pressed", "true");
-    expect(await screen.findByText("업무 일정")).toBeInTheDocument();
-    expect(await screen.findByText("개인 일정")).toBeInTheDocument();
+    expect(await screen.findByText("팀 회의")).toBeInTheDocument();
+    expect(await screen.findByText("저녁 산책")).toBeInTheDocument();
     expect(screen.getByLabelText("분류 업무")).toBeInTheDocument();
     expect(screen.getByLabelText("분류 개인")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "개인 일정 보기" }));
 
-    await waitFor(() => expect(screen.queryByText("업무 일정")).not.toBeInTheDocument());
-    expect(screen.getByText("개인 일정")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("팀 회의")).not.toBeInTheDocument());
+    expect(screen.getByText("저녁 산책")).toBeInTheDocument();
+    expect(screen.queryByLabelText("분류 개인")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /빠른 업무 패널 열기/ }));
     const todaySection = screen.getByRole("heading", { name: "오늘 일정" }).closest(".today-work-section");
 
     expect(todaySection).not.toBeNull();
-    expect(within(todaySection as HTMLElement).queryByText("업무 일정")).not.toBeInTheDocument();
-    expect(within(todaySection as HTMLElement).getByText("개인 일정")).toBeInTheDocument();
+    expect(within(todaySection as HTMLElement).queryByText("팀 회의")).not.toBeInTheDocument();
+    expect(within(todaySection as HTMLElement).getByText("저녁 산책")).toBeInTheDocument();
+    expect(within(todaySection as HTMLElement).queryByLabelText("분류 개인")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "오늘 업무 닫기" }));
 
     await user.click(screen.getByRole("button", { name: "달력" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "달력" })).toHaveAttribute("aria-pressed", "true"));
-    expect(screen.queryByText("업무 일정")).not.toBeInTheDocument();
-    expect(screen.getAllByText("개인 일정").length).toBeGreaterThan(0);
+    expect(screen.queryByText("팀 회의")).not.toBeInTheDocument();
+    expect(screen.getAllByText("저녁 산책").length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText("분류 개인")).not.toBeInTheDocument();
+    const personalCalendarDay = screen.getByRole("button", { name: /일정 1개: 저녁 산책$/u });
+    const personalCalendarPill = within(document.querySelector(".calendar-grid") as HTMLElement)
+      .getByText("저녁 산책")
+      .closest<HTMLElement>(".calendar-task-pill");
+
+    expect(personalCalendarDay).not.toHaveAccessibleName(/개인/u);
+    expect(personalCalendarPill).toHaveAttribute("title", "저녁 산책");
 
     await user.click(screen.getByRole("button", { name: "매트릭스" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "매트릭스" })).toHaveAttribute("aria-pressed", "true"));
-    expect(screen.queryByText("업무 일정")).not.toBeInTheDocument();
-    expect(screen.getByText("개인 일정")).toBeInTheDocument();
+    expect(screen.queryByText("팀 회의")).not.toBeInTheDocument();
+    expect(screen.getByText("저녁 산책")).toBeInTheDocument();
+    expect(screen.queryByLabelText("분류 개인")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "개인 일정 보기" })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "전체 일정 보기" }));
+
+    expect(await screen.findByText("팀 회의")).toBeInTheDocument();
+    expect(screen.getByText("저녁 산책")).toBeInTheDocument();
+    expect(screen.getByLabelText("분류 업무")).toBeInTheDocument();
+    expect(screen.getByLabelText("분류 개인")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "업무 일정 보기" }));
+
+    await waitFor(() => expect(screen.queryByText("저녁 산책")).not.toBeInTheDocument());
+    expect(screen.getByText("팀 회의")).toBeInTheDocument();
+    expect(screen.queryByLabelText("분류 업무")).not.toBeInTheDocument();
+  });
+
+  it("shows one category badge for a multi-day calendar range in the all filter", async () => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 10);
+    const end = new Date(now.getFullYear(), now.getMonth(), 12);
+    const toDateString = (date: Date) => [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, "0"),
+      String(date.getDate()).padStart(2, "0")
+    ].join("-");
+    const rangeTask = categorizedScheduleTaskSnapshot(
+      "calendar-range",
+      "출장 준비",
+      "work",
+      toDateString(start)
+    );
+
+    rangeTask.endDate = toDateString(end);
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([rangeTask]);
+      return vi.fn();
+    });
+
+    renderSchedulePage(undefined, "/schedule?view=calendar");
+
+    await screen.findAllByText("출장 준비");
+    const calendarGrid = document.querySelector<HTMLElement>(".calendar-grid");
+
+    expect(calendarGrid).not.toBeNull();
+    expect(calendarGrid?.querySelectorAll(".calendar-task-pill")).toHaveLength(3);
+    expect(calendarGrid?.querySelectorAll(".schedule-category-badge")).toHaveLength(1);
+    expect(within(calendarGrid as HTMLElement).getAllByText("출장 준비")).toHaveLength(1);
+    expect(calendarGrid?.querySelector(".schedule-category-badge")).toHaveAccessibleName("분류 업무");
+    expect(calendarGrid?.querySelectorAll('.calendar-task-pill[title="업무 · 출장 준비"]')).toHaveLength(1);
+    expect(calendarGrid?.querySelectorAll('.calendar-task-pill[title="출장 준비"]')).toHaveLength(2);
   });
 
   it("opens schedule views with the saved default category", async () => {
@@ -986,12 +1046,18 @@ describe("SchedulePage quick work panel", () => {
     fireEvent.pointerDown(taskTitle, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 1 });
     fireEvent.pointerMove(document, { button: 0, clientX: 20, clientY: 10, isPrimary: true, pointerId: 1 });
 
+    expect(document.querySelector(".matrix-drag-overlay")).not.toBeInTheDocument();
+    fireEvent.pointerUp(document, { button: 0, clientX: 20, clientY: 10, isPrimary: true, pointerId: 1 });
+
+    fireEvent.pointerDown(dragHandle!, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 2 });
+    fireEvent.pointerMove(document, { button: 0, clientX: 20, clientY: 10, isPrimary: true, pointerId: 2 });
+
     await waitFor(() => expect(document.querySelector(".matrix-drag-overlay")).toBeInTheDocument());
 
-    fireEvent.pointerMove(document, { button: 0, clientX: 360, clientY: 40, isPrimary: true, pointerId: 1 });
+    fireEvent.pointerMove(document, { button: 0, clientX: 360, clientY: 40, isPrimary: true, pointerId: 2 });
     await waitFor(() => expect(urgentSection).toHaveClass("drag-over"));
 
-    fireEvent.pointerUp(document, { button: 0, clientX: 360, clientY: 40, isPrimary: true, pointerId: 1 });
+    fireEvent.pointerUp(document, { button: 0, clientX: 360, clientY: 40, isPrimary: true, pointerId: 2 });
 
     await waitFor(() =>
       expect(updateScheduleTask).toHaveBeenCalledWith("matrix-task-a", "user-a", {
@@ -1003,6 +1069,33 @@ describe("SchedulePage quick work panel", () => {
     // dnd-kit removes its document-level click guard shortly after the pointer sensor detaches.
     await new Promise((resolve) => window.setTimeout(resolve, 60));
     rectSpy.mockRestore();
+  });
+
+  it("clears the matrix drag overlay when a handle drag is cancelled", async () => {
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      onNext([scheduleTaskSnapshot()]);
+      return vi.fn();
+    });
+
+    renderSchedulePage(undefined, "/schedule?view=matrix");
+
+    const taskTitle = await screen.findByText("matrix drag task");
+    const dragHandle = taskTitle
+      .closest<HTMLElement>(".matrix-task-row")
+      ?.querySelector<HTMLButtonElement>(".task-drag-handle");
+
+    expect(dragHandle).not.toBeNull();
+    fireEvent.pointerDown(dragHandle!, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 3 });
+    fireEvent.pointerMove(document, { button: 0, clientX: 20, clientY: 10, isPrimary: true, pointerId: 3 });
+    await waitFor(() => expect(document.querySelector(".matrix-drag-overlay")).toBeInTheDocument());
+
+    fireEvent.pointerCancel(document, { clientX: 20, clientY: 10, isPrimary: true, pointerId: 3 });
+
+    await waitFor(() => expect(document.querySelector(".matrix-drag-overlay")).not.toBeInTheDocument());
+    expect(updateScheduleTask).not.toHaveBeenCalled();
+
+    // dnd-kit removes its document-level click guard shortly after the pointer sensor detaches.
+    await new Promise((resolve) => window.setTimeout(resolve, 60));
   });
 
   it("syncs the new date when matrix drag moves an undated task into today's section", async () => {
@@ -1038,6 +1131,7 @@ describe("SchedulePage quick work panel", () => {
     renderSchedulePage(undefined, "/schedule?view=matrix");
     const taskTitle = await screen.findByText("matrix drag task");
     const taskRow = taskTitle.closest<HTMLElement>(".matrix-task-row");
+    const dragHandle = taskRow?.querySelector<HTMLButtonElement>(".task-drag-handle");
     const todaySection = screen.getByRole("heading", {
       name: testData.matrixLabels.todayOverdue
     }).closest<HTMLElement>(".matrix-section");
@@ -1053,7 +1147,8 @@ describe("SchedulePage quick work panel", () => {
       return testRect(0, 0, 0, 0);
     });
 
-    fireEvent.pointerDown(taskTitle, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 1 });
+    expect(dragHandle).not.toBeNull();
+    fireEvent.pointerDown(dragHandle!, { button: 0, clientX: 10, clientY: 10, isPrimary: true, pointerId: 1 });
     fireEvent.pointerMove(document, { button: 0, clientX: 20, clientY: 10, isPrimary: true, pointerId: 1 });
     await waitFor(() => expect(document.querySelector(".matrix-drag-overlay")).toBeInTheDocument());
     fireEvent.pointerMove(document, { button: 0, clientX: 360, clientY: 40, isPrimary: true, pointerId: 1 });

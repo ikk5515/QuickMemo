@@ -1873,6 +1873,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
 
   const sortedTasks = useMemo(() => [...decryptedTasks].sort(compareTaskSchedule), [decryptedTasks]);
   const categoryViewActive = activeView === "todo" || activeView === "calendar" || activeView === "matrix";
+  const showTaskCategories = !categoryViewActive || scheduleCategoryFilter === "all";
   const categoryFilteredTasks = useMemo(
     () => categoryViewActive
       ? sortedTasks.filter((task) => scheduleTaskMatchesCategory(task, scheduleCategoryFilter))
@@ -4802,6 +4803,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             id={todayPanelId}
             panelRef={todayPanelRef}
             pendingCheckIns={pendingRecurringCheckIn}
+            showCategory={showTaskCategories}
             summary={todayWorkSummary}
             today={today}
             onAddTask={() => {
@@ -4842,7 +4844,13 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         {!activeView && <p className="schedule-empty">설정한 일정 화면을 여는 중입니다.</p>}
 
         {activeView === "todo" && (
-          <TodoView groups={todoGroups} today={today} onOpen={setViewTaskId} onToggle={(task) => void toggleTask(task)} />
+          <TodoView
+            groups={todoGroups}
+            showCategory={showTaskCategories}
+            today={today}
+            onOpen={setViewTaskId}
+            onToggle={(task) => void toggleTask(task)}
+          />
         )}
 
         {activeView === "calendar" && (
@@ -4860,6 +4868,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             onSelectDate={setSelectedCalendarDate}
             onToday={goToday}
             onToggle={(task) => void toggleTask(task)}
+            showCategory={showTaskCategories}
           />
         )}
 
@@ -4876,6 +4885,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             onOpen={setViewTaskId}
             onReorderTasks={(activeTaskId, overTaskId) => void reorderTasksWithinDate(activeTaskId, overTaskId)}
             onToggle={(task) => void toggleTask(task)}
+            showCategory={showTaskCategories}
           />
         )}
 
@@ -5465,6 +5475,7 @@ function TodayWorkPanel({
   onToggleHabit,
   onToggleTask,
   pendingCheckIns,
+  showCategory,
   summary,
   today
 }: {
@@ -5478,6 +5489,7 @@ function TodayWorkPanel({
   onToggleHabit: (habit: DecryptedRecurringHabit) => void;
   onToggleTask: (task: DecryptedScheduleTask) => void;
   pendingCheckIns: Record<string, boolean>;
+  showCategory: boolean;
   summary: TodayWorkSummary;
   today: string;
 }) {
@@ -5522,6 +5534,7 @@ function TodayWorkPanel({
             today={today}
             onOpen={onOpenTask}
             onToggle={onToggleTask}
+            showCategory={showCategory}
           />
         </section>
         <section className="today-work-section">
@@ -5535,6 +5548,7 @@ function TodayWorkPanel({
             today={today}
             onOpen={onOpenTask}
             onToggle={onToggleTask}
+            showCategory={showCategory}
           />
         </section>
         <section className="today-work-section">
@@ -5965,11 +5979,13 @@ function TodoView({
   groups,
   onOpen,
   onToggle,
+  showCategory,
   today
 }: {
   groups: ReturnType<typeof groupTasksByTodoDate>;
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
+  showCategory: boolean;
   today: string;
 }) {
   return (
@@ -5980,7 +5996,14 @@ function TodoView({
             <h2>{group.label}</h2>
             <span>{group.tasks.length}</span>
           </header>
-          <PagedTaskList tasks={group.tasks} today={today} showProgress onOpen={onOpen} onToggle={onToggle} />
+          <PagedTaskList
+            tasks={group.tasks}
+            today={today}
+            showCategory={showCategory}
+            showProgress
+            onOpen={onOpen}
+            onToggle={onToggle}
+          />
         </section>
       ))}
     </div>
@@ -6000,6 +6023,7 @@ function CalendarView({
   onToggle,
   selectedDate,
   selectedDayTasks,
+  showCategory,
   weeks
 }: {
   calendarTaskLayout: ReturnType<typeof buildCalendarTaskLayout>;
@@ -6014,6 +6038,7 @@ function CalendarView({
   onToggle: (task: DecryptedScheduleTask) => void;
   selectedDate: string;
   selectedDayTasks: DecryptedScheduleTask[];
+  showCategory: boolean;
   weeks: ReturnType<typeof buildCalendarMonth>;
 }) {
   const firstVisibleDate = weeks[0]?.days[0]?.dateString ?? selectedDate;
@@ -6071,7 +6096,7 @@ function CalendarView({
                   type="button"
                   onClick={() => onSelectDate(day.dateString)}
                   onDoubleClick={() => onAddDate(day.dateString)}
-                  aria-label={calendarDayAriaLabel(day.dateString, dayTasks)}
+                  aria-label={calendarDayAriaLabel(day.dateString, dayTasks, showCategory, holidays)}
                 >
                   <span className="calendar-day-head">
                     <strong>{day.dayNumber}</strong>
@@ -6092,6 +6117,7 @@ function CalendarView({
                         <span
                           className={[
                             "calendar-task-pill",
+                            showCategory && showLabel ? "show-category" : "",
                             task.status === "completed" ? "completed" : "",
                             rangePosition,
                             day.date.getDay() === 0 ? "week-start" : "",
@@ -6101,9 +6127,9 @@ function CalendarView({
                             .join(" ")}
                           key={task.id}
                           style={{ "--schedule-task-color": color } as CSSProperties}
-                          title={`${scheduleCategoryLabel(task.details.category)} · ${task.title}${timeLabel ? ` · ${timeLabel}` : ""}`}
+                          title={`${showCategory && showLabel ? `${scheduleCategoryLabel(task.details.category)} · ` : ""}${task.title}${timeLabel ? ` · ${timeLabel}` : ""}`}
                         >
-                          <ScheduleCategoryBadge category={task.details.category} compact />
+                          {showCategory && showLabel && <ScheduleCategoryBadge category={task.details.category} compact />}
                           {showLabel && (
                             <>
                               <span className="calendar-task-title">{task.title}</span>
@@ -6114,6 +6140,11 @@ function CalendarView({
                       );
                     })}
                     {dayTasks.length > visibleTaskCount && <span className="calendar-more">+{dayTasks.length - visibleTaskCount}</span>}
+                    {dayTasks.length > 0 && (
+                      <span aria-hidden="true" className="calendar-task-count">
+                        {dayTasks.length}개
+                      </span>
+                    )}
                   </span>
                 </button>
               );
@@ -6146,6 +6177,7 @@ function CalendarView({
           tasks={selectedDayTasks}
           onOpen={onOpen}
           onToggle={onToggle}
+          showCategory={showCategory}
         />
       </section>
     </div>
@@ -6161,6 +6193,7 @@ function MatrixView({
   onReorderTasks,
   onToggle,
   sections,
+  showCategory,
   today,
   totalTaskCount,
   visibleTaskCount
@@ -6173,6 +6206,7 @@ function MatrixView({
   onReorderTasks: (activeTaskId: string, overTaskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   sections: MatrixSection[];
+  showCategory: boolean;
   today: string;
   totalTaskCount: number;
   visibleTaskCount: number;
@@ -6228,6 +6262,7 @@ function MatrixView({
   return (
     <DndContext
       collisionDetection={matrixCollisionDetection}
+      onDragCancel={() => setActiveTaskId(null)}
       onDragEnd={handleDragEnd}
       onDragStart={handleDragStart}
       sensors={sensors}
@@ -6253,6 +6288,7 @@ function MatrixView({
               onToggle={onToggle}
               onToggleGroup={toggleGroup}
               section={todaySection}
+              showCategory={showCategory}
               today={today}
             />
           </div>
@@ -6267,6 +6303,7 @@ function MatrixView({
               onToggle={onToggle}
               onToggleGroup={toggleGroup}
               section={section}
+              showCategory={showCategory}
               today={today}
             />
           ))}
@@ -6278,7 +6315,7 @@ function MatrixView({
             <span className="task-drag-handle ghost">
               <GripVertical size={16} />
             </span>
-            <MatrixTaskRowContent task={activeTask} today={today} />
+            <MatrixTaskRowContent showCategory={showCategory} task={activeTask} today={today} />
           </div>
         ) : null}
       </DragOverlay>
@@ -6293,6 +6330,7 @@ function MatrixSectionPanel({
   onToggle,
   onToggleGroup,
   section,
+  showCategory,
   today
 }: {
   collapsedGroups: Record<string, boolean>;
@@ -6301,6 +6339,7 @@ function MatrixSectionPanel({
   onToggle: (task: DecryptedScheduleTask) => void;
   onToggleGroup: (sectionKey: MatrixQuadrantKey, groupKey: string) => void;
   section: MatrixSection;
+  showCategory: boolean;
   today: string;
 }) {
   const { isOver, setNodeRef } = useDroppable({
@@ -6331,6 +6370,7 @@ function MatrixSectionPanel({
       {section.key === "urgentImportant" ? (
         <MatrixSortableTaskList
           sectionKey={section.key}
+          showCategory={showCategory}
           tasks={section.tasks}
           today={today}
           onOpen={onOpen}
@@ -6343,7 +6383,10 @@ function MatrixSectionPanel({
             const collapsed = collapsedGroups[stateKey] === true;
 
             return (
-              <section className="matrix-date-group" key={group.key}>
+              <section
+                className={`matrix-date-group${group.tasks.length === 0 ? " empty" : ""}`}
+                key={group.key}
+              >
                 <button
                   className="matrix-date-group-header"
                   type="button"
@@ -6360,6 +6403,7 @@ function MatrixSectionPanel({
                   <MatrixSortableTaskList
                     emptyMessage="표시할 일정이 없습니다."
                     sectionKey={section.key}
+                    showCategory={showCategory}
                     tasks={group.tasks}
                     today={today}
                     onOpen={onOpen}
@@ -6380,6 +6424,7 @@ function MatrixSortableTaskList({
   onOpen,
   onToggle,
   sectionKey,
+  showCategory,
   tasks,
   today
 }: {
@@ -6387,6 +6432,7 @@ function MatrixSortableTaskList({
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   sectionKey: MatrixQuadrantKey;
+  showCategory: boolean;
   tasks: DecryptedScheduleTask[];
   today: string;
 }) {
@@ -6401,6 +6447,7 @@ function MatrixSortableTaskList({
           <SortableMatrixTaskRow
             key={task.id}
             sectionKey={sectionKey}
+            showCategory={showCategory}
             task={task}
             today={today}
             onOpen={onOpen}
@@ -6416,12 +6463,14 @@ function SortableMatrixTaskRow({
   onOpen,
   onToggle,
   sectionKey,
+  showCategory,
   task,
   today
 }: {
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   sectionKey: MatrixQuadrantKey;
+  showCategory: boolean;
   task: DecryptedScheduleTask;
   today: string;
 }) {
@@ -6447,7 +6496,6 @@ function SortableMatrixTaskRow({
       className={`task-row matrix-task-row ${task.status === "completed" ? "completed" : ""} ${isDragging ? "dragging" : ""}`}
       ref={setNodeRef}
       style={style}
-      {...listeners}
     >
       <button
         className="task-drag-handle"
@@ -6457,10 +6505,17 @@ function SortableMatrixTaskRow({
         style={{ touchAction: "none" }}
         title="드래그 이동"
         {...attributes}
+        {...listeners}
       >
         <GripVertical size={16} />
       </button>
-      <MatrixTaskRowContent task={task} today={today} onOpen={onOpen} onToggle={onToggle} />
+      <MatrixTaskRowContent
+        onOpen={onOpen}
+        onToggle={onToggle}
+        showCategory={showCategory}
+        task={task}
+        today={today}
+      />
     </div>
   );
 }
@@ -6468,11 +6523,13 @@ function SortableMatrixTaskRow({
 function MatrixTaskRowContent({
   onOpen,
   onToggle,
+  showCategory = true,
   task,
   today
 }: {
   onOpen?: (taskId: string) => void;
   onToggle?: (task: DecryptedScheduleTask) => void;
+  showCategory?: boolean;
   task: DecryptedScheduleTask;
   today: string;
 }) {
@@ -6497,7 +6554,7 @@ function MatrixTaskRowContent({
       </button>
       <button className="task-main task-open-button" type="button" onClick={() => onOpen?.(task.id)}>
         <strong>{task.title}</strong>
-        <ScheduleCategoryBadge category={task.details.category} />
+        {showCategory && <ScheduleCategoryBadge category={task.details.category} />}
         <span className={isOverdue ? "task-meta overdue" : "task-meta"}>{formatTaskMeta(task)}</span>
         <span
           aria-label={`${task.title} 진행률 ${progressPercent}%`}
@@ -6754,6 +6811,7 @@ function PagedTaskList({
   onOpen,
   onToggle,
   pageSize = taskPageSize,
+  showCategory = true,
   showProgress = false,
   strikeCompleted = true,
   today = toLocalDateString(new Date()),
@@ -6764,6 +6822,7 @@ function PagedTaskList({
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
   pageSize?: number;
+  showCategory?: boolean;
   showProgress?: boolean;
   strikeCompleted?: boolean;
   today?: string;
@@ -6791,6 +6850,7 @@ function PagedTaskList({
         tasks={visibleTasks}
         onOpen={onOpen}
         onToggle={onToggle}
+        showCategory={showCategory}
         showProgress={showProgress}
         strikeCompleted={strikeCompleted}
         today={today}
@@ -6990,6 +7050,7 @@ function TaskList({
   tasks,
   onOpen,
   onToggle,
+  showCategory = true,
   showProgress = false,
   strikeCompleted = true,
   today = toLocalDateString(new Date())
@@ -6999,6 +7060,7 @@ function TaskList({
   tasks: DecryptedScheduleTask[];
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
+  showCategory?: boolean;
   showProgress?: boolean;
   strikeCompleted?: boolean;
   today?: string;
@@ -7015,6 +7077,7 @@ function TaskList({
           key={task.id}
           onOpen={onOpen}
           onToggle={onToggle}
+          showCategory={showCategory}
           showProgress={showProgress}
           strikeCompleted={strikeCompleted}
           task={task}
@@ -7029,6 +7092,7 @@ function TaskListRow({
   getMeta,
   onOpen,
   onToggle,
+  showCategory,
   showProgress,
   strikeCompleted,
   task,
@@ -7037,6 +7101,7 @@ function TaskListRow({
   getMeta?: (task: DecryptedScheduleTask) => string;
   onOpen: (taskId: string) => void;
   onToggle: (task: DecryptedScheduleTask) => void;
+  showCategory: boolean;
   showProgress: boolean;
   strikeCompleted: boolean;
   task: DecryptedScheduleTask;
@@ -7058,7 +7123,7 @@ function TaskListRow({
       </button>
       <button className="task-main task-open-button" type="button" onClick={() => onOpen(task.id)}>
         <strong>{task.title}</strong>
-        <ScheduleCategoryBadge category={task.details.category} />
+        {showCategory && <ScheduleCategoryBadge category={task.details.category} />}
         <span className={isTaskScheduleOverdue(task, today) ? "task-meta overdue" : "task-meta"}>
           {getMeta ? getMeta(task) : formatTaskMeta(task)}
         </span>
@@ -9961,20 +10026,28 @@ function shouldShowCalendarTaskLabel(task: DecryptedScheduleTask, dateString: st
   return dateString === firstVisibleDate || !taskCoversDate(task, addDays(dateString, -1));
 }
 
-function calendarDayAriaLabel(dateString: string, tasks: DecryptedScheduleTask[]) {
+function calendarDayAriaLabel(
+  dateString: string,
+  tasks: DecryptedScheduleTask[],
+  showCategory = true,
+  holidays: KoreanHoliday[] = []
+) {
   const dateLabel = formatDateLabel(dateString);
+  const holidayLabel = holidays.length > 0
+    ? ` 공휴일 ${holidays.map((holiday) => holiday.name).join(", ")}.`
+    : "";
 
   if (tasks.length === 0) {
-    return `${dateLabel} 선택. 일정 없음`;
+    return `${dateLabel} 선택.${holidayLabel} 일정 없음`;
   }
 
   const visibleTaskLabels = tasks.slice(0, 3).map(
-    (task) => `${scheduleCategoryLabel(task.details.category)} ${task.title}`
+    (task) => `${showCategory ? `${scheduleCategoryLabel(task.details.category)} ` : ""}${task.title}`
   );
   const remainingCount = tasks.length - visibleTaskLabels.length;
   const remainingLabel = remainingCount > 0 ? ` 외 ${remainingCount}개` : "";
 
-  return `${dateLabel} 선택. 일정 ${tasks.length}개: ${visibleTaskLabels.join(", ")}${remainingLabel}`;
+  return `${dateLabel} 선택.${holidayLabel} 일정 ${tasks.length}개: ${visibleTaskLabels.join(", ")}${remainingLabel}`;
 }
 
 function taskCoversDate(task: DecryptedScheduleTask, dateString: string) {

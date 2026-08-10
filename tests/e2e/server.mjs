@@ -158,6 +158,7 @@ function json(response, statusCode, payload) {
 }
 
 const allowedScenarios = new Set([
+  "admin-layout",
   "authenticated-unverified",
   "authenticated-verified",
   "comment",
