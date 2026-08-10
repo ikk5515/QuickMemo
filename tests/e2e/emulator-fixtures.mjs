@@ -231,7 +231,7 @@ async function userKeyBundle(password) {
   };
 }
 
-async function createLoginUser({ displayName, verified }) {
+async function createLoginUser({ displayName, isAdmin = false, verified }) {
   const suffix = randomSuffix();
   const email = `e2e-${suffix}@example.test`;
   const created = await createEmulatorOwner(email, testLoginPassword);
@@ -252,8 +252,8 @@ async function createLoginUser({ displayName, verified }) {
     quickKey: 91,
     loginEmail: email,
     isActive: true,
-    isAdmin: false,
-    role: "user",
+    isAdmin,
+    role: isAdmin ? "admin" : "user",
     publicKeyJwk: keys.publicKeyJwk,
     allowedShareTargetUids: [created.localId],
     featureAccess: {
@@ -318,6 +318,7 @@ function scenarioOptions(scenario) {
     schemaVersion: 2,
     showCommenterIpPrefix: false,
     standardV2Url: false,
+    viewerAdmin: false,
     viewerAuth: null,
     withAttachment: false
   };
@@ -351,6 +352,11 @@ function scenarioOptions(scenario) {
     options.permissionLevel = "save_copy";
     options.viewerAuth = "verified";
     options.withAttachment = true;
+  } else if (scenario === "admin-layout") {
+    options.accessMode = "authenticated_users";
+    options.emailVerificationRequired = true;
+    options.viewerAdmin = true;
+    options.viewerAuth = "verified";
   } else if (scenario === "authenticated-verified") {
     options.accessMode = "authenticated_users";
     options.emailVerificationRequired = true;
@@ -489,6 +495,7 @@ export async function seedE2eScenario(scenario) {
   const viewerAuth = options.viewerAuth
     ? await createLoginUser({
         displayName: `E2E Viewer ${suffix.slice(0, 5)}`,
+        isAdmin: options.viewerAdmin,
         verified: options.viewerAuth === "verified"
       })
     : null;
