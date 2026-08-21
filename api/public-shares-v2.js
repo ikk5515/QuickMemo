@@ -8082,12 +8082,9 @@ function evaluateCopyAttachmentQuota({
 
 async function preflightCopyAttachmentQuota(context, uid, share) {
   const freeTierPolicy = resolveFreeTierPolicy(process.env);
-  const [attachments, usage, globalUsage] = await Promise.all([
+  const [attachments, usage] = await Promise.all([
     currentAttachments(context, share),
-    firestoreGet(context, `userAttachmentUsage/${safeId(uid, "uid")}`),
-    freeTierPolicy.enabled
-      ? firestoreGet(context, GLOBAL_BLOB_USAGE_DOCUMENT_PATH)
-      : Promise.resolve(null)
+    firestoreGet(context, `userAttachmentUsage/${safeId(uid, "uid")}`)
   ]);
   let additionalBytes = 0;
   for (const attachment of attachments) {
@@ -8113,7 +8110,13 @@ async function preflightCopyAttachmentQuota(context, uid, share) {
   if (!decision.allowed) {
     throw new HttpError(413, "attachment_quota_exceeded", "Attachment quota preflight failed");
   }
-  if (freeTierPolicy.enabled) {
+  // A copy grant for a note without attachments does not reserve or upload any
+  // Blob bytes. Requiring the global Blob counter in that case turns a missing
+  // storage document into an unrelated Secure Share outage. Keep the counter
+  // fail-closed for every positive-byte copy while allowing metadata-only
+  // grants to avoid an unnecessary Firestore read.
+  if (freeTierPolicy.enabled && additionalBytes > 0) {
+    const globalUsage = await firestoreGet(context, GLOBAL_BLOB_USAGE_DOCUMENT_PATH);
     if (
       !globalUsage
       || globalUsage.schemaVersion !== GLOBAL_BLOB_USAGE_SCHEMA_VERSION

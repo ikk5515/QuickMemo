@@ -23,6 +23,12 @@ const thematicBreakPattern = /^\s{0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,}
 const tableDelimiterCellPattern = /^:?-{3,}:?$/;
 const mathFencePattern = /^\s{0,3}\$\$(.*)$/;
 const maximumMarkdownBlockNestingDepth = 64;
+const maximumMarkdownInlineNestingDepth = 32;
+const markdownInlineProbeMultiplier = 12;
+
+interface MarkdownInlineParseContext {
+  remainingProbeCharacters: number;
+}
 
 export function normalizeMarkdownLineEndings(value: string) {
   return value.replace(/\r\n?/g, "\n");
@@ -100,6 +106,9 @@ export function stripObsidianComments(source: string, preserveFrontmatter = true
           index = closing + markerLength;
           continue;
         }
+        result += line.slice(index, index + markerLength);
+        index += markerLength;
+        continue;
       }
 
       result += line[index];
@@ -171,10 +180,20 @@ export function parseWikiLinkTarget(value: string): ParsedWikiLinkTarget | null 
 }
 
 export function parseMarkdownInline(value: string): MarkdownInlineToken[] {
-  return parseMarkdownInlineValue(stripObsidianComments(value, false));
+  const source = stripObsidianComments(value, false);
+  return parseMarkdownInlineValue(source, {
+    remainingProbeCharacters: Math.max(1_024, source.length * markdownInlineProbeMultiplier)
+  }, 0);
 }
 
-function parseMarkdownInlineValue(value: string): MarkdownInlineToken[] {
+function parseMarkdownInlineValue(
+  value: string,
+  context: MarkdownInlineParseContext,
+  depth: number
+): MarkdownInlineToken[] {
+  if (depth >= maximumMarkdownInlineNestingDepth) {
+    return value ? [{ type: "text", value }] : [];
+  }
   const tokens: MarkdownInlineToken[] = [];
   let text = "";
   let index = 0;
@@ -188,13 +207,17 @@ function parseMarkdownInlineValue(value: string): MarkdownInlineToken[] {
   };
 
   while (index < value.length) {
+    if (context.remainingProbeCharacters <= 0) {
+      text += value.slice(index);
+      break;
+    }
     if (value[index] === "\\" && index + 1 < value.length) {
       text += value[index + 1];
       index += 2;
       continue;
     }
 
-    const code = parseCodeSpan(value, index);
+    const code = parseCodeSpan(value, index, context);
     if (code) {
       pushText();
       tokens.push({ type: "code", value: code.value });
@@ -202,7 +225,7 @@ function parseMarkdownInlineValue(value: string): MarkdownInlineToken[] {
       continue;
     }
 
-    const footnote = parseFootnoteReference(value, index);
+    const footnote = parseFootnoteReference(value, index, context, depth);
     if (footnote) {
       pushText();
       tokens.push(footnote.token);
@@ -210,7 +233,7 @@ function parseMarkdownInlineValue(value: string): MarkdownInlineToken[] {
       continue;
     }
 
-    const math = parseInlineMath(value, index);
+    const math = parseInlineMath(value, index, context);
     if (math) {
       pushText();
       tokens.push({ type: "math", value: math.value });
@@ -218,7 +241,7 @@ function parseMarkdownInlineValue(value: string): MarkdownInlineToken[] {
       continue;
     }
 
-    const wiki = parseWikiLink(value, index);
+    const wiki = parseWikiLink(value, index, context);
     if (wiki) {
       pushText();
       tokens.push(wiki.token);
@@ -226,7 +249,7 @@ function parseMarkdownInlineValue(value: string): MarkdownInlineToken[] {
       continue;
     }
 
-    const markdownLink = parseMarkdownLink(value, index);
+    const markdownLink = parseMarkdownLink(value, index, context, depth);
     if (markdownLink) {
       pushText();
       tokens.push(markdownLink.token);
@@ -234,7 +257,7 @@ function parseMarkdownInlineValue(value: string): MarkdownInlineToken[] {
       continue;
     }
 
-    const decorated = parseDecoratedSpan(value, index);
+    const decorated = parseDecoratedSpan(value, index, context, depth);
     if (decorated) {
       pushText();
       tokens.push(decorated.token);
@@ -430,17 +453,20 @@ function tokenizeMarkdownAtDepth(source: string, depth: number): MarkdownDocumen
   };
 }
 
-function parseCodeSpan(value: string, index: number) {
+function parseCodeSpan(value: string, index: number, context: MarkdownInlineParseContext) {
   if (value[index] !== "`") {
     return null;
   }
 
   let markerLength = 1;
   while (value[index + markerLength] === "`") {
+    if (!consumeInlineProbe(context)) {
+      return null;
+    }
     markerLength += 1;
   }
   const marker = "`".repeat(markerLength);
-  const closing = value.indexOf(marker, index + markerLength);
+  const closing = findSequenceWithBudget(value, marker, index + markerLength, context);
   if (closing === -1) {
     return null;
   }
@@ -452,7 +478,12 @@ function parseCodeSpan(value: string, index: number) {
   return { value: content, end: closing + markerLength };
 }
 
-function parseFootnoteReference(value: string, index: number) {
+function parseFootnoteReference(
+  value: string,
+  index: number,
+  context: MarkdownInlineParseContext,
+  depth: number
+) {
   const inline = value.startsWith("^[", index);
   const reference = value.startsWith("[^", index);
   if (!inline && !reference) {
@@ -460,11 +491,11 @@ function parseFootnoteReference(value: string, index: number) {
   }
 
   const contentStart = index + 2;
-  const closing = findUnescaped(value.slice(contentStart), "]");
+  const closing = findUnescapedWithBudget(value, "]", contentStart, context);
   if (closing === -1) {
     return null;
   }
-  const contentEnd = contentStart + closing;
+  const contentEnd = closing;
   const content = value.slice(contentStart, contentEnd).trim();
   if (!content || (!inline && /\s/u.test(content))) {
     return null;
@@ -474,14 +505,14 @@ function parseFootnoteReference(value: string, index: number) {
     type: "footnote-reference",
     raw: value.slice(index, contentEnd + 1),
     label: inline ? "" : content,
-    inline: inline ? parseMarkdownInline(content) : null,
+    inline: inline ? parseMarkdownInlineValue(content, context, depth + 1) : null,
     number: null,
     referenceIndex: null
   };
   return { token, end: contentEnd + 1 };
 }
 
-function parseInlineMath(value: string, index: number) {
+function parseInlineMath(value: string, index: number, context: MarkdownInlineParseContext) {
   if (
     value[index] !== "$"
     || value[index + 1] === "$"
@@ -492,6 +523,9 @@ function parseInlineMath(value: string, index: number) {
   }
 
   for (let end = index + 1; end < value.length; end += 1) {
+    if (!consumeInlineProbe(context)) {
+      return null;
+    }
     if (value[end] === "\\") {
       end += 1;
       continue;
@@ -544,14 +578,14 @@ function parseMathBlock(lines: string[], index: number) {
   return null;
 }
 
-function parseWikiLink(value: string, index: number) {
+function parseWikiLink(value: string, index: number, context: MarkdownInlineParseContext) {
   const embed = value.startsWith("![[", index);
   if (!embed && !value.startsWith("[[", index)) {
     return null;
   }
 
   const contentStart = index + (embed ? 3 : 2);
-  const closing = value.indexOf("]]", contentStart);
+  const closing = findSequenceWithBudget(value, "]]", contentStart, context);
   if (closing === -1) {
     return null;
   }
@@ -574,7 +608,12 @@ function parseWikiLink(value: string, index: number) {
   return { token, end: closing + 2 };
 }
 
-function parseMarkdownLink(value: string, index: number) {
+function parseMarkdownLink(
+  value: string,
+  index: number,
+  context: MarkdownInlineParseContext,
+  depth: number
+) {
   const image = value.startsWith("![", index);
   const openingLength = image ? 2 : 1;
   if (value[index] !== "[" && !image) {
@@ -582,11 +621,11 @@ function parseMarkdownLink(value: string, index: number) {
   }
 
   const labelStart = index + openingLength;
-  const labelEnd = value.indexOf("](", labelStart);
+  const labelEnd = findSequenceWithBudget(value, "](", labelStart, context);
   if (labelEnd === -1) {
     return null;
   }
-  const hrefEnd = findClosingParenthesis(value, labelEnd + 2);
+  const hrefEnd = findClosingParenthesis(value, labelEnd + 2, context);
   if (hrefEnd === -1) {
     return null;
   }
@@ -607,7 +646,7 @@ function parseMarkdownLink(value: string, index: number) {
     external,
     safe,
     embed: image,
-    children: parseMarkdownInline(value.slice(labelStart, labelEnd))
+    children: parseMarkdownInlineValue(value.slice(labelStart, labelEnd), context, depth + 1)
   };
 
   if (image) {
@@ -616,7 +655,12 @@ function parseMarkdownLink(value: string, index: number) {
   return { token, end: hrefEnd + 1 };
 }
 
-function parseDecoratedSpan(value: string, index: number) {
+function parseDecoratedSpan(
+  value: string,
+  index: number,
+  context: MarkdownInlineParseContext,
+  depth: number
+) {
   const candidates: Array<{ marker: string; type: "strong" | "emphasis" | "delete" }> = [
     { marker: "**", type: "strong" },
     { marker: "__", type: "strong" },
@@ -630,14 +674,14 @@ function parseDecoratedSpan(value: string, index: number) {
       continue;
     }
     const contentStart = index + candidate.marker.length;
-    const closing = value.indexOf(candidate.marker, contentStart);
+    const closing = findSequenceWithBudget(value, candidate.marker, contentStart, context);
     if (closing <= contentStart) {
       continue;
     }
     return {
       token: {
         type: candidate.type,
-        children: parseMarkdownInline(value.slice(contentStart, closing))
+        children: parseMarkdownInlineValue(value.slice(contentStart, closing), context, depth + 1)
       } as MarkdownInlineToken,
       end: closing + candidate.marker.length
     };
@@ -953,9 +997,16 @@ function splitTableRow(value: string) {
   return cells;
 }
 
-function findClosingParenthesis(value: string, start: number) {
+function findClosingParenthesis(
+  value: string,
+  start: number,
+  context: MarkdownInlineParseContext
+) {
   let depth = 0;
   for (let index = start; index < value.length; index += 1) {
+    if (!consumeInlineProbe(context)) {
+      return -1;
+    }
     if (value[index] === "\\") {
       index += 1;
     } else if (value[index] === "(") {
@@ -965,6 +1016,52 @@ function findClosingParenthesis(value: string, start: number) {
         return index;
       }
       depth -= 1;
+    }
+  }
+  return -1;
+}
+
+function consumeInlineProbe(context: MarkdownInlineParseContext, amount = 1) {
+  if (context.remainingProbeCharacters < amount) {
+    context.remainingProbeCharacters = 0;
+    return false;
+  }
+  context.remainingProbeCharacters -= amount;
+  return true;
+}
+
+function findSequenceWithBudget(
+  value: string,
+  sequence: string,
+  start: number,
+  context: MarkdownInlineParseContext
+) {
+  const lastStart = value.length - sequence.length;
+  for (let index = start; index <= lastStart; index += 1) {
+    if (!consumeInlineProbe(context, Math.max(1, sequence.length))) {
+      return -1;
+    }
+    if (value.startsWith(sequence, index)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function findUnescapedWithBudget(
+  value: string,
+  character: string,
+  start: number,
+  context: MarkdownInlineParseContext
+) {
+  for (let index = start; index < value.length; index += 1) {
+    if (!consumeInlineProbe(context)) {
+      return -1;
+    }
+    if (value[index] === "\\") {
+      index += 1;
+    } else if (value[index] === character) {
+      return index;
     }
   }
   return -1;

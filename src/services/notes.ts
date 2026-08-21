@@ -4,6 +4,7 @@ import {
   deleteDoc,
   deleteField,
   doc,
+  getCountFromServer,
   getDoc,
   getDocs,
   limit,
@@ -71,7 +72,7 @@ export interface SaveNoteInput {
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
   contentFormat?: VaultContentFormat;
-  entryKind?: Exclude<VaultEntryKind, "asset">;
+  entryKind?: VaultEntryKind;
   folderId?: string | null;
   historySummary?: EncryptedPayload;
   historySnapshot?: EncryptedPayload;
@@ -126,6 +127,8 @@ export interface UpdateRevisionedEncryptedNoteInput {
   changedFields?: string[];
   encryptedBody: EncryptedPayload;
   encryptedTitle: EncryptedPayload;
+  expectedContentFormat: VaultContentFormat;
+  expectedEntryKind: VaultEntryKind;
   expectedRevision: number;
   historySnapshot?: EncryptedPayload;
   historySummary?: EncryptedPayload;
@@ -172,6 +175,41 @@ export class NoteRevisionConflictError extends Error {
   }
 }
 
+export class NoteFolderLimitError extends Error {
+  readonly code = "note-folder/resource-limit-exceeded";
+  readonly context: "create" | "subscription";
+  readonly maxFolders: number;
+
+  constructor(maxFolders: number, context: "create" | "subscription" = "create") {
+    super(context === "subscription"
+      ? `폴더가 ${maxFolders.toLocaleString("ko-KR")}개를 초과해 전체 목록을 표시하지 않았습니다. 기존 폴더를 삭제한 뒤 다시 확인해주세요.`
+      : `폴더는 최대 ${maxFolders.toLocaleString("ko-KR")}개까지 만들 수 있습니다. 새 폴더를 만들려면 기존 폴더를 삭제해주세요.`);
+    this.name = "NoteFolderLimitError";
+    this.context = context;
+    this.maxFolders = maxFolders;
+  }
+}
+
+export function isLegacyHtmlNoteDocument(
+  note: Pick<NoteDocument, "contentFormat" | "entryKind">
+) {
+  return (
+    (!note.contentFormat && !note.entryKind)
+    || (note.contentFormat === "legacy-html-v1" && note.entryKind === "legacy-html")
+  );
+}
+
+function noteStorageIdentityMatches(
+  note: Pick<NoteDocument, "contentFormat" | "entryKind">,
+  expectedContentFormat: VaultContentFormat,
+  expectedEntryKind: VaultEntryKind
+) {
+  if (isLegacyHtmlNoteDocument(note)) {
+    return expectedContentFormat === "legacy-html-v1" && expectedEntryKind === "legacy-html";
+  }
+  return note.contentFormat === expectedContentFormat && note.entryKind === expectedEntryKind;
+}
+
 export interface SaveNoteAttachmentInput {
   noteId: string;
   fileName: string;
@@ -215,6 +253,43 @@ export interface PurgeNoteInput {
 
 const initialNoteRevision = 1;
 const maxNoteRevision = 999_999_999_999;
+const maxEncryptedTitleCharacters = 4_096;
+const maxEncryptedBodyCharacters = 700_000;
+const maxEncryptedHistorySummaryCharacters = 8_192;
+const maxEncryptedHistorySnapshotCharacters = 700_000;
+const maxEncryptedIvCharacters = 256;
+export const maxNoteFoldersPerOwner = 5_000;
+const noteFolderSubscriptionSentinelLimit = maxNoteFoldersPerOwner + 1;
+
+function assertEncryptedPayloadSize(
+  payload: EncryptedPayload | undefined,
+  label: string,
+  maxCipherTextCharacters: number
+) {
+  if (!payload) {
+    return;
+  }
+  if (
+    payload.algorithm !== "AES-GCM"
+    || payload.version !== 1
+    || !payload.cipherText
+    || payload.cipherText.length > maxCipherTextCharacters
+    || !payload.iv
+    || payload.iv.length > maxEncryptedIvCharacters
+  ) {
+    throw new Error(`${label} 암호문 크기 또는 형식이 올바르지 않습니다.`);
+  }
+}
+
+function assertEncryptedNotePayloadSizes(input: Pick<
+  SaveNoteInput,
+  "encryptedBody" | "encryptedTitle" | "historySnapshot" | "historySummary"
+>) {
+  assertEncryptedPayloadSize(input.encryptedTitle, "노트 제목", maxEncryptedTitleCharacters);
+  assertEncryptedPayloadSize(input.encryptedBody, "노트 본문", maxEncryptedBodyCharacters);
+  assertEncryptedPayloadSize(input.historySummary, "노트 이력 요약", maxEncryptedHistorySummaryCharacters);
+  assertEncryptedPayloadSize(input.historySnapshot, "노트 이력 스냅샷", maxEncryptedHistorySnapshotCharacters);
+}
 
 function expectedNoteRevision(revision: number) {
   if (!Number.isSafeInteger(revision) || revision < 0 || revision > maxNoteRevision) {
@@ -776,6 +851,7 @@ async function createRevisionedEncryptedNoteWithFields(
   input: SaveNoteInput,
   additionalFields: Record<string, unknown> = {}
 ): Promise<CreatedRevisionedNoteResult> {
+  assertEncryptedNotePayloadSizes(input);
   const { historySnapshot, historySummary, ...noteInput } = input;
   const noteRef = doc(collection(db, "notes"));
   const historyRef = doc(collection(db, "notes", noteRef.id, "history"));
@@ -918,6 +994,7 @@ export async function createEncryptedNote(input: SaveNoteInput) {
 }
 
 export async function updateRevisionedEncryptedNote(input: UpdateRevisionedEncryptedNoteInput) {
+  assertEncryptedNotePayloadSizes(input);
   return commitRevisionedNoteMutation({
     action: "content",
     changedFields: input.changedFields ?? ["title", "body"],
@@ -927,6 +1004,11 @@ export async function updateRevisionedEncryptedNote(input: UpdateRevisionedEncry
     noteId: input.noteId,
     readerUids: input.readerUids,
     uid: input.uid,
+    validateCurrent: (note) => noteStorageIdentityMatches(
+      note,
+      input.expectedContentFormat,
+      input.expectedEntryKind
+    ),
     update: {
       encryptedTitle: input.encryptedTitle,
       encryptedBody: input.encryptedBody,
@@ -955,6 +1037,7 @@ export async function updateEncryptedNote(
     noteId,
     readerUids,
     uid,
+    validateCurrent: isLegacyHtmlNoteDocument,
     update: {
       encryptedTitle,
       encryptedBody,
@@ -1134,6 +1217,9 @@ async function commitRevisionedNoteMutation(input: RevisionedNoteMutationInput):
     if (input.expectedRevision !== undefined && currentRevision !== input.expectedRevision) {
       throw new NoteRevisionConflictError(input.expectedRevision, currentRevision);
     }
+    if (currentRevision >= maxNoteRevision) {
+      throw new Error("노트 revision이 안전한 저장 범위를 초과했습니다.");
+    }
     if (input.validateCurrent && !input.validateCurrent(currentNote)) {
       throw new Error("현재 노트 상태가 요청한 작업과 일치하지 않습니다.");
     }
@@ -1300,13 +1386,27 @@ export async function getEncryptedNoteAttachmentSource(
 export function subscribeNoteFolders(
   uid: string,
   callback: (folders: NoteFolderSnapshot[]) => void,
-  onError?: (error: Error) => void
+  onError: (error: Error) => void
 ) {
-  const foldersQuery = query(collection(db, "noteFolders"), where("ownerUid", "==", uid));
+  const foldersQuery = query(
+    collection(db, "noteFolders"),
+    where("ownerUid", "==", uid),
+    limit(noteFolderSubscriptionSentinelLimit)
+  );
+  let limitExceeded = false;
 
   return onSnapshot(
     foldersQuery,
     (snapshot) => {
+      if (snapshot.docs.length > maxNoteFoldersPerOwner) {
+        if (!limitExceeded) {
+          onError(new NoteFolderLimitError(maxNoteFoldersPerOwner, "subscription"));
+        }
+        limitExceeded = true;
+        return;
+      }
+
+      limitExceeded = false;
       callback(
         snapshot.docs
           .map((document) => ({ id: document.id, ...(document.data() as NoteFolderDocument) }))
@@ -1316,11 +1416,20 @@ export function subscribeNoteFolders(
           })
       );
     },
-    (error) => onError?.(error)
+    onError
   );
 }
 
 export async function createNoteFolder(uid: string, name: string, color: string) {
+  const folderCount = await getCountFromServer(query(
+    collection(db, "noteFolders"),
+    where("ownerUid", "==", uid),
+    limit(maxNoteFoldersPerOwner)
+  ));
+  if (folderCount.data().count >= maxNoteFoldersPerOwner) {
+    throw new NoteFolderLimitError(maxNoteFoldersPerOwner);
+  }
+
   return addDoc(collection(db, "noteFolders"), {
     ownerUid: uid,
     name: name.trim(),
@@ -1334,6 +1443,21 @@ export async function createNoteFolder(uid: string, name: string, color: string)
 }
 
 export async function createEncryptedNoteFolder(input: CreateEncryptedNoteFolderInput) {
+  assertEncryptedPayloadSize(input.encryptedName, "폴더 이름", 2_048);
+  if (
+    !input.ownerUid
+    || input.ownerUid.length > 160
+    || !Number.isSafeInteger(input.order)
+    || input.order < 0
+    || input.order > 999_999_999
+    || (input.parentId !== null && (
+      !input.parentId
+      || input.parentId.length > 120
+      || input.parentId.includes("/")
+    ))
+  ) {
+    throw new Error("암호화 폴더 정보가 올바르지 않습니다.");
+  }
   const folderRef = doc(collection(db, "noteFolders"));
   await runTransaction(db, async (transaction) => {
     if (input.parentId) {
@@ -1374,6 +1498,26 @@ export async function createEncryptedNoteFolder(input: CreateEncryptedNoteFolder
 }
 
 export async function updateEncryptedNoteFolder(input: UpdateEncryptedNoteFolderInput) {
+  expectedNoteRevision(input.expectedRevision);
+  if (!input.folderId || input.folderId.length > 120 || input.folderId.includes("/")) {
+    throw new Error("폴더 식별자가 올바르지 않습니다.");
+  }
+  if (input.encryptedName) {
+    assertEncryptedPayloadSize(input.encryptedName, "폴더 이름", 2_048);
+  }
+  if (
+    input.order !== undefined
+    && (!Number.isSafeInteger(input.order) || input.order < 0 || input.order > 999_999_999)
+  ) {
+    throw new Error("폴더 정렬 순서가 올바르지 않습니다.");
+  }
+  if (
+    input.parentId !== undefined
+    && input.parentId !== null
+    && (!input.parentId || input.parentId.length > 120 || input.parentId.includes("/"))
+  ) {
+    throw new Error("상위 폴더 식별자가 올바르지 않습니다.");
+  }
   const folderRef = doc(db, "noteFolders", input.folderId);
 
   return runTransaction(db, async (transaction) => {
@@ -1388,6 +1532,9 @@ export async function updateEncryptedNoteFolder(input: UpdateEncryptedNoteFolder
 
     if (folder.ownerUid !== input.ownerUid || revision !== input.expectedRevision) {
       throw new NoteRevisionConflictError(input.expectedRevision, revision);
+    }
+    if (revision >= maxNoteRevision) {
+      throw new Error("폴더 revision이 안전한 저장 범위를 초과했습니다.");
     }
 
     if (input.parentId !== undefined) {

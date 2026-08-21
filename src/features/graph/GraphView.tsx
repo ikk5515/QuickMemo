@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { memo, useId, useState } from "react";
 import { GraphCanvas, type GraphCanvasProps } from "./GraphCanvas";
 import { GraphSettingsDrawer } from "./GraphSettingsDrawer";
 import type { GraphSettingsSectionId, GraphViewSettings } from "./types";
@@ -12,7 +12,7 @@ export interface GraphViewProps extends GraphCanvasProps {
   onSettingsVisibilityChange?: (open: boolean) => void;
 }
 
-export function GraphView({
+export const GraphView = memo(function GraphView({
   collapsedSettingsSections,
   defaultSettingsOpen = true,
   onCollapsedSettingsSectionsChange,
@@ -56,4 +56,4 @@ export function GraphView({
       ) : null}
     </div>
   );
-}
+});

@@ -42,6 +42,9 @@ export {
   VaultInteropWorkerExecutionError,
   VaultInteropWorkerProtocolError,
   VaultInteropWorkerTerminatedError,
+  VaultInteropWorkerTimeoutError,
+  DEFAULT_VAULT_INTEROP_TIMEOUT_MS,
+  MAXIMUM_VAULT_INTEROP_TIMEOUT_MS,
   type VaultInteropWorkerFactory,
   type VaultInteropWorkerRequestOptions,
   type VaultInteropWorkerTransport
@@ -56,7 +59,9 @@ export {
   planObsidianVaultImport,
   VaultImportPlanError,
   type ExistingVaultImportFolder,
+  type VaultImportAssetEntryPlan,
   type VaultImportEntryPlan,
   type VaultImportFolderPlan,
-  type VaultImportPlan
+  type VaultImportPlan,
+  type VaultImportTextEntryPlan
 } from "./importPlan";

@@ -25,8 +25,12 @@ export interface CodeMirrorMarkdownEditorProps {
   ariaLabel?: string;
   autoFocus?: boolean;
   completionData?: ObsidianMarkdownCompletionData;
+  insertRequest?: { id: number; text: string } | null;
   onChange: (value: string) => void;
+  onInsertHandled?: (id: number) => void;
+  onRevealHandled?: (id: number) => void;
   onSave?: () => void;
+  revealRequest?: { id: number; line: number } | null;
   value: string;
 }
 
@@ -34,21 +38,29 @@ export function CodeMirrorMarkdownEditor({
   ariaLabel = "Markdown 편집기",
   autoFocus = false,
   completionData,
+  insertRequest,
   onChange,
+  onInsertHandled,
+  onRevealHandled,
   onSave,
+  revealRequest,
   value
 }: CodeMirrorMarkdownEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const completionDataRef = useRef(completionData);
   const onChangeRef = useRef(onChange);
+  const onInsertHandledRef = useRef(onInsertHandled);
+  const onRevealHandledRef = useRef(onRevealHandled);
   const onSaveRef = useRef(onSave);
   const viewRef = useRef<EditorView | null>(null);
 
   useEffect(() => {
     completionDataRef.current = completionData;
     onChangeRef.current = onChange;
+    onInsertHandledRef.current = onInsertHandled;
+    onRevealHandledRef.current = onRevealHandled;
     onSaveRef.current = onSave;
-  }, [completionData, onChange, onSave]);
+  }, [completionData, onChange, onInsertHandled, onRevealHandled, onSave]);
 
   useEffect(() => {
     if (!hostRef.current) {
@@ -139,6 +151,37 @@ export function CodeMirrorMarkdownEditor({
       changes: { from: 0, to: view.state.doc.length, insert: value }
     });
   }, [value]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !insertRequest) {
+      return;
+    }
+    const selection = view.state.selection.main;
+    const anchor = selection.from + insertRequest.text.length;
+    view.dispatch({
+      changes: { from: selection.from, to: selection.to, insert: insertRequest.text },
+      selection: { anchor },
+      effects: EditorView.scrollIntoView(anchor, { y: "center" })
+    });
+    view.focus();
+    onInsertHandledRef.current?.(insertRequest.id);
+  }, [insertRequest]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !revealRequest) {
+      return;
+    }
+    const lineNumber = Math.max(1, Math.min(revealRequest.line, view.state.doc.lines));
+    const position = view.state.doc.line(lineNumber).from;
+    view.dispatch({
+      selection: { anchor: position },
+      effects: EditorView.scrollIntoView(position, { y: "center" })
+    });
+    view.focus();
+    onRevealHandledRef.current?.(revealRequest.id);
+  }, [revealRequest]);
 
   return <div className="vault-codemirror" ref={hostRef} />;
 }

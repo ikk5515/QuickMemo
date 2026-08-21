@@ -70,7 +70,6 @@ import {
   useRef,
   useState
 } from "react";
-import { Timestamp } from "firebase/firestore";
 import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
 import AttachmentPreviewModal from "../components/PublicAttachmentPreviewModal";
@@ -185,6 +184,7 @@ import {
   getEncryptedNoteAttachmentSource,
   getNoteAttachments,
   getNoteRevisionState,
+  isLegacyHtmlNoteDocument,
   markNoteRead,
   purgeNote,
   publishNoteCursor,
@@ -200,6 +200,8 @@ import {
   updateRevisionedEncryptedNote,
   updateRevisionedNoteAccess,
   updateNoteFolder,
+  maxNoteFoldersPerOwner,
+  NoteFolderLimitError,
   NoteRevisionConflictError,
   type NoteHistorySnapshot,
   type NoteAttachmentSnapshot,
@@ -2530,7 +2532,7 @@ async function decryptNoteSnapshots(
   isCurrent: () => boolean = () => true
 ) {
   const nextCache = new Map<string, DecryptedNoteCacheEntry>();
-  const nextNotes = await mapWithConcurrency(notes, 4, async (note) => {
+  const nextNotes = await mapWithConcurrency(notes.filter(isLegacyHtmlNoteDocument), 4, async (note) => {
     const wrappedKey = note.wrappedKeys[uid];
 
     if (!wrappedKey) {
@@ -2696,6 +2698,7 @@ export default function NotesPage() {
     async () => null
   );
   const attachmentUploadInFlightRef = useRef(false);
+  const folderCreationInFlightRef = useRef(false);
   const cursorPublishTimer = useRef<number | null>(null);
   const lastPublishedCursor = useRef<string | null>(null);
   const memoEditorRef = useRef<HTMLDivElement | null>(null);
@@ -2891,8 +2894,11 @@ export default function NotesPage() {
       return undefined;
     }
 
-    return subscribeVisibleNotes(profile.uid, profile.isAdmin ? null : visibleNoteOwnerUids, setNotes, () =>
-      setError("노트 목록을 불러오지 못했습니다.")
+    return subscribeVisibleNotes(
+      profile.uid,
+      profile.isAdmin ? null : visibleNoteOwnerUids,
+      (nextNotes) => setNotes(nextNotes.filter(isLegacyHtmlNoteDocument)),
+      () => setError("노트 목록을 불러오지 못했습니다.")
     );
   }, [privateKey, profile, visibleNoteOwnerUids]);
 
@@ -2902,8 +2908,11 @@ export default function NotesPage() {
       return undefined;
     }
 
-    return subscribeDeletedNotes(profile.uid, profile.isAdmin ? null : visibleNoteOwnerUids, setDeletedNotes, () =>
-      setError("복구함을 불러오지 못했습니다.")
+    return subscribeDeletedNotes(
+      profile.uid,
+      profile.isAdmin ? null : visibleNoteOwnerUids,
+      (nextNotes) => setDeletedNotes(nextNotes.filter(isLegacyHtmlNoteDocument)),
+      () => setError("복구함을 불러오지 못했습니다.")
     );
   }, [privateKey, profile, visibleNoteOwnerUids]);
 
@@ -2931,7 +2940,16 @@ export default function NotesPage() {
       return undefined;
     }
 
-    return subscribeNoteFolders(profile.uid, setFolders, () => setError("폴더 목록을 불러오지 못했습니다."));
+    return subscribeNoteFolders(profile.uid, setFolders, (subscriptionError) => {
+      if (subscriptionError instanceof NoteFolderLimitError) {
+        setStatus("");
+      }
+      setError(
+        subscriptionError instanceof NoteFolderLimitError
+          ? subscriptionError.message
+          : "폴더 목록을 불러오지 못했습니다."
+      );
+    });
   }, [privateKey, profile]);
 
   useEffect(() => {
@@ -4183,30 +4201,33 @@ export default function NotesPage() {
       setError("폴더 이름을 입력해주세요.");
       return null;
     }
+    if (folders.length >= maxNoteFoldersPerOwner) {
+      setStatus("");
+      setError(new NoteFolderLimitError(maxNoteFoldersPerOwner).message);
+      return null;
+    }
+    if (folderCreationInFlightRef.current) {
+      setError("폴더를 만들고 있습니다. 잠시 후 다시 시도해주세요.");
+      return null;
+    }
 
+    folderCreationInFlightRef.current = true;
     try {
       const folderRef = await createNoteFolder(unlockedProfile.uid, trimmedName, safeColor);
-      const createdFolder: NoteFolderSnapshot = {
-        id: folderRef.id,
-        ownerUid: unlockedProfile.uid,
-        name: trimmedName,
-        color: safeColor,
-        createdAt: Timestamp.now(),
-        updatedAt: Timestamp.now()
-      };
-
-      setFolders((currentFolders) =>
-        currentFolders.some((folder) => folder.id === folderRef.id)
-          ? currentFolders
-          : [...currentFolders, createdFolder].sort((left, right) => left.name.localeCompare(right.name, "ko"))
-      );
       setOverviewFolderFilter(folderRef.id);
       setStatus("폴더를 만들었습니다.");
       setError(null);
       return folderRef.id;
-    } catch {
-      setError("폴더를 만들지 못했습니다.");
+    } catch (createError) {
+      if (createError instanceof NoteFolderLimitError) {
+        setStatus("");
+        setError(createError.message);
+      } else {
+        setError("폴더를 만들지 못했습니다.");
+      }
       return null;
+    } finally {
+      folderCreationInFlightRef.current = false;
     }
   }
 
@@ -4341,7 +4362,8 @@ export default function NotesPage() {
 
     const rawNote = notes.find((current) => current.id === note.id);
 
-    if (!rawNote) {
+    if (!rawNote || !isLegacyHtmlNoteDocument(rawNote)) {
+      setError("Vault 항목은 새 편집기에서 열어주세요.");
       return;
     }
 
@@ -6595,6 +6617,10 @@ export default function NotesPage() {
       setError(null);
 
       if (editor.noteId && editor.noteKey) {
+        const rawNote = notes.find((note) => note.id === editor.noteId);
+        if (!rawNote || !isLegacyHtmlNoteDocument(rawNote)) {
+          throw new Error("Vault 항목은 기존 편집기에서 저장할 수 없습니다.");
+        }
         const expectedRevision = editor.baseRevision;
         const previousDraft = activeRemoteNote ? draftFromNote(activeRemoteNote) : null;
         const saveDraft =
@@ -6612,6 +6638,8 @@ export default function NotesPage() {
           expectedRevision,
           encryptedTitle: payload.encryptedTitle,
           encryptedBody: payload.encryptedBody,
+          expectedContentFormat: "legacy-html-v1",
+          expectedEntryKind: "legacy-html",
           changedFields: changedDraftFields(previousDraft, saveDraft),
           readerUids: activeRemoteNote?.participantUids ?? editor.participantUids,
           historySummary,
@@ -7554,7 +7582,7 @@ export default function NotesPage() {
 
     const rawNote = notes.find((current) => current.id === note.id);
 
-    if (!rawNote) {
+    if (!rawNote || !isLegacyHtmlNoteDocument(rawNote)) {
       setError("이 노트를 저장할 수 없습니다.");
       return { revision: null, error: "이 노트를 저장할 수 없습니다." };
     }
@@ -7578,6 +7606,8 @@ export default function NotesPage() {
         noteId: note.id,
         uid: unlockedProfile.uid,
         expectedRevision,
+        expectedContentFormat: "legacy-html-v1",
+        expectedEntryKind: "legacy-html",
         encryptedTitle: payload.encryptedTitle,
         encryptedBody: payload.encryptedBody,
         changedFields: changedDraftFields(previousDraft, saveDraft),

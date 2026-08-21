@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type KeyboardEvent,
   type ReactNode
 } from "react";
@@ -22,6 +23,7 @@ import { graphOpenIntentFromModifiers } from "./graphSettings";
 import "./graph.css";
 
 const LazyForceGraphRenderer = lazy(() => import("./ForceGraphRenderer"));
+const ACCESSIBLE_NODE_BATCH_SIZE = 200;
 
 const NODE_KIND_LABELS: Record<GraphNode["kind"], string> = {
   note: "노트",
@@ -32,6 +34,31 @@ const NODE_KIND_LABELS: Record<GraphNode["kind"], string> = {
 };
 
 export type GraphRenderMode = "auto" | "canvas" | "accessible";
+
+export type GraphKeyboardAction =
+  | { type: "pan"; deltaX: number; deltaY: number }
+  | { type: "zoom"; factor: number };
+
+export function graphKeyboardAction(key: string, shiftKey: boolean): GraphKeyboardAction | null {
+  const panDistance = shiftKey ? 120 : 32;
+  switch (key) {
+    case "+":
+    case "=":
+      return { type: "zoom", factor: 1.25 };
+    case "-":
+      return { type: "zoom", factor: 0.8 };
+    case "ArrowLeft":
+      return { type: "pan", deltaX: -panDistance, deltaY: 0 };
+    case "ArrowRight":
+      return { type: "pan", deltaX: panDistance, deltaY: 0 };
+    case "ArrowUp":
+      return { type: "pan", deltaX: 0, deltaY: -panDistance };
+    case "ArrowDown":
+      return { type: "pan", deltaX: 0, deltaY: panDistance };
+    default:
+      return null;
+  }
+}
 
 export interface GraphCanvasProps {
   activeNodeId?: string;
@@ -91,6 +118,25 @@ function browserSupportsGraphCanvas() {
   }
 }
 
+function subscribeReducedMotion(onChange: () => void) {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => undefined;
+  }
+  const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+  media.addEventListener("change", onChange);
+  return () => media.removeEventListener("change", onChange);
+}
+
+function reducedMotionSnapshot() {
+  return typeof window !== "undefined"
+    && typeof window.matchMedia === "function"
+    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function useReducedMotion() {
+  return useSyncExternalStore(subscribeReducedMotion, reducedMotionSnapshot, () => false);
+}
+
 export interface GraphAccessibilityListProps {
   activeNodeId?: string;
   edges: readonly GraphEdge[];
@@ -106,6 +152,7 @@ export function GraphAccessibilityList({
   onNodeContextMenu,
   onNodeOpen
 }: GraphAccessibilityListProps) {
+  const [visibleCount, setVisibleCount] = useState(ACCESSIBLE_NODE_BATCH_SIZE);
   const connectionCountByNodeId = useMemo(() => {
     const neighbors = new Map<string, Set<string>>();
     for (const node of nodes) {
@@ -117,34 +164,55 @@ export function GraphAccessibilityList({
     }
     return new Map([...neighbors].map(([id, connected]) => [id, connected.size]));
   }, [edges, nodes]);
+  const visibleNodes = nodes.length > ACCESSIBLE_NODE_BATCH_SIZE
+    ? nodes.slice(0, visibleCount)
+    : nodes;
+
+  useEffect(() => {
+    setVisibleCount(ACCESSIBLE_NODE_BATCH_SIZE);
+  }, [nodes]);
 
   if (nodes.length === 0) {
     return <p role="status">표시할 그래프 노드가 없습니다.</p>;
   }
 
   return (
-    <ul aria-label="그래프 노드" className="qm-graph-accessible-list">
-      {nodes.map((node) => {
-        const connectionCount = connectionCountByNodeId.get(node.id) ?? 0;
-        return (
-          <li key={node.id}>
-            <button
-              aria-current={node.id === activeNodeId ? "page" : undefined}
-              aria-label={`${node.label}, ${NODE_KIND_LABELS[node.kind]}, 연결 ${connectionCount}개`}
-              onClick={(event) => onNodeOpen(node, graphOpenIntentFromModifiers(event))}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                onNodeContextMenu?.(node, { clientX: event.clientX, clientY: event.clientY });
-              }}
-              type="button"
-            >
-              <span>{node.label}</span>
-              <small>{NODE_KIND_LABELS[node.kind]} · 연결 {connectionCount}</small>
-            </button>
-          </li>
-        );
-      })}
-    </ul>
+    <div className="qm-graph-accessible-window">
+      <p aria-live="polite" className="qm-graph-accessible-count">
+        전체 {nodes.length}개 중 {visibleNodes.length}개 표시
+      </p>
+      <ul aria-label="그래프 노드" className="qm-graph-accessible-list">
+        {visibleNodes.map((node, index) => {
+          const connectionCount = connectionCountByNodeId.get(node.id) ?? 0;
+          return (
+            <li aria-posinset={index + 1} aria-setsize={nodes.length} key={node.id}>
+              <button
+                aria-current={node.id === activeNodeId ? "page" : undefined}
+                aria-label={`${node.label}, ${NODE_KIND_LABELS[node.kind]}, 연결 ${connectionCount}개`}
+                onClick={(event) => onNodeOpen(node, graphOpenIntentFromModifiers(event))}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  onNodeContextMenu?.(node, { clientX: event.clientX, clientY: event.clientY });
+                }}
+                type="button"
+              >
+                <span>{node.label}</span>
+                <small>{NODE_KIND_LABELS[node.kind]} · 연결 {connectionCount}</small>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      {visibleNodes.length < nodes.length ? (
+        <button
+          className="qm-graph-accessible-more"
+          onClick={() => setVisibleCount((current) => Math.min(nodes.length, current + ACCESSIBLE_NODE_BATCH_SIZE))}
+          type="button"
+        >
+          다음 {Math.min(ACCESSIBLE_NODE_BATCH_SIZE, nodes.length - visibleNodes.length)}개 표시
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -165,18 +233,16 @@ export function GraphCanvas({
   settings
 }: GraphCanvasProps) {
   const rendererRef = useRef<GraphRendererHandle>(null);
-  const [canvasSupported, setCanvasSupported] = useState(false);
+  const [canvasSupported] = useState(browserSupportsGraphCanvas);
   const [rendererReady, setRendererReady] = useState(false);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
   const [timelinePosition, setTimelinePosition] = useState<number | null>(null);
   const [timelinePlaying, setTimelinePlaying] = useState(false);
-
-  useEffect(() => {
-    setCanvasSupported(browserSupportsGraphCanvas());
-  }, []);
+  const reducedMotion = useReducedMotion();
 
   const shouldRenderCanvas = renderMode === "canvas" || (renderMode === "auto" && canvasSupported);
+  const [accessibilityOpen, setAccessibilityOpen] = useState(!shouldRenderCanvas);
   const chronologicalNodes = useMemo(
     () => nodes
       .filter((node): node is GraphNode & { createdAt: number } => (
@@ -205,38 +271,38 @@ export function GraphCanvas({
   );
 
   useEffect(() => {
-    if (!timelineEnabled || !timelinePlaying || effectiveTimelinePosition >= lastTimelinePosition) {
+    if (reducedMotion && timelinePlaying) {
+      setTimelinePlaying(false);
+    }
+  }, [reducedMotion, timelinePlaying]);
+
+  useEffect(() => {
+    if (!shouldRenderCanvas) {
+      setAccessibilityOpen(true);
+    }
+  }, [shouldRenderCanvas]);
+
+  useEffect(() => {
+    if (reducedMotion || !timelineEnabled || !timelinePlaying || effectiveTimelinePosition >= lastTimelinePosition) {
       return undefined;
     }
     const timeout = window.setTimeout(() => {
       setTimelinePosition(effectiveTimelinePosition + 1);
     }, 650);
     return () => window.clearTimeout(timeout);
-  }, [effectiveTimelinePosition, lastTimelinePosition, timelineEnabled, timelinePlaying]);
+  }, [effectiveTimelinePosition, lastTimelinePosition, reducedMotion, timelineEnabled, timelinePlaying]);
 
   function handleKeyboardNavigation(event: KeyboardEvent<HTMLElement>) {
-    if (!rendererRef.current) {
+    const renderer = rendererRef.current;
+    const action = graphKeyboardAction(event.key, event.shiftKey);
+    if (!renderer || !action) {
       return;
     }
-    const panDistance = event.shiftKey ? 120 : 32;
-    if (event.key === "+" || event.key === "=") {
-      event.preventDefault();
-      rendererRef.current.zoomBy(1.25);
-    } else if (event.key === "-") {
-      event.preventDefault();
-      rendererRef.current.zoomBy(0.8);
-    } else if (event.key === "ArrowLeft") {
-      event.preventDefault();
-      rendererRef.current.panBy(-panDistance, 0);
-    } else if (event.key === "ArrowRight") {
-      event.preventDefault();
-      rendererRef.current.panBy(panDistance, 0);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      rendererRef.current.panBy(0, -panDistance);
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      rendererRef.current.panBy(0, panDistance);
+    event.preventDefault();
+    if (action.type === "zoom") {
+      renderer.zoomBy(action.factor);
+    } else {
+      renderer.panBy(action.deltaX, action.deltaY);
     }
   }
 
@@ -326,6 +392,7 @@ export function GraphCanvas({
             aria-label={timelinePlaying && effectiveTimelinePosition < lastTimelinePosition
               ? "타임라인 일시 정지"
               : "타임라인 재생"}
+            disabled={reducedMotion}
             onClick={() => {
               if (timelinePlaying && effectiveTimelinePosition < lastTimelinePosition) {
                 setTimelinePlaying(false);
@@ -355,6 +422,7 @@ export function GraphCanvas({
           <time dateTime={timelineCutoff === undefined ? undefined : new Date(timelineCutoff).toISOString()}>
             {timelineCutoff === undefined ? "" : new Date(timelineCutoff).toLocaleDateString("ko-KR")}
           </time>
+          {reducedMotion ? <span className="qm-graph-motion-note">모션 감소 설정으로 자동 재생 꺼짐</span> : null}
         </div>
       ) : null}
 
@@ -377,6 +445,7 @@ export function GraphCanvas({
                 onNodeOpen={onNodeOpen}
                 onReady={() => setRendererReady(true)}
                 onViewportChange={onViewportChange}
+                reducedMotion={reducedMotion}
                 ref={rendererRef}
                 settings={settings}
               />
@@ -392,15 +461,21 @@ export function GraphCanvas({
         ) : null}
       </div>
 
-      <details className="qm-graph-accessibility" open={!shouldRenderCanvas}>
+      <details
+        className="qm-graph-accessibility"
+        onToggle={(event) => setAccessibilityOpen(event.currentTarget.open)}
+        open={accessibilityOpen}
+      >
         <summary>접근 가능한 그래프 목록</summary>
-        <GraphAccessibilityList
-          activeNodeId={activeNodeId}
-          edges={visibleEdges}
-          nodes={visibleNodes}
-          onNodeContextMenu={onNodeContextMenu}
-          onNodeOpen={onNodeOpen}
-        />
+        {accessibilityOpen ? (
+          <GraphAccessibilityList
+            activeNodeId={activeNodeId}
+            edges={visibleEdges}
+            nodes={visibleNodes}
+            onNodeContextMenu={onNodeContextMenu}
+            onNodeOpen={onNodeOpen}
+          />
+        ) : null}
       </details>
       <p aria-live="polite" className="qm-graph-copy-status">{copyStatus}</p>
     </section>

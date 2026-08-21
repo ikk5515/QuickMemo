@@ -14,6 +14,7 @@ import type {
 
 export interface VaultInteropWorkerRequestOptions {
   signal?: AbortSignal;
+  timeoutMs?: number;
 }
 export interface VaultInteropWorkerTransport {
   onerror: ((event: ErrorEvent) => void) | null;
@@ -61,6 +62,18 @@ export class VaultInteropWorkerTerminatedError extends Error {
   }
 }
 
+export const DEFAULT_VAULT_INTEROP_TIMEOUT_MS = 120_000;
+export const MAXIMUM_VAULT_INTEROP_TIMEOUT_MS = 300_000;
+
+export class VaultInteropWorkerTimeoutError extends Error {
+  readonly code = "timeout" as const;
+
+  constructor() {
+    super("Vault interoperability worker timed out.");
+    this.name = "VaultInteropWorkerTimeoutError";
+  }
+}
+
 interface ActiveOperation {
   cancel(error: Error): void;
 }
@@ -84,6 +97,18 @@ function defaultWorkerFactory(): VaultInteropWorkerTransport {
     name: "quickmemo-vault-interop",
     type: "module"
   });
+}
+
+function requestTimeoutMs(value: number | undefined) {
+  const timeoutMs = value ?? DEFAULT_VAULT_INTEROP_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(timeoutMs)
+    || timeoutMs < 1
+    || timeoutMs > MAXIMUM_VAULT_INTEROP_TIMEOUT_MS
+  ) {
+    throw new RangeError("Vault interoperability timeout is outside the safe range.");
+  }
+  return timeoutMs;
 }
 
 function isolatedBytes(bytes: Uint8Array): Uint8Array {
@@ -160,6 +185,12 @@ export class VaultInteropWorkerClient {
     if (options.signal?.aborted) {
       return Promise.reject(new VaultInteropWorkerCancelledError());
     }
+    let timeoutMs: number;
+    try {
+      timeoutMs = requestTimeoutMs(options.timeoutMs);
+    } catch (error) {
+      return Promise.reject(error);
+    }
 
     let worker: VaultInteropWorkerTransport;
     try {
@@ -170,7 +201,12 @@ export class VaultInteropWorkerClient {
 
     return new Promise((resolve, reject) => {
       let settled = false;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       const cleanup = () => {
+        if (timeoutHandle !== undefined) {
+          clearTimeout(timeoutHandle);
+          timeoutHandle = undefined;
+        }
         options.signal?.removeEventListener("abort", onAbort);
         worker.onerror = null;
         worker.onmessage = null;
@@ -218,6 +254,9 @@ export class VaultInteropWorkerClient {
         }
         finish({ response: event.data });
       };
+      timeoutHandle = setTimeout(() => {
+        finish({ error: new VaultInteropWorkerTimeoutError() });
+      }, timeoutMs);
 
       try {
         worker.postMessage(request, transfer);

@@ -110,4 +110,13 @@ describe("vault workspace state", () => {
     expect(state.expandedFolderIds).toEqual([]);
     expect(state.globalGraph.settings.common.query).toBe("");
   });
+
+  it("restores the outline right-panel mode", () => {
+    const state = normalizeVaultWorkspaceState({
+      ...createDefaultVaultWorkspaceState(),
+      right: { open: true, mode: "outline" }
+    });
+
+    expect(state.right).toEqual({ open: true, mode: "outline" });
+  });
 });

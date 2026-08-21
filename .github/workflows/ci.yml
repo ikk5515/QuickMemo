@@ -47,6 +47,9 @@ jobs:
       - name: Sensitive-file gitignore guard
         run: npm run security:gitignore-guard
 
+      - name: Zero-cost dependency and runtime guard
+        run: npm run security:billing-guard
+
       - name: Dependency audit
         run: npm audit
 
@@ -67,6 +70,14 @@ jobs:
 
       - name: Secure Share browser E2E
         run: npm run test:e2e
+
+      - name: Encrypted Vault browser E2E
+        run: npm run test:e2e:vault
+
+      - name: Build encrypted Vault bundle with the release flag enabled
+        env:
+          VITE_OBSIDIAN_VAULT_ENABLED: "true"
+        run: npm run build
 
       - name: Build
         run: npm run build

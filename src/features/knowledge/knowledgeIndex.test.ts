@@ -2,9 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_GLOBAL_GRAPH_SETTINGS,
   DEFAULT_LOCAL_GRAPH_SETTINGS,
+  MAX_ALIASES_PER_ENTRY,
+  MAX_BLOCK_REFERENCES_PER_ENTRY,
+  MAX_CANVAS_NODES_PER_ENTRY,
+  MAX_CANVAS_TEXT_CHARACTERS_PER_NODE,
+  MAX_FRONTMATTER_PROPERTIES_PER_ENTRY,
+  MAX_FRONTMATTER_SCALAR_CHARACTERS,
+  MAX_HEADINGS_PER_ENTRY,
+  MAX_HEADING_TEXT_CHARACTERS,
   MAX_INTERNAL_LINK_CONTEXT_CHARACTERS,
   MAX_INTERNAL_LINK_OCCURRENCES_PER_ENTRY,
   MAX_INTERNAL_LINK_OCCURRENCES_PER_INDEX,
+  MAX_INTERNAL_LINK_SYNTAX_CHARACTERS,
+  MAX_TAG_CHARACTERS,
   MAX_TAG_OCCURRENCES_PER_ENTRY,
   MAX_TAG_OCCURRENCES_PER_INDEX,
   backlinkOccurrences,
@@ -150,6 +160,61 @@ related: "[[Reference]]"
     expect(metadata.tags.at(-1)).toBe(`tag-${MAX_TAG_OCCURRENCES_PER_ENTRY - 1}`);
     expect(elapsed).toBeLessThan(2_000);
   }, 10_000);
+
+  it("bounds frontmatter properties, aliases, and scalar text before indexing", () => {
+    const properties = Array.from(
+      { length: MAX_FRONTMATTER_PROPERTIES_PER_ENTRY + 50 },
+      (_, index) => `property_${index}: ${index}`
+    ).join("\n");
+    const aliases = Array.from(
+      { length: MAX_ALIASES_PER_ENTRY + 50 },
+      (_, index) => `alias-${index}`
+    ).join(",");
+    const oversizedScalar = "x".repeat(MAX_FRONTMATTER_SCALAR_CHARACTERS + 500);
+    const metadata = parseObsidianMarkdown(
+      "source",
+      "Source.md",
+      `---\naliases: [${aliases}]\nsummary: ${oversizedScalar}\n${properties}\n---\n`
+    );
+
+    expect(metadata.aliases).toHaveLength(MAX_ALIASES_PER_ENTRY);
+    expect(Object.keys(metadata.properties)).toHaveLength(
+      MAX_FRONTMATTER_PROPERTIES_PER_ENTRY
+    );
+    expect(metadata.properties.summary).toBe(oversizedScalar.slice(
+      0,
+      MAX_FRONTMATTER_SCALAR_CHARACTERS
+    ));
+  });
+
+  it("ignores overlong tags and link syntax while keeping bounded valid metadata", () => {
+    const validHeading = "제목".repeat(MAX_HEADING_TEXT_CHARACTERS);
+    const overlongTag = `#a${"b".repeat(MAX_TAG_CHARACTERS)}`;
+    const overlongLink = `[[${"x".repeat(MAX_INTERNAL_LINK_SYNTAX_CHARACTERS)}]]`;
+    const metadata = parseObsidianMarkdown(
+      "source",
+      "Source.md",
+      `${overlongTag}\n${overlongLink}\n# ${validHeading}\n[[Valid]]`
+    );
+
+    expect(metadata.tags).toEqual([]);
+    expect(metadata.links).toEqual([
+      expect.objectContaining({ target: "Valid", raw: "[[Valid]]" })
+    ]);
+    expect(metadata.headings[0]?.text).toHaveLength(MAX_HEADING_TEXT_CHARACTERS);
+  });
+
+  it("caps heading and block-reference collections for pathological notes", () => {
+    const lineCount = Math.max(MAX_HEADINGS_PER_ENTRY, MAX_BLOCK_REFERENCES_PER_ENTRY) + 20;
+    const metadata = parseObsidianMarkdown(
+      "source",
+      "Source.md",
+      Array.from({ length: lineCount }, (_, index) => `# Heading ${index} ^block-${index}`).join("\n")
+    );
+
+    expect(metadata.headings).toHaveLength(MAX_HEADINGS_PER_ENTRY);
+    expect(metadata.blocks).toHaveLength(MAX_BLOCK_REFERENCES_PER_ENTRY);
+  });
 });
 
 describe("knowledge index and resolution", () => {
@@ -239,6 +304,39 @@ describe("knowledge index and resolution", () => {
     ]);
     expect(backlinkOccurrences(index, "source")).toHaveLength(1);
     expect(index.tags.get("canvas")?.entryIds).toEqual(["canvas"]);
+  });
+
+  it("bounds Canvas node and text indexing without changing the Canvas payload", () => {
+    const canvas = {
+      id: "bounded-canvas",
+      path: "Bounded.canvas",
+      kind: "canvas" as const,
+      content: JSON.stringify({
+        nodes: [
+          {
+            id: "bounded-text",
+            type: "text",
+            text: `[[Visible]]${"x".repeat(MAX_CANVAS_TEXT_CHARACTERS_PER_NODE)}[[HiddenByTextBudget]]`
+          },
+          ...Array.from({ length: MAX_CANVAS_NODES_PER_ENTRY - 1 }, (_, index) => ({
+            id: `ignored-shape-${index}`,
+            type: "group"
+          })),
+          { id: "beyond-node-budget", type: "file", file: "HiddenByNodeBudget.md" }
+        ]
+      })
+    };
+    const index = buildKnowledgeIndex([
+      canvas,
+      markdownEntry("visible", "Visible.md", ""),
+      markdownEntry("hidden-text", "HiddenByTextBudget.md", ""),
+      markdownEntry("hidden-node", "HiddenByNodeBudget.md", "")
+    ]);
+
+    expect(outgoingOccurrences(index, canvas.id).map((link) => link.targetEntryId)).toEqual([
+      "visible"
+    ]);
+    expect(canvas.content).toContain("HiddenByNodeBudget.md");
   });
 
   it("enforces a deterministic vault-wide occurrence budget before backlink resolution", () => {

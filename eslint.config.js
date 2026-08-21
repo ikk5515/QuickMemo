@@ -19,6 +19,22 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: [
+      "scripts/security-no-billing-guard.mjs",
+      "scripts/verify-vercel-hobby-plan.mjs"
+    ],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: {
+        AbortSignal: "readonly",
+        URL: "readonly",
+        console: "readonly",
+        fetch: "readonly",
+        process: "readonly"
+      }
+    }
+  },
+  {
     files: ["**/*.{ts,tsx}"],
     languageOptions: {
       ecmaVersion: 2022,

@@ -7,7 +7,7 @@ import {
 } from "../../api/_free-tier-policy.js";
 
 describe("free-tier storage policy", () => {
-  it("uses the documented free capacity, conservative operational cap, and exact enable flag", () => {
+  it("uses the documented free capacity and keeps enforcement enabled for every flag value", () => {
     expect(DEFAULT_FREE_TIER_POLICY).toEqual({
       officialCapacityBytes: 1_000_000_000,
       operationalCapBytes: 800_000_000,
@@ -28,9 +28,14 @@ describe("free-tier storage policy", () => {
       invalidConfiguration: false,
       invalidFields: []
     });
-    expect(resolveFreeTierPolicy({ FREE_TIER_MODE: "TRUE" }).enabled).toBe(false);
-    expect(resolveFreeTierPolicy({ FREE_TIER_MODE: true }).enabled).toBe(false);
-    expect(resolveFreeTierPolicy({ FREE_TIER_MODE: "1" }).enabled).toBe(false);
+    for (const invalidMode of ["TRUE", true, "1", "false", undefined]) {
+      const policy = resolveFreeTierPolicy(
+        invalidMode === undefined ? {} : { FREE_TIER_MODE: invalidMode }
+      );
+      expect(policy.enabled).toBe(true);
+      expect(policy.invalidConfiguration).toBe(true);
+      expect(policy.invalidFields).toContain("FREE_TIER_MODE");
+    }
   });
 
   it("classifies warning and admin-warning boundaries without exceeding the operational cap", () => {
@@ -193,21 +198,21 @@ describe("free-tier storage policy", () => {
     ]);
   });
 
-  it("validates usage before honoring an intentionally disabled policy", () => {
-    const disabled = resolveFreeTierPolicy({ FREE_TIER_MODE: "false" });
+  it("never allows an environment flag to disable the zero-cost hard stop", () => {
+    const enforced = resolveFreeTierPolicy({ FREE_TIER_MODE: "false" });
     expect(evaluateFreeTierUpload({
       usedBytes: 900_000_000,
       reservedBytes: 0,
       requestedBytes: 1
-    }, disabled)).toMatchObject({
-      state: "allow",
-      allowUpload: true
+    }, enforced)).toMatchObject({
+      state: "hard-stop",
+      allowUpload: false
     });
     expect(evaluateFreeTierUpload({
       usedBytes: -1,
       reservedBytes: 0,
       requestedBytes: 1
-    }, disabled)).toMatchObject({
+    }, enforced)).toMatchObject({
       state: "hard-stop",
       allowUpload: false
     });

@@ -1,12 +1,20 @@
 import { renamedDuplicateVaultPath, vaultPathCollisionKey } from "./path";
 import type { ObsidianVaultEntryKind, ObsidianVaultManifest } from "./types";
+import { encodeVaultAsset, MAX_INLINE_VAULT_ASSET_BYTES } from "../vaultAsset";
+import { assertVaultPayloadFitsPersistence } from "../vaultPayloadLimits";
+import { requireValidProposedVaultFolderTree } from "../vaultFolderPreflight";
 
-const MAX_VAULT_TEXT_LENGTH = 500_000;
 const MAX_VAULT_NAME_LENGTH = 180;
 const MAX_VAULT_FOLDER_NAME_LENGTH = 120;
+// Import planning happens before Firestore folder IDs exist. This placeholder
+// is the maximum UTF-8 footprint accepted by persistence for a 120-character
+// folder ID, so a real generated ID cannot make the later history snapshot
+// larger than the preflighted one.
+const MAX_FOLDER_ID_SIZE_PLACEHOLDER = "\u0800".repeat(120);
 
 export interface ExistingVaultImportFolder {
   id: string;
+  parentId?: string | null;
   path: string;
 }
 
@@ -17,7 +25,7 @@ export interface VaultImportFolderPlan {
   path: string;
 }
 
-export interface VaultImportEntryPlan {
+export interface VaultImportTextEntryPlan {
   body: string;
   destinationPath: string;
   folderPath: string | null;
@@ -26,11 +34,23 @@ export interface VaultImportEntryPlan {
   title: string;
 }
 
+export interface VaultImportAssetEntryPlan {
+  bytes: Uint8Array;
+  destinationPath: string;
+  folderPath: string | null;
+  kind: "asset";
+  mimeType: string;
+  sourcePath: string;
+  title: string;
+}
+
+export type VaultImportEntryPlan = VaultImportTextEntryPlan | VaultImportAssetEntryPlan;
+
 export interface VaultImportPlan {
   entries: VaultImportEntryPlan[];
   folders: VaultImportFolderPlan[];
   renamedEntries: number;
-  skippedAssets: number;
+  assetEntries: number;
 }
 
 export class VaultImportPlanError extends Error {
@@ -49,7 +69,10 @@ function baseName(path: string) {
   return path.slice(path.lastIndexOf("/") + 1);
 }
 
-function titleFromPath(path: string, kind: Exclude<ObsidianVaultEntryKind, "asset">) {
+function titleFromPath(path: string, kind: ObsidianVaultEntryKind) {
+  if (kind === "asset") {
+    return baseName(path);
+  }
   const extension = kind === "canvas" ? /\.canvas$/i : kind === "base" ? /\.base$/i : /\.md$/i;
   return baseName(path).replace(extension, "");
 }
@@ -61,6 +84,40 @@ function assertFolderNames(paths: readonly string[]) {
         throw new VaultImportPlanError("폴더 이름은 1~120자여야 합니다.");
       }
     }
+  }
+}
+
+function persistenceFormat(kind: Exclude<ObsidianVaultEntryKind, "asset">) {
+  return kind === "markdown"
+    ? "markdown-v1" as const
+    : kind === "canvas"
+      ? "json-canvas-v1" as const
+      : "base-v1" as const;
+}
+
+function assertImportPayloadFitsPersistence(
+  entry: ObsidianVaultManifest["entries"][number],
+  title: string,
+  destinationFolderPath: string | null
+) {
+  const body = entry.kind === "asset"
+    ? encodeVaultAsset(entry.bytes, entry.mimeType)
+    : entry.text ?? "";
+  const contentFormat = entry.kind === "asset"
+    ? "asset-v1" as const
+    : persistenceFormat(entry.kind);
+  try {
+    assertVaultPayloadFitsPersistence({
+      body,
+      contentFormat,
+      entryKind: entry.kind,
+      folderId: destinationFolderPath ? MAX_FOLDER_ID_SIZE_PLACEHOLDER : null,
+      title
+    });
+  } catch (caught) {
+    throw new VaultImportPlanError(
+      caught instanceof Error ? caught.message : "가져올 항목이 저장 가능한 크기를 초과했습니다."
+    );
   }
 }
 
@@ -102,17 +159,24 @@ export function planObsidianVaultImport(
       };
     });
 
+  try {
+    requireValidProposedVaultFolderTree(existingFolders, folders);
+  } catch (caught) {
+    throw new VaultImportPlanError(
+      caught instanceof Error ? caught.message : "가져올 폴더 깊이를 확인할 수 없습니다."
+    );
+  }
+
   const entries: VaultImportEntryPlan[] = [];
   let renamedEntries = 0;
-  let skippedAssets = 0;
+  let assetEntries = 0;
 
   for (const entry of manifest.entries) {
-    if (entry.kind === "asset") {
-      skippedAssets += 1;
-      continue;
+    if (entry.kind !== "asset" && entry.text === undefined) {
+      throw new VaultImportPlanError("가져올 텍스트 항목을 UTF-8로 해석할 수 없습니다.");
     }
-    if (entry.text === undefined || entry.text.length > MAX_VAULT_TEXT_LENGTH) {
-      throw new VaultImportPlanError("가져올 텍스트 항목은 500,000자 이하여야 합니다.");
+    if (entry.kind === "asset" && entry.bytes.byteLength > MAX_INLINE_VAULT_ASSET_BYTES) {
+      throw new VaultImportPlanError(`첨부 파일은 ${Math.floor(MAX_INLINE_VAULT_ASSET_BYTES / 1024)}KB 이하만 암호화해 가져올 수 있습니다.`);
     }
 
     let destinationPath = entry.path;
@@ -136,17 +200,31 @@ export function planObsidianVaultImport(
     if (destinationFolderPath && !occupiedFolderKeys.has(vaultPathCollisionKey(destinationFolderPath))) {
       throw new VaultImportPlanError("가져올 파일의 상위 폴더를 확인할 수 없습니다.");
     }
+    assertImportPayloadFitsPersistence(entry, title, destinationFolderPath);
 
     occupiedFileKeys.add(vaultPathCollisionKey(destinationPath));
-    entries.push({
-      body: entry.text,
-      destinationPath,
-      folderPath: destinationFolderPath,
-      kind: entry.kind,
-      sourcePath: entry.path,
-      title
-    });
+    if (entry.kind === "asset") {
+      assetEntries += 1;
+      entries.push({
+        bytes: entry.bytes.slice(),
+        destinationPath,
+        folderPath: destinationFolderPath,
+        kind: "asset",
+        mimeType: entry.mimeType,
+        sourcePath: entry.path,
+        title
+      });
+    } else {
+      entries.push({
+        body: entry.text!,
+        destinationPath,
+        folderPath: destinationFolderPath,
+        kind: entry.kind,
+        sourcePath: entry.path,
+        title
+      });
+    }
   }
 
-  return { entries, folders, renamedEntries, skippedAssets };
+  return { assetEntries, entries, folders, renamedEntries };
 }

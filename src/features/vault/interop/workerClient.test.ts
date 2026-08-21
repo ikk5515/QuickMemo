@@ -4,6 +4,7 @@ import {
   VaultInteropWorkerClient,
   VaultInteropWorkerProtocolError,
   VaultInteropWorkerTerminatedError,
+  VaultInteropWorkerTimeoutError,
   type VaultInteropWorkerTransport
 } from "./workerClient";
 import { createVaultInteropWorkerRuntime } from "./workerRuntime";
@@ -100,6 +101,30 @@ describe("VaultInteropWorkerClient", () => {
 
     await expect(pending).rejects.toBeInstanceOf(VaultInteropWorkerCancelledError);
     expect(worker.terminateCount).toBe(1);
+  });
+
+  it("fails closed and terminates a worker that exceeds the bounded operation timeout", async () => {
+    const worker = new HangingWorker();
+    const client = new VaultInteropWorkerClient(() => worker);
+    const pending = client.importVault(new Uint8Array([1]), {}, { timeoutMs: 5 });
+
+    await expect(pending).rejects.toBeInstanceOf(VaultInteropWorkerTimeoutError);
+    expect(worker.terminateCount).toBe(1);
+  });
+
+  it("rejects an unsafe timeout before creating a worker", async () => {
+    let workerCreated = false;
+    const client = new VaultInteropWorkerClient(() => {
+      workerCreated = true;
+      return new HangingWorker();
+    });
+
+    await expect(client.importVault(
+      new Uint8Array([1]),
+      {},
+      { timeoutMs: Number.POSITIVE_INFINITY }
+    )).rejects.toBeInstanceOf(RangeError);
+    expect(workerCreated).toBe(false);
   });
 
   it("terminates and rejects every active operation without retaining workers", async () => {

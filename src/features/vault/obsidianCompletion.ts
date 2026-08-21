@@ -25,6 +25,20 @@ const ALIAS_SECTION = { name: "별칭", rank: 1 } as const;
 const HEADING_SECTION = { name: "제목", rank: 0 } as const;
 const BLOCK_SECTION = { name: "블록", rank: 0 } as const;
 const TAG_SECTION = { name: "태그", rank: 0 } as const;
+const SLASH_SECTION = { name: "슬래시 명령", rank: -1 } as const;
+
+const SLASH_COMMANDS: readonly Completion[] = [
+  { apply: "# ", detail: "제목 1", label: "/heading-1", section: SLASH_SECTION, type: "keyword" },
+  { apply: "## ", detail: "제목 2", label: "/heading-2", section: SLASH_SECTION, type: "keyword" },
+  { apply: "### ", detail: "제목 3", label: "/heading-3", section: SLASH_SECTION, type: "keyword" },
+  { apply: "- [ ] ", detail: "체크리스트", label: "/check", section: SLASH_SECTION, type: "keyword" },
+  { apply: "- ", detail: "글머리 기호 목록", label: "/bullet", section: SLASH_SECTION, type: "keyword" },
+  { apply: "1. ", detail: "번호 목록", label: "/number", section: SLASH_SECTION, type: "keyword" },
+  { apply: "> ", detail: "인용문", label: "/quote", section: SLASH_SECTION, type: "keyword" },
+  { apply: "> [!note]\n> ", detail: "콜아웃", label: "/callout", section: SLASH_SECTION, type: "keyword" },
+  { apply: "```\n\n```", detail: "코드 블록", label: "/code", section: SLASH_SECTION, type: "keyword" },
+  { apply: "---", detail: "구분선", label: "/divider", section: SLASH_SECTION, type: "keyword" }
+];
 
 function uniqueByNormalizedValue(values: readonly string[]): string[] {
   const result: string[] = [];
@@ -236,12 +250,35 @@ function completeTag(context: CompletionContext, data: ObsidianMarkdownCompletio
   };
 }
 
+function completeSlashCommand(context: CompletionContext): CompletionResult | null {
+  const line = context.state.doc.lineAt(context.pos);
+  const beforeCursor = context.state.sliceDoc(line.from, context.pos);
+  const match = /^(\s*)\/([^\s/]*)$/u.exec(beforeCursor);
+  if (!match) {
+    return null;
+  }
+  return {
+    from: line.from + match[1].length,
+    options: [...SLASH_COMMANDS],
+    validFor: /^\/[^\s/]*$/u
+  };
+}
+
 /** A synchronous, plaintext-in-memory-only CodeMirror completion source. */
 export function completeObsidianMarkdown(
   context: CompletionContext,
   data: ObsidianMarkdownCompletionData | undefined
 ): CompletionResult | null {
-  if (!data || isInsideCode(context)) {
+  if (isInsideCode(context)) {
+    return null;
+  }
+
+  const slashCommand = completeSlashCommand(context);
+  if (slashCommand) {
+    return slashCommand;
+  }
+
+  if (!data) {
     return null;
   }
 

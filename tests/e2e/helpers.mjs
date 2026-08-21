@@ -253,7 +253,14 @@ export async function expectNoHorizontalOverflow(page) {
     return {
       body: Math.max(0, body.scrollWidth - body.clientWidth),
       element: overflowingElement
-        ? `${overflowingElement.tagName}.${overflowingElement.className}`
+        ? {
+            ariaLabel: overflowingElement.getAttribute("aria-label"),
+            className: overflowingElement.className,
+            left: Math.round(overflowingElement.getBoundingClientRect().left * 100) / 100,
+            right: Math.round(overflowingElement.getBoundingClientRect().right * 100) / 100,
+            tagName: overflowingElement.tagName,
+            text: overflowingElement.textContent?.trim().slice(0, 80) ?? ""
+          }
         : null,
       root: Math.max(0, root.scrollWidth - root.clientWidth)
     };

@@ -205,4 +205,15 @@ describe("Markdown parser", () => {
     expect(() => tokenizeMarkdown(deeplyNested)).not.toThrow();
     expect(JSON.stringify(tokenizeMarkdown(deeplyNested))).toContain("보존할 내용");
   });
+
+  it("bounds adversarial unmatched inline syntax at the maximum note size", () => {
+    const startedAt = performance.now();
+    const unmatchedBrackets = tokenizeMarkdown("[".repeat(500_000));
+    const unmatchedCodeRun = tokenizeMarkdown("`".repeat(500_000));
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(unmatchedBrackets.blocks).toHaveLength(1);
+    expect(unmatchedCodeRun.blocks).toHaveLength(1);
+    expect(elapsedMs).toBeLessThan(2_000);
+  });
 });

@@ -22,6 +22,16 @@ const INLINE_TAG_PATTERN = /(^|[\s([{>"'])#([\p{L}\p{M}\p{N}_\-/\p{Extended_Pict
 export const MAX_INTERNAL_LINK_CONTEXT_CHARACTERS = 320;
 export const MAX_INTERNAL_LINK_OCCURRENCES_PER_ENTRY = 4_096;
 export const MAX_TAG_OCCURRENCES_PER_ENTRY = 4_096;
+export const MAX_TAG_CHARACTERS = 256;
+export const MAX_ALIASES_PER_ENTRY = 256;
+export const MAX_FRONTMATTER_PROPERTIES_PER_ENTRY = 512;
+export const MAX_FRONTMATTER_SEQUENCE_VALUES = 4_096;
+export const MAX_FRONTMATTER_SCALAR_CHARACTERS = 8_192;
+export const MAX_HEADINGS_PER_ENTRY = 4_096;
+export const MAX_BLOCK_REFERENCES_PER_ENTRY = 4_096;
+export const MAX_HEADING_TEXT_CHARACTERS = 1_024;
+export const MAX_INTERNAL_LINK_SYNTAX_CHARACTERS = 16_384;
+export const MAX_INTERNAL_LINK_TARGET_CHARACTERS = 8_192;
 
 function stripMatchingQuotes(value: string): string {
   const trimmed = value.trim();
@@ -51,6 +61,9 @@ function splitInlineYamlList(value: string): string[] {
     if (character === "," && !quote) {
       values.push(current.trim());
       current = "";
+      if (values.length >= MAX_FRONTMATTER_SEQUENCE_VALUES) {
+        break;
+      }
       continue;
     }
     current += character;
@@ -79,7 +92,7 @@ function parseYamlScalar(value: string): FrontmatterScalar {
       return numberValue;
     }
   }
-  return unquoted;
+  return unquoted.slice(0, MAX_FRONTMATTER_SCALAR_CHARACTERS);
 }
 
 function parseYamlValue(value: string): FrontmatterValue {
@@ -110,6 +123,9 @@ function parseFrontmatter(markdown: string): FrontmatterParseResult {
 
   const properties: Record<string, FrontmatterValue> = {};
   for (let index = 1; index < closingLine; index += 1) {
+    if (Object.keys(properties).length >= MAX_FRONTMATTER_PROPERTIES_PER_ENTRY) {
+      break;
+    }
     const match = lines[index].match(FRONTMATTER_KEY_PATTERN);
     if (!match || /^\s/.test(lines[index])) {
       continue;
@@ -122,7 +138,10 @@ function parseFrontmatter(markdown: string): FrontmatterParseResult {
 
     const sequence: FrontmatterScalar[] = [];
     let sequenceIndex = index + 1;
-    while (sequenceIndex < closingLine) {
+    while (
+      sequenceIndex < closingLine
+      && sequence.length < MAX_FRONTMATTER_SEQUENCE_VALUES
+    ) {
       const sequenceMatch = lines[sequenceIndex].match(/^\s+-\s+(.+)$/);
       if (!sequenceMatch) {
         break;
@@ -168,6 +187,36 @@ function maskIgnoredMarkdown(markdown: string): string {
     }
   }
   return masked;
+}
+
+function maskLinkSyntaxForTags(markdown: string): string {
+  const ranges: Array<[number, number]> = [];
+  const patterns = [
+    /!?\[\[[^\]]+\]\]/g,
+    /!?\[[^\]]*\]\(\s*(?:<[^>]+>|(?:\\.|[^)\s])+)(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?\s*\)/g
+  ];
+
+  for (const pattern of patterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(markdown)) !== null) {
+      ranges.push([match.index, match.index + match[0].length]);
+    }
+  }
+  ranges.sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const [start, end] of ranges) {
+    if (end <= cursor) {
+      continue;
+    }
+    const boundedStart = Math.max(cursor, start);
+    parts.push(markdown.slice(cursor, boundedStart));
+    parts.push(markdown.slice(boundedStart, end).replace(/[^\r\n]/g, " "));
+    cursor = end;
+  }
+  parts.push(markdown.slice(cursor));
+  return parts.join("");
 }
 
 function boundedLineContext(
@@ -275,9 +324,15 @@ function parseLinks(
     wikiOccurrences < maximumOccurrences
     && (match = wikiPattern.exec(searchableMarkdown)) !== null
   ) {
+    if (match[0].length > MAX_INTERNAL_LINK_SYNTAX_CHARACTERS) {
+      continue;
+    }
     const rawInner = markdown.slice(match.index + match[1].length + 2, match.index + match[0].length - 2);
     const pipeIndex = rawInner.indexOf("|");
     const targetWithFragment = pipeIndex >= 0 ? rawInner.slice(0, pipeIndex) : rawInner;
+    if (targetWithFragment.length > MAX_INTERNAL_LINK_TARGET_CHARACTERS) {
+      continue;
+    }
     const displayText = pipeIndex >= 0 ? rawInner.slice(pipeIndex + 1).trim() : undefined;
     const { target, fragment } = splitTargetFragment(targetWithFragment);
     const location = locate(match.index, match[0].length);
@@ -300,7 +355,13 @@ function parseLinks(
     markdownOccurrences < maximumOccurrences
     && (match = markdownPattern.exec(searchableMarkdown)) !== null
   ) {
+    if (match[0].length > MAX_INTERNAL_LINK_SYNTAX_CHARACTERS) {
+      continue;
+    }
     const rawTarget = (match[3] ?? match[4] ?? "").replace(/\\([()])/g, "$1").trim();
+    if (rawTarget.length > MAX_INTERNAL_LINK_TARGET_CHARACTERS) {
+      continue;
+    }
     const { target, fragment } = splitTargetFragment(rawTarget);
     if ((!target && !fragment) || (target && isExternalLinkTarget(target))) {
       continue;
@@ -334,22 +395,34 @@ function propertyStrings(value: FrontmatterValue | undefined): string[] {
 
 export function normalizeTag(tag: string): string | null {
   const withoutHash = tag.trim().replace(/^#+/, "").replace(/^\/+|\/+$/g, "");
-  if (!withoutHash || !TAG_CHARACTER_PATTERN.test(withoutHash) || !TAG_NON_NUMERIC_PATTERN.test(withoutHash)) {
+  if (
+    !withoutHash
+    || withoutHash.length > MAX_TAG_CHARACTERS
+    || !TAG_CHARACTER_PATTERN.test(withoutHash)
+    || !TAG_NON_NUMERIC_PATTERN.test(withoutHash)
+  ) {
     return null;
   }
   return withoutHash.normalize("NFC");
 }
 
-function uniqueCaseInsensitive(values: readonly string[]): string[] {
+function uniqueCaseInsensitive(
+  values: readonly string[],
+  maximumValues = Number.POSITIVE_INFINITY
+): string[] {
   const seen = new Set<string>();
-  return values.filter((value) => {
-    const key = value.toLocaleLowerCase();
-    if (seen.has(key)) {
-      return false;
+  const unique: string[] = [];
+  for (const value of values) {
+    if (unique.length >= maximumValues) {
+      break;
     }
-    seen.add(key);
-    return true;
-  });
+    const key = value.toLocaleLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(value);
+    }
+  }
+  return unique;
 }
 
 function headingSlug(text: string): string {
@@ -370,11 +443,14 @@ export function parseObsidianMarkdown(
 ): ParsedMarkdownMetadata {
   const frontmatter = parseFrontmatter(markdown);
   const searchableMarkdown = maskIgnoredMarkdown(markdown);
-  const bodyForTags = frontmatter.end > 0 ? maskRange(searchableMarkdown, frontmatter.start, frontmatter.end) : searchableMarkdown;
+  const bodyWithoutLinks = maskLinkSyntaxForTags(searchableMarkdown);
+  const bodyForTags = frontmatter.end > 0
+    ? maskRange(bodyWithoutLinks, frontmatter.start, frontmatter.end)
+    : bodyWithoutLinks;
   const aliases = uniqueCaseInsensitive([
     ...propertyStrings(frontmatter.properties.aliases),
     ...propertyStrings(frontmatter.properties.alias)
-  ].map((alias) => alias.trim()).filter(Boolean));
+  ].map((alias) => alias.trim().slice(0, MAX_FRONTMATTER_SCALAR_CHARACTERS)).filter(Boolean), MAX_ALIASES_PER_ENTRY);
   const tags: string[] = [];
   const seenTagKeys = new Set<string>();
   const tagBudget = Math.max(
@@ -418,11 +494,16 @@ export function parseObsidianMarkdown(
       continue;
     }
     const atxMatch = lines[index].match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
-    if (atxMatch) {
-      const text = atxMatch[2].trim();
+    if (atxMatch && headings.length < MAX_HEADINGS_PER_ENTRY) {
+      const text = atxMatch[2].trim().slice(0, MAX_HEADING_TEXT_CHARACTERS);
       headings.push({ level: atxMatch[1].length, text, line: index + 1, slug: headingSlug(text) });
-    } else if (index + 1 < lines.length && /^(?: {0,3})(=+|-+)\s*$/.test(lines[index + 1]) && lines[index].trim()) {
-      const text = lines[index].trim();
+    } else if (
+      headings.length < MAX_HEADINGS_PER_ENTRY
+      && index + 1 < lines.length
+      && /^(?: {0,3})(=+|-+)\s*$/.test(lines[index + 1])
+      && lines[index].trim()
+    ) {
+      const text = lines[index].trim().slice(0, MAX_HEADING_TEXT_CHARACTERS);
       headings.push({
         level: lines[index + 1].trim().startsWith("=") ? 1 : 2,
         text,
@@ -431,8 +512,14 @@ export function parseObsidianMarkdown(
       });
     }
     const blockMatch = lines[index].match(/(?:^|\s)\^([A-Za-z0-9-]+)\s*$/);
-    if (blockMatch) {
+    if (blockMatch && blocks.length < MAX_BLOCK_REFERENCES_PER_ENTRY) {
       blocks.push({ id: blockMatch[1], line: index + 1 });
+    }
+    if (
+      headings.length >= MAX_HEADINGS_PER_ENTRY
+      && blocks.length >= MAX_BLOCK_REFERENCES_PER_ENTRY
+    ) {
+      break;
     }
   }
 

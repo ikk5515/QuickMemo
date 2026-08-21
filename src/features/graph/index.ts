@@ -7,8 +7,6 @@ export type {
 } from "./GraphCanvas";
 export { GraphSettingsDrawer } from "./GraphSettingsDrawer";
 export type { GraphSettingsDrawerProps } from "./GraphSettingsDrawer";
-export { GraphView } from "./GraphView";
-export type { GraphViewProps } from "./GraphView";
 export {
   clampGraphNumber,
   createDefaultGlobalGraphSettings,

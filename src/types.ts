@@ -89,7 +89,7 @@ export interface UserKeyDocument {
 export type NoteKind = "personal" | "shared";
 export type SecureShareCopyState = "copying" | "active" | "aborted";
 export type VaultEntryKind = "markdown" | "legacy-html" | "canvas" | "base" | "asset";
-export type VaultContentFormat = "markdown-v1" | "legacy-html-v1" | "json-canvas-v1" | "base-v1";
+export type VaultContentFormat = "markdown-v1" | "legacy-html-v1" | "json-canvas-v1" | "base-v1" | "asset-v1";
 
 export interface NoteDocument {
   type: NoteKind;
@@ -100,7 +100,7 @@ export interface NoteDocument {
   /** Missing on historical TipTap notes; absence is interpreted as legacy-html-v1. */
   contentFormat?: VaultContentFormat;
   /** Missing on historical notes; inferred from contentFormat. */
-  entryKind?: Exclude<VaultEntryKind, "asset">;
+  entryKind?: VaultEntryKind;
   wrappedKeys: Record<string, WrappedNoteKey>;
   folderId?: string | null;
   createdAt?: Timestamp;

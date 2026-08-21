@@ -69,6 +69,12 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: node scripts/verify-vercel-firewall-rate-limit.mjs --probe
 
+      - name: Verify zero-cost Vercel Hobby plan
+        if: steps.master_at_start.outputs.current == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: node scripts/verify-vercel-hobby-plan.mjs --probe
+
       - name: Revalidate master immediately before deployment
         if: steps.master_at_start.outputs.current == 'true'
         id: master_before_deploy

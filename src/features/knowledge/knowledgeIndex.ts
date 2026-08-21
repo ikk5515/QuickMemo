@@ -1,9 +1,19 @@
 import {
+  MAX_ALIASES_PER_ENTRY,
+  MAX_BLOCK_REFERENCES_PER_ENTRY,
+  MAX_FRONTMATTER_PROPERTIES_PER_ENTRY,
+  MAX_HEADINGS_PER_ENTRY,
+  MAX_INTERNAL_LINK_CONTEXT_CHARACTERS,
   MAX_INTERNAL_LINK_OCCURRENCES_PER_ENTRY,
+  MAX_INTERNAL_LINK_TARGET_CHARACTERS,
   MAX_TAG_OCCURRENCES_PER_ENTRY,
   parseObsidianMarkdown
 } from "./markdown";
-import { normalizeVaultPath, resolveInternalLink } from "./path";
+import {
+  buildInternalLinkResolutionIndex,
+  normalizeVaultPath,
+  resolveInternalLink
+} from "./path";
 import type {
   InternalLinkOccurrence,
   KnowledgeIndex,
@@ -24,6 +34,9 @@ const EMPTY_METADATA: ParsedMarkdownMetadata = {
 
 export const MAX_INTERNAL_LINK_OCCURRENCES_PER_INDEX = 32_768;
 export const MAX_TAG_OCCURRENCES_PER_INDEX = 32_768;
+export const MAX_CANVAS_NODES_PER_ENTRY = 10_000;
+export const MAX_CANVAS_TEXT_CHARACTERS_PER_NODE = 1_000_000;
+export const MAX_CANVAS_TEXT_CHARACTERS_PER_ENTRY = 8_000_000;
 
 interface CanvasNode {
   type?: string;
@@ -39,11 +52,17 @@ function mergeMetadata(
   const aliases: string[] = [];
   const tags: string[] = [];
   const properties: ParsedMarkdownMetadata["properties"] = {};
+  let propertyCount = 0;
   const seenAliases = new Set<string>();
   const seenTags = new Set<string>();
   const links: InternalLinkOccurrence[] = [];
+  const headings: ParsedMarkdownMetadata["headings"] = [];
+  const blocks: ParsedMarkdownMetadata["blocks"] = [];
   for (const part of parts) {
     for (const alias of part.aliases) {
+      if (aliases.length >= MAX_ALIASES_PER_ENTRY) {
+        break;
+      }
       const key = alias.toLocaleLowerCase();
       if (!seenAliases.has(key)) {
         aliases.push(alias);
@@ -60,7 +79,22 @@ function mergeMetadata(
         seenTags.add(key);
       }
     }
-    Object.assign(properties, part.properties);
+    for (const [key, value] of Object.entries(part.properties)) {
+      const exists = Object.hasOwn(properties, key);
+      if (!exists && propertyCount >= MAX_FRONTMATTER_PROPERTIES_PER_ENTRY) {
+        break;
+      }
+      properties[key] = value;
+      if (!exists) {
+        propertyCount += 1;
+      }
+    }
+    if (headings.length < MAX_HEADINGS_PER_ENTRY) {
+      headings.push(...part.headings.slice(0, MAX_HEADINGS_PER_ENTRY - headings.length));
+    }
+    if (blocks.length < MAX_BLOCK_REFERENCES_PER_ENTRY) {
+      blocks.push(...part.blocks.slice(0, MAX_BLOCK_REFERENCES_PER_ENTRY - blocks.length));
+    }
     const remainingLinks = maximumLinkOccurrences - links.length;
     if (remainingLinks > 0) {
       links.push(...part.links.slice(0, remainingLinks));
@@ -70,8 +104,8 @@ function mergeMetadata(
     aliases,
     tags,
     properties,
-    headings: parts.flatMap((part) => part.headings),
-    blocks: parts.flatMap((part) => part.blocks),
+    headings,
+    blocks,
     links
   };
 }
@@ -90,22 +124,35 @@ function parseCanvasMetadata(
     const fileLinks: InternalLinkOccurrence[] = [];
     let remainingTextLinks = maximumLinkOccurrences;
     let remainingTextTags = maximumTagOccurrences;
-    for (const [index, node] of (parsed.nodes ?? []).entries()) {
+    let remainingTextCharacters = MAX_CANVAS_TEXT_CHARACTERS_PER_ENTRY;
+    const nodes = Array.isArray(parsed.nodes)
+      ? parsed.nodes.slice(0, MAX_CANVAS_NODES_PER_ENTRY)
+      : [];
+    for (const [index, node] of nodes.entries()) {
       if (node.type === "text" && typeof node.text === "string") {
+        if (remainingTextCharacters <= 0) {
+          continue;
+        }
+        const boundedText = node.text.slice(
+          0,
+          Math.min(MAX_CANVAS_TEXT_CHARACTERS_PER_NODE, remainingTextCharacters)
+        );
         const metadata = parseObsidianMarkdown(
           entry.id,
           entry.path,
-          node.text,
+          boundedText,
           remainingTextLinks,
           remainingTextTags
         );
         parts.push(metadata);
+        remainingTextCharacters -= boundedText.length;
         remainingTextLinks = Math.max(0, remainingTextLinks - metadata.links.length);
         remainingTextTags = Math.max(0, remainingTextTags - metadata.tags.length);
       }
       if (
         node.type === "file"
         && typeof node.file === "string"
+        && node.file.length <= MAX_INTERNAL_LINK_TARGET_CHARACTERS
         && fileLinks.length < maximumLinkOccurrences
       ) {
         fileLinks.push({
@@ -117,7 +164,7 @@ function parseCanvasMetadata(
           embedded: true,
           line: index + 1,
           column: 1,
-          context: node.file
+          context: node.file.slice(0, MAX_INTERNAL_LINK_CONTEXT_CHARACTERS)
         });
       }
     }
@@ -225,9 +272,10 @@ export function buildKnowledgeIndex(inputEntries: readonly VaultIndexEntry[]): K
     outgoingByEntryId.set(entry.id, []);
     backlinksByEntryId.set(entry.id, []);
   }
+  const resolutionIndex = buildInternalLinkResolutionIndex(entries, metadataByEntryId);
   for (const entry of entries) {
     const resolved = (metadataByEntryId.get(entry.id)?.links ?? []).map((occurrence) =>
-      resolveInternalLink(occurrence, entries, metadataByEntryId)
+      resolveInternalLink(occurrence, entries, metadataByEntryId, resolutionIndex)
     );
     outgoingByEntryId.set(entry.id, resolved);
     for (const occurrence of resolved) {

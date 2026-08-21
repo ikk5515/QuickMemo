@@ -6,6 +6,12 @@ import {
 import type { UserProfile } from "../../types";
 import type { VaultContentFormat, VaultEntryKind } from "../../types";
 import type { DecryptedVaultNote } from "./vaultData";
+import { decodeVaultAsset, encodeVaultAsset } from "./vaultAsset";
+import { canonicalVaultName } from "./vaultIntegrity";
+import {
+  assertVaultPayloadFitsPersistence,
+  encryptedHistorySnapshotSource
+} from "./vaultPayloadLimits";
 
 export interface MarkdownNoteDraft {
   body: string;
@@ -15,57 +21,58 @@ export interface MarkdownNoteDraft {
 
 export interface VaultEntryDraft extends MarkdownNoteDraft {
   contentFormat: VaultContentFormat;
-  entryKind: Exclude<VaultEntryKind, "asset">;
+  entryKind: VaultEntryKind;
 }
 
-const maxVaultBodyCharacters = 500_000;
-// Firestore documents are capped at 1 MiB. AES-GCM payloads are base64 encoded,
-// so keep plaintext below 500 kB to leave room for ciphertext expansion,
-// title/key metadata, and the separately encrypted history snapshot envelope.
-const maxVaultBodyUtf8Bytes = 500_000;
-const maxVaultHistorySnapshotUtf8Bytes = 520_000;
-const utf8Encoder = new TextEncoder();
+export interface VaultAssetDraft {
+  bytes: Uint8Array;
+  folderId: string | null;
+  mimeType?: string;
+  title: string;
+}
 
-function validateDraft(draft: MarkdownNoteDraft) {
-  const title = draft.title.trim();
+function validVaultFormatPair(
+  contentFormat: VaultContentFormat,
+  entryKind: VaultEntryKind
+) {
+  return (
+    (contentFormat === "markdown-v1" && entryKind === "markdown")
+    || (contentFormat === "legacy-html-v1" && entryKind === "legacy-html")
+    || (contentFormat === "json-canvas-v1" && entryKind === "canvas")
+    || (contentFormat === "base-v1" && entryKind === "base")
+    || (contentFormat === "asset-v1" && entryKind === "asset")
+  );
+}
+
+function validateDraft(
+  draft: MarkdownNoteDraft,
+  contentFormat: VaultContentFormat,
+  entryKind: VaultEntryKind
+) {
+  const title = draft.title.trim().normalize("NFC");
   if (!title || title.length > 180) {
     throw new Error("노트 이름은 1~180자로 입력해주세요.");
   }
-  if (title.includes("/") || title.includes("\\")) {
-    throw new Error("노트 이름에는 경로 구분자를 사용할 수 없습니다.");
-  }
+  canonicalVaultName(title, "entry", entryKind);
   if (
-    draft.body.length > maxVaultBodyCharacters
-    || utf8Encoder.encode(draft.body).byteLength > maxVaultBodyUtf8Bytes
+    draft.folderId !== null
+    && (
+      !draft.folderId
+      || draft.folderId.length > 120
+      || draft.folderId.includes("/")
+    )
   ) {
-    throw new Error("Markdown 본문은 UTF-8 기준 500KB 이하로 저장할 수 있습니다.");
+    throw new Error("노트 폴더 식별자가 올바르지 않습니다.");
+  }
+  if (!validVaultFormatPair(contentFormat, entryKind)) {
+    throw new Error("Vault 항목 종류와 저장 형식이 일치하지 않습니다.");
+  }
+  if (entryKind === "asset") {
+    decodeVaultAsset(draft.body);
   }
   const normalized = { ...draft, title };
-  if (
-    utf8Encoder.encode(encryptedHistorySnapshotSource(
-      normalized,
-      "markdown-v1",
-      "markdown"
-    )).byteLength > maxVaultHistorySnapshotUtf8Bytes
-  ) {
-    throw new Error("노트 이력 스냅샷이 저장 가능한 크기를 초과했습니다.");
-  }
+  assertVaultPayloadFitsPersistence({ ...normalized, contentFormat, entryKind });
   return normalized;
-}
-
-function encryptedHistorySnapshotSource(
-  draft: MarkdownNoteDraft,
-  contentFormat: VaultContentFormat,
-  entryKind: Exclude<VaultEntryKind, "asset">
-) {
-  return JSON.stringify({
-    title: draft.title,
-    body: draft.body,
-    fontSize: 16,
-    folderId: draft.folderId,
-    contentFormat,
-    entryKind
-  });
 }
 
 function historySummary(previous: MarkdownNoteDraft | null, next: MarkdownNoteDraft) {
@@ -95,14 +102,18 @@ export async function createEncryptedVaultEntry(
   profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
   draft: VaultEntryDraft
 ) {
-  const normalized = validateDraft(draft);
+  const normalized = validateDraft(draft, draft.contentFormat, draft.entryKind);
   const noteKey = await generateNoteKey();
   const [encryptedTitle, encryptedBody, wrappedKey, historySummaryPayload, historySnapshot] = await Promise.all([
     encryptText(normalized.title, noteKey),
     encryptText(normalized.body, noteKey),
     wrapNoteKey(noteKey, profile.publicKeyJwk),
     encryptText(historySummary(null, normalized), noteKey),
-    encryptText(encryptedHistorySnapshotSource(normalized, draft.contentFormat, draft.entryKind), noteKey)
+    encryptText(encryptedHistorySnapshotSource({
+      ...normalized,
+      contentFormat: draft.contentFormat,
+      entryKind: draft.entryKind
+    }), noteKey)
   ]);
 
   return createRevisionedEncryptedNote({
@@ -117,6 +128,19 @@ export async function createEncryptedVaultEntry(
     participantUids: [profile.uid],
     type: "personal",
     wrappedKeys: { [profile.uid]: wrappedKey }
+  });
+}
+
+export async function createEncryptedVaultAsset(
+  profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
+  draft: VaultAssetDraft
+) {
+  return createEncryptedVaultEntry(profile, {
+    body: encodeVaultAsset(draft.bytes, draft.mimeType),
+    contentFormat: "asset-v1",
+    entryKind: "asset",
+    folderId: draft.folderId,
+    title: draft.title
   });
 }
 
@@ -139,24 +163,45 @@ export async function saveEncryptedVaultEntry(
     throw new Error("기존 HTML 노트는 Markdown 복사본으로 변환한 뒤 편집할 수 있습니다.");
   }
 
-  const normalized = validateDraft(draft);
+  const normalized = validateDraft(draft, note.contentFormat, note.entryKind);
+  if ((note.folderId ?? null) !== normalized.folderId) {
+    throw new Error("폴더 이동은 이력과 revision을 함께 기록하는 이동 기능을 사용해주세요.");
+  }
   const wrappedKey = note.wrappedKeys[uid];
   if (!wrappedKey) {
     throw new Error("노트를 저장할 암호화 키가 없습니다.");
   }
 
+  const changedFields = [
+    normalized.title !== note.title ? "title" : "",
+    normalized.body !== note.body ? "body" : ""
+  ].filter(Boolean);
+  if (!changedFields.length) {
+    return { noteId: note.id, revision: note.revision ?? 0 };
+  }
+
   const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
   const [encryptedTitle, encryptedBody, historySummaryPayload, historySnapshot] = await Promise.all([
-    encryptText(normalized.title, noteKey),
-    encryptText(normalized.body, noteKey),
+    changedFields.includes("title")
+      ? encryptText(normalized.title, noteKey)
+      : Promise.resolve(note.encryptedTitle),
+    changedFields.includes("body")
+      ? encryptText(normalized.body, noteKey)
+      : Promise.resolve(note.encryptedBody),
     encryptText(historySummary({ body: note.body, folderId: note.folderId ?? null, title: note.title }, normalized), noteKey),
-    encryptText(encryptedHistorySnapshotSource(normalized, note.contentFormat, note.entryKind), noteKey)
+    encryptText(encryptedHistorySnapshotSource({
+      ...normalized,
+      contentFormat: note.contentFormat,
+      entryKind: note.entryKind
+    }), noteKey)
   ]);
 
   return updateRevisionedEncryptedNote({
-    changedFields: ["title", "body"],
+    changedFields,
     encryptedBody,
     encryptedTitle,
+    expectedContentFormat: note.contentFormat,
+    expectedEntryKind: note.entryKind,
     expectedRevision: note.revision ?? 0,
     historySnapshot,
     historySummary: historySummaryPayload,

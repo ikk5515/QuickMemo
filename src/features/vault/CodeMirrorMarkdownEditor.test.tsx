@@ -31,4 +31,28 @@ describe("CodeMirrorMarkdownEditor", () => {
     expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("원격에서 갱신된 노트");
     expect(onChange).not.toHaveBeenCalled();
   });
+
+  it("inserts requested template text through the editor transaction", () => {
+    const onChange = vi.fn();
+    const onInsertHandled = vi.fn();
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        onInsertHandled={onInsertHandled}
+        value="본문"
+      />
+    );
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        insertRequest={{ id: 7, text: "# 템플릿\n" }}
+        onChange={onChange}
+        onInsertHandled={onInsertHandled}
+        value="본문"
+      />
+    );
+
+    expect(onChange).toHaveBeenCalledWith("# 템플릿\n본문");
+    expect(onInsertHandled).toHaveBeenCalledWith(7);
+  });
 });

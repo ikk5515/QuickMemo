@@ -91,4 +91,24 @@ describe("completeObsidianMarkdown", () => {
 
     expect(result).toBeNull();
   });
+
+  it("offers slash commands at the start of a Markdown line without vault data", () => {
+    const state = EditorState.create({ doc: "  /hea", extensions: [markdown()] });
+    const result = completeObsidianMarkdown(
+      new CompletionContext(state, state.doc.length, false),
+      undefined
+    );
+
+    expect(result?.from).toBe(2);
+    expect(result?.options).toContainEqual(expect.objectContaining({
+      apply: "# ",
+      detail: "제목 1",
+      label: "/heading-1"
+    }));
+  });
+
+  it("does not offer slash commands in prose or code", () => {
+    expect(complete("문장 /hea")).toBeNull();
+    expect(complete("`/hea")).toBeNull();
+  });
 });

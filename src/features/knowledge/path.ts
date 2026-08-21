@@ -53,6 +53,44 @@ function safelyDecodePath(value: string): string {
   }
 }
 
+export interface InternalLinkResolutionIndex {
+  byAlias: ReadonlyMap<string, readonly VaultIndexEntry[]>;
+  byPath: ReadonlyMap<string, readonly VaultIndexEntry[]>;
+  byStem: ReadonlyMap<string, readonly VaultIndexEntry[]>;
+}
+
+function appendLookupEntry(
+  lookup: Map<string, VaultIndexEntry[]>,
+  key: string,
+  entry: VaultIndexEntry
+): void {
+  const existing = lookup.get(key);
+  if (existing) {
+    existing.push(entry);
+  } else {
+    lookup.set(key, [entry]);
+  }
+}
+
+export function buildInternalLinkResolutionIndex(
+  entries: readonly VaultIndexEntry[],
+  metadataByEntryId: ReadonlyMap<string, ParsedMarkdownMetadata>
+): InternalLinkResolutionIndex {
+  const byAlias = new Map<string, VaultIndexEntry[]>();
+  const byPath = new Map<string, VaultIndexEntry[]>();
+  const byStem = new Map<string, VaultIndexEntry[]>();
+
+  for (const entry of entries) {
+    appendLookupEntry(byPath, caseFold(normalizeVaultPath(entry.path)), entry);
+    appendLookupEntry(byStem, caseFold(vaultStem(entry.path)), entry);
+    for (const alias of metadataByEntryId.get(entry.id)?.aliases ?? []) {
+      appendLookupEntry(byAlias, caseFold(alias), entry);
+    }
+  }
+
+  return { byAlias, byPath, byStem };
+}
+
 function pathVariants(target: string, syntax: InternalLinkOccurrence["syntax"], sourcePath: string): string[] {
   const decoded = safelyDecodePath(target.trim()).replace(/\\/g, "/");
   const sourceDirectory = vaultDirectory(sourcePath);
@@ -89,7 +127,8 @@ export function isExternalLinkTarget(target: string): boolean {
 export function resolveInternalLink(
   occurrence: InternalLinkOccurrence,
   entries: readonly VaultIndexEntry[],
-  metadataByEntryId: ReadonlyMap<string, ParsedMarkdownMetadata>
+  metadataByEntryId: ReadonlyMap<string, ParsedMarkdownMetadata>,
+  resolutionIndex = buildInternalLinkResolutionIndex(entries, metadataByEntryId)
 ): ResolvedLinkOccurrence {
   const target = occurrence.target.trim();
   if (!target && occurrence.fragment) {
@@ -107,22 +146,20 @@ export function resolveInternalLink(
   const variantKeys = variants.map(caseFold);
   let candidates: VaultIndexEntry[] = [];
   for (const variantKey of variantKeys) {
-    const matches = entries.filter((entry) => caseFold(normalizeVaultPath(entry.path)) === variantKey);
+    const matches = resolutionIndex.byPath.get(variantKey) ?? [];
     if (matches.length > 0) {
-      candidates = matches;
+      candidates = [...matches];
       break;
     }
   }
 
   if (candidates.length === 0 && occurrence.syntax === "wikilink" && !target.includes("/")) {
     const targetName = caseFold(target.replace(MARKDOWN_EXTENSION_PATTERN, ""));
-    const stemMatches = entries.filter((entry) => caseFold(vaultStem(entry.path)) === targetName);
+    const stemMatches = resolutionIndex.byStem.get(targetName) ?? [];
     if (stemMatches.length > 0) {
-      candidates = stemMatches;
+      candidates = [...stemMatches];
     } else {
-      candidates = entries.filter((entry) =>
-        (metadataByEntryId.get(entry.id)?.aliases ?? []).some((alias) => caseFold(alias) === targetName)
-      );
+      candidates = [...(resolutionIndex.byAlias.get(targetName) ?? [])];
     }
   }
 

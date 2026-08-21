@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
-import { GraphAccessibilityList, GraphCanvas } from "./GraphCanvas";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { GraphAccessibilityList, GraphCanvas, graphKeyboardAction } from "./GraphCanvas";
 import { createDefaultGlobalGraphSettings, createDefaultLocalGraphSettings } from "./graphSettings";
 import type { GraphEdge, GraphNode } from "./types";
 
@@ -15,6 +15,10 @@ const edges: GraphEdge[] = [
   { id: "edge-a", sourceId: "note-a", targetId: "tag-work" },
   { id: "edge-b", sourceId: "note-a", targetId: "missing" }
 ];
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("GraphAccessibilityList", () => {
   it("exposes every Canvas node with its kind and distinct connection count", async () => {
@@ -50,9 +54,37 @@ describe("GraphAccessibilityList", () => {
     render(<GraphAccessibilityList edges={[]} nodes={[]} onNodeOpen={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent("표시할 그래프 노드가 없습니다.");
   });
+
+  it("windows very large accessible graphs into bounded DOM batches", async () => {
+    const user = userEvent.setup();
+    const manyNodes = Array.from({ length: 450 }, (_, index): GraphNode => ({
+      id: `node-${index}`,
+      kind: "note",
+      label: `노트 ${index}`
+    }));
+    render(<GraphAccessibilityList edges={[]} nodes={manyNodes} onNodeOpen={vi.fn()} />);
+
+    const list = screen.getByRole("list", { name: "그래프 노드" });
+    expect(within(list).getAllByRole("button")).toHaveLength(200);
+    expect(screen.getByText("전체 450개 중 200개 표시")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "다음 200개 표시" }));
+    expect(within(list).getAllByRole("button")).toHaveLength(400);
+    await user.click(screen.getByRole("button", { name: "다음 50개 표시" }));
+    expect(within(list).getAllByRole("button")).toHaveLength(450);
+    expect(screen.queryByRole("button", { name: /다음 .*개 표시/ })).not.toBeInTheDocument();
+  });
 });
 
 describe("GraphCanvas", () => {
+  it("maps zoom and normal/accelerated keyboard panning to deterministic actions", () => {
+    expect(graphKeyboardAction("+", false)).toEqual({ type: "zoom", factor: 1.25 });
+    expect(graphKeyboardAction("-", false)).toEqual({ type: "zoom", factor: 0.8 });
+    expect(graphKeyboardAction("ArrowLeft", false)).toEqual({ type: "pan", deltaX: -32, deltaY: 0 });
+    expect(graphKeyboardAction("ArrowDown", true)).toEqual({ type: "pan", deltaX: 0, deltaY: 120 });
+    expect(graphKeyboardAction("Escape", false)).toBeNull();
+  });
+
   it("falls back to the accessible list when Canvas is unavailable in tests", () => {
     render(
       <GraphCanvas
@@ -112,5 +144,33 @@ describe("GraphCanvas", () => {
     fireEvent.change(screen.getByRole("slider", { name: "그래프 생성일 위치" }), { target: { value: "0" } });
     expect(screen.getByRole("button", { name: "오래된 노트, 노트, 연결 0개" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /새 노트/ })).not.toBeInTheDocument();
+  });
+
+  it("keeps timeline scrubbing but disables automatic playback when reduced motion is requested", () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn()
+    })));
+    const settings = createDefaultGlobalGraphSettings();
+    settings.animate = true;
+    render(
+      <GraphCanvas
+        edges={[]}
+        nodes={[{ id: "dated", kind: "note", label: "날짜 노트", createdAt: 100 }]}
+        onNodeOpen={vi.fn()}
+        renderMode="accessible"
+        settings={settings}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "타임라인 재생" })).toBeDisabled();
+    expect(screen.getByRole("slider", { name: "그래프 생성일 위치" })).toBeEnabled();
+    expect(screen.getByText("모션 감소 설정으로 자동 재생 꺼짐")).toBeInTheDocument();
   });
 });

@@ -52,10 +52,16 @@ export interface BuildGraphSnapshotOptions {
 }
 
 interface CollapsedLink {
+  order: number;
   sourceEntryId: string;
   targetEntryId?: string;
   unresolvedKey?: string;
   occurrences: ResolvedLinkOccurrence[];
+}
+
+interface LinkAdjacency {
+  incomingByTarget: Map<string, CollapsedLink[]>;
+  outgoingBySource: Map<string, CollapsedLink[]>;
 }
 
 function isAttachment(entry: VaultIndexEntry): boolean {
@@ -91,6 +97,7 @@ function collapseLinks(index: KnowledgeIndex): CollapsedLink[] {
         existing.occurrences.push(occurrence);
       } else {
         collapsed.set(key, {
+          order: collapsed.size,
           sourceEntryId,
           targetEntryId: occurrence.targetEntryId,
           unresolvedKey: occurrence.targetEntryId ? undefined : occurrence.unresolvedKey,
@@ -100,6 +107,59 @@ function collapseLinks(index: KnowledgeIndex): CollapsedLink[] {
     }
   }
   return [...collapsed.values()];
+}
+
+function appendAdjacentLink(
+  adjacency: Map<string, CollapsedLink[]>,
+  entryId: string,
+  link: CollapsedLink
+): void {
+  const links = adjacency.get(entryId);
+  if (links) {
+    links.push(link);
+  } else {
+    adjacency.set(entryId, [link]);
+  }
+}
+
+function buildLinkAdjacency(links: readonly CollapsedLink[]): LinkAdjacency {
+  const incomingByTarget = new Map<string, CollapsedLink[]>();
+  const outgoingBySource = new Map<string, CollapsedLink[]>();
+  for (const link of links) {
+    appendAdjacentLink(outgoingBySource, link.sourceEntryId, link);
+    if (link.targetEntryId) {
+      appendAdjacentLink(incomingByTarget, link.targetEntryId, link);
+    }
+  }
+  return { incomingByTarget, outgoingBySource };
+}
+
+function forEachAdjacentLink(
+  entryId: string,
+  adjacency: LinkAdjacency,
+  incoming: boolean,
+  outgoing: boolean,
+  visit: (link: CollapsedLink) => void
+): void {
+  const incomingLinks = incoming ? adjacency.incomingByTarget.get(entryId) ?? [] : [];
+  const outgoingLinks = outgoing ? adjacency.outgoingBySource.get(entryId) ?? [] : [];
+  let incomingIndex = 0;
+  let outgoingIndex = 0;
+
+  while (incomingIndex < incomingLinks.length || outgoingIndex < outgoingLinks.length) {
+    const incomingLink = incomingLinks[incomingIndex];
+    const outgoingLink = outgoingLinks[outgoingIndex];
+    if (!outgoingLink || (incomingLink && incomingLink.order < outgoingLink.order)) {
+      visit(incomingLink);
+      incomingIndex += 1;
+      continue;
+    }
+    visit(outgoingLink);
+    outgoingIndex += 1;
+    if (incomingLink === outgoingLink) {
+      incomingIndex += 1;
+    }
+  }
 }
 
 function graphGroupForEntry(
@@ -134,12 +194,20 @@ function graphNodeForEntry(
   };
 }
 
-function graphEdgeFromCollapsed(link: CollapsedLink): GraphEdge {
-  const target = link.targetEntryId
+function collapsedLinkTargetNodeId(link: CollapsedLink): string {
+  return link.targetEntryId
     ? entryNodeId(link.targetEntryId)
     : unresolvedNodeId(link.unresolvedKey ?? "");
+}
+
+function graphEdgeId(link: CollapsedLink): string {
+  return `link:${entryNodeId(link.sourceEntryId)}->${collapsedLinkTargetNodeId(link)}`;
+}
+
+function graphEdgeFromCollapsed(link: CollapsedLink): GraphEdge {
+  const target = collapsedLinkTargetNodeId(link);
   return {
-    id: `link:${entryNodeId(link.sourceEntryId)}->${target}`,
+    id: graphEdgeId(link),
     kind: "internal-link",
     source: entryNodeId(link.sourceEntryId),
     target,
@@ -287,6 +355,7 @@ interface LocalSelection {
 function localEntryIds(
   index: KnowledgeIndex,
   links: readonly CollapsedLink[],
+  adjacency: LinkAdjacency,
   settings: Extract<GraphViewSettings, { scope: "local" }>,
   activeEntryId: string | undefined,
   allowRegex: boolean
@@ -313,16 +382,18 @@ function localEntryIds(
 
   const depths = new Map<string, number>([[rootEntryId, 0]]);
   const queue = [rootEntryId];
+  let queueIndex = 0;
   const selectedLinkIds = new Set<string>();
   const unresolvedKeys = new Set<string>();
-  while (queue.length > 0) {
-    const current = queue.shift() as string;
+  while (queueIndex < queue.length) {
+    const current = queue[queueIndex];
+    queueIndex += 1;
     const depth = depths.get(current) ?? 0;
     if (depth >= settings.depth) {
       continue;
     }
-    for (const link of links) {
-      const edgeId = graphEdgeFromCollapsed(link).id;
+    forEachAdjacentLink(current, adjacency, settings.incoming, settings.outgoing, (link) => {
+      const edgeId = graphEdgeId(link);
       let neighbor: string | undefined;
       if (settings.outgoing && link.sourceEntryId === current) {
         if (link.targetEntryId) {
@@ -336,7 +407,7 @@ function localEntryIds(
         neighbor = link.sourceEntryId;
       }
       if (!neighbor || !eligible.has(neighbor)) {
-        continue;
+        return;
       }
       if (!depths.has(neighbor)) {
         selectedLinkIds.add(edgeId);
@@ -345,7 +416,7 @@ function localEntryIds(
       } else if (current === rootEntryId || neighbor === rootEntryId) {
         selectedLinkIds.add(edgeId);
       }
-    }
+    });
   }
   const entryIds = new Set(depths.keys());
   if (settings.neighborLinks) {
@@ -355,7 +426,7 @@ function localEntryIds(
         entryIds.has(link.sourceEntryId) &&
         entryIds.has(link.targetEntryId)
       ) {
-        selectedLinkIds.add(graphEdgeFromCollapsed(link).id);
+        selectedLinkIds.add(graphEdgeId(link));
       }
     }
   }
@@ -369,8 +440,9 @@ export function buildGraphSnapshot(
 ): GraphSnapshot {
   const allowRegex = options.allowRegex !== false;
   const links = collapseLinks(index);
-  const localSelection = settings.scope === "local"
-    ? localEntryIds(index, links, settings, options.activeEntryId, allowRegex)
+  const adjacency = settings.scope === "local" ? buildLinkAdjacency(links) : undefined;
+  const localSelection = settings.scope === "local" && adjacency
+    ? localEntryIds(index, links, adjacency, settings, options.activeEntryId, allowRegex)
     : undefined;
   const visibleEntryIds = settings.scope === "global"
     ? globalEntryIds(index, settings, allowRegex)

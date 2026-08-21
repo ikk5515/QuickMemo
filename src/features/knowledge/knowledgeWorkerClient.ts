@@ -14,6 +14,7 @@ import { vaultSearchQueryContainsRegex } from "./query";
 
 export const DEFAULT_KNOWLEDGE_SEARCH_TIMEOUT_MS = 2_000;
 export const DEFAULT_KNOWLEDGE_GRAPH_TIMEOUT_MS = 5_000;
+export const DEFAULT_KNOWLEDGE_INDEX_TIMEOUT_MS = 10_000;
 
 export class KnowledgeWorkerError extends Error {
   constructor(message = "Knowledge worker request failed.") {
@@ -217,7 +218,16 @@ export class KnowledgeWorkerClient {
           }
         }, Math.max(0, options.timeoutMs));
       }
-      this.worker.postMessage({ ...request, id } as KnowledgeWorkerRequest);
+      try {
+        this.worker.postMessage({ ...request, id } as KnowledgeWorkerRequest);
+      } catch {
+        const pending = this.pending.get(id);
+        if (pending) {
+          this.pending.delete(id);
+          pending.cleanup();
+          pending.reject(new KnowledgeWorkerError());
+        }
+      }
     });
   }
 
@@ -226,25 +236,45 @@ export class KnowledgeWorkerClient {
     return { version: response.version, entryCount: response.entryCount };
   }
 
-  async replaceVault(entries: readonly VaultIndexEntry[]): Promise<void> {
+  async replaceVault(
+    entries: readonly VaultIndexEntry[],
+    options: KnowledgeWorkerRequestOptions = {}
+  ): Promise<void> {
+    const nextEntries = entries.map((entry) => ({ ...entry }));
+    assertResponseType(await this.request(
+      {
+        type: "replace-vault",
+        entries: nextEntries
+      },
+      { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_KNOWLEDGE_INDEX_TIMEOUT_MS }
+    ), "updated");
     this.entriesById.clear();
-    for (const entry of entries) {
-      this.entriesById.set(entry.id, { ...entry });
+    for (const entry of nextEntries) {
+      this.entriesById.set(entry.id, entry);
     }
-    assertResponseType(await this.request({
-      type: "replace-vault",
-      entries: [...this.entriesById.values()]
-    }), "updated");
   }
 
-  async upsertEntry(entry: VaultIndexEntry): Promise<void> {
-    this.entriesById.set(entry.id, { ...entry });
-    assertResponseType(await this.request({ type: "upsert-entry", entry: { ...entry } }), "updated");
+  async upsertEntry(
+    entry: VaultIndexEntry,
+    options: KnowledgeWorkerRequestOptions = {}
+  ): Promise<void> {
+    const nextEntry = { ...entry };
+    assertResponseType(await this.request(
+      { type: "upsert-entry", entry: nextEntry },
+      { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_KNOWLEDGE_INDEX_TIMEOUT_MS }
+    ), "updated");
+    this.entriesById.set(entry.id, nextEntry);
   }
 
-  async removeEntry(entryId: string): Promise<void> {
+  async removeEntry(
+    entryId: string,
+    options: KnowledgeWorkerRequestOptions = {}
+  ): Promise<void> {
+    assertResponseType(await this.request(
+      { type: "remove-entry", entryId },
+      { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_KNOWLEDGE_INDEX_TIMEOUT_MS }
+    ), "updated");
     this.entriesById.delete(entryId);
-    assertResponseType(await this.request({ type: "remove-entry", entryId }), "updated");
   }
 
   async search(

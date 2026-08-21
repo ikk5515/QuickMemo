@@ -8,6 +8,7 @@ import {
   type NoteSnapshot
 } from "../../services/notes";
 import type { DecryptedNote, UserProfile, VaultContentFormat, VaultEntryKind } from "../../types";
+import { canonicalVaultName } from "./vaultIntegrity";
 
 export interface DecryptedVaultFolder extends NoteFolderSnapshot {
   displayName: string;
@@ -15,7 +16,7 @@ export interface DecryptedVaultFolder extends NoteFolderSnapshot {
 
 export interface DecryptedVaultNote extends DecryptedNote {
   contentFormat: VaultContentFormat;
-  entryKind: Exclude<VaultEntryKind, "asset">;
+  entryKind: VaultEntryKind;
 }
 
 export function resolvedNoteContentFormat(note: Pick<NoteSnapshot, "contentFormat">) {
@@ -31,6 +32,9 @@ export function resolvedVaultEntryKind(note: Pick<NoteSnapshot, "contentFormat" 
   }
   if (note.contentFormat === "base-v1") {
     return "base" as const;
+  }
+  if (note.contentFormat === "asset-v1") {
+    return "asset" as const;
   }
   return note.contentFormat === "markdown-v1" ? "markdown" as const : "legacy-html" as const;
 }
@@ -65,7 +69,12 @@ export async function decryptVaultNotes(notes: NoteSnapshot[], uid: string, priv
 }
 
 export async function decryptVaultFolders(folders: NoteFolderSnapshot[], uid: string, privateKey: CryptoKey) {
-  return Promise.all(folders.map(async (folder): Promise<DecryptedVaultFolder> => {
+  // Filter before decryption so an accidentally over-broad caller never puts
+  // another owner's legacy plaintext name into the decrypted result pipeline.
+  // Bound crypto concurrency as a large Vault otherwise creates a CPU/memory
+  // spike while unlocking.
+  const ownedFolders = folders.filter((folder) => folder.ownerUid === uid);
+  return mapWithConcurrency(ownedFolders, 4, async (folder): Promise<DecryptedVaultFolder> => {
     if (!folder.encryptedName || !folder.wrappedKey) {
       return { ...folder, displayName: folder.name };
     }
@@ -76,7 +85,7 @@ export async function decryptVaultFolders(folders: NoteFolderSnapshot[], uid: st
     } catch {
       return { ...folder, displayName: "복호화할 수 없는 폴더" };
     }
-  })).then((items) => items.filter((folder) => folder.ownerUid === uid));
+  });
 }
 
 export async function createEncryptedVaultFolder(
@@ -86,10 +95,11 @@ export async function createEncryptedVaultFolder(
   order: number,
   color = "#7c5cff"
 ) {
-  const normalizedName = name.trim();
-  if (!normalizedName || normalizedName.length > 120 || normalizedName.includes("/")) {
-    throw new Error("폴더 이름은 1~120자이며 '/'를 포함할 수 없습니다.");
+  const normalizedName = name.trim().normalize("NFC");
+  if (!normalizedName || normalizedName.length > 120) {
+    throw new Error("폴더 이름은 1~120자로 입력해주세요.");
   }
+  canonicalVaultName(normalizedName, "folder");
 
   const folderKey = await generateNoteKey();
   const [encryptedName, wrappedKey] = await Promise.all([
@@ -116,9 +126,15 @@ export async function migrateLegacyVaultFolder(
     return { folderId: folder.id, revision: folder.revision ?? 1 };
   }
 
+  const normalizedName = folder.name.trim().normalize("NFC");
+  if (!normalizedName || normalizedName.length > 120) {
+    throw new Error("기존 폴더 이름을 안전하게 변환할 수 없습니다.");
+  }
+  canonicalVaultName(normalizedName, "folder");
+
   const folderKey = await generateNoteKey();
   const [encryptedName, wrappedKey] = await Promise.all([
-    encryptText(folder.name, folderKey),
+    encryptText(normalizedName, folderKey),
     wrapNoteKey(folderKey, profile.publicKeyJwk)
   ]);
 
@@ -140,10 +156,11 @@ export async function renameEncryptedVaultFolder(
   privateKey: CryptoKey,
   name: string
 ) {
-  const normalizedName = name.trim();
-  if (!normalizedName || normalizedName.length > 120 || normalizedName.includes("/")) {
-    throw new Error("폴더 이름은 1~120자이며 '/'를 포함할 수 없습니다.");
+  const normalizedName = name.trim().normalize("NFC");
+  if (!normalizedName || normalizedName.length > 120) {
+    throw new Error("폴더 이름은 1~120자로 입력해주세요.");
   }
+  canonicalVaultName(normalizedName, "folder");
   if (!folder.encryptedName || !folder.wrappedKey) {
     throw new Error("먼저 기존 폴더 이름을 암호화해주세요.");
   }
@@ -193,6 +210,10 @@ export function vaultEntryPath(
   note: Pick<DecryptedVaultNote, "entryKind" | "folderId" | "title">,
   folderPaths: Map<string, string>
 ) {
+  if (note.entryKind === "asset") {
+    const folderPath = note.folderId ? folderPaths.get(note.folderId) : "";
+    return folderPath ? `${folderPath}/${note.title}` : note.title;
+  }
   const extension = note.entryKind === "canvas" ? ".canvas" : note.entryKind === "base" ? ".base" : ".md";
   const escapedExtension = extension.replace(".", "\\.");
   const title = note.title.replace(new RegExp(`${escapedExtension}$`, "i"), "");

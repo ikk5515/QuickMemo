@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DecryptedVaultNote } from "./vaultData";
 import {
+  createEncryptedVaultAsset,
   createEncryptedVaultEntry,
   createMarkdownVaultNote,
   saveEncryptedVaultEntry
@@ -16,6 +17,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../lib/crypto", () => ({
+  base64ToBytes: (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0)),
+  bytesToBase64: (value: Uint8Array) => btoa(String.fromCharCode(...value)),
   encryptText: mocks.encryptText,
   generateNoteKey: mocks.generateNoteKey,
   unwrapNoteKey: mocks.unwrapNoteKey,
@@ -100,6 +103,28 @@ describe("vaultPersistence encrypted revision contract", () => {
     expect(JSON.stringify(persisted)).not.toContain("원본 노트");
   });
 
+  it.each(["bad/name", "bad\\name", "bad%2Fname", "bad%252Fname", "bad\u0000name"])(
+    "rejects a Vault title that would collapse to an unsafe path: %s",
+    async (title) => {
+      await expect(createMarkdownVaultNote(profile, {
+        body: "# safe body",
+        folderId: null,
+        title
+      })).rejects.toThrow("Vault 이름");
+      expect(mocks.generateNoteKey).not.toHaveBeenCalled();
+    }
+  );
+
+  it("normalizes a stored title to NFC before encryption", async () => {
+    await createMarkdownVaultNote(profile, {
+      body: "# normalized",
+      folderId: null,
+      title: "RE\u0301SUME\u0301"
+    });
+
+    expect(mocks.encryptText).toHaveBeenCalledWith("RÉSUMÉ", noteKey);
+  });
+
   it("persists Canvas and Base kinds with their matching canonical formats", async () => {
     await createEncryptedVaultEntry(profile, {
       body: "{\"nodes\":[],\"edges\":[]}",
@@ -126,6 +151,38 @@ describe("vaultPersistence encrypted revision contract", () => {
     }));
   });
 
+  it("stores a binary asset only inside the encrypted asset-v1 envelope", async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+
+    await createEncryptedVaultAsset(profile, {
+      bytes,
+      folderId: "folder-a",
+      mimeType: "application/pdf",
+      title: "설계.pdf"
+    });
+
+    expect(mocks.createRevisionedEncryptedNote).toHaveBeenCalledWith(expect.objectContaining({
+      contentFormat: "asset-v1",
+      entryKind: "asset",
+      folderId: "folder-a"
+    }));
+    const persisted = JSON.stringify(mocks.createRevisionedEncryptedNote.mock.calls[0][0]);
+    expect(persisted).not.toContain("application/pdf");
+    expect(persisted).not.toContain("설계.pdf");
+  });
+
+  it("rejects a malformed asset body before generating a key", async () => {
+    await expect(createEncryptedVaultEntry(profile, {
+      body: "not-an-asset",
+      contentFormat: "asset-v1",
+      entryKind: "asset",
+      folderId: null,
+      title: "bad.bin"
+    })).rejects.toThrow("첨부 데이터 형식");
+
+    expect(mocks.generateNoteKey).not.toHaveBeenCalled();
+  });
+
   it("saves against the expected revision and encrypts a recoverable snapshot", async () => {
     const body = "---\ntags: [project]\n---\n\n# 변경\n";
 
@@ -147,6 +204,60 @@ describe("vaultPersistence encrypted revision contract", () => {
       uid: "user-a"
     }));
     expect(JSON.stringify(mocks.updateRevisionedEncryptedNote.mock.calls[0][0])).not.toContain(body);
+  });
+
+  it("does not re-encrypt unchanged fields and records the exact changed field", async () => {
+    const note = markdownNote();
+
+    await saveEncryptedVaultEntry(note, "user-a", privateKey, {
+      body: "# 본문만 변경\n",
+      folderId: null,
+      title: note.title
+    });
+
+    expect(mocks.encryptText).not.toHaveBeenCalledWith(note.title, noteKey);
+    expect(mocks.updateRevisionedEncryptedNote).toHaveBeenCalledWith(expect.objectContaining({
+      changedFields: ["body"],
+      encryptedTitle: note.encryptedTitle
+    }));
+  });
+
+  it("skips encryption and Firestore writes for an unchanged draft", async () => {
+    const note = markdownNote();
+
+    await expect(saveEncryptedVaultEntry(note, "user-a", privateKey, {
+      body: note.body,
+      folderId: null,
+      title: note.title
+    })).resolves.toEqual({ noteId: note.id, revision: note.revision });
+
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.encryptText).not.toHaveBeenCalled();
+    expect(mocks.updateRevisionedEncryptedNote).not.toHaveBeenCalled();
+  });
+
+  it("requires folder moves to use the audited revisioned move path", async () => {
+    await expect(saveEncryptedVaultEntry(markdownNote(), "user-a", privateKey, {
+      body: "# 변경\n",
+      folderId: "folder-b",
+      title: "이전 제목"
+    })).rejects.toThrow("이력과 revision");
+
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.updateRevisionedEncryptedNote).not.toHaveBeenCalled();
+  });
+
+  it("rejects a runtime-mismatched Vault kind before generating a key", async () => {
+    await expect(createEncryptedVaultEntry(profile, {
+      body: "# 잘못된 형식",
+      contentFormat: "markdown-v1",
+      entryKind: "canvas",
+      folderId: null,
+      title: "잘못된 항목"
+    })).rejects.toThrow("저장 형식이 일치");
+
+    expect(mocks.generateNoteKey).not.toHaveBeenCalled();
+    expect(mocks.createRevisionedEncryptedNote).not.toHaveBeenCalled();
   });
 
   it("refuses to overwrite legacy HTML entries", async () => {

@@ -3759,6 +3759,15 @@ describeRules("firestore security rules", () => {
         updatedAt: serverTimestamp()
       })
     );
+    await assertFails(
+      updateDoc(doc(ownerDb, "noteFolders/folder-a"), {
+        // encrypted-folder already points to folder-a. getAfter(parent)
+        // must reject completing the reverse edge even via a direct SDK write.
+        parentId: "encrypted-folder",
+        revision: 2,
+        updatedAt: serverTimestamp()
+      })
+    );
     await assertSucceeds(
       updateDoc(doc(ownerDb, "noteFolders/encrypted-folder"), {
         encryptedName: { ...encryptedPayload, cipherText: "renamed" },
@@ -3780,6 +3789,20 @@ describeRules("firestore security rules", () => {
         name: "암호화 폴더",
         color: "#7c5cff",
         encryptedName: encryptedPayload,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "noteFolders/oversized-encrypted-name"), {
+        ownerUid: "user-a",
+        name: "암호화 폴더",
+        color: "#7c5cff",
+        encryptedName: { ...encryptedPayload, cipherText: "A".repeat(2049) },
+        wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+        parentId: null,
+        order: 1,
+        revision: 1,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       })
@@ -3820,6 +3843,21 @@ describeRules("firestore security rules", () => {
         })
       );
     }
+    await assertFails(
+      createAuditedNote(ownerDb, "oversized-vault-note", "user-a", {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: { ...encryptedPayload, cipherText: "A".repeat(700_001) },
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        isDeleted: false
+      }, ["user-a"])
+    );
     await assertSucceeds(
       createAuditedNote(ownerDb, "revisioned-folder-note", "user-a", {
         type: "personal",
@@ -3959,6 +3997,16 @@ describeRules("firestore security rules", () => {
       contentFormat: "json-canvas-v1",
       entryKind: "canvas"
     }, ["user-a"]));
+    await assertSucceeds(createAuditedNote(ownerDb, "asset-entry", "user-a", {
+      ...vaultNote,
+      contentFormat: "asset-v1",
+      entryKind: "asset"
+    }, ["user-a"]));
+    await assertFails(createAuditedNote(ownerDb, "asset-mismatched-entry", "user-a", {
+      ...vaultNote,
+      contentFormat: "asset-v1",
+      entryKind: "markdown"
+    }, ["user-a"]));
     await assertFails(createAuditedNote(ownerDb, "mismatched-entry", "user-a", {
       ...vaultNote,
       contentFormat: "markdown-v1",
@@ -3977,11 +4025,37 @@ describeRules("firestore security rules", () => {
       ...vaultNote,
       executablePayload: "alert(1)"
     }, ["user-a"]));
-    await assertFails(updateAuditedNote(
+    await assertSucceeds(updateAuditedNote(
       ownerDb,
       "markdown-entry",
       "user-a",
       2,
+      "content",
+      ["body"],
+      ["user-a"],
+      {
+        encryptedBody: { ...encryptedPayload, cipherText: "changed" },
+        isDeleted: false
+      }
+    ));
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "markdown-entry",
+      "user-a",
+      3,
+      "content",
+      ["body"],
+      ["user-a"],
+      {
+        encryptedBody: { ...encryptedPayload, cipherText: "A".repeat(700_001) },
+        isDeleted: false
+      }
+    ));
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "markdown-entry",
+      "user-a",
+      3,
       "content",
       ["body"],
       ["user-a"],
@@ -4887,6 +4961,36 @@ describeRules("firestore security rules", () => {
     });
     secondBatch.set(secondHistoryRef, noteHistory("note-a", "user-b", { changedFields: ["title"], revision: 2 }));
     await assertSucceeds(secondBatch.commit());
+
+    for (const [historyId, historyOverrides] of [
+      ["oversized-summary", {
+        encryptedSummary: { ...encryptedPayload, cipherText: "s".repeat(8_193) }
+      }],
+      ["oversized-snapshot", {
+        encryptedSnapshot: { ...encryptedPayload, cipherText: "s".repeat(700_001) }
+      }],
+      ["oversized-history-iv", {
+        encryptedSnapshot: { ...encryptedPayload, iv: "i".repeat(257) }
+      }]
+    ] as const) {
+      const oversizedHistoryBatch = writeBatch(participantDb);
+      oversizedHistoryBatch.update(doc(participantDb, "notes/note-a"), {
+        encryptedBody: { ...encryptedPayload, cipherText: historyId },
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-b",
+        revision: 3,
+        lastMutationId: historyId
+      });
+      oversizedHistoryBatch.set(
+        doc(participantDb, "notes/note-a/history", historyId),
+        noteHistory("note-a", "user-b", {
+          changedFields: ["body"],
+          revision: 3,
+          ...historyOverrides
+        })
+      );
+      await assertFails(oversizedHistoryBatch.commit());
+    }
 
     await assertSucceeds(getDoc(historyRef));
     await assertFails(

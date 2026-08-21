@@ -15,6 +15,25 @@ const documentPreviewSource = readFileSync(join(process.cwd(), "src/lib/document
 const pdfPreviewCanvasSource = readFileSync(join(process.cwd(), "src/lib/pdfPreviewCanvas.ts"), "utf8");
 
 describe("NotesPage security controls", () => {
+  it("fails closed at the folder cap without optimistically appending an unconfirmed folder", () => {
+    const folderSubscriptionFlow = notesPageSource.match(
+      /return subscribeNoteFolders\(profile\.uid[\s\S]*?\n\s*\}, \[privateKey, profile\]\);/
+    )?.[0] ?? "";
+    const folderCreationFlow = notesPageSource.match(
+      /async function createFolder[\s\S]*?async function removeFolder/
+    )?.[0] ?? "";
+
+    expect(folderSubscriptionFlow).toContain("subscriptionError instanceof NoteFolderLimitError");
+    expect(folderSubscriptionFlow).toContain("subscriptionError.message");
+    expect(folderCreationFlow).toContain("folders.length >= maxNoteFoldersPerOwner");
+    expect(folderCreationFlow.indexOf("folders.length >= maxNoteFoldersPerOwner"))
+      .toBeLessThan(folderCreationFlow.indexOf("createNoteFolder("));
+    expect(folderCreationFlow).toContain("folderCreationInFlightRef.current");
+    expect(folderCreationFlow).toContain("folderCreationInFlightRef.current = false");
+    expect(folderCreationFlow).toContain("createError instanceof NoteFolderLimitError");
+    expect(folderCreationFlow).not.toContain("setFolders(");
+  });
+
   it("keeps bounded document parsing in the shared preview module", () => {
     expect(notesPageSource).toContain('from "../lib/documentPreview"');
     expect(notesPageSource).not.toContain("function safeZipPreviewEntries");
@@ -408,5 +427,22 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("revisionConflictNoteId.current === editor.noteId");
     expect(notesPageSource).toContain("현재 편집 내용은 그대로 유지했습니다.");
     expect(notesPageSource).toContain("onSave(note, savedDraft, editBaseRevision)");
+  });
+
+  it("keeps Vault storage formats out of the legacy TipTap editor and validates saves", () => {
+    const createLegacyNote = notesPageSource.match(
+      /const created = await createRevisionedEncryptedNote\(\{[\s\S]*?\n\s*\}\);/u
+    )?.[0] ?? "";
+
+    expect(notesPageSource).toContain("nextNotes.filter(isLegacyHtmlNoteDocument)");
+    expect(notesPageSource).toContain("notes.filter(isLegacyHtmlNoteDocument)");
+    expect(notesPageSource).toContain("!isLegacyHtmlNoteDocument(rawNote)");
+    expect(notesPageSource).toContain('expectedContentFormat: "legacy-html-v1"');
+    expect(notesPageSource).toContain('expectedEntryKind: "legacy-html"');
+    // Missing format fields are the backward-compatible legacy identity. This
+    // keeps a flag-off/code-first deployment compatible with the live Rules
+    // and with the historical unrevisioned folder compatibility path.
+    expect(createLegacyNote).not.toContain("contentFormat:");
+    expect(createLegacyNote).not.toContain("entryKind:");
   });
 });

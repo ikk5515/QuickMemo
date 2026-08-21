@@ -18,17 +18,21 @@ import {
   type OnSelectionChangeParams
 } from "@xyflow/react";
 import { Copy, FilePlus2, Grid3X3, Group, Link2, StickyNote, Trash2 } from "lucide-react";
+import { createPortal } from "react-dom";
 import {
   createContext,
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent
 } from "react";
+import { VaultAssetPreview } from "../vault/VaultAssetPreview";
+import type { DecodedVaultAsset } from "../vault/vaultAsset";
 import "@xyflow/react/dist/style.css";
 import {
   alignJsonCanvasNodes,
@@ -53,6 +57,8 @@ import {
 import "./canvas.css";
 
 export interface JsonCanvasFileOption {
+  asset?: DecodedVaultAsset;
+  kind?: "markdown" | "canvas" | "base" | "asset";
   label: string;
   path: string;
 }
@@ -66,6 +72,7 @@ export interface JsonCanvasViewProps {
 }
 
 interface CanvasRuntime {
+  fileOptionsByPath: ReadonlyMap<string, JsonCanvasFileOption>;
   fileOptions: readonly JsonCanvasFileOption[];
   onOpenFile: (path: string) => void;
   patchNode: (nodeId: string, patch: Partial<JsonCanvasNode>) => void;
@@ -75,6 +82,7 @@ interface CanvasRuntime {
 const CanvasRuntimeContext = createContext<CanvasRuntime | null>(null);
 const JSON_CANVAS_SIDES: readonly JsonCanvasSide[] = ["top", "right", "bottom", "left"];
 const CANVAS_COLORS = ["1", "2", "3", "4", "5", "6"] as const;
+const CANVAS_FILE_RESULT_LIMIT = 50;
 const ALIGNMENTS: ReadonlyArray<{ label: string; value: CanvasAlignment }> = [
   { label: "왼쪽 맞춤", value: "left" },
   { label: "가로 가운데", value: "center" },
@@ -86,6 +94,182 @@ const ALIGNMENTS: ReadonlyArray<{ label: string; value: CanvasAlignment }> = [
 
 function stopCanvasControlEvent(event: React.SyntheticEvent) {
   event.stopPropagation();
+}
+
+interface CanvasFileChooserProps {
+  accessibleLabel: string;
+  buttonText: string;
+  disabled?: boolean;
+  onSelect: (path: string) => void;
+  options: readonly JsonCanvasFileOption[];
+  value: string;
+}
+
+function CanvasFileChooser({
+  accessibleLabel,
+  buttonText,
+  disabled = false,
+  onSelect,
+  options,
+  value
+}: CanvasFileChooserProps) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const dialogTitleId = useId();
+  const resultListId = useId();
+  const normalizedQuery = query.trim().normalize("NFC").toLocaleLowerCase();
+  const searchResult = useMemo(() => {
+    if (!open) {
+      return { count: 0, matches: [] as JsonCanvasFileOption[] };
+    }
+    const matches: JsonCanvasFileOption[] = [];
+    let count = 0;
+    const selected = options.find((option) => option.path === value);
+    if (!normalizedQuery && selected) {
+      matches.push(selected);
+      count = 1;
+    }
+    for (const option of options) {
+      if (!normalizedQuery && option.path === selected?.path) {
+        continue;
+      }
+      const searchable = `${option.label}\n${option.path}`.normalize("NFC").toLocaleLowerCase();
+      if (normalizedQuery && !searchable.includes(normalizedQuery)) {
+        continue;
+      }
+      count += 1;
+      if (matches.length < CANVAS_FILE_RESULT_LIMIT) {
+        matches.push(option);
+      }
+    }
+    return { count, matches };
+  }, [normalizedQuery, open, options, value]);
+
+  useEffect(() => {
+    if (open) {
+      searchRef.current?.focus();
+    }
+  }, [open]);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    window.requestAnimationFrame(() => buttonRef.current?.focus());
+  }, []);
+
+  const chooser = open && typeof document !== "undefined" ? createPortal(
+    <div
+      className="vault-canvas-file-dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          close();
+        }
+      }}
+      onPointerDown={stopCanvasControlEvent}
+      role="presentation"
+    >
+      <section
+        ref={dialogRef}
+        aria-labelledby={dialogTitleId}
+        aria-modal="true"
+        className="vault-canvas-file-dialog"
+        onClick={stopCanvasControlEvent}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            close();
+          } else if (event.key === "Tab") {
+            const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+              'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+            ) ?? []);
+            const first = focusable[0];
+            const last = focusable.at(-1);
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last?.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first?.focus();
+            }
+          }
+        }}
+        role="dialog"
+      >
+        <header>
+          <h2 id={dialogTitleId}>Canvas 파일 선택</h2>
+          <button aria-label="파일 선택 닫기" onClick={close} type="button">×</button>
+        </header>
+        <label className="vault-canvas-file-search">
+          <span>파일 이름 또는 경로 검색</span>
+          <input
+            ref={searchRef}
+            aria-controls={resultListId}
+            autoComplete="off"
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            placeholder="검색어 입력"
+            type="search"
+            value={query}
+          />
+        </label>
+        <p aria-live="polite" className="vault-canvas-file-result-status">
+          {searchResult.count === 0
+            ? "일치하는 파일이 없습니다."
+            : searchResult.count > CANVAS_FILE_RESULT_LIMIT
+              ? `${searchResult.count.toLocaleString("ko-KR")}개 중 ${CANVAS_FILE_RESULT_LIMIT}개를 표시합니다. 더 구체적으로 검색하세요.`
+              : `${searchResult.count.toLocaleString("ko-KR")}개 파일`}
+        </p>
+        <ul
+          aria-label="Canvas 파일 검색 결과"
+          className="vault-canvas-file-results"
+          id={resultListId}
+        >
+          {searchResult.matches.map((option) => (
+            <li key={option.path}>
+              <button
+                aria-current={option.path === value ? "true" : undefined}
+                onClick={() => {
+                  if (option.path !== value) {
+                    onSelect(option.path);
+                  }
+                  close();
+                }}
+                type="button"
+              >
+                <span>{option.label}</span>
+                <small>{option.path}</small>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+    </div>,
+    document.body
+  ) : null;
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        aria-haspopup="dialog"
+        aria-label={accessibleLabel}
+        className="nodrag nowheel vault-canvas-file-picker-button"
+        disabled={disabled || options.length === 0}
+        onClick={(event) => {
+          event.stopPropagation();
+          setQuery("");
+          setOpen(true);
+        }}
+        onPointerDown={stopCanvasControlEvent}
+        title={value || undefined}
+        type="button"
+      >
+        {buttonText}
+      </button>
+      {chooser}
+    </>
+  );
 }
 
 function accessibleNodeLabel(node: JsonCanvasNode) {
@@ -125,6 +309,9 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
   const node = data.canvas;
   const readOnly = runtime?.readOnly ?? true;
   const resolvedLink = node.type === "link" ? safeHttpUrl(node.url) : null;
+  const fileOption = node.type === "file"
+    ? runtime?.fileOptionsByPath.get(node.file ?? "")
+    : undefined;
   const accent = safeCanvasColor(node.color, node.type === "group" ? "#5b5664" : "#8b82f6");
   const style = { "--canvas-node-accent": accent } as CSSProperties;
 
@@ -172,23 +359,32 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
 
       {node.type === "file" ? (
         <div className="vault-canvas-file-card">
-          <span aria-hidden="true" className="vault-canvas-card-icon">📄</span>
-          <select
-            aria-label="Canvas 파일 선택"
-            className="nodrag nowheel"
-            disabled={readOnly}
-            onChange={(event) => runtime?.patchNode(id, { file: event.target.value })}
-            onDoubleClick={stopCanvasControlEvent}
-            onPointerDown={stopCanvasControlEvent}
-            value={node.file ?? ""}
-          >
-            {node.file && !runtime?.fileOptions.some((option) => option.path === node.file) ? (
-              <option value={node.file}>{node.file}</option>
-            ) : null}
-            {(runtime?.fileOptions ?? []).map((option) => (
-              <option key={option.path} value={option.path}>{option.label}</option>
-            ))}
-          </select>
+          {fileOption?.asset ? (
+            <VaultAssetPreview
+              asset={fileOption.asset}
+              className="nodrag nowheel"
+              compact
+              fileName={fileOption.label}
+            />
+          ) : <span aria-hidden="true" className="vault-canvas-card-icon">📄</span>}
+          {selected && !readOnly ? (
+            <>
+              <span className="vault-canvas-file-label" title={node.file}>
+                {fileOption?.label ?? node.file}
+              </span>
+              <CanvasFileChooser
+                accessibleLabel="Canvas 파일 선택"
+                buttonText="파일 변경"
+                onSelect={(path) => runtime?.patchNode(id, { file: path })}
+                options={runtime?.fileOptions ?? []}
+                value={node.file ?? ""}
+              />
+            </>
+          ) : (
+            <span className="vault-canvas-file-label" title={node.file}>
+              {fileOption?.label ?? node.file}
+            </span>
+          )}
           {node.subpath ? <span className="vault-canvas-file-subpath">{node.subpath}</span> : null}
           <button
             className="nodrag"
@@ -224,15 +420,22 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
             />
           </label>
           {resolvedLink ? (
-            <a
-              className="nodrag vault-canvas-safe-link"
-              href={resolvedLink}
-              onPointerDown={stopCanvasControlEvent}
-              rel="noopener noreferrer"
-              target="_blank"
-            >
-              안전하게 열기
-            </a>
+            <>
+              <span className="vault-canvas-web-host">
+                {new URL(resolvedLink).hostname}
+                <small>외부 콘텐츠는 개인정보 보호를 위해 자동으로 불러오지 않습니다.</small>
+              </span>
+              <a
+                className="nodrag vault-canvas-safe-link"
+                href={resolvedLink}
+                onPointerDown={stopCanvasControlEvent}
+                referrerPolicy="no-referrer"
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                안전하게 열기
+              </a>
+            </>
           ) : (
             <span className="vault-canvas-blocked-link" role="status">http/https 링크만 열 수 있습니다.</span>
           )}
@@ -370,7 +573,23 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
   }, [canvasReadOnly, commit]);
 
   const safeFileOptions = useMemo(() => fileOptions.filter((option) => Boolean(safeVaultPath(option.path))), [fileOptions]);
-  const runtime = useMemo<CanvasRuntime>(() => ({ fileOptions: safeFileOptions, onOpenFile, patchNode, readOnly: canvasReadOnly }), [canvasReadOnly, onOpenFile, patchNode, safeFileOptions]);
+  const fileOptionsByPath = useMemo(() => {
+    const index = new Map<string, JsonCanvasFileOption>();
+    for (const option of safeFileOptions) {
+      const path = option.path;
+      if (!index.has(path)) {
+        index.set(path, option);
+      }
+    }
+    return index;
+  }, [safeFileOptions]);
+  const runtime = useMemo<CanvasRuntime>(() => ({
+    fileOptions: safeFileOptions,
+    fileOptionsByPath,
+    onOpenFile,
+    patchNode,
+    readOnly: canvasReadOnly
+  }), [canvasReadOnly, fileOptionsByPath, onOpenFile, patchNode, safeFileOptions]);
 
   const changeNodes = useCallback((changes: NodeChange<CanvasFlowNode>[]) => {
     if (canvasReadOnly && changes.some((change) => change.type !== "select")) {
@@ -465,7 +684,7 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
     addNode({ id: createCanvasId("node"), type: "group", x: 40 + offset, y: 40 + offset, width: 640, height: 420, label: "새 그룹" });
   }, [addNode]);
 
-  const selectedFilePath = safeFileOptions.some((option) => option.path === fileDraft) ? fileDraft : safeFileOptions[0]?.path ?? "";
+  const selectedFilePath = fileOptionsByPath.has(fileDraft) ? fileDraft : safeFileOptions[0]?.path ?? "";
 
   const addFileNode = useCallback(() => {
     if (!selectedFilePath) {
@@ -625,13 +844,14 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
           <div aria-label="Canvas 편집 도구" className="vault-canvas-toolbar" role="toolbar">
             <div className="vault-canvas-toolbar-group">
               <button aria-label="텍스트 카드 추가" onClick={addTextNode} type="button"><StickyNote size={16} /> 텍스트</button>
-              <label className="vault-canvas-inline-select">
-                <span className="sr-only">추가할 노트</span>
-                <select onChange={(event) => setFileDraft(event.target.value)} value={selectedFilePath}>
-                  {safeFileOptions.length === 0 ? <option value="">노트 없음</option> : null}
-                  {safeFileOptions.map((option) => <option key={option.path} value={option.path}>{option.label}</option>)}
-                </select>
-              </label>
+              <CanvasFileChooser
+                accessibleLabel="추가할 노트 선택"
+                buttonText={fileOptionsByPath.get(selectedFilePath)?.label ?? "노트 없음"}
+                disabled={safeFileOptions.length === 0}
+                onSelect={setFileDraft}
+                options={safeFileOptions}
+                value={selectedFilePath}
+              />
               <button aria-label="선택한 노트 카드 추가" disabled={!selectedFilePath} onClick={addFileNode} type="button"><FilePlus2 size={16} /> 노트</button>
               <label className="vault-canvas-link-input">
                 <span className="sr-only">추가할 웹 주소</span>

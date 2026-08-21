@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createElement } from "react";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -132,6 +132,7 @@ describe("JSON Canvas safe model", () => {
     expect(safeHttpUrl("javascript:alert(1)")).toBeNull();
     expect(safeHttpUrl("data:text/html,test")).toBeNull();
     expect(safeHttpUrl("/relative/path")).toBeNull();
+    expect(safeHttpUrl("https://user:password@example.com/private")).toBeNull();
     expect(safeHttpUrl("https://example.com/path?q=1")).toBe("https://example.com/path?q=1");
     expect(safeCanvasDocument(JSON.stringify({
       nodes: [{ id: "unsafe", type: "link", x: 0, y: 0, width: 100, height: 100, url: "javascript:alert(1)" }],
@@ -268,6 +269,74 @@ describe("JsonCanvasView controls", () => {
     expect(emitted.nodes[0]).toMatchObject({ text: "새 메모", type: "text" });
   });
 
+  it("searches a large Vault without rendering thousands of file options", async () => {
+    const fileOptions = Array.from({ length: 5_000 }, (_, index) => ({
+      label: `노트 ${index}`,
+      path: `Folder/Note-${index}.md`
+    }));
+    const onChange = vi.fn();
+    render(createElement(JsonCanvasView, {
+      fileOptions,
+      onChange,
+      onOpenFile: vi.fn(),
+      source: emptyJsonCanvas
+    }));
+
+    expect(document.querySelectorAll("option").length).toBeLessThan(20);
+    await userEvent.click(screen.getByRole("button", { name: "추가할 노트 선택" }));
+
+    const resultList = screen.getByRole("list", { name: "Canvas 파일 검색 결과" });
+    expect(within(resultList).getAllByRole("button")).toHaveLength(50);
+    expect(screen.getByText(/5,000개 중 50개/)).toBeInTheDocument();
+
+    const search = screen.getByRole("searchbox", { name: "파일 이름 또는 경로 검색" });
+    await userEvent.type(search, "4999");
+    const match = within(resultList).getByRole("button", { name: /노트 4999/ });
+    await userEvent.click(match);
+    await userEvent.click(screen.getByRole("button", { name: "선택한 노트 카드 추가" }));
+
+    const emitted = safeCanvasDocument(onChange.mock.lastCall?.[0] as string);
+    expect(emitted.nodes).toHaveLength(1);
+    expect(emitted.nodes[0]).toMatchObject({ file: "Folder/Note-4999.md", type: "file" });
+    expect(screen.queryByRole("dialog", { name: "Canvas 파일 선택" })).not.toBeInTheDocument();
+  });
+
+  it("indexes large file option lists once instead of scanning them for every card", async () => {
+    let pathReads = 0;
+    const fileOptions = Array.from({ length: 5_000 }, (_, index) => {
+      const path = `Folder/Note-${index}.md`;
+      return {
+        label: `노트 ${index}`,
+        get path() {
+          pathReads += 1;
+          return path;
+        }
+      };
+    });
+    const file = "Folder/Note-4999.md";
+    render(createElement(JsonCanvasView, {
+      fileOptions,
+      onChange: vi.fn(),
+      onOpenFile: vi.fn(),
+      readOnly: true,
+      source: JSON.stringify({
+        nodes: Array.from({ length: 12 }, (_, index) => ({
+          id: `file-${index}`,
+          type: "file",
+          x: index * 8,
+          y: index * 8,
+          width: 300,
+          height: 180,
+          file
+        })),
+        edges: []
+      })
+    }));
+
+    await vi.waitFor(() => expect(screen.getAllByText("노트 4999")).toHaveLength(12));
+    expect(pathReads).toBeLessThanOrEqual(fileOptions.length * 3);
+  });
+
   it("never turns a non-http link card into an anchor", () => {
     render(createElement(
       JsonCanvasView,
@@ -302,6 +371,57 @@ describe("JsonCanvasView controls", () => {
     expect(link).not.toBeNull();
     expect(link).toHaveAttribute("target", "_blank");
     expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link).toHaveAttribute("referrerpolicy", "no-referrer");
+  });
+
+  it("keeps web cards inert until the user explicitly opens a no-opener link", () => {
+    render(createElement(JsonCanvasView, {
+      fileOptions: [],
+      onChange: vi.fn(),
+      onOpenFile: vi.fn(),
+      readOnly: true,
+      source: JSON.stringify({
+        nodes: [{ id: "web", type: "link", x: 0, y: 0, width: 360, height: 240, url: "https://example.com/embed" }],
+        edges: []
+      })
+    }));
+
+    expect(screen.getByText("example.com")).toBeInTheDocument();
+    expect(screen.getByText(/자동으로 불러오지 않습니다/)).toBeInTheDocument();
+    expect(screen.queryByTitle(/웹 카드 미리보기/)).not.toBeInTheDocument();
+    expect(screen.getByText("안전하게 열기").closest("a")).toHaveAttribute("rel", "noopener noreferrer");
+  });
+
+  it("renders an encrypted image asset card without accepting an object URL as model data", async () => {
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:canvas-asset");
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const rendered = render(createElement(JsonCanvasView, {
+      fileOptions: [{
+        asset: {
+          bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+          mimeType: "image/png"
+        },
+        kind: "asset",
+        label: "diagram.png",
+        path: "Assets/diagram.png"
+      }],
+      onChange: vi.fn(),
+      onOpenFile: vi.fn(),
+      readOnly: true,
+      source: JSON.stringify({
+        nodes: [{ id: "asset", type: "file", x: 0, y: 0, width: 360, height: 240, file: "Assets/diagram.png" }],
+        edges: []
+      })
+    }));
+
+    await vi.waitFor(() => expect(document.querySelector('img[alt="diagram.png"]')).toHaveAttribute("src", "blob:canvas-asset"));
+    expect(screen.queryByText("blob:canvas-asset")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Canvas 파일 선택")).not.toBeInTheDocument();
+    expect(screen.getByText("diagram.png")).toBeInTheDocument();
+    rendered.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:canvas-asset");
+    createObjectURL.mockRestore();
+    revokeObjectURL.mockRestore();
   });
 
   it("locks a lossy canvas without emitting a replacement document", async () => {

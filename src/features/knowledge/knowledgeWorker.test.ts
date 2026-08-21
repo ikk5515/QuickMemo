@@ -6,6 +6,7 @@ import {
 import {
   KnowledgeWorkerCancelledError,
   KnowledgeWorkerClient,
+  KnowledgeWorkerError,
   KnowledgeWorkerTimeoutError
 } from "./knowledgeWorkerClient";
 import { createKnowledgeWorkerRuntime } from "./workerRuntime";
@@ -60,6 +61,15 @@ class RuntimeTransport implements KnowledgeWorkerTransport {
 
   terminate(): void {
     this.terminated = true;
+  }
+}
+
+class ThrowingMutationTransport extends RuntimeTransport {
+  override postMessage(message: KnowledgeWorkerRequest): void {
+    if (message.type === "upsert-entry") {
+      throw new DOMException("worker unavailable", "InvalidStateError");
+    }
+    super.postMessage(message);
   }
 }
 
@@ -240,6 +250,58 @@ describe("knowledge worker client", () => {
       entries: [expect.objectContaining({ id: "source" })]
     });
     await expect(client.search("recoverable")).resolves.toEqual(["source"]);
+    await client.dispose();
+  });
+
+  it("drops a vault mutation instead of rehydrating an index payload that timed out", async () => {
+    const first = new RuntimeTransport(["replace-vault"]);
+    const second = new RuntimeTransport();
+    const transports = [first, second];
+    const client = new KnowledgeWorkerClient(() => transports.shift() as RuntimeTransport);
+
+    await expect(client.replaceVault(
+      [markdownEntry("malicious", "Private.md", "sensitive")],
+      { timeoutMs: 5 }
+    )).rejects.toBeInstanceOf(KnowledgeWorkerTimeoutError);
+
+    expect(first.terminated).toBe(true);
+    expect(second.received).toEqual([]);
+    await expect(client.search("sensitive")).resolves.toEqual([]);
+    await client.dispose();
+  });
+
+  it("rehydrates only the last acknowledged index after an upsert times out", async () => {
+    const first = new RuntimeTransport(["upsert-entry"]);
+    const second = new RuntimeTransport();
+    const transports = [first, second];
+    const client = new KnowledgeWorkerClient(() => transports.shift() as RuntimeTransport);
+    await client.replaceVault([markdownEntry("base", "Base.md", "stable")]);
+
+    await expect(client.upsertEntry(
+      markdownEntry("unacknowledged", "Private.md", "sensitive"),
+      { timeoutMs: 5 }
+    )).rejects.toBeInstanceOf(KnowledgeWorkerTimeoutError);
+
+    expect(second.received[0]).toMatchObject({
+      type: "replace-vault",
+      entries: [expect.objectContaining({ id: "base" })]
+    });
+    expect(JSON.stringify(second.received[0])).not.toContain("sensitive");
+    await expect(client.search("stable")).resolves.toEqual(["base"]);
+    await expect(client.search("sensitive")).resolves.toEqual([]);
+    await client.dispose();
+  });
+
+  it("cleans up a synchronous postMessage failure without committing the mutation", async () => {
+    const transport = new ThrowingMutationTransport();
+    const client = new KnowledgeWorkerClient(() => transport);
+    await client.replaceVault([markdownEntry("base", "Base.md", "stable")]);
+
+    await expect(client.upsertEntry(
+      markdownEntry("unacknowledged", "Private.md", "sensitive")
+    )).rejects.toBeInstanceOf(KnowledgeWorkerError);
+    await expect(client.search("stable")).resolves.toEqual(["base"]);
+    await expect(client.search("sensitive")).resolves.toEqual([]);
     await client.dispose();
   });
 

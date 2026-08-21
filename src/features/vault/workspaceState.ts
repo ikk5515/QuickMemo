@@ -11,7 +11,7 @@ import {
 } from "../graph";
 
 export type VaultLeftPanelMode = "files" | "search" | "tags";
-export type VaultRightPanelMode = "backlinks" | "outgoing" | "properties" | "local-graph";
+export type VaultRightPanelMode = "backlinks" | "outgoing" | "properties" | "outline" | "local-graph";
 export type VaultMarkdownViewMode = "source" | "live-preview" | "reading";
 
 export type PersistedVaultTab =
@@ -263,7 +263,7 @@ export function normalizeVaultWorkspaceState(value: unknown): VaultPersistedWork
     },
     right: {
       open: booleanOr(right.open, fallback.right.open),
-      mode: normalizePanelMode(right.mode, ["backlinks", "outgoing", "properties", "local-graph"], fallback.right.mode)
+      mode: normalizePanelMode(right.mode, ["backlinks", "outgoing", "properties", "outline", "local-graph"], fallback.right.mode)
     },
     selectedFolderId,
     expandedFolderIds,
