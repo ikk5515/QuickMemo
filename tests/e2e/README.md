@@ -21,6 +21,7 @@ Node.js, Java, Firebase Emulator 및 Playwright browser binary가 필요하다.
 ```bash
 npx playwright install chromium webkit
 npm run test:e2e
+npm run test:e2e:vault
 npm run test:e2e:chromium
 npm run test:e2e:webkit
 ```
@@ -39,6 +40,13 @@ Playwright가 Firebase Auth/Firestore Emulator와 로컬 서버를 함께 시작
 
 실패한 실행만 screenshot, trace, video를 보존한다. `test-results/`,
 `playwright-report/`, `blob-report/`는 Git에서 제외된다.
+
+`test:e2e:vault`는 기존 flag=false 서버와 분리된 4174 포트에서
+`VITE_OBSIDIAN_VAULT_ENABLED=true`로 실행한다. 1280px, 390px, 320px에서
+Emulator 사용자 로그인과 개인 키 복호화, Markdown 암호화 저장, 내부 링크와
+태그 인덱싱, Global Graph, 모바일 drawer·44px touch target, reload 뒤 재잠금과
+재복호화를 검증한다. 저장된 Firestore 문서에는 평문 Markdown이 없고 암호문과
+wrapped key만 존재하는지도 인증된 Emulator 요청으로 확인한다.
 
 ## 자동화 범위
 

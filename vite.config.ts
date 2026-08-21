@@ -42,7 +42,7 @@ export default defineConfig({
             return "icons";
           }
 
-          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/react-router/") || id.includes("/react-router-dom/")) {
+          if (/\/node_modules\/(?:react|react-dom|react-router|react-router-dom)\//u.test(id)) {
             return "react";
           }
 

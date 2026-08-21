@@ -607,6 +607,16 @@ export async function seedE2eScenario(scenario) {
       ...(attachment ? [attachment.document] : [])
     );
   }
+  if (scenario === "save-copy-attachment") {
+    documents.push({
+      path: "systemUsage/blobAttachmentsV1",
+      fields: {
+        schemaVersion: 1,
+        usedBytes: 0,
+        updatedAt: now
+      }
+    });
+  }
   await writeEmulatorDocuments(documents);
 
   return {

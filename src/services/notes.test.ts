@@ -1,22 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  NoteFolderLimitError,
   NoteRevisionConflictError,
   abortSecureShareCopyingNote,
   activateSecureShareCopyingNote,
+  createEncryptedNoteFolder,
+  createNoteFolder,
   createNoteAttachment,
   createRevisionedEncryptedNote,
   createSecureShareCopyingNote,
   deleteNote,
   getNoteRevisionState,
   getVisibleNotesByIds,
+  isLegacyHtmlNoteDocument,
   listStaleSecureShareCopyingNotes,
+  migrateLegacyNoteFolder,
   purgeNote,
   restoreRevisionedNote,
   subscribeMyNoteStates,
+  subscribeNoteFolders,
   subscribeNoteHistory,
   subscribeVisibleNotes,
   updateRevisionedEncryptedNote,
-  updateRevisionedNoteAccess
+  updateEncryptedNoteFolder,
+  updateRevisionedNoteAccess,
+  updateRevisionedNoteFolder
 } from "./notes";
 
 const mocks = vi.hoisted(() => {
@@ -56,6 +64,7 @@ const mocks = vi.hoisted(() => {
     fetchBlobAttachmentBytes: vi.fn(),
     fetchBlobAttachmentResponse: vi.fn(),
     getBytes: vi.fn(),
+    getCountFromServer: vi.fn(),
     getDoc: vi.fn(),
     getDocs: vi.fn(),
     limit: vi.fn((count: number) => ({ count, type: "limit" })),
@@ -95,6 +104,7 @@ vi.mock("firebase/firestore", () => ({
   deleteField: mocks.deleteField,
   doc: mocks.doc,
   getDoc: mocks.getDoc,
+  getCountFromServer: mocks.getCountFromServer,
   getDocs: mocks.getDocs,
   limit: mocks.limit,
   onSnapshot: mocks.onSnapshot,
@@ -143,6 +153,11 @@ const wrappedKey = {
   wrappedKey: "wrapped-key"
 };
 
+const legacyStorageIdentity = {
+  expectedContentFormat: "legacy-html-v1" as const,
+  expectedEntryKind: "legacy-html" as const
+};
+
 describe("revision-aware note persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -151,6 +166,20 @@ describe("revision-aware note persistence", () => {
     mocks.getDocs.mockResolvedValue({ docs: [] });
     mocks.transaction.get.mockResolvedValue(noteSnapshot(4));
     mocks.runTransaction.mockImplementation(async (_db, updateFunction) => updateFunction(mocks.transaction));
+  });
+
+  it("recognizes only historical or explicit legacy HTML storage identities", () => {
+    expect(isLegacyHtmlNoteDocument({})).toBe(true);
+    expect(isLegacyHtmlNoteDocument({
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html"
+    })).toBe(true);
+    expect(isLegacyHtmlNoteDocument({ contentFormat: "legacy-html-v1" })).toBe(false);
+    expect(isLegacyHtmlNoteDocument({ entryKind: "legacy-html" })).toBe(false);
+    expect(isLegacyHtmlNoteDocument({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown"
+    })).toBe(false);
   });
 
   it("creates revision 1 with an independent paired history document", async () => {
@@ -188,6 +217,20 @@ describe("revision-aware note persistence", () => {
         revision: 1
       })
     );
+  });
+
+  it("rejects oversized encrypted note payloads before issuing a write", async () => {
+    await expect(createRevisionedEncryptedNote({
+      encryptedBody: { ...encryptedPayload, cipherText: "A".repeat(700_001) },
+      encryptedTitle: encryptedPayload,
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    })).rejects.toThrow("노트 본문 암호문");
+
+    expect(mocks.batch.set).not.toHaveBeenCalled();
+    expect(mocks.batch.commit).not.toHaveBeenCalled();
   });
 
   it("creates an invisible copying note with durable zeroed counters", async () => {
@@ -379,6 +422,7 @@ describe("revision-aware note persistence", () => {
 
   it("updates only when the expected revision matches and pairs history in the transaction", async () => {
     const result = await updateRevisionedEncryptedNote({
+      ...legacyStorageIdentity,
       encryptedBody: encryptedPayload,
       encryptedTitle: encryptedPayload,
       expectedRevision: 4,
@@ -402,9 +446,35 @@ describe("revision-aware note persistence", () => {
     );
   });
 
+  it("rejects content writes when the stored entry format differs from the caller expectation", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        revision: 4
+      }),
+      exists: () => true,
+      id: "vault-note"
+    });
+
+    await expect(updateRevisionedEncryptedNote({
+      ...legacyStorageIdentity,
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      expectedRevision: 4,
+      noteId: "vault-note",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).rejects.toThrow("현재 노트 상태");
+
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
   it("reports a conflict before writing when the expected revision is stale", async () => {
     await expect(
       updateRevisionedEncryptedNote({
+        ...legacyStorageIdentity,
         encryptedBody: encryptedPayload,
         encryptedTitle: encryptedPayload,
         expectedRevision: 3,
@@ -421,10 +491,28 @@ describe("revision-aware note persistence", () => {
     expect(mocks.transaction.set).not.toHaveBeenCalled();
   });
 
+  it("rejects a revision increment beyond the Rules maximum", async () => {
+    mocks.transaction.get.mockResolvedValueOnce(noteSnapshot(999_999_999_999));
+
+    await expect(updateRevisionedEncryptedNote({
+      ...legacyStorageIdentity,
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      expectedRevision: 999_999_999_999,
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).rejects.toThrow("안전한 저장 범위");
+
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
   it("treats a legacy note without revision as revision 0", async () => {
     mocks.transaction.get.mockResolvedValueOnce(noteSnapshot(undefined));
 
     await updateRevisionedEncryptedNote({
+      ...legacyStorageIdentity,
       encryptedBody: encryptedPayload,
       encryptedTitle: encryptedPayload,
       expectedRevision: 0,
@@ -440,6 +528,18 @@ describe("revision-aware note persistence", () => {
   });
 
   it("increments access changes and records the normalized participant set", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        folderId: "folder-a",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        revision: 4,
+        type: "personal",
+        wrappedKeys: { "user-a": wrappedKey }
+      }),
+      exists: () => true,
+      id: "note-a"
+    });
     await updateRevisionedNoteAccess({
       expectedRevision: 4,
       folderId: "ignored-for-shared",
@@ -462,10 +562,168 @@ describe("revision-aware note persistence", () => {
       expect.anything(),
       expect.objectContaining({
         action: "share",
+        changedFields: ["participants", "folder"],
         readerUids: ["user-a", "user-b"],
         revision: 5
       })
     );
+  });
+
+  it("moves an owned personal note with a revisioned folder history record", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        folderId: null,
+        ownerUid: "user-a",
+        revision: 4,
+        type: "personal"
+      }),
+      exists: () => true,
+      id: "note-a"
+    });
+
+    await updateRevisionedNoteFolder({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+
+    expect(mocks.transaction.update).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ folderId: "folder-a", revision: 5 })
+    );
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "share",
+        changedFields: ["folder"],
+        readerUids: ["user-a"],
+        revision: 5
+      })
+    );
+  });
+
+  it("rejects encrypted folder creation below an unmigrated legacy parent", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({ ownerUid: "user-a", name: "평문 폴더" }),
+      exists: () => true,
+      id: "legacy-parent"
+    });
+
+    await expect(createEncryptedNoteFolder({
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      order: 1,
+      ownerUid: "user-a",
+      parentId: "legacy-parent",
+      wrappedKey
+    })).rejects.toThrow("먼저 암호화");
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("rejects a folder move when the transaction ancestor chain reaches itself", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          encryptedName: encryptedPayload,
+          ownerUid: "user-a",
+          parentId: null,
+          revision: 1,
+          wrappedKey
+        }),
+        exists: () => true,
+        id: "folder-a"
+      })
+      .mockResolvedValueOnce({
+        data: () => ({
+          encryptedName: encryptedPayload,
+          ownerUid: "user-a",
+          parentId: "folder-a",
+          revision: 1,
+          wrappedKey
+        }),
+        exists: () => true,
+        id: "folder-b"
+      });
+
+    await expect(updateEncryptedNoteFolder({
+      expectedRevision: 1,
+      folderId: "folder-a",
+      ownerUid: "user-a",
+      parentId: "folder-b"
+    })).rejects.toThrow("하위 폴더");
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a three-node folder cycle inside the revision-aware transaction", async () => {
+    const folderSnapshot = (id: string, parentId: string | null) => ({
+      data: () => ({
+        encryptedName: encryptedPayload,
+        ownerUid: "user-a",
+        parentId,
+        revision: 1,
+        wrappedKey
+      }),
+      exists: () => true,
+      id
+    });
+    mocks.transaction.get
+      .mockResolvedValueOnce(folderSnapshot("folder-a", null))
+      .mockResolvedValueOnce(folderSnapshot("folder-b", "folder-c"))
+      .mockResolvedValueOnce(folderSnapshot("folder-c", "folder-a"));
+
+    await expect(updateEncryptedNoteFolder({
+      expectedRevision: 1,
+      folderId: "folder-a",
+      ownerUid: "user-a",
+      parentId: "folder-b"
+    })).rejects.toThrow("하위 폴더");
+
+    expect(mocks.transaction.get).toHaveBeenCalledTimes(3);
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy folder migration idempotent but rejects a stale plaintext name", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        encryptedName: encryptedPayload,
+        name: "암호화 폴더",
+        ownerUid: "user-a",
+        revision: 2,
+        wrappedKey
+      }),
+      exists: () => true,
+      id: "folder-a"
+    });
+    await expect(migrateLegacyNoteFolder({
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      expectedName: "이전 이름",
+      folderId: "folder-a",
+      order: 1,
+      ownerUid: "user-a",
+      parentId: null,
+      wrappedKey
+    })).resolves.toEqual({ folderId: "folder-a", revision: 2 });
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({ name: "다른 탭 이름", ownerUid: "user-a" }),
+      exists: () => true,
+      id: "folder-b"
+    });
+    await expect(migrateLegacyNoteFolder({
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      expectedName: "이전 이름",
+      folderId: "folder-b",
+      order: 2,
+      ownerUid: "user-a",
+      parentId: null,
+      wrappedKey
+    })).rejects.toThrow("다른 탭");
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
   });
 
   it("soft-deletes without reading or deleting attachment documents", async () => {
@@ -850,5 +1108,160 @@ describe("personal note state subscriptions", () => {
     expect(callback).toHaveBeenCalledWith({});
     expect(mocks.onSnapshot).not.toHaveBeenCalled();
     expect(cleanup()).toBeUndefined();
+  });
+});
+
+describe("note folder subscriptions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("uses one bounded sentinel document and never emits a truncated folder list", () => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+    }) => void) | undefined;
+    const unsubscribe = vi.fn();
+    const callback = vi.fn();
+    const onError = vi.fn();
+
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[1] as typeof listener;
+      return unsubscribe;
+    });
+
+    const cleanup = subscribeNoteFolders("user-a", callback, onError);
+
+    expect(mocks.limit).toHaveBeenCalledWith(5_001);
+
+    listener?.({
+      docs: Array.from({ length: 5_001 }, (_, index) => ({
+        data: () => ({ name: `folder-${index}` }),
+        id: `folder-${index}`
+      }))
+    });
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expect.any(NoteFolderLimitError));
+
+    const error = onError.mock.calls[0][0] as NoteFolderLimitError;
+    expect(error.code).toBe("note-folder/resource-limit-exceeded");
+    expect(error.context).toBe("subscription");
+    expect(error.message).toContain("전체 목록을 표시하지 않았습니다");
+    expect(error.maxFolders).toBe(5_000);
+
+    listener?.({
+      docs: Array.from({ length: 5_001 }, (_, index) => ({
+        data: () => ({ name: `folder-${index}` }),
+        id: `folder-${index}`
+      }))
+    });
+
+    expect(callback).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledTimes(1);
+    cleanup();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes complete, sorted snapshots after the folder count returns below the limit", () => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+    }) => void) | undefined;
+    const callback = vi.fn();
+    const onError = vi.fn();
+
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[1] as typeof listener;
+      return vi.fn();
+    });
+
+    subscribeNoteFolders("user-a", callback, onError);
+    listener?.({
+      docs: Array.from({ length: 5_001 }, (_, index) => ({
+        data: () => ({ name: `folder-${index}` }),
+        id: `folder-${index}`
+      }))
+    });
+    listener?.({
+      docs: [
+        { data: () => ({ name: "나중", order: 2 }), id: "folder-b" },
+        { data: () => ({ name: "먼저", order: 1 }), id: "folder-a" }
+      ]
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledWith([
+      expect.objectContaining({ id: "folder-a", name: "먼저", order: 1 }),
+      expect.objectContaining({ id: "folder-b", name: "나중", order: 2 })
+    ]);
+  });
+
+  it("still emits the complete snapshot at the supported 5,000-folder boundary", () => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+    }) => void) | undefined;
+    const callback = vi.fn();
+    const onError = vi.fn();
+
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[1] as typeof listener;
+      return vi.fn();
+    });
+
+    subscribeNoteFolders("user-a", callback, onError);
+    listener?.({
+      docs: Array.from({ length: 5_000 }, (_, index) => ({
+        data: () => ({ name: `folder-${index}`, order: index }),
+        id: `folder-${index}`
+      }))
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledOnce();
+    expect(callback.mock.calls[0][0]).toHaveLength(5_000);
+  });
+});
+
+describe("legacy note folder creation limits", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getCountFromServer.mockResolvedValue({ data: () => ({ count: 0 }) });
+    mocks.addDoc.mockResolvedValue({ id: "folder-new" });
+  });
+
+  it("fails closed before writing when the bounded server count reaches 5,000", async () => {
+    mocks.getCountFromServer.mockResolvedValueOnce({ data: () => ({ count: 5_000 }) });
+
+    await expect(createNoteFolder("user-a", "새 폴더", "#123456"))
+      .rejects.toMatchObject({
+        code: "note-folder/resource-limit-exceeded",
+        context: "create",
+        maxFolders: 5_000
+      });
+
+    expect(mocks.limit).toHaveBeenCalledWith(5_000);
+    expect(mocks.where).toHaveBeenCalledWith("ownerUid", "==", "user-a");
+    expect(mocks.addDoc).not.toHaveBeenCalled();
+  });
+
+  it("creates after a bounded server count confirms capacity", async () => {
+    mocks.getCountFromServer.mockResolvedValueOnce({ data: () => ({ count: 4_999 }) });
+
+    await expect(createNoteFolder("user-a", "새 폴더", "#123456"))
+      .resolves.toEqual({ id: "folder-new" });
+
+    expect(mocks.getCountFromServer).toHaveBeenCalledTimes(1);
+    expect(mocks.limit).toHaveBeenCalledWith(5_000);
+    expect(mocks.addDoc).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not write when the server preflight cannot be completed", async () => {
+    mocks.getCountFromServer.mockRejectedValueOnce(new Error("unavailable"));
+
+    await expect(createNoteFolder("user-a", "새 폴더", "#123456"))
+      .rejects.toThrow("unavailable");
+
+    expect(mocks.addDoc).not.toHaveBeenCalled();
   });
 });

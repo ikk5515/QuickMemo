@@ -2537,6 +2537,7 @@ describe("Secure Share v2 owner, source, quota, and attachment policy", () => {
     )?.[0] ?? "";
     expect(copyPreflightSource).toContain("GLOBAL_BLOB_USAGE_DOCUMENT_PATH");
     expect(copyPreflightSource).toContain("evaluateFreeTierUpload");
+    expect(copyPreflightSource).toContain("freeTierPolicy.enabled && additionalBytes > 0");
     expect(copyPreflightSource).toContain("Global Blob usage counter is missing or invalid");
   });
 

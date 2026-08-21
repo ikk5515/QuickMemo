@@ -158,6 +158,14 @@ service cloud.firestore {
         && payload.iv is string;
     }
 
+    function boundedEncryptedPayload(payload, maximumCipherTextSize) {
+      return encryptedPayload(payload)
+        && payload.cipherText.size() > 0
+        && payload.cipherText.size() <= maximumCipherTextSize
+        && payload.iv.size() > 0
+        && payload.iv.size() <= 256;
+    }
+
     function wrappedAesKeyPayload(payload) {
       return payload is map
         && payload.keys().hasOnly(["version", "algorithm", "wrappedKey"])
@@ -175,6 +183,8 @@ service cloud.firestore {
         "participantUids",
         "encryptedTitle",
         "encryptedBody",
+        "contentFormat",
+        "entryKind",
         "wrappedKeys",
         "folderId",
         "createdAt",
@@ -202,7 +212,13 @@ service cloud.firestore {
         "purgedAt",
         "purgedBy"
       ])
-      && data.type in ["personal", "shared"]
+      && validUpdatedNote(data);
+    }
+
+    // Update branches already constrain affected keys, so revalidate values
+    // without re-counting the full create-only allowlist on every mutation.
+    function validUpdatedNote(data) {
+      return data.type in ["personal", "shared"]
       && data.ownerUid is string
       && data.participantUids is list
       && data.participantUids.size() > 0
@@ -220,6 +236,41 @@ service cloud.firestore {
       && validNoteAttachmentRevision(data)
       && validDeleteMetadata(data)
       && validPurgeMetadata(data);
+    }
+
+    function validVaultEntryFormat(data) {
+      return !data.keys().hasAny(["contentFormat", "entryKind"])
+        || (
+          data.keys().hasAll(["contentFormat", "entryKind"])
+          && (
+            (data.contentFormat == "legacy-html-v1" && data.entryKind == "legacy-html")
+            || (data.contentFormat == "markdown-v1" && data.entryKind == "markdown")
+            || (data.contentFormat == "json-canvas-v1" && data.entryKind == "canvas")
+            || (data.contentFormat == "base-v1" && data.entryKind == "base")
+            || (data.contentFormat == "asset-v1" && data.entryKind == "asset")
+          )
+          && validVaultEntryPayloadSize(data)
+        );
+    }
+
+    // Historical TipTap notes share the same collection and already sit close
+    // to the Firestore Rules expression budget. Apply the stricter create and
+    // content-update byte budget only to explicitly versioned Vault entries;
+    // the revisioned client service mirrors the same limit before each write.
+    // Adding this expansion to all legacy mutation branches exceeds Rules'
+    // 1000-expression ceiling, so legacy paths retain structural validation.
+    function validVaultEntryPayloadSize(data) {
+      return !data.keys().hasAny(["contentFormat", "entryKind"])
+        || (
+          data.encryptedTitle.cipherText.size() > 0
+          && data.encryptedTitle.cipherText.size() <= 4096
+          && data.encryptedTitle.iv.size() > 0
+          && data.encryptedTitle.iv.size() <= 256
+          && data.encryptedBody.cipherText.size() > 0
+          && data.encryptedBody.cipherText.size() <= 700000
+          && data.encryptedBody.iv.size() > 0
+          && data.encryptedBody.iv.size() <= 256
+        );
     }
 
     function secureShareCopyMetadataAbsent(data) {
@@ -859,6 +910,50 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function validVaultWorkspace(data, uid) {
+      return data.keys().hasAll([
+          "ownerUid",
+          "encryptedState",
+          "wrappedKey",
+          "revision",
+          "createdAt",
+          "updatedAt"
+        ])
+        && data.keys().hasOnly([
+          "ownerUid",
+          "encryptedState",
+          "wrappedKey",
+          "revision",
+          "createdAt",
+          "updatedAt"
+        ])
+        && data.ownerUid == uid
+        && encryptedPayload(data.encryptedState)
+        && data.encryptedState.cipherText.size() > 0
+        && data.encryptedState.cipherText.size() <= 800000
+        && data.encryptedState.iv.size() > 0
+        && data.encryptedState.iv.size() <= 128
+        && wrappedAesKeyPayload(data.wrappedKey)
+        && data.revision is int
+        && data.revision >= 1
+        && data.revision <= 999999999999
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function validVaultWorkspaceUpdate(data) {
+      return data.ownerUid == resource.data.ownerUid
+        && data.wrappedKey == resource.data.wrappedKey
+        && data.createdAt == resource.data.createdAt
+        && data.revision == resource.data.revision + 1
+        && data.updatedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "encryptedState",
+          "revision",
+          "updatedAt"
+        ]);
+    }
+
     function validScheduleWrappedKeys(data, uid) {
       return data.wrappedKeys is map
         && data.wrappedKeys.keys().hasOnly([uid])
@@ -1209,8 +1304,19 @@ service cloud.firestore {
       && recurringHabitBelongsToOwner(data.habitId, uid);
     }
 
-    function validNoteFolder(data) {
-      return data.keys().hasOnly(["ownerUid", "name", "color", "createdAt", "updatedAt"])
+    function validNoteFolder(data, folderId) {
+      return data.keys().hasOnly([
+          "ownerUid",
+          "name",
+          "color",
+          "encryptedName",
+          "wrappedKey",
+          "parentId",
+          "order",
+          "revision",
+          "createdAt",
+          "updatedAt"
+        ])
         && data.ownerUid == request.auth.uid
         && data.name is string
         && data.name.size() > 0
@@ -1218,8 +1324,68 @@ service cloud.firestore {
         && data.color is string
         && data.color.size() > 0
         && data.color.size() <= 24
+        && (
+          !data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
+          || (
+            data.keys().hasAll(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
+            && encryptedPayload(data.encryptedName)
+            && data.encryptedName.cipherText.size() > 0
+            && data.encryptedName.cipherText.size() <= 2048
+            && data.encryptedName.iv.size() > 0
+            && data.encryptedName.iv.size() <= 256
+            && wrappedAesKeyPayload(data.wrappedKey)
+            && (
+              data.parentId == null
+              || (
+                data.parentId is string
+                && data.parentId.size() > 0
+                && data.parentId.size() <= 120
+                && data.parentId != folderId
+                && existsAfter(noteFolderPath(data.parentId))
+                && getAfter(noteFolderPath(data.parentId)).data.ownerUid == request.auth.uid
+                // getAfter also rejects an atomic A -> B, B -> A write. Rules
+                // cannot traverse an unbounded encrypted tree, so deeper-cycle
+                // integrity still requires the transactional client traversal
+                // (and remains a release blocker for arbitrary direct writes).
+                && getAfter(noteFolderPath(data.parentId)).data.parentId != folderId
+                // Nested Vault folders may only point at another migrated,
+                // encrypted folder. A deletable legacy parent would orphan
+                // the encrypted subtree.
+                && getAfter(noteFolderPath(data.parentId)).data.keys().hasAll([
+                  "encryptedName",
+                  "wrappedKey",
+                  "parentId",
+                  "order",
+                  "revision"
+                ])
+              )
+            )
+            && data.order is int
+            && data.order >= 0
+            && data.order <= 999999999
+            && data.revision is int
+            && data.revision >= 1
+            && data.revision <= 999999999999
+          )
+        )
         && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
         && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
+    }
+
+    function validEncryptedNoteFolderUpdate(data) {
+      return (
+          !resource.data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
+          && (
+            !data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
+            || data.revision == 1
+          )
+        )
+        || (
+          data.wrappedKey == resource.data.wrappedKey
+          && data.name == resource.data.name
+          && data.color == resource.data.color
+          && data.revision == resource.data.revision + 1
+        );
     }
 
     function validQuickLoginKey(data, uid) {
@@ -1285,15 +1451,15 @@ service cloud.firestore {
         && data.changedFields is list
         && data.changedFields.size() > 0
         && data.changedFields.size() <= 8
-        && data.changedFields.hasOnly(["title", "body", "participants", "deleted", "restored"])
+        && data.changedFields.hasOnly(["title", "body", "participants", "folder", "deleted", "restored"])
         && data.readerUids is list
         && data.readerUids.size() > 0
         && data.readerUids.size() <= 200
         && data.revision is int
         && data.revision >= 1
         && data.revision <= 999999999999
-        && (!data.keys().hasAny(["encryptedSummary"]) || encryptedPayload(data.encryptedSummary))
-        && (!data.keys().hasAny(["encryptedSnapshot"]) || encryptedPayload(data.encryptedSnapshot))
+        && (!data.keys().hasAny(["encryptedSummary"]) || boundedEncryptedPayload(data.encryptedSummary, 8192))
+        && (!data.keys().hasAny(["encryptedSnapshot"]) || boundedEncryptedPayload(data.encryptedSnapshot, 700000))
         && data.createdAt == request.time;
     }
 
@@ -1352,15 +1518,24 @@ service cloud.firestore {
         && request.auth.uid == get(notePath(noteId)).data.ownerUid
         && !noteDeleted(get(notePath(noteId)).data)
         && !noteDeleted(getAfter(notePath(noteId)).data)
-        && data.changedFields.hasOnly(["participants"])
-        && getAfter(notePath(noteId)).data.encryptedTitle == get(notePath(noteId)).data.encryptedTitle
-        && getAfter(notePath(noteId)).data.encryptedBody == get(notePath(noteId)).data.encryptedBody
+        && data.changedFields.hasOnly(["participants", "folder"])
         && (
-          getAfter(notePath(noteId)).data.type != get(notePath(noteId)).data.type
-          || getAfter(notePath(noteId)).data.participantUids != get(notePath(noteId)).data.participantUids
-          || getAfter(notePath(noteId)).data.wrappedKeys != get(notePath(noteId)).data.wrappedKeys
-          || noteFolderId(getAfter(notePath(noteId)).data) != noteFolderId(get(notePath(noteId)).data)
-        );
+          data.changedFields.hasAny(["folder"])
+          == (
+            noteFolderId(getAfter(notePath(noteId)).data)
+            != noteFolderId(get(notePath(noteId)).data)
+          )
+        )
+        && (
+          data.changedFields.hasAny(["participants"])
+          == (
+            getAfter(notePath(noteId)).data.type != get(notePath(noteId)).data.type
+            || getAfter(notePath(noteId)).data.participantUids != get(notePath(noteId)).data.participantUids
+            || getAfter(notePath(noteId)).data.wrappedKeys != get(notePath(noteId)).data.wrappedKeys
+          )
+        )
+        && getAfter(notePath(noteId)).data.encryptedTitle == get(notePath(noteId)).data.encryptedTitle
+        && getAfter(notePath(noteId)).data.encryptedBody == get(notePath(noteId)).data.encryptedBody;
     }
 
     function deleteHistoryMatchesNote(data, noteId, historyId) {
@@ -1940,7 +2115,8 @@ service cloud.firestore {
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
         && allowedShareTargets(data)
-        && validNote(data);
+        && validVaultEntryPayloadSize(data)
+        && validUpdatedNote(data);
     }
 
     function noteFolderUpdate(data) {
@@ -1955,6 +2131,10 @@ service cloud.firestore {
           "isDeleted"
         ])
         && request.auth.uid == resource.data.ownerUid
+        // Revisioned Vault entries must use the audited mutation path below.
+        // This compatibility branch is only for historical HTML documents.
+        && !resource.data.keys().hasAny(["contentFormat", "entryKind"])
+        && !data.keys().hasAny(["contentFormat", "entryKind"])
         && secureShareCopyUsable(resource.data)
         && resource.data.type == "personal"
         && data.type == "personal"
@@ -1968,7 +2148,7 @@ service cloud.firestore {
         && data.updatedAt == request.time
         && noteRevisionIsPreserved(data)
         && validAssignedFolder(data)
-        && validNote(data);
+        && validUpdatedNote(data);
     }
 
     function ownerAccessUpdate(noteId, data) {
@@ -2004,7 +2184,7 @@ service cloud.firestore {
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
         && validAssignedFolder(data)
-        && validNote(data);
+        && validUpdatedNote(data);
     }
 
     function noteSoftDeleteUpdate(noteId, data) {
@@ -2027,7 +2207,7 @@ service cloud.firestore {
         && data.updatedAt == request.time
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
-        && validNote(data);
+        && validUpdatedNote(data);
     }
 
     function noteRestoreUpdate(noteId, data) {
@@ -2050,7 +2230,7 @@ service cloud.firestore {
         && data.updatedAt == request.time
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
-        && validNote(data);
+        && validUpdatedNote(data);
     }
 
     function secureShareCopyActivateUpdate(data) {
@@ -2083,7 +2263,7 @@ service cloud.firestore {
         && data.savedAt == request.time
         && data.updatedBy == request.auth.uid
         && noteRevisionIsPreserved(data)
-        && validNote(data);
+        && validUpdatedNote(data);
     }
 
     function secureShareCopyAbortUpdate(noteId, data) {
@@ -2121,11 +2301,11 @@ service cloud.firestore {
         && data.updatedBy == request.auth.uid
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
-        && validNote(data);
+        && validUpdatedNote(data);
     }
 
     function notePurgeUpdate(noteId, data) {
-      return request.resource.data.diff(resource.data).changedKeys().hasOnly([
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           "type",
           "participantUids",
           "wrappedKeys",
@@ -2157,7 +2337,7 @@ service cloud.firestore {
         && data.participantUids == [request.auth.uid]
         && data.wrappedKeys.keys().hasOnly([request.auth.uid])
         && notePurgeCleanupQueueCreated(noteId, data)
-        && validNote(data);
+        && validUpdatedNote(data);
     }
 
     function notePurgeRequested() {
@@ -2554,6 +2734,28 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    match /vaultWorkspaces/{uid} {
+      allow get: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && (
+          !exists(/databases/$(database)/documents/vaultWorkspaces/$(uid))
+          || resource.data.ownerUid == uid
+        );
+      allow list: if false;
+      allow create: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && validVaultWorkspace(request.resource.data, uid)
+        && request.resource.data.revision == 1
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && resource.data.ownerUid == uid
+        && validVaultWorkspace(request.resource.data, uid)
+        && validVaultWorkspaceUpdate(request.resource.data);
+      allow delete: if false;
+    }
+
     match /libraryItems/{itemId} {
       allow get: if activeSignedInUserHasFeature("library")
         && resource.data.ownerUid == request.auth.uid;
@@ -2786,17 +2988,34 @@ service cloud.firestore {
       allow read: if activeSignedInUserHasNotes()
         && resource.data.ownerUid == request.auth.uid;
       allow create: if activeSignedInUserHasNotes()
-        && validNoteFolder(request.resource.data)
+        && validNoteFolder(request.resource.data, folderId)
+        && (
+          !request.resource.data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
+          || request.resource.data.revision == 1
+        )
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
       allow update: if activeSignedInUserHasNotes()
         && resource.data.ownerUid == request.auth.uid
-        && validNoteFolder(request.resource.data)
+        && validNoteFolder(request.resource.data, folderId)
+        && validEncryptedNoteFolderUpdate(request.resource.data)
         && request.resource.data.ownerUid == resource.data.ownerUid
         && request.resource.data.updatedAt == request.time
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly(["name", "color", "updatedAt"]);
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+          "name",
+          "color",
+          "encryptedName",
+          "wrappedKey",
+          "parentId",
+          "order",
+          "revision",
+          "updatedAt"
+        ]);
       allow delete: if activeSignedInUserHasNotes()
-        && resource.data.ownerUid == request.auth.uid;
+        && resource.data.ownerUid == request.auth.uid
+        // Nested encrypted folders require a subtree-aware trash operation.
+        // The historical root-folder delete path must not orphan Vault data.
+        && !resource.data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"]);
     }
 
     match /quickLoginKeys/{quickKey} {
@@ -2835,6 +3054,7 @@ service cloud.firestore {
       allow list: if canListNoteDocument(resource.data);
       allow create: if activeSignedInUserHasNotes()
         && validNote(request.resource.data)
+        && validVaultEntryFormat(request.resource.data)
         && request.resource.data.isDeleted == false
         && !request.resource.data.keys().hasAny(["deletedAt", "deletedBy"])
         && request.resource.data.ownerUid == request.auth.uid
@@ -2870,7 +3090,7 @@ service cloud.firestore {
                   noteContentUpdate(noteId, request.resource.data)
                   || noteFolderUpdate(request.resource.data)
                   || (ownerAccessUpdate(noteId, request.resource.data) && allowedShareTargets(request.resource.data))
-                  || (legacyActiveDeleteMetadataMigration(request.resource.data) && validNote(request.resource.data))
+                  || (legacyActiveDeleteMetadataMigration(request.resource.data) && validUpdatedNote(request.resource.data))
                   || noteSoftDeleteUpdate(noteId, request.resource.data)
                   || noteRestoreUpdate(noteId, request.resource.data)
                 )

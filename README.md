@@ -348,11 +348,23 @@ CI는 `.github/workflows/ci.yml`에 추가되어 PR과 `main`/`master` push마�
 - typecheck
 - functions-free security guard
 - sensitive-file gitignore guard
+- zero-cost dependency/runtime guard
+- dependency audit
 - unit tests
 - Firestore Rules tests
+- Secure Share emulator integration and performance benchmark
+- Chromium/WebKit responsive browser E2E
 - production build
 
 운영 Vercel 배포는 `.github/workflows/vercel-production.yml`에서 CI가 성공한 `master` push에 대해서만 실행합니다. 이 workflow는 `workflow_run.event == 'push'`, 같은 저장소의 head repository, `head_branch == 'master'` 조건을 모두 확인해 PR branch가 production deploy를 트리거하지 못하게 합니다.
+배포 직전 계정 요금제가 명시적으로 `Hobby`인지 읽기 전용 API로 다시
+검증하며, 값이 없거나 `Hobby`가 아니면 실패하도록 닫혀 있습니다. Firebase는
+Cloud Billing이 연결되지 않은 Spark 프로젝트만 사용하고, 이번 구조에서는
+Cloud Functions와 Firebase Storage를 생성하거나 배포하지 않습니다.
+
+암호화 Web Obsidian Vault는 아직 Core 전체 동급 완료가 아니며 운영 기능
+플래그를 켜면 안 됩니다. 구현·한계·활성화 증거 기준은
+[`docs/obsidian-vault-status.md`](docs/obsidian-vault-status.md)를 따릅니다.
 
 자동 PR 생성을 하려면 GitHub CLI가 필요합니다.
 
@@ -368,11 +380,18 @@ gh auth login
 ```bash
 npm run security:functions-guard
 npm run security:gitignore-guard
+npm run security:billing-guard
 npm run lint
 npm run typecheck
 npm test
 npm run test:rules
+npm run test:integration
+npm run test:performance
+npm run test:e2e
+npm run test:e2e:vault
+VITE_OBSIDIAN_VAULT_ENABLED=true npm run build
 npm run build
+npm audit
 ```
 
 `npm run test:rules`는 Firebase Firestore/Storage Emulator와 Java Runtime이 필요합니다.

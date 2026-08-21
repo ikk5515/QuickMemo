@@ -1,0 +1,82 @@
+.vault-asset-preview {
+  align-items: center;
+  color: var(--vault-text, inherit);
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
+  min-height: 0;
+  min-width: 0;
+  padding: 12px;
+}
+
+.vault-asset-preview img,
+.vault-asset-preview iframe {
+  background: var(--vault-canvas-card-strong, rgba(127, 127, 127, 0.08));
+  border: 0;
+  border-radius: 6px;
+  display: block;
+  height: min(70vh, 720px);
+  max-width: 100%;
+  object-fit: contain;
+  width: 100%;
+}
+
+.vault-asset-preview iframe {
+  min-height: 320px;
+}
+
+.vault-asset-preview a {
+  color: var(--vault-accent, #9b87ff);
+}
+
+.vault-asset-preview--compact {
+  gap: 4px;
+  justify-content: flex-start;
+  max-height: calc(100% - 70px);
+  padding: 0;
+}
+
+.vault-asset-preview--compact img,
+.vault-asset-preview--compact iframe {
+  flex: 1;
+  height: 100%;
+  min-height: 64px;
+}
+
+.vault-asset-preview--compact iframe {
+  min-height: 64px;
+}
+
+.vault-asset-preview--compact a,
+.vault-asset-preview--compact .vault-asset-preview-unsupported {
+  font-size: 10px;
+}
+
+.vault-asset-preview-unsupported,
+.vault-asset-preview-error {
+  color: var(--vault-canvas-muted, #77717f);
+  font-size: 12px;
+  text-align: center;
+}
+
+.vault-asset-preview-error {
+  margin: auto;
+  max-width: 520px;
+  padding: 24px;
+}
+
+@media (max-width: 640px) {
+  .vault-asset-preview {
+    padding: 8px;
+  }
+
+  .vault-asset-preview iframe {
+    min-height: 240px;
+  }
+
+  .vault-asset-preview--compact iframe {
+    min-height: 64px;
+  }
+}

@@ -14,6 +14,9 @@ const PublicSharePage = lazy(() => import("./pages/PublicSharePage"));
 const RecurringPage = lazy(() => import("./pages/RecurringPage"));
 const SchedulePage = lazy(() => import("./pages/SchedulePage"));
 const SetupPage = lazy(() => import("./pages/SetupPage"));
+const VaultPage = lazy(() => import("./pages/VaultPage"));
+
+const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
 
 function PageLoadingFallback() {
   return (
@@ -155,6 +158,14 @@ export default function App() {
         />
         <Route
           path="/app"
+          element={
+            <RequireAuth feature="notes">
+              {obsidianVaultEnabled ? <VaultPage /> : <NotesPage />}
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/app/legacy"
           element={
             <RequireAuth feature="notes">
               <NotesPage />

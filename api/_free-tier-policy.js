@@ -5,6 +5,7 @@ const DEFAULT_ADMIN_WARNING_PERCENT = 75;
 const DEFAULT_RESTRICT_LARGE_PERCENT = 80;
 const DEFAULT_HARD_STOP_PERCENT = 85;
 const DEFAULT_RESTRICTED_UPLOAD_MAX_BYTES = 25_000_000;
+const FREE_TIER_MODE_KEY = "FREE_TIER_MODE";
 
 export const GLOBAL_BLOB_USAGE_DOCUMENT_PATH = "systemUsage/blobAttachmentsV1";
 export const GLOBAL_BLOB_USAGE_SCHEMA_VERSION = 1;
@@ -68,6 +69,9 @@ function hasOrderedThresholds(policy) {
 export function resolveFreeTierPolicy(sourceEnv = {}) {
   const env = sourceEnv && typeof sourceEnv === "object" ? sourceEnv : {};
   const invalidFields = new Set();
+  if (env[FREE_TIER_MODE_KEY] !== "true") {
+    invalidFields.add(FREE_TIER_MODE_KEY);
+  }
   const officialCapacityBytes = readPositiveInteger(
     env,
     ENV_KEYS.officialCapacityBytes,
@@ -153,7 +157,11 @@ export function resolveFreeTierPolicy(sourceEnv = {}) {
   );
 
   return Object.freeze({
-    enabled: env.FREE_TIER_MODE === "true",
+    // QuickMemo is deliberately zero-cost. A missing or malformed environment
+    // flag must never disable the global storage guard and silently permit
+    // billable overage. Callers therefore enforce the conservative policy and
+    // fail closed if its usage counter is unavailable.
+    enabled: true,
     officialCapacityBytes,
     operationalCapBytes,
     ...thresholds,

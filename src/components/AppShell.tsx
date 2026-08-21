@@ -1,6 +1,6 @@
 import { CalendarDays, KeyRound, LibraryBig, LogOut, Moon, NotebookPen, Settings, Shield, Sun, X } from "lucide-react";
-import { type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import { Link, NavLink } from "react-router-dom";
+import { type FormEvent, type MouseEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
@@ -41,8 +41,19 @@ import type {
 } from "../types";
 import { AppSelect } from "./AppSelect";
 
-export function AppShell({ children, onNavigateHome }: { children: ReactNode; onNavigateHome?: () => void }) {
+export function AppShell({
+  children,
+  onBeforeExit,
+  onNavigateHome,
+  variant = "default"
+}: {
+  children: ReactNode;
+  onBeforeExit?: () => Promise<boolean>;
+  onNavigateHome?: () => void;
+  variant?: "default" | "vault";
+}) {
   const { changePassword, profile, signOut } = useAuth();
+  const navigate = useNavigate();
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const passwordModalTriggerRef = useRef<HTMLButtonElement>(null);
@@ -113,39 +124,61 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
     }
   }
 
+  function guardedNavigation(destination: string, after?: () => void) {
+    return (event: MouseEvent<HTMLAnchorElement>) => {
+      if (!onBeforeExit) {
+        after?.();
+        return;
+      }
+      event.preventDefault();
+      void onBeforeExit().then((canExit) => {
+        if (canExit) {
+          after?.();
+          navigate(destination);
+        }
+      });
+    };
+  }
+
+  async function guardedSignOut() {
+    if (!onBeforeExit || await onBeforeExit()) {
+      await signOut();
+    }
+  }
+
   return (
-    <div className="app-frame">
+    <div className={`app-frame ${variant === "vault" ? "app-frame-vault" : ""}`}>
       {!hasFirebaseConfig && (
         <div className="config-banner">
           `.env.local`에 Firebase 설정을 넣거나 `VITE_USE_FIREBASE_EMULATORS=true`로 에뮬레이터를 사용하세요.
         </div>
       )}
-      <header className="topbar">
-        <Link aria-label="QuickMemo 홈" className="brand" to="/home" onClick={onNavigateHome}>
+      <header className={`topbar ${variant === "vault" ? "vault-titlebar" : ""}`}>
+        <Link aria-label="QuickMemo 홈" className="brand" to="/home" onClick={guardedNavigation("/home", onNavigateHome)}>
           <span className="brand-mark">Q</span>
           <span>QuickMemo</span>
         </Link>
         <nav className="nav-links" aria-label="주요 메뉴">
           {featureAccess.notes && (
-            <NavLink to="/app" onClick={onNavigateHome}>
+            <NavLink to="/app" onClick={guardedNavigation("/app", onNavigateHome)}>
               <NotebookPen size={18} />
               노트
             </NavLink>
           )}
           {featureAccess.library && (
-            <NavLink to="/library">
+            <NavLink to="/library" onClick={guardedNavigation("/library")}>
               <LibraryBig size={18} />
               자료실
             </NavLink>
           )}
           {featureAccess.schedule && (
-            <NavLink to="/schedule">
+            <NavLink to="/schedule" onClick={guardedNavigation("/schedule")}>
               <CalendarDays size={18} />
               일정관리
             </NavLink>
           )}
           {profile?.isAdmin && (
-            <NavLink to="/admin">
+            <NavLink to="/admin" onClick={guardedNavigation("/admin")}>
               <Shield size={18} />
               관리자
             </NavLink>
@@ -182,7 +215,7 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
               <Settings size={18} />
             </button>
           )}
-          <button className="icon-button" type="button" onClick={() => void signOut()} aria-label="로그아웃">
+          <button className="icon-button" type="button" onClick={() => void guardedSignOut()} aria-label="로그아웃">
             <LogOut size={18} />
           </button>
           {themeStatus && (
@@ -192,7 +225,7 @@ export function AppShell({ children, onNavigateHome }: { children: ReactNode; on
           )}
         </div>
       </header>
-      <main>{children}</main>
+      <main className={variant === "vault" ? "vault-main" : undefined}>{children}</main>
       {passwordModalOpen && (
         <PasswordChangeModal
           onChangePassword={changePassword}

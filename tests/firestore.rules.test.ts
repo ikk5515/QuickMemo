@@ -176,6 +176,18 @@ function libraryVault(uid: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+function vaultWorkspace(uid: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ownerUid: uid,
+    encryptedState: encryptedPayload,
+    wrappedKey: ownerWrappedShareKey,
+    revision: 1,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
 function scheduleTask(uid: string, overrides: Record<string, unknown> = {}) {
   return {
     ownerUid: uid,
@@ -1644,6 +1656,56 @@ describeRules("firestore security rules", () => {
     await assertFails(setDoc(doc(inactiveDb, "libraryVaults/user-inactive"), libraryVault("user-inactive")));
     await assertFails(updateDoc(vaultRef, { updatedAt: serverTimestamp() }));
     await assertFails(deleteDoc(vaultRef));
+  });
+
+  it("stores encrypted vault workspace state for its active notes owner with revision checks", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(db, "users/user-inactive"), userProfile("user-inactive", { isActive: false }));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const adminDb = testEnv.authenticatedContext("admin-a").firestore();
+    const inactiveDb = testEnv.authenticatedContext("user-inactive").firestore();
+    const workspaceRef = doc(ownerDb, "vaultWorkspaces/user-a");
+
+    const missingWorkspace = await assertSucceeds(getDoc(workspaceRef));
+    expect(missingWorkspace.exists()).toBe(false);
+    await assertSucceeds(setDoc(workspaceRef, vaultWorkspace("user-a")));
+    await assertSucceeds(getDoc(workspaceRef));
+    await assertFails(getDocs(collection(ownerDb, "vaultWorkspaces")));
+    await assertFails(getDoc(doc(otherDb, "vaultWorkspaces/user-a")));
+    await assertFails(getDoc(doc(adminDb, "vaultWorkspaces/user-a")));
+    await assertFails(setDoc(doc(otherDb, "vaultWorkspaces/user-a"), vaultWorkspace("user-a")));
+    await assertFails(
+      setDoc(doc(inactiveDb, "vaultWorkspaces/user-inactive"), vaultWorkspace("user-inactive"))
+    );
+    await assertSucceeds(
+      updateDoc(workspaceRef, {
+        encryptedState: { ...encryptedPayload, cipherText: "next-cipher" },
+        revision: 2,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(workspaceRef, {
+        encryptedState: { ...encryptedPayload, cipherText: "skipped-revision" },
+        revision: 4,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(workspaceRef, {
+        wrappedKey: { ...ownerWrappedShareKey, wrappedKey: "replaced-key" },
+        revision: 3,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(deleteDoc(workspaceRef));
   });
 
   it("keeps personal schedule tasks owner-only and blocks forged attribution", async () => {
@@ -3622,6 +3684,13 @@ describeRules("firestore security rules", () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "noteFolders/user-b-parent"), {
+        ownerUid: "user-b",
+        name: "다른 사용자 폴더",
+        color: "#2f7d70",
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z")
+      });
       await setDoc(doc(context.firestore(), "notes/personal-note"), {
         type: "personal",
         ownerUid: "user-a",
@@ -3655,7 +3724,21 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(
       setDoc(doc(ownerDb, "noteFolders/folder-a"), {
         ownerUid: "user-a",
-        name: "업무",
+        name: "암호화 폴더",
+        color: "#7c5cff",
+        encryptedName: encryptedPayload,
+        wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+        parentId: null,
+        order: 0,
+        revision: 1,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(ownerDb, "noteFolders/legacy-folder"), {
+        ownerUid: "user-a",
+        name: "기존 폴더",
         color: "#2f7d70",
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
@@ -3663,8 +3746,209 @@ describeRules("firestore security rules", () => {
     );
     await assertFails(getDoc(doc(otherDb, "noteFolders/folder-a")));
     await assertSucceeds(
+      setDoc(doc(ownerDb, "noteFolders/encrypted-folder"), {
+        ownerUid: "user-a",
+        name: "암호화 폴더",
+        color: "#7c5cff",
+        encryptedName: encryptedPayload,
+        wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+        parentId: "folder-a",
+        order: 1,
+        revision: 1,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "noteFolders/folder-a"), {
+        // encrypted-folder already points to folder-a. getAfter(parent)
+        // must reject completing the reverse edge even via a direct SDK write.
+        parentId: "encrypted-folder",
+        revision: 2,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(ownerDb, "noteFolders/encrypted-folder"), {
+        encryptedName: { ...encryptedPayload, cipherText: "renamed" },
+        order: 2,
+        revision: 2,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "noteFolders/encrypted-folder"), {
+        parentId: null,
+        revision: 4,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "noteFolders/incomplete-encrypted-folder"), {
+        ownerUid: "user-a",
+        name: "암호화 폴더",
+        color: "#7c5cff",
+        encryptedName: encryptedPayload,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "noteFolders/oversized-encrypted-name"), {
+        ownerUid: "user-a",
+        name: "암호화 폴더",
+        color: "#7c5cff",
+        encryptedName: { ...encryptedPayload, cipherText: "A".repeat(2049) },
+        wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+        parentId: null,
+        order: 1,
+        revision: 1,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      setDoc(doc(ownerDb, "noteFolders/legacy-parent-child"), {
+        ownerUid: "user-a",
+        name: "암호화 폴더",
+        color: "#7c5cff",
+        encryptedName: encryptedPayload,
+        wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+        parentId: "legacy-folder",
+        order: 1,
+        revision: 1,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(deleteDoc(doc(ownerDb, "noteFolders/folder-a")));
+    for (const [folderId, parentId, revision] of [
+      ["wrong-initial-revision", null, 2],
+      ["self-parent", "self-parent", 1],
+      ["missing-parent", "does-not-exist", 1],
+      ["cross-user-parent", "user-b-parent", 1]
+    ] as const) {
+      await assertFails(
+        setDoc(doc(ownerDb, `noteFolders/${folderId}`), {
+          ownerUid: "user-a",
+          name: "거부할 암호화 폴더",
+          color: "#7c5cff",
+          encryptedName: encryptedPayload,
+          wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+          parentId,
+          order: 1,
+          revision,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        })
+      );
+    }
+    await assertFails(
+      createAuditedNote(ownerDb, "oversized-vault-note", "user-a", {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: { ...encryptedPayload, cipherText: "A".repeat(700_001) },
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        isDeleted: false
+      }, ["user-a"])
+    );
+    await assertSucceeds(
+      createAuditedNote(ownerDb, "revisioned-folder-note", "user-a", {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        isDeleted: false
+      }, ["user-a"])
+    );
+    await assertSucceeds(
+      updateAuditedNote(
+        ownerDb,
+        "revisioned-folder-note",
+        "user-a",
+        2,
+        "share",
+        ["folder"],
+        ["user-a"],
+        { folderId: "folder-a", isDeleted: false }
+      )
+    );
+    await assertFails(
+      updateAuditedNote(
+        ownerDb,
+        "revisioned-folder-note",
+        "user-a",
+        3,
+        "share",
+        ["participants"],
+        ["user-a"],
+        { folderId: null, isDeleted: false }
+      )
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "notes/revisioned-folder-note"), {
+        folderId: null,
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-a"
+      })
+    );
+    await assertFails(
+      updateAuditedNote(
+        ownerDb,
+        "revisioned-folder-note",
+        "user-a",
+        3,
+        "share",
+        ["participants"],
+        ["user-a", "user-b"],
+        {
+          type: "shared",
+          participantUids: ["user-a", "user-b"],
+          wrappedKeys: {
+            "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+            "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+          },
+          folderId: null,
+          isDeleted: false
+        }
+      )
+    );
+    await assertSucceeds(
+      updateAuditedNote(
+        ownerDb,
+        "revisioned-folder-note",
+        "user-a",
+        3,
+        "share",
+        ["participants", "folder"],
+        ["user-a", "user-b"],
+        {
+          type: "shared",
+          participantUids: ["user-a", "user-b"],
+          wrappedKeys: {
+            "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+            "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+          },
+          folderId: null,
+          isDeleted: false
+        }
+      )
+    );
+    await assertSucceeds(
       updateDoc(doc(ownerDb, "notes/personal-note"), {
-        folderId: "folder-a",
+        folderId: "legacy-folder",
         updatedAt: serverTimestamp(),
         updatedBy: "user-a"
       })
@@ -3683,6 +3967,104 @@ describeRules("firestore security rules", () => {
         updatedBy: "user-a"
       })
     );
+  });
+
+  it("requires matching vault content formats and entry kinds", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const vaultNote = {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+      },
+      isDeleted: false
+    };
+
+    await assertSucceeds(createAuditedNote(ownerDb, "markdown-entry", "user-a", {
+      ...vaultNote,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown"
+    }, ["user-a"]));
+    await assertSucceeds(createAuditedNote(ownerDb, "canvas-entry", "user-a", {
+      ...vaultNote,
+      contentFormat: "json-canvas-v1",
+      entryKind: "canvas"
+    }, ["user-a"]));
+    await assertSucceeds(createAuditedNote(ownerDb, "asset-entry", "user-a", {
+      ...vaultNote,
+      contentFormat: "asset-v1",
+      entryKind: "asset"
+    }, ["user-a"]));
+    await assertFails(createAuditedNote(ownerDb, "asset-mismatched-entry", "user-a", {
+      ...vaultNote,
+      contentFormat: "asset-v1",
+      entryKind: "markdown"
+    }, ["user-a"]));
+    await assertFails(createAuditedNote(ownerDb, "mismatched-entry", "user-a", {
+      ...vaultNote,
+      contentFormat: "markdown-v1",
+      entryKind: "canvas"
+    }, ["user-a"]));
+    await assertFails(createAuditedNote(ownerDb, "missing-kind", "user-a", {
+      ...vaultNote,
+      contentFormat: "base-v1"
+    }, ["user-a"]));
+    await assertFails(createAuditedNote(ownerDb, "unknown-format", "user-a", {
+      ...vaultNote,
+      contentFormat: "executable-v1",
+      entryKind: "markdown"
+    }, ["user-a"]));
+    await assertFails(createAuditedNote(ownerDb, "unknown-field", "user-a", {
+      ...vaultNote,
+      executablePayload: "alert(1)"
+    }, ["user-a"]));
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "markdown-entry",
+      "user-a",
+      2,
+      "content",
+      ["body"],
+      ["user-a"],
+      {
+        encryptedBody: { ...encryptedPayload, cipherText: "changed" },
+        isDeleted: false
+      }
+    ));
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "markdown-entry",
+      "user-a",
+      3,
+      "content",
+      ["body"],
+      ["user-a"],
+      {
+        encryptedBody: { ...encryptedPayload, cipherText: "A".repeat(700_001) },
+        isDeleted: false
+      }
+    ));
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "markdown-entry",
+      "user-a",
+      3,
+      "content",
+      ["body"],
+      ["user-a"],
+      {
+        encryptedBody: { ...encryptedPayload, cipherText: "changed" },
+        executablePayload: "alert(1)",
+        isDeleted: false
+      }
+    ));
   });
 
   it("rejects malformed note timestamp fields", async () => {
@@ -3893,6 +4275,9 @@ describeRules("firestore security rules", () => {
         participantUids: ["user-a", "user-b"],
         encryptedTitle: encryptedPayload,
         encryptedBody: encryptedPayload,
+        attachmentRevision: 0,
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
         wrappedKeys: {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
@@ -4283,6 +4668,9 @@ describeRules("firestore security rules", () => {
         participantUids: ["user-a", "user-b"],
         encryptedTitle: encryptedPayload,
         encryptedBody: encryptedPayload,
+        attachmentRevision: 0,
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
         wrappedKeys: {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
@@ -4348,6 +4736,30 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp()
     });
     await assertFails(wrongQueueBatch.commit());
+
+    const unknownFieldBatch = writeBatch(ownerDb);
+    unknownFieldBatch.update(doc(ownerDb, "notes/note-a"), {
+      ...purgeUpdates,
+      plaintextLeak: "must-not-be-stored"
+    });
+    unknownFieldBatch.set(doc(ownerDb, "notePurgeCleanupQueue/note-a"), {
+      noteId: "note-a",
+      ownerUid: "user-a",
+      createdAt: serverTimestamp()
+    });
+    await assertFails(unknownFieldBatch.commit());
+
+    const removedFormatBatch = writeBatch(ownerDb);
+    removedFormatBatch.update(doc(ownerDb, "notes/note-a"), {
+      ...purgeUpdates,
+      contentFormat: deleteField()
+    });
+    removedFormatBatch.set(doc(ownerDb, "notePurgeCleanupQueue/note-a"), {
+      noteId: "note-a",
+      ownerUid: "user-a",
+      createdAt: serverTimestamp()
+    });
+    await assertFails(removedFormatBatch.commit());
 
     const purgeBatch = writeBatch(ownerDb);
     purgeBatch.update(doc(ownerDb, "notes/note-a"), purgeUpdates);
@@ -4549,6 +4961,36 @@ describeRules("firestore security rules", () => {
     });
     secondBatch.set(secondHistoryRef, noteHistory("note-a", "user-b", { changedFields: ["title"], revision: 2 }));
     await assertSucceeds(secondBatch.commit());
+
+    for (const [historyId, historyOverrides] of [
+      ["oversized-summary", {
+        encryptedSummary: { ...encryptedPayload, cipherText: "s".repeat(8_193) }
+      }],
+      ["oversized-snapshot", {
+        encryptedSnapshot: { ...encryptedPayload, cipherText: "s".repeat(700_001) }
+      }],
+      ["oversized-history-iv", {
+        encryptedSnapshot: { ...encryptedPayload, iv: "i".repeat(257) }
+      }]
+    ] as const) {
+      const oversizedHistoryBatch = writeBatch(participantDb);
+      oversizedHistoryBatch.update(doc(participantDb, "notes/note-a"), {
+        encryptedBody: { ...encryptedPayload, cipherText: historyId },
+        updatedAt: serverTimestamp(),
+        updatedBy: "user-b",
+        revision: 3,
+        lastMutationId: historyId
+      });
+      oversizedHistoryBatch.set(
+        doc(participantDb, "notes/note-a/history", historyId),
+        noteHistory("note-a", "user-b", {
+          changedFields: ["body"],
+          revision: 3,
+          ...historyOverrides
+        })
+      );
+      await assertFails(oversizedHistoryBatch.commit());
+    }
 
     await assertSucceeds(getDoc(historyRef));
     await assertFails(
