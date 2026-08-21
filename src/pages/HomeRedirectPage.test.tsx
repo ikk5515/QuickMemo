@@ -1,15 +1,21 @@
-import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { render, screen, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserProfile, UserPreferencesDocument } from "../types";
 import HomeRedirectPage from "./HomeRedirectPage";
 
+type HomePreferences = Pick<UserPreferencesDocument, "defaultHome" | "scheduleDefaultView">;
+
 const state = vi.hoisted(() => ({
+  cachedPreferences: {
+    defaultHome: "notes",
+    scheduleDefaultView: "todo"
+  } as HomePreferences | null,
   preferences: {
     defaultHome: "notes",
     scheduleDefaultView: "todo"
-  } as Pick<UserPreferencesDocument, "defaultHome" | "scheduleDefaultView">,
+  } as HomePreferences,
   profile: null as UserProfile | null
 }));
 
@@ -25,7 +31,7 @@ vi.mock("../services/userPreferences", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/userPreferences")>();
   return {
     ...actual,
-    getCachedUserPreferences: () => state.preferences,
+    getCachedUserPreferences: () => state.cachedPreferences,
     getUserPreferences: vi.fn(async () => state.preferences)
   };
 });
@@ -47,27 +53,53 @@ function profile(overrides: Partial<UserProfile> = {}): UserProfile {
   };
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{`${location.pathname}${location.search}`}</output>;
+}
+
+function renderHome() {
+  return render(
+    <MemoryRouter initialEntries={["/home"]}>
+      <Routes>
+        <Route path="/home" element={<HomeRedirectPage />} />
+        <Route path="*" element={<LocationProbe />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
 describe("HomeRedirectPage feature access", () => {
   beforeEach(() => {
+    state.cachedPreferences = { defaultHome: "notes", scheduleDefaultView: "todo" };
     state.preferences = { defaultHome: "notes", scheduleDefaultView: "todo" };
     state.profile = profile();
   });
 
-  it("falls back from a denied default home and only renders granted cards", () => {
+  it("opens the file explorer instead of rendering the legacy dashboard", async () => {
+    renderHome();
+
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/app?panel=files"));
+    expect(screen.queryByText(/작업 공간/)).not.toBeInTheDocument();
+  });
+
+  it("falls back from a denied default home to the first granted feature", async () => {
     state.profile = profile({
       featureAccess: { notes: false, library: true, schedule: false }
     });
 
-    render(
-      <MemoryRouter>
-        <HomeRedirectPage />
-      </MemoryRouter>
-    );
+    renderHome();
 
-    expect(screen.getByRole("link", { name: /작업 시작/ })).toHaveAttribute("href", "/library");
-    expect(screen.getByRole("link", { name: /자료실/ })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /노트 작업/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /일정관리/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/library"));
+  });
+
+  it("preserves the preferred schedule surface", async () => {
+    state.cachedPreferences = { defaultHome: "schedule", scheduleDefaultView: "matrix" };
+    state.preferences = state.cachedPreferences;
+
+    renderHome();
+
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/schedule?view=matrix"));
   });
 
   it("shows a clear non-destructive empty state when all features are denied", () => {
@@ -75,14 +107,10 @@ describe("HomeRedirectPage feature access", () => {
       featureAccess: { notes: false, library: false, schedule: false }
     });
 
-    render(
-      <MemoryRouter>
-        <HomeRedirectPage />
-      </MemoryRouter>
-    );
+    renderHome();
 
     expect(screen.getByRole("status")).toHaveTextContent("사용 가능한 기능이 없습니다");
-    expect(screen.queryByRole("link", { name: /작업 시작/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /노트 작업|자료실|일정관리/ })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("location")).not.toBeInTheDocument();
   });
+
 });

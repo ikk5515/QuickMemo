@@ -123,7 +123,7 @@ export async function loginRosterUser(page, user, diagnostics) {
 export async function loginDirectly(page, user, diagnostics) {
   await page.goto("/login");
   await loginRosterUser(page, user, diagnostics);
-  await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+  await expect(page.locator(".app-frame")).toBeVisible();
 }
 
 export async function navigateWithinApp(page, rawUrl) {

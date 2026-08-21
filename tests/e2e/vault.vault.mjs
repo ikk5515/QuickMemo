@@ -183,5 +183,13 @@ test("authenticated encrypted Vault works at 1280, 390, and 320 pixels", async (
   await expect(page.getByLabel("노트 이름")).toHaveValue("E2E 연결 노트");
   await expectEditorSource(page.getByRole("textbox", { name: "Markdown 편집기" }), markdownSource);
   await expectNoHorizontalOverflow(page);
+
+  await navigateWithinApp(page, "/library");
+  await page.getByRole("link", { name: "그래프 보기" }).click();
+  await expect(page).toHaveURL((url) => (
+    url.pathname === "/app" && url.searchParams.get("view") === "graph"
+  ));
+  await expect(page.getByRole("region", { name: "전체 그래프" })).toBeVisible();
+  await expectNoHorizontalOverflow(page);
   await expectCleanRuntime(diagnostics, fixture);
 });

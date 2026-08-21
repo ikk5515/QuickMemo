@@ -70,6 +70,7 @@ import {
   useRef,
   useState
 } from "react";
+import { useLocation, useSearchParams } from "react-router-dom";
 import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
 import AttachmentPreviewModal from "../components/PublicAttachmentPreviewModal";
@@ -2644,6 +2645,9 @@ export function refreshedSecureShareSettingsFlags(
 
 export default function NotesPage() {
   const { firebaseUser, profile, privateKey } = useAuth();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const requestedNotePanel = searchParams.get("panel");
   const unlockedUid = profile && privateKey ? profile.uid : null;
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
   const [deletedNotes, setDeletedNotes] = useState<NoteSnapshot[]>([]);
@@ -2727,6 +2731,18 @@ export default function NotesPage() {
   const decryptedDeletedNoteCache = useRef<DecryptedNoteCache>(new Map());
   const visibleDecryptionGeneration = useRef(0);
   const deletedDecryptionGeneration = useRef(0);
+
+  useEffect(() => {
+    if (!privateKey || (requestedNotePanel !== "files" && requestedNotePanel !== "search")) {
+      return;
+    }
+
+    setOverviewOpen(false);
+    setListOpen(true);
+    if (requestedNotePanel === "files") {
+      setNoteQuery("");
+    }
+  }, [location.key, privateKey, requestedNotePanel]);
 
   secureShareOwnerIdentity.current = {
     firebaseUid: firebaseUser?.uid ?? null,
@@ -4167,6 +4183,19 @@ export default function NotesPage() {
   function returnToEditor() {
     setOverviewOpen(false);
     setListOpen(false);
+  }
+
+  function openWorkspaceNotePanel(intent?: "files" | "search") {
+    if (!intent) {
+      returnToEditor();
+      return;
+    }
+
+    setOverviewOpen(false);
+    setListOpen(true);
+    if (intent === "files") {
+      setNoteQuery("");
+    }
   }
 
   function updateFontSize(fontSize: number) {
@@ -7690,7 +7719,7 @@ export default function NotesPage() {
   }
 
   return (
-    <AppShell onNavigateHome={returnToEditor}>
+    <AppShell onNavigateHome={openWorkspaceNotePanel}>
       <section className="workspace notes-workspace">
         {overviewOpen ? (
           <PersonalOverview
@@ -7758,6 +7787,8 @@ export default function NotesPage() {
               folders={folders}
               noteStates={noteStateMap}
               notes={visibleNotes}
+              navigationPanel={requestedNotePanel === "files" || requestedNotePanel === "search" ? requestedNotePanel : null}
+              navigationRequestKey={location.key}
               onClose={() => setListOpen(false)}
               onFilterChange={updateNoteFilter}
               onOpenOverview={openOverview}
@@ -11058,6 +11089,8 @@ function NoteDrawer({
   deletedNotes,
   filter,
   folders,
+  navigationPanel,
+  navigationRequestKey,
   noteStates,
   notes,
   onClose,
@@ -11084,6 +11117,8 @@ function NoteDrawer({
   deletedNotes: DecryptedNote[];
   filter: NoteListFilter;
   folders: NoteFolderSnapshot[];
+  navigationPanel: "files" | "search" | null;
+  navigationRequestKey: string;
   noteStates: NoteStateByNoteId;
   notes: DecryptedNote[];
   onClose: () => void;
@@ -11102,6 +11137,18 @@ function NoteDrawer({
   sortSetting: NoteSortSetting;
 }) {
   const [mode, setMode] = useState<DrawerMode>("notes");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open || !navigationPanel) {
+      return;
+    }
+
+    setMode("notes");
+    if (navigationPanel === "search") {
+      searchInputRef.current?.focus();
+    }
+  }, [navigationPanel, navigationRequestKey, open]);
 
   if (!open) {
     return null;
@@ -11131,6 +11178,7 @@ function NoteDrawer({
           aria-label="노트 제목과 내용 검색"
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder="제목 또는 내용 검색"
+          ref={searchInputRef}
           type="search"
           value={query}
         />

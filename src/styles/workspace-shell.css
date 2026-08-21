@@ -1,0 +1,552 @@
+.app-frame-workspace {
+  --workspace-accent: #7c6ccf;
+  --workspace-accent-soft: color-mix(in srgb, var(--workspace-accent) 16%, transparent);
+  --workspace-panel: var(--color-surface);
+  --workspace-panel-muted: var(--color-surface-muted);
+  --workspace-border: var(--color-border-subtle);
+  background: var(--color-page-bg);
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  flex-direction: column;
+}
+
+.app-frame-workspace .obsidian-titlebar,
+.app-frame-vault .obsidian-titlebar {
+  backdrop-filter: none;
+  background: var(--workspace-panel-muted, var(--color-surface-muted));
+  border-bottom: 1px solid var(--workspace-border, var(--color-border-subtle));
+  box-shadow: none;
+  display: flex;
+  flex: 0 0 44px;
+  gap: 9px;
+  height: 44px;
+  min-height: 44px;
+  padding: 4px 8px;
+  position: relative;
+  z-index: 55;
+}
+
+.obsidian-titlebar-brand {
+  gap: 8px;
+  min-width: 0;
+}
+
+.obsidian-titlebar-brand .brand-mark {
+  border-radius: 8px;
+  font-size: 13px;
+  height: 28px;
+  min-width: 28px;
+  width: 28px;
+}
+
+.obsidian-titlebar-brand > span:last-child {
+  font-size: 14px;
+  letter-spacing: -.01em;
+}
+
+.obsidian-titlebar-context {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  left: 50%;
+  max-width: min(42vw, 420px);
+  overflow: hidden;
+  position: absolute;
+  text-overflow: ellipsis;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+}
+
+.obsidian-titlebar-user {
+  gap: 7px;
+  margin-inline-start: auto;
+}
+
+.obsidian-titlebar-actions {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.obsidian-titlebar-actions .icon-button {
+  height: 32px;
+  min-height: 32px;
+  width: 32px;
+}
+
+.obsidian-app-workspace {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: 48px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.obsidian-app-ribbon {
+  align-items: center;
+  background: var(--workspace-panel-muted);
+  border-inline-end: 1px solid var(--workspace-border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px 4px;
+  scrollbar-width: none;
+  z-index: 45;
+}
+
+.obsidian-app-ribbon > button,
+.obsidian-ribbon-primary > a,
+.obsidian-ribbon-primary > button,
+.obsidian-ribbon-secondary > button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted);
+  display: inline-flex;
+  flex: 0 0 38px;
+  height: 38px;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0;
+  position: relative;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    opacity var(--duration-fast) var(--ease-standard);
+  width: 38px;
+}
+
+.obsidian-app-ribbon > button:hover,
+.obsidian-ribbon-primary > a:hover,
+.obsidian-ribbon-primary > button:hover,
+.obsidian-ribbon-secondary > button:hover,
+.workspace-ribbon-link.active,
+.workspace-ribbon-link[aria-current="page"] {
+  background: var(--workspace-accent-soft);
+  color: var(--ink);
+}
+
+.obsidian-ribbon-primary {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.workspace-ribbon-link.active::before,
+.workspace-ribbon-link[aria-current="page"]::before {
+  background: var(--workspace-accent);
+  border-radius: 999px;
+  content: "";
+  height: 18px;
+  inset-inline-start: -5px;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+}
+
+.workspace-ribbon-link.unavailable,
+.obsidian-drawer-link.unavailable {
+  cursor: not-allowed;
+  opacity: .42;
+}
+
+.obsidian-ribbon-spacer {
+  flex: 1 1 auto;
+}
+
+.obsidian-ribbon-secondary {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.obsidian-workspace-main {
+  grid-column: 2;
+  grid-row: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.workspace-route-state {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: center;
+  min-height: 100%;
+  padding: 32px 20px;
+  text-align: center;
+}
+
+.workspace-route-state h1,
+.workspace-route-state p {
+  margin: 0;
+}
+
+.workspace-route-state h1 {
+  color: var(--ink);
+  font-size: clamp(18px, 3vw, 24px);
+}
+
+.workspace-route-state p {
+  font-size: 13px;
+}
+
+.workspace-route-unavailable svg {
+  color: var(--workspace-accent);
+}
+
+.obsidian-workspace-drawer {
+  background: var(--workspace-panel);
+  border-inline-end: 1px solid var(--workspace-border);
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  bottom: 0;
+  inset-inline-start: 48px;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: fixed;
+  top: 44px;
+  width: min(248px, calc(100vw - 48px));
+  z-index: 85;
+}
+
+.obsidian-workspace-drawer > header {
+  align-items: center;
+  border-bottom: 1px solid var(--workspace-border);
+  display: flex;
+  flex: 0 0 54px;
+  justify-content: space-between;
+  padding: 7px 8px 7px 13px;
+}
+
+.obsidian-workspace-drawer > header > div,
+.obsidian-drawer-profile > span:last-child {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.obsidian-workspace-drawer > header span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .12em;
+}
+
+.obsidian-workspace-drawer > header strong {
+  font-size: 14px;
+}
+
+.obsidian-workspace-drawer > nav {
+  display: grid;
+  gap: 3px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.obsidian-drawer-link {
+  align-items: center;
+  border-radius: 7px;
+  color: var(--muted);
+  display: grid;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 9px;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  min-height: 38px;
+  padding: 5px 9px;
+  position: relative;
+}
+
+.obsidian-drawer-link:hover,
+.obsidian-drawer-link.active,
+.obsidian-drawer-link[aria-current="page"] {
+  background: var(--workspace-accent-soft);
+  color: var(--ink);
+}
+
+.obsidian-drawer-link.active::before,
+.obsidian-drawer-link[aria-current="page"]::before {
+  background: var(--workspace-accent);
+  border-radius: 999px;
+  content: "";
+  inset-block: 8px;
+  inset-inline-start: 0;
+  position: absolute;
+  width: 3px;
+}
+
+.obsidian-drawer-link small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.obsidian-workspace-drawer > footer {
+  border-top: 1px solid var(--workspace-border);
+  display: grid;
+  gap: 9px;
+  margin-top: auto;
+  padding: 10px;
+}
+
+.obsidian-drawer-profile {
+  align-items: center;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: 32px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.obsidian-drawer-profile strong,
+.obsidian-drawer-profile small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.obsidian-drawer-profile strong {
+  font-size: 12px;
+}
+
+.obsidian-drawer-profile small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.obsidian-drawer-account-actions {
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.obsidian-drawer-account-actions .icon-button {
+  height: 36px;
+  min-height: 36px;
+  width: 100%;
+}
+
+.obsidian-drawer-backdrop {
+  background: rgb(15 18 24 / 24%);
+  border: 0;
+  bottom: 0;
+  display: block;
+  inset-inline-end: 0;
+  inset-inline-start: 0;
+  position: fixed;
+  top: 0;
+  z-index: 80;
+}
+
+.app-frame-workspace > .modal-backdrop,
+.app-frame-vault > .modal-backdrop {
+  z-index: 110;
+}
+
+.obsidian-app-ribbon button:focus-visible,
+.obsidian-app-ribbon a:focus-visible,
+.obsidian-workspace-drawer button:focus-visible,
+.obsidian-workspace-drawer a:focus-visible {
+  outline: 2px solid var(--workspace-accent);
+  outline-offset: 1px;
+}
+
+@media (max-width: 760px) {
+  .app-frame-workspace .obsidian-titlebar {
+    flex-basis: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding-block: 0;
+    padding-inline:
+      max(7px, env(safe-area-inset-left))
+      max(7px, env(safe-area-inset-right));
+  }
+
+  .obsidian-titlebar-context {
+    flex: 1 1 auto;
+    left: auto;
+    margin-inline: auto;
+    max-width: none;
+    min-width: 0;
+    position: static;
+    transform: none;
+  }
+
+  .obsidian-app-workspace,
+  .obsidian-app-workspace.drawer-open {
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: calc(56px + env(safe-area-inset-bottom));
+  }
+
+  .obsidian-workspace-main,
+  .obsidian-app-workspace.drawer-open .obsidian-workspace-main {
+    grid-column: 1;
+    padding-bottom: 0;
+  }
+
+  .obsidian-app-ribbon {
+    border-inline-end: 0;
+    border-top: 1px solid var(--workspace-border);
+    bottom: 0;
+    flex-direction: row;
+    gap: 2px;
+    grid-column: 1;
+    height: calc(56px + env(safe-area-inset-bottom));
+    inset-inline: 0;
+    justify-content: stretch;
+    min-height: 56px;
+    padding: 5px max(4px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(4px, env(safe-area-inset-left));
+    position: fixed;
+    z-index: 70;
+  }
+
+  .obsidian-app-ribbon > button,
+  .obsidian-ribbon-primary > a,
+  .obsidian-ribbon-primary > button {
+    flex: 1 1 0;
+    height: 44px;
+    max-width: 54px;
+    min-height: 44px;
+    min-width: 44px;
+    width: auto;
+  }
+
+  .obsidian-ribbon-primary {
+    flex: 1 1 auto;
+    flex-direction: row;
+    gap: 2px;
+    justify-content: stretch;
+    min-width: 0;
+  }
+
+  .obsidian-ribbon-primary > a,
+  .obsidian-ribbon-primary > button {
+    width: 100%;
+  }
+
+  .obsidian-ribbon-primary [data-workspace-section="admin"],
+  .obsidian-ribbon-primary .workspace-ribbon-link.unavailable {
+    display: none;
+  }
+
+  .workspace-ribbon-link.active::before,
+  .workspace-ribbon-link[aria-current="page"]::before {
+    height: 3px;
+    inset-block-start: auto;
+    inset-bottom: -5px;
+    inset-inline: 10px;
+    transform: none;
+    width: auto;
+  }
+
+  .obsidian-ribbon-spacer,
+  .obsidian-ribbon-secondary {
+    display: none;
+  }
+
+  .obsidian-workspace-drawer {
+    bottom: 0;
+    box-shadow: 14px 0 36px rgb(15 18 24 / 22%);
+    inset-inline-start: 0;
+    max-width: 292px;
+    position: fixed;
+    top: 44px;
+    width: min(86vw, 292px);
+    z-index: 85;
+  }
+
+  .obsidian-drawer-backdrop {
+    background: rgb(15 18 24 / 38%);
+    border: 0;
+    bottom: 0;
+    display: block;
+    inset-inline: 0;
+    position: fixed;
+    top: 0;
+    z-index: 80;
+  }
+
+  .obsidian-workspace-drawer > header,
+  .obsidian-drawer-link {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 420px) {
+  .obsidian-titlebar-brand > span:last-child {
+    display: none;
+  }
+
+  .obsidian-titlebar-context {
+    text-align: center;
+  }
+}
+
+@media (pointer: coarse) {
+  .obsidian-titlebar-brand,
+  .obsidian-workspace-drawer > header .icon-button {
+    height: 44px;
+    max-height: 44px;
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  .obsidian-workspace-drawer > header .icon-button {
+    max-width: 44px;
+    width: 44px;
+  }
+
+  .obsidian-app-ribbon > button,
+  .obsidian-ribbon-primary > a,
+  .obsidian-ribbon-primary > button,
+  .obsidian-ribbon-secondary > button,
+  .obsidian-titlebar-actions .icon-button,
+  .obsidian-drawer-account-actions .icon-button {
+    height: 44px;
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (pointer: coarse) and (min-width: 761px) {
+  .obsidian-app-workspace {
+    grid-template-columns: 54px minmax(0, 1fr);
+  }
+
+  .obsidian-workspace-drawer {
+    inset-inline-start: 54px;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .obsidian-app-ribbon > button,
+  .obsidian-ribbon-primary > a,
+  .obsidian-ribbon-primary > button {
+    transition: none;
+  }
+}

@@ -1,4 +1,4 @@
-/* global Node, document, getComputedStyle */
+/* global document, getComputedStyle */
 
 import { expect, test } from "@playwright/test";
 import {
@@ -81,36 +81,6 @@ async function expectInside(page, containerSelector, childSelector, label) {
   );
 }
 
-async function expectNavigationLabelsOnOneLine(page) {
-  const renderedLines = await page.locator(".nav-links a").evaluateAll((links) =>
-    links.map((link) => {
-      const linePositions = new Set();
-
-      for (const child of link.childNodes) {
-        if (child.nodeType !== Node.TEXT_NODE || !child.textContent?.trim()) {
-          continue;
-        }
-
-        const range = document.createRange();
-        range.selectNodeContents(child);
-        for (const rectangle of range.getClientRects()) {
-          linePositions.add(Math.round(rectangle.top * 2) / 2);
-        }
-      }
-
-      return {
-        label: link.textContent?.trim() ?? "",
-        lines: linePositions.size
-      };
-    })
-  );
-
-  expect(renderedLines.length, "primary navigation must be rendered").toBeGreaterThan(0);
-  for (const { label, lines } of renderedLines) {
-    expect.soft(lines, `${label} navigation label must stay on one line`).toBe(1);
-  }
-}
-
 async function expectTopbarControlsDoNotOverlap(page) {
   const bounds = await page.evaluate(() => {
     const brand = document.querySelector(".topbar > .brand");
@@ -167,23 +137,55 @@ test("authenticated app layouts keep controls contained across primary routes", 
   test.setTimeout(90_000);
   const fixture = await seedScenario(request, "authenticated-verified");
   const viewportWidth = page.viewportSize()?.width ?? 1280;
-  const mobileLayout = viewportWidth <= 520;
   const touchLayout = viewportWidth <= 1024;
+  const mobileRibbon = viewportWidth <= 760;
 
   await loginDirectly(page, fixture.viewerAuth);
 
-  await navigateWithinApp(page, "/home");
-  await expect(page.getByRole("region", { name: "QuickMemo 홈" })).toBeVisible();
-  await expectNoHorizontalOverflow(page);
-  await expectInside(page, ".home-dashboard", ".home-hero", "home hero");
-  if (mobileLayout) {
-    await expectNavigationLabelsOnOneLine(page);
+  await expect(page).toHaveURL((url) => url.pathname === "/app" && url.searchParams.get("panel") === "files");
+  const workspaceRibbon = page.getByRole("complementary", { name: "작업공간 리본" });
+  await expect(workspaceRibbon).toBeVisible();
+  await expect(page.getByRole("link", { name: "파일 탐색기" })).toHaveAttribute("aria-current", "page");
+  await expect(page.locator(".note-drawer")).toBeVisible();
+  if (!mobileRibbon) {
+    await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
   }
+  await expectNoHorizontalOverflow(page);
   if (touchLayout) {
     await expectTopbarControlsDoNotOverlap(page);
+    const targetBounds = await workspaceRibbon.locator("a:visible, button:visible").evaluateAll((targets) =>
+      targets.map((target) => {
+        const rectangle = target.getBoundingClientRect();
+        return { height: rectangle.height, label: target.getAttribute("aria-label") ?? "", width: rectangle.width };
+      })
+    );
+    for (const target of targetBounds) {
+      expect.soft(target.height, `${target.label} touch height`).toBeGreaterThanOrEqual(44);
+      expect.soft(target.width, `${target.label} touch width`).toBeGreaterThanOrEqual(44);
+    }
   }
 
-  await page.getByRole("button", { name: "설정", exact: true }).click();
+  await page.getByRole("button", { name: "작업공간 메뉴 열기" }).click();
+  const workspaceDrawer = page.getByRole("dialog", { name: "QuickMemo 작업공간 메뉴" });
+  await expect(workspaceDrawer).toBeVisible();
+  await expect(workspaceDrawer.getByRole("button", { name: "로그아웃" })).toBeVisible();
+  if (touchLayout) {
+    const shellTouchTargets = await page
+      .locator('.obsidian-titlebar-brand, .obsidian-workspace-drawer > header .icon-button')
+      .evaluateAll((targets) => targets.map((target) => {
+        const rectangle = target.getBoundingClientRect();
+        return {
+          height: rectangle.height,
+          label: target.getAttribute("aria-label") ?? "",
+          width: rectangle.width
+        };
+      }));
+    for (const target of shellTouchTargets) {
+      expect.soft(target.height, `${target.label} touch height`).toBeGreaterThanOrEqual(44);
+      expect.soft(target.width, `${target.label} touch width`).toBeGreaterThanOrEqual(44);
+    }
+  }
+  await workspaceDrawer.getByRole("button", { name: "설정", exact: true }).click();
   const settingsDialog = page.getByRole("dialog", { name: "설정" });
   await expect(settingsDialog).toBeVisible();
   await expectInside(
@@ -193,9 +195,11 @@ test("authenticated app layouts keep controls contained across primary routes", 
     "settings close button"
   );
   await settingsDialog.getByRole("button", { name: "설정 닫기" }).click();
+  await expect(page.getByRole("button", { name: "작업공간 메뉴 열기" })).toBeFocused();
 
-  await navigateWithinApp(page, "/app");
+  await navigateWithinApp(page, "/app?panel=search");
   await expect(page.locator(".rich-editor-toolbar")).toBeVisible();
+  await expect(page.getByLabel("노트 제목과 내용 검색")).toBeFocused();
   await expect(page.locator(".text-color-palette")).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await expectInside(
@@ -292,6 +296,7 @@ test("setup, login, and admin layouts stay contained across responsive widths", 
   await expectInside(page, ".login-layout", ".roster-panel", "login roster");
 
   await loginDirectly(page, fixture.viewerAuth);
+  await expect(page.locator('[data-workspace-section="admin"]')).toHaveCount(1);
   await navigateWithinApp(page, "/admin");
   await expect(
     page.getByRole("heading", { name: "사용자, 공유 권한, 노트를 관리합니다", exact: true })

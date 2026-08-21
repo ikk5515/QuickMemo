@@ -1,6 +1,21 @@
-import { CalendarDays, KeyRound, LibraryBig, LogOut, Moon, NotebookPen, Settings, Shield, Sun, X } from "lucide-react";
+import {
+  CalendarDays,
+  Files,
+  KeyRound,
+  LibraryBig,
+  LogOut,
+  Menu,
+  Moon,
+  Network,
+  Search,
+  Settings,
+  Shield,
+  Sun,
+  X,
+  type LucideIcon
+} from "lucide-react";
 import { type FormEvent, type MouseEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import { Link, NavLink, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
@@ -41,6 +56,41 @@ import type {
 } from "../types";
 import { AppSelect } from "./AppSelect";
 
+type WorkspaceSection = "files" | "search" | "graph" | "library" | "schedule" | "admin";
+type WorkspacePanelIntent = Extract<WorkspaceSection, "files" | "search">;
+
+interface WorkspaceNavigationItem {
+  disabled?: boolean;
+  href: string;
+  icon: LucideIcon;
+  label: string;
+  section: WorkspaceSection;
+  unavailableHint?: string;
+}
+
+const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
+
+function workspaceSectionFromLocation(pathname: string, search: string): WorkspaceSection | null {
+  const params = new URLSearchParams(search);
+
+  if (pathname === "/app" || pathname === "/app/legacy") {
+    if (pathname === "/app" && obsidianVaultEnabled && params.get("view") === "graph") {
+      return "graph";
+    }
+    return params.get("panel") === "search" ? "search" : "files";
+  }
+  if (pathname === "/library") {
+    return "library";
+  }
+  if (pathname.startsWith("/schedule")) {
+    return "schedule";
+  }
+  if (pathname === "/admin") {
+    return "admin";
+  }
+  return null;
+}
+
 export function AppShell({
   children,
   onBeforeExit,
@@ -49,15 +99,21 @@ export function AppShell({
 }: {
   children: ReactNode;
   onBeforeExit?: () => Promise<boolean>;
-  onNavigateHome?: () => void;
+  onNavigateHome?: (intent?: WorkspacePanelIntent) => void;
   variant?: "default" | "vault";
 }) {
   const { changePassword, profile, signOut } = useAuth();
+  const location = useLocation();
   const navigate = useNavigate();
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [workspaceDrawerOpen, setWorkspaceDrawerOpen] = useState(false);
   const passwordModalTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsModalTriggerRef = useRef<HTMLButtonElement>(null);
+  const workspaceDrawerRef = useRef<HTMLElement>(null);
+  const workspaceDrawerReturnFocusRef = useRef<HTMLElement>(null);
+  const workspaceDrawerTriggerRef = useRef<HTMLButtonElement>(null);
+  const pendingModalReturnFocusRef = useRef<HTMLElement | null>(null);
   const [preferences, setPreferences] = useState<UserPreferencesDocument | null>(() =>
     profile ? getCachedUserPreferences(profile.uid) : null
   );
@@ -70,6 +126,37 @@ export function AppShell({
     () => normalizeFeatureAccess(profile),
     [profile]
   );
+  const activeWorkspaceSection = workspaceSectionFromLocation(location.pathname, location.search);
+  const navigationItems: WorkspaceNavigationItem[] = [];
+
+  if (featureAccess.notes) {
+    navigationItems.push(
+      { href: "/app?panel=files", icon: Files, label: "파일 탐색기", section: "files" },
+      { href: "/app?panel=search", icon: Search, label: "노트 검색", section: "search" },
+      {
+        disabled: !obsidianVaultEnabled,
+        href: "/app?view=graph",
+        icon: Network,
+        label: "그래프 보기",
+        section: "graph",
+        unavailableHint: "암호화 Vault의 운영 검증이 끝난 뒤 사용할 수 있습니다."
+      }
+    );
+  }
+  if (featureAccess.library) {
+    navigationItems.push({ href: "/library", icon: LibraryBig, label: "자료실", section: "library" });
+  }
+  if (featureAccess.schedule) {
+    navigationItems.push({ href: "/schedule", icon: CalendarDays, label: "일정관리", section: "schedule" });
+  }
+  if (profile?.isAdmin) {
+    navigationItems.push({ href: "/admin", icon: Shield, label: "관리자", section: "admin" });
+  }
+
+  useModalFocus(workspaceDrawerRef, {
+    enabled: workspaceDrawerOpen,
+    returnFocusRef: workspaceDrawerReturnFocusRef
+  });
 
   useEffect(() => {
     if (!profile) {
@@ -104,6 +191,36 @@ export function AppShell({
       document.documentElement.style.colorScheme = nextResolvedTheme;
     });
   }, [themePreference]);
+
+  useEffect(() => {
+    if (!workspaceDrawerOpen) {
+      return undefined;
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setWorkspaceDrawerOpen(false);
+      }
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [workspaceDrawerOpen]);
+
+  useEffect(() => {
+    if (passwordModalOpen || settingsModalOpen || !pendingModalReturnFocusRef.current) {
+      return;
+    }
+
+    const preferredTarget = pendingModalReturnFocusRef.current;
+    const focusTarget = preferredTarget.isConnected
+      ? preferredTarget
+      : workspaceDrawerTriggerRef.current;
+
+    pendingModalReturnFocusRef.current = null;
+    focusTarget?.focus({ preventScroll: true });
+  }, [passwordModalOpen, settingsModalOpen]);
 
   async function toggleTheme() {
     const nextPreference: ThemePreference = resolvedTheme === "dark" ? "light" : "dark";
@@ -146,78 +263,99 @@ export function AppShell({
     }
   }
 
+  function modalReturnTarget(trigger: HTMLButtonElement) {
+    return trigger.closest(".obsidian-workspace-drawer")
+      ? workspaceDrawerTriggerRef.current ?? trigger
+      : trigger;
+  }
+
+  function openPasswordModal(trigger: HTMLButtonElement) {
+    passwordModalTriggerRef.current = modalReturnTarget(trigger);
+    setWorkspaceDrawerOpen(false);
+    setPasswordModalOpen(true);
+  }
+
+  function openSettingsModal(trigger: HTMLButtonElement) {
+    settingsModalTriggerRef.current = modalReturnTarget(trigger);
+    setWorkspaceDrawerOpen(false);
+    setSettingsModalOpen(true);
+  }
+
+  function closePasswordModal() {
+    pendingModalReturnFocusRef.current = passwordModalTriggerRef.current ?? workspaceDrawerTriggerRef.current;
+    setPasswordModalOpen(false);
+  }
+
+  function closeSettingsModal() {
+    pendingModalReturnFocusRef.current = settingsModalTriggerRef.current ?? workspaceDrawerTriggerRef.current;
+    setSettingsModalOpen(false);
+  }
+
+  function navigationAfter(section: WorkspaceSection) {
+    setWorkspaceDrawerOpen(false);
+    if (section === "files" || section === "search") {
+      onNavigateHome?.(section);
+    }
+  }
+
+  const activeWorkspaceLabel = navigationItems.find((item) => item.section === activeWorkspaceSection)?.label
+    ?? (variant === "vault" ? "암호화 Vault" : "작업공간");
+
+  const accountActions = (
+    <>
+      <button
+        aria-label="비밀번호 변경"
+        className="icon-button"
+        onClick={(event) => openPasswordModal(event.currentTarget)}
+        title="비밀번호 변경"
+        type="button"
+      >
+        <KeyRound size={18} />
+      </button>
+      <ThemeToggleButton onToggle={() => void toggleTheme()} resolvedTheme={resolvedTheme} />
+      <button
+        aria-label="설정"
+        className="icon-button"
+        onClick={(event) => openSettingsModal(event.currentTarget)}
+        title="설정"
+        type="button"
+      >
+        <Settings size={18} />
+      </button>
+      <button className="icon-button" type="button" onClick={() => void guardedSignOut()} aria-label="로그아웃" title="로그아웃">
+        <LogOut size={18} />
+      </button>
+    </>
+  );
+
   return (
-    <div className={`app-frame ${variant === "vault" ? "app-frame-vault" : ""}`}>
+    <div className={`app-frame ${variant === "vault" ? "app-frame-vault" : "app-frame-workspace"}`}>
       {!hasFirebaseConfig && (
         <div className="config-banner">
           `.env.local`에 Firebase 설정을 넣거나 `VITE_USE_FIREBASE_EMULATORS=true`로 에뮬레이터를 사용하세요.
         </div>
       )}
-      <header className={`topbar ${variant === "vault" ? "vault-titlebar" : ""}`}>
-        <Link aria-label="QuickMemo 홈" className="brand" to="/home" onClick={guardedNavigation("/home", onNavigateHome)}>
+      <header className={`topbar obsidian-titlebar ${variant === "vault" ? "vault-titlebar" : ""}`}>
+        <Link
+          aria-label="QuickMemo 작업공간"
+          className="brand obsidian-titlebar-brand"
+          to="/home"
+          onClick={guardedNavigation("/home", () => {
+            setWorkspaceDrawerOpen(false);
+            onNavigateHome?.();
+          })}
+        >
           <span className="brand-mark">Q</span>
           <span>QuickMemo</span>
         </Link>
-        <nav className="nav-links" aria-label="주요 메뉴">
-          {featureAccess.notes && (
-            <NavLink to="/app" onClick={guardedNavigation("/app", onNavigateHome)}>
-              <NotebookPen size={18} />
-              노트
-            </NavLink>
-          )}
-          {featureAccess.library && (
-            <NavLink to="/library" onClick={guardedNavigation("/library")}>
-              <LibraryBig size={18} />
-              자료실
-            </NavLink>
-          )}
-          {featureAccess.schedule && (
-            <NavLink to="/schedule" onClick={guardedNavigation("/schedule")}>
-              <CalendarDays size={18} />
-              일정관리
-            </NavLink>
-          )}
-          {profile?.isAdmin && (
-            <NavLink to="/admin" onClick={guardedNavigation("/admin")}>
-              <Shield size={18} />
-              관리자
-            </NavLink>
-          )}
-        </nav>
-        <div className="topbar-user">
+        <span className="obsidian-titlebar-context" aria-live="polite">{activeWorkspaceLabel}</span>
+        <div className="topbar-user obsidian-titlebar-user">
           {profile && (
-            <span className="mini-avatar" style={{ background: profile.color }}>
+            <span className="mini-avatar" style={{ background: profile.color }} title={profile.displayName}>
               {profile.avatarText}
             </span>
           )}
-          {profile && (
-            <button
-              aria-label="비밀번호 변경"
-              className="secondary-button topbar-password-button"
-              onClick={() => setPasswordModalOpen(true)}
-              ref={passwordModalTriggerRef}
-              title="비밀번호 변경"
-              type="button"
-            >
-              <KeyRound size={16} />
-              <span>비밀번호 변경</span>
-            </button>
-          )}
-          <ThemeToggleButton onToggle={() => void toggleTheme()} resolvedTheme={resolvedTheme} />
-          {profile && (
-            <button
-              aria-label="설정"
-              className="icon-button"
-              onClick={() => setSettingsModalOpen(true)}
-              ref={settingsModalTriggerRef}
-              type="button"
-            >
-              <Settings size={18} />
-            </button>
-          )}
-          <button className="icon-button" type="button" onClick={() => void guardedSignOut()} aria-label="로그아웃">
-            <LogOut size={18} />
-          </button>
+          {variant === "vault" ? <div className="obsidian-titlebar-actions">{accountActions}</div> : null}
           {themeStatus && (
             <span className="sr-only" role="status">
               {themeStatus}
@@ -225,11 +363,146 @@ export function AppShell({
           )}
         </div>
       </header>
-      <main className={variant === "vault" ? "vault-main" : undefined}>{children}</main>
+      {variant === "vault" ? (
+        <main className="vault-main">{children}</main>
+      ) : (
+        <div className={`obsidian-app-workspace ${workspaceDrawerOpen ? "drawer-open" : ""}`}>
+          <aside aria-label="작업공간 리본" className="obsidian-app-ribbon">
+            <button
+              aria-controls="quickmemo-workspace-drawer"
+              aria-expanded={workspaceDrawerOpen}
+              aria-label={workspaceDrawerOpen ? "작업공간 메뉴 닫기" : "작업공간 메뉴 열기"}
+              onClick={(event) => {
+                if (!workspaceDrawerOpen) {
+                  workspaceDrawerReturnFocusRef.current = event.currentTarget;
+                }
+                setWorkspaceDrawerOpen((open) => !open);
+              }}
+              ref={workspaceDrawerTriggerRef}
+              title="작업공간 메뉴"
+              type="button"
+            >
+              <Menu size={19} />
+            </button>
+            <nav aria-label="주요 메뉴" className="obsidian-ribbon-primary">
+              {navigationItems.map((item) => {
+                const Icon = item.icon;
+                const active = activeWorkspaceSection === item.section;
+
+                return item.disabled ? (
+                  <button
+                    aria-label={`${item.label} (비활성)`}
+                    className="workspace-ribbon-link unavailable"
+                    data-workspace-section={item.section}
+                    disabled
+                    key={item.section}
+                    title={item.unavailableHint}
+                    type="button"
+                  >
+                    <Icon size={19} />
+                  </button>
+                ) : (
+                  <Link
+                    aria-current={active ? "page" : undefined}
+                    aria-label={item.label}
+                    className={`workspace-ribbon-link ${active ? "active" : ""}`}
+                    data-workspace-section={item.section}
+                    key={item.section}
+                    onClick={guardedNavigation(item.href, () => navigationAfter(item.section))}
+                    title={item.label}
+                    to={item.href}
+                  >
+                    <Icon size={19} />
+                  </Link>
+                );
+              })}
+            </nav>
+            <span className="obsidian-ribbon-spacer" />
+            <div className="obsidian-ribbon-secondary">{accountActions}</div>
+          </aside>
+
+          {workspaceDrawerOpen ? (
+            <>
+              <button
+                aria-label="작업공간 메뉴 닫기"
+                className="obsidian-drawer-backdrop"
+                onClick={() => setWorkspaceDrawerOpen(false)}
+                type="button"
+              />
+              <aside
+                aria-label="QuickMemo 작업공간 메뉴"
+                aria-modal="true"
+                className="obsidian-workspace-drawer"
+                id="quickmemo-workspace-drawer"
+                ref={workspaceDrawerRef}
+                role="dialog"
+                tabIndex={-1}
+              >
+                <header>
+                  <div>
+                    <span>QUICKMEMO</span>
+                    <strong>작업공간</strong>
+                  </div>
+                  <button
+                    aria-label="작업공간 메뉴 닫기"
+                    className="icon-button"
+                    data-dialog-initial-focus
+                    onClick={() => setWorkspaceDrawerOpen(false)}
+                    type="button"
+                  >
+                    <X size={17} />
+                  </button>
+                </header>
+                <nav aria-label="작업공간 이동">
+                  {navigationItems.map((item) => {
+                    const Icon = item.icon;
+                    const active = activeWorkspaceSection === item.section;
+
+                    return item.disabled ? (
+                      <span aria-disabled="true" className="obsidian-drawer-link unavailable" key={item.section} title={item.unavailableHint}>
+                        <Icon size={18} />
+                        <span>{item.label}</span>
+                        <small>준비 중</small>
+                      </span>
+                    ) : (
+                      <Link
+                        aria-current={active ? "page" : undefined}
+                        className={`obsidian-drawer-link ${active ? "active" : ""}`}
+                        key={item.section}
+                        onClick={guardedNavigation(item.href, () => navigationAfter(item.section))}
+                        to={item.href}
+                      >
+                        <Icon size={18} />
+                        <span>{item.label}</span>
+                      </Link>
+                    );
+                  })}
+                </nav>
+                <footer>
+                  {profile ? (
+                    <div className="obsidian-drawer-profile">
+                      <span className="mini-avatar" style={{ background: profile.color }}>{profile.avatarText}</span>
+                      <span>
+                        <strong>{profile.displayName}</strong>
+                        <small>{profile.isAdmin ? "관리자" : "사용자"}</small>
+                      </span>
+                    </div>
+                  ) : null}
+                  <div className="obsidian-drawer-account-actions">{accountActions}</div>
+                </footer>
+              </aside>
+            </>
+          ) : null}
+
+          <main aria-hidden={workspaceDrawerOpen ? true : undefined} className="obsidian-workspace-main">
+            {children}
+          </main>
+        </div>
+      )}
       {passwordModalOpen && (
         <PasswordChangeModal
           onChangePassword={changePassword}
-          onClose={() => setPasswordModalOpen(false)}
+          onClose={closePasswordModal}
           returnFocusRef={passwordModalTriggerRef}
         />
       )}
@@ -237,7 +510,7 @@ export function AppShell({
         <SettingsModal
           featureAccess={featureAccess}
           preferences={preferences}
-          onClose={() => setSettingsModalOpen(false)}
+          onClose={closeSettingsModal}
           onSave={(nextPreferences) => saveUserPreferences(profile.uid, nextPreferences)}
           returnFocusRef={settingsModalTriggerRef}
         />
