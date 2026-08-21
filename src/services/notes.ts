@@ -38,6 +38,8 @@ import type {
   NoteHistoryDocument,
   NoteKind,
   NoteUserStateDocument,
+  VaultContentFormat,
+  VaultEntryKind,
   WrappedNoteKey
 } from "../types";
 
@@ -68,6 +70,8 @@ export interface SaveNoteInput {
   encryptedTitle: EncryptedPayload;
   encryptedBody: EncryptedPayload;
   wrappedKeys: Record<string, WrappedNoteKey>;
+  contentFormat?: VaultContentFormat;
+  entryKind?: Exclude<VaultEntryKind, "asset">;
   folderId?: string | null;
   historySummary?: EncryptedPayload;
   historySnapshot?: EncryptedPayload;
@@ -77,6 +81,29 @@ export interface NoteMutationResult {
   lastMutationId: string;
   noteId: string;
   revision: number;
+}
+
+export interface CreateEncryptedNoteFolderInput {
+  color: string;
+  encryptedName: EncryptedPayload;
+  order: number;
+  ownerUid: string;
+  parentId: string | null;
+  wrappedKey: WrappedNoteKey;
+}
+
+export interface UpdateEncryptedNoteFolderInput {
+  encryptedName?: EncryptedPayload;
+  expectedRevision: number;
+  folderId: string;
+  order?: number;
+  ownerUid: string;
+  parentId?: string | null;
+}
+
+export interface MigrateLegacyNoteFolderInput extends CreateEncryptedNoteFolderInput {
+  expectedName: string;
+  folderId: string;
 }
 
 export interface CreatedRevisionedNoteResult extends NoteMutationResult {
@@ -115,6 +142,14 @@ export interface UpdateRevisionedNoteAccessInput {
   type: NoteKind;
   uid: string;
   wrappedKeys: Record<string, WrappedNoteKey>;
+}
+
+export interface UpdateRevisionedNoteFolderInput {
+  expectedRevision: number;
+  folderId: string | null;
+  noteId: string;
+  readerUids: string[];
+  uid: string;
 }
 
 export interface RevisionedNoteLifecycleInput {
@@ -945,6 +980,28 @@ export async function updateNoteAccess(
   return commitRevisionedNoteAccess({ noteId, uid, type, participantUids, wrappedKeys, folderId });
 }
 
+export async function updateRevisionedNoteFolder(input: UpdateRevisionedNoteFolderInput) {
+  return commitRevisionedNoteMutation({
+    action: "share",
+    changedFields: ["folder"],
+    expectedRevision: expectedNoteRevision(input.expectedRevision),
+    noteId: input.noteId,
+    readerUids: input.readerUids,
+    uid: input.uid,
+    update: {
+      folderId: input.folderId,
+      isDeleted: false,
+      updatedAt: serverTimestamp(),
+      updatedBy: input.uid
+    },
+    validateCurrent: (note) => (
+      note.ownerUid === input.uid
+      && note.type === "personal"
+      && (note.folderId ?? null) !== input.folderId
+    )
+  });
+}
+
 export async function updateNoteFolder(noteId: string, uid: string, folderId: string | null) {
   await updateDoc(doc(db, "notes", noteId), {
     folderId,
@@ -1048,7 +1105,7 @@ function noteHistoryDocument(
 
 interface RevisionedNoteMutationInput {
   action: NoteHistoryAction;
-  changedFields: string[];
+  changedFields: string[] | ((currentNote: NoteDocument) => string[]);
   encryptedSnapshot?: EncryptedPayload;
   encryptedSummary?: EncryptedPayload;
   expectedRevision?: number;
@@ -1082,11 +1139,14 @@ async function commitRevisionedNoteMutation(input: RevisionedNoteMutationInput):
     }
 
     const revision = currentRevision + 1;
+    const changedFields = typeof input.changedFields === "function"
+      ? input.changedFields(currentNote)
+      : input.changedFields;
     const historyDocument = noteHistoryDocument(
       input.noteId,
       input.uid,
       input.action,
-      input.changedFields,
+      changedFields,
       input.readerUids,
       revision,
       input.encryptedSummary,
@@ -1114,10 +1174,34 @@ type CompatibleRevisionedNoteAccessInput = Omit<UpdateRevisionedNoteAccessInput,
 
 function commitRevisionedNoteAccess(input: CompatibleRevisionedNoteAccessInput, expectedRevision?: number) {
   const normalizedParticipantUids = Array.from(new Set(input.participantUids));
+  const nextFolderId = input.type === "personal" ? input.folderId ?? null : null;
 
   return commitRevisionedNoteMutation({
     action: "share",
-    changedFields: ["participants"],
+    changedFields: (currentNote) => {
+      const currentWrappedKeys = currentNote.wrappedKeys ?? {};
+      const currentWrappedKeyIds = Object.keys(currentWrappedKeys).sort();
+      const nextWrappedKeyIds = Object.keys(input.wrappedKeys).sort();
+      const wrappedKeysChanged = currentWrappedKeyIds.length !== nextWrappedKeyIds.length
+        || currentWrappedKeyIds.some((uid, index) => {
+          const current = currentWrappedKeys[uid];
+          const next = input.wrappedKeys[nextWrappedKeyIds[index]];
+          return uid !== nextWrappedKeyIds[index]
+            || current?.version !== next?.version
+            || current?.algorithm !== next?.algorithm
+            || current?.wrappedKey !== next?.wrappedKey;
+        });
+      const currentParticipantUids = currentNote.participantUids ?? [];
+      const participantsChanged = currentNote.type !== input.type
+        || currentParticipantUids.length !== normalizedParticipantUids.length
+        || currentParticipantUids.some((uid, index) => uid !== normalizedParticipantUids[index])
+        || wrappedKeysChanged;
+      const folderChanged = (currentNote.folderId ?? null) !== nextFolderId;
+      return [
+        ...(participantsChanged ? ["participants"] : []),
+        ...(folderChanged ? ["folder"] : [])
+      ];
+    },
     expectedRevision,
     noteId: input.noteId,
     readerUids: normalizedParticipantUids,
@@ -1126,7 +1210,7 @@ function commitRevisionedNoteAccess(input: CompatibleRevisionedNoteAccessInput, 
       type: input.type,
       participantUids: normalizedParticipantUids,
       wrappedKeys: input.wrappedKeys,
-      folderId: input.type === "personal" ? input.folderId ?? null : null,
+      folderId: nextFolderId,
       isDeleted: false,
       updatedAt: serverTimestamp(),
       updatedBy: input.uid
@@ -1226,7 +1310,10 @@ export function subscribeNoteFolders(
       callback(
         snapshot.docs
           .map((document) => ({ id: document.id, ...(document.data() as NoteFolderDocument) }))
-          .sort((left, right) => left.name.localeCompare(right.name, "ko"))
+          .sort((left, right) => {
+            const orderDifference = (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER);
+            return orderDifference || left.name.localeCompare(right.name, "ko");
+          })
       );
     },
     (error) => onError?.(error)
@@ -1243,6 +1330,150 @@ export async function createNoteFolder(uid: string, name: string, color: string)
   } satisfies Omit<NoteFolderDocument, "createdAt" | "updatedAt"> & {
     createdAt: ReturnType<typeof serverTimestamp>;
     updatedAt: ReturnType<typeof serverTimestamp>;
+  });
+}
+
+export async function createEncryptedNoteFolder(input: CreateEncryptedNoteFolderInput) {
+  const folderRef = doc(collection(db, "noteFolders"));
+  await runTransaction(db, async (transaction) => {
+    if (input.parentId) {
+      const parentSnapshot = await transaction.get(doc(db, "noteFolders", input.parentId));
+      if (!parentSnapshot.exists()) {
+        throw new Error("상위 폴더를 찾을 수 없습니다.");
+      }
+      const parent = parentSnapshot.data() as NoteFolderDocument;
+      if (
+        parent.ownerUid !== input.ownerUid
+        || !parent.encryptedName
+        || !parent.wrappedKey
+        || !Number.isSafeInteger(parent.revision)
+      ) {
+        throw new Error("상위 폴더를 먼저 암호화해주세요.");
+      }
+    }
+
+    transaction.set(folderRef, {
+      ownerUid: input.ownerUid,
+      // Historical clients require a non-empty name. It deliberately contains
+      // no user folder text; unlocked vault clients render encryptedName.
+      name: "암호화 폴더",
+      color: input.color,
+      encryptedName: input.encryptedName,
+      wrappedKey: input.wrappedKey,
+      parentId: input.parentId,
+      order: input.order,
+      revision: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    } satisfies Omit<NoteFolderDocument, "createdAt" | "updatedAt"> & {
+      createdAt: ReturnType<typeof serverTimestamp>;
+      updatedAt: ReturnType<typeof serverTimestamp>;
+    });
+  });
+  return folderRef;
+}
+
+export async function updateEncryptedNoteFolder(input: UpdateEncryptedNoteFolderInput) {
+  const folderRef = doc(db, "noteFolders", input.folderId);
+
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(folderRef);
+
+    if (!snapshot.exists()) {
+      throw new Error("변경할 폴더를 찾을 수 없습니다.");
+    }
+
+    const folder = snapshot.data() as NoteFolderDocument;
+    const revision = folder.revision ?? 0;
+
+    if (folder.ownerUid !== input.ownerUid || revision !== input.expectedRevision) {
+      throw new NoteRevisionConflictError(input.expectedRevision, revision);
+    }
+
+    if (input.parentId !== undefined) {
+      if (input.parentId === input.folderId) {
+        throw new Error("폴더를 자기 자신 아래로 이동할 수 없습니다.");
+      }
+
+      const visited = new Set([input.folderId]);
+      let ancestorId = input.parentId;
+      let depth = 0;
+      while (ancestorId !== null) {
+        if (visited.has(ancestorId)) {
+          throw new Error("하위 폴더 아래로 이동할 수 없습니다.");
+        }
+        if (depth >= 64) {
+          throw new Error("폴더 중첩 깊이가 허용 범위를 초과했습니다.");
+        }
+        visited.add(ancestorId);
+        const ancestorSnapshot = await transaction.get(doc(db, "noteFolders", ancestorId));
+        if (!ancestorSnapshot.exists()) {
+          throw new Error("상위 폴더를 찾을 수 없습니다.");
+        }
+        const ancestor = ancestorSnapshot.data() as NoteFolderDocument;
+        if (
+          ancestor.ownerUid !== input.ownerUid
+          || !ancestor.encryptedName
+          || !ancestor.wrappedKey
+          || !Number.isSafeInteger(ancestor.revision)
+        ) {
+          throw new Error("다른 사용자의 폴더 아래로 이동할 수 없습니다.");
+        }
+        ancestorId = ancestor.parentId ?? null;
+        depth += 1;
+      }
+    }
+
+    const update: Record<string, unknown> = {
+      revision: revision + 1,
+      updatedAt: serverTimestamp()
+    };
+
+    if (input.encryptedName) {
+      update.encryptedName = input.encryptedName;
+    }
+    if (input.parentId !== undefined) {
+      update.parentId = input.parentId;
+    }
+    if (input.order !== undefined) {
+      update.order = input.order;
+    }
+
+    transaction.update(folderRef, update);
+    return { folderId: input.folderId, revision: revision + 1 };
+  });
+}
+
+export async function migrateLegacyNoteFolder(input: MigrateLegacyNoteFolderInput) {
+  const folderRef = doc(db, "noteFolders", input.folderId);
+
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(folderRef);
+    if (!snapshot.exists()) {
+      throw new Error("마이그레이션할 폴더를 찾을 수 없습니다.");
+    }
+
+    const folder = snapshot.data() as NoteFolderDocument;
+    if (folder.ownerUid !== input.ownerUid) {
+      throw new Error("이 폴더를 변경할 권한이 없습니다.");
+    }
+    if (folder.encryptedName && folder.wrappedKey) {
+      return { folderId: input.folderId, revision: folder.revision ?? 1 };
+    }
+    if (folder.name !== input.expectedName) {
+      throw new Error("다른 탭에서 폴더 이름이 변경되었습니다. 다시 잠금 해제한 뒤 마이그레이션해주세요.");
+    }
+
+    transaction.update(folderRef, {
+      name: "암호화 폴더",
+      encryptedName: input.encryptedName,
+      wrappedKey: input.wrappedKey,
+      parentId: input.parentId,
+      order: input.order,
+      revision: 1,
+      updatedAt: serverTimestamp()
+    });
+    return { folderId: input.folderId, revision: 1 };
   });
 }
 

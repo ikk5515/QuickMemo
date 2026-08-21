@@ -3,6 +3,7 @@ import {
   NoteRevisionConflictError,
   abortSecureShareCopyingNote,
   activateSecureShareCopyingNote,
+  createEncryptedNoteFolder,
   createNoteAttachment,
   createRevisionedEncryptedNote,
   createSecureShareCopyingNote,
@@ -10,13 +11,16 @@ import {
   getNoteRevisionState,
   getVisibleNotesByIds,
   listStaleSecureShareCopyingNotes,
+  migrateLegacyNoteFolder,
   purgeNote,
   restoreRevisionedNote,
   subscribeMyNoteStates,
   subscribeNoteHistory,
   subscribeVisibleNotes,
   updateRevisionedEncryptedNote,
-  updateRevisionedNoteAccess
+  updateEncryptedNoteFolder,
+  updateRevisionedNoteAccess,
+  updateRevisionedNoteFolder
 } from "./notes";
 
 const mocks = vi.hoisted(() => {
@@ -440,6 +444,18 @@ describe("revision-aware note persistence", () => {
   });
 
   it("increments access changes and records the normalized participant set", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        folderId: "folder-a",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        revision: 4,
+        type: "personal",
+        wrappedKeys: { "user-a": wrappedKey }
+      }),
+      exists: () => true,
+      id: "note-a"
+    });
     await updateRevisionedNoteAccess({
       expectedRevision: 4,
       folderId: "ignored-for-shared",
@@ -462,10 +478,140 @@ describe("revision-aware note persistence", () => {
       expect.anything(),
       expect.objectContaining({
         action: "share",
+        changedFields: ["participants", "folder"],
         readerUids: ["user-a", "user-b"],
         revision: 5
       })
     );
+  });
+
+  it("moves an owned personal note with a revisioned folder history record", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        folderId: null,
+        ownerUid: "user-a",
+        revision: 4,
+        type: "personal"
+      }),
+      exists: () => true,
+      id: "note-a"
+    });
+
+    await updateRevisionedNoteFolder({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+
+    expect(mocks.transaction.update).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ folderId: "folder-a", revision: 5 })
+    );
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "share",
+        changedFields: ["folder"],
+        readerUids: ["user-a"],
+        revision: 5
+      })
+    );
+  });
+
+  it("rejects encrypted folder creation below an unmigrated legacy parent", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({ ownerUid: "user-a", name: "평문 폴더" }),
+      exists: () => true,
+      id: "legacy-parent"
+    });
+
+    await expect(createEncryptedNoteFolder({
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      order: 1,
+      ownerUid: "user-a",
+      parentId: "legacy-parent",
+      wrappedKey
+    })).rejects.toThrow("먼저 암호화");
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("rejects a folder move when the transaction ancestor chain reaches itself", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          encryptedName: encryptedPayload,
+          ownerUid: "user-a",
+          parentId: null,
+          revision: 1,
+          wrappedKey
+        }),
+        exists: () => true,
+        id: "folder-a"
+      })
+      .mockResolvedValueOnce({
+        data: () => ({
+          encryptedName: encryptedPayload,
+          ownerUid: "user-a",
+          parentId: "folder-a",
+          revision: 1,
+          wrappedKey
+        }),
+        exists: () => true,
+        id: "folder-b"
+      });
+
+    await expect(updateEncryptedNoteFolder({
+      expectedRevision: 1,
+      folderId: "folder-a",
+      ownerUid: "user-a",
+      parentId: "folder-b"
+    })).rejects.toThrow("하위 폴더");
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy folder migration idempotent but rejects a stale plaintext name", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        encryptedName: encryptedPayload,
+        name: "암호화 폴더",
+        ownerUid: "user-a",
+        revision: 2,
+        wrappedKey
+      }),
+      exists: () => true,
+      id: "folder-a"
+    });
+    await expect(migrateLegacyNoteFolder({
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      expectedName: "이전 이름",
+      folderId: "folder-a",
+      order: 1,
+      ownerUid: "user-a",
+      parentId: null,
+      wrappedKey
+    })).resolves.toEqual({ folderId: "folder-a", revision: 2 });
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({ name: "다른 탭 이름", ownerUid: "user-a" }),
+      exists: () => true,
+      id: "folder-b"
+    });
+    await expect(migrateLegacyNoteFolder({
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      expectedName: "이전 이름",
+      folderId: "folder-b",
+      order: 2,
+      ownerUid: "user-a",
+      parentId: null,
+      wrappedKey
+    })).rejects.toThrow("다른 탭");
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
   });
 
   it("soft-deletes without reading or deleting attachment documents", async () => {
