@@ -65,13 +65,13 @@ export default function HomeRedirectPage() {
 
   if (!preferencesResolved) {
     return (
-      <AppShell>
+      <main className="app-frame workspace-route-gate">
         <section className="workspace-route-state" role="status" aria-live="polite">
           <Loader2 className="spin" size={22} aria-hidden="true" />
           <h1>작업공간을 여는 중입니다</h1>
           <p>기본 화면과 접근 권한을 확인하고 있습니다.</p>
         </section>
-      </AppShell>
+      </main>
     );
   }
 

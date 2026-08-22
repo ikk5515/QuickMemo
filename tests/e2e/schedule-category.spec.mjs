@@ -245,6 +245,15 @@ test("schedule categories filter every primary view and persist the saved defaul
   await createTask(page, additionalWorkTitle, "work");
   await createTask(page, additionalPersonalTitle, "personal");
 
+  await page.locator(".task-open-button").filter({ hasText: additionalWorkTitle }).click();
+  const taskDialog = page.getByRole("dialog", { name: additionalWorkTitle });
+  await taskDialog.getByRole("button", { name: "삭제", exact: true }).click();
+  const deleteDialog = page.getByRole("alertdialog", { name: "이 일정을 삭제할까요?" });
+  await expect(deleteDialog).toBeVisible();
+  await deleteDialog.getByRole("button", { name: "취소", exact: true }).click();
+  await expect(deleteDialog).toBeHidden();
+  await taskDialog.getByRole("button", { name: "닫기", exact: true }).click();
+
   await expect(page.getByRole("button", { name: "전체 일정 보기" })).toHaveAttribute(
     "aria-pressed",
     "true"
@@ -279,7 +288,9 @@ test("schedule categories filter every primary view and persist the saved defaul
   await expect(page.locator(".calendar-agenda").getByText(personalTitle, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "개인 일정 보기" }).click();
 
-  await page.getByRole("button", { name: "설정" }).click();
+  await page.getByRole("button", { name: "작업공간 메뉴 열기" }).click();
+  const workspaceDrawer = page.getByRole("dialog", { name: "QuickMemo 작업공간 메뉴" });
+  await workspaceDrawer.getByRole("button", { name: "설정", exact: true }).click();
   const settingsDialog = page.getByRole("dialog", { name: "설정" });
   await settingsDialog.getByLabel("일정 기본 분류 보기").selectOption("personal");
   await settingsDialog.getByRole("button", { name: "저장", exact: true }).click();

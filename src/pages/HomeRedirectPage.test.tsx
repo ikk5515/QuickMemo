@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,11 +16,12 @@ const state = vi.hoisted(() => ({
     defaultHome: "notes",
     scheduleDefaultView: "todo"
   } as HomePreferences,
+  preferencesRequest: null as Promise<HomePreferences> | null,
   profile: null as UserProfile | null
 }));
 
 vi.mock("../components/AppShell", () => ({
-  AppShell: ({ children }: PropsWithChildren) => <div>{children}</div>
+  AppShell: ({ children }: PropsWithChildren) => <div data-testid="app-shell">{children}</div>
 }));
 
 vi.mock("../context/AuthContext", () => ({
@@ -32,7 +33,7 @@ vi.mock("../services/userPreferences", async (importOriginal) => {
   return {
     ...actual,
     getCachedUserPreferences: () => state.cachedPreferences,
-    getUserPreferences: vi.fn(async () => state.preferences)
+    getUserPreferences: vi.fn(() => state.preferencesRequest ?? Promise.resolve(state.preferences))
   };
 });
 
@@ -73,6 +74,7 @@ describe("HomeRedirectPage feature access", () => {
   beforeEach(() => {
     state.cachedPreferences = { defaultHome: "notes", scheduleDefaultView: "todo" };
     state.preferences = { defaultHome: "notes", scheduleDefaultView: "todo" };
+    state.preferencesRequest = null;
     state.profile = profile();
   });
 
@@ -100,6 +102,24 @@ describe("HomeRedirectPage feature access", () => {
     renderHome();
 
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/schedule?view=matrix"));
+  });
+
+  it("keeps workspace navigation unavailable until remote preferences resolve", async () => {
+    let resolvePreferences!: (preferences: HomePreferences) => void;
+    state.cachedPreferences = null;
+    state.preferencesRequest = new Promise((resolve) => {
+      resolvePreferences = resolve;
+    });
+
+    renderHome();
+
+    expect(screen.getByRole("status")).toHaveTextContent("작업공간을 여는 중입니다");
+    expect(screen.queryByTestId("app-shell")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolvePreferences(state.preferences);
+    });
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/app?panel=files"));
   });
 
   it("shows a clear non-destructive empty state when all features are denied", () => {

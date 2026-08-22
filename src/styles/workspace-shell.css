@@ -1,3 +1,8 @@
+.app-frame-workspace,
+.app-frame-vault {
+  isolation: isolate;
+}
+
 .app-frame-workspace {
   --workspace-accent: #7c6ccf;
   --workspace-accent-soft: color-mix(in srgb, var(--workspace-accent) 16%, transparent);
@@ -198,6 +203,17 @@
   text-align: center;
 }
 
+.workspace-route-gate {
+  background: var(--color-page-bg);
+  display: grid;
+  min-height: 100svh;
+  place-items: center;
+}
+
+.workspace-route-gate .workspace-route-state {
+  min-height: auto;
+}
+
 .workspace-route-state h1,
 .workspace-route-state p {
   margin: 0;
@@ -362,8 +378,8 @@
   z-index: 80;
 }
 
-.app-frame-workspace > .modal-backdrop,
-.app-frame-vault > .modal-backdrop {
+.app-frame-workspace .modal-backdrop,
+.app-frame-vault .modal-backdrop {
   z-index: 110;
 }
 

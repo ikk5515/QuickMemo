@@ -123,6 +123,7 @@ export async function loginRosterUser(page, user, diagnostics) {
 export async function loginDirectly(page, user, diagnostics) {
   await page.goto("/login");
   await loginRosterUser(page, user, diagnostics);
+  await expect(page).toHaveURL((url) => url.pathname !== "/login" && url.pathname !== "/home");
   await expect(page.locator(".app-frame")).toBeVisible();
 }
 
