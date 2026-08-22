@@ -212,8 +212,33 @@ describe("ForceGraphRenderer", () => {
       />
     );
 
-    expect(capturedGraph.current?.warmupTicks).toBe(70);
+    expect(capturedGraph.current?.warmupTicks).toBe(48);
     expect(capturedGraph.current?.cooldownTicks).toBe(0);
+  });
+
+  it("applies large-graph keyboard navigation without overlapping canvas transitions", () => {
+    const rendererRef = createRef<GraphRendererHandle>();
+    const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `node-${index}`,
+      kind: "note",
+      label: `Node ${index}`
+    }));
+
+    render(
+      <ForceGraphRenderer
+        edges={[]}
+        nodes={nodes}
+        onNodeOpen={vi.fn()}
+        ref={rendererRef}
+        settings={createDefaultGlobalGraphSettings()}
+      />
+    );
+
+    act(() => rendererRef.current?.panBy(32, -12));
+    expect(graphMethodState.centerAtCalls).toContainEqual({ duration: 0, x: 32, y: -12 });
+
+    act(() => rendererRef.current?.zoomBy(1.25));
+    expect(graphMethodState.zoomCalls).toContainEqual({ duration: 0, value: 1.25 });
   });
 
   it("restores an initial viewport without relying on simulated node coordinates", () => {

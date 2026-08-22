@@ -55,6 +55,11 @@ interface SuppressedNodeClick {
 }
 
 const LONG_PRESS_CLICK_SUPPRESSION_MS = 1_000;
+const LARGE_GRAPH_NODE_THRESHOLD = 5_000;
+// A 48-tick prewarm leaves the large-graph simulation below 0.06 alpha with
+// the matching decay below. That is visually settled enough to navigate while
+// avoiding a long, synchronous 70-tick block before the first canvas paint.
+const LARGE_GRAPH_WARMUP_TICKS = 48;
 
 interface ConfigurableForce {
   distance?: (value: number) => unknown;
@@ -183,6 +188,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     const interactionActiveRef = useRef(false);
     const interactionIdleTimerRef = useRef<number | null>(null);
     const lastViewportRef = useRef<GraphViewport | null>(null);
+    const reconciledNodesInputRef = useRef(nodes);
     const readyNotifiedRef = useRef(false);
     const longPressStartRef = useRef<{ clientX: number; clientY: number } | null>(null);
     const longPressTimerRef = useRef<number | null>(null);
@@ -195,8 +201,16 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     const initialCenterY = initialViewport?.centerY;
     const initialZoom = initialViewport?.zoom;
     const graphSizeReady = width > 0 && height > 0;
+    const largeGraph = nodes.length >= LARGE_GRAPH_NODE_THRESHOLD;
 
     useLayoutEffect(() => {
+      // The lazy state initializer already copied this exact input. Avoid a
+      // redundant 5k-node Map/allocation and synchronous mount rerender before
+      // the host-size effect is allowed to mount the canvas.
+      if (reconciledNodesInputRef.current === nodes) {
+        return;
+      }
+      reconciledNodesInputRef.current = nodes;
       setRenderNodes((current) => {
         const previousNodes = new Map(current.map((node) => [node.id, node]));
         return nodes.map((node) => {
@@ -332,7 +346,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         });
       },
       fitView() {
-        forceGraphRef.current?.zoomToFit(reducedMotion ? 0 : 300, 48);
+        forceGraphRef.current?.zoomToFit(reducedMotion || largeGraph ? 0 : 300, 48);
       },
       panBy(deltaX, deltaY) {
         const graph = forceGraphRef.current;
@@ -347,7 +361,11 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
           centerY: center.y + deltaY / zoom,
           zoom
         };
-        graph.centerAt(next.centerX, next.centerY, reducedMotion ? 0 : 120);
+        // Repeated keyboard input arrives faster than the regular transition.
+        // On a 5k/10k graph, overlapping transitions otherwise redraw every
+        // node and edge continuously. Apply each keyboard step atomically so
+        // the canvas stays responsive without hiding any graph data.
+        graph.centerAt(next.centerX, next.centerY, reducedMotion || largeGraph ? 0 : 120);
         emitViewport(next);
       },
       zoomBy(factor) {
@@ -361,11 +379,11 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
           GRAPH_SETTING_RANGES.zoom.min,
           GRAPH_SETTING_RANGES.zoom.max
         );
-        graph.zoom(nextZoom, reducedMotion ? 0 : 180);
+        graph.zoom(nextZoom, reducedMotion || largeGraph ? 0 : 180);
         const center = graph.centerAt();
         emitViewport({ centerX: center.x, centerY: center.y, zoom: nextZoom });
       }
-    }), [emitViewport, markInteractionActive, reducedMotion]);
+    }), [emitViewport, largeGraph, markInteractionActive, reducedMotion]);
 
     function publicNode(node: RenderNode): GraphNode | undefined {
       return publicNodeById.get(node.id);
@@ -465,8 +483,8 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         {graphSizeReady ? <ForceGraph2D<RenderNode, RenderEdge>
           autoPauseRedraw
           backgroundColor="rgba(0,0,0,0)"
-          cooldownTicks={reducedMotion || nodes.length >= 5_000 ? 0 : 130}
-          d3AlphaDecay={nodes.length >= 5_000 ? 0.06 : 0.035}
+          cooldownTicks={reducedMotion || largeGraph ? 0 : 130}
+          d3AlphaDecay={largeGraph ? 0.06 : 0.035}
           enableNodeDrag
           graphData={graphData}
           height={height}
@@ -570,7 +588,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
           }}
           ref={forceGraphRef}
           showPointerCursor
-          warmupTicks={nodes.length >= 5_000 ? 70 : reducedMotion ? 80 : 0}
+          warmupTicks={largeGraph ? LARGE_GRAPH_WARMUP_TICKS : reducedMotion ? 80 : 0}
           width={width}
         /> : null}
       </div>
