@@ -13,4 +13,12 @@ describe("AuthContext session boundary", () => {
     expect(authContextSource).toContain("window.setTimeout");
     expect(authContextSource).toContain("firebaseSignOut(auth)");
   });
+
+  it("gives pending encrypted saves a bounded grace and treats wheel zoom as activity", () => {
+    expect(authContextSource).toContain("shouldDelayPrivateKeyAutoLock()");
+    expect(authContextSource).toContain("privateKeyAutoLockSaveGraceMs = 5_000");
+    expect(authContextSource).toContain("activityGeneration !== expectedActivityGeneration");
+    expect(authContextSource).toContain('window.addEventListener("wheel", refreshSessionFromActivity');
+    expect(authContextSource).toContain('window.removeEventListener("wheel", refreshSessionFromActivity');
+  });
 });

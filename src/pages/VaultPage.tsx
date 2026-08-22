@@ -236,6 +236,7 @@ import {
   type QuickSwitcherItem
 } from "../features/vault/navigation";
 import { previewTextFromHtml } from "../lib/editorContent";
+import { registerPrivateKeyAutoLockGuard } from "../lib/privateKeyAutoLockGuard";
 import {
   buildVaultPaths,
   createEncryptedVaultFolder,
@@ -411,6 +412,7 @@ const LazyVaultWebViewer = lazy(() => import("../features/vault/core/VaultWebVie
 
 const MOBILE_VAULT_MEDIA_QUERY = "(max-width: 760px)";
 const COMPACT_CALENDAR_MEDIA_QUERY = "(max-width: 420px)";
+const GRAPH_VIEWPORT_COMMIT_DELAY_MS = 240;
 const EMPTY_FRONTMATTER_PROPERTIES = Object.freeze({});
 const MOBILE_DRAWER_FOCUSABLE = [
   "button:not(:disabled)",
@@ -1200,6 +1202,35 @@ function workspaceStateForSave(input: {
   };
 }
 
+function sameGraphViewport(left: GraphViewport, right: GraphViewport) {
+  return left.centerX === right.centerX
+    && left.centerY === right.centerY
+    && left.zoom === right.zoom;
+}
+
+export function vaultWorkspaceWithGraphViewport(
+  workspace: VaultPersistedWorkspaceState,
+  scope: "global" | "local",
+  viewport: GraphViewport
+): VaultPersistedWorkspaceState {
+  const nextViewport = { ...viewport };
+  return scope === "global"
+    ? {
+        ...workspace,
+        globalGraph: {
+          ...workspace.globalGraph,
+          viewport: nextViewport
+        }
+      }
+    : {
+        ...workspace,
+        localGraph: {
+          ...workspace.localGraph,
+          viewport: nextViewport
+        }
+      };
+}
+
 function namedWorkspaceForEntryIds(
   workspace: PersistedNamedWorkspace,
   visibleEntryIds: ReadonlySet<string>
@@ -1556,6 +1587,8 @@ function UnlockedVaultPage({
   const workspaceRevisionRef = useRef<number | undefined>(undefined);
   const lastSavedWorkspaceRef = useRef("");
   const latestWorkspaceStateRef = useRef<VaultPersistedWorkspaceState>(createDefaultVaultWorkspaceState());
+  const globalViewportRef = useRef(globalViewport);
+  const localViewportRef = useRef(localViewport);
   const workspaceInteractionDuringLoadRef = useRef(false);
   const pendingWorkspaceStateRef = useRef<VaultPersistedWorkspaceState | null>(null);
   const renameEntryRef = useRef<(entryId: string, requestedTitle?: string) => Promise<void>>(async () => undefined);
@@ -1577,6 +1610,9 @@ function UnlockedVaultPage({
   const workspaceSaveGenerationRef = useRef(0);
   const workspaceSaveDebounceTimerRef = useRef<number | null>(null);
   const workspaceSaveRetryTimerRef = useRef<number | null>(null);
+  const globalViewportCommitTimerRef = useRef<number | null>(null);
+  const localViewportCommitTimerRef = useRef<number | null>(null);
+  const privateKeyAutoLockGuardRef = useRef<() => boolean>(() => false);
   const workspaceConflictPendingRef = useRef(false);
   const workspaceConflictRequestGenerationRef = useRef(0);
   const workspaceAccessScopeGenerationRef = useRef(0);
@@ -1620,6 +1656,122 @@ function UnlockedVaultPage({
     && currentServerReservationSignature !== null
     && currentServerReservationSignature === auditedServerReservationSignature;
   const previousOnlineRef = useRef(isOnline);
+  privateKeyAutoLockGuardRef.current = () => Boolean(
+    templateApplyBusyRef.current
+    || pathRewriteBusyRef.current
+    || vaultImportBusy
+    || entryMutationPromisesRef.current.size > 0
+    || Object.values(draftsRef.current).some((draft) => draft.dirty)
+    || globalViewportCommitTimerRef.current !== null
+    || localViewportCommitTimerRef.current !== null
+    || workspaceSaveDebounceTimerRef.current !== null
+    || workspaceSaveRetryTimerRef.current !== null
+    || workspaceConflictPendingRef.current
+    || workspaceSavePending
+    || (workspaceReady
+      && JSON.stringify(latestWorkspaceStateRef.current) !== lastSavedWorkspaceRef.current)
+  );
+  useEffect(() => registerPrivateKeyAutoLockGuard(
+    () => privateKeyAutoLockGuardRef.current()
+  ), []);
+  const cancelScheduledWorkspaceSave = useCallback(() => {
+    if (workspaceSaveDebounceTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveDebounceTimerRef.current);
+      workspaceSaveDebounceTimerRef.current = null;
+    }
+  }, []);
+  const commitPendingGraphViewports = useCallback(() => {
+    if (globalViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(globalViewportCommitTimerRef.current);
+      globalViewportCommitTimerRef.current = null;
+    }
+    if (localViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(localViewportCommitTimerRef.current);
+      localViewportCommitTimerRef.current = null;
+    }
+    setGlobalViewport((current) => sameGraphViewport(current, globalViewportRef.current)
+      ? current
+      : { ...globalViewportRef.current });
+    setLocalViewport((current) => sameGraphViewport(current, localViewportRef.current)
+      ? current
+      : { ...localViewportRef.current });
+  }, []);
+  const applyGlobalGraphViewport = useCallback((viewport: GraphViewport) => {
+    const latestViewport = { ...viewport };
+    const pendingCommit = globalViewportCommitTimerRef.current !== null;
+    if (!pendingCommit && sameGraphViewport(globalViewportRef.current, latestViewport)) return;
+    cancelScheduledWorkspaceSave();
+    if (globalViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(globalViewportCommitTimerRef.current);
+      globalViewportCommitTimerRef.current = null;
+    }
+    globalViewportRef.current = latestViewport;
+    latestWorkspaceStateRef.current = vaultWorkspaceWithGraphViewport(
+      latestWorkspaceStateRef.current,
+      "global",
+      latestViewport
+    );
+    setGlobalViewport(latestViewport);
+  }, [cancelScheduledWorkspaceSave]);
+  const applyLocalGraphViewport = useCallback((viewport: GraphViewport) => {
+    const latestViewport = { ...viewport };
+    const pendingCommit = localViewportCommitTimerRef.current !== null;
+    if (!pendingCommit && sameGraphViewport(localViewportRef.current, latestViewport)) return;
+    cancelScheduledWorkspaceSave();
+    if (localViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(localViewportCommitTimerRef.current);
+      localViewportCommitTimerRef.current = null;
+    }
+    localViewportRef.current = latestViewport;
+    latestWorkspaceStateRef.current = vaultWorkspaceWithGraphViewport(
+      latestWorkspaceStateRef.current,
+      "local",
+      latestViewport
+    );
+    setLocalViewport(latestViewport);
+  }, [cancelScheduledWorkspaceSave]);
+  const queueGlobalGraphViewport = useCallback((viewport: GraphViewport) => {
+    const latestViewport = { ...viewport };
+    const pendingCommit = globalViewportCommitTimerRef.current !== null;
+    if (!pendingCommit && sameGraphViewport(globalViewportRef.current, latestViewport)) return;
+    if (!sameGraphViewport(globalViewportRef.current, latestViewport)) {
+      globalViewportRef.current = latestViewport;
+      latestWorkspaceStateRef.current = vaultWorkspaceWithGraphViewport(
+        latestWorkspaceStateRef.current,
+        "global",
+        latestViewport
+      );
+    }
+    cancelScheduledWorkspaceSave();
+    if (globalViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(globalViewportCommitTimerRef.current);
+    }
+    globalViewportCommitTimerRef.current = window.setTimeout(() => {
+      globalViewportCommitTimerRef.current = null;
+      setGlobalViewport({ ...globalViewportRef.current });
+    }, GRAPH_VIEWPORT_COMMIT_DELAY_MS);
+  }, [cancelScheduledWorkspaceSave]);
+  const queueLocalGraphViewport = useCallback((viewport: GraphViewport) => {
+    const latestViewport = { ...viewport };
+    const pendingCommit = localViewportCommitTimerRef.current !== null;
+    if (!pendingCommit && sameGraphViewport(localViewportRef.current, latestViewport)) return;
+    if (!sameGraphViewport(localViewportRef.current, latestViewport)) {
+      localViewportRef.current = latestViewport;
+      latestWorkspaceStateRef.current = vaultWorkspaceWithGraphViewport(
+        latestWorkspaceStateRef.current,
+        "local",
+        latestViewport
+      );
+    }
+    cancelScheduledWorkspaceSave();
+    if (localViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(localViewportCommitTimerRef.current);
+    }
+    localViewportCommitTimerRef.current = window.setTimeout(() => {
+      localViewportCommitTimerRef.current = null;
+      setLocalViewport({ ...localViewportRef.current });
+    }, GRAPH_VIEWPORT_COMMIT_DELAY_MS);
+  }, [cancelScheduledWorkspaceSave]);
   const activeMobileDrawer = mobileLayout
     ? leftOpen ? "left" : rightOpen ? "right" : null
     : null;
@@ -1652,14 +1804,14 @@ function UnlockedVaultPage({
     expandedFolderIds,
     globalCollapsedSections,
     globalGraphSettings,
-    globalViewport,
+    globalViewport: globalViewportRef.current,
     bookmarks: vaultBookmarks,
     graphBookmarks,
     leftMode,
     leftOpen: mobileLayout ? desktopLeftOpenRef.current : leftOpen,
     localCollapsedSections,
     localGraphSettings,
-    localViewport,
+    localViewport: localViewportRef.current,
     namedWorkspaces,
     rightMode,
     rightOpen: mobileLayout ? desktopRightOpenRef.current : rightOpen,
@@ -1878,6 +2030,14 @@ function UnlockedVaultPage({
       window.clearTimeout(workspaceSaveRetryTimerRef.current);
       workspaceSaveRetryTimerRef.current = null;
     }
+    if (globalViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(globalViewportCommitTimerRef.current);
+      globalViewportCommitTimerRef.current = null;
+    }
+    if (localViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(localViewportCommitTimerRef.current);
+      localViewportCommitTimerRef.current = null;
+    }
     if (workspaceSaveDebounceTimerRef.current !== null) {
       window.clearTimeout(workspaceSaveDebounceTimerRef.current);
       workspaceSaveDebounceTimerRef.current = null;
@@ -1953,12 +2113,13 @@ function UnlockedVaultPage({
     setTemplatesIncludeDescendants(restored.plugins.templates.includeDescendants);
     setGlobalGraphSettings(restored.globalGraph.settings);
     setLocalGraphSettings(restored.localGraph.settings);
-    setGlobalViewport(restored.globalGraph.viewport);
-    setLocalViewport(restored.localGraph.viewport);
+    applyGlobalGraphViewport(restored.globalGraph.viewport);
+    applyLocalGraphViewport(restored.localGraph.viewport);
     setGlobalCollapsedSections(restored.globalGraph.collapsedSections);
     setLocalCollapsedSections(restored.localGraph.collapsedSections);
     setGraphBookmarks(restored.graphBookmarks);
     setNamedWorkspaces(restored.namedWorkspaces);
+    latestWorkspaceStateRef.current = restored;
     workspaceRevisionRef.current = revision;
     pendingWorkspaceStateRef.current = null;
     const restoredSerialization = JSON.stringify(restored);
@@ -1969,7 +2130,7 @@ function UnlockedVaultPage({
     workspaceConflictPendingRef.current = false;
     setWorkspaceConflict(null);
     setWorkspaceReady(true);
-  }, []);
+  }, [applyGlobalGraphViewport, applyLocalGraphViewport]);
 
   function keepCurrentWorkspaceAfterConflict() {
     if (!workspaceConflict) return;
@@ -1981,7 +2142,7 @@ function UnlockedVaultPage({
       : `remote-revision:${workspaceConflict.actualRevision}`;
     lastSavedWorkspaceRef.current = remoteSerialization;
     setLastSavedWorkspaceSerialization(remoteSerialization);
-    pendingWorkspaceStateRef.current = workspaceConflict.localState;
+    pendingWorkspaceStateRef.current = latestWorkspaceStateRef.current;
     setWorkspaceConflict(null);
     setWorkspaceReady(true);
     setWorkspaceSaveRetry((attempt) => attempt + 1);
@@ -2276,6 +2437,14 @@ function UnlockedVaultPage({
     if (workspaceSaveRetryTimerRef.current !== null) {
       window.clearTimeout(workspaceSaveRetryTimerRef.current);
       workspaceSaveRetryTimerRef.current = null;
+    }
+    if (globalViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(globalViewportCommitTimerRef.current);
+      globalViewportCommitTimerRef.current = null;
+    }
+    if (localViewportCommitTimerRef.current !== null) {
+      window.clearTimeout(localViewportCommitTimerRef.current);
+      localViewportCommitTimerRef.current = null;
     }
     if (workspaceSaveDebounceTimerRef.current !== null) {
       window.clearTimeout(workspaceSaveDebounceTimerRef.current);
@@ -3563,14 +3732,14 @@ function UnlockedVaultPage({
       expandedFolderIds,
       globalCollapsedSections,
       globalGraphSettings,
-      globalViewport,
+      globalViewport: globalViewportRef.current,
       bookmarks: vaultBookmarks,
       graphBookmarks,
       leftMode,
       leftOpen: mobileLayout ? desktopLeftOpenRef.current : leftOpen,
       localCollapsedSections,
       localGraphSettings,
-      localViewport,
+      localViewport: localViewportRef.current,
       namedWorkspaces,
       rightMode,
       rightOpen: mobileLayout ? desktopRightOpenRef.current : rightOpen,
@@ -4117,6 +4286,7 @@ function UnlockedVaultPage({
   }
 
   async function flushWorkspaceBeforeExit() {
+    commitPendingGraphViewports();
     if (!workspaceReady) {
       if (workspaceInteractionDuringLoadRef.current) {
         setError("서버 워크스페이스를 확인하는 중입니다. 현재 배치를 안전하게 비교한 뒤 이동해주세요.");
@@ -4129,6 +4299,7 @@ function UnlockedVaultPage({
       return false;
     }
 
+    cancelScheduledWorkspaceSave();
     const initialLatest = latestWorkspaceStateRef.current;
     if (!vaultWorkspaceStateFitsEncryptedDocument(initialLatest)) {
       setError("암호화 워크스페이스 상태가 안전 저장 크기를 초과해 화면 이동을 중단했습니다. 그래프 그룹 또는 북마크를 줄여주세요.");
@@ -4139,11 +4310,6 @@ function UnlockedVaultPage({
     if (!isOnline) {
       return window.confirm("오프라인이라 마지막 탭·패널 배치를 서버에 저장할 수 없습니다. 노트 편집본과 현재 배치는 이 세션에만 남습니다. 그래도 이동할까요?");
     }
-    if (workspaceSaveDebounceTimerRef.current !== null) {
-      window.clearTimeout(workspaceSaveDebounceTimerRef.current);
-      workspaceSaveDebounceTimerRef.current = null;
-    }
-
     const saveGeneration = workspaceSaveGenerationRef.current;
     try {
       const flushResult = await flushLatestWorkspaceState({
@@ -7109,7 +7275,7 @@ function UnlockedVaultPage({
       id: `${Date.now().toString(36)}-${random[0].toString(36)}${random[1].toString(36)}`,
       label: label.slice(0, 120),
       settings: globalGraphSettings,
-      viewport: globalViewport
+      viewport: globalViewportRef.current
     }].slice(-64));
     setStatus("그래프 설정과 화면 위치를 암호화 북마크에 추가했습니다.");
   }
@@ -7190,7 +7356,7 @@ function UnlockedVaultPage({
       return;
     }
     setGlobalGraphSettings(bookmark.settings);
-    setGlobalViewport(bookmark.viewport);
+    applyGlobalGraphViewport(bookmark.viewport);
     openGlobalGraph();
   }
 
@@ -7672,7 +7838,7 @@ function UnlockedVaultPage({
       const bookmark = graphBookmarks.find((candidate) => command.id === `graph-bookmark:${candidate.id}`);
       if (bookmark) {
         setGlobalGraphSettings(bookmark.settings);
-        setGlobalViewport(bookmark.viewport);
+        applyGlobalGraphViewport(bookmark.viewport);
         openGlobalGraph();
       }
       return;
@@ -8679,7 +8845,7 @@ function UnlockedVaultPage({
                   onNodeContextMenu={stableHandleGraphNodeContextMenu}
                   onNodeOpen={stableHandleGraphNodeOpen}
                   onSettingsChange={setGlobalGraphSettings}
-                  onViewportChange={setGlobalViewport}
+                  onViewportChange={queueGlobalGraphViewport}
                   settings={globalGraphSettings}
                 />
               </Suspense>
@@ -8997,7 +9163,7 @@ function UnlockedVaultPage({
                     onNodeContextMenu={stableHandleGraphNodeContextMenu}
                     onNodeOpen={stableHandleGraphNodeOpen}
                     onSettingsChange={setLocalGraphSettings}
-                    onViewportChange={setLocalViewport}
+                    onViewportChange={queueLocalGraphViewport}
                     settings={localGraphSettings}
                   />
                 </Suspense>

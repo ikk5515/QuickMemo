@@ -54,12 +54,72 @@ interface SuppressedNodeClick {
   nodeId: string;
 }
 
+interface DeferredViewport {
+  base: GraphViewport;
+  target: GraphViewport;
+}
+
+interface CanvasPresentationSnapshot {
+  canvas: HTMLCanvasElement;
+  transform: string;
+  transformOrigin: string;
+  transition: string;
+  willChange: string;
+}
+
 const LONG_PRESS_CLICK_SUPPRESSION_MS = 1_000;
 const LARGE_GRAPH_NODE_THRESHOLD = 5_000;
+const LARGE_GRAPH_VIEWPORT_COMMIT_DELAY_MS = 180;
+const LARGE_GRAPH_COMPOSITOR_TRANSITION_MS = 60;
 // A 48-tick prewarm leaves the large-graph simulation below 0.06 alpha with
 // the matching decay below. That is visually settled enough to navigate while
 // avoiding a long, synchronous 70-tick block before the first canvas paint.
 const LARGE_GRAPH_WARMUP_TICKS = 48;
+
+function viewportNearlyEqual(left: GraphViewport | null, right: GraphViewport) {
+  return Boolean(
+    left
+    && Math.abs(left.centerX - right.centerX) < 0.01
+    && Math.abs(left.centerY - right.centerY) < 0.01
+    && Math.abs(left.zoom - right.zoom) < 0.0001
+  );
+}
+
+function compositorTransform(base: GraphViewport, target: GraphViewport) {
+  const scale = target.zoom / base.zoom;
+  const translateX = (base.centerX - target.centerX) * target.zoom;
+  const translateY = (base.centerY - target.centerY) * target.zoom;
+  return {
+    css: `translate3d(${translateX}px, ${translateY}px, 0) scale(${scale})`,
+    scale,
+    translateX,
+    translateY
+  };
+}
+
+function applyCanvasPresentation(
+  snapshots: readonly CanvasPresentationSnapshot[],
+  transform: string,
+  reducedMotion: boolean
+) {
+  for (const snapshot of snapshots) {
+    snapshot.canvas.style.transformOrigin = "50% 50%";
+    snapshot.canvas.style.transition = reducedMotion
+      ? "none"
+      : `transform ${LARGE_GRAPH_COMPOSITOR_TRANSITION_MS}ms linear`;
+    snapshot.canvas.style.willChange = "transform";
+    snapshot.canvas.style.transform = transform;
+  }
+}
+
+function restoreCanvasPresentations(snapshots: readonly CanvasPresentationSnapshot[]) {
+  for (const snapshot of snapshots) {
+    snapshot.canvas.style.transform = snapshot.transform;
+    snapshot.canvas.style.transformOrigin = snapshot.transformOrigin;
+    snapshot.canvas.style.transition = snapshot.transition;
+    snapshot.canvas.style.willChange = snapshot.willChange;
+  }
+}
 
 interface ConfigurableForce {
   distance?: (value: number) => unknown;
@@ -184,6 +244,8 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     settings
   }, forwardedRef) {
     const hostRef = useRef<HTMLDivElement>(null);
+    const canvasPresentationRef = useRef<CanvasPresentationSnapshot[] | null>(null);
+    const deferredViewportRef = useRef<DeferredViewport | null>(null);
     const forceGraphRef = useRef<GraphMethods | undefined>(undefined);
     const hoveredNodeIdRef = useRef<string | null>(null);
     const interactionActiveRef = useRef(false);
@@ -192,9 +254,13 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     const programmaticViewportChangeRef = useRef(false);
     const reconciledNodesInputRef = useRef(nodes);
     const readyNotifiedRef = useRef(false);
+    const resetCompositorAfterRenderRef = useRef(false);
+    const restoredGraphSizeRef = useRef("");
+    const restoredViewportInputRef = useRef<GraphViewport | null>(null);
     const longPressStartRef = useRef<{ clientX: number; clientY: number } | null>(null);
     const longPressTimerRef = useRef<number | null>(null);
     const suppressedNodeClickRef = useRef<SuppressedNodeClick | null>(null);
+    const viewportCommitTimerRef = useRef<number | null>(null);
     const publicNodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
     const [renderNodes, setRenderNodes] = useState<RenderNode[]>(() => nodes.map((node) => ({ ...node })));
     const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
@@ -275,15 +341,6 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     }, [settings.common.centerForce, settings.common.linkDistance, settings.common.linkForce, settings.common.repelForce]);
 
     useEffect(() => {
-      const graph = forceGraphRef.current;
-      if (!graph || !graphSizeReady || initialCenterX === undefined || initialCenterY === undefined || initialZoom === undefined) {
-        return;
-      }
-      graph.centerAt(initialCenterX, initialCenterY, 0);
-      graph.zoom(clamp(initialZoom, GRAPH_SETTING_RANGES.zoom.min, GRAPH_SETTING_RANGES.zoom.max), 0);
-    }, [graphSizeReady, height, initialCenterX, initialCenterY, initialZoom, width]);
-
-    useEffect(() => {
       if (!graphSizeReady || readyNotifiedRef.current) return;
       readyNotifiedRef.current = true;
       onReady?.();
@@ -296,6 +353,10 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
       if (interactionIdleTimerRef.current !== null) {
         window.clearTimeout(interactionIdleTimerRef.current);
       }
+      if (viewportCommitTimerRef.current !== null) {
+        window.clearTimeout(viewportCommitTimerRef.current);
+      }
+      restoreCanvasPresentations(canvasPresentationRef.current ?? []);
     }, []);
 
     const markInteractionIdle = useCallback(() => {
@@ -336,20 +397,159 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
 
     const emitViewport = useCallback((next: GraphViewport) => {
       const previous = lastViewportRef.current;
-      if (
-        previous
-        && Math.abs(previous.centerX - next.centerX) < 0.01
-        && Math.abs(previous.centerY - next.centerY) < 0.01
-        && Math.abs(previous.zoom - next.zoom) < 0.0001
-      ) {
+      if (viewportNearlyEqual(previous, next)) {
         return;
       }
       lastViewportRef.current = next;
       onViewportChange?.(next);
     }, [onViewportChange]);
 
+    const restoreCanvasPresentation = useCallback(() => {
+      restoreCanvasPresentations(canvasPresentationRef.current ?? []);
+      canvasPresentationRef.current = null;
+      hostRef.current?.removeAttribute("data-compositor-navigation");
+    }, []);
+
+    const commitDeferredViewport = useCallback(() => {
+      if (viewportCommitTimerRef.current !== null) {
+        window.clearTimeout(viewportCommitTimerRef.current);
+        viewportCommitTimerRef.current = null;
+      }
+      const pending = deferredViewportRef.current;
+      if (!pending) {
+        return false;
+      }
+      deferredViewportRef.current = null;
+      const graph = forceGraphRef.current;
+      if (!graph) {
+        restoreCanvasPresentation();
+        markInteractionIdle();
+        return false;
+      }
+
+      // Keep the composited bitmap in place until force-graph has painted the
+      // exact target viewport. onRenderFramePost then removes the CSS transform
+      // in the same frame, avoiding a flash of the previous viewport.
+      resetCompositorAfterRenderRef.current = true;
+      markInteractionIdle();
+      programmaticViewportChangeRef.current = true;
+      try {
+        graph.centerAt(pending.target.centerX, pending.target.centerY, 0);
+        graph.zoom(pending.target.zoom, 0);
+      } finally {
+        programmaticViewportChangeRef.current = false;
+      }
+      return true;
+    }, [markInteractionIdle, restoreCanvasPresentation]);
+
+    const flushDeferredViewportForDirectInput = useCallback(() => {
+      if (!commitDeferredViewport()) {
+        return;
+      }
+
+      // Capture runs before react-force-graph's own wheel/pointer handler. The
+      // exact D3 viewport is already committed synchronously, so remove the CSS
+      // presentation in the same task as well. The browser cannot paint between
+      // these statements, and the downstream handler therefore measures the
+      // untransformed canvas bounds instead of applying its anchor twice.
+      resetCompositorAfterRenderRef.current = false;
+      restoreCanvasPresentation();
+    }, [commitDeferredViewport, restoreCanvasPresentation]);
+
+    const stageDeferredViewport = useCallback((next: GraphViewport) => {
+      const graph = forceGraphRef.current;
+      const host = hostRef.current;
+      const canvas = host?.querySelector("canvas");
+      if (!largeGraph || !graph || !host || !(canvas instanceof HTMLCanvasElement)) {
+        return false;
+      }
+
+      const current = deferredViewportRef.current;
+      const graphCenter = current ? null : graph.centerAt();
+      const base = current?.base ?? {
+        centerX: graphCenter?.x ?? 0,
+        centerY: graphCenter?.y ?? 0,
+        zoom: graph.zoom() || 1
+      };
+      const transform = compositorTransform(base, next);
+      deferredViewportRef.current = { base, target: next };
+      if (!canvasPresentationRef.current) {
+        canvasPresentationRef.current = [...host.querySelectorAll("canvas")].map((candidate) => ({
+          canvas: candidate,
+          transform: candidate.style.transform,
+          transformOrigin: candidate.style.transformOrigin,
+          transition: candidate.style.transition,
+          willChange: candidate.style.willChange
+        }));
+      }
+      applyCanvasPresentation(canvasPresentationRef.current, transform.css, reducedMotion);
+      host.dataset.compositorNavigation = "true";
+      if (viewportCommitTimerRef.current !== null) {
+        window.clearTimeout(viewportCommitTimerRef.current);
+      }
+      viewportCommitTimerRef.current = window.setTimeout(
+        commitDeferredViewport,
+        LARGE_GRAPH_VIEWPORT_COMMIT_DELAY_MS
+      );
+
+      // Do not let a long held key expose an unpainted region or excessively
+      // scale the cached bitmap. Ordinary bursts stay compositor-only; larger
+      // moves settle to a sharp Canvas and begin a fresh burst.
+      if (
+        Math.abs(transform.translateX) > width * 0.35
+        || Math.abs(transform.translateY) > height * 0.35
+        || transform.scale < 0.7
+        || transform.scale > 1.4
+      ) {
+        commitDeferredViewport();
+      }
+      return true;
+    }, [commitDeferredViewport, height, largeGraph, reducedMotion, width]);
+
+    useLayoutEffect(() => {
+      if (deferredViewportRef.current) {
+        commitDeferredViewport();
+      }
+    }, [commitDeferredViewport, graphData, height, width]);
+
+    useEffect(() => {
+      const graph = forceGraphRef.current;
+      if (!graph || !graphSizeReady || initialCenterX === undefined || initialCenterY === undefined || initialZoom === undefined) {
+        return;
+      }
+      const next = {
+        centerX: initialCenterX,
+        centerY: initialCenterY,
+        zoom: clamp(initialZoom, GRAPH_SETTING_RANGES.zoom.min, GRAPH_SETTING_RANGES.zoom.max)
+      };
+      const graphSizeKey = `${width}:${height}`;
+      const sizeChanged = restoredGraphSizeRef.current !== graphSizeKey;
+      const inputChanged = !viewportNearlyEqual(restoredViewportInputRef.current, next);
+      restoredGraphSizeRef.current = graphSizeKey;
+      restoredViewportInputRef.current = next;
+      const target = inputChanged ? next : lastViewportRef.current ?? next;
+      if (!sizeChanged && viewportNearlyEqual(lastViewportRef.current, target)) {
+        return;
+      }
+      if (deferredViewportRef.current) {
+        commitDeferredViewport();
+      }
+      programmaticViewportChangeRef.current = true;
+      try {
+        graph.centerAt(target.centerX, target.centerY, 0);
+        graph.zoom(target.zoom, 0);
+      } finally {
+        programmaticViewportChangeRef.current = false;
+      }
+      lastViewportRef.current = target;
+    }, [commitDeferredViewport, graphSizeReady, height, initialCenterX, initialCenterY, initialZoom, width]);
+
     useImperativeHandle(forwardedRef, () => ({
       async copyImage() {
+        const committed = commitDeferredViewport();
+        if (committed) {
+          await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+        }
         const canvas = hostRef.current?.querySelector("canvas");
         if (!canvas || typeof canvas.toBlob !== "function") {
           return null;
@@ -363,6 +563,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         });
       },
       fitView() {
+        commitDeferredViewport();
         forceGraphRef.current?.zoomToFit(reducedMotion || largeGraph ? 0 : 300, 48);
       },
       panBy(deltaX, deltaY) {
@@ -370,14 +571,27 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         if (!graph) {
           return;
         }
-        markInteractionActive(reducedMotion ? 50 : 220, true);
-        const center = graph.centerAt();
-        const zoom = graph.zoom() || 1;
+        const virtualViewport = deferredViewportRef.current?.target;
+        const graphCenter = virtualViewport ? null : graph.centerAt();
+        const current = virtualViewport ?? {
+          centerX: graphCenter?.x ?? 0,
+          centerY: graphCenter?.y ?? 0,
+          zoom: graph.zoom() || 1
+        };
+        const zoom = current.zoom;
         const next = {
-          centerX: center.x + deltaX / zoom,
-          centerY: center.y + deltaY / zoom,
+          centerX: current.centerX + deltaX / zoom,
+          centerY: current.centerY + deltaY / zoom,
           zoom
         };
+        if (largeGraph) {
+          markInteractionActive(undefined, true);
+          if (stageDeferredViewport(next)) {
+            emitViewport(next);
+            return;
+          }
+        }
+        markInteractionActive(reducedMotion ? 50 : 220, true);
         // Repeated keyboard input arrives faster than the regular transition.
         // On a 5k/10k graph, overlapping transitions otherwise redraw every
         // node and edge continuously. Apply each keyboard step atomically so
@@ -395,22 +609,43 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         if (!graph) {
           return;
         }
-        markInteractionActive(reducedMotion ? 50 : 260, true);
+        const virtualViewport = deferredViewportRef.current?.target;
+        const currentZoom = virtualViewport?.zoom ?? graph.zoom();
         const nextZoom = clamp(
-          graph.zoom() * factor,
+          currentZoom * factor,
           GRAPH_SETTING_RANGES.zoom.min,
           GRAPH_SETTING_RANGES.zoom.max
         );
+        const graphCenter = virtualViewport ? null : graph.centerAt();
+        const next = {
+          centerX: virtualViewport?.centerX ?? graphCenter?.x ?? 0,
+          centerY: virtualViewport?.centerY ?? graphCenter?.y ?? 0,
+          zoom: nextZoom
+        };
+        if (largeGraph) {
+          markInteractionActive(undefined, true);
+          if (stageDeferredViewport(next)) {
+            emitViewport(next);
+            return;
+          }
+        }
+        markInteractionActive(reducedMotion ? 50 : 260, true);
         programmaticViewportChangeRef.current = true;
         try {
           graph.zoom(nextZoom, reducedMotion || largeGraph ? 0 : 180);
         } finally {
           programmaticViewportChangeRef.current = false;
         }
-        const center = graph.centerAt();
-        emitViewport({ centerX: center.x, centerY: center.y, zoom: nextZoom });
+        emitViewport(next);
       }
-    }), [emitViewport, largeGraph, markInteractionActive, reducedMotion]);
+    }), [
+      commitDeferredViewport,
+      emitViewport,
+      largeGraph,
+      markInteractionActive,
+      reducedMotion,
+      stageDeferredViewport
+    ]);
 
     function publicNode(node: RenderNode): GraphNode | undefined {
       return publicNodeById.get(node.id);
@@ -503,8 +738,11 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         className="qm-graph-renderer"
         onPointerCancel={clearLongPress}
         onPointerDown={beginLongPress}
+        onPointerDownCapture={flushDeferredViewportForDirectInput}
         onPointerMove={moveLongPress}
+        onPointerMoveCapture={flushDeferredViewportForDirectInput}
         onPointerUp={clearLongPress}
+        onWheelCapture={flushDeferredViewportForDirectInput}
         ref={hostRef}
       >
         {graphSizeReady ? <ForceGraph2D<RenderNode, RenderEdge>
@@ -606,6 +844,19 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
             const node = publicNode(renderedNode as RenderNode);
             if (node) {
               onNodeContextMenu?.(node, { clientX: event.clientX, clientY: event.clientY });
+            }
+          }}
+          onRenderFramePost={() => {
+            if (!resetCompositorAfterRenderRef.current) {
+              return;
+            }
+            resetCompositorAfterRenderRef.current = false;
+            // A very fast key repeat can begin the next compositor burst
+            // before this committed frame is painted. In that case the fresh
+            // transform is relative to the viewport being painted now and
+            // must remain until the newer target is committed.
+            if (!deferredViewportRef.current) {
+              restoreCanvasPresentation();
             }
           }}
           onZoom={() => {

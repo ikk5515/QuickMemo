@@ -1,4 +1,4 @@
-import { act, render } from "@testing-library/react";
+import { act, fireEvent, render } from "@testing-library/react";
 import { createRef, forwardRef, useImperativeHandle } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ForceGraphRenderer } from "./ForceGraphRenderer";
@@ -21,6 +21,7 @@ const capturedGraph = vi.hoisted(() => ({ current: null as null | {
   onNodeDragEnd?: (node: { fx?: number; fy?: number; id: string; x?: number; y?: number }) => void;
   onNodeHover?: (node: { id: string } | null) => void;
   onNodeRightClick?: (node: { id: string }, event: MouseEvent) => void;
+  onRenderFramePost?: () => void;
   onZoomEnd?: (transform: { k: number }) => void;
   warmupTicks?: number;
 } }));
@@ -30,7 +31,8 @@ const graphMethodState = vi.hoisted(() => ({
   forceAssignments: [] as Array<{ force: unknown; name: string }>,
   reheatCount: 0,
   zoom: 1,
-  zoomCalls: [] as Array<{ duration?: number; value: number }>
+  zoomCalls: [] as Array<{ duration?: number; value: number }>,
+  zoomToFitCalls: [] as Array<{ duration?: number; padding?: number }>
 }));
 
 vi.mock("react-force-graph-2d", () => ({
@@ -49,6 +51,7 @@ vi.mock("react-force-graph-2d", () => ({
       onNodeDragEnd?: (node: { fx?: number; fy?: number; id: string; x?: number; y?: number }) => void;
       onNodeHover?: (node: { id: string } | null) => void;
       onNodeRightClick?: (node: { id: string }, event: MouseEvent) => void;
+      onRenderFramePost?: () => void;
       onZoomEnd?: (transform: { k: number }) => void;
       warmupTicks?: number;
       height: number;
@@ -97,7 +100,9 @@ vi.mock("react-force-graph-2d", () => ({
         }
         return graphMethodState.zoom;
       },
-      zoomToFit: vi.fn()
+      zoomToFit: (duration?: number, padding?: number) => {
+        graphMethodState.zoomToFitCalls.push({ duration, padding });
+      }
     }));
     return <canvas data-testid="force-graph" />;
   })
@@ -113,6 +118,7 @@ beforeEach(() => {
   graphMethodState.reheatCount = 0;
   graphMethodState.zoom = 1;
   graphMethodState.zoomCalls.length = 0;
+  graphMethodState.zoomToFitCalls.length = 0;
 });
 
 describe("ForceGraphRenderer", () => {
@@ -222,10 +228,11 @@ describe("ForceGraphRenderer", () => {
     expect(capturedGraph.current?.cooldownTicks).toBe(0);
   });
 
-  it("applies large-graph keyboard navigation without overlapping canvas transitions", () => {
+  it("composites a large-graph keyboard burst and commits one exact canvas redraw at idle", () => {
     vi.useFakeTimers();
     const rendererRef = createRef<GraphRendererHandle>();
     const onHoveredNodeChange = vi.fn();
+    const onViewportChange = vi.fn();
     const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
       id: `node-${index}`,
       kind: "note",
@@ -233,34 +240,222 @@ describe("ForceGraphRenderer", () => {
     }));
 
     try {
-      render(
+      const view = render(
         <ForceGraphRenderer
           edges={[]}
           nodes={nodes}
           onHoveredNodeChange={onHoveredNodeChange}
           onNodeOpen={vi.fn()}
+          onViewportChange={onViewportChange}
           ref={rendererRef}
           settings={createDefaultGlobalGraphSettings()}
         />
       );
+      const canvas = view.getByTestId("force-graph");
+      const host = canvas.closest(".qm-graph-renderer");
 
       expect(capturedGraph.current?.enablePointerInteraction).toBe(true);
       expect(capturedGraph.current?.enableNodeDrag).toBe(true);
       act(() => capturedGraph.current?.onNodeHover?.({ id: "node-0" }));
       expect(onHoveredNodeChange).toHaveBeenLastCalledWith(expect.objectContaining({ id: "node-0" }));
       act(() => rendererRef.current?.panBy(32, -12));
-      expect(graphMethodState.centerAtCalls).toContainEqual({ duration: 0, x: 32, y: -12 });
+      expect(graphMethodState.centerAtCalls).toEqual([]);
+      expect(onViewportChange).toHaveBeenLastCalledWith({ centerX: 32, centerY: -12, zoom: 1 });
+      expect(canvas.style.transform).toBe("translate3d(-32px, 12px, 0) scale(1)");
+      expect(host).toHaveAttribute("data-compositor-navigation", "true");
       expect(capturedGraph.current?.enablePointerInteraction).toBe(false);
       expect(onHoveredNodeChange).toHaveBeenLastCalledWith(null);
 
       act(() => rendererRef.current?.zoomBy(1.25));
-      expect(graphMethodState.zoomCalls).toContainEqual({ duration: 0, value: 1.25 });
+      expect(graphMethodState.zoomCalls).toEqual([]);
+      expect(onViewportChange).toHaveBeenLastCalledWith({ centerX: 32, centerY: -12, zoom: 1.25 });
+      expect(canvas.style.transform).toBe("translate3d(-40px, 15px, 0) scale(1.25)");
       expect(capturedGraph.current?.enablePointerInteraction).toBe(false);
 
-      act(() => vi.advanceTimersByTime(260));
+      act(() => vi.advanceTimersByTime(179));
+      expect(graphMethodState.centerAtCalls).toEqual([]);
+      act(() => vi.advanceTimersByTime(1));
+      expect(graphMethodState.centerAtCalls).toEqual([{ duration: 0, x: 32, y: -12 }]);
+      expect(graphMethodState.zoomCalls).toEqual([{ duration: 0, value: 1.25 }]);
       expect(capturedGraph.current?.enablePointerInteraction).toBe(true);
+      expect(canvas.style.transform).toBe("translate3d(-40px, 15px, 0) scale(1.25)");
+
+      act(() => capturedGraph.current?.onRenderFramePost?.());
+      expect(canvas.style.transform).toBe("");
+      expect(host).not.toHaveAttribute("data-compositor-navigation");
+      act(() => capturedGraph.current?.onNodeHover?.({ id: "node-1" }));
+      expect(onHoveredNodeChange).toHaveBeenLastCalledWith(expect.objectContaining({ id: "node-1" }));
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("flushes deferred large-graph navigation before direct pointer input and fit-to-view", () => {
+    vi.useFakeTimers();
+    const rendererRef = createRef<GraphRendererHandle>();
+    const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `node-${index}`,
+      kind: "note",
+      label: `Node ${index}`
+    }));
+
+    try {
+      const view = render(
+        <ForceGraphRenderer
+          edges={[]}
+          nodes={nodes}
+          onNodeOpen={vi.fn()}
+          ref={rendererRef}
+          settings={createDefaultGlobalGraphSettings()}
+        />
+      );
+      const canvas = view.getByTestId("force-graph");
+
+      act(() => rendererRef.current?.panBy(32, 0));
+      expect(graphMethodState.centerAtCalls).toEqual([]);
+      fireEvent.pointerMove(canvas);
+      expect(graphMethodState.centerAtCalls).toEqual([{ duration: 0, x: 32, y: 0 }]);
+      expect(canvas.style.transform).toBe("");
+
+      act(() => rendererRef.current?.panBy(16, 0));
+      expect(canvas.style.transform).not.toBe("");
+      fireEvent.wheel(canvas, { deltaY: -100 });
+      expect(graphMethodState.centerAtCalls.at(-1)).toEqual({ duration: 0, x: 48, y: 0 });
+      expect(canvas.style.transform).toBe("");
+
+      act(() => rendererRef.current?.panBy(32, 0));
+      expect(canvas.style.transform).not.toBe("");
+      act(() => rendererRef.current?.fitView());
+      expect(graphMethodState.centerAtCalls.at(-1)).toEqual({ duration: 0, x: 80, y: 0 });
+      expect(graphMethodState.zoomToFitCalls).toEqual([{ duration: 0, padding: 48 }]);
+      act(() => capturedGraph.current?.onRenderFramePost?.());
+      expect(canvas.style.transform).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves a newer compositor burst when a safety commit paint arrives", () => {
+    vi.useFakeTimers();
+    const rendererRef = createRef<GraphRendererHandle>();
+    const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `node-${index}`,
+      kind: "note",
+      label: `Node ${index}`
+    }));
+
+    try {
+      const view = render(
+        <ForceGraphRenderer
+          edges={[]}
+          nodes={nodes}
+          onNodeOpen={vi.fn()}
+          ref={rendererRef}
+          settings={createDefaultGlobalGraphSettings()}
+        />
+      );
+      const canvas = view.getByTestId("force-graph");
+      const host = canvas.closest(".qm-graph-renderer");
+
+      act(() => rendererRef.current?.zoomBy(1.25));
+      act(() => rendererRef.current?.zoomBy(1.25));
+      expect(graphMethodState.zoomCalls.at(-1)).toEqual({ duration: 0, value: 1.5625 });
+
+      // Begin the next burst before force-graph paints the safety commit.
+      act(() => rendererRef.current?.zoomBy(1.25));
+      expect(canvas.style.transform).toBe("translate3d(0px, 0px, 0) scale(1.25)");
+      act(() => capturedGraph.current?.onRenderFramePost?.());
+      expect(canvas.style.transform).toBe("translate3d(0px, 0px, 0) scale(1.25)");
+      expect(host).toHaveAttribute("data-compositor-navigation", "true");
+
+      act(() => vi.advanceTimersByTime(180));
+      expect(graphMethodState.zoomCalls.at(-1)).toEqual({ duration: 0, value: 1.953125 });
+      act(() => capturedGraph.current?.onRenderFramePost?.());
+      expect(canvas.style.transform).toBe("");
+      expect(host).not.toHaveAttribute("data-compositor-navigation");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("restores compositor styles and cancels an outstanding viewport commit on unmount", () => {
+    vi.useFakeTimers();
+    const rendererRef = createRef<GraphRendererHandle>();
+    const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `node-${index}`,
+      kind: "note",
+      label: `Node ${index}`
+    }));
+
+    try {
+      const view = render(
+        <ForceGraphRenderer
+          edges={[]}
+          nodes={nodes}
+          onNodeOpen={vi.fn()}
+          ref={rendererRef}
+          settings={createDefaultGlobalGraphSettings()}
+        />
+      );
+      const canvas = view.getByTestId("force-graph");
+      act(() => rendererRef.current?.panBy(32, 0));
+      expect(canvas.style.transform).not.toBe("");
+
+      view.unmount();
+      expect(canvas.style.transform).toBe("");
+      act(() => vi.advanceTimersByTime(500));
+      expect(graphMethodState.centerAtCalls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("paints an exact deferred viewport before exporting a large graph image", async () => {
+    const rendererRef = createRef<GraphRendererHandle>();
+    const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `node-${index}`,
+      kind: "note",
+      label: `Node ${index}`
+    }));
+    const view = render(
+      <ForceGraphRenderer
+        edges={[]}
+        nodes={nodes}
+        onNodeOpen={vi.fn()}
+        ref={rendererRef}
+        settings={createDefaultGlobalGraphSettings()}
+      />
+    );
+    const canvas = view.getByTestId("force-graph") as HTMLCanvasElement;
+    const expectedBlob = new Blob(["graph"], { type: "image/png" });
+    const toBlob = vi.fn((callback: BlobCallback) => callback(expectedBlob));
+    Object.defineProperty(canvas, "toBlob", { configurable: true, value: toBlob });
+    let exportFrame: FrameRequestCallback | null = null;
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      exportFrame = callback;
+      return 1;
+    });
+
+    try {
+      act(() => rendererRef.current?.panBy(32, 0));
+      let exportPromise: Promise<Blob | null> | undefined;
+      act(() => {
+        exportPromise = rendererRef.current?.copyImage();
+      });
+      expect(graphMethodState.centerAtCalls.at(-1)).toEqual({ duration: 0, x: 32, y: 0 });
+      expect(toBlob).not.toHaveBeenCalled();
+      act(() => capturedGraph.current?.onRenderFramePost?.());
+      await act(async () => {
+        const callback = exportFrame;
+        exportFrame = null;
+        callback?.(0);
+        await Promise.resolve();
+      });
+      await expect(exportPromise).resolves.toBe(expectedBlob);
+      expect(toBlob).toHaveBeenCalledTimes(1);
+      expect(canvas.style.transform).toBe("");
+    } finally {
+      requestFrame.mockRestore();
     }
   });
 
@@ -280,6 +475,12 @@ describe("ForceGraphRenderer", () => {
   });
 
   it("measures a narrow host before mounting and reapplies the saved viewport after resize", () => {
+    const rendererRef = createRef<GraphRendererHandle>();
+    const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `node-${index}`,
+      kind: "note",
+      label: `Node ${index}`
+    }));
     let width = 276;
     let resizeCallback: ResizeObserverCallback | null = null;
     let resizeFrame: FrameRequestCallback | null = null;
@@ -316,8 +517,9 @@ describe("ForceGraphRenderer", () => {
         <ForceGraphRenderer
           edges={[]}
           initialViewport={{ centerX: 91, centerY: -17, zoom: 3.25 }}
-          nodes={[{ id: "a", kind: "note", label: "A" }]}
+          nodes={nodes}
           onNodeOpen={vi.fn()}
+          ref={rendererRef}
           settings={createDefaultGlobalGraphSettings()}
         />
       );
@@ -329,6 +531,8 @@ describe("ForceGraphRenderer", () => {
       expect(graphMethodState.zoomCalls).toContainEqual({ duration: 0, value: 3.25 });
 
       const centerCallsBeforeResize = graphMethodState.centerAtCalls.length;
+      act(() => rendererRef.current?.panBy(32.5, 0));
+      expect(graphMethodState.centerAtCalls.length).toBe(centerCallsBeforeResize);
       width = 346;
       act(() => {
         resizeCallback?.([], {} as ResizeObserver);
@@ -343,7 +547,7 @@ describe("ForceGraphRenderer", () => {
 
       expect(renderedSizes.at(-1)).toEqual({ height: 420, width: 346 });
       expect(graphMethodState.centerAtCalls.length).toBeGreaterThan(centerCallsBeforeResize);
-      expect(graphMethodState.centerAtCalls.at(-1)).toEqual({ duration: 0, x: 91, y: -17 });
+      expect(graphMethodState.centerAtCalls.at(-1)).toEqual({ duration: 0, x: 101, y: -17 });
       expect(graphMethodState.zoomCalls.at(-1)).toEqual({ duration: 0, value: 3.25 });
     } finally {
       rect.mockRestore();

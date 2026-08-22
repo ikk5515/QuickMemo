@@ -1,8 +1,9 @@
-import { act, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import type { User } from "firebase/auth";
 import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PublicRosterUser, UserKeyDocument, UserProfile } from "../types";
+import { registerPrivateKeyAutoLockGuard } from "../lib/privateKeyAutoLockGuard";
 import { AuthProvider, useAuth } from "./AuthContext";
 
 interface Deferred<T> {
@@ -486,6 +487,44 @@ describe("AuthProvider optimized login", () => {
 
     await waitFor(() => expect(mocks.deleteSessionPrivateKey).toHaveBeenCalledWith("user-a", 2));
     expect(currentAuth.privateKey).toBeNull();
+  });
+
+  it("keeps the key for a bounded save grace after wheel activity, then locks when work settles", async () => {
+    mocks.getUserProfile.mockResolvedValue(profileFor("user-a"));
+    mocks.getUserKeyDocument.mockResolvedValue(keyDocument);
+    mocks.unlockPrivateKeyWithFallback.mockResolvedValue(privateKey);
+    mocks.signInWithEmailAndPassword.mockImplementation(async () => {
+      mocks.auth.currentUser = userA;
+      mocks.emitAuthState(userA);
+      return { user: userA };
+    });
+    await renderAuthProvider();
+    await act(async () => {
+      await currentAuth.loginRosterUser(rosterFor("user-a"), "password");
+    });
+    expect(currentAuth.privateKey).toBe(privateKey);
+
+    let savePending = true;
+    const unregister = registerPrivateKeyAutoLockGuard(() => savePending);
+    vi.useFakeTimers();
+
+    try {
+      fireEvent.wheel(window, { deltaY: -120 });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      });
+      expect(currentAuth.privateKey).toBe(privateKey);
+
+      savePending = false;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(currentAuth.privateKey).toBeNull();
+      expect(mocks.deleteSessionPrivateKey).toHaveBeenCalledWith("user-a");
+    } finally {
+      unregister();
+      vi.useRealTimers();
+    }
   });
 
   it("does not create an app session for a different persisted Firebase user", async () => {
