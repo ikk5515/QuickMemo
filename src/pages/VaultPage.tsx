@@ -43,7 +43,7 @@ import {
   useState,
   useSyncExternalStore
 } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { UnlockPanel } from "../components/UnlockPanel";
@@ -566,8 +566,11 @@ function UnlockedVaultPage({
   privateKey: CryptoKey;
   profile: UserProfile;
 }) {
+  const location = useLocation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const requestedWorkspacePanel = searchParams.get("panel");
+  const requestedWorkspaceView = searchParams.get("view");
   const [rawNotes, setRawNotes] = useState<NoteSnapshot[]>([]);
   const [rawFolders, setRawFolders] = useState<NoteFolderSnapshot[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -996,6 +999,9 @@ function UnlockedVaultPage({
   ], [graphBookmarks]);
 
   useEffect(() => {
+    if (!workspaceReady || requestedWorkspaceView === "graph") {
+      return;
+    }
     const requestedEntryId = searchParams.get("entry");
     const firstEntry = requestedEntryId && notes.some((note) => note.id === requestedEntryId)
       ? notes.find((note) => note.id === requestedEntryId)
@@ -1006,7 +1012,7 @@ function UnlockedVaultPage({
     const tab = { id: `entry:${firstEntry.id}`, kind: "entry", entryId: firstEntry.id, label: entryLabel(firstEntry) } as const;
     setTabs([tab]);
     setActiveTabId(tab.id);
-  }, [notes, searchParams, tabs.length]);
+  }, [notes, requestedWorkspaceView, searchParams, tabs.length, workspaceReady]);
 
   useEffect(() => {
     setTabs((current) => current.map((tab) => {
@@ -1616,7 +1622,7 @@ function UnlockedVaultPage({
     }
   }
 
-  function openGlobalGraph() {
+  const openGlobalGraph = useCallback(() => {
     const tab: WorkspaceTab = { id: "global-graph", kind: "global-graph", label: "그래프 보기" };
     setTabs((current) => current.some((item) => item.id === tab.id) ? current : [...current, tab]);
     setActiveTabId(tab.id);
@@ -1624,7 +1630,29 @@ function UnlockedVaultPage({
       setLeftOpen(false);
       setRightOpen(false);
     }
-  }
+  }, [mobileLayout]);
+
+  useEffect(() => {
+    if (!workspaceReady) {
+      return;
+    }
+
+    if (requestedWorkspaceView === "graph") {
+      openGlobalGraph();
+      return;
+    }
+
+    if (requestedWorkspacePanel === "files" || requestedWorkspacePanel === "search") {
+      showLeftPanel(requestedWorkspacePanel);
+    }
+  }, [
+    location.key,
+    openGlobalGraph,
+    requestedWorkspacePanel,
+    requestedWorkspaceView,
+    showLeftPanel,
+    workspaceReady
+  ]);
 
   function closeTab(tabId: string) {
     const closingTab = tabs.find((tab) => tab.id === tabId);

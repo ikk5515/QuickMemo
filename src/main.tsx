@@ -6,6 +6,7 @@ import { AuthProvider } from "./context/AuthContext";
 import App from "./App";
 import { initializeThemePreference } from "./lib/theme";
 import "./styles.css";
+import "./styles/workspace-shell.css";
 
 initializeThemePreference();
 
