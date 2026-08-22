@@ -1,6 +1,10 @@
 import type { FrontmatterScalar, FrontmatterValue } from "../knowledge";
 
 const FRONTMATTER_KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
+const DATE_PROPERTY_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
+const DATETIME_PROPERTY_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:?\d{2})?$/u;
+
+export type VaultPropertyType = "checkbox" | "date" | "datetime" | "list" | "number" | "tags" | "text";
 
 export class UnsupportedFrontmatterPropertyError extends Error {
   constructor(message = "지원하지 않는 YAML 속성 구조입니다.") {
@@ -162,4 +166,61 @@ export function parsePropertyEditorValue(
     return null;
   }
   return rawValue;
+}
+
+export function inferVaultPropertyType(key: string, value: FrontmatterValue): VaultPropertyType {
+  const normalizedKey = key.trim().toLocaleLowerCase();
+  if (normalizedKey === "tags" || normalizedKey === "tag") return "tags";
+  if (Array.isArray(value)) return "list";
+  if (typeof value === "boolean") return "checkbox";
+  if (typeof value === "number") return "number";
+  if (typeof value === "string" && DATETIME_PROPERTY_PATTERN.test(value)) return "datetime";
+  if (typeof value === "string" && DATE_PROPERTY_PATTERN.test(value)) return "date";
+  return "text";
+}
+
+function validCalendarDate(value: string): boolean {
+  if (!DATE_PROPERTY_PATTERN.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
+}
+
+export function parseTypedPropertyEditorValue(
+  rawValue: string,
+  type: VaultPropertyType
+): FrontmatterValue {
+  const trimmed = rawValue.trim();
+  switch (type) {
+    case "checkbox": {
+      const normalized = trimmed.toLocaleLowerCase();
+      if (normalized !== "true" && normalized !== "false") {
+        throw new Error("체크박스 속성은 true 또는 false여야 합니다.");
+      }
+      return normalized === "true";
+    }
+    case "number": {
+      const value = Number(trimmed);
+      if (!trimmed || !Number.isFinite(value)) throw new Error("유효한 숫자를 입력해주세요.");
+      return value;
+    }
+    case "list": return trimmed
+      ? rawValue.split(",").map((item) => item.trim()).filter(Boolean)
+      : [];
+    case "tags": return trimmed
+      ? rawValue.split(",").map((item) => item.trim().replace(/^#/u, "")).filter(Boolean)
+      : [];
+    case "date":
+      if (!validCalendarDate(trimmed)) throw new Error("유효한 날짜를 입력해주세요.");
+      return trimmed;
+    case "datetime": {
+      if (!DATETIME_PROPERTY_PATTERN.test(trimmed) || !Number.isFinite(Date.parse(trimmed))) {
+        throw new Error("유효한 날짜와 시간을 입력해주세요.");
+      }
+      return trimmed;
+    }
+    case "text": return rawValue;
+  }
 }

@@ -1,10 +1,40 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MarkdownRenderer } from "./MarkdownRenderer";
+import { MAX_DATAVIEW_BLOCKS_PER_DOCUMENT, MarkdownRenderer } from "./MarkdownRenderer";
 
 afterEach(cleanup);
 
 describe("MarkdownRenderer", () => {
+  it("allows a bounded host renderer to handle an explicit code language", () => {
+    render(
+      <MarkdownRenderer
+        renderCodeBlock={(language, source) => language === "dataview"
+          ? <output data-testid="dataview">{source}</output>
+          : undefined}
+        source={'```dataview\nLIST\n```\n\n```unknown\nplain\n```'}
+      />
+    );
+    expect(screen.getByTestId("dataview")).toHaveTextContent("LIST");
+    expect(document.querySelector('code[data-language="unknown"]')).toHaveTextContent("plain");
+  });
+
+  it("limits executable Dataview blocks per document and preserves skipped code as inert text", () => {
+    const renderCodeBlock = vi.fn((language: string, source: string) => language === "dataview"
+      ? <output data-testid="dataview">{source}</output>
+      : undefined);
+    const source = Array.from(
+      { length: MAX_DATAVIEW_BLOCKS_PER_DOCUMENT + 1 },
+      (_, index) => `\`\`\`dataview\nLIST ${index}\n\`\`\``
+    ).join("\n\n");
+
+    const { container } = render(<MarkdownRenderer renderCodeBlock={renderCodeBlock} source={source} />);
+
+    expect(renderCodeBlock).toHaveBeenCalledTimes(MAX_DATAVIEW_BLOCKS_PER_DOCUMENT);
+    expect(screen.getAllByTestId("dataview")).toHaveLength(MAX_DATAVIEW_BLOCKS_PER_DOCUMENT);
+    expect(screen.getByText("Dataview 실행 한도에 도달했습니다.")).toBeInTheDocument();
+    expect(container.querySelectorAll(".qm-markdown-dataview-budget pre")).toHaveLength(1);
+    expect(container.querySelector("script")).toBeNull();
+  });
   it("renders raw HTML as inert text and refuses active link schemes", () => {
     const { container } = render(
       <MarkdownRenderer
@@ -48,6 +78,45 @@ describe("MarkdownRenderer", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "#Project/QuickMemo" }));
     expect(onTagClick.mock.calls[0][0]).toBe("Project/QuickMemo");
+  });
+
+  it("reports pointer and keyboard preview intent only for inert internal-link controls", () => {
+    const onLinkPreviewInteraction = vi.fn();
+    render(
+      <MarkdownRenderer
+        source="[[Folder/Note|Wiki]] [상대](../Note.md) [외부](https://example.com)"
+        onLinkPreviewInteraction={onLinkPreviewInteraction}
+      />
+    );
+
+    const wiki = screen.getByRole("button", { name: "Wiki" });
+    fireEvent.mouseEnter(wiki);
+    fireEvent.focus(wiki);
+    fireEvent.mouseLeave(wiki);
+    fireEvent.blur(wiki);
+
+    expect(onLinkPreviewInteraction).toHaveBeenCalledTimes(4);
+    expect(onLinkPreviewInteraction.mock.calls.map(([reference, interaction]) => ({
+      active: interaction.active,
+      anchor: interaction.anchor,
+      kind: reference.kind,
+      source: interaction.source
+    }))).toEqual([
+      { active: true, anchor: wiki, kind: "wikilink", source: "pointer" },
+      { active: true, anchor: wiki, kind: "wikilink", source: "focus" },
+      { active: false, anchor: wiki, kind: "wikilink", source: "pointer" },
+      { active: false, anchor: wiki, kind: "wikilink", source: "focus" }
+    ]);
+
+    const relative = screen.getByRole("button", { name: "상대" });
+    fireEvent.focus(relative);
+    expect(onLinkPreviewInteraction.mock.calls.at(-1)?.[0]).toMatchObject({
+      kind: "markdown-internal",
+      path: "../Note.md"
+    });
+
+    fireEvent.mouseEnter(screen.getByRole("link", { name: "외부" }));
+    expect(onLinkPreviewInteraction).toHaveBeenCalledTimes(5);
   });
 
   it("preserves literal tabs in source code and renders accessible tasks and tables", () => {

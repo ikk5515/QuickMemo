@@ -1,0 +1,50 @@
+.qm-kanban { height: 100%; min-height: 0; overflow: auto; padding: 14px; }
+.qm-kanban-warning, .qm-kanban-error { border: 1px solid var(--vault-warning, #b98a35); border-radius: 7px; margin: 8px; padding: 10px; }
+.qm-kanban-interop-toolbar { display: flex; justify-content: flex-end; margin: 0 0 10px; }
+.qm-kanban-interop-toolbar button, .qm-kanban-interop button { align-items: center; background: var(--vault-surface-muted); border: 1px solid var(--vault-border); border-radius: 6px; color: inherit; display: inline-flex; gap: 5px; justify-content: center; min-height: 34px; padding: 5px 9px; }
+.qm-kanban-interop-toolbar button:hover:not(:disabled), .qm-kanban-interop button:hover:not(:disabled) { background: var(--vault-hover); }
+.qm-kanban-interop { background: var(--vault-surface); border: 1px solid var(--vault-border); border-radius: 9px; display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 12px; max-width: 920px; padding: 12px; }
+.qm-kanban-interop-section { align-content: start; display: grid; gap: 8px; min-width: 0; }
+.qm-kanban-interop-section h3, .qm-kanban-interop-section p { margin: 0; }
+.qm-kanban-interop-section p { color: var(--vault-text-muted); font-size: 12px; }
+.qm-kanban-interop-section > label { display: grid; font-size: 12px; gap: 5px; }
+.qm-kanban-interop textarea { background: var(--vault-surface-muted); border: 1px solid var(--vault-border); border-radius: 6px; color: inherit; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; max-height: 280px; min-height: 118px; min-width: 0; padding: 8px; resize: vertical; width: 100%; }
+.qm-kanban-interop textarea:focus { border-color: var(--vault-accent); outline: 2px solid color-mix(in srgb, var(--vault-accent) 30%, transparent); outline-offset: 1px; }
+.qm-kanban-import-result { border-top: 1px solid var(--vault-border); display: grid; gap: 7px; padding-top: 8px; }
+.qm-kanban-import-result ul { margin: 0; max-height: 160px; overflow: auto; padding-left: 20px; }
+.qm-kanban-import-confirm { align-items: start; display: grid; gap: 7px; grid-template-columns: auto minmax(0, 1fr); }
+.qm-kanban-import-confirm input { height: 18px; margin: 0; min-width: 18px; width: 18px; }
+.qm-kanban-columns { align-items: flex-start; display: flex; gap: 12px; min-height: 100%; min-width: max-content; }
+.qm-kanban-column { background: var(--vault-surface-muted); border: 1px solid var(--vault-border); border-radius: 9px; display: grid; gap: 8px; padding: 8px; width: 280px; }
+.qm-kanban-column > header { align-items: center; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 6px; }
+.qm-kanban-column-move { display: inline-flex; }
+.qm-kanban-column > header input, .qm-kanban-column form input, .qm-kanban-card-content { background: transparent; border: 1px solid transparent; border-radius: 5px; color: inherit; font: inherit; min-width: 0; padding: 5px; }
+.qm-kanban-column > header input { font-weight: 650; }
+.qm-kanban-column > header input:focus, .qm-kanban-column form input:focus, .qm-kanban-card-content:focus { border-color: var(--vault-accent); outline: none; }
+.qm-kanban-column button { align-items: center; background: transparent; border: 0; border-radius: 5px; color: inherit; display: inline-flex; justify-content: center; min-height: 28px; min-width: 28px; }
+.qm-kanban-column button:hover:not(:disabled) { background: var(--vault-hover); }
+.qm-kanban-cards { display: grid; gap: 7px; min-height: 6px; }
+.qm-kanban-empty-drop { align-items: center; border: 1px dashed var(--vault-border); border-radius: 7px; color: var(--vault-text-muted); display: flex; justify-content: center; min-height: 64px; padding: 10px; text-align: center; }
+.qm-kanban-empty-drop[data-drag-over="true"] { background: color-mix(in srgb, var(--vault-accent) 14%, transparent); border-color: var(--vault-accent); color: var(--vault-text); }
+.qm-kanban-empty-drop[aria-disabled="true"] { opacity: 0.62; }
+.qm-kanban-card { align-items: center; background: var(--vault-surface); border: 1px solid var(--vault-border); border-radius: 7px; box-shadow: 0 1px 2px #0002; display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; padding: 6px; }
+.qm-kanban-handle { grid-column: 1; grid-row: 1; }
+.qm-kanban-card > input[type="checkbox"] { grid-column: 2; grid-row: 1; height: 18px; margin: 0 5px; min-width: 18px; position: relative; width: 18px; z-index: 1; }
+.qm-kanban-card-content { grid-column: 3 / 4; grid-row: 1; position: relative; width: 100%; }
+.qm-kanban-card-links { display: flex; flex-wrap: wrap; gap: 4px; grid-column: 3 / 5; min-width: 0; padding: 3px 0; }
+.qm-kanban-card-links button { border: 1px solid var(--vault-border); gap: 4px; justify-content: flex-start; max-width: 100%; padding: 2px 6px; }
+.qm-kanban-card-links button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qm-kanban-checklist { display: grid; gap: 3px; grid-column: 2 / 5; min-width: 0; padding: 4px 0 2px; }
+.qm-kanban-checklist-item { align-items: center; display: grid; gap: 4px; grid-template-columns: auto minmax(0, 1fr) auto; }
+.qm-kanban-checklist-item > input[type="checkbox"] { height: 16px; margin: 0; min-width: 16px; width: 16px; }
+.qm-kanban-checklist-item > input[type="text"] { background: transparent; border: 1px solid transparent; border-radius: 4px; color: inherit; min-width: 0; padding: 3px 4px; }
+.qm-kanban-checklist-item > input[type="text"]:focus { border-color: var(--vault-accent); outline: none; }
+.qm-kanban-checklist-add { gap: 4px; justify-self: start; padding: 2px 6px; }
+.qm-kanban-card select { background: var(--vault-surface-muted); border: 1px solid var(--vault-border); border-radius: 4px; color: inherit; font-size: 10px; grid-column: 3 / 5; max-width: 100%; min-height: 24px; }
+.qm-kanban-card-delete { grid-column: 4 / 5; grid-row: 1; }
+.qm-kanban-handle { cursor: grab; touch-action: none; }
+.qm-kanban-column > form { display: grid; grid-template-columns: 1fr auto; }
+.qm-kanban-add-column { align-items: center; background: var(--vault-surface-muted); border: 1px dashed var(--vault-border); border-radius: 8px; color: inherit; display: flex; gap: 5px; min-height: 38px; padding: 7px 12px; }
+@media (max-width: 760px) { .qm-kanban { padding: 8px; } .qm-kanban-interop { grid-template-columns: minmax(0, 1fr); max-width: none; } .qm-kanban-interop-toolbar button, .qm-kanban-interop button, .qm-kanban-interop textarea { min-height: 44px; } .qm-kanban-column { width: min(78vw, 300px); } .qm-kanban-column button, .qm-kanban-add-column, .qm-kanban-column input, .qm-kanban-card-content, .qm-kanban-card select { min-height: 44px; } .qm-kanban-column button, .qm-kanban-add-column { min-width: 44px; } .qm-kanban-card > input[type="checkbox"], .qm-kanban-checklist-item > input[type="checkbox"], .qm-kanban-import-confirm input { height: 44px; min-width: 44px; width: 44px; } }
+@media (pointer: coarse) { .qm-kanban-interop-toolbar button, .qm-kanban-interop button, .qm-kanban-interop textarea { min-height: 44px; } .qm-kanban-column button, .qm-kanban-add-column, .qm-kanban-column > header input, .qm-kanban-column > form input, .qm-kanban-card select, .qm-kanban-card-content, .qm-kanban-checklist-item > input[type="text"] { min-height: 44px; } .qm-kanban-card > input[type="checkbox"], .qm-kanban-checklist-item > input[type="checkbox"], .qm-kanban-import-confirm input { height: 44px; min-width: 44px; width: 44px; } }
+@media (prefers-reduced-motion: reduce) { .qm-kanban-card { transition: none !important; } }

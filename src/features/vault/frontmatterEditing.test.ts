@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   UnsupportedFrontmatterPropertyError,
+  inferVaultPropertyType,
   parsePropertyEditorValue,
+  parseTypedPropertyEditorValue,
   removeFrontmatterProperty,
   setFrontmatterProperty
 } from "./frontmatterEditing";
@@ -39,5 +41,16 @@ describe("frontmatter editing", () => {
     expect(parsePropertyEditorValue("42", 1)).toBe(42);
     expect(parsePropertyEditorValue("a, b", ["old"])).toEqual(["a", "b"]);
     expect(parsePropertyEditorValue("plain", "old")).toBe("plain");
+  });
+
+  it("infers and validates Obsidian property editor types", () => {
+    expect(inferVaultPropertyType("tags", ["work"])).toBe("tags");
+    expect(inferVaultPropertyType("due", "2026-08-23")).toBe("date");
+    expect(inferVaultPropertyType("meeting", "2026-08-23T14:30")).toBe("datetime");
+    expect(inferVaultPropertyType("done", false)).toBe("checkbox");
+    expect(parseTypedPropertyEditorValue("#work, quickmemo", "tags")).toEqual(["work", "quickmemo"]);
+    expect(parseTypedPropertyEditorValue("42.5", "number")).toBe(42.5);
+    expect(parseTypedPropertyEditorValue("true", "checkbox")).toBe(true);
+    expect(() => parseTypedPropertyEditorValue("2026-02-30", "date")).toThrow(/유효한 날짜/);
   });
 });

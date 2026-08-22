@@ -247,6 +247,150 @@ describe("AuthProvider optimized login", () => {
     expect(currentAuth.privateKey).toBeNull();
   });
 
+  it("keeps a verified session during a retryable profile subscription outage", async () => {
+    mocks.getUserProfile.mockResolvedValue(profileFor("user-a"));
+    mocks.getUserKeyDocument.mockResolvedValue(keyDocument);
+    mocks.unlockPrivateKeyWithFallback.mockResolvedValue(privateKey);
+    mocks.signInWithEmailAndPassword.mockImplementation(async () => {
+      mocks.auth.currentUser = userA;
+      mocks.emitAuthState(userA);
+      return { user: userA };
+    });
+    await renderAuthProvider();
+
+    await act(async () => {
+      await currentAuth.loginRosterUser(rosterFor("user-a"), "password");
+    });
+    await waitFor(() => expect(mocks.subscribeUserProfile).toHaveBeenCalledOnce());
+    const subscriptionCall = (mocks.subscribeUserProfile.mock.calls as unknown[][]).at(-1);
+    const onSubscriptionError = subscriptionCall?.[2] as
+      | ((error: Error) => void)
+      | undefined;
+
+    act(() => {
+      onSubscriptionError?.(Object.assign(new Error("offline"), { code: "unknown" }));
+    });
+
+    expect(mocks.firebaseSignOut).not.toHaveBeenCalled();
+    expect(currentAuth.firebaseUser?.uid).toBe("user-a");
+    expect(currentAuth.profile?.uid).toBe("user-a");
+    expect(currentAuth.privateKey).toBe(privateKey);
+  });
+
+  it("expires the session when the profile subscription is denied", async () => {
+    mocks.getUserProfile.mockResolvedValue(profileFor("user-a"));
+    mocks.getUserKeyDocument.mockResolvedValue(keyDocument);
+    mocks.unlockPrivateKeyWithFallback.mockResolvedValue(privateKey);
+    mocks.signInWithEmailAndPassword.mockImplementation(async () => {
+      mocks.auth.currentUser = userA;
+      mocks.emitAuthState(userA);
+      return { user: userA };
+    });
+    await renderAuthProvider();
+
+    await act(async () => {
+      await currentAuth.loginRosterUser(rosterFor("user-a"), "password");
+    });
+    await waitFor(() => expect(mocks.subscribeUserProfile).toHaveBeenCalledOnce());
+    const subscriptionCall = (mocks.subscribeUserProfile.mock.calls as unknown[][]).at(-1);
+    const onSubscriptionError = subscriptionCall?.[2] as
+      | ((error: Error) => void)
+      | undefined;
+
+    await act(async () => {
+      onSubscriptionError?.(Object.assign(new Error("forbidden"), { code: "permission-denied" }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(mocks.firebaseSignOut).toHaveBeenCalledOnce());
+    expect(currentAuth.firebaseUser).toBeNull();
+    expect(currentAuth.profile).toBeNull();
+    expect(currentAuth.privateKey).toBeNull();
+  });
+
+  it("fails closed for quota and unclassified profile subscription errors", async () => {
+    mocks.getUserProfile.mockResolvedValue(profileFor("user-a"));
+    mocks.getUserKeyDocument.mockResolvedValue(keyDocument);
+    mocks.unlockPrivateKeyWithFallback.mockResolvedValue(privateKey);
+    mocks.signInWithEmailAndPassword.mockImplementation(async () => {
+      mocks.auth.currentUser = userA;
+      mocks.emitAuthState(userA);
+      return { user: userA };
+    });
+    await renderAuthProvider();
+
+    await act(async () => {
+      await currentAuth.loginRosterUser(rosterFor("user-a"), "password");
+    });
+    await waitFor(() => expect(mocks.subscribeUserProfile).toHaveBeenCalledOnce());
+    const subscriptionCall = (mocks.subscribeUserProfile.mock.calls as unknown[][]).at(-1);
+    const onSubscriptionError = subscriptionCall?.[2] as
+      | ((error: Error) => void)
+      | undefined;
+
+    await act(async () => {
+      onSubscriptionError?.(Object.assign(new Error("quota"), { code: "resource-exhausted" }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(mocks.firebaseSignOut).toHaveBeenCalledOnce());
+    expect(currentAuth.profile).toBeNull();
+    expect(currentAuth.privateKey).toBeNull();
+  });
+
+  it("expires after the bounded number of retryable profile subscription failures", async () => {
+    mocks.getUserProfile.mockResolvedValue(profileFor("user-a"));
+    mocks.getUserKeyDocument.mockResolvedValue(keyDocument);
+    mocks.unlockPrivateKeyWithFallback.mockResolvedValue(privateKey);
+    mocks.signInWithEmailAndPassword.mockImplementation(async () => {
+      mocks.auth.currentUser = userA;
+      mocks.emitAuthState(userA);
+      return { user: userA };
+    });
+    await renderAuthProvider();
+
+    await act(async () => {
+      await currentAuth.loginRosterUser(rosterFor("user-a"), "password");
+    });
+    await waitFor(() => expect(mocks.subscribeUserProfile).toHaveBeenCalledOnce());
+    vi.useFakeTimers();
+
+    try {
+      for (const delay of [1_000, 2_000, 4_000, 8_000, 16_000]) {
+        const subscriptionCall = (mocks.subscribeUserProfile.mock.calls as unknown[][]).at(-1);
+        const onProfile = subscriptionCall?.[1] as
+          | ((profile: UserProfile, metadata: { fromCache: boolean }) => void)
+          | undefined;
+        const onSubscriptionError = subscriptionCall?.[2] as
+          | ((error: Error) => void)
+          | undefined;
+
+        await act(async () => {
+          onProfile?.(profileFor("user-a"), { fromCache: true });
+          onSubscriptionError?.(Object.assign(new Error("offline"), { code: "unavailable" }));
+          await vi.advanceTimersByTimeAsync(delay);
+        });
+      }
+
+      expect(mocks.subscribeUserProfile).toHaveBeenCalledTimes(6);
+      const finalSubscriptionCall = (mocks.subscribeUserProfile.mock.calls as unknown[][]).at(-1);
+      const onFinalSubscriptionError = finalSubscriptionCall?.[2] as
+        | ((error: Error) => void)
+        | undefined;
+
+      await act(async () => {
+        onFinalSubscriptionError?.(Object.assign(new Error("offline"), { code: "unavailable" }));
+        await Promise.resolve();
+      });
+
+      expect(mocks.firebaseSignOut).toHaveBeenCalledOnce();
+      expect(currentAuth.profile).toBeNull();
+      expect(currentAuth.privateKey).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not publish a decrypted key when the user signs out during PBKDF2", async () => {
     const unlock = deferred<CryptoKey>();
 

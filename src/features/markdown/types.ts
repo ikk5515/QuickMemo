@@ -176,6 +176,19 @@ export type MarkdownLinkClickHandler = (
   event: ReactMouseEvent<HTMLElement>
 ) => void;
 
+export type MarkdownLinkPreviewSource = "focus" | "pointer";
+
+export interface MarkdownLinkPreviewInteraction {
+  active: boolean;
+  anchor: HTMLElement;
+  source: MarkdownLinkPreviewSource;
+}
+
+export type MarkdownLinkPreviewHandler = (
+  reference: MarkdownLinkReference,
+  interaction: MarkdownLinkPreviewInteraction
+) => void;
+
 export type MarkdownTagClickHandler = (
   tag: string,
   event: ReactMouseEvent<HTMLButtonElement>

@@ -16,6 +16,8 @@ jobs:
     concurrency:
       group: vercel-production-${{ github.event.workflow_run.head_branch }}
       cancel-in-progress: true
+    environment:
+      name: production
     runs-on: ubuntu-latest
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -63,20 +65,35 @@ jobs:
         if: steps.master_at_start.outputs.current == 'true'
         run: git diff --check HEAD^ HEAD
 
-      - name: Verify Secure Share live-sync firewall gate
+      - name: Verify attested Firebase and Vault release contract
         if: steps.master_at_start.outputs.current == 'true'
+        id: release_contract
+        env:
+          FIREBASE_DEPLOYED_RULES_INDEXES_SHA256: ${{ vars.FIREBASE_DEPLOYED_RULES_INDEXES_SHA256 }}
+          FIREBASE_SPARK_ATTESTATION: ${{ vars.FIREBASE_SPARK_ATTESTATION }}
+          VAULT_RELEASE_STATE: ${{ vars.VAULT_RELEASE_STATE }}
+        run: node scripts/verify-production-release-contract.mjs --verify
+
+      - name: Verify Secure Share live-sync firewall gate
+        if: steps.master_at_start.outputs.current == 'true' && steps.release_contract.outputs.contract_verified == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: node scripts/verify-vercel-firewall-rate-limit.mjs --probe
 
-      - name: Verify zero-cost Vercel Hobby plan
-        if: steps.master_at_start.outputs.current == 'true'
+      - name: Verify zero-cost Vercel Hobby plan and enabled Vault flag
+        if: steps.master_at_start.outputs.current == 'true' && steps.release_contract.outputs.contract_verified == 'true' && steps.release_contract.outputs.vault_enabled == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: node scripts/verify-vercel-hobby-plan.mjs --probe
+        run: node scripts/verify-vercel-hobby-plan.mjs --probe --expect-vault-enabled
+
+      - name: Verify zero-cost Vercel Hobby plan and disabled Vault flag
+        if: steps.master_at_start.outputs.current == 'true' && steps.release_contract.outputs.contract_verified == 'true' && steps.release_contract.outputs.vault_enabled == 'false'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: node scripts/verify-vercel-hobby-plan.mjs --probe --expect-vault-disabled
 
       - name: Revalidate master immediately before deployment
-        if: steps.master_at_start.outputs.current == 'true'
+        if: steps.master_at_start.outputs.current == 'true' && steps.release_contract.outputs.contract_verified == 'true' && (steps.release_contract.outputs.vault_enabled == 'true' || steps.release_contract.outputs.vault_enabled == 'false')
         id: master_before_deploy
         env:
           EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -97,7 +114,7 @@ jobs:
           fi
 
       - name: Deploy
-        if: steps.master_before_deploy.outputs.current == 'true'
+        if: steps.master_before_deploy.outputs.current == 'true' && steps.release_contract.outputs.contract_verified == 'true' && (steps.release_contract.outputs.vault_enabled == 'true' || steps.release_contract.outputs.vault_enabled == 'false')
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: npx --yes vercel@54.4.1 deploy --prod --yes

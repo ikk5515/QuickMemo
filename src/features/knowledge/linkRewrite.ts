@@ -1,10 +1,13 @@
 import { backlinkOccurrences, buildKnowledgeIndex } from "./knowledgeIndex";
 import {
+  buildInternalLinkResolutionIndex,
   normalizeVaultPath,
   resolveInternalLink,
   vaultBasename,
-  vaultDirectory
+  vaultDirectory,
+  vaultStem
 } from "./path";
+import type { InternalLinkResolutionIndex } from "./path";
 import type {
   InternalLinkOccurrence,
   InternalLinkSyntax,
@@ -26,15 +29,18 @@ export interface InternalLinkRewritePatch {
   column: number;
 }
 
-export interface IncomingInternalLinkRewritePlan {
+export interface InternalLinkRewritePlan {
   sourceEntryId: string;
   sourcePath: string;
   rewrittenSourcePath: string;
   expectedRevision: number;
+  patches: InternalLinkRewritePatch[];
+}
+
+export interface IncomingInternalLinkRewritePlan extends InternalLinkRewritePlan {
   targetEntryId: string;
   oldTargetPath: string;
   newTargetPath: string;
-  patches: InternalLinkRewritePatch[];
 }
 
 export type ApplyInternalLinkRewriteResult =
@@ -55,6 +61,17 @@ export interface PlanIncomingInternalLinkRewritesInput {
   entries: readonly RevisionedVaultIndexEntry[];
   targetEntryId: string;
   newTargetPath: string;
+}
+
+export interface VaultEntryPathChange {
+  entryId: string;
+  oldPath: string;
+  newPath: string;
+}
+
+export interface PlanInternalLinkRewritesForPathChangesInput {
+  entries: readonly RevisionedVaultIndexEntry[];
+  pathChanges: readonly VaultEntryPathChange[];
 }
 
 function caseFold(value: string): string {
@@ -125,12 +142,14 @@ function resolvesToEntry(
   sourcePath: string,
   targetEntryId: string,
   entries: readonly VaultIndexEntry[],
-  metadataByEntryId: ReadonlyMap<string, ParsedMarkdownMetadata>
+  metadataByEntryId: ReadonlyMap<string, ParsedMarkdownMetadata>,
+  resolutionIndex?: InternalLinkResolutionIndex
 ): boolean {
   const resolution = resolveInternalLink(
     occurrenceWithTarget(occurrence, sourcePath, candidate),
     entries,
-    metadataByEntryId
+    metadataByEntryId,
+    resolutionIndex
   );
   return resolution.status === "resolved" && resolution.targetEntryId === targetEntryId;
 }
@@ -139,12 +158,18 @@ function isPathBasedLink(
   occurrence: InternalLinkOccurrence,
   targetEntryId: string,
   entries: readonly VaultIndexEntry[],
-  metadataWithoutAliases: ReadonlyMap<string, ParsedMarkdownMetadata>
+  metadataWithoutAliases: ReadonlyMap<string, ParsedMarkdownMetadata>,
+  resolutionIndex?: InternalLinkResolutionIndex
 ): boolean {
   if (!occurrence.target) {
     return false;
   }
-  const resolution = resolveInternalLink(occurrence, entries, metadataWithoutAliases);
+  const resolution = resolveInternalLink(
+    occurrence,
+    entries,
+    metadataWithoutAliases,
+    resolutionIndex
+  );
   return resolution.status === "resolved" && resolution.targetEntryId === targetEntryId;
 }
 
@@ -153,22 +178,36 @@ function wikilinkTarget(
   sourcePath: string,
   targetEntry: VaultIndexEntry,
   renamedEntries: readonly VaultIndexEntry[],
-  renamedMetadata: ReadonlyMap<string, ParsedMarkdownMetadata>
+  renamedMetadata: ReadonlyMap<string, ParsedMarkdownMetadata>,
+  resolutionIndex?: InternalLinkResolutionIndex
 ): string {
   const normalizedPath = normalizeVaultPath(targetEntry.path);
   const omitMarkdownExtension = targetEntry.kind === "markdown";
   const canonicalPath = markdownPath(normalizedPath, omitMarkdownExtension);
   const basename = vaultBasename(canonicalPath);
   const candidates = [basename, canonicalPath];
+  const basenameCollisionCount = renamedEntries.filter((entry) => {
+    const shortestName = entry.kind === "markdown"
+      ? vaultStem(entry.path)
+      : vaultBasename(entry.path);
+    return caseFold(shortestName) === caseFold(basename);
+  }).length;
 
   for (const candidate of candidates) {
+    // The official resolver deterministically selects one duplicate basename,
+    // but generated/re-written links must still name the intended file. Avoid
+    // emitting a shortest link that would silently select a different target.
+    if (candidate === basename && basenameCollisionCount > 1) {
+      continue;
+    }
     if (resolvesToEntry(
       occurrence,
       candidate,
       sourcePath,
       targetEntry.id,
       renamedEntries,
-      renamedMetadata
+      renamedMetadata,
+      resolutionIndex
     )) {
       return candidate;
     }
@@ -221,19 +260,19 @@ function rewriteOccurrence(
   sourcePath: string,
   targetEntry: VaultIndexEntry,
   renamedEntries: readonly VaultIndexEntry[],
-  renamedMetadata: ReadonlyMap<string, ParsedMarkdownMetadata>
-): string {
+  renamedMetadata: ReadonlyMap<string, ParsedMarkdownMetadata>,
+  resolutionIndex?: InternalLinkResolutionIndex
+): { raw: string; target: string } {
   if (occurrence.syntax === "wikilink") {
-    return rewriteWikilinkRaw(
-      occurrence.raw,
-      wikilinkTarget(
-        occurrence,
-        sourcePath,
-        targetEntry,
-        renamedEntries,
-        renamedMetadata
-      )
+    const target = wikilinkTarget(
+      occurrence,
+      sourcePath,
+      targetEntry,
+      renamedEntries,
+      renamedMetadata,
+      resolutionIndex
     );
+    return { raw: rewriteWikilinkRaw(occurrence.raw, target), target };
   }
 
   const originalUsedMarkdownExtension = /\.md$/i.test(occurrence.target);
@@ -245,7 +284,8 @@ function rewriteOccurrence(
   if (occurrence.target.startsWith("./") && !relativePath.startsWith(".")) {
     relativePath = `./${relativePath}`;
   }
-  return rewriteMarkdownLinkRaw(occurrence.raw, encodeRelativeMarkdownPath(relativePath));
+  const target = encodeRelativeMarkdownPath(relativePath);
+  return { raw: rewriteMarkdownLinkRaw(occurrence.raw, target), target };
 }
 
 function assertValidRename(
@@ -270,6 +310,243 @@ function assertValidRename(
   return { targetEntry, normalizedNewPath };
 }
 
+function assertUniqueEntryIdsAndPaths(
+  entries: readonly RevisionedVaultIndexEntry[],
+  stateLabel: "current" | "resulting"
+): void {
+  const entryIds = new Set<string>();
+  const pathOwners = new Map<string, string>();
+  for (const entry of entries) {
+    if (entryIds.has(entry.id)) {
+      throw new Error(`Cannot plan link rewrites because the ${stateLabel} vault contains a duplicate entry ID.`);
+    }
+    entryIds.add(entry.id);
+
+    const path = normalizeVaultPath(entry.path);
+    if (!path) {
+      throw new Error(`Cannot plan link rewrites because the ${stateLabel} vault contains an empty path.`);
+    }
+    const pathKey = caseFold(path);
+    if (pathOwners.has(pathKey)) {
+      throw new Error(`Cannot plan link rewrites because the ${stateLabel} vault contains a duplicate path.`);
+    }
+    pathOwners.set(pathKey, entry.id);
+  }
+}
+
+function normalizePathChanges(
+  entries: readonly RevisionedVaultIndexEntry[],
+  pathChanges: readonly VaultEntryPathChange[]
+): {
+  entries: RevisionedVaultIndexEntry[];
+  changedPathsByEntryId: Map<string, string>;
+} {
+  const normalizedEntries = entries.map((entry) => ({
+    ...entry,
+    path: normalizeVaultPath(entry.path)
+  }));
+  assertUniqueEntryIdsAndPaths(normalizedEntries, "current");
+
+  const entriesById = new Map(normalizedEntries.map((entry) => [entry.id, entry]));
+  const changedPathsByEntryId = new Map<string, string>();
+  for (const change of pathChanges) {
+    if (changedPathsByEntryId.has(change.entryId)) {
+      throw new Error("Cannot plan link rewrites for duplicate path changes to one entry.");
+    }
+    const entry = entriesById.get(change.entryId);
+    if (!entry) {
+      throw new Error("Cannot plan link rewrites for a path change with a missing entry.");
+    }
+    const oldPath = normalizeVaultPath(change.oldPath);
+    if (oldPath !== entry.path) {
+      throw new Error("Cannot plan link rewrites because a path change is stale.");
+    }
+    const newPath = normalizeVaultPath(change.newPath);
+    if (!newPath) {
+      throw new Error("Cannot plan link rewrites for an empty resulting path.");
+    }
+    changedPathsByEntryId.set(change.entryId, newPath);
+  }
+
+  const resultingEntries = normalizedEntries.map((entry) => ({
+    ...entry,
+    path: changedPathsByEntryId.get(entry.id) ?? entry.path
+  }));
+  assertUniqueEntryIdsAndPaths(resultingEntries, "resulting");
+  return { entries: resultingEntries, changedPathsByEntryId };
+}
+
+function assertOccurrenceOffset(
+  markdown: string,
+  occurrence: InternalLinkOccurrence
+): { start: number; end: number } {
+  const start = offsetForOccurrence(markdown, occurrence);
+  const end = start + occurrence.raw.length;
+  if (start < 0 || end > markdown.length || markdown.slice(start, end) !== occurrence.raw) {
+    throw new Error("Cannot plan link rewrites because parsed link offsets are stale.");
+  }
+  return { start, end };
+}
+
+function assertNonOverlappingPatches(patches: readonly InternalLinkRewritePatch[]): void {
+  let previousEnd = -1;
+  for (const patch of [...patches].sort((left, right) => left.start - right.start)) {
+    if (patch.start < previousEnd) {
+      throw new Error("Cannot plan link rewrites because parsed link offsets overlap.");
+    }
+    previousEnd = patch.end;
+  }
+}
+
+/**
+ * Plans the Markdown changes required by one atomic set of path changes.
+ *
+ * Every link is first resolved against the old vault, with aliases removed so
+ * that an alias-only reference is never silently converted into a path link.
+ * The untouched raw target is then resolved from the source's resulting path
+ * against the resulting vault. A patch is only emitted when that raw target no
+ * longer identifies the same entry. This is important for folder moves: links
+ * inside a moved subtree often remain valid and should not churn needlessly,
+ * while relative links from a moved source to an entry outside the subtree do
+ * need to change.
+ */
+export function planInternalLinkRewritesForPathChanges({
+  entries,
+  pathChanges
+}: PlanInternalLinkRewritesForPathChangesInput): InternalLinkRewritePlan[] {
+  if (pathChanges.length === 0) {
+    return [];
+  }
+
+  const oldEntries = entries.map((entry) => ({
+    ...entry,
+    path: normalizeVaultPath(entry.path)
+  }));
+  const {
+    entries: resultingEntries,
+    changedPathsByEntryId
+  } = normalizePathChanges(entries, pathChanges);
+  const hasEffectivePathChange = oldEntries.some((entry) =>
+    (changedPathsByEntryId.get(entry.id) ?? entry.path) !== entry.path
+  );
+  if (!hasEffectivePathChange) {
+    return [];
+  }
+
+  const oldIndex = buildKnowledgeIndex(oldEntries);
+  const oldMetadataWithoutAliases = withoutAliases(oldIndex.metadataByEntryId);
+  const oldResolutionIndexWithoutAliases = buildInternalLinkResolutionIndex(
+    oldIndex.entries,
+    oldMetadataWithoutAliases
+  );
+  const resultingIndex = buildKnowledgeIndex(resultingEntries);
+  const resultingResolutionIndex = buildInternalLinkResolutionIndex(
+    resultingIndex.entries,
+    resultingIndex.metadataByEntryId
+  );
+  const resultingEntriesById = new Map(
+    resultingEntries.map((entry) => [entry.id, entry])
+  );
+  const plans: InternalLinkRewritePlan[] = [];
+
+  for (const source of oldEntries) {
+    if (source.kind !== "markdown") {
+      continue;
+    }
+    const markdown = source.content ?? "";
+    const rewrittenSourcePath = changedPathsByEntryId.get(source.id) ?? source.path;
+    const patches: InternalLinkRewritePatch[] = [];
+
+    for (const occurrence of oldIndex.metadataByEntryId.get(source.id)?.links ?? []) {
+      if (!occurrence.target) {
+        continue;
+      }
+      const oldResolution = resolveInternalLink(
+        occurrence,
+        oldIndex.entries,
+        oldMetadataWithoutAliases,
+        oldResolutionIndexWithoutAliases
+      );
+      if (oldResolution.status !== "resolved" || !oldResolution.targetEntryId) {
+        continue;
+      }
+
+      const targetEntry = resultingEntriesById.get(oldResolution.targetEntryId);
+      if (!targetEntry) {
+        continue;
+      }
+      const occurrenceAtResultingSource = {
+        ...occurrence,
+        sourcePath: rewrittenSourcePath
+      };
+      const unchangedResolution = resolveInternalLink(
+        occurrenceAtResultingSource,
+        resultingIndex.entries,
+        resultingIndex.metadataByEntryId,
+        resultingResolutionIndex
+      );
+      if (
+        unchangedResolution.status === "resolved"
+        && unchangedResolution.targetEntryId === targetEntry.id
+      ) {
+        continue;
+      }
+
+      const rewritten = rewriteOccurrence(
+        occurrence,
+        rewrittenSourcePath,
+        targetEntry,
+        resultingIndex.entries,
+        resultingIndex.metadataByEntryId,
+        resultingResolutionIndex
+      );
+      const rewrittenResolution = resolveInternalLink(
+        occurrenceWithTarget(occurrence, rewrittenSourcePath, rewritten.target),
+        resultingIndex.entries,
+        resultingIndex.metadataByEntryId,
+        resultingResolutionIndex
+      );
+      if (
+        rewrittenResolution.status !== "resolved"
+        || rewrittenResolution.targetEntryId !== targetEntry.id
+      ) {
+        throw new Error("Cannot plan link rewrites because the rewritten link is not uniquely resolvable.");
+      }
+      if (rewritten.raw === occurrence.raw) {
+        throw new Error("Cannot plan link rewrites because a semantic change produced no textual patch.");
+      }
+
+      const { start, end } = assertOccurrenceOffset(markdown, occurrence);
+      patches.push({
+        start,
+        end,
+        before: occurrence.raw,
+        after: rewritten.raw,
+        syntax: occurrence.syntax,
+        line: occurrence.line,
+        column: occurrence.column
+      });
+    }
+
+    if (patches.length > 0) {
+      patches.sort((left, right) => left.start - right.start);
+      assertNonOverlappingPatches(patches);
+      plans.push({
+        sourceEntryId: source.id,
+        sourcePath: source.path,
+        rewrittenSourcePath,
+        expectedRevision: source.revision,
+        patches
+      });
+    }
+  }
+
+  return plans.sort((left, right) =>
+    left.sourcePath.localeCompare(right.sourcePath)
+    || left.sourceEntryId.localeCompare(right.sourceEntryId)
+  );
+}
+
 export function planIncomingInternalLinkRewrites({
   entries,
   targetEntryId,
@@ -284,11 +561,19 @@ export function planIncomingInternalLinkRewrites({
   const oldIndex = buildKnowledgeIndex(entries);
   const oldEntries = oldIndex.entries;
   const oldMetadataWithoutAliases = withoutAliases(oldIndex.metadataByEntryId);
+  const oldResolutionIndexWithoutAliases = buildInternalLinkResolutionIndex(
+    oldEntries,
+    oldMetadataWithoutAliases
+  );
   const renamedEntries: RevisionedVaultIndexEntry[] = entries.map((entry) => ({
     ...entry,
     path: entry.id === targetEntryId ? normalizedNewPath : normalizeVaultPath(entry.path)
   }));
   const renamedIndex = buildKnowledgeIndex(renamedEntries);
+  const renamedResolutionIndex = buildInternalLinkResolutionIndex(
+    renamedIndex.entries,
+    renamedIndex.metadataByEntryId
+  );
   const renamedTarget = renamedEntries.find((entry) => entry.id === targetEntryId);
   if (!renamedTarget) {
     return [];
@@ -300,7 +585,8 @@ export function planIncomingInternalLinkRewrites({
       occurrence,
       targetEntryId,
       oldEntries,
-      oldMetadataWithoutAliases
+      oldMetadataWithoutAliases,
+      oldResolutionIndexWithoutAliases
     )) {
       continue;
     }
@@ -322,24 +608,21 @@ export function planIncomingInternalLinkRewrites({
     const patches: InternalLinkRewritePatch[] = [];
 
     for (const occurrence of occurrences) {
-      const start = offsetForOccurrence(markdown, occurrence);
-      const end = start + occurrence.raw.length;
-      if (start < 0 || markdown.slice(start, end) !== occurrence.raw) {
-        throw new Error("Cannot plan link rewrites because parsed link offsets are stale.");
-      }
-      const after = rewriteOccurrence(
+      const { start, end } = assertOccurrenceOffset(markdown, occurrence);
+      const rewritten = rewriteOccurrence(
         occurrence,
         rewrittenSourcePath,
         renamedTarget,
         renamedEntries,
-        renamedIndex.metadataByEntryId
+        renamedIndex.metadataByEntryId,
+        renamedResolutionIndex
       );
-      if (after !== occurrence.raw) {
+      if (rewritten.raw !== occurrence.raw) {
         patches.push({
           start,
           end,
           before: occurrence.raw,
-          after,
+          after: rewritten.raw,
           syntax: occurrence.syntax,
           line: occurrence.line,
           column: occurrence.column
@@ -348,6 +631,8 @@ export function planIncomingInternalLinkRewrites({
     }
 
     if (patches.length > 0) {
+      patches.sort((left, right) => left.start - right.start);
+      assertNonOverlappingPatches(patches);
       plans.push({
         sourceEntryId,
         sourcePath: normalizeVaultPath(source.path),
@@ -356,7 +641,7 @@ export function planIncomingInternalLinkRewrites({
         targetEntryId,
         oldTargetPath,
         newTargetPath: normalizedNewPath,
-        patches: patches.sort((left, right) => left.start - right.start)
+        patches
       });
     }
   }
@@ -365,7 +650,7 @@ export function planIncomingInternalLinkRewrites({
 }
 
 export function applyInternalLinkRewritePlan(
-  plan: IncomingInternalLinkRewritePlan,
+  plan: InternalLinkRewritePlan,
   markdown: string,
   currentRevision: number
 ): ApplyInternalLinkRewriteResult {

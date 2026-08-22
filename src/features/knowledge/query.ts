@@ -1,15 +1,21 @@
 import { normalizeTag } from "./markdown";
 import { vaultBasename, vaultStem } from "./path";
 import type {
-  ParsedMarkdownMetadata,
+  FrontmatterValue,
   VaultIndexEntry,
   VaultSearchField,
   VaultSearchQuery
 } from "./types";
 
+export interface VaultSearchMetadata {
+  aliases: readonly string[];
+  properties: Readonly<Record<string, FrontmatterValue>>;
+  tags: readonly string[];
+}
+
 interface SearchContext {
   entry: VaultIndexEntry;
-  metadata: ParsedMarkdownMetadata;
+  metadata: VaultSearchMetadata;
 }
 
 export interface VaultSearchEvaluationOptions {
@@ -165,6 +171,28 @@ export function parseVaultSearchQuery(query: string): VaultSearchQuery {
   return parseOr();
 }
 
+/**
+ * Main-thread fallback search intentionally cannot execute regular expressions:
+ * JavaScript regex evaluation is not preemptible there. Callers use this helper
+ * to surface an explicit degraded-mode message instead of silently returning no
+ * matches for an otherwise valid query.
+ */
+export function vaultSearchQueryUsesRegex(query: string | VaultSearchQuery): boolean {
+  const parsed = typeof query === "string" ? parseVaultSearchQuery(query) : query;
+  switch (parsed.type) {
+    case "regex":
+      return true;
+    case "not":
+      return vaultSearchQueryUsesRegex(parsed.child);
+    case "and":
+    case "or":
+      return parsed.children.some(vaultSearchQueryUsesRegex);
+    case "all":
+    case "term":
+      return false;
+  }
+}
+
 export function vaultSearchQueryContainsRegex(query: string | VaultSearchQuery): boolean {
   const parsed = typeof query === "string" ? parseVaultSearchQuery(query) : query;
   switch (parsed.type) {
@@ -236,7 +264,7 @@ function fieldValues(context: SearchContext, field?: VaultSearchField, propertyN
     case "task":
       return content.split(/\r?\n/).filter((line) => /^\s*(?:[-+*]|\d+[.)])\s+\[[ xX]\]\s+/u.test(line));
     case "tag":
-      return context.metadata.tags;
+      return [...context.metadata.tags];
     case "property":
       return [propertyText(context, propertyName)];
     default:
@@ -271,7 +299,7 @@ function matchesTerm(
 export function evaluateVaultSearchQuery(
   query: VaultSearchQuery,
   entry: VaultIndexEntry,
-  metadata: ParsedMarkdownMetadata,
+  metadata: VaultSearchMetadata,
   options: VaultSearchEvaluationOptions = {}
 ): boolean {
   const context = { entry, metadata };
@@ -303,7 +331,7 @@ export function evaluateVaultSearchQuery(
 export function matchesVaultSearchQuery(
   query: string | VaultSearchQuery,
   entry: VaultIndexEntry,
-  metadata: ParsedMarkdownMetadata,
+  metadata: VaultSearchMetadata,
   options: VaultSearchEvaluationOptions = {}
 ): boolean {
   const parsed = typeof query === "string" ? parseVaultSearchQuery(query) : query;

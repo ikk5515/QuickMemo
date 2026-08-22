@@ -2,29 +2,40 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   NoteFolderLimitError,
   NoteRevisionConflictError,
+  backfillRevisionedVaultNameClaim,
   abortSecureShareCopyingNote,
   activateSecureShareCopyingNote,
   createEncryptedNoteFolder,
+  createEncryptedNoteFolderAtId,
   createNoteFolder,
   createNoteAttachment,
   createRevisionedEncryptedNote,
+  createRevisionedEncryptedNoteAtId,
   createSecureShareCopyingNote,
   deleteNote,
+  deleteRevisionedNote,
   getNoteRevisionState,
+  loadOwnedVaultCutoverNotes,
   getVisibleNotesByIds,
+  getVisibleNotesByIdsFromServer,
   isLegacyHtmlNoteDocument,
   listStaleSecureShareCopyingNotes,
   migrateLegacyNoteFolder,
   purgeNote,
+  resolveRevisionedVaultNameCollision,
   restoreRevisionedNote,
+  restoreRevisionedEncryptedFolderSubtree,
+  subscribeDeletedNoteFolders,
   subscribeMyNoteStates,
   subscribeNoteFolders,
   subscribeNoteHistory,
   subscribeVisibleNotes,
+  trashRevisionedEncryptedFolderSubtree,
   updateRevisionedEncryptedNote,
   updateEncryptedNoteFolder,
   updateRevisionedNoteAccess,
-  updateRevisionedNoteFolder
+  updateRevisionedNoteFolder,
+  vaultNameClaimReservationMatches
 } from "./notes";
 
 const mocks = vi.hoisted(() => {
@@ -37,6 +48,7 @@ const mocks = vi.hoisted(() => {
     update: vi.fn()
   };
   const transaction = {
+    delete: vi.fn(),
     get: vi.fn(),
     set: vi.fn(),
     update: vi.fn()
@@ -66,8 +78,12 @@ const mocks = vi.hoisted(() => {
     getBytes: vi.fn(),
     getCountFromServer: vi.fn(),
     getDoc: vi.fn(),
+    getDocFromServer: vi.fn(),
     getDocs: vi.fn(),
+    getDocsFromServer: vi.fn(),
     limit: vi.fn((count: number) => ({ count, type: "limit" })),
+    ensureVaultFolderTree: vi.fn().mockResolvedValue({ status: "ready" }),
+    mutateVaultFolder: vi.fn(),
     onSnapshot: vi.fn((...args: unknown[]) => {
       void args;
       return vi.fn();
@@ -104,8 +120,10 @@ vi.mock("firebase/firestore", () => ({
   deleteField: mocks.deleteField,
   doc: mocks.doc,
   getDoc: mocks.getDoc,
+  getDocFromServer: mocks.getDocFromServer,
   getCountFromServer: mocks.getCountFromServer,
   getDocs: mocks.getDocs,
+  getDocsFromServer: mocks.getDocsFromServer,
   limit: mocks.limit,
   onSnapshot: mocks.onSnapshot,
   orderBy: mocks.orderBy,
@@ -132,6 +150,11 @@ vi.mock("./blobAttachments", () => ({
   uploadNoteAttachmentBlob: mocks.uploadNoteAttachmentBlob
 }));
 
+vi.mock("./vaultFolderMutations", () => ({
+  ensureVaultFolderTree: mocks.ensureVaultFolderTree,
+  mutateVaultFolder: mocks.mutateVaultFolder
+}));
+
 function noteSnapshot(revision: number | undefined) {
   return {
     data: () => ({ revision }),
@@ -152,6 +175,23 @@ const wrappedKey = {
   version: 1 as const,
   wrappedKey: "wrapped-key"
 };
+const vaultClaimId = "C".repeat(43);
+const vaultImportJobId = `vi1_${"J".repeat(43)}`;
+const vaultNameClaim = (parentId: string | null) => ({
+  claimId: vaultClaimId,
+  indexVersion: 1 as const,
+  parentId
+});
+const storedVaultNameClaim = (targetId = "import-note-a") => ({
+  exists: () => true,
+  data: () => ({
+    indexVersion: 1,
+    ownerUid: "user-a",
+    parentId: null,
+    targetId,
+    targetType: "entry"
+  })
+});
 
 const legacyStorageIdentity = {
   expectedContentFormat: "legacy-html-v1" as const,
@@ -164,7 +204,16 @@ describe("revision-aware note persistence", () => {
     mocks.resetGeneratedId();
     mocks.batch.commit.mockResolvedValue(undefined);
     mocks.getDocs.mockResolvedValue({ docs: [] });
-    mocks.transaction.get.mockResolvedValue(noteSnapshot(4));
+    mocks.getDocsFromServer.mockResolvedValue({ docs: [] });
+    mocks.transaction.get.mockReset().mockResolvedValue(noteSnapshot(4));
+    mocks.mutateVaultFolder.mockReset().mockImplementation(async (
+      _uid: string,
+      payload: { expectedRevision?: number; folderId?: string }
+    ) => ({
+      folderId: payload.folderId,
+      revision: typeof payload.expectedRevision === "number" ? payload.expectedRevision + 1 : 1,
+      treeRevision: 1
+    }));
     mocks.runTransaction.mockImplementation(async (_db, updateFunction) => updateFunction(mocks.transaction));
   });
 
@@ -180,6 +229,40 @@ describe("revision-aware note persistence", () => {
       contentFormat: "markdown-v1",
       entryKind: "markdown"
     })).toBe(false);
+  });
+
+  it("normalizes missing legacy deletion metadata before returning a server-confirmed owner cutover snapshot", async () => {
+    const legacy = {
+      id: "legacy-active",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      secureShareCopyState: undefined,
+      isPurged: false
+    };
+    const normalized = { ...legacy, isDeleted: false };
+    mocks.getDocsFromServer
+      .mockResolvedValueOnce({
+        docs: [{
+          id: legacy.id,
+          data: () => Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== "id"))
+        }]
+      })
+      .mockResolvedValueOnce({
+        docs: [{
+          id: normalized.id,
+          data: () => Object.fromEntries(Object.entries(normalized).filter(([key]) => key !== "id"))
+        }]
+      });
+
+    await expect(loadOwnedVaultCutoverNotes("user-a")).resolves.toEqual([
+      expect.objectContaining({ id: "legacy-active", isDeleted: false })
+    ]);
+    expect(mocks.batch.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "legacy-active" }),
+      { isDeleted: false }
+    );
+    expect(mocks.batch.commit).toHaveBeenCalledOnce();
+    expect(mocks.getDocsFromServer).toHaveBeenCalledTimes(2);
   });
 
   it("creates revision 1 with an independent paired history document", async () => {
@@ -217,6 +300,283 @@ describe("revision-aware note persistence", () => {
         revision: 1
       })
     );
+  });
+
+  it("creates a Vault entry at a preallocated id without an overwrite-capable set", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({ exists: () => false });
+
+    const result = await createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId);
+
+    expect(result).toMatchObject({ noteId: "import-note-a", revision: 1 });
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "import-note-a" }),
+      expect.objectContaining({
+        vaultNameClaimId: vaultClaimId,
+        revision: 1,
+        isDeleted: false
+      })
+    );
+    expect(mocks.transaction.get).toHaveBeenCalledOnce();
+    expect(mocks.transaction.get.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ id: vaultClaimId })
+    );
+  });
+
+  it("treats a matching revision-one preallocated entry as an idempotent response-loss retry", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce(storedVaultNameClaim())
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          attachmentRevision: 0,
+          contentFormat: "markdown-v1",
+          encryptedBody: encryptedPayload,
+          encryptedTitle: encryptedPayload,
+          entryKind: "markdown",
+          folderId: null,
+          isDeleted: false,
+          lastMutationId: "history-original",
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          revision: 1,
+          type: "personal",
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1,
+          vaultImportJobId,
+          wrappedKeys: { "user-a": wrappedKey },
+          updatedBy: "user-a"
+        })
+      })
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          action: "create",
+          actorUid: "user-a",
+          changedFields: ["title", "body"],
+          encryptedSnapshot: encryptedPayload,
+          encryptedSummary: encryptedPayload,
+          noteId: "import-note-a",
+          readerUids: ["user-a"],
+          revision: 1
+        })
+      });
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).resolves.toMatchObject({
+      lastMutationId: "history-original",
+      noteId: "import-note-a",
+      revision: 1
+    });
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a response-loss retry has a different encrypted create history", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce(storedVaultNameClaim())
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          attachmentRevision: 0,
+          contentFormat: "markdown-v1",
+          encryptedBody: encryptedPayload,
+          encryptedTitle: encryptedPayload,
+          entryKind: "markdown",
+          folderId: null,
+          isDeleted: false,
+          lastMutationId: "history-original",
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          revision: 1,
+          type: "personal",
+          updatedBy: "user-a",
+          vaultImportJobId,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1,
+          wrappedKeys: { "user-a": wrappedKey }
+        })
+      })
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          action: "create",
+          actorUid: "user-a",
+          changedFields: ["title", "body"],
+          encryptedSnapshot: { ...encryptedPayload, cipherText: "different-history" },
+          encryptedSummary: encryptedPayload,
+          noteId: "import-note-a",
+          readerUids: ["user-a"],
+          revision: 1
+        })
+      });
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).rejects.toThrow("생성 이력과 충돌");
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a response-loss retry carries different encrypted after-state", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce(storedVaultNameClaim())
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          attachmentRevision: 0,
+          contentFormat: "markdown-v1",
+          encryptedBody: encryptedPayload,
+          encryptedTitle: { ...encryptedPayload, cipherText: "stored-other-title" },
+          entryKind: "markdown",
+          folderId: null,
+          isDeleted: false,
+          lastMutationId: "history-original",
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          revision: 1,
+          type: "personal",
+          updatedBy: "user-a",
+          vaultImportJobId,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1,
+          wrappedKeys: { "user-a": wrappedKey }
+        })
+      });
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).rejects.toThrow("충돌");
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a preallocated entry id was edited or belongs to another claim", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce(storedVaultNameClaim())
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          contentFormat: "markdown-v1",
+          entryKind: "markdown",
+          folderId: null,
+          isDeleted: false,
+          lastMutationId: "history-edited",
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          revision: 2,
+          type: "personal",
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1,
+          vaultImportJobId
+        })
+      });
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).rejects.toThrow("충돌");
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("does not accept a response-loss retry when explicit active metadata is missing", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce(storedVaultNameClaim())
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          contentFormat: "markdown-v1",
+          entryKind: "markdown",
+          folderId: null,
+          lastMutationId: "history-original",
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          revision: 1,
+          type: "personal",
+          vaultImportJobId,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1
+        })
+      });
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).rejects.toThrow("충돌");
+  });
+
+  it("rejects a preallocated retry before reading a note when the name claim targets another entry", async () => {
+    mocks.transaction.get.mockResolvedValueOnce(storedVaultNameClaim("other-note"));
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).rejects.toBeInstanceOf(Error);
+
+    expect(mocks.transaction.get).toHaveBeenCalledOnce();
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
   });
 
   it("rejects oversized encrypted note payloads before issuing a write", async () => {
@@ -446,6 +806,98 @@ describe("revision-aware note persistence", () => {
     );
   });
 
+  it("backfills only claim metadata and history without rewriting historical ciphertext", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          contentFormat: "markdown-v1",
+          encryptedBody: encryptedPayload,
+          encryptedTitle: encryptedPayload,
+          entryKind: "markdown",
+          folderId: null,
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          revision: 4,
+          type: "personal",
+          wrappedKeys: { "user-a": wrappedKey }
+        }),
+        exists: () => true,
+        id: "vault-note"
+      })
+      .mockResolvedValueOnce({ exists: () => false });
+
+    await backfillRevisionedVaultNameClaim({
+      expectedContentFormat: "markdown-v1",
+      expectedEntryKind: "markdown",
+      expectedRevision: 4,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      noteId: "vault-note",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+
+    const noteUpdate = mocks.transaction.update.mock.calls[0][1];
+    expect(noteUpdate).toMatchObject({
+      lastMutationId: "generated-1",
+      revision: 5,
+      updatedBy: "user-a",
+      vaultNameClaimId: vaultClaimId,
+      vaultNameIndexVersion: 1
+    });
+    expect(noteUpdate).not.toHaveProperty("encryptedBody");
+    expect(noteUpdate).not.toHaveProperty("encryptedTitle");
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "generated-1" }),
+      expect.objectContaining({ action: "content", changedFields: ["name-claim"], revision: 5 })
+    );
+  });
+
+  it("resolves an unclaimed collision without rewriting the stored body", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          contentFormat: "legacy-html-v1",
+          encryptedBody: encryptedPayload,
+          encryptedTitle: encryptedPayload,
+          entryKind: "legacy-html",
+          folderId: null,
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          revision: 4,
+          type: "personal",
+          wrappedKeys: { "user-a": wrappedKey }
+        }),
+        exists: () => true,
+        id: "collision-note"
+      })
+      .mockResolvedValueOnce({ exists: () => false });
+
+    await resolveRevisionedVaultNameCollision({
+      changedFields: ["title", "name-claim"],
+      encryptedTitle: { ...encryptedPayload, cipherText: "replacement-title" },
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 4,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      noteId: "collision-note",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+
+    const noteUpdate = mocks.transaction.update.mock.calls[0][1];
+    expect(noteUpdate).toMatchObject({
+      encryptedTitle: expect.objectContaining({ cipherText: "replacement-title" }),
+      vaultNameClaimId: vaultClaimId
+    });
+    expect(noteUpdate).not.toHaveProperty("encryptedBody");
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "generated-1" }),
+      expect.objectContaining({ changedFields: ["title", "name-claim"] })
+    );
+  });
+
   it("rejects content writes when the stored entry format differs from the caller expectation", async () => {
     mocks.transaction.get.mockResolvedValueOnce({
       data: () => ({
@@ -604,7 +1056,7 @@ describe("revision-aware note persistence", () => {
     );
   });
 
-  it("rejects encrypted folder creation below an unmigrated legacy parent", async () => {
+  it("delegates encrypted folder creation and parent validation to the authoritative server tree", async () => {
     mocks.transaction.get.mockResolvedValueOnce({
       data: () => ({ ownerUid: "user-a", name: "평문 폴더" }),
       exists: () => true,
@@ -617,18 +1069,88 @@ describe("revision-aware note persistence", () => {
       order: 1,
       ownerUid: "user-a",
       parentId: "legacy-parent",
+      nameClaim: vaultNameClaim("legacy-parent"),
       wrappedKey
-    })).rejects.toThrow("먼저 암호화");
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
+    })).resolves.toMatchObject({ id: "generated-1" });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith(
+      "user-a",
+      expect.objectContaining({
+        action: "create",
+        folderId: "generated-1",
+        parentId: "legacy-parent"
+      })
+    );
   });
 
-  it("rejects a folder move when the transaction ancestor chain reaches itself", async () => {
+  it("creates and idempotently recognizes an untouched preallocated encrypted folder", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({ exists: () => false })
+      .mockResolvedValueOnce({ exists: () => false });
+    const input = {
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      order: 1,
+      ownerUid: "user-a",
+      parentId: null,
+      nameClaim: vaultNameClaim(null),
+      wrappedKey
+    };
+
+    await expect(createEncryptedNoteFolderAtId(input, "import-folder-a", vaultImportJobId))
+      .resolves.toMatchObject({ id: "import-folder-a" });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith(
+      "user-a",
+      expect.objectContaining({
+        action: "create",
+        folderId: "import-folder-a",
+        importJobId: vaultImportJobId,
+        nameClaim: expect.objectContaining({ claimId: vaultClaimId })
+      })
+    );
+
+    vi.clearAllMocks();
+    mocks.runTransaction.mockImplementation(async (_db, updateFunction) => updateFunction(mocks.transaction));
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          encryptedName: encryptedPayload,
+          isDeleted: false,
+          ownerUid: "user-a",
+          parentId: null,
+          revision: 1,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1,
+          vaultImportJobId,
+          vaultAncestorIds: [],
+          vaultLineageDepth: 0,
+          vaultLineageGeneration: 1,
+          vaultLineageVersion: 1,
+          wrappedKey
+        })
+      })
+      .mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({
+          indexVersion: 1,
+          ownerUid: "user-a",
+          parentId: null,
+          targetId: "import-folder-a",
+          targetType: "folder"
+        })
+      });
+    await expect(createEncryptedNoteFolderAtId(input, "import-folder-a", vaultImportJobId))
+      .resolves.toMatchObject({ id: "import-folder-a" });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledOnce();
+  });
+
+  it("delegates cycle-safe folder moves to the authoritative server tree", async () => {
     mocks.transaction.get
       .mockResolvedValueOnce({
         data: () => ({
           encryptedName: encryptedPayload,
           ownerUid: "user-a",
-          parentId: null,
+          parentId: "root-x",
           revision: 1,
           wrappedKey
         }),
@@ -650,13 +1172,20 @@ describe("revision-aware note persistence", () => {
     await expect(updateEncryptedNoteFolder({
       expectedRevision: 1,
       folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-b"),
       ownerUid: "user-a",
       parentId: "folder-b"
-    })).rejects.toThrow("하위 폴더");
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
+    })).resolves.toMatchObject({ folderId: "folder-a", revision: 2 });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith("user-a", {
+      action: "move",
+      expectedRevision: 1,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-b"),
+      parentId: "folder-b"
+    });
   });
 
-  it("rejects a three-node folder cycle inside the revision-aware transaction", async () => {
+  it("delegates deep folder moves without a client-side depth-one ceiling", async () => {
     const folderSnapshot = (id: string, parentId: string | null) => ({
       data: () => ({
         encryptedName: encryptedPayload,
@@ -669,32 +1198,80 @@ describe("revision-aware note persistence", () => {
       id
     });
     mocks.transaction.get
-      .mockResolvedValueOnce(folderSnapshot("folder-a", null))
-      .mockResolvedValueOnce(folderSnapshot("folder-b", "folder-c"))
-      .mockResolvedValueOnce(folderSnapshot("folder-c", "folder-a"));
+      .mockResolvedValueOnce(folderSnapshot("folder-a", "root-x"))
+      .mockResolvedValueOnce(folderSnapshot("folder-b", "folder-c"));
 
     await expect(updateEncryptedNoteFolder({
       expectedRevision: 1,
       folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-b"),
       ownerUid: "user-a",
       parentId: "folder-b"
-    })).rejects.toThrow("하위 폴더");
+    })).resolves.toMatchObject({ folderId: "folder-a", revision: 2 });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith(
+      "user-a",
+      expect.objectContaining({ action: "move", folderId: "folder-a", parentId: "folder-b" })
+    );
+  });
 
-    expect(mocks.transaction.get).toHaveBeenCalledTimes(3);
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
+  it("allows the server authority to validate moving an existing root below another folder", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        encryptedName: encryptedPayload,
+        ownerUid: "user-a",
+        parentId: null,
+        revision: 1,
+        wrappedKey
+      }),
+      exists: () => true,
+      id: "folder-a"
+    });
+
+    await expect(updateEncryptedNoteFolder({
+      expectedRevision: 1,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-b"),
+      ownerUid: "user-a",
+      parentId: "folder-b"
+    })).resolves.toMatchObject({ folderId: "folder-a", revision: 2 });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith(
+      "user-a",
+      expect.objectContaining({ action: "move", folderId: "folder-a", parentId: "folder-b" })
+    );
   });
 
   it("keeps legacy folder migration idempotent but rejects a stale plaintext name", async () => {
+    mocks.mutateVaultFolder.mockResolvedValueOnce({
+      folderId: "folder-a",
+      revision: 2,
+      treeRevision: 1
+    });
     mocks.transaction.get.mockResolvedValueOnce({
       data: () => ({
         encryptedName: encryptedPayload,
         name: "암호화 폴더",
         ownerUid: "user-a",
         revision: 2,
+        vaultNameClaimId: vaultClaimId,
+        vaultNameIndexVersion: 1,
+        vaultAncestorIds: [],
+        vaultLineageDepth: 0,
+        vaultLineageGeneration: 1,
+        vaultLineageVersion: 1,
         wrappedKey
       }),
       exists: () => true,
       id: "folder-a"
+    }).mockResolvedValueOnce({
+      data: () => ({
+        indexVersion: 1,
+        ownerUid: "user-a",
+        parentId: null,
+        targetId: "folder-a",
+        targetType: "folder"
+      }),
+      exists: () => true,
+      id: vaultClaimId
     });
     await expect(migrateLegacyNoteFolder({
       color: "#7c5cff",
@@ -704,15 +1281,26 @@ describe("revision-aware note persistence", () => {
       order: 1,
       ownerUid: "user-a",
       parentId: null,
+      nameClaim: vaultNameClaim(null),
       wrappedKey
-    })).resolves.toEqual({ folderId: "folder-a", revision: 2 });
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
+    })).resolves.toEqual({ folderId: "folder-a", revision: 2, treeRevision: 1 });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith(
+      "user-a",
+      expect.objectContaining({
+        action: "migrate",
+        expectedName: "이전 이름",
+        folderId: "folder-a"
+      })
+    );
 
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({ name: "다른 탭 이름", ownerUid: "user-a" }),
-      exists: () => true,
-      id: "folder-b"
-    });
+    mocks.mutateVaultFolder.mockRejectedValueOnce(new Error("다른 탭에서 폴더 이름이 변경되었습니다."));
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({ name: "다른 탭 이름", ownerUid: "user-a" }),
+        exists: () => true,
+        id: "folder-b"
+      })
+      .mockResolvedValueOnce({ exists: () => false });
     await expect(migrateLegacyNoteFolder({
       color: "#7c5cff",
       encryptedName: encryptedPayload,
@@ -721,9 +1309,217 @@ describe("revision-aware note persistence", () => {
       order: 2,
       ownerUid: "user-a",
       parentId: null,
+      nameClaim: vaultNameClaim(null),
       wrappedKey
     })).rejects.toThrow("다른 탭");
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
+  });
+
+  it("tombstones an encrypted folder subtree with one revision-aware folder write and retains its claim", async () => {
+    const lifecycleFolder = {
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      id: "folder-a",
+      isDeleted: false,
+      name: "암호화 폴더",
+      ownerUid: "user-a",
+      parentId: null,
+      revision: 4,
+      vaultNameClaimId: vaultClaimId,
+      vaultNameIndexVersion: 1 as const,
+      wrappedKey
+    };
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          encryptedName: encryptedPayload,
+          isDeleted: false,
+          ownerUid: "user-a",
+          parentId: null,
+          revision: 4,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1,
+          wrappedKey
+        }),
+        exists: () => true,
+        id: "folder-a"
+      })
+      .mockResolvedValueOnce({
+        data: () => ({
+          indexVersion: 1,
+          ownerUid: "user-a",
+          parentId: null,
+          targetId: "folder-a",
+          targetType: "folder"
+        }),
+        exists: () => true,
+        id: vaultClaimId
+      });
+
+    await expect(trashRevisionedEncryptedFolderSubtree({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      folders: [lifecycleFolder],
+      ownerUid: "user-a"
+    })).resolves.toEqual({ folderId: "folder-a", revision: 5, treeRevision: 1 });
+
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith("user-a", {
+      action: "trash",
+      expectedRevision: 4,
+      folderId: "folder-a"
+    });
+  });
+
+  it("restores a nested subtree only when its parent and retained claim are server-confirmed", async () => {
+    const parent = {
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      id: "parent",
+      isDeleted: false,
+      name: "암호화 폴더",
+      ownerUid: "user-a",
+      parentId: null,
+      revision: 2,
+      vaultNameClaimId: "P".repeat(43),
+      vaultNameIndexVersion: 1 as const,
+      wrappedKey
+    };
+    const lifecycleFolder = {
+      ...parent,
+      id: "folder-a",
+      isDeleted: true,
+      parentId: "parent",
+      revision: 4,
+      vaultNameClaimId: vaultClaimId
+    };
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          encryptedName: encryptedPayload,
+          isDeleted: true,
+          ownerUid: "user-a",
+          parentId: "parent",
+          revision: 4,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1,
+          wrappedKey
+        }),
+        exists: () => true,
+        id: "folder-a"
+      })
+      .mockResolvedValueOnce({ exists: () => false })
+      .mockResolvedValueOnce({
+        data: () => ({
+          encryptedName: encryptedPayload,
+          isDeleted: false,
+          ownerUid: "user-a",
+          parentId: null,
+          revision: 2,
+          wrappedKey
+        }),
+        exists: () => true,
+        id: "parent"
+      });
+
+    await restoreRevisionedEncryptedFolderSubtree({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      folders: [parent, lifecycleFolder],
+      ownerUid: "user-a"
+    });
+
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith("user-a", {
+      action: "restore",
+      expectedRevision: 4,
+      folderId: "folder-a"
+    });
+  });
+
+  it("reacquires the stored deterministic claim when restoring a deleted root folder", async () => {
+    const lifecycleFolder = {
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      id: "folder-a",
+      isDeleted: true,
+      name: "암호화 폴더",
+      ownerUid: "user-a",
+      parentId: null,
+      revision: 4,
+      vaultNameClaimId: vaultClaimId,
+      vaultNameIndexVersion: 1 as const,
+      wrappedKey
+    };
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          encryptedName: encryptedPayload,
+          isDeleted: true,
+          ownerUid: "user-a",
+          parentId: null,
+          revision: 4,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1,
+          wrappedKey
+        }),
+        exists: () => true,
+        id: "folder-a"
+      })
+      .mockResolvedValueOnce({ exists: () => false });
+
+    await expect(restoreRevisionedEncryptedFolderSubtree({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      folders: [lifecycleFolder],
+      ownerUid: "user-a"
+    })).resolves.toEqual({ folderId: "folder-a", revision: 5, treeRevision: 1 });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith("user-a", {
+      action: "restore",
+      expectedRevision: 4,
+      folderId: "folder-a"
+    });
+  });
+
+  it("fails closed when a deleted root folder claim is now occupied by another target", async () => {
+    mocks.mutateVaultFolder.mockRejectedValueOnce(Object.assign(new Error("폴더 이름이 이미 사용 중입니다."), {
+      code: "vault_name_conflict"
+    }));
+    const lifecycleFolder = {
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      id: "folder-a",
+      isDeleted: true,
+      name: "암호화 폴더",
+      ownerUid: "user-a",
+      parentId: null,
+      revision: 4,
+      vaultNameClaimId: vaultClaimId,
+      vaultNameIndexVersion: 1 as const,
+      wrappedKey
+    };
+    mocks.transaction.get
+      .mockResolvedValueOnce({ data: () => lifecycleFolder, exists: () => true, id: "folder-a" })
+      .mockResolvedValueOnce({
+        data: () => ({
+          indexVersion: 1,
+          ownerUid: "user-a",
+          parentId: null,
+          targetId: "replacement-folder",
+          targetType: "folder"
+        }),
+        exists: () => true,
+        id: vaultClaimId
+      });
+
+    await expect(restoreRevisionedEncryptedFolderSubtree({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      folders: [lifecycleFolder],
+      ownerUid: "user-a"
+    })).rejects.toMatchObject({ code: "vault/name-conflict" });
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith("user-a", {
+      action: "restore",
+      expectedRevision: 4,
+      folderId: "folder-a"
+    });
   });
 
   it("soft-deletes without reading or deleting attachment documents", async () => {
@@ -744,6 +1540,86 @@ describe("revision-aware note persistence", () => {
     expect(mocks.getDocs).not.toHaveBeenCalled();
     expect(mocks.deleteBlobAttachment).not.toHaveBeenCalled();
     expect(mocks.deleteObject).not.toHaveBeenCalled();
+  });
+
+  it("atomically releases the stored Vault name claim when a revisioned entry is deleted", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          folderId: null,
+          ownerUid: "user-a",
+          revision: 4,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1
+        }),
+        exists: () => true,
+        id: "note-a"
+      })
+      .mockResolvedValueOnce({
+        data: () => ({
+          indexVersion: 1,
+          ownerUid: "user-a",
+          parentId: null,
+          targetId: "note-a",
+          targetType: "entry"
+        }),
+        exists: () => true,
+        id: vaultClaimId
+      });
+
+    await deleteRevisionedNote({
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+
+    expect(mocks.transaction.delete).toHaveBeenCalledWith(expect.objectContaining({
+      id: vaultClaimId,
+      parts: [mocks.db, "vaultIntegrity", "user-a", "nameClaims", vaultClaimId]
+    }));
+    expect(mocks.transaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "note-a" }),
+      expect.objectContaining({ isDeleted: true, revision: 5 })
+    );
+  });
+
+  it("matches only the exact owner, target, type, parent and index in a blinded claim document", async () => {
+    mocks.getDoc.mockResolvedValueOnce({
+      data: () => ({
+        indexVersion: 1,
+        ownerUid: "user-a",
+        parentId: "folder-a",
+        targetId: "note-a",
+        targetType: "entry"
+      }),
+      exists: () => true
+    });
+    await expect(vaultNameClaimReservationMatches({
+      claimId: vaultClaimId,
+      ownerUid: "user-a",
+      parentId: "folder-a",
+      targetId: "note-a",
+      targetType: "entry"
+    })).resolves.toBe(true);
+
+    mocks.getDoc.mockResolvedValueOnce({
+      data: () => ({
+        indexVersion: 1,
+        ownerUid: "user-b",
+        parentId: "folder-a",
+        targetId: "note-a",
+        targetType: "entry"
+      }),
+      exists: () => true
+    });
+    await expect(vaultNameClaimReservationMatches({
+      claimId: vaultClaimId,
+      ownerUid: "user-a",
+      parentId: "folder-a",
+      targetId: "note-a",
+      targetType: "entry"
+    })).resolves.toBe(false);
   });
 
   it("atomically redacts a purged note and enqueues durable server cleanup", async () => {
@@ -790,6 +1666,181 @@ describe("revision-aware note persistence", () => {
       expect.objectContaining({ id: "generated-1" }),
       expect.objectContaining({ action: "restore", revision: 5 })
     );
+  });
+
+  it("atomically reacquires a released Vault name claim when restoring", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          contentFormat: "markdown-v1",
+          entryKind: "markdown",
+          folderId: "folder-a",
+          isDeleted: true,
+          ownerUid: "user-a",
+          revision: 4,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1
+        }),
+        exists: () => true,
+        id: "note-a"
+      })
+      .mockResolvedValueOnce({ exists: () => false });
+
+    await restoreRevisionedNote({
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: vaultClaimId,
+        parts: [mocks.db, "vaultIntegrity", "user-a", "nameClaims", vaultClaimId]
+      }),
+      expect.objectContaining({
+        ownerUid: "user-a",
+        parentId: "folder-a",
+        targetId: "note-a",
+        targetType: "entry"
+      })
+    );
+    expect(mocks.transaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "note-a" }),
+      expect.objectContaining({ isDeleted: false, revision: 5 })
+    );
+  });
+
+  it("fails closed when a deleted Vault entry lost its reservation metadata", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        isDeleted: true,
+        ownerUid: "user-a",
+        revision: 4
+      }),
+      exists: () => true,
+      id: "note-a"
+    });
+
+    await expect(restoreRevisionedNote({
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).rejects.toThrow("이름 예약 정보");
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+  });
+
+  it("atomically claims and restores a pre-cutover deleted Vault entry for its owner", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          contentFormat: "legacy-html-v1",
+          entryKind: "legacy-html",
+          folderId: "folder-a",
+          isDeleted: true,
+          ownerUid: "user-a",
+          revision: 4
+        }),
+        exists: () => true,
+        id: "note-a"
+      })
+      .mockResolvedValueOnce({ exists: () => false });
+
+    await restoreRevisionedNote({
+      expectedRevision: 4,
+      nameClaim: vaultNameClaim("folder-a"),
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+
+    expect(mocks.transaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "note-a" }),
+      expect.objectContaining({
+        isDeleted: false,
+        revision: 5,
+        vaultNameClaimId: vaultClaimId,
+        vaultNameIndexVersion: 1
+      })
+    );
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.objectContaining({ id: vaultClaimId }),
+      expect.objectContaining({
+        ownerUid: "user-a",
+        parentId: "folder-a",
+        targetId: "note-a",
+        targetType: "entry"
+      })
+    );
+    expect(mocks.transaction.set).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "generated-1" }),
+      expect.objectContaining({ action: "restore", changedFields: ["restored", "name-claim"], revision: 5 })
+    );
+  });
+
+  it("rejects a forged pre-cutover restore claim from a non-owner", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        folderId: null,
+        isDeleted: true,
+        ownerUid: "user-a",
+        revision: 4
+      }),
+      exists: () => true,
+      id: "note-a"
+    });
+
+    await expect(restoreRevisionedNote({
+      expectedRevision: 4,
+      nameClaim: vaultNameClaim(null),
+      noteId: "note-a",
+      readerUids: ["user-a", "user-b"],
+      uid: "user-b"
+    })).rejects.toThrow("현재 노트 상태");
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects restore when another target acquired the released claim", async () => {
+    mocks.transaction.get
+      .mockResolvedValueOnce({
+        data: () => ({
+          contentFormat: "markdown-v1",
+          entryKind: "markdown",
+          folderId: null,
+          isDeleted: true,
+          ownerUid: "user-a",
+          revision: 4,
+          vaultNameClaimId: vaultClaimId,
+          vaultNameIndexVersion: 1
+        }),
+        exists: () => true,
+        id: "note-a"
+      })
+      .mockResolvedValueOnce({
+        data: () => ({
+          indexVersion: 1,
+          ownerUid: "user-a",
+          parentId: null,
+          targetId: "other-note",
+          targetType: "entry"
+        }),
+        exists: () => true,
+        id: vaultClaimId
+      });
+
+    await expect(restoreRevisionedNote({
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).rejects.toBeInstanceOf(Error);
+    expect(mocks.transaction.update).not.toHaveBeenCalled();
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
   });
 
 });
@@ -840,6 +1891,229 @@ describe("bounded library note reads", () => {
         && candidate.parts?.[0] === "isDeleted"
         && candidate.parts[2] === false;
     }))).toBe(true);
+  });
+
+  it("marks a cached first snapshot incomplete until the server snapshot arrives", () => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata: { fromCache: boolean; hasPendingWrites?: boolean };
+    }) => void) | undefined;
+    const callback = vi.fn();
+
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      expect(args[1]).toEqual({ includeMetadataChanges: true });
+      listener = args[2] as typeof listener;
+      return vi.fn();
+    });
+
+    subscribeVisibleNotes("admin-a", null, callback, vi.fn(), 80);
+    const document = {
+      data: () => ({
+        isDeleted: false,
+        ownerUid: "owner-a",
+        participantUids: ["admin-a"],
+        updatedAt: { toMillis: () => 100 }
+      }),
+      id: "note-a"
+    };
+
+    listener?.({ docs: [document], metadata: { fromCache: true } });
+    listener?.({ docs: [document], metadata: { fromCache: false, hasPendingWrites: true } });
+    listener?.({ docs: [document], metadata: { fromCache: false, hasPendingWrites: false } });
+
+    expect(callback).toHaveBeenNthCalledWith(
+      1,
+      [expect.objectContaining({ id: "note-a" })],
+      { fromCache: true, hasPendingWrites: false, serverComplete: false }
+    );
+    expect(callback).toHaveBeenNthCalledWith(
+      2,
+      [expect.objectContaining({ id: "note-a" })],
+      { fromCache: false, hasPendingWrites: true, serverComplete: false }
+    );
+    expect(callback).toHaveBeenNthCalledWith(
+      3,
+      [expect.objectContaining({ id: "note-a" })],
+      { fromCache: false, hasPendingWrites: false, serverComplete: true }
+    );
+  });
+
+  it("clears a single-query note snapshot when its listener loses authorization", () => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata: { fromCache: boolean; hasPendingWrites?: boolean };
+    }) => void) | undefined;
+    let errorListener: ((error: Error) => void) | undefined;
+    const callback = vi.fn();
+    const onError = vi.fn();
+
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[2] as typeof listener;
+      errorListener = args[3] as typeof errorListener;
+      return vi.fn();
+    });
+
+    subscribeVisibleNotes("admin-a", null, callback, onError, 80);
+    listener?.({
+      docs: [{
+        data: () => ({
+          isDeleted: false,
+          ownerUid: "owner-a",
+          participantUids: ["admin-a"],
+          updatedAt: { toMillis: () => 100 }
+        }),
+        id: "private-note"
+      }],
+      metadata: { fromCache: false, hasPendingWrites: false }
+    });
+    expect(callback).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ id: "private-note" })],
+      { fromCache: false, hasPendingWrites: false, serverComplete: true }
+    );
+
+    const permissionError = new Error("permission-denied");
+    errorListener?.(permissionError);
+    expect(callback).toHaveBeenLastCalledWith(
+      [],
+      { fromCache: false, hasPendingWrites: false, serverComplete: false }
+    );
+    expect(onError).toHaveBeenCalledWith(permissionError);
+
+    listener?.({
+      docs: [{
+        data: () => ({
+          isDeleted: false,
+          ownerUid: "owner-a",
+          participantUids: ["admin-a"],
+          updatedAt: { toMillis: () => 200 }
+        }),
+        id: "stale-private-note"
+      }],
+      metadata: { fromCache: false, hasPendingWrites: false }
+    });
+    expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it("requires every owner query to emit a non-cache snapshot before reporting server completeness", () => {
+    const listeners: Array<(snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata: { fromCache: boolean; hasPendingWrites?: boolean };
+    }) => void> = [];
+    const callback = vi.fn();
+
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      expect(args[1]).toEqual({ includeMetadataChanges: true });
+      listeners.push(args[2] as (typeof listeners)[number]);
+      return vi.fn();
+    });
+
+    subscribeVisibleNotes("user-a", ["user-a", "owner-b"], callback, vi.fn(), 80);
+    const document = (id: string, ownerUid: string, updatedAt: number) => ({
+      data: () => ({
+        isDeleted: false,
+        ownerUid,
+        participantUids: ["user-a"],
+        updatedAt: { toMillis: () => updatedAt }
+      }),
+      id
+    });
+
+    listeners[0]({
+      docs: [document("note-a", "user-a", 100)],
+      metadata: { fromCache: false }
+    });
+    expect(callback).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ id: "note-a" })],
+      { fromCache: false, hasPendingWrites: false, serverComplete: false }
+    );
+
+    listeners[1]({
+      docs: [document("note-b", "owner-b", 200)],
+      metadata: { fromCache: true }
+    });
+    expect(callback).toHaveBeenLastCalledWith(
+      [
+        expect.objectContaining({ id: "note-b" }),
+        expect.objectContaining({ id: "note-a" })
+      ],
+      { fromCache: true, hasPendingWrites: false, serverComplete: false }
+    );
+
+    listeners[1]({
+      docs: [document("note-b", "owner-b", 200)],
+      metadata: { fromCache: false }
+    });
+    expect(callback).toHaveBeenLastCalledWith(
+      [
+        expect.objectContaining({ id: "note-b" }),
+        expect.objectContaining({ id: "note-a" })
+      ],
+      { fromCache: false, hasPendingWrites: false, serverComplete: true }
+    );
+  });
+
+  it("keeps a multi-owner subscription incomplete after any owner listener fails", () => {
+    const listeners: Array<(snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata: { fromCache: boolean; hasPendingWrites?: boolean };
+    }) => void> = [];
+    const errorListeners: Array<(error: Error) => void> = [];
+    const callback = vi.fn();
+    const onError = vi.fn();
+
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listeners.push(args[2] as (typeof listeners)[number]);
+      errorListeners.push(args[3] as (typeof errorListeners)[number]);
+      return vi.fn();
+    });
+
+    subscribeVisibleNotes("user-a", ["user-a", "owner-b"], callback, onError, 80);
+    const document = (id: string, ownerUid: string, updatedAt: number) => ({
+      data: () => ({
+        isDeleted: false,
+        ownerUid,
+        participantUids: ["user-a"],
+        updatedAt: { toMillis: () => updatedAt }
+      }),
+      id
+    });
+
+    listeners[0]({
+      docs: [document("note-a", "user-a", 100)],
+      metadata: { fromCache: false, hasPendingWrites: false }
+    });
+    listeners[1]({
+      docs: [document("note-b", "owner-b", 200)],
+      metadata: { fromCache: false, hasPendingWrites: false }
+    });
+    expect(callback).toHaveBeenLastCalledWith(
+      [
+        expect.objectContaining({ id: "note-b" }),
+        expect.objectContaining({ id: "note-a" })
+      ],
+      { fromCache: false, hasPendingWrites: false, serverComplete: true }
+    );
+
+    const ownerError = new Error("owner query failed");
+    errorListeners[1](ownerError);
+    expect(onError).toHaveBeenCalledWith(ownerError);
+    expect(callback).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ id: "note-a" })],
+      { fromCache: false, hasPendingWrites: false, serverComplete: false }
+    );
+
+    listeners[0]({
+      docs: [document("note-a-next", "user-a", 300)],
+      metadata: { fromCache: false, hasPendingWrites: false }
+    });
+    listeners[1]({
+      docs: [document("stale-note-b", "owner-b", 400)],
+      metadata: { fromCache: false, hasPendingWrites: false }
+    });
+    expect(callback).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ id: "note-a-next" })],
+      { fromCache: false, hasPendingWrites: false, serverComplete: false }
+    );
   });
 
   it("paginates owner-safe legacy normalization beyond the visible-note limit", async () => {
@@ -1002,6 +2276,25 @@ describe("bounded library note reads", () => {
     expect(mocks.getDoc).toHaveBeenCalledTimes(3);
   });
 
+  it("does not fall back to cached direct notes for durable maintenance reads", async () => {
+    mocks.getDoc.mockResolvedValue({
+      data: () => ({
+        isDeleted: false,
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        updatedAt: { toMillis: () => 100 }
+      }),
+      exists: () => true,
+      id: "cached-note"
+    });
+    mocks.getDocFromServer.mockRejectedValue(new Error("unavailable"));
+
+    await expect(getVisibleNotesByIdsFromServer("user-a", ["cached-note"]))
+      .resolves.toEqual({ notes: [], resolvedNoteIds: [] });
+    expect(mocks.getDocFromServer).toHaveBeenCalledTimes(1);
+    expect(mocks.getDoc).not.toHaveBeenCalled();
+  });
+
   it("does not expose copying or aborted saga notes through visible direct reads", async () => {
     mocks.getDoc
       .mockResolvedValueOnce({
@@ -1125,7 +2418,7 @@ describe("note folder subscriptions", () => {
     const onError = vi.fn();
 
     mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
-      listener = args[1] as typeof listener;
+      listener = args[2] as typeof listener;
       return unsubscribe;
     });
 
@@ -1171,7 +2464,7 @@ describe("note folder subscriptions", () => {
     const onError = vi.fn();
 
     mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
-      listener = args[1] as typeof listener;
+      listener = args[2] as typeof listener;
       return vi.fn();
     });
 
@@ -1191,10 +2484,13 @@ describe("note folder subscriptions", () => {
 
     expect(onError).toHaveBeenCalledTimes(1);
     expect(callback).toHaveBeenCalledOnce();
-    expect(callback).toHaveBeenCalledWith([
-      expect.objectContaining({ id: "folder-a", name: "먼저", order: 1 }),
-      expect.objectContaining({ id: "folder-b", name: "나중", order: 2 })
-    ]);
+    expect(callback).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({ id: "folder-a", name: "먼저", order: 1 }),
+        expect.objectContaining({ id: "folder-b", name: "나중", order: 2 })
+      ],
+      { fromCache: false, hasPendingWrites: false, serverComplete: true }
+    );
   });
 
   it("still emits the complete snapshot at the supported 5,000-folder boundary", () => {
@@ -1205,7 +2501,7 @@ describe("note folder subscriptions", () => {
     const onError = vi.fn();
 
     mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
-      listener = args[1] as typeof listener;
+      listener = args[2] as typeof listener;
       return vi.fn();
     });
 
@@ -1220,6 +2516,74 @@ describe("note folder subscriptions", () => {
     expect(onError).not.toHaveBeenCalled();
     expect(callback).toHaveBeenCalledOnce();
     expect(callback.mock.calls[0][0]).toHaveLength(5_000);
+  });
+
+  it("reports cache and server completeness without opening another query", () => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata: { fromCache: boolean; hasPendingWrites?: boolean };
+    }) => void) | undefined;
+    const callback = vi.fn();
+
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      expect(args[1]).toEqual({ includeMetadataChanges: true });
+      listener = args[2] as typeof listener;
+      return vi.fn();
+    });
+
+    subscribeNoteFolders("user-a", callback, vi.fn());
+    const snapshotDocument = {
+      data: () => ({ name: "업무", order: 1 }),
+      id: "folder-a"
+    };
+    listener?.({ docs: [snapshotDocument], metadata: { fromCache: true } });
+    listener?.({ docs: [snapshotDocument], metadata: { fromCache: false, hasPendingWrites: true } });
+    listener?.({ docs: [snapshotDocument], metadata: { fromCache: false, hasPendingWrites: false } });
+
+    expect(callback).toHaveBeenNthCalledWith(
+      1,
+      [expect.objectContaining({ id: "folder-a", name: "업무" })],
+      { fromCache: true, hasPendingWrites: false, serverComplete: false }
+    );
+    expect(callback).toHaveBeenNthCalledWith(
+      2,
+      [expect.objectContaining({ id: "folder-a", name: "업무" })],
+      { fromCache: false, hasPendingWrites: true, serverComplete: false }
+    );
+    expect(callback).toHaveBeenNthCalledWith(
+      3,
+      [expect.objectContaining({ id: "folder-a", name: "업무" })],
+      { fromCache: false, hasPendingWrites: false, serverComplete: true }
+    );
+    expect(mocks.onSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps tombstoned descendants out of active folders and emits them only to the deleted subscription", () => {
+    const listeners: Array<(snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata?: { fromCache?: boolean; hasPendingWrites?: boolean };
+    }) => void> = [];
+    const activeCallback = vi.fn();
+    const deletedCallback = vi.fn();
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listeners.push(args[2] as typeof listeners[number]);
+      return vi.fn();
+    });
+
+    subscribeNoteFolders("user-a", activeCallback, vi.fn());
+    subscribeDeletedNoteFolders("user-a", deletedCallback, vi.fn());
+    const docs = [
+      { data: () => ({ isDeleted: true, name: "암호화 폴더", parentId: null }), id: "trashed" },
+      { data: () => ({ name: "암호화 폴더", parentId: "trashed" }), id: "hidden-child" },
+      { data: () => ({ name: "암호화 폴더", parentId: null }), id: "active" }
+    ];
+    listeners.forEach((listener) => listener({ docs, metadata: { fromCache: false } }));
+
+    expect(activeCallback.mock.calls[0][0].map(({ id }: { id: string }) => id)).toEqual(["active"]);
+    expect(deletedCallback.mock.calls[0][0].map(({ id }: { id: string }) => id)).toEqual([
+      "trashed",
+      "hidden-child"
+    ]);
   });
 });
 

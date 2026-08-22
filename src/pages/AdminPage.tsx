@@ -43,6 +43,7 @@ import { createUser, deleteManagedUserDocuments, updateUser } from "../services/
 import { deleteNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
 import { subscribeUsers } from "../services/users";
 import type { AppFeature, FeatureAccess, NoteKind, UserProfile } from "../types";
+import "../styles/admin-settings.css";
 
 const palette = ["#2f7d70", "#c75146", "#7c5b9e", "#b9822f", "#3f6fb5", "#65707a"];
 const AUTO_SAVE_DELAY_MS = 550;
@@ -110,10 +111,10 @@ export const adminTabIds: Readonly<Record<AdminTab, { panelId: string; tabId: st
 };
 
 const adminTabs = [
-  { icon: Plus, label: "사용자 추가", tab: "create" },
-  { icon: UserRoundCog, label: "사용자 목록", tab: "users" },
-  { icon: FileText, label: "노트 관리", tab: "notes" },
-  { icon: Mail, label: "이메일 설정", tab: "email" }
+  { description: "새 계정과 최초 접근 권한을 설정합니다.", icon: Plus, label: "사용자 추가", tab: "create" },
+  { description: "계정 상태, 기능 권한, 공유 대상을 관리합니다.", icon: UserRoundCog, label: "사용자 목록", tab: "users" },
+  { description: "권한 범위 안의 암호화 노트를 확인하고 관리합니다.", icon: FileText, label: "노트 관리", tab: "notes" },
+  { description: "Secure Share용 SMTP 연결과 검증 상태를 관리합니다.", icon: Mail, label: "이메일 설정", tab: "email" }
 ] as const;
 
 interface AdminTabsProps {
@@ -128,9 +129,9 @@ export function AdminTabs({ activeTab, onSelect }: AdminTabsProps) {
     const currentIndex = adminTabs.findIndex(({ tab }) => tab === currentTab);
     let nextIndex: number | null = null;
 
-    if (event.key === "ArrowRight") {
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
       nextIndex = (currentIndex + 1) % adminTabs.length;
-    } else if (event.key === "ArrowLeft") {
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
       nextIndex = (currentIndex - 1 + adminTabs.length) % adminTabs.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
@@ -149,7 +150,12 @@ export function AdminTabs({ activeTab, onSelect }: AdminTabsProps) {
   }
 
   return (
-    <div className="admin-tabs" role="tablist" aria-label="관리자 기능">
+    <div
+      aria-label="관리자 기능"
+      aria-orientation="vertical"
+      className="admin-tabs admin-settings-tabs"
+      role="tablist"
+    >
       {adminTabs.map(({ icon: Icon, label, tab }) => {
         const selected = activeTab === tab;
         const ids = adminTabIds[tab];
@@ -693,29 +699,46 @@ function AdminDashboard() {
     }
   }
 
+  const activeAdminSection = adminTabs.find(({ tab }) => tab === activeAdminTab) ?? adminTabs[1];
+  const ActiveAdminSectionIcon = activeAdminSection.icon;
+
   return (
     <AppShell>
-      <section className="workspace admin-workspace">
-        <div className="workspace-heading">
-          <div>
-            <div className="section-kicker">
-              <ShieldCheck size={18} />
-              관리자 페이지
-            </div>
-            <h1>사용자, 공유 권한, 노트를 관리합니다</h1>
-          </div>
-        </div>
+      <section className="workspace admin-workspace admin-settings-workspace">
+        <div className="admin-settings-layout">
+          <aside aria-labelledby="admin-settings-title" className="admin-settings-sidebar">
+            <header className="admin-settings-sidebar-header">
+              <span className="admin-settings-eyebrow">
+                <ShieldCheck aria-hidden="true" size={15} />
+                QUICKMEMO
+              </span>
+              <h1 id="admin-settings-title">관리자 설정</h1>
+              <p>사용자, 공유 권한과 운영 연결을 한곳에서 관리합니다.</p>
+            </header>
 
-        <section className="admin-stats-grid" aria-label="관리 현황">
-          <AdminStat icon={<UsersRound size={18} />} label="전체 사용자" value={adminStats.totalUsers} />
-          <AdminStat icon={<UserCheck size={18} />} label="활성 사용자" value={adminStats.activeUsers} />
-          <AdminStat icon={<ShieldCheck size={18} />} label="관리자" value={adminStats.admins} />
-          <AdminStat icon={<KeyRound size={18} />} label="공유 허용" value={adminStats.shareLinks} />
-        </section>
+            <AdminTabs activeTab={activeAdminTab} onSelect={setActiveAdminTab} />
 
-        <AdminTabs activeTab={activeAdminTab} onSelect={setActiveAdminTab} />
+            <section className="admin-stats-grid admin-settings-summary" aria-label="관리 현황">
+              <AdminStat icon={<UsersRound size={15} />} label="전체" value={adminStats.totalUsers} />
+              <AdminStat icon={<UserCheck size={15} />} label="활성" value={adminStats.activeUsers} />
+              <AdminStat icon={<ShieldCheck size={15} />} label="관리자" value={adminStats.admins} />
+              <AdminStat icon={<KeyRound size={15} />} label="공유 허용" value={adminStats.shareLinks} />
+            </section>
+          </aside>
 
-        {(activeAdminTab === "create" || activeAdminTab === "users") && (
+          <section aria-label={`${activeAdminSection.label} 설정`} className="admin-settings-pane">
+            <header className="admin-settings-pane-header">
+              <span className="admin-settings-pane-icon" aria-hidden="true">
+                <ActiveAdminSectionIcon size={18} />
+              </span>
+              <div>
+                <strong>{activeAdminSection.label}</strong>
+                <p>{activeAdminSection.description}</p>
+              </div>
+            </header>
+
+            <div className="admin-settings-pane-body" key={activeAdminTab}>
+              {(activeAdminTab === "create" || activeAdminTab === "users") && (
           <div className={`admin-management-grid ${activeAdminTab === "users" ? "single-panel" : ""}`}>
             {activeAdminTab === "create" && (
               <section
@@ -1023,7 +1046,11 @@ function AdminDashboard() {
           </div>
           </section>
         )}
-        {activeAdminTab === "email" && <AdminEmailSettingsPanel />}
+              {activeAdminTab === "email" && <AdminEmailSettingsPanel />}
+            </div>
+          </section>
+        </div>
+
         {selectedAdminNote && (
           <div className="modal-backdrop" role="presentation">
             <article

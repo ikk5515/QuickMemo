@@ -45,7 +45,6 @@ describe("local graph adjacency traversal", () => {
       "unresolved:missing"
     ]);
     expect(snapshot.edges.map((edge) => edge.id)).toEqual([
-      "link:entry:A->entry:A",
       "link:entry:A->entry:B",
       "link:entry:A->unresolved:missing",
       "link:entry:X->entry:A",

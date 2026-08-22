@@ -3,6 +3,7 @@ import {
   useEffect,
   useImperativeHandle,
   useLayoutEffect,
+  useCallback,
   useMemo,
   useRef,
   useState,
@@ -14,11 +15,14 @@ import ForceGraph2D, {
   type LinkObject,
   type NodeObject
 } from "react-force-graph-2d";
+import { forceX, forceY } from "d3-force";
 import {
+  graphEngineForceSettings,
   graphOpenIntentFromModifiers,
   GRAPH_SETTING_RANGES,
   resolveGraphNodeColor
 } from "./graphSettings";
+import { shouldRenderGraphLabel } from "./labelLod";
 import type {
   GraphContextPoint,
   GraphEdge,
@@ -96,7 +100,11 @@ function colorWithAlpha(color: string, alpha: number): string {
 }
 
 function useGraphSize(hostRef: RefObject<HTMLDivElement | null>) {
-  const [size, setSize] = useState({ height: 480, width: 640 });
+  // Do not mount force-graph against a guessed desktop-sized canvas. On a
+  // narrow viewport, restoring the saved transform before the first real
+  // measurement makes force-graph translate it when 640px is replaced by the
+  // actual width. That shifts the persisted graph center during unlock.
+  const [size, setSize] = useState({ height: 0, width: 0 });
 
   useEffect(() => {
     const host = hostRef.current;
@@ -108,22 +116,47 @@ function useGraphSize(hostRef: RefObject<HTMLDivElement | null>) {
       const bounds = host.getBoundingClientRect();
       setSize((current) => {
         const next = {
-          height: Math.max(240, Math.round(bounds.height || current.height)),
-          width: Math.max(1, Math.round(bounds.width || current.width))
+          height: Math.max(240, Math.round(bounds.height || current.height || 480)),
+          width: Math.max(1, Math.round(bounds.width || current.width || 640))
         };
         return next.height === current.height && next.width === current.width ? current : next;
       });
     };
 
+    let measureFrame = 0;
+    const scheduleMeasure = () => {
+      if (measureFrame !== 0) {
+        return;
+      }
+      // Updating the force-graph canvas from inside a ResizeObserver delivery
+      // can resize its host again in the same WebKit frame and surface an
+      // undelivered-notification loop. Coalesce measurements into the next
+      // animation frame so layout has settled before React updates the canvas.
+      measureFrame = window.requestAnimationFrame(() => {
+        measureFrame = 0;
+        measure();
+      });
+    };
+
     measure();
     if (typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver(measure);
+      const observer = new ResizeObserver(scheduleMeasure);
       observer.observe(host);
-      return () => observer.disconnect();
+      return () => {
+        observer.disconnect();
+        if (measureFrame !== 0) {
+          window.cancelAnimationFrame(measureFrame);
+        }
+      };
     }
 
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+    window.addEventListener("resize", scheduleMeasure);
+    return () => {
+      window.removeEventListener("resize", scheduleMeasure);
+      if (measureFrame !== 0) {
+        window.cancelAnimationFrame(measureFrame);
+      }
+    };
   }, [hostRef]);
 
   return size;
@@ -148,7 +181,9 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     const hostRef = useRef<HTMLDivElement>(null);
     const forceGraphRef = useRef<GraphMethods | undefined>(undefined);
     const interactionActiveRef = useRef(false);
+    const interactionIdleTimerRef = useRef<number | null>(null);
     const lastViewportRef = useRef<GraphViewport | null>(null);
+    const readyNotifiedRef = useRef(false);
     const longPressStartRef = useRef<{ clientX: number; clientY: number } | null>(null);
     const longPressTimerRef = useRef<number | null>(null);
     const suppressedNodeClickRef = useRef<SuppressedNodeClick | null>(null);
@@ -159,6 +194,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     const initialCenterX = initialViewport?.centerX;
     const initialCenterY = initialViewport?.centerY;
     const initialZoom = initialViewport?.zoom;
+    const graphSizeReady = width > 0 && height > 0;
 
     useLayoutEffect(() => {
       setRenderNodes((current) => {
@@ -204,34 +240,82 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
       if (!graph) {
         return;
       }
+      const mapped = graphEngineForceSettings({
+        centerForce: settings.common.centerForce,
+        linkDistance: settings.common.linkDistance,
+        linkForce: settings.common.linkForce,
+        repelForce: settings.common.repelForce
+      });
       const charge = graph.d3Force("charge") as ConfigurableForce | undefined;
-      const center = graph.d3Force("center") as ConfigurableForce | undefined;
       const link = graph.d3Force("link") as ConfigurableForce | undefined;
-      charge?.strength?.(-settings.common.repelForce * 15);
-      center?.strength?.(settings.common.centerForce);
-      link?.strength?.(settings.common.linkForce);
-      link?.distance?.(settings.common.linkDistance);
+      graph.d3Force("center", null);
+      graph.d3Force("x", forceX<RenderNode>(0).strength(mapped.centerStrength));
+      graph.d3Force("y", forceY<RenderNode>(0).strength(mapped.centerStrength));
+      charge?.strength?.(mapped.repelStrength);
+      link?.strength?.(mapped.linkStrength);
+      link?.distance?.(mapped.linkDistance);
       graph.d3ReheatSimulation();
     }, [settings.common.centerForce, settings.common.linkDistance, settings.common.linkForce, settings.common.repelForce]);
 
     useEffect(() => {
       const graph = forceGraphRef.current;
-      if (!graph || initialCenterX === undefined || initialCenterY === undefined || initialZoom === undefined) {
+      if (!graph || !graphSizeReady || initialCenterX === undefined || initialCenterY === undefined || initialZoom === undefined) {
         return;
       }
       graph.centerAt(initialCenterX, initialCenterY, 0);
       graph.zoom(clamp(initialZoom, GRAPH_SETTING_RANGES.zoom.min, GRAPH_SETTING_RANGES.zoom.max), 0);
-    }, [initialCenterX, initialCenterY, initialZoom]);
+    }, [graphSizeReady, height, initialCenterX, initialCenterY, initialZoom, width]);
 
     useEffect(() => {
+      if (!graphSizeReady || readyNotifiedRef.current) return;
+      readyNotifiedRef.current = true;
       onReady?.();
-    }, [onReady]);
+    }, [graphSizeReady, onReady]);
 
     useEffect(() => () => {
       if (longPressTimerRef.current !== null) {
         window.clearTimeout(longPressTimerRef.current);
       }
+      if (interactionIdleTimerRef.current !== null) {
+        window.clearTimeout(interactionIdleTimerRef.current);
+      }
     }, []);
+
+    const markInteractionIdle = useCallback(() => {
+      if (interactionIdleTimerRef.current !== null) {
+        window.clearTimeout(interactionIdleTimerRef.current);
+        interactionIdleTimerRef.current = null;
+      }
+      interactionActiveRef.current = false;
+    }, []);
+
+    const markInteractionActive = useCallback((idleAfterMs?: number) => {
+      interactionActiveRef.current = true;
+      if (interactionIdleTimerRef.current !== null) {
+        window.clearTimeout(interactionIdleTimerRef.current);
+        interactionIdleTimerRef.current = null;
+      }
+      if (idleAfterMs !== undefined) {
+        interactionIdleTimerRef.current = window.setTimeout(() => {
+          interactionIdleTimerRef.current = null;
+          interactionActiveRef.current = false;
+        }, idleAfterMs);
+      }
+    }, []);
+
+    const emitViewport = useCallback((next: GraphViewport) => {
+      const previous = lastViewportRef.current;
+      if (
+        previous
+        && Math.abs(previous.centerX - next.centerX) < 0.01
+        && Math.abs(previous.centerY - next.centerY) < 0.01
+        && Math.abs(previous.zoom - next.zoom) < 0.0001
+      ) {
+        return;
+      }
+      lastViewportRef.current = next;
+      onViewportChange?.(next);
+    }, [onViewportChange]);
 
     useImperativeHandle(forwardedRef, () => ({
       async copyImage() {
@@ -255,23 +339,33 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         if (!graph) {
           return;
         }
+        markInteractionActive(reducedMotion ? 50 : 220);
         const center = graph.centerAt();
         const zoom = graph.zoom() || 1;
-        graph.centerAt(center.x + deltaX / zoom, center.y + deltaY / zoom, reducedMotion ? 0 : 120);
+        const next = {
+          centerX: center.x + deltaX / zoom,
+          centerY: center.y + deltaY / zoom,
+          zoom
+        };
+        graph.centerAt(next.centerX, next.centerY, reducedMotion ? 0 : 120);
+        emitViewport(next);
       },
       zoomBy(factor) {
         const graph = forceGraphRef.current;
         if (!graph) {
           return;
         }
+        markInteractionActive(reducedMotion ? 50 : 260);
         const nextZoom = clamp(
           graph.zoom() * factor,
           GRAPH_SETTING_RANGES.zoom.min,
           GRAPH_SETTING_RANGES.zoom.max
         );
         graph.zoom(nextZoom, reducedMotion ? 0 : 180);
+        const center = graph.centerAt();
+        emitViewport({ centerX: center.x, centerY: center.y, zoom: nextZoom });
       }
-    }), [reducedMotion]);
+    }), [emitViewport, markInteractionActive, reducedMotion]);
 
     function publicNode(node: RenderNode): GraphNode | undefined {
       return publicNodeById.get(node.id);
@@ -342,26 +436,13 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     }
 
     function shouldDrawLabel(node: RenderNode, globalScale: number) {
-      const focused = node.id === activeNodeId || node.id === hoveredNodeId;
-      if (focused) {
-        return true;
-      }
-      if (interactionActiveRef.current && nodes.length >= 1_000) {
-        return false;
-      }
-      if (nodes.length < 1_000) {
-        return true;
-      }
-      const references = node.inboundReferenceCount ?? 0;
-      if (nodes.length >= 5_000) {
-        if (globalScale < 2.5) return false;
-        if (globalScale < 4.5) return references >= 5;
-        if (globalScale < 7) return references >= 2;
-        return true;
-      }
-      if (globalScale < 1.5) return references >= 3;
-      if (globalScale < 3) return references >= 1;
-      return true;
+      return shouldRenderGraphLabel({
+        focused: node.id === activeNodeId || node.id === hoveredNodeId,
+        globalScale,
+        inboundReferenceCount: node.inboundReferenceCount ?? 0,
+        interactionActive: interactionActiveRef.current,
+        nodeCount: nodes.length
+      });
     }
 
     function publishViewport(zoom: number) {
@@ -369,18 +450,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
       if (!center) {
         return;
       }
-      const next = { centerX: center.x, centerY: center.y, zoom };
-      const previous = lastViewportRef.current;
-      if (
-        previous
-        && Math.abs(previous.centerX - next.centerX) < 0.01
-        && Math.abs(previous.centerY - next.centerY) < 0.01
-        && Math.abs(previous.zoom - next.zoom) < 0.0001
-      ) {
-        return;
-      }
-      lastViewportRef.current = next;
-      onViewportChange?.(next);
+      emitViewport({ centerX: center.x, centerY: center.y, zoom });
     }
 
     return (
@@ -392,11 +462,11 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         onPointerUp={clearLongPress}
         ref={hostRef}
       >
-        <ForceGraph2D<RenderNode, RenderEdge>
+        {graphSizeReady ? <ForceGraph2D<RenderNode, RenderEdge>
           autoPauseRedraw
           backgroundColor="rgba(0,0,0,0)"
-          cooldownTicks={reducedMotion ? 0 : nodes.length > 5_000 ? 70 : 130}
-          d3AlphaDecay={nodes.length > 5_000 ? 0.06 : 0.035}
+          cooldownTicks={reducedMotion || nodes.length >= 5_000 ? 0 : 130}
+          d3AlphaDecay={nodes.length >= 5_000 ? 0.06 : 0.035}
           enableNodeDrag
           graphData={graphData}
           height={height}
@@ -459,7 +529,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
             onNodeOpen(node, graphOpenIntentFromModifiers(event));
           }}
           onNodeDrag={(renderedNode) => {
-            interactionActiveRef.current = true;
+            markInteractionActive();
             const node = renderedNode as RenderNode;
             node.fx = node.x;
             node.fy = node.y;
@@ -469,7 +539,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
             }
           }}
           onNodeDragEnd={(renderedNode) => {
-            interactionActiveRef.current = false;
+            markInteractionIdle();
             const node = renderedNode as RenderNode;
             node.fx = undefined;
             node.fy = undefined;
@@ -492,17 +562,17 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
             }
           }}
           onZoom={() => {
-            interactionActiveRef.current = true;
+            markInteractionActive(reducedMotion ? 50 : 260);
           }}
           onZoomEnd={({ k }) => {
-            interactionActiveRef.current = false;
+            markInteractionIdle();
             publishViewport(k);
           }}
           ref={forceGraphRef}
           showPointerCursor
-          warmupTicks={reducedMotion ? (nodes.length > 5_000 ? 40 : 80) : 0}
+          warmupTicks={nodes.length >= 5_000 ? 70 : reducedMotion ? 80 : 0}
           width={width}
-        />
+        /> : null}
       </div>
     );
   }

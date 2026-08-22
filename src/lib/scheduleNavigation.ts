@@ -1,25 +1,23 @@
-import type { ScheduleView } from "../types";
+import type { ActiveScheduleView, ScheduleView } from "../types";
 
-export type PrimaryScheduleView = Extract<ScheduleView, "todo" | "calendar" | "matrix" | "recurring">;
+export type PrimaryScheduleView = ActiveScheduleView;
 
-export const primaryScheduleViews = ["todo", "calendar", "matrix", "recurring"] as const satisfies readonly PrimaryScheduleView[];
+export const primaryScheduleViews = ["calendar", "matrix"] as const satisfies readonly PrimaryScheduleView[];
 
 export function isPrimaryScheduleView(value: unknown): value is PrimaryScheduleView {
-  return value === "todo" || value === "calendar" || value === "matrix" || value === "recurring";
+  return value === "calendar" || value === "matrix";
 }
 
 export function normalizePrimaryScheduleView(value: ScheduleView | null | undefined): PrimaryScheduleView {
-  return isPrimaryScheduleView(value) ? value : "todo";
+  return isPrimaryScheduleView(value) ? value : "calendar";
 }
 
-export function scheduleViewFromSearch(search: string): ScheduleView | null {
+export function scheduleViewFromSearch(search: string): PrimaryScheduleView | null {
   const value = new URLSearchParams(search).get("view");
 
-  return isPrimaryScheduleView(value) || value === "completed"
-    ? value
-    : null;
+  return isPrimaryScheduleView(value) ? value : null;
 }
 
-export function scheduleViewHref(view: ScheduleView) {
-  return view === "recurring" ? "/schedule/recurring" : `/schedule?view=${view}`;
+export function scheduleViewHref(view: ScheduleView | null | undefined) {
+  return `/schedule?view=${normalizePrimaryScheduleView(view)}`;
 }

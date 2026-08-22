@@ -26,9 +26,9 @@ describe("MarkdownEditor", () => {
     expect(textarea).toHaveValue("앞\t뒤");
   });
 
-  it("switches between source, live preview, and reading modes with accessible tabs", () => {
+  it("labels its legacy two-pane fallback as split preview", () => {
     render(<MarkdownEditor defaultMode="source" value="# 제목" onChange={() => undefined} />);
-    fireEvent.click(screen.getByRole("tab", { name: "라이브 프리뷰" }));
+    fireEvent.click(screen.getByRole("tab", { name: "분할 미리보기" }));
     expect(screen.getByLabelText("Markdown 노트 미리보기")).toHaveTextContent("제목");
     fireEvent.click(screen.getByRole("tab", { name: "읽기 보기" }));
     expect(screen.getByLabelText("Markdown 노트 읽기 보기")).toHaveTextContent("제목");

@@ -18,6 +18,27 @@ describe("vault note commands", () => {
     ]);
   });
 
+  it("supports an exact configurable template folder with bounded descendants", () => {
+    const notes = [
+      { id: "a", title: "회의", body: "A", entryKind: "markdown" },
+      { id: "b", title: "주간", body: "B", entryKind: "markdown" },
+      { id: "c", title: "다른", body: "C", entryKind: "markdown" }
+    ];
+    const paths = new Map([
+      ["a", "System/Templates/회의.md"],
+      ["b", "System/Templates/Reviews/주간.md"],
+      ["c", "Project/Templates/다른.md"]
+    ]);
+
+    expect(templateCandidates(notes, paths, { folderPath: "System/Templates" }).map((item) => item.id))
+      .toEqual(["b", "a"]);
+    expect(templateCandidates(notes, paths, {
+      folderPath: "System/Templates",
+      includeDescendants: false
+    }).map((item) => item.id)).toEqual(["a"]);
+    expect(templateCandidates(notes, paths, { folderPath: "../Templates" })).toEqual([]);
+  });
+
   it("selects exact or unambiguous partial templates", () => {
     const candidates = [
       { id: "a", title: "회의", body: "A", path: "Templates/회의.md" },

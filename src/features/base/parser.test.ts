@@ -43,7 +43,7 @@ views:
     });
   });
 
-  it("retains formulas only as inert strings and emits explicit warnings", () => {
+  it("retains formulas as data without evaluating JavaScript during YAML parsing", () => {
     const result = parseBaseSource(`
 formulas:
   dangerous: 'globalThis.compromised = true'
@@ -55,11 +55,24 @@ views:
 
     expect(result.errors).toEqual([]);
     expect(result.document?.formulas.dangerous).toBe("globalThis.compromised = true");
-    expect(result.warnings).toContainEqual(expect.objectContaining({
-      code: "unsupported-formula",
-      path: "formulas.dangerous"
-    }));
+    expect(result.warnings).not.toContainEqual(expect.objectContaining({ path: "formulas.dangerous" }));
     expect((globalThis as { compromised?: boolean }).compromised).toBeUndefined();
+  });
+
+  it("parses custom and per-view summary mappings", () => {
+    const result = parseBaseSource(`
+summaries:
+  Rounded average: values.mean().round(3)
+views:
+  - type: table
+    name: Summary
+    summaries:
+      priority: Rounded average
+      score: Sum
+`);
+    expect(result.errors).toEqual([]);
+    expect(result.document?.summaries).toEqual({ "Rounded average": "values.mean().round(3)" });
+    expect(result.document?.views[0].summaries).toEqual({ priority: "Rounded average", score: "Sum" });
   });
 
   it("rejects aliases, custom tags, duplicate keys and prototype-shaped mappings", () => {
@@ -74,7 +87,7 @@ views:
     const empty = parseBaseSource("");
     expect(empty.errors).toEqual([]);
     expect(empty.document?.views).toEqual([
-      { type: "table", name: "Table", order: ["file.name"], sort: [] }
+      { type: "table", name: "Table", order: ["file.name"], sort: [], summaries: {} }
     ]);
 
     const oversized = parseBaseSource(`views: []\npadding: ${"가".repeat(180_000)}`);

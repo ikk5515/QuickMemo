@@ -858,6 +858,269 @@ textarea {
   position: relative;
 }
 
+.legacy-readonly-workspace {
+  align-content: start;
+  background: var(--color-page-bg);
+  gap: 12px;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+.legacy-readonly-header,
+.legacy-readonly-document-header {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.legacy-readonly-header {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.legacy-readonly-header h1,
+.legacy-readonly-document-header h2 {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.legacy-readonly-header h1 {
+  font-size: clamp(24px, 3vw, 34px);
+}
+
+.legacy-readonly-header p {
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 8px 0 0;
+  max-width: 860px;
+}
+
+.legacy-readonly-eyebrow {
+  align-items: center;
+  color: var(--blue);
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 850;
+  gap: 6px;
+}
+
+.legacy-readonly-layout {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.legacy-readonly-list-panel,
+.legacy-readonly-document {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.legacy-readonly-list-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100svh - 226px);
+  min-height: 360px;
+  padding: 10px;
+}
+
+.legacy-readonly-search {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: flex;
+  gap: 7px;
+  padding: 0 10px;
+}
+
+.legacy-readonly-search:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--blue) 22%, transparent);
+}
+
+.legacy-readonly-search input {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  min-height: 40px;
+  min-width: 0;
+  padding: 0;
+  width: 100%;
+}
+
+.legacy-readonly-count {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 10px 4px 6px;
+}
+
+.legacy-readonly-list {
+  display: grid;
+  gap: 3px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.legacy-readonly-list > div > button {
+  align-items: flex-start;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 6px;
+  color: var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 52px;
+  padding: 8px 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.legacy-readonly-list > div > button:hover,
+.legacy-readonly-list > div > button.active {
+  background: color-mix(in srgb, var(--blue) 14%, var(--surface));
+  border-color: color-mix(in srgb, var(--blue) 32%, var(--line));
+}
+
+.legacy-readonly-list > div > button span {
+  color: var(--muted);
+  display: -webkit-box;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.legacy-readonly-document {
+  max-height: calc(100svh - 226px);
+  min-height: 360px;
+  overflow: auto;
+  padding: clamp(14px, 2vw, 24px);
+}
+
+.legacy-readonly-document-header {
+  align-items: flex-start;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 14px;
+}
+
+.legacy-readonly-document-header > div:first-child > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.legacy-readonly-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
+.legacy-readonly-actions button {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 40px;
+}
+
+.legacy-readonly-warning,
+.legacy-readonly-feedback {
+  background: color-mix(in srgb, var(--gold) 10%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--gold) 35%, var(--line));
+  border-radius: 7px;
+  color: var(--ink);
+  line-height: 1.5;
+  padding: 10px 12px;
+}
+
+.legacy-readonly-warning {
+  margin-top: 14px;
+}
+
+.legacy-readonly-content {
+  margin: 18px auto;
+  max-width: 860px;
+  min-height: 160px;
+  overflow-wrap: anywhere;
+}
+
+.legacy-readonly-attachments {
+  border-top: 1px solid var(--line);
+  padding: 12px 0;
+}
+
+.legacy-readonly-attachments h3,
+.legacy-readonly-attachments button {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+}
+
+.legacy-readonly-attachments h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+
+.legacy-readonly-attachments > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.legacy-readonly-attachments button {
+  max-width: 100%;
+  min-height: 40px;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.legacy-readonly-source {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.legacy-readonly-source summary {
+  cursor: pointer;
+  font-weight: 750;
+  min-height: 40px;
+  padding: 8px 0;
+}
+
+.legacy-readonly-source pre {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  max-height: 340px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.legacy-readonly-empty {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 300px;
+}
+
+.legacy-readonly-feedback {
+  margin: 0;
+}
+
 .notes-top-actions {
   align-items: center;
   background: var(--panel);
@@ -5845,6 +6108,33 @@ textarea {
     overflow-x: visible;
   }
 
+  .legacy-readonly-workspace {
+    overflow-x: hidden;
+  }
+
+  .legacy-readonly-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .legacy-readonly-list-panel {
+    max-height: min(36svh, 360px);
+    min-height: 220px;
+  }
+
+  .legacy-readonly-document {
+    max-height: none;
+    min-height: 320px;
+  }
+
+  .legacy-readonly-document-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .legacy-readonly-actions {
+    justify-content: flex-start;
+  }
+
   .notes-editor-layout.with-drawer {
     grid-template-columns: minmax(0, 1fr);
     min-width: 0;
@@ -5985,6 +6275,43 @@ textarea {
   .admin-user-card-footer .row-message {
     grid-column: 1 / -1;
     justify-self: stretch;
+  }
+}
+
+@media (max-width: 560px) {
+  .legacy-readonly-workspace {
+    padding: 10px;
+  }
+
+  .legacy-readonly-header {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 13px;
+  }
+
+  .legacy-readonly-header > button,
+  .legacy-readonly-actions button {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .legacy-readonly-document {
+    padding: 13px;
+  }
+
+  .legacy-readonly-attachments > div,
+  .legacy-readonly-attachments button {
+    width: 100%;
+  }
+}
+
+@media (pointer: coarse) {
+  .legacy-readonly-header button,
+  .legacy-readonly-actions button,
+  .legacy-readonly-list > div > button,
+  .legacy-readonly-attachments button,
+  .legacy-readonly-source summary {
+    min-height: 44px;
   }
 }
 
@@ -14176,32 +14503,32 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   .rich-editor-toolbar .icon-button,
   .task-pager .icon-button,
   .topbar-password-button {
-    block-size: 40px;
-    flex-basis: 40px;
-    inline-size: 40px;
-    max-height: 40px;
-    max-width: 40px;
-    min-height: 40px;
-    min-width: 40px;
-    width: 40px;
+    block-size: 44px;
+    flex-basis: 44px;
+    inline-size: 44px;
+    max-height: 44px;
+    max-width: 44px;
+    min-height: 44px;
+    min-width: 44px;
+    width: 44px;
   }
 
   .task-row {
-    grid-template-columns: 40px minmax(0, 1fr) auto;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
   }
 
   .matrix-task-row {
-    grid-template-columns: 40px 40px minmax(0, 1fr) 38px;
+    grid-template-columns: 44px 44px minmax(0, 1fr) 44px;
   }
 
   .task-check {
     background: transparent;
     border: 0;
-    height: 40px;
+    height: 44px;
     margin-top: 0;
-    min-height: 40px;
+    min-height: 44px;
     position: relative;
-    width: 40px;
+    width: 44px;
   }
 
   .task-check::before {
@@ -14222,11 +14549,11 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   .task-drag-handle,
   .recurring-drag-handle,
   .recurring-check-button {
-    height: 40px;
+    height: 44px;
     margin-top: 0;
-    min-height: 40px;
-    min-width: 40px;
-    width: 40px;
+    min-height: 44px;
+    min-width: 44px;
+    width: 44px;
   }
 
   .recurring-date-strip {
@@ -14235,69 +14562,6 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
 
   .recurring-date-strip::-webkit-scrollbar {
     display: none;
-  }
-}
-
-@media (max-width: 1024px) {
-  .matrix-layout {
-    --matrix-section-height: auto;
-  }
-
-  .matrix-grid {
-    grid-auto-rows: auto;
-  }
-
-  .matrix-section,
-  .matrix-grid .matrix-section,
-  .matrix-today-rail .matrix-section {
-    height: auto;
-    min-height: 140px;
-  }
-
-  .matrix-section > .matrix-task-list,
-  .matrix-section > .matrix-date-groups {
-    max-height: none;
-    overflow-y: visible;
-    padding-right: 0;
-    scrollbar-gutter: auto;
-  }
-
-  .matrix-date-group.empty {
-    display: none;
-  }
-
-  .matrix-task-row {
-    align-items: start;
-    column-gap: 8px;
-    grid-template-areas:
-      "drag main flags"
-      "check main flags";
-    grid-template-columns: 40px minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
-    min-height: 72px;
-    row-gap: 2px;
-  }
-
-  .matrix-task-row > .task-drag-handle {
-    grid-area: drag;
-    justify-self: center;
-  }
-
-  .matrix-task-row > .task-check {
-    grid-area: check;
-    justify-self: center;
-  }
-
-  .matrix-task-row > .task-main {
-    align-self: stretch;
-    grid-area: main;
-    min-width: 0;
-    padding-block: 2px;
-  }
-
-  .matrix-task-row > .task-flags {
-    align-self: start;
-    grid-area: flags;
   }
 }
 
@@ -14346,4 +14610,301 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
     margin-top: 6px;
   }
 
+}
+
+/* Obsidian-style schedule pane: Calendar and Matrix share one compact workspace. */
+.obsidian-schedule-pane {
+  background: var(--color-page-bg);
+  margin: 0;
+  max-width: none;
+  min-height: 100%;
+  padding: 0;
+}
+
+.obsidian-schedule-pane .schedule-header {
+  align-items: center;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border-subtle);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(116px, auto) minmax(180px, 1fr) auto auto;
+  margin: 0;
+  min-height: 48px;
+  padding: 5px 10px;
+  position: sticky;
+  top: 0;
+  z-index: 12;
+}
+
+.obsidian-schedule-pane .schedule-header > div:first-child {
+  min-width: 0;
+}
+
+.obsidian-schedule-pane .schedule-header .section-kicker {
+  color: var(--muted);
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  margin: 0 0 3px;
+}
+
+.obsidian-schedule-pane .schedule-header h1 {
+  font-size: 14px;
+  line-height: 1.2;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.obsidian-schedule-pane .schedule-search-control {
+  min-height: 34px;
+}
+
+.obsidian-schedule-pane .schedule-search-control input {
+  min-height: 34px;
+}
+
+.obsidian-schedule-pane .schedule-view-tabs {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  display: grid;
+  gap: 2px;
+  grid-template-columns: repeat(2, minmax(76px, 1fr));
+  padding: 0;
+}
+
+.obsidian-schedule-pane .schedule-view-tabs button {
+  border: 1px solid transparent;
+  border-radius: 4px;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.obsidian-schedule-pane .schedule-view-tabs button.active {
+  background: var(--color-primary-subtle);
+  border-color: color-mix(in srgb, var(--teal) 28%, var(--color-border-subtle));
+  box-shadow: none;
+}
+
+.obsidian-schedule-pane .schedule-header-actions {
+  gap: 4px;
+}
+
+.obsidian-schedule-pane .schedule-primary-action {
+  border-radius: 4px;
+  min-height: 34px;
+  padding-inline: 11px;
+}
+
+.obsidian-schedule-pane .schedule-category-toolbar {
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border-subtle);
+  justify-content: flex-start;
+  margin: 0;
+  padding: 6px 10px;
+}
+
+.obsidian-schedule-pane .schedule-category-filter {
+  background: transparent;
+  border-color: var(--color-border-subtle);
+  border-radius: 4px;
+  box-shadow: none;
+  padding: 2px;
+}
+
+.obsidian-schedule-pane .schedule-category-filter button {
+  border-radius: 3px;
+  min-height: 32px;
+}
+
+.obsidian-schedule-pane .schedule-feedback {
+  border-radius: 4px;
+  margin: 8px 10px 0;
+}
+
+.obsidian-schedule-pane .calendar-layout,
+.obsidian-schedule-pane .matrix-layout {
+  padding: 10px;
+}
+
+.obsidian-schedule-pane .calendar-panel,
+.obsidian-schedule-pane .calendar-agenda,
+.obsidian-schedule-pane .matrix-section {
+  border-color: var(--color-border-subtle);
+  border-radius: 4px;
+  box-shadow: none;
+}
+
+.obsidian-schedule-pane .matrix-section {
+  border-top-width: 2px;
+}
+
+@media (max-width: 900px) {
+  .obsidian-schedule-pane .schedule-header {
+    grid-template-areas:
+      "title actions"
+      "search search"
+      "views views";
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 7px 10px 8px;
+  }
+
+  .obsidian-schedule-pane .schedule-header > div:first-child {
+    grid-area: title;
+  }
+
+  .obsidian-schedule-pane .schedule-search-control {
+    grid-area: search;
+  }
+
+  .obsidian-schedule-pane .schedule-view-tabs {
+    grid-area: views;
+    width: 100%;
+  }
+
+  .obsidian-schedule-pane .schedule-header-actions {
+    display: flex;
+    grid-area: actions;
+    width: auto;
+  }
+}
+
+@media (max-width: 1024px) {
+  .matrix-layout {
+    --matrix-section-height: auto;
+  }
+
+  .matrix-grid {
+    grid-auto-rows: auto;
+  }
+
+  .matrix-section,
+  .matrix-grid .matrix-section,
+  .matrix-today-rail .matrix-section {
+    height: auto;
+    min-height: 140px;
+  }
+
+  .matrix-section > .matrix-task-list,
+  .matrix-section > .matrix-date-groups {
+    max-height: none;
+    overflow-y: visible;
+    padding-right: 0;
+    scrollbar-gutter: auto;
+  }
+
+  .matrix-date-group.empty {
+    display: none;
+  }
+
+  .matrix-task-row {
+    align-items: start;
+    column-gap: 8px;
+    grid-template-areas:
+      "drag main flags"
+      "check main flags";
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    min-height: 72px;
+    row-gap: 2px;
+  }
+
+  .matrix-task-row > .task-drag-handle {
+    grid-area: drag;
+    justify-self: center;
+  }
+
+  .matrix-task-row > .task-check {
+    grid-area: check;
+    justify-self: center;
+  }
+
+  .matrix-task-row > .task-main {
+    align-self: stretch;
+    grid-area: main;
+    min-width: 0;
+    padding-block: 2px;
+  }
+
+  .matrix-task-row > .task-flags {
+    align-self: start;
+    grid-area: flags;
+  }
+
+  .obsidian-schedule-pane .schedule-search-control,
+  .obsidian-schedule-pane .schedule-search-control input,
+  .obsidian-schedule-pane .schedule-view-tabs button,
+  .obsidian-schedule-pane .schedule-primary-action,
+  .obsidian-schedule-pane .schedule-header-actions .icon-button,
+  .obsidian-schedule-pane .schedule-category-filter button {
+    min-height: 44px;
+  }
+}
+
+@media (max-width: 640px) {
+  .obsidian-schedule-pane {
+    padding: 0;
+  }
+
+  .obsidian-schedule-pane .schedule-header {
+    gap: 7px;
+    margin: 0;
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+  }
+
+  .obsidian-schedule-pane .schedule-header .section-kicker {
+    display: block;
+  }
+
+  .obsidian-schedule-pane .schedule-header h1 {
+    font-size: 14px;
+  }
+
+  .obsidian-schedule-pane .schedule-view-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .obsidian-schedule-pane .schedule-view-tabs button,
+  .obsidian-schedule-pane .schedule-search-control,
+  .obsidian-schedule-pane .schedule-search-control input,
+  .obsidian-schedule-pane .schedule-primary-action,
+  .obsidian-schedule-pane .schedule-header-actions .icon-button {
+    min-height: 44px;
+  }
+
+  .obsidian-schedule-pane .schedule-view-tabs button {
+    padding-block: 4px;
+  }
+
+  .obsidian-schedule-pane .schedule-primary-action {
+    min-width: 44px;
+  }
+
+  .obsidian-schedule-pane .schedule-header-actions {
+    display: flex;
+    grid-template-columns: none;
+    width: auto;
+  }
+
+  .obsidian-schedule-pane .schedule-category-toolbar {
+    margin: 0;
+    padding: 7px 8px;
+  }
+
+  .obsidian-schedule-pane .schedule-category-filter button {
+    min-height: 44px;
+  }
+
+  .obsidian-schedule-pane .calendar-layout,
+  .obsidian-schedule-pane .matrix-layout {
+    padding: 8px;
+  }
+
+  .obsidian-schedule-pane .matrix-today-rail .matrix-section {
+    min-height: 112px;
+  }
 }

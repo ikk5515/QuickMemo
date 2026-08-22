@@ -23,19 +23,13 @@ describe("schedule UI styles", () => {
     expect(stylesSource).not.toMatch(/\.home-primary-action \{[^}]*background: var\(--ink\);/);
   });
 
-  it("styles the today quick panel trigger and popover surfaces for light and dark themes", () => {
-    const mobileStyles = stylesSource.slice(stylesSource.indexOf("@media (max-width: 760px)"));
-
-    expect(stylesSource).toMatch(/\.today-work-trigger\.active,[\s\S]*\.today-work-trigger\[aria-expanded="true"\] \{[\s\S]*background: var\(--color-primary-subtle\);/);
-    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.today-work-trigger\.active,[\s\S]*html\[data-theme="dark"\] \.today-work-trigger\[aria-expanded="true"\] \{[\s\S]*background: color-mix\(in srgb, var\(--teal\) 14%, var\(--color-surface-elevated\)\);/);
-    expect(stylesSource).toMatch(/\.schedule-tool-menu-trigger\.active,[\s\S]*\.schedule-tool-menu-trigger\[aria-current="page"\] \{[\s\S]*background: var\(--color-primary-subtle\);/);
-    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-tool-menu-trigger\.active,[\s\S]*html\[data-theme="dark"\] \.schedule-tool-menu-trigger\[aria-current="page"\] \{[\s\S]*background: color-mix\(in srgb, var\(--teal\) 14%, var\(--color-surface-elevated\)\);/);
-    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-tool-menu-popover \{[\s\S]*background: var\(--color-popover-bg\);/);
-    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.schedule-view-tabs \{[\s\S]*grid-template-columns: repeat\(4, minmax\(0, 1fr\)\);/);
-    expect(mobileStyles).toMatch(/\.today-work-panel \{[\s\S]*overflow-y: auto;/);
-    expect(mobileStyles).toMatch(/\.today-work-panel \{[\s\S]*position: fixed;/);
-    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.today-work-section\.overdue \{[\s\S]*background: var\(--color-danger-subtle\);/);
-    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.today-recurring-item\.checked \{[\s\S]*background: var\(--color-success-subtle\);/);
+  it("uses a compact Obsidian-style two-view pane with mobile touch targets", () => {
+    expect(stylesSource).toMatch(/\.obsidian-schedule-pane \{[\s\S]*max-width: none;[\s\S]*padding: 0;/);
+    expect(stylesSource).toMatch(/\.obsidian-schedule-pane \.schedule-header \{[\s\S]*border-bottom: 1px solid var\(--color-border-subtle\);[\s\S]*position: sticky;/);
+    expect(stylesSource).toMatch(/\.obsidian-schedule-pane \.schedule-view-tabs \{[\s\S]*box-shadow: none;[\s\S]*grid-template-columns: repeat\(2, minmax\(76px, 1fr\)\);/);
+    expect(stylesSource).toMatch(/\.obsidian-schedule-pane \.calendar-panel,[\s\S]*\.obsidian-schedule-pane \.matrix-section \{[\s\S]*border-radius: 4px;[\s\S]*box-shadow: none;/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.obsidian-schedule-pane \.schedule-view-tabs \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.obsidian-schedule-pane \.schedule-view-tabs button,[\s\S]*min-height: 44px;/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-feedback:not\(\.error\) \{[\s\S]*background: var\(--color-success-subtle\);/);
   });
 
@@ -65,7 +59,7 @@ describe("schedule UI styles", () => {
     expect(tabletStyles).toMatch(/\.matrix-today-rail \.matrix-section \{[\s\S]*height: auto;[\s\S]*min-height: 140px;/);
     expect(tabletStyles).toMatch(/\.matrix-section > \.matrix-date-groups \{[\s\S]*max-height: none;[\s\S]*overflow-y: visible;/);
     expect(tabletStyles).toMatch(/\.matrix-date-group\.empty \{[\s\S]*display: none;/);
-    expect(tabletStyles).toMatch(/\.matrix-task-row \{[\s\S]*grid-template-areas:[\s\S]*"drag main flags"[\s\S]*"check main flags";[\s\S]*grid-template-columns: 40px minmax\(0, 1fr\) auto;/);
+    expect(tabletStyles).toMatch(/\.matrix-task-row \{[\s\S]*grid-template-areas:[\s\S]*"drag main flags"[\s\S]*"check main flags";[\s\S]*grid-template-columns: 44px minmax\(0, 1fr\) auto;/);
     expect(mobileStyles).toMatch(/\.matrix-today-rail \.matrix-section \{[\s\S]*min-height: 112px;/);
     expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-day \{[\s\S]*min-height: 76px;[\s\S]*padding: 5px 3px;/);
     expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-task-pill \{[\s\S]*border-radius: 999px;[\s\S]*height: 8px;[\s\S]*width: 8px;/);

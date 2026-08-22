@@ -10,7 +10,8 @@ import type {
   KnowledgeIndex,
   ParsedMarkdownMetadata,
   ResolvedLinkOccurrence,
-  VaultIndexEntry
+  VaultIndexEntry,
+  VaultSearchQuery
 } from "./types";
 
 export const DEFAULT_GRAPH_COMMON_SETTINGS: GraphCommonSettings = {
@@ -46,6 +47,9 @@ export const DEFAULT_LOCAL_GRAPH_SETTINGS: Extract<GraphViewSettings, { scope: "
   neighborLinks: false
 };
 
+/** Mirrors the encrypted workspace-state boundary and caps worker evaluation. */
+export const MAX_GRAPH_GROUPS_PER_SNAPSHOT = 64;
+
 export interface BuildGraphSnapshotOptions {
   activeEntryId?: string;
   allowRegex?: boolean;
@@ -62,6 +66,11 @@ interface CollapsedLink {
 interface LinkAdjacency {
   incomingByTarget: Map<string, CollapsedLink[]>;
   outgoingBySource: Map<string, CollapsedLink[]>;
+}
+
+interface PreparedGraphGroup {
+  group: GraphGroup;
+  query: VaultSearchQuery;
 }
 
 function isAttachment(entry: VaultIndexEntry): boolean {
@@ -163,20 +172,28 @@ function forEachAdjacentLink(
 }
 
 function graphGroupForEntry(
-  groups: readonly GraphGroup[],
+  groups: readonly PreparedGraphGroup[],
   entry: VaultIndexEntry,
   metadata: ParsedMarkdownMetadata,
   allowRegex: boolean
 ): GraphGroup | undefined {
-  return [...groups]
-    .sort((left, right) => left.order - right.order)
-    .find((group) => matchesVaultSearchQuery(group.query, entry, metadata, { allowRegex }));
+  return groups.find(({ query }) =>
+    matchesVaultSearchQuery(query, entry, metadata, { allowRegex })
+  )?.group;
+}
+
+function prepareGraphGroups(groups: readonly GraphGroup[]): PreparedGraphGroup[] {
+  return groups
+    .slice(0, MAX_GRAPH_GROUPS_PER_SNAPSHOT)
+    .map((group, index) => ({ group, index }))
+    .sort((left, right) => left.group.order - right.group.order || left.index - right.index)
+    .map(({ group }) => ({ group, query: parseVaultSearchQuery(group.query) }));
 }
 
 function graphNodeForEntry(
   entry: VaultIndexEntry,
   metadata: ParsedMarkdownMetadata,
-  groups: readonly GraphGroup[],
+  groups: readonly PreparedGraphGroup[],
   incomingReferenceCount: number,
   allowRegex: boolean
 ): GraphNode {
@@ -234,7 +251,7 @@ function incomingReferenceCounts(links: readonly CollapsedLink[], visibleEntryId
 
 function unresolvedNode(
   key: string,
-  groups: readonly GraphGroup[],
+  groups: readonly PreparedGraphGroup[],
   incomingReferenceCount: number,
   allowRegex: boolean
 ): GraphNode {
@@ -252,7 +269,7 @@ function unresolvedNode(
   };
 }
 
-function unresolvedMatchesQuery(query: string, key: string, allowRegex: boolean): boolean {
+function unresolvedMatchesQuery(query: VaultSearchQuery, key: string, allowRegex: boolean): boolean {
   const pseudoEntry: VaultIndexEntry = { id: `unresolved:${key}`, path: key, kind: "markdown" };
   return matchesVaultSearchQuery(query, pseudoEntry, emptyMetadata(), { allowRegex });
 }
@@ -260,7 +277,7 @@ function unresolvedMatchesQuery(query: string, key: string, allowRegex: boolean)
 function addTagNodesAndEdges(
   index: KnowledgeIndex,
   visibleEntryIds: ReadonlySet<string>,
-  groups: readonly GraphGroup[],
+  groups: readonly PreparedGraphGroup[],
   nodes: GraphNode[],
   edges: GraphEdge[],
   allowRegex: boolean
@@ -310,10 +327,11 @@ function addTagNodesAndEdges(
 
 function globalEntryIds(
   index: KnowledgeIndex,
+  links: readonly CollapsedLink[],
   settings: Extract<GraphViewSettings, { scope: "global" }>,
+  parsedQuery: VaultSearchQuery,
   allowRegex: boolean
 ): Set<string> {
-  const parsedQuery = parseVaultSearchQuery(settings.common.query);
   const visible = new Set(
     index.entries
       .filter((entry) => settings.common.showAttachments || !isAttachment(entry))
@@ -329,12 +347,20 @@ function globalEntryIds(
   );
 
   if (!settings.showOrphans) {
+    // Obsidian's orphan state belongs to the full ACL-scoped knowledge graph,
+    // not to the temporary search/attachment projection. Otherwise a linked
+    // note becomes an apparent orphan merely because its neighbour is hidden
+    // by the current query. Attachment links also must not turn a note into a
+    // connected knowledge note.
+    const entryById = new Map(index.entries.map((entry) => [entry.id, entry]));
     const connected = new Set<string>();
-    for (const link of collapseLinks(index)) {
-      if (link.targetEntryId && visible.has(link.sourceEntryId) && visible.has(link.targetEntryId)) {
-        connected.add(link.sourceEntryId);
-        connected.add(link.targetEntryId);
-      }
+    for (const link of links) {
+      if (!link.targetEntryId) continue;
+      const source = entryById.get(link.sourceEntryId);
+      const target = entryById.get(link.targetEntryId);
+      if (!source || !target || isAttachment(source) || isAttachment(target)) continue;
+      connected.add(link.sourceEntryId);
+      connected.add(link.targetEntryId);
     }
     for (const entryId of visible) {
       if (!connected.has(entryId)) {
@@ -358,13 +384,13 @@ function localEntryIds(
   adjacency: LinkAdjacency,
   settings: Extract<GraphViewSettings, { scope: "local" }>,
   activeEntryId: string | undefined,
+  parsedQuery: VaultSearchQuery,
   allowRegex: boolean
 ): LocalSelection {
   const rootEntryId = settings.root === "follow-active" ? activeEntryId : settings.root.entryId;
   if (!rootEntryId || !index.entries.some((entry) => entry.id === rootEntryId)) {
     return { entryIds: new Set(), selectedLinkIds: new Set(), unresolvedKeys: new Set() };
   }
-  const parsedQuery = parseVaultSearchQuery(settings.common.query);
   const eligible = new Set(
     index.entries
       .filter((entry) => settings.common.showAttachments || !isAttachment(entry))
@@ -393,6 +419,11 @@ function localEntryIds(
       continue;
     }
     forEachAdjacentLink(current, adjacency, settings.incoming, settings.outgoing, (link) => {
+      // Official Obsidian 1.13.7 retains self links in Global Graph but omits
+      // them from Local Graph traversal and neighbor-link projection.
+      if (link.targetEntryId === link.sourceEntryId) {
+        return;
+      }
       const edgeId = graphEdgeId(link);
       let neighbor: string | undefined;
       if (settings.outgoing && link.sourceEntryId === current) {
@@ -423,6 +454,7 @@ function localEntryIds(
     for (const link of links) {
       if (
         link.targetEntryId &&
+        link.sourceEntryId !== link.targetEntryId &&
         entryIds.has(link.sourceEntryId) &&
         entryIds.has(link.targetEntryId)
       ) {
@@ -439,13 +471,23 @@ export function buildGraphSnapshot(
   options: BuildGraphSnapshotOptions = {}
 ): GraphSnapshot {
   const allowRegex = options.allowRegex !== false;
+  const parsedQuery = parseVaultSearchQuery(settings.common.query);
+  const preparedGroups = prepareGraphGroups(settings.common.groups);
   const links = collapseLinks(index);
   const adjacency = settings.scope === "local" ? buildLinkAdjacency(links) : undefined;
   const localSelection = settings.scope === "local" && adjacency
-    ? localEntryIds(index, links, adjacency, settings, options.activeEntryId, allowRegex)
+    ? localEntryIds(
+        index,
+        links,
+        adjacency,
+        settings,
+        options.activeEntryId,
+        parsedQuery,
+        allowRegex
+      )
     : undefined;
   const visibleEntryIds = settings.scope === "global"
-    ? globalEntryIds(index, settings, allowRegex)
+    ? globalEntryIds(index, links, settings, parsedQuery, allowRegex)
     : localSelection?.entryIds ?? new Set<string>();
   const counts = incomingReferenceCounts(links, visibleEntryIds);
   const nodes = index.entries
@@ -453,7 +495,7 @@ export function buildGraphSnapshot(
     .map((entry) => graphNodeForEntry(
       entry,
       index.metadataByEntryId.get(entry.id) ?? emptyMetadata(),
-      settings.common.groups,
+      preparedGroups,
       counts.get(entry.id) ?? 0,
       allowRegex
     ));
@@ -477,7 +519,7 @@ export function buildGraphSnapshot(
     if (settings.common.existingFilesOnly || !link.unresolvedKey) {
       continue;
     }
-    if (!unresolvedMatchesQuery(settings.common.query, link.unresolvedKey, allowRegex)) {
+    if (!unresolvedMatchesQuery(parsedQuery, link.unresolvedKey, allowRegex)) {
       continue;
     }
     if (settings.scope === "local" && !localSelection?.unresolvedKeys.has(link.unresolvedKey)) {
@@ -496,13 +538,13 @@ export function buildGraphSnapshot(
   for (const unresolved of unresolvedCounts.values()) {
     nodes.push(unresolvedNode(
       unresolved.displayKey,
-      settings.common.groups,
+      preparedGroups,
       unresolved.sources.size,
       allowRegex
     ));
   }
   if (settings.common.showTags) {
-    addTagNodesAndEdges(index, visibleEntryIds, settings.common.groups, nodes, edges, allowRegex);
+    addTagNodesAndEdges(index, visibleEntryIds, preparedGroups, nodes, edges, allowRegex);
   }
 
   nodes.sort((left, right) => left.id.localeCompare(right.id));

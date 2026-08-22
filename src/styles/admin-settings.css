@@ -1,0 +1,435 @@
+.admin-settings-workspace {
+  --admin-settings-sidebar-width: clamp(232px, 20vw, 272px);
+  background: var(--color-page-bg);
+  display: block;
+  gap: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.admin-settings-layout {
+  display: grid;
+  grid-template-columns: var(--admin-settings-sidebar-width) minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.admin-settings-sidebar {
+  background: color-mix(in srgb, var(--color-surface-muted) 88%, var(--color-page-bg));
+  border-inline-end: 1px solid var(--color-border-subtle);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 14px 10px 10px;
+  scrollbar-gutter: stable;
+}
+
+.admin-settings-sidebar-header {
+  display: grid;
+  gap: 5px;
+  padding: 4px 8px 14px;
+}
+
+.admin-settings-eyebrow {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 9px;
+  font-weight: 900;
+  gap: 6px;
+  letter-spacing: .12em;
+}
+
+.admin-settings-sidebar-header h1 {
+  font-size: 20px;
+  letter-spacing: -.02em;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.admin-settings-sidebar-header p,
+.admin-settings-pane-header p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.admin-settings-workspace .admin-settings-tabs {
+  align-items: stretch;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  display: flex;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 2px;
+  padding: 2px 0 12px;
+}
+
+.admin-settings-workspace .admin-settings-tabs button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 760;
+  gap: 9px;
+  justify-content: flex-start;
+  min-height: 36px;
+  padding: 6px 9px;
+  text-align: start;
+  width: 100%;
+}
+
+.admin-settings-workspace .admin-settings-tabs button:hover {
+  background: var(--color-surface-hover);
+  border-color: transparent;
+  color: var(--ink);
+}
+
+.admin-settings-workspace .admin-settings-tabs button.active,
+.admin-settings-workspace .admin-settings-tabs button[aria-selected="true"] {
+  background: color-mix(in srgb, var(--workspace-accent, var(--blue)) 13%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--workspace-accent, var(--blue)) 20%, var(--color-border-subtle));
+  color: var(--ink);
+}
+
+.admin-settings-workspace .admin-settings-tabs button[aria-selected="true"]::before {
+  background: var(--workspace-accent, var(--blue));
+  border-radius: 999px;
+  content: "";
+  height: 18px;
+  margin-inline-start: -10px;
+  width: 3px;
+}
+
+.admin-settings-summary {
+  border-top: 1px solid var(--color-border-subtle);
+  display: grid;
+  gap: 3px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: auto;
+  padding: 10px 0 0;
+}
+
+.admin-settings-workspace .admin-settings-summary .admin-stat-card {
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  box-shadow: none;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: 26px minmax(0, 1fr);
+  padding: 7px 6px;
+}
+
+.admin-settings-workspace .admin-settings-summary .admin-stat-card > span {
+  background: var(--color-surface-hover);
+  border-radius: 4px;
+  height: 26px;
+  width: 26px;
+}
+
+.admin-settings-workspace .admin-settings-summary .admin-stat-card strong {
+  font-size: 15px;
+}
+
+.admin-settings-workspace .admin-settings-summary .admin-stat-card em {
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.admin-settings-pane {
+  background: var(--color-page-bg);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.admin-settings-pane-header {
+  align-items: center;
+  background: color-mix(in srgb, var(--color-surface) 82%, var(--color-page-bg));
+  border-bottom: 1px solid var(--color-border-subtle);
+  display: flex;
+  gap: 10px;
+  min-height: 58px;
+  padding: 8px clamp(16px, 2.4vw, 28px);
+}
+
+.admin-settings-pane-icon {
+  align-items: center;
+  background: color-mix(in srgb, var(--workspace-accent, var(--blue)) 14%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--workspace-accent, var(--blue)) 20%, var(--color-border-subtle));
+  border-radius: 5px;
+  color: var(--workspace-accent, var(--blue));
+  display: inline-flex;
+  flex: 0 0 32px;
+  height: 32px;
+  justify-content: center;
+}
+
+.admin-settings-pane-header > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.admin-settings-pane-header strong {
+  font-size: 14px;
+}
+
+.admin-settings-pane-header p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-settings-pane-body {
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.admin-settings-workspace .admin-management-grid,
+.admin-settings-workspace .admin-management-grid.single-panel {
+  display: block;
+  max-width: none;
+}
+
+.admin-settings-workspace .admin-settings-pane-body > .panel,
+.admin-settings-workspace .admin-settings-pane-body > .admin-management-grid > .panel {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  margin: 0;
+  max-width: none;
+  padding: 22px clamp(16px, 2.6vw, 32px) 32px;
+  width: 100%;
+}
+
+.admin-settings-workspace .admin-section-header {
+  border-bottom: 1px solid var(--color-border-subtle);
+  min-height: 40px;
+  padding-bottom: 12px;
+}
+
+.admin-settings-workspace .admin-section-header h2 {
+  font-size: 18px;
+  gap: 8px;
+  letter-spacing: -.01em;
+}
+
+.admin-settings-workspace .admin-user-card-list,
+.admin-settings-workspace .admin-note-list {
+  background: var(--color-border-subtle);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  gap: 1px;
+  max-width: none;
+  overflow: hidden;
+}
+
+.admin-settings-workspace .admin-user-card,
+.admin-settings-workspace .admin-note-card {
+  background: var(--color-surface);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  margin: 0;
+}
+
+.admin-settings-workspace .admin-user-card {
+  padding: 12px;
+}
+
+.admin-settings-workspace .admin-user-card:hover {
+  background: var(--color-surface-hover);
+  border-color: transparent;
+  box-shadow: none;
+  transform: none;
+}
+
+.admin-settings-workspace .admin-user-card.inactive {
+  background: color-mix(in srgb, var(--color-surface) 88%, var(--color-page-bg));
+}
+
+.admin-settings-workspace .admin-note-card {
+  height: auto;
+  min-height: 156px;
+  padding: 12px 14px;
+}
+
+.admin-settings-workspace .admin-note-card h3 {
+  font-size: 16px;
+}
+
+.admin-settings-workspace .admin-note-preview {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.admin-settings-workspace .admin-email-settings-panel {
+  gap: 14px;
+}
+
+.admin-settings-workspace .admin-email-security-note,
+.admin-settings-workspace .admin-email-settings-form,
+.admin-settings-workspace .admin-email-verification,
+.admin-settings-workspace .admin-email-danger-zone {
+  border-radius: 5px;
+  box-shadow: none;
+}
+
+.admin-settings-workspace .admin-email-status-grid {
+  background: var(--color-border-subtle);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.admin-settings-workspace .admin-email-status-card {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+@media (max-width: 980px) {
+  .admin-settings-workspace {
+    --admin-settings-sidebar-width: 216px;
+  }
+
+  .admin-settings-sidebar-header p {
+    font-size: 11px;
+  }
+}
+
+@media (max-width: 760px) {
+  .admin-settings-workspace {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+
+  .admin-settings-layout {
+    display: block;
+    height: auto;
+    min-height: 100%;
+  }
+
+  .admin-settings-sidebar {
+    border-bottom: 1px solid var(--color-border-subtle);
+    border-inline-end: 0;
+    overflow: visible;
+    padding: 10px max(10px, env(safe-area-inset-right)) 8px max(10px, env(safe-area-inset-left));
+  }
+
+  .admin-settings-sidebar-header {
+    padding: 2px 4px 10px;
+  }
+
+  .admin-settings-sidebar-header h1 {
+    font-size: 18px;
+  }
+
+  .admin-settings-workspace .admin-settings-tabs {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: 8px;
+  }
+
+  .admin-settings-workspace .admin-settings-tabs button {
+    min-height: 44px;
+    min-width: 0;
+  }
+
+  .admin-settings-summary {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    padding-top: 7px;
+  }
+
+  .admin-settings-workspace .admin-settings-summary .admin-stat-card {
+    display: block;
+    min-width: 0;
+    padding: 5px 3px;
+    text-align: center;
+  }
+
+  .admin-settings-workspace .admin-settings-summary .admin-stat-card > span {
+    display: none;
+  }
+
+  .admin-settings-pane {
+    display: block;
+    overflow: visible;
+  }
+
+  .admin-settings-pane-header {
+    min-height: 54px;
+    padding: 7px max(14px, env(safe-area-inset-right)) 7px max(14px, env(safe-area-inset-left));
+    position: sticky;
+    top: 0;
+    z-index: 4;
+  }
+
+  .admin-settings-pane-body {
+    overflow: visible;
+  }
+
+  .admin-settings-workspace .admin-settings-pane-body > .panel,
+  .admin-settings-workspace .admin-settings-pane-body > .admin-management-grid > .panel {
+    padding: 16px max(14px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+  }
+
+  .admin-settings-workspace .admin-create-form,
+  .admin-settings-workspace .admin-note-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-settings-workspace .admin-note-toolbar .admin-search-field {
+    grid-column: auto;
+  }
+
+  .admin-settings-workspace .admin-section-header {
+    align-items: flex-start;
+    gap: 8px;
+  }
+}
+
+@media (pointer: coarse) {
+  .admin-settings-workspace .admin-settings-tabs button,
+  .admin-settings-workspace .admin-settings-pane-body button,
+  .admin-settings-workspace .admin-settings-pane-body input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+  .admin-settings-workspace .admin-settings-pane-body select,
+  .admin-settings-workspace .admin-settings-pane-body .checkbox-row,
+  .admin-settings-workspace .admin-settings-pane-body .permission-chip {
+    min-height: 44px;
+  }
+
+  .admin-settings-workspace .admin-settings-pane-body button[aria-label] {
+    min-width: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-settings-workspace *,
+  .admin-settings-workspace *::before,
+  .admin-settings-workspace *::after {
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
+}

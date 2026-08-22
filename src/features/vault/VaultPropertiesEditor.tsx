@@ -2,11 +2,26 @@ import { Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FrontmatterValue } from "../knowledge";
 import {
-  parsePropertyEditorValue,
+  inferVaultPropertyType,
+  parseTypedPropertyEditorValue,
   propertyEditorValue,
   removeFrontmatterProperty,
-  setFrontmatterProperty
+  setFrontmatterProperty,
+  type VaultPropertyType
 } from "./frontmatterEditing";
+import "./vaultProperties.css";
+
+const propertyTypeLabels: Record<VaultPropertyType, string> = {
+  text: "텍스트",
+  list: "목록",
+  number: "숫자",
+  checkbox: "체크박스",
+  date: "날짜",
+  datetime: "날짜와 시간",
+  tags: "태그"
+};
+
+const propertyTypes = Object.keys(propertyTypeLabels) as VaultPropertyType[];
 
 export interface VaultPropertiesEditorProps {
   disabled?: boolean;
@@ -24,18 +39,26 @@ export function VaultPropertiesEditor({
   source
 }: VaultPropertiesEditorProps) {
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
+  const [draftTypes, setDraftTypes] = useState<Record<string, VaultPropertyType>>({});
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
+  const [newType, setNewType] = useState<VaultPropertyType>("text");
 
   useEffect(() => {
     setDraftValues(Object.fromEntries(
       Object.entries(properties).map(([key, value]) => [key, propertyEditorValue(value)])
     ));
+    setDraftTypes(Object.fromEntries(
+      Object.entries(properties).map(([key, value]) => [key, inferVaultPropertyType(key, value)])
+    ));
   }, [properties]);
 
   function updateProperty(key: string) {
     try {
-      const nextValue = parsePropertyEditorValue(draftValues[key] ?? "", properties[key]);
+      const nextValue = parseTypedPropertyEditorValue(
+        draftValues[key] ?? "",
+        draftTypes[key] ?? inferVaultPropertyType(key, properties[key])
+      );
       onChange(setFrontmatterProperty(source, key, nextValue));
     } catch (caught) {
       onError(caught instanceof Error ? caught.message : "속성을 수정하지 못했습니다.");
@@ -57,9 +80,10 @@ export function VaultPropertiesEditor({
       return;
     }
     try {
-      onChange(setFrontmatterProperty(source, key, newValue));
+      onChange(setFrontmatterProperty(source, key, parseTypedPropertyEditorValue(newValue, newType)));
       setNewKey("");
       setNewValue("");
+      setNewType("text");
     } catch (caught) {
       onError(caught instanceof Error ? caught.message : "속성을 추가하지 못했습니다.");
     }
@@ -72,23 +96,51 @@ export function VaultPropertiesEditor({
       <div className="vault-property-list">
         {Object.entries(properties).map(([key]) => (
           <div className="vault-property-row" key={key}>
-            <label>
-              <span>{key}</span>
-              <input
-                aria-label={`${key} 속성 값`}
-                disabled={disabled}
-                onChange={(event) => {
-                  const value = event.currentTarget.value;
-                  setDraftValues((current) => ({ ...current, [key]: value }));
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    updateProperty(key);
-                  }
-                }}
-                value={draftValues[key] ?? ""}
-              />
+            <span className="vault-property-name">{key}</span>
+            <select
+              aria-label={`${key} 속성 유형`}
+              disabled={disabled}
+              onChange={(event) => setDraftTypes((current) => ({
+                ...current,
+                [key]: event.currentTarget.value as VaultPropertyType
+              }))}
+              value={draftTypes[key] ?? inferVaultPropertyType(key, properties[key])}
+            >
+              {propertyTypes.map((type) => <option key={type} value={type}>{propertyTypeLabels[type]}</option>)}
+            </select>
+            <label className="vault-property-value">
+              <span className="sr-only">{key} 속성 값</span>
+              {(draftTypes[key] ?? inferVaultPropertyType(key, properties[key])) === "checkbox" ? (
+                <input
+                  aria-label={`${key} 속성 값`}
+                  checked={(draftValues[key] ?? "false") === "true"}
+                  disabled={disabled}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setDraftValues((current) => ({ ...current, [key]: String(checked) }));
+                  }}
+                  type="checkbox"
+                />
+              ) : (
+                <input
+                  aria-label={`${key} 속성 값`}
+                  disabled={disabled}
+                  inputMode={(draftTypes[key] ?? inferVaultPropertyType(key, properties[key])) === "number" ? "decimal" : undefined}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value.replace(/[\r\n]/gu, " ");
+                    setDraftValues((current) => ({ ...current, [key]: value }));
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      updateProperty(key);
+                    }
+                  }}
+                  placeholder={(draftTypes[key] === "list" || draftTypes[key] === "tags") ? "쉼표로 구분" : undefined}
+                  type={draftTypes[key] === "date" ? "date" : draftTypes[key] === "datetime" ? "datetime-local" : draftTypes[key] === "number" ? "number" : "text"}
+                  value={draftValues[key] ?? ""}
+                />
+              )}
             </label>
             <button
               aria-label={`${key} 속성 삭제`}
@@ -117,16 +169,25 @@ export function VaultPropertiesEditor({
           placeholder="속성 이름"
           value={newKey}
         />
+        <select
+          aria-label="새 속성 유형"
+          disabled={disabled}
+          onChange={(event) => setNewType(event.currentTarget.value as VaultPropertyType)}
+          value={newType}
+        >
+          {propertyTypes.map((type) => <option key={type} value={type}>{propertyTypeLabels[type]}</option>)}
+        </select>
         <input
           aria-label="새 속성 값"
           disabled={disabled}
           onChange={(event) => setNewValue(event.currentTarget.value)}
-          placeholder="값"
+          placeholder={newType === "list" || newType === "tags" ? "쉼표로 구분" : "값"}
+          type={newType === "date" ? "date" : newType === "datetime" ? "datetime-local" : newType === "number" ? "number" : "text"}
           value={newValue}
         />
         <button aria-label="속성 추가" disabled={disabled} type="submit"><Plus size={14} /> 추가</button>
       </form>
-      <small>배열 값은 쉼표로 구분합니다. 지원하지 않는 중첩 YAML은 원본을 보호하기 위해 편집하지 않습니다.</small>
+      <small>목록과 태그는 쉼표로 구분합니다. 지원하지 않는 중첩 YAML은 원본을 보호하기 위해 편집하지 않습니다.</small>
     </div>
   );
 }

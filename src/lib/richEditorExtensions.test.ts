@@ -61,6 +61,14 @@ afterEach(() => {
 });
 
 describe("rich editor extensions", () => {
+  it("registers customized StarterKit marks exactly once", () => {
+    const editor = createEditor("<p><u>underline</u> <a href=\"https://example.com\">link</a></p>");
+    const extensionNames = editor.extensionManager.extensions.map((extension) => extension.name);
+
+    expect(extensionNames.filter((name) => name === "underline")).toHaveLength(1);
+    expect(extensionNames.filter((name) => name === "link")).toHaveLength(1);
+  });
+
   it("bounds undo history and groups nearby edits to limit retained editor state", () => {
     const editor = createEditor("<p>alpha</p>");
     const undoRedoExtension = editor.extensionManager.extensions.find((extension) => extension.name === "undoRedo");

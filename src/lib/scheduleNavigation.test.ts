@@ -8,22 +8,26 @@ import {
 } from "./scheduleNavigation";
 
 describe("scheduleNavigation", () => {
-  it("exposes recurring work as the fourth primary schedule tab", () => {
-    expect(primaryScheduleViews).toEqual(["todo", "calendar", "matrix", "recurring"]);
+  it("exposes only Calendar and Matrix as active schedule views", () => {
+    expect(primaryScheduleViews).toEqual(["calendar", "matrix"]);
   });
 
-  it("keeps completed history as the only utility view", () => {
-    expect(isPrimaryScheduleView("recurring")).toBe(true);
+  it("canonicalizes every legacy view to Calendar", () => {
+    expect(isPrimaryScheduleView("recurring")).toBe(false);
+    expect(isPrimaryScheduleView("todo")).toBe(false);
     expect(isPrimaryScheduleView("completed")).toBe(false);
-    expect(normalizePrimaryScheduleView("recurring")).toBe("recurring");
-    expect(normalizePrimaryScheduleView("completed")).toBe("todo");
+    expect(normalizePrimaryScheduleView("recurring")).toBe("calendar");
+    expect(normalizePrimaryScheduleView("todo")).toBe("calendar");
+    expect(normalizePrimaryScheduleView("completed")).toBe("calendar");
   });
 
-  it("maps deep-linked tabs to stable schedule URLs", () => {
-    expect(scheduleViewHref("todo")).toBe("/schedule?view=todo");
-    expect(scheduleViewHref("recurring")).toBe("/schedule/recurring");
+  it("maps active and legacy links to stable schedule URLs", () => {
+    expect(scheduleViewHref("todo")).toBe("/schedule?view=calendar");
+    expect(scheduleViewHref("recurring")).toBe("/schedule?view=calendar");
+    expect(scheduleViewHref("completed")).toBe("/schedule?view=calendar");
     expect(scheduleViewFromSearch("?view=matrix")).toBe("matrix");
-    expect(scheduleViewFromSearch("?view=completed")).toBe("completed");
+    expect(scheduleViewFromSearch("?view=calendar")).toBe("calendar");
+    expect(scheduleViewFromSearch("?view=completed")).toBeNull();
     expect(scheduleViewFromSearch("?view=unknown")).toBeNull();
   });
 });

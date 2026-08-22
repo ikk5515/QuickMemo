@@ -488,6 +488,7 @@ export const richEditorExtensions = [
       levels: [...editorHeadingLevels]
     },
     link: false,
+    underline: false,
     undoRedo: {
       depth: editorUndoHistoryDepth,
       newGroupDelay: editorUndoGroupDelayMs

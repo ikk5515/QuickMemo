@@ -10,9 +10,10 @@ QuickMemo 서버와 Firestore Rules는 복호화된 파일·폴더 이름 또는
 2. 서버가 임의의 암호문 두 개가 같은 이름인지 스스로 판정해야 한다.
 
 또한 Firestore Rules에는 재귀 탐색과 collection query가 없으므로,
-`parentId` 그래프의 임의 깊이 순환을 Rules만으로 판정할 수 없다.
-현재 Rules의 자기 참조와 2-node cycle 차단은 방어층이지만 3-node 이상을
-완전하게 증명하지 않는다.
+`parentId` 그래프의 임의 깊이 순환을 Rules만으로 판정할 수 없다. QuickMemo는
+이 제약을 client metadata 신뢰로 우회하지 않는다. 폴더 구조 변경은 기존
+Vercel service-account API 경계에서 검증하고, Rules는 서버 전용 중앙 트리를
+상수 비용으로 조회한다. 합리적인 hard cap 32 안에서는 깊은 중첩을 지원한다.
 
 ## Blind name index v1
 
@@ -56,35 +57,69 @@ AES key를 HMAC-SHA-256 key로 가져와 다음 값을 MAC 한다.
 대상 문서와 상호 검증하지 않은 채 claim collection만 추가하면 orphan claim
 또는 이름 재사용 불가 상태가 생기므로 금지한다.
 
-## Folder ancestry v1
+## Folder authority v3
 
-`auditVaultFolderTree`는 잠금 해제 후 소유자의 전체 폴더 snapshot으로 다음을
-검사하고, 정상인 경우에만 `{version, depth, ancestorIds}`를 계산한다.
+`noteFolders`의 lineage v3 필드는 경로 표시와 ZIP export를 위한 파생 metadata다.
+권한 판정에는 사용하지 않는다.
 
-- duplicate ID
-- missing parent
-- 임의 깊이 cycle
-- 최대 깊이 64 초과
+```ts
+interface VaultFolderLineageV3 {
+  vaultAncestorIds: string[];
+  vaultLineageDepth: number;        // 0...32
+  vaultLineageGeneration: number;
+  vaultLineagePath: string;
+  vaultLineageVersion: 3;
+}
+```
 
-이 metadata는 마이그레이션 진단과 client transaction 사전 검증에만 쓴다.
-현재 구조에서 이것을 곧바로 Firestore Rules의 권한 근거로 사용하면 안 된다.
-상위 폴더 이동 시 모든 하위 폴더 metadata를 원자적으로 갱신할 수 없고,
-부분 갱신된 stale ancestry는 false positive뿐 아니라 새 조상을 누락해 이후
-cycle을 허용할 수 있기 때문이다.
+권위 구조는 owner별 서버 전용 `vaultFolderTrees/{uid}` 문서다. 각 node에는
+opaque folder ID, opaque parent ID, `selfActive`, 파생 `active`, generation만
+있으며 이름·경로·본문·key·name fingerprint는 없다. 브라우저 SDK는 owner라도
+이 문서를 읽거나 쓸 수 없다.
 
-현재 구현된 방어층은 다음과 같다.
+```ts
+interface VaultFolderTreeNode {
+  parentId: string | null;
+  selfActive: boolean;
+  active: boolean;
+  generation: number;
+}
+```
 
-- 공식 클라이언트는 create/move 전에 복호화한 전체 폴더 snapshot과 제안된
-  새 상태를 함께 audit하여 자기 ID 재등장, missing parent, 깊이 64 초과를
-  실패 처리한다.
-- 폴더 이동 transaction은 parent부터 root까지 다시 읽지만, 폴더 생성
-  transaction은 immediate parent의 존재·소유자·암호화 상태만 확인한다.
-  따라서 동시 생성·이동 race나 변조 SDK까지 포함한 ancestry 불변식은 아직
-  모든 경로에서 강제되지 않는다.
-- 잠금 해제 직후 전체 tree audit가 실패하면 folder move/migration을 중단하고
-  복구 화면만 제공한다.
-- Rules는 self-cycle과 직접 2-node cycle을 추가 방어한다.
-- 인증된 소유자의 임의 SDK write까지 포함한 arbitrary-depth cycle의 완전한
-  서버 강제는 trusted server/Cloud Function 또는 이동 불가 immutable tree
-  없이는 불가능하다. 둘 다 현재 E2EE·무과금·Obsidian 동작 계약과 충돌하므로
-  구현 완료로 보고하지 않는다.
+`/api/vault-folders`는 same-origin, Firebase ID token, active-user, App Check를
+검증한 뒤 기존 service-account Firestore REST transaction을 사용한다. 전체
+tree에서 missing parent, self/2-node/3-node cycle, depth 32 초과, forged active를
+검증한다. 중앙 map은 보수적으로 암호화 폴더 2,000개와 JSON 700KB를 cap으로
+두며 `nodes` indexing을 끈다. Cloud Functions나 유료 queue/database는 추가하지
+않는다.
+
+Firestore Rules는 client lineage 대신 중앙 문서의 `nodes[folderId].active`를
+한 번 조회한다. 깊이 2 이상 note write도 Rules의 1,000-expression 제한 아래서
+동작하며, tombstoned ancestor 아래의 create/update/restore는 실패 폐쇄한다.
+
+### 생성·이동·휴지통·복원·가져오기 계약
+
+- bootstrap은 tree가 없을 때만 bounded owner folder projection으로 최초 tree를
+  만든다. 기존 tree가 invalid/stale이면 자동 덮어쓰지 않는다.
+- create/import/legacy cutover는 authoritative parent가 존재하고 active인지
+  확인한 뒤 tree, folder, opaque name claim을 한 transaction에 쓴다.
+- rename/order 변경은 folder revision과 claim precondition을 확인한다.
+- parent 변경은 전체 제안 tree를 검증한다. root→child, child→root, subtree
+  이동을 허용하지만 descendant 아래 이동과 depth 32 초과는 원자적으로 거부한다.
+- trash는 대상 `selfActive=false`와 모든 descendant의 파생 `active=false`를
+  중앙 문서 한 번의 write로 반영한다. descendant 문서 순차 rewrite가 없으므로
+  중간에 일부만 활성인 상태가 생기지 않는다.
+- restore는 active parent를 요구하고 독립적으로 삭제된 descendant의
+  `selfActive=false`를 보존한다.
+- ambiguous create 응답 재시도는 저장된 암호문, wrapped key, parent, claim,
+  import binding, revision-one lineage가 모두 같은 exact after-state일 때만 성공한다.
+- entry import 응답 재시도도 encrypted title/body/wrapped keys/content identity와
+  `lastMutationId`가 가리키는 encrypted create history까지 일치해야 한다.
+
+ancestor move 뒤 descendant folder 문서의 파생 lineage는 즉시 rewrite하지 않아도
+권한에 영향을 주지 않는다. 중앙 tree는 같은 transaction에서 완전히 갱신되며,
+UI의 runtime path/trash 분류는 현재 `parentId`를 순회한다. 파생 lineage를 다시
+저장하는 maintenance는 export metadata 정리일 뿐 보안 전제 조건이 아니다.
+
+상세 위협 모델, 용량 제한, 장애/복구 계약과 검증 항목은
+`docs/vault-folder-tree-security.md`를 기준으로 한다.

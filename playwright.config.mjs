@@ -54,6 +54,17 @@ export default defineConfig({
   ],
   projects: [
     {
+      name: "chromium-desktop-1440",
+      testMatch: [
+        "**/app-layout.spec.mjs",
+        "**/schedule-category.spec.mjs"
+      ],
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1440, height: 900 }
+      }
+    },
+    {
       name: "chromium-desktop",
       testMatch: ["**/*.spec.mjs"],
       use: {

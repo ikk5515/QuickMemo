@@ -2,16 +2,22 @@ import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey }
 import { mapWithConcurrency } from "../../lib/mapWithConcurrency";
 import {
   createEncryptedNoteFolder,
+  createEncryptedNoteFolderAtId,
   migrateLegacyNoteFolder,
   updateEncryptedNoteFolder,
   type NoteFolderSnapshot,
   type NoteSnapshot
 } from "../../services/notes";
 import type { DecryptedNote, UserProfile, VaultContentFormat, VaultEntryKind } from "../../types";
-import { canonicalVaultName } from "./vaultIntegrity";
+import {
+  VAULT_NAME_INDEX_VERSION,
+  canonicalVaultName,
+  vaultNameFingerprint
+} from "./vaultIntegrity";
 
 export interface DecryptedVaultFolder extends NoteFolderSnapshot {
   displayName: string;
+  nameDecryptionFailed?: boolean;
 }
 
 export interface DecryptedVaultNote extends DecryptedNote {
@@ -83,17 +89,19 @@ export async function decryptVaultFolders(folders: NoteFolderSnapshot[], uid: st
       const folderKey = await unwrapNoteKey(folder.wrappedKey, privateKey);
       return { ...folder, displayName: await decryptText(folder.encryptedName, folderKey) };
     } catch {
-      return { ...folder, displayName: "복호화할 수 없는 폴더" };
+      return { ...folder, displayName: "복호화할 수 없는 폴더", nameDecryptionFailed: true };
     }
   });
 }
 
 export async function createEncryptedVaultFolder(
   profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
+  vaultIntegrityKey: CryptoKey,
   name: string,
   parentId: string | null,
   order: number,
-  color = "#7c5cff"
+  color = "#7c5cff",
+  options?: { targetId: string; importJobId: string }
 ) {
   const normalizedName = name.trim().normalize("NFC");
   if (!normalizedName || normalizedName.length > 120) {
@@ -106,37 +114,69 @@ export async function createEncryptedVaultFolder(
     encryptText(normalizedName, folderKey),
     wrapNoteKey(folderKey, profile.publicKeyJwk)
   ]);
+  const claimId = await vaultNameFingerprint(vaultIntegrityKey, {
+    name: normalizedName,
+    parentId,
+    targetType: "folder"
+  });
 
-  return createEncryptedNoteFolder({
+  const createInput = {
     color,
     encryptedName,
     order,
     ownerUid: profile.uid,
     parentId,
-    wrappedKey
-  });
+    wrappedKey,
+    nameClaim: {
+      claimId,
+      indexVersion: VAULT_NAME_INDEX_VERSION,
+      parentId
+    }
+  };
+  return options?.targetId
+    ? createEncryptedNoteFolderAtId(createInput, options.targetId, options.importJobId)
+    : createEncryptedNoteFolder(createInput);
 }
 
 export async function migrateLegacyVaultFolder(
   profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
+  vaultIntegrityKey: CryptoKey,
   folder: NoteFolderSnapshot,
-  order: number
+  order: number,
+  recovery?: {
+    replacementName?: string;
+    targetParentId?: string | null;
+  }
 ) {
   if (folder.encryptedName && folder.wrappedKey) {
     return { folderId: folder.id, revision: folder.revision ?? 1 };
   }
 
-  const normalizedName = folder.name.trim().normalize("NFC");
+  const normalizedName = (recovery?.replacementName ?? folder.name).trim().normalize("NFC");
   if (!normalizedName || normalizedName.length > 120) {
     throw new Error("기존 폴더 이름을 안전하게 변환할 수 없습니다.");
   }
   canonicalVaultName(normalizedName, "folder");
+  const parentId = recovery?.targetParentId === undefined
+    ? folder.parentId ?? null
+    : recovery.targetParentId;
+  if (
+    parentId !== null
+    && (!parentId || parentId.length > 120 || parentId.includes("/") || parentId === folder.id)
+  ) {
+    throw new Error("상위 폴더 식별자가 올바르지 않습니다.");
+  }
 
   const folderKey = await generateNoteKey();
   const [encryptedName, wrappedKey] = await Promise.all([
     encryptText(normalizedName, folderKey),
     wrapNoteKey(folderKey, profile.publicKeyJwk)
   ]);
+  const claimId = await vaultNameFingerprint(vaultIntegrityKey, {
+    name: normalizedName,
+    parentId,
+    targetType: "folder"
+  });
 
   return migrateLegacyNoteFolder({
     color: folder.color,
@@ -145,8 +185,13 @@ export async function migrateLegacyVaultFolder(
     folderId: folder.id,
     order,
     ownerUid: profile.uid,
-    parentId: null,
-    wrappedKey
+    parentId,
+    wrappedKey,
+    nameClaim: {
+      claimId,
+      indexVersion: VAULT_NAME_INDEX_VERSION,
+      parentId
+    }
   });
 }
 
@@ -154,6 +199,7 @@ export async function renameEncryptedVaultFolder(
   folder: DecryptedVaultFolder,
   uid: string,
   privateKey: CryptoKey,
+  vaultIntegrityKey: CryptoKey,
   name: string
 ) {
   const normalizedName = name.trim().normalize("NFC");
@@ -165,12 +211,48 @@ export async function renameEncryptedVaultFolder(
     throw new Error("먼저 기존 폴더 이름을 암호화해주세요.");
   }
   const folderKey = await unwrapNoteKey(folder.wrappedKey, privateKey);
-  const encryptedName = await encryptText(normalizedName, folderKey);
+  const [encryptedName, claimId] = await Promise.all([
+    encryptText(normalizedName, folderKey),
+    vaultNameFingerprint(vaultIntegrityKey, {
+      name: normalizedName,
+      parentId: folder.parentId ?? null,
+      targetType: "folder"
+    })
+  ]);
   return updateEncryptedNoteFolder({
     encryptedName,
     expectedRevision: folder.revision ?? 1,
     folderId: folder.id,
-    ownerUid: uid
+    ownerUid: uid,
+    nameClaim: {
+      claimId,
+      indexVersion: VAULT_NAME_INDEX_VERSION,
+      parentId: folder.parentId ?? null
+    }
+  });
+}
+
+export async function moveEncryptedVaultFolder(
+  folder: DecryptedVaultFolder,
+  uid: string,
+  vaultIntegrityKey: CryptoKey,
+  parentId: string | null
+) {
+  const claimId = await vaultNameFingerprint(vaultIntegrityKey, {
+    name: folder.displayName,
+    parentId,
+    targetType: "folder"
+  });
+  return updateEncryptedNoteFolder({
+    expectedRevision: folder.revision ?? 1,
+    folderId: folder.id,
+    nameClaim: {
+      claimId,
+      indexVersion: VAULT_NAME_INDEX_VERSION,
+      parentId
+    },
+    ownerUid: uid,
+    parentId
   });
 }
 

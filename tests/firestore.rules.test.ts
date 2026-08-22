@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import {
   RulesTestEnvironment,
   type RulesTestContext,
@@ -30,6 +31,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 const describeRules = process.env.FIRESTORE_EMULATOR_HOST ? describe : describe.skip;
 type RulesFirestore = ReturnType<RulesTestContext["firestore"]>;
+let testEnv: RulesTestEnvironment;
 
 const encryptedPayload = {
   version: 1,
@@ -362,9 +364,21 @@ function createAuditedNote(
   const revision = 1;
   const historyId = noteRevisionId(revision);
   const batch = writeBatch(firestore);
+  const versionedVaultEntry = Boolean(note.contentFormat || note.entryKind);
+  const claimId = vaultTestClaimId(noteId);
 
   batch.set(doc(firestore, "notes", noteId), {
     ...note,
+    ...(versionedVaultEntry ? {
+      attachmentRevision: Object.prototype.hasOwnProperty.call(note, "attachmentRevision")
+        ? note.attachmentRevision
+        : 0,
+      folderId: Object.prototype.hasOwnProperty.call(note, "folderId")
+        ? note.folderId
+        : null,
+      vaultNameClaimId: claimId,
+      vaultNameIndexVersion: 1
+    } : {}),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     savedAt: serverTimestamp(),
@@ -381,11 +395,267 @@ function createAuditedNote(
       revision
     })
   );
+  if (versionedVaultEntry) {
+    batch.set(doc(firestore, "vaultIntegrity", actorUid, "nameClaims", claimId), {
+      ownerUid: actorUid,
+      indexVersion: 1,
+      parentId: typeof note.folderId === "string" ? note.folderId : null,
+      targetId: noteId,
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  }
 
   return batch.commit();
 }
 
-function updateAuditedNote(
+function vaultTestClaimId(value: string) {
+  return createHash("sha256").update(`quickmemo-rules-test:${value}`).digest("base64url");
+}
+
+function vaultIntegrity(uid: string) {
+  return {
+    ownerUid: uid,
+    indexVersion: 1,
+    wrappedKey: ownerWrappedShareKey,
+    createdAt: new Date("2026-05-18T08:00:00.000Z"),
+    updatedAt: new Date("2026-05-18T08:00:00.000Z")
+  };
+}
+
+function vaultPathRewriteJob(
+  uid: string,
+  jobId: string,
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    ownerUid: uid,
+    kind: "path-rewrite-v1",
+    version: 1,
+    planFingerprint: jobId,
+    status: "preparing",
+    stepCount: 2,
+    cursor: 0,
+    confirmedCount: 0,
+    attemptCount: 0,
+    retryCount: 0,
+    lastErrorCode: null,
+    revision: 1,
+    encryptedManifest: encryptedPayload,
+    wrappedKey: ownerWrappedShareKey,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
+function vaultPathRewriteStep(uid: string, jobId: string, ordinal: number) {
+  const stepId = `step-${String(ordinal).padStart(6, "0")}`;
+  return {
+    ownerUid: uid,
+    jobId,
+    stepId,
+    ordinal,
+    encryptedStep: encryptedPayload,
+    createdAt: serverTimestamp()
+  };
+}
+
+function vaultImportJob(
+  uid: string,
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    ownerUid: uid,
+    kind: "vault-import-v1",
+    version: 1,
+    status: "preparing",
+    itemCount: 2,
+    entryCount: 1,
+    folderCount: 1,
+    rootFolderCount: 1,
+    chunkCount: 1,
+    remainingChunkCount: 1,
+    revision: 1,
+    lastErrorCode: null,
+    wrappedKey: ownerWrappedShareKey,
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
+function vaultImportChunk(uid: string, jobId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    ownerUid: uid,
+    jobId,
+    ordinal: 0,
+    itemCount: 2,
+    encryptedManifest: { ...encryptedPayload, cipherText: "encrypted-import-manifest" },
+    createdAt: serverTimestamp(),
+    ...overrides
+  };
+}
+
+function createAuditedVaultFolderDirect(
+  firestore: RulesFirestore,
+  folderId: string,
+  uid: string,
+  folder: Record<string, unknown>
+) {
+  const claimId = vaultTestClaimId(`folder:${folderId}`);
+  const parentId = typeof folder.parentId === "string" ? folder.parentId : null;
+  const ancestorIds = Array.isArray(folder.vaultAncestorIds)
+    ? folder.vaultAncestorIds.filter((value): value is string => typeof value === "string")
+    : [];
+  const batch = writeBatch(firestore);
+  batch.set(doc(firestore, "noteFolders", folderId), {
+    vaultAncestorIds: [],
+    vaultLineageDepth: 0,
+    vaultLineageGeneration: 1,
+    vaultLineageVersion: 3,
+    vaultLineagePath: [...ancestorIds, folderId].join("/"),
+    ...folder,
+    vaultNameClaimId: claimId,
+    vaultNameIndexVersion: 1
+  });
+  batch.set(doc(firestore, "vaultIntegrity", uid, "nameClaims", claimId), {
+    ownerUid: uid,
+    indexVersion: 1,
+    parentId,
+    targetId: folderId,
+    targetType: "folder",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  });
+  return batch.commit();
+}
+
+async function createAuditedVaultFolder(
+  _firestore: RulesFirestore,
+  folderId: string,
+  uid: string,
+  folder: Record<string, unknown>
+) {
+  return testEnv.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
+    const claimId = vaultTestClaimId(`folder:${folderId}`);
+    const parentId = typeof folder.parentId === "string" ? folder.parentId : null;
+    const ancestorIds = Array.isArray(folder.vaultAncestorIds)
+      ? folder.vaultAncestorIds.filter((value): value is string => typeof value === "string")
+      : [];
+    const treeRef = doc(firestore, "vaultFolderTrees", uid);
+    const treeSnapshot = await getDoc(treeRef);
+    const storedTree = treeSnapshot.data() ?? {};
+    const nodes = { ...((storedTree.nodes as Record<string, Record<string, unknown>> | undefined) ?? {}) };
+    const selfActive = folder.isDeleted !== true;
+    const parentActive = parentId === null || nodes[parentId]?.active === true;
+    nodes[folderId] = {
+      active: selfActive && parentActive,
+      generation: 1,
+      parentId,
+      selfActive
+    };
+    const batch = writeBatch(firestore);
+    batch.set(doc(firestore, "noteFolders", folderId), {
+      vaultAncestorIds: ancestorIds,
+      vaultLineageDepth: ancestorIds.length,
+      vaultLineageGeneration: 1,
+      vaultLineageVersion: 3,
+      vaultLineagePath: [...ancestorIds, folderId].join("/"),
+      ...folder,
+      vaultNameClaimId: claimId,
+      vaultNameIndexVersion: 1
+    });
+    batch.set(doc(firestore, "vaultIntegrity", uid, "nameClaims", claimId), {
+      ownerUid: uid,
+      indexVersion: 1,
+      parentId,
+      targetId: folderId,
+      targetType: "folder",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    batch.set(treeRef, {
+      createdAt: storedTree.createdAt ?? serverTimestamp(),
+      folderCount: Object.keys(nodes).length,
+      nodes,
+      ownerUid: uid,
+      revision: typeof storedTree.revision === "number" ? storedTree.revision + 1 : 1,
+      schemaVersion: 1,
+      updatedAt: serverTimestamp()
+    });
+    return batch.commit();
+  });
+}
+
+async function seedServerVaultFolderLifecycle(uid: string, folderId: string, active: boolean) {
+  return testEnv.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
+    const treeRef = doc(firestore, "vaultFolderTrees", uid);
+    const folderRef = doc(firestore, "noteFolders", folderId);
+    const [treeSnapshot, folderSnapshot] = await Promise.all([
+      getDoc(treeRef),
+      getDoc(folderRef)
+    ]);
+    const tree = treeSnapshot.data();
+    const folder = folderSnapshot.data();
+    if (!tree || !folder) throw new Error("missing server-seeded folder state");
+    const nodes = structuredClone(tree.nodes) as Record<string, {
+      active: boolean;
+      generation: number;
+      parentId: string | null;
+      selfActive: boolean;
+    }>;
+    nodes[folderId].selfActive = active;
+    nodes[folderId].generation += 1;
+    const activeFor = (id: string, visiting = new Set<string>()): boolean => {
+      if (visiting.has(id)) throw new Error("cycle in test tree");
+      visiting.add(id);
+      const node = nodes[id];
+      const result = node.selfActive
+        && (node.parentId === null || activeFor(node.parentId, visiting));
+      visiting.delete(id);
+      return result;
+    };
+    Object.keys(nodes).forEach((id) => { nodes[id].active = activeFor(id); });
+    const now = new Date("2026-08-23T00:00:00.000Z");
+    const batch = writeBatch(firestore);
+    batch.update(treeRef, {
+      nodes,
+      revision: Number(tree.revision) + 1,
+      updatedAt: now
+    });
+    batch.update(folderRef, {
+      isDeleted: !active,
+      revision: Number(folder.revision) + 1,
+      vaultLineageGeneration: Number(folder.vaultLineageGeneration) + 1,
+      updatedAt: now,
+      ...(active
+        ? { deletedAt: deleteField(), deletedBy: deleteField() }
+        : { deletedAt: now, deletedBy: uid })
+    });
+    const claimId = String(folder.vaultNameClaimId);
+    const claimRef = doc(firestore, "vaultIntegrity", uid, "nameClaims", claimId);
+    if (active) {
+      batch.set(claimRef, {
+        ownerUid: uid,
+        indexVersion: 1,
+        parentId: folder.parentId ?? null,
+        targetId: folderId,
+        targetType: "folder",
+        createdAt: now,
+        updatedAt: now
+      });
+    } else {
+      batch.delete(claimRef);
+    }
+    return batch.commit();
+  });
+}
+
+async function updateAuditedNote(
   firestore: RulesFirestore,
   noteId: string,
   actorUid: string,
@@ -396,10 +666,26 @@ function updateAuditedNote(
   updates: Record<string, unknown>
 ) {
   const historyId = noteRevisionId(revision);
+  const noteRef = doc(firestore, "notes", noteId);
+  const currentSnapshot = await getDoc(noteRef);
+  const current = currentSnapshot.data() ?? {};
+  const currentClaimId = typeof current.vaultNameClaimId === "string" ? current.vaultNameClaimId : null;
+  const claimChanges = currentClaimId && changedFields.some((field) => field === "title" || field === "folder");
+  const auditedChangedFields = claimChanges && !changedFields.includes("name-claim")
+    ? [...changedFields, "name-claim"]
+    : changedFields;
+  const nextClaimId = claimChanges ? vaultTestClaimId(`${noteId}:claim:${revision}`) : currentClaimId;
+  const nextParentId = Object.prototype.hasOwnProperty.call(updates, "folderId")
+    ? (typeof updates.folderId === "string" ? updates.folderId : null)
+    : typeof current.folderId === "string" ? current.folderId : null;
   const batch = writeBatch(firestore);
 
-  batch.update(doc(firestore, "notes", noteId), {
+  batch.update(noteRef, {
     ...updates,
+    ...(claimChanges ? {
+      vaultNameClaimId: nextClaimId,
+      vaultNameIndexVersion: 1
+    } : {}),
     updatedAt: serverTimestamp(),
     updatedBy: actorUid,
     revision,
@@ -407,9 +693,187 @@ function updateAuditedNote(
   });
   batch.set(
     doc(firestore, "notes", noteId, "history", historyId),
-    noteHistory(noteId, actorUid, { action, changedFields, readerUids, revision })
+    noteHistory(noteId, actorUid, { action, changedFields: auditedChangedFields, readerUids, revision })
   );
 
+  if (action === "delete" && currentClaimId) {
+    batch.delete(doc(firestore, "vaultIntegrity", actorUid, "nameClaims", currentClaimId));
+  } else if (action === "restore" && currentClaimId) {
+    batch.set(doc(firestore, "vaultIntegrity", actorUid, "nameClaims", currentClaimId), {
+      ownerUid: actorUid,
+      indexVersion: 1,
+      parentId: nextParentId,
+      targetId: noteId,
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  } else if (claimChanges && nextClaimId) {
+    batch.set(doc(firestore, "vaultIntegrity", actorUid, "nameClaims", nextClaimId), {
+      ownerUid: actorUid,
+      indexVersion: 1,
+      parentId: nextParentId,
+      targetId: noteId,
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    batch.delete(doc(firestore, "vaultIntegrity", actorUid, "nameClaims", currentClaimId));
+  }
+
+  return batch.commit();
+}
+
+async function updateExactAuditedVaultContent(
+  firestore: RulesFirestore,
+  input: {
+    actorUid: string;
+    changedFields: string[];
+    encryptedBody: Record<string, unknown>;
+    encryptedTitle: Record<string, unknown>;
+    noteId: string;
+    ownerSuppliesNameClaim: boolean;
+    readerUids: string[];
+    replacementClaimId?: string;
+    revision: number;
+  }
+) {
+  const historyId = `mutation-${String(input.revision).padStart(12, "0")}`;
+  return runTransaction(firestore, async (transaction) => {
+    const noteRef = doc(firestore, "notes", input.noteId);
+    const currentSnapshot = await transaction.get(noteRef);
+    const current = currentSnapshot.data() ?? {};
+    const currentClaimId = typeof current.vaultNameClaimId === "string"
+      ? current.vaultNameClaimId
+      : null;
+    const nextClaimId = input.ownerSuppliesNameClaim
+      ? input.replacementClaimId ?? currentClaimId
+      : null;
+    const nextClaimRef = nextClaimId
+      ? doc(firestore, "vaultIntegrity", current.ownerUid as string, "nameClaims", nextClaimId)
+      : null;
+    const previousClaimRef = input.ownerSuppliesNameClaim
+      && currentClaimId
+      && currentClaimId !== nextClaimId
+      ? doc(firestore, "vaultIntegrity", current.ownerUid as string, "nameClaims", currentClaimId)
+      : null;
+
+    if (nextClaimRef) {
+      await transaction.get(nextClaimRef);
+    }
+    if (previousClaimRef) {
+      await transaction.get(previousClaimRef);
+    }
+
+    const claimChanged = Boolean(nextClaimId && nextClaimId !== currentClaimId);
+    transaction.update(noteRef, {
+      encryptedTitle: input.encryptedTitle,
+      encryptedBody: input.encryptedBody,
+      isDeleted: false,
+      ...(nextClaimId ? {
+        vaultNameClaimId: nextClaimId,
+        vaultNameIndexVersion: 1
+      } : {}),
+      updatedAt: serverTimestamp(),
+      updatedBy: input.actorUid,
+      revision: input.revision,
+      lastMutationId: historyId
+    });
+    transaction.set(
+      doc(firestore, "notes", input.noteId, "history", historyId),
+      noteHistory(input.noteId, input.actorUid, {
+        action: "content",
+        changedFields: claimChanged && !input.changedFields.includes("name-claim")
+          ? [...input.changedFields, "name-claim"]
+          : input.changedFields,
+        readerUids: input.readerUids,
+        revision: input.revision
+      })
+    );
+    if (claimChanged && nextClaimRef) {
+      transaction.set(nextClaimRef, {
+        ownerUid: current.ownerUid,
+        indexVersion: 1,
+        parentId: typeof current.folderId === "string" ? current.folderId : null,
+        targetId: input.noteId,
+        targetType: "entry",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    }
+    if (previousClaimRef) {
+      transaction.delete(previousClaimRef);
+    }
+  });
+}
+
+async function commitOwnerTitleOnlyNameMutation(
+  firestore: RulesFirestore,
+  input: {
+    access?: {
+      participantUids: string[];
+      type: "personal" | "shared";
+      wrappedKeys: Record<string, unknown>;
+    };
+    caseId: string;
+    createNewClaim?: boolean;
+    deletePreviousClaim?: boolean;
+    encryptedBody?: Record<string, unknown>;
+    folderId?: string | null;
+    historyChangedFields?: string[];
+    historyRevision?: number;
+    newClaimTargetId?: string;
+    noteId: string;
+  }
+) {
+  const noteRef = doc(firestore, "notes", input.noteId);
+  const currentSnapshot = await getDoc(noteRef);
+  const current = currentSnapshot.data() ?? {};
+  const ownerUid = String(current.ownerUid);
+  const currentClaimId = String(current.vaultNameClaimId);
+  const revision = Number(current.revision) + 1;
+  const historyId = `title-only-${input.caseId}-${revision}`;
+  const nextClaimId = vaultTestClaimId(`${input.noteId}:${input.caseId}:${revision}`);
+  const nextParentId = Object.prototype.hasOwnProperty.call(input, "folderId")
+    ? input.folderId ?? null
+    : typeof current.folderId === "string" ? current.folderId : null;
+  const batch = writeBatch(firestore);
+
+  batch.update(noteRef, {
+    encryptedTitle: { ...encryptedPayload, cipherText: `title-${input.caseId}` },
+    ...(input.encryptedBody ? { encryptedBody: input.encryptedBody } : {}),
+    ...(Object.prototype.hasOwnProperty.call(input, "folderId") ? { folderId: input.folderId } : {}),
+    ...(input.access ?? {}),
+    vaultNameClaimId: nextClaimId,
+    vaultNameIndexVersion: 1,
+    updatedAt: serverTimestamp(),
+    updatedBy: ownerUid,
+    revision,
+    lastMutationId: historyId
+  });
+  batch.set(
+    doc(firestore, "notes", input.noteId, "history", historyId),
+    noteHistory(input.noteId, ownerUid, {
+      action: "content",
+      changedFields: input.historyChangedFields ?? ["title", "name-claim"],
+      readerUids: input.access?.participantUids ?? current.participantUids as string[],
+      revision: input.historyRevision ?? revision
+    })
+  );
+  if (input.createNewClaim !== false) {
+    batch.set(doc(firestore, "vaultIntegrity", ownerUid, "nameClaims", nextClaimId), {
+      ownerUid,
+      indexVersion: 1,
+      parentId: nextParentId,
+      targetId: input.newClaimTargetId ?? input.noteId,
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+  }
+  if (input.deletePreviousClaim !== false) {
+    batch.delete(doc(firestore, "vaultIntegrity", ownerUid, "nameClaims", currentClaimId));
+  }
   return batch.commit();
 }
 
@@ -549,8 +1013,6 @@ function createPublicShareAttachmentBatch(
 }
 
 describeRules("firestore security rules", () => {
-  let testEnv: RulesTestEnvironment;
-
   beforeAll(async () => {
     testEnv = await initializeTestEnvironment({
       projectId: "quickmemo-rules-test",
@@ -1127,18 +1589,44 @@ describeRules("firestore security rules", () => {
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     const otherDb = testEnv.authenticatedContext("user-b").firestore();
 
+    const customMatrixLabels = {
+      todayOverdue: "오늘/지연",
+      importantUrgent: "중요·긴급",
+      urgent: "긴급 업무",
+      important: "중요 업무",
+      waiting: "대기 업무"
+    };
+    const encryptedMatrixLabels = {
+      ...encryptedPayload,
+      cipherText: "M".repeat(24),
+      iv: "I".repeat(16)
+    };
+    const matrixLabelsWrappedKey = {
+      version: 1,
+      algorithm: "RSA-OAEP",
+      wrappedKey: validLibraryWrappedKey
+    };
+
+    await assertFails(
+      setDoc(
+        doc(ownerDb, "userPreferences/user-a"),
+        userPreferences("user-a", {
+          defaultHome: "schedule",
+          matrixLabels: customMatrixLabels,
+          scheduleDefaultView: "matrix",
+          scheduleDefaultCategory: "all",
+          theme: "dark"
+        })
+      )
+    );
     await assertSucceeds(
       setDoc(
         doc(ownerDb, "userPreferences/user-a"),
         userPreferences("user-a", {
           defaultHome: "schedule",
-          matrixLabels: {
-            todayOverdue: "오늘/지연",
-            importantUrgent: "중요·긴급",
-            urgent: "긴급 업무",
-            important: "중요 업무",
-            waiting: "대기 업무"
-          },
+          encryptedMatrixLabels,
+          matrixLabelsFormat: "matrix-labels-v1",
+          matrixLabelsWrappedKey,
           scheduleDefaultView: "matrix",
           scheduleDefaultCategory: "all",
           theme: "dark"
@@ -1157,13 +1645,7 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "light", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), { theme: "system", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
-      matrixLabels: {
-        todayOverdue: "오늘 처리",
-        importantUrgent: "바로 처리",
-        urgent: "위임 업무",
-        important: "집중 업무",
-        waiting: "대기 목록"
-      },
+      encryptedMatrixLabels: { ...encryptedMatrixLabels, cipherText: "N".repeat(24) },
       updatedAt: serverTimestamp()
     }));
     await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
@@ -1205,18 +1687,43 @@ describeRules("firestore security rules", () => {
       },
       updatedAt: serverTimestamp()
     }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+      encryptedMatrixLabels: deleteField(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+      encryptedMatrixLabels: { ...encryptedMatrixLabels, cipherText: "short" },
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+      encryptedMatrixLabels: deleteField(),
+      matrixLabelsFormat: deleteField(),
+      matrixLabelsWrappedKey: deleteField(),
+      updatedAt: serverTimestamp()
+    }));
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "userPreferences/user-a"), {
         uid: "user-a",
         defaultHome: "notes",
+        matrixLabels: customMatrixLabels,
         scheduleDefaultView: "todo",
         theme: "system",
         updatedAt: serverTimestamp()
       });
     });
+    await assertFails(
+      updateDoc(doc(ownerDb, "userPreferences/user-a"), {
+        defaultHome: "schedule",
+        updatedAt: serverTimestamp()
+      })
+    );
     await assertSucceeds(
       updateDoc(doc(ownerDb, "userPreferences/user-a"), {
         defaultHome: "schedule",
+        encryptedMatrixLabels,
+        matrixLabels: deleteField(),
+        matrixLabelsFormat: "matrix-labels-v1",
+        matrixLabelsWrappedKey,
         scheduleDefaultView: "matrix",
         scheduleDefaultCategory: "personal",
         updatedAt: serverTimestamp()
@@ -1706,6 +2213,1848 @@ describeRules("firestore security rules", () => {
       })
     );
     await assertFails(deleteDoc(workspaceRef));
+  });
+
+  it("keeps encrypted path rewrite jobs owner-only and enforces crash-safe state transitions", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const jobId = `pr1_${"A".repeat(43)}`;
+    const jobRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId);
+    const otherJobRef = doc(otherDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId);
+    const jobsQuery = query(
+      collection(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites"),
+      where("status", "in", ["preparing", "prepared", "ready", "running", "blocked"]),
+      limit(51)
+    );
+
+    await assertSucceeds(setDoc(jobRef, vaultPathRewriteJob("user-a", jobId)));
+    await assertSucceeds(getDoc(jobRef));
+    await assertSucceeds(getDocs(jobsQuery));
+    await assertFails(getDoc(otherJobRef));
+    await assertFails(getDocs(query(
+      collection(otherDb, "vaultMaintenanceJobs", "user-a", "pathRewrites"),
+      where("status", "in", ["preparing", "prepared", "ready", "running", "blocked"]),
+      limit(51)
+    )));
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", `pr1_${"B".repeat(43)}`),
+      vaultPathRewriteJob("user-a", jobId)
+    ));
+    await assertFails(setDoc(
+      doc(otherDb, "vaultMaintenanceJobs", "user-b", "pathRewrites", `pr1_${"C".repeat(43)}`),
+      vaultPathRewriteJob("user-a", `pr1_${"C".repeat(43)}`)
+    ));
+
+    const stepZeroRef = doc(jobRef, "steps", "step-000000");
+    await assertSucceeds(setDoc(stepZeroRef, vaultPathRewriteStep("user-a", jobId, 0)));
+    await assertFails(setDoc(
+      doc(jobRef, "steps", "step-000001"),
+      vaultPathRewriteStep("user-a", jobId, 0)
+    ));
+    await assertFails(setDoc(
+      doc(jobRef, "steps", "step-000002"),
+      vaultPathRewriteStep("user-a", jobId, 2)
+    ));
+    await assertFails(setDoc(
+      doc(jobRef, "steps", "forged-step"),
+      { ...vaultPathRewriteStep("user-a", jobId, 1), stepId: "forged-step" }
+    ));
+
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "prepared",
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(setDoc(
+      doc(jobRef, "steps", "step-000001"),
+      vaultPathRewriteStep("user-a", jobId, 1)
+    ));
+    await assertFails(updateDoc(stepZeroRef, { encryptedStep: { ...encryptedPayload, cipherText: "changed" } }));
+    await assertFails(deleteDoc(stepZeroRef));
+    await assertFails(updateDoc(jobRef, {
+      status: "running",
+      attemptCount: 1,
+      revision: 3,
+      lastAttemptAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "ready",
+      revision: 3,
+      activatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "running",
+      attemptCount: 1,
+      lastAttemptAt: serverTimestamp(),
+      revision: 4,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(jobRef, {
+      cursor: 2,
+      confirmedCount: 2,
+      status: "completed",
+      completedAt: serverTimestamp(),
+      revision: 5,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(jobRef, {
+      cursor: 1,
+      confirmedCount: 1,
+      revision: 5,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(jobRef, {
+      cursor: 2,
+      confirmedCount: 2,
+      status: "completed",
+      completedAt: serverTimestamp(),
+      revision: 6,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(jobRef, { revision: 7, updatedAt: serverTimestamp() }));
+    await assertFails(deleteDoc(jobRef));
+
+    const recoveryJobId = `pr1_${"D".repeat(43)}`;
+    const recoveryRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", recoveryJobId);
+    await assertSucceeds(setDoc(recoveryRef, vaultPathRewriteJob("user-a", recoveryJobId, { stepCount: 1 })));
+    await assertSucceeds(updateDoc(recoveryRef, {
+      status: "prepared",
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(recoveryRef, {
+      status: "blocked",
+      attemptCount: 1,
+      retryCount: 1,
+      lastErrorCode: "path-state-conflict",
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(recoveryRef, {
+      status: "prepared",
+      lastErrorCode: null,
+      revision: 4,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(recoveryRef, {
+      status: "ready",
+      revision: 5,
+      activatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+
+    const directRecoveryJobId = `pr1_${"E".repeat(43)}`;
+    const directRecoveryRef = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      directRecoveryJobId
+    );
+    await assertSucceeds(setDoc(
+      directRecoveryRef,
+      vaultPathRewriteJob("user-a", directRecoveryJobId, { stepCount: 1 })
+    ));
+    await assertSucceeds(updateDoc(directRecoveryRef, {
+      status: "prepared",
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(directRecoveryRef, {
+      status: "blocked",
+      attemptCount: 1,
+      retryCount: 1,
+      lastErrorCode: "path-state-conflict",
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(directRecoveryRef, {
+      status: "ready",
+      lastErrorCode: null,
+      revision: 4,
+      activatedAt: serverTimestamp(),
+      recoveredAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+  });
+
+  it("keeps direct missing-note reads closed while owner-and-import-job probes disclose nothing", async () => {
+    const probeJobId = `vi1_${"P".repeat(43)}`;
+    const ownedProbeJobId = `vi1_${"Q".repeat(43)}`;
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "notes/foreign-deterministic-target"), {
+        type: "personal",
+        ownerUid: "user-b",
+        participantUids: ["user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: { "user-b": ownerWrappedShareKey },
+        vaultImportJobId: probeJobId,
+        isDeleted: false,
+        updatedBy: "user-b"
+      });
+      await setDoc(doc(db, "notes/owned-deterministic-target"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: { "user-a": ownerWrappedShareKey },
+        vaultImportJobId: ownedProbeJobId,
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    await assertFails(getDoc(doc(ownerDb, "notes/missing-deterministic-target")));
+    const missingProbe = await assertSucceeds(getDocs(query(
+      collection(ownerDb, "notes"),
+      where("ownerUid", "==", "user-a"),
+      where("vaultImportJobId", "==", probeJobId),
+      limit(2)
+    )));
+    expect(missingProbe.empty).toBe(true);
+
+    await assertFails(getDoc(doc(ownerDb, "notes/foreign-deterministic-target")));
+    const foreignHiddenProbe = await assertSucceeds(getDocs(query(
+      collection(ownerDb, "notes"),
+      where("ownerUid", "==", "user-a"),
+      where("vaultImportJobId", "==", probeJobId),
+      limit(2)
+    )));
+    expect(foreignHiddenProbe.empty).toBe(true);
+    const ownedProbe = await assertSucceeds(getDocs(query(
+      collection(ownerDb, "notes"),
+      where("ownerUid", "==", "user-a"),
+      where("vaultImportJobId", "==", ownedProbeJobId),
+      limit(2)
+    )));
+    expect(ownedProbe.docs.map((document) => document.id)).toEqual([
+      "owned-deterministic-target"
+    ]);
+    await assertFails(getDocs(query(
+      collection(ownerDb, "notes"),
+      where("ownerUid", "==", "user-b"),
+      where("vaultImportJobId", "==", probeJobId),
+      limit(2)
+    )));
+  });
+
+  it("locks durable Vault import targets and placements until an exact rollback tombstones them", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "vaultIntegrity/user-a"), vaultIntegrity("user-a"));
+      // Recovery intentionally queries only active owned notes. A purged row
+      // must not make that server-only query fail authorization.
+      await setDoc(doc(db, "notes/purged-before-import"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: { "user-a": ownerWrappedShareKey },
+        isDeleted: true,
+        isPurged: true,
+        purgedAt: new Date("2026-05-18T08:00:00.000Z"),
+        purgedBy: "user-a",
+        updatedBy: "user-a"
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const jobId = `vi1_${"I".repeat(43)}`;
+    const jobRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "imports", jobId);
+    const otherJobRef = doc(otherDb, "vaultMaintenanceJobs", "user-a", "imports", jobId);
+    const chunkRef = doc(jobRef, "chunks", "chunk-000");
+
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "ordinary-folder", "user-a", {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      parentId: null,
+      order: 0,
+      revision: 1,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(createAuditedNote(ownerDb, "ordinary-note", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: null,
+      isDeleted: false
+    }, ["user-a"]));
+
+    await assertSucceeds(setDoc(jobRef, vaultImportJob("user-a", {
+      itemCount: 3,
+      entryCount: 1,
+      folderCount: 2,
+      rootFolderCount: 1
+    })));
+    await assertSucceeds(getDoc(jobRef));
+    await assertFails(getDoc(otherJobRef));
+    await assertSucceeds(getDocs(query(
+      collection(ownerDb, "vaultMaintenanceJobs", "user-a", "imports"),
+      where("status", "in", ["preparing", "staging", "rolling-back", "blocked"]),
+      limit(21)
+    )));
+    await assertFails(getDocs(query(
+      collection(otherDb, "vaultMaintenanceJobs", "user-a", "imports"),
+      where("status", "in", ["preparing", "staging", "rolling-back", "blocked"]),
+      limit(21)
+    )));
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "imports", `vi1_${"X".repeat(43)}`),
+      vaultImportJob("user-a", { remainingChunkCount: 0 })
+    ));
+    await assertSucceeds(setDoc(chunkRef, vaultImportChunk("user-a", jobId, { itemCount: 3 })));
+    await assertFails(updateDoc(chunkRef, {
+      encryptedManifest: { ...encryptedPayload, cipherText: "changed" }
+    }));
+    await assertFails(deleteDoc(chunkRef));
+    await assertFails(updateDoc(jobRef, {
+      status: "committed",
+      revision: 2,
+      committedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "staging",
+      revision: 2,
+      preparedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+
+    // createRevisionedEncryptedNoteAtId deliberately does not probe a missing
+    // note document. Its claim-first create uses a blind set, so prove that a
+    // same-id collision is treated as an update and cannot attach an import
+    // job or overwrite the original ciphertext/history/name reservation.
+    const collisionClaimId = vaultTestClaimId("import-collision-at-ordinary-note");
+    const collisionHistoryId = "import-collision-history";
+    const collisionBatch = writeBatch(ownerDb);
+    collisionBatch.set(doc(ownerDb, "notes/ordinary-note"), {
+      attachmentRevision: 0,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: { ...encryptedPayload, cipherText: "collision-body" },
+      encryptedTitle: { ...encryptedPayload, cipherText: "collision-title" },
+      folderId: null,
+      isDeleted: false,
+      lastMutationId: collisionHistoryId,
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      revision: 1,
+      type: "personal",
+      updatedBy: "user-a",
+      vaultImportJobId: jobId,
+      vaultNameClaimId: collisionClaimId,
+      vaultNameIndexVersion: 1,
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      createdAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    collisionBatch.set(
+      doc(ownerDb, "notes/ordinary-note/history", collisionHistoryId),
+      noteHistory("ordinary-note", "user-a", {
+        action: "create",
+        changedFields: ["title", "body"],
+        readerUids: ["user-a"],
+        revision: 1
+      })
+    );
+    collisionBatch.set(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", collisionClaimId),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "ordinary-note",
+        targetType: "entry",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    );
+    await assertFails(collisionBatch.commit());
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      const collisionOriginal = await getDoc(doc(db, "notes/ordinary-note"));
+      expect(collisionOriginal.data()?.vaultImportJobId).toBeUndefined();
+      expect(collisionOriginal.data()?.vaultNameClaimId).toBe(vaultTestClaimId("ordinary-note"));
+      expect(collisionOriginal.data()?.encryptedTitle).toEqual(encryptedPayload);
+      expect((await getDoc(
+        doc(db, "notes/ordinary-note/history", collisionHistoryId)
+      )).exists()).toBe(false);
+      expect((await getDoc(
+        doc(db, "vaultIntegrity", "user-a", "nameClaims", collisionClaimId)
+      )).exists()).toBe(false);
+    });
+
+    await assertFails(setDoc(
+      doc(jobRef, "chunks", "chunk-001"),
+      vaultImportChunk("user-a", jobId, { ordinal: 1, itemCount: 1 })
+    ));
+
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "import-root", "user-a", {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      parentId: null,
+      order: 1,
+      revision: 1,
+      vaultImportJobId: jobId,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "import-child", "user-a", {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      parentId: "import-root",
+      vaultAncestorIds: ["import-root"],
+      vaultLineageDepth: 1,
+      order: 2,
+      revision: 1,
+      vaultImportJobId: jobId,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(createAuditedNote(ownerDb, "import-note", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      vaultImportJobId: jobId,
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "import-child",
+      isDeleted: false
+    }, ["user-a"]));
+
+    // No unrelated entry or folder may enter the subtree while the manifest
+    // is live, even though the same owner controls both documents.
+    await assertFails(createAuditedNote(ownerDb, "ordinary-in-import", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "import-root",
+      isDeleted: false
+    }, ["user-a"]));
+    await assertFails(createAuditedVaultFolderDirect(ownerDb, "ordinary-in-import-folder", "user-a", {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      parentId: "import-root",
+      order: 3,
+      revision: 1,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "ordinary-note",
+      "user-a",
+      2,
+      "content",
+      ["folder"],
+      ["user-a"],
+      { folderId: "import-root", isDeleted: false }
+    ));
+    const ordinaryFolderMove = writeBatch(ownerDb);
+    const ordinaryFolderOldClaim = vaultTestClaimId("folder:ordinary-folder");
+    const ordinaryFolderMovedClaim = vaultTestClaimId("folder:ordinary-folder:moved");
+    ordinaryFolderMove.update(doc(ownerDb, "noteFolders/ordinary-folder"), {
+      parentId: "import-root",
+      revision: 2,
+      vaultNameClaimId: ordinaryFolderMovedClaim,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp()
+    });
+    ordinaryFolderMove.set(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", ordinaryFolderMovedClaim),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: "import-root",
+        targetId: "ordinary-folder",
+        targetType: "folder",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    );
+    ordinaryFolderMove.delete(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", ordinaryFolderOldClaim)
+    );
+    await assertFails(ordinaryFolderMove.commit());
+
+    // Source locks also prevent another tab from editing or moving imported
+    // descendants out after the server-complete rollback preflight.
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "import-note",
+      "user-a",
+      2,
+      "content",
+      ["body"],
+      ["user-a"],
+      { encryptedBody: { ...encryptedPayload, cipherText: "edited" }, isDeleted: false }
+    ));
+    await assertFails(updateDoc(doc(ownerDb, "noteFolders/import-root"), {
+      color: "#ff0000",
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+
+    const exactTrashImportRoot = () => {
+      const batch = writeBatch(ownerDb);
+      batch.update(doc(ownerDb, "noteFolders/import-root"), {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a",
+        revision: 2,
+        vaultLineageGeneration: 2,
+        updatedAt: serverTimestamp()
+      });
+      batch.delete(doc(
+        ownerDb,
+        "vaultIntegrity",
+        "user-a",
+        "nameClaims",
+        vaultTestClaimId("folder:import-root")
+      ));
+      return batch.commit();
+    };
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "import-note",
+      "user-a",
+      2,
+      "delete",
+      ["deleted"],
+      ["user-a"],
+      {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a"
+      }
+    ));
+    await assertFails(exactTrashImportRoot());
+
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "blocked",
+      revision: 3,
+      lastErrorCode: "rollback-conflict",
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "import-note",
+      "user-a",
+      2,
+      "delete",
+      ["deleted"],
+      ["user-a"],
+      {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a"
+      }
+    ));
+    await assertFails(exactTrashImportRoot());
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "rolling-back",
+      revision: 4,
+      lastErrorCode: null,
+      rollbackStartedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    const importedChildMove = writeBatch(ownerDb);
+    const importedChildOldClaim = vaultTestClaimId("folder:import-child");
+    const importedChildMovedClaim = vaultTestClaimId("folder:import-child:moved");
+    importedChildMove.update(doc(ownerDb, "noteFolders/import-child"), {
+      parentId: null,
+      revision: 2,
+      vaultNameClaimId: importedChildMovedClaim,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp()
+    });
+    importedChildMove.set(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", importedChildMovedClaim),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "import-child",
+        targetType: "folder",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    );
+    importedChildMove.delete(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", importedChildOldClaim)
+    );
+    await assertFails(importedChildMove.commit());
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "import-note",
+      "user-a",
+      2,
+      "delete",
+      ["deleted"],
+      ["user-a"],
+      {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a"
+      }
+    ));
+    await seedServerVaultFolderLifecycle("user-a", "import-root", false);
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "rolled-back",
+      revision: 5,
+      rolledBackAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+
+    await assertFails(deleteDoc(jobRef));
+    const cleanupChunk = writeBatch(ownerDb);
+    cleanupChunk.delete(chunkRef);
+    cleanupChunk.update(jobRef, {
+      remainingChunkCount: 0,
+      revision: 6,
+      updatedAt: serverTimestamp()
+    });
+    await assertSucceeds(cleanupChunk.commit());
+    await assertSucceeds(deleteDoc(jobRef));
+    expect((await getDoc(jobRef)).exists()).toBe(false);
+
+    await assertSucceeds(getDocs(query(
+      collection(ownerDb, "notes"),
+      where("ownerUid", "==", "user-a"),
+      where("isDeleted", "==", false),
+      limit(20_001)
+    )));
+  });
+
+  it("unlocks committed import targets while keeping terminal manifest deletion bounded", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "vaultIntegrity/user-a"), vaultIntegrity("user-a"));
+    });
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const jobId = `vi1_${"C".repeat(43)}`;
+    const jobRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "imports", jobId);
+    const chunkRef = doc(jobRef, "chunks", "chunk-000");
+    await assertSucceeds(setDoc(jobRef, vaultImportJob("user-a")));
+    await assertSucceeds(setDoc(chunkRef, vaultImportChunk("user-a", jobId)));
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "staging",
+      revision: 2,
+      preparedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "committed-import-root", "user-a", {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      parentId: null,
+      order: 1,
+      revision: 1,
+      vaultImportJobId: jobId,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(createAuditedNote(ownerDb, "committed-import-note", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      vaultImportJobId: jobId,
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "committed-import-root",
+      isDeleted: false
+    }, ["user-a"]));
+    await assertFails(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "staging-import-locked",
+      noteId: "committed-import-note"
+    }));
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "committed",
+      revision: 3,
+      committedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "noteFolders/committed-import-root"), {
+      order: 2,
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    // A terminal root cannot be removed first; the only accepted cleanup is
+    // highest ordinal chunk + one counter revision, then the job document.
+    await assertFails(deleteDoc(jobRef));
+    await assertFails(deleteDoc(chunkRef));
+    const cleanup = writeBatch(ownerDb);
+    cleanup.delete(chunkRef);
+    cleanup.update(jobRef, {
+      remainingChunkCount: 0,
+      revision: 4,
+      updatedAt: serverTimestamp()
+    });
+    await assertSucceeds(cleanup.commit());
+    await assertSucceeds(deleteDoc(jobRef));
+
+    // Terminal cleanup removes the durable job but deliberately retains the
+    // immutable provenance marker on each target. A later rename may replace
+    // the blinded claim only when that before/after marker is unchanged.
+    await assertSucceeds(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "post-cleanup-import-rename",
+      noteId: "committed-import-note"
+    }));
+    const renamedImportedNote = await getDoc(doc(ownerDb, "notes/committed-import-note"));
+    expect(renamedImportedNote.data()?.vaultImportJobId).toBe(jobId);
+    expect(renamedImportedNote.data()?.revision).toBe(2);
+
+    const missingJobId = `vi1_${"Z".repeat(43)}`;
+    await assertFails(createAuditedNote(ownerDb, "forged-import-note", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      vaultImportJobId: missingJobId,
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: null,
+      isDeleted: false
+    }, ["user-a"]));
+
+    await assertSucceeds(createAuditedNote(ownerDb, "post-commit-note", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "committed-import-root",
+      isDeleted: false
+    }, ["user-a"]));
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "post-commit-folder", "user-a", {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      parentId: "committed-import-root",
+      vaultAncestorIds: ["committed-import-root"],
+      vaultLineageDepth: 1,
+      order: 2,
+      revision: 1,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+  });
+
+  it("accepts the exact encrypted Vault create and immediate-save transactions without crossing the Rules expression budget", async () => {
+    const sharedClaimId = vaultTestClaimId("real-shared-participant");
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a", {
+        allowedShareTargetUids: ["user-a", "user-b"],
+        featureAccess: featureAccess()
+      }));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b", {
+        featureAccess: featureAccess()
+      }));
+      await setDoc(doc(db, "users/user-c"), userProfile("user-c", {
+        featureAccess: featureAccess({ notes: false })
+      }));
+      await setDoc(doc(db, "vaultIntegrity/user-a"), vaultIntegrity("user-a"));
+      await setDoc(doc(db, "vaultIntegrity/user-b"), vaultIntegrity("user-b"));
+      await setDoc(doc(db, "vaultIntegrity/user-c"), vaultIntegrity("user-c"));
+      await setDoc(doc(db, "notes/real-shared-participant"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        vaultNameClaimId: sharedClaimId,
+        vaultNameIndexVersion: 1,
+        wrappedKeys: {
+          "user-a": ownerWrappedShareKey,
+          "user-b": ownerWrappedShareKey
+        },
+        folderId: null,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        savedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a",
+        revision: 1,
+        lastMutationId: noteRevisionId(1),
+        attachmentRevision: 0,
+        isDeleted: false
+      });
+      await setDoc(doc(db, "vaultIntegrity", "user-a", "nameClaims", sharedClaimId), {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "real-shared-participant",
+        targetType: "entry",
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    await assertSucceeds(createAuditedNote(ownerDb, "real-create-shape", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: null,
+      isDeleted: false
+    }, ["user-a"]));
+    await assertSucceeds(updateExactAuditedVaultContent(ownerDb, {
+      actorUid: "user-a",
+      changedFields: ["body"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: { ...encryptedPayload, cipherText: "templated-body" },
+      noteId: "real-create-shape",
+      ownerSuppliesNameClaim: true,
+      readerUids: ["user-a"],
+      revision: 2
+    }));
+    await assertSucceeds(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "root-valid",
+      noteId: "real-create-shape"
+    }));
+    const renamedTitle = { ...encryptedPayload, cipherText: "title-root-valid" };
+    await assertSucceeds(updateExactAuditedVaultContent(ownerDb, {
+      actorUid: "user-a",
+      changedFields: ["body"],
+      encryptedTitle: renamedTitle,
+      encryptedBody: { ...encryptedPayload, cipherText: "body-only-save" },
+      noteId: "real-create-shape",
+      ownerSuppliesNameClaim: true,
+      readerUids: ["user-a"],
+      revision: 4
+    }));
+
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "real-create-folder", "user-a", {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      parentId: null,
+      order: 0,
+      revision: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(createAuditedNote(ownerDb, "real-create-in-folder", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "real-create-folder",
+      isDeleted: false
+    }, ["user-a"]));
+    await assertSucceeds(updateExactAuditedVaultContent(ownerDb, {
+      actorUid: "user-a",
+      changedFields: ["body"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: { ...encryptedPayload, cipherText: "nested-templated-body" },
+      noteId: "real-create-in-folder",
+      ownerSuppliesNameClaim: true,
+      readerUids: ["user-a"],
+      revision: 2
+    }));
+    await assertSucceeds(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "nested-valid",
+      noteId: "real-create-in-folder"
+    }));
+    await assertSucceeds(updateExactAuditedVaultContent(ownerDb, {
+      actorUid: "user-a",
+      changedFields: ["body"],
+      encryptedTitle: { ...encryptedPayload, cipherText: "title-nested-valid" },
+      encryptedBody: { ...encryptedPayload, cipherText: "nested-body-only-save" },
+      noteId: "real-create-in-folder",
+      ownerSuppliesNameClaim: true,
+      readerUids: ["user-a"],
+      revision: 4
+    }));
+
+    await assertSucceeds(createAuditedNote(ownerDb, "title-only-negative", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "real-create-folder",
+      isDeleted: false
+    }, ["user-a"]));
+    const negativeOriginalClaimId = vaultTestClaimId("title-only-negative");
+
+    await assertFails(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "extra-body",
+      encryptedBody: { ...encryptedPayload, cipherText: "unaudited-body" },
+      noteId: "title-only-negative"
+    }));
+    await assertFails(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "extra-folder",
+      folderId: null,
+      noteId: "title-only-negative"
+    }));
+    await assertFails(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      access: {
+        participantUids: ["user-a", "user-b"],
+        type: "shared",
+        wrappedKeys: {
+          "user-a": ownerWrappedShareKey,
+          "user-b": ownerWrappedShareKey
+        }
+      },
+      caseId: "extra-access",
+      noteId: "title-only-negative"
+    }));
+    await assertFails(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "old-claim-retained",
+      deletePreviousClaim: false,
+      noteId: "title-only-negative"
+    }));
+    await assertFails(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "new-claim-missing",
+      createNewClaim: false,
+      noteId: "title-only-negative"
+    }));
+    await assertFails(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "new-claim-wrong-target",
+      newClaimTargetId: "different-entry",
+      noteId: "title-only-negative"
+    }));
+    await assertFails(commitOwnerTitleOnlyNameMutation(ownerDb, {
+      caseId: "history-mismatch",
+      historyChangedFields: ["body", "name-claim"],
+      noteId: "title-only-negative"
+    }));
+
+    const unchangedNegativeNote = await getDoc(doc(ownerDb, "notes/title-only-negative"));
+    expect(unchangedNegativeNote.data()?.revision).toBe(1);
+    expect(unchangedNegativeNote.data()?.vaultNameClaimId).toBe(negativeOriginalClaimId);
+    expect((await getDoc(doc(
+      ownerDb,
+      "vaultIntegrity",
+      "user-a",
+      "nameClaims",
+      negativeOriginalClaimId
+    ))).exists()).toBe(true);
+
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+    await assertSucceeds(updateExactAuditedVaultContent(participantDb, {
+      actorUid: "user-b",
+      changedFields: ["body"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: { ...encryptedPayload, cipherText: "participant-body-only" },
+      noteId: "real-shared-participant",
+      ownerSuppliesNameClaim: false,
+      readerUids: ["user-a", "user-b"],
+      revision: 2
+    }));
+    await assertFails(updateExactAuditedVaultContent(participantDb, {
+      actorUid: "user-b",
+      changedFields: ["title", "body"],
+      encryptedTitle: { ...encryptedPayload, cipherText: "participant-title-change" },
+      encryptedBody: { ...encryptedPayload, cipherText: "participant-body-change" },
+      noteId: "real-shared-participant",
+      ownerSuppliesNameClaim: false,
+      readerUids: ["user-a", "user-b"],
+      revision: 3
+    }));
+
+    const notesDisabledDb = testEnv.authenticatedContext("user-c").firestore();
+    await assertFails(createAuditedNote(notesDisabledDb, "feature-blocked-create", "user-c", {
+      type: "personal",
+      ownerUid: "user-c",
+      participantUids: ["user-c"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-c": ownerWrappedShareKey },
+      folderId: null,
+      isDeleted: false
+    }, ["user-c"]));
+  });
+
+  it("treats a Vault marker created in the same batch as an active cutover boundary", async () => {
+    const uid = "cutover-user";
+    const existingNoteId = "cutover-existing-legacy";
+    const legacyFolderId = "cutover-legacy-folder";
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, `users/${uid}`), userProfile(uid));
+      await setDoc(doc(db, `notes/${existingNoteId}`), {
+        type: "personal",
+        ownerUid: uid,
+        participantUids: [uid],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: { [uid]: ownerWrappedShareKey },
+        folderId: null,
+        isDeleted: false,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        savedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: uid,
+        revision: 1,
+        lastMutationId: noteRevisionId(1)
+      });
+      await setDoc(doc(db, `noteFolders/${legacyFolderId}`), {
+        ownerUid: uid,
+        name: "marker 이전 폴더",
+        color: "#2f7d70",
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+    });
+
+    const db = testEnv.authenticatedContext(uid).firestore();
+    const markerRef = doc(db, `vaultIntegrity/${uid}`);
+    const marker = {
+      ownerUid: uid,
+      indexVersion: 1,
+      wrappedKey: ownerWrappedShareKey,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    };
+
+    const unclaimedVersionedId = "same-batch-unclaimed-versioned";
+    const versionedHistoryId = noteRevisionId(1);
+    const fakeClaimId = vaultTestClaimId(unclaimedVersionedId);
+    const unclaimedVersionedBatch = writeBatch(db);
+    unclaimedVersionedBatch.set(markerRef, marker);
+    unclaimedVersionedBatch.set(doc(db, `notes/${unclaimedVersionedId}`), {
+      type: "personal",
+      ownerUid: uid,
+      participantUids: [uid],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      attachmentRevision: 0,
+      vaultNameClaimId: fakeClaimId,
+      vaultNameIndexVersion: 1,
+      wrappedKeys: { [uid]: ownerWrappedShareKey },
+      folderId: null,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: uid,
+      revision: 1,
+      lastMutationId: versionedHistoryId
+    });
+    unclaimedVersionedBatch.set(
+      doc(db, `notes/${unclaimedVersionedId}/history/${versionedHistoryId}`),
+      noteHistory(unclaimedVersionedId, uid, {
+        action: "create",
+        changedFields: ["title", "body"],
+        readerUids: [uid],
+        revision: 1
+      })
+    );
+    await assertFails(unclaimedVersionedBatch.commit());
+
+    const legacyCreateId = "same-batch-legacy-create";
+    const legacyCreateBatch = writeBatch(db);
+    legacyCreateBatch.set(markerRef, marker);
+    legacyCreateBatch.set(doc(db, `notes/${legacyCreateId}`), {
+      type: "personal",
+      ownerUid: uid,
+      participantUids: [uid],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      wrappedKeys: { [uid]: ownerWrappedShareKey },
+      folderId: null,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: uid,
+      revision: 1,
+      lastMutationId: noteRevisionId(1)
+    });
+    legacyCreateBatch.set(
+      doc(db, `notes/${legacyCreateId}/history/${noteRevisionId(1)}`),
+      noteHistory(legacyCreateId, uid, {
+        action: "create",
+        changedFields: ["title", "body"],
+        readerUids: [uid],
+        revision: 1
+      })
+    );
+    await assertFails(legacyCreateBatch.commit());
+
+    const legacyUpdateBatch = writeBatch(db);
+    legacyUpdateBatch.set(markerRef, marker);
+    legacyUpdateBatch.update(doc(db, `notes/${existingNoteId}`), {
+      encryptedBody: { ...encryptedPayload, cipherText: "same-batch-cutover-body" },
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: uid,
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
+    });
+    legacyUpdateBatch.set(
+      doc(db, `notes/${existingNoteId}/history/${noteRevisionId(2)}`),
+      noteHistory(existingNoteId, uid, {
+        changedFields: ["body"],
+        readerUids: [uid],
+        revision: 2
+      })
+    );
+    await assertFails(legacyUpdateBatch.commit());
+
+    const legacyFolderDeleteBatch = writeBatch(db);
+    legacyFolderDeleteBatch.set(markerRef, marker);
+    legacyFolderDeleteBatch.delete(doc(db, `noteFolders/${legacyFolderId}`));
+    await assertFails(legacyFolderDeleteBatch.commit());
+  });
+
+  it("atomically reserves blinded Vault names across concurrent entry and folder mutations", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", {
+        allowedShareTargetUids: ["user-a", "user-b"]
+      }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "notes/unclaimed-entry"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        folderId: null,
+        isDeleted: false,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        savedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a",
+        revision: 1,
+        lastMutationId: "legacy-revision-1"
+      });
+      await setDoc(doc(context.firestore(), "notes/collision-loser"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        contentFormat: "legacy-html-v1",
+        entryKind: "legacy-html",
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        folderId: null,
+        isDeleted: false,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        savedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a",
+        revision: 1,
+        lastMutationId: "legacy-revision-1"
+      });
+      await setDoc(doc(context.firestore(), "notes/missing-deletion-metadata"), {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        folderId: null,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        savedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a",
+        revision: 1,
+        lastMutationId: "legacy-revision-1"
+      });
+      await setDoc(doc(context.firestore(), "notes/shared-unclaimed"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        folderId: null,
+        isDeleted: false,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        savedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a",
+        revision: 1,
+        lastMutationId: "legacy-revision-1"
+      });
+      await setDoc(doc(context.firestore(), "notes/shared-invalid-folder"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        folderId: "historical-folder",
+        isDeleted: false,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        savedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a",
+        revision: 1,
+        lastMutationId: "legacy-revision-1"
+      });
+      for (const noteId of ["deleted-unclaimed", "deleted-unclaimed-conflict"]) {
+        await setDoc(doc(context.firestore(), `notes/${noteId}`), {
+          type: "personal",
+          ownerUid: "user-a",
+          participantUids: ["user-a"],
+          encryptedTitle: encryptedPayload,
+          encryptedBody: encryptedPayload,
+          contentFormat: "legacy-html-v1",
+          entryKind: "legacy-html",
+          wrappedKeys: {
+            "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+          },
+          folderId: null,
+          isDeleted: true,
+          deletedAt: new Date("2026-05-18T08:30:00.000Z"),
+          deletedBy: "user-a",
+          createdAt: new Date("2026-05-18T08:00:00.000Z"),
+          updatedAt: new Date("2026-05-18T08:30:00.000Z"),
+          savedAt: new Date("2026-05-18T08:00:00.000Z"),
+          updatedBy: "user-a",
+          revision: 4,
+          lastMutationId: "legacy-delete-revision-4"
+        });
+      }
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const integrityRef = doc(ownerDb, "vaultIntegrity/user-a");
+    await assertSucceeds(setDoc(integrityRef, {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      wrappedKey: ownerWrappedShareKey,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(getDoc(integrityRef));
+    await assertFails(getDoc(doc(otherDb, "vaultIntegrity/user-a")));
+    await assertFails(updateDoc(integrityRef, { updatedAt: serverTimestamp() }));
+
+    const backfillClaimId = vaultTestClaimId("unclaimed-entry");
+    const backfillBatch = writeBatch(ownerDb);
+    backfillBatch.update(doc(ownerDb, "notes/unclaimed-entry"), {
+      vaultNameClaimId: backfillClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
+    });
+    backfillBatch.set(
+      doc(ownerDb, "notes/unclaimed-entry/history", noteRevisionId(2)),
+      noteHistory("unclaimed-entry", "user-a", {
+        action: "content",
+        changedFields: ["name-claim"],
+        readerUids: ["user-a"],
+        revision: 2
+      })
+    );
+    backfillBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", backfillClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: null,
+      targetId: "unclaimed-entry",
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    await assertSucceeds(backfillBatch.commit());
+
+    await assertSucceeds(updateDoc(doc(ownerDb, "notes/missing-deletion-metadata"), {
+      isDeleted: false
+    }));
+    await assertFails(updateDoc(doc(otherDb, "notes/missing-deletion-metadata"), {
+      isDeleted: false
+    }));
+
+    const recoveryClaimId = vaultTestClaimId("collision-loser-recovered");
+    const invalidRecoveryBatch = writeBatch(ownerDb);
+    invalidRecoveryBatch.update(doc(ownerDb, "notes/collision-loser"), {
+      encryptedTitle: { ...encryptedPayload, cipherText: "replacement-title" },
+      encryptedBody: { ...encryptedPayload, cipherText: "forbidden-body-rewrite" },
+      vaultNameClaimId: recoveryClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
+    });
+    invalidRecoveryBatch.set(
+      doc(ownerDb, "notes/collision-loser/history", noteRevisionId(2)),
+      noteHistory("collision-loser", "user-a", {
+        action: "content",
+        changedFields: ["title", "body", "name-claim"],
+        readerUids: ["user-a"],
+        revision: 2
+      })
+    );
+    invalidRecoveryBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", recoveryClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: null,
+      targetId: "collision-loser",
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    await assertFails(invalidRecoveryBatch.commit());
+
+    const recoveryBatch = writeBatch(ownerDb);
+    recoveryBatch.update(doc(ownerDb, "notes/collision-loser"), {
+      encryptedTitle: { ...encryptedPayload, cipherText: "replacement-title" },
+      vaultNameClaimId: recoveryClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
+    });
+    recoveryBatch.set(
+      doc(ownerDb, "notes/collision-loser/history", noteRevisionId(2)),
+      noteHistory("collision-loser", "user-a", {
+        action: "content",
+        changedFields: ["title", "name-claim"],
+        readerUids: ["user-a"],
+        revision: 2
+      })
+    );
+    recoveryBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", recoveryClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: null,
+      targetId: "collision-loser",
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    await assertSucceeds(recoveryBatch.commit());
+
+    const sharedClaimId = vaultTestClaimId("shared-unclaimed");
+    const sharedBackfillBatch = writeBatch(ownerDb);
+    sharedBackfillBatch.update(doc(ownerDb, "notes/shared-unclaimed"), {
+      vaultNameClaimId: sharedClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
+    });
+    sharedBackfillBatch.set(
+      doc(ownerDb, "notes/shared-unclaimed/history", noteRevisionId(2)),
+      noteHistory("shared-unclaimed", "user-a", {
+        action: "content",
+        changedFields: ["name-claim"],
+        readerUids: ["user-a", "user-b"],
+        revision: 2
+      })
+    );
+    sharedBackfillBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", sharedClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: null,
+      targetId: "shared-unclaimed",
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    await assertSucceeds(sharedBackfillBatch.commit());
+
+    const participantBodyBatch = writeBatch(otherDb);
+    participantBodyBatch.update(doc(otherDb, "notes/shared-unclaimed"), {
+      encryptedBody: { ...encryptedPayload, cipherText: "participant-body" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-b",
+      revision: 3,
+      lastMutationId: noteRevisionId(3)
+    });
+    participantBodyBatch.set(
+      doc(otherDb, "notes/shared-unclaimed/history", noteRevisionId(3)),
+      noteHistory("shared-unclaimed", "user-b", {
+        action: "content",
+        changedFields: ["body"],
+        readerUids: ["user-a", "user-b"],
+        revision: 3
+      })
+    );
+    await assertSucceeds(participantBodyBatch.commit());
+
+    const participantTitleBatch = writeBatch(otherDb);
+    participantTitleBatch.update(doc(otherDb, "notes/shared-unclaimed"), {
+      encryptedTitle: { ...encryptedPayload, cipherText: "participant-title" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-b",
+      revision: 4,
+      lastMutationId: noteRevisionId(4)
+    });
+    participantTitleBatch.set(
+      doc(otherDb, "notes/shared-unclaimed/history", noteRevisionId(4)),
+      noteHistory("shared-unclaimed", "user-b", {
+        action: "content",
+        changedFields: ["title"],
+        readerUids: ["user-a", "user-b"],
+        revision: 4
+      })
+    );
+    await assertFails(participantTitleBatch.commit());
+
+    const sharedFolderRepairClaimId = vaultTestClaimId("shared-invalid-folder-root");
+    const sharedFolderRepairBatch = writeBatch(ownerDb);
+    sharedFolderRepairBatch.update(doc(ownerDb, "notes/shared-invalid-folder"), {
+      folderId: null,
+      vaultNameClaimId: sharedFolderRepairClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
+    });
+    sharedFolderRepairBatch.set(
+      doc(ownerDb, "notes/shared-invalid-folder/history", noteRevisionId(2)),
+      noteHistory("shared-invalid-folder", "user-a", {
+        action: "content",
+        changedFields: ["folder", "name-claim"],
+        readerUids: ["user-a", "user-b"],
+        revision: 2
+      })
+    );
+    sharedFolderRepairBatch.set(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", sharedFolderRepairClaimId),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "shared-invalid-folder",
+        targetType: "entry",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    );
+    await assertSucceeds(sharedFolderRepairBatch.commit());
+
+    const restoredClaimId = vaultTestClaimId("deleted-unclaimed-restored");
+    const restoreLegacyDeletedBatch = writeBatch(ownerDb);
+    restoreLegacyDeletedBatch.update(doc(ownerDb, "notes/deleted-unclaimed"), {
+      isDeleted: false,
+      deletedAt: deleteField(),
+      deletedBy: deleteField(),
+      vaultNameClaimId: restoredClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 5,
+      lastMutationId: noteRevisionId(5)
+    });
+    restoreLegacyDeletedBatch.set(
+      doc(ownerDb, "notes/deleted-unclaimed/history", noteRevisionId(5)),
+      noteHistory("deleted-unclaimed", "user-a", {
+        action: "restore",
+        changedFields: ["restored", "name-claim"],
+        readerUids: ["user-a"],
+        revision: 5
+      })
+    );
+    restoreLegacyDeletedBatch.set(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", restoredClaimId),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "deleted-unclaimed",
+        targetType: "entry",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    );
+    await assertSucceeds(restoreLegacyDeletedBatch.commit());
+
+    const conflictingRestoreBatch = writeBatch(ownerDb);
+    conflictingRestoreBatch.update(doc(ownerDb, "notes/deleted-unclaimed-conflict"), {
+      isDeleted: false,
+      deletedAt: deleteField(),
+      deletedBy: deleteField(),
+      vaultNameClaimId: restoredClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 5,
+      lastMutationId: noteRevisionId(5)
+    });
+    conflictingRestoreBatch.set(
+      doc(ownerDb, "notes/deleted-unclaimed-conflict/history", noteRevisionId(5)),
+      noteHistory("deleted-unclaimed-conflict", "user-a", {
+        action: "restore",
+        changedFields: ["restored", "name-claim"],
+        readerUids: ["user-a"],
+        revision: 5
+      })
+    );
+    conflictingRestoreBatch.set(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", restoredClaimId),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "deleted-unclaimed-conflict",
+        targetType: "entry",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    );
+    await assertFails(conflictingRestoreBatch.commit());
+
+    await assertFails(createAuditedNote(ownerDb, "legacy-after-cutover", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+      },
+      folderId: null,
+      isDeleted: false
+    }, ["user-a"]));
+
+    const versionedNote = {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+      },
+      folderId: null,
+      isDeleted: false
+    };
+    const missingClaimId = vaultTestClaimId("missing-claim-entry");
+    const missingClaimBatch = writeBatch(ownerDb);
+    missingClaimBatch.set(doc(ownerDb, "notes/missing-claim-entry"), {
+      ...versionedNote,
+      vaultNameClaimId: missingClaimId,
+      vaultNameIndexVersion: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 1,
+      lastMutationId: noteRevisionId(1)
+    });
+    missingClaimBatch.set(
+      doc(ownerDb, "notes/missing-claim-entry/history", noteRevisionId(1)),
+      noteHistory("missing-claim-entry", "user-a", {
+        action: "create",
+        changedFields: ["title", "body"],
+        readerUids: ["user-a"],
+        revision: 1
+      })
+    );
+    await assertFails(missingClaimBatch.commit());
+
+    await assertSucceeds(createAuditedNote(
+      ownerDb,
+      "claimed-entry",
+      "user-a",
+      versionedNote,
+      ["user-a"]
+    ));
+
+    const firstClaimId = vaultTestClaimId("claimed-entry");
+    const duplicateBatch = writeBatch(ownerDb);
+    duplicateBatch.set(doc(ownerDb, "notes/duplicate-entry"), {
+      ...versionedNote,
+      vaultNameClaimId: firstClaimId,
+      vaultNameIndexVersion: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      savedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 1,
+      lastMutationId: noteRevisionId(1)
+    });
+    duplicateBatch.set(
+      doc(ownerDb, "notes/duplicate-entry/history", noteRevisionId(1)),
+      noteHistory("duplicate-entry", "user-a", {
+        action: "create",
+        changedFields: ["title", "body"],
+        readerUids: ["user-a"],
+        revision: 1
+      })
+    );
+    duplicateBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", firstClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: null,
+      targetId: "duplicate-entry",
+      targetType: "entry",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    await assertFails(duplicateBatch.commit());
+
+    const staleRenameBatch = writeBatch(ownerDb);
+    staleRenameBatch.update(doc(ownerDb, "notes/claimed-entry"), {
+      encryptedTitle: { ...encryptedPayload, cipherText: "stale-rename" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
+    });
+    staleRenameBatch.set(
+      doc(ownerDb, "notes/claimed-entry/history", noteRevisionId(2)),
+      noteHistory("claimed-entry", "user-a", {
+        action: "content",
+        changedFields: ["title"],
+        readerUids: ["user-a"],
+        revision: 2
+      })
+    );
+    await assertFails(staleRenameBatch.commit());
+
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "claimed-entry",
+      "user-a",
+      2,
+      "content",
+      ["title"],
+      ["user-a"],
+      { encryptedTitle: { ...encryptedPayload, cipherText: "renamed" }, isDeleted: false }
+    ));
+    const renamedEntry = await getDoc(doc(ownerDb, "notes/claimed-entry"));
+    const renamedClaimId = renamedEntry.data()?.vaultNameClaimId as string;
+    expect(renamedClaimId).not.toBe(firstClaimId);
+    expect((await assertSucceeds(getDoc(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", firstClaimId)))).exists())
+      .toBe(false);
+
+    const deleteWithoutRelease = writeBatch(ownerDb);
+    deleteWithoutRelease.update(doc(ownerDb, "notes/claimed-entry"), {
+      isDeleted: true,
+      deletedAt: serverTimestamp(),
+      deletedBy: "user-a",
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 3,
+      lastMutationId: noteRevisionId(3)
+    });
+    deleteWithoutRelease.set(
+      doc(ownerDb, "notes/claimed-entry/history", noteRevisionId(3)),
+      noteHistory("claimed-entry", "user-a", {
+        action: "delete",
+        changedFields: ["deleted"],
+        readerUids: ["user-a"],
+        revision: 3
+      })
+    );
+    await assertFails(deleteWithoutRelease.commit());
+
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "claimed-entry",
+      "user-a",
+      3,
+      "delete",
+      ["deleted"],
+      ["user-a"],
+      {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a"
+      }
+    ));
+    expect((await assertSucceeds(getDoc(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", renamedClaimId)))).exists())
+      .toBe(false);
+
+    const restoreWithoutClaim = writeBatch(ownerDb);
+    restoreWithoutClaim.update(doc(ownerDb, "notes/claimed-entry"), {
+      isDeleted: false,
+      deletedAt: deleteField(),
+      deletedBy: deleteField(),
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 4,
+      lastMutationId: noteRevisionId(4)
+    });
+    restoreWithoutClaim.set(
+      doc(ownerDb, "notes/claimed-entry/history", noteRevisionId(4)),
+      noteHistory("claimed-entry", "user-a", {
+        action: "restore",
+        changedFields: ["restored"],
+        readerUids: ["user-a"],
+        revision: 4
+      })
+    );
+    await assertFails(restoreWithoutClaim.commit());
+
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "claimed-entry",
+      "user-a",
+      4,
+      "restore",
+      ["restored"],
+      ["user-a"],
+      {
+        isDeleted: false,
+        deletedAt: deleteField(),
+        deletedBy: deleteField()
+      }
+    ));
+    expect((await assertSucceeds(getDoc(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", renamedClaimId)))).exists())
+      .toBe(true);
+
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "claimed-folder", "user-a", {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+      parentId: null,
+      order: 0,
+      revision: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(setDoc(doc(ownerDb, "noteFolders/missing-claim-folder"), {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+      parentId: null,
+      order: 1,
+      revision: 1,
+      vaultNameClaimId: vaultTestClaimId("folder:missing-claim-folder"),
+      vaultNameIndexVersion: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    const folderClaimId = vaultTestClaimId("folder:claimed-folder");
+    const duplicateFolderBatch = writeBatch(ownerDb);
+    duplicateFolderBatch.set(doc(ownerDb, "noteFolders/duplicate-folder"), {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+      parentId: null,
+      order: 1,
+      revision: 1,
+      vaultNameClaimId: folderClaimId,
+      vaultNameIndexVersion: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    duplicateFolderBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", folderClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: null,
+      targetId: "duplicate-folder",
+      targetType: "folder",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    await assertFails(duplicateFolderBatch.commit());
   });
 
   it("keeps personal schedule tasks owner-only and blocks forged attribution", async () => {
@@ -2740,6 +5089,70 @@ describeRules("firestore security rules", () => {
     await assertFails(getDoc(doc(participantDb, "notes/note-a")));
   });
 
+  it("allows production-shaped self and approved-owner note subscriptions while rejecting revoked owner scopes", async () => {
+    const profileTimestamp = new Date("2026-05-18T07:00:00.000Z");
+    const noteTimestamp = new Date("2026-05-18T08:00:00.000Z");
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/new-user"), userProfile("new-user", {
+        allowedShareTargetUids: ["new-user"],
+        featureAccess: featureAccess(),
+        createdAt: profileTimestamp,
+        updatedAt: profileTimestamp
+      }));
+      await setDoc(doc(db, "users/approved-owner"), userProfile("approved-owner", {
+        allowedShareTargetUids: ["approved-owner", "new-user"],
+        featureAccess: featureAccess(),
+        createdAt: profileTimestamp,
+        updatedAt: profileTimestamp
+      }));
+      await setDoc(doc(db, "users/revoked-owner"), userProfile("revoked-owner", {
+        allowedShareTargetUids: ["revoked-owner"],
+        featureAccess: featureAccess(),
+        createdAt: profileTimestamp,
+        updatedAt: profileTimestamp
+      }));
+      const sharedNote = (ownerUid: string) => ({
+        type: "shared",
+        ownerUid,
+        participantUids: [ownerUid, "new-user"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          [ownerUid]: ownerWrappedShareKey,
+          "new-user": ownerWrappedShareKey
+        },
+        folderId: null,
+        createdAt: noteTimestamp,
+        updatedAt: noteTimestamp,
+        savedAt: noteTimestamp,
+        updatedBy: ownerUid,
+        revision: 1,
+        lastMutationId: noteRevisionId(1),
+        attachmentRevision: 0,
+        isDeleted: false
+      });
+      await setDoc(doc(db, "notes/approved-shared-note"), sharedNote("approved-owner"));
+      await setDoc(doc(db, "notes/revoked-shared-note"), sharedNote("revoked-owner"));
+    });
+
+    const newUserDb = testEnv.authenticatedContext("new-user").firestore();
+    const visibleOwnerNotes = (ownerUid: string) => query(
+      collection(newUserDb, "notes"),
+      where("ownerUid", "==", ownerUid),
+      where("isDeleted", "==", false),
+      where("participantUids", "array-contains", "new-user"),
+      orderBy("updatedAt", "desc"),
+      limit(80)
+    );
+
+    await assertSucceeds(getDocs(visibleOwnerNotes("new-user")));
+    await assertSucceeds(getDocs(visibleOwnerNotes("approved-owner")));
+    await assertSucceeds(getDoc(doc(newUserDb, "notes/approved-shared-note")));
+    await assertFails(getDocs(visibleOwnerNotes("revoked-owner")));
+    await assertFails(getDoc(doc(newUserDb, "notes/revoked-shared-note")));
+  });
+
   it("allows owners to publish temporary public note shares while blocking expired or revoked links", async () => {
     const shareExpiresAt = new Date(Date.now() + 6 * 24 * 60 * 60 * 1000);
     const legacySourceAttachmentShare = publicShareDocument("note-a", "user-a", {
@@ -3680,10 +6093,378 @@ describeRules("firestore security rules", () => {
     );
   });
 
+  it("uses one server tree lookup for deep notes and denies direct topology forgery", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "vaultIntegrity/user-a"), vaultIntegrity("user-a"));
+    });
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const base = {
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      order: 0,
+      revision: 1,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    };
+    await createAuditedVaultFolder(ownerDb, "deep-a", "user-a", {
+      ...base, parentId: null, vaultAncestorIds: []
+    });
+    await createAuditedVaultFolder(ownerDb, "deep-b", "user-a", {
+      ...base, parentId: "deep-a", vaultAncestorIds: ["deep-a"]
+    });
+    await createAuditedVaultFolder(ownerDb, "deep-c", "user-a", {
+      ...base, parentId: "deep-b", vaultAncestorIds: ["deep-a", "deep-b"]
+    });
+    await createAuditedVaultFolder(ownerDb, "deep-d", "user-a", {
+      ...base, parentId: "deep-c", vaultAncestorIds: ["deep-a", "deep-b", "deep-c"]
+    });
+    await assertSucceeds(createAuditedNote(ownerDb, "deep-note", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "deep-d",
+      isDeleted: false
+    }, ["user-a"]));
+
+    await assertFails(getDoc(doc(ownerDb, "vaultFolderTrees/user-a")));
+    await assertFails(updateDoc(doc(ownerDb, "vaultFolderTrees/user-a"), {
+      "nodes.deep-a.parentId": "deep-d"
+    }));
+    await assertFails(updateDoc(doc(ownerDb, "noteFolders/deep-a"), {
+      parentId: "deep-d",
+      revision: 2,
+      vaultAncestorIds: ["deep-b", "deep-c", "deep-d"],
+      vaultLineageDepth: 3,
+      vaultLineageGeneration: 2,
+      vaultLineagePath: "deep-b/deep-c/deep-d/deep-a",
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(createAuditedVaultFolderDirect(ownerDb, "direct-folder", "user-a", {
+      ...base,
+      parentId: null,
+      vaultAncestorIds: []
+    }));
+
+    await seedServerVaultFolderLifecycle("user-a", "deep-a", false);
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "deep-note",
+      "user-a",
+      2,
+      "content",
+      ["body"],
+      ["user-a"],
+      { encryptedBody: { ...encryptedPayload, cipherText: "blocked" }, isDeleted: false }
+    ));
+  });
+
+  it("rejects forged deep lineage, three-node cycles, and writes below a tombstoned ancestor", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", {
+        allowedShareTargetUids: ["user-a", "user-b"]
+      }));
+      await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "vaultIntegrity/user-a"), vaultIntegrity("user-a"));
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const folder = (parentId: string | null, ancestorIds: string[], order: number) => ({
+      ownerUid: "user-a",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: ownerWrappedShareKey,
+      parentId,
+      order,
+      revision: 1,
+      vaultAncestorIds: ancestorIds,
+      vaultLineageDepth: ancestorIds.length,
+      vaultLineageGeneration: 1,
+      vaultLineageVersion: 3,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "lineage-a", "user-a", folder(null, [], 0)));
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "lineage-b", "user-a", folder("lineage-a", ["lineage-a"], 1)));
+    await assertSucceeds(createAuditedVaultFolder(ownerDb, "lineage-root-d", "user-a", folder(null, [], 2)));
+    await assertSucceeds(createAuditedNote(ownerDb, "lineage-note", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "lineage-b",
+      isDeleted: false
+    }, ["user-a"]));
+    await assertSucceeds(createAuditedNote(ownerDb, "lineage-deleted-note", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "lineage-b",
+      isDeleted: false
+    }, ["user-a"]));
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "lineage-deleted-note",
+      "user-a",
+      2,
+      "delete",
+      ["deleted"],
+      ["user-a"],
+      { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "user-a" }
+    ));
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "lineage-deleted-note",
+      "user-a",
+      3,
+      "restore",
+      ["restored"],
+      ["user-a"],
+      { isDeleted: false, deletedAt: deleteField(), deletedBy: deleteField() }
+    ));
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "lineage-deleted-note",
+      "user-a",
+      4,
+      "delete",
+      ["deleted"],
+      ["user-a"],
+      { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "user-a" }
+    ));
+
+    // Seed a pre-contract shared note in the nested folder. Current product
+    // flows do not place a newly shared note there, but a participant must not
+    // be able to use that historical shape to bypass a later ancestor tombstone.
+    const sharedClaimId = vaultTestClaimId("lineage-shared-note");
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "notes/lineage-shared-note"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        wrappedKeys: {
+          "user-a": ownerWrappedShareKey,
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        folderId: "lineage-b",
+        attachmentRevision: 0,
+        vaultNameClaimId: sharedClaimId,
+        vaultNameIndexVersion: 1,
+        isDeleted: false,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z"),
+        savedAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedBy: "user-a",
+        revision: 3,
+        lastMutationId: "seeded-pre-contract-shared-note"
+      });
+      await setDoc(doc(
+        context.firestore(),
+        "vaultIntegrity",
+        "user-a",
+        "nameClaims",
+        sharedClaimId
+      ), {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: "lineage-b",
+        targetId: "lineage-shared-note",
+        targetType: "entry",
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z")
+      });
+    });
+    const participantDb = testEnv.authenticatedContext("user-b").firestore();
+
+    // Simulate a deeper pre-contract folder that may exist during dual-read.
+    // The new Rules must not let a direct owner SDK use it to complete a cycle.
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(
+        doc(context.firestore(), "noteFolders/lineage-c"),
+        folder("lineage-b", ["lineage-a", "lineage-b"], 2)
+      );
+    });
+
+    // A root may already have children, which Rules cannot enumerate. Moving
+    // it below another root would silently turn those children into a depth-two
+    // tree, so the v1 contract rejects even an otherwise complete direct-SDK
+    // move/name-claim transaction.
+    const rootMoveClaimId = vaultTestClaimId("folder:lineage-a:root-move");
+    const forgedRootMove = writeBatch(ownerDb);
+    forgedRootMove.update(doc(ownerDb, "noteFolders/lineage-a"), {
+      parentId: "lineage-root-d",
+      revision: 2,
+      vaultAncestorIds: ["lineage-root-d"],
+      vaultLineageDepth: 1,
+      vaultLineageGeneration: 2,
+      vaultNameClaimId: rootMoveClaimId,
+      updatedAt: serverTimestamp()
+    });
+    forgedRootMove.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", rootMoveClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: "lineage-root-d",
+      targetId: "lineage-a",
+      targetType: "folder",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    forgedRootMove.delete(doc(
+      ownerDb,
+      "vaultIntegrity",
+      "user-a",
+      "nameClaims",
+      vaultTestClaimId("folder:lineage-a")
+    ));
+    await assertFails(forgedRootMove.commit());
+
+    const cycleClaimId = vaultTestClaimId("folder:lineage-a:cycle");
+    const forgedCycle = writeBatch(ownerDb);
+    forgedCycle.update(doc(ownerDb, "noteFolders/lineage-a"), {
+      parentId: "lineage-c",
+      revision: 2,
+      vaultAncestorIds: ["lineage-b", "lineage-c"],
+      vaultLineageDepth: 2,
+      vaultLineageGeneration: 2,
+      vaultNameClaimId: cycleClaimId,
+      updatedAt: serverTimestamp()
+    });
+    forgedCycle.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", cycleClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: "lineage-c",
+      targetId: "lineage-a",
+      targetType: "folder",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    forgedCycle.delete(doc(
+      ownerDb,
+      "vaultIntegrity",
+      "user-a",
+      "nameClaims",
+      vaultTestClaimId("folder:lineage-a")
+    ));
+    await assertFails(forgedCycle.commit());
+
+    await assertFails(createAuditedVaultFolderDirect(
+      ownerDb,
+      "forged-short-lineage",
+      "user-a",
+      {
+        ...folder("lineage-b", ["lineage-a"], 3),
+        vaultLineageDepth: 1,
+        vaultLineagePath: "lineage-a/forged-short-lineage"
+      }
+    ));
+
+    const forgedRootLifecycle = writeBatch(ownerDb);
+    forgedRootLifecycle.update(doc(ownerDb, "noteFolders/lineage-a"), {
+      isDeleted: true,
+      deletedAt: serverTimestamp(),
+      deletedBy: "user-a",
+      revision: 2,
+      vaultAncestorIds: ["lineage-b"],
+      vaultLineageDepth: 1,
+      vaultLineageGeneration: 2,
+      updatedAt: serverTimestamp()
+    });
+    forgedRootLifecycle.delete(doc(
+      ownerDb,
+      "vaultIntegrity",
+      "user-a",
+      "nameClaims",
+      vaultTestClaimId("folder:lineage-a")
+    ));
+    await assertFails(forgedRootLifecycle.commit());
+
+    // Browser SDK lifecycle writes are denied. Seed the exact state that the
+    // authenticated Vercel transaction commits and verify descendants fail
+    // closed from the central authoritative map.
+    await seedServerVaultFolderLifecycle("user-a", "lineage-a", false);
+
+    await assertFails(createAuditedNote(ownerDb, "hidden-descendant-write", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: "lineage-b",
+      isDeleted: false
+    }, ["user-a"]));
+    await assertFails(updateExactAuditedVaultContent(ownerDb, {
+      actorUid: "user-a",
+      changedFields: ["body"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: { ...encryptedPayload, cipherText: "blocked-under-deleted-ancestor" },
+      noteId: "lineage-note",
+      ownerSuppliesNameClaim: true,
+      readerUids: ["user-a"],
+      revision: 2
+    }));
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "lineage-deleted-note",
+      "user-a",
+      5,
+      "restore",
+      ["restored"],
+      ["user-a"],
+      { isDeleted: false, deletedAt: deleteField(), deletedBy: deleteField() }
+    ));
+    await assertFails(updateExactAuditedVaultContent(participantDb, {
+      actorUid: "user-b",
+      changedFields: ["body"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: { ...encryptedPayload, cipherText: "participant-after-trash" },
+      noteId: "lineage-shared-note",
+      ownerSuppliesNameClaim: true,
+      readerUids: ["user-a", "user-b"],
+      revision: 4
+    }));
+  });
+
   it("allows owners to manage personal note folders and blocks cross-user assignments", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
       await setDoc(doc(context.firestore(), "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(context.firestore(), "vaultIntegrity/user-a"), vaultIntegrity("user-a"));
+      await setDoc(doc(context.firestore(), "noteFolders/legacy-folder-to-migrate"), {
+        ownerUid: "user-a",
+        name: "기존 폴더 이름",
+        color: "#2f7d70",
+        isDeleted: false,
+        createdAt: new Date("2026-05-18T08:00:00.000Z"),
+        updatedAt: new Date("2026-05-18T08:00:00.000Z")
+      });
       await setDoc(doc(context.firestore(), "noteFolders/user-b-parent"), {
         ownerUid: "user-b",
         name: "다른 사용자 폴더",
@@ -3722,7 +6503,7 @@ describeRules("firestore security rules", () => {
     const otherDb = testEnv.authenticatedContext("user-b").firestore();
 
     await assertSucceeds(
-      setDoc(doc(ownerDb, "noteFolders/folder-a"), {
+      createAuditedVaultFolder(ownerDb, "folder-a", "user-a", {
         ownerUid: "user-a",
         name: "암호화 폴더",
         color: "#7c5cff",
@@ -3731,11 +6512,142 @@ describeRules("firestore security rules", () => {
         parentId: null,
         order: 0,
         revision: 1,
+        isDeleted: false,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    const folderPlacementNote = {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      isDeleted: false
+    };
+    await assertSucceeds(createAuditedNote(ownerDb, "note-in-folder-a", "user-a", {
+      ...folderPlacementNote,
+      folderId: "folder-a"
+    }, ["user-a"]));
+    await assertSucceeds(createAuditedNote(ownerDb, "note-to-move-into-folder-a", "user-a", {
+      ...folderPlacementNote,
+      folderId: null
+    }, ["user-a"]));
+    await assertFails(
+      createAuditedVaultFolderDirect(ownerDb, "plaintext-name-folder", "user-a", {
+        ownerUid: "user-a",
+        name: "서버에 노출되면 안 되는 실제 폴더 이름",
+        color: "#7c5cff",
+        encryptedName: encryptedPayload,
+        wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+        parentId: null,
+        order: 1,
+        revision: 1,
+        isDeleted: false,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       })
     );
     await assertSucceeds(
+      setDoc(doc(otherDb, "noteFolders/legacy-user-b-folder"), {
+        ownerUid: "user-b",
+        name: "marker 이전 폴더",
+        color: "#2f7d70",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertSucceeds(
+      updateDoc(doc(otherDb, "noteFolders/legacy-user-b-folder"), {
+        name: "marker 이전 폴더 수정",
+        updatedAt: serverTimestamp()
+      })
+    );
+    const atomicCutoverClaimId = vaultTestClaimId("folder:atomic-cutover-folder");
+    const unsafeAtomicCutover = writeBatch(otherDb);
+    unsafeAtomicCutover.set(doc(otherDb, "vaultIntegrity/user-b"), {
+      ownerUid: "user-b",
+      indexVersion: 1,
+      wrappedKey: ownerWrappedShareKey,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    unsafeAtomicCutover.set(doc(otherDb, "noteFolders/atomic-cutover-folder"), {
+      ownerUid: "user-b",
+      name: "암호화 폴더",
+      color: "#7c5cff",
+      encryptedName: encryptedPayload,
+      wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+      parentId: null,
+      order: 1,
+      revision: 1,
+      vaultNameClaimId: atomicCutoverClaimId,
+      vaultNameIndexVersion: 1,
+      isDeleted: false,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    await assertFails(unsafeAtomicCutover.commit());
+    const legacyMigrationClaimId = vaultTestClaimId("folder:legacy-folder-to-migrate");
+    const unsafeLegacyMigration = writeBatch(ownerDb);
+    unsafeLegacyMigration.update(doc(ownerDb, "noteFolders/legacy-folder-to-migrate"), {
+      name: "기존 폴더 이름",
+      encryptedName: encryptedPayload,
+      wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+      parentId: null,
+      order: 2,
+      revision: 1,
+      vaultNameClaimId: legacyMigrationClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp()
+    });
+    unsafeLegacyMigration.set(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", legacyMigrationClaimId),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "legacy-folder-to-migrate",
+        targetType: "folder",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    );
+    await assertFails(unsafeLegacyMigration.commit());
+    const safeLegacyMigration = writeBatch(ownerDb);
+    safeLegacyMigration.update(doc(ownerDb, "noteFolders/legacy-folder-to-migrate"), {
+      name: "암호화 폴더",
+      encryptedName: encryptedPayload,
+      wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+      parentId: null,
+      order: 2,
+      revision: 1,
+      vaultAncestorIds: [],
+      vaultLineagePath: "legacy-folder-to-migrate",
+      vaultLineageDepth: 0,
+      vaultLineageGeneration: 1,
+      vaultLineageVersion: 3,
+      vaultNameClaimId: legacyMigrationClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp()
+    });
+    safeLegacyMigration.set(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", legacyMigrationClaimId),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "legacy-folder-to-migrate",
+        targetType: "folder",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    );
+    await assertFails(safeLegacyMigration.commit());
+    await assertFails(
       setDoc(doc(ownerDb, "noteFolders/legacy-folder"), {
         ownerUid: "user-a",
         name: "기존 폴더",
@@ -3746,13 +6658,15 @@ describeRules("firestore security rules", () => {
     );
     await assertFails(getDoc(doc(otherDb, "noteFolders/folder-a")));
     await assertSucceeds(
-      setDoc(doc(ownerDb, "noteFolders/encrypted-folder"), {
+      createAuditedVaultFolder(ownerDb, "encrypted-folder", "user-a", {
         ownerUid: "user-a",
         name: "암호화 폴더",
         color: "#7c5cff",
         encryptedName: encryptedPayload,
         wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
         parentId: "folder-a",
+        vaultAncestorIds: ["folder-a"],
+        vaultLineageDepth: 1,
         order: 1,
         revision: 1,
         createdAt: serverTimestamp(),
@@ -3768,7 +6682,7 @@ describeRules("firestore security rules", () => {
         updatedAt: serverTimestamp()
       })
     );
-    await assertSucceeds(
+    await assertFails(
       updateDoc(doc(ownerDb, "noteFolders/encrypted-folder"), {
         encryptedName: { ...encryptedPayload, cipherText: "renamed" },
         order: 2,
@@ -3776,6 +6690,28 @@ describeRules("firestore security rules", () => {
         updatedAt: serverTimestamp()
       })
     );
+    const currentFolderClaimId = vaultTestClaimId("folder:encrypted-folder");
+    const renamedFolderClaimId = vaultTestClaimId("folder:encrypted-folder:renamed");
+    const renameFolderBatch = writeBatch(ownerDb);
+    renameFolderBatch.update(doc(ownerDb, "noteFolders/encrypted-folder"), {
+      encryptedName: { ...encryptedPayload, cipherText: "renamed" },
+      order: 2,
+      revision: 2,
+      vaultNameClaimId: renamedFolderClaimId,
+      vaultNameIndexVersion: 1,
+      updatedAt: serverTimestamp()
+    });
+    renameFolderBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", renamedFolderClaimId), {
+      ownerUid: "user-a",
+      indexVersion: 1,
+      parentId: "folder-a",
+      targetId: "encrypted-folder",
+      targetType: "folder",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    renameFolderBatch.delete(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", currentFolderClaimId));
+    await assertFails(renameFolderBatch.commit());
     await assertFails(
       updateDoc(doc(ownerDb, "noteFolders/encrypted-folder"), {
         parentId: null,
@@ -3822,6 +6758,81 @@ describeRules("firestore security rules", () => {
       })
     );
     await assertFails(deleteDoc(doc(ownerDb, "noteFolders/folder-a")));
+    await assertFails(
+      updateDoc(doc(otherDb, "noteFolders/folder-a"), {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-b",
+        revision: 2,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "noteFolders/folder-a"), {
+        isDeleted: true,
+        deletedAt: serverTimestamp(),
+        deletedBy: "user-a",
+        revision: 2,
+        updatedAt: serverTimestamp()
+      })
+    );
+    const trashedFolderClaimId = vaultTestClaimId("folder:folder-a");
+    await seedServerVaultFolderLifecycle("user-a", "folder-a", false);
+    expect((await assertSucceeds(getDoc(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", trashedFolderClaimId)))).exists())
+      .toBe(false);
+    await assertFails(createAuditedNote(ownerDb, "note-created-in-trashed-folder", "user-a", {
+      ...folderPlacementNote,
+      folderId: "folder-a"
+    }, ["user-a"]));
+    await assertFails(updateExactAuditedVaultContent(ownerDb, {
+      actorUid: "user-a",
+      changedFields: ["body"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: { ...encryptedPayload, cipherText: "body-save-under-trashed-folder" },
+      noteId: "note-in-folder-a",
+      ownerSuppliesNameClaim: true,
+      readerUids: ["user-a"],
+      revision: 2
+    }));
+    await assertFails(updateAuditedNote(
+      ownerDb,
+      "note-to-move-into-folder-a",
+      "user-a",
+      2,
+      "content",
+      ["body", "folder"],
+      ["user-a"],
+      {
+        encryptedBody: { ...encryptedPayload, cipherText: "move-into-trashed-folder" },
+        folderId: "folder-a",
+        isDeleted: false
+      }
+    ));
+    await assertFails(
+      createAuditedVaultFolderDirect(ownerDb, "child-under-trashed-parent", "user-a", {
+        ownerUid: "user-a",
+        name: "암호화 폴더",
+        color: "#7c5cff",
+        encryptedName: encryptedPayload,
+        wrappedKey: { version: 1, algorithm: "RSA-OAEP", wrappedKey: "wrapped-folder-key" },
+        parentId: "folder-a",
+        order: 2,
+        revision: 1,
+        isDeleted: false,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      })
+    );
+    await assertFails(
+      updateDoc(doc(ownerDb, "noteFolders/folder-a"), {
+        isDeleted: false,
+        deletedAt: deleteField(),
+        deletedBy: deleteField(),
+        revision: 3,
+        updatedAt: serverTimestamp()
+      })
+    );
+    await seedServerVaultFolderLifecycle("user-a", "folder-a", true);
     for (const [folderId, parentId, revision] of [
       ["wrong-initial-revision", null, 2],
       ["self-parent", "self-parent", 1],
@@ -3872,6 +6883,54 @@ describeRules("firestore security rules", () => {
         },
         isDeleted: false
       }, ["user-a"])
+    );
+    await assertSucceeds(
+      createAuditedNote(ownerDb, "atomic-content-folder-note", "user-a", {
+        type: "personal",
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        contentFormat: "markdown-v1",
+        entryKind: "markdown",
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+        },
+        folderId: null,
+        isDeleted: false
+      }, ["user-a"])
+    );
+    await assertSucceeds(
+      updateAuditedNote(
+        ownerDb,
+        "atomic-content-folder-note",
+        "user-a",
+        2,
+        "content",
+        ["body", "folder"],
+        ["user-a"],
+        {
+          encryptedBody: { ...encryptedPayload, cipherText: "atomic-moved-body" },
+          folderId: "folder-a",
+          isDeleted: false
+        }
+      )
+    );
+    await assertFails(
+      updateAuditedNote(
+        ownerDb,
+        "atomic-content-folder-note",
+        "user-a",
+        3,
+        "content",
+        ["folder"],
+        ["user-a"],
+        {
+          encryptedBody: { ...encryptedPayload, cipherText: "undeclared-body-change" },
+          folderId: null,
+          isDeleted: false
+        }
+      )
     );
     await assertSucceeds(
       updateAuditedNote(
@@ -3946,7 +7005,7 @@ describeRules("firestore security rules", () => {
         }
       )
     );
-    await assertSucceeds(
+    await assertFails(
       updateDoc(doc(ownerDb, "notes/personal-note"), {
         folderId: "legacy-folder",
         updatedAt: serverTimestamp(),
@@ -3972,6 +7031,7 @@ describeRules("firestore security rules", () => {
   it("requires matching vault content formats and entry kinds", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(context.firestore(), "vaultIntegrity/user-a"), vaultIntegrity("user-a"));
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
@@ -4950,16 +8010,30 @@ describeRules("firestore security rules", () => {
     firstBatch.set(historyRef, noteHistory("note-a", "user-b", { changedFields: ["body"], revision: 1 }));
     await assertSucceeds(firstBatch.commit());
 
-    const secondBatch = writeBatch(participantDb);
-    const secondHistoryRef = doc(participantDb, "notes/note-a/history", noteRevisionId(2));
-    secondBatch.update(doc(participantDb, "notes/note-a"), {
+    const participantTitleBatch = writeBatch(participantDb);
+    participantTitleBatch.update(doc(participantDb, "notes/note-a"), {
       encryptedTitle: { ...encryptedPayload, cipherText: "updated-title" },
       updatedAt: serverTimestamp(),
       updatedBy: "user-b",
       revision: 2,
       lastMutationId: noteRevisionId(2)
     });
-    secondBatch.set(secondHistoryRef, noteHistory("note-a", "user-b", { changedFields: ["title"], revision: 2 }));
+    participantTitleBatch.set(
+      doc(participantDb, "notes/note-a/history", noteRevisionId(2)),
+      noteHistory("note-a", "user-b", { changedFields: ["title"], revision: 2 })
+    );
+    await assertFails(participantTitleBatch.commit());
+
+    const secondBatch = writeBatch(ownerDb);
+    const secondHistoryRef = doc(ownerDb, "notes/note-a/history", noteRevisionId(2));
+    secondBatch.update(doc(ownerDb, "notes/note-a"), {
+      encryptedTitle: { ...encryptedPayload, cipherText: "updated-title" },
+      updatedAt: serverTimestamp(),
+      updatedBy: "user-a",
+      revision: 2,
+      lastMutationId: noteRevisionId(2)
+    });
+    secondBatch.set(secondHistoryRef, noteHistory("note-a", "user-a", { changedFields: ["title"], revision: 2 }));
     await assertSucceeds(secondBatch.commit());
 
     for (const [historyId, historyOverrides] of [

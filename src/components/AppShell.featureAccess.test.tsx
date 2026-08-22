@@ -21,12 +21,14 @@ const scheduleOnlyProfile: UserProfile = {
 };
 
 const authState = vi.hoisted(() => ({
+  privateKey: {} as CryptoKey | null,
   profile: null as UserProfile | null
 }));
 
 vi.mock("../context/AuthContext", () => ({
   useAuth: () => ({
     changePassword: vi.fn(),
+    privateKey: authState.privateKey,
     profile: authState.profile,
     signOut: vi.fn()
   })
@@ -48,6 +50,7 @@ vi.mock("../services/userPreferences", async (importOriginal) => {
 
 describe("AppShell feature navigation", () => {
   beforeEach(() => {
+    authState.privateKey = {} as CryptoKey;
     authState.profile = scheduleOnlyProfile;
   });
 

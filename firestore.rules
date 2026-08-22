@@ -74,6 +74,26 @@ service cloud.firestore {
       return /databases/$(database)/documents/noteFolders/$(folderId);
     }
 
+    function vaultIntegrityPath(uid) {
+      return /databases/$(database)/documents/vaultIntegrity/$(uid);
+    }
+
+    function vaultFolderTreePath(uid) {
+      return /databases/$(database)/documents/vaultFolderTrees/$(uid);
+    }
+
+    function vaultNameClaimPath(uid, claimId) {
+      return /databases/$(database)/documents/vaultIntegrity/$(uid)/nameClaims/$(claimId);
+    }
+
+    function vaultPathRewriteJobPath(uid, jobId) {
+      return /databases/$(database)/documents/vaultMaintenanceJobs/$(uid)/pathRewrites/$(jobId);
+    }
+
+    function vaultImportJobPath(uid, jobId) {
+      return /databases/$(database)/documents/vaultMaintenanceJobs/$(uid)/imports/$(jobId);
+    }
+
     function publicSharePath(shareId) {
       return /databases/$(database)/documents/publicNoteShares/$(shareId);
     }
@@ -123,8 +143,10 @@ service cloud.firestore {
 
     function userHasNotes(uid) {
       let profile = get(userPath(uid)).data;
-      return exists(userPath(uid))
-        && profile.isActive == true
+      // Reading a missing profile yields no usable profile data, so the
+      // isActive comparison below already fails closed. Avoid evaluating the
+      // same user document twice on every note/history/name-claim write.
+      return profile.isActive == true
         && (
           profile.isAdmin == true
           || !profile.keys().hasAny(["featureAccess"])
@@ -185,6 +207,9 @@ service cloud.firestore {
         "encryptedBody",
         "contentFormat",
         "entryKind",
+        "vaultNameClaimId",
+        "vaultNameIndexVersion",
+        "vaultImportJobId",
         "wrappedKeys",
         "folderId",
         "createdAt",
@@ -238,19 +263,105 @@ service cloud.firestore {
       && validPurgeMetadata(data);
     }
 
-    function validVaultEntryFormat(data) {
+    function validVaultImportJobId(jobId) {
+      return jobId is string && jobId.matches("^vi1_[A-Za-z0-9_-]{43}$");
+    }
+
+    // Access mutations cannot change encrypted content, ownership, deletion,
+    // purge, attachment, or timestamp identity fields. Validate only the
+    // mutable access projection here to stay below Firestore's 1000-expression
+    // budget while preserving the same constraints for every changed value.
+    function validNoteAccessProjection(data) {
+      return data.type in ["personal", "shared"]
+        && data.participantUids is list
+        && data.participantUids.size() > 0
+        && (
+          (data.type == "personal" && data.participantUids.size() == 1)
+          || (data.type == "shared" && data.participantUids.size() > 1)
+        )
+        && data.wrappedKeys is map
+        && validNoteFolderReference(data);
+    }
+
+    // Content mutations cannot alter ownership, participants, wrapped keys,
+    // deletion/purge state, or attachment metadata. Revalidate the encrypted
+    // payloads and optional folder reference that this branch can change.
+    function validNoteContentProjection(data) {
+      return encryptedPayload(data.encryptedTitle)
+        && encryptedPayload(data.encryptedBody)
+        && validNoteFolderReference(data);
+    }
+
+    function validVaultStorageIdentity(data) {
+      return data.keys().hasAll(["contentFormat", "entryKind"])
+        && (
+          (data.contentFormat == "legacy-html-v1" && data.entryKind == "legacy-html")
+          || (data.contentFormat == "markdown-v1" && data.entryKind == "markdown")
+          || (data.contentFormat == "json-canvas-v1" && data.entryKind == "canvas")
+          || (data.contentFormat == "base-v1" && data.entryKind == "base")
+          || (data.contentFormat == "asset-v1" && data.entryKind == "asset")
+        );
+    }
+
+    function validVaultEntryFormat(data, noteId) {
       return !data.keys().hasAny(["contentFormat", "entryKind"])
         || (
-          data.keys().hasAll(["contentFormat", "entryKind"])
-          && (
-            (data.contentFormat == "legacy-html-v1" && data.entryKind == "legacy-html")
-            || (data.contentFormat == "markdown-v1" && data.entryKind == "markdown")
-            || (data.contentFormat == "json-canvas-v1" && data.entryKind == "canvas")
-            || (data.contentFormat == "base-v1" && data.entryKind == "base")
-            || (data.contentFormat == "asset-v1" && data.entryKind == "asset")
-          )
+          validVaultStorageIdentity(data)
           && validVaultEntryPayloadSize(data)
+          && validVaultNameReservationFields(data)
         );
+    }
+
+    function validVaultNameClaimId(value) {
+      return value is string && value.matches("^[A-Za-z0-9_-]{43}$");
+    }
+
+    function validVaultNameReservationFields(data) {
+      return data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && validVaultNameClaimId(data.vaultNameClaimId)
+        && data.vaultNameIndexVersion == 1;
+    }
+
+    function vaultCutoverCreateHasNameReservation(data) {
+      // Marker activation is a separate transaction. Treat a marker created in
+      // this same request as active so a client cannot smuggle unclaimed legacy
+      // or versioned entries through the pre-cutover create branch.
+      return existsAfter(vaultIntegrityPath(data.ownerUid))
+        ? validVaultNameReservationFields(data)
+        : true;
+    }
+
+    function vaultCutoverNoteNameMutationIsClaimAware(data) {
+      return resource.data.keys().hasAny(["vaultNameClaimId"])
+        ? (
+          data.encryptedTitle == resource.data.encryptedTitle
+          && noteFolderId(data) == noteFolderId(resource.data)
+          && data.type == resource.data.type
+          ? true
+          : data.vaultNameClaimId != resource.data.vaultNameClaimId
+        )
+        : true;
+    }
+
+    function vaultCutoverFolderMutationIsClaimAware(data) {
+      return resource.data.keys().hasAny(["vaultNameClaimId"])
+        ? (
+          data.encryptedName == resource.data.encryptedName
+          && data.parentId == resource.data.parentId
+          ? true
+          : data.vaultNameClaimId != resource.data.vaultNameClaimId
+        )
+        : true;
+    }
+
+    // Once the Vault integrity marker exists (including a marker created in
+    // the same atomic write), folder names must never be persisted in clear
+    // text. Historical accounts without a marker retain their legacy folder
+    // shape so the unlocked client can dual-read and migrate it explicitly.
+    function vaultFolderStorageMatchesCutover(data) {
+      return existsAfter(vaultIntegrityPath(data.ownerUid))
+        ? data.name == "암호화 폴더"
+        : true;
     }
 
     // Historical TipTap notes share the same collection and already sit close
@@ -390,13 +501,137 @@ service cloud.firestore {
         );
     }
 
+    function encryptedVaultFolder(data) {
+      return data.keys().hasAll([
+        "encryptedName",
+        "wrappedKey",
+        "parentId",
+        "order",
+        "revision"
+      ]);
+    }
+
+    // The complete opaque tree is written only by the authenticated Vercel
+    // mutation boundary. Rules use one document lookup regardless of nesting
+    // depth and never accept client-supplied ancestorIds as authority.
+    function authoritativeVaultFolderActive(uid, folderId, folder) {
+      let node = get(vaultFolderTreePath(uid)).data.nodes[folderId];
+      // The central document is not readable or writable by any client, and
+      // the API validates its complete schema before every server transaction.
+      // Keep this hot-path projection minimal so large note batches remain
+      // below Firestore's 1,000-expression ceiling.
+      return node.active == true;
+    }
+
+    function validVaultFolderLineage(data, folderId) {
+      return data.keys().hasAll([
+          "vaultAncestorIds",
+          "vaultLineagePath",
+          "vaultLineageDepth",
+          "vaultLineageGeneration",
+          "vaultLineageVersion"
+        ])
+        && data.vaultAncestorIds is list
+        && data.vaultLineagePath is string
+        && data.vaultLineagePath.size() > 0
+        && data.vaultLineagePath.size() <= 4096
+        && data.vaultLineageDepth is int
+        && data.vaultLineageDepth == data.vaultAncestorIds.size()
+        && data.vaultLineageDepth >= 0
+        && data.vaultLineageDepth <= 32
+        && data.vaultLineageGeneration is int
+        && data.vaultLineageGeneration >= 1
+        && data.vaultLineageGeneration <= 999999999999
+        && data.vaultLineageVersion == 3
+        && !data.vaultAncestorIds.hasAny([folderId])
+        && authoritativeVaultFolderActive(data.ownerUid, folderId, data);
+    }
+
     function validAssignedFolder(data) {
       return !data.keys().hasAny(["folderId"])
         || data.folderId == null
+        || validAssignedFolderDocument(data, data.folderId);
+    }
+
+    function validAssignedFolderDocument(data, folderId) {
+      let folder = get(noteFolderPath(folderId)).data;
+      return exists(noteFolderPath(folderId))
+        && folder.ownerUid == data.ownerUid
+        && folderActive(folder)
+        && (
+          !encryptedVaultFolder(folder)
+          || authoritativeVaultFolderActive(data.ownerUid, folderId, folder)
+        )
+        && vaultImportFolderDocumentPlacementAllowed(data, folder);
+    }
+
+    function vaultImportFolderPlacementAllowed(data, folderId) {
+      let folder = get(noteFolderPath(folderId)).data;
+      return vaultImportFolderDocumentPlacementAllowed(data, folder);
+    }
+
+    function vaultImportFolderDocumentPlacementAllowed(data, folder) {
+      return !folder.keys().hasAny(["vaultImportJobId"])
         || (
-          data.folderId is string
-          && exists(noteFolderPath(data.folderId))
-          && get(noteFolderPath(data.folderId)).data.ownerUid == data.ownerUid
+          data.keys().hasAny(["vaultImportJobId"])
+          && data.vaultImportJobId == folder.vaultImportJobId
+        )
+        || !existsAfter(vaultImportJobPath(folder.ownerUid, folder.vaultImportJobId))
+        || vaultImportExistingFolderPlacementAllowed(folder);
+    }
+
+    function vaultImportExistingFolderPlacementAllowed(folder) {
+      let job = getAfter(vaultImportJobPath(folder.ownerUid, folder.vaultImportJobId)).data;
+      return job.ownerUid == folder.ownerUid && job.status == "committed";
+    }
+
+    // Imported targets stay immutable until their durable job is committed.
+    // During rollback, the normal note mutation validators still verify the
+    // complete revision/history/name-claim tombstone transaction; this helper
+    // only opens that exact mutation shape and keeps edits/moves locked.
+    function vaultImportNoteUpdateAllowed(data) {
+      return !resource.data.keys().hasAny(["vaultImportJobId"])
+        || !existsAfter(vaultImportJobPath(resource.data.ownerUid, resource.data.vaultImportJobId))
+        || vaultImportExistingJobNoteUpdateAllowed(data);
+    }
+
+    function vaultImportExistingJobNoteUpdateAllowed(data) {
+      let job = getAfter(vaultImportJobPath(resource.data.ownerUid, resource.data.vaultImportJobId)).data;
+      return job.ownerUid == resource.data.ownerUid
+        && (
+          job.status == "committed"
+          || (
+            job.status == "rolling-back"
+            && data.keys().hasAny(["vaultImportJobId"])
+            && data.vaultImportJobId == resource.data.vaultImportJobId
+            && data.isDeleted == true
+            && request.resource.data.diff(resource.data).affectedKeys().hasAny(["isDeleted"])
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              "isDeleted", "deletedAt", "deletedBy", "updatedAt", "updatedBy",
+              "revision", "lastMutationId"
+            ])
+          )
+        );
+    }
+
+    function vaultImportFolderUpdateAllowed(data) {
+      return !resource.data.keys().hasAny(["vaultImportJobId"])
+        || !existsAfter(vaultImportJobPath(resource.data.ownerUid, resource.data.vaultImportJobId))
+        || vaultImportExistingJobFolderUpdateAllowed(data);
+    }
+
+    function vaultImportExistingJobFolderUpdateAllowed(data) {
+      let job = getAfter(vaultImportJobPath(resource.data.ownerUid, resource.data.vaultImportJobId)).data;
+      return job.ownerUid == resource.data.ownerUid
+        && (
+          job.status == "committed"
+          || (
+            job.status == "rolling-back"
+            && data.keys().hasAny(["vaultImportJobId"])
+            && data.vaultImportJobId == resource.data.vaultImportJobId
+            && data.isDeleted == true
+            && vaultFolderLifecycleRequested(data)
+          )
         );
     }
 
@@ -573,10 +808,21 @@ service cloud.firestore {
     }
 
     function validUserPreferences(data, uid) {
-      return data.keys().hasOnly(["uid", "defaultHome", "matrixLabels", "scheduleDefaultView", "scheduleDefaultCategory", "theme", "createdAt", "updatedAt"])
+      return data.keys().hasOnly([
+          "uid",
+          "defaultHome",
+          "encryptedMatrixLabels",
+          "matrixLabelsFormat",
+          "matrixLabelsWrappedKey",
+          "scheduleDefaultView",
+          "scheduleDefaultCategory",
+          "theme",
+          "createdAt",
+          "updatedAt"
+        ])
         && data.uid == uid
         && data.defaultHome in ["notes", "library", "schedule"]
-        && (!data.keys().hasAny(["matrixLabels"]) || validMatrixLabels(data.matrixLabels))
+        && validEncryptedMatrixLabels(data)
         && data.scheduleDefaultView in ["todo", "calendar", "matrix", "recurring", "completed"]
         && (!data.keys().hasAny(["scheduleDefaultCategory"]) || data.scheduleDefaultCategory in ["all", "work", "personal"])
         && (!data.keys().hasAny(["theme"]) || data.theme in ["light", "dark", "system"])
@@ -584,21 +830,29 @@ service cloud.firestore {
         && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
     }
 
-    function validMatrixLabels(labels) {
-      return labels is map
-        && labels.keys().hasOnly(["todayOverdue", "importantUrgent", "urgent", "important", "waiting"])
-        && labels.keys().hasAll(["todayOverdue", "importantUrgent", "urgent", "important", "waiting"])
-        && validMatrixLabel(labels.todayOverdue)
-        && validMatrixLabel(labels.importantUrgent)
-        && validMatrixLabel(labels.urgent)
-        && validMatrixLabel(labels.important)
-        && validMatrixLabel(labels.waiting);
-    }
-
-    function validMatrixLabel(label) {
-      return label is string
-        && label.size() > 0
-        && label.size() <= 16;
+    function validEncryptedMatrixLabels(data) {
+      return !data.keys().hasAny([
+          "encryptedMatrixLabels",
+          "matrixLabelsFormat",
+          "matrixLabelsWrappedKey"
+        ])
+        || (
+          data.keys().hasAll([
+            "encryptedMatrixLabels",
+            "matrixLabelsFormat",
+            "matrixLabelsWrappedKey"
+          ])
+          && data.matrixLabelsFormat == "matrix-labels-v1"
+          && encryptedPayload(data.encryptedMatrixLabels)
+          && data.encryptedMatrixLabels.cipherText.size() >= 24
+          && data.encryptedMatrixLabels.cipherText.size() <= 4096
+          && data.encryptedMatrixLabels.iv.size() == 16
+          && wrappedAesKeyPayload(data.matrixLabelsWrappedKey)
+          && (
+            data.matrixLabelsWrappedKey.wrappedKey.size() == 344
+            || data.matrixLabelsWrappedKey.wrappedKey.size() == 512
+          )
+        );
     }
 
     function validScheduleDate(value) {
@@ -910,6 +1164,250 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function validVaultIntegrity(data, uid) {
+      return data.keys().hasAll(["ownerUid", "indexVersion", "wrappedKey", "createdAt", "updatedAt"])
+        && data.keys().hasOnly(["ownerUid", "indexVersion", "wrappedKey", "createdAt", "updatedAt"])
+        && data.ownerUid == uid
+        && data.indexVersion == 1
+        && wrappedAesKeyPayload(data.wrappedKey)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function validVaultNameClaim(data, uid, claimId) {
+      return data.keys().hasAll([
+          "ownerUid",
+          "indexVersion",
+          "parentId",
+          "targetId",
+          "targetType",
+          "createdAt",
+          "updatedAt"
+        ])
+        && data.keys().hasOnly([
+          "ownerUid",
+          "indexVersion",
+          "parentId",
+          "targetId",
+          "targetType",
+          "createdAt",
+          "updatedAt"
+        ])
+        && validVaultNameClaimId(claimId)
+        && data.ownerUid == uid
+        && data.indexVersion == 1
+        && (data.parentId == null || (data.parentId is string && data.parentId.size() > 0 && data.parentId.size() <= 120))
+        && data.targetId is string
+        && data.targetId.size() > 0
+        && data.targetId.size() <= 120
+        && data.targetType in ["entry", "folder"]
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function vaultEntryNameClaimTargetMatchesAfter(data, uid, claimId) {
+      let target = getAfter(notePath(data.targetId)).data;
+      return target.ownerUid == uid
+        && noteActive(target)
+        && target.vaultNameClaimId == claimId
+        && target.vaultNameIndexVersion == 1
+        && noteFolderId(target) == data.parentId
+        && vaultImportEntryClaimTargetBound(target, data.targetId);
+    }
+
+    function vaultFolderNameClaimTargetMatchesAfter(data, uid, claimId) {
+      let target = getAfter(noteFolderPath(data.targetId)).data;
+      return target.ownerUid == uid
+        && folderActive(target)
+        && target.vaultNameClaimId == claimId
+        && target.vaultNameIndexVersion == 1
+        && target.parentId == data.parentId
+        && vaultImportFolderClaimTargetBound(target, data.targetId);
+    }
+
+    // Import provenance is enforced on the paired name-claim write rather
+    // than the already expression-heavy target create rule. The target and
+    // claim are required in one atomic write, so this remains fail closed while
+    // keeping the exact Vault create transaction below Firestore's 1000 limit.
+    function vaultImportStagingClaimTargetBound(target) {
+      return existsAfter(vaultImportJobPath(target.ownerUid, target.vaultImportJobId))
+        && getAfter(vaultImportJobPath(target.ownerUid, target.vaultImportJobId)).data.ownerUid
+          == target.ownerUid
+        && getAfter(vaultImportJobPath(target.ownerUid, target.vaultImportJobId)).data.status
+          == "staging";
+    }
+
+    // A new imported target must still be attached to its owned staging job.
+    // Existing targets retain immutable provenance after terminal cleanup, so
+    // later name-claim replacement may reuse that exact before-image binding;
+    // the enclosing note/folder mutation rule remains responsible for locking
+    // staging, blocked and rollback states.
+    function vaultImportEntryClaimTargetBound(target, noteId) {
+      return !target.keys().hasAny(["vaultImportJobId"])
+        || (
+          validVaultImportJobId(target.vaultImportJobId)
+          && (
+            exists(notePath(noteId))
+            ? (
+              get(notePath(noteId)).data.ownerUid == target.ownerUid
+              && get(notePath(noteId)).data.vaultImportJobId == target.vaultImportJobId
+            )
+            : vaultImportStagingClaimTargetBound(target)
+          )
+        );
+    }
+
+    function vaultImportFolderClaimTargetBound(target, folderId) {
+      return !target.keys().hasAny(["vaultImportJobId"])
+        || (
+          validVaultImportJobId(target.vaultImportJobId)
+          && (
+            exists(noteFolderPath(folderId))
+            ? (
+              get(noteFolderPath(folderId)).data.ownerUid == target.ownerUid
+              && get(noteFolderPath(folderId)).data.vaultImportJobId == target.vaultImportJobId
+            )
+            : vaultImportStagingClaimTargetBound(target)
+          )
+        );
+    }
+
+    // Claims and targets validate each other in the same atomic write. The
+    // claim-create rule below prevents two targets from acquiring one blinded
+    // name, while these target-side checks prevent a buggy/direct client from
+    // attaching a syntactically valid but missing or unrelated claim id.
+    function vaultEntryNameClaimMatchesTargetAfter(noteId, data) {
+      let claimId = data.vaultNameClaimId;
+      let claim = getAfter(vaultNameClaimPath(data.ownerUid, claimId)).data;
+      return existsAfter(vaultNameClaimPath(data.ownerUid, claimId))
+        ? (
+          claim.ownerUid == data.ownerUid
+          && claim.indexVersion == 1
+          && claim.targetId == noteId
+          && claim.targetType == "entry"
+          && claim.parentId == noteFolderId(data)
+        )
+        : false;
+    }
+
+    function vaultFolderNameClaimMatchesTargetAfter(folderId, data) {
+      let claimId = data.vaultNameClaimId;
+      let claim = getAfter(vaultNameClaimPath(data.ownerUid, claimId)).data;
+      return existsAfter(vaultNameClaimPath(data.ownerUid, claimId))
+        ? (
+          claim.ownerUid == data.ownerUid
+          && claim.indexVersion == 1
+          && claim.targetId == folderId
+          && claim.targetType == "folder"
+          && claim.parentId == data.parentId
+        )
+        : false;
+    }
+
+    function vaultEntryNameClaimStateMatchesAfter(noteId, data) {
+      return existsAfter(vaultIntegrityPath(data.ownerUid))
+        ? (
+          noteDeleted(data)
+          ? !existsAfter(vaultNameClaimPath(data.ownerUid, data.vaultNameClaimId))
+          : vaultEntryNameClaimMatchesTargetAfter(noteId, data)
+        )
+        : true;
+    }
+
+    function vaultEntryNameReservationStateMatchesAfter(noteId, data) {
+      return existsAfter(vaultIntegrityPath(data.ownerUid))
+        ? (
+          validVaultNameReservationFields(data)
+          && (
+            noteDeleted(data)
+            ? !existsAfter(vaultNameClaimPath(data.ownerUid, data.vaultNameClaimId))
+            : vaultEntryNameClaimMatchesTargetAfter(noteId, data)
+          )
+        )
+        : true;
+    }
+
+    function vaultFolderNameReservationStateMatchesAfter(folderId, data) {
+      // existsAfter closes the marker + folder same-batch gap. Marker
+      // activation is intentionally a separate preflighted transaction; once
+      // it exists in the resulting state, every folder must have a matching
+      // claim document as well as the encrypted storage shape.
+      return existsAfter(vaultIntegrityPath(data.ownerUid))
+        ? (
+          validVaultNameReservationFields(data)
+          && (
+            folderDeleted(data)
+            ? !existsAfter(vaultNameClaimPath(data.ownerUid, data.vaultNameClaimId))
+            : vaultFolderNameClaimMatchesTargetAfter(folderId, data)
+          )
+        )
+        : true;
+    }
+
+    function vaultEntryPreviousNameClaimReleasedAfter(data) {
+      return resource.data.keys().hasAny(["vaultNameClaimId"])
+        ? (
+          data.vaultNameClaimId == resource.data.vaultNameClaimId
+          ? true
+          : !existsAfter(vaultNameClaimPath(resource.data.ownerUid, resource.data.vaultNameClaimId))
+        )
+        : true;
+    }
+
+    function vaultFolderPreviousNameClaimReleasedAfter(data) {
+      return resource.data.keys().hasAny(["vaultNameClaimId"])
+        ? (
+          data.vaultNameClaimId == resource.data.vaultNameClaimId
+          ? true
+          : !existsAfter(vaultNameClaimPath(resource.data.ownerUid, resource.data.vaultNameClaimId))
+        )
+        : true;
+    }
+
+    function vaultNameClaimTargetMatchesAfter(data, uid, claimId) {
+      return data.targetType == "entry"
+        ? (
+          existsAfter(notePath(data.targetId))
+          && vaultEntryNameClaimTargetMatchesAfter(data, uid, claimId)
+        )
+        : (
+          data.targetType == "folder"
+          && existsAfter(noteFolderPath(data.targetId))
+          && vaultFolderNameClaimTargetMatchesAfter(data, uid, claimId)
+        );
+    }
+
+    function vaultNameClaimTargetReleasedAfter(data, uid, claimId) {
+      let entryTarget = getAfter(notePath(data.targetId)).data;
+      let folderTarget = getAfter(noteFolderPath(data.targetId)).data;
+      return data.targetType == "entry"
+        ? (
+          !existsAfter(notePath(data.targetId))
+          || noteDeleted(entryTarget)
+          || entryTarget.ownerUid != uid
+          || entryTarget.vaultNameClaimId != claimId
+        )
+        : (
+          data.targetType == "folder"
+          && (
+            !existsAfter(noteFolderPath(data.targetId))
+            || folderDeleted(folderTarget)
+            || folderTarget.ownerUid != uid
+            || folderTarget.vaultNameClaimId != claimId
+          )
+        );
+    }
+
+    function vaultEntryNameClaimReleasedAfterDelete(data) {
+      return !data.keys().hasAny(["vaultNameClaimId"])
+        || !existsAfter(vaultNameClaimPath(data.ownerUid, data.vaultNameClaimId));
+    }
+
+    function vaultEntryNameClaimPresentAfterRestore(data) {
+      return !data.keys().hasAny(["vaultNameClaimId"])
+        || existsAfter(vaultNameClaimPath(data.ownerUid, data.vaultNameClaimId));
+    }
+
     function validVaultWorkspace(data, uid) {
       return data.keys().hasAll([
           "ownerUid",
@@ -952,6 +1450,477 @@ service cloud.firestore {
           "revision",
           "updatedAt"
         ]);
+    }
+
+    function validVaultPathRewriteJobId(jobId) {
+      return jobId is string && jobId.matches("^pr1_[A-Za-z0-9_-]{43}$");
+    }
+
+    function validVaultPathRewriteError(value) {
+      return value == null || value in [
+        "content-conflict",
+        "job-corrupt",
+        "missing-source",
+        "path-state-conflict",
+        "revision-conflict",
+        "write-failed"
+      ];
+    }
+
+    function validVaultPathRewriteOptionalTimestamps(data) {
+      return (!data.keys().hasAny(["activatedAt"]) || data.activatedAt is timestamp)
+        && (!data.keys().hasAny(["completedAt"]) || data.completedAt is timestamp)
+        && (!data.keys().hasAny(["recoveredAt"]) || data.recoveredAt is timestamp)
+        && (!data.keys().hasAny(["lastAttemptAt"]) || data.lastAttemptAt is timestamp)
+        && (!data.keys().hasAny(["recoveredAt"]) || data.keys().hasAny(["activatedAt"]));
+    }
+
+    function validVaultPathRewriteJob(data, uid, jobId) {
+      return data.keys().hasAll([
+          "ownerUid",
+          "kind",
+          "version",
+          "planFingerprint",
+          "status",
+          "stepCount",
+          "cursor",
+          "confirmedCount",
+          "attemptCount",
+          "retryCount",
+          "lastErrorCode",
+          "revision",
+          "encryptedManifest",
+          "wrappedKey",
+          "createdAt",
+          "updatedAt"
+        ])
+        && data.keys().hasOnly([
+          "ownerUid",
+          "kind",
+          "version",
+          "planFingerprint",
+          "status",
+          "stepCount",
+          "cursor",
+          "confirmedCount",
+          "attemptCount",
+          "retryCount",
+          "lastErrorCode",
+          "revision",
+          "encryptedManifest",
+          "wrappedKey",
+          "createdAt",
+          "updatedAt",
+          "activatedAt",
+          "completedAt",
+          "recoveredAt",
+          "lastAttemptAt"
+        ])
+        && validVaultPathRewriteJobId(jobId)
+        && data.ownerUid == uid
+        && data.kind == "path-rewrite-v1"
+        && data.version == 1
+        && data.planFingerprint == jobId
+        && data.status in ["preparing", "prepared", "ready", "running", "blocked", "completed"]
+        && data.stepCount is int
+        && data.stepCount >= 0
+        && data.stepCount <= 5000
+        && data.cursor is int
+        && data.cursor >= 0
+        && data.cursor <= data.stepCount
+        && data.confirmedCount == data.cursor
+        && data.attemptCount is int
+        && data.attemptCount >= 0
+        && data.attemptCount <= 999999
+        && data.retryCount is int
+        && data.retryCount >= 0
+        && data.retryCount <= data.attemptCount
+        && validVaultPathRewriteError(data.lastErrorCode)
+        && ((data.status == "blocked") == (data.lastErrorCode != null))
+        && data.revision is int
+        && data.revision >= 1
+        && data.revision <= 999999999999
+        && boundedEncryptedPayload(data.encryptedManifest, 900000)
+        && wrappedAesKeyPayload(data.wrappedKey)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && validVaultPathRewriteOptionalTimestamps(data)
+        && (
+          data.status == "completed"
+          ? (
+            data.cursor == data.stepCount
+            && data.keys().hasAll(["activatedAt", "completedAt"])
+          )
+          : (
+            !data.keys().hasAny(["completedAt"])
+            && (data.stepCount == 0 || data.cursor < data.stepCount)
+          )
+        );
+    }
+
+    function vaultPathRewritePreparingToPrepared(data) {
+      return resource.data.status == "preparing"
+        && data.status == "prepared"
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.diff(resource.data).affectedKeys().hasOnly(["status", "revision", "updatedAt"]);
+    }
+
+    function vaultPathRewritePreparedActivation(data) {
+      return resource.data.status == "prepared"
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.activatedAt == request.time
+        && (
+          (data.stepCount == 0 && data.status == "completed" && data.completedAt == request.time)
+          || (data.stepCount > 0 && data.status == "ready" && !data.keys().hasAny(["completedAt"]))
+        )
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "revision", "activatedAt", "completedAt", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewritePathConflict(data) {
+      return (
+          resource.data.status == "prepared"
+          || (resource.data.status == "blocked" && resource.data.lastErrorCode == "path-state-conflict")
+        )
+        && data.status == "blocked"
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount + 1
+        && data.retryCount == resource.data.retryCount + 1
+        && data.lastErrorCode == "path-state-conflict"
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "attemptCount", "retryCount", "lastErrorCode", "revision", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewritePathRecovery(data) {
+      return resource.data.status == "blocked"
+        && resource.data.lastErrorCode == "path-state-conflict"
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && (
+          (
+            data.status == "prepared"
+            && data.diff(resource.data).affectedKeys().hasOnly([
+              "status", "lastErrorCode", "revision", "updatedAt"
+            ])
+          )
+          || (
+            data.activatedAt == request.time
+            && data.recoveredAt == request.time
+            && (
+              (data.stepCount == 0 && data.status == "completed" && data.completedAt == request.time)
+              || (data.stepCount > 0 && data.status == "ready" && !data.keys().hasAny(["completedAt"]))
+            )
+            && data.diff(resource.data).affectedKeys().hasOnly([
+              "status",
+              "lastErrorCode",
+              "revision",
+              "activatedAt",
+              "recoveredAt",
+              "completedAt",
+              "updatedAt"
+            ])
+          )
+        );
+    }
+
+    function vaultPathRewriteAttemptStart(data) {
+      return (
+          resource.data.status == "ready"
+          || resource.data.status == "running"
+          || (resource.data.status == "blocked" && resource.data.lastErrorCode != "path-state-conflict")
+        )
+        && data.status == "running"
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount + 1
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.lastAttemptAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "attemptCount", "lastErrorCode", "revision", "lastAttemptAt", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteBlocked(data) {
+      return resource.data.status in ["ready", "running", "blocked"]
+        && data.status == "blocked"
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount + 1
+        && data.lastErrorCode != null
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "retryCount", "lastErrorCode", "revision", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteStepConfirmed(data) {
+      return resource.data.status == "running"
+        && data.cursor == resource.data.cursor + 1
+        && data.confirmedCount == data.cursor
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && (
+          (data.cursor == data.stepCount && data.status == "completed" && data.completedAt == request.time)
+          || (data.cursor < data.stepCount && data.status == "running" && !data.keys().hasAny(["completedAt"]))
+        )
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "cursor", "confirmedCount", "status", "lastErrorCode", "revision", "completedAt", "updatedAt"
+        ]);
+    }
+
+    function validVaultPathRewriteJobCreate(data, uid, jobId) {
+      return validVaultPathRewriteJob(data, uid, jobId)
+        && data.status == "preparing"
+        && data.cursor == 0
+        && data.confirmedCount == 0
+        && data.attemptCount == 0
+        && data.retryCount == 0
+        && data.lastErrorCode == null
+        && data.revision == 1
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && !data.keys().hasAny(["activatedAt", "completedAt", "recoveredAt", "lastAttemptAt"]);
+    }
+
+    function validVaultPathRewriteJobUpdate(data, uid, jobId) {
+      return validVaultPathRewriteJob(data, uid, jobId)
+        && resource.data.ownerUid == uid
+        && resource.data.kind == data.kind
+        && resource.data.version == data.version
+        && resource.data.planFingerprint == data.planFingerprint
+        && resource.data.stepCount == data.stepCount
+        && resource.data.encryptedManifest == data.encryptedManifest
+        && resource.data.wrappedKey == data.wrappedKey
+        && resource.data.createdAt == data.createdAt
+        && resource.data.status != "completed"
+        && data.revision == resource.data.revision + 1
+        && data.updatedAt == request.time
+        && (
+          vaultPathRewritePreparingToPrepared(data)
+          || vaultPathRewritePreparedActivation(data)
+          || vaultPathRewritePathConflict(data)
+          || vaultPathRewritePathRecovery(data)
+          || vaultPathRewriteAttemptStart(data)
+          || vaultPathRewriteBlocked(data)
+          || vaultPathRewriteStepConfirmed(data)
+        );
+    }
+
+    function validVaultPathRewriteStep(data, uid, jobId, stepId) {
+      let parent = get(vaultPathRewriteJobPath(uid, jobId)).data;
+      return data.keys().hasAll(["ownerUid", "jobId", "stepId", "ordinal", "encryptedStep", "createdAt"])
+        && data.keys().hasOnly(["ownerUid", "jobId", "stepId", "ordinal", "encryptedStep", "createdAt"])
+        && validVaultPathRewriteJobId(jobId)
+        && stepId.matches("^step-[0-9]{6}$")
+        && data.ownerUid == uid
+        && data.jobId == jobId
+        && data.stepId == stepId
+        && exists(vaultPathRewriteJobPath(uid, jobId))
+        && parent.ownerUid == uid
+        && parent.status == "preparing"
+        && data.ordinal is int
+        && data.ordinal >= 0
+        && data.ordinal < parent.stepCount
+        && boundedEncryptedPayload(data.encryptedStep, 900000)
+        && data.createdAt == request.time;
+    }
+
+    function validVaultImportError(value) {
+      return value == null || value in [
+        "job-corrupt",
+        "rollback-conflict",
+        "snapshot-incomplete",
+        "write-failed"
+      ];
+    }
+
+    function validVaultImportJob(data, uid, jobId) {
+      return data.keys().hasAll([
+          "ownerUid", "kind", "version", "status", "itemCount", "entryCount",
+          "folderCount", "rootFolderCount", "chunkCount", "revision",
+          "remainingChunkCount", "lastErrorCode", "wrappedKey", "createdAt", "updatedAt"
+        ])
+        && data.keys().hasOnly([
+          "ownerUid", "kind", "version", "status", "itemCount", "entryCount",
+          "folderCount", "rootFolderCount", "chunkCount", "revision",
+          "remainingChunkCount", "lastErrorCode", "wrappedKey", "createdAt", "updatedAt", "preparedAt",
+          "committedAt", "rollbackStartedAt", "rolledBackAt"
+        ])
+        && validVaultImportJobId(jobId)
+        && data.ownerUid == uid
+        && data.kind == "vault-import-v1"
+        && data.version == 1
+        && data.status in ["preparing", "staging", "committed", "rolling-back", "rolled-back", "blocked"]
+        && data.itemCount is int
+        && data.itemCount >= 1
+        && data.itemCount <= 10000
+        && data.entryCount is int
+        && data.entryCount >= 1
+        && data.folderCount is int
+        && data.folderCount >= 0
+        && data.folderCount <= 5000
+        && data.entryCount + data.folderCount == data.itemCount
+        && data.rootFolderCount is int
+        && data.rootFolderCount >= 0
+        && data.rootFolderCount <= data.folderCount
+        && data.chunkCount is int
+        && data.chunkCount >= 1
+        && data.chunkCount <= 100
+        && data.remainingChunkCount is int
+        && data.remainingChunkCount >= 0
+        && data.remainingChunkCount <= data.chunkCount
+        && data.revision is int
+        && data.revision >= 1
+        && data.revision <= 999999999999
+        && validVaultImportError(data.lastErrorCode)
+        && ((data.status == "blocked") == (data.lastErrorCode != null))
+        && wrappedAesKeyPayload(data.wrappedKey)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && (!data.keys().hasAny(["preparedAt"]) || data.preparedAt is timestamp)
+        && (!data.keys().hasAny(["committedAt"]) || data.committedAt is timestamp)
+        && (!data.keys().hasAny(["rollbackStartedAt"]) || data.rollbackStartedAt is timestamp)
+        && (!data.keys().hasAny(["rolledBackAt"]) || data.rolledBackAt is timestamp);
+    }
+
+    function validVaultImportJobCreate(data, uid, jobId) {
+      return validVaultImportJob(data, uid, jobId)
+        && data.status == "preparing"
+        && data.remainingChunkCount == data.chunkCount
+        && data.lastErrorCode == null
+        && data.revision == 1
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && !data.keys().hasAny(["preparedAt", "committedAt", "rollbackStartedAt", "rolledBackAt"]);
+    }
+
+    function vaultImportPreparingToStaging(data) {
+      return resource.data.status == "preparing"
+        && data.status == "staging"
+        && data.lastErrorCode == null
+        && data.preparedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly(["status", "revision", "preparedAt", "updatedAt"]);
+    }
+
+    function vaultImportStagingToCommitted(data) {
+      return resource.data.status == "staging"
+        && data.status == "committed"
+        && data.lastErrorCode == null
+        && data.committedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly(["status", "revision", "committedAt", "updatedAt"]);
+    }
+
+    function vaultImportRollbackStart(data) {
+      return resource.data.status in ["staging", "blocked"]
+        && data.status == "rolling-back"
+        && data.lastErrorCode == null
+        && data.rollbackStartedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "lastErrorCode", "revision", "rollbackStartedAt", "updatedAt"
+        ]);
+    }
+
+    function vaultImportRollbackBlocked(data) {
+      return resource.data.status in ["staging", "rolling-back", "blocked"]
+        && data.status == "blocked"
+        && data.lastErrorCode != null
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "lastErrorCode", "revision", "updatedAt"
+        ]);
+    }
+
+    function vaultImportRolledBack(data) {
+      return resource.data.status in ["preparing", "rolling-back"]
+        && data.status == "rolled-back"
+        && data.lastErrorCode == null
+        && data.rolledBackAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "lastErrorCode", "revision", "rolledBackAt", "updatedAt"
+        ]);
+    }
+
+    function vaultImportTerminalChunkCleanup(data) {
+      return resource.data.status in ["committed", "rolled-back"]
+        && data.status == resource.data.status
+        && data.lastErrorCode == resource.data.lastErrorCode
+        && resource.data.remainingChunkCount > 0
+        && data.remainingChunkCount == resource.data.remainingChunkCount - 1
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "remainingChunkCount", "revision", "updatedAt"
+        ]);
+    }
+
+    function validVaultImportJobUpdate(data, uid, jobId) {
+      return validVaultImportJob(data, uid, jobId)
+        && resource.data.ownerUid == uid
+        && data.ownerUid == resource.data.ownerUid
+        && data.kind == resource.data.kind
+        && data.version == resource.data.version
+        && data.itemCount == resource.data.itemCount
+        && data.entryCount == resource.data.entryCount
+        && data.folderCount == resource.data.folderCount
+        && data.rootFolderCount == resource.data.rootFolderCount
+        && data.chunkCount == resource.data.chunkCount
+        && data.wrappedKey == resource.data.wrappedKey
+        && data.createdAt == resource.data.createdAt
+        && data.revision == resource.data.revision + 1
+        && data.updatedAt == request.time
+        && (
+          (
+            resource.data.status != "committed"
+            && resource.data.status != "rolled-back"
+            && data.remainingChunkCount == resource.data.remainingChunkCount
+            && (
+              vaultImportPreparingToStaging(data)
+              || vaultImportStagingToCommitted(data)
+              || vaultImportRollbackStart(data)
+              || vaultImportRollbackBlocked(data)
+              || vaultImportRolledBack(data)
+            )
+          )
+          || vaultImportTerminalChunkCleanup(data)
+        );
+    }
+
+    function validVaultImportChunk(data, uid, jobId, chunkId) {
+      let parent = get(vaultImportJobPath(uid, jobId)).data;
+      return data.keys().hasAll([
+          "ownerUid", "jobId", "ordinal", "itemCount", "encryptedManifest", "createdAt"
+        ])
+        && data.keys().hasOnly([
+          "ownerUid", "jobId", "ordinal", "itemCount", "encryptedManifest", "createdAt"
+        ])
+        && validVaultImportJobId(jobId)
+        && chunkId.matches("^chunk-[0-9]{3}$")
+        && data.ownerUid == uid
+        && data.jobId == jobId
+        && exists(vaultImportJobPath(uid, jobId))
+        && parent.ownerUid == uid
+        && parent.status == "preparing"
+        && data.ordinal is int
+        && data.ordinal >= 0
+        && data.ordinal < parent.chunkCount
+        && data.itemCount is int
+        && data.itemCount >= 1
+        && data.itemCount <= 100
+        && boundedEncryptedPayload(data.encryptedManifest, 200000)
+        && data.createdAt == request.time;
     }
 
     function validScheduleWrappedKeys(data, uid) {
@@ -1314,9 +2283,28 @@ service cloud.firestore {
           "parentId",
           "order",
           "revision",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "vaultImportJobId",
+          "vaultAncestorIds",
+          "vaultLineagePath",
+          "vaultLineageDepth",
+          "vaultLineageGeneration",
+          "vaultLineageVersion",
+          "isDeleted",
+          "deletedAt",
+          "deletedBy",
           "createdAt",
           "updatedAt"
         ])
+        && validNoteFolderShape(data, folderId);
+    }
+
+    // Update branches independently constrain every affected key. Reusing the
+    // value-level shape without recounting the create-only key allowlist keeps
+    // the import lock below Firestore's 1000-expression ceiling.
+    function validNoteFolderShape(data, folderId) {
+      return folderId.matches("^[A-Za-z0-9_-]{1,120}$")
         && data.ownerUid == request.auth.uid
         && data.name is string
         && data.name.size() > 0
@@ -1327,7 +2315,18 @@ service cloud.firestore {
         && (
           !data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
           || (
-            data.keys().hasAll(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
+            data.keys().hasAll([
+              "encryptedName",
+              "wrappedKey",
+              "parentId",
+              "order",
+              "revision",
+              "vaultAncestorIds",
+              "vaultLineagePath",
+              "vaultLineageDepth",
+              "vaultLineageGeneration",
+              "vaultLineageVersion"
+            ])
             && encryptedPayload(data.encryptedName)
             && data.encryptedName.cipherText.size() > 0
             && data.encryptedName.cipherText.size() <= 2048
@@ -1341,23 +2340,6 @@ service cloud.firestore {
                 && data.parentId.size() > 0
                 && data.parentId.size() <= 120
                 && data.parentId != folderId
-                && existsAfter(noteFolderPath(data.parentId))
-                && getAfter(noteFolderPath(data.parentId)).data.ownerUid == request.auth.uid
-                // getAfter also rejects an atomic A -> B, B -> A write. Rules
-                // cannot traverse an unbounded encrypted tree, so deeper-cycle
-                // integrity still requires the transactional client traversal
-                // (and remains a release blocker for arbitrary direct writes).
-                && getAfter(noteFolderPath(data.parentId)).data.parentId != folderId
-                // Nested Vault folders may only point at another migrated,
-                // encrypted folder. A deletable legacy parent would orphan
-                // the encrypted subtree.
-                && getAfter(noteFolderPath(data.parentId)).data.keys().hasAll([
-                  "encryptedName",
-                  "wrappedKey",
-                  "parentId",
-                  "order",
-                  "revision"
-                ])
               )
             )
             && data.order is int
@@ -1366,25 +2348,132 @@ service cloud.firestore {
             && data.revision is int
             && data.revision >= 1
             && data.revision <= 999999999999
+            && validVaultFolderLineage(data, folderId)
+            && validVaultNameReservationFields(data)
           )
         )
+        && validFolderDeletionMetadata(data)
         && (!data.keys().hasAny(["createdAt"]) || data.createdAt is timestamp)
         && (!data.keys().hasAny(["updatedAt"]) || data.updatedAt is timestamp);
     }
 
-    function validEncryptedNoteFolderUpdate(data) {
-      return (
-          !resource.data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
-          && (
-            !data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
-            || data.revision == 1
+    // Update match rules already freeze owner/name/color/createdAt and reject
+    // lifecycle fields on this branch. Revalidate only values an encrypted
+    // rename, move, ordering change or legacy cutover can actually introduce.
+    function validEncryptedFolderMutationProjection(data, folderId) {
+      return encryptedPayload(data.encryptedName)
+        && data.encryptedName.cipherText.size() > 0
+        && data.encryptedName.cipherText.size() <= 2048
+        && data.encryptedName.iv.size() > 0
+        && data.encryptedName.iv.size() <= 256
+        && wrappedAesKeyPayload(data.wrappedKey)
+        && (
+          data.parentId == null
+          || (
+            data.parentId is string
+            && data.parentId.size() > 0
+            && data.parentId.size() <= 120
+            && data.parentId != folderId
           )
         )
-        || (
-          data.wrappedKey == resource.data.wrappedKey
-          && data.name == resource.data.name
-          && data.color == resource.data.color
-          && data.revision == resource.data.revision + 1
+        && data.order is int
+        && data.order >= 0
+        && data.order <= 999999999
+        && data.revision is int
+        && data.revision >= 1
+        && data.revision <= 999999999999
+        && validVaultFolderLineage(data, folderId)
+        && validVaultNameReservationFields(data);
+    }
+
+    function vaultImportFolderParentPlacementAllowed(data) {
+      return !data.keys().hasAny(["parentId"])
+        || data.parentId == null
+        || vaultImportFolderPlacementAllowed(data, data.parentId);
+    }
+
+    function validEncryptedNoteFolderUpdate(data) {
+      return (
+          (
+            !resource.data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
+            && (
+              !data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
+              || (
+                data.revision == 1
+                && data.color == resource.data.color
+              )
+            )
+          )
+          || (
+            data.wrappedKey == resource.data.wrappedKey
+            && data.name == resource.data.name
+            && data.color == resource.data.color
+            && data.revision == resource.data.revision + 1
+            && data.vaultLineageGeneration >= resource.data.vaultLineageGeneration
+          )
+        );
+    }
+
+    function validVaultFolderLifecycleGeneration(data) {
+      return data.vaultLineageVersion == 3
+        && data.vaultLineageGeneration == resource.data.vaultLineageGeneration + 1;
+    }
+
+    function folderDeleted(data) {
+      return data.keys().hasAny(["isDeleted"]) && data.isDeleted == true;
+    }
+
+    function folderActive(data) {
+      return !data.keys().hasAny(["isDeleted"]) || data.isDeleted == false;
+    }
+
+    function validFolderDeletionMetadata(data) {
+      return folderDeleted(data)
+        ? (
+          data.keys().hasAll(["deletedAt", "deletedBy"])
+          && data.deletedAt is timestamp
+          && data.deletedBy is string
+          && data.deletedBy.size() > 0
+          && data.deletedBy.size() <= 160
+        )
+        : !data.keys().hasAny(["deletedAt", "deletedBy"]);
+    }
+
+    function vaultFolderLifecycleRequested(data) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        "isDeleted",
+        "deletedAt",
+        "deletedBy"
+      ]);
+    }
+
+    // One root tombstone hides a complete subtree without rewriting every
+    // descendant. All later folder and entry writes validate the authoritative
+    // root-to-parent chain (at most one ancestor), so a deleted ancestor or
+    // a forged/cyclic lineage fails closed even through a direct SDK write.
+    function vaultFolderLifecycleUpdate(data) {
+      return encryptedVaultFolder(resource.data)
+        && data.revision == resource.data.revision + 1
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "isDeleted",
+          "deletedAt",
+          "deletedBy",
+          "revision",
+          "vaultLineageGeneration",
+          "updatedAt"
+        ])
+        && (
+          (
+            folderActive(resource.data)
+            && folderDeleted(data)
+            && data.deletedAt == request.time
+            && data.deletedBy == request.auth.uid
+          )
+          || (
+            folderDeleted(resource.data)
+            && folderActive(data)
+            && !data.keys().hasAny(["deletedAt", "deletedBy"])
+          )
         );
     }
 
@@ -1451,7 +2540,7 @@ service cloud.firestore {
         && data.changedFields is list
         && data.changedFields.size() > 0
         && data.changedFields.size() <= 8
-        && data.changedFields.hasOnly(["title", "body", "participants", "folder", "deleted", "restored"])
+        && data.changedFields.hasOnly(["title", "body", "participants", "folder", "name-claim", "deleted", "restored"])
         && data.readerUids is list
         && data.readerUids.size() > 0
         && data.readerUids.size() <= 200
@@ -1472,43 +2561,76 @@ service cloud.firestore {
     }
 
     function linkedNoteUpdate(noteId, historyId, data) {
+      let nextNote = getAfter(notePath(noteId)).data;
       return exists(notePath(noteId))
         && existsAfter(notePath(noteId))
-        && getAfter(notePath(noteId)).data.updatedBy == request.auth.uid
-        && getAfter(notePath(noteId)).data.updatedAt == request.time
-        && getAfter(notePath(noteId)).data.revision == data.revision
-        && getAfter(notePath(noteId)).data.lastMutationId == historyId;
+        && nextNote.updatedBy == request.auth.uid
+        && nextNote.updatedAt == request.time
+        && nextNote.revision == data.revision
+        && nextNote.lastMutationId == historyId;
     }
 
     function createHistoryMatchesNote(data, noteId, historyId) {
+      let nextNote = getAfter(notePath(noteId)).data;
       return data.action == "create"
         && !exists(notePath(noteId))
         && existsAfter(notePath(noteId))
-        && getAfter(notePath(noteId)).data.ownerUid == request.auth.uid
-        && getAfter(notePath(noteId)).data.updatedBy == request.auth.uid
-        && getAfter(notePath(noteId)).data.createdAt == request.time
-        && getAfter(notePath(noteId)).data.updatedAt == request.time
-        && getAfter(notePath(noteId)).data.savedAt == request.time
-        && getAfter(notePath(noteId)).data.revision == 1
-        && getAfter(notePath(noteId)).data.revision == data.revision
-        && getAfter(notePath(noteId)).data.lastMutationId == historyId
-        && getAfter(notePath(noteId)).data.isDeleted == false
+        && nextNote.ownerUid == request.auth.uid
+        && nextNote.updatedBy == request.auth.uid
+        && nextNote.createdAt == request.time
+        && nextNote.updatedAt == request.time
+        && nextNote.savedAt == request.time
+        && nextNote.revision == 1
+        && nextNote.revision == data.revision
+        && nextNote.lastMutationId == historyId
+        && nextNote.isDeleted == false
         && data.changedFields.hasOnly(["title", "body"]);
     }
 
     function contentHistoryMatchesNote(data, noteId, historyId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
       return data.action == "content"
         && linkedNoteUpdate(noteId, historyId, data)
-        && !noteDeleted(get(notePath(noteId)).data)
-        && !noteDeleted(getAfter(notePath(noteId)).data)
-        && data.changedFields.hasOnly(["title", "body"])
-        && getAfter(notePath(noteId)).data.type == get(notePath(noteId)).data.type
-        && getAfter(notePath(noteId)).data.participantUids == get(notePath(noteId)).data.participantUids
-        && getAfter(notePath(noteId)).data.wrappedKeys == get(notePath(noteId)).data.wrappedKeys
-        && noteFolderId(getAfter(notePath(noteId)).data) == noteFolderId(get(notePath(noteId)).data)
+        && !noteDeleted(previousNote)
+        && !noteDeleted(nextNote)
+        && data.changedFields.hasOnly(["title", "body", "folder", "name-claim"])
+        && nextNote.type == previousNote.type
+        && nextNote.participantUids == previousNote.participantUids
+        && nextNote.wrappedKeys == previousNote.wrappedKeys
         && (
-          getAfter(notePath(noteId)).data.encryptedTitle != get(notePath(noteId)).data.encryptedTitle
-          || getAfter(notePath(noteId)).data.encryptedBody != get(notePath(noteId)).data.encryptedBody
+          request.auth.uid == previousNote.ownerUid
+          || (
+            nextNote.encryptedTitle == previousNote.encryptedTitle
+            && noteFolderId(nextNote) == noteFolderId(previousNote)
+            && data.changedFields.hasOnly(["body"])
+            && data.changedFields.hasAny(["body"])
+          )
+        )
+        && (
+          (
+            noteFolderId(nextNote) == noteFolderId(previousNote)
+            && data.changedFields.hasOnly(["title", "body", "name-claim"])
+            && (
+              nextNote.encryptedTitle != previousNote.encryptedTitle
+              || nextNote.encryptedBody != previousNote.encryptedBody
+              || data.changedFields.hasAny(["name-claim"])
+            )
+          )
+          || (
+            request.auth.uid == previousNote.ownerUid
+            && previousNote.type == "personal"
+            && data.changedFields.hasAny(["folder"])
+            && noteFolderId(nextNote) != noteFolderId(previousNote)
+            && (
+              nextNote.encryptedTitle == previousNote.encryptedTitle
+              || data.changedFields.hasAny(["title"])
+            )
+            && (
+              nextNote.encryptedBody == previousNote.encryptedBody
+              || data.changedFields.hasAny(["body"])
+            )
+          )
         );
     }
 
@@ -1518,7 +2640,7 @@ service cloud.firestore {
         && request.auth.uid == get(notePath(noteId)).data.ownerUid
         && !noteDeleted(get(notePath(noteId)).data)
         && !noteDeleted(getAfter(notePath(noteId)).data)
-        && data.changedFields.hasOnly(["participants", "folder"])
+        && data.changedFields.hasOnly(["participants", "folder", "name-claim"])
         && (
           data.changedFields.hasAny(["folder"])
           == (
@@ -1556,8 +2678,9 @@ service cloud.firestore {
     }
 
     function historyMatchesNoteMutation(data, noteId, historyId) {
+      let nextNote = getAfter(notePath(noteId)).data;
       return existsAfter(notePath(noteId))
-        && data.readerUids == getAfter(notePath(noteId)).data.participantUids
+        && data.readerUids == nextNote.participantUids
         && (
           createHistoryMatchesNote(data, noteId, historyId)
           || contentHistoryMatchesNote(data, noteId, historyId)
@@ -1567,12 +2690,738 @@ service cloud.firestore {
         );
     }
 
+    // A cutover backfill changes only blinded reservation metadata and its
+    // ordinary revision/history envelope. Keeping a narrow branch avoids
+    // evaluating every historical mutation variant in the same three-write
+    // atomic batch, which otherwise exceeds Firestore's 1000-expression cap.
+    function vaultNameBackfillHistoryMatches(data, noteId, historyId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return validNoteHistory(data, noteId)
+        && exists(notePath(noteId))
+        && existsAfter(notePath(noteId))
+        && !previousNote.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && validVaultNameReservationFields(nextNote)
+        && nextNote.diff(previousNote).affectedKeys().hasOnly([
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ])
+        && nextNote.ownerUid == request.auth.uid
+        && !noteDeleted(previousNote)
+        && !noteDeleted(nextNote)
+        && nextNote.updatedBy == request.auth.uid
+        && nextNote.updatedAt == request.time
+        && nextNote.revision == previousNote.revision + 1
+        && nextNote.lastMutationId == historyId
+        && data.action == "content"
+        && data.changedFields == ["name-claim"]
+        && data.readerUids == nextNote.participantUids
+        && data.revision == nextNote.revision;
+    }
+
+    function vaultNameBackfillHistoryRequested(noteId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return exists(notePath(noteId))
+        && existsAfter(notePath(noteId))
+        && exists(vaultIntegrityPath(nextNote.ownerUid))
+        && !previousNote.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && validVaultNameReservationFields(nextNote);
+    }
+
+    function vaultUnclaimedRestoreHistoryRequested(noteId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return exists(notePath(noteId))
+        && existsAfter(notePath(noteId))
+        && exists(vaultIntegrityPath(previousNote.ownerUid))
+        && !previousNote.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && noteDeleted(previousNote)
+        && !noteDeleted(nextNote)
+        && validVaultNameReservationFields(nextNote);
+    }
+
+    function vaultUnclaimedRestoreHistoryMatches(data, noteId, historyId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return validNoteHistory(data, noteId)
+        && vaultUnclaimedRestoreHistoryRequested(noteId)
+        && previousNote.ownerUid == request.auth.uid
+        && nextNote.ownerUid == previousNote.ownerUid
+        && linkedNoteUpdate(noteId, historyId, data)
+        && data.action == "restore"
+        && data.changedFields == ["restored", "name-claim"]
+        && data.readerUids == nextNote.participantUids
+        && data.revision == nextNote.revision;
+    }
+
+    // A collision loser has no old reservation to release. It may recover in
+    // one atomic transaction only by changing its encrypted title or parent,
+    // acquiring the new claim, and writing matching revision history.
+    function vaultNameCollisionRecoveryHistoryRequested(noteId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return exists(notePath(noteId)) && existsAfter(notePath(noteId))
+        ? (
+          exists(vaultIntegrityPath(previousNote.ownerUid))
+          && !previousNote.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+          && validVaultNameReservationFields(nextNote)
+          && (
+            nextNote.encryptedTitle != previousNote.encryptedTitle
+            || noteFolderId(nextNote) != noteFolderId(previousNote)
+          )
+        )
+        : false;
+    }
+
+    function vaultNameCollisionRecoveryHistoryMatches(data, noteId, historyId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return validNoteHistory(data, noteId)
+        && exists(notePath(noteId))
+        && existsAfter(notePath(noteId))
+        && previousNote.ownerUid == request.auth.uid
+        && !previousNote.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && validVaultNameReservationFields(nextNote)
+        && data.action == "content"
+        && data.changedFields.hasAny(["name-claim"])
+        && (
+          data.changedFields.hasAny(["title"])
+          == (nextNote.encryptedTitle != previousNote.encryptedTitle)
+        )
+        && (
+          data.changedFields.hasAny(["body"])
+          == (nextNote.encryptedBody != previousNote.encryptedBody)
+        )
+        && (
+          data.changedFields.hasAny(["folder"])
+          == (noteFolderId(nextNote) != noteFolderId(previousNote))
+        )
+        && (
+          data.changedFields.hasAny(["title"])
+          || data.changedFields.hasAny(["folder"])
+        )
+        && !data.changedFields.hasAny(["body"])
+        && data.readerUids == nextNote.participantUids
+        && data.revision == nextNote.revision
+        && historyId == nextNote.lastMutationId
+        && (
+          (
+            previousNote.type == "shared"
+            && nextNote.type == "shared"
+            && noteFolderId(previousNote) != null
+            && noteFolderId(nextNote) == null
+            && nextNote.encryptedTitle == previousNote.encryptedTitle
+            && nextNote.encryptedBody == previousNote.encryptedBody
+            && data.changedFields == ["folder", "name-claim"]
+            && linkedNoteUpdate(noteId, historyId, data)
+          )
+          || contentHistoryMatchesNote(data, noteId, historyId)
+        );
+    }
+
     function pairedNoteHistoryCreated(noteId, data) {
+      let history = getAfter(noteHistoryPath(noteId, data.lastMutationId)).data;
       return data.keys().hasAll(["revision", "lastMutationId"])
         && !exists(noteHistoryPath(noteId, data.lastMutationId))
         && existsAfter(noteHistoryPath(noteId, data.lastMutationId))
-        && getAfter(noteHistoryPath(noteId, data.lastMutationId)).data.revision == data.revision
-        && getAfter(noteHistoryPath(noteId, data.lastMutationId)).data.actorUid == request.auth.uid;
+        && history.revision == data.revision
+        && history.actorUid == request.auth.uid;
+    }
+
+    function vaultNameBackfillUpdate(noteId, data) {
+      return exists(vaultIntegrityPath(resource.data.ownerUid))
+        && request.auth.uid == resource.data.ownerUid
+        && !resource.data.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && validVaultNameReservationFields(data)
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ])
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validAssignedFolder(data)
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data);
+    }
+
+    function vaultNameCollisionRecoveryUpdate(noteId, data) {
+      return exists(vaultIntegrityPath(resource.data.ownerUid))
+        && request.auth.uid == resource.data.ownerUid
+        && !resource.data.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && validVaultNameReservationFields(data)
+        && activeNoteUpdateAffectedKeys([
+          "encryptedTitle",
+          "folderId",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ], [
+          "encryptedTitle",
+          "folderId",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId",
+          "isDeleted"
+        ])
+        && (
+          data.encryptedTitle != resource.data.encryptedTitle
+          || noteFolderId(data) != noteFolderId(resource.data)
+        )
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && data.type == resource.data.type
+        && data.participantUids == resource.data.participantUids
+        && data.wrappedKeys == resource.data.wrappedKeys
+        && data.encryptedBody == resource.data.encryptedBody
+        && data.encryptedTitle.cipherText.size() > 0
+        && data.encryptedTitle.cipherText.size() <= 4096
+        && data.encryptedTitle.iv.size() > 0
+        && data.encryptedTitle.iv.size() <= 256
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validAssignedFolder(data)
+        && validNoteContentProjection(data)
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data);
+    }
+
+    // Deleted versioned entries that predate the blinded-name cutover have no
+    // claim to reacquire. The owner may restore one only by creating the claim
+    // in the same transaction; encrypted content, storage identity, folder and
+    // sharing state stay byte-for-byte unchanged.
+    function vaultUnclaimedRestoreRequested(data) {
+      return exists(vaultIntegrityPath(resource.data.ownerUid))
+        && !resource.data.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && noteDeleted(resource.data)
+        && !noteDeleted(data);
+    }
+
+    function vaultUnclaimedRestoreUpdate(noteId, data) {
+      return request.auth.uid == resource.data.ownerUid
+        && validVaultStorageIdentity(resource.data)
+        && data.contentFormat == resource.data.contentFormat
+        && data.entryKind == resource.data.entryKind
+        && validVaultNameReservationFields(data)
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "isDeleted",
+          "deletedAt",
+          "deletedBy",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ])
+        && noteDeleted(resource.data)
+        && !notePurged(resource.data)
+        && data.isDeleted == false
+        && !data.keys().hasAny(["deletedAt", "deletedBy"])
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validAssignedFolder(data)
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data);
+    }
+
+    function vaultEntryNameClaimChanges(data) {
+      return (
+          resource.data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+          && data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        )
+        ? data.vaultNameClaimId != resource.data.vaultNameClaimId
+        : false;
+    }
+
+    function vaultNameBackfillRequested(data) {
+      return exists(vaultIntegrityPath(resource.data.ownerUid))
+        ? (
+          !resource.data.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+          && data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        )
+        : false;
+    }
+
+    function vaultNameCollisionRecoveryRequested(data) {
+      return exists(vaultIntegrityPath(resource.data.ownerUid))
+        ? (
+          !resource.data.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+          && data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+          && (
+            data.encryptedTitle != resource.data.encryptedTitle
+            || noteFolderId(data) != noteFolderId(resource.data)
+          )
+        )
+        : false;
+    }
+
+    function vaultParticipantBodyOnlyRequested(data) {
+      return request.auth.uid != resource.data.ownerUid
+        && resource.data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && data.vaultNameClaimId == resource.data.vaultNameClaimId
+        && data.vaultNameIndexVersion == resource.data.vaultNameIndexVersion
+        && data.encryptedBody != resource.data.encryptedBody
+        && data.encryptedTitle == resource.data.encryptedTitle
+        && noteFolderId(data) == noteFolderId(resource.data);
+    }
+
+    function vaultClaimedRestoreRequested(data) {
+      return resource.data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && data.vaultNameClaimId == resource.data.vaultNameClaimId
+        && data.vaultNameIndexVersion == resource.data.vaultNameIndexVersion;
+    }
+
+    function vaultParticipantBodyOnlyUpdate(noteId, data) {
+      return data.diff(resource.data).affectedKeys().hasOnly([
+          "encryptedBody",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ])
+        && validVaultNameReservationFields(data)
+        && resource.data.type == "shared"
+        && data.type == resource.data.type
+        && request.auth.uid in resource.data.participantUids
+        && ownerAllowsParticipant(resource.data, request.auth.uid)
+        && data.participantUids == resource.data.participantUids
+        && data.wrappedKeys == resource.data.wrappedKeys
+        && secureShareCopyUsable(resource.data)
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && data.encryptedBody.cipherText.size() > 0
+        && data.encryptedBody.cipherText.size() <= 700000
+        && data.encryptedBody.iv.size() > 0
+        && data.encryptedBody.iv.size() <= 256
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validAssignedFolder(data)
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data);
+    }
+
+    function vaultParticipantBodyOnlyHistoryRequested(noteId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return exists(notePath(noteId)) && existsAfter(notePath(noteId))
+        ? (
+          previousNote.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+          && request.auth.uid != previousNote.ownerUid
+          && nextNote.updatedBy == request.auth.uid
+          && nextNote.encryptedBody != previousNote.encryptedBody
+          && nextNote.encryptedTitle == previousNote.encryptedTitle
+        )
+        : false;
+    }
+
+    function vaultParticipantBodyOnlyHistoryMatches(data, noteId, historyId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return validNoteHistory(data, noteId)
+        && data.action == "content"
+        && data.changedFields == ["body"]
+        && data.readerUids == nextNote.participantUids
+        && data.revision == nextNote.revision
+        && historyId == nextNote.lastMutationId
+        && nextNote.revision == previousNote.revision + 1
+        && nextNote.updatedAt == request.time
+        && !noteDeleted(previousNote)
+        && !noteDeleted(nextNote);
+    }
+
+    function vaultLegacyDeletionMetadataNormalizationRequested(data) {
+      return exists(vaultIntegrityPath(resource.data.ownerUid))
+        ? (
+          request.auth.uid == resource.data.ownerUid
+          && !resource.data.keys().hasAny(["isDeleted"])
+          && data.keys().hasAny(["isDeleted"])
+          && data.isDeleted == false
+          && data.diff(resource.data).affectedKeys().hasOnly(["isDeleted"])
+        )
+        : false;
+    }
+
+    function versionedVaultNameContentMutationUpdate(noteId, data) {
+      // The caller has already selected the name-claim-change branch. Keep
+      // schema and both sides of the claim relationship here, but do not
+      // re-evaluate that selector or the target lookup a second time.
+      return validVaultNameReservationFields(data)
+        && activeNoteUpdateAffectedKeys([
+          "encryptedTitle",
+          "encryptedBody",
+          "folderId",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ], [
+          "encryptedTitle",
+          "encryptedBody",
+          "folderId",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId",
+          "isDeleted"
+        ])
+        && request.auth.uid in data.participantUids
+        && secureShareCopyUsable(resource.data)
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && data.type == resource.data.type
+        && data.participantUids == resource.data.participantUids
+        && data.wrappedKeys == resource.data.wrappedKeys
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validAssignedFolder(data)
+        && validVaultEntryPayloadSize(data)
+        && validNoteContentProjection(data)
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data)
+        && vaultEntryPreviousNameClaimReleasedAfter(data);
+    }
+
+    function versionedVaultNameAccessMutationUpdate(noteId, data) {
+      return validVaultNameReservationFields(data)
+        && ownerAccessUpdate(noteId, data)
+        && allowedShareTargets(data)
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data)
+        && vaultEntryPreviousNameClaimReleasedAfter(data);
+    }
+
+    function versionedVaultNameMutationUpdate(noteId, data) {
+      let history = getAfter(noteHistoryPath(noteId, data.lastMutationId)).data;
+      return history.action == "share"
+        ? versionedVaultNameAccessMutationUpdate(noteId, data)
+        : versionedVaultNameContentMutationUpdate(noteId, data);
+    }
+
+    function versionedVaultNameMutationHistoryMatches(data, noteId, historyId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      // versionedVaultNameMutationRequested already proves both note states
+      // exist and that the claim id changed. Retain the stronger schema and
+      // history coupling checks here without repeating those selector facts.
+      return previousNote.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && validVaultNameReservationFields(nextNote)
+        && validNoteHistory(data, noteId)
+        && data.changedFields.hasAny(["name-claim"])
+        && data.revision == nextNote.revision
+        && historyId == nextNote.lastMutationId
+        && (
+          data.action == "share"
+          ? shareHistoryMatchesNote(data, noteId, historyId)
+          : contentHistoryMatchesNote(data, noteId, historyId)
+        );
+    }
+
+    function versionedVaultNameMutationRequested(noteId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      // The enclosing history-create match already requires the previous note.
+      // All accepting validators below require and link the after-image, so
+      // repeating both existence checks here only spends the shared expression
+      // budget without opening a fail-open path.
+      return previousNote.keys().hasAny(["vaultNameClaimId"])
+        && nextNote.keys().hasAny(["vaultNameClaimId"])
+        && nextNote.vaultNameClaimId != previousNote.vaultNameClaimId;
+    }
+
+    function versionedVaultEntryCreatedAfter(noteId) {
+      let nextNote = getAfter(notePath(noteId)).data;
+      return !exists(notePath(noteId)) && existsAfter(notePath(noteId))
+        ? nextNote.keys().hasAll(["contentFormat", "entryKind"])
+        : false;
+    }
+
+    function versionedVaultEntryCreate(noteId, data) {
+      // The match selector already requires both storage identity fields.
+      return validNote(data)
+        && validVaultEntryFormat(data, noteId)
+        // validVaultEntryFormat already validates the reservation fields and
+        // a versioned entry is only valid after the owner marker/claim cutover.
+        // The paired claim rule proves marker existence, so avoid repeating
+        // that selector inside this expression-budgeted target write.
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data)
+        // The mandatory paired history's create rule validates owner, actor,
+        // timestamps, revision and active deletion state against this exact
+        // after-image. Avoid repeating those expressions here so an active
+        // nested-folder lineage check remains below Firestore's hard budget.
+        && data.participantUids == [request.auth.uid]
+        && pairedNoteHistoryCreated(noteId, data)
+        && (
+          secureShareCopyMetadataAbsent(data)
+          || secureShareCopyCreate(data)
+        )
+        && (
+          data.folderId == null
+          || validAssignedFolderDocument(data, data.folderId)
+        );
+    }
+
+    function legacyNoteCreate(noteId, data) {
+      return validNote(data)
+        && !data.keys().hasAny(["vaultImportJobId"])
+        && validVaultEntryFormat(data, noteId)
+        && vaultCutoverCreateHasNameReservation(data)
+        && vaultEntryNameReservationStateMatchesAfter(noteId, data)
+        && data.isDeleted == false
+        && data.ownerUid == request.auth.uid
+        && request.auth.uid in data.participantUids
+        && data.updatedBy == request.auth.uid
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.savedAt == request.time
+        && data.revision == 1
+        && pairedNoteHistoryCreated(noteId, data)
+        && (
+          secureShareCopyMetadataAbsent(data)
+          || secureShareCopyCreate(data)
+        )
+        && allowedShareTargets(data)
+        && validAssignedFolder(data);
+    }
+
+    function versionedVaultEntryCreateHistoryMatches(data, noteId, historyId) {
+      let nextNote = getAfter(notePath(noteId)).data;
+      return versionedVaultEntryCreatedAfter(noteId)
+        && validNoteHistory(data, noteId)
+        && data.readerUids == [request.auth.uid]
+        && data.revision == nextNote.revision
+        && historyId == nextNote.lastMutationId
+        && createHistoryMatchesNote(data, noteId, historyId);
+    }
+
+    function baseNoteUpdate(noteId, data) {
+      return (
+          (notePurgeRequested() && notePurgeUpdate(noteId, data))
+          || (
+            !notePurgeRequested()
+            && (
+              (
+                secureShareCopyStateChangeRequested()
+                && (
+                  secureShareCopyActivateUpdate(data)
+                  || secureShareCopyAbortUpdate(noteId, data)
+                )
+              )
+              || (
+                !secureShareCopyStateChangeRequested()
+                && (
+                  noteContentUpdate(noteId, data)
+                  || noteFolderUpdate(data)
+                  || (ownerAccessUpdate(noteId, data) && allowedShareTargets(data))
+                  || (legacyActiveDeleteMetadataMigration(data) && validUpdatedNote(data))
+                  || noteSoftDeleteUpdate(noteId, data)
+                  || noteRestoreUpdate(noteId, data)
+                )
+              )
+            )
+          )
+        );
+    }
+
+    function regularNoteUpdate(noteId, data) {
+      return vaultEntryNameReservationStateMatchesAfter(noteId, data)
+        && vaultEntryPreviousNameClaimReleasedAfter(data)
+        && baseNoteUpdate(noteId, data);
+    }
+
+    // The editor's most common save keeps the encrypted title, parent and
+    // blinded name claim byte-for-byte stable and changes only the encrypted
+    // body. Select that exact owner path before the broad mutation dispatcher
+    // so a note inside an encrypted folder does not exceed Firestore's shared
+    // 1000-expression budget when its history write and claim verify are in the
+    // same transaction. The validator deliberately reuses the ordinary claim
+    // and content validators, so this is only an evaluation shortcut.
+    function stableClaimOwnerBodyUpdateRequested(noteId, data) {
+      let history = getAfter(noteHistoryPath(noteId, data.lastMutationId)).data;
+      return history.action == "content"
+        && history.changedFields == ["body"]
+        && request.auth.uid == resource.data.ownerUid
+        && resource.data.keys().hasAll([
+          "contentFormat", "entryKind", "vaultNameClaimId", "vaultNameIndexVersion"
+        ])
+        && data.vaultNameClaimId == resource.data.vaultNameClaimId
+        && data.vaultNameIndexVersion == resource.data.vaultNameIndexVersion
+        && data.encryptedTitle == resource.data.encryptedTitle
+        && noteFolderId(data) == noteFolderId(resource.data)
+        && data.encryptedBody != resource.data.encryptedBody;
+    }
+
+    function stableClaimOwnerBodyUpdate(noteId, data) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "encryptedBody", "updatedAt", "updatedBy", "revision", "lastMutationId"
+        ])
+        && validVaultStorageIdentity(resource.data)
+        && validVaultNameReservationFields(data)
+        && secureShareCopyUsable(resource.data)
+        && !noteDeleted(resource.data)
+        && !noteDeleted(data)
+        && request.auth.uid in data.participantUids
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && allowedShareTargets(data)
+        && validAssignedFolder(data)
+        && validVaultEntryPayloadSize(data)
+        && validNoteContentProjection(data)
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data);
+    }
+
+    function stableClaimOwnerBodyHistoryRequested(data, noteId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return data.action == "content"
+        && data.changedFields == ["body"]
+        && previousNote.ownerUid == request.auth.uid
+        && previousNote.keys().hasAll([
+          "contentFormat", "entryKind", "vaultNameClaimId", "vaultNameIndexVersion"
+        ])
+        && nextNote.vaultNameClaimId == previousNote.vaultNameClaimId
+        && nextNote.vaultNameIndexVersion == previousNote.vaultNameIndexVersion
+        && nextNote.encryptedTitle == previousNote.encryptedTitle
+        && noteFolderId(nextNote) == noteFolderId(previousNote)
+        && nextNote.encryptedBody != previousNote.encryptedBody;
+    }
+
+    function stableClaimOwnerBodyHistoryMatches(data, noteId, historyId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return validNoteHistory(data, noteId)
+        && data.readerUids == nextNote.participantUids
+        && linkedNoteUpdate(noteId, historyId, data)
+        && nextNote.revision == previousNote.revision + 1
+        && !noteDeleted(previousNote)
+        && !noteDeleted(nextNote)
+        && nextNote.type == previousNote.type
+        && nextNote.participantUids == previousNote.participantUids
+        && nextNote.wrappedKeys == previousNote.wrappedKeys;
+    }
+
+    // Renaming an owned entry changes only its encrypted title and blinded
+    // name reservation after the editor has durably flushed the body. Keep
+    // this exact shape separate from the broad content/move dispatcher: a
+    // nested-folder rename also creates one claim, deletes the old claim and
+    // creates history in the same atomic request, and the broad validators
+    // otherwise cross Firestore's hard 1,000-expression limit. The diff is the
+    // security boundary here: body, folder, access, deletion, storage identity
+    // and import provenance must remain byte-for-byte unchanged.
+    function ownerTitleOnlyNameMutationRequested(data) {
+      return request.auth.uid == resource.data.ownerUid
+        && resource.data.keys().hasAll([
+          "contentFormat", "entryKind", "vaultNameClaimId", "vaultNameIndexVersion"
+        ])
+        && data.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && data.vaultNameClaimId != resource.data.vaultNameClaimId
+        && data.encryptedTitle != resource.data.encryptedTitle
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "encryptedTitle",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ]);
+    }
+
+    function ownerTitleOnlyNameMutationUpdate(noteId, data) {
+      return validVaultStorageIdentity(resource.data)
+        && validVaultNameReservationFields(data)
+        && boundedEncryptedPayload(data.encryptedTitle, 4096)
+        && secureShareCopyUsable(resource.data)
+        && !noteDeleted(resource.data)
+        && request.auth.uid in resource.data.participantUids
+        && data.updatedBy == request.auth.uid
+        && data.updatedAt == request.time
+        && noteRevisionAdvances(data)
+        && pairedNoteHistoryCreated(noteId, data)
+        && validAssignedFolder(data)
+        && vaultEntryNameClaimMatchesTargetAfter(noteId, data)
+        // ownerTitleOnlyNameMutationRequested already proves both claim fields
+        // exist and differ, so avoid re-evaluating that selector here.
+        && !existsAfter(vaultNameClaimPath(
+          resource.data.ownerUid,
+          resource.data.vaultNameClaimId
+        ));
+    }
+
+    function ownerTitleOnlyNameHistoryMutationRequested(noteId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      // A folder-only name-claim move is already close to Firestore's shared
+      // expression ceiling. Reject it from this title-only selector before the
+      // schema/diff checks below are evaluated.
+      return nextNote.encryptedTitle != previousNote.encryptedTitle
+        && previousNote.ownerUid == request.auth.uid
+        && previousNote.keys().hasAll([
+          "contentFormat", "entryKind", "vaultNameClaimId", "vaultNameIndexVersion"
+        ])
+        && nextNote.keys().hasAll(["vaultNameClaimId", "vaultNameIndexVersion"])
+        && nextNote.vaultNameClaimId != previousNote.vaultNameClaimId
+        && nextNote.diff(previousNote).affectedKeys().hasOnly([
+          "encryptedTitle",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
+          "updatedAt",
+          "updatedBy",
+          "revision",
+          "lastMutationId"
+        ]);
+    }
+
+    function ownerTitleOnlyNameHistoryMatches(data, noteId, historyId) {
+      let previousNote = get(notePath(noteId)).data;
+      let nextNote = getAfter(notePath(noteId)).data;
+      return data.action == "content"
+        && data.changedFields == ["title", "name-claim"]
+        && validNoteHistory(data, noteId)
+        && data.readerUids == nextNote.participantUids
+        && data.revision == nextNote.revision
+        && historyId == nextNote.lastMutationId
+        && nextNote.updatedBy == request.auth.uid
+        && nextNote.updatedAt == request.time
+        && nextNote.revision == previousNote.revision + 1
+        && !noteDeleted(previousNote)
+        && !noteDeleted(nextNote);
+    }
+
+    function regularNoteHistoryCreate(data, noteId, historyId) {
+      return validNoteHistory(data, noteId)
+        && data.revision == getAfter(notePath(noteId)).data.revision
+        && historyId == getAfter(notePath(noteId)).data.lastMutationId
+        && historyMatchesNoteMutation(data, noteId, historyId);
     }
 
     function validAttachmentExtension(extension) {
@@ -2090,6 +3939,9 @@ service cloud.firestore {
       return activeNoteUpdateAffectedKeys([
           "encryptedTitle",
           "encryptedBody",
+          "folderId",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
           "updatedAt",
           "updatedBy",
           "revision",
@@ -2097,6 +3949,9 @@ service cloud.firestore {
         ], [
           "encryptedTitle",
           "encryptedBody",
+          "folderId",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
           "updatedAt",
           "updatedBy",
           "revision",
@@ -2114,9 +3969,21 @@ service cloud.firestore {
         && data.updatedAt == request.time
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
+        && (
+          !exists(vaultIntegrityPath(resource.data.ownerUid))
+          || request.auth.uid == resource.data.ownerUid
+          || (
+            data.encryptedTitle == resource.data.encryptedTitle
+            && noteFolderId(data) == noteFolderId(resource.data)
+            && data.vaultNameClaimId == resource.data.vaultNameClaimId
+            && data.vaultNameIndexVersion == resource.data.vaultNameIndexVersion
+          )
+        )
         && allowedShareTargets(data)
+        && validAssignedFolder(data)
+        && vaultCutoverNoteNameMutationIsClaimAware(data)
         && validVaultEntryPayloadSize(data)
-        && validUpdatedNote(data);
+        && validNoteContentProjection(data);
     }
 
     function noteFolderUpdate(data) {
@@ -2135,6 +4002,7 @@ service cloud.firestore {
         // This compatibility branch is only for historical HTML documents.
         && !resource.data.keys().hasAny(["contentFormat", "entryKind"])
         && !data.keys().hasAny(["contentFormat", "entryKind"])
+        && !exists(vaultIntegrityPath(resource.data.ownerUid))
         && secureShareCopyUsable(resource.data)
         && resource.data.type == "personal"
         && data.type == "personal"
@@ -2157,6 +4025,8 @@ service cloud.firestore {
           "participantUids",
           "wrappedKeys",
           "folderId",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
           "updatedAt",
           "updatedBy",
           "revision",
@@ -2166,6 +4036,8 @@ service cloud.firestore {
           "participantUids",
           "wrappedKeys",
           "folderId",
+          "vaultNameClaimId",
+          "vaultNameIndexVersion",
           "updatedAt",
           "updatedBy",
           "revision",
@@ -2175,7 +4047,6 @@ service cloud.firestore {
         && request.auth.uid == resource.data.ownerUid
         && secureShareCopyUsable(resource.data)
         && !noteDeleted(resource.data)
-        && !noteDeleted(data)
         && request.auth.uid in data.participantUids
         && data.encryptedTitle == resource.data.encryptedTitle
         && data.encryptedBody == resource.data.encryptedBody
@@ -2183,8 +4054,9 @@ service cloud.firestore {
         && data.updatedAt == request.time
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
+        && vaultCutoverNoteNameMutationIsClaimAware(data)
         && validAssignedFolder(data)
-        && validUpdatedNote(data);
+        && validNoteAccessProjection(data);
     }
 
     function noteSoftDeleteUpdate(noteId, data) {
@@ -2203,11 +4075,12 @@ service cloud.firestore {
         && data.isDeleted == true
         && data.deletedAt == request.time
         && data.deletedBy == request.auth.uid
-        && data.updatedBy == request.auth.uid
-        && data.updatedAt == request.time
         && noteRevisionAdvances(data)
+        // The mandatory paired delete history re-checks the after-image's
+        // updatedBy/updatedAt through linkedNoteUpdate. Avoid evaluating those
+        // facts twice so import rollback remains below the expression ceiling.
         && pairedNoteHistoryCreated(noteId, data)
-        && validUpdatedNote(data);
+        && vaultEntryNameClaimReleasedAfterDelete(resource.data);
     }
 
     function noteRestoreUpdate(noteId, data) {
@@ -2230,7 +4103,8 @@ service cloud.firestore {
         && data.updatedAt == request.time
         && noteRevisionAdvances(data)
         && pairedNoteHistoryCreated(noteId, data)
-        && validUpdatedNote(data);
+        && validAssignedFolder(data)
+        && vaultEntryNameClaimPresentAfterRestore(data);
     }
 
     function secureShareCopyActivateUpdate(data) {
@@ -2263,6 +4137,7 @@ service cloud.firestore {
         && data.savedAt == request.time
         && data.updatedBy == request.auth.uid
         && noteRevisionIsPreserved(data)
+        && validAssignedFolder(data)
         && validUpdatedNote(data);
     }
 
@@ -2710,6 +4585,9 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).changedKeys().hasOnly([
           "defaultHome",
           "matrixLabels",
+          "encryptedMatrixLabels",
+          "matrixLabelsFormat",
+          "matrixLabelsWrappedKey",
           "scheduleDefaultView",
           "scheduleDefaultCategory",
           "theme",
@@ -2734,6 +4612,46 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
+    match /vaultIntegrity/{uid} {
+      allow get: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && (!exists(vaultIntegrityPath(uid)) || resource.data.ownerUid == uid);
+      allow list: if false;
+      allow create: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && validVaultIntegrity(request.resource.data, uid)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update, delete: if false;
+
+      match /nameClaims/{claimId} {
+        allow get: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid
+          && (
+            !exists(vaultNameClaimPath(uid, claimId))
+            || resource.data.ownerUid == uid
+          );
+        allow list: if false;
+        allow create: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid
+          && exists(vaultIntegrityPath(uid))
+          && validVaultNameClaim(request.resource.data, uid, claimId)
+          && vaultNameClaimTargetMatchesAfter(request.resource.data, uid, claimId);
+        allow update: if false;
+        allow delete: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid
+          && resource.data.ownerUid == uid
+          && vaultNameClaimTargetReleasedAfter(resource.data, uid, claimId);
+      }
+    }
+
+    // Server-authoritative opaque folder topology. The Vercel boundary uses a
+    // service-account REST transaction; no browser SDK may read or mutate the
+    // complete map, including the owner.
+    match /vaultFolderTrees/{uid} {
+      allow read, write: if false;
+    }
+
     match /vaultWorkspaces/{uid} {
       allow get: if activeSignedInUserHasNotes()
         && request.auth.uid == uid
@@ -2754,6 +4672,77 @@ service cloud.firestore {
         && validVaultWorkspace(request.resource.data, uid)
         && validVaultWorkspaceUpdate(request.resource.data);
       allow delete: if false;
+    }
+
+    match /vaultMaintenanceJobs/{uid}/pathRewrites/{jobId} {
+      allow get: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && (
+          !exists(vaultPathRewriteJobPath(uid, jobId))
+          || resource.data.ownerUid == uid
+        );
+      allow list: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid;
+      allow create: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && validVaultPathRewriteJobCreate(request.resource.data, uid, jobId);
+      allow update: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && validVaultPathRewriteJobUpdate(request.resource.data, uid, jobId);
+      allow delete: if false;
+
+      match /steps/{stepId} {
+        allow get, list: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid;
+        allow create: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid
+          && validVaultPathRewriteStep(request.resource.data, uid, jobId, stepId);
+        allow update, delete: if false;
+      }
+    }
+
+    match /vaultMaintenanceJobs/{uid}/imports/{jobId} {
+      allow get: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && (
+          !exists(vaultImportJobPath(uid, jobId))
+          || resource.data.ownerUid == uid
+        );
+      allow list: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid;
+      allow create: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && validVaultImportJobCreate(request.resource.data, uid, jobId);
+      allow update: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && validVaultImportJobUpdate(request.resource.data, uid, jobId);
+      allow delete: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && resource.data.ownerUid == uid
+        && resource.data.status in ["committed", "rolled-back"]
+        && resource.data.remainingChunkCount == 0;
+
+      match /chunks/{chunkId} {
+        allow get, list: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid;
+        allow create: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid
+          && validVaultImportChunk(request.resource.data, uid, jobId, chunkId);
+        allow update: if false;
+        allow delete: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid
+          && exists(vaultImportJobPath(uid, jobId))
+          && get(vaultImportJobPath(uid, jobId)).data.ownerUid == uid
+          && get(vaultImportJobPath(uid, jobId)).data.status in ["committed", "rolled-back"]
+          && resource.data.ordinal
+            == get(vaultImportJobPath(uid, jobId)).data.remainingChunkCount - 1
+          && existsAfter(vaultImportJobPath(uid, jobId))
+          && getAfter(vaultImportJobPath(uid, jobId)).data.ownerUid == uid
+          && getAfter(vaultImportJobPath(uid, jobId)).data.status
+            == get(vaultImportJobPath(uid, jobId)).data.status
+          && getAfter(vaultImportJobPath(uid, jobId)).data.remainingChunkCount
+            == get(vaultImportJobPath(uid, jobId)).data.remainingChunkCount - 1;
+      }
     }
 
     match /libraryItems/{itemId} {
@@ -2988,7 +4977,11 @@ service cloud.firestore {
       allow read: if activeSignedInUserHasNotes()
         && resource.data.ownerUid == request.auth.uid;
       allow create: if activeSignedInUserHasNotes()
+        && !encryptedVaultFolder(request.resource.data)
         && validNoteFolder(request.resource.data, folderId)
+        && vaultImportFolderParentPlacementAllowed(request.resource.data)
+        && vaultFolderStorageMatchesCutover(request.resource.data)
+        && vaultFolderNameReservationStateMatchesAfter(folderId, request.resource.data)
         && (
           !request.resource.data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"])
           || request.resource.data.revision == 1
@@ -2997,22 +4990,56 @@ service cloud.firestore {
         && request.resource.data.updatedAt == request.time;
       allow update: if activeSignedInUserHasNotes()
         && resource.data.ownerUid == request.auth.uid
-        && validNoteFolder(request.resource.data, folderId)
-        && validEncryptedNoteFolderUpdate(request.resource.data)
-        && request.resource.data.ownerUid == resource.data.ownerUid
+        && !encryptedVaultFolder(resource.data)
+        && !encryptedVaultFolder(request.resource.data)
+        && vaultImportFolderUpdateAllowed(request.resource.data)
         && request.resource.data.updatedAt == request.time
-        && request.resource.data.diff(resource.data).changedKeys().hasOnly([
-          "name",
-          "color",
-          "encryptedName",
-          "wrappedKey",
-          "parentId",
-          "order",
-          "revision",
-          "updatedAt"
-        ]);
+        && (
+          vaultFolderLifecycleRequested(request.resource.data)
+          ? (
+            vaultFolderLifecycleUpdate(request.resource.data)
+            && validVaultFolderLifecycleGeneration(request.resource.data)
+            && (
+              folderDeleted(request.resource.data)
+              ? !existsAfter(vaultNameClaimPath(request.auth.uid, request.resource.data.vaultNameClaimId))
+              : existsAfter(vaultNameClaimPath(request.auth.uid, request.resource.data.vaultNameClaimId))
+            )
+          )
+          : (
+            (
+              encryptedVaultFolder(request.resource.data)
+              ? validEncryptedFolderMutationProjection(request.resource.data, folderId)
+              : validNoteFolderShape(request.resource.data, folderId)
+            )
+            && vaultFolderStorageMatchesCutover(request.resource.data)
+            && validEncryptedNoteFolderUpdate(request.resource.data)
+            && vaultCutoverFolderMutationIsClaimAware(request.resource.data)
+            && vaultFolderNameReservationStateMatchesAfter(folderId, request.resource.data)
+            && vaultFolderPreviousNameClaimReleasedAfter(request.resource.data)
+            && folderActive(resource.data)
+            && vaultImportFolderParentPlacementAllowed(request.resource.data)
+            && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+              "name",
+              "color",
+              "encryptedName",
+              "wrappedKey",
+              "parentId",
+              "order",
+              "revision",
+              "vaultNameClaimId",
+              "vaultNameIndexVersion",
+              "vaultAncestorIds",
+              "vaultLineagePath",
+              "vaultLineageDepth",
+              "vaultLineageGeneration",
+              "vaultLineageVersion",
+              "updatedAt"
+            ])
+          )
+        );
       allow delete: if activeSignedInUserHasNotes()
         && resource.data.ownerUid == request.auth.uid
+        && !existsAfter(vaultIntegrityPath(resource.data.ownerUid))
         // Nested encrypted folders require a subtree-aware trash operation.
         // The historical root-folder delete path must not orphan Vault data.
         && !resource.data.keys().hasAny(["encryptedName", "wrappedKey", "parentId", "order", "revision"]);
@@ -3053,46 +5080,65 @@ service cloud.firestore {
       allow get: if canReadNoteDocument(resource.data);
       allow list: if canListNoteDocument(resource.data);
       allow create: if activeSignedInUserHasNotes()
-        && validNote(request.resource.data)
-        && validVaultEntryFormat(request.resource.data)
-        && request.resource.data.isDeleted == false
-        && !request.resource.data.keys().hasAny(["deletedAt", "deletedBy"])
-        && request.resource.data.ownerUid == request.auth.uid
-        && request.auth.uid in request.resource.data.participantUids
-        && request.resource.data.updatedBy == request.auth.uid
-        && request.resource.data.createdAt == request.time
-        && request.resource.data.updatedAt == request.time
-        && request.resource.data.savedAt == request.time
-        && request.resource.data.revision == 1
-        && pairedNoteHistoryCreated(noteId, request.resource.data)
         && (
-          secureShareCopyMetadataAbsent(request.resource.data)
-          || secureShareCopyCreate(request.resource.data)
-        )
-        && allowedShareTargets(request.resource.data)
-        && validAssignedFolder(request.resource.data);
+          request.resource.data.keys().hasAll(["contentFormat", "entryKind"])
+          ? versionedVaultEntryCreate(noteId, request.resource.data)
+          : legacyNoteCreate(noteId, request.resource.data)
+        );
       allow update: if activeSignedInUserHasNotes()
+        && vaultImportNoteUpdateAllowed(request.resource.data)
         && (
-          (notePurgeRequested() && notePurgeUpdate(noteId, request.resource.data))
-          || (
-            !notePurgeRequested()
-            && (
-              (
-                secureShareCopyStateChangeRequested()
-                && (
-                  secureShareCopyActivateUpdate(request.resource.data)
-                  || secureShareCopyAbortUpdate(noteId, request.resource.data)
+          !existsAfter(vaultIntegrityPath(resource.data.ownerUid))
+          ? baseNoteUpdate(noteId, request.resource.data)
+          : (
+            !resource.data.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+            ? (
+              vaultUnclaimedRestoreRequested(request.resource.data)
+              ? (
+                vaultEntryNameReservationStateMatchesAfter(noteId, request.resource.data)
+                && vaultUnclaimedRestoreUpdate(noteId, request.resource.data)
+              )
+              : (
+                vaultLegacyDeletionMetadataNormalizationRequested(request.resource.data)
+                ? validUpdatedNote(request.resource.data)
+                : (
+                  vaultNameCollisionRecoveryRequested(request.resource.data)
+                  ? (
+                    vaultEntryNameReservationStateMatchesAfter(noteId, request.resource.data)
+                    && vaultNameCollisionRecoveryUpdate(noteId, request.resource.data)
+                  )
+                  : (
+                    vaultNameBackfillRequested(request.resource.data)
+                    && vaultEntryNameReservationStateMatchesAfter(noteId, request.resource.data)
+                    && vaultNameBackfillUpdate(noteId, request.resource.data)
+                  )
                 )
               )
-              || (
-                !secureShareCopyStateChangeRequested()
-                && (
-                  noteContentUpdate(noteId, request.resource.data)
-                  || noteFolderUpdate(request.resource.data)
-                  || (ownerAccessUpdate(noteId, request.resource.data) && allowedShareTargets(request.resource.data))
-                  || (legacyActiveDeleteMetadataMigration(request.resource.data) && validUpdatedNote(request.resource.data))
-                  || noteSoftDeleteUpdate(noteId, request.resource.data)
-                  || noteRestoreUpdate(noteId, request.resource.data)
+            )
+            : (
+              vaultClaimedRestoreRequested(request.resource.data)
+              ? noteRestoreUpdate(noteId, request.resource.data)
+              : (
+                stableClaimOwnerBodyUpdateRequested(noteId, request.resource.data)
+                ? stableClaimOwnerBodyUpdate(noteId, request.resource.data)
+                : (
+                  vaultParticipantBodyOnlyRequested(request.resource.data)
+                  ? vaultParticipantBodyOnlyUpdate(noteId, request.resource.data)
+                  : (
+                    vaultEntryNameClaimChanges(request.resource.data)
+                    ? (
+                      request.resource.data.encryptedTitle != resource.data.encryptedTitle
+                      ? (
+                        ownerTitleOnlyNameMutationRequested(request.resource.data)
+                        ? ownerTitleOnlyNameMutationUpdate(noteId, request.resource.data)
+                        : versionedVaultNameMutationUpdate(noteId, request.resource.data)
+                      )
+                      : versionedVaultNameMutationUpdate(noteId, request.resource.data)
+                    )
+                    : (
+                      regularNoteUpdate(noteId, request.resource.data)
+                    )
+                  )
                 )
               )
             )
@@ -3103,10 +5149,41 @@ service cloud.firestore {
       match /history/{historyId} {
         allow read: if exists(notePath(noteId))
           && canReadNoteHistory(resource.data, get(notePath(noteId)).data);
-        allow create: if validNoteHistory(request.resource.data, noteId)
-          && request.resource.data.revision == getAfter(notePath(noteId)).data.revision
-          && historyId == getAfter(notePath(noteId)).data.lastMutationId
-          && historyMatchesNoteMutation(request.resource.data, noteId, historyId);
+        allow create: if exists(notePath(noteId))
+          && existsAfter(vaultIntegrityPath(get(notePath(noteId)).data.ownerUid))
+          && !get(notePath(noteId)).data.keys().hasAny(["vaultNameClaimId", "vaultNameIndexVersion"])
+          ? (
+            vaultUnclaimedRestoreHistoryRequested(noteId)
+            ? vaultUnclaimedRestoreHistoryMatches(request.resource.data, noteId, historyId)
+            : (
+              vaultNameCollisionRecoveryHistoryRequested(noteId)
+              ? vaultNameCollisionRecoveryHistoryMatches(request.resource.data, noteId, historyId)
+              : vaultNameBackfillHistoryMatches(request.resource.data, noteId, historyId)
+            )
+          )
+          : (
+            stableClaimOwnerBodyHistoryRequested(request.resource.data, noteId)
+            ? stableClaimOwnerBodyHistoryMatches(request.resource.data, noteId, historyId)
+            : (
+              vaultParticipantBodyOnlyHistoryRequested(noteId)
+              ? vaultParticipantBodyOnlyHistoryMatches(request.resource.data, noteId, historyId)
+              : (
+                versionedVaultEntryCreatedAfter(noteId)
+                ? versionedVaultEntryCreateHistoryMatches(request.resource.data, noteId, historyId)
+                : (
+                  versionedVaultNameMutationRequested(noteId)
+                  ? (
+                    ownerTitleOnlyNameHistoryMutationRequested(noteId)
+                    ? ownerTitleOnlyNameHistoryMatches(request.resource.data, noteId, historyId)
+                    : versionedVaultNameMutationHistoryMatches(request.resource.data, noteId, historyId)
+                  )
+                  : (
+                    regularNoteHistoryCreate(request.resource.data, noteId, historyId)
+                  )
+                )
+              )
+            )
+          );
         allow update: if false;
         allow delete: if exists(notePath(noteId))
           && noteDeleted(get(notePath(noteId)).data)

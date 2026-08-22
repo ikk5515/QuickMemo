@@ -16,10 +16,44 @@ export interface MarkdownExportOptions {
 
 export interface MarkdownExportResult {
   profile: MarkdownExportProfile;
+  /**
+   * Complete transformed Markdown. For `discord-ai`, this is an archival value,
+   * not a message-size-safe clipboard payload.
+   */
   content: string;
+  /** @deprecated Discord/AI consumers should use `exportMarkdownForDiscordAi`. */
   chunks: string[];
   warnings: string[];
 }
+
+export interface DiscordAiMarkdownExportOptions {
+  maximumMessageCharacters?: number;
+  resolveWikiLinkPath?: MarkdownExportOptions["resolveWikiLinkPath"];
+  sourcePath?: string;
+}
+
+export interface DiscordAiMarkdownMessage {
+  readonly content: string;
+  readonly index: number;
+  readonly total: number;
+}
+
+interface DiscordAiMarkdownDeliveryBase {
+  readonly maximumMessageCharacters: number;
+  readonly messages: readonly DiscordAiMarkdownMessage[];
+  readonly profile: "discord-ai";
+  readonly warnings: readonly string[];
+}
+
+export type DiscordAiMarkdownDelivery =
+  | (DiscordAiMarkdownDeliveryBase & {
+      readonly kind: "single-message";
+      readonly singleMessageContent: string;
+    })
+  | (DiscordAiMarkdownDeliveryBase & {
+      readonly kind: "message-batch";
+      readonly singleMessageContent: null;
+    });
 
 interface WikiTransformContext {
   profile: MarkdownExportProfile;
@@ -55,6 +89,43 @@ export function exportMarkdown(
   return { profile: options.profile, content, chunks, warnings };
 }
 
+/**
+ * Build an explicit Discord/AI message delivery contract.
+ *
+ * The complete transformed document is deliberately not exposed on this
+ * object. A multi-message delivery has `singleMessageContent: null`, and each
+ * bounded message is an object rather than a joinable string array. Consumers
+ * must therefore copy or send `message.content` one message at a time instead
+ * of accidentally presenting a concatenated document as one safe message.
+ */
+export function exportMarkdownForDiscordAi(
+  source: string,
+  options: DiscordAiMarkdownExportOptions = {}
+): DiscordAiMarkdownDelivery {
+  const maximumMessageCharacters = options.maximumMessageCharacters ?? 1_900;
+  const exported = exportMarkdown(source, {
+    profile: "discord-ai",
+    maximumChunkCharacters: maximumMessageCharacters,
+    resolveWikiLinkPath: options.resolveWikiLinkPath,
+    sourcePath: options.sourcePath
+  });
+  const total = exported.chunks.length;
+  const messages = Object.freeze(exported.chunks.map((content, offset) => Object.freeze({
+    content,
+    index: offset + 1,
+    total
+  })));
+  const common = {
+    maximumMessageCharacters,
+    messages,
+    profile: "discord-ai" as const,
+    warnings: Object.freeze([...exported.warnings])
+  };
+  return total === 1
+    ? { ...common, kind: "single-message", singleMessageContent: messages[0]?.content ?? "" }
+    : { ...common, kind: "message-batch", singleMessageContent: null };
+}
+
 export function splitMarkdownForMessages(source: string, maximumCharacters = 1_900) {
   if (!Number.isInteger(maximumCharacters) || maximumCharacters < 80) {
     throw new RangeError("maximumCharacters must be an integer of at least 80");
@@ -63,39 +134,49 @@ export function splitMarkdownForMessages(source: string, maximumCharacters = 1_9
     return [source];
   }
 
-  const payloadLimit = Math.max(1, maximumCharacters - 48);
-  const rawChunks: string[] = [];
-  let remaining = normalizeMarkdownLineEndings(source);
-  while (remaining.length > payloadLimit) {
-    let boundary = remaining.lastIndexOf("\n\n", payloadLimit);
-    let separatorLength = 2;
-    if (boundary < payloadLimit / 3) {
-      boundary = remaining.lastIndexOf("\n", payloadLimit);
-      separatorLength = 1;
-    }
-    if (boundary < payloadLimit / 3) {
-      boundary = remaining.lastIndexOf(" ", payloadLimit);
-      separatorLength = 1;
-    }
-    if (boundary <= 0) {
-      boundary = payloadLimit;
-      separatorLength = 0;
-    }
-    rawChunks.push(remaining.slice(0, boundary));
-    remaining = remaining.slice(boundary + separatorLength);
-  }
-  rawChunks.push(remaining);
-
+  const messages: string[] = [];
   let activeFence: FenceState | null = null;
-  return rawChunks.map((chunk) => {
-    const prefix = activeFence ? `${activeFence.marker}${activeFence.info}\n` : "";
-    activeFence = fenceStateAfter(chunk, activeFence);
-    const suffix = activeFence ? `\n${activeFence.marker}` : "";
-    const repaired = `${prefix}${chunk}${suffix}`;
-    return repaired.length <= maximumCharacters
-      ? repaired
-      : repaired.slice(0, maximumCharacters);
-  });
+  let remaining = normalizeMarkdownLineEndings(source);
+  while (remaining.length) {
+    // Reopened continuation fences intentionally omit a possibly long info
+    // string. Keeping the language label on the first message is sufficient,
+    // while a bounded three-character marker guarantees room for source text.
+    const continuationMarker = activeFence ? activeFence.marker[0].repeat(3) : "";
+    const prefix = activeFence ? `${continuationMarker}\n` : "";
+    const suffixBudget = 4; // newline + a three-character continuation marker
+    const payloadLimit = Math.max(1, maximumCharacters - prefix.length - suffixBudget);
+    let boundary = markdownMessageBoundary(remaining, payloadLimit);
+    let chunk = remaining.slice(0, boundary);
+    let nextFence = fenceStateAfter(chunk, activeFence);
+    let suffix = nextFence ? `\n${nextFence.marker[0].repeat(3)}` : "";
+
+    // A chunk that closes its fence does not need the reserved suffix and can
+    // use the full remaining budget. Conversely, unusual long fence markers
+    // are reduced without ever slicing an already assembled message, because
+    // slicing there would silently discard source Markdown.
+    while (`${prefix}${chunk}${suffix}`.length > maximumCharacters && boundary > 1) {
+      boundary = Math.max(1, boundary - (`${prefix}${chunk}${suffix}`.length - maximumCharacters));
+      chunk = remaining.slice(0, boundary);
+      nextFence = fenceStateAfter(chunk, activeFence);
+      suffix = nextFence ? `\n${nextFence.marker[0].repeat(3)}` : "";
+    }
+
+    messages.push(`${prefix}${chunk}${suffix}`);
+    remaining = remaining.slice(boundary);
+    activeFence = nextFence;
+  }
+
+  return messages;
+}
+
+function markdownMessageBoundary(source: string, maximumPayload: number) {
+  if (source.length <= maximumPayload) return source.length;
+  const minimumPreferredBoundary = maximumPayload / 3;
+  for (const separator of ["\n\n", "\n", " "]) {
+    const boundary = source.lastIndexOf(separator, maximumPayload);
+    if (boundary >= minimumPreferredBoundary) return boundary;
+  }
+  return maximumPayload;
 }
 
 function transformWikiLinksOutsideCode(source: string, context: WikiTransformContext) {

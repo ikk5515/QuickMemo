@@ -1,0 +1,30 @@
+.qm-dataview { border: 1px solid var(--vault-border); border-radius: 8px; background: var(--vault-surface-muted); margin: 12px 0; overflow: hidden; }
+.qm-dataview > header { align-items: center; display: flex; justify-content: space-between; padding: 8px 10px; }
+.qm-dataview > header output { color: var(--vault-text-muted); font-size: 12px; }
+.qm-dataview > details, .qm-dataview > p, .qm-dataview-error { padding: 8px 10px; }
+.qm-dataview-table { overflow: auto; }
+.qm-dataview table { border-collapse: collapse; min-width: 100%; }
+.qm-dataview th, .qm-dataview td { border-top: 1px solid var(--vault-border); padding: 7px 10px; text-align: left; white-space: nowrap; }
+.qm-dataview tbody tr { contain-intrinsic-size: auto 34px; content-visibility: auto; }
+.qm-dataview button { background: none; border: 0; color: var(--vault-accent); cursor: pointer; font: inherit; padding: 0; text-align: left; }
+.qm-dataview > ul { display: grid; gap: 5px; list-style: none; margin: 0; padding: 8px 10px 12px; }
+.qm-dataview > ul li { align-items: baseline; display: flex; flex-wrap: wrap; gap: 8px; }
+.qm-dataview > ul span { color: var(--vault-text-muted); font-size: 12px; }
+.qm-dataview-groups > section > h3 { border-top: 1px solid var(--vault-border); font-size: 12px; margin: 0; padding: 8px 10px 4px; }
+.qm-dataview-groups > section > ul { display: grid; gap: 5px; list-style: none; margin: 0; padding: 8px 10px 12px; }
+.qm-dataview-groups > section > ul:not(.qm-dataview-tasks) li { align-items: baseline; display: flex; flex-wrap: wrap; gap: 8px; }
+.qm-dataview-groups > section > ul:not(.qm-dataview-tasks) span { color: var(--vault-text-muted); font-size: 12px; }
+.qm-dataview-tasks li { align-items: center; display: grid; gap: 8px; grid-template-columns: auto minmax(0, 1fr) auto; }
+.qm-dataview-tasks input { accent-color: var(--vault-accent); }
+.qm-dataview-tasks li > span { min-width: 0; overflow-wrap: anywhere; }
+.qm-dataview-tasks li > button { color: var(--vault-text-muted); font-size: 11px; max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qm-dataview-calendar { display: grid; gap: 1px; list-style: none; margin: 0; padding: 0 10px 10px; }
+.qm-dataview-calendar li { align-items: center; border-top: 1px solid var(--vault-border); display: grid; gap: 10px; grid-template-columns: minmax(7rem, auto) minmax(0, 1fr); padding: 7px 0; }
+.qm-dataview-calendar time { color: var(--vault-text-muted); font-variant-numeric: tabular-nums; }
+.qm-dataview button:disabled { color: inherit; cursor: default; }
+.qm-dataview-error { color: var(--danger, #d66); }
+@media (pointer: coarse) { .qm-dataview button { min-height: 44px; min-width: 44px; } }
+@media (max-width: 480px) {
+  .qm-dataview-tasks li { grid-template-columns: auto minmax(0, 1fr); }
+  .qm-dataview-tasks li > button { grid-column: 2; max-width: 100%; }
+}

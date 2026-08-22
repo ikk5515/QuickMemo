@@ -1,6 +1,8 @@
+import { Buffer } from "node:buffer";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { cwd } from "node:process";
+import { gzipSync } from "node:zlib";
 
 const assetsDirectory = join(cwd(), "dist", "assets");
 const javascriptFiles = (await readdir(assetsDirectory))
@@ -44,6 +46,22 @@ function importedChunks(fileName) {
   return imports;
 }
 
+function staticallyImportedChunks(fileName) {
+  const source = sourceByFile.get(fileName) ?? "";
+  const imports = new Set();
+  const staticRelativeJavaScriptImport = /(?:\bfrom|(?:^|[;}])import)\s*["']\.\/([^"'?]+\.js)["']/gu;
+  let match = staticRelativeJavaScriptImport.exec(source);
+
+  while (match) {
+    if (sourceByFile.has(match[1])) {
+      imports.add(match[1]);
+    }
+    match = staticRelativeJavaScriptImport.exec(source);
+  }
+
+  return imports;
+}
+
 function reachableChunks(entryFiles) {
   const visited = new Set();
   const queue = [...entryFiles];
@@ -56,6 +74,20 @@ function reachableChunks(entryFiles) {
     }
     visited.add(fileName);
     importedChunks(fileName).forEach((importedFile) => queue.push(importedFile));
+  }
+
+  return visited;
+}
+
+function staticallyReachableChunks(entryFiles) {
+  const visited = new Set();
+  const queue = [...entryFiles];
+
+  while (queue.length > 0) {
+    const fileName = queue.shift();
+    if (!fileName || visited.has(fileName)) continue;
+    visited.add(fileName);
+    staticallyImportedChunks(fileName).forEach((importedFile) => queue.push(importedFile));
   }
 
   return visited;
@@ -79,4 +111,43 @@ if (!ocrGraph.has(commonJsRuntimeFile)) {
 
 if ([...ocrGraph].some((fileName) => fileName.startsWith("docx-preview-"))) {
   throw new Error("The OCR graph unexpectedly pulls in the DOCX preview implementation.");
+}
+
+function requireSingleChunk(prefix) {
+  const matches = javascriptFiles.filter((fileName) => fileName.startsWith(`${prefix}-`));
+  if (matches.length !== 1) {
+    throw new Error(`Expected exactly one ${prefix} chunk, received ${matches.length}.`);
+  }
+  return matches[0];
+}
+
+function assertChunkBudget(fileName, { rawBytes, gzipBytes }) {
+  const source = sourceByFile.get(fileName) ?? "";
+  const rawSize = Buffer.byteLength(source);
+  const gzipSize = gzipSync(source, { level: 9 }).byteLength;
+
+  if (rawSize > rawBytes || gzipSize > gzipBytes) {
+    throw new Error(
+      `${fileName} exceeds its bundle budget: ${rawSize} raw / ${gzipSize} gzip bytes.`
+    );
+  }
+}
+
+// Keep the initial encrypted Vault route compact on slower mobile devices.
+// CodeMirror is deliberately a separate lazy chunk and has its own ceiling so
+// a dependency upgrade cannot silently restore the former 900+ KiB route.
+const vaultPageChunk = requireSingleChunk("VaultPage");
+const codeMirrorChunk = requireSingleChunk("CodeMirrorMarkdownEditor");
+
+assertChunkBudget(vaultPageChunk, {
+  rawBytes: 400 * 1_024,
+  gzipBytes: 120 * 1_024
+});
+assertChunkBudget(codeMirrorChunk, {
+  rawBytes: 640 * 1_024,
+  gzipBytes: 225 * 1_024
+});
+
+if ([...staticallyReachableChunks([codeMirrorChunk])].some((fileName) => fileName.startsWith("editor-"))) {
+  throw new Error("The lazy CodeMirror graph unexpectedly pulls in the legacy TipTap/ProseMirror editor chunk.");
 }

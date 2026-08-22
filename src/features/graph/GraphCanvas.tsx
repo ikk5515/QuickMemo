@@ -233,12 +233,17 @@ export function GraphCanvas({
   settings
 }: GraphCanvasProps) {
   const rendererRef = useRef<GraphRendererHandle>(null);
+  const pendingKeyboardActionsRef = useRef<GraphKeyboardAction[]>([]);
   const [canvasSupported] = useState(browserSupportsGraphCanvas);
   const [rendererReady, setRendererReady] = useState(false);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
   const [timelinePosition, setTimelinePosition] = useState<number | null>(null);
   const [timelinePlaying, setTimelinePlaying] = useState(false);
+  const [observedViewport, setObservedViewport] = useState<GraphViewport | undefined>(initialViewport);
+  const initialViewportCenterX = initialViewport?.centerX;
+  const initialViewportCenterY = initialViewport?.centerY;
+  const initialViewportZoom = initialViewport?.zoom;
   const reducedMotion = useReducedMotion();
 
   const shouldRenderCanvas = renderMode === "canvas" || (renderMode === "auto" && canvasSupported);
@@ -283,6 +288,28 @@ export function GraphCanvas({
   }, [shouldRenderCanvas]);
 
   useEffect(() => {
+    setObservedViewport((current) => {
+      if (
+        initialViewportCenterX === undefined
+        || initialViewportCenterY === undefined
+        || initialViewportZoom === undefined
+      ) return current;
+      if (
+        current?.centerX === initialViewportCenterX
+        && current.centerY === initialViewportCenterY
+        && current.zoom === initialViewportZoom
+      ) {
+        return current;
+      }
+      return {
+        centerX: initialViewportCenterX,
+        centerY: initialViewportCenterY,
+        zoom: initialViewportZoom
+      };
+    });
+  }, [initialViewportCenterX, initialViewportCenterY, initialViewportZoom]);
+
+  useEffect(() => {
     if (reducedMotion || !timelineEnabled || !timelinePlaying || effectiveTimelinePosition >= lastTimelinePosition) {
       return undefined;
     }
@@ -295,14 +322,39 @@ export function GraphCanvas({
   function handleKeyboardNavigation(event: KeyboardEvent<HTMLElement>) {
     const renderer = rendererRef.current;
     const action = graphKeyboardAction(event.key, event.shiftKey);
-    if (!renderer || !action) {
+    if (!action) {
       return;
     }
     event.preventDefault();
+    if (!renderer || !rendererReady) {
+      // The graph renderer is lazy-loaded and its imperative handle can exist
+      // before the underlying Canvas has a measured viewport. Preserve a
+      // bounded burst of keyboard input so the first zoom/pan gesture is not
+      // lost on fast desktop loads or slower mobile browsers.
+      pendingKeyboardActionsRef.current = [...pendingKeyboardActionsRef.current.slice(-15), action];
+      return;
+    }
+    applyKeyboardAction(renderer, action);
+  }
+
+  function applyKeyboardAction(renderer: GraphRendererHandle, action: GraphKeyboardAction) {
     if (action.type === "zoom") {
       renderer.zoomBy(action.factor);
     } else {
       renderer.panBy(action.deltaX, action.deltaY);
+    }
+  }
+
+  function handleRendererReady() {
+    setRendererReady(true);
+    const renderer = rendererRef.current;
+    if (!renderer || pendingKeyboardActionsRef.current.length === 0) {
+      return;
+    }
+    const pending = pendingKeyboardActionsRef.current;
+    pendingKeyboardActionsRef.current = [];
+    for (const action of pending) {
+      applyKeyboardAction(renderer, action);
     }
   }
 
@@ -338,6 +390,9 @@ export function GraphCanvas({
     <section
       aria-label={`${settings.scope === "global" ? "전체" : "로컬"} 그래프`}
       className="qm-graph-canvas"
+      data-graph-center-x={observedViewport?.centerX}
+      data-graph-center-y={observedViewport?.centerY}
+      data-graph-zoom={observedViewport?.zoom}
       onKeyDown={handleKeyboardNavigation}
       tabIndex={0}
     >
@@ -443,8 +498,11 @@ export function GraphCanvas({
                 onNodeDrag={onNodeDrag}
                 onNodeDragEnd={onNodeDragEnd}
                 onNodeOpen={onNodeOpen}
-                onReady={() => setRendererReady(true)}
-                onViewportChange={onViewportChange}
+                onReady={handleRendererReady}
+                onViewportChange={(viewport) => {
+                  setObservedViewport(viewport);
+                  onViewportChange?.(viewport);
+                }}
                 reducedMotion={reducedMotion}
                 ref={rendererRef}
                 settings={settings}

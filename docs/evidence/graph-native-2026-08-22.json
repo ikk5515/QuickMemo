@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-08-22T14:20:20.255Z",
+  "host": {
+    "architecture": "arm64",
+    "chip": "Apple M4",
+    "macOS": "26.6.2",
+    "chromeBundleVersion": "151.0.7922.173",
+    "safariBundleVersion": "26.6.2"
+  },
+  "benchmark": { "nodes": 5000, "edges": 10000, "repeats": 5 },
+  "engines": [
+    {
+      "kind": "system-chrome",
+      "headless": false,
+      "accepted": true,
+      "acceptedRuns": 5,
+      "endToEndDisplayMs": [640.4, 580.9, 593.8, 594.9, 577.7],
+      "filterGroupP95Ms": [17.9, 17.5, 17.9, 17.4, 17.6],
+      "fps": [59.08, 59.03, 58.08, 58.44, 59.11],
+      "p95FrameIntervalMs": [17.6, 17.6, 17.7, 17.7, 17.5],
+      "window": {
+        "devicePixelRatio": 2,
+        "innerWidth": 1200,
+        "innerHeight": 1278,
+        "screenWidth": 2560,
+        "screenHeight": 1440
+      }
+    },
+    {
+      "kind": "playwright-webkit",
+      "browserVersion": "26.5",
+      "headless": false,
+      "accepted": true,
+      "acceptedRuns": 5,
+      "endToEndDisplayMs": [679, 963, 935, 958, 953],
+      "filterGroupP95Ms": [29, 28, 30, 27, 28],
+      "fps": [54.62, 53.81, 54.98, 55.2, 55.5],
+      "p95FrameIntervalMs": [20, 22, 18, 19, 20]
+    },
+    {
+      "kind": "system-safari",
+      "appVersion": "26.6.2",
+      "accepted": false,
+      "automationAvailable": false,
+      "reason": "Safari Allow Remote Automation was disabled; the verifier did not alter that security setting."
+    }
+  ],
+  "releaseGate": {
+    "measuredDesktopBudgetsAccepted": true,
+    "actualSafariAccepted": false,
+    "representativePhysicalMobileMeasured": false,
+    "accepted": false
+  },
+  "limits": [
+    "Playwright WebKit is not Apple Safari.",
+    "No physical phone or tablet was connected.",
+    "One Mac/display cannot guarantee frame rate on every production device."
+  ]
+}

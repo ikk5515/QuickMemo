@@ -50,6 +50,8 @@ import { AppShell } from "../components/AppShell";
 import PublicAttachmentPreviewModal from "../components/PublicAttachmentPreviewModal";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
+import { LibraryVaultPromotionButton } from "../features/library/LibraryVaultPromotionButton";
+import { LibraryVaultUserError } from "../features/library/libraryVaultErrors";
 import {
   attachmentDownloadName,
   formatFileSize,
@@ -121,7 +123,11 @@ import {
   type NoteAttachmentSnapshot,
   type NoteSnapshot
 } from "../services/notes";
+import { ensureLibraryVaultInboxFolder } from "../services/libraryVaultInbox";
+import { promoteLibraryItemToVault } from "../services/libraryVaultPromotion";
+import { assertLibraryVaultPromotionReady } from "../services/libraryVaultReadiness";
 import { subscribeUsers } from "../services/users";
+import { prepareVaultIntegrityKey } from "../services/vaultIntegrity";
 import type {
   LibraryHighlight,
   LibraryHighlightColor,
@@ -278,6 +284,7 @@ const highlightColorLabels: Record<LibraryHighlightColor, string> = {
   blue: "파랑",
   pink: "분홍"
 };
+const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
 
 function throwIfAttachmentActionAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
@@ -1757,6 +1764,39 @@ export default function LibraryPage() {
     }
   }
 
+  async function promoteManagedItemToVault(item: DecryptedLibraryItem) {
+    if (!obsidianVaultEnabled || !notesFeatureEnabled) {
+      throw new LibraryVaultUserError("Vault 기능을 사용할 수 있는 계정인지 확인해주세요.");
+    }
+    if (!profile || !privateKey || !profile.isActive || item.ownerUid !== profile.uid) {
+      throw new LibraryVaultUserError("자료실과 Vault의 암호화 소유자를 확인할 수 없습니다.");
+    }
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      throw new LibraryVaultUserError("서버 상태를 확인할 수 있도록 온라인에서 Vault로 저장해주세요.");
+    }
+    const preparedIntegrity = await prepareVaultIntegrityKey(profile, privateKey);
+    if (preparedIntegrity.state !== "existing") {
+      throw new LibraryVaultUserError("먼저 Vault를 한 번 열어 기존 노트와 폴더의 암호화 이름 준비를 완료해주세요.");
+    }
+    await assertLibraryVaultPromotionReady({
+      privateKey,
+      profile,
+      vaultIntegrityKey: preparedIntegrity.key
+    });
+    const folderId = await ensureLibraryVaultInboxFolder({
+      privateKey,
+      profile,
+      vaultIntegrityKey: preparedIntegrity.key
+    });
+    return promoteLibraryItemToVault({
+      folderId,
+      item,
+      privateKey,
+      profile,
+      vaultIntegrityKey: preparedIntegrity.key
+    });
+  }
+
   function clearFilters() {
     setKindFilter("all");
     setStatusFilter("all");
@@ -2747,6 +2787,8 @@ export default function LibraryPage() {
               onHighlightColorChange={setHighlightColor}
               onHighlightNoteChange={setHighlightNote}
               onOpenSource={(noteId) => void openSourceNote(noteId)}
+              onOpenVaultEntry={(entryId) => navigate(`/app?entry=${encodeURIComponent(entryId)}`)}
+              onPromoteToVault={promoteManagedItemToVault}
               onPreview={(returnFocus) => {
                 previewReturnFocus.current = returnFocus;
                 void previewSelectedAttachment();
@@ -3166,7 +3208,9 @@ function LibraryReader({
   onHighlightColorChange,
   onHighlightNoteChange,
   onOpenSource,
+  onOpenVaultEntry,
   onPreview,
+  onPromoteToVault,
   onReview,
   pendingHighlight,
   suspended
@@ -3190,7 +3234,12 @@ function LibraryReader({
   onHighlightColorChange: (color: LibraryHighlightColor) => void;
   onHighlightNoteChange: (value: string) => void;
   onOpenSource: (noteId: string) => void;
+  onOpenVaultEntry: (entryId: string) => void;
   onPreview: (returnFocus: HTMLElement) => void;
+  onPromoteToVault: (item: DecryptedLibraryItem) => Promise<{
+    noteId: string;
+    state: "created" | "existing" | "recovered";
+  }>;
   onReview: (item: DecryptedLibraryItem) => void;
   pendingHighlight: PendingHighlight | null;
   suspended: boolean;
@@ -3281,6 +3330,13 @@ function LibraryReader({
               <BookOpenCheck size={15} />
               검토 완료
             </button>
+            {obsidianVaultEnabled && (
+              <LibraryVaultPromotionButton
+                disabled={mutating}
+                onOpen={onOpenVaultEntry}
+                onPromote={() => onPromoteToVault(managed)}
+              />
+            )}
           </>
         )}
         {safeUrl && (

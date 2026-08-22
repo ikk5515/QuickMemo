@@ -1,5 +1,5 @@
-import SchedulePage from "./SchedulePage";
+import { Navigate } from "react-router-dom";
 
 export default function RecurringPage() {
-  return <SchedulePage routeView="recurring" />;
+  return <Navigate to="/schedule?view=calendar" replace />;
 }

@@ -46,6 +46,10 @@ function expectBrowserHardeningHeaders(headers: HostingHeader[]): void {
   expect(values.get("x-content-type-options")).toBe("nosniff");
   expect(values.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
   expect(values.get("permissions-policy")).toContain("camera=()");
+  expect(values.get("permissions-policy")).toContain("microphone=(self)");
+  expect(values.get("permissions-policy")).toContain("geolocation=()");
+  expect(values.get("permissions-policy")).toContain("payment=()");
+  expect(values.get("permissions-policy")).toContain("usb=()");
   expect(values.get("strict-transport-security")).toContain("max-age=63072000");
 }
 

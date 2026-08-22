@@ -57,6 +57,15 @@ export function productionVaultEnvironmentId(payload) {
 }
 
 export function assertProductionVaultDisabled(payload, expectedId) {
+  return assertProductionVaultState(payload, expectedId, false);
+}
+
+export function assertProductionVaultEnabled(payload, expectedId) {
+  return assertProductionVaultState(payload, expectedId, true);
+}
+
+export function assertProductionVaultState(payload, expectedId, enabled) {
+  const expectedValue = enabled ? "true" : "false";
   if (
     !payload
     || typeof payload !== "object"
@@ -65,11 +74,11 @@ export function assertProductionVaultDisabled(payload, expectedId) {
     || payload.id !== expectedId
     || payload.key !== VAULT_FEATURE_FLAG_KEY
     || !productionTarget(payload.target)
-    || payload.value !== "false"
+    || payload.value !== expectedValue
   ) {
-    throw new Error("Vercel deployment is blocked because the production Vault feature flag is not explicitly disabled.");
+    throw new Error(`Vercel deployment is blocked because the production Vault feature flag is not explicitly ${enabled ? "enabled" : "disabled"}.`);
   }
-  return "false";
+  return expectedValue;
 }
 
 function appendTeamId(endpoint, organizationId) {
@@ -109,24 +118,55 @@ export async function verifyProductionVaultDisabled(
   { organizationId, projectId, token },
   requestJson = vercelJson
 ) {
+  return verifyProductionVaultState(
+    { organizationId, projectId, token },
+    false,
+    requestJson
+  );
+}
+
+export async function verifyProductionVaultEnabled(
+  { organizationId, projectId, token },
+  requestJson = vercelJson
+) {
+  return verifyProductionVaultState(
+    { organizationId, projectId, token },
+    true,
+    requestJson
+  );
+}
+
+export async function verifyProductionVaultState(
+  { organizationId, projectId, token },
+  enabled,
+  requestJson = vercelJson
+) {
   const metadataPayload = await requestJson(
     productionEnvironmentMetadataEndpoint(projectId, organizationId),
     token
   );
   const environmentId = productionVaultEnvironmentId(metadataPayload);
   if (!environmentId) {
+    if (enabled) {
+      throw new Error("Vercel deployment is blocked because the production Vault feature flag is not explicitly enabled.");
+    }
     return "unset";
   }
   const valuePayload = await requestJson(
     productionEnvironmentValueEndpoint(projectId, environmentId, organizationId),
     token
   );
-  return assertProductionVaultDisabled(valuePayload, environmentId);
+  return assertProductionVaultState(valuePayload, environmentId, enabled);
 }
 
 async function main() {
   if (!process.argv.includes("--probe")) {
     throw new Error("Pass --probe to perform the read-only Vercel plan verification.");
+  }
+  const expectEnabled = process.argv.includes("--expect-vault-enabled");
+  const expectDisabled = process.argv.includes("--expect-vault-disabled");
+  if (expectEnabled === expectDisabled) {
+    throw new Error("Pass exactly one of --expect-vault-enabled or --expect-vault-disabled.");
   }
   const token = process.env.VERCEL_TOKEN;
   const organizationId = process.env.VERCEL_ORG_ID;
@@ -140,8 +180,11 @@ async function main() {
     : "https://api.vercel.com/v2/user";
   const payload = await vercelJson(endpoint, token);
   assertVercelHobbyPlan(payload);
-  await verifyProductionVaultDisabled({ organizationId, projectId, token });
-  console.log("Vercel Hobby plan and disabled production Vault flag verified; paid or premature deployment is blocked.");
+  await verifyProductionVaultState(
+    { organizationId, projectId, token },
+    expectEnabled
+  );
+  console.log(`Vercel Hobby plan and explicitly ${expectEnabled ? "enabled" : "disabled"} production Vault flag verified; paid or ambiguous deployment is blocked.`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

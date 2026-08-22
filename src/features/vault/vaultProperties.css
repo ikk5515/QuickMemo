@@ -1,0 +1,76 @@
+.vault-properties {
+  display: grid;
+  gap: 10px;
+}
+
+.vault-properties h3,
+.vault-properties p {
+  margin: 0;
+}
+
+.vault-property-list {
+  display: grid;
+  gap: 5px;
+}
+
+.vault-property-row {
+  align-items: center;
+  display: grid;
+  gap: 5px;
+  grid-template-columns: minmax(84px, 0.8fr) minmax(88px, auto) minmax(120px, 1.7fr) auto auto;
+}
+
+.vault-property-name {
+  color: var(--muted, #aaaab2);
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-property-row input,
+.vault-property-row select,
+.vault-property-add input,
+.vault-property-add select {
+  background: var(--surface, #202024);
+  border: 1px solid var(--border, #3a3a40);
+  border-radius: 5px;
+  color: inherit;
+  min-block-size: 32px;
+  min-inline-size: 0;
+  padding: 5px 7px;
+}
+
+.vault-property-value input[type="checkbox"] {
+  accent-color: var(--accent, #8b7cf6);
+  inline-size: 18px;
+  min-block-size: 18px;
+}
+
+.vault-property-add {
+  display: grid;
+  gap: 5px;
+  grid-template-columns: minmax(90px, 0.8fr) minmax(88px, auto) minmax(120px, 1.7fr) auto;
+}
+
+.vault-property-row button,
+.vault-property-add button {
+  min-block-size: 32px;
+}
+
+@media (max-width: 720px) {
+  .vault-property-row,
+  .vault-property-add {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .vault-property-value,
+  .vault-property-add input[aria-label="새 속성 값"] {
+    grid-column: 1 / -1;
+  }
+
+  .vault-property-row button,
+  .vault-property-add button {
+    min-block-size: 44px;
+  }
+}

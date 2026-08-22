@@ -188,6 +188,10 @@ describe("AdminPage feature access editing", () => {
 
   it("links every admin tab to its panel and keeps only the selected tab tabbable", () => {
     render(<AdminTabsHarness />);
+    expect(screen.getByRole("tablist", { name: "관리자 기능" })).toHaveAttribute(
+      "aria-orientation",
+      "vertical"
+    );
 
     const expectedTabs: Array<[AdminTab, string]> = [
       ["create", "사용자 추가"],
@@ -210,7 +214,7 @@ describe("AdminPage feature access editing", () => {
     }
   });
 
-  it("moves and activates admin tabs with ArrowLeft, ArrowRight, Home, and End", async () => {
+  it("moves and activates vertical admin tabs with arrow keys, Home, and End", async () => {
     const user = userEvent.setup();
     render(<AdminTabsHarness />);
 
@@ -220,6 +224,14 @@ describe("AdminPage feature access editing", () => {
     const emailTab = screen.getByRole("tab", { name: "이메일 설정" });
 
     usersTab.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(notesTab).toHaveFocus();
+    expect(notesTab).toHaveAttribute("aria-selected", "true");
+
+    await user.keyboard("{ArrowUp}");
+    expect(usersTab).toHaveFocus();
+    expect(usersTab).toHaveAttribute("aria-selected", "true");
+
     await user.keyboard("{ArrowRight}");
     expect(notesTab).toHaveFocus();
     expect(notesTab).toHaveAttribute("aria-selected", "true");
@@ -230,11 +242,17 @@ describe("AdminPage feature access editing", () => {
     expect(emailTab).toHaveFocus();
     expect(emailTab).toHaveAttribute("aria-selected", "true");
 
-    await user.keyboard("{ArrowRight}");
+    await user.keyboard("{ArrowDown}");
     expect(createTab).toHaveFocus();
     expect(createTab).toHaveAttribute("aria-selected", "true");
 
+    await user.keyboard("{ArrowUp}");
+    expect(emailTab).toHaveFocus();
+
     await user.keyboard("{ArrowLeft}");
+    expect(notesTab).toHaveFocus();
+
+    await user.keyboard("{ArrowRight}");
     expect(emailTab).toHaveFocus();
 
     await user.keyboard("{Home}");

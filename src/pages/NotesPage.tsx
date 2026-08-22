@@ -56,6 +56,17 @@ import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Selection } from "@tiptap/pm/state";
 import { EditorContent, useEditor } from "@tiptap/react";
 import {
+  collection,
+  doc,
+  limit,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+  type QuerySnapshot,
+  type DocumentData
+} from "firebase/firestore";
+import {
   type ChangeEvent,
   type CSSProperties,
   type DragEvent as ReactDragEvent,
@@ -64,13 +75,14 @@ import {
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   useCallback,
+  useDeferredValue,
   useEffect,
   useId,
   useMemo,
   useRef,
   useState
 } from "react";
-import { useLocation, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
 import AttachmentPreviewModal from "../components/PublicAttachmentPreviewModal";
@@ -86,6 +98,8 @@ import {
 } from "../components/SecureShareSettingsModal";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
+import { previewLegacyHtmlToMarkdown } from "../features/markdown/legacyHtml";
+import { noteListSnippet } from "../features/notes/noteListSnippet";
 import {
   allowedAttachmentExtensions,
   attachmentDownloadName,
@@ -161,6 +175,7 @@ import {
   richEditorExtensions
 } from "../lib/richEditorExtensions";
 import { selectionFromStoredRange, type StoredEditorSelectionRange } from "../lib/editorSelection";
+import { db } from "../lib/firebase";
 import {
   extractHwpPreviewHtml,
   extractHwpxPreviewHtml,
@@ -2643,7 +2658,499 @@ export function refreshedSecureShareSettingsFlags(
   };
 }
 
-export default function NotesPage() {
+export interface NotesPageProps {
+  legacyReadOnly?: boolean;
+}
+
+export type LegacyNotesAccessMode = "checking" | "read-only" | "writable";
+
+export interface LegacyIntegrityState {
+  status: "error" | "missing" | "present";
+  uid: string;
+}
+
+export function resolveLegacyNotesAccessMode(
+  legacyReadOnly: boolean,
+  uid: string | null,
+  integrityState: LegacyIntegrityState | null
+): LegacyNotesAccessMode {
+  if (legacyReadOnly) {
+    return "read-only";
+  }
+  if (!uid || integrityState?.uid !== uid) {
+    return "checking";
+  }
+  return integrityState.status === "missing" ? "writable" : "read-only";
+}
+
+const maximumLegacyReadonlyNotes = 2_000;
+
+function legacyReadonlySnapshotNotes(snapshot: QuerySnapshot<unknown, DocumentData>, uid: string) {
+  return snapshot.docs
+    .map((document) => ({
+      id: document.id,
+      ...(document.data() as Omit<NoteSnapshot, "id">)
+    }))
+    .filter((note) => (
+      Array.isArray(note.participantUids)
+      && note.participantUids.includes(uid)
+      && note.isDeleted !== true
+      && isLegacyHtmlNoteDocument(note)
+    ));
+}
+
+/**
+ * Read-only subscription used only by the legacy cutover screen.
+ *
+ * This deliberately does not call subscribeVisibleNotes because that legacy
+ * subscription may repair deletion metadata. The cutover screen must never
+ * write note or folder documents merely because a user opened it.
+ */
+export function subscribeLegacyNotesReadOnly(
+  uid: string,
+  callback: (notes: NoteSnapshot[]) => void,
+  onError: (error: Error) => void
+) {
+  const notesBySource = new Map<"active" | "owned", NoteSnapshot[]>();
+  let closed = false;
+
+  const emit = () => {
+    if (closed) {
+      return;
+    }
+
+    const uniqueNotes = new Map<string, NoteSnapshot>();
+    notesBySource.forEach((sourceNotes) => {
+      sourceNotes.forEach((note) => uniqueNotes.set(note.id, note));
+    });
+    callback(
+      Array.from(uniqueNotes.values())
+        .sort((left, right) => timestampMillisValue(right.updatedAt) - timestampMillisValue(left.updatedAt))
+        .slice(0, maximumLegacyReadonlyNotes)
+    );
+  };
+
+  const subscribe = (
+    source: "active" | "owned",
+    notesQuery: ReturnType<typeof query>
+  ) => onSnapshot(
+    notesQuery,
+    (snapshot) => {
+      notesBySource.set(source, legacyReadonlySnapshotNotes(snapshot, uid));
+      emit();
+    },
+    onError
+  );
+
+  const unsubscribes = [
+    subscribe(
+      "owned",
+      query(
+        collection(db, "notes"),
+        where("ownerUid", "==", uid),
+        orderBy("updatedAt", "desc"),
+        limit(maximumLegacyReadonlyNotes)
+      )
+    ),
+    subscribe(
+      "active",
+      query(
+        collection(db, "notes"),
+        where("isDeleted", "==", false),
+        where("participantUids", "array-contains", uid),
+        orderBy("updatedAt", "desc"),
+        limit(maximumLegacyReadonlyNotes)
+      )
+    )
+  ];
+
+  return () => {
+    closed = true;
+    unsubscribes.forEach((unsubscribe) => unsubscribe());
+  };
+}
+
+function legacyExportFileName(title: string) {
+  const safeTitle = safeAttachmentBaseName(title).slice(0, 100);
+  return `${safeTitle || "기존-노트"}.html.txt`;
+}
+
+function downloadLegacyHtmlAsText(note: DecryptedNote) {
+  const objectUrl = URL.createObjectURL(new Blob([note.body], { type: "text/plain;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.download = legacyExportFileName(note.title);
+  anchor.href = objectUrl;
+  anchor.rel = "noopener noreferrer";
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+}
+
+export function LegacyNotesReadOnlyPage({
+  lockReason,
+  vaultAvailable = true
+}: {
+  lockReason?: string;
+  vaultAvailable?: boolean;
+} = {}) {
+  const { privateKey, profile } = useAuth();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const [encryptedNotes, setEncryptedNotes] = useState<NoteSnapshot[]>([]);
+  const [decryptedNotes, setDecryptedNotes] = useState<DecryptedNote[]>([]);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(() => searchParams.get("entry"));
+  const [queryText, setQueryText] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [readonlyAttachments, setReadonlyAttachments] = useState<NoteAttachmentSnapshot[]>([]);
+  const [downloadingAttachmentId, setDownloadingAttachmentId] = useState<string | null>(null);
+  const decryptionCache = useRef<DecryptedNoteCache>(new Map());
+  const decryptionGeneration = useRef(0);
+  const deferredQueryText = useDeferredValue(queryText);
+
+  useEffect(() => {
+    if (!profile || !privateKey) {
+      setEncryptedNotes([]);
+      setDecryptedNotes([]);
+      setLoading(false);
+      decryptionCache.current.clear();
+      return undefined;
+    }
+
+    setLoading(true);
+    setFeedback(null);
+    return subscribeLegacyNotesReadOnly(
+      profile.uid,
+      (nextNotes) => {
+        setEncryptedNotes(nextNotes);
+        setLoading(false);
+      },
+      () => {
+        setFeedback("기존 노트 목록을 읽지 못했습니다. 네트워크 연결과 접근 권한을 확인해주세요.");
+        setLoading(false);
+      }
+    );
+  }, [privateKey, profile]);
+
+  useEffect(() => {
+    const generation = decryptionGeneration.current + 1;
+    decryptionGeneration.current = generation;
+    if (!profile || !privateKey) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    void decryptNoteSnapshots(
+      encryptedNotes,
+      profile.uid,
+      privateKey,
+      decryptionCache.current,
+      () => !cancelled && decryptionGeneration.current === generation
+    ).then((nextNotes) => {
+      if (!cancelled && decryptionGeneration.current === generation) {
+        setDecryptedNotes(nextNotes);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [encryptedNotes, privateKey, profile]);
+
+  const visibleNotes = useMemo(() => {
+    const queryValue = deferredQueryText.trim().toLocaleLowerCase("ko-KR");
+    if (!queryValue) {
+      return decryptedNotes;
+    }
+    return decryptedNotes.filter((note) => (
+      note.title.toLocaleLowerCase("ko-KR").includes(queryValue)
+      || previewTextFromHtml(note.body).toLocaleLowerCase("ko-KR").includes(queryValue)
+    ));
+  }, [decryptedNotes, deferredQueryText]);
+
+  useEffect(() => {
+    const requestedNoteId = searchParams.get("entry");
+    if (requestedNoteId && decryptedNotes.some((note) => note.id === requestedNoteId)) {
+      setSelectedNoteId(requestedNoteId);
+      return;
+    }
+    if (!selectedNoteId || !decryptedNotes.some((note) => note.id === selectedNoteId)) {
+      setSelectedNoteId(decryptedNotes[0]?.id ?? null);
+    }
+  }, [decryptedNotes, searchParams, selectedNoteId]);
+
+  const selectedNote = decryptedNotes.find((note) => note.id === selectedNoteId) ?? null;
+  const selectedDraft = useMemo(
+    () => selectedNote ? draftFromNote(selectedNote) : null,
+    [selectedNote]
+  );
+  const markdownPreview = useMemo(
+    () => selectedDraft ? previewLegacyHtmlToMarkdown(selectedDraft.body) : null,
+    [selectedDraft]
+  );
+
+  useEffect(() => {
+    if (!selectedNote) {
+      setReadonlyAttachments([]);
+      return undefined;
+    }
+
+    setReadonlyAttachments([]);
+    return subscribeNoteAttachments(
+      selectedNote.id,
+      setReadonlyAttachments,
+      () => setFeedback("첨부파일 목록을 읽지 못했습니다.")
+    );
+  }, [selectedNote]);
+
+  async function copyMarkdownPreview() {
+    if (!markdownPreview || !navigator.clipboard?.writeText) {
+      setFeedback("이 브라우저에서는 Markdown 복사를 사용할 수 없습니다.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(markdownPreview.markdown);
+      setFeedback("Markdown 변환 미리보기를 클립보드에 복사했습니다. 원본 노트는 변경하지 않았습니다.");
+    } catch {
+      setFeedback("브라우저가 클립보드 복사를 허용하지 않았습니다.");
+    }
+  }
+
+  async function downloadReadonlyAttachment(attachment: NoteAttachmentSnapshot) {
+    if (!selectedNote || downloadingAttachmentId) {
+      return;
+    }
+
+    const wrappedKey = selectedNote.wrappedKeys[profile?.uid ?? ""];
+    if (!wrappedKey || !privateKey) {
+      setFeedback("첨부파일 암호화 키를 확인할 수 없습니다.");
+      return;
+    }
+
+    setDownloadingAttachmentId(attachment.id);
+    setFeedback(null);
+    try {
+      const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
+      const encryptedSource = await getEncryptedNoteAttachmentSource(attachment);
+      const blob = await decryptAttachmentToBlob(attachment, noteKey, encryptedSource);
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.download = attachmentDownloadName(attachment);
+      anchor.href = objectUrl;
+      anchor.rel = "noopener noreferrer";
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+      setFeedback("첨부파일을 복호화해 다운로드했습니다. 서버 데이터는 변경하지 않았습니다.");
+    } catch {
+      setFeedback("첨부파일을 다운로드하지 못했습니다.");
+    } finally {
+      setDownloadingAttachmentId(null);
+    }
+  }
+
+  if (!profile) {
+    return null;
+  }
+
+  if (!privateKey) {
+    return (
+      <AppShell variant="vault">
+        <UnlockPanel />
+      </AppShell>
+    );
+  }
+
+  return (
+    <AppShell variant="vault">
+      <section
+        className="workspace legacy-readonly-workspace"
+        data-legacy-lock-reason={lockReason ? "integrity-marker" : "feature-flag"}
+        data-legacy-notes-mode="read-only"
+      >
+        <header className="legacy-readonly-header">
+          <div>
+            <span className="legacy-readonly-eyebrow"><LockKeyhole size={15} /> 보존 모드</span>
+            <h1>기존 노트 보관함</h1>
+            <p>
+              {vaultAvailable
+                ? "암호화 Vault가 켜져 있어 이 화면에서는 노트·폴더 생성, 편집, 이동, 공유, 첨부, 복구와 삭제를 할 수 없습니다. 원본을 읽고 내보내거나 명시적으로 Markdown 복사본을 만드세요."
+                : "Vault 무결성 보호 이후에는 이전 편집기에서 노트나 폴더를 변경할 수 없습니다. 원본을 읽고 안전한 텍스트로 내보낼 수 있습니다."}
+            </p>
+            {lockReason ? <p className="legacy-readonly-lock-reason" role="note">{lockReason}</p> : null}
+          </div>
+          {vaultAvailable ? (
+            <button className="secondary-button" onClick={() => navigate("/app")} type="button">
+              Vault로 돌아가기
+            </button>
+          ) : (
+            <button className="secondary-button" onClick={() => navigate("/home")} type="button">
+              작업공간 홈으로
+            </button>
+          )}
+        </header>
+
+        <div className="legacy-readonly-layout">
+          <aside aria-label="기존 노트 목록" className="legacy-readonly-list-panel">
+            <label className="legacy-readonly-search">
+              <Search aria-hidden="true" size={16} />
+              <span className="sr-only">기존 노트 검색</span>
+              <input
+                aria-label="기존 노트 검색"
+                onChange={(event) => setQueryText(event.target.value)}
+                placeholder="제목과 내용 검색"
+                type="search"
+                value={queryText}
+              />
+            </label>
+            <p className="legacy-readonly-count">
+              {loading ? "불러오는 중..." : `기존 HTML 노트 ${visibleNotes.length}개`}
+            </p>
+            <div className="legacy-readonly-list" role="list">
+              {visibleNotes.map((note) => (
+                <div key={note.id} role="listitem">
+                  <button
+                    aria-current={selectedNoteId === note.id ? "page" : undefined}
+                    className={selectedNoteId === note.id ? "active" : ""}
+                    onClick={() => setSelectedNoteId(note.id)}
+                    type="button"
+                  >
+                    <strong>{note.title || "제목 없음"}</strong>
+                    <span>{previewTextFromHtml(note.body) || "내용 없음"}</span>
+                  </button>
+                </div>
+              ))}
+              {!loading && !visibleNotes.length ? <p className="muted">표시할 기존 HTML 노트가 없습니다.</p> : null}
+            </div>
+          </aside>
+
+          <main className="legacy-readonly-document">
+            {selectedNote && selectedDraft && markdownPreview ? (
+              <>
+                <header className="legacy-readonly-document-header">
+                  <div>
+                    <span>읽기 전용 원본</span>
+                    <h2>{selectedNote.title || "제목 없음"}</h2>
+                  </div>
+                  <div className="legacy-readonly-actions">
+                    <button className="secondary-button" onClick={() => downloadLegacyHtmlAsText(selectedNote)} type="button">
+                      <Download size={16} /> 원본 HTML 텍스트 내보내기
+                    </button>
+                    <button className="secondary-button" onClick={() => void copyMarkdownPreview()} type="button">
+                      <Copy size={16} /> Markdown 미리보기 복사
+                    </button>
+                    {vaultAvailable ? (
+                      <button onClick={() => navigate(`/app?entry=${encodeURIComponent(selectedNote.id)}`)} type="button">
+                        <ExternalLink size={16} /> Vault에서 Markdown 복사본 만들기
+                      </button>
+                    ) : null}
+                  </div>
+                </header>
+                {markdownPreview.lossy ? (
+                  <div className="legacy-readonly-warning" role="note">
+                    자동 변환은 일부 서식을 단순화합니다. 원본 HTML은 그대로 보존되며, Vault에서 경고를 확인한 뒤 복사본을 만드세요.
+                  </div>
+                ) : null}
+                <ReadonlyNoteRenderer
+                  as="article"
+                  className="legacy-readonly-content"
+                  content={selectedDraft.body}
+                  fontSize={selectedDraft.fontSize}
+                />
+                {readonlyAttachments.length ? (
+                  <section aria-label="기존 노트 첨부파일" className="legacy-readonly-attachments">
+                    <h3><Paperclip aria-hidden="true" size={16} /> 첨부파일 {readonlyAttachments.length}개</h3>
+                    <div>
+                      {readonlyAttachments.map((attachment) => (
+                        <button
+                          className="secondary-button"
+                          disabled={Boolean(downloadingAttachmentId)}
+                          key={attachment.id}
+                          onClick={() => void downloadReadonlyAttachment(attachment)}
+                          type="button"
+                        >
+                          {downloadingAttachmentId === attachment.id
+                            ? <Loader2 aria-hidden="true" className="spin" size={16} />
+                            : <Download aria-hidden="true" size={16} />}
+                          {attachmentDownloadName(attachment)} · {formatFileSize(attachment.originalSize)} 다운로드
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+                <details className="legacy-readonly-source">
+                  <summary>변환될 Markdown 미리보기</summary>
+                  <pre>{markdownPreview.markdown || "(빈 문서)"}</pre>
+                </details>
+              </>
+            ) : (
+              <div className="legacy-readonly-empty">
+                <File aria-hidden="true" size={30} />
+                <p>왼쪽에서 기존 노트를 선택하세요.</p>
+              </div>
+            )}
+          </main>
+        </div>
+        {feedback ? <p aria-live="polite" className="legacy-readonly-feedback" role="status">{feedback}</p> : null}
+      </section>
+    </AppShell>
+  );
+}
+
+export default function NotesPage({ legacyReadOnly = false }: NotesPageProps) {
+  const { profile } = useAuth();
+  const uid = profile?.uid ?? null;
+  const [integrityState, setIntegrityState] = useState<LegacyIntegrityState | null>(null);
+
+  useEffect(() => {
+    if (legacyReadOnly || !uid) {
+      return undefined;
+    }
+
+    return onSnapshot(
+      doc(db, "vaultIntegrity", uid),
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (snapshot.exists()) {
+          setIntegrityState({ status: "present", uid });
+        } else if (!snapshot.metadata.fromCache) {
+          // A cache miss does not prove that the server-side cutover marker is
+          // absent. Writable legacy code mounts only after a server-confirmed
+          // missing document.
+          setIntegrityState({ status: "missing", uid });
+        }
+      },
+      () => setIntegrityState({ status: "error", uid })
+    );
+  }, [legacyReadOnly, uid]);
+
+  const accessMode = resolveLegacyNotesAccessMode(legacyReadOnly, uid, integrityState);
+
+  if (accessMode === "read-only" && legacyReadOnly) {
+    return <LegacyNotesReadOnlyPage />;
+  }
+
+  if (accessMode === "checking") {
+    return (
+      <AppShell variant="vault">
+        <div aria-live="polite" className="page-center" role="status">Vault 무결성 상태를 확인하는 중...</div>
+      </AppShell>
+    );
+  }
+
+  if (accessMode === "read-only") {
+    return (
+      <LegacyNotesReadOnlyPage
+        lockReason={integrityState?.status === "present"
+          ? "이 계정에는 Vault 이름 무결성 보호가 이미 적용되었습니다. 환경 설정을 되돌려도 이전 편집기는 다시 활성화하지 않습니다. Vault 기능을 다시 켠 뒤 Markdown 복사본을 만드세요."
+          : "Vault 무결성 상태를 확인할 수 없어 안전을 위해 이전 편집기를 잠갔습니다. 연결을 확인한 뒤 다시 시도해주세요."}
+        vaultAvailable={false}
+      />
+    );
+  }
+
+  return <WritableNotesPage />;
+}
+
+function WritableNotesPage() {
   const { firebaseUser, profile, privateKey } = useAuth();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -8859,6 +9366,14 @@ function SecureShareRevokeConfirmDialog({
   );
 }
 
+function mountedEditorElement(editor: TipTapEditor) {
+  try {
+    return editor.view.dom as HTMLDivElement;
+  } catch {
+    return null;
+  }
+}
+
 export function RichMemoEditor({
   editorRef,
   fontSize,
@@ -8978,10 +9493,16 @@ export function RichMemoEditor({
     }
 
     const mutableRef = editorRef as MutableRefObject<HTMLDivElement | null>;
-    mutableRef.current = editor.view.dom as HTMLDivElement;
+    const editorElement = mountedEditorElement(editor);
+
+    if (!editorElement) {
+      return;
+    }
+
+    mutableRef.current = editorElement;
 
     return () => {
-      if (mutableRef.current === editor.view.dom) {
+      if (mutableRef.current === editorElement) {
         mutableRef.current = null;
       }
     };
@@ -9005,7 +9526,12 @@ export function RichMemoEditor({
       return undefined;
     }
 
-    const editorElement = editor.view.dom as HTMLElement;
+    const mountedElement = mountedEditorElement(editor);
+
+    if (!mountedElement) {
+      return undefined;
+    }
+    const editorElement: HTMLDivElement = mountedElement;
 
     function setResizeCursor(cursor: TableResizeCursor | null) {
       if (cursor) {
@@ -9172,7 +9698,7 @@ export function RichMemoEditor({
   }, []);
 
   useEffect(() => {
-    if (!editor || editor.getHTML() === (value || "")) {
+    if (!editor || editor.isDestroyed || editor.getHTML() === (value || "")) {
       return;
     }
 
@@ -11141,13 +11667,22 @@ function NoteDrawer({
 
   useEffect(() => {
     if (!open || !navigationPanel) {
-      return;
+      return undefined;
     }
 
     setMode("notes");
-    if (navigationPanel === "search") {
-      searchInputRef.current?.focus();
+    if (navigationPanel !== "search") {
+      return undefined;
     }
+
+    // Route navigation, the drawer mode reset, and the editor can commit in
+    // the same React turn. Focusing synchronously here occasionally lets a
+    // later commit reclaim focus. Confirm the explicit search intent after the
+    // DOM has settled, and cancel it if the route changes first.
+    const focusFrame = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(focusFrame);
   }, [navigationPanel, navigationRequestKey, open]);
 
   if (!open) {
@@ -11455,6 +11990,10 @@ function NoteList({
   sortSetting: NoteSortSetting;
 }) {
   const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
+  const snippetByNoteId = useMemo(() => new Map(notes.map((note) => [
+    note.id,
+    noteListSnippet(notePreviewText(note), query)
+  ])), [notes, query]);
 
   if (notes.length === 0) {
     const emptyMessage = query.trim()
@@ -11512,7 +12051,7 @@ function NoteList({
                 </strong>
               </header>
               <span className="note-snippet">
-                <HighlightedText text={notePreviewText(note) || "내용 없음"} query={query} />
+                <HighlightedText text={snippetByNoteId.get(note.id) || "내용 없음"} query={query} />
               </span>
               <footer className="note-list-meta">
                 <span className="note-list-date">

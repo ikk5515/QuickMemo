@@ -12,6 +12,23 @@ interface TemplateSourceNote {
   title: string;
 }
 
+export interface TemplateCandidateOptions {
+  /** Exact decrypted Vault folder path. Descendants are included by default. */
+  folderPath?: string;
+  includeDescendants?: boolean;
+  maxCandidates?: number;
+}
+
+const MAX_TEMPLATE_CANDIDATES = 1_000;
+
+function normalizedTemplateFolder(value: string) {
+  const path = value.normalize("NFC").replace(/^\/+|\/+$/gu, "");
+  if (!path || path.includes("\\") || path.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+    return null;
+  }
+  return path;
+}
+
 function twoDigits(value: number): string {
   return String(value).padStart(2, "0");
 }
@@ -29,19 +46,36 @@ export function uniqueNoteTitle(now: Date): string {
 
 export function templateCandidates(
   notes: readonly TemplateSourceNote[],
-  entryPaths: ReadonlyMap<string, string>
+  entryPaths: ReadonlyMap<string, string>,
+  options: TemplateCandidateOptions = {}
 ): TemplateCandidate[] {
+  const configuredFolder = options.folderPath === undefined
+    ? undefined
+    : normalizedTemplateFolder(options.folderPath);
+  if (options.folderPath !== undefined && configuredFolder === null) return [];
+  const requestedMaximum = Number.isFinite(options.maxCandidates)
+    ? options.maxCandidates!
+    : MAX_TEMPLATE_CANDIDATES;
+  const maxCandidates = Math.max(1, Math.min(
+    MAX_TEMPLATE_CANDIDATES,
+    Math.trunc(requestedMaximum)
+  ));
   return notes.flatMap((note) => {
     if (note.entryKind !== "markdown") {
       return [];
     }
     const path = entryPaths.get(note.id) ?? note.title;
     const directorySegments = path.split("/").slice(0, -1);
-    if (!directorySegments.some((segment) => /^(?:templates|템플릿)$/iu.test(segment))) {
+    const directory = directorySegments.join("/").normalize("NFC");
+    const inTemplateFolder = configuredFolder === undefined
+      ? directorySegments.some((segment) => /^(?:templates|템플릿)$/iu.test(segment))
+      : directory === configuredFolder
+        || (options.includeDescendants !== false && directory.startsWith(`${configuredFolder}/`));
+    if (!inTemplateFolder) {
       return [];
     }
     return [{ body: note.body, id: note.id, path, title: note.title }];
-  }).sort((left, right) => left.path.localeCompare(right.path));
+  }).sort((left, right) => left.path.localeCompare(right.path)).slice(0, maxCandidates);
 }
 
 export function chooseTemplate(

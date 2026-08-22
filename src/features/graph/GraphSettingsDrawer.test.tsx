@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { createDefaultGlobalGraphSettings, createDefaultLocalGraphSettings } from "./graphSettings";
-import { GraphSettingsDrawer } from "./GraphSettingsDrawer";
+import { GraphSettingsDrawer, uniqueGraphGroupId } from "./GraphSettingsDrawer";
 import type { GraphViewSettings } from "./types";
 
 function SettingsHarness({ initial }: { initial: GraphViewSettings }) {
@@ -17,6 +17,22 @@ function SettingsHarness({ initial }: { initial: GraphViewSettings }) {
 }
 
 describe("GraphSettingsDrawer", () => {
+  it("never reuses a persisted group id after remount", () => {
+    const uuids = ["persisted", "fresh"];
+    expect(uniqueGraphGroupId(
+      [{ id: "graph-group-persisted" }],
+      () => uuids.shift() ?? "fallback"
+    )).toBe("graph-group-fresh");
+  });
+
+  it("keeps the complete prefixed group id within the persisted limit", () => {
+    const maximumSuffix = "a".repeat(148);
+    expect(uniqueGraphGroupId([], () => maximumSuffix)).toHaveLength(160);
+    expect(() => uniqueGraphGroupId([], () => "a".repeat(149))).toThrow(
+      "고유한 그래프 그룹 식별자를 만들지 못했습니다."
+    );
+  });
+
   it("shows Global controls without Local-only controls", () => {
     render(<SettingsHarness initial={createDefaultGlobalGraphSettings()} />);
 

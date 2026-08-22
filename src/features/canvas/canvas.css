@@ -18,6 +18,27 @@
   box-shadow: inset 0 0 0 2px #8b82f6;
 }
 
+.vault-json-canvas--external-drop {
+  box-shadow: inset 0 0 0 3px #9b87ff;
+}
+
+.vault-canvas-external-drop-indicator {
+  align-items: center;
+  background: color-mix(in srgb, #7c5cff 18%, var(--vault-canvas-panel));
+  border: 2px dashed #a99aff;
+  border-radius: 12px;
+  color: var(--vault-text);
+  display: flex;
+  font-size: 14px;
+  font-weight: 700;
+  inset: 14px;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  text-align: center;
+  z-index: 7;
+}
+
 .vault-json-canvas .react-flow__renderer {
   cursor: grab;
 }
@@ -104,6 +125,48 @@
   display: flex;
   gap: 10px;
   justify-content: space-between;
+  min-height: 100%;
+  position: relative;
+}
+
+.vault-canvas-group-background-preview {
+  inset: -10px -12px;
+  max-height: none;
+  opacity: 0.42;
+  overflow: hidden;
+  padding: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+}
+
+.vault-canvas-group-background-preview img {
+  border-radius: 7px;
+  height: 100%;
+  max-width: none;
+  width: 100%;
+}
+
+.vault-canvas-group-background-preview--cover img {
+  object-fit: cover;
+}
+
+.vault-canvas-group-background-preview--ratio img {
+  object-fit: contain;
+}
+
+.vault-canvas-group-background-preview--repeat img {
+  object-fit: none;
+}
+
+.vault-canvas-group-background-preview a,
+.vault-canvas-group-background-preview .vault-asset-preview-unsupported {
+  display: none;
+}
+
+.vault-canvas-group-content > :not(.vault-canvas-group-background-preview) {
+  position: relative;
+  z-index: 1;
 }
 
 .vault-canvas-group-label {
@@ -135,6 +198,72 @@
   gap: 9px;
   height: 100%;
   justify-content: center;
+}
+
+.vault-canvas-markdown-preview {
+  background: color-mix(in srgb, var(--vault-canvas-card-strong) 86%, transparent);
+  border-radius: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
+  pointer-events: none;
+  position: relative;
+}
+
+.vault-canvas-markdown-preview .qm-markdown-renderer {
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.vault-canvas-markdown-preview .qm-markdown-renderer > :first-child {
+  margin-top: 0;
+}
+
+.vault-canvas-markdown-preview .qm-markdown-renderer > :last-child {
+  margin-bottom: 0;
+}
+
+.vault-canvas-markdown-preview small {
+  background: linear-gradient(transparent, var(--vault-canvas-card-strong) 45%);
+  bottom: 0;
+  color: var(--vault-canvas-muted);
+  inset-inline: 0;
+  padding: 18px 8px 4px;
+  position: absolute;
+}
+
+.vault-canvas-pdf-controls {
+  align-items: center;
+  background: color-mix(in srgb, var(--vault-canvas-panel) 94%, transparent);
+  border-radius: 5px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  justify-content: center;
+  padding: 3px;
+}
+
+.vault-canvas-pdf-controls button,
+.vault-canvas-pdf-controls input {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 2px 5px;
+}
+
+.vault-canvas-pdf-controls input {
+  width: 58px;
+}
+
+.vault-canvas-pdf-controls output {
+  color: var(--vault-canvas-muted);
+  font-size: 10px;
+  min-width: 34px;
+  text-align: center;
 }
 
 .vault-canvas-web-host {
@@ -425,6 +554,13 @@
   padding-left: 7px;
 }
 
+.vault-canvas-toolbar-subgroup {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
 .vault-canvas-toolbar button,
 .vault-canvas-toolbar select,
 .vault-canvas-toolbar input {
@@ -503,15 +639,24 @@
 }
 
 .vault-canvas-palette button {
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  border-radius: 50%;
+  border: 0;
+  border-radius: 5px;
   height: 19px;
   min-height: 19px;
   padding: 0;
   width: 19px;
 }
 
-.vault-canvas-palette button:first-child {
+.vault-canvas-color-swatch {
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 50%;
+  display: block;
+  flex: 0 0 auto;
+  height: 19px;
+  width: 19px;
+}
+
+.vault-canvas-color-swatch--default {
   background: linear-gradient(135deg, #777 0 45%, transparent 45% 55%, #777 55% 100%);
 }
 
@@ -555,6 +700,58 @@
 .vault-canvas-edge-editor input,
 .vault-canvas-edge-editor select {
   min-width: 140px;
+}
+
+.vault-canvas-context-menu {
+  background: #25232d;
+  border: 1px solid #565064;
+  border-radius: 8px;
+  box-shadow: 0 16px 46px rgba(0, 0, 0, 0.46);
+  display: flex;
+  flex-direction: column;
+  min-width: 216px;
+  padding: 5px;
+  position: fixed;
+  z-index: 10020;
+}
+
+.vault-canvas-context-menu button {
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: #eceaf2;
+  font: inherit;
+  min-height: 34px;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.vault-canvas-context-menu button:hover:not(:disabled),
+.vault-canvas-context-menu button:focus-visible {
+  background: rgba(124, 92, 255, 0.2);
+  outline: 2px solid #9b87ff;
+  outline-offset: -2px;
+}
+
+.vault-canvas-context-menu button:disabled {
+  opacity: 0.42;
+}
+
+.vault-canvas-context-menu .vault-canvas-context-menu-danger {
+  color: #f3aaaa;
+}
+
+html[data-theme="light"] .vault-canvas-context-menu {
+  background: #fff;
+  border-color: #d7d3df;
+}
+
+html[data-theme="light"] .vault-canvas-context-menu button {
+  color: #292631;
+}
+
+html[data-theme="light"] .vault-canvas-context-menu .vault-canvas-context-menu-danger {
+  color: #9f2020;
 }
 
 .vault-json-canvas .react-flow__controls,
@@ -601,10 +798,12 @@ html[data-theme="light"] .vault-json-canvas {
   }
 
   .vault-canvas-toolbar {
+    box-sizing: border-box;
     bottom: 9px;
     left: 9px;
     max-width: calc(100% - 18px);
     transform: none;
+    width: calc(100% - 18px);
   }
 
   .vault-canvas-link-input input {
@@ -620,5 +819,40 @@ html[data-theme="light"] .vault-json-canvas {
 
   .vault-json-canvas .react-flow__minimap {
     display: none;
+  }
+}
+
+@media (max-width: 640px), (pointer: coarse) {
+  .vault-canvas-toolbar button,
+  .vault-canvas-toolbar select,
+  .vault-canvas-link-input input,
+  .vault-canvas-snap-toggle,
+  .vault-canvas-file-dialog header button,
+  .vault-canvas-file-search input,
+  .vault-canvas-file-card button,
+  .vault-canvas-safe-link,
+  .vault-canvas-context-menu button {
+    min-height: 44px;
+  }
+
+  .vault-canvas-file-card button,
+  .vault-canvas-safe-link {
+    align-items: center;
+    display: inline-flex;
+  }
+
+  .vault-canvas-file-dialog header button,
+  .vault-json-canvas .react-flow__controls-button {
+    height: 44px;
+    min-height: 44px;
+    min-width: 44px;
+    width: 44px;
+  }
+
+  .vault-canvas-palette button {
+    height: 44px;
+    min-height: 44px;
+    min-width: 44px;
+    width: 44px;
   }
 }

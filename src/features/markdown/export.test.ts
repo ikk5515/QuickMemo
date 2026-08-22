@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { exportMarkdown, splitMarkdownForMessages } from "./export";
+import { exportMarkdown, exportMarkdownForDiscordAi, splitMarkdownForMessages } from "./export";
 
 describe("Markdown interoperability exports", () => {
   it("keeps raw and Obsidian exports byte-for-byte, including CRLF and tabs", () => {
@@ -52,6 +52,39 @@ describe("Markdown interoperability exports", () => {
       const fences = chunk.match(/```/g)?.length ?? 0;
       return fences % 2 === 0;
     })).toBe(true);
+  });
+
+  it("never truncates source characters when a continued code fence has a long info string", () => {
+    const source = `\`\`\`lang-${"i".repeat(40)}\n${"x".repeat(600)}\n\`\`\``;
+    const messages = splitMarkdownForMessages(source, 100);
+
+    expect(messages.every((message) => message.length <= 100)).toBe(true);
+    expect(messages.join("").split("x").length - 1).toBe(600);
+  });
+
+  it("represents multi-message Discord/AI output only as an explicit bounded delivery batch", () => {
+    const source = `# 공유\n\n[[Long Note|긴 노트]]\n\n\`\`\`ts\n${"const value = 1;\n".repeat(30)}\`\`\``;
+    const delivery = exportMarkdownForDiscordAi(source, { maximumMessageCharacters: 180 });
+
+    expect(delivery.kind).toBe("message-batch");
+    expect(delivery.singleMessageContent).toBeNull();
+    expect(delivery.messages.length).toBeGreaterThan(1);
+    expect(delivery.messages.every((message, index) => (
+      message.content.length <= 180
+      && message.index === index + 1
+      && message.total === delivery.messages.length
+    ))).toBe(true);
+    expect(delivery).not.toHaveProperty("content");
+    expect(delivery).not.toHaveProperty("chunks");
+    expect(Object.isFrozen(delivery.messages)).toBe(true);
+  });
+
+  it("exposes a safe single-message value only when Discord/AI output fits one message", () => {
+    const delivery = exportMarkdownForDiscordAi("[[Note|노트]]", { maximumMessageCharacters: 180 });
+
+    expect(delivery.kind).toBe("single-message");
+    expect(delivery.singleMessageContent).toBe("노트");
+    expect(delivery.messages).toEqual([{ content: "노트", index: 1, total: 1 }]);
   });
 
   it("rejects chunk sizes too small to repair Markdown safely", () => {

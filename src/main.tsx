@@ -4,11 +4,13 @@ import { BrowserRouter } from "react-router-dom";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { AuthProvider } from "./context/AuthContext";
 import App from "./App";
+import { installFrameDeferredResizeObserver } from "./features/vault/frameDeferredResizeObserver";
 import { initializeThemePreference } from "./lib/theme";
 import "./styles.css";
 import "./styles/workspace-shell.css";
 
 initializeThemePreference();
+installFrameDeferredResizeObserver(window);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

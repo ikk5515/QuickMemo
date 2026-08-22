@@ -1,0 +1,23 @@
+.qm-template-overlay { align-items: flex-start; background: #0008; display: flex; inset: 0; justify-content: center; padding: min(12vh, 96px) 12px 12px; position: fixed; z-index: 1200; }
+.qm-template-dialog { background: var(--vault-surface); border: 1px solid var(--vault-border); border-radius: 10px; box-shadow: 0 20px 60px #0007; color: var(--vault-text); display: grid; gap: 10px; max-height: min(680px, 80vh); max-width: 560px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 12px; width: 100%; }
+.qm-template-dialog > header, .qm-template-dialog > header > div, .qm-template-dialog > footer { align-items: center; display: flex; gap: 7px; }
+.qm-template-dialog > header { justify-content: space-between; }
+.qm-template-dialog > header button { background: transparent; border: 0; color: inherit; min-height: 32px; min-width: 32px; }
+.qm-template-dialog > label { display: grid; gap: 4px; }
+.qm-template-dialog > label span { color: var(--vault-text-muted); font-size: 12px; }
+.qm-template-dialog input { background: var(--vault-surface-muted); border: 1px solid var(--vault-border); border-radius: 6px; color: inherit; min-height: 36px; padding: 6px 8px; }
+.qm-template-list { border: 1px solid var(--vault-border); border-radius: 7px; display: grid; max-height: 300px; overflow: auto; padding: 4px; }
+.qm-template-list button { background: transparent; border: 0; border-radius: 5px; color: inherit; display: grid; gap: 2px; padding: 7px 8px; text-align: left; }
+.qm-template-list button[aria-selected="true"] { background: var(--vault-hover); color: var(--vault-accent); }
+.qm-template-list span, .qm-template-dialog > p { color: var(--vault-text-muted); font-size: 11px; overflow-wrap: anywhere; }
+.qm-template-dialog > footer { background: var(--vault-surface); bottom: -12px; justify-content: flex-end; margin: 0 -12px -12px; padding: 8px 12px 12px; position: sticky; z-index: 1; }
+.qm-template-dialog > footer button { background: var(--vault-surface-muted); border: 1px solid var(--vault-border); border-radius: 6px; color: inherit; min-height: 34px; padding: 5px 12px; }
+.qm-template-dialog > footer button:last-child { background: var(--vault-accent); color: white; }
+.qm-template-prompts { border: 1px solid var(--vault-border); border-radius: 7px; display: grid; gap: 7px; margin: 0; padding: 8px; }
+.qm-template-prompts legend { color: var(--vault-text-muted); font-size: 12px; padding-inline: 4px; }
+.qm-template-prompts label { display: grid; gap: 4px; }
+.qm-template-prompts label span { color: var(--vault-text-muted); font-size: 12px; }
+.qm-template-preview { background: var(--vault-surface-muted); border: 1px solid var(--vault-border); border-radius: 7px; display: grid; gap: 5px; max-height: 180px; overflow: auto; padding: 8px; }
+.qm-template-preview pre { font: 11px/1.5 var(--font-mono, ui-monospace, monospace); margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.qm-template-preview small { color: var(--vault-text-muted); }
+@media (max-width: 760px) { .qm-template-overlay { padding: 8px; } .qm-template-dialog { margin-top: auto; max-height: calc(100dvh - 16px); } .qm-template-list { max-height: 24dvh; } .qm-template-preview { max-height: 20dvh; } .qm-template-dialog > header button, .qm-template-dialog > footer button, .qm-template-list button, .qm-template-dialog input { min-height: 44px; } .qm-template-dialog > header button, .qm-template-dialog > footer button, .qm-template-list button { min-width: 44px; } }

@@ -92,7 +92,7 @@ describe("planObsidianVaultImport", () => {
     }), [], [])).toThrow("350KB 이하");
   });
 
-  it("audits the complete proposed folder tree against ancestor depth 64", () => {
+  it("audits the complete proposed folder tree against the server-verifiable depth", () => {
     const segments = Array.from({ length: MAX_VAULT_FOLDER_DEPTH + 2 }, (_, index) => `f${index}`);
     const folders = segments.map((_, index) => segments.slice(0, index + 1).join("/"));
 

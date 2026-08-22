@@ -11,12 +11,12 @@ function proposedPath(depth: number) {
 }
 
 describe("requireValidProposedVaultFolderTree", () => {
-  it("accepts a proposed folder whose ancestor depth is exactly 64", () => {
+  it("accepts a proposed folder at the server-verifiable maximum depth", () => {
     expect(() => requireValidProposedVaultFolderTree([], proposedPath(MAX_VAULT_FOLDER_DEPTH)))
       .not.toThrow();
   });
 
-  it("rejects depth 65 before any folder write", () => {
+  it("rejects a path above the server-verifiable depth before any folder write", () => {
     expect(() => requireValidProposedVaultFolderTree([], proposedPath(MAX_VAULT_FOLDER_DEPTH + 1)))
       .toThrow(VaultFolderIntegrityError);
   });

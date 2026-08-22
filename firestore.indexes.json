@@ -546,6 +546,11 @@
       "collectionGroup": "libraryItems",
       "fieldPath": "wrappedKeys",
       "indexes": []
+    },
+    {
+      "collectionGroup": "vaultFolderTrees",
+      "fieldPath": "nodes",
+      "indexes": []
     }
   ]
 }

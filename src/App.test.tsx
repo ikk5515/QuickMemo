@@ -26,9 +26,20 @@ vi.mock("./services/secureShareCopyJobs", () => recoveryMocks);
 
 vi.mock("./pages/HomeRedirectPage", () => ({ default: () => <span>홈 화면</span> }));
 vi.mock("./pages/LibraryPage", () => ({ default: () => <span>자료실 화면</span> }));
-vi.mock("./pages/NotesPage", () => ({ default: () => <span>노트 화면</span> }));
+vi.mock("./pages/NotesPage", () => ({
+  default: ({ legacyReadOnly = false }: { legacyReadOnly?: boolean }) => (
+    <>
+      <span>노트 화면</span>
+      <span data-testid="legacy-read-only-prop">{String(legacyReadOnly)}</span>
+    </>
+  )
+}));
 vi.mock("./pages/PublicSharePage", () => ({ default: () => <span>보안 공유 화면</span> }));
-vi.mock("./pages/RecurringPage", () => ({ default: () => <span>반복 업무 화면</span> }));
+vi.mock("./pages/RecurringPage", async () => {
+  const { Navigate } = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
+
+  return { default: () => <Navigate replace to="/schedule?view=calendar" /> };
+});
 vi.mock("./pages/SchedulePage", () => ({ default: () => <span>일정 화면</span> }));
 vi.mock("./pages/VaultPage", () => ({ default: () => <span>Vault 화면</span> }));
 
@@ -159,7 +170,7 @@ describe("RequireAuth feature access", () => {
     ["/app/legacy", { notes: true, library: false, schedule: false }, "노트 화면"],
     ["/library", { notes: false, library: true, schedule: false }, "자료실 화면"],
     ["/schedule", { notes: false, library: false, schedule: true }, "일정 화면"],
-    ["/schedule/recurring", { notes: false, library: false, schedule: true }, "반복 업무 화면"]
+    ["/schedule/recurring", { notes: false, library: false, schedule: true }, "일정 화면"]
   ] as const)("maps %s to its matching feature gate", async (path, featureAccess, expectedText) => {
     authState.profile = profile({ featureAccess: { ...featureAccess } });
 
@@ -170,6 +181,20 @@ describe("RequireAuth feature access", () => {
     );
 
     expect(await screen.findByText(expectedText)).toBeInTheDocument();
+  });
+
+  it("passes the Vault feature flag into the explicit legacy route", async () => {
+    authState.profile = profile({ featureAccess: { notes: true, library: false, schedule: false } });
+
+    render(
+      <MemoryRouter initialEntries={["/app/legacy"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("legacy-read-only-prop")).toHaveTextContent(
+      String(import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true")
+    );
   });
 
   it.each([

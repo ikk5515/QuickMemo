@@ -47,6 +47,23 @@ export interface VaultAssetPreviewProps {
   className?: string;
   compact?: boolean;
   fileName: string;
+  imageMode?: "contain" | "cover" | "repeat";
+  pdfFragment?: string;
+}
+
+export function safeVaultPdfFragment(value: string | undefined): string {
+  if (!value) {
+    return "";
+  }
+  const match = /^#page=([1-9]\d{0,4})(?:&zoom=(\d{2,3}))?$/u.exec(value);
+  if (!match) {
+    return "";
+  }
+  const zoom = match[2] ? Number(match[2]) : null;
+  if (zoom !== null && (zoom < 50 || zoom > 400)) {
+    return "";
+  }
+  return zoom === null ? `#page=${Number(match[1])}` : `#page=${Number(match[1])}&zoom=${zoom}`;
 }
 
 /**
@@ -54,7 +71,14 @@ export interface VaultAssetPreviewProps {
  * mismatched formats are download-only; every replacement and unmount revokes
  * the previous URL so decrypted objects do not accumulate in browser memory.
  */
-export function VaultAssetPreview({ asset, className = "", compact = false, fileName }: VaultAssetPreviewProps) {
+export function VaultAssetPreview({
+  asset,
+  className = "",
+  compact = false,
+  fileName,
+  imageMode = "contain",
+  pdfFragment
+}: VaultAssetPreviewProps) {
   const [objectUrlState, setObjectUrlState] = useState<{
     asset: DecodedVaultAsset;
     url: string;
@@ -70,14 +94,22 @@ export function VaultAssetPreview({ asset, className = "", compact = false, file
 
   return (
     <section className={`vault-asset-preview ${compact ? "vault-asset-preview--compact" : ""} ${className}`.trim()}>
-      {objectUrl && previewKind === "image" ? (
-        <img alt={fileName} draggable={false} loading="lazy" src={objectUrl} />
+      {objectUrl && previewKind === "image" && imageMode === "repeat" ? (
+        <div
+          aria-label={fileName}
+          className="vault-asset-preview-repeat-image"
+          role="img"
+          style={{ backgroundImage: `url(${JSON.stringify(objectUrl)})` }}
+        />
+      ) : null}
+      {objectUrl && previewKind === "image" && imageMode !== "repeat" ? (
+        <img alt={fileName} draggable={false} loading="lazy" src={objectUrl} style={{ objectFit: imageMode }} />
       ) : null}
       {objectUrl && previewKind === "pdf" ? (
         <iframe
           referrerPolicy="no-referrer"
           sandbox=""
-          src={objectUrl}
+          src={`${objectUrl}${safeVaultPdfFragment(pdfFragment)}`}
           title={`${fileName} PDF 미리보기`}
         />
       ) : null}

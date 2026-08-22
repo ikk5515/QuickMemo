@@ -62,11 +62,11 @@ jobs:
       - name: Secure Share API emulator integration
         run: npm run test:integration
 
-      - name: Secure Share performance benchmark
-        run: npm run test:performance
-
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium webkit
+
+      - name: Secure Share and Graph performance benchmarks
+        run: npm run test:performance
 
       - name: Secure Share browser E2E
         run: npm run test:e2e

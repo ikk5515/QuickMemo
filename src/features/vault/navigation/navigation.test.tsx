@@ -172,6 +172,41 @@ describe("CommandPalette", () => {
 });
 
 describe("QuickSwitcher", () => {
+  it("bounds a 5k-vault result set while preserving keyboard and screen-reader context", () => {
+    const entries = Array.from({ length: 5_000 }, (_, index): QuickSwitcherItem => ({
+      id: `note-${index}`,
+      kind: "markdown",
+      path: `Archive/Note-${index}.md`,
+      title: `노트 ${index}`
+    }));
+    const onOpen = vi.fn();
+    render(
+      <QuickSwitcher
+        entries={entries}
+        onOpen={onOpen}
+        onOpenChange={() => undefined}
+        open
+      />
+    );
+
+    const input = screen.getByRole("combobox", { name: "퀵 스위처 검색" });
+    const options = screen.getAllByRole("option");
+    expect(options).toHaveLength(160);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "5,000개 결과 중 160개 표시. 더 구체적으로 검색하면 나머지 결과를 찾을 수 있습니다."
+    );
+    expect(options[0]).toHaveAttribute("aria-setsize", "5000");
+    expect(options[159]).toHaveAttribute("aria-posinset", "160");
+
+    fireEvent.keyDown(input, { key: "End" });
+    expect(options[159]).toHaveAttribute("aria-selected", "true");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "note-159" }),
+      expect.objectContaining({ source: "keyboard" })
+    );
+  });
+
   it("matches aliases and returns pointer modifier metadata", () => {
     const onOpen = vi.fn();
     const onOpenChange = vi.fn();

@@ -10,12 +10,23 @@ export { parseBaseSource } from "./parser";
 export type {
   BaseCellScalar,
   BaseCellValue,
+  BaseDateValue,
   BaseDiagnostic,
   BaseDocument,
+  BaseDurationValue,
+  BaseEvaluationContext,
+  BaseFileValue,
   BaseFilterSource,
   BaseGroupRule,
   BaseInputRow,
   BaseMaterializedView,
+  BaseMetadata,
+  BaseHtmlValue,
+  BaseIconValue,
+  BaseImageValue,
+  BaseLinkValue,
+  BaseObjectValue,
+  BaseRegexValue,
   BaseParseResult,
   BasePropertyConfig,
   BaseResultGroup,
@@ -23,5 +34,6 @@ export type {
   BaseSortDirection,
   BaseSortRule,
   BaseViewConfig,
-  BaseViewType
+  BaseViewType,
+  BaseTypedValue
 } from "./types";

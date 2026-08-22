@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseObsidianMarkdown } from "./markdown";
-import { matchesVaultSearchQuery } from "./query";
+import { matchesVaultSearchQuery, vaultSearchQueryUsesRegex } from "./query";
 import type { VaultIndexEntry } from "./types";
 
 const content = `---
@@ -39,5 +39,10 @@ describe("structured vault search fields", () => {
       metadata,
       { allowRegex: false }
     )).toBe(false);
+  });
+
+  it("detects nested regular expressions before entering degraded main-thread search", () => {
+    expect(vaultSearchQueryUsesRegex("tag:#work OR (content:/deploy/ -file:draft)")).toBe(true);
+    expect(vaultSearchQueryUsesRegex("tag:#work path:Projects -file:draft")).toBe(false);
   });
 });

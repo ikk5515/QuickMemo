@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { buildGraphSnapshot, DEFAULT_GLOBAL_GRAPH_SETTINGS } from "./graph";
+import {
+  buildGraphSnapshot,
+  DEFAULT_GLOBAL_GRAPH_SETTINGS,
+  MAX_GRAPH_GROUPS_PER_SNAPSHOT
+} from "./graph";
 import { buildKnowledgeIndex } from "./knowledgeIndex";
+import { createKnowledgeWorkerRuntime } from "./workerRuntime";
 import type {
   KnowledgeIndex,
   ParsedMarkdownMetadata,
   ResolvedLinkOccurrence,
   VaultIndexEntry
 } from "./types";
+import type { KnowledgeWorkerResponse } from "./workerProtocol";
 
 const NODE_COUNT = 5_000;
 const EDGE_COUNT = 10_000;
@@ -80,6 +86,37 @@ function performanceVault(): VaultIndexEntry[] {
 }
 
 describe("knowledge graph performance budget", () => {
+  it("handles a cloned 5k node / 10k edge worker request and response within three seconds", () => {
+    const responses: KnowledgeWorkerResponse[] = [];
+    const runtime = createKnowledgeWorkerRuntime({
+      // A real Worker structured-clones both directions. The runtime unit test
+      // calls synchronously, so clone the response here to keep this budget
+      // representative without treating it as a browser/FPS measurement.
+      postMessage: (response) => responses.push(structuredClone(response))
+    });
+    const startedAt = performance.now();
+    runtime.handleRequest({
+      entries: structuredClone(performanceVault()),
+      id: "replace-performance-vault",
+      type: "replace-vault"
+    });
+    runtime.handleRequest({
+      id: "graph-performance-vault",
+      settings: DEFAULT_GLOBAL_GRAPH_SETTINGS,
+      type: "graph-snapshot"
+    });
+    const elapsedMs = performance.now() - startedAt;
+    const response = responses.at(-1);
+
+    expect(response?.type).toBe("graph-snapshot");
+    if (!response || response.type !== "graph-snapshot") {
+      throw new Error("Expected graph snapshot response");
+    }
+    expect(response.snapshot.nodes).toHaveLength(NODE_COUNT);
+    expect(response.snapshot.edges).toHaveLength(EDGE_COUNT);
+    expect(elapsedMs).toBeLessThan(3_000);
+  }, 10_000);
+
   it("indexes and materializes the 5k node / 10k edge acceptance fixture within three seconds", () => {
     const startedAt = performance.now();
     const index = buildKnowledgeIndex(performanceVault());
@@ -115,6 +152,51 @@ describe("knowledge graph performance budget", () => {
     durations.sort((left, right) => left - right);
     const p95 = durations[Math.ceil(durations.length * 0.95) - 1] ?? Number.POSITIVE_INFINITY;
     expect(p95).toBeLessThan(250);
+  }, 10_000);
+
+  it("evaluates the maximum persisted group count without reparsing per node", () => {
+    const index = buildKnowledgeIndex(performanceVault());
+    const groups = Array.from({ length: MAX_GRAPH_GROUPS_PER_SNAPSHOT }, (_, index) => ({
+      color: `#${(index + 1).toString(16).padStart(6, "0")}`,
+      id: `group-${index}`,
+      order: index,
+      query: index === MAX_GRAPH_GROUPS_PER_SNAPSHOT - 1
+        ? "path:Notes"
+        : `path:Never-${index}`
+    }));
+
+    // Warm parsing/JIT before measuring the representative max-group pass.
+    buildGraphSnapshot(index, {
+      ...DEFAULT_GLOBAL_GRAPH_SETTINGS,
+      common: { ...DEFAULT_GLOBAL_GRAPH_SETTINGS.common, groups }
+    });
+    const startedAt = performance.now();
+    const snapshot = buildGraphSnapshot(index, {
+      ...DEFAULT_GLOBAL_GRAPH_SETTINGS,
+      common: { ...DEFAULT_GLOBAL_GRAPH_SETTINGS.common, groups }
+    });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(snapshot.nodes).toHaveLength(NODE_COUNT);
+    expect(snapshot.nodes.every((node) => node.groupId === "group-63")).toBe(true);
+    expect(elapsedMs).toBeLessThan(250);
+
+    const bounded = buildGraphSnapshot(index, {
+      ...DEFAULT_GLOBAL_GRAPH_SETTINGS,
+      common: {
+        ...DEFAULT_GLOBAL_GRAPH_SETTINGS.common,
+        groups: [
+          ...groups,
+          {
+            color: "#ffffff",
+            id: "ignored-group-64",
+            order: -1,
+            query: "path:Notes"
+          }
+        ]
+      }
+    });
+    expect(bounded.nodes.every((node) => node.groupId === "group-63")).toBe(true);
   }, 10_000);
 
   it("traverses a large depth-two Local Graph through adjacency within a stable budget", () => {

@@ -15,6 +15,7 @@ interface FrontmatterParseResult {
 }
 
 const FRONTMATTER_KEY_PATTERN = /^([A-Za-z0-9_-]+)\s*:\s*(.*)$/;
+const UNSAFE_FRONTMATTER_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const TAG_CHARACTER_PATTERN = /[\p{L}\p{M}\p{N}_\-/\p{Extended_Pictographic}]/u;
 const TAG_NON_NUMERIC_PATTERN = /[\p{L}\p{M}_\-\p{Extended_Pictographic}]/u;
 const INLINE_TAG_PATTERN = /(^|[\s([{>"'])#([\p{L}\p{M}\p{N}_\-/\p{Extended_Pictographic}]+)/gu;
@@ -103,8 +104,17 @@ function parseYamlValue(value: string): FrontmatterValue {
   return parseYamlScalar(trimmed);
 }
 
+function safeFrontmatterPropertyKey(key: string) {
+  return !UNSAFE_FRONTMATTER_KEYS.has(key.toLocaleLowerCase("en-US"));
+}
+
 function parseFrontmatter(markdown: string): FrontmatterParseResult {
-  const empty: FrontmatterParseResult = { properties: {}, start: 0, end: 0, endLine: 0 };
+  const empty: FrontmatterParseResult = {
+    properties: Object.create(null) as Record<string, FrontmatterValue>,
+    start: 0,
+    end: 0,
+    endLine: 0
+  };
   if (!markdown.startsWith("---\n") && !markdown.startsWith("---\r\n")) {
     return empty;
   }
@@ -121,7 +131,7 @@ function parseFrontmatter(markdown: string): FrontmatterParseResult {
     return empty;
   }
 
-  const properties: Record<string, FrontmatterValue> = {};
+  const properties = Object.create(null) as Record<string, FrontmatterValue>;
   for (let index = 1; index < closingLine; index += 1) {
     if (Object.keys(properties).length >= MAX_FRONTMATTER_PROPERTIES_PER_ENTRY) {
       break;
@@ -131,6 +141,11 @@ function parseFrontmatter(markdown: string): FrontmatterParseResult {
       continue;
     }
     const [, key, rawValue] = match;
+    // These names can mutate or shadow object prototypes when metadata is
+    // projected into ordinary objects elsewhere in the client.
+    if (!safeFrontmatterPropertyKey(key)) {
+      continue;
+    }
     if (rawValue.trim()) {
       properties[key] = parseYamlValue(rawValue);
       continue;
@@ -169,15 +184,14 @@ function maskRange(text: string, start: number, end: number): string {
     .replace(/[^\r\n]/g, " ")}${text.slice(end)}`;
 }
 
-function maskIgnoredMarkdown(markdown: string): string {
+function maskCodeMarkdown(markdown: string): string {
   let masked = markdown;
   const ranges: Array<[number, number]> = [];
   const fencedPattern = /^(?: {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?^(?: {0,3})\1[ \t]*(?:\r?\n|$)/gm;
   const inlineCodePattern = /(`+)(?!`)([\s\S]*?[^`])\1(?!`)/g;
-  const obsidianCommentPattern = /%%[\s\S]*?%%/g;
   let match: RegExpExecArray | null;
 
-  for (const pattern of [fencedPattern, inlineCodePattern, obsidianCommentPattern]) {
+  for (const pattern of [fencedPattern, inlineCodePattern]) {
     pattern.lastIndex = 0;
     while ((match = pattern.exec(masked)) !== null) {
       ranges.push([match.index, match.index + match[0].length]);
@@ -185,6 +199,16 @@ function maskIgnoredMarkdown(markdown: string): string {
     for (const [start, end] of ranges.splice(0)) {
       masked = maskRange(masked, start, end);
     }
+  }
+  return masked;
+}
+
+function maskObsidianComments(markdown: string): string {
+  let masked = markdown;
+  const pattern = /%%[\s\S]*?%%/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(markdown)) !== null) {
+    masked = maskRange(masked, match.index, match.index + match[0].length);
   }
   return masked;
 }
@@ -279,6 +303,39 @@ function createLineLocator(markdown: string): (
       context: boundedLineContext(markdown, lineStart, lineEnd, offset, occurrenceLength)
     };
   };
+}
+
+/**
+ * Produces an offset-preserving projection for plaintext mention discovery.
+ * Metadata, executable/code-like regions, existing links, and external URL
+ * tokens are blanked so their text cannot become an unlinked mention.
+ */
+export function markdownTextForUnlinkedMentions(markdown: string): string {
+  const frontmatter = parseFrontmatter(markdown);
+  let searchable = maskLinkSyntaxForTags(maskObsidianComments(maskCodeMarkdown(markdown)));
+  if (frontmatter.end > 0) {
+    searchable = maskRange(searchable, frontmatter.start, frontmatter.end);
+  }
+
+  const externalUrlPatterns = [
+    /(?:https?:\/\/|\/\/)[^\s<>"'`]+/giu,
+    /\bwww\.[^\s<>"'`]+/giu
+  ];
+  for (const pattern of externalUrlPatterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(searchable)) !== null) {
+      searchable = maskRange(searchable, match.index, match.index + match[0].length);
+    }
+  }
+  return searchable;
+}
+
+export function markdownOccurrenceLocation(
+  markdown: string,
+  offset: number,
+  occurrenceLength: number
+): { line: number; column: number; context: string } {
+  return createLineLocator(markdown)(offset, occurrenceLength);
 }
 
 function splitTargetFragment(rawTarget: string): { target: string; fragment?: InternalLinkFragment } {
@@ -442,7 +499,10 @@ export function parseObsidianMarkdown(
   maximumTagOccurrences = MAX_TAG_OCCURRENCES_PER_ENTRY
 ): ParsedMarkdownMetadata {
   const frontmatter = parseFrontmatter(markdown);
-  const searchableMarkdown = maskIgnoredMarkdown(markdown);
+  // Official Obsidian 1.13.7 indexes links and tags inside %% comments while
+  // still excluding inline and fenced code. Keep unlinked-mention discovery
+  // stricter above so hidden comments are not suggested as plaintext mentions.
+  const searchableMarkdown = maskCodeMarkdown(markdown);
   const bodyWithoutLinks = maskLinkSyntaxForTags(searchableMarkdown);
   const bodyForTags = frontmatter.end > 0
     ? maskRange(bodyWithoutLinks, frontmatter.start, frontmatter.end)

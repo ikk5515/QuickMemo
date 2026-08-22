@@ -1,5 +1,5 @@
 import { cleanup as testingCleanup, fireEvent, render, waitFor } from "@testing-library/react";
-import { useRef, useState } from "react";
+import { StrictMode, useRef, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   RichMemoEditor,
@@ -63,6 +63,21 @@ afterEach(() => {
 });
 
 describe("NotesPage lifecycle guards", () => {
+  it("unmounts the rich editor safely after StrictMode destroys its TipTap view", async () => {
+    const onChange = vi.fn();
+    const view = render(
+      <StrictMode>
+        <InlineEditorChangeHarness onChange={onChange} />
+      </StrictMode>
+    );
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".rich-body-input")).toBeInstanceOf(HTMLDivElement);
+    });
+
+    expect(() => view.unmount()).not.toThrow();
+  });
+
   it("keeps in-memory share secrets for the same unlocked UID and clears them on lock, UID change, and unmount", () => {
     const clearSecrets = vi.fn();
     const view = render(
