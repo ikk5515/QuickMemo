@@ -9,6 +9,8 @@ const renderedSnapshots = vi.hoisted(() => [] as Array<{ edgeIds: string[]; node
 const renderedSizes = vi.hoisted(() => [] as Array<{ height: number; width: number }>);
 const capturedGraph = vi.hoisted(() => ({ current: null as null | {
   cooldownTicks?: number;
+  enableNodeDrag?: boolean;
+  enablePointerInteraction?: boolean;
   graphData: {
     links: Array<{ id: string; source: string | { id: string }; target: string | { id: string } }>;
     nodes: Array<{ fx?: number; fy?: number; id: string; x?: number; y?: number }>;
@@ -17,6 +19,7 @@ const capturedGraph = vi.hoisted(() => ({ current: null as null | {
   onNodeClick?: (node: { id: string }, event: MouseEvent) => void;
   onNodeDrag?: (node: { fx?: number; fy?: number; id: string; x?: number; y?: number }) => void;
   onNodeDragEnd?: (node: { fx?: number; fy?: number; id: string; x?: number; y?: number }) => void;
+  onNodeHover?: (node: { id: string } | null) => void;
   onNodeRightClick?: (node: { id: string }, event: MouseEvent) => void;
   onZoomEnd?: (transform: { k: number }) => void;
   warmupTicks?: number;
@@ -34,6 +37,8 @@ vi.mock("react-force-graph-2d", () => ({
   default: forwardRef(function MockForceGraph(
     props: {
       cooldownTicks?: number;
+      enableNodeDrag?: boolean;
+      enablePointerInteraction?: boolean;
       graphData: {
         links: Array<{ id: string; source: string | { id: string }; target: string | { id: string } }>;
         nodes: Array<{ id: string }>;
@@ -42,6 +47,7 @@ vi.mock("react-force-graph-2d", () => ({
       onNodeClick?: (node: { id: string }, event: MouseEvent) => void;
       onNodeDrag?: (node: { fx?: number; fy?: number; id: string; x?: number; y?: number }) => void;
       onNodeDragEnd?: (node: { fx?: number; fy?: number; id: string; x?: number; y?: number }) => void;
+      onNodeHover?: (node: { id: string } | null) => void;
       onNodeRightClick?: (node: { id: string }, event: MouseEvent) => void;
       onZoomEnd?: (transform: { k: number }) => void;
       warmupTicks?: number;
@@ -217,28 +223,45 @@ describe("ForceGraphRenderer", () => {
   });
 
   it("applies large-graph keyboard navigation without overlapping canvas transitions", () => {
+    vi.useFakeTimers();
     const rendererRef = createRef<GraphRendererHandle>();
+    const onHoveredNodeChange = vi.fn();
     const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
       id: `node-${index}`,
       kind: "note",
       label: `Node ${index}`
     }));
 
-    render(
-      <ForceGraphRenderer
-        edges={[]}
-        nodes={nodes}
-        onNodeOpen={vi.fn()}
-        ref={rendererRef}
-        settings={createDefaultGlobalGraphSettings()}
-      />
-    );
+    try {
+      render(
+        <ForceGraphRenderer
+          edges={[]}
+          nodes={nodes}
+          onHoveredNodeChange={onHoveredNodeChange}
+          onNodeOpen={vi.fn()}
+          ref={rendererRef}
+          settings={createDefaultGlobalGraphSettings()}
+        />
+      );
 
-    act(() => rendererRef.current?.panBy(32, -12));
-    expect(graphMethodState.centerAtCalls).toContainEqual({ duration: 0, x: 32, y: -12 });
+      expect(capturedGraph.current?.enablePointerInteraction).toBe(true);
+      expect(capturedGraph.current?.enableNodeDrag).toBe(true);
+      act(() => capturedGraph.current?.onNodeHover?.({ id: "node-0" }));
+      expect(onHoveredNodeChange).toHaveBeenLastCalledWith(expect.objectContaining({ id: "node-0" }));
+      act(() => rendererRef.current?.panBy(32, -12));
+      expect(graphMethodState.centerAtCalls).toContainEqual({ duration: 0, x: 32, y: -12 });
+      expect(capturedGraph.current?.enablePointerInteraction).toBe(false);
+      expect(onHoveredNodeChange).toHaveBeenLastCalledWith(null);
 
-    act(() => rendererRef.current?.zoomBy(1.25));
-    expect(graphMethodState.zoomCalls).toContainEqual({ duration: 0, value: 1.25 });
+      act(() => rendererRef.current?.zoomBy(1.25));
+      expect(graphMethodState.zoomCalls).toContainEqual({ duration: 0, value: 1.25 });
+      expect(capturedGraph.current?.enablePointerInteraction).toBe(false);
+
+      act(() => vi.advanceTimersByTime(260));
+      expect(capturedGraph.current?.enablePointerInteraction).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("restores an initial viewport without relying on simulated node coordinates", () => {

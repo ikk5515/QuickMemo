@@ -60,6 +60,13 @@ export function graphKeyboardAction(key: string, shiftKey: boolean): GraphKeyboa
   }
 }
 
+function mirrorGraphViewport(element: HTMLElement | null, viewport: GraphViewport) {
+  if (!element) return;
+  element.dataset.graphCenterX = String(viewport.centerX);
+  element.dataset.graphCenterY = String(viewport.centerY);
+  element.dataset.graphZoom = String(viewport.zoom);
+}
+
 export interface GraphCanvasProps {
   activeNodeId?: string;
   edges: readonly GraphEdge[];
@@ -233,6 +240,7 @@ export function GraphCanvas({
   settings
 }: GraphCanvasProps) {
   const rendererRef = useRef<GraphRendererHandle>(null);
+  const graphSectionRef = useRef<HTMLElement>(null);
   const pendingKeyboardActionsRef = useRef<GraphKeyboardAction[]>([]);
   const [canvasSupported] = useState(browserSupportsGraphCanvas);
   const [rendererReady, setRendererReady] = useState(false);
@@ -240,7 +248,7 @@ export function GraphCanvas({
   const [copyStatus, setCopyStatus] = useState("");
   const [timelinePosition, setTimelinePosition] = useState<number | null>(null);
   const [timelinePlaying, setTimelinePlaying] = useState(false);
-  const [observedViewport, setObservedViewport] = useState<GraphViewport | undefined>(initialViewport);
+  const observedViewportRef = useRef<GraphViewport | undefined>(initialViewport);
   const initialViewportCenterX = initialViewport?.centerX;
   const initialViewportCenterY = initialViewport?.centerY;
   const initialViewportZoom = initialViewport?.zoom;
@@ -288,25 +296,18 @@ export function GraphCanvas({
   }, [shouldRenderCanvas]);
 
   useEffect(() => {
-    setObservedViewport((current) => {
-      if (
-        initialViewportCenterX === undefined
-        || initialViewportCenterY === undefined
-        || initialViewportZoom === undefined
-      ) return current;
-      if (
-        current?.centerX === initialViewportCenterX
-        && current.centerY === initialViewportCenterY
-        && current.zoom === initialViewportZoom
-      ) {
-        return current;
-      }
-      return {
-        centerX: initialViewportCenterX,
-        centerY: initialViewportCenterY,
-        zoom: initialViewportZoom
-      };
-    });
+    if (
+      initialViewportCenterX === undefined
+      || initialViewportCenterY === undefined
+      || initialViewportZoom === undefined
+    ) return;
+    const next = {
+      centerX: initialViewportCenterX,
+      centerY: initialViewportCenterY,
+      zoom: initialViewportZoom
+    };
+    observedViewportRef.current = next;
+    mirrorGraphViewport(graphSectionRef.current, next);
   }, [initialViewportCenterX, initialViewportCenterY, initialViewportZoom]);
 
   useEffect(() => {
@@ -385,6 +386,7 @@ export function GraphCanvas({
       그래프 Canvas를 사용할 수 없어 목록으로 표시합니다.
     </div>
   );
+  const observedViewport = observedViewportRef.current;
 
   return (
     <section
@@ -394,6 +396,7 @@ export function GraphCanvas({
       data-graph-center-y={observedViewport?.centerY}
       data-graph-zoom={observedViewport?.zoom}
       onKeyDown={handleKeyboardNavigation}
+      ref={graphSectionRef}
       tabIndex={0}
     >
       <div aria-label="그래프 화면 제어" className="qm-graph-toolbar" role="toolbar">
@@ -500,7 +503,8 @@ export function GraphCanvas({
                 onNodeOpen={onNodeOpen}
                 onReady={handleRendererReady}
                 onViewportChange={(viewport) => {
-                  setObservedViewport(viewport);
+                  observedViewportRef.current = viewport;
+                  mirrorGraphViewport(graphSectionRef.current, viewport);
                   onViewportChange?.(viewport);
                 }}
                 reducedMotion={reducedMotion}

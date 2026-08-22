@@ -185,9 +185,11 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
   }, forwardedRef) {
     const hostRef = useRef<HTMLDivElement>(null);
     const forceGraphRef = useRef<GraphMethods | undefined>(undefined);
+    const hoveredNodeIdRef = useRef<string | null>(null);
     const interactionActiveRef = useRef(false);
     const interactionIdleTimerRef = useRef<number | null>(null);
     const lastViewportRef = useRef<GraphViewport | null>(null);
+    const programmaticViewportChangeRef = useRef(false);
     const reconciledNodesInputRef = useRef(nodes);
     const readyNotifiedRef = useRef(false);
     const longPressStartRef = useRef<{ clientX: number; clientY: number } | null>(null);
@@ -196,6 +198,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     const publicNodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
     const [renderNodes, setRenderNodes] = useState<RenderNode[]>(() => nodes.map((node) => ({ ...node })));
     const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+    const [pointerInteractionEnabled, setPointerInteractionEnabled] = useState(true);
     const { height, width } = useGraphSize(hostRef);
     const initialCenterX = initialViewport?.centerX;
     const initialCenterY = initialViewport?.centerY;
@@ -301,10 +304,23 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         interactionIdleTimerRef.current = null;
       }
       interactionActiveRef.current = false;
+      setPointerInteractionEnabled(true);
     }, []);
 
-    const markInteractionActive = useCallback((idleAfterMs?: number) => {
+    const markInteractionActive = useCallback((idleAfterMs?: number, suspendPointerHitTesting = false) => {
       interactionActiveRef.current = true;
+      if (largeGraph && suspendPointerHitTesting) {
+        // force-graph otherwise redraws a second, hidden 5k/10k hit-map Canvas
+        // for every viewport frame. Hover cannot be meaningful while the
+        // viewport itself is moving, so pause only that duplicate paint and
+        // restore it immediately at idle. Node dragging does not use this path.
+        if (hoveredNodeIdRef.current !== null) {
+          hoveredNodeIdRef.current = null;
+          setHoveredNodeId(null);
+          onHoveredNodeChange?.(null);
+        }
+        setPointerInteractionEnabled(false);
+      }
       if (interactionIdleTimerRef.current !== null) {
         window.clearTimeout(interactionIdleTimerRef.current);
         interactionIdleTimerRef.current = null;
@@ -313,9 +329,10 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         interactionIdleTimerRef.current = window.setTimeout(() => {
           interactionIdleTimerRef.current = null;
           interactionActiveRef.current = false;
+          setPointerInteractionEnabled(true);
         }, idleAfterMs);
       }
-    }, []);
+    }, [largeGraph, onHoveredNodeChange]);
 
     const emitViewport = useCallback((next: GraphViewport) => {
       const previous = lastViewportRef.current;
@@ -353,7 +370,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         if (!graph) {
           return;
         }
-        markInteractionActive(reducedMotion ? 50 : 220);
+        markInteractionActive(reducedMotion ? 50 : 220, true);
         const center = graph.centerAt();
         const zoom = graph.zoom() || 1;
         const next = {
@@ -365,7 +382,12 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         // On a 5k/10k graph, overlapping transitions otherwise redraw every
         // node and edge continuously. Apply each keyboard step atomically so
         // the canvas stays responsive without hiding any graph data.
-        graph.centerAt(next.centerX, next.centerY, reducedMotion || largeGraph ? 0 : 120);
+        programmaticViewportChangeRef.current = true;
+        try {
+          graph.centerAt(next.centerX, next.centerY, reducedMotion || largeGraph ? 0 : 120);
+        } finally {
+          programmaticViewportChangeRef.current = false;
+        }
         emitViewport(next);
       },
       zoomBy(factor) {
@@ -373,13 +395,18 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         if (!graph) {
           return;
         }
-        markInteractionActive(reducedMotion ? 50 : 260);
+        markInteractionActive(reducedMotion ? 50 : 260, true);
         const nextZoom = clamp(
           graph.zoom() * factor,
           GRAPH_SETTING_RANGES.zoom.min,
           GRAPH_SETTING_RANGES.zoom.max
         );
-        graph.zoom(nextZoom, reducedMotion || largeGraph ? 0 : 180);
+        programmaticViewportChangeRef.current = true;
+        try {
+          graph.zoom(nextZoom, reducedMotion || largeGraph ? 0 : 180);
+        } finally {
+          programmaticViewportChangeRef.current = false;
+        }
         const center = graph.centerAt();
         emitViewport({ centerX: center.x, centerY: center.y, zoom: nextZoom });
       }
@@ -486,6 +513,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
           cooldownTicks={reducedMotion || largeGraph ? 0 : 130}
           d3AlphaDecay={largeGraph ? 0.06 : 0.035}
           enableNodeDrag
+          enablePointerInteraction={pointerInteractionEnabled}
           graphData={graphData}
           height={height}
           linkColor={(edge) => edgeIsHighlighted(edge as RenderEdge) ? "rgba(154, 148, 178, 0.55)" : "rgba(154, 148, 178, 0.09)"}
@@ -569,6 +597,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
           }}
           onNodeHover={(renderedNode) => {
             const node = renderedNode ? publicNode(renderedNode as RenderNode) ?? null : null;
+            hoveredNodeIdRef.current = node?.id ?? null;
             setHoveredNodeId(node?.id ?? null);
             onHoveredNodeChange?.(node);
           }}
@@ -580,9 +609,14 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
             }
           }}
           onZoom={() => {
-            markInteractionActive(reducedMotion ? 50 : 260);
+            if (!programmaticViewportChangeRef.current) {
+              markInteractionActive(reducedMotion ? 50 : 260, true);
+            }
           }}
           onZoomEnd={({ k }) => {
+            if (programmaticViewportChangeRef.current) {
+              return;
+            }
             markInteractionIdle();
             publishViewport(k);
           }}

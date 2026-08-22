@@ -10,6 +10,7 @@ const canvasRendererState = vi.hoisted(() => ({
   deferReady: false,
   fitCalls: 0,
   panCalls: [] as Array<{ deltaX: number; deltaY: number }>,
+  renderCount: 0,
   props: null as null | {
     onReady?: () => void;
     onViewportChange?: (viewport: { centerX: number; centerY: number; zoom: number }) => void;
@@ -26,6 +27,7 @@ vi.mock("./ForceGraphRenderer", () => ({
     ref
   ) {
     const { onReady } = props;
+    canvasRendererState.renderCount += 1;
     canvasRendererState.props = props;
     useImperativeHandle(ref, () => ({
       copyImage: async () => null,
@@ -65,6 +67,7 @@ afterEach(() => {
   canvasRendererState.fitCalls = 0;
   canvasRendererState.panCalls.length = 0;
   canvasRendererState.props = null;
+  canvasRendererState.renderCount = 0;
   canvasRendererState.zoomCalls.length = 0;
 });
 
@@ -206,12 +209,14 @@ describe("GraphCanvas", () => {
   });
 
   it("mirrors restored and renderer-observed viewports for encrypted reload acceptance", async () => {
+    const onViewportChange = vi.fn();
     render(
       <GraphCanvas
         edges={edges}
         initialViewport={{ centerX: -12.5, centerY: 44.25, zoom: 1.75 }}
         nodes={nodes}
         onNodeOpen={vi.fn()}
+        onViewportChange={onViewportChange}
         renderMode="canvas"
         settings={createDefaultGlobalGraphSettings()}
       />
@@ -223,10 +228,13 @@ describe("GraphCanvas", () => {
     expect(graph).toHaveAttribute("data-graph-center-y", "44.25");
     expect(graph).toHaveAttribute("data-graph-zoom", "1.75");
 
+    const renderCountBeforeViewport = canvasRendererState.renderCount;
     act(() => canvasRendererState.props?.onViewportChange?.({ centerX: 80, centerY: -20, zoom: 3 }));
     expect(graph).toHaveAttribute("data-graph-center-x", "80");
     expect(graph).toHaveAttribute("data-graph-center-y", "-20");
     expect(graph).toHaveAttribute("data-graph-zoom", "3");
+    expect(onViewportChange).toHaveBeenLastCalledWith({ centerX: 80, centerY: -20, zoom: 3 });
+    expect(canvasRendererState.renderCount).toBe(renderCountBeforeViewport);
   });
 
   it("labels Local Graph independently and keeps its accessible fallback interactive", async () => {
