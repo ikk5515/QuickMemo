@@ -124,7 +124,12 @@ export default function LoginPage() {
 
   const sortedRoster = useMemo(() => roster.filter((user) => user.isActive), [roster]);
 
-  if (firebaseUser && profile) {
+  // `loadProfile()` can publish the authenticated user/profile before
+  // `loginRosterUser()` finishes decrypting and installing the private key.
+  // Keep the submitting login route mounted until that promise settles so its
+  // later redirect cannot race a user or E2E navigation that already opened a
+  // protected workspace.
+  if (firebaseUser && profile && !pending && !selectedUser) {
     return <Navigate to={redirectTarget} replace />;
   }
 

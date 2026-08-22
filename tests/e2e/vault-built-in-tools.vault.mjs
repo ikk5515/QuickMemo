@@ -80,9 +80,13 @@ async function saveActiveEntry(page) {
 }
 
 async function expectVaultNameWritesReady(page) {
-  const createBase = page
-    .getByRole("complementary", { name: "Vault 리본" })
-    .getByRole("button", { name: "새 Base", exact: true });
+  // Mobile drawers are modal surfaces. While one is open, the background
+  // ribbon is intentionally inert/aria-hidden and the equivalent toolbar
+  // action inside the drawer is the only accessible create control. Query the
+  // active accessibility surface so this readiness assertion covers both
+  // valid drawer states instead of mistaking correct modal isolation for a
+  // missing Vault shell.
+  const createBase = page.getByRole("button", { name: "새 Base", exact: true }).first();
   await expect(createBase).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByRole("status", { name: "Vault 이름 무결성 준비" })).toHaveCount(0);
 }
@@ -641,9 +645,7 @@ test("Bases switches views, writes through Properties, and persists only ciphert
   await saveActiveEntry(page);
   const sourceEntryId = await activeEntryId(page);
 
-  const createBase = page
-    .getByRole("complementary", { name: "Vault 리본" })
-    .getByRole("button", { name: "새 Base", exact: true });
+  const createBase = page.getByRole("button", { name: "새 Base", exact: true }).first();
   await expect(createBase).toBeEnabled();
   await createBase.click();
   await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill("E2E Base Dashboard");
