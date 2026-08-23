@@ -76,7 +76,11 @@ async function saveActiveEntry(page) {
   // encrypted mutation takes ownership. Observing that transition first
   // prevents a stale pre-click "저장됨" label from satisfying the assertion.
   await expect(save).toBeDisabled();
-  await expect(saveState).toHaveText("저장됨");
+  // A backend-confirmed path rename can briefly wait for the Firestore SDK's
+  // emulator WebChannel to reconnect after registering its one-shot document
+  // targets. Keep this deadline local to the path-aware save acceptance; the
+  // test must still reach the app's terminal state and cannot pass on "내부 참조 확인 중".
+  await expect(saveState).toHaveText("저장됨", { timeout: 30_000 });
 }
 
 async function expectVaultNameWritesReady(page) {

@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import type { Timestamp } from "firebase/firestore";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject } from "react";
 import { AdminEmailSettingsPanel } from "../components/AdminEmailSettingsPanel";
 import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
@@ -39,8 +39,9 @@ import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { defaultFeatureAccess, normalizeFeatureAccess } from "../lib/featureAccess";
 import { initialsFromName } from "../lib/roster";
 import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
+import { useModalFocus } from "../lib/useModalFocus";
 import { createUser, deleteManagedUserDocuments, updateUser } from "../services/adminFunctions";
-import { deleteNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
+import { deleteRevisionedNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
 import { subscribeUsers } from "../services/users";
 import type { AppFeature, FeatureAccess, NoteKind, UserProfile } from "../types";
 import "../styles/admin-settings.css";
@@ -213,6 +214,103 @@ function formatAdminDate(timestamp: Timestamp | Date | null | undefined, emptyTe
     minute: "2-digit",
     hour12: false
   }).format(date);
+}
+
+interface AdminNotePreviewDialogProps {
+  deleting: boolean;
+  fallbackFocusRef?: RefObject<HTMLElement | null>;
+  note: AdminNoteView;
+  onClose: () => void;
+  onMoveToRecovery: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
+  userName: (uid: string) => string;
+}
+
+export function AdminNotePreviewDialog({
+  deleting,
+  fallbackFocusRef,
+  note,
+  onClose,
+  onMoveToRecovery,
+  returnFocusRef,
+  userName
+}: AdminNotePreviewDialogProps) {
+  const dialogRef = useRef<HTMLElement>(null);
+
+  useModalFocus(dialogRef, { fallbackFocusRef, returnFocusRef });
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <article
+        aria-labelledby="admin-note-modal-title"
+        aria-modal="true"
+        className="note-preview-modal admin-note-modal"
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+      >
+        <header className="note-preview-header">
+          <div>
+            <div className="note-preview-kicker">
+              {note.type === "shared" ? "공유 노트" : "개인 노트"} · 작성자 {userName(note.ownerUid)}
+            </div>
+            <h2 id="admin-note-modal-title">{note.title}</h2>
+            <div className="admin-note-modal-meta">
+              <span>생성 {formatAdminDate(note.createdAt, "입력 전")}</span>
+              <span>수정 {formatAdminDate(note.updatedAt, "없음")}</span>
+            </div>
+          </div>
+          <div className="note-preview-actions">
+            <button
+              className="secondary-button danger"
+              disabled={deleting}
+              onClick={onMoveToRecovery}
+              type="button"
+            >
+              복구함으로 이동
+            </button>
+            <button
+              aria-label="노트 미리보기 닫기"
+              className="icon-button"
+              data-dialog-initial-focus
+              onClick={onClose}
+              type="button"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </header>
+        <div className="note-preview-body">
+          {note.canReadContent ? (
+            <ReadonlyNoteRenderer
+              className="admin-note-view-body"
+              content={note.bodyHtml}
+              contentFormat={note.bodyFormat}
+              emptyText="본문 없음"
+              fontSize={note.fontSize}
+            />
+          ) : (
+            <div className="admin-note-locked">
+              <LockKeyhole size={18} />
+              {note.unavailableReason}
+            </div>
+          )}
+        </div>
+      </article>
+    </div>
+  );
 }
 
 function normalizedShareTargets(ownerUid: string, targetUids: string[] = []) {
@@ -420,6 +518,8 @@ function AdminDashboard() {
   const [error, setError] = useState<string | null>(null);
   const adminNoteDecryptCache = useRef(new AdminNoteDecryptionCache());
   const adminNoteDecryptGeneration = useRef(0);
+  const adminNoteDialogReturnFocusRef = useRef<HTMLElement | null>(null);
+  const adminNoteFallbackFocusRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     return subscribeUsers(setUsers, () => setError("사용자 목록을 불러오지 못했습니다."));
@@ -483,22 +583,6 @@ function AdminDashboard() {
       setSelectedNoteId(null);
     }
   }, [adminNoteViews, selectedNoteId]);
-
-  useEffect(() => {
-    if (!selectedNoteId) {
-      return undefined;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSelectedNoteId(null);
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNoteId]);
 
   const nextQuickKey = useMemo(() => {
     const used = new Set(users.map((user) => user.quickKey));
@@ -677,7 +761,7 @@ function AdminDashboard() {
     const currentProfile = profile;
     const readableTitle = note.canReadContent ? note.title : "암호화된 노트";
     const confirmed = window.confirm(
-      `${userName(note.ownerUid)} 사용자의 "${readableTitle}" 노트를 삭제할까요?\n삭제하면 복구할 수 없습니다.`
+      `${userName(note.ownerUid)} 사용자의 "${readableTitle}" 노트를 복구함으로 이동할까요?`
     );
 
     if (!confirmed) {
@@ -689,9 +773,14 @@ function AdminDashboard() {
     setNoteError(null);
 
     try {
-      await deleteNote(note.id, currentProfile.uid, note.participantUids);
+      await deleteRevisionedNote({
+        expectedRevision: note.revision ?? 0,
+        noteId: note.id,
+        readerUids: note.participantUids,
+        uid: currentProfile.uid
+      });
       setSelectedNoteId(null);
-      setNoteNotice("노트를 삭제했습니다.");
+      setNoteNotice("노트를 복구함으로 이동했습니다.");
     } catch {
       setNoteError("노트를 삭제하지 못했습니다. 권한 또는 네트워크 상태를 확인해주세요.");
     } finally {
@@ -983,6 +1072,7 @@ function AdminDashboard() {
                 <input
                   onChange={(event) => setNoteSearch(event.target.value)}
                   placeholder="제목, 내용, 사용자"
+                  ref={adminNoteFallbackFocusRef}
                   value={noteSearch}
                 />
               </span>
@@ -1021,7 +1111,10 @@ function AdminDashboard() {
                     <div className="admin-note-actions">
                       <button
                         className="icon-button"
-                        onClick={() => setSelectedNoteId(note.id)}
+                        onClick={(event) => {
+                          adminNoteDialogReturnFocusRef.current = event.currentTarget;
+                          setSelectedNoteId(note.id);
+                        }}
                         type="button"
                         aria-label="노트 조회"
                       >
@@ -1052,57 +1145,15 @@ function AdminDashboard() {
         </div>
 
         {selectedAdminNote && (
-          <div className="modal-backdrop" role="presentation">
-            <article
-              className="note-preview-modal admin-note-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="admin-note-modal-title"
-            >
-              <header className="note-preview-header">
-                <div>
-                  <div className="note-preview-kicker">
-                    {selectedAdminNote.type === "shared" ? "공유 노트" : "개인 노트"} · 작성자{" "}
-                    {userName(selectedAdminNote.ownerUid)}
-                  </div>
-                  <h2 id="admin-note-modal-title">{selectedAdminNote.title}</h2>
-                  <div className="admin-note-modal-meta">
-                    <span>생성 {formatAdminDate(selectedAdminNote.createdAt, "입력 전")}</span>
-                    <span>수정 {formatAdminDate(selectedAdminNote.updatedAt, "없음")}</span>
-                  </div>
-                </div>
-                <div className="note-preview-actions">
-                  <button
-                    className="secondary-button danger"
-                    disabled={deletingNoteId === selectedAdminNote.id}
-                    onClick={() => void handleDeleteManagedNote(selectedAdminNote)}
-                    type="button"
-                  >
-                    삭제
-                  </button>
-                  <button className="icon-button" onClick={() => setSelectedNoteId(null)} type="button" aria-label="닫기">
-                    <X size={18} />
-                  </button>
-                </div>
-              </header>
-              <div className="note-preview-body">
-                {selectedAdminNote.canReadContent ? (
-                  <ReadonlyNoteRenderer
-                    className="admin-note-view-body"
-                    content={selectedAdminNote.bodyHtml}
-                    contentFormat={selectedAdminNote.bodyFormat}
-                    emptyText="본문 없음"
-                    fontSize={selectedAdminNote.fontSize}
-                  />
-                ) : (
-                  <div className="admin-note-locked">
-                    <LockKeyhole size={18} />
-                    {selectedAdminNote.unavailableReason}
-                  </div>
-                )}
-              </div>
-            </article>
-          </div>
+          <AdminNotePreviewDialog
+            deleting={deletingNoteId === selectedAdminNote.id}
+            fallbackFocusRef={adminNoteFallbackFocusRef}
+            note={selectedAdminNote}
+            onClose={() => setSelectedNoteId(null)}
+            onMoveToRecovery={() => void handleDeleteManagedNote(selectedAdminNote)}
+            returnFocusRef={adminNoteDialogReturnFocusRef}
+            userName={userName}
+          />
         )}
       </section>
     </AppShell>

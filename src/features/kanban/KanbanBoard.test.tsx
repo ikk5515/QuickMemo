@@ -8,10 +8,17 @@ import {
 } from "./KanbanBoard";
 import { MAX_KANBAN_PARSE_DIAGNOSTICS, createKanbanSource, parseKanbanSource } from "./model";
 
+const downloadBlobMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../vault/browserDownload", () => ({
+  downloadBlob: downloadBlobMock
+}));
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  downloadBlobMock.mockReset();
 });
 
 describe("KanbanBoard", () => {
@@ -217,6 +224,9 @@ kanban-plugin: basic
     expect((output as HTMLTextAreaElement).value).toContain("kanban-plugin: basic");
     expect(screen.getByRole("button", { name: "Markdown 다운로드" })).toBeEnabled();
     await waitFor(() => expect(screen.getByText(/아래 내보내기 원문과 다운로드/u)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Markdown 다운로드" }));
+    expect(downloadBlobMock).toHaveBeenCalledWith(expect.any(Blob), "내보내기.md");
+    expect((downloadBlobMock.mock.calls[0][0] as Blob).type).toBe("text/markdown;charset=utf-8");
     expect(onChange).not.toHaveBeenCalled();
   });
 });

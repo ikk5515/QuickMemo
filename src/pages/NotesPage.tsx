@@ -100,6 +100,7 @@ import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { previewLegacyHtmlToMarkdown } from "../features/markdown/legacyHtml";
 import { noteListSnippet } from "../features/notes/noteListSnippet";
+import { downloadBlob } from "../features/vault/browserDownload";
 import {
   allowedAttachmentExtensions,
   attachmentDownloadName,
@@ -2708,10 +2709,12 @@ function legacyReadonlySnapshotNotes(snapshot: QuerySnapshot<unknown, DocumentDa
  */
 export function subscribeLegacyNotesReadOnly(
   uid: string,
+  ownerUids: string[],
   callback: (notes: NoteSnapshot[]) => void,
   onError: (error: Error) => void
 ) {
-  const notesBySource = new Map<"active" | "owned", NoteSnapshot[]>();
+  const normalizedOwnerUids = Array.from(new Set([uid, ...ownerUids])).filter(Boolean);
+  const notesByOwner = new Map<string, NoteSnapshot[]>();
   let closed = false;
 
   const emit = () => {
@@ -2720,8 +2723,8 @@ export function subscribeLegacyNotesReadOnly(
     }
 
     const uniqueNotes = new Map<string, NoteSnapshot>();
-    notesBySource.forEach((sourceNotes) => {
-      sourceNotes.forEach((note) => uniqueNotes.set(note.id, note));
+    notesByOwner.forEach((ownerNotes) => {
+      ownerNotes.forEach((note) => uniqueNotes.set(note.id, note));
     });
     callback(
       Array.from(uniqueNotes.values())
@@ -2730,39 +2733,32 @@ export function subscribeLegacyNotesReadOnly(
     );
   };
 
-  const subscribe = (
-    source: "active" | "owned",
-    notesQuery: ReturnType<typeof query>
-  ) => onSnapshot(
-    notesQuery,
+  const unsubscribes = normalizedOwnerUids.map((ownerUid) => onSnapshot(
+    ownerUid === uid
+      ? query(
+          collection(db, "notes"),
+          where("ownerUid", "==", uid),
+          orderBy("updatedAt", "desc"),
+          limit(maximumLegacyReadonlyNotes)
+        )
+      : query(
+          collection(db, "notes"),
+          where("ownerUid", "==", ownerUid),
+          where("isDeleted", "==", false),
+          where("participantUids", "array-contains", uid),
+          orderBy("updatedAt", "desc"),
+          limit(maximumLegacyReadonlyNotes)
+        ),
     (snapshot) => {
-      notesBySource.set(source, legacyReadonlySnapshotNotes(snapshot, uid));
+      notesByOwner.set(ownerUid, legacyReadonlySnapshotNotes(snapshot, uid));
       emit();
     },
-    onError
-  );
-
-  const unsubscribes = [
-    subscribe(
-      "owned",
-      query(
-        collection(db, "notes"),
-        where("ownerUid", "==", uid),
-        orderBy("updatedAt", "desc"),
-        limit(maximumLegacyReadonlyNotes)
-      )
-    ),
-    subscribe(
-      "active",
-      query(
-        collection(db, "notes"),
-        where("isDeleted", "==", false),
-        where("participantUids", "array-contains", uid),
-        orderBy("updatedAt", "desc"),
-        limit(maximumLegacyReadonlyNotes)
-      )
-    )
-  ];
+    (error) => {
+      notesByOwner.delete(ownerUid);
+      emit();
+      onError(error);
+    }
+  ));
 
   return () => {
     closed = true;
@@ -2776,13 +2772,10 @@ function legacyExportFileName(title: string) {
 }
 
 function downloadLegacyHtmlAsText(note: DecryptedNote) {
-  const objectUrl = URL.createObjectURL(new Blob([note.body], { type: "text/plain;charset=utf-8" }));
-  const anchor = document.createElement("a");
-  anchor.download = legacyExportFileName(note.title);
-  anchor.href = objectUrl;
-  anchor.rel = "noopener noreferrer";
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  downloadBlob(
+    new Blob([note.body], { type: "text/plain;charset=utf-8" }),
+    legacyExportFileName(note.title)
+  );
 }
 
 export function LegacyNotesReadOnlyPage({
@@ -2801,11 +2794,41 @@ export function LegacyNotesReadOnlyPage({
   const [queryText, setQueryText] = useState("");
   const [loading, setLoading] = useState(true);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [legacyUsers, setLegacyUsers] = useState<UserProfile[]>([]);
   const [readonlyAttachments, setReadonlyAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [downloadingAttachmentId, setDownloadingAttachmentId] = useState<string | null>(null);
   const decryptionCache = useRef<DecryptedNoteCache>(new Map());
   const decryptionGeneration = useRef(0);
   const deferredQueryText = useDeferredValue(queryText);
+  const legacyOwnerUids = useMemo(() => {
+    if (!profile) {
+      return [];
+    }
+    if (profile.isAdmin) {
+      return Array.from(new Set([profile.uid, ...legacyUsers.map((user) => user.uid)]));
+    }
+    return Array.from(new Set([
+      profile.uid,
+      ...legacyUsers
+        .filter((user) => (
+          user.uid === profile.uid
+          || (user.isAdmin && user.isActive)
+          || user.allowedShareTargetUids?.includes(profile.uid)
+        ))
+        .map((user) => user.uid)
+    ]));
+  }, [legacyUsers, profile]);
+
+  useEffect(() => {
+    if (!profile || !privateKey) {
+      setLegacyUsers([]);
+      return undefined;
+    }
+    return subscribeUsers(
+      setLegacyUsers,
+      () => setFeedback("공유된 기존 노트의 사용자 목록을 읽지 못했습니다.")
+    );
+  }, [privateKey, profile]);
 
   useEffect(() => {
     if (!profile || !privateKey) {
@@ -2820,6 +2843,7 @@ export function LegacyNotesReadOnlyPage({
     setFeedback(null);
     return subscribeLegacyNotesReadOnly(
       profile.uid,
+      legacyOwnerUids,
       (nextNotes) => {
         setEncryptedNotes(nextNotes);
         setLoading(false);
@@ -2829,7 +2853,7 @@ export function LegacyNotesReadOnlyPage({
         setLoading(false);
       }
     );
-  }, [privateKey, profile]);
+  }, [legacyOwnerUids, privateKey, profile]);
 
   useEffect(() => {
     const generation = decryptionGeneration.current + 1;
@@ -2932,13 +2956,7 @@ export function LegacyNotesReadOnlyPage({
       const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
       const encryptedSource = await getEncryptedNoteAttachmentSource(attachment);
       const blob = await decryptAttachmentToBlob(attachment, noteKey, encryptedSource);
-      const objectUrl = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.download = attachmentDownloadName(attachment);
-      anchor.href = objectUrl;
-      anchor.rel = "noopener noreferrer";
-      anchor.click();
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+      downloadBlob(blob, attachmentDownloadName(attachment));
       setFeedback("첨부파일을 복호화해 다운로드했습니다. 서버 데이터는 변경하지 않았습니다.");
     } catch {
       setFeedback("첨부파일을 다운로드하지 못했습니다.");
@@ -8061,6 +8079,7 @@ function WritableNotesPage() {
     ]);
 
     await purgeNote({
+      expectedRevision: note.revision ?? 0,
       noteId: note.id,
       ownerUid: note.ownerUid,
       uid: unlockedProfile.uid,

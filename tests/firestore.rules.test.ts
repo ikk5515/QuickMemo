@@ -33,6 +33,14 @@ const describeRules = process.env.FIRESTORE_EMULATOR_HOST ? describe : describe.
 type RulesFirestore = ReturnType<RulesTestContext["firestore"]>;
 let testEnv: RulesTestEnvironment;
 
+async function assertServerSucceeds<T>(operation: (db: RulesFirestore) => Promise<T>) {
+  let result: T | undefined;
+  await testEnv.withSecurityRulesDisabled(async (context) => {
+    result = await operation(context.firestore());
+  });
+  return result as T;
+}
+
 const encryptedPayload = {
   version: 1,
   algorithm: "AES-GCM",
@@ -2483,7 +2491,7 @@ describeRules("firestore security rules", () => {
     const otherJobRef = doc(otherDb, "vaultMaintenanceJobs", "user-a", "imports", jobId);
     const chunkRef = doc(jobRef, "chunks", "chunk-000");
 
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "ordinary-folder", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "ordinary-folder", "user-a", {
       ownerUid: "user-a",
       name: "암호화 폴더",
       color: "#7c5cff",
@@ -2496,7 +2504,7 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));
-    await assertSucceeds(createAuditedNote(ownerDb, "ordinary-note", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "ordinary-note", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -2619,7 +2627,7 @@ describeRules("firestore security rules", () => {
       vaultImportChunk("user-a", jobId, { ordinal: 1, itemCount: 1 })
     ));
 
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "import-root", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "import-root", "user-a", {
       ownerUid: "user-a",
       name: "암호화 폴더",
       color: "#7c5cff",
@@ -2633,7 +2641,7 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "import-child", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "import-child", "user-a", {
       ownerUid: "user-a",
       name: "암호화 폴더",
       color: "#7c5cff",
@@ -2649,7 +2657,7 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));
-    await assertSucceeds(createAuditedNote(ownerDb, "import-note", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "import-note", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -2834,8 +2842,8 @@ describeRules("firestore security rules", () => {
       doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", importedChildOldClaim)
     );
     await assertFails(importedChildMove.commit());
-    await assertSucceeds(updateAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => updateAuditedNote(
+      serverDb,
       "import-note",
       "user-a",
       2,
@@ -2894,7 +2902,7 @@ describeRules("firestore security rules", () => {
       preparedAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "committed-import-root", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "committed-import-root", "user-a", {
       ownerUid: "user-a",
       name: "암호화 폴더",
       color: "#7c5cff",
@@ -2908,7 +2916,7 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));
-    await assertSucceeds(createAuditedNote(ownerDb, "committed-import-note", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "committed-import-note", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -2953,7 +2961,7 @@ describeRules("firestore security rules", () => {
     // Terminal cleanup removes the durable job but deliberately retains the
     // immutable provenance marker on each target. A later rename may replace
     // the blinded claim only when that before/after marker is unchanged.
-    await assertSucceeds(commitOwnerTitleOnlyNameMutation(ownerDb, {
+    await assertServerSucceeds((serverDb) => commitOwnerTitleOnlyNameMutation(serverDb, {
       caseId: "post-cleanup-import-rename",
       noteId: "committed-import-note"
     }));
@@ -2976,7 +2984,7 @@ describeRules("firestore security rules", () => {
       isDeleted: false
     }, ["user-a"]));
 
-    await assertSucceeds(createAuditedNote(ownerDb, "post-commit-note", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "post-commit-note", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -2988,7 +2996,7 @@ describeRules("firestore security rules", () => {
       folderId: "committed-import-root",
       isDeleted: false
     }, ["user-a"]));
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "post-commit-folder", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "post-commit-folder", "user-a", {
       ownerUid: "user-a",
       name: "암호화 폴더",
       color: "#7c5cff",
@@ -3058,7 +3066,7 @@ describeRules("firestore security rules", () => {
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
-    await assertSucceeds(createAuditedNote(ownerDb, "real-create-shape", "user-a", {
+    await assertFails(createAuditedNote(ownerDb, "direct-versioned-boundary", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -3070,7 +3078,29 @@ describeRules("firestore security rules", () => {
       folderId: null,
       isDeleted: false
     }, ["user-a"]));
-    await assertSucceeds(updateExactAuditedVaultContent(ownerDb, {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "real-create-shape", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      wrappedKeys: { "user-a": ownerWrappedShareKey },
+      folderId: null,
+      isDeleted: false
+    }, ["user-a"]));
+    await assertFails(updateExactAuditedVaultContent(ownerDb, {
+      actorUid: "user-a",
+      changedFields: ["body"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: { ...encryptedPayload, cipherText: "direct-versioned-body" },
+      noteId: "real-create-shape",
+      ownerSuppliesNameClaim: true,
+      readerUids: ["user-a"],
+      revision: 2
+    }));
+    await assertServerSucceeds((serverDb) => updateExactAuditedVaultContent(serverDb, {
       actorUid: "user-a",
       changedFields: ["body"],
       encryptedTitle: encryptedPayload,
@@ -3080,12 +3110,12 @@ describeRules("firestore security rules", () => {
       readerUids: ["user-a"],
       revision: 2
     }));
-    await assertSucceeds(commitOwnerTitleOnlyNameMutation(ownerDb, {
+    await assertServerSucceeds((serverDb) => commitOwnerTitleOnlyNameMutation(serverDb, {
       caseId: "root-valid",
       noteId: "real-create-shape"
     }));
     const renamedTitle = { ...encryptedPayload, cipherText: "title-root-valid" };
-    await assertSucceeds(updateExactAuditedVaultContent(ownerDb, {
+    await assertServerSucceeds((serverDb) => updateExactAuditedVaultContent(serverDb, {
       actorUid: "user-a",
       changedFields: ["body"],
       encryptedTitle: renamedTitle,
@@ -3096,7 +3126,7 @@ describeRules("firestore security rules", () => {
       revision: 4
     }));
 
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "real-create-folder", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "real-create-folder", "user-a", {
       ownerUid: "user-a",
       name: "암호화 폴더",
       color: "#7c5cff",
@@ -3108,7 +3138,7 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));
-    await assertSucceeds(createAuditedNote(ownerDb, "real-create-in-folder", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "real-create-in-folder", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -3120,7 +3150,7 @@ describeRules("firestore security rules", () => {
       folderId: "real-create-folder",
       isDeleted: false
     }, ["user-a"]));
-    await assertSucceeds(updateExactAuditedVaultContent(ownerDb, {
+    await assertServerSucceeds((serverDb) => updateExactAuditedVaultContent(serverDb, {
       actorUid: "user-a",
       changedFields: ["body"],
       encryptedTitle: encryptedPayload,
@@ -3130,11 +3160,11 @@ describeRules("firestore security rules", () => {
       readerUids: ["user-a"],
       revision: 2
     }));
-    await assertSucceeds(commitOwnerTitleOnlyNameMutation(ownerDb, {
+    await assertServerSucceeds((serverDb) => commitOwnerTitleOnlyNameMutation(serverDb, {
       caseId: "nested-valid",
       noteId: "real-create-in-folder"
     }));
-    await assertSucceeds(updateExactAuditedVaultContent(ownerDb, {
+    await assertServerSucceeds((serverDb) => updateExactAuditedVaultContent(serverDb, {
       actorUid: "user-a",
       changedFields: ["body"],
       encryptedTitle: { ...encryptedPayload, cipherText: "title-nested-valid" },
@@ -3145,7 +3175,7 @@ describeRules("firestore security rules", () => {
       revision: 4
     }));
 
-    await assertSucceeds(createAuditedNote(ownerDb, "title-only-negative", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "title-only-negative", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -3214,7 +3244,7 @@ describeRules("firestore security rules", () => {
     ))).exists()).toBe(true);
 
     const participantDb = testEnv.authenticatedContext("user-b").firestore();
-    await assertSucceeds(updateExactAuditedVaultContent(participantDb, {
+    await assertServerSucceeds((serverDb) => updateExactAuditedVaultContent(serverDb, {
       actorUid: "user-b",
       changedFields: ["body"],
       encryptedTitle: encryptedPayload,
@@ -3527,10 +3557,24 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDoc(integrityRef));
     await assertFails(getDoc(doc(otherDb, "vaultIntegrity/user-a")));
     await assertFails(updateDoc(integrityRef, { updatedAt: serverTimestamp() }));
+    const directClaimId = vaultTestClaimId("direct-client-claim");
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", directClaimId),
+      {
+        ownerUid: "user-a",
+        indexVersion: 1,
+        parentId: null,
+        targetId: "unclaimed-entry",
+        targetType: "entry",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }
+    ));
 
     const backfillClaimId = vaultTestClaimId("unclaimed-entry");
-    const backfillBatch = writeBatch(ownerDb);
-    backfillBatch.update(doc(ownerDb, "notes/unclaimed-entry"), {
+    await assertServerSucceeds(async (serverDb) => {
+    const backfillBatch = writeBatch(serverDb);
+    backfillBatch.update(doc(serverDb, "notes/unclaimed-entry"), {
       vaultNameClaimId: backfillClaimId,
       vaultNameIndexVersion: 1,
       updatedAt: serverTimestamp(),
@@ -3539,7 +3583,7 @@ describeRules("firestore security rules", () => {
       lastMutationId: noteRevisionId(2)
     });
     backfillBatch.set(
-      doc(ownerDb, "notes/unclaimed-entry/history", noteRevisionId(2)),
+      doc(serverDb, "notes/unclaimed-entry/history", noteRevisionId(2)),
       noteHistory("unclaimed-entry", "user-a", {
         action: "content",
         changedFields: ["name-claim"],
@@ -3547,7 +3591,7 @@ describeRules("firestore security rules", () => {
         revision: 2
       })
     );
-    backfillBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", backfillClaimId), {
+    backfillBatch.set(doc(serverDb, "vaultIntegrity", "user-a", "nameClaims", backfillClaimId), {
       ownerUid: "user-a",
       indexVersion: 1,
       parentId: null,
@@ -3556,9 +3600,10 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
-    await assertSucceeds(backfillBatch.commit());
+    return backfillBatch.commit();
+    });
 
-    await assertSucceeds(updateDoc(doc(ownerDb, "notes/missing-deletion-metadata"), {
+    await assertServerSucceeds((serverDb) => updateDoc(doc(serverDb, "notes/missing-deletion-metadata"), {
       isDeleted: false
     }));
     await assertFails(updateDoc(doc(otherDb, "notes/missing-deletion-metadata"), {
@@ -3597,8 +3642,9 @@ describeRules("firestore security rules", () => {
     });
     await assertFails(invalidRecoveryBatch.commit());
 
-    const recoveryBatch = writeBatch(ownerDb);
-    recoveryBatch.update(doc(ownerDb, "notes/collision-loser"), {
+    await assertServerSucceeds(async (serverDb) => {
+    const recoveryBatch = writeBatch(serverDb);
+    recoveryBatch.update(doc(serverDb, "notes/collision-loser"), {
       encryptedTitle: { ...encryptedPayload, cipherText: "replacement-title" },
       vaultNameClaimId: recoveryClaimId,
       vaultNameIndexVersion: 1,
@@ -3608,7 +3654,7 @@ describeRules("firestore security rules", () => {
       lastMutationId: noteRevisionId(2)
     });
     recoveryBatch.set(
-      doc(ownerDb, "notes/collision-loser/history", noteRevisionId(2)),
+      doc(serverDb, "notes/collision-loser/history", noteRevisionId(2)),
       noteHistory("collision-loser", "user-a", {
         action: "content",
         changedFields: ["title", "name-claim"],
@@ -3616,7 +3662,7 @@ describeRules("firestore security rules", () => {
         revision: 2
       })
     );
-    recoveryBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", recoveryClaimId), {
+    recoveryBatch.set(doc(serverDb, "vaultIntegrity", "user-a", "nameClaims", recoveryClaimId), {
       ownerUid: "user-a",
       indexVersion: 1,
       parentId: null,
@@ -3625,11 +3671,13 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
-    await assertSucceeds(recoveryBatch.commit());
+    return recoveryBatch.commit();
+    });
 
     const sharedClaimId = vaultTestClaimId("shared-unclaimed");
-    const sharedBackfillBatch = writeBatch(ownerDb);
-    sharedBackfillBatch.update(doc(ownerDb, "notes/shared-unclaimed"), {
+    await assertServerSucceeds(async (serverDb) => {
+    const sharedBackfillBatch = writeBatch(serverDb);
+    sharedBackfillBatch.update(doc(serverDb, "notes/shared-unclaimed"), {
       vaultNameClaimId: sharedClaimId,
       vaultNameIndexVersion: 1,
       updatedAt: serverTimestamp(),
@@ -3638,7 +3686,7 @@ describeRules("firestore security rules", () => {
       lastMutationId: noteRevisionId(2)
     });
     sharedBackfillBatch.set(
-      doc(ownerDb, "notes/shared-unclaimed/history", noteRevisionId(2)),
+      doc(serverDb, "notes/shared-unclaimed/history", noteRevisionId(2)),
       noteHistory("shared-unclaimed", "user-a", {
         action: "content",
         changedFields: ["name-claim"],
@@ -3646,7 +3694,7 @@ describeRules("firestore security rules", () => {
         revision: 2
       })
     );
-    sharedBackfillBatch.set(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", sharedClaimId), {
+    sharedBackfillBatch.set(doc(serverDb, "vaultIntegrity", "user-a", "nameClaims", sharedClaimId), {
       ownerUid: "user-a",
       indexVersion: 1,
       parentId: null,
@@ -3655,10 +3703,12 @@ describeRules("firestore security rules", () => {
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
-    await assertSucceeds(sharedBackfillBatch.commit());
+    return sharedBackfillBatch.commit();
+    });
 
-    const participantBodyBatch = writeBatch(otherDb);
-    participantBodyBatch.update(doc(otherDb, "notes/shared-unclaimed"), {
+    await assertServerSucceeds(async (serverDb) => {
+    const participantBodyBatch = writeBatch(serverDb);
+    participantBodyBatch.update(doc(serverDb, "notes/shared-unclaimed"), {
       encryptedBody: { ...encryptedPayload, cipherText: "participant-body" },
       updatedAt: serverTimestamp(),
       updatedBy: "user-b",
@@ -3666,7 +3716,7 @@ describeRules("firestore security rules", () => {
       lastMutationId: noteRevisionId(3)
     });
     participantBodyBatch.set(
-      doc(otherDb, "notes/shared-unclaimed/history", noteRevisionId(3)),
+      doc(serverDb, "notes/shared-unclaimed/history", noteRevisionId(3)),
       noteHistory("shared-unclaimed", "user-b", {
         action: "content",
         changedFields: ["body"],
@@ -3674,7 +3724,8 @@ describeRules("firestore security rules", () => {
         revision: 3
       })
     );
-    await assertSucceeds(participantBodyBatch.commit());
+    return participantBodyBatch.commit();
+    });
 
     const participantTitleBatch = writeBatch(otherDb);
     participantTitleBatch.update(doc(otherDb, "notes/shared-unclaimed"), {
@@ -3696,8 +3747,9 @@ describeRules("firestore security rules", () => {
     await assertFails(participantTitleBatch.commit());
 
     const sharedFolderRepairClaimId = vaultTestClaimId("shared-invalid-folder-root");
-    const sharedFolderRepairBatch = writeBatch(ownerDb);
-    sharedFolderRepairBatch.update(doc(ownerDb, "notes/shared-invalid-folder"), {
+    await assertServerSucceeds(async (serverDb) => {
+    const sharedFolderRepairBatch = writeBatch(serverDb);
+    sharedFolderRepairBatch.update(doc(serverDb, "notes/shared-invalid-folder"), {
       folderId: null,
       vaultNameClaimId: sharedFolderRepairClaimId,
       vaultNameIndexVersion: 1,
@@ -3707,7 +3759,7 @@ describeRules("firestore security rules", () => {
       lastMutationId: noteRevisionId(2)
     });
     sharedFolderRepairBatch.set(
-      doc(ownerDb, "notes/shared-invalid-folder/history", noteRevisionId(2)),
+      doc(serverDb, "notes/shared-invalid-folder/history", noteRevisionId(2)),
       noteHistory("shared-invalid-folder", "user-a", {
         action: "content",
         changedFields: ["folder", "name-claim"],
@@ -3716,7 +3768,7 @@ describeRules("firestore security rules", () => {
       })
     );
     sharedFolderRepairBatch.set(
-      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", sharedFolderRepairClaimId),
+      doc(serverDb, "vaultIntegrity", "user-a", "nameClaims", sharedFolderRepairClaimId),
       {
         ownerUid: "user-a",
         indexVersion: 1,
@@ -3727,11 +3779,13 @@ describeRules("firestore security rules", () => {
         updatedAt: serverTimestamp()
       }
     );
-    await assertSucceeds(sharedFolderRepairBatch.commit());
+    return sharedFolderRepairBatch.commit();
+    });
 
     const restoredClaimId = vaultTestClaimId("deleted-unclaimed-restored");
-    const restoreLegacyDeletedBatch = writeBatch(ownerDb);
-    restoreLegacyDeletedBatch.update(doc(ownerDb, "notes/deleted-unclaimed"), {
+    await assertServerSucceeds(async (serverDb) => {
+    const restoreLegacyDeletedBatch = writeBatch(serverDb);
+    restoreLegacyDeletedBatch.update(doc(serverDb, "notes/deleted-unclaimed"), {
       isDeleted: false,
       deletedAt: deleteField(),
       deletedBy: deleteField(),
@@ -3743,7 +3797,7 @@ describeRules("firestore security rules", () => {
       lastMutationId: noteRevisionId(5)
     });
     restoreLegacyDeletedBatch.set(
-      doc(ownerDb, "notes/deleted-unclaimed/history", noteRevisionId(5)),
+      doc(serverDb, "notes/deleted-unclaimed/history", noteRevisionId(5)),
       noteHistory("deleted-unclaimed", "user-a", {
         action: "restore",
         changedFields: ["restored", "name-claim"],
@@ -3752,7 +3806,7 @@ describeRules("firestore security rules", () => {
       })
     );
     restoreLegacyDeletedBatch.set(
-      doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", restoredClaimId),
+      doc(serverDb, "vaultIntegrity", "user-a", "nameClaims", restoredClaimId),
       {
         ownerUid: "user-a",
         indexVersion: 1,
@@ -3763,7 +3817,8 @@ describeRules("firestore security rules", () => {
         updatedAt: serverTimestamp()
       }
     );
-    await assertSucceeds(restoreLegacyDeletedBatch.commit());
+    return restoreLegacyDeletedBatch.commit();
+    });
 
     const conflictingRestoreBatch = writeBatch(ownerDb);
     conflictingRestoreBatch.update(doc(ownerDb, "notes/deleted-unclaimed-conflict"), {
@@ -3851,8 +3906,8 @@ describeRules("firestore security rules", () => {
     );
     await assertFails(missingClaimBatch.commit());
 
-    await assertSucceeds(createAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => createAuditedNote(
+      serverDb,
       "claimed-entry",
       "user-a",
       versionedNote,
@@ -3911,8 +3966,8 @@ describeRules("firestore security rules", () => {
     );
     await assertFails(staleRenameBatch.commit());
 
-    await assertSucceeds(updateAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => updateAuditedNote(
+      serverDb,
       "claimed-entry",
       "user-a",
       2,
@@ -3948,8 +4003,8 @@ describeRules("firestore security rules", () => {
     );
     await assertFails(deleteWithoutRelease.commit());
 
-    await assertSucceeds(updateAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => updateAuditedNote(
+      serverDb,
       "claimed-entry",
       "user-a",
       3,
@@ -3986,8 +4041,8 @@ describeRules("firestore security rules", () => {
     );
     await assertFails(restoreWithoutClaim.commit());
 
-    await assertSucceeds(updateAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => updateAuditedNote(
+      serverDb,
       "claimed-entry",
       "user-a",
       4,
@@ -4003,7 +4058,7 @@ describeRules("firestore security rules", () => {
     expect((await assertSucceeds(getDoc(doc(ownerDb, "vaultIntegrity", "user-a", "nameClaims", renamedClaimId)))).exists())
       .toBe(true);
 
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "claimed-folder", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "claimed-folder", "user-a", {
       ownerUid: "user-a",
       name: "암호화 폴더",
       color: "#7c5cff",
@@ -6123,7 +6178,7 @@ describeRules("firestore security rules", () => {
     await createAuditedVaultFolder(ownerDb, "deep-d", "user-a", {
       ...base, parentId: "deep-c", vaultAncestorIds: ["deep-a", "deep-b", "deep-c"]
     });
-    await assertSucceeds(createAuditedNote(ownerDb, "deep-note", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "deep-note", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -6196,10 +6251,10 @@ describeRules("firestore security rules", () => {
       updatedAt: serverTimestamp()
     });
 
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "lineage-a", "user-a", folder(null, [], 0)));
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "lineage-b", "user-a", folder("lineage-a", ["lineage-a"], 1)));
-    await assertSucceeds(createAuditedVaultFolder(ownerDb, "lineage-root-d", "user-a", folder(null, [], 2)));
-    await assertSucceeds(createAuditedNote(ownerDb, "lineage-note", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "lineage-a", "user-a", folder(null, [], 0)));
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "lineage-b", "user-a", folder("lineage-a", ["lineage-a"], 1)));
+    await assertServerSucceeds((serverDb) => createAuditedVaultFolder(serverDb, "lineage-root-d", "user-a", folder(null, [], 2)));
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "lineage-note", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -6211,7 +6266,7 @@ describeRules("firestore security rules", () => {
       folderId: "lineage-b",
       isDeleted: false
     }, ["user-a"]));
-    await assertSucceeds(createAuditedNote(ownerDb, "lineage-deleted-note", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "lineage-deleted-note", "user-a", {
       type: "personal",
       ownerUid: "user-a",
       participantUids: ["user-a"],
@@ -6223,8 +6278,8 @@ describeRules("firestore security rules", () => {
       folderId: "lineage-b",
       isDeleted: false
     }, ["user-a"]));
-    await assertSucceeds(updateAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => updateAuditedNote(
+      serverDb,
       "lineage-deleted-note",
       "user-a",
       2,
@@ -6233,8 +6288,8 @@ describeRules("firestore security rules", () => {
       ["user-a"],
       { isDeleted: true, deletedAt: serverTimestamp(), deletedBy: "user-a" }
     ));
-    await assertSucceeds(updateAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => updateAuditedNote(
+      serverDb,
       "lineage-deleted-note",
       "user-a",
       3,
@@ -6243,8 +6298,8 @@ describeRules("firestore security rules", () => {
       ["user-a"],
       { isDeleted: false, deletedAt: deleteField(), deletedBy: deleteField() }
     ));
-    await assertSucceeds(updateAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => updateAuditedNote(
+      serverDb,
       "lineage-deleted-note",
       "user-a",
       4,
@@ -6502,8 +6557,8 @@ describeRules("firestore security rules", () => {
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
     const otherDb = testEnv.authenticatedContext("user-b").firestore();
 
-    await assertSucceeds(
-      createAuditedVaultFolder(ownerDb, "folder-a", "user-a", {
+    await assertServerSucceeds((serverDb) =>
+      createAuditedVaultFolder(serverDb, "folder-a", "user-a", {
         ownerUid: "user-a",
         name: "암호화 폴더",
         color: "#7c5cff",
@@ -6528,11 +6583,11 @@ describeRules("firestore security rules", () => {
       wrappedKeys: { "user-a": ownerWrappedShareKey },
       isDeleted: false
     };
-    await assertSucceeds(createAuditedNote(ownerDb, "note-in-folder-a", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "note-in-folder-a", "user-a", {
       ...folderPlacementNote,
       folderId: "folder-a"
     }, ["user-a"]));
-    await assertSucceeds(createAuditedNote(ownerDb, "note-to-move-into-folder-a", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "note-to-move-into-folder-a", "user-a", {
       ...folderPlacementNote,
       folderId: null
     }, ["user-a"]));
@@ -6657,8 +6712,8 @@ describeRules("firestore security rules", () => {
       })
     );
     await assertFails(getDoc(doc(otherDb, "noteFolders/folder-a")));
-    await assertSucceeds(
-      createAuditedVaultFolder(ownerDb, "encrypted-folder", "user-a", {
+    await assertServerSucceeds((serverDb) =>
+      createAuditedVaultFolder(serverDb, "encrypted-folder", "user-a", {
         ownerUid: "user-a",
         name: "암호화 폴더",
         color: "#7c5cff",
@@ -6869,8 +6924,8 @@ describeRules("firestore security rules", () => {
         isDeleted: false
       }, ["user-a"])
     );
-    await assertSucceeds(
-      createAuditedNote(ownerDb, "revisioned-folder-note", "user-a", {
+    await assertServerSucceeds((serverDb) =>
+      createAuditedNote(serverDb, "revisioned-folder-note", "user-a", {
         type: "personal",
         ownerUid: "user-a",
         participantUids: ["user-a"],
@@ -6884,8 +6939,8 @@ describeRules("firestore security rules", () => {
         isDeleted: false
       }, ["user-a"])
     );
-    await assertSucceeds(
-      createAuditedNote(ownerDb, "atomic-content-folder-note", "user-a", {
+    await assertServerSucceeds((serverDb) =>
+      createAuditedNote(serverDb, "atomic-content-folder-note", "user-a", {
         type: "personal",
         ownerUid: "user-a",
         participantUids: ["user-a"],
@@ -6900,9 +6955,9 @@ describeRules("firestore security rules", () => {
         isDeleted: false
       }, ["user-a"])
     );
-    await assertSucceeds(
+    await assertServerSucceeds((serverDb) =>
       updateAuditedNote(
-        ownerDb,
+        serverDb,
         "atomic-content-folder-note",
         "user-a",
         2,
@@ -6932,9 +6987,9 @@ describeRules("firestore security rules", () => {
         }
       )
     );
-    await assertSucceeds(
+    await assertServerSucceeds((serverDb) =>
       updateAuditedNote(
-        ownerDb,
+        serverDb,
         "revisioned-folder-note",
         "user-a",
         2,
@@ -6984,9 +7039,9 @@ describeRules("firestore security rules", () => {
         }
       )
     );
-    await assertSucceeds(
+    await assertServerSucceeds((serverDb) =>
       updateAuditedNote(
-        ownerDb,
+        serverDb,
         "revisioned-folder-note",
         "user-a",
         3,
@@ -7047,17 +7102,17 @@ describeRules("firestore security rules", () => {
       isDeleted: false
     };
 
-    await assertSucceeds(createAuditedNote(ownerDb, "markdown-entry", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "markdown-entry", "user-a", {
       ...vaultNote,
       contentFormat: "markdown-v1",
       entryKind: "markdown"
     }, ["user-a"]));
-    await assertSucceeds(createAuditedNote(ownerDb, "canvas-entry", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "canvas-entry", "user-a", {
       ...vaultNote,
       contentFormat: "json-canvas-v1",
       entryKind: "canvas"
     }, ["user-a"]));
-    await assertSucceeds(createAuditedNote(ownerDb, "asset-entry", "user-a", {
+    await assertServerSucceeds((serverDb) => createAuditedNote(serverDb, "asset-entry", "user-a", {
       ...vaultNote,
       contentFormat: "asset-v1",
       entryKind: "asset"
@@ -7085,8 +7140,8 @@ describeRules("firestore security rules", () => {
       ...vaultNote,
       executablePayload: "alert(1)"
     }, ["user-a"]));
-    await assertSucceeds(updateAuditedNote(
-      ownerDb,
+    await assertServerSucceeds((serverDb) => updateAuditedNote(
+      serverDb,
       "markdown-entry",
       "user-a",
       2,
@@ -7747,15 +7802,15 @@ describeRules("firestore security rules", () => {
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a")));
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/history/history-a")));
-    await assertSucceeds(
-      updateAuditedNote(ownerDb, "note-a", "user-a", 1, "restore", ["restored"], ["user-a", "user-b"], {
+    await assertServerSucceeds((serverDb) =>
+      updateAuditedNote(serverDb, "note-a", "user-a", 1, "restore", ["restored"], ["user-a", "user-b"], {
         isDeleted: false,
         deletedAt: deleteField(),
         deletedBy: deleteField()
       })
     );
-    await assertSucceeds(
-      updateAuditedNote(ownerDb, "note-a", "user-a", 2, "delete", ["deleted"], ["user-a", "user-b"], {
+    await assertServerSucceeds((serverDb) =>
+      updateAuditedNote(serverDb, "note-a", "user-a", 2, "delete", ["deleted"], ["user-a", "user-b"], {
         isDeleted: true,
         deletedAt: serverTimestamp(),
         deletedBy: "user-a"
@@ -7821,19 +7876,21 @@ describeRules("firestore security rules", () => {
     });
     await assertFails(removedFormatBatch.commit());
 
-    const purgeBatch = writeBatch(ownerDb);
-    purgeBatch.update(doc(ownerDb, "notes/note-a"), purgeUpdates);
-    purgeBatch.set(doc(ownerDb, "notePurgeCleanupQueue/note-a"), {
+    await assertServerSucceeds(async (serverDb) => {
+    const purgeBatch = writeBatch(serverDb);
+    purgeBatch.update(doc(serverDb, "notes/note-a"), purgeUpdates);
+    purgeBatch.set(doc(serverDb, "notePurgeCleanupQueue/note-a"), {
       noteId: "note-a",
       ownerUid: "user-a",
       createdAt: serverTimestamp()
     });
-    await assertSucceeds(purgeBatch.commit());
+    return purgeBatch.commit();
+    });
     await assertFails(getDoc(doc(ownerDb, "notePurgeCleanupQueue/note-a")));
     await assertFails(getDoc(doc(participantDb, "notePurgeCleanupQueue/note-a")));
     await assertFails(updateDoc(doc(ownerDb, "notes/note-a"), restoreFields("user-a")));
     await assertFails(deleteDoc(doc(ownerDb, "notes/note-a/attachments/attachment-a")));
-    await assertSucceeds(deleteDoc(doc(ownerDb, "notes/note-a/history/history-a")));
+    await assertServerSucceeds((serverDb) => deleteDoc(doc(serverDb, "notes/note-a/history/history-a")));
     await assertFails(getDoc(doc(participantDb, "notes/note-a")));
   });
 

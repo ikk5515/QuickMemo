@@ -92,6 +92,29 @@ describe("Vercel zero-cost plan gate", () => {
     expect(() => productionVaultEnvironmentId({
       envs: [{ key: "VITE_OBSIDIAN_VAULT_ENABLED", target: ["production"] }]
     })).toThrow("metadata is ambiguous");
+    expect(() => productionVaultEnvironmentId({
+      envs: [{
+        id: "env_mixed",
+        key: "VITE_OBSIDIAN_VAULT_ENABLED",
+        target: ["production", "preview"]
+      }]
+    })).toThrow("metadata is ambiguous");
+    expect(() => productionVaultEnvironmentId({
+      envs: [{
+        id: "env_string",
+        key: "VITE_OBSIDIAN_VAULT_ENABLED",
+        target: "production"
+      }]
+    })).toThrow("metadata is ambiguous");
+  });
+
+  it("rejects a decrypted Vault flag that is not production-only", () => {
+    expect(() => assertProductionVaultEnabled({
+      id: "env_vault",
+      key: "VITE_OBSIDIAN_VAULT_ENABLED",
+      target: ["production", "preview"],
+      value: "true"
+    }, "env_vault")).toThrow("not explicitly enabled");
   });
 
   it("fails closed on an unknown or paginated environment response", () => {

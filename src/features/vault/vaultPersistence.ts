@@ -3,6 +3,7 @@ import {
   backfillRevisionedVaultNameClaim,
   createRevisionedEncryptedNote,
   createRevisionedEncryptedNoteAtId,
+  migrateLegacyVaultNote,
   resolveRevisionedVaultNameCollision,
   updateRevisionedEncryptedNote,
   updateRevisionedEncryptedNoteAndFolder,
@@ -236,6 +237,52 @@ export async function backfillVaultEntryNameClaim(
       indexVersion: VAULT_NAME_INDEX_VERSION,
       parentId: normalized.folderId
     },
+    noteId: note.id,
+    readerUids: note.participantUids,
+    uid
+  });
+}
+
+/**
+ * Seals the inferred legacy HTML storage identity after the Vault integrity
+ * marker exists. A unique active entry reserves its blinded name in the same
+ * server transaction; a collision loser or deleted entry deliberately writes
+ * identity only so it cannot steal or retain an active sibling reservation.
+ */
+export async function migrateLegacyVaultEntryIdentity(
+  note: DecryptedVaultNote,
+  uid: string,
+  vaultIntegrityKey: CryptoKey,
+  reserveNameClaim: boolean
+) {
+  if (note.ownerUid !== uid) {
+    throw new Error("Vault 저장 형식은 노트 소유자만 전환할 수 있습니다.");
+  }
+  if (note.contentFormat !== "legacy-html-v1" || note.entryKind !== "legacy-html") {
+    throw new Error("기존 HTML 노트만 명시적 Vault 저장 형식으로 전환할 수 있습니다.");
+  }
+  const normalized = validateVaultIdentityDraft(
+    { body: note.body, folderId: note.folderId ?? null, title: note.title },
+    note.contentFormat,
+    note.entryKind
+  );
+  const nameClaim = reserveNameClaim
+    ? {
+        claimId: await vaultNameFingerprint(vaultIntegrityKey, {
+          kind: note.entryKind,
+          name: normalized.title,
+          parentId: normalized.folderId,
+          targetType: "entry"
+        }),
+        indexVersion: VAULT_NAME_INDEX_VERSION,
+        parentId: normalized.folderId
+      }
+    : undefined;
+  return migrateLegacyVaultNote({
+    expectedContentFormat: "legacy-html-v1",
+    expectedEntryKind: "legacy-html",
+    expectedRevision: note.revision ?? 0,
+    ...(nameClaim ? { nameClaim } : {}),
     noteId: note.id,
     readerUids: note.participantUids,
     uid

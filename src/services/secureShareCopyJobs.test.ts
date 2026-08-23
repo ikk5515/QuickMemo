@@ -152,6 +152,26 @@ describe("secure share copy job recovery", () => {
     expect(deps.abortSecureShareCopyingNote).not.toHaveBeenCalled();
   });
 
+  it("fails closed before any mutation when stored copy counters are out of range", async () => {
+    const deps = dependencies([copyingNote({
+      secureShareCopyExpectedAttachmentCount: 1,
+      secureShareCopyReservedAttachmentCount: 1,
+      secureShareCopyReadyAttachmentCount: 2
+    })]);
+
+    await expect(reapStaleSecureShareCopyJobs("user-a", deps)).resolves.toEqual({
+      aborted: 0,
+      activated: 0,
+      retained: 1,
+      scanned: 1
+    });
+
+    expect(deps.activateSecureShareCopyingNote).not.toHaveBeenCalled();
+    expect(deps.getAllNoteAttachments).not.toHaveBeenCalled();
+    expect(deps.deleteNoteAttachment).not.toHaveBeenCalled();
+    expect(deps.abortSecureShareCopyingNote).not.toHaveBeenCalled();
+  });
+
   it("leaves a server-claimed job exclusively to the cleanup Cron", async () => {
     const deps = dependencies([copyingNote({
       secureShareCopyCleanupClaimId:

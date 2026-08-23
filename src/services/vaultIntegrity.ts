@@ -20,6 +20,13 @@ export interface ActivatedVaultIntegrityKey {
   key: CryptoKey;
 }
 
+export class VaultIntegrityNotReadyError extends Error {
+  constructor() {
+    super("먼저 Vault를 열어 암호화된 이름 준비를 완료해주세요.");
+    this.name = "VaultIntegrityNotReadyError";
+  }
+}
+
 function validateUid(uid: string) {
   if (!uid || uid !== uid.trim() || uid.length > 128 || uid.includes("/")) {
     throw new Error("Vault 무결성 키 사용자를 확인할 수 없습니다.");
@@ -126,6 +133,22 @@ export async function prepareVaultIntegrityKey(
     state: "candidate",
     wrappedKey: await wrapNoteKey(key, profile.publicKeyJwk)
   };
+}
+
+/**
+ * Reads an already-activated integrity key without ever creating the cutover
+ * marker. Secondary entry points such as public-share copy must not activate a
+ * marker because they do not own a complete Vault snapshot.
+ */
+export async function requireExistingVaultIntegrityKey(
+  profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
+  privateKey: CryptoKey
+) {
+  const prepared = await prepareVaultIntegrityKey(profile, privateKey);
+  if (prepared.state !== "existing") {
+    throw new VaultIntegrityNotReadyError();
+  }
+  return prepared.key;
 }
 
 /**

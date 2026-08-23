@@ -127,9 +127,11 @@ export async function loginRosterUser(page, user, diagnostics) {
 
     const message = (await formError.textContent()) ?? "";
     const transientEmulatorTransportError =
-      /client is offline|network connection was lost|firestore\/unavailable/iu.test(message);
-    const transientSeededCredentialRejection = message.trim() === "비밀번호를 확인해주세요.";
-    if ((!transientEmulatorTransportError && !transientSeededCredentialRejection) || attempt === 2) {
+      /client is offline|network connection was lost|firestore\/unavailable|네트워크 연결이 불안정/iu.test(message);
+    // A credential rejection is authoritative. In particular, Auth Emulator
+    // returns the same localized UI message for EMAIL_NOT_FOUND after an
+    // external reset, so retrying it would hide a real missing/wrong account.
+    if (!transientEmulatorTransportError || attempt === 2) {
       throw new Error(`E2E roster login failed: ${message || "unknown error"}`);
     }
 

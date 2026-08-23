@@ -29,6 +29,8 @@ import {
   deleteNoteAttachment
 } from "../services/notes";
 import { BlobAttachmentReservationCleanupError } from "../services/blobAttachments";
+import { requireExistingVaultIntegrityKey } from "../services/vaultIntegrity";
+import { vaultNameFingerprint } from "../features/vault/vaultIntegrity";
 import type {
   SecurePublicShareAttachmentMetadata,
   SecurePublicShareCopyPayload
@@ -134,6 +136,7 @@ export type SecureShareSaveCopyErrorCode =
   | "invalid_attachment"
   | "invalid_content"
   | "not_authorized"
+  | "vault_not_ready"
   | "save_failed";
 
 export class SecureShareSaveCopyError extends Error {
@@ -157,8 +160,10 @@ interface SecureShareSaveCopyDependencies {
   encryptText: typeof encryptText;
   generateNoteKey: typeof generateNoteKey;
   now: () => number;
+  requireExistingVaultIntegrityKey: typeof requireExistingVaultIntegrityKey;
   unwrapNoteKey: typeof unwrapNoteKey;
   wrapNoteKey: typeof wrapNoteKey;
+  vaultNameFingerprint: typeof vaultNameFingerprint;
 }
 
 const defaultDependencies: SecureShareSaveCopyDependencies = {
@@ -172,8 +177,10 @@ const defaultDependencies: SecureShareSaveCopyDependencies = {
   encryptText,
   generateNoteKey,
   now: Date.now,
+  requireExistingVaultIntegrityKey,
   unwrapNoteKey,
-  wrapNoteKey
+  wrapNoteKey,
+  vaultNameFingerprint
 };
 
 interface ValidatedCopyAttachment {
@@ -473,6 +480,18 @@ export async function saveSecureShareCopy(
     totalBytes: 0
   });
 
+  let vaultIntegrityKey: CryptoKey;
+  try {
+    vaultIntegrityKey = await dependencies.requireExistingVaultIntegrityKey(profile, privateKey);
+  } catch (caught) {
+    throw new SecureShareSaveCopyError(
+      "vault_not_ready",
+      "먼저 Vault를 열어 암호화된 이름 준비를 완료해주세요.",
+      { cause: caught }
+    );
+  }
+  assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
+
   let createdNoteId: string | null = null;
   let copyJobId: string | null = null;
   let activationAttempted = false;
@@ -489,11 +508,17 @@ export async function saveSecureShareCopy(
     const noteKey = await dependencies.unwrapNoteKey(ownerWrappedKey, privateKey);
     assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
 
-    const [encryptedTitle, encryptedBody, historySummary, historySnapshot] = await Promise.all([
+    const [encryptedTitle, encryptedBody, historySummary, historySnapshot, nameClaimId] = await Promise.all([
       dependencies.encryptText(validated.title, noteKey),
       dependencies.encryptText(validated.serializedBody, noteKey),
       dependencies.encryptText("보안 공유에서 독립 복사본을 저장했습니다.", noteKey),
-      dependencies.encryptText(validated.historySnapshot, noteKey)
+      dependencies.encryptText(validated.historySnapshot, noteKey),
+      dependencies.vaultNameFingerprint(vaultIntegrityKey, {
+        kind: "legacy-html",
+        name: validated.title,
+        parentId: null,
+        targetType: "entry"
+      })
     ]);
 
     emitProgress(input.onProgress, {
@@ -509,18 +534,28 @@ export async function saveSecureShareCopy(
 
     const activeCopyJobId = dependencies.createCopyJobId();
     copyJobId = activeCopyJobId;
+    const targetNoteId = crypto.randomUUID();
+    createdNoteId = targetNoteId;
     const createdNote = await dependencies.createSecureShareCopyingNote({
       type: "personal",
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html",
       ownerUid: profile.uid,
       participantUids: [profile.uid],
       encryptedTitle,
       encryptedBody,
       wrappedKeys: { [profile.uid]: ownerWrappedKey },
       folderId: null,
+      nameClaim: {
+        claimId: nameClaimId,
+        indexVersion: 1,
+        parentId: null
+      },
       historySummary,
       historySnapshot,
       copyJobId: activeCopyJobId,
-      expectedAttachmentCount: validated.attachments.length
+      expectedAttachmentCount: validated.attachments.length,
+      noteId: targetNoteId
     });
     createdNoteId = createdNote.noteId;
     assertActive(signal, validated.copyGrantExpiresAt, dependencies.now());
@@ -723,15 +758,17 @@ export async function saveSecureShareCopy(
       }
     }
 
-    try {
-      await dependencies.abortSecureShareCopyingNote({
-        copyJobId,
-        expectedRevision: 1,
-        noteId: createdNoteId,
-        uid: profile.uid
-      });
-    } catch (cleanupError) {
-      cleanupErrors.push(cleanupError);
+    if (cleanupErrors.length === 0) {
+      try {
+        await dependencies.abortSecureShareCopyingNote({
+          copyJobId,
+          expectedRevision: 1,
+          noteId: createdNoteId,
+          uid: profile.uid
+        });
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
     }
 
     if (cleanupErrors.length) {

@@ -37,6 +37,20 @@ import {
   type BlobAttachmentUploadProgressHandler
 } from "./blobAttachments";
 import { ensureVaultFolderTree, mutateVaultFolder } from "./vaultFolderMutations";
+import {
+  mutateVaultNote,
+  vaultNoteAccessPayload,
+  VaultNoteApiError,
+  vaultNoteCreatePayload,
+  vaultNoteImportCreatePayload,
+  vaultNoteLifecyclePayload,
+  vaultNoteMigrateLegacyPayload,
+  vaultNotePurgePayload,
+  vaultNoteSecureCopyCreatePayload,
+  vaultNoteSecureCopyLifecyclePayload,
+  type VaultNoteApiPayload,
+  type VaultNoteMutationResultFor
+} from "./vaultNoteMutations";
 import type {
   EncryptedPayload,
   NoteAttachmentDocument,
@@ -85,7 +99,14 @@ const maximumVaultCutoverOwnedNotes = 20_000;
  * again from the server, preventing the active `isDeleted == false` query from
  * silently omitting them when the integrity marker is activated.
  */
-export async function loadOwnedVaultCutoverNotes(uid: string) {
+export interface OwnedVaultCutoverInventory {
+  activeNotes: NoteSnapshot[];
+  deletedNotes: NoteSnapshot[];
+}
+
+export async function loadOwnedVaultCutoverInventory(
+  uid: string
+): Promise<OwnedVaultCutoverInventory> {
   if (!uid || uid !== uid.trim() || uid.length > 128 || uid.includes("/")) {
     throw new Error("Vault 소유자를 확인할 수 없습니다.");
   }
@@ -116,7 +137,14 @@ export async function loadOwnedVaultCutoverNotes(uid: string) {
   if (notes.some((note) => !hasDeletionMetadata(note) && visibleNote(note))) {
     throw new Error("기존 노트의 삭제 상태를 서버에서 확인하지 못했습니다.");
   }
-  return sortedByUpdatedAt(notes.filter(visibleNote));
+  return {
+    activeNotes: sortedByUpdatedAt(notes.filter(visibleNote)),
+    deletedNotes: sortedByUpdatedAt(notes.filter(deletedNote))
+  };
+}
+
+export async function loadOwnedVaultCutoverNotes(uid: string) {
+  return (await loadOwnedVaultCutoverInventory(uid)).activeNotes;
 }
 
 export interface SaveNoteInput {
@@ -186,6 +214,18 @@ export interface CreatedRevisionedNoteResult extends NoteMutationResult {
 export interface CreateSecureShareCopyingNoteInput extends SaveNoteInput {
   copyJobId: string;
   expectedAttachmentCount: number;
+  noteId: string;
+}
+
+export interface MigrateLegacyVaultNoteInput {
+  expectedContentFormat: "legacy-html-v1";
+  expectedEntryKind: "legacy-html";
+  expectedRevision: number;
+  historySummary?: EncryptedPayload;
+  nameClaim?: VaultNameClaimReservationInput;
+  noteId: string;
+  readerUids: string[];
+  uid: string;
 }
 
 export interface SecureShareCopyingNoteLifecycleInput {
@@ -242,6 +282,7 @@ export interface UpdateRevisionedEncryptedNoteAndFolderInput extends UpdateRevis
 export interface UpdateRevisionedNoteAccessInput {
   expectedRevision: number;
   folderId?: string | null;
+  nameClaim?: VaultNameClaimReservationInput;
   noteId: string;
   participantUids: string[];
   type: NoteKind;
@@ -252,6 +293,7 @@ export interface UpdateRevisionedNoteAccessInput {
 export interface UpdateRevisionedNoteFolderInput {
   expectedRevision: number;
   folderId: string | null;
+  nameClaim: VaultNameClaimReservationInput;
   noteId: string;
   readerUids: string[];
   uid: string;
@@ -327,6 +369,33 @@ async function commitVaultFolderMutation(
   }
 }
 
+async function commitServerVaultNoteMutation<TPayload extends VaultNoteApiPayload>(
+  ownerUid: string,
+  payload: TPayload,
+  options: { claimId?: string; expectedRevision?: number } = {}
+): Promise<VaultNoteMutationResultFor<TPayload>> {
+  try {
+    return await mutateVaultNote(ownerUid, payload);
+  } catch (error) {
+    if (error instanceof VaultNoteApiError) {
+      if (error.code === "vault_name_conflict" && options.claimId) {
+        throw new VaultNameConflictError(options.claimId);
+      }
+      if (
+        error.code === "revision_conflict"
+        && options.expectedRevision !== undefined
+        && error.actualRevision !== undefined
+      ) {
+        throw new NoteRevisionConflictError(
+          options.expectedRevision,
+          error.actualRevision
+        );
+      }
+    }
+    throw error;
+  }
+}
+
 export function isLegacyHtmlNoteDocument(
   note: Pick<NoteDocument, "contentFormat" | "entryKind">
 ) {
@@ -334,17 +403,6 @@ export function isLegacyHtmlNoteDocument(
     (!note.contentFormat && !note.entryKind)
     || (note.contentFormat === "legacy-html-v1" && note.entryKind === "legacy-html")
   );
-}
-
-function noteStorageIdentityMatches(
-  note: Pick<NoteDocument, "contentFormat" | "entryKind">,
-  expectedContentFormat: VaultContentFormat,
-  expectedEntryKind: VaultEntryKind
-) {
-  if (isLegacyHtmlNoteDocument(note)) {
-    return expectedContentFormat === "legacy-html-v1" && expectedEntryKind === "legacy-html";
-  }
-  return note.contentFormat === expectedContentFormat && note.entryKind === expectedEntryKind;
 }
 
 export interface SaveNoteAttachmentInput {
@@ -380,6 +438,7 @@ type StoredAttachmentDocument = Pick<
 };
 
 export interface PurgeNoteInput {
+  expectedRevision: number;
   noteId: string;
   ownerUid: string;
   uid: string;
@@ -511,72 +570,6 @@ function assertEncryptedNotePayloadSizes(input: Pick<
   assertEncryptedPayloadSize(input.encryptedBody, "노트 본문", maxEncryptedBodyCharacters);
   assertEncryptedPayloadSize(input.historySummary, "노트 이력 요약", maxEncryptedHistorySummaryCharacters);
   assertEncryptedPayloadSize(input.historySnapshot, "노트 이력 스냅샷", maxEncryptedHistorySnapshotCharacters);
-}
-
-function encryptedPayloadMatches(value: unknown, expected: EncryptedPayload) {
-  if (!value || typeof value !== "object") return false;
-  const payload = value as Record<string, unknown>;
-  return Object.keys(payload).length === 4
-    && payload.algorithm === expected.algorithm
-    && payload.cipherText === expected.cipherText
-    && payload.iv === expected.iv
-    && payload.version === expected.version;
-}
-
-function optionalEncryptedPayloadMatches(value: unknown, expected?: EncryptedPayload) {
-  return expected === undefined
-    ? value === undefined
-    : encryptedPayloadMatches(value, expected);
-}
-
-function wrappedNoteKeyMatches(value: unknown, expected: WrappedNoteKey) {
-  if (!value || typeof value !== "object") return false;
-  const wrappedKey = value as Record<string, unknown>;
-  return Object.keys(wrappedKey).length === 3
-    && wrappedKey.algorithm === expected.algorithm
-    && wrappedKey.version === expected.version
-    && wrappedKey.wrappedKey === expected.wrappedKey;
-}
-
-function wrappedNoteKeysMatch(
-  value: unknown,
-  expected: Record<string, WrappedNoteKey>
-) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const stored = value as Record<string, unknown>;
-  const storedUids = Object.keys(stored).sort();
-  const expectedUids = Object.keys(expected).sort();
-  return storedUids.length === expectedUids.length
-    && storedUids.every((uid, index) => (
-      uid === expectedUids[index] && wrappedNoteKeyMatches(stored[uid], expected[uid])
-    ));
-}
-
-function importedCreateHistoryMatches(
-  value: unknown,
-  input: {
-    encryptedSnapshot?: EncryptedPayload;
-    encryptedSummary?: EncryptedPayload;
-    noteId: string;
-    participantUids: string[];
-    uid: string;
-  }
-) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const history = value as Record<string, unknown>;
-  return history.noteId === input.noteId
-    && history.actorUid === input.uid
-    && history.action === "create"
-    && history.revision === initialNoteRevision
-    && Array.isArray(history.changedFields)
-    && history.changedFields.length === 2
-    && history.changedFields[0] === "title"
-    && history.changedFields[1] === "body"
-    && Array.isArray(history.readerUids)
-    && history.readerUids.length === input.participantUids.length
-    && history.readerUids.every((uid, index) => uid === input.participantUids[index])
-    && optionalEncryptedPayloadMatches(history.encryptedSummary, input.encryptedSummary)
-    && optionalEncryptedPayloadMatches(history.encryptedSnapshot, input.encryptedSnapshot);
 }
 
 function expectedNoteRevision(revision: number) {
@@ -1223,14 +1216,32 @@ export async function getNoteRevisionState(noteId: string) {
 }
 
 async function createRevisionedEncryptedNoteWithFields(
-  input: SaveNoteInput,
-  additionalFields: Record<string, unknown> = {}
+  input: SaveNoteInput
 ): Promise<CreatedRevisionedNoteResult> {
   assertEncryptedNotePayloadSizes(input);
   if (input.type === "personal" && input.folderId) {
     await ensureVaultFolderTree(input.ownerUid);
   }
-  const { historySnapshot, historySummary, nameClaim, ...noteInput } = input;
+  const versionedVaultEntry = Boolean(input.contentFormat || input.entryKind);
+  if (versionedVaultEntry) {
+    const validatedClaim = assertVaultNameClaim(
+      input.nameClaim as VaultNameClaimReservationInput,
+      input.folderId ?? null
+    );
+    const result = await commitServerVaultNoteMutation(
+      input.ownerUid,
+      vaultNoteCreatePayload(input),
+      { claimId: validatedClaim.claimId }
+    );
+    return {
+      lastMutationId: result.lastMutationId,
+      noteId: result.noteId,
+      noteRef: doc(db, "notes", result.noteId),
+      revision: result.revision
+    };
+  }
+  const { historySnapshot, historySummary, nameClaim: _nameClaim, ...noteInput } = input;
+  void _nameClaim;
   const noteRef = doc(collection(db, "notes"));
   const historyRef = doc(collection(db, "notes", noteRef.id, "history"));
   const batch = writeBatch(db);
@@ -1252,21 +1263,11 @@ async function createRevisionedEncryptedNoteWithFields(
     throw new Error("노트 생성 이력을 만들 수 없습니다.");
   }
 
-  const versionedVaultEntry = Boolean(input.contentFormat || input.entryKind);
-  const validatedClaim = versionedVaultEntry
-    ? assertVaultNameClaim(nameClaim as VaultNameClaimReservationInput, input.folderId ?? null)
-    : null;
-
   batch.set(noteRef, {
     ...noteInput,
     attachmentRevision: 0,
-    ...additionalFields,
     participantUids,
     folderId: input.type === "personal" ? input.folderId ?? null : null,
-    ...(validatedClaim ? {
-      vaultNameClaimId: validatedClaim.claimId,
-      vaultNameIndexVersion: validatedClaim.indexVersion
-    } : {}),
     createdAt: serverTimestamp(),
     isDeleted: false,
     lastMutationId,
@@ -1276,14 +1277,6 @@ async function createRevisionedEncryptedNoteWithFields(
     updatedBy: input.ownerUid
   });
   batch.set(historyRef, historyDocument);
-  if (validatedClaim) {
-    batch.set(vaultNameClaimRef(input.ownerUid, validatedClaim.claimId), vaultNameClaimDocument(
-      input.ownerUid,
-      noteRef.id,
-      "entry",
-      validatedClaim
-    ));
-  }
 
   await batch.commit();
   return { lastMutationId, noteId: noteRef.id, noteRef, revision };
@@ -1329,124 +1322,24 @@ export async function createRevisionedEncryptedNoteAtId(
   }
   const noteId = assertExplicitVaultTargetId(targetId, "가져오기 항목");
   const vaultImportJobId = assertVaultImportJobId(importJobId);
-  const { historySnapshot, historySummary, nameClaim, ...noteInput } = input;
   const validatedClaim = assertVaultNameClaim(
-    nameClaim as VaultNameClaimReservationInput,
+    input.nameClaim as VaultNameClaimReservationInput,
     input.folderId ?? null
   );
   if (!input.contentFormat || !input.entryKind || input.type !== "personal") {
     throw new Error("명시적 식별자 생성은 암호화 Vault 항목에서만 사용할 수 있습니다.");
   }
-  const noteRef = doc(db, "notes", noteId);
-  const claimRef = vaultNameClaimRef(input.ownerUid, validatedClaim.claimId);
-  const historyRef = doc(collection(db, "notes", noteId, "history"));
-  const participantUids = Array.from(new Set(input.participantUids));
-  const revision = initialNoteRevision;
-  const lastMutationId = historyRef.id;
-  const historyDocument = noteHistoryDocument(
-    noteId,
+  const result = await commitServerVaultNoteMutation(
     input.ownerUid,
-    "create",
-    ["title", "body"],
-    participantUids,
-    revision,
-    historySummary,
-    historySnapshot
+    vaultNoteImportCreatePayload(input, noteId, vaultImportJobId),
+    { claimId: validatedClaim.claimId }
   );
-  if (!historyDocument) throw new Error("노트 생성 이력을 만들 수 없습니다.");
-
-  return runTransaction(db, async (transaction) => {
-    // The blinded name claim is safe to probe when absent because it lives in
-    // the authenticated owner's namespace. Reading the deterministic note id
-    // first would require a missing-document get and either weaken the notes
-    // ACL into an existence oracle or make every first create fail. A missing
-    // claim therefore takes the create-only path without reading noteRef;
-    // Firestore Rules reject the same set as an update if noteRef already
-    // exists, so this path still cannot overwrite a colliding document.
-    const claimSnapshot = await transaction.get(claimRef);
-    if (claimSnapshot.exists()) {
-      if (!claimTargets(
-        claimSnapshot.data(),
-        input.ownerUid,
-        noteId,
-        "entry",
-        input.folderId ?? null
-      )) {
-        throw new VaultNameConflictError(validatedClaim.claimId);
-      }
-      const noteSnapshot = await transaction.get(noteRef);
-      if (!noteSnapshot.exists()) {
-        throw new Error("가져오기 이름 예약과 대상 항목이 일치하지 않습니다.");
-      }
-      const current = noteSnapshot.data() as NoteDocument;
-      const currentMutationId = current.lastMutationId;
-      if (
-        current.ownerUid !== input.ownerUid
-        || current.type !== "personal"
-        || !Array.isArray(current.participantUids)
-        || current.participantUids.length !== participantUids.length
-        || current.participantUids.some((uid, index) => uid !== participantUids[index])
-        || !encryptedPayloadMatches(current.encryptedTitle, input.encryptedTitle)
-        || !encryptedPayloadMatches(current.encryptedBody, input.encryptedBody)
-        || !wrappedNoteKeysMatch(current.wrappedKeys, input.wrappedKeys)
-        || current.vaultNameClaimId !== validatedClaim.claimId
-        || current.vaultNameIndexVersion !== validatedClaim.indexVersion
-        || current.vaultImportJobId !== vaultImportJobId
-        || (current.folderId ?? null) !== (input.folderId ?? null)
-        || current.contentFormat !== input.contentFormat
-        || current.entryKind !== input.entryKind
-        || current.revision !== initialNoteRevision
-        || current.attachmentRevision !== 0
-        || current.isDeleted !== false
-        || current.updatedBy !== input.ownerUid
-        || typeof currentMutationId !== "string"
-        || !currentMutationId
-      ) {
-        throw new Error("가져오기 항목 식별자가 기존 데이터와 충돌합니다.");
-      }
-      const currentHistorySnapshot = await transaction.get(
-        doc(db, "notes", noteId, "history", currentMutationId)
-      );
-      if (
-        !currentHistorySnapshot.exists()
-        || !importedCreateHistoryMatches(currentHistorySnapshot.data(), {
-          encryptedSnapshot: historySnapshot,
-          encryptedSummary: historySummary,
-          noteId,
-          participantUids,
-          uid: input.ownerUid
-        })
-      ) {
-        throw new Error("가져오기 항목 식별자가 기존 생성 이력과 충돌합니다.");
-      }
-      return { lastMutationId: currentMutationId, noteId, noteRef, revision };
-    }
-
-    transaction.set(noteRef, {
-      ...noteInput,
-      attachmentRevision: 0,
-      participantUids,
-      folderId: input.folderId ?? null,
-      vaultNameClaimId: validatedClaim.claimId,
-      vaultNameIndexVersion: validatedClaim.indexVersion,
-      vaultImportJobId,
-      createdAt: serverTimestamp(),
-      isDeleted: false,
-      lastMutationId,
-      revision,
-      updatedAt: serverTimestamp(),
-      savedAt: serverTimestamp(),
-      updatedBy: input.ownerUid
-    });
-    transaction.set(historyRef, historyDocument);
-    transaction.set(claimRef, vaultNameClaimDocument(
-      input.ownerUid,
-      noteId,
-      "entry",
-      validatedClaim
-    ));
-    return { lastMutationId, noteId, noteRef, revision };
-  });
+  return {
+    lastMutationId: result.lastMutationId,
+    noteId: result.noteId,
+    noteRef: doc(db, "notes", result.noteId),
+    revision: result.revision
+  };
 }
 
 export async function createSecureShareCopyingNote(
@@ -1457,6 +1350,9 @@ export async function createSecureShareCopyingNote(
     || input.ownerUid.length === 0
     || input.participantUids.length !== 1
     || input.participantUids[0] !== input.ownerUid
+    || input.contentFormat !== "legacy-html-v1"
+    || input.entryKind !== "legacy-html"
+    || !/^[A-Za-z0-9_-]{1,120}$/u.test(input.noteId)
     || !/^[A-Za-z0-9_-]{16,160}$/u.test(input.copyJobId)
     || !Number.isSafeInteger(input.expectedAttachmentCount)
     || input.expectedAttachmentCount < 0
@@ -1465,79 +1361,68 @@ export async function createSecureShareCopyingNote(
     throw new Error("보안 공유 복사 작업 정보가 올바르지 않습니다.");
   }
 
-  const {
-    copyJobId,
-    expectedAttachmentCount,
-    ...noteInput
-  } = input;
+  assertEncryptedNotePayloadSizes(input);
+  assertVaultNameClaim(
+    input.nameClaim as VaultNameClaimReservationInput,
+    input.folderId ?? null
+  );
 
-  return createRevisionedEncryptedNoteWithFields(noteInput, {
-    secureShareCopyExpectedAttachmentCount: expectedAttachmentCount,
-    secureShareCopyJobId: copyJobId,
-    secureShareCopyReadyAttachmentCount: 0,
-    secureShareCopyReservedAttachmentCount: 0,
-    secureShareCopyStartedAt: serverTimestamp(),
-    secureShareCopyState: "copying",
-    secureShareCopyUpdatedAt: serverTimestamp()
-  });
+  const payload = vaultNoteSecureCopyCreatePayload(input);
+  let result;
+  try {
+    result = await commitServerVaultNoteMutation(input.ownerUid, payload);
+  } catch (error) {
+    if (
+      !(error instanceof VaultNoteApiError)
+      || (error.code !== "network_error" && error.code !== "invalid_response")
+    ) {
+      throw error;
+    }
+    result = await commitServerVaultNoteMutation(input.ownerUid, payload);
+  }
+  return {
+    lastMutationId: result.lastMutationId,
+    noteId: result.noteId,
+    noteRef: doc(db, "notes", result.noteId),
+    revision: result.revision
+  };
 }
 
 export async function activateSecureShareCopyingNote(
   input: SecureShareCopyingNoteLifecycleInput
 ): Promise<{ noteId: string; state: "active" }> {
   const expectedRevision = expectedNoteRevision(input.expectedRevision);
-  const noteRef = doc(db, "notes", input.noteId);
+  const result = await commitServerVaultNoteMutation(input.uid, {
+    action: "secure-copy-activate",
+    copyJobId: input.copyJobId,
+    expectedRevision,
+    noteId: input.noteId
+  }, { expectedRevision });
+  return { noteId: result.noteId, state: result.state };
+}
 
-  return runTransaction(db, async (transaction) => {
-    const snapshot = await transaction.get(noteRef);
-
-    if (!snapshot.exists()) {
-      throw new Error("활성화할 복사 노트를 찾을 수 없습니다.");
+export async function migrateLegacyVaultNote(input: MigrateLegacyVaultNoteInput) {
+  if (
+    input.expectedContentFormat !== "legacy-html-v1"
+    || input.expectedEntryKind !== "legacy-html"
+  ) {
+    throw new Error("기존 HTML 노트 저장 형식을 확인할 수 없습니다.");
+  }
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const result = await commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteMigrateLegacyPayload({ ...input, expectedRevision }),
+    {
+      claimId: input.nameClaim?.claimId,
+      expectedRevision
     }
-
-    const note = snapshot.data() as NoteDocument;
-
-    if (
-      note.ownerUid !== input.uid
-      || note.secureShareCopyJobId !== input.copyJobId
-      || storedNoteRevision(note) !== expectedRevision
-    ) {
-      throw new Error("보안 공유 복사 작업이 현재 노트와 일치하지 않습니다.");
-    }
-
-    if (note.secureShareCopyState === "active") {
-      return { noteId: input.noteId, state: "active" as const };
-    }
-
-    const expectedCount = note.secureShareCopyExpectedAttachmentCount;
-    const reservedCount = note.secureShareCopyReservedAttachmentCount;
-    const readyCount = note.secureShareCopyReadyAttachmentCount;
-
-    if (
-      note.secureShareCopyState !== "copying"
-      || note.isDeleted === true
-      || Boolean(
-        note.secureShareCopyCleanupClaimId
-        || note.secureShareCopyCleanupClaimedAt
-      )
-      || !Number.isSafeInteger(expectedCount)
-      || reservedCount !== expectedCount
-      || readyCount !== expectedCount
-    ) {
-      throw new Error("복사할 첨부파일이 모두 준비되지 않았습니다.");
-    }
-
-    transaction.update(noteRef, {
-      savedAt: serverTimestamp(),
-      secureShareCopyFinishedAt: serverTimestamp(),
-      secureShareCopyState: "active",
-      secureShareCopyUpdatedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    });
-
-    return { noteId: input.noteId, state: "active" as const };
-  });
+  );
+  return {
+    claimState: result.claimState,
+    lastMutationId: result.lastMutationId,
+    noteId: result.noteId,
+    revision: result.revision
+  };
 }
 
 export async function createEncryptedNote(input: SaveNoteInput) {
@@ -1546,28 +1431,15 @@ export async function createEncryptedNote(input: SaveNoteInput) {
 
 export async function updateRevisionedEncryptedNote(input: UpdateRevisionedEncryptedNoteInput) {
   assertEncryptedNotePayloadSizes(input);
-  return commitRevisionedNoteMutation({
-    action: "content",
-    changedFields: input.changedFields ?? ["title", "body"],
-    encryptedSnapshot: input.historySnapshot,
-    encryptedSummary: input.historySummary,
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    nameClaim: input.nameClaim,
-    validateCurrent: (note) => noteStorageIdentityMatches(
-      note,
-      input.expectedContentFormat,
-      input.expectedEntryKind
-    ),
-    update: {
-      encryptedTitle: input.encryptedTitle,
-      encryptedBody: input.encryptedBody,
-      isDeleted: false,
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    }
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "update",
+    expectedRevision
+  }, {
+    claimId: input.nameClaim?.claimId,
+    expectedRevision
   });
 }
 
@@ -1579,23 +1451,15 @@ export async function updateRevisionedEncryptedNote(input: UpdateRevisionedEncry
 export async function backfillRevisionedVaultNameClaim(
   input: BackfillRevisionedVaultNameClaimInput
 ) {
-  return commitRevisionedNoteMutation({
-    action: "content",
-    changedFields: ["name-claim"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    encryptedSummary: input.historySummary,
-    nameClaim: input.nameClaim,
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    validateCurrent: (note) => (
-      note.ownerUid === input.uid
-      && noteStorageIdentityMatches(note, input.expectedContentFormat, input.expectedEntryKind)
-    ),
-    update: {
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    }
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "backfill-claim",
+    expectedRevision
+  }, {
+    claimId: input.nameClaim.claimId,
+    expectedRevision
   });
 }
 
@@ -1614,26 +1478,16 @@ export async function resolveRevisionedVaultNameCollision(
     throw new Error("Vault 이름 충돌 복구 변경 정보가 올바르지 않습니다.");
   }
   assertEncryptedPayloadSize(input.encryptedTitle, "노트 제목", maxEncryptedTitleCharacters);
-  return commitRevisionedNoteMutation({
-    action: "content",
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "resolve-collision",
     changedFields,
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    encryptedSummary: input.historySummary,
-    nameClaim: input.nameClaim,
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    validateCurrent: (note) => (
-      note.ownerUid === input.uid
-      && noteStorageIdentityMatches(note, input.expectedContentFormat, input.expectedEntryKind)
-      && (!changedFields.includes("folder") || note.type === "personal")
-    ),
-    update: {
-      ...(input.encryptedTitle ? { encryptedTitle: input.encryptedTitle } : {}),
-      ...(Object.prototype.hasOwnProperty.call(input, "folderId") ? { folderId: input.folderId } : {}),
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    }
+    expectedRevision
+  }, {
+    claimId: input.nameClaim.claimId,
+    expectedRevision
   });
 }
 
@@ -1641,29 +1495,15 @@ export async function updateRevisionedEncryptedNoteAndFolder(
   input: UpdateRevisionedEncryptedNoteAndFolderInput
 ) {
   assertEncryptedNotePayloadSizes(input);
-  return commitRevisionedNoteMutation({
-    action: "content",
-    changedFields: input.changedFields ?? ["title", "body", "folder"],
-    encryptedSnapshot: input.historySnapshot,
-    encryptedSummary: input.historySummary,
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    nameClaim: input.nameClaim,
-    validateCurrent: (note) => (
-      noteStorageIdentityMatches(note, input.expectedContentFormat, input.expectedEntryKind)
-      && note.ownerUid === input.uid
-      && note.type === "personal"
-    ),
-    update: {
-      encryptedTitle: input.encryptedTitle,
-      encryptedBody: input.encryptedBody,
-      folderId: input.folderId,
-      isDeleted: false,
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    }
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "update",
+    expectedRevision
+  }, {
+    claimId: input.nameClaim?.claimId,
+    expectedRevision
   });
 }
 
@@ -1697,7 +1537,12 @@ export async function updateEncryptedNote(
 }
 
 export async function updateRevisionedNoteAccess(input: UpdateRevisionedNoteAccessInput) {
-  return commitRevisionedNoteAccess(input, expectedNoteRevision(input.expectedRevision));
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteAccessPayload({ ...input, expectedRevision }),
+    { expectedRevision }
+  );
 }
 
 export async function updateNoteAccess(
@@ -1712,25 +1557,13 @@ export async function updateNoteAccess(
 }
 
 export async function updateRevisionedNoteFolder(input: UpdateRevisionedNoteFolderInput) {
-  return commitRevisionedNoteMutation({
-    action: "share",
-    changedFields: ["folder"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    update: {
-      folderId: input.folderId,
-      isDeleted: false,
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    },
-    validateCurrent: (note) => (
-      note.ownerUid === input.uid
-      && note.type === "personal"
-      && (note.folderId ?? null) !== input.folderId
-    )
-  });
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "move",
+    expectedRevision
+  }, { expectedRevision });
 }
 
 export async function updateNoteFolder(noteId: string, uid: string, folderId: string | null) {
@@ -2404,51 +2237,26 @@ export async function deleteNoteAttachment(noteId: string, attachmentId: string)
 }
 
 export async function deleteRevisionedNote(input: RevisionedNoteLifecycleInput) {
-  return commitRevisionedNoteMutation({
-    action: "delete",
-    changedFields: ["deleted"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    update: {
-      isDeleted: true,
-      deletedAt: serverTimestamp(),
-      deletedBy: input.uid,
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    }
-  });
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteLifecyclePayload({ ...input, expectedRevision }, "trash"),
+    { expectedRevision }
+  );
 }
 
 export async function abortSecureShareCopyingNote(
   input: SecureShareCopyingNoteLifecycleInput
 ) {
-  return commitRevisionedNoteMutation({
-    action: "delete",
-    changedFields: ["deleted"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: [input.uid],
-    uid: input.uid,
-    update: {
-      isDeleted: true,
-      deletedAt: serverTimestamp(),
-      deletedBy: input.uid,
-      secureShareCopyFinishedAt: serverTimestamp(),
-      secureShareCopyState: "aborted",
-      secureShareCopyUpdatedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    },
-    validateCurrent: (note) =>
-      note.ownerUid === input.uid
-      && note.secureShareCopyJobId === input.copyJobId
-      && note.secureShareCopyState === "copying"
-      && !note.secureShareCopyCleanupClaimId
-      && !note.secureShareCopyCleanupClaimedAt
-      && note.secureShareCopyReadyAttachmentCount === 0
-  });
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteSecureCopyLifecyclePayload(
+      { ...input, expectedRevision },
+      "secure-copy-abort"
+    ),
+    { expectedRevision }
+  );
 }
 
 export async function deleteNote(noteId: string, uid: string, readerUids: string[]) {
@@ -2469,35 +2277,15 @@ export async function deleteNote(noteId: string, uid: string, readerUids: string
 }
 
 export async function restoreRevisionedNote(input: RevisionedNoteLifecycleInput) {
-  return commitRevisionedNoteMutation({
-    action: "restore",
-    changedFields: input.nameClaim ? ["restored", "name-claim"] : ["restored"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    nameClaim: input.nameClaim,
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    update: {
-      isDeleted: false,
-      deletedAt: deleteField(),
-      deletedBy: deleteField(),
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    },
-    ...(input.nameClaim ? {
-      validateCurrent: (note: NoteDocument) =>
-        note.ownerUid === input.uid
-        && note.isDeleted === true
-        && !storedVaultNameClaimId(note)
-        && (
-          (note.contentFormat === "legacy-html-v1" && note.entryKind === "legacy-html")
-          || (note.contentFormat === "markdown-v1" && note.entryKind === "markdown")
-          || (note.contentFormat === "json-canvas-v1" && note.entryKind === "canvas")
-          || (note.contentFormat === "base-v1" && note.entryKind === "base")
-          || (note.contentFormat === "asset-v1" && note.entryKind === "asset")
-        )
-    } : {})
-  });
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteLifecyclePayload({ ...input, expectedRevision }, "restore"),
+    {
+      claimId: input.nameClaim?.claimId,
+      expectedRevision
+    }
+  );
 }
 
 export async function restoreNote(noteId: string, uid: string, readerUids: string[]) {
@@ -2518,35 +2306,10 @@ export async function restoreNote(noteId: string, uid: string, readerUids: strin
 }
 
 export async function purgeNote(input: PurgeNoteInput) {
-  const noteRef = doc(db, "notes", input.noteId);
-  const cleanupQueueRef = doc(db, "notePurgeCleanupQueue", input.noteId);
-  const batch = writeBatch(db);
-
-  batch.update(noteRef, {
-    type: "personal",
-    participantUids: [input.uid],
-    wrappedKeys: {
-      [input.uid]: input.wrappedKey
-    },
-    encryptedTitle: input.encryptedTitle,
-    encryptedBody: input.encryptedBody,
-    folderId: deleteField(),
-    dueAt: deleteField(),
-    deletedAt: deleteField(),
-    deletedBy: deleteField(),
-    isDeleted: true,
-    isPurged: true,
-    purgedAt: serverTimestamp(),
-    purgedBy: input.uid,
-    updatedAt: serverTimestamp(),
-    savedAt: serverTimestamp(),
-    updatedBy: input.uid
-  });
-  batch.set(cleanupQueueRef, {
-    noteId: input.noteId,
-    ownerUid: input.ownerUid,
-    createdAt: serverTimestamp()
-  });
-
-  await batch.commit();
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNotePurgePayload(input),
+    { expectedRevision }
+  );
 }

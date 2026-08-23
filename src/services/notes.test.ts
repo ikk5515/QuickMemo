@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   NoteFolderLimitError,
   NoteRevisionConflictError,
+  VaultNameConflictError,
   backfillRevisionedVaultNameClaim,
   abortSecureShareCopyingNote,
   activateSecureShareCopyingNote,
@@ -15,12 +16,14 @@ import {
   deleteNote,
   deleteRevisionedNote,
   getNoteRevisionState,
+  loadOwnedVaultCutoverInventory,
   loadOwnedVaultCutoverNotes,
   getVisibleNotesByIds,
   getVisibleNotesByIdsFromServer,
   isLegacyHtmlNoteDocument,
   listStaleSecureShareCopyingNotes,
   migrateLegacyNoteFolder,
+  migrateLegacyVaultNote,
   purgeNote,
   resolveRevisionedVaultNameCollision,
   restoreRevisionedNote,
@@ -37,6 +40,7 @@ import {
   updateRevisionedNoteFolder,
   vaultNameClaimReservationMatches
 } from "./notes";
+import { VaultNoteApiError } from "./vaultNoteMutations";
 
 const mocks = vi.hoisted(() => {
   const timestamp = { __type: "serverTimestamp" };
@@ -83,6 +87,7 @@ const mocks = vi.hoisted(() => {
     getDocsFromServer: vi.fn(),
     limit: vi.fn((count: number) => ({ count, type: "limit" })),
     ensureVaultFolderTree: vi.fn().mockResolvedValue({ status: "ready" }),
+    mutateVaultNote: vi.fn(),
     mutateVaultFolder: vi.fn(),
     onSnapshot: vi.fn((...args: unknown[]) => {
       void args;
@@ -155,6 +160,14 @@ vi.mock("./vaultFolderMutations", () => ({
   mutateVaultFolder: mocks.mutateVaultFolder
 }));
 
+vi.mock("./vaultNoteMutations", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./vaultNoteMutations")>();
+  return {
+    ...actual,
+    mutateVaultNote: mocks.mutateVaultNote
+  };
+});
+
 function noteSnapshot(revision: number | undefined) {
   return {
     data: () => ({ revision }),
@@ -182,17 +195,6 @@ const vaultNameClaim = (parentId: string | null) => ({
   indexVersion: 1 as const,
   parentId
 });
-const storedVaultNameClaim = (targetId = "import-note-a") => ({
-  exists: () => true,
-  data: () => ({
-    indexVersion: 1,
-    ownerUid: "user-a",
-    parentId: null,
-    targetId,
-    targetType: "entry"
-  })
-});
-
 const legacyStorageIdentity = {
   expectedContentFormat: "legacy-html-v1" as const,
   expectedEntryKind: "legacy-html" as const
@@ -206,6 +208,16 @@ describe("revision-aware note persistence", () => {
     mocks.getDocs.mockResolvedValue({ docs: [] });
     mocks.getDocsFromServer.mockResolvedValue({ docs: [] });
     mocks.transaction.get.mockReset().mockResolvedValue(noteSnapshot(4));
+    mocks.mutateVaultNote.mockReset().mockImplementation(async (
+      _uid: string,
+      payload: { action: string; expectedRevision?: number; noteId?: string }
+    ) => ({
+      lastMutationId: "server-mutation-1",
+      noteId: payload.noteId ?? "server-note-a",
+      ok: true,
+      revision: typeof payload.expectedRevision === "number" ? payload.expectedRevision + 1 : 1,
+      ...(payload.action === "secure-copy-activate" ? { state: "active" } : {})
+    }));
     mocks.mutateVaultFolder.mockReset().mockImplementation(async (
       _uid: string,
       payload: { expectedRevision?: number; folderId?: string }
@@ -265,6 +277,31 @@ describe("revision-aware note persistence", () => {
     expect(mocks.getDocsFromServer).toHaveBeenCalledTimes(2);
   });
 
+  it("returns a bounded server inventory split into active and deleted notes", async () => {
+    const documents = [
+      { id: "active", isDeleted: false },
+      { id: "deleted", isDeleted: true },
+      { id: "copying", isDeleted: false, secureShareCopyState: "copying" },
+      { id: "aborted", isDeleted: true, secureShareCopyState: "aborted" },
+      { id: "purged", isDeleted: true, isPurged: true }
+    ].map((value) => ({
+      id: value.id,
+      data: () => ({
+        ownerUid: "user-a",
+        participantUids: ["user-a"],
+        ...value
+      })
+    }));
+    mocks.getDocsFromServer.mockResolvedValueOnce({ docs: documents });
+
+    await expect(loadOwnedVaultCutoverInventory("user-a")).resolves.toEqual({
+      activeNotes: [expect.objectContaining({ id: "active" })],
+      deletedNotes: [expect.objectContaining({ id: "deleted" })]
+    });
+    expect(mocks.getDocsFromServer).toHaveBeenCalledOnce();
+    expect(mocks.batch.commit).not.toHaveBeenCalled();
+  });
+
   it("creates revision 1 with an independent paired history document", async () => {
     const result = await createRevisionedEncryptedNote({
       encryptedBody: encryptedPayload,
@@ -302,10 +339,8 @@ describe("revision-aware note persistence", () => {
     );
   });
 
-  it("creates a Vault entry at a preallocated id without an overwrite-capable set", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({ exists: () => false });
-
-    const result = await createRevisionedEncryptedNoteAtId({
+  it("creates a versioned Vault note through the server-authoritative contract", async () => {
+    const result = await createRevisionedEncryptedNote({
       contentFormat: "markdown-v1",
       entryKind: "markdown",
       encryptedBody: encryptedPayload,
@@ -317,61 +352,80 @@ describe("revision-aware note persistence", () => {
       participantUids: ["user-a"],
       type: "personal",
       wrappedKeys: { "user-a": wrappedKey }
-    }, "import-note-a", vaultImportJobId);
+    });
 
-    expect(result).toMatchObject({ noteId: "import-note-a", revision: 1 });
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "import-note-a" }),
-      expect.objectContaining({
-        vaultNameClaimId: vaultClaimId,
-        revision: 1,
-        isDeleted: false
-      })
-    );
-    expect(mocks.transaction.get).toHaveBeenCalledOnce();
-    expect(mocks.transaction.get.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ id: vaultClaimId })
-    );
+    expect(result).toMatchObject({
+      lastMutationId: "server-mutation-1",
+      noteId: "server-note-a",
+      revision: 1
+    });
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "create",
+      contentFormat: "markdown-v1",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      entryKind: "markdown",
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    });
+    expect(mocks.batch.set).not.toHaveBeenCalled();
   });
 
-  it("treats a matching revision-one preallocated entry as an idempotent response-loss retry", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce(storedVaultNameClaim())
-      .mockResolvedValueOnce({
-        exists: () => true,
-        data: () => ({
-          attachmentRevision: 0,
-          contentFormat: "markdown-v1",
-          encryptedBody: encryptedPayload,
-          encryptedTitle: encryptedPayload,
-          entryKind: "markdown",
-          folderId: null,
-          isDeleted: false,
-          lastMutationId: "history-original",
-          ownerUid: "user-a",
-          participantUids: ["user-a"],
-          revision: 1,
-          type: "personal",
-          vaultNameClaimId: vaultClaimId,
-          vaultNameIndexVersion: 1,
-          vaultImportJobId,
-          wrappedKeys: { "user-a": wrappedKey },
-          updatedBy: "user-a"
-        })
-      })
-      .mockResolvedValueOnce({
-        exists: () => true,
-        data: () => ({
-          action: "create",
-          actorUid: "user-a",
-          changedFields: ["title", "body"],
-          encryptedSnapshot: encryptedPayload,
-          encryptedSummary: encryptedPayload,
-          noteId: "import-note-a",
-          readerUids: ["user-a"],
-          revision: 1
-        })
-      });
+  it("delegates preallocated Vault creation to the server without an owner field", async () => {
+    const input = {
+      contentFormat: "markdown-v1" as const,
+      entryKind: "markdown" as const,
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal" as const,
+      wrappedKeys: { "user-a": wrappedKey }
+    };
+
+    const result = await createRevisionedEncryptedNoteAtId(
+      input,
+      "import-note-a",
+      vaultImportJobId
+    );
+
+    expect(result).toMatchObject({
+      lastMutationId: "server-mutation-1",
+      noteId: "import-note-a",
+      revision: 1
+    });
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "import-create",
+      contentFormat: "markdown-v1",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      entryKind: "markdown",
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      importJobId: vaultImportJobId,
+      nameClaim: vaultNameClaim(null),
+      noteId: "import-note-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
+  });
+
+  it("returns the server's exact idempotent response-loss retry result", async () => {
+    mocks.mutateVaultNote.mockResolvedValueOnce({
+      lastMutationId: "history-original",
+      noteId: "import-note-a",
+      ok: true,
+      revision: 1
+    });
 
     await expect(createRevisionedEncryptedNoteAtId({
       contentFormat: "markdown-v1",
@@ -390,47 +444,87 @@ describe("revision-aware note persistence", () => {
       noteId: "import-note-a",
       revision: 1
     });
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
-  it("fails closed when a response-loss retry has a different encrypted create history", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce(storedVaultNameClaim())
-      .mockResolvedValueOnce({
-        exists: () => true,
-        data: () => ({
-          attachmentRevision: 0,
-          contentFormat: "markdown-v1",
-          encryptedBody: encryptedPayload,
-          encryptedTitle: encryptedPayload,
-          entryKind: "markdown",
-          folderId: null,
-          isDeleted: false,
-          lastMutationId: "history-original",
-          ownerUid: "user-a",
-          participantUids: ["user-a"],
-          revision: 1,
-          type: "personal",
-          updatedBy: "user-a",
-          vaultImportJobId,
-          vaultNameClaimId: vaultClaimId,
-          vaultNameIndexVersion: 1,
-          wrappedKeys: { "user-a": wrappedKey }
-        })
+  it("propagates a server-detected encrypted import history conflict", async () => {
+    const conflict = new VaultNoteApiError("vault_import_history_conflict", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(conflict);
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).rejects.toBe(conflict);
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
+  });
+
+  it("propagates a server-detected encrypted import after-state conflict", async () => {
+    const conflict = new VaultNoteApiError("vault_import_state_conflict", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(conflict);
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).rejects.toBe(conflict);
+  });
+
+  it("maps an import name reservation conflict to the public Vault error", async () => {
+    mocks.mutateVaultNote.mockRejectedValueOnce(
+      new VaultNoteApiError("vault_name_conflict", 409)
+    );
+
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", vaultImportJobId)).rejects.toEqual(
+      expect.objectContaining<Partial<VaultNameConflictError>>({
+        claimId: vaultClaimId,
+        code: "vault/name-conflict"
       })
-      .mockResolvedValueOnce({
-        exists: () => true,
-        data: () => ({
-          action: "create",
-          actorUid: "user-a",
-          changedFields: ["title", "body"],
-          encryptedSnapshot: { ...encryptedPayload, cipherText: "different-history" },
-          encryptedSummary: encryptedPayload,
-          noteId: "import-note-a",
-          readerUids: ["user-a"],
-          revision: 1
-        })
-      });
+    );
+  });
+
+  it("rejects malformed import provenance before contacting the server", async () => {
+    await expect(createRevisionedEncryptedNoteAtId({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    }, "import-note-a", "invalid-job-id")).rejects.toThrow("가져오기 작업 식별자");
+    expect(mocks.mutateVaultNote).not.toHaveBeenCalled();
+  });
+
+  it("leaves import claim ownership validation to the authoritative endpoint", async () => {
+    const conflict = new VaultNoteApiError("vault_name_conflict", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(conflict);
 
     await expect(createRevisionedEncryptedNoteAtId({
       contentFormat: "markdown-v1",
@@ -444,139 +538,10 @@ describe("revision-aware note persistence", () => {
       participantUids: ["user-a"],
       type: "personal",
       wrappedKeys: { "user-a": wrappedKey }
-    }, "import-note-a", vaultImportJobId)).rejects.toThrow("생성 이력과 충돌");
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
-  });
-
-  it("fails closed when a response-loss retry carries different encrypted after-state", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce(storedVaultNameClaim())
-      .mockResolvedValueOnce({
-        exists: () => true,
-        data: () => ({
-          attachmentRevision: 0,
-          contentFormat: "markdown-v1",
-          encryptedBody: encryptedPayload,
-          encryptedTitle: { ...encryptedPayload, cipherText: "stored-other-title" },
-          entryKind: "markdown",
-          folderId: null,
-          isDeleted: false,
-          lastMutationId: "history-original",
-          ownerUid: "user-a",
-          participantUids: ["user-a"],
-          revision: 1,
-          type: "personal",
-          updatedBy: "user-a",
-          vaultImportJobId,
-          vaultNameClaimId: vaultClaimId,
-          vaultNameIndexVersion: 1,
-          wrappedKeys: { "user-a": wrappedKey }
-        })
-      });
-
-    await expect(createRevisionedEncryptedNoteAtId({
-      contentFormat: "markdown-v1",
-      entryKind: "markdown",
-      encryptedBody: encryptedPayload,
-      encryptedTitle: encryptedPayload,
-      historySnapshot: encryptedPayload,
-      historySummary: encryptedPayload,
-      nameClaim: vaultNameClaim(null),
-      ownerUid: "user-a",
-      participantUids: ["user-a"],
-      type: "personal",
-      wrappedKeys: { "user-a": wrappedKey }
-    }, "import-note-a", vaultImportJobId)).rejects.toThrow("충돌");
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
-  });
-
-  it("fails closed when a preallocated entry id was edited or belongs to another claim", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce(storedVaultNameClaim())
-      .mockResolvedValueOnce({
-        exists: () => true,
-        data: () => ({
-          contentFormat: "markdown-v1",
-          entryKind: "markdown",
-          folderId: null,
-          isDeleted: false,
-          lastMutationId: "history-edited",
-          ownerUid: "user-a",
-          participantUids: ["user-a"],
-          revision: 2,
-          type: "personal",
-          vaultNameClaimId: vaultClaimId,
-          vaultNameIndexVersion: 1,
-          vaultImportJobId
-        })
-      });
-
-    await expect(createRevisionedEncryptedNoteAtId({
-      contentFormat: "markdown-v1",
-      entryKind: "markdown",
-      encryptedBody: encryptedPayload,
-      encryptedTitle: encryptedPayload,
-      nameClaim: vaultNameClaim(null),
-      ownerUid: "user-a",
-      participantUids: ["user-a"],
-      type: "personal",
-      wrappedKeys: { "user-a": wrappedKey }
-    }, "import-note-a", vaultImportJobId)).rejects.toThrow("충돌");
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
-  });
-
-  it("does not accept a response-loss retry when explicit active metadata is missing", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce(storedVaultNameClaim())
-      .mockResolvedValueOnce({
-        exists: () => true,
-        data: () => ({
-          contentFormat: "markdown-v1",
-          entryKind: "markdown",
-          folderId: null,
-          lastMutationId: "history-original",
-          ownerUid: "user-a",
-          participantUids: ["user-a"],
-          revision: 1,
-          type: "personal",
-          vaultImportJobId,
-          vaultNameClaimId: vaultClaimId,
-          vaultNameIndexVersion: 1
-        })
-      });
-
-    await expect(createRevisionedEncryptedNoteAtId({
-      contentFormat: "markdown-v1",
-      entryKind: "markdown",
-      encryptedBody: encryptedPayload,
-      encryptedTitle: encryptedPayload,
-      nameClaim: vaultNameClaim(null),
-      ownerUid: "user-a",
-      participantUids: ["user-a"],
-      type: "personal",
-      wrappedKeys: { "user-a": wrappedKey }
-    }, "import-note-a", vaultImportJobId)).rejects.toThrow("충돌");
-  });
-
-  it("rejects a preallocated retry before reading a note when the name claim targets another entry", async () => {
-    mocks.transaction.get.mockResolvedValueOnce(storedVaultNameClaim("other-note"));
-
-    await expect(createRevisionedEncryptedNoteAtId({
-      contentFormat: "markdown-v1",
-      entryKind: "markdown",
-      encryptedBody: encryptedPayload,
-      encryptedTitle: encryptedPayload,
-      historySnapshot: encryptedPayload,
-      historySummary: encryptedPayload,
-      nameClaim: vaultNameClaim(null),
-      ownerUid: "user-a",
-      participantUids: ["user-a"],
-      type: "personal",
-      wrappedKeys: { "user-a": wrappedKey }
-    }, "import-note-a", vaultImportJobId)).rejects.toBeInstanceOf(Error);
-
-    expect(mocks.transaction.get).toHaveBeenCalledOnce();
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
+    }, "import-note-a", vaultImportJobId)).rejects.toMatchObject({
+      code: "vault/name-conflict"
+    });
+    expect(mocks.transaction.get).not.toHaveBeenCalled();
   });
 
   it("rejects oversized encrypted note payloads before issuing a write", async () => {
@@ -593,33 +558,74 @@ describe("revision-aware note persistence", () => {
     expect(mocks.batch.commit).not.toHaveBeenCalled();
   });
 
-  it("creates an invisible copying note with durable zeroed counters", async () => {
+  it("creates an invisible copying note through the server-owned counter boundary", async () => {
     const result = await createSecureShareCopyingNote({
       copyJobId: "copy_job_1234567890",
+      contentFormat: "legacy-html-v1",
       encryptedBody: encryptedPayload,
       encryptedTitle: encryptedPayload,
+      entryKind: "legacy-html",
       expectedAttachmentCount: 2,
       historySnapshot: encryptedPayload,
       historySummary: encryptedPayload,
+      noteId: "copy-note-a",
+      nameClaim: vaultNameClaim(null),
       ownerUid: "user-a",
       participantUids: ["user-a"],
       type: "personal",
       wrappedKeys: { "user-a": wrappedKey }
     });
 
-    expect(mocks.batch.set).toHaveBeenNthCalledWith(
-      1,
-      result.noteRef,
-      expect.objectContaining({
-        secureShareCopyExpectedAttachmentCount: 2,
-        secureShareCopyJobId: "copy_job_1234567890",
-        secureShareCopyReadyAttachmentCount: 0,
-        secureShareCopyReservedAttachmentCount: 0,
-        secureShareCopyStartedAt: mocks.timestamp,
-        secureShareCopyState: "copying",
-        secureShareCopyUpdatedAt: mocks.timestamp
-      })
-    );
+    expect(result).toMatchObject({ noteId: "copy-note-a", revision: 1 });
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "secure-copy-create",
+      copyJobId: "copy_job_1234567890",
+      contentFormat: "legacy-html-v1",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      entryKind: "legacy-html",
+      expectedAttachmentCount: 2,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      noteId: "copy-note-a",
+      nameClaim: vaultNameClaim(null),
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    });
+    expect(mocks.batch.set).not.toHaveBeenCalled();
+  });
+
+  it("retries a response-loss secure-copy create with the same preallocated note id", async () => {
+    mocks.mutateVaultNote
+      .mockRejectedValueOnce(new VaultNoteApiError("network_error", 0))
+      .mockResolvedValueOnce({
+        lastMutationId: "server-mutation-1",
+        noteId: "copy-note-retry",
+        ok: true,
+        revision: 1
+      });
+    const input = {
+      copyJobId: "copy_job_retry_1234",
+      contentFormat: "legacy-html-v1" as const,
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      entryKind: "legacy-html" as const,
+      expectedAttachmentCount: 0,
+      noteId: "copy-note-retry",
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal" as const,
+      wrappedKeys: { "user-a": wrappedKey }
+    };
+
+    await expect(createSecureShareCopyingNote(input)).resolves.toMatchObject({
+      noteId: "copy-note-retry",
+      revision: 1
+    });
+    expect(mocks.mutateVaultNote).toHaveBeenCalledTimes(2);
+    expect(mocks.mutateVaultNote.mock.calls[0]).toEqual(mocks.mutateVaultNote.mock.calls[1]);
   });
 
   it("forwards the caller AbortSignal to the Blob attachment upload", async () => {
@@ -652,22 +658,7 @@ describe("revision-aware note persistence", () => {
     }));
   });
 
-  it("atomically activates only a fully reserved and ready copying note", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({
-        ownerUid: "user-a",
-        revision: 1,
-        isDeleted: false,
-        secureShareCopyState: "copying",
-        secureShareCopyJobId: "copy_job_1234567890",
-        secureShareCopyExpectedAttachmentCount: 2,
-        secureShareCopyReservedAttachmentCount: 2,
-        secureShareCopyReadyAttachmentCount: 2
-      }),
-      exists: () => true,
-      id: "note-copy"
-    });
-
+  it("delegates atomic copying-note activation without sending the caller uid", async () => {
     await expect(activateSecureShareCopyingNote({
       copyJobId: "copy_job_1234567890",
       expectedRevision: 1,
@@ -675,55 +666,29 @@ describe("revision-aware note persistence", () => {
       uid: "user-a"
     })).resolves.toEqual({ noteId: "note-copy", state: "active" });
 
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "note-copy" }),
-      expect.objectContaining({
-        secureShareCopyFinishedAt: mocks.timestamp,
-        secureShareCopyState: "active",
-        secureShareCopyUpdatedAt: mocks.timestamp
-      })
-    );
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "secure-copy-activate",
+      copyJobId: "copy_job_1234567890",
+      expectedRevision: 1,
+      noteId: "note-copy"
+    });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
-  it("refuses activation while a reserved attachment is not ready", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({
-        ownerUid: "user-a",
-        revision: 1,
-        isDeleted: false,
-        secureShareCopyState: "copying",
-        secureShareCopyJobId: "copy_job_1234567890",
-        secureShareCopyExpectedAttachmentCount: 2,
-        secureShareCopyReservedAttachmentCount: 2,
-        secureShareCopyReadyAttachmentCount: 1
-      }),
-      exists: () => true,
-      id: "note-copy"
-    });
+  it("propagates the server's refusal when a reserved attachment is not ready", async () => {
+    const notReady = new VaultNoteApiError("secure_copy_not_ready", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(notReady);
 
     await expect(activateSecureShareCopyingNote({
       copyJobId: "copy_job_1234567890",
       expectedRevision: 1,
       noteId: "note-copy",
       uid: "user-a"
-    })).rejects.toThrow("모두 준비되지 않았습니다");
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
+    })).rejects.toBe(notReady);
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
-  it("pairs a stale copying-note abort with revision history", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({
-        ownerUid: "user-a",
-        revision: 1,
-        secureShareCopyState: "copying",
-        secureShareCopyJobId: "copy_job_1234567890",
-        secureShareCopyReadyAttachmentCount: 0
-      }),
-      exists: () => true,
-      id: "note-copy"
-    });
-
+  it("delegates stale copying-note abort and revision history atomically", async () => {
     await abortSecureShareCopyingNote({
       copyJobId: "copy_job_1234567890",
       expectedRevision: 1,
@@ -731,18 +696,13 @@ describe("revision-aware note persistence", () => {
       uid: "user-a"
     });
 
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "note-copy" }),
-      expect.objectContaining({
-        isDeleted: true,
-        secureShareCopyState: "aborted",
-        revision: 2
-      })
-    );
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ action: "delete", revision: 2 })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "secure-copy-abort",
+      copyJobId: "copy_job_1234567890",
+      expectedRevision: 1,
+      noteId: "note-copy"
+    });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
   it("queries only owner-scoped stale copying jobs through the recovery index", async () => {
@@ -780,7 +740,7 @@ describe("revision-aware note persistence", () => {
     await expect(getNoteRevisionState("legacy-note")).resolves.toEqual({ attachmentRevision: 0, revision: 0 });
   });
 
-  it("updates only when the expected revision matches and pairs history in the transaction", async () => {
+  it("sends an exact revisioned content update to the authoritative endpoint", async () => {
     const result = await updateRevisionedEncryptedNote({
       ...legacyStorageIdentity,
       encryptedBody: encryptedPayload,
@@ -792,40 +752,25 @@ describe("revision-aware note persistence", () => {
     });
 
     expect(result).toEqual({
-      lastMutationId: "generated-1",
+      lastMutationId: "server-mutation-1",
       noteId: "note-a",
+      ok: true,
       revision: 5
     });
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "note-a" }),
-      expect.objectContaining({ lastMutationId: "generated-1", revision: 5 })
-    );
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "generated-1" }),
-      expect.objectContaining({ action: "content", revision: 5 })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "update",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: ["user-a"]
+    });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
-  it("backfills only claim metadata and history without rewriting historical ciphertext", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce({
-        data: () => ({
-          contentFormat: "markdown-v1",
-          encryptedBody: encryptedPayload,
-          encryptedTitle: encryptedPayload,
-          entryKind: "markdown",
-          folderId: null,
-          ownerUid: "user-a",
-          participantUids: ["user-a"],
-          revision: 4,
-          type: "personal",
-          wrappedKeys: { "user-a": wrappedKey }
-        }),
-        exists: () => true,
-        id: "vault-note"
-      })
-      .mockResolvedValueOnce({ exists: () => false });
-
+  it("backfills only claim metadata through the server contract without ciphertext fields", async () => {
     await backfillRevisionedVaultNameClaim({
       expectedContentFormat: "markdown-v1",
       expectedEntryKind: "markdown",
@@ -837,42 +782,58 @@ describe("revision-aware note persistence", () => {
       uid: "user-a"
     });
 
-    const noteUpdate = mocks.transaction.update.mock.calls[0][1];
-    expect(noteUpdate).toMatchObject({
-      lastMutationId: "generated-1",
-      revision: 5,
-      updatedBy: "user-a",
-      vaultNameClaimId: vaultClaimId,
-      vaultNameIndexVersion: 1
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "backfill-claim",
+      expectedContentFormat: "markdown-v1",
+      expectedEntryKind: "markdown",
+      expectedRevision: 4,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      noteId: "vault-note",
+      readerUids: ["user-a"]
     });
-    expect(noteUpdate).not.toHaveProperty("encryptedBody");
-    expect(noteUpdate).not.toHaveProperty("encryptedTitle");
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "generated-1" }),
-      expect.objectContaining({ action: "content", changedFields: ["name-claim"], revision: 5 })
-    );
+    expect(mocks.mutateVaultNote.mock.calls[0]?.[1]).not.toHaveProperty("encryptedBody");
+    expect(mocks.mutateVaultNote.mock.calls[0]?.[1]).not.toHaveProperty("encryptedTitle");
   });
 
-  it("resolves an unclaimed collision without rewriting the stored body", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce({
-        data: () => ({
-          contentFormat: "legacy-html-v1",
-          encryptedBody: encryptedPayload,
-          encryptedTitle: encryptedPayload,
-          entryKind: "legacy-html",
-          folderId: null,
-          ownerUid: "user-a",
-          participantUids: ["user-a"],
-          revision: 4,
-          type: "personal",
-          wrappedKeys: { "user-a": wrappedKey }
-        }),
-        exists: () => true,
-        id: "collision-note"
-      })
-      .mockResolvedValueOnce({ exists: () => false });
+  it("migrates legacy storage identity through the owner-only server contract", async () => {
+    mocks.mutateVaultNote.mockResolvedValueOnce({
+      claimState: "reserved",
+      lastMutationId: "legacy-migration",
+      noteId: "legacy-note",
+      ok: true,
+      revision: 5
+    });
 
+    await expect(migrateLegacyVaultNote({
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 4,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      noteId: "legacy-note",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).resolves.toEqual({
+      claimState: "reserved",
+      lastMutationId: "legacy-migration",
+      noteId: "legacy-note",
+      revision: 5
+    });
+
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "migrate-legacy",
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 4,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      noteId: "legacy-note",
+      readerUids: ["user-a"]
+    });
+  });
+
+  it("resolves an unclaimed collision without sending the stored body", async () => {
     await resolveRevisionedVaultNameCollision({
       changedFields: ["title", "name-claim"],
       encryptedTitle: { ...encryptedPayload, cipherText: "replacement-title" },
@@ -886,28 +847,24 @@ describe("revision-aware note persistence", () => {
       uid: "user-a"
     });
 
-    const noteUpdate = mocks.transaction.update.mock.calls[0][1];
-    expect(noteUpdate).toMatchObject({
-      encryptedTitle: expect.objectContaining({ cipherText: "replacement-title" }),
-      vaultNameClaimId: vaultClaimId
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "resolve-collision",
+      changedFields: ["title", "name-claim"],
+      encryptedTitle: { ...encryptedPayload, cipherText: "replacement-title" },
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 4,
+      historySummary: encryptedPayload,
+      nameClaim: vaultNameClaim(null),
+      noteId: "collision-note",
+      readerUids: ["user-a"]
     });
-    expect(noteUpdate).not.toHaveProperty("encryptedBody");
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "generated-1" }),
-      expect.objectContaining({ changedFields: ["title", "name-claim"] })
-    );
+    expect(mocks.mutateVaultNote.mock.calls[0]?.[1]).not.toHaveProperty("encryptedBody");
   });
 
-  it("rejects content writes when the stored entry format differs from the caller expectation", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({
-        contentFormat: "markdown-v1",
-        entryKind: "markdown",
-        revision: 4
-      }),
-      exists: () => true,
-      id: "vault-note"
-    });
+  it("propagates a server rejection when the stored entry format differs", async () => {
+    const mismatch = new VaultNoteApiError("vault_storage_identity_mismatch", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(mismatch);
 
     await expect(updateRevisionedEncryptedNote({
       ...legacyStorageIdentity,
@@ -917,13 +874,15 @@ describe("revision-aware note persistence", () => {
       noteId: "vault-note",
       readerUids: ["user-a"],
       uid: "user-a"
-    })).rejects.toThrow("현재 노트 상태");
+    })).rejects.toBe(mismatch);
 
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
-  it("reports a conflict before writing when the expected revision is stale", async () => {
+  it("maps the endpoint's stale revision to NoteRevisionConflictError", async () => {
+    mocks.mutateVaultNote.mockRejectedValueOnce(
+      new VaultNoteApiError("revision_conflict", 409, 4)
+    );
     await expect(
       updateRevisionedEncryptedNote({
         ...legacyStorageIdentity,
@@ -939,12 +898,12 @@ describe("revision-aware note persistence", () => {
       code: "note/revision-conflict",
       expectedRevision: 3
     }));
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
-  it("rejects a revision increment beyond the Rules maximum", async () => {
-    mocks.transaction.get.mockResolvedValueOnce(noteSnapshot(999_999_999_999));
+  it("propagates the server's rejection at the maximum revision", async () => {
+    const limitReached = new VaultNoteApiError("revision_limit", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(limitReached);
 
     await expect(updateRevisionedEncryptedNote({
       ...legacyStorageIdentity,
@@ -954,15 +913,15 @@ describe("revision-aware note persistence", () => {
       noteId: "note-a",
       readerUids: ["user-a"],
       uid: "user-a"
-    })).rejects.toThrow("안전한 저장 범위");
+    })).rejects.toBe(limitReached);
 
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", expect.objectContaining({
+      action: "update",
+      expectedRevision: 999_999_999_999
+    }));
   });
 
-  it("treats a legacy note without revision as revision 0", async () => {
-    mocks.transaction.get.mockResolvedValueOnce(noteSnapshot(undefined));
-
+  it("preserves expected revision zero for a legacy cutover note", async () => {
     await updateRevisionedEncryptedNote({
       ...legacyStorageIdentity,
       encryptedBody: encryptedPayload,
@@ -973,25 +932,19 @@ describe("revision-aware note persistence", () => {
       uid: "user-a"
     });
 
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ lastMutationId: "generated-1", revision: 1 })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "update",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 0,
+      noteId: "legacy-note",
+      readerUids: ["user-a"]
+    });
   });
 
-  it("increments access changes and records the normalized participant set", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({
-        folderId: "folder-a",
-        ownerUid: "user-a",
-        participantUids: ["user-a"],
-        revision: 4,
-        type: "personal",
-        wrappedKeys: { "user-a": wrappedKey }
-      }),
-      exists: () => true,
-      id: "note-a"
-    });
+  it("sends access changes to the endpoint for atomic normalization and history", async () => {
     await updateRevisionedNoteAccess({
       expectedRevision: 4,
       folderId: "ignored-for-shared",
@@ -1002,58 +955,36 @@ describe("revision-aware note persistence", () => {
       wrappedKeys: { "user-a": wrappedKey, "user-b": wrappedKey }
     });
 
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        folderId: null,
-        participantUids: ["user-a", "user-b"],
-        revision: 5
-      })
-    );
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        action: "share",
-        changedFields: ["participants", "folder"],
-        readerUids: ["user-a", "user-b"],
-        revision: 5
-      })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "access",
+      expectedRevision: 4,
+      folderId: "ignored-for-shared",
+      noteId: "note-a",
+      participantUids: ["user-a", "user-b", "user-b"],
+      type: "shared",
+      wrappedKeys: { "user-a": wrappedKey, "user-b": wrappedKey }
+    });
   });
 
-  it("moves an owned personal note with a revisioned folder history record", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({
-        folderId: null,
-        ownerUid: "user-a",
-        revision: 4,
-        type: "personal"
-      }),
-      exists: () => true,
-      id: "note-a"
-    });
-
+  it("moves an owned personal note through the revisioned server contract", async () => {
     await updateRevisionedNoteFolder({
       expectedRevision: 4,
       folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-a"),
       noteId: "note-a",
       readerUids: ["user-a"],
       uid: "user-a"
     });
 
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ folderId: "folder-a", revision: 5 })
-    );
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        action: "share",
-        changedFields: ["folder"],
-        readerUids: ["user-a"],
-        revision: 5
-      })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "move",
+      expectedRevision: 4,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-a"),
+      noteId: "note-a",
+      readerUids: ["user-a"]
+    });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
   it("delegates encrypted folder creation and parent validation to the authoritative server tree", async () => {
@@ -1542,31 +1473,7 @@ describe("revision-aware note persistence", () => {
     expect(mocks.deleteObject).not.toHaveBeenCalled();
   });
 
-  it("atomically releases the stored Vault name claim when a revisioned entry is deleted", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce({
-        data: () => ({
-          folderId: null,
-          ownerUid: "user-a",
-          revision: 4,
-          vaultNameClaimId: vaultClaimId,
-          vaultNameIndexVersion: 1
-        }),
-        exists: () => true,
-        id: "note-a"
-      })
-      .mockResolvedValueOnce({
-        data: () => ({
-          indexVersion: 1,
-          ownerUid: "user-a",
-          parentId: null,
-          targetId: "note-a",
-          targetType: "entry"
-        }),
-        exists: () => true,
-        id: vaultClaimId
-      });
-
+  it("delegates name-claim release and revisioned trash atomically", async () => {
     await deleteRevisionedNote({
       expectedRevision: 4,
       noteId: "note-a",
@@ -1574,14 +1481,13 @@ describe("revision-aware note persistence", () => {
       uid: "user-a"
     });
 
-    expect(mocks.transaction.delete).toHaveBeenCalledWith(expect.objectContaining({
-      id: vaultClaimId,
-      parts: [mocks.db, "vaultIntegrity", "user-a", "nameClaims", vaultClaimId]
-    }));
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "note-a" }),
-      expect.objectContaining({ isDeleted: true, revision: 5 })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "trash",
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: ["user-a"]
+    });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
   it("matches only the exact owner, target, type, parent and index in a blinded claim document", async () => {
@@ -1626,26 +1532,27 @@ describe("revision-aware note persistence", () => {
     await purgeNote({
       encryptedBody: encryptedPayload,
       encryptedTitle: encryptedPayload,
+      expectedRevision: 4,
       noteId: "note-a",
       ownerUid: "user-a",
       uid: "user-a",
       wrappedKey
     });
 
-    expect(mocks.batch.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "note-a", parts: [mocks.db, "notes", "note-a"] }),
-      expect.objectContaining({ isDeleted: true, isPurged: true })
-    );
-    expect(mocks.batch.set).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "note-a", parts: [mocks.db, "notePurgeCleanupQueue", "note-a"] }),
-      expect.objectContaining({ noteId: "note-a", ownerUid: "user-a" })
-    );
-    expect(mocks.batch.commit).toHaveBeenCalledTimes(1);
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "purge",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      expectedRevision: 4,
+      noteId: "note-a",
+      wrappedKey
+    });
+    expect(mocks.batch.commit).not.toHaveBeenCalled();
     expect(mocks.getDocs).not.toHaveBeenCalled();
     expect(mocks.deleteBlobAttachment).not.toHaveBeenCalled();
   });
 
-  it("restores with an expected revision and a paired independent history document", async () => {
+  it("restores with an expected revision through the paired server mutation", async () => {
     await restoreRevisionedNote({
       expectedRevision: 4,
       noteId: "note-a",
@@ -1653,102 +1560,49 @@ describe("revision-aware note persistence", () => {
       uid: "user-a"
     });
 
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        deletedAt: mocks.deletedField,
-        deletedBy: mocks.deletedField,
-        isDeleted: false,
-        revision: 5
-      })
-    );
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "generated-1" }),
-      expect.objectContaining({ action: "restore", revision: 5 })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "restore",
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: ["user-a"]
+    });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
-  it("atomically reacquires a released Vault name claim when restoring", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce({
-        data: () => ({
-          contentFormat: "markdown-v1",
-          entryKind: "markdown",
-          folderId: "folder-a",
-          isDeleted: true,
-          ownerUid: "user-a",
-          revision: 4,
-          vaultNameClaimId: vaultClaimId,
-          vaultNameIndexVersion: 1
-        }),
-        exists: () => true,
-        id: "note-a"
-      })
-      .mockResolvedValueOnce({ exists: () => false });
-
-    await restoreRevisionedNote({
+  it("returns the server result after atomically reacquiring a stored name claim", async () => {
+    await expect(restoreRevisionedNote({
       expectedRevision: 4,
       noteId: "note-a",
       readerUids: ["user-a"],
       uid: "user-a"
+    })).resolves.toEqual({
+      lastMutationId: "server-mutation-1",
+      noteId: "note-a",
+      ok: true,
+      revision: 5
     });
-
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: vaultClaimId,
-        parts: [mocks.db, "vaultIntegrity", "user-a", "nameClaims", vaultClaimId]
-      }),
-      expect.objectContaining({
-        ownerUid: "user-a",
-        parentId: "folder-a",
-        targetId: "note-a",
-        targetType: "entry"
-      })
-    );
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "note-a" }),
-      expect.objectContaining({ isDeleted: false, revision: 5 })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "restore",
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: ["user-a"]
+    });
   });
 
-  it("fails closed when a deleted Vault entry lost its reservation metadata", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({
-        contentFormat: "markdown-v1",
-        entryKind: "markdown",
-        isDeleted: true,
-        ownerUid: "user-a",
-        revision: 4
-      }),
-      exists: () => true,
-      id: "note-a"
-    });
+  it("fails closed when the server reports missing reservation metadata", async () => {
+    const missingClaim = new VaultNoteApiError("vault_name_claim_missing", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(missingClaim);
 
     await expect(restoreRevisionedNote({
       expectedRevision: 4,
       noteId: "note-a",
       readerUids: ["user-a"],
       uid: "user-a"
-    })).rejects.toThrow("이름 예약 정보");
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
+    })).rejects.toBe(missingClaim);
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
-  it("atomically claims and restores a pre-cutover deleted Vault entry for its owner", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce({
-        data: () => ({
-          contentFormat: "legacy-html-v1",
-          entryKind: "legacy-html",
-          folderId: "folder-a",
-          isDeleted: true,
-          ownerUid: "user-a",
-          revision: 4
-        }),
-        exists: () => true,
-        id: "note-a"
-      })
-      .mockResolvedValueOnce({ exists: () => false });
-
+  it("atomically claims and restores a pre-cutover Vault entry through the endpoint", async () => {
     await restoreRevisionedNote({
       expectedRevision: 4,
       nameClaim: vaultNameClaim("folder-a"),
@@ -1757,43 +1611,18 @@ describe("revision-aware note persistence", () => {
       uid: "user-a"
     });
 
-    expect(mocks.transaction.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "note-a" }),
-      expect.objectContaining({
-        isDeleted: false,
-        revision: 5,
-        vaultNameClaimId: vaultClaimId,
-        vaultNameIndexVersion: 1
-      })
-    );
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.objectContaining({ id: vaultClaimId }),
-      expect.objectContaining({
-        ownerUid: "user-a",
-        parentId: "folder-a",
-        targetId: "note-a",
-        targetType: "entry"
-      })
-    );
-    expect(mocks.transaction.set).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "generated-1" }),
-      expect.objectContaining({ action: "restore", changedFields: ["restored", "name-claim"], revision: 5 })
-    );
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "restore",
+      expectedRevision: 4,
+      nameClaim: vaultNameClaim("folder-a"),
+      noteId: "note-a",
+      readerUids: ["user-a"]
+    });
   });
 
-  it("rejects a forged pre-cutover restore claim from a non-owner", async () => {
-    mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({
-        contentFormat: "markdown-v1",
-        entryKind: "markdown",
-        folderId: null,
-        isDeleted: true,
-        ownerUid: "user-a",
-        revision: 4
-      }),
-      exists: () => true,
-      id: "note-a"
-    });
+  it("propagates server authorization rejection for a forged restore claim", async () => {
+    const forbidden = new VaultNoteApiError("forbidden", 403);
+    mocks.mutateVaultNote.mockRejectedValueOnce(forbidden);
 
     await expect(restoreRevisionedNote({
       expectedRevision: 4,
@@ -1801,46 +1630,27 @@ describe("revision-aware note persistence", () => {
       noteId: "note-a",
       readerUids: ["user-a", "user-b"],
       uid: "user-b"
-    })).rejects.toThrow("현재 노트 상태");
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
+    })).rejects.toBe(forbidden);
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-b", {
+      action: "restore",
+      expectedRevision: 4,
+      nameClaim: vaultNameClaim(null),
+      noteId: "note-a",
+      readerUids: ["user-a", "user-b"]
+    });
   });
 
   it("rejects restore when another target acquired the released claim", async () => {
-    mocks.transaction.get
-      .mockResolvedValueOnce({
-        data: () => ({
-          contentFormat: "markdown-v1",
-          entryKind: "markdown",
-          folderId: null,
-          isDeleted: true,
-          ownerUid: "user-a",
-          revision: 4,
-          vaultNameClaimId: vaultClaimId,
-          vaultNameIndexVersion: 1
-        }),
-        exists: () => true,
-        id: "note-a"
-      })
-      .mockResolvedValueOnce({
-        data: () => ({
-          indexVersion: 1,
-          ownerUid: "user-a",
-          parentId: null,
-          targetId: "other-note",
-          targetType: "entry"
-        }),
-        exists: () => true,
-        id: vaultClaimId
-      });
+    const conflict = new VaultNoteApiError("vault_name_conflict", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(conflict);
 
     await expect(restoreRevisionedNote({
       expectedRevision: 4,
       noteId: "note-a",
       readerUids: ["user-a"],
       uid: "user-a"
-    })).rejects.toBeInstanceOf(Error);
-    expect(mocks.transaction.update).not.toHaveBeenCalled();
-    expect(mocks.transaction.set).not.toHaveBeenCalled();
+    })).rejects.toBe(conflict);
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
 });

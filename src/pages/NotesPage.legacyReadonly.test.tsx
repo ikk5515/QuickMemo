@@ -18,6 +18,7 @@ const noteMutationMocks = vi.hoisted(() => ({
   deleteNoteAttachment: vi.fn(),
   deleteNoteFolder: vi.fn(),
   deleteRevisionedNote: vi.fn(),
+  getEncryptedNoteAttachmentSource: vi.fn(async () => new Uint8Array([1, 2, 3])),
   markNoteRead: vi.fn(),
   purgeNote: vi.fn(),
   restoreRevisionedNote: vi.fn(),
@@ -28,11 +29,14 @@ const noteMutationMocks = vi.hoisted(() => ({
 }));
 
 const clipboardWriteText = vi.hoisted(() => vi.fn(async () => undefined));
+const downloadBlobMock = vi.hoisted(() => vi.fn());
+const attachmentState = vi.hoisted(() => ({ items: [] as unknown[] }));
+const decryptAttachmentToBlobMock = vi.hoisted(() => vi.fn());
 const subscribeNoteAttachments = vi.hoisted(() => vi.fn((
   _noteId: string,
   callback: (attachments: unknown[]) => void
 ) => {
-  callback([]);
+  callback(attachmentState.items);
   return vi.fn();
 }));
 
@@ -68,6 +72,18 @@ vi.mock("../components/AppShell", () => ({
 vi.mock("../components/UnlockPanel", () => ({
   UnlockPanel: () => <div>잠금 해제</div>
 }));
+
+vi.mock("../features/vault/browserDownload", () => ({
+  downloadBlob: downloadBlobMock
+}));
+
+vi.mock("../lib/attachmentCrypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/attachmentCrypto")>();
+  return {
+    ...actual,
+    decryptAttachmentToBlob: decryptAttachmentToBlobMock
+  };
+});
 
 vi.mock("../lib/crypto", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/crypto")>();
@@ -161,7 +177,10 @@ beforeEach(() => {
   firestoreState.markerMode = "present";
   firestoreState.markerNext = null;
   firestoreState.queryDocuments = [];
+  attachmentState.items = [];
   clipboardWriteText.mockClear();
+  decryptAttachmentToBlobMock.mockReset();
+  downloadBlobMock.mockReset();
   Object.values(noteMutationMocks).forEach((mutation) => mutation.mockClear());
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
@@ -170,8 +189,44 @@ beforeEach(() => {
 });
 
 describe("legacy NotesPage cutover", () => {
+  it("keeps an owned historical legacy note visible when deletion metadata is absent", async () => {
+    const existingDocument = legacyDocument();
+    firestoreState.queryDocuments = [{
+      ...existingDocument,
+      data: () => {
+        const historicalData = existingDocument.data() as Record<string, unknown>;
+        Reflect.deleteProperty(historicalData, "isDeleted");
+        return historicalData;
+      }
+    }];
+
+    render(
+      <MemoryRouter initialEntries={["/app/legacy"]}>
+        <Routes>
+          <Route path="/app/legacy" element={<NotesPage legacyReadOnly />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByRole("heading", { name: "기존 회의록" })).toBeInTheDocument();
+    expect(screen.getByText("보존할 본문")).toBeInTheDocument();
+  });
+
   it("mounts only the read-only reader when the Vault feature is enabled", async () => {
     firestoreState.queryDocuments = [legacyDocument()];
+    const attachmentBlob = new Blob(["보존 첨부"], { type: "text/plain" });
+    attachmentState.items = [{
+      algorithm: "AES-GCM",
+      extension: "txt",
+      fileName: "보존자료",
+      id: "legacy-attachment-a",
+      mimeType: "text/plain",
+      noteId: "legacy-note-a",
+      originalSize: 13,
+      uploadedBy: "user-a",
+      version: 1
+    }];
+    decryptAttachmentToBlobMock.mockResolvedValue(attachmentBlob);
 
     render(
       <MemoryRouter initialEntries={["/app/legacy"]}>
@@ -194,6 +249,13 @@ describe("legacy NotesPage cutover", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Markdown 미리보기 복사" }));
     await waitFor(() => expect(clipboardWriteText).toHaveBeenCalledWith("## 안전한 제목\n\n보존할 본문"));
+
+    fireEvent.click(screen.getByRole("button", { name: "원본 HTML 텍스트 내보내기" }));
+    expect(downloadBlobMock).toHaveBeenCalledWith(expect.any(Blob), "기존 회의록.html.txt");
+    expect((downloadBlobMock.mock.calls[0][0] as Blob).type).toBe("text/plain;charset=utf-8");
+
+    fireEvent.click(await screen.findByRole("button", { name: /보존자료\.txt.*다운로드/u }));
+    await waitFor(() => expect(downloadBlobMock).toHaveBeenLastCalledWith(attachmentBlob, "보존자료.txt"));
 
     fireEvent.click(screen.getByRole("button", { name: "Vault에서 Markdown 복사본 만들기" }));
     expect(await screen.findByTestId("location")).toHaveTextContent("/app?entry=legacy-note-a");

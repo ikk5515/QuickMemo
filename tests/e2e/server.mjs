@@ -93,6 +93,7 @@ Object.assign(process.env, {
 const fixtures = await import("./emulator-fixtures.mjs");
 const { default: secureShareHandler } = await import("../../api/public-shares-v2.js");
 const { default: vaultFolderHandler } = await import("../../api/vault-folders.js");
+const { default: vaultNoteHandler } = await import("../../api/vault-notes.js");
 const { createServer: createViteServer } = await import("vite");
 const vite = await createViteServer({
   appType: "spa",
@@ -413,6 +414,10 @@ const server = createServer((request, response) => {
   }
   if (url.pathname === "/api/vault-folders") {
     void vaultFolderHandler(request, response);
+    return;
+  }
+  if (url.pathname === "/api/vault-notes") {
+    void vaultNoteHandler(request, response);
     return;
   }
   if (url.pathname === "/api/blob-attachments") {

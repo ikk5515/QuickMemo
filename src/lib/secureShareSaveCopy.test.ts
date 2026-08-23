@@ -32,6 +32,7 @@ const profile: UserProfile = {
 };
 const privateKey = {} as CryptoKey;
 const noteKey = {} as CryptoKey;
+const vaultIntegrityKey = {} as CryptoKey;
 const wrappedKey = {
   version: 1 as const,
   algorithm: "RSA-OAEP" as const,
@@ -150,8 +151,10 @@ function dependencies() {
     })),
     generateNoteKey: vi.fn(async () => noteKey),
     now: vi.fn(() => Date.parse("2026-07-28T00:00:00.000Z")),
+    requireExistingVaultIntegrityKey: vi.fn(async () => vaultIntegrityKey),
     unwrapNoteKey: vi.fn(async () => noteKey),
-    wrapNoteKey: vi.fn(async () => wrappedKey)
+    wrapNoteKey: vi.fn(async () => wrappedKey),
+    vaultNameFingerprint: vi.fn(async () => "C".repeat(43))
   } as unknown as NonNullable<Parameters<typeof saveSecureShareCopy>[1]>;
 }
 
@@ -197,11 +200,18 @@ describe("secure share save-copy saga", () => {
 
     expect(deps.createSecureShareCopyingNote).toHaveBeenCalledWith(expect.objectContaining({
       copyJobId: "copy_job_1234567890",
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html",
       expectedAttachmentCount: 2,
       historySnapshot: expect.any(Object),
       type: "personal",
       ownerUid: profile.uid,
       participantUids: [profile.uid],
+      nameClaim: {
+        claimId: "C".repeat(43),
+        indexVersion: 1,
+        parentId: null
+      },
       wrappedKeys: { [profile.uid]: wrappedKey }
     }));
     expect(deps.encryptText).toHaveBeenCalledWith(JSON.stringify({
@@ -222,6 +232,13 @@ describe("secure share save-copy saga", () => {
     });
     expect(deps.deleteNoteAttachment).not.toHaveBeenCalled();
     expect(deps.abortSecureShareCopyingNote).not.toHaveBeenCalled();
+    expect(deps.requireExistingVaultIntegrityKey).toHaveBeenCalledWith(profile, privateKey);
+    expect(deps.vaultNameFingerprint).toHaveBeenCalledWith(vaultIntegrityKey, {
+      kind: "legacy-html",
+      name: "복사할 노트",
+      parentId: null,
+      targetType: "entry"
+    });
     expect(progress.map((entry) => entry.phase)).toEqual(expect.arrayContaining([
       "preparing",
       "creating_note",
@@ -510,7 +527,25 @@ describe("secure share save-copy saga", () => {
       "new_note_123456",
       "reserved_attachment_123456"
     );
-    expect(deps.abortSecureShareCopyingNote).toHaveBeenCalledTimes(1);
+    expect(deps.abortSecureShareCopyingNote).not.toHaveBeenCalled();
+  });
+
+  it("fails before creating a note or Blob reservation when the Vault marker is absent", async () => {
+    const deps = dependencies();
+    vi.mocked(deps.requireExistingVaultIntegrityKey).mockRejectedValue(
+      new Error("marker missing")
+    );
+
+    await expect(saveSecureShareCopy({
+      payload: payload(),
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps)).rejects.toMatchObject({ code: "vault_not_ready" });
+
+    expect(deps.generateNoteKey).not.toHaveBeenCalled();
+    expect(deps.createSecureShareCopyingNote).not.toHaveBeenCalled();
+    expect(deps.createNoteAttachment).not.toHaveBeenCalled();
   });
 
   it("uses the same compensation path when cancellation arrives during upload", async () => {

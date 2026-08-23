@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { NoteFolderSnapshot } from "../../services/notes";
-import { decryptVaultFolders, migrateLegacyVaultFolder } from "./vaultData";
+import {
+  decryptVaultFolders,
+  migrateLegacyVaultFolder,
+  vaultEntryStorageIdentityState
+} from "./vaultData";
 import { vaultNameFingerprint } from "./vaultIntegrity";
 
 const mocks = vi.hoisted(() => ({
@@ -148,5 +152,26 @@ describe("Vault folder persistence", () => {
         nameDecryptionFailed: true
       })
     ]);
+  });
+});
+
+describe("Vault entry storage identity", () => {
+  it("distinguishes raw legacy absence from explicit and partial identities", () => {
+    expect(vaultEntryStorageIdentityState({})).toBe("legacy-missing");
+    expect(vaultEntryStorageIdentityState({
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html"
+    })).toBe("explicit");
+    expect(vaultEntryStorageIdentityState({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown"
+    })).toBe("explicit");
+    expect(vaultEntryStorageIdentityState({
+      contentFormat: "legacy-html-v1"
+    })).toBe("invalid");
+    expect(vaultEntryStorageIdentityState({
+      contentFormat: "markdown-v1",
+      entryKind: "canvas"
+    })).toBe("invalid");
   });
 });

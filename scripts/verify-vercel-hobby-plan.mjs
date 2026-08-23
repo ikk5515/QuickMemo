@@ -21,9 +21,15 @@ export function assertVercelHobbyPlan(payload) {
   return plan;
 }
 
-function productionTarget(target) {
+function targetsProduction(target) {
   const targets = Array.isArray(target) ? target : [target];
   return targets.includes("production");
+}
+
+function exactProductionTarget(target) {
+  return Array.isArray(target)
+    && target.length === 1
+    && target[0] === "production";
 }
 
 const VAULT_FEATURE_FLAG_KEY = "VITE_OBSIDIAN_VAULT_ENABLED";
@@ -40,13 +46,14 @@ export function productionVaultEnvironmentId(payload) {
     record
     && typeof record === "object"
     && record.key === VAULT_FEATURE_FLAG_KEY
-    && productionTarget(record.target)
+    && targetsProduction(record.target)
   ));
   if (productionRecords.length === 0) {
     return null;
   }
   if (
     productionRecords.length !== 1
+    || !exactProductionTarget(productionRecords[0].target)
     || typeof productionRecords[0].id !== "string"
     || productionRecords[0].id.trim() === ""
     || productionRecords[0].id.trim() !== productionRecords[0].id
@@ -73,7 +80,7 @@ export function assertProductionVaultState(payload, expectedId, enabled) {
     || expectedId === ""
     || payload.id !== expectedId
     || payload.key !== VAULT_FEATURE_FLAG_KEY
-    || !productionTarget(payload.target)
+    || !exactProductionTarget(payload.target)
     || payload.value !== expectedValue
   ) {
     throw new Error(`Vercel deployment is blocked because the production Vault feature flag is not explicitly ${enabled ? "enabled" : "disabled"}.`);

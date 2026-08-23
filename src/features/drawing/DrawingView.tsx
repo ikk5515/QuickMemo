@@ -27,6 +27,7 @@ import {
   type ReactNode,
   type WheelEvent as ReactWheelEvent
 } from "react";
+import { downloadBlob } from "../vault/browserDownload";
 import {
   clampDrawingCoordinate,
   drawingElementBounds,
@@ -590,13 +591,7 @@ export function DrawingView({ onChange, onExportSvg, readOnly = false, source }:
       if (onExportSvg) {
         onExportSvg({ filename, svg });
       } else if (typeof URL.createObjectURL === "function") {
-        const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
-        const anchor = globalThis.document.createElement("a");
-        anchor.download = filename;
-        anchor.href = url;
-        anchor.rel = "noopener noreferrer";
-        anchor.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 0);
+        downloadBlob(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }), filename);
       } else {
         throw new Error("이 브라우저에서는 파일 내보내기를 사용할 수 없습니다.");
       }

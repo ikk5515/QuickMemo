@@ -9,10 +9,17 @@ import {
   type DrawingDocument
 } from "./model";
 
+const downloadBlobMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../vault/browserDownload", () => ({
+  downloadBlob: downloadBlobMock
+}));
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  downloadBlobMock.mockReset();
 });
 
 const rectangleDocument: DrawingDocument = {
@@ -229,5 +236,15 @@ describe("DrawingView", () => {
       svg: expect.stringContaining("<rect")
     }));
     expect(onExportSvg.mock.calls[0][0].svg).not.toMatch(/script|foreignObject|href=/iu);
+  });
+
+  it("routes the standalone SVG download through the WebKit-safe Blob helper", () => {
+    render(<ControlledDrawing initialSource={rectangleSource()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "안전한 SVG로 내보내기" }));
+
+    expect(downloadBlobMock).toHaveBeenCalledTimes(1);
+    expect(downloadBlobMock).toHaveBeenCalledWith(expect.any(Blob), "Drawing.svg");
+    expect((downloadBlobMock.mock.calls[0][0] as Blob).type).toBe("image/svg+xml;charset=utf-8");
   });
 });

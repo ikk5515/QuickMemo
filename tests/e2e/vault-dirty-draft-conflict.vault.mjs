@@ -11,6 +11,9 @@ import {
 } from "./helpers.mjs";
 
 const firestoreProjectId = "quickmemo-share-api-test";
+const vaultNoteMutationUrl = "http://127.0.0.1:4174/api/vault-notes";
+const expectedRevisionConflictConsoleText =
+  "Failed to load resource: the server responded with a status of 409 (Conflict)";
 
 async function activeEntryId(page) {
   const tabId = await page
@@ -175,11 +178,31 @@ test("two authenticated contexts preserve a dirty draft and apply a revision-che
     await saveActiveEntry(page);
     await expectVaultNameWritesReady(pageB);
     await expectEditorSource(pageB, localSource);
+    const conflictConsoleStartIndex = diagnosticsB.consoleErrors.length;
+    const conflictResponsePromise = pageB.waitForResponse((response) => (
+      response.url() === vaultNoteMutationUrl
+      && response.request().method() === "POST"
+    ));
     await pageB.getByRole("button", { name: "저장", exact: true }).click();
+    const conflictResponse = await conflictResponsePromise;
+    expect(conflictResponse.status()).toBe(409);
 
     const conflict = pageB.locator(".vault-save-conflict");
     await expect(conflict).toBeVisible();
     await expect(conflict).toContainText("저장 충돌");
+    await expect.poll(() => diagnosticsB.consoleErrors.slice(conflictConsoleStartIndex).filter((entry) => (
+      entry.location === vaultNoteMutationUrl
+      && entry.text === expectedRevisionConflictConsoleText
+    )).length, {
+      message: "the proven revision conflict must emit exactly one matching browser resource error"
+    }).toBe(1);
+    const [expectedConflictConsoleError] = diagnosticsB.consoleErrors
+      .slice(conflictConsoleStartIndex)
+      .filter((entry) => (
+        entry.location === vaultNoteMutationUrl
+        && entry.text === expectedRevisionConflictConsoleText
+      ));
+    diagnosticsB.expectedConsoleErrors.add(expectedConflictConsoleError);
     await expectEditorSource(pageB, localSource);
     await conflict.getByRole("button", { name: "안전 병합" }).click();
     const resolver = pageB.getByRole("dialog", { name: "편집 충돌 안전 병합" });

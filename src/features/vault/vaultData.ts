@@ -25,6 +25,32 @@ export interface DecryptedVaultNote extends DecryptedNote {
   entryKind: VaultEntryKind;
 }
 
+export type VaultEntryStorageIdentityState = "explicit" | "invalid" | "legacy-missing";
+
+/**
+ * Classifies the persisted storage identity without applying the legacy HTML
+ * fallback used by the renderer. Cutover preflight must distinguish a truly
+ * legacy document (both fields absent) from a partially written or mismatched
+ * identity, which is never safe to repair automatically.
+ */
+export function vaultEntryStorageIdentityState(
+  note: Pick<NoteSnapshot, "contentFormat" | "entryKind">
+): VaultEntryStorageIdentityState {
+  if (note.contentFormat === undefined && note.entryKind === undefined) {
+    return "legacy-missing";
+  }
+  if (
+    (note.contentFormat === "markdown-v1" && note.entryKind === "markdown")
+    || (note.contentFormat === "legacy-html-v1" && note.entryKind === "legacy-html")
+    || (note.contentFormat === "json-canvas-v1" && note.entryKind === "canvas")
+    || (note.contentFormat === "base-v1" && note.entryKind === "base")
+    || (note.contentFormat === "asset-v1" && note.entryKind === "asset")
+  ) {
+    return "explicit";
+  }
+  return "invalid";
+}
+
 export function resolvedNoteContentFormat(note: Pick<NoteSnapshot, "contentFormat">) {
   return note.contentFormat ?? "legacy-html-v1";
 }

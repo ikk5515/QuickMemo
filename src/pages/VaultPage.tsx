@@ -162,7 +162,7 @@ import { VaultAssetPreview } from "../features/vault/VaultAssetPreview";
 import { setFrontmatterProperty } from "../features/vault/frontmatterEditing";
 import type { VaultHistoryDraft } from "../features/vault/VaultHistoryPanel";
 import { createSearchIndexMarkdown } from "../features/vault/moc";
-import { migrateVaultNameReservations } from "../features/vault/vaultNameMigration";
+import type { VaultNameReservationMigrationResult } from "../features/vault/vaultNameMigration";
 import { downloadBlob } from "../features/vault/browserDownload";
 import {
   createVaultImportManifest
@@ -260,7 +260,6 @@ import {
 import {
   VAULT_NAME_INDEX_VERSION,
   auditVaultFolderTree,
-  planVaultNameMigration,
   requireValidVaultFolderTree,
   vaultNameFingerprint
 } from "../features/vault/vaultIntegrity";
@@ -292,6 +291,7 @@ import {
   subscribeVisibleNotes,
   deleteRevisionedNote,
   getVisibleNotesByIdsFromServer,
+  loadOwnedVaultCutoverInventory,
   NoteRevisionConflictError,
   restoreRevisionedNote,
   restoreRevisionedEncryptedFolderSubtree,
@@ -683,7 +683,7 @@ interface VaultWorkspaceConflictState {
   remoteState: VaultPersistedWorkspaceState | null;
 }
 
-type VaultNameMigrationStatus = "waiting" | "running" | "ready" | "blocked";
+type VaultNameMigrationStatus = "waiting" | "running" | "audited" | "ready" | "blocked";
 
 interface VaultNameMigrationProgressState {
   completed: number;
@@ -754,6 +754,31 @@ export function ownedNoteReservationSignature(notes: readonly NoteSnapshot[], ui
       note.vaultNameIndexVersion ?? null
     ])
     .sort((left, right) => String(left[0]).localeCompare(String(right[0]))));
+}
+
+export function ownedVaultCutoverInventorySignature(
+  inventory: { activeNotes: readonly NoteSnapshot[]; deletedNotes: readonly NoteSnapshot[] },
+  uid: string
+) {
+  return JSON.stringify([
+    ...inventory.activeNotes.map((note) => ["active", note] as const),
+    ...inventory.deletedNotes.map((note) => ["deleted", note] as const)
+  ]
+    .filter(([, note]) => note.ownerUid === uid)
+    .map(([state, note]) => [
+      state,
+      note.id,
+      note.folderId ?? null,
+      note.entryKind ?? null,
+      note.contentFormat ?? null,
+      note.encryptedTitle.version,
+      note.encryptedTitle.algorithm,
+      note.encryptedTitle.iv,
+      note.encryptedTitle.cipherText,
+      note.vaultNameClaimId ?? null,
+      note.vaultNameIndexVersion ?? null
+    ])
+    .sort((left, right) => String(left[1]).localeCompare(String(right[1]))));
 }
 
 export function visibleVaultOwnerIds(profile: UserProfile, users: readonly UserProfile[]) {
@@ -1437,6 +1462,7 @@ function UnlockedVaultPage({
   const [noteServerReservationSignature, setNoteServerReservationSignature] = useState<string | null>(null);
   const [folderServerReservationSignature, setFolderServerReservationSignature] = useState<string | null>(null);
   const [auditedServerReservationSignature, setAuditedServerReservationSignature] = useState<string | null>(null);
+  const [auditedServerInventorySignature, setAuditedServerInventorySignature] = useState<string | null>(null);
   const notesRef = useRef<DecryptedVaultNote[]>(notes);
   const foldersRef = useRef<DecryptedVaultFolder[]>(folders);
   const folderPathsRef = useRef<Map<string, string>>(new Map());
@@ -1653,6 +1679,7 @@ function UnlockedVaultPage({
     : null;
   const vaultNameWritesReady = isOnline
     && vaultNameMigrationStatus === "ready"
+    && auditedServerInventorySignature !== null
     && currentServerReservationSignature !== null
     && currentServerReservationSignature === auditedServerReservationSignature;
   const previousOnlineRef = useRef(isOnline);
@@ -2519,6 +2546,7 @@ function UnlockedVaultPage({
     setNoteServerReservationSignature(null);
     setFolderServerReservationSignature(null);
     setAuditedServerReservationSignature(null);
+    setAuditedServerInventorySignature(null);
     void prepareVaultIntegrityKey(profile, privateKey)
       .then((prepared) => {
         if (active) setPreparedVaultIntegrityKey(prepared);
@@ -2542,9 +2570,7 @@ function UnlockedVaultPage({
       !preparedVaultIntegrityKey
       || vaultIntegrityKey
       || vaultIntegrityActivationRef.current
-      || !noteSnapshotReceived
       || !folderSnapshotReceived
-      || noteServerReservationSignature === null
       || folderServerReservationSignature === null
       || !isOnline
     ) {
@@ -2553,57 +2579,22 @@ function UnlockedVaultPage({
     const generation = vaultNameMigrationGenerationRef.current;
     let cancelled = false;
     const pending = (async () => {
+      const { preflightVaultNameCutover } = await import("../features/vault/vaultNameMigration");
       let prepared = preparedVaultIntegrityKey;
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const ownedRawNotes = rawNotes.filter((note) => (
-          note.ownerUid === profile.uid
-          && note.isDeleted !== true
-          && (note.type === "personal" || note.type === "shared")
-        ));
-        // The legacy isDeleted normalizer must first be acknowledged by a
-        // server snapshot. Creating the cutover marker before that repair can
-        // permanently lock the legacy document under claim-enforcing Rules.
-        if (ownedRawNotes.some((note) => note.isDeleted !== false)) {
-          setStatus("기존 노트 삭제 상태를 서버에서 확인한 뒤 이름 무결성을 활성화합니다…");
-          return;
-        }
+        // The marker is irreversible. Read every owner note directly from the
+        // server (active and deleted), then decrypt and plan the complete
+        // inventory under the exact candidate key before sealing it.
+        const inventory = await loadOwnedVaultCutoverInventory(profile.uid);
         const ownedRawFolders = rawFolders.filter((folder) => folder.ownerUid === profile.uid);
-        const [preflightNotes, preflightFolders] = await Promise.all([
-          decryptVaultNotes(ownedRawNotes, profile.uid, privateKey),
-          decryptVaultFolders(ownedRawFolders, profile.uid, privateKey)
-        ]);
-        if (
-          preflightNotes.length !== ownedRawNotes.length
-          || preflightFolders.length !== ownedRawFolders.length
-          || preflightFolders.some((folder) => folder.nameDecryptionFailed)
-        ) {
-          throw new Error("전체 Vault 이름과 payload를 복호화하지 못해 무결성 활성화를 중단했습니다.");
-        }
-        requireValidVaultFolderTree(preflightFolders);
-        const folderIds = new Set(preflightFolders.map((folder) => folder.id));
-        if (preflightNotes.some((note) => (
-          note.folderId !== null && note.folderId !== undefined && !folderIds.has(note.folderId)
-        ))) {
-          throw new Error("전체 Vault 폴더 경로를 확인하지 못해 무결성 활성화를 중단했습니다.");
-        }
-        const invalidSharedFolderTargetIds = new Set(preflightNotes
-          .filter((note) => note.type === "shared" && (note.folderId ?? null) !== null)
-          .map((note) => note.id));
-        await planVaultNameMigration(prepared.key, [
-          ...preflightFolders.map((folder) => ({
-            id: folder.id,
-            name: folder.displayName,
-            parentId: folder.parentId ?? null,
-            targetType: "folder" as const
-          })),
-          ...preflightNotes.filter((note) => !invalidSharedFolderTargetIds.has(note.id)).map((note) => ({
-            id: note.id,
-            kind: note.entryKind,
-            name: note.title,
-            parentId: note.folderId ?? null,
-            targetType: "entry" as const
-          }))
-        ]);
+        await preflightVaultNameCutover({
+          activeNotes: inventory.activeNotes,
+          deletedNotes: inventory.deletedNotes,
+          folders: ownedRawFolders,
+          privateKey,
+          uid: profile.uid,
+          vaultIntegrityKey: prepared.key
+        });
         const activated = await activatePreparedVaultIntegrityKey(prepared, privateKey);
         if (!activated.keyChanged) {
           if (
@@ -2616,8 +2607,8 @@ function UnlockedVaultPage({
         }
 
         // Another tab won the candidate race. Its key changes every blinded
-        // claim, so fetch the winner and rerun decrypt/tree/name planning from
-        // the same server-confirmed encrypted snapshot before enabling writes.
+        // claim, so fetch the winner and rerun a fresh full server inventory
+        // preflight before enabling writes.
         prepared = await prepareVaultIntegrityKey(profile, privateKey);
       }
       throw new Error("다른 탭의 Vault 무결성 활성화와 계속 충돌했습니다.");
@@ -2641,13 +2632,10 @@ function UnlockedVaultPage({
     folderServerReservationSignature,
     folderSnapshotReceived,
     isOnline,
-    noteServerReservationSignature,
-    noteSnapshotReceived,
     preparedVaultIntegrityKey,
     privateKey,
     profile,
     rawFolders,
-    rawNotes,
     vaultIntegrityKey
   ]);
 
@@ -3009,7 +2997,6 @@ function UnlockedVaultPage({
   useEffect(() => {
     if (
       !vaultIntegrityKey
-      || !vaultDataReady
       || !isOnline
       || currentServerReservationSignature === null
       || vaultNameMigrationStatus !== "waiting"
@@ -3019,59 +3006,152 @@ function UnlockedVaultPage({
     }
 
     const generation = vaultNameMigrationGenerationRef.current;
-    const ownedFolders = folders.filter((folder) => folder.ownerUid === profile.uid);
-    const ownedNotes = notes.filter((note) => (
-      note.ownerUid === profile.uid
-      && note.isDeleted !== true
-      && (note.type === "personal" || note.type === "shared")
-    ));
-    const expectedFolderCount = rawFolders.filter((folder) => folder.ownerUid === profile.uid).length;
-    const expectedNoteCount = rawNotes.filter((note) => (
-      note.ownerUid === profile.uid
-      && note.isDeleted !== true
-      && (note.type === "personal" || note.type === "shared")
-    )).length;
-    const migrationSnapshotSignature = currentServerReservationSignature;
-
     setVaultNameMigrationStatus("running");
-    setVaultNameMigrationProgress({ completed: 0, migrated: 0, skipped: 0, total: ownedFolders.length + ownedNotes.length });
+    setVaultNameMigrationProgress({ completed: 0, migrated: 0, skipped: 0, total: 0 });
     setVaultNameCollisionTargetIds(new Set());
+    setAuditedServerReservationSignature(null);
+    setAuditedServerInventorySignature(null);
     setStatus("암호화된 이름 예약을 검증하는 중입니다…");
 
-    const pending = migrateVaultNameReservations({
-      expectedFolderCount,
-      expectedNoteCount,
-      folders: ownedFolders,
-      notes: ownedNotes,
-      onProgress: (progress) => {
-        if (vaultNameMigrationGenerationRef.current === generation) {
-          setVaultNameMigrationProgress(progress);
+    const pending = (async () => {
+      const {
+        auditVaultNameReservations,
+        migrateVaultNameReservations,
+        preflightVaultNameCutover
+      } = await import("../features/vault/vaultNameMigration");
+      const inventory = await loadOwnedVaultCutoverInventory(profile.uid);
+      if (!folderSubscriptionServerReadyRef.current) {
+        throw new Error("서버의 전체 Vault 폴더 목록을 아직 확인하지 못했습니다.");
+      }
+      const ownedFolderSnapshots = activeFolderSnapshotsRef.current
+        .filter((folder) => folder.ownerUid === profile.uid);
+      const preflight = await preflightVaultNameCutover({
+        activeNotes: inventory.activeNotes,
+        deletedNotes: inventory.deletedNotes,
+        folders: ownedFolderSnapshots,
+        privateKey,
+        uid: profile.uid,
+        vaultIntegrityKey
+      });
+      if (vaultNameMigrationGenerationRef.current !== generation) return null;
+      setVaultNameMigrationProgress({
+        completed: 0,
+        migrated: 0,
+        skipped: 0,
+        total: preflight.folders.length + preflight.activeNotes.length + preflight.deletedNotes.length
+      });
+
+      const result = await migrateVaultNameReservations({
+        deletedNotes: preflight.deletedNotes,
+        expectedDeletedNoteCount: inventory.deletedNotes.length,
+        expectedFolderCount: preflight.folders.length,
+        expectedNoteCount: inventory.activeNotes.length,
+        folders: preflight.folders,
+        legacyActiveNoteIds: preflight.legacyActiveNoteIds,
+        legacyDeletedNoteIds: preflight.legacyDeletedNoteIds,
+        notes: preflight.activeNotes,
+        onProgress: (progress) => {
+          if (vaultNameMigrationGenerationRef.current === generation) {
+            setVaultNameMigrationProgress(progress);
+          }
+        },
+        privateKey,
+        profile,
+        vaultIntegrityKey
+      });
+
+      // A mutation result is not the cutover proof. Read the complete owner
+      // inventory again from the server and reject any raw identity that still
+      // relies on the renderer's legacy fallback, including trash and
+      // collision-deferred entries.
+      const finalInventory = await loadOwnedVaultCutoverInventory(profile.uid);
+      const initialFinalFolders = activeFolderSnapshotsRef.current
+        .filter((folder) => folder.ownerUid === profile.uid);
+      const finalPreflight = await preflightVaultNameCutover({
+        activeNotes: finalInventory.activeNotes,
+        deletedNotes: finalInventory.deletedNotes,
+        folders: initialFinalFolders,
+        privateKey,
+        uid: profile.uid,
+        vaultIntegrityKey
+      });
+      if (finalPreflight.legacyActiveNoteIds.size || finalPreflight.legacyDeletedNoteIds.size) {
+        throw new Error("서버 재확인에서 명시적 저장 형식이 없는 Vault 항목을 발견했습니다.");
+      }
+
+      // Folder mutations are server-authoritative but their listener can land
+      // just after the note inventory read. Retry only this read-only audit on
+      // a server-complete folder snapshot; note inventory is never substituted
+      // with the active UI subscription.
+      let finalAudit: Pick<
+        VaultNameReservationMigrationResult,
+        "collisions" | "deferredTargetIds"
+      > | null = null;
+      let auditedFolders: NoteFolderSnapshot[] = initialFinalFolders;
+      let lastAuditError: unknown = null;
+      for (let attempt = 0; attempt < 12 && finalAudit === null; attempt += 1) {
+        if (vaultNameMigrationGenerationRef.current !== generation) return null;
+        if (folderSubscriptionServerReadyRef.current) {
+          auditedFolders = activeFolderSnapshotsRef.current
+            .filter((folder) => folder.ownerUid === profile.uid);
+          const decryptedFolders = await decryptVaultFolders(auditedFolders, profile.uid, privateKey);
+          if (
+            decryptedFolders.length === auditedFolders.length
+            && !decryptedFolders.some((folder) => folder.nameDecryptionFailed)
+          ) {
+            try {
+              finalAudit = await auditVaultNameReservations({
+                deletedNotes: finalPreflight.deletedNotes,
+                expectedDeletedNoteCount: finalInventory.deletedNotes.length,
+                expectedFolderCount: auditedFolders.length,
+                expectedNoteCount: finalInventory.activeNotes.length,
+                folders: decryptedFolders,
+                notes: finalPreflight.activeNotes,
+                profile,
+                vaultIntegrityKey
+              });
+            } catch (caught) {
+              lastAuditError = caught;
+            }
+          }
         }
-      },
-      privateKey,
-      profile,
-      vaultIntegrityKey
-    }).then((result) => {
+        if (finalAudit === null && attempt < 11) {
+          await new Promise((resolve) => window.setTimeout(resolve, 100));
+        }
+      }
+      if (!finalAudit) {
+        throw lastAuditError instanceof Error
+          ? lastAuditError
+          : new Error("서버의 최종 Vault 이름 예약 상태를 확인하지 못했습니다.");
+      }
+      return { auditedFolders, finalAudit, finalInventory, result };
+    })().then((outcome) => {
       if (vaultNameMigrationGenerationRef.current !== generation) return;
+      if (!outcome) return;
+      const { auditedFolders, finalAudit, finalInventory, result } = outcome;
       setVaultNameMigrationProgress(result);
-      if (result.deferredTargetIds.length) {
-        setVaultNameCollisionTargetIds(new Set(result.deferredTargetIds));
+      const auditedActiveSignature = `${ownedNoteReservationSignature(finalInventory.activeNotes, profile.uid)}\n${ownedFolderReservationSignature(auditedFolders, profile.uid)}`;
+      setAuditedServerReservationSignature(auditedActiveSignature);
+      setAuditedServerInventorySignature(ownedVaultCutoverInventorySignature(finalInventory, profile.uid));
+      if (finalAudit.deferredTargetIds.length) {
+        setVaultNameCollisionTargetIds(new Set(finalAudit.deferredTargetIds));
         setVaultNameMigrationStatus("blocked");
-        setError(result.collisions.length
-          ? `같은 폴더에서 이름이 겹치거나 그 하위에 있는 항목 ${result.deferredTargetIds.length}개를 발견했습니다. 표시된 항목의 이름이나 위치를 정리한 뒤 다시 확인해주세요.`
-          : `이전 버전의 공유 폴더 경로 ${result.deferredTargetIds.length}개를 발견했습니다. 표시된 공유 항목을 Vault 루트로 이동해 무결성 검증을 완료해주세요.`);
+        setError(finalAudit.collisions.length
+          ? `같은 폴더에서 이름이 겹치거나 그 하위에 있는 항목 ${finalAudit.deferredTargetIds.length}개를 발견했습니다. 표시된 항목의 이름이나 위치를 정리한 뒤 다시 확인해주세요.`
+          : `이전 버전의 공유 폴더 경로 ${finalAudit.deferredTargetIds.length}개를 발견했습니다. 표시된 공유 항목을 Vault 루트로 이동해 무결성 검증을 완료해주세요.`);
         return;
       }
       setVaultNameCollisionTargetIds(new Set());
-      setAuditedServerReservationSignature(migrationSnapshotSignature);
-      setVaultNameMigrationStatus("ready");
+      setVaultNameMigrationStatus("audited");
       setStatus(result.migrated
-        ? `암호화된 이름 예약 ${result.migrated}개를 준비했습니다.`
-        : "암호화된 이름 예약을 확인했습니다.");
+        ? `암호화된 이름 예약 ${result.migrated}개를 서버에서 최종 확인하는 중입니다…`
+        : "암호화된 이름 예약을 서버에서 최종 확인하는 중입니다…");
     }).catch((caught) => {
       if (vaultNameMigrationGenerationRef.current !== generation) return;
       setVaultNameMigrationStatus("blocked");
       setVaultNameCollisionTargetIds(new Set());
+      setAuditedServerReservationSignature(null);
+      setAuditedServerInventorySignature(null);
       setError(caught instanceof Error
         ? `이름 예약 검증을 완료하지 못했습니다: ${caught.message}`
         : "이름 예약 검증을 완료하지 못해 Vault 쓰기를 잠갔습니다.");
@@ -3082,17 +3162,47 @@ function UnlockedVaultPage({
     });
     vaultNameMigrationPromiseRef.current = pending;
   }, [
-    folders,
     isOnline,
-    notes,
     privateKey,
     profile,
-    rawFolders,
-    rawNotes,
-    vaultDataReady,
     vaultIntegrityKey,
     vaultNameMigrationStatus,
     currentServerReservationSignature
+  ]);
+
+  useEffect(() => {
+    if (vaultNameMigrationStatus !== "audited" || auditedServerInventorySignature === null) {
+      return undefined;
+    }
+    if (
+      currentServerReservationSignature !== null
+      && currentServerReservationSignature === auditedServerReservationSignature
+    ) {
+      setVaultNameMigrationStatus("ready");
+      setStatus("암호화된 이름 예약을 서버에서 최종 확인했습니다.");
+      return undefined;
+    }
+    const generation = vaultNameMigrationGenerationRef.current;
+    const retryTimer = window.setTimeout(() => {
+      if (
+        vaultNameMigrationGenerationRef.current !== generation
+        || vaultNameMigrationStatus !== "audited"
+      ) return;
+      vaultNameMigrationGenerationRef.current += 1;
+      vaultNameMigrationPromiseRef.current = null;
+      setVaultNameMigrationProgress(null);
+      setVaultNameCollisionTargetIds(new Set());
+      setAuditedServerReservationSignature(null);
+      setAuditedServerInventorySignature(null);
+      setVaultNameMigrationStatus("waiting");
+      setStatus("최종 확인 중 새 Vault 변경을 감지해 전체 inventory를 다시 검사합니다…");
+    }, 3_000);
+    return () => window.clearTimeout(retryTimer);
+  }, [
+    auditedServerInventorySignature,
+    auditedServerReservationSignature,
+    currentServerReservationSignature,
+    vaultNameMigrationStatus
   ]);
 
   useEffect(() => {
@@ -3102,6 +3212,8 @@ function UnlockedVaultPage({
     ) {
       setVaultNameMigrationProgress(null);
       setVaultNameCollisionTargetIds(new Set());
+      setAuditedServerReservationSignature(null);
+      setAuditedServerInventorySignature(null);
       setVaultNameMigrationStatus("waiting");
       setStatus("서버에서 Vault 변경을 감지해 이름 예약을 다시 확인합니다…");
     }
@@ -3112,12 +3224,13 @@ function UnlockedVaultPage({
   ]);
 
   function retryVaultNameMigration() {
-    if (vaultNameMigrationStatus === "running") return;
+    if (vaultNameMigrationStatus === "running" || vaultNameMigrationStatus === "audited") return;
     vaultNameMigrationGenerationRef.current += 1;
     vaultNameMigrationPromiseRef.current = null;
     setVaultNameMigrationProgress(null);
     setVaultNameCollisionTargetIds(new Set());
     setAuditedServerReservationSignature(null);
+    setAuditedServerInventorySignature(null);
     setVaultNameMigrationStatus("waiting");
     setError(null);
   }
@@ -6051,7 +6164,10 @@ function UnlockedVaultPage({
     setTrashBusyEntryIds((current) => new Set(current).add(entryId));
     setError(null);
     try {
-      const nameClaim = note.vaultNameClaimId ? undefined : {
+      // Always send the deterministic reservation. The server atomically
+      // reuses a retained versioned claim id or creates the missing claim for
+      // a deleted legacy entry that was migrated identity-only.
+      const nameClaim = {
         claimId: await vaultNameFingerprint(vaultIntegrityKey, {
           kind: note.entryKind,
           name: note.title,
@@ -6063,7 +6179,7 @@ function UnlockedVaultPage({
       };
       await restoreRevisionedNote({
         expectedRevision: note.revision ?? 0,
-        ...(nameClaim ? { nameClaim } : {}),
+        nameClaim,
         noteId: note.id,
         readerUids: note.participantUids,
         uid: profile.uid
@@ -8481,7 +8597,7 @@ function UnlockedVaultPage({
               <p>
                 {!isOnline
                   ? "온라인 연결 후 같은 폴더의 중복 이름을 안전하게 검사합니다. 그전까지 쓰기를 잠급니다."
-                  : vaultNameMigrationStatus === "running"
+                  : vaultNameMigrationStatus === "running" || vaultNameMigrationStatus === "audited"
                     ? `${vaultNameMigrationProgress?.completed ?? 0}/${vaultNameMigrationProgress?.total ?? 0}개 확인 중 · 제목 평문은 서버에 저장하지 않습니다.`
                     : vaultNameCollisionLabels.length
                       ? `이름 또는 위치를 정리해야 합니다: ${vaultNameCollisionLabels.join(", ")}${vaultNameCollisionTargetIds.size > vaultNameCollisionLabels.length ? " 외" : ""}`

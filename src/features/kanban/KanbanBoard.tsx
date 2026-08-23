@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useMemo, useState } from "react";
 import { parseMarkdownInline, type MarkdownInlineToken } from "../markdown";
+import { downloadBlob } from "../vault/browserDownload";
 import {
   MAX_KANBAN_PARSE_DIAGNOSTICS,
   exportObsidianKanbanMarkdown,
@@ -364,17 +365,11 @@ export function KanbanBoard({ onChange, onOpenLink, readOnly = false, source }: 
       return;
     }
     try {
-      const url = URL.createObjectURL(new Blob([exportText], { type: "text/markdown;charset=utf-8" }));
-      try {
-        const anchor = globalThis.document.createElement("a");
-        anchor.download = safeKanbanFilename(document.title);
-        anchor.href = url;
-        anchor.rel = "noopener noreferrer";
-        anchor.click();
-        setMessage("Obsidian Kanban Markdown 다운로드를 준비했습니다.");
-      } finally {
-        window.setTimeout(() => URL.revokeObjectURL(url), 0);
-      }
+      downloadBlob(
+        new Blob([exportText], { type: "text/markdown;charset=utf-8" }),
+        safeKanbanFilename(document.title)
+      );
+      setMessage("Obsidian Kanban Markdown 다운로드를 준비했습니다.");
     } catch {
       setMessage("파일 다운로드에 실패했습니다. 내보내기 원문을 복사해주세요.");
     }

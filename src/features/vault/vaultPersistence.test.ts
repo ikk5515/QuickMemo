@@ -5,6 +5,7 @@ import {
   createEncryptedVaultAsset,
   createEncryptedVaultEntry,
   createMarkdownVaultNote,
+  migrateLegacyVaultEntryIdentity,
   resolveVaultEntryNameCollision,
   saveAndMoveEncryptedVaultEntry,
   saveEncryptedVaultEntry
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   encryptText: vi.fn(),
   fingerprint: vi.fn(),
   generateNoteKey: vi.fn(),
+  migrateLegacyVaultNote: vi.fn(),
   resolveRevisionedVaultNameCollision: vi.fn(),
   unwrapNoteKey: vi.fn(),
   updateRevisionedEncryptedNote: vi.fn(),
@@ -35,6 +37,7 @@ vi.mock("../../lib/crypto", () => ({
 vi.mock("../../services/notes", () => ({
   backfillRevisionedVaultNameClaim: mocks.backfillRevisionedVaultNameClaim,
   createRevisionedEncryptedNote: mocks.createRevisionedEncryptedNote,
+  migrateLegacyVaultNote: mocks.migrateLegacyVaultNote,
   resolveRevisionedVaultNameCollision: mocks.resolveRevisionedVaultNameCollision,
   updateRevisionedEncryptedNote: mocks.updateRevisionedEncryptedNote,
   updateRevisionedEncryptedNoteAndFolder: mocks.updateRevisionedEncryptedNoteAndFolder
@@ -93,6 +96,12 @@ describe("vaultPersistence encrypted revision contract", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.generateNoteKey.mockResolvedValue(noteKey);
+    mocks.migrateLegacyVaultNote.mockResolvedValue({
+      claimState: "reserved",
+      lastMutationId: "mutation",
+      noteId: "note-a",
+      revision: 8
+    });
     mocks.unwrapNoteKey.mockResolvedValue(noteKey);
     mocks.wrapNoteKey.mockResolvedValue(wrappedKey);
     mocks.fingerprint.mockImplementation(async (_key: CryptoKey, input: { name: string; parentId: string | null }) => (
@@ -387,6 +396,59 @@ describe("vaultPersistence encrypted revision contract", () => {
     expect(mocks.encryptText).not.toHaveBeenCalledWith(legacy.body, noteKey);
     expect(mocks.encryptText).not.toHaveBeenCalledWith(legacy.title, noteKey);
     expect(mocks.updateRevisionedEncryptedNote).not.toHaveBeenCalled();
+  });
+
+  it("seals a missing legacy identity and reserves the exact deterministic claim atomically", async () => {
+    const legacy = markdownNote({
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html",
+      vaultNameClaimId: undefined,
+      vaultNameIndexVersion: undefined
+    });
+
+    await migrateLegacyVaultEntryIdentity(legacy, "user-a", vaultIntegrityKey, true);
+
+    expect(mocks.migrateLegacyVaultNote).toHaveBeenCalledWith({
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 7,
+      nameClaim: {
+        claimId: vaultClaimId,
+        indexVersion: 1,
+        parentId: null
+      },
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+    expect(mocks.encryptText).not.toHaveBeenCalled();
+  });
+
+  it("seals a deferred or deleted legacy identity without sending a claim", async () => {
+    const legacy = markdownNote({
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html",
+      vaultNameClaimId: undefined,
+      vaultNameIndexVersion: undefined
+    });
+    mocks.migrateLegacyVaultNote.mockResolvedValue({
+      claimState: "deferred",
+      lastMutationId: "mutation",
+      noteId: legacy.id,
+      revision: 8
+    });
+
+    await migrateLegacyVaultEntryIdentity(legacy, "user-a", vaultIntegrityKey, false);
+
+    expect(mocks.migrateLegacyVaultNote).toHaveBeenCalledWith({
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 7,
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    });
+    expect(mocks.migrateLegacyVaultNote.mock.calls[0][0]).not.toHaveProperty("nameClaim");
   });
 
   it("backfills an oversized historical body without snapshotting or revalidating it", async () => {

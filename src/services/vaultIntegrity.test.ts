@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activatePreparedVaultIntegrityKey,
   getOrCreateVaultIntegrityKey,
-  prepareVaultIntegrityKey
+  prepareVaultIntegrityKey,
+  requireExistingVaultIntegrityKey
 } from "./vaultIntegrity";
 
 const mocks = vi.hoisted(() => ({
@@ -98,6 +99,28 @@ describe("Vault integrity key persistence", () => {
     expect(mocks.getDocFromServer).toHaveBeenCalledOnce();
     expect(mocks.runTransaction).not.toHaveBeenCalled();
     expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("requires an existing marker without activating a missing Vault", async () => {
+    const privateKey = { kind: "private-secondary-entry" } as unknown as CryptoKey;
+    mocks.getDocFromServer.mockResolvedValueOnce({ exists: () => false });
+
+    await expect(requireExistingVaultIntegrityKey(profile, privateKey))
+      .rejects.toMatchObject({ name: "VaultIntegrityNotReadyError" });
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
+    expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("unwraps an existing marker for secondary Vault writes", async () => {
+    const privateKey = { kind: "private-secondary-existing" } as unknown as CryptoKey;
+    mocks.getDocFromServer.mockResolvedValueOnce({
+      data: () => ({ indexVersion: 1, ownerUid: profile.uid, wrappedKey: mocks.wrappedKey }),
+      exists: () => true
+    });
+
+    await expect(requireExistingVaultIntegrityKey(profile, privateKey)).resolves.toBe(mocks.unwrappedKey);
+    expect(mocks.unwrap).toHaveBeenCalledWith(mocks.wrappedKey, privateKey);
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
   it("activates a preflight candidate only after the caller explicitly commits it", async () => {

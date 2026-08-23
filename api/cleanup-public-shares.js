@@ -35,6 +35,7 @@ const secureShareCopyCleanupAttachmentDeleteLimit = 100;
 const secureShareEmailDeliveryCleanupLimit = 200;
 const secureShareCopyCleanupClaimIdField = "secureShareCopyCleanupClaimId";
 const secureShareCopyCleanupClaimedAtField = "secureShareCopyCleanupClaimedAt";
+const vaultNameClaimPattern = /^[A-Za-z0-9_-]{43}$/u;
 const secureShareRootStateCollections = [
   "publicShareAccessSessions",
   "publicShareEmailChallenges",
@@ -2893,6 +2894,65 @@ function secureShareCopyJobState(note, projectId, staleCutoffMs = Number.POSITIV
   };
 }
 
+function secureShareCopyVaultNameClaimName(note, state, projectId) {
+  const claimId = stringField(note, "vaultNameClaimId");
+  if (
+    stringField(note, "contentFormat") !== "legacy-html-v1"
+    || stringField(note, "entryKind") !== "legacy-html"
+    || integerField(note, "vaultNameIndexVersion") !== 1
+    || !vaultNameClaimPattern.test(claimId)
+    || note?.fields?.folderId?.nullValue !== null
+  ) {
+    return "";
+  }
+  return documentNameForPath(
+    projectId,
+    `vaultIntegrity/${state.ownerUid}/nameClaims/${claimId}`
+  );
+}
+
+function exactSecureShareCopyVaultNameClaim(claim, claimName, state) {
+  return Boolean(
+    claim
+    && claim.name === claimName
+    && claim.updateTime
+    && stringField(claim, "ownerUid") === state.ownerUid
+    && integerField(claim, "indexVersion") === 1
+    && claim?.fields?.parentId?.nullValue === null
+    && stringField(claim, "targetId") === state.noteId
+    && stringField(claim, "targetType") === "entry"
+  );
+}
+
+function legacySecureShareCopyWithoutVaultIdentity(note) {
+  return Boolean(
+    note
+    && !hasField(note, "contentFormat")
+    && !hasField(note, "entryKind")
+    && !hasField(note, "vaultNameClaimId")
+    && !hasField(note, "vaultNameIndexVersion")
+  );
+}
+
+function vaultNameClaimVerificationWrite(claim) {
+  return {
+    update: {
+      name: claim.name,
+      fields: {
+        indexVersion: claim.fields.indexVersion,
+        ownerUid: claim.fields.ownerUid,
+        parentId: claim.fields.parentId,
+        targetId: claim.fields.targetId,
+        targetType: claim.fields.targetType
+      }
+    },
+    updateMask: {
+      fieldPaths: ["indexVersion", "ownerUid", "parentId", "targetId", "targetType"]
+    },
+    currentDocument: { updateTime: claim.updateTime }
+  };
+}
+
 function secureShareCopyCleanupClaimId(note, state) {
   return `copy_cleanup_claim_${createHash("sha256")
     .update(`${note.name}:${state.copyJobId}:${state.revision}`, "utf8")
@@ -2976,9 +3036,16 @@ async function activateStaleSecureShareCopyJob(
   note,
   state,
   cleanupClaimId,
-  accessToken
+  accessToken,
+  projectId
 ) {
   if (!exactSecureShareCopyCleanupClaim(note, state, cleanupClaimId)) {
+    return false;
+  }
+
+  const claimName = secureShareCopyVaultNameClaimName(note, state, projectId);
+  const claim = claimName ? await getDocumentByName(claimName, accessToken) : null;
+  if (!exactSecureShareCopyVaultNameClaim(claim, claimName, state)) {
     return false;
   }
 
@@ -3010,7 +3077,8 @@ async function activateStaleSecureShareCopyJob(
               { fieldPath: "secureShareCopyUpdatedAt", setToServerValue: "REQUEST_TIME" },
               { fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }
             ]
-          }
+          },
+          vaultNameClaimVerificationWrite(claim)
         ]
       })
     });
@@ -3034,7 +3102,8 @@ async function abortStaleSecureShareCopyJob(
   note,
   state,
   cleanupClaimId,
-  accessToken
+  accessToken,
+  projectId
 ) {
   if (!exactSecureShareCopyCleanupClaim(note, state, cleanupClaimId)) {
     return false;
@@ -3043,6 +3112,12 @@ async function abortStaleSecureShareCopyJob(
   const mutationId = secureShareCopyAbortMutationId(note, state);
   const historyName = `${note.name}/history/${mutationId}`;
   const revision = state.revision + 1;
+  const claimName = secureShareCopyVaultNameClaimName(note, state, projectId);
+  const claim = claimName ? await getDocumentByName(claimName, accessToken) : null;
+  const legacyWithoutIdentity = legacySecureShareCopyWithoutVaultIdentity(note);
+  if (!legacyWithoutIdentity && !exactSecureShareCopyVaultNameClaim(claim, claimName, state)) {
+    return false;
+  }
 
   try {
     await firestoreRequest(firestoreCommitPathFromDocumentName(note.name), accessToken, {
@@ -3101,7 +3176,11 @@ async function abortStaleSecureShareCopyJob(
             updateTransforms: [
               { fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }
             ]
-          }
+          },
+          ...(!legacyWithoutIdentity ? [{
+            delete: claim.name,
+            currentDocument: { updateTime: claim.updateTime }
+          }] : [])
         ]
       })
     });
@@ -3167,7 +3246,11 @@ async function cleanupStaleSecureShareCopyJobs(config, stats) {
       state
     } = claimedJob;
 
+    const legacyWithoutIdentity = legacySecureShareCopyWithoutVaultIdentity(note);
+
     if (
+      !legacyWithoutIdentity
+      &&
       state.reservedCount === state.expectedCount
       && state.readyCount === state.expectedCount
     ) {
@@ -3176,7 +3259,8 @@ async function cleanupStaleSecureShareCopyJobs(config, stats) {
           note,
           state,
           cleanupClaimId,
-          config.accessToken
+          config.accessToken,
+          config.projectId
         )
       ) {
         stats.staleSecureShareCopyJobsActivated += 1;
@@ -3288,7 +3372,8 @@ async function cleanupStaleSecureShareCopyJobs(config, stats) {
         currentNote,
         currentState,
         cleanupClaimId,
-        config.accessToken
+        config.accessToken,
+        config.projectId
       )
     ) {
       stats.staleSecureShareCopyJobsAborted += 1;

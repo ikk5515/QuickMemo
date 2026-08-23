@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { NoteFolderSnapshot, NoteSnapshot } from "../services/notes";
 import {
   ownedFolderReservationSignature,
-  ownedNoteReservationSignature
+  ownedNoteReservationSignature,
+  ownedVaultCutoverInventorySignature
 } from "./VaultPage";
 
 const encrypted = (cipherText: string) => ({
@@ -88,5 +89,23 @@ describe("Vault name-reservation signatures", () => {
     expect(ownedFolderReservationSignature([
       folder({ parentId: "parent" })
     ], "owner")).not.toBe(before);
+  });
+
+  it("tracks deleted inventory and raw storage identity outside the active listener signature", () => {
+    const active = note();
+    const deleted = note({ id: "deleted", isDeleted: true });
+    const before = ownedVaultCutoverInventorySignature({
+      activeNotes: [active],
+      deletedNotes: [deleted]
+    }, "owner");
+
+    expect(ownedVaultCutoverInventorySignature({
+      activeNotes: [active],
+      deletedNotes: [{ ...deleted, contentFormat: undefined, entryKind: undefined }]
+    }, "owner")).not.toBe(before);
+    expect(ownedVaultCutoverInventorySignature({
+      activeNotes: [active],
+      deletedNotes: []
+    }, "owner")).not.toBe(before);
   });
 });
