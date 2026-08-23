@@ -4,7 +4,9 @@ import {
   useDeferredValue,
   useId,
   useMemo,
+  type FocusEventHandler,
   type HTMLAttributes,
+  type MouseEventHandler,
   type ReactNode
 } from "react";
 import { MathExpression } from "./MathExpression";
@@ -15,12 +17,14 @@ import type {
   MarkdownFootnote,
   MarkdownInlineToken,
   MarkdownLinkClickHandler,
+  MarkdownLinkPreviewHandler,
   MarkdownLinkReference,
   MarkdownTagClickHandler
 } from "./types";
 import "./markdown.css";
 
 const maximumRenderedMarkdownCharacters = 1_000_000;
+export const MAX_DATAVIEW_BLOCKS_PER_DOCUMENT = 8;
 
 function safelyTokenizeMarkdown(source: string) {
   try {
@@ -35,15 +39,20 @@ export interface MarkdownRendererProps
   source: string;
   emptyText?: string;
   onLinkClick?: MarkdownLinkClickHandler;
+  onLinkPreviewInteraction?: MarkdownLinkPreviewHandler;
   onTagClick?: MarkdownTagClickHandler;
+  renderCodeBlock?: (language: string, source: string) => ReactNode | undefined;
   renderEmbed?: (reference: MarkdownLinkReference) => ReactNode;
 }
 
 interface InlineRenderOptions {
   onLinkClick?: MarkdownLinkClickHandler;
+  onLinkPreviewInteraction?: MarkdownLinkPreviewHandler;
   onTagClick?: MarkdownTagClickHandler;
+  renderCodeBlock?: (language: string, source: string) => ReactNode | undefined;
   renderEmbed?: (reference: MarkdownLinkReference) => ReactNode;
   footnotePrefix: string;
+  dataviewBlocksRendered: number;
 }
 
 export function MarkdownRenderer({
@@ -51,7 +60,9 @@ export function MarkdownRenderer({
   emptyText = "내용 없음",
   className = "",
   onLinkClick,
+  onLinkPreviewInteraction,
   onTagClick,
+  renderCodeBlock,
   renderEmbed,
   ...attributes
 }: MarkdownRendererProps) {
@@ -65,9 +76,12 @@ export function MarkdownRenderer({
   );
   const options = {
     onLinkClick,
+    onLinkPreviewInteraction,
     onTagClick,
+    renderCodeBlock,
     renderEmbed,
-    footnotePrefix: `qm-markdown-${reactId.replace(/[^a-z0-9_-]/giu, "")}`
+    footnotePrefix: `qm-markdown-${reactId.replace(/[^a-z0-9_-]/giu, "")}`,
+    dataviewBlocksRendered: 0
   };
 
   return (
@@ -81,6 +95,44 @@ export function MarkdownRenderer({
       {document && document.footnotes.length > 0 && renderFootnotes(document.footnotes, options)}
     </div>
   );
+}
+
+interface InternalLinkPreviewBindings {
+  onBlur?: FocusEventHandler<HTMLElement>;
+  onFocus?: FocusEventHandler<HTMLElement>;
+  onMouseEnter?: MouseEventHandler<HTMLElement>;
+  onMouseLeave?: MouseEventHandler<HTMLElement>;
+}
+
+function internalLinkPreviewBindings(
+  reference: MarkdownLinkReference,
+  handler: MarkdownLinkPreviewHandler | undefined
+): InternalLinkPreviewBindings {
+  if (!handler || reference.kind === "external") {
+    return {};
+  }
+  return {
+    onBlur: (event) => handler(reference, {
+      active: false,
+      anchor: event.currentTarget,
+      source: "focus"
+    }),
+    onFocus: (event) => handler(reference, {
+      active: true,
+      anchor: event.currentTarget,
+      source: "focus"
+    }),
+    onMouseEnter: (event) => handler(reference, {
+      active: true,
+      anchor: event.currentTarget,
+      source: "pointer"
+    }),
+    onMouseLeave: (event) => handler(reference, {
+      active: false,
+      anchor: event.currentTarget,
+      source: "pointer"
+    })
+  };
 }
 
 function renderBlock(block: MarkdownBlock, key: string, options: InlineRenderOptions): ReactNode {
@@ -98,6 +150,26 @@ function renderBlock(block: MarkdownBlock, key: string, options: InlineRenderOpt
         </p>
       );
     case "code-block":
+      if (block.language.trim().toLocaleLowerCase() === "dataview") {
+        if (options.dataviewBlocksRendered >= MAX_DATAVIEW_BLOCKS_PER_DOCUMENT) {
+          return (
+            <aside key={key} className="qm-markdown-dataview-budget" role="status">
+              <strong>Dataview 실행 한도에 도달했습니다.</strong>
+              <p>문서당 Dataview 블록은 {MAX_DATAVIEW_BLOCKS_PER_DOCUMENT}개까지만 실행합니다.</p>
+              <pre className="qm-markdown-code-block">
+                <code data-language={block.language || undefined}>{block.value}</code>
+              </pre>
+            </aside>
+          );
+        }
+        options.dataviewBlocksRendered += 1;
+      }
+      if (options.renderCodeBlock) {
+        const custom = options.renderCodeBlock(block.language, block.value);
+        if (custom !== undefined) {
+          return <Fragment key={key}>{custom}</Fragment>;
+        }
+      }
       if (block.language.toLocaleLowerCase() === "mermaid") {
         return <MermaidDiagram key={key} source={block.value} />;
       }
@@ -284,6 +356,7 @@ function renderInline(
                 key={key}
                 className="qm-markdown-link"
                 type="button"
+                {...internalLinkPreviewBindings(reference, options.onLinkPreviewInteraction)}
                 onClick={(event) => options.onLinkClick?.(reference, event)}
               >
                 {token.display}
@@ -337,6 +410,7 @@ function renderInline(
             key={key}
             className="qm-markdown-link"
             type="button"
+            {...internalLinkPreviewBindings(reference, options.onLinkPreviewInteraction)}
             onClick={(event) => options.onLinkClick?.(reference, event)}
           >
             {renderInline(token.children, key, options)}
@@ -386,6 +460,7 @@ function renderEmbed(
         <button
           className="qm-markdown-link qm-markdown-embed-link"
           type="button"
+          {...internalLinkPreviewBindings(reference, options.onLinkPreviewInteraction)}
           onClick={(event) => options.onLinkClick?.(reference, event)}
         >
           <span aria-hidden="true">↳ </span>

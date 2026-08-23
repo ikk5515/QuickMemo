@@ -231,7 +231,12 @@ async function userKeyBundle(password) {
   };
 }
 
-async function createLoginUser({ displayName, isAdmin = false, verified }) {
+async function createLoginUser({
+  displayName,
+  initializeVaultIntegrity = false,
+  isAdmin = false,
+  verified
+}) {
   const suffix = randomSuffix();
   const email = `e2e-${suffix}@example.test`;
   const created = await createEmulatorOwner(email, testLoginPassword);
@@ -265,6 +270,32 @@ async function createLoginUser({ displayName, isAdmin = false, verified }) {
     updatedAt: now,
     needsKeyRecovery: false
   };
+  const vaultIntegrityDocument = initializeVaultIntegrity
+    ? {
+        path: `vaultIntegrity/${created.localId}`,
+        fields: {
+          createdAt: now,
+          indexVersion: 1,
+          ownerUid: created.localId,
+          updatedAt: now,
+          wrappedKey: {
+            version: 1,
+            algorithm: "RSA-OAEP",
+            wrappedKey: toBase64(await crypto.subtle.encrypt(
+              { name: "RSA-OAEP" },
+              await crypto.subtle.importKey(
+                "jwk",
+                keys.publicKeyJwk,
+                { name: "RSA-OAEP", hash: "SHA-256" },
+                false,
+                ["encrypt"]
+              ),
+              crypto.getRandomValues(new Uint8Array(32))
+            ))
+          }
+        }
+      }
+    : null;
   await writeEmulatorDocuments([
     { path: `users/${created.localId}`, fields: profile },
     {
@@ -291,7 +322,8 @@ async function createLoginUser({ displayName, isAdmin = false, verified }) {
         kdfIterations: keys.kdfIterations,
         updatedAt: now
       }
-    }
+    },
+    ...(vaultIntegrityDocument ? [vaultIntegrityDocument] : [])
   ]);
 
   return {
@@ -495,6 +527,7 @@ export async function seedE2eScenario(scenario) {
   const viewerAuth = options.viewerAuth
     ? await createLoginUser({
         displayName: `E2E Viewer ${suffix.slice(0, 5)}`,
+        initializeVaultIntegrity: options.permissionLevel === "save_copy",
         isAdmin: options.viewerAdmin,
         verified: options.viewerAuth === "verified"
       })

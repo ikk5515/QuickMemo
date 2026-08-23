@@ -3,12 +3,14 @@ import type {
   GraphViewSettings,
   ResolvedLinkOccurrence,
   TagIndexEntry,
+  UnlinkedMentionOccurrence,
   VaultIndexEntry
 } from "./types";
 import type {
   KnowledgeMetadataSummary,
   KnowledgeWorkerRequest,
-  KnowledgeWorkerResponse
+  KnowledgeWorkerResponse,
+  KnowledgeWorkerUpdateResult
 } from "./workerProtocol";
 import { vaultSearchQueryContainsRegex } from "./query";
 
@@ -85,6 +87,16 @@ function assertResponseType<Type extends KnowledgeWorkerResponse["type"]>(
     throw new KnowledgeWorkerError();
   }
   return response as Extract<KnowledgeWorkerResponse, { type: Type }>;
+}
+
+function updateResult(
+  response: Extract<KnowledgeWorkerResponse, { type: "updated" }>
+): KnowledgeWorkerUpdateResult {
+  return {
+    version: response.version,
+    entryCount: response.entryCount,
+    changedMetadataEntryIds: [...response.changedMetadataEntryIds]
+  };
 }
 
 function requestMayRunRegex(request: RequestWithoutId): boolean {
@@ -239,9 +251,9 @@ export class KnowledgeWorkerClient {
   async replaceVault(
     entries: readonly VaultIndexEntry[],
     options: KnowledgeWorkerRequestOptions = {}
-  ): Promise<void> {
+  ): Promise<KnowledgeWorkerUpdateResult> {
     const nextEntries = entries.map((entry) => ({ ...entry }));
-    assertResponseType(await this.request(
+    const response = assertResponseType(await this.request(
       {
         type: "replace-vault",
         entries: nextEntries
@@ -252,29 +264,32 @@ export class KnowledgeWorkerClient {
     for (const entry of nextEntries) {
       this.entriesById.set(entry.id, entry);
     }
+    return updateResult(response);
   }
 
   async upsertEntry(
     entry: VaultIndexEntry,
     options: KnowledgeWorkerRequestOptions = {}
-  ): Promise<void> {
+  ): Promise<KnowledgeWorkerUpdateResult> {
     const nextEntry = { ...entry };
-    assertResponseType(await this.request(
+    const response = assertResponseType(await this.request(
       { type: "upsert-entry", entry: nextEntry },
       { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_KNOWLEDGE_INDEX_TIMEOUT_MS }
     ), "updated");
     this.entriesById.set(entry.id, nextEntry);
+    return updateResult(response);
   }
 
   async removeEntry(
     entryId: string,
     options: KnowledgeWorkerRequestOptions = {}
-  ): Promise<void> {
-    assertResponseType(await this.request(
+  ): Promise<KnowledgeWorkerUpdateResult> {
+    const response = assertResponseType(await this.request(
       { type: "remove-entry", entryId },
       { ...options, timeoutMs: options.timeoutMs ?? DEFAULT_KNOWLEDGE_INDEX_TIMEOUT_MS }
     ), "updated");
     this.entriesById.delete(entryId);
+    return updateResult(response);
   }
 
   async search(
@@ -300,6 +315,14 @@ export class KnowledgeWorkerClient {
     const response = assertResponseType(
       await this.request({ type: "backlinks", entryId }),
       "backlinks"
+    );
+    return response.occurrences;
+  }
+
+  async unlinkedMentions(entryId: string): Promise<UnlinkedMentionOccurrence[]> {
+    const response = assertResponseType(
+      await this.request({ type: "unlinked-mentions", entryId }),
+      "unlinked-mentions"
     );
     return response.occurrences;
   }

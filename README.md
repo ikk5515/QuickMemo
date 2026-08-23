@@ -1,6 +1,6 @@
 # QuickMemo
 
-Firebase와 Vercel 기반의 실시간 암호화 메모·일정관리 웹앱입니다. 개인/공유 노트, 일정 매트릭스, 반복 업무·습관, 관리자 사용자 관리를 하나의 업무 화면에서 다룹니다.
+Firebase와 Vercel 기반의 실시간 암호화 메모·일정관리 웹앱입니다. 개인/공유 노트, Markdown 지식 도구, 달력·일정 매트릭스, 관리자 사용자 관리를 하나의 Obsidian형 업무 화면에서 다룹니다.
 
 ## 기술 구성
 
@@ -9,7 +9,7 @@ Firebase와 Vercel 기반의 실시간 암호화 메모·일정관리 웹앱입�
 - Vercel Static Hosting, Vercel Serverless API, Vercel Cron
 - TipTap 기반 리치 텍스트 편집기
 - Web Crypto API 기반 클라이언트 암호화
-- `@dnd-kit` 기반 일정/반복 업무 Drag & Drop
+- `@dnd-kit` 기반 일정 매트릭스와 Kanban Drag & Drop
 - Intl dangi calendar 기반 한국 공휴일 계산과 보완 공휴일 매핑
 
 ## 주요 기능
@@ -18,10 +18,10 @@ Firebase와 Vercel 기반의 실시간 암호화 메모·일정관리 웹앱입�
 - `/login`: 원형 사용자 버튼으로 빠르게 사용자 계정을 선택하고 로그인합니다.
 - `/admin`: 관리자가 사용자 생성, 권한, 색상, 원 안 글자, 표시 순서, 사용자 삭제를 관리합니다.
 - `/app`: 개인 노트와 선택 사용자 공유 노트를 작성하고 실시간으로 동기화합니다.
-- `/schedule`: 할 일, 달력, 매트릭스와 완료 내역을 관리합니다.
-- `/schedule/recurring`: 반복 업무, 날짜별 체크인과 월간 통계를 관리합니다.
+- `/schedule`: 달력과 매트릭스에서 일정을 관리합니다.
+- `/schedule/recurring`: 새 반복 업무 화면을 열지 않고 `/schedule?view=calendar`로 안전하게 이동합니다.
 - 노트 편집기는 표, 체크리스트, 이미지, PDF/DOCX/HWP 미리보기, 글자 크기·색상 서식, 기본 줄간격, 선택 영역 유지, 표 안 커서 안정화를 지원합니다.
-- 설정에서 기본 시작 화면과 일정관리 기본 탭을 저장할 수 있습니다.
+- 설정에서 기본 시작 화면과 일정관리 기본 탭(달력 또는 매트릭스)을 저장할 수 있습니다.
 - Firebase Auth와 Firestore Rules로 활성 사용자와 소유자 중심 권한을 검증합니다.
 
 ### 사용자별 기능 권한
@@ -33,16 +33,39 @@ Firebase와 Vercel 기반의 실시간 암호화 메모·일정관리 웹앱입�
 
 ### 일정관리
 
-- `할 일`: 오늘, 내일, 다음 7일, 이후, 날짜 없음, 최근 완료 그룹으로 업무를 관리합니다. 각 그룹 안에서는 가장 임박한 일정이 먼저 보이고, 기간이 지난 활성 일정은 날짜가 빨간색으로 표시됩니다. 업무별 진행률은 얇은 막대로 표시됩니다.
 - `달력`: 월간 달력에서 일정 범위와 한국 법정공휴일, 대체공휴일, 2026년 지방선거 같은 보완 공휴일을 함께 확인합니다.
 - `매트릭스`: `오늘까지 해야 할 일`, `1순위 업무`, `2순위 업무`, `업무 목록`, `대기 업무` 5개 섹션으로 업무를 관리합니다. 각 섹션은 같은 비율을 유지하고, 많은 항목은 내부 스크롤로 처리합니다.
 - `매트릭스` Drag & Drop: 섹션 간 이동 시 도착 섹션에 맞게 중요/긴급 값이 자동 조정됩니다. 오늘 이전이거나 오늘을 포함하는 일정은 `오늘까지 해야 할 일`로 분류되고, 날짜 범위가 오늘을 포함하면 기존 범위를 유지합니다.
 - `매트릭스` 날짜 그룹: `1순위 업무`, `2순위 업무`, `업무 목록`, `대기 업무`는 `다음 3일`, `그 이후`, `날짜 없음` 접힘 그룹을 제공합니다.
 - `매트릭스` 정렬: 동일한 `startDate`를 가진 활성 일정끼리만 수동 순서 변경을 저장합니다.
-- `반복 업무`: 독립 페이지에서 매일 반복되는 업무·습관을 `오전`, `오후`, `기타`로 나누어 관리합니다. 프리셋 아이콘, 날짜별 원형 완료율, 체크인 버튼, 총 체크인 수, 월별 체크인 비율, 연속 기록, 월간 출석 달력을 제공합니다.
-- `반복 업무` 상세: 업무별 색상/아이콘/구분을 수정할 수 있고, 더블클릭으로 상세를 열어 설명, 매일 초기화되는 체크리스트, 진행률을 관리합니다.
-- `반복 업무` Drag & Drop: 업무 행을 끌어서 오전/오후/기타를 바꾸거나 같은 구분 안에서 순서를 조정할 수 있습니다.
-- `완료`: 완료된 일정을 기간, 날짜, 우선순위, 내용 기준으로 조회합니다.
+- 기존 `할 일`, `완료`, `반복 업무` 화면과 메뉴는 제거했습니다. 저장돼 있던 일정·반복 업무 데이터와 삭제/권한 정리 경로는 손실 방지를 위해 유지하며, 자동 변환하거나 삭제하지 않습니다.
+
+### 내장 지식 도구
+
+- 일정관리의 월간 달력과 별개로, 날짜별 Markdown을 여는 Daily Notes Calendar와
+  주간·월간 노트 흐름을 제공합니다. Daily Notes는 고정 폴더와 템플릿을 사용하며 기존 노트를
+  자동 덮어쓰지 않습니다.
+- Bases는 지원하는 top-level Properties를 원본 Markdown frontmatter에 반영하는 작업 화면이고,
+  안전한 Dataview 하위 문법은 같은 데이터를 읽기 전용 목록·표로 만드는 보고 화면입니다.
+- 비스크립트 Templates는 제목·경로·날짜·시간과 사용자 prompt만 미리보기 후 치환합니다.
+  QuickMemo Drawing beta는 단일 요소 선택·이동·모서리 크기 조절과 키보드·터치 조작을 제공하는
+  자체 `drawing-v1` 형식이며 Excalidraw 파일·플러그인 호환을 주장하지 않습니다. Kanban은 한 줄
+  행동과 `[[원본 노트]]` 연결을 중심으로 Markdown에 저장합니다.
+- 외부 Community Plugin 바이너리나 사용자 JavaScript를 실행하지 않으며, 별도 API 키·유료 SaaS·새 데이터베이스를 사용하지 않습니다.
+- 지원 문법과 의도적으로 제한한 고급 기능은 [`docs/obsidian-built-in-tools.md`](docs/obsidian-built-in-tools.md)에 명시합니다. 전체 Obsidian Core 완료 상태로 오해하지 않도록 [`docs/obsidian-vault-status.md`](docs/obsidian-vault-status.md)의 운영 게이트를 함께 적용합니다.
+
+권장 지식 흐름은 빠른 입력, 얕은 폴더·Properties 정리, 링크·MOC 연결, 검색·백링크·Local
+Graph 회수, Base/Dataview 결과 작성 순서입니다. Graph는 실제 Markdown 링크 구조를 점검하는
+보조 화면이며, 태그·AI 유사도·시각적 Canvas 선을 임의의 지식 링크로 만들지 않습니다.
+
+Firestore 동기화는 백업이 아닙니다. 잘못된 수정이나 삭제도 동기화될 수 있으므로 암호화 File
+Recovery와 Obsidian ZIP 내보내기를 별도 복구 수단으로 사용합니다. 모바일은 저장 중·저장됨·
+오프라인 대기·실패·revision 충돌을 구분하고, 충돌한 로컬 초안을 자동 덮어쓰지 않습니다.
+브라우저 종료 후까지 보장되는 무제한 오프라인 편집은 아직 지원하지 않습니다.
+
+종량제 AI·embedding·원격 의미 검색은 내장하거나 자동 fallback으로 호출하지 않습니다. 의미
+검색은 기본값이 꺼짐/미제공이며, 향후 추가하더라도 명시적 opt-in과 무료 운영 경계를 통과해야
+합니다. 의미상 유사도는 Graph 또는 Backlinks edge로 계산하지 않습니다.
 
 ### 보안 설계
 
@@ -289,7 +312,9 @@ Provider로 수동 이전합니다.
 ```bash
 cp .firebaserc.example .firebaserc
 npm run build
-npx firebase-tools deploy --only firestore:rules,firestore:indexes
+npx --yes firebase-tools@15.24.0 deploy \
+  --project quickmemo-a95ba \
+  --only firestore:rules,firestore:indexes
 ```
 
 전역 Firebase CLI가 없어도 `npx firebase-tools`로 실행할 수 있습니다.
@@ -297,6 +322,25 @@ npx firebase-tools deploy --only firestore:rules,firestore:indexes
 배포하지 않고 Firestore Rules/Indexes만 배포합니다.
 
 Rules나 Indexes와 프론트엔드가 함께 바뀌는 릴리스는 Firebase Rules/Indexes를 먼저 배포하고 새 복합 인덱스가 `Ready` 상태인지 확인한 뒤 Vercel 프론트엔드를 배포해야 합니다. `.github/workflows/vercel-production.yml`은 Vercel만 배포하므로 이 순서를 자동으로 대신하지 않습니다.
+
+운영 배포는 GitHub의 `production` Environment에 있는 다음 비밀이 아닌
+attestation 변수도 모두 일치해야 합니다.
+
+- `FIREBASE_DEPLOYED_RULES_INDEXES_SHA256`: `firestore.rules`와
+  `firestore.indexes.json` 현재 바이트의 결합 SHA-256
+- `FIREBASE_SPARK_ATTESTATION`: 같은 SHA에 대해 운영 프로젝트가 Billing이
+  연결되지 않은 Spark임을 외부에서 확인한 `spark:quickmemo-a95ba:<SHA-256>`
+- `VAULT_RELEASE_STATE`: 정확히 `enabled` 또는 `disabled`
+
+현재 결합 SHA는 `npm run release:firestore-contract-sha256`으로 계산합니다.
+Rules/Indexes를 명시적인 운영 프로젝트에 배포하고 인덱스가 Ready인지 확인한
+뒤에만 첫 번째 attestation을 같은 SHA로 갱신합니다. 같은 시점에 Firebase
+Console/API에서 Spark와 Billing 미연결을 읽기 전용으로 다시 확인한 뒤에만 두
+번째 attestation을 갱신합니다. 파일이 한 바이트라도 달라지면 SHA가 바뀌어
+배포가 실패 폐쇄됩니다. `VAULT_RELEASE_STATE=enabled`는 아래 Vault 수용 증거가
+모두 기록된 경우에만 사용하며, 긴급 비활성 재배포에는 `disabled`를 사용합니다.
+Vercel Production의 `VITE_OBSIDIAN_VAULT_ENABLED` 값도 선택한 release state와
+일치해야 합니다. attestation 값이나 secret을 workflow 로그로 출력하지 않습니다.
 
 Firestore Rules에는 다음 주요 컬렉션의 owner-only 접근과 데이터 형식 검증이 포함되어 있습니다.
 
@@ -357,14 +401,24 @@ CI는 `.github/workflows/ci.yml`에 추가되어 PR과 `main`/`master` push마�
 - production build
 
 운영 Vercel 배포는 `.github/workflows/vercel-production.yml`에서 CI가 성공한 `master` push에 대해서만 실행합니다. 이 workflow는 `workflow_run.event == 'push'`, 같은 저장소의 head repository, `head_branch == 'master'` 조건을 모두 확인해 PR branch가 production deploy를 트리거하지 못하게 합니다.
+또한 GitHub `production` Environment의 Firestore 계약 SHA, 같은 SHA에 묶인
+Spark attestation, 명시적인 Vault release state를 먼저 검증합니다. `enabled`와
+`disabled` 모두 표준 경로를 사용하므로 활성화 후에도 플래그를 끈 긴급 빌드를
+배포할 수 있습니다. attestation이 없거나 오래됐거나 Vercel Production의 실제
+Vault 플래그와 다르면 배포하지 않습니다.
 배포 직전 계정 요금제가 명시적으로 `Hobby`인지 읽기 전용 API로 다시
 검증하며, 값이 없거나 `Hobby`가 아니면 실패하도록 닫혀 있습니다. Firebase는
-Cloud Billing이 연결되지 않은 Spark 프로젝트만 사용하고, 이번 구조에서는
-Cloud Functions와 Firebase Storage를 생성하거나 배포하지 않습니다.
+Cloud Billing이 연결되지 않은 Spark 프로젝트만 사용해야 합니다. 다만 실제
+Firebase Billing 연결 상태는 저장소 코드만으로 검증할 수 없으므로 운영 배포 전
+콘솔/API에서 별도로 확인해야 합니다. 이번 구조에서는 Cloud Functions와 Firebase
+Storage를 생성하거나 배포하지 않습니다.
 
-암호화 Web Obsidian Vault는 아직 Core 전체 동급 완료가 아니며 운영 기능
-플래그를 켜면 안 됩니다. 구현·한계·활성화 증거 기준은
+암호화 Web Obsidian Vault의 공개 범위, 의도적인 제외 사항, 활성화 증거 기준은
 [`docs/obsidian-vault-status.md`](docs/obsidian-vault-status.md)를 따릅니다.
+현재 증거가 기록되기 전에는 운영 플래그와 `VAULT_RELEASE_STATE`를 활성화하지
+않습니다. 요구 증거가 모두 기록된 정확한 릴리스에서만 두 값을 `enabled`/`true`로
+맞춰 한 번에 활성화할 수 있으며, 이것이 비공개 엔진 좌표나 Community Plugin
+바이너리 호환까지 포함한 문자 그대로의 “모든 Obsidian 기능” 주장은 아닙니다.
 
 자동 PR 생성을 하려면 GitHub CLI가 필요합니다.
 
@@ -381,6 +435,7 @@ gh auth login
 npm run security:functions-guard
 npm run security:gitignore-guard
 npm run security:billing-guard
+npm run release:firestore-contract-sha256
 npm run lint
 npm run typecheck
 npm test

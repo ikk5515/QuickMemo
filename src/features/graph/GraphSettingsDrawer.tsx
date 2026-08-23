@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useState, type DragEvent, type ReactNode } from "react";
 import {
   createDefaultGraphSettings,
   GRAPH_SETTING_RANGES,
@@ -18,6 +18,21 @@ import "./graph.css";
 
 const GRAPH_GROUP_COLORS = ["#e05f65", "#e0a958", "#66b47b", "#4aa8c7", "#8b82f6", "#c56fbd"];
 const EMPTY_COLLAPSED_SECTIONS: readonly GraphSettingsSectionId[] = [];
+
+export function uniqueGraphGroupId(
+  groups: readonly Pick<GraphGroup, "id">[],
+  createUuid: () => string = () => crypto.randomUUID()
+) {
+  const existingIds = new Set(groups.map((group) => group.id));
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const uuid = createUuid();
+    // The storage contract limits the complete, prefixed id to 160 characters.
+    if (!/^[A-Za-z0-9_-]{1,148}$/u.test(uuid)) continue;
+    const id = `graph-group-${uuid}`;
+    if (!existingIds.has(id)) return id;
+  }
+  throw new Error("고유한 그래프 그룹 식별자를 만들지 못했습니다.");
+}
 
 interface GraphSettingsSectionProps {
   children: ReactNode;
@@ -127,8 +142,6 @@ export function GraphSettingsDrawer({
   onCollapsedSectionsChange,
   settings
 }: GraphSettingsDrawerProps) {
-  const instanceId = useId().replace(/:/g, "");
-  const nextGroupNumber = useRef(1);
   const [draggedGroupIndex, setDraggedGroupIndex] = useState<number | null>(null);
   const [internalCollapsedSections, setInternalCollapsedSections] = useState<readonly GraphSettingsSectionId[]>(
     EMPTY_COLLAPSED_SECTIONS
@@ -155,12 +168,10 @@ export function GraphSettingsDrawer({
   }
 
   function addGroup() {
-    const number = nextGroupNumber.current;
-    nextGroupNumber.current += 1;
     updateGroups([
       ...groups,
       {
-        id: `graph-group-${instanceId}-${number}`,
+        id: uniqueGraphGroupId(groups),
         query: "",
         color: GRAPH_GROUP_COLORS[groups.length % GRAPH_GROUP_COLORS.length],
         order: groups.length

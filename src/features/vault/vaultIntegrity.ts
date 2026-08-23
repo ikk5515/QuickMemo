@@ -3,8 +3,13 @@ import type { VaultEntryKind } from "../../types";
 import { normalizeVaultPath } from "./interop/path";
 
 export const VAULT_NAME_INDEX_VERSION = 1 as const;
-export const VAULT_ANCESTRY_VERSION = 1 as const;
-export const MAX_VAULT_FOLDER_DEPTH = 64;
+export const VAULT_ANCESTRY_VERSION = 3 as const;
+/**
+ * Version 3 lineage is display/export metadata generated only by the
+ * authenticated server mutation boundary. Firestore Rules do not trust it;
+ * they consult the server-only vaultFolderTrees document instead.
+ */
+export const MAX_VAULT_FOLDER_DEPTH = 32;
 
 const encoder = new TextEncoder();
 const fingerprintKeyCache = new WeakMap<CryptoKey, Promise<CryptoKey>>();
@@ -25,6 +30,17 @@ export interface VaultAncestorMetadataV1 {
   depth: number;
   version: typeof VAULT_ANCESTRY_VERSION;
 }
+
+export interface VaultFolderLineageV3 {
+  vaultAncestorIds: string[];
+  vaultLineagePath: string;
+  vaultLineageDepth: number;
+  vaultLineageGeneration: number;
+  vaultLineageVersion: typeof VAULT_ANCESTRY_VERSION;
+}
+
+/** @deprecated Compatibility alias while callers migrate to the v3 name. */
+export type VaultFolderLineageV1 = VaultFolderLineageV3;
 
 export interface VaultFolderIntegritySource {
   id: string;

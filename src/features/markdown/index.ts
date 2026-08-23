@@ -12,11 +12,18 @@ export {
 } from "./parser";
 export {
   exportMarkdown,
+  exportMarkdownForDiscordAi,
   splitMarkdownForMessages,
+  type DiscordAiMarkdownDelivery,
+  type DiscordAiMarkdownMessage,
   type MarkdownExportOptions,
   type MarkdownExportProfile,
   type MarkdownExportResult
 } from "./export";
+export {
+  MarkdownMessageBatchDialog,
+  type MarkdownMessageBatchDialogProps
+} from "./MarkdownMessageBatchDialog";
 export {
   previewLegacyHtmlToMarkdown,
   type LegacyHtmlConversionPreview,
@@ -29,6 +36,9 @@ export type {
   MarkdownFootnote,
   MarkdownInlineToken,
   MarkdownLinkClickHandler,
+  MarkdownLinkPreviewHandler,
+  MarkdownLinkPreviewInteraction,
+  MarkdownLinkPreviewSource,
   MarkdownLinkReference,
   MarkdownTagClickHandler,
   MarkdownViewMode

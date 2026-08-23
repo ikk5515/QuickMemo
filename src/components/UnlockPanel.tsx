@@ -1,6 +1,42 @@
 import { KeyRound } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { useAuth } from "../context/AuthContext";
+import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
+
+const retryableUnlockErrorCodes = new Set([
+  "aborted",
+  "cancelled",
+  "deadline-exceeded",
+  "internal",
+  "network-request-failed",
+  "resource-exhausted",
+  "unavailable",
+  "unknown"
+]);
+
+export function vaultUnlockErrorMessage(error: unknown) {
+  const rawCode = typeof error === "object" && error && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : "";
+  const normalizedCode = rawCode.toLowerCase().split("/").at(-1) ?? "";
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+
+  if (
+    retryableUnlockErrorCodes.has(normalizedCode)
+    || /network|connection|offline|transport/u.test(message)
+  ) {
+    return "네트워크 연결이 불안정합니다. 연결을 확인한 뒤 다시 열어주세요.";
+  }
+
+  if (error instanceof DOMException && error.name === "OperationError") {
+    return "비밀번호가 올바르지 않거나 암호화 키를 열 수 없습니다.";
+  }
+
+  return firebaseAuthErrorMessage(
+    error,
+    "암호화 키를 열지 못했습니다. 잠시 후 다시 시도해주세요."
+  );
+}
 
 export function UnlockPanel() {
   const { profile, unlockPrivateKey, keyError } = useAuth();
@@ -16,8 +52,8 @@ export function UnlockPanel() {
     try {
       await unlockPrivateKey(password);
       setPassword("");
-    } catch {
-      setError("비밀번호를 확인해주세요.");
+    } catch (caught) {
+      setError(vaultUnlockErrorMessage(caught));
     } finally {
       setPending(false);
     }

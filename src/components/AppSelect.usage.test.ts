@@ -8,7 +8,7 @@ const selectCallSites = [
   ["src/pages/AdminPage.tsx", 3],
   ["src/pages/LibraryPage.tsx", 6],
   ["src/pages/NotesPage.tsx", 3],
-  ["src/pages/SchedulePage.tsx", 8]
+  ["src/pages/SchedulePage.tsx", 4]
 ] as const;
 
 function source(filePath: string) {

@@ -5,14 +5,16 @@ import {
   backlinkOccurrences,
   buildGraphSnapshot,
   buildKnowledgeIndex,
+  matchesVaultSearchQuery,
   outgoingOccurrences,
   parseObsidianMarkdown
 } from "./index";
 import {
-  OBSIDIAN_GOLDEN_IDS,
-  OBSIDIAN_GOLDEN_VAULT
+  LOCAL_OBSIDIAN_CONTRACT_COUNTS,
+  LOCAL_OBSIDIAN_CONTRACT_IDS,
+  LOCAL_OBSIDIAN_CONTRACT_VAULT
 } from "./obsidianGoldenVault.fixture";
-import type { GraphEdge, GraphViewSettings, VaultIndexEntry } from "./types";
+import type { GraphEdge, GraphViewSettings } from "./types";
 
 function globalSettings(
   common: Partial<Extract<GraphViewSettings, { scope: "global" }>["common"]> = {},
@@ -55,15 +57,110 @@ function edge(
   ));
 }
 
-describe("Obsidian 1.13 golden vault compatibility", () => {
-  const index = buildKnowledgeIndex(OBSIDIAN_GOLDEN_VAULT);
+function representedOccurrences(snapshot: ReturnType<typeof buildGraphSnapshot>): number {
+  return snapshot.edges
+    .filter((candidate) => candidate.kind === "internal-link")
+    .reduce((total, candidate) => total + candidate.occurrenceCount, 0);
+}
 
-  it("resolves file, alias, heading, block, embed and relative links occurrence-by-occurrence", () => {
+describe("QuickMemo local Obsidian-style knowledge contract fixture", () => {
+  const index = buildKnowledgeIndex(LOCAL_OBSIDIAN_CONTRACT_VAULT);
+
+  const matchingEntryIds = (query: string) => index.entries
+    .filter((entry) => matchesVaultSearchQuery(
+      query,
+      entry,
+      index.metadataByEntryId.get(entry.id) ?? {
+        aliases: [],
+        properties: {},
+        tags: []
+      }
+    ))
+    .map((entry) => entry.id)
+    .sort();
+
+  it("pins the complete entry, occurrence, resolution, tag and topology totals", () => {
+    const occurrences = [...index.outgoingByEntryId.values()].flat();
+    const defaultGlobal = buildGraphSnapshot(index, globalSettings());
+    const withAttachments = buildGraphSnapshot(
+      index,
+      globalSettings({ showAttachments: true })
+    );
+    const withTags = buildGraphSnapshot(index, globalSettings({ showTags: true }));
+
+    expect(index.entries).toHaveLength(LOCAL_OBSIDIAN_CONTRACT_COUNTS.vaultEntries);
+    expect(index.entries.filter((entry) => entry.kind === "markdown")).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.markdownEntries
+    );
+    expect(index.entries.filter((entry) => entry.kind === "canvas")).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.canvasEntries
+    );
+    expect(index.entries.filter((entry) => entry.kind === "asset")).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.assetEntries
+    );
+    expect(occurrences).toHaveLength(LOCAL_OBSIDIAN_CONTRACT_COUNTS.linkOccurrences.total);
+    expect(occurrences.filter((occurrence) => occurrence.status === "resolved")).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.linkOccurrences.resolved
+    );
+    expect(occurrences.filter((occurrence) => occurrence.status === "ambiguous")).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.linkOccurrences.ambiguous
+    );
+    expect(occurrences.filter((occurrence) => occurrence.status === "unresolved")).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.linkOccurrences.unresolved
+    );
+    expect(index.tags).toHaveLength(LOCAL_OBSIDIAN_CONTRACT_COUNTS.tags.nodes);
+
+    expect(defaultGlobal.nodes).toHaveLength(LOCAL_OBSIDIAN_CONTRACT_COUNTS.defaultGlobal.nodes);
+    expect(defaultGlobal.edges).toHaveLength(LOCAL_OBSIDIAN_CONTRACT_COUNTS.defaultGlobal.edges);
+    expect(representedOccurrences(defaultGlobal)).toBe(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.defaultGlobal.representedLinkOccurrences
+    );
+    expect(withAttachments.nodes).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.withAttachments.nodes
+    );
+    expect(withAttachments.edges).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.withAttachments.edges
+    );
+    expect(representedOccurrences(withAttachments)).toBe(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.withAttachments.representedLinkOccurrences
+    );
+    expect(withTags.nodes).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.defaultGlobal.nodes
+        + LOCAL_OBSIDIAN_CONTRACT_COUNTS.tags.nodes
+    );
+    expect(withTags.edges).toHaveLength(
+      LOCAL_OBSIDIAN_CONTRACT_COUNTS.defaultGlobal.edges
+        + LOCAL_OBSIDIAN_CONTRACT_COUNTS.tags.edges
+    );
+  });
+
+  it("evaluates shared search fields, Boolean operators, properties, nested tags and regex", () => {
+    expect(matchingEntryIds("path:Projects tag:#project [status:active]")).toEqual(["hub"]);
+    expect(matchingEntryIds("tag:#project -path:Projects")).toEqual(["orphan"]);
+    expect(matchingEntryIds("(file:Hub OR file:Orphan)")).toEqual(["hub", "orphan"]);
+    expect(matchingEntryIds("file:/^Target\\.md$/")).toEqual([
+      "archive-target",
+      "research-target"
+    ]);
+    expect(matchingEntryIds("path:Depth -file:5")).toEqual([
+      "depth-0",
+      "depth-1",
+      "depth-2",
+      "depth-3",
+      "depth-4"
+    ]);
+  });
+
+  it("resolves file, heading, block, embed and relative links occurrence-by-occurrence", () => {
     const outgoing = outgoingOccurrences(index, "hub");
 
-    expect(outgoing).toHaveLength(11);
-    expect(outgoing.filter((link) => link.targetEntryId === "research-target")).toHaveLength(6);
-    expect(outgoing.find((link) => link.fragment?.kind === "heading" && link.embedded)).toBeUndefined();
+    expect(outgoing).toHaveLength(LOCAL_OBSIDIAN_CONTRACT_COUNTS.linkOccurrences.hub);
+    expect(outgoing.filter((link) => link.targetEntryId === "research-target")).toHaveLength(5);
+    expect(outgoing.find((link) => (
+      link.targetEntryId === "research-target"
+      && link.fragment?.kind === "heading"
+      && link.embedded
+    ))).toBeUndefined();
     expect(outgoing).toEqual(expect.arrayContaining([
       expect.objectContaining({
         raw: "[[Research/Target#Section|target heading]]",
@@ -89,43 +186,52 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
         fragment: { kind: "heading", value: "Local Heading" }
       }),
       expect.objectContaining({ raw: "![[Assets/diagram.png]]", targetEntryId: "asset" }),
+      expect.objectContaining({
+        raw: "![[Assets/reference.pdf#page=1]]",
+        targetEntryId: "asset-pdf",
+        embedded: true
+      }),
       expect.objectContaining({ raw: "[[Missing Note]]", status: "unresolved" })
     ]));
-    expect(outgoing.some((link) => link.raw.includes("Ignored"))).toBe(false);
+    expect(outgoing.some((link) => link.raw.includes("Ignored Inline"))).toBe(false);
+    expect(outgoing.some((link) => link.raw.includes("Ignored Fenced"))).toBe(false);
+    expect(outgoing.find((link) => link.raw === "[[Ignored Comment]]")).toMatchObject({
+      status: "unresolved"
+    });
+    expect(outgoing.some((link) => link.raw.includes("example.com"))).toBe(false);
     expect(backlinkOccurrences(index, "research-target").filter((link) => link.sourceEntryId === "hub"))
-      .toHaveLength(6);
+      .toHaveLength(5);
   });
 
-  it("keeps duplicate-name and alias collisions ambiguous instead of inventing a target", () => {
+  it("uses the official shortest-path duplicate target and keeps aliases unresolved", () => {
     const outgoing = outgoingOccurrences(index, "hub");
     const duplicateName = outgoing.find((link) => link.raw === "[[Target]]");
     const aliasCollision = outgoing.find((link) => link.raw === "[[Shared Alias]]");
+    const uniqueAlias = outgoing.find((link) => link.raw === "[[Unique Alias]]");
 
-    expect(duplicateName).toMatchObject({ status: "ambiguous" });
-    expect(aliasCollision).toMatchObject({ status: "ambiguous" });
-    expect(duplicateName?.targetEntryId).toBeUndefined();
+    expect(duplicateName).toMatchObject({
+      status: "resolved",
+      targetEntryId: "archive-target"
+    });
+    expect(aliasCollision).toMatchObject({ status: "unresolved" });
+    expect(uniqueAlias).toMatchObject({ status: "unresolved" });
     expect(aliasCollision?.targetEntryId).toBeUndefined();
     expect([...(duplicateName?.candidateEntryIds ?? [])].sort()).toEqual([
       "archive-target",
       "research-target"
     ]);
-    expect([...(aliasCollision?.candidateEntryIds ?? [])].sort()).toEqual([
-      "archive-target",
-      "research-target"
-    ]);
-    expect(outgoing.find((link) => link.raw === "[[Unique Alias]]")).toMatchObject({
-      status: "resolved",
-      targetEntryId: "research-target"
-    });
+    expect(aliasCollision?.candidateEntryIds).toEqual([]);
+    expect(uniqueAlias?.candidateEntryIds).toEqual([]);
   });
 
   it("merges YAML and inline nested tags, preserves first casing, and ignores code", () => {
     expect(index.metadataByEntryId.get("hub")?.tags).toEqual([
       "project/core",
       "SharedCase",
-      "inline/tag"
+      "inline/tag",
+      "ignored-comment"
     ]);
-    expect(index.metadataByEntryId.get("canvas")?.tags).toEqual(["canvas/nested"]);
+    expect(index.metadataByEntryId.get("canvas")?.tags).toEqual([]);
     expect(index.tags.get("project/core")).toMatchObject({
       displayName: "project/core",
       entryIds: ["hub", "orphan"],
@@ -134,6 +240,10 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
     });
     expect(index.tags.has("ignored-inline")).toBe(false);
     expect(index.tags.has("ignored-fenced")).toBe(false);
+    expect(index.tags.get("ignored-comment")).toMatchObject({
+      displayName: "ignored-comment",
+      entryIds: ["hub"]
+    });
   });
 
   it("does not turn hashtags inside wikilinks, Markdown links, embeds, or inline code into tags", () => {
@@ -152,10 +262,11 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
   it("indexes Canvas file and text cards but not a purely visual Canvas edge", () => {
     const outgoing = outgoingOccurrences(index, "canvas");
 
-    expect(outgoing).toHaveLength(5);
+    expect(outgoing).toHaveLength(LOCAL_OBSIDIAN_CONTRACT_COUNTS.linkOccurrences.canvas);
     expect(outgoing.map((link) => link.targetEntryId ?? link.unresolvedKey).sort()).toEqual([
       "Missing Canvas",
       "asset",
+      "asset-pdf",
       "canvas",
       "hub",
       "research-target"
@@ -168,37 +279,46 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
     expect(outgoing.some((link) => link.raw === "visual-only-edge")).toBe(false);
   });
 
-  it("matches the default global node/edge golden topology and collapses occurrences", () => {
+  it("matches the default global local-contract topology and collapses occurrences", () => {
     const snapshot = buildGraphSnapshot(index, globalSettings());
 
     expect(nodeIds(snapshot)).toEqual([
-      ...OBSIDIAN_GOLDEN_IDS.entries,
-      ...OBSIDIAN_GOLDEN_IDS.unresolved
+      ...LOCAL_OBSIDIAN_CONTRACT_IDS.entries,
+      ...LOCAL_OBSIDIAN_CONTRACT_IDS.unresolved
     ].sort());
     expect(snapshot.nodes.find((node) => node.id === "entry:research-target"))
       .toMatchObject({ incomingReferenceCount: 3 });
     expect(snapshot.nodes.find((node) => node.id === "entry:hub"))
       .toMatchObject({ incomingReferenceCount: 4 });
     expect(edge(snapshot, "entry:hub", "entry:research-target")).toMatchObject({
-      occurrenceCount: 6
+      occurrenceCount: 5
     });
     expect(edge(snapshot, "entry:hub", "entry:hub")).toMatchObject({ occurrenceCount: 1 });
     expect(snapshot.edges.some((candidate) => candidate.target === "entry:asset")).toBe(false);
-    expect(snapshot.edges).toHaveLength(13);
+    expect(snapshot.edges.some((candidate) => candidate.target === "entry:asset-pdf")).toBe(false);
+    expect(snapshot.edges).toHaveLength(LOCAL_OBSIDIAN_CONTRACT_COUNTS.defaultGlobal.edges);
   });
 
-  it("applies attachment, unresolved, orphan, query and tag filters with Obsidian semantics", () => {
+  it("applies attachment, unresolved, orphan, query and tag filters under the local contract", () => {
     const attachments = buildGraphSnapshot(index, globalSettings({ showAttachments: true }));
     expect(nodeIds(attachments)).toContain("entry:asset");
     expect(edge(attachments, "entry:hub", "entry:asset")).toBeDefined();
     expect(edge(attachments, "entry:canvas", "entry:asset")).toBeDefined();
+    expect(edge(attachments, "entry:hub", "entry:asset-pdf")).toBeDefined();
+    expect(edge(attachments, "entry:canvas", "entry:asset-pdf")).toBeDefined();
     expect(attachments.nodes.find((node) => node.id === "entry:asset")).toMatchObject({
+      kind: "attachment",
+      incomingReferenceCount: 2
+    });
+    expect(attachments.nodes.find((node) => node.id === "entry:asset-pdf")).toMatchObject({
       kind: "attachment",
       incomingReferenceCount: 2
     });
 
     const existingOnly = buildGraphSnapshot(index, globalSettings({ existingFilesOnly: true }));
     expect(existingOnly.nodes.some((node) => node.kind === "unresolved")).toBe(false);
+    expect(existingOnly.edges.some((candidate) => candidate.target.startsWith("unresolved:")))
+      .toBe(false);
 
     const withoutOrphans = buildGraphSnapshot(
       index,
@@ -214,6 +334,7 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
     expect(nodeIds(projectTag)).toEqual([
       "entry:hub",
       "entry:orphan",
+      "tag:ignored-comment",
       "tag:inline/tag",
       "tag:project/core",
       "tag:sharedcase"
@@ -270,7 +391,6 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
     ]);
     expect(edgeIds(incomingOnly)).toEqual([
       "link:entry:canvas->entry:hub",
-      "link:entry:hub->entry:hub",
       "link:entry:incoming->entry:hub",
       "link:entry:research-target->entry:hub"
     ]);
@@ -282,11 +402,13 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
       outgoing: true
     }));
     expect(nodeIds(outgoingDepthOne)).toEqual([
+      "entry:archive-target",
       "entry:hub",
       "entry:research-target",
+      "unresolved:ignored comment",
       "unresolved:missing note",
       "unresolved:shared alias",
-      "unresolved:target"
+      "unresolved:unique alias"
     ]);
 
     const outgoingDepthTwo = buildGraphSnapshot(index, localSettings({
@@ -296,7 +418,7 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
       outgoing: true
     }));
     expect(nodeIds(outgoingDepthTwo)).toContain("entry:archive-target");
-    expect(edge(outgoingDepthTwo, "entry:research-target", "entry:archive-target")).toBeDefined();
+    expect(edge(outgoingDepthTwo, "entry:research-target", "entry:archive-target")).toBeUndefined();
   });
 
   it("adds links among already selected local neighbors only when enabled", () => {
@@ -317,23 +439,15 @@ describe("Obsidian 1.13 golden vault compatibility", () => {
     const additionalEdges = edgeIds(withNeighbors).filter((id) => !edgeIds(withoutNeighbors).includes(id));
 
     expect(additionalEdges).toEqual([
-      "link:entry:canvas->entry:canvas",
       "link:entry:canvas->entry:research-target",
-      "link:entry:incoming->entry:research-target"
+      "link:entry:incoming->entry:research-target",
+      "link:entry:research-target->entry:archive-target"
     ]);
   });
 
   it("supports every local depth from one through five", () => {
-    const depthVault: VaultIndexEntry[] = Array.from({ length: 6 }, (_, position) => ({
-      id: `depth-${position}`,
-      path: `Depth/${position}.md`,
-      kind: "markdown",
-      content: position < 5 ? `[[Depth/${position + 1}]]` : ""
-    }));
-    const depthIndex = buildKnowledgeIndex(depthVault);
-
     for (const depth of [1, 2, 3, 4, 5] as const) {
-      const snapshot = buildGraphSnapshot(depthIndex, localSettings({
+      const snapshot = buildGraphSnapshot(index, localSettings({
         root: { entryId: "depth-0" },
         depth,
         incoming: false,

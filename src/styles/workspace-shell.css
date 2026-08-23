@@ -367,15 +367,40 @@
 }
 
 .obsidian-drawer-backdrop {
-  background: rgb(15 18 24 / 24%);
+  --workspace-drawer-backdrop: rgb(15 18 24 / 24%);
+
+  background: var(--workspace-drawer-backdrop);
   border: 0;
+  border-radius: 0;
   bottom: 0;
+  cursor: default;
   display: block;
   inset-inline-end: 0;
   inset-inline-start: 0;
+  margin: 0;
+  max-width: none;
+  min-height: 0;
+  padding: 0;
   position: fixed;
   top: 0;
+  transform: none;
   z-index: 80;
+}
+
+/*
+ * The backdrop is a semantic close button. Global primary-button hover and
+ * active rules have greater selector specificity than the base class and used
+ * to turn the entire workspace teal while the pointer remained over the menu
+ * trigger. Keep every interaction state as the same neutral scrim.
+ */
+button.obsidian-drawer-backdrop:not(:disabled):hover,
+button.obsidian-drawer-backdrop:not(:disabled):focus-visible,
+button.obsidian-drawer-backdrop:not(:disabled):active {
+  background: var(--workspace-drawer-backdrop);
+  border: 0;
+  box-shadow: none;
+  outline: 0;
+  transform: none;
 }
 
 .app-frame-workspace .modal-backdrop,
@@ -496,7 +521,9 @@
   }
 
   .obsidian-drawer-backdrop {
-    background: rgb(15 18 24 / 38%);
+    --workspace-drawer-backdrop: rgb(15 18 24 / 38%);
+
+    background: var(--workspace-drawer-backdrop);
     border: 0;
     bottom: 0;
     display: block;

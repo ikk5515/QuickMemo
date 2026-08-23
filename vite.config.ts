@@ -14,6 +14,13 @@ export default defineConfig({
             return undefined;
           }
 
+          // CodeMirror and ProseMirror both depend on this tiny package. Keep
+          // it neutral so Rollup does not make the lazy Markdown editor pull
+          // in the complete legacy TipTap/ProseMirror chunk.
+          if (id.includes("/w3c-keyname/")) {
+            return "keyboard-keynames";
+          }
+
           if (id.includes("/@tiptap/") || id.includes("/prosemirror-")) {
             return "editor";
           }

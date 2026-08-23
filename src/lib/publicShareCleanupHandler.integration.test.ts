@@ -10,6 +10,7 @@ type FirestoreValue = {
   arrayValue?: { values?: FirestoreValue[] };
   booleanValue?: boolean;
   integerValue?: number | string;
+  nullValue?: null;
   stringValue?: string;
   timestampValue?: string;
 };
@@ -497,6 +498,7 @@ function completedBackfillCursor(backend: FakeFirestoreRest) {
 }
 
 function secureShareCopyNote(
+  noteId: string,
   state: "active" | "copying",
   updatedAt: string,
   overrides: Partial<Record<
@@ -507,9 +509,13 @@ function secureShareCopyNote(
     | "revision",
     number | string
   >> & { participantUids?: string[] } = {}
-) {
+): Record<string, FirestoreValue> {
   const ownerUid = String(overrides.ownerUid ?? "owner-a");
+  const claimId = noteId.slice(0, 43).padEnd(43, "_");
   return {
+    contentFormat: stringValue("legacy-html-v1"),
+    entryKind: stringValue("legacy-html"),
+    folderId: { nullValue: null },
     isDeleted: booleanValue(false),
     ownerUid: stringValue(ownerUid),
     participantUids: stringArrayValue(overrides.participantUids ?? [ownerUid]),
@@ -520,8 +526,46 @@ function secureShareCopyNote(
     secureShareCopyReservedAttachmentCount: integerValue(Number(overrides.reserved ?? 0)),
     secureShareCopyState: stringValue(state),
     secureShareCopyUpdatedAt: timestampValue(updatedAt),
-    type: stringValue("personal")
+    type: stringValue("personal"),
+    vaultNameClaimId: stringValue(claimId),
+    vaultNameIndexVersion: integerValue(1)
   };
+}
+
+function addSecureShareCopyNote(
+  backend: FakeFirestoreRest,
+  noteId: string,
+  state: "active" | "copying",
+  updatedAt: string,
+  overrides: Parameters<typeof secureShareCopyNote>[3] = {}
+) {
+  const ownerUid = String(overrides.ownerUid ?? "owner-a");
+  const claimId = noteId.slice(0, 43).padEnd(43, "_");
+  const noteName = backend.add(
+    `notes/${noteId}`,
+    secureShareCopyNote(noteId, state, updatedAt, overrides)
+  );
+  backend.add(`vaultIntegrity/${ownerUid}/nameClaims/${claimId}`, {
+    indexVersion: integerValue(1),
+    ownerUid: stringValue(ownerUid),
+    parentId: { nullValue: null },
+    targetId: stringValue(noteId),
+    targetType: stringValue("entry")
+  });
+  return noteName;
+}
+
+function legacySecureShareCopyNote(
+  state: "active" | "copying",
+  updatedAt: string,
+  overrides: Parameters<typeof secureShareCopyNote>[3] = {}
+) {
+  const fields = secureShareCopyNote("legacy-copy", state, updatedAt, overrides);
+  delete fields.contentFormat;
+  delete fields.entryKind;
+  delete fields.vaultNameClaimId;
+  delete fields.vaultNameIndexVersion;
+  return fields;
 }
 
 function emailQuotaBucketFields(
@@ -1574,35 +1618,35 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
       expiresAt: timestampValue(future),
       status: stringValue("active")
     });
-    backend.add("notes/stale-incomplete", secureShareCopyNote("copying", stale, {
+    addSecureShareCopyNote(backend, "stale-incomplete", "copying", stale, {
       reserved: 1
-    }));
+    });
     backend.add("notes/stale-incomplete/attachments/pending-copy", {
       isReady: booleanValue(false),
       ownerUid: stringValue("owner-a"),
       quotaReserved: booleanValue(false),
       secureShareCopyJobId: stringValue("copy_job_handler_test_1234")
     });
-    backend.add("notes/stale-complete", secureShareCopyNote("copying", stale, {
+    addSecureShareCopyNote(backend, "stale-complete", "copying", stale, {
       expected: 1,
       ready: 1,
       reserved: 1
-    }));
-    backend.add("notes/fresh-copy", secureShareCopyNote("copying", fresh));
-    backend.add("notes/other-participant-copy", secureShareCopyNote("copying", stale, {
+    });
+    addSecureShareCopyNote(backend, "fresh-copy", "copying", fresh);
+    addSecureShareCopyNote(backend, "other-participant-copy", "copying", stale, {
       participantUids: ["owner-a", "owner-b"]
-    }));
-    backend.add("notes/foreign-attachment-copy", secureShareCopyNote("copying", stale, {
+    });
+    addSecureShareCopyNote(backend, "foreign-attachment-copy", "copying", stale, {
       reserved: 1
-    }));
+    });
     backend.add("notes/foreign-attachment-copy/attachments/foreign-copy", {
       isReady: booleanValue(false),
       ownerUid: stringValue("owner-b"),
       quotaReserved: booleanValue(false),
       secureShareCopyJobId: stringValue("copy_job_handler_test_1234")
     });
-    const racingName = backend.add("notes/racing-copy", secureShareCopyNote("copying", stale));
-    backend.add("notes/already-active", secureShareCopyNote("active", stale));
+    const racingName = addSecureShareCopyNote(backend, "racing-copy", "copying", stale);
+    addSecureShareCopyNote(backend, "already-active", "active", stale);
     backend.raceAbortDocumentOnce = racingName;
     installBackend(backend);
 
@@ -1651,12 +1695,18 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     );
     expect(backend.pathsStartingWith("notes/stale-incomplete/history/")).toHaveLength(1);
     expect(backend.has("notes/stale-incomplete/attachments/pending-copy")).toBe(false);
+    expect(backend.has(
+      `vaultIntegrity/owner-a/nameClaims/${"stale-incomplete".padEnd(43, "_")}`
+    )).toBe(false);
     expect(backend.get("notes/stale-complete")?.fields.secureShareCopyState).toEqual(
       stringValue("active")
     );
     expect(backend.get("notes/stale-complete")?.fields.isDeleted).toEqual(
       booleanValue(false)
     );
+    expect(backend.has(
+      `vaultIntegrity/owner-a/nameClaims/${"stale-complete".padEnd(43, "_")}`
+    )).toBe(true);
     expect(backend.get("notes/fresh-copy")?.fields.secureShareCopyState).toEqual(
       stringValue("copying")
     );
@@ -1734,11 +1784,14 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
 
     completedBackfillCursor(backend);
     for (let index = 0; index < 21; index += 1) {
-      backend.add(`notes/stale-complete-${String(index).padStart(2, "0")}`, secureShareCopyNote(
+      const noteId = `stale-complete-${String(index).padStart(2, "0")}`;
+      addSecureShareCopyNote(
+        backend,
+        noteId,
         "copying",
         stale,
         { expected: 1, ready: 1, reserved: 1 }
-      ));
+      );
     }
     installBackend(backend);
 
@@ -1772,13 +1825,18 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
 
     completedBackfillCursor(backend);
-    const heartbeatNoteName = backend.add(
-      "notes/stale-heartbeat-race",
-      secureShareCopyNote("copying", stale)
+    const heartbeatNoteName = addSecureShareCopyNote(
+      backend,
+      "stale-heartbeat-race",
+      "copying",
+      stale
     );
-    const readyNoteName = backend.add(
-      "notes/stale-ready-race",
-      secureShareCopyNote("copying", stale, { reserved: 1 })
+    const readyNoteName = addSecureShareCopyNote(
+      backend,
+      "stale-ready-race",
+      "copying",
+      stale,
+      { reserved: 1 }
     );
     const readyAttachmentName = backend.add(
       "notes/stale-ready-race/attachments/resumed-upload",
@@ -1837,15 +1895,45 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     });
   });
 
+  it("terminally aborts an exact legacy copying job without creating or requiring a Vault claim", async () => {
+    const backend = new FakeFirestoreRest();
+    const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+
+    completedBackfillCursor(backend);
+    backend.add(
+      "notes/stale-legacy-copy",
+      legacySecureShareCopyNote("copying", stale, { expected: 0, ready: 0, reserved: 0 })
+    );
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      staleSecureShareCopyJobsAborted: 1,
+      staleSecureShareCopyJobsActivated: 0,
+      staleSecureShareCopyJobsRetained: 0,
+      staleSecureShareCopyJobsScanned: 1
+    });
+    expect(backend.get("notes/stale-legacy-copy")?.fields).toMatchObject({
+      isDeleted: booleanValue(true),
+      secureShareCopyState: stringValue("aborted")
+    });
+    expect(backend.pathsStartingWith("vaultIntegrity/owner-a/nameClaims/")).toHaveLength(0);
+  });
+
   it("resumes an exact cleanup claim after a crash and removes it on abort", async () => {
     const backend = new FakeFirestoreRest();
     const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     completedBackfillCursor(backend);
-    backend.add(
-      "notes/stale-claimed-retry",
-      secureShareCopyNote("copying", stale, { reserved: 1 })
+    addSecureShareCopyNote(
+      backend,
+      "stale-claimed-retry",
+      "copying",
+      stale,
+      { reserved: 1 }
     );
     backend.add(
       "notes/stale-claimed-retry/attachments/pending-copy",
@@ -1912,8 +2000,15 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
 
     completedBackfillCursor(backend);
+    addSecureShareCopyNote(
+      backend,
+      "stale-malformed-claim",
+      "copying",
+      stale,
+      { reserved: 1 }
+    );
     backend.add("notes/stale-malformed-claim", {
-      ...secureShareCopyNote("copying", stale, { reserved: 1 }),
+      ...backend.get("notes/stale-malformed-claim")?.fields,
       secureShareCopyCleanupClaimId: stringValue("wrong-cleanup-claim"),
       secureShareCopyCleanupClaimedAt: timestampValue(stale)
     });

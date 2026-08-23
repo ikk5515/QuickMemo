@@ -1,0 +1,12 @@
+.vault-history-panel { display: grid; gap: 10px; min-width: 0; padding: 10px; }
+.vault-history-panel > header { align-items: center; display: flex; gap: 6px; }
+.vault-history-panel > p { color: var(--vault-text-muted); font-size: 12px; margin: 0; }
+.vault-history-list { display: grid; gap: 8px; }
+.vault-history-list article { background: var(--vault-surface-muted); border: 1px solid var(--vault-border); border-radius: 7px; display: grid; gap: 7px; min-width: 0; padding: 8px; }
+.vault-history-list article > div { display: grid; gap: 2px; }
+.vault-history-list article span, .vault-history-list article small { color: var(--vault-text-muted); font-size: 11px; }
+.vault-history-list details { min-width: 0; }
+.vault-history-list summary { cursor: pointer; font-size: 12px; }
+.vault-history-list pre { background: var(--vault-surface); border-radius: 5px; font: 11px/1.45 var(--font-mono, ui-monospace, monospace); margin: 6px 0 0; max-height: 220px; overflow: auto; padding: 7px; white-space: pre-wrap; }
+.vault-history-list button { align-items: center; display: inline-flex; gap: 5px; justify-self: start; min-height: 34px; }
+@media (pointer: coarse) { .vault-history-list button, .vault-history-list summary { min-height: 44px; } }

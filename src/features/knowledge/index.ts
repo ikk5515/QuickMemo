@@ -6,5 +6,6 @@ export * from "./markdown";
 export * from "./path";
 export * from "./query";
 export * from "./types";
+export * from "./unlinkedMentions";
 export * from "./workerProtocol";
 export * from "./workerRuntime";

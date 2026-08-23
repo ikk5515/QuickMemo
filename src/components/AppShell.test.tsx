@@ -12,7 +12,7 @@ function preferences(matrixLabels: MatrixLabels = defaultMatrixLabels): UserPref
     defaultHome: "notes",
     matrixLabels,
     scheduleDefaultCategory: "all",
-    scheduleDefaultView: "todo",
+    scheduleDefaultView: "calendar",
     theme: "system"
   };
 }
@@ -50,7 +50,7 @@ describe("SettingsModal", () => {
         urgent: "위임 업무"
       },
       scheduleDefaultCategory: "all",
-      scheduleDefaultView: "todo"
+      scheduleDefaultView: "calendar"
     });
   });
 
@@ -98,11 +98,11 @@ describe("SettingsModal", () => {
       defaultHome: "notes",
       matrixLabels: defaultMatrixLabels,
       scheduleDefaultCategory: "all",
-      scheduleDefaultView: "todo"
+      scheduleDefaultView: "calendar"
     });
   });
 
-  it("offers recurring work as a default schedule tab while excluding completed history", () => {
+  it("offers only Calendar and Matrix while canonicalizing a legacy saved view", () => {
     render(
       <SettingsModal
         preferences={{ ...preferences(), scheduleDefaultView: "completed" }}
@@ -113,11 +113,11 @@ describe("SettingsModal", () => {
 
     const defaultScheduleSelect = screen.getByLabelText("일정관리 기본 화면") as HTMLSelectElement;
 
-    expect(defaultScheduleSelect.value).toBe("todo");
-    expect(screen.getByRole("option", { name: "할 일" })).toBeInTheDocument();
+    expect(defaultScheduleSelect.value).toBe("calendar");
+    expect(screen.queryByRole("option", { name: "할 일" })).not.toBeInTheDocument();
     expect(screen.getByRole("option", { name: "달력" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "매트릭스" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "반복 업무" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "반복 업무" })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "완료" })).not.toBeInTheDocument();
   });
 
@@ -150,7 +150,7 @@ describe("SettingsModal", () => {
       defaultHome: "notes",
       matrixLabels: defaultMatrixLabels,
       scheduleDefaultCategory: "personal",
-      scheduleDefaultView: "todo"
+      scheduleDefaultView: "calendar"
     });
   });
 
@@ -218,7 +218,7 @@ describe("SettingsModal", () => {
       defaultHome: "library",
       matrixLabels: defaultMatrixLabels,
       scheduleDefaultCategory: "all",
-      scheduleDefaultView: "todo"
+      scheduleDefaultView: "calendar"
     });
   });
 

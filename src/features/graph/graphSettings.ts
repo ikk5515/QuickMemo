@@ -122,6 +122,41 @@ export function clampGraphNumber(value: number, range: GraphNumberRange): number
   return Math.min(range.max, Math.max(range.min, value));
 }
 
+export interface GraphEngineForceSettings {
+  centerStrength: number;
+  linkDistance: number;
+  linkStrength: number;
+  repelStrength: number;
+}
+
+/**
+ * Maps the public Obsidian-style controls to d3's physical parameters. The
+ * controls represent perceived intensity, so a linear UI step must not create
+ * a disproportionately large jump near zero. Endpoints remain exact and the
+ * mapping is deterministic for golden interaction fixtures.
+ */
+export function graphEngineForceSettings(
+  common: Pick<GraphCommonSettings, "centerForce" | "linkDistance" | "linkForce" | "repelForce">
+): GraphEngineForceSettings {
+  const center = clampGraphNumber(common.centerForce, GRAPH_SETTING_RANGES.centerForce);
+  const repel = clampGraphNumber(common.repelForce, GRAPH_SETTING_RANGES.repelForce);
+  const link = clampGraphNumber(common.linkForce, GRAPH_SETTING_RANGES.linkForce);
+  const distance = clampGraphNumber(common.linkDistance, GRAPH_SETTING_RANGES.linkDistance);
+  const distancePosition = (
+    distance - GRAPH_SETTING_RANGES.linkDistance.min
+  ) / (
+    GRAPH_SETTING_RANGES.linkDistance.max - GRAPH_SETTING_RANGES.linkDistance.min
+  );
+  return {
+    centerStrength: 0.1 * Math.expm1(center * 3) / Math.expm1(3),
+    linkDistance: GRAPH_SETTING_RANGES.linkDistance.min
+      + (GRAPH_SETTING_RANGES.linkDistance.max - GRAPH_SETTING_RANGES.linkDistance.min)
+        * (distancePosition ** 1.2),
+    linkStrength: link ** 1.5,
+    repelStrength: repel === 0 ? 0 : -12 * (repel ** 1.25)
+  };
+}
+
 export function graphOpenIntentFromModifiers(modifiers: {
   altKey: boolean;
   ctrlKey: boolean;

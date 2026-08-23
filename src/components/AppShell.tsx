@@ -47,6 +47,7 @@ import {
   type SaveUserPreferencesInput
 } from "../services/userPreferences";
 import type {
+  ActiveScheduleView,
   DefaultHomeView,
   FeatureAccess,
   MatrixLabels,
@@ -102,7 +103,7 @@ export function AppShell({
   onNavigateHome?: (intent?: WorkspacePanelIntent) => void;
   variant?: "default" | "vault";
 }) {
-  const { changePassword, profile, signOut } = useAuth();
+  const { changePassword, privateKey, profile, signOut } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
@@ -125,6 +126,10 @@ export function AppShell({
   const featureAccess = useMemo(
     () => normalizeFeatureAccess(profile),
     [profile]
+  );
+  const preferencesCryptoContext = useMemo(
+    () => profile && privateKey ? { privateKey, profile } : undefined,
+    [privateKey, profile]
   );
   const activeWorkspaceSection = workspaceSectionFromLocation(location.pathname, location.search);
   const navigationItems: WorkspaceNavigationItem[] = [];
@@ -165,12 +170,15 @@ export function AppShell({
     }
 
     const cachedPreferences = getCachedUserPreferences(profile.uid);
-    if (cachedPreferences) {
-      setPreferences(cachedPreferences);
-    }
+    setPreferences(cachedPreferences);
 
-    return subscribeUserPreferences(profile.uid, setPreferences);
-  }, [profile]);
+    return subscribeUserPreferences(
+      profile.uid,
+      setPreferences,
+      undefined,
+      preferencesCryptoContext
+    );
+  }, [preferencesCryptoContext, profile]);
 
   useEffect(() => {
     const nextPreference = preferences?.theme ?? getStoredThemePreference() ?? "system";
@@ -235,7 +243,7 @@ export function AppShell({
     }
 
     try {
-      await saveUserPreferences(profile.uid, { theme: nextPreference });
+      await saveUserPreferences(profile.uid, { theme: nextPreference }, preferencesCryptoContext);
     } catch {
       setThemeStatus("테마 설정은 이 브라우저에만 저장되었습니다.");
     }
@@ -509,9 +517,14 @@ export function AppShell({
       {settingsModalOpen && profile && (
         <SettingsModal
           featureAccess={featureAccess}
+          matrixLabelsUnlocked={Boolean(preferencesCryptoContext)}
           preferences={preferences}
           onClose={closeSettingsModal}
-          onSave={(nextPreferences) => saveUserPreferences(profile.uid, nextPreferences)}
+          onSave={(nextPreferences) => saveUserPreferences(
+            profile.uid,
+            nextPreferences,
+            preferencesCryptoContext
+          )}
           returnFocusRef={settingsModalTriggerRef}
         />
       )}
@@ -546,12 +559,14 @@ export function ThemeToggleButton({
 
 export function SettingsModal({
   featureAccess = defaultFeatureAccess,
+  matrixLabelsUnlocked = true,
   onClose,
   onSave,
   preferences,
   returnFocusRef
 }: {
   featureAccess?: FeatureAccess;
+  matrixLabelsUnlocked?: boolean;
   onClose: () => void;
   onSave: (preferences: SaveUserPreferencesInput) => Promise<void>;
   preferences: UserPreferencesDocument | null;
@@ -561,7 +576,7 @@ export function SettingsModal({
   const preferredDefaultHome = preferences?.defaultHome ?? "notes";
   const savedAccessibleHome = resolveAccessibleHome({ featureAccess }, preferredDefaultHome);
   const [defaultHome, setDefaultHome] = useState<DefaultHomeView | null>(savedAccessibleHome);
-  const [scheduleDefaultView, setScheduleDefaultView] = useState<UserPreferencesDocument["scheduleDefaultView"]>(
+  const [scheduleDefaultView, setScheduleDefaultView] = useState<ActiveScheduleView>(
     normalizePrimaryScheduleView(preferences?.scheduleDefaultView)
   );
   const [scheduleDefaultCategory, setScheduleDefaultCategory] = useState<ScheduleCategoryFilter>(
@@ -582,7 +597,11 @@ export function SettingsModal({
       featureAccess.schedule
       && scheduleDefaultCategory !== normalizeScheduleCategoryFilter(preferences?.scheduleDefaultCategory)
     )
-    || (featureAccess.schedule && !sameMatrixLabels(nextMatrixLabels, savedMatrixLabels));
+    || (
+      featureAccess.schedule
+      && matrixLabelsUnlocked
+      && !sameMatrixLabels(nextMatrixLabels, savedMatrixLabels)
+    );
 
   useModalFocus(dialogRef, { returnFocusRef });
 
@@ -629,7 +648,7 @@ export function SettingsModal({
         nextPreferences.defaultHome = defaultHome;
       }
       if (featureAccess.schedule) {
-        nextPreferences.matrixLabels = nextMatrixLabels;
+        if (matrixLabelsUnlocked) nextPreferences.matrixLabels = nextMatrixLabels;
         nextPreferences.scheduleDefaultCategory = scheduleDefaultCategory;
         nextPreferences.scheduleDefaultView = scheduleDefaultView;
       }
@@ -681,7 +700,7 @@ export function SettingsModal({
         </button>
         <h2 id="settings-modal-title">설정</h2>
         <p id="settings-modal-description" className="settings-modal-description">
-          작업 시작 화면, 일정관리 기본 탭과 분류 보기, 매트릭스 표시 명칭을 설정합니다.
+          작업 시작 화면, 일정관리 기본 보기와 분류, 매트릭스 표시 명칭을 설정합니다.
         </p>
         <form className="form-grid compact" onSubmit={(event) => void submitSettings(event)}>
           <section className="settings-form-section" aria-labelledby="settings-workspace-title">
@@ -716,14 +735,12 @@ export function SettingsModal({
                     settingsEditedRef.current = true;
                     setError(null);
                     setMessage(null);
-                    setScheduleDefaultView(event.target.value as UserPreferencesDocument["scheduleDefaultView"]);
+                    setScheduleDefaultView(event.target.value as ActiveScheduleView);
                   }}
                   value={scheduleDefaultView}
                 >
-                  <option value="todo">할 일</option>
                   <option value="calendar">달력</option>
                   <option value="matrix">매트릭스</option>
-                  <option value="recurring">반복 업무</option>
                 </AppSelect>
               </label>
             )}
@@ -752,7 +769,12 @@ export function SettingsModal({
                 <h3 id="matrix-label-settings-title">매트릭스 명칭 설정</h3>
                 <p>각 영역의 표시 명칭만 바꾸며 일정 분류 기준은 유지됩니다.</p>
               </div>
-              <button className="secondary-button" type="button" onClick={resetMatrixLabels}>
+              <button
+                className="secondary-button"
+                disabled={!matrixLabelsUnlocked}
+                type="button"
+                onClick={resetMatrixLabels}
+              >
                 기본값으로 초기화
               </button>
             </div>
@@ -770,6 +792,7 @@ export function SettingsModal({
                       id={inputId}
                       aria-describedby={helperId}
                       aria-invalid={invalid}
+                      disabled={!matrixLabelsUnlocked}
                       maxLength={matrixLabelMaxLength}
                       onBlur={(event) => updateMatrixLabel(field.key, event.target.value.trim())}
                       onChange={(event) => updateMatrixLabel(field.key, event.target.value)}
@@ -780,6 +803,11 @@ export function SettingsModal({
                 );
               })}
             </div>
+            {!matrixLabelsUnlocked ? (
+              <p className="settings-access-note" role="status">
+                암호화 키를 연 뒤 사용자 지정 명칭을 확인하거나 변경할 수 있습니다.
+              </p>
+            ) : null}
             <p className="settings-inline-status" role="status">
               {hasChanges ? "변경사항 있음" : "저장된 설정과 같습니다."}
             </p>

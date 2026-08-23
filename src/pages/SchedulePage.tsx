@@ -20,7 +20,6 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
-  BookOpen,
   BriefcaseBusiness,
   CalendarSync,
   CalendarDays,
@@ -31,28 +30,17 @@ import {
   ChevronRight,
   Clock,
   Copy,
-  Dumbbell,
   Flag,
-  Flame,
   GripVertical,
   Grid2X2,
-  GraduationCap,
-  HeartPulse,
-  LayoutGrid,
-  ListTodo,
   LoaderCircle,
   Minus,
-  MoreHorizontal,
   Pencil,
-  Percent,
   Plus,
-  Repeat2,
   Save,
   Search,
-  Sparkles,
   Trash2,
   UserRound,
-  Zap,
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -91,44 +79,17 @@ import {
   type PrimaryScheduleView
 } from "../lib/scheduleNavigation";
 import {
-  buildRecurringDateStrip,
-  buildRecurringHabitOrderUpdates,
-  buildRecurringMonthCalendar,
-  buildRecurringMonthlySummaries,
-  calculateHabitMonthStats,
-  calculateHabitStats,
-  calculateRecurringDateProgress,
-  groupRecurringHabitsBySlot,
-  isHabitCheckedOn,
-  normalizeMonthString,
-  normalizeRecurringHabitDetails,
-  recurringHabitChecklistItemMaxLength,
-  recurringHabitChecklistMaxItems,
-  recurringCheckInId,
-  recurringHabitDescriptionMaxLength,
-  recurringHabitDetailsValidationError,
-  recurringHabitDayCheckedItemIds,
-  recurringHabitDayProgressPercent,
-  recurringHabitIconLabels,
-  recurringHabitIconValues,
-  recurringHabitSlots,
-  recurringHabitTitleMaxLength,
-  recurringHabitTitleValidationError
-} from "../lib/recurringHabitHelpers";
-import {
   addDays,
   buildScheduleTaskOrderUpdates,
   buildCalendarMonth,
   buildCalendarTaskLayout,
   compareCalendarAgendaTasks,
-  compareCompletedTasks,
   compareTaskSchedule,
   emptyScheduleDetails,
   formatScheduleDateRange,
   formatScheduleTimeRange,
   formatTaskTime,
   groupTasksByMatrix,
-  groupTasksByTodoDate,
   isSafeScheduleDateRange,
   isValidScheduleDateString,
   matrixPriorityForSection,
@@ -191,44 +152,24 @@ import {
   type ScheduleTaskSnapshot
 } from "../services/scheduleTasks";
 import {
-  createRecurringHabit,
-  deleteRecurringHabit,
-  setRecurringHabitCheckIn,
-  subscribeRecurringHabitCheckIns,
-  subscribeRecurringHabits,
-  updateRecurringHabitDayState,
-  updateRecurringHabitFromLatest,
-  updateRecurringHabitOrderBatch,
-  type RecurringHabitCheckInSnapshot,
-  type RecurringHabitSnapshot,
-  type UpdateRecurringHabitDayStateInput
-} from "../services/recurringHabits";
-import {
   defaultUserPreferences,
   getCachedUserPreferences,
   getUserPreferences,
   subscribeUserPreferences
 } from "../services/userPreferences";
 import type {
-  DecryptedRecurringHabit,
   DecryptedScheduleTask,
   EncryptedPayload,
   MatrixLabels,
-  RecurringHabitDetails,
-  RecurringHabitIcon,
-  RecurringHabitSlot,
   ScheduleChecklistItem,
   ScheduleCategoryFilter,
   ScheduleTaskDetails,
-  ScheduleTaskCategory,
-  ScheduleView
+  ScheduleTaskCategory
 } from "../types";
 
 const scheduleTabs: Array<{ view: PrimaryScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
-  { view: "todo", label: "할 일", shortLabel: "할 일", Icon: ListTodo },
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
-  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 },
-  { view: "recurring", label: "반복 업무", shortLabel: "반복 업무", Icon: Repeat2 }
+  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 }
 ];
 
 const scheduleCategoryFilters: Array<{ value: ScheduleCategoryFilter; label: string }> = [
@@ -237,32 +178,17 @@ const scheduleCategoryFilters: Array<{ value: ScheduleCategoryFilter; label: str
   { value: "personal", label: "개인" }
 ];
 
-const scheduleViewTitles: Record<ScheduleView, string> = {
+const scheduleViewTitles: Record<PrimaryScheduleView, string> = {
   calendar: "달력",
-  completed: "완료 내역",
-  matrix: "매트릭스",
-  recurring: "반복 업무",
-  todo: "할 일"
+  matrix: "매트릭스"
 };
 
 const taskPageSize = 5;
-const completedPageSize = 10;
 const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야 하고 같은 연도 안에서 최대 ${maxScheduleTaskRangeDays}일까지 선택할 수 있습니다.`;
 
 function categoryForNewTask(filter: ScheduleCategoryFilter): ScheduleTaskCategory {
   return filter === "personal" ? "personal" : defaultScheduleTaskCategory;
 }
-
-const recurringHabitIconMeta: Record<RecurringHabitIcon, { Icon: LucideIcon; color: string; label: string }> = {
-  work: { Icon: BriefcaseBusiness, color: "#2563eb", label: recurringHabitIconLabels.work },
-  study: { Icon: GraduationCap, color: "#7c3aed", label: recurringHabitIconLabels.study },
-  reading: { Icon: BookOpen, color: "#0891b2", label: recurringHabitIconLabels.reading },
-  exercise: { Icon: Dumbbell, color: "#ea580c", label: recurringHabitIconLabels.exercise },
-  health: { Icon: HeartPulse, color: "#e11d48", label: recurringHabitIconLabels.health },
-  cleanup: { Icon: Sparkles, color: "#16a34a", label: recurringHabitIconLabels.cleanup },
-  review: { Icon: CheckCircle2, color: "#ca8a04", label: recurringHabitIconLabels.review },
-  other: { Icon: Repeat2, color: "#64748b", label: recurringHabitIconLabels.other }
-};
 
 type DecryptedTaskCache = Map<string, {
   details: ScheduleTaskDetails;
@@ -271,13 +197,6 @@ type DecryptedTaskCache = Map<string, {
   encryptedTitle: ScheduleTaskSnapshot["encryptedTitle"];
   title: string;
   wrappedKey: ScheduleTaskSnapshot["wrappedKeys"][string];
-}>;
-type DecryptedHabitCache = Map<string, {
-  details: RecurringHabitDetails;
-  encryptedDetails: RecurringHabitSnapshot["encryptedDetails"];
-  encryptedTitle: RecurringHabitSnapshot["encryptedTitle"];
-  title: string;
-  wrappedKey: RecurringHabitSnapshot["wrappedKeys"][string];
 }>;
 
 const scheduleDecryptConcurrency = 6;
@@ -363,25 +282,6 @@ function pruneScheduleDecryptCache<TCache extends Map<string, unknown>>(cache: T
   }
 }
 
-function replaceRecurringCheckInSnapshot(
-  checkIns: RecurringHabitCheckInSnapshot[],
-  habitId: string,
-  date: string,
-  nextCheckIn: RecurringHabitCheckInSnapshot | null
-) {
-  const existingIndex = checkIns.findIndex((checkIn) => checkIn.habitId === habitId && checkIn.date === date);
-
-  if (!nextCheckIn) {
-    return existingIndex < 0 ? checkIns : checkIns.filter((_, index) => index !== existingIndex);
-  }
-
-  if (existingIndex < 0) {
-    return [...checkIns, nextCheckIn];
-  }
-
-  return checkIns.map((checkIn, index) => index === existingIndex ? nextCheckIn : checkIn);
-}
-
 function useKoreanHolidayMap(dateStrings: string[]) {
   const cacheKey = dateStrings.join("|");
   const [holidayMap, setHolidayMap] = useState<Record<string, KoreanHoliday[]>>({});
@@ -409,12 +309,7 @@ function useKoreanHolidayMap(dateStrings: string[]) {
 
   return holidayMap;
 }
-
-type CompletedContentFilter = "all" | "hasDescription" | "hasChecklist";
-type CompletedMonthsFilter = "1" | "3" | "6" | "12" | "all";
-type CompletedPriorityFilter = "all" | "important" | "urgent" | "importantUrgent";
 type TaskDetailsUpdater = (details: ScheduleTaskDetails) => ScheduleTaskDetails;
-type RecurringHabitDetailsUpdater = (details: RecurringHabitDetails) => RecurringHabitDetails;
 
 interface QuickDefaults {
   category?: ScheduleTaskCategory;
@@ -523,25 +418,6 @@ interface CreateDialogState {
   allowPriority?: boolean;
   defaults: QuickDefaults;
   title: string;
-}
-
-interface RecurringHabitDraft {
-  title: string;
-  description: string;
-  slot: RecurringHabitSlot;
-  icon: RecurringHabitIcon;
-  color: string;
-}
-
-interface RecurringHabitDialogState {
-  habitId?: string;
-  mode: "create" | "edit";
-}
-
-interface TodayWorkSummary {
-  overdueTasks: DecryptedScheduleTask[];
-  recurringHabits: DecryptedRecurringHabit[];
-  todayTasks: DecryptedScheduleTask[];
 }
 
 type ChecklistGroupKey = "checked" | "unchecked";
@@ -1094,15 +970,17 @@ function GoogleCalendarRecoveryWorker({
   return null;
 }
 
-export default function SchedulePage({ routeView }: { routeView?: Extract<ScheduleView, "recurring"> }) {
+export default function SchedulePage() {
   const { privateKey, profile } = useAuth();
+  const preferencesCryptoContext = useMemo(
+    () => profile && privateKey ? { privateKey, profile } : undefined,
+    [privateKey, profile]
+  );
   const googleCalendarProfileUid = profile?.uid ?? null;
   const location = useLocation();
   const navigate = useNavigate();
-  const isRecurringPage = routeView === "recurring";
-  const [activeView, setActiveView] = useState<ScheduleView | null>(() =>
-    routeView
-      ?? scheduleViewFromSearch(location.search)
+  const [activeView, setActiveView] = useState<PrimaryScheduleView | null>(() =>
+    scheduleViewFromSearch(location.search)
       ?? (profile ? normalizePrimaryScheduleView(getCachedUserPreferences(profile.uid)?.scheduleDefaultView) : null)
   );
   const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() =>
@@ -1119,9 +997,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const [tasks, setTasks] = useState<ScheduleTaskSnapshot[]>([]);
   const [scheduleTasksLoaded, setScheduleTasksLoaded] = useState(false);
   const [decryptedTasks, setDecryptedTasks] = useState<DecryptedScheduleTask[]>([]);
-  const [recurringHabits, setRecurringHabits] = useState<RecurringHabitSnapshot[]>([]);
-  const [decryptedRecurringHabits, setDecryptedRecurringHabits] = useState<DecryptedRecurringHabit[]>([]);
-  const [recurringCheckIns, setRecurringCheckIns] = useState<RecurringHabitCheckInSnapshot[]>([]);
   const [viewTaskId, setViewTaskId] = useState<string | null>(null);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const createDialogReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -1131,27 +1006,10 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const [taskDeletionPending, setTaskDeletionPending] = useState(false);
   const [taskDeletionError, setTaskDeletionError] = useState<string | null>(null);
   const [taskDuplicationPending, setTaskDuplicationPending] = useState(false);
-  const [viewRecurringHabitId, setViewRecurringHabitId] = useState<string | null>(null);
-  const [readRecurringHabitId, setReadRecurringHabitId] = useState<string | null>(null);
-  const recurringHabitModalReturnFocusRef = useRef<HTMLElement | null>(null);
-  const [recurringHabitDialog, setRecurringHabitDialog] = useState<RecurringHabitDialogState | null>(null);
-  const [recurringOverviewOpen, setRecurringOverviewOpen] = useState(false);
-  const [todayPanelOpen, setTodayPanelOpen] = useState(false);
-  const [scheduleToolsOpen, setScheduleToolsOpen] = useState(false);
-  const [selectedRecurringDate, setSelectedRecurringDate] = useState(() => toLocalDateString(new Date()));
-  const [recurringMonth, setRecurringMonth] = useState(() => toLocalDateString(new Date()).slice(0, 7));
-  const [pendingRecurringCheckIn, setPendingRecurringCheckIn] = useState<Record<string, boolean>>({});
-  const [pendingRecurringDeletion, setPendingRecurringDeletion] = useState<Record<string, boolean>>({});
   const [selectedCalendarDate, setSelectedCalendarDate] = useState(() => toLocalDateString(new Date()));
   const [calendarCursor, setCalendarCursor] = useState(() => new Date());
   const [createDialog, setCreateDialog] = useState<CreateDialogState | null>(null);
   const [scheduleQuery, setScheduleQuery] = useState("");
-  const [completedQuery, setCompletedQuery] = useState("");
-  const [completedDate, setCompletedDate] = useState("");
-  const [completedMonth, setCompletedMonth] = useState(() => toLocalDateString(new Date()).slice(0, 7));
-  const [completedMonths, setCompletedMonths] = useState<CompletedMonthsFilter>("1");
-  const [completedPriority, setCompletedPriority] = useState<CompletedPriorityFilter>("all");
-  const [completedContent, setCompletedContent] = useState<CompletedContentFilter>("all");
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [today, setToday] = useState(() => toLocalDateString(new Date()));
@@ -1166,25 +1024,12 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const [googleCalendarNotice, setGoogleCalendarNotice] = useState<string | null>(null);
   const [googleCalendarTaskSyncPendingCount, setGoogleCalendarTaskSyncPendingCount] = useState(0);
   const decryptedTasksRef = useRef<DecryptedScheduleTask[]>([]);
-  const decryptedRecurringHabitsRef = useRef<DecryptedRecurringHabit[]>([]);
   const decryptedTaskCacheRef = useRef<DecryptedTaskCache>(new Map());
-  const decryptedHabitCacheRef = useRef<DecryptedHabitCache>(new Map());
   const decryptCacheIdentityRef = useRef<{ privateKey: CryptoKey | null; uid: string | null }>({
     privateKey: null,
     uid: null
   });
   const taskDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<ScheduleTaskDetails>>>>({});
-  const recurringDetailsUpdateQueueRef = useRef<Partial<Record<string, Promise<RecurringHabitDetails>>>>({});
-  const recurringCheckInSnapshotRevisionRef = useRef(0);
-  const recurringCheckInOperationRef = useRef(new Map<string, symbol>());
-  const recurringCheckInWriteQueueRef = useRef(new Map<string, Promise<unknown>>());
-  const seenRecurringHabitIdsRef = useRef(new Set<string>());
-  const scheduleToolsRef = useRef<HTMLDivElement>(null);
-  const scheduleToolsTriggerRef = useRef<HTMLButtonElement>(null);
-  const scheduleToolsPopoverId = useId();
-  const todayPanelId = useId();
-  const todayPanelRef = useRef<HTMLElement | null>(null);
-  const todayWorkTriggerRef = useRef<HTMLButtonElement>(null);
   const schedulePrimaryActionRef = useRef<HTMLButtonElement>(null);
   const googleCalendarPopupRef = useRef<Window | null>(null);
   const googleCalendarAttemptRef = useRef(0);
@@ -1200,13 +1045,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const googleCalendarTaskSyncRunnersRef = useRef(new Map<string, symbol>());
   const googleCalendarTaskSyncVersionsRef = useRef(new Map<string, number>());
   const taskDuplicationPendingRef = useRef(false);
-  const needsScheduleData = Boolean(privateKey)
-    && !isRecurringPage
-    && activeView !== null
-    && activeView !== "recurring";
-  const needsFullRecurringHistory = isRecurringPage
-    || Boolean(viewRecurringHabitId || readRecurringHabitId || recurringHabitDialog || recurringOverviewOpen);
-  const needsRecurringData = Boolean(privateKey) && (needsFullRecurringHistory || todayPanelOpen);
+  const needsScheduleData = Boolean(privateKey) && activeView !== null;
 
   const refreshGoogleCalendarStatus = useCallback(async (
     showLoading = true,
@@ -1306,7 +1145,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     googleCalendarConnectionLifecycleEpochRef.current += 1;
     setGoogleCalendarTaskSyncPendingCount(0);
 
-    if (googleCalendarProfileUid && privateKey && !isRecurringPage) {
+    if (googleCalendarProfileUid && privateKey) {
       void refreshGoogleCalendarStatus(false, false).catch(() => undefined);
     }
 
@@ -1328,10 +1167,10 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       googleCalendarConnectionGenerationRef.current = null;
       clearGoogleCalendarSession();
     };
-  }, [googleCalendarProfileUid, isRecurringPage, privateKey, refreshGoogleCalendarStatus]);
+  }, [googleCalendarProfileUid, privateKey, refreshGoogleCalendarStatus]);
 
   useEffect(() => {
-    if (!googleCalendarDialogOpen || !googleCalendarProfileUid || !privateKey || isRecurringPage) {
+    if (!googleCalendarDialogOpen || !googleCalendarProfileUid || !privateKey) {
       return;
     }
 
@@ -1349,39 +1188,20 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refreshVisibleConnection);
     };
-  }, [googleCalendarDialogOpen, googleCalendarProfileUid, isRecurringPage, privateKey, refreshGoogleCalendarStatus]);
-
-  const closeScheduleToolsMenu = useCallback((restoreFocus = false) => {
-    setScheduleToolsOpen(false);
-
-    if (restoreFocus) {
-      window.setTimeout(() => scheduleToolsTriggerRef.current?.focus({ preventScroll: true }), 0);
-    }
-  }, []);
-
-  const closeTodayWorkPanel = useCallback((restoreFocus = true) => {
-    setTodayPanelOpen(false);
-
-    if (restoreFocus) {
-      window.setTimeout(() => todayWorkTriggerRef.current?.focus({ preventScroll: true }), 0);
-    }
-  }, []);
+  }, [googleCalendarDialogOpen, googleCalendarProfileUid, privateKey, refreshGoogleCalendarStatus]);
 
   useEffect(() => {
-    if (routeView) {
-      setActiveView(routeView);
-      return undefined;
-    }
-
     const requestedView = scheduleViewFromSearch(location.search);
 
     if (requestedView) {
-      if (requestedView === "recurring") {
-        navigate(scheduleViewHref("recurring"), { replace: true });
-        return undefined;
-      }
-
       setActiveView(requestedView);
+      return undefined;
+    }
+
+    const rawRequestedView = new URLSearchParams(location.search).get("view");
+
+    if (rawRequestedView) {
+      navigate(scheduleViewHref("calendar"), { replace: true });
       return undefined;
     }
 
@@ -1395,22 +1215,14 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
 
     const cachedView = normalizePrimaryScheduleView(cachedPreferences?.scheduleDefaultView);
 
-    if (cachedView === "recurring") {
-      navigate(scheduleViewHref(cachedView), { replace: true });
-    } else {
-      setActiveView(cachedView);
-    }
+    setActiveView(cachedView);
 
     void getUserPreferences(profile.uid)
       .then((preferences) => {
         if (active) {
           const nextView = normalizePrimaryScheduleView(preferences.scheduleDefaultView);
 
-          if (nextView === "recurring") {
-            navigate(scheduleViewHref(nextView), { replace: true });
-          } else {
-            setActiveView(nextView);
-          }
+          setActiveView(nextView);
         }
       })
       .catch(() => {
@@ -1419,84 +1231,17 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
             cachedPreferences?.scheduleDefaultView ?? defaultUserPreferences.scheduleDefaultView
           );
 
-          if (fallbackView === "recurring") {
-            navigate(scheduleViewHref(fallbackView), { replace: true });
-          } else {
-            setActiveView(fallbackView);
-          }
+          setActiveView(fallbackView);
         }
       });
 
     return () => {
       active = false;
     };
-  }, [location.search, navigate, profile, routeView]);
+  }, [location.search, navigate, profile]);
 
   useEffect(() => {
-    if (!scheduleToolsOpen) {
-      return undefined;
-    }
-
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-
-      if (target instanceof Node && scheduleToolsRef.current?.contains(target)) {
-        return;
-      }
-
-      closeScheduleToolsMenu();
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeScheduleToolsMenu(true);
-      }
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [closeScheduleToolsMenu, scheduleToolsOpen]);
-
-  useEffect(() => {
-    if (!todayPanelOpen) {
-      return undefined;
-    }
-
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-
-      if (
-        target instanceof Node &&
-        (todayPanelRef.current?.contains(target) || todayWorkTriggerRef.current?.contains(target))
-      ) {
-        return;
-      }
-
-      setTodayPanelOpen(false);
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeTodayWorkPanel();
-      }
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [closeTodayWorkPanel, todayPanelOpen]);
-
-  useEffect(() => {
-    if (!profile || isRecurringPage) {
+    if (!profile) {
       setMatrixLabels(defaultMatrixLabels);
       setScheduleCategoryFilter(defaultScheduleCategoryFilter);
       scheduleDefaultCategoryRef.current = null;
@@ -1535,9 +1280,10 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         setMatrixLabels(cachedPreferences?.matrixLabels ?? defaultMatrixLabels);
         scheduleCategoryPreferenceResolvedRef.current = true;
         scheduleCategoryTouchedBeforePreferenceRef.current = false;
-      }
+      },
+      preferencesCryptoContext
     );
-  }, [isRecurringPage, profile]);
+  }, [preferencesCryptoContext, profile]);
 
   useEffect(() => {
     let timeoutId: number | undefined;
@@ -1575,11 +1321,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   }, []);
 
   useEffect(() => {
-    setSelectedRecurringDate((current) => (current < today ? today : current));
-    setRecurringMonth((current) => current || today.slice(0, 7));
-  }, [today]);
-
-  useEffect(() => {
     if (!profile || !needsScheduleData) {
       setTasks([]);
       setScheduleTasksLoaded(false);
@@ -1603,51 +1344,12 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   }, [needsScheduleData, profile]);
 
   useEffect(() => {
-    if (!profile || !needsRecurringData) {
-      recurringCheckInSnapshotRevisionRef.current += 1;
-      recurringCheckInOperationRef.current.clear();
-      seenRecurringHabitIdsRef.current.clear();
-      setRecurringHabits([]);
-      setRecurringCheckIns([]);
-      setPendingRecurringCheckIn({});
-      return undefined;
-    }
-
-    const unsubscribeHabits = subscribeRecurringHabits(
-      profile.uid,
-      (nextHabits) => {
-        nextHabits.forEach((habit) => seenRecurringHabitIdsRef.current.add(habit.id));
-        setRecurringHabits(nextHabits);
-        setError(null);
-      },
-      (caught) => setError(scheduleActionError(caught, "반복 업무를 불러오지 못했습니다."))
-    );
-    const unsubscribeCheckIns = subscribeRecurringHabitCheckIns(
-      profile.uid,
-      (nextCheckIns) => {
-        recurringCheckInSnapshotRevisionRef.current += 1;
-        setRecurringCheckIns(nextCheckIns);
-        setError(null);
-      },
-      (caught) => setError(scheduleActionError(caught, "반복 체크인을 불러오지 못했습니다.")),
-      needsFullRecurringHistory ? undefined : { date: today }
-    );
-
-    return () => {
-      unsubscribeHabits();
-      unsubscribeCheckIns();
-    };
-  }, [needsRecurringData, needsFullRecurringHistory, profile, today]);
-
-  useEffect(() => {
     const uid = profile?.uid ?? null;
     const currentIdentity = decryptCacheIdentityRef.current;
 
     if (currentIdentity.privateKey !== privateKey || currentIdentity.uid !== uid) {
       decryptedTaskCacheRef.current.clear();
-      decryptedHabitCacheRef.current.clear();
       setDecryptedTasks([]);
-      setDecryptedRecurringHabits([]);
       decryptCacheIdentityRef.current = { privateKey, uid };
     }
   }, [privateKey, profile?.uid]);
@@ -1760,119 +1462,11 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   }, [privateKey, profile, tasks]);
 
   useEffect(() => {
-    if (!profile || !privateKey) {
-      decryptedHabitCacheRef.current.clear();
-      setDecryptedRecurringHabits([]);
-      return undefined;
-    }
-
-    const safeProfile = profile;
-    const safePrivateKey = privateKey;
-    let active = true;
-
-    const ownsCurrentCache = () => active
-      && decryptCacheIdentityRef.current.privateKey === safePrivateKey
-      && decryptCacheIdentityRef.current.uid === safeProfile.uid;
-
-    async function decryptHabits() {
-      if (!ownsCurrentCache()) {
-        return;
-      }
-
-      pruneScheduleDecryptCache(decryptedHabitCacheRef.current, recurringHabits);
-      const nextHabits = await mapWithConcurrency(
-        recurringHabits,
-        scheduleDecryptConcurrency,
-        async (habit) => {
-          if (!ownsCurrentCache()) {
-            return null;
-          }
-
-          const wrappedKey = habit.wrappedKeys[safeProfile.uid];
-
-          if (!wrappedKey) {
-            decryptedHabitCacheRef.current.delete(habit.id);
-            return null;
-          }
-
-          const cached = decryptedHabitCacheRef.current.get(habit.id);
-
-          if (
-            cached
-            && sameEncryptedPayload(cached.encryptedTitle, habit.encryptedTitle)
-            && sameEncryptedPayload(cached.encryptedDetails, habit.encryptedDetails)
-            && sameWrappedKey(cached.wrappedKey, wrappedKey)
-          ) {
-            decryptedHabitCacheRef.current.set(habit.id, {
-              ...cached,
-              encryptedDetails: habit.encryptedDetails,
-              encryptedTitle: habit.encryptedTitle,
-              wrappedKey
-            });
-
-            return {
-              ...habit,
-              title: cached.title,
-              details: cached.details
-            } satisfies DecryptedRecurringHabit;
-          }
-
-          try {
-            const habitKey = await unwrapNoteKey(wrappedKey, safePrivateKey);
-            const [title, detailsJson] = await Promise.all([
-              decryptText(habit.encryptedTitle, habitKey),
-              decryptText(habit.encryptedDetails, habitKey)
-            ]);
-
-            const decryptedHabit = {
-              ...habit,
-              title,
-              details: normalizeRecurringHabitDetails(JSON.parse(detailsJson) as unknown)
-            } satisfies DecryptedRecurringHabit;
-
-            if (!ownsCurrentCache()) {
-              return null;
-            }
-
-            decryptedHabitCacheRef.current.set(habit.id, {
-              details: decryptedHabit.details,
-              encryptedDetails: habit.encryptedDetails,
-              encryptedTitle: habit.encryptedTitle,
-              title: decryptedHabit.title,
-              wrappedKey
-            });
-            return decryptedHabit;
-          } catch {
-            if (ownsCurrentCache()) {
-              decryptedHabitCacheRef.current.delete(habit.id);
-            }
-            return null;
-          }
-        }
-      );
-
-      if (ownsCurrentCache()) {
-        setDecryptedRecurringHabits(nextHabits.filter((habit): habit is DecryptedRecurringHabit => Boolean(habit)));
-      }
-    }
-
-    void decryptHabits();
-
-    return () => {
-      active = false;
-    };
-  }, [privateKey, profile, recurringHabits]);
-
-  useEffect(() => {
     decryptedTasksRef.current = decryptedTasks;
   }, [decryptedTasks]);
 
-  useEffect(() => {
-    decryptedRecurringHabitsRef.current = decryptedRecurringHabits;
-  }, [decryptedRecurringHabits]);
-
   const sortedTasks = useMemo(() => [...decryptedTasks].sort(compareTaskSchedule), [decryptedTasks]);
-  const categoryViewActive = activeView === "todo" || activeView === "calendar" || activeView === "matrix";
+  const categoryViewActive = activeView === "calendar" || activeView === "matrix";
   const showTaskCategories = !categoryViewActive || scheduleCategoryFilter === "all";
   const categoryFilteredTasks = useMemo(
     () => categoryViewActive
@@ -1888,22 +1482,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     () => categoryFilteredTasks.filter((task) => scheduleTaskMatchesQuery(task, scheduleQuery)),
     [categoryFilteredTasks, scheduleQuery]
   );
-  const displayedRecurringHabits = useMemo(
-    () => decryptedRecurringHabits.filter(
-      (habit) => habit.status === "active" && recurringHabitMatchesQuery(habit, scheduleQuery)
-    ),
-    [decryptedRecurringHabits, scheduleQuery]
-  );
-  const pendingDeletionHabits = useMemo(
-    () => decryptedRecurringHabits.filter((habit) => habit.status === "archived"),
-    [decryptedRecurringHabits]
-  );
-  const scheduleStats = useMemo(
-    () => isRecurringPage
-      ? { active: 0, completed: 0, overdue: 0, recurring: 0, today: 0 }
-      : scheduleDashboardStats(categoryFilteredTasks, decryptedRecurringHabits, today),
-    [categoryFilteredTasks, decryptedRecurringHabits, isRecurringPage, today]
-  );
   const viewTask = useMemo(
     () => sortedTasks.find((task) => task.id === viewTaskId) ?? null,
     [viewTaskId, sortedTasks]
@@ -1911,34 +1489,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   const editingTask = useMemo(
     () => sortedTasks.find((task) => task.id === editingTaskId) ?? null,
     [editingTaskId, sortedTasks]
-  );
-  const selectedRecurringHabit = useMemo(
-    () => decryptedRecurringHabits.find(
-      (habit) => habit.id === viewRecurringHabitId && habit.status === "active"
-    ) ?? null,
-    [decryptedRecurringHabits, viewRecurringHabitId]
-  );
-  const readRecurringHabit = useMemo(
-    () => decryptedRecurringHabits.find(
-      (habit) => habit.id === readRecurringHabitId && habit.status === "active"
-    ) ?? null,
-    [decryptedRecurringHabits, readRecurringHabitId]
-  );
-  const editingRecurringHabit = useMemo(
-    () => decryptedRecurringHabits.find(
-      (habit) => habit.id === recurringHabitDialog?.habitId && habit.status === "active"
-    ) ?? null,
-    [decryptedRecurringHabits, recurringHabitDialog?.habitId]
-  );
-  const completedTasks = useMemo(
-    () => activeView === "completed"
-      ? displayedTasks.filter((task) => task.status === "completed").sort(compareCompletedTasks)
-      : [],
-    [activeView, displayedTasks]
-  );
-  const todoGroups = useMemo(
-    () => activeView === "todo" ? groupTasksByTodoDate(displayedTasks, today) : [],
-    [activeView, displayedTasks, today]
   );
   const matrixSections = useMemo(
     () => activeView === "matrix" ? groupTasksByMatrix(displayedTasks, today, matrixLabels) : [],
@@ -1979,52 +1529,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       : [],
     [activeView, calendarTaskMap, selectedCalendarDate]
   );
-  const todayWorkSummary = useMemo<TodayWorkSummary>(() => {
-    if (isRecurringPage) {
-      return { overdueTasks: [], recurringHabits: [], todayTasks: [] };
-    }
-
-    const activeTasks = categoryFilteredTasks.filter((task) => task.status !== "completed");
-    const overdueTasks = activeTasks.filter((task) => isTaskScheduleOverdue(task, today));
-    const todayTasks = activeTasks.filter((task) => taskCoversDate(task, today) && !isTaskScheduleOverdue(task, today));
-    const recurringHabitsForToday = decryptedRecurringHabits.filter((habit) => habit.status === "active");
-
-    return { overdueTasks, recurringHabits: recurringHabitsForToday, todayTasks };
-  }, [categoryFilteredTasks, decryptedRecurringHabits, isRecurringPage, today]);
-
-  useEffect(() => {
-    const habitIsUnavailable = (habitId: string) => {
-      const rawHabit = recurringHabits.find((habit) => habit.id === habitId);
-
-      return rawHabit?.status === "archived"
-        || (!rawHabit && seenRecurringHabitIdsRef.current.has(habitId));
-    };
-
-    if (viewRecurringHabitId && !selectedRecurringHabit && habitIsUnavailable(viewRecurringHabitId)) {
-      setViewRecurringHabitId(null);
-    }
-    if (readRecurringHabitId && !readRecurringHabit && habitIsUnavailable(readRecurringHabitId)) {
-      setReadRecurringHabitId(null);
-    }
-
-    if (
-      recurringHabitDialog?.mode === "edit"
-      && recurringHabitDialog.habitId
-      && !editingRecurringHabit
-      && habitIsUnavailable(recurringHabitDialog.habitId)
-    ) {
-      setRecurringHabitDialog(null);
-    }
-  }, [
-    editingRecurringHabit,
-    readRecurringHabit,
-    readRecurringHabitId,
-    recurringHabits,
-    recurringHabitDialog?.habitId,
-    recurringHabitDialog?.mode,
-    selectedRecurringHabit,
-    viewRecurringHabitId
-  ]);
 
   if (!profile) {
     return null;
@@ -2875,8 +2379,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
       .reverse()
       .find((failure) => failure.surfaced);
 
-    setTodayPanelOpen(false);
-    setScheduleToolsOpen(false);
     setGoogleCalendarDialogOpen(true);
     setGoogleCalendarError(surfacedFailure?.warning ?? null);
     setGoogleCalendarNotice(null);
@@ -3287,26 +2789,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         setGoogleCalendarOperation(null);
       }
     }
-  }
-
-  function enqueueRecurringCheckInWrite<TResult>(queueKey: string, write: () => Promise<TResult>) {
-    const previousWrite = recurringCheckInWriteQueueRef.current.get(queueKey) ?? Promise.resolve();
-    const queuedWrite = previousWrite.catch(() => undefined).then(write);
-
-    recurringCheckInWriteQueueRef.current.set(queueKey, queuedWrite);
-    void queuedWrite.then(
-      () => {
-        if (recurringCheckInWriteQueueRef.current.get(queueKey) === queuedWrite) {
-          recurringCheckInWriteQueueRef.current.delete(queueKey);
-        }
-      },
-      () => {
-        if (recurringCheckInWriteQueueRef.current.get(queueKey) === queuedWrite) {
-          recurringCheckInWriteQueueRef.current.delete(queueKey);
-        }
-      }
-    );
-    return queuedWrite;
   }
 
   async function encryptTaskFields(title: string, details: ScheduleTaskDetails, taskKey: CryptoKey) {
@@ -4053,438 +3535,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     }
   }
 
-  async function encryptRecurringHabitFields(title: string, details: RecurringHabitDetails, habitKey: CryptoKey) {
-    const normalizedDetails = normalizeMutableRecurringHabitDetails(details);
-    const validationError = recurringHabitTitleValidationError(title)
-      ?? recurringHabitDetailsValidationError(normalizedDetails);
-
-    if (validationError) {
-      throw new Error(validationError);
-    }
-
-    return Promise.all([
-      encryptText(title.trim() || "반복 업무", habitKey),
-      encryptText(JSON.stringify(normalizedDetails), habitKey)
-    ]);
-  }
-
-  function currentRecurringHabitDetails(habit: DecryptedRecurringHabit) {
-    return decryptedRecurringHabitsRef.current.find((currentHabit) => currentHabit.id === habit.id)?.details
-      ?? habit.details
-      ?? { description: "", checklist: [] };
-  }
-
-  function normalizeMutableRecurringHabitDetails(details: unknown): RecurringHabitDetails {
-    const normalizedDetails = normalizeRecurringHabitDetails(details);
-
-    return {
-      description: normalizedDetails.description,
-      checklist: normalizedDetails.checklist
-        .map((item) => ({ ...item, text: item.text.trim(), checked: false }))
-        .filter((item) => item.text)
-    };
-  }
-
-  async function updateRecurringHabitDetails(
-    habit: DecryptedRecurringHabit,
-    updateDetails: RecurringHabitDetailsUpdater,
-    fallback: string
-  ) {
-    const wrappedKey = habit.wrappedKeys[unlockedProfile.uid];
-
-    if (!wrappedKey) {
-      setError("반복 업무 암호화 키를 찾지 못했습니다.");
-      return false;
-    }
-
-    const queuedUpdate = recurringDetailsUpdateQueueRef.current[habit.id];
-    const previousUpdate = queuedUpdate ?? Promise.resolve(currentRecurringHabitDetails(habit));
-    const nextUpdate = previousUpdate
-      .catch(() => currentRecurringHabitDetails(habit))
-      .then(() => updateRecurringHabitFromLatest(
-        habit.id,
-        unlockedProfile.uid,
-        async (latestHabit) => {
-          const latestWrappedKey = latestHabit.wrappedKeys[unlockedProfile.uid];
-
-          if (!latestWrappedKey) {
-            throw new Error("반복 업무 암호화 키를 찾지 못했습니다.");
-          }
-
-          const habitKey = await unwrapNoteKey(latestWrappedKey, unlockedPrivateKey);
-          const latestDetailsJson = await decryptText(latestHabit.encryptedDetails, habitKey);
-          const latestDetails = normalizeMutableRecurringHabitDetails(JSON.parse(latestDetailsJson) as unknown);
-          const nextDetails = normalizeMutableRecurringHabitDetails(updateDetails(latestDetails));
-          const validationError = recurringHabitDetailsValidationError(nextDetails);
-
-          if (validationError) {
-            throw new Error(validationError);
-          }
-
-          const encryptedDetails = await encryptText(JSON.stringify(nextDetails), habitKey);
-
-          return {
-            input: { encryptedDetails },
-            result: nextDetails
-          };
-        }
-      ));
-
-    recurringDetailsUpdateQueueRef.current[habit.id] = nextUpdate;
-
-    try {
-      await nextUpdate;
-      setError(null);
-      return true;
-    } catch (caught) {
-      setError(scheduleActionError(caught, fallback));
-      return false;
-    } finally {
-      if (recurringDetailsUpdateQueueRef.current[habit.id] === nextUpdate) {
-        delete recurringDetailsUpdateQueueRef.current[habit.id];
-      }
-    }
-  }
-
-  async function createRecurringHabitFromDraft(draft: RecurringHabitDraft) {
-    const trimmedTitle = draft.title.trim();
-    const validationError = recurringHabitTitleValidationError(trimmedTitle)
-      ?? recurringHabitDetailsValidationError({ description: draft.description, checklist: [] });
-
-    if (validationError) {
-      setError(validationError);
-      return false;
-    }
-
-    try {
-      const habitKey = await generateNoteKey();
-      const [encryptedTitle, encryptedDetails] = await encryptRecurringHabitFields(
-        trimmedTitle,
-        { description: draft.description, checklist: [] },
-        habitKey
-      );
-      const wrappedKey = await wrapNoteKey(habitKey, unlockedProfile.publicKeyJwk);
-      const createdHabit = await createRecurringHabit({
-        ownerUid: unlockedProfile.uid,
-        title: encryptedTitle,
-        details: encryptedDetails,
-        wrappedKey,
-        slot: draft.slot,
-        icon: draft.icon,
-        color: normalizeScheduleTaskColor(draft.color),
-        sortOrder: nextRecurringHabitSortOrder(decryptedRecurringHabits, draft.slot)
-      });
-
-      setViewRecurringHabitId(createdHabit.id);
-      setStatus("반복 업무를 추가했습니다.");
-      setError(null);
-      return true;
-    } catch (caught) {
-      setError(scheduleActionError(caught, "반복 업무를 추가하지 못했습니다."));
-      return false;
-    }
-  }
-
-  async function saveRecurringHabit(habit: DecryptedRecurringHabit, draft: RecurringHabitDraft) {
-    const wrappedKey = habit.wrappedKeys[unlockedProfile.uid];
-
-    if (!wrappedKey) {
-      setError("반복 업무 암호화 키를 찾지 못했습니다.");
-      return false;
-    }
-
-    const validationError = recurringHabitTitleValidationError(draft.title)
-      ?? recurringHabitDetailsValidationError({
-        description: draft.description,
-        checklist: currentRecurringHabitDetails(habit).checklist
-      });
-
-    if (validationError) {
-      setError(validationError);
-      return false;
-    }
-
-    try {
-      await updateRecurringHabitFromLatest(
-        habit.id,
-        unlockedProfile.uid,
-        async (latestHabit) => {
-          const latestWrappedKey = latestHabit.wrappedKeys[unlockedProfile.uid];
-
-          if (!latestWrappedKey) {
-            throw new Error("반복 업무 암호화 키를 찾지 못했습니다.");
-          }
-
-          const habitKey = await unwrapNoteKey(latestWrappedKey, unlockedPrivateKey);
-          const latestDetailsJson = await decryptText(latestHabit.encryptedDetails, habitKey);
-          const currentDetails = normalizeMutableRecurringHabitDetails(JSON.parse(latestDetailsJson) as unknown);
-          const [encryptedTitle, encryptedDetails] = await encryptRecurringHabitFields(
-            draft.title,
-            { description: draft.description, checklist: currentDetails.checklist },
-            habitKey
-          );
-
-          return {
-            input: {
-              encryptedTitle,
-              encryptedDetails,
-              slot: draft.slot,
-              icon: draft.icon,
-              color: normalizeScheduleTaskColor(draft.color)
-            },
-            result: null
-          };
-        }
-      );
-      setRecurringHabitDialog(null);
-      setStatus("반복 업무를 저장했습니다.");
-      setError(null);
-      return true;
-    } catch (caught) {
-      setError(scheduleActionError(caught, "반복 업무를 저장하지 못했습니다."));
-      return false;
-    }
-  }
-
-  async function removeRecurringHabit(habit: DecryptedRecurringHabit) {
-    setPendingRecurringDeletion((current) => ({ ...current, [habit.id]: true }));
-
-    try {
-      await deleteRecurringHabit(habit.id, unlockedProfile.uid);
-      setRecurringHabitDialog(null);
-      setViewRecurringHabitId(null);
-      setReadRecurringHabitId(null);
-      setStatus("반복 업무를 삭제했습니다.");
-      setError(null);
-    } catch (caught) {
-      setError(scheduleActionError(caught, "반복 업무를 삭제하지 못했습니다."));
-    } finally {
-      setPendingRecurringDeletion((current) => {
-        const next = { ...current };
-        delete next[habit.id];
-        return next;
-      });
-    }
-  }
-
-  async function moveRecurringHabit(activeHabitId: string, targetSlot: RecurringHabitSlot, overHabitId: string | null) {
-    const updates = buildRecurringHabitOrderUpdates(decryptedRecurringHabits, activeHabitId, targetSlot, overHabitId);
-
-    if (!updates.length) {
-      return;
-    }
-
-    try {
-      await updateRecurringHabitOrderBatch(unlockedProfile.uid, updates);
-      setStatus("반복 업무 위치를 저장했습니다.");
-      setError(null);
-    } catch (caught) {
-      setError(scheduleActionError(caught, "반복 업무 위치를 저장하지 못했습니다."));
-    }
-  }
-
-  async function toggleRecurringHabitCheckIn(habit: DecryptedRecurringHabit, date: string) {
-    if (!isValidScheduleDateString(date) || date > today) {
-      setError("오늘 또는 지난 날짜만 체크할 수 있습니다.");
-      return;
-    }
-
-    const checkInId = recurringCheckInId(habit.id, date);
-    const checked = isHabitCheckedOn(recurringCheckIns, habit.id, date);
-    const nextChecked = !checked;
-    const previousCheckIn = recurringCheckIns.find(
-      (checkIn) => checkIn.habitId === habit.id && checkIn.date === date
-    ) ?? null;
-    const operation = Symbol(checkInId);
-    const startingSnapshotRevision = recurringCheckInSnapshotRevisionRef.current;
-
-    recurringCheckInOperationRef.current.set(checkInId, operation);
-    setPendingRecurringCheckIn((current) => ({ ...current, [checkInId]: true }));
-    setRecurringCheckIns((current) => {
-      if (!nextChecked) {
-        return replaceRecurringCheckInSnapshot(current, habit.id, date, null);
-      }
-
-      const existing = current.find((checkIn) => checkIn.habitId === habit.id && checkIn.date === date);
-      return replaceRecurringCheckInSnapshot(
-        current,
-        habit.id,
-        date,
-        {
-          ...(existing ?? {}),
-          id: checkInId,
-          ownerUid: unlockedProfile.uid,
-          habitId: habit.id,
-          date,
-          completed: true,
-          progressPercent: 100,
-          checkedItemIds: existing?.checkedItemIds ?? []
-        }
-      );
-    });
-
-    try {
-      await enqueueRecurringCheckInWrite(
-        `${unlockedProfile.uid}:${checkInId}`,
-        () => setRecurringHabitCheckIn(unlockedProfile.uid, habit.id, date, nextChecked)
-      );
-
-      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
-        setError(null);
-      }
-    } catch (caught) {
-      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
-        if (recurringCheckInSnapshotRevisionRef.current === startingSnapshotRevision) {
-          setRecurringCheckIns((current) => replaceRecurringCheckInSnapshot(
-            current,
-            habit.id,
-            date,
-            previousCheckIn
-          ));
-        }
-        setError(scheduleActionError(caught, "반복 체크인을 저장하지 못했습니다."));
-      }
-    } finally {
-      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
-        recurringCheckInOperationRef.current.delete(checkInId);
-        setPendingRecurringCheckIn((current) => {
-          const next = { ...current };
-          delete next[checkInId];
-          return next;
-        });
-      }
-    }
-  }
-
-  async function updateRecurringHabitDailyState(
-    habit: DecryptedRecurringHabit,
-    date: string,
-    input: UpdateRecurringHabitDayStateInput
-  ) {
-    if (!isValidScheduleDateString(date) || date > today) {
-      setError("오늘 또는 지난 날짜만 수정할 수 있습니다.");
-      return false;
-    }
-
-    const checkInId = recurringCheckInId(habit.id, date);
-    const previousCheckIn = recurringCheckIns.find(
-      (checkIn) => checkIn.habitId === habit.id && checkIn.date === date
-    ) ?? null;
-    const operation = Symbol(checkInId);
-    const startingSnapshotRevision = recurringCheckInSnapshotRevisionRef.current;
-
-    recurringCheckInOperationRef.current.set(checkInId, operation);
-    setPendingRecurringCheckIn((current) => ({ ...current, [checkInId]: true }));
-    setRecurringCheckIns((current) => {
-      const existing = current.find((checkIn) => checkIn.habitId === habit.id && checkIn.date === date);
-      const nextState: RecurringHabitCheckInSnapshot = {
-        ...(existing ?? {}),
-        id: checkInId,
-        ownerUid: unlockedProfile.uid,
-        habitId: habit.id,
-        date,
-        ...(input.checkedItemIds !== undefined ? { checkedItemIds: input.checkedItemIds } : {}),
-        ...(input.completed !== undefined ? { completed: input.completed } : {}),
-        ...(input.progressPercent !== undefined ? { progressPercent: input.progressPercent } : {})
-      };
-
-      if (existing) {
-        return current.map((checkIn) =>
-          checkIn.habitId === habit.id && checkIn.date === date ? nextState : checkIn
-        );
-      }
-
-      return [...current, nextState];
-    });
-
-    try {
-      const committedState = await enqueueRecurringCheckInWrite(
-        `${unlockedProfile.uid}:${checkInId}`,
-        () => updateRecurringHabitDayState(unlockedProfile.uid, habit.id, date, input)
-      );
-
-      if (
-        recurringCheckInOperationRef.current.get(checkInId) === operation
-        && recurringCheckInSnapshotRevisionRef.current === startingSnapshotRevision
-      ) {
-        setRecurringCheckIns((current) => {
-          const existing = current.find((checkIn) => checkIn.habitId === habit.id && checkIn.date === date);
-
-          return replaceRecurringCheckInSnapshot(current, habit.id, date, {
-            ...(existing ?? {}),
-            id: checkInId,
-            ownerUid: unlockedProfile.uid,
-            habitId: habit.id,
-            date,
-            ...committedState
-          });
-        });
-      }
-      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
-        setError(null);
-      }
-      return true;
-    } catch (caught) {
-      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
-        if (recurringCheckInSnapshotRevisionRef.current === startingSnapshotRevision) {
-          setRecurringCheckIns((current) => replaceRecurringCheckInSnapshot(
-            current,
-            habit.id,
-            date,
-            previousCheckIn
-          ));
-        }
-        setError(scheduleActionError(caught, "반복 업무 진행 상태를 저장하지 못했습니다."));
-      }
-      return false;
-    } finally {
-      if (recurringCheckInOperationRef.current.get(checkInId) === operation) {
-        recurringCheckInOperationRef.current.delete(checkInId);
-        setPendingRecurringCheckIn((current) => {
-          const next = { ...current };
-          delete next[checkInId];
-          return next;
-        });
-      }
-    }
-  }
-
-  async function updateRecurringHabitProgress(habit: DecryptedRecurringHabit, date: string, percent: number) {
-    const progressPercent = normalizeTaskProgressPercent(percent);
-
-    await updateRecurringHabitDailyState(habit, date, {
-      completed: progressPercent >= 100,
-      progressPercent
-    });
-  }
-
-  async function toggleRecurringHabitChecklistItem(habit: DecryptedRecurringHabit, date: string, itemId: string) {
-    const checklist = habit.details.checklist;
-    const currentCheckedIds = recurringHabitDayCheckedItemIds(recurringCheckIns, habit.id, date);
-    const nextCheckedIds = new Set(currentCheckedIds);
-
-    if (nextCheckedIds.has(itemId)) {
-      nextCheckedIds.delete(itemId);
-    } else {
-      nextCheckedIds.add(itemId);
-    }
-
-    const checkedItemIds = checklist
-      .filter((item) => nextCheckedIds.has(item.id))
-      .map((item) => item.id);
-    const progressPercent = checklist.length ? Math.round((checkedItemIds.length / checklist.length) * 100) : 0;
-
-    await updateRecurringHabitDailyState(habit, date, {
-      checkedItemIds,
-      completed: checklist.length > 0 && progressPercent >= 100,
-      progressPercent,
-      toggleCheckedItem: {
-        allowedItemIds: checklist.map((item) => item.id),
-        itemId
-      }
-    });
-  }
-
   function moveCalendarMonth(offset: number) {
     setCalendarCursor((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
   }
@@ -4505,27 +3555,8 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     setSelectedCalendarDate(nextTodayString);
   }
 
-  function toggleTodayWorkPanel() {
-    if (todayPanelOpen) {
-      closeTodayWorkPanel(false);
-      return;
-    }
-
-    const nextToday = refreshToday();
-    const nextDate = new Date(`${nextToday}T00:00:00`);
-
-    setScheduleToolsOpen(false);
-    setCalendarCursor(new Date(nextDate.getFullYear(), nextDate.getMonth(), 1));
-    setSelectedCalendarDate(nextToday);
-    setSelectedRecurringDate(nextToday);
-    setRecurringMonth(nextToday.slice(0, 7));
-    setTodayPanelOpen(true);
-  }
-
   function openQuickTaskDialog() {
     const currentToday = refreshToday();
-
-    setScheduleToolsOpen(false);
 
     if (activeView === "matrix") {
       setCreateDialog({
@@ -4537,7 +3568,7 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
           isImportant: true,
           isUrgent: true
         },
-        title: "매트릭스 일정 추가"
+        title: "새 일정 추가"
       });
       return;
     }
@@ -4559,13 +3590,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
   }
 
   function openScheduleTab(view: PrimaryScheduleView) {
-    setScheduleToolsOpen(false);
-    setTodayPanelOpen(false);
-    navigate(scheduleViewHref(view));
-  }
-
-  function openScheduleUtilityView(view: Extract<ScheduleView, "completed">) {
-    setScheduleToolsOpen(false);
     navigate(scheduleViewHref(view));
   }
 
@@ -4607,9 +3631,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     });
   }
 
-  const todayPanelToggleLabel = `${todayPanelOpen ? "빠른 업무 패널 닫기" : "빠른 업무 패널 열기"}. 오늘 일정 ${scheduleStats.today}개, 지연 ${scheduleStats.overdue}개`;
-  const utilityViewActive = activeView === "completed";
-  const scheduleToolsLabel = scheduleToolsOpen ? "일정관리 도구 닫기" : "일정관리 도구 열기";
   const googleCalendarStateLabel = googleCalendarTaskSyncPendingCount > 0 || googleCalendarOperation === "syncing"
     ? "동기화 중"
     : googleCalendarConnection.lastSyncStatus === "synced"
@@ -4617,64 +3638,55 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
     : googleCalendarConnection.lastSyncStatus === "failed"
       ? "동기화 실패"
       : "미동기화";
-  const searchResultCount = isRecurringPage
-    ? displayedRecurringHabits.length
-    : activeView === "completed"
-      ? completedTasks.length
-      : displayedTasks.length;
+  const searchResultCount = displayedTasks.length;
 
   return (
     <AppShell>
-      {!isRecurringPage && (
-        <GoogleCalendarRecoveryWorker
-          connection={googleCalendarConnection}
-          onFailure={(caught, failureKeys) => {
-            rememberGoogleCalendarTaskSyncFailures(
-              failureKeys,
-              googleCalendarErrorMessage(caught)
-            );
-            return updateGoogleCalendarSyncFailure(caught);
-          }}
-          onRecoveryStateResolved={(failureKey) => {
-            const resolvedFailure = googleCalendarTaskSyncFailuresRef.current.get(failureKey);
+      <GoogleCalendarRecoveryWorker
+        connection={googleCalendarConnection}
+        onFailure={(caught, failureKeys) => {
+          rememberGoogleCalendarTaskSyncFailures(
+            failureKeys,
+            googleCalendarErrorMessage(caught)
+          );
+          return updateGoogleCalendarSyncFailure(caught);
+        }}
+        onRecoveryStateResolved={(failureKey) => {
+          const resolvedFailure = googleCalendarTaskSyncFailuresRef.current.get(failureKey);
 
-            if (!resolvedFailure) {
-              return;
-            }
-            googleCalendarTaskSyncFailuresRef.current.delete(failureKey);
-            if (resolvedFailure.surfaced
-              && clearGoogleCalendarTaskSyncFailures([], 0)) {
-              reportGoogleCalendarSyncSuccess(0);
-            }
-          }}
-          onRecoveryStateUnresolved={rememberUnresolvedGoogleCalendarRecoveryState}
-          onSuccess={(syncedCount, taskIds) => {
-            if (clearGoogleCalendarTaskSyncFailures(taskIds, syncedCount)) {
-              reportGoogleCalendarSyncSuccess(syncedCount);
-            }
-          }}
-          ownerUid={unlockedProfile.uid}
-          paused={Boolean(googleCalendarOperation)}
-          scheduleTasksLoaded={scheduleTasksLoaded}
-          tasks={decryptedTasks}
-        />
-      )}
-      <section className="schedule-workspace">
+          if (!resolvedFailure) {
+            return;
+          }
+          googleCalendarTaskSyncFailuresRef.current.delete(failureKey);
+          if (resolvedFailure.surfaced
+            && clearGoogleCalendarTaskSyncFailures([], 0)) {
+            reportGoogleCalendarSyncSuccess(0);
+          }
+        }}
+        onRecoveryStateUnresolved={rememberUnresolvedGoogleCalendarRecoveryState}
+        onSuccess={(syncedCount, taskIds) => {
+          if (clearGoogleCalendarTaskSyncFailures(taskIds, syncedCount)) {
+            reportGoogleCalendarSyncSuccess(syncedCount);
+          }
+        }}
+        ownerUid={unlockedProfile.uid}
+        paused={Boolean(googleCalendarOperation)}
+        scheduleTasksLoaded={scheduleTasksLoaded}
+        tasks={decryptedTasks}
+      />
+      <section className="schedule-workspace obsidian-schedule-pane" aria-label="일정관리 작업공간">
         <header className="schedule-header">
           <div>
-            <p className="section-kicker">
-              <CalendarDays size={16} />
-              일정관리
-            </p>
+            <p className="section-kicker">QUICKMEMO</p>
             <h1>{activeView ? scheduleViewTitles[activeView] : "일정관리"}</h1>
           </div>
           <label className="schedule-search-control">
             <Search size={17} aria-hidden="true" />
-            <span className="sr-only">{isRecurringPage ? "반복 업무 검색" : "일정 검색"}</span>
+            <span className="sr-only">일정 검색</span>
             <input
-              aria-label={isRecurringPage ? "반복 업무 검색" : "일정 검색"}
+              aria-label="일정 검색"
               onChange={(event) => setScheduleQuery(event.target.value)}
-              placeholder={isRecurringPage ? "반복 업무, 설명, 체크리스트 검색" : "일정, 설명, 체크리스트 검색"}
+              placeholder="일정, 설명, 체크리스트 검색"
               type="search"
               value={scheduleQuery}
             />
@@ -4694,85 +3706,38 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
               </button>
             ))}
           </nav>
-          <div className={`schedule-header-actions ${isRecurringPage ? "recurring" : ""}`}>
+          <div className="schedule-header-actions">
             {scheduleQuery.trim() && (
               <span className="schedule-query-result">
                 검색 결과 {searchResultCount}개
               </span>
             )}
-            {!isRecurringPage && (
-              <button
-                aria-haspopup="dialog"
-                aria-label={`Google Calendar 동기화: ${googleCalendarStateLabel}`}
-                className="icon-button google-calendar-trigger"
-                data-sync-state={googleCalendarTaskSyncPendingCount > 0 || googleCalendarOperation === "syncing"
-                  ? "syncing"
-                  : googleCalendarConnection.lastSyncStatus}
-                onClick={openGoogleCalendarDialog}
-                title={`Google Calendar · ${googleCalendarStateLabel}`}
-                type="button"
-              >
-                <CalendarSync size={17} aria-hidden="true" />
-                <span className="google-calendar-trigger-status" aria-hidden="true" />
-              </button>
-            )}
-            {!isRecurringPage && (
-              <button
-                ref={todayWorkTriggerRef}
-                className={`icon-button today-work-trigger ${todayPanelOpen ? "active" : ""}`}
-                type="button"
-                aria-controls={todayPanelId}
-                aria-expanded={todayPanelOpen}
-                aria-label={todayPanelToggleLabel}
-                title="오늘 업무"
-                onClick={toggleTodayWorkPanel}
-              >
-                <Zap size={16} />
-              </button>
-            )}
+            <button
+              aria-haspopup="dialog"
+              aria-label={`Google Calendar 동기화: ${googleCalendarStateLabel}`}
+              className="icon-button google-calendar-trigger"
+              data-sync-state={googleCalendarTaskSyncPendingCount > 0 || googleCalendarOperation === "syncing"
+                ? "syncing"
+                : googleCalendarConnection.lastSyncStatus}
+              onClick={openGoogleCalendarDialog}
+              title={`Google Calendar · ${googleCalendarStateLabel}`}
+              type="button"
+            >
+              <CalendarSync size={17} aria-hidden="true" />
+              <span className="google-calendar-trigger-status" aria-hidden="true" />
+            </button>
             <button
               ref={schedulePrimaryActionRef}
               className="schedule-primary-action"
               type="button"
               onClick={(event) => {
-                if (isRecurringPage) {
-                  recurringHabitModalReturnFocusRef.current = event.currentTarget;
-                  setRecurringHabitDialog({ mode: "create" });
-                  return;
-                }
                 createDialogReturnFocusRef.current = event.currentTarget;
                 openQuickTaskDialog();
               }}
             >
               <Plus size={16} />
-              {isRecurringPage ? "새 반복 업무" : "새 일정"}
+              새 일정
             </button>
-            <div className="schedule-tool-menu" ref={scheduleToolsRef}>
-              <button
-                ref={scheduleToolsTriggerRef}
-                className={`icon-button schedule-tool-menu-trigger ${scheduleToolsOpen || utilityViewActive ? "active" : ""}`}
-                type="button"
-                aria-controls={scheduleToolsPopoverId}
-                aria-current={utilityViewActive && !scheduleToolsOpen ? "page" : undefined}
-                aria-expanded={scheduleToolsOpen}
-                aria-label={scheduleToolsLabel}
-                title={utilityViewActive ? scheduleViewTitles[activeView] : "일정관리 도구"}
-                onClick={() => setScheduleToolsOpen((current) => !current)}
-              >
-                <MoreHorizontal size={18} />
-              </button>
-              {scheduleToolsOpen && (
-                <div id={scheduleToolsPopoverId} className="schedule-tool-menu-popover" role="group" aria-label="일정관리 도구">
-                  <button className="schedule-quick-menu-item" type="button" onClick={() => openScheduleUtilityView("completed")}>
-                    <CheckCircle2 size={16} />
-                    <span>
-                      <strong>완료 내역</strong>
-                      <em>완료한 일정과 필터 확인</em>
-                    </span>
-                  </button>
-                </div>
-              )}
-            </div>
           </div>
         </header>
 
@@ -4797,44 +3762,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
           </div>
         )}
 
-        {!isRecurringPage && todayPanelOpen && (
-          <TodayWorkPanel
-            checkIns={recurringCheckIns}
-            id={todayPanelId}
-            panelRef={todayPanelRef}
-            pendingCheckIns={pendingRecurringCheckIn}
-            showCategory={showTaskCategories}
-            summary={todayWorkSummary}
-            today={today}
-            onAddTask={() => {
-              createDialogReturnFocusRef.current = todayWorkTriggerRef.current;
-              setTodayPanelOpen(false);
-              setCreateDialog({
-                defaults: {
-                  category: categoryForNewTask(scheduleCategoryFilter),
-                  startDate: today,
-                  endDate: today,
-                  color: nextScheduleTaskColor(decryptedTasks)
-                },
-                title: "오늘 일정 추가"
-              });
-            }}
-            onClose={() => closeTodayWorkPanel()}
-            onOpenHabit={(habitId) => {
-              recurringHabitModalReturnFocusRef.current = todayWorkTriggerRef.current;
-              setReadRecurringHabitId(habitId);
-              setTodayPanelOpen(false);
-            }}
-            onOpenTask={(taskId) => {
-              taskModalReturnFocusRef.current = todayWorkTriggerRef.current;
-              setViewTaskId(taskId);
-              setTodayPanelOpen(false);
-            }}
-            onToggleHabit={(habit) => void toggleRecurringHabitCheckIn(habit, today)}
-            onToggleTask={(task) => void toggleTask(task)}
-          />
-        )}
-
         {(error || status) && (
           <div className={`schedule-feedback ${error ? "error" : ""}`} role="status">
             {error || status}
@@ -4842,16 +3769,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         )}
 
         {!activeView && <p className="schedule-empty">설정한 일정 화면을 여는 중입니다.</p>}
-
-        {activeView === "todo" && (
-          <TodoView
-            groups={todoGroups}
-            showCategory={showTaskCategories}
-            today={today}
-            onOpen={setViewTaskId}
-            onToggle={(task) => void toggleTask(task)}
-          />
-        )}
 
         {activeView === "calendar" && (
           <CalendarView
@@ -4889,54 +3806,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
           />
         )}
 
-        {activeView === "recurring" && (
-          <RecurringView
-            checkIns={recurringCheckIns}
-            habits={displayedRecurringHabits}
-            month={recurringMonth}
-            pendingDeletions={pendingRecurringDeletion}
-            pendingDeletionHabits={pendingDeletionHabits}
-            pendingCheckIns={pendingRecurringCheckIn}
-            selectedDate={selectedRecurringDate}
-            selectedHabit={selectedRecurringHabit}
-            today={today}
-            onAdd={() => setRecurringHabitDialog({ mode: "create" })}
-            onCloseHabit={() => setViewRecurringHabitId(null)}
-            onDeleteHabit={(habit) => void removeRecurringHabit(habit)}
-            onEditHabit={(habit) => setRecurringHabitDialog({ habitId: habit.id, mode: "edit" })}
-            onMonthChange={setRecurringMonth}
-            onMoveHabit={(habitId, targetSlot, overHabitId) => void moveRecurringHabit(habitId, targetSlot, overHabitId)}
-            onOpenHabit={setViewRecurringHabitId}
-            onReadHabit={setReadRecurringHabitId}
-            onOpenOverview={() => setRecurringOverviewOpen(true)}
-            onRetryDelete={(habit) => void removeRecurringHabit(habit)}
-            onSelectDate={(date) => {
-              setSelectedRecurringDate(date);
-              setRecurringMonth(date.slice(0, 7));
-            }}
-            onToggleCheckIn={(habit, date) => void toggleRecurringHabitCheckIn(habit, date)}
-          />
-        )}
-
-        {activeView === "completed" && (
-          <CompletedView
-            contentFilter={completedContent}
-            dateFilter={completedDate}
-            month={completedMonth}
-            months={completedMonths}
-            priorityFilter={completedPriority}
-            query={completedQuery}
-            tasks={completedTasks}
-            onContentFilterChange={setCompletedContent}
-            onDateFilterChange={setCompletedDate}
-            onMonthChange={setCompletedMonth}
-            onMonthsChange={setCompletedMonths}
-            onOpen={setViewTaskId}
-            onPriorityFilterChange={setCompletedPriority}
-            onQueryChange={setCompletedQuery}
-            onToggle={(task) => void toggleTask(task)}
-          />
-        )}
       </section>
 
       {viewTask && (
@@ -4984,31 +3853,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
         />
       )}
 
-      {readRecurringHabit && (
-        <RecurringHabitReadModal
-          checkIns={recurringCheckIns}
-          dayStatePending={pendingRecurringCheckIn[
-            recurringCheckInId(readRecurringHabit.id, selectedRecurringDate)
-          ] === true}
-          habit={readRecurringHabit}
-          fallbackFocusRef={schedulePrimaryActionRef}
-          selectedDate={selectedRecurringDate}
-          today={today}
-          onClose={() => setReadRecurringHabitId(null)}
-          onDelete={() => void removeRecurringHabit(readRecurringHabit)}
-          onEdit={() => {
-            setRecurringHabitDialog({ habitId: readRecurringHabit.id, mode: "edit" });
-            setReadRecurringHabitId(null);
-          }}
-          onToggleChecklist={(itemId) => toggleRecurringHabitChecklistItem(readRecurringHabit, selectedRecurringDate, itemId)}
-          onUpdateDetails={(updateDetails) =>
-            updateRecurringHabitDetails(readRecurringHabit, updateDetails, "반복 업무 상세 내용을 저장하지 못했습니다.")
-          }
-          onUpdateProgress={(percent) => updateRecurringHabitProgress(readRecurringHabit, selectedRecurringDate, percent)}
-          returnFocusRef={recurringHabitModalReturnFocusRef}
-        />
-      )}
-
       {createDialog && (
         <ScheduleCreateDialog
           allowPriority={createDialog.allowPriority}
@@ -5018,33 +3862,6 @@ export default function SchedulePage({ routeView }: { routeView?: Extract<Schedu
           onClose={() => setCreateDialog(null)}
           onCreate={createTask}
           returnFocusRef={createDialogReturnFocusRef}
-        />
-      )}
-
-      {recurringHabitDialog && (recurringHabitDialog.mode === "create" || editingRecurringHabit) && (
-        <RecurringHabitModal
-          fallbackFocusRef={schedulePrimaryActionRef}
-          habit={recurringHabitDialog.mode === "edit" ? editingRecurringHabit : null}
-          onClose={() => setRecurringHabitDialog(null)}
-          onCreate={createRecurringHabitFromDraft}
-          onDelete={(habit) => void removeRecurringHabit(habit)}
-          onSave={(habit, draft) => saveRecurringHabit(habit, draft)}
-          returnFocusRef={recurringHabitModalReturnFocusRef}
-        />
-      )}
-
-      {recurringOverviewOpen && (
-        <RecurringOverviewModal
-          checkIns={recurringCheckIns}
-          habits={decryptedRecurringHabits}
-          month={recurringMonth}
-          today={today}
-          onClose={() => setRecurringOverviewOpen(false)}
-          onMonthChange={setRecurringMonth}
-          onOpenHabit={(habitId) => {
-            setViewRecurringHabitId(habitId);
-            setRecurringOverviewOpen(false);
-          }}
         />
       )}
 
@@ -5464,138 +4281,6 @@ function ScheduleCreateDialog({
   );
 }
 
-function TodayWorkPanel({
-  checkIns,
-  id,
-  onAddTask,
-  onClose,
-  onOpenHabit,
-  onOpenTask,
-  panelRef,
-  onToggleHabit,
-  onToggleTask,
-  pendingCheckIns,
-  showCategory,
-  summary,
-  today
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  id: string;
-  onAddTask: () => void;
-  onClose: () => void;
-  onOpenHabit: (habitId: string) => void;
-  onOpenTask: (taskId: string) => void;
-  panelRef: RefObject<HTMLElement | null>;
-  onToggleHabit: (habit: DecryptedRecurringHabit) => void;
-  onToggleTask: (task: DecryptedScheduleTask) => void;
-  pendingCheckIns: Record<string, boolean>;
-  showCategory: boolean;
-  summary: TodayWorkSummary;
-  today: string;
-}) {
-  const titleId = useId();
-  const totalCount = summary.overdueTasks.length + summary.todayTasks.length + summary.recurringHabits.length;
-
-  useEffect(() => {
-    panelRef.current?.focus({ preventScroll: true });
-  }, [panelRef]);
-
-  return (
-    <aside
-      id={id}
-      className="today-work-panel"
-      ref={panelRef}
-      role="region"
-      aria-labelledby={titleId}
-      tabIndex={-1}
-    >
-      <header>
-        <div>
-          <p className="section-kicker">
-            <Zap size={15} />
-            오늘 업무
-          </p>
-          <h2 id={titleId}>{formatDateLabel(today)}</h2>
-          <span>{totalCount ? `${totalCount}개 항목` : "오늘 예정된 업무가 없습니다."}</span>
-        </div>
-        <button className="icon-button" type="button" onClick={onClose} aria-label="오늘 업무 닫기">
-          <X size={18} />
-        </button>
-      </header>
-      <div className="today-work-content">
-        <section className="today-work-section overdue">
-          <div>
-            <h3>지연 업무</h3>
-            <span>{summary.overdueTasks.length}</span>
-          </div>
-          <TaskList
-            emptyMessage="지연된 업무가 없습니다."
-            tasks={summary.overdueTasks}
-            today={today}
-            onOpen={onOpenTask}
-            onToggle={onToggleTask}
-            showCategory={showCategory}
-          />
-        </section>
-        <section className="today-work-section">
-          <div>
-            <h3>오늘 일정</h3>
-            <span>{summary.todayTasks.length}</span>
-          </div>
-          <TaskList
-            emptyMessage="오늘 예정된 일정이 없습니다."
-            tasks={summary.todayTasks}
-            today={today}
-            onOpen={onOpenTask}
-            onToggle={onToggleTask}
-            showCategory={showCategory}
-          />
-        </section>
-        <section className="today-work-section">
-          <div>
-            <h3>반복 업무</h3>
-            <span>{summary.recurringHabits.length}</span>
-          </div>
-          {summary.recurringHabits.length ? (
-            <div className="today-recurring-list">
-              {summary.recurringHabits.map((habit) => {
-                const checked = isHabitCheckedOn(checkIns, habit.id, today);
-                const pending = pendingCheckIns[recurringCheckInId(habit.id, today)] === true;
-
-                return (
-                  <article className={`today-recurring-item ${checked ? "checked" : ""}`} key={habit.id}>
-                    <button
-                      className={`recurring-check-button ${checked ? "checked" : ""}`}
-                      disabled={pending}
-                      type="button"
-                      aria-label={checked ? `${habit.title} 체크 해제` : `${habit.title} 체크`}
-                      onClick={() => onToggleHabit(habit)}
-                    >
-                      {checked ? <Check size={16} /> : null}
-                    </button>
-                    <button className="today-recurring-open" type="button" onClick={() => onOpenHabit(habit.id)}>
-                      <strong>{habit.title}</strong>
-                      <span>{slotLabel(habit.slot)} · {recurringHabitIconLabels[habit.icon]}</span>
-                    </button>
-                  </article>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="schedule-empty">오늘 체크할 반복 업무가 없습니다.</p>
-          )}
-        </section>
-      </div>
-      <footer>
-        <button className="secondary-button" type="button" onClick={onAddTask}>
-          <Plus size={16} />
-          오늘 일정 추가
-        </button>
-      </footer>
-    </aside>
-  );
-}
-
 function consumeNestedEscape(event: ReactKeyboardEvent<HTMLElement>) {
   event.preventDefault();
   event.stopPropagation();
@@ -5972,41 +4657,6 @@ function ScheduleColorPicker({ onChange, value }: { onChange: (color: string) =>
         value={normalizedValue}
       />
     </label>
-  );
-}
-
-function TodoView({
-  groups,
-  onOpen,
-  onToggle,
-  showCategory,
-  today
-}: {
-  groups: ReturnType<typeof groupTasksByTodoDate>;
-  onOpen: (taskId: string) => void;
-  onToggle: (task: DecryptedScheduleTask) => void;
-  showCategory: boolean;
-  today: string;
-}) {
-  return (
-    <div className="todo-groups">
-      {groups.map((group) => (
-        <section className="schedule-section" key={group.key}>
-          <header>
-            <h2>{group.label}</h2>
-            <span>{group.tasks.length}</span>
-          </header>
-          <PagedTaskList
-            tasks={group.tasks}
-            today={today}
-            showCategory={showCategory}
-            showProgress
-            onOpen={onOpen}
-            onToggle={onToggle}
-          />
-        </section>
-      ))}
-    </div>
   );
 }
 
@@ -6605,47 +5255,12 @@ const matrixCollisionDetection: CollisionDetection = (args) => {
   return sectionCollisions.length > 0 ? sectionCollisions : rectangleCollisions;
 };
 
-const recurringCollisionDetection: CollisionDetection = (args) => {
-  const pointerCollisions = pointerWithin(args);
-
-  if (pointerCollisions.length > 0) {
-    const habitCollisions = pointerCollisions.filter((collision) => collisionType(collision) === "recurring-habit");
-
-    if (habitCollisions.length > 0) {
-      return habitCollisions;
-    }
-
-    const slotCollisions = pointerCollisions.filter((collision) => collisionType(collision) === "recurring-slot");
-
-    if (slotCollisions.length > 0) {
-      return slotCollisions;
-    }
-
-    return pointerCollisions;
-  }
-
-  const rectangleCollisions = rectIntersection(args);
-  const habitCollisions = rectangleCollisions.filter((collision) => collisionType(collision) === "recurring-habit");
-
-  if (habitCollisions.length > 0) {
-    return habitCollisions;
-  }
-
-  const slotCollisions = rectangleCollisions.filter((collision) => collisionType(collision) === "recurring-slot");
-
-  return slotCollisions.length > 0 ? slotCollisions : rectangleCollisions;
-};
-
 function collisionType(collision: ReturnType<CollisionDetection>[number]) {
   return collision.data?.droppableContainer.data.current?.type;
 }
 
 function matrixSectionDropId(sectionKey: MatrixQuadrantKey) {
   return `matrix-section:${sectionKey}`;
-}
-
-function recurringSlotDropId(slot: RecurringHabitSlot) {
-  return `recurring-slot:${slot}`;
 }
 
 function matrixGroupStateKey(sectionKey: MatrixQuadrantKey, groupKey: string) {
@@ -6660,30 +5275,6 @@ function matrixSectionKeyFromDragEvent(event: DragEndEvent): MatrixQuadrantKey |
 
 function matrixTaskIdFromDragEvent(event: DragEndEvent) {
   return event.over?.data.current?.type === "matrix-task" ? String(event.over.id) : null;
-}
-
-function recurringSlotFromDragEvent(event: DragEndEvent): RecurringHabitSlot | null {
-  const slot = event.over?.data.current?.slot;
-
-  if (isRecurringHabitSlot(slot)) {
-    return slot;
-  }
-
-  return recurringSlotFromDropId(event.over?.id);
-}
-
-function recurringSlotFromDropId(value: unknown): RecurringHabitSlot | null {
-  if (typeof value !== "string" || !value.startsWith("recurring-slot:")) {
-    return null;
-  }
-
-  const slot = value.slice("recurring-slot:".length);
-
-  return isRecurringHabitSlot(slot) ? slot : null;
-}
-
-function recurringHabitIdFromDragEvent(event: DragEndEvent) {
-  return event.over?.data.current?.type === "recurring-habit" ? String(event.over.id) : null;
 }
 
 function matrixSectionKeyForTask(
@@ -6749,10 +5340,6 @@ function isMatrixQuadrantKey(value: unknown): value is MatrixQuadrantKey {
     || value === "importantNotUrgent"
     || value === "notUrgentNotImportant"
   );
-}
-
-function isRecurringHabitSlot(value: unknown): value is RecurringHabitSlot {
-  return value === "morning" || value === "afternoon" || value === "other";
 }
 
 function normalizeTaskProgressPercent(value: number | null | undefined) {
@@ -6881,166 +5468,6 @@ function PagedTaskList({
         </div>
       )}
     </div>
-  );
-}
-
-function CompletedView({
-  contentFilter,
-  dateFilter,
-  month,
-  months,
-  onContentFilterChange,
-  onDateFilterChange,
-  onMonthChange,
-  onMonthsChange,
-  onOpen,
-  onPriorityFilterChange,
-  onQueryChange,
-  onToggle,
-  priorityFilter,
-  query,
-  tasks
-}: {
-  contentFilter: CompletedContentFilter;
-  dateFilter: string;
-  month: string;
-  months: CompletedMonthsFilter;
-  onContentFilterChange: (filter: CompletedContentFilter) => void;
-  onDateFilterChange: (date: string) => void;
-  onMonthChange: (month: string) => void;
-  onMonthsChange: (months: CompletedMonthsFilter) => void;
-  onOpen: (taskId: string) => void;
-  onPriorityFilterChange: (filter: CompletedPriorityFilter) => void;
-  onQueryChange: (query: string) => void;
-  onToggle: (task: DecryptedScheduleTask) => void;
-  priorityFilter: CompletedPriorityFilter;
-  query: string;
-  tasks: DecryptedScheduleTask[];
-}) {
-  const normalizedQuery = query.trim().toLowerCase();
-  const filteredTasks = useMemo(() => {
-    return tasks.filter((task) => {
-      const details = task.details ?? emptyScheduleDetails;
-      const completedDate = taskCompletedDate(task);
-
-      if (!completedDate) {
-        return false;
-      }
-
-      if (dateFilter) {
-        if (completedDate !== dateFilter) {
-          return false;
-        }
-      } else if (!completedTaskInMonthWindow(completedDate, month, months)) {
-        return false;
-      }
-
-      if (priorityFilter === "important" && !task.isImportant) {
-        return false;
-      }
-
-      if (priorityFilter === "urgent" && !task.isUrgent) {
-        return false;
-      }
-
-      if (priorityFilter === "importantUrgent" && (!task.isImportant || !task.isUrgent)) {
-        return false;
-      }
-
-      if (contentFilter === "hasDescription" && !details.description.trim()) {
-        return false;
-      }
-
-      if (contentFilter === "hasChecklist" && details.checklist.length === 0) {
-        return false;
-      }
-
-      if (!normalizedQuery) {
-        return true;
-      }
-
-      const searchable = [task.title, details.description, ...details.checklist.map((item) => item.text)]
-        .join(" ")
-        .toLowerCase();
-
-      return searchable.includes(normalizedQuery);
-    });
-  }, [contentFilter, dateFilter, month, months, normalizedQuery, priorityFilter, tasks]);
-  const rangeLabel = dateFilter ? `${dateFilter} 완료` : completedMonthRangeLabel(month, months);
-
-  return (
-    <section className="completed-panel">
-      <header>
-        <div>
-          <h2>완료 내역</h2>
-          <span>
-            {rangeLabel} · {filteredTasks.length}
-          </span>
-        </div>
-      </header>
-      <div className="completed-filter-grid" aria-label="완료 내역 필터">
-        <label className="completed-filter-control search">
-          <span>검색</span>
-          <span className="completed-search">
-            <Search size={16} />
-            <input
-              onChange={(event) => onQueryChange(event.target.value)}
-              placeholder="제목, 내용, 체크리스트 검색"
-              type="search"
-              value={query}
-            />
-          </span>
-        </label>
-        <label className="completed-filter-control">
-          <span>기준 월</span>
-          <input onChange={(event) => onMonthChange(event.target.value)} type="month" value={month} />
-        </label>
-        <label className="completed-filter-control">
-          <span>조회 기간</span>
-          <AppSelect onChange={(event) => onMonthsChange(event.target.value as CompletedMonthsFilter)} value={months}>
-            <option value="1">1개월</option>
-            <option value="3">3개월</option>
-            <option value="6">6개월</option>
-            <option value="12">12개월</option>
-            <option value="all">전체</option>
-          </AppSelect>
-        </label>
-        <DatePickerField
-          className="completed-filter-control"
-          label="특정 완료일"
-          onChange={onDateFilterChange}
-          value={dateFilter}
-        />
-        <label className="completed-filter-control">
-          <span>중요/긴급</span>
-          <AppSelect
-            onChange={(event) => onPriorityFilterChange(event.target.value as CompletedPriorityFilter)}
-            value={priorityFilter}
-          >
-            <option value="all">전체</option>
-            <option value="important">중요</option>
-            <option value="urgent">긴급</option>
-            <option value="importantUrgent">중요 + 긴급</option>
-          </AppSelect>
-        </label>
-        <label className="completed-filter-control">
-          <span>내용 필터</span>
-          <AppSelect onChange={(event) => onContentFilterChange(event.target.value as CompletedContentFilter)} value={contentFilter}>
-            <option value="all">전체</option>
-            <option value="hasDescription">내용 있음</option>
-            <option value="hasChecklist">체크리스트 있음</option>
-          </AppSelect>
-        </label>
-      </div>
-      <PagedTaskList
-        getMeta={formatCompletedTaskMeta}
-        pageSize={completedPageSize}
-        tasks={filteredTasks}
-        onOpen={onOpen}
-        onToggle={onToggle}
-        strikeCompleted={false}
-      />
-    </section>
   );
 }
 
@@ -7226,1536 +5653,6 @@ function TaskProgressControl({
         </span>
       </label>
     </section>
-  );
-}
-
-function RecurringView({
-  checkIns,
-  habits,
-  month,
-  onAdd,
-  onCloseHabit,
-  onDeleteHabit,
-  onEditHabit,
-  onMonthChange,
-  onMoveHabit,
-  onOpenHabit,
-  onOpenOverview,
-  onReadHabit,
-  onRetryDelete,
-  onSelectDate,
-  onToggleCheckIn,
-  pendingCheckIns,
-  pendingDeletionHabits,
-  pendingDeletions,
-  selectedDate,
-  selectedHabit,
-  today
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  habits: DecryptedRecurringHabit[];
-  month: string;
-  onAdd: () => void;
-  onCloseHabit: () => void;
-  onDeleteHabit: (habit: DecryptedRecurringHabit) => void;
-  onEditHabit: (habit: DecryptedRecurringHabit) => void;
-  onMonthChange: (month: string) => void;
-  onMoveHabit: (habitId: string, targetSlot: RecurringHabitSlot, overHabitId: string | null) => void;
-  onOpenHabit: (habitId: string) => void;
-  onOpenOverview: () => void;
-  onReadHabit: (habitId: string) => void;
-  onRetryDelete: (habit: DecryptedRecurringHabit) => void;
-  onSelectDate: (date: string) => void;
-  onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
-  pendingCheckIns: Record<string, boolean>;
-  pendingDeletionHabits: DecryptedRecurringHabit[];
-  pendingDeletions: Record<string, boolean>;
-  selectedDate: string;
-  selectedHabit: DecryptedRecurringHabit | null;
-  today: string;
-}) {
-  const [activeHabitId, setActiveHabitId] = useState<string | null>(null);
-  const dateStrip = useMemo(() => buildRecurringDateStrip(today), [today]);
-  const groups = useMemo(() => groupRecurringHabitsBySlot(habits), [habits]);
-  const activeHabitCount = habits.filter((habit) => habit.status === "active").length;
-  const activeHabit = useMemo(
-    () => habits.find((habit) => habit.id === activeHabitId) ?? null,
-    [activeHabitId, habits]
-  );
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  );
-
-  function handleDragStart(event: DragStartEvent) {
-    setActiveHabitId(String(event.active.id));
-  }
-
-  function handleDragEnd(event: DragEndEvent) {
-    setActiveHabitId(null);
-
-    if (!event.over) {
-      return;
-    }
-
-    const activeId = String(event.active.id);
-    const targetSlot = recurringSlotFromDragEvent(event);
-    const overHabitId = recurringHabitIdFromDragEvent(event);
-
-    if (targetSlot) {
-      onMoveHabit(activeId, targetSlot, overHabitId === activeId ? null : overHabitId);
-    }
-  }
-
-  return (
-    <DndContext
-      collisionDetection={recurringCollisionDetection}
-      onDragEnd={handleDragEnd}
-      onDragStart={handleDragStart}
-      sensors={sensors}
-    >
-      <div className="recurring-page-content">
-        {pendingDeletionHabits.length > 0 && (
-          <section className="recurring-cleanup-notice" role="status" aria-live="polite">
-            <div>
-              <strong>삭제 정리를 다시 시작해야 합니다.</strong>
-              <p>중단된 반복 업무는 완료될 때까지 삭제 대기 상태로 안전하게 유지됩니다.</p>
-            </div>
-            <div className="recurring-cleanup-actions">
-              {pendingDeletionHabits.map((habit) => (
-                <button
-                  className="secondary-button"
-                  disabled={pendingDeletions[habit.id] === true}
-                  key={habit.id}
-                  onClick={() => onRetryDelete(habit)}
-                  type="button"
-                >
-                  <Trash2 size={15} />
-                  {pendingDeletions[habit.id] ? "정리 중" : `${habit.title} 삭제 재시도`}
-                </button>
-              ))}
-            </div>
-          </section>
-        )}
-
-        <div className="recurring-layout">
-          <section className="recurring-main-panel">
-          <header className="recurring-toolbar">
-            <div>
-              <h2>반복 업무</h2>
-              <span>{formatDateLabel(selectedDate)} · {activeHabitCount}</span>
-            </div>
-            <div className="recurring-toolbar-actions">
-              <button className="secondary-button" type="button" onClick={onAdd}>
-                <Plus size={16} />
-                추가
-              </button>
-              <button className="icon-button" type="button" aria-label="월별 반복 조회" title="월별 반복 조회" onClick={onOpenOverview}>
-                <LayoutGrid size={18} />
-              </button>
-            </div>
-          </header>
-
-          <div className="recurring-date-strip" aria-label="반복 업무 날짜 선택">
-            {dateStrip.map((day) => {
-              const progress = calculateRecurringDateProgress(habits, checkIns, day.dateString);
-              const selected = selectedDate === day.dateString;
-
-              return (
-                <button
-                  aria-label={`${formatDateLabel(day.dateString)} 반복 업무 ${progress.percent}% 완료`}
-                  className={selected ? "selected" : ""}
-                  key={day.dateString}
-                  onClick={() => onSelectDate(day.dateString)}
-                  type="button"
-                >
-                  <span>{day.weekday}</span>
-                  <strong>{day.dayNumber}</strong>
-                  <RecurringProgressRing percent={progress.percent} total={progress.total} />
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="recurring-slot-groups">
-            {groups.map((group) => (
-              <RecurringSlotSection
-                checkIns={checkIns}
-                group={group}
-                key={group.key}
-                pendingCheckIns={pendingCheckIns}
-                selectedDate={selectedDate}
-                onOpenHabit={onOpenHabit}
-                onReadHabit={onReadHabit}
-                onToggleCheckIn={onToggleCheckIn}
-              />
-            ))}
-          </div>
-          </section>
-
-          <RecurringHabitDetailPanel
-            checkIns={checkIns}
-            habit={selectedHabit}
-            month={month}
-            pendingCheckIns={pendingCheckIns}
-            selectedDate={selectedDate}
-            today={today}
-            onClose={onCloseHabit}
-            onDelete={onDeleteHabit}
-            onEdit={onEditHabit}
-            onMonthChange={onMonthChange}
-            onSelectDate={onSelectDate}
-            onToggleCheckIn={onToggleCheckIn}
-          />
-        </div>
-      </div>
-      <DragOverlay>
-        {activeHabit ? (
-          <div className={`recurring-habit-row recurring-drag-overlay ${isHabitCheckedOn(checkIns, activeHabit.id, selectedDate) ? "checked" : ""}`} aria-hidden="true">
-            <span className="recurring-drag-handle ghost">
-              <GripVertical size={16} />
-            </span>
-            <span className="recurring-habit-main overlay">
-              <RecurringHabitRowContent checkIns={checkIns} habit={activeHabit} selectedDate={selectedDate} />
-            </span>
-            <span className="recurring-check-button ghost" />
-          </div>
-        ) : null}
-      </DragOverlay>
-    </DndContext>
-  );
-}
-
-function RecurringSlotSection({
-  checkIns,
-  group,
-  onOpenHabit,
-  onReadHabit,
-  onToggleCheckIn,
-  pendingCheckIns,
-  selectedDate
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  group: ReturnType<typeof groupRecurringHabitsBySlot>[number];
-  onOpenHabit: (habitId: string) => void;
-  onReadHabit: (habitId: string) => void;
-  onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
-  pendingCheckIns: Record<string, boolean>;
-  selectedDate: string;
-}) {
-  const { isOver, setNodeRef } = useDroppable({
-    id: recurringSlotDropId(group.key),
-    data: { slot: group.key, type: "recurring-slot" }
-  });
-
-  return (
-    <section className={`recurring-slot-section ${isOver ? "drag-over" : ""}`} ref={setNodeRef}>
-      <header>
-        <h3>{group.label}</h3>
-        <span>{group.habits.length}</span>
-      </header>
-      {group.habits.length ? (
-        <SortableContext items={group.habits.map((habit) => habit.id)} strategy={verticalListSortingStrategy}>
-          <div className="recurring-habit-list">
-            {group.habits.map((habit) => (
-              <SortableRecurringHabitRow
-                checkIns={checkIns}
-                habit={habit}
-                key={habit.id}
-                pending={pendingCheckIns[recurringCheckInId(habit.id, selectedDate)] === true}
-                selectedDate={selectedDate}
-                slot={group.key}
-                onOpen={() => onOpenHabit(habit.id)}
-                onRead={() => onReadHabit(habit.id)}
-                onToggle={() => onToggleCheckIn(habit, selectedDate)}
-              />
-            ))}
-          </div>
-        </SortableContext>
-      ) : (
-        <p className="schedule-empty">등록된 반복 업무가 없습니다.</p>
-      )}
-    </section>
-  );
-}
-
-function SortableRecurringHabitRow({
-  checkIns,
-  habit,
-  onOpen,
-  onRead,
-  onToggle,
-  pending,
-  selectedDate,
-  slot
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  habit: DecryptedRecurringHabit;
-  onOpen: () => void;
-  onRead: () => void;
-  onToggle: () => void;
-  pending: boolean;
-  selectedDate: string;
-  slot: RecurringHabitSlot;
-}) {
-  const checked = isHabitCheckedOn(checkIns, habit.id, selectedDate);
-  const progressPercent = recurringHabitDayProgressPercent(habit, checkIns, selectedDate);
-  const {
-    attributes,
-    isDragging,
-    listeners,
-    setActivatorNodeRef,
-    setNodeRef,
-    transform,
-    transition
-  } = useSortable({
-    id: habit.id,
-    data: { habitId: habit.id, slot, type: "recurring-habit" }
-  });
-  const style: CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition
-  };
-
-  return (
-    <div
-      className={`recurring-habit-row ${checked ? "checked" : ""} ${isDragging ? "dragging" : ""}`}
-      onDoubleClick={onRead}
-      ref={setNodeRef}
-      style={style}
-      title="더블클릭하여 상세 보기"
-    >
-      <button
-        aria-label={`${habit.title} 위치 이동`}
-        className="recurring-drag-handle"
-        ref={setActivatorNodeRef}
-        style={{ touchAction: "none" }}
-        type="button"
-        {...attributes}
-        {...listeners}
-      >
-        <GripVertical size={16} />
-      </button>
-      <div className="recurring-habit-main">
-        <button className="recurring-habit-content" type="button" onClick={onOpen} onDoubleClick={onRead}>
-          <RecurringHabitRowContent checkIns={checkIns} habit={habit} selectedDate={selectedDate} />
-        </button>
-        <span
-          aria-label={`${habit.title} 진행률 ${progressPercent}%`}
-          aria-valuemax={100}
-          aria-valuemin={0}
-          aria-valuenow={progressPercent}
-          className="recurring-habit-progress-strip"
-          onClick={(event) => event.stopPropagation()}
-          onDoubleClick={(event) => event.stopPropagation()}
-          onPointerDown={(event) => event.stopPropagation()}
-          role="progressbar"
-          style={
-            {
-              "--recurring-habit-progress-color": taskProgressColor(progressPercent),
-              "--recurring-habit-progress-fill": `${progressPercent}%`
-            } as CSSProperties
-          }
-          title={`${progressPercent}%`}
-        />
-      </div>
-      <button
-        aria-checked={checked}
-        aria-label={checked ? `${habit.title} 체크 해제` : `${habit.title} 체크`}
-        className={`recurring-check-button ${checked ? "checked" : ""}`}
-        disabled={pending}
-        onClick={onToggle}
-        onDoubleClick={(event) => event.stopPropagation()}
-        onPointerDown={(event) => event.stopPropagation()}
-        role="checkbox"
-        type="button"
-      >
-        {checked ? <Check size={17} /> : null}
-      </button>
-    </div>
-  );
-}
-
-function RecurringHabitRowContent({
-  checkIns,
-  habit,
-  selectedDate
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  habit: DecryptedRecurringHabit;
-  selectedDate: string;
-}) {
-  const stats = calculateHabitStats(habit.id, checkIns, selectedDate);
-
-  return (
-    <>
-      <HabitIconBadge color={habit.color} icon={habit.icon} />
-      <span>
-        <strong>{habit.title}</strong>
-        <small className="recurring-habit-metrics">
-          <span className="metric-total">
-            <Zap size={12} />
-            {stats.totalCheckIns}일
-          </span>
-          <span className="metric-streak">
-            <Flame size={12} />
-            {stats.streakDays}일 (연속)
-          </span>
-        </small>
-      </span>
-    </>
-  );
-}
-
-function RecurringHabitDetailPanel({
-  checkIns,
-  habit,
-  month,
-  onClose,
-  onDelete,
-  onEdit,
-  onMonthChange,
-  onSelectDate,
-  onToggleCheckIn,
-  pendingCheckIns,
-  selectedDate,
-  today
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  habit: DecryptedRecurringHabit | null;
-  month: string;
-  onClose: () => void;
-  onDelete: (habit: DecryptedRecurringHabit) => void;
-  onEdit: (habit: DecryptedRecurringHabit) => void;
-  onMonthChange: (month: string) => void;
-  onSelectDate: (date: string) => void;
-  onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
-  pendingCheckIns: Record<string, boolean>;
-  selectedDate: string;
-  today: string;
-}) {
-  if (!habit) {
-    return (
-      <aside className="recurring-detail-panel empty">
-        <Repeat2 size={22} />
-        <strong>반복 업무를 선택하세요.</strong>
-        <span>월간 출석체크, 총 체크인 수, 월별 비율과 연속 기록이 여기에 표시됩니다.</span>
-      </aside>
-    );
-  }
-
-  const safeMonth = normalizeMonthString(month, today.slice(0, 7));
-  const stats = calculateHabitStats(habit.id, checkIns, selectedDate);
-  const monthStats = calculateHabitMonthStats(habit.id, checkIns, safeMonth, today);
-
-  return (
-    <aside className="recurring-detail-panel">
-      <header>
-        <div className="recurring-detail-title">
-          <HabitIconBadge color={habit.color} icon={habit.icon} />
-          <div>
-            <h2>{habit.title}</h2>
-            <span>{slotLabel(habit.slot)} · {recurringHabitIconLabels[habit.icon]}</span>
-          </div>
-        </div>
-        <button className="icon-button" type="button" onClick={onClose} aria-label="상세 닫기">
-          <X size={17} />
-        </button>
-      </header>
-
-      {habit.details.description.trim() && <p className="recurring-detail-description">{habit.details.description}</p>}
-
-      <RecurringStatsGrid stats={stats} monthStats={monthStats} />
-
-      <RecurringMonthCalendar
-        checkIns={checkIns}
-        habit={habit}
-        month={safeMonth}
-        pendingCheckIns={pendingCheckIns}
-        today={today}
-        onMonthChange={onMonthChange}
-        onSelectDate={onSelectDate}
-        onToggleCheckIn={onToggleCheckIn}
-      />
-
-      <footer className="recurring-detail-actions">
-        <button className="danger-button" type="button" onClick={() => onDelete(habit)}>
-          <Trash2 size={16} />
-          삭제
-        </button>
-        <button type="button" onClick={() => onEdit(habit)}>
-          <Pencil size={16} />
-          수정
-        </button>
-      </footer>
-    </aside>
-  );
-}
-
-function RecurringStatsGrid({
-  monthStats,
-  stats
-}: {
-  monthStats: ReturnType<typeof calculateHabitMonthStats>;
-  stats: ReturnType<typeof calculateHabitStats>;
-}) {
-  const cards: Array<{ Icon: LucideIcon; color: string; label: string; value: string }> = [
-    { Icon: CheckCircle2, color: "#10b981", label: "월간 체크인 수", value: `${monthStats.checkedDays}일` },
-    { Icon: Zap, color: "#2563eb", label: "총 체크인 수", value: `${stats.totalCheckIns}일` },
-    { Icon: Percent, color: "#7c3aed", label: "월별 체크인 비율", value: `${monthStats.percent}%` },
-    { Icon: Flame, color: "#ef4444", label: "연속", value: `${stats.streakDays}일` }
-  ];
-
-  return (
-    <div className="recurring-stats-grid">
-      {cards.map(({ Icon, color, label, value }) => (
-        <div key={label}>
-          <span className="recurring-stat-icon" style={{ "--recurring-stat-color": color } as CSSProperties}>
-            <Icon size={16} />
-          </span>
-          <span className="recurring-stat-copy">
-            <span>{label}</span>
-            <strong>{value}</strong>
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function RecurringMonthCalendar({
-  checkIns,
-  habit,
-  month,
-  onMonthChange,
-  onSelectDate,
-  onToggleCheckIn,
-  pendingCheckIns,
-  today
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  habit: DecryptedRecurringHabit;
-  month: string;
-  onMonthChange: (month: string) => void;
-  onSelectDate: (date: string) => void;
-  onToggleCheckIn: (habit: DecryptedRecurringHabit, date: string) => void;
-  pendingCheckIns: Record<string, boolean>;
-  today: string;
-}) {
-  const weeks = buildRecurringMonthCalendar(month, today);
-
-  return (
-    <section className="recurring-month-card">
-      <header>
-        <button className="icon-button" type="button" aria-label="이전 달" onClick={() => onMonthChange(recurringMonthOffset(month, -1))}>
-          <ChevronLeft size={16} />
-        </button>
-        <MonthPicker value={month} today={today} onChange={onMonthChange} />
-        <button className="icon-button" type="button" aria-label="다음 달" onClick={() => onMonthChange(recurringMonthOffset(month, 1))}>
-          <ChevronRight size={16} />
-        </button>
-      </header>
-      <div className="recurring-month-weekdays" aria-hidden="true">
-        {["일", "월", "화", "수", "목", "금", "토"].map((weekday) => (
-          <span key={weekday}>{weekday}</span>
-        ))}
-      </div>
-      <div className="recurring-month-grid">
-        {weeks.flatMap((week) =>
-          week.days.map((day) => {
-            const checked = isHabitCheckedOn(checkIns, habit.id, day.dateString);
-            const pending = pendingCheckIns[recurringCheckInId(habit.id, day.dateString)] === true;
-            const disabled = !day.inCurrentMonth || day.dateString > today || pending;
-
-            return (
-              <button
-                aria-label={`${formatDateLabel(day.dateString)} ${checked ? "체크됨" : "체크 안 됨"}`}
-                className={[
-                  day.inCurrentMonth ? "" : "muted",
-                  checked ? "checked" : "",
-                  day.isToday ? "today" : ""
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                disabled={disabled}
-                key={day.dateString}
-                onClick={() => {
-                  onSelectDate(day.dateString);
-                  onToggleCheckIn(habit, day.dateString);
-                }}
-                type="button"
-              >
-                <span>{day.dayNumber}</span>
-                {checked && <Check size={15} />}
-              </button>
-            );
-          })
-        )}
-      </div>
-    </section>
-  );
-}
-
-function MonthPicker({
-  onChange,
-  today,
-  value
-}: {
-  onChange: (month: string) => void;
-  today: string;
-  value: string;
-}) {
-  const safeMonth = normalizeMonthString(value, today.slice(0, 7));
-  const safeYear = Number(safeMonth.slice(0, 4)) || new Date().getFullYear();
-  const currentMonth = today.slice(0, 7);
-  const [open, setOpen] = useState(false);
-  const [cursorYear, setCursorYear] = useState(safeYear);
-
-  useEffect(() => {
-    setCursorYear(safeYear);
-  }, [safeYear]);
-
-  function choose(month: string) {
-    onChange(month);
-    setOpen(false);
-  }
-
-  return (
-    <div
-      className="month-picker"
-      onBlur={(event) => {
-        const nextTarget = event.relatedTarget;
-
-        if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
-          setOpen(false);
-        }
-      }}
-    >
-      <button
-        aria-expanded={open}
-        aria-label={`${recurringMonthLabel(safeMonth)} 선택`}
-        className="month-picker-trigger"
-        onClick={() => setOpen((current) => !current)}
-        type="button"
-      >
-        <CalendarDays size={15} />
-        <span>{recurringMonthLabel(safeMonth)}</span>
-        <ChevronDown size={14} />
-      </button>
-      {open && (
-        <div className="month-picker-popover">
-          <header>
-            <button className="icon-button" type="button" aria-label="이전 연도" onClick={() => setCursorYear((year) => year - 1)}>
-              <ChevronLeft size={15} />
-            </button>
-            <strong>{cursorYear}</strong>
-            <button className="icon-button" type="button" aria-label="다음 연도" onClick={() => setCursorYear((year) => year + 1)}>
-              <ChevronRight size={15} />
-            </button>
-          </header>
-          <div className="month-picker-grid">
-            {Array.from({ length: 12 }, (_, index) => {
-              const month = `${cursorYear}-${`${index + 1}`.padStart(2, "0")}`;
-
-              return (
-                <button
-                  className={[month === safeMonth ? "selected" : "", month === currentMonth ? "current" : ""].filter(Boolean).join(" ")}
-                  key={month}
-                  onClick={() => choose(month)}
-                  type="button"
-                >
-                  {index + 1}월
-                </button>
-              );
-            })}
-          </div>
-          <footer>
-            <button className="secondary-button" type="button" onClick={() => choose(currentMonth)}>
-              이번 달
-            </button>
-          </footer>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function RecurringHabitModal({
-  fallbackFocusRef,
-  habit,
-  onClose,
-  onCreate,
-  onDelete,
-  onSave,
-  returnFocusRef
-}: {
-  fallbackFocusRef: RefObject<HTMLElement | null>;
-  habit: DecryptedRecurringHabit | null;
-  onClose: () => void;
-  onCreate: (draft: RecurringHabitDraft) => Promise<boolean>;
-  onDelete: (habit: DecryptedRecurringHabit) => void;
-  onSave: (habit: DecryptedRecurringHabit, draft: RecurringHabitDraft) => Promise<boolean>;
-  returnFocusRef: RefObject<HTMLElement | null>;
-}) {
-  const titleId = useId();
-  const dialogRef = useRef<HTMLElement>(null);
-  const [draft, setDraft] = useState<RecurringHabitDraft>(() => recurringDraftFromHabit(habit));
-  const [busy, setBusy] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
-
-  useModalFocus(dialogRef, { fallbackFocusRef, returnFocusRef });
-
-  useEffect(() => {
-    setDraft(recurringDraftFromHabit(habit));
-  }, [habit]);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    const validationError = recurringHabitTitleValidationError(draft.title)
-      ?? recurringHabitDetailsValidationError({ description: draft.description, checklist: habit?.details.checklist ?? [] });
-
-    if (validationError) {
-      setLocalError(validationError);
-      return;
-    }
-
-    setBusy(true);
-    setLocalError(null);
-
-    const saved = habit ? await onSave(habit, draft) : await onCreate(draft);
-    setBusy(false);
-
-    if (saved) {
-      onClose();
-    }
-  }
-
-  return (
-    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        aria-labelledby={titleId}
-        aria-modal="true"
-        className="recurring-edit-modal"
-        onMouseDown={(event) => event.stopPropagation()}
-        ref={dialogRef}
-        role="dialog"
-        tabIndex={-1}
-      >
-        <header>
-          <div>
-            <p className="section-kicker">
-              <Repeat2 size={15} />
-              반복 업무
-            </p>
-            <h2 id={titleId}>{habit ? "반복 업무 수정" : "반복 업무 추가"}</h2>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
-            <X size={18} />
-          </button>
-        </header>
-        <form onSubmit={(event) => void submit(event)}>
-          <label>
-            이름
-            <input
-              autoFocus
-              data-dialog-initial-focus
-              maxLength={recurringHabitTitleMaxLength}
-              onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-              placeholder="반복 업무 이름"
-              value={draft.title}
-            />
-          </label>
-          <label>
-            설명
-            <textarea
-              maxLength={recurringHabitDescriptionMaxLength}
-              onChange={(event) => setDraft((current) => ({ ...current, description: event.target.value }))}
-              placeholder="간단한 설명"
-              rows={4}
-              value={draft.description}
-            />
-          </label>
-          <div className="recurring-edit-grid">
-            <label>
-              구분
-              <AppSelect
-                onChange={(event) => setDraft((current) => ({ ...current, slot: event.target.value as RecurringHabitSlot }))}
-                value={draft.slot}
-              >
-                {recurringHabitSlots.map((slot) => (
-                  <option key={slot.key} value={slot.key}>
-                    {slot.label}
-                  </option>
-                ))}
-              </AppSelect>
-            </label>
-            <ScheduleColorPicker
-              value={draft.color}
-              onChange={(color) => setDraft((current) => ({ ...current, color }))}
-            />
-          </div>
-          <fieldset className="recurring-icon-picker">
-            <legend>이미지</legend>
-            <div>
-              {recurringHabitIconValues.map((icon) => (
-                <button
-                  className={draft.icon === icon ? "selected" : ""}
-                  key={icon}
-                  onClick={() => setDraft((current) => ({ ...current, color: recurringHabitIconMeta[icon].color, icon }))}
-                  type="button"
-                >
-                  <HabitIconBadge color={recurringHabitIconMeta[icon].color} icon={icon} />
-                  <span>{recurringHabitIconLabels[icon]}</span>
-                </button>
-              ))}
-            </div>
-          </fieldset>
-          {localError && <p className="form-error" role="alert">{localError}</p>}
-          <footer>
-            {habit ? (
-              <button className="danger-button" type="button" onClick={() => onDelete(habit)}>
-                <Trash2 size={16} />
-                삭제
-              </button>
-            ) : (
-              <span />
-            )}
-            <button disabled={busy} type="submit">
-              <Save size={16} />
-              {busy ? "저장 중" : "저장"}
-            </button>
-          </footer>
-        </form>
-      </section>
-    </div>
-  );
-}
-
-function RecurringOverviewModal({
-  checkIns,
-  habits,
-  month,
-  onClose,
-  onMonthChange,
-  onOpenHabit,
-  today
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  habits: DecryptedRecurringHabit[];
-  month: string;
-  onClose: () => void;
-  onMonthChange: (month: string) => void;
-  onOpenHabit: (habitId: string) => void;
-  today: string;
-}) {
-  const titleId = useId();
-  const dialogRef = useRef<HTMLElement>(null);
-  const safeMonth = normalizeMonthString(month, today.slice(0, 7));
-  const summaries = buildRecurringMonthlySummaries(habits, checkIns, safeMonth, today, today);
-
-  useModalFocus(dialogRef);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  return (
-    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        aria-labelledby={titleId}
-        aria-modal="true"
-        className="recurring-overview-modal"
-        onMouseDown={(event) => event.stopPropagation()}
-        ref={dialogRef}
-        role="dialog"
-        tabIndex={-1}
-      >
-        <header>
-          <div>
-            <p className="section-kicker">
-              <LayoutGrid size={15} />
-              월별 반복 조회
-            </p>
-            <h2 id={titleId}>{recurringMonthLabel(safeMonth)}</h2>
-          </div>
-          <div>
-            <button className="icon-button" type="button" aria-label="이전 달" onClick={() => onMonthChange(recurringMonthOffset(safeMonth, -1))}>
-              <ChevronLeft size={17} />
-            </button>
-            <MonthPicker value={safeMonth} today={today} onChange={onMonthChange} />
-            <button className="icon-button" type="button" aria-label="다음 달" onClick={() => onMonthChange(recurringMonthOffset(safeMonth, 1))}>
-              <ChevronRight size={17} />
-            </button>
-            <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
-              <X size={18} />
-            </button>
-          </div>
-        </header>
-        {summaries.length ? (
-          <div className="recurring-overview-list">
-            {summaries.map((summary) => (
-              <button
-                className="recurring-overview-item"
-                key={summary.habit.id}
-                onClick={() => onOpenHabit(summary.habit.id)}
-                type="button"
-              >
-                <span className="recurring-overview-title">
-                  <HabitIconBadge color={summary.habit.color} icon={summary.habit.icon} />
-                  <span>
-                    <strong>{summary.habit.title}</strong>
-                    <small>{slotLabel(summary.habit.slot)}</small>
-                  </span>
-                </span>
-                <span className="recurring-overview-stats">
-                  <span className="metric-month">
-                    <CheckCircle2 size={13} />
-                    {summary.checkedDays}일
-                  </span>
-                  <span className="metric-total">
-                    <Zap size={13} />
-                    {summary.totalCheckIns}일
-                  </span>
-                  <span className="metric-percent">
-                    <Percent size={13} />
-                    {summary.percent}%
-                  </span>
-                  <span className="metric-streak">
-                    <Flame size={13} />
-                    {summary.streakDays}일
-                  </span>
-                </span>
-                <MiniRecurringMonth checkIns={checkIns} habit={summary.habit} month={safeMonth} today={today} />
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="schedule-empty">조회할 반복 업무가 없습니다.</p>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function MiniRecurringMonth({
-  checkIns,
-  habit,
-  month,
-  today
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  habit: DecryptedRecurringHabit;
-  month: string;
-  today: string;
-}) {
-  const weeks = buildRecurringMonthCalendar(month, today);
-
-  return (
-    <span className="recurring-mini-month" aria-hidden="true">
-      {weeks.flatMap((week) =>
-        week.days.map((day) => (
-          <span
-            className={[
-              day.inCurrentMonth ? "" : "muted",
-              isHabitCheckedOn(checkIns, habit.id, day.dateString) ? "checked" : ""
-            ]
-              .filter(Boolean)
-              .join(" ")}
-            key={day.dateString}
-          />
-        ))
-      )}
-    </span>
-  );
-}
-
-function RecurringProgressRing({ percent, total }: { percent: number; total: number }) {
-  const normalizedPercent = Math.max(0, Math.min(100, percent));
-
-  return (
-    <span
-      aria-hidden="true"
-      className="recurring-progress-ring"
-      style={
-        {
-          "--recurring-progress": `${normalizedPercent}%`,
-          "--recurring-progress-color": recurringProgressColor(normalizedPercent, total)
-        } as CSSProperties
-      }
-    />
-  );
-}
-
-function recurringProgressColor(percent: number, total: number) {
-  if (total <= 0) {
-    return "#d7ded9";
-  }
-
-  if (percent >= 100) {
-    return "#2563eb";
-  }
-
-  if (percent >= 67) {
-    return "#16a34a";
-  }
-
-  if (percent >= 34) {
-    return "#f59e0b";
-  }
-
-  return "#dc2626";
-}
-
-function HabitIconBadge({ color, icon }: { color: string; icon: RecurringHabitIcon }) {
-  const meta = recurringHabitIconMeta[icon] ?? recurringHabitIconMeta.other;
-  const Icon = meta.Icon;
-  const normalizedColor = normalizeScheduleTaskColor(color);
-  const displayColor = normalizedColor.toLowerCase() === "#6fa99f" ? meta.color : normalizedColor;
-
-  return (
-    <span
-      aria-label={meta.label}
-      className="habit-icon-badge"
-      style={{ "--habit-icon-color": displayColor } as CSSProperties}
-      title={meta.label}
-    >
-      <Icon size={18} />
-    </span>
-  );
-}
-
-function recurringDraftFromHabit(habit: DecryptedRecurringHabit | null): RecurringHabitDraft {
-  return {
-    title: habit?.title ?? "",
-    description: habit?.details.description ?? "",
-    slot: habit?.slot ?? "morning",
-    icon: habit?.icon ?? "work",
-    color: normalizeScheduleTaskColor(habit?.color ?? recurringHabitIconMeta[habit?.icon ?? "work"].color)
-  };
-}
-
-function nextRecurringHabitSortOrder(habits: DecryptedRecurringHabit[], slot: RecurringHabitSlot) {
-  const slotOrders = habits
-    .filter((habit) => habit.status === "active" && habit.slot === slot)
-    .map((habit) => habit.sortOrder)
-    .filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0);
-
-  return slotOrders.length ? Math.max(...slotOrders) + 1 : habits.filter((habit) => habit.status === "active" && habit.slot === slot).length + 1;
-}
-
-function slotLabel(slot: RecurringHabitSlot) {
-  return recurringHabitSlots.find((item) => item.key === slot)?.label ?? "기타";
-}
-
-function recurringMonthOffset(month: string, offset: number) {
-  const safeMonth = normalizeMonthString(month);
-  const [year, monthNumber] = safeMonth.split("-").map(Number);
-  const nextDate = new Date(year, monthNumber - 1 + offset, 1);
-
-  return `${nextDate.getFullYear()}-${`${nextDate.getMonth() + 1}`.padStart(2, "0")}`;
-}
-
-function recurringMonthLabel(month: string) {
-  const safeMonth = normalizeMonthString(month);
-  const [year, monthNumber] = safeMonth.split("-").map(Number);
-
-  return new Intl.DateTimeFormat("ko-KR", { month: "long", year: "numeric" }).format(new Date(year, monthNumber - 1, 1));
-}
-
-function RecurringHabitReadModal({
-  checkIns,
-  dayStatePending,
-  fallbackFocusRef,
-  habit,
-  onClose,
-  onDelete,
-  onEdit,
-  onToggleChecklist,
-  onUpdateDetails,
-  onUpdateProgress,
-  returnFocusRef,
-  selectedDate,
-  today
-}: {
-  checkIns: RecurringHabitCheckInSnapshot[];
-  dayStatePending: boolean;
-  fallbackFocusRef: RefObject<HTMLElement | null>;
-  habit: DecryptedRecurringHabit;
-  onClose: () => void;
-  onDelete: () => void;
-  onEdit: () => void;
-  onToggleChecklist: (itemId: string) => void | Promise<void>;
-  onUpdateDetails: (updateDetails: RecurringHabitDetailsUpdater) => boolean | Promise<boolean>;
-  onUpdateProgress: (percent: number) => void | Promise<void>;
-  returnFocusRef: RefObject<HTMLElement | null>;
-  selectedDate: string;
-  today: string;
-}) {
-  const titleId = useId();
-  const dialogRef = useRef<HTMLElement>(null);
-  const details = habit.details ?? { description: "", checklist: [] };
-  const checkedItemIds = recurringHabitDayCheckedItemIds(checkIns, habit.id, selectedDate);
-  const dailyProgressPercent = recurringHabitDayProgressPercent(habit, checkIns, selectedDate);
-  const displayedChecklist = details.checklist.map((item) => ({ ...item, checked: checkedItemIds.has(item.id) }));
-  const checklistGroups = checklistDisplayGroups(displayedChecklist);
-  const hasChecklist = displayedChecklist.length > 0;
-  const selectedDateIsEditable = isValidScheduleDateString(selectedDate) && selectedDate <= today;
-  const [isDescriptionEditing, setIsDescriptionEditing] = useState(false);
-  const [descriptionDraft, setDescriptionDraft] = useState(details.description);
-  const [progressPercent, setProgressPercent] = useState(() => normalizeTaskProgressPercent(dailyProgressPercent));
-  const [pendingProgress, setPendingProgress] = useState(false);
-  const [pendingDetailsAction, setPendingDetailsAction] = useState<string | null>(null);
-  const [isAddingChecklist, setIsAddingChecklist] = useState(false);
-  const [newChecklistText, setNewChecklistText] = useState("");
-  const [editingChecklistItemId, setEditingChecklistItemId] = useState<string | null>(null);
-  const [checklistEditText, setChecklistEditText] = useState("");
-  const [isChecklistComposing, setIsChecklistComposing] = useState(false);
-  const [pendingChecklistItemId, setPendingChecklistItemId] = useState<string | null>(null);
-  const detailsMutationPending = pendingDetailsAction !== null || pendingChecklistItemId !== null;
-  const dayMutationPending = dayStatePending || pendingProgress || pendingChecklistItemId !== null;
-
-  useModalFocus(dialogRef, { fallbackFocusRef, returnFocusRef });
-
-  useEffect(() => {
-    setProgressPercent(normalizeTaskProgressPercent(dailyProgressPercent));
-  }, [dailyProgressPercent, habit.id, selectedDate]);
-
-  useEffect(() => {
-    if (!isDescriptionEditing) {
-      setDescriptionDraft(details.description);
-    }
-  }, [details.description, habit.id, isDescriptionEditing]);
-
-  useEffect(() => {
-    setEditingChecklistItemId(null);
-    setChecklistEditText("");
-    setIsAddingChecklist(false);
-    setNewChecklistText("");
-  }, [habit.id, selectedDate]);
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  async function changeProgress(percent: number) {
-    if (!selectedDateIsEditable || dayMutationPending) {
-      return;
-    }
-
-    const nextPercent = normalizeTaskProgressPercent(percent);
-
-    setProgressPercent(nextPercent);
-    setPendingProgress(true);
-
-    try {
-      await onUpdateProgress(nextPercent);
-    } finally {
-      setPendingProgress(false);
-    }
-  }
-
-  async function saveInlineDetails(updateDetails: RecurringHabitDetailsUpdater, actionId: string) {
-    setPendingDetailsAction(actionId);
-
-    try {
-      return await onUpdateDetails(updateDetails);
-    } finally {
-      setPendingDetailsAction(null);
-    }
-  }
-
-  async function saveDescription() {
-    const didSave = await saveInlineDetails(
-      (currentDetails) => ({
-        description: descriptionDraft,
-        checklist: currentDetails.checklist
-      }),
-      "description"
-    );
-
-    if (didSave) {
-      setIsDescriptionEditing(false);
-    }
-  }
-
-  async function addChecklistItem() {
-    const text = newChecklistText.trim();
-
-    if (!text || details.checklist.length >= recurringHabitChecklistMaxItems) {
-      return;
-    }
-
-    const didSave = await saveInlineDetails(
-      (currentDetails) => ({
-        description: currentDetails.description,
-        checklist: [...currentDetails.checklist, { id: crypto.randomUUID(), text, checked: false }]
-      }),
-      "checklist:add"
-    );
-
-    if (didSave) {
-      setNewChecklistText("");
-      setIsAddingChecklist(false);
-    }
-  }
-
-  function startEditingChecklistItem(item: ScheduleChecklistItem) {
-    setEditingChecklistItemId(item.id);
-    setChecklistEditText(item.text);
-  }
-
-  async function saveChecklistItemText(itemId: string) {
-    const text = checklistEditText.trim();
-
-    if (!text) {
-      return;
-    }
-
-    const didSave = await saveInlineDetails(
-      (currentDetails) => ({
-        description: currentDetails.description,
-        checklist: currentDetails.checklist.map((item) => (item.id === itemId ? { ...item, text, checked: false } : item))
-      }),
-      `checklist:edit:${itemId}`
-    );
-
-    if (didSave) {
-      setEditingChecklistItemId(null);
-      setChecklistEditText("");
-    }
-  }
-
-  async function deleteChecklistItem(itemId: string) {
-    const didSave = await saveInlineDetails(
-      (currentDetails) => ({
-        description: currentDetails.description,
-        checklist: currentDetails.checklist.filter((item) => item.id !== itemId)
-      }),
-      `checklist:delete:${itemId}`
-    );
-
-    if (didSave && editingChecklistItemId === itemId) {
-      setEditingChecklistItemId(null);
-      setChecklistEditText("");
-    }
-  }
-
-  async function toggleChecklistItem(itemId: string) {
-    if (!selectedDateIsEditable || dayMutationPending) {
-      return;
-    }
-
-    setPendingChecklistItemId(itemId);
-
-    try {
-      await onToggleChecklist(itemId);
-    } finally {
-      setPendingChecklistItemId(null);
-    }
-  }
-
-  return (
-    <div className="modal-backdrop schedule-detail-backdrop" role="presentation" onMouseDown={onClose}>
-      <section
-        className="schedule-read-modal recurring-read-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onMouseDown={(event) => event.stopPropagation()}
-        ref={dialogRef}
-        tabIndex={-1}
-      >
-        <header>
-          <div className="recurring-read-title">
-            <HabitIconBadge color={habit.color} icon={habit.icon} />
-            <div>
-              <p className="section-kicker">
-                <Repeat2 size={15} />
-                반복 업무
-              </p>
-              <h2 id={titleId}>{habit.title}</h2>
-            </div>
-          </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="닫기">
-            <X size={18} />
-          </button>
-        </header>
-
-        <div className="task-read-meta">
-          <span>{formatDateLabel(selectedDate)}</span>
-          <span>{slotLabel(habit.slot)}</span>
-          <span>{recurringHabitIconLabels[habit.icon]}</span>
-          <span>매일 초기화</span>
-        </div>
-
-        <TaskProgressControl
-          disabled={!selectedDateIsEditable || dayMutationPending}
-          helperText={selectedDateIsEditable ? (dayMutationPending ? "저장 중" : "선택 날짜 기준") : "미래 날짜는 수정할 수 없습니다"}
-          onChange={(percent) => void changeProgress(percent)}
-          percent={progressPercent}
-        />
-
-        <section className="task-read-section">
-          <div className="task-read-section-head">
-            <h3>내용</h3>
-            {isDescriptionEditing ? (
-              <div className="task-read-inline-actions">
-                <button
-                  className="icon-button task-read-icon-button"
-                  type="button"
-                  aria-label="내용 저장"
-                  disabled={detailsMutationPending}
-                  onClick={() => void saveDescription()}
-                >
-                  <Save size={15} />
-                </button>
-                <button
-                  className="icon-button task-read-icon-button"
-                  type="button"
-                  aria-label="내용 수정 취소"
-                  disabled={detailsMutationPending}
-                  onClick={() => {
-                    setDescriptionDraft(details.description);
-                    setIsDescriptionEditing(false);
-                  }}
-                >
-                  <X size={15} />
-                </button>
-              </div>
-            ) : (
-              <button
-                className="icon-button task-read-icon-button"
-                type="button"
-                aria-label="내용 수정"
-                disabled={detailsMutationPending}
-                onClick={() => setIsDescriptionEditing(true)}
-              >
-                <Pencil size={15} />
-              </button>
-            )}
-          </div>
-          {isDescriptionEditing ? (
-            <textarea
-              className="task-read-inline-textarea"
-              maxLength={recurringHabitDescriptionMaxLength}
-              onChange={(event) => setDescriptionDraft(event.target.value)}
-              rows={5}
-              value={descriptionDraft}
-            />
-          ) : (
-            <p>{details.description.trim() || "내용이 없습니다."}</p>
-          )}
-        </section>
-
-        <section className="task-read-section">
-          <div className="task-read-section-head">
-            <h3>체크리스트</h3>
-            <button
-              className="icon-button task-read-icon-button"
-              type="button"
-              aria-label="체크리스트 추가"
-              disabled={detailsMutationPending || details.checklist.length >= recurringHabitChecklistMaxItems}
-              onClick={() => setIsAddingChecklist(true)}
-            >
-              <Plus size={15} />
-            </button>
-          </div>
-          {isAddingChecklist && (
-            <div className="task-read-checklist-add">
-              <input
-                autoFocus
-                aria-label="새 체크리스트 항목"
-                disabled={detailsMutationPending}
-                maxLength={recurringHabitChecklistItemMaxLength}
-                onCompositionEnd={() => setIsChecklistComposing(false)}
-                onCompositionStart={() => setIsChecklistComposing(true)}
-                onChange={(event) => setNewChecklistText(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter") {
-                    return;
-                  }
-
-                  if (isChecklistComposing || isComposingKeyboardEvent(event)) {
-                    return;
-                  }
-
-                  event.preventDefault();
-                  void addChecklistItem();
-                }}
-                value={newChecklistText}
-              />
-              <div className="task-read-inline-actions">
-                <button
-                  className="icon-button task-read-icon-button"
-                  type="button"
-                  aria-label="체크리스트 저장"
-                  disabled={detailsMutationPending}
-                  onClick={() => void addChecklistItem()}
-                >
-                  <Save size={15} />
-                </button>
-                <button
-                  className="icon-button task-read-icon-button"
-                  type="button"
-                  aria-label="체크리스트 추가 취소"
-                  disabled={detailsMutationPending}
-                  onClick={() => {
-                    setNewChecklistText("");
-                    setIsAddingChecklist(false);
-                  }}
-                >
-                  <X size={15} />
-                </button>
-              </div>
-            </div>
-          )}
-          {hasChecklist ? (
-            <div className="task-read-checklist-groups">
-              {checklistGroups.map((group) => (
-                <section className={`checklist-group ${group.key}`} key={group.key} aria-label={`${group.label} ${group.countLabel}`}>
-                  <div className="checklist-group-header">
-                    <strong>{group.label}</strong>
-                    <span>{group.countLabel}</span>
-                  </div>
-                  <ul className="task-read-checklist">
-                    {group.items.map((item) => (
-                      <li key={item.id} className={item.checked ? "checked" : ""}>
-                        <button
-                          aria-checked={item.checked}
-                          aria-label={item.checked ? `${item.text} 완료 해제` : `${item.text} 완료`}
-                          className={`task-read-check-button ${item.checked ? "checked" : ""}`}
-                          disabled={detailsMutationPending || dayMutationPending || !selectedDateIsEditable}
-                          onClick={() => void toggleChecklistItem(item.id)}
-                          role="checkbox"
-                          type="button"
-                        >
-                          {item.checked ? <CheckCircle2 size={16} /> : null}
-                        </button>
-                        {editingChecklistItemId === item.id ? (
-                          <>
-                            <input
-                              autoFocus
-                              aria-label="체크리스트 항목 수정"
-                              className="task-read-checklist-input"
-                              disabled={detailsMutationPending}
-                              maxLength={recurringHabitChecklistItemMaxLength}
-                              onCompositionEnd={() => setIsChecklistComposing(false)}
-                              onCompositionStart={() => setIsChecklistComposing(true)}
-                              onChange={(event) => setChecklistEditText(event.target.value)}
-                              onKeyDown={(event) => {
-                                if (event.key !== "Enter") {
-                                  return;
-                                }
-
-                                if (isChecklistComposing || isComposingKeyboardEvent(event)) {
-                                  return;
-                                }
-
-                                event.preventDefault();
-                                void saveChecklistItemText(item.id);
-                              }}
-                              value={checklistEditText}
-                            />
-                            <div className="task-read-inline-actions">
-                              <button
-                                className="icon-button task-read-icon-button"
-                                type="button"
-                                aria-label={`${item.text} 저장`}
-                                disabled={detailsMutationPending}
-                                onClick={() => void saveChecklistItemText(item.id)}
-                              >
-                                <Save size={15} />
-                              </button>
-                              <button
-                                className="icon-button task-read-icon-button"
-                                type="button"
-                                aria-label={`${item.text} 수정 취소`}
-                                disabled={detailsMutationPending}
-                                onClick={() => {
-                                  setEditingChecklistItemId(null);
-                                  setChecklistEditText("");
-                                }}
-                              >
-                                <X size={15} />
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <span>{item.text}</span>
-                            <div className="task-read-inline-actions">
-                              <button
-                                className="icon-button task-read-icon-button"
-                                type="button"
-                                aria-label={`${item.text} 수정`}
-                                disabled={detailsMutationPending}
-                                onClick={() => startEditingChecklistItem(item)}
-                              >
-                                <Pencil size={15} />
-                              </button>
-                              <button
-                                className="icon-button task-read-icon-button danger"
-                                type="button"
-                                aria-label={`${item.text} 삭제`}
-                                disabled={detailsMutationPending}
-                                onClick={() => void deleteChecklistItem(item.id)}
-                              >
-                                <Minus size={15} />
-                              </button>
-                            </div>
-                          </>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              ))}
-            </div>
-          ) : !isAddingChecklist ? (
-            <p>체크리스트가 없습니다.</p>
-          ) : null}
-        </section>
-
-        <footer className="task-read-actions">
-          <button className="danger-button" disabled={detailsMutationPending} type="button" onClick={onDelete}>
-            <Trash2 size={17} />
-            삭제
-          </button>
-          <div>
-            <button type="button" onClick={onEdit}>
-              <Pencil size={17} />
-              수정
-            </button>
-          </div>
-        </footer>
-      </section>
-    </div>
   );
 }
 
@@ -9850,37 +6747,6 @@ function scheduleTaskMatchesQuery(task: DecryptedScheduleTask, query: string) {
     .includes(term);
 }
 
-function recurringHabitMatchesQuery(habit: DecryptedRecurringHabit, query: string) {
-  const term = normalizedScheduleSearch(query);
-
-  if (!term) {
-    return true;
-  }
-
-  return [
-    habit.title,
-    habit.details.description,
-    habit.details.checklist.map((item) => item.text).join(" "),
-    slotLabel(habit.slot),
-    recurringHabitIconLabels[habit.icon]
-  ]
-    .join(" ")
-    .toLocaleLowerCase("ko")
-    .includes(term);
-}
-
-function scheduleDashboardStats(tasks: DecryptedScheduleTask[], habits: DecryptedRecurringHabit[], today: string) {
-  const activeTasks = tasks.filter((task) => task.status !== "completed");
-
-  return {
-    active: activeTasks.length,
-    completed: tasks.length - activeTasks.length,
-    overdue: activeTasks.filter((task) => isTaskScheduleOverdue(task, today)).length,
-    recurring: habits.filter((habit) => habit.status === "active").length,
-    today: activeTasks.filter((task) => taskCoversDate(task, today)).length
-  };
-}
-
 export function scheduleActionError(caught: unknown, fallback: string) {
   const error = typeof caught === "object" && caught !== null
     ? caught as { code?: unknown; reason?: unknown }
@@ -9942,61 +6808,6 @@ function isTaskScheduleOverdue(task: DecryptedScheduleTask, today: string) {
   const endDate = taskEndDate(task);
 
   return Boolean(task.status === "active" && isValidScheduleDateString(endDate) && endDate < today);
-}
-
-function formatCompletedTaskMeta(task: DecryptedScheduleTask) {
-  const completedDate = taskCompletedDate(task);
-  const parts = completedDate ? [`완료 ${formatDateLabel(completedDate)}`] : ["완료일 없음"];
-
-  parts.push(formatTaskMeta(task));
-  return parts.join(" · ");
-}
-
-function taskCompletedDate(task: DecryptedScheduleTask) {
-  const completedAt = timestampMillis(task.completedAt);
-  return completedAt ? toLocalDateString(new Date(completedAt)) : null;
-}
-
-function timestampMillis(value: { toMillis?: () => number } | null | undefined) {
-  return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
-}
-
-function completedTaskInMonthWindow(completedDate: string, month: string, months: CompletedMonthsFilter) {
-  if (months === "all") {
-    return true;
-  }
-
-  const range = completedMonthRange(month, months);
-  return completedDate >= range.start && completedDate <= range.end;
-}
-
-function completedMonthRangeLabel(month: string, months: CompletedMonthsFilter) {
-  if (months === "all") {
-    return "전체 기간";
-  }
-
-  const range = completedMonthRange(month, months);
-  return range.start.slice(0, 7) === range.end.slice(0, 7)
-    ? `${range.end.slice(0, 7)} 완료`
-    : `${range.start.slice(0, 7)} - ${range.end.slice(0, 7)} 완료`;
-}
-
-function completedMonthRange(month: string, months: Exclude<CompletedMonthsFilter, "all">) {
-  const [yearText, monthText] = month.split("-");
-  const year = Number(yearText);
-  const monthNumber = Number(monthText);
-  const count = Number(months);
-  const safeDate =
-    Number.isInteger(year) && Number.isInteger(monthNumber) && monthNumber >= 1 && monthNumber <= 12
-      ? new Date(year, monthNumber - 1, 1)
-      : new Date();
-  const start = new Date(safeDate.getFullYear(), safeDate.getMonth() - count + 1, 1);
-  const end = new Date(safeDate.getFullYear(), safeDate.getMonth() + 1, 0);
-
-  return {
-    start: toLocalDateString(start),
-    end: toLocalDateString(end)
-  };
 }
 
 function calendarTaskRangePosition(task: DecryptedScheduleTask, dateString: string) {

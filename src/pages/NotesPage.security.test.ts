@@ -445,4 +445,21 @@ describe("NotesPage security controls", () => {
     expect(createLegacyNote).not.toContain("contentFormat:");
     expect(createLegacyNote).not.toContain("entryKind:");
   });
+
+  it("preserves deletion-metadata-free owned legacy notes while scoping foreign reads", () => {
+    const legacySubscription = notesPageSource.match(
+      /export function subscribeLegacyNotesReadOnly[\s\S]*?function legacyExportFileName/u
+    )?.[0] ?? "";
+    const ownerQuery = legacySubscription.match(
+      /ownerUid === uid[\s\S]*?: query\(/u
+    )?.[0] ?? "";
+    const foreignQuery = legacySubscription.slice(ownerQuery.length);
+
+    expect(ownerQuery).toContain('where("ownerUid", "==", uid)');
+    expect(ownerQuery).not.toContain('where("isDeleted", "==", false)');
+    expect(ownerQuery).not.toContain('where("participantUids", "array-contains", uid)');
+    expect(foreignQuery).toContain('where("ownerUid", "==", ownerUid)');
+    expect(foreignQuery).toContain('where("isDeleted", "==", false)');
+    expect(foreignQuery).toContain('where("participantUids", "array-contains", uid)');
+  });
 });

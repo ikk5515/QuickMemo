@@ -2,10 +2,12 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AdminNoteView } from "../lib/adminNoteDecryption";
 import type { UserProfile } from "../types";
 import {
+  AdminNotePreviewDialog,
   adminTabIds,
   AdminTabs,
   editableUserDraft,
@@ -25,6 +27,57 @@ const adminPageSource = readFileSync(join(process.cwd(), "src/pages/AdminPage.ts
 function AdminTabsHarness() {
   const [activeTab, setActiveTab] = useState<AdminTab>("users");
   return <AdminTabs activeTab={activeTab} onSelect={setActiveTab} />;
+}
+
+const previewNote: AdminNoteView = {
+  bodyFormat: "html",
+  bodyHtml: "<p>관리자 미리보기 본문</p>",
+  bodyPreview: "관리자 미리보기 본문",
+  bodySearchText: "관리자 미리보기 본문",
+  canReadContent: true,
+  encryptedBody: { algorithm: "AES-GCM", cipherText: "body", iv: "body-iv", version: 1 },
+  encryptedTitle: { algorithm: "AES-GCM", cipherText: "title", iv: "title-iv", version: 1 },
+  fontSize: 17,
+  id: "note-preview-a",
+  ownerUid: "owner-a",
+  participantUids: ["owner-a"],
+  title: "관리자 미리보기",
+  type: "personal",
+  unavailableReason: null,
+  updatedBy: "owner-a",
+  wrappedKeys: {}
+};
+
+function AdminNotePreviewDialogHarness() {
+  const [open, setOpen] = useState(false);
+  const fallbackFocusRef = useRef<HTMLButtonElement>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  return (
+    <>
+      <button ref={fallbackFocusRef} type="button">노트 검색으로 이동</button>
+      <button
+        onClick={(event) => {
+          returnFocusRef.current = event.currentTarget;
+          setOpen(true);
+        }}
+        type="button"
+      >
+        노트 미리보기 열기
+      </button>
+      {open ? (
+        <AdminNotePreviewDialog
+          deleting={false}
+          fallbackFocusRef={fallbackFocusRef}
+          note={previewNote}
+          onClose={() => setOpen(false)}
+          onMoveToRecovery={vi.fn()}
+          returnFocusRef={returnFocusRef}
+          userName={() => "노트 작성자"}
+        />
+      ) : null}
+    </>
+  );
 }
 
 vi.mock("../services/adminFunctions", () => ({
@@ -63,6 +116,28 @@ describe("AdminPage feature access editing", () => {
     expect(managedUserDeleteUiError(
       new Error("관리자 중요 작업을 계속하려면 로그아웃 후 다시 로그인해주세요.")
     )).toBe("관리자 중요 작업을 계속하려면 로그아웃 후 다시 로그인해주세요.");
+  });
+
+  it("traps focus in the admin note dialog and restores the opener after Escape", async () => {
+    const user = userEvent.setup();
+    render(<AdminNotePreviewDialogHarness />);
+    const opener = screen.getByRole("button", { name: "노트 미리보기 열기" });
+
+    await user.click(opener);
+    const dialog = screen.getByRole("dialog", { name: "관리자 미리보기" });
+    const closeButton = screen.getByRole("button", { name: "노트 미리보기 닫기" });
+    const recoveryButton = screen.getByRole("button", { name: "복구함으로 이동" });
+
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    await waitFor(() => expect(closeButton).toHaveFocus());
+    await user.tab();
+    expect(recoveryButton).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(closeButton).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "관리자 미리보기" })).not.toBeInTheDocument();
+    await waitFor(() => expect(opener).toHaveFocus());
   });
 
   it("materializes legacy users as fully enabled without making the draft dirty", () => {
@@ -188,6 +263,10 @@ describe("AdminPage feature access editing", () => {
 
   it("links every admin tab to its panel and keeps only the selected tab tabbable", () => {
     render(<AdminTabsHarness />);
+    expect(screen.getByRole("tablist", { name: "관리자 기능" })).toHaveAttribute(
+      "aria-orientation",
+      "vertical"
+    );
 
     const expectedTabs: Array<[AdminTab, string]> = [
       ["create", "사용자 추가"],
@@ -210,7 +289,7 @@ describe("AdminPage feature access editing", () => {
     }
   });
 
-  it("moves and activates admin tabs with ArrowLeft, ArrowRight, Home, and End", async () => {
+  it("moves and activates vertical admin tabs with arrow keys, Home, and End", async () => {
     const user = userEvent.setup();
     render(<AdminTabsHarness />);
 
@@ -220,6 +299,14 @@ describe("AdminPage feature access editing", () => {
     const emailTab = screen.getByRole("tab", { name: "이메일 설정" });
 
     usersTab.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(notesTab).toHaveFocus();
+    expect(notesTab).toHaveAttribute("aria-selected", "true");
+
+    await user.keyboard("{ArrowUp}");
+    expect(usersTab).toHaveFocus();
+    expect(usersTab).toHaveAttribute("aria-selected", "true");
+
     await user.keyboard("{ArrowRight}");
     expect(notesTab).toHaveFocus();
     expect(notesTab).toHaveAttribute("aria-selected", "true");
@@ -230,11 +317,17 @@ describe("AdminPage feature access editing", () => {
     expect(emailTab).toHaveFocus();
     expect(emailTab).toHaveAttribute("aria-selected", "true");
 
-    await user.keyboard("{ArrowRight}");
+    await user.keyboard("{ArrowDown}");
     expect(createTab).toHaveFocus();
     expect(createTab).toHaveAttribute("aria-selected", "true");
 
+    await user.keyboard("{ArrowUp}");
+    expect(emailTab).toHaveFocus();
+
     await user.keyboard("{ArrowLeft}");
+    expect(notesTab).toHaveFocus();
+
+    await user.keyboard("{ArrowRight}");
     expect(emailTab).toHaveFocus();
 
     await user.keyboard("{Home}");

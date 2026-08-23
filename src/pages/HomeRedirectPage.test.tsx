@@ -3,18 +3,18 @@ import type { PropsWithChildren } from "react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UserProfile, UserPreferencesDocument } from "../types";
-import HomeRedirectPage from "./HomeRedirectPage";
+import HomeRedirectPage, { HOME_REDIRECT_PREFERENCES_TIMEOUT_MS } from "./HomeRedirectPage";
 
 type HomePreferences = Pick<UserPreferencesDocument, "defaultHome" | "scheduleDefaultView">;
 
 const state = vi.hoisted(() => ({
   cachedPreferences: {
     defaultHome: "notes",
-    scheduleDefaultView: "todo"
+    scheduleDefaultView: "calendar"
   } as HomePreferences | null,
   preferences: {
     defaultHome: "notes",
-    scheduleDefaultView: "todo"
+    scheduleDefaultView: "calendar"
   } as HomePreferences,
   preferencesRequest: null as Promise<HomePreferences> | null,
   profile: null as UserProfile | null
@@ -72,8 +72,8 @@ function renderHome() {
 
 describe("HomeRedirectPage feature access", () => {
   beforeEach(() => {
-    state.cachedPreferences = { defaultHome: "notes", scheduleDefaultView: "todo" };
-    state.preferences = { defaultHome: "notes", scheduleDefaultView: "todo" };
+    state.cachedPreferences = { defaultHome: "notes", scheduleDefaultView: "calendar" };
+    state.preferences = { defaultHome: "notes", scheduleDefaultView: "calendar" };
     state.preferencesRequest = null;
     state.profile = profile();
   });
@@ -104,6 +104,18 @@ describe("HomeRedirectPage feature access", () => {
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/schedule?view=matrix"));
   });
 
+  it.each(["todo", "recurring", "completed"] as const)(
+    "canonicalizes the legacy %s schedule preference to Calendar",
+    async (legacyView) => {
+      state.cachedPreferences = { defaultHome: "schedule", scheduleDefaultView: legacyView };
+      state.preferences = state.cachedPreferences;
+
+      renderHome();
+
+      await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/schedule?view=calendar"));
+    }
+  );
+
   it("keeps workspace navigation unavailable until remote preferences resolve", async () => {
     let resolvePreferences!: (preferences: HomePreferences) => void;
     state.cachedPreferences = null;
@@ -120,6 +132,25 @@ describe("HomeRedirectPage feature access", () => {
       resolvePreferences(state.preferences);
     });
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/app?panel=files"));
+  });
+
+  it("opens the safe default workspace when remote preferences stay pending", async () => {
+    vi.useFakeTimers();
+    try {
+      state.cachedPreferences = null;
+      state.preferencesRequest = new Promise(() => undefined);
+
+      renderHome();
+      expect(screen.getByRole("status")).toHaveTextContent("작업공간을 여는 중입니다");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(HOME_REDIRECT_PREFERENCES_TIMEOUT_MS);
+      });
+
+      expect(screen.getByTestId("location")).toHaveTextContent("/app?panel=files");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("shows a clear non-destructive empty state when all features are denied", () => {

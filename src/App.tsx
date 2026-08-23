@@ -138,74 +138,78 @@ export function RequireAuth({
 }
 
 export default function App() {
+  const location = useLocation();
+
   return (
-    <Suspense fallback={<PageLoadingFallback />}>
+    <>
       {e2eNavigationBridgeEnabled && <E2eNavigationBridge />}
       <SecureShareCopyRecovery />
-      <Routes>
-        <Route path="/" element={<Navigate to="/login" replace />} />
-        <Route path="/setup" element={<SetupPage />} />
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/share/:shareId" element={<PublicSharePage />} />
-        <Route path="/s/:compactToken" element={<PublicSharePage />} />
-        <Route
-          path="/home"
-          element={
-            <RequireAuth>
-              <HomeRedirectPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/app"
-          element={
-            <RequireAuth feature="notes">
-              {obsidianVaultEnabled ? <VaultPage /> : <NotesPage />}
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/app/legacy"
-          element={
-            <RequireAuth feature="notes">
-              <NotesPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/library"
-          element={
-            <RequireAuth feature="library">
-              <LibraryPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/schedule"
-          element={
-            <RequireAuth feature="schedule">
-              <SchedulePage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/schedule/recurring"
-          element={
-            <RequireAuth feature="schedule">
-              <RecurringPage />
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/admin"
-          element={
-            <RequireAuth adminOnly>
-              <AdminPage />
-            </RequireAuth>
-          }
-        />
-        <Route path="*" element={<Navigate to="/login" replace />} />
-      </Routes>
-    </Suspense>
+      <Suspense key={location.pathname} fallback={<PageLoadingFallback />}>
+        <Routes location={location}>
+          <Route path="/" element={<Navigate to="/login" replace />} />
+          <Route path="/setup" element={<SetupPage />} />
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/share/:shareId" element={<PublicSharePage />} />
+          <Route path="/s/:compactToken" element={<PublicSharePage />} />
+          <Route
+            path="/home"
+            element={
+              <RequireAuth>
+                <HomeRedirectPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/app"
+            element={
+              <RequireAuth feature="notes">
+                {obsidianVaultEnabled ? <VaultPage /> : <NotesPage />}
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/app/legacy"
+            element={
+              <RequireAuth feature="notes">
+                <NotesPage legacyReadOnly={obsidianVaultEnabled} />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/library"
+            element={
+              <RequireAuth feature="library">
+                <LibraryPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/schedule"
+            element={
+              <RequireAuth feature="schedule">
+                <SchedulePage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/schedule/recurring"
+            element={
+              <RequireAuth feature="schedule">
+                <RecurringPage />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <RequireAuth adminOnly>
+                <AdminPage />
+              </RequireAuth>
+            }
+          />
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </Routes>
+      </Suspense>
+    </>
   );
 }

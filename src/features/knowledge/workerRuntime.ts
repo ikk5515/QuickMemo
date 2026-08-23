@@ -2,11 +2,16 @@ import { buildGraphSnapshot } from "./graph";
 import {
   backlinkOccurrences,
   buildKnowledgeIndex,
-  outgoingOccurrences
+  getKnowledgeIndexUpdateDiagnostics,
+  outgoingOccurrences,
+  removeKnowledgeIndex,
+  unlinkedMentionOccurrences,
+  upsertKnowledgeIndex
 } from "./knowledgeIndex";
 import { matchesVaultSearchQuery, parseVaultSearchQuery } from "./query";
 import type { KnowledgeIndex, ParsedMarkdownMetadata, VaultIndexEntry } from "./types";
 import type {
+  KnowledgeMetadataLinkSummary,
   KnowledgeMetadataSummary,
   KnowledgeWorkerRequest,
   KnowledgeWorkerResponse
@@ -21,6 +26,17 @@ export interface KnowledgeWorkerRuntimeOptions {
   close?(): void;
 }
 
+// Metadata summaries feed safe Base/Dataview projections, not the canonical
+// graph/backlink index. Keep the structured clone bounded independently from
+// the much larger parsing limits so a valid large Vault cannot freeze the UI.
+export const MAX_METADATA_SUMMARY_LINKS_PER_ENTRY = 256;
+export const MAX_METADATA_SUMMARY_LINKS_PER_RESPONSE = 4_096;
+export const MAX_METADATA_SUMMARY_LINK_TARGET_CHARACTERS = 1_024;
+
+interface MetadataSummaryLinkBudget {
+  remaining: number;
+}
+
 function emptyIndex(): KnowledgeIndex {
   return buildKnowledgeIndex([]);
 }
@@ -29,10 +45,86 @@ function copyEntry(entry: VaultIndexEntry): VaultIndexEntry {
   return { ...entry };
 }
 
+function metadataSummaryLinks(
+  metadata: ParsedMarkdownMetadata,
+  linkBudget: MetadataSummaryLinkBudget
+): KnowledgeMetadataSummary["links"] {
+  const seenTargets = new Set<string>();
+  const links: KnowledgeMetadataSummary["links"] = [];
+  for (const link of metadata.links) {
+    if (
+      links.length >= MAX_METADATA_SUMMARY_LINKS_PER_ENTRY
+      || linkBudget.remaining <= 0
+    ) {
+      break;
+    }
+    if (
+      link.target.length > MAX_METADATA_SUMMARY_LINK_TARGET_CHARACTERS
+      || seenTargets.has(link.target)
+    ) {
+      continue;
+    }
+    seenTargets.add(link.target);
+    links.push({ target: link.target });
+    linkBudget.remaining -= 1;
+  }
+  return links;
+}
+
+function metadataSummaryLinkProjection(
+  index: KnowledgeIndex
+): ReadonlyMap<string, KnowledgeMetadataSummary["links"]> {
+  const linkBudget: MetadataSummaryLinkBudget = {
+    remaining: MAX_METADATA_SUMMARY_LINKS_PER_RESPONSE
+  };
+  const linksByEntryId = new Map<string, KnowledgeMetadataSummary["links"]>();
+  for (const entry of index.entries) {
+    const metadata = index.metadataByEntryId.get(entry.id);
+    if (!metadata) {
+      continue;
+    }
+    const links = metadataSummaryLinks(metadata, linkBudget);
+    if (links.length > 0) {
+      linksByEntryId.set(entry.id, links);
+    }
+  }
+  return linksByEntryId;
+}
+
+function sameMetadataSummaryLinks(
+  left: readonly KnowledgeMetadataLinkSummary[] | undefined,
+  right: readonly KnowledgeMetadataLinkSummary[] | undefined
+): boolean {
+  const leftLinks = left ?? [];
+  const rightLinks = right ?? [];
+  return leftLinks.length === rightLinks.length
+    && leftLinks.every((link, index) => link.target === rightLinks[index]?.target);
+}
+
+function changedMetadataSummaryLinkEntryIds(
+  previousIndex: KnowledgeIndex,
+  nextIndex: KnowledgeIndex
+): string[] {
+  const previous = metadataSummaryLinkProjection(previousIndex);
+  const next = metadataSummaryLinkProjection(nextIndex);
+  const orderedIds = previousIndex.entries.map((entry) => entry.id);
+  const seen = new Set(orderedIds);
+  for (const entry of nextIndex.entries) {
+    if (!seen.has(entry.id)) {
+      seen.add(entry.id);
+      orderedIds.push(entry.id);
+    }
+  }
+  return orderedIds.filter((entryId) => !sameMetadataSummaryLinks(
+    previous.get(entryId),
+    next.get(entryId)
+  ));
+}
+
 function metadataSummary(
-  index: KnowledgeIndex,
   entryId: string,
-  metadata: ParsedMarkdownMetadata
+  metadata: ParsedMarkdownMetadata,
+  links: KnowledgeMetadataSummary["links"]
 ): KnowledgeMetadataSummary {
   const properties = Object.fromEntries(
     Object.entries(metadata.properties).map(([key, value]) => [
@@ -47,8 +139,7 @@ function metadataSummary(
     properties,
     headings: metadata.headings.map((heading) => ({ ...heading })),
     blocks: metadata.blocks.map((block) => ({ ...block })),
-    outgoingLinkCount: outgoingOccurrences(index, entryId).length,
-    backlinkCount: backlinkOccurrences(index, entryId).length
+    links: links.map((link) => ({ ...link }))
   };
 }
 
@@ -84,16 +175,60 @@ export function createKnowledgeWorkerRuntime(
   let version = 0;
   let disposed = false;
 
-  const rebuild = () => {
-    index = buildKnowledgeIndex([...entriesById.values()]);
+  const replace = (entries: readonly VaultIndexEntry[]) => {
+    const previousEntryIds = index.entries.map((entry) => entry.id);
+    const nextEntriesById = new Map<string, VaultIndexEntry>();
+    for (const entry of entries) {
+      const copiedEntry = copyEntry(entry);
+      nextEntriesById.set(copiedEntry.id, copiedEntry);
+    }
+    const nextIndex = buildKnowledgeIndex([...nextEntriesById.values()]);
+    entriesById.clear();
+    for (const [entryId, entry] of nextEntriesById) {
+      entriesById.set(entryId, entry);
+    }
+    index = nextIndex;
     version += 1;
+    return Array.from(new Set([
+      ...previousEntryIds,
+      ...index.entries.map((entry) => entry.id)
+    ]));
   };
 
-  const updatedResponse = (id: string): KnowledgeWorkerResponse => ({
+  const upsert = (entry: VaultIndexEntry) => {
+    const copiedEntry = copyEntry(entry);
+    const previousIndex = index;
+    const nextIndex = upsertKnowledgeIndex(previousIndex, copiedEntry);
+    entriesById.set(copiedEntry.id, copiedEntry);
+    index = nextIndex;
+    version += 1;
+    return Array.from(new Set([
+      ...(getKnowledgeIndexUpdateDiagnostics(index)?.changedMetadataEntryIds ?? [entry.id]),
+      ...changedMetadataSummaryLinkEntryIds(previousIndex, nextIndex)
+    ]));
+  };
+
+  const remove = (entryId: string) => {
+    const previousIndex = index;
+    const nextIndex = removeKnowledgeIndex(previousIndex, entryId);
+    entriesById.delete(entryId);
+    index = nextIndex;
+    version += 1;
+    return Array.from(new Set([
+      ...(getKnowledgeIndexUpdateDiagnostics(index)?.changedMetadataEntryIds ?? [entryId]),
+      ...changedMetadataSummaryLinkEntryIds(previousIndex, nextIndex)
+    ]));
+  };
+
+  const updatedResponse = (
+    id: string,
+    changedMetadataEntryIds: readonly string[]
+  ): KnowledgeWorkerResponse => ({
     id,
     type: "updated",
     version,
-    entryCount: entriesById.size
+    entryCount: entriesById.size,
+    changedMetadataEntryIds: [...changedMetadataEntryIds]
   });
 
   return {
@@ -114,22 +249,13 @@ export function createKnowledgeWorkerRuntime(
             });
             return;
           case "replace-vault":
-            entriesById.clear();
-            for (const entry of request.entries) {
-              entriesById.set(entry.id, copyEntry(entry));
-            }
-            rebuild();
-            options.postMessage(updatedResponse(request.id));
+            options.postMessage(updatedResponse(request.id, replace(request.entries)));
             return;
           case "upsert-entry":
-            entriesById.set(request.entry.id, copyEntry(request.entry));
-            rebuild();
-            options.postMessage(updatedResponse(request.id));
+            options.postMessage(updatedResponse(request.id, upsert(request.entry)));
             return;
           case "remove-entry":
-            entriesById.delete(request.entryId);
-            rebuild();
-            options.postMessage(updatedResponse(request.id));
+            options.postMessage(updatedResponse(request.id, remove(request.entryId)));
             return;
           case "search": {
             const query = parseVaultSearchQuery(request.query);
@@ -171,6 +297,14 @@ export function createKnowledgeWorkerRuntime(
               occurrences: [...backlinkOccurrences(index, request.entryId)]
             });
             return;
+          case "unlinked-mentions":
+            options.postMessage({
+              id: request.id,
+              type: "unlinked-mentions",
+              version,
+              occurrences: [...unlinkedMentionOccurrences(index, request.entryId)]
+            });
+            return;
           case "tags":
             options.postMessage({
               id: request.id,
@@ -185,12 +319,20 @@ export function createKnowledgeWorkerRuntime(
             const selectedIds = request.entryIds
               ? new Set(request.entryIds)
               : undefined;
+            // Always project the response-wide budget over the canonical Vault
+            // order first. A selected fetch must be byte-for-byte equivalent to
+            // selecting the same summaries from a full response.
+            const linksByEntryId = metadataSummaryLinkProjection(index);
             const summaries = index.entries.flatMap((entry) => {
               if (selectedIds && !selectedIds.has(entry.id)) {
                 return [];
               }
               const metadata = index.metadataByEntryId.get(entry.id);
-              return metadata ? [metadataSummary(index, entry.id, metadata)] : [];
+              return metadata ? [metadataSummary(
+                entry.id,
+                metadata,
+                linksByEntryId.get(entry.id) ?? []
+              )] : [];
             });
             options.postMessage({
               id: request.id,

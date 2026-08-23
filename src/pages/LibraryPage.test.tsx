@@ -56,7 +56,11 @@ const serviceMocks = vi.hoisted(() => ({
   subscribeVisibleNoteById: vi.fn(),
   subscribeVisibleNotes: vi.fn(),
   touchLibraryItemOpened: vi.fn(),
-  updateLibraryItem: vi.fn()
+  updateLibraryItem: vi.fn(),
+  ensureLibraryVaultInboxFolder: vi.fn(),
+  assertLibraryVaultPromotionReady: vi.fn(),
+  prepareVaultIntegrityKey: vi.fn(),
+  promoteLibraryItemToVault: vi.fn()
 }));
 
 const cryptoMocks = vi.hoisted(() => ({
@@ -118,6 +122,22 @@ vi.mock("../services/users", () => ({
 
 vi.mock("../services/activeNotes", () => ({
   publishActiveNote: serviceMocks.publishActiveNote
+}));
+
+vi.mock("../services/libraryVaultInbox", () => ({
+  ensureLibraryVaultInboxFolder: serviceMocks.ensureLibraryVaultInboxFolder
+}));
+
+vi.mock("../services/libraryVaultPromotion", () => ({
+  promoteLibraryItemToVault: serviceMocks.promoteLibraryItemToVault
+}));
+
+vi.mock("../services/libraryVaultReadiness", () => ({
+  assertLibraryVaultPromotionReady: serviceMocks.assertLibraryVaultPromotionReady
+}));
+
+vi.mock("../services/vaultIntegrity", () => ({
+  prepareVaultIntegrityKey: serviceMocks.prepareVaultIntegrityKey
 }));
 
 vi.mock("../lib/crypto", async (importOriginal) => {
@@ -319,6 +339,21 @@ beforeEach(() => {
     revision: revision + 1
   }));
   serviceMocks.publishActiveNote.mockResolvedValue(undefined);
+  serviceMocks.prepareVaultIntegrityKey.mockResolvedValue({
+    key: {} as CryptoKey,
+    ownerUid: testData.auth.profile.uid,
+    state: "existing",
+    wrappedKey: { algorithm: "RSA-OAEP", version: 1, wrappedKey: "wrapped-integrity" }
+  });
+  serviceMocks.ensureLibraryVaultInboxFolder.mockResolvedValue("folder-inbox");
+  serviceMocks.assertLibraryVaultPromotionReady.mockResolvedValue(undefined);
+  serviceMocks.promoteLibraryItemToVault.mockResolvedValue({
+    body: "# 보안 가이드",
+    noteId: "vault-note-a",
+    revision: 1,
+    state: "created",
+    title: "보안 가이드"
+  });
   serviceMocks.touchLibraryItemOpened.mockResolvedValue(undefined);
   serviceMocks.updateLibraryItem.mockImplementation(async (item) => ({
     lastMutationId: `mutation-updated-${item.revision + 1}`,
@@ -365,6 +400,60 @@ beforeEach(() => {
 });
 
 describe("LibraryPage", () => {
+  it.runIf(import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true")(
+    "promotes an owned item to the encrypted Vault Inbox and keeps the source intact",
+    async () => {
+      const user = userEvent.setup();
+      renderPage();
+      await user.click(await screen.findByRole("button", { name: "보안 가이드 열기" }));
+      const promote = screen.getByRole("button", { name: "Vault Markdown으로 저장" });
+      await user.click(promote);
+
+      await waitFor(() => expect(serviceMocks.promoteLibraryItemToVault).toHaveBeenCalledOnce());
+      expect(serviceMocks.prepareVaultIntegrityKey).toHaveBeenCalledWith(
+        testData.auth.profile,
+        testData.auth.privateKey
+      );
+      expect(serviceMocks.ensureLibraryVaultInboxFolder).toHaveBeenCalledWith(expect.objectContaining({
+        privateKey: testData.auth.privateKey,
+        profile: testData.auth.profile
+      }));
+      expect(serviceMocks.assertLibraryVaultPromotionReady).toHaveBeenCalledWith(expect.objectContaining({
+        privateKey: testData.auth.privateKey,
+        profile: testData.auth.profile
+      }));
+      expect(serviceMocks.promoteLibraryItemToVault).toHaveBeenCalledWith(expect.objectContaining({
+        folderId: "folder-inbox",
+        item: expect.objectContaining({ id: "library-a", ownerUid: testData.auth.profile.uid }),
+        privateKey: testData.auth.privateKey,
+        profile: testData.auth.profile
+      }));
+      expect(screen.getByText(/원본 자료는 그대로/u)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Vault에서 열기" })).toBeInTheDocument();
+    }
+  );
+
+  it.runIf(import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true")(
+    "fails closed before activating a missing Vault integrity marker",
+    async () => {
+      const user = userEvent.setup();
+      serviceMocks.prepareVaultIntegrityKey.mockResolvedValueOnce({
+        key: {} as CryptoKey,
+        ownerUid: testData.auth.profile.uid,
+        state: "candidate",
+        wrappedKey: { algorithm: "RSA-OAEP", version: 1, wrappedKey: "candidate" }
+      });
+      renderPage();
+      await user.click(await screen.findByRole("button", { name: "보안 가이드 열기" }));
+      await user.click(screen.getByRole("button", { name: "Vault Markdown으로 저장" }));
+
+      await waitFor(() => expect(screen.getByText(/먼저 Vault를 한 번 열어/u)).toBeInTheDocument());
+      expect(serviceMocks.ensureLibraryVaultInboxFolder).not.toHaveBeenCalled();
+      expect(serviceMocks.assertLibraryVaultPromotionReady).not.toHaveBeenCalled();
+      expect(serviceMocks.promoteLibraryItemToVault).not.toHaveBeenCalled();
+    }
+  );
+
   it("keeps trusted local validation details but hides backend error internals", () => {
     const fallback = "자료를 불러오지 못했습니다.";
 

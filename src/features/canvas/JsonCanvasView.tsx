@@ -14,10 +14,24 @@ import {
   type EdgeChange,
   type NodeChange,
   type NodeMouseHandler,
+  type OnNodeDrag,
   type NodeProps,
-  type OnSelectionChangeParams
+  type OnSelectionChangeParams,
+  type ReactFlowInstance
 } from "@xyflow/react";
-import { Copy, FilePlus2, Grid3X3, Group, Link2, StickyNote, Trash2 } from "lucide-react";
+import {
+  BringToFront,
+  Columns3,
+  Copy,
+  FilePlus2,
+  Grid3X3,
+  Group,
+  Link2,
+  Rows3,
+  SendToBack,
+  StickyNote,
+  Trash2
+} from "lucide-react";
 import { createPortal } from "react-dom";
 import {
   createContext,
@@ -29,60 +43,130 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent
+  type DragEvent as ReactDragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent
 } from "react";
 import { VaultAssetPreview } from "../vault/VaultAssetPreview";
-import type { DecodedVaultAsset } from "../vault/vaultAsset";
+import { safeVaultAssetPreviewKind, type DecodedVaultAsset } from "../vault/vaultAsset";
+import { MarkdownRenderer } from "../markdown/MarkdownRenderer";
 import "@xyflow/react/dist/style.css";
 import {
   alignJsonCanvasNodes,
   canvasDocumentFromFlow,
+  distributeJsonCanvasNodes,
   duplicateJsonCanvasSelection,
   effectiveJsonCanvasEdgeEnds,
   emptyJsonCanvas,
+  expandJsonCanvasGroupSelection,
+  containedJsonCanvasNodeIds,
+  containingJsonCanvasGroupId,
+  jsonCanvasEdgeEndsForDirection,
+  jsonCanvasEdgeNavigationNodeId,
   parseCanvasDocument,
+  reorderJsonCanvasNodes,
   safeCanvasColor,
   safeCanvasDocument,
   safeHttpUrl,
   safeVaultPath,
   serializeCanvas,
+  translateJsonCanvasNodes,
   type CanvasAlignment,
+  type CanvasDistribution,
   type CanvasFlowEdge,
   type CanvasFlowNode,
+  type CanvasStackOrder,
   type JsonCanvasDocument,
   type JsonCanvasEdge,
   type JsonCanvasNode,
   type JsonCanvasSide
 } from "./canvasModel";
+import {
+  JSON_CANVAS_VAULT_ENTRY_MIME,
+  containsJsonCanvasVaultEntryDragType,
+  parseJsonCanvasVaultEntryDragPayload
+} from "./vaultEntryDrag";
+export {
+  JSON_CANVAS_VAULT_ENTRY_MIME,
+  parseJsonCanvasVaultEntryDragPayload,
+  serializeJsonCanvasVaultEntryDragPayload,
+  setJsonCanvasVaultEntryDragData,
+  type JsonCanvasVaultEntryDragPayload
+} from "./vaultEntryDrag";
 import "./canvas.css";
 
 export interface JsonCanvasFileOption {
   asset?: DecodedVaultAsset;
+  content?: string;
   kind?: "markdown" | "canvas" | "base" | "asset";
   label: string;
   path: string;
 }
 
+export type ResolveJsonCanvasVaultEntryDrop = (
+  entryId: string
+) => string | null | undefined;
+
+export type ImportJsonCanvasExternalFiles = (
+  files: readonly File[]
+) => Promise<{ paths: readonly string[]; rejected: number }>;
+
 export interface JsonCanvasViewProps {
   fileOptions: readonly JsonCanvasFileOption[];
   onChange: (source: string) => void;
+  onImportExternalFiles?: ImportJsonCanvasExternalFiles;
   onOpenFile: (path: string) => void;
   readOnly?: boolean;
+  resolveVaultEntryDrop?: ResolveJsonCanvasVaultEntryDrop;
   source: string;
 }
 
 interface CanvasRuntime {
+  editTextNode: (nodeId: string) => void;
+  editingTextNodeId: string | null;
   fileOptionsByPath: ReadonlyMap<string, JsonCanvasFileOption>;
   fileOptions: readonly JsonCanvasFileOption[];
   onOpenFile: (path: string) => void;
   patchNode: (nodeId: string, patch: Partial<JsonCanvasNode>) => void;
   readOnly: boolean;
+  stopTextNodeEditing: (nodeId?: string) => void;
+}
+
+interface CanvasContextMenuState {
+  clientX: number;
+  clientY: number;
+  kind: "node" | "edge" | "pane";
+  targetId?: string;
+  flowPosition?: { x: number; y: number };
+}
+
+interface CanvasGroupDragState {
+  groupId: string;
+  memberIds: ReadonlySet<string>;
+}
+
+interface CanvasLongPressState {
+  clientX: number;
+  clientY: number;
+  nodeId: string;
+  pointerId: number;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 const CanvasRuntimeContext = createContext<CanvasRuntime | null>(null);
 const JSON_CANVAS_SIDES: readonly JsonCanvasSide[] = ["top", "right", "bottom", "left"];
 const CANVAS_COLORS = ["1", "2", "3", "4", "5", "6"] as const;
 const CANVAS_FILE_RESULT_LIMIT = 50;
+export const CANVAS_NODE_INTERACTION_THRESHOLD_PX = 6;
+const CANVAS_DROP_GRID: readonly [number, number] = [20, 20];
+const MAX_CANVAS_DROP_COORDINATE = 100_000_000;
+const MAX_CANVAS_DROP_NODES = 10_000;
+const MAX_CANVAS_EXTERNAL_DROP_FILES = 16;
+const CANVAS_VISIBLE_ELEMENT_LOD_THRESHOLD = 500;
+const CANVAS_LONG_PRESS_MS = 560;
+const CANVAS_LONG_PRESS_MOVE_TOLERANCE_PX = 8;
+const MAX_CANVAS_MARKDOWN_PREVIEW_CHARACTERS = 100_000;
 const ALIGNMENTS: ReadonlyArray<{ label: string; value: CanvasAlignment }> = [
   { label: "왼쪽 맞춤", value: "left" },
   { label: "가로 가운데", value: "center" },
@@ -94,6 +178,65 @@ const ALIGNMENTS: ReadonlyArray<{ label: string; value: CanvasAlignment }> = [
 
 function stopCanvasControlEvent(event: React.SyntheticEvent) {
   event.stopPropagation();
+}
+
+function boundedDropCoordinate(value: number, gridSize: number, snapToGrid: boolean): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const rounded = snapToGrid
+    ? Math.round(value / gridSize) * gridSize
+    : Math.round(value);
+  return Math.abs(rounded) <= MAX_CANVAS_DROP_COORDINATE ? rounded : null;
+}
+
+export interface CreateDroppedJsonCanvasFileNodeInput {
+  createId?: () => string;
+  existingNodeIds: ReadonlySet<string>;
+  path: string;
+  position: { x: number; y: number };
+  snapToGrid: boolean;
+}
+
+export function createDroppedJsonCanvasFileNode({
+  createId = () => createCanvasId("node"),
+  existingNodeIds,
+  path,
+  position,
+  snapToGrid
+}: CreateDroppedJsonCanvasFileNodeInput): JsonCanvasNode | null {
+  const file = safeVaultPath(path);
+  const x = boundedDropCoordinate(position.x, CANVAS_DROP_GRID[0], snapToGrid);
+  const y = boundedDropCoordinate(position.y, CANVAS_DROP_GRID[1], snapToGrid);
+  if (!file || x === null || y === null) {
+    return null;
+  }
+
+  let id: string | null = null;
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const candidate = createId();
+    if (
+      candidate.length > 0
+      && candidate.length <= 256
+      && !existingNodeIds.has(candidate)
+    ) {
+      id = candidate;
+      break;
+    }
+  }
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    type: "file",
+    x,
+    y,
+    width: 300,
+    height: 180,
+    file
+  };
 }
 
 interface CanvasFileChooserProps {
@@ -279,6 +422,37 @@ function accessibleNodeLabel(node: JsonCanvasNode) {
   return summary ? `${kind}: ${summary}` : kind;
 }
 
+export function canvasPdfPageFromSubpath(subpath: string | undefined): number {
+  const match = /^#page=([1-9]\d{0,4})$/u.exec(subpath ?? "");
+  return match ? Number(match[1]) : 1;
+}
+
+function renderCanvasPreviewCode(language: string, source: string) {
+  return (
+    <pre className="qm-markdown-code-block">
+      <code data-language={language || undefined}>{source}</code>
+    </pre>
+  );
+}
+
+function CanvasMarkdownPreview({ label, source }: { label: string; source: string }) {
+  const truncated = source.length > MAX_CANVAS_MARKDOWN_PREVIEW_CHARACTERS;
+  return (
+    <div
+      aria-label={label}
+      className="nodrag nowheel vault-canvas-markdown-preview"
+      inert
+    >
+      <MarkdownRenderer
+        emptyText="빈 노트"
+        renderCodeBlock={renderCanvasPreviewCode}
+        source={truncated ? source.slice(0, MAX_CANVAS_MARKDOWN_PREVIEW_CHARACTERS) : source}
+      />
+      {truncated ? <small>미리보기는 앞부분만 표시합니다.</small> : null}
+    </div>
+  );
+}
+
 function CanvasHandles({ readOnly }: { readOnly: boolean }) {
   if (readOnly) {
     return null;
@@ -308,9 +482,24 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
   const runtime = useContext(CanvasRuntimeContext);
   const node = data.canvas;
   const readOnly = runtime?.readOnly ?? true;
+  const editingText = node.type === "text"
+    && !readOnly
+    && runtime?.editingTextNodeId === id;
   const resolvedLink = node.type === "link" ? safeHttpUrl(node.url) : null;
   const fileOption = node.type === "file"
     ? runtime?.fileOptionsByPath.get(node.file ?? "")
+    : undefined;
+  const fileAssetPreviewKind = fileOption?.asset ? safeVaultAssetPreviewKind(fileOption.asset) : null;
+  const persistedPdfPage = canvasPdfPageFromSubpath(node.subpath);
+  const [pdfPage, setPdfPage] = useState(persistedPdfPage);
+  const [pdfZoom, setPdfZoom] = useState(100);
+  useEffect(() => setPdfPage(persistedPdfPage), [persistedPdfPage]);
+  const groupBackgroundOption = node.type === "group" && safeVaultPath(node.background)
+    ? runtime?.fileOptionsByPath.get(node.background ?? "")
+    : undefined;
+  const groupBackgroundAsset = groupBackgroundOption?.asset
+    && safeVaultAssetPreviewKind(groupBackgroundOption.asset) === "image"
+    ? groupBackgroundOption.asset
     : undefined;
   const accent = safeCanvasColor(node.color, node.type === "group" ? "#5b5664" : "#8b82f6");
   const style = { "--canvas-node-accent": accent } as CSSProperties;
@@ -319,6 +508,11 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
     <article
       aria-label={accessibleNodeLabel(node)}
       className={`vault-canvas-card vault-canvas-card--${node.type}`}
+      onDoubleClick={node.type === "text" && !readOnly ? (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        runtime?.editTextNode(id);
+      } : undefined}
       style={style}
     >
       <NodeResizer
@@ -330,20 +524,41 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
       />
       <CanvasHandles readOnly={readOnly} />
 
-      {node.type === "text" ? (
+      {editingText ? (
         <textarea
           aria-label="Canvas 텍스트"
+          autoFocus
           className="nodrag nowheel vault-canvas-text-editor"
           onChange={(event) => runtime?.patchNode(id, { text: event.target.value })}
           onDoubleClick={stopCanvasControlEvent}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              event.stopPropagation();
+              runtime?.stopTextNodeEditing(id);
+            }
+          }}
           onPointerDown={stopCanvasControlEvent}
           readOnly={readOnly}
           value={node.text ?? ""}
         />
       ) : null}
 
+      {node.type === "text" && !editingText ? (
+        <CanvasMarkdownPreview label="Canvas 텍스트 Markdown 미리보기" source={node.text ?? ""} />
+      ) : null}
+
       {node.type === "group" ? (
         <div className="vault-canvas-group-content">
+          {groupBackgroundAsset ? (
+            <VaultAssetPreview
+              asset={groupBackgroundAsset}
+              className={`vault-canvas-group-background-preview vault-canvas-group-background-preview--${node.backgroundStyle ?? "cover"}`}
+              compact
+              fileName={groupBackgroundOption?.label ?? node.background ?? "Canvas 그룹 배경"}
+              imageMode={node.backgroundStyle === "ratio" ? "contain" : node.backgroundStyle ?? "cover"}
+            />
+          ) : null}
           <input
             aria-label="Canvas 그룹 이름"
             className="nodrag nowheel vault-canvas-group-label"
@@ -360,12 +575,82 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
       {node.type === "file" ? (
         <div className="vault-canvas-file-card">
           {fileOption?.asset ? (
-            <VaultAssetPreview
-              asset={fileOption.asset}
-              className="nodrag nowheel"
-              compact
-              fileName={fileOption.label}
-            />
+            <>
+              <VaultAssetPreview
+                asset={fileOption.asset}
+                className="nodrag nowheel"
+                compact
+                fileName={fileOption.label}
+                pdfFragment={fileAssetPreviewKind === "pdf" ? `#page=${pdfPage}&zoom=${pdfZoom}` : undefined}
+              />
+              {fileAssetPreviewKind === "pdf" ? (
+                <div aria-label="PDF 페이지 도구" className="nodrag nowheel vault-canvas-pdf-controls" role="group">
+                  <button
+                    aria-label="이전 PDF 페이지"
+                    disabled={pdfPage <= 1}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const nextPage = Math.max(1, pdfPage - 1);
+                      setPdfPage(nextPage);
+                      if (!readOnly) runtime?.patchNode(id, { subpath: `#page=${nextPage}` });
+                    }}
+                    onPointerDown={stopCanvasControlEvent}
+                    type="button"
+                  >‹</button>
+                  <label>
+                    <span className="sr-only">PDF 페이지</span>
+                    <input
+                      aria-label="PDF 페이지"
+                      max={99_999}
+                      min={1}
+                      onChange={(event) => {
+                        const nextPage = Math.max(1, Math.min(99_999, Number(event.target.value) || 1));
+                        setPdfPage(nextPage);
+                        if (!readOnly) runtime?.patchNode(id, { subpath: `#page=${nextPage}` });
+                      }}
+                      onPointerDown={stopCanvasControlEvent}
+                      type="number"
+                      value={pdfPage}
+                    />
+                  </label>
+                  <button
+                    aria-label="다음 PDF 페이지"
+                    disabled={pdfPage >= 99_999}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      const nextPage = Math.min(99_999, pdfPage + 1);
+                      setPdfPage(nextPage);
+                      if (!readOnly) runtime?.patchNode(id, { subpath: `#page=${nextPage}` });
+                    }}
+                    onPointerDown={stopCanvasControlEvent}
+                    type="button"
+                  >›</button>
+                  <button
+                    aria-label="PDF 축소"
+                    disabled={pdfZoom <= 50}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPdfZoom((current) => Math.max(50, current - 25));
+                    }}
+                    onPointerDown={stopCanvasControlEvent}
+                    type="button"
+                  >−</button>
+                  <output aria-label="PDF 확대 비율">{pdfZoom}%</output>
+                  <button
+                    aria-label="PDF 확대"
+                    disabled={pdfZoom >= 400}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPdfZoom((current) => Math.min(400, current + 25));
+                    }}
+                    onPointerDown={stopCanvasControlEvent}
+                    type="button"
+                  >+</button>
+                </div>
+              ) : null}
+            </>
+          ) : fileOption?.kind === "markdown" && typeof fileOption.content === "string" ? (
+            <CanvasMarkdownPreview label="Markdown 노트 미리보기" source={fileOption.content} />
           ) : <span aria-hidden="true" className="vault-canvas-card-icon">📄</span>}
           {selected && !readOnly ? (
             <>
@@ -498,6 +783,107 @@ function isFormControl(target: EventTarget | null) {
   return target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, button, a, [contenteditable='true']"));
 }
 
+interface CanvasContextMenuAction {
+  disabled?: boolean;
+  destructive?: boolean;
+  id: string;
+  label: string;
+}
+
+function CanvasContextMenu({
+  actions,
+  clientX,
+  clientY,
+  onClose,
+  onSelect
+}: CanvasContextMenuState & {
+  actions: readonly CanvasContextMenuAction[];
+  onClose: () => void;
+  onSelect: (actionId: string) => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const viewportWidth = typeof window === "undefined" ? clientX + 232 : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? clientY + 360 : window.innerHeight;
+  const position = {
+    left: Math.max(8, Math.min(clientX, viewportWidth - 232)),
+    top: Math.max(8, Math.min(clientY, viewportHeight - Math.min(360, actions.length * 42 + 16)))
+  };
+
+  useEffect(() => {
+    const menu = menuRef.current;
+    (menu?.querySelector<HTMLButtonElement>('button:not(:disabled)') ?? menu)?.focus();
+    const dismiss = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) {
+        onClose();
+      }
+    };
+    const dismissForViewportChange = () => onClose();
+    window.addEventListener("pointerdown", dismiss, true);
+    window.addEventListener("resize", dismissForViewportChange);
+    window.addEventListener("blur", dismissForViewportChange);
+    return () => {
+      window.removeEventListener("pointerdown", dismiss, true);
+      window.removeEventListener("resize", dismissForViewportChange);
+      window.removeEventListener("blur", dismissForViewportChange);
+    };
+  }, [onClose]);
+
+  if (typeof document === "undefined") {
+    return null;
+  }
+  return createPortal(
+    <div
+      ref={menuRef}
+      aria-label="Canvas 항목 메뉴"
+      className="vault-canvas-context-menu"
+      onContextMenu={(event) => event.preventDefault()}
+      onKeyDown={(event) => {
+        const items = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? []);
+        const activeIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+        if (event.key === "Escape" || event.key === "Tab") {
+          onClose();
+          return;
+        }
+        let nextIndex: number | null = null;
+        if (event.key === "ArrowDown") {
+          nextIndex = activeIndex < 0 ? 0 : (activeIndex + 1) % items.length;
+        } else if (event.key === "ArrowUp") {
+          nextIndex = activeIndex < 0 ? items.length - 1 : (activeIndex - 1 + items.length) % items.length;
+        } else if (event.key === "Home") {
+          nextIndex = 0;
+        } else if (event.key === "End") {
+          nextIndex = items.length - 1;
+        }
+        if (nextIndex !== null && items.length > 0 && items[nextIndex]) {
+          event.preventDefault();
+          items[nextIndex].focus();
+        }
+      }}
+      onPointerDown={stopCanvasControlEvent}
+      role="menu"
+      style={position}
+      tabIndex={-1}
+    >
+      {actions.map((action) => (
+        <button
+          className={action.destructive ? "vault-canvas-context-menu-danger" : undefined}
+          disabled={action.disabled}
+          key={action.id}
+          onClick={() => {
+            onSelect(action.id);
+            onClose();
+          }}
+          role="menuitem"
+          type="button"
+        >
+          {action.label}
+        </button>
+      ))}
+    </div>,
+    document.body
+  );
+}
+
 function documentToFlow(
   document: JsonCanvasDocument,
   selectedNodeIds: ReadonlySet<string> = new Set(),
@@ -509,7 +895,15 @@ function documentToFlow(
   };
 }
 
-export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = false, source }: JsonCanvasViewProps) {
+export function JsonCanvasView({
+  fileOptions,
+  onChange,
+  onImportExternalFiles,
+  onOpenFile,
+  readOnly = false,
+  resolveVaultEntryDrop,
+  source
+}: JsonCanvasViewProps) {
   const parseResult = useMemo(() => parseCanvasDocument(source), [source]);
   const parsed = parseResult.document;
   const canvasReadOnly = readOnly || !parseResult.editable;
@@ -520,11 +914,43 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
   const [fileDraft, setFileDraft] = useState("");
   const [linkDraft, setLinkDraft] = useState("https://");
   const [status, setStatus] = useState("");
+  const [externalDropActive, setExternalDropActive] = useState(false);
+  const [flowReady, setFlowReady] = useState(false);
+  const [contextMenu, setContextMenu] = useState<CanvasContextMenuState | null>(null);
+  const [edgeLabelEditRequest, setEdgeLabelEditRequest] = useState<string | null>(null);
+  const [editingTextNodeId, setEditingTextNodeId] = useState<string | null>(null);
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
+  const groupDragRef = useRef<CanvasGroupDragState | null>(null);
+  const longPressRef = useRef<CanvasLongPressState | null>(null);
   const documentRef = useRef(parsed);
   const sourceRef = useRef(source);
   const canonicalSourceRef = useRef(`${JSON.stringify(parsed, null, 2)}\n`);
+  const flowInstanceRef = useRef<ReactFlowInstance<CanvasFlowNode, CanvasFlowEdge> | null>(null);
+  const canvasSectionRef = useRef<HTMLElement | null>(null);
+  const edgeLabelInputRef = useRef<HTMLInputElement | null>(null);
+  const dropHelpId = useId();
+
+  const closeContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  const cancelLongPress = useCallback((pointerId?: number) => {
+    const pending = longPressRef.current;
+    if (!pending || (pointerId !== undefined && pending.pointerId !== pointerId)) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    longPressRef.current = null;
+  }, []);
+
+  useEffect(() => () => cancelLongPress(), [cancelLongPress]);
+
+  useEffect(() => {
+    if (canvasReadOnly || (!resolveVaultEntryDrop && !onImportExternalFiles)) {
+      setExternalDropActive(false);
+    }
+  }, [canvasReadOnly, onImportExternalFiles, resolveVaultEntryDrop]);
 
   const commit = useCallback((nextNodes: CanvasFlowNode[], nextEdges: CanvasFlowEdge[]) => {
     nodesRef.current = nextNodes;
@@ -555,6 +981,7 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
     edgesRef.current = nextFlow.edges;
     setNodes(nextFlow.nodes);
     setEdges(nextFlow.edges);
+    setEditingTextNodeId(null);
   }, [source]);
 
   const patchNode = useCallback((nodeId: string, patch: Partial<JsonCanvasNode>) => {
@@ -583,19 +1010,59 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
     }
     return index;
   }, [safeFileOptions]);
+  const editTextNode = useCallback((nodeId: string) => {
+    if (
+      canvasReadOnly
+      || !nodesRef.current.some((node) => node.id === nodeId && node.data.canvas.type === "text")
+    ) {
+      return;
+    }
+    const nextNodes = nodesRef.current.map((node) => ({ ...node, selected: node.id === nodeId }));
+    const nextEdges = edgesRef.current.map((edge) => edge.selected ? { ...edge, selected: false } : edge);
+    nodesRef.current = nextNodes;
+    edgesRef.current = nextEdges;
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    setEditingTextNodeId(nodeId);
+    setStatus("텍스트 카드를 편집합니다.");
+  }, [canvasReadOnly]);
+  const stopTextNodeEditing = useCallback((nodeId?: string) => {
+    setEditingTextNodeId((current) => !nodeId || current === nodeId ? null : current);
+  }, []);
   const runtime = useMemo<CanvasRuntime>(() => ({
+    editTextNode,
+    editingTextNodeId,
     fileOptions: safeFileOptions,
     fileOptionsByPath,
     onOpenFile,
     patchNode,
-    readOnly: canvasReadOnly
-  }), [canvasReadOnly, fileOptionsByPath, onOpenFile, patchNode, safeFileOptions]);
+    readOnly: canvasReadOnly,
+    stopTextNodeEditing
+  }), [canvasReadOnly, editTextNode, editingTextNodeId, fileOptionsByPath, onOpenFile, patchNode, safeFileOptions, stopTextNodeEditing]);
 
   const changeNodes = useCallback((changes: NodeChange<CanvasFlowNode>[]) => {
     if (canvasReadOnly && changes.some((change) => change.type !== "select")) {
       return;
     }
-    const nextNodes = applyNodeChanges(changes, nodesRef.current);
+    const previousNodes = nodesRef.current;
+    let nextNodes = applyNodeChanges(changes, previousNodes);
+    const groupDrag = groupDragRef.current;
+    if (groupDrag) {
+      const previousGroup = previousNodes.find((node) => node.id === groupDrag.groupId);
+      const nextGroup = nextNodes.find((node) => node.id === groupDrag.groupId);
+      const explicitPositionChanges = new Set(changes.flatMap((change) => (
+        change.type === "position" ? [change.id] : []
+      )));
+      const deltaX = (nextGroup?.position.x ?? 0) - (previousGroup?.position.x ?? 0);
+      const deltaY = (nextGroup?.position.y ?? 0) - (previousGroup?.position.y ?? 0);
+      if ((deltaX || deltaY) && Number.isFinite(deltaX) && Number.isFinite(deltaY)) {
+        nextNodes = nextNodes.map((node) => (
+          groupDrag.memberIds.has(node.id) && !explicitPositionChanges.has(node.id)
+            ? { ...node, position: { x: node.position.x + deltaX, y: node.position.y + deltaY } }
+            : node
+        ));
+      }
+    }
     if (changes.every((change) => change.type === "select")) {
       nodesRef.current = nextNodes;
       setNodes(nextNodes);
@@ -615,6 +1082,30 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
       return;
     }
     commit(nextNodes, nextEdges);
+  }, [canvasReadOnly, commit]);
+
+  const startNodeDrag = useCallback<OnNodeDrag<CanvasFlowNode>>((_event, node) => {
+    if (canvasReadOnly || node.data.canvas.type !== "group") {
+      groupDragRef.current = null;
+      return;
+    }
+    const document = canvasDocumentFromFlow(nodesRef.current, edgesRef.current, documentRef.current);
+    groupDragRef.current = {
+      groupId: node.id,
+      memberIds: containedJsonCanvasNodeIds(document, new Set([node.id]))
+    };
+  }, [canvasReadOnly]);
+
+  const stopNodeDrag = useCallback<OnNodeDrag<CanvasFlowNode>>((_event, node) => {
+    const draggedGroup = groupDragRef.current;
+    groupDragRef.current = null;
+    if (canvasReadOnly || draggedGroup?.groupId !== node.id) {
+      return;
+    }
+    commit(nodesRef.current, edgesRef.current);
+    if (draggedGroup.memberIds.size > 0) {
+      setStatus(`그룹과 안의 카드 ${draggedGroup.memberIds.size}개를 함께 옮겼습니다.`);
+    }
   }, [canvasReadOnly, commit]);
 
   const changeEdges = useCallback((changes: EdgeChange<CanvasFlowEdge>[]) => {
@@ -674,6 +1165,207 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
     commit([...unselected, flowNode(node, true)], edgesRef.current.map((edge) => ({ ...edge, selected: false })));
   }, [commit]);
 
+  const hasVaultEntryDragType = useCallback((event: ReactDragEvent<HTMLElement>) =>
+    containsJsonCanvasVaultEntryDragType(Array.from(event.dataTransfer.types)), []);
+
+  const hasExternalFileDragType = useCallback((event: ReactDragEvent<HTMLElement>) =>
+    Array.from(event.dataTransfer.types).includes("Files"), []);
+
+  const dropFlowPosition = useCallback((clientX: number, clientY: number) => {
+    const flowInstance = flowInstanceRef.current;
+    if (!flowInstance) {
+      return null;
+    }
+    let position = flowInstance.screenToFlowPosition({ x: clientX, y: clientY });
+    if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) {
+      const viewport = flowInstance.getViewport();
+      const bounds = canvasSectionRef.current?.getBoundingClientRect();
+      if (
+        bounds
+        && Number.isFinite(clientX)
+        && Number.isFinite(clientY)
+        && Number.isFinite(viewport.x)
+        && Number.isFinite(viewport.y)
+        && Number.isFinite(viewport.zoom)
+        && viewport.zoom > 0
+      ) {
+        position = {
+          x: (clientX - bounds.left - viewport.x) / viewport.zoom,
+          y: (clientY - bounds.top - viewport.y) / viewport.zoom
+        };
+      }
+    }
+    return Number.isFinite(position.x) && Number.isFinite(position.y) ? position : null;
+  }, []);
+
+  const handleExternalDragOver = useCallback((event: ReactDragEvent<HTMLElement>) => {
+    const vaultEntryDrag = hasVaultEntryDragType(event);
+    const externalFileDrag = !vaultEntryDrag && hasExternalFileDragType(event);
+    if (!vaultEntryDrag && !externalFileDrag) {
+      return;
+    }
+    event.preventDefault();
+    if (
+      canvasReadOnly
+      || (vaultEntryDrag && !resolveVaultEntryDrop)
+      || (externalFileDrag && !onImportExternalFiles)
+    ) {
+      event.dataTransfer.dropEffect = "none";
+      setExternalDropActive(false);
+      return;
+    }
+    event.dataTransfer.dropEffect = "copy";
+    setExternalDropActive(true);
+  }, [
+    canvasReadOnly,
+    hasExternalFileDragType,
+    hasVaultEntryDragType,
+    onImportExternalFiles,
+    resolveVaultEntryDrop
+  ]);
+
+  const handleExternalDragLeave = useCallback((event: ReactDragEvent<HTMLElement>) => {
+    const relatedTarget = event.relatedTarget;
+    if (!(relatedTarget instanceof Node) || !event.currentTarget.contains(relatedTarget)) {
+      setExternalDropActive(false);
+    }
+  }, []);
+
+  const handleExternalDrop = useCallback(async (event: ReactDragEvent<HTMLElement>) => {
+    const vaultEntryDrag = hasVaultEntryDragType(event);
+    const externalFileDrag = !vaultEntryDrag && hasExternalFileDragType(event);
+    if (!vaultEntryDrag && !externalFileDrag) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setExternalDropActive(false);
+    const clientX = event.clientX;
+    const clientY = event.clientY;
+
+    if (canvasReadOnly) {
+      setStatus("읽기 전용 Canvas에는 파일을 놓을 수 없습니다.");
+      return;
+    }
+    if (externalFileDrag) {
+      if (!onImportExternalFiles) {
+        setStatus("외부 파일을 암호화해 저장하는 연결이 준비되지 않았습니다.");
+        return;
+      }
+      const files = Array.from(event.dataTransfer.files).slice(0, MAX_CANVAS_EXTERNAL_DROP_FILES);
+      const available = MAX_CANVAS_DROP_NODES - nodesRef.current.length;
+      const position = dropFlowPosition(clientX, clientY);
+      if (!files.length || available <= 0 || !position) {
+        setStatus(!files.length
+          ? "드래그한 외부 파일을 확인하지 못했습니다."
+          : !position
+            ? "Canvas가 준비된 뒤 다시 놓아 주세요."
+            : "Canvas 카드 수가 안전한 편집 제한에 도달했습니다.");
+        return;
+      }
+      setStatus(`${files.length}개 외부 파일을 E2EE asset-v1로 저장하는 중입니다…`);
+      let importResult: { paths: readonly string[]; rejected: number };
+      try {
+        importResult = await onImportExternalFiles(files);
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "외부 파일을 암호화해 저장하지 못했습니다.");
+        return;
+      }
+      const rejectedCount = Number.isSafeInteger(importResult.rejected) && importResult.rejected > 0
+        ? Math.min(files.length, importResult.rejected)
+        : 0;
+      const existingNodeIds = new Set(nodesRef.current.map((candidate) => candidate.id));
+      const created: CanvasFlowNode[] = [];
+      for (const [index, importedPath] of importResult.paths.slice(0, available).entries()) {
+        const node = createDroppedJsonCanvasFileNode({
+          existingNodeIds,
+          path: importedPath,
+          position: { x: position.x + index * 24, y: position.y + index * 24 },
+          snapToGrid
+        });
+        if (node) {
+          existingNodeIds.add(node.id);
+          created.push(flowNode(node, true));
+        }
+      }
+      if (!created.length) {
+        setStatus(rejectedCount >= files.length
+          ? "외부 파일을 안전 제한 또는 저장 오류로 추가하지 못했습니다."
+          : "암호화 저장 결과에서 안전한 Vault 경로를 확인하지 못했습니다.");
+        return;
+      }
+      commit(
+        [...nodesRef.current.map((node) => ({ ...node, selected: false })), ...created],
+        edgesRef.current.map((edge) => ({ ...edge, selected: false }))
+      );
+      setStatus(`${created.length}개 외부 파일을 암호화해 Canvas에 추가했습니다.${rejectedCount ? ` ${rejectedCount}개는 안전 제한 또는 저장 오류로 제외했습니다.` : ""}`);
+      return;
+    }
+    if (!resolveVaultEntryDrop) {
+      setStatus("파일 탐색기 드래그 연결이 준비되지 않았습니다. 노트 추가 도구를 사용하세요.");
+      return;
+    }
+    if (nodesRef.current.length >= MAX_CANVAS_DROP_NODES) {
+      setStatus("Canvas 카드 수가 안전한 편집 제한에 도달했습니다.");
+      return;
+    }
+
+    let rawPayload = "";
+    try {
+      rawPayload = event.dataTransfer.getData(JSON_CANVAS_VAULT_ENTRY_MIME);
+    } catch {
+      setStatus("드래그한 노트를 확인할 수 없습니다.");
+      return;
+    }
+    const payload = parseJsonCanvasVaultEntryDragPayload(rawPayload);
+    if (!payload) {
+      setStatus("안전하지 않거나 만료된 노트 드래그를 거부했습니다.");
+      return;
+    }
+
+    let resolvedPath: string | null | undefined;
+    try {
+      resolvedPath = resolveVaultEntryDrop(payload.entryId);
+    } catch {
+      setStatus("드래그한 노트에 접근할 수 없습니다.");
+      return;
+    }
+    const safePath = safeVaultPath(resolvedPath ?? undefined);
+    if (!safePath || !fileOptionsByPath.has(safePath)) {
+      setStatus("현재 Vault에서 열 수 없는 노트는 추가하지 않았습니다.");
+      return;
+    }
+
+    const position = dropFlowPosition(clientX, clientY);
+    if (!position) {
+      setStatus("Canvas가 준비된 뒤 다시 놓아 주세요.");
+      return;
+    }
+    const node = createDroppedJsonCanvasFileNode({
+      existingNodeIds: new Set(nodesRef.current.map((candidate) => candidate.id)),
+      path: safePath,
+      position,
+      snapToGrid
+    });
+    if (!node) {
+      setStatus("노트를 안전한 Canvas 위치에 추가할 수 없습니다.");
+      return;
+    }
+    addNode(node);
+    setStatus("노트 카드를 놓은 위치에 추가했습니다.");
+  }, [
+    addNode,
+    canvasReadOnly,
+    commit,
+    dropFlowPosition,
+    fileOptionsByPath,
+    hasExternalFileDragType,
+    hasVaultEntryDragType,
+    onImportExternalFiles,
+    resolveVaultEntryDrop,
+    snapToGrid
+  ]);
+
   const addTextNode = useCallback(() => {
     const offset = (nodesRef.current.length % 8) * 28;
     addNode({ id: createCanvasId("node"), type: "text", x: 80 + offset, y: 80 + offset, width: 280, height: 160, text: "새 메모" });
@@ -710,6 +1402,189 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
   const selectedEdges = useMemo(() => edges.filter((edge) => edge.selected), [edges]);
   const selectedCount = selectedNodeIds.size + selectedEdges.length;
 
+  useEffect(() => {
+    if (edgeLabelEditRequest && selectedEdges.some((edge) => edge.id === edgeLabelEditRequest)) {
+      edgeLabelInputRef.current?.focus();
+      edgeLabelInputRef.current?.select();
+      setEdgeLabelEditRequest(null);
+    }
+  }, [edgeLabelEditRequest, selectedEdges]);
+
+  const selectCanvasItems = useCallback((nodeIds: ReadonlySet<string>, edgeIds: ReadonlySet<string> = new Set()) => {
+    const nextNodes = nodesRef.current.map((node) => node.selected === nodeIds.has(node.id)
+      ? node
+      : { ...node, selected: nodeIds.has(node.id) });
+    const nextEdges = edgesRef.current.map((edge) => edge.selected === edgeIds.has(edge.id)
+      ? edge
+      : flowEdge(edge.data ?? {
+        id: edge.id,
+        fromNode: edge.source,
+        toNode: edge.target
+      }, edgeIds.has(edge.id)));
+    nodesRef.current = nextNodes;
+    edgesRef.current = nextEdges;
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+  }, []);
+
+  const handleCanvasDoubleClick = useCallback((event: ReactMouseEvent<HTMLElement>) => {
+    if (
+      canvasReadOnly
+      || event.button !== 0
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.shiftKey
+      || !(event.target instanceof HTMLElement)
+    ) {
+      return;
+    }
+    const nodeElement = event.target.closest<HTMLElement>(".react-flow__node");
+    const node = nodesRef.current.find((candidate) => candidate.id === nodeElement?.dataset.id);
+    if (node?.data.canvas.type === "text") {
+      event.preventDefault();
+      editTextNode(node.id);
+      return;
+    }
+    if (!event.target.classList.contains("react-flow__pane")) {
+      return;
+    }
+    const position = dropFlowPosition(event.clientX, event.clientY);
+    const x = boundedDropCoordinate(position?.x ?? Number.NaN, CANVAS_DROP_GRID[0], snapToGrid);
+    const y = boundedDropCoordinate(position?.y ?? Number.NaN, CANVAS_DROP_GRID[1], snapToGrid);
+    if (x === null || y === null) {
+      return;
+    }
+    event.preventDefault();
+    addNode({ id: createCanvasId("node"), type: "text", x, y, width: 280, height: 160, text: "" });
+    setStatus("선택한 위치에 텍스트 카드를 추가했습니다.");
+  }, [addNode, canvasReadOnly, dropFlowPosition, editTextNode, snapToGrid]);
+
+  const selectGroupContents = useCallback((groupId: string) => {
+    const current = canvasDocumentFromFlow(nodesRef.current, edgesRef.current, documentRef.current);
+    const expanded = expandJsonCanvasGroupSelection(current, new Set([groupId]));
+    selectCanvasItems(expanded);
+    setStatus(`그룹과 안의 카드 ${Math.max(0, expanded.size - 1)}개를 선택했습니다.`);
+  }, [selectCanvasItems]);
+
+  const nudgeSelection = useCallback((deltaX: number, deltaY: number) => {
+    if (canvasReadOnly || selectedNodeIds.size === 0) {
+      return;
+    }
+    const current = canvasDocumentFromFlow(nodesRef.current, edgesRef.current, documentRef.current);
+    const effectiveSelection = expandJsonCanvasGroupSelection(current, selectedNodeIds);
+    const translated = translateJsonCanvasNodes(current, effectiveSelection, deltaX, deltaY);
+    const selectedEdgeIds = new Set(selectedEdges.map((edge) => edge.id));
+    const nextFlow = documentToFlow(translated, selectedNodeIds, selectedEdgeIds);
+    commit(nextFlow.nodes, nextFlow.edges);
+    setStatus(`선택한 카드를 ${Math.abs(deltaX || deltaY)}px 옮겼습니다.`);
+  }, [canvasReadOnly, commit, selectedEdges, selectedNodeIds]);
+
+  const openNodeContextMenu = useCallback<NodeMouseHandler<CanvasFlowNode>>((event, node) => {
+    event.preventDefault();
+    if (!node.selected) {
+      selectCanvasItems(new Set([node.id]));
+    }
+    setContextMenu({
+      clientX: event.clientX,
+      clientY: event.clientY,
+      kind: "node",
+      targetId: node.id
+    });
+  }, [selectCanvasItems]);
+
+  const openEdgeContextMenu = useCallback((event: ReactMouseEvent, edge: CanvasFlowEdge) => {
+    event.preventDefault();
+    if (!edge.selected) {
+      selectCanvasItems(new Set(), new Set([edge.id]));
+    }
+    setContextMenu({
+      clientX: event.clientX,
+      clientY: event.clientY,
+      kind: "edge",
+      targetId: edge.id
+    });
+  }, [selectCanvasItems]);
+
+  const editEdgeLabel = useCallback((event: ReactMouseEvent, edge: CanvasFlowEdge) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!edge.selected) {
+      selectCanvasItems(new Set(), new Set([edge.id]));
+    }
+    setEdgeLabelEditRequest(edge.id);
+    setStatus("연결선 이름을 편집합니다.");
+  }, [selectCanvasItems]);
+
+  const openPaneContextMenu = useCallback((event: ReactMouseEvent | MouseEvent) => {
+    event.preventDefault();
+    const flowPosition = flowInstanceRef.current?.screenToFlowPosition({
+      x: event.clientX,
+      y: event.clientY
+    });
+    setContextMenu({
+      clientX: event.clientX,
+      clientY: event.clientY,
+      flowPosition: flowPosition && Number.isFinite(flowPosition.x) && Number.isFinite(flowPosition.y)
+        ? flowPosition
+        : undefined,
+      kind: "pane"
+    });
+  }, []);
+
+  const startLongPress = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    cancelLongPress();
+    if (event.pointerType !== "touch" || isFormControl(event.target)) {
+      return;
+    }
+    const nodeElement = event.target instanceof HTMLElement
+      ? event.target.closest<HTMLElement>(".react-flow__node")
+      : null;
+    const nodeId = nodeElement?.dataset.id;
+    if (!nodeId || !nodesRef.current.some((node) => node.id === nodeId)) {
+      return;
+    }
+    const pending: CanvasLongPressState = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      nodeId,
+      pointerId: event.pointerId,
+      timer: setTimeout(() => {
+        if (longPressRef.current !== pending) {
+          return;
+        }
+        const target = nodesRef.current.find((node) => node.id === pending.nodeId);
+        if (!target) {
+          longPressRef.current = null;
+          return;
+        }
+        if (!target.selected) {
+          selectCanvasItems(new Set([target.id]));
+        }
+        setContextMenu({
+          clientX: pending.clientX,
+          clientY: pending.clientY,
+          kind: "node",
+          targetId: target.id
+        });
+        setStatus("길게 눌러 Canvas 항목 메뉴를 열었습니다.");
+        longPressRef.current = null;
+      }, CANVAS_LONG_PRESS_MS)
+    };
+    longPressRef.current = pending;
+  }, [cancelLongPress, selectCanvasItems]);
+
+  const moveLongPress = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    const pending = longPressRef.current;
+    if (
+      pending
+      && pending.pointerId === event.pointerId
+      && Math.hypot(event.clientX - pending.clientX, event.clientY - pending.clientY) > CANVAS_LONG_PRESS_MOVE_TOLERANCE_PX
+    ) {
+      cancelLongPress(event.pointerId);
+    }
+  }, [cancelLongPress]);
+
   const duplicateSelection = useCallback(() => {
     if (canvasReadOnly || selectedNodeIds.size === 0) {
       return;
@@ -743,6 +1618,39 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
     commit(nextFlow.nodes, nextFlow.edges);
     setStatus("선택한 카드를 정렬했습니다.");
   }, [commit, selectedEdges, selectedNodeIds]);
+
+  const distributeSelection = useCallback((distribution: CanvasDistribution) => {
+    if (canvasReadOnly || selectedNodeIds.size < 3) {
+      setStatus("배치하려면 카드를 세 개 이상 선택하세요.");
+      return;
+    }
+    const selectedEdgeIds = new Set(selectedEdges.map((edge) => edge.id));
+    const current = canvasDocumentFromFlow(nodesRef.current, edgesRef.current, documentRef.current);
+    const distributed = distributeJsonCanvasNodes(current, selectedNodeIds, distribution);
+    const nextFlow = documentToFlow(distributed, selectedNodeIds, selectedEdgeIds);
+    commit(nextFlow.nodes, nextFlow.edges);
+    setStatus(distribution === "horizontal"
+      ? "선택한 카드의 가로 간격을 같게 배치했습니다."
+      : "선택한 카드의 세로 간격을 같게 배치했습니다.");
+  }, [canvasReadOnly, commit, selectedEdges, selectedNodeIds]);
+
+  const reorderSelection = useCallback((stackOrder: CanvasStackOrder) => {
+    if (
+      canvasReadOnly
+      || selectedNodeIds.size === 0
+      || selectedNodeIds.size === nodesRef.current.length
+    ) {
+      return;
+    }
+    const selectedEdgeIds = new Set(selectedEdges.map((edge) => edge.id));
+    const current = canvasDocumentFromFlow(nodesRef.current, edgesRef.current, documentRef.current);
+    const reordered = reorderJsonCanvasNodes(current, selectedNodeIds, stackOrder);
+    const nextFlow = documentToFlow(reordered, selectedNodeIds, selectedEdgeIds);
+    commit(nextFlow.nodes, nextFlow.edges);
+    setStatus(stackOrder === "front"
+      ? "선택한 카드를 맨 앞으로 옮겼습니다."
+      : "선택한 카드를 맨 뒤로 옮겼습니다.");
+  }, [canvasReadOnly, commit, selectedEdges, selectedNodeIds]);
 
   const applyColor = useCallback((color: string | undefined) => {
     if (canvasReadOnly || selectedCount === 0) {
@@ -780,12 +1688,81 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
     : "none-arrow";
 
   const changeEdgeDirection = useCallback((value: string) => {
-    const [fromEnd, toEnd] = value.split("-") as ["none" | "arrow", "none" | "arrow"];
-    patchSelectedEdge({ fromEnd, toEnd });
+    const ends = jsonCanvasEdgeEndsForDirection(value);
+    if (ends) patchSelectedEdge(ends);
   }, [patchSelectedEdge]);
+
+  const fitCanvasNodes = useCallback((nodeIds?: ReadonlySet<string>) => {
+    const instance = flowInstanceRef.current;
+    if (!instance) {
+      return false;
+    }
+    const targetNodes = nodeIds
+      ? nodesRef.current.filter((node) => nodeIds.has(node.id))
+      : nodesRef.current;
+    if (!targetNodes.length) {
+      return false;
+    }
+    void instance.fitView({ nodes: targetNodes, padding: 0.16 });
+    return true;
+  }, []);
 
   const handleKeyDown = useCallback((event: ReactKeyboardEvent<HTMLElement>) => {
     if (isFormControl(event.target)) {
+      return;
+    }
+    if (event.key === "Escape") {
+      stopTextNodeEditing();
+      if (contextMenu) {
+        event.preventDefault();
+        closeContextMenu();
+      } else if (selectedCount > 0) {
+        event.preventDefault();
+        selectCanvasItems(new Set());
+        setStatus("선택을 해제했습니다.");
+      }
+      return;
+    }
+    if (event.shiftKey && event.key === "F10") {
+      const focusedNode = event.target instanceof HTMLElement
+        ? event.target.closest<HTMLElement>(".react-flow__node")
+        : null;
+      const focusedNodeId = focusedNode?.dataset.id;
+      const candidate = nodesRef.current.find((node) => node.id === focusedNodeId)
+        ?? nodesRef.current.find((node) => node.selected);
+      const bounds = focusedNode?.getBoundingClientRect() ?? canvasSectionRef.current?.getBoundingClientRect();
+      if (candidate && bounds) {
+        event.preventDefault();
+        if (!candidate.selected) {
+          selectCanvasItems(new Set([candidate.id]));
+        }
+        setContextMenu({
+          clientX: bounds.left + Math.min(24, bounds.width / 2),
+          clientY: bounds.top + Math.min(24, bounds.height / 2),
+          kind: "node",
+          targetId: candidate.id
+        });
+      }
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "a") {
+      event.preventDefault();
+      selectCanvasItems(new Set(nodesRef.current.map((node) => node.id)));
+      setStatus("Canvas 카드를 모두 선택했습니다.");
+      return;
+    }
+    if (event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && event.code === "Digit1") {
+      if (fitCanvasNodes()) {
+        event.preventDefault();
+        setStatus("Canvas 전체를 화면에 맞춰 표시했습니다.");
+      }
+      return;
+    }
+    if (event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && event.code === "Digit2") {
+      if (selectedNodeIds.size > 0 && fitCanvasNodes(selectedNodeIds)) {
+        event.preventDefault();
+        setStatus("선택한 카드를 화면에 맞춰 표시했습니다.");
+      }
       return;
     }
     if (event.key === "Enter") {
@@ -802,6 +1779,16 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
         return;
       }
     }
+    if (!event.altKey && !event.ctrlKey && !event.metaKey && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      const step = (snapToGrid ? CANVAS_DROP_GRID[0] : 1) * (event.shiftKey ? 5 : 1);
+      const deltaX = event.key === "ArrowLeft" ? -step : event.key === "ArrowRight" ? step : 0;
+      const deltaY = event.key === "ArrowUp" ? -step : event.key === "ArrowDown" ? step : 0;
+      if (selectedNodeIds.size > 0 && !canvasReadOnly) {
+        event.preventDefault();
+        nudgeSelection(deltaX, deltaY);
+        return;
+      }
+    }
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "d") {
       event.preventDefault();
       duplicateSelection();
@@ -811,14 +1798,45 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
       event.preventDefault();
       deleteSelection();
     }
-  }, [deleteSelection, duplicateSelection, onOpenFile]);
+  }, [
+    canvasReadOnly,
+    closeContextMenu,
+    contextMenu,
+    deleteSelection,
+    duplicateSelection,
+    fitCanvasNodes,
+    nudgeSelection,
+    onOpenFile,
+    selectCanvasItems,
+    selectedCount,
+    selectedNodeIds,
+    snapToGrid,
+    stopTextNodeEditing
+  ]);
 
-  const handleNodeDoubleClick: NodeMouseHandler<CanvasFlowNode> = (_event, node) => {
+  const handleNodeClick = useCallback<NodeMouseHandler<CanvasFlowNode>>((event, node) => {
+    if (
+      event.defaultPrevented
+      || event.button !== 0
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.shiftKey
+    ) {
+      return;
+    }
+    stopTextNodeEditing();
     const file = node.data.canvas.type === "file" ? safeVaultPath(node.data.canvas.file) : null;
     if (file) {
       onOpenFile(file);
+      setStatus("원본 노트를 열었습니다.");
     }
-  };
+  }, [onOpenFile, stopTextNodeEditing]);
+
+  const handlePaneClick = useCallback(() => {
+    closeContextMenu();
+    stopTextNodeEditing();
+  }, [closeContextMenu, stopTextNodeEditing]);
 
   const handleSelectionChange = useCallback(({ nodes: selectedNodes, edges: selectedFlowEdges }: OnSelectionChangeParams<CanvasFlowNode, CanvasFlowEdge>) => {
     const nodeIds = new Set(selectedNodes.map((node) => node.id));
@@ -831,9 +1849,235 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
     }, edgeIds.has(edge.id)));
   }, []);
 
+  const contextMenuActions = useMemo<readonly CanvasContextMenuAction[]>(() => {
+    if (!contextMenu) {
+      return [];
+    }
+    if (contextMenu.kind === "node") {
+      const target = nodes.find((node) => node.id === contextMenu.targetId);
+      if (!target) {
+        return [];
+      }
+      const canvas = target.data.canvas;
+      const file = canvas.type === "file" ? safeVaultPath(canvas.file) : null;
+      return [
+        ...(file ? [{
+          id: "open-file",
+          label: "원본 열기"
+        }] : []),
+        ...(canvas.type === "group" ? [{
+          id: "select-group",
+          label: "그룹과 안의 카드 선택"
+        }] : []),
+        {
+          disabled: canvasReadOnly,
+          id: "duplicate",
+          label: canvas.type === "group" ? "그룹과 안의 카드 복제" : "선택 카드 복제"
+        },
+        {
+          disabled: canvasReadOnly || selectedNodeIds.size === nodes.length,
+          id: "front",
+          label: "맨 앞으로"
+        },
+        {
+          disabled: canvasReadOnly || selectedNodeIds.size === nodes.length,
+          id: "back",
+          label: "맨 뒤로"
+        },
+        {
+          destructive: true,
+          disabled: canvasReadOnly,
+          id: "delete",
+          label: "선택 항목 삭제"
+        }
+      ];
+    }
+    if (contextMenu.kind === "edge") {
+      const target = edges.find((edge) => edge.id === contextMenu.targetId);
+      return [
+        {
+          disabled: !target || !nodes.some((node) => node.id === target.source),
+          id: "edge-go-source",
+          label: "시작 카드로 이동"
+        },
+        {
+          disabled: !target || !nodes.some((node) => node.id === target.target),
+          id: "edge-go-target",
+          label: "대상 카드로 이동"
+        },
+        {
+          disabled: canvasReadOnly,
+          id: "edge-forward",
+          label: "화살표 앞으로"
+        },
+        {
+          disabled: canvasReadOnly,
+          id: "edge-reverse",
+          label: "화살표 뒤로"
+        },
+        {
+          disabled: canvasReadOnly,
+          id: "edge-bidirectional",
+          label: "화살표 양방향"
+        },
+        {
+          disabled: canvasReadOnly,
+          id: "edge-none",
+          label: "방향 없음"
+        },
+        {
+          destructive: true,
+          disabled: canvasReadOnly,
+          id: "delete",
+          label: "연결선 삭제"
+        }
+      ];
+    }
+    const position = contextMenu.flowPosition;
+    const x = boundedDropCoordinate(position?.x ?? Number.NaN, CANVAS_DROP_GRID[0], snapToGrid);
+    const y = boundedDropCoordinate(position?.y ?? Number.NaN, CANVAS_DROP_GRID[1], snapToGrid);
+    return [
+      {
+        disabled: canvasReadOnly || x === null || y === null,
+        id: "add-text",
+        label: "여기에 텍스트 카드 추가"
+      },
+      {
+        disabled: canvasReadOnly || x === null || y === null,
+        id: "add-group",
+        label: "여기에 그룹 추가"
+      },
+      {
+        disabled: nodes.length === 0,
+        id: "select-all",
+        label: "모든 카드 선택"
+      }
+    ];
+  }, [
+    canvasReadOnly,
+    contextMenu,
+    edges,
+    nodes,
+    selectedNodeIds.size,
+    snapToGrid
+  ]);
+
+  const handleContextMenuAction = useCallback((actionId: string) => {
+    if (!contextMenu) {
+      return;
+    }
+    if (actionId === "open-file" && contextMenu.targetId) {
+      const target = nodesRef.current.find((node) => node.id === contextMenu.targetId);
+      const file = target?.data.canvas.type === "file" ? safeVaultPath(target.data.canvas.file) : null;
+      if (file) {
+        onOpenFile(file);
+        setStatus("원본 노트를 열었습니다.");
+      }
+      return;
+    }
+    if (actionId === "select-group" && contextMenu.targetId) {
+      selectGroupContents(contextMenu.targetId);
+      return;
+    }
+    if (actionId === "duplicate") {
+      duplicateSelection();
+      return;
+    }
+    if (actionId === "front" || actionId === "back") {
+      reorderSelection(actionId);
+      return;
+    }
+    if (actionId === "delete") {
+      deleteSelection();
+      return;
+    }
+    if ((actionId === "edge-go-source" || actionId === "edge-go-target") && contextMenu.targetId) {
+      const edge = edgesRef.current.find((candidate) => candidate.id === contextMenu.targetId);
+      const data = edge?.data ?? (edge ? { fromNode: edge.source, toNode: edge.target } : undefined);
+      const nodeId = data
+        ? jsonCanvasEdgeNavigationNodeId(data, actionId === "edge-go-source" ? "source" : "target")
+        : undefined;
+      if (nodeId && fitCanvasNodes(new Set([nodeId]))) {
+        selectCanvasItems(new Set([nodeId]));
+        setStatus(actionId === "edge-go-source"
+          ? "연결선 시작 카드로 이동했습니다."
+          : "연결선 대상 카드로 이동했습니다.");
+      }
+      return;
+    }
+    if (["edge-forward", "edge-reverse", "edge-bidirectional", "edge-none"].includes(actionId)) {
+      const direction = actionId === "edge-forward"
+        ? "none-arrow"
+        : actionId === "edge-reverse"
+          ? "arrow-none"
+          : actionId === "edge-bidirectional"
+            ? "arrow-arrow"
+            : "none-none";
+      const ends = jsonCanvasEdgeEndsForDirection(direction);
+      if (ends) patchSelectedEdge(ends);
+      return;
+    }
+    if (actionId === "select-all") {
+      selectCanvasItems(new Set(nodesRef.current.map((node) => node.id)));
+      return;
+    }
+    if (actionId === "add-text" || actionId === "add-group") {
+      const position = contextMenu.flowPosition;
+      const x = boundedDropCoordinate(position?.x ?? Number.NaN, CANVAS_DROP_GRID[0], snapToGrid);
+      const y = boundedDropCoordinate(position?.y ?? Number.NaN, CANVAS_DROP_GRID[1], snapToGrid);
+      if (x === null || y === null) {
+        return;
+      }
+      addNode(actionId === "add-text"
+        ? { id: createCanvasId("node"), type: "text", x, y, width: 280, height: 160, text: "새 메모" }
+        : { id: createCanvasId("node"), type: "group", x, y, width: 640, height: 420, label: "새 그룹" });
+      setStatus(actionId === "add-text"
+        ? "선택한 위치에 텍스트 카드를 추가했습니다."
+        : "선택한 위치에 그룹을 추가했습니다.");
+    }
+  }, [
+    addNode,
+    contextMenu,
+    deleteSelection,
+    duplicateSelection,
+    fitCanvasNodes,
+    onOpenFile,
+    patchSelectedEdge,
+    reorderSelection,
+    selectCanvasItems,
+    selectGroupContents,
+    snapToGrid
+  ]);
+
   return (
     <CanvasRuntimeContext.Provider value={runtime}>
-      <section aria-label="Canvas" className="vault-json-canvas" onKeyDown={handleKeyDown} tabIndex={0}>
+      <section
+        ref={canvasSectionRef}
+        aria-busy={!flowReady}
+        aria-describedby={dropHelpId}
+        aria-label="Canvas"
+        className={`vault-json-canvas${externalDropActive ? " vault-json-canvas--external-drop" : ""}`}
+        onDragLeave={handleExternalDragLeave}
+        onDragOver={handleExternalDragOver}
+        onDrop={handleExternalDrop}
+        onDoubleClick={handleCanvasDoubleClick}
+        onKeyDownCapture={handleKeyDown}
+        onPointerCancelCapture={(event) => cancelLongPress(event.pointerId)}
+        onPointerDownCapture={startLongPress}
+        onPointerMoveCapture={moveLongPress}
+        onPointerUpCapture={(event) => cancelLongPress(event.pointerId)}
+        tabIndex={0}
+      >
+        <p className="sr-only" id={dropHelpId}>
+          {canvasReadOnly
+            ? "이 Canvas는 읽기 전용입니다. 노트 카드와 연결을 탐색할 수 있습니다."
+            : `${resolveVaultEntryDrop ? "파일 탐색기에서 노트를 끌어 Canvas에 놓을 수 있습니다. " : ""}${onImportExternalFiles ? "운영체제 파일은 E2EE asset-v1로 저장한 뒤 카드로 추가합니다. " : ""}키보드나 터치 환경에서는 아래 Canvas 편집 도구의 노트 추가 버튼을 사용하세요.`}
+        </p>
+        {externalDropActive ? (
+          <div aria-hidden="true" className="vault-canvas-external-drop-indicator">
+            여기에 놓아 Canvas 카드 추가
+          </div>
+        ) : null}
         {parseResult.warnings.length > 0 ? (
           <div className="vault-canvas-warning" role="alert">
             <strong>읽기 전용으로 열었습니다.</strong>
@@ -882,21 +2126,66 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
                   {ALIGNMENTS.map((alignment) => <option key={alignment.value} value={alignment.value}>{alignment.label}</option>)}
                 </select>
               </label>
+              <div aria-label="카드 배치와 순서" className="vault-canvas-toolbar-subgroup" role="group">
+                <button
+                  aria-label="선택 카드 가로 간격 같게 배치"
+                  disabled={selectedNodeIds.size < 3}
+                  onClick={() => distributeSelection("horizontal")}
+                  title="가로 간격 같게 배치"
+                  type="button"
+                >
+                  <Columns3 aria-hidden="true" size={16} />
+                </button>
+                <button
+                  aria-label="선택 카드 세로 간격 같게 배치"
+                  disabled={selectedNodeIds.size < 3}
+                  onClick={() => distributeSelection("vertical")}
+                  title="세로 간격 같게 배치"
+                  type="button"
+                >
+                  <Rows3 aria-hidden="true" size={16} />
+                </button>
+                <button
+                  aria-label="선택 카드를 맨 앞으로"
+                  disabled={selectedNodeIds.size === 0 || selectedNodeIds.size === nodes.length}
+                  onClick={() => reorderSelection("front")}
+                  title="맨 앞으로"
+                  type="button"
+                >
+                  <BringToFront aria-hidden="true" size={16} />
+                </button>
+                <button
+                  aria-label="선택 카드를 맨 뒤로"
+                  disabled={selectedNodeIds.size === 0 || selectedNodeIds.size === nodes.length}
+                  onClick={() => reorderSelection("back")}
+                  title="맨 뒤로"
+                  type="button"
+                >
+                  <SendToBack aria-hidden="true" size={16} />
+                </button>
+              </div>
               <label className="vault-canvas-snap-toggle">
                 <input checked={snapToGrid} onChange={(event) => setSnapToGrid(event.target.checked)} type="checkbox" />
                 <Grid3X3 aria-hidden="true" size={15} /> 스냅
               </label>
               <div aria-label="선택 항목 색상" className="vault-canvas-palette" role="group">
-                <button aria-label="기본 색상" disabled={selectedCount === 0} onClick={() => applyColor(undefined)} type="button" />
+                <button aria-label="기본 색상" disabled={selectedCount === 0} onClick={() => applyColor(undefined)} type="button">
+                  <span aria-hidden="true" className="vault-canvas-color-swatch vault-canvas-color-swatch--default" />
+                </button>
                 {CANVAS_COLORS.map((color) => (
                   <button
                     aria-label={`색상 ${color}`}
                     disabled={selectedCount === 0}
                     key={color}
                     onClick={() => applyColor(color)}
-                    style={{ backgroundColor: safeCanvasColor(color) }}
                     type="button"
-                  />
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="vault-canvas-color-swatch"
+                      style={{ backgroundColor: safeCanvasColor(color) }}
+                    />
+                  </button>
                 ))}
               </div>
             </div>
@@ -907,7 +2196,7 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
           <aside aria-label="연결선 설정" className="vault-canvas-edge-editor">
             <label>
               <span>연결선 이름</span>
-              <input onChange={(event) => patchSelectedEdge({ label: event.target.value })} placeholder="라벨" value={selectedEdges[0].data?.label ?? ""} />
+              <input ref={edgeLabelInputRef} onChange={(event) => patchSelectedEdge({ label: event.target.value })} placeholder="라벨" value={selectedEdges[0].data?.label ?? ""} />
             </label>
             <label>
               <span>방향</span>
@@ -928,25 +2217,45 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
           edgesFocusable
           edgesReconnectable={!canvasReadOnly}
           elementsSelectable
-          fitView
+          elevateNodesOnSelect
+          fitView={nodes.length > 0}
           maxZoom={8}
           minZoom={1 / 128}
+          multiSelectionKeyCode={["Meta", "Control", "Shift"]}
+          nodeClickDistance={CANVAS_NODE_INTERACTION_THRESHOLD_PX}
+          nodeDragThreshold={CANVAS_NODE_INTERACTION_THRESHOLD_PX}
           nodeTypes={CANVAS_NODE_TYPES}
           nodes={nodes}
           nodesConnectable={!canvasReadOnly}
           nodesDraggable={!canvasReadOnly}
           nodesFocusable
-          onlyRenderVisibleElements
+          onlyRenderVisibleElements={nodes.length > CANVAS_VISIBLE_ELEMENT_LOD_THRESHOLD}
           onConnect={connect}
+          onEdgeContextMenu={openEdgeContextMenu}
+          onEdgeDoubleClick={editEdgeLabel}
           onEdgesChange={changeEdges}
-          onNodeDoubleClick={handleNodeDoubleClick}
+          onInit={(instance) => {
+            flowInstanceRef.current = instance;
+            setFlowReady(true);
+          }}
+          onNodeClick={handleNodeClick}
+          onNodeContextMenu={openNodeContextMenu}
+          onNodeDragStart={startNodeDrag}
+          onNodeDragStop={stopNodeDrag}
           onNodesChange={changeNodes}
+          onPaneClick={handlePaneClick}
+          onPaneContextMenu={openPaneContextMenu}
           onReconnect={reconnect}
           onSelectionChange={handleSelectionChange}
-          panOnDrag={canvasReadOnly ? true : [1, 2]}
+          panActivationKeyCode="Space"
+          panOnDrag={[1]}
+          panOnScroll
           selectionOnDrag={!canvasReadOnly}
           snapGrid={[20, 20]}
           snapToGrid={snapToGrid}
+          zoomActivationKeyCode={["Meta", "Control", "Space"]}
+          zoomOnDoubleClick={false}
+          zoomOnScroll={false}
         >
           <Background gap={20} size={1} />
           <Controls showInteractive={!canvasReadOnly} />
@@ -959,6 +2268,14 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
             zoomable
           />
         </ReactFlow>
+        {contextMenu && contextMenuActions.length > 0 ? (
+          <CanvasContextMenu
+            {...contextMenu}
+            actions={contextMenuActions}
+            onClose={closeContextMenu}
+            onSelect={handleContextMenuAction}
+          />
+        ) : null}
         <p aria-live="polite" className="sr-only">{status}</p>
       </section>
     </CanvasRuntimeContext.Provider>
@@ -967,13 +2284,21 @@ export function JsonCanvasView({ fileOptions, onChange, onOpenFile, readOnly = f
 
 export {
   alignJsonCanvasNodes,
+  containedJsonCanvasNodeIds,
+  containingJsonCanvasGroupId,
+  distributeJsonCanvasNodes,
   duplicateJsonCanvasSelection,
   effectiveJsonCanvasEdgeEnds,
   emptyJsonCanvas,
+  expandJsonCanvasGroupSelection,
+  jsonCanvasEdgeEndsForDirection,
+  jsonCanvasEdgeNavigationNodeId,
   parseCanvasDocument,
+  reorderJsonCanvasNodes,
   safeCanvasColor,
   safeCanvasDocument,
   safeHttpUrl,
   safeVaultPath,
-  serializeCanvas
+  serializeCanvas,
+  translateJsonCanvasNodes
 };

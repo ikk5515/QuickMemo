@@ -1,56 +1,177 @@
-import { describe, expect, it } from "vitest";
-import type { DecryptedVaultFolder, DecryptedVaultNote } from "./vaultData";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { NoteFolderSnapshot } from "../../services/notes";
 import {
-  buildVaultPaths,
   decryptVaultFolders,
-  resolvedNoteContentFormat,
-  resolvedVaultEntryKind,
-  vaultEntryPath,
-  vaultNotePath
+  migrateLegacyVaultFolder,
+  vaultEntryStorageIdentityState
 } from "./vaultData";
+import { vaultNameFingerprint } from "./vaultIntegrity";
 
-describe("vaultData", () => {
-  it("treats historical notes as legacy HTML", () => {
-    expect(resolvedNoteContentFormat({})).toBe("legacy-html-v1");
-    expect(resolvedNoteContentFormat({ contentFormat: "markdown-v1" })).toBe("markdown-v1");
-    expect(resolvedVaultEntryKind({ contentFormat: "json-canvas-v1" })).toBe("canvas");
-    expect(resolvedVaultEntryKind({ contentFormat: "asset-v1" })).toBe("asset");
+const mocks = vi.hoisted(() => ({
+  encryptText: vi.fn(),
+  generateNoteKey: vi.fn(),
+  migrateLegacyNoteFolder: vi.fn(),
+  unwrapNoteKey: vi.fn(),
+  wrapNoteKey: vi.fn()
+}));
+
+vi.mock("../../lib/crypto", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../lib/crypto")>(),
+  decryptText: vi.fn(),
+  encryptText: mocks.encryptText,
+  generateNoteKey: mocks.generateNoteKey,
+  unwrapNoteKey: mocks.unwrapNoteKey,
+  wrapNoteKey: mocks.wrapNoteKey
+}));
+
+vi.mock("../../services/notes", () => ({
+  createEncryptedNoteFolder: vi.fn(),
+  migrateLegacyNoteFolder: mocks.migrateLegacyNoteFolder,
+  updateEncryptedNoteFolder: vi.fn()
+}));
+
+const encryptedName = {
+  algorithm: "AES-GCM" as const,
+  cipherText: "encrypted-name",
+  iv: "iv",
+  version: 1 as const
+};
+const wrappedKey = {
+  algorithm: "RSA-OAEP" as const,
+  version: 1 as const,
+  wrappedKey: "wrapped-folder-key"
+};
+
+describe("Vault folder persistence", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.generateNoteKey.mockResolvedValue({ kind: "folder-key" } as unknown as CryptoKey);
+    mocks.encryptText.mockResolvedValue(encryptedName);
+    mocks.wrapNoteKey.mockResolvedValue(wrappedKey);
+    mocks.migrateLegacyNoteFolder.mockResolvedValue({ folderId: "child", revision: 1 });
   });
 
-  it("builds nested paths without persisting decrypted names", () => {
-    const folders = [
-      { id: "a", ownerUid: "u", name: "암호화 폴더", color: "#000", displayName: "자료" },
-      { id: "b", ownerUid: "u", name: "암호화 폴더", color: "#000", displayName: "연구", parentId: "a" }
-    ] as DecryptedVaultFolder[];
-    const paths = buildVaultPaths(folders);
-    expect(paths.get("b")).toBe("자료/연구");
+  it("preserves a nested legacy folder parent in both its blinded claim and migration transaction", async () => {
+    const vaultIntegrityKey = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const folder = {
+      color: "#7c5cff",
+      id: "child",
+      name: "Child",
+      order: 4,
+      ownerUid: "user-a",
+      parentId: "parent"
+    } as NoteFolderSnapshot;
+    const expectedClaimId = await vaultNameFingerprint(vaultIntegrityKey, {
+      name: "Child",
+      parentId: "parent",
+      targetType: "folder"
+    });
 
-    const note = { title: "그래프", folderId: "b" } as DecryptedVaultNote;
-    expect(vaultNotePath(note, paths)).toBe("자료/연구/그래프.md");
-    expect(vaultEntryPath({ ...note, entryKind: "canvas" }, paths)).toBe("자료/연구/그래프.canvas");
-    expect(vaultEntryPath({ ...note, entryKind: "asset", title: "설계.pdf" }, paths)).toBe("자료/연구/설계.pdf");
+    await migrateLegacyVaultFolder(
+      { publicKeyJwk: { kty: "RSA" }, uid: "user-a" },
+      vaultIntegrityKey,
+      folder,
+      4
+    );
+
+    expect(mocks.migrateLegacyNoteFolder).toHaveBeenCalledWith(expect.objectContaining({
+      folderId: "child",
+      parentId: "parent",
+      nameClaim: {
+        claimId: expectedClaimId,
+        indexVersion: 1,
+        parentId: "parent"
+      }
+    }));
   });
 
-  it("does not recurse forever for malformed folder cycles", () => {
-    const folders = [
-      { id: "a", ownerUid: "u", name: "a", color: "#000", displayName: "A", parentId: "b" },
-      { id: "b", ownerUid: "u", name: "b", color: "#000", displayName: "B", parentId: "a" }
-    ] as DecryptedVaultFolder[];
-    expect(buildVaultPaths(folders).get("a")).toBeTruthy();
+  it("recovers a legacy collision by encrypting the replacement name and moving its claim atomically", async () => {
+    const vaultIntegrityKey = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const folder = {
+      color: "#7c5cff",
+      id: "duplicate",
+      name: "Project",
+      order: 3,
+      ownerUid: "user-a",
+      parentId: null
+    } as NoteFolderSnapshot;
+    const expectedClaimId = await vaultNameFingerprint(vaultIntegrityKey, {
+      name: "Project archive",
+      parentId: "archive",
+      targetType: "folder"
+    });
+
+    await migrateLegacyVaultFolder(
+      { publicKeyJwk: { kty: "RSA" }, uid: "user-a" },
+      vaultIntegrityKey,
+      folder,
+      3,
+      { replacementName: " Project archive ", targetParentId: "archive" }
+    );
+
+    expect(mocks.encryptText).toHaveBeenCalledWith("Project archive", expect.anything());
+    expect(mocks.migrateLegacyNoteFolder).toHaveBeenCalledWith(expect.objectContaining({
+      encryptedName,
+      expectedName: "Project",
+      folderId: "duplicate",
+      parentId: "archive",
+      nameClaim: {
+        claimId: expectedClaimId,
+        indexVersion: 1,
+        parentId: "archive"
+      }
+    }));
   });
 
-  it("filters foreign folders before legacy plaintext enters the decryption pipeline", async () => {
-    const folders = [{
-      id: "foreign",
-      ownerUid: "other-user",
-      name: "다른 사용자의 평문 폴더",
-      color: "#000"
-    }] as DecryptedVaultFolder[];
+  it("marks an encrypted folder decryption failure so migration cannot fingerprint placeholder text", async () => {
+    mocks.unwrapNoteKey.mockRejectedValueOnce(new Error("corrupt wrapped key"));
 
-    await expect(decryptVaultFolders(
-      folders,
-      "user-a",
-      {} as CryptoKey
-    )).resolves.toEqual([]);
+    const result = await decryptVaultFolders([{
+      color: "#7c5cff",
+      encryptedName,
+      id: "folder-a",
+      name: "암호화 폴더",
+      ownerUid: "user-a",
+      parentId: null,
+      revision: 1,
+      wrappedKey
+    } as NoteFolderSnapshot], "user-a", { kind: "private" } as unknown as CryptoKey);
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        displayName: "복호화할 수 없는 폴더",
+        id: "folder-a",
+        nameDecryptionFailed: true
+      })
+    ]);
+  });
+});
+
+describe("Vault entry storage identity", () => {
+  it("distinguishes raw legacy absence from explicit and partial identities", () => {
+    expect(vaultEntryStorageIdentityState({})).toBe("legacy-missing");
+    expect(vaultEntryStorageIdentityState({
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html"
+    })).toBe("explicit");
+    expect(vaultEntryStorageIdentityState({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown"
+    })).toBe("explicit");
+    expect(vaultEntryStorageIdentityState({
+      contentFormat: "legacy-html-v1"
+    })).toBe("invalid");
+    expect(vaultEntryStorageIdentityState({
+      contentFormat: "markdown-v1",
+      entryKind: "canvas"
+    })).toBe("invalid");
   });
 });

@@ -359,7 +359,7 @@ describe("schedule helpers", () => {
     expect(matrixQuadrantForTask({ isImportant: true, isUrgent: false })).toBe("importantNotUrgent");
     expect(sections.map((section) => [section.key, section.tasks.map((item) => item.id)])).toEqual([
       ["urgentImportant", ["active-range-urgent-important", "overdue-waiting", "urgent-important"]],
-      ["firstPriority", ["future-urgent-important", "no-date-urgent-important"]],
+      ["firstPriority", ["future-urgent-important", "no-date-urgent-important", "done"]],
       ["urgentNotImportant", ["active-range-urgent", "urgent-sooner", "urgent-earlier", "urgent"]],
       ["importantNotUrgent", ["important"]],
       ["notUrgentNotImportant", ["waiting-new", "waiting-old"]]
@@ -367,7 +367,7 @@ describe("schedule helpers", () => {
     expect(sections.find((section) => section.key === "firstPriority")?.dateGroups.map((group) => [group.key, group.tasks.map((item) => item.id)])).toEqual([
       ["next3", []],
       ["later", ["future-urgent-important"]],
-      ["noDate", ["no-date-urgent-important"]]
+      ["noDate", ["no-date-urgent-important", "done"]]
     ]);
   });
 
@@ -442,19 +442,20 @@ describe("schedule helpers", () => {
       task("urgent-null-progress", { isImportant: false, isUrgent: true, progressPercent: null }),
       task("waiting-zero-progress", { isImportant: false, isUrgent: false, progressPercent: 0 }),
       task("legacy-missing-status", { status: undefined as unknown as DecryptedScheduleTask["status"] }),
-      task("completed-hidden", { status: "completed", isImportant: true, isUrgent: true, progressPercent: 100 }),
+      task("completed-visible", { status: "completed", isImportant: true, isUrgent: true, progressPercent: 100 }),
       task("archived-hidden", { status: "archived" as DecryptedScheduleTask["status"] }),
       task("deleted-hidden", { isDeleted: true } as Partial<DecryptedScheduleTask>)
     ], "2026-05-20");
     const matrixTaskIds = sections.flatMap((section) => section.tasks.map((item) => item.id));
 
-    expect(matrixTaskIds).toHaveLength(4);
+    expect(matrixTaskIds).toHaveLength(5);
     expect(matrixTaskIds).toEqual(
       expect.arrayContaining([
         "urgent-null-progress",
         "important-missing-progress",
         "waiting-zero-progress",
-        "legacy-missing-status"
+        "legacy-missing-status",
+        "completed-visible"
       ])
     );
     expect(sections.find((section) => section.key === "urgentNotImportant")?.tasks.map((item) => item.id)).toEqual(["urgent-null-progress"]);
@@ -464,7 +465,7 @@ describe("schedule helpers", () => {
       "waiting-zero-progress"
     ]));
     expect(matrixTaskIds).not.toContain("archived-hidden");
-    expect(matrixTaskIds).not.toContain("completed-hidden");
+    expect(matrixTaskIds).toContain("completed-visible");
     expect(matrixTaskIds).not.toContain("deleted-hidden");
     expect(sections.some((section) => "progress" in section)).toBe(false);
   });

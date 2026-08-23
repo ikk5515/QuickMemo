@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest";
 
 const ciWorkflowSource = readFileSync(join(process.cwd(), ".github/workflows/ci.yml"), "utf8");
 const vercelWorkflowSource = readFileSync(join(process.cwd(), ".github/workflows/vercel-production.yml"), "utf8");
+const releaseContractSource = readFileSync(
+  join(process.cwd(), "scripts/verify-production-release-contract.mjs"),
+  "utf8"
+);
 const sensitiveFileGuardSource = readFileSync(
   join(process.cwd(), "scripts/security-gitignore-guard.mjs"),
   "utf8"
@@ -73,12 +77,62 @@ describe("CI/CD security controls", () => {
       "concurrency:\n      group: vercel-production-${{ github.event.workflow_run.head_branch }}"
     );
     expect(deployJob).toContain("cancel-in-progress: true");
+    expect(deployJob).toContain("environment:\n      name: production");
     expect(vercelWorkflowSource).toContain("git ls-remote --exit-code origin refs/heads/master");
     expect(vercelWorkflowSource).toContain("steps.master_at_start.outputs.current == 'true'");
     expect(vercelWorkflowSource).toContain("steps.master_before_deploy.outputs.current == 'true'");
     expect(vercelWorkflowSource.match(/git ls-remote --exit-code origin refs\/heads\/master/g)).toHaveLength(2);
     expect(vercelWorkflowSource.indexOf("Revalidate master immediately before deployment")).toBeLessThan(
       vercelWorkflowSource.indexOf("      - name: Deploy")
+    );
+  });
+
+  it("requires exact Firebase, Spark, and explicit Vault release attestations", () => {
+    const contractIndex = vercelWorkflowSource.indexOf(
+      "Verify attested Firebase and Vault release contract"
+    );
+    const hobbyEnabledIndex = vercelWorkflowSource.indexOf(
+      "Verify zero-cost Vercel Hobby plan and enabled Vault flag"
+    );
+    const hobbyDisabledIndex = vercelWorkflowSource.indexOf(
+      "Verify zero-cost Vercel Hobby plan and disabled Vault flag"
+    );
+    const deployIndex = vercelWorkflowSource.indexOf("      - name: Deploy");
+
+    expect(contractIndex).toBeGreaterThan(-1);
+    expect(contractIndex).toBeLessThan(hobbyEnabledIndex);
+    expect(contractIndex).toBeLessThan(hobbyDisabledIndex);
+    expect(hobbyEnabledIndex).toBeLessThan(deployIndex);
+    expect(hobbyDisabledIndex).toBeLessThan(deployIndex);
+    expect(vercelWorkflowSource).toContain(
+      "FIREBASE_DEPLOYED_RULES_INDEXES_SHA256: ${{ vars.FIREBASE_DEPLOYED_RULES_INDEXES_SHA256 }}"
+    );
+    expect(vercelWorkflowSource).toContain(
+      "FIREBASE_SPARK_ATTESTATION: ${{ vars.FIREBASE_SPARK_ATTESTATION }}"
+    );
+    expect(vercelWorkflowSource).toContain(
+      "VAULT_RELEASE_STATE: ${{ vars.VAULT_RELEASE_STATE }}"
+    );
+    expect(vercelWorkflowSource).toContain(
+      "node scripts/verify-production-release-contract.mjs --verify"
+    );
+    expect(vercelWorkflowSource).toContain("--expect-vault-enabled");
+    expect(vercelWorkflowSource).toContain("--expect-vault-disabled");
+    expect(vercelWorkflowSource).toContain(
+      "steps.release_contract.outputs.contract_verified == 'true'"
+    );
+    expect(vercelWorkflowSource).toContain(
+      "steps.release_contract.outputs.vault_enabled == 'true' || steps.release_contract.outputs.vault_enabled == 'false'"
+    );
+    expect(releaseContractSource).toContain(
+      'export const PRODUCTION_FIREBASE_PROJECT_ID = "quickmemo-a95ba"'
+    );
+    expect(releaseContractSource).toContain(
+      '"firestore.rules",\n  "firestore.indexes.json"'
+    );
+    expect(releaseContractSource).not.toContain("console.log(input");
+    expect(vercelWorkflowSource).not.toMatch(
+      /echo[^\n]*(?:FIREBASE_DEPLOYED_RULES_INDEXES_SHA256|FIREBASE_SPARK_ATTESTATION|VAULT_RELEASE_STATE)/u
     );
   });
 

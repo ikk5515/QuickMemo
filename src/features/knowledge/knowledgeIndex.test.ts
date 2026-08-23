@@ -95,7 +95,7 @@ related: "[[Reference]]"
     ]);
   });
 
-  it("ignores tags and links in fenced code, inline code, and Obsidian comments", () => {
+  it("ignores tags and links in code while indexing Obsidian comment metadata", () => {
     const metadata = parseObsidianMarkdown(
       "source",
       "Source.md",
@@ -113,8 +113,9 @@ related: "[[Reference]]"
 `
     );
 
-    expect(metadata.tags).toEqual(["visible"]);
+    expect(metadata.tags).toEqual(["visible", "comment"]);
     expect(metadata.links).toEqual([
+      expect.objectContaining({ target: "Comment" }),
       expect.objectContaining({ target: "Actual", fragment: { kind: "heading", value: "Heading" } }),
       expect.objectContaining({ target: "Asset.png", embedded: true }),
       expect.objectContaining({
@@ -187,6 +188,21 @@ related: "[[Reference]]"
     ));
   });
 
+  it("rejects prototype-mutating frontmatter property names", () => {
+    const metadata = parseObsidianMarkdown(
+      "source",
+      "Source.md",
+      "---\n__proto__: polluted\nconstructor: shadowed\nPrototype: shadowed\nstatus: safe\n---\n"
+    );
+
+    expect(Object.getPrototypeOf(metadata.properties)).toBeNull();
+    expect(Object.hasOwn(metadata.properties, "__proto__")).toBe(false);
+    expect(Object.hasOwn(metadata.properties, "constructor")).toBe(false);
+    expect(Object.hasOwn(metadata.properties, "Prototype")).toBe(false);
+    expect(metadata.properties.status).toBe("safe");
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   it("ignores overlong tags and link syntax while keeping bounded valid metadata", () => {
     const validHeading = "제목".repeat(MAX_HEADING_TEXT_CHARACTERS);
     const overlongTag = `#a${"b".repeat(MAX_TAG_CHARACTERS)}`;
@@ -218,7 +234,7 @@ related: "[[Reference]]"
 });
 
 describe("knowledge index and resolution", () => {
-  it("resolves exact, relative, alias and self-heading links while retaining unresolved occurrences", () => {
+  it("resolves exact, relative and self-heading links while retaining aliases as unresolved", () => {
     const index = buildKnowledgeIndex([
       markdownEntry(
         "source",
@@ -233,15 +249,15 @@ describe("knowledge index and resolution", () => {
     expect(outgoing.map((link) => [link.status, link.targetEntryId])).toEqual([
       ["resolved", "target"],
       ["resolved", "target"],
-      ["resolved", "target"],
+      ["unresolved", undefined],
       ["resolved", "source"],
       ["unresolved", undefined]
     ]);
-    expect(backlinkOccurrences(index, "target")).toHaveLength(3);
+    expect(backlinkOccurrences(index, "target")).toHaveLength(2);
     expect(outgoing[4].unresolvedKey).toBe("Missing");
   });
 
-  it("marks a shortest-name link ambiguous when neither path nor alias selects one file", () => {
+  it("selects the deterministic official shortest-name target for duplicate basenames", () => {
     const index = buildKnowledgeIndex([
       markdownEntry("source", "Source.md", "[[Target]]"),
       markdownEntry("one", "One/Target.md", ""),
@@ -249,7 +265,8 @@ describe("knowledge index and resolution", () => {
     ]);
 
     expect(outgoingOccurrences(index, "source")[0]).toMatchObject({
-      status: "ambiguous",
+      status: "resolved",
+      targetEntryId: "one",
       candidateEntryIds: ["one", "two"]
     });
   });
@@ -303,7 +320,7 @@ describe("knowledge index and resolution", () => {
       "source"
     ]);
     expect(backlinkOccurrences(index, "source")).toHaveLength(1);
-    expect(index.tags.get("canvas")?.entryIds).toEqual(["canvas"]);
+    expect(index.tags.has("canvas")).toBe(false);
   });
 
   it("bounds Canvas node and text indexing without changing the Canvas payload", () => {
@@ -363,7 +380,7 @@ describe("knowledge index and resolution", () => {
     );
   });
 
-  it("shares one entry tag budget across Canvas text nodes", () => {
+  it("does not project Canvas text-card hashtags into file tags", () => {
     const tagsPerNode = Math.floor(MAX_TAG_OCCURRENCES_PER_ENTRY * 0.75);
     const canvas = {
       id: "canvas-tags",
@@ -383,9 +400,7 @@ describe("knowledge index and resolution", () => {
     };
     const index = buildKnowledgeIndex([canvas]);
 
-    expect(index.metadataByEntryId.get(canvas.id)?.tags).toHaveLength(
-      MAX_TAG_OCCURRENCES_PER_ENTRY
-    );
+    expect(index.metadataByEntryId.get(canvas.id)?.tags).toEqual([]);
   });
 
   it("enforces a deterministic vault-wide tag occurrence budget", () => {
@@ -500,6 +515,34 @@ describe("graph snapshots", () => {
       common: { ...DEFAULT_GLOBAL_GRAPH_SETTINGS.common, query: "file:Alpha" }
     }));
     expect(filtered.nodes.map((node) => node.id)).toEqual(["entry:alpha"]);
+  });
+
+  it("computes orphan state from the full note graph before query and attachment projection", () => {
+    const index = buildKnowledgeIndex([
+      markdownEntry("a", "A.md", "[[B]] [[Image.png]]"),
+      markdownEntry("b", "B.md", ""),
+      markdownEntry("attachment-only", "Attachment only.md", "[[Image.png]]"),
+      { id: "asset", path: "Image.png", kind: "asset" }
+    ]);
+
+    const linkedButFilteredNeighbor = buildGraphSnapshot(index, globalSettings({
+      showOrphans: false,
+      common: {
+        ...DEFAULT_GLOBAL_GRAPH_SETTINGS.common,
+        query: "file:A"
+      }
+    }));
+    expect(linkedButFilteredNeighbor.nodes.map((node) => node.id)).toEqual(["entry:a"]);
+
+    const attachmentDoesNotCreateKnowledgeConnectivity = buildGraphSnapshot(index, globalSettings({
+      showOrphans: false,
+      common: {
+        ...DEFAULT_GLOBAL_GRAPH_SETTINGS.common,
+        query: "file:\"Attachment only\"",
+        showAttachments: true
+      }
+    }));
+    expect(attachmentDoesNotCreateKnowledgeConnectivity.nodes).toEqual([]);
   });
 
   it("uses outgoing local depth and includes cross-neighbor links only when requested", () => {

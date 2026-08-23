@@ -1,6 +1,5 @@
 import type {
   InternalLinkOccurrence,
-  ParsedMarkdownMetadata,
   ResolvedLinkOccurrence,
   VaultIndexEntry
 } from "./types";
@@ -45,6 +44,19 @@ function caseFold(value: string): string {
   return value.normalize("NFC").toLocaleLowerCase();
 }
 
+function compareShortestLinkCandidates(
+  left: VaultIndexEntry,
+  right: VaultIndexEntry
+): number {
+  const leftPath = normalizeVaultPath(left.path);
+  const rightPath = normalizeVaultPath(right.path);
+  const depthDifference = leftPath.split("/").length - rightPath.split("/").length;
+  if (depthDifference !== 0) {
+    return depthDifference;
+  }
+  return caseFold(leftPath).localeCompare(caseFold(rightPath));
+}
+
 function safelyDecodePath(value: string): string {
   try {
     return decodeURIComponent(value);
@@ -57,6 +69,10 @@ export interface InternalLinkResolutionIndex {
   byAlias: ReadonlyMap<string, readonly VaultIndexEntry[]>;
   byPath: ReadonlyMap<string, readonly VaultIndexEntry[]>;
   byStem: ReadonlyMap<string, readonly VaultIndexEntry[]>;
+}
+
+interface LinkResolutionMetadata {
+  aliases: readonly string[];
 }
 
 function appendLookupEntry(
@@ -74,7 +90,7 @@ function appendLookupEntry(
 
 export function buildInternalLinkResolutionIndex(
   entries: readonly VaultIndexEntry[],
-  metadataByEntryId: ReadonlyMap<string, ParsedMarkdownMetadata>
+  metadataByEntryId: ReadonlyMap<string, LinkResolutionMetadata>
 ): InternalLinkResolutionIndex {
   const byAlias = new Map<string, VaultIndexEntry[]>();
   const byPath = new Map<string, VaultIndexEntry[]>();
@@ -127,7 +143,7 @@ export function isExternalLinkTarget(target: string): boolean {
 export function resolveInternalLink(
   occurrence: InternalLinkOccurrence,
   entries: readonly VaultIndexEntry[],
-  metadataByEntryId: ReadonlyMap<string, ParsedMarkdownMetadata>,
+  metadataByEntryId: ReadonlyMap<string, LinkResolutionMetadata>,
   resolutionIndex = buildInternalLinkResolutionIndex(entries, metadataByEntryId)
 ): ResolvedLinkOccurrence {
   const target = occurrence.target.trim();
@@ -145,6 +161,7 @@ export function resolveInternalLink(
   const variants = pathVariants(target, occurrence.syntax, occurrence.sourcePath);
   const variantKeys = variants.map(caseFold);
   let candidates: VaultIndexEntry[] = [];
+  let resolvedFromStem = false;
   for (const variantKey of variantKeys) {
     const matches = resolutionIndex.byPath.get(variantKey) ?? [];
     if (matches.length > 0) {
@@ -157,22 +174,25 @@ export function resolveInternalLink(
     const targetName = caseFold(target.replace(MARKDOWN_EXTENSION_PATTERN, ""));
     const stemMatches = resolutionIndex.byStem.get(targetName) ?? [];
     if (stemMatches.length > 0) {
-      candidates = [...stemMatches];
-    } else {
-      candidates = [...(resolutionIndex.byAlias.get(targetName) ?? [])];
+      candidates = [...stemMatches].sort(compareShortestLinkCandidates);
+      resolvedFromStem = true;
     }
   }
 
   const unresolvedKey = occurrence.syntax === "markdown" || target.startsWith("./") || target.startsWith("../")
     ? normalizeVaultPath(variants[0] ?? target)
     : normalizeVaultPath(target);
-  if (candidates.length === 1) {
+  // Obsidian's metadata cache chooses one deterministic shortest-path file for
+  // a basename collision and retains every candidate for diagnostics. YAML
+  // aliases are autocomplete/display metadata; `[[Alias]]` is not itself a
+  // file target in the official 1.13.7 graph/backlink contract.
+  if (candidates.length === 1 || (resolvedFromStem && candidates.length > 1)) {
     return {
       ...occurrence,
       status: "resolved",
       targetEntryId: candidates[0].id,
       targetPath: normalizeVaultPath(candidates[0].path),
-      candidateEntryIds: [candidates[0].id],
+      candidateEntryIds: candidates.map((candidate) => candidate.id),
       unresolvedKey
     };
   }

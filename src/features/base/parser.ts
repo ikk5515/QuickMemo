@@ -152,14 +152,37 @@ function parseFormulas(value: unknown, warnings: BaseDiagnostic[]): Record<strin
       warnings.push(diagnostic("unsupported-formula", "계산식은 문자열이어야 하며 실행되지 않았습니다.", `formulas.${key}`));
       continue;
     }
+    if (!text(key, 128) || dangerousKeys.has(key)) {
+      warnings.push(diagnostic("unsupported-formula", "계산식 이름을 사용할 수 없습니다.", `formulas.${key}`));
+      continue;
+    }
     formulas[key] = rawFormula;
-    warnings.push(diagnostic(
-      "unsupported-formula",
-      `계산식 '${key}'은(는) 보안을 위해 실행하지 않습니다.`,
-      `formulas.${key}`
-    ));
   }
   return formulas;
+}
+
+function parseSummaryMap(
+  value: unknown,
+  path: string,
+  warnings: BaseDiagnostic[],
+  maximum = 1_000
+): Record<string, string> {
+  if (value === undefined) return {};
+  const source = record(value);
+  if (!source) {
+    warnings.push(diagnostic("unsupported-option", "요약 설정은 이름과 계산식의 객체여야 합니다.", path));
+    return {};
+  }
+  const summaries: Record<string, string> = Object.create(null);
+  for (const [key, rawSummary] of Object.entries(source).slice(0, maximum)) {
+    const summary = text(rawSummary, 10_000);
+    if (!text(key, 128) || dangerousKeys.has(key) || !summary) {
+      warnings.push(diagnostic("unsupported-option", "요약 이름과 계산식을 확인할 수 없습니다.", `${path}.${key}`));
+      continue;
+    }
+    summaries[key] = summary;
+  }
+  return summaries;
 }
 
 function parseSort(value: unknown, path: string, warnings: BaseDiagnostic[]): BaseSortRule[] {
@@ -223,9 +246,7 @@ function parseView(
   if (unsupported.length) {
     warnings.push(diagnostic("unsupported-option", `아직 지원하지 않는 View 옵션: ${unsupported.join(", ")}`, path));
   }
-  if (source.summaries !== undefined) {
-    warnings.push(diagnostic("unsupported-option", "요약 계산은 아직 지원하지 않습니다.", `${path}.summaries`));
-  }
+  const summaries = parseSummaryMap(source.summaries, `${path}.summaries`, warnings, 200);
   const groupBy = parseGroup(source.groupBy, `${path}.groupBy`, warnings);
   return {
     type: rawType as BaseViewType,
@@ -234,7 +255,8 @@ function parseView(
     ...(groupBy ? { groupBy } : {}),
     ...(numericLimit ? { limit: numericLimit } : {}),
     order,
-    sort: parseSort(source.sort ?? source.sortBy, `${path}.sort`, warnings)
+    sort: parseSort(source.sort ?? source.sortBy, `${path}.sort`, warnings),
+    summaries
   };
 }
 
@@ -307,9 +329,7 @@ export function parseBaseSource(source: string): BaseParseResult {
     const filters = root.filters === undefined ? undefined : parseFilter(root.filters, "filters", errors);
     const properties = parseProperties(root.properties, warnings);
     const formulas = parseFormulas(root.formulas, warnings);
-    if (root.summaries !== undefined) {
-      warnings.push(diagnostic("unsupported-option", "사용자 정의 요약 계산은 아직 지원하지 않습니다.", "summaries"));
-    }
+    const summaries = parseSummaryMap(root.summaries, "summaries", warnings);
     if (root.views !== undefined && !Array.isArray(root.views)) {
       errors.push(diagnostic("invalid-schema", "views는 View 객체 목록이어야 합니다.", "views"));
     }
@@ -325,7 +345,7 @@ export function parseBaseSource(source: string): BaseParseResult {
       viewNames.add(key);
     }
     if (!views.length && !errors.length) {
-      views.push({ type: "table", name: "Table", order: ["file.name"], sort: [] });
+      views.push({ type: "table", name: "Table", order: ["file.name"], sort: [], summaries: {} });
     }
     if (errors.length) {
       return { document: null, errors, warnings };
@@ -334,6 +354,7 @@ export function parseBaseSource(source: string): BaseParseResult {
       ...(filters ? { filters } : {}),
       formulas,
       properties,
+      summaries,
       views
     };
     return { document, errors, warnings };

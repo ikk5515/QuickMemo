@@ -28,6 +28,7 @@ export interface UserProfile extends PublicRosterUser {
 
 export type DefaultHomeView = "notes" | "library" | "schedule";
 export type ScheduleView = "todo" | "calendar" | "matrix" | "recurring" | "completed";
+export type ActiveScheduleView = Extract<ScheduleView, "calendar" | "matrix">;
 export type ScheduleTaskCategory = "work" | "personal";
 export type ScheduleCategoryFilter = "all" | ScheduleTaskCategory;
 export type ThemePreference = "light" | "dark" | "system";
@@ -101,6 +102,11 @@ export interface NoteDocument {
   contentFormat?: VaultContentFormat;
   /** Missing on historical notes; inferred from contentFormat. */
   entryKind?: VaultEntryKind;
+  /** Opaque, parent-scoped HMAC reservation for versioned Vault entries. */
+  vaultNameClaimId?: string;
+  vaultNameIndexVersion?: 1;
+  /** Opaque durable ZIP-import job binding; never contains a Vault path/name. */
+  vaultImportJobId?: string;
   wrappedKeys: Record<string, WrappedNoteKey>;
   folderId?: string | null;
   createdAt?: Timestamp;
@@ -260,6 +266,46 @@ export interface NoteFolderDocument {
   parentId?: string | null;
   order?: number;
   revision?: number;
+  /** Opaque, parent-scoped HMAC reservation for encrypted Vault folders. */
+  vaultNameClaimId?: string;
+  vaultNameIndexVersion?: 1;
+  /** Opaque durable ZIP-import job binding; never contains a folder name. */
+  vaultImportJobId?: string;
+  /**
+   * Server-verifiable root-to-parent ids. Rules compare every id with the
+   * authoritative folder documents; this is never trusted as a client claim.
+   */
+  vaultAncestorIds?: string[];
+  /** Slash-delimited opaque root-to-self proof copied from the direct parent. */
+  vaultLineagePath?: string;
+  vaultLineageDepth?: number;
+  vaultLineageGeneration?: number;
+  vaultLineageVersion?: 1 | 2 | 3;
+  /**
+   * A single encrypted-folder tombstone hides its complete descendant subtree.
+   * Descendants are not rewritten, so very large trees remain one atomic write.
+   */
+  isDeleted?: boolean;
+  deletedAt?: Timestamp;
+  deletedBy?: string;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+}
+
+export interface VaultIntegrityDocument {
+  ownerUid: string;
+  indexVersion: 1;
+  wrappedKey: WrappedNoteKey;
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+}
+
+export interface VaultNameClaimDocument {
+  ownerUid: string;
+  indexVersion: 1;
+  parentId: string | null;
+  targetId: string;
+  targetType: "entry" | "folder";
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }

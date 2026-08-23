@@ -15,7 +15,7 @@ import "./markdown.css";
 
 const markdownModes: Array<{ id: MarkdownViewMode; label: string }> = [
   { id: "source", label: "소스 모드" },
-  { id: "live-preview", label: "라이브 프리뷰" },
+  { id: "live-preview", label: "분할 미리보기" },
   { id: "reading", label: "읽기 보기" }
 ];
 

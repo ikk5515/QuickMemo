@@ -89,4 +89,16 @@ describe("note UI styles", () => {
       /\.overview-folder-panel \{(?=[^}]*gap: 12px;)(?=[^}]*height: auto;)(?=[^}]*max-height: none;)(?=[^}]*overflow: visible;)(?=[^}]*padding: 12px;)(?=[^}]*position: static;)[^}]*\}/
     );
   });
+
+  it("keeps the stacked legacy reader vertically reachable inside the fixed Vault shell", () => {
+    const mobileStart = stylesSource.indexOf("@media (max-width: 980px) {");
+    const mobileEnd = stylesSource.indexOf("@media", mobileStart + 1);
+    const mobileStyles = stylesSource.slice(mobileStart, mobileEnd);
+
+    expect(mobileStart).toBeGreaterThanOrEqual(0);
+    expect(mobileEnd).toBeGreaterThan(mobileStart);
+    expect(mobileStyles).toMatch(
+      /\.app-frame-vault \.vault-main > \.legacy-readonly-workspace \{(?=[^}]*flex: 1 1 auto;)(?=[^}]*height: 100%;)(?=[^}]*min-height: 0;)(?=[^}]*overflow-x: hidden;)(?=[^}]*overflow-y: auto;)(?=[^}]*overscroll-behavior-y: contain;)(?=[^}]*width: 100%;)[^}]*\}/u
+    );
+  });
 });

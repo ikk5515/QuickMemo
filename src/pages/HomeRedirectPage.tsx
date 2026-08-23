@@ -8,6 +8,8 @@ import { normalizePrimaryScheduleView, scheduleViewHref } from "../lib/scheduleN
 import { defaultUserPreferences, getCachedUserPreferences, getUserPreferences } from "../services/userPreferences";
 import type { UserPreferencesDocument } from "../types";
 
+export const HOME_REDIRECT_PREFERENCES_TIMEOUT_MS = 4_000;
+
 export default function HomeRedirectPage() {
   const { profile } = useAuth();
   const [preferences, setPreferences] = useState<Pick<UserPreferencesDocument, "defaultHome" | "scheduleDefaultView"> | null>(() =>
@@ -28,16 +30,24 @@ export default function HomeRedirectPage() {
     const cachedPreferences = getCachedUserPreferences(profile.uid);
     setPreferences(cachedPreferences);
     setPreferencesResolved(cachedPreferences !== null);
+    const fallbackTimeoutId = window.setTimeout(() => {
+      if (active) {
+        setPreferences(cachedPreferences ?? defaultUserPreferences);
+        setPreferencesResolved(true);
+      }
+    }, HOME_REDIRECT_PREFERENCES_TIMEOUT_MS);
 
     void getUserPreferences(profile.uid)
       .then((nextPreferences) => {
         if (active) {
+          window.clearTimeout(fallbackTimeoutId);
           setPreferences(nextPreferences);
           setPreferencesResolved(true);
         }
       })
       .catch(() => {
         if (active) {
+          window.clearTimeout(fallbackTimeoutId);
           setPreferences(cachedPreferences ?? defaultUserPreferences);
           setPreferencesResolved(true);
         }
@@ -45,6 +55,7 @@ export default function HomeRedirectPage() {
 
     return () => {
       active = false;
+      window.clearTimeout(fallbackTimeoutId);
     };
   }, [profile]);
 

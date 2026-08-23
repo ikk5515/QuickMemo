@@ -1483,7 +1483,7 @@ export async function firestoreGet(context, documentPath) {
   return decodeFirestoreDocument(await response.json());
 }
 
-export async function firestoreBatchGet(context, documentPaths) {
+export async function firestoreBatchGet(context, documentPaths, transaction = "") {
   if (
     !Array.isArray(documentPaths)
     || documentPaths.length < 1
@@ -1499,7 +1499,8 @@ export async function firestoreBatchGet(context, documentPaths) {
       body: JSON.stringify({
         documents: documentPaths.map((documentPath) =>
           firestoreDocumentName(context.projectId, documentPath)
-        )
+        ),
+        ...(transaction ? { transaction } : {})
       })
     }
   );

@@ -72,6 +72,30 @@ export async function unlockV2Share(page, fixture) {
   await expect(page.getByRole("button", { name: "열기", exact: true })).toHaveCount(0);
 }
 
+export async function unlockEncryptedVault(page, password) {
+  const passwordInput = page.locator('input[type="password"][aria-label="비밀번호"]');
+  const formError = page.locator(".unlock-panel .form-error");
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await expect(passwordInput).toBeVisible();
+    await passwordInput.fill(password);
+    await page.getByRole("button", { name: "열기", exact: true }).click();
+
+    const outcome = await Promise.any([
+      passwordInput.waitFor({ state: "hidden", timeout: 25_000 }).then(() => "unlocked"),
+      formError.waitFor({ state: "visible", timeout: 25_000 }).then(() => "error")
+    ]);
+    if (outcome === "unlocked") return;
+
+    const message = (await formError.textContent())?.trim() ?? "";
+    if (attempt === 0 && /네트워크 연결이 불안정/u.test(message)) {
+      await page.waitForTimeout(300);
+      continue;
+    }
+    throw new Error(`encrypted Vault unlock failed: ${message || "unknown error"}`);
+  }
+}
+
 export async function loginRosterUser(page, user, diagnostics) {
   await expect(
     page.getByRole("button", { name: `${user.displayName} 사용자 선택` })
@@ -103,15 +127,17 @@ export async function loginRosterUser(page, user, diagnostics) {
 
     const message = (await formError.textContent()) ?? "";
     const transientEmulatorTransportError =
-      /client is offline|network connection was lost|firestore\/unavailable/iu.test(message);
-    const transientSeededCredentialRejection = message.trim() === "비밀번호를 확인해주세요.";
-    if ((!transientEmulatorTransportError && !transientSeededCredentialRejection) || attempt === 2) {
+      /client is offline|network connection was lost|firestore\/unavailable|네트워크 연결이 불안정/iu.test(message);
+    // A credential rejection is authoritative. In particular, Auth Emulator
+    // returns the same localized UI message for EMAIL_NOT_FOUND after an
+    // external reset, so retrying it would hide a real missing/wrong account.
+    if (!transientEmulatorTransportError || attempt === 2) {
       throw new Error(`E2E roster login failed: ${message || "unknown error"}`);
     }
 
     if (diagnostics) {
       for (const consoleError of diagnostics.consoleErrors.slice(consoleStartIndex)) {
-        if (isTransientFirestoreTransportConsoleError(consoleError)) {
+        if (isExpectedFirestoreEmulatorTransportConsoleError(consoleError)) {
           diagnostics.expectedTransientFirestoreTransportErrors.add(consoleError);
         }
       }
@@ -200,10 +226,66 @@ export function observePage(page) {
   };
 }
 
-function isTransientFirestoreTransportConsoleError({ location, text }) {
+/**
+ * WebKit reports aborted Firestore emulator WebChannel requests as page errors
+ * when a test deliberately reloads or tears down the page. Keep this opt-in
+ * and emulator-only: product assertions still have to prove every read/write
+ * before callers classify the exact localhost transport message as expected.
+ */
+export function allowExpectedWebKitFirestoreEmulatorUnloadErrors(diagnostics) {
+  let hasExpectedRestAbort = false;
+  for (const consoleError of diagnostics.consoleErrors) {
+    if (isExpectedFirestoreEmulatorTransportConsoleError(consoleError)) {
+      diagnostics.expectedTransientFirestoreTransportErrors.add(consoleError);
+      if (isExpectedFirestoreEmulatorRestAbort(consoleError)) {
+        hasExpectedRestAbort = true;
+      }
+    }
+  }
+  // WebKit can emit a second, location-less console line for the same aborted
+  // REST request. Never accept that generic line on its own: it is expected only
+  // when an exact allowlisted localhost emulator failure is present in this opt-in
+  // unload window.
+  if (hasExpectedRestAbort) {
+    for (const consoleError of diagnostics.consoleErrors) {
+      if (
+        consoleError.location === ""
+        && consoleError.text === "The network connection was lost."
+      ) {
+        diagnostics.expectedTransientFirestoreTransportErrors.add(consoleError);
+      }
+    }
+  }
+  for (const pageError of diagnostics.pageErrors) {
+    if (isExpectedWebKitFirestoreEmulatorUnloadPageError(pageError)) {
+      diagnostics.expectedPageErrors.add(pageError);
+    }
+  }
+}
+
+export function isExpectedFirestoreEmulatorTransportConsoleError({ location, text }) {
   return (
-    location.includes("127.0.0.1:8080/google.firestore.v1.Firestore/")
+    (
+      /^http:\/\/127\.0\.0\.1:8080\/google\.firestore\.v1\.Firestore\/(?:Listen|Write)\/channel(?:\?|$)/u.test(location)
+      || isExpectedFirestoreEmulatorRestAbort({ location, text })
+    )
     && text === "Failed to load resource: The network connection was lost."
+  );
+}
+
+function isExpectedFirestoreEmulatorRestAbort({ location, text }) {
+  return (
+    /^http:\/\/127\.0\.0\.1:8080\/v1\/projects\/[A-Za-z0-9._-]+\/databases\/\(default\)\/documents:(?:batchGet|commit)\?key=fake-emulator-api-key$/u.test(location)
+    && text === "Failed to load resource: The network connection was lost."
+  );
+}
+
+export function isExpectedWebKitFirestoreEmulatorUnloadPageError(message) {
+  return (
+    /^\/127\.0\.0\.1:8080\/google\.firestore\.v1\.Firestore\/(?:Listen|Write)\/channel\?.+ due to access control checks\.$/u
+      .test(message)
+    || /^\/127\.0\.0\.1:8080\/v1\/projects\/[A-Za-z0-9._-]+\/databases\/\(default\)\/documents:(?:batchGet|commit)\?key=fake-emulator-api-key due to access control checks\.$/u
+      .test(message)
   );
 }
 

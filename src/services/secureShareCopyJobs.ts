@@ -95,6 +95,12 @@ async function runRecovery(
       || !Number.isSafeInteger(readyCount)
       || typeof revision !== "number"
       || !Number.isSafeInteger(revision)
+      || expectedCount < 0
+      || expectedCount > 100
+      || reservedCount < 0
+      || reservedCount > expectedCount
+      || readyCount < 0
+      || readyCount > reservedCount
     ) {
       report.retained += 1;
       continue;

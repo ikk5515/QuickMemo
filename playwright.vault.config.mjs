@@ -1,6 +1,6 @@
 /* global process */
 
-import { defineConfig } from "@playwright/test";
+import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = "http://127.0.0.1:4174";
 const firebaseEmulatorHubUrl = "http://127.0.0.1:4400/emulators";
@@ -55,7 +55,17 @@ export default defineConfig({
   ],
   projects: [
     {
+      name: "vault-chromium-desktop-1440",
+      testIgnore: ["**/vault-webkit-ui.vault.mjs"],
+      testMatch: ["**/*.vault.mjs"],
+      use: {
+        browserName: "chromium",
+        viewport: { width: 1440, height: 900 }
+      }
+    },
+    {
       name: "vault-chromium-desktop-1280",
+      testIgnore: ["**/vault-webkit-ui.vault.mjs"],
       testMatch: ["**/*.vault.mjs"],
       use: {
         browserName: "chromium",
@@ -63,7 +73,32 @@ export default defineConfig({
       }
     },
     {
+      name: "vault-chromium-tablet-1024",
+      testIgnore: ["**/vault-webkit-ui.vault.mjs"],
+      testMatch: ["**/*.vault.mjs"],
+      use: {
+        browserName: "chromium",
+        deviceScaleFactor: 1,
+        hasTouch: true,
+        screen: { width: 1024, height: 768 },
+        viewport: { width: 1024, height: 768 }
+      }
+    },
+    {
+      name: "vault-chromium-tablet-768",
+      testIgnore: ["**/vault-webkit-ui.vault.mjs"],
+      testMatch: ["**/*.vault.mjs"],
+      use: {
+        browserName: "chromium",
+        deviceScaleFactor: 1,
+        hasTouch: true,
+        screen: { width: 768, height: 1024 },
+        viewport: { width: 768, height: 1024 }
+      }
+    },
+    {
       name: "vault-chromium-mobile-390",
+      testIgnore: ["**/vault-webkit-ui.vault.mjs"],
       testMatch: ["**/*.vault.mjs"],
       use: {
         browserName: "chromium",
@@ -76,6 +111,7 @@ export default defineConfig({
     },
     {
       name: "vault-chromium-mobile-320",
+      testIgnore: ["**/vault-webkit-ui.vault.mjs"],
       testMatch: ["**/*.vault.mjs"],
       use: {
         browserName: "chromium",
@@ -84,6 +120,32 @@ export default defineConfig({
         isMobile: true,
         screen: { width: 320, height: 568 },
         viewport: { width: 320, height: 568 }
+      }
+    },
+    {
+      // Engine-level Safari compatibility gate. This does not replace a real
+      // macOS/iOS Safari smoke on production hardware.
+      name: "vault-webkit-desktop-1280",
+      testMatch: ["**/*.vault.mjs"],
+      use: {
+        browserName: "webkit",
+        viewport: { width: 1280, height: 720 }
+      }
+    },
+    {
+      name: "vault-webkit-mobile-390",
+      testMatch: ["**/*.vault.mjs"],
+      use: {
+        ...devices["iPhone 13"],
+        browserName: "webkit"
+      }
+    },
+    {
+      name: "vault-webkit-mobile-320",
+      testMatch: ["**/*.vault.mjs"],
+      use: {
+        ...devices["iPhone SE"],
+        browserName: "webkit"
       }
     }
   ]

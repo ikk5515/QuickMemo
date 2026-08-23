@@ -115,8 +115,8 @@ async function expectMatrixTaskLayout(page) {
   }
   if (metrics.coarsePointer) {
     for (const name of ["drag", "check"]) {
-      expect.soft(metrics.controls[name].width, `${name} touch width`).toBeGreaterThanOrEqual(39);
-      expect.soft(metrics.controls[name].height, `${name} touch height`).toBeGreaterThanOrEqual(39);
+      expect.soft(metrics.controls[name].width, `${name} touch width`).toBeGreaterThanOrEqual(44);
+      expect.soft(metrics.controls[name].height, `${name} touch height`).toBeGreaterThanOrEqual(44);
     }
   }
   if (metrics.viewportWidth <= 1024) {
@@ -176,7 +176,7 @@ async function expectCompactCalendarLayout(page, { categoryMarker = false } = {}
 }
 
 async function expectFilterAcrossViews(page, visibleTitle, hiddenTitle) {
-  for (const view of ["할 일", "달력", "매트릭스"]) {
+  for (const view of ["달력", "매트릭스"]) {
     await page.getByRole("button", { name: view, exact: true }).click();
     await expect(page.getByRole("heading", { name: view, exact: true })).toBeVisible();
     await expectFilteredTasks(page, visibleTitle, hiddenTitle);
@@ -236,8 +236,10 @@ test("schedule categories filter every primary view and persist the saved defaul
     await page.evaluate(() => window.matchMedia("(prefers-color-scheme: dark)").matches)
   ).toBe(false);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  await navigateWithinApp(page, "/schedule?view=todo");
-  await expect(page.getByRole("heading", { name: "할 일", exact: true })).toBeVisible();
+  await navigateWithinApp(page, "/schedule?view=calendar");
+  await expect(page.getByRole("heading", { name: "달력", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "할 일", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "반복 업무", exact: true })).toHaveCount(0);
   await expect(page.getByRole("group", { name: "일정 분류" })).toBeVisible();
 
   await createTask(page, workTitle, "work");

@@ -8,6 +8,12 @@ export interface VaultIndexEntry {
   path: string;
   kind: VaultEntryKind;
   content?: string;
+  /**
+   * Decrypted file size in bytes when the vault projection knows it. Asset
+   * indexes may omit this instead of exposing encrypted payload sizes as if
+   * they were plaintext file sizes.
+   */
+  size?: number;
   createdAt?: number;
   updatedAt?: number;
 }
@@ -68,6 +74,25 @@ export interface ResolvedLinkOccurrence extends InternalLinkOccurrence {
   targetPath?: string;
   candidateEntryIds: string[];
   unresolvedKey: string;
+}
+
+/**
+ * A visible title or alias mention that is not already part of Markdown link
+ * syntax. Offsets refer to the decrypted source snapshot held by the in-memory
+ * knowledge index and must be revalidated before an edit is applied.
+ */
+export interface UnlinkedMentionOccurrence {
+  sourceEntryId: string;
+  sourcePath: string;
+  targetEntryId: string;
+  targetPath: string;
+  matchedText: string;
+  matchedTerm: string;
+  startOffset: number;
+  endOffset: number;
+  line: number;
+  column: number;
+  context: string;
 }
 
 export interface KnowledgeIndex {

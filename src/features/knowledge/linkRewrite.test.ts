@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   applyInternalLinkRewritePlan,
+  planInternalLinkRewritesForPathChanges,
   planIncomingInternalLinkRewrites
 } from "./linkRewrite";
-import type { RevisionedVaultIndexEntry } from "./linkRewrite";
+import type {
+  RevisionedVaultIndexEntry,
+  VaultEntryPathChange
+} from "./linkRewrite";
 
 function markdownEntry(
   id: string,
@@ -192,5 +196,203 @@ describe("incoming internal-link rewrite planning", () => {
       targetEntryId: "target",
       newTargetPath: "folder/new.md"
     })).toThrow("duplicate target path");
+  });
+});
+
+function applyBatchPlans(
+  entries: readonly RevisionedVaultIndexEntry[],
+  pathChanges: readonly VaultEntryPathChange[]
+): Map<string, string> {
+  const plans = planInternalLinkRewritesForPathChanges({ entries, pathChanges });
+  return new Map(plans.map((plan) => {
+    const source = entries.find((entry) => entry.id === plan.sourceEntryId);
+    if (!source) {
+      throw new Error("test source missing");
+    }
+    const result = applyInternalLinkRewritePlan(
+      plan,
+      source.content ?? "",
+      source.revision
+    );
+    expect(result.status).toBe("applied");
+    return [
+      source.id,
+      result.status === "applied" ? result.markdown : source.content ?? ""
+    ];
+  }));
+}
+
+describe("batch internal-link rewrite planning", () => {
+  it("rewrites relative Markdown links when only their source path moves", () => {
+    const entries = [
+      markdownEntry(
+        "source",
+        "Folder/Sub/Source.md",
+        `[target](../Target.md#Heading "title")`,
+        9
+      ),
+      markdownEntry("target", "Folder/Target.md", "# Heading")
+    ];
+    const pathChanges = [{
+      entryId: "source",
+      oldPath: "Folder/Sub/Source.md",
+      newPath: "Archive/Source.md"
+    }];
+
+    const plans = planInternalLinkRewritesForPathChanges({ entries, pathChanges });
+    expect(plans).toEqual([
+      expect.objectContaining({
+        sourceEntryId: "source",
+        sourcePath: "Folder/Sub/Source.md",
+        rewrittenSourcePath: "Archive/Source.md",
+        expectedRevision: 9
+      })
+    ]);
+    expect(applyBatchPlans(entries, pathChanges).get("source")).toBe(
+      `[target](../Folder/Target.md#Heading "title")`
+    );
+  });
+
+  it("handles a folder subtree atomically, preserving valid cross-links and grouping incoming patches", () => {
+    const entries = [
+      markdownEntry(
+        "a",
+        "Folder/Sub/A.md",
+        "[B](./B.md) [outside](../../Outside.md)"
+      ),
+      markdownEntry("b", "Folder/Sub/B.md", "[A](./A.md)"),
+      markdownEntry(
+        "outside",
+        "Outside.md",
+        "[[Folder/Sub/A#Top]] ![[Folder/Sub/B#^quote]]",
+        4
+      )
+    ];
+    const pathChanges = [
+      {
+        entryId: "a",
+        oldPath: "Folder/Sub/A.md",
+        newPath: "Archive/Deep/Sub/A.md"
+      },
+      {
+        entryId: "b",
+        oldPath: "Folder/Sub/B.md",
+        newPath: "Archive/Deep/Sub/B.md"
+      }
+    ];
+
+    const plans = planInternalLinkRewritesForPathChanges({ entries, pathChanges });
+    expect(plans.map((plan) => plan.sourceEntryId)).toEqual(["a", "outside"]);
+    expect(plans.find((plan) => plan.sourceEntryId === "outside")?.patches).toHaveLength(2);
+
+    const rewritten = applyBatchPlans(entries, pathChanges);
+    expect(rewritten.get("a")).toBe("[B](./B.md) [outside](../../../Outside.md)");
+    expect(rewritten.has("b")).toBe(false);
+    expect(rewritten.get("outside")).toBe("[[A#Top]] ![[B#^quote]]");
+  });
+
+  it("does not churn shortest wikilinks or relative links that still resolve after a joint move", () => {
+    const entries = [
+      markdownEntry("source", "Folder/Source.md", "[[Target]] [target](./Target.md)"),
+      markdownEntry("target", "Folder/Target.md", "")
+    ];
+
+    expect(planInternalLinkRewritesForPathChanges({
+      entries,
+      pathChanges: [
+        { entryId: "source", oldPath: "Folder/Source.md", newPath: "Archive/Source.md" },
+        { entryId: "target", oldPath: "Folder/Target.md", newPath: "Archive/Target.md" }
+      ]
+    })).toEqual([]);
+  });
+
+  it("uses a full path when duplicate basenames make the shortest wikilink ambiguous", () => {
+    const entries = [
+      markdownEntry("source", "Source.md", "[[One/Note#Heading]]"),
+      markdownEntry("target", "One/Note.md", "# Heading"),
+      markdownEntry("duplicate-name", "Two/Note.md", "")
+    ];
+    const pathChanges = [{
+      entryId: "target",
+      oldPath: "One/Note.md",
+      newPath: "Three/Note.md"
+    }];
+
+    expect(applyBatchPlans(entries, pathChanges).get("source")).toBe(
+      "[[Three/Note#Heading]]"
+    );
+  });
+
+  it("rewrites explicit self links while preserving fragment-only, heading, block, and embed syntax", () => {
+    const entries = [markdownEntry(
+      "self",
+      "Old.md",
+      "[[Old#Heading]] [[#Heading]] ![[Old#^block-id]] [self](Old.md#Heading)",
+      12
+    )];
+    const pathChanges = [{
+      entryId: "self",
+      oldPath: "Old.md",
+      newPath: "Folder/New.md"
+    }];
+
+    expect(applyBatchPlans(entries, pathChanges).get("self")).toBe(
+      "[[New#Heading]] [[#Heading]] ![[New#^block-id]] [self](New.md#Heading)"
+    );
+  });
+
+  it("preserves aliases, fragments, embeds, Markdown titles, and ignored code", () => {
+    const source = `![[Docs/Old#Heading|preview]]
+[[Docs/Old#^block-id|block]]
+![image](../Docs/Old.md#Heading "title")
+\`[[Docs/Old]]\`
+`;
+    const entries = [
+      markdownEntry("source", "Inbox/Source.md", source),
+      markdownEntry("target", "Docs/Old.md", "")
+    ];
+    const pathChanges = [{
+      entryId: "target",
+      oldPath: "Docs/Old.md",
+      newPath: "Archive/New.md"
+    }];
+
+    expect(applyBatchPlans(entries, pathChanges).get("source")).toBe(
+      `![[New#Heading|preview]]
+[[New#^block-id|block]]
+![image](../Archive/New.md#Heading "title")
+\`[[Docs/Old]]\`
+`
+    );
+  });
+
+  it("rejects duplicate current/resulting paths, repeated changes, and stale old paths", () => {
+    const normalEntries = [
+      markdownEntry("a", "A.md", "[[B]]"),
+      markdownEntry("b", "B.md", "")
+    ];
+
+    expect(() => planInternalLinkRewritesForPathChanges({
+      entries: [
+        markdownEntry("a", "Same.md", ""),
+        markdownEntry("b", "same.md", "")
+      ],
+      pathChanges: [{ entryId: "a", oldPath: "Same.md", newPath: "New.md" }]
+    })).toThrow("current vault contains a duplicate path");
+    expect(() => planInternalLinkRewritesForPathChanges({
+      entries: normalEntries,
+      pathChanges: [{ entryId: "a", oldPath: "A.md", newPath: "b.md" }]
+    })).toThrow("resulting vault contains a duplicate path");
+    expect(() => planInternalLinkRewritesForPathChanges({
+      entries: normalEntries,
+      pathChanges: [
+        { entryId: "a", oldPath: "A.md", newPath: "C.md" },
+        { entryId: "a", oldPath: "A.md", newPath: "D.md" }
+      ]
+    })).toThrow("duplicate path changes");
+    expect(() => planInternalLinkRewritesForPathChanges({
+      entries: normalEntries,
+      pathChanges: [{ entryId: "a", oldPath: "Stale.md", newPath: "C.md" }]
+    })).toThrow("path change is stale");
   });
 });

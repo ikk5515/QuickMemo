@@ -1,0 +1,37 @@
+.library-vault-promotion {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.library-vault-promotion-button,
+.library-vault-open-button {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 40px;
+}
+
+.library-vault-promotion-status {
+  color: var(--text-muted);
+  flex-basis: 100%;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+  .library-vault-promotion {
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .library-vault-promotion-button,
+  .library-vault-open-button {
+    justify-content: center;
+    min-height: 44px;
+    white-space: normal;
+    width: 100%;
+  }
+}

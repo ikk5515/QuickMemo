@@ -2,12 +2,14 @@ import { URL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
   assertProductionVaultDisabled,
+  assertProductionVaultEnabled,
   assertVercelHobbyPlan,
   normalizedVercelPlan,
   productionEnvironmentMetadataEndpoint,
   productionEnvironmentValueEndpoint,
   productionVaultEnvironmentId,
-  verifyProductionVaultDisabled
+  verifyProductionVaultDisabled,
+  verifyProductionVaultEnabled
 } from "./verify-vercel-hobby-plan.mjs";
 
 describe("Vercel zero-cost plan gate", () => {
@@ -65,6 +67,21 @@ describe("Vercel zero-cost plan gate", () => {
     }, "env_vault")).toThrow("not explicitly disabled");
   });
 
+  it("accepts production activation only for the exact true flag", () => {
+    expect(assertProductionVaultEnabled({
+      id: "env_vault",
+      key: "VITE_OBSIDIAN_VAULT_ENABLED",
+      target: ["production"],
+      value: "true"
+    }, "env_vault")).toBe("true");
+    expect(() => assertProductionVaultEnabled({
+      id: "env_vault",
+      key: "VITE_OBSIDIAN_VAULT_ENABLED",
+      target: ["production"],
+      value: "false"
+    }, "env_vault")).toThrow("not explicitly enabled");
+  });
+
   it("blocks duplicate or identifier-less production Vault flag metadata", () => {
     expect(() => productionVaultEnvironmentId({
       envs: [
@@ -75,6 +92,29 @@ describe("Vercel zero-cost plan gate", () => {
     expect(() => productionVaultEnvironmentId({
       envs: [{ key: "VITE_OBSIDIAN_VAULT_ENABLED", target: ["production"] }]
     })).toThrow("metadata is ambiguous");
+    expect(() => productionVaultEnvironmentId({
+      envs: [{
+        id: "env_mixed",
+        key: "VITE_OBSIDIAN_VAULT_ENABLED",
+        target: ["production", "preview"]
+      }]
+    })).toThrow("metadata is ambiguous");
+    expect(() => productionVaultEnvironmentId({
+      envs: [{
+        id: "env_string",
+        key: "VITE_OBSIDIAN_VAULT_ENABLED",
+        target: "production"
+      }]
+    })).toThrow("metadata is ambiguous");
+  });
+
+  it("rejects a decrypted Vault flag that is not production-only", () => {
+    expect(() => assertProductionVaultEnabled({
+      id: "env_vault",
+      key: "VITE_OBSIDIAN_VAULT_ENABLED",
+      target: ["production", "preview"],
+      value: "true"
+    }, "env_vault")).toThrow("not explicitly enabled");
   });
 
   it("fails closed on an unknown or paginated environment response", () => {
@@ -125,6 +165,31 @@ describe("Vercel zero-cost plan gate", () => {
     expect(new URL(requested[0]).searchParams.get("decrypt")).toBe("false");
     expect(new URL(requested[1]).pathname).toBe("/v1/projects/project/env/env_vault");
     expect(requested.join("\n")).not.toContain("env_other/");
+  });
+
+  it("requires a present true production flag for the one-time full activation", async () => {
+    const requestJson = vi.fn()
+      .mockResolvedValueOnce({
+        envs: [{ id: "env_vault", key: "VITE_OBSIDIAN_VAULT_ENABLED", target: ["production"] }]
+      })
+      .mockResolvedValueOnce({
+        id: "env_vault",
+        key: "VITE_OBSIDIAN_VAULT_ENABLED",
+        target: ["production"],
+        value: "true"
+      });
+    await expect(verifyProductionVaultEnabled({
+      organizationId: "team_example",
+      projectId: "project",
+      token: "test-token"
+    }, requestJson)).resolves.toBe("true");
+    expect(requestJson).toHaveBeenCalledTimes(2);
+
+    await expect(verifyProductionVaultEnabled({
+      organizationId: "team_example",
+      projectId: "project",
+      token: "test-token"
+    }, vi.fn().mockResolvedValue({ envs: [] }))).rejects.toThrow("not explicitly enabled");
   });
 
   it("does not request a decrypted value when the flag is unset", async () => {

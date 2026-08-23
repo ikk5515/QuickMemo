@@ -72,19 +72,17 @@ describe("vault integrity primitives", () => {
     expect(JSON.stringify(plan)).not.toContain("Note");
   });
 
-  it("builds deterministic ancestry metadata for an arbitrary-depth valid tree", () => {
+  it("builds deterministic ancestry metadata for the server-verifiable depth", () => {
     const audit = auditVaultFolderTree([
       { id: "root", parentId: null },
-      { id: "one", parentId: "root" },
-      { id: "two", parentId: "one" },
-      { id: "three", parentId: "two" }
+      { id: "one", parentId: "root" }
     ]);
 
     expect(audit.valid).toBe(true);
-    expect(audit.ancestryById.get("three")).toEqual({
-      ancestorIds: ["root", "one", "two"],
-      depth: 3,
-      version: 1
+    expect(audit.ancestryById.get("one")).toEqual({
+      ancestorIds: ["root"],
+      depth: 1,
+      version: 3
     });
   });
 

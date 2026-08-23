@@ -53,8 +53,8 @@ function LocationProbe() {
   );
 }
 
-function renderLogin(initialEntry: Parameters<typeof MemoryRouter>[0]["initialEntries"]) {
-  return render(
+function loginTree(initialEntry: Parameters<typeof MemoryRouter>[0]["initialEntries"]) {
+  return (
     <MemoryRouter initialEntries={initialEntry}>
       <LocationProbe />
       <Routes>
@@ -66,6 +66,10 @@ function renderLogin(initialEntry: Parameters<typeof MemoryRouter>[0]["initialEn
       </Routes>
     </MemoryRouter>
   );
+}
+
+function renderLogin(initialEntry: Parameters<typeof MemoryRouter>[0]["initialEntries"]) {
+  return render(loginTree(initialEntry));
 }
 
 describe("LoginPage library capture handoff", () => {
@@ -103,6 +107,56 @@ describe("LoginPage library capture handoff", () => {
     });
     expect(screen.getByTestId("location-state")).toBeEmptyDOMElement();
     expect(mocks.loginRosterUser).toHaveBeenCalledWith(rosterUser, "password");
+  });
+
+  it("does not redirect a submitting login before private-key unlock settles", async () => {
+    const user = userEvent.setup();
+    let resolveLogin!: (profile: UserProfile) => void;
+    const loginPending = new Promise<UserProfile>((resolve) => {
+      resolveLogin = resolve;
+    });
+    mocks.loginRosterUser.mockReturnValueOnce(loginPending);
+    const rendered = renderLogin(["/login"]);
+
+    await user.click(await screen.findByRole("button", { name: "사용자 사용자 선택" }));
+    await user.type(screen.getByLabelText("비밀번호"), "password");
+    await user.click(screen.getByRole("button", { name: "로그인" }));
+    expect(screen.getByRole("button", { name: "로그인 중" })).toBeDisabled();
+
+    // AuthContext publishes the verified profile before the same login
+    // promise finishes decrypting the private key. This intermediate state
+    // must not unmount LoginPage or navigate away.
+    mocks.firebaseUser = { uid: rosterUser.uid } as User;
+    mocks.profile = userProfile;
+    rendered.rerender(loginTree(["/login"]));
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
+
+    resolveLogin(userProfile);
+    await waitFor(() => {
+      expect(screen.getByTestId("location")).toHaveTextContent(/^\/home$/);
+    });
+  });
+
+  it("keeps the login error visible when private-key unlock fails after profile verification", async () => {
+    const user = userEvent.setup();
+    let rejectLogin!: (error: Error) => void;
+    const loginPending = new Promise<UserProfile>((_resolve, reject) => {
+      rejectLogin = reject;
+    });
+    mocks.loginRosterUser.mockReturnValueOnce(loginPending);
+    const rendered = renderLogin(["/login"]);
+
+    await user.click(await screen.findByRole("button", { name: "사용자 사용자 선택" }));
+    await user.type(screen.getByLabelText("비밀번호"), "password");
+    await user.click(screen.getByRole("button", { name: "로그인" }));
+
+    mocks.firebaseUser = { uid: rosterUser.uid } as User;
+    mocks.profile = userProfile;
+    rendered.rerender(loginTree(["/login"]));
+    rejectLogin(new Error("private-key-unlock-failed"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("비밀번호를 확인해주세요.");
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
   });
 
   it("returns a validated Safari bookmarklet nonce without accepting capture body state", async () => {

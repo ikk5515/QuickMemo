@@ -52,6 +52,8 @@ export type CanvasFlowNode = Node<CanvasFlowNodeData, "canvasCard">;
 export type CanvasFlowEdge = Edge<JsonCanvasEdge>;
 
 export type CanvasAlignment = "left" | "center" | "right" | "top" | "middle" | "bottom";
+export type CanvasDistribution = "horizontal" | "vertical";
+export type CanvasStackOrder = "front" | "back";
 
 const MAX_CANVAS_SOURCE_BYTES = 5 * 1024 * 1024;
 const MAX_CANVAS_NODES = 10_000;
@@ -252,8 +254,141 @@ export function effectiveJsonCanvasEdgeEnds(edge: Pick<JsonCanvasEdge, "fromEnd"
   } as const;
 }
 
+export function jsonCanvasEdgeEndsForDirection(value: string): Pick<JsonCanvasEdge, "fromEnd" | "toEnd"> | null {
+  if (value === "none-arrow") return { fromEnd: "none", toEnd: "arrow" };
+  if (value === "arrow-none") return { fromEnd: "arrow", toEnd: "none" };
+  if (value === "arrow-arrow") return { fromEnd: "arrow", toEnd: "arrow" };
+  if (value === "none-none") return { fromEnd: "none", toEnd: "none" };
+  return null;
+}
+
+export function jsonCanvasEdgeNavigationNodeId(
+  edge: Pick<JsonCanvasEdge, "fromNode" | "toNode">,
+  direction: "source" | "target"
+) {
+  return direction === "source" ? edge.fromNode : edge.toNode;
+}
+
 function nodeSize(node: JsonCanvasNode) {
   return { width: node.width, height: node.height };
+}
+
+function canvasNodeContains(container: JsonCanvasNode, candidate: JsonCanvasNode) {
+  const sameBounds = candidate.x === container.x
+    && candidate.y === container.y
+    && candidate.width === container.width
+    && candidate.height === container.height;
+  return candidate.id !== container.id
+    && !(candidate.type === "group" && sameBounds)
+    && candidate.x >= container.x
+    && candidate.y >= container.y
+    && candidate.x + candidate.width <= container.x + container.width
+    && candidate.y + candidate.height <= container.y + container.height;
+}
+
+function canvasGroupArea(group: JsonCanvasNode) {
+  return group.width * group.height;
+}
+
+/**
+ * A card can be geometrically covered by multiple groups even though JSON
+ * Canvas has no parent field. Choose the smallest enclosing group and then the
+ * highest z-order group (last in `nodes`) so membership is deterministic.
+ */
+export function containingJsonCanvasGroupId(
+  document: JsonCanvasDocument,
+  candidate: JsonCanvasNode
+): string | null {
+  let owner: JsonCanvasNode | null = null;
+  let ownerIndex = -1;
+  for (const [index, node] of document.nodes.entries()) {
+    if (node.type !== "group" || !canvasNodeContains(node, candidate)) {
+      continue;
+    }
+    const area = canvasGroupArea(node);
+    const ownerArea = owner ? canvasGroupArea(owner) : Number.POSITIVE_INFINITY;
+    if (area < ownerArea || (area === ownerArea && index > ownerIndex)) {
+      owner = node;
+      ownerIndex = index;
+    }
+  }
+  return owner?.id ?? null;
+}
+
+/**
+ * JSON Canvas 1.0 intentionally has no persisted parent/group identifier.
+ * Obsidian therefore derives group membership from geometry. Keep that
+ * relationship in memory only so round-tripping never adds a proprietary
+ * field to the canonical `.canvas` document.
+ */
+export function containedJsonCanvasNodeIds(
+  document: JsonCanvasDocument,
+  groupIds: ReadonlySet<string>
+): Set<string> {
+  if (groupIds.size === 0) {
+    return new Set();
+  }
+  const existingGroupIds = new Set(document.nodes.flatMap((node) => (
+    node.type === "group" && groupIds.has(node.id) ? [node.id] : []
+  )));
+  if (existingGroupIds.size === 0) {
+    return new Set();
+  }
+  const contained = new Set<string>();
+  const pending = [...existingGroupIds];
+  for (let cursor = 0; cursor < pending.length; cursor += 1) {
+    const groupId = pending[cursor];
+    for (const node of document.nodes) {
+      if (
+        existingGroupIds.has(node.id)
+        || contained.has(node.id)
+        || containingJsonCanvasGroupId(document, node) !== groupId
+      ) {
+        continue;
+      }
+      contained.add(node.id);
+      if (node.type === "group") {
+        pending.push(node.id);
+      }
+    }
+  }
+  return contained;
+}
+
+export function expandJsonCanvasGroupSelection(
+  document: JsonCanvasDocument,
+  selectedNodeIds: ReadonlySet<string>
+): Set<string> {
+  const expanded = new Set(selectedNodeIds);
+  if (expanded.size === document.nodes.length) {
+    return expanded;
+  }
+  for (const id of containedJsonCanvasNodeIds(document, selectedNodeIds)) {
+    expanded.add(id);
+  }
+  return expanded;
+}
+
+export function translateJsonCanvasNodes(
+  document: JsonCanvasDocument,
+  nodeIds: ReadonlySet<string>,
+  deltaX: number,
+  deltaY: number
+): JsonCanvasDocument {
+  if (
+    nodeIds.size === 0
+    || (!deltaX && !deltaY)
+    || !Number.isFinite(deltaX)
+    || !Number.isFinite(deltaY)
+  ) {
+    return document;
+  }
+  return {
+    ...document,
+    nodes: document.nodes.map((node) => nodeIds.has(node.id)
+      ? { ...node, x: node.x + deltaX, y: node.y + deltaY }
+      : node)
+  };
 }
 
 export function alignJsonCanvasNodes(
@@ -299,6 +434,75 @@ export function alignJsonCanvasNodes(
   };
 }
 
+export function distributeJsonCanvasNodes(
+  document: JsonCanvasDocument,
+  selectedNodeIds: ReadonlySet<string>,
+  distribution: CanvasDistribution
+): JsonCanvasDocument {
+  const sourceOrder = new Map(document.nodes.map((node, index) => [node.id, index]));
+  const selected = document.nodes
+    .filter((node) => selectedNodeIds.has(node.id))
+    .sort((first, second) => {
+      const firstStart = distribution === "horizontal" ? first.x : first.y;
+      const secondStart = distribution === "horizontal" ? second.x : second.y;
+      return firstStart - secondStart
+        || (sourceOrder.get(first.id) ?? 0) - (sourceOrder.get(second.id) ?? 0);
+    });
+  if (selected.length < 3) {
+    return document;
+  }
+
+  const first = selected[0];
+  const last = selected[selected.length - 1];
+  const start = distribution === "horizontal" ? first.x : first.y;
+  const end = distribution === "horizontal"
+    ? last.x + last.width
+    : last.y + last.height;
+  const occupied = selected.reduce(
+    (total, node) => total + (distribution === "horizontal" ? node.width : node.height),
+    0
+  );
+  const gap = (end - start - occupied) / (selected.length - 1);
+  const distributedPosition = new Map<string, number>();
+  let cursor = start;
+  for (const node of selected) {
+    distributedPosition.set(node.id, cursor);
+    cursor += (distribution === "horizontal" ? node.width : node.height) + gap;
+  }
+
+  return {
+    ...document,
+    nodes: document.nodes.map((node) => {
+      const position = distributedPosition.get(node.id);
+      if (position === undefined) {
+        return node;
+      }
+      return distribution === "horizontal"
+        ? { ...node, x: position }
+        : { ...node, y: position };
+    })
+  };
+}
+
+export function reorderJsonCanvasNodes(
+  document: JsonCanvasDocument,
+  selectedNodeIds: ReadonlySet<string>,
+  stackOrder: CanvasStackOrder
+): JsonCanvasDocument {
+  const selected = document.nodes.filter((node) => selectedNodeIds.has(node.id));
+  if (selected.length === 0 || selected.length === document.nodes.length) {
+    return document;
+  }
+  const unselected = document.nodes.filter((node) => !selectedNodeIds.has(node.id));
+  return {
+    ...document,
+    // JSON Canvas 1.0 orders nodes from the lowest to the highest z-index.
+    nodes: stackOrder === "front"
+      ? [...unselected, ...selected]
+      : [...selected, ...unselected]
+  };
+}
+
 export interface DuplicateCanvasResult {
   document: JsonCanvasDocument;
   newNodeIds: Set<string>;
@@ -310,11 +514,12 @@ export function duplicateJsonCanvasSelection(
   createId: (kind: "node" | "edge", originalId: string) => string,
   offset = 32
 ): DuplicateCanvasResult {
+  const effectiveSelection = expandJsonCanvasGroupSelection(document, selectedNodeIds);
   const idMap = new Map<string, string>();
   const duplicates: JsonCanvasNode[] = [];
 
   for (const node of document.nodes) {
-    if (!selectedNodeIds.has(node.id)) {
+    if (!effectiveSelection.has(node.id)) {
       continue;
     }
     const id = createId("node", node.id);

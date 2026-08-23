@@ -1,0 +1,1025 @@
+{
+  "schemaVersion": 1,
+  "captureKind": "obsidian-official-interactive-v1",
+  "app": {
+    "asarSha256": "a52a7daf1e2460bae03de80f2816604bd16a56cd374fbe5ce8d1a9ef5604059d",
+    "bundleIdentifier": "md.obsidian",
+    "bundleVersion": "1.13.7",
+    "displayedVersion": "1.13.7",
+    "shellVersion": "1.13.7",
+    "signatureVerified": true
+  },
+  "fixture": {
+    "fileCount": 14,
+    "sha256": "9831628d77f08f72c1a70dfce8cf8e97695947850c41f981b21540bd435fd6ea"
+  },
+  "evidence": [
+    {
+      "kind": "global-graph",
+      "path": "global-graph.png",
+      "sha256": "651136cdcfb24ae7cb0b22e496debbe086c59b60008956ab4475d6252c918276"
+    },
+    {
+      "kind": "backlinks",
+      "path": "backlinks.png",
+      "sha256": "187d467fbf2bd255e672122444df012a039f9b2ef676e1fa3eaeba93ec0f3356"
+    },
+    {
+      "kind": "tags",
+      "path": "tags.png",
+      "sha256": "b1fab9eed633cf4b1a326d5e72c355a167adfe460ce6245153586d376dd789ef"
+    },
+    {
+      "kind": "canvas",
+      "path": "canvas.png",
+      "sha256": "a7ac96225a7502f3f487d25cd62ab3cabeda321ea45f875a4602d2feeec6cec7"
+    }
+  ],
+  "oracle": {
+    "graph": {
+      "defaultGlobal": {
+        "nodes": [
+          "?Ignored Comment",
+          "?Missing Canvas",
+          "?Missing Note",
+          "?Shared Alias",
+          "?Unique Alias",
+          "Archive/Target.md",
+          "Canvas/Research.canvas",
+          "Depth/0.md",
+          "Depth/1.md",
+          "Depth/2.md",
+          "Depth/3.md",
+          "Depth/4.md",
+          "Depth/5.md",
+          "Inbox/Incoming.md",
+          "Loose/Orphan.md",
+          "Projects/Hub.md",
+          "Research/Target.md"
+        ],
+        "edges": [
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "?Missing Canvas"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Canvas/Research.canvas"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Research/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/0.md",
+            "target": "Depth/1.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/1.md",
+            "target": "Depth/2.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/2.md",
+            "target": "Depth/3.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/3.md",
+            "target": "Depth/4.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/4.md",
+            "target": "Depth/5.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Inbox/Incoming.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Inbox/Incoming.md",
+            "target": "Research/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Ignored Comment"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Missing Note"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Shared Alias"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Unique Alias"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Archive/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "Archive/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 5,
+            "source": "Projects/Hub.md",
+            "target": "Research/Target.md"
+          }
+        ]
+      },
+      "withAttachments": {
+        "nodes": [
+          "?Ignored Comment",
+          "?Missing Canvas",
+          "?Missing Note",
+          "?Shared Alias",
+          "?Unique Alias",
+          "Archive/Target.md",
+          "Assets/diagram.png",
+          "Assets/reference.pdf",
+          "Canvas/Research.canvas",
+          "Depth/0.md",
+          "Depth/1.md",
+          "Depth/2.md",
+          "Depth/3.md",
+          "Depth/4.md",
+          "Depth/5.md",
+          "Inbox/Incoming.md",
+          "Loose/Orphan.md",
+          "Projects/Hub.md",
+          "Research/Target.md"
+        ],
+        "edges": [
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "?Missing Canvas"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Assets/diagram.png"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Assets/reference.pdf"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Canvas/Research.canvas"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Research/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/0.md",
+            "target": "Depth/1.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/1.md",
+            "target": "Depth/2.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/2.md",
+            "target": "Depth/3.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/3.md",
+            "target": "Depth/4.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/4.md",
+            "target": "Depth/5.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Inbox/Incoming.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Inbox/Incoming.md",
+            "target": "Research/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Ignored Comment"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Missing Note"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Shared Alias"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Unique Alias"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Archive/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Assets/diagram.png"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Assets/reference.pdf"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "Archive/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 5,
+            "source": "Projects/Hub.md",
+            "target": "Research/Target.md"
+          }
+        ]
+      },
+      "withTags": {
+        "nodes": [
+          "#Mixed",
+          "#SharedCase",
+          "#ignored-comment",
+          "#inline/tag",
+          "#project/core",
+          "#research/alpha",
+          "?Ignored Comment",
+          "?Missing Canvas",
+          "?Missing Note",
+          "?Shared Alias",
+          "?Unique Alias",
+          "Archive/Target.md",
+          "Canvas/Research.canvas",
+          "Depth/0.md",
+          "Depth/1.md",
+          "Depth/2.md",
+          "Depth/3.md",
+          "Depth/4.md",
+          "Depth/5.md",
+          "Inbox/Incoming.md",
+          "Loose/Orphan.md",
+          "Projects/Hub.md",
+          "Research/Target.md"
+        ],
+        "edges": [
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "?Missing Canvas"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Canvas/Research.canvas"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Research/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/0.md",
+            "target": "Depth/1.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/1.md",
+            "target": "Depth/2.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/2.md",
+            "target": "Depth/3.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/3.md",
+            "target": "Depth/4.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Depth/4.md",
+            "target": "Depth/5.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Inbox/Incoming.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Inbox/Incoming.md",
+            "target": "Research/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Ignored Comment"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Missing Note"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Shared Alias"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Unique Alias"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Archive/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "Archive/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 5,
+            "source": "Projects/Hub.md",
+            "target": "Research/Target.md"
+          },
+          {
+            "kind": "tag",
+            "occurrenceCount": 1,
+            "source": "Loose/Orphan.md",
+            "target": "#project/core"
+          },
+          {
+            "kind": "tag",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "#ignored-comment"
+          },
+          {
+            "kind": "tag",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "#inline/tag"
+          },
+          {
+            "kind": "tag",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "#project/core"
+          },
+          {
+            "kind": "tag",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "#SharedCase"
+          },
+          {
+            "kind": "tag",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "#Mixed"
+          },
+          {
+            "kind": "tag",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "#research/alpha"
+          }
+        ]
+      },
+      "localHubDepthTwo": {
+        "nodes": [
+          "?Ignored Comment",
+          "?Missing Canvas",
+          "?Missing Note",
+          "?Shared Alias",
+          "?Unique Alias",
+          "Archive/Target.md",
+          "Canvas/Research.canvas",
+          "Inbox/Incoming.md",
+          "Projects/Hub.md",
+          "Research/Target.md"
+        ],
+        "edges": [
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "?Missing Canvas"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Canvas/Research.canvas",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Inbox/Incoming.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Ignored Comment"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Missing Note"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Shared Alias"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "?Unique Alias"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Projects/Hub.md",
+            "target": "Archive/Target.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 1,
+            "source": "Research/Target.md",
+            "target": "Projects/Hub.md"
+          },
+          {
+            "kind": "internal-link",
+            "occurrenceCount": 5,
+            "source": "Projects/Hub.md",
+            "target": "Research/Target.md"
+          }
+        ]
+      }
+    },
+    "outgoing": [
+      {
+        "candidatePaths": [
+          "Archive/Target.md",
+          "Research/Target.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Target]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Archive/Target.md",
+        "unresolvedKey": "Target"
+      },
+      {
+        "candidatePaths": [
+          "Archive/Target.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Archive/Target]]",
+        "sourcePath": "Research/Target.md",
+        "status": "resolved",
+        "targetPath": "Archive/Target.md",
+        "unresolvedKey": "Archive/Target"
+      },
+      {
+        "candidatePaths": [
+          "Assets/diagram.png"
+        ],
+        "embedded": true,
+        "fragment": null,
+        "raw": "![[Assets/diagram.png]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Assets/diagram.png",
+        "unresolvedKey": "Assets/diagram.png"
+      },
+      {
+        "candidatePaths": [
+          "Assets/diagram.png"
+        ],
+        "embedded": true,
+        "fragment": null,
+        "raw": "Assets/diagram.png",
+        "sourcePath": "Canvas/Research.canvas",
+        "status": "resolved",
+        "targetPath": "Assets/diagram.png",
+        "unresolvedKey": "Assets/diagram.png"
+      },
+      {
+        "candidatePaths": [
+          "Assets/reference.pdf"
+        ],
+        "embedded": true,
+        "fragment": {
+          "kind": "heading",
+          "value": "page=1"
+        },
+        "raw": "![[Assets/reference.pdf#page=1]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Assets/reference.pdf",
+        "unresolvedKey": "Assets/reference.pdf"
+      },
+      {
+        "candidatePaths": [
+          "Assets/reference.pdf"
+        ],
+        "embedded": true,
+        "fragment": null,
+        "raw": "Assets/reference.pdf",
+        "sourcePath": "Canvas/Research.canvas",
+        "status": "resolved",
+        "targetPath": "Assets/reference.pdf",
+        "unresolvedKey": "Assets/reference.pdf"
+      },
+      {
+        "candidatePaths": [
+          "Canvas/Research.canvas"
+        ],
+        "embedded": false,
+        "fragment": {
+          "kind": "heading",
+          "value": "Canvas Heading"
+        },
+        "raw": "[[#Canvas Heading]]",
+        "sourcePath": "Canvas/Research.canvas",
+        "status": "resolved",
+        "targetPath": "Canvas/Research.canvas",
+        "unresolvedKey": "Canvas/Research.canvas"
+      },
+      {
+        "candidatePaths": [
+          "Depth/1.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Depth/1]]",
+        "sourcePath": "Depth/0.md",
+        "status": "resolved",
+        "targetPath": "Depth/1.md",
+        "unresolvedKey": "Depth/1"
+      },
+      {
+        "candidatePaths": [
+          "Depth/2.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Depth/2]]",
+        "sourcePath": "Depth/1.md",
+        "status": "resolved",
+        "targetPath": "Depth/2.md",
+        "unresolvedKey": "Depth/2"
+      },
+      {
+        "candidatePaths": [
+          "Depth/3.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Depth/3]]",
+        "sourcePath": "Depth/2.md",
+        "status": "resolved",
+        "targetPath": "Depth/3.md",
+        "unresolvedKey": "Depth/3"
+      },
+      {
+        "candidatePaths": [
+          "Depth/4.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Depth/4]]",
+        "sourcePath": "Depth/3.md",
+        "status": "resolved",
+        "targetPath": "Depth/4.md",
+        "unresolvedKey": "Depth/4"
+      },
+      {
+        "candidatePaths": [
+          "Depth/5.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Depth/5]]",
+        "sourcePath": "Depth/4.md",
+        "status": "resolved",
+        "targetPath": "Depth/5.md",
+        "unresolvedKey": "Depth/5"
+      },
+      {
+        "candidatePaths": [
+          "Projects/Hub.md"
+        ],
+        "embedded": false,
+        "fragment": {
+          "kind": "heading",
+          "value": "Local Heading"
+        },
+        "raw": "[[#Local Heading]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Projects/Hub.md",
+        "unresolvedKey": "Projects/Hub.md"
+      },
+      {
+        "candidatePaths": [
+          "Projects/Hub.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Projects/Hub]]",
+        "sourcePath": "Inbox/Incoming.md",
+        "status": "resolved",
+        "targetPath": "Projects/Hub.md",
+        "unresolvedKey": "Projects/Hub"
+      },
+      {
+        "candidatePaths": [
+          "Projects/Hub.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Projects/Hub]]",
+        "sourcePath": "Research/Target.md",
+        "status": "resolved",
+        "targetPath": "Projects/Hub.md",
+        "unresolvedKey": "Projects/Hub"
+      },
+      {
+        "candidatePaths": [
+          "Projects/Hub.md"
+        ],
+        "embedded": true,
+        "fragment": null,
+        "raw": "Projects/Hub.md",
+        "sourcePath": "Canvas/Research.canvas",
+        "status": "resolved",
+        "targetPath": "Projects/Hub.md",
+        "unresolvedKey": "Projects/Hub.md"
+      },
+      {
+        "candidatePaths": [
+          "Research/Target.md"
+        ],
+        "embedded": false,
+        "fragment": {
+          "kind": "heading",
+          "value": "Section"
+        },
+        "raw": "[[Research/Target#Section|target heading]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Research/Target.md",
+        "unresolvedKey": "Research/Target"
+      },
+      {
+        "candidatePaths": [
+          "Research/Target.md"
+        ],
+        "embedded": false,
+        "fragment": {
+          "kind": "heading",
+          "value": "Section"
+        },
+        "raw": "[relative](../Research/Target.md#Section)",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Research/Target.md",
+        "unresolvedKey": "Research/Target.md"
+      },
+      {
+        "candidatePaths": [
+          "Research/Target.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[../Research/Target]]",
+        "sourcePath": "Canvas/Research.canvas",
+        "status": "resolved",
+        "targetPath": "Research/Target.md",
+        "unresolvedKey": "Research/Target"
+      },
+      {
+        "candidatePaths": [
+          "Research/Target.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Research/Target]]",
+        "sourcePath": "Inbox/Incoming.md",
+        "status": "resolved",
+        "targetPath": "Research/Target.md",
+        "unresolvedKey": "Research/Target"
+      },
+      {
+        "candidatePaths": [
+          "Research/Target.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Research/Target]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Research/Target.md",
+        "unresolvedKey": "Research/Target"
+      },
+      {
+        "candidatePaths": [
+          "Research/Target.md"
+        ],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Research/Target]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Research/Target.md",
+        "unresolvedKey": "Research/Target"
+      },
+      {
+        "candidatePaths": [
+          "Research/Target.md"
+        ],
+        "embedded": true,
+        "fragment": {
+          "kind": "block",
+          "value": "block-a"
+        },
+        "raw": "![[Research/Target#^block-a]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "resolved",
+        "targetPath": "Research/Target.md",
+        "unresolvedKey": "Research/Target"
+      },
+      {
+        "candidatePaths": [],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Ignored Comment]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "unresolved",
+        "targetPath": null,
+        "unresolvedKey": "Ignored Comment"
+      },
+      {
+        "candidatePaths": [],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Missing Canvas]]",
+        "sourcePath": "Canvas/Research.canvas",
+        "status": "unresolved",
+        "targetPath": null,
+        "unresolvedKey": "Missing Canvas"
+      },
+      {
+        "candidatePaths": [],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Missing Note]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "unresolved",
+        "targetPath": null,
+        "unresolvedKey": "Missing Note"
+      },
+      {
+        "candidatePaths": [],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Shared Alias]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "unresolved",
+        "targetPath": null,
+        "unresolvedKey": "Shared Alias"
+      },
+      {
+        "candidatePaths": [],
+        "embedded": false,
+        "fragment": null,
+        "raw": "[[Unique Alias]]",
+        "sourcePath": "Projects/Hub.md",
+        "status": "unresolved",
+        "targetPath": null,
+        "unresolvedKey": "Unique Alias"
+      }
+    ],
+    "tags": [
+      {
+        "displayName": "ignored-comment",
+        "entryPaths": [
+          "Projects/Hub.md"
+        ],
+        "key": "ignored-comment",
+        "parentKeys": []
+      },
+      {
+        "displayName": "inline/tag",
+        "entryPaths": [
+          "Projects/Hub.md"
+        ],
+        "key": "inline/tag",
+        "parentKeys": [
+          "inline"
+        ]
+      },
+      {
+        "displayName": "Mixed",
+        "entryPaths": [
+          "Research/Target.md"
+        ],
+        "key": "mixed",
+        "parentKeys": []
+      },
+      {
+        "displayName": "project/core",
+        "entryPaths": [
+          "Loose/Orphan.md",
+          "Projects/Hub.md"
+        ],
+        "key": "project/core",
+        "parentKeys": [
+          "project"
+        ]
+      },
+      {
+        "displayName": "research/alpha",
+        "entryPaths": [
+          "Research/Target.md"
+        ],
+        "key": "research/alpha",
+        "parentKeys": [
+          "research"
+        ]
+      },
+      {
+        "displayName": "SharedCase",
+        "entryPaths": [
+          "Projects/Hub.md"
+        ],
+        "key": "sharedcase",
+        "parentKeys": []
+      }
+    ]
+  }
+}

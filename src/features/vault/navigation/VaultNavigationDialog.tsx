@@ -42,6 +42,8 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])"
 ].join(",");
 
+const NAVIGATION_RESULT_LIMIT = 160;
+
 export function VaultNavigationDialog<T>({
   closeOnActivate = true,
   emptyLabel,
@@ -72,9 +74,14 @@ export function VaultNavigationDialog<T>({
     [getSearchText, items, query]
   );
   const visibleItems = useMemo(
-    () => rankedItems.map((rankedItem) => rankedItem.item),
+    () => rankedItems
+      .slice(0, NAVIGATION_RESULT_LIMIT)
+      .map((rankedItem) => rankedItem.item),
     [rankedItems]
   );
+  const resultStatus = rankedItems.length > visibleItems.length
+    ? `${rankedItems.length.toLocaleString("ko-KR")}개 결과 중 ${visibleItems.length.toLocaleString("ko-KR")}개 표시. 더 구체적으로 검색하면 나머지 결과를 찾을 수 있습니다.`
+    : `${rankedItems.length.toLocaleString("ko-KR")}개 결과`;
   const activeItem = visibleItems[activeIndex];
   const activeOptionId = activeItem === undefined
     ? undefined
@@ -279,10 +286,17 @@ export function VaultNavigationDialog<T>({
           </button>
         </div>
 
-        <p aria-live="polite" className="qm-vault-navigation-visually-hidden">
-          {visibleItems.length}개 결과
+        <p
+          aria-atomic="true"
+          aria-live="polite"
+          className="qm-vault-navigation-visually-hidden"
+          id={`${instanceId}-result-status`}
+          role="status"
+        >
+          {resultStatus}
         </p>
         <div
+          aria-describedby={`${instanceId}-result-status`}
           aria-label={listLabel}
           className="qm-vault-navigation-results"
           id={`${instanceId}-listbox`}
@@ -296,7 +310,9 @@ export function VaultNavigationDialog<T>({
             return (
               <button
                 aria-disabled={disabled || undefined}
+                aria-posinset={index + 1}
                 aria-selected={active}
+                aria-setsize={rankedItems.length}
                 className={`qm-vault-navigation-option${active ? " is-active" : ""}`}
                 id={`${instanceId}-option-${index}`}
                 key={getItemKey(item)}

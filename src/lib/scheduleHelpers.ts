@@ -313,6 +313,10 @@ export function compareCompletedTasks(left: DecryptedScheduleTask, right: Decryp
 }
 
 export function compareMatrixTasks(left: DecryptedScheduleTask, right: DecryptedScheduleTask) {
+  if (left.status !== right.status) {
+    return left.status === "active" ? -1 : 1;
+  }
+
   const dateOrder = compareTaskStartDates(left, right);
 
   if (dateOrder !== 0) {
@@ -776,8 +780,7 @@ function isMatrixVisibleTask(task: DecryptedScheduleTask) {
     status?: string;
   };
 
-  return legacyTask.status !== "completed"
-    && legacyTask.status !== "archived"
+  return legacyTask.status !== "archived"
     && legacyTask.deleted !== true
     && legacyTask.isDeleted !== true;
 }

@@ -27,7 +27,8 @@ describe("ReadonlyNoteRenderer surface contract", () => {
     expect(notesPageSource).toContain('contentFormat={renderLegacyPlainText ? "plain-text" : "html"}');
     expect(publicSharePageSource).toContain("contentFormat={bodyFormat}");
     expect(secureShareViewerSource).toContain("contentFormat={content.bodyFormat}");
-    expect(adminPageSource).toContain("contentFormat={selectedAdminNote.bodyFormat}");
+    expect(adminPageSource).toContain("export function AdminNotePreviewDialog");
+    expect(adminPageSource).toContain("contentFormat={note.bodyFormat}");
   });
 
   it("keeps the public renderer independent of the interactive TipTap editor bundle", () => {

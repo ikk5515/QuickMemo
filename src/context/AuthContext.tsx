@@ -12,6 +12,7 @@ import { PropsWithChildren, createContext, useCallback, useContext, useEffect, u
 import { auth, authPersistenceReady } from "../lib/firebase";
 import { relockUserPrivateKey, unlockPrivateKeyWithFallback } from "../lib/crypto";
 import { clearAuthSession, readAuthSession, startAuthSession } from "../lib/authSession";
+import { shouldDelayPrivateKeyAutoLock } from "../lib/privateKeyAutoLockGuard";
 import {
   deleteSessionPrivateKey,
   privateKeySessionDurationMs,
@@ -50,6 +51,26 @@ interface ProfileLoadInFlight {
 interface SignInAttempt {
   attemptId: number;
   expectedUid: string;
+}
+
+const retryableProfileSubscriptionErrorCodes = new Set([
+  "aborted",
+  "cancelled",
+  "deadline-exceeded",
+  "internal",
+  "unknown",
+  "unavailable"
+]);
+const maxProfileSubscriptionRetryAttempts = 5;
+const privateKeyAutoLockSaveGraceMs = 5_000;
+const privateKeyAutoLockSaveRetryMs = 100;
+
+function retryableProfileSubscriptionError(error: Error) {
+  const rawCode = (error as Error & { code?: unknown }).code;
+  const normalizedCode = typeof rawCode === "string"
+    ? rawCode.toLowerCase().split("/").at(-1) ?? ""
+    : "";
+  return retryableProfileSubscriptionErrorCodes.has(normalizedCode);
 }
 
 export function AuthProvider({ children }: PropsWithChildren) {
@@ -329,44 +350,89 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
 
     let active = true;
+    let retryAttempt = 0;
+    let retryTimeoutId: number | undefined;
+    let unsubscribe: (() => void) | null = null;
 
-    const unsubscribe = subscribeUserProfile(
-      firebaseUserUid,
-      (nextProfile) => {
-        if (!active) {
-          return;
-        }
+    const stopSubscription = () => {
+      unsubscribe?.();
+      unsubscribe = null;
+    };
 
-        if (!nextProfile?.isActive || nextProfile.uid !== firebaseUserUid) {
-          activeProfileUidRef.current = null;
-          void expireFirebaseSession(firebaseUserUid);
-          return;
-        }
-
-        if (
-          auth.currentUser?.uid !== firebaseUserUid ||
-          observedFirebaseUidRef.current !== firebaseUserUid
-        ) {
-          return;
-        }
-
-        activeProfileUidRef.current = firebaseUserUid;
-        setProfile(nextProfile);
-      },
-      () => {
-        if (active) {
-          activeProfileUidRef.current = null;
-          setProfile(null);
-          clearPrivateKey();
-        }
+    const startSubscription = () => {
+      if (
+        !active ||
+        auth.currentUser?.uid !== firebaseUserUid ||
+        observedFirebaseUidRef.current !== firebaseUserUid ||
+        !readAuthSession(firebaseUserUid)
+      ) {
+        return;
       }
-    );
+
+      stopSubscription();
+      unsubscribe = subscribeUserProfile(
+        firebaseUserUid,
+        (nextProfile, metadata) => {
+          if (!active) {
+            return;
+          }
+
+          // WebKit can replay a cached profile on every re-subscription. A
+          // cached success keeps the verified workspace usable, but only a
+          // server-confirmed snapshot may reset the bounded retry window.
+          if (!metadata.fromCache) {
+            retryAttempt = 0;
+          }
+          if (!nextProfile?.isActive || nextProfile.uid !== firebaseUserUid) {
+            activeProfileUidRef.current = null;
+            void expireFirebaseSession(firebaseUserUid);
+            return;
+          }
+
+          if (
+            auth.currentUser?.uid !== firebaseUserUid ||
+            observedFirebaseUidRef.current !== firebaseUserUid
+          ) {
+            return;
+          }
+
+          activeProfileUidRef.current = firebaseUserUid;
+          setProfile(nextProfile);
+        },
+        (error) => {
+          if (!active) {
+            return;
+          }
+
+          stopSubscription();
+          if (
+            !retryableProfileSubscriptionError(error) ||
+            retryAttempt >= maxProfileSubscriptionRetryAttempts
+          ) {
+            activeProfileUidRef.current = null;
+            void expireFirebaseSession(firebaseUserUid);
+            return;
+          }
+
+          // A verified profile remains usable during a brief transport loss;
+          // Firestore Rules still authorize every read/write. Re-subscribe
+          // with a bounded backoff instead of blanking the Safari workspace.
+          const delay = Math.min(30_000, 1_000 * (2 ** Math.min(retryAttempt, 5)));
+          retryAttempt += 1;
+          window.clearTimeout(retryTimeoutId);
+          retryTimeoutId = window.setTimeout(startSubscription, delay);
+        }
+      );
+    };
+
+    startSubscription();
 
     return () => {
       active = false;
-      unsubscribe();
+      window.clearTimeout(retryTimeoutId);
+      stopSubscription();
     };
-  }, [clearPrivateKey, expireFirebaseSession, firebaseUserUid]);
+  }, [expireFirebaseSession, firebaseUserUid]);
 
   useEffect(() => {
     if (!firebaseUserUid || !privateKey || privateKeyUid !== firebaseUserUid) {
@@ -378,10 +444,19 @@ export function AuthProvider({ children }: PropsWithChildren) {
     const generation = authGenerationRef.current;
     let timeoutId: number | undefined;
     let active = true;
+    let activityGeneration = 0;
     let lastRefreshAt = 0;
 
-    function clearUnlockAfterIdle() {
-      if (!active) {
+    function clearUnlockAfterIdle(expectedActivityGeneration: number, graceDeadline: number) {
+      if (!active || activityGeneration !== expectedActivityGeneration) {
+        return;
+      }
+
+      if (shouldDelayPrivateKeyAutoLock() && Date.now() < graceDeadline) {
+        timeoutId = window.setTimeout(
+          () => clearUnlockAfterIdle(expectedActivityGeneration, graceDeadline),
+          Math.min(privateKeyAutoLockSaveRetryMs, Math.max(1, graceDeadline - Date.now()))
+        );
         return;
       }
 
@@ -389,14 +464,26 @@ export function AuthProvider({ children }: PropsWithChildren) {
       void deleteSessionPrivateKey(uid).catch(() => undefined);
     }
 
-    function refreshSession() {
+    function armAutoLock() {
       if (!active) {
         return;
       }
 
-      lastRefreshAt = Date.now();
+      activityGeneration += 1;
+      const expectedActivityGeneration = activityGeneration;
       window.clearTimeout(timeoutId);
-      void writeSessionPrivateKey(uid, sessionPrivateKey, lastRefreshAt + privateKeySessionDurationMs)
+      timeoutId = window.setTimeout(
+        () => clearUnlockAfterIdle(
+          expectedActivityGeneration,
+          Date.now() + privateKeyAutoLockSaveGraceMs
+        ),
+        privateKeySessionDurationMs
+      );
+    }
+
+    function persistSessionKey() {
+      const expiresAt = lastRefreshAt + privateKeySessionDurationMs;
+      void writeSessionPrivateKey(uid, sessionPrivateKey, expiresAt)
         .then((mutationVersion) => {
           if (mutationVersion === null) {
             return undefined;
@@ -416,20 +503,32 @@ export function AuthProvider({ children }: PropsWithChildren) {
           return undefined;
         })
         .catch(() => undefined);
-      timeoutId = window.setTimeout(clearUnlockAfterIdle, privateKeySessionDurationMs);
+    }
+
+    function refreshSession() {
+      if (!active) {
+        return;
+      }
+
+      lastRefreshAt = Date.now();
+      armAutoLock();
+      persistSessionKey();
     }
 
     function refreshSessionFromActivity() {
+      armAutoLock();
       if (Date.now() - lastRefreshAt < 60_000) {
         return;
       }
 
-      refreshSession();
+      lastRefreshAt = Date.now();
+      persistSessionKey();
     }
 
     refreshSession();
     window.addEventListener("keydown", refreshSessionFromActivity, true);
     window.addEventListener("pointerdown", refreshSessionFromActivity, true);
+    window.addEventListener("wheel", refreshSessionFromActivity, { capture: true, passive: true });
     window.addEventListener("focus", refreshSessionFromActivity);
 
     return () => {
@@ -437,6 +536,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       window.clearTimeout(timeoutId);
       window.removeEventListener("keydown", refreshSessionFromActivity, true);
       window.removeEventListener("pointerdown", refreshSessionFromActivity, true);
+      window.removeEventListener("wheel", refreshSessionFromActivity, true);
       window.removeEventListener("focus", refreshSessionFromActivity);
     };
   }, [clearPrivateKey, firebaseUserUid, privateKey, privateKeyUid]);

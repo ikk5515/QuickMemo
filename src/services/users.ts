@@ -44,13 +44,24 @@ export function subscribeUsers(callback: (users: UserProfile[]) => void, onError
 
 export function subscribeUserProfile(
   uid: string,
-  callback: (profile: UserProfile | null) => void,
+  callback: (profile: UserProfile | null, metadata: { fromCache: boolean }) => void,
   onError?: (error: Error) => void
 ) {
   return onSnapshot(
     doc(db, "users", uid),
     (snapshot) => {
-      callback(snapshot.exists() ? (snapshot.data() as UserProfile) : null);
+      // A newly opened Safari/WebKit context can emit an empty cache snapshot
+      // before the server answers. The caller has already verified this
+      // profile with getDoc during login, so only a server-confirmed miss may
+      // invalidate the session. Existing cached profiles remain useful while
+      // Firestore reconnects; Rules still authorize every operation.
+      if (!snapshot.exists() && snapshot.metadata.fromCache) {
+        return;
+      }
+      callback(
+        snapshot.exists() ? (snapshot.data() as UserProfile) : null,
+        { fromCache: snapshot.metadata.fromCache }
+      );
     },
     (error) => onError?.(error)
   );

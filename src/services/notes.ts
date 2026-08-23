@@ -6,7 +6,9 @@ import {
   doc,
   getCountFromServer,
   getDoc,
+  getDocFromServer,
   getDocs,
+  getDocsFromServer,
   limit,
   onSnapshot,
   orderBy,
@@ -24,12 +26,31 @@ import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
 import { db, getLegacyStorage } from "../lib/firebase";
 import {
+  assertVaultFolderLifecyclePreflight,
+  partitionVaultFolderTrash
+} from "../features/vault/folderTrash";
+import {
   deleteBlobAttachment,
   fetchBlobAttachmentBytes,
   fetchBlobAttachmentResponse,
   uploadNoteAttachmentBlob,
   type BlobAttachmentUploadProgressHandler
 } from "./blobAttachments";
+import { ensureVaultFolderTree, mutateVaultFolder } from "./vaultFolderMutations";
+import {
+  mutateVaultNote,
+  vaultNoteAccessPayload,
+  VaultNoteApiError,
+  vaultNoteCreatePayload,
+  vaultNoteImportCreatePayload,
+  vaultNoteLifecyclePayload,
+  vaultNoteMigrateLegacyPayload,
+  vaultNotePurgePayload,
+  vaultNoteSecureCopyCreatePayload,
+  vaultNoteSecureCopyLifecyclePayload,
+  type VaultNoteApiPayload,
+  type VaultNoteMutationResultFor
+} from "./vaultNoteMutations";
 import type {
   EncryptedPayload,
   NoteAttachmentDocument,
@@ -64,6 +85,68 @@ export interface NoteFolderSnapshot extends NoteFolderDocument {
   id: string;
 }
 
+export interface ServerSnapshotMetadata {
+  fromCache: boolean;
+  hasPendingWrites: boolean;
+  serverComplete: boolean;
+}
+
+const maximumVaultCutoverOwnedNotes = 20_000;
+
+/**
+ * Returns a server-confirmed, owner-only cutover snapshot. Historical active
+ * notes without `isDeleted` are normalized in awaited batches and then read
+ * again from the server, preventing the active `isDeleted == false` query from
+ * silently omitting them when the integrity marker is activated.
+ */
+export interface OwnedVaultCutoverInventory {
+  activeNotes: NoteSnapshot[];
+  deletedNotes: NoteSnapshot[];
+}
+
+export async function loadOwnedVaultCutoverInventory(
+  uid: string
+): Promise<OwnedVaultCutoverInventory> {
+  if (!uid || uid !== uid.trim() || uid.length > 128 || uid.includes("/")) {
+    throw new Error("Vault 소유자를 확인할 수 없습니다.");
+  }
+  const ownedQuery = query(collection(db, "notes"), where("ownerUid", "==", uid));
+  const readOwned = async () => {
+    const snapshot = await getDocsFromServer(ownedQuery);
+    if (snapshot.docs.length > maximumVaultCutoverOwnedNotes) {
+      throw new Error("Vault 이름 예약 전환 한도를 초과했습니다.");
+    }
+    return snapshot.docs.map((document) => ({
+      id: document.id,
+      ...(document.data() as NoteDocument)
+    }));
+  };
+
+  let notes = await readOwned();
+  const missingActiveMetadata = notes.filter((note) => !hasDeletionMetadata(note) && visibleNote(note));
+  for (let index = 0; index < missingActiveMetadata.length; index += 450) {
+    const batch = writeBatch(db);
+    missingActiveMetadata.slice(index, index + 450).forEach((note) => {
+      batch.update(doc(db, "notes", note.id), { isDeleted: false });
+    });
+    await batch.commit();
+  }
+  if (missingActiveMetadata.length) {
+    notes = await readOwned();
+  }
+  if (notes.some((note) => !hasDeletionMetadata(note) && visibleNote(note))) {
+    throw new Error("기존 노트의 삭제 상태를 서버에서 확인하지 못했습니다.");
+  }
+  return {
+    activeNotes: sortedByUpdatedAt(notes.filter(visibleNote)),
+    deletedNotes: sortedByUpdatedAt(notes.filter(deletedNote))
+  };
+}
+
+export async function loadOwnedVaultCutoverNotes(uid: string) {
+  return (await loadOwnedVaultCutoverInventory(uid)).activeNotes;
+}
+
 export interface SaveNoteInput {
   type: NoteKind;
   ownerUid: string;
@@ -76,6 +159,7 @@ export interface SaveNoteInput {
   folderId?: string | null;
   historySummary?: EncryptedPayload;
   historySnapshot?: EncryptedPayload;
+  nameClaim?: VaultNameClaimReservationInput;
 }
 
 export interface NoteMutationResult {
@@ -91,6 +175,7 @@ export interface CreateEncryptedNoteFolderInput {
   ownerUid: string;
   parentId: string | null;
   wrappedKey: WrappedNoteKey;
+  nameClaim: VaultNameClaimReservationInput;
 }
 
 export interface UpdateEncryptedNoteFolderInput {
@@ -100,6 +185,21 @@ export interface UpdateEncryptedNoteFolderInput {
   order?: number;
   ownerUid: string;
   parentId?: string | null;
+  nameClaim: VaultNameClaimReservationInput;
+}
+
+export interface RevisionedEncryptedFolderLifecycleInput {
+  expectedRevision: number;
+  folderId: string;
+  /** Complete owner folder snapshot from a server-confirmed subscription. */
+  folders: readonly NoteFolderSnapshot[];
+  ownerUid: string;
+}
+
+export interface VaultNameClaimReservationInput {
+  claimId: string;
+  indexVersion: 1;
+  parentId: string | null;
 }
 
 export interface MigrateLegacyNoteFolderInput extends CreateEncryptedNoteFolderInput {
@@ -114,6 +214,18 @@ export interface CreatedRevisionedNoteResult extends NoteMutationResult {
 export interface CreateSecureShareCopyingNoteInput extends SaveNoteInput {
   copyJobId: string;
   expectedAttachmentCount: number;
+  noteId: string;
+}
+
+export interface MigrateLegacyVaultNoteInput {
+  expectedContentFormat: "legacy-html-v1";
+  expectedEntryKind: "legacy-html";
+  expectedRevision: number;
+  historySummary?: EncryptedPayload;
+  nameClaim?: VaultNameClaimReservationInput;
+  noteId: string;
+  readerUids: string[];
+  uid: string;
 }
 
 export interface SecureShareCopyingNoteLifecycleInput {
@@ -135,11 +247,42 @@ export interface UpdateRevisionedEncryptedNoteInput {
   noteId: string;
   readerUids: string[];
   uid: string;
+  nameClaim?: VaultNameClaimReservationInput;
+}
+
+export interface BackfillRevisionedVaultNameClaimInput {
+  expectedContentFormat: VaultContentFormat;
+  expectedEntryKind: VaultEntryKind;
+  expectedRevision: number;
+  historySummary?: EncryptedPayload;
+  nameClaim: VaultNameClaimReservationInput;
+  noteId: string;
+  readerUids: string[];
+  uid: string;
+}
+
+export interface ResolveRevisionedVaultNameCollisionInput {
+  changedFields: Array<"folder" | "name-claim" | "title">;
+  encryptedTitle?: EncryptedPayload;
+  expectedContentFormat: VaultContentFormat;
+  expectedEntryKind: VaultEntryKind;
+  expectedRevision: number;
+  folderId?: string | null;
+  historySummary?: EncryptedPayload;
+  nameClaim: VaultNameClaimReservationInput;
+  noteId: string;
+  readerUids: string[];
+  uid: string;
+}
+
+export interface UpdateRevisionedEncryptedNoteAndFolderInput extends UpdateRevisionedEncryptedNoteInput {
+  folderId: string | null;
 }
 
 export interface UpdateRevisionedNoteAccessInput {
   expectedRevision: number;
   folderId?: string | null;
+  nameClaim?: VaultNameClaimReservationInput;
   noteId: string;
   participantUids: string[];
   type: NoteKind;
@@ -150,6 +293,7 @@ export interface UpdateRevisionedNoteAccessInput {
 export interface UpdateRevisionedNoteFolderInput {
   expectedRevision: number;
   folderId: string | null;
+  nameClaim: VaultNameClaimReservationInput;
   noteId: string;
   readerUids: string[];
   uid: string;
@@ -157,6 +301,7 @@ export interface UpdateRevisionedNoteFolderInput {
 
 export interface RevisionedNoteLifecycleInput {
   expectedRevision: number;
+  nameClaim?: VaultNameClaimReservationInput;
   noteId: string;
   readerUids: string[];
   uid: string;
@@ -175,6 +320,17 @@ export class NoteRevisionConflictError extends Error {
   }
 }
 
+export class VaultNameConflictError extends Error {
+  readonly code = "vault/name-conflict";
+  readonly claimId: string;
+
+  constructor(claimId: string) {
+    super("같은 위치에 동일한 이름의 Vault 항목이 있습니다.");
+    this.name = "VaultNameConflictError";
+    this.claimId = claimId;
+  }
+}
+
 export class NoteFolderLimitError extends Error {
   readonly code = "note-folder/resource-limit-exceeded";
   readonly context: "create" | "subscription";
@@ -190,6 +346,56 @@ export class NoteFolderLimitError extends Error {
   }
 }
 
+const maxEncryptedVaultFoldersPerOwner = 2_000;
+
+async function commitVaultFolderMutation(
+  ownerUid: string,
+  payload: Parameters<typeof mutateVaultFolder>[1],
+  claimId?: string
+) {
+  try {
+    return await mutateVaultFolder(ownerUid, payload);
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error
+      ? String(error.code)
+      : "";
+    if (code === "vault_name_conflict" && claimId) {
+      throw new VaultNameConflictError(claimId);
+    }
+    if (code === "vault_tree_capacity") {
+      throw new NoteFolderLimitError(maxEncryptedVaultFoldersPerOwner);
+    }
+    throw error;
+  }
+}
+
+async function commitServerVaultNoteMutation<TPayload extends VaultNoteApiPayload>(
+  ownerUid: string,
+  payload: TPayload,
+  options: { claimId?: string; expectedRevision?: number } = {}
+): Promise<VaultNoteMutationResultFor<TPayload>> {
+  try {
+    return await mutateVaultNote(ownerUid, payload);
+  } catch (error) {
+    if (error instanceof VaultNoteApiError) {
+      if (error.code === "vault_name_conflict" && options.claimId) {
+        throw new VaultNameConflictError(options.claimId);
+      }
+      if (
+        error.code === "revision_conflict"
+        && options.expectedRevision !== undefined
+        && error.actualRevision !== undefined
+      ) {
+        throw new NoteRevisionConflictError(
+          options.expectedRevision,
+          error.actualRevision
+        );
+      }
+    }
+    throw error;
+  }
+}
+
 export function isLegacyHtmlNoteDocument(
   note: Pick<NoteDocument, "contentFormat" | "entryKind">
 ) {
@@ -197,17 +403,6 @@ export function isLegacyHtmlNoteDocument(
     (!note.contentFormat && !note.entryKind)
     || (note.contentFormat === "legacy-html-v1" && note.entryKind === "legacy-html")
   );
-}
-
-function noteStorageIdentityMatches(
-  note: Pick<NoteDocument, "contentFormat" | "entryKind">,
-  expectedContentFormat: VaultContentFormat,
-  expectedEntryKind: VaultEntryKind
-) {
-  if (isLegacyHtmlNoteDocument(note)) {
-    return expectedContentFormat === "legacy-html-v1" && expectedEntryKind === "legacy-html";
-  }
-  return note.contentFormat === expectedContentFormat && note.entryKind === expectedEntryKind;
 }
 
 export interface SaveNoteAttachmentInput {
@@ -243,6 +438,7 @@ type StoredAttachmentDocument = Pick<
 };
 
 export interface PurgeNoteInput {
+  expectedRevision: number;
   noteId: string;
   ownerUid: string;
   uid: string;
@@ -260,6 +456,91 @@ const maxEncryptedHistorySnapshotCharacters = 700_000;
 const maxEncryptedIvCharacters = 256;
 export const maxNoteFoldersPerOwner = 5_000;
 const noteFolderSubscriptionSentinelLimit = maxNoteFoldersPerOwner + 1;
+
+function assertVaultNameClaim(
+  claim: VaultNameClaimReservationInput,
+  expectedParentId: string | null
+) {
+  if (
+    !claim
+    || claim.indexVersion !== 1
+    || !/^[A-Za-z0-9_-]{43}$/u.test(claim.claimId)
+    || claim.parentId !== expectedParentId
+  ) {
+    throw new Error("Vault 이름 예약 정보가 올바르지 않습니다.");
+  }
+  return claim;
+}
+
+function vaultNameClaimRef(uid: string, claimId: string) {
+  return doc(db, "vaultIntegrity", uid, "nameClaims", claimId);
+}
+
+function vaultNameClaimDocument(
+  uid: string,
+  targetId: string,
+  targetType: "entry" | "folder",
+  claim: VaultNameClaimReservationInput
+) {
+  return {
+    createdAt: serverTimestamp(),
+    indexVersion: claim.indexVersion,
+    ownerUid: uid,
+    parentId: claim.parentId,
+    targetId,
+    targetType,
+    updatedAt: serverTimestamp()
+  };
+}
+
+function storedVaultNameClaimId(data: Pick<NoteDocument, "vaultNameClaimId"> | Pick<NoteFolderDocument, "vaultNameClaimId">) {
+  const value = data.vaultNameClaimId;
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/u.test(value) ? value : null;
+}
+
+function claimTargets(
+  value: unknown,
+  uid: string,
+  targetId: string,
+  targetType: "entry" | "folder",
+  parentId?: string | null
+) {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const claim = value as Record<string, unknown>;
+  return claim.ownerUid === uid
+    && claim.targetId === targetId
+    && claim.targetType === targetType
+    && claim.indexVersion === 1
+    && (parentId === undefined || claim.parentId === parentId);
+}
+
+export async function vaultNameClaimReservationMatches(input: {
+  claimId: string;
+  ownerUid: string;
+  parentId: string | null;
+  targetId: string;
+  targetType: "entry" | "folder";
+}) {
+  if (
+    !/^[A-Za-z0-9_-]{43}$/u.test(input.claimId)
+    || !input.ownerUid
+    || !input.targetId
+    || input.targetId.length > 120
+    || input.targetId.includes("/")
+  ) {
+    throw new Error("Vault 이름 예약 조회 정보가 올바르지 않습니다.");
+  }
+  const snapshot = await getDoc(vaultNameClaimRef(input.ownerUid, input.claimId));
+  return snapshot.exists() && claimTargets(
+    snapshot.data(),
+    input.ownerUid,
+    input.targetId,
+    input.targetType,
+    input.parentId
+  );
+}
 
 function assertEncryptedPayloadSize(
   payload: EncryptedPayload | undefined,
@@ -457,11 +738,23 @@ function noteSnapshotList(snapshot: { docs: Array<{ id: string; data: () => unkn
   return sortedByUpdatedAt(notes);
 }
 
+function serverSnapshotMetadata(snapshot: {
+  metadata?: { fromCache?: boolean; hasPendingWrites?: boolean };
+}) {
+  const fromCache = snapshot.metadata?.fromCache === true;
+  const hasPendingWrites = snapshot.metadata?.hasPendingWrites === true;
+  return {
+    fromCache,
+    hasPendingWrites,
+    serverComplete: !fromCache && !hasPendingWrites
+  } satisfies ServerSnapshotMetadata;
+}
+
 function subscribeNotesByDeletedState(
   uid: string,
   ownerUids: string[] | null,
   deleted: boolean,
-  callback: (notes: NoteSnapshot[]) => void,
+  callback: (notes: NoteSnapshot[], metadata: ServerSnapshotMetadata) => void,
   onError?: (error: Error) => void,
   maximumNotes?: number
 ) {
@@ -471,6 +764,7 @@ function subscribeNotesByDeletedState(
     if (!deleted && maximumNotes) {
       void migrateLegacyDeletionMetadata(uid, true);
       const boundedMaximum = Math.min(2_000, Math.max(1, Math.floor(maximumNotes)));
+      let failed = false;
       const notesQuery = query(
         collection(db, "notes"),
         where("isDeleted", "==", false),
@@ -480,10 +774,27 @@ function subscribeNotesByDeletedState(
 
       return onSnapshot(
         notesQuery,
+        { includeMetadataChanges: true },
         (snapshot) => {
-          callback(noteSnapshotList(snapshot, noteFilter).slice(0, boundedMaximum));
+          if (failed) {
+            return;
+          }
+          callback(
+            noteSnapshotList(snapshot, noteFilter).slice(0, boundedMaximum),
+            serverSnapshotMetadata(snapshot)
+          );
         },
-        (error) => onError?.(error)
+        (error) => {
+          if (failed) {
+            return;
+          }
+          // Listener errors can represent a revoked authorization boundary.
+          // Clear the previous encrypted rows before surfacing the error so a
+          // consumer cannot keep rendering already-decrypted note plaintext.
+          failed = true;
+          callback([], { fromCache: false, hasPendingWrites: false, serverComplete: false });
+          onError?.(error);
+        }
       );
     }
 
@@ -505,12 +816,24 @@ function subscribeNotesByDeletedState(
       void migrateLegacyDeletionMetadata(uid, true);
     }
 
+    let failed = false;
     return onSnapshot(
       notesQuery,
+      { includeMetadataChanges: true },
       (snapshot) => {
-        callback(noteSnapshotList(snapshot, noteFilter));
+        if (failed) {
+          return;
+        }
+        callback(noteSnapshotList(snapshot, noteFilter), serverSnapshotMetadata(snapshot));
       },
-      (error) => onError?.(error)
+      (error) => {
+        if (failed) {
+          return;
+        }
+        failed = true;
+        callback([], { fromCache: false, hasPendingWrites: false, serverComplete: false });
+        onError?.(error);
+      }
     );
   }
 
@@ -519,6 +842,9 @@ function subscribeNotesByDeletedState(
     ? Math.min(2_000, Math.max(1, Math.floor(maximumNotes)))
     : null;
   const notesByOwner = new Map<string, NoteSnapshot[]>();
+  const fromCacheByOwner = new Map<string, boolean>();
+  const pendingWritesByOwner = new Map<string, boolean>();
+  const failedOwners = new Set<string>();
   let closed = false;
 
   if (!deleted) {
@@ -533,7 +859,17 @@ function subscribeNotesByDeletedState(
     const merged = Array.from(notesByOwner.values())
       .flat()
       .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt));
-    callback(boundedMaximum ? merged.slice(0, boundedMaximum) : merged);
+    const fromCache = Array.from(fromCacheByOwner.values()).some(Boolean);
+    const hasPendingWrites = Array.from(pendingWritesByOwner.values()).some(Boolean);
+    callback(boundedMaximum ? merged.slice(0, boundedMaximum) : merged, {
+      fromCache,
+      hasPendingWrites,
+      serverComplete: fromCacheByOwner.size === normalizedOwnerUids.length
+        && pendingWritesByOwner.size === normalizedOwnerUids.length
+        && failedOwners.size === 0
+        && !fromCache
+        && !hasPendingWrites
+    });
   };
 
   const unsubscribes = normalizedOwnerUids.map((ownerUid) => {
@@ -549,11 +885,25 @@ function subscribeNotesByDeletedState(
 
     return onSnapshot(
       notesQuery,
+      { includeMetadataChanges: true },
       (snapshot) => {
+        if (failedOwners.has(ownerUid)) {
+          return;
+        }
         notesByOwner.set(ownerUid, noteSnapshotList(snapshot, noteFilter));
+        const metadata = serverSnapshotMetadata(snapshot);
+        fromCacheByOwner.set(ownerUid, metadata.fromCache);
+        pendingWritesByOwner.set(ownerUid, metadata.hasPendingWrites);
         emitNotes();
       },
-      (error) => onError?.(error)
+      (error) => {
+        failedOwners.add(ownerUid);
+        notesByOwner.delete(ownerUid);
+        fromCacheByOwner.delete(ownerUid);
+        pendingWritesByOwner.delete(ownerUid);
+        emitNotes();
+        onError?.(error);
+      }
     );
   });
 
@@ -566,14 +916,18 @@ function subscribeNotesByDeletedState(
 export function subscribeVisibleNotes(
   uid: string,
   ownerUids: string[] | null,
-  callback: (notes: NoteSnapshot[]) => void,
+  callback: (notes: NoteSnapshot[], metadata: ServerSnapshotMetadata) => void,
   onError?: (error: Error) => void,
   maximumNotes?: number
 ) {
   return subscribeNotesByDeletedState(uid, ownerUids, false, callback, onError, maximumNotes);
 }
 
-export async function getVisibleNotesByIds(uid: string, noteIds: string[]) {
+async function getVisibleNotesByIdsWithReader(
+  uid: string,
+  noteIds: string[],
+  readDocument: typeof getDoc
+) {
   const uniqueIds = Array.from(new Set(noteIds)).filter(Boolean).slice(0, 1_200);
   const notes: NoteSnapshot[] = [];
   const resolvedNoteIds: string[] = [];
@@ -585,7 +939,7 @@ export async function getVisibleNotesByIds(uid: string, noteIds: string[]) {
       nextIndex += 1;
 
       try {
-        const snapshot = await getDoc(doc(db, "notes", noteId));
+        const snapshot = await readDocument(doc(db, "notes", noteId));
         resolvedNoteIds.push(noteId);
 
         if (!snapshot.exists()) {
@@ -608,6 +962,19 @@ export async function getVisibleNotesByIds(uid: string, noteIds: string[]) {
 
   normalizeLegacyDeletionMetadata(notes);
   return { notes: sortedByUpdatedAt(notes), resolvedNoteIds };
+}
+
+export function getVisibleNotesByIds(uid: string, noteIds: string[]) {
+  return getVisibleNotesByIdsWithReader(uid, noteIds, getDoc);
+}
+
+/**
+ * Reads every direct note strictly from Firestore's backend. Durable Vault
+ * maintenance must never treat an offline cache fallback as a current path or
+ * revision snapshot, because doing so could activate a stale rewrite plan.
+ */
+export function getVisibleNotesByIdsFromServer(uid: string, noteIds: string[]) {
+  return getVisibleNotesByIdsWithReader(uid, noteIds, getDocFromServer);
 }
 
 export function subscribeVisibleNoteById(
@@ -640,10 +1007,11 @@ export function subscribeVisibleNoteById(
 export function subscribeDeletedNotes(
   uid: string,
   ownerUids: string[] | null,
-  callback: (notes: NoteSnapshot[]) => void,
-  onError?: (error: Error) => void
+  callback: (notes: NoteSnapshot[], metadata: ServerSnapshotMetadata) => void,
+  onError?: (error: Error) => void,
+  maximumNotes = 500
 ) {
-  return subscribeNotesByDeletedState(uid, ownerUids, true, callback, onError);
+  return subscribeNotesByDeletedState(uid, ownerUids, true, callback, onError, maximumNotes);
 }
 
 export function subscribeAllNotesForAdmin(callback: (notes: NoteSnapshot[]) => void, onError?: (error: Error) => void) {
@@ -848,11 +1216,32 @@ export async function getNoteRevisionState(noteId: string) {
 }
 
 async function createRevisionedEncryptedNoteWithFields(
-  input: SaveNoteInput,
-  additionalFields: Record<string, unknown> = {}
+  input: SaveNoteInput
 ): Promise<CreatedRevisionedNoteResult> {
   assertEncryptedNotePayloadSizes(input);
-  const { historySnapshot, historySummary, ...noteInput } = input;
+  if (input.type === "personal" && input.folderId) {
+    await ensureVaultFolderTree(input.ownerUid);
+  }
+  const versionedVaultEntry = Boolean(input.contentFormat || input.entryKind);
+  if (versionedVaultEntry) {
+    const validatedClaim = assertVaultNameClaim(
+      input.nameClaim as VaultNameClaimReservationInput,
+      input.folderId ?? null
+    );
+    const result = await commitServerVaultNoteMutation(
+      input.ownerUid,
+      vaultNoteCreatePayload(input),
+      { claimId: validatedClaim.claimId }
+    );
+    return {
+      lastMutationId: result.lastMutationId,
+      noteId: result.noteId,
+      noteRef: doc(db, "notes", result.noteId),
+      revision: result.revision
+    };
+  }
+  const { historySnapshot, historySummary, nameClaim: _nameClaim, ...noteInput } = input;
+  void _nameClaim;
   const noteRef = doc(collection(db, "notes"));
   const historyRef = doc(collection(db, "notes", noteRef.id, "history"));
   const batch = writeBatch(db);
@@ -877,7 +1266,6 @@ async function createRevisionedEncryptedNoteWithFields(
   batch.set(noteRef, {
     ...noteInput,
     attachmentRevision: 0,
-    ...additionalFields,
     participantUids,
     folderId: input.type === "personal" ? input.folderId ?? null : null,
     createdAt: serverTimestamp(),
@@ -898,6 +1286,62 @@ export async function createRevisionedEncryptedNote(input: SaveNoteInput): Promi
   return createRevisionedEncryptedNoteWithFields(input);
 }
 
+function assertExplicitVaultTargetId(targetId: string, label: string) {
+  if (
+    !targetId
+    || targetId !== targetId.trim()
+    || targetId.length > 120
+    || targetId.includes("/")
+  ) {
+    throw new Error(`${label} 식별자가 올바르지 않습니다.`);
+  }
+  return targetId;
+}
+
+function assertVaultImportJobId(jobId: string) {
+  if (!/^vi1_[A-Za-z0-9_-]{43}$/u.test(jobId)) {
+    throw new Error("가져오기 작업 식별자가 올바르지 않습니다.");
+  }
+  return jobId;
+}
+
+/**
+ * Creates a Vault entry at a preallocated opaque id. A retry after a lost
+ * commit response returns the exact revision-one entry only when its owner,
+ * name claim and storage identity still match. It never overwrites an existing
+ * document, even if a caller accidentally reuses an id.
+ */
+export async function createRevisionedEncryptedNoteAtId(
+  input: SaveNoteInput,
+  targetId: string,
+  importJobId: string
+): Promise<CreatedRevisionedNoteResult> {
+  assertEncryptedNotePayloadSizes(input);
+  if (input.folderId) {
+    await ensureVaultFolderTree(input.ownerUid);
+  }
+  const noteId = assertExplicitVaultTargetId(targetId, "가져오기 항목");
+  const vaultImportJobId = assertVaultImportJobId(importJobId);
+  const validatedClaim = assertVaultNameClaim(
+    input.nameClaim as VaultNameClaimReservationInput,
+    input.folderId ?? null
+  );
+  if (!input.contentFormat || !input.entryKind || input.type !== "personal") {
+    throw new Error("명시적 식별자 생성은 암호화 Vault 항목에서만 사용할 수 있습니다.");
+  }
+  const result = await commitServerVaultNoteMutation(
+    input.ownerUid,
+    vaultNoteImportCreatePayload(input, noteId, vaultImportJobId),
+    { claimId: validatedClaim.claimId }
+  );
+  return {
+    lastMutationId: result.lastMutationId,
+    noteId: result.noteId,
+    noteRef: doc(db, "notes", result.noteId),
+    revision: result.revision
+  };
+}
+
 export async function createSecureShareCopyingNote(
   input: CreateSecureShareCopyingNoteInput
 ): Promise<CreatedRevisionedNoteResult> {
@@ -906,6 +1350,9 @@ export async function createSecureShareCopyingNote(
     || input.ownerUid.length === 0
     || input.participantUids.length !== 1
     || input.participantUids[0] !== input.ownerUid
+    || input.contentFormat !== "legacy-html-v1"
+    || input.entryKind !== "legacy-html"
+    || !/^[A-Za-z0-9_-]{1,120}$/u.test(input.noteId)
     || !/^[A-Za-z0-9_-]{16,160}$/u.test(input.copyJobId)
     || !Number.isSafeInteger(input.expectedAttachmentCount)
     || input.expectedAttachmentCount < 0
@@ -914,79 +1361,68 @@ export async function createSecureShareCopyingNote(
     throw new Error("보안 공유 복사 작업 정보가 올바르지 않습니다.");
   }
 
-  const {
-    copyJobId,
-    expectedAttachmentCount,
-    ...noteInput
-  } = input;
+  assertEncryptedNotePayloadSizes(input);
+  assertVaultNameClaim(
+    input.nameClaim as VaultNameClaimReservationInput,
+    input.folderId ?? null
+  );
 
-  return createRevisionedEncryptedNoteWithFields(noteInput, {
-    secureShareCopyExpectedAttachmentCount: expectedAttachmentCount,
-    secureShareCopyJobId: copyJobId,
-    secureShareCopyReadyAttachmentCount: 0,
-    secureShareCopyReservedAttachmentCount: 0,
-    secureShareCopyStartedAt: serverTimestamp(),
-    secureShareCopyState: "copying",
-    secureShareCopyUpdatedAt: serverTimestamp()
-  });
+  const payload = vaultNoteSecureCopyCreatePayload(input);
+  let result;
+  try {
+    result = await commitServerVaultNoteMutation(input.ownerUid, payload);
+  } catch (error) {
+    if (
+      !(error instanceof VaultNoteApiError)
+      || (error.code !== "network_error" && error.code !== "invalid_response")
+    ) {
+      throw error;
+    }
+    result = await commitServerVaultNoteMutation(input.ownerUid, payload);
+  }
+  return {
+    lastMutationId: result.lastMutationId,
+    noteId: result.noteId,
+    noteRef: doc(db, "notes", result.noteId),
+    revision: result.revision
+  };
 }
 
 export async function activateSecureShareCopyingNote(
   input: SecureShareCopyingNoteLifecycleInput
 ): Promise<{ noteId: string; state: "active" }> {
   const expectedRevision = expectedNoteRevision(input.expectedRevision);
-  const noteRef = doc(db, "notes", input.noteId);
+  const result = await commitServerVaultNoteMutation(input.uid, {
+    action: "secure-copy-activate",
+    copyJobId: input.copyJobId,
+    expectedRevision,
+    noteId: input.noteId
+  }, { expectedRevision });
+  return { noteId: result.noteId, state: result.state };
+}
 
-  return runTransaction(db, async (transaction) => {
-    const snapshot = await transaction.get(noteRef);
-
-    if (!snapshot.exists()) {
-      throw new Error("활성화할 복사 노트를 찾을 수 없습니다.");
+export async function migrateLegacyVaultNote(input: MigrateLegacyVaultNoteInput) {
+  if (
+    input.expectedContentFormat !== "legacy-html-v1"
+    || input.expectedEntryKind !== "legacy-html"
+  ) {
+    throw new Error("기존 HTML 노트 저장 형식을 확인할 수 없습니다.");
+  }
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const result = await commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteMigrateLegacyPayload({ ...input, expectedRevision }),
+    {
+      claimId: input.nameClaim?.claimId,
+      expectedRevision
     }
-
-    const note = snapshot.data() as NoteDocument;
-
-    if (
-      note.ownerUid !== input.uid
-      || note.secureShareCopyJobId !== input.copyJobId
-      || storedNoteRevision(note) !== expectedRevision
-    ) {
-      throw new Error("보안 공유 복사 작업이 현재 노트와 일치하지 않습니다.");
-    }
-
-    if (note.secureShareCopyState === "active") {
-      return { noteId: input.noteId, state: "active" as const };
-    }
-
-    const expectedCount = note.secureShareCopyExpectedAttachmentCount;
-    const reservedCount = note.secureShareCopyReservedAttachmentCount;
-    const readyCount = note.secureShareCopyReadyAttachmentCount;
-
-    if (
-      note.secureShareCopyState !== "copying"
-      || note.isDeleted === true
-      || Boolean(
-        note.secureShareCopyCleanupClaimId
-        || note.secureShareCopyCleanupClaimedAt
-      )
-      || !Number.isSafeInteger(expectedCount)
-      || reservedCount !== expectedCount
-      || readyCount !== expectedCount
-    ) {
-      throw new Error("복사할 첨부파일이 모두 준비되지 않았습니다.");
-    }
-
-    transaction.update(noteRef, {
-      savedAt: serverTimestamp(),
-      secureShareCopyFinishedAt: serverTimestamp(),
-      secureShareCopyState: "active",
-      secureShareCopyUpdatedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    });
-
-    return { noteId: input.noteId, state: "active" as const };
-  });
+  );
+  return {
+    claimState: result.claimState,
+    lastMutationId: result.lastMutationId,
+    noteId: result.noteId,
+    revision: result.revision
+  };
 }
 
 export async function createEncryptedNote(input: SaveNoteInput) {
@@ -995,27 +1431,79 @@ export async function createEncryptedNote(input: SaveNoteInput) {
 
 export async function updateRevisionedEncryptedNote(input: UpdateRevisionedEncryptedNoteInput) {
   assertEncryptedNotePayloadSizes(input);
-  return commitRevisionedNoteMutation({
-    action: "content",
-    changedFields: input.changedFields ?? ["title", "body"],
-    encryptedSnapshot: input.historySnapshot,
-    encryptedSummary: input.historySummary,
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    validateCurrent: (note) => noteStorageIdentityMatches(
-      note,
-      input.expectedContentFormat,
-      input.expectedEntryKind
-    ),
-    update: {
-      encryptedTitle: input.encryptedTitle,
-      encryptedBody: input.encryptedBody,
-      isDeleted: false,
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    }
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "update",
+    expectedRevision
+  }, {
+    claimId: input.nameClaim?.claimId,
+    expectedRevision
+  });
+}
+
+/**
+ * Adds only the blinded name reservation envelope. Existing ciphertext is not
+ * rewritten, snapshotted, or revalidated against current create-size limits;
+ * this keeps historical data intact while still recording a revision event.
+ */
+export async function backfillRevisionedVaultNameClaim(
+  input: BackfillRevisionedVaultNameClaimInput
+) {
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "backfill-claim",
+    expectedRevision
+  }, {
+    claimId: input.nameClaim.claimId,
+    expectedRevision
+  });
+}
+
+/** Resolves an unclaimed collision without touching the existing body. */
+export async function resolveRevisionedVaultNameCollision(
+  input: ResolveRevisionedVaultNameCollisionInput
+) {
+  const changedFields = Array.from(new Set(input.changedFields));
+  if (
+    !changedFields.includes("name-claim")
+    || (!changedFields.includes("title") && !changedFields.includes("folder"))
+    || changedFields.some((field) => !["folder", "name-claim", "title"].includes(field))
+    || (changedFields.includes("title") !== Boolean(input.encryptedTitle))
+    || (changedFields.includes("folder") !== Object.prototype.hasOwnProperty.call(input, "folderId"))
+  ) {
+    throw new Error("Vault 이름 충돌 복구 변경 정보가 올바르지 않습니다.");
+  }
+  assertEncryptedPayloadSize(input.encryptedTitle, "노트 제목", maxEncryptedTitleCharacters);
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "resolve-collision",
+    changedFields,
+    expectedRevision
+  }, {
+    claimId: input.nameClaim.claimId,
+    expectedRevision
+  });
+}
+
+export async function updateRevisionedEncryptedNoteAndFolder(
+  input: UpdateRevisionedEncryptedNoteAndFolderInput
+) {
+  assertEncryptedNotePayloadSizes(input);
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "update",
+    expectedRevision
+  }, {
+    claimId: input.nameClaim?.claimId,
+    expectedRevision
   });
 }
 
@@ -1049,7 +1537,12 @@ export async function updateEncryptedNote(
 }
 
 export async function updateRevisionedNoteAccess(input: UpdateRevisionedNoteAccessInput) {
-  return commitRevisionedNoteAccess(input, expectedNoteRevision(input.expectedRevision));
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteAccessPayload({ ...input, expectedRevision }),
+    { expectedRevision }
+  );
 }
 
 export async function updateNoteAccess(
@@ -1064,25 +1557,13 @@ export async function updateNoteAccess(
 }
 
 export async function updateRevisionedNoteFolder(input: UpdateRevisionedNoteFolderInput) {
-  return commitRevisionedNoteMutation({
-    action: "share",
-    changedFields: ["folder"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    update: {
-      folderId: input.folderId,
-      isDeleted: false,
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    },
-    validateCurrent: (note) => (
-      note.ownerUid === input.uid
-      && note.type === "personal"
-      && (note.folderId ?? null) !== input.folderId
-    )
-  });
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  const { uid, ...payload } = input;
+  return commitServerVaultNoteMutation(uid, {
+    ...payload,
+    action: "move",
+    expectedRevision
+  }, { expectedRevision });
 }
 
 export async function updateNoteFolder(noteId: string, uid: string, folderId: string | null) {
@@ -1197,6 +1678,7 @@ interface RevisionedNoteMutationInput {
   uid: string;
   update: Record<string, unknown>;
   validateCurrent?: (note: NoteDocument) => boolean;
+  nameClaim?: VaultNameClaimReservationInput;
 }
 
 async function commitRevisionedNoteMutation(input: RevisionedNoteMutationInput): Promise<NoteMutationResult> {
@@ -1224,6 +1706,63 @@ async function commitRevisionedNoteMutation(input: RevisionedNoteMutationInput):
       throw new Error("현재 노트 상태가 요청한 작업과 일치하지 않습니다.");
     }
 
+    const currentClaimId = storedVaultNameClaimId(currentNote);
+    if (
+      input.action === "restore"
+      && (currentNote.contentFormat !== undefined || currentNote.entryKind !== undefined)
+      && !currentClaimId
+      && !input.nameClaim
+    ) {
+      throw new Error("삭제된 Vault 항목의 이름 예약 정보가 없어 복구할 수 없습니다.");
+    }
+    const nextParentId = Object.prototype.hasOwnProperty.call(input.update, "folderId")
+      ? (input.update.folderId as string | null)
+      : currentNote.folderId ?? null;
+    const nextClaim = input.nameClaim
+      ? assertVaultNameClaim(input.nameClaim, nextParentId)
+      : null;
+    const restoringClaim = input.action === "restore" && currentClaimId
+      ? {
+          claimId: currentClaimId,
+          indexVersion: 1 as const,
+          parentId: currentNote.folderId ?? null
+        }
+      : null;
+    const activeClaim = nextClaim ?? restoringClaim;
+    let activeClaimExists = false;
+
+    if (activeClaim) {
+      const claimSnapshot = await transaction.get(vaultNameClaimRef(currentNote.ownerUid, activeClaim.claimId));
+      if (claimSnapshot.exists()) {
+        if (!claimTargets(
+          claimSnapshot.data(),
+          currentNote.ownerUid,
+          input.noteId,
+          "entry",
+          activeClaim.parentId
+        )) {
+          throw new VaultNameConflictError(activeClaim.claimId);
+        }
+        activeClaimExists = true;
+      }
+    }
+
+    const releasingClaimId = currentClaimId && (
+      input.action === "delete"
+      || (nextClaim && nextClaim.claimId !== currentClaimId)
+    ) ? currentClaimId : null;
+    let releasingClaimRef: ReturnType<typeof doc> | null = null;
+    if (releasingClaimId) {
+      releasingClaimRef = vaultNameClaimRef(currentNote.ownerUid, releasingClaimId);
+      const releasingSnapshot = await transaction.get(releasingClaimRef);
+      if (
+        releasingSnapshot.exists()
+        && !claimTargets(releasingSnapshot.data(), currentNote.ownerUid, input.noteId, "entry")
+      ) {
+        throw new Error("기존 Vault 이름 예약이 현재 항목과 일치하지 않습니다.");
+      }
+    }
+
     const revision = currentRevision + 1;
     const changedFields = typeof input.changedFields === "function"
       ? input.changedFields(currentNote)
@@ -1245,10 +1784,23 @@ async function commitRevisionedNoteMutation(input: RevisionedNoteMutationInput):
 
     transaction.update(noteRef, {
       ...input.update,
+      ...(nextClaim ? {
+        vaultNameClaimId: nextClaim.claimId,
+        vaultNameIndexVersion: nextClaim.indexVersion
+      } : {}),
       lastMutationId,
       revision
     });
     transaction.set(historyRef, historyDocument);
+    if (activeClaim && !activeClaimExists) {
+      transaction.set(
+        vaultNameClaimRef(currentNote.ownerUid, activeClaim.claimId),
+        vaultNameClaimDocument(currentNote.ownerUid, input.noteId, "entry", activeClaim)
+      );
+    }
+    if (releasingClaimRef) {
+      transaction.delete(releasingClaimRef);
+    }
 
     return { lastMutationId, noteId: input.noteId, revision };
   });
@@ -1385,7 +1937,56 @@ export async function getEncryptedNoteAttachmentSource(
 
 export function subscribeNoteFolders(
   uid: string,
-  callback: (folders: NoteFolderSnapshot[]) => void,
+  callback: (folders: NoteFolderSnapshot[], metadata: ServerSnapshotMetadata) => void,
+  onError: (error: Error) => void,
+  onCompleteSnapshot?: (folders: NoteFolderSnapshot[], metadata: ServerSnapshotMetadata) => void
+) {
+  const foldersQuery = query(
+    collection(db, "noteFolders"),
+    where("ownerUid", "==", uid),
+    limit(noteFolderSubscriptionSentinelLimit)
+  );
+  let limitExceeded = false;
+
+  return onSnapshot(
+    foldersQuery,
+    { includeMetadataChanges: true },
+    (snapshot) => {
+      if (snapshot.docs.length > maxNoteFoldersPerOwner) {
+        if (!limitExceeded) {
+          onError(new NoteFolderLimitError(maxNoteFoldersPerOwner, "subscription"));
+        }
+        limitExceeded = true;
+        return;
+      }
+
+      limitExceeded = false;
+      const metadata = serverSnapshotMetadata(snapshot);
+      const allFolders = snapshot.docs
+        .map((document) => ({ id: document.id, ...(document.data() as NoteFolderDocument) }));
+      const { activeFolders } = partitionVaultFolderTrash(allFolders);
+      if (metadata.serverComplete) {
+        void ensureVaultFolderTree(uid).catch((error: unknown) => {
+          onError(error instanceof Error ? error : new Error("Vault 폴더 트리를 준비하지 못했습니다."));
+        });
+      }
+      onCompleteSnapshot?.(allFolders, metadata);
+      callback(
+        activeFolders
+          .sort((left, right) => {
+            const orderDifference = (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER);
+            return orderDifference || left.name.localeCompare(right.name, "ko");
+          }),
+        metadata
+      );
+    },
+    onError
+  );
+}
+
+export function subscribeDeletedNoteFolders(
+  uid: string,
+  callback: (folders: NoteFolderSnapshot[], metadata: ServerSnapshotMetadata) => void,
   onError: (error: Error) => void
 ) {
   const foldersQuery = query(
@@ -1397,23 +1998,20 @@ export function subscribeNoteFolders(
 
   return onSnapshot(
     foldersQuery,
+    { includeMetadataChanges: true },
     (snapshot) => {
       if (snapshot.docs.length > maxNoteFoldersPerOwner) {
-        if (!limitExceeded) {
-          onError(new NoteFolderLimitError(maxNoteFoldersPerOwner, "subscription"));
-        }
+        if (!limitExceeded) onError(new NoteFolderLimitError(maxNoteFoldersPerOwner, "subscription"));
         limitExceeded = true;
         return;
       }
-
       limitExceeded = false;
+      const allFolders = snapshot.docs
+        .map((document) => ({ id: document.id, ...(document.data() as NoteFolderDocument) }));
+      const { hiddenFolderIds } = partitionVaultFolderTrash(allFolders);
       callback(
-        snapshot.docs
-          .map((document) => ({ id: document.id, ...(document.data() as NoteFolderDocument) }))
-          .sort((left, right) => {
-            const orderDifference = (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER);
-            return orderDifference || left.name.localeCompare(right.name, "ko");
-          })
+        allFolders.filter((folder) => hiddenFolderIds.has(folder.id)),
+        serverSnapshotMetadata(snapshot)
       );
     },
     onError
@@ -1458,42 +2056,61 @@ export async function createEncryptedNoteFolder(input: CreateEncryptedNoteFolder
   ) {
     throw new Error("암호화 폴더 정보가 올바르지 않습니다.");
   }
+  const nameClaim = assertVaultNameClaim(input.nameClaim, input.parentId);
   const folderRef = doc(collection(db, "noteFolders"));
-  await runTransaction(db, async (transaction) => {
-    if (input.parentId) {
-      const parentSnapshot = await transaction.get(doc(db, "noteFolders", input.parentId));
-      if (!parentSnapshot.exists()) {
-        throw new Error("상위 폴더를 찾을 수 없습니다.");
-      }
-      const parent = parentSnapshot.data() as NoteFolderDocument;
-      if (
-        parent.ownerUid !== input.ownerUid
-        || !parent.encryptedName
-        || !parent.wrappedKey
-        || !Number.isSafeInteger(parent.revision)
-      ) {
-        throw new Error("상위 폴더를 먼저 암호화해주세요.");
-      }
-    }
+  await commitVaultFolderMutation(input.ownerUid, {
+    action: "create",
+    color: input.color,
+    encryptedName: input.encryptedName,
+    folderId: folderRef.id,
+    nameClaim,
+    order: input.order,
+    parentId: input.parentId,
+    wrappedKey: input.wrappedKey
+  }, nameClaim.claimId);
+  return folderRef;
+}
 
-    transaction.set(folderRef, {
-      ownerUid: input.ownerUid,
-      // Historical clients require a non-empty name. It deliberately contains
-      // no user folder text; unlocked vault clients render encryptedName.
-      name: "암호화 폴더",
-      color: input.color,
-      encryptedName: input.encryptedName,
-      wrappedKey: input.wrappedKey,
-      parentId: input.parentId,
-      order: input.order,
-      revision: 1,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp()
-    } satisfies Omit<NoteFolderDocument, "createdAt" | "updatedAt"> & {
-      createdAt: ReturnType<typeof serverTimestamp>;
-      updatedAt: ReturnType<typeof serverTimestamp>;
-    });
-  });
+/**
+ * Creates an encrypted folder at a preallocated opaque id. Retrying the same
+ * create after a lost response is accepted only while the stored folder is the
+ * untouched revision-one target for the same owner, parent, and name claim.
+ */
+export async function createEncryptedNoteFolderAtId(
+  input: CreateEncryptedNoteFolderInput,
+  targetId: string,
+  importJobId: string
+) {
+  assertEncryptedPayloadSize(input.encryptedName, "폴더 이름", 2_048);
+  const folderId = assertExplicitVaultTargetId(targetId, "가져오기 폴더");
+  const vaultImportJobId = assertVaultImportJobId(importJobId);
+  if (
+    !input.ownerUid
+    || input.ownerUid.length > 160
+    || !Number.isSafeInteger(input.order)
+    || input.order < 0
+    || input.order > 999_999_999
+    || (input.parentId !== null && (
+      !input.parentId
+      || input.parentId.length > 120
+      || input.parentId.includes("/")
+    ))
+  ) {
+    throw new Error("암호화 폴더 정보가 올바르지 않습니다.");
+  }
+  const nameClaim = assertVaultNameClaim(input.nameClaim, input.parentId);
+  const folderRef = doc(db, "noteFolders", folderId);
+  await commitVaultFolderMutation(input.ownerUid, {
+    action: "create",
+    color: input.color,
+    encryptedName: input.encryptedName,
+    folderId,
+    importJobId: vaultImportJobId,
+    nameClaim,
+    order: input.order,
+    parentId: input.parentId,
+    wrappedKey: input.wrappedKey
+  }, nameClaim.claimId);
   return folderRef;
 }
 
@@ -1518,114 +2135,45 @@ export async function updateEncryptedNoteFolder(input: UpdateEncryptedNoteFolder
   ) {
     throw new Error("상위 폴더 식별자가 올바르지 않습니다.");
   }
-  const folderRef = doc(db, "noteFolders", input.folderId);
-
-  return runTransaction(db, async (transaction) => {
-    const snapshot = await transaction.get(folderRef);
-
-    if (!snapshot.exists()) {
-      throw new Error("변경할 폴더를 찾을 수 없습니다.");
-    }
-
-    const folder = snapshot.data() as NoteFolderDocument;
-    const revision = folder.revision ?? 0;
-
-    if (folder.ownerUid !== input.ownerUid || revision !== input.expectedRevision) {
-      throw new NoteRevisionConflictError(input.expectedRevision, revision);
-    }
-    if (revision >= maxNoteRevision) {
-      throw new Error("폴더 revision이 안전한 저장 범위를 초과했습니다.");
-    }
-
-    if (input.parentId !== undefined) {
-      if (input.parentId === input.folderId) {
-        throw new Error("폴더를 자기 자신 아래로 이동할 수 없습니다.");
-      }
-
-      const visited = new Set([input.folderId]);
-      let ancestorId = input.parentId;
-      let depth = 0;
-      while (ancestorId !== null) {
-        if (visited.has(ancestorId)) {
-          throw new Error("하위 폴더 아래로 이동할 수 없습니다.");
-        }
-        if (depth >= 64) {
-          throw new Error("폴더 중첩 깊이가 허용 범위를 초과했습니다.");
-        }
-        visited.add(ancestorId);
-        const ancestorSnapshot = await transaction.get(doc(db, "noteFolders", ancestorId));
-        if (!ancestorSnapshot.exists()) {
-          throw new Error("상위 폴더를 찾을 수 없습니다.");
-        }
-        const ancestor = ancestorSnapshot.data() as NoteFolderDocument;
-        if (
-          ancestor.ownerUid !== input.ownerUid
-          || !ancestor.encryptedName
-          || !ancestor.wrappedKey
-          || !Number.isSafeInteger(ancestor.revision)
-        ) {
-          throw new Error("다른 사용자의 폴더 아래로 이동할 수 없습니다.");
-        }
-        ancestorId = ancestor.parentId ?? null;
-        depth += 1;
-      }
-    }
-
-    const update: Record<string, unknown> = {
-      revision: revision + 1,
-      updatedAt: serverTimestamp()
-    };
-
-    if (input.encryptedName) {
-      update.encryptedName = input.encryptedName;
-    }
-    if (input.parentId !== undefined) {
-      update.parentId = input.parentId;
-    }
-    if (input.order !== undefined) {
-      update.order = input.order;
-    }
-
-    transaction.update(folderRef, update);
-    return { folderId: input.folderId, revision: revision + 1 };
-  });
+  const nameClaim = assertVaultNameClaim(
+    input.nameClaim,
+    input.parentId === undefined ? input.nameClaim.parentId : input.parentId
+  );
+  return commitVaultFolderMutation(input.ownerUid, {
+    action: input.parentId === undefined ? "update" : "move",
+    expectedRevision: input.expectedRevision,
+    folderId: input.folderId,
+    nameClaim,
+    ...(input.encryptedName === undefined ? {} : { encryptedName: input.encryptedName }),
+    ...(input.order === undefined ? {} : { order: input.order }),
+    ...(input.parentId === undefined ? {} : { parentId: input.parentId })
+  }, nameClaim.claimId);
 }
 
 export async function migrateLegacyNoteFolder(input: MigrateLegacyNoteFolderInput) {
-  const folderRef = doc(db, "noteFolders", input.folderId);
-
-  return runTransaction(db, async (transaction) => {
-    const snapshot = await transaction.get(folderRef);
-    if (!snapshot.exists()) {
-      throw new Error("마이그레이션할 폴더를 찾을 수 없습니다.");
-    }
-
-    const folder = snapshot.data() as NoteFolderDocument;
-    if (folder.ownerUid !== input.ownerUid) {
-      throw new Error("이 폴더를 변경할 권한이 없습니다.");
-    }
-    if (folder.encryptedName && folder.wrappedKey) {
-      return { folderId: input.folderId, revision: folder.revision ?? 1 };
-    }
-    if (folder.name !== input.expectedName) {
-      throw new Error("다른 탭에서 폴더 이름이 변경되었습니다. 다시 잠금 해제한 뒤 마이그레이션해주세요.");
-    }
-
-    transaction.update(folderRef, {
-      name: "암호화 폴더",
-      encryptedName: input.encryptedName,
-      wrappedKey: input.wrappedKey,
-      parentId: input.parentId,
-      order: input.order,
-      revision: 1,
-      updatedAt: serverTimestamp()
-    });
-    return { folderId: input.folderId, revision: 1 };
-  });
+  const nameClaim = assertVaultNameClaim(input.nameClaim, input.parentId);
+  return commitVaultFolderMutation(input.ownerUid, {
+    action: "migrate",
+    color: input.color,
+    encryptedName: input.encryptedName,
+    expectedName: input.expectedName,
+    folderId: input.folderId,
+    nameClaim,
+    order: input.order,
+    parentId: input.parentId,
+    wrappedKey: input.wrappedKey
+  }, nameClaim.claimId);
 }
 
 export async function deleteNoteFolder(uid: string, folderId: string, noteIds: string[] = []) {
   const folderRef = doc(db, "noteFolders", folderId);
+  const folderSnapshot = await getDoc(folderRef);
+  if (
+    folderSnapshot.exists()
+    && (folderSnapshot.data() as NoteFolderDocument).encryptedName
+  ) {
+    throw new Error("암호화 Vault 폴더는 하위 트리 휴지통으로만 이동할 수 있습니다.");
+  }
   const uniqueNoteIds = Array.from(new Set(noteIds)).filter(Boolean);
   const chunkSize = 450;
 
@@ -1654,56 +2202,61 @@ export async function deleteNoteFolder(uid: string, folderId: string, noteIds: s
   }
 }
 
+async function commitRevisionedEncryptedFolderLifecycle(
+  input: RevisionedEncryptedFolderLifecycleInput,
+  operation: "delete" | "restore"
+) {
+  if (!input.folderId || input.folderId.length > 120 || input.folderId.includes("/")) {
+    throw new Error("폴더 식별자가 올바르지 않습니다.");
+  }
+  assertVaultFolderLifecyclePreflight({ ...input, operation });
+  expectedNoteRevision(input.expectedRevision);
+  const claimId = input.folders.find((folder) => folder.id === input.folderId)?.vaultNameClaimId;
+  return commitVaultFolderMutation(input.ownerUid, {
+    action: operation === "delete" ? "trash" : "restore",
+    expectedRevision: input.expectedRevision,
+    folderId: input.folderId
+  }, claimId);
+}
+
+/**
+ * One root tombstone logically trashes its whole subtree in one atomic write.
+ * Descendant folders and entries remain encrypted and revision-stable; active
+ * subscriptions hide anything whose ancestor is tombstoned.
+ */
+export function trashRevisionedEncryptedFolderSubtree(input: RevisionedEncryptedFolderLifecycleInput) {
+  return commitRevisionedEncryptedFolderLifecycle(input, "delete");
+}
+
+export function restoreRevisionedEncryptedFolderSubtree(input: RevisionedEncryptedFolderLifecycleInput) {
+  return commitRevisionedEncryptedFolderLifecycle(input, "restore");
+}
+
 export async function deleteNoteAttachment(noteId: string, attachmentId: string) {
   await deleteBlobAttachment({ scope: "note", noteId, attachmentId });
 }
 
 export async function deleteRevisionedNote(input: RevisionedNoteLifecycleInput) {
-  return commitRevisionedNoteMutation({
-    action: "delete",
-    changedFields: ["deleted"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    update: {
-      isDeleted: true,
-      deletedAt: serverTimestamp(),
-      deletedBy: input.uid,
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    }
-  });
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteLifecyclePayload({ ...input, expectedRevision }, "trash"),
+    { expectedRevision }
+  );
 }
 
 export async function abortSecureShareCopyingNote(
   input: SecureShareCopyingNoteLifecycleInput
 ) {
-  return commitRevisionedNoteMutation({
-    action: "delete",
-    changedFields: ["deleted"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: [input.uid],
-    uid: input.uid,
-    update: {
-      isDeleted: true,
-      deletedAt: serverTimestamp(),
-      deletedBy: input.uid,
-      secureShareCopyFinishedAt: serverTimestamp(),
-      secureShareCopyState: "aborted",
-      secureShareCopyUpdatedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
-    },
-    validateCurrent: (note) =>
-      note.ownerUid === input.uid
-      && note.secureShareCopyJobId === input.copyJobId
-      && note.secureShareCopyState === "copying"
-      && !note.secureShareCopyCleanupClaimId
-      && !note.secureShareCopyCleanupClaimedAt
-      && note.secureShareCopyReadyAttachmentCount === 0
-  });
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteSecureCopyLifecyclePayload(
+      { ...input, expectedRevision },
+      "secure-copy-abort"
+    ),
+    { expectedRevision }
+  );
 }
 
 export async function deleteNote(noteId: string, uid: string, readerUids: string[]) {
@@ -1724,21 +2277,15 @@ export async function deleteNote(noteId: string, uid: string, readerUids: string
 }
 
 export async function restoreRevisionedNote(input: RevisionedNoteLifecycleInput) {
-  return commitRevisionedNoteMutation({
-    action: "restore",
-    changedFields: ["restored"],
-    expectedRevision: expectedNoteRevision(input.expectedRevision),
-    noteId: input.noteId,
-    readerUids: input.readerUids,
-    uid: input.uid,
-    update: {
-      isDeleted: false,
-      deletedAt: deleteField(),
-      deletedBy: deleteField(),
-      updatedAt: serverTimestamp(),
-      updatedBy: input.uid
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNoteLifecyclePayload({ ...input, expectedRevision }, "restore"),
+    {
+      claimId: input.nameClaim?.claimId,
+      expectedRevision
     }
-  });
+  );
 }
 
 export async function restoreNote(noteId: string, uid: string, readerUids: string[]) {
@@ -1759,35 +2306,10 @@ export async function restoreNote(noteId: string, uid: string, readerUids: strin
 }
 
 export async function purgeNote(input: PurgeNoteInput) {
-  const noteRef = doc(db, "notes", input.noteId);
-  const cleanupQueueRef = doc(db, "notePurgeCleanupQueue", input.noteId);
-  const batch = writeBatch(db);
-
-  batch.update(noteRef, {
-    type: "personal",
-    participantUids: [input.uid],
-    wrappedKeys: {
-      [input.uid]: input.wrappedKey
-    },
-    encryptedTitle: input.encryptedTitle,
-    encryptedBody: input.encryptedBody,
-    folderId: deleteField(),
-    dueAt: deleteField(),
-    deletedAt: deleteField(),
-    deletedBy: deleteField(),
-    isDeleted: true,
-    isPurged: true,
-    purgedAt: serverTimestamp(),
-    purgedBy: input.uid,
-    updatedAt: serverTimestamp(),
-    savedAt: serverTimestamp(),
-    updatedBy: input.uid
-  });
-  batch.set(cleanupQueueRef, {
-    noteId: input.noteId,
-    ownerUid: input.ownerUid,
-    createdAt: serverTimestamp()
-  });
-
-  await batch.commit();
+  const expectedRevision = expectedNoteRevision(input.expectedRevision);
+  return commitServerVaultNoteMutation(
+    input.uid,
+    vaultNotePurgePayload(input),
+    { expectedRevision }
+  );
 }

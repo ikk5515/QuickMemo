@@ -10,14 +10,16 @@ function markdownEntry(
 }
 
 /**
- * A deterministic compatibility vault for the public Obsidian graph contract.
+ * QuickMemo's deterministic local contract fixture for Obsidian-style
+ * knowledge behavior.
  *
- * The fixture intentionally combines syntax variants that must collapse to one
- * knowledge edge while remaining separate backlink occurrences. Visual Canvas
- * edges are present as a negative fixture: only file cards and Markdown links
- * inside text cards belong in the knowledge graph.
+ * This is not output captured from, or an oracle comparison against, the
+ * official Obsidian application. It intentionally combines syntax variants
+ * that must collapse to one knowledge edge while remaining separate backlink
+ * occurrences. Visual Canvas edges are a negative fixture: only file cards and
+ * Markdown links inside text cards belong in the knowledge graph.
  */
-export const OBSIDIAN_GOLDEN_VAULT: readonly VaultIndexEntry[] = [
+export const LOCAL_OBSIDIAN_CONTRACT_VAULT: readonly VaultIndexEntry[] = [
   markdownEntry(
     "hub",
     "Projects/Hub.md",
@@ -37,7 +39,10 @@ status: active
 [[Missing Note]]
 [[Research/Target]]
 ![[Assets/diagram.png]]
+![[Assets/reference.pdf#page=1]]
 [relative](../Research/Target.md#Section)
+[external](https://example.com/Research/Target)
+Plain Research/Target mention.
 
 #inline/tag #PROJECT/CORE
 ${"`"}[[Ignored Inline]] #ignored-inline${"`"}
@@ -45,6 +50,8 @@ ${"`"}[[Ignored Inline]] #ignored-inline${"`"}
 ~~~md
 [[Ignored Fenced]] #ignored-fenced
 ~~~
+
+%% [[Ignored Comment]] #ignored-comment %%
 `,
     10
   ),
@@ -93,6 +100,7 @@ aliases: [Shared Alias]
       nodes: [
         { id: "hub-card", type: "file", file: "Projects/Hub.md", x: 0, y: 0, width: 320, height: 180 },
         { id: "asset-card", type: "file", file: "Assets/diagram.png", x: 360, y: 0, width: 320, height: 180 },
+        { id: "pdf-card", type: "file", file: "Assets/reference.pdf", x: 720, y: 0, width: 320, height: 180 },
         {
           id: "text-card",
           type: "text",
@@ -119,22 +127,75 @@ aliases: [Shared Alias]
     path: "Assets/diagram.png",
     kind: "asset",
     createdAt: 70
-  }
+  },
+  {
+    id: "asset-pdf",
+    path: "Assets/reference.pdf",
+    kind: "asset",
+    createdAt: 80
+  },
+  ...Array.from({ length: 6 }, (_, position): VaultIndexEntry => ({
+    id: `depth-${position}`,
+    path: `Depth/${position}.md`,
+    kind: "markdown",
+    content: position < 5 ? `[[Depth/${position + 1}]]` : "",
+    createdAt: 90 + position
+  }))
 ] as const;
 
-export const OBSIDIAN_GOLDEN_IDS = {
+export const LOCAL_OBSIDIAN_CONTRACT_IDS = {
   entries: [
     "entry:archive-target",
     "entry:canvas",
+    "entry:depth-0",
+    "entry:depth-1",
+    "entry:depth-2",
+    "entry:depth-3",
+    "entry:depth-4",
+    "entry:depth-5",
     "entry:hub",
     "entry:incoming",
     "entry:orphan",
     "entry:research-target"
   ],
   unresolved: [
+    "unresolved:ignored comment",
     "unresolved:missing canvas",
     "unresolved:missing note",
     "unresolved:shared alias",
-    "unresolved:target"
+    "unresolved:unique alias"
   ]
+} as const;
+
+/**
+ * Reviewable topology totals for the fixture above. Tests also derive and
+ * assert every value so edits cannot silently change the contract.
+ */
+export const LOCAL_OBSIDIAN_CONTRACT_COUNTS = {
+  vaultEntries: 14,
+  markdownEntries: 11,
+  canvasEntries: 1,
+  assetEntries: 2,
+  linkOccurrences: {
+    total: 28,
+    resolved: 23,
+    ambiguous: 0,
+    unresolved: 5,
+    hub: 13,
+    canvas: 6
+  },
+  tags: {
+    nodes: 6,
+    edges: 7
+  },
+  defaultGlobal: {
+    nodes: 17,
+    edges: 20,
+    representedLinkOccurrences: 24
+  },
+  withAttachments: {
+    nodes: 19,
+    edges: 24,
+    representedLinkOccurrences: 28
+  }
 } as const;

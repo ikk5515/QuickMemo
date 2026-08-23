@@ -3,6 +3,7 @@ import {
   createDefaultGlobalGraphSettings,
   createDefaultLocalGraphSettings,
   firstMatchingGraphGroup,
+  graphEngineForceSettings,
   graphOpenIntentFromModifiers,
   GRAPH_SETTING_RANGES,
   moveGraphGroup,
@@ -80,5 +81,36 @@ describe("graph settings", () => {
       .toEqual({ target: "new-group" });
     expect(graphOpenIntentFromModifiers({ altKey: true, ctrlKey: true, metaKey: false, shiftKey: true }))
       .toEqual({ target: "new-window" });
+  });
+
+  it("maps force sliders nonlinearly with exact endpoints and monotonic defaults", () => {
+    const atMinimum = graphEngineForceSettings({
+      centerForce: 0,
+      linkDistance: 30,
+      linkForce: 0,
+      repelForce: 0
+    });
+    const atDefault = graphEngineForceSettings(createDefaultGlobalGraphSettings().common);
+    const atMaximum = graphEngineForceSettings({
+      centerForce: 1,
+      linkDistance: 500,
+      linkForce: 1,
+      repelForce: 20
+    });
+
+    expect(atMinimum).toEqual({
+      centerStrength: 0,
+      linkDistance: 30,
+      linkStrength: 0,
+      repelStrength: 0
+    });
+    expect(atMaximum.centerStrength).toBeCloseTo(0.1, 10);
+    expect(atMaximum.linkDistance).toBeCloseTo(500, 10);
+    expect(atMaximum.linkStrength).toBe(1);
+    expect(atMaximum.repelStrength).toBeLessThan(atDefault.repelStrength);
+    expect(atDefault.centerStrength).toBeGreaterThan(0);
+    expect(atDefault.centerStrength).toBeLessThan(atMaximum.centerStrength);
+    expect(atDefault.linkDistance).toBeGreaterThan(30);
+    expect(atDefault.linkDistance).toBeLessThan(250);
   });
 });

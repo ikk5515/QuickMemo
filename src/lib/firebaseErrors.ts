@@ -18,6 +18,8 @@ const authErrorMessages: Record<string, string> = {
   "auth/wrong-password": "비밀번호를 확인해주세요."
 };
 
+const networkErrorMessage = "네트워크 연결이 불안정합니다. 잠시 후 다시 시도해주세요.";
+
 function errorCode(error: unknown) {
   if (typeof error === "object" && error && "code" in error) {
     return String((error as { code?: unknown }).code);
@@ -36,6 +38,17 @@ export function firebaseAuthErrorMessage(error: unknown, fallback: string) {
 
   if (authErrorMessages[code]) {
     return authErrorMessages[code];
+  }
+
+  // Roster login continues with Firestore profile/key reads after Firebase
+  // Authentication succeeds. Preserve that distinction so a transient
+  // Firestore transport failure is never presented as a wrong password.
+  if (
+    code === "unavailable"
+    || code === "firestore/unavailable"
+    || /client is offline|network connection was lost|failed to fetch/iu.test(message)
+  ) {
+    return networkErrorMessage;
   }
 
   if (message.includes("CONFIGURATION_NOT_FOUND") || message.includes("configuration-not-found")) {

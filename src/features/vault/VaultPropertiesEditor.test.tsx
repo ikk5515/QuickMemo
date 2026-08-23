@@ -40,4 +40,27 @@ describe("VaultPropertiesEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: "status 속성 삭제" }));
     expect(onChange).toHaveBeenCalledWith("---\n---\n본문");
   });
+
+  it("edits checkbox, date, number and tag property types without flattening unrelated YAML", () => {
+    const onChange = vi.fn();
+    const source = '---\ndone: false\nkeep: { nested: true }\n---\n본문';
+    render(
+      <VaultPropertiesEditor
+        onChange={onChange}
+        onError={() => undefined}
+        properties={{ done: false }}
+        source={source}
+      />
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "done 속성 값" }));
+    fireEvent.click(screen.getByRole("button", { name: "적용" }));
+    expect(onChange).toHaveBeenCalledWith('---\ndone: true\nkeep: { nested: true }\n---\n본문');
+
+    fireEvent.change(screen.getByLabelText("새 속성 이름"), { target: { value: "tags" } });
+    fireEvent.change(screen.getByLabelText("새 속성 유형"), { target: { value: "tags" } });
+    fireEvent.change(screen.getByLabelText("새 속성 값"), { target: { value: "#work, quickmemo" } });
+    fireEvent.click(screen.getByRole("button", { name: "속성 추가" }));
+    expect(onChange).toHaveBeenLastCalledWith('---\ndone: false\nkeep: { nested: true }\ntags: ["work", "quickmemo"]\n---\n본문');
+  });
 });

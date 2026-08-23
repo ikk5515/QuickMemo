@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_GLOBAL_GRAPH_SETTINGS,
   DEFAULT_LOCAL_GRAPH_SETTINGS
@@ -9,7 +9,11 @@ import {
   KnowledgeWorkerError,
   KnowledgeWorkerTimeoutError
 } from "./knowledgeWorkerClient";
-import { createKnowledgeWorkerRuntime } from "./workerRuntime";
+import {
+  MAX_METADATA_SUMMARY_LINKS_PER_ENTRY,
+  MAX_METADATA_SUMMARY_LINKS_PER_RESPONSE,
+  createKnowledgeWorkerRuntime
+} from "./workerRuntime";
 import type { VaultIndexEntry } from "./types";
 import type {
   KnowledgeWorkerRequest,
@@ -86,7 +90,7 @@ describe("knowledge worker runtime", () => {
         markdownEntry(
           "source",
           "Projects/Source.md",
-          "---\naliases: [Start]\ntags: [project/quickmemo]\nstatus: active\n---\n[[Target]] important"
+          "---\naliases: [Start]\ntags: [project/quickmemo]\nstatus: active\n---\n[[Target]] Target important"
         ),
         markdownEntry("target", "Projects/Target.md", "# Target")
       ]
@@ -94,6 +98,7 @@ describe("knowledge worker runtime", () => {
     runtime.handleRequest({ id: "search", type: "search", query: "tag:#project content:important" });
     runtime.handleRequest({ id: "outgoing", type: "outgoing-links", entryId: "source" });
     runtime.handleRequest({ id: "backlinks", type: "backlinks", entryId: "target" });
+    runtime.handleRequest({ id: "unlinked", type: "unlinked-mentions", entryId: "target" });
     runtime.handleRequest({ id: "tags", type: "tags" });
     runtime.handleRequest({ id: "metadata", type: "metadata-summaries", entryIds: ["source"] });
     runtime.handleRequest({
@@ -124,11 +129,23 @@ describe("knowledge worker runtime", () => {
     });
     expect(responses.find((response) => response.id === "outgoing")).toMatchObject({
       type: "outgoing-links",
-      occurrences: [expect.objectContaining({ targetEntryId: "target" })]
+      occurrences: [expect.objectContaining({
+        context: expect.stringContaining("important"),
+        raw: "[[Target]]",
+        targetEntryId: "target"
+      })]
     });
     expect(responses.find((response) => response.id === "backlinks")).toMatchObject({
       type: "backlinks",
       occurrences: [expect.objectContaining({ sourceEntryId: "source" })]
+    });
+    expect(responses.find((response) => response.id === "unlinked")).toMatchObject({
+      type: "unlinked-mentions",
+      occurrences: [expect.objectContaining({
+        matchedText: "Target",
+        sourceEntryId: "source",
+        targetEntryId: "target"
+      })]
     });
     expect(responses.find((response) => response.id === "tags")).toMatchObject({
       type: "tags",
@@ -141,8 +158,7 @@ describe("knowledge worker runtime", () => {
         aliases: ["Start"],
         tags: ["project/quickmemo"],
         properties: expect.objectContaining({ status: "active" }),
-        outgoingLinkCount: 1,
-        backlinkCount: 0
+        links: [{ target: "Target" }]
       })]
     });
     expect(responses.find((response) => response.id === "global")).toMatchObject({
@@ -156,44 +172,191 @@ describe("knowledge worker runtime", () => {
     expect(responses.find((response) => response.id === "upsert")).toMatchObject({
       type: "updated",
       version: 2,
-      entryCount: 3
+      entryCount: 3,
+      changedMetadataEntryIds: ["third"]
     });
     expect(responses.find((response) => response.id === "remove")).toMatchObject({
       type: "updated",
       version: 3,
-      entryCount: 2
+      entryCount: 2,
+      changedMetadataEntryIds: ["third"]
     });
   });
 
-  it("returns a generic error without reflecting plaintext input", () => {
+  it("returns bounded structured-clone-safe internal link summaries without exposing mutable index state", () => {
+    const responses: KnowledgeWorkerResponse[] = [];
+    const runtime = createKnowledgeWorkerRuntime({
+      postMessage: (response) => responses.push(response)
+    });
+    const linkSyntax = "![[Target#^block-id|Card]]";
+    runtime.handleRequest({
+      id: "replace",
+      type: "replace-vault",
+      entries: [
+        markdownEntry(
+          "source",
+          "Folder/Source.md",
+          `${linkSyntax} `.repeat(MAX_METADATA_SUMMARY_LINKS_PER_ENTRY + 32)
+        ),
+        markdownEntry("target", "Folder/Target.md", "^block-id")
+      ]
+    });
+    runtime.handleRequest({ id: "metadata-1", type: "metadata-summaries", entryIds: ["source"] });
+
+    const response = responses.find((item) => item.id === "metadata-1");
+    expect(response?.type).toBe("metadata-summaries");
+    if (!response || response.type !== "metadata-summaries") {
+      throw new Error("Expected metadata summaries response");
+    }
+    expect(structuredClone(response)).toEqual(response);
+    expect(response.summaries[0]?.links).toHaveLength(1);
+    expect(response.summaries[0]?.links[0]).toEqual({ target: "Target" });
+    expect(Object.keys(response.summaries[0]?.links[0] ?? {})).toEqual(["target"]);
+    expect(JSON.stringify(response)).not.toContain(linkSyntax);
+
+    const firstLink = response.summaries[0]?.links[0];
+    if (firstLink) {
+      firstLink.target = "mutated-outside-worker";
+    }
+    runtime.handleRequest({ id: "metadata-2", type: "metadata-summaries", entryIds: ["source"] });
+    const secondResponse = responses.find((item) => item.id === "metadata-2");
+    expect(secondResponse?.type === "metadata-summaries"
+      ? secondResponse.summaries[0]?.links[0]
+      : undefined).toEqual(expect.objectContaining({
+      target: "Target"
+    }));
+  });
+
+  it("bounds metadata link projections across the whole worker response", () => {
+    const responses: KnowledgeWorkerResponse[] = [];
+    const runtime = createKnowledgeWorkerRuntime({
+      postMessage: (response) => responses.push(response)
+    });
+    const entries = Array.from({ length: 17 }, (_, entryIndex) => markdownEntry(
+      `source-${entryIndex}`,
+      `Folder/Source-${entryIndex}.md`,
+      Array.from(
+        { length: MAX_METADATA_SUMMARY_LINKS_PER_ENTRY + 1 },
+        (__, linkIndex) => `[[Target-${entryIndex}-${linkIndex}]]`
+      ).join(" ")
+    ));
+    runtime.handleRequest({ id: "replace-many", type: "replace-vault", entries });
+    runtime.handleRequest({ id: "metadata-many", type: "metadata-summaries" });
+    runtime.handleRequest({
+      id: "metadata-selected",
+      type: "metadata-summaries",
+      entryIds: ["source-16"]
+    });
+
+    const response = responses.find((item) => item.id === "metadata-many");
+    expect(response?.type).toBe("metadata-summaries");
+    if (!response || response.type !== "metadata-summaries") {
+      throw new Error("Expected metadata summaries response");
+    }
+    expect(response.summaries.reduce((sum, summary) => sum + summary.links.length, 0))
+      .toBe(MAX_METADATA_SUMMARY_LINKS_PER_RESPONSE);
+    expect(response.summaries.every(
+      (summary) => summary.links.length <= MAX_METADATA_SUMMARY_LINKS_PER_ENTRY
+    )).toBe(true);
+    const selectedResponse = responses.find((item) => item.id === "metadata-selected");
+    expect(selectedResponse?.type === "metadata-summaries"
+      ? selectedResponse.summaries
+      : undefined).toEqual([response.summaries[16]]);
+  });
+
+  it("reports every summary whose response-wide link budget projection moves", () => {
+    const responses: KnowledgeWorkerResponse[] = [];
+    const runtime = createKnowledgeWorkerRuntime({
+      postMessage: (response) => responses.push(response)
+    });
+    const entries = Array.from({ length: 17 }, (_, entryIndex) => markdownEntry(
+      `source-${entryIndex}`,
+      `Folder/Source-${entryIndex}.md`,
+      Array.from(
+        { length: MAX_METADATA_SUMMARY_LINKS_PER_ENTRY + 1 },
+        (__, linkIndex) => `[[Target-${entryIndex}-${linkIndex}]]`
+      ).join(" ")
+    ));
+    runtime.handleRequest({ id: "replace-budget", type: "replace-vault", entries });
+    runtime.handleRequest({
+      id: "upsert-budget",
+      type: "upsert-entry",
+      entry: markdownEntry("source-0", "Folder/Source-0.md", "no links")
+    });
+    runtime.handleRequest({ id: "metadata-after", type: "metadata-summaries" });
+    runtime.handleRequest({
+      id: "metadata-after-selected",
+      type: "metadata-summaries",
+      entryIds: ["source-16"]
+    });
+
+    expect(responses.find((item) => item.id === "upsert-budget")).toMatchObject({
+      type: "updated",
+      changedMetadataEntryIds: ["source-0", "source-16"]
+    });
+    const fullResponse = responses.find((item) => item.id === "metadata-after");
+    const selectedResponse = responses.find((item) => item.id === "metadata-after-selected");
+    expect(fullResponse?.type).toBe("metadata-summaries");
+    expect(selectedResponse?.type).toBe("metadata-summaries");
+    if (
+      !fullResponse
+      || fullResponse.type !== "metadata-summaries"
+      || !selectedResponse
+      || selectedResponse.type !== "metadata-summaries"
+    ) {
+      throw new Error("Expected metadata summaries responses");
+    }
+    const fullSummary = fullResponse.summaries.find((summary) => summary.entryId === "source-16");
+    expect(fullSummary?.links).toHaveLength(MAX_METADATA_SUMMARY_LINKS_PER_ENTRY);
+    expect(selectedResponse.summaries).toEqual([fullSummary]);
+  });
+
+  it("returns a generic error without reflecting or publicly logging plaintext input", () => {
+    const consoleSpies = (["debug", "error", "info", "log", "warn"] as const).map((method) => (
+      vi.spyOn(console, method).mockImplementation(() => undefined)
+    ));
     const responses: KnowledgeWorkerResponse[] = [];
     const secret = "private-title-that-must-not-be-reflected";
-    const response = request(responses, {
-      id: "invalid",
-      type: "graph-snapshot",
-      settings: null
-    } as unknown as KnowledgeWorkerRequest);
+    try {
+      const response = request(responses, {
+        id: "invalid",
+        type: "replace-vault",
+        entries: null,
+        privatePlaintext: secret
+      } as unknown as KnowledgeWorkerRequest);
 
-    expect(response).toEqual({
-      id: "invalid",
-      type: "error",
-      code: "internal-error",
-      message: "Knowledge worker request failed."
-    });
-    expect(JSON.stringify(response)).not.toContain(secret);
+      expect(response).toEqual({
+        id: "invalid",
+        type: "error",
+        code: "internal-error",
+        message: "Knowledge worker request failed."
+      });
+      expect(JSON.stringify(response)).not.toContain(secret);
 
-    const malformedResponses: KnowledgeWorkerResponse[] = [];
-    const runtime = createKnowledgeWorkerRuntime({
-      postMessage: (malformedResponse) => malformedResponses.push(malformedResponse)
-    });
-    runtime.handleRequest({ id: secret, type: "unknown" } as unknown as KnowledgeWorkerRequest);
-    expect(malformedResponses[0]).toMatchObject({
-      id: secret,
-      type: "error",
-      code: "invalid-request",
-      message: "Knowledge worker request failed."
-    });
-    expect(malformedResponses[0]?.type === "error" ? malformedResponses[0].message : "").not.toContain(secret);
+      const malformedResponses: KnowledgeWorkerResponse[] = [];
+      const runtime = createKnowledgeWorkerRuntime({
+        postMessage: (malformedResponse) => malformedResponses.push(malformedResponse)
+      });
+      runtime.handleRequest({
+        id: "malformed",
+        type: "unknown",
+        privatePlaintext: secret
+      } as unknown as KnowledgeWorkerRequest);
+      expect(malformedResponses[0]).toEqual({
+        id: "malformed",
+        type: "error",
+        code: "invalid-request",
+        message: "Knowledge worker request failed."
+      });
+      expect(JSON.stringify(malformedResponses[0])).not.toContain(secret);
+      for (const spy of consoleSpies) {
+        expect(spy).not.toHaveBeenCalled();
+      }
+    } finally {
+      for (const spy of consoleSpies) {
+        spy.mockRestore();
+      }
+    }
   });
 });
 
@@ -201,23 +364,34 @@ describe("knowledge worker client", () => {
   it("provides typed query methods over a worker transport", async () => {
     const transport = new RuntimeTransport();
     const client = new KnowledgeWorkerClient(() => transport);
-    await client.replaceVault([
-      markdownEntry("source", "Source.md", "[[Target]] #work"),
+    const replaceResult = await client.replaceVault([
+      markdownEntry("source", "Source.md", "[[Target]] Target #work"),
       markdownEntry("target", "Target.md", "")
     ]);
+    expect(replaceResult).toEqual({
+      version: 1,
+      entryCount: 2,
+      changedMetadataEntryIds: ["source", "target"]
+    });
 
     await expect(client.search("tag:#work")).resolves.toEqual(["source"]);
     await expect(client.outgoingLinks("source")).resolves.toEqual([
-      expect.objectContaining({ targetEntryId: "target" })
+      expect.objectContaining({ context: "[[Target]] Target #work", raw: "[[Target]]", targetEntryId: "target" })
     ]);
     await expect(client.backlinks("target")).resolves.toEqual([
       expect.objectContaining({ sourceEntryId: "source" })
+    ]);
+    await expect(client.unlinkedMentions("target")).resolves.toEqual([
+      expect.objectContaining({ matchedText: "Target", sourceEntryId: "source" })
     ]);
     await expect(client.tags()).resolves.toEqual([
       expect.objectContaining({ key: "work", entryIds: ["source"] })
     ]);
     await expect(client.metadataSummaries(["source"])).resolves.toEqual([
-      expect.objectContaining({ entryId: "source", outgoingLinkCount: 1 })
+      expect.objectContaining({
+        entryId: "source",
+        links: [{ target: "Target" }]
+      })
     ]);
     await expect(client.globalGraphSnapshot(DEFAULT_GLOBAL_GRAPH_SETTINGS)).resolves.toMatchObject({
       scope: "global",
@@ -229,6 +403,18 @@ describe("knowledge worker client", () => {
     )).resolves.toMatchObject({
       scope: "local",
       rootNodeId: "entry:target"
+    });
+    await expect(client.upsertEntry(
+      markdownEntry("source", "Source.md", "[[Target]] #updated")
+    )).resolves.toEqual({
+      version: 2,
+      entryCount: 2,
+      changedMetadataEntryIds: ["source"]
+    });
+    await expect(client.removeEntry("target")).resolves.toEqual({
+      version: 3,
+      entryCount: 1,
+      changedMetadataEntryIds: ["target"]
     });
     await client.dispose();
     expect(transport.terminated).toBe(true);

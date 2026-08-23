@@ -1,4 +1,4 @@
-/* global document, getComputedStyle */
+/* global document, getComputedStyle, window */
 
 import { expect, test } from "@playwright/test";
 import {
@@ -123,7 +123,7 @@ async function expectScheduleActionsOnOneRow(page) {
     };
   });
 
-  expect(actionRows.actionCount, "schedule header actions must be rendered").toBeGreaterThanOrEqual(4);
+  expect(actionRows.actionCount, "schedule header actions must be rendered").toBeGreaterThanOrEqual(2);
   expect.soft(
     actionRows.highestTop,
     "schedule header actions must share one vertically overlapping row"
@@ -167,7 +167,24 @@ test("authenticated app layouts keep controls contained across primary routes", 
 
   await page.getByRole("button", { name: "작업공간 메뉴 열기" }).click();
   const workspaceDrawer = page.getByRole("dialog", { name: "QuickMemo 작업공간 메뉴" });
+  const workspaceBackdrop = page.locator(".obsidian-drawer-backdrop");
   await expect(workspaceDrawer).toBeVisible();
+  await expect(workspaceBackdrop).toBeVisible();
+  const backdropAppearance = await workspaceBackdrop.evaluate((backdrop) => {
+    const style = getComputedStyle(backdrop);
+
+    return {
+      backgroundColor: style.backgroundColor,
+      borderRadius: style.borderRadius,
+      viewportWidth: window.innerWidth
+    };
+  });
+  expect(backdropAppearance.backgroundColor).toBe(
+    backdropAppearance.viewportWidth <= 760
+      ? "rgba(15, 18, 24, 0.38)"
+      : "rgba(15, 18, 24, 0.24)"
+  );
+  expect(backdropAppearance.borderRadius).toBe("0px");
   await expect(workspaceDrawer.getByRole("button", { name: "로그아웃" })).toBeVisible();
   if (touchLayout) {
     const shellTouchTargets = await page
@@ -226,10 +243,12 @@ test("authenticated app layouts keep controls contained across primary routes", 
     "library sort control"
   );
 
-  await navigateWithinApp(page, "/schedule?view=todo");
+  await navigateWithinApp(page, "/schedule?view=calendar");
   await expect(
-    page.getByRole("heading", { name: "할 일", exact: true, level: 1 })
+    page.getByRole("heading", { name: "달력", exact: true, level: 1 })
   ).toBeVisible();
+  await expect(page.getByRole("button", { name: "할 일", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "반복 업무", exact: true })).toHaveCount(0);
   await expectNoHorizontalOverflow(page);
   await expectInside(page, ".schedule-workspace", ".schedule-header", "schedule header");
   await expectInside(
@@ -242,11 +261,6 @@ test("authenticated app layouts keep controls contained across primary routes", 
     await expectScheduleActionsOnOneRow(page);
   }
 
-  await page.getByRole("button", { name: "달력", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "달력", exact: true, level: 1 })
-  ).toBeVisible();
-  await expectNoHorizontalOverflow(page);
   await expectInside(page, ".calendar-panel", ".calendar-grid", "calendar grid");
 
   await page.getByRole("button", { name: "매트릭스", exact: true }).click();
@@ -256,17 +270,6 @@ test("authenticated app layouts keep controls contained across primary routes", 
   await expectNoHorizontalOverflow(page);
   await expectInside(page, ".matrix-layout", ".matrix-grid", "matrix grid");
 
-  await page.getByRole("button", { name: "반복 업무", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "반복 업무", exact: true, level: 1 })
-  ).toBeVisible();
-  await expectNoHorizontalOverflow(page);
-  await expectInside(
-    page,
-    ".recurring-main-panel",
-    ".recurring-date-strip",
-    "recurring date strip"
-  );
 });
 
 test("setup, login, and admin layouts stay contained across responsive widths", async ({
@@ -287,6 +290,7 @@ test("setup, login, and admin layouts stay contained across responsive widths", 
   await setupPage.close();
 
   const fixture = await seedScenario(request, "admin-layout");
+  const viewportWidth = page.viewportSize()?.width ?? 1280;
   await page.goto("/login");
   await expect(
     page.getByRole("heading", { name: /사용자를 선택하고/u })
@@ -299,12 +303,28 @@ test("setup, login, and admin layouts stay contained across responsive widths", 
   await expect(page.locator('[data-workspace-section="admin"]')).toHaveCount(1);
   await navigateWithinApp(page, "/admin");
   await expect(
-    page.getByRole("heading", { name: "사용자, 공유 권한, 노트를 관리합니다", exact: true })
+    page.getByRole("heading", { name: "관리자 설정", exact: true })
   ).toBeVisible();
-  await expect(page.getByRole("tablist", { name: "관리자 기능" })).toBeVisible();
+  const adminTabs = page.getByRole("tablist", { name: "관리자 기능" });
+  await expect(adminTabs).toBeVisible();
+  await expect(adminTabs).toHaveAttribute("aria-orientation", "vertical");
+  if (viewportWidth <= 1024) {
+    const adminTabBounds = await adminTabs.getByRole("tab").evaluateAll((tabs) =>
+      tabs.map((tab) => {
+        const rectangle = tab.getBoundingClientRect();
+        return { height: rectangle.height, width: rectangle.width };
+      })
+    );
+    for (const bounds of adminTabBounds) {
+      expect.soft(bounds.height, "admin tab touch height").toBeGreaterThanOrEqual(44);
+      expect.soft(bounds.width, "admin tab touch width").toBeGreaterThanOrEqual(44);
+    }
+  }
   await expectNoHorizontalOverflow(page);
-  await expectInside(page, ".admin-workspace", ".workspace-heading", "admin heading");
-  await expectInside(page, ".admin-workspace", ".admin-stats-grid", "admin stats");
+  await expectInside(page, ".admin-workspace", ".admin-settings-layout", "admin settings layout");
+  await expectInside(page, ".admin-settings-layout", ".admin-settings-sidebar", "admin settings sidebar");
+  await expectInside(page, ".admin-settings-layout", ".admin-settings-pane", "admin settings pane");
+  await expectInside(page, ".admin-settings-sidebar", ".admin-stats-grid", "admin stats");
   await expect(
     page.getByRole("heading", { name: fixture.viewerAuth.displayName, exact: true })
   ).toBeVisible();

@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import type { Timestamp } from "firebase/firestore";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode, RefObject } from "react";
 import { AdminEmailSettingsPanel } from "../components/AdminEmailSettingsPanel";
 import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
@@ -39,10 +39,12 @@ import { firebaseAuthErrorMessage } from "../lib/firebaseErrors";
 import { defaultFeatureAccess, normalizeFeatureAccess } from "../lib/featureAccess";
 import { initialsFromName } from "../lib/roster";
 import { minimumNewPasswordLength, newPasswordMeetsMinimum } from "../lib/passwordPolicy";
+import { useModalFocus } from "../lib/useModalFocus";
 import { createUser, deleteManagedUserDocuments, updateUser } from "../services/adminFunctions";
-import { deleteNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
+import { deleteRevisionedNote, subscribeAllNotesForAdmin, type NoteSnapshot } from "../services/notes";
 import { subscribeUsers } from "../services/users";
 import type { AppFeature, FeatureAccess, NoteKind, UserProfile } from "../types";
+import "../styles/admin-settings.css";
 
 const palette = ["#2f7d70", "#c75146", "#7c5b9e", "#b9822f", "#3f6fb5", "#65707a"];
 const AUTO_SAVE_DELAY_MS = 550;
@@ -110,10 +112,10 @@ export const adminTabIds: Readonly<Record<AdminTab, { panelId: string; tabId: st
 };
 
 const adminTabs = [
-  { icon: Plus, label: "사용자 추가", tab: "create" },
-  { icon: UserRoundCog, label: "사용자 목록", tab: "users" },
-  { icon: FileText, label: "노트 관리", tab: "notes" },
-  { icon: Mail, label: "이메일 설정", tab: "email" }
+  { description: "새 계정과 최초 접근 권한을 설정합니다.", icon: Plus, label: "사용자 추가", tab: "create" },
+  { description: "계정 상태, 기능 권한, 공유 대상을 관리합니다.", icon: UserRoundCog, label: "사용자 목록", tab: "users" },
+  { description: "권한 범위 안의 암호화 노트를 확인하고 관리합니다.", icon: FileText, label: "노트 관리", tab: "notes" },
+  { description: "Secure Share용 SMTP 연결과 검증 상태를 관리합니다.", icon: Mail, label: "이메일 설정", tab: "email" }
 ] as const;
 
 interface AdminTabsProps {
@@ -128,9 +130,9 @@ export function AdminTabs({ activeTab, onSelect }: AdminTabsProps) {
     const currentIndex = adminTabs.findIndex(({ tab }) => tab === currentTab);
     let nextIndex: number | null = null;
 
-    if (event.key === "ArrowRight") {
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
       nextIndex = (currentIndex + 1) % adminTabs.length;
-    } else if (event.key === "ArrowLeft") {
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
       nextIndex = (currentIndex - 1 + adminTabs.length) % adminTabs.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
@@ -149,7 +151,12 @@ export function AdminTabs({ activeTab, onSelect }: AdminTabsProps) {
   }
 
   return (
-    <div className="admin-tabs" role="tablist" aria-label="관리자 기능">
+    <div
+      aria-label="관리자 기능"
+      aria-orientation="vertical"
+      className="admin-tabs admin-settings-tabs"
+      role="tablist"
+    >
       {adminTabs.map(({ icon: Icon, label, tab }) => {
         const selected = activeTab === tab;
         const ids = adminTabIds[tab];
@@ -207,6 +214,103 @@ function formatAdminDate(timestamp: Timestamp | Date | null | undefined, emptyTe
     minute: "2-digit",
     hour12: false
   }).format(date);
+}
+
+interface AdminNotePreviewDialogProps {
+  deleting: boolean;
+  fallbackFocusRef?: RefObject<HTMLElement | null>;
+  note: AdminNoteView;
+  onClose: () => void;
+  onMoveToRecovery: () => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
+  userName: (uid: string) => string;
+}
+
+export function AdminNotePreviewDialog({
+  deleting,
+  fallbackFocusRef,
+  note,
+  onClose,
+  onMoveToRecovery,
+  returnFocusRef,
+  userName
+}: AdminNotePreviewDialogProps) {
+  const dialogRef = useRef<HTMLElement>(null);
+
+  useModalFocus(dialogRef, { fallbackFocusRef, returnFocusRef });
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <article
+        aria-labelledby="admin-note-modal-title"
+        aria-modal="true"
+        className="note-preview-modal admin-note-modal"
+        ref={dialogRef}
+        role="dialog"
+        tabIndex={-1}
+      >
+        <header className="note-preview-header">
+          <div>
+            <div className="note-preview-kicker">
+              {note.type === "shared" ? "공유 노트" : "개인 노트"} · 작성자 {userName(note.ownerUid)}
+            </div>
+            <h2 id="admin-note-modal-title">{note.title}</h2>
+            <div className="admin-note-modal-meta">
+              <span>생성 {formatAdminDate(note.createdAt, "입력 전")}</span>
+              <span>수정 {formatAdminDate(note.updatedAt, "없음")}</span>
+            </div>
+          </div>
+          <div className="note-preview-actions">
+            <button
+              className="secondary-button danger"
+              disabled={deleting}
+              onClick={onMoveToRecovery}
+              type="button"
+            >
+              복구함으로 이동
+            </button>
+            <button
+              aria-label="노트 미리보기 닫기"
+              className="icon-button"
+              data-dialog-initial-focus
+              onClick={onClose}
+              type="button"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </header>
+        <div className="note-preview-body">
+          {note.canReadContent ? (
+            <ReadonlyNoteRenderer
+              className="admin-note-view-body"
+              content={note.bodyHtml}
+              contentFormat={note.bodyFormat}
+              emptyText="본문 없음"
+              fontSize={note.fontSize}
+            />
+          ) : (
+            <div className="admin-note-locked">
+              <LockKeyhole size={18} />
+              {note.unavailableReason}
+            </div>
+          )}
+        </div>
+      </article>
+    </div>
+  );
 }
 
 function normalizedShareTargets(ownerUid: string, targetUids: string[] = []) {
@@ -414,6 +518,8 @@ function AdminDashboard() {
   const [error, setError] = useState<string | null>(null);
   const adminNoteDecryptCache = useRef(new AdminNoteDecryptionCache());
   const adminNoteDecryptGeneration = useRef(0);
+  const adminNoteDialogReturnFocusRef = useRef<HTMLElement | null>(null);
+  const adminNoteFallbackFocusRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     return subscribeUsers(setUsers, () => setError("사용자 목록을 불러오지 못했습니다."));
@@ -477,22 +583,6 @@ function AdminDashboard() {
       setSelectedNoteId(null);
     }
   }, [adminNoteViews, selectedNoteId]);
-
-  useEffect(() => {
-    if (!selectedNoteId) {
-      return undefined;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSelectedNoteId(null);
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNoteId]);
 
   const nextQuickKey = useMemo(() => {
     const used = new Set(users.map((user) => user.quickKey));
@@ -671,7 +761,7 @@ function AdminDashboard() {
     const currentProfile = profile;
     const readableTitle = note.canReadContent ? note.title : "암호화된 노트";
     const confirmed = window.confirm(
-      `${userName(note.ownerUid)} 사용자의 "${readableTitle}" 노트를 삭제할까요?\n삭제하면 복구할 수 없습니다.`
+      `${userName(note.ownerUid)} 사용자의 "${readableTitle}" 노트를 복구함으로 이동할까요?`
     );
 
     if (!confirmed) {
@@ -683,9 +773,14 @@ function AdminDashboard() {
     setNoteError(null);
 
     try {
-      await deleteNote(note.id, currentProfile.uid, note.participantUids);
+      await deleteRevisionedNote({
+        expectedRevision: note.revision ?? 0,
+        noteId: note.id,
+        readerUids: note.participantUids,
+        uid: currentProfile.uid
+      });
       setSelectedNoteId(null);
-      setNoteNotice("노트를 삭제했습니다.");
+      setNoteNotice("노트를 복구함으로 이동했습니다.");
     } catch {
       setNoteError("노트를 삭제하지 못했습니다. 권한 또는 네트워크 상태를 확인해주세요.");
     } finally {
@@ -693,29 +788,46 @@ function AdminDashboard() {
     }
   }
 
+  const activeAdminSection = adminTabs.find(({ tab }) => tab === activeAdminTab) ?? adminTabs[1];
+  const ActiveAdminSectionIcon = activeAdminSection.icon;
+
   return (
     <AppShell>
-      <section className="workspace admin-workspace">
-        <div className="workspace-heading">
-          <div>
-            <div className="section-kicker">
-              <ShieldCheck size={18} />
-              관리자 페이지
-            </div>
-            <h1>사용자, 공유 권한, 노트를 관리합니다</h1>
-          </div>
-        </div>
+      <section className="workspace admin-workspace admin-settings-workspace">
+        <div className="admin-settings-layout">
+          <aside aria-labelledby="admin-settings-title" className="admin-settings-sidebar">
+            <header className="admin-settings-sidebar-header">
+              <span className="admin-settings-eyebrow">
+                <ShieldCheck aria-hidden="true" size={15} />
+                QUICKMEMO
+              </span>
+              <h1 id="admin-settings-title">관리자 설정</h1>
+              <p>사용자, 공유 권한과 운영 연결을 한곳에서 관리합니다.</p>
+            </header>
 
-        <section className="admin-stats-grid" aria-label="관리 현황">
-          <AdminStat icon={<UsersRound size={18} />} label="전체 사용자" value={adminStats.totalUsers} />
-          <AdminStat icon={<UserCheck size={18} />} label="활성 사용자" value={adminStats.activeUsers} />
-          <AdminStat icon={<ShieldCheck size={18} />} label="관리자" value={adminStats.admins} />
-          <AdminStat icon={<KeyRound size={18} />} label="공유 허용" value={adminStats.shareLinks} />
-        </section>
+            <AdminTabs activeTab={activeAdminTab} onSelect={setActiveAdminTab} />
 
-        <AdminTabs activeTab={activeAdminTab} onSelect={setActiveAdminTab} />
+            <section className="admin-stats-grid admin-settings-summary" aria-label="관리 현황">
+              <AdminStat icon={<UsersRound size={15} />} label="전체" value={adminStats.totalUsers} />
+              <AdminStat icon={<UserCheck size={15} />} label="활성" value={adminStats.activeUsers} />
+              <AdminStat icon={<ShieldCheck size={15} />} label="관리자" value={adminStats.admins} />
+              <AdminStat icon={<KeyRound size={15} />} label="공유 허용" value={adminStats.shareLinks} />
+            </section>
+          </aside>
 
-        {(activeAdminTab === "create" || activeAdminTab === "users") && (
+          <section aria-label={`${activeAdminSection.label} 설정`} className="admin-settings-pane">
+            <header className="admin-settings-pane-header">
+              <span className="admin-settings-pane-icon" aria-hidden="true">
+                <ActiveAdminSectionIcon size={18} />
+              </span>
+              <div>
+                <strong>{activeAdminSection.label}</strong>
+                <p>{activeAdminSection.description}</p>
+              </div>
+            </header>
+
+            <div className="admin-settings-pane-body" key={activeAdminTab}>
+              {(activeAdminTab === "create" || activeAdminTab === "users") && (
           <div className={`admin-management-grid ${activeAdminTab === "users" ? "single-panel" : ""}`}>
             {activeAdminTab === "create" && (
               <section
@@ -960,6 +1072,7 @@ function AdminDashboard() {
                 <input
                   onChange={(event) => setNoteSearch(event.target.value)}
                   placeholder="제목, 내용, 사용자"
+                  ref={adminNoteFallbackFocusRef}
                   value={noteSearch}
                 />
               </span>
@@ -998,7 +1111,10 @@ function AdminDashboard() {
                     <div className="admin-note-actions">
                       <button
                         className="icon-button"
-                        onClick={() => setSelectedNoteId(note.id)}
+                        onClick={(event) => {
+                          adminNoteDialogReturnFocusRef.current = event.currentTarget;
+                          setSelectedNoteId(note.id);
+                        }}
                         type="button"
                         aria-label="노트 조회"
                       >
@@ -1023,59 +1139,21 @@ function AdminDashboard() {
           </div>
           </section>
         )}
-        {activeAdminTab === "email" && <AdminEmailSettingsPanel />}
+              {activeAdminTab === "email" && <AdminEmailSettingsPanel />}
+            </div>
+          </section>
+        </div>
+
         {selectedAdminNote && (
-          <div className="modal-backdrop" role="presentation">
-            <article
-              className="note-preview-modal admin-note-modal"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="admin-note-modal-title"
-            >
-              <header className="note-preview-header">
-                <div>
-                  <div className="note-preview-kicker">
-                    {selectedAdminNote.type === "shared" ? "공유 노트" : "개인 노트"} · 작성자{" "}
-                    {userName(selectedAdminNote.ownerUid)}
-                  </div>
-                  <h2 id="admin-note-modal-title">{selectedAdminNote.title}</h2>
-                  <div className="admin-note-modal-meta">
-                    <span>생성 {formatAdminDate(selectedAdminNote.createdAt, "입력 전")}</span>
-                    <span>수정 {formatAdminDate(selectedAdminNote.updatedAt, "없음")}</span>
-                  </div>
-                </div>
-                <div className="note-preview-actions">
-                  <button
-                    className="secondary-button danger"
-                    disabled={deletingNoteId === selectedAdminNote.id}
-                    onClick={() => void handleDeleteManagedNote(selectedAdminNote)}
-                    type="button"
-                  >
-                    삭제
-                  </button>
-                  <button className="icon-button" onClick={() => setSelectedNoteId(null)} type="button" aria-label="닫기">
-                    <X size={18} />
-                  </button>
-                </div>
-              </header>
-              <div className="note-preview-body">
-                {selectedAdminNote.canReadContent ? (
-                  <ReadonlyNoteRenderer
-                    className="admin-note-view-body"
-                    content={selectedAdminNote.bodyHtml}
-                    contentFormat={selectedAdminNote.bodyFormat}
-                    emptyText="본문 없음"
-                    fontSize={selectedAdminNote.fontSize}
-                  />
-                ) : (
-                  <div className="admin-note-locked">
-                    <LockKeyhole size={18} />
-                    {selectedAdminNote.unavailableReason}
-                  </div>
-                )}
-              </div>
-            </article>
-          </div>
+          <AdminNotePreviewDialog
+            deleting={deletingNoteId === selectedAdminNote.id}
+            fallbackFocusRef={adminNoteFallbackFocusRef}
+            note={selectedAdminNote}
+            onClose={() => setSelectedNoteId(null)}
+            onMoveToRecovery={() => void handleDeleteManagedNote(selectedAdminNote)}
+            returnFocusRef={adminNoteDialogReturnFocusRef}
+            userName={userName}
+          />
         )}
       </section>
     </AppShell>

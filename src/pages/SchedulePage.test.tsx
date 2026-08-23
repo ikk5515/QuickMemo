@@ -45,7 +45,7 @@ function schedulePageElement(routeView?: "recurring", initialEntry?: string) {
     <MemoryRouter initialEntries={[initialEntry ?? (routeView ? "/schedule/recurring" : "/schedule")]}>
       <Routes>
         <Route path="/schedule" element={<SchedulePage />} />
-        <Route path="/schedule/recurring" element={<SchedulePage routeView="recurring" />} />
+        <Route path="/schedule/recurring" element={<SchedulePage />} />
       </Routes>
     </MemoryRouter>
   );
@@ -305,7 +305,7 @@ vi.mock("../services/userPreferences", () => ({
     defaultHome: "notes",
     matrixLabels: testData.matrixLabels,
     scheduleDefaultCategory: "all",
-    scheduleDefaultView: "todo",
+    scheduleDefaultView: "calendar",
     theme: "system",
     uid: "user-a"
   },
@@ -313,7 +313,7 @@ vi.mock("../services/userPreferences", () => ({
     defaultHome: "notes",
     matrixLabels: testData.matrixLabels,
     scheduleDefaultCategory: testData.scheduleDefaultCategory,
-    scheduleDefaultView: "todo",
+    scheduleDefaultView: "matrix",
     theme: "system",
     uid: "user-a"
   })),
@@ -321,7 +321,7 @@ vi.mock("../services/userPreferences", () => ({
     defaultHome: "notes",
     matrixLabels: testData.matrixLabels,
     scheduleDefaultCategory: testData.scheduleDefaultCategory,
-    scheduleDefaultView: "todo",
+    scheduleDefaultView: "matrix",
     theme: "system",
     uid: "user-a"
   }),
@@ -330,7 +330,7 @@ vi.mock("../services/userPreferences", () => ({
       defaultHome: "notes",
       matrixLabels: testData.matrixLabels,
       scheduleDefaultCategory: testData.scheduleDefaultCategory,
-      scheduleDefaultView: "todo",
+      scheduleDefaultView: "matrix",
       theme: "system",
       uid: "user-a"
     });
@@ -468,38 +468,20 @@ describe("SchedulePage quick work panel", () => {
     );
   });
 
-  it("toggles the lightning quick panel without moving the active tab", async () => {
-    const user = userEvent.setup();
-
+  it("exposes only Calendar and Matrix without recurring subscriptions", async () => {
     renderSchedulePage();
 
-    const todoTab = await screen.findByRole("button", { name: "할 일" });
-    const quickPanelButton = screen.getByRole("button", { name: /빠른 업무 패널 열기/ });
-
-    expect(todoTab).toHaveAttribute("aria-pressed", "true");
-    expect(quickPanelButton).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("지연 업무")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "매트릭스" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "달력" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "할 일" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "반복 업무" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /빠른 업무 패널/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "일정관리 도구 열기" })).not.toBeInTheDocument();
     expect(subscribeRecurringHabits).not.toHaveBeenCalled();
     expect(subscribeRecurringHabitCheckIns).not.toHaveBeenCalled();
-
-    await user.click(quickPanelButton);
-
-    expect(screen.getByRole("button", { name: /빠른 업무 패널 닫기/ })).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByText("지연 업무")).toBeInTheDocument();
-    expect(screen.getByText("오늘 일정")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "반복 업무", level: 3 })).toBeInTheDocument();
-    expect(todoTab).toHaveAttribute("aria-pressed", "true");
-    expect(subscribeRecurringHabits).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(subscribeRecurringHabitCheckIns).mock.calls[0]?.[3]).toEqual({ date: expect.any(String) });
-
-    await user.click(quickPanelButton);
-
-    expect(screen.getByRole("button", { name: /빠른 업무 패널 열기/ })).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByText("지연 업무")).not.toBeInTheDocument();
-    expect(todoTab).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("filters work and personal schedules consistently across todo, calendar, and matrix views", async () => {
+  it("filters work and personal schedules consistently across Calendar and Matrix", async () => {
     const user = userEvent.setup();
     const now = new Date();
     const today = [
@@ -529,15 +511,6 @@ describe("SchedulePage quick work panel", () => {
     await waitFor(() => expect(screen.queryByText("팀 회의")).not.toBeInTheDocument());
     expect(screen.getByText("저녁 산책")).toBeInTheDocument();
     expect(screen.queryByLabelText("분류 개인")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: /빠른 업무 패널 열기/ }));
-    const todaySection = screen.getByRole("heading", { name: "오늘 일정" }).closest(".today-work-section");
-
-    expect(todaySection).not.toBeNull();
-    expect(within(todaySection as HTMLElement).queryByText("팀 회의")).not.toBeInTheDocument();
-    expect(within(todaySection as HTMLElement).getByText("저녁 산책")).toBeInTheDocument();
-    expect(within(todaySection as HTMLElement).queryByLabelText("분류 개인")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "오늘 업무 닫기" }));
 
     await user.click(screen.getByRole("button", { name: "달력" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "달력" })).toHaveAttribute("aria-pressed", "true"));
@@ -705,7 +678,7 @@ describe("SchedulePage quick work panel", () => {
         defaultHome: "notes",
         matrixLabels: testData.matrixLabels,
         scheduleDefaultCategory: "work",
-        scheduleDefaultView: "todo",
+        scheduleDefaultView: "calendar",
         theme: "system",
         uid: "user-a"
       });
@@ -862,46 +835,6 @@ describe("SchedulePage quick work panel", () => {
     );
   });
 
-  it("closes the quick panel with Escape and outside pointer input", async () => {
-    const user = userEvent.setup();
-
-    renderSchedulePage();
-
-    const quickPanelButton = await screen.findByRole("button", { name: /빠른 업무 패널 열기/ });
-
-    await user.click(quickPanelButton);
-    expect(screen.getByText("오늘 일정")).toBeInTheDocument();
-
-    await user.keyboard("{Escape}");
-
-    await waitFor(() => expect(screen.queryByText("오늘 일정")).not.toBeInTheDocument());
-    await waitFor(() => expect(quickPanelButton).toHaveFocus());
-
-    await user.click(quickPanelButton);
-    expect(screen.getByText("오늘 일정")).toBeInTheDocument();
-
-    await user.click(document.body);
-
-    expect(screen.queryByText("오늘 일정")).not.toBeInTheDocument();
-    expect(quickPanelButton).toHaveAttribute("aria-expanded", "false");
-  });
-
-  it("returns focus to the today-work trigger after opening a create dialog from the panel", async () => {
-    const user = userEvent.setup();
-
-    renderSchedulePage();
-
-    const quickPanelButton = await screen.findByRole("button", { name: /빠른 업무 패널 열기/ });
-    await user.click(quickPanelButton);
-    await user.click(screen.getByRole("button", { name: "오늘 일정 추가" }));
-
-    const createDialog = await screen.findByRole("dialog", { name: "오늘 일정 추가" });
-    await user.click(within(createDialog).getByRole("button", { name: "닫기" }));
-
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    await waitFor(() => expect(quickPanelButton).toHaveFocus());
-  });
-
   it("keeps the create dialog open when Escape closes a nested date picker", async () => {
     const user = userEvent.setup();
     const { container } = renderSchedulePage();
@@ -940,43 +873,25 @@ describe("SchedulePage quick work panel", () => {
     expect(screen.getByRole("dialog", { name: "새 일정 추가" })).toBeInTheDocument();
   });
 
-  it("keeps recurring management out of the overflow menu", async () => {
-    const user = userEvent.setup();
+  it("keeps completed history and recurring management out of the schedule chrome", async () => {
     renderSchedulePage();
 
-    await user.click(await screen.findByRole("button", { name: "일정관리 도구 열기" }));
-
-    expect(screen.getByText("완료 내역")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "달력" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "일정관리 도구 열기" })).not.toBeInTheDocument();
+    expect(screen.queryByText("완료 내역")).not.toBeInTheDocument();
     expect(screen.queryByText("반복 업무 관리")).not.toBeInTheDocument();
     expect(screen.queryByText("반복 업무 추가")).not.toBeInTheDocument();
   });
 
-  it("shows recurring work as a dedicated fourth tab and page", async () => {
-    const user = userEvent.setup();
+  it("does not expose or subscribe to recurring work on the legacy path", async () => {
     renderSchedulePage("recurring");
 
-    const recurringTab = await screen.findByRole("button", { name: "반복 업무" });
-
-    expect(recurringTab).toHaveAttribute("aria-pressed", "true");
-    expect(subscribeScheduleTasks).not.toHaveBeenCalled();
-    expect(subscribeRecurringHabits).toHaveBeenCalledTimes(1);
-    expect(subscribeRecurringHabitCheckIns).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "할 일" })).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByRole("button", { name: "새 반복 업무" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "매트릭스" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "반복 업무" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "새 반복 업무" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /빠른 업무 패널/ })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "할 일" }));
-
-    await waitFor(() => expect(screen.getByRole("button", { name: "할 일" })).toHaveAttribute("aria-pressed", "true"));
-    expect(screen.getByRole("button", { name: "새 일정" })).toBeInTheDocument();
-  });
-
-  it("does not expose Google Calendar sync from the recurring-only route", async () => {
-    renderSchedulePage("recurring");
-
-    expect(await screen.findByRole("button", { name: "새 반복 업무" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Google Calendar 동기화/u })).not.toBeInTheDocument();
-    expect(getGoogleCalendarConnectionStatus).not.toHaveBeenCalled();
+    expect(subscribeRecurringHabits).not.toHaveBeenCalled();
+    expect(subscribeRecurringHabitCheckIns).not.toHaveBeenCalled();
   });
 
   it("does not subscribe to schedule data while the encryption key is locked", async () => {
