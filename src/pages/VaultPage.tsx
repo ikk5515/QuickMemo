@@ -143,7 +143,6 @@ import {
   type VaultIndexEntry
 } from "../features/knowledge";
 import {
-  MarkdownMessageBatchDialog,
   MarkdownRenderer,
   exportMarkdown,
   exportMarkdownForDiscordAi,
@@ -361,6 +360,9 @@ const LazyCodeMirrorMarkdownEditor = lazy(() => import("../features/vault/CodeMi
 })));
 const LazyDataviewBlock = lazy(() => import("../features/dataview/DataviewBlock").then((module) => ({
   default: module.DataviewBlock
+})));
+const LazyMarkdownMessageBatchDialog = lazy(() => import("../features/markdown/MarkdownMessageBatchDialog").then((module) => ({
+  default: module.MarkdownMessageBatchDialog
 })));
 const LazyDrawingView = lazy(() => import("../features/drawing/DrawingView").then((module) => ({
   default: module.DrawingView
@@ -10011,11 +10013,13 @@ function UnlockedVaultPage({
         </Suspense>
       ) : null}
       {discordMessageBatch ? (
-        <MarkdownMessageBatchDialog
-          delivery={discordMessageBatch}
-          onClose={() => setDiscordMessageBatch(null)}
-          returnFocusTo={markdownCopySelectRef.current}
-        />
+        <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">메시지 나누기 도구 불러오는 중…</div>}>
+          <LazyMarkdownMessageBatchDialog
+            delivery={discordMessageBatch}
+            onClose={() => setDiscordMessageBatch(null)}
+            returnFocusTo={markdownCopySelectRef.current}
+          />
+        </Suspense>
       ) : null}
       {templateDialogMode ? (
         <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">템플릿 도구 불러오는 중…</div>}>
