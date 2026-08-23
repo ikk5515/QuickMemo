@@ -41,6 +41,14 @@ describe("Vault right-panel responsive layout contract", () => {
     expect(resizeFrame).not.toContain("setRightPanelWidth(");
     expect(source).toContain("rightPanelWidth,");
     expect(source).toContain("setRightPanelWidth(restored.right.width)");
+    expect(ruleBodiesForSelector(vaultStyles, ".vault-right-panel-resizer")).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/inset-inline-start:\s*0;[\s\S]*top:\s*41px;[\s\S]*width:\s*12px;/u)
+      ])
+    );
+    expect(vaultStyles).toMatch(
+      /@media \(max-width: 1024px\), \(pointer: coarse\)[\s\S]*\.vault-right-panel-resizer[\s\S]*inset-inline-start:\s*0;[\s\S]*top:\s*48px;[\s\S]*width:\s*24px;/u
+    );
   });
 
   it("uses compact icon tabs and a complete visible current-mode label", () => {
@@ -57,6 +65,9 @@ describe("Vault right-panel responsive layout contract", () => {
     expect(source).toContain("RIGHT_PANEL_TABS.find(({ mode }) => mode === rightMode)?.label");
     expect(vaultStyles).toMatch(
       /@media \(max-width: 1024px\) and \(pointer: fine\)[\s\S]*\.vault-right-panel > header \[role="tab"\][\s\S]*flex:\s*0 0 32px;[\s\S]*\.vault-right-panel > header > button[\s\S]*flex-basis:\s*32px;/u
+    );
+    expect(vaultStyles).toMatch(
+      /@media \(min-width: 761px\) and \(max-width: 1024px\) and \(pointer: coarse\)[\s\S]*\.vault-right-panel > header > div[\s\S]*overflow-x:\s*hidden;[\s\S]*\.vault-right-panel > header \[role="tab"\][\s\S]*flex:\s*1 1 44px;[\s\S]*min-width:\s*30px;/u
     );
   });
 

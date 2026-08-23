@@ -254,10 +254,10 @@
   border: 0;
   bottom: 0;
   cursor: col-resize;
-  inset-inline-start: -6px;
+  inset-inline-start: 0;
   padding: 0;
   position: absolute;
-  top: 0;
+  top: 41px;
   touch-action: none;
   width: 12px;
   z-index: 8;
@@ -267,7 +267,7 @@
   background: transparent;
   bottom: 0;
   content: "";
-  inset-inline-start: 5px;
+  inset-inline-start: 0;
   position: absolute;
   top: 0;
   transition: background-color 120ms ease;
@@ -2052,12 +2052,13 @@
 
 @media (max-width: 1024px), (pointer: coarse) {
   .vault-right-panel-resizer {
-    inset-inline-start: -12px;
+    inset-inline-start: 0;
+    top: 48px;
     width: 24px;
   }
 
   .vault-right-panel-resizer::after {
-    inset-inline-start: 11px;
+    inset-inline-start: 0;
   }
 
   .vault-local-graph-pin {
@@ -2241,6 +2242,24 @@
     min-height: 32px;
     min-width: 32px;
     width: 32px;
+  }
+}
+
+/*
+ * Tablet pointers still need a tall touch target, but six fixed 44px tabs do
+ * not fit beside the close button when both sidebars preserve a 280px editor.
+ * Share the available row instead of placing the last tool outside the
+ * viewport. The narrowest resulting target remains above the 24px WCAG 2.5.8
+ * minimum while its block size stays 44px.
+ */
+@media (min-width: 761px) and (max-width: 1024px) and (pointer: coarse) {
+  .vault-right-panel > header > div {
+    overflow-x: hidden;
+  }
+
+  .vault-right-panel > header [role="tab"] {
+    flex: 1 1 44px;
+    min-width: 30px;
   }
 }
 
