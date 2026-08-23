@@ -23,12 +23,12 @@ describe("schedule UI styles", () => {
     expect(stylesSource).not.toMatch(/\.home-primary-action \{[^}]*background: var\(--ink\);/);
   });
 
-  it("uses a compact Obsidian-style two-view pane with mobile touch targets", () => {
+  it("uses a compact Obsidian-style three-view pane with mobile touch targets", () => {
     expect(stylesSource).toMatch(/\.obsidian-schedule-pane \{[\s\S]*max-width: none;[\s\S]*padding: 0;/);
     expect(stylesSource).toMatch(/\.obsidian-schedule-pane \.schedule-header \{[\s\S]*border-bottom: 1px solid var\(--color-border-subtle\);[\s\S]*position: sticky;/);
-    expect(stylesSource).toMatch(/\.obsidian-schedule-pane \.schedule-view-tabs \{[\s\S]*box-shadow: none;[\s\S]*grid-template-columns: repeat\(2, minmax\(76px, 1fr\)\);/);
+    expect(stylesSource).toMatch(/\.obsidian-schedule-pane \.schedule-view-tabs \{[\s\S]*box-shadow: none;[\s\S]*grid-template-columns: repeat\(3, minmax\(72px, 1fr\)\);/);
     expect(stylesSource).toMatch(/\.obsidian-schedule-pane \.calendar-panel,[\s\S]*\.obsidian-schedule-pane \.matrix-section \{[\s\S]*border-radius: 4px;[\s\S]*box-shadow: none;/);
-    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.obsidian-schedule-pane \.schedule-view-tabs \{[\s\S]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
+    expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.obsidian-schedule-pane \.schedule-view-tabs \{[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\);/);
     expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.obsidian-schedule-pane \.schedule-view-tabs button,[\s\S]*min-height: 44px;/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-feedback:not\(\.error\) \{[\s\S]*background: var\(--color-success-subtle\);/);
   });
@@ -50,6 +50,7 @@ describe("schedule UI styles", () => {
   it("reflows matrix controls and panels across tablet and mobile widths", () => {
     const tabletStyles = stylesSource.slice(stylesSource.lastIndexOf("@media (max-width: 1024px)"));
     const mobileStyles = stylesSource.slice(stylesSource.lastIndexOf("@media (max-width: 640px)"));
+    const narrowTabletStyles = stylesSource.slice(stylesSource.lastIndexOf("@media (max-width: 820px)"));
 
     expect(stylesSource).toContain("@media (hover: none) and (pointer: coarse) and (max-width: 1024px)");
     expect(stylesSource).toMatch(/\.matrix-task-row \{[\s\S]*cursor: default;/);
@@ -59,8 +60,12 @@ describe("schedule UI styles", () => {
     expect(tabletStyles).toMatch(/\.matrix-today-rail \.matrix-section \{[\s\S]*height: auto;[\s\S]*min-height: 140px;/);
     expect(tabletStyles).toMatch(/\.matrix-section > \.matrix-date-groups \{[\s\S]*max-height: none;[\s\S]*overflow-y: visible;/);
     expect(tabletStyles).toMatch(/\.matrix-date-group\.empty \{[\s\S]*display: none;/);
-    expect(tabletStyles).toMatch(/\.matrix-task-row \{[\s\S]*grid-template-areas:[\s\S]*"drag main flags"[\s\S]*"check main flags";[\s\S]*grid-template-columns: 44px minmax\(0, 1fr\) auto;/);
+    expect(tabletStyles).toMatch(/\.matrix-task-row \{[\s\S]*grid-template-areas: "drag check main flags";[\s\S]*grid-template-columns: 44px 44px minmax\(0, 1fr\) minmax\(0, auto\);/);
+    expect(narrowTabletStyles).toMatch(/\.obsidian-schedule-pane \.matrix-grid \{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
     expect(mobileStyles).toMatch(/\.matrix-today-rail \.matrix-section \{[\s\S]*min-height: 112px;/);
+    expect(mobileStyles).toMatch(/\.obsidian-schedule-pane \.matrix-task-row \{[\s\S]*"drag check main"[\s\S]*"\. \. flags";[\s\S]*grid-template-columns: 44px 44px minmax\(0, 1fr\);/);
+    expect(mobileStyles).toMatch(/\.matrix-task-row > \.task-main strong,[\s\S]*overflow-wrap: anywhere;[\s\S]*white-space: normal;/);
+    expect(stylesSource).toMatch(/\.obsidian-schedule-pane \.completed-panel \{[\s\S]*inline-size: calc\(100% - 20px\);[\s\S]*margin: 10px;/);
     expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-day \{[\s\S]*min-height: 76px;[\s\S]*padding: 5px 3px;/);
     expect(stylesSource).toMatch(/@media \(max-width: 640px\) \{[\s\S]*\.calendar-task-pill \{[\s\S]*border-radius: 999px;[\s\S]*height: 8px;[\s\S]*width: 8px;/);
   });

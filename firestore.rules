@@ -1062,12 +1062,33 @@ service cloud.firestore {
 
     function validVaultIntegrity(data, uid) {
       return data.keys().hasAll(["ownerUid", "indexVersion", "wrappedKey", "createdAt", "updatedAt"])
-        && data.keys().hasOnly(["ownerUid", "indexVersion", "wrappedKey", "createdAt", "updatedAt"])
+        && data.keys().hasOnly([
+          "ownerUid", "indexVersion", "wrappedKey", "createdAt", "updatedAt",
+          "cutoverState", "cutoverVersion", "verifiedAt"
+        ])
         && data.ownerUid == uid
         && data.indexVersion == 1
         && wrappedAesKeyPayload(data.wrappedKey)
         && data.createdAt is timestamp
-        && data.updatedAt is timestamp;
+        && data.updatedAt is timestamp
+        && (
+          // Keep the five-field legacy marker valid during the Rules-first
+          // rolling deployment. New clients always create an explicit pending
+          // marker; only the authenticated server API can add a ready seal.
+          !data.keys().hasAny(["cutoverState", "cutoverVersion", "verifiedAt"])
+          || (
+            data.keys().hasAll(["cutoverState", "cutoverVersion"])
+            && data.cutoverState == "pending"
+            && data.cutoverVersion == 1
+            && !data.keys().hasAny(["verifiedAt"])
+          )
+          || (
+            data.keys().hasAll(["cutoverState", "cutoverVersion", "verifiedAt"])
+            && data.cutoverState == "ready"
+            && data.cutoverVersion == 1
+            && data.verifiedAt is timestamp
+          )
+        );
     }
 
 
@@ -3370,6 +3391,9 @@ service cloud.firestore {
       allow create: if activeSignedInUserHasNotes()
         && request.auth.uid == uid
         && validVaultIntegrity(request.resource.data, uid)
+        // A ready seal is server-only. During the rolling deployment clients
+        // may create either the five-field legacy marker or versioned pending.
+        && !request.resource.data.keys().hasAny(["verifiedAt"])
         && request.resource.data.createdAt == request.time
         && request.resource.data.updatedAt == request.time;
 

@@ -38,19 +38,31 @@ AES key를 HMAC-SHA-256 key로 가져와 다음 값을 MAC 한다.
 ### 안전한 도입 순서
 
 1. 소유자별 무작위 index key를 RSA-OAEP로 감싸 `vaultIntegrity/{uid}`에
-   1회 저장한다. 평문 key는 잠금 해제 세션 메모리에만 둔다.
-2. 잠금 해제 후 기존 dual-read 폴더와 Vault entry를 모두 복호화하고
-   `planVaultNameMigration`으로 v1 claim을 계산한다.
-3. 기존 충돌이 하나라도 있으면 자동 덮어쓰기나 임의 삭제를 하지 않고
-   사용자에게 rename 목록을 제시한다.
-4. 충돌이 없는 claim만 revision-aware transaction으로 대상 문서와 함께
-   생성한다. claim 문서 ID는 fingerprint, payload는 target ID/type과
+   `cutoverState=pending`으로 1회 저장한다. 평문 key는 잠금 해제 세션
+   메모리에만 둔다.
+2. pending 또는 구형 5-field marker인 Vault를 처음 열 때만 owner의 전체
+   노트·폴더 inventory를 서버에서 읽고 복호화한다. `planVaultNameMigration`으로
+   v1 claim을 계산하며, 기존 충돌이 있으면 덮어쓰기나 임의 삭제 없이
+   rename 대상만 표시한다.
+3. 충돌이 없는 claim은 revision-aware transaction으로 대상 문서와 함께
+   생성한다. claim 문서 ID는 fingerprint, payload는 opaque target ID/type과
    parent ID만 가진다.
-5. rename/move는 새 claim 생성, 대상 revision 변경, 이전 claim 삭제를
-   한 transaction에 묶는다. 새 claim이 이미 다른 target을 가리키면
-   transaction을 실패시킨다.
-6. 모든 활성 문서가 v1 claim을 가진 것이 확인되기 전까지는 기존 복호화
-   스캔을 병행한다. 마이그레이션 완료 표시를 먼저 쓰지 않는다.
+4. 클라이언트 마이그레이션이 끝나면 same-origin `/api/vault-integrity`가
+   App Check, ID token, active owner를 다시 확인한다. 서버는 owner inventory,
+   중앙 folder tree, `entry|folder` claim의 전단사 관계, 저장 형식, 삭제 상태와
+   클라이언트가 제출한 개수를 하나의 Firestore read transaction에서 검증한다.
+   평문 이름·경로·본문·키는 서버에 전달하지 않는다.
+5. 검증이 모두 성공한 transaction만 `cutoverState=ready`,
+   `cutoverVersion=1`, `verifiedAt`을 기록한다. 일부 정규화가 성공하고 뒤의
+   검증이 실패해도 marker는 pending에 남으므로 같은 절차를 안전하게 재시작할
+   수 있다.
+6. 이후 접속은 marker 문서 한 건만 서버에서 읽어 ready를 확인한다. 전체
+   inventory와 claim collection을 다시 스캔하지 않는다. 일반 rename/move/
+   create/trash/restore는 서버 transaction이 target과 claim을 원자적으로
+   유지하므로 매 변경 뒤 전체 재검증도 수행하지 않는다.
+7. ready 확인이나 정상 note/folder subscription이 실패하면 쓰기만 실패
+   폐쇄하고 현재 편집 버퍼는 보존한다. 사용자가 다시 확인을 누르면 진행 중인
+   seal 요청을 취소한 뒤 새로운 세대로 재시작한다.
 
 위 transaction/Rules 결합은 Firestore emulator golden fixture가 준비되기
 전에는 production enforcement로 활성화하지 않는다. 특히 claim lifecycle을

@@ -2,8 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { NoteFolderSnapshot, NoteSnapshot } from "../services/notes";
 import {
   ownedFolderReservationSignature,
-  ownedNoteReservationSignature,
-  ownedVaultCutoverInventorySignature
+  ownedNoteReservationSignature
 } from "./VaultPage";
 
 const encrypted = (cipherText: string) => ({
@@ -50,7 +49,7 @@ function folder(overrides: Partial<NoteFolderSnapshot> = {}): NoteFolderSnapshot
 }
 
 describe("Vault name-reservation signatures", () => {
-  it("does not re-audit name claims for body-only note saves", () => {
+  it("keeps body-only saves outside the name-bearing server snapshot identity", () => {
     const before = ownedNoteReservationSignature([note()], "owner");
     const after = ownedNoteReservationSignature([
       note({ encryptedBody: encrypted("changed-body"), revision: 99 })
@@ -58,7 +57,7 @@ describe("Vault name-reservation signatures", () => {
     expect(after).toBe(before);
   });
 
-  it("re-audits when a note title or parent changes", () => {
+  it("tracks note title and parent changes without restarting the sealed cutover", () => {
     const before = ownedNoteReservationSignature([note()], "owner");
     expect(ownedNoteReservationSignature([
       note({ encryptedTitle: encrypted("renamed") })
@@ -91,21 +90,4 @@ describe("Vault name-reservation signatures", () => {
     ], "owner")).not.toBe(before);
   });
 
-  it("tracks deleted inventory and raw storage identity outside the active listener signature", () => {
-    const active = note();
-    const deleted = note({ id: "deleted", isDeleted: true });
-    const before = ownedVaultCutoverInventorySignature({
-      activeNotes: [active],
-      deletedNotes: [deleted]
-    }, "owner");
-
-    expect(ownedVaultCutoverInventorySignature({
-      activeNotes: [active],
-      deletedNotes: [{ ...deleted, contentFormat: undefined, entryKind: undefined }]
-    }, "owner")).not.toBe(before);
-    expect(ownedVaultCutoverInventorySignature({
-      activeNotes: [active],
-      deletedNotes: []
-    }, "owner")).not.toBe(before);
-  });
 });

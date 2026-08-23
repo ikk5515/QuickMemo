@@ -346,3 +346,40 @@ test("schedule category layout remains contained in dark mode", async ({ page, r
   allowExpectedScheduleRuntimeErrors(diagnostics);
   await expectCleanRuntime(diagnostics, fixture);
 });
+
+test("checked matrix schedules move to completed history and can be restored", async ({
+  page,
+  request
+}) => {
+  test.setTimeout(90_000);
+  const fixture = await seedScenario(request, "authenticated-verified");
+  const diagnostics = observePage(page);
+
+  await loginDirectly(page, fixture.viewerAuth, diagnostics);
+  await navigateWithinApp(page, "/schedule?view=matrix");
+  await expect(page.getByRole("heading", { name: "매트릭스", exact: true })).toBeVisible();
+  await createTask(page, workTitle, "work");
+
+  const activeRow = page.locator(".matrix-task-row").filter({ hasText: workTitle });
+  await activeRow.getByRole("checkbox", { name: "일정 완료" }).click();
+  await expect(activeRow).toHaveCount(0);
+
+  await page.getByRole("button", { name: "완료", exact: true }).click();
+  const completedPanel = page.getByRole("region", { name: "완료 내역" });
+  await expect(completedPanel).toBeVisible();
+  await expect(completedPanel.getByText(workTitle, { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "개인 일정 보기" }).click();
+  await expect(completedPanel.getByText(workTitle, { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "업무 일정 보기" }).click();
+  await expect(completedPanel.getByText(workTitle, { exact: true })).toBeVisible();
+
+  await completedPanel.getByRole("checkbox", { name: "일정 완료 해제" }).click();
+  await expect(completedPanel.getByText(workTitle, { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "매트릭스", exact: true }).click();
+  await expect(page.locator(".matrix-task-row").filter({ hasText: workTitle })).toBeVisible();
+  await expectMatrixTaskLayout(page);
+  await expectNoHorizontalOverflow(page);
+  allowExpectedScheduleRuntimeErrors(diagnostics);
+  await expectCleanRuntime(diagnostics, fixture);
+});

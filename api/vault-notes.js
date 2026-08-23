@@ -22,6 +22,11 @@ import {
   verifySecureShareAppCheck
 } from "./_secure-share-common.js";
 import { validateVaultFolderTree } from "./_vault-folder-tree.js";
+import { logVaultApiRejection } from "./_vault-api-observability.js";
+import {
+  integrityPath,
+  requireVaultIntegrityMarker
+} from "./_vault-integrity-marker.js";
 
 const maximumRevision = 999_999_999_999;
 const maximumParticipants = 200;
@@ -63,6 +68,11 @@ const supportedActions = new Set([
   "trash",
   "update"
 ]);
+const claimRecoveryActions = new Set([
+  "backfill-claim",
+  "migrate-legacy",
+  "resolve-collision"
+]);
 
 function requirePost(request) {
   if (request.method !== "POST") throw new HttpError(405, "method_not_allowed");
@@ -84,10 +94,6 @@ function historyPath(noteId, historyId) {
 
 function claimPath(uid, claimId) {
   return `vaultIntegrity/${uid}/nameClaims/${claimId}`;
-}
-
-function integrityPath(uid) {
-  return `vaultIntegrity/${uid}`;
 }
 
 function folderPath(folderId) {
@@ -190,43 +196,6 @@ function assertWrappedKey(value, fieldName = "wrappedKey") {
     throw new HttpError(400, "invalid_request", `Invalid ${fieldName}`);
   }
   return value;
-}
-
-function assertStoredVaultIntegrityMarker(marker, uid) {
-  const storedKeys = marker && typeof marker === "object"
-    ? Object.keys(marker).filter((key) => !key.startsWith("__")).sort()
-    : [];
-  const expectedKeys = ["createdAt", "indexVersion", "ownerUid", "updatedAt", "wrappedKey"];
-  const wrappedKey = marker?.wrappedKey;
-  const validWrappedKey = Boolean(
-    wrappedKey
-    && typeof wrappedKey === "object"
-    && !Array.isArray(wrappedKey)
-    && Object.keys(wrappedKey).sort().join("\u0000") === ["algorithm", "version", "wrappedKey"].join("\u0000")
-    && wrappedKey.version === 1
-    && wrappedKey.algorithm === "RSA-OAEP"
-    && typeof wrappedKey.wrappedKey === "string"
-    && wrappedKey.wrappedKey.length >= 8
-    && wrappedKey.wrappedKey.length <= 4_096
-  );
-  if (
-    !marker
-    || marker.ownerUid !== uid
-    || marker.indexVersion !== 1
-    || storedKeys.join("\u0000") !== expectedKeys.join("\u0000")
-    || typeof marker.createdAt !== "string"
-    || !Number.isFinite(Date.parse(marker.createdAt))
-    || typeof marker.updatedAt !== "string"
-    || !Number.isFinite(Date.parse(marker.updatedAt))
-    || !validWrappedKey
-  ) {
-    throw new HttpError(
-      409,
-      "vault_integrity_not_ready",
-      "Vault integrity setup must be completed before this operation"
-    );
-  }
-  return marker;
 }
 
 function assertParticipants(value, uid, type) {
@@ -597,32 +566,46 @@ async function assertFolderAvailable(context, transaction, uid, folderId, target
 async function transactionState(context, uid, noteId) {
   const { documents, transaction } = await firestoreBatchGetNewTransaction(
     context,
-    [notePath(noteId), userPath(uid)]
+    [notePath(noteId), userPath(uid), integrityPath(uid)]
   );
   try {
     const profile = assertProfile(documents[1], uid);
-    return { note: documents[0], profile, transaction };
+    return {
+      integrityMarker: documents[2],
+      note: documents[0],
+      profile,
+      transaction
+    };
   } catch (error) {
     await firestoreRollback(context, transaction).catch(() => undefined);
     throw error;
   }
 }
 
-async function assertPreCutoverLegacyMutation(context, transaction, note) {
+function assertPreCutoverLegacyMutation(note) {
   if (!missingLegacyHtmlIdentity(note)) return false;
-  const [integrityMarker] = await firestoreBatchGet(
-    context,
-    [integrityPath(note.ownerUid)],
-    transaction
+  throw new HttpError(
+    409,
+    "vault_integrity_stale",
+    "Legacy HTML note must be migrated before this Vault mutation"
   );
-  if (integrityMarker) {
-    throw new HttpError(
-      409,
-      "vault_cutover_required",
-      "Legacy HTML note must be converted before this Vault mutation"
-    );
+}
+
+function assertStoredOwnerUid(note) {
+  if (typeof note?.ownerUid !== "string" || !identifierPattern.test(note.ownerUid)) {
+    throw new HttpError(409, "vault_note_invalid", "Stored Vault note owner is invalid", {
+      expose: false
+    });
   }
-  return true;
+  return note.ownerUid;
+}
+
+async function requireNoteIntegrityMarker(context, state, uid, note, requirement) {
+  const ownerUid = assertStoredOwnerUid(note);
+  const marker = ownerUid === uid
+    ? state.integrityMarker
+    : (await firestoreBatchGet(context, [integrityPath(ownerUid)], state.transaction))[0];
+  return requireVaultIntegrityMarker(marker, ownerUid, requirement);
 }
 
 async function authorizeRevisionedMutation(context, transaction, note, uid, profile, actionName) {
@@ -722,12 +705,7 @@ async function createNote(context, uid, body, options = {}) {
   const state = await transactionState(context, uid, noteId);
   try {
     assertAllowedParticipants(state.profile, uid, input.participants);
-    const [integrityMarker] = await firestoreBatchGet(
-      context,
-      [integrityPath(uid)],
-      state.transaction
-    );
-    assertStoredVaultIntegrityMarker(integrityMarker, uid);
+    requireVaultIntegrityMarker(state.integrityMarker, uid, "ready");
     let importJob = null;
     if (options.imported) {
       const [job] = await firestoreBatchGet(context, [importJobPath(uid, importJobId)], state.transaction);
@@ -907,6 +885,7 @@ async function mutateRevisionedNote(context, uid, body, specification) {
   try {
     const note = state.note;
     if (!note) throw new HttpError(404, "vault_note_not_found", "Vault note was not found");
+    assertStoredOwnerUid(note);
     await authorizeRevisionedMutation(
       context,
       state.transaction,
@@ -914,6 +893,13 @@ async function mutateRevisionedNote(context, uid, body, specification) {
       uid,
       state.profile,
       specification.actionName
+    );
+    await requireNoteIntegrityMarker(
+      context,
+      state,
+      uid,
+      note,
+      claimRecoveryActions.has(specification.actionName) ? "any" : "ready"
     );
     const revision = assertExpectedRevision(note, expectedRevision);
     await assertSourceImportMutationAllowed(context, state.transaction, note, uid, specification.actionName);
@@ -974,14 +960,6 @@ async function mutateRevisionedNote(context, uid, body, specification) {
 }
 
 async function claimMutation(context, transaction, note, noteId, uid, nextClaim) {
-  if (nextClaim) {
-    const [integrityMarker] = await firestoreBatchGet(
-      context,
-      [integrityPath(note.ownerUid)],
-      transaction
-    );
-    assertStoredVaultIntegrityMarker(integrityMarker, note.ownerUid);
-  }
   const previousClaimId = storedClaimId(note);
   const paths = [];
   if (nextClaim) paths.push(claimPath(note.ownerUid, nextClaim.claimId));
@@ -1045,7 +1023,7 @@ async function handleUpdate(context, uid, body) {
     actionName: "update",
     prepare: async ({ context: innerContext, note, noteId, transaction }) => {
       const preCutoverLegacy = missingLegacyHtmlIdentity(note)
-        ? await assertPreCutoverLegacyMutation(innerContext, transaction, note)
+        ? assertPreCutoverLegacyMutation(note)
         : false;
       const expectedLegacyIdentity = body.expectedContentFormat === "legacy-html-v1"
         && body.expectedEntryKind === "legacy-html";
@@ -1207,7 +1185,7 @@ async function handleAccess(context, uid, body) {
     prepare: async ({ context: innerContext, note, noteId, profile, transaction }) => {
       assertOwnedNote(note, uid);
       const preCutoverLegacy = missingLegacyHtmlIdentity(note)
-        ? await assertPreCutoverLegacyMutation(innerContext, transaction, note)
+        ? assertPreCutoverLegacyMutation(note)
         : false;
       if (
         !noteActive(note)
@@ -1327,12 +1305,6 @@ async function handleMigrateLegacy(context, uid, body) {
       ) {
         throw new HttpError(409, "vault_note_state_mismatch", "Legacy Vault identity cannot be migrated");
       }
-      const [integrityMarker] = await firestoreBatchGet(
-        innerContext,
-        [integrityPath(uid)],
-        transaction
-      );
-      assertStoredVaultIntegrityMarker(integrityMarker, uid);
       assertReaderUids(body.readerUids, note.participantUids);
       const deleted = note.isDeleted === true;
       if (deleted && body.nameClaim !== undefined) {
@@ -1446,7 +1418,7 @@ async function handleLifecycle(context, uid, body, restoring) {
         throw new HttpError(404, "vault_note_not_found", "Vault note was not found");
       }
       const preCutoverLegacy = missingLegacyHtmlIdentity(note)
-        ? await assertPreCutoverLegacyMutation(innerContext, transaction, note)
+        ? assertPreCutoverLegacyMutation(note)
         : false;
       assertReaderUids(body.readerUids, note.participantUids);
       if (
@@ -1521,6 +1493,7 @@ async function handlePurge(context, uid, body) {
   const wrappedKey = assertWrappedKey(body.wrappedKey);
   const state = await transactionState(context, uid, noteId);
   try {
+    requireVaultIntegrityMarker(state.integrityMarker, uid, "ready");
     const note = assertOwnedNote(state.note, uid);
     const revision = storedRevision(note);
     if (revision !== expectedRevision) {
@@ -1588,6 +1561,7 @@ async function handleSecureCopyActivate(context, uid, body) {
   const copyJobId = assertIdentifier(body.copyJobId, "copyJobId");
   const state = await transactionState(context, uid, noteId);
   try {
+    requireVaultIntegrityMarker(state.integrityMarker, uid, "ready");
     const note = assertOwnedNote(state.note, uid);
     const revision = storedRevision(note);
     if (revision !== expectedRevision || note.secureShareCopyJobId !== copyJobId) {
@@ -1740,6 +1714,7 @@ export const __vaultNoteTesting = Object.freeze({
 
 export default async function handler(request, response) {
   const id = requestId();
+  let action = "unknown";
   applySecureResponseHeaders(response, id);
   try {
     requirePost(request);
@@ -1752,9 +1727,17 @@ export default async function handler(request, response) {
     }
     const user = await activeUserFromRequest(request, context);
     const body = await readJsonBody(request, maximumRequestBytes);
+    action = typeof body?.action === "string" ? body.action : "unknown";
     const result = await performAction(context, user.uid, body);
     jsonResponse(response, 200, { ok: true, ...result });
   } catch (error) {
+    logVaultApiRejection({
+      action,
+      error,
+      requestId: id,
+      route: "/api/vault-notes",
+      supportedActions
+    });
     if (
       error instanceof HttpError
       && error.code === "revision_conflict"

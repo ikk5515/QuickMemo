@@ -3415,6 +3415,69 @@ describeRules("firestore security rules", () => {
     await assertFails(legacyFolderDeleteBatch.commit());
   });
 
+  it("allows an explicit pending Vault marker but reserves the ready seal for the server", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      for (const uid of ["pending-marker-user", "ready-marker-user", "partial-marker-user"]) {
+        await setDoc(doc(context.firestore(), `users/${uid}`), userProfile(uid));
+      }
+    });
+
+    const pendingUid = "pending-marker-user";
+    const pendingDb = testEnv.authenticatedContext(pendingUid).firestore();
+    const pendingRef = doc(pendingDb, `vaultIntegrity/${pendingUid}`);
+    await assertSucceeds(setDoc(pendingRef, {
+      ownerUid: pendingUid,
+      indexVersion: 1,
+      wrappedKey: ownerWrappedShareKey,
+      cutoverState: "pending",
+      cutoverVersion: 1,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(pendingRef, {
+      cutoverState: "ready",
+      verifiedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+
+    const readyUid = "ready-marker-user";
+    const readyDb = testEnv.authenticatedContext(readyUid).firestore();
+    await assertFails(setDoc(doc(readyDb, `vaultIntegrity/${readyUid}`), {
+      ownerUid: readyUid,
+      indexVersion: 1,
+      wrappedKey: ownerWrappedShareKey,
+      cutoverState: "ready",
+      cutoverVersion: 1,
+      verifiedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), `vaultIntegrity/${readyUid}`), {
+        ownerUid: readyUid,
+        indexVersion: 1,
+        wrappedKey: ownerWrappedShareKey,
+        cutoverState: "ready",
+        cutoverVersion: 1,
+        verifiedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    });
+    await assertSucceeds(getDoc(doc(readyDb, `vaultIntegrity/${readyUid}`)));
+
+    const partialUid = "partial-marker-user";
+    const partialDb = testEnv.authenticatedContext(partialUid).firestore();
+    await assertFails(setDoc(doc(partialDb, `vaultIntegrity/${partialUid}`), {
+      ownerUid: partialUid,
+      indexVersion: 1,
+      wrappedKey: ownerWrappedShareKey,
+      cutoverState: "pending",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+  });
+
   it("atomically reserves blinded Vault names across concurrent entry and folder mutations", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a", {

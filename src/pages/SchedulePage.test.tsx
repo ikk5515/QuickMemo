@@ -468,17 +468,108 @@ describe("SchedulePage quick work panel", () => {
     );
   });
 
-  it("exposes only Calendar and Matrix without recurring subscriptions", async () => {
+  it("exposes Calendar, Matrix, and completed history without Todo or recurring subscriptions", async () => {
     renderSchedulePage();
 
     expect(await screen.findByRole("button", { name: "매트릭스" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "달력" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "완료" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByRole("button", { name: "할 일" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "반복 업무" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /빠른 업무 패널/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "일정관리 도구 열기" })).not.toBeInTheDocument();
     expect(subscribeRecurringHabits).not.toHaveBeenCalled();
     expect(subscribeRecurringHabitCheckIns).not.toHaveBeenCalled();
+  });
+
+  it("moves a checked matrix item into completed history and restores it when unchecked", async () => {
+    const user = userEvent.setup();
+    const now = new Date();
+    const currentDate = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0")
+    ].join("-");
+    const activeTask = categorizedScheduleTaskSnapshot("completion-flow", "완료 이동 일정", "work", currentDate);
+    let emitTasks!: (tasks: ScheduleTaskSnapshot[]) => void;
+
+    vi.mocked(subscribeScheduleTasks).mockImplementationOnce((_uid, onNext) => {
+      emitTasks = onNext;
+      onNext([activeTask]);
+      return vi.fn();
+    });
+
+    renderSchedulePage(undefined, "/schedule?view=matrix");
+
+    const activeTitle = await screen.findByText("완료 이동 일정");
+    const activeRow = activeTitle.closest<HTMLElement>(".matrix-task-row");
+
+    expect(activeRow).not.toBeNull();
+    await user.click(within(activeRow!).getByRole("checkbox", { name: "일정 완료" }));
+
+    await waitFor(() => expect(updateScheduleTask).toHaveBeenCalledWith(
+      "completion-flow",
+      "user-a",
+      {
+        completedAt: expect.anything(),
+        status: "completed"
+      }
+    ));
+
+    const completedTask: ScheduleTaskSnapshot = {
+      ...activeTask,
+      completedAt: {
+        nanoseconds: 0,
+        seconds: 4_071_427_200,
+        toDate: () => new Date("2099-01-10T00:00:00"),
+        toMillis: () => Date.parse("2099-01-10T00:00:00")
+      } as ScheduleTaskSnapshot["completedAt"],
+      status: "completed"
+    };
+
+    act(() => emitTasks([completedTask]));
+    await waitFor(() => expect(screen.queryByText("완료 이동 일정")).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: "달력" }));
+    await waitFor(() => expect(screen.queryByText("완료 이동 일정")).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: "완료" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "완료" })).toHaveAttribute("aria-pressed", "true"));
+    const completedPanel = screen.getByRole("region", { name: "완료 내역" });
+
+    expect(within(completedPanel).getByText("완료 이동 일정")).toBeInTheDocument();
+    expect(within(completedPanel).getByText("완료한 일정 1개")).toHaveAttribute("aria-live", "polite");
+    expect(within(completedPanel).getByRole("checkbox", { name: "일정 완료 해제" })).toHaveAttribute(
+      "aria-checked",
+      "true"
+    );
+
+    await user.click(screen.getByRole("button", { name: "개인 일정 보기" }));
+    await waitFor(() => expect(within(completedPanel).queryByText("완료 이동 일정")).not.toBeInTheDocument());
+    expect(within(completedPanel).getByText("완료한 일정 0개")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "업무 일정 보기" }));
+    expect(await within(completedPanel).findByText("완료 이동 일정")).toBeInTheDocument();
+
+    vi.mocked(updateScheduleTask).mockClear();
+    await user.click(within(completedPanel).getByRole("checkbox", { name: "일정 완료 해제" }));
+    await waitFor(() => expect(updateScheduleTask).toHaveBeenCalledWith(
+      "completion-flow",
+      "user-a",
+      {
+        completedAt: null,
+        status: "active"
+      }
+    ));
+
+    act(() => emitTasks([activeTask]));
+    await waitFor(() => expect(within(completedPanel).queryByText("완료 이동 일정")).not.toBeInTheDocument());
+
+    await user.click(screen.getByRole("button", { name: "달력" }));
+    expect((await screen.findAllByText("완료 이동 일정")).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "매트릭스" }));
+    expect(await screen.findByText("완료 이동 일정")).toBeInTheDocument();
   });
 
   it("filters work and personal schedules consistently across Calendar and Matrix", async () => {
@@ -873,12 +964,14 @@ describe("SchedulePage quick work panel", () => {
     expect(screen.getByRole("dialog", { name: "새 일정 추가" })).toBeInTheDocument();
   });
 
-  it("keeps completed history and recurring management out of the schedule chrome", async () => {
-    renderSchedulePage();
+  it("keeps completed history in the schedule chrome while recurring management stays removed", async () => {
+    renderSchedulePage(undefined, "/schedule?view=completed");
 
     expect(await screen.findByRole("button", { name: "달력" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "완료" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByRole("button", { name: "일정관리 도구 열기" })).not.toBeInTheDocument();
-    expect(screen.queryByText("완료 내역")).not.toBeInTheDocument();
+    expect(screen.getAllByText("완료 내역").length).toBeGreaterThan(0);
+    expect(screen.getByText("완료한 일정이 없습니다.")).toBeInTheDocument();
     expect(screen.queryByText("반복 업무 관리")).not.toBeInTheDocument();
     expect(screen.queryByText("반복 업무 추가")).not.toBeInTheDocument();
   });

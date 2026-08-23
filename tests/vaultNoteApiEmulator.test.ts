@@ -36,12 +36,21 @@ const wrappedKey = {
   wrappedKey: "wrapped-key"
 } as const;
 
-function vaultIntegrityMarkerFields(uid: string) {
+function vaultIntegrityMarkerFields(
+  uid: string,
+  state: "legacy" | "pending" | "ready" = "ready"
+) {
+  const now = new Date();
   return {
-    createdAt: new Date(),
+    createdAt: now,
     indexVersion: 1,
     ownerUid: uid,
-    updatedAt: new Date(),
+    updatedAt: now,
+    ...(state === "legacy" ? {} : {
+      cutoverState: state,
+      cutoverVersion: 1
+    }),
+    ...(state === "ready" ? { verifiedAt: now } : {}),
     wrappedKey
   };
 }
@@ -382,6 +391,7 @@ describeEmulator("Vault note API emulator transaction", () => {
 
   it("refuses secure-copy abort while any attachment reservation remains", async () => {
     const claimId = "U".repeat(43);
+    await activateVaultIntegrityMarker();
     await writeEmulatorDocuments([
       {
         path: "notes/secure-copy-reserved",
@@ -550,7 +560,7 @@ describeEmulator("Vault note API emulator transaction", () => {
     expect(deletedParticipantProbe.body).not.toHaveProperty("actualRevision");
   });
 
-  it("keeps missing-field legacy HTML mutations only before the Vault cutover marker", async () => {
+  it("allows only explicit legacy recovery before the ready cutover", async () => {
     await writeEmulatorDocuments([{
       path: "notes/legacy-pre-cutover",
       fields: legacyNoteFields()
@@ -567,37 +577,8 @@ describeEmulator("Vault note API emulator transaction", () => {
       noteId: "legacy-pre-cutover",
       readerUids: [uid]
     });
-    expect(updated.response.status).toBe(200);
-    expect(updated.body).toMatchObject({ revision: 2 });
-
-    const shared = await request({
-      action: "access",
-      expectedRevision: 2,
-      folderId: null,
-      noteId: "legacy-pre-cutover",
-      participantUids: [uid, participantUid],
-      type: "shared",
-      wrappedKeys: { [uid]: wrappedKey, [participantUid]: wrappedKey }
-    });
-    expect(shared.response.status).toBe(200);
-    expect(shared.body).toMatchObject({ revision: 3 });
-
-    const trashed = await request({
-      action: "trash",
-      expectedRevision: 3,
-      noteId: "legacy-pre-cutover",
-      readerUids: [uid, participantUid]
-    });
-    expect(trashed.response.status).toBe(200);
-    expect(trashed.body).toMatchObject({ revision: 4 });
-    const restored = await request({
-      action: "restore",
-      expectedRevision: 4,
-      noteId: "legacy-pre-cutover",
-      readerUids: [uid, participantUid]
-    });
-    expect(restored.response.status).toBe(200);
-    expect(restored.body).toMatchObject({ revision: 5 });
+    expect(updated.response.status).toBe(409);
+    expect(updated.body).toMatchObject({ error: "vault_integrity_not_ready", ok: false });
     expect(await readEmulatorDocument("notes/legacy-pre-cutover")).not.toHaveProperty("contentFormat");
     expect(await readEmulatorDocument("notes/legacy-pre-cutover")).not.toHaveProperty("vaultNameClaimId");
 
@@ -605,9 +586,9 @@ describeEmulator("Vault note API emulator transaction", () => {
       action: "migrate-legacy",
       expectedContentFormat: "legacy-html-v1",
       expectedEntryKind: "legacy-html",
-      expectedRevision: 5,
+      expectedRevision: 1,
       noteId: "legacy-pre-cutover",
-      readerUids: [uid, participantUid]
+      readerUids: [uid]
     });
     expect(prematureMigration.response.status).toBe(409);
     expect(prematureMigration.body).toMatchObject({
@@ -620,7 +601,7 @@ describeEmulator("Vault note API emulator transaction", () => {
     await writeEmulatorDocuments([
       {
         path: `vaultIntegrity/${uid}`,
-        fields: vaultIntegrityMarkerFields(uid)
+        fields: vaultIntegrityMarkerFields(uid, "pending")
       },
       {
         path: "notes/legacy-post-cutover",
@@ -673,7 +654,7 @@ describeEmulator("Vault note API emulator transaction", () => {
     for (const rejectedRequest of rejectedRequests) {
       const rejected = await request(rejectedRequest);
       expect(rejected.response.status).toBe(409);
-      expect(rejected.body).toMatchObject({ error: "vault_cutover_required", ok: false });
+      expect(rejected.body).toMatchObject({ error: "vault_integrity_not_ready", ok: false });
     }
     expect(await readEmulatorDocument("notes/legacy-post-cutover")).toMatchObject({ revision: 1 });
     expect(await readEmulatorDocument("notes/legacy-post-cutover-deleted")).toMatchObject({
@@ -736,6 +717,11 @@ describeEmulator("Vault note API emulator transaction", () => {
     });
     expect(await readEmulatorDocument("notes/legacy-post-cutover-deleted"))
       .not.toHaveProperty("vaultNameClaimId");
+
+    await writeEmulatorDocuments([{
+      path: `vaultIntegrity/${uid}`,
+      fields: vaultIntegrityMarkerFields(uid, "ready")
+    }]);
 
     const restoredDeleted = await request({
       action: "restore",

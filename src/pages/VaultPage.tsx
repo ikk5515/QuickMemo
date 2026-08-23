@@ -162,7 +162,6 @@ import { VaultAssetPreview } from "../features/vault/VaultAssetPreview";
 import { setFrontmatterProperty } from "../features/vault/frontmatterEditing";
 import type { VaultHistoryDraft } from "../features/vault/VaultHistoryPanel";
 import { createSearchIndexMarkdown } from "../features/vault/moc";
-import type { VaultNameReservationMigrationResult } from "../features/vault/vaultNameMigration";
 import { downloadBlob } from "../features/vault/browserDownload";
 import {
   createVaultImportManifest
@@ -304,6 +303,7 @@ import { subscribeUsers } from "../services/users";
 import {
   activatePreparedVaultIntegrityKey,
   prepareVaultIntegrityKey,
+  sealVaultIntegrityCutover,
   type PreparedVaultIntegrityKey
 } from "../services/vaultIntegrity";
 import {
@@ -683,7 +683,7 @@ interface VaultWorkspaceConflictState {
   remoteState: VaultPersistedWorkspaceState | null;
 }
 
-type VaultNameMigrationStatus = "waiting" | "running" | "audited" | "ready" | "blocked";
+type VaultNameMigrationStatus = "checking" | "waiting" | "running" | "ready" | "blocked";
 
 interface VaultNameMigrationProgressState {
   completed: number;
@@ -754,31 +754,6 @@ export function ownedNoteReservationSignature(notes: readonly NoteSnapshot[], ui
       note.vaultNameIndexVersion ?? null
     ])
     .sort((left, right) => String(left[0]).localeCompare(String(right[0]))));
-}
-
-export function ownedVaultCutoverInventorySignature(
-  inventory: { activeNotes: readonly NoteSnapshot[]; deletedNotes: readonly NoteSnapshot[] },
-  uid: string
-) {
-  return JSON.stringify([
-    ...inventory.activeNotes.map((note) => ["active", note] as const),
-    ...inventory.deletedNotes.map((note) => ["deleted", note] as const)
-  ]
-    .filter(([, note]) => note.ownerUid === uid)
-    .map(([state, note]) => [
-      state,
-      note.id,
-      note.folderId ?? null,
-      note.entryKind ?? null,
-      note.contentFormat ?? null,
-      note.encryptedTitle.version,
-      note.encryptedTitle.algorithm,
-      note.encryptedTitle.iv,
-      note.encryptedTitle.cipherText,
-      note.vaultNameClaimId ?? null,
-      note.vaultNameIndexVersion ?? null
-    ])
-    .sort((left, right) => String(left[1]).localeCompare(String(right[1]))));
 }
 
 export function visibleVaultOwnerIds(profile: UserProfile, users: readonly UserProfile[]) {
@@ -1454,15 +1429,20 @@ function UnlockedVaultPage({
     noteSnapshotReceived
   ), [decryptedNotes, decryptedVaultScopeKey, noteSnapshotReceived, ownerIds, plaintextScopeKey]);
   const [folders, setFolders] = useState<DecryptedVaultFolder[]>([]);
+  const vaultIntegrityProfileSignature = JSON.stringify([profile.uid, profile.publicKeyJwk]);
+  const vaultIntegrityProfileRef = useRef(profile);
+  vaultIntegrityProfileRef.current = profile;
   const [vaultIntegrityKey, setVaultIntegrityKey] = useState<CryptoKey | null>(null);
   const [preparedVaultIntegrityKey, setPreparedVaultIntegrityKey] = useState<PreparedVaultIntegrityKey | null>(null);
-  const [vaultNameMigrationStatus, setVaultNameMigrationStatus] = useState<VaultNameMigrationStatus>("waiting");
+  const [vaultNameMigrationStatus, setVaultNameMigrationStatus] = useState<VaultNameMigrationStatus>("checking");
   const [vaultNameMigrationProgress, setVaultNameMigrationProgress] = useState<VaultNameMigrationProgressState | null>(null);
+  const [vaultNameMigrationFailure, setVaultNameMigrationFailure] = useState<string | null>(null);
+  const [vaultIntegrityRetryAttempt, setVaultIntegrityRetryAttempt] = useState(0);
+  const vaultNameMigrationStatusRef = useRef<VaultNameMigrationStatus>("checking");
+  vaultNameMigrationStatusRef.current = vaultNameMigrationStatus;
   const [vaultNameCollisionTargetIds, setVaultNameCollisionTargetIds] = useState<Set<string>>(new Set());
   const [noteServerReservationSignature, setNoteServerReservationSignature] = useState<string | null>(null);
   const [folderServerReservationSignature, setFolderServerReservationSignature] = useState<string | null>(null);
-  const [auditedServerReservationSignature, setAuditedServerReservationSignature] = useState<string | null>(null);
-  const [auditedServerInventorySignature, setAuditedServerInventorySignature] = useState<string | null>(null);
   const notesRef = useRef<DecryptedVaultNote[]>(notes);
   const foldersRef = useRef<DecryptedVaultFolder[]>(folders);
   const folderPathsRef = useRef<Map<string, string>>(new Map());
@@ -1631,7 +1611,7 @@ function UnlockedVaultPage({
   const durableSourceNotesRef = useRef<Map<string, DecryptedVaultNote>>(new Map());
   const vaultNameMigrationGenerationRef = useRef(0);
   const vaultNameMigrationPromiseRef = useRef<Promise<void> | null>(null);
-  const vaultIntegrityActivationRef = useRef<Promise<void> | null>(null);
+  const vaultIntegritySealAbortRef = useRef<AbortController | null>(null);
   const workspaceSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const workspaceSaveGenerationRef = useRef(0);
   const workspaceSaveDebounceTimerRef = useRef<number | null>(null);
@@ -1677,11 +1657,11 @@ function UnlockedVaultPage({
     && folderServerReservationSignature !== null
     ? `${noteServerReservationSignature}\n${folderServerReservationSignature}`
     : null;
+  const vaultServerSubscriptionsReady = currentServerReservationSignature !== null;
   const vaultNameWritesReady = isOnline
     && vaultNameMigrationStatus === "ready"
-    && auditedServerInventorySignature !== null
-    && currentServerReservationSignature !== null
-    && currentServerReservationSignature === auditedServerReservationSignature;
+    && vaultIntegrityKey !== null
+    && vaultServerSubscriptionsReady;
   const previousOnlineRef = useRef(isOnline);
   privateKeyAutoLockGuardRef.current = () => Boolean(
     templateApplyBusyRef.current
@@ -2536,108 +2516,57 @@ function UnlockedVaultPage({
     let active = true;
     const migrationGeneration = vaultNameMigrationGenerationRef.current + 1;
     vaultNameMigrationGenerationRef.current = migrationGeneration;
+    vaultIntegritySealAbortRef.current?.abort();
+    vaultIntegritySealAbortRef.current = null;
     vaultNameMigrationPromiseRef.current = null;
-    vaultIntegrityActivationRef.current = null;
     setVaultIntegrityKey(null);
     setPreparedVaultIntegrityKey(null);
-    setVaultNameMigrationStatus("waiting");
     setVaultNameMigrationProgress(null);
+    setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
-    setNoteServerReservationSignature(null);
-    setFolderServerReservationSignature(null);
-    setAuditedServerReservationSignature(null);
-    setAuditedServerInventorySignature(null);
-    void prepareVaultIntegrityKey(profile, privateKey)
-      .then((prepared) => {
-        if (active) setPreparedVaultIntegrityKey(prepared);
-      })
-      .catch(() => {
-        if (active) {
-          setError("암호화된 이름 무결성 키를 준비하지 못해 Vault 쓰기를 잠갔습니다.");
+    if (!isOnline) {
+      setVaultNameMigrationStatus("waiting");
+      return () => {
+        active = false;
+        if (vaultNameMigrationGenerationRef.current === migrationGeneration) {
+          vaultNameMigrationGenerationRef.current += 1;
         }
+      };
+    }
+
+    setVaultNameMigrationStatus("checking");
+    setStatus("암호화된 이름 완료 상태를 서버에서 확인하는 중입니다…");
+    void prepareVaultIntegrityKey(vaultIntegrityProfileRef.current, privateKey)
+      .then((prepared) => {
+        if (!active || vaultNameMigrationGenerationRef.current !== migrationGeneration) return;
+        setPreparedVaultIntegrityKey(prepared);
+        if (prepared.cutoverState === "ready") {
+          setVaultIntegrityKey(prepared.key);
+          setVaultNameMigrationStatus("ready");
+          setStatus("암호화된 이름 무결성 준비가 완료된 Vault입니다.");
+          return;
+        }
+        setVaultNameMigrationStatus("waiting");
+        setStatus("서버의 전체 노트·폴더 목록을 한 번 확인하는 중입니다…");
+      })
+      .catch((caught) => {
+        if (!active || vaultNameMigrationGenerationRef.current !== migrationGeneration) return;
+        const message = caught instanceof Error
+          ? `암호화된 이름 완료 상태를 확인하지 못했습니다: ${caught.message}`
+          : "암호화된 이름 완료 상태를 확인하지 못했습니다.";
+        setVaultNameMigrationFailure(message);
+        setVaultNameMigrationStatus("blocked");
+        setError(message);
       });
     return () => {
       active = false;
       if (vaultNameMigrationGenerationRef.current === migrationGeneration) {
         vaultNameMigrationGenerationRef.current += 1;
-        vaultNameMigrationPromiseRef.current = null;
       }
+      vaultIntegritySealAbortRef.current?.abort();
+      vaultIntegritySealAbortRef.current = null;
     };
-  }, [privateKey, profile]);
-
-  useEffect(() => {
-    if (
-      !preparedVaultIntegrityKey
-      || vaultIntegrityKey
-      || vaultIntegrityActivationRef.current
-      || !folderSnapshotReceived
-      || folderServerReservationSignature === null
-      || !isOnline
-    ) {
-      return;
-    }
-    const generation = vaultNameMigrationGenerationRef.current;
-    let cancelled = false;
-    const pending = (async () => {
-      const { preflightVaultNameCutover } = await import("../features/vault/vaultNameMigration");
-      let prepared = preparedVaultIntegrityKey;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        // The marker is irreversible. Read every owner note directly from the
-        // server (active and deleted), then decrypt and plan the complete
-        // inventory under the exact candidate key before sealing it.
-        const inventory = await loadOwnedVaultCutoverInventory(profile.uid);
-        const ownedRawFolders = rawFolders.filter((folder) => folder.ownerUid === profile.uid);
-        await preflightVaultNameCutover({
-          activeNotes: inventory.activeNotes,
-          deletedNotes: inventory.deletedNotes,
-          folders: ownedRawFolders,
-          privateKey,
-          uid: profile.uid,
-          vaultIntegrityKey: prepared.key
-        });
-        const activated = await activatePreparedVaultIntegrityKey(prepared, privateKey);
-        if (!activated.keyChanged) {
-          if (
-            !cancelled
-            && vaultNameMigrationGenerationRef.current === generation
-          ) {
-            setVaultIntegrityKey(activated.key);
-          }
-          return;
-        }
-
-        // Another tab won the candidate race. Its key changes every blinded
-        // claim, so fetch the winner and rerun a fresh full server inventory
-        // preflight before enabling writes.
-        prepared = await prepareVaultIntegrityKey(profile, privateKey);
-      }
-      throw new Error("다른 탭의 Vault 무결성 활성화와 계속 충돌했습니다.");
-    })().catch((caught) => {
-      if (!cancelled && vaultNameMigrationGenerationRef.current === generation) {
-        setVaultNameMigrationStatus("blocked");
-        setError(caught instanceof Error
-          ? `Vault 무결성 사전 검증을 완료하지 못했습니다: ${caught.message}`
-          : "Vault 무결성 사전 검증을 완료하지 못해 쓰기를 잠갔습니다.");
-      }
-    }).finally(() => {
-      if (vaultIntegrityActivationRef.current === pending) {
-        vaultIntegrityActivationRef.current = null;
-      }
-    });
-    vaultIntegrityActivationRef.current = pending;
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    folderServerReservationSignature,
-    folderSnapshotReceived,
-    isOnline,
-    preparedVaultIntegrityKey,
-    privateKey,
-    profile,
-    rawFolders,
-    vaultIntegrityKey
-  ]);
+  }, [isOnline, privateKey, vaultIntegrityProfileSignature, vaultIntegrityRetryAttempt]);
 
   useEffect(() => {
     if (
@@ -2840,12 +2769,12 @@ function UnlockedVaultPage({
   useEffect(() => {
     const subscriptionGeneration = noteSubscriptionGenerationRef.current + 1;
     noteSubscriptionGenerationRef.current = subscriptionGeneration;
+    noteSubscriptionServerReadyRef.current = false;
+    setNoteServerReservationSignature(null);
     if (!privateKey || !profile) {
       allVisibleNoteSnapshotsRef.current = [];
-      noteSubscriptionServerReadyRef.current = false;
       setRawNotes([]);
       setNoteSnapshotReceived(false);
-      setNoteServerReservationSignature(null);
       return undefined;
     }
     const visibleOwners = ownerIdKey === "admin" ? null : ownerIdKey.split("\n").filter(Boolean);
@@ -2877,7 +2806,9 @@ function UnlockedVaultPage({
         noteSubscriptionServerReadyRef.current = false;
         setNoteServerReservationSignature(null);
         setError("암호화 노트 목록을 불러오지 못했습니다.");
-      }
+      },
+      undefined,
+      { repairLegacyDeletionMetadata: false }
     );
     return () => {
       if (noteSubscriptionGenerationRef.current === subscriptionGeneration) {
@@ -2885,16 +2816,16 @@ function UnlockedVaultPage({
       }
       unsubscribe();
     };
-  }, [clearVaultPlaintextForAccessScope, ownerIdKey, privateKey, profile]);
+  }, [clearVaultPlaintextForAccessScope, ownerIdKey, privateKey, profile, vaultIntegrityRetryAttempt]);
 
   useEffect(() => {
+    folderSubscriptionServerReadyRef.current = false;
+    setFolderServerReservationSignature(null);
     if (!privateKey || !profile) {
       activeFolderSnapshotsRef.current = [];
       allFolderSnapshotsRef.current = [];
-      folderSubscriptionServerReadyRef.current = false;
       setRawFolders([]);
       setFolderSnapshotReceived(false);
-      setFolderServerReservationSignature(null);
       return undefined;
     }
     return subscribeNoteFolders(profile.uid, (nextFolders, metadata) => {
@@ -2944,7 +2875,7 @@ function UnlockedVaultPage({
         }
       }
     });
-  }, [clearVaultPlaintextForAccessScope, privateKey, profile]);
+  }, [clearVaultPlaintextForAccessScope, privateKey, profile, vaultIntegrityRetryAttempt]);
 
   useEffect(() => {
     if (!privateKey || !profile || !noteSnapshotReceived || !folderSnapshotReceived) {
@@ -2996,44 +2927,81 @@ function UnlockedVaultPage({
 
   useEffect(() => {
     if (
-      !vaultIntegrityKey
+      !preparedVaultIntegrityKey
+      || preparedVaultIntegrityKey.cutoverState === "ready"
       || !isOnline
-      || currentServerReservationSignature === null
-      || vaultNameMigrationStatus !== "waiting"
+      || !vaultServerSubscriptionsReady
+      || vaultNameMigrationStatusRef.current !== "waiting"
       || vaultNameMigrationPromiseRef.current
     ) {
       return;
     }
 
     const generation = vaultNameMigrationGenerationRef.current;
+    const controller = new AbortController();
+    vaultIntegritySealAbortRef.current?.abort();
+    vaultIntegritySealAbortRef.current = controller;
     setVaultNameMigrationStatus("running");
     setVaultNameMigrationProgress({ completed: 0, migrated: 0, skipped: 0, total: 0 });
+    setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
-    setAuditedServerReservationSignature(null);
-    setAuditedServerInventorySignature(null);
-    setStatus("암호화된 이름 예약을 검증하는 중입니다…");
+    setStatus("암호화된 이름 예약을 한 번 확인하는 중입니다…");
 
     const pending = (async () => {
       const {
-        auditVaultNameReservations,
         migrateVaultNameReservations,
         preflightVaultNameCutover
       } = await import("../features/vault/vaultNameMigration");
-      const inventory = await loadOwnedVaultCutoverInventory(profile.uid);
+      const currentProfile = vaultIntegrityProfileRef.current;
+      const inventory = await loadOwnedVaultCutoverInventory(currentProfile.uid);
+      if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
+        return { kind: "cancelled" } as const;
+      }
       if (!folderSubscriptionServerReadyRef.current) {
         throw new Error("서버의 전체 Vault 폴더 목록을 아직 확인하지 못했습니다.");
       }
       const ownedFolderSnapshots = activeFolderSnapshotsRef.current
-        .filter((folder) => folder.ownerUid === profile.uid);
-      const preflight = await preflightVaultNameCutover({
+        .filter((folder) => folder.ownerUid === currentProfile.uid);
+      let activeIntegrityKey = preparedVaultIntegrityKey.key;
+      let preflight = await preflightVaultNameCutover({
         activeNotes: inventory.activeNotes,
         deletedNotes: inventory.deletedNotes,
         folders: ownedFolderSnapshots,
         privateKey,
-        uid: profile.uid,
-        vaultIntegrityKey
+        uid: currentProfile.uid,
+        vaultIntegrityKey: activeIntegrityKey
       });
-      if (vaultNameMigrationGenerationRef.current !== generation) return null;
+      if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
+        return { kind: "cancelled" } as const;
+      }
+
+      if (preparedVaultIntegrityKey.state === "candidate") {
+        const activated = await activatePreparedVaultIntegrityKey(preparedVaultIntegrityKey, privateKey);
+        activeIntegrityKey = activated.key;
+        if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
+          return { kind: "cancelled" } as const;
+        }
+        if (activated.keyChanged && activated.cutoverState === "ready") {
+          return { key: activeIntegrityKey, kind: "already-ready" } as const;
+        }
+        if (activated.keyChanged) {
+          // Another tab created the pending marker with a different blinded-name
+          // key. Reuse the same complete inventory and only repeat decryption and
+          // planning under that winning key; do not query the Vault again.
+          preflight = await preflightVaultNameCutover({
+            activeNotes: inventory.activeNotes,
+            deletedNotes: inventory.deletedNotes,
+            folders: ownedFolderSnapshots,
+            privateKey,
+            uid: currentProfile.uid,
+            vaultIntegrityKey: activeIntegrityKey
+          });
+        }
+      }
+      if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
+        return { kind: "cancelled" } as const;
+      }
+      setVaultIntegrityKey(activeIntegrityKey);
       setVaultNameMigrationProgress({
         completed: 0,
         migrated: 0,
@@ -3056,183 +3024,126 @@ function UnlockedVaultPage({
           }
         },
         privateKey,
-        profile,
-        vaultIntegrityKey
+        profile: currentProfile,
+        vaultIntegrityKey: activeIntegrityKey
       });
-
-      // A mutation result is not the cutover proof. Read the complete owner
-      // inventory again from the server and reject any raw identity that still
-      // relies on the renderer's legacy fallback, including trash and
-      // collision-deferred entries.
-      const finalInventory = await loadOwnedVaultCutoverInventory(profile.uid);
-      const initialFinalFolders = activeFolderSnapshotsRef.current
-        .filter((folder) => folder.ownerUid === profile.uid);
-      const finalPreflight = await preflightVaultNameCutover({
-        activeNotes: finalInventory.activeNotes,
-        deletedNotes: finalInventory.deletedNotes,
-        folders: initialFinalFolders,
-        privateKey,
-        uid: profile.uid,
-        vaultIntegrityKey
-      });
-      if (finalPreflight.legacyActiveNoteIds.size || finalPreflight.legacyDeletedNoteIds.size) {
-        throw new Error("서버 재확인에서 명시적 저장 형식이 없는 Vault 항목을 발견했습니다.");
+      if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
+        return { kind: "cancelled" } as const;
+      }
+      if (result.deferredTargetIds.length) {
+        return { kind: "deferred", result } as const;
       }
 
-      // Folder mutations are server-authoritative but their listener can land
-      // just after the note inventory read. Retry only this read-only audit on
-      // a server-complete folder snapshot; note inventory is never substituted
-      // with the active UI subscription.
-      let finalAudit: Pick<
-        VaultNameReservationMigrationResult,
-        "collisions" | "deferredTargetIds"
-      > | null = null;
-      let auditedFolders: NoteFolderSnapshot[] = initialFinalFolders;
-      let lastAuditError: unknown = null;
-      for (let attempt = 0; attempt < 12 && finalAudit === null; attempt += 1) {
-        if (vaultNameMigrationGenerationRef.current !== generation) return null;
-        if (folderSubscriptionServerReadyRef.current) {
-          auditedFolders = activeFolderSnapshotsRef.current
-            .filter((folder) => folder.ownerUid === profile.uid);
-          const decryptedFolders = await decryptVaultFolders(auditedFolders, profile.uid, privateKey);
-          if (
-            decryptedFolders.length === auditedFolders.length
-            && !decryptedFolders.some((folder) => folder.nameDecryptionFailed)
-          ) {
-            try {
-              finalAudit = await auditVaultNameReservations({
-                deletedNotes: finalPreflight.deletedNotes,
-                expectedDeletedNoteCount: finalInventory.deletedNotes.length,
-                expectedFolderCount: auditedFolders.length,
-                expectedNoteCount: finalInventory.activeNotes.length,
-                folders: decryptedFolders,
-                notes: finalPreflight.activeNotes,
-                profile,
-                vaultIntegrityKey
-              });
-            } catch (caught) {
-              lastAuditError = caught;
-            }
-          }
-        }
-        if (finalAudit === null && attempt < 11) {
-          await new Promise((resolve) => window.setTimeout(resolve, 100));
-        }
-      }
-      if (!finalAudit) {
-        throw lastAuditError instanceof Error
-          ? lastAuditError
-          : new Error("서버의 최종 Vault 이름 예약 상태를 확인하지 못했습니다.");
-      }
-      return { auditedFolders, finalAudit, finalInventory, result };
+      await sealVaultIntegrityCutover(currentProfile.uid, {
+        expectedActiveNoteCount: inventory.activeNotes.length,
+        expectedDeletedNoteCount: inventory.deletedNotes.length,
+        expectedFolderCount: preflight.folders.length
+      }, controller.signal);
+      return { key: activeIntegrityKey, kind: "sealed", result } as const;
     })().then((outcome) => {
       if (vaultNameMigrationGenerationRef.current !== generation) return;
-      if (!outcome) return;
-      const { auditedFolders, finalAudit, finalInventory, result } = outcome;
-      setVaultNameMigrationProgress(result);
-      const auditedActiveSignature = `${ownedNoteReservationSignature(finalInventory.activeNotes, profile.uid)}\n${ownedFolderReservationSignature(auditedFolders, profile.uid)}`;
-      setAuditedServerReservationSignature(auditedActiveSignature);
-      setAuditedServerInventorySignature(ownedVaultCutoverInventorySignature(finalInventory, profile.uid));
-      if (finalAudit.deferredTargetIds.length) {
-        setVaultNameCollisionTargetIds(new Set(finalAudit.deferredTargetIds));
-        setVaultNameMigrationStatus("blocked");
-        setError(finalAudit.collisions.length
-          ? `같은 폴더에서 이름이 겹치거나 그 하위에 있는 항목 ${finalAudit.deferredTargetIds.length}개를 발견했습니다. 표시된 항목의 이름이나 위치를 정리한 뒤 다시 확인해주세요.`
-          : `이전 버전의 공유 폴더 경로 ${finalAudit.deferredTargetIds.length}개를 발견했습니다. 표시된 공유 항목을 Vault 루트로 이동해 무결성 검증을 완료해주세요.`);
+      if (outcome.kind === "cancelled") return;
+      if (outcome.kind === "already-ready") {
+        setVaultIntegrityKey(outcome.key);
+        setVaultNameMigrationProgress(null);
+        setVaultNameMigrationFailure(null);
+        setVaultNameCollisionTargetIds(new Set());
+        setVaultNameMigrationStatus("ready");
+        setStatus("다른 탭에서 암호화된 이름 무결성 준비를 완료했습니다.");
         return;
       }
+      setVaultNameMigrationProgress(outcome.result);
+      if (outcome.kind === "deferred") {
+        setVaultNameCollisionTargetIds(new Set(outcome.result.deferredTargetIds));
+        setVaultNameMigrationStatus("blocked");
+        const failure = outcome.result.collisions.length
+          ? `같은 폴더에서 이름이 겹치거나 그 하위에 있는 항목 ${outcome.result.deferredTargetIds.length}개를 발견했습니다. 표시된 항목의 이름이나 위치를 정리한 뒤 다시 확인해주세요.`
+          : `이전 버전의 공유 폴더 경로 ${outcome.result.deferredTargetIds.length}개를 발견했습니다. 표시된 공유 항목을 Vault 루트로 이동해 무결성 검증을 완료해주세요.`;
+        setVaultNameMigrationFailure(failure);
+        setError(failure);
+        return;
+      }
+      setVaultIntegrityKey(outcome.key);
       setVaultNameCollisionTargetIds(new Set());
-      setVaultNameMigrationStatus("audited");
-      setStatus(result.migrated
-        ? `암호화된 이름 예약 ${result.migrated}개를 서버에서 최종 확인하는 중입니다…`
-        : "암호화된 이름 예약을 서버에서 최종 확인하는 중입니다…");
+      setVaultNameMigrationFailure(null);
+      setVaultNameMigrationStatus("ready");
+      setStatus(outcome.result.migrated
+        ? `암호화된 이름 예약 ${outcome.result.migrated}개를 확인하고 완료 상태를 저장했습니다.`
+        : "암호화된 이름 무결성 완료 상태를 서버에 저장했습니다.");
     }).catch((caught) => {
-      if (vaultNameMigrationGenerationRef.current !== generation) return;
+      if (
+        vaultNameMigrationGenerationRef.current !== generation
+        || controller.signal.aborted
+      ) return;
+      const failure = caught instanceof Error
+        ? `이름 예약 확인을 완료하지 못했습니다: ${caught.message}`
+        : "이름 예약 확인을 완료하지 못해 Vault 쓰기를 잠갔습니다.";
       setVaultNameMigrationStatus("blocked");
       setVaultNameCollisionTargetIds(new Set());
-      setAuditedServerReservationSignature(null);
-      setAuditedServerInventorySignature(null);
-      setError(caught instanceof Error
-        ? `이름 예약 검증을 완료하지 못했습니다: ${caught.message}`
-        : "이름 예약 검증을 완료하지 못해 Vault 쓰기를 잠갔습니다.");
+      setVaultNameMigrationFailure(failure);
+      setError(failure);
     }).finally(() => {
       if (vaultNameMigrationPromiseRef.current === pending) {
         vaultNameMigrationPromiseRef.current = null;
+      }
+      if (vaultIntegritySealAbortRef.current === controller) {
+        vaultIntegritySealAbortRef.current = null;
       }
     });
     vaultNameMigrationPromiseRef.current = pending;
   }, [
     isOnline,
     privateKey,
-    profile,
-    vaultIntegrityKey,
-    vaultNameMigrationStatus,
-    currentServerReservationSignature
+    preparedVaultIntegrityKey,
+    vaultIntegrityRetryAttempt,
+    vaultServerSubscriptionsReady
   ]);
 
   useEffect(() => {
-    if (vaultNameMigrationStatus !== "audited" || auditedServerInventorySignature === null) {
-      return undefined;
-    }
     if (
-      currentServerReservationSignature !== null
-      && currentServerReservationSignature === auditedServerReservationSignature
+      !isOnline
+      || !preparedVaultIntegrityKey
+      || vaultServerSubscriptionsReady
+      || (vaultNameMigrationStatus !== "waiting" && vaultNameMigrationStatus !== "ready")
     ) {
-      setVaultNameMigrationStatus("ready");
-      setStatus("암호화된 이름 예약을 서버에서 최종 확인했습니다.");
       return undefined;
     }
     const generation = vaultNameMigrationGenerationRef.current;
-    const retryTimer = window.setTimeout(() => {
+    const timeout = window.setTimeout(() => {
       if (
         vaultNameMigrationGenerationRef.current !== generation
-        || vaultNameMigrationStatus !== "audited"
+        || (vaultNameMigrationStatusRef.current !== "waiting"
+          && vaultNameMigrationStatusRef.current !== "ready")
       ) return;
-      vaultNameMigrationGenerationRef.current += 1;
-      vaultNameMigrationPromiseRef.current = null;
-      setVaultNameMigrationProgress(null);
-      setVaultNameCollisionTargetIds(new Set());
-      setAuditedServerReservationSignature(null);
-      setAuditedServerInventorySignature(null);
-      setVaultNameMigrationStatus("waiting");
-      setStatus("최종 확인 중 새 Vault 변경을 감지해 전체 inventory를 다시 검사합니다…");
-    }, 3_000);
-    return () => window.clearTimeout(retryTimer);
+      const failure = "서버의 전체 노트·폴더 목록을 확인하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해주세요.";
+      setVaultNameMigrationFailure(failure);
+      setVaultNameMigrationStatus("blocked");
+      setError(failure);
+    }, 30_000);
+    return () => window.clearTimeout(timeout);
   }, [
-    auditedServerInventorySignature,
-    auditedServerReservationSignature,
-    currentServerReservationSignature,
-    vaultNameMigrationStatus
-  ]);
-
-  useEffect(() => {
-    if (
-      vaultNameMigrationStatus === "ready"
-      && currentServerReservationSignature !== auditedServerReservationSignature
-    ) {
-      setVaultNameMigrationProgress(null);
-      setVaultNameCollisionTargetIds(new Set());
-      setAuditedServerReservationSignature(null);
-      setAuditedServerInventorySignature(null);
-      setVaultNameMigrationStatus("waiting");
-      setStatus("서버에서 Vault 변경을 감지해 이름 예약을 다시 확인합니다…");
-    }
-  }, [
-    auditedServerReservationSignature,
-    currentServerReservationSignature,
-    vaultNameMigrationStatus
+    isOnline,
+    preparedVaultIntegrityKey,
+    vaultNameMigrationStatus,
+    vaultServerSubscriptionsReady
   ]);
 
   function retryVaultNameMigration() {
-    if (vaultNameMigrationStatus === "running" || vaultNameMigrationStatus === "audited") return;
+    if (vaultNameMigrationStatus === "running" || vaultNameMigrationPromiseRef.current) return;
     vaultNameMigrationGenerationRef.current += 1;
-    vaultNameMigrationPromiseRef.current = null;
+    vaultIntegritySealAbortRef.current?.abort();
+    vaultIntegritySealAbortRef.current = null;
+    setVaultIntegrityKey(null);
+    setPreparedVaultIntegrityKey(null);
     setVaultNameMigrationProgress(null);
+    setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
-    setAuditedServerReservationSignature(null);
-    setAuditedServerInventorySignature(null);
-    setVaultNameMigrationStatus("waiting");
+    setNoteServerReservationSignature(null);
+    setFolderServerReservationSignature(null);
+    setVaultNameMigrationStatus(isOnline ? "checking" : "waiting");
+    setStatus("암호화된 이름 완료 상태를 다시 확인합니다…");
     setError(null);
+    setVaultIntegrityRetryAttempt((attempt) => attempt + 1);
   }
 
   function canMutateExistingNameTarget(entryId: string) {
@@ -8590,23 +8501,41 @@ function UnlockedVaultPage({
             <div><button onClick={() => setImportRecoveryOpen(true)} type="button">복구 패널 열기</button></div>
           </aside>
         ) : null}
-        {!workspaceConflict && !vaultNameWritesReady ? (
-          <aside aria-label="Vault 이름 무결성 준비" className="vault-workspace-conflict vault-name-migration" role="status">
+        {!workspaceConflict
+        && !vaultNameWritesReady
+        && (
+          !isOnline
+          || vaultNameMigrationStatus === "waiting"
+          || vaultNameMigrationStatus === "running"
+          || vaultNameMigrationStatus === "blocked"
+        ) ? (
+          <aside
+            aria-busy={vaultNameMigrationStatus === "running"}
+            aria-label="Vault 이름 무결성 준비"
+            className="vault-workspace-conflict vault-name-migration"
+            role={vaultNameMigrationStatus === "blocked" ? "alert" : "status"}
+          >
             <div>
               <strong>암호화된 이름 무결성 준비</strong>
               <p>
                 {!isOnline
-                  ? "온라인 연결 후 같은 폴더의 중복 이름을 안전하게 검사합니다. 그전까지 쓰기를 잠급니다."
-                  : vaultNameMigrationStatus === "running" || vaultNameMigrationStatus === "audited"
-                    ? `${vaultNameMigrationProgress?.completed ?? 0}/${vaultNameMigrationProgress?.total ?? 0}개 확인 중 · 제목 평문은 서버에 저장하지 않습니다.`
-                    : vaultNameCollisionLabels.length
+                  ? "온라인 연결을 기다리고 있습니다. 현재 편집 버퍼는 그대로 유지됩니다."
+                  : vaultNameMigrationStatus === "running"
+                    ? `${vaultNameMigrationProgress?.completed ?? 0}/${vaultNameMigrationProgress?.total ?? 0}개를 한 번만 확인 중입니다. 제목 평문은 서버에 저장하지 않습니다.`
+                    : vaultNameMigrationStatus === "blocked" && vaultNameCollisionLabels.length
                       ? `이름 또는 위치를 정리해야 합니다: ${vaultNameCollisionLabels.join(", ")}${vaultNameCollisionTargetIds.size > vaultNameCollisionLabels.length ? " 외" : ""}`
-                      : "검증을 완료하지 못해 생성·저장·가져오기를 잠갔습니다. 현재 편집 버퍼는 유지됩니다."
+                      : vaultNameMigrationStatus === "blocked"
+                        ? vaultNameMigrationFailure ?? "무결성 확인을 완료하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해주세요. 현재 편집 버퍼는 유지됩니다."
+                        : "처음 전환이 필요한 Vault만 서버의 전체 노트·폴더 목록을 한 번 확인합니다. 현재 편집 버퍼는 유지됩니다."
                 }
               </p>
             </div>
             {vaultNameMigrationStatus === "blocked" ? (
-              <div><button onClick={retryVaultNameMigration} type="button">정리 후 다시 확인</button></div>
+              <div>
+                <button onClick={retryVaultNameMigration} type="button">
+                  {vaultNameCollisionTargetIds.size ? "정리 후 다시 확인" : "다시 확인"}
+                </button>
+              </div>
             ) : null}
           </aside>
         ) : null}

@@ -20,6 +20,7 @@ import {
   updateDocumentWrite,
   verifySecureShareAppCheck
 } from "./_secure-share-common.js";
+import { logVaultApiRejection } from "./_vault-api-observability.js";
 import {
   VAULT_FOLDER_TREE_MAX_FOLDERS,
   VAULT_FOLDER_TREE_SCHEMA_VERSION,
@@ -33,6 +34,10 @@ import {
   vaultFolderTreeDocumentWrite,
   vaultFolderTreeMatchesFolders
 } from "./_vault-folder-tree.js";
+import {
+  integrityPath,
+  requireVaultIntegrityMarker
+} from "./_vault-integrity-marker.js";
 
 const maximumStoredFoldersPerOwner = 5_000;
 const claimPattern = /^[A-Za-z0-9_-]{43}$/u;
@@ -402,13 +407,14 @@ async function transactionState(context, uid, action, body) {
     ? assertParentId(body.parentId)
     : null;
   const claimId = body.nameClaim?.claimId;
-  const paths = [treePath(uid)];
+  const paths = [treePath(uid), integrityPath(uid)];
   if (folderId) paths.push(folderPath(folderId));
   if (typeof claimId === "string" && claimPattern.test(claimId)) paths.push(claimPath(uid, claimId));
   const { documents, transaction } = await firestoreBatchGetNewTransaction(context, paths);
   try {
     let offset = 0;
     const treeDocument = documents[offset++];
+    const integrityMarker = documents[offset++];
     const folder = folderId ? documents[offset++] : null;
     const requestedClaim = typeof claimId === "string" && claimPattern.test(claimId)
       ? documents[offset++]
@@ -426,6 +432,7 @@ async function transactionState(context, uid, action, body) {
       liveImportJob: null,
       liveImportJobLoaded: false,
       importJobs: new Map(),
+      integrityMarker,
       ownedFolders,
       parentId,
       requestedClaim,
@@ -908,6 +915,13 @@ async function performAction(context, uid, body) {
     if (action === "audit" || action === "bootstrap") {
       return await handleBootstrapOrAudit(context, uid, state, action);
     }
+    requireVaultIntegrityMarker(
+      state.integrityMarker,
+      uid,
+      action === "migrate" || action === "update" || action === "move"
+        ? "any"
+        : "ready"
+    );
     if (action === "create") return await handleCreate(context, uid, state, body);
     if (action === "migrate") return await handleMigrate(context, uid, state, body);
     if (action === "update" || action === "move") {
@@ -933,6 +947,7 @@ export const __vaultFolderTreeTesting = Object.freeze({
 
 export default async function handler(request, response) {
   const id = requestId();
+  let action = "unknown";
   applySecureResponseHeaders(response, id);
   try {
     requirePost(request);
@@ -945,6 +960,7 @@ export default async function handler(request, response) {
     }
     const user = await activeUserFromRequest(request, context);
     const body = await readJsonBody(request, 32 * 1024);
+    action = typeof body?.action === "string" ? body.action : "unknown";
     const result = await performAction(context, user.uid, body);
     jsonResponse(response, 200, {
       ok: true,
@@ -953,6 +969,13 @@ export default async function handler(request, response) {
       ...result
     });
   } catch (error) {
+    logVaultApiRejection({
+      action,
+      error,
+      requestId: id,
+      route: "/api/vault-folders",
+      supportedActions
+    });
     handleApiError(error, response, id);
   }
 }

@@ -95,9 +95,10 @@ const maximumVaultCutoverOwnedNotes = 20_000;
 
 /**
  * Returns a server-confirmed, owner-only cutover snapshot. Historical active
- * notes without `isDeleted` are normalized in awaited batches and then read
- * again from the server, preventing the active `isDeleted == false` query from
- * silently omitting them when the integrity marker is activated.
+ * notes without `isDeleted` remain visible in this one-time inventory so their
+ * revision-aware migration can normalize them. The browser deliberately does
+ * not repair them here: after marker activation those direct writes are denied,
+ * and the server cutover seal owns the final normalization and verification.
  */
 export interface OwnedVaultCutoverInventory {
   activeNotes: NoteSnapshot[];
@@ -122,21 +123,7 @@ export async function loadOwnedVaultCutoverInventory(
     }));
   };
 
-  let notes = await readOwned();
-  const missingActiveMetadata = notes.filter((note) => !hasDeletionMetadata(note) && visibleNote(note));
-  for (let index = 0; index < missingActiveMetadata.length; index += 450) {
-    const batch = writeBatch(db);
-    missingActiveMetadata.slice(index, index + 450).forEach((note) => {
-      batch.update(doc(db, "notes", note.id), { isDeleted: false });
-    });
-    await batch.commit();
-  }
-  if (missingActiveMetadata.length) {
-    notes = await readOwned();
-  }
-  if (notes.some((note) => !hasDeletionMetadata(note) && visibleNote(note))) {
-    throw new Error("기존 노트의 삭제 상태를 서버에서 확인하지 못했습니다.");
-  }
+  const notes = await readOwned();
   return {
     activeNotes: sortedByUpdatedAt(notes.filter(visibleNote)),
     deletedNotes: sortedByUpdatedAt(notes.filter(deletedNote))
@@ -756,13 +743,16 @@ function subscribeNotesByDeletedState(
   deleted: boolean,
   callback: (notes: NoteSnapshot[], metadata: ServerSnapshotMetadata) => void,
   onError?: (error: Error) => void,
-  maximumNotes?: number
+  maximumNotes?: number,
+  repairLegacyDeletionMetadata = true
 ) {
   const noteFilter = deleted ? deletedNote : visibleNote;
 
   if (ownerUids === null) {
     if (!deleted && maximumNotes) {
-      void migrateLegacyDeletionMetadata(uid, true);
+      if (repairLegacyDeletionMetadata) {
+        void migrateLegacyDeletionMetadata(uid, true);
+      }
       const boundedMaximum = Math.min(2_000, Math.max(1, Math.floor(maximumNotes)));
       let failed = false;
       const notesQuery = query(
@@ -812,7 +802,7 @@ function subscribeNotesByDeletedState(
           orderBy("updatedAt", "desc")
         );
 
-    if (!deleted) {
+    if (!deleted && repairLegacyDeletionMetadata) {
       void migrateLegacyDeletionMetadata(uid, true);
     }
 
@@ -847,7 +837,7 @@ function subscribeNotesByDeletedState(
   const failedOwners = new Set<string>();
   let closed = false;
 
-  if (!deleted) {
+  if (!deleted && repairLegacyDeletionMetadata) {
     void migrateLegacyDeletionMetadata(uid, false);
   }
 
@@ -918,9 +908,18 @@ export function subscribeVisibleNotes(
   ownerUids: string[] | null,
   callback: (notes: NoteSnapshot[], metadata: ServerSnapshotMetadata) => void,
   onError?: (error: Error) => void,
-  maximumNotes?: number
+  maximumNotes?: number,
+  options?: { repairLegacyDeletionMetadata?: boolean }
 ) {
-  return subscribeNotesByDeletedState(uid, ownerUids, false, callback, onError, maximumNotes);
+  return subscribeNotesByDeletedState(
+    uid,
+    ownerUids,
+    false,
+    callback,
+    onError,
+    maximumNotes,
+    options?.repairLegacyDeletionMetadata !== false
+  );
 }
 
 async function getVisibleNotesByIdsWithReader(

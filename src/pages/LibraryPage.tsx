@@ -1775,7 +1775,7 @@ export default function LibraryPage() {
       throw new LibraryVaultUserError("서버 상태를 확인할 수 있도록 온라인에서 Vault로 저장해주세요.");
     }
     const preparedIntegrity = await prepareVaultIntegrityKey(profile, privateKey);
-    if (preparedIntegrity.state !== "existing") {
+    if (preparedIntegrity.state !== "existing" || preparedIntegrity.cutoverState !== "ready") {
       throw new LibraryVaultUserError("먼저 Vault를 한 번 열어 기존 노트와 폴더의 암호화 이름 준비를 완료해주세요.");
     }
     await assertLibraryVaultPromotionReady({

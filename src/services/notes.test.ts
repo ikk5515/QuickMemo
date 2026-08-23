@@ -243,7 +243,7 @@ describe("revision-aware note persistence", () => {
     })).toBe(false);
   });
 
-  it("normalizes missing legacy deletion metadata before returning a server-confirmed owner cutover snapshot", async () => {
+  it("keeps missing legacy deletion metadata in the cutover inventory without a browser write", async () => {
     const legacy = {
       id: "legacy-active",
       ownerUid: "user-a",
@@ -251,30 +251,19 @@ describe("revision-aware note persistence", () => {
       secureShareCopyState: undefined,
       isPurged: false
     };
-    const normalized = { ...legacy, isDeleted: false };
-    mocks.getDocsFromServer
-      .mockResolvedValueOnce({
-        docs: [{
-          id: legacy.id,
-          data: () => Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== "id"))
-        }]
-      })
-      .mockResolvedValueOnce({
-        docs: [{
-          id: normalized.id,
-          data: () => Object.fromEntries(Object.entries(normalized).filter(([key]) => key !== "id"))
-        }]
-      });
+    mocks.getDocsFromServer.mockResolvedValueOnce({
+      docs: [{
+        id: legacy.id,
+        data: () => Object.fromEntries(Object.entries(legacy).filter(([key]) => key !== "id"))
+      }]
+    });
 
     await expect(loadOwnedVaultCutoverNotes("user-a")).resolves.toEqual([
-      expect.objectContaining({ id: "legacy-active", isDeleted: false })
+      expect.objectContaining({ id: "legacy-active" })
     ]);
-    expect(mocks.batch.update).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "legacy-active" }),
-      { isDeleted: false }
-    );
-    expect(mocks.batch.commit).toHaveBeenCalledOnce();
-    expect(mocks.getDocsFromServer).toHaveBeenCalledTimes(2);
+    expect(mocks.batch.update).not.toHaveBeenCalled();
+    expect(mocks.batch.commit).not.toHaveBeenCalled();
+    expect(mocks.getDocsFromServer).toHaveBeenCalledOnce();
   });
 
   it("returns a bounded server inventory split into active and deleted notes", async () => {
@@ -1924,6 +1913,22 @@ describe("bounded library note reads", () => {
       [expect.objectContaining({ id: "note-a-next" })],
       { fromCache: false, hasPendingWrites: false, serverComplete: false }
     );
+  });
+
+  it("skips the legacy deletion scan for the server-sealed Vault subscription", async () => {
+    subscribeVisibleNotes(
+      "sealed-owner",
+      ["sealed-owner"],
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      { repairLegacyDeletionMetadata: false }
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mocks.getDocs).not.toHaveBeenCalled();
+    expect(mocks.updateDoc).not.toHaveBeenCalled();
+    expect(mocks.onSnapshot).toHaveBeenCalledOnce();
   });
 
   it("paginates owner-safe legacy normalization beyond the visible-note limit", async () => {

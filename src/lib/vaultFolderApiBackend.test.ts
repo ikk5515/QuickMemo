@@ -28,6 +28,35 @@ function treeDocument(folders: unknown[] = []) {
   };
 }
 
+function integrityDocument(state: "legacy" | "pending" | "ready" = "ready") {
+  return {
+    fields: {
+      createdAt: { timestampValue: timestamp.toISOString() },
+      indexVersion: { integerValue: "1" },
+      ownerUid: { stringValue: uid },
+      updatedAt: { timestampValue: timestamp.toISOString() },
+      wrappedKey: {
+        mapValue: {
+          fields: {
+            algorithm: { stringValue: "RSA-OAEP" },
+            version: { integerValue: "1" },
+            wrappedKey: { stringValue: "wrapped-integrity-key" }
+          }
+        }
+      },
+      ...(state === "legacy" ? {} : {
+        cutoverState: { stringValue: state },
+        cutoverVersion: { integerValue: "1" }
+      }),
+      ...(state === "ready" ? {
+        verifiedAt: { timestampValue: timestamp.toISOString() }
+      } : {})
+    },
+    name: documentName(`vaultIntegrity/${uid}`),
+    updateTime: timestamp.toISOString()
+  };
+}
+
 function json(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     headers: { "content-type": "application/json" },
@@ -116,6 +145,7 @@ describe("Vault folder server transaction boundary", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json([
         { found: treeDocument(), transaction },
+        { found: integrityDocument("ready") },
         { missing: `projects/${projectId}/databases/(default)/documents/noteFolders/folder-a` },
         { missing: `projects/${projectId}/databases/(default)/documents/vaultIntegrity/${uid}/nameClaims/${"C".repeat(43)}` }
       ]))
@@ -144,6 +174,7 @@ describe("Vault folder server transaction boundary", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json([
         { found: treeDocument(), transaction },
+        { found: integrityDocument("ready") },
         { missing: `projects/${projectId}/databases/(default)/documents/noteFolders/folder-a` },
         {
           found: {
@@ -173,6 +204,7 @@ describe("Vault folder server transaction boundary", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json([
         { found: malformedTree, transaction },
+        { found: integrityDocument("ready") },
         { missing: `projects/${projectId}/databases/(default)/documents/noteFolders/folder-a` },
         { missing: `projects/${projectId}/databases/(default)/documents/vaultIntegrity/${uid}/nameClaims/${"C".repeat(43)}` }
       ]))
@@ -189,6 +221,7 @@ describe("Vault folder server transaction boundary", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json([
         { found: treeDocument(), transaction },
+        { found: integrityDocument("ready") },
         { missing: `projects/${projectId}/databases/(default)/documents/noteFolders/folder-a` },
         { missing: `projects/${projectId}/databases/(default)/documents/vaultIntegrity/${uid}/nameClaims/${"C".repeat(43)}` }
       ]))
@@ -220,6 +253,7 @@ describe("Vault folder server transaction boundary", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json([
         { found: treeDocument([importedParent]), transaction },
+        { found: integrityDocument("pending") },
         {
           found: {
             fields: {
@@ -285,6 +319,7 @@ describe("Vault folder server transaction boundary", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json([
         { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+        { found: integrityDocument("ready") },
         { found: ordinaryFolderDocument() },
         { missing: documentName(`vaultIntegrity/${uid}/nameClaims/${"C".repeat(43)}`) }
       ]))
@@ -312,6 +347,7 @@ describe("Vault folder server transaction boundary", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(json([
         { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+        { found: integrityDocument("ready") },
         { found: ordinaryFolderDocument() },
         { missing: documentName(`vaultIntegrity/${uid}/nameClaims/${"C".repeat(43)}`) }
       ]))
