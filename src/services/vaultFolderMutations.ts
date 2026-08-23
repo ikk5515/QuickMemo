@@ -16,6 +16,11 @@ export interface VaultFolderMutationResult {
   treeRevision: number;
 }
 
+type CutoverLeasePayload = {
+  leaseGeneration?: string;
+  leaseId?: string;
+};
+
 type CreatePayload = {
   action: "create";
   color: string;
@@ -28,7 +33,7 @@ type CreatePayload = {
   wrappedKey: WrappedNoteKey;
 };
 
-type UpdatePayload = {
+type UpdatePayload = CutoverLeasePayload & {
   action: "move" | "update";
   encryptedName?: EncryptedPayload;
   expectedRevision: number;
@@ -38,7 +43,35 @@ type UpdatePayload = {
   parentId?: string | null;
 };
 
-type MigratePayload = {
+type ResolveCollisionPayloadBase = CutoverLeasePayload & {
+  action: "resolve-collision";
+  expectedRevision: number;
+  folderId: string;
+  nameClaim: VaultFolderNameClaimInput;
+};
+
+type ResolveEncryptedCollisionPayload = ResolveCollisionPayloadBase & (
+  | { encryptedName: EncryptedPayload; parentId?: string | null }
+  | { encryptedName?: EncryptedPayload; parentId: string | null }
+);
+
+type ResolveLegacyCollisionPayload = {
+  action: "resolve-collision";
+  color: string;
+  encryptedName: EncryptedPayload;
+  expectedName: string;
+  folderId: string;
+  nameClaim: VaultFolderNameClaimInput;
+  order: number;
+  parentId: string | null;
+  wrappedKey: WrappedNoteKey;
+};
+
+type ResolveCollisionPayload =
+  | ResolveEncryptedCollisionPayload
+  | ResolveLegacyCollisionPayload;
+
+type MigratePayload = CutoverLeasePayload & {
   action: "migrate";
   color: string;
   encryptedName: EncryptedPayload;
@@ -63,6 +96,7 @@ export type VaultFolderApiPayload =
   | LifecyclePayload
   | MaintenancePayload
   | MigratePayload
+  | ResolveCollisionPayload
   | UpdatePayload;
 
 export class VaultFolderApiError extends Error {
@@ -89,6 +123,63 @@ const readyTreeRequests = new Map<string, Promise<{
   schemaVersion: 1;
   status: "created" | "ready";
 }>>();
+
+const maximumFolderCount = 2_000;
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isIntegerInRange(value: unknown, minimum: number, maximum: number) {
+  return Number.isSafeInteger(value)
+    && Number(value) >= minimum
+    && Number(value) <= maximum;
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]) {
+  const actual = Object.keys(value).sort();
+  const canonicalExpected = [...expected].sort();
+  return actual.length === canonicalExpected.length
+    && actual.every((key, index) => key === canonicalExpected[index]);
+}
+
+function validVaultFolderSuccess(
+  body: unknown,
+  payload: VaultFolderApiPayload
+): body is Record<string, unknown> {
+  if (
+    !isJsonObject(body)
+    || body.ok !== true
+    || body.schemaVersion !== 1
+    || body.maximumFolderCount !== maximumFolderCount
+  ) {
+    return false;
+  }
+  if (payload.action === "bootstrap") {
+    return hasExactKeys(body, [
+      "folderCount", "maximumFolderCount", "ok", "revision", "schemaVersion", "status"
+    ])
+      && isIntegerInRange(body.folderCount, 0, maximumFolderCount)
+      && isIntegerInRange(body.revision, 0, 999_999_999_999)
+      && (body.status === "created" || body.status === "ready");
+  }
+  if (payload.action === "audit") {
+    return hasExactKeys(body, [
+      "folderCount", "matches", "maximumFolderCount", "ok", "revision", "schemaVersion", "status"
+    ])
+      && isIntegerInRange(body.folderCount, 0, maximumFolderCount)
+      && typeof body.matches === "boolean"
+      && isIntegerInRange(body.revision, 0, 999_999_999_999)
+      && (body.status === "missing" || body.status === "ok" || body.status === "stale");
+  }
+  return hasExactKeys(body, [
+    "folderId", "maximumFolderCount", "ok", "revision", "schemaVersion", "treeRevision"
+  ])
+    && "folderId" in payload
+    && body.folderId === payload.folderId
+    && isIntegerInRange(body.revision, 1, 999_999_999_999)
+    && isIntegerInRange(body.treeRevision, 1, 999_999_999_999);
+}
 
 async function bestEffortAppCheckToken() {
   if (!appCheck) return null;
@@ -143,12 +234,15 @@ export async function vaultFolderApiRequest<T>(
   } catch {
     throw new VaultFolderApiError("invalid_response", response.status);
   }
-  if (!response.ok || !body || typeof body !== "object") {
-    const code = body && typeof body === "object" && "error" in body
+  if (!response.ok) {
+    const code = isJsonObject(body) && typeof body.error === "string"
       && typeof body.error === "string"
       ? body.error
       : "request_failed";
     throw new VaultFolderApiError(code, response.status);
+  }
+  if (!validVaultFolderSuccess(body, payload)) {
+    throw new VaultFolderApiError("invalid_response", response.status);
   }
   return body as T;
 }
@@ -187,7 +281,8 @@ export async function auditVaultFolderTreeServer(ownerUid: string) {
 
 export async function mutateVaultFolder(
   ownerUid: string,
-  payload: Exclude<VaultFolderApiPayload, MaintenancePayload>
+  payload: Exclude<VaultFolderApiPayload, MaintenancePayload>,
+  signal?: AbortSignal
 ) {
-  return vaultFolderApiRequest<VaultFolderMutationResult>(ownerUid, payload);
+  return vaultFolderApiRequest<VaultFolderMutationResult>(ownerUid, payload, signal);
 }

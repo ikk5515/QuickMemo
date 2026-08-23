@@ -5,12 +5,15 @@ import {
   migrateLegacyVaultFolder,
   vaultEntryStorageIdentityState
 } from "./vaultData";
+import { resolveVaultFolderNameCollision } from "./vaultFolderCollisionRecovery";
 import { vaultNameFingerprint } from "./vaultIntegrity";
 
 const mocks = vi.hoisted(() => ({
   encryptText: vi.fn(),
   generateNoteKey: vi.fn(),
   migrateLegacyNoteFolder: vi.fn(),
+  resolveEncryptedNoteFolderCollision: vi.fn(),
+  resolveLegacyNoteFolderCollision: vi.fn(),
   unwrapNoteKey: vi.fn(),
   wrapNoteKey: vi.fn()
 }));
@@ -27,6 +30,8 @@ vi.mock("../../lib/crypto", async (importOriginal) => ({
 vi.mock("../../services/notes", () => ({
   createEncryptedNoteFolder: vi.fn(),
   migrateLegacyNoteFolder: mocks.migrateLegacyNoteFolder,
+  resolveEncryptedNoteFolderCollision: mocks.resolveEncryptedNoteFolderCollision,
+  resolveLegacyNoteFolderCollision: mocks.resolveLegacyNoteFolderCollision,
   updateEncryptedNoteFolder: vi.fn()
 }));
 
@@ -49,6 +54,9 @@ describe("Vault folder persistence", () => {
     mocks.encryptText.mockResolvedValue(encryptedName);
     mocks.wrapNoteKey.mockResolvedValue(wrappedKey);
     mocks.migrateLegacyNoteFolder.mockResolvedValue({ folderId: "child", revision: 1 });
+    mocks.resolveEncryptedNoteFolderCollision.mockResolvedValue({ folderId: "duplicate", revision: 2 });
+    mocks.resolveLegacyNoteFolderCollision.mockResolvedValue({ folderId: "duplicate", revision: 1 });
+    mocks.unwrapNoteKey.mockResolvedValue({ kind: "folder-key" } as unknown as CryptoKey);
   });
 
   it("preserves a nested legacy folder parent in both its blinded claim and migration transaction", async () => {
@@ -118,7 +126,7 @@ describe("Vault folder persistence", () => {
     );
 
     expect(mocks.encryptText).toHaveBeenCalledWith("Project archive", expect.anything());
-    expect(mocks.migrateLegacyNoteFolder).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.resolveLegacyNoteFolderCollision).toHaveBeenCalledWith(expect.objectContaining({
       encryptedName,
       expectedName: "Project",
       folderId: "duplicate",
@@ -129,6 +137,79 @@ describe("Vault folder persistence", () => {
         parentId: "archive"
       }
     }));
+  });
+
+  it("resolves an encrypted folder collision through the dedicated atomic mutation", async () => {
+    const vaultIntegrityKey = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+    const expectedClaimId = await vaultNameFingerprint(vaultIntegrityKey, {
+      name: "Project archive",
+      parentId: "archive",
+      targetType: "folder"
+    });
+
+    await resolveVaultFolderNameCollision({
+      color: "#7c5cff",
+      displayName: "Project",
+      encryptedName,
+      id: "duplicate",
+      name: "암호화 폴더",
+      order: 3,
+      ownerUid: "user-a",
+      parentId: null,
+      revision: 1,
+      wrappedKey
+    }, { publicKeyJwk: {}, uid: "user-a" }, { kind: "private" } as unknown as CryptoKey, vaultIntegrityKey, {
+      name: " Project archive ",
+      parentId: "archive"
+    });
+
+    expect(mocks.resolveEncryptedNoteFolderCollision).toHaveBeenCalledWith({
+      encryptedName,
+      expectedRevision: 1,
+      folderId: "duplicate",
+      nameClaim: {
+        claimId: expectedClaimId,
+        indexVersion: 1,
+        parentId: "archive"
+      },
+      ownerUid: "user-a",
+      parentId: "archive"
+    });
+  });
+
+  it("routes a deferred legacy folder collision through atomic encryption migration", async () => {
+    const vaultIntegrityKey = await crypto.subtle.generateKey(
+      { name: "AES-GCM", length: 256 },
+      true,
+      ["encrypt", "decrypt"]
+    );
+
+    await resolveVaultFolderNameCollision({
+      color: "#7c5cff",
+      displayName: "Project",
+      id: "legacy-duplicate",
+      name: "Project",
+      order: 7,
+      ownerUid: "user-a",
+      parentId: null
+    }, { publicKeyJwk: { kty: "RSA" }, uid: "user-a" },
+    { kind: "private" } as unknown as CryptoKey, vaultIntegrityKey, {
+      name: "Project archive",
+      parentId: "archive"
+    });
+
+    expect(mocks.resolveLegacyNoteFolderCollision).toHaveBeenCalledWith(expect.objectContaining({
+      expectedName: "Project",
+      folderId: "legacy-duplicate",
+      order: 7,
+      parentId: "archive"
+    }));
+    expect(mocks.migrateLegacyNoteFolder).not.toHaveBeenCalled();
+    expect(mocks.resolveEncryptedNoteFolderCollision).not.toHaveBeenCalled();
   });
 
   it("marks an encrypted folder decryption failure so migration cannot fingerprint placeholder text", async () => {

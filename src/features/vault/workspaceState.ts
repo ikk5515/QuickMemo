@@ -84,7 +84,7 @@ export interface VaultWorkspaceLayoutSnapshot {
   activeTabGroupId: PersistedVaultTabGroupId;
   layout: VaultWorkspacePaneNode;
   left: { open: boolean; mode: VaultLeftPanelMode };
-  right: { open: boolean; mode: VaultRightPanelMode };
+  right: { open: boolean; mode: VaultRightPanelMode; width: number };
   selectedFolderId: string | null;
   expandedFolderIds: string[];
   searchQuery: string;
@@ -116,6 +116,11 @@ export interface PersistedNamedWorkspace {
 
 export const MAX_VAULT_BOOKMARKS = 64;
 export const MAX_NAMED_WORKSPACES = 32;
+export const DEFAULT_VAULT_RIGHT_PANEL_WIDTH = 310;
+export const MIN_VAULT_RIGHT_PANEL_WIDTH = 250;
+export const MAX_VAULT_RIGHT_PANEL_WIDTH = 480;
+const VAULT_RIBBON_WIDTH = 44;
+const MIN_VAULT_EDITOR_WIDTH = 280;
 export const MAX_NAMED_WORKSPACE_SNAPSHOT_SERIALIZED_BYTES = 12_000;
 export const MAX_NAMED_WORKSPACES_SERIALIZED_BYTES = 300_000;
 // AES payloads are base64 encoded before Firestore storage. Keeping the UTF-8
@@ -131,7 +136,7 @@ export interface VaultPersistedWorkspaceState {
   activeTabGroupId: PersistedVaultTabGroupId;
   layout: VaultWorkspacePaneNode;
   left: { open: boolean; mode: VaultLeftPanelMode };
-  right: { open: boolean; mode: VaultRightPanelMode };
+  right: { open: boolean; mode: VaultRightPanelMode; width: number };
   selectedFolderId: string | null;
   expandedFolderIds: string[];
   searchQuery: string;
@@ -196,6 +201,56 @@ export async function flushLatestWorkspaceState<TState>({
 const defaultViewport: GraphViewport = { centerX: 0, centerY: 0, zoom: 1 };
 const graphSections = new Set<GraphSettingsSectionId>(["filters", "groups", "display", "forces", "local"]);
 const workspaceTextEncoder = new TextEncoder();
+
+export function clampVaultRightPanelWidth(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_VAULT_RIGHT_PANEL_WIDTH;
+  }
+  return Math.round(Math.min(
+    MAX_VAULT_RIGHT_PANEL_WIDTH,
+    Math.max(MIN_VAULT_RIGHT_PANEL_WIDTH, value)
+  ));
+}
+
+/**
+ * Keep a usable editor column while both desktop sidebars are visible. The
+ * left panel widths mirror the desktop CSS breakpoints. Stored workspace
+ * width remains independent, so widening the browser restores the preferred
+ * panel width instead of permanently shrinking the encrypted preference.
+ */
+export function maxVaultRightPanelWidthForViewport(
+  viewportWidth: number,
+  leftPanelOpen: boolean
+): number {
+  if (!Number.isFinite(viewportWidth) || viewportWidth <= 760) {
+    return MAX_VAULT_RIGHT_PANEL_WIDTH;
+  }
+  const leftPanelWidth = !leftPanelOpen
+    ? 0
+    : viewportWidth <= 900
+      ? 170
+      : viewportWidth <= 1_180
+        ? 230
+        : 260;
+  return Math.round(Math.min(
+    MAX_VAULT_RIGHT_PANEL_WIDTH,
+    Math.max(
+      MIN_VAULT_RIGHT_PANEL_WIDTH,
+      viewportWidth - VAULT_RIBBON_WIDTH - leftPanelWidth - MIN_VAULT_EDITOR_WIDTH
+    )
+  ));
+}
+
+export function clampVaultRightPanelWidthForViewport(
+  value: unknown,
+  viewportWidth: number,
+  leftPanelOpen: boolean
+): number {
+  return Math.min(
+    clampVaultRightPanelWidth(value),
+    maxVaultRightPanelWidthForViewport(viewportWidth, leftPanelOpen)
+  );
+}
 
 function serializedUtf8Bytes(value: unknown) {
   return workspaceTextEncoder.encode(JSON.stringify(value)).byteLength;
@@ -653,7 +708,8 @@ function normalizedWorkspaceLayout(value: unknown): VaultWorkspaceLayoutSnapshot
     },
     right: {
       open: booleanOr(right.open, fallback.right.open),
-      mode: normalizePanelMode(right.mode, ["backlinks", "outgoing", "properties", "outline", "local-graph", "history"], fallback.right.mode)
+      mode: normalizePanelMode(right.mode, ["backlinks", "outgoing", "properties", "outline", "local-graph", "history"], fallback.right.mode),
+      width: clampVaultRightPanelWidth(right.width)
     },
     selectedFolderId,
     expandedFolderIds,
@@ -858,7 +914,7 @@ export function createDefaultVaultWorkspaceState(): VaultPersistedWorkspaceState
     activeTabGroupId: "primary",
     layout: createDefaultWorkspaceLayout(),
     left: { open: true, mode: "files" },
-    right: { open: true, mode: "backlinks" },
+    right: { open: true, mode: "backlinks", width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH },
     selectedFolderId: null,
     expandedFolderIds: [],
     searchQuery: "",
@@ -939,7 +995,8 @@ export function normalizeVaultWorkspaceState(value: unknown): VaultPersistedWork
     },
     right: {
       open: booleanOr(right.open, fallback.right.open),
-      mode: normalizePanelMode(right.mode, ["backlinks", "outgoing", "properties", "outline", "local-graph", "history"], fallback.right.mode)
+      mode: normalizePanelMode(right.mode, ["backlinks", "outgoing", "properties", "outline", "local-graph", "history"], fallback.right.mode),
+      width: clampVaultRightPanelWidth(right.width)
     },
     selectedFolderId,
     expandedFolderIds,

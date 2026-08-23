@@ -1,4 +1,8 @@
-import { HttpError } from "./_secure-share-common.js";
+import {
+  HttpError,
+  constantTimeStringEqual,
+  sha256Digest
+} from "./_secure-share-common.js";
 
 export const VAULT_CUTOVER_VERSION = 1;
 export const VAULT_INTEGRITY_STATES = Object.freeze({
@@ -18,6 +22,17 @@ const pendingMarkerKeys = Object.freeze([
   "cutoverState",
   "cutoverVersion"
 ].sort());
+export const VAULT_CUTOVER_LEASE_FIELD_PATHS = Object.freeze([
+  "cutoverLeaseAcquiredAt",
+  "cutoverLeaseExpiresAt",
+  "cutoverLeaseGeneration",
+  "cutoverLeaseHash",
+  "cutoverLeaseVersion"
+]);
+const leasedPendingMarkerKeys = Object.freeze([
+  ...pendingMarkerKeys,
+  ...VAULT_CUTOVER_LEASE_FIELD_PATHS
+].sort());
 const readyMarkerKeys = Object.freeze([
   ...pendingMarkerKeys,
   "verifiedAt"
@@ -35,6 +50,42 @@ function exactKeys(value, expected) {
 
 function validTimestamp(value) {
   return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function validOpaqueDigest(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/u.test(value);
+}
+
+export function vaultCutoverLeaseCredential(leaseId, leaseGeneration) {
+  if (!validOpaqueDigest(leaseId) || !validOpaqueDigest(leaseGeneration)) {
+    throw new HttpError(400, "invalid_request", "Invalid Vault cutover lease credential");
+  }
+  return { generation: leaseGeneration, hash: sha256Digest(leaseId) };
+}
+
+function parsedLease(marker) {
+  if (
+    marker.cutoverLeaseVersion !== 1
+    || !validOpaqueDigest(marker.cutoverLeaseHash)
+    || !validOpaqueDigest(marker.cutoverLeaseGeneration)
+    || !validTimestamp(marker.cutoverLeaseAcquiredAt)
+    || !validTimestamp(marker.cutoverLeaseExpiresAt)
+  ) return null;
+  const acquiredAt = Date.parse(marker.cutoverLeaseAcquiredAt);
+  const updatedAt = Date.parse(marker.updatedAt);
+  const expiresAt = Date.parse(marker.cutoverLeaseExpiresAt);
+  if (
+    acquiredAt > updatedAt
+    || updatedAt >= expiresAt
+    || expiresAt - updatedAt > 95_000
+  ) return null;
+  return {
+    acquiredAt: marker.cutoverLeaseAcquiredAt,
+    expiresAt,
+    generation: marker.cutoverLeaseGeneration,
+    hash: marker.cutoverLeaseHash,
+    version: 1
+  };
 }
 
 function validWrappedKey(value) {
@@ -93,6 +144,21 @@ export function parseVaultIntegrityMarker(marker, uid) {
     return { document: marker, legacy: false, state: VAULT_INTEGRITY_STATES.pending };
   }
   if (
+    exactKeys(marker, leasedPendingMarkerKeys)
+    && marker.cutoverState === VAULT_INTEGRITY_STATES.pending
+    && marker.cutoverVersion === VAULT_CUTOVER_VERSION
+  ) {
+    const lease = parsedLease(marker);
+    if (lease) {
+      return {
+        document: marker,
+        lease,
+        legacy: false,
+        state: VAULT_INTEGRITY_STATES.pending
+      };
+    }
+  }
+  if (
     exactKeys(marker, readyMarkerKeys)
     && marker.cutoverState === VAULT_INTEGRITY_STATES.ready
     && marker.cutoverVersion === VAULT_CUTOVER_VERSION
@@ -106,6 +172,40 @@ export function parseVaultIntegrityMarker(marker, uid) {
     "Stored Vault integrity attestation is invalid",
     { expose: false }
   );
+}
+
+export function requireVaultCutoverLease(
+  marker,
+  uid,
+  credential,
+  nowMilliseconds = Date.now()
+) {
+  const parsed = requireVaultIntegrityMarker(marker, uid, "pending");
+  if (
+    !credential
+    || !validOpaqueDigest(credential.hash)
+    || !validOpaqueDigest(credential.generation)
+  ) {
+    throw new HttpError(400, "invalid_request", "Invalid Vault cutover lease credential");
+  }
+  const lease = parsed.lease ?? null;
+  if (
+    !lease
+    || lease.expiresAt <= nowMilliseconds
+    || !constantTimeStringEqual(lease.hash, credential.hash)
+    || !constantTimeStringEqual(lease.generation, credential.generation)
+  ) {
+    const retryAfter = lease && lease.expiresAt > nowMilliseconds
+      ? Math.min(30, Math.max(1, Math.ceil((lease.expiresAt - nowMilliseconds) / 1_000)))
+      : 1;
+    throw new HttpError(
+      409,
+      "vault_cutover_busy",
+      "Another Vault cutover operation owns the lease",
+      { retryAfter }
+    );
+  }
+  return parsed;
 }
 
 export function requireVaultIntegrityMarker(marker, uid, requirement = "any") {

@@ -6,10 +6,10 @@ import {
   createEncryptedVaultEntry,
   createMarkdownVaultNote,
   migrateLegacyVaultEntryIdentity,
-  resolveVaultEntryNameCollision,
   saveAndMoveEncryptedVaultEntry,
   saveEncryptedVaultEntry
 } from "./vaultPersistence";
+import { resolveVaultEntryNameCollision } from "./vaultEntryCollisionRecovery";
 
 const mocks = vi.hoisted(() => ({
   backfillRevisionedVaultNameClaim: vi.fn(),
@@ -521,6 +521,33 @@ describe("vaultPersistence encrypted revision contract", () => {
       folderId: "different-folder",
       title: shared.title
     })).rejects.toThrow("공유 노트는 폴더로 이동");
+  });
+
+  it("renames a historical shared collision and moves it to Vault root atomically", async () => {
+    const shared = markdownNote({
+      body: "unsaved local draft must not replace ciphertext",
+      folderId: "legacy-folder",
+      participantUids: ["user-a", "user-b"],
+      type: "shared",
+      vaultNameClaimId: undefined,
+      vaultNameIndexVersion: undefined,
+      wrappedKeys: { "user-a": wrappedKey, "user-b": wrappedKey }
+    });
+
+    await resolveVaultEntryNameCollision(shared, "user-a", privateKey, vaultIntegrityKey, {
+      folderId: null,
+      title: "Recovered shared"
+    });
+
+    expect(mocks.resolveRevisionedVaultNameCollision).toHaveBeenCalledWith(expect.objectContaining({
+      changedFields: ["title", "folder", "name-claim"],
+      folderId: null,
+      nameClaim: expect.objectContaining({ parentId: null }),
+      noteId: shared.id
+    }));
+    const recovery = mocks.resolveRevisionedVaultNameCollision.mock.calls[0][0];
+    expect(recovery).not.toHaveProperty("encryptedBody");
+    expect(recovery).not.toHaveProperty("historySnapshot");
   });
 
   it("repairs a missing reservation document even when the deterministic claim metadata is unchanged", async () => {

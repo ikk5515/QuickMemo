@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const vaultPageSource = readFileSync(join(process.cwd(), "src/pages/VaultPage.tsx"), "utf8");
+const vaultTrashDialogSource = readFileSync(
+  join(process.cwd(), "src/features/vault/VaultTrashDialog.tsx"),
+  "utf8"
+);
 
 describe("VaultPage security boundaries", () => {
   it("routes asset embeds through the signature-checked Blob preview instead of rendering asset JSON", () => {
@@ -110,12 +114,13 @@ describe("VaultPage security boundaries", () => {
     expect(vaultPageSource).toContain("legacyDeletedNoteIds: preflight.legacyDeletedNoteIds");
   });
 
-  it("uses a ready marker as an O(1) fast path and seals a pending Vault after one owner inventory", () => {
-    expect(vaultPageSource.match(/loadOwnedVaultCutoverInventory\(/gu)?.length ?? 0).toBe(1);
+  it("uses a ready marker as an O(1) fast path and refreshes pending inventory after reconciliation", () => {
+    expect(vaultPageSource.match(/loadOwnedVaultCutoverInventory\(/gu)?.length ?? 0).toBe(2);
     expect(vaultPageSource).toContain('if (prepared.cutoverState === "ready")');
     expect(vaultPageSource).toContain("setVaultIntegrityKey(prepared.key)");
     expect(vaultPageSource).toContain('|| preparedVaultIntegrityKey.cutoverState === "ready"');
     expect(vaultPageSource).toContain("const inventory = await loadOwnedVaultCutoverInventory(currentProfile.uid)");
+    expect(vaultPageSource).toContain("const candidateInventory = await loadOwnedVaultCutoverInventory(currentProfile.uid)");
 
     const slowPath = vaultPageSource.match(
       /const pending = \(async \(\) => \{[\s\S]*?vaultNameMigrationPromiseRef\.current = pending;/u
@@ -123,8 +128,10 @@ describe("VaultPage security boundaries", () => {
     expect(slowPath).toContain("activeNotes: inventory.activeNotes");
     expect(slowPath).toContain("deletedNotes: inventory.deletedNotes");
     expect(slowPath.indexOf("preflightVaultNameCutover({")).toBeLessThan(
-      slowPath.indexOf("activatePreparedVaultIntegrityKey(preparedVaultIntegrityKey")
+      slowPath.indexOf("const activated = await activatePreparedVaultIntegrityKey(")
     );
+    expect(slowPath.indexOf("const initialReconciledClaimCount"))
+      .toBeLessThan(slowPath.indexOf("const inventory = await loadOwnedVaultCutoverInventory"));
     expect(slowPath.indexOf("await migrateVaultNameReservations({")).toBeLessThan(
       slowPath.indexOf("await sealVaultIntegrityCutover(currentProfile.uid")
     );
@@ -147,6 +154,10 @@ describe("VaultPage security boundaries", () => {
     expect(retry).toContain("setFolderServerReservationSignature(null)");
     expect(retry).not.toContain("setDrafts(");
     expect(retry).not.toContain("clearVaultPlaintextForAccessScope");
+    expect(vaultPageSource).toContain("cancelledWhileCurrent");
+    expect(vaultPageSource).toContain("vaultIntegritySealAbortRef.current === controller");
+    expect(vaultPageSource).toContain("controller.abort();");
+    expect(vaultPageSource).toContain("setVaultNameMigrationResumeAttempt((attempt) => attempt + 1)");
   });
 
   it("does not flash the migration warning during the normal marker fast path", () => {
@@ -168,8 +179,9 @@ describe("VaultPage security boundaries", () => {
     expect(vaultPageSource).toContain("claimId: await vaultNameFingerprint");
     expect(vaultPageSource).toContain("await restoreRevisionedNote({");
     expect(vaultPageSource).toContain("expectedRevision: note.revision ?? 0,\n        nameClaim,");
-    expect(vaultPageSource).toContain("<VaultTrashDialog");
-    expect(vaultPageSource).toContain('aria-label="Vault 휴지통"');
+    expect(vaultPageSource).toContain("<LazyVaultTrashDialog");
+    expect(vaultTrashDialogSource).toContain("aria-labelledby={titleId}");
+    expect(vaultTrashDialogSource).toContain("<h2 id={titleId}>Vault 휴지통</h2>");
     expect(vaultPageSource).not.toContain("기존 노트 관리의 휴지통에서 복구");
   });
 

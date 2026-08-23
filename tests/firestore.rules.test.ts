@@ -3417,7 +3417,12 @@ describeRules("firestore security rules", () => {
 
   it("allows an explicit pending Vault marker but reserves the ready seal for the server", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      for (const uid of ["pending-marker-user", "ready-marker-user", "partial-marker-user"]) {
+      for (const uid of [
+        "pending-marker-user",
+        "ready-marker-user",
+        "partial-marker-user",
+        "leased-marker-user"
+      ]) {
         await setDoc(doc(context.firestore(), `users/${uid}`), userProfile(uid));
       }
     });
@@ -3473,6 +3478,23 @@ describeRules("firestore security rules", () => {
       indexVersion: 1,
       wrappedKey: ownerWrappedShareKey,
       cutoverState: "pending",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+
+    const leasedUid = "leased-marker-user";
+    const leasedDb = testEnv.authenticatedContext(leasedUid).firestore();
+    await assertFails(setDoc(doc(leasedDb, `vaultIntegrity/${leasedUid}`), {
+      ownerUid: leasedUid,
+      indexVersion: 1,
+      wrappedKey: ownerWrappedShareKey,
+      cutoverState: "pending",
+      cutoverVersion: 1,
+      cutoverLeaseAcquiredAt: serverTimestamp(),
+      cutoverLeaseExpiresAt: serverTimestamp(),
+      cutoverLeaseGeneration: "g".repeat(43),
+      cutoverLeaseHash: "h".repeat(43),
+      cutoverLeaseVersion: 1,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));

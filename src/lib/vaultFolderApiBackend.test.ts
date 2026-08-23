@@ -4,12 +4,16 @@ import {
   buildVaultFolderTree,
   vaultFolderTreeFirestoreFields
 } from "../../api/_vault-folder-tree.js";
+import { vaultCutoverLeaseCredential } from "../../api/_vault-integrity-marker.js";
 
 const projectId = "quickmemo-rules-test";
 const context = { accessToken: "owner", projectId };
 const uid = "user-a";
 const transaction = "dHJhbnNhY3Rpb24tdG9rZW4=";
 const timestamp = new Date("2026-08-23T00:00:00.000Z");
+const leaseId = "l".repeat(43);
+const leaseGeneration = "g".repeat(43);
+const leaseCredential = vaultCutoverLeaseCredential(leaseId, leaseGeneration);
 const treeName = `projects/${projectId}/databases/(default)/documents/vaultFolderTrees/${uid}`;
 const documentName = (path: string) =>
   `projects/${projectId}/databases/(default)/documents/${path}`;
@@ -29,12 +33,13 @@ function treeDocument(folders: unknown[] = []) {
 }
 
 function integrityDocument(state: "legacy" | "pending" | "ready" = "ready") {
+  const leaseUpdatedAt = new Date();
   return {
     fields: {
       createdAt: { timestampValue: timestamp.toISOString() },
       indexVersion: { integerValue: "1" },
       ownerUid: { stringValue: uid },
-      updatedAt: { timestampValue: timestamp.toISOString() },
+      updatedAt: { timestampValue: state === "pending" ? leaseUpdatedAt.toISOString() : timestamp.toISOString() },
       wrappedKey: {
         mapValue: {
           fields: {
@@ -50,6 +55,13 @@ function integrityDocument(state: "legacy" | "pending" | "ready" = "ready") {
       }),
       ...(state === "ready" ? {
         verifiedAt: { timestampValue: timestamp.toISOString() }
+      } : {}),
+      ...(state === "pending" ? {
+        cutoverLeaseAcquiredAt: { timestampValue: leaseUpdatedAt.toISOString() },
+        cutoverLeaseExpiresAt: { timestampValue: new Date(leaseUpdatedAt.getTime() + 90_000).toISOString() },
+        cutoverLeaseGeneration: { stringValue: leaseGeneration },
+        cutoverLeaseHash: { stringValue: leaseCredential.hash },
+        cutoverLeaseVersion: { integerValue: "1" }
       } : {})
     },
     name: documentName(`vaultIntegrity/${uid}`),
@@ -115,6 +127,7 @@ function ordinaryFolderDocument() {
       parentId: { nullValue: null },
       revision: { integerValue: "1" },
       vaultNameClaimId: { stringValue: "C".repeat(43) },
+      vaultNameIndexVersion: { integerValue: "1" },
       wrappedKey: {
         mapValue: {
           fields: {
@@ -270,6 +283,7 @@ describe("Vault folder server transaction boundary", () => {
           missing: documentName(`vaultIntegrity/${uid}/nameClaims/${"L".repeat(43)}`)
         }
       ]))
+      .mockResolvedValueOnce(json([]))
       .mockResolvedValueOnce(json([{
         found: {
           fields: {
@@ -301,6 +315,8 @@ describe("Vault folder server transaction boundary", () => {
       encryptedName: createBody.encryptedName,
       expectedName: "Legacy folder",
       folderId: "legacy-folder",
+      leaseGeneration,
+      leaseId,
       nameClaim: {
         claimId: "L".repeat(43),
         indexVersion: 1,

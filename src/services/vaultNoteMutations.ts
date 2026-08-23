@@ -212,6 +212,56 @@ async function bestEffortAppCheckToken() {
   }
 }
 
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]) {
+  const actual = Object.keys(value).sort();
+  const canonicalExpected = [...expected].sort();
+  return actual.length === canonicalExpected.length
+    && actual.every((key, index) => key === canonicalExpected[index]);
+}
+
+function validIdentifier(value: unknown) {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 1_500
+    && Array.from(value).every((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint >= 32 && codePoint !== 127;
+    });
+}
+
+function validRevision(value: unknown) {
+  return Number.isSafeInteger(value)
+    && Number(value) >= 1
+    && Number(value) <= 999_999_999_999;
+}
+
+function validVaultNoteSuccess(
+  body: unknown,
+  payload: VaultNoteApiPayload
+): body is Record<string, unknown> {
+  if (!isJsonObject(body) || body.ok !== true || !validIdentifier(body.noteId) || !validRevision(body.revision)) {
+    return false;
+  }
+  if ("noteId" in payload && body.noteId !== payload.noteId) return false;
+  if (payload.action === "purge") {
+    return hasExactKeys(body, ["noteId", "ok", "revision"]);
+  }
+  if (payload.action === "secure-copy-activate") {
+    return hasExactKeys(body, ["noteId", "ok", "revision", "state"])
+      && body.state === "active";
+  }
+  if (!validIdentifier(body.lastMutationId)) return false;
+  if (payload.action === "migrate-legacy") {
+    return hasExactKeys(body, ["claimState", "lastMutationId", "noteId", "ok", "revision"])
+      && (body.claimState === "deferred" || body.claimState === "deleted" || body.claimState === "reserved");
+  }
+  return hasExactKeys(body, ["lastMutationId", "noteId", "ok", "revision"]);
+}
+
 export async function vaultNoteApiRequest<T>(
   ownerUid: string,
   payload: VaultNoteApiPayload,
@@ -256,21 +306,17 @@ export async function vaultNoteApiRequest<T>(
   } catch {
     throw new VaultNoteApiError("invalid_response", response.status);
   }
-  if (
-    !response.ok
-    || !body
-    || typeof body !== "object"
-    || !("ok" in body)
-    || body.ok !== true
-  ) {
-    const code = body && typeof body === "object" && "error" in body
-      && typeof body.error === "string"
+  if (!response.ok) {
+    const code = isJsonObject(body) && typeof body.error === "string"
       ? body.error
       : "request_failed";
-    const actualRevision = body && typeof body === "object" && "actualRevision" in body
+    const actualRevision = isJsonObject(body) && "actualRevision" in body
       ? body.actualRevision
       : undefined;
     throw new VaultNoteApiError(code, response.status, actualRevision);
+  }
+  if (!validVaultNoteSuccess(body, payload)) {
+    throw new VaultNoteApiError("invalid_response", response.status);
   }
   return body as T;
 }

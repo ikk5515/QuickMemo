@@ -21,6 +21,7 @@ import {
   verifySecureShareAppCheck
 } from "./_secure-share-common.js";
 import { logVaultApiRejection } from "./_vault-api-observability.js";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   VAULT_FOLDER_TREE_MAX_FOLDERS,
   VAULT_FOLDER_TREE_SCHEMA_VERSION,
@@ -36,7 +37,9 @@ import {
 } from "./_vault-folder-tree.js";
 import {
   integrityPath,
-  requireVaultIntegrityMarker
+  requireVaultCutoverLease,
+  requireVaultIntegrityMarker,
+  vaultCutoverLeaseCredential
 } from "./_vault-integrity-marker.js";
 
 const maximumStoredFoldersPerOwner = 5_000;
@@ -55,10 +58,23 @@ const supportedActions = new Set([
   "create",
   "migrate",
   "move",
+  "resolve-collision",
   "restore",
   "trash",
   "update"
 ]);
+
+class VaultFolderTransactionConflict extends Error {
+  constructor() {
+    super("Vault folder transaction conflicted");
+    this.name = "VaultFolderTransactionConflict";
+  }
+}
+
+function transactionRetryDelay(attempt) {
+  const jitterMilliseconds = 12 + Math.floor(Math.random() * 29) + attempt * 20;
+  return delay(jitterMilliseconds);
+}
 
 function requirePost(request) {
   if (request.method !== "POST") {
@@ -376,7 +392,7 @@ function folderCreateAfterStateMatches(folder, uid, folderId, input, tree, impor
     && folderLineageMatches(folder, tree, folderId);
 }
 
-function assertOwnedEncryptedFolder(folder, uid, folderId, expectedRevision) {
+function assertOwnedEncryptedFolder(folder, uid, folderId, expectedRevision, allowMissingClaim = false) {
   if (!folder || folder.ownerUid !== uid || !folder.encryptedName || !folder.wrappedKey) {
     throw new HttpError(404, "vault_folder_not_found", "Vault folder was not found");
   }
@@ -387,7 +403,13 @@ function assertOwnedEncryptedFolder(folder, uid, folderId, expectedRevision) {
   if (revision >= 999_999_999_999) {
     throw new HttpError(409, "vault_folder_revision_exhausted", "Vault folder revision exhausted");
   }
-  if (!folderId || !storedClaimId(folder)) {
+  const claimId = storedClaimId(folder);
+  const claimMetadataAbsent = !Object.prototype.hasOwnProperty.call(folder, "vaultNameClaimId")
+    && !Object.prototype.hasOwnProperty.call(folder, "vaultNameIndexVersion");
+  if (
+    !folderId
+    || (claimId ? folder.vaultNameIndexVersion !== 1 : !(allowMissingClaim && claimMetadataAbsent))
+  ) {
     throw new HttpError(409, "vault_folder_invalid", "Vault folder metadata is invalid", { expose: false });
   }
   return revision;
@@ -583,7 +605,7 @@ async function commitOrConflict(context, writes, transaction) {
     return await firestoreCommit(context, writes, transaction);
   } catch (error) {
     if (error?.statusCode === 409 || error?.upstreamCode === "ABORTED") {
-      throw new HttpError(409, "revision_conflict", "Vault folder changed concurrently");
+      throw new VaultFolderTransactionConflict();
     }
     throw error;
   }
@@ -685,11 +707,20 @@ async function handleCreate(context, uid, state, body) {
   return { folderId, revision: 1, treeRevision: tree.revision };
 }
 
-async function handleUpdateOrMove(context, uid, state, body) {
-  assertOnlyKeys(body, ["action", "encryptedName", "expectedRevision", "folderId", "nameClaim", "order", "parentId"]);
+async function handleUpdateOrMove(context, uid, state, body, allowMissingClaim = false) {
+  assertOnlyKeys(body, [
+    "action", "encryptedName", "expectedRevision", "folderId", "leaseGeneration", "leaseId",
+    "nameClaim", "order", "parentId"
+  ]);
   const expectedRevision = assertInteger(body.expectedRevision, "expectedRevision", 1);
   const folderId = assertVaultFolderId(body.folderId);
-  const revision = assertOwnedEncryptedFolder(state.folder, uid, folderId, expectedRevision);
+  const revision = assertOwnedEncryptedFolder(
+    state.folder,
+    uid,
+    folderId,
+    expectedRevision,
+    allowMissingClaim
+  );
   if (state.folder.isDeleted === true) {
     throw new HttpError(409, "vault_folder_unavailable", "Restore the folder before changing it");
   }
@@ -731,7 +762,9 @@ async function handleUpdateOrMove(context, uid, state, body) {
     ...(body.parentId === undefined ? {} : { parentId })
   };
   const writes = [];
-  if (moved) writes.push(treeWrite(context, uid, state, tree, now));
+  if (moved || !state.treeDocument) {
+    writes.push(treeWrite(context, uid, state, tree, now));
+  }
   writes.push(updateDocumentWrite(
     context.projectId,
     folderPath(folderId),
@@ -753,6 +786,170 @@ async function handleUpdateOrMove(context, uid, state, body) {
       previousClaim.__updateTime
     ));
   }
+  await commitOrConflict(context, writes, state.transaction);
+  return { folderId, revision: revision + 1, treeRevision: tree.revision };
+}
+
+async function handleResolveCollision(context, uid, state, body) {
+  const folderId = assertVaultFolderId(body.folderId);
+  const folder = state.folder;
+  if (!folder || folder.ownerUid !== uid) {
+    throw new HttpError(404, "vault_folder_not_found", "Vault folder was not found");
+  }
+  const hasEncryptedName = Boolean(folder.encryptedName);
+  const hasWrappedKey = Boolean(folder.wrappedKey);
+  if (hasEncryptedName !== hasWrappedKey) {
+    throw new HttpError(409, "vault_folder_state_mismatch", "Vault folder encryption state is incomplete");
+  }
+  if (!hasEncryptedName) {
+    assertOnlyKeys(body, [
+      "action", "color", "encryptedName", "expectedName", "folderId", "nameClaim", "order",
+      "parentId", "wrappedKey"
+    ]);
+    const input = assertCommonFolderFields(body);
+    if (typeof body.expectedName !== "string" || body.expectedName.length < 1 || body.expectedName.length > 40) {
+      throw new HttpError(400, "invalid_request", "Invalid expectedName");
+    }
+    if (folder.name !== body.expectedName) {
+      throw new HttpError(409, "revision_conflict", "Legacy folder changed before collision recovery");
+    }
+    if (
+      folder.isDeleted === true
+      || Object.prototype.hasOwnProperty.call(folder, "vaultNameClaimId")
+      || Object.prototype.hasOwnProperty.call(folder, "vaultNameIndexVersion")
+    ) {
+      throw new HttpError(409, "vault_folder_state_mismatch", "Legacy folder collision cannot be resolved");
+    }
+    const sourceImportState = await assertImportSourceMutationAllowed(
+      context,
+      state,
+      uid,
+      "resolve-collision"
+    );
+    await assertWorkspaceImportMutationAllowed(context, state, uid, sourceImportState);
+    await assertImportParentPlacementAllowed(
+      context,
+      state,
+      uid,
+      input.parentId,
+      sourceImportState.importJobId
+    );
+    if (state.requestedClaim) {
+      throw new HttpError(409, "vault_name_conflict", "Vault folder name is already reserved");
+    }
+    const tree = createVaultFolderNode(state.treeState.tree, { folderId, parentId: input.parentId });
+    const now = new Date();
+    const fields = {
+      encryptedName: input.encryptedName,
+      isDeleted: false,
+      name: "암호화 폴더",
+      order: input.order,
+      parentId: input.parentId,
+      revision: 1,
+      updatedAt: now,
+      vaultNameClaimId: input.nameClaim.claimId,
+      vaultNameIndexVersion: 1,
+      wrappedKey: input.wrappedKey,
+      ...folderLineage(tree, folderId)
+    };
+    await commitOrConflict(context, [
+      treeWrite(context, uid, state, tree, now),
+      updateDocumentWrite(
+        context.projectId,
+        folderPath(folderId),
+        fields,
+        Object.keys(fields),
+        folder.__updateTime
+      ),
+      createDocumentWrite(
+        context.projectId,
+        claimPath(uid, input.nameClaim.claimId),
+        claimFields(uid, folderId, input.parentId, now)
+      )
+    ], state.transaction);
+    return { folderId, revision: 1, treeRevision: tree.revision };
+  }
+  assertOnlyKeys(body, [
+    "action", "encryptedName", "expectedRevision", "folderId", "leaseGeneration", "leaseId",
+    "nameClaim", "parentId"
+  ]);
+  const revision = assertInteger(folder.revision, "stored revision", 1);
+  const expectedRevision = assertInteger(body.expectedRevision, "expectedRevision", 1);
+  if (revision !== expectedRevision) {
+    throw new HttpError(409, "revision_conflict", "Vault folder revision changed");
+  }
+  if (revision >= 999_999_999_999) {
+    throw new HttpError(409, "vault_folder_revision_exhausted", "Vault folder revision exhausted");
+  }
+  if (
+    folder.isDeleted === true
+    || Object.prototype.hasOwnProperty.call(folder, "vaultNameClaimId")
+    || Object.prototype.hasOwnProperty.call(folder, "vaultNameIndexVersion")
+  ) {
+    throw new HttpError(409, "vault_folder_state_mismatch", "Vault folder collision cannot be resolved");
+  }
+  assertFolderMatchesTree(folder, state.treeState.tree, folderId);
+  const sourceImportState = await assertImportSourceMutationAllowed(
+    context,
+    state,
+    uid,
+    "resolve-collision"
+  );
+  await assertWorkspaceImportMutationAllowed(context, state, uid, sourceImportState);
+  const parentId = body.parentId === undefined
+    ? folder.parentId ?? null
+    : assertParentId(body.parentId);
+  await assertImportParentPlacementAllowed(
+    context,
+    state,
+    uid,
+    parentId,
+    sourceImportState.importJobId
+  );
+  const nameClaim = assertNameClaim(body.nameClaim, parentId);
+  const encryptedName = body.encryptedName === undefined
+    ? undefined
+    : assertEncryptedPayload(body.encryptedName, "encryptedName");
+  const moved = parentId !== (folder.parentId ?? null);
+  const renamed = encryptedName !== undefined
+    && !encryptedPayloadMatches(folder.encryptedName, encryptedName);
+  if (!moved && !renamed) {
+    throw new HttpError(400, "invalid_request", "Collision recovery must change the folder name or parent");
+  }
+  if (state.requestedClaim) {
+    throw new HttpError(409, "vault_name_conflict", "Vault folder name is already reserved");
+  }
+
+  let tree = state.treeState.tree;
+  if (moved) tree = moveVaultFolderNode(tree, { folderId, parentId });
+  const now = new Date();
+  const fields = {
+    revision: revision + 1,
+    updatedAt: now,
+    vaultNameClaimId: nameClaim.claimId,
+    vaultNameIndexVersion: 1,
+    ...folderLineage(tree, folderId),
+    ...(encryptedName === undefined ? {} : { encryptedName }),
+    ...(body.parentId === undefined ? {} : { parentId })
+  };
+  const writes = [];
+  if (moved || !state.treeDocument) {
+    writes.push(treeWrite(context, uid, state, tree, now));
+  }
+  writes.push(
+    updateDocumentWrite(
+      context.projectId,
+      folderPath(folderId),
+      fields,
+      Object.keys(fields),
+      folder.__updateTime
+    ),
+    createDocumentWrite(
+      context.projectId,
+      claimPath(uid, nameClaim.claimId),
+      claimFields(uid, folderId, parentId, now)
+    )
+  );
   await commitOrConflict(context, writes, state.transaction);
   return { folderId, revision: revision + 1, treeRevision: tree.revision };
 }
@@ -827,7 +1024,10 @@ async function handleLifecycle(context, uid, state, body, active) {
 }
 
 async function handleMigrate(context, uid, state, body) {
-  assertOnlyKeys(body, ["action", "color", "encryptedName", "expectedName", "folderId", "nameClaim", "order", "parentId", "wrappedKey"]);
+  assertOnlyKeys(body, [
+    "action", "color", "encryptedName", "expectedName", "folderId", "leaseGeneration", "leaseId",
+    "nameClaim", "order", "parentId", "wrappedKey"
+  ]);
   const input = assertCommonFolderFields(body);
   const folderId = assertVaultFolderId(body.folderId);
   if (typeof body.expectedName !== "string" || body.expectedName.length < 1 || body.expectedName.length > 40) {
@@ -861,12 +1061,19 @@ async function handleMigrate(context, uid, state, body) {
   if (state.requestedClaim) {
     throw new HttpError(409, "vault_name_conflict", "Vault folder name is already reserved");
   }
+  const sourceImportState = await assertImportSourceMutationAllowed(
+    context,
+    state,
+    uid,
+    "migrate"
+  );
+  await assertWorkspaceImportMutationAllowed(context, state, uid, sourceImportState);
   await assertImportParentPlacementAllowed(
     context,
     state,
     uid,
     input.parentId,
-    null
+    sourceImportState.importJobId
   );
   const tree = createVaultFolderNode(state.treeState.tree, { folderId, parentId: input.parentId });
   const now = new Date();
@@ -901,10 +1108,10 @@ async function handleMigrate(context, uid, state, body) {
   return { folderId, revision: 1, treeRevision: tree.revision };
 }
 
-async function performAction(context, uid, body) {
+async function performActionOnce(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "color", "encryptedName", "expectedName", "expectedRevision", "folderId",
-    "importJobId", "nameClaim", "order", "parentId", "wrappedKey"
+    "importJobId", "leaseGeneration", "leaseId", "nameClaim", "order", "parentId", "wrappedKey"
   ]);
   const action = body.action;
   if (typeof action !== "string" || !supportedActions.has(action)) {
@@ -915,17 +1122,33 @@ async function performAction(context, uid, body) {
     if (action === "audit" || action === "bootstrap") {
       return await handleBootstrapOrAudit(context, uid, state, action);
     }
-    requireVaultIntegrityMarker(
+    const integrityMarker = requireVaultIntegrityMarker(
       state.integrityMarker,
       uid,
-      action === "migrate" || action === "update" || action === "move"
-        ? "any"
-        : "ready"
+      action === "resolve-collision"
+        ? "pending"
+        : action === "migrate" || action === "update" || action === "move" ? "any" : "ready"
     );
+    if (integrityMarker.state === "pending" && action !== "resolve-collision") {
+      requireVaultCutoverLease(
+        integrityMarker.document,
+        uid,
+        vaultCutoverLeaseCredential(body.leaseId, body.leaseGeneration)
+      );
+    }
     if (action === "create") return await handleCreate(context, uid, state, body);
     if (action === "migrate") return await handleMigrate(context, uid, state, body);
+    if (action === "resolve-collision") {
+      return await handleResolveCollision(context, uid, state, body);
+    }
     if (action === "update" || action === "move") {
-      return await handleUpdateOrMove(context, uid, state, body);
+      return await handleUpdateOrMove(
+        context,
+        uid,
+        state,
+        body,
+        integrityMarker.state === "pending"
+      );
     }
     return await handleLifecycle(context, uid, state, body, action === "restore");
   } catch (error) {
@@ -937,6 +1160,21 @@ async function performAction(context, uid, body) {
     }
     throw error;
   }
+}
+
+async function performAction(context, uid, body) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await performActionOnce(context, uid, body);
+    } catch (error) {
+      if (!(error instanceof VaultFolderTransactionConflict)) throw error;
+      if (attempt === 2) {
+        throw new HttpError(409, "revision_conflict", "Vault folder changed concurrently");
+      }
+      await transactionRetryDelay(attempt);
+    }
+  }
+  throw new HttpError(409, "revision_conflict", "Vault folder changed concurrently");
 }
 
 export const __vaultFolderTreeTesting = Object.freeze({

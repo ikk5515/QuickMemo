@@ -1,4 +1,5 @@
 import { bytesToBase64 } from "../../lib/crypto";
+import { mapWithConcurrency } from "../../lib/mapWithConcurrency";
 import type { VaultEntryKind } from "../../types";
 import { normalizeVaultPath } from "./interop/path";
 
@@ -10,6 +11,7 @@ export const VAULT_ANCESTRY_VERSION = 3 as const;
  * they consult the server-only vaultFolderTrees document instead.
  */
 export const MAX_VAULT_FOLDER_DEPTH = 32;
+export const VAULT_NAME_FINGERPRINT_CONCURRENCY = 8;
 
 const encoder = new TextEncoder();
 const fingerprintKeyCache = new WeakMap<CryptoKey, Promise<CryptoKey>>();
@@ -201,10 +203,17 @@ export async function planVaultNameMigration(
   const claims: VaultNameClaimV1[] = [];
   const collisions: VaultNameMigrationPlan["collisions"] = [];
   const firstByFingerprint = new Map<string, string>();
+  const fingerprints = await mapWithConcurrency(
+    sources,
+    VAULT_NAME_FINGERPRINT_CONCURRENCY,
+    async (source) => {
+      assertIdentifier(source.id, "Vault 항목");
+      return vaultNameFingerprint(vaultKey, source);
+    }
+  );
 
-  for (const source of sources) {
-    assertIdentifier(source.id, "Vault 항목");
-    const fingerprint = await vaultNameFingerprint(vaultKey, source);
+  for (const [index, source] of sources.entries()) {
+    const fingerprint = fingerprints[index];
     const firstTargetId = firstByFingerprint.get(fingerprint);
     if (firstTargetId) {
       collisions.push({

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -35,6 +36,8 @@ const wrappedKey = {
   version: 1,
   wrappedKey: "wrapped-key"
 } as const;
+const leaseId = "l".repeat(43);
+const leaseGeneration = "g".repeat(43);
 
 function vaultIntegrityMarkerFields(
   uid: string,
@@ -51,6 +54,13 @@ function vaultIntegrityMarkerFields(
       cutoverVersion: 1
     }),
     ...(state === "ready" ? { verifiedAt: now } : {}),
+    ...(state === "pending" ? {
+      cutoverLeaseAcquiredAt: now,
+      cutoverLeaseExpiresAt: new Date(now.getTime() + 90_000),
+      cutoverLeaseGeneration: leaseGeneration,
+      cutoverLeaseHash: createHash("sha256").update(leaseId, "utf8").digest("base64url"),
+      cutoverLeaseVersion: 1
+    } : {}),
     wrappedKey
   };
 }
@@ -614,8 +624,39 @@ describeEmulator("Vault note API emulator transaction", () => {
       {
         path: "notes/legacy-post-cutover-deferred",
         fields: legacyNoteFields()
+      },
+      {
+        path: "notes/claim-metadata-only",
+        fields: {
+          ...legacyNoteFields(),
+          contentFormat: "markdown-v1",
+          entryKind: "markdown",
+          vaultNameClaimId: "B".repeat(43),
+          vaultNameIndexVersion: 1
+        }
       }
     ]);
+
+    const repairedMissingClaim = await request({
+      action: "backfill-claim",
+      expectedContentFormat: "markdown-v1",
+      expectedEntryKind: "markdown",
+      expectedRevision: 1,
+      leaseGeneration,
+      leaseId,
+      nameClaim: { claimId: "B".repeat(43), indexVersion: 1, parentId: null },
+      noteId: "claim-metadata-only",
+      readerUids: [uid]
+    });
+    expect(repairedMissingClaim.response.status).toBe(200);
+    expect(repairedMissingClaim.body).toMatchObject({ revision: 2 });
+    expect(await readEmulatorDocument(`vaultIntegrity/${uid}/nameClaims/${"B".repeat(43)}`))
+      .toMatchObject({
+        ownerUid: uid,
+        parentId: null,
+        targetId: "claim-metadata-only",
+        targetType: "entry"
+      });
 
     const rejectedRequests = [
       {
@@ -662,11 +703,39 @@ describeEmulator("Vault note API emulator transaction", () => {
       revision: 1
     });
 
+    const unfencedMigration = await request({
+      action: "migrate-legacy",
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 1,
+      nameClaim: { claimId: "M".repeat(43), indexVersion: 1, parentId: null },
+      noteId: "legacy-post-cutover",
+      readerUids: [uid]
+    });
+    expect(unfencedMigration.response.status).toBe(400);
+    expect(unfencedMigration.body).toMatchObject({ error: "invalid_request", ok: false });
+    const wrongLeaseMigration = await request({
+      action: "migrate-legacy",
+      expectedContentFormat: "legacy-html-v1",
+      expectedEntryKind: "legacy-html",
+      expectedRevision: 1,
+      leaseGeneration,
+      leaseId: "x".repeat(43),
+      nameClaim: { claimId: "M".repeat(43), indexVersion: 1, parentId: null },
+      noteId: "legacy-post-cutover",
+      readerUids: [uid]
+    });
+    expect(wrongLeaseMigration.response.status).toBe(409);
+    expect(wrongLeaseMigration.body).toMatchObject({ error: "vault_cutover_busy", ok: false });
+    expect(await readEmulatorDocument("notes/legacy-post-cutover")).not.toHaveProperty("contentFormat");
+
     const migratedActive = await request({
       action: "migrate-legacy",
       expectedContentFormat: "legacy-html-v1",
       expectedEntryKind: "legacy-html",
       expectedRevision: 1,
+      leaseGeneration,
+      leaseId,
       nameClaim: { claimId: "M".repeat(43), indexVersion: 1, parentId: null },
       noteId: "legacy-post-cutover",
       readerUids: [uid]
@@ -687,6 +756,8 @@ describeEmulator("Vault note API emulator transaction", () => {
       expectedContentFormat: "legacy-html-v1",
       expectedEntryKind: "legacy-html",
       expectedRevision: 1,
+      leaseGeneration,
+      leaseId,
       noteId: "legacy-post-cutover-deferred",
       readerUids: [uid]
     });
@@ -705,6 +776,8 @@ describeEmulator("Vault note API emulator transaction", () => {
       expectedContentFormat: "legacy-html-v1",
       expectedEntryKind: "legacy-html",
       expectedRevision: 1,
+      leaseGeneration,
+      leaseId,
       noteId: "legacy-post-cutover-deleted",
       readerUids: [uid]
     });
@@ -738,6 +811,206 @@ describeEmulator("Vault note API emulator transaction", () => {
       vaultNameClaimId: "N".repeat(43),
       vaultNameIndexVersion: 1
     });
+  });
+
+  it("atomically repairs only an owner-owned historical shared folder path", async () => {
+    const noteId = "historical-shared-folder";
+    const claimId = "R".repeat(43);
+    const repairedTitle = { ...title, cipherText: "historical-shared-repaired-title" };
+    const historySummary = { ...body, cipherText: "historical-shared-repair-summary" };
+    await writeEmulatorDocuments([
+      {
+        path: `vaultIntegrity/${uid}`,
+        fields: vaultIntegrityMarkerFields(uid, "pending")
+      },
+      {
+        path: `notes/${noteId}`,
+        fields: {
+          ...legacyNoteFields({ shared: true }),
+          contentFormat: "markdown-v1",
+          entryKind: "markdown",
+          folderId: "legacy-folder"
+        }
+      }
+    ]);
+
+    const repaired = await request({
+      action: "resolve-collision",
+      changedFields: ["folder", "name-claim", "title"],
+      encryptedTitle: repairedTitle,
+      expectedContentFormat: "markdown-v1",
+      expectedEntryKind: "markdown",
+      expectedRevision: 1,
+      folderId: null,
+      historySummary,
+      nameClaim: { claimId, indexVersion: 1, parentId: null },
+      noteId,
+      readerUids: [uid, participantUid]
+    });
+
+    expect(repaired.response.status).toBe(200);
+    expect(repaired.body).toMatchObject({ noteId, revision: 2 });
+    const mutationId = String(repaired.body.lastMutationId);
+    expect(await readEmulatorDocument(`notes/${noteId}`)).toMatchObject({
+      contentFormat: "markdown-v1",
+      encryptedBody: body,
+      encryptedTitle: repairedTitle,
+      entryKind: "markdown",
+      folderId: null,
+      ownerUid: uid,
+      participantUids: [uid, participantUid],
+      revision: 2,
+      type: "shared",
+      vaultNameClaimId: claimId,
+      vaultNameIndexVersion: 1,
+      wrappedKeys: {
+        [uid]: wrappedKey,
+        [participantUid]: wrappedKey
+      }
+    });
+    expect(await readEmulatorDocument(`notes/${noteId}/history/${mutationId}`)).toMatchObject({
+      action: "content",
+      actorUid: uid,
+      changedFields: ["folder", "name-claim", "title"],
+      encryptedSummary: historySummary,
+      noteId,
+      readerUids: [uid, participantUid],
+      revision: 2
+    });
+    expect(await readEmulatorDocument(`vaultIntegrity/${uid}/nameClaims/${claimId}`))
+      .toMatchObject({
+        ownerUid: uid,
+        parentId: null,
+        targetId: noteId,
+        targetType: "entry"
+      });
+  });
+
+  it("rejects every broader shared-folder collision mutation and rolls back claim conflicts", async () => {
+    const rootNoteId = "shared-root-move-rejected";
+    const otherFolderNoteId = "shared-other-folder-rejected";
+    const participantNoteId = "shared-participant-rejected";
+    const rollbackNoteId = "shared-claim-rollback";
+    const rootClaimId = "S".repeat(43);
+    const otherClaimId = "T".repeat(43);
+    const participantClaimId = "U".repeat(43);
+    const occupiedClaimId = "V".repeat(43);
+    const sharedFields = {
+      ...legacyNoteFields({ shared: true }),
+      contentFormat: "markdown-v1",
+      entryKind: "markdown"
+    };
+    await writeEmulatorDocuments([
+      {
+        path: `vaultIntegrity/${uid}`,
+        fields: vaultIntegrityMarkerFields(uid, "pending")
+      },
+      {
+        path: `notes/${rootNoteId}`,
+        fields: sharedFields
+      },
+      {
+        path: `notes/${otherFolderNoteId}`,
+        fields: { ...sharedFields, folderId: "legacy-folder" }
+      },
+      {
+        path: `notes/${participantNoteId}`,
+        fields: { ...sharedFields, folderId: "legacy-folder" }
+      },
+      {
+        path: `notes/${rollbackNoteId}`,
+        fields: { ...sharedFields, folderId: "legacy-folder" }
+      },
+      {
+        path: `vaultIntegrity/${uid}/nameClaims/${occupiedClaimId}`,
+        fields: {
+          indexVersion: 1,
+          ownerUid: uid,
+          parentId: null,
+          targetId: "different-active-target",
+          targetType: "entry"
+        }
+      }
+    ]);
+
+    const collisionRequest = (
+      noteId: string,
+      claimId: string,
+      folderId: string | null,
+      encryptedTitle: Record<string, unknown> = title
+    ) => ({
+      action: "resolve-collision",
+      changedFields: ["folder", "name-claim", "title"],
+      encryptedTitle,
+      expectedContentFormat: "markdown-v1",
+      expectedEntryKind: "markdown",
+      expectedRevision: 1,
+      folderId,
+      nameClaim: { claimId, indexVersion: 1, parentId: folderId },
+      noteId,
+      readerUids: [uid, participantUid]
+    });
+
+    const rootToFolder = await request(collisionRequest(
+      rootNoteId,
+      rootClaimId,
+      "new-folder",
+      { ...title, cipherText: "root-to-folder-rejected" }
+    ));
+    expect(rootToFolder.response.status).toBe(409);
+    expect(rootToFolder.body).toMatchObject({ error: "vault_note_state_mismatch", ok: false });
+
+    const folderToOtherFolder = await request(collisionRequest(
+      otherFolderNoteId,
+      otherClaimId,
+      "different-folder",
+      { ...title, cipherText: "folder-to-other-rejected" }
+    ));
+    expect(folderToOtherFolder.response.status).toBe(409);
+    expect(folderToOtherFolder.body).toMatchObject({
+      error: "vault_note_state_mismatch",
+      ok: false
+    });
+
+    const participantRepair = await request(collisionRequest(
+      participantNoteId,
+      participantClaimId,
+      null,
+      { ...title, cipherText: "participant-repair-rejected" }
+    ), participantIdToken);
+    expect(participantRepair.response.status).toBe(404);
+    expect(participantRepair.body).not.toHaveProperty("actualRevision");
+
+    const occupiedClaim = await request(collisionRequest(
+      rollbackNoteId,
+      occupiedClaimId,
+      null,
+      { ...title, cipherText: "must-roll-back" }
+    ));
+    expect(occupiedClaim.response.status).toBe(409);
+    expect(occupiedClaim.body).toMatchObject({ error: "vault_name_conflict", ok: false });
+
+    for (const [noteId, folderId] of [
+      [rootNoteId, null],
+      [otherFolderNoteId, "legacy-folder"],
+      [participantNoteId, "legacy-folder"],
+      [rollbackNoteId, "legacy-folder"]
+    ] as const) {
+      expect(await readEmulatorDocument(`notes/${noteId}`)).toMatchObject({
+        encryptedBody: body,
+        encryptedTitle: title,
+        folderId,
+        lastMutationId: "legacy-seed-mutation",
+        participantUids: [uid, participantUid],
+        revision: 1,
+        type: "shared"
+      });
+    }
+    for (const claimId of [rootClaimId, otherClaimId, participantClaimId]) {
+      expect(await readEmulatorDocument(`vaultIntegrity/${uid}/nameClaims/${claimId}`)).toBeNull();
+    }
+    expect(await readEmulatorDocument(`vaultIntegrity/${uid}/nameClaims/${occupiedClaimId}`))
+      .toMatchObject({ targetId: "different-active-target" });
   });
 
   it("lets an active admin trash but never restore or rewrite another owner's note", async () => {
