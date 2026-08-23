@@ -4,10 +4,10 @@ import {
   createRevisionedEncryptedNote,
   createRevisionedEncryptedNoteAtId,
   migrateLegacyVaultNote,
-  resolveRevisionedVaultNameCollision,
   updateRevisionedEncryptedNote,
   updateRevisionedEncryptedNoteAndFolder,
-  type SaveNoteInput
+  type SaveNoteInput,
+  type VaultCutoverLeaseInput
 } from "../../services/notes";
 import type { UserProfile } from "../../types";
 import type { VaultContentFormat, VaultEntryKind } from "../../types";
@@ -197,8 +197,11 @@ export async function backfillVaultEntryNameClaim(
   uid: string,
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
-  repairMissingReservation = false
+  repairMissingReservation = false,
+  cutoverLease?: VaultCutoverLeaseInput,
+  signal?: AbortSignal
 ) {
+  signal?.throwIfAborted();
   if (note.ownerUid !== uid) {
     throw new Error("Vault 이름 예약은 노트 소유자만 생성할 수 있습니다.");
   }
@@ -226,12 +229,14 @@ export async function backfillVaultEntryNameClaim(
   }
   const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
   const historySummaryPayload = await encryptText("Vault 이름 예약 인덱스 생성", noteKey);
+  signal?.throwIfAborted();
 
-  return backfillRevisionedVaultNameClaim({
+  const backfillInput = {
     expectedContentFormat: note.contentFormat,
     expectedEntryKind: note.entryKind,
     expectedRevision: note.revision ?? 0,
     historySummary: historySummaryPayload,
+    ...cutoverLease,
     nameClaim: {
       claimId,
       indexVersion: VAULT_NAME_INDEX_VERSION,
@@ -240,7 +245,10 @@ export async function backfillVaultEntryNameClaim(
     noteId: note.id,
     readerUids: note.participantUids,
     uid
-  });
+  };
+  return signal
+    ? backfillRevisionedVaultNameClaim(backfillInput, signal)
+    : backfillRevisionedVaultNameClaim(backfillInput);
 }
 
 /**
@@ -253,8 +261,11 @@ export async function migrateLegacyVaultEntryIdentity(
   note: DecryptedVaultNote,
   uid: string,
   vaultIntegrityKey: CryptoKey,
-  reserveNameClaim: boolean
+  reserveNameClaim: boolean,
+  cutoverLease?: VaultCutoverLeaseInput,
+  signal?: AbortSignal
 ) {
+  signal?.throwIfAborted();
   if (note.ownerUid !== uid) {
     throw new Error("Vault 저장 형식은 노트 소유자만 전환할 수 있습니다.");
   }
@@ -278,15 +289,20 @@ export async function migrateLegacyVaultEntryIdentity(
         parentId: normalized.folderId
       }
     : undefined;
-  return migrateLegacyVaultNote({
-    expectedContentFormat: "legacy-html-v1",
-    expectedEntryKind: "legacy-html",
+  signal?.throwIfAborted();
+  const migrationInput = {
+    expectedContentFormat: "legacy-html-v1" as const,
+    expectedEntryKind: "legacy-html" as const,
     expectedRevision: note.revision ?? 0,
+    ...cutoverLease,
     ...(nameClaim ? { nameClaim } : {}),
     noteId: note.id,
     readerUids: note.participantUids,
     uid
-  });
+  };
+  return signal
+    ? migrateLegacyVaultNote(migrationInput, signal)
+    : migrateLegacyVaultNote(migrationInput);
 }
 
 export async function saveEncryptedVaultEntry(
@@ -383,75 +399,6 @@ export async function saveEncryptedVaultEntry(
  * title and/or parent plus the replacement claim advance in one transaction.
  * This also works for legacy HTML entries without converting their content.
  */
-export async function resolveVaultEntryNameCollision(
-  note: DecryptedVaultNote,
-  uid: string,
-  privateKey: CryptoKey,
-  vaultIntegrityKey: CryptoKey,
-  replacement: { folderId: string | null; title: string }
-) {
-  if (note.ownerUid !== uid) {
-    throw new Error("Vault 이름 충돌은 노트 소유자만 해결할 수 있습니다.");
-  }
-  if (note.vaultNameClaimId || note.vaultNameIndexVersion) {
-    throw new Error("이 항목은 이미 Vault 이름 예약을 보유하고 있습니다.");
-  }
-  const normalized = validateVaultIdentityDraft(
-    { body: note.body, folderId: replacement.folderId, title: replacement.title },
-    note.contentFormat,
-    note.entryKind
-  );
-  const titleChanged = normalized.title !== note.title;
-  const folderChanged = normalized.folderId !== (note.folderId ?? null);
-  if (!titleChanged && !folderChanged) {
-    throw new Error("충돌을 해결하려면 이름 또는 폴더를 변경해주세요.");
-  }
-  const repairsHistoricalSharedFolder = note.type === "shared"
-    && (note.folderId ?? null) !== null
-    && normalized.folderId === null;
-  if (folderChanged && note.type !== "personal" && !repairsHistoricalSharedFolder) {
-    throw new Error("공유 노트는 폴더로 이동할 수 없습니다.");
-  }
-  const wrappedKey = note.wrappedKeys[uid];
-  if (!wrappedKey) {
-    throw new Error("Vault 이름 충돌 이력을 암호화할 키가 없습니다.");
-  }
-  const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
-  const [encryptedTitle, historySummaryPayload, claimId] = await Promise.all([
-    titleChanged ? encryptText(normalized.title, noteKey) : Promise.resolve(undefined),
-    encryptText(folderChanged && !titleChanged ? "폴더 변경으로 이름 충돌 해결" : "이름 충돌 해결", noteKey),
-    vaultNameFingerprint(vaultIntegrityKey, {
-      kind: note.entryKind,
-      name: normalized.title,
-      parentId: normalized.folderId,
-      targetType: "entry"
-    })
-  ]);
-  const changedFields = [
-    titleChanged ? "title" as const : null,
-    folderChanged ? "folder" as const : null,
-    "name-claim" as const
-  ].filter((field): field is "folder" | "name-claim" | "title" => field !== null);
-
-  return resolveRevisionedVaultNameCollision({
-    changedFields,
-    ...(encryptedTitle ? { encryptedTitle } : {}),
-    expectedContentFormat: note.contentFormat,
-    expectedEntryKind: note.entryKind,
-    expectedRevision: note.revision ?? 0,
-    ...(folderChanged ? { folderId: normalized.folderId } : {}),
-    historySummary: historySummaryPayload,
-    nameClaim: {
-      claimId,
-      indexVersion: VAULT_NAME_INDEX_VERSION,
-      parentId: normalized.folderId
-    },
-    noteId: note.id,
-    readerUids: note.participantUids,
-    uid
-  });
-}
-
 /** Saves content and a folder move in one revision-aware Firestore transaction. */
 export async function saveAndMoveEncryptedVaultEntry(
   note: DecryptedVaultNote,

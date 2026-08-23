@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DecryptedVaultFolder, DecryptedVaultNote } from "./vaultData";
+import { VaultNameConflictError } from "../../services/notes";
 import { vaultNameFingerprint } from "./vaultIntegrity";
 import {
   auditVaultNameReservations,
   migrateVaultNameReservations,
   preflightVaultNameCutover,
+  vaultNameCollisionRepairTargetIds,
+  VaultNameReservationMigrationConflictError,
   type VaultNameReservationMigrationInput
 } from "./vaultNameMigration";
 
@@ -20,6 +23,15 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../services/notes", () => ({
   updateEncryptedNoteFolder: mocks.updateFolder,
+  VaultNameConflictError: class VaultNameConflictError extends Error {
+    readonly claimId: string;
+
+    constructor(claimId: string) {
+      super("같은 위치에 동일한 이름의 Vault 항목이 있습니다.");
+      this.name = "VaultNameConflictError";
+      this.claimId = claimId;
+    }
+  },
   vaultNameClaimReservationMatches: mocks.claimMatches
 }));
 vi.mock("./vaultData", async (importOriginal) => ({
@@ -38,6 +50,10 @@ let vaultIntegrityKey: CryptoKey;
 const encryptedPayload = { algorithm: "AES-GCM" as const, cipherText: "cipher", iv: "iv", version: 1 as const };
 const wrappedKey = { algorithm: "RSA-OAEP" as const, version: 1 as const, wrappedKey: "wrapped" };
 const profile = { publicKeyJwk: { kty: "RSA" }, uid: "user-a" };
+const cutoverLease = {
+  leaseGeneration: "g".repeat(43),
+  leaseId: "l".repeat(43)
+};
 
 function folder(overrides: Partial<DecryptedVaultFolder> = {}): DecryptedVaultFolder {
   return {
@@ -79,13 +95,14 @@ function note(overrides: Partial<DecryptedVaultNote> = {}): DecryptedVaultNote {
 function migrate(
   input: Omit<
     VaultNameReservationMigrationInput,
-    "deletedNotes" | "expectedDeletedNoteCount" | "legacyActiveNoteIds" | "legacyDeletedNoteIds"
+    "cutoverLease" | "deletedNotes" | "expectedDeletedNoteCount" | "legacyActiveNoteIds" | "legacyDeletedNoteIds"
   > & Partial<Pick<
     VaultNameReservationMigrationInput,
     "deletedNotes" | "expectedDeletedNoteCount" | "legacyActiveNoteIds" | "legacyDeletedNoteIds"
   >>
 ) {
   return migrateVaultNameReservations({
+    cutoverLease,
     deletedNotes: [],
     expectedDeletedNoteCount: 0,
     legacyActiveNoteIds: new Set(),
@@ -95,6 +112,18 @@ function migrate(
 }
 
 describe("Vault name reservation migration", () => {
+  it("offers only collision roots and legacy shared-folder entries for direct repair", () => {
+    const result = {
+      collisions: [{ duplicateTargetId: "duplicate", fingerprint: "fingerprint", firstTargetId: "winner" }],
+      deferredTargetIds: ["duplicate", "child", "legacy-shared"]
+    };
+    expect(vaultNameCollisionRepairTargetIds(result, [
+      { folderId: "child-folder", id: "legacy-shared", type: "shared" }
+    ])).toEqual(["duplicate", "legacy-shared"]);
+    expect(vaultNameCollisionRepairTargetIds({ collisions: [], deferredTargetIds: ["fallback"] }, []))
+      .toEqual(["fallback"]);
+  });
+
   beforeEach(async () => {
     vi.clearAllMocks();
     vaultIntegrityKey = await crypto.subtle.generateKey(
@@ -138,9 +167,65 @@ describe("Vault name reservation migration", () => {
       expect.objectContaining({ id: "first" }),
       "user-a",
       privateKey,
-      vaultIntegrityKey
+      vaultIntegrityKey,
+      false,
+      cutoverLease
     );
     expect(mocks.updateFolder).not.toHaveBeenCalled();
+  });
+
+  it("keeps an existing atomic reservation owner as the retry winner", async () => {
+    const reserved = note({ id: "already-reserved", title: "note.md" });
+    const fingerprint = await vaultNameFingerprint(vaultIntegrityKey, {
+      kind: reserved.entryKind,
+      name: reserved.title,
+      parentId: null,
+      targetType: "entry"
+    });
+    const result = await migrate({
+      folders: [],
+      notes: [
+        note({ id: "new-input-first" }),
+        { ...reserved, vaultNameClaimId: fingerprint, vaultNameIndexVersion: 1 }
+      ],
+      privateKey,
+      profile,
+      expectedFolderCount: 0,
+      expectedNoteCount: 2,
+      vaultIntegrityKey
+    });
+
+    expect(result.collisions).toEqual([expect.objectContaining({
+      duplicateTargetId: "new-input-first",
+      firstTargetId: "already-reserved"
+    })]);
+    expect(result.deferredTargetIds).toEqual(["new-input-first"]);
+    expect(result).toMatchObject({ completed: 2, migrated: 0, skipped: 2, total: 2 });
+    expect(mocks.claimMatches).toHaveBeenCalledWith(expect.objectContaining({
+      claimId: fingerprint,
+      targetId: "already-reserved"
+    }));
+    expect(mocks.saveEntry).not.toHaveBeenCalled();
+  });
+
+  it("keeps the affected target actionable when a concurrent reservation wins", async () => {
+    mocks.saveEntry.mockRejectedValueOnce(new VaultNameConflictError("A".repeat(43)));
+
+    const migration = migrate({
+      folders: [],
+      notes: [note({ id: "concurrent-target" })],
+      privateKey,
+      profile,
+      expectedFolderCount: 0,
+      expectedNoteCount: 1,
+      vaultIntegrityKey
+    });
+
+    await expect(migration).rejects.toMatchObject({
+      name: "VaultNameReservationMigrationConflictError",
+      targetIds: ["concurrent-target"]
+    });
+    await expect(migration).rejects.toBeInstanceOf(VaultNameReservationMigrationConflictError);
   });
 
   it("rejects incomplete, foreign-owned, deleted, and orphaned snapshots before writing", async () => {
@@ -238,7 +323,14 @@ describe("Vault name reservation migration", () => {
     });
 
     expect(result).toMatchObject({ completed: 1, migrated: 1, skipped: 0 });
-    expect(mocks.saveEntry).toHaveBeenCalledWith(shared, "user-a", privateKey, vaultIntegrityKey);
+    expect(mocks.saveEntry).toHaveBeenCalledWith(
+      shared,
+      "user-a",
+      privateKey,
+      vaultIntegrityKey,
+      false,
+      cutoverLease
+    );
   });
 
   it("defers a duplicate folder subtree while reserving its sibling winner", async () => {
@@ -290,21 +382,93 @@ describe("Vault name reservation migration", () => {
       profile,
       vaultIntegrityKey,
       expect.objectContaining({ id: "legacy-folder" }),
-      expect.any(Number)
+      expect.any(Number),
+      undefined,
+      cutoverLease
     );
     expect(mocks.saveEntry).toHaveBeenCalledWith(
       expect.objectContaining({ id: "note-a" }),
       "user-a",
       privateKey,
-      vaultIntegrityKey
+      vaultIntegrityKey,
+      false,
+      cutoverLease
     );
     expect(mocks.saveEntry).toHaveBeenCalledWith(
       expect.objectContaining({ id: "legacy-note" }),
       "user-a",
       privateKey,
-      vaultIntegrityKey
+      vaultIntegrityKey,
+      false,
+      cutoverLease
     );
     expect(progress).toHaveBeenLastCalledWith({ completed: 4, migrated: 4, skipped: 0, total: 4 });
+  });
+
+  it("bounds independent entry migration writes while avoiding a serial waterfall", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    mocks.saveEntry.mockImplementation(async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return { noteId: "saved", revision: 2 };
+    });
+    const notes = Array.from({ length: 24 }, (_, index) => note({
+      id: `bounded-${index}`,
+      title: `Bounded ${index}`
+    }));
+
+    const result = await migrate({
+      folders: [],
+      notes,
+      privateKey,
+      profile,
+      expectedFolderCount: 0,
+      expectedNoteCount: notes.length,
+      vaultIntegrityKey
+    });
+
+    expect(result).toMatchObject({ completed: 24, migrated: 24, skipped: 0 });
+    expect(maximumActive).toBeGreaterThan(1);
+    expect(maximumActive).toBeLessThanOrEqual(4);
+  });
+
+  it("stops dequeuing the current migration batch when the Vault is locked", async () => {
+    const controller = new AbortController();
+    let started = 0;
+    let releaseWrites: (() => void) | undefined;
+    const writeBarrier = new Promise<void>((resolve) => {
+      releaseWrites = resolve;
+    });
+    mocks.saveEntry.mockImplementation(async (...args: unknown[]) => {
+      started += 1;
+      expect(args[6]).toBe(controller.signal);
+      await writeBarrier;
+      return { noteId: "saved", revision: 2 };
+    });
+    const notes = Array.from({ length: 24 }, (_, index) => note({
+      id: `cancelled-${index}`,
+      title: `Cancelled ${index}`
+    }));
+
+    const migration = migrate({
+      folders: [],
+      notes,
+      privateKey,
+      profile,
+      expectedFolderCount: 0,
+      expectedNoteCount: notes.length,
+      signal: controller.signal,
+      vaultIntegrityKey
+    });
+    await vi.waitFor(() => expect(started).toBe(4));
+    controller.abort();
+    releaseWrites?.();
+
+    await expect(migration).rejects.toMatchObject({ name: "AbortError" });
+    expect(started).toBe(4);
   });
 
   it("migrates nested legacy folders parent-first and preserves each parent claim scope", async () => {
@@ -397,7 +561,8 @@ describe("Vault name reservation migration", () => {
       "user-a",
       privateKey,
       vaultIntegrityKey,
-      true
+      true,
+      cutoverLease
     );
   });
 
@@ -464,7 +629,8 @@ describe("Vault name reservation migration", () => {
       legacy,
       profile.uid,
       vaultIntegrityKey,
-      true
+      true,
+      cutoverLease
     );
     expect(mocks.saveEntry).not.toHaveBeenCalled();
   });
@@ -495,8 +661,20 @@ describe("Vault name reservation migration", () => {
     });
 
     expect(result.deferredTargetIds).toEqual([loser.id]);
-    expect(mocks.migrateEntry).toHaveBeenCalledWith(winner, profile.uid, vaultIntegrityKey, true);
-    expect(mocks.migrateEntry).toHaveBeenCalledWith(loser, profile.uid, vaultIntegrityKey, false);
+    expect(mocks.migrateEntry).toHaveBeenCalledWith(
+      winner,
+      profile.uid,
+      vaultIntegrityKey,
+      true,
+      cutoverLease
+    );
+    expect(mocks.migrateEntry).toHaveBeenCalledWith(
+      loser,
+      profile.uid,
+      vaultIntegrityKey,
+      false,
+      cutoverLease
+    );
   });
 
   it("seals a deleted legacy identity without reserving its name", async () => {
@@ -522,7 +700,13 @@ describe("Vault name reservation migration", () => {
     });
 
     expect(result).toMatchObject({ completed: 1, migrated: 1, skipped: 0 });
-    expect(mocks.migrateEntry).toHaveBeenCalledWith(deleted, profile.uid, vaultIntegrityKey, false);
+    expect(mocks.migrateEntry).toHaveBeenCalledWith(
+      deleted,
+      profile.uid,
+      vaultIntegrityKey,
+      false,
+      cutoverLease
+    );
   });
 
   it("audits active claims, deferred identity-only entries, and released trash claims", async () => {

@@ -165,7 +165,12 @@ export interface CreateEncryptedNoteFolderInput {
   nameClaim: VaultNameClaimReservationInput;
 }
 
-export interface UpdateEncryptedNoteFolderInput {
+export interface VaultCutoverLeaseInput {
+  leaseGeneration?: string;
+  leaseId?: string;
+}
+
+export interface UpdateEncryptedNoteFolderInput extends VaultCutoverLeaseInput {
   encryptedName?: EncryptedPayload;
   expectedRevision: number;
   folderId: string;
@@ -174,6 +179,19 @@ export interface UpdateEncryptedNoteFolderInput {
   parentId?: string | null;
   nameClaim: VaultNameClaimReservationInput;
 }
+
+interface ResolveEncryptedNoteFolderCollisionInputBase extends VaultCutoverLeaseInput {
+  expectedRevision: number;
+  folderId: string;
+  nameClaim: VaultNameClaimReservationInput;
+  ownerUid: string;
+}
+
+export type ResolveEncryptedNoteFolderCollisionInput =
+  ResolveEncryptedNoteFolderCollisionInputBase & (
+    | { encryptedName: EncryptedPayload; parentId?: string | null }
+    | { encryptedName?: EncryptedPayload; parentId: string | null }
+  );
 
 export interface RevisionedEncryptedFolderLifecycleInput {
   expectedRevision: number;
@@ -189,10 +207,15 @@ export interface VaultNameClaimReservationInput {
   parentId: string | null;
 }
 
-export interface MigrateLegacyNoteFolderInput extends CreateEncryptedNoteFolderInput {
+export interface MigrateLegacyNoteFolderInput extends CreateEncryptedNoteFolderInput, VaultCutoverLeaseInput {
   expectedName: string;
   folderId: string;
 }
+
+export type ResolveLegacyNoteFolderCollisionInput = Omit<
+  MigrateLegacyNoteFolderInput,
+  "leaseGeneration" | "leaseId"
+>;
 
 export interface CreatedRevisionedNoteResult extends NoteMutationResult {
   noteRef: ReturnType<typeof doc>;
@@ -204,7 +227,7 @@ export interface CreateSecureShareCopyingNoteInput extends SaveNoteInput {
   noteId: string;
 }
 
-export interface MigrateLegacyVaultNoteInput {
+export interface MigrateLegacyVaultNoteInput extends VaultCutoverLeaseInput {
   expectedContentFormat: "legacy-html-v1";
   expectedEntryKind: "legacy-html";
   expectedRevision: number;
@@ -237,7 +260,7 @@ export interface UpdateRevisionedEncryptedNoteInput {
   nameClaim?: VaultNameClaimReservationInput;
 }
 
-export interface BackfillRevisionedVaultNameClaimInput {
+export interface BackfillRevisionedVaultNameClaimInput extends VaultCutoverLeaseInput {
   expectedContentFormat: VaultContentFormat;
   expectedEntryKind: VaultEntryKind;
   expectedRevision: number;
@@ -248,7 +271,7 @@ export interface BackfillRevisionedVaultNameClaimInput {
   uid: string;
 }
 
-export interface ResolveRevisionedVaultNameCollisionInput {
+export interface ResolveRevisionedVaultNameCollisionInput extends VaultCutoverLeaseInput {
   changedFields: Array<"folder" | "name-claim" | "title">;
   encryptedTitle?: EncryptedPayload;
   expectedContentFormat: VaultContentFormat;
@@ -338,10 +361,13 @@ const maxEncryptedVaultFoldersPerOwner = 2_000;
 async function commitVaultFolderMutation(
   ownerUid: string,
   payload: Parameters<typeof mutateVaultFolder>[1],
-  claimId?: string
+  claimId?: string,
+  signal?: AbortSignal
 ) {
   try {
-    return await mutateVaultFolder(ownerUid, payload);
+    return await (signal
+      ? mutateVaultFolder(ownerUid, payload, signal)
+      : mutateVaultFolder(ownerUid, payload));
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error
       ? String(error.code)
@@ -359,10 +385,12 @@ async function commitVaultFolderMutation(
 async function commitServerVaultNoteMutation<TPayload extends VaultNoteApiPayload>(
   ownerUid: string,
   payload: TPayload,
-  options: { claimId?: string; expectedRevision?: number } = {}
+  options: { claimId?: string; expectedRevision?: number; signal?: AbortSignal } = {}
 ): Promise<VaultNoteMutationResultFor<TPayload>> {
   try {
-    return await mutateVaultNote(ownerUid, payload);
+    return await (options.signal
+      ? mutateVaultNote(ownerUid, payload, options.signal)
+      : mutateVaultNote(ownerUid, payload));
   } catch (error) {
     if (error instanceof VaultNoteApiError) {
       if (error.code === "vault_name_conflict" && options.claimId) {
@@ -1400,7 +1428,10 @@ export async function activateSecureShareCopyingNote(
   return { noteId: result.noteId, state: result.state };
 }
 
-export async function migrateLegacyVaultNote(input: MigrateLegacyVaultNoteInput) {
+export async function migrateLegacyVaultNote(
+  input: MigrateLegacyVaultNoteInput,
+  signal?: AbortSignal
+) {
   if (
     input.expectedContentFormat !== "legacy-html-v1"
     || input.expectedEntryKind !== "legacy-html"
@@ -1413,7 +1444,8 @@ export async function migrateLegacyVaultNote(input: MigrateLegacyVaultNoteInput)
     vaultNoteMigrateLegacyPayload({ ...input, expectedRevision }),
     {
       claimId: input.nameClaim?.claimId,
-      expectedRevision
+      expectedRevision,
+      signal
     }
   );
   return {
@@ -1448,7 +1480,8 @@ export async function updateRevisionedEncryptedNote(input: UpdateRevisionedEncry
  * this keeps historical data intact while still recording a revision event.
  */
 export async function backfillRevisionedVaultNameClaim(
-  input: BackfillRevisionedVaultNameClaimInput
+  input: BackfillRevisionedVaultNameClaimInput,
+  signal?: AbortSignal
 ) {
   const expectedRevision = expectedNoteRevision(input.expectedRevision);
   const { uid, ...payload } = input;
@@ -1458,7 +1491,8 @@ export async function backfillRevisionedVaultNameClaim(
     expectedRevision
   }, {
     claimId: input.nameClaim.claimId,
-    expectedRevision
+    expectedRevision,
+    signal
   });
 }
 
@@ -2113,7 +2147,10 @@ export async function createEncryptedNoteFolderAtId(
   return folderRef;
 }
 
-export async function updateEncryptedNoteFolder(input: UpdateEncryptedNoteFolderInput) {
+export async function updateEncryptedNoteFolder(
+  input: UpdateEncryptedNoteFolderInput,
+  signal?: AbortSignal
+) {
   expectedNoteRevision(input.expectedRevision);
   if (!input.folderId || input.folderId.length > 120 || input.folderId.includes("/")) {
     throw new Error("폴더 식별자가 올바르지 않습니다.");
@@ -2142,17 +2179,111 @@ export async function updateEncryptedNoteFolder(input: UpdateEncryptedNoteFolder
     action: input.parentId === undefined ? "update" : "move",
     expectedRevision: input.expectedRevision,
     folderId: input.folderId,
+    ...(input.leaseId === undefined ? {} : {
+      leaseGeneration: input.leaseGeneration,
+      leaseId: input.leaseId
+    }),
     nameClaim,
     ...(input.encryptedName === undefined ? {} : { encryptedName: input.encryptedName }),
     ...(input.order === undefined ? {} : { order: input.order }),
     ...(input.parentId === undefined ? {} : { parentId: input.parentId })
-  }, nameClaim.claimId);
+  }, nameClaim.claimId, signal);
 }
 
-export async function migrateLegacyNoteFolder(input: MigrateLegacyNoteFolderInput) {
+export async function resolveEncryptedNoteFolderCollision(
+  input: ResolveEncryptedNoteFolderCollisionInput
+) {
+  if (
+    !Number.isSafeInteger(input.expectedRevision)
+    || input.expectedRevision < 1
+    || input.expectedRevision > maxNoteRevision
+  ) {
+    throw new RangeError(`예상 폴더 revision은 1 이상 ${maxNoteRevision} 이하의 정수여야 합니다.`);
+  }
+  if (!input.folderId || input.folderId.length > 120 || input.folderId.includes("/")) {
+    throw new Error("폴더 식별자가 올바르지 않습니다.");
+  }
+  if (input.encryptedName) {
+    assertEncryptedPayloadSize(input.encryptedName, "폴더 이름", 2_048);
+  }
+  if (input.encryptedName === undefined && input.parentId === undefined) {
+    throw new Error("폴더 이름 충돌을 해결하려면 이름 또는 위치를 변경해주세요.");
+  }
+  if (
+    input.parentId !== undefined
+    && input.parentId !== null
+    && (!input.parentId || input.parentId.length > 120 || input.parentId.includes("/"))
+  ) {
+    throw new Error("상위 폴더 식별자가 올바르지 않습니다.");
+  }
+  const nameClaim = assertVaultNameClaim(
+    input.nameClaim,
+    input.parentId === undefined ? input.nameClaim.parentId : input.parentId
+  );
+  const mutationBase = {
+    action: "resolve-collision",
+    expectedRevision: input.expectedRevision,
+    folderId: input.folderId,
+    ...(input.leaseId === undefined ? {} : {
+      leaseGeneration: input.leaseGeneration,
+      leaseId: input.leaseId
+    }),
+    nameClaim
+  } as const;
+  let mutation: Parameters<typeof mutateVaultFolder>[1];
+  if (input.encryptedName !== undefined) {
+    mutation = {
+      ...mutationBase,
+      encryptedName: input.encryptedName,
+      ...(input.parentId === undefined ? {} : { parentId: input.parentId })
+    };
+  } else {
+    if (input.parentId === undefined) {
+      throw new Error("폴더 이름 충돌을 해결하려면 이름 또는 위치를 변경해주세요.");
+    }
+    mutation = {
+      ...mutationBase,
+      parentId: input.parentId
+    };
+  }
+  return commitVaultFolderMutation(input.ownerUid, mutation, nameClaim.claimId);
+}
+
+export async function migrateLegacyNoteFolder(
+  input: MigrateLegacyNoteFolderInput,
+  signal?: AbortSignal
+) {
   const nameClaim = assertVaultNameClaim(input.nameClaim, input.parentId);
   return commitVaultFolderMutation(input.ownerUid, {
     action: "migrate",
+    color: input.color,
+    encryptedName: input.encryptedName,
+    expectedName: input.expectedName,
+    folderId: input.folderId,
+    ...(input.leaseId === undefined ? {} : {
+      leaseGeneration: input.leaseGeneration,
+      leaseId: input.leaseId
+    }),
+    nameClaim,
+    order: input.order,
+    parentId: input.parentId,
+    wrappedKey: input.wrappedKey
+  }, nameClaim.claimId, signal);
+}
+
+/**
+ * Encrypts and claims a deferred legacy collision loser atomically. Unlike the
+ * bulk migrate action this explicit owner repair is intentionally lease-free,
+ * so the user can rename or move the blocked folder after the bulk lease has
+ * been released.
+ */
+export async function resolveLegacyNoteFolderCollision(
+  input: ResolveLegacyNoteFolderCollisionInput,
+  signal?: AbortSignal
+) {
+  const nameClaim = assertVaultNameClaim(input.nameClaim, input.parentId);
+  return commitVaultFolderMutation(input.ownerUid, {
+    action: "resolve-collision",
     color: input.color,
     encryptedName: input.encryptedName,
     expectedName: input.expectedName,
@@ -2161,7 +2292,7 @@ export async function migrateLegacyNoteFolder(input: MigrateLegacyNoteFolderInpu
     order: input.order,
     parentId: input.parentId,
     wrappedKey: input.wrappedKey
-  }, nameClaim.claimId);
+  }, nameClaim.claimId, signal);
 }
 
 export async function deleteNoteFolder(uid: string, folderId: string, noteIds: string[] = []) {

@@ -230,9 +230,23 @@ describe("Vault note mutation API client", () => {
     }));
 
     await expect(mutateVaultNote(uid, updatePayload)).rejects.toMatchObject({
-      code: "request_failed",
+      code: "invalid_response",
       status: 200
     });
+  });
+
+  it("rejects malformed or action-mismatched success bodies", async () => {
+    for (const payload of [
+      { lastMutationId: "history-a", noteId: "different-note", ok: true, revision: 5 },
+      { lastMutationId: "history-a", noteId: "note-a", ok: true, revision: "5" },
+      { lastMutationId: "history-a", noteId: "note-a", ok: true, revision: 5, state: "active" }
+    ]) {
+      vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(payload));
+      await expect(mutateVaultNote(uid, updatePayload)).rejects.toMatchObject({
+        code: "invalid_response",
+        status: 200
+      });
+    }
   });
 
   it("preserves AbortSignal cancellation rather than converting it to a retryable error", async () => {

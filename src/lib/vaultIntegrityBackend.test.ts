@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { logVaultApiRejection } from "../../api/_vault-api-observability.js";
 import {
   parseVaultIntegrityMarker,
-  requireVaultIntegrityMarker
+  requireVaultCutoverLease,
+  requireVaultIntegrityMarker,
+  vaultCutoverLeaseCredential
 } from "../../api/_vault-integrity-marker.js";
 import { __vaultIntegrityTesting } from "../../api/vault-integrity.js";
 
@@ -30,6 +32,17 @@ const readyMarker = {
   cutoverState: "ready",
   cutoverVersion: 1,
   verifiedAt: timestamp
+};
+const leaseId = "l".repeat(43);
+const leaseGeneration = "g".repeat(43);
+const leaseCredential = vaultCutoverLeaseCredential(leaseId, leaseGeneration);
+const leasedPendingMarker = {
+  ...pendingMarker,
+  cutoverLeaseAcquiredAt: timestamp,
+  cutoverLeaseExpiresAt: "2026-08-23T00:01:30.000Z",
+  cutoverLeaseGeneration: leaseGeneration,
+  cutoverLeaseHash: leaseCredential.hash,
+  cutoverLeaseVersion: 1
 };
 
 function claimId(index: number) {
@@ -110,9 +123,20 @@ describe("Vault integrity marker backend contract", () => {
   it("strictly distinguishes legacy, pending, and ready markers", () => {
     expect(parseVaultIntegrityMarker(legacyMarker, uid)).toMatchObject({ legacy: true, state: "pending" });
     expect(parseVaultIntegrityMarker(pendingMarker, uid)).toMatchObject({ legacy: false, state: "pending" });
+    expect(parseVaultIntegrityMarker(leasedPendingMarker, uid)).toMatchObject({
+      lease: { generation: leaseGeneration, hash: leaseCredential.hash, version: 1 },
+      legacy: false,
+      state: "pending"
+    });
     expect(parseVaultIntegrityMarker(readyMarker, uid)).toMatchObject({ legacy: false, state: "ready" });
     expect(requireVaultIntegrityMarker(readyMarker, uid, "ready")).toMatchObject({ state: "ready" });
     expectConflict(() => requireVaultIntegrityMarker(pendingMarker, uid, "ready"), "vault_integrity_not_ready");
+    expect(requireVaultCutoverLease(
+      leasedPendingMarker,
+      uid,
+      leaseCredential,
+      Date.parse("2026-08-23T00:00:30.000Z")
+    )).toMatchObject({ state: "pending" });
   });
 
   it.each([
@@ -120,6 +144,8 @@ describe("Vault integrity marker backend contract", () => {
     ["legacy cutover state without version", { ...legacyMarker, cutoverState: "pending" }],
     ["legacy cutover version without state", { ...legacyMarker, cutoverVersion: 1 }],
     ["pending extra field", { ...pendingMarker, extra: true }],
+    ["leased pending raw token", { ...leasedPendingMarker, cutoverLeaseId: leaseId }],
+    ["leased pending invalid generation", { ...leasedPendingMarker, cutoverLeaseGeneration: "short" }],
     ["pending with ready state but no attestation", { ...pendingMarker, cutoverState: "ready" }],
     ["ready without verifiedAt", { ...readyMarker, verifiedAt: undefined }],
     ["ready with an invalid verifiedAt", { ...readyMarker, verifiedAt: "not-a-timestamp" }],

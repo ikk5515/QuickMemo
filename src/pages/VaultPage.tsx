@@ -35,6 +35,7 @@ import {
   X
 } from "lucide-react";
 import {
+  type CSSProperties,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
@@ -142,7 +143,6 @@ import {
   type VaultIndexEntry
 } from "../features/knowledge";
 import {
-  MarkdownMessageBatchDialog,
   MarkdownRenderer,
   exportMarkdown,
   exportMarkdownForDiscordAi,
@@ -196,7 +196,7 @@ import {
   type VaultWorkspacePaneNode,
   type VaultWorkspaceSplitDirection
 } from "../features/vault/workspaceLayout";
-import { VaultTrashDialog, type VaultTrashFolderItem } from "../features/vault/VaultTrashDialog";
+import type { VaultTrashFolderItem } from "../features/vault/VaultTrashDialog";
 import {
   partitionVaultFolderTrash,
   vaultFolderTrashCounts,
@@ -235,6 +235,7 @@ import {
   type QuickSwitcherItem
 } from "../features/vault/navigation";
 import { previewTextFromHtml } from "../lib/editorContent";
+import { FeatureErrorBoundary } from "../components/FeatureErrorBoundary";
 import { registerPrivateKeyAutoLockGuard } from "../lib/privateKeyAutoLockGuard";
 import {
   buildVaultPaths,
@@ -264,9 +265,14 @@ import {
 } from "../features/vault/vaultIntegrity";
 import { requireValidProposedVaultFolderTree } from "../features/vault/vaultFolderPreflight";
 import {
+  DEFAULT_VAULT_RIGHT_PANEL_WIDTH,
+  MIN_VAULT_RIGHT_PANEL_WIDTH,
   captureVaultWorkspaceLayout,
+  clampVaultRightPanelWidth,
+  clampVaultRightPanelWidthForViewport,
   createDefaultVaultWorkspaceState,
   flushLatestWorkspaceState,
+  maxVaultRightPanelWidthForViewport,
   normalizeVaultWorkspaceState,
   restoreVaultWorkspaceLayout,
   vaultWorkspaceLayoutFitsEncryptedDocument,
@@ -302,9 +308,15 @@ import {
 import { subscribeUsers } from "../services/users";
 import {
   activatePreparedVaultIntegrityKey,
+  createVaultIntegrityCutoverLeaseId,
   prepareVaultIntegrityKey,
+  reconcilePendingVaultIntegrityClaims,
+  releaseVaultIntegrityCutoverLease,
+  renewVaultIntegrityCutoverLease,
   sealVaultIntegrityCutover,
-  type PreparedVaultIntegrityKey
+  type PreparedVaultIntegrityKey,
+  type VaultIntegrityCutoverLease,
+  VaultIntegrityApiError
 } from "../services/vaultIntegrity";
 import {
   activateVaultPathRewriteJob,
@@ -349,6 +361,9 @@ const LazyCodeMirrorMarkdownEditor = lazy(() => import("../features/vault/CodeMi
 const LazyDataviewBlock = lazy(() => import("../features/dataview/DataviewBlock").then((module) => ({
   default: module.DataviewBlock
 })));
+const LazyMarkdownMessageBatchDialog = lazy(() => import("../features/markdown/MarkdownMessageBatchDialog").then((module) => ({
+  default: module.MarkdownMessageBatchDialog
+})));
 const LazyDrawingView = lazy(() => import("../features/drawing/DrawingView").then((module) => ({
   default: module.DrawingView
 })));
@@ -381,6 +396,9 @@ const LazyTemplatePickerDialog = lazy(() => import("../features/templater/Templa
 })));
 const LazyVaultHistoryPanel = lazy(() => import("../features/vault/VaultHistoryPanel").then((module) => ({
   default: module.VaultHistoryPanel
+})));
+const LazyVaultTrashDialog = lazy(() => import("../features/vault/VaultTrashDialog").then((module) => ({
+  default: module.VaultTrashDialog
 })));
 const LazyVaultImportRecoveryPanel = lazy(() => import("../features/vault/VaultImportRecoveryPanel").then((module) => ({
   default: module.VaultImportRecoveryPanel
@@ -576,6 +594,57 @@ function DailyNotesSettings({
 
 type LeftPanelMode = "files" | "search" | "tags" | "bookmarks";
 type RightPanelMode = "backlinks" | "outgoing" | "properties" | "outline" | "local-graph" | "history";
+
+async function resolveDeferredVaultFolderCollision(
+  folder: DecryptedVaultFolder,
+  profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
+  privateKey: CryptoKey,
+  vaultIntegrityKey: CryptoKey,
+  replacement: { name: string; parentId: string | null }
+) {
+  const { resolveVaultFolderNameCollision } = await import(
+    "../features/vault/vaultFolderCollisionRecovery"
+  );
+  return resolveVaultFolderNameCollision(
+    folder,
+    profile,
+    privateKey,
+    vaultIntegrityKey,
+    replacement
+  );
+}
+
+async function resolveDeferredVaultEntryCollision(
+  note: DecryptedVaultNote,
+  uid: string,
+  privateKey: CryptoKey,
+  vaultIntegrityKey: CryptoKey,
+  replacement: { folderId: string | null; title: string }
+) {
+  const { resolveVaultEntryNameCollision } = await import(
+    "../features/vault/vaultEntryCollisionRecovery"
+  );
+  return resolveVaultEntryNameCollision(
+    note,
+    uid,
+    privateKey,
+    vaultIntegrityKey,
+    replacement
+  );
+}
+
+const RIGHT_PANEL_TABS = [
+  { icon: Link2, label: "백링크", mode: "backlinks" },
+  { icon: GitFork, label: "나가는 링크", mode: "outgoing" },
+  { icon: ListTree, label: "목차", mode: "outline" },
+  { icon: Hash, label: "속성", mode: "properties" },
+  { icon: Network, label: "로컬 그래프", mode: "local-graph" },
+  { icon: History, label: "File Recovery", mode: "history" }
+] as const satisfies ReadonlyArray<{
+  icon: typeof Link2;
+  label: string;
+  mode: RightPanelMode;
+}>;
 type VaultCoreToolId = "audio" | "footnotes" | "format" | "composer" | "slides" | "web";
 type WorkspaceTab =
   | { id: string; kind: "entry"; entryId: string; instanceId?: WorkspaceTabGroupId; label: string; pinned?: boolean }
@@ -1126,6 +1195,7 @@ function workspaceStateForSave(input: {
   namedWorkspaces: PersistedNamedWorkspace[];
   rightMode: RightPanelMode;
   rightOpen: boolean;
+  rightPanelWidth: number;
   searchQuery: string;
   searchBookmarks: PersistedSearchBookmark[];
   selectedFolderId: string | null;
@@ -1164,7 +1234,11 @@ function workspaceStateForSave(input: {
       safeTabGroups.map((group) => group.id)
     ),
     left: { open: input.leftOpen, mode: input.leftMode },
-    right: { open: input.rightOpen, mode: input.rightMode },
+    right: {
+      open: input.rightOpen,
+      mode: input.rightMode,
+      width: clampVaultRightPanelWidth(input.rightPanelWidth)
+    },
     selectedFolderId: input.selectedFolderId,
     expandedFolderIds: [...input.expandedFolderIds],
     searchQuery: input.searchQuery,
@@ -1438,9 +1512,19 @@ function UnlockedVaultPage({
   const [vaultNameMigrationProgress, setVaultNameMigrationProgress] = useState<VaultNameMigrationProgressState | null>(null);
   const [vaultNameMigrationFailure, setVaultNameMigrationFailure] = useState<string | null>(null);
   const [vaultIntegrityRetryAttempt, setVaultIntegrityRetryAttempt] = useState(0);
+  const LazyVaultNameIntegrityNotice = useMemo(() => {
+    void vaultIntegrityRetryAttempt;
+    return lazy(() => import("../features/vault/VaultNameIntegrityNotice"));
+  }, [vaultIntegrityRetryAttempt]);
+  const [vaultNameMigrationResumeAttempt, setVaultNameMigrationResumeAttempt] = useState(0);
   const vaultNameMigrationStatusRef = useRef<VaultNameMigrationStatus>("checking");
   vaultNameMigrationStatusRef.current = vaultNameMigrationStatus;
   const [vaultNameCollisionTargetIds, setVaultNameCollisionTargetIds] = useState<Set<string>>(new Set());
+  const [vaultNameCollisionRepairTargetIds, setVaultNameCollisionRepairTargetIds] = useState<Set<string>>(new Set());
+  const [vaultNameCollisionRepairBusy, setVaultNameCollisionRepairBusy] = useState(false);
+  const vaultNameCollisionRepairBusyRef = useRef(false);
+  const vaultNameCollisionRepairTargetIdsRef = useRef(vaultNameCollisionRepairTargetIds);
+  vaultNameCollisionRepairTargetIdsRef.current = vaultNameCollisionRepairTargetIds;
   const [noteServerReservationSignature, setNoteServerReservationSignature] = useState<string | null>(null);
   const [folderServerReservationSignature, setFolderServerReservationSignature] = useState<string | null>(null);
   const notesRef = useRef<DecryptedVaultNote[]>(notes);
@@ -1462,6 +1546,11 @@ function UnlockedVaultPage({
   const [rightMode, setRightMode] = useState<RightPanelMode>("backlinks");
   const [leftOpen, setLeftOpen] = useState(() => !mobileVaultLayoutSnapshot());
   const [rightOpen, setRightOpen] = useState(() => !mobileVaultLayoutSnapshot());
+  const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_VAULT_RIGHT_PANEL_WIDTH);
+  const vaultViewportWidth = (
+    typeof window === "undefined" ? 1_440 : window.innerWidth
+  );
+  const [vaultWorkspaceWidth, setVaultWorkspaceWidth] = useState(vaultViewportWidth);
   const [searchQuery, setSearchQuery] = useState("");
   const [entryBookmarks, setEntryBookmarks] = useState<PersistedEntryBookmark[]>([]);
   const [searchBookmarks, setSearchBookmarks] = useState<PersistedSearchBookmark[]>([]);
@@ -1583,8 +1672,16 @@ function UnlockedVaultPage({
   const compactCalendarDialogRef = useRef<HTMLElement>(null);
   const compactCalendarToggleRef = useRef<HTMLButtonElement>(null);
   const compactCalendarReturnFocusRef = useRef<HTMLElement | null>(null);
+  const vaultWorkspaceRef = useRef<HTMLDivElement>(null);
   const leftPanelRef = useRef<HTMLElement>(null);
   const rightPanelRef = useRef<HTMLElement>(null);
+  const rightPanelResizeRef = useRef<{
+    frameId: number | null;
+    pendingWidth: number;
+    pointerId: number;
+    startClientX: number;
+    startWidth: number;
+  } | null>(null);
   const leftPanelToggleRef = useRef<HTMLButtonElement>(null);
   const rightPanelToggleRef = useRef<HTMLButtonElement>(null);
   const mobileDrawerReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -1612,6 +1709,7 @@ function UnlockedVaultPage({
   const vaultNameMigrationGenerationRef = useRef(0);
   const vaultNameMigrationPromiseRef = useRef<Promise<void> | null>(null);
   const vaultIntegritySealAbortRef = useRef<AbortController | null>(null);
+  const vaultIntegrityBusyRetryTimerRef = useRef<number | null>(null);
   const workspaceSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const workspaceSaveGenerationRef = useRef(0);
   const workspaceSaveDebounceTimerRef = useRef<number | null>(null);
@@ -1644,6 +1742,30 @@ function UnlockedVaultPage({
   const mobileLayout = useMobileVaultLayout();
   const compactCalendarLayout = useCompactCalendarLayout();
   const isOnline = useOnlineStatus();
+  const rightPanelMaxWidth = maxVaultRightPanelWidthForViewport(
+    vaultViewportWidth,
+    leftOpen,
+    vaultWorkspaceWidth
+  );
+  const effectiveRightPanelWidth = clampVaultRightPanelWidthForViewport(
+    rightPanelWidth,
+    vaultViewportWidth,
+    leftOpen,
+    vaultWorkspaceWidth
+  );
+  useLayoutEffect(() => {
+    const workspace = vaultWorkspaceRef.current;
+    if (!workspace) return;
+    const updateViewportWidth = () => setVaultWorkspaceWidth(workspace.clientWidth || window.innerWidth);
+    updateViewportWidth();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateViewportWidth);
+      return () => window.removeEventListener("resize", updateViewportWidth);
+    }
+    const resizeObserver = new ResizeObserver(updateViewportWidth);
+    resizeObserver.observe(workspace);
+    return () => resizeObserver.disconnect();
+  }, []);
   useEffect(() => {
     vaultPageMountedRef.current = true;
     return () => {
@@ -1822,6 +1944,7 @@ function UnlockedVaultPage({
     namedWorkspaces,
     rightMode,
     rightOpen: mobileLayout ? desktopRightOpenRef.current : rightOpen,
+    rightPanelWidth,
     searchQuery,
     searchBookmarks,
     selectedFolderId,
@@ -2097,6 +2220,7 @@ function UnlockedVaultPage({
     const restorePanels = !mobileVaultLayoutSnapshot();
     setLeftOpen(restorePanels && restored.left.open);
     setRightMode(restored.right.mode);
+    setRightPanelWidth(restored.right.width);
     setRightOpen(restorePanels && restored.right.open);
     setSelectedFolderId(restored.selectedFolderId);
     setExpandedFolderIds(new Set(restored.expandedFolderIds));
@@ -2268,6 +2392,85 @@ function UnlockedVaultPage({
     pendingMobileDrawerFocusRef.current = target?.isConnected ? target : null;
   }, []);
 
+  const clampRightPanelWidthForCurrentLayout = useCallback((requestedWidth: number) => (
+    clampVaultRightPanelWidthForViewport(
+      requestedWidth,
+      vaultViewportWidth,
+      leftOpen,
+      vaultWorkspaceWidth
+    )
+  ), [leftOpen, vaultViewportWidth, vaultWorkspaceWidth]);
+
+  const queueRightPanelResize = useCallback((requestedWidth: number) => {
+    const resize = rightPanelResizeRef.current;
+    if (!resize) return;
+    resize.pendingWidth = clampRightPanelWidthForCurrentLayout(requestedWidth);
+    if (resize.frameId !== null) return;
+    resize.frameId = window.requestAnimationFrame(() => {
+      const activeResize = rightPanelResizeRef.current;
+      if (!activeResize) return;
+      activeResize.frameId = null;
+      vaultWorkspaceRef.current?.style.setProperty(
+        "--vault-right-panel-width",
+        `${activeResize.pendingWidth}px`
+      );
+    });
+  }, [clampRightPanelWidthForCurrentLayout]);
+
+  const beginRightPanelResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (mobileLayout || event.button !== 0) return;
+    event.preventDefault();
+    const previous = rightPanelResizeRef.current;
+    if (previous?.frameId !== null && previous?.frameId !== undefined) {
+      window.cancelAnimationFrame(previous.frameId);
+    }
+    rightPanelResizeRef.current = {
+      frameId: null,
+      pendingWidth: effectiveRightPanelWidth,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startWidth: effectiveRightPanelWidth
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [effectiveRightPanelWidth, mobileLayout]);
+
+  const moveRightPanelResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const resize = rightPanelResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    queueRightPanelResize(resize.startWidth + resize.startClientX - event.clientX);
+  }, [queueRightPanelResize]);
+
+  const finishRightPanelResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const resize = rightPanelResizeRef.current;
+    if (!resize || resize.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const width = event.type === "pointercancel" || event.type === "lostpointercapture"
+      ? resize.pendingWidth
+      : clampRightPanelWidthForCurrentLayout(
+          resize.startWidth + resize.startClientX - event.clientX
+        );
+    if (resize.frameId !== null) window.cancelAnimationFrame(resize.frameId);
+    rightPanelResizeRef.current = null;
+    vaultWorkspaceRef.current?.style.setProperty("--vault-right-panel-width", `${width}px`);
+    setRightPanelWidth(width);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, [clampRightPanelWidthForCurrentLayout]);
+
+  const handleRightPanelResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 40 : 10;
+    let requestedWidth: number | null = null;
+    if (event.key === "ArrowLeft") requestedWidth = effectiveRightPanelWidth + step;
+    if (event.key === "ArrowRight") requestedWidth = effectiveRightPanelWidth - step;
+    if (event.key === "Home") requestedWidth = MIN_VAULT_RIGHT_PANEL_WIDTH;
+    if (event.key === "End") requestedWidth = rightPanelMaxWidth;
+    if (requestedWidth === null) return;
+    event.preventDefault();
+    setRightPanelWidth(clampRightPanelWidthForCurrentLayout(requestedWidth));
+  }, [clampRightPanelWidthForCurrentLayout, effectiveRightPanelWidth, rightPanelMaxWidth]);
+
   const closeLeftPanel = useCallback(() => {
     setLeftOpen(false);
     if (mobileLayout) restoreMobileDrawerFocus(leftPanelToggleRef.current);
@@ -2437,6 +2640,11 @@ function UnlockedVaultPage({
     importAbortRef.current?.abort();
     importAbortRef.current = null;
     decodedAssetCacheRef.current.clear();
+    const rightPanelResize = rightPanelResizeRef.current;
+    if (rightPanelResize?.frameId !== null && rightPanelResize?.frameId !== undefined) {
+      window.cancelAnimationFrame(rightPanelResize.frameId);
+    }
+    rightPanelResizeRef.current = null;
     if (knowledgeSyncRetryTimerRef.current !== null) {
       window.clearTimeout(knowledgeSyncRetryTimerRef.current);
       knowledgeSyncRetryTimerRef.current = null;
@@ -2516,6 +2724,10 @@ function UnlockedVaultPage({
     let active = true;
     const migrationGeneration = vaultNameMigrationGenerationRef.current + 1;
     vaultNameMigrationGenerationRef.current = migrationGeneration;
+    if (vaultIntegrityBusyRetryTimerRef.current !== null) {
+      window.clearTimeout(vaultIntegrityBusyRetryTimerRef.current);
+      vaultIntegrityBusyRetryTimerRef.current = null;
+    }
     vaultIntegritySealAbortRef.current?.abort();
     vaultIntegritySealAbortRef.current = null;
     vaultNameMigrationPromiseRef.current = null;
@@ -2524,10 +2736,15 @@ function UnlockedVaultPage({
     setVaultNameMigrationProgress(null);
     setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
+    setVaultNameCollisionRepairTargetIds(new Set());
     if (!isOnline) {
       setVaultNameMigrationStatus("waiting");
       return () => {
         active = false;
+        if (vaultIntegrityBusyRetryTimerRef.current !== null) {
+          window.clearTimeout(vaultIntegrityBusyRetryTimerRef.current);
+          vaultIntegrityBusyRetryTimerRef.current = null;
+        }
         if (vaultNameMigrationGenerationRef.current === migrationGeneration) {
           vaultNameMigrationGenerationRef.current += 1;
         }
@@ -2560,6 +2777,10 @@ function UnlockedVaultPage({
       });
     return () => {
       active = false;
+      if (vaultIntegrityBusyRetryTimerRef.current !== null) {
+        window.clearTimeout(vaultIntegrityBusyRetryTimerRef.current);
+        vaultIntegrityBusyRetryTimerRef.current = null;
+      }
       if (vaultNameMigrationGenerationRef.current === migrationGeneration) {
         vaultNameMigrationGenerationRef.current += 1;
       }
@@ -2945,101 +3166,227 @@ function UnlockedVaultPage({
     setVaultNameMigrationProgress({ completed: 0, migrated: 0, skipped: 0, total: 0 });
     setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
+    setVaultNameCollisionRepairTargetIds(new Set());
     setStatus("암호화된 이름 예약을 한 번 확인하는 중입니다…");
 
     const pending = (async () => {
       const {
         migrateVaultNameReservations,
-        preflightVaultNameCutover
+        preflightVaultNameCutover,
+        vaultNameCollisionRepairTargetIds
       } = await import("../features/vault/vaultNameMigration");
       const currentProfile = vaultIntegrityProfileRef.current;
-      const inventory = await loadOwnedVaultCutoverInventory(currentProfile.uid);
-      if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
-        return { kind: "cancelled" } as const;
-      }
-      if (!folderSubscriptionServerReadyRef.current) {
-        throw new Error("서버의 전체 Vault 폴더 목록을 아직 확인하지 못했습니다.");
-      }
-      const ownedFolderSnapshots = activeFolderSnapshotsRef.current
-        .filter((folder) => folder.ownerUid === currentProfile.uid);
+      const migrationCancelled = () => (
+        vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted
+      );
       let activeIntegrityKey = preparedVaultIntegrityKey.key;
-      let preflight = await preflightVaultNameCutover({
-        activeNotes: inventory.activeNotes,
-        deletedNotes: inventory.deletedNotes,
-        folders: ownedFolderSnapshots,
-        privateKey,
-        uid: currentProfile.uid,
-        vaultIntegrityKey: activeIntegrityKey
-      });
-      if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
-        return { kind: "cancelled" } as const;
-      }
-
+      // A brand-new Vault must prove that its complete owner inventory is
+      // decryptable before the first integrity marker write. Existing pending
+      // Vaults already crossed that boundary and can reconcile stale blinded
+      // reservations before loading a fresh migration inventory.
       if (preparedVaultIntegrityKey.state === "candidate") {
-        const activated = await activatePreparedVaultIntegrityKey(preparedVaultIntegrityKey, privateKey);
-        activeIntegrityKey = activated.key;
-        if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
+        const candidateInventory = await loadOwnedVaultCutoverInventory(currentProfile.uid);
+        if (migrationCancelled()) {
           return { kind: "cancelled" } as const;
         }
-        if (activated.keyChanged && activated.cutoverState === "ready") {
+        if (!folderSubscriptionServerReadyRef.current) {
+          throw new Error("서버의 전체 Vault 폴더 목록을 아직 확인하지 못했습니다.");
+        }
+        await preflightVaultNameCutover({
+          activeNotes: candidateInventory.activeNotes,
+          deletedNotes: candidateInventory.deletedNotes,
+          folders: activeFolderSnapshotsRef.current.filter(
+            (folder) => folder.ownerUid === currentProfile.uid
+          ),
+          privateKey,
+          uid: currentProfile.uid,
+          vaultIntegrityKey: activeIntegrityKey
+        });
+      }
+
+      const activated = await activatePreparedVaultIntegrityKey(
+        preparedVaultIntegrityKey,
+        privateKey
+      );
+      activeIntegrityKey = activated.key;
+      if (migrationCancelled()) {
+        return { kind: "cancelled" } as const;
+      }
+      if (activated.cutoverState === "ready") {
+        return { key: activeIntegrityKey, kind: "already-ready" } as const;
+      }
+
+      const leaseId = createVaultIntegrityCutoverLeaseId();
+      let cutoverLease: VaultIntegrityCutoverLease | null = null;
+      let leaseLastConfirmedAt = 0;
+      const renewCutoverLeaseBetweenBatches = async () => {
+        if (migrationCancelled()) {
+          throw new Error("Vault 무결성 확인이 취소되었습니다.");
+        }
+        if (!cutoverLease) {
+          throw new Error("Vault 무결성 임대 상태를 확인할 수 없습니다.");
+        }
+        // Renewal is serialized between mutation batches. An interval update
+        // could invalidate the marker updateTime read by an in-flight fenced
+        // note/folder transaction and create an avoidable abort loop.
+        if (Date.now() - leaseLastConfirmedAt < 25_000) return;
+        const renewed = await renewVaultIntegrityCutoverLease(
+          currentProfile.uid,
+          cutoverLease,
+          controller.signal
+        );
+        if (renewed.state === "ready") {
+          throw new VaultIntegrityApiError("vault_cutover_complete", 409);
+        }
+        leaseLastConfirmedAt = Date.now();
+      };
+
+      try {
+        const reconcilePendingClaims = async () => {
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            try {
+              const reconciled = await reconcilePendingVaultIntegrityClaims(
+                currentProfile.uid,
+                leaseId,
+                controller.signal
+              );
+              cutoverLease = {
+                leaseGeneration: reconciled.leaseGeneration,
+                leaseId
+              };
+              leaseLastConfirmedAt = Date.now();
+              return reconciled;
+            } catch (caught) {
+              if (
+                caught instanceof VaultIntegrityApiError
+                && caught.code === "vault_cutover_complete"
+              ) {
+                return null;
+              }
+              if (
+                caught instanceof VaultIntegrityApiError
+                && caught.code === "vault_cutover_changed"
+                && attempt < 1
+              ) {
+                continue;
+              }
+              throw caught;
+            }
+          }
+          throw new Error("Vault 이름 예약 정리 재시도 횟수를 초과했습니다.");
+        };
+        const initialReconciliation = await reconcilePendingClaims();
+        if (initialReconciliation === null) {
           return { key: activeIntegrityKey, kind: "already-ready" } as const;
         }
-        if (activated.keyChanged) {
-          // Another tab created the pending marker with a different blinded-name
-          // key. Reuse the same complete inventory and only repeat decryption and
-          // planning under that winning key; do not query the Vault again.
-          preflight = await preflightVaultNameCutover({
-            activeNotes: inventory.activeNotes,
-            deletedNotes: inventory.deletedNotes,
-            folders: ownedFolderSnapshots,
-            privateKey,
-            uid: currentProfile.uid,
-            vaultIntegrityKey: activeIntegrityKey
-          });
+        if (!cutoverLease) {
+          throw new Error("Vault 무결성 임대 응답을 확인할 수 없습니다.");
+        }
+        let reconciledClaimCount = initialReconciliation.removedClaimCount;
+        if (migrationCancelled()) {
+          return { kind: "cancelled" } as const;
+        }
+        // Reconciliation may have removed orphaned/superseded reservations, so
+        // never reuse an inventory captured before it. The migration plan and
+        // count assertions are always based on this fresh server read.
+        const inventory = await loadOwnedVaultCutoverInventory(currentProfile.uid);
+        if (migrationCancelled()) {
+          return { kind: "cancelled" } as const;
+        }
+        if (!folderSubscriptionServerReadyRef.current) {
+          throw new Error("서버의 전체 Vault 폴더 목록을 아직 확인하지 못했습니다.");
+        }
+        const ownedFolderSnapshots = activeFolderSnapshotsRef.current
+          .filter((folder) => folder.ownerUid === currentProfile.uid);
+        const preflight = await preflightVaultNameCutover({
+          activeNotes: inventory.activeNotes,
+          deletedNotes: inventory.deletedNotes,
+          folders: ownedFolderSnapshots,
+          privateKey,
+          uid: currentProfile.uid,
+          vaultIntegrityKey: activeIntegrityKey
+        });
+        if (migrationCancelled()) {
+          return { kind: "cancelled" } as const;
+        }
+        setVaultIntegrityKey(activeIntegrityKey);
+        setVaultNameMigrationProgress({
+          completed: 0,
+          migrated: 0,
+          skipped: 0,
+          total: preflight.folders.length + preflight.activeNotes.length + preflight.deletedNotes.length
+        });
+
+        const result = await migrateVaultNameReservations({
+          cutoverLease,
+          deletedNotes: preflight.deletedNotes,
+          expectedDeletedNoteCount: inventory.deletedNotes.length,
+          expectedFolderCount: preflight.folders.length,
+          expectedNoteCount: inventory.activeNotes.length,
+          folders: preflight.folders,
+          legacyActiveNoteIds: preflight.legacyActiveNoteIds,
+          legacyDeletedNoteIds: preflight.legacyDeletedNoteIds,
+          notes: preflight.activeNotes,
+          onLeaseCheckpoint: renewCutoverLeaseBetweenBatches,
+          onProgress: (progress) => {
+            if (vaultNameMigrationGenerationRef.current === generation) {
+              setVaultNameMigrationProgress(progress);
+            }
+          },
+          privateKey,
+          profile: currentProfile,
+          signal: controller.signal,
+          vaultIntegrityKey: activeIntegrityKey
+        });
+        if (migrationCancelled()) {
+          return { kind: "cancelled" } as const;
+        }
+        if (result.deferredTargetIds.length) {
+          return {
+            kind: "deferred",
+            repairTargetIds: vaultNameCollisionRepairTargetIds(result, notesRef.current),
+            result
+          } as const;
+        }
+
+        // Only a pre-existing claim can become safely superseded during the
+        // migration. When the initial server inventory observed no claim, the
+        // same held lease proves that a second full reconciliation cannot find
+        // such a legacy reservation, saving one bounded full-Vault scan.
+        if (initialReconciliation.observedClaimCount > 0) {
+          const finalReconciliation = await reconcilePendingClaims();
+          if (finalReconciliation === null) {
+            return { key: activeIntegrityKey, kind: "already-ready" } as const;
+          }
+          reconciledClaimCount += finalReconciliation.removedClaimCount;
+        }
+        if (migrationCancelled()) {
+          return { kind: "cancelled" } as const;
+        }
+
+        if (!cutoverLease) {
+          throw new Error("Vault 무결성 임대 상태를 확인할 수 없습니다.");
+        }
+        await sealVaultIntegrityCutover(currentProfile.uid, cutoverLease, {
+          expectedActiveNoteCount: inventory.activeNotes.length,
+          expectedDeletedNoteCount: inventory.deletedNotes.length,
+          expectedFolderCount: preflight.folders.length
+        }, controller.signal);
+        cutoverLease = null;
+        return {
+          key: activeIntegrityKey,
+          kind: "sealed",
+          reconciledClaimCount,
+          result
+        } as const;
+      } finally {
+        if (cutoverLease) {
+          await releaseVaultIntegrityCutoverLease(
+            currentProfile.uid,
+            cutoverLease
+          ).catch(() => undefined);
         }
       }
-      if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
-        return { kind: "cancelled" } as const;
-      }
-      setVaultIntegrityKey(activeIntegrityKey);
-      setVaultNameMigrationProgress({
-        completed: 0,
-        migrated: 0,
-        skipped: 0,
-        total: preflight.folders.length + preflight.activeNotes.length + preflight.deletedNotes.length
-      });
-
-      const result = await migrateVaultNameReservations({
-        deletedNotes: preflight.deletedNotes,
-        expectedDeletedNoteCount: inventory.deletedNotes.length,
-        expectedFolderCount: preflight.folders.length,
-        expectedNoteCount: inventory.activeNotes.length,
-        folders: preflight.folders,
-        legacyActiveNoteIds: preflight.legacyActiveNoteIds,
-        legacyDeletedNoteIds: preflight.legacyDeletedNoteIds,
-        notes: preflight.activeNotes,
-        onProgress: (progress) => {
-          if (vaultNameMigrationGenerationRef.current === generation) {
-            setVaultNameMigrationProgress(progress);
-          }
-        },
-        privateKey,
-        profile: currentProfile,
-        vaultIntegrityKey: activeIntegrityKey
-      });
-      if (vaultNameMigrationGenerationRef.current !== generation || controller.signal.aborted) {
-        return { kind: "cancelled" } as const;
-      }
-      if (result.deferredTargetIds.length) {
-        return { kind: "deferred", result } as const;
-      }
-
-      await sealVaultIntegrityCutover(currentProfile.uid, {
-        expectedActiveNoteCount: inventory.activeNotes.length,
-        expectedDeletedNoteCount: inventory.deletedNotes.length,
-        expectedFolderCount: preflight.folders.length
-      }, controller.signal);
-      return { key: activeIntegrityKey, kind: "sealed", result } as const;
     })().then((outcome) => {
       if (vaultNameMigrationGenerationRef.current !== generation) return;
       if (outcome.kind === "cancelled") return;
@@ -3048,54 +3395,114 @@ function UnlockedVaultPage({
         setVaultNameMigrationProgress(null);
         setVaultNameMigrationFailure(null);
         setVaultNameCollisionTargetIds(new Set());
+        setVaultNameCollisionRepairTargetIds(new Set());
         setVaultNameMigrationStatus("ready");
         setStatus("다른 탭에서 암호화된 이름 무결성 준비를 완료했습니다.");
         return;
       }
       setVaultNameMigrationProgress(outcome.result);
       if (outcome.kind === "deferred") {
+        const actionableTargetIds = new Set(outcome.repairTargetIds);
         setVaultNameCollisionTargetIds(new Set(outcome.result.deferredTargetIds));
+        setVaultNameCollisionRepairTargetIds(actionableTargetIds);
         setVaultNameMigrationStatus("blocked");
         const failure = outcome.result.collisions.length
-          ? `같은 폴더에서 이름이 겹치거나 그 하위에 있는 항목 ${outcome.result.deferredTargetIds.length}개를 발견했습니다. 표시된 항목의 이름이나 위치를 정리한 뒤 다시 확인해주세요.`
-          : `이전 버전의 공유 폴더 경로 ${outcome.result.deferredTargetIds.length}개를 발견했습니다. 표시된 공유 항목을 Vault 루트로 이동해 무결성 검증을 완료해주세요.`;
+          ? `이름이 겹친 항목 ${actionableTargetIds.size}개가 있습니다. 새 이름을 정하면 내용을 보존하고 검증을 이어갑니다.`
+          : `이전 버전의 공유 폴더 경로 ${actionableTargetIds.size}개를 발견했습니다. 표시된 공유 항목을 Vault 루트로 이동해 무결성 검증을 완료해주세요.`;
         setVaultNameMigrationFailure(failure);
         setError(failure);
         return;
       }
       setVaultIntegrityKey(outcome.key);
       setVaultNameCollisionTargetIds(new Set());
+      setVaultNameCollisionRepairTargetIds(new Set());
       setVaultNameMigrationFailure(null);
       setVaultNameMigrationStatus("ready");
-      setStatus(outcome.result.migrated
-        ? `암호화된 이름 예약 ${outcome.result.migrated}개를 확인하고 완료 상태를 저장했습니다.`
-        : "암호화된 이름 무결성 완료 상태를 서버에 저장했습니다.");
+      setStatus(outcome.reconciledClaimCount
+        ? `오래된 이름 예약 ${outcome.reconciledClaimCount}개를 안전하게 정리하고 무결성 완료 상태를 저장했습니다.`
+        : outcome.result.migrated
+          ? `암호화된 이름 예약 ${outcome.result.migrated}개를 확인하고 완료 상태를 저장했습니다.`
+          : "암호화된 이름 무결성 완료 상태를 서버에 저장했습니다.");
     }).catch((caught) => {
       if (
         vaultNameMigrationGenerationRef.current !== generation
         || controller.signal.aborted
       ) return;
+      if (caught instanceof VaultIntegrityApiError && caught.code === "vault_cutover_busy") {
+        const retryAfterSeconds = Math.min(30, Math.max(1, caught.retryAfterSeconds ?? 3));
+        setVaultNameMigrationStatus("waiting");
+        setVaultNameMigrationProgress(null);
+        setVaultNameMigrationFailure("다른 탭이나 기기의 확인이 끝나기를 기다리고 있습니다. 현재 편집 버퍼는 유지됩니다.");
+        setVaultNameCollisionTargetIds(new Set());
+        setVaultNameCollisionRepairTargetIds(new Set());
+        setStatus(`다른 탭의 Vault 확인이 끝난 뒤 ${retryAfterSeconds}초 후 다시 확인합니다.`);
+        setError(null);
+        if (vaultIntegrityBusyRetryTimerRef.current !== null) {
+          window.clearTimeout(vaultIntegrityBusyRetryTimerRef.current);
+        }
+        vaultIntegrityBusyRetryTimerRef.current = window.setTimeout(() => {
+          vaultIntegrityBusyRetryTimerRef.current = null;
+          if (
+            vaultNameMigrationGenerationRef.current !== generation
+            || controller.signal.aborted
+          ) return;
+          setVaultNameMigrationStatus("checking");
+          setVaultIntegrityRetryAttempt((attempt) => attempt + 1);
+        }, retryAfterSeconds * 1_000);
+        return;
+      }
       const failure = caught instanceof Error
         ? `이름 예약 확인을 완료하지 못했습니다: ${caught.message}`
         : "이름 예약 확인을 완료하지 못해 Vault 쓰기를 잠갔습니다.";
+      const conflictTargetIds = caught instanceof Error
+        && caught.name === "VaultNameReservationMigrationConflictError"
+        && Array.isArray((caught as Error & { targetIds?: unknown }).targetIds)
+        ? (caught as Error & { targetIds: unknown[] }).targetIds
+            .filter((targetId): targetId is string => typeof targetId === "string")
+        : [];
+      const knownTargetIds = new Set([
+        ...notesRef.current.map((note) => note.id),
+        ...foldersRef.current.map((folder) => folder.id)
+      ]);
+      const knownCollisionTargets = conflictTargetIds.filter((targetId) => knownTargetIds.has(targetId));
       setVaultNameMigrationStatus("blocked");
-      setVaultNameCollisionTargetIds(new Set());
+      setVaultNameCollisionTargetIds(new Set(knownCollisionTargets));
+      setVaultNameCollisionRepairTargetIds(new Set(knownCollisionTargets));
       setVaultNameMigrationFailure(failure);
       setError(failure);
     }).finally(() => {
+      const cancelledWhileCurrent = controller.signal.aborted
+        && vaultNameMigrationGenerationRef.current === generation;
       if (vaultNameMigrationPromiseRef.current === pending) {
         vaultNameMigrationPromiseRef.current = null;
       }
       if (vaultIntegritySealAbortRef.current === controller) {
         vaultIntegritySealAbortRef.current = null;
       }
+      if (
+        cancelledWhileCurrent
+        && vaultNameMigrationStatusRef.current === "running"
+      ) {
+        setVaultNameMigrationProgress(null);
+        setVaultNameMigrationStatus("waiting");
+        // Readiness can recover before the aborted promise releases its lease.
+        // Bump an explicit dependency after that promise is cleared so the
+        // migration cannot remain stranded in waiting with unchanged inputs.
+        setVaultNameMigrationResumeAttempt((attempt) => attempt + 1);
+      }
     });
     vaultNameMigrationPromiseRef.current = pending;
+    return () => {
+      if (vaultIntegritySealAbortRef.current === controller) {
+        controller.abort();
+      }
+    };
   }, [
     isOnline,
     privateKey,
     preparedVaultIntegrityKey,
     vaultIntegrityRetryAttempt,
+    vaultNameMigrationResumeAttempt,
     vaultServerSubscriptionsReady
   ]);
 
@@ -3129,7 +3536,15 @@ function UnlockedVaultPage({
   ]);
 
   function retryVaultNameMigration() {
-    if (vaultNameMigrationStatus === "running" || vaultNameMigrationPromiseRef.current) return;
+    if (
+      vaultNameCollisionRepairBusyRef.current
+      || vaultNameMigrationStatus === "running"
+      || vaultNameMigrationPromiseRef.current
+    ) return;
+    if (vaultIntegrityBusyRetryTimerRef.current !== null) {
+      window.clearTimeout(vaultIntegrityBusyRetryTimerRef.current);
+      vaultIntegrityBusyRetryTimerRef.current = null;
+    }
     vaultNameMigrationGenerationRef.current += 1;
     vaultIntegritySealAbortRef.current?.abort();
     vaultIntegritySealAbortRef.current = null;
@@ -3138,6 +3553,7 @@ function UnlockedVaultPage({
     setVaultNameMigrationProgress(null);
     setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
+    setVaultNameCollisionRepairTargetIds(new Set());
     setNoteServerReservationSignature(null);
     setFolderServerReservationSignature(null);
     setVaultNameMigrationStatus(isOnline ? "checking" : "waiting");
@@ -3149,6 +3565,63 @@ function UnlockedVaultPage({
   function canMutateExistingNameTarget(entryId: string) {
     return vaultNameWritesReady
       || (vaultNameMigrationStatus === "blocked" && vaultNameCollisionTargetIds.has(entryId));
+  }
+
+  async function repairFirstVaultNameCollision() {
+    if (
+      vaultNameCollisionRepairBusyRef.current
+      || vaultNameMigrationStatusRef.current !== "blocked"
+    ) return;
+    const generation = vaultNameMigrationGenerationRef.current;
+    const targetId = vaultNameCollisionRepairTargetIdsRef.current.values().next().value as string;
+    if (!targetId) return;
+    vaultNameCollisionRepairBusyRef.current = true;
+    setVaultNameCollisionRepairBusy(true);
+    setError(null);
+    try {
+      const { promptVaultNameCollisionRepair } = await import(
+        "../features/vault/vaultCollisionNaming"
+      );
+      if (
+        vaultNameMigrationGenerationRef.current !== generation
+        || vaultNameMigrationStatusRef.current !== "blocked"
+        || !vaultNameCollisionRepairTargetIdsRef.current.has(targetId)
+      ) return;
+      const repair = promptVaultNameCollisionRepair(
+        notesRef.current,
+        foldersRef.current,
+        targetId
+      );
+      if (!repair) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      if (
+        vaultNameMigrationGenerationRef.current !== generation
+        || vaultNameMigrationStatusRef.current !== "blocked"
+        || !vaultNameCollisionRepairTargetIdsRef.current.has(targetId)
+      ) return;
+      if (repair.kind === "entry") {
+        openEntry(repair.targetId);
+        await renameEntry(repair.targetId, repair.name);
+      } else if (repair.kind === "missing") {
+        setError("충돌 항목을 찾지 못했습니다. 다시 확인해주세요.");
+      } else {
+        setLeftMode("files");
+        setLeftOpen(true);
+        setSelectedFolderId(repair.targetId);
+        await renameFolder(repair.targetId, repair.name);
+      }
+    } catch {
+      if (vaultNameMigrationGenerationRef.current === generation) {
+        setError("충돌 정리 도구를 불러오지 못했습니다.");
+      }
+    } finally {
+      vaultNameCollisionRepairBusyRef.current = false;
+      setVaultNameCollisionRepairBusy(false);
+    }
+  }
+
+  function recheckVaultNameIntegrityAfterRepair() {
+    window.setTimeout(() => retryVaultNameMigration(), 0);
   }
 
   useEffect(() => {
@@ -3767,6 +4240,7 @@ function UnlockedVaultPage({
       namedWorkspaces,
       rightMode,
       rightOpen: mobileLayout ? desktopRightOpenRef.current : rightOpen,
+      rightPanelWidth,
       searchQuery,
       searchBookmarks,
       selectedFolderId,
@@ -3916,6 +4390,7 @@ function UnlockedVaultPage({
     profile,
     rightMode,
     rightOpen,
+    rightPanelWidth,
     searchQuery,
     searchBookmarks,
     selectedFolderId,
@@ -5500,7 +5975,20 @@ function UnlockedVaultPage({
     }
     const currentNotes = notesRef.current;
     const note = currentNotes.find((candidate) => candidate.id === entryId);
-    if (!note || note.type !== "personal" || note.ownerUid !== profile.uid) {
+    const resolvingNameCollision = vaultNameMigrationStatus === "blocked"
+      && vaultNameCollisionTargetIds.has(entryId);
+    const repairsHistoricalSharedFolder = Boolean(
+      resolvingNameCollision
+      && note?.type === "shared"
+      && note.ownerUid === profile.uid
+      && (note.folderId ?? null) !== null
+      && folderId === null
+    );
+    if (
+      !note
+      || note.ownerUid !== profile.uid
+      || (note.type !== "personal" && !repairsHistoricalSharedFolder)
+    ) {
       setError("내 개인 항목만 폴더로 이동할 수 있습니다.");
       return;
     }
@@ -5521,8 +6009,6 @@ function UnlockedVaultPage({
       setError("대상 폴더에 동일한 이름의 항목이 있습니다.");
       return;
     }
-    const resolvingNameCollision = vaultNameMigrationStatus === "blocked"
-      && vaultNameCollisionTargetIds.has(entryId);
     const finishEntryMutation = beginEntryMutation(entryId);
     savingEntryIdsRef.current.add(entryId);
     setSavingEntryIds((current) => new Set(current).add(entryId));
@@ -5531,8 +6017,8 @@ function UnlockedVaultPage({
     setPathRewriteJob(null);
     setError(null);
     try {
-      await flushOwnedRewriteDrafts(entryId);
-      await flushPathTargetBody(entryId);
+      if (!resolvingNameCollision) await flushOwnedRewriteDrafts(entryId);
+      if (!resolvingNameCollision) await flushPathTargetBody(entryId);
       const refreshedNote = notesRef.current.find((candidate) => candidate.id === entryId);
       const refreshedDraft = draftsRef.current[entryId];
       if (!refreshedNote || !refreshedDraft || conflictedEntryIds.has(entryId)) {
@@ -5543,7 +6029,7 @@ function UnlockedVaultPage({
       if (
         !serverTarget
         || (serverTarget.revision ?? 0) !== refreshedDraft.baseRevision
-        || serverTarget.body !== refreshedDraft.body
+        || (!resolvingNameCollision && serverTarget.body !== refreshedDraft.body)
       ) {
         throw new Error("이동 대상이 다른 기기에서 변경되어 경로 변경을 시작하지 않았습니다.");
       }
@@ -5595,17 +6081,26 @@ function UnlockedVaultPage({
           if (applied.status !== "applied") throw new Error("Canvas 자기 링크 source가 변경되었습니다.");
           submittedDraft = { ...submittedDraft, body: applied.source };
         }
-        const result = await saveAndMoveEncryptedVaultEntry(
-          { ...serverTarget, revision: refreshedDraft.baseRevision },
-          profile.uid,
-          privateKey,
-          vaultIntegrityKey,
-          submittedDraft
-        );
+        const revisionedTarget = { ...serverTarget, revision: refreshedDraft.baseRevision };
+        const result = resolvingNameCollision
+          ? await resolveDeferredVaultEntryCollision(
+              revisionedTarget,
+              profile.uid,
+              privateKey,
+              vaultIntegrityKey,
+              { folderId, title: submittedDraft.title }
+            )
+          : await saveAndMoveEncryptedVaultEntry(
+              revisionedTarget,
+              profile.uid,
+              privateKey,
+              vaultIntegrityKey,
+              submittedDraft
+            );
         commitNotes((current) => current.map((candidate) => candidate.id === entryId
           ? {
               ...candidate,
-              body: submittedDraft.body,
+              body: resolvingNameCollision ? serverTarget.body : submittedDraft.body,
               folderId,
               lastMutationId: result.lastMutationId,
               revision: result.revision,
@@ -5616,7 +6111,11 @@ function UnlockedVaultPage({
         if (latest && sameDraftPayload(latest, refreshedDraft)) {
           const nextDrafts = {
             ...draftsRef.current,
-            [entryId]: { ...submittedDraft, baseRevision: result.revision, dirty: false }
+            [entryId]: {
+              ...submittedDraft,
+              baseRevision: result.revision,
+              dirty: resolvingNameCollision && submittedDraft.body !== serverTarget.body
+            }
           };
           draftsRef.current = nextDrafts;
           setDrafts(nextDrafts);
@@ -5650,8 +6149,8 @@ function UnlockedVaultPage({
   }
 
   async function moveFolder(folderId: string, parentId: string | null) {
-    if (!profile || !vaultIntegrityKey || folderId === parentId) {
-      if (!vaultIntegrityKey) {
+    if (!profile || !privateKey || !vaultIntegrityKey || folderId === parentId) {
+      if (!privateKey || !vaultIntegrityKey) {
         setError("암호화된 이름 무결성 키가 준비될 때까지 폴더를 이동할 수 없습니다.");
       }
       return;
@@ -5666,7 +6165,12 @@ function UnlockedVaultPage({
     }
     const currentFolders = foldersRef.current;
     const folder = currentFolders.find((candidate) => candidate.id === folderId);
-    if (!folder?.encryptedName || !folder.wrappedKey) {
+    const resolvingNameCollision = vaultNameMigrationStatus === "blocked"
+      && vaultNameCollisionTargetIds.has(folderId);
+    if (!folder) {
+      return;
+    }
+    if ((!folder.encryptedName || !folder.wrappedKey) && !resolvingNameCollision) {
       setError("먼저 기존 폴더 이름을 암호화해주세요.");
       return;
     }
@@ -5684,14 +6188,12 @@ function UnlockedVaultPage({
       setError("폴더를 자신의 하위 폴더로 이동할 수 없습니다.");
       return;
     }
-    const resolvingNameCollision = vaultNameMigrationStatus === "blocked"
-      && vaultNameCollisionTargetIds.has(folderId);
     pathRewriteBusyRef.current = true;
     setPathRewriteBusy(true);
     setPathRewriteJob(null);
     setError(null);
     try {
-      await flushOwnedRewriteDrafts();
+      if (!resolvingNameCollision) await flushOwnedRewriteDrafts();
       const nextFolders = currentFolders.map((candidate) => (
         candidate.id === folderId ? { ...candidate, parentId } : candidate
       ));
@@ -5706,7 +6208,15 @@ function UnlockedVaultPage({
           return oldPath === newPath ? [] : [{ entryId: note.id, newPath, oldPath }];
         });
       if (!pathChanges.length) {
-        const result = await moveEncryptedVaultFolder(folder, profile.uid, vaultIntegrityKey, parentId);
+        const result = resolvingNameCollision
+          ? await resolveDeferredVaultFolderCollision(
+              folder,
+              profile,
+              privateKey,
+              vaultIntegrityKey,
+              { name: folder.displayName, parentId }
+            )
+          : await moveEncryptedVaultFolder(folder, profile.uid, vaultIntegrityKey, parentId);
         commitFolders((current) => current.map((candidate) => candidate.id === folderId
           ? { ...candidate, parentId, revision: result.revision }
           : candidate));
@@ -5728,7 +6238,15 @@ function UnlockedVaultPage({
         sourcePlans
       });
       const completed = await executePreparedPathRewrite(prepared, async () => {
-        const result = await moveEncryptedVaultFolder(folder, profile.uid, vaultIntegrityKey, parentId);
+        const result = resolvingNameCollision
+          ? await resolveDeferredVaultFolderCollision(
+              folder,
+              profile,
+              privateKey,
+              vaultIntegrityKey,
+              { name: folder.displayName, parentId }
+            )
+          : await moveEncryptedVaultFolder(folder, profile.uid, vaultIntegrityKey, parentId);
         commitFolders((current) => current.map((candidate) => candidate.id === folderId
           ? { ...candidate, parentId, revision: result.revision }
           : candidate));
@@ -5761,7 +6279,7 @@ function UnlockedVaultPage({
     }
   }
 
-  async function renameFolder(folderId: string) {
+  async function renameFolder(folderId: string, requestedName?: string) {
     if (!profile || !privateKey || !vaultIntegrityKey) {
       setError("암호화된 이름 무결성 키가 준비될 때까지 폴더 이름을 바꿀 수 없습니다.");
       return;
@@ -5779,7 +6297,7 @@ function UnlockedVaultPage({
     if (!folder) {
       return;
     }
-    const name = window.prompt("폴더 이름 변경", folder.displayName)?.trim();
+    const name = (requestedName ?? window.prompt("폴더 이름 변경", folder.displayName))?.trim();
     if (!name || name === folder.displayName) {
       return;
     }
@@ -5798,7 +6316,7 @@ function UnlockedVaultPage({
     setPathRewriteJob(null);
     setError(null);
     try {
-      await flushOwnedRewriteDrafts();
+      if (!resolvingNameCollision) await flushOwnedRewriteDrafts();
       const nextFolders = currentFolders.map((candidate) => candidate.id === folderId
         ? { ...candidate, displayName: name }
         : candidate);
@@ -5810,19 +6328,30 @@ function UnlockedVaultPage({
           const oldPath = vaultEntryPath(note, folderPathsRef.current);
           const newPath = vaultEntryPath(note, nextFolderPaths);
           return oldPath === newPath ? [] : [{ entryId: note.id, newPath, oldPath }];
-        });
+      });
       if (!pathChanges.length) {
-        const result = await renameEncryptedVaultFolder(
-          folder,
-          profile.uid,
-          privateKey,
-          vaultIntegrityKey,
-          name
-        );
+        const result = resolvingNameCollision
+          ? await resolveDeferredVaultFolderCollision(
+              folder,
+              profile,
+              privateKey,
+              vaultIntegrityKey,
+              { name, parentId: folder.parentId ?? null }
+            )
+          : await renameEncryptedVaultFolder(
+              folder,
+              profile.uid,
+              privateKey,
+              vaultIntegrityKey,
+              name
+            );
         commitFolders((current) => current.map((candidate) => candidate.id === folderId
           ? { ...candidate, displayName: name, revision: result.revision }
           : candidate));
-        setStatus("빈 폴더 이름을 변경했습니다. 갱신할 내부 참조는 없습니다.");
+        setStatus(resolvingNameCollision
+          ? "중복 폴더 이름을 해소해 검증을 다시 시작합니다."
+          : "빈 폴더 이름을 변경했습니다. 갱신할 내부 참조는 없습니다.");
+        if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
         return;
       }
       const rewritePlans = resolvingNameCollision
@@ -5840,20 +6369,29 @@ function UnlockedVaultPage({
         sourcePlans
       });
       const completed = await executePreparedPathRewrite(prepared, async () => {
-        const result = await renameEncryptedVaultFolder(
-          folder,
-          profile.uid,
-          privateKey,
-          vaultIntegrityKey,
-          name
-        );
+        const result = resolvingNameCollision
+          ? await resolveDeferredVaultFolderCollision(
+              folder,
+              profile,
+              privateKey,
+              vaultIntegrityKey,
+              { name, parentId: folder.parentId ?? null }
+            )
+          : await renameEncryptedVaultFolder(
+              folder,
+              profile.uid,
+              privateKey,
+              vaultIntegrityKey,
+              name
+            );
         commitFolders((current) => current.map((candidate) => candidate.id === folderId
           ? { ...candidate, displayName: name, revision: result.revision }
           : candidate));
       });
       setStatus(resolvingNameCollision
-        ? "중복 이름을 해소했습니다. 기존의 모호한 링크는 자동 귀속하지 않았으므로 다시 확인해주세요."
+        ? "중복 폴더 이름을 해소해 검증을 다시 시작합니다."
         : `암호화된 폴더 이름을 변경하고 내부 참조 ${completed.confirmedCount}개 파일을 서버에서 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
+      if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "폴더 이름을 변경하지 못했습니다.");
     } finally {
@@ -5884,7 +6422,13 @@ function UnlockedVaultPage({
     const currentNotes = notesRef.current;
     const note = currentNotes.find((candidate) => candidate.id === entryId);
     const currentDraft = draftsRef.current[entryId];
-    if (!note || !currentDraft || note.contentFormat === "legacy-html-v1") {
+    const resolvingNameCollision = vaultNameMigrationStatus === "blocked"
+      && vaultNameCollisionTargetIds.has(entryId);
+    if (!note || !currentDraft) {
+      setError("이름을 변경할 항목의 편집 버퍼를 준비하지 못했습니다.");
+      return;
+    }
+    if (note.contentFormat === "legacy-html-v1" && !resolvingNameCollision) {
       setError("기존 HTML 노트는 Markdown 복사본으로 변환한 뒤 이름을 변경할 수 있습니다.");
       return;
     }
@@ -5892,6 +6436,11 @@ function UnlockedVaultPage({
       setError("공유 항목의 이름과 위치는 소유자만 변경할 수 있습니다.");
       return;
     }
+    const collisionRepairFolderId = resolvingNameCollision
+      && note.type === "shared"
+      && (note.folderId ?? null) !== null
+        ? null
+        : currentDraft.folderId;
     const title = (requestedTitle ?? window.prompt("항목 이름 변경", currentDraft.title))?.trim();
     // The inline title field already updates the draft before Save is pressed.
     // Compare against the persisted note, not the draft, or an inline rename is
@@ -5902,19 +6451,21 @@ function UnlockedVaultPage({
     if (currentNotes.some((candidate) => (
       candidate.id !== entryId
       && candidate.ownerUid === note.ownerUid
-      && (candidate.folderId ?? null) === currentDraft.folderId
+      && (candidate.folderId ?? null) === collisionRepairFolderId
       && normalizedEntryTitle(candidate.title, candidate.entryKind) === normalizedEntryTitle(title, note.entryKind)
     ))) {
       setError("같은 폴더에 동일한 이름의 항목이 있습니다.");
       return;
     }
-    const resolvingNameCollision = vaultNameMigrationStatus === "blocked"
-      && vaultNameCollisionTargetIds.has(entryId);
-
     if (!currentDraft.dirty) {
       captureMarkdownDraftBase(entryId, note, currentDraft);
     }
-    const nextDraft = { ...currentDraft, title, dirty: true };
+    const nextDraft = {
+      ...currentDraft,
+      dirty: true,
+      folderId: collisionRepairFolderId,
+      title
+    };
     const stagedDrafts = { ...draftsRef.current, [entryId]: nextDraft };
     draftsRef.current = stagedDrafts;
     setDrafts(stagedDrafts);
@@ -5926,8 +6477,8 @@ function UnlockedVaultPage({
     setPathRewriteJob(null);
     setError(null);
     try {
-      await flushOwnedRewriteDrafts(entryId);
-      await flushPathTargetBody(entryId);
+      if (!resolvingNameCollision) await flushOwnedRewriteDrafts(entryId);
+      if (!resolvingNameCollision) await flushPathTargetBody(entryId);
       const refreshedNote = notesRef.current.find((candidate) => candidate.id === entryId);
       const refreshedDraft = draftsRef.current[entryId];
       if (!refreshedNote || !refreshedDraft || conflictedEntryIds.has(entryId)) {
@@ -5938,7 +6489,7 @@ function UnlockedVaultPage({
       if (
         !serverTarget
         || (serverTarget.revision ?? 0) !== refreshedDraft.baseRevision
-        || serverTarget.body !== refreshedDraft.body
+        || (!resolvingNameCollision && serverTarget.body !== refreshedDraft.body)
       ) {
         throw new Error("이름 변경 대상이 다른 기기에서 변경되어 작업을 시작하지 않았습니다.");
       }
@@ -5988,21 +6539,40 @@ function UnlockedVaultPage({
           if (applied.status !== "applied") throw new Error("Canvas 자기 링크 source가 변경되었습니다.");
           rewrittenDraft = { ...rewrittenDraft, body: applied.source };
         }
-        const result = await saveEncryptedVaultEntry(
-          { ...serverTarget, revision: refreshedDraft.baseRevision },
-          profile.uid,
-          privateKey,
-          vaultIntegrityKey,
-          rewrittenDraft
-        );
+        const revisionedTarget = { ...serverTarget, revision: refreshedDraft.baseRevision };
+        const result = resolvingNameCollision
+          ? await resolveDeferredVaultEntryCollision(
+              revisionedTarget,
+              profile.uid,
+              privateKey,
+              vaultIntegrityKey,
+              { folderId: rewrittenDraft.folderId, title }
+            )
+          : await saveEncryptedVaultEntry(
+              revisionedTarget,
+              profile.uid,
+              privateKey,
+              vaultIntegrityKey,
+              rewrittenDraft
+            );
         commitNotes((current) => current.map((candidate) => candidate.id === entryId
-          ? { ...candidate, body: rewrittenDraft.body, title, revision: result.revision }
+          ? {
+              ...candidate,
+              body: resolvingNameCollision ? serverTarget.body : rewrittenDraft.body,
+              folderId: rewrittenDraft.folderId,
+              title,
+              revision: result.revision
+            }
           : candidate));
         const latest = draftsRef.current[entryId];
         if (latest && sameDraftPayload(latest, refreshedDraft)) {
           const nextDrafts = {
             ...draftsRef.current,
-            [entryId]: { ...rewrittenDraft, baseRevision: result.revision, dirty: false }
+            [entryId]: {
+              ...rewrittenDraft,
+              baseRevision: result.revision,
+              dirty: resolvingNameCollision && rewrittenDraft.body !== serverTarget.body
+            }
           };
           draftsRef.current = nextDrafts;
           setDrafts(nextDrafts);
@@ -6012,8 +6582,9 @@ function UnlockedVaultPage({
       });
       const selfRewriteCount = (selfPlan?.patches.length ?? 0) + (selfCanvasPlan?.changeCount ?? 0);
       setStatus(resolvingNameCollision
-        ? "중복 이름을 해소했습니다. 기존의 모호한 링크는 자동 귀속하지 않았으므로 다시 확인해주세요."
+        ? "중복 이름을 해소해 검증을 다시 시작합니다. 모호한 기존 링크는 자동 귀속하지 않습니다."
         : `이름을 변경하고 내부 참조 ${completed.confirmedCount + selfRewriteCount}개를 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
+      if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
     } catch (caught) {
       if (caught instanceof NoteRevisionConflictError) {
         setConflictedEntryIds((current) => new Map(current).set(entryId, caught.actualRevision));
@@ -8411,7 +8982,7 @@ function UnlockedVaultPage({
             : activeEntryId
               ? "저장됨"
               : "";
-  const vaultNameCollisionLabels = [...vaultNameCollisionTargetIds].map((targetId) => {
+  const vaultNameCollisionLabels = [...vaultNameCollisionRepairTargetIds].map((targetId) => {
     const note = notes.find((candidate) => candidate.id === targetId);
     if (note) return entryPaths.get(note.id) ?? entryLabel(note);
     return folderPaths.get(targetId) ?? folders.find((folder) => folder.id === targetId)?.displayName ?? "알 수 없는 항목";
@@ -8446,6 +9017,8 @@ function UnlockedVaultPage({
         onPointerDownCapture={(event) => {
           if (!workspaceReady && event.isTrusted) workspaceInteractionDuringLoadRef.current = true;
         }}
+        ref={vaultWorkspaceRef}
+        style={{ "--vault-right-panel-width": `${effectiveRightPanelWidth}px` } as CSSProperties}
       >
         {workspaceConflict ? (
           <aside aria-label="워크스페이스 배치 충돌" className="vault-workspace-conflict" role="alert">
@@ -8509,35 +9082,37 @@ function UnlockedVaultPage({
           || vaultNameMigrationStatus === "running"
           || vaultNameMigrationStatus === "blocked"
         ) ? (
-          <aside
-            aria-busy={vaultNameMigrationStatus === "running"}
-            aria-label="Vault 이름 무결성 준비"
-            className="vault-workspace-conflict vault-name-migration"
-            role={vaultNameMigrationStatus === "blocked" ? "alert" : "status"}
+          <FeatureErrorBoundary
+            fallback={(
+              <aside aria-label="Vault 이름 무결성 준비" className="vault-workspace-conflict vault-name-migration" role="alert">
+                <div>
+                  <strong>암호화된 이름 무결성 준비</strong>
+                  <p>안내 오류입니다. 편집 내용은 유지됩니다.</p>
+                </div>
+                <div>
+                  {vaultNameCollisionRepairTargetIds.size ? (
+                    <button disabled={vaultNameCollisionRepairBusy} onClick={() => void repairFirstVaultNameCollision()} type="button">충돌 이름 바꾸기</button>
+                  ) : null}
+                  <button disabled={!isOnline || vaultNameCollisionRepairBusy} onClick={retryVaultNameMigration} type="button">다시 확인</button>
+                </div>
+              </aside>
+            )}
+            key={vaultIntegrityRetryAttempt}
           >
-            <div>
-              <strong>암호화된 이름 무결성 준비</strong>
-              <p>
-                {!isOnline
-                  ? "온라인 연결을 기다리고 있습니다. 현재 편집 버퍼는 그대로 유지됩니다."
-                  : vaultNameMigrationStatus === "running"
-                    ? `${vaultNameMigrationProgress?.completed ?? 0}/${vaultNameMigrationProgress?.total ?? 0}개를 한 번만 확인 중입니다. 제목 평문은 서버에 저장하지 않습니다.`
-                    : vaultNameMigrationStatus === "blocked" && vaultNameCollisionLabels.length
-                      ? `이름 또는 위치를 정리해야 합니다: ${vaultNameCollisionLabels.join(", ")}${vaultNameCollisionTargetIds.size > vaultNameCollisionLabels.length ? " 외" : ""}`
-                      : vaultNameMigrationStatus === "blocked"
-                        ? vaultNameMigrationFailure ?? "무결성 확인을 완료하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해주세요. 현재 편집 버퍼는 유지됩니다."
-                        : "처음 전환이 필요한 Vault만 서버의 전체 노트·폴더 목록을 한 번 확인합니다. 현재 편집 버퍼는 유지됩니다."
-                }
-              </p>
-            </div>
-            {vaultNameMigrationStatus === "blocked" ? (
-              <div>
-                <button onClick={retryVaultNameMigration} type="button">
-                  {vaultNameCollisionTargetIds.size ? "정리 후 다시 확인" : "다시 확인"}
-                </button>
-              </div>
-            ) : null}
-          </aside>
+            <Suspense fallback={<VaultViewLoading label="이름 무결성 준비" />}>
+              <LazyVaultNameIntegrityNotice
+                collisionLabels={vaultNameCollisionLabels}
+                failure={vaultNameMigrationFailure}
+                migrationStatus={vaultNameMigrationStatus}
+                online={isOnline}
+                onRepair={() => void repairFirstVaultNameCollision()}
+                onRetry={retryVaultNameMigration}
+                progress={vaultNameMigrationProgress}
+                repairBusy={vaultNameCollisionRepairBusy}
+                repairCount={vaultNameCollisionRepairTargetIds.size}
+              />
+            </Suspense>
+          </FeatureErrorBoundary>
         ) : null}
         <input
           accept=".zip,application/zip"
@@ -9128,17 +9703,49 @@ function UnlockedVaultPage({
             role={mobileLayout ? "dialog" : undefined}
             tabIndex={mobileLayout ? -1 : undefined}
           >
+            {!mobileLayout ? (
+              <div
+                aria-controls="vault-right-panel"
+                aria-label="오른쪽 패널 너비 조절"
+                aria-orientation="vertical"
+                aria-valuemax={rightPanelMaxWidth}
+                aria-valuemin={MIN_VAULT_RIGHT_PANEL_WIDTH}
+                aria-valuenow={effectiveRightPanelWidth}
+                aria-valuetext={`${effectiveRightPanelWidth}px`}
+                className="vault-right-panel-resizer"
+                onKeyDown={handleRightPanelResizeKeyDown}
+                onLostPointerCapture={finishRightPanelResize}
+                onPointerCancel={finishRightPanelResize}
+                onPointerDown={beginRightPanelResize}
+                onPointerMove={moveRightPanelResize}
+                onPointerUp={finishRightPanelResize}
+                role="separator"
+                tabIndex={0}
+                title="드래그하거나 좌우 방향키로 너비 조절"
+              />
+            ) : null}
             <header>
               <div aria-label="연결 정보 보기" onKeyDown={handleRovingTabListKeyDown} role="tablist">
-                <button aria-label="백링크" aria-selected={rightMode === "backlinks"} onClick={() => setRightMode("backlinks")} role="tab" tabIndex={rightMode === "backlinks" ? 0 : -1} title="백링크" type="button"><Link2 size={15} /><span>백링크</span></button>
-                <button aria-label="나가는 링크" aria-selected={rightMode === "outgoing"} onClick={() => setRightMode("outgoing")} role="tab" tabIndex={rightMode === "outgoing" ? 0 : -1} title="나가는 링크" type="button"><GitFork size={15} /><span>나가는 링크</span></button>
-                <button aria-label="목차" aria-selected={rightMode === "outline"} onClick={() => setRightMode("outline")} role="tab" tabIndex={rightMode === "outline" ? 0 : -1} title="목차" type="button"><ListTree size={15} /><span>목차</span></button>
-                <button aria-label="속성" aria-selected={rightMode === "properties"} onClick={() => setRightMode("properties")} role="tab" tabIndex={rightMode === "properties" ? 0 : -1} title="속성" type="button"><Hash size={15} /><span>속성</span></button>
-                <button aria-label="로컬 그래프" aria-selected={rightMode === "local-graph"} onClick={() => setRightMode("local-graph")} role="tab" tabIndex={rightMode === "local-graph" ? 0 : -1} title="로컬 그래프" type="button"><Network size={15} /><span>로컬</span></button>
-                <button aria-label="File Recovery" aria-selected={rightMode === "history"} onClick={() => setRightMode("history")} role="tab" tabIndex={rightMode === "history" ? 0 : -1} title="File Recovery" type="button"><History size={15} /><span>이력</span></button>
+                {RIGHT_PANEL_TABS.map(({ icon: Icon, label, mode }) => (
+                  <button
+                    aria-label={label}
+                    aria-selected={rightMode === mode}
+                    key={mode}
+                    onClick={() => setRightMode(mode)}
+                    role="tab"
+                    tabIndex={rightMode === mode ? 0 : -1}
+                    title={label}
+                    type="button"
+                  >
+                    <Icon size={15} />
+                  </button>
+                ))}
               </div>
               <button aria-label="오른쪽 패널 닫기" onClick={closeRightPanel} type="button"><X size={15} /></button>
             </header>
+            <div aria-live="polite" className="vault-right-panel-current-mode" role="status">
+              {RIGHT_PANEL_TABS.find(({ mode }) => mode === rightMode)?.label}
+            </div>
             {rightMode === "backlinks" ? (
               <Suspense fallback={<VaultViewLoading label="백링크" />}>
                 <LazyLinkOccurrencePanel
@@ -9390,25 +9997,36 @@ function UnlockedVaultPage({
         open={quickSwitcherOpen}
       />
       {trashOpen ? (
-        <VaultTrashDialog
-          busyEntryIds={trashBusyEntryIds}
-          busyFolderIds={trashBusyFolderIds}
-          folders={trashFolders}
-          loading={trashLoading}
-          notes={trashNotes}
-          onClose={() => setTrashOpen(false)}
-          onRestore={(entryId) => void restoreTrashEntry(entryId)}
-          onRestoreFolder={(folderId) => void restoreTrashFolder(folderId)}
-          returnFocusTo={trashButtonRef.current}
-          serverReady={trashServerReady}
-        />
+        <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">휴지통 불러오는 중…</div>}>
+          <LazyVaultTrashDialog
+            busyEntryIds={trashBusyEntryIds}
+            busyFolderIds={trashBusyFolderIds}
+            folders={trashFolders}
+            loading={trashLoading}
+            notes={trashNotes}
+            onClose={() => setTrashOpen(false)}
+            onRestore={(entryId) => void restoreTrashEntry(entryId)}
+            onRestoreFolder={(folderId) => void restoreTrashFolder(folderId)}
+            returnFocusTo={trashButtonRef.current}
+            serverReady={trashServerReady}
+          />
+        </Suspense>
       ) : null}
       {discordMessageBatch ? (
-        <MarkdownMessageBatchDialog
-          delivery={discordMessageBatch}
-          onClose={() => setDiscordMessageBatch(null)}
-          returnFocusTo={markdownCopySelectRef.current}
-        />
+        <FeatureErrorBoundary fallback={(
+          <div className="vault-dialog-loading" role="alert">
+            메시지 나누기 도구를 불러오지 못했습니다. 편집 내용은 유지됩니다.
+            <button onClick={() => setDiscordMessageBatch(null)} type="button">닫기</button>
+          </div>
+        )}>
+          <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">메시지 나누기 도구 불러오는 중…</div>}>
+            <LazyMarkdownMessageBatchDialog
+              delivery={discordMessageBatch}
+              onClose={() => setDiscordMessageBatch(null)}
+              returnFocusTo={markdownCopySelectRef.current}
+            />
+          </Suspense>
+        </FeatureErrorBoundary>
       ) : null}
       {templateDialogMode ? (
         <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">템플릿 도구 불러오는 중…</div>}>

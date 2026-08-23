@@ -21,13 +21,13 @@ describe("Vault tablet sidebar layout contract", () => {
     expect(tabletStart).toBeGreaterThanOrEqual(0);
     expect(touchStart).toBeGreaterThan(tabletStart);
     expect(ruleBodiesForSelector(tabletStyles, ".vault-workspace")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*44px minmax\(195px, 230px\) minmax\(0, 1fr\) minmax\(250px, 280px\);/u)
+      expect.stringMatching(/grid-template-columns:\s*44px minmax\(195px, 230px\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(tabletStyles, ".vault-workspace.vault-left-closed")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*44px minmax\(0, 1fr\) minmax\(250px, 280px\);/u)
+      expect.stringMatching(/grid-template-columns:\s*44px minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(tabletStyles, ".vault-right-panel")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/max-width:\s*none;[\s\S]*position:\s*static;[\s\S]*width:\s*auto;/u)
+      expect.stringMatching(/max-width:\s*none;[\s\S]*position:\s*relative;[\s\S]*width:\s*auto;/u)
     ]));
   });
 
@@ -62,16 +62,16 @@ describe("Vault tablet sidebar layout contract", () => {
     expect(compactStart).toBeGreaterThanOrEqual(0);
     expect(splitStart).toBeGreaterThan(compactStart);
     expect(ruleBodiesForSelector(compactStyles, ".vault-workspace")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*44px minmax\(150px, 170px\) minmax\(0, 1fr\) minmax\(160px, 180px\);/u)
+      expect.stringMatching(/grid-template-columns:\s*44px minmax\(150px, 170px\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(compactStyles, ".vault-workspace.vault-left-closed")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*44px minmax\(0, 1fr\) minmax\(160px, 180px\);/u)
+      expect.stringMatching(/grid-template-columns:\s*44px minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(compactStyles, ".vault-right-panel > header")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/align-items:\s*flex-start;[\s\S]*min-height:\s*142px;/u)
+      expect.stringMatching(/min-height:\s*48px;/u)
     ]));
     expect(ruleBodiesForSelector(compactStyles, ".vault-right-panel > header > div")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/align-content:\s*flex-start;[\s\S]*flex-wrap:\s*wrap;[\s\S]*overflow-y:\s*hidden;/u)
+      expect.stringMatching(/flex-wrap:\s*nowrap;[\s\S]*overflow-x:\s*auto;[\s\S]*overflow-y:\s*hidden;/u)
     ]));
   });
 

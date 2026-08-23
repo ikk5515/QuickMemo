@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activatePreparedVaultIntegrityKey,
+  createVaultIntegrityCutoverLeaseId,
   getOrCreateVaultIntegrityKey,
   prepareVaultIntegrityKey,
   requireExistingVaultIntegrityKey,
+  reconcilePendingVaultIntegrityClaims,
+  releaseVaultIntegrityCutoverLease,
+  renewVaultIntegrityCutoverLease,
   sealVaultIntegrityCutover
 } from "./vaultIntegrity";
 
@@ -43,6 +47,10 @@ const profile = {
   uid: "vault-integrity-user"
 };
 const storedTimestamp = { toMillis: () => 1_768_000_000_000 };
+const cutoverLease = {
+  leaseGeneration: "g".repeat(43),
+  leaseId: "l".repeat(43)
+};
 
 function storedMarker(extra: Record<string, unknown> = {}) {
   return {
@@ -149,6 +157,43 @@ describe("Vault integrity key persistence", () => {
     expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
+  it("accepts only the strict server-leased pending marker shape without exposing a raw token", async () => {
+    const privateKey = { kind: "private-leased-pending" } as unknown as CryptoKey;
+    mocks.getDocFromServer.mockResolvedValueOnce({
+      data: () => storedMarker({
+        cutoverLeaseAcquiredAt: storedTimestamp,
+        cutoverLeaseExpiresAt: { toMillis: () => storedTimestamp.toMillis() + 90_000 },
+        cutoverLeaseGeneration: cutoverLease.leaseGeneration,
+        cutoverLeaseHash: "h".repeat(43),
+        cutoverLeaseVersion: 1,
+        cutoverState: "pending",
+        cutoverVersion: 1
+      }),
+      exists: () => true
+    });
+
+    await expect(prepareVaultIntegrityKey(profile, privateKey)).resolves.toMatchObject({
+      cutoverState: "pending",
+      state: "existing"
+    });
+    expect(mocks.unwrap).toHaveBeenCalledWith(mocks.wrappedKey, privateKey);
+
+    mocks.getDocFromServer.mockResolvedValueOnce({
+      data: () => storedMarker({
+        cutoverLeaseAcquiredAt: storedTimestamp,
+        cutoverLeaseExpiresAt: { toMillis: () => storedTimestamp.toMillis() + 90_000 },
+        cutoverLeaseGeneration: cutoverLease.leaseGeneration,
+        cutoverLeaseHash: "h".repeat(43),
+        cutoverLeaseId: cutoverLease.leaseId,
+        cutoverLeaseVersion: 1,
+        cutoverState: "pending",
+        cutoverVersion: 1
+      }),
+      exists: () => true
+    });
+    await expect(prepareVaultIntegrityKey(profile, privateKey)).rejects.toThrow("완료 상태");
+  });
+
   it("unwraps only an exact ready marker for secondary Vault writes", async () => {
     const privateKey = { kind: "private-secondary-ready" } as unknown as CryptoKey;
     mocks.getDocFromServer.mockResolvedValueOnce({
@@ -232,7 +277,7 @@ describe("Vault integrity key persistence", () => {
       verifiedAt: "2026-08-23T00:00:00.000Z"
     }), { headers: { "content-type": "application/json" }, status: 200 }));
 
-    await expect(sealVaultIntegrityCutover(profile.uid, {
+    await expect(sealVaultIntegrityCutover(profile.uid, cutoverLease, {
       expectedActiveNoteCount: 3,
       expectedDeletedNoteCount: 2,
       expectedFolderCount: 4
@@ -247,8 +292,54 @@ describe("Vault integrity key persistence", () => {
       action: "seal-ready",
       expectedActiveNoteCount: 3,
       expectedDeletedNoteCount: 2,
-      expectedFolderCount: 4
+      expectedFolderCount: 4,
+      ...cutoverLease
     });
+  });
+
+  it("creates 256-bit base64url lease ids and posts the exact renew/release credentials", async () => {
+    expect(createVaultIntegrityCutoverLeaseId()).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(createVaultIntegrityCutoverLeaseId()).not.toBe(createVaultIntegrityCutoverLeaseId());
+    mocks.getIdToken.mockResolvedValue("firebase-id-token");
+    mocks.auth.currentUser = { getIdToken: mocks.getIdToken, uid: profile.uid };
+    mocks.fetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        leaseExpiresInSeconds: 90,
+        ok: true,
+        state: "pending"
+      }), { headers: { "content-type": "application/json" }, status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        ok: true,
+        released: true,
+        state: "released"
+      }), { headers: { "content-type": "application/json" }, status: 200 }));
+
+    await expect(renewVaultIntegrityCutoverLease(profile.uid, cutoverLease))
+      .resolves.toMatchObject({ state: "pending" });
+    await expect(releaseVaultIntegrityCutoverLease(profile.uid, cutoverLease)).resolves.toBe(true);
+    expect(mocks.fetch.mock.calls.slice(-2).map((call) => JSON.parse(String(call[1]?.body)))).toEqual([
+      { action: "renew-cutover-lease", ...cutoverLease },
+      { action: "release-cutover-lease", ...cutoverLease }
+    ]);
+  });
+
+  it("returns only a bounded server Retry-After for a competing cutover tab", async () => {
+    mocks.getIdToken.mockResolvedValueOnce("firebase-id-token");
+    mocks.auth.currentUser = { getIdToken: mocks.getIdToken, uid: profile.uid };
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      error: "vault_cutover_busy",
+      ok: false
+    }), {
+      headers: { "content-type": "application/json", "retry-after": "17" },
+      status: 409
+    }));
+
+    await expect(reconcilePendingVaultIntegrityClaims(profile.uid, cutoverLease.leaseId))
+      .rejects.toMatchObject({
+        code: "vault_cutover_busy",
+        retryAfterSeconds: 17,
+        status: 409
+      });
   });
 
   it("rejects a server seal response whose authoritative counts do not match", async () => {
@@ -264,7 +355,7 @@ describe("Vault integrity key persistence", () => {
       verifiedAt: "2026-08-23T00:00:00.000Z"
     }), { headers: { "content-type": "application/json" }, status: 200 }));
 
-    await expect(sealVaultIntegrityCutover(profile.uid, {
+    await expect(sealVaultIntegrityCutover(profile.uid, cutoverLease, {
       expectedActiveNoteCount: 3,
       expectedDeletedNoteCount: 2,
       expectedFolderCount: 4
@@ -272,11 +363,80 @@ describe("Vault integrity key persistence", () => {
   });
 
   it("rejects folder counts above the authoritative tree cap before authentication or fetch", async () => {
-    await expect(sealVaultIntegrityCutover(profile.uid, {
+    await expect(sealVaultIntegrityCutover(profile.uid, cutoverLease, {
       expectedActiveNoteCount: 0,
       expectedDeletedNoteCount: 0,
       expectedFolderCount: 2_001
     })).rejects.toBeInstanceOf(RangeError);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("reconciles stale claims through the authenticated pending-only action", async () => {
+    mocks.getIdToken.mockResolvedValueOnce("firebase-id-token");
+    mocks.auth.currentUser = { getIdToken: mocks.getIdToken, uid: profile.uid };
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      hasMore: false,
+      leaseGeneration: cutoverLease.leaseGeneration,
+      observedClaimCount: 2,
+      ok: true,
+      removedClaimCount: 2,
+      state: "pending"
+    }), { headers: { "content-type": "application/json" }, status: 200 }));
+
+    await expect(reconcilePendingVaultIntegrityClaims(profile.uid, cutoverLease.leaseId)).resolves.toEqual({
+      leaseGeneration: cutoverLease.leaseGeneration,
+      observedClaimCount: 2,
+      ok: true,
+      passCount: 1,
+      removedClaimCount: 2,
+      state: "pending"
+    });
+
+    const [path, init] = mocks.fetch.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/api/vault-integrity");
+    const headers = new Headers(init.headers);
+    expect(headers.get("authorization")).toBe("Bearer firebase-id-token");
+    expect(headers.get("x-quickmemo-vault-integrity")).toBe("1");
+    expect(JSON.parse(String(init.body))).toEqual({
+      action: "reconcile-stale-claims",
+      leaseId: cutoverLease.leaseId
+    });
+  });
+
+  it("enforces one full-inventory reconciliation request per invocation", async () => {
+    mocks.getIdToken.mockResolvedValue("firebase-id-token");
+    mocks.auth.currentUser = { getIdToken: mocks.getIdToken, uid: profile.uid };
+    mocks.fetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        hasMore: true,
+        leaseGeneration: cutoverLease.leaseGeneration,
+        observedClaimCount: 400,
+        ok: true,
+        removedClaimCount: 400,
+        state: "pending"
+      }), { headers: { "content-type": "application/json" }, status: 200 }));
+
+    await expect(reconcilePendingVaultIntegrityClaims(profile.uid, cutoverLease.leaseId))
+      .rejects.toMatchObject({ code: "vault_reconciliation_incomplete", status: 409 });
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      hasMore: false,
+      leaseGeneration: cutoverLease.leaseGeneration,
+      observedClaimCount: 0,
+      ok: true,
+      removedClaimCount: 0,
+      state: "pending",
+      targetId: "must-not-be-returned"
+    }), { headers: { "content-type": "application/json" }, status: 200 }));
+    await expect(reconcilePendingVaultIntegrityClaims(profile.uid, cutoverLease.leaseId))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("rejects reconciliation before fetch when the active user does not match", async () => {
+    mocks.auth.currentUser = { getIdToken: mocks.getIdToken, uid: "other-user" };
+    await expect(reconcilePendingVaultIntegrityClaims(profile.uid, cutoverLease.leaseId))
+      .rejects.toMatchObject({ code: "authentication_required", status: 401 });
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 });

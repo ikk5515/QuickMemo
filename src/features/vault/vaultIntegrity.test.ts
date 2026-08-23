@@ -72,6 +72,24 @@ describe("vault integrity primitives", () => {
     expect(JSON.stringify(plan)).not.toContain("Note");
   });
 
+  it("plans 5,000 deterministic claims within the bounded fingerprint worker ceiling", async () => {
+    const key = await generateNoteKey();
+    const sources = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `note-${index}`,
+      kind: "markdown" as const,
+      name: `Note ${index}`,
+      parentId: null,
+      targetType: "entry" as const
+    }));
+    const startedAt = performance.now();
+    const plan = await planVaultNameMigration(key, sources);
+
+    expect(plan.claims).toHaveLength(5_000);
+    expect(plan.collisions).toEqual([]);
+    expect(plan.claims.map((claim) => claim.targetId)).toEqual(sources.map((source) => source.id));
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
+  }, 15_000);
+
   it("builds deterministic ancestry metadata for the server-verifiable depth", () => {
     const audit = auditVaultFolderTree([
       { id: "root", parentId: null },

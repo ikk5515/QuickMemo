@@ -17,7 +17,7 @@
   align-items: center;
   display: grid;
   gap: 5px;
-  grid-template-columns: minmax(84px, 0.8fr) minmax(88px, auto) minmax(120px, 1.7fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(88px, 0.8fr) auto;
 }
 
 .vault-property-name {
@@ -26,6 +26,27 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.vault-property-row > select {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.vault-property-value {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  min-width: 0;
+}
+
+.vault-property-row > button[aria-label$="속성 삭제"] {
+  grid-column: 3;
+  grid-row: 1;
+}
+
+.vault-property-row > button:last-child {
+  grid-column: 3;
+  grid-row: 2;
 }
 
 .vault-property-row input,
@@ -50,7 +71,12 @@
 .vault-property-add {
   display: grid;
   gap: 5px;
-  grid-template-columns: minmax(90px, 0.8fr) minmax(88px, auto) minmax(120px, 1.7fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(88px, 0.8fr);
+}
+
+.vault-property-add input[aria-label="새 속성 값"],
+.vault-property-add button {
+  grid-column: 1 / -1;
 }
 
 .vault-property-row button,
@@ -58,19 +84,13 @@
   min-block-size: 32px;
 }
 
-@media (max-width: 720px) {
-  .vault-property-row,
-  .vault-property-add {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .vault-property-value,
-  .vault-property-add input[aria-label="새 속성 값"] {
-    grid-column: 1 / -1;
-  }
-
+@media (max-width: 1024px), (pointer: coarse) {
   .vault-property-row button,
-  .vault-property-add button {
+  .vault-property-row input,
+  .vault-property-row select,
+  .vault-property-add button,
+  .vault-property-add input,
+  .vault-property-add select {
     min-block-size: 44px;
   }
 }

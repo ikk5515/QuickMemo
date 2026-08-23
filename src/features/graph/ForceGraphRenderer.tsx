@@ -248,10 +248,16 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     const deferredViewportRef = useRef<DeferredViewport | null>(null);
     const forceGraphRef = useRef<GraphMethods | undefined>(undefined);
     const hoveredNodeIdRef = useRef<string | null>(null);
+    const hoveredNodeFrameRef = useRef<number | null>(null);
+    const pendingHoveredNodeRef = useRef<GraphNode | null>(null);
+    const onHoveredNodeChangeRef = useRef(onHoveredNodeChange);
     const interactionActiveRef = useRef(false);
     const interactionIdleTimerRef = useRef<number | null>(null);
     const lastViewportRef = useRef<GraphViewport | null>(null);
     const programmaticViewportChangeRef = useRef(false);
+    const pointerInteractionEnabledRef = useRef(true);
+    const pointerInteractionFrameRef = useRef<number | null>(null);
+    const pendingPointerInteractionRef = useRef(true);
     const reconciledNodesInputRef = useRef(nodes);
     const readyNotifiedRef = useRef(false);
     const resetCompositorAfterRenderRef = useRef(false);
@@ -271,6 +277,10 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
     const initialZoom = initialViewport?.zoom;
     const graphSizeReady = width > 0 && height > 0;
     const largeGraph = nodes.length >= LARGE_GRAPH_NODE_THRESHOLD;
+
+    useEffect(() => {
+      onHoveredNodeChangeRef.current = onHoveredNodeChange;
+    }, [onHoveredNodeChange]);
 
     useLayoutEffect(() => {
       // The lazy state initializer already copied this exact input. Avoid a
@@ -356,7 +366,61 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
       if (viewportCommitTimerRef.current !== null) {
         window.clearTimeout(viewportCommitTimerRef.current);
       }
+      if (pointerInteractionFrameRef.current !== null) {
+        window.cancelAnimationFrame(pointerInteractionFrameRef.current);
+      }
+      if (hoveredNodeFrameRef.current !== null) {
+        window.cancelAnimationFrame(hoveredNodeFrameRef.current);
+      }
       restoreCanvasPresentations(canvasPresentationRef.current ?? []);
+    }, []);
+
+    const schedulePointerInteraction = useCallback((enabled: boolean) => {
+      pendingPointerInteractionRef.current = enabled;
+      if (
+        pointerInteractionFrameRef.current === null
+        && pointerInteractionEnabledRef.current === enabled
+      ) {
+        return;
+      }
+      if (pointerInteractionFrameRef.current !== null) {
+        return;
+      }
+      // react-kapsule applies changed ForceGraph props during the child render.
+      // A synchronous zoom-end callback must not update this parent in that
+      // render phase, so coalesce pointer hit-map changes into the next frame.
+      pointerInteractionFrameRef.current = window.requestAnimationFrame(() => {
+        pointerInteractionFrameRef.current = null;
+        const next = pendingPointerInteractionRef.current;
+        if (pointerInteractionEnabledRef.current === next) {
+          return;
+        }
+        pointerInteractionEnabledRef.current = next;
+        setPointerInteractionEnabled(next);
+      });
+    }, []);
+
+    const scheduleHoveredNode = useCallback((node: GraphNode | null) => {
+      pendingHoveredNodeRef.current = node;
+      if (
+        hoveredNodeFrameRef.current === null
+        && hoveredNodeIdRef.current === (node?.id ?? null)
+      ) {
+        return;
+      }
+      if (hoveredNodeFrameRef.current !== null) return;
+      // A force-graph zoom callback may run while react-kapsule applies props
+      // during its child render. Coalesce both local hover state and the parent
+      // notification into the next frame so neither can update React in render.
+      hoveredNodeFrameRef.current = window.requestAnimationFrame(() => {
+        hoveredNodeFrameRef.current = null;
+        const nextNode = pendingHoveredNodeRef.current;
+        const nextNodeId = nextNode?.id ?? null;
+        if (hoveredNodeIdRef.current === nextNodeId) return;
+        hoveredNodeIdRef.current = nextNodeId;
+        setHoveredNodeId(nextNodeId);
+        onHoveredNodeChangeRef.current?.(nextNode);
+      });
     }, []);
 
     const markInteractionIdle = useCallback(() => {
@@ -365,8 +429,8 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         interactionIdleTimerRef.current = null;
       }
       interactionActiveRef.current = false;
-      setPointerInteractionEnabled(true);
-    }, []);
+      schedulePointerInteraction(true);
+    }, [schedulePointerInteraction]);
 
     const markInteractionActive = useCallback((idleAfterMs?: number, suspendPointerHitTesting = false) => {
       interactionActiveRef.current = true;
@@ -375,12 +439,8 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         // for every viewport frame. Hover cannot be meaningful while the
         // viewport itself is moving, so pause only that duplicate paint and
         // restore it immediately at idle. Node dragging does not use this path.
-        if (hoveredNodeIdRef.current !== null) {
-          hoveredNodeIdRef.current = null;
-          setHoveredNodeId(null);
-          onHoveredNodeChange?.(null);
-        }
-        setPointerInteractionEnabled(false);
+        scheduleHoveredNode(null);
+        schedulePointerInteraction(false);
       }
       if (interactionIdleTimerRef.current !== null) {
         window.clearTimeout(interactionIdleTimerRef.current);
@@ -390,10 +450,10 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
         interactionIdleTimerRef.current = window.setTimeout(() => {
           interactionIdleTimerRef.current = null;
           interactionActiveRef.current = false;
-          setPointerInteractionEnabled(true);
+          schedulePointerInteraction(true);
         }, idleAfterMs);
       }
-    }, [largeGraph, onHoveredNodeChange]);
+    }, [largeGraph, scheduleHoveredNode, schedulePointerInteraction]);
 
     const emitViewport = useCallback((next: GraphViewport) => {
       const previous = lastViewportRef.current;
@@ -835,9 +895,7 @@ export const ForceGraphRenderer = forwardRef<GraphRendererHandle, ForceGraphRend
           }}
           onNodeHover={(renderedNode) => {
             const node = renderedNode ? publicNode(renderedNode as RenderNode) ?? null : null;
-            hoveredNodeIdRef.current = node?.id ?? null;
-            setHoveredNodeId(node?.id ?? null);
-            onHoveredNodeChange?.(node);
+            scheduleHoveredNode(node);
           }}
           onNodeRightClick={(renderedNode, event) => {
             event.preventDefault();

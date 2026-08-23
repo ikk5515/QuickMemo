@@ -360,7 +360,14 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
       const panel = await ensureLeftPanel(page);
       const source = panel.getByRole("treeitem", { name: todayKey, exact: true });
       const target = canvas.locator(".react-flow__pane");
-      await source.dragTo(target, { targetPosition: { x: 300, y: 260 } });
+      const targetBox = await target.boundingBox();
+      expect(targetBox).not.toBeNull();
+      await source.dragTo(target, {
+        targetPosition: {
+          x: Math.min(300, Math.max(24, targetBox.width - 24)),
+          y: Math.min(260, Math.max(24, targetBox.height - 24))
+        }
+      });
     }
 
     await expect(canvas.getByRole("article", { name: new RegExp(`Canvas 카드: .*${todayKey}`, "u") })).toBeVisible();

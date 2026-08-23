@@ -3,9 +3,10 @@ import {
   activeUserFromRequest,
   applySecureResponseHeaders,
   assertOnlyKeys,
+  constantTimeStringEqual,
   createFirestoreContext,
+  deleteDocumentWrite,
   ensureSameOrigin,
-  firestoreBatchGet,
   firestoreBatchGetNewTransaction,
   firestoreCommit,
   firestoreRollback,
@@ -13,8 +14,10 @@ import {
   handleApiError,
   headerValue,
   jsonResponse,
+  randomToken,
   readJsonBody,
   requestId,
+  sha256Digest,
   updateDocumentWrite,
   verifySecureShareAppCheck
 } from "./_secure-share-common.js";
@@ -26,7 +29,10 @@ import {
 } from "./_vault-folder-tree.js";
 import {
   VAULT_CUTOVER_VERSION,
+  VAULT_CUTOVER_LEASE_FIELD_PATHS,
+  claimPath,
   integrityPath,
+  requireVaultCutoverLease,
   requireVaultIntegrityMarker,
   vaultIntegrityReadyFields
 } from "./_vault-integrity-marker.js";
@@ -35,12 +41,22 @@ const maximumOwnedNotes = 20_000;
 const maximumOwnedFolders = VAULT_FOLDER_TREE_MAX_FOLDERS;
 const maximumNameClaims = 25_000;
 const maximumNormalizationWrites = 400;
+const maximumReconciliationWrites = 400;
 const maximumRequestBytes = 32 * 1024;
 const maximumRevision = 999_999_999_999;
+const cutoverLeaseTtlSeconds = 90;
+const cutoverLeaseVersion = 1;
+const maximumLeaseAcquireAttempts = 3;
 const claimPattern = /^[A-Za-z0-9_-]{43}$/u;
 const ownerPattern = /^[A-Za-z0-9_-]{1,160}$/u;
+const leaseTokenPattern = /^[A-Za-z0-9_-]{43}$/u;
 const targetPattern = /^[A-Za-z0-9_-]{1,120}$/u;
-const supportedActions = new Set(["seal-ready"]);
+const supportedActions = new Set([
+  "reconcile-stale-claims",
+  "release-cutover-lease",
+  "renew-cutover-lease",
+  "seal-ready"
+]);
 const storageIdentities = new Map([
   ["legacy-html-v1", "legacy-html"],
   ["markdown-v1", "markdown"],
@@ -49,6 +65,30 @@ const storageIdentities = new Map([
   ["asset-v1", "asset"]
 ]);
 const secureCopyStates = new Set(["active", "aborted", "copying"]);
+
+/**
+ * Explicit read/write ceilings make the one-time cutover auditable without
+ * logging owner ids, document ids, titles, paths, or blinded claim ids. Query
+ * limits include the single overflow row used to fail closed.
+ */
+export const VAULT_INTEGRITY_OPERATION_BOUNDS = Object.freeze({
+  lease: Object.freeze({
+    maximumDocumentReads: 1,
+    maximumDocumentWrites: 1,
+    retryAfterSeconds: 30,
+    ttlSeconds: cutoverLeaseTtlSeconds
+  }),
+  reconcile: Object.freeze({
+    maximumClaimlessDocumentReads: 4,
+    maximumDocumentReads: 47_006,
+    maximumDocumentWrites: maximumReconciliationWrites + 2
+  }),
+  seal: Object.freeze({
+    maximumFastPathDocumentReads: 47_006,
+    maximumDocumentReads: 94_066,
+    maximumDocumentWrites: maximumOwnedNotes + maximumOwnedFolders + 56
+  })
+});
 
 function requirePost(request) {
   if (request.method !== "POST") throw new HttpError(405, "method_not_allowed");
@@ -74,6 +114,13 @@ function folderPath(folderId) {
 
 function expectedCount(value, fieldName, maximum) {
   if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new HttpError(400, "invalid_request", `Invalid ${fieldName}`);
+  }
+  return value;
+}
+
+function assertLeaseToken(value, fieldName) {
+  if (typeof value !== "string" || !leaseTokenPattern.test(value)) {
     throw new HttpError(400, "invalid_request", `Invalid ${fieldName}`);
   }
   return value;
@@ -153,6 +200,211 @@ function claimInventoryQuery() {
 
 function hasOwn(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isOptimisticLeaseConflict(error) {
+  return !(error instanceof HttpError) && (
+    error?.statusCode === 409
+    || error?.upstreamCode === "ABORTED"
+    || error?.upstreamCode === "FAILED_PRECONDITION"
+  );
+}
+
+function cutoverBusy(lease = null, nowMilliseconds = Date.now()) {
+  return new HttpError(
+    409,
+    "vault_cutover_busy",
+    "Another Vault cutover operation is active",
+    {
+      retryAfter: lease && lease.expiresAt > nowMilliseconds
+        ? Math.min(30, Math.max(1, Math.ceil((lease.expiresAt - nowMilliseconds) / 1_000)))
+        : 1
+    }
+  );
+}
+
+function cutoverLeaseFields(leaseHash, leaseGeneration, options) {
+  const now = options.now;
+  return {
+    cutoverLeaseAcquiredAt: options.acquiredAt ?? now,
+    cutoverLeaseExpiresAt: new Date(now.getTime() + cutoverLeaseTtlSeconds * 1_000),
+    cutoverLeaseGeneration: leaseGeneration,
+    cutoverLeaseHash: leaseHash,
+    cutoverLeaseVersion,
+    cutoverState: "pending",
+    cutoverVersion: VAULT_CUTOVER_VERSION,
+    updatedAt: now,
+  };
+}
+
+function cutoverLeaseWrite(context, uid, markerDocument, fields) {
+  return updateDocumentWrite(
+    context.projectId,
+    integrityPath(uid),
+    fields,
+    Object.keys(fields),
+    markerDocument.__updateTime
+  );
+}
+
+function clearCutoverLeaseWrite(context, uid, markerDocument, now = new Date()) {
+  return updateDocumentWrite(
+    context.projectId,
+    integrityPath(uid),
+    { updatedAt: now },
+    ["updatedAt", ...VAULT_CUTOVER_LEASE_FIELD_PATHS],
+    markerDocument.__updateTime
+  );
+}
+
+function leaseCredential(body, options = {}) {
+  const leaseId = assertLeaseToken(body.leaseId, "leaseId");
+  const generation = options.generation === false
+    ? ""
+    : assertLeaseToken(body.leaseGeneration, "leaseGeneration");
+  return {
+    generation,
+    hash: sha256Digest(leaseId)
+  };
+}
+
+async function acquireCutoverLease(context, uid, leaseId) {
+  const leaseHash = sha256Digest(assertLeaseToken(leaseId, "leaseId"));
+  for (let attempt = 0; attempt < maximumLeaseAcquireAttempts; attempt += 1) {
+    const { documents, transaction } = await firestoreBatchGetNewTransaction(context, [
+      integrityPath(uid)
+    ]);
+    let finalized = false;
+    try {
+      const marker = requireVaultIntegrityMarker(documents[0], uid, "any");
+      if (marker.state === "ready") {
+        await firestoreRollback(context, transaction);
+        finalized = true;
+        return { marker: marker.document, state: "ready" };
+      }
+
+      const now = new Date();
+      const existing = marker.lease ?? null;
+      if (
+        existing
+        && existing.expiresAt > now.getTime()
+        && !constantTimeStringEqual(existing.hash, leaseHash)
+      ) {
+        await firestoreRollback(context, transaction);
+        finalized = true;
+        throw cutoverBusy(existing, now.getTime());
+      }
+      const sameLiveLease = existing
+        && existing.expiresAt > now.getTime()
+        && constantTimeStringEqual(existing.hash, leaseHash);
+      const generation = sameLiveLease ? existing.generation : randomToken(32);
+      const fields = cutoverLeaseFields(leaseHash, generation, {
+        acquiredAt: sameLiveLease ? new Date(existing.acquiredAt) : now,
+        now,
+      });
+      await firestoreCommit(context, [
+        cutoverLeaseWrite(context, uid, marker.document, fields)
+      ], transaction);
+      finalized = true;
+      return {
+        generation,
+        hash: leaseHash,
+        state: "active"
+      };
+    } catch (error) {
+      if (!finalized) await firestoreRollback(context, transaction).catch(() => undefined);
+      if (error instanceof HttpError && error.code === "vault_cutover_busy") throw error;
+      if (isOptimisticLeaseConflict(error) && attempt < maximumLeaseAcquireAttempts - 1) {
+        continue;
+      }
+      if (isOptimisticLeaseConflict(error)) throw cutoverBusy();
+      throw error;
+    }
+  }
+  throw cutoverBusy();
+}
+
+function renewedCutoverLeaseWrite(context, uid, markerDocument, leaseRequest) {
+  const marker = requireVaultCutoverLease(markerDocument, uid, leaseRequest);
+  const lease = marker.lease;
+  const now = new Date();
+  return cutoverLeaseWrite(context, uid, markerDocument, cutoverLeaseFields(
+    lease.hash,
+    lease.generation,
+    {
+      acquiredAt: new Date(lease.acquiredAt),
+      now
+    }
+  ));
+}
+
+async function renewHeldCutoverLease(context, uid, leaseRequest) {
+  for (let attempt = 0; attempt < maximumLeaseAcquireAttempts; attempt += 1) {
+    const { documents, transaction } = await firestoreBatchGetNewTransaction(context, [
+      integrityPath(uid)
+    ]);
+    let finalized = false;
+    try {
+      const marker = requireVaultIntegrityMarker(documents[0], uid, "any");
+      if (marker.state === "ready") {
+        await firestoreRollback(context, transaction);
+        finalized = true;
+        return { state: "ready" };
+      }
+      const lease = requireVaultCutoverLease(marker.document, uid, leaseRequest).lease;
+      const now = new Date();
+      const fields = cutoverLeaseFields(lease.hash, lease.generation, {
+        acquiredAt: new Date(lease.acquiredAt),
+        now
+      });
+      await firestoreCommit(context, [
+        cutoverLeaseWrite(context, uid, marker.document, fields)
+      ], transaction);
+      finalized = true;
+      return { state: "pending" };
+    } catch (error) {
+      if (!finalized) await firestoreRollback(context, transaction).catch(() => undefined);
+      if (error instanceof HttpError && error.code === "vault_cutover_busy") throw error;
+      if (isOptimisticLeaseConflict(error) && attempt < maximumLeaseAcquireAttempts - 1) continue;
+      if (isOptimisticLeaseConflict(error)) throw cutoverBusy();
+      throw error;
+    }
+  }
+  throw cutoverBusy();
+}
+
+async function releaseCutoverLease(context, uid, leaseRequest) {
+  for (let attempt = 0; attempt < maximumLeaseAcquireAttempts; attempt += 1) {
+    const { documents, transaction } = await firestoreBatchGetNewTransaction(context, [
+      integrityPath(uid)
+    ]);
+    let finalized = false;
+    try {
+      const marker = requireVaultIntegrityMarker(documents[0], uid, "any");
+      const existing = marker.lease ?? null;
+      if (
+        marker.state === "ready"
+        || !existing
+        || !constantTimeStringEqual(existing.hash, leaseRequest.hash)
+        || !constantTimeStringEqual(existing.generation, leaseRequest.generation)
+      ) {
+        await firestoreRollback(context, transaction);
+        finalized = true;
+        return false;
+      }
+      await firestoreCommit(context, [
+        clearCutoverLeaseWrite(context, uid, marker.document)
+      ], transaction);
+      finalized = true;
+      return true;
+    } catch (error) {
+      if (!finalized) await firestoreRollback(context, transaction).catch(() => undefined);
+      if (isOptimisticLeaseConflict(error) && attempt < maximumLeaseAcquireAttempts - 1) continue;
+      if (isOptimisticLeaseConflict(error)) return false;
+      throw error;
+    }
+  }
+  return false;
 }
 
 function failIncomplete(message = "Vault cutover inventory is incomplete") {
@@ -317,6 +569,122 @@ function normalizeFolderTarget(folder, uid) {
   };
 }
 
+function reconciliationTargetState(document, kind) {
+  if (hasOwn(document, "isDeleted") && typeof document.isDeleted !== "boolean") {
+    failIncomplete("Vault deletion metadata is invalid");
+  }
+  if (kind === "folder") {
+    if (!hasOwn(document, "isDeleted")) {
+      if (
+        ambiguousLegacyDeletion(document, kind)
+        || !projectedEnvelope(document.encryptedName)
+        || !projectedEnvelope(document.wrappedKey)
+      ) {
+        return "ambiguous";
+      }
+      return "active";
+    }
+    return document.isDeleted === true
+      ? "inactive"
+      : "active";
+  }
+
+  if (hasOwn(document, "isPurged") && typeof document.isPurged !== "boolean") {
+    failIncomplete("Vault purge metadata is invalid");
+  }
+  const copyState = document.secureShareCopyState;
+  if (copyState !== undefined && !secureCopyStates.has(copyState)) {
+    failIncomplete("Vault secure copy state is invalid");
+  }
+  if (document.isDeleted === false && (document.isPurged === true || copyState === "aborted")) {
+    failIncomplete("Vault inactive lifecycle metadata is inconsistent");
+  }
+  if (document.isDeleted === true && copyState === "copying") {
+    failIncomplete("Vault pending copy lifecycle metadata is inconsistent");
+  }
+  if (document.isDeleted === true) return "inactive";
+  if (document.isDeleted === false) return "active";
+  return ambiguousLegacyDeletion(document, kind) ? "ambiguous" : "active";
+}
+
+function reconciliationTarget(document, uid, targetType) {
+  assertOwnerUid(document?.ownerUid, uid);
+  return {
+    claimId: claimMetadata(document),
+    parentId: optionalParentId(targetType === "entry" ? document.folderId : document.parentId),
+    state: reconciliationTargetState(document, targetType === "entry" ? "note" : "folder"),
+    targetId: assertTargetId(document?.__id, targetType === "entry" ? "note id" : "folder id"),
+    targetType
+  };
+}
+
+function claimMatchesReconciliationTarget(claim, target) {
+  return claim.targetId === target.targetId
+    && claim.targetType === target.targetType
+    && claim.parentId === target.parentId;
+}
+
+/**
+ * Returns only claims that are safe to remove without knowing a plaintext
+ * Vault name. Active and ambiguous targets are preserved unless their target
+ * has a different, complete claim that is already present and points back to
+ * the same target. An orphan is removable only when no active or ambiguous
+ * target document references its claim id.
+ */
+function staleClaimDocuments(uid, inventory) {
+  const targets = [
+    ...inventory.notes.map((note) => reconciliationTarget(note, uid, "entry")),
+    ...inventory.folders.map((folder) => reconciliationTarget(folder, uid, "folder"))
+  ];
+  const targetByKey = new Map();
+  const referencesByClaimId = new Map();
+  for (const target of targets) {
+    const key = claimTargetKey(target.targetType, target.targetId);
+    if (targetByKey.has(key)) failIncomplete("Vault inventory contains a duplicate target");
+    targetByKey.set(key, target);
+    if (target.claimId) {
+      const references = referencesByClaimId.get(target.claimId) ?? [];
+      references.push(target);
+      referencesByClaimId.set(target.claimId, references);
+    }
+  }
+
+  const normalizedClaims = inventory.claims.map((document) => ({
+    document,
+    value: normalizedClaim(document, uid)
+  }));
+  const claimById = new Map();
+  for (const claim of normalizedClaims) {
+    if (claimById.has(claim.value.claimId)) {
+      throw new HttpError(409, "vault_claim_invalid", "Vault name claims are not unique");
+    }
+    claimById.set(claim.value.claimId, claim.value);
+  }
+
+  return normalizedClaims.filter(({ document, value: claim }) => {
+    if (typeof document.__updateTime !== "string" || !document.__updateTime) {
+      failIncomplete("Vault claim update precondition is missing");
+    }
+    const target = targetByKey.get(claimTargetKey(claim.targetType, claim.targetId)) ?? null;
+    const protectedReference = (referencesByClaimId.get(claim.claimId) ?? []).some(
+      (reference) => reference.state !== "inactive" && !claimMatchesReconciliationTarget(claim, reference)
+    );
+
+    if (!target || target.state === "inactive") {
+      return !protectedReference;
+    }
+    if (target.state !== "active" || !target.claimId || target.claimId === claim.claimId) {
+      return false;
+    }
+    const replacement = claimById.get(target.claimId);
+    return Boolean(
+      replacement
+      && claimMatchesReconciliationTarget(replacement, target)
+      && !protectedReference
+    );
+  });
+}
+
 function validateTree(treeDocument, folders, uid) {
   if (!treeDocument || treeDocument.ownerUid !== uid) {
     throw new HttpError(409, "vault_tree_invalid", "Vault folder tree is unavailable", {
@@ -467,11 +835,22 @@ function normalizationWrites(context, documents, kind) {
   return writes;
 }
 
-async function commitNormalizationWrites(context, writes) {
+async function commitNormalizationWrites(context, uid, writes, leaseRequest) {
   for (let offset = 0; offset < writes.length; offset += maximumNormalizationWrites) {
+    const { documents, transaction } = await firestoreBatchGetNewTransaction(context, [
+      integrityPath(uid)
+    ]);
+    let committed = false;
     try {
-      await firestoreCommit(context, writes.slice(offset, offset + maximumNormalizationWrites));
+      requireVaultCutoverLease(documents[0], uid, leaseRequest);
+      await firestoreCommit(context, [
+        ...writes.slice(offset, offset + maximumNormalizationWrites),
+        renewedCutoverLeaseWrite(context, uid, documents[0], leaseRequest)
+      ], transaction);
+      committed = true;
     } catch (error) {
+      if (!committed) await firestoreRollback(context, transaction).catch(() => undefined);
+      if (error instanceof HttpError && error.code === "vault_cutover_busy") throw error;
       if (
         error?.statusCode === 409
         || error?.upstreamCode === "ABORTED"
@@ -484,20 +863,70 @@ async function commitNormalizationWrites(context, writes) {
   }
 }
 
-async function normalizeLegacyDeletionMetadata(context, uid) {
-  const [notes, folders] = await Promise.all([
-    firestoreRunQuery(context, noteInventoryQuery(uid)),
-    firestoreRunQuery(context, folderInventoryQuery(uid))
+async function reconcileStaleClaims(context, uid, leaseRequest) {
+  const { documents, transaction } = await firestoreBatchGetNewTransaction(context, [
+    integrityPath(uid)
   ]);
-  if (notes.length > maximumOwnedNotes || folders.length > maximumOwnedFolders) {
-    failIncomplete("Vault inventory exceeded its safe normalization limit");
+  let committed = false;
+  try {
+    requireVaultCutoverLease(documents[0], uid, leaseRequest);
+    const claims = await firestoreRunQuery(
+      context,
+      claimInventoryQuery(),
+      integrityPath(uid),
+      transaction
+    );
+    if (claims.length > maximumNameClaims) {
+      failIncomplete("Vault claim inventory exceeded its safe limit");
+    }
+    let notes = [];
+    let folders = [];
+    if (claims.length > 0) {
+      notes = await firestoreRunQuery(context, noteInventoryQuery(uid), "", transaction);
+      if (notes.length > maximumOwnedNotes) {
+        failIncomplete("Vault note inventory exceeded its safe limit");
+      }
+      folders = await firestoreRunQuery(context, folderInventoryQuery(uid), "", transaction);
+      if (folders.length > maximumOwnedFolders) {
+        failIncomplete("Vault folder inventory exceeded its safe limit");
+      }
+    }
+    const staleClaims = claims.length > 0
+      ? staleClaimDocuments(uid, { claims, folders, notes })
+      : [];
+    const selected = staleClaims.slice(0, maximumReconciliationWrites);
+    const writes = [
+      ...selected.map(({ document, value }) => deleteDocumentWrite(
+        context.projectId,
+        claimPath(uid, value.claimId),
+        document.__updateTime
+      )),
+      renewedCutoverLeaseWrite(context, uid, documents[0], leaseRequest)
+    ];
+    try {
+      await firestoreCommit(context, writes, transaction);
+    } catch (error) {
+      if (
+        error?.statusCode === 409
+        || error?.upstreamCode === "ABORTED"
+        || error?.upstreamCode === "FAILED_PRECONDITION"
+      ) {
+        throw new HttpError(409, "vault_cutover_changed", "Vault changed during claim reconciliation");
+      }
+      throw error;
+    }
+    committed = true;
+    return {
+      hasMore: staleClaims.length > selected.length,
+      leaseGeneration: leaseRequest.generation,
+      observedClaimCount: claims.length,
+      removedClaimCount: selected.length,
+      state: "pending"
+    };
+  } catch (error) {
+    if (!committed) await firestoreRollback(context, transaction).catch(() => undefined);
+    throw error;
   }
-  const writes = [
-    ...normalizationWrites(context, notes, "note"),
-    ...normalizationWrites(context, folders, "folder")
-  ];
-  await commitNormalizationWrites(context, writes);
-  return { normalizedCount: writes.length };
 }
 
 function readyResult(marker, expected) {
@@ -511,12 +940,7 @@ function readyResult(marker, expected) {
   };
 }
 
-async function sealReady(context, uid, expected) {
-  const [initialMarker] = await firestoreBatchGet(context, [integrityPath(uid)]);
-  const initial = requireVaultIntegrityMarker(initialMarker, uid, "any");
-  if (initial.state === "ready") return readyResult(initial.document, expected);
-
-  await normalizeLegacyDeletionMetadata(context, uid);
+async function sealReady(context, uid, expected, leaseRequest, normalizationPass = 0) {
   const { documents, transaction } = await firestoreBatchGetNewTransaction(context, [
     integrityPath(uid),
     treePath(uid)
@@ -528,6 +952,7 @@ async function sealReady(context, uid, expected) {
       await firestoreRollback(context, transaction);
       return readyResult(marker.document, expected);
     }
+    requireVaultCutoverLease(marker.document, uid, leaseRequest);
     const notes = await firestoreRunQuery(context, noteInventoryQuery(uid), "", transaction);
     if (notes.length > maximumOwnedNotes) failIncomplete("Vault note inventory exceeded its safe limit");
     const folders = await firestoreRunQuery(context, folderInventoryQuery(uid), "", transaction);
@@ -539,6 +964,24 @@ async function sealReady(context, uid, expected) {
       transaction
     );
     if (claims.length > maximumNameClaims) failIncomplete("Vault claim inventory exceeded its safe limit");
+    const legacyNormalizationWrites = [
+      ...normalizationWrites(context, notes, "note"),
+      ...normalizationWrites(context, folders, "folder")
+    ];
+    if (legacyNormalizationWrites.length) {
+      await firestoreRollback(context, transaction);
+      committed = true;
+      if (normalizationPass >= 1) {
+        failChanged("Vault deletion metadata changed during normalization");
+      }
+      await commitNormalizationWrites(
+        context,
+        uid,
+        legacyNormalizationWrites,
+        leaseRequest
+      );
+      return sealReady(context, uid, expected, leaseRequest, normalizationPass + 1);
+    }
     const counts = validateVaultIntegrityInventory(uid, {
       claims,
       folders,
@@ -548,15 +991,21 @@ async function sealReady(context, uid, expected) {
     const now = new Date();
     const readyFields = vaultIntegrityReadyFields(now);
     try {
-      await firestoreCommit(context, [updateDocumentWrite(
-        context.projectId,
-        integrityPath(uid),
-        readyFields,
-        Object.keys(readyFields),
-        documents[0].__updateTime
-      )], transaction);
+      await firestoreCommit(context, [
+        updateDocumentWrite(
+          context.projectId,
+          integrityPath(uid),
+          readyFields,
+          [...Object.keys(readyFields), ...VAULT_CUTOVER_LEASE_FIELD_PATHS],
+          documents[0].__updateTime
+        )
+      ], transaction);
     } catch (error) {
-      if (error?.statusCode === 409 || error?.upstreamCode === "ABORTED") {
+      if (
+        error?.statusCode === 409
+        || error?.upstreamCode === "ABORTED"
+        || error?.upstreamCode === "FAILED_PRECONDITION"
+      ) {
         throw new HttpError(409, "vault_cutover_changed", "Vault changed while sealing cutover");
       }
       throw error;
@@ -578,15 +1027,46 @@ async function performAction(context, uid, body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw new HttpError(400, "invalid_request", "Expected a JSON object");
   }
+  const action = body.action;
+  if (typeof action !== "string" || !supportedActions.has(action)) {
+    throw new HttpError(400, "invalid_request", "Invalid Vault integrity action");
+  }
+  if (body.action === "reconcile-stale-claims") {
+    assertOnlyKeys(body, ["action", "leaseId"]);
+    const lease = await acquireCutoverLease(context, uid, body.leaseId);
+    if (lease.state === "ready") {
+      throw new HttpError(409, "vault_cutover_complete", "Vault cutover migration is already complete");
+    }
+    try {
+      return await reconcileStaleClaims(context, uid, lease);
+    } catch (error) {
+      await releaseCutoverLease(context, uid, lease).catch(() => undefined);
+      throw error;
+    }
+  }
+  if (body.action === "renew-cutover-lease") {
+    assertOnlyKeys(body, ["action", "leaseGeneration", "leaseId"]);
+    const result = await renewHeldCutoverLease(context, uid, leaseCredential(body));
+    return {
+      leaseExpiresInSeconds: result.state === "pending" ? cutoverLeaseTtlSeconds : 0,
+      state: result.state
+    };
+  }
+  if (body.action === "release-cutover-lease") {
+    assertOnlyKeys(body, ["action", "leaseGeneration", "leaseId"]);
+    return {
+      released: await releaseCutoverLease(context, uid, leaseCredential(body)),
+      state: "released"
+    };
+  }
   assertOnlyKeys(body, [
     "action",
     "expectedActiveNoteCount",
     "expectedDeletedNoteCount",
-    "expectedFolderCount"
+    "expectedFolderCount",
+    "leaseGeneration",
+    "leaseId"
   ]);
-  if (body.action !== "seal-ready") {
-    throw new HttpError(400, "invalid_request", "Invalid Vault integrity action");
-  }
   const expected = {
     expectedActiveNoteCount: expectedCount(
       body.expectedActiveNoteCount,
@@ -607,15 +1087,25 @@ async function performAction(context, uid, body) {
   if (expected.expectedActiveNoteCount + expected.expectedDeletedNoteCount > maximumOwnedNotes) {
     throw new HttpError(400, "invalid_request", "Expected Vault note count exceeds its safe limit");
   }
-  return sealReady(context, uid, expected);
+  const lease = leaseCredential(body);
+  try {
+    return await sealReady(context, uid, expected, lease);
+  } catch (error) {
+    await releaseCutoverLease(context, uid, lease).catch(() => undefined);
+    throw error;
+  }
 }
 
 export const __vaultIntegrityTesting = Object.freeze({
   claimInventoryQuery,
   folderInventoryQuery,
-  normalizeLegacyDeletionMetadata,
   noteInventoryQuery,
   performAction,
+  operationBounds: VAULT_INTEGRITY_OPERATION_BOUNDS,
+  reconcileStaleClaims,
+  releaseCutoverLease,
+  renewHeldCutoverLease,
+  staleClaimDocuments,
   validateVaultIntegrityInventory
 });
 

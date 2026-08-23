@@ -104,7 +104,8 @@ describe("VaultPage built-in knowledge tool wiring", () => {
     expect(source).toContain("onEditProperty={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked ? undefined : editBaseProperty}");
     expect(source).toContain("onOpenLink={openKanbanLink}");
     expect(source).toContain("<LazyVaultHistoryPanel");
-    expect(source).toContain('rightMode === "history"');
+    expect(source).toContain('{ icon: History, label: "File Recovery", mode: "history" }');
+    expect(source).toContain(") : activeNote ? (");
     const restoreHistory = source.match(
       /function restoreHistorySnapshot[\s\S]*?const legacyFolderCount/u
     )?.[0] ?? "";

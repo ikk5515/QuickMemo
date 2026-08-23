@@ -7,6 +7,7 @@ import type { GraphEdge, GraphNode, GraphRendererHandle } from "./types";
 
 const renderedSnapshots = vi.hoisted(() => [] as Array<{ edgeIds: string[]; nodeIds: string[] }>);
 const renderedSizes = vi.hoisted(() => [] as Array<{ height: number; width: number }>);
+const invokeZoomDuringRender = vi.hoisted(() => ({ current: false }));
 const capturedGraph = vi.hoisted(() => ({ current: null as null | {
   cooldownTicks?: number;
   enableNodeDrag?: boolean;
@@ -22,6 +23,7 @@ const capturedGraph = vi.hoisted(() => ({ current: null as null | {
   onNodeHover?: (node: { id: string } | null) => void;
   onNodeRightClick?: (node: { id: string }, event: MouseEvent) => void;
   onRenderFramePost?: () => void;
+  onZoom?: () => void;
   onZoomEnd?: (transform: { k: number }) => void;
   warmupTicks?: number;
 } }));
@@ -52,6 +54,7 @@ vi.mock("react-force-graph-2d", () => ({
       onNodeHover?: (node: { id: string } | null) => void;
       onNodeRightClick?: (node: { id: string }, event: MouseEvent) => void;
       onRenderFramePost?: () => void;
+      onZoom?: () => void;
       onZoomEnd?: (transform: { k: number }) => void;
       warmupTicks?: number;
       height: number;
@@ -72,6 +75,7 @@ vi.mock("react-force-graph-2d", () => ({
     });
     renderedSizes.push({ height: props.height, width: props.width });
     capturedGraph.current = props;
+    if (invokeZoomDuringRender.current) props.onZoom?.();
     useImperativeHandle(ref, () => ({
       centerAt: (x?: number, y?: number, duration?: number) => {
         if (typeof x === "number" && typeof y === "number") {
@@ -110,6 +114,7 @@ vi.mock("react-force-graph-2d", () => ({
 
 beforeEach(() => {
   capturedGraph.current = null;
+  invokeZoomDuringRender.current = false;
   renderedSnapshots.length = 0;
   renderedSizes.length = 0;
   graphMethodState.center = { x: 0, y: 0 };
@@ -257,12 +262,14 @@ describe("ForceGraphRenderer", () => {
       expect(capturedGraph.current?.enablePointerInteraction).toBe(true);
       expect(capturedGraph.current?.enableNodeDrag).toBe(true);
       act(() => capturedGraph.current?.onNodeHover?.({ id: "node-0" }));
+      act(() => vi.advanceTimersByTime(16));
       expect(onHoveredNodeChange).toHaveBeenLastCalledWith(expect.objectContaining({ id: "node-0" }));
       act(() => rendererRef.current?.panBy(32, -12));
       expect(graphMethodState.centerAtCalls).toEqual([]);
       expect(onViewportChange).toHaveBeenLastCalledWith({ centerX: 32, centerY: -12, zoom: 1 });
       expect(canvas.style.transform).toBe("translate3d(-32px, 12px, 0) scale(1)");
       expect(host).toHaveAttribute("data-compositor-navigation", "true");
+      act(() => vi.advanceTimersByTime(16));
       expect(capturedGraph.current?.enablePointerInteraction).toBe(false);
       expect(onHoveredNodeChange).toHaveBeenLastCalledWith(null);
 
@@ -277,6 +284,8 @@ describe("ForceGraphRenderer", () => {
       act(() => vi.advanceTimersByTime(1));
       expect(graphMethodState.centerAtCalls).toEqual([{ duration: 0, x: 32, y: -12 }]);
       expect(graphMethodState.zoomCalls).toEqual([{ duration: 0, value: 1.25 }]);
+      expect(capturedGraph.current?.enablePointerInteraction).toBe(false);
+      act(() => vi.advanceTimersByTime(16));
       expect(capturedGraph.current?.enablePointerInteraction).toBe(true);
       expect(canvas.style.transform).toBe("translate3d(-40px, 15px, 0) scale(1.25)");
 
@@ -284,8 +293,56 @@ describe("ForceGraphRenderer", () => {
       expect(canvas.style.transform).toBe("");
       expect(host).not.toHaveAttribute("data-compositor-navigation");
       act(() => capturedGraph.current?.onNodeHover?.({ id: "node-1" }));
+      act(() => vi.advanceTimersByTime(16));
       expect(onHoveredNodeChange).toHaveBeenLastCalledWith(expect.objectContaining({ id: "node-1" }));
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defers large-graph hover clearing when zoom fires during child render", () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const onHoveredNodeChange = vi.fn();
+    const nodes: GraphNode[] = Array.from({ length: 5_000 }, (_, index) => ({
+      id: `node-${index}`,
+      kind: "note",
+      label: `Node ${index}`
+    }));
+    const settings = createDefaultGlobalGraphSettings();
+
+    try {
+      const view = render(
+        <ForceGraphRenderer
+          edges={[]}
+          nodes={nodes}
+          onHoveredNodeChange={onHoveredNodeChange}
+          onNodeOpen={vi.fn()}
+          settings={settings}
+        />
+      );
+      act(() => capturedGraph.current?.onNodeHover?.({ id: "node-0" }));
+      act(() => vi.advanceTimersByTime(16));
+      expect(onHoveredNodeChange).toHaveBeenLastCalledWith(expect.objectContaining({ id: "node-0" }));
+
+      invokeZoomDuringRender.current = true;
+      view.rerender(
+        <ForceGraphRenderer
+          edges={[]}
+          nodes={nodes}
+          onHoveredNodeChange={onHoveredNodeChange}
+          onNodeOpen={vi.fn()}
+          settings={settings}
+        />
+      );
+      invokeZoomDuringRender.current = false;
+      expect(onHoveredNodeChange).toHaveBeenLastCalledWith(expect.objectContaining({ id: "node-0" }));
+      act(() => vi.advanceTimersByTime(16));
+      expect(onHoveredNodeChange).toHaveBeenLastCalledWith(null);
+      expect(consoleError.mock.calls.flat().join(" ")).not.toContain("Cannot update a component");
+    } finally {
+      invokeZoomDuringRender.current = false;
+      consoleError.mockRestore();
       vi.useRealTimers();
     }
   });

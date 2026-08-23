@@ -4,9 +4,11 @@ import {
   createEncryptedNoteFolder,
   createEncryptedNoteFolderAtId,
   migrateLegacyNoteFolder,
+  resolveLegacyNoteFolderCollision,
   updateEncryptedNoteFolder,
   type NoteFolderSnapshot,
-  type NoteSnapshot
+  type NoteSnapshot,
+  type VaultCutoverLeaseInput
 } from "../../services/notes";
 import type { DecryptedNote, UserProfile, VaultContentFormat, VaultEntryKind } from "../../types";
 import {
@@ -172,8 +174,11 @@ export async function migrateLegacyVaultFolder(
   recovery?: {
     replacementName?: string;
     targetParentId?: string | null;
-  }
+  },
+  cutoverLease?: VaultCutoverLeaseInput,
+  signal?: AbortSignal
 ) {
+  signal?.throwIfAborted();
   if (folder.encryptedName && folder.wrappedKey) {
     return { folderId: folder.id, revision: folder.revision ?? 1 };
   }
@@ -198,17 +203,19 @@ export async function migrateLegacyVaultFolder(
     encryptText(normalizedName, folderKey),
     wrapNoteKey(folderKey, profile.publicKeyJwk)
   ]);
+  signal?.throwIfAborted();
   const claimId = await vaultNameFingerprint(vaultIntegrityKey, {
     name: normalizedName,
     parentId,
     targetType: "folder"
   });
 
-  return migrateLegacyNoteFolder({
+  const migrationInput = {
     color: folder.color,
     encryptedName,
     expectedName: folder.name,
     folderId: folder.id,
+    ...cutoverLease,
     order,
     ownerUid: profile.uid,
     parentId,
@@ -218,7 +225,15 @@ export async function migrateLegacyVaultFolder(
       indexVersion: VAULT_NAME_INDEX_VERSION,
       parentId
     }
-  });
+  };
+  if (recovery) {
+    return signal
+      ? resolveLegacyNoteFolderCollision(migrationInput, signal)
+      : resolveLegacyNoteFolderCollision(migrationInput);
+  }
+  return signal
+    ? migrateLegacyNoteFolder(migrationInput, signal)
+    : migrateLegacyNoteFolder(migrationInput);
 }
 
 export async function renameEncryptedVaultFolder(

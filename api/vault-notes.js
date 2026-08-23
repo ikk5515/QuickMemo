@@ -25,6 +25,8 @@ import { validateVaultFolderTree } from "./_vault-folder-tree.js";
 import { logVaultApiRejection } from "./_vault-api-observability.js";
 import {
   integrityPath,
+  requireVaultCutoverLease,
+  vaultCutoverLeaseCredential,
   requireVaultIntegrityMarker
 } from "./_vault-integrity-marker.js";
 
@@ -894,13 +896,26 @@ async function mutateRevisionedNote(context, uid, body, specification) {
       state.profile,
       specification.actionName
     );
-    await requireNoteIntegrityMarker(
+    const integrityMarker = await requireNoteIntegrityMarker(
       context,
       state,
       uid,
       note,
-      claimRecoveryActions.has(specification.actionName) ? "any" : "ready"
+      specification.actionName === "resolve-collision"
+        ? "pending"
+        : claimRecoveryActions.has(specification.actionName) ? "any" : "ready"
     );
+    if (
+      claimRecoveryActions.has(specification.actionName)
+      && specification.actionName !== "resolve-collision"
+      && integrityMarker.state === "pending"
+    ) {
+      requireVaultCutoverLease(
+        integrityMarker.document,
+        assertStoredOwnerUid(note),
+        vaultCutoverLeaseCredential(body.leaseId, body.leaseGeneration)
+      );
+    }
     const revision = assertExpectedRevision(note, expectedRevision);
     await assertSourceImportMutationAllowed(context, state.transaction, note, uid, specification.actionName);
     const mutation = await specification.prepare({
@@ -1243,23 +1258,27 @@ async function handleAccess(context, uid, body) {
 async function handleBackfill(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "expectedContentFormat", "expectedEntryKind", "expectedRevision", "historySummary",
-    "nameClaim", "noteId", "readerUids"
+    "leaseGeneration", "leaseId", "nameClaim", "noteId", "readerUids"
   ]);
   assertStorageIdentity(body.expectedContentFormat, body.expectedEntryKind);
   return mutateRevisionedNote(context, uid, body, {
     actionName: "backfill-claim",
     prepare: async ({ context: innerContext, note, noteId, transaction }) => {
       assertOwnedNote(note, uid);
+      const nextClaim = assertNameClaim(body.nameClaim, note.folderId ?? null);
+      const claimMetadataAbsent = !Object.prototype.hasOwnProperty.call(note, "vaultNameClaimId")
+        && !Object.prototype.hasOwnProperty.call(note, "vaultNameIndexVersion");
+      const claimMetadataMatches = storedClaimId(note) === nextClaim.claimId
+        && note.vaultNameIndexVersion === 1;
       if (
         !noteActive(note)
         || !secureCopyUsable(note)
-        || storedClaimId(note)
+        || (!claimMetadataAbsent && !claimMetadataMatches)
         || !storageIdentityMatches(note, body.expectedContentFormat, body.expectedEntryKind)
       ) {
         throw new HttpError(409, "vault_note_state_mismatch", "Vault name claim cannot be backfilled");
       }
       assertReaderUids(body.readerUids, note.participantUids);
-      const nextClaim = assertNameClaim(body.nameClaim, note.folderId ?? null);
       await assertFolderAvailable(innerContext, transaction, uid, note.folderId ?? null);
       const additionalWrites = await claimMutation(
         innerContext,
@@ -1286,7 +1305,7 @@ async function handleBackfill(context, uid, body) {
 async function handleMigrateLegacy(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "expectedContentFormat", "expectedEntryKind", "expectedRevision", "historySummary",
-    "nameClaim", "noteId", "readerUids"
+    "leaseGeneration", "leaseId", "nameClaim", "noteId", "readerUids"
   ]);
   if (
     body.expectedContentFormat !== "legacy-html-v1"
@@ -1344,7 +1363,8 @@ async function handleMigrateLegacy(context, uid, body) {
 async function handleCollision(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "changedFields", "encryptedTitle", "expectedContentFormat", "expectedEntryKind",
-    "expectedRevision", "folderId", "historySummary", "nameClaim", "noteId", "readerUids"
+    "expectedRevision", "folderId", "historySummary", "leaseGeneration", "leaseId", "nameClaim",
+    "noteId", "readerUids"
   ]);
   assertStorageIdentity(body.expectedContentFormat, body.expectedEntryKind);
   const changedFields = assertHistoryFields(body.changedFields, ["name-claim"]);
@@ -1364,17 +1384,21 @@ async function handleCollision(context, uid, body) {
     actionName: "resolve-collision",
     prepare: async ({ context: innerContext, note, noteId, transaction }) => {
       assertOwnedNote(note, uid);
+      const nextFolderId = folderChanged ? folderId : note.folderId ?? null;
+      const repairsHistoricalSharedFolder = folderChanged
+        && note.type === "shared"
+        && (note.folderId ?? null) !== null
+        && nextFolderId === null;
       if (
         !noteActive(note)
         || !secureCopyUsable(note)
         || storedClaimId(note)
         || !storageIdentityMatches(note, body.expectedContentFormat, body.expectedEntryKind)
-        || (folderChanged && note.type !== "personal")
+        || (folderChanged && note.type !== "personal" && !repairsHistoricalSharedFolder)
       ) {
         throw new HttpError(409, "vault_note_state_mismatch", "Vault collision cannot be resolved");
       }
       assertReaderUids(body.readerUids, note.participantUids);
-      const nextFolderId = folderChanged ? folderId : note.folderId ?? null;
       await assertFolderAvailable(innerContext, transaction, uid, nextFolderId);
       if (titleChanged && encryptedPayloadMatches(note.encryptedTitle, encryptedTitle)) {
         throw new HttpError(400, "invalid_request", "Collision recovery title is unchanged");

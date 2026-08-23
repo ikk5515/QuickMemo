@@ -25,6 +25,7 @@ import {
   migrateLegacyNoteFolder,
   migrateLegacyVaultNote,
   purgeNote,
+  resolveEncryptedNoteFolderCollision,
   resolveRevisionedVaultNameCollision,
   restoreRevisionedNote,
   restoreRevisionedEncryptedFolderSubtree,
@@ -1102,6 +1103,24 @@ describe("revision-aware note persistence", () => {
       folderId: "folder-a",
       nameClaim: vaultNameClaim("folder-b"),
       parentId: "folder-b"
+    });
+  });
+
+  it("uses the dedicated folder collision recovery action", async () => {
+    await expect(resolveEncryptedNoteFolderCollision({
+      encryptedName: encryptedPayload,
+      expectedRevision: 1,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a"
+    })).resolves.toMatchObject({ folderId: "folder-a", revision: 2 });
+
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledWith("user-a", {
+      action: "resolve-collision",
+      encryptedName: encryptedPayload,
+      expectedRevision: 1,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim(null)
     });
   });
 

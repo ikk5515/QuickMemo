@@ -1,9 +1,11 @@
 import {
   updateEncryptedNoteFolder,
+  VaultNameConflictError,
   vaultNameClaimReservationMatches,
   type NoteFolderSnapshot,
   type NoteSnapshot
 } from "../../services/notes";
+import type { VaultIntegrityCutoverLease } from "../../services/vaultIntegrity";
 import type { UserProfile } from "../../types";
 import {
   decryptVaultFolders,
@@ -37,6 +39,9 @@ export interface VaultNameReservationMigrationInput {
   expectedNoteCount: number;
   expectedDeletedNoteCount: number;
   vaultIntegrityKey: CryptoKey;
+  cutoverLease: VaultIntegrityCutoverLease;
+  signal?: AbortSignal;
+  onLeaseCheckpoint?: () => Promise<void>;
   onProgress?: (progress: VaultNameReservationMigrationProgress) => void;
 }
 
@@ -50,6 +55,35 @@ export interface VaultNameReservationMigrationProgress {
 export interface VaultNameReservationMigrationResult extends VaultNameReservationMigrationProgress {
   collisions: VaultNameMigrationPlan["collisions"];
   deferredTargetIds: string[];
+}
+
+export function vaultNameCollisionRepairTargetIds(
+  result: Pick<VaultNameReservationMigrationResult, "collisions" | "deferredTargetIds">,
+  notes: readonly Pick<DecryptedVaultNote, "folderId" | "id" | "type">[]
+) {
+  const targetIds = new Set(
+    result.collisions.map((collision) => collision.duplicateTargetId)
+  );
+  for (const targetId of result.deferredTargetIds) {
+    const note = notes.find((candidate) => candidate.id === targetId);
+    if (note?.type === "shared" && (note.folderId ?? null) !== null) {
+      targetIds.add(targetId);
+    }
+  }
+  return targetIds.size ? [...targetIds] : [...result.deferredTargetIds];
+}
+
+export const VAULT_NAME_MIGRATION_WRITE_CONCURRENCY = 4;
+export const VAULT_NAME_MIGRATION_LEASE_CHECKPOINT_BATCH_SIZE = 16;
+
+export class VaultNameReservationMigrationConflictError extends Error {
+  readonly targetIds: string[];
+
+  constructor(targetIds: readonly string[]) {
+    super("이름 예약이 다른 활성 항목에 의해 변경되었습니다. 표시된 항목의 이름이나 위치를 확인해주세요.");
+    this.name = "VaultNameReservationMigrationConflictError";
+    this.targetIds = [...new Set(targetIds)];
+  }
 }
 
 export interface VaultNameReservationAuditInput {
@@ -70,6 +104,125 @@ interface VaultNameReservationPlanState {
   notesById: Map<string, DecryptedVaultNote>;
   orderedFolders: DecryptedVaultFolder[];
   plan: VaultNameMigrationPlan;
+}
+
+type VaultNameMigrationTarget = DecryptedVaultFolder | DecryptedVaultNote;
+
+async function runBoundedMigrationWrites<T>(
+  items: readonly T[],
+  worker: (item: T) => Promise<void>,
+  onBatchComplete?: () => Promise<void>,
+  signal?: AbortSignal
+) {
+  for (let offset = 0; offset < items.length; offset += VAULT_NAME_MIGRATION_LEASE_CHECKPOINT_BATCH_SIZE) {
+    signal?.throwIfAborted();
+    const batch = items.slice(offset, offset + VAULT_NAME_MIGRATION_LEASE_CHECKPOINT_BATCH_SIZE);
+    let cursor = 0;
+    let failed = false;
+    let failure: unknown;
+    const runner = async () => {
+      while (!failed) {
+        signal?.throwIfAborted();
+        const index = cursor;
+        cursor += 1;
+        if (index >= batch.length) return;
+        try {
+          await worker(batch[index]);
+        } catch (caught) {
+          if (!failed) {
+            failed = true;
+            failure = caught;
+          }
+        }
+      }
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(VAULT_NAME_MIGRATION_WRITE_CONCURRENCY, batch.length) },
+      runner
+    ));
+    if (failed) throw failure;
+    signal?.throwIfAborted();
+    await onBatchComplete?.();
+  }
+}
+
+function migrationTargetForClaim(
+  claim: VaultNameMigrationPlan["claims"][number],
+  targetId: string,
+  foldersById: ReadonlyMap<string, DecryptedVaultFolder>,
+  notesById: ReadonlyMap<string, DecryptedVaultNote>
+) {
+  return claim.targetType === "folder"
+    ? foldersById.get(targetId)
+    : notesById.get(targetId);
+}
+
+/**
+ * A retry must preserve the live server reservation owner. Planning from the
+ * decrypted snapshot alone is order-dependent, so a duplicate that completed
+ * an earlier atomic reservation could otherwise be demoted and make the new
+ * first item fail with a misleading conflict. Only a target whose encrypted
+ * metadata and owner-scoped claim document both match may replace the planned
+ * winner; plaintext names and target ids are never sent to a repair endpoint.
+ */
+async function preferExistingReservationOwners(
+  plan: VaultNameMigrationPlan,
+  ownerUid: string,
+  foldersById: ReadonlyMap<string, DecryptedVaultFolder>,
+  notesById: ReadonlyMap<string, DecryptedVaultNote>
+): Promise<VaultNameMigrationPlan> {
+  const duplicateIdsByFingerprint = new Map<string, string[]>();
+  for (const collision of plan.collisions) {
+    const duplicateIds = duplicateIdsByFingerprint.get(collision.fingerprint) ?? [];
+    duplicateIds.push(collision.duplicateTargetId);
+    duplicateIdsByFingerprint.set(collision.fingerprint, duplicateIds);
+  }
+  if (!duplicateIdsByFingerprint.size) return plan;
+
+  const claims = [] as VaultNameMigrationPlan["claims"];
+  const collisions = [] as VaultNameMigrationPlan["collisions"];
+  for (const claim of plan.claims) {
+    const duplicateIds = duplicateIdsByFingerprint.get(claim.fingerprint);
+    if (!duplicateIds?.length) {
+      claims.push(claim);
+      continue;
+    }
+    const candidateIds = [claim.targetId, ...duplicateIds];
+    const matchingOwners: VaultNameMigrationTarget[] = [];
+    for (const candidateId of candidateIds) {
+      const target = migrationTargetForClaim(claim, candidateId, foldersById, notesById);
+      if (
+        !target
+        || target.vaultNameClaimId !== claim.fingerprint
+        || target.vaultNameIndexVersion !== VAULT_NAME_INDEX_VERSION
+      ) {
+        continue;
+      }
+      if (await vaultNameClaimReservationMatches({
+        claimId: claim.fingerprint,
+        ownerUid,
+        parentId: claim.parentId,
+        targetId: candidateId,
+        targetType: claim.targetType
+      })) {
+        matchingOwners.push(target);
+      }
+    }
+    if (matchingOwners.length > 1) {
+      throw new Error("하나의 Vault 이름 예약을 여러 항목이 보유하고 있어 자동 복구를 중단했습니다.");
+    }
+    const winnerId = matchingOwners[0]?.id ?? claim.targetId;
+    claims.push({ ...claim, targetId: winnerId });
+    for (const candidateId of candidateIds) {
+      if (candidateId === winnerId) continue;
+      collisions.push({
+        duplicateTargetId: candidateId,
+        fingerprint: claim.fingerprint,
+        firstTargetId: winnerId
+      });
+    }
+  }
+  return { claims, collisions };
 }
 
 export interface VaultNameCutoverPreflightResult {
@@ -138,7 +291,9 @@ async function buildVaultNameReservationPlan(input: VaultNameReservationAuditInp
       .filter((note) => note.type === "shared" && (note.folderId ?? null) !== null)
       .map((note) => note.id)
   );
-  const plan = await planVaultNameMigration(input.vaultIntegrityKey, [
+  const foldersById = new Map(orderedFolders.map((folder) => [folder.id, folder]));
+  const notesById = new Map(input.notes.map((note) => [note.id, note]));
+  const initialPlan = await planVaultNameMigration(input.vaultIntegrityKey, [
     ...orderedFolders.map((folder) => ({
       id: folder.id,
       name: folder.displayName,
@@ -153,6 +308,12 @@ async function buildVaultNameReservationPlan(input: VaultNameReservationAuditInp
       targetType: "entry" as const
     }))
   ]);
+  const plan = await preferExistingReservationOwners(
+    initialPlan,
+    input.profile.uid,
+    foldersById,
+    notesById
+  );
   const duplicateTargetIds = new Set(plan.collisions.map((collision) => collision.duplicateTargetId));
   const duplicateFolderIds = new Set(
     orderedFolders
@@ -182,8 +343,8 @@ async function buildVaultNameReservationPlan(input: VaultNameReservationAuditInp
   return {
     deferredTargetIdSet,
     deferredTargetIds,
-    foldersById: new Map(orderedFolders.map((folder) => [folder.id, folder])),
-    notesById: new Map(input.notes.map((note) => [note.id, note])),
+    foldersById,
+    notesById,
     orderedFolders,
     plan
   };
@@ -271,6 +432,7 @@ export async function preflightVaultNameCutover(input: {
 export async function migrateVaultNameReservations(
   input: VaultNameReservationMigrationInput
 ): Promise<VaultNameReservationMigrationResult> {
+  input.signal?.throwIfAborted();
   const {
     deferredTargetIdSet,
     deferredTargetIds,
@@ -303,6 +465,47 @@ export async function migrateVaultNameReservations(
   };
 
   const processedTargetIds = new Set<string>();
+  await input.onLeaseCheckpoint?.();
+  const migrateEntryIdentity = (
+    target: DecryptedVaultNote,
+    reserveNameClaim: boolean
+  ) => input.signal
+    ? migrateLegacyVaultEntryIdentity(
+        target,
+        input.profile.uid,
+        input.vaultIntegrityKey,
+        reserveNameClaim,
+        input.cutoverLease,
+        input.signal
+      )
+    : migrateLegacyVaultEntryIdentity(
+        target,
+        input.profile.uid,
+        input.vaultIntegrityKey,
+        reserveNameClaim,
+        input.cutoverLease
+      );
+  const backfillEntryClaim = (
+    target: DecryptedVaultNote,
+    repairMissingReservation: boolean
+  ) => input.signal
+    ? backfillVaultEntryNameClaim(
+        target,
+        input.profile.uid,
+        input.privateKey,
+        input.vaultIntegrityKey,
+        repairMissingReservation,
+        input.cutoverLease,
+        input.signal
+      )
+    : backfillVaultEntryNameClaim(
+        target,
+        input.profile.uid,
+        input.privateKey,
+        input.vaultIntegrityKey,
+        repairMissingReservation,
+        input.cutoverLease
+      );
   const complete = (migrated: boolean) => {
     progress.completed += 1;
     if (migrated) progress.migrated += 1;
@@ -310,7 +513,8 @@ export async function migrateVaultNameReservations(
     input.onProgress?.({ ...progress });
   };
 
-  for (const claim of plan.claims) {
+  const processClaim = async (claim: VaultNameMigrationPlan["claims"][number]) => {
+    input.signal?.throwIfAborted();
     const target = claim.targetType === "folder"
       ? foldersById.get(claim.targetId)
       : notesById.get(claim.targetId);
@@ -321,12 +525,7 @@ export async function migrateVaultNameReservations(
 
     if (deferredTargetIdSet.has(claim.targetId)) {
       if (claim.targetType === "entry" && input.legacyActiveNoteIds.has(claim.targetId)) {
-        const result = await migrateLegacyVaultEntryIdentity(
-          target as DecryptedVaultNote,
-          input.profile.uid,
-          input.vaultIntegrityKey,
-          false
-        );
+        const result = await migrateEntryIdentity(target as DecryptedVaultNote, false);
         if (result.claimState !== "deferred") {
           throw new Error("충돌 대상의 Vault 저장 형식만 분리해 전환하지 못했습니다.");
         }
@@ -334,7 +533,7 @@ export async function migrateVaultNameReservations(
       } else {
         complete(false);
       }
-      continue;
+      return;
     }
 
     const metadataMatches = (
@@ -348,75 +547,91 @@ export async function migrateVaultNameReservations(
       targetId: claim.targetId,
       targetType: claim.targetType
     });
+    input.signal?.throwIfAborted();
 
-    if (reservationMatches) {
-      complete(false);
-    } else if (claim.targetType === "folder") {
-      const folder = target as DecryptedVaultFolder;
-      if (folder.encryptedName && folder.wrappedKey) {
-        await updateEncryptedNoteFolder({
-          expectedRevision: folder.revision ?? 1,
-          folderId: folder.id,
-          nameClaim: {
-            claimId: claim.fingerprint,
-            indexVersion: VAULT_NAME_INDEX_VERSION,
-            parentId: folder.parentId ?? null
-          },
-          ownerUid: input.profile.uid
-        });
-      } else {
-        await migrateLegacyVaultFolder(
-          input.profile,
-          input.vaultIntegrityKey,
-          folder,
-          folder.order ?? progress.completed
-        );
-      }
-      complete(true);
-    } else {
-      const note = target as DecryptedVaultNote;
-      if (input.legacyActiveNoteIds.has(note.id)) {
-        const result = await migrateLegacyVaultEntryIdentity(
-          note,
-          input.profile.uid,
-          input.vaultIntegrityKey,
-          true
-        );
-        if (result.claimState !== "reserved") {
-          throw new Error("활성 legacy Vault 항목의 이름 예약을 함께 전환하지 못했습니다.");
+    try {
+      if (reservationMatches) {
+        complete(false);
+      } else if (claim.targetType === "folder") {
+        const folder = target as DecryptedVaultFolder;
+        if (folder.encryptedName && folder.wrappedKey) {
+          const updateInput = {
+            expectedRevision: folder.revision ?? 1,
+            folderId: folder.id,
+            nameClaim: {
+              claimId: claim.fingerprint,
+              indexVersion: VAULT_NAME_INDEX_VERSION,
+              parentId: folder.parentId ?? null
+            },
+            ownerUid: input.profile.uid,
+            ...input.cutoverLease
+          };
+          if (input.signal) {
+            await updateEncryptedNoteFolder(updateInput, input.signal);
+          } else {
+            await updateEncryptedNoteFolder(updateInput);
+          }
+        } else {
+          const migrationArguments = [
+            input.profile,
+            input.vaultIntegrityKey,
+            folder,
+            folder.order ?? progress.completed,
+            undefined,
+            input.cutoverLease
+          ] as const;
+          if (input.signal) {
+            await migrateLegacyVaultFolder(...migrationArguments, input.signal);
+          } else {
+            await migrateLegacyVaultFolder(...migrationArguments);
+          }
         }
-      } else if (metadataMatches) {
-        await backfillVaultEntryNameClaim(
-          note,
-          input.profile.uid,
-          input.privateKey,
-          input.vaultIntegrityKey,
-          true
-        );
+        complete(true);
       } else {
-        await backfillVaultEntryNameClaim(
-          note,
-          input.profile.uid,
-          input.privateKey,
-          input.vaultIntegrityKey
-        );
+        const note = target as DecryptedVaultNote;
+        if (input.legacyActiveNoteIds.has(note.id)) {
+          const result = await migrateEntryIdentity(note, true);
+          if (result.claimState !== "reserved") {
+            throw new Error("활성 legacy Vault 항목의 이름 예약을 함께 전환하지 못했습니다.");
+          }
+        } else if (metadataMatches) {
+          await backfillEntryClaim(note, true);
+        } else {
+          await backfillEntryClaim(note, false);
+        }
+        complete(true);
       }
-      complete(true);
+    } catch (error) {
+      if (error instanceof VaultNameConflictError) {
+        throw new VaultNameReservationMigrationConflictError([claim.targetId]);
+      }
+      throw error;
     }
+  };
+
+  // Legacy folders must stay parent-first. Entry reservations are independent
+  // revision-aware transactions, so a small fixed worker pool avoids a 5,000
+  // request serial waterfall without creating an unbounded write burst.
+  for (const claim of plan.claims.filter((candidate) => candidate.targetType === "folder")) {
+    input.signal?.throwIfAborted();
+    await processClaim(claim);
+    await input.onLeaseCheckpoint?.();
   }
+  await runBoundedMigrationWrites(
+    plan.claims.filter((claim) => claim.targetType === "entry"),
+    processClaim,
+    input.onLeaseCheckpoint,
+    input.signal
+  );
 
   for (const target of [...orderedFolders, ...input.notes]) {
+    input.signal?.throwIfAborted();
     if (processedTargetIds.has(target.id)) continue;
     if (!deferredTargetIdSet.has(target.id)) {
       throw new Error("Vault 이름 예약 계획에서 활성 대상을 확인할 수 없습니다.");
     }
     if (input.legacyActiveNoteIds.has(target.id)) {
-      const result = await migrateLegacyVaultEntryIdentity(
-        target as DecryptedVaultNote,
-        input.profile.uid,
-        input.vaultIntegrityKey,
-        false
-      );
+      const result = await migrateEntryIdentity(target as DecryptedVaultNote, false);
       if (result.claimState !== "deferred") {
         throw new Error("보류된 Vault 저장 형식 전환 결과를 확인할 수 없습니다.");
       }
@@ -424,16 +639,13 @@ export async function migrateVaultNameReservations(
     } else {
       complete(false);
     }
+    await input.onLeaseCheckpoint?.();
   }
 
   for (const note of input.deletedNotes) {
+    input.signal?.throwIfAborted();
     if (input.legacyDeletedNoteIds.has(note.id)) {
-      const result = await migrateLegacyVaultEntryIdentity(
-        note,
-        input.profile.uid,
-        input.vaultIntegrityKey,
-        false
-      );
+      const result = await migrateEntryIdentity(note, false);
       if (result.claimState !== "deleted") {
         throw new Error("삭제 Vault 항목의 저장 형식 전환 결과를 확인할 수 없습니다.");
       }
@@ -441,6 +653,7 @@ export async function migrateVaultNameReservations(
     } else {
       complete(false);
     }
+    await input.onLeaseCheckpoint?.();
   }
 
   return { ...progress, collisions: plan.collisions, deferredTargetIds };

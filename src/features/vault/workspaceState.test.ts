@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_VAULT_RIGHT_PANEL_WIDTH,
+  MAX_VAULT_RIGHT_PANEL_WIDTH,
+  MIN_VAULT_RIGHT_PANEL_WIDTH,
   captureVaultWorkspaceLayout,
+  clampVaultRightPanelWidth,
+  clampVaultRightPanelWidthForViewport,
   createDefaultVaultWorkspaceState,
   flushLatestWorkspaceState,
   normalizeVaultWorkspaceState,
+  maxVaultRightPanelWidthForViewport,
   restoreVaultWorkspaceLayout,
   vaultWorkspaceLayoutFitsEncryptedDocument,
   vaultWorkspaceStateFitsEncryptedDocument
@@ -55,7 +61,7 @@ describe("vault workspace state", () => {
       layout: { type: "pane", groupId: "primary" },
       tabGroups: [{ id: "primary", tabs: [], activeTab: null }],
       left: { open: true, mode: "files" },
-      right: { open: true, mode: "backlinks" },
+      right: { open: true, mode: "backlinks", width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH },
       viewMode: "live-preview",
       bookmarks: [],
       searchBookmarks: [],
@@ -356,6 +362,38 @@ describe("vault workspace state", () => {
     expect(state.globalGraph.settings.common.query).toBe("");
   });
 
+  it("clamps the encrypted right-panel width and migrates older workspaces", () => {
+    expect(clampVaultRightPanelWidth(Number.NaN)).toBe(DEFAULT_VAULT_RIGHT_PANEL_WIDTH);
+    expect(clampVaultRightPanelWidth(MIN_VAULT_RIGHT_PANEL_WIDTH - 200)).toBe(MIN_VAULT_RIGHT_PANEL_WIDTH);
+    expect(clampVaultRightPanelWidth(MAX_VAULT_RIGHT_PANEL_WIDTH + 200)).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
+    expect(clampVaultRightPanelWidth(337.6)).toBe(338);
+
+    const migrated = normalizeVaultWorkspaceState({
+      ...createDefaultVaultWorkspaceState(),
+      right: { open: true, mode: "outline" }
+    });
+    expect(migrated.right.width).toBe(DEFAULT_VAULT_RIGHT_PANEL_WIDTH);
+
+    const bounded = normalizeVaultWorkspaceState({
+      ...createDefaultVaultWorkspaceState(),
+      right: { open: true, mode: "properties", width: 9_999 }
+    });
+    expect(bounded.right.width).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
+  });
+
+  it("preserves a 280px editor while clamping the desktop right panel", () => {
+    expect(maxVaultRightPanelWidthForViewport(761, true)).toBe(267);
+    expect(maxVaultRightPanelWidthForViewport(768, true, 753)).toBe(259);
+    expect(maxVaultRightPanelWidthForViewport(900, true)).toBe(406);
+    expect(maxVaultRightPanelWidthForViewport(901, true)).toBe(347);
+    expect(maxVaultRightPanelWidthForViewport(761, false)).toBe(437);
+    expect(maxVaultRightPanelWidthForViewport(1_440, true)).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
+    expect(clampVaultRightPanelWidthForViewport(480, 761, true)).toBe(267);
+    expect(clampVaultRightPanelWidthForViewport(310, 768, true, 753)).toBe(259);
+    expect(clampVaultRightPanelWidthForViewport(200, 761, true)).toBe(MIN_VAULT_RIGHT_PANEL_WIDTH);
+    expect(maxVaultRightPanelWidthForViewport(390, true)).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
+  });
+
   it("keeps Daily Notes settings independent of the selected folder and normalizes invalid ids", () => {
     const state = normalizeVaultWorkspaceState({
       ...createDefaultVaultWorkspaceState(),
@@ -426,7 +464,11 @@ describe("vault workspace state", () => {
       right: { open: true, mode: "outline" }
     });
 
-    expect(state.right).toEqual({ open: true, mode: "outline" });
+    expect(state.right).toEqual({
+      open: true,
+      mode: "outline",
+      width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH
+    });
   });
 
   it("restores the encrypted File Recovery right-panel mode", () => {
@@ -435,7 +477,11 @@ describe("vault workspace state", () => {
       right: { open: true, mode: "history" }
     });
 
-    expect(state.right).toEqual({ open: true, mode: "history" });
+    expect(state.right).toEqual({
+      open: true,
+      mode: "history",
+      width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH
+    });
   });
 
   it("normalizes pinned tabs and general bookmarks while migrating legacy bookmark arrays", () => {
