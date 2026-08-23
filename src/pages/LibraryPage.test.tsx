@@ -340,6 +340,7 @@ beforeEach(() => {
   }));
   serviceMocks.publishActiveNote.mockResolvedValue(undefined);
   serviceMocks.prepareVaultIntegrityKey.mockResolvedValue({
+    cutoverState: "ready",
     key: {} as CryptoKey,
     ownerUid: testData.auth.profile.uid,
     state: "existing",
@@ -438,6 +439,7 @@ describe("LibraryPage", () => {
     async () => {
       const user = userEvent.setup();
       serviceMocks.prepareVaultIntegrityKey.mockResolvedValueOnce({
+        cutoverState: "candidate",
         key: {} as CryptoKey,
         ownerUid: testData.auth.profile.uid,
         state: "candidate",
@@ -450,6 +452,27 @@ describe("LibraryPage", () => {
       await waitFor(() => expect(screen.getByText(/먼저 Vault를 한 번 열어/u)).toBeInTheDocument());
       expect(serviceMocks.ensureLibraryVaultInboxFolder).not.toHaveBeenCalled();
       expect(serviceMocks.assertLibraryVaultPromotionReady).not.toHaveBeenCalled();
+      expect(serviceMocks.promoteLibraryItemToVault).not.toHaveBeenCalled();
+    }
+  );
+
+  it.runIf(import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true")(
+    "keeps Vault promotion locked while an existing marker is still pending",
+    async () => {
+      const user = userEvent.setup();
+      serviceMocks.prepareVaultIntegrityKey.mockResolvedValueOnce({
+        cutoverState: "pending",
+        key: {} as CryptoKey,
+        ownerUid: testData.auth.profile.uid,
+        state: "existing",
+        wrappedKey: { algorithm: "RSA-OAEP", version: 1, wrappedKey: "pending" }
+      });
+      renderPage();
+      await user.click(await screen.findByRole("button", { name: "보안 가이드 열기" }));
+      await user.click(screen.getByRole("button", { name: "Vault Markdown으로 저장" }));
+
+      await waitFor(() => expect(screen.getByText(/먼저 Vault를 한 번 열어/u)).toBeInTheDocument());
+      expect(serviceMocks.ensureLibraryVaultInboxFolder).not.toHaveBeenCalled();
       expect(serviceMocks.promoteLibraryItemToVault).not.toHaveBeenCalled();
     }
   );

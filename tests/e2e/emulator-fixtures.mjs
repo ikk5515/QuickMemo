@@ -275,9 +275,12 @@ async function createLoginUser({
         path: `vaultIntegrity/${created.localId}`,
         fields: {
           createdAt: now,
+          cutoverState: "ready",
+          cutoverVersion: 1,
           indexVersion: 1,
           ownerUid: created.localId,
           updatedAt: now,
+          verifiedAt: now,
           wrappedKey: {
             version: 1,
             algorithm: "RSA-OAEP",

@@ -8,6 +8,7 @@ export default defineConfig({
     include: [
       "tests/secureShareApiEmulator.test.ts",
       "tests/vaultFolderApiEmulator.test.ts",
+      "tests/vaultIntegrityApiEmulator.test.ts",
       "tests/vaultNoteApiEmulator.test.ts"
     ],
     testTimeout: 30_000

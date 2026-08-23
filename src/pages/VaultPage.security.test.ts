@@ -38,12 +38,29 @@ describe("VaultPage security boundaries", () => {
 
   it("wipes note-derived plaintext when the authorized folder listener fails", () => {
     const folderSubscription = vaultPageSource.match(
-      /return subscribeNoteFolders\(profile\.uid,[\s\S]*?\n\s{2}\}, \[clearVaultPlaintextForAccessScope, privateKey, profile\]\);/u
+      /return subscribeNoteFolders\(profile\.uid,[\s\S]*?\n\s{2}\}, \[clearVaultPlaintextForAccessScope, privateKey, profile, vaultIntegrityRetryAttempt\]\);/u
     )?.[0] ?? "";
 
     expect(folderSubscription).toContain("clearVaultPlaintextForAccessScope();");
     expect(folderSubscription).toContain("setFolderServerReservationSignature(null)");
     expect(folderSubscription).toContain("setNoteServerReservationSignature(null)");
+  });
+
+  it("drops prior server-ready signatures before replacing note and folder subscriptions", () => {
+    const noteSubscription = vaultPageSource.match(
+      /const subscriptionGeneration = noteSubscriptionGenerationRef\.current \+ 1;[\s\S]*?const unsubscribe = subscribeVisibleNotes\(/u
+    )?.[0] ?? "";
+    expect(noteSubscription).toContain("noteSubscriptionServerReadyRef.current = false");
+    expect(noteSubscription).toContain("setNoteServerReservationSignature(null)");
+    expect(noteSubscription.indexOf("setNoteServerReservationSignature(null)"))
+      .toBeLessThan(noteSubscription.indexOf("subscribeVisibleNotes("));
+
+    const folderSubscription = vaultPageSource.match(
+      /useEffect\(\(\) => \{\n\s{4}folderSubscriptionServerReadyRef\.current = false;\n\s{4}setFolderServerReservationSignature\(null\);[\s\S]*?return subscribeNoteFolders\(/u
+    )?.[0] ?? "";
+    expect(folderSubscription).toContain("setFolderServerReservationSignature(null)");
+    expect(folderSubscription.indexOf("setFolderServerReservationSignature(null)"))
+      .toBeLessThan(folderSubscription.indexOf("subscribeNoteFolders("));
   });
 
   it("does not let another owner's valid shared filename block body-only saves or owner-scoped creates", () => {
@@ -87,29 +104,60 @@ describe("VaultPage security boundaries", () => {
   });
 
   it("write-locks every deferred name-migration target, not only direct collision pairs", () => {
-    expect(vaultPageSource).toContain("if (finalAudit.deferredTargetIds.length)");
-    expect(vaultPageSource).toContain("setVaultNameCollisionTargetIds(new Set(finalAudit.deferredTargetIds))");
+    expect(vaultPageSource).toContain("if (result.deferredTargetIds.length)");
+    expect(vaultPageSource).toContain("setVaultNameCollisionTargetIds(new Set(outcome.result.deferredTargetIds))");
     expect(vaultPageSource).toContain("legacyActiveNoteIds: preflight.legacyActiveNoteIds");
     expect(vaultPageSource).toContain("legacyDeletedNoteIds: preflight.legacyDeletedNoteIds");
   });
 
-  it("seals the marker only after a full owner inventory preflight and reaches ready only after a final server audit", () => {
-    expect(vaultPageSource.match(/loadOwnedVaultCutoverInventory\(profile\.uid\)/gu)?.length ?? 0).toBeGreaterThanOrEqual(3);
-    expect(vaultPageSource).toContain("activeNotes: inventory.activeNotes");
-    expect(vaultPageSource).toContain("deletedNotes: inventory.deletedNotes");
-    expect(vaultPageSource).toContain("const finalInventory = await loadOwnedVaultCutoverInventory(profile.uid)");
-    expect(vaultPageSource).toContain("finalPreflight.legacyActiveNoteIds.size || finalPreflight.legacyDeletedNoteIds.size");
-    expect(vaultPageSource).toContain("await auditVaultNameReservations({");
-    expect(vaultPageSource).toContain("setAuditedServerInventorySignature(ownedVaultCutoverInventorySignature");
-    expect(vaultPageSource).toContain('setVaultNameMigrationStatus("audited")');
-    expect(vaultPageSource).toContain("currentServerReservationSignature === auditedServerReservationSignature");
+  it("uses a ready marker as an O(1) fast path and seals a pending Vault after one owner inventory", () => {
+    expect(vaultPageSource.match(/loadOwnedVaultCutoverInventory\(/gu)?.length ?? 0).toBe(1);
+    expect(vaultPageSource).toContain('if (prepared.cutoverState === "ready")');
+    expect(vaultPageSource).toContain("setVaultIntegrityKey(prepared.key)");
+    expect(vaultPageSource).toContain('|| preparedVaultIntegrityKey.cutoverState === "ready"');
+    expect(vaultPageSource).toContain("const inventory = await loadOwnedVaultCutoverInventory(currentProfile.uid)");
+
+    const slowPath = vaultPageSource.match(
+      /const pending = \(async \(\) => \{[\s\S]*?vaultNameMigrationPromiseRef\.current = pending;/u
+    )?.[0] ?? "";
+    expect(slowPath).toContain("activeNotes: inventory.activeNotes");
+    expect(slowPath).toContain("deletedNotes: inventory.deletedNotes");
+    expect(slowPath.indexOf("preflightVaultNameCutover({")).toBeLessThan(
+      slowPath.indexOf("activatePreparedVaultIntegrityKey(preparedVaultIntegrityKey")
+    );
+    expect(slowPath.indexOf("await migrateVaultNameReservations({")).toBeLessThan(
+      slowPath.indexOf("await sealVaultIntegrityCutover(currentProfile.uid")
+    );
+    expect(slowPath).not.toContain("auditVaultNameReservations");
+    expect(vaultPageSource).not.toContain("auditedServerReservationSignature");
+    expect(vaultPageSource).not.toContain("auditedServerInventorySignature");
   });
 
-  it("bounds the listener catch-up state and re-audits a stable mismatched signature", () => {
-    expect(vaultPageSource).toContain('vaultNameMigrationStatus !== "audited"');
-    expect(vaultPageSource).toContain("const retryTimer = window.setTimeout");
-    expect(vaultPageSource).toContain("최종 확인 중 새 Vault 변경을 감지해 전체 inventory를 다시 검사합니다");
-    expect(vaultPageSource).toContain("}, 3_000)");
+  it("bounds listener catch-up, retries subscriptions, and preserves dirty drafts", () => {
+    expect(vaultPageSource).toContain("const timeout = window.setTimeout");
+    expect(vaultPageSource).toContain("}, 30_000)");
+    expect(vaultPageSource).toContain("vaultIntegritySealAbortRef.current?.abort()");
+    expect(vaultPageSource).toContain("setVaultIntegrityRetryAttempt((attempt) => attempt + 1)");
+    expect(vaultPageSource).toContain("{ repairLegacyDeletionMetadata: false }");
+
+    const retry = vaultPageSource.match(
+      /function retryVaultNameMigration\(\) \{[\s\S]*?\n {2}\}/u
+    )?.[0] ?? "";
+    expect(retry).toContain("setNoteServerReservationSignature(null)");
+    expect(retry).toContain("setFolderServerReservationSignature(null)");
+    expect(retry).not.toContain("setDrafts(");
+    expect(retry).not.toContain("clearVaultPlaintextForAccessScope");
+  });
+
+  it("does not flash the migration warning during the normal marker fast path", () => {
+    const bannerGate = vaultPageSource.match(
+      /!workspaceConflict[\s\S]*?\? \(\n\s+<aside[\s\S]*?aria-label="Vault 이름 무결성 준비"/u
+    )?.[0] ?? "";
+    expect(bannerGate).toContain('vaultNameMigrationStatus === "waiting"');
+    expect(bannerGate).toContain('vaultNameMigrationStatus === "running"');
+    expect(bannerGate).toContain('vaultNameMigrationStatus === "blocked"');
+    expect(bannerGate).not.toContain('vaultNameMigrationStatus === "checking"');
+    expect(bannerGate).not.toContain('vaultNameMigrationStatus === "ready"');
   });
 
   it("connects a server-confirmed encrypted Vault trash restore with claim collision checks", () => {

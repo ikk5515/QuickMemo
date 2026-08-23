@@ -33,7 +33,11 @@ complete Obsidian Core parity.
   download authorized attachments without changing them, copy a bounded
   Markdown conversion preview, and—only while Vault is enabled—open the
   preserved source in Vault to explicitly create a Markdown copy.
-- A Vault integrity marker is a server-enforced cutover boundary. Turning the
+- A Vault integrity marker is a server-enforced cutover boundary. Legacy and
+  `pending` markers keep Vault name mutations locked until the authenticated
+  server inventory seal writes exact `ready` attestation fields. A ready Vault
+  reconnect reads only that one marker plus the normal note/folder listeners;
+  it does not repeat the full owner inventory or claim scan. Turning the
   environment flag off does not make the claim-less legacy editor writable
   again; a marker read failure also fails closed. Deploy Rules that permit the
   owner-only marker `get` before deploying this client gate.

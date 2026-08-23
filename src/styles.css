@@ -14678,7 +14678,7 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   box-shadow: none;
   display: grid;
   gap: 2px;
-  grid-template-columns: repeat(2, minmax(76px, 1fr));
+  grid-template-columns: repeat(3, minmax(72px, 1fr));
   padding: 0;
 }
 
@@ -14734,6 +14734,53 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
 .obsidian-schedule-pane .calendar-layout,
 .obsidian-schedule-pane .matrix-layout {
   padding: 10px;
+}
+
+.obsidian-schedule-pane .matrix-layout,
+.obsidian-schedule-pane .matrix-today-rail,
+.obsidian-schedule-pane .matrix-grid,
+.obsidian-schedule-pane .matrix-section,
+.obsidian-schedule-pane .matrix-date-groups,
+.obsidian-schedule-pane .matrix-task-list,
+.obsidian-schedule-pane .completed-panel {
+  box-sizing: border-box;
+  max-inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.obsidian-schedule-pane .matrix-section > header,
+.obsidian-schedule-pane .matrix-section > header > div,
+.obsidian-schedule-pane .matrix-task-row,
+.obsidian-schedule-pane .matrix-task-row > .task-main,
+.obsidian-schedule-pane .matrix-task-row > .task-main strong,
+.obsidian-schedule-pane .matrix-task-row > .task-main .task-meta {
+  min-inline-size: 0;
+}
+
+.obsidian-schedule-pane .matrix-section > header > div {
+  flex: 1 1 auto;
+}
+
+.obsidian-schedule-pane .matrix-task-row {
+  box-sizing: border-box;
+  max-inline-size: 100%;
+}
+
+.obsidian-schedule-pane .matrix-task-row > .task-flags {
+  flex-wrap: wrap;
+  max-inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.obsidian-schedule-pane .schedule-category-filter,
+.obsidian-schedule-pane .schedule-category-filter button {
+  max-inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.obsidian-schedule-pane .completed-panel {
+  inline-size: calc(100% - 20px);
+  margin: 10px;
 }
 
 .obsidian-schedule-pane .calendar-panel,
@@ -14807,15 +14854,13 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   }
 
   .matrix-task-row {
-    align-items: start;
+    align-items: center;
     column-gap: 8px;
-    grid-template-areas:
-      "drag main flags"
-      "check main flags";
-    grid-template-columns: 44px minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
-    min-height: 72px;
-    row-gap: 2px;
+    grid-template-areas: "drag check main flags";
+    grid-template-columns: 44px 44px minmax(0, 1fr) minmax(0, auto);
+    grid-template-rows: auto;
+    min-height: 60px;
+    row-gap: 4px;
   }
 
   .matrix-task-row > .task-drag-handle {
@@ -14829,7 +14874,7 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   }
 
   .matrix-task-row > .task-main {
-    align-self: stretch;
+    align-self: center;
     grid-area: main;
     min-width: 0;
     padding-block: 2px;
@@ -14847,6 +14892,12 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   .obsidian-schedule-pane .schedule-header-actions .icon-button,
   .obsidian-schedule-pane .schedule-category-filter button {
     min-height: 44px;
+  }
+}
+
+@media (max-width: 820px) {
+  .obsidian-schedule-pane .matrix-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -14871,7 +14922,7 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   }
 
   .obsidian-schedule-pane .schedule-view-tabs {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .obsidian-schedule-pane .schedule-view-tabs button,
@@ -14883,7 +14934,13 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
   }
 
   .obsidian-schedule-pane .schedule-view-tabs button {
-    padding-block: 4px;
+    gap: 3px;
+    padding: 4px 2px;
+  }
+
+  .obsidian-schedule-pane .schedule-view-tabs button span {
+    font-size: 11px;
+    line-height: 1.1;
   }
 
   .obsidian-schedule-pane .schedule-primary-action {
@@ -14901,8 +14958,15 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
     padding: 7px 8px;
   }
 
+  .obsidian-schedule-pane .schedule-category-filter {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
   .obsidian-schedule-pane .schedule-category-filter button {
     min-height: 44px;
+    overflow: hidden;
+    padding-inline: 5px;
   }
 
   .obsidian-schedule-pane .calendar-layout,
@@ -14912,5 +14976,86 @@ html[data-theme="dark"] .google-calendar-sync-dialog {
 
   .obsidian-schedule-pane .matrix-today-rail .matrix-section {
     min-height: 112px;
+  }
+
+  .obsidian-schedule-pane .matrix-task-row {
+    align-items: start;
+    grid-template-areas:
+      "drag check main"
+      ". . flags";
+    grid-template-columns: 44px 44px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    min-height: 72px;
+  }
+
+  .obsidian-schedule-pane .matrix-task-row > .task-main {
+    align-self: start;
+  }
+
+  .obsidian-schedule-pane .matrix-task-row > .task-main strong,
+  .obsidian-schedule-pane .matrix-task-row > .task-main .task-meta {
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .obsidian-schedule-pane .matrix-task-row > .task-flags {
+    justify-self: start;
+  }
+
+  .obsidian-schedule-pane .completed-panel {
+    inline-size: calc(100% - 16px);
+    margin: 8px;
+    padding: 14px;
+  }
+
+  .obsidian-schedule-pane .completed-panel .task-row {
+    grid-template-areas:
+      "check main"
+      ". flags";
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .obsidian-schedule-pane .completed-panel .task-check {
+    grid-area: check;
+  }
+
+  .obsidian-schedule-pane .completed-panel .task-main {
+    grid-area: main;
+  }
+
+  .obsidian-schedule-pane .completed-panel .task-main strong,
+  .obsidian-schedule-pane .completed-panel .task-main span {
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .obsidian-schedule-pane .completed-panel .task-flags {
+    grid-area: flags;
+    justify-self: start;
+  }
+}
+
+@media (max-width: 420px) {
+  .obsidian-schedule-pane .schedule-header {
+    grid-template-areas:
+      "title"
+      "search"
+      "views"
+      "actions";
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .obsidian-schedule-pane .schedule-header-actions {
+    justify-content: flex-end;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .obsidian-schedule-pane .schedule-query-result {
+    margin-right: auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 }

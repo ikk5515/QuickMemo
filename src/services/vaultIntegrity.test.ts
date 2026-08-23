@@ -1,26 +1,30 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   activatePreparedVaultIntegrityKey,
   getOrCreateVaultIntegrityKey,
   prepareVaultIntegrityKey,
-  requireExistingVaultIntegrityKey
+  requireExistingVaultIntegrityKey,
+  sealVaultIntegrityCutover
 } from "./vaultIntegrity";
 
 const mocks = vi.hoisted(() => ({
   candidateKey: { kind: "candidate" } as unknown as CryptoKey,
   db: { kind: "firestore" },
+  auth: { currentUser: null as { getIdToken: () => Promise<string>; uid: string } | null },
+  fetch: vi.fn(),
   generated: vi.fn(),
   getDocFromServer: vi.fn(),
+  getIdToken: vi.fn(),
   runTransaction: vi.fn(),
   serverTimestamp: vi.fn(() => ({ kind: "server-timestamp" })),
   transaction: { get: vi.fn(), set: vi.fn() },
   unwrappedKey: { kind: "unwrapped" } as unknown as CryptoKey,
   unwrap: vi.fn(),
-  wrappedKey: { algorithm: "RSA-OAEP", version: 1, wrappedKey: "wrapped" },
+  wrappedKey: { algorithm: "RSA-OAEP", version: 1, wrappedKey: "wrapped-value" },
   wrap: vi.fn()
 }));
 
-vi.mock("../lib/firebase", () => ({ db: mocks.db }));
+vi.mock("../lib/firebase", () => ({ appCheck: null, auth: mocks.auth, db: mocks.db }));
 vi.mock("../lib/crypto", () => ({
   generateNoteKey: mocks.generated,
   unwrapNoteKey: mocks.unwrap,
@@ -32,15 +36,30 @@ vi.mock("firebase/firestore", () => ({
   runTransaction: mocks.runTransaction,
   serverTimestamp: mocks.serverTimestamp
 }));
+vi.mock("firebase/app-check", () => ({ getToken: vi.fn() }));
 
 const profile = {
   publicKeyJwk: { e: "AQAB", kty: "RSA", n: "public" },
   uid: "vault-integrity-user"
 };
+const storedTimestamp = { toMillis: () => 1_768_000_000_000 };
+
+function storedMarker(extra: Record<string, unknown> = {}) {
+  return {
+    createdAt: storedTimestamp,
+    indexVersion: 1,
+    ownerUid: profile.uid,
+    updatedAt: storedTimestamp,
+    wrappedKey: mocks.wrappedKey,
+    ...extra
+  };
+}
 
 describe("Vault integrity key persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal("fetch", mocks.fetch);
+    mocks.auth.currentUser = null;
     mocks.generated.mockResolvedValue(mocks.candidateKey);
     mocks.wrap.mockResolvedValue(mocks.wrappedKey);
     mocks.unwrap.mockResolvedValue(mocks.unwrappedKey);
@@ -49,12 +68,18 @@ describe("Vault integrity key persistence", () => {
     ));
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("creates a random key only as an owner-wrapped immutable document", async () => {
     const privateKey = { kind: "private-create" } as unknown as CryptoKey;
     mocks.transaction.get.mockResolvedValueOnce({ exists: () => false });
 
     await expect(getOrCreateVaultIntegrityKey(profile, privateKey)).resolves.toBe(mocks.candidateKey);
     expect(mocks.transaction.set).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      cutoverState: "pending",
+      cutoverVersion: 1,
       indexVersion: 1,
       ownerUid: profile.uid,
       wrappedKey: mocks.wrappedKey
@@ -64,7 +89,7 @@ describe("Vault integrity key persistence", () => {
   it("uses the winning wrapped key after a concurrent creator and caches it in memory", async () => {
     const privateKey = { kind: "private-existing" } as unknown as CryptoKey;
     mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({ indexVersion: 1, ownerUid: profile.uid, wrappedKey: mocks.wrappedKey }),
+      data: () => storedMarker(),
       exists: () => true
     });
 
@@ -81,7 +106,7 @@ describe("Vault integrity key persistence", () => {
   it("fails closed for a malformed or cross-user stored key document", async () => {
     const privateKey = { kind: "private-malformed" } as unknown as CryptoKey;
     mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({ indexVersion: 1, ownerUid: "other", wrappedKey: mocks.wrappedKey }),
+      data: () => storedMarker({ ownerUid: "other" }),
       exists: () => true
     });
 
@@ -111,16 +136,49 @@ describe("Vault integrity key persistence", () => {
     expect(mocks.transaction.set).not.toHaveBeenCalled();
   });
 
-  it("unwraps an existing marker for secondary Vault writes", async () => {
+  it("rejects a legacy or pending marker for secondary Vault writes", async () => {
     const privateKey = { kind: "private-secondary-existing" } as unknown as CryptoKey;
     mocks.getDocFromServer.mockResolvedValueOnce({
-      data: () => ({ indexVersion: 1, ownerUid: profile.uid, wrappedKey: mocks.wrappedKey }),
+      data: () => storedMarker(),
+      exists: () => true
+    });
+
+    await expect(requireExistingVaultIntegrityKey(profile, privateKey))
+      .rejects.toMatchObject({ name: "VaultIntegrityNotReadyError" });
+    expect(mocks.unwrap).toHaveBeenCalledWith(mocks.wrappedKey, privateKey);
+    expect(mocks.runTransaction).not.toHaveBeenCalled();
+  });
+
+  it("unwraps only an exact ready marker for secondary Vault writes", async () => {
+    const privateKey = { kind: "private-secondary-ready" } as unknown as CryptoKey;
+    mocks.getDocFromServer.mockResolvedValueOnce({
+      data: () => storedMarker({
+        cutoverState: "ready",
+        cutoverVersion: 1,
+        verifiedAt: storedTimestamp
+      }),
       exists: () => true
     });
 
     await expect(requireExistingVaultIntegrityKey(profile, privateKey)).resolves.toBe(mocks.unwrappedKey);
     expect(mocks.unwrap).toHaveBeenCalledWith(mocks.wrappedKey, privateKey);
     expect(mocks.runTransaction).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a ready marker has unknown fields", async () => {
+    const privateKey = { kind: "private-ready-extra-field" } as unknown as CryptoKey;
+    mocks.getDocFromServer.mockResolvedValueOnce({
+      data: () => storedMarker({
+        cutoverState: "ready",
+        cutoverVersion: 1,
+        unexpected: true,
+        verifiedAt: storedTimestamp
+      }),
+      exists: () => true
+    });
+
+    await expect(prepareVaultIntegrityKey(profile, privateKey)).rejects.toThrow("완료 상태");
+    expect(mocks.unwrap).not.toHaveBeenCalled();
   });
 
   it("activates a preflight candidate only after the caller explicitly commits it", async () => {
@@ -131,10 +189,13 @@ describe("Vault integrity key persistence", () => {
 
     await expect(activatePreparedVaultIntegrityKey(prepared, privateKey)).resolves.toEqual({
       created: true,
+      cutoverState: "pending",
       key: mocks.candidateKey,
       keyChanged: false
     });
     expect(mocks.transaction.set).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      cutoverState: "pending",
+      cutoverVersion: 1,
       ownerUid: profile.uid,
       wrappedKey: mocks.wrappedKey
     }));
@@ -144,16 +205,78 @@ describe("Vault integrity key persistence", () => {
     const privateKey = { kind: "private-race" } as unknown as CryptoKey;
     mocks.getDocFromServer.mockResolvedValueOnce({ exists: () => false });
     mocks.transaction.get.mockResolvedValueOnce({
-      data: () => ({ indexVersion: 1, ownerUid: profile.uid, wrappedKey: mocks.wrappedKey }),
+      data: () => storedMarker({ cutoverState: "pending", cutoverVersion: 1 }),
       exists: () => true
     });
     const prepared = await prepareVaultIntegrityKey(profile, privateKey);
 
     await expect(activatePreparedVaultIntegrityKey(prepared, privateKey)).resolves.toEqual({
       created: false,
+      cutoverState: "pending",
       key: mocks.unwrappedKey,
       keyChanged: true
     });
     expect(mocks.transaction.set).not.toHaveBeenCalled();
+  });
+
+  it("posts exact counts to the authenticated server seal endpoint", async () => {
+    mocks.getIdToken.mockResolvedValueOnce("firebase-id-token");
+    mocks.auth.currentUser = { getIdToken: mocks.getIdToken, uid: profile.uid };
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      activeNoteCount: 3,
+      cutoverVersion: 1,
+      deletedNoteCount: 2,
+      folderCount: 4,
+      ok: true,
+      state: "ready",
+      verifiedAt: "2026-08-23T00:00:00.000Z"
+    }), { headers: { "content-type": "application/json" }, status: 200 }));
+
+    await expect(sealVaultIntegrityCutover(profile.uid, {
+      expectedActiveNoteCount: 3,
+      expectedDeletedNoteCount: 2,
+      expectedFolderCount: 4
+    })).resolves.toMatchObject({ state: "ready", verifiedAt: "2026-08-23T00:00:00.000Z" });
+
+    const [path, init] = mocks.fetch.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/api/vault-integrity");
+    const headers = new Headers(init.headers);
+    expect(headers.get("authorization")).toBe("Bearer firebase-id-token");
+    expect(headers.get("x-quickmemo-vault-integrity")).toBe("1");
+    expect(JSON.parse(String(init.body))).toEqual({
+      action: "seal-ready",
+      expectedActiveNoteCount: 3,
+      expectedDeletedNoteCount: 2,
+      expectedFolderCount: 4
+    });
+  });
+
+  it("rejects a server seal response whose authoritative counts do not match", async () => {
+    mocks.getIdToken.mockResolvedValueOnce("firebase-id-token");
+    mocks.auth.currentUser = { getIdToken: mocks.getIdToken, uid: profile.uid };
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      activeNoteCount: 4,
+      cutoverVersion: 1,
+      deletedNoteCount: 2,
+      folderCount: 4,
+      ok: true,
+      state: "ready",
+      verifiedAt: "2026-08-23T00:00:00.000Z"
+    }), { headers: { "content-type": "application/json" }, status: 200 }));
+
+    await expect(sealVaultIntegrityCutover(profile.uid, {
+      expectedActiveNoteCount: 3,
+      expectedDeletedNoteCount: 2,
+      expectedFolderCount: 4
+    })).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("rejects folder counts above the authoritative tree cap before authentication or fetch", async () => {
+    await expect(sealVaultIntegrityCutover(profile.uid, {
+      expectedActiveNoteCount: 0,
+      expectedDeletedNoteCount: 0,
+      expectedFolderCount: 2_001
+    })).rejects.toBeInstanceOf(RangeError);
+    expect(mocks.fetch).not.toHaveBeenCalled();
   });
 });

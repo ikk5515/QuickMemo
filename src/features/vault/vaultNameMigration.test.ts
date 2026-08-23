@@ -402,7 +402,12 @@ describe("Vault name reservation migration", () => {
   });
 
   it("preflights active and deleted raw identities before the marker and rejects partial identities", async () => {
-    const activeLegacy = note({ contentFormat: undefined, entryKind: undefined, id: "active-legacy" });
+    const activeLegacy = note({
+      contentFormat: undefined,
+      entryKind: undefined,
+      id: "active-legacy",
+      isDeleted: undefined
+    });
     const deletedLegacy = note({
       contentFormat: undefined,
       entryKind: undefined,

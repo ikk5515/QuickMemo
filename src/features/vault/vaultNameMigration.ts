@@ -199,7 +199,10 @@ export async function preflightVaultNameCutover(input: {
   vaultIntegrityKey: CryptoKey;
 }): Promise<VaultNameCutoverPreflightResult> {
   if (
-    input.activeNotes.some((note) => note.ownerUid !== input.uid || note.isDeleted !== false)
+    input.activeNotes.some((note) => (
+      note.ownerUid !== input.uid
+      || (note.isDeleted !== false && note.isDeleted !== undefined)
+    ))
     || input.deletedNotes.some((note) => note.ownerUid !== input.uid || note.isDeleted !== true)
   ) {
     throw new Error("활성·삭제 owner server inventory의 삭제 상태를 확인할 수 없습니다.");

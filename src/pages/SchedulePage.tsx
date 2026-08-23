@@ -84,6 +84,7 @@ import {
   buildCalendarMonth,
   buildCalendarTaskLayout,
   compareCalendarAgendaTasks,
+  compareCompletedTasks,
   compareTaskSchedule,
   emptyScheduleDetails,
   formatScheduleDateRange,
@@ -167,9 +168,12 @@ import type {
   ScheduleTaskCategory
 } from "../types";
 
-const scheduleTabs: Array<{ view: PrimaryScheduleView; label: string; shortLabel: string; Icon: LucideIcon }> = [
+type ScheduleWorkspaceView = PrimaryScheduleView | "completed";
+
+const scheduleTabs: Array<{ view: ScheduleWorkspaceView; label: string; shortLabel: string; Icon: LucideIcon }> = [
   { view: "calendar", label: "달력", shortLabel: "달력", Icon: CalendarDays },
-  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 }
+  { view: "matrix", label: "매트릭스", shortLabel: "매트릭스", Icon: Grid2X2 },
+  { view: "completed", label: "완료", shortLabel: "완료", Icon: CheckCircle2 }
 ];
 
 const scheduleCategoryFilters: Array<{ value: ScheduleCategoryFilter; label: string }> = [
@@ -178,13 +182,27 @@ const scheduleCategoryFilters: Array<{ value: ScheduleCategoryFilter; label: str
   { value: "personal", label: "개인" }
 ];
 
-const scheduleViewTitles: Record<PrimaryScheduleView, string> = {
+const scheduleViewTitles: Record<ScheduleWorkspaceView, string> = {
   calendar: "달력",
+  completed: "완료 내역",
   matrix: "매트릭스"
 };
 
 const taskPageSize = 5;
+const completedPageSize = 10;
 const scheduleDateRangeValidationMessage = `일정 날짜는 실제 날짜여야 하고 같은 연도 안에서 최대 ${maxScheduleTaskRangeDays}일까지 선택할 수 있습니다.`;
+
+function scheduleWorkspaceViewFromSearch(search: string): ScheduleWorkspaceView | null {
+  if (new URLSearchParams(search).get("view") === "completed") {
+    return "completed";
+  }
+
+  return scheduleViewFromSearch(search);
+}
+
+function scheduleWorkspaceViewHref(view: ScheduleWorkspaceView) {
+  return view === "completed" ? "/schedule?view=completed" : scheduleViewHref(view);
+}
 
 function categoryForNewTask(filter: ScheduleCategoryFilter): ScheduleTaskCategory {
   return filter === "personal" ? "personal" : defaultScheduleTaskCategory;
@@ -979,8 +997,8 @@ export default function SchedulePage() {
   const googleCalendarProfileUid = profile?.uid ?? null;
   const location = useLocation();
   const navigate = useNavigate();
-  const [activeView, setActiveView] = useState<PrimaryScheduleView | null>(() =>
-    scheduleViewFromSearch(location.search)
+  const [activeView, setActiveView] = useState<ScheduleWorkspaceView | null>(() =>
+    scheduleWorkspaceViewFromSearch(location.search)
       ?? (profile ? normalizePrimaryScheduleView(getCachedUserPreferences(profile.uid)?.scheduleDefaultView) : null)
   );
   const [matrixLabels, setMatrixLabels] = useState<MatrixLabels>(() =>
@@ -1191,7 +1209,7 @@ export default function SchedulePage() {
   }, [googleCalendarDialogOpen, googleCalendarProfileUid, privateKey, refreshGoogleCalendarStatus]);
 
   useEffect(() => {
-    const requestedView = scheduleViewFromSearch(location.search);
+    const requestedView = scheduleWorkspaceViewFromSearch(location.search);
 
     if (requestedView) {
       setActiveView(requestedView);
@@ -1466,7 +1484,7 @@ export default function SchedulePage() {
   }, [decryptedTasks]);
 
   const sortedTasks = useMemo(() => [...decryptedTasks].sort(compareTaskSchedule), [decryptedTasks]);
-  const categoryViewActive = activeView === "calendar" || activeView === "matrix";
+  const categoryViewActive = activeView === "calendar" || activeView === "matrix" || activeView === "completed";
   const showTaskCategories = !categoryViewActive || scheduleCategoryFilter === "all";
   const categoryFilteredTasks = useMemo(
     () => categoryViewActive
@@ -1482,6 +1500,10 @@ export default function SchedulePage() {
     () => categoryFilteredTasks.filter((task) => scheduleTaskMatchesQuery(task, scheduleQuery)),
     [categoryFilteredTasks, scheduleQuery]
   );
+  const activeDisplayedTasks = useMemo(
+    () => displayedTasks.filter((task) => task.status !== "completed"),
+    [displayedTasks]
+  );
   const viewTask = useMemo(
     () => sortedTasks.find((task) => task.id === viewTaskId) ?? null,
     [viewTaskId, sortedTasks]
@@ -1490,17 +1512,25 @@ export default function SchedulePage() {
     () => sortedTasks.find((task) => task.id === editingTaskId) ?? null,
     [editingTaskId, sortedTasks]
   );
+  const completedTasks = useMemo(
+    () => activeView === "completed"
+      ? displayedTasks.filter((task) => task.status === "completed").sort(compareCompletedTasks)
+      : [],
+    [activeView, displayedTasks]
+  );
   const matrixSections = useMemo(
-    () => activeView === "matrix" ? groupTasksByMatrix(displayedTasks, today, matrixLabels) : [],
-    [activeView, displayedTasks, matrixLabels, today]
+    () => activeView === "matrix"
+      ? groupTasksByMatrix(activeDisplayedTasks, today, matrixLabels)
+      : [],
+    [activeDisplayedTasks, activeView, matrixLabels, today]
   );
   const activeMatrixTaskCount = useMemo(
     () => activeView === "matrix" ? categoryFilteredTasks.filter((task) => task.status !== "completed").length : 0,
     [activeView, categoryFilteredTasks]
   );
   const visibleMatrixTaskCount = useMemo(
-    () => activeView === "matrix" ? displayedTasks.filter((task) => task.status !== "completed").length : 0,
-    [activeView, displayedTasks]
+    () => activeView === "matrix" ? activeDisplayedTasks.length : 0,
+    [activeDisplayedTasks, activeView]
   );
   const calendarWeeks = useMemo(
     () => activeView === "calendar"
@@ -1509,12 +1539,12 @@ export default function SchedulePage() {
     [activeView, calendarCursor, today]
   );
   const calendarTaskMap = useMemo(
-    () => activeView === "calendar" ? tasksByDate(displayedTasks) : {},
-    [activeView, displayedTasks]
+    () => activeView === "calendar" ? tasksByDate(activeDisplayedTasks) : {},
+    [activeDisplayedTasks, activeView]
   );
   const calendarTaskLayout = useMemo(
-    () => activeView === "calendar" ? buildCalendarTaskLayout(calendarWeeks, displayedTasks) : {},
-    [activeView, calendarWeeks, displayedTasks]
+    () => activeView === "calendar" ? buildCalendarTaskLayout(calendarWeeks, activeDisplayedTasks) : {},
+    [activeDisplayedTasks, activeView, calendarWeeks]
   );
   const calendarDateStrings = useMemo(
     () => activeView === "calendar"
@@ -3589,8 +3619,8 @@ export default function SchedulePage() {
     });
   }
 
-  function openScheduleTab(view: PrimaryScheduleView) {
-    navigate(scheduleViewHref(view));
+  function openScheduleTab(view: ScheduleWorkspaceView) {
+    navigate(scheduleWorkspaceViewHref(view));
   }
 
   function selectScheduleCategoryFilter(value: ScheduleCategoryFilter) {
@@ -3638,7 +3668,7 @@ export default function SchedulePage() {
     : googleCalendarConnection.lastSyncStatus === "failed"
       ? "동기화 실패"
       : "미동기화";
-  const searchResultCount = displayedTasks.length;
+  const searchResultCount = activeView === "completed" ? completedTasks.length : activeDisplayedTasks.length;
 
   return (
     <AppShell>
@@ -3803,6 +3833,15 @@ export default function SchedulePage() {
             onReorderTasks={(activeTaskId, overTaskId) => void reorderTasksWithinDate(activeTaskId, overTaskId)}
             onToggle={(task) => void toggleTask(task)}
             showCategory={showTaskCategories}
+          />
+        )}
+
+        {activeView === "completed" && (
+          <CompletedView
+            onOpen={setViewTaskId}
+            onToggle={(task) => void toggleTask(task)}
+            showCategory={showTaskCategories}
+            tasks={completedTasks}
           />
         )}
 
@@ -5471,6 +5510,39 @@ function PagedTaskList({
   );
 }
 
+function CompletedView({
+  onOpen,
+  onToggle,
+  showCategory,
+  tasks
+}: {
+  onOpen: (taskId: string) => void;
+  onToggle: (task: DecryptedScheduleTask) => void;
+  showCategory: boolean;
+  tasks: DecryptedScheduleTask[];
+}) {
+  return (
+    <section aria-labelledby="completed-view-title" className="completed-panel">
+      <header>
+        <div>
+          <h2 id="completed-view-title">완료 내역</h2>
+          <span aria-live="polite">완료한 일정 {tasks.length}개</span>
+        </div>
+      </header>
+      <PagedTaskList
+        emptyMessage="완료한 일정이 없습니다."
+        getMeta={formatCompletedTaskMeta}
+        onOpen={onOpen}
+        onToggle={onToggle}
+        pageSize={completedPageSize}
+        showCategory={showCategory}
+        strikeCompleted={false}
+        tasks={tasks}
+      />
+    </section>
+  );
+}
+
 function TaskList({
   emptyMessage = "표시할 일정이 없습니다.",
   getMeta,
@@ -6802,6 +6874,16 @@ function formatTaskDateDisplay(task: DecryptedScheduleTask) {
 
 function formatTaskMeta(task: DecryptedScheduleTask) {
   return `${formatTaskDateDisplay(task)}${formatScheduleTimeRange(task) ? ` · ${formatScheduleTimeRange(task)}` : ""}`;
+}
+
+function formatCompletedTaskMeta(task: DecryptedScheduleTask) {
+  const completedAt = task.completedAt;
+  const completedMillis = completedAt && typeof completedAt.toMillis === "function" ? completedAt.toMillis() : 0;
+  const completedLabel = completedMillis > 0
+    ? `완료 ${formatDateLabel(toLocalDateString(new Date(completedMillis)))}`
+    : "완료일 없음";
+
+  return `${completedLabel} · ${formatTaskMeta(task)}`;
 }
 
 function isTaskScheduleOverdue(task: DecryptedScheduleTask, today: string) {

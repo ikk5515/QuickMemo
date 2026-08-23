@@ -296,6 +296,12 @@ export interface VaultIntegrityDocument {
   ownerUid: string;
   indexVersion: 1;
   wrappedKey: WrappedNoteKey;
+  /** Missing on the original marker; absence is treated as a pending cutover. */
+  cutoverState?: "pending" | "ready";
+  /** Versioned independently from the blinded-name index format. */
+  cutoverVersion?: 1;
+  /** Server timestamp written only after the authoritative bulk seal succeeds. */
+  verifiedAt?: Timestamp;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 }

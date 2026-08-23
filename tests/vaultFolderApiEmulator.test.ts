@@ -116,16 +116,36 @@ describeEmulator("Vault folder API emulator transaction", () => {
     );
     idToken = owner.idToken;
     uid = owner.localId;
-    await writeEmulatorDocuments([{
-      path: `users/${uid}`,
-      fields: {
-        displayName: "Vault folder owner",
-        featureAccess: { notes: true },
-        isActive: true,
-        isAdmin: false,
-        uid
+    const now = new Date("2026-08-23T00:00:00.000Z");
+    await writeEmulatorDocuments([
+      {
+        path: `users/${uid}`,
+        fields: {
+          displayName: "Vault folder owner",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid
+        }
+      },
+      {
+        path: `vaultIntegrity/${uid}`,
+        fields: {
+          createdAt: now,
+          cutoverState: "ready",
+          cutoverVersion: 1,
+          indexVersion: 1,
+          ownerUid: uid,
+          updatedAt: now,
+          verifiedAt: now,
+          wrappedKey: {
+            algorithm: "RSA-OAEP",
+            version: 1,
+            wrappedKey: "wrapped-integrity-key"
+          }
+        }
       }
-    }]);
+    ]);
   });
 
   afterAll(async () => {
