@@ -178,7 +178,8 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
   expect(legacyAfterMove.revision).toBe(legacyBeforeMove.revision + 1);
 
   await page.getByRole("button", { name: "Markdown 복사본 만들기", exact: true }).click();
-  const formatDialog = page.getByRole("dialog").filter({
+  const coreDialog = page.getByRole("dialog", { name: "Vault Core 도구" });
+  const formatDialog = coreDialog.filter({
     has: page.getByLabel("Format converter")
   });
   await expect(formatDialog).toBeVisible();
@@ -201,8 +202,11 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
     folderId: legacyAfterMove.folderId
   });
 
-  if (await formatDialog.isVisible()) {
-    await formatDialog.getByRole("button", { name: "Core 도구 닫기", exact: true }).click();
+  // Creating the copy makes it active. The converter content can therefore
+  // unmount before the surrounding Core dialog closes; target the stable
+  // dialog shell so the visibility check and click cannot race that switch.
+  if (await coreDialog.isVisible()) {
+    await coreDialog.getByRole("button", { name: "Core 도구 닫기", exact: true }).click();
   }
   await explorer.getByRole("treeitem", { name: "새 노트 Markdown", exact: true }).click();
   await expect(page.getByLabel("노트 이름")).toHaveValue("새 노트 Markdown");
