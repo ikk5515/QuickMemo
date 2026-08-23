@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(join(process.cwd(), "src/pages/VaultPage.tsx"), "utf8");
+const noticeSource = readFileSync(
+  join(process.cwd(), "src/features/vault/VaultNameIntegrityNotice.tsx"),
+  "utf8"
+);
 
 describe("Vault deferred name-collision recovery wiring", () => {
   it("uses the claimless entry recovery transaction for both move and rename", () => {
@@ -39,6 +43,30 @@ describe("Vault deferred name-collision recovery wiring", () => {
     expect(source).toContain("...notesRef.current.map((note) => note.id)");
     expect(source).toContain("...foldersRef.current.map((folder) => folder.id)");
     expect(source).toContain("setVaultNameCollisionTargetIds(new Set(knownCollisionTargets))");
+  });
+
+  it("offers a direct, preserving repair flow and automatically resumes integrity verification", () => {
+    expect(source).toContain('"../features/vault/vaultCollisionNaming"');
+    expect(source).toContain("async function repairFirstVaultNameCollision()");
+    expect(source).toContain("promptVaultNameCollisionRepair(");
+    expect(noticeSource).toContain("충돌 이름 바꾸기");
+    expect(source.match(/recheckVaultNameIntegrityAfterRepair\(\)/gu)).toHaveLength(4);
+  });
+
+  it("serializes lazy collision repair against integrity retries and stale targets", () => {
+    expect(source).toContain("vaultNameCollisionRepairBusyRef.current");
+    expect(source).toContain("vaultNameCollisionRepairTargetIdsRef.current.has(targetId)");
+    expect(source.match(/vaultNameMigrationGenerationRef\.current !== generation/gu)?.length ?? 0)
+      .toBeGreaterThanOrEqual(2);
+    expect(source).toContain("충돌 정리 도구를 불러오지 못했습니다");
+    expect(noticeSource).toContain("disabled={repairBusy}");
+  });
+
+  it("shows only root collision losers instead of asking users to rename descendants", () => {
+    expect(source).toContain("vaultNameCollisionRepairTargetIds(result, notesRef.current)");
+    expect(source).toContain("setVaultNameCollisionRepairTargetIds(actionableTargetIds)");
+    expect(source).toContain("setVaultNameCollisionTargetIds(new Set(outcome.result.deferredTargetIds))");
+    expect(source).toContain("이름이 겹친 항목");
   });
 
   it("preserves dirty buffers while a blocked target is being renamed or moved", () => {

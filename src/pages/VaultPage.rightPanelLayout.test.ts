@@ -28,7 +28,12 @@ describe("Vault right-panel responsive layout contract", () => {
     expect(source).toContain("window.requestAnimationFrame");
     expect(source).toContain('"--vault-right-panel-width": `${effectiveRightPanelWidth}px`');
     expect(source).toContain('vaultWorkspaceRef.current?.style.setProperty(');
-    expect(source).toContain("clampVaultRightPanelWidthForViewport(requestedWidth, window.innerWidth, leftOpen)");
+    expect(source).toContain("vaultWorkspaceWidth");
+    expect(source).toContain("new ResizeObserver(updateViewportWidth)");
+    expect(source).toContain("workspace.clientWidth || window.innerWidth");
+    expect(source).toContain('window.addEventListener("resize", updateViewportWidth');
+    expect(source).toContain('window.removeEventListener("resize", updateViewportWidth)');
+    expect(source).toContain("useLayoutEffect(() => {");
     const resizeFrame = source.slice(
       source.indexOf("const queueRightPanelResize"),
       source.indexOf("const beginRightPanelResize")

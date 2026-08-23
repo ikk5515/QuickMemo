@@ -236,6 +236,7 @@ import {
   type QuickSwitcherItem
 } from "../features/vault/navigation";
 import { previewTextFromHtml } from "../lib/editorContent";
+import { FeatureErrorBoundary } from "../components/FeatureErrorBoundary";
 import { registerPrivateKeyAutoLockGuard } from "../lib/privateKeyAutoLockGuard";
 import {
   buildVaultPaths,
@@ -1509,10 +1510,19 @@ function UnlockedVaultPage({
   const [vaultNameMigrationProgress, setVaultNameMigrationProgress] = useState<VaultNameMigrationProgressState | null>(null);
   const [vaultNameMigrationFailure, setVaultNameMigrationFailure] = useState<string | null>(null);
   const [vaultIntegrityRetryAttempt, setVaultIntegrityRetryAttempt] = useState(0);
+  const LazyVaultNameIntegrityNotice = useMemo(() => {
+    void vaultIntegrityRetryAttempt;
+    return lazy(() => import("../features/vault/VaultNameIntegrityNotice"));
+  }, [vaultIntegrityRetryAttempt]);
   const [vaultNameMigrationResumeAttempt, setVaultNameMigrationResumeAttempt] = useState(0);
   const vaultNameMigrationStatusRef = useRef<VaultNameMigrationStatus>("checking");
   vaultNameMigrationStatusRef.current = vaultNameMigrationStatus;
   const [vaultNameCollisionTargetIds, setVaultNameCollisionTargetIds] = useState<Set<string>>(new Set());
+  const [vaultNameCollisionRepairTargetIds, setVaultNameCollisionRepairTargetIds] = useState<Set<string>>(new Set());
+  const [vaultNameCollisionRepairBusy, setVaultNameCollisionRepairBusy] = useState(false);
+  const vaultNameCollisionRepairBusyRef = useRef(false);
+  const vaultNameCollisionRepairTargetIdsRef = useRef(vaultNameCollisionRepairTargetIds);
+  vaultNameCollisionRepairTargetIdsRef.current = vaultNameCollisionRepairTargetIds;
   const [noteServerReservationSignature, setNoteServerReservationSignature] = useState<string | null>(null);
   const [folderServerReservationSignature, setFolderServerReservationSignature] = useState<string | null>(null);
   const notesRef = useRef<DecryptedVaultNote[]>(notes);
@@ -1535,9 +1545,10 @@ function UnlockedVaultPage({
   const [leftOpen, setLeftOpen] = useState(() => !mobileVaultLayoutSnapshot());
   const [rightOpen, setRightOpen] = useState(() => !mobileVaultLayoutSnapshot());
   const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_VAULT_RIGHT_PANEL_WIDTH);
-  const [vaultViewportWidth, setVaultViewportWidth] = useState(() => (
+  const vaultViewportWidth = (
     typeof window === "undefined" ? 1_440 : window.innerWidth
-  ));
+  );
+  const [vaultWorkspaceWidth, setVaultWorkspaceWidth] = useState(vaultViewportWidth);
   const [searchQuery, setSearchQuery] = useState("");
   const [entryBookmarks, setEntryBookmarks] = useState<PersistedEntryBookmark[]>([]);
   const [searchBookmarks, setSearchBookmarks] = useState<PersistedSearchBookmark[]>([]);
@@ -1729,26 +1740,29 @@ function UnlockedVaultPage({
   const mobileLayout = useMobileVaultLayout();
   const compactCalendarLayout = useCompactCalendarLayout();
   const isOnline = useOnlineStatus();
-  const rightPanelMaxWidth = maxVaultRightPanelWidthForViewport(vaultViewportWidth, leftOpen);
+  const rightPanelMaxWidth = maxVaultRightPanelWidthForViewport(
+    vaultViewportWidth,
+    leftOpen,
+    vaultWorkspaceWidth
+  );
   const effectiveRightPanelWidth = clampVaultRightPanelWidthForViewport(
     rightPanelWidth,
     vaultViewportWidth,
-    leftOpen
+    leftOpen,
+    vaultWorkspaceWidth
   );
-  useEffect(() => {
-    let frameId: number | null = null;
-    const updateViewportWidth = () => {
-      if (frameId !== null) return;
-      frameId = window.requestAnimationFrame(() => {
-        frameId = null;
-        setVaultViewportWidth(window.innerWidth);
-      });
-    };
-    window.addEventListener("resize", updateViewportWidth, { passive: true });
-    return () => {
-      window.removeEventListener("resize", updateViewportWidth);
-      if (frameId !== null) window.cancelAnimationFrame(frameId);
-    };
+  useLayoutEffect(() => {
+    const workspace = vaultWorkspaceRef.current;
+    if (!workspace) return;
+    const updateViewportWidth = () => setVaultWorkspaceWidth(workspace.clientWidth || window.innerWidth);
+    updateViewportWidth();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateViewportWidth);
+      return () => window.removeEventListener("resize", updateViewportWidth);
+    }
+    const resizeObserver = new ResizeObserver(updateViewportWidth);
+    resizeObserver.observe(workspace);
+    return () => resizeObserver.disconnect();
   }, []);
   useEffect(() => {
     vaultPageMountedRef.current = true;
@@ -2377,8 +2391,13 @@ function UnlockedVaultPage({
   }, []);
 
   const clampRightPanelWidthForCurrentLayout = useCallback((requestedWidth: number) => (
-    clampVaultRightPanelWidthForViewport(requestedWidth, window.innerWidth, leftOpen)
-  ), [leftOpen]);
+    clampVaultRightPanelWidthForViewport(
+      requestedWidth,
+      vaultViewportWidth,
+      leftOpen,
+      vaultWorkspaceWidth
+    )
+  ), [leftOpen, vaultViewportWidth, vaultWorkspaceWidth]);
 
   const queueRightPanelResize = useCallback((requestedWidth: number) => {
     const resize = rightPanelResizeRef.current;
@@ -2715,6 +2734,7 @@ function UnlockedVaultPage({
     setVaultNameMigrationProgress(null);
     setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
+    setVaultNameCollisionRepairTargetIds(new Set());
     if (!isOnline) {
       setVaultNameMigrationStatus("waiting");
       return () => {
@@ -3144,12 +3164,14 @@ function UnlockedVaultPage({
     setVaultNameMigrationProgress({ completed: 0, migrated: 0, skipped: 0, total: 0 });
     setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
+    setVaultNameCollisionRepairTargetIds(new Set());
     setStatus("암호화된 이름 예약을 한 번 확인하는 중입니다…");
 
     const pending = (async () => {
       const {
         migrateVaultNameReservations,
-        preflightVaultNameCutover
+        preflightVaultNameCutover,
+        vaultNameCollisionRepairTargetIds
       } = await import("../features/vault/vaultNameMigration");
       const currentProfile = vaultIntegrityProfileRef.current;
       const migrationCancelled = () => (
@@ -3318,7 +3340,11 @@ function UnlockedVaultPage({
           return { kind: "cancelled" } as const;
         }
         if (result.deferredTargetIds.length) {
-          return { kind: "deferred", result } as const;
+          return {
+            kind: "deferred",
+            repairTargetIds: vaultNameCollisionRepairTargetIds(result, notesRef.current),
+            result
+          } as const;
         }
 
         // Only a pre-existing claim can become safely superseded during the
@@ -3367,23 +3393,27 @@ function UnlockedVaultPage({
         setVaultNameMigrationProgress(null);
         setVaultNameMigrationFailure(null);
         setVaultNameCollisionTargetIds(new Set());
+        setVaultNameCollisionRepairTargetIds(new Set());
         setVaultNameMigrationStatus("ready");
         setStatus("다른 탭에서 암호화된 이름 무결성 준비를 완료했습니다.");
         return;
       }
       setVaultNameMigrationProgress(outcome.result);
       if (outcome.kind === "deferred") {
+        const actionableTargetIds = new Set(outcome.repairTargetIds);
         setVaultNameCollisionTargetIds(new Set(outcome.result.deferredTargetIds));
+        setVaultNameCollisionRepairTargetIds(actionableTargetIds);
         setVaultNameMigrationStatus("blocked");
         const failure = outcome.result.collisions.length
-          ? `같은 폴더에서 이름이 겹치거나 그 하위에 있는 항목 ${outcome.result.deferredTargetIds.length}개를 발견했습니다. 표시된 항목의 이름이나 위치를 정리한 뒤 다시 확인해주세요.`
-          : `이전 버전의 공유 폴더 경로 ${outcome.result.deferredTargetIds.length}개를 발견했습니다. 표시된 공유 항목을 Vault 루트로 이동해 무결성 검증을 완료해주세요.`;
+          ? `이름이 겹친 항목 ${actionableTargetIds.size}개가 있습니다. 새 이름을 정하면 내용을 보존하고 검증을 이어갑니다.`
+          : `이전 버전의 공유 폴더 경로 ${actionableTargetIds.size}개를 발견했습니다. 표시된 공유 항목을 Vault 루트로 이동해 무결성 검증을 완료해주세요.`;
         setVaultNameMigrationFailure(failure);
         setError(failure);
         return;
       }
       setVaultIntegrityKey(outcome.key);
       setVaultNameCollisionTargetIds(new Set());
+      setVaultNameCollisionRepairTargetIds(new Set());
       setVaultNameMigrationFailure(null);
       setVaultNameMigrationStatus("ready");
       setStatus(outcome.reconciledClaimCount
@@ -3402,6 +3432,7 @@ function UnlockedVaultPage({
         setVaultNameMigrationProgress(null);
         setVaultNameMigrationFailure("다른 탭이나 기기의 확인이 끝나기를 기다리고 있습니다. 현재 편집 버퍼는 유지됩니다.");
         setVaultNameCollisionTargetIds(new Set());
+        setVaultNameCollisionRepairTargetIds(new Set());
         setStatus(`다른 탭의 Vault 확인이 끝난 뒤 ${retryAfterSeconds}초 후 다시 확인합니다.`);
         setError(null);
         if (vaultIntegrityBusyRetryTimerRef.current !== null) {
@@ -3434,6 +3465,7 @@ function UnlockedVaultPage({
       const knownCollisionTargets = conflictTargetIds.filter((targetId) => knownTargetIds.has(targetId));
       setVaultNameMigrationStatus("blocked");
       setVaultNameCollisionTargetIds(new Set(knownCollisionTargets));
+      setVaultNameCollisionRepairTargetIds(new Set(knownCollisionTargets));
       setVaultNameMigrationFailure(failure);
       setError(failure);
     }).finally(() => {
@@ -3502,7 +3534,11 @@ function UnlockedVaultPage({
   ]);
 
   function retryVaultNameMigration() {
-    if (vaultNameMigrationStatus === "running" || vaultNameMigrationPromiseRef.current) return;
+    if (
+      vaultNameCollisionRepairBusyRef.current
+      || vaultNameMigrationStatus === "running"
+      || vaultNameMigrationPromiseRef.current
+    ) return;
     if (vaultIntegrityBusyRetryTimerRef.current !== null) {
       window.clearTimeout(vaultIntegrityBusyRetryTimerRef.current);
       vaultIntegrityBusyRetryTimerRef.current = null;
@@ -3515,6 +3551,7 @@ function UnlockedVaultPage({
     setVaultNameMigrationProgress(null);
     setVaultNameMigrationFailure(null);
     setVaultNameCollisionTargetIds(new Set());
+    setVaultNameCollisionRepairTargetIds(new Set());
     setNoteServerReservationSignature(null);
     setFolderServerReservationSignature(null);
     setVaultNameMigrationStatus(isOnline ? "checking" : "waiting");
@@ -3526,6 +3563,63 @@ function UnlockedVaultPage({
   function canMutateExistingNameTarget(entryId: string) {
     return vaultNameWritesReady
       || (vaultNameMigrationStatus === "blocked" && vaultNameCollisionTargetIds.has(entryId));
+  }
+
+  async function repairFirstVaultNameCollision() {
+    if (
+      vaultNameCollisionRepairBusyRef.current
+      || vaultNameMigrationStatusRef.current !== "blocked"
+    ) return;
+    const generation = vaultNameMigrationGenerationRef.current;
+    const targetId = vaultNameCollisionRepairTargetIdsRef.current.values().next().value as string;
+    if (!targetId) return;
+    vaultNameCollisionRepairBusyRef.current = true;
+    setVaultNameCollisionRepairBusy(true);
+    setError(null);
+    try {
+      const { promptVaultNameCollisionRepair } = await import(
+        "../features/vault/vaultCollisionNaming"
+      );
+      if (
+        vaultNameMigrationGenerationRef.current !== generation
+        || vaultNameMigrationStatusRef.current !== "blocked"
+        || !vaultNameCollisionRepairTargetIdsRef.current.has(targetId)
+      ) return;
+      const repair = promptVaultNameCollisionRepair(
+        notesRef.current,
+        foldersRef.current,
+        targetId
+      );
+      if (!repair) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      if (
+        vaultNameMigrationGenerationRef.current !== generation
+        || vaultNameMigrationStatusRef.current !== "blocked"
+        || !vaultNameCollisionRepairTargetIdsRef.current.has(targetId)
+      ) return;
+      if (repair.kind === "entry") {
+        openEntry(repair.targetId);
+        await renameEntry(repair.targetId, repair.name);
+      } else if (repair.kind === "missing") {
+        setError("충돌 항목을 찾지 못했습니다. 다시 확인해주세요.");
+      } else {
+        setLeftMode("files");
+        setLeftOpen(true);
+        setSelectedFolderId(repair.targetId);
+        await renameFolder(repair.targetId, repair.name);
+      }
+    } catch {
+      if (vaultNameMigrationGenerationRef.current === generation) {
+        setError("충돌 정리 도구를 불러오지 못했습니다.");
+      }
+    } finally {
+      vaultNameCollisionRepairBusyRef.current = false;
+      setVaultNameCollisionRepairBusy(false);
+    }
+  }
+
+  function recheckVaultNameIntegrityAfterRepair() {
+    window.setTimeout(() => retryVaultNameMigration(), 0);
   }
 
   useEffect(() => {
@@ -6183,7 +6277,7 @@ function UnlockedVaultPage({
     }
   }
 
-  async function renameFolder(folderId: string) {
+  async function renameFolder(folderId: string, requestedName?: string) {
     if (!profile || !privateKey || !vaultIntegrityKey) {
       setError("암호화된 이름 무결성 키가 준비될 때까지 폴더 이름을 바꿀 수 없습니다.");
       return;
@@ -6201,7 +6295,7 @@ function UnlockedVaultPage({
     if (!folder) {
       return;
     }
-    const name = window.prompt("폴더 이름 변경", folder.displayName)?.trim();
+    const name = (requestedName ?? window.prompt("폴더 이름 변경", folder.displayName))?.trim();
     if (!name || name === folder.displayName) {
       return;
     }
@@ -6252,7 +6346,10 @@ function UnlockedVaultPage({
         commitFolders((current) => current.map((candidate) => candidate.id === folderId
           ? { ...candidate, displayName: name, revision: result.revision }
           : candidate));
-        setStatus("빈 폴더 이름을 변경했습니다. 갱신할 내부 참조는 없습니다.");
+        setStatus(resolvingNameCollision
+          ? "중복 폴더 이름을 해소해 검증을 다시 시작합니다."
+          : "빈 폴더 이름을 변경했습니다. 갱신할 내부 참조는 없습니다.");
+        if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
         return;
       }
       const rewritePlans = resolvingNameCollision
@@ -6290,8 +6387,9 @@ function UnlockedVaultPage({
           : candidate));
       });
       setStatus(resolvingNameCollision
-        ? "중복 이름을 해소했습니다. 기존의 모호한 링크는 자동 귀속하지 않았으므로 다시 확인해주세요."
+        ? "중복 폴더 이름을 해소해 검증을 다시 시작합니다."
         : `암호화된 폴더 이름을 변경하고 내부 참조 ${completed.confirmedCount}개 파일을 서버에서 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
+      if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "폴더 이름을 변경하지 못했습니다.");
     } finally {
@@ -6482,8 +6580,9 @@ function UnlockedVaultPage({
       });
       const selfRewriteCount = (selfPlan?.patches.length ?? 0) + (selfCanvasPlan?.changeCount ?? 0);
       setStatus(resolvingNameCollision
-        ? "중복 이름을 해소했습니다. 기존의 모호한 링크는 자동 귀속하지 않았으므로 다시 확인해주세요."
+        ? "중복 이름을 해소해 검증을 다시 시작합니다. 모호한 기존 링크는 자동 귀속하지 않습니다."
         : `이름을 변경하고 내부 참조 ${completed.confirmedCount + selfRewriteCount}개를 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
+      if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
     } catch (caught) {
       if (caught instanceof NoteRevisionConflictError) {
         setConflictedEntryIds((current) => new Map(current).set(entryId, caught.actualRevision));
@@ -8881,7 +8980,7 @@ function UnlockedVaultPage({
             : activeEntryId
               ? "저장됨"
               : "";
-  const vaultNameCollisionLabels = [...vaultNameCollisionTargetIds].map((targetId) => {
+  const vaultNameCollisionLabels = [...vaultNameCollisionRepairTargetIds].map((targetId) => {
     const note = notes.find((candidate) => candidate.id === targetId);
     if (note) return entryPaths.get(note.id) ?? entryLabel(note);
     return folderPaths.get(targetId) ?? folders.find((folder) => folder.id === targetId)?.displayName ?? "알 수 없는 항목";
@@ -8981,35 +9080,37 @@ function UnlockedVaultPage({
           || vaultNameMigrationStatus === "running"
           || vaultNameMigrationStatus === "blocked"
         ) ? (
-          <aside
-            aria-busy={vaultNameMigrationStatus === "running"}
-            aria-label="Vault 이름 무결성 준비"
-            className="vault-workspace-conflict vault-name-migration"
-            role={vaultNameMigrationStatus === "blocked" ? "alert" : "status"}
+          <FeatureErrorBoundary
+            fallback={(
+              <aside aria-label="Vault 이름 무결성 준비" className="vault-workspace-conflict vault-name-migration" role="alert">
+                <div>
+                  <strong>암호화된 이름 무결성 준비</strong>
+                  <p>안내 오류입니다. 편집 내용은 유지됩니다.</p>
+                </div>
+                <div>
+                  {vaultNameCollisionRepairTargetIds.size ? (
+                    <button disabled={vaultNameCollisionRepairBusy} onClick={() => void repairFirstVaultNameCollision()} type="button">충돌 이름 바꾸기</button>
+                  ) : null}
+                  <button disabled={!isOnline || vaultNameCollisionRepairBusy} onClick={retryVaultNameMigration} type="button">다시 확인</button>
+                </div>
+              </aside>
+            )}
+            key={vaultIntegrityRetryAttempt}
           >
-            <div>
-              <strong>암호화된 이름 무결성 준비</strong>
-              <p>
-                {!isOnline
-                  ? "온라인 연결을 기다리고 있습니다. 현재 편집 버퍼는 그대로 유지됩니다."
-                  : vaultNameMigrationStatus === "running"
-                    ? `${vaultNameMigrationProgress?.completed ?? 0}/${vaultNameMigrationProgress?.total ?? 0}개를 한 번만 확인 중입니다. 제목 평문은 서버에 저장하지 않습니다.`
-                    : vaultNameMigrationStatus === "blocked" && vaultNameCollisionLabels.length
-                      ? `이름 또는 위치를 정리해야 합니다: ${vaultNameCollisionLabels.join(", ")}${vaultNameCollisionTargetIds.size > vaultNameCollisionLabels.length ? " 외" : ""}`
-                      : vaultNameMigrationStatus === "blocked"
-                        ? vaultNameMigrationFailure ?? "무결성 확인을 완료하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해주세요. 현재 편집 버퍼는 유지됩니다."
-                        : vaultNameMigrationFailure ?? "처음 전환이 필요한 Vault만 서버의 전체 노트·폴더 목록을 한 번 확인합니다. 현재 편집 버퍼는 유지됩니다."
-                }
-              </p>
-            </div>
-            {vaultNameMigrationStatus === "blocked" ? (
-              <div>
-                <button onClick={retryVaultNameMigration} type="button">
-                  {vaultNameCollisionTargetIds.size ? "정리 후 다시 확인" : "다시 확인"}
-                </button>
-              </div>
-            ) : null}
-          </aside>
+            <Suspense fallback={<VaultViewLoading label="이름 무결성 준비" />}>
+              <LazyVaultNameIntegrityNotice
+                collisionLabels={vaultNameCollisionLabels}
+                failure={vaultNameMigrationFailure}
+                migrationStatus={vaultNameMigrationStatus}
+                online={isOnline}
+                onRepair={() => void repairFirstVaultNameCollision()}
+                onRetry={retryVaultNameMigration}
+                progress={vaultNameMigrationProgress}
+                repairBusy={vaultNameCollisionRepairBusy}
+                repairCount={vaultNameCollisionRepairTargetIds.size}
+              />
+            </Suspense>
+          </FeatureErrorBoundary>
         ) : null}
         <input
           accept=".zip,application/zip"

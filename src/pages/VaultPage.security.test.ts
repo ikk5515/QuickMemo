@@ -162,7 +162,7 @@ describe("VaultPage security boundaries", () => {
 
   it("does not flash the migration warning during the normal marker fast path", () => {
     const bannerGate = vaultPageSource.match(
-      /!workspaceConflict[\s\S]*?\? \(\n\s+<aside[\s\S]*?aria-label="Vault 이름 무결성 준비"/u
+      /!workspaceConflict[\s\S]*?\? \(\n\s+<FeatureErrorBoundary[\s\S]*?<LazyVaultNameIntegrityNotice/u
     )?.[0] ?? "";
     expect(bannerGate).toContain('vaultNameMigrationStatus === "waiting"');
     expect(bannerGate).toContain('vaultNameMigrationStatus === "running"');

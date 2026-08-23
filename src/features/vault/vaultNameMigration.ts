@@ -57,6 +57,22 @@ export interface VaultNameReservationMigrationResult extends VaultNameReservatio
   deferredTargetIds: string[];
 }
 
+export function vaultNameCollisionRepairTargetIds(
+  result: Pick<VaultNameReservationMigrationResult, "collisions" | "deferredTargetIds">,
+  notes: readonly Pick<DecryptedVaultNote, "folderId" | "id" | "type">[]
+) {
+  const targetIds = new Set(
+    result.collisions.map((collision) => collision.duplicateTargetId)
+  );
+  for (const targetId of result.deferredTargetIds) {
+    const note = notes.find((candidate) => candidate.id === targetId);
+    if (note?.type === "shared" && (note.folderId ?? null) !== null) {
+      targetIds.add(targetId);
+    }
+  }
+  return targetIds.size ? [...targetIds] : [...result.deferredTargetIds];
+}
+
 export const VAULT_NAME_MIGRATION_WRITE_CONCURRENCY = 4;
 export const VAULT_NAME_MIGRATION_LEASE_CHECKPOINT_BATCH_SIZE = 16;
 

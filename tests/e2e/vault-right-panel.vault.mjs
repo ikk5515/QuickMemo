@@ -11,9 +11,11 @@ import {
   unlockEncryptedVault
 } from "./helpers.mjs";
 
-async function openRightPanel(page) {
+async function openRightPanel(page, { keepLeftOpen = false } = {}) {
   const leftPanel = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
-  if (await leftPanel.isVisible()) {
+  if (keepLeftOpen && !(await leftPanel.isVisible())) {
+    await page.getByRole("button", { name: "왼쪽 패널 열기" }).click();
+  } else if (!keepLeftOpen && await leftPanel.isVisible()) {
     await leftPanel.getByRole("button", { name: "왼쪽 패널 닫기" }).click();
   }
   const panel = page.locator('.vault-right-panel[aria-label="연결 정보"]');
@@ -56,7 +58,35 @@ test("right-panel tabs, narrow tools, and encrypted resizing stay usable", async
   const workspace = page.locator(".vault-workspace");
   await expect(page.getByLabel("Vault 이름 무결성 준비")).toHaveCount(0, { timeout: 35_000 });
   await expect(workspace).toHaveAttribute("data-workspace-sync", "saved", { timeout: 35_000 });
-  const panel = await openRightPanel(page);
+  const panel = await openRightPanel(page, { keepLeftOpen: !mobileLayout });
+  if (!mobileLayout) {
+    const leftPanel = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
+    const center = workspace.locator(".vault-center");
+    await expect(leftPanel).toBeVisible();
+    await expect.poll(async () => (await center.boundingBox())?.width ?? 0, {
+      message: "The settled two-sidebar layout must preserve a usable editor column"
+    }).toBeGreaterThanOrEqual(279);
+    const [workspaceBounds, leftBounds, centerBounds, panelBounds] = await Promise.all([
+      workspace.boundingBox(),
+      leftPanel.boundingBox(),
+      center.boundingBox(),
+      panel.boundingBox()
+    ]);
+    expect(workspaceBounds).not.toBeNull();
+    expect(leftBounds).not.toBeNull();
+    expect(centerBounds).not.toBeNull();
+    expect(panelBounds).not.toBeNull();
+    if (workspaceBounds && leftBounds && centerBounds && panelBounds) {
+      expect(centerBounds.width).toBeGreaterThanOrEqual(279);
+      expect(leftBounds.x + leftBounds.width).toBeLessThanOrEqual(centerBounds.x + 1);
+      expect(centerBounds.x + centerBounds.width).toBeLessThanOrEqual(panelBounds.x + 1);
+      expect(panelBounds.x + panelBounds.width)
+        .toBeLessThanOrEqual(workspaceBounds.x + workspaceBounds.width + 1);
+    }
+    await expect.poll(() => workspace.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth + 1
+    ), { message: "Both sidebars and the editor must fit without workspace overflow" }).toBe(true);
+  }
   const tabs = panel.getByRole("tab");
   await expect(tabs).toHaveCount(6);
 
@@ -132,12 +162,12 @@ test("right-panel tabs, narrow tools, and encrypted resizing stay usable", async
     await separator.press("Home");
     await expect(separator).toHaveAttribute("aria-valuenow", "250");
     const maximumWidth = Number(await separator.getAttribute("aria-valuemax"));
-    expect(maximumWidth).toBeGreaterThanOrEqual(330);
+    expect(maximumWidth).toBeGreaterThanOrEqual(250);
     expect(maximumWidth).toBeLessThanOrEqual(480);
     await separator.press("End");
     await expect(separator).toHaveAttribute("aria-valuenow", `${maximumWidth}`);
     await separator.press("ArrowRight");
-    await expect(separator).toHaveAttribute("aria-valuenow", `${maximumWidth - 10}`);
+    await expect(separator).toHaveAttribute("aria-valuenow", `${Math.max(250, maximumWidth - 10)}`);
     await separator.press("Home");
     const bounds = await separator.boundingBox();
     expect(bounds).not.toBeNull();
@@ -157,7 +187,7 @@ test("right-panel tabs, narrow tools, and encrypted resizing stay usable", async
     await expect(page.getByLabel("Vault 이름 무결성 준비")).toHaveCount(0, { timeout: 35_000 });
     await expect(page.locator(".vault-workspace"))
       .toHaveAttribute("data-workspace-sync", "saved", { timeout: 35_000 });
-    const restoredPanel = await openRightPanel(page);
+    const restoredPanel = await openRightPanel(page, { keepLeftOpen: !mobileLayout });
     await expect(restoredPanel.getByRole("separator", { name: "오른쪽 패널 너비 조절" }))
       .toHaveAttribute("aria-valuenow", `${draggedWidth}`);
   }

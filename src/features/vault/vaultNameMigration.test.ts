@@ -6,6 +6,7 @@ import {
   auditVaultNameReservations,
   migrateVaultNameReservations,
   preflightVaultNameCutover,
+  vaultNameCollisionRepairTargetIds,
   VaultNameReservationMigrationConflictError,
   type VaultNameReservationMigrationInput
 } from "./vaultNameMigration";
@@ -111,6 +112,18 @@ function migrate(
 }
 
 describe("Vault name reservation migration", () => {
+  it("offers only collision roots and legacy shared-folder entries for direct repair", () => {
+    const result = {
+      collisions: [{ duplicateTargetId: "duplicate", fingerprint: "fingerprint", firstTargetId: "winner" }],
+      deferredTargetIds: ["duplicate", "child", "legacy-shared"]
+    };
+    expect(vaultNameCollisionRepairTargetIds(result, [
+      { folderId: "child-folder", id: "legacy-shared", type: "shared" }
+    ])).toEqual(["duplicate", "legacy-shared"]);
+    expect(vaultNameCollisionRepairTargetIds({ collisions: [], deferredTargetIds: ["fallback"] }, []))
+      .toEqual(["fallback"]);
+  });
+
   beforeEach(async () => {
     vi.clearAllMocks();
     vaultIntegrityKey = await crypto.subtle.generateKey(

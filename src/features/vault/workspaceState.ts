@@ -220,11 +220,15 @@ export function clampVaultRightPanelWidth(value: unknown): number {
  */
 export function maxVaultRightPanelWidthForViewport(
   viewportWidth: number,
-  leftPanelOpen: boolean
+  leftPanelOpen: boolean,
+  workspaceWidth: number = viewportWidth
 ): number {
   if (!Number.isFinite(viewportWidth) || viewportWidth <= 760) {
     return MAX_VAULT_RIGHT_PANEL_WIDTH;
   }
+  const availableWidth = Number.isFinite(workspaceWidth) && workspaceWidth > 0
+    ? workspaceWidth
+    : viewportWidth;
   const leftPanelWidth = !leftPanelOpen
     ? 0
     : viewportWidth <= 900
@@ -236,7 +240,7 @@ export function maxVaultRightPanelWidthForViewport(
     MAX_VAULT_RIGHT_PANEL_WIDTH,
     Math.max(
       MIN_VAULT_RIGHT_PANEL_WIDTH,
-      viewportWidth - VAULT_RIBBON_WIDTH - leftPanelWidth - MIN_VAULT_EDITOR_WIDTH
+      availableWidth - VAULT_RIBBON_WIDTH - leftPanelWidth - MIN_VAULT_EDITOR_WIDTH
     )
   ));
 }
@@ -244,11 +248,12 @@ export function maxVaultRightPanelWidthForViewport(
 export function clampVaultRightPanelWidthForViewport(
   value: unknown,
   viewportWidth: number,
-  leftPanelOpen: boolean
+  leftPanelOpen: boolean,
+  workspaceWidth: number = viewportWidth
 ): number {
   return Math.min(
     clampVaultRightPanelWidth(value),
-    maxVaultRightPanelWidthForViewport(viewportWidth, leftPanelOpen)
+    maxVaultRightPanelWidthForViewport(viewportWidth, leftPanelOpen, workspaceWidth)
   );
 }
 
