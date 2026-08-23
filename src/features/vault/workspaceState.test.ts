@@ -81,6 +81,25 @@ describe("vault workspace state", () => {
     });
   });
 
+  it("preserves an intentionally empty encrypted tab workspace", () => {
+    const state = normalizeVaultWorkspaceState({
+      ...createDefaultVaultWorkspaceState(),
+      tabs: [],
+      activeTab: null,
+      tabGroups: [{ id: "primary", tabs: [], activeTab: null }],
+      activeTabGroupId: "primary",
+      left: { open: false, mode: "files" },
+      right: { open: false, mode: "backlinks", width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH }
+    });
+
+    expect(state.tabs).toEqual([]);
+    expect(state.activeTab).toBeNull();
+    expect(state.tabGroups).toEqual([{ id: "primary", tabs: [], activeTab: null }]);
+    expect(state.activeTabGroupId).toBe("primary");
+    expect(state.left.open).toBe(false);
+    expect(state.right.open).toBe(false);
+  });
+
   it("normalizes and restores a bounded recursive pane layout", () => {
     const nested = normalizeVaultWorkspaceState({
       ...createDefaultVaultWorkspaceState(),

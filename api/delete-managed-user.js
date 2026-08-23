@@ -11,6 +11,18 @@ import {
   resolveFreeTierPolicy
 } from "./_free-tier-policy.js";
 import { disconnectGoogleCalendarForManagedUser } from "./_google-calendar-common.js";
+import {
+  createDocumentWrite,
+  firestoreBatchGetNewTransaction,
+  firestoreCommit,
+  firestoreRollback,
+  toFirestoreValue,
+  updateDocumentWrite
+} from "./_secure-share-common.js";
+import {
+  nextVaultInventoryDocument,
+  prepareVaultInventoryManifestMutation
+} from "./_vault-inventory-manifest-mutation.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
@@ -28,6 +40,11 @@ const attachmentCleanupBatchSize = 20;
 const historyCleanupBatchSize = 50;
 const participantNoteCleanupBatchSize = 50;
 const managedUserAttachmentDeleteBudget = 20;
+const managedUserVaultReadBudget = 500;
+const managedUserVaultWriteBudget = 500;
+const managedUserVaultCollectionBatchSize = 50;
+const managedUserVaultJobBatchSize = 20;
+const maximumVaultNoteRevision = 999_999_999_999;
 const secureShareRootStateCollections = [
   {
     collectionId: "publicShareAccessSessions",
@@ -302,14 +319,6 @@ function stringArrayValue(values) {
           values: values.map((value) => stringValue(value))
         }
       : {}
-  };
-}
-
-function mapValue(fields) {
-  return {
-    mapValue: {
-      fields
-    }
   };
 }
 
@@ -804,7 +813,7 @@ async function queryOwnedSecureShareItems(projectId, ownerUid, accessToken) {
 async function queryParticipantNotes(projectId, uid, accessToken) {
   return queryDocumentsByArrayContains(projectId, "notes", "participantUids", uid, accessToken, {
     limit: participantNoteCleanupBatchSize,
-    selectFieldPaths: ["__name__", "ownerUid", "participantUids", "wrappedKeys"]
+    selectFieldPaths: ["__name__"]
   });
 }
 
@@ -876,10 +885,6 @@ function stringField(document, fieldName) {
 function stringArrayField(document, fieldName) {
   const values = document?.fields?.[fieldName]?.arrayValue?.values ?? [];
   return values.flatMap((value) => (typeof value.stringValue === "string" ? [value.stringValue] : []));
-}
-
-function mapField(document, fieldName) {
-  return document?.fields?.[fieldName]?.mapValue?.fields ?? {};
 }
 
 function integerField(document, fieldName) {
@@ -1544,6 +1549,323 @@ async function deleteChildDocumentsRepeatedly({
   }
 
   throw new ManagedUserCleanupInProgressError(errorMessage);
+}
+
+function consumeManagedUserVaultBudget(budget, kind, count) {
+  const key = kind === "read" ? "reads" : "writes";
+  const limit = kind === "read"
+    ? managedUserVaultReadBudget
+    : managedUserVaultWriteBudget;
+  if (!Number.isSafeInteger(count) || count < 0 || budget[key] + count > limit) {
+    throw new ManagedUserCleanupInProgressError(
+      "Managed user Vault cleanup requires another request"
+    );
+  }
+  budget[key] += count;
+}
+
+function assertDirectOwnedVaultDocuments(
+  projectId,
+  documents,
+  parentPath,
+  collectionId,
+  targetUid
+) {
+  const prefix = `${parentPath}/${collectionId}/`;
+  for (const document of documents) {
+    const path = documentPathFromName(projectId, document?.name ?? "");
+    const childId = path.startsWith(prefix) ? path.slice(prefix.length) : "";
+    if (
+      !document?.updateTime
+      || !childId
+      || childId.includes("/")
+      || stringField(document, "ownerUid") !== targetUid
+    ) {
+      throw new Error("Managed user Vault ownership changed during cleanup");
+    }
+  }
+}
+
+async function listDirectOwnedVaultDocuments({
+  accessToken,
+  budget,
+  collectionId,
+  limit,
+  parentName,
+  parentPath,
+  projectId,
+  targetUid
+}) {
+  const remainingReads = managedUserVaultReadBudget - budget.reads;
+  if (remainingReads <= 0) {
+    throw new ManagedUserCleanupInProgressError(
+      "Managed user Vault cleanup requires another request"
+    );
+  }
+  const documents = await listChildDocuments(
+    parentName,
+    collectionId,
+    accessToken,
+    Math.max(1, Math.min(limit, remainingReads)),
+    ["__name__", "ownerUid"]
+  );
+  // Firestore bills an empty query as one document read. Counting it keeps
+  // this endpoint within the same explicit bound even for many empty jobs.
+  consumeManagedUserVaultBudget(budget, "read", Math.max(1, documents.length));
+  assertDirectOwnedVaultDocuments(
+    projectId,
+    documents,
+    parentPath,
+    collectionId,
+    targetUid
+  );
+  return documents;
+}
+
+async function deleteOwnedVaultDocuments({
+  accessToken,
+  budget,
+  counterName,
+  documents,
+  stats
+}) {
+  if (documents.length === 0) return 0;
+  consumeManagedUserVaultBudget(budget, "write", documents.length);
+  try {
+    await firestoreCommitWrites(
+      documents[0].name,
+      documents.map((document) => ({
+        delete: document.name,
+        currentDocument: { updateTime: document.updateTime }
+      })),
+      accessToken
+    );
+  } catch (error) {
+    if ([400, 409].includes(errorNumberField(error, "statusCode"))) {
+      throw new ManagedUserCleanupInProgressError(
+        "Concurrent Vault cleanup requires a fresh cleanup pass"
+      );
+    }
+    throw error;
+  }
+  stats[counterName] += documents.length;
+  stats.vaultServerStateDocumentsDeleted += documents.length;
+  stats.documentsDeleted += documents.length;
+  return documents.length;
+}
+
+async function deleteFlatOwnedVaultCollection({
+  accessToken,
+  budget,
+  collectionId,
+  counterName,
+  parentName,
+  parentPath,
+  projectId,
+  stats,
+  targetUid
+}) {
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const remainingWrites = managedUserVaultWriteBudget - budget.writes;
+    if (remainingWrites <= 0) {
+      throw new ManagedUserCleanupInProgressError(
+        "Managed user Vault cleanup requires another request"
+      );
+    }
+    const documents = await listDirectOwnedVaultDocuments({
+      accessToken,
+      budget,
+      collectionId,
+      limit: Math.min(managedUserVaultCollectionBatchSize, remainingWrites),
+      parentName,
+      parentPath,
+      projectId,
+      targetUid
+    });
+    if (documents.length === 0) return;
+    await deleteOwnedVaultDocuments({
+      accessToken,
+      budget,
+      counterName,
+      documents,
+      stats
+    });
+  }
+  throw new ManagedUserCleanupInProgressError(
+    "Managed user Vault collection cleanup requires another request"
+  );
+}
+
+async function deleteOwnedVaultJobTrees({
+  accessToken,
+  budget,
+  childCollectionId,
+  childCounterName,
+  jobCollectionId,
+  jobCounterName,
+  maintenanceName,
+  maintenancePath,
+  projectId,
+  stats,
+  targetUid
+}) {
+  for (let iteration = 0; iteration < maxManagedUserDeleteIterations; iteration += 1) {
+    const remainingWrites = managedUserVaultWriteBudget - budget.writes;
+    if (remainingWrites <= 0) {
+      throw new ManagedUserCleanupInProgressError(
+        "Managed user Vault cleanup requires another request"
+      );
+    }
+    const jobs = await listDirectOwnedVaultDocuments({
+      accessToken,
+      budget,
+      collectionId: jobCollectionId,
+      limit: Math.min(managedUserVaultJobBatchSize, remainingWrites),
+      parentName: maintenanceName,
+      parentPath: maintenancePath,
+      projectId,
+      targetUid
+    });
+    if (jobs.length === 0) return;
+
+    for (const job of jobs) {
+      const jobPath = documentPathFromName(projectId, job.name);
+      await deleteFlatOwnedVaultCollection({
+        accessToken,
+        budget,
+        collectionId: childCollectionId,
+        counterName: childCounterName,
+        parentName: job.name,
+        parentPath: jobPath,
+        projectId,
+        stats,
+        targetUid
+      });
+      await deleteOwnedVaultDocuments({
+        accessToken,
+        budget,
+        counterName: jobCounterName,
+        documents: [job],
+        stats
+      });
+    }
+  }
+  throw new ManagedUserCleanupInProgressError(
+    "Managed user Vault job cleanup requires another request"
+  );
+}
+
+async function deleteOwnedVaultRoot({
+  accessToken,
+  budget,
+  counterName,
+  documentPath,
+  projectId,
+  stats,
+  targetUid
+}) {
+  consumeManagedUserVaultBudget(budget, "read", 1);
+  const document = await firestoreGet(
+    projectId,
+    documentPath,
+    accessToken,
+    ["__name__", "ownerUid"]
+  );
+  if (!document) return;
+  if (
+    documentPathFromName(projectId, document.name) !== documentPath
+    || stringField(document, "ownerUid") !== targetUid
+  ) {
+    throw new Error("Managed user Vault root ownership changed during cleanup");
+  }
+  await deleteOwnedVaultDocuments({
+    accessToken,
+    budget,
+    counterName,
+    documents: [document],
+    stats
+  });
+}
+
+export async function deleteManagedUserVaultServerState({
+  accessToken,
+  projectId,
+  stats,
+  targetUid
+}) {
+  const budget = { reads: 0, writes: 0 };
+  const integrityPath = `vaultIntegrity/${targetUid}`;
+  const integrityName = documentNameForPath(projectId, integrityPath);
+  const maintenancePath = `vaultMaintenanceJobs/${targetUid}`;
+  const maintenanceName = documentNameForPath(projectId, maintenancePath);
+
+  await deleteFlatOwnedVaultCollection({
+    accessToken,
+    budget,
+    collectionId: "nameClaims",
+    counterName: "vaultIntegrityClaimsDeleted",
+    parentName: integrityName,
+    parentPath: integrityPath,
+    projectId,
+    stats,
+    targetUid
+  });
+  await deleteOwnedVaultJobTrees({
+    accessToken,
+    budget,
+    childCollectionId: "steps",
+    childCounterName: "vaultPathRewriteStepsDeleted",
+    jobCollectionId: "pathRewrites",
+    jobCounterName: "vaultPathRewriteJobsDeleted",
+    maintenanceName,
+    maintenancePath,
+    projectId,
+    stats,
+    targetUid
+  });
+  await deleteOwnedVaultJobTrees({
+    accessToken,
+    budget,
+    childCollectionId: "chunks",
+    childCounterName: "vaultImportChunksDeleted",
+    jobCollectionId: "imports",
+    jobCounterName: "vaultImportJobsDeleted",
+    maintenanceName,
+    maintenancePath,
+    projectId,
+    stats,
+    targetUid
+  });
+  await deleteFlatOwnedVaultCollection({
+    accessToken,
+    budget,
+    collectionId: "pathRewriteInventory",
+    counterName: "vaultPathRewriteInventoryDeleted",
+    parentName: maintenanceName,
+    parentPath: maintenancePath,
+    projectId,
+    stats,
+    targetUid
+  });
+
+  for (const [documentPath, counterName] of [
+    [integrityPath, "vaultIntegrityRootsDeleted"],
+    [`vaultFolderTrees/${targetUid}`, "vaultFolderTreesDeleted"],
+    [`vaultWorkspaces/${targetUid}`, "vaultWorkspacesDeleted"],
+    [maintenancePath, "vaultMaintenanceRootsDeleted"]
+  ]) {
+    await deleteOwnedVaultRoot({
+      accessToken,
+      budget,
+      counterName,
+      documentPath,
+      projectId,
+      stats,
+      targetUid
+    });
+  }
+  stats.vaultServerStateReads = budget.reads;
+  return budget;
 }
 
 async function deleteChildAttachmentsRepeatedly({
@@ -2433,6 +2755,190 @@ async function removeDeletedUserFromNoteHistoryReaders(projectId, uid, accessTok
   throw new ManagedUserCleanupInProgressError("Too many note history reader references to update in one request");
 }
 
+function validManagedUserParticipantUid(value) {
+  return typeof value === "string"
+    && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
+}
+
+function participantCleanupHistoryId() {
+  return crypto.randomUUID().replaceAll("-", "");
+}
+
+async function rollbackManagedUserTransaction(context, transaction) {
+  await firestoreRollback(context, transaction).catch(() => undefined);
+}
+
+function managedUserParticipantCleanupRetry(error) {
+  return [400, 409].includes(errorNumberField(error, "statusCode"))
+    || error?.upstreamCode === "ABORTED"
+    || error?.upstreamCode === "FAILED_PRECONDITION";
+}
+
+function managedUserParticipantNoteWrite(projectId, notePath, update, updateTime) {
+  const { wrappedKeys, ...ordinaryFields } = update;
+  const write = updateDocumentWrite(
+    projectId,
+    notePath,
+    ordinaryFields,
+    Object.keys(update),
+    updateTime
+  );
+  write.update.fields.wrappedKeys = {
+    mapValue: {
+      fields: Object.fromEntries(
+        Object.entries(wrappedKeys).map(([uid, wrappedKey]) => [
+          uid,
+          toFirestoreValue(wrappedKey)
+        ])
+      )
+    }
+  };
+  return write;
+}
+
+/**
+ * Removes one deleted participant with the same revision/manifest atomicity as
+ * the owner Vault API. Discovery supplies only the opaque document name; every
+ * authorization and canonical field is reread in one Firestore transaction.
+ */
+export async function removeDeletedUserFromParticipantNote({
+  accessToken,
+  callerUid,
+  noteName,
+  projectId,
+  targetUid
+}) {
+  if (
+    !validManagedUserParticipantUid(callerUid)
+    || !validManagedUserParticipantUid(targetUid)
+    || typeof noteName !== "string"
+    || !noteName
+  ) {
+    throw new TypeError("Invalid managed-user participant cleanup input");
+  }
+  const notePath = documentPathFromName(projectId, noteName);
+  const notePathSegments = notePath.split("/");
+  if (
+    notePathSegments.length !== 2
+    || notePathSegments[0] !== "notes"
+    || !/^[A-Za-z0-9_-]{1,120}$/u.test(notePathSegments[1])
+  ) {
+    throw new Error("Managed-user participant cleanup target is invalid");
+  }
+  const noteId = notePathSegments[1];
+  const context = { accessToken, projectId };
+  const state = await firestoreBatchGetNewTransaction(context, [notePath]);
+  const transaction = state.transaction;
+
+  try {
+    const note = state.documents[0];
+    if (!note) {
+      await rollbackManagedUserTransaction(context, transaction);
+      return false;
+    }
+    const ownerUid = note.ownerUid;
+    if (!validManagedUserParticipantUid(ownerUid)) {
+      throw new Error("Managed-user participant cleanup owner is invalid");
+    }
+    if (ownerUid === targetUid) {
+      throw new ManagedUserCleanupInProgressError(
+        "Owned note requires a fresh managed-user cleanup pass"
+      );
+    }
+    const participantUids = Array.isArray(note.participantUids)
+      ? note.participantUids
+      : [];
+    if (
+      participantUids.length < 2
+      || participantUids.length > 200
+      || participantUids.some((uid) => !validManagedUserParticipantUid(uid))
+      || new Set(participantUids).size !== participantUids.length
+      || !participantUids.includes(ownerUid)
+      || note.type !== "shared"
+    ) {
+      throw new Error("Managed-user participant cleanup source is invalid");
+    }
+    if (!participantUids.includes(targetUid)) {
+      await rollbackManagedUserTransaction(context, transaction);
+      return false;
+    }
+    const wrappedKeyEntries = note.wrappedKeys
+      && typeof note.wrappedKeys === "object"
+      && !Array.isArray(note.wrappedKeys)
+      ? Object.entries(note.wrappedKeys)
+      : [];
+    if (
+      wrappedKeyEntries.length !== participantUids.length
+      || wrappedKeyEntries.some(([uid]) => !participantUids.includes(uid))
+    ) {
+      throw new Error("Managed-user participant cleanup wrapped keys are invalid");
+    }
+    // Match the canonical Vault note contract: pre-versioned legacy notes have
+    // an implicit revision 0 and their first audited mutation advances to 1.
+    const revision = note.revision ?? 0;
+    if (
+      !Number.isSafeInteger(revision)
+      || revision < 0
+      || revision >= maximumVaultNoteRevision
+    ) {
+      throw new Error("Managed-user participant cleanup revision is invalid");
+    }
+
+    const remainingParticipantUids = participantUids.filter((uid) => uid !== targetUid);
+    const wrappedKeys = Object.fromEntries(
+      wrappedKeyEntries.filter(([uid]) => uid !== targetUid)
+    );
+    const nextRevision = revision + 1;
+    const lastMutationId = participantCleanupHistoryId();
+    const now = new Date();
+    const update = {
+      lastMutationId,
+      participantUids: remainingParticipantUids,
+      revision: nextRevision,
+      type: remainingParticipantUids.length > 1 ? "shared" : "personal",
+      updatedAt: now,
+      updatedBy: callerUid,
+      wrappedKeys
+    };
+    const nextDocument = nextVaultInventoryDocument(note, update);
+    const inventoryWrites = await prepareVaultInventoryManifestMutation(
+      context,
+      transaction,
+      {
+        currentDocument: note,
+        id: noteId,
+        kind: "note",
+        nextDocument,
+        now,
+        uid: ownerUid
+      }
+    );
+    const writes = [
+      managedUserParticipantNoteWrite(projectId, notePath, update, note.__updateTime),
+      createDocumentWrite(projectId, `${notePath}/history/${lastMutationId}`, {
+        action: "share",
+        actorUid: callerUid,
+        changedFields: ["participants"],
+        createdAt: now,
+        noteId,
+        readerUids: remainingParticipantUids,
+        revision: nextRevision
+      }),
+      ...inventoryWrites
+    ];
+    await firestoreCommit(context, writes, transaction);
+    return true;
+  } catch (error) {
+    await rollbackManagedUserTransaction(context, transaction);
+    if (managedUserParticipantCleanupRetry(error)) {
+      throw new ManagedUserCleanupInProgressError(
+        "Concurrent Vault membership update requires a fresh cleanup pass"
+      );
+    }
+    throw error;
+  }
+}
+
 async function removeDeletedUserFromParticipantNotes(projectId, targetUid, callerUid, accessToken, stats) {
   let updated = 0;
 
@@ -2445,44 +2951,19 @@ async function removeDeletedUserFromParticipantNotes(projectId, targetUid, calle
     }
 
     for (const note of notes) {
-      const ownerUid = stringField(note, "ownerUid");
-
-      if (ownerUid === targetUid) {
-        continue;
-      }
-
-      const participantUids = stringArrayField(note, "participantUids");
-      const remainingParticipantUids = participantUids.filter((uid) => uid !== targetUid);
-
-      if (ownerUid && !remainingParticipantUids.includes(ownerUid)) {
-        remainingParticipantUids.unshift(ownerUid);
-      }
-
-      if (remainingParticipantUids.length === 0) {
-        continue;
-      }
-
-      const wrappedKeys = { ...mapField(note, "wrappedKeys") };
-      delete wrappedKeys[targetUid];
-      const normalizedParticipantUids = Array.from(new Set(remainingParticipantUids));
-
-      await firestorePatchProjectedFields(
-        projectId,
-        documentPathFromName(projectId, note.name),
-        {
-          participantUids: stringArrayValue(normalizedParticipantUids),
-          type: stringValue(normalizedParticipantUids.length > 1 ? "shared" : "personal"),
-          updatedAt: timestampValue(),
-          updatedBy: stringValue(callerUid),
-          wrappedKeys: mapValue(wrappedKeys)
-        },
+      const changed = await removeDeletedUserFromParticipantNote({
         accessToken,
-        note
-      );
+        callerUid,
+        noteName: note.name,
+        projectId,
+        targetUid
+      });
 
-      updated += 1;
-      updatedThisPass += 1;
-      stats.sharedNoteMembershipsRemoved += 1;
+      if (changed) {
+        updated += 1;
+        updatedThisPass += 1;
+        stats.sharedNoteMembershipsRemoved += 1;
+      }
     }
 
     if (updatedThisPass === 0 || notes.length < participantNoteCleanupBatchSize) {
@@ -2673,7 +3154,19 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
     uploadedNoteAttachmentsDeleted: 0,
     rosterProfileDeactivated: false,
     userProfileDeactivated: false,
-    userDocumentsDeleted: 0
+    userDocumentsDeleted: 0,
+    vaultFolderTreesDeleted: 0,
+    vaultImportChunksDeleted: 0,
+    vaultImportJobsDeleted: 0,
+    vaultIntegrityClaimsDeleted: 0,
+    vaultIntegrityRootsDeleted: 0,
+    vaultMaintenanceRootsDeleted: 0,
+    vaultPathRewriteInventoryDeleted: 0,
+    vaultPathRewriteJobsDeleted: 0,
+    vaultPathRewriteStepsDeleted: 0,
+    vaultServerStateDocumentsDeleted: 0,
+    vaultServerStateReads: 0,
+    vaultWorkspacesDeleted: 0
   };
 
   await deactivateManagedUserBeforeCleanup(projectId, targetUid, quickKey, accessToken, stats);
@@ -2712,6 +3205,12 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
   await removeDeletedUserFromNoteHistoryReaders(projectId, targetUid, accessToken, stats);
   await deleteTargetNoteUserStates(projectId, targetUid, accessToken, stats);
   await deleteOwnedNoteFolders(projectId, targetUid, accessToken, stats);
+  await deleteManagedUserVaultServerState({
+    accessToken,
+    projectId,
+    stats,
+    targetUid
+  });
   await deleteOwnedGoogleCalendarOAuthStates(projectId, targetUid, accessToken, stats);
   await deleteOwnedGoogleCalendarTaskTombstones(projectId, targetUid, accessToken, stats);
   await deleteOwnedGoogleCalendarTaskSyncReceipts(projectId, targetUid, accessToken, stats);

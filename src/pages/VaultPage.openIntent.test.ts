@@ -75,8 +75,8 @@ describe("Vault entry open intent wiring", () => {
     expect(inactivePane).toContain("onChange={onChange}");
     expect(inactivePane).toContain("onSave={onSave}");
     expect(source).toContain("if (groupActiveEntryId) updateEntryDraft(groupActiveEntryId, { body })");
-    expect(source).toContain("const dirtyEntryIds = Object.entries(drafts)");
-    expect(source).toContain("() => void saveEntry(entryId)");
+    expect(source).toContain("const dirtyEntryIds = Object.entries(draftsRef.current)");
+    expect(source).toContain("() => void saveEntryRef.current(entryId)");
   });
 
   it("resizes with an animation-frame CSS update and commits React state once on release", () => {

@@ -10,6 +10,7 @@ import {
   type NoteSnapshot,
   type VaultCutoverLeaseInput
 } from "../../services/notes";
+import type { VaultPathRewriteActivationInput } from "../../services/vaultPathRewriteJobs";
 import type { DecryptedNote, UserProfile, VaultContentFormat, VaultEntryKind } from "../../types";
 import {
   VAULT_NAME_INDEX_VERSION,
@@ -25,6 +26,15 @@ export interface DecryptedVaultFolder extends NoteFolderSnapshot {
 export interface DecryptedVaultNote extends DecryptedNote {
   contentFormat: VaultContentFormat;
   entryKind: VaultEntryKind;
+}
+
+export interface DecryptVaultNotesOptions {
+  /**
+   * Already-decrypted subscription rows from the same unlocked session. Their
+   * plaintext is reused only when the backend snapshot has the exact revision,
+   * storage identity, ciphertext, and current-user wrapped key.
+   */
+  reusableNotes?: readonly DecryptedVaultNote[];
 }
 
 export type VaultEntryStorageIdentityState = "explicit" | "invalid" | "legacy-missing";
@@ -73,8 +83,64 @@ export function resolvedVaultEntryKind(note: Pick<NoteSnapshot, "contentFormat" 
   return note.contentFormat === "markdown-v1" ? "markdown" as const : "legacy-html" as const;
 }
 
-export async function decryptVaultNotes(notes: NoteSnapshot[], uid: string, privateKey: CryptoKey) {
+function encryptedPayloadMatches(
+  left: NoteSnapshot["encryptedBody"] | undefined,
+  right: NoteSnapshot["encryptedBody"] | undefined
+) {
+  if (!left || !right) return false;
+  return left.algorithm === right.algorithm
+    && left.cipherText === right.cipherText
+    && left.iv === right.iv
+    && left.version === right.version;
+}
+
+function wrappedKeyMatches(
+  left: NoteSnapshot["wrappedKeys"][string] | undefined,
+  right: NoteSnapshot["wrappedKeys"][string] | undefined
+) {
+  return Boolean(left && right)
+    && left?.algorithm === right?.algorithm
+    && left?.version === right?.version
+    && left?.wrappedKey === right?.wrappedKey;
+}
+
+function reusableDecryptedNoteMatches(
+  note: NoteSnapshot,
+  reusable: DecryptedVaultNote,
+  uid: string
+) {
+  return note.id === reusable.id
+    && note.ownerUid === reusable.ownerUid
+    && note.revision === reusable.revision
+    // Require explicit raw identity equality. A resolved legacy fallback must
+    // still be decrypted from the authoritative backend payload.
+    && note.contentFormat === reusable.contentFormat
+    && note.entryKind === reusable.entryKind
+    && encryptedPayloadMatches(note.encryptedTitle, reusable.encryptedTitle)
+    && encryptedPayloadMatches(note.encryptedBody, reusable.encryptedBody)
+    && wrappedKeyMatches(note.wrappedKeys?.[uid], reusable.wrappedKeys?.[uid]);
+}
+
+export async function decryptVaultNotes(
+  notes: NoteSnapshot[],
+  uid: string,
+  privateKey: CryptoKey,
+  options: DecryptVaultNotesOptions = {}
+) {
+  const reusableById = new Map(options.reusableNotes?.map((note) => [note.id, note]) ?? []);
   const decrypted = await mapWithConcurrency(notes, 4, async (note): Promise<DecryptedVaultNote | null> => {
+    const reusable = reusableById.get(note.id);
+    if (reusable && reusableDecryptedNoteMatches(note, reusable, uid)) {
+      // Keep every authoritative metadata/ciphertext field from the server and
+      // reuse only the plaintext proven to correspond to those exact bytes.
+      return {
+        ...note,
+        contentFormat: reusable.contentFormat,
+        entryKind: reusable.entryKind,
+        title: reusable.title,
+        body: reusable.body
+      };
+    }
     const wrappedKey = note.wrappedKeys[uid];
     if (!wrappedKey) {
       return null;
@@ -241,7 +307,8 @@ export async function renameEncryptedVaultFolder(
   uid: string,
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
-  name: string
+  name: string,
+  pathRewriteActivation?: VaultPathRewriteActivationInput
 ) {
   const normalizedName = name.trim().normalize("NFC");
   if (!normalizedName || normalizedName.length > 120) {
@@ -260,31 +327,39 @@ export async function renameEncryptedVaultFolder(
       targetType: "folder"
     })
   ]);
-  return updateEncryptedNoteFolder({
+  const result = await updateEncryptedNoteFolder({
     encryptedName,
     expectedRevision: folder.revision ?? 1,
     folderId: folder.id,
     ownerUid: uid,
+    ...(pathRewriteActivation ? { pathRewriteActivation } : {}),
     nameClaim: {
       claimId,
       indexVersion: VAULT_NAME_INDEX_VERSION,
       parentId: folder.parentId ?? null
     }
   });
+  return {
+    ...result,
+    encryptedName,
+    vaultNameClaimId: claimId,
+    vaultNameIndexVersion: VAULT_NAME_INDEX_VERSION
+  };
 }
 
 export async function moveEncryptedVaultFolder(
   folder: DecryptedVaultFolder,
   uid: string,
   vaultIntegrityKey: CryptoKey,
-  parentId: string | null
+  parentId: string | null,
+  pathRewriteActivation?: VaultPathRewriteActivationInput
 ) {
   const claimId = await vaultNameFingerprint(vaultIntegrityKey, {
     name: folder.displayName,
     parentId,
     targetType: "folder"
   });
-  return updateEncryptedNoteFolder({
+  const result = await updateEncryptedNoteFolder({
     expectedRevision: folder.revision ?? 1,
     folderId: folder.id,
     nameClaim: {
@@ -293,8 +368,15 @@ export async function moveEncryptedVaultFolder(
       parentId
     },
     ownerUid: uid,
-    parentId
+    parentId,
+    ...(pathRewriteActivation ? { pathRewriteActivation } : {})
   });
+  return {
+    ...result,
+    encryptedName: folder.encryptedName,
+    vaultNameClaimId: claimId,
+    vaultNameIndexVersion: VAULT_NAME_INDEX_VERSION
+  };
 }
 
 export function buildVaultPaths(folders: DecryptedVaultFolder[]) {

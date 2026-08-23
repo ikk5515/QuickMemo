@@ -162,6 +162,7 @@ describe("Vault folder server transaction boundary", () => {
         { missing: `projects/${projectId}/databases/(default)/documents/noteFolders/folder-a` },
         { missing: `projects/${projectId}/databases/(default)/documents/vaultIntegrity/${uid}/nameClaims/${"C".repeat(43)}` }
       ]))
+      .mockResolvedValueOnce(json([]))
       .mockResolvedValueOnce(json({ commitTime: timestamp.toISOString(), writeResults: [] }));
 
     const result = await __vaultFolderTreeTesting.performAction(context, uid, createBody);
@@ -224,7 +225,7 @@ describe("Vault folder server transaction boundary", () => {
       .mockResolvedValueOnce(json({}));
 
     await expect(__vaultFolderTreeTesting.performAction(context, uid, createBody))
-      .rejects.toMatchObject({ code: "vault_tree_invalid", statusCode: 409 });
+      .rejects.toMatchObject({ code: "vault_tree_repair_required", statusCode: 409 });
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(":commit"))).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(":rollback"))).toBe(true);
   });

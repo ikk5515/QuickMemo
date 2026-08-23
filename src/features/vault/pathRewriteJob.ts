@@ -30,6 +30,10 @@ export interface VaultPathRewriteSourcePlan {
 export interface VaultPathRewriteManifestV1 {
   version: typeof VAULT_PATH_REWRITE_JOB_VERSION;
   ownerUid: string;
+  /** Present on atomic pr2 jobs; absent on recoverable legacy pr1 jobs. */
+  inventoryFingerprint?: string;
+  /** Present on fixed-manifest pr3 jobs; mutually exclusive with the pr2 fingerprint. */
+  inventoryManifest?: VaultPathRewriteInventoryManifestBindingV1;
   pathChanges: VaultEntryPathChange[];
   steps: Array<{
     ordinal: number;
@@ -40,6 +44,13 @@ export interface VaultPathRewriteManifestV1 {
     rewrittenSourceDigest: string;
     changeCount: number;
   }>;
+}
+
+export interface VaultPathRewriteInventoryManifestBindingV1 {
+  epoch: number;
+  root: string;
+  shardCount: number;
+  version: number;
 }
 
 export interface VaultPathRewriteStepV1 {
@@ -57,7 +68,14 @@ export interface VaultPathRewriteStepV1 {
 export interface PreparedVaultPathRewriteJob {
   jobId: string;
   manifest: VaultPathRewriteManifestV1;
+  mutationTarget: VaultPathRewriteMutationTarget;
   steps: VaultPathRewriteStepV1[];
+}
+
+export interface VaultPathRewriteMutationTarget {
+  expectedRevision: number;
+  id: string;
+  kind: "entry" | "folder";
 }
 
 export type VaultPathRewriteSourceState =
@@ -121,13 +139,50 @@ async function hmacKey(vaultIntegrityKey: CryptoKey) {
   }
 }
 
-async function deterministicJobId(vaultIntegrityKey: CryptoKey, manifest: VaultPathRewriteManifestV1) {
+async function deterministicJobId(
+  vaultIntegrityKey: CryptoKey,
+  manifest: VaultPathRewriteManifestV1,
+  mutationTarget: VaultPathRewriteMutationTarget,
+  activationMode: "atomic-v1" | "atomic-manifest-v1"
+) {
   const signature = await crypto.subtle.sign(
     "HMAC",
     await hmacKey(vaultIntegrityKey),
-    encoder.encode(JSON.stringify(["quickmemo/vault-path-rewrite", manifest]))
+    encoder.encode(JSON.stringify([
+      activationMode === "atomic-manifest-v1"
+        ? "quickmemo/vault-path-rewrite/atomic-manifest-v1"
+        : "quickmemo/vault-path-rewrite/atomic-v1",
+      mutationTarget,
+      manifest
+    ]))
   );
-  return `pr1_${base64Url(signature)}`;
+  return `${activationMode === "atomic-manifest-v1" ? "pr3" : "pr2"}_${base64Url(signature)}`;
+}
+
+function validDigest(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/u.test(value);
+}
+
+function normalizedInventoryManifest(
+  value: VaultPathRewriteInventoryManifestBindingV1 | undefined
+) {
+  if (!value) return null;
+  if (
+    value.version !== 1
+    || value.shardCount !== 32
+    || !Number.isSafeInteger(value.epoch)
+    || value.epoch < 1
+    || value.epoch > 999_999_999_999
+    || !validDigest(value.root)
+  ) {
+    throw new Error("경로 재작성 고정 인벤토리 binding이 올바르지 않습니다.");
+  }
+  return {
+    version: value.version,
+    epoch: value.epoch,
+    shardCount: value.shardCount,
+    root: value.root
+  } satisfies VaultPathRewriteInventoryManifestBindingV1;
 }
 
 function normalizePathChanges(pathChanges: readonly VaultEntryPathChange[]) {
@@ -221,24 +276,33 @@ export function buildVaultPathRewriteSourcePlans(input: {
 export async function prepareVaultPathRewriteJob(
   vaultIntegrityKey: CryptoKey,
   input: {
+    inventoryFingerprint?: string;
+    inventoryManifest?: VaultPathRewriteInventoryManifestBindingV1;
+    mutationTarget: VaultPathRewriteMutationTarget;
     ownerUid: string;
     pathChanges: readonly VaultEntryPathChange[];
     sourcePlans: readonly VaultPathRewriteSourcePlan[];
   }
 ): Promise<PreparedVaultPathRewriteJob> {
   assertUid(input.ownerUid);
+  assertIdentifier(input.mutationTarget.id, "경로 변경 대상");
+  assertRevision(input.mutationTarget.expectedRevision);
+  if (input.mutationTarget.kind !== "entry" && input.mutationTarget.kind !== "folder") {
+    throw new Error("경로 변경 대상 종류가 올바르지 않습니다.");
+  }
   if (!vaultIntegrityKey) {
     throw new Error("경로 재작성 무결성 키를 확인할 수 없습니다.");
+  }
+  const inventoryManifest = normalizedInventoryManifest(input.inventoryManifest);
+  const hasFingerprint = validDigest(input.inventoryFingerprint);
+  if ((inventoryManifest === null) === !hasFingerprint) {
+    throw new Error("경로 재작성 서버 인벤토리 binding은 정확히 하나만 필요합니다.");
   }
   if (input.sourcePlans.length > MAX_VAULT_PATH_REWRITE_STEPS) {
     throw new RangeError(`경로 재작성 source는 한 작업에 ${MAX_VAULT_PATH_REWRITE_STEPS}개까지 저장할 수 있습니다.`);
   }
 
   const pathChanges = normalizePathChanges(input.pathChanges);
-  if (!pathChanges.length) {
-    throw new Error("경로 재작성 작업에는 하나 이상의 경로 변경이 필요합니다.");
-  }
-
   const sourceIds = new Set<string>();
   const sortedPlans = [...input.sourcePlans].sort((left, right) =>
     left.sourceEntryId.localeCompare(right.sourceEntryId)
@@ -282,6 +346,9 @@ export async function prepareVaultPathRewriteJob(
   const manifest: VaultPathRewriteManifestV1 = {
     version: VAULT_PATH_REWRITE_JOB_VERSION,
     ownerUid: input.ownerUid,
+    ...(inventoryManifest
+      ? { inventoryManifest }
+      : { inventoryFingerprint: input.inventoryFingerprint! }),
     pathChanges,
     steps: steps.map((step) => ({
       ordinal: step.ordinal,
@@ -298,8 +365,14 @@ export async function prepareVaultPathRewriteJob(
   }
 
   return {
-    jobId: await deterministicJobId(vaultIntegrityKey, manifest),
+    jobId: await deterministicJobId(
+      vaultIntegrityKey,
+      manifest,
+      input.mutationTarget,
+      inventoryManifest ? "atomic-manifest-v1" : "atomic-v1"
+    ),
     manifest,
+    mutationTarget: { ...input.mutationTarget },
     steps
   };
 }

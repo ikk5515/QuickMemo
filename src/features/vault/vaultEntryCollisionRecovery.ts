@@ -1,6 +1,7 @@
 import { encryptText, unwrapNoteKey } from "../../lib/crypto";
 import { resolveRevisionedVaultNameCollision } from "../../services/notes";
 import type { VaultContentFormat, VaultEntryKind } from "../../types";
+import type { VaultPathRewriteActivationInput } from "../../services/vaultPathRewriteJobs";
 import type { DecryptedVaultNote } from "./vaultData";
 import {
   VAULT_NAME_INDEX_VERSION,
@@ -52,7 +53,8 @@ export async function resolveVaultEntryNameCollision(
   uid: string,
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
-  replacement: { folderId: string | null; title: string }
+  replacement: { folderId: string | null; title: string },
+  pathRewriteActivation?: VaultPathRewriteActivationInput
 ) {
   if (note.ownerUid !== uid) {
     throw new Error("Vault 이름 충돌은 노트 소유자만 해결할 수 있습니다.");
@@ -93,7 +95,7 @@ export async function resolveVaultEntryNameCollision(
     "name-claim" as const
   ].filter((field): field is "folder" | "name-claim" | "title" => field !== null);
 
-  return resolveRevisionedVaultNameCollision({
+  const result = await resolveRevisionedVaultNameCollision({
     changedFields,
     ...(encryptedTitle ? { encryptedTitle } : {}),
     expectedContentFormat: note.contentFormat,
@@ -107,7 +109,15 @@ export async function resolveVaultEntryNameCollision(
       parentId: normalized.folderId
     },
     noteId: note.id,
+    ...(pathRewriteActivation ? { pathRewriteActivation } : {}),
     readerUids: note.participantUids,
     uid
   });
+  return {
+    ...result,
+    encryptedBody: note.encryptedBody,
+    encryptedTitle: encryptedTitle ?? note.encryptedTitle,
+    vaultNameClaimId: claimId,
+    vaultNameIndexVersion: VAULT_NAME_INDEX_VERSION
+  };
 }

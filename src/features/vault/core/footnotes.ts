@@ -99,6 +99,8 @@ function inlineText(tokens: readonly MarkdownInlineToken[]): string {
       case "code":
       case "math":
         return token.value;
+      case "line-break":
+        return "\n";
       case "footnote-reference":
         return token.inline ? inlineText(token.inline) : `[^${token.label}]`;
       case "emphasis":

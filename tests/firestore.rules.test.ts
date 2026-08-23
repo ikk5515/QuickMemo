@@ -449,6 +449,8 @@ function vaultPathRewriteJob(
     attemptCount: 0,
     retryCount: 0,
     lastErrorCode: null,
+    recoveryCheckCount: 0,
+    remainingStepCount: typeof overrides.stepCount === "number" ? overrides.stepCount : 2,
     revision: 1,
     encryptedManifest: encryptedPayload,
     wrappedKey: ownerWrappedShareKey,
@@ -468,6 +470,41 @@ function vaultPathRewriteStep(uid: string, jobId: string, ordinal: number) {
     encryptedStep: encryptedPayload,
     createdAt: serverTimestamp()
   };
+}
+
+function atomicVaultPathRewriteJob(
+  uid: string,
+  jobId: string,
+  overrides: Record<string, unknown> = {}
+) {
+  return vaultPathRewriteJob(uid, jobId, {
+    activationMode: "atomic-v1",
+    inventoryFingerprint: "I".repeat(43),
+    preparedStepCount: 0,
+    mutationExpectedRevision: 0,
+    mutationTargetId: "legacy-note",
+    mutationTargetKind: "entry",
+    ...overrides
+  });
+}
+
+function atomicManifestVaultPathRewriteJob(
+  uid: string,
+  jobId: string,
+  overrides: Record<string, unknown> = {}
+) {
+  return vaultPathRewriteJob(uid, jobId, {
+    activationMode: "atomic-manifest-v1",
+    inventoryManifestVersion: 1,
+    inventoryManifestEpoch: 1,
+    inventoryManifestShardCount: 32,
+    inventoryManifestRoot: "M".repeat(43),
+    preparedStepCount: 0,
+    mutationExpectedRevision: 0,
+    mutationTargetId: "legacy-note",
+    mutationTargetKind: "entry",
+    ...overrides
+  });
 }
 
 function vaultImportJob(
@@ -2242,6 +2279,33 @@ describeRules("firestore security rules", () => {
     );
 
     await assertSucceeds(setDoc(jobRef, vaultPathRewriteJob("user-a", jobId)));
+    const legacyJobId = `pr1_${"X".repeat(43)}`;
+    const legacyJobRef = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      legacyJobId
+    );
+    const legacyJob = vaultPathRewriteJob("user-a", legacyJobId) as Record<string, unknown>;
+    delete legacyJob.recoveryCheckCount;
+    delete legacyJob.remainingStepCount;
+    await assertSucceeds(setDoc(legacyJobRef, legacyJob));
+    await assertSucceeds(updateDoc(legacyJobRef, {
+      status: "prepared",
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    const invalidRecoveryCreateId = `pr1_${"Y".repeat(43)}`;
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", invalidRecoveryCreateId),
+      vaultPathRewriteJob("user-a", invalidRecoveryCreateId, { recoveryCheckCount: 1 })
+    ));
+    const invalidRemainingCreateId = `pr1_${"Z".repeat(43)}`;
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", invalidRemainingCreateId),
+      vaultPathRewriteJob("user-a", invalidRemainingCreateId, { remainingStepCount: 1 })
+    ));
     await assertSucceeds(getDoc(jobRef));
     await assertSucceeds(getDocs(jobsQuery));
     await assertFails(getDoc(otherJobRef));
@@ -2354,8 +2418,35 @@ describeRules("firestore security rules", () => {
       updatedAt: serverTimestamp()
     }));
     await assertSucceeds(updateDoc(recoveryRef, {
-      status: "ready",
+      status: "not-applied",
+      lastErrorCode: null,
+      recoveryCheckCount: 1,
+      lastRecoveryCheckAt: serverTimestamp(),
       revision: 5,
+      notAppliedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(recoveryRef, {
+      status: "running",
+      attemptCount: 2,
+      revision: 6,
+      lastAttemptAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(recoveryRef, {
+      recoveryCheckCount: 3,
+      lastRecoveryCheckAt: serverTimestamp(),
+      revision: 6,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(recoveryRef, {
+      status: "prepared",
+      revision: 6,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(recoveryRef, {
+      status: "ready",
+      revision: 7,
       activatedAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));
@@ -2393,6 +2484,543 @@ describeRules("firestore security rules", () => {
       recoveredAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }));
+
+    const preparedRecoveryJobId = `pr1_${"J".repeat(43)}`;
+    const preparedRecoveryRef = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      preparedRecoveryJobId
+    );
+    await assertSucceeds(setDoc(
+      preparedRecoveryRef,
+      vaultPathRewriteJob("user-a", preparedRecoveryJobId, { stepCount: 1 })
+    ));
+    await assertSucceeds(updateDoc(preparedRecoveryRef, {
+      status: "prepared",
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(preparedRecoveryRef, {
+      status: "ready",
+      activatedAt: serverTimestamp(),
+      recoveredAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+
+    const staleSnapshotJobId = `pr1_${"F".repeat(43)}`;
+    const staleSnapshotRef = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      staleSnapshotJobId
+    );
+    await assertSucceeds(setDoc(
+      staleSnapshotRef,
+      vaultPathRewriteJob("user-a", staleSnapshotJobId, { stepCount: 1 })
+    ));
+    await assertSucceeds(updateDoc(staleSnapshotRef, {
+      status: "prepared",
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(staleSnapshotRef, {
+      status: "not-applied",
+      recoveryCheckCount: 1,
+      lastRecoveryCheckAt: serverTimestamp(),
+      notAppliedAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(staleSnapshotRef, {
+      recoveryCheckCount: 2,
+      lastRecoveryCheckAt: serverTimestamp(),
+      revision: 4,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(staleSnapshotRef, {
+      status: "ready",
+      activatedAt: serverTimestamp(),
+      revision: 5,
+      updatedAt: serverTimestamp()
+    }));
+  });
+
+  it("fences atomic preparation, denies client activation, and cleans abandoned partial steps", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+    });
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const jobId = `pr2_${"K".repeat(43)}`;
+    const jobRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId);
+    const stepZeroRef = doc(jobRef, "steps", "step-000000");
+    const stepOneRef = doc(jobRef, "steps", "step-000001");
+
+    await assertSucceeds(setDoc(jobRef, atomicVaultPathRewriteJob("user-a", jobId)));
+    await assertFails(updateDoc(jobRef, {
+      inventoryFingerprint: "J".repeat(43),
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(setDoc(stepZeroRef, vaultPathRewriteStep("user-a", jobId, 0)));
+    await assertSucceeds(updateDoc(jobRef, {
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(jobRef, {
+      status: "abandoned",
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    const stalePreparingBatch = writeBatch(ownerDb);
+    stalePreparingBatch.set(stepOneRef, vaultPathRewriteStep("user-a", jobId, 1));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(
+        doc(context.firestore(), "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId),
+        { updatedAt: new Date(Date.now() - 2 * 60_000 - 1) }
+      );
+    });
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "abandoned",
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(stalePreparingBatch.commit());
+
+    // An exact deterministic retry may safely reuse the opaque job only after
+    // resetting its terminal/cleanup state. The server still checks target and
+    // exact revisions before any later path mutation can activate it.
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "preparing",
+      preparedStepCount: 0,
+      remainingStepCount: 2,
+      abandonedAt: deleteField(),
+      completedAt: deleteField(),
+      revision: 4,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(jobRef, {
+      status: "abandoned",
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 5,
+      updatedAt: serverTimestamp()
+    }));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(
+        doc(context.firestore(), "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId),
+        { updatedAt: new Date(Date.now() - 2 * 60_000 - 1) }
+      );
+    });
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "abandoned",
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 5,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(setDoc(stepOneRef, vaultPathRewriteStep("user-a", jobId, 1)));
+    await assertSucceeds(updateDoc(jobRef, {
+      cleanupStartedAt: serverTimestamp(),
+      revision: 6,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(deleteDoc(stepZeroRef));
+    await assertSucceeds(updateDoc(jobRef, {
+      remainingStepCount: 0,
+      revision: 7,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(deleteDoc(jobRef));
+
+    const activationJobId = `pr2_${"L".repeat(43)}`;
+    const activationRef = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      activationJobId
+    );
+    await assertSucceeds(setDoc(
+      activationRef,
+      atomicVaultPathRewriteJob("user-a", activationJobId, {
+        stepCount: 0,
+        remainingStepCount: 0
+      })
+    ));
+    await assertSucceeds(updateDoc(activationRef, {
+      status: "prepared",
+      preparedStepCount: 0,
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    const directPreparedJobId = `pr2_${"Z".repeat(43)}`;
+    await assertSucceeds(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", directPreparedJobId),
+      atomicVaultPathRewriteJob("user-a", directPreparedJobId, {
+        status: "prepared",
+        stepCount: 0,
+        preparedStepCount: 0,
+        remainingStepCount: 0
+      })
+    ));
+    await assertFails(updateDoc(activationRef, {
+      status: "completed",
+      activatedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(
+        doc(context.firestore(), "vaultMaintenanceJobs", "user-a", "pathRewrites", activationJobId),
+        {
+          status: "ready",
+          activatedAt: new Date(),
+          revision: 3,
+          updatedAt: new Date()
+        }
+      );
+    });
+    await assertSucceeds(updateDoc(activationRef, {
+      status: "completed",
+      completedAt: serverTimestamp(),
+      revision: 4,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(activationRef, {
+      cleanupStartedAt: serverTimestamp(),
+      revision: 5,
+      updatedAt: serverTimestamp()
+    }));
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await updateDoc(
+        doc(context.firestore(), "vaultMaintenanceJobs", "user-a", "pathRewrites", activationJobId),
+        { completedAt: new Date(Date.now() - 2 * 60_000 - 1) }
+      );
+    });
+    await assertSucceeds(updateDoc(activationRef, {
+      cleanupStartedAt: serverTimestamp(),
+      revision: 5,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(deleteDoc(activationRef));
+  });
+
+  it("keeps the server manifest owner-readable but denies every browser write", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewriteInventory", "marker"),
+        { ownerUid: "user-a", version: 1 }
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewriteInventory", "shard-00"),
+        { ownerUid: "user-a", version: 1 }
+      );
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const markerRef = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewriteInventory",
+      "marker"
+    );
+    const otherMarkerRef = doc(
+      otherDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewriteInventory",
+      "marker"
+    );
+    const ownerManifestQuery = query(
+      collection(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewriteInventory"),
+      where("ownerUid", "==", "user-a"),
+      limit(34)
+    );
+
+    await assertSucceeds(getDoc(markerRef));
+    await assertSucceeds(getDocs(ownerManifestQuery));
+    await assertFails(getDoc(otherMarkerRef));
+    await assertFails(getDocs(query(
+      collection(otherDb, "vaultMaintenanceJobs", "user-a", "pathRewriteInventory"),
+      where("ownerUid", "==", "user-a"),
+      limit(34)
+    )));
+    await assertFails(getDocs(query(
+      collection(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewriteInventory"),
+      limit(35)
+    )));
+
+    await assertFails(setDoc(markerRef, { ownerUid: "user-a", version: 2 }));
+    await assertFails(updateDoc(markerRef, { version: 2 }));
+    await assertFails(deleteDoc(markerRef));
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewriteInventory", "shard-01"),
+      { ownerUid: "user-a", version: 1 }
+    ));
+  });
+
+  it("validates pr3 manifest bindings without weakening pr1/pr2 job contracts", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));
+    });
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const jobId = `pr3_${"P".repeat(43)}`;
+    const jobRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId);
+
+    await assertSucceeds(setDoc(jobRef, atomicManifestVaultPathRewriteJob("user-a", jobId)));
+    await assertFails(updateDoc(jobRef, {
+      inventoryManifestRoot: "N".repeat(43),
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(jobRef, {
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(jobRef, {
+      status: "prepared",
+      preparedStepCount: 2,
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(jobRef, {
+      status: "ready",
+      activatedAt: serverTimestamp(),
+      revision: 4,
+      updatedAt: serverTimestamp()
+    }));
+
+    const directPreparedJobId = `pr3_${"Q".repeat(43)}`;
+    const directPreparedRef = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      directPreparedJobId
+    );
+    await assertSucceeds(setDoc(
+      directPreparedRef,
+      atomicManifestVaultPathRewriteJob("user-a", directPreparedJobId, {
+        status: "prepared",
+        stepCount: 0,
+        preparedStepCount: 0,
+        remainingStepCount: 0
+      })
+    ));
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", `pr3_${"R".repeat(43)}`),
+      atomicManifestVaultPathRewriteJob("user-a", `pr3_${"R".repeat(43)}`, {
+        status: "prepared",
+        stepCount: 1,
+        preparedStepCount: 1,
+        remainingStepCount: 1
+      })
+    ));
+
+    const invalidModeId = `pr3_${"S".repeat(43)}`;
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", invalidModeId),
+      atomicManifestVaultPathRewriteJob("user-a", invalidModeId, { activationMode: "atomic-v1" })
+    ));
+    const mixedPr3Id = `pr3_${"T".repeat(43)}`;
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", mixedPr3Id),
+      atomicManifestVaultPathRewriteJob("user-a", mixedPr3Id, {
+        inventoryFingerprint: "I".repeat(43)
+      })
+    ));
+    const missingRootId = `pr3_${"U".repeat(43)}`;
+    const missingRoot = atomicManifestVaultPathRewriteJob(
+      "user-a",
+      missingRootId
+    ) as Record<string, unknown>;
+    delete missingRoot.inventoryManifestRoot;
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", missingRootId),
+      missingRoot
+    ));
+    const wrongCountId = `pr3_${"V".repeat(43)}`;
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", wrongCountId),
+      atomicManifestVaultPathRewriteJob("user-a", wrongCountId, {
+        inventoryManifestShardCount: 31
+      })
+    ));
+    const mixedPr2Id = `pr2_${"W".repeat(43)}`;
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", mixedPr2Id),
+      atomicVaultPathRewriteJob("user-a", mixedPr2Id, {
+        inventoryManifestVersion: 1,
+        inventoryManifestEpoch: 1,
+        inventoryManifestShardCount: 32,
+        inventoryManifestRoot: "M".repeat(43)
+      })
+    ));
+    const mixedPr1Id = `pr1_${"X".repeat(43)}`;
+    await assertFails(setDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", mixedPr1Id),
+      atomicManifestVaultPathRewriteJob("user-a", mixedPr1Id)
+    ));
+  });
+
+  it("abandons only stale legacy preparation and fences late step uploads before cleanup", async () => {
+    const freshJobId = `pr1_${"M".repeat(43)}`;
+    const staleJobId = `pr1_${"N".repeat(43)}`;
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", freshJobId),
+        vaultPathRewriteJob("user-a", freshJobId, { stepCount: 1 })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", staleJobId),
+        vaultPathRewriteJob("user-a", staleJobId, {
+          stepCount: 1,
+          updatedAt: new Date(Date.now() - 15 * 60_000 - 1)
+        })
+      );
+    });
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const freshRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", freshJobId);
+    const staleRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", staleJobId);
+    const staleStepRef = doc(staleRef, "steps", "step-000000");
+    await assertSucceeds(setDoc(staleStepRef, vaultPathRewriteStep("user-a", staleJobId, 0)));
+
+    await assertFails(updateDoc(freshRef, {
+      status: "abandoned",
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(updateDoc(staleRef, {
+      status: "abandoned",
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 2,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(setDoc(
+      doc(staleRef, "steps", "step-000001"),
+      vaultPathRewriteStep("user-a", staleJobId, 1)
+    ));
+    await assertSucceeds(updateDoc(staleRef, {
+      cleanupStartedAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(deleteDoc(staleStepRef));
+    await assertSucceeds(updateDoc(staleRef, {
+      remainingStepCount: 0,
+      revision: 4,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(deleteDoc(staleRef));
+  });
+
+  it("cleans completed path rewrite ciphertext immediately with ordered counter confirmation", async () => {
+    const oldCompletedAt = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000);
+    const freshCompletedAt = new Date();
+    const oldJobId = `pr1_${"G".repeat(43)}`;
+    const freshJobId = `pr1_${"H".repeat(43)}`;
+    const dormantJobId = `pr1_${"I".repeat(43)}`;
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      for (const [jobId, completedAt] of [[oldJobId, oldCompletedAt], [freshJobId, freshCompletedAt]] as const) {
+        const reference = doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId);
+        await setDoc(reference, vaultPathRewriteJob("user-a", jobId, {
+          status: "completed",
+          stepCount: 1,
+          cursor: 1,
+          confirmedCount: 1,
+          remainingStepCount: 1,
+          revision: 2,
+          activatedAt: completedAt,
+          completedAt,
+          createdAt: completedAt,
+          updatedAt: completedAt
+        }));
+        await setDoc(doc(reference, "steps", "step-000000"), {
+          ...vaultPathRewriteStep("user-a", jobId, 0),
+          createdAt: completedAt
+        });
+      }
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", dormantJobId),
+        vaultPathRewriteJob("user-a", dormantJobId, {
+          status: "not-applied",
+          stepCount: 1,
+          remainingStepCount: 1,
+          recoveryCheckCount: 1,
+          lastRecoveryCheckAt: oldCompletedAt,
+          notAppliedAt: oldCompletedAt,
+          createdAt: oldCompletedAt,
+          updatedAt: oldCompletedAt,
+          revision: 2
+        })
+      );
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const oldRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", oldJobId);
+    const oldStepRef = doc(oldRef, "steps", "step-000000");
+    const freshRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", freshJobId);
+    const dormantRef = doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", dormantJobId);
+
+    await assertFails(deleteDoc(oldStepRef));
+    await assertFails(deleteDoc(oldRef));
+    await assertSucceeds(updateDoc(freshRef, {
+      cleanupStartedAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(deleteDoc(dormantRef));
+    await assertFails(updateDoc(
+      doc(otherDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", oldJobId),
+      { cleanupStartedAt: serverTimestamp(), revision: 3, updatedAt: serverTimestamp() }
+    ));
+
+    await assertSucceeds(updateDoc(oldRef, {
+      cleanupStartedAt: serverTimestamp(),
+      revision: 3,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(oldRef, {
+      remainingStepCount: 0,
+      lastCleanupStepId: "step-000000",
+      revision: 4,
+      updatedAt: serverTimestamp()
+    }));
+    await assertSucceeds(runTransaction(ownerDb, async (transaction) => {
+      await transaction.get(oldRef);
+      await transaction.get(oldStepRef);
+      transaction.delete(oldStepRef);
+      transaction.update(oldRef, {
+        remainingStepCount: 0,
+        lastCleanupStepId: "step-000000",
+        revision: 4,
+        updatedAt: serverTimestamp()
+      });
+    }));
+    await assertSucceeds(deleteDoc(oldRef));
   });
 
   it("keeps direct missing-note reads closed while owner-and-import-job probes disclose nothing", async () => {

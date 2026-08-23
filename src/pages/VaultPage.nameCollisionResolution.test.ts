@@ -20,9 +20,11 @@ describe("Vault deferred name-collision recovery wiring", () => {
   it("uses the claimless folder recovery transaction in empty and linked paths", () => {
     expect(source).toContain("async function resolveDeferredVaultFolderCollision(");
     expect(source).toContain('"../features/vault/vaultFolderCollisionRecovery"');
-    expect(source.match(/await resolveDeferredVaultFolderCollision\(/gu)).toHaveLength(4);
-    expect(source).toContain("{ name: folder.displayName, parentId }");
-    expect(source).toContain("{ name, parentId: folder.parentId ?? null }");
+    // Move and rename now share one atomic empty-or-linked path each instead
+    // of duplicating the collision transaction in separate branches.
+    expect(source.match(/await resolveDeferredVaultFolderCollision\(/gu)).toHaveLength(2);
+    expect(source).toContain("{ name: serverFolder.displayName, parentId }");
+    expect(source).toContain("{ name, parentId: serverFolder.parentId ?? null }");
     expect(source).toContain("if ((!folder.encryptedName || !folder.wrappedKey) && !resolvingNameCollision)");
   });
 
@@ -50,7 +52,8 @@ describe("Vault deferred name-collision recovery wiring", () => {
     expect(source).toContain("async function repairFirstVaultNameCollision()");
     expect(source).toContain("promptVaultNameCollisionRepair(");
     expect(noticeSource).toContain("충돌 이름 바꾸기");
-    expect(source.match(/recheckVaultNameIntegrityAfterRepair\(\)/gu)).toHaveLength(4);
+    // One declaration plus the folder-rename and entry-rename success paths.
+    expect(source.match(/recheckVaultNameIntegrityAfterRepair\(\)/gu)).toHaveLength(3);
   });
 
   it("serializes lazy collision repair against integrity retries and stale targets", () => {

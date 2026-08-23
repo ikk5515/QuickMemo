@@ -1,0 +1,313 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+
+const source = readFileSync(join(process.cwd(), "src/pages/VaultPage.tsx"), "utf8");
+const styles = readFileSync(join(process.cwd(), "src/styles/vault.css"), "utf8");
+const pathRewriteInventorySource = readFileSync(
+  join(process.cwd(), "src/features/vault/pathRewriteInventory.ts"),
+  "utf8"
+);
+
+function sourceBetween(start: string, end: string) {
+  const startIndex = source.indexOf(start);
+  const endIndex = source.indexOf(end, startIndex);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(endIndex).toBeGreaterThan(startIndex);
+  return source.slice(startIndex, endIndex);
+}
+
+function ruleBodiesForSelector(css: string, selector: string) {
+  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/gu)]
+    .filter((match) => match[1]
+      .split(",")
+      .some((candidate) => candidate.trim() === selector))
+    .map((match) => match[2]);
+}
+
+describe("Vault workspace UI regression contract", () => {
+  it("lets source mode fill the pane while constraining reading surfaces", () => {
+    expect(ruleBodiesForSelector(
+      styles,
+      ".vault-note-content > .vault-codemirror:not(.vault-codemirror--live-preview)"
+    )).toEqual(expect.arrayContaining([
+      expect.stringMatching(/max-width:\s*none;[\s\S]*min-height:\s*100%;[\s\S]*width:\s*100%;/u)
+    ]));
+
+    for (const selector of [
+      ".vault-note-content > .vault-codemirror--live-preview",
+      ".vault-note-content > .vault-markdown-renderer",
+      ".vault-legacy-note"
+    ]) {
+      expect(ruleBodiesForSelector(styles, selector)).toEqual(expect.arrayContaining([
+        expect.stringMatching(/margin-inline:\s*auto;[\s\S]*max-width:\s*860px;/u)
+      ]));
+    }
+  });
+
+  it("keeps the empty workspace inside transiently narrow pane bounds", () => {
+    expect(ruleBodiesForSelector(styles, ".vault-empty-state")).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /box-sizing:\s*border-box;[\s\S]*min-width:\s*0;[\s\S]*overflow:\s*hidden;[\s\S]*width:\s*100%;/u
+        )
+      ])
+    );
+    for (const selector of [".vault-empty-state h2", ".vault-empty-state p"]) {
+      expect(ruleBodiesForSelector(styles, selector)).toEqual(expect.arrayContaining([
+        expect.stringMatching(/max-width:\s*100%;[\s\S]*overflow-wrap:\s*anywhere;/u)
+      ]));
+    }
+  });
+
+  it("themes the CodeMirror editor and gutter from Vault colors", () => {
+    expect(ruleBodiesForSelector(styles, ".vault-codemirror > .cm-editor")).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/background:\s*var\(--vault-bg\);[\s\S]*color:\s*var\(--vault-text\);/u)
+      ])
+    );
+    expect(ruleBodiesForSelector(styles, ".vault-codemirror > .cm-editor .cm-gutters")).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/background:\s*var\(--vault-panel-muted\);[\s\S]*color:\s*var\(--vault-text-muted\);/u)
+      ])
+    );
+  });
+
+  it("themes CodeMirror completion surfaces and every readable completion state", () => {
+    expect(ruleBodiesForSelector(
+      styles,
+      ".vault-codemirror > .cm-editor .cm-tooltip.cm-tooltip-autocomplete"
+    )).toEqual(expect.arrayContaining([
+      expect.stringMatching(
+        /background:\s*var\(--vault-panel\);[\s\S]*border:\s*1px solid var\(--vault-border\);[\s\S]*color:\s*var\(--vault-text\);/u
+      )
+    ]));
+    expect(ruleBodiesForSelector(
+      styles,
+      ".vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul"
+    )).toEqual(expect.arrayContaining([
+      expect.stringMatching(/background:\s*var\(--vault-panel\);[\s\S]*color:\s*var\(--vault-text\);/u)
+    ]));
+    expect(ruleBodiesForSelector(
+      styles,
+      ".vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected=\"true\"]"
+    )).toEqual(expect.arrayContaining([
+      expect.stringMatching(/background:\s*color-mix\([\s\S]*var\(--vault-accent\)[\s\S]*color:\s*var\(--vault-text\);/u)
+    ]));
+    expect(ruleBodiesForSelector(
+      styles,
+      ".vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionMatchedText"
+    )).toEqual(expect.arrayContaining([
+      expect.stringMatching(/color:\s*color-mix\([\s\S]*font-weight:\s*750;[\s\S]*text-decoration:\s*none;/u)
+    ]));
+    expect(ruleBodiesForSelector(
+      styles,
+      ".vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionDetail"
+    )).toEqual(expect.arrayContaining([
+      expect.stringMatching(/color:\s*var\(--vault-text-muted\);[\s\S]*opacity:\s*1;/u)
+    ]));
+  });
+
+  it("starts panels closed and restores encrypted or first-time defaults without flashing", () => {
+    expect(source).toContain("const [leftOpen, setLeftOpen] = useState(false);");
+    expect(source).toContain("const [rightOpen, setRightOpen] = useState(false);");
+    expect(source).toContain("const desktopLeftOpenRef = useRef(false);");
+    expect(source).toContain("const desktopRightOpenRef = useRef(false);");
+    expect(source).toContain("applyRestoredWorkspace(remoteState, record?.revision, record === null)");
+    expect(source).toContain("const restorePanels = !mobileVaultLayoutSnapshot();");
+  });
+
+  it("uses a discoverable desktop chevron while preserving the mobile close and ribbon reopen controls", () => {
+    expect(source).toContain('className="vault-left-panel-collapse"');
+    expect(source).toContain('aria-label={mobileLayout ? "왼쪽 패널 닫기" : "왼쪽 패널 접기"}');
+    expect(source).toContain('mobileLayout ? <X aria-hidden="true" size={18} /> : <ChevronLeft aria-hidden="true" size={18} />');
+    expect(source).toContain('aria-controls="vault-left-panel" aria-expanded={leftOpen}');
+    expect(ruleBodiesForSelector(
+      styles,
+      ".vault-left-panel > header > .vault-left-panel-collapse"
+    )).toEqual(expect.arrayContaining([
+      expect.stringMatching(
+        /background:\s*var\(--vault-panel-muted\);[\s\S]*border:\s*1px solid var\(--vault-border\);[\s\S]*color:\s*var\(--vault-text\);/u
+      )
+    ]));
+  });
+
+  it("auto-opens the first note only for a new Vault and preserves an intentional empty workspace", () => {
+    const restore = sourceBetween(
+      "const applyRestoredWorkspace = useCallback((",
+      "function keepCurrentWorkspaceAfterConflict()"
+    );
+    expect(restore).toContain("allowInitialEntryAutoOpen = false");
+    expect(restore).toContain("initialEntryAutoOpenPendingRef.current = allowInitialEntryAutoOpen;");
+    expect(source).toContain("applyRestoredWorkspace(remoteState, record?.revision, record === null)");
+
+    const autoOpen = sourceBetween(
+      "useEffect(() => {\n    if (!workspaceReady) return;\n    const requestedEntryId = searchParams.get(\"entry\");",
+      "useEffect(() => {\n    setTabs((current) => current.map((tab) => {"
+    );
+    expect(autoOpen).toContain('requestedWorkspaceView === "graph" || tabs.length');
+    expect(autoOpen).toContain("if (!initialEntryAutoOpenPendingRef.current) return;");
+    expect(autoOpen).toContain("initialEntryAutoOpenPendingRef.current = false;");
+    expect(autoOpen.indexOf("if (!initialEntryAutoOpenPendingRef.current) return;")).toBeLessThan(
+      autoOpen.indexOf("const firstEntry = notes[0];")
+    );
+
+    const closeTab = sourceBetween("function closeTab(tabId: string)", "function activateTabInGroup(");
+    expect(closeTab).toContain("initialEntryAutoOpenPendingRef.current = false;");
+    expect(closeTab).toContain("setTabs((current) => current.filter((tab) => tab.id !== tabId))");
+  });
+
+  it("consumes each route panel intent once so the hamburger can stay closed", () => {
+    expect(source).toContain("const handledWorkspaceRouteIntentRef = useRef<string | null>(null);");
+    const routeIntent = sourceBetween(
+      "const routeIntentKey = JSON.stringify([",
+      "function closeTab(tabId: string)"
+    );
+    expect(routeIntent).toContain("profile.uid,");
+    expect(routeIntent).toContain("location.key,");
+    expect(routeIntent).toContain("requestedWorkspaceView,");
+    expect(routeIntent).toContain("requestedWorkspacePanel");
+    expect(routeIntent).toContain("handledWorkspaceRouteIntentRef.current === routeIntentKey");
+    expect(routeIntent).toContain("handledWorkspaceRouteIntentRef.current = routeIntentKey;");
+    expect(routeIntent.indexOf("handledWorkspaceRouteIntentRef.current = routeIntentKey;")).toBeLessThan(
+      routeIntent.indexOf('requestedWorkspaceView === "graph"')
+    );
+
+    const showLeftPanel = sourceBetween(
+      "const showLeftPanel = useCallback(",
+      "const showRightPanel = useCallback("
+    );
+    expect(showLeftPanel).not.toContain("[leftOpen,");
+    expect(showLeftPanel).toContain("[mobileLayout, rememberMobileDrawerTrigger]");
+  });
+
+  it("offers a copy-only Markdown normalization for complete HTML blocks", () => {
+    const conversion = sourceBetween(
+      "async function createNormalizedMarkdownCopy()",
+      "async function exportObsidianZip()"
+    );
+    expect(conversion).toContain("previewMarkdownHtmlNormalization(activeDraft.body)");
+    expect(conversion).toContain("preview.changedBlockCount < 1");
+    expect(conversion).toContain("preview.warnings[0]?.message");
+    expect(conversion).toContain("원본과 첨부·공유 설정은 변경하지 않습니다");
+    expect(conversion).toContain("preview.markdown");
+    expect(conversion).toContain("{ folderId: activeDraft.folderId }");
+    expect(source).toContain("HTML → Markdown 복사");
+  });
+
+  it("unwraps durable rewrite errors into actionable concurrent rename and move messages", () => {
+    const moveEntry = sourceBetween("async function moveEntryToFolder", "async function moveFolder(");
+    const moveFolder = sourceBetween("async function moveFolder(", "async function moveContextTarget(");
+    const renameFolder = sourceBetween("async function renameFolder(", "async function renameEntry(");
+    const renameEntry = sourceBetween("async function renameEntry(", "async function restoreTrashEntry(");
+    for (const section of [moveEntry, moveFolder, renameFolder, renameEntry]) {
+      expect(section).toContain("caught instanceof VaultPathRewriteControllerError");
+      expect(section).toContain("caught.cause");
+    }
+    expect(moveEntry).toContain("underlyingError instanceof VaultNameConflictError");
+    expect(moveFolder).toContain("underlyingError instanceof VaultFolderApiError");
+    expect(renameFolder).toContain("underlyingError instanceof VaultNameConflictError");
+    expect(renameEntry).toContain("underlyingError instanceof NoteRevisionConflictError");
+    expect(renameEntry).toContain("setConflictedEntryIds");
+  });
+
+  it("plans from one aligned subscription generation and a fixed server manifest", () => {
+    const loader = sourceBetween(
+      "function captureCurrentRevisionedIndexGeneration()",
+      "async function flushOwnedRewriteDrafts("
+    );
+    expect(loader).not.toContain("loadOwnedVaultCutoverInventory");
+    expect(loader).not.toContain("loadOwnedVaultFolderInventory");
+    expect(loader).not.toContain("getDocsFromServer");
+    expect(loader).not.toContain("decryptVaultNotes");
+    expect(loader).not.toContain("decryptVaultFolders");
+    expect(loader).toContain("noteSubscriptionServerReadyRef.current");
+    expect(loader).toContain("folderSubscriptionServerReadyRef.current");
+    expect(loader).toContain("buildAlignedVaultPathRewriteIndex({");
+    expect(loader).not.toContain("rawFingerprintNotes:");
+    expect(loader).not.toContain("rawFingerprintFolders:");
+    expect(loader).toContain("loadVaultPathRewriteInventoryBinding({");
+    expect(loader).toContain("notes: generation.rawOwnerNotes");
+    expect(loader).toContain("folders: generation.rawOwnerFolders");
+    expect(loader).not.toContain("folderPathsRef.current");
+    expect(pathRewriteInventorySource).toContain("vaultPathRewriteGenerationAligned({");
+    expect(pathRewriteInventorySource).toContain("const folderPaths = buildVaultPaths([...input.decryptedFolders]);");
+    expect(pathRewriteInventorySource).toContain("path: vaultEntryPath(note, folderPaths)");
+    expect(pathRewriteInventorySource).toContain("if (inventoryManifest) return { inventoryManifest };");
+    expect(pathRewriteInventorySource).toContain(
+      "inventoryFingerprint: await vaultPathRewriteInventoryFingerprint(input)"
+    );
+    expect(pathRewriteInventorySource).toContain(
+      "throw new VaultPathRewriteInventorySnapshotLagError();"
+    );
+
+    const indexBuilder = sourceBetween(
+      "async function buildCurrentRevisionedIndexEntries()",
+      "async function flushOwnedRewriteDrafts("
+    );
+    expect(indexBuilder).toContain("generationDeadline ??= Date.now() + 2_000;");
+    expect(indexBuilder).toContain("generationChangeCount <= 3");
+    expect(indexBuilder).toContain("waitForVaultPathRewriteGenerationChange(");
+    expect(indexBuilder).toContain("VaultPathRewriteInventorySnapshotLagError");
+    expect(indexBuilder).not.toContain("attempt < 40");
+
+    for (const section of [
+      sourceBetween("async function moveEntryToFolder", "async function moveFolder("),
+      sourceBetween("async function moveFolder(", "async function moveContextTarget("),
+      sourceBetween("async function renameFolder(", "async function renameEntry("),
+      sourceBetween("async function renameEntry(", "async function restoreTrashEntry(")
+    ]) {
+      expect(section).toContain("...server.inventoryBinding");
+      expect(section).toContain("server.folderPaths");
+    }
+  });
+
+  it("runs bounded terminal path cleanup once per unlocked profile after recovery", () => {
+    expect(source).toContain("const pathRewriteCleanupOwnerRef = useRef<string | null>(null);");
+    const recoveryEffect = sourceBetween(
+      "void scanRecoverableVaultPathRewriteJobs(profile.uid, privateKey)",
+      "useEffect(() => {\n    if (!isOnline || !vaultDataReady || !vaultNameWritesReady || pathRewriteBusy)"
+    );
+    expect(recoveryEffect).toContain("pathRewriteCleanupOwnerRef.current !== profile.uid");
+    expect(recoveryEffect).toContain("pathRewriteCleanupOwnerRef.current = profile.uid;");
+    expect(recoveryEffect).toContain("const eligibleJobs = jobs.filter");
+    expect(recoveryEffect).toContain("deferredRecoveryTimer = window.setTimeout");
+    expect(recoveryEffect).toContain("if (hasMore && shouldContinueImmediately)");
+    expect(recoveryEffect.indexOf("if (eligibleJobs.length === 0) return;")).toBeLessThan(
+      recoveryEffect.indexOf("pathRewriteBusyRef.current = true;")
+    );
+    expect(recoveryEffect).toContain("flushVaultDraftsBeforePathRewriteRecovery({");
+    expect(recoveryEffect.indexOf("flushVaultDraftsBeforePathRewriteRecovery({")).toBeLessThan(
+      recoveryEffect.indexOf("recoverDurablePathRewriteJob(job)")
+    );
+    expect(recoveryEffect).toContain(
+      "void scheduleTerminalVaultPathRewriteCleanup(profile.uid).catch(() => undefined);"
+    );
+    expect(recoveryEffect.indexOf("}).finally(() => {")).toBeLessThan(
+      recoveryEffect.indexOf("scheduleTerminalVaultPathRewriteCleanup(profile.uid)")
+    );
+  });
+
+  it("debounces dirty entries independently and never immediately retries edits made during a save", () => {
+    const saveEntry = sourceBetween(
+      "const saveEntry = useCallback(async (entryId: string) => {",
+      "useEffect(() => {\n    saveEntryRef.current = saveEntry;"
+    );
+    expect(saveEntry).toContain("entryAutosaveRef.current?.cancel(entryId);");
+    expect(saveEntry).toContain("const latest = draftsRef.current[entryId];");
+    expect(saveEntry).toContain("const reconciled = reconcileDraftAfterSave(latest, draft, result.revision);");
+    expect(saveEntry).toContain("const nextDrafts = { ...draftsRef.current, [entryId]: reconciled };");
+    expect(saveEntry).toContain("setDrafts(nextDrafts);");
+    expect(saveEntry).not.toContain("window.setTimeout(() => void saveEntryRef.current(entryId), 0)");
+
+    const autosaveEffect = sourceBetween(
+      "const dirtyEntryIds = new Set<string>();",
+      "function updateEntryDraft("
+    );
+    expect(autosaveEffect).toContain("autosave.schedule(");
+    expect(autosaveEffect).toContain("entryId,\n        draft,\n        vaultEntryAutosaveIdleMs(entryKind)");
+    expect(autosaveEffect).toContain("() => void saveEntryRef.current(entryId)");
+    expect(autosaveEffect).toContain("autosave.retain(dirtyEntryIds);");
+    expect(autosaveEffect).toContain("entryAutosaveRef.current?.cancelAll();");
+  });
+});

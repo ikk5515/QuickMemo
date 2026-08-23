@@ -6,6 +6,7 @@ import {
   createEncryptedVaultEntry,
   createMarkdownVaultNote,
   migrateLegacyVaultEntryIdentity,
+  moveOnlyEncryptedVaultEntry,
   saveAndMoveEncryptedVaultEntry,
   saveEncryptedVaultEntry
 } from "./vaultPersistence";
@@ -22,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   unwrapNoteKey: vi.fn(),
   updateRevisionedEncryptedNote: vi.fn(),
   updateRevisionedEncryptedNoteAndFolder: vi.fn(),
+  updateRevisionedNoteFolder: vi.fn(),
   wrapNoteKey: vi.fn()
 }));
 
@@ -40,7 +42,8 @@ vi.mock("../../services/notes", () => ({
   migrateLegacyVaultNote: mocks.migrateLegacyVaultNote,
   resolveRevisionedVaultNameCollision: mocks.resolveRevisionedVaultNameCollision,
   updateRevisionedEncryptedNote: mocks.updateRevisionedEncryptedNote,
-  updateRevisionedEncryptedNoteAndFolder: mocks.updateRevisionedEncryptedNoteAndFolder
+  updateRevisionedEncryptedNoteAndFolder: mocks.updateRevisionedEncryptedNoteAndFolder,
+  updateRevisionedNoteFolder: mocks.updateRevisionedNoteFolder
 }));
 
 vi.mock("./vaultIntegrity", async (importOriginal) => ({
@@ -116,6 +119,7 @@ describe("vaultPersistence encrypted revision contract", () => {
     mocks.backfillRevisionedVaultNameClaim.mockResolvedValue({ noteId: "note-a", revision: 8 });
     mocks.updateRevisionedEncryptedNote.mockResolvedValue({ noteId: "note-a", revision: 8 });
     mocks.updateRevisionedEncryptedNoteAndFolder.mockResolvedValue({ noteId: "note-a", revision: 8 });
+    mocks.updateRevisionedNoteFolder.mockResolvedValue({ noteId: "note-a", revision: 8 });
   });
 
   it("keeps original Markdown unchanged and stores only encrypted title, body and history payloads", async () => {
@@ -315,11 +319,39 @@ describe("vaultPersistence encrypted revision contract", () => {
       body: note.body,
       folderId: null,
       title: note.title
-    })).resolves.toEqual({ noteId: note.id, revision: note.revision });
+    })).resolves.toEqual({
+      encryptedBody: note.encryptedBody,
+      encryptedTitle: note.encryptedTitle,
+      noteId: note.id,
+      revision: note.revision,
+      vaultNameClaimId: note.vaultNameClaimId,
+      vaultNameIndexVersion: note.vaultNameIndexVersion
+    });
 
     expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
     expect(mocks.encryptText).not.toHaveBeenCalled();
     expect(mocks.updateRevisionedEncryptedNote).not.toHaveBeenCalled();
+  });
+
+  it("returns the exact persisted cipher generation for an immediate follow-up mutation", async () => {
+    const note = markdownNote();
+    const result = await saveEncryptedVaultEntry(note, "user-a", privateKey, vaultIntegrityKey, {
+      body: "# 저장 직후 이름 변경\n",
+      folderId: null,
+      title: note.title
+    });
+
+    const request = mocks.updateRevisionedEncryptedNote.mock.calls[0][0];
+    expect(request.changedFields).toEqual(["body"]);
+    expect(result).toEqual({
+      encryptedBody: request.encryptedBody,
+      encryptedTitle: request.encryptedTitle,
+      noteId: note.id,
+      revision: 8,
+      vaultNameClaimId: note.vaultNameClaimId,
+      vaultNameIndexVersion: note.vaultNameIndexVersion
+    });
+    expect(result.encryptedBody).not.toEqual(note.encryptedBody);
   });
 
   it("requires folder moves to use the audited revisioned move path", async () => {
@@ -350,6 +382,104 @@ describe("vaultPersistence encrypted revision contract", () => {
       noteId: "note-a"
     }));
     expect(JSON.stringify(mocks.updateRevisionedEncryptedNoteAndFolder.mock.calls[0][0])).not.toContain(body);
+  });
+
+  it("moves legacy HTML without rewriting its encrypted title or body", async () => {
+    const legacy = markdownNote({
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html"
+    });
+    mocks.encryptText.mockResolvedValueOnce({ ...encryptedPayload, cipherText: "history-only" });
+
+    await moveOnlyEncryptedVaultEntry(
+      legacy,
+      "user-a",
+      privateKey,
+      vaultIntegrityKey,
+      { body: legacy.body, folderId: "folder-b", title: legacy.title }
+    );
+
+    expect(mocks.updateRevisionedNoteFolder).toHaveBeenCalledWith(expect.objectContaining({
+      expectedRevision: 7,
+      folderId: "folder-b",
+      historySummary: { ...encryptedPayload, cipherText: "history-only" },
+      noteId: "note-a"
+    }));
+    expect(mocks.encryptText).toHaveBeenCalledTimes(1);
+    expect(mocks.updateRevisionedEncryptedNoteAndFolder).not.toHaveBeenCalled();
+  });
+
+  it("moves oversized historical legacy HTML without resending or snapshotting its content", async () => {
+    const historicalBody = `<section>${"x".repeat(800_000)}</section>`;
+    const legacy = markdownNote({
+      body: historicalBody,
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html"
+    });
+
+    await moveOnlyEncryptedVaultEntry(
+      legacy,
+      "user-a",
+      privateKey,
+      vaultIntegrityKey,
+      { body: historicalBody, folderId: "folder-b", title: legacy.title }
+    );
+
+    expect(mocks.encryptText).toHaveBeenCalledTimes(1);
+    expect(mocks.encryptText).toHaveBeenCalledWith("폴더 변경", noteKey);
+    expect(mocks.updateRevisionedNoteFolder).toHaveBeenCalledWith(expect.objectContaining({
+      expectedRevision: legacy.revision,
+      folderId: "folder-b",
+      historySummary: expect.objectContaining({ cipherText: expect.stringMatching(/^encrypted:/) }),
+      nameClaim: expect.objectContaining({ parentId: "folder-b" }),
+      noteId: legacy.id,
+      readerUids: legacy.participantUids,
+      uid: legacy.ownerUid
+    }));
+    const mutation = mocks.updateRevisionedNoteFolder.mock.calls[0][0];
+    expect(mutation).not.toHaveProperty("encryptedBody");
+    expect(mutation).not.toHaveProperty("encryptedTitle");
+    expect(mutation).not.toHaveProperty("historySnapshot");
+    expect(JSON.stringify(mutation)).not.toContain(historicalBody);
+    expect(JSON.stringify(mutation)).not.toContain(legacy.title);
+    expect(mocks.updateRevisionedEncryptedNoteAndFolder).not.toHaveBeenCalled();
+  });
+
+  it("refuses a move-only operation that would also change legacy content", async () => {
+    const legacy = markdownNote({
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html"
+    });
+
+    await expect(moveOnlyEncryptedVaultEntry(
+      legacy,
+      "user-a",
+      privateKey,
+      vaultIntegrityKey,
+      { body: "<p>changed</p>", folderId: "folder-b", title: legacy.title }
+    )).rejects.toThrow("내용 또는 이름 변경");
+
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.updateRevisionedNoteFolder).not.toHaveBeenCalled();
+  });
+
+  it("does not normalize an unsaved title change into a move-only mutation", async () => {
+    const legacy = markdownNote({
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html"
+    });
+
+    await expect(moveOnlyEncryptedVaultEntry(
+      legacy,
+      "user-a",
+      privateKey,
+      vaultIntegrityKey,
+      { body: legacy.body, folderId: "folder-b", title: ` ${legacy.title} ` }
+    )).rejects.toThrow("내용 또는 이름 변경");
+
+    expect(mocks.fingerprint).not.toHaveBeenCalled();
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.updateRevisionedNoteFolder).not.toHaveBeenCalled();
   });
 
   it("rejects a runtime-mismatched Vault kind before generating a key", async () => {

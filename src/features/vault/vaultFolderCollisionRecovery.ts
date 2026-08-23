@@ -1,6 +1,7 @@
 import { encryptText, unwrapNoteKey } from "../../lib/crypto";
 import { resolveEncryptedNoteFolderCollision } from "../../services/notes";
 import type { UserProfile } from "../../types";
+import type { VaultPathRewriteActivationInput } from "../../services/vaultPathRewriteJobs";
 import { migrateLegacyVaultFolder, type DecryptedVaultFolder } from "./vaultData";
 import {
   VAULT_NAME_INDEX_VERSION,
@@ -17,7 +18,8 @@ export async function resolveVaultFolderNameCollision(
   profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
-  replacement: { name: string; parentId: string | null }
+  replacement: { name: string; parentId: string | null },
+  pathRewriteActivation?: VaultPathRewriteActivationInput
 ) {
   if (folder.ownerUid !== profile.uid) {
     throw new Error("Vault 폴더 이름 충돌은 소유자만 해결할 수 있습니다.");
@@ -72,9 +74,10 @@ export async function resolveVaultFolderNameCollision(
       indexVersion: VAULT_NAME_INDEX_VERSION,
       parentId: replacement.parentId
     },
-    ownerUid: profile.uid
+    ownerUid: profile.uid,
+    ...(pathRewriteActivation ? { pathRewriteActivation } : {})
   };
-  return encryptedName
+  const result = await (encryptedName
     ? resolveEncryptedNoteFolderCollision({
         ...collisionInput,
         encryptedName,
@@ -83,5 +86,11 @@ export async function resolveVaultFolderNameCollision(
     : resolveEncryptedNoteFolderCollision({
         ...collisionInput,
         parentId: replacement.parentId
-      });
+      }));
+  return {
+    ...result,
+    encryptedName: encryptedName ?? folder.encryptedName,
+    vaultNameClaimId: claimId,
+    vaultNameIndexVersion: VAULT_NAME_INDEX_VERSION
+  };
 }

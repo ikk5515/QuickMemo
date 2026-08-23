@@ -5,6 +5,15 @@ import { MAX_DATAVIEW_BLOCKS_PER_DOCUMENT, MarkdownRenderer } from "./MarkdownRe
 afterEach(cleanup);
 
 describe("MarkdownRenderer", () => {
+  it("renders a CommonMark hard break as br while retaining a soft line ending as text", () => {
+    const { container } = render(
+      <MarkdownRenderer source={"첫 줄\\\n둘째 줄\n셋째 줄"} />
+    );
+
+    expect(container.querySelectorAll("br")).toHaveLength(1);
+    expect(container.querySelector(".qm-markdown-paragraph")).toHaveTextContent("첫 줄둘째 줄 셋째 줄");
+  });
+
   it("allows a bounded host renderer to handle an explicit code language", () => {
     render(
       <MarkdownRenderer

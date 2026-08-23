@@ -118,18 +118,24 @@ export function stripObsidianComments(source: string, preserveFrontmatter = true
   }).join("\n");
 }
 
-export function isSafeExternalHttpUrl(href: string) {
+export function canonicalSafeExternalHttpUrl(href: string) {
   const trimmed = href.trim();
   if (!/^https?:\/\//i.test(trimmed)) {
-    return false;
+    return null;
   }
 
   try {
     const url = new URL(trimmed);
-    return url.protocol === "http:" || url.protocol === "https:";
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.href
+      : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function isSafeExternalHttpUrl(href: string) {
+  return canonicalSafeExternalHttpUrl(href) !== null;
 }
 
 export function isValidObsidianTag(tag: string) {
@@ -210,6 +216,24 @@ function parseMarkdownInlineValue(
     if (context.remainingProbeCharacters <= 0) {
       text += value.slice(index);
       break;
+    }
+    if (value[index] === "\\" && value[index + 1] === "\n") {
+      pushText();
+      tokens.push({ type: "line-break" });
+      index += 2;
+      continue;
+    }
+    if (value[index] === " ") {
+      let whitespaceEnd = index;
+      while (value[whitespaceEnd] === " ") {
+        whitespaceEnd += 1;
+      }
+      if (whitespaceEnd - index >= 2 && value[whitespaceEnd] === "\n") {
+        pushText();
+        tokens.push({ type: "line-break" });
+        index = whitespaceEnd + 1;
+        continue;
+      }
     }
     if (value[index] === "\\" && index + 1 < value.length) {
       text += value[index + 1];

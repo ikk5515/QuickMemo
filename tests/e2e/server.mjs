@@ -363,6 +363,36 @@ async function handleE2eRequest(request, response, url) {
     json(response, 200, { ok: true, state });
     return;
   }
+  if (request.method === "POST" && url.pathname === "/__e2e__/vault-note-legacy") {
+    const body = await readJson(request);
+    if (typeof body.uid !== "string" || !/^[A-Za-z0-9_-]{6,180}$/u.test(body.uid)) {
+      json(response, 400, { ok: false });
+      return;
+    }
+    const note = await fixtures.markOnlyOwnedE2eVaultNoteAsLegacy(body.uid);
+    json(response, 200, { note, ok: true });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/__e2e__/vault-notes-state") {
+    const uid = url.searchParams.get("uid") ?? "";
+    if (!/^[A-Za-z0-9_-]{6,180}$/u.test(uid)) {
+      json(response, 400, { ok: false });
+      return;
+    }
+    const notes = await fixtures.e2eOwnedVaultNotesState(uid);
+    json(response, 200, { notes, ok: true });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/__e2e__/vault-path-rewrite-state") {
+    const uid = url.searchParams.get("uid") ?? "";
+    if (!/^[A-Za-z0-9_-]{6,180}$/u.test(uid)) {
+      json(response, 400, { ok: false });
+      return;
+    }
+    const state = await fixtures.e2eVaultPathRewriteState(uid);
+    json(response, 200, { ok: true, state });
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/__e2e__/mail") {
     const email = (url.searchParams.get("email") ?? "").toLowerCase();
     const delivery = mailboxes.get(email) ?? null;

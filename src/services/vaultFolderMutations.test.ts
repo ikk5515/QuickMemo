@@ -3,7 +3,8 @@ import {
   auditVaultFolderTreeServer,
   ensureVaultFolderTree,
   invalidateVaultFolderTreeReadiness,
-  mutateVaultFolder
+  mutateVaultFolder,
+  repairVaultFolderTree
 } from "./vaultFolderMutations";
 
 const firebaseMocks = vi.hoisted(() => ({
@@ -73,6 +74,36 @@ describe("Vault folder mutation API client", () => {
 
     await expect(ensureVaultFolderTree(uid)).resolves.toMatchObject({ status: "ready" });
     await expect(auditVaultFolderTreeServer(uid)).resolves.toMatchObject({ matches: true });
+  });
+
+  it("keeps valid readiness cached and uses an explicit uncached repair request", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        folderCount: 3,
+        maximumFolderCount: 2_000,
+        ok: true,
+        revision: 7,
+        schemaVersion: 1,
+        status: "ready"
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        folderCount: 4,
+        maximumFolderCount: 2_000,
+        ok: true,
+        revision: 8,
+        schemaVersion: 1,
+        status: "created"
+      }));
+
+    await expect(ensureVaultFolderTree(uid)).resolves.toMatchObject({ revision: 7 });
+    await expect(ensureVaultFolderTree(uid)).resolves.toMatchObject({ revision: 7 });
+    expect(fetch).toHaveBeenCalledOnce();
+
+    await expect(repairVaultFolderTree(uid)).resolves.toMatchObject({ revision: 8 });
+    await expect(ensureVaultFolderTree(uid)).resolves.toMatchObject({ revision: 8 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body)))
+      .toEqual({ action: "repair" });
   });
 
   it("rejects malformed, extra-field, and target-mismatched successes", async () => {

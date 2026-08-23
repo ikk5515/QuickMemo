@@ -6,9 +6,11 @@ import {
   migrateLegacyVaultNote,
   updateRevisionedEncryptedNote,
   updateRevisionedEncryptedNoteAndFolder,
+  updateRevisionedNoteFolder,
   type SaveNoteInput,
   type VaultCutoverLeaseInput
 } from "../../services/notes";
+import type { VaultPathRewriteActivationInput } from "../../services/vaultPathRewriteJobs";
 import type { UserProfile } from "../../types";
 import type { VaultContentFormat, VaultEntryKind } from "../../types";
 import type { DecryptedVaultNote } from "./vaultData";
@@ -310,7 +312,8 @@ export async function saveEncryptedVaultEntry(
   uid: string,
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
-  draft: MarkdownNoteDraft
+  draft: MarkdownNoteDraft,
+  pathRewriteActivation?: VaultPathRewriteActivationInput
 ) {
   if (note.contentFormat === "legacy-html-v1") {
     throw new Error("기존 HTML 노트는 Markdown 복사본으로 변환한 뒤 편집할 수 있습니다.");
@@ -353,7 +356,14 @@ export async function saveEncryptedVaultEntry(
     claimChanged ? "name-claim" : ""
   ].filter(Boolean);
   if (!changedFields.length) {
-    return { noteId: note.id, revision: note.revision ?? 0 };
+    return {
+      encryptedBody: note.encryptedBody,
+      encryptedTitle: note.encryptedTitle,
+      noteId: note.id,
+      revision: note.revision ?? 0,
+      vaultNameClaimId: note.vaultNameClaimId!,
+      vaultNameIndexVersion: note.vaultNameIndexVersion!
+    };
   }
 
   const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
@@ -372,7 +382,7 @@ export async function saveEncryptedVaultEntry(
     }), noteKey)
   ]);
 
-  return updateRevisionedEncryptedNote({
+  const result = await updateRevisionedEncryptedNote({
     changedFields,
     encryptedBody,
     encryptedTitle,
@@ -390,8 +400,16 @@ export async function saveEncryptedVaultEntry(
     } : {}),
     noteId: note.id,
     readerUids: note.participantUids,
-    uid
+    uid,
+    ...(pathRewriteActivation ? { pathRewriteActivation } : {})
   });
+  return {
+    ...result,
+    encryptedBody,
+    encryptedTitle,
+    vaultNameClaimId: claimId!,
+    vaultNameIndexVersion: VAULT_NAME_INDEX_VERSION
+  };
 }
 
 /**
@@ -405,7 +423,8 @@ export async function saveAndMoveEncryptedVaultEntry(
   uid: string,
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
-  draft: MarkdownNoteDraft
+  draft: MarkdownNoteDraft,
+  pathRewriteActivation?: VaultPathRewriteActivationInput
 ) {
   if (note.contentFormat === "legacy-html-v1") {
     throw new Error("기존 HTML 노트는 Markdown 복사본으로 변환한 뒤 이동할 수 있습니다.");
@@ -452,7 +471,7 @@ export async function saveAndMoveEncryptedVaultEntry(
     }), noteKey)
   ]);
 
-  return updateRevisionedEncryptedNoteAndFolder({
+  const result = await updateRevisionedEncryptedNoteAndFolder({
     changedFields,
     encryptedBody,
     encryptedTitle,
@@ -469,6 +488,92 @@ export async function saveAndMoveEncryptedVaultEntry(
     },
     noteId: note.id,
     readerUids: note.participantUids,
-    uid
+    uid,
+    ...(pathRewriteActivation ? { pathRewriteActivation } : {})
   });
+  return {
+    ...result,
+    encryptedBody,
+    encryptedTitle,
+    vaultNameClaimId: claimId,
+    vaultNameIndexVersion: VAULT_NAME_INDEX_VERSION
+  };
+}
+
+/**
+ * Moves an encrypted Vault entry without rewriting either encrypted title or
+ * encrypted body. This is the only safe move path for legacy HTML entries:
+ * their historical ciphertext remains byte-for-byte unchanged while the
+ * folder, blinded name reservation, history, and revision advance together on
+ * the server.
+ */
+export async function moveOnlyEncryptedVaultEntry(
+  note: DecryptedVaultNote,
+  uid: string,
+  privateKey: CryptoKey,
+  vaultIntegrityKey: CryptoKey,
+  draft: MarkdownNoteDraft,
+  pathRewriteActivation?: VaultPathRewriteActivationInput
+) {
+  if (note.ownerUid !== uid || note.type !== "personal") {
+    throw new Error("내 개인 항목만 폴더로 이동할 수 있습니다.");
+  }
+
+  // A move-only mutation must never reinterpret an unsaved editor draft as
+  // persisted content. Compare the exact decrypted values first, then validate
+  // only the identity fields that the move actually uses. In particular, do
+  // not apply current body/snapshot persistence limits to historical ciphertext
+  // that this request neither rewrites nor sends to the server.
+  if (draft.title !== note.title || draft.body !== note.body) {
+    throw new Error("내용 또는 이름 변경을 먼저 저장한 뒤 항목을 이동해주세요.");
+  }
+  const normalized = validateVaultIdentityDraft(
+    draft,
+    note.contentFormat,
+    note.entryKind
+  );
+  if (normalized.folderId === (note.folderId ?? null)) {
+    throw new Error("이동할 폴더가 현재 위치와 같습니다.");
+  }
+
+  const wrappedKey = note.wrappedKeys[uid];
+  if (!wrappedKey) {
+    throw new Error("항목 이동 이력을 암호화할 키가 없습니다.");
+  }
+  const claimId = await vaultNameFingerprint(vaultIntegrityKey, {
+    kind: note.entryKind,
+    name: normalized.title,
+    parentId: normalized.folderId,
+    targetType: "entry"
+  });
+  const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
+  const historySummaryPayload = await encryptText(
+    historySummary(
+      { body: note.body, folderId: note.folderId ?? null, title: note.title },
+      normalized
+    ),
+    noteKey
+  );
+
+  const result = await updateRevisionedNoteFolder({
+    expectedRevision: note.revision ?? 0,
+    folderId: normalized.folderId,
+    historySummary: historySummaryPayload,
+    nameClaim: {
+      claimId,
+      indexVersion: VAULT_NAME_INDEX_VERSION,
+      parentId: normalized.folderId
+    },
+    noteId: note.id,
+    readerUids: note.participantUids,
+    uid,
+    ...(pathRewriteActivation ? { pathRewriteActivation } : {})
+  });
+  return {
+    ...result,
+    encryptedBody: note.encryptedBody,
+    encryptedTitle: note.encryptedTitle,
+    vaultNameClaimId: claimId,
+    vaultNameIndexVersion: VAULT_NAME_INDEX_VERSION
+  };
 }

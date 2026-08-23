@@ -32,9 +32,24 @@ function sourcePlan(overrides: Partial<VaultPathRewriteSourcePlan> = {}): VaultP
   };
 }
 
+const mutationTarget = {
+  expectedRevision: 4,
+  id: "target-a",
+  kind: "entry" as const
+};
+const inventoryFingerprint = "I".repeat(43);
+const inventoryManifest = {
+  version: 1,
+  epoch: 7,
+  shardCount: 32,
+  root: "M".repeat(43)
+};
+
 describe("durable Vault path rewrite job planning", () => {
   it("derives a deterministic opaque ID and keeps paths and source bodies out of clear manifest metadata", async () => {
     const input = {
+      inventoryFingerprint,
+      mutationTarget,
       ownerUid: "user-a",
       pathChanges: [{ entryId: "target-a", oldPath: "Folder/Old.md", newPath: "Archive/New.md" }],
       sourcePlans: [sourcePlan()]
@@ -43,7 +58,7 @@ describe("durable Vault path rewrite job planning", () => {
     const first = await prepareVaultPathRewriteJob(integrityKey, input);
     const second = await prepareVaultPathRewriteJob(integrityKey, input);
 
-    expect(first.jobId).toMatch(/^pr1_[A-Za-z0-9_-]{43}$/);
+    expect(first.jobId).toMatch(/^pr2_[A-Za-z0-9_-]{43}$/);
     expect(second.jobId).toBe(first.jobId);
     expect(first.steps[0]).toMatchObject({
       ordinal: 0,
@@ -69,6 +84,8 @@ describe("durable Vault path rewrite job planning", () => {
       rewrittenSource: "![[Media/New.png]]"
     });
     const forward = await prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget,
       ownerUid: "user-a",
       pathChanges: [
         { entryId: "target-z", oldPath: "z.md", newPath: "moved/z.md" },
@@ -77,6 +94,8 @@ describe("durable Vault path rewrite job planning", () => {
       sourcePlans: [left, right]
     });
     const reverse = await prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget,
       ownerUid: "user-a",
       pathChanges: [
         { entryId: "target-a", oldPath: "a.md", newPath: "moved/a.md" },
@@ -87,6 +106,62 @@ describe("durable Vault path rewrite job planning", () => {
 
     expect(reverse.jobId).toBe(forward.jobId);
     expect(forward.steps.map((step) => step.sourceEntryId)).toEqual(["source-a", "source-z"]);
+  });
+
+  it("creates an inventory-bound zero-step atomic job for an empty folder path mutation", async () => {
+    const prepared = await prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget: { expectedRevision: 2, id: "empty-folder", kind: "folder" },
+      ownerUid: "user-a",
+      pathChanges: [],
+      sourcePlans: []
+    });
+    expect(prepared).toMatchObject({
+      jobId: expect.stringMatching(/^pr2_[A-Za-z0-9_-]{43}$/),
+      manifest: { inventoryFingerprint, pathChanges: [], steps: [] },
+      steps: []
+    });
+  });
+
+  it("derives a distinct pr3 job from the exact fixed-manifest binding", async () => {
+    const prepared = await prepareVaultPathRewriteJob(integrityKey, {
+      inventoryManifest,
+      mutationTarget,
+      ownerUid: "user-a",
+      pathChanges: [{ entryId: "target-a", oldPath: "Old.md", newPath: "New.md" }],
+      sourcePlans: []
+    });
+    expect(prepared.jobId).toMatch(/^pr3_[A-Za-z0-9_-]{43}$/u);
+    expect(prepared.manifest).toMatchObject({ inventoryManifest });
+    expect(prepared.manifest).not.toHaveProperty("inventoryFingerprint");
+
+    const changedRoot = await prepareVaultPathRewriteJob(integrityKey, {
+      inventoryManifest: { ...inventoryManifest, root: "N".repeat(43) },
+      mutationTarget,
+      ownerUid: "user-a",
+      pathChanges: [{ entryId: "target-a", oldPath: "Old.md", newPath: "New.md" }],
+      sourcePlans: []
+    });
+    expect(changedRoot.jobId).not.toBe(prepared.jobId);
+  });
+
+  it("rejects absent, ambiguous, and malformed inventory bindings", async () => {
+    const base = {
+      mutationTarget,
+      ownerUid: "user-a",
+      pathChanges: [{ entryId: "target-a", oldPath: "Old.md", newPath: "New.md" }],
+      sourcePlans: []
+    };
+    await expect(prepareVaultPathRewriteJob(integrityKey, base)).rejects.toThrow(/정확히 하나/u);
+    await expect(prepareVaultPathRewriteJob(integrityKey, {
+      ...base,
+      inventoryFingerprint,
+      inventoryManifest
+    })).rejects.toThrow(/정확히 하나/u);
+    await expect(prepareVaultPathRewriteJob(integrityKey, {
+      ...base,
+      inventoryManifest: { ...inventoryManifest, shardCount: 31 }
+    })).rejects.toThrow(/올바르지 않습니다/u);
   });
 
   it("builds current Markdown and Canvas source plans and fails closed for stale sources", () => {
@@ -133,6 +208,8 @@ describe("durable Vault path rewrite job planning", () => {
 
   it("classifies only exact revision-and-digest states as pending or confirmed", async () => {
     const prepared = await prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget,
       ownerUid: "user-a",
       pathChanges: [{ entryId: "target-a", oldPath: "Old.md", newPath: "New.md" }],
       sourcePlans: [sourcePlan()]
@@ -159,21 +236,29 @@ describe("durable Vault path rewrite job planning", () => {
 
   it("rejects unsafe paths, duplicate sources, no-op content and oversized source bodies", async () => {
     await expect(prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget,
       ownerUid: "user-a",
       pathChanges: [{ entryId: "target-a", oldPath: "../Old.md", newPath: "New.md" }],
       sourcePlans: []
     })).rejects.toThrow();
     await expect(prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget,
       ownerUid: "user-a",
       pathChanges: [{ entryId: "target-a", oldPath: "Old.md", newPath: "New.md" }],
       sourcePlans: [sourcePlan(), sourcePlan()]
     })).rejects.toThrow("중복");
     await expect(prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget,
       ownerUid: "user-a",
       pathChanges: [{ entryId: "target-a", oldPath: "Old.md", newPath: "New.md" }],
       sourcePlans: [sourcePlan({ rewrittenSource: "See [[Folder/Old]]." })]
     })).rejects.toThrow("실제 내용 변경");
     await expect(prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget,
       ownerUid: "user-a",
       pathChanges: [{ entryId: "target-a", oldPath: "Old.md", newPath: "New.md" }],
       sourcePlans: [sourcePlan({ rewrittenSource: "가".repeat(200_000) })]

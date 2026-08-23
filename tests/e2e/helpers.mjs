@@ -17,6 +17,34 @@ export async function seedScenario(request, scenario) {
   return payload.fixture;
 }
 
+export async function markOnlyOwnedVaultNoteAsLegacy(request, uid) {
+  const response = await request.post("/__e2e__/vault-note-legacy", {
+    data: { uid }
+  });
+  expect(response.ok()).toBeTruthy();
+  const payload = await response.json();
+  expect(payload.ok).toBe(true);
+  return payload.note;
+}
+
+export async function ownedVaultNotesState(request, uid) {
+  const query = new URLSearchParams({ uid });
+  const response = await request.get(`/__e2e__/vault-notes-state?${query.toString()}`);
+  expect(response.ok()).toBeTruthy();
+  const payload = await response.json();
+  expect(payload.ok).toBe(true);
+  return payload.notes;
+}
+
+export async function vaultPathRewriteState(request, uid) {
+  const query = new URLSearchParams({ uid });
+  const response = await request.get(`/__e2e__/vault-path-rewrite-state?${query.toString()}`);
+  expect(response.ok()).toBeTruthy();
+  const payload = await response.json();
+  expect(payload.ok).toBe(true);
+  return payload.state;
+}
+
 export async function mutateScenario(request, shareId, action) {
   const response = await request.post("/__e2e__/mutate", {
     data: { action, shareId }

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { act, createEvent, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createElement } from "react";
@@ -31,6 +33,8 @@ import {
   translateJsonCanvasNodes
 } from "./JsonCanvasView";
 import type { CanvasFlowEdge, CanvasFlowNode, JsonCanvasDocument } from "./canvasModel";
+
+const jsonCanvasViewSource = readFileSync(join(process.cwd(), "src/features/canvas/JsonCanvasView.tsx"), "utf8");
 
 const richCanvasSource = JSON.stringify({
   appExtension: { keep: true },
@@ -507,6 +511,13 @@ describe("JSON Canvas editing operations", () => {
 });
 
 describe("JsonCanvasView controls", () => {
+  it("uses primary background drag for panning and keeps Shift-drag selection", () => {
+    expect(jsonCanvasViewSource).toContain("panOnDrag={[0, 1]}");
+    expect(jsonCanvasViewSource).toContain('noPanClassName="nodrag"');
+    expect(jsonCanvasViewSource).toContain('selectionKeyCode="Shift"');
+    expect(jsonCanvasViewSource).toContain("selectionOnDrag={false}");
+  });
+
   it("does not rewrite a valid document merely because it was mounted", async () => {
     const onChange = vi.fn();
     render(createElement(JsonCanvasView, {
@@ -1013,7 +1024,7 @@ describe("JsonCanvasView controls", () => {
     expect(onOpenFile).toHaveBeenCalledWith("Folder/Note.md");
   });
 
-  it("opens a safe file card on an unmodified primary click and reserves modified clicks for selection intent", () => {
+  it("selects a file card on single click and opens it only on double click or the explicit button", async () => {
     const onOpenFile = vi.fn();
     render(createElement(JsonCanvasView, {
       fileOptions: [{ label: "노트", path: "Folder/Note.md" }],
@@ -1029,6 +1040,10 @@ describe("JsonCanvasView controls", () => {
 
     expect(CANVAS_NODE_INTERACTION_THRESHOLD_PX).toBe(6);
     fireEvent.click(fileCard, { button: 0 });
+    expect(onOpenFile).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(fileCard).toHaveClass("selected"));
+
+    fireEvent.doubleClick(fileCard, { button: 0 });
     expect(onOpenFile).toHaveBeenCalledOnce();
     expect(onOpenFile).toHaveBeenLastCalledWith("Folder/Note.md");
 
@@ -1038,6 +1053,12 @@ describe("JsonCanvasView controls", () => {
     fireEvent.click(fileCard, { shiftKey: true });
     fireEvent.click(fileCard, { altKey: true });
     expect(onOpenFile).not.toHaveBeenCalled();
+
+    const openButton = screen.getByText("원본 열기").closest("button");
+    expect(openButton).not.toBeNull();
+    await userEvent.click(openButton!);
+    expect(onOpenFile).toHaveBeenCalledOnce();
+    expect(onOpenFile).toHaveBeenLastCalledWith("Folder/Note.md");
   });
 
   it("opens a keyboard-accessible context menu and duplicates a group with contained cards", async () => {

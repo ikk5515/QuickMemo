@@ -183,6 +183,10 @@ export class VaultNoteApiError extends Error {
   constructor(code: string, status: number, actualRevision?: unknown) {
     super(code === "vault_import_locked"
       ? "Vault 가져오기 또는 복구가 끝날 때까지 노트 변경이 잠깁니다."
+      : code === "vault_path_rewrite_inventory_changed"
+        ? "다른 탭에서 Vault 항목이나 폴더가 변경되었습니다. 최신 목록으로 다시 시도해주세요."
+        : code === "vault_path_rewrite_inventory_capacity"
+          ? "Vault 항목 또는 폴더 수가 안전한 경로 갱신 한도를 초과했습니다."
       : code === "vault_name_conflict"
         ? "같은 위치에 동일한 이름의 Vault 항목이 있습니다."
         : code === "revision_conflict" || status === 409

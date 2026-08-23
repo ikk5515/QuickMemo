@@ -52,6 +52,7 @@ export function VaultFormatConverter({ onCreateMarkdownCopy, source }: VaultForm
     <section aria-label="Format converter" className="vault-core-panel vault-format-converter">
       <header><FileWarning aria-hidden="true" size={16} /><strong>Format converter</strong></header>
       <p>원본 HTML을 덮어쓰지 않고 같은 폴더에 새 Markdown 노트를 만듭니다.</p>
+      <p>첨부파일과 공유 설정은 원본에 그대로 남으며 복사본으로 자동 이전되지 않습니다.</p>
       {plan.preview.warnings.length ? (
         <div className="vault-format-converter__warnings" role="status">
           <strong>변환 전 확인</strong>

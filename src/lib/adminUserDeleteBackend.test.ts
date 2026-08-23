@@ -224,6 +224,33 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("libraryVaultsDeleted");
   });
 
+  it("purges bounded owner-scoped Vault maintenance trees before their roots", () => {
+    const vaultCleanupSource = deleteManagedUserSource.match(
+      /export async function deleteManagedUserVaultServerState[\s\S]*?async function deleteOwnedScheduleTasks/u
+    )?.[0] ?? "";
+
+    expect(deleteManagedUserSource).toContain("const managedUserVaultReadBudget = 500");
+    expect(deleteManagedUserSource).toContain("const managedUserVaultWriteBudget = 500");
+    expect(vaultCleanupSource).toContain('collectionId: "nameClaims"');
+    expect(vaultCleanupSource).toContain('jobCollectionId: "pathRewrites"');
+    expect(vaultCleanupSource).toContain('childCollectionId: "steps"');
+    expect(vaultCleanupSource).toContain('jobCollectionId: "imports"');
+    expect(vaultCleanupSource).toContain('childCollectionId: "chunks"');
+    expect(vaultCleanupSource).toContain('collectionId: "pathRewriteInventory"');
+    expect(vaultCleanupSource).toContain('`vaultFolderTrees/${targetUid}`');
+    expect(vaultCleanupSource).toContain('`vaultWorkspaces/${targetUid}`');
+    expect(deleteManagedUserSource).toContain(
+      "currentDocument: { updateTime: document.updateTime }"
+    );
+    expect(deleteManagedUserSource).toContain(
+      'stringField(document, "ownerUid") !== targetUid'
+    );
+    expect(deleteManagedUserSource).toContain("await deleteManagedUserVaultServerState({");
+    expect(vaultCleanupSource.indexOf('collectionId: "nameClaims"')).toBeLessThan(
+      vaultCleanupSource.indexOf('[integrityPath, "vaultIntegrityRootsDeleted"]')
+    );
+  });
+
   it("claims attachment deletion before objects and finalizes metadata with optimistic preconditions", () => {
     const cleanupFunction = deleteManagedUserSource.slice(
       deleteManagedUserSource.indexOf("async function cleanupManagedAttachmentDocument"),
@@ -304,7 +331,7 @@ describe("managed user backend deletion", () => {
       'deleteProjectedDocumentForStat(history, accessToken, stats, "noteHistoryDeleted")'
     );
 
-    for (const projectedDocument of ["history", "note", "user", "bootstrap"]) {
+    for (const projectedDocument of ["history", "user", "bootstrap"]) {
       expect(deleteManagedUserSource).toMatch(
         new RegExp(`accessToken,\\s+${projectedDocument}\\s*\\)`, "u")
       );
@@ -321,7 +348,11 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("limit: participantNoteCleanupBatchSize");
     expect(deleteManagedUserSource).toContain("notes.length < participantNoteCleanupBatchSize");
     expect(deleteManagedUserSource).toContain('selectFieldPaths: ["__name__", "readerUids"]');
-    expect(deleteManagedUserSource).toContain('selectFieldPaths: ["__name__", "ownerUid", "participantUids", "wrappedKeys"]');
+    expect(deleteManagedUserSource).toContain('selectFieldPaths: ["__name__"]');
+    expect(deleteManagedUserSource).toContain("firestoreBatchGetNewTransaction(context, [notePath])");
+    expect(deleteManagedUserSource).toContain("prepareVaultInventoryManifestMutation(");
+    expect(deleteManagedUserSource).toContain("revision: nextRevision");
+    expect(deleteManagedUserSource).toContain("await firestoreCommit(context, writes, transaction)");
     expect(deleteManagedUserSource).toContain('["isAdmin", "isActive"]');
     expect(deleteManagedUserSource).toContain('["ownerUid", "attachmentRevision"]');
     expect(deleteManagedUserSource).toContain('["uid", "attachmentCount", "usedBytes"]');

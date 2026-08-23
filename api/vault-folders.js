@@ -21,6 +21,11 @@ import {
   verifySecureShareAppCheck
 } from "./_secure-share-common.js";
 import { logVaultApiRejection } from "./_vault-api-observability.js";
+import { prepareAtomicPathRewriteActivation } from "./_vault-path-rewrite-activation.js";
+import {
+  nextVaultInventoryDocument,
+  prepareVaultInventoryManifestMutation
+} from "./_vault-inventory-manifest-mutation.js";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   VAULT_FOLDER_TREE_MAX_FOLDERS,
@@ -58,6 +63,7 @@ const supportedActions = new Set([
   "create",
   "migrate",
   "move",
+  "repair",
   "resolve-collision",
   "restore",
   "trash",
@@ -298,12 +304,30 @@ async function loadOwnedFoldersInTransaction(context, transaction, uid) {
   return folders;
 }
 
-function newTreeDocumentState(treeDocument, tree) {
+function repairTreeRevision(treeDocument) {
+  const revision = treeDocument?.revision;
+  if (Number.isSafeInteger(revision) && revision >= 1 && revision < 999_999_999_999) {
+    return revision + 1;
+  }
+  if (revision === 999_999_999_999) {
+    throw new HttpError(409, "vault_tree_invalid", "Vault folder tree revision is exhausted", {
+      expose: false
+    });
+  }
+  return 1;
+}
+
+function newTreeDocumentState(treeDocument, tree, allowMetadataRepair = false) {
   const createdAt = treeDocument?.createdAt
     ? new Date(treeDocument.createdAt)
     : new Date();
   if (!Number.isFinite(createdAt.getTime())) {
-    throw new HttpError(409, "vault_tree_invalid", "Vault tree timestamp is invalid", { expose: false });
+    if (!allowMetadataRepair) {
+      throw new HttpError(409, "vault_tree_invalid", "Vault tree timestamp is invalid", {
+        expose: false
+      });
+    }
+    return { createdAt: new Date(), tree, updateTime: treeDocument?.__updateTime ?? "" };
   }
   return { createdAt, tree, updateTime: treeDocument?.__updateTime ?? "" };
 }
@@ -441,11 +465,54 @@ async function transactionState(context, uid, action, body) {
     const requestedClaim = typeof claimId === "string" && claimPattern.test(claimId)
       ? documents[offset++]
       : null;
-    let tree = treeFromDocument(treeDocument, uid);
+    let tree = null;
+    let treeDocumentValid = false;
+    try {
+      tree = treeFromDocument(treeDocument, uid);
+      treeDocumentValid = Boolean(treeDocument);
+    } catch (error) {
+      const maintenanceRepair = action === "audit" || action === "bootstrap" || action === "repair";
+      const repairableTreeError = error?.code === "vault_tree_invalid"
+        || error?.code === "vault_depth_exceeded";
+      if (
+        !treeDocument
+        || treeDocument.ownerUid !== uid
+        || !repairableTreeError
+      ) {
+        throw error;
+      }
+      if (!maintenanceRepair) {
+        throw new HttpError(
+          409,
+          "vault_tree_repair_required",
+          "Vault folder tree must be repaired before this mutation"
+        );
+      }
+      // A same-owner malformed tree can be reconstructed from the authoritative
+      // encrypted folder documents. Owner mismatches always fail closed above.
+    }
+    if (treeDocumentValid && treeDocument?.createdAt) {
+      const storedCreatedAt = new Date(treeDocument.createdAt);
+      if (!Number.isFinite(storedCreatedAt.getTime())) {
+        const maintenanceRepair = action === "audit" || action === "bootstrap" || action === "repair";
+        if (!maintenanceRepair) {
+          throw new HttpError(
+            409,
+            "vault_tree_repair_required",
+            "Vault folder tree must be repaired before this mutation"
+          );
+        }
+        tree = null;
+        treeDocumentValid = false;
+      }
+    }
     let ownedFolders = null;
     if (!tree) {
       ownedFolders = await loadOwnedFoldersInTransaction(context, transaction, uid);
-      tree = buildVaultFolderTree(ownedFolders);
+      tree = buildVaultFolderTree(
+        ownedFolders,
+        treeDocument ? repairTreeRevision(treeDocument) : 1
+      );
     }
     return {
       action,
@@ -460,7 +527,8 @@ async function transactionState(context, uid, action, body) {
       requestedClaim,
       transaction,
       treeDocument,
-      treeState: newTreeDocumentState(treeDocument, tree)
+      treeDocumentValid,
+      treeState: newTreeDocumentState(treeDocument, tree, Boolean(treeDocument && !treeDocumentValid))
     };
   } catch (error) {
     try {
@@ -613,7 +681,7 @@ async function commitOrConflict(context, writes, transaction) {
 
 async function handleBootstrapOrAudit(context, uid, state, action) {
   const tree = state.treeState.tree;
-  if (action === "bootstrap" && state.treeDocument) {
+  if (action === "bootstrap" && state.treeDocumentValid) {
     await firestoreRollback(context, state.transaction);
     return {
       folderCount: tree.folderCount,
@@ -627,7 +695,9 @@ async function handleBootstrapOrAudit(context, uid, state, action) {
     state.transaction,
     uid
   );
-  const matches = state.treeDocument ? vaultFolderTreeMatchesFolders(tree, folders) : false;
+  const matches = state.treeDocumentValid
+    ? vaultFolderTreeMatchesFolders(tree, folders)
+    : false;
   if (action === "audit") {
     await firestoreRollback(context, state.transaction);
     return {
@@ -638,12 +708,28 @@ async function handleBootstrapOrAudit(context, uid, state, action) {
       status: !state.treeDocument ? "missing" : matches ? "ok" : "stale"
     };
   }
+  if (state.treeDocumentValid && matches) {
+    await firestoreRollback(context, state.transaction);
+    return {
+      folderCount: tree.folderCount,
+      revision: tree.revision,
+      schemaVersion: tree.schemaVersion,
+      status: "ready"
+    };
+  }
+  const repairedTree = state.treeDocumentValid
+    ? buildVaultFolderTree(folders, tree.revision + 1)
+    : tree;
   const now = new Date();
-  await commitOrConflict(context, [treeWrite(context, uid, state, tree, now)], state.transaction);
+  await commitOrConflict(
+    context,
+    [treeWrite(context, uid, state, repairedTree, now)],
+    state.transaction
+  );
   return {
-    folderCount: tree.folderCount,
-    revision: tree.revision,
-    schemaVersion: tree.schemaVersion,
+    folderCount: repairedTree.folderCount,
+    revision: repairedTree.revision,
+    schemaVersion: repairedTree.schemaVersion,
     status: "created"
   };
 }
@@ -687,22 +773,28 @@ async function handleCreate(context, uid, state, body) {
   );
   const tree = createVaultFolderNode(state.treeState.tree, { folderId, parentId: input.parentId });
   const now = new Date();
+  const folderFields = folderCreateFields(uid, folderId, input, tree, now, importJobId);
   const writes = [
     treeWrite(context, uid, state, tree, now),
-    createDocumentWrite(context.projectId, folderPath(folderId), folderCreateFields(
-      uid,
-      folderId,
-      input,
-      tree,
-      now,
-      importJobId
-    )),
+    createDocumentWrite(context.projectId, folderPath(folderId), folderFields),
     createDocumentWrite(
       context.projectId,
       claimPath(uid, input.nameClaim.claimId),
       claimFields(uid, folderId, input.parentId, now)
     )
   ];
+  writes.push(...await prepareVaultInventoryManifestMutation(
+    context,
+    state.transaction,
+    {
+      uid,
+      kind: "folder",
+      id: folderId,
+      currentDocument: null,
+      nextDocument: folderFields,
+      now
+    }
+  ));
   await commitOrConflict(context, writes, state.transaction);
   return { folderId, revision: 1, treeRevision: tree.revision };
 }
@@ -710,7 +802,7 @@ async function handleCreate(context, uid, state, body) {
 async function handleUpdateOrMove(context, uid, state, body, allowMissingClaim = false) {
   assertOnlyKeys(body, [
     "action", "encryptedName", "expectedRevision", "folderId", "leaseGeneration", "leaseId",
-    "nameClaim", "order", "parentId"
+    "nameClaim", "order", "parentId", "pathRewriteActivation"
   ]);
   const expectedRevision = assertInteger(body.expectedRevision, "expectedRevision", 1);
   const folderId = assertVaultFolderId(body.folderId);
@@ -750,6 +842,19 @@ async function handleUpdateOrMove(context, uid, state, body, allowMissingClaim =
   let tree = state.treeState.tree;
   const moved = parentId !== (state.folder.parentId ?? null);
   if (moved) tree = moveVaultFolderNode(tree, { folderId, parentId });
+  const currentClaimId = storedClaimId(state.folder);
+  const pathIdentityChanged = Boolean(currentClaimId)
+    && (moved || currentClaimId !== nameClaim.claimId);
+  if (!allowMissingClaim && pathIdentityChanged && body.pathRewriteActivation === undefined) {
+    throw new HttpError(
+      409,
+      "vault_path_rewrite_required",
+      "A prepared path rewrite is required before changing the Vault path"
+    );
+  }
+  if (!allowMissingClaim && !pathIdentityChanged && body.pathRewriteActivation !== undefined) {
+    throw new HttpError(400, "invalid_request", "Path rewrite activation requires a path change");
+  }
   const now = new Date();
   const fields = {
     revision: revision + 1,
@@ -786,6 +891,35 @@ async function handleUpdateOrMove(context, uid, state, body, allowMissingClaim =
       previousClaim.__updateTime
     ));
   }
+  const pathRewriteActivationWrites = await prepareAtomicPathRewriteActivation(
+    context,
+    state.transaction,
+    uid,
+    body.pathRewriteActivation,
+    {
+      expectedRevision,
+      id: folderId,
+      kind: "folder",
+      currentDocument: state.folder,
+      nextDocument: nextVaultInventoryDocument(state.folder, fields)
+    },
+    now
+  );
+  writes.push(
+    ...pathRewriteActivationWrites,
+    ...await prepareVaultInventoryManifestMutation(
+      context,
+      state.transaction,
+      {
+        uid,
+        kind: "folder",
+        id: folderId,
+        currentDocument: state.folder,
+        nextDocument: nextVaultInventoryDocument(state.folder, fields),
+        now
+      }
+    )
+  );
   await commitOrConflict(context, writes, state.transaction);
   return { folderId, revision: revision + 1, treeRevision: tree.revision };
 }
@@ -852,7 +986,7 @@ async function handleResolveCollision(context, uid, state, body) {
       wrappedKey: input.wrappedKey,
       ...folderLineage(tree, folderId)
     };
-    await commitOrConflict(context, [
+    const writes = [
       treeWrite(context, uid, state, tree, now),
       updateDocumentWrite(
         context.projectId,
@@ -866,12 +1000,25 @@ async function handleResolveCollision(context, uid, state, body) {
         claimPath(uid, input.nameClaim.claimId),
         claimFields(uid, folderId, input.parentId, now)
       )
-    ], state.transaction);
+    ];
+    writes.push(...await prepareVaultInventoryManifestMutation(
+      context,
+      state.transaction,
+      {
+        uid,
+        kind: "folder",
+        id: folderId,
+        currentDocument: folder,
+        nextDocument: nextVaultInventoryDocument(folder, fields),
+        now
+      }
+    ));
+    await commitOrConflict(context, writes, state.transaction);
     return { folderId, revision: 1, treeRevision: tree.revision };
   }
   assertOnlyKeys(body, [
     "action", "encryptedName", "expectedRevision", "folderId", "leaseGeneration", "leaseId",
-    "nameClaim", "parentId"
+    "nameClaim", "parentId", "pathRewriteActivation"
   ]);
   const revision = assertInteger(folder.revision, "stored revision", 1);
   const expectedRevision = assertInteger(body.expectedRevision, "expectedRevision", 1);
@@ -950,6 +1097,35 @@ async function handleResolveCollision(context, uid, state, body) {
       claimFields(uid, folderId, parentId, now)
     )
   );
+  const pathRewriteActivationWrites = await prepareAtomicPathRewriteActivation(
+    context,
+    state.transaction,
+    uid,
+    body.pathRewriteActivation,
+    {
+      expectedRevision,
+      id: folderId,
+      kind: "folder",
+      currentDocument: folder,
+      nextDocument: nextVaultInventoryDocument(folder, fields)
+    },
+    now
+  );
+  writes.push(
+    ...pathRewriteActivationWrites,
+    ...await prepareVaultInventoryManifestMutation(
+      context,
+      state.transaction,
+      {
+        uid,
+        kind: "folder",
+        id: folderId,
+        currentDocument: folder,
+        nextDocument: nextVaultInventoryDocument(folder, fields),
+        now
+      }
+    )
+  );
   await commitOrConflict(context, writes, state.transaction);
   return { folderId, revision: revision + 1, treeRevision: tree.revision };
 }
@@ -1019,6 +1195,22 @@ async function handleLifecycle(context, uid, state, body, active) {
   } else if (!active) {
     writes.push(deleteDocumentWrite(context.projectId, claimPath(uid, claimId), claim.__updateTime));
   }
+  writes.push(...await prepareVaultInventoryManifestMutation(
+    context,
+    state.transaction,
+    {
+      uid,
+      kind: "folder",
+      id: folderId,
+      currentDocument: state.folder,
+      nextDocument: nextVaultInventoryDocument(
+        state.folder,
+        fields,
+        active ? ["deletedAt", "deletedBy"] : []
+      ),
+      now
+    }
+  ));
   await commitOrConflict(context, writes, state.transaction);
   return { folderId, revision: revision + 1, treeRevision: tree.revision };
 }
@@ -1090,7 +1282,7 @@ async function handleMigrate(context, uid, state, body) {
     wrappedKey: input.wrappedKey,
     ...folderLineage(tree, folderId)
   };
-  await commitOrConflict(context, [
+  const writes = [
     treeWrite(context, uid, state, tree, now),
     updateDocumentWrite(
       context.projectId,
@@ -1104,14 +1296,28 @@ async function handleMigrate(context, uid, state, body) {
       claimPath(uid, input.nameClaim.claimId),
       claimFields(uid, folderId, input.parentId, now)
     )
-  ], state.transaction);
+  ];
+  writes.push(...await prepareVaultInventoryManifestMutation(
+    context,
+    state.transaction,
+    {
+      uid,
+      kind: "folder",
+      id: folderId,
+      currentDocument: state.folder,
+      nextDocument: nextVaultInventoryDocument(state.folder, fields),
+      now
+    }
+  ));
+  await commitOrConflict(context, writes, state.transaction);
   return { folderId, revision: 1, treeRevision: tree.revision };
 }
 
 async function performActionOnce(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "color", "encryptedName", "expectedName", "expectedRevision", "folderId",
-    "importJobId", "leaseGeneration", "leaseId", "nameClaim", "order", "parentId", "wrappedKey"
+    "importJobId", "leaseGeneration", "leaseId", "nameClaim", "order", "parentId",
+    "pathRewriteActivation", "wrappedKey"
   ]);
   const action = body.action;
   if (typeof action !== "string" || !supportedActions.has(action)) {
@@ -1119,7 +1325,7 @@ async function performActionOnce(context, uid, body) {
   }
   const state = await transactionState(context, uid, action, body);
   try {
-    if (action === "audit" || action === "bootstrap") {
+    if (action === "audit" || action === "bootstrap" || action === "repair") {
       return await handleBootstrapOrAudit(context, uid, state, action);
     }
     const integrityMarker = requireVaultIntegrityMarker(

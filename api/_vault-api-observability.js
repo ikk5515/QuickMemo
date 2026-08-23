@@ -27,6 +27,7 @@ const safeVaultErrorCodes = new Set([
   "vault_note_revision_exhausted",
   "vault_note_state_mismatch",
   "vault_parent_unavailable",
+  "vault_path_rewrite_required",
   "vault_tree_capacity",
   "vault_tree_invalid",
   "vault_tree_stale"

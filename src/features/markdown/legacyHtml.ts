@@ -1,4 +1,8 @@
-import { isSafeExternalHttpUrl } from "./parser";
+import {
+  canonicalSafeExternalHttpUrl,
+  isSafeExternalHttpUrl,
+  normalizeMarkdownLineEndings
+} from "./parser";
 
 export type LegacyHtmlConversionWarningCode =
   | "active-content-removed"
@@ -36,33 +40,68 @@ const removedActiveTags = new Set([
 ]);
 const maximumLegacyHtmlNestingDepth = 64;
 const maximumLegacyTraversalNodes = 100_000;
+const maximumLegacyHtmlSourceLength = 500_000;
+const maximumLegacyHtmlElementCount = 5_000;
+const maximumLegacyFallbackCharacters = 100_000;
+const legacyFontSizePattern = /^<!--qm-font-size:(\d+)-->/;
+const legacyReadonlyHtmlTagPattern =
+  /<(a|p|div|strong|b|em|i|u|s|del|strike|span|img|figure|h[1-6]|hr|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
 const legacyVoidTags = new Set(["AREA", "BASE", "BR", "COL", "EMBED", "HR", "IMG", "INPUT", "LINK", "META", "PARAM", "SOURCE", "TRACK", "WBR"]);
 
 export function previewLegacyHtmlToMarkdown(html: string): LegacyHtmlConversionPreview {
+  const classifiedSource = classifyLegacySource(html);
+
+  // Older QuickMemo records can contain plain text even though their storage
+  // format is named `legacy-html-v1`.  The read-only renderer deliberately
+  // treats unrecognised markup (for example a literal `<script>` snippet) as
+  // inert text.  Apply the exact same classification here so conversion never
+  // deletes text that the owner could previously see.
+  if (classifiedSource.contentFormat === "plain-text") {
+    return {
+      markdown: escapeMarkdownText(normalizeMarkdownLineEndings(classifiedSource.content)),
+      warnings: [],
+      lossy: false,
+      sourcePreserved: true
+    };
+  }
+
+  // The bounds are deliberately evaluated before any browser DOM parser or
+  // sanitizer sees the source. A conversion is optional and copy-only, so an
+  // oversized historical note is left untouched and receives an explicit
+  // lossy-preview warning instead of stalling a mobile main thread.
+  const budgetWarning = legacyHtmlBudgetWarning(classifiedSource.content);
+  if (budgetWarning) {
+    return legacyHtmlTextFallback(classifiedSource.content, budgetWarning);
+  }
+
   if (typeof document === "undefined") {
     const warning: LegacyHtmlConversionWarning = {
       code: "unsupported-environment",
       message: "이 환경에서는 HTML 구조를 분석할 수 없어 원문을 안전한 텍스트로 표시했습니다."
     };
     return {
-      markdown: escapeHtmlAsText(html),
+      markdown: escapeHtmlAsText(classifiedSource.content),
       warnings: [warning],
       lossy: true,
       sourcePreserved: true
     };
   }
 
-  if (legacyHtmlNestingExceedsLimit(html)) {
-    return legacyHtmlTextFallback(html);
-  }
-
   const template = document.createElement("template");
   try {
-    template.innerHTML = html;
+    // `template` parsing is inert. Conversion then applies its own strict tag
+    // and URL allowlist, preserving safe external-link/image semantics and
+    // code-language metadata that the legacy read-only sanitizer normalises.
+    template.innerHTML = classifiedSource.content;
   } catch {
-    return legacyHtmlTextFallback(html);
+    return legacyHtmlTextFallback(
+      classifiedSource.content,
+      "HTML 구조를 안전하게 분석할 수 없어 텍스트 미리보기만 만들었습니다."
+    );
   }
   const context: ConversionContext = { warnings: new Map() };
+  const elements = Array.from(template.content.querySelectorAll("*"));
+  inspectLegacyHtmlLosses(html, elements, context);
   let markdown: string;
   try {
     markdown = Array.from(template.content.childNodes)
@@ -84,7 +123,94 @@ export function previewLegacyHtmlToMarkdown(html: string): LegacyHtmlConversionP
   };
 }
 
-function legacyHtmlNestingExceedsLimit(html: string) {
+function inspectLegacyHtmlLosses(
+  html: string,
+  elements: Element[],
+  context: ConversionContext
+) {
+  if (html.startsWith("<!--qm-font-size:") || elements.some((element) =>
+    element.matches("[style], [align], [width], [height], [colspan], [rowspan], [start], [reversed], [data-qm-font-size], [data-qm-line-height], [data-qm-text-color], [data-text-align], [data-qm-image-width], [data-qm-width], [data-qm-table-width], [data-qm-table-width-px], [data-qm-table-height-px], [data-qm-row-height-px], [data-qm-column-width-px], [data-qm-cell-width-px], [data-qm-cell-color], [data-qm-block-id], [data-qm-author-uids], [data-qm-editor-uids], [data-qm-last-editor-uid], [data-qm-attribution-label]")
+  )) {
+    warn(
+      context,
+      "unsupported-formatting",
+      "글자 크기, 정렬, 색상, 표·이미지 크기 같은 일부 편집기 서식은 표준 Markdown에 없어 단순화했습니다."
+    );
+  }
+
+  if (elements.some((element) => {
+    const className = element.getAttribute("class")?.trim() ?? "";
+    return Boolean(className)
+      && !(element.tagName === "CODE" && className.split(/\s+/).every((token) => /^language-[\w+-]+$/.test(token)));
+  })) {
+    warn(
+      context,
+      "unsupported-formatting",
+      "일부 CSS 기반 서식은 표준 Markdown에 없어 내용만 보존했습니다."
+    );
+  }
+  if (elements.some((element) => removedActiveTags.has(element.tagName) || Array.from(element.attributes).some((attribute) => attribute.name.toLowerCase().startsWith("on")))) {
+    warn(
+      context,
+      "active-content-removed",
+      "스크립트, 스타일, 임베드 또는 이벤트 처리 같은 실행 가능한 HTML은 변환에서 제거했습니다."
+    );
+  }
+
+  if (elements.some((element) => element.tagName === "A" && !isSafeExternalHttpUrl(element.getAttribute("href")?.trim() ?? ""))) {
+    warn(
+      context,
+      "unsafe-link-removed",
+      "http 또는 https가 아닌 링크는 주소를 제거하고 표시 텍스트만 보존했습니다."
+    );
+  }
+
+  if (elements.some((element) => element.tagName === "IMG" && !isSafeExternalHttpUrl(element.getAttribute("src")?.trim() ?? ""))) {
+    warn(
+      context,
+      "unsafe-image-removed",
+      "안전한 원격 주소가 아닌 이미지는 변환에서 제거했습니다."
+    );
+  }
+}
+
+function classifyLegacySource(source: string): {
+  content: string;
+  contentFormat: "html" | "plain-text";
+} {
+  const fontSizeMatch = source.match(legacyFontSizePattern);
+  const content = fontSizeMatch ? source.replace(legacyFontSizePattern, "") : source;
+  if (!content) {
+    return { content, contentFormat: "html" };
+  }
+  return {
+    content,
+    contentFormat: fontSizeMatch || legacyReadonlyHtmlTagPattern.test(content)
+      ? "html"
+      : "plain-text"
+  };
+}
+
+function legacyHtmlBudgetWarning(html: string): string | null {
+  if (html.length > maximumLegacyHtmlSourceLength) {
+    return "HTML 원문이 안전한 변환 한도를 넘어 텍스트 미리보기만 만들었습니다. 원본 노트는 그대로 보존됩니다.";
+  }
+
+  let elementCount = 0;
+  for (let index = html.indexOf("<"); index !== -1; index = html.indexOf("<", index + 1)) {
+    const nameStart = index + 1;
+    if (html[nameStart] === "/") {
+      continue;
+    }
+    if (!/[a-z]/i.test(html[nameStart] ?? "")) {
+      continue;
+    }
+    elementCount += 1;
+    if (elementCount > maximumLegacyHtmlElementCount) {
+      return "HTML 노드 수가 안전한 변환 한도를 넘어 텍스트 미리보기만 만들었습니다. 원본 노트는 그대로 보존됩니다.";
+    }
+  }
+
   const tagPattern = /<(\/)?([a-z][a-z\d:-]*)(?:\s[^<>]*?)?(\/?)>/giu;
   let depth = 0;
   for (const match of html.matchAll(tagPattern)) {
@@ -94,17 +220,22 @@ function legacyHtmlNestingExceedsLimit(html: string) {
     } else if (!match[3] && !legacyVoidTags.has(tag)) {
       depth += 1;
       if (depth > maximumLegacyHtmlNestingDepth) {
-        return true;
+        return "HTML 중첩 깊이가 안전한 변환 한도를 넘어 텍스트 미리보기만 만들었습니다. 원본 노트는 그대로 보존됩니다.";
       }
     }
   }
-  return false;
+  return null;
 }
 
-function legacyHtmlTextFallback(html: string): LegacyHtmlConversionPreview {
+function legacyHtmlTextFallback(
+  html: string,
+  reason = "HTML 구조가 너무 깊거나 복잡해 안전한 텍스트만 보존했습니다."
+): LegacyHtmlConversionPreview {
+  const previewSource = html.slice(0, maximumLegacyFallbackCharacters);
+  const truncated = previewSource.length !== html.length;
   const activePattern = /<(script|style|svg|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\/\1\s*>/giu;
-  const activeRemoved = activePattern.test(html);
-  const withoutActiveContent = html.replace(activePattern, "");
+  const activeRemoved = activePattern.test(previewSource);
+  const withoutActiveContent = previewSource.replace(activePattern, "");
   const text = withoutActiveContent
     .replace(/<[^>]*>/g, " ")
     .replace(/&nbsp;/gi, " ")
@@ -117,7 +248,9 @@ function legacyHtmlTextFallback(html: string): LegacyHtmlConversionPreview {
     .trim();
   const warnings: LegacyHtmlConversionWarning[] = [{
     code: "unsupported-formatting",
-    message: "HTML 구조가 너무 깊거나 복잡해 안전한 텍스트만 보존했습니다."
+    message: truncated
+      ? `${reason} 미리보기는 앞 ${maximumLegacyFallbackCharacters.toLocaleString("ko-KR")}자까지만 포함합니다.`
+      : reason
   }];
   if (activeRemoved) {
     warnings.push({
@@ -162,7 +295,7 @@ function convertNode(node: Node, context: ConversionContext, depth: number): str
 
   switch (tag) {
     case "BR":
-      return "\n";
+      return "\\\n";
     case "P":
     case "DIV":
     case "SECTION":
@@ -276,7 +409,8 @@ function convertList(
 
 function convertAnchor(element: HTMLElement, label: string, context: ConversionContext) {
   const href = element.getAttribute("href")?.trim() ?? "";
-  if (!isSafeExternalHttpUrl(href)) {
+  const destination = markdownExternalDestination(href);
+  if (!destination) {
     warn(
       context,
       "unsafe-link-removed",
@@ -284,13 +418,14 @@ function convertAnchor(element: HTMLElement, label: string, context: ConversionC
     );
     return label;
   }
-  return `[${label.replace(/\]/g, "\\]")}](${href.replace(/\)/g, "%29")})`;
+  return `[${ensureOddEscapeBefore(label, "]")}](${destination})`;
 }
 
 function convertImage(element: HTMLElement, context: ConversionContext) {
   const source = element.getAttribute("src")?.trim() ?? "";
-  const alt = (element.getAttribute("alt") ?? "이미지").replace(/\]/g, "\\]");
-  if (!isSafeExternalHttpUrl(source)) {
+  const alt = escapeMarkdownText(element.getAttribute("alt") ?? "이미지");
+  const destination = markdownExternalDestination(source);
+  if (!destination) {
     warn(
       context,
       "unsafe-image-removed",
@@ -298,7 +433,18 @@ function convertImage(element: HTMLElement, context: ConversionContext) {
     );
     return alt ? `[${alt} 제거됨]` : "";
   }
-  return `![${alt}](${source.replace(/\)/g, "%29")})`;
+  return `![${alt}](${destination})`;
+}
+
+function markdownExternalDestination(value: string) {
+  const canonical = canonicalSafeExternalHttpUrl(value);
+  if (!canonical) {
+    return null;
+  }
+  // Angle-bracket destinations are the unambiguous CommonMark form. Encode
+  // parentheses as well so both balanced and historical unbalanced URL paths
+  // survive QuickMemo's bounded Markdown parser without becoming syntax.
+  return `<${canonical.replace(/\(/g, "%28").replace(/\)/g, "%29")}>`;
 }
 
 function convertTable(element: HTMLElement, context: ConversionContext, depth: number) {
@@ -312,7 +458,7 @@ function convertTable(element: HTMLElement, context: ConversionContext, depth: n
       .map((child) => convertNode(child, context, depth + 1))
       .join("")
       .trim()
-      .replace(/\|/g, "\\|")
+      .replace(/(\\*)\|/g, (_match, slashes: string) => `${slashes}${slashes.length % 2 === 0 ? "\\" : ""}|`)
       .replace(/\n+/g, " ")));
   const width = Math.max(...converted.map((row) => row.length));
   if (width === 0) {
@@ -378,7 +524,18 @@ function wrapInline(marker: string, value: string) {
 function escapeMarkdownText(value: string) {
   return value
     .replace(/\u00a0/g, " ")
-    .replace(/([\\`*_[\]<>])/g, "\\$1");
+    // CommonMark permits every ASCII punctuation character to be escaped.
+    // Escaping the complete set also neutralises Obsidian constructs such as
+    // tags, highlights, comments, block IDs and wikilinks while preserving the
+    // exact visible text after rendering.
+    .replace(/([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "\\$1");
+}
+
+function ensureOddEscapeBefore(value: string, character: string) {
+  const escaped = character.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return value.replace(new RegExp(`(\\\\*)${escaped}`, "g"), (_match, slashes: string) =>
+    `${slashes}${slashes.length % 2 === 0 ? "\\" : ""}${character}`
+  );
 }
 
 function escapeHtmlAsText(value: string) {

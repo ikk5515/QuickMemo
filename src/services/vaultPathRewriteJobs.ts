@@ -1,5 +1,7 @@
 import {
   collection,
+  deleteField,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -23,13 +25,22 @@ import {
   VAULT_PATH_REWRITE_JOB_VERSION,
   classifyVaultPathRewriteSourceState,
   type PreparedVaultPathRewriteJob,
+  type VaultPathRewriteInventoryManifestBindingV1,
   type VaultPathRewriteManifestV1,
   type VaultPathRewriteSourceKind,
   type VaultPathRewriteStepV1
 } from "../features/vault/pathRewriteJob";
 import { normalizeVaultPath } from "../features/vault/interop/path";
 
-export type VaultPathRewriteJobStatus = "preparing" | "prepared" | "ready" | "running" | "blocked" | "completed";
+export type VaultPathRewriteJobStatus =
+  | "preparing"
+  | "prepared"
+  | "ready"
+  | "running"
+  | "blocked"
+  | "completed"
+  | "not-applied"
+  | "abandoned";
 export type VaultPathRewriteSafeErrorCode =
   | "content-conflict"
   | "job-corrupt"
@@ -54,6 +65,22 @@ export interface VaultPathRewriteJobSummary {
   lastErrorCode: VaultPathRewriteSafeErrorCode | null;
   revision: number;
   manifest: VaultPathRewriteManifestV1;
+  /** Remaining server-heartbeat lease before automatic abandonment is safe. */
+  recoveryAfterMs?: number;
+}
+
+export interface VaultPathRewriteRecoveryScan {
+  /** A bounded page. Terminal jobs are excluded by the server status query. */
+  jobs: VaultPathRewriteJobSummary[];
+  /** True when another bounded scan is required after this page is resolved. */
+  hasMore: boolean;
+  /** The full page contains work that this scan can make terminal now. */
+  shouldContinueImmediately: boolean;
+}
+
+export interface VaultPathRewriteActivationInput {
+  expectedRevision: number;
+  jobId: string;
 }
 
 export interface VaultPathRewriteSourceSnapshot {
@@ -70,9 +97,18 @@ export interface ResumeVaultPathRewriteJobResult extends VaultPathRewriteJobSumm
 export type RecoverPreparedVaultPathRewriteJobResult =
   | { recovery: "activated"; job: VaultPathRewriteJobSummary }
   | { recovery: "not-applied"; job: VaultPathRewriteJobSummary }
+  | { recovery: "deferred"; job: VaultPathRewriteJobSummary }
   | { recovery: "conflict"; job: VaultPathRewriteJobSummary };
 
+type VaultPathRewriteAtomicActivationMode = "atomic-v1" | "atomic-manifest-v1";
+
 interface StoredVaultPathRewriteJob {
+  activationMode?: VaultPathRewriteAtomicActivationMode;
+  inventoryFingerprint?: string;
+  inventoryManifestVersion?: number;
+  inventoryManifestEpoch?: number;
+  inventoryManifestShardCount?: number;
+  inventoryManifestRoot?: string;
   ownerUid: string;
   kind: "path-rewrite-v1";
   version: typeof VAULT_PATH_REWRITE_JOB_VERSION;
@@ -85,8 +121,20 @@ interface StoredVaultPathRewriteJob {
   retryCount: number;
   lastErrorCode: VaultPathRewriteSafeErrorCode | null;
   revision: number;
+  preparedStepCount?: number;
+  mutationExpectedRevision?: number;
+  mutationTargetId?: string;
+  mutationTargetKind?: "entry" | "folder";
   encryptedManifest: EncryptedPayload;
   wrappedKey: WrappedNoteKey;
+  recoveryCheckCount?: number;
+  lastRecoveryCheckAt?: unknown;
+  remainingStepCount?: number;
+  completedAt?: unknown;
+  cleanupStartedAt?: unknown;
+  lastCleanupStepId?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
 }
 
 interface StoredVaultPathRewriteStep {
@@ -98,17 +146,58 @@ interface StoredVaultPathRewriteStep {
 }
 
 const encoder = new TextEncoder();
-const maxJobsPerVault = 50;
+// A rewrite step encrypts both the original and rewritten source. New atomic
+// jobs use the smaller advisory cap, while the recovery scan must preserve the
+// previous production contract that allowed as many as 50 legacy pr1 jobs.
+// The +1 page detects concurrent atomic cap overshoot without treating a
+// recoverable backlog as corruption.
+const maxAtomicJobsPerVault = 8;
+const maxLegacyJobsPerVault = 50;
+const maxRecoverableJobsPerVault = maxAtomicJobsPerVault + maxLegacyJobsPerVault;
+const recoverableJobQueryLimit = maxRecoverableJobsPerVault + 1;
 const maxJobTotalSourceBytes = 16 * 1024 * 1024;
 const maxStoredCipherTextLength = 900_000;
 const writeBatchSize = 50;
 const maxResumeSteps = 100;
+const terminalCleanupJobsPerPass = 3;
+const terminalCleanupStepsPerPass = 50;
+const terminalCleanupNoProgressLimit = 3;
+const terminalCleanupQueryLimit = recoverableJobQueryLimit;
+// Automatic cleanup runs in the foreground browser session and must not turn a
+// completed 5,000-step rewrite into thousands of immediate Firestore
+// transactions. One small pass per unlocked session keeps free-tier bursts and
+// UI/network contention bounded; the encrypted terminal root records the exact
+// remaining cursor so a later unlock can safely continue. The explicit drain
+// helper below intentionally retains the full bounded-loop behavior for tests
+// and operator-invoked maintenance.
+const scheduledTerminalCleanupJobsPerPass = 1;
+const scheduledTerminalCleanupStepsPerPass = 8;
+const scheduledTerminalCleanupQueryLimit = 8;
+const scheduledTerminalCleanupPassesPerSession = 1;
+const terminalCleanupPumps = new Map<string, Promise<void>>();
+const terminalCleanupSessionPasses = new Map<string, number>();
+// A different tab must not classify a job that is still being prepared or
+// committed as abandoned. Preparation heartbeats refresh this server timestamp
+// fence before every step batch; two minutes is also longer than the paired
+// server mutation request window.
+const atomicRecoveryStaleAfterMs = 2 * 60_000;
+// Legacy pr1 preparation had no heartbeat. It still predates path mutation,
+// but gets a wider fence so an older tab finishing a large encrypted upload is
+// never abandoned by a newly opened tab.
+const legacyPreparingRecoveryStaleAfterMs = 15 * 60_000;
+// Zero-step jobs contain no step ciphertext, but their small completed root is
+// retained briefly as durable proof for a mutating tab whose HTTP response was
+// lost. Non-zero completed jobs and every abandoned job remain immediately
+// eligible for cleanup.
+const zeroStepCompletionProofMs = 2 * 60_000;
+const dormantRecoveryBackoffMs = [5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 12 * 60 * 60_000] as const;
 const recoverableJobStatuses: VaultPathRewriteJobStatus[] = [
-  "preparing",
-  "prepared",
   "ready",
   "running",
-  "blocked"
+  "blocked",
+  "prepared",
+  "preparing",
+  "not-applied"
 ];
 
 export class VaultPathRewriteJobError extends Error {
@@ -129,10 +218,28 @@ function validateUid(uid: string) {
 }
 
 function validateJobId(jobId: string) {
-  if (!/^pr1_[A-Za-z0-9_-]{43}$/.test(jobId)) {
+  if (!/^pr[123]_[A-Za-z0-9_-]{43}$/.test(jobId)) {
     throw new VaultPathRewriteJobError("invalid", "경로 재작성 작업 식별자가 올바르지 않습니다.");
   }
   return jobId;
+}
+
+function activationModeForJobId(jobId: string): VaultPathRewriteAtomicActivationMode | null {
+  if (jobId.startsWith("pr2_")) return "atomic-v1";
+  if (jobId.startsWith("pr3_")) return "atomic-manifest-v1";
+  return null;
+}
+
+function atomicActivationMode(value: StoredVaultPathRewriteJob | Partial<StoredVaultPathRewriteJob>) {
+  return value.activationMode === "atomic-v1" || value.activationMode === "atomic-manifest-v1";
+}
+
+function validInventoryManifestBinding(value: Partial<StoredVaultPathRewriteJob>) {
+  return value.inventoryManifestVersion === 1
+    && value.inventoryManifestShardCount === 32
+    && safeInteger(value.inventoryManifestEpoch, 1, 999_999_999_999)
+    && typeof value.inventoryManifestRoot === "string"
+    && /^[A-Za-z0-9_-]{43}$/u.test(value.inventoryManifestRoot);
 }
 
 function jobCollection(uid: string) {
@@ -187,7 +294,9 @@ function validStatus(value: unknown): value is VaultPathRewriteJobStatus {
     || value === "ready"
     || value === "running"
     || value === "blocked"
-    || value === "completed";
+    || value === "completed"
+    || value === "not-applied"
+    || value === "abandoned";
 }
 
 function validErrorCode(value: unknown): value is VaultPathRewriteSafeErrorCode | null {
@@ -204,11 +313,76 @@ function safeInteger(value: unknown, minimum: number, maximum: number): value is
   return Number.isSafeInteger(value) && (value as number) >= minimum && (value as number) <= maximum;
 }
 
+function timestampMillis(value: unknown) {
+  if (!value || typeof value !== "object" || !("toMillis" in value)) return null;
+  const toMillis = (value as { toMillis?: unknown }).toMillis;
+  if (typeof toMillis !== "function") return null;
+  try {
+    const milliseconds = toMillis.call(value) as unknown;
+    return typeof milliseconds === "number" && Number.isFinite(milliseconds) ? milliseconds : null;
+  } catch {
+    return null;
+  }
+}
+
+function dormantRecoveryDelay(checkCount: number) {
+  const index = Math.min(Math.max(checkCount, 1) - 1, dormantRecoveryBackoffMs.length - 1);
+  return dormantRecoveryBackoffMs[index];
+}
+
+function preparationRecoveryDelayMs(stored: StoredVaultPathRewriteJob, now = Date.now()) {
+  const staleAfterMs = atomicActivationMode(stored)
+    && (stored.status === "preparing" || stored.status === "prepared")
+    ? atomicRecoveryStaleAfterMs
+    : !atomicActivationMode(stored) && stored.status === "preparing"
+      ? legacyPreparingRecoveryStaleAfterMs
+      : 0;
+  if (staleAfterMs === 0) return 0;
+  const updatedAt = timestampMillis(stored.updatedAt);
+  // A missing/non-server timestamp cannot prove that a preparation lease is
+  // stale. Fail closed and leave it for explicit operator recovery.
+  return updatedAt === null ? Number.POSITIVE_INFINITY : Math.max(0, updatedAt + staleAfterMs - now);
+}
+
+function preparationRecoveryIsDue(stored: StoredVaultPathRewriteJob, now = Date.now()) {
+  return preparationRecoveryDelayMs(stored, now) === 0;
+}
+
+function dormantRecoveryDelayMs(stored: StoredVaultPathRewriteJob, now = Date.now()) {
+  if (stored.status !== "not-applied") return 0;
+  const checkedAt = timestampMillis(stored.lastRecoveryCheckAt);
+  if (checkedAt === null) return 0;
+  const checkCount = safeInteger(stored.recoveryCheckCount, 1, 999_999)
+    ? stored.recoveryCheckCount
+    : 1;
+  return Math.max(0, checkedAt + dormantRecoveryDelay(checkCount) - now);
+}
+
+function terminalCleanupEligibility(stored: StoredVaultPathRewriteJob, now = Date.now()) {
+  if (stored.status !== "completed" || stored.stepCount !== 0) {
+    return { eligible: true, retryAfterMs: 0 };
+  }
+  const completedAt = timestampMillis(stored.completedAt);
+  if (completedAt === null) {
+    throw new VaultPathRewriteJobError("corrupt", "완료된 경로 재작성 작업의 확인 시각이 올바르지 않습니다.");
+  }
+  const retryAfterMs = Math.max(0, completedAt + zeroStepCompletionProofMs - now);
+  return { eligible: retryAfterMs === 0, retryAfterMs };
+}
+
+function terminalJob(stored: StoredVaultPathRewriteJob) {
+  return stored.status === "completed" || stored.status === "abandoned";
+}
+
 function validateStoredJob(value: unknown, uid: string, expectedJobId: string): StoredVaultPathRewriteJob {
   if (!value || typeof value !== "object") {
     throw new VaultPathRewriteJobError("corrupt", "저장된 경로 재작성 작업을 확인할 수 없습니다.");
   }
   const candidate = value as Partial<StoredVaultPathRewriteJob>;
+  const expectedActivationMode = activationModeForJobId(expectedJobId);
+  const atomic = expectedActivationMode !== null;
+  const pr2 = expectedActivationMode === "atomic-v1";
+  const pr3 = expectedActivationMode === "atomic-manifest-v1";
   if (
     candidate.ownerUid !== uid
     || candidate.kind !== "path-rewrite-v1"
@@ -224,8 +398,104 @@ function validateStoredJob(value: unknown, uid: string, expectedJobId: string): 
     || !safeInteger(candidate.revision, 1, 999_999_999_999)
     || !validEncryptedPayload(candidate.encryptedManifest)
     || !validWrappedKey(candidate.wrappedKey)
+    || timestampMillis(candidate.createdAt) === null
+    || timestampMillis(candidate.updatedAt) === null
+    || (
+      atomic
+      && (
+        candidate.activationMode !== expectedActivationMode
+        || (
+          pr2
+          && (
+            !/^[A-Za-z0-9_-]{43}$/u.test(candidate.inventoryFingerprint ?? "")
+            || candidate.inventoryManifestVersion !== undefined
+            || candidate.inventoryManifestEpoch !== undefined
+            || candidate.inventoryManifestShardCount !== undefined
+            || candidate.inventoryManifestRoot !== undefined
+          )
+        )
+        || (
+          pr3
+          && (
+            candidate.inventoryFingerprint !== undefined
+            || !validInventoryManifestBinding(candidate)
+          )
+        )
+        || !safeInteger(candidate.preparedStepCount, 0, candidate.stepCount ?? 0)
+        || (
+          candidate.status !== "preparing"
+          && candidate.status !== "abandoned"
+          && candidate.preparedStepCount !== candidate.stepCount
+        )
+        || (candidate.mutationTargetKind !== "entry" && candidate.mutationTargetKind !== "folder")
+        || typeof candidate.mutationTargetId !== "string"
+        || !candidate.mutationTargetId
+        || candidate.mutationTargetId.length > 120
+        || candidate.mutationTargetId.includes("/")
+        || !safeInteger(candidate.mutationExpectedRevision, 0, 999_999_999_999)
+      )
+    )
+    || (
+      !atomic
+      && (
+        candidate.activationMode !== undefined
+        || candidate.inventoryFingerprint !== undefined
+        || candidate.inventoryManifestVersion !== undefined
+        || candidate.inventoryManifestEpoch !== undefined
+        || candidate.inventoryManifestShardCount !== undefined
+        || candidate.inventoryManifestRoot !== undefined
+        || candidate.preparedStepCount !== undefined
+        || candidate.mutationTargetKind !== undefined
+        || candidate.mutationTargetId !== undefined
+        || candidate.mutationExpectedRevision !== undefined
+      )
+    )
+    || (
+      candidate.recoveryCheckCount !== undefined
+      && !safeInteger(candidate.recoveryCheckCount, 0, 999_999)
+    )
+    || (
+      candidate.remainingStepCount !== undefined
+      && !safeInteger(candidate.remainingStepCount, 0, candidate.stepCount ?? 0)
+    )
+    || (candidate.lastRecoveryCheckAt !== undefined && timestampMillis(candidate.lastRecoveryCheckAt) === null)
+    || (candidate.completedAt !== undefined && timestampMillis(candidate.completedAt) === null)
+    || (
+      (candidate.status === "completed" || candidate.status === "abandoned")
+      && timestampMillis(candidate.completedAt) === null
+    )
+    || (candidate.cleanupStartedAt !== undefined && timestampMillis(candidate.cleanupStartedAt) === null)
+    || (
+      candidate.lastCleanupStepId !== undefined
+      && !/^step-[0-9]{6}$/.test(candidate.lastCleanupStepId)
+    )
     || (candidate.status === "completed" && candidate.cursor !== candidate.stepCount)
-    || (candidate.status !== "completed" && candidate.stepCount > 0 && candidate.cursor === candidate.stepCount)
+    || (
+      candidate.status === "abandoned"
+      && (
+        candidate.cursor !== 0
+        || candidate.confirmedCount !== 0
+        || candidate.lastErrorCode !== null
+      )
+    )
+    || (
+      candidate.status === "not-applied"
+      && (
+        candidate.cursor !== 0
+        || candidate.confirmedCount !== 0
+        || candidate.lastErrorCode !== null
+        || (
+          candidate.recoveryCheckCount !== undefined
+          && candidate.recoveryCheckCount < 1
+        )
+      )
+    )
+    || (
+      candidate.status !== "completed"
+      && candidate.status !== "abandoned"
+      && candidate.stepCount > 0
+      && candidate.cursor === candidate.stepCount
+    )
   ) {
     throw new VaultPathRewriteJobError("corrupt", "저장된 경로 재작성 작업을 확인할 수 없습니다.");
   }
@@ -254,7 +524,12 @@ function validateStoredStep(
   return candidate as StoredVaultPathRewriteStep;
 }
 
-function validateManifest(value: unknown, uid: string, stepCount: number): VaultPathRewriteManifestV1 {
+function validateManifest(
+  value: unknown,
+  uid: string,
+  stepCount: number,
+  activationMode: VaultPathRewriteAtomicActivationMode | null
+): VaultPathRewriteManifestV1 {
   if (!value || typeof value !== "object") {
     throw new VaultPathRewriteJobError("corrupt", "경로 재작성 manifest를 확인할 수 없습니다.");
   }
@@ -262,6 +537,18 @@ function validateManifest(value: unknown, uid: string, stepCount: number): Vault
   if (
     candidate.version !== VAULT_PATH_REWRITE_JOB_VERSION
     || candidate.ownerUid !== uid
+    || (activationMode === "atomic-v1" && (
+      !/^[A-Za-z0-9_-]{43}$/u.test(candidate.inventoryFingerprint ?? "")
+      || candidate.inventoryManifest !== undefined
+    ))
+    || (activationMode === "atomic-manifest-v1" && (
+      candidate.inventoryFingerprint !== undefined
+      || !validManifestBinding(candidate.inventoryManifest)
+    ))
+    || (activationMode === null && (
+      candidate.inventoryFingerprint !== undefined
+      || candidate.inventoryManifest !== undefined
+    ))
     || !Array.isArray(candidate.pathChanges)
     || !Array.isArray(candidate.steps)
     || candidate.steps.length !== stepCount
@@ -272,7 +559,10 @@ function validateManifest(value: unknown, uid: string, stepCount: number): Vault
   if (encoder.encode(serialized).byteLength > MAX_VAULT_PATH_REWRITE_MANIFEST_BYTES) {
     throw new VaultPathRewriteJobError("corrupt", "경로 재작성 manifest 크기가 올바르지 않습니다.");
   }
-  if (!candidate.pathChanges.length || candidate.pathChanges.length > MAX_VAULT_PATH_REWRITE_STEPS) {
+  if (
+    candidate.pathChanges.length > MAX_VAULT_PATH_REWRITE_STEPS
+    || (activationMode === null && candidate.pathChanges.length === 0)
+  ) {
     throw new VaultPathRewriteJobError("corrupt", "경로 재작성 manifest의 경로 변경 수가 올바르지 않습니다.");
   }
   const pathEntryIds = new Set<string>();
@@ -338,6 +628,16 @@ function validateManifest(value: unknown, uid: string, stepCount: number): Vault
   return candidate as VaultPathRewriteManifestV1;
 }
 
+function validManifestBinding(value: unknown): value is VaultPathRewriteInventoryManifestBindingV1 {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const candidate = value as Partial<VaultPathRewriteInventoryManifestBindingV1>;
+  return candidate.version === 1
+    && candidate.shardCount === 32
+    && safeInteger(candidate.epoch, 1, 999_999_999_999)
+    && typeof candidate.root === "string"
+    && /^[A-Za-z0-9_-]{43}$/u.test(candidate.root);
+}
+
 function validateStep(value: unknown, summary: VaultPathRewriteManifestV1["steps"][number]): VaultPathRewriteStepV1 {
   if (!value || typeof value !== "object") {
     throw new VaultPathRewriteJobError("corrupt", "경로 재작성 단계 payload를 확인할 수 없습니다.");
@@ -389,10 +689,33 @@ async function decryptManifest(
   jobKey: CryptoKey
 ) {
   const serialized = await decryptText(stored.encryptedManifest, jobKey);
-  return validateManifest(parseJson(serialized, "경로 재작성 manifest"), uid, stored.stepCount);
+  const activationMode = atomicActivationMode(stored) ? stored.activationMode! : null;
+  const manifest = validateManifest(
+    parseJson(serialized, "경로 재작성 manifest"),
+    uid,
+    stored.stepCount,
+    activationMode
+  );
+  if (activationMode === "atomic-v1" && stored.inventoryFingerprint !== manifest.inventoryFingerprint) {
+    throw new VaultPathRewriteJobError("corrupt", "경로 재작성 서버 인벤토리 지문이 일치하지 않습니다.");
+  }
+  if (activationMode === "atomic-manifest-v1" && (
+    !manifest.inventoryManifest
+    || stored.inventoryManifestVersion !== manifest.inventoryManifest.version
+    || stored.inventoryManifestEpoch !== manifest.inventoryManifest.epoch
+    || stored.inventoryManifestShardCount !== manifest.inventoryManifest.shardCount
+    || stored.inventoryManifestRoot !== manifest.inventoryManifest.root
+  )) {
+    throw new VaultPathRewriteJobError("corrupt", "경로 재작성 고정 인벤토리 binding이 일치하지 않습니다.");
+  }
+  return manifest;
 }
 
 function summary(stored: StoredVaultPathRewriteJob, jobId: string, manifest: VaultPathRewriteManifestV1) {
+  const recoveryAfterMs = Math.max(
+    preparationRecoveryDelayMs(stored),
+    dormantRecoveryDelayMs(stored)
+  );
   return {
     jobId,
     status: stored.status,
@@ -403,7 +726,8 @@ function summary(stored: StoredVaultPathRewriteJob, jobId: string, manifest: Vau
     retryCount: stored.retryCount,
     lastErrorCode: stored.lastErrorCode,
     revision: stored.revision,
-    manifest
+    manifest,
+    ...(recoveryAfterMs > 0 ? { recoveryAfterMs } : {})
   } satisfies VaultPathRewriteJobSummary;
 }
 
@@ -413,10 +737,19 @@ function recoveryResult(
   manifest: VaultPathRewriteManifestV1
 ): RecoverPreparedVaultPathRewriteJobResult {
   const job = summary(stored, jobId, manifest);
+  if (!preparationRecoveryIsDue(stored)) {
+    return { recovery: "deferred", job };
+  }
   if (stored.status === "ready" || stored.status === "running" || stored.status === "completed") {
     return { recovery: "activated", job };
   }
-  if (stored.status === "prepared") return { recovery: "not-applied", job };
+  if (
+    stored.status === "prepared"
+    || stored.status === "not-applied"
+    || stored.status === "abandoned"
+  ) {
+    return { recovery: "not-applied", job };
+  }
   return { recovery: "conflict", job };
 }
 
@@ -464,6 +797,59 @@ export async function ensureVaultPathRewriteJob(
   }
 
   const reference = jobRef(uid, prepared.jobId);
+  let existing = await getDoc(reference);
+  if (existing.exists()) {
+    const stored = validateStoredJob(existing.data(), uid, prepared.jobId);
+    if (stored.status === "abandoned" && atomicActivationMode(stored)) {
+      // An abandoned atomic job proves that its paired path mutation never
+      // committed. Verify the encrypted deterministic plan before reviving it,
+      // then fence any concurrent cleanup through the job document revision.
+      const existingKey = await unwrapNoteKey(stored.wrappedKey, privateKey);
+      const existingManifest = await decryptManifest(stored, uid, existingKey);
+      if (JSON.stringify(existingManifest) !== JSON.stringify(prepared.manifest)) {
+        throw new VaultPathRewriteJobError(
+          "conflict",
+          "같은 작업 식별자에 다른 경로 재작성 계획이 저장되어 있습니다."
+        );
+      }
+      await runTransaction(db, async (transaction) => {
+        const snapshot = await transaction.get(reference);
+        if (!snapshot.exists()) return;
+        const current = validateStoredJob(snapshot.data(), uid, prepared.jobId);
+        if (current.status !== "abandoned" || !atomicActivationMode(current)) return;
+        transaction.update(reference, {
+          status: "preparing",
+          preparedStepCount: 0,
+          remainingStepCount: current.stepCount,
+          abandonedAt: deleteField(),
+          completedAt: deleteField(),
+          cleanupStartedAt: deleteField(),
+          lastCleanupStepId: deleteField(),
+          revision: current.revision + 1,
+          updatedAt: serverTimestamp()
+        });
+      });
+      existing = await getDoc(reference);
+    }
+  }
+  if (!existing.exists()) {
+    const incomplete = await getDocs(query(
+      jobCollection(uid),
+      where("status", "in", recoverableJobStatuses),
+      limit(recoverableJobQueryLimit)
+    ));
+    const atomicCount = incomplete.docs.reduce((count, document) => {
+      const jobId = validateJobId(document.id);
+      const stored = validateStoredJob(document.data(), uid, jobId);
+      return count + (atomicActivationMode(stored) ? 1 : 0);
+    }, 0);
+    if (atomicCount >= maxAtomicJobsPerVault) {
+      throw new VaultPathRewriteJobError(
+        "conflict",
+        "중단되었거나 확인 대기 중인 경로 재작성 작업이 보관 한도에 도달했습니다. 기존 작업을 먼저 복구해주세요."
+      );
+    }
+  }
   const candidateKey = await generateNoteKey();
   const [candidateEncryptedManifest, candidateWrappedKey] = await Promise.all([
     encryptText(JSON.stringify(prepared.manifest), candidateKey),
@@ -474,8 +860,23 @@ export async function ensureVaultPathRewriteJob(
     if (snapshot.exists()) {
       return validateStoredJob(snapshot.data(), uid, prepared.jobId);
     }
-    const initialStatus: VaultPathRewriteJobStatus = "preparing";
+    // A zero-step atomic job is complete at creation time: there are no child
+    // payloads to stage. Persist it directly as prepared so concurrent UI
+    // effects cannot race through a redundant preparing -> prepared write.
+    const initialStatus: VaultPathRewriteJobStatus = prepared.steps.length === 0
+      ? "prepared"
+      : "preparing";
+    const inventoryManifest = prepared.manifest.inventoryManifest;
     const stored: StoredVaultPathRewriteJob = {
+      activationMode: inventoryManifest ? "atomic-manifest-v1" : "atomic-v1",
+      ...(inventoryManifest
+        ? {
+            inventoryManifestVersion: inventoryManifest.version,
+            inventoryManifestEpoch: inventoryManifest.epoch,
+            inventoryManifestShardCount: inventoryManifest.shardCount,
+            inventoryManifestRoot: inventoryManifest.root
+          }
+        : { inventoryFingerprint: prepared.manifest.inventoryFingerprint }),
       ownerUid: uid,
       kind: "path-rewrite-v1",
       version: VAULT_PATH_REWRITE_JOB_VERSION,
@@ -488,8 +889,14 @@ export async function ensureVaultPathRewriteJob(
       retryCount: 0,
       lastErrorCode: null,
       revision: 1,
+      preparedStepCount: 0,
+      mutationExpectedRevision: prepared.mutationTarget.expectedRevision,
+      mutationTargetId: prepared.mutationTarget.id,
+      mutationTargetKind: prepared.mutationTarget.kind,
       encryptedManifest: candidateEncryptedManifest,
-      wrappedKey: candidateWrappedKey
+      wrappedKey: candidateWrappedKey,
+      recoveryCheckCount: 0,
+      remainingStepCount: prepared.steps.length
     };
     transaction.set(reference, {
       ...stored,
@@ -551,6 +958,23 @@ export async function ensureVaultPathRewriteJob(
         createdAt: serverTimestamp()
       } satisfies StoredVaultPathRewriteStep & { createdAt: ReturnType<typeof serverTimestamp> });
     }
+    // Refresh the parent immediately before each bounded write. Recovery may
+    // abandon only a server-timestamp-stale parent, so a concurrent tab cannot
+    // terminalize the job between an expensive encryption pass and this batch.
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(reference);
+      if (!snapshot.exists()) {
+        throw new VaultPathRewriteJobError("conflict", "경로 재작성 작업이 준비 중 삭제되었습니다.");
+      }
+      const current = validateStoredJob(snapshot.data(), uid, prepared.jobId);
+      if (current.status !== "preparing") {
+        throw new VaultPathRewriteJobError("conflict", "경로 재작성 작업 준비 상태가 다른 세션에서 변경되었습니다.");
+      }
+      transaction.update(reference, {
+        revision: current.revision + 1,
+        updatedAt: serverTimestamp()
+      });
+    });
     await batch.commit();
   }
 
@@ -560,10 +984,24 @@ export async function ensureVaultPathRewriteJob(
       throw new VaultPathRewriteJobError("conflict", "경로 재작성 작업이 준비 중 삭제되었습니다.");
     }
     const current = validateStoredJob(snapshot.data(), uid, prepared.jobId);
+    if (current.status === "not-applied") {
+      const next: StoredVaultPathRewriteJob = {
+        ...current,
+        status: "prepared",
+        revision: current.revision + 1
+      };
+      transaction.update(reference, {
+        status: next.status,
+        revision: next.revision,
+        updatedAt: serverTimestamp()
+      });
+      return next;
+    }
     if (current.status !== "preparing") return current;
     const next: StoredVaultPathRewriteJob = { ...current, status: "prepared", revision: current.revision + 1 };
     transaction.update(reference, {
       status: next.status,
+      preparedStepCount: current.stepCount,
       revision: next.revision,
       updatedAt: serverTimestamp()
     });
@@ -601,7 +1039,13 @@ export async function activateVaultPathRewriteJob(
     if (current.status === "preparing") {
       throw new VaultPathRewriteJobError("not-ready", "경로 재작성 단계가 아직 모두 준비되지 않았습니다.");
     }
-    if (current.status !== "prepared") return current;
+    if (current.status !== "prepared" && current.status !== "not-applied") return current;
+    if (atomicActivationMode(current)) {
+      throw new VaultPathRewriteJobError(
+        "not-ready",
+        "원자적 경로 변경은 서버 경로 transaction에서만 활성화할 수 있습니다."
+      );
+    }
     const status: VaultPathRewriteJobStatus = current.stepCount === 0 ? "completed" : "ready";
     const next: StoredVaultPathRewriteJob = {
       ...current,
@@ -617,7 +1061,11 @@ export async function activateVaultPathRewriteJob(
     });
     return next;
   });
-  return summary(stored, validatedJobId, loaded.manifest);
+  const activated = summary(stored, validatedJobId, loaded.manifest);
+  if (terminalJob(stored)) {
+    void scheduleTerminalVaultPathRewriteCleanup(validatedUid).catch(() => undefined);
+  }
+  return activated;
 }
 
 export async function loadVaultPathRewriteJob(
@@ -632,42 +1080,376 @@ export async function loadVaultPathRewriteJob(
   return loaded ? summary(loaded.stored, jobId, loaded.manifest) : null;
 }
 
-async function listIncompleteVaultPathRewriteJobs(uid: string, privateKey: CryptoKey) {
+async function scanIncompleteVaultPathRewriteJobs(
+  uid: string,
+  privateKey: CryptoKey
+): Promise<VaultPathRewriteRecoveryScan> {
   const validatedUid = validateUid(uid);
   if (!privateKey) {
     throw new VaultPathRewriteJobError("invalid", "경로 재작성 암호화 세션을 확인할 수 없습니다.");
   }
-  const snapshots = await getDocs(query(
-    jobCollection(validatedUid),
-    where("status", "in", recoverableJobStatuses),
-    limit(maxJobsPerVault + 1)
-  ));
-  if (snapshots.size > maxJobsPerVault) {
-    throw new VaultPathRewriteJobError("corrupt", "재개 가능한 Vault 유지보수 작업 수가 한도를 초과했습니다.");
+  const snapshots: DocumentSnapshot<DocumentData>[] = [];
+  let hasMore = false;
+  // Query one status at a time so no composite index is required and a full
+  // page of deferred preparation cannot hide an already-ready job. Ready and
+  // running work is deliberately first; total decrypted roots remain bounded
+  // by recoverableJobQueryLimit across all status queries.
+  for (const status of recoverableJobStatuses) {
+    const remaining = recoverableJobQueryLimit - snapshots.length;
+    if (remaining <= 0) {
+      hasMore = true;
+      break;
+    }
+    const page = await getDocs(query(
+      jobCollection(validatedUid),
+      where("status", "==", status),
+      limit(remaining)
+    ));
+    snapshots.push(...page.docs);
+    if (page.size >= remaining) {
+      hasMore = true;
+      break;
+    }
   }
   const jobs: VaultPathRewriteJobSummary[] = [];
-  for (const snapshot of snapshots.docs) {
+  for (const snapshot of snapshots) {
     const jobId = validateJobId(snapshot.id);
     const stored = validateStoredJob(snapshot.data(), validatedUid, jobId);
     if (stored.status === "completed") continue;
+    // Dormant jobs remain in the result with a bounded recoveryAfterMs. The UI
+    // schedules one due-time retry instead of rescanning paths on every login.
     const jobKey = await unwrapNoteKey(stored.wrappedKey, privateKey);
     const manifest = await decryptManifest(stored, validatedUid, jobKey);
     jobs.push(summary(stored, jobId, manifest));
   }
-  return jobs.sort((left, right) => left.jobId.localeCompare(right.jobId));
+  return {
+    jobs: jobs.sort((left, right) => left.jobId.localeCompare(right.jobId)),
+    // A full page may be exactly complete; one harmless empty follow-up keeps
+    // concurrent cap overshoot recoverable without an unbounded query.
+    hasMore,
+    shouldContinueImmediately: hasMore
+      && jobs.some((job) => (job.recoveryAfterMs ?? 0) <= 0)
+  };
 }
 
-/** Includes `prepared` jobs so a reload after the path write can recover the activation gap. */
+/** Includes due dormant jobs so a stale all-old observation cannot hide a committed move. */
 export async function listRecoverableVaultPathRewriteJobs(uid: string, privateKey: CryptoKey) {
-  return listIncompleteVaultPathRewriteJobs(uid, privateKey);
+  return (await scanIncompleteVaultPathRewriteJobs(uid, privateKey)).jobs;
+}
+
+export async function scanRecoverableVaultPathRewriteJobs(uid: string, privateKey: CryptoKey) {
+  return scanIncompleteVaultPathRewriteJobs(uid, privateKey);
 }
 
 export async function listResumableVaultPathRewriteJobs(uid: string, privateKey: CryptoKey) {
-  return (await listIncompleteVaultPathRewriteJobs(uid, privateKey)).filter((job) =>
+  return (await scanIncompleteVaultPathRewriteJobs(uid, privateKey)).jobs.filter((job) =>
     job.status === "ready"
     || job.status === "running"
     || (job.status === "blocked" && job.lastErrorCode !== "path-state-conflict")
   );
+}
+
+async function initializeTerminalPathRewriteCleanup(uid: string, jobId: string) {
+  const reference = jobRef(uid, jobId);
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(reference);
+    if (!snapshot.exists()) return null;
+    const current = validateStoredJob(snapshot.data(), uid, jobId);
+    if (!terminalJob(current)) return current;
+    if (current.cleanupStartedAt !== undefined && current.remainingStepCount !== undefined) return current;
+    const next: StoredVaultPathRewriteJob = {
+      ...current,
+      remainingStepCount: current.remainingStepCount ?? current.stepCount,
+      revision: current.revision + 1
+    };
+    transaction.update(reference, {
+      remainingStepCount: next.remainingStepCount,
+      cleanupStartedAt: serverTimestamp(),
+      revision: next.revision,
+      updatedAt: serverTimestamp()
+    });
+    return next;
+  });
+}
+
+async function cleanupTerminalPathRewriteJob(uid: string, jobId: string, maximumSteps: number) {
+  const reference = jobRef(uid, jobId);
+  let current = await initializeTerminalPathRewriteCleanup(uid, jobId);
+  if (
+    current
+    && terminalJob(current)
+    && (current.cleanupStartedAt === undefined || current.remainingStepCount === undefined)
+  ) {
+    const initialized = await getDoc(reference);
+    current = initialized.exists() ? validateStoredJob(initialized.data(), uid, jobId) : null;
+  }
+  if (
+    !current
+    || !terminalJob(current)
+    || current.cleanupStartedAt === undefined
+    || current.remainingStepCount === undefined
+  ) {
+    return { cleaned: false, removedSteps: 0 };
+  }
+
+  if (current.status === "abandoned") {
+    const abandonedSteps = await getDocs(query(
+      stepCollection(reference),
+      limit(maximumSteps)
+    ));
+    if (abandonedSteps.size > 0) {
+      const batch = writeBatch(db);
+      for (const stepSnapshot of abandonedSteps.docs) {
+        const ordinal = Number(stepSnapshot.id.replace(/^step-/, ""));
+        validateStoredStep(stepSnapshot.data(), uid, jobId, ordinal);
+        batch.delete(stepSnapshot.ref);
+      }
+      await batch.commit();
+      return { cleaned: false, removedSteps: abandonedSteps.size };
+    }
+    current = await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(reference);
+      if (!snapshot.exists()) return null;
+      const stored = validateStoredJob(snapshot.data(), uid, jobId);
+      if (stored.status !== "abandoned") return stored;
+      const next: StoredVaultPathRewriteJob = {
+        ...stored,
+        remainingStepCount: 0,
+        revision: stored.revision + 1
+      };
+      transaction.update(reference, {
+        remainingStepCount: 0,
+        revision: next.revision,
+        updatedAt: serverTimestamp()
+      });
+      return next;
+    });
+    if (!current || current.status !== "abandoned" || current.remainingStepCount !== 0) {
+      return { cleaned: false, removedSteps: 0 };
+    }
+    try {
+      await deleteDoc(reference);
+    } catch (cause) {
+      const confirmed = await getDoc(reference);
+      if (confirmed.exists()) throw cause;
+    }
+    return { cleaned: true, removedSteps: 0 };
+  }
+
+  let removedSteps = 0;
+  while ((current.remainingStepCount ?? 0) > 0 && removedSteps < maximumSteps) {
+    current = await runTransaction(db, async (transaction) => {
+      const jobSnapshot = await transaction.get(reference);
+      if (!jobSnapshot.exists()) {
+        throw new VaultPathRewriteJobError("conflict", "완료된 경로 재작성 작업이 정리 중 삭제되었습니다.");
+      }
+      const stored = validateStoredJob(jobSnapshot.data(), uid, jobId);
+      if (
+        !terminalJob(stored)
+        || stored.cleanupStartedAt === undefined
+        || stored.remainingStepCount === undefined
+      ) {
+        throw new VaultPathRewriteJobError("conflict", "완료된 경로 재작성 작업의 정리 상태가 변경되었습니다.");
+      }
+      if (stored.remainingStepCount === 0) return stored;
+      const ordinal = stored.remainingStepCount - 1;
+      const storedStepReference = stepRef(reference, ordinal);
+      const stepSnapshot = await transaction.get(storedStepReference);
+      if (!stepSnapshot.exists()) {
+        throw new VaultPathRewriteJobError("corrupt", "완료된 경로 재작성 단계의 정리 순서를 확인할 수 없습니다.");
+      }
+      validateStoredStep(stepSnapshot.data(), uid, jobId, ordinal);
+      const next: StoredVaultPathRewriteJob = {
+        ...stored,
+        remainingStepCount: ordinal,
+        revision: stored.revision + 1
+      };
+      transaction.delete(storedStepReference);
+      transaction.update(reference, {
+        remainingStepCount: next.remainingStepCount,
+        lastCleanupStepId: stepId(ordinal),
+        revision: next.revision,
+        updatedAt: serverTimestamp()
+      });
+      return next;
+    });
+    removedSteps += 1;
+  }
+
+  if ((current.remainingStepCount ?? 0) > 0) {
+    return { cleaned: false, removedSteps };
+  }
+  try {
+    await deleteDoc(reference);
+  } catch (cause) {
+    const confirmed = await getDoc(reference);
+    if (confirmed.exists()) throw cause;
+  }
+  return { cleaned: true, removedSteps };
+}
+
+/**
+ * Removes immutable completed/abandoned ciphertext immediately. A terminal
+ * rewrite is already fully confirmed (or an atomic path mutation provably did
+ * not commit), so retaining its encrypted steps adds quota risk without a
+ * recovery benefit. Work remains capped per call and callers may schedule
+ * another best-effort pass until `hasMore` becomes false.
+ */
+async function cleanupRetainedTerminalVaultPathRewriteJobsPass(
+  uid: string,
+  limits: {
+    jobsPerPass: number;
+    queryLimit: number;
+    stepsPerPass: number;
+  }
+) {
+  const validatedUid = validateUid(uid);
+  const snapshot = await getDocs(query(
+    jobCollection(validatedUid),
+    where("status", "in", ["completed", "abandoned"]),
+    limit(limits.queryLimit)
+  ));
+  let cleanedJobs = 0;
+  let removedSteps = 0;
+  let remainingStepBudget = limits.stepsPerPass;
+  const now = Date.now();
+  let retryAfterMs = 0;
+  const terminalDocuments = snapshot.docs
+    .map((document) => ({
+      document,
+      stored: validateStoredJob(document.data(), validatedUid, validateJobId(document.id))
+    }))
+    .filter(({ stored }) => terminalJob(stored))
+    .sort((left, right) => (
+      timestampMillis(left.stored.completedAt) ?? 0
+    ) - (
+      timestampMillis(right.stored.completedAt) ?? 0
+    ));
+  const retained = terminalDocuments
+    .filter(({ stored }) => {
+      const eligibility = terminalCleanupEligibility(stored, now);
+      if (!eligibility.eligible) {
+        retryAfterMs = retryAfterMs === 0
+          ? eligibility.retryAfterMs
+          : Math.min(retryAfterMs, eligibility.retryAfterMs);
+      }
+      return eligibility.eligible;
+    })
+    .slice(0, limits.jobsPerPass);
+  for (const { document } of retained) {
+    if (remainingStepBudget <= 0) break;
+    const result = await cleanupTerminalPathRewriteJob(
+      validatedUid,
+      document.id,
+      remainingStepBudget
+    );
+    removedSteps += result.removedSteps;
+    remainingStepBudget -= result.removedSteps;
+    if (result.cleaned) cleanedJobs += 1;
+  }
+  return {
+    cleanedJobs,
+    // A full page may hide older terminal documents. Force one empty-page
+    // confirmation after every full page so historical backlogs cannot starve.
+    hasMore: snapshot.size >= limits.queryLimit || snapshot.size > cleanedJobs,
+    removedSteps,
+    retryAfterMs
+  };
+}
+
+export function cleanupRetainedTerminalVaultPathRewriteJobs(uid: string) {
+  return cleanupRetainedTerminalVaultPathRewriteJobsPass(uid, {
+    jobsPerPass: terminalCleanupJobsPerPass,
+    queryLimit: terminalCleanupQueryLimit,
+    stepsPerPass: terminalCleanupStepsPerPass
+  });
+}
+
+/**
+ * Drains all terminal rewrite ciphertext in bounded Firestore passes while
+ * yielding between passes. Every pass is capped, but a healthy unlocked
+ * session converges even for a 5,000-step job. Repeated zero-progress passes
+ * fail closed instead of creating an unbounded request loop.
+ */
+export async function drainTerminalVaultPathRewriteJobs(uid: string) {
+  const validatedUid = validateUid(uid);
+  let cleanedJobs = 0;
+  let removedSteps = 0;
+  let noProgressPasses = 0;
+  for (;;) {
+    const progress = await cleanupRetainedTerminalVaultPathRewriteJobs(validatedUid);
+    cleanedJobs += progress.cleanedJobs;
+    removedSteps += progress.removedSteps;
+    if (!progress.hasMore) return { cleanedJobs, removedSteps };
+    if (progress.retryAfterMs > 0 && progress.cleanedJobs === 0 && progress.removedSteps === 0) {
+      noProgressPasses = 0;
+      await new Promise<void>((resolve) => setTimeout(resolve, progress.retryAfterMs));
+      continue;
+    }
+    if (progress.cleanedJobs === 0 && progress.removedSteps === 0) {
+      noProgressPasses += 1;
+      if (noProgressPasses >= terminalCleanupNoProgressLimit) {
+        throw new VaultPathRewriteJobError(
+          "conflict",
+          "완료된 경로 재작성 작업 정리가 진행되지 않았습니다."
+        );
+      }
+    } else {
+      noProgressPasses = 0;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+/**
+ * Starts a fresh cleanup budget for one unlocked Vault session. Callers invoke
+ * this once after server-confirmed Vault readiness; repeating normal renders or
+ * rewrite completions must not reset the budget.
+ */
+export function beginTerminalVaultPathRewriteCleanupSession(uid: string) {
+  terminalCleanupSessionPasses.set(validateUid(uid), 0);
+}
+
+/**
+ * Dedupe cleanup pumps per unlocked owner without retaining plaintext. Unlike
+ * the explicit drain helper, the automatic path performs at most one small
+ * pass per session and leaves a durable, resumable remainder.
+ */
+export function scheduleTerminalVaultPathRewriteCleanup(uid: string) {
+  const validatedUid = validateUid(uid);
+  const existing = terminalCleanupPumps.get(validatedUid);
+  if (existing) return existing;
+  const passes = terminalCleanupSessionPasses.get(validatedUid) ?? 0;
+  if (passes >= scheduledTerminalCleanupPassesPerSession) return Promise.resolve();
+  terminalCleanupSessionPasses.set(validatedUid, passes + 1);
+  const pump = cleanupRetainedTerminalVaultPathRewriteJobsPass(validatedUid, {
+    jobsPerPass: scheduledTerminalCleanupJobsPerPass,
+    queryLimit: scheduledTerminalCleanupQueryLimit,
+    stepsPerPass: scheduledTerminalCleanupStepsPerPass
+  })
+    .then((progress) => {
+      // A readiness-time probe with no terminal root should not consume the
+      // session budget. A retained proof or any progress does consume it, so
+      // repeated calls cannot create a read/write burst.
+      if (
+        progress.cleanedJobs === 0
+        && progress.removedSteps === 0
+        && !progress.hasMore
+        && progress.retryAfterMs === 0
+      ) {
+        const currentPasses = terminalCleanupSessionPasses.get(validatedUid);
+        if (currentPasses === passes + 1) {
+          terminalCleanupSessionPasses.set(validatedUid, passes);
+        }
+      }
+    })
+    .finally(() => {
+      if (terminalCleanupPumps.get(validatedUid) === pump) {
+        terminalCleanupPumps.delete(validatedUid);
+      }
+    });
+  terminalCleanupPumps.set(validatedUid, pump);
+  return pump;
 }
 
 async function markBlocked(
@@ -712,6 +1494,7 @@ async function markPathStateConflict(uid: string, jobId: string) {
     const current = validateStoredJob(snapshot.data(), uid, jobId);
     if (
       current.status !== "prepared"
+      && current.status !== "not-applied"
       && !(current.status === "blocked" && current.lastErrorCode === "path-state-conflict")
     ) return current;
     const next: StoredVaultPathRewriteJob = {
@@ -758,14 +1541,51 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
   if (!loaded) {
     throw new VaultPathRewriteJobError("invalid", "복구할 경로 재작성 작업을 찾을 수 없습니다.");
   }
+  if (!preparationRecoveryIsDue(loaded.stored)) {
+    return { recovery: "deferred", job: summary(loaded.stored, jobId, loaded.manifest) };
+  }
   if (loaded.stored.status === "preparing") {
-    throw new VaultPathRewriteJobError("not-ready", "경로 재작성 단계가 아직 모두 준비되지 않았습니다.");
+    const abandoned = await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(loaded.reference);
+      if (!snapshot.exists()) {
+        throw new VaultPathRewriteJobError("conflict", "경로 재작성 작업이 복구 중 삭제되었습니다.");
+      }
+      const current = validateStoredJob(snapshot.data(), uid, jobId);
+      if (current.status !== "preparing") return current;
+      if (!preparationRecoveryIsDue(current)) return current;
+      const next: StoredVaultPathRewriteJob = {
+        ...current,
+        status: "abandoned",
+        lastErrorCode: null,
+        revision: current.revision + 1
+      };
+      transaction.update(loaded.reference, {
+        status: next.status,
+        lastErrorCode: next.lastErrorCode,
+        revision: next.revision,
+        abandonedAt: serverTimestamp(),
+        completedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      return next;
+    });
+    if (terminalJob(abandoned)) {
+      void scheduleTerminalVaultPathRewriteCleanup(uid).catch(() => undefined);
+    }
+    return recoveryResult(abandoned, jobId, loaded.manifest);
+  }
+  if (loaded.stored.status === "abandoned") {
+    void scheduleTerminalVaultPathRewriteCleanup(uid).catch(() => undefined);
+    return { recovery: "not-applied", job: summary(loaded.stored, jobId, loaded.manifest) };
   }
   if (
     loaded.stored.status === "ready"
     || loaded.stored.status === "running"
     || loaded.stored.status === "completed"
   ) {
+    if (loaded.stored.status === "completed") {
+      void scheduleTerminalVaultPathRewriteCleanup(uid).catch(() => undefined);
+    }
     return { recovery: "activated", job: summary(loaded.stored, jobId, loaded.manifest) };
   }
   if (loaded.stored.status === "blocked" && loaded.stored.lastErrorCode !== "path-state-conflict") {
@@ -828,9 +1648,10 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
     if (current.status === "preparing") {
       throw new VaultPathRewriteJobError("not-ready", "경로 재작성 단계가 아직 모두 준비되지 않았습니다.");
     }
+    if (!preparationRecoveryIsDue(current)) return current;
     if (current.status === "blocked" && current.lastErrorCode !== "path-state-conflict") return current;
 
-    if (allNew) {
+    if (allNew && !atomicActivationMode(current)) {
       const status: VaultPathRewriteJobStatus = current.stepCount === 0 ? "completed" : "ready";
       const next: StoredVaultPathRewriteJob = {
         ...current,
@@ -849,11 +1670,10 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
       });
       return next;
     }
-    if (allOld) {
-      if (current.status === "prepared" && current.lastErrorCode === null) return current;
+    if (allOld && atomicActivationMode(current)) {
       const next: StoredVaultPathRewriteJob = {
         ...current,
-        status: "prepared",
+        status: "abandoned",
         lastErrorCode: null,
         revision: current.revision + 1
       };
@@ -861,6 +1681,28 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
         status: next.status,
         lastErrorCode: next.lastErrorCode,
         revision: next.revision,
+        abandonedAt: serverTimestamp(),
+        completedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      return next;
+    }
+    if (allOld) {
+      const recoveryCheckCount = (current.recoveryCheckCount ?? 0) + 1;
+      const next: StoredVaultPathRewriteJob = {
+        ...current,
+        status: "not-applied",
+        lastErrorCode: null,
+        recoveryCheckCount,
+        revision: current.revision + 1
+      };
+      transaction.update(loaded.reference, {
+        status: next.status,
+        lastErrorCode: next.lastErrorCode,
+        recoveryCheckCount: next.recoveryCheckCount,
+        lastRecoveryCheckAt: serverTimestamp(),
+        revision: next.revision,
+        ...(current.status === "not-applied" ? {} : { notAppliedAt: serverTimestamp() }),
         updatedAt: serverTimestamp()
       });
       return next;
@@ -885,6 +1727,9 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
     return next;
   });
 
+  if (terminalJob(transitioned)) {
+    void scheduleTerminalVaultPathRewriteCleanup(uid).catch(() => undefined);
+  }
   return recoveryResult(transitioned, jobId, loaded.manifest);
 }
 
@@ -918,7 +1763,12 @@ export async function resumeVaultPathRewriteJob(input: {
   if (!loaded) {
     throw new VaultPathRewriteJobError("invalid", "재개할 경로 재작성 작업을 찾을 수 없습니다.");
   }
-  if (loaded.stored.status === "preparing" || loaded.stored.status === "prepared") {
+  if (
+    loaded.stored.status === "preparing"
+    || loaded.stored.status === "prepared"
+    || loaded.stored.status === "not-applied"
+    || loaded.stored.status === "abandoned"
+  ) {
     throw new VaultPathRewriteJobError("not-ready", "경로 재작성 단계가 아직 모두 준비되지 않았습니다.");
   }
   if (loaded.stored.status === "blocked" && loaded.stored.lastErrorCode === "path-state-conflict") {
@@ -928,6 +1778,7 @@ export async function resumeVaultPathRewriteJob(input: {
     );
   }
   if (loaded.stored.status === "completed") {
+    void scheduleTerminalVaultPathRewriteCleanup(uid).catch(() => undefined);
     return { ...summary(loaded.stored, jobId, loaded.manifest), processedSteps: 0 };
   }
 
@@ -937,7 +1788,32 @@ export async function resumeVaultPathRewriteJob(input: {
       throw new VaultPathRewriteJobError("conflict", "경로 재작성 작업이 실행 전 삭제되었습니다.");
     }
     const stored = validateStoredJob(snapshot.data(), uid, jobId);
-    if (stored.status === "preparing" || stored.status === "prepared" || stored.status === "completed") return stored;
+    if (
+      stored.status === "preparing"
+      || stored.status === "prepared"
+      || stored.status === "not-applied"
+      || stored.status === "abandoned"
+      || stored.status === "completed"
+    ) return stored;
+    if (
+      atomicActivationMode(stored)
+      && stored.status === "ready"
+      && stored.stepCount === 0
+      && stored.cursor === 0
+    ) {
+      const next: StoredVaultPathRewriteJob = {
+        ...stored,
+        status: "completed",
+        revision: stored.revision + 1
+      };
+      transaction.update(loaded.reference, {
+        status: next.status,
+        revision: next.revision,
+        completedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      return next;
+    }
     const next: StoredVaultPathRewriteJob = {
       ...stored,
       status: "running",
@@ -1080,5 +1956,8 @@ export async function resumeVaultPathRewriteJob(input: {
     processedSteps += 1;
   }
 
+  if (current.status === "completed") {
+    void scheduleTerminalVaultPathRewriteCleanup(uid).catch(() => undefined);
+  }
   return { ...summary(current, jobId, loaded.manifest), processedSteps };
 }

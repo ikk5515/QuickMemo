@@ -90,6 +90,7 @@ const mocks = vi.hoisted(() => {
     ensureVaultFolderTree: vi.fn().mockResolvedValue({ status: "ready" }),
     mutateVaultNote: vi.fn(),
     mutateVaultFolder: vi.fn(),
+    repairVaultFolderTree: vi.fn().mockResolvedValue({ status: "created" }),
     onSnapshot: vi.fn((...args: unknown[]) => {
       void args;
       return vi.fn();
@@ -158,7 +159,8 @@ vi.mock("./blobAttachments", () => ({
 
 vi.mock("./vaultFolderMutations", () => ({
   ensureVaultFolderTree: mocks.ensureVaultFolderTree,
-  mutateVaultFolder: mocks.mutateVaultFolder
+  mutateVaultFolder: mocks.mutateVaultFolder,
+  repairVaultFolderTree: mocks.repairVaultFolderTree
 }));
 
 vi.mock("./vaultNoteMutations", async (importOriginal) => {
@@ -227,6 +229,7 @@ describe("revision-aware note persistence", () => {
       revision: typeof payload.expectedRevision === "number" ? payload.expectedRevision + 1 : 1,
       treeRevision: 1
     }));
+    mocks.repairVaultFolderTree.mockReset().mockResolvedValue({ status: "created" });
     mocks.runTransaction.mockImplementation(async (_db, updateFunction) => updateFunction(mocks.transaction));
   });
 
@@ -285,6 +288,7 @@ describe("revision-aware note persistence", () => {
     mocks.getDocsFromServer.mockResolvedValueOnce({ docs: documents });
 
     await expect(loadOwnedVaultCutoverInventory("user-a")).resolves.toEqual({
+      allNotes: expect.arrayContaining(documents.map((document) => expect.objectContaining({ id: document.id }))),
       activeNotes: [expect.objectContaining({ id: "active" })],
       deletedNotes: [expect.objectContaining({ id: "deleted" })]
     });
@@ -891,6 +895,71 @@ describe("revision-aware note persistence", () => {
     expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
+  it("repairs a stale folder tree and retries a note mutation exactly once", async () => {
+    mocks.mutateVaultNote
+      .mockRejectedValueOnce(new VaultNoteApiError("vault_tree_repair_required", 409))
+      .mockResolvedValueOnce({
+        lastMutationId: "mutation-a",
+        noteId: "note-a",
+        ok: true,
+        revision: 5
+      });
+
+    await expect(updateRevisionedNoteFolder({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-a"),
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).resolves.toMatchObject({ revision: 5 });
+
+    expect(mocks.repairVaultFolderTree).toHaveBeenCalledWith("user-a", undefined);
+    expect(mocks.mutateVaultNote).toHaveBeenCalledTimes(2);
+    expect(mocks.mutateVaultNote.mock.calls[0]?.[1]).toEqual(mocks.mutateVaultNote.mock.calls[1]?.[1]);
+  });
+
+  it("does not loop when a repaired-tree retry is rejected", async () => {
+    const first = new VaultNoteApiError("vault_tree_repair_required", 409);
+    const second = new VaultNoteApiError("vault_parent_unavailable", 409);
+    mocks.mutateVaultNote.mockRejectedValueOnce(first).mockRejectedValueOnce(second);
+
+    await expect(updateRevisionedNoteFolder({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-a"),
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).rejects.toBe(second);
+
+    expect(mocks.mutateVaultNote).toHaveBeenCalledTimes(2);
+    expect(mocks.repairVaultFolderTree).toHaveBeenCalledOnce();
+  });
+
+  it("repairs a stale parent index before retrying a note mutation exactly once", async () => {
+    mocks.mutateVaultNote
+      .mockRejectedValueOnce(new VaultNoteApiError("vault_parent_unavailable", 409))
+      .mockResolvedValueOnce({
+        lastMutationId: "mutation-parent",
+        noteId: "note-a",
+        ok: true,
+        revision: 5
+      });
+
+    await expect(updateRevisionedNoteFolder({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-a"),
+      noteId: "note-a",
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).resolves.toMatchObject({ revision: 5 });
+
+    expect(mocks.repairVaultFolderTree).toHaveBeenCalledWith("user-a", undefined);
+    expect(mocks.mutateVaultNote).toHaveBeenCalledTimes(2);
+  });
+
   it("propagates the server's rejection at the maximum revision", async () => {
     const limitReached = new VaultNoteApiError("revision_limit", 409);
     mocks.mutateVaultNote.mockRejectedValueOnce(limitReached);
@@ -975,6 +1044,27 @@ describe("revision-aware note persistence", () => {
       readerUids: ["user-a"]
     });
     expect(mocks.runTransaction).not.toHaveBeenCalled();
+  });
+
+  it("forwards the atomic rewrite binding and maps a concurrent note name claim", async () => {
+    const activation = { expectedRevision: 7, jobId: `pr2_${"N".repeat(43)}` };
+    mocks.mutateVaultNote.mockRejectedValueOnce(new VaultNoteApiError("vault_name_conflict", 409));
+    await expect(updateRevisionedNoteFolder({
+      expectedRevision: 4,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-a"),
+      noteId: "note-a",
+      pathRewriteActivation: activation,
+      readerUids: ["user-a"],
+      uid: "user-a"
+    })).rejects.toMatchObject({
+      code: "vault/name-conflict",
+      claimId: vaultClaimId
+    });
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", expect.objectContaining({
+      action: "move",
+      pathRewriteActivation: activation
+    }));
   });
 
   it("delegates encrypted folder creation and parent validation to the authoritative server tree", async () => {
@@ -1106,6 +1196,38 @@ describe("revision-aware note persistence", () => {
     });
   });
 
+  it("repairs a stale server tree and retries a folder move exactly once", async () => {
+    mocks.transaction.get.mockResolvedValueOnce({
+      data: () => ({
+        encryptedName: encryptedPayload,
+        ownerUid: "user-a",
+        parentId: null,
+        revision: 1,
+        wrappedKey
+      }),
+      exists: () => true,
+      id: "folder-a"
+    });
+    mocks.mutateVaultFolder
+      .mockRejectedValueOnce(Object.assign(new Error("stale tree"), {
+        code: "vault_tree_stale"
+      }))
+      .mockResolvedValueOnce({ folderId: "folder-a", revision: 2, treeRevision: 4 });
+
+    await expect(updateEncryptedNoteFolder({
+      expectedRevision: 1,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-b"),
+      ownerUid: "user-a",
+      parentId: "folder-b"
+    })).resolves.toMatchObject({ folderId: "folder-a", revision: 2 });
+
+    expect(mocks.repairVaultFolderTree).toHaveBeenCalledWith("user-a", undefined);
+    expect(mocks.mutateVaultFolder).toHaveBeenCalledTimes(2);
+    expect(mocks.mutateVaultFolder.mock.calls[0]?.[1])
+      .toEqual(mocks.mutateVaultFolder.mock.calls[1]?.[1]);
+  });
+
   it("uses the dedicated folder collision recovery action", async () => {
     await expect(resolveEncryptedNoteFolderCollision({
       encryptedName: encryptedPayload,
@@ -1122,6 +1244,35 @@ describe("revision-aware note persistence", () => {
       folderId: "folder-a",
       nameClaim: vaultNameClaim(null)
     });
+  });
+
+  it("forwards atomic rewrite activation for folder moves and collision recovery", async () => {
+    const activation = { expectedRevision: 9, jobId: `pr2_${"F".repeat(43)}` };
+    await updateEncryptedNoteFolder({
+      expectedRevision: 1,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim("folder-b"),
+      ownerUid: "user-a",
+      parentId: "folder-b",
+      pathRewriteActivation: activation
+    });
+    expect(mocks.mutateVaultFolder).toHaveBeenLastCalledWith("user-a", expect.objectContaining({
+      action: "move",
+      pathRewriteActivation: activation
+    }));
+
+    await resolveEncryptedNoteFolderCollision({
+      encryptedName: encryptedPayload,
+      expectedRevision: 1,
+      folderId: "folder-a",
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      pathRewriteActivation: activation
+    });
+    expect(mocks.mutateVaultFolder).toHaveBeenLastCalledWith("user-a", expect.objectContaining({
+      action: "resolve-collision",
+      pathRewriteActivation: activation
+    }));
   });
 
   it("delegates deep folder moves without a client-side depth-one ceiling", async () => {
@@ -1646,6 +1797,7 @@ describe("revision-aware note persistence", () => {
       noteId: "note-a",
       readerUids: ["user-a", "user-b"]
     });
+    expect(mocks.repairVaultFolderTree).not.toHaveBeenCalled();
   });
 
   it("rejects restore when another target acquired the released claim", async () => {

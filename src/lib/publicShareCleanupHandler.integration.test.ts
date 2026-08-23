@@ -1,15 +1,25 @@
-import { generateKeyPairSync, webcrypto } from "node:crypto";
+import { createHash, generateKeyPairSync, webcrypto } from "node:crypto";
 import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import cleanupHandler, {
   type CleanupHttpRequest,
   type CleanupHttpResponse
 } from "../../api/cleanup-public-shares.js";
+import {
+  canonicalVaultInventoryManifestEntryKey,
+  canonicalVaultInventoryManifestEntryToken,
+  canonicalVaultInventoryManifestShard,
+  vaultInventoryManifestContract,
+  vaultInventoryManifestMarkerPath,
+  vaultInventoryManifestShardIndexFromEntryKey,
+  vaultInventoryManifestShardPath
+} from "../../shared/vault-inventory-manifest.js";
 
 type FirestoreValue = {
   arrayValue?: { values?: FirestoreValue[] };
   booleanValue?: boolean;
   integerValue?: number | string;
+  mapValue?: { fields?: Record<string, FirestoreValue> };
   nullValue?: null;
   stringValue?: string;
   timestampValue?: string;
@@ -168,6 +178,7 @@ class FakeFirestoreRest {
   raceCleanupClaimHeartbeatDocumentOnce = "";
   raceEmailQuotaDocumentOnce = "";
   raceEmailTreeDeliveryOnce = "";
+  raceManifestBootstrapMarkerOnce = "";
   raceCleanupClaimReadyUploadOnce: {
     attachmentName: string;
     noteName: string;
@@ -299,7 +310,9 @@ class FakeFirestoreRest {
 
   private writeDocumentName(write: Record<string, unknown>) {
     const update = write.update as { name?: string } | undefined;
-    return typeof write.delete === "string" ? write.delete : update?.name ?? "";
+    return typeof write.delete === "string"
+      ? write.delete
+      : typeof write.verify === "string" ? write.verify : update?.name ?? "";
   }
 
   private validatePrecondition(write: Record<string, unknown>) {
@@ -436,6 +449,22 @@ class FakeFirestoreRest {
       return this.json({ error: { status: "UNAVAILABLE" } }, 503);
     }
 
+    if (
+      this.raceManifestBootstrapMarkerOnce
+      && writes.some((write) =>
+        write.verify === this.raceManifestBootstrapMarkerOnce
+        && (write.currentDocument as { exists?: boolean } | undefined)?.exists === false
+      )
+    ) {
+      const name = this.raceManifestBootstrapMarkerOnce;
+      this.documents.set(name, {
+        fields: {},
+        name,
+        updateTime: this.nextUpdateTime()
+      });
+      this.raceManifestBootstrapMarkerOnce = "";
+    }
+
     if (!writes.every((write) => this.validatePrecondition(write))) {
       return this.json({ error: { status: "ABORTED" } }, 409);
     }
@@ -447,6 +476,9 @@ class FakeFirestoreRest {
     for (const write of writes) {
       if (typeof write.delete === "string") {
         nextDocuments.delete(write.delete);
+        continue;
+      }
+      if (typeof write.verify === "string") {
         continue;
       }
 
@@ -553,6 +585,111 @@ function addSecureShareCopyNote(
     targetType: stringValue("entry")
   });
   return noteName;
+}
+
+function sha256Base64Url(value: string) {
+  return createHash("sha256").update(value, "utf8").digest("base64url");
+}
+
+function manifestNoteDocument(
+  noteId: string,
+  fields: Record<string, FirestoreValue>
+) {
+  return {
+    contentFormat: fields.contentFormat?.stringValue,
+    entryKind: fields.entryKind?.stringValue,
+    folderId: fields.folderId?.nullValue === null
+      ? null
+      : fields.folderId?.stringValue,
+    id: noteId,
+    isDeleted: fields.isDeleted?.booleanValue,
+    isPurged: fields.isPurged?.booleanValue,
+    ownerUid: fields.ownerUid?.stringValue,
+    revision: Number(fields.revision?.integerValue),
+    secureShareCopyState: fields.secureShareCopyState?.stringValue,
+    type: fields.type?.stringValue,
+    vaultImportJobId: fields.vaultImportJobId?.stringValue,
+    vaultNameClaimId: fields.vaultNameClaimId?.stringValue,
+    vaultNameIndexVersion: fields.vaultNameIndexVersion?.integerValue === undefined
+      ? undefined
+      : Number(fields.vaultNameIndexVersion.integerValue)
+  };
+}
+
+function addEmptyVaultInventoryManifest(
+  backend: FakeFirestoreRest,
+  ownerUid = "owner-a"
+) {
+  const epoch = 1;
+  const createdAt = new Date(Date.now() - 60_000).toISOString();
+  backend.add(vaultInventoryManifestMarkerPath(ownerUid), {
+    createdAt: timestampValue(createdAt),
+    epoch: integerValue(epoch),
+    ownerUid: stringValue(ownerUid),
+    shardCount: integerValue(vaultInventoryManifestContract.shardCount),
+    updatedAt: timestampValue(createdAt),
+    version: integerValue(vaultInventoryManifestContract.version)
+  });
+  for (
+    let shardIndex = 0;
+    shardIndex < vaultInventoryManifestContract.shardCount;
+    shardIndex += 1
+  ) {
+    const revision = 1;
+    const root = sha256Base64Url(canonicalVaultInventoryManifestShard({
+      entries: {},
+      epoch,
+      revision,
+      shardIndex,
+      uid: ownerUid
+    }));
+    backend.add(vaultInventoryManifestShardPath(ownerUid, shardIndex), {
+      createdAt: timestampValue(createdAt),
+      entries: { mapValue: { fields: {} } },
+      epoch: integerValue(epoch),
+      ownerUid: stringValue(ownerUid),
+      revision: integerValue(revision),
+      root: stringValue(root),
+      shardIndex: integerValue(shardIndex),
+      updatedAt: timestampValue(createdAt),
+      version: integerValue(vaultInventoryManifestContract.version)
+    });
+  }
+}
+
+function manifestEntryForNote(
+  backend: FakeFirestoreRest,
+  noteId: string,
+  nextState: "active" | "aborted"
+) {
+  const note = backend.get(`notes/${noteId}`);
+  if (!note) throw new Error(`Missing test note: ${noteId}`);
+  const document = manifestNoteDocument(noteId, note.fields);
+  const ownerUid = String(document.ownerUid);
+  const entryKey = sha256Base64Url(canonicalVaultInventoryManifestEntryKey({
+    document,
+    kind: "note",
+    uid: ownerUid
+  }));
+  const nextDocument = {
+    ...document,
+    secureShareCopyState: nextState,
+    ...(nextState === "aborted" ? {
+      isDeleted: true,
+      revision: Number(document.revision) + 1
+    } : {})
+  };
+  const tokenPreimage = canonicalVaultInventoryManifestEntryToken({
+    document: nextDocument,
+    kind: "note",
+    uid: ownerUid
+  });
+  return {
+    entryKey,
+    ownerUid,
+    shardIndex: vaultInventoryManifestShardIndexFromEntryKey(entryKey),
+    token: tokenPreimage === null ? null : sha256Base64Url(tokenPreimage)
+  };
 }
 
 function legacySecureShareCopyNote(
@@ -1776,6 +1913,164 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     expect(
       backend.pathsStartingWith("publicShareEmailChallenges/expired-")
     ).toHaveLength(0);
+  });
+
+  it("updates initialized Vault inventory shards atomically for copy activation and abort", async () => {
+    const backend = new FakeFirestoreRest();
+    const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+
+    completedBackfillCursor(backend);
+    addSecureShareCopyNote(
+      backend,
+      "manifest-active-copy",
+      "copying",
+      stale,
+      { expected: 1, ready: 1, reserved: 1 }
+    );
+    addSecureShareCopyNote(
+      backend,
+      "manifest-aborted-copy",
+      "copying",
+      stale,
+      { expected: 1, ready: 0, reserved: 1 }
+    );
+    backend.add("notes/manifest-aborted-copy/attachments/pending-copy", {
+      isReady: booleanValue(false),
+      ownerUid: stringValue("owner-a"),
+      quotaReserved: booleanValue(false),
+      secureShareCopyJobId: stringValue("copy_job_handler_test_1234")
+    });
+    addEmptyVaultInventoryManifest(backend);
+    const activatedEntry = manifestEntryForNote(
+      backend,
+      "manifest-active-copy",
+      "active"
+    );
+    const abortedEntry = manifestEntryForNote(
+      backend,
+      "manifest-aborted-copy",
+      "aborted"
+    );
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      staleSecureShareCopyJobsAborted: 1,
+      staleSecureShareCopyJobsActivated: 1,
+      staleSecureShareCopyJobsRetained: 0,
+      staleSecureShareCopyJobsScanned: 2
+    });
+    expect(backend.get("notes/manifest-active-copy")?.fields.secureShareCopyState)
+      .toEqual(stringValue("active"));
+    expect(backend.get("notes/manifest-aborted-copy")?.fields.secureShareCopyState)
+      .toEqual(stringValue("aborted"));
+
+    const activatedShard = backend.get(vaultInventoryManifestShardPath(
+      activatedEntry.ownerUid,
+      activatedEntry.shardIndex
+    ));
+    const activatedEntries = activatedShard?.fields.entries?.mapValue?.fields ?? {};
+    expect(activatedEntries[activatedEntry.entryKey]).toEqual(
+      stringValue(String(activatedEntry.token))
+    );
+
+    const abortedShard = backend.get(vaultInventoryManifestShardPath(
+      abortedEntry.ownerUid,
+      abortedEntry.shardIndex
+    ));
+    const abortedEntries = abortedShard?.fields.entries?.mapValue?.fields ?? {};
+    expect(abortedEntry.token).toBeNull();
+    expect(abortedEntries[abortedEntry.entryKey]).toBeUndefined();
+
+    for (const shard of new Set([activatedShard, abortedShard])) {
+      if (!shard) throw new Error("Missing test inventory shard");
+      const entries = Object.fromEntries(Object.entries(
+        shard.fields.entries?.mapValue?.fields ?? {}
+      ).map(([key, value]) => [key, String(value.stringValue)]));
+      const epoch = Number(shard.fields.epoch?.integerValue);
+      const revision = Number(shard.fields.revision?.integerValue);
+      const shardIndex = Number(shard.fields.shardIndex?.integerValue);
+      expect(shard.fields.root).toEqual(stringValue(sha256Base64Url(
+        canonicalVaultInventoryManifestShard({
+          entries,
+          epoch,
+          revision,
+          shardIndex,
+          uid: "owner-a"
+        })
+      )));
+    }
+  });
+
+  it("fails closed when the initialized Vault inventory target shard is malformed", async () => {
+    const backend = new FakeFirestoreRest();
+    const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+
+    completedBackfillCursor(backend);
+    addSecureShareCopyNote(
+      backend,
+      "manifest-malformed-copy",
+      "copying",
+      stale,
+      { expected: 1, ready: 1, reserved: 1 }
+    );
+    addEmptyVaultInventoryManifest(backend);
+    const entry = manifestEntryForNote(backend, "manifest-malformed-copy", "active");
+    const shard = backend.get(vaultInventoryManifestShardPath(
+      entry.ownerUid,
+      entry.shardIndex
+    ));
+    if (!shard) throw new Error("Missing test inventory shard");
+    shard.fields.root = stringValue("A".repeat(43));
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      staleSecureShareCopyJobsAborted: 0,
+      staleSecureShareCopyJobsActivated: 0,
+      staleSecureShareCopyJobsRetained: 1,
+      staleSecureShareCopyJobsScanned: 1
+    });
+    expect(backend.get("notes/manifest-malformed-copy")?.fields.secureShareCopyState)
+      .toEqual(stringValue("copying"));
+    expect(shard.fields.root).toEqual(stringValue("A".repeat(43)));
+  });
+
+  it("lets concurrent manifest bootstrap win without partially activating a copy", async () => {
+    const backend = new FakeFirestoreRest();
+    const stale = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+
+    completedBackfillCursor(backend);
+    addSecureShareCopyNote(
+      backend,
+      "manifest-bootstrap-race-copy",
+      "copying",
+      stale,
+      { expected: 1, ready: 1, reserved: 1 }
+    );
+    backend.raceManifestBootstrapMarkerOnce = `${documentRoot}/${
+      vaultInventoryManifestMarkerPath("owner-a")
+    }`;
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      staleSecureShareCopyJobsAborted: 0,
+      staleSecureShareCopyJobsActivated: 0,
+      staleSecureShareCopyJobsRetained: 1,
+      staleSecureShareCopyJobsScanned: 1
+    });
+    expect(backend.get("notes/manifest-bootstrap-race-copy")?.fields.secureShareCopyState)
+      .toEqual(stringValue("copying"));
+    expect(backend.pathsStartingWith(
+      `vaultMaintenanceJobs/owner-a/${vaultInventoryManifestContract.collectionId}/shard-`
+    )).toHaveLength(0);
   });
 
   it("bounds global stale-copy recovery to twenty jobs per cron invocation", async () => {

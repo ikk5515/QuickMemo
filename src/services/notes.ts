@@ -36,7 +36,11 @@ import {
   uploadNoteAttachmentBlob,
   type BlobAttachmentUploadProgressHandler
 } from "./blobAttachments";
-import { ensureVaultFolderTree, mutateVaultFolder } from "./vaultFolderMutations";
+import {
+  ensureVaultFolderTree,
+  mutateVaultFolder,
+  repairVaultFolderTree
+} from "./vaultFolderMutations";
 import {
   mutateVaultNote,
   vaultNoteAccessPayload,
@@ -64,6 +68,7 @@ import type {
   VaultEntryKind,
   WrappedNoteKey
 } from "../types";
+import type { VaultPathRewriteActivationInput } from "./vaultPathRewriteJobs";
 
 export interface NoteSnapshot extends NoteDocument {
   id: string;
@@ -101,6 +106,8 @@ const maximumVaultCutoverOwnedNotes = 20_000;
  * and the server cutover seal owns the final normalization and verification.
  */
 export interface OwnedVaultCutoverInventory {
+  /** Complete raw owner inventory; callers apply the same lifecycle filter as the server fence. */
+  allNotes: NoteSnapshot[];
   activeNotes: NoteSnapshot[];
   deletedNotes: NoteSnapshot[];
 }
@@ -111,7 +118,11 @@ export async function loadOwnedVaultCutoverInventory(
   if (!uid || uid !== uid.trim() || uid.length > 128 || uid.includes("/")) {
     throw new Error("Vault 소유자를 확인할 수 없습니다.");
   }
-  const ownedQuery = query(collection(db, "notes"), where("ownerUid", "==", uid));
+  const ownedQuery = query(
+    collection(db, "notes"),
+    where("ownerUid", "==", uid),
+    limit(maximumVaultCutoverOwnedNotes + 1)
+  );
   const readOwned = async () => {
     const snapshot = await getDocsFromServer(ownedQuery);
     if (snapshot.docs.length > maximumVaultCutoverOwnedNotes) {
@@ -125,6 +136,7 @@ export async function loadOwnedVaultCutoverInventory(
 
   const notes = await readOwned();
   return {
+    allNotes: notes,
     activeNotes: sortedByUpdatedAt(notes.filter(visibleNote)),
     deletedNotes: sortedByUpdatedAt(notes.filter(deletedNote))
   };
@@ -178,6 +190,7 @@ export interface UpdateEncryptedNoteFolderInput extends VaultCutoverLeaseInput {
   ownerUid: string;
   parentId?: string | null;
   nameClaim: VaultNameClaimReservationInput;
+  pathRewriteActivation?: VaultPathRewriteActivationInput;
 }
 
 interface ResolveEncryptedNoteFolderCollisionInputBase extends VaultCutoverLeaseInput {
@@ -185,6 +198,7 @@ interface ResolveEncryptedNoteFolderCollisionInputBase extends VaultCutoverLease
   folderId: string;
   nameClaim: VaultNameClaimReservationInput;
   ownerUid: string;
+  pathRewriteActivation?: VaultPathRewriteActivationInput;
 }
 
 export type ResolveEncryptedNoteFolderCollisionInput =
@@ -258,6 +272,7 @@ export interface UpdateRevisionedEncryptedNoteInput {
   readerUids: string[];
   uid: string;
   nameClaim?: VaultNameClaimReservationInput;
+  pathRewriteActivation?: VaultPathRewriteActivationInput;
 }
 
 export interface BackfillRevisionedVaultNameClaimInput extends VaultCutoverLeaseInput {
@@ -283,6 +298,7 @@ export interface ResolveRevisionedVaultNameCollisionInput extends VaultCutoverLe
   noteId: string;
   readerUids: string[];
   uid: string;
+  pathRewriteActivation?: VaultPathRewriteActivationInput;
 }
 
 export interface UpdateRevisionedEncryptedNoteAndFolderInput extends UpdateRevisionedEncryptedNoteInput {
@@ -295,6 +311,7 @@ export interface UpdateRevisionedNoteAccessInput {
   nameClaim?: VaultNameClaimReservationInput;
   noteId: string;
   participantUids: string[];
+  pathRewriteActivation?: VaultPathRewriteActivationInput;
   type: NoteKind;
   uid: string;
   wrappedKeys: Record<string, WrappedNoteKey>;
@@ -303,10 +320,12 @@ export interface UpdateRevisionedNoteAccessInput {
 export interface UpdateRevisionedNoteFolderInput {
   expectedRevision: number;
   folderId: string | null;
+  historySummary?: EncryptedPayload;
   nameClaim: VaultNameClaimReservationInput;
   noteId: string;
   readerUids: string[];
   uid: string;
+  pathRewriteActivation?: VaultPathRewriteActivationInput;
 }
 
 export interface RevisionedNoteLifecycleInput {
@@ -357,6 +376,17 @@ export class NoteFolderLimitError extends Error {
 }
 
 const maxEncryptedVaultFoldersPerOwner = 2_000;
+const repairableVaultTreeCodes = new Set([
+  "vault_parent_unavailable",
+  "vault_tree_invalid",
+  "vault_tree_repair_required",
+  "vault_tree_stale"
+]);
+
+function vaultTreeRepairableError(error: unknown) {
+  return error && typeof error === "object" && "code" in error
+    && repairableVaultTreeCodes.has(String(error.code));
+}
 
 async function commitVaultFolderMutation(
   ownerUid: string,
@@ -364,13 +394,28 @@ async function commitVaultFolderMutation(
   claimId?: string,
   signal?: AbortSignal
 ) {
+  const commit = () => signal
+    ? mutateVaultFolder(ownerUid, payload, signal)
+    : mutateVaultFolder(ownerUid, payload);
+  let commitError: unknown;
   try {
-    return await (signal
-      ? mutateVaultFolder(ownerUid, payload, signal)
-      : mutateVaultFolder(ownerUid, payload));
+    return await commit();
   } catch (error) {
-    const code = error && typeof error === "object" && "code" in error
-      ? String(error.code)
+    commitError = error;
+  }
+  if (vaultTreeRepairableError(commitError)) {
+    signal?.throwIfAborted();
+    await repairVaultFolderTree(ownerUid, signal);
+    signal?.throwIfAborted();
+    try {
+      return await commit();
+    } catch (error) {
+      commitError = error;
+    }
+  }
+  {
+    const code = commitError && typeof commitError === "object" && "code" in commitError
+      ? String(commitError.code)
       : "";
     if (code === "vault_name_conflict" && claimId) {
       throw new VaultNameConflictError(claimId);
@@ -378,7 +423,7 @@ async function commitVaultFolderMutation(
     if (code === "vault_tree_capacity") {
       throw new NoteFolderLimitError(maxEncryptedVaultFoldersPerOwner);
     }
-    throw error;
+    throw commitError;
   }
 }
 
@@ -387,27 +432,39 @@ async function commitServerVaultNoteMutation<TPayload extends VaultNoteApiPayloa
   payload: TPayload,
   options: { claimId?: string; expectedRevision?: number; signal?: AbortSignal } = {}
 ): Promise<VaultNoteMutationResultFor<TPayload>> {
+  const commit = () => options.signal
+    ? mutateVaultNote(ownerUid, payload, options.signal)
+    : mutateVaultNote(ownerUid, payload);
   try {
-    return await (options.signal
-      ? mutateVaultNote(ownerUid, payload, options.signal)
-      : mutateVaultNote(ownerUid, payload));
+    return await commit();
   } catch (error) {
-    if (error instanceof VaultNoteApiError) {
-      if (error.code === "vault_name_conflict" && options.claimId) {
+    let commitError = error;
+    if (commitError instanceof VaultNoteApiError && vaultTreeRepairableError(commitError)) {
+      options.signal?.throwIfAborted();
+      await repairVaultFolderTree(ownerUid, options.signal);
+      options.signal?.throwIfAborted();
+      try {
+        return await commit();
+      } catch (retryError) {
+        commitError = retryError;
+      }
+    }
+    if (commitError instanceof VaultNoteApiError) {
+      if (commitError.code === "vault_name_conflict" && options.claimId) {
         throw new VaultNameConflictError(options.claimId);
       }
       if (
-        error.code === "revision_conflict"
+        commitError.code === "revision_conflict"
         && options.expectedRevision !== undefined
-        && error.actualRevision !== undefined
+        && commitError.actualRevision !== undefined
       ) {
         throw new NoteRevisionConflictError(
           options.expectedRevision,
-          error.actualRevision
+          commitError.actualRevision
         );
       }
     }
-    throw error;
+    throw commitError;
   }
 }
 
@@ -1596,7 +1653,7 @@ export async function updateRevisionedNoteFolder(input: UpdateRevisionedNoteFold
     ...payload,
     action: "move",
     expectedRevision
-  }, { expectedRevision });
+  }, { claimId: input.nameClaim.claimId, expectedRevision });
 }
 
 export async function updateNoteFolder(noteId: string, uid: string, folderId: string | null) {
@@ -2186,7 +2243,8 @@ export async function updateEncryptedNoteFolder(
     nameClaim,
     ...(input.encryptedName === undefined ? {} : { encryptedName: input.encryptedName }),
     ...(input.order === undefined ? {} : { order: input.order }),
-    ...(input.parentId === undefined ? {} : { parentId: input.parentId })
+    ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+    ...(input.pathRewriteActivation ? { pathRewriteActivation: input.pathRewriteActivation } : {})
   }, nameClaim.claimId, signal);
 }
 
@@ -2228,7 +2286,8 @@ export async function resolveEncryptedNoteFolderCollision(
       leaseGeneration: input.leaseGeneration,
       leaseId: input.leaseId
     }),
-    nameClaim
+    nameClaim,
+    ...(input.pathRewriteActivation ? { pathRewriteActivation: input.pathRewriteActivation } : {})
   } as const;
   let mutation: Parameters<typeof mutateVaultFolder>[1];
   if (input.encryptedName !== undefined) {
