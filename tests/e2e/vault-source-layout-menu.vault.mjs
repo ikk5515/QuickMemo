@@ -202,12 +202,21 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
     folderId: legacyAfterMove.folderId
   });
 
-  // Creating the copy makes it active. The converter content can therefore
-  // unmount before the surrounding Core dialog closes; target the stable
-  // dialog shell so the visibility check and click cannot race that switch.
-  if (await coreDialog.isVisible()) {
-    await coreDialog.getByRole("button", { name: "Core 도구 닫기", exact: true }).click();
+  // The converter child can unmount while the encrypted Vault snapshot
+  // reconciles. Close the stable shell when it remains mounted, and tolerate
+  // a failed click only when that shell has already closed on its own.
+  if (await coreDialog.count()) {
+    const closeCoreDialog = coreDialog.getByRole("button", {
+      name: "Core 도구 닫기",
+      exact: true
+    });
+    try {
+      await closeCoreDialog.click({ timeout: 2_000 });
+    } catch (error) {
+      if (await coreDialog.count()) throw error;
+    }
   }
+  await expect(coreDialog).toHaveCount(0);
   await explorer.getByRole("treeitem", { name: "새 노트 Markdown", exact: true }).click();
   await expect(page.getByLabel("노트 이름")).toHaveValue("새 노트 Markdown");
   await page.getByRole("button", { name: "소스 모드", exact: true }).click();
