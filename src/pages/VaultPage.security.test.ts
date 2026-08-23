@@ -171,6 +171,21 @@ describe("VaultPage security boundaries", () => {
     expect(bannerGate).not.toContain('vaultNameMigrationStatus === "ready"');
   });
 
+  it("contains a lazy message-batch failure without replacing the Vault draft tree", () => {
+    expect(vaultPageSource).toContain(
+      'lazy(() => import("../features/markdown/MarkdownMessageBatchDialog")'
+    );
+    const messageBatchGate = vaultPageSource.match(
+      /\{discordMessageBatch \? \([\s\S]*?<LazyMarkdownMessageBatchDialog[\s\S]*?\) : null\}/u
+    )?.[0] ?? "";
+
+    expect(messageBatchGate).toContain("<FeatureErrorBoundary");
+    expect(messageBatchGate).toContain('role="alert"');
+    expect(messageBatchGate).toContain("편집 내용은 유지됩니다.");
+    expect(messageBatchGate).toContain("setDiscordMessageBatch(null)");
+    expect(messageBatchGate).toContain("<Suspense");
+  });
+
   it("connects a server-confirmed encrypted Vault trash restore with claim collision checks", () => {
     expect(vaultPageSource).toContain("subscribeDeletedNotes(");
     expect(vaultPageSource).toContain("subscribeDeletedNoteFolders(");

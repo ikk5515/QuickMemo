@@ -10013,13 +10013,20 @@ function UnlockedVaultPage({
         </Suspense>
       ) : null}
       {discordMessageBatch ? (
-        <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">메시지 나누기 도구 불러오는 중…</div>}>
-          <LazyMarkdownMessageBatchDialog
-            delivery={discordMessageBatch}
-            onClose={() => setDiscordMessageBatch(null)}
-            returnFocusTo={markdownCopySelectRef.current}
-          />
-        </Suspense>
+        <FeatureErrorBoundary fallback={(
+          <div className="vault-dialog-loading" role="alert">
+            메시지 나누기 도구를 불러오지 못했습니다. 편집 내용은 유지됩니다.
+            <button onClick={() => setDiscordMessageBatch(null)} type="button">닫기</button>
+          </div>
+        )}>
+          <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">메시지 나누기 도구 불러오는 중…</div>}>
+            <LazyMarkdownMessageBatchDialog
+              delivery={discordMessageBatch}
+              onClose={() => setDiscordMessageBatch(null)}
+              returnFocusTo={markdownCopySelectRef.current}
+            />
+          </Suspense>
+        </FeatureErrorBoundary>
       ) : null}
       {templateDialogMode ? (
         <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">템플릿 도구 불러오는 중…</div>}>
