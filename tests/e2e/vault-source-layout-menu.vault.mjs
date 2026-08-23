@@ -178,7 +178,8 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
   expect(legacyAfterMove.revision).toBe(legacyBeforeMove.revision + 1);
 
   await page.getByRole("button", { name: "Markdown 복사본 만들기", exact: true }).click();
-  const formatDialog = page.getByRole("dialog").filter({
+  const coreDialog = page.getByRole("dialog", { name: "Vault Core 도구" });
+  const formatDialog = coreDialog.filter({
     has: page.getByLabel("Format converter")
   });
   await expect(formatDialog).toBeVisible();
@@ -201,9 +202,21 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
     folderId: legacyAfterMove.folderId
   });
 
-  if (await formatDialog.isVisible()) {
-    await formatDialog.getByRole("button", { name: "Core 도구 닫기", exact: true }).click();
+  // The converter child can unmount while the encrypted Vault snapshot
+  // reconciles. Close the stable shell when it remains mounted, and tolerate
+  // a failed click only when that shell has already closed on its own.
+  if (await coreDialog.count()) {
+    const closeCoreDialog = coreDialog.getByRole("button", {
+      name: "Core 도구 닫기",
+      exact: true
+    });
+    try {
+      await closeCoreDialog.click({ timeout: 2_000 });
+    } catch (error) {
+      if (await coreDialog.count()) throw error;
+    }
   }
+  await expect(coreDialog).toHaveCount(0);
   await explorer.getByRole("treeitem", { name: "새 노트 Markdown", exact: true }).click();
   await expect(page.getByLabel("노트 이름")).toHaveValue("새 노트 Markdown");
   await page.getByRole("button", { name: "소스 모드", exact: true }).click();
