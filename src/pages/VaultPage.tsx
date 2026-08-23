@@ -3,6 +3,7 @@ import {
   BookOpen,
   CalendarDays,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Columns3,
   Command as CommandIcon,
@@ -81,6 +82,7 @@ import {
   sameRevisionedDraft,
   type RevisionedEditableDraft
 } from "../features/vault/draftConcurrency";
+import { EntryIdleDebounce, vaultEntryAutosaveIdleMs } from "../features/vault/entryAutosave";
 import {
   shouldReleaseVaultEntryCreation,
   type CreatableVaultEntryKind,
@@ -93,11 +95,9 @@ import {
   type VaultPagePreviewContent,
   type VaultPagePreviewPosition
 } from "../features/vault/pagePreview";
-import {
-  buildVaultPathRewriteSourcePlans,
-  prepareVaultPathRewriteJob,
-  type PreparedVaultPathRewriteJob,
-  type VaultPathRewriteStepV1
+import type {
+  PreparedVaultPathRewriteJob,
+  VaultPathRewriteStepV1
 } from "../features/vault/pathRewriteJob";
 import {
   executeVaultPathRewrite,
@@ -146,7 +146,7 @@ import {
   MarkdownRenderer,
   exportMarkdown,
   exportMarkdownForDiscordAi,
-  previewLegacyHtmlToMarkdown,
+  previewMarkdownHtmlNormalization,
   type DiscordAiMarkdownDelivery,
   type MarkdownExportProfile,
   type MarkdownLinkPreviewInteraction,
@@ -253,6 +253,7 @@ import {
   createEncryptedVaultAsset,
   createEncryptedVaultEntry,
   createMarkdownVaultNote,
+  moveOnlyEncryptedVaultEntry,
   saveAndMoveEncryptedVaultEntry,
   saveEncryptedVaultEntry,
   type MarkdownNoteDraft
@@ -306,6 +307,7 @@ import {
   type NoteSnapshot
 } from "../services/notes";
 import { subscribeUsers } from "../services/users";
+import { VaultFolderApiError } from "../services/vaultFolderMutations";
 import {
   activatePreparedVaultIntegrityKey,
   createVaultIntegrityCutoverLeaseId,
@@ -318,14 +320,10 @@ import {
   type VaultIntegrityCutoverLease,
   VaultIntegrityApiError
 } from "../services/vaultIntegrity";
-import {
-  activateVaultPathRewriteJob,
-  ensureVaultPathRewriteJob,
-  listRecoverableVaultPathRewriteJobs,
-  recoverPreparedVaultPathRewriteJob,
-  resumeVaultPathRewriteJob,
-  type VaultPathRewriteJobSummary,
-  type VaultPathRewriteSourceSnapshot
+import type {
+  VaultPathRewriteActivationInput,
+  VaultPathRewriteJobSummary,
+  VaultPathRewriteSourceSnapshot
 } from "../services/vaultPathRewriteJobs";
 import {
   cleanupRetainedTerminalVaultImportJobs,
@@ -348,6 +346,64 @@ import {
 } from "../services/vaultWorkspace";
 import type { UserProfile } from "../types";
 import "../styles/vault.css";
+
+type VaultPathRewriteJobsModule = typeof import("../services/vaultPathRewriteJobs");
+type VaultPathRewriteJobModule = typeof import("../features/vault/pathRewriteJob");
+
+let vaultPathRewriteJobsModulePromise: Promise<VaultPathRewriteJobsModule> | null = null;
+let vaultPathRewriteJobModulePromise: Promise<VaultPathRewriteJobModule> | null = null;
+
+function loadVaultPathRewriteJobModule() {
+  vaultPathRewriteJobModulePromise ??= import("../features/vault/pathRewriteJob");
+  return vaultPathRewriteJobModulePromise;
+}
+
+function loadVaultPathRewriteJobsModule() {
+  vaultPathRewriteJobsModulePromise ??= import("../services/vaultPathRewriteJobs");
+  return vaultPathRewriteJobsModulePromise;
+}
+
+const buildVaultPathRewriteSourcePlans = (
+  ...args: Parameters<VaultPathRewriteJobModule["buildVaultPathRewriteSourcePlans"]>
+) => loadVaultPathRewriteJobModule()
+  .then((module) => module.buildVaultPathRewriteSourcePlans(...args));
+
+const prepareVaultPathRewriteJob = (
+  ...args: Parameters<VaultPathRewriteJobModule["prepareVaultPathRewriteJob"]>
+) => loadVaultPathRewriteJobModule()
+  .then((module) => module.prepareVaultPathRewriteJob(...args));
+
+const activateVaultPathRewriteJob = (
+  ...args: Parameters<VaultPathRewriteJobsModule["activateVaultPathRewriteJob"]>
+) => loadVaultPathRewriteJobsModule().then((module) => module.activateVaultPathRewriteJob(...args));
+
+const scheduleTerminalVaultPathRewriteCleanup = (
+  ...args: Parameters<VaultPathRewriteJobsModule["scheduleTerminalVaultPathRewriteCleanup"]>
+) => loadVaultPathRewriteJobsModule()
+  .then((module) => module.scheduleTerminalVaultPathRewriteCleanup(...args));
+
+const beginTerminalVaultPathRewriteCleanupSession = (
+  ...args: Parameters<VaultPathRewriteJobsModule["beginTerminalVaultPathRewriteCleanupSession"]>
+) => loadVaultPathRewriteJobsModule()
+  .then((module) => module.beginTerminalVaultPathRewriteCleanupSession(...args));
+
+const ensureVaultPathRewriteJob = (
+  ...args: Parameters<VaultPathRewriteJobsModule["ensureVaultPathRewriteJob"]>
+) => loadVaultPathRewriteJobsModule().then((module) => module.ensureVaultPathRewriteJob(...args));
+
+const scanRecoverableVaultPathRewriteJobs = (
+  ...args: Parameters<VaultPathRewriteJobsModule["scanRecoverableVaultPathRewriteJobs"]>
+) => loadVaultPathRewriteJobsModule()
+  .then((module) => module.scanRecoverableVaultPathRewriteJobs(...args));
+
+const recoverPreparedVaultPathRewriteJob = (
+  ...args: Parameters<VaultPathRewriteJobsModule["recoverPreparedVaultPathRewriteJob"]>
+) => loadVaultPathRewriteJobsModule()
+  .then((module) => module.recoverPreparedVaultPathRewriteJob(...args));
+
+const resumeVaultPathRewriteJob = (
+  ...args: Parameters<VaultPathRewriteJobsModule["resumeVaultPathRewriteJob"]>
+) => loadVaultPathRewriteJobsModule().then((module) => module.resumeVaultPathRewriteJob(...args));
 
 const LazyBaseView = lazy(() => import("../features/base/BaseView").then((module) => ({
   default: module.BaseView
@@ -595,12 +651,101 @@ function DailyNotesSettings({
 type LeftPanelMode = "files" | "search" | "tags" | "bookmarks";
 type RightPanelMode = "backlinks" | "outgoing" | "properties" | "outline" | "local-graph" | "history";
 
+class VaultPathRewriteSnapshotChangedError extends Error {
+  constructor(message = "Vault 구독 세대가 변경되었습니다.") {
+    super(message);
+    this.name = "VaultPathRewriteSnapshotChangedError";
+  }
+}
+
+interface VaultPathRewriteGenerationSignal {
+  decryptedFolders: readonly DecryptedVaultFolder[];
+  decryptedNotes: readonly DecryptedVaultNote[];
+  folderReservationSignature: string | null;
+  folderServerReady: boolean;
+  noteReservationSignature: string | null;
+  noteServerReady: boolean;
+  rawFolders: readonly NoteFolderSnapshot[];
+  rawNotes: readonly NoteSnapshot[];
+}
+
+export function vaultPathRewriteGenerationSignalChanged(
+  before: VaultPathRewriteGenerationSignal,
+  after: VaultPathRewriteGenerationSignal
+) {
+  return before.decryptedFolders !== after.decryptedFolders
+    || before.decryptedNotes !== after.decryptedNotes
+    || before.folderReservationSignature !== after.folderReservationSignature
+    || before.folderServerReady !== after.folderServerReady
+    || before.noteReservationSignature !== after.noteReservationSignature
+    || before.noteServerReady !== after.noteServerReady
+    || before.rawFolders !== after.rawFolders
+    || before.rawNotes !== after.rawNotes;
+}
+
+function pathRewriteInventoryFailureMessage(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error)) return null;
+  const code = String(error.code);
+  if (code === "vault_path_rewrite_inventory_changed") {
+    return "다른 탭에서 Vault 항목이나 폴더가 변경되어 작업을 중단했습니다. 최신 목록으로 다시 시도해주세요.";
+  }
+  if (code === "vault_path_rewrite_inventory_capacity") {
+    return "Vault 항목 또는 폴더 수가 안전한 경로 갱신 한도를 초과해 작업을 중단했습니다.";
+  }
+  if (code === "vault_inventory_manifest_invalid") {
+    return "암호화된 경로 인벤토리가 현재 Vault와 일치하지 않아 변경을 중단했습니다. 새로고침 후에도 반복되면 복구가 필요합니다.";
+  }
+  if (code === "vault_inventory_manifest_capacity") {
+    return "암호화된 경로 인벤토리 shard가 안전한 용량을 초과해 변경을 중단했습니다.";
+  }
+  return null;
+}
+
+function persistedEncryptedMutationPatch(result: {
+  revision: number;
+  encryptedBody?: DecryptedVaultNote["encryptedBody"];
+  encryptedTitle?: DecryptedVaultNote["encryptedTitle"];
+  vaultNameClaimId?: string;
+  vaultNameIndexVersion?: DecryptedVaultNote["vaultNameIndexVersion"];
+}): Partial<Pick<
+  DecryptedVaultNote,
+  "encryptedBody" | "encryptedTitle" | "vaultNameClaimId" | "vaultNameIndexVersion"
+>> {
+  return {
+    ...(result.encryptedBody ? { encryptedBody: result.encryptedBody } : {}),
+    ...(result.encryptedTitle ? { encryptedTitle: result.encryptedTitle } : {}),
+    ...(result.vaultNameClaimId ? { vaultNameClaimId: result.vaultNameClaimId } : {}),
+    ...(result.vaultNameIndexVersion !== undefined
+      ? { vaultNameIndexVersion: result.vaultNameIndexVersion }
+      : {})
+  };
+}
+
+function persistedEncryptedFolderMutationPatch(result: {
+  revision: number;
+  encryptedName?: DecryptedVaultFolder["encryptedName"];
+  vaultNameClaimId?: string;
+  vaultNameIndexVersion?: DecryptedVaultFolder["vaultNameIndexVersion"];
+}): Partial<Pick<
+  DecryptedVaultFolder,
+  "encryptedName" | "vaultNameClaimId" | "vaultNameIndexVersion"
+>> {
+  return {
+    ...(result.encryptedName ? { encryptedName: result.encryptedName } : {}),
+    ...(result.vaultNameClaimId ? { vaultNameClaimId: result.vaultNameClaimId } : {}),
+    ...(result.vaultNameIndexVersion !== undefined
+      ? { vaultNameIndexVersion: result.vaultNameIndexVersion }
+      : {})
+  };
+}
+
 async function resolveDeferredVaultFolderCollision(
   folder: DecryptedVaultFolder,
   profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
-  replacement: { name: string; parentId: string | null }
+  replacement: { name: string; parentId: string | null },
+  pathRewriteActivation?: VaultPathRewriteActivationInput
 ) {
   const { resolveVaultFolderNameCollision } = await import(
     "../features/vault/vaultFolderCollisionRecovery"
@@ -610,7 +755,8 @@ async function resolveDeferredVaultFolderCollision(
     profile,
     privateKey,
     vaultIntegrityKey,
-    replacement
+    replacement,
+    pathRewriteActivation
   );
 }
 
@@ -619,7 +765,8 @@ async function resolveDeferredVaultEntryCollision(
   uid: string,
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
-  replacement: { folderId: string | null; title: string }
+  replacement: { folderId: string | null; title: string },
+  pathRewriteActivation?: VaultPathRewriteActivationInput
 ) {
   const { resolveVaultEntryNameCollision } = await import(
     "../features/vault/vaultEntryCollisionRecovery"
@@ -629,7 +776,8 @@ async function resolveDeferredVaultEntryCollision(
     uid,
     privateKey,
     vaultIntegrityKey,
-    replacement
+    replacement,
+    pathRewriteActivation
   );
 }
 
@@ -1544,8 +1692,14 @@ function UnlockedVaultPage({
   const [workerLocalSnapshot, setWorkerLocalSnapshot] = useState<IndexGraphSnapshot | null>(null);
   const [leftMode, setLeftMode] = useState<LeftPanelMode>("files");
   const [rightMode, setRightMode] = useState<RightPanelMode>("backlinks");
-  const [leftOpen, setLeftOpen] = useState(() => !mobileVaultLayoutSnapshot());
-  const [rightOpen, setRightOpen] = useState(() => !mobileVaultLayoutSnapshot());
+  // Start closed until the encrypted workspace record has been restored. This
+  // prevents a saved closed layout from flashing both sidebars on first paint.
+  // First-time vaults still receive the open-panel defaults from
+  // createDefaultVaultWorkspaceState() in applyRestoredWorkspace().
+  const [leftOpen, setLeftOpen] = useState(false);
+  const [rightOpen, setRightOpen] = useState(false);
+  const leftOpenRef = useRef(leftOpen);
+  leftOpenRef.current = leftOpen;
   const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_VAULT_RIGHT_PANEL_WIDTH);
   const vaultViewportWidth = (
     typeof window === "undefined" ? 1_440 : window.innerWidth
@@ -1668,6 +1822,8 @@ function UnlockedVaultPage({
   const noteAccessScopeRef = useRef<string[]>([]);
   const noteSubscriptionServerReadyRef = useRef(false);
   const folderSubscriptionServerReadyRef = useRef(false);
+  const noteServerReservationSignatureRef = useRef<string | null>(null);
+  const folderServerReservationSignatureRef = useRef<string | null>(null);
   const pendingFolderRestoreRef = useRef<{ folderId: string; revision: number } | null>(null);
   const compactCalendarDialogRef = useRef<HTMLElement>(null);
   const compactCalendarToggleRef = useRef<HTMLButtonElement>(null);
@@ -1687,6 +1843,8 @@ function UnlockedVaultPage({
   const mobileDrawerReturnFocusRef = useRef<HTMLElement | null>(null);
   const pendingMobileDrawerFocusRef = useRef<HTMLElement | null>(null);
   const handledRequestedEntryRef = useRef<string | null>(null);
+  const handledWorkspaceRouteIntentRef = useRef<string | null>(null);
+  const initialEntryAutoOpenPendingRef = useRef(false);
   const workspaceRevisionRef = useRef<number | undefined>(undefined);
   const lastSavedWorkspaceRef = useRef("");
   const latestWorkspaceStateRef = useRef<VaultPersistedWorkspaceState>(createDefaultVaultWorkspaceState());
@@ -1698,11 +1856,15 @@ function UnlockedVaultPage({
   const moveEntryRef = useRef<(entryId: string, folderId: string | null) => Promise<void>>(async () => undefined);
   const trashEntryRef = useRef<(entryId: string, confirmed?: boolean) => Promise<void>>(async () => undefined);
   const saveEntryRef = useRef<(entryId: string) => Promise<void>>(async () => undefined);
+  const entryAutosaveRef = useRef<EntryIdleDebounce | null>(null);
+  entryAutosaveRef.current ??= new EntryIdleDebounce();
   const entryMutationPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   const draftBaseSnapshotsRef = useRef<Map<string, MarkdownDraftBaseSnapshot>>(new Map());
   const draftMergeRequestGenerationRef = useRef(0);
   const draftMergeReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const pathRewriteBusyRef = useRef(false);
+  const pathRewriteCleanupOwnerRef = useRef<string | null>(null);
+  const pathRewriteCleanupSessionRef = useRef<{ privateKey: CryptoKey; uid: string } | null>(null);
   const pathRewriteRecoveryBusyOwnerRef = useRef<number | null>(null);
   const pathRewriteRecoveryGenerationRef = useRef(0);
   const durableSourceNotesRef = useRef<Map<string, DecryptedVaultNote>>(new Map());
@@ -1728,8 +1890,8 @@ function UnlockedVaultPage({
   const knowledgeForceFullSyncRef = useRef(false);
   const knowledgeSyncRetryTimerRef = useRef<number | null>(null);
   const decodedAssetCacheRef = useRef(new BoundedVaultAssetDecodeCache());
-  const desktopLeftOpenRef = useRef(!mobileVaultLayoutSnapshot());
-  const desktopRightOpenRef = useRef(!mobileVaultLayoutSnapshot());
+  const desktopLeftOpenRef = useRef(false);
+  const desktopRightOpenRef = useRef(false);
   const previousMobileLayoutRef = useRef(mobileVaultLayoutSnapshot());
   const editorRequestIdRef = useRef(0);
   const dismissVaultPagePreview = useCallback((clearIntent = true) => {
@@ -1780,6 +1942,12 @@ function UnlockedVaultPage({
     ? `${noteServerReservationSignature}\n${folderServerReservationSignature}`
     : null;
   const vaultServerSubscriptionsReady = currentServerReservationSignature !== null;
+  useEffect(() => {
+    noteServerReservationSignatureRef.current = noteServerReservationSignature;
+  }, [noteServerReservationSignature]);
+  useEffect(() => {
+    folderServerReservationSignatureRef.current = folderServerReservationSignature;
+  }, [folderServerReservationSignature]);
   const vaultNameWritesReady = isOnline
     && vaultNameMigrationStatus === "ready"
     && vaultIntegrityKey !== null
@@ -2144,6 +2312,7 @@ function UnlockedVaultPage({
     setImportRecoveryBusyJobId(null);
     setImportRecoveryOpen(false);
     pendingWorkspaceStateRef.current = null;
+    initialEntryAutoOpenPendingRef.current = false;
     latestWorkspaceStateRef.current = vaultWorkspaceWithoutEntryReferences(latestWorkspaceStateRef.current);
     lastSavedWorkspaceRef.current = "";
     setLastSavedWorkspaceSerialization("");
@@ -2191,8 +2360,13 @@ function UnlockedVaultPage({
     }
   }, [clearVaultPlaintextForAccessScope, ownerIdKey]);
 
-  const applyRestoredWorkspace = useCallback((restored: VaultPersistedWorkspaceState, revision?: number) => {
+  const applyRestoredWorkspace = useCallback((
+    restored: VaultPersistedWorkspaceState,
+    revision?: number,
+    allowInitialEntryAutoOpen = false
+  ) => {
     workspaceConflictRequestGenerationRef.current += 1;
+    initialEntryAutoOpenPendingRef.current = allowInitialEntryAutoOpen;
     const restoredTabs = restored.tabs.map((tab) => restoredTab(tab));
     const restoredGroups = restored.tabGroups.map((group) => ({
       id: group.id,
@@ -2485,12 +2659,12 @@ function UnlockedVaultPage({
     if (mode) {
       setLeftMode(mode);
     }
-    if (!leftOpen) rememberMobileDrawerTrigger(leftPanelToggleRef.current);
+    if (!leftOpenRef.current) rememberMobileDrawerTrigger(leftPanelToggleRef.current);
     setLeftOpen(true);
     if (mobileLayout) {
       setRightOpen(false);
     }
-  }, [leftOpen, mobileLayout, rememberMobileDrawerTrigger]);
+  }, [mobileLayout, rememberMobileDrawerTrigger]);
 
   const showRightPanel = useCallback((mode: RightPanelMode) => {
     setRightMode(mode);
@@ -2833,6 +3007,7 @@ function UnlockedVaultPage({
           // flight, then let the normal encrypted save effect create revision
           // 1 from the current in-memory layout.
           workspaceRevisionRef.current = undefined;
+          initialEntryAutoOpenPendingRef.current = false;
           const remoteSerialization = JSON.stringify(remoteState);
           lastSavedWorkspaceRef.current = remoteSerialization;
           setLastSavedWorkspaceSerialization(remoteSerialization);
@@ -2843,7 +3018,7 @@ function UnlockedVaultPage({
           setWorkspaceReady(true);
           return;
         }
-        applyRestoredWorkspace(remoteState, record?.revision);
+        applyRestoredWorkspace(remoteState, record?.revision, record === null);
       })
       .catch(() => {
         if (active && workspaceAccessScopeGenerationRef.current === accessScopeGeneration) {
@@ -3979,14 +4154,13 @@ function UnlockedVaultPage({
   }, [namedWorkspaces, notes, vaultBookmarks]);
 
   useEffect(() => {
-    if (!workspaceReady || requestedWorkspaceView === "graph") {
-      return;
-    }
+    if (!workspaceReady) return;
     const requestedEntryId = searchParams.get("entry");
     const requestedEntry = requestedEntryId
       ? notes.find((note) => note.id === requestedEntryId)
       : null;
     if (requestedEntry && handledRequestedEntryRef.current !== requestedEntry.id) {
+      initialEntryAutoOpenPendingRef.current = false;
       const requestedTab: WorkspaceTab = {
         id: workspaceEntryTabId(requestedEntry.id, activeTabGroupId),
         kind: "entry",
@@ -4004,9 +4178,18 @@ function UnlockedVaultPage({
       handledRequestedEntryRef.current = requestedEntry.id;
       return;
     }
-    if (requestedEntryId || tabs.length) return;
+    if (requestedEntryId) {
+      initialEntryAutoOpenPendingRef.current = false;
+      return;
+    }
+    if (requestedWorkspaceView === "graph" || tabs.length) {
+      initialEntryAutoOpenPendingRef.current = false;
+      return;
+    }
+    if (!initialEntryAutoOpenPendingRef.current) return;
     const firstEntry = notes[0];
     if (!firstEntry) return;
+    initialEntryAutoOpenPendingRef.current = false;
     const tab = { id: `entry:${firstEntry.id}`, kind: "entry", entryId: firstEntry.id, label: entryLabel(firstEntry) } as const;
     setTabs([tab]);
     const groupPlan = openWorkspaceTabInGroup(tabGroups, tab.id, activeTabGroupId);
@@ -4091,6 +4274,11 @@ function UnlockedVaultPage({
   const activeEntryId = activeTab?.kind === "entry" ? activeTab.entryId : null;
   const activeNote = activeEntryId ? notes.find((note) => note.id === activeEntryId) ?? null : null;
   const activeDraft = activeEntryId ? drafts[activeEntryId] : undefined;
+  const activeMarkdownMayContainConvertibleHtml = Boolean(
+    activeNote?.contentFormat === "markdown-v1"
+    && activeDraft
+    && /^ {0,3}<(?:blockquote|div|h[1-6]|ol|p|pre|table|ul|hr)\b/im.test(activeDraft.body)
+  );
   useEffect(() => {
     if (!shouldReleaseVaultEntryCreation(pendingEntryCreation, {
       activeEntryId,
@@ -4615,6 +4803,10 @@ function UnlockedVaultPage({
   };
 
   const saveEntry = useCallback(async (entryId: string) => {
+    // Explicit saves, navigation flushes, and fired idle callbacks all own the
+    // next attempt. Cancel only this entry so unrelated notes keep their own
+    // idle deadlines.
+    entryAutosaveRef.current?.cancel(entryId);
     if (!profile || !privateKey || !vaultIntegrityKey) {
       setError("암호화된 이름 무결성 키가 준비될 때까지 Vault 쓰기가 잠깁니다.");
       return;
@@ -4671,7 +4863,14 @@ function UnlockedVaultPage({
       );
       commitNotes((current) => current.map((candidate) => (
         candidate.id === entryId
-          ? { ...candidate, title: draft.title.trim(), body: draft.body, folderId: draft.folderId, revision: result.revision }
+          ? {
+              ...candidate,
+              ...persistedEncryptedMutationPatch(result),
+              title: draft.title.trim(),
+              body: draft.body,
+              folderId: draft.folderId,
+              revision: result.revision
+            }
           : candidate
       )));
       const latest = draftsRef.current[entryId];
@@ -4729,9 +4928,6 @@ function UnlockedVaultPage({
         next.delete(entryId);
         return next;
       });
-      if (hasPendingEdits) {
-        window.setTimeout(() => void saveEntryRef.current(entryId), 0);
-      }
       finishEntryMutation();
     }
   }, [
@@ -4916,16 +5112,26 @@ function UnlockedVaultPage({
   }
 
   useEffect(() => {
-    const dirtyEntryIds = Object.entries(drafts)
-      .filter(([, draft]) => draft.dirty)
-      .map(([entryId]) => entryId);
-    if (!dirtyEntryIds.length) return undefined;
-    const timers = dirtyEntryIds.map((entryId) => window.setTimeout(
-      () => void saveEntry(entryId),
-      1_500
-    ));
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
-  }, [drafts, saveEntry]);
+    const autosave = entryAutosaveRef.current;
+    if (!autosave) return;
+    const dirtyEntryIds = new Set<string>();
+    for (const [entryId, draft] of Object.entries(drafts)) {
+      if (!draft.dirty || conflictedEntryIds.has(entryId)) continue;
+      dirtyEntryIds.add(entryId);
+      const entryKind = notesRef.current.find((note) => note.id === entryId)?.entryKind;
+      autosave.schedule(
+        entryId,
+        draft,
+        vaultEntryAutosaveIdleMs(entryKind),
+        () => void saveEntryRef.current(entryId)
+      );
+    }
+    autosave.retain(dirtyEntryIds);
+  }, [conflictedEntryIds, drafts, isOnline, privateKey, profile, vaultIntegrityKey, vaultNameWritesReady]);
+
+  useEffect(() => () => {
+    entryAutosaveRef.current?.cancelAll();
+  }, []);
 
   function updateEntryDraft(
     entryId: string,
@@ -5286,6 +5492,20 @@ function UnlockedVaultPage({
       return;
     }
 
+    const routeIntentKey = JSON.stringify([
+      profile.uid,
+      location.key,
+      requestedWorkspaceView,
+      requestedWorkspacePanel
+    ]);
+    if (handledWorkspaceRouteIntentRef.current === routeIntentKey) {
+      return;
+    }
+    // A route is an opening intent, not a permanently controlled panel state.
+    // Mark it handled before applying it so subsequent callback/state changes
+    // cannot reopen a panel that the user deliberately closed.
+    handledWorkspaceRouteIntentRef.current = routeIntentKey;
+
     if (requestedWorkspaceView === "graph") {
       openGlobalGraph();
       return;
@@ -5302,6 +5522,7 @@ function UnlockedVaultPage({
   }, [
     location.key,
     openGlobalGraph,
+    profile.uid,
     requestedWorkspacePanel,
     requestedWorkspaceView,
     showLeftPanel,
@@ -5329,6 +5550,9 @@ function UnlockedVaultPage({
     if (closingTab?.kind === "entry") {
       void saveEntry(closingTab.entryId);
     }
+    // Closing a tab is an explicit workspace choice. In particular, closing
+    // the final tab must not re-arm the first-time Vault auto-open behavior.
+    initialEntryAutoOpenPendingRef.current = false;
     setTabs((current) => current.filter((tab) => tab.id !== tabId));
     const groupsPlan = removeWorkspaceTabFromGroups(tabGroups, tabId, activeTabGroupId);
     setTabGroups(groupsPlan.groups);
@@ -5478,7 +5702,9 @@ function UnlockedVaultPage({
     if (uniqueIds.some((entryId) => !resolvedIds.has(entryId))) {
       throw new Error("서버에서 모든 경로 갱신 대상을 확인하지 못했습니다.");
     }
-    const decrypted = await decryptVaultNotes(snapshots, profile.uid, privateKey);
+    const decrypted = await decryptVaultNotes(snapshots, profile.uid, privateKey, {
+      reusableNotes: notesRef.current
+    });
     const owned = decrypted.filter((note) => note.ownerUid === profile.uid);
     if (owned.length !== uniqueIds.length) {
       throw new Error("경로 갱신 대상의 소유권 또는 암호화 payload를 확인하지 못했습니다.");
@@ -5486,28 +5712,145 @@ function UnlockedVaultPage({
     return owned;
   }
 
-  async function loadServerRevisionedIndexEntries() {
-    if (!vaultDataReady || noteServerReservationSignature === null || folderServerReservationSignature === null) {
-      throw new Error("서버에서 최신 Vault 경로와 revision을 확인한 뒤 다시 시도해주세요.");
+  function captureVaultPathRewriteGenerationSignal(): VaultPathRewriteGenerationSignal {
+    return {
+      decryptedFolders: foldersRef.current,
+      decryptedNotes: notesRef.current,
+      folderReservationSignature: folderServerReservationSignatureRef.current,
+      folderServerReady: folderSubscriptionServerReadyRef.current,
+      noteReservationSignature: noteServerReservationSignatureRef.current,
+      noteServerReady: noteSubscriptionServerReadyRef.current,
+      rawFolders: allFolderSnapshotsRef.current,
+      rawNotes: allVisibleNoteSnapshotsRef.current
+    };
+  }
+
+  async function waitForVaultPathRewriteGenerationChange(
+    baseline: VaultPathRewriteGenerationSignal,
+    deadline: number
+  ) {
+    while (Date.now() < deadline) {
+      if (vaultPathRewriteGenerationSignalChanged(
+        baseline,
+        captureVaultPathRewriteGenerationSignal()
+      )) {
+        return true;
+      }
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
     }
-    const ownerIds = notesRef.current
-      .filter((note) => note.ownerUid === profile.uid)
-      .map((note) => note.id);
-    const serverNotes = await fetchOwnedServerNotes(ownerIds);
-    const entries = serverNotes.map((note): RevisionedVaultIndexEntry => ({
-      id: note.id,
-      path: vaultEntryPath(note, folderPathsRef.current),
-      kind: note.entryKind,
-      content: note.entryKind === "asset"
-        ? undefined
-        : note.contentFormat === "legacy-html-v1"
-          ? previewTextFromHtml(note.body)
-          : note.body,
-      createdAt: timestampMillis(note.createdAt),
-      updatedAt: timestampMillis(note.updatedAt),
-      revision: note.revision ?? 0
-    }));
-    return { entries, notes: serverNotes };
+    return vaultPathRewriteGenerationSignalChanged(
+      baseline,
+      captureVaultPathRewriteGenerationSignal()
+    );
+  }
+
+  function captureCurrentRevisionedIndexGeneration() {
+    if (
+      !vaultDataReady
+      || !noteSubscriptionServerReadyRef.current
+      || !folderSubscriptionServerReadyRef.current
+      || noteServerReservationSignatureRef.current === null
+      || folderServerReservationSignatureRef.current === null
+    ) {
+      throw new VaultPathRewriteSnapshotChangedError();
+    }
+    const rawAllNotes = allVisibleNoteSnapshotsRef.current;
+    const rawAllFolders = allFolderSnapshotsRef.current;
+    const rawOwnerNotes = rawAllNotes.filter((note) => (
+      note.ownerUid === profile.uid
+      && note.isDeleted !== true
+      && note.isPurged !== true
+      && note.secureShareCopyState !== "copying"
+      && note.secureShareCopyState !== "aborted"
+    ));
+    const rawOwnerFolders = rawAllFolders.filter((folder) => folder.ownerUid === profile.uid);
+    const folderPartition = partitionVaultFolderTrash(rawOwnerFolders);
+    if (folderPartition.invalidFolderIds.size > 0) {
+      throw new Error("서버의 전체 Vault 폴더 경로를 확인할 수 없습니다.");
+    }
+    const rawVisibleOwnerNotes = visibleVaultNotesForFolders(
+      rawOwnerNotes,
+      folderPartition.activeFolders
+    );
+    if (
+      ownedNoteReservationSignature(rawVisibleOwnerNotes, profile.uid)
+        !== noteServerReservationSignatureRef.current
+      || ownedFolderReservationSignature(folderPartition.activeFolders, profile.uid)
+        !== folderServerReservationSignatureRef.current
+    ) {
+      throw new VaultPathRewriteSnapshotChangedError();
+    }
+    const currentNotes = notesRef.current.filter((note) => note.ownerUid === profile.uid);
+    const currentFolders = foldersRef.current.filter((folder) => folder.ownerUid === profile.uid);
+    if (currentFolders.some((folder) => folder.nameDecryptionFailed)) {
+      throw new Error("서버 Vault 폴더 이름을 복호화하지 못해 경로 변경을 잠갔습니다.");
+    }
+    requireValidVaultFolderTree(currentFolders);
+    return {
+      currentFolders,
+      currentNotes,
+      rawAllFolders,
+      rawAllNotes,
+      rawActiveFolders: folderPartition.activeFolders,
+      rawOwnerFolders,
+      rawOwnerNotes,
+      rawVisibleOwnerNotes
+    };
+  }
+
+  async function buildCurrentRevisionedIndexEntries() {
+    if (!isOnline) {
+      throw new Error("온라인 연결 후 경로 변경을 다시 시도해주세요.");
+    }
+    const inventory = await import("../features/vault/pathRewriteInventory");
+    let generationDeadline: number | null = null;
+    for (let generationChangeCount = 0; generationChangeCount <= 3; generationChangeCount += 1) {
+      const generationSignal = captureVaultPathRewriteGenerationSignal();
+      try {
+        const generation = captureCurrentRevisionedIndexGeneration();
+        const planned = await inventory.buildAlignedVaultPathRewriteIndex({
+          uid: profile.uid,
+          rawVisibleNotes: generation.rawVisibleOwnerNotes,
+          rawActiveFolders: generation.rawActiveFolders,
+          decryptedNotes: generation.currentNotes,
+          decryptedFolders: generation.currentFolders
+        });
+        if (!planned) throw new VaultPathRewriteSnapshotChangedError();
+        const inventoryBinding = await inventory.loadVaultPathRewriteInventoryBinding({
+          uid: profile.uid,
+          notes: generation.rawOwnerNotes,
+          folders: generation.rawOwnerFolders
+        });
+        if (vaultPathRewriteGenerationSignalChanged(
+          generationSignal,
+          captureVaultPathRewriteGenerationSignal()
+        )) {
+          throw new VaultPathRewriteSnapshotChangedError();
+        }
+        return {
+          entries: planned.entries,
+          folders: generation.currentFolders,
+          folderPaths: planned.folderPaths,
+          inventoryBinding,
+          notes: generation.currentNotes
+        };
+      } catch (caught) {
+        const manifestSnapshotLag = caught instanceof inventory.VaultPathRewriteInventorySnapshotLagError;
+        const localSnapshotLag = caught instanceof VaultPathRewriteSnapshotChangedError;
+        if (!manifestSnapshotLag && !localSnapshotLag) {
+          throw caught;
+        }
+        generationDeadline ??= Date.now() + 2_000;
+        const canRetry = generationChangeCount < 3
+          && await waitForVaultPathRewriteGenerationChange(generationSignal, generationDeadline);
+        if (!canRetry) {
+          throw new Error(manifestSnapshotLag
+            ? "서버 경로 인벤토리와 최신 Vault 구독 세대를 제한 시간 안에 정렬하지 못했습니다. 잠시 후 다시 시도해주세요."
+            : "서버의 최신 Vault 구독 세대를 제한 시간 안에 확인하지 못했습니다. 잠시 후 다시 시도해주세요.");
+        }
+      }
+    }
+    throw new Error("서버의 최신 Vault 구독 세대를 확인하지 못했습니다.");
   }
 
   async function flushOwnedRewriteDrafts(excludedEntryId?: string) {
@@ -5589,7 +5932,12 @@ function UnlockedVaultPage({
       submitted
     );
     commitNotes((current) => current.map((candidate) => candidate.id === entryId
-      ? { ...candidate, body: submitted.body, revision: result.revision }
+      ? {
+          ...candidate,
+          ...persistedEncryptedMutationPatch(result),
+          body: submitted.body,
+          revision: result.revision
+        }
       : candidate));
     const latest = draftsRef.current[entryId] ?? draft;
     const reconciled = reconcileDraftAfterSave(latest, submitted, result.revision);
@@ -5651,7 +5999,12 @@ function UnlockedVaultPage({
         throw new Error("참조 source 저장 revision을 확인하지 못했습니다.");
       }
       commitNotes((notes) => notes.map((note) => note.id === sourceNote.id
-        ? { ...note, body: step.rewrittenSource, revision: result.revision }
+        ? {
+            ...note,
+            ...persistedEncryptedMutationPatch(result),
+            body: step.rewrittenSource,
+            revision: result.revision
+          }
         : note));
       const latest = draftsRef.current[sourceNote.id];
       if (latest && sameDraftPayload(latest, {
@@ -5682,7 +6035,7 @@ function UnlockedVaultPage({
 
   function executePreparedPathRewrite(
     prepared: PreparedVaultPathRewriteJob,
-    commitPathMutation: () => Promise<void>
+    commitPathMutation: (activation: VaultPathRewriteActivationInput) => Promise<void>
   ) {
     return executeVaultPathRewrite({
       activate: () => activateVaultPathRewriteJob(profile.uid, privateKey, prepared.jobId),
@@ -5773,6 +6126,10 @@ function UnlockedVaultPage({
       setStatus(`서버의 현재 경로와 revision을 다시 확인하는 중입니다… ${job.cursor}/${job.stepCount}`);
       const recovered = await recoverDurablePathRewriteJob(job);
       setPathRewriteJob(recovered.job);
+      if (recovered.outcome === "deferred") {
+        setStatus("다른 탭에서 진행 중일 수 있어 내부 참조 복구를 잠시 보류했습니다.");
+        return;
+      }
       if (recovered.outcome === "not-applied") {
         setStatus("준비된 경로 변경이 서버에 적용되지 않아 원본 참조를 수정하지 않았습니다.");
         return;
@@ -5792,6 +6149,20 @@ function UnlockedVaultPage({
   }
 
   useEffect(() => {
+    // Reset the strictly bounded automatic-cleanup allowance only when this
+    // owner actually unlocks a new Vault session. The following recovery effect
+    // is declared after this one, so its lazy module callback observes the new
+    // allowance before it can resume or complete a job.
+    if (
+      pathRewriteCleanupSessionRef.current?.privateKey === privateKey
+      && pathRewriteCleanupSessionRef.current.uid === profile.uid
+    ) return;
+    pathRewriteCleanupSessionRef.current = { privateKey, uid: profile.uid };
+    pathRewriteCleanupOwnerRef.current = null;
+    void beginTerminalVaultPathRewriteCleanupSession(profile.uid).catch(() => undefined);
+  }, [privateKey, profile.uid]);
+
+  useEffect(() => {
     if (
       !isOnline
       || !vaultDataReady
@@ -5806,10 +6177,26 @@ function UnlockedVaultPage({
     const generation = pathRewriteRecoveryGenerationRef.current + 1;
     pathRewriteRecoveryGenerationRef.current = generation;
     let cancelled = false;
+    let deferredRecoveryTimer: number | null = null;
 
-    void listRecoverableVaultPathRewriteJobs(profile.uid, privateKey).then(async (jobs) => {
+    void scanRecoverableVaultPathRewriteJobs(profile.uid, privateKey).then(async ({
+      jobs,
+      hasMore,
+      shouldContinueImmediately
+    }) => {
       if (cancelled || generation !== pathRewriteRecoveryGenerationRef.current) return;
-      if (jobs.length === 0) return;
+      const deferredDelays = jobs
+        .map((job) => job.recoveryAfterMs ?? 0)
+        .filter((delay) => delay > 0);
+      if (deferredDelays.length > 0) {
+        deferredRecoveryTimer = window.setTimeout(() => {
+          if (!cancelled && generation === pathRewriteRecoveryGenerationRef.current) {
+            setPathRewriteRecoveryRetry((current) => current + 1);
+          }
+        }, Math.min(...deferredDelays) + 25);
+      }
+      const eligibleJobs = jobs.filter((job) => (job.recoveryAfterMs ?? 0) <= 0);
+      if (eligibleJobs.length === 0) return;
       // The lookup itself is read-only. Claim the global path lock only after
       // a recoverable job is known, and retry if a user mutation won the race.
       if (pathRewriteBusyRef.current) {
@@ -5819,14 +6206,40 @@ function UnlockedVaultPage({
       pathRewriteBusyRef.current = true;
       pathRewriteRecoveryBusyOwnerRef.current = generation;
       setPathRewriteBusy(true);
-      for (const job of jobs) {
+      setStatus("저장되지 않은 편집을 먼저 확인하는 중입니다…");
+      const dirtyEntryIds = Object.entries(draftsRef.current)
+        .filter(([, draft]) => draft.dirty)
+        .map(([entryId]) => entryId);
+      const remainingDirtyEntryIds = await flushVaultDraftsBeforePathRewriteRecovery({
+        dirtyEntryIds,
+        isDirty: (entryId) => Boolean(draftsRef.current[entryId]?.dirty),
+        save: (entryId) => saveEntryRef.current(entryId),
+        waitForMutation: (entryId) => entryMutationPromisesRef.current.get(entryId)
+      });
+      if (remainingDirtyEntryIds.length > 0) {
+        setError(
+          `${remainingDirtyEntryIds.length}개 편집본을 서버에 저장하지 못해 내부 참조 자동 복구를 중단했습니다. 현재 초안은 이 세션에 그대로 남아 있습니다.`
+        );
+        return;
+      }
+      for (const job of eligibleJobs) {
         if (cancelled || generation !== pathRewriteRecoveryGenerationRef.current) return;
         setPathRewriteJob(job);
         setStatus(`중단된 내부 참조 작업을 확인하는 중입니다… ${job.cursor}/${job.stepCount}`);
         const recovered = await recoverDurablePathRewriteJob(job);
+        if (recovered.outcome === "deferred") {
+          setStatus("다른 탭에서 진행 중일 수 있어 내부 참조 자동 복구를 잠시 보류했습니다.");
+          continue;
+        }
         if (recovered.outcome === "not-applied") {
           setStatus("이전에 준비한 경로 변경은 서버에 적용되지 않아 내부 참조 작업을 실행하지 않았습니다.");
         }
+      }
+      if (hasMore && shouldContinueImmediately) {
+        // The bounded page was full. Rescan after these jobs became terminal so
+        // a legacy 50-job backlog plus a concurrent atomic overshoot converges
+        // in the current unlocked session.
+        setPathRewriteRecoveryRetry((current) => current + 1);
       }
     }).catch((caught) => {
       if (cancelled || generation !== pathRewriteRecoveryGenerationRef.current) return;
@@ -5841,10 +6254,22 @@ function UnlockedVaultPage({
         pathRewriteBusyRef.current = false;
         setPathRewriteBusy(false);
       }
+      if (
+        !cancelled
+        && generation === pathRewriteRecoveryGenerationRef.current
+        && pathRewriteCleanupOwnerRef.current !== profile.uid
+      ) {
+        // Terminal ciphertext cleanup is deliberately best-effort and runs
+        // once per unlocked profile session, after critical recovery has had
+        // priority. It never blocks login or surfaces private maintenance data.
+        pathRewriteCleanupOwnerRef.current = profile.uid;
+        void scheduleTerminalVaultPathRewriteCleanup(profile.uid).catch(() => undefined);
+      }
     });
 
     return () => {
       cancelled = true;
+      if (deferredRecoveryTimer !== null) window.clearTimeout(deferredRecoveryTimer);
       if (pathRewriteRecoveryGenerationRef.current === generation) {
         pathRewriteRecoveryGenerationRef.current += 1;
       }
@@ -6024,7 +6449,7 @@ function UnlockedVaultPage({
       if (!refreshedNote || !refreshedDraft || conflictedEntryIds.has(entryId)) {
         throw new Error("이동 대상의 최신 server revision을 확인하지 못했습니다.");
       }
-      const server = await loadServerRevisionedIndexEntries();
+      const server = await buildCurrentRevisionedIndexEntries();
       const serverTarget = server.notes.find((candidate) => candidate.id === entryId);
       if (
         !serverTarget
@@ -6035,9 +6460,9 @@ function UnlockedVaultPage({
       }
       const nextPath = vaultEntryPath(
         { ...serverTarget, folderId, title: refreshedDraft.title },
-        folderPathsRef.current
+        server.folderPaths
       );
-      const currentPath = vaultEntryPath(serverTarget, folderPathsRef.current);
+      const currentPath = vaultEntryPath(serverTarget, server.folderPaths);
       const rewritePlans = resolvingNameCollision
         ? { canvasPlans: [], markdownPlans: [] }
         : planVaultContentPathRewritesForPathChanges({
@@ -6049,17 +6474,19 @@ function UnlockedVaultPage({
       ]);
       const selfPlan = rewritePlans.markdownPlans.find((plan) => plan.sourceEntryId === entryId);
       const selfCanvasPlan = rewritePlans.canvasPlans.find((plan) => plan.sourceEntryId === entryId);
-      const sourcePlans = buildVaultPathRewriteSourcePlans({
+      const sourcePlans = (await buildVaultPathRewriteSourcePlans({
         canvasPlans: rewritePlans.canvasPlans,
         entries: server.entries,
         markdownPlans: rewritePlans.markdownPlans
-      }).filter((plan) => plan.sourceEntryId !== entryId);
+      })).filter((plan) => plan.sourceEntryId !== entryId);
       const prepared = await prepareVaultPathRewriteJob(vaultIntegrityKey, {
+        ...server.inventoryBinding,
+        mutationTarget: { expectedRevision: refreshedDraft.baseRevision, id: entryId, kind: "entry" },
         ownerUid: profile.uid,
         pathChanges: [{ entryId, newPath: nextPath, oldPath: currentPath }],
         sourcePlans
       });
-      const completed = await executePreparedPathRewrite(prepared, async () => {
+      const completed = await executePreparedPathRewrite(prepared, async (pathRewriteActivation) => {
         let submittedDraft: DraftState = { ...refreshedDraft, dirty: false, folderId };
         if (selfPlan) {
           if (serverTarget.contentFormat !== "markdown-v1") {
@@ -6088,18 +6515,30 @@ function UnlockedVaultPage({
               profile.uid,
               privateKey,
               vaultIntegrityKey,
-              { folderId, title: submittedDraft.title }
+              { folderId, title: submittedDraft.title },
+              pathRewriteActivation
             )
-          : await saveAndMoveEncryptedVaultEntry(
-              revisionedTarget,
-              profile.uid,
-              privateKey,
-              vaultIntegrityKey,
-              submittedDraft
-            );
+          : revisionedTarget.contentFormat === "legacy-html-v1"
+            ? await moveOnlyEncryptedVaultEntry(
+                revisionedTarget,
+                profile.uid,
+                privateKey,
+                vaultIntegrityKey,
+                submittedDraft,
+                pathRewriteActivation
+              )
+            : await saveAndMoveEncryptedVaultEntry(
+                revisionedTarget,
+                profile.uid,
+                privateKey,
+                vaultIntegrityKey,
+                submittedDraft,
+                pathRewriteActivation
+              );
         commitNotes((current) => current.map((candidate) => candidate.id === entryId
           ? {
               ...candidate,
+              ...persistedEncryptedMutationPatch(result),
               body: resolvingNameCollision ? serverTarget.body : submittedDraft.body,
               folderId,
               lastMutationId: result.lastMutationId,
@@ -6128,10 +6567,18 @@ function UnlockedVaultPage({
         ? "중복 이름 해소를 위해 항목을 이동했습니다. 기존의 모호한 링크는 임의로 한 항목에 귀속하지 않았으므로 다시 확인해주세요."
         : `항목을 이동하고 내부 참조 ${completed.confirmedCount + selfRewriteCount}개를 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
     } catch (caught) {
-      if (caught instanceof NoteRevisionConflictError) {
-        setConflictedEntryIds((current) => new Map(current).set(entryId, caught.actualRevision));
+      const underlyingError = caught instanceof VaultPathRewriteControllerError
+        ? caught.cause
+        : caught;
+      const inventoryFailure = pathRewriteInventoryFailureMessage(underlyingError);
+      if (inventoryFailure) {
+        setError(inventoryFailure);
+      } else if (underlyingError instanceof NoteRevisionConflictError) {
+        setConflictedEntryIds((current) => new Map(current).set(entryId, underlyingError.actualRevision));
         setError("다른 기기나 탭에서 이 항목이 변경되어 이동하지 않았습니다. 현재 편집본은 그대로 보존됩니다.");
         if (isMarkdownMergeEntry(note)) void prepareDraftMergeConflict(entryId, false);
+      } else if (underlyingError instanceof VaultNameConflictError) {
+        setError("대상 폴더에 동일한 이름의 항목이 있어 이동하지 않았습니다.");
       } else {
         setError(caught instanceof Error ? caught.message : "항목을 이동하지 못했습니다.");
       }
@@ -6194,68 +6641,80 @@ function UnlockedVaultPage({
     setError(null);
     try {
       if (!resolvingNameCollision) await flushOwnedRewriteDrafts();
-      const nextFolders = currentFolders.map((candidate) => (
+      const server = await buildCurrentRevisionedIndexEntries();
+      const serverFolder = server.folders.find((candidate) => candidate.id === folderId);
+      if (!serverFolder || (serverFolder.revision ?? 1) !== (folder.revision ?? 1)) {
+        throw new Error("이동 대상 폴더가 다른 기기에서 변경되어 작업을 시작하지 않았습니다.");
+      }
+      const nextFolders = server.folders.map((candidate) => (
         candidate.id === folderId ? { ...candidate, parentId } : candidate
       ));
       requireValidVaultFolderTree(nextFolders);
       const nextFolderPaths = buildVaultPaths(nextFolders);
-      const server = await loadServerRevisionedIndexEntries();
       const pathChanges = server.notes
         .filter((note) => note.type === "personal")
         .flatMap((note) => {
-          const oldPath = vaultEntryPath(note, folderPathsRef.current);
+          const oldPath = vaultEntryPath(note, server.folderPaths);
           const newPath = vaultEntryPath(note, nextFolderPaths);
           return oldPath === newPath ? [] : [{ entryId: note.id, newPath, oldPath }];
         });
-      if (!pathChanges.length) {
-        const result = resolvingNameCollision
-          ? await resolveDeferredVaultFolderCollision(
-              folder,
-              profile,
-              privateKey,
-              vaultIntegrityKey,
-              { name: folder.displayName, parentId }
-            )
-          : await moveEncryptedVaultFolder(folder, profile.uid, vaultIntegrityKey, parentId);
-        commitFolders((current) => current.map((candidate) => candidate.id === folderId
-          ? { ...candidate, parentId, revision: result.revision }
-          : candidate));
-        setStatus("빈 폴더를 이동했습니다. 갱신할 내부 참조는 없습니다.");
-        return;
-      }
       const rewritePlans = resolvingNameCollision
         ? { canvasPlans: [], markdownPlans: [] }
         : planVaultContentPathRewritesForPathChanges({ entries: server.entries, pathChanges });
       const excludedSharedCount = resolvingNameCollision ? 0 : excludedSharedRewriteSourceCount(pathChanges);
-      const sourcePlans = buildVaultPathRewriteSourcePlans({
+      const sourcePlans = await buildVaultPathRewriteSourcePlans({
         canvasPlans: rewritePlans.canvasPlans,
         entries: server.entries,
         markdownPlans: rewritePlans.markdownPlans
       });
       const prepared = await prepareVaultPathRewriteJob(vaultIntegrityKey, {
+        ...server.inventoryBinding,
+        mutationTarget: { expectedRevision: serverFolder.revision ?? 1, id: folderId, kind: "folder" },
         ownerUid: profile.uid,
         pathChanges,
         sourcePlans
       });
-      const completed = await executePreparedPathRewrite(prepared, async () => {
+      const completed = await executePreparedPathRewrite(prepared, async (pathRewriteActivation) => {
         const result = resolvingNameCollision
           ? await resolveDeferredVaultFolderCollision(
-              folder,
+              serverFolder,
               profile,
               privateKey,
               vaultIntegrityKey,
-              { name: folder.displayName, parentId }
+              { name: serverFolder.displayName, parentId },
+              pathRewriteActivation
             )
-          : await moveEncryptedVaultFolder(folder, profile.uid, vaultIntegrityKey, parentId);
+            : await moveEncryptedVaultFolder(
+              serverFolder,
+              profile.uid,
+              vaultIntegrityKey,
+              parentId,
+              pathRewriteActivation
+            );
         commitFolders((current) => current.map((candidate) => candidate.id === folderId
-          ? { ...candidate, parentId, revision: result.revision }
+          ? {
+              ...candidate,
+              ...persistedEncryptedFolderMutationPatch(result),
+              parentId,
+              revision: result.revision
+            }
           : candidate));
       });
       setStatus(resolvingNameCollision
         ? "중복 이름 해소를 위해 폴더를 이동했습니다. 기존의 모호한 링크는 자동 귀속하지 않았으므로 다시 확인해주세요."
         : `폴더를 이동하고 내부 참조 ${completed.confirmedCount}개 파일을 서버에서 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
     } catch (caught) {
-      if (caught instanceof VaultPathRewriteControllerError && caught.stage === "path-committed") {
+      const underlyingError = caught instanceof VaultPathRewriteControllerError
+        ? caught.cause
+        : caught;
+      const inventoryFailure = pathRewriteInventoryFailureMessage(underlyingError);
+      if (inventoryFailure) {
+        setError(inventoryFailure);
+      } else if (underlyingError instanceof VaultNameConflictError) {
+        setError("대상 위치에 동일한 이름의 폴더가 있어 이동하지 않았습니다.");
+      } else if (underlyingError instanceof VaultFolderApiError && underlyingError.status === 409) {
+        setError("다른 기기나 탭에서 폴더가 변경되어 이동하지 않았습니다. 폴더 목록을 다시 확인해주세요.");
+      } else if (caught instanceof VaultPathRewriteControllerError && caught.stage === "path-committed") {
         setError(caught.message);
       } else {
         setError(caught instanceof Error ? caught.message : "폴더를 이동하지 못했습니다.");
@@ -6317,75 +6776,63 @@ function UnlockedVaultPage({
     setError(null);
     try {
       if (!resolvingNameCollision) await flushOwnedRewriteDrafts();
-      const nextFolders = currentFolders.map((candidate) => candidate.id === folderId
+      const server = await buildCurrentRevisionedIndexEntries();
+      const serverFolder = server.folders.find((candidate) => candidate.id === folderId);
+      if (!serverFolder || (serverFolder.revision ?? 1) !== (folder.revision ?? 1)) {
+        throw new Error("이름 변경 대상 폴더가 다른 기기에서 변경되어 작업을 시작하지 않았습니다.");
+      }
+      const nextFolders = server.folders.map((candidate) => candidate.id === folderId
         ? { ...candidate, displayName: name }
         : candidate);
       const nextFolderPaths = buildVaultPaths(nextFolders);
-      const server = await loadServerRevisionedIndexEntries();
       const pathChanges = server.notes
         .filter((note) => note.type === "personal")
         .flatMap((note) => {
-          const oldPath = vaultEntryPath(note, folderPathsRef.current);
+          const oldPath = vaultEntryPath(note, server.folderPaths);
           const newPath = vaultEntryPath(note, nextFolderPaths);
           return oldPath === newPath ? [] : [{ entryId: note.id, newPath, oldPath }];
       });
-      if (!pathChanges.length) {
-        const result = resolvingNameCollision
-          ? await resolveDeferredVaultFolderCollision(
-              folder,
-              profile,
-              privateKey,
-              vaultIntegrityKey,
-              { name, parentId: folder.parentId ?? null }
-            )
-          : await renameEncryptedVaultFolder(
-              folder,
-              profile.uid,
-              privateKey,
-              vaultIntegrityKey,
-              name
-            );
-        commitFolders((current) => current.map((candidate) => candidate.id === folderId
-          ? { ...candidate, displayName: name, revision: result.revision }
-          : candidate));
-        setStatus(resolvingNameCollision
-          ? "중복 폴더 이름을 해소해 검증을 다시 시작합니다."
-          : "빈 폴더 이름을 변경했습니다. 갱신할 내부 참조는 없습니다.");
-        if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
-        return;
-      }
       const rewritePlans = resolvingNameCollision
         ? { canvasPlans: [], markdownPlans: [] }
         : planVaultContentPathRewritesForPathChanges({ entries: server.entries, pathChanges });
       const excludedSharedCount = resolvingNameCollision ? 0 : excludedSharedRewriteSourceCount(pathChanges);
-      const sourcePlans = buildVaultPathRewriteSourcePlans({
+      const sourcePlans = await buildVaultPathRewriteSourcePlans({
         canvasPlans: rewritePlans.canvasPlans,
         entries: server.entries,
         markdownPlans: rewritePlans.markdownPlans
       });
       const prepared = await prepareVaultPathRewriteJob(vaultIntegrityKey, {
+        ...server.inventoryBinding,
+        mutationTarget: { expectedRevision: serverFolder.revision ?? 1, id: folderId, kind: "folder" },
         ownerUid: profile.uid,
         pathChanges,
         sourcePlans
       });
-      const completed = await executePreparedPathRewrite(prepared, async () => {
+      const completed = await executePreparedPathRewrite(prepared, async (pathRewriteActivation) => {
         const result = resolvingNameCollision
           ? await resolveDeferredVaultFolderCollision(
-              folder,
+              serverFolder,
               profile,
               privateKey,
               vaultIntegrityKey,
-              { name, parentId: folder.parentId ?? null }
+              { name, parentId: serverFolder.parentId ?? null },
+              pathRewriteActivation
             )
-          : await renameEncryptedVaultFolder(
-              folder,
+            : await renameEncryptedVaultFolder(
+              serverFolder,
               profile.uid,
               privateKey,
               vaultIntegrityKey,
-              name
+              name,
+              pathRewriteActivation
             );
         commitFolders((current) => current.map((candidate) => candidate.id === folderId
-          ? { ...candidate, displayName: name, revision: result.revision }
+          ? {
+              ...candidate,
+              ...persistedEncryptedFolderMutationPatch(result),
+              displayName: name,
+              revision: result.revision
+            }
           : candidate));
       });
       setStatus(resolvingNameCollision
@@ -6393,7 +6840,19 @@ function UnlockedVaultPage({
         : `암호화된 폴더 이름을 변경하고 내부 참조 ${completed.confirmedCount}개 파일을 서버에서 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
       if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "폴더 이름을 변경하지 못했습니다.");
+      const underlyingError = caught instanceof VaultPathRewriteControllerError
+        ? caught.cause
+        : caught;
+      const inventoryFailure = pathRewriteInventoryFailureMessage(underlyingError);
+      if (inventoryFailure) {
+        setError(inventoryFailure);
+      } else if (underlyingError instanceof VaultNameConflictError) {
+        setError("같은 위치에 동일한 이름의 폴더가 있어 이름을 변경하지 않았습니다.");
+      } else if (underlyingError instanceof VaultFolderApiError && underlyingError.status === 409) {
+        setError("다른 기기나 탭에서 폴더가 변경되어 이름을 바꾸지 않았습니다. 폴더 목록을 다시 확인해주세요.");
+      } else {
+        setError(caught instanceof Error ? caught.message : "폴더 이름을 변경하지 못했습니다.");
+      }
     } finally {
       pathRewriteBusyRef.current = false;
       setPathRewriteBusy(false);
@@ -6484,7 +6943,7 @@ function UnlockedVaultPage({
       if (!refreshedNote || !refreshedDraft || conflictedEntryIds.has(entryId)) {
         throw new Error("이름 변경 대상의 최신 server revision을 확인하지 못했습니다.");
       }
-      const server = await loadServerRevisionedIndexEntries();
+      const server = await buildCurrentRevisionedIndexEntries();
       const serverTarget = server.notes.find((candidate) => candidate.id === entryId);
       if (
         !serverTarget
@@ -6497,8 +6956,8 @@ function UnlockedVaultPage({
         ...serverTarget,
         folderId: refreshedDraft.folderId,
         title
-      }, folderPathsRef.current);
-      const currentPath = vaultEntryPath(serverTarget, folderPathsRef.current);
+      }, server.folderPaths);
+      const currentPath = vaultEntryPath(serverTarget, server.folderPaths);
       const rewritePlans = resolvingNameCollision
         ? { canvasPlans: [], markdownPlans: [] }
         : planVaultContentPathRewritesForPathChanges({
@@ -6510,17 +6969,19 @@ function UnlockedVaultPage({
       ]);
       const selfPlan = rewritePlans.markdownPlans.find((plan) => plan.sourceEntryId === entryId);
       const selfCanvasPlan = rewritePlans.canvasPlans.find((plan) => plan.sourceEntryId === entryId);
-      const sourcePlans = buildVaultPathRewriteSourcePlans({
+      const sourcePlans = (await buildVaultPathRewriteSourcePlans({
         canvasPlans: rewritePlans.canvasPlans,
         entries: server.entries,
         markdownPlans: rewritePlans.markdownPlans
-      }).filter((plan) => plan.sourceEntryId !== entryId);
+      })).filter((plan) => plan.sourceEntryId !== entryId);
       const prepared = await prepareVaultPathRewriteJob(vaultIntegrityKey, {
+        ...server.inventoryBinding,
+        mutationTarget: { expectedRevision: refreshedDraft.baseRevision, id: entryId, kind: "entry" },
         ownerUid: profile.uid,
         pathChanges: [{ entryId, newPath: nextPath, oldPath: currentPath }],
         sourcePlans
       });
-      const completed = await executePreparedPathRewrite(prepared, async () => {
+      const completed = await executePreparedPathRewrite(prepared, async (pathRewriteActivation) => {
         let rewrittenDraft = { ...refreshedDraft, dirty: false, title };
         if (selfPlan) {
           const applied = applyInternalLinkRewritePlan(
@@ -6546,18 +7007,21 @@ function UnlockedVaultPage({
               profile.uid,
               privateKey,
               vaultIntegrityKey,
-              { folderId: rewrittenDraft.folderId, title }
+              { folderId: rewrittenDraft.folderId, title },
+              pathRewriteActivation
             )
           : await saveEncryptedVaultEntry(
               revisionedTarget,
               profile.uid,
               privateKey,
               vaultIntegrityKey,
-              rewrittenDraft
+              rewrittenDraft,
+              pathRewriteActivation
             );
         commitNotes((current) => current.map((candidate) => candidate.id === entryId
           ? {
               ...candidate,
+              ...persistedEncryptedMutationPatch(result),
               body: resolvingNameCollision ? serverTarget.body : rewrittenDraft.body,
               folderId: rewrittenDraft.folderId,
               title,
@@ -6586,10 +7050,18 @@ function UnlockedVaultPage({
         : `이름을 변경하고 내부 참조 ${completed.confirmedCount + selfRewriteCount}개를 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
       if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
     } catch (caught) {
-      if (caught instanceof NoteRevisionConflictError) {
-        setConflictedEntryIds((current) => new Map(current).set(entryId, caught.actualRevision));
+      const underlyingError = caught instanceof VaultPathRewriteControllerError
+        ? caught.cause
+        : caught;
+      const inventoryFailure = pathRewriteInventoryFailureMessage(underlyingError);
+      if (inventoryFailure) {
+        setError(inventoryFailure);
+      } else if (underlyingError instanceof NoteRevisionConflictError) {
+        setConflictedEntryIds((current) => new Map(current).set(entryId, underlyingError.actualRevision));
         setError("다른 기기나 탭에서 이 항목이 변경되어 이름을 바꾸지 않았습니다. 현재 편집본은 그대로 보존됩니다.");
         if (isMarkdownMergeEntry(note)) void prepareDraftMergeConflict(entryId, false);
+      } else if (underlyingError instanceof VaultNameConflictError) {
+        setError("같은 폴더에 동일한 이름의 항목이 있어 이름을 변경하지 않았습니다.");
       } else {
         setError(caught instanceof Error ? caught.message : "항목 이름을 변경하지 못했습니다.");
       }
@@ -6851,6 +7323,7 @@ function UnlockedVaultPage({
         commitNotes((current) => current.map((candidate) => candidate.id === entryId
           ? {
               ...candidate,
+              ...persistedEncryptedMutationPatch(saved),
               body: draft.body,
               folderId: draft.folderId,
               revision: saved.revision,
@@ -7297,12 +7770,35 @@ function UnlockedVaultPage({
     if (!activeNote || activeNote.contentFormat !== "legacy-html-v1") {
       return;
     }
-    const preview = previewLegacyHtmlToMarkdown(activeNote.body);
-    const warning = preview.warnings.map((item) => `• ${item.message}`).join("\n");
-    if (!window.confirm(`원본은 그대로 두고 Markdown 복사본을 만듭니다.${warning ? `\n\n${warning}` : ""}`)) {
+    openCoreTool("format");
+  }
+
+  async function createNormalizedMarkdownCopy() {
+    if (
+      !activeNote
+      || activeNote.contentFormat !== "markdown-v1"
+      || !activeDraft
+      || !activeMarkdownMayContainConvertibleHtml
+    ) return;
+    const preview = previewMarkdownHtmlNormalization(activeDraft.body);
+    if (preview.changedBlockCount < 1) {
+      setStatus(
+        preview.warnings[0]?.message
+        ?? "코드·YAML·인라인 HTML을 제외하면 변환할 블록 HTML이 없습니다."
+      );
       return;
     }
-    await createEntry("markdown", `${activeNote.title} Markdown`, preview.markdown);
+    const warningLines = preview.warnings.map((item) => `• ${item.message}`).join("\n");
+    const confirmed = window.confirm(
+      `HTML 블록 ${preview.changedBlockCount}개를 Markdown으로 바꾼 복사본을 만듭니다. 원본과 첨부·공유 설정은 변경하지 않습니다.${warningLines ? `\n\n${warningLines}` : ""}`
+    );
+    if (!confirmed) return;
+    await createEntry(
+      "markdown",
+      `${activeDraft.title.replace(/\.md$/iu, "")} Markdown`,
+      preview.markdown,
+      { folderId: activeDraft.folderId }
+    );
   }
 
   async function exportObsidianZip() {
@@ -8061,14 +8557,21 @@ function UnlockedVaultPage({
   function applyComposerSave(
     entryId: string,
     submitted: Pick<DraftState, "body" | "folderId" | "title">,
-    revision: number
+    persisted: {
+      revision: number;
+      encryptedBody?: DecryptedVaultNote["encryptedBody"];
+      encryptedTitle?: DecryptedVaultNote["encryptedTitle"];
+      vaultNameClaimId?: string;
+      vaultNameIndexVersion?: DecryptedVaultNote["vaultNameIndexVersion"];
+    }
   ) {
     commitNotes((current) => current.map((candidate) => candidate.id === entryId
       ? {
           ...candidate,
+          ...persistedEncryptedMutationPatch(persisted),
           body: submitted.body,
           folderId: submitted.folderId,
-          revision,
+          revision: persisted.revision,
           title: submitted.title
         }
       : candidate));
@@ -8076,7 +8579,7 @@ function UnlockedVaultPage({
     if (!latest) return;
     const nextDrafts = {
       ...draftsRef.current,
-      [entryId]: reconcileDraftAfterSave(latest, submitted, revision)
+      [entryId]: reconcileDraftAfterSave(latest, submitted, persisted.revision)
     };
     draftsRef.current = nextDrafts;
     setDrafts(nextDrafts);
@@ -8216,7 +8719,7 @@ function UnlockedVaultPage({
           vaultIntegrityKey,
           submitted
         );
-        applyComposerSave(input.entryId, submitted, saved.revision);
+        applyComposerSave(input.entryId, submitted, saved);
         return { revision: saved.revision };
       } catch (caught) {
         const confirmed = await readComposerEntryFromServer(input.entryId).catch(() => null);
@@ -8226,7 +8729,13 @@ function UnlockedVaultPage({
           && confirmed.snapshot.title === input.title
           && confirmed.snapshot.revision > input.expectedRevision
         ) {
-          applyComposerSave(input.entryId, submitted, confirmed.snapshot.revision);
+          applyComposerSave(input.entryId, submitted, {
+            encryptedBody: confirmed.note.encryptedBody,
+            encryptedTitle: confirmed.note.encryptedTitle,
+            revision: confirmed.snapshot.revision,
+            vaultNameClaimId: confirmed.note.vaultNameClaimId,
+            vaultNameIndexVersion: confirmed.note.vaultNameIndexVersion
+          });
           return { revision: confirmed.snapshot.revision };
         }
         throw caught;
@@ -8360,15 +8869,26 @@ function UnlockedVaultPage({
     if (!latest || latest.contentFormat !== "legacy-html-v1") {
       throw new Error("변환할 HTML 원본을 서버에서 다시 확인하지 못했습니다.");
     }
-    const plan = planLegacyVaultFormatConversion({
-      body: activeNote?.body ?? "",
+    const localSource = notesRef.current.find((note) => note.id === draft.sourceEntryId);
+    if (!localSource || localSource.contentFormat !== "legacy-html-v1") {
+      throw new Error("미리보기한 HTML 원본을 현재 Vault에서 다시 확인하지 못했습니다.");
+    }
+    const previewPlan = planLegacyVaultFormatConversion({
+      body: localSource.body,
       contentFormat: "legacy-html-v1",
-      folderId: activeNote?.folderId ?? null,
+      folderId: localSource.folderId ?? null,
       id: draft.sourceEntryId,
-      revision: draft.sourceRevision,
-      title: activeNote?.title ?? ""
+      revision: localSource.revision ?? 0,
+      title: localSource.title
     });
-    assertFormatConversionSourceUnchanged(plan, {
+    if (
+      draft.sourceRevision !== previewPlan.copy.sourceRevision
+      || draft.body !== previewPlan.copy.body
+      || draft.folderId !== previewPlan.copy.folderId
+    ) {
+      throw new Error("미리보기와 변환 요청이 일치하지 않습니다. 최신 원본으로 다시 미리보기해주세요.");
+    }
+    assertFormatConversionSourceUnchanged(previewPlan, {
       body: latest.body,
       contentFormat: "legacy-html-v1",
       folderId: latest.folderId ?? null,
@@ -8376,15 +8896,26 @@ function UnlockedVaultPage({
       revision: latest.revision ?? 0,
       title: latest.title
     });
+    const verifiedPlan = planLegacyVaultFormatConversion({
+      body: latest.body,
+      contentFormat: "legacy-html-v1",
+      folderId: latest.folderId ?? null,
+      id: latest.id,
+      revision: latest.revision ?? 0,
+      title: latest.title
+    });
+    const targetFolderId = latest.ownerUid === profile.uid && latest.type === "personal"
+      ? latest.folderId ?? null
+      : null;
     const title = uniqueTitle(
       notesRef.current.filter((note) => note.ownerUid === profile.uid),
       draft.title,
-      draft.folderId,
+      targetFolderId,
       "markdown"
     );
     const result = await createMarkdownVaultNote(profile, vaultIntegrityKey, {
-      body: draft.body,
-      folderId: draft.folderId,
+      body: verifiedPlan.copy.body,
+      folderId: targetFolderId,
       title
     });
     pendingCreatedEntryIdsRef.current.add(result.noteId);
@@ -8718,6 +9249,7 @@ function UnlockedVaultPage({
         }
         return {
           ...candidate,
+          ...persistedEncryptedMutationPatch(result),
           body: submitted.body,
           folderId: submitted.folderId,
           revision: result.revision,
@@ -9175,7 +9707,15 @@ function UnlockedVaultPage({
           >
             <header>
               <strong>{leftMode === "files" ? "파일" : leftMode === "search" ? "검색" : leftMode === "tags" ? "태그" : "북마크"}</strong>
-              <button aria-label="왼쪽 패널 닫기" onClick={closeLeftPanel} type="button"><X size={15} /></button>
+              <button
+                aria-controls="vault-left-panel"
+                aria-expanded="true"
+                aria-label={mobileLayout ? "왼쪽 패널 닫기" : "왼쪽 패널 접기"}
+                className="vault-left-panel-collapse"
+                onClick={closeLeftPanel}
+                title={mobileLayout ? "왼쪽 패널 닫기" : "왼쪽 패널 접기"}
+                type="button"
+              >{mobileLayout ? <X aria-hidden="true" size={18} /> : <ChevronLeft aria-hidden="true" size={18} />}</button>
             </header>
             {leftMode === "files" ? (
               <>
@@ -9509,6 +10049,13 @@ function UnlockedVaultPage({
                         <option value="notion">Notion</option>
                         <option value="discord-ai">Discord · AI</option>
                       </select>
+                    ) : null}
+                    {activeMarkdownMayContainConvertibleHtml ? (
+                      <button
+                        disabled={entryCreationContentLocked || pathRewriteBusy}
+                        onClick={() => void createNormalizedMarkdownCopy()}
+                        type="button"
+                      >HTML → Markdown 복사</button>
                     ) : null}
                     <button
                       aria-label="저장"

@@ -90,6 +90,10 @@ service cloud.firestore {
       return /databases/$(database)/documents/vaultMaintenanceJobs/$(uid)/pathRewrites/$(jobId);
     }
 
+    function vaultPathRewriteStepPath(uid, jobId, stepId) {
+      return /databases/$(database)/documents/vaultMaintenanceJobs/$(uid)/pathRewrites/$(jobId)/steps/$(stepId);
+    }
+
     function vaultImportJobPath(uid, jobId) {
       return /databases/$(database)/documents/vaultMaintenanceJobs/$(uid)/imports/$(jobId);
     }
@@ -1195,7 +1199,70 @@ service cloud.firestore {
     }
 
     function validVaultPathRewriteJobId(jobId) {
-      return jobId is string && jobId.matches("^pr1_[A-Za-z0-9_-]{43}$");
+      return jobId is string && jobId.matches("^pr[123]_[A-Za-z0-9_-]{43}$");
+    }
+
+    function validVaultPathRewriteAtomicMode(value) {
+      return value in ["atomic-v1", "atomic-manifest-v1"];
+    }
+
+    function validVaultPathRewriteAtomicTarget(data) {
+      return data.keys().hasAll([
+          "activationMode", "preparedStepCount", "mutationExpectedRevision",
+          "mutationTargetId", "mutationTargetKind"
+        ])
+        && data.preparedStepCount is int
+        && data.preparedStepCount >= 0
+        && data.preparedStepCount <= data.stepCount
+        && (
+          data.status in ["preparing", "abandoned"]
+          || data.preparedStepCount == data.stepCount
+        )
+        && data.mutationExpectedRevision is int
+        && data.mutationExpectedRevision >= 0
+        && data.mutationExpectedRevision <= 999999999999
+        && data.mutationTargetId is string
+        && data.mutationTargetId.matches("^[A-Za-z0-9_-]{1,120}$")
+        && data.mutationTargetKind in ["entry", "folder"]
+        && (data.mutationTargetKind == "entry" || data.mutationExpectedRevision >= 1);
+    }
+
+    function validVaultPathRewriteAtomicBinding(data, jobId) {
+      return jobId.matches("^pr2_[A-Za-z0-9_-]{43}$")
+        ? (
+          validVaultPathRewriteAtomicTarget(data)
+          && data.keys().hasAll(["inventoryFingerprint"])
+          && data.activationMode == "atomic-v1"
+          && data.inventoryFingerprint is string
+          && data.inventoryFingerprint.matches("^[A-Za-z0-9_-]{43}$")
+          && !data.keys().hasAny([
+            "inventoryManifestVersion", "inventoryManifestEpoch",
+            "inventoryManifestShardCount", "inventoryManifestRoot"
+          ])
+        )
+        : jobId.matches("^pr3_[A-Za-z0-9_-]{43}$")
+          ? (
+            validVaultPathRewriteAtomicTarget(data)
+            && data.keys().hasAll([
+              "inventoryManifestVersion", "inventoryManifestEpoch",
+              "inventoryManifestShardCount", "inventoryManifestRoot"
+            ])
+            && data.activationMode == "atomic-manifest-v1"
+            && data.inventoryManifestVersion == 1
+            && data.inventoryManifestEpoch is int
+            && data.inventoryManifestEpoch >= 1
+            && data.inventoryManifestEpoch <= 999999999999
+            && data.inventoryManifestShardCount == 32
+            && data.inventoryManifestRoot is string
+            && data.inventoryManifestRoot.matches("^[A-Za-z0-9_-]{43}$")
+            && !data.keys().hasAny(["inventoryFingerprint"])
+          )
+          : !data.keys().hasAny([
+            "activationMode", "preparedStepCount", "mutationExpectedRevision",
+            "mutationTargetId", "mutationTargetKind", "inventoryFingerprint",
+            "inventoryManifestVersion", "inventoryManifestEpoch",
+            "inventoryManifestShardCount", "inventoryManifestRoot"
+          ]);
     }
 
     function validVaultPathRewriteError(value) {
@@ -1214,6 +1281,10 @@ service cloud.firestore {
         && (!data.keys().hasAny(["completedAt"]) || data.completedAt is timestamp)
         && (!data.keys().hasAny(["recoveredAt"]) || data.recoveredAt is timestamp)
         && (!data.keys().hasAny(["lastAttemptAt"]) || data.lastAttemptAt is timestamp)
+        && (!data.keys().hasAny(["notAppliedAt"]) || data.notAppliedAt is timestamp)
+        && (!data.keys().hasAny(["lastRecoveryCheckAt"]) || data.lastRecoveryCheckAt is timestamp)
+        && (!data.keys().hasAny(["cleanupStartedAt"]) || data.cleanupStartedAt is timestamp)
+        && (!data.keys().hasAny(["abandonedAt"]) || data.abandonedAt is timestamp)
         && (!data.keys().hasAny(["recoveredAt"]) || data.keys().hasAny(["activatedAt"]));
     }
 
@@ -1256,14 +1327,31 @@ service cloud.firestore {
           "activatedAt",
           "completedAt",
           "recoveredAt",
-          "lastAttemptAt"
+          "lastAttemptAt",
+          "notAppliedAt",
+          "recoveryCheckCount",
+          "lastRecoveryCheckAt",
+          "remainingStepCount",
+          "cleanupStartedAt",
+          "lastCleanupStepId",
+          "activationMode",
+          "preparedStepCount",
+          "mutationExpectedRevision",
+          "mutationTargetId",
+          "mutationTargetKind",
+          "inventoryFingerprint",
+          "inventoryManifestVersion",
+          "inventoryManifestEpoch",
+          "inventoryManifestShardCount",
+          "inventoryManifestRoot",
+          "abandonedAt"
         ])
         && validVaultPathRewriteJobId(jobId)
         && data.ownerUid == uid
         && data.kind == "path-rewrite-v1"
         && data.version == 1
         && data.planFingerprint == jobId
-        && data.status in ["preparing", "prepared", "ready", "running", "blocked", "completed"]
+        && data.status in ["preparing", "prepared", "ready", "running", "blocked", "completed", "not-applied", "abandoned"]
         && data.stepCount is int
         && data.stepCount >= 0
         && data.stepCount <= 5000
@@ -1277,8 +1365,29 @@ service cloud.firestore {
         && data.retryCount is int
         && data.retryCount >= 0
         && data.retryCount <= data.attemptCount
+        && (!data.keys().hasAny(["recoveryCheckCount"]) || (
+          data.recoveryCheckCount is int
+          && data.recoveryCheckCount >= 0
+          && data.recoveryCheckCount <= 999999
+        ))
+        && (!data.keys().hasAny(["remainingStepCount"]) || (
+          data.remainingStepCount is int
+          && data.remainingStepCount >= 0
+          && data.remainingStepCount <= data.stepCount
+        ))
+        && (!data.keys().hasAny(["lastCleanupStepId"]) || (
+          data.lastCleanupStepId is string
+          && data.lastCleanupStepId.matches("^step-[0-9]{6}$")
+        ))
         && validVaultPathRewriteError(data.lastErrorCode)
         && ((data.status == "blocked") == (data.lastErrorCode != null))
+        && validVaultPathRewriteAtomicBinding(data, jobId)
+        && (data.status != "not-applied" || !data.keys().hasAny(["activationMode"]))
+        && (data.status != "not-applied" || (
+          data.cursor == 0
+          && data.confirmedCount == 0
+          && (!data.keys().hasAny(["recoveryCheckCount"]) || data.recoveryCheckCount > 0)
+        ))
         && data.revision is int
         && data.revision >= 1
         && data.revision <= 999999999999
@@ -1293,6 +1402,18 @@ service cloud.firestore {
             data.cursor == data.stepCount
             && data.keys().hasAll(["activatedAt", "completedAt"])
           )
+          : data.status == "abandoned"
+            ? (
+              data.cursor == 0
+              && data.confirmedCount == 0
+              && data.lastErrorCode == null
+              && (
+                !data.keys().hasAny(["activationMode"])
+                || validVaultPathRewriteAtomicMode(data.activationMode)
+              )
+              && data.keys().hasAll(["abandonedAt", "completedAt"])
+              && !data.keys().hasAny(["activatedAt"])
+            )
           : (
             !data.keys().hasAny(["completedAt"])
             && (data.stepCount == 0 || data.cursor < data.stepCount)
@@ -1308,11 +1429,32 @@ service cloud.firestore {
         && data.attemptCount == resource.data.attemptCount
         && data.retryCount == resource.data.retryCount
         && data.lastErrorCode == null
-        && data.diff(resource.data).affectedKeys().hasOnly(["status", "revision", "updatedAt"]);
+        && (
+          resource.data.keys().hasAny(["activationMode"])
+            ? data.preparedStepCount == data.stepCount
+            : !data.keys().hasAny(["preparedStepCount"])
+        )
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "preparedStepCount", "revision", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewritePreparationHeartbeat(data) {
+      return resource.data.status == "preparing"
+        && validVaultPathRewriteAtomicMode(resource.data.activationMode)
+        && data.status == resource.data.status
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.preparedStepCount == resource.data.preparedStepCount
+        && data.diff(resource.data).affectedKeys().hasOnly(["revision", "updatedAt"]);
     }
 
     function vaultPathRewritePreparedActivation(data) {
-      return resource.data.status == "prepared"
+      return resource.data.status in ["prepared", "not-applied"]
+        && !resource.data.keys().hasAny(["activationMode"])
         && data.cursor == resource.data.cursor
         && data.confirmedCount == resource.data.confirmedCount
         && data.attemptCount == resource.data.attemptCount
@@ -1331,6 +1473,7 @@ service cloud.firestore {
     function vaultPathRewritePathConflict(data) {
       return (
           resource.data.status == "prepared"
+          || resource.data.status == "not-applied"
           || (resource.data.status == "blocked" && resource.data.lastErrorCode == "path-state-conflict")
         )
         && data.status == "blocked"
@@ -1345,13 +1488,17 @@ service cloud.firestore {
     }
 
     function vaultPathRewritePathRecovery(data) {
-      return resource.data.status == "blocked"
-        && resource.data.lastErrorCode == "path-state-conflict"
+      return (
+          resource.data.status == "prepared"
+          || (resource.data.status == "blocked" && resource.data.lastErrorCode == "path-state-conflict")
+          || (resource.data.status == "not-applied" && resource.data.lastErrorCode == null)
+        )
         && data.cursor == resource.data.cursor
         && data.confirmedCount == resource.data.confirmedCount
         && data.attemptCount == resource.data.attemptCount
         && data.retryCount == resource.data.retryCount
         && data.lastErrorCode == null
+        && !resource.data.keys().hasAny(["activationMode"])
         && (
           (
             data.status == "prepared"
@@ -1377,6 +1524,131 @@ service cloud.firestore {
             ])
           )
         );
+    }
+
+    function vaultPathRewriteNotApplied(data) {
+      return (
+          resource.data.status == "prepared"
+          || resource.data.status == "not-applied"
+          || (resource.data.status == "blocked" && resource.data.lastErrorCode == "path-state-conflict")
+        )
+        && resource.data.cursor == 0
+        && resource.data.confirmedCount == 0
+        && !resource.data.keys().hasAny(["activationMode"])
+        && data.status == "not-applied"
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && (
+          (resource.data.keys().hasAny(["recoveryCheckCount"])
+            && data.recoveryCheckCount == resource.data.recoveryCheckCount + 1)
+          || (!resource.data.keys().hasAny(["recoveryCheckCount"])
+            && data.recoveryCheckCount == 1)
+        )
+        && data.lastRecoveryCheckAt == request.time
+        && (
+          (resource.data.status == "not-applied" && data.notAppliedAt == resource.data.notAppliedAt)
+          || (resource.data.status != "not-applied" && data.notAppliedAt == request.time)
+        )
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "lastErrorCode",
+          "recoveryCheckCount",
+          "lastRecoveryCheckAt",
+          "revision",
+          "notAppliedAt",
+          "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteNotAppliedRevival(data) {
+      return resource.data.status == "not-applied"
+        && data.status == "prepared"
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.notAppliedAt == resource.data.notAppliedAt
+        && data.diff(resource.data).affectedKeys().hasOnly(["status", "revision", "updatedAt"]);
+    }
+
+    function vaultPathRewriteAtomicAbandoned(data) {
+      return resource.data.status in ["preparing", "prepared"]
+        && validVaultPathRewriteAtomicMode(resource.data.activationMode)
+        && resource.data.updatedAt <= request.time - duration.value(2, "m")
+        && resource.data.cursor == 0
+        && resource.data.confirmedCount == 0
+        && data.status == "abandoned"
+        && data.cursor == 0
+        && data.confirmedCount == 0
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.abandonedAt == request.time
+        && data.completedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "lastErrorCode", "revision", "abandonedAt", "completedAt", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteLegacyPreparingAbandoned(data) {
+      return resource.data.status == "preparing"
+        && !resource.data.keys().hasAny(["activationMode"])
+        && resource.data.updatedAt <= request.time - duration.value(15, "m")
+        && resource.data.cursor == 0
+        && resource.data.confirmedCount == 0
+        && data.status == "abandoned"
+        && data.cursor == 0
+        && data.confirmedCount == 0
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.abandonedAt == request.time
+        && data.completedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "lastErrorCode", "revision", "abandonedAt", "completedAt", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteZeroStepAcknowledged(data) {
+      return resource.data.status == "ready"
+        && validVaultPathRewriteAtomicMode(resource.data.activationMode)
+        && resource.data.stepCount == 0
+        && resource.data.cursor == 0
+        && resource.data.confirmedCount == 0
+        && data.status == "completed"
+        && data.cursor == 0
+        && data.confirmedCount == 0
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.completedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "revision", "completedAt", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteAtomicAbandonedRevival(data) {
+      return resource.data.status == "abandoned"
+        && validVaultPathRewriteAtomicMode(resource.data.activationMode)
+        && data.status == "preparing"
+        && data.cursor == 0
+        && data.confirmedCount == 0
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.preparedStepCount == 0
+        && data.remainingStepCount == data.stepCount
+        && !data.keys().hasAny([
+          "abandonedAt", "completedAt", "cleanupStartedAt", "lastCleanupStepId"
+        ])
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "preparedStepCount", "remainingStepCount", "abandonedAt", "completedAt",
+          "cleanupStartedAt", "lastCleanupStepId", "revision", "updatedAt"
+        ]);
     }
 
     function vaultPathRewriteAttemptStart(data) {
@@ -1426,18 +1698,165 @@ service cloud.firestore {
         ]);
     }
 
+    function vaultPathRewriteTerminalCleanupStart(data) {
+      return resource.data.status in ["completed", "abandoned"]
+        && (
+          resource.data.status == "abandoned"
+          || resource.data.stepCount > 0
+          || resource.data.completedAt <= request.time - duration.value(2, "m")
+        )
+        && !resource.data.keys().hasAny(["cleanupStartedAt"])
+        && data.status == resource.data.status
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == resource.data.lastErrorCode
+        && data.cleanupStartedAt == request.time
+        && (
+          (resource.data.keys().hasAny(["remainingStepCount"])
+            && data.remainingStepCount == resource.data.remainingStepCount)
+          || (!resource.data.keys().hasAny(["remainingStepCount"])
+            && data.remainingStepCount == resource.data.stepCount)
+        )
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "remainingStepCount", "cleanupStartedAt", "revision", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteTerminalCleanupProgress(data) {
+      return resource.data.status in ["completed", "abandoned"]
+        && resource.data.cleanupStartedAt is timestamp
+        && resource.data.remainingStepCount > 0
+        && data.status == resource.data.status
+        && data.cursor == resource.data.cursor
+        && data.confirmedCount == resource.data.confirmedCount
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == resource.data.lastErrorCode
+        && data.cleanupStartedAt == resource.data.cleanupStartedAt
+        && data.remainingStepCount == resource.data.remainingStepCount - 1
+        && data.keys().hasAny(["lastCleanupStepId"])
+        && exists(vaultPathRewriteStepPath(data.ownerUid, data.planFingerprint, data.lastCleanupStepId))
+        && get(vaultPathRewriteStepPath(data.ownerUid, data.planFingerprint, data.lastCleanupStepId)).data.ordinal
+          == resource.data.remainingStepCount - 1
+        && !existsAfter(vaultPathRewriteStepPath(data.ownerUid, data.planFingerprint, data.lastCleanupStepId))
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "remainingStepCount", "lastCleanupStepId", "revision", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteAbandonedCleanupFinish(data) {
+      return resource.data.status == "abandoned"
+        && resource.data.cleanupStartedAt is timestamp
+        && data.status == resource.data.status
+        && data.cursor == 0
+        && data.confirmedCount == 0
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.cleanupStartedAt == resource.data.cleanupStartedAt
+        && data.remainingStepCount == 0
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "remainingStepCount", "revision", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteStateTransition(data) {
+      return resource.data.status == "preparing"
+        ? data.status == "abandoned"
+          ? (
+            vaultPathRewriteAtomicAbandoned(data)
+            || vaultPathRewriteLegacyPreparingAbandoned(data)
+          )
+          : vaultPathRewritePreparingToPrepared(data)
+        : resource.data.status == "prepared"
+          ? data.status == "abandoned"
+            ? vaultPathRewriteAtomicAbandoned(data)
+            : data.status == "not-applied"
+            ? vaultPathRewriteNotApplied(data)
+            : data.status == "blocked"
+              ? vaultPathRewritePathConflict(data)
+              : data.keys().hasAny(["recoveredAt"])
+                ? vaultPathRewritePathRecovery(data)
+                : vaultPathRewritePreparedActivation(data)
+          : resource.data.status == "not-applied"
+            ? data.status == "not-applied"
+              ? vaultPathRewriteNotApplied(data)
+              : data.status == "blocked"
+                ? vaultPathRewritePathConflict(data)
+                : data.status == "prepared"
+                  ? vaultPathRewriteNotAppliedRevival(data)
+                  : data.keys().hasAny(["recoveredAt"])
+                    ? vaultPathRewritePathRecovery(data)
+                    : vaultPathRewritePreparedActivation(data)
+            : resource.data.status == "blocked"
+              ? (
+                resource.data.lastErrorCode == "path-state-conflict"
+                ? data.status == "not-applied"
+                  ? vaultPathRewriteNotApplied(data)
+                  : data.status == "blocked"
+                    ? vaultPathRewritePathConflict(data)
+                    : vaultPathRewritePathRecovery(data)
+                : data.status == "blocked"
+                  ? vaultPathRewriteBlocked(data)
+                  : vaultPathRewriteAttemptStart(data)
+              )
+              : resource.data.status in ["ready", "running"]
+                ? data.status == "blocked"
+                  ? vaultPathRewriteBlocked(data)
+                  : data.cursor == resource.data.cursor + 1
+                    ? vaultPathRewriteStepConfirmed(data)
+                    : vaultPathRewriteAttemptStart(data)
+                : resource.data.status in ["completed", "abandoned"]
+                  ? (
+                    data.status == "preparing"
+                      ? vaultPathRewriteAtomicAbandonedRevival(data)
+                      : (
+                        vaultPathRewriteTerminalCleanupStart(data)
+                        || vaultPathRewriteTerminalCleanupProgress(data)
+                        || vaultPathRewriteAbandonedCleanupFinish(data)
+                      )
+                  )
+                  : false;
+    }
+
     function validVaultPathRewriteJobCreate(data, uid, jobId) {
       return validVaultPathRewriteJob(data, uid, jobId)
-        && data.status == "preparing"
+        && (
+          data.status == "preparing"
+          || (
+            data.status == "prepared"
+            && validVaultPathRewriteAtomicMode(data.activationMode)
+            && data.stepCount == 0
+            && data.preparedStepCount == 0
+          )
+        )
         && data.cursor == 0
         && data.confirmedCount == 0
         && data.attemptCount == 0
         && data.retryCount == 0
         && data.lastErrorCode == null
+        && (
+          !data.keys().hasAny(["recoveryCheckCount"])
+          || data.recoveryCheckCount == 0
+        )
+        && (
+          !data.keys().hasAny(["remainingStepCount"])
+          || data.remainingStepCount == data.stepCount
+        )
         && data.revision == 1
         && data.createdAt == request.time
         && data.updatedAt == request.time
-        && !data.keys().hasAny(["activatedAt", "completedAt", "recoveredAt", "lastAttemptAt"]);
+        && !data.keys().hasAny([
+          "activatedAt",
+          "completedAt",
+          "recoveredAt",
+          "lastAttemptAt",
+          "notAppliedAt",
+          "lastRecoveryCheckAt",
+          "cleanupStartedAt"
+        ]);
     }
 
     function validVaultPathRewriteJobUpdate(data, uid, jobId) {
@@ -1446,21 +1865,109 @@ service cloud.firestore {
         && resource.data.kind == data.kind
         && resource.data.version == data.version
         && resource.data.planFingerprint == data.planFingerprint
+        && (
+          jobId.matches("^pr2_[A-Za-z0-9_-]{43}$")
+            ? resource.data.inventoryFingerprint == data.inventoryFingerprint
+              && !resource.data.keys().hasAny([
+                "inventoryManifestVersion", "inventoryManifestEpoch",
+                "inventoryManifestShardCount", "inventoryManifestRoot"
+              ])
+              && !data.keys().hasAny([
+                "inventoryManifestVersion", "inventoryManifestEpoch",
+                "inventoryManifestShardCount", "inventoryManifestRoot"
+              ])
+            : jobId.matches("^pr3_[A-Za-z0-9_-]{43}$")
+              ? !resource.data.keys().hasAny(["inventoryFingerprint"])
+                && !data.keys().hasAny(["inventoryFingerprint"])
+                && resource.data.inventoryManifestVersion == data.inventoryManifestVersion
+                && resource.data.inventoryManifestEpoch == data.inventoryManifestEpoch
+                && resource.data.inventoryManifestShardCount == data.inventoryManifestShardCount
+                && resource.data.inventoryManifestRoot == data.inventoryManifestRoot
+              : !resource.data.keys().hasAny([
+                "inventoryFingerprint", "inventoryManifestVersion", "inventoryManifestEpoch",
+                "inventoryManifestShardCount", "inventoryManifestRoot"
+              ])
+                && !data.keys().hasAny([
+                  "inventoryFingerprint", "inventoryManifestVersion", "inventoryManifestEpoch",
+                  "inventoryManifestShardCount", "inventoryManifestRoot"
+                ])
+        )
         && resource.data.stepCount == data.stepCount
         && resource.data.encryptedManifest == data.encryptedManifest
         && resource.data.wrappedKey == data.wrappedKey
         && resource.data.createdAt == data.createdAt
-        && resource.data.status != "completed"
+        && data.revision == resource.data.revision + 1
+        && data.updatedAt == request.time
+        && vaultPathRewriteStateTransition(data);
+    }
+
+    // Keep hot maintenance transitions below Firestore's 1,000-expression
+    // ceiling. Each transition function constrains the complete affected-key
+    // set, while these shared fences preserve owner, revision, and timestamps.
+    function validVaultPathRewriteMaintenanceUpdate(data, uid) {
+      return resource.data.ownerUid == uid
+        && data.ownerUid == uid
         && data.revision == resource.data.revision + 1
         && data.updatedAt == request.time
         && (
-          vaultPathRewritePreparingToPrepared(data)
-          || vaultPathRewritePreparedActivation(data)
-          || vaultPathRewritePathConflict(data)
-          || vaultPathRewritePathRecovery(data)
-          || vaultPathRewriteAttemptStart(data)
-          || vaultPathRewriteBlocked(data)
-          || vaultPathRewriteStepConfirmed(data)
+          resource.data.status in ["completed", "abandoned"]
+            ? data.status == "preparing"
+              ? vaultPathRewriteAtomicAbandonedRevival(data)
+              : (
+                vaultPathRewriteTerminalCleanupStart(data)
+                || vaultPathRewriteTerminalCleanupProgress(data)
+                || vaultPathRewriteAbandonedCleanupFinish(data)
+              )
+            : resource.data.keys().hasAny(["activationMode"])
+              && resource.data.status == "preparing"
+              ? data.status == "abandoned"
+                ? vaultPathRewriteAtomicAbandoned(data)
+                : data.status == "prepared"
+                  ? vaultPathRewritePreparingToPrepared(data)
+                  : vaultPathRewritePreparationHeartbeat(data)
+              : resource.data.keys().hasAny(["activationMode"])
+                && resource.data.status == "ready"
+                && resource.data.stepCount == 0
+                ? vaultPathRewriteZeroStepAcknowledged(data)
+              : resource.data.status in ["ready", "running"]
+                ? data.status == "blocked"
+                  ? vaultPathRewriteBlocked(data)
+                  : data.cursor == resource.data.cursor + 1
+                    ? vaultPathRewriteStepConfirmed(data)
+                    : vaultPathRewriteAttemptStart(data)
+              : resource.data.status == "preparing"
+                ? data.status == "abandoned"
+                  ? vaultPathRewriteLegacyPreparingAbandoned(data)
+                  : vaultPathRewritePreparingToPrepared(data)
+              : resource.data.status == "prepared"
+                ? data.status == "not-applied"
+                  ? vaultPathRewriteNotApplied(data)
+                  : data.status == "blocked"
+                    ? vaultPathRewritePathConflict(data)
+                    : data.keys().hasAny(["recoveredAt"])
+                      ? vaultPathRewritePathRecovery(data)
+                      : vaultPathRewritePreparedActivation(data)
+              : resource.data.status == "not-applied"
+                ? data.status == "not-applied"
+                  ? vaultPathRewriteNotApplied(data)
+                  : data.status == "blocked"
+                    ? vaultPathRewritePathConflict(data)
+                    : data.status == "prepared"
+                      ? vaultPathRewriteNotAppliedRevival(data)
+                      : data.keys().hasAny(["recoveredAt"])
+                        ? vaultPathRewritePathRecovery(data)
+                        : vaultPathRewritePreparedActivation(data)
+              : resource.data.status == "blocked"
+                ? resource.data.lastErrorCode == "path-state-conflict"
+                  ? data.status == "not-applied"
+                    ? vaultPathRewriteNotApplied(data)
+                    : data.status == "blocked"
+                      ? vaultPathRewritePathConflict(data)
+                      : vaultPathRewritePathRecovery(data)
+                  : data.status == "blocked"
+                    ? vaultPathRewriteBlocked(data)
+                    : vaultPathRewriteAttemptStart(data)
+              : false
         );
     }
 
@@ -3431,6 +3938,22 @@ service cloud.firestore {
         && validVaultWorkspaceUpdate(request.resource.data);
     }
 
+    match /vaultMaintenanceJobs/{uid}/pathRewriteInventory/{manifestDocumentId} {
+      allow get: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && (
+          !exists(/databases/$(database)/documents/vaultMaintenanceJobs/$(uid)/pathRewriteInventory/$(manifestDocumentId))
+          || resource.data.ownerUid == uid
+        );
+      allow list: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && resource.data.ownerUid == uid
+        && request.query.limit != null
+        && request.query.limit <= 34;
+      // The manifest is a server-maintained concurrency fence. Browser create,
+      // update and delete are intentionally absent even for its owner.
+    }
+
     match /vaultMaintenanceJobs/{uid}/pathRewrites/{jobId} {
       allow get: if activeSignedInUserHasNotes()
         && request.auth.uid == uid
@@ -3445,7 +3968,21 @@ service cloud.firestore {
         && validVaultPathRewriteJobCreate(request.resource.data, uid, jobId);
       allow update: if activeSignedInUserHasNotes()
         && request.auth.uid == uid
-        && validVaultPathRewriteJobUpdate(request.resource.data, uid, jobId);
+        && (
+          validVaultPathRewriteMaintenanceUpdate(request.resource.data, uid)
+          || validVaultPathRewriteJobUpdate(request.resource.data, uid, jobId)
+        );
+      allow delete: if activeSignedInUserHasNotes()
+        && request.auth.uid == uid
+        && resource.data.ownerUid == uid
+        && resource.data.status in ["completed", "abandoned"]
+        && (
+          resource.data.status == "abandoned"
+          || resource.data.stepCount > 0
+          || resource.data.completedAt <= request.time - duration.value(2, "m")
+        )
+        && resource.data.cleanupStartedAt is timestamp
+        && resource.data.remainingStepCount == 0;
 
       match /steps/{stepId} {
         allow get, list: if activeSignedInUserHasNotes()
@@ -3453,6 +3990,25 @@ service cloud.firestore {
         allow create: if activeSignedInUserHasNotes()
           && request.auth.uid == uid
           && validVaultPathRewriteStep(request.resource.data, uid, jobId, stepId);
+        allow delete: if activeSignedInUserHasNotes()
+          && request.auth.uid == uid
+          && resource.data.ownerUid == uid
+          && exists(vaultPathRewriteJobPath(uid, jobId))
+          && get(vaultPathRewriteJobPath(uid, jobId)).data.ownerUid == uid
+          && get(vaultPathRewriteJobPath(uid, jobId)).data.cleanupStartedAt is timestamp
+          && (
+            get(vaultPathRewriteJobPath(uid, jobId)).data.status == "abandoned"
+            || (
+              get(vaultPathRewriteJobPath(uid, jobId)).data.status == "completed"
+              && resource.data.ordinal
+                == get(vaultPathRewriteJobPath(uid, jobId)).data.remainingStepCount - 1
+              && existsAfter(vaultPathRewriteJobPath(uid, jobId))
+              && getAfter(vaultPathRewriteJobPath(uid, jobId)).data.ownerUid == uid
+              && getAfter(vaultPathRewriteJobPath(uid, jobId)).data.status == "completed"
+              && getAfter(vaultPathRewriteJobPath(uid, jobId)).data.remainingStepCount
+                == get(vaultPathRewriteJobPath(uid, jobId)).data.remainingStepCount - 1
+            )
+          );
       }
     }
 

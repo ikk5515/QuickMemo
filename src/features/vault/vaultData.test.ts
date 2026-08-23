@@ -1,14 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { NoteFolderSnapshot } from "../../services/notes";
+import type { NoteFolderSnapshot, NoteSnapshot } from "../../services/notes";
 import {
   decryptVaultFolders,
+  decryptVaultNotes,
   migrateLegacyVaultFolder,
+  type DecryptedVaultNote,
   vaultEntryStorageIdentityState
 } from "./vaultData";
 import { resolveVaultFolderNameCollision } from "./vaultFolderCollisionRecovery";
 import { vaultNameFingerprint } from "./vaultIntegrity";
 
 const mocks = vi.hoisted(() => ({
+  decryptText: vi.fn(),
   encryptText: vi.fn(),
   generateNoteKey: vi.fn(),
   migrateLegacyNoteFolder: vi.fn(),
@@ -20,7 +23,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../lib/crypto", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../lib/crypto")>(),
-  decryptText: vi.fn(),
+  decryptText: mocks.decryptText,
   encryptText: mocks.encryptText,
   generateNoteKey: mocks.generateNoteKey,
   unwrapNoteKey: mocks.unwrapNoteKey,
@@ -50,6 +53,7 @@ const wrappedKey = {
 describe("Vault folder persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.decryptText.mockImplementation(async (payload: { cipherText: string }) => `plain:${payload.cipherText}`);
     mocks.generateNoteKey.mockResolvedValue({ kind: "folder-key" } as unknown as CryptoKey);
     mocks.encryptText.mockResolvedValue(encryptedName);
     mocks.wrapNoteKey.mockResolvedValue(wrappedKey);
@@ -233,6 +237,127 @@ describe("Vault folder persistence", () => {
         nameDecryptionFailed: true
       })
     ]);
+  });
+});
+
+describe("Vault note server snapshot decryption reuse", () => {
+  const encryptedTitle = {
+    algorithm: "AES-GCM" as const,
+    cipherText: "encrypted-title",
+    iv: "title-iv",
+    version: 1 as const
+  };
+  const encryptedBody = {
+    algorithm: "AES-GCM" as const,
+    cipherText: "encrypted-body",
+    iv: "body-iv",
+    version: 1 as const
+  };
+  const noteWrappedKey = {
+    algorithm: "RSA-OAEP" as const,
+    version: 1 as const,
+    wrappedKey: "wrapped-note-key"
+  };
+
+  function serverNote(overrides: Record<string, unknown> = {}) {
+    return {
+      contentFormat: "markdown-v1",
+      encryptedBody,
+      encryptedTitle,
+      entryKind: "markdown",
+      folderId: "server-folder",
+      id: "note-a",
+      isDeleted: false,
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      revision: 7,
+      type: "personal",
+      updatedBy: "user-a",
+      wrappedKeys: { "user-a": noteWrappedKey },
+      ...overrides
+    } as NoteSnapshot;
+  }
+
+  function reusableNote(overrides: Record<string, unknown> = {}) {
+    return {
+      ...serverNote({ folderId: "subscription-folder" }),
+      body: "already decrypted body",
+      title: "already decrypted title",
+      ...overrides
+    } as DecryptedVaultNote;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.decryptText.mockImplementation(async (payload: { cipherText: string }) => `plain:${payload.cipherText}`);
+    mocks.unwrapNoteKey.mockResolvedValue({ kind: "note-key" } as unknown as CryptoKey);
+  });
+
+  it("reuses plaintext for an exact authoritative revision, identity, ciphertext, and wrapped key", async () => {
+    const result = await decryptVaultNotes(
+      [serverNote()],
+      "user-a",
+      { kind: "private" } as unknown as CryptoKey,
+      { reusableNotes: [reusableNote()] }
+    );
+
+    expect(result).toEqual([expect.objectContaining({
+      body: "already decrypted body",
+      folderId: "server-folder",
+      title: "already decrypted title"
+    })]);
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.decryptText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["revision", { revision: 8 }],
+    ["storage identity", { contentFormat: "legacy-html-v1", entryKind: "legacy-html" }],
+    ["body ciphertext", { encryptedBody: { ...encryptedBody, cipherText: "changed-body" } }],
+    ["wrapped key", { wrappedKeys: { "user-a": { ...noteWrappedKey, wrappedKey: "changed-key" } } }]
+  ])("decrypts the backend payload again when %s differs", async (_label, serverOverrides) => {
+    const result = await decryptVaultNotes(
+      [serverNote(serverOverrides)],
+      "user-a",
+      { kind: "private" } as unknown as CryptoKey,
+      { reusableNotes: [reusableNote()] }
+    );
+
+    expect(result).toHaveLength(1);
+    expect(mocks.unwrapNoteKey).toHaveBeenCalledOnce();
+    expect(mocks.decryptText).toHaveBeenCalledTimes(2);
+  });
+
+  it("eliminates all repeated crypto work for an unchanged large server snapshot", async () => {
+    const count = 200;
+    const snapshots = Array.from({ length: count }, (_, index) => serverNote({ id: `note-${index}` }));
+    const reusable = snapshots.map((note, index) => reusableNote({
+      ...note,
+      body: `body-${index}`,
+      title: `title-${index}`
+    }));
+
+    const baseline = await decryptVaultNotes(
+      snapshots,
+      "user-a",
+      { kind: "private" } as unknown as CryptoKey
+    );
+    expect(baseline).toHaveLength(count);
+    expect(mocks.unwrapNoteKey).toHaveBeenCalledTimes(count);
+    expect(mocks.decryptText).toHaveBeenCalledTimes(count * 2);
+
+    mocks.unwrapNoteKey.mockClear();
+    mocks.decryptText.mockClear();
+    const result = await decryptVaultNotes(
+      snapshots,
+      "user-a",
+      { kind: "private" } as unknown as CryptoKey,
+      { reusableNotes: reusable }
+    );
+
+    expect(result).toHaveLength(count);
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.decryptText).not.toHaveBeenCalled();
   });
 });
 

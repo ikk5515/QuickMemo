@@ -7,6 +7,10 @@ export interface MarkdownTextToken {
   value: string;
 }
 
+export interface MarkdownLineBreakToken {
+  type: "line-break";
+}
+
 export interface MarkdownCodeToken {
   type: "code";
   value: string;
@@ -60,6 +64,7 @@ export interface MarkdownTagToken {
 
 export type MarkdownInlineToken =
   | MarkdownTextToken
+  | MarkdownLineBreakToken
   | MarkdownCodeToken
   | MarkdownMathToken
   | MarkdownFootnoteReferenceToken

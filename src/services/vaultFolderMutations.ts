@@ -1,6 +1,7 @@
 import { getToken as getAppCheckToken } from "firebase/app-check";
 import { appCheck, auth } from "../lib/firebase";
 import type { EncryptedPayload, WrappedNoteKey } from "../types";
+import type { VaultPathRewriteActivationInput } from "./vaultPathRewriteJobs";
 
 export const vaultFolderApiPath = "/api/vault-folders";
 
@@ -41,6 +42,7 @@ type UpdatePayload = CutoverLeasePayload & {
   nameClaim: VaultFolderNameClaimInput;
   order?: number;
   parentId?: string | null;
+  pathRewriteActivation?: VaultPathRewriteActivationInput;
 };
 
 type ResolveCollisionPayloadBase = CutoverLeasePayload & {
@@ -48,6 +50,7 @@ type ResolveCollisionPayloadBase = CutoverLeasePayload & {
   expectedRevision: number;
   folderId: string;
   nameClaim: VaultFolderNameClaimInput;
+  pathRewriteActivation?: VaultPathRewriteActivationInput;
 };
 
 type ResolveEncryptedCollisionPayload = ResolveCollisionPayloadBase & (
@@ -89,7 +92,7 @@ type LifecyclePayload = {
   folderId: string;
 };
 
-type MaintenancePayload = { action: "audit" | "bootstrap" };
+type MaintenancePayload = { action: "audit" | "bootstrap" | "repair" };
 
 export type VaultFolderApiPayload =
   | CreatePayload
@@ -106,6 +109,10 @@ export class VaultFolderApiError extends Error {
   constructor(code: string, status: number) {
     super(code === "vault_import_locked"
       ? "Vault 가져오기 또는 복구가 끝날 때까지 기존 폴더 변경이 잠깁니다."
+      : code === "vault_path_rewrite_inventory_changed"
+        ? "다른 탭에서 Vault 항목이나 폴더가 변경되었습니다. 최신 목록으로 다시 시도해주세요."
+        : code === "vault_path_rewrite_inventory_capacity"
+          ? "Vault 항목 또는 폴더 수가 안전한 경로 갱신 한도를 초과했습니다."
       : status === 409
         ? "다른 탭에서 폴더가 변경되었습니다. 새로고침 후 다시 시도해주세요."
         : status === 401 || status === 403
@@ -118,6 +125,12 @@ export class VaultFolderApiError extends Error {
 }
 
 const readyTreeRequests = new Map<string, Promise<{
+  folderCount: number;
+  revision: number;
+  schemaVersion: 1;
+  status: "created" | "ready";
+}>>();
+const activeRepairRequests = new Map<string, Promise<{
   folderCount: number;
   revision: number;
   schemaVersion: 1;
@@ -155,7 +168,7 @@ function validVaultFolderSuccess(
   ) {
     return false;
   }
-  if (payload.action === "bootstrap") {
+  if (payload.action === "bootstrap" || payload.action === "repair") {
     return hasExactKeys(body, [
       "folderCount", "maximumFolderCount", "ok", "revision", "schemaVersion", "status"
     ])
@@ -262,6 +275,39 @@ export async function ensureVaultFolderTree(ownerUid: string) {
   } catch (error) {
     readyTreeRequests.delete(ownerUid);
     throw error;
+  }
+}
+
+/**
+ * Rebuilds the server-owned folder tree from the owner's encrypted folder
+ * documents. This is deliberately separate from the cached O(1) bootstrap so
+ * ordinary sign-in never scans the complete Vault. Callers should use it only
+ * after a server mutation reports a known tree/parent consistency error.
+ */
+export async function repairVaultFolderTree(ownerUid: string, signal?: AbortSignal) {
+  const activeRepair = signal ? null : activeRepairRequests.get(ownerUid);
+  if (activeRepair) return activeRepair;
+  invalidateVaultFolderTreeReadiness(ownerUid);
+  const request = vaultFolderApiRequest<{
+    folderCount: number;
+    revision: number;
+    schemaVersion: 1;
+    status: "created" | "ready";
+  }>(ownerUid, { action: "repair" }, signal);
+  if (!signal) activeRepairRequests.set(ownerUid, request);
+  try {
+    const repaired = await request;
+    // A successful repair is also a valid readiness result. Cache only the
+    // settled value so one caller's AbortSignal is never shared with another.
+    readyTreeRequests.set(ownerUid, Promise.resolve(repaired));
+    return repaired;
+  } catch (error) {
+    readyTreeRequests.delete(ownerUid);
+    throw error;
+  } finally {
+    if (!signal && activeRepairRequests.get(ownerUid) === request) {
+      activeRepairRequests.delete(ownerUid);
+    }
   }
 }
 

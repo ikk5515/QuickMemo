@@ -7,11 +7,13 @@ import {
   clearSecureShareEmulators,
   configureSecureShareApiEmulatorEnvironment,
   createEmulatorOwner,
+  listEmulatorCollection,
   readEmulatorDocument,
   secureShareApiEmulatorProjectId,
   type SecureShareApiHarness,
   writeEmulatorDocuments
 } from "./helpers/secureShareApiEmulator.js";
+import { vaultPathRewriteInventoryFingerprint } from "../api/_vault-path-rewrite-activation.js";
 
 const describeEmulator =
   process.env.FIRESTORE_EMULATOR_HOST && process.env.FIREBASE_AUTH_EMULATOR_HOST
@@ -37,6 +39,29 @@ async function startVaultFolderHarness(): Promise<SecureShareApiHarness> {
   const moduleUrl = new URL("../api/vault-folders.js", import.meta.url);
   moduleUrl.searchParams.set("integration-instance", String(Date.now()));
   const module = await import(/* @vite-ignore */ moduleUrl.href) as typeof import("../api/vault-folders.js");
+  const server = createServer((request, response) => {
+    void module.default(request, response);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    })
+  };
+}
+
+async function startVaultNoteHarness(): Promise<SecureShareApiHarness> {
+  const moduleUrl = new URL("../api/vault-notes.js", import.meta.url);
+  moduleUrl.searchParams.set("integration-instance", String(Date.now()));
+  const module = await import(/* @vite-ignore */ moduleUrl.href) as typeof import("../api/vault-notes.js");
   const server = createServer((request, response) => {
     void module.default(request, response);
   });
@@ -126,7 +151,9 @@ async function deleteEmulatorDocument(path: string) {
 
 describeEmulator("Vault folder API emulator transaction", () => {
   let harness: SecureShareApiHarness;
+  let noteHarness: SecureShareApiHarness;
   let idToken = "";
+  let pathJobCounter = 0;
   let uid = "";
 
   async function request(body: Record<string, unknown>) {
@@ -142,6 +169,66 @@ describeEmulator("Vault folder API emulator transaction", () => {
       body: await response.json() as Record<string, unknown>,
       response
     };
+  }
+
+  async function requestNote(body: Record<string, unknown>) {
+    const response = await fetch(`${noteHarness.origin}/api/vault-notes`, {
+      method: "POST",
+      headers: {
+        ...apiHeaders(noteHarness.origin, { authorization: idToken }),
+        "x-quickmemo-vault-notes": "1"
+      },
+      body: JSON.stringify(body)
+    });
+    return {
+      body: await response.json() as Record<string, unknown>,
+      response
+    };
+  }
+
+  async function preparePr2PathRewriteActivation(input: {
+    expectedTargetRevision: number;
+    id: string;
+    kind: "entry" | "folder";
+    label: string;
+  }) {
+    const [notes, folders] = await Promise.all([
+      listEmulatorCollection("notes"),
+      listEmulatorCollection("noteFolders")
+    ]);
+    const inventoryFingerprint = vaultPathRewriteInventoryFingerprint(
+      uid,
+      notes.filter((note) => note.ownerUid === uid),
+      folders.filter((folder) => folder.ownerUid === uid)
+    );
+    pathJobCounter += 1;
+    const digest = createHash("sha256")
+      .update(`${input.label}:${pathJobCounter}`, "utf8")
+      .digest("base64url");
+    const jobId = `pr2_${digest}`;
+    await writeEmulatorDocuments([{
+      path: `vaultMaintenanceJobs/${uid}/pathRewrites/${jobId}`,
+      fields: {
+        activationMode: "atomic-v1",
+        confirmedCount: 0,
+        cursor: 0,
+        inventoryFingerprint,
+        kind: "path-rewrite-v1",
+        lastErrorCode: null,
+        mutationExpectedRevision: input.expectedTargetRevision,
+        mutationTargetId: input.id,
+        mutationTargetKind: input.kind,
+        ownerUid: uid,
+        planFingerprint: jobId,
+        preparedStepCount: 0,
+        revision: 2,
+        status: "prepared",
+        stepCount: 0,
+        updatedAt: new Date(),
+        version: 1
+      }
+    }]);
+    return { expectedRevision: 2, jobId };
   }
 
   async function setPendingIntegrityMarker(leased = false) {
@@ -173,7 +260,10 @@ describeEmulator("Vault folder API emulator transaction", () => {
 
   beforeAll(async () => {
     configureSecureShareApiEmulatorEnvironment();
-    harness = await startVaultFolderHarness();
+    [harness, noteHarness] = await Promise.all([
+      startVaultFolderHarness(),
+      startVaultNoteHarness()
+    ]);
   });
 
   beforeEach(async () => {
@@ -183,6 +273,7 @@ describeEmulator("Vault folder API emulator transaction", () => {
       "emulator-owner-password"
     );
     idToken = owner.idToken;
+    pathJobCounter = 0;
     uid = owner.localId;
     const now = new Date("2026-08-23T00:00:00.000Z");
     await writeEmulatorDocuments([
@@ -217,7 +308,7 @@ describeEmulator("Vault folder API emulator transaction", () => {
   });
 
   afterAll(async () => {
-    await harness?.close();
+    await Promise.all([harness?.close(), noteHarness?.close()]);
   });
 
   it("atomically creates the tree, folder, and claim and rejects a mismatched response-loss retry", async () => {
@@ -247,6 +338,482 @@ describeEmulator("Vault folder API emulator transaction", () => {
     });
     expect(mismatched.response.status).toBe(409);
     expect(await readEmulatorDocument(`noteFolders/root`)).toMatchObject({ encryptedName });
+  });
+
+  it("keeps valid bootstrap O(1) and repairs a stale tree only on the explicit path", async () => {
+    expect((await request(createBody("root", null, "R"))).response.status).toBe(200);
+    await writeEmulatorDocuments([{
+      path: "noteFolders/late-folder",
+      fields: unclaimedFolderFields(uid, {
+        vaultLineageGeneration: 1
+      })
+    }]);
+
+    const fastReady = await request({ action: "bootstrap" });
+
+    expect(fastReady.response.status).toBe(200);
+    expect(fastReady.body).toMatchObject({
+      folderCount: 1,
+      revision: 2,
+      status: "ready"
+    });
+    expect(await readEmulatorDocument(`vaultFolderTrees/${uid}`)).toMatchObject({
+      folderCount: 1,
+      nodes: { root: { active: true, parentId: null, selfActive: true } },
+      revision: 2
+    });
+
+    const repaired = await request({ action: "repair" });
+
+    expect(repaired.response.status).toBe(200);
+    expect(repaired.body).toMatchObject({
+      folderCount: 2,
+      revision: 3,
+      status: "created"
+    });
+    expect(await readEmulatorDocument(`vaultFolderTrees/${uid}`)).toMatchObject({
+      folderCount: 2,
+      nodes: {
+        "late-folder": { active: true, parentId: null, selfActive: true },
+        root: { active: true, parentId: null, selfActive: true }
+      },
+      revision: 3
+    });
+
+    const ready = await request({ action: "bootstrap" });
+    expect(ready.response.status).toBe(200);
+    expect(ready.body).toMatchObject({ folderCount: 2, revision: 3, status: "ready" });
+  });
+
+  it("rebuilds same-owner malformed and missing tree documents without weakening ownership", async () => {
+    expect((await request(createBody("root", null, "R"))).response.status).toBe(200);
+    const now = new Date();
+    await writeEmulatorDocuments([{
+      path: `vaultFolderTrees/${uid}`,
+      fields: {
+        createdAt: now,
+        folderCount: 1,
+        nodes: {
+          root: {
+            active: true,
+            generation: 1,
+            parentId: "missing-parent",
+            selfActive: true
+          }
+        },
+        ownerUid: uid,
+        revision: 7,
+        schemaVersion: 1,
+        updatedAt: now
+      }
+    }]);
+
+    const malformedRepair = await request({ action: "repair" });
+    expect(malformedRepair.response.status).toBe(200);
+    expect(malformedRepair.body).toMatchObject({ revision: 8, status: "created" });
+    expect(await readEmulatorDocument(`vaultFolderTrees/${uid}`)).toMatchObject({
+      folderCount: 1,
+      nodes: { root: { active: true, parentId: null, selfActive: true } },
+      ownerUid: uid,
+      revision: 8
+    });
+
+    await deleteEmulatorDocument(`vaultFolderTrees/${uid}`);
+    const missingRepair = await request({ action: "repair" });
+    expect(missingRepair.response.status).toBe(200);
+    expect(missingRepair.body).toMatchObject({
+      folderCount: 1,
+      revision: 1,
+      status: "created"
+    });
+
+    await writeEmulatorDocuments([{
+      path: `vaultFolderTrees/${uid}`,
+      fields: {
+        createdAt: now,
+        folderCount: 0,
+        nodes: {},
+        ownerUid: "different-owner",
+        revision: 2,
+        schemaVersion: 1,
+        updatedAt: now
+      }
+    }]);
+    const ownerMismatch = await request({ action: "repair" });
+    expect(ownerMismatch.response.status).toBe(409);
+    expect(ownerMismatch.body).toMatchObject({ error: "request_failed", ok: false });
+    expect(await readEmulatorDocument(`vaultFolderTrees/${uid}`))
+      .toMatchObject({ ownerUid: "different-owner", revision: 2 });
+  });
+
+  it("repairs a same-owner tree whose stored lineage exceeds the depth limit", async () => {
+    expect((await request(createBody("root", null, "R"))).response.status).toBe(200);
+    const now = new Date();
+    const nodes = Object.fromEntries(Array.from({ length: 34 }, (_, index) => [
+      `depth-${index}`,
+      {
+        active: true,
+        generation: 1,
+        parentId: index === 0 ? null : `depth-${index - 1}`,
+        selfActive: true
+      }
+    ]));
+    await writeEmulatorDocuments([{
+      path: `vaultFolderTrees/${uid}`,
+      fields: {
+        createdAt: now,
+        folderCount: 34,
+        nodes,
+        ownerUid: uid,
+        revision: 9,
+        schemaVersion: 1,
+        updatedAt: now
+      }
+    }]);
+
+    const repaired = await request({ action: "repair" });
+
+    expect(repaired.response.status).toBe(200);
+    expect(repaired.body).toMatchObject({
+      folderCount: 1,
+      revision: 10,
+      status: "created"
+    });
+    expect(await readEmulatorDocument(`vaultFolderTrees/${uid}`)).toMatchObject({
+      folderCount: 1,
+      nodes: { root: { active: true, parentId: null, selfActive: true } },
+      ownerUid: uid,
+      revision: 10
+    });
+  });
+
+  it("allows an actual note move to retry after stale and missing parent trees are repaired", async () => {
+    expect((await request(createBody("target-folder", null, "T"))).response.status).toBe(200);
+    const now = new Date();
+    const notePayload = (noteId: string, targetClaim: string) => ({
+      action: "move",
+      expectedRevision: 1,
+      folderId: "target-folder",
+      nameClaim: { claimId: targetClaim.repeat(43), indexVersion: 1, parentId: "target-folder" },
+      noteId,
+      readerUids: [uid]
+    });
+    const noteFields = (sourceClaim: string) => ({
+      attachmentRevision: 0,
+      contentFormat: "markdown-v1",
+      createdAt: now,
+      encryptedBody: { ...encryptedName, cipherText: "encrypted-note-body" },
+      encryptedTitle: { ...encryptedName, cipherText: "encrypted-note-title" },
+      entryKind: "markdown",
+      folderId: null,
+      isDeleted: false,
+      lastMutationId: "seed-mutation",
+      ownerUid: uid,
+      participantUids: [uid],
+      revision: 1,
+      savedAt: now,
+      type: "personal",
+      updatedAt: now,
+      updatedBy: uid,
+      vaultNameClaimId: sourceClaim.repeat(43),
+      vaultNameIndexVersion: 1,
+      wrappedKeys: { [uid]: wrappedKey }
+    });
+    const sourceClaimFields = (noteId: string) => ({
+      createdAt: now,
+      indexVersion: 1,
+      ownerUid: uid,
+      parentId: null,
+      targetId: noteId,
+      targetType: "entry",
+      updatedAt: now
+    });
+
+    await writeEmulatorDocuments([
+      {
+        path: "notes/stale-tree-note",
+        fields: noteFields("S")
+      },
+      {
+        path: `vaultIntegrity/${uid}/nameClaims/${"S".repeat(43)}`,
+        fields: sourceClaimFields("stale-tree-note")
+      },
+      {
+        path: `vaultFolderTrees/${uid}`,
+        fields: {
+          createdAt: now,
+          folderCount: 0,
+          nodes: {},
+          ownerUid: uid,
+          revision: 3,
+          schemaVersion: 1,
+          updatedAt: now
+        }
+      },
+      {
+        path: "notes/missing-tree-note",
+        fields: noteFields("V")
+      },
+      {
+        path: `vaultIntegrity/${uid}/nameClaims/${"V".repeat(43)}`,
+        fields: sourceClaimFields("missing-tree-note")
+      }
+    ]);
+
+    const stalePayload = notePayload("stale-tree-note", "U");
+    const staleRejected = await requestNote(stalePayload);
+    expect(staleRejected.response.status).toBe(409);
+    expect(staleRejected.body).toMatchObject({ error: "vault_parent_unavailable", ok: false });
+    expect((await request({ action: "repair" })).body)
+      .toMatchObject({ revision: 4, status: "created" });
+    const staleActivation = await preparePr2PathRewriteActivation({
+      expectedTargetRevision: 1,
+      id: "stale-tree-note",
+      kind: "entry",
+      label: "stale-tree-note-move"
+    });
+    const staleRetried = await requestNote({
+      ...stalePayload,
+      pathRewriteActivation: staleActivation
+    });
+    expect(staleRetried.response.status).toBe(200);
+    expect(staleRetried.body).toMatchObject({ noteId: "stale-tree-note", revision: 2 });
+    expect(await readEmulatorDocument("notes/stale-tree-note"))
+      .toMatchObject({ folderId: "target-folder", vaultNameClaimId: "U".repeat(43) });
+
+    await deleteEmulatorDocument(`vaultFolderTrees/${uid}`);
+
+    const missingPayload = notePayload("missing-tree-note", "W");
+    const missingRejected = await requestNote(missingPayload);
+    expect(missingRejected.response.status).toBe(409);
+    expect(missingRejected.body)
+      .toMatchObject({ error: "vault_tree_repair_required", ok: false });
+    expect((await request({ action: "repair" })).body)
+      .toMatchObject({ folderCount: 1, revision: 1, status: "created" });
+    const missingActivation = await preparePr2PathRewriteActivation({
+      expectedTargetRevision: 1,
+      id: "missing-tree-note",
+      kind: "entry",
+      label: "missing-tree-note-move"
+    });
+    const missingRetried = await requestNote({
+      ...missingPayload,
+      pathRewriteActivation: missingActivation
+    });
+    expect(missingRetried.response.status).toBe(200);
+    expect(missingRetried.body).toMatchObject({ noteId: "missing-tree-note", revision: 2 });
+    expect(await readEmulatorDocument("notes/missing-tree-note"))
+      .toMatchObject({ folderId: "target-folder", vaultNameClaimId: "W".repeat(43) });
+  });
+
+  it("commits a folder move and its bound rewrite activation in one transaction", async () => {
+    expect((await request(createBody("atomic-source", null, "A"))).response.status).toBe(200);
+    expect((await request(createBody("atomic-destination", null, "B"))).response.status).toBe(200);
+    expect((await request(createBody("atomic-other", null, "C"))).response.status).toBe(200);
+    const now = new Date();
+    const jobId = `pr2_${"atomic-folder".padEnd(43, "0")}`;
+    const jobPath = `vaultMaintenanceJobs/${uid}/pathRewrites/${jobId}`;
+    const inventoryFolders = await Promise.all([
+      "atomic-source",
+      "atomic-destination",
+      "atomic-other"
+    ].map(async (folderId) => ({
+      ...(await readEmulatorDocument(`noteFolders/${folderId}`) ?? {}),
+      __id: folderId
+    })));
+    const inventoryFingerprint = vaultPathRewriteInventoryFingerprint(uid, [], inventoryFolders);
+    await writeEmulatorDocuments([{
+      path: jobPath,
+      fields: {
+        activationMode: "atomic-v1",
+        confirmedCount: 0,
+        cursor: 0,
+        inventoryFingerprint,
+        kind: "path-rewrite-v1",
+        lastErrorCode: null,
+        mutationExpectedRevision: 1,
+        mutationTargetId: "atomic-source",
+        mutationTargetKind: "folder",
+        ownerUid: uid,
+        planFingerprint: jobId,
+        preparedStepCount: 1,
+        revision: 2,
+        status: "prepared",
+        stepCount: 1,
+        updatedAt: now,
+        version: 1
+      }
+    }]);
+
+    const moved = await request({
+      action: "move",
+      expectedRevision: 1,
+      folderId: "atomic-source",
+      nameClaim: {
+        claimId: "D".repeat(43),
+        indexVersion: 1,
+        parentId: "atomic-destination"
+      },
+      parentId: "atomic-destination",
+      pathRewriteActivation: { expectedRevision: 2, jobId }
+    });
+    expect(moved.response.status).toBe(200);
+    expect(await readEmulatorDocument("noteFolders/atomic-source"))
+      .toMatchObject({ parentId: "atomic-destination", revision: 2 });
+    expect(await readEmulatorDocument(jobPath)).toMatchObject({ revision: 3, status: "ready" });
+
+    const raceFolderIds = ["atomic-source", "atomic-destination", "atomic-other"];
+    const raceFolders = await Promise.all(raceFolderIds.map(async (currentFolderId) => ({
+      ...(await readEmulatorDocument(`noteFolders/${currentFolderId}`) ?? {}),
+      __id: currentFolderId
+    })));
+    const ancestorRaceJobId = `pr2_${"ancestor-folder-race".padEnd(43, "0")}`;
+    const ancestorRaceJobPath = `vaultMaintenanceJobs/${uid}/pathRewrites/${ancestorRaceJobId}`;
+    const ancestorBefore = await readEmulatorDocument("noteFolders/atomic-destination");
+    if (!ancestorBefore) throw new Error("ancestor race fixture is missing");
+    await writeEmulatorDocuments([
+      {
+        path: ancestorRaceJobPath,
+        fields: {
+          activationMode: "atomic-v1",
+          confirmedCount: 0,
+          cursor: 0,
+          inventoryFingerprint: vaultPathRewriteInventoryFingerprint(uid, [], raceFolders),
+          kind: "path-rewrite-v1",
+          lastErrorCode: null,
+          mutationExpectedRevision: 2,
+          mutationTargetId: "atomic-source",
+          mutationTargetKind: "folder",
+          ownerUid: uid,
+          planFingerprint: ancestorRaceJobId,
+          preparedStepCount: 0,
+          revision: 2,
+          status: "prepared",
+          stepCount: 0,
+          updatedAt: now,
+          version: 1
+        }
+      },
+      {
+        path: "noteFolders/atomic-destination",
+        fields: {
+          ...ancestorBefore,
+          encryptedName: { ...encryptedName, cipherText: "concurrent-ancestor-rename" },
+          revision: 2,
+          updatedAt: new Date()
+        }
+      }
+    ]);
+    const ancestorRaced = await request({
+      action: "move",
+      expectedRevision: 2,
+      folderId: "atomic-source",
+      nameClaim: { claimId: "F".repeat(43), indexVersion: 1, parentId: null },
+      parentId: null,
+      pathRewriteActivation: { expectedRevision: 2, jobId: ancestorRaceJobId }
+    });
+    expect(ancestorRaced.response.status).toBe(409);
+    expect(ancestorRaced.body).toMatchObject({
+      error: "vault_path_rewrite_inventory_changed",
+      ok: false
+    });
+    expect(await readEmulatorDocument("noteFolders/atomic-source"))
+      .toMatchObject({ parentId: "atomic-destination", revision: 2 });
+    expect(await readEmulatorDocument(ancestorRaceJobPath))
+      .toMatchObject({ revision: 2, status: "prepared" });
+
+    const noOpJobId = `pr2_${"no-op-folder".padEnd(43, "0")}`;
+    const noOpJobPath = `vaultMaintenanceJobs/${uid}/pathRewrites/${noOpJobId}`;
+    await writeEmulatorDocuments([{
+      path: noOpJobPath,
+      fields: {
+        activationMode: "atomic-v1",
+        confirmedCount: 0,
+        cursor: 0,
+        inventoryFingerprint: vaultPathRewriteInventoryFingerprint(uid, [], [
+          ...inventoryFolders.filter((folder) => folder.__id !== "atomic-source"),
+          {
+            ...(await readEmulatorDocument("noteFolders/atomic-source") ?? {}),
+            __id: "atomic-source"
+          }
+        ]),
+        kind: "path-rewrite-v1",
+        lastErrorCode: null,
+        mutationExpectedRevision: 1,
+        mutationTargetId: "atomic-other",
+        mutationTargetKind: "folder",
+        ownerUid: uid,
+        planFingerprint: noOpJobId,
+        preparedStepCount: 1,
+        revision: 2,
+        status: "prepared",
+        stepCount: 1,
+        updatedAt: now,
+        version: 1
+      }
+    }]);
+    const noOpRejected = await request({
+      action: "update",
+      encryptedName,
+      expectedRevision: 1,
+      folderId: "atomic-other",
+      nameClaim: { claimId: "C".repeat(43), indexVersion: 1, parentId: null },
+      order: 1,
+      pathRewriteActivation: { expectedRevision: 2, jobId: noOpJobId }
+    });
+    expect(noOpRejected.response.status).toBe(400);
+    expect(await readEmulatorDocument("noteFolders/atomic-other"))
+      .toMatchObject({ order: 0, revision: 1 });
+    expect(await readEmulatorDocument(noOpJobPath))
+      .toMatchObject({ revision: 2, status: "prepared" });
+
+    const mismatchedJobId = `pr2_${"wrong-target".padEnd(43, "0")}`;
+    const mismatchedJobPath = `vaultMaintenanceJobs/${uid}/pathRewrites/${mismatchedJobId}`;
+    await writeEmulatorDocuments([{
+      path: mismatchedJobPath,
+      fields: {
+        activationMode: "atomic-v1",
+        confirmedCount: 0,
+        cursor: 0,
+        inventoryFingerprint: vaultPathRewriteInventoryFingerprint(uid, [], [
+          ...inventoryFolders.filter((folder) => folder.__id !== "atomic-source"),
+          {
+            ...(await readEmulatorDocument("noteFolders/atomic-source") ?? {}),
+            __id: "atomic-source"
+          }
+        ]),
+        kind: "path-rewrite-v1",
+        lastErrorCode: null,
+        mutationExpectedRevision: 1,
+        mutationTargetId: "atomic-source",
+        mutationTargetKind: "folder",
+        ownerUid: uid,
+        planFingerprint: mismatchedJobId,
+        preparedStepCount: 1,
+        revision: 2,
+        status: "prepared",
+        stepCount: 1,
+        updatedAt: now,
+        version: 1
+      }
+    }]);
+    const rejected = await request({
+      action: "move",
+      expectedRevision: 1,
+      folderId: "atomic-other",
+      nameClaim: {
+        claimId: "E".repeat(43),
+        indexVersion: 1,
+        parentId: "atomic-destination"
+      },
+      parentId: "atomic-destination",
+      pathRewriteActivation: { expectedRevision: 2, jobId: mismatchedJobId }
+    });
+    expect(rejected.response.status).toBe(409);
+    expect(await readEmulatorDocument("noteFolders/atomic-other"))
+      .toMatchObject({ parentId: null, revision: 1 });
+    expect(await readEmulatorDocument(mismatchedJobPath))
+      .toMatchObject({ revision: 2, status: "prepared" });
   });
 
   it("atomically resolves an unclaimed encrypted folder collision", async () => {
@@ -1009,12 +1576,19 @@ describeEmulator("Vault folder API emulator transaction", () => {
     });
     expect(committedLegacyFolder).not.toHaveProperty("vaultImportJobId");
 
+    const committedRenameActivation = await preparePr2PathRewriteActivation({
+      expectedTargetRevision: 1,
+      id: "import-child",
+      kind: "folder",
+      label: "import-child-committed-rename"
+    });
     const committedRename = await request({
       action: "update",
       encryptedName: { ...encryptedName, cipherText: "renamed-after-commit" },
       expectedRevision: 1,
       folderId: "import-child",
-      nameClaim: { claimId: "D".repeat(43), indexVersion: 1, parentId: "import-root" }
+      nameClaim: { claimId: "D".repeat(43), indexVersion: 1, parentId: "import-root" },
+      pathRewriteActivation: committedRenameActivation
     });
     expect(committedRename.response.status).toBe(200);
     expect(await readEmulatorDocument("noteFolders/import-child")).toMatchObject({
@@ -1024,12 +1598,19 @@ describeEmulator("Vault folder API emulator transaction", () => {
     });
 
     await deleteEmulatorDocument(jobPath);
+    const cleanedRenameActivation = await preparePr2PathRewriteActivation({
+      expectedTargetRevision: 2,
+      id: "import-child",
+      kind: "folder",
+      label: "import-child-cleaned-rename"
+    });
     const cleanedJobRename = await request({
       action: "update",
       encryptedName: { ...encryptedName, cipherText: "renamed-after-cleanup" },
       expectedRevision: 2,
       folderId: "import-child",
-      nameClaim: { claimId: "E".repeat(43), indexVersion: 1, parentId: "import-root" }
+      nameClaim: { claimId: "E".repeat(43), indexVersion: 1, parentId: "import-root" },
+      pathRewriteActivation: cleanedRenameActivation
     });
     expect(cleanedJobRename.response.status).toBe(200);
     expect(await readEmulatorDocument("noteFolders/import-child")).toMatchObject({
@@ -1038,12 +1619,19 @@ describeEmulator("Vault folder API emulator transaction", () => {
       vaultImportJobId: jobId
     });
 
+    const committedParentMoveActivation = await preparePr2PathRewriteActivation({
+      expectedTargetRevision: 1,
+      id: "ordinary-root",
+      kind: "folder",
+      label: "ordinary-root-committed-move"
+    });
     const committedParentMove = await request({
       action: "move",
       expectedRevision: 1,
       folderId: "ordinary-root",
       nameClaim: { claimId: "P".repeat(43), indexVersion: 1, parentId: "import-root" },
-      parentId: "import-root"
+      parentId: "import-root",
+      pathRewriteActivation: committedParentMoveActivation
     });
     expect(committedParentMove.response.status).toBe(200);
   });
@@ -1128,12 +1716,19 @@ describeEmulator("Vault folder API emulator transaction", () => {
         version: 1
       }
     }]);
+    const allowedRenameActivation = await preparePr2PathRewriteActivation({
+      expectedTargetRevision: 1,
+      id: "ordinary-ancestor",
+      kind: "folder",
+      label: "ordinary-ancestor-allowed-rename"
+    });
     expect((await request({
       action: "update",
       encryptedName: { ...encryptedName, cipherText: "allowed-after-commit" },
       expectedRevision: 1,
       folderId: "ordinary-ancestor",
-      nameClaim: { claimId: "E".repeat(43), indexVersion: 1, parentId: null }
+      nameClaim: { claimId: "E".repeat(43), indexVersion: 1, parentId: null },
+      pathRewriteActivation: allowedRenameActivation
     })).response.status).toBe(200);
     expect((await request({
       action: "restore",

@@ -301,6 +301,19 @@
   text-transform: uppercase;
 }
 
+.vault-left-panel > header > .vault-left-panel-collapse {
+  background: var(--vault-panel-muted);
+  border: 1px solid var(--vault-border);
+  color: var(--vault-text);
+}
+
+.vault-left-panel > header > .vault-left-panel-collapse:hover,
+.vault-left-panel > header > .vault-left-panel-collapse:focus-visible {
+  background: color-mix(in srgb, var(--vault-accent) 16%, var(--vault-panel));
+  border-color: color-mix(in srgb, var(--vault-accent) 54%, var(--vault-border));
+  color: var(--vault-text);
+}
+
 .vault-right-panel > header > div {
   display: flex;
   flex: 1 1 0;
@@ -1438,7 +1451,13 @@
   opacity: .45;
 }
 
-.vault-note-content > .vault-codemirror,
+.vault-note-content > .vault-codemirror:not(.vault-codemirror--live-preview) {
+  max-width: none;
+  min-height: 100%;
+  width: 100%;
+}
+
+.vault-note-content > .vault-codemirror--live-preview,
 .vault-note-content > .vault-markdown-renderer,
 .vault-legacy-note {
   margin-inline: auto;
@@ -1454,8 +1473,69 @@
 }
 
 .vault-codemirror > .cm-editor {
+  background: var(--vault-bg);
+  color: var(--vault-text);
   height: 100%;
   min-height: 0;
+}
+
+.vault-codemirror > .cm-editor .cm-tooltip.cm-tooltip-autocomplete,
+.vault-codemirror > .cm-editor .cm-tooltip.cm-completionInfo {
+  background: var(--vault-panel);
+  border: 1px solid var(--vault-border);
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 24%, transparent);
+  color: var(--vault-text);
+}
+
+.vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul {
+  background: var(--vault-panel);
+  color: var(--vault-text);
+  scrollbar-color: var(--vault-text-muted) var(--vault-panel);
+}
+
+.vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul > li {
+  background: transparent;
+  color: var(--vault-text);
+}
+
+.vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected="true"] {
+  background: color-mix(in srgb, var(--vault-accent) 24%, var(--vault-panel));
+  color: var(--vault-text);
+}
+
+.vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionLabel {
+  color: inherit;
+}
+
+.vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionMatchedText {
+  color: color-mix(in srgb, var(--vault-accent) 78%, var(--vault-text));
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionDetail,
+.vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionIcon {
+  color: var(--vault-text-muted);
+  opacity: 1;
+}
+
+.vault-codemirror > .cm-editor .cm-gutters {
+  background: var(--vault-panel-muted);
+  border-inline-end: 1px solid var(--vault-border);
+  color: var(--vault-text-muted);
+}
+
+.vault-codemirror > .cm-editor .cm-activeLineGutter {
+  background: var(--vault-row-hover);
+  color: var(--vault-text);
+}
+
+.vault-codemirror > .cm-editor .cm-activeLine {
+  background: color-mix(in srgb, var(--vault-accent) 7%, transparent);
+}
+
+.vault-codemirror > .cm-editor .cm-cursor {
+  border-inline-start-color: var(--vault-text);
 }
 
 .vault-codemirror .cm-scroller {
@@ -1693,18 +1773,29 @@
 
 .vault-empty-state {
   align-items: center;
+  box-sizing: border-box;
   color: var(--muted);
   display: flex;
   flex-direction: column;
   height: 100%;
   justify-content: center;
+  min-width: 0;
+  overflow: hidden;
   padding: 28px;
   text-align: center;
+  width: 100%;
 }
 
 .vault-empty-state h2 {
   color: var(--ink);
   margin: 13px 0 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.vault-empty-state p {
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .vault-empty-state button {
@@ -1712,6 +1803,8 @@
   border: 0;
   border-radius: 6px;
   color: white;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 8px 15px;
 }
 

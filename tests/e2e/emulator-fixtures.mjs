@@ -1002,6 +1002,116 @@ export async function e2eScenarioState(shareId, uid) {
   };
 }
 
+function validE2eVaultIdentifier(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{6,180}$/u.test(value);
+}
+
+function encryptedPayloadDigest(payload) {
+  if (
+    !payload
+    || typeof payload !== "object"
+    || typeof payload.cipherText !== "string"
+    || typeof payload.iv !== "string"
+  ) {
+    throw new Error("E2E Vault note is missing encrypted content");
+  }
+  return createHash("sha256")
+    .update(String(payload.version ?? ""))
+    .update("\0")
+    .update(String(payload.algorithm ?? ""))
+    .update("\0")
+    .update(payload.iv)
+    .update("\0")
+    .update(payload.cipherText)
+    .digest("hex");
+}
+
+function e2eVaultNoteSummary(note) {
+  return {
+    bodyCipherDigest: encryptedPayloadDigest(note.encryptedBody),
+    contentFormat: note.contentFormat ?? null,
+    entryKind: note.entryKind ?? null,
+    folderId: note.folderId ?? null,
+    id: note.__id,
+    revision: Number(note.revision ?? 0),
+    titleCipherDigest: encryptedPayloadDigest(note.encryptedTitle)
+  };
+}
+
+export async function markOnlyOwnedE2eVaultNoteAsLegacy(uid) {
+  if (!validE2eVaultIdentifier(uid)) {
+    throw new Error("Invalid E2E Vault owner");
+  }
+  const candidates = (await listEmulatorCollection("notes")).filter((note) => (
+    note.ownerUid === uid
+    && note.isDeleted !== true
+    && note.isPurged !== true
+    && note.contentFormat === "markdown-v1"
+    && note.entryKind === "markdown"
+  ));
+  if (candidates.length !== 1) {
+    throw new Error(`Expected one owned E2E Markdown note, received ${candidates.length}`);
+  }
+
+  const [note] = candidates;
+  const before = e2eVaultNoteSummary(note);
+  await patchEmulatorDocuments([{
+    path: `notes/${note.__id}`,
+    fields: {
+      contentFormat: "legacy-html-v1",
+      entryKind: "legacy-html"
+    }
+  }]);
+  const updated = await readEmulatorDocument(`notes/${note.__id}`);
+  if (!updated || updated.ownerUid !== uid) {
+    throw new Error("E2E legacy Vault note update was not persisted");
+  }
+  const after = e2eVaultNoteSummary(updated);
+  const changed = [
+    before.bodyCipherDigest !== after.bodyCipherDigest ? "body" : "",
+    before.titleCipherDigest !== after.titleCipherDigest ? "title" : "",
+    before.folderId !== after.folderId ? "folder" : "",
+    before.revision !== after.revision ? "revision" : ""
+  ].filter(Boolean);
+  if (changed.length) {
+    throw new Error(`E2E legacy metadata setup modified encrypted note fields: ${changed.join(",")}`);
+  }
+  return after;
+}
+
+export async function e2eOwnedVaultNotesState(uid) {
+  if (!validE2eVaultIdentifier(uid)) {
+    throw new Error("Invalid E2E Vault owner");
+  }
+  return (await listEmulatorCollection("notes"))
+    .filter((note) => (
+      note.ownerUid === uid
+      && note.isDeleted !== true
+      && note.isPurged !== true
+    ))
+    .map(e2eVaultNoteSummary)
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+export async function e2eVaultPathRewriteState(uid) {
+  if (!validE2eVaultIdentifier(uid)) {
+    throw new Error("Invalid E2E Vault owner");
+  }
+  const jobs = await listEmulatorCollection(`vaultMaintenanceJobs/${uid}/pathRewrites`);
+  const inventory = await listEmulatorCollection(`vaultMaintenanceJobs/${uid}/pathRewriteInventory`);
+  return {
+    inventoryDocumentCount: inventory.filter((document) => document.ownerUid === uid).length,
+    jobs: jobs
+      .filter((job) => job.ownerUid === uid)
+      .map((job) => ({
+        activationMode: job.activationMode ?? null,
+        id: job.__id,
+        status: job.status
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id))
+  };
+}
+
 export async function resetE2eEmulators() {
   await clearSecureShareEmulators();
 }

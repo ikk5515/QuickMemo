@@ -304,6 +304,8 @@ function renderInline(
     switch (token.type) {
       case "text":
         return <Fragment key={key}>{token.value}</Fragment>;
+      case "line-break":
+        return <br key={key} />;
       case "code":
         return <code key={key}>{token.value}</code>;
       case "math":
@@ -428,6 +430,8 @@ function inlinePlainText(tokens: MarkdownInlineToken[]): string {
       case "code":
       case "math":
         return token.value;
+      case "line-break":
+        return "\n";
       case "footnote-reference":
         return token.number === null ? token.raw : `${token.number}`;
       case "tag":

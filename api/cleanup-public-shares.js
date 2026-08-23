@@ -8,6 +8,16 @@ import {
   evaluateFreeTierUpload,
   resolveFreeTierPolicy
 } from "./_free-tier-policy.js";
+import {
+  canonicalVaultInventoryManifestEntryKey,
+  canonicalVaultInventoryManifestEntryToken,
+  canonicalVaultInventoryManifestShard,
+  validVaultInventoryManifestDigest,
+  vaultInventoryManifestContract,
+  vaultInventoryManifestMarkerPath,
+  vaultInventoryManifestShardIndexFromEntryKey,
+  vaultInventoryManifestShardPath
+} from "../shared/vault-inventory-manifest.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const storageBaseUrl = "https://storage.googleapis.com/storage/v1";
@@ -1012,6 +1022,282 @@ function integerValue(value) {
 
 function documentNameForPath(projectId, documentPath) {
   return `${documentsResourceRoot(projectId)}/${documentPath}`;
+}
+
+function sha256Base64Url(value) {
+  return createHash("sha256").update(value, "utf8").digest("base64url");
+}
+
+function decodeFirestoreValue(value, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 8) return undefined;
+  if (Object.hasOwn(value, "stringValue")) {
+    return typeof value.stringValue === "string" ? value.stringValue : undefined;
+  }
+  if (Object.hasOwn(value, "booleanValue")) {
+    return typeof value.booleanValue === "boolean" ? value.booleanValue : undefined;
+  }
+  if (Object.hasOwn(value, "integerValue")) {
+    const parsed = Number(value.integerValue);
+    return Number.isSafeInteger(parsed) ? parsed : undefined;
+  }
+  if (Object.hasOwn(value, "nullValue")) return null;
+  if (Object.hasOwn(value, "timestampValue")) {
+    return typeof value.timestampValue === "string" ? value.timestampValue : undefined;
+  }
+  if (value.mapValue && typeof value.mapValue === "object") {
+    return Object.fromEntries(Object.entries(value.mapValue.fields ?? {}).map(
+      ([key, child]) => [key, decodeFirestoreValue(child, depth + 1)]
+    ));
+  }
+  if (value.arrayValue && typeof value.arrayValue === "object") {
+    return (value.arrayValue.values ?? []).map((child) => (
+      decodeFirestoreValue(child, depth + 1)
+    ));
+  }
+  return undefined;
+}
+
+const vaultInventoryNoteFields = Object.freeze([
+  "contentFormat",
+  "encryptedBody",
+  "encryptedTitle",
+  "entryKind",
+  "folderId",
+  "isDeleted",
+  "isPurged",
+  "ownerUid",
+  "revision",
+  "secureShareCopyState",
+  "type",
+  "vaultImportJobId",
+  "vaultNameClaimId",
+  "vaultNameIndexVersion"
+]);
+
+function decodedVaultInventoryNote(note, state) {
+  const decoded = { id: state.noteId };
+  for (const fieldName of vaultInventoryNoteFields) {
+    if (Object.hasOwn(note?.fields ?? {}, fieldName)) {
+      decoded[fieldName] = decodeFirestoreValue(note.fields[fieldName]);
+    }
+  }
+  return decoded;
+}
+
+function exactFirestoreFieldSet(document, expected) {
+  return Boolean(document?.fields)
+    && Object.keys(document.fields).sort().join("\u0000")
+      === [...expected].sort().join("\u0000");
+}
+
+function validFirestoreTimestampField(document, fieldName) {
+  return Number.isFinite(Date.parse(document?.fields?.[fieldName]?.timestampValue ?? ""));
+}
+
+function firestoreStringMap(entries) {
+  return {
+    mapValue: {
+      fields: Object.fromEntries(Object.entries(entries).map(
+        ([key, value]) => [key, { stringValue: value }]
+      ))
+    }
+  };
+}
+
+function manifestVerifyWrite(documentName, document) {
+  return {
+    verify: documentName,
+    currentDocument: document?.updateTime
+      ? { updateTime: document.updateTime }
+      : { exists: false }
+  };
+}
+
+function parsedCopyManifest(marker, shard, state, entryKey, projectId) {
+  const markerName = documentNameForPath(
+    projectId,
+    vaultInventoryManifestMarkerPath(state.ownerUid)
+  );
+  const shardIndex = vaultInventoryManifestShardIndexFromEntryKey(entryKey);
+  const shardName = documentNameForPath(
+    projectId,
+    vaultInventoryManifestShardPath(state.ownerUid, shardIndex)
+  );
+  if (!marker && !shard) {
+    return {
+      initialized: false,
+      shardIndex,
+      writes: [
+        manifestVerifyWrite(markerName, null),
+        manifestVerifyWrite(shardName, null)
+      ]
+    };
+  }
+  if (
+    !marker
+    || !shard
+    || marker.name !== markerName
+    || shard.name !== shardName
+    || !marker.updateTime
+    || !shard.updateTime
+    || !exactFirestoreFieldSet(marker, [
+      "createdAt", "epoch", "ownerUid", "shardCount", "updatedAt", "version"
+    ])
+    || !exactFirestoreFieldSet(shard, [
+      "createdAt", "entries", "epoch", "ownerUid", "revision", "root",
+      "shardIndex", "updatedAt", "version"
+    ])
+    || stringField(marker, "ownerUid") !== state.ownerUid
+    || integerField(marker, "version") !== vaultInventoryManifestContract.version
+    || integerField(marker, "shardCount") !== vaultInventoryManifestContract.shardCount
+    || integerField(marker, "epoch") < 1
+    || integerField(marker, "epoch") > 999_999_999_999
+    || !validFirestoreTimestampField(marker, "createdAt")
+    || !validFirestoreTimestampField(marker, "updatedAt")
+    || stringField(shard, "ownerUid") !== state.ownerUid
+    || integerField(shard, "version") !== vaultInventoryManifestContract.version
+    || integerField(shard, "epoch") !== integerField(marker, "epoch")
+    || integerField(shard, "shardIndex") !== shardIndex
+    || integerField(shard, "revision") < 1
+    || integerField(shard, "revision") > 999_999_999_999
+    || !validVaultInventoryManifestDigest(stringField(shard, "root"))
+    || !validFirestoreTimestampField(shard, "createdAt")
+    || !validFirestoreTimestampField(shard, "updatedAt")
+  ) {
+    return null;
+  }
+  const entries = decodeFirestoreValue(shard.fields.entries);
+  if (!entries || typeof entries !== "object" || Array.isArray(entries)) return null;
+  const canonical = canonicalVaultInventoryManifestShard({
+    entries,
+    epoch: integerField(shard, "epoch"),
+    revision: integerField(shard, "revision"),
+    shardIndex,
+    uid: state.ownerUid
+  });
+  if (sha256Base64Url(canonical) !== stringField(shard, "root")) return null;
+  return {
+    entries,
+    initialized: true,
+    marker,
+    markerName,
+    revision: integerField(shard, "revision"),
+    shard,
+    shardIndex,
+    shardName,
+    writes: [manifestVerifyWrite(markerName, marker)]
+  };
+}
+
+async function secureShareCopyManifestWrites(
+  note,
+  state,
+  nextState,
+  accessToken,
+  projectId
+) {
+  let currentNote;
+  let entryKey;
+  try {
+    currentNote = decodedVaultInventoryNote(note, state);
+    if (currentNote.ownerUid !== state.ownerUid) return null;
+    entryKey = sha256Base64Url(canonicalVaultInventoryManifestEntryKey({
+      document: currentNote,
+      kind: "note",
+      uid: state.ownerUid
+    }));
+    if (canonicalVaultInventoryManifestEntryToken({
+      document: currentNote,
+      kind: "note",
+      uid: state.ownerUid
+    }) !== null) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  const shardIndex = vaultInventoryManifestShardIndexFromEntryKey(entryKey);
+  const markerName = documentNameForPath(
+    projectId,
+    vaultInventoryManifestMarkerPath(state.ownerUid)
+  );
+  const shardName = documentNameForPath(
+    projectId,
+    vaultInventoryManifestShardPath(state.ownerUid, shardIndex)
+  );
+  const [marker, shard] = await Promise.all([
+    getDocumentByName(markerName, accessToken),
+    getDocumentByName(shardName, accessToken)
+  ]);
+  let manifest;
+  try {
+    manifest = parsedCopyManifest(marker, shard, state, entryKey, projectId);
+  } catch {
+    return null;
+  }
+  if (!manifest) return null;
+  if (!manifest.initialized) return manifest.writes;
+  if (Object.hasOwn(manifest.entries, entryKey)) return null;
+
+  const nextNote = {
+    ...currentNote,
+    secureShareCopyState: nextState,
+    ...(nextState === "aborted" ? {
+      isDeleted: true,
+      revision: state.revision + 1
+    } : {})
+  };
+  let nextTokenPreimage;
+  try {
+    nextTokenPreimage = canonicalVaultInventoryManifestEntryToken({
+      document: nextNote,
+      kind: "note",
+      uid: state.ownerUid
+    });
+  } catch {
+    return null;
+  }
+  if (nextTokenPreimage === null) {
+    return [
+      ...manifest.writes,
+      manifestVerifyWrite(manifest.shardName, manifest.shard)
+    ];
+  }
+  const entries = {
+    ...manifest.entries,
+    [entryKey]: sha256Base64Url(nextTokenPreimage)
+  };
+  const revision = manifest.revision + 1;
+  if (revision > 999_999_999_999) return null;
+  let root;
+  try {
+    root = sha256Base64Url(canonicalVaultInventoryManifestShard({
+      entries,
+      epoch: integerField(manifest.shard, "epoch"),
+      revision,
+      shardIndex: manifest.shardIndex,
+      uid: state.ownerUid
+    }));
+  } catch {
+    return null;
+  }
+  return [
+    ...manifest.writes,
+    {
+      update: {
+        name: manifest.shardName,
+        fields: {
+          entries: firestoreStringMap(entries),
+          revision: integerValue(revision),
+          root: { stringValue: root }
+        }
+      },
+      updateMask: { fieldPaths: ["entries", "revision", "root"] },
+      currentDocument: { updateTime: manifest.shard.updateTime },
+      updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+    }
+  ];
 }
 
 function globalBlobUsage(document) {
@@ -2987,6 +3273,8 @@ async function claimStaleSecureShareCopyJob(
     return null;
   }
 
+  // Claim fields do not participate in the manifest tuple and the note stays
+  // in the inventory-excluded `copying` state, so no shard read is required.
   try {
     await firestoreRequest(firestoreCommitPathFromDocumentName(note.name), accessToken, {
       method: "POST",
@@ -3049,6 +3337,15 @@ async function activateStaleSecureShareCopyJob(
     return false;
   }
 
+  const inventoryWrites = await secureShareCopyManifestWrites(
+    note,
+    state,
+    "active",
+    accessToken,
+    projectId
+  );
+  if (!inventoryWrites) return false;
+
   try {
     await firestoreRequest(firestoreCommitPathFromDocumentName(note.name), accessToken, {
       method: "POST",
@@ -3078,7 +3375,8 @@ async function activateStaleSecureShareCopyJob(
               { fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }
             ]
           },
-          vaultNameClaimVerificationWrite(claim)
+          vaultNameClaimVerificationWrite(claim),
+          ...inventoryWrites
         ]
       })
     });
@@ -3118,6 +3416,15 @@ async function abortStaleSecureShareCopyJob(
   if (!legacyWithoutIdentity && !exactSecureShareCopyVaultNameClaim(claim, claimName, state)) {
     return false;
   }
+
+  const inventoryWrites = await secureShareCopyManifestWrites(
+    note,
+    state,
+    "aborted",
+    accessToken,
+    projectId
+  );
+  if (!inventoryWrites) return false;
 
   try {
     await firestoreRequest(firestoreCommitPathFromDocumentName(note.name), accessToken, {
@@ -3180,7 +3487,8 @@ async function abortStaleSecureShareCopyJob(
           ...(!legacyWithoutIdentity ? [{
             delete: claim.name,
             currentDocument: { updateTime: claim.updateTime }
-          }] : [])
+          }] : []),
+          ...inventoryWrites
         ]
       })
     });

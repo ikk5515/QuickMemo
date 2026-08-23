@@ -1429,8 +1429,7 @@ export function JsonCanvasView({
 
   const handleCanvasDoubleClick = useCallback((event: ReactMouseEvent<HTMLElement>) => {
     if (
-      canvasReadOnly
-      || event.button !== 0
+      event.button !== 0
       || event.altKey
       || event.ctrlKey
       || event.metaKey
@@ -1441,6 +1440,17 @@ export function JsonCanvasView({
     }
     const nodeElement = event.target.closest<HTMLElement>(".react-flow__node");
     const node = nodesRef.current.find((candidate) => candidate.id === nodeElement?.dataset.id);
+    const file = node?.data.canvas.type === "file" ? safeVaultPath(node.data.canvas.file) : null;
+    if (file) {
+      event.preventDefault();
+      event.stopPropagation();
+      onOpenFile(file);
+      setStatus("원본 노트를 열었습니다.");
+      return;
+    }
+    if (canvasReadOnly) {
+      return;
+    }
     if (node?.data.canvas.type === "text") {
       event.preventDefault();
       editTextNode(node.id);
@@ -1458,7 +1468,7 @@ export function JsonCanvasView({
     event.preventDefault();
     addNode({ id: createCanvasId("node"), type: "text", x, y, width: 280, height: 160, text: "" });
     setStatus("선택한 위치에 텍스트 카드를 추가했습니다.");
-  }, [addNode, canvasReadOnly, dropFlowPosition, editTextNode, snapToGrid]);
+  }, [addNode, canvasReadOnly, dropFlowPosition, editTextNode, onOpenFile, snapToGrid]);
 
   const selectGroupContents = useCallback((groupId: string) => {
     const current = canvasDocumentFromFlow(nodesRef.current, edgesRef.current, documentRef.current);
@@ -1814,7 +1824,7 @@ export function JsonCanvasView({
     stopTextNodeEditing
   ]);
 
-  const handleNodeClick = useCallback<NodeMouseHandler<CanvasFlowNode>>((event, node) => {
+  const handleNodeClick = useCallback<NodeMouseHandler<CanvasFlowNode>>((event) => {
     if (
       event.defaultPrevented
       || event.button !== 0
@@ -1826,12 +1836,7 @@ export function JsonCanvasView({
       return;
     }
     stopTextNodeEditing();
-    const file = node.data.canvas.type === "file" ? safeVaultPath(node.data.canvas.file) : null;
-    if (file) {
-      onOpenFile(file);
-      setStatus("원본 노트를 열었습니다.");
-    }
-  }, [onOpenFile, stopTextNodeEditing]);
+  }, [stopTextNodeEditing]);
 
   const handlePaneClick = useCallback(() => {
     closeContextMenu();
@@ -2225,6 +2230,7 @@ export function JsonCanvasView({
           nodeClickDistance={CANVAS_NODE_INTERACTION_THRESHOLD_PX}
           nodeDragThreshold={CANVAS_NODE_INTERACTION_THRESHOLD_PX}
           nodeTypes={CANVAS_NODE_TYPES}
+          noPanClassName="nodrag"
           nodes={nodes}
           nodesConnectable={!canvasReadOnly}
           nodesDraggable={!canvasReadOnly}
@@ -2248,9 +2254,10 @@ export function JsonCanvasView({
           onReconnect={reconnect}
           onSelectionChange={handleSelectionChange}
           panActivationKeyCode="Space"
-          panOnDrag={[1]}
+          panOnDrag={[0, 1]}
           panOnScroll
-          selectionOnDrag={!canvasReadOnly}
+          selectionKeyCode="Shift"
+          selectionOnDrag={false}
           snapGrid={[20, 20]}
           snapToGrid={snapToGrid}
           zoomActivationKeyCode={["Meta", "Control", "Space"]}

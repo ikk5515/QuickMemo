@@ -1,6 +1,7 @@
 export { MarkdownEditor, type MarkdownEditorProps } from "./MarkdownEditor";
 export { MarkdownRenderer, type MarkdownRendererProps } from "./MarkdownRenderer";
 export {
+  canonicalSafeExternalHttpUrl,
   isSafeExternalHttpUrl,
   isValidObsidianTag,
   normalizeMarkdownLineEndings,
@@ -30,6 +31,10 @@ export {
   type LegacyHtmlConversionWarning,
   type LegacyHtmlConversionWarningCode
 } from "./legacyHtml";
+export {
+  previewMarkdownHtmlNormalization,
+  type MarkdownHtmlNormalizationPreview
+} from "./markdownHtmlNormalization";
 export type {
   MarkdownBlock,
   MarkdownDocument,

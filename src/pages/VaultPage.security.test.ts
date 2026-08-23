@@ -115,6 +115,9 @@ describe("VaultPage security boundaries", () => {
   });
 
   it("uses a ready marker as an O(1) fast path and refreshes pending inventory after reconciliation", () => {
+    // Both full server reads belong only to the one-time cutover flow. Path
+    // mutations use the complete live subscription plus an atomic projected
+    // server fence instead of re-downloading every ciphertext.
     expect(vaultPageSource.match(/loadOwnedVaultCutoverInventory\(/gu)?.length ?? 0).toBe(2);
     expect(vaultPageSource).toContain('if (prepared.cutoverState === "ready")');
     expect(vaultPageSource).toContain("setVaultIntegrityKey(prepared.key)");
@@ -213,6 +216,20 @@ describe("VaultPage security boundaries", () => {
     expect(vaultPageSource).toContain("onImportExternalFiles={importCanvasExternalFiles}");
   });
 
+  it("creates Markdown conversion copies only from a server-confirmed source", () => {
+    const conversion = vaultPageSource.match(
+      /async function createConvertedMarkdownCopy[\s\S]*?function openCoreTool/u
+    )?.[0] ?? "";
+
+    expect(conversion).toContain("getVisibleNotesByIdsFromServer(profile.uid, [draft.sourceEntryId])");
+    expect(conversion).toContain("assertFormatConversionSourceUnchanged(previewPlan");
+    expect(conversion).toContain("const verifiedPlan = planLegacyVaultFormatConversion");
+    expect(conversion).toContain("body: verifiedPlan.copy.body");
+    expect(conversion).toContain("folderId: targetFolderId");
+    expect(conversion).not.toContain("body: draft.body");
+    expect(conversion).not.toContain("folderId: draft.folderId");
+  });
+
   it("never silently rolls back an interrupted ZIP import and exposes explicit recovery", () => {
     const startupRecovery = vaultPageSource.match(
       /void cleanupRetainedTerminalVaultImportJobs[\s\S]*?async function recheckRecoverableImportJobs/u
@@ -229,6 +246,16 @@ describe("VaultPage security boundaries", () => {
     expect(explicitRollback).toContain("rollbackVaultImportJob");
     expect(explicitRollback).toContain("revision 확인 후 휴지통 처리");
     expect(vaultPageSource).toContain("<LazyVaultImportRecoveryPanel");
+  });
+
+  it("preserves a dirty draft when path rewrite wraps a server revision conflict", () => {
+    const move = vaultPageSource.match(
+      /async function moveEntryToFolder[\s\S]*?async function moveFolder/u
+    )?.[0] ?? "";
+    expect(move).toContain("caught instanceof VaultPathRewriteControllerError");
+    expect(move).toContain("? caught.cause");
+    expect(move).toContain("underlyingError instanceof NoteRevisionConflictError");
+    expect(move).toContain("prepareDraftMergeConflict(entryId, false)");
   });
 
   it("keeps a revision-scoped Markdown base and wipes conflict plaintext at every access boundary", () => {

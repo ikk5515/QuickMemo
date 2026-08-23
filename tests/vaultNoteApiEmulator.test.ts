@@ -11,6 +11,19 @@ import {
   type SecureShareApiHarness,
   writeEmulatorDocuments
 } from "./helpers/secureShareApiEmulator.js";
+import {
+  vaultInventoryManifestBindingRoot,
+  vaultPathRewriteInventoryFingerprint
+} from "../api/_vault-path-rewrite-activation.js";
+import {
+  canonicalVaultInventoryManifestEntryKey,
+  canonicalVaultInventoryManifestEntryToken,
+  vaultInventoryManifestContract,
+  vaultInventoryManifestMarkerPath,
+  vaultInventoryManifestShardId,
+  vaultInventoryManifestShardIndexFromEntryKey,
+  vaultInventoryManifestShardPath
+} from "../shared/vault-inventory-manifest.js";
 
 const describeEmulator =
   process.env.FIRESTORE_EMULATOR_HOST && process.env.FIREBASE_AUTH_EMULATOR_HOST
@@ -239,7 +252,7 @@ describeEmulator("Vault note API emulator transaction", () => {
       .toMatchObject({ targetId: noteId, targetType: "entry" });
 
     const updatedTitle = { ...title, cipherText: "renamed-title" };
-    const updated = await request({
+    const renamePayload = {
       action: "update",
       changedFields: ["title", "name-claim"],
       encryptedBody: body,
@@ -250,6 +263,45 @@ describeEmulator("Vault note API emulator transaction", () => {
       nameClaim: { claimId: "B".repeat(43), indexVersion: 1, parentId: null },
       noteId,
       readerUids: [uid]
+    };
+    const missingRewrite = await request(renamePayload);
+    expect(missingRewrite.response.status).toBe(409);
+    expect(missingRewrite.body).toMatchObject({
+      error: "vault_path_rewrite_required",
+      ok: false
+    });
+    const currentNote = await readEmulatorDocument(`notes/${noteId}`);
+    if (!currentNote) throw new Error("created note fixture is missing");
+    const renameJobId = `pr2_${"required-note-rename".padEnd(43, "0")}`;
+    await writeEmulatorDocuments([{
+      path: `vaultMaintenanceJobs/${uid}/pathRewrites/${renameJobId}`,
+      fields: {
+        activationMode: "atomic-v1",
+        confirmedCount: 0,
+        cursor: 0,
+        inventoryFingerprint: vaultPathRewriteInventoryFingerprint(
+          uid,
+          [{ ...currentNote, __id: noteId }],
+          []
+        ),
+        kind: "path-rewrite-v1",
+        lastErrorCode: null,
+        mutationExpectedRevision: 1,
+        mutationTargetId: noteId,
+        mutationTargetKind: "entry",
+        ownerUid: uid,
+        planFingerprint: renameJobId,
+        preparedStepCount: 0,
+        revision: 2,
+        status: "prepared",
+        stepCount: 0,
+        updatedAt: new Date(),
+        version: 1
+      }
+    }]);
+    const updated = await request({
+      ...renamePayload,
+      pathRewriteActivation: { expectedRevision: 2, jobId: renameJobId }
     });
     expect(updated.response.status).toBe(200);
     expect(updated.body).toMatchObject({ revision: 2 });
@@ -319,6 +371,256 @@ describeEmulator("Vault note API emulator transaction", () => {
     });
     expect(await readEmulatorDocument(`notePurgeCleanupQueue/${noteId}`))
       .toMatchObject({ noteId, ownerUid: uid });
+  });
+
+  it("atomically moves a historical revision-zero note with its bound rewrite activation", async () => {
+    await activateVaultIntegrityMarker();
+    const now = new Date();
+    const noteId = "revision-zero-atomic-move";
+    const folderId = "revision-zero-destination";
+    const sourceClaimId = "S".repeat(43);
+    const targetClaimId = "T".repeat(43);
+    const jobId = `pr2_${"revision-zero".padEnd(43, "0")}`;
+    const jobPath = `vaultMaintenanceJobs/${uid}/pathRewrites/${jobId}`;
+    const noteFields = {
+      attachmentRevision: 0,
+      contentFormat: "markdown-v1",
+      createdAt: now,
+      encryptedBody: body,
+      encryptedTitle: title,
+      entryKind: "markdown",
+      folderId: null,
+      isDeleted: false,
+      lastMutationId: "revision-zero-seed",
+      ownerUid: uid,
+      participantUids: [uid],
+      savedAt: now,
+      type: "personal",
+      updatedAt: now,
+      updatedBy: uid,
+      vaultNameClaimId: sourceClaimId,
+      vaultNameIndexVersion: 1,
+      wrappedKeys: { [uid]: wrappedKey }
+    } as const;
+    const folderFields = {
+      encryptedName: title,
+      isDeleted: false,
+      ownerUid: uid,
+      parentId: null,
+      revision: 1,
+      wrappedKey
+    } as const;
+    const inventoryFingerprint = vaultPathRewriteInventoryFingerprint(
+      uid,
+      [{ __id: noteId, ...noteFields }],
+      [{ __id: folderId, ...folderFields }]
+    );
+    await writeEmulatorDocuments([
+      {
+        path: `notes/${noteId}`,
+        fields: noteFields
+      },
+      {
+        path: `vaultIntegrity/${uid}/nameClaims/${sourceClaimId}`,
+        fields: {
+          createdAt: now,
+          indexVersion: 1,
+          ownerUid: uid,
+          parentId: null,
+          targetId: noteId,
+          targetType: "entry",
+          updatedAt: now
+        }
+      },
+      {
+        path: `noteFolders/${folderId}`,
+        fields: folderFields
+      },
+      {
+        path: `vaultFolderTrees/${uid}`,
+        fields: {
+          createdAt: now,
+          folderCount: 1,
+          nodes: {
+            [folderId]: { active: true, generation: 1, parentId: null, selfActive: true }
+          },
+          ownerUid: uid,
+          revision: 1,
+          schemaVersion: 1,
+          updatedAt: now
+        }
+      },
+      {
+        path: jobPath,
+        fields: {
+          activationMode: "atomic-v1",
+          confirmedCount: 0,
+          cursor: 0,
+          inventoryFingerprint,
+          kind: "path-rewrite-v1",
+          lastErrorCode: null,
+          mutationExpectedRevision: 0,
+          mutationTargetId: noteId,
+          mutationTargetKind: "entry",
+          ownerUid: uid,
+          planFingerprint: jobId,
+          preparedStepCount: 1,
+          revision: 2,
+          status: "prepared",
+          stepCount: 1,
+          updatedAt: now,
+          version: 1
+        }
+      }
+    ]);
+
+    const moved = await request({
+      action: "move",
+      expectedRevision: 0,
+      folderId,
+      nameClaim: { claimId: targetClaimId, indexVersion: 1, parentId: folderId },
+      noteId,
+      pathRewriteActivation: { expectedRevision: 2, jobId },
+      readerUids: [uid]
+    });
+    expect(moved.response.status, JSON.stringify(moved.body)).toBe(200);
+    expect(moved.body).toMatchObject({ noteId, revision: 1 });
+    const movedNote = await readEmulatorDocument(`notes/${noteId}`);
+    expect(movedNote).toMatchObject({ folderId, revision: 1 });
+    expect(await readEmulatorDocument(jobPath)).toMatchObject({ revision: 3, status: "ready" });
+    const manifestMarker = await readEmulatorDocument(vaultInventoryManifestMarkerPath(uid));
+    expect(manifestMarker)
+      .toMatchObject({ epoch: 1, ownerUid: uid, shardCount: 32, version: 1 });
+    if (!movedNote) throw new Error("moved note fixture is missing");
+    const manifestEntryKey = createHash("sha256")
+      .update(canonicalVaultInventoryManifestEntryKey({ uid, kind: "note", id: noteId }), "utf8")
+      .digest("base64url");
+    const manifestEntryTokenCanonical = canonicalVaultInventoryManifestEntryToken({
+      uid,
+      kind: "note",
+      document: { ...movedNote, id: noteId }
+    });
+    if (manifestEntryTokenCanonical === null) throw new Error("moved note must be active");
+    const manifestEntryToken = createHash("sha256")
+      .update(manifestEntryTokenCanonical, "utf8")
+      .digest("base64url");
+    const manifestShard = await readEmulatorDocument(vaultInventoryManifestShardPath(
+      uid,
+      vaultInventoryManifestShardIndexFromEntryKey(manifestEntryKey)
+    ));
+    expect(manifestShard?.entries).toMatchObject({ [manifestEntryKey]: manifestEntryToken });
+
+    if (!manifestMarker) throw new Error("manifest marker is missing");
+    const manifestShards = await Promise.all(Array.from(
+      { length: vaultInventoryManifestContract.shardCount },
+      async (_, shardIndex) => {
+        const shard = await readEmulatorDocument(vaultInventoryManifestShardPath(uid, shardIndex));
+        if (!shard) throw new Error(`manifest shard ${shardIndex} is missing`);
+        return { ...shard, __id: vaultInventoryManifestShardId(shardIndex) };
+      }
+    ));
+    const pr3JobId = `pr3_${"manifest-note-move".padEnd(43, "0")}`;
+    const pr3JobPath = `vaultMaintenanceJobs/${uid}/pathRewrites/${pr3JobId}`;
+    await writeEmulatorDocuments([{
+      path: pr3JobPath,
+      fields: {
+        activationMode: "atomic-manifest-v1",
+        confirmedCount: 0,
+        cursor: 0,
+        inventoryManifestEpoch: manifestMarker.epoch,
+        inventoryManifestRoot: vaultInventoryManifestBindingRoot(
+          uid,
+          { ...manifestMarker, __id: "marker" },
+          manifestShards
+        ),
+        inventoryManifestShardCount: vaultInventoryManifestContract.shardCount,
+        inventoryManifestVersion: vaultInventoryManifestContract.version,
+        kind: "path-rewrite-v1",
+        lastErrorCode: null,
+        mutationExpectedRevision: 1,
+        mutationTargetId: noteId,
+        mutationTargetKind: "entry",
+        ownerUid: uid,
+        planFingerprint: pr3JobId,
+        preparedStepCount: 0,
+        revision: 2,
+        status: "prepared",
+        stepCount: 0,
+        updatedAt: now,
+        version: 1
+      }
+    }]);
+    const movedBack = await request({
+      action: "move",
+      expectedRevision: 1,
+      folderId: null,
+      nameClaim: { claimId: "W".repeat(43), indexVersion: 1, parentId: null },
+      noteId,
+      pathRewriteActivation: { expectedRevision: 2, jobId: pr3JobId },
+      readerUids: [uid]
+    });
+    expect(movedBack.response.status, JSON.stringify(movedBack.body)).toBe(200);
+    expect(movedBack.body).toMatchObject({ noteId, revision: 2 });
+    expect(await readEmulatorDocument(`notes/${noteId}`)).toMatchObject({ folderId: null, revision: 2 });
+    expect(await readEmulatorDocument(pr3JobPath)).toMatchObject({ revision: 3, status: "ready" });
+
+    const raceJobId = `pr2_${"concurrent-note-create".padEnd(43, "0")}`;
+    const raceJobPath = `vaultMaintenanceJobs/${uid}/pathRewrites/${raceJobId}`;
+    const currentNote = await readEmulatorDocument(`notes/${noteId}`);
+    const currentFolder = await readEmulatorDocument(`noteFolders/${folderId}`);
+    if (!currentNote || !currentFolder) throw new Error("atomic race fixture is missing");
+    const raceFingerprint = vaultPathRewriteInventoryFingerprint(
+      uid,
+      [{ ...currentNote, __id: noteId }],
+      [{ ...currentFolder, __id: folderId }]
+    );
+    await writeEmulatorDocuments([
+      {
+        path: raceJobPath,
+        fields: {
+          activationMode: "atomic-v1",
+          confirmedCount: 0,
+          cursor: 0,
+          inventoryFingerprint: raceFingerprint,
+          kind: "path-rewrite-v1",
+          lastErrorCode: null,
+          mutationExpectedRevision: 2,
+          mutationTargetId: noteId,
+          mutationTargetKind: "entry",
+          ownerUid: uid,
+          planFingerprint: raceJobId,
+          preparedStepCount: 0,
+          revision: 2,
+          status: "prepared",
+          stepCount: 0,
+          updatedAt: now,
+          version: 1
+        }
+      },
+      {
+        path: "notes/concurrent-created-note",
+        fields: {
+          ...noteFields,
+          folderId,
+          lastMutationId: "concurrent-create",
+          revision: 1,
+          vaultNameClaimId: "V".repeat(43)
+        }
+      }
+    ]);
+    const raced = await request({
+      action: "move",
+      expectedRevision: 2,
+      folderId,
+      nameClaim: { claimId: "U".repeat(43), indexVersion: 1, parentId: folderId },
+      noteId,
+      pathRewriteActivation: { expectedRevision: 2, jobId: raceJobId },
+      readerUids: [uid]
+    });
+    expect(raced.response.status).toBe(409);
+    expect(raced.body).toMatchObject({ error: "vault_path_rewrite_inventory_changed", ok: false });
+    expect(await readEmulatorDocument(`notes/${noteId}`)).toMatchObject({ folderId: null, revision: 2 });
+    expect(await readEmulatorDocument(raceJobPath)).toMatchObject({ revision: 2, status: "prepared" });
   });
 
   it("atomically reserves secure-share copy names and releases them only after zero-counter abort", async () => {
@@ -442,6 +744,105 @@ describeEmulator("Vault note API emulator transaction", () => {
       .toMatchObject({ secureShareCopyState: "copying" });
     expect(await readEmulatorDocument(`vaultIntegrity/${uid}/nameClaims/${claimId}`))
       .toMatchObject({ targetId: "secure-copy-reserved" });
+  });
+
+  it("requires an atomic rewrite when access moves a versioned note out of a folder", async () => {
+    await activateVaultIntegrityMarker();
+    const now = new Date();
+    const folderId = "access-path-folder";
+    await writeEmulatorDocuments([
+      {
+        path: `noteFolders/${folderId}`,
+        fields: {
+          encryptedName: title,
+          isDeleted: false,
+          ownerUid: uid,
+          parentId: null,
+          revision: 1,
+          wrappedKey
+        }
+      },
+      {
+        path: `vaultFolderTrees/${uid}`,
+        fields: {
+          createdAt: now,
+          folderCount: 1,
+          nodes: {
+            [folderId]: { active: true, generation: 1, parentId: null, selfActive: true }
+          },
+          ownerUid: uid,
+          revision: 1,
+          schemaVersion: 1,
+          updatedAt: now
+        }
+      }
+    ]);
+    const created = await request({
+      ...createBody("Q"),
+      folderId,
+      nameClaim: { claimId: "Q".repeat(43), indexVersion: 1, parentId: folderId }
+    });
+    expect(created.response.status, JSON.stringify(created.body)).toBe(200);
+    const noteId = String(created.body.noteId);
+    const accessPayload = {
+      action: "access",
+      expectedRevision: 1,
+      folderId: null,
+      nameClaim: { claimId: "R".repeat(43), indexVersion: 1, parentId: null },
+      noteId,
+      participantUids: [uid, participantUid],
+      type: "shared",
+      wrappedKeys: { [uid]: wrappedKey, [participantUid]: wrappedKey }
+    };
+    const missingRewrite = await request(accessPayload);
+    expect(missingRewrite.response.status).toBe(409);
+    expect(missingRewrite.body).toMatchObject({ error: "vault_path_rewrite_required", ok: false });
+
+    const [storedNote, storedFolder] = await Promise.all([
+      readEmulatorDocument(`notes/${noteId}`),
+      readEmulatorDocument(`noteFolders/${folderId}`)
+    ]);
+    if (!storedNote || !storedFolder) throw new Error("access path fixture is missing");
+    const jobId = `pr2_${"access-path-rewrite".padEnd(43, "0")}`;
+    await writeEmulatorDocuments([{
+      path: `vaultMaintenanceJobs/${uid}/pathRewrites/${jobId}`,
+      fields: {
+        activationMode: "atomic-v1",
+        confirmedCount: 0,
+        cursor: 0,
+        inventoryFingerprint: vaultPathRewriteInventoryFingerprint(
+          uid,
+          [{ ...storedNote, __id: noteId }],
+          [{ ...storedFolder, __id: folderId }]
+        ),
+        kind: "path-rewrite-v1",
+        lastErrorCode: null,
+        mutationExpectedRevision: 1,
+        mutationTargetId: noteId,
+        mutationTargetKind: "entry",
+        ownerUid: uid,
+        planFingerprint: jobId,
+        preparedStepCount: 0,
+        revision: 2,
+        status: "prepared",
+        stepCount: 0,
+        updatedAt: now,
+        version: 1
+      }
+    }]);
+    const shared = await request({
+      ...accessPayload,
+      pathRewriteActivation: { expectedRevision: 2, jobId }
+    });
+    expect(shared.response.status, JSON.stringify(shared.body)).toBe(200);
+    expect(shared.body).toMatchObject({ revision: 2 });
+    expect(await readEmulatorDocument(`notes/${noteId}`)).toMatchObject({
+      folderId: null,
+      type: "shared",
+      vaultNameClaimId: "R".repeat(43)
+    });
+    expect(await readEmulatorDocument(`vaultMaintenanceJobs/${uid}/pathRewrites/${jobId}`))
+      .toMatchObject({ revision: 3, status: "ready" });
   });
 
   it("authorizes a participant before CAS and hides revisions after policy, membership, or lifecycle removal", async () => {

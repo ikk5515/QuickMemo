@@ -2,6 +2,7 @@ import type { PreparedVaultPathRewriteJob } from "./pathRewriteJob";
 import type {
   RecoverPreparedVaultPathRewriteJobResult,
   ResumeVaultPathRewriteJobResult,
+  VaultPathRewriteActivationInput,
   VaultPathRewriteJobSummary
 } from "../../services/vaultPathRewriteJobs";
 
@@ -116,7 +117,7 @@ export async function resumeVaultPathRewriteToCompletion({
 export async function executeVaultPathRewrite(input: {
   prepared: PreparedVaultPathRewriteJob;
   ensurePrepared: () => Promise<VaultPathRewriteJobSummary>;
-  commitPathMutation: () => Promise<void>;
+  commitPathMutation: (activation: VaultPathRewriteActivationInput) => Promise<void>;
   activate: () => Promise<VaultPathRewriteJobSummary>;
   resume: () => Promise<ResumeVaultPathRewriteJobResult>;
   onStage?: (stage: VaultPathRewriteStage, job?: VaultPathRewriteJobSummary) => void;
@@ -141,26 +142,47 @@ export async function executeVaultPathRewrite(input: {
   }
   input.onStage?.("prepared", preparedSummary);
 
+  let activated: VaultPathRewriteJobSummary | null = null;
   try {
-    await input.commitPathMutation();
+    await input.commitPathMutation({
+      expectedRevision: preparedSummary.revision,
+      jobId: preparedSummary.jobId
+    });
   } catch (cause) {
-    throw new VaultPathRewriteControllerError(
-      "prepared",
-      "경로 변경을 저장하지 못해 준비된 참조 갱신 작업을 실행하지 않았습니다.",
-      { cause, job: preparedSummary }
-    );
+    // The Firestore transaction may have committed even when its HTTP response
+    // was lost. A ready/running/completed atomic job is durable proof that the
+    // paired path write committed; a still-prepared job makes `activate` fail
+    // closed and preserves the original mutation error.
+    try {
+      const confirmed = await input.activate();
+      if (
+        confirmed.status !== "ready"
+        && confirmed.status !== "running"
+        && confirmed.status !== "completed"
+      ) {
+        throw new Error("Path rewrite activation did not confirm the path transaction");
+      }
+      activated = confirmed;
+    } catch {
+      throw new VaultPathRewriteControllerError(
+        "prepared",
+        "경로 변경을 저장하지 못해 준비된 참조 갱신 작업을 실행하지 않았습니다.",
+        { cause, job: preparedSummary }
+      );
+    }
   }
   input.onStage?.("path-committed", preparedSummary);
 
-  let activated: VaultPathRewriteJobSummary;
-  try {
-    activated = await input.activate();
-  } catch (cause) {
-    throw new VaultPathRewriteControllerError(
-      "path-committed",
-      "경로는 변경했지만 참조 갱신 활성화를 확인하지 못했습니다. 다시 열면 안전하게 복구합니다.",
-      { cause, job: preparedSummary }
-    );
+  if (!activated) {
+    try {
+      activated = await input.activate();
+    } catch (cause) {
+      throw new VaultPathRewriteControllerError(
+        "path-committed",
+        "경로는 변경했지만 참조 갱신 활성화를 확인하지 못했습니다. 다시 열면 안전하게 복구합니다.",
+        { cause, job: preparedSummary }
+      );
+    }
   }
 
   return resumeVaultPathRewriteToCompletion({
@@ -177,16 +199,16 @@ export async function recoverVaultPathRewrite(input: {
   onStage?: (stage: VaultPathRewriteStage, job: VaultPathRewriteJobSummary) => void;
 }) {
   let current = input.job;
-  if (current.status === "preparing") {
-    throw new VaultPathRewriteControllerError(
-      "preparing",
-      "참조 갱신 준비가 완료되지 않았습니다.",
-      { job: current }
-    );
-  }
-  if (current.status === "prepared" || current.lastErrorCode === "path-state-conflict") {
+  if (
+    current.status === "preparing"
+    || current.status === "prepared"
+    || current.lastErrorCode === "path-state-conflict"
+  ) {
     const recovered = await input.recoverPrepared();
     current = recovered.job;
+    if (recovered.recovery === "deferred") {
+      return { outcome: "deferred" as const, job: current };
+    }
     if (recovered.recovery === "not-applied") {
       return { outcome: "not-applied" as const, job: current };
     }

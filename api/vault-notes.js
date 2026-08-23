@@ -23,6 +23,11 @@ import {
 } from "./_secure-share-common.js";
 import { validateVaultFolderTree } from "./_vault-folder-tree.js";
 import { logVaultApiRejection } from "./_vault-api-observability.js";
+import { prepareAtomicPathRewriteActivation } from "./_vault-path-rewrite-activation.js";
+import {
+  nextVaultInventoryDocument,
+  prepareVaultInventoryManifestMutation
+} from "./_vault-inventory-manifest-mutation.js";
 import {
   integrityPath,
   requireVaultCutoverLease,
@@ -533,16 +538,30 @@ async function assertFolderAvailable(context, transaction, uid, folderId, target
   }
   if (folder.encryptedName || folder.wrappedKey) {
     if (!treeDocument || treeDocument.ownerUid !== uid) {
-      throw new HttpError(409, "vault_tree_invalid", "Vault folder tree is unavailable", {
-        expose: false
-      });
+      throw new HttpError(
+        409,
+        "vault_tree_repair_required",
+        "Vault folder tree must be repaired before this mutation"
+      );
     }
-    const tree = validateVaultFolderTree({
-      folderCount: treeDocument.folderCount,
-      nodes: treeDocument.nodes,
-      revision: treeDocument.revision,
-      schemaVersion: treeDocument.schemaVersion
-    });
+    let tree;
+    try {
+      tree = validateVaultFolderTree({
+        folderCount: treeDocument.folderCount,
+        nodes: treeDocument.nodes,
+        revision: treeDocument.revision,
+        schemaVersion: treeDocument.schemaVersion
+      });
+    } catch (error) {
+      if (error?.code === "vault_tree_invalid" || error?.code === "vault_depth_exceeded") {
+        throw new HttpError(
+          409,
+          "vault_tree_repair_required",
+          "Vault folder tree must be repaired before this mutation"
+        );
+      }
+      throw error;
+    }
     if (tree.nodes[folderId]?.active !== true) {
       throw new HttpError(409, "vault_parent_unavailable", "Vault note folder is unavailable");
     }
@@ -872,6 +891,18 @@ async function createNote(context, uid, body, options = {}) {
       claimPath(uid, claim.claimId),
       claimFields(uid, noteId, input.folderId, now)
     ));
+    writes.push(...await prepareVaultInventoryManifestMutation(
+      context,
+      state.transaction,
+      {
+        uid,
+        kind: "note",
+        id: noteId,
+        currentDocument: null,
+        nextDocument: noteFields,
+        now
+      }
+    ));
     await commitOrConflict(context, writes, state.transaction);
     return { lastMutationId: historyId, noteId, revision: 1 };
   } catch (error) {
@@ -946,10 +977,70 @@ async function mutateRevisionedNote(context, uid, body, specification) {
       updatedAt: now,
       updatedBy: uid
     };
+    const nextInventoryDocument = nextVaultInventoryDocument(
+      note,
+      update,
+      mutation.deleteFields
+    );
+    const currentClaimId = storedClaimId(note);
+    const nextClaimId = storedClaimId(nextInventoryDocument);
+    const pathIdentityChanged = specification.actionName === "resolve-collision"
+      ? (
+          (note.folderId ?? null) !== (nextInventoryDocument.folderId ?? null)
+          || currentClaimId !== nextClaimId
+        )
+      : Boolean(currentClaimId) && (
+          (note.folderId ?? null) !== (nextInventoryDocument.folderId ?? null)
+          || currentClaimId !== nextClaimId
+        );
+    if (
+      integrityMarker.state === "ready"
+      && pathIdentityChanged
+      && body.pathRewriteActivation === undefined
+    ) {
+      throw new HttpError(
+        409,
+        "vault_path_rewrite_required",
+        "A prepared path rewrite is required before changing the Vault path"
+      );
+    }
+    if (
+      integrityMarker.state === "ready"
+      && !pathIdentityChanged
+      && body.pathRewriteActivation !== undefined
+    ) {
+      throw new HttpError(400, "invalid_request", "Path rewrite activation requires a path change");
+    }
+    const pathRewriteActivationWrites = await prepareAtomicPathRewriteActivation(
+      context,
+      state.transaction,
+      uid,
+      body.pathRewriteActivation,
+      {
+        expectedRevision,
+        id: noteId,
+        kind: "entry",
+        currentDocument: note,
+        nextDocument: nextInventoryDocument
+      },
+      now
+    );
     const fieldPaths = [
       ...Object.keys(update),
       ...(mutation.deleteFields ?? [])
     ];
+    const inventoryManifestWrites = await prepareVaultInventoryManifestMutation(
+      context,
+      state.transaction,
+      {
+        uid: note.ownerUid,
+        kind: "note",
+        id: noteId,
+        currentDocument: note,
+        nextDocument: nextInventoryDocument,
+        now
+      }
+    );
     const writes = [
       updateNoteWrite(
         context.projectId,
@@ -959,7 +1050,9 @@ async function mutateRevisionedNote(context, uid, body, specification) {
         note.__updateTime
       ),
       createDocumentWrite(context.projectId, historyPath(noteId, historyId), history),
-      ...(mutation.additionalWrites ?? [])
+      ...(mutation.additionalWrites ?? []),
+      ...pathRewriteActivationWrites,
+      ...inventoryManifestWrites
     ];
     await commitOrConflict(context, writes, state.transaction);
     return {
@@ -1029,7 +1122,7 @@ async function handleUpdate(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "changedFields", "encryptedBody", "encryptedTitle", "expectedContentFormat",
     "expectedEntryKind", "expectedRevision", "folderId", "historySnapshot", "historySummary",
-    "nameClaim", "noteId", "readerUids"
+    "nameClaim", "noteId", "pathRewriteActivation", "readerUids"
   ]);
   const encryptedTitle = assertEncryptedPayload(body.encryptedTitle, "encryptedTitle", 4_096);
   const encryptedBody = assertEncryptedPayload(body.encryptedBody, "encryptedBody", 700_000);
@@ -1142,7 +1235,8 @@ async function handleUpdate(context, uid, body) {
 
 async function handleMove(context, uid, body) {
   assertOnlyKeys(body, [
-    "action", "expectedRevision", "folderId", "historySummary", "nameClaim", "noteId", "readerUids"
+    "action", "expectedRevision", "folderId", "historySummary", "nameClaim", "noteId",
+    "pathRewriteActivation", "readerUids"
   ]);
   const folderId = assertFolderId(body.folderId);
   return mutateRevisionedNote(context, uid, body, {
@@ -1187,7 +1281,7 @@ async function handleMove(context, uid, body) {
 async function handleAccess(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "expectedRevision", "folderId", "nameClaim", "noteId", "participantUids",
-    "type", "wrappedKeys"
+    "pathRewriteActivation", "type", "wrappedKeys"
   ]);
   const participants = assertParticipants(body.participantUids, uid, body.type);
   const wrappedKeys = assertWrappedKeys(body.wrappedKeys, participants);
@@ -1364,7 +1458,7 @@ async function handleCollision(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "changedFields", "encryptedTitle", "expectedContentFormat", "expectedEntryKind",
     "expectedRevision", "folderId", "historySummary", "leaseGeneration", "leaseId", "nameClaim",
-    "noteId", "readerUids"
+    "noteId", "pathRewriteActivation", "readerUids"
   ]);
   assertStorageIdentity(body.expectedContentFormat, body.expectedEntryKind);
   const changedFields = assertHistoryFields(body.changedFields, ["name-claim"]);
@@ -1557,6 +1651,22 @@ async function handlePurge(context, uid, body) {
       "dueAt",
       "folderId"
     ];
+    const inventoryManifestWrites = await prepareVaultInventoryManifestMutation(
+      context,
+      state.transaction,
+      {
+        uid: note.ownerUid,
+        kind: "note",
+        id: noteId,
+        currentDocument: note,
+        nextDocument: nextVaultInventoryDocument(
+          note,
+          fields,
+          ["deletedAt", "deletedBy", "dueAt", "folderId"]
+        ),
+        now
+      }
+    );
     await commitOrConflict(context, [
       updateNoteWrite(
         context.projectId,
@@ -1569,7 +1679,8 @@ async function handlePurge(context, uid, body) {
         createdAt: now,
         noteId,
         ownerUid: uid
-      })
+      }),
+      ...inventoryManifestWrites
     ], state.transaction);
     return { noteId, revision };
   } catch (error) {
@@ -1631,13 +1742,28 @@ async function handleSecureCopyActivate(context, uid, body) {
       updatedAt: now,
       updatedBy: uid
     };
-    await commitOrConflict(context, [updateNoteWrite(
-      context.projectId,
-      notePath(noteId),
-      update,
-      Object.keys(update),
-      note.__updateTime
-    )], state.transaction);
+    const inventoryManifestWrites = await prepareVaultInventoryManifestMutation(
+      context,
+      state.transaction,
+      {
+        uid: note.ownerUid,
+        kind: "note",
+        id: noteId,
+        currentDocument: note,
+        nextDocument: nextVaultInventoryDocument(note, update),
+        now
+      }
+    );
+    await commitOrConflict(context, [
+      updateNoteWrite(
+        context.projectId,
+        notePath(noteId),
+        update,
+        Object.keys(update),
+        note.__updateTime
+      ),
+      ...inventoryManifestWrites
+    ], state.transaction);
     return { noteId, revision, state: "active" };
   } catch (error) {
     await firestoreRollback(context, state.transaction).catch(() => undefined);

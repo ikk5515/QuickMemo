@@ -8,6 +8,19 @@ import {
 } from "./parser";
 
 describe("Markdown parser", () => {
+  it("distinguishes CommonMark hard breaks from soft line endings", () => {
+    expect(parseMarkdownInline("첫 줄\\\n둘째 줄\n셋째 줄")).toEqual([
+      { type: "text", value: "첫 줄" },
+      { type: "line-break" },
+      { type: "text", value: "둘째 줄\n셋째 줄" }
+    ]);
+    expect(parseMarkdownInline("첫 줄  \n둘째 줄")).toEqual([
+      { type: "text", value: "첫 줄" },
+      { type: "line-break" },
+      { type: "text", value: "둘째 줄" }
+    ]);
+  });
+
   it("keeps wiki target paths separate from display aliases and subpaths", () => {
     expect(parseWikiLinkTarget("Projects/QuickMemo#보안 설계|암호화 메모"))
       .toEqual({

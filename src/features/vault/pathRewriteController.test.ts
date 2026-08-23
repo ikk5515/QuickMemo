@@ -76,6 +76,48 @@ describe("path rewrite controller", () => {
     })).rejects.toMatchObject({ stage: "path-committed" });
   });
 
+  it("continues immediately when an atomic commit succeeded but its HTTP response was lost", async () => {
+    const activate = vi.fn(async () => summary("ready"));
+    const resume = vi.fn(async () => ({ ...summary("completed"), processedSteps: 1 }));
+    await expect(executeVaultPathRewrite({
+      activate,
+      commitPathMutation: async () => { throw new Error("response lost"); },
+      ensurePrepared: async () => summary("prepared"),
+      prepared,
+      resume
+    })).resolves.toMatchObject({ status: "completed" });
+    expect(activate).toHaveBeenCalledOnce();
+    expect(resume).toHaveBeenCalledOnce();
+  });
+
+  it("uses a zero-step ready receipt to disambiguate a lost mutation response", async () => {
+    const ready = summary("ready", { stepCount: 0 });
+    const completed = summary("completed", {
+      confirmedCount: 0,
+      cursor: 0,
+      stepCount: 0
+    });
+    const resume = vi.fn(async () => ({ ...completed, processedSteps: 0 }));
+    await expect(executeVaultPathRewrite({
+      activate: async () => ready,
+      commitPathMutation: async () => { throw new Error("response lost"); },
+      ensurePrepared: async () => summary("prepared", { stepCount: 0 }),
+      prepared,
+      resume
+    })).resolves.toMatchObject({ status: "completed", stepCount: 0 });
+    expect(resume).toHaveBeenCalledOnce();
+  });
+
+  it("does not mask a genuine path commit failure while the job is still prepared", async () => {
+    await expect(executeVaultPathRewrite({
+      activate: async () => { throw new Error("atomic job remains prepared"); },
+      commitPathMutation: async () => { throw new Error("revision conflict"); },
+      ensurePrepared: async () => summary("prepared"),
+      prepared,
+      resume: vi.fn()
+    })).rejects.toMatchObject({ stage: "prepared" });
+  });
+
   it("requires cursor progress and a confirmed completed status", async () => {
     await expect(resumeVaultPathRewriteToCompletion({
       initial: summary("ready"),
@@ -100,5 +142,30 @@ describe("path rewrite controller", () => {
       recoverPrepared: async () => ({ recovery: "not-applied", job }),
       resume: vi.fn()
     })).resolves.toEqual({ outcome: "not-applied", job });
+  });
+
+  it("defers a fresh atomic job without starting any rewrite step", async () => {
+    const job = { ...summary("prepared"), recoveryAfterMs: 120_000 };
+    const resume = vi.fn();
+    await expect(recoverVaultPathRewrite({
+      job,
+      recoverPrepared: async () => ({ recovery: "deferred", job }),
+      resume
+    })).resolves.toEqual({ outcome: "deferred", job });
+    expect(resume).not.toHaveBeenCalled();
+  });
+
+  it("lets recovery abandon an interrupted atomic preparing job", async () => {
+    const abandoned = summary("abandoned");
+    const recoverPrepared = vi.fn(async () => ({
+      recovery: "not-applied" as const,
+      job: abandoned
+    }));
+    await expect(recoverVaultPathRewrite({
+      job: summary("preparing"),
+      recoverPrepared,
+      resume: vi.fn()
+    })).resolves.toEqual({ outcome: "not-applied", job: abandoned });
+    expect(recoverPrepared).toHaveBeenCalledOnce();
   });
 });

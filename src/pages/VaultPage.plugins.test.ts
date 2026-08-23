@@ -114,13 +114,13 @@ describe("VaultPage built-in knowledge tool wiring", () => {
   });
 
   it("keeps a recovery lookup lock-free but claims the path lock for an actual rewrite", () => {
-    const recoveryStart = source.indexOf("void listRecoverableVaultPathRewriteJobs");
+    const recoveryStart = source.indexOf("void scanRecoverableVaultPathRewriteJobs");
     const recoveryEnd = source.indexOf("}, [isOnline, pathRewriteRecoveryRetry", recoveryStart);
     const recovery = recoveryStart >= 0 && recoveryEnd > recoveryStart
       ? source.slice(recoveryStart, recoveryEnd)
       : "";
-    expect(recovery).toContain("if (jobs.length === 0) return");
-    expect(recovery.indexOf("listRecoverableVaultPathRewriteJobs")).toBeLessThan(
+    expect(recovery).toContain("if (eligibleJobs.length === 0) return");
+    expect(recovery.indexOf("scanRecoverableVaultPathRewriteJobs")).toBeLessThan(
       recovery.indexOf("pathRewriteBusyRef.current = true")
     );
     expect(recovery).toContain("pathRewriteRecoveryBusyOwnerRef.current = generation");

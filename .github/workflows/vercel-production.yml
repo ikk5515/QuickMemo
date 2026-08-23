@@ -4,6 +4,8 @@ on:
   workflow_run:
     workflows:
       - CI
+    branches:
+      - master
     types:
       - completed
 
@@ -56,10 +58,6 @@ jobs:
         with:
           node-version: 24
           cache: npm
-
-      - name: Install dependencies
-        if: steps.master_at_start.outputs.current == 'true'
-        run: npm ci
 
       - name: Verify committed patch whitespace
         if: steps.master_at_start.outputs.current == 'true'

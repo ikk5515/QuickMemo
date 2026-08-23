@@ -72,7 +72,7 @@ describe("Vault graph viewport persistence", () => {
 
   it("uses immediate viewport application for restore and graph bookmarks", () => {
     const restore = sourceBetween(
-      "const applyRestoredWorkspace = useCallback((restored: VaultPersistedWorkspaceState, revision?: number) => {",
+      "const applyRestoredWorkspace = useCallback((",
       "function keepCurrentWorkspaceAfterConflict()"
     );
     const bookmark = sourceBetween("function bookmarkGlobalGraph(", "function addSearchBookmark(");
