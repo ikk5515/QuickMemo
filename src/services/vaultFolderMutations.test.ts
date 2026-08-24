@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  acquireVaultPastedImageFolderLock,
   auditVaultFolderTreeServer,
   ensureVaultFolderTree,
   invalidateVaultFolderTreeReadiness,
   mutateVaultFolder,
+  releaseVaultPastedImageFolderLock,
   repairVaultFolderTree
 } from "./vaultFolderMutations";
 import { VAULT_API_REQUEST_DEADLINE_MS } from "./vaultApiDeadline";
@@ -28,6 +30,7 @@ vi.mock("../lib/firebase", () => ({
 vi.mock("firebase/app-check", () => ({ getToken: firebaseMocks.getAppCheckToken }));
 
 const uid = "owner-a";
+const pasteLockId = `vpl1_${"P".repeat(43)}`;
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -226,5 +229,187 @@ describe("Vault folder mutation API client", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body))
       .toBe(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+  });
+
+  it("sends exact acquire and release lock payloads through the authenticated API boundary", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        folderId: "folder-a",
+        maximumFolderCount: 2_000,
+        ok: true,
+        revision: 7,
+        schemaVersion: 1,
+        treeRevision: 11
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        folderId: "folder-a",
+        maximumFolderCount: 2_000,
+        ok: true,
+        revision: 7,
+        schemaVersion: 1,
+        treeRevision: 11
+      }));
+
+    await expect(acquireVaultPastedImageFolderLock(uid, {
+      expectedRevision: 7,
+      folderId: "folder-a",
+      lockId: pasteLockId
+    })).resolves.toEqual(expect.objectContaining({ revision: 7, treeRevision: 11 }));
+    await expect(releaseVaultPastedImageFolderLock(uid, {
+      folderId: "folder-a",
+      lockId: pasteLockId
+    })).resolves.toEqual(expect.objectContaining({ revision: 7, treeRevision: 11 }));
+
+    expect(vi.mocked(fetch).mock.calls.map((call) =>
+      JSON.parse(String(call[1]?.body)))).toEqual([
+      {
+        action: "paste-lock-acquire",
+        expectedRevision: 7,
+        folderId: "folder-a",
+        lockId: pasteLockId
+      },
+      {
+        action: "paste-lock-release",
+        folderId: "folder-a",
+        lockId: pasteLockId
+      }
+    ]);
+    const headers = new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers);
+    expect(headers.get("authorization")).toBe("Bearer firebase-id-token");
+    expect(headers.get("x-quickmemo-vault-folder-tree")).toBe("1");
+  });
+
+  it("retries acquire exactly once for each ambiguous transport or response failure", async () => {
+    const success = () => jsonResponse({
+      folderId: "folder-a",
+      maximumFolderCount: 2_000,
+      ok: true,
+      revision: 7,
+      schemaVersion: 1,
+      treeRevision: 11
+    });
+    const ambiguousFailures: Array<() => Promise<Response>> = [
+      () => Promise.reject(new Error("connection reset")),
+      () => Promise.resolve(jsonResponse({ ok: true })),
+      () => Promise.resolve(jsonResponse({ error: "service_unavailable" }, 503))
+    ];
+
+    for (const ambiguousFailure of ambiguousFailures) {
+      vi.mocked(fetch)
+        .mockImplementationOnce(ambiguousFailure)
+        .mockResolvedValueOnce(success());
+      await expect(acquireVaultPastedImageFolderLock(uid, {
+        expectedRevision: 7,
+        folderId: "folder-a",
+        lockId: pasteLockId
+      })).resolves.toMatchObject({ folderId: "folder-a", revision: 7 });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body))
+        .toBe(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+      vi.mocked(fetch).mockReset();
+    }
+  });
+
+  it("retries a timed-out acquire once with the same lock id", async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch)
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(jsonResponse({
+        folderId: "folder-a",
+        maximumFolderCount: 2_000,
+        ok: true,
+        revision: 7,
+        schemaVersion: 1,
+        treeRevision: 11
+      }));
+
+    const request = acquireVaultPastedImageFolderLock(uid, {
+      expectedRevision: 7,
+      folderId: "folder-a",
+      lockId: pasteLockId
+    });
+    await vi.advanceTimersByTimeAsync(VAULT_API_REQUEST_DEADLINE_MS);
+
+    await expect(request).resolves.toMatchObject({ folderId: "folder-a", revision: 7 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body))
+      .toBe(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+  });
+
+  it("does not retry an explicitly aborted acquire or a definitive conflict", async () => {
+    const controller = new AbortController();
+    const abortError = new DOMException("cancelled", "AbortError");
+    vi.mocked(fetch).mockImplementationOnce(async () => {
+      controller.abort(abortError);
+      throw abortError;
+    });
+    await expect(acquireVaultPastedImageFolderLock(uid, {
+      expectedRevision: 7,
+      folderId: "folder-a",
+      lockId: pasteLockId
+    }, controller.signal)).rejects.toBe(abortError);
+    expect(fetch).toHaveBeenCalledOnce();
+
+    vi.mocked(fetch).mockReset().mockResolvedValueOnce(jsonResponse({
+      error: "vault_paste_locked"
+    }, 409));
+    await expect(acquireVaultPastedImageFolderLock(uid, {
+      expectedRevision: 7,
+      folderId: "folder-a",
+      lockId: pasteLockId
+    })).rejects.toMatchObject({ code: "vault_paste_locked", status: 409 });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("retries a matching release once when its response may have been lost", async () => {
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new Error("connection reset after commit"))
+      .mockResolvedValueOnce(jsonResponse({
+        folderId: "folder-a",
+        maximumFolderCount: 2_000,
+        ok: true,
+        revision: 7,
+        schemaVersion: 1,
+        treeRevision: 11
+      }));
+
+    await expect(releaseVaultPastedImageFolderLock(uid, {
+      folderId: "folder-a",
+      lockId: pasteLockId
+    })).resolves.toMatchObject({ folderId: "folder-a", revision: 7 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body))
+      .toBe(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+  });
+
+  it("rejects extra lock response fields instead of trusting server metadata", async () => {
+    const malformedResponse = () => jsonResponse({
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      folderId: "folder-a",
+      maximumFolderCount: 2_000,
+      ok: true,
+      revision: 7,
+      schemaVersion: 1,
+      treeRevision: 11
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(malformedResponse())
+      .mockResolvedValueOnce(malformedResponse());
+
+    await expect(acquireVaultPastedImageFolderLock(uid, {
+      expectedRevision: 7,
+      folderId: "folder-a",
+      lockId: pasteLockId
+    })).rejects.toMatchObject({ code: "invalid_response", status: 200 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a lock request when the authenticated user is not the owner", async () => {
+    await expect(acquireVaultPastedImageFolderLock("other-owner", {
+      expectedRevision: 7,
+      folderId: "folder-a",
+      lockId: pasteLockId
+    })).rejects.toMatchObject({ code: "authentication_required", status: 401 });
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

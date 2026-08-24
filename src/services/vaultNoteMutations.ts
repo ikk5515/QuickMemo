@@ -75,7 +75,10 @@ export type VaultNoteMovePayload = Omit<UpdateRevisionedNoteFolderInput, "uid"> 
   action: "move";
 };
 
-export type VaultNoteRestorePayload = Omit<RevisionedNoteLifecycleInput, "uid"> & {
+export type VaultNoteRestorePayload = Omit<
+  RevisionedNoteLifecycleInput,
+  "uid" | "vaultPasteLockId"
+> & {
   action: "restore";
 };
 
@@ -183,7 +186,9 @@ export class VaultNoteApiError extends Error {
   readonly status: number;
 
   constructor(code: string, status: number, actualRevision?: unknown) {
-    super(code === "vault_import_locked"
+    super(code === "vault_paste_locked"
+      ? "이미지 붙여넣기가 끝날 때까지 해당 폴더의 이미지 이름이나 경로를 변경할 수 없습니다."
+      : code === "vault_import_locked"
       ? "Vault 가져오기 또는 복구가 끝날 때까지 노트 변경이 잠깁니다."
       : code === "network_timeout"
         ? "서버 응답이 지연되어 저장 잠금을 해제했습니다. 현재 편집본은 유지되며 자동으로 다시 시도합니다."
@@ -461,7 +466,9 @@ export function vaultNoteLifecyclePayload(
     void _nameClaim;
     return { ...trashPayload, action };
   }
-  return { ...payload, action };
+  const { vaultPasteLockId: _vaultPasteLockId, ...restorePayload } = payload;
+  void _vaultPasteLockId;
+  return { ...restorePayload, action };
 }
 
 export function vaultNotePurgePayload(

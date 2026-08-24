@@ -112,6 +112,31 @@ async function rawOwnedNoteDocuments(request, fixture) {
   return rows.flatMap((row) => row.document ? [row.document] : []);
 }
 
+async function rawOwnedFolderDocuments(request, fixture) {
+  const response = await request.post(`${firestoreDocumentsRoot}:runQuery`, {
+    data: {
+      structuredQuery: {
+        from: [{ collectionId: "noteFolders" }],
+        limit: 10,
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "ownerUid" },
+            op: "EQUAL",
+            value: { stringValue: fixture.viewerAuth.uid }
+          }
+        }
+      }
+    },
+    headers: {
+      authorization: `Bearer ${fixture.viewerAuth.idToken}`,
+      "content-type": "application/json"
+    }
+  });
+  expect(response.ok(), "the owner-only raw Vault folder query must succeed").toBe(true);
+  const rows = await response.json();
+  return rows.flatMap((row) => row.document ? [row.document] : []);
+}
+
 test("Source and Live Preview file pickers persist encrypted Markdown image embeds", async ({
   browserName,
   page,
@@ -186,6 +211,20 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
   }).toBe(2);
   const embeds = imageEmbeds(persistedSource);
   expect(new Set(embeds).size, "the two encrypted image assets need distinct Vault paths").toBe(2);
+  expect(new Set(embeds)).toEqual(new Set([
+    `![[붙여넣은 이미지/${noteTitle} -1.png]]`,
+    `![[붙여넣은 이미지/${noteTitle} -2.png]]`
+  ]));
+  await expect(page.getByRole("treeitem", { name: "붙여넣은 이미지", exact: true }))
+    .toHaveCount(1);
+
+  const statesAfterBothUploads = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
+  const imageAssets = statesAfterBothUploads.filter((state) => state.entryKind === "asset");
+  expect(imageAssets).toHaveLength(2);
+  expect(imageAssets.every((asset) => typeof asset.folderId === "string" && asset.folderId.length > 0))
+    .toBe(true);
+  expect(new Set(imageAssets.map((asset) => asset.folderId)).size).toBe(1);
+  expect(statesAfterBothUploads.find((state) => state.id === entryId)?.folderId ?? null).toBeNull();
 
   await test.step("save and prove plaintext is absent from Firestore", async () => {
     const save = page.getByRole("button", { name: "저장", exact: true });
@@ -208,7 +247,16 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
       timeout: 35_000
     }).toBe(3);
 
-    const rawFirestore = JSON.stringify(documents);
+    let folderDocuments = [];
+    await expect.poll(async () => {
+      folderDocuments = await rawOwnedFolderDocuments(request, fixture);
+      return folderDocuments.length;
+    }, {
+      message: "the dedicated encrypted image folder must be persisted once",
+      timeout: 35_000
+    }).toBe(1);
+
+    const rawFirestore = JSON.stringify([...documents, ...folderDocuments]);
     for (const marker of ["encryptedTitle", "encryptedBody", "wrappedKeys", "markdown-v1", "asset-v1"]) {
       expect(rawFirestore).toContain(marker);
     }
@@ -217,6 +265,7 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
       livePreviewFileName,
       onePixelPngBase64,
       noteTitle,
+      "붙여넣은 이미지",
       persistedSource,
       ...embeds
     ]) {
@@ -236,6 +285,8 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
     await expect(page.locator("body")).not.toContainText(noteTitle);
     await unlockEncryptedVault(page, fixture.viewerAuth.password);
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(noteTitle);
+    await expect(page.getByRole("treeitem", { name: "붙여넣은 이미지", exact: true }))
+      .toHaveCount(1);
     await page.getByRole("button", { name: "소스 모드", exact: true }).click();
     const restoredEditor = page.getByRole("textbox", { name: "Markdown 편집기" });
     await expect.poll(() => editorSource(restoredEditor), {

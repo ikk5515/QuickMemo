@@ -4,6 +4,7 @@ import {
   decryptVaultFolders,
   decryptVaultNotes,
   migrateLegacyVaultFolder,
+  type DecryptedVaultFolder,
   type DecryptedVaultNote,
   vaultEntryStorageIdentityState
 } from "./vaultData";
@@ -237,6 +238,41 @@ describe("Vault folder persistence", () => {
         nameDecryptionFailed: true
       })
     ]);
+  });
+
+  it("reuses only an exact successfully decrypted encrypted-folder name", async () => {
+    const snapshot = {
+      color: "#7c5cff",
+      encryptedName,
+      id: "folder-a",
+      name: "암호화 폴더",
+      ownerUid: "user-a",
+      parentId: null,
+      revision: 3,
+      wrappedKey
+    } as NoteFolderSnapshot;
+    const reusable = {
+      ...snapshot,
+      displayName: "이미 복호화한 폴더"
+    } as DecryptedVaultFolder;
+
+    await expect(decryptVaultFolders(
+      [snapshot],
+      "user-a",
+      { kind: "private" } as unknown as CryptoKey,
+      { reusableFolders: [reusable] }
+    )).resolves.toEqual([expect.objectContaining({ displayName: "이미 복호화한 폴더" })]);
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.decryptText).not.toHaveBeenCalled();
+
+    await decryptVaultFolders([{
+      ...snapshot,
+      encryptedName: { ...encryptedName, cipherText: "changed-name" }
+    }], "user-a", { kind: "private" } as unknown as CryptoKey, {
+      reusableFolders: [reusable]
+    });
+    expect(mocks.unwrapNoteKey).toHaveBeenCalledOnce();
+    expect(mocks.decryptText).toHaveBeenCalledOnce();
   });
 });
 

@@ -39,6 +39,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -562,6 +563,7 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
           autoFocus
           className="nodrag nowheel vault-canvas-text-editor"
           onChange={(event) => runtime?.patchNode(id, { text: event.target.value })}
+          onClick={stopCanvasControlEvent}
           onDoubleClick={stopCanvasControlEvent}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
@@ -936,10 +938,13 @@ export function JsonCanvasView({
   resolveVaultEntryDrop,
   source
 }: JsonCanvasViewProps) {
-  const parseResult = useMemo(() => parseCanvasDocument(source), [source]);
-  const parsed = parseResult.document;
-  const canvasReadOnly = readOnly || !parseResult.editable;
-  const initialFlow = useMemo(() => documentToFlow(parsed), [parsed]);
+  const [initialParseResult] = useState(() => parseCanvasDocument(source));
+  const [canvasSafety, setCanvasSafety] = useState(() => ({
+    editable: initialParseResult.editable,
+    warnings: initialParseResult.warnings
+  }));
+  const canvasReadOnly = readOnly || !canvasSafety.editable;
+  const [initialFlow] = useState(() => documentToFlow(initialParseResult.document));
   const [nodes, setNodes] = useState<CanvasFlowNode[]>(() => initialFlow.nodes);
   const [edges, setEdges] = useState<CanvasFlowEdge[]>(() => initialFlow.edges);
   const [snapToGrid, setSnapToGrid] = useState(true);
@@ -953,16 +958,23 @@ export function JsonCanvasView({
   const [editingTextNodeId, setEditingTextNodeId] = useState<string | null>(null);
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
+  const onChangeRef = useRef(onChange);
+  const onOpenFileRef = useRef(onOpenFile);
   const groupDragRef = useRef<CanvasGroupDragState | null>(null);
   const nodeDragCommitRef = useRef<CanvasNodeDragCommitState | null>(null);
   const longPressRef = useRef<CanvasLongPressState | null>(null);
-  const documentRef = useRef(parsed);
+  const documentRef = useRef(initialParseResult.document);
   const sourceRef = useRef(source);
-  const canonicalSourceRef = useRef(`${JSON.stringify(parsed, null, 2)}\n`);
+  const canonicalSourceRef = useRef(`${JSON.stringify(initialParseResult.document, null, 2)}\n`);
   const flowInstanceRef = useRef<ReactFlowInstance<CanvasFlowNode, CanvasFlowEdge> | null>(null);
   const canvasSectionRef = useRef<HTMLElement | null>(null);
   const edgeLabelInputRef = useRef<HTMLInputElement | null>(null);
   const dropHelpId = useId();
+
+  useLayoutEffect(() => {
+    onChangeRef.current = onChange;
+    onOpenFileRef.current = onOpenFile;
+  }, [onChange, onOpenFile]);
 
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
@@ -1002,8 +1014,8 @@ export function JsonCanvasView({
     }
     canonicalSourceRef.current = serialized;
     sourceRef.current = serialized;
-    onChange(serialized);
-  }, [onChange]);
+    onChangeRef.current(serialized);
+  }, []);
 
   const settleNodeDragCommit = useCallback((
     drag: CanvasNodeDragCommitState,
@@ -1053,12 +1065,13 @@ export function JsonCanvasView({
     });
   }, [commit]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (source === sourceRef.current) {
       return;
     }
     sourceRef.current = source;
-    const nextDocument = safeCanvasDocument(source);
+    const nextParseResult = parseCanvasDocument(source);
+    const nextDocument = nextParseResult.document;
     const nextFlow = documentToFlow(nextDocument);
     documentRef.current = nextDocument;
     canonicalSourceRef.current = `${JSON.stringify(nextDocument, null, 2)}\n`;
@@ -1068,6 +1081,10 @@ export function JsonCanvasView({
     edgesRef.current = nextFlow.edges;
     setNodes(nextFlow.nodes);
     setEdges(nextFlow.edges);
+    setCanvasSafety({
+      editable: nextParseResult.editable,
+      warnings: nextParseResult.warnings
+    });
     setEditingTextNodeId(null);
   }, [source]);
 
@@ -1080,10 +1097,16 @@ export function JsonCanvasView({
       ...measuredDocument,
       nodes: measuredDocument.nodes.map((node) => node.id === nodeId ? { ...node, ...patch, id: node.id, type: node.type } : node)
     };
-    const selectedNodes = new Set(nodesRef.current.filter((node) => node.selected).map((node) => node.id));
-    const selectedEdges = new Set(edgesRef.current.filter((edge) => edge.selected).map((edge) => edge.id));
-    const nextFlow = documentToFlow(nextDocument, selectedNodes, selectedEdges);
-    commit(nextFlow.nodes, nextFlow.edges);
+    const patchedNode = nextDocument.nodes.find((node) => node.id === nodeId);
+    if (!patchedNode) {
+      return;
+    }
+    const nextNodes = nodesRef.current.map((node) => node.id === nodeId ? {
+      ...node,
+      ariaLabel: accessibleNodeLabel(patchedNode),
+      data: { ...node.data, canvas: patchedNode }
+    } : node);
+    commit(nextNodes, edgesRef.current);
   }, [canvasReadOnly, commit]);
 
   const safeFileOptions = useMemo(() => fileOptions.filter((option) => Boolean(safeVaultPath(option.path))), [fileOptions]);
@@ -1116,16 +1139,19 @@ export function JsonCanvasView({
   const stopTextNodeEditing = useCallback((nodeId?: string) => {
     setEditingTextNodeId((current) => !nodeId || current === nodeId ? null : current);
   }, []);
+  const openFile = useCallback((path: string) => {
+    onOpenFileRef.current(path);
+  }, []);
   const runtime = useMemo<CanvasRuntime>(() => ({
     editTextNode,
     editingTextNodeId,
     fileOptions: safeFileOptions,
     fileOptionsByPath,
-    onOpenFile,
+    onOpenFile: openFile,
     patchNode,
     readOnly: canvasReadOnly,
     stopTextNodeEditing
-  }), [canvasReadOnly, editTextNode, editingTextNodeId, fileOptionsByPath, onOpenFile, patchNode, safeFileOptions, stopTextNodeEditing]);
+  }), [canvasReadOnly, editTextNode, editingTextNodeId, fileOptionsByPath, openFile, patchNode, safeFileOptions, stopTextNodeEditing]);
 
   const changeNodes = useCallback((changes: NodeChange<CanvasFlowNode>[]) => {
     if (canvasReadOnly && changes.some((change) => change.type !== "select")) {
@@ -2220,10 +2246,10 @@ export function JsonCanvasView({
             여기에 놓아 Canvas 카드 추가
           </div>
         ) : null}
-        {parseResult.warnings.length > 0 ? (
+        {canvasSafety.warnings.length > 0 ? (
           <div className="vault-canvas-warning" role="alert">
             <strong>읽기 전용으로 열었습니다.</strong>
-            <span>{parseResult.warnings.join(" ")}</span>
+            <span>{canvasSafety.warnings.join(" ")}</span>
           </div>
         ) : null}
         {!canvasReadOnly ? (

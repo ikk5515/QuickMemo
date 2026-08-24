@@ -11,8 +11,16 @@ const vaultClipboardPasteFlowSource = readFileSync(
   join(process.cwd(), "src/features/vault/vaultClipboardPasteFlow.ts"),
   "utf8"
 );
+const vaultPastedImageFolderSource = readFileSync(
+  join(process.cwd(), "src/features/vault/vaultPastedImageFolder.ts"),
+  "utf8"
+);
 const codeMirrorMarkdownEditorSource = readFileSync(
   join(process.cwd(), "src/features/vault/CodeMirrorMarkdownEditor.tsx"),
+  "utf8"
+);
+const vaultCanvasExternalFilesSource = readFileSync(
+  join(process.cwd(), "src/features/canvas/vaultCanvasExternalFiles.ts"),
   "utf8"
 );
 
@@ -36,6 +44,7 @@ describe("VaultPage security boundaries", () => {
       /useEffect\(\(\) => \(\) => \{[\s\S]*?\n\s{2}\}, \[\]\);/u
     )?.[0] ?? "";
     expect(cleanup).toContain("decryptGeneration.current += 1");
+    expect(cleanup).toContain("workspaceAccessScopeGenerationRef.current += 1");
     expect(cleanup).toContain("notesRef.current = []");
     expect(cleanup).toContain("foldersRef.current = []");
     expect(cleanup).toContain("draftsRef.current = {}");
@@ -260,11 +269,15 @@ describe("VaultPage security boundaries", () => {
       /async function importCanvasExternalFiles[\s\S]*?async function createConvertedMarkdownCopy/u
     )?.[0] ?? "";
 
-    expect(importer).toContain("MAX_INLINE_VAULT_ASSET_BYTES");
+    expect(importer).toContain('import("../features/canvas/vaultCanvasExternalFiles")');
     expect(importer).toContain("await createEncryptedVaultAsset(profile, vaultIntegrityKey");
-    expect(importer).toContain("bytes?.fill(0)");
+    expect(importer).toContain("workspaceAccessScopeGenerationRef.current !== accessScopeGeneration");
+    expect(vaultCanvasExternalFilesSource).toContain("MAX_INLINE_VAULT_ASSET_BYTES");
+    expect(vaultCanvasExternalFilesSource).toContain("bytes?.fill(0)");
     expect(importer).not.toContain("localStorage");
     expect(importer).not.toContain("sessionStorage");
+    expect(vaultCanvasExternalFilesSource).not.toContain("localStorage");
+    expect(vaultCanvasExternalFilesSource).not.toContain("sessionStorage");
     expect(vaultPageSource).toContain("onImportExternalFiles={importCanvasExternalFiles}");
   });
 
@@ -274,11 +287,23 @@ describe("VaultPage security boundaries", () => {
     )?.[0] ?? "";
 
     expect(pasteHandler).toContain('note.ownerUid !== profile.uid || note.type !== "personal"');
-    expect(pasteHandler).toContain("pendingClipboardPasteCountsRef.current.set(");
-    expect(pasteHandler.indexOf("pendingClipboardPasteCountsRef.current.set(")).toBeLessThan(
-      pasteHandler.indexOf('import(\n        "../features/vault/vaultClipboardPasteFlow"')
-    );
-    expect(pasteHandler).toContain("return await pasteVaultClipboardImages({");
+    expect(pasteHandler).toContain("beginVaultClipboardPastePendingGuard({");
+    expect(vaultClipboardPasteFlowSource).toContain("input.counts.set(input.entryId");
+    expect(pasteHandler).toContain("const result = await pasteModule.pasteVaultClipboardImages({");
+    expect(pasteHandler).toContain("resolveAssetDestination: async (resolveSignal) => {");
+    expect(pasteHandler).toContain("assertAssetDestinationCurrent: (target) => {");
+    expect(pasteHandler).toContain("confirmAssetDestination: (lease) => {");
+    expect(pasteHandler).toContain("vaultPasteFolderRevision: destination.folderRevision");
+    expect(pasteHandler).toContain("pasteModule.rollbackVaultClipboardSource(latestDraft.body, rollback)");
+    expect(pasteHandler).toContain('outcome === "rollback-blocked"');
+    expect(pasteHandler).toContain("const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;");
+    expect(pasteHandler).toContain("if (!accessScopeIsCurrent()) {");
+    expect(pasteHandler).toContain("if (accessScopeIsCurrent() && !signal.aborted)");
+    const saveEntry = vaultPageSource.match(
+      /const saveEntry = useCallback[\s\S]*?useEffect\(\(\) => \{\n\s+saveEntryRef\.current/u
+    )?.[0] ?? "";
+    expect(saveEntry).toContain("pendingClipboardPasteCountsRef.current.has(entryId)");
+    expect(saveEntry).toContain("pastedImageSourceCommit");
     expect(vaultClipboardPasteFlowSource).toContain(
       "prepareVaultClipboardImages(files, { signal: preflightController.signal })"
     );
@@ -287,10 +312,14 @@ describe("VaultPage security boundaries", () => {
     expect(vaultClipboardPasteFlowSource).toContain("getVisibleNotesByIdsFromServer(ownerUid, [note.id])");
     expect(vaultClipboardPasteFlowSource).toContain('server.type !== "personal"');
     expect(vaultClipboardPasteFlowSource).toContain("server.folderId ?? null");
-    expect(vaultClipboardPasteFlowSource).toContain("source: vaultClipboardImageEmbedSource(sourceTitles)");
+    expect(vaultClipboardPasteFlowSource).toContain("`${folderPath}/${title}`");
     expect(vaultClipboardPasteFlowSource).toContain("clearPreparedVaultClipboardImages(prepared)");
     expect(vaultClipboardPasteFlowSource).toContain("if (signal.aborted)");
-    expect(vaultClipboardPasteFlowSource).toContain("onDiscard: discardCreatedAssets");
+    expect(vaultClipboardPasteFlowSource).toContain("onDiscard: discardPaste");
+    expect(vaultClipboardPasteFlowSource).toContain("await confirmAssetDestination(destination)");
+    expect(vaultClipboardPasteFlowSource).toContain("persisted = await commitSource(source, destination)");
+    expect(vaultPastedImageFolderSource).toContain("acquireVaultPastedImageFolderLock(input.ownerUid");
+    expect(vaultPastedImageFolderSource).toContain("releaseVaultPastedImageFolderLock(input.ownerUid");
     expect(vaultClipboardPasteFlowSource).toContain("await deleteRevisionedNote({");
     expect(vaultClipboardPasteFlowSource).not.toContain("data:");
     expect(vaultClipboardPasteFlowSource).not.toContain("localStorage");
@@ -302,6 +331,19 @@ describe("VaultPage security boundaries", () => {
     expect(codeMirrorMarkdownEditorSource).toContain("EditorSelection.cursor(position)");
     expect(codeMirrorMarkdownEditorSource).toContain("multiple");
     expect(codeMirrorMarkdownEditorSource).not.toContain("readAsDataURL");
+  });
+
+  it("keeps pasted asset guards until the exact decrypted subscription acknowledgement", () => {
+    const acknowledgement = vaultPageSource.match(
+      /useEffect\(\(\) => \{\n\s+for \(const note of notes\) \{\n\s+const pendingTitleKey = pendingClipboardAssetTitleKeyByIdRef[\s\S]*?\n\s{2}\}, \[notes, profile\.uid\]\);/u
+    )?.[0] ?? "";
+
+    expect(acknowledgement).toContain("note.ownerUid !== profile.uid");
+    expect(acknowledgement).toContain('note.entryKind !== "asset"');
+    expect(acknowledgement).toContain("(note.folderId ?? null) !== reservation.folderId");
+    expect(acknowledgement).toContain("note.title !== reservation.title");
+    expect(acknowledgement).toContain("pendingClipboardAssetIdsRef.current.delete(note.id)");
+    expect(vaultClipboardPasteFlowSource).not.toContain("clearCreatedAssetReservations");
   });
 
   it("opens the lazy share manager only from a stable saved snapshot and carries asset ACL blocks forward", () => {
@@ -371,7 +413,7 @@ describe("VaultPage security boundaries", () => {
 
     expect(conversion).toContain("getVisibleNotesByIdsFromServer(profile.uid, [draft.sourceEntryId])");
     expect(conversion).toContain("assertFormatConversionSourceUnchanged(previewPlan");
-    expect(conversion).toContain("const verifiedPlan = planLegacyVaultFormatConversion");
+    expect(conversion).toContain("const verifiedPlan = formatConverter.planLegacyVaultFormatConversion");
     expect(conversion).toContain("body: verifiedPlan.copy.body");
     expect(conversion).toContain("folderId: targetFolderId");
     expect(conversion).not.toContain("body: draft.body");

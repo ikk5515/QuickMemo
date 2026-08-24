@@ -95,11 +95,23 @@ type LifecyclePayload = {
 
 type MaintenancePayload = { action: "audit" | "bootstrap" | "repair" };
 
+type PastedImageFolderLockPayload = {
+  action: "paste-lock-acquire";
+  expectedRevision: number;
+  folderId: string;
+  lockId: string;
+} | {
+  action: "paste-lock-release";
+  folderId: string;
+  lockId: string;
+};
+
 export type VaultFolderApiPayload =
   | CreatePayload
   | LifecyclePayload
   | MaintenancePayload
   | MigratePayload
+  | PastedImageFolderLockPayload
   | ResolveCollisionPayload
   | UpdatePayload;
 
@@ -108,7 +120,9 @@ export class VaultFolderApiError extends Error {
   readonly status: number;
 
   constructor(code: string, status: number) {
-    super(code === "vault_import_locked"
+    super(code === "vault_paste_locked"
+      ? "이미지 붙여넣기가 끝날 때까지 해당 폴더를 변경할 수 없습니다."
+      : code === "vault_import_locked"
       ? "Vault 가져오기 또는 복구가 끝날 때까지 기존 폴더 변경이 잠깁니다."
       : code === "network_timeout"
         ? "서버 응답이 지연되어 폴더 작업 잠금을 해제했습니다. 현재 목록을 확인한 뒤 다시 시도해주세요."
@@ -343,23 +357,76 @@ export async function auditVaultFolderTreeServer(ownerUid: string) {
   }>(ownerUid, { action: "audit" });
 }
 
+export function vaultFolderResponseMayHaveBeenLost(caught: unknown) {
+  return caught instanceof VaultFolderApiError
+    && (
+      caught.code === "network_error"
+      || caught.code === "network_timeout"
+      || caught.code === "invalid_response"
+      || caught.status >= 500
+    );
+}
+
+async function vaultFolderApiRequestWithSingleAmbiguousRetry<T>(
+  ownerUid: string,
+  payload: VaultFolderApiPayload,
+  signal?: AbortSignal
+) {
+  try {
+    return await vaultFolderApiRequest<T>(ownerUid, payload, signal);
+  } catch (caught) {
+    if (!vaultFolderResponseMayHaveBeenLost(caught)) throw caught;
+    signal?.throwIfAborted();
+    return vaultFolderApiRequest<T>(ownerUid, payload, signal);
+  }
+}
+
 export async function mutateVaultFolder(
   ownerUid: string,
-  payload: Exclude<VaultFolderApiPayload, MaintenancePayload>,
+  payload: Exclude<VaultFolderApiPayload, MaintenancePayload | PastedImageFolderLockPayload>,
   signal?: AbortSignal
 ) {
   try {
     return await vaultFolderApiRequest<VaultFolderMutationResult>(ownerUid, payload, signal);
   } catch (caught) {
-    const responseMayHaveBeenLost = caught instanceof VaultFolderApiError
-      && (
-        caught.code === "network_error"
-        || caught.code === "network_timeout"
-        || caught.code === "invalid_response"
-        || caught.status >= 500
-      );
+    const responseMayHaveBeenLost = vaultFolderResponseMayHaveBeenLost(caught);
     if (payload.action !== "create" || !responseMayHaveBeenLost) throw caught;
     signal?.throwIfAborted();
     return vaultFolderApiRequest<VaultFolderMutationResult>(ownerUid, payload, signal);
   }
+}
+
+export async function acquireVaultPastedImageFolderLock(
+  ownerUid: string,
+  input: {
+    expectedRevision: number;
+    folderId: string;
+    lockId: string;
+  },
+  signal?: AbortSignal
+) {
+  return vaultFolderApiRequestWithSingleAmbiguousRetry<VaultFolderMutationResult>(ownerUid, {
+    action: "paste-lock-acquire",
+    expectedRevision: input.expectedRevision,
+    folderId: input.folderId,
+    lockId: input.lockId
+  }, signal);
+}
+
+export async function releaseVaultPastedImageFolderLock(
+  ownerUid: string,
+  input: {
+    folderId: string;
+    lockId: string;
+  },
+  signal?: AbortSignal
+) {
+  // Lock ids are operation-unique and the caller cannot begin a replacement
+  // lease until this promise settles. Replaying the exact matching release is
+  // therefore safe: an already-released or different lease is a server no-op.
+  return vaultFolderApiRequestWithSingleAmbiguousRetry<VaultFolderMutationResult>(ownerUid, {
+    action: "paste-lock-release",
+    folderId: input.folderId,
+    lockId: input.lockId
+  }, signal);
 }

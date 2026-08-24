@@ -14,6 +14,9 @@ const timestamp = new Date("2026-08-23T00:00:00.000Z");
 const leaseId = "l".repeat(43);
 const leaseGeneration = "g".repeat(43);
 const leaseCredential = vaultCutoverLeaseCredential(leaseId, leaseGeneration);
+const pasteLockId = `vpl1_${"P".repeat(43)}`;
+const otherPasteLockId = `vpl1_${"Q".repeat(43)}`;
+const pasteLockNow = new Date("2026-08-23T01:00:00.000Z");
 const treeName = `projects/${projectId}/databases/(default)/documents/vaultFolderTrees/${uid}`;
 const documentName = (path: string) =>
   `projects/${projectId}/databases/(default)/documents/${path}`;
@@ -109,7 +112,13 @@ const ordinaryFolderTreeInput = {
   wrappedKey: createBody.wrappedKey
 };
 
-function ordinaryFolderDocument() {
+function ordinaryFolderDocument(options: {
+  lock?: { expiresAt: string; id: string; malformedExtraField?: boolean };
+  ownerUid?: string;
+  parentId?: string | null;
+  revision?: number;
+} = {}) {
+  const parentId = options.parentId ?? null;
   return {
     fields: {
       encryptedName: {
@@ -123,9 +132,11 @@ function ordinaryFolderDocument() {
         }
       },
       isDeleted: { booleanValue: false },
-      ownerUid: { stringValue: uid },
-      parentId: { nullValue: null },
-      revision: { integerValue: "1" },
+      ownerUid: { stringValue: options.ownerUid ?? uid },
+      parentId: parentId === null
+        ? { nullValue: null }
+        : { stringValue: parentId },
+      revision: { integerValue: String(options.revision ?? 1) },
       vaultNameClaimId: { stringValue: "C".repeat(43) },
       vaultNameIndexVersion: { integerValue: "1" },
       wrappedKey: {
@@ -136,7 +147,20 @@ function ordinaryFolderDocument() {
             wrappedKey: { stringValue: "wrapped-key" }
           }
         }
-      }
+      },
+      ...(options.lock ? {
+        vaultPasteLock: {
+          mapValue: {
+            fields: {
+              expiresAt: { timestampValue: options.lock.expiresAt },
+              id: { stringValue: options.lock.id },
+              ...(options.lock.malformedExtraField
+                ? { unexpected: { booleanValue: true } }
+                : {})
+            }
+          }
+        }
+      } : {})
     },
     name: documentName("noteFolders/folder-a"),
     updateTime: timestamp.toISOString()
@@ -151,8 +175,22 @@ const updateBody = {
   nameClaim: createBody.nameClaim
 } as const;
 
+const pasteLockAcquireBody = {
+  action: "paste-lock-acquire",
+  expectedRevision: 1,
+  folderId: "folder-a",
+  lockId: pasteLockId
+} as const;
+
+function pasteLockExpiry(offsetMilliseconds: number) {
+  return new Date(pasteLockNow.getTime() + offsetMilliseconds).toISOString();
+}
+
 describe("Vault folder server transaction boundary", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it("commits tree, encrypted folder, and name claim in one preconditioned transaction", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch")
@@ -375,5 +413,246 @@ describe("Vault folder server transaction boundary", () => {
       .rejects.toBeInstanceOf(Error);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(":commit"))).toBe(false);
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(":rollback"))).toBe(true);
+  });
+
+  it("acquires a 120-second root-folder lock without changing folder or tree revisions", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(pasteLockNow);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json([
+        { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+        { found: integrityDocument("ready") },
+        { found: ordinaryFolderDocument() }
+      ]))
+      .mockResolvedValueOnce(json({ commitTime: timestamp.toISOString(), writeResults: [] }));
+
+    await expect(__vaultFolderTreeTesting.performAction(
+      context,
+      uid,
+      pasteLockAcquireBody
+    )).resolves.toEqual({ folderId: "folder-a", revision: 1, treeRevision: 1 });
+
+    const commitCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith(":commit"));
+    const payload = JSON.parse(String((commitCall?.[1] as RequestInit | undefined)?.body)) as {
+      writes: Array<{
+        update: { fields: Record<string, unknown> };
+        updateMask: { fieldPaths: string[] };
+      }>;
+    };
+    expect(payload.writes).toHaveLength(1);
+    expect(payload.writes[0]?.updateMask.fieldPaths).toEqual(["vaultPasteLock"]);
+    expect(payload.writes[0]?.update.fields).toEqual({
+      vaultPasteLock: {
+        mapValue: {
+          fields: {
+            expiresAt: { timestampValue: pasteLockExpiry(120_000) },
+            id: { stringValue: pasteLockId }
+          }
+        }
+      }
+    });
+    expect(JSON.stringify(payload)).not.toContain("revision");
+  });
+
+  it("refreshes the same active lock to a full server-timed TTL", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(pasteLockNow);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json([
+        { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+        { found: integrityDocument("ready") },
+        {
+          found: ordinaryFolderDocument({
+            lock: { expiresAt: pasteLockExpiry(60_000), id: pasteLockId }
+          })
+        }
+      ]))
+      .mockResolvedValueOnce(json({ commitTime: timestamp.toISOString(), writeResults: [] }));
+
+    await expect(__vaultFolderTreeTesting.performAction(
+      context,
+      uid,
+      pasteLockAcquireBody
+    )).resolves.toEqual({ folderId: "folder-a", revision: 1, treeRevision: 1 });
+    const commitCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith(":commit"));
+    const payload = JSON.parse(String((commitCall?.[1] as RequestInit | undefined)?.body)) as {
+      writes: Array<{ update: { fields: Record<string, unknown> }; updateMask: { fieldPaths: string[] } }>;
+    };
+    expect(payload.writes).toEqual([expect.objectContaining({
+      update: expect.objectContaining({
+        fields: {
+          vaultPasteLock: {
+            mapValue: {
+              fields: {
+                expiresAt: { timestampValue: pasteLockExpiry(120_000) },
+                id: { stringValue: pasteLockId }
+              }
+            }
+          }
+        }
+      }),
+      updateMask: { fieldPaths: ["vaultPasteLock"] }
+    })]);
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(":rollback"))).toBe(false);
+  });
+
+  it("rejects normal mutation for an active or malformed pasted-image lock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(pasteLockNow);
+    for (const lock of [
+      { expiresAt: pasteLockExpiry(60_000), id: pasteLockId },
+      { expiresAt: pasteLockExpiry(60_000), id: pasteLockId, malformedExtraField: true }
+    ]) {
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(json([
+          { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+          { found: integrityDocument("ready") },
+          { found: ordinaryFolderDocument({ lock }) },
+          { missing: documentName(`vaultIntegrity/${uid}/nameClaims/${"C".repeat(43)}`) }
+        ]))
+        .mockResolvedValueOnce(json({}));
+
+      await expect(__vaultFolderTreeTesting.performAction(context, uid, updateBody))
+        .rejects.toMatchObject({ code: "vault_paste_locked", statusCode: 409 });
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(":commit"))).toBe(false);
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("overwrites an expired lock with a new lock id", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(pasteLockNow);
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json([
+        { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+        { found: integrityDocument("ready") },
+        {
+          found: ordinaryFolderDocument({
+            lock: { expiresAt: pasteLockExpiry(-1), id: otherPasteLockId }
+          })
+        }
+      ]))
+      .mockResolvedValueOnce(json({ commitTime: timestamp.toISOString(), writeResults: [] }));
+
+    await expect(__vaultFolderTreeTesting.performAction(
+      context,
+      uid,
+      pasteLockAcquireBody
+    )).resolves.toEqual({ folderId: "folder-a", revision: 1, treeRevision: 1 });
+    const commitBody = String(fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith(":commit"))?.[1]?.body);
+    expect(commitBody).toContain(pasteLockId);
+    expect(commitBody).not.toContain(otherPasteLockId);
+  });
+
+  it("releases only a matching lock and keeps absent or different locks idempotent", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(pasteLockNow);
+    const activeLock = {
+      expiresAt: pasteLockExpiry(60_000),
+      id: pasteLockId
+    };
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(json([
+        { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+        { found: integrityDocument("pending") },
+        { found: ordinaryFolderDocument({ lock: activeLock }) }
+      ]))
+      .mockResolvedValueOnce(json({}))
+      .mockResolvedValueOnce(json([
+        { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+        { found: integrityDocument("ready") },
+        { found: ordinaryFolderDocument() }
+      ]))
+      .mockResolvedValueOnce(json({}))
+      .mockResolvedValueOnce(json([
+        { found: treeDocument([ordinaryFolderTreeInput]), transaction },
+        { found: integrityDocument("ready") },
+        { found: ordinaryFolderDocument({ lock: activeLock }) }
+      ]))
+      .mockResolvedValueOnce(json({ commitTime: timestamp.toISOString(), writeResults: [] }));
+
+    await expect(__vaultFolderTreeTesting.performAction(context, uid, {
+      action: "paste-lock-release",
+      folderId: "folder-a",
+      lockId: otherPasteLockId
+    })).resolves.toEqual({ folderId: "folder-a", revision: 1, treeRevision: 1 });
+    await expect(__vaultFolderTreeTesting.performAction(context, uid, {
+      action: "paste-lock-release",
+      folderId: "folder-a",
+      lockId: pasteLockId
+    })).resolves.toEqual({ folderId: "folder-a", revision: 1, treeRevision: 1 });
+    await expect(__vaultFolderTreeTesting.performAction(context, uid, {
+      action: "paste-lock-release",
+      folderId: "folder-a",
+      lockId: pasteLockId
+    })).resolves.toEqual({ folderId: "folder-a", revision: 1, treeRevision: 1 });
+
+    const commits = fetchMock.mock.calls.filter(([url]) => String(url).endsWith(":commit"));
+    expect(commits).toHaveLength(1);
+    const payload = JSON.parse(String((commits[0]?.[1] as RequestInit | undefined)?.body)) as {
+      writes: Array<{ update: { fields: Record<string, unknown> }; updateMask: { fieldPaths: string[] } }>;
+    };
+    expect(payload.writes).toEqual([expect.objectContaining({
+      update: expect.objectContaining({ fields: {} }),
+      updateMask: { fieldPaths: ["vaultPasteLock"] }
+    })]);
+  });
+
+  it("requires a current revision, ready integrity, owner match, and active root placement", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(pasteLockNow);
+    const parentTreeInput = {
+      ...ordinaryFolderTreeInput,
+      __id: "parent-a"
+    };
+    const childTreeInput = {
+      ...ordinaryFolderTreeInput,
+      parentId: "parent-a"
+    };
+    const cases = [
+      {
+        body: { ...pasteLockAcquireBody, expectedRevision: 2 },
+        expectedCode: "revision_conflict",
+        folder: ordinaryFolderDocument(),
+        integrity: integrityDocument("ready"),
+        tree: treeDocument([ordinaryFolderTreeInput])
+      },
+      {
+        body: pasteLockAcquireBody,
+        expectedCode: "vault_integrity_not_ready",
+        folder: ordinaryFolderDocument(),
+        integrity: integrityDocument("pending"),
+        tree: treeDocument([ordinaryFolderTreeInput])
+      },
+      {
+        body: pasteLockAcquireBody,
+        expectedCode: "vault_folder_not_found",
+        folder: ordinaryFolderDocument({ ownerUid: "other-user" }),
+        integrity: integrityDocument("ready"),
+        tree: treeDocument([ordinaryFolderTreeInput])
+      },
+      {
+        body: pasteLockAcquireBody,
+        expectedCode: "vault_folder_unavailable",
+        folder: ordinaryFolderDocument({ parentId: "parent-a" }),
+        integrity: integrityDocument("ready"),
+        tree: treeDocument([parentTreeInput, childTreeInput])
+      }
+    ];
+
+    for (const testCase of cases) {
+      const fetchMock = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(json([
+          { found: testCase.tree, transaction },
+          { found: testCase.integrity },
+          { found: testCase.folder }
+        ]))
+        .mockResolvedValueOnce(json({}));
+      await expect(__vaultFolderTreeTesting.performAction(context, uid, testCase.body))
+        .rejects.toMatchObject({ code: testCase.expectedCode });
+      expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(":commit"))).toBe(false);
+      fetchMock.mockRestore();
+    }
   });
 });

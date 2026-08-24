@@ -112,6 +112,7 @@ describe("VaultPage built-in knowledge tool wiring", () => {
     expect(commandPaletteSource).toContain('{ id: "create-search-index"');
     expect(source).toContain("async function createIndexFromCurrentSearch()");
     expect(source).toContain("const candidates = filteredNotes.flatMap");
+    expect(source).toContain('await import("../features/vault/moc")');
     expect(source).toContain("const result = createSearchIndexMarkdown");
     expect(source).toContain('await createEntry("markdown", requestedTitle, result.source');
     expect(source).toContain('case "create-search-index": void createIndexFromCurrentSearch()');

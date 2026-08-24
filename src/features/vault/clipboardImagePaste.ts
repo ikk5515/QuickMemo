@@ -9,6 +9,7 @@ import {
   MAX_VAULT_RASTER_PREVIEW_PIXELS,
   safeVaultAssetPreviewKind
 } from "./vaultAsset";
+import { normalizeVaultPath } from "./interop/path";
 
 export const MAX_VAULT_CLIPBOARD_IMAGES = 8;
 export const MAX_VAULT_CLIPBOARD_SOURCE_BYTES = 32 * 1024 * 1024;
@@ -593,20 +594,49 @@ export function clearPreparedVaultClipboardImages(images: readonly PreparedVault
   }
 }
 
-function twoDigits(value: number) {
-  return String(value).padStart(2, "0");
+const MAX_VAULT_PASTED_IMAGE_TITLE_LENGTH = 180;
+const MAX_VAULT_PASTED_IMAGE_ORDINAL_DIGITS = 8;
+const pastedImageExtensions = new Set(["jpg", "png", "webp"]);
+
+function truncateWithoutSplittingSurrogate(value: string, maximumLength: number) {
+  let truncated = value.slice(0, maximumLength);
+  const finalCodeUnit = truncated.charCodeAt(truncated.length - 1);
+  if (finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff) {
+    truncated = truncated.slice(0, -1);
+  }
+  return truncated.trimEnd();
+}
+
+export function vaultClipboardImageTitleStem(noteTitle: string) {
+  const normalized = noteTitle.trim().normalize("NFC").replace(/\.md$/iu, "");
+  const embedSafe = normalized
+    .replace(/[\p{Cc}%/\\|#[\]]/gu, "-")
+    .replace(/\s+/gu, " ")
+    .trim() || "노트";
+  const longestSuffixLength = ` -${"9".repeat(MAX_VAULT_PASTED_IMAGE_ORDINAL_DIGITS)}.webp`.length;
+  return truncateWithoutSplittingSurrogate(
+    embedSafe,
+    MAX_VAULT_PASTED_IMAGE_TITLE_LENGTH - longestSuffixLength
+  ) || "노트";
+}
+
+function vaultClipboardImageTitleFromStem(
+  image: Pick<PreparedVaultClipboardImage, "extension">,
+  stem: string,
+  ordinal: number
+) {
+  if (!Number.isSafeInteger(ordinal) || ordinal < 1 || ordinal >= 10 ** MAX_VAULT_PASTED_IMAGE_ORDINAL_DIGITS) {
+    throw new Error("붙여넣은 이미지 순번을 안전하게 만들 수 없습니다.");
+  }
+  return `${stem} -${ordinal}.${image.extension}`;
 }
 
 export function vaultClipboardImageBaseTitle(
   image: Pick<PreparedVaultClipboardImage, "extension">,
-  now: Date,
-  index: number,
-  total: number
+  noteTitle: string,
+  ordinal: number
 ) {
-  const date = [now.getFullYear(), twoDigits(now.getMonth() + 1), twoDigits(now.getDate())].join("-");
-  const time = [twoDigits(now.getHours()), twoDigits(now.getMinutes()), twoDigits(now.getSeconds())].join("-");
-  const ordinal = total > 1 ? ` ${index + 1}` : "";
-  return `붙여넣은 이미지 ${date} ${time}${ordinal}.${image.extension}`;
+  return vaultClipboardImageTitleFromStem(image, vaultClipboardImageTitleStem(noteTitle), ordinal);
 }
 
 function collisionKey(value: string) {
@@ -616,29 +646,51 @@ function collisionKey(value: string) {
 export function reserveVaultClipboardImageTitles(
   existingTitles: Iterable<string>,
   images: readonly Pick<PreparedVaultClipboardImage, "extension">[],
-  now = new Date()
+  noteTitle: string
 ) {
-  const reserved = new Set(Array.from(existingTitles, collisionKey));
-  return images.map((image, index) => {
-    const base = vaultClipboardImageBaseTitle(image, now, index, images.length);
-    const extension = `.${image.extension}`;
-    const stem = base.slice(0, -extension.length);
-    let title = base;
-    let suffix = 2;
-    while (reserved.has(collisionKey(title))) {
-      title = `${stem} ${suffix}${extension}`;
-      suffix += 1;
+  const stem = vaultClipboardImageTitleStem(noteTitle);
+  const reservedTitles = new Set<string>();
+  const reservedOrdinals = new Set<number>();
+  const ordinalPrefix = collisionKey(`${stem} -`);
+  for (const existingTitle of existingTitles) {
+    const key = collisionKey(existingTitle);
+    reservedTitles.add(key);
+    if (!key.startsWith(ordinalPrefix)) continue;
+    const remainder = key.slice(ordinalPrefix.length);
+    const dotIndex = remainder.lastIndexOf(".");
+    const extension = dotIndex > 0 ? remainder.slice(dotIndex + 1) : "";
+    const ordinalText = dotIndex > 0 ? remainder.slice(0, dotIndex) : "";
+    if (/^[1-9]\d{0,7}$/u.test(ordinalText) && pastedImageExtensions.has(extension)) {
+      reservedOrdinals.add(Number(ordinalText));
     }
-    reserved.add(collisionKey(title));
+  }
+
+  let nextOrdinal = 1;
+  return images.map((image) => {
+    while (reservedOrdinals.has(nextOrdinal)) nextOrdinal += 1;
+    let title = vaultClipboardImageTitleFromStem(image, stem, nextOrdinal);
+    while (reservedTitles.has(collisionKey(title))) {
+      nextOrdinal += 1;
+      while (reservedOrdinals.has(nextOrdinal)) nextOrdinal += 1;
+      title = vaultClipboardImageTitleFromStem(image, stem, nextOrdinal);
+    }
+    reservedOrdinals.add(nextOrdinal);
+    reservedTitles.add(collisionKey(title));
+    nextOrdinal += 1;
     return title;
   });
 }
 
-export function vaultClipboardImageEmbedSource(titles: readonly string[]) {
-  for (const title of titles) {
-    if (!title || /[\r\n|#]/u.test(title) || title.includes("[[") || title.includes("]]")) {
+export function vaultClipboardImageEmbedSource(paths: readonly string[]) {
+  const normalizedPaths = paths.map((path) => {
+    if (!path || /[\r\n|#]/u.test(path) || path.includes("[[") || path.includes("]]")) {
       throw new Error("붙여넣은 이미지의 안전한 내부 링크를 만들 수 없습니다.");
     }
-  }
-  return titles.map((title) => `![[${title}]]`).join("\n");
+    try {
+      return normalizeVaultPath(path);
+    } catch {
+      throw new Error("붙여넣은 이미지의 안전한 내부 링크를 만들 수 없습니다.");
+    }
+  });
+  return normalizedPaths.map((path) => `![[${path}]]`).join("\n");
 }
