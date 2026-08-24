@@ -5,12 +5,14 @@ import {
   MAX_VAULT_CLIPBOARD_SOURCE_BYTES,
   MAX_VAULT_CLIPBOARD_TRANSCODE_DIMENSION,
   MAX_VAULT_CLIPBOARD_TRANSCODE_MS,
+  VAULT_MARKDOWN_IMAGE_ACCEPT,
   clearPreparedVaultClipboardImages,
   prepareVaultClipboardImages,
   reserveVaultClipboardImageTitles,
   transcodeVaultClipboardImage,
   vaultClipboardImageEmbedSource,
-  vaultClipboardImageFiles
+  vaultClipboardImageFiles,
+  vaultSelectedImageFiles
 } from "./clipboardImagePaste";
 import { MAX_INLINE_VAULT_ASSET_BYTES, safeVaultAssetPreviewKind } from "./vaultAsset";
 
@@ -137,6 +139,18 @@ describe("encrypted Vault clipboard image preparation", () => {
     })).toEqual([itemPng]);
   });
 
+  it("selects supported files, ignores video, and surfaces unsupported image files for rejection", () => {
+    const png = imageFile(pngBytes(), "selected.png", "image/png");
+    const mov = imageFile(new Uint8Array([0, 0, 0, 0]), "selected.mov", "video/quicktime");
+    const heic = imageFile(new Uint8Array([0, 0, 0, 0]), "selected.heic", "image/heic");
+
+    expect(vaultSelectedImageFiles([png, mov])).toEqual([png]);
+    expect(vaultSelectedImageFiles([mov])).toEqual([]);
+    expect(vaultSelectedImageFiles([heic])).toEqual([heic]);
+    expect(VAULT_MARKDOWN_IMAGE_ACCEPT).toContain("image/png");
+    expect(VAULT_MARKDOWN_IMAGE_ACCEPT).not.toMatch(/heic|heif|quicktime|\.mov/iu);
+  });
+
   it("accepts a signature-matched static image and clears plaintext bytes on demand", async () => {
     const prepared = await prepareVaultClipboardImages([
       imageFile(pngBytes(), "clipboard.png", "image/png")
@@ -166,11 +180,14 @@ describe("encrypted Vault clipboard image preparation", () => {
       imageFile(new TextEncoder().encode("<svg><script/></svg>"), "unsafe.svg", "image/svg+xml")
     ])).rejects.toThrow("PNG, JPG, WEBP");
     await expect(prepareVaultClipboardImages([
+      imageFile(new TextEncoder().encode("unsupported heic"), "photo.heic", "image/heic")
+    ])).rejects.toThrow("PNG, JPG, WEBP");
+    await expect(prepareVaultClipboardImages([
       imageFile(new TextEncoder().encode("not png"), "fake.png", "image/png")
     ])).rejects.toThrow("서명과 해상도");
     const tooLarge = imageFile(pngBytes(), "large.png", "image/png");
     Object.defineProperty(tooLarge, "size", { value: MAX_VAULT_CLIPBOARD_SOURCE_BYTES + 1 });
-    await expect(prepareVaultClipboardImages([tooLarge])).rejects.toThrow("20MB 이하");
+    await expect(prepareVaultClipboardImages([tooLarge])).rejects.toThrow("32MB 이하");
     await expect(prepareVaultClipboardImages(Array.from(
       { length: MAX_VAULT_CLIPBOARD_IMAGES + 1 },
       () => imageFile(pngBytes(), "many.png", "image/png")
@@ -183,7 +200,7 @@ describe("encrypted Vault clipboard image preparation", () => {
       });
       return file;
     });
-    await expect(prepareVaultClipboardImages(batchFiles)).rejects.toThrow("합계는 40MB 이하");
+    await expect(prepareVaultClipboardImages(batchFiles)).rejects.toThrow("합계는 64MB 이하");
   });
 
   it("transcodes an oversized validated raster and revalidates the bounded output", async () => {
@@ -298,6 +315,56 @@ describe("encrypted Vault clipboard image preparation", () => {
 
     await vi.advanceTimersByTimeAsync(MAX_VAULT_CLIPBOARD_TRANSCODE_MS);
     await rejected;
+  });
+
+  it("bounds a stalled browser-encoded Blob read and clears bytes that resolve late", async () => {
+    vi.useFakeTimers();
+    const close = vi.fn();
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ close, height: 2_000, width: 8_192 })));
+    const context = {
+      clearRect: vi.fn(),
+      drawImage: vi.fn(),
+      fillRect: vi.fn(),
+      fillStyle: "",
+      globalCompositeOperation: "source-over",
+      restore: vi.fn(),
+      save: vi.fn()
+    };
+    const encoded = webpLosslessBytes(640, 360);
+    const lateBuffer = encoded.slice().buffer as ArrayBuffer;
+    let resolveRead: ((value: ArrayBuffer) => void) | undefined;
+    const encodedBlob = new Blob([encoded], { type: "image/webp" });
+    Object.defineProperty(encodedBlob, "arrayBuffer", {
+      value: () => new Promise<ArrayBuffer>((resolve) => {
+        resolveRead = resolve;
+      })
+    });
+    const canvas = {
+      getContext: vi.fn(() => context),
+      height: 0,
+      toBlob: (callback: BlobCallback) => callback(encodedBlob),
+      width: 0
+    } as unknown as HTMLCanvasElement;
+    const createElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName, options) => (
+      tagName.toLocaleLowerCase("en-US") === "canvas"
+        ? canvas
+        : createElement(tagName, options)
+    ));
+    const pending = transcodeVaultClipboardImage({
+      bytes: pngBytes(8_192, 2_000),
+      mimeType: "image/png"
+    });
+    const rejected = expect(pending).rejects.toThrow("이미지 배치 축소 시간이 초과");
+
+    await vi.advanceTimersByTimeAsync(MAX_VAULT_CLIPBOARD_TRANSCODE_MS);
+    await rejected;
+    resolveRead?.(lateBuffer);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(new Uint8Array(lateBuffer).every((byte) => byte === 0)).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("revalidates browser-encoded WebP bytes before returning a transcode", async () => {

@@ -263,6 +263,37 @@ async function activatePreparedAtomicJob(prepared: PreparedVaultPathRewriteJob) 
   return activateVaultPathRewriteJob("user-a", privateKey, prepared.jobId);
 }
 
+function convertPreparedJobToLegacy(
+  prepared: PreparedVaultPathRewriteJob,
+  legacyJobId: string,
+  overrides: Record<string, unknown> = {}
+) {
+  const atomicPath = `vaultMaintenanceJobs/user-a/pathRewrites/${prepared.jobId}`;
+  const legacyPath = `vaultMaintenanceJobs/user-a/pathRewrites/${legacyJobId}`;
+  const legacy = { ...firestoreMocks.documents.get(atomicPath) };
+  delete legacy.activationMode;
+  delete legacy.inventoryFingerprint;
+  delete legacy.preparedStepCount;
+  delete legacy.mutationExpectedRevision;
+  delete legacy.mutationTargetId;
+  delete legacy.mutationTargetKind;
+  const legacyManifest = JSON.parse(atob(String(
+    (legacy.encryptedManifest as { cipherText: string }).cipherText
+  ))) as Record<string, unknown>;
+  delete legacyManifest.inventoryFingerprint;
+  legacy.encryptedManifest = {
+    ...(legacy.encryptedManifest as Record<string, unknown>),
+    cipherText: btoa(JSON.stringify(legacyManifest))
+  };
+  firestoreMocks.documents.delete(atomicPath);
+  firestoreMocks.documents.set(legacyPath, {
+    ...legacy,
+    planFingerprint: legacyJobId,
+    ...overrides
+  });
+  return legacyPath;
+}
+
 beforeAll(async () => {
   if (!globalThis.crypto?.subtle) {
     const { webcrypto } = await import("node:crypto");
@@ -729,6 +760,137 @@ describe("encrypted durable Vault path rewrite persistence", () => {
       job: { lastErrorCode: null, retryCount: 5, status: "abandoned", stepCount: 0 }
     });
     expect(readCurrentPaths).not.toHaveBeenCalled();
+  });
+
+  it("completes activated pr2 and pr3 zero-step conflicts without rereading paths", async () => {
+    for (const prepare of [preparedJob, preparedManifestJob]) {
+      const prepared = await prepare(0);
+      await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+      const storedPath = `vaultMaintenanceJobs/user-a/pathRewrites/${prepared.jobId}`;
+      const activationProof = firestoreMocks.serverTimestamp();
+      firestoreMocks.documents.set(storedPath, {
+        ...firestoreMocks.documents.get(storedPath),
+        activatedAt: activationProof,
+        recoveredAt: activationProof,
+        attemptCount: 4,
+        lastErrorCode: "path-state-conflict",
+        retryCount: 4,
+        revision: 6,
+        status: "blocked"
+      });
+      const readCurrentPaths = vi.fn(async () => {
+        throw { code: "firestore/unavailable" };
+      });
+
+      await expect(recoverPreparedVaultPathRewriteJob({
+        uid: "user-a",
+        privateKey,
+        jobId: prepared.jobId,
+        readCurrentPaths
+      })).resolves.toMatchObject({
+        recovery: "activated",
+        job: { lastErrorCode: null, retryCount: 4, status: "completed", stepCount: 0 }
+      });
+      expect(readCurrentPaths).not.toHaveBeenCalled();
+      expect(firestoreMocks.documents.get(storedPath)).toMatchObject({
+        activatedAt: activationProof,
+        completedAt: expect.anything(),
+        lastErrorCode: null,
+        recoveredAt: activationProof,
+        status: "completed"
+      });
+    }
+  });
+
+  it("settles legacy zero-step conflicts without guessing whether the path mutation committed", async () => {
+    const prepared = await preparedJob(0);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    const legacyJobId = `pr1_${"legacy-zero-conflict".padEnd(43, "0")}`;
+    convertPreparedJobToLegacy(prepared, legacyJobId, {
+      attemptCount: 4,
+      lastErrorCode: "path-state-conflict",
+      retryCount: 4,
+      revision: 6,
+      status: "blocked"
+    });
+    const readCurrentPaths = vi.fn(async () => {
+      throw { code: "firestore/unavailable" };
+    });
+
+    await expect(recoverPreparedVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: legacyJobId,
+      readCurrentPaths
+    })).resolves.toMatchObject({
+      recovery: "not-applied",
+      job: { lastErrorCode: null, retryCount: 4, status: "abandoned", stepCount: 0 }
+    });
+    expect(readCurrentPaths).not.toHaveBeenCalled();
+  });
+
+  it("keeps a nonzero legacy conflict on the read-first recovery path", async () => {
+    const prepared = await preparedJob(1);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    const legacyJobId = `pr1_${"legacy-nonzero-conflict".padEnd(43, "0")}`;
+    convertPreparedJobToLegacy(prepared, legacyJobId, {
+      attemptCount: 2,
+      lastErrorCode: "path-state-conflict",
+      retryCount: 2,
+      revision: 4,
+      status: "blocked"
+    });
+    const readCurrentPaths = vi.fn(async () => [
+      { entryId: "target-a", path: "Elsewhere/Unknown.md" }
+    ]);
+
+    await expect(recoverPreparedVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: legacyJobId,
+      readCurrentPaths
+    })).resolves.toMatchObject({
+      recovery: "conflict",
+      job: {
+        lastErrorCode: "path-state-conflict",
+        retryCount: 3,
+        status: "blocked",
+        stepCount: 1
+      }
+    });
+    expect(readCurrentPaths).toHaveBeenCalledWith(["target-a"]);
+  });
+
+  it("completes an activated legacy zero-step conflict but preserves its activation proof", async () => {
+    const prepared = await preparedJob(0);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    const legacyJobId = `pr1_${"legacy-active-conflict".padEnd(43, "0")}`;
+    const activatedAt = firestoreMocks.serverTimestamp();
+    const legacyPath = convertPreparedJobToLegacy(prepared, legacyJobId, {
+      activatedAt,
+      attemptCount: 3,
+      lastErrorCode: "path-state-conflict",
+      retryCount: 3,
+      revision: 5,
+      status: "blocked"
+    });
+    const readCurrentPaths = vi.fn();
+
+    await expect(recoverPreparedVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: legacyJobId,
+      readCurrentPaths
+    })).resolves.toMatchObject({
+      recovery: "activated",
+      job: { lastErrorCode: null, status: "completed", stepCount: 0 }
+    });
+    expect(readCurrentPaths).not.toHaveBeenCalled();
+    expect(firestoreMocks.documents.get(legacyPath)).toMatchObject({
+      activatedAt,
+      completedAt: expect.anything(),
+      status: "completed"
+    });
   });
 
   it("preserves an activated atomic path conflict instead of abandoning committed rewrite work", async () => {

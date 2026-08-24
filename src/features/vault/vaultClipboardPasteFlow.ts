@@ -39,10 +39,10 @@ export function withVaultClipboardSourceReadDeadline<T>(
       callback();
     };
     const abort = () => finish(() => reject(
-      signal.reason ?? new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError")
+      signal.reason ?? new DOMException("이미지 추가가 취소되었습니다.", "AbortError")
     ));
     const timeout = globalThis.setTimeout(() => finish(() => reject(
-      new Error("서버의 원본 노트 확인이 지연되어 이미지 붙여넣기를 중단했습니다. 잠시 후 다시 시도해주세요.")
+      new Error("서버의 원본 노트 확인이 지연되어 이미지 추가를 중단했습니다. 잠시 후 다시 시도해주세요.")
     )), timeoutMs);
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
@@ -122,7 +122,7 @@ export async function pasteVaultClipboardImages({
       }));
       const failedCount = results.filter((result) => result.status === "rejected").length;
       if (failedCount > 0) {
-        setError(`취소된 이미지 붙여넣기에서 ${failedCount}개 asset을 자동으로 휴지통에 옮기지 못했습니다. Vault에서 직접 확인해주세요.`);
+        setError(`취소된 이미지 추가에서 ${failedCount}개 asset을 자동으로 휴지통에 옮기지 못했습니다. Vault에서 직접 확인해주세요.`);
       }
     })();
     return discardPromise;
@@ -130,7 +130,7 @@ export async function pasteVaultClipboardImages({
   const throwIfCancelled = (checkSignal: AbortSignal = signal) => {
     if (checkSignal.aborted) {
       throw checkSignal.reason
-        ?? new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError");
+        ?? new DOMException("이미지 추가가 취소되었습니다.", "AbortError");
     }
   };
   const createdTitles = () => createdAssets.flatMap((asset) => asset ? [asset.title] : []);
@@ -148,7 +148,7 @@ export async function pasteVaultClipboardImages({
       || local.participantUids.length !== 1
       || local.participantUids[0] !== ownerUid
     ) {
-      throw new Error("붙여넣는 동안 노트의 소유권이나 공유 상태가 변경되어 이미지 저장을 중단했습니다.");
+      throw new Error("이미지를 추가하는 동안 노트의 소유권이나 공유 상태가 변경되어 저장을 중단했습니다.");
     }
     const serverRead = await withVaultClipboardSourceReadDeadline(
       getVisibleNotesByIdsFromServer(ownerUid, [note.id]),
@@ -197,7 +197,7 @@ export async function pasteVaultClipboardImages({
     };
     const abortPreflightFromCaller = () => {
       const reason = signal.reason
-        ?? new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError");
+        ?? new DOMException("이미지 추가가 취소되었습니다.", "AbortError");
       if (!hasPreflightFailure) {
         firstPreflightFailure = reason;
         hasPreflightFailure = true;
@@ -240,7 +240,7 @@ export async function pasteVaultClipboardImages({
     for (const title of titles) {
       const titleKey = clipboardAssetTitleReservationKey(folderId, title);
       if (pendingAssetTitleKeys.has(titleKey)) {
-        throw new Error("동시에 붙여넣은 이미지 이름을 안전하게 예약하지 못했습니다. 다시 시도해주세요.");
+        throw new Error("동시에 추가한 이미지 이름을 안전하게 예약하지 못했습니다. 다시 시도해주세요.");
       }
       reservedTitleKeys.add(titleKey);
       pendingAssetTitleKeys.set(titleKey, {
@@ -252,7 +252,7 @@ export async function pasteVaultClipboardImages({
     setError(null);
     setStatus(prepared.length > 1
       ? `${prepared.length}개 이미지를 Vault에서 암호화하는 중입니다…`
-      : "붙여넣은 이미지를 Vault에서 암호화하는 중입니다…");
+      : "이미지를 Vault에서 암호화하는 중입니다…");
 
     let nextImageIndex = 0;
     const failures: unknown[] = [];
@@ -302,7 +302,7 @@ export async function pasteVaultClipboardImages({
         : "이미지를 asset-v1로 암호화해 붙여넣었습니다.");
     });
   } catch (caught) {
-    const message = caught instanceof Error ? caught.message : "붙여넣은 이미지를 암호화해 저장하지 못했습니다.";
+    const message = caught instanceof Error ? caught.message : "이미지를 암호화해 저장하지 못했습니다.";
     if (signal.aborted || discardOnFailure) {
       await discardCreatedAssets();
       if (!signal.aborted) setError(message);

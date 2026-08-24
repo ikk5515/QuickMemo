@@ -92,22 +92,27 @@ export function vaultPathRewriteRecoveryContinuationIsCurrent(input: {
  * Preparing/prepared/not-applied jobs never rewrite content unless the paired
  * path mutation is confirmed. Atomic receipt status is authoritative; legacy
  * jobs require a read-first path-state check. Atomic path-state conflicts are
- * stale receipts that can be abandoned without reading or changing source
- * content, so they converge automatically. Other semantic conflicts require
- * an explicit user retry from the recovery notice.
+ * stale receipts that can be resolved without reading or changing source
+ * content. A legacy zero-step conflict is equally safe to settle because it
+ * contains no source rewrite work. Other semantic conflicts require an
+ * explicit user retry from the recovery notice.
  * A write-failed job is safe to retry once per fresh recovery scan because every
  * source is re-read and digest-checked first.
  */
 export function shouldAutomaticallyRecoverVaultPathRewriteJob(job: VaultPathRewriteJobSummary) {
-  const atomicPathConflict = job.status === "blocked"
+  const safelyResolvablePathConflict = job.status === "blocked"
     && job.lastErrorCode === "path-state-conflict"
-    && (job.jobId.startsWith("pr2_") || job.jobId.startsWith("pr3_"));
+    && (
+      job.stepCount === 0
+      || job.jobId.startsWith("pr2_")
+      || job.jobId.startsWith("pr3_")
+    );
   return job.status === "preparing"
     || job.status === "prepared"
     || job.status === "not-applied"
     || job.status === "ready"
     || job.status === "running"
-    || atomicPathConflict
+    || safelyResolvablePathConflict
     || (job.status === "blocked" && job.lastErrorCode === "write-failed");
 }
 

@@ -2,7 +2,7 @@ import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } 
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
-import { Annotation, Compartment, EditorState } from "@codemirror/state";
+import { Annotation, Compartment, EditorSelection, EditorState } from "@codemirror/state";
 import { searchKeymap } from "@codemirror/search";
 import {
   crosshairCursor,
@@ -29,7 +29,14 @@ import {
   LIVE_PREVIEW_LINK_OPEN_EVENT,
   livePreviewReferenceFromElement
 } from "./inlineLivePreview";
-import { vaultClipboardImageFiles } from "./clipboardImagePaste";
+import {
+  MAX_VAULT_CLIPBOARD_BATCH_SOURCE_BYTES,
+  MAX_VAULT_CLIPBOARD_IMAGES,
+  MAX_VAULT_CLIPBOARD_SOURCE_BYTES,
+  VAULT_MARKDOWN_IMAGE_ACCEPT,
+  vaultClipboardImageFiles,
+  vaultSelectedImageFiles
+} from "./clipboardImagePaste";
 import { completeObsidianMarkdown, type ObsidianMarkdownCompletionData } from "./obsidianCompletion";
 
 const externalValueSync = Annotation.define<boolean>();
@@ -64,6 +71,12 @@ export interface MarkdownImagePasteResult {
 // React acknowledgements normally arrive in the next commit. Four snapshots
 // cover batched renders without retaining a large Markdown document per keypress.
 const maximumControlledValueHistory = 4;
+const vaultMarkdownImageLimitLabel = [
+  "PNG · JPG · WebP",
+  `최대 ${MAX_VAULT_CLIPBOARD_IMAGES}개`,
+  `파일당 ${MAX_VAULT_CLIPBOARD_SOURCE_BYTES / (1024 * 1024)}MB`,
+  `합계 ${MAX_VAULT_CLIPBOARD_BATCH_SOURCE_BYTES / (1024 * 1024)}MB`
+].join(" · ");
 
 function appendBoundedValue(values: string[], value: string) {
   if (values.at(-1) === value) return null;
@@ -170,6 +183,9 @@ export function CodeMirrorMarkdownEditor({
     from: number;
     to: number;
   }>());
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
+  const imagePickerTargetViewRef = useRef<EditorView | null>(null);
+  const queueSelectedImagesRef = useRef<(files: readonly File[]) => void>(() => undefined);
   const livePreviewCompartmentRef = useRef(new Compartment());
   const readOnlyCompartmentRef = useRef(new Compartment());
   const viewRef = useRef<EditorView | null>(null);
@@ -212,6 +228,65 @@ export function CodeMirrorMarkdownEditor({
     pendingLocalValuesRef.current = [];
     pendingImagePasteRanges.forEach(({ controller }) => controller.abort());
     pendingImagePasteRanges.clear();
+
+    const queueImages = (
+      files: readonly File[],
+      editorView: EditorView,
+      insertionRange = editorView.state.selection.main
+    ) => {
+      const handler = onPasteImagesRef.current;
+      if (!handler || !files.length || editorView.state.readOnly) return false;
+
+      const requestId = pendingImagePasteIdRef.current + 1;
+      pendingImagePasteIdRef.current = requestId;
+      const controller = new AbortController();
+      pendingImagePasteRangesRef.current.set(requestId, {
+        controller,
+        collapsed: insertionRange.empty,
+        expectedText: editorView.state.sliceDoc(insertionRange.from, insertionRange.to),
+        from: insertionRange.from,
+        to: insertionRange.to
+      });
+
+      void Promise.resolve(handler(files, { signal: controller.signal })).then((value) => {
+        const result = imagePasteResult(value);
+        const range = pendingImagePasteRangesRef.current.get(requestId);
+        pendingImagePasteRangesRef.current.delete(requestId);
+        if (
+          !range
+          || !result?.source
+          || controller.signal.aborted
+          || viewRef.current !== editorView
+          || editorView.state.readOnly
+        ) {
+          runImagePasteCallback(result?.onDiscard);
+          return;
+        }
+        const documentLength = editorView.state.doc.length;
+        const from = Math.max(0, Math.min(documentLength, range.from));
+        const to = Math.max(from, Math.min(documentLength, range.to));
+        if (!range.collapsed && editorView.state.sliceDoc(from, to) !== range.expectedText) {
+          controller.abort();
+          runImagePasteCallback(result.onDiscard);
+          return;
+        }
+        try {
+          editorView.dispatch({
+            changes: { from, to, insert: result.source },
+            selection: { anchor: from + result.source.length },
+            effects: EditorView.scrollIntoView(from + result.source.length, { y: "center" })
+          });
+          editorView.focus();
+          runImagePasteCallback(result.onCommit);
+        } catch {
+          controller.abort();
+          runImagePasteCallback(result.onDiscard);
+        }
+      }).catch(() => {
+        pendingImagePasteRangesRef.current.delete(requestId);
+      });
+      return true;
+    };
 
     const view = constructWithFrameDeferredResizeObserver(window, () => new EditorView({
       parent,
@@ -299,57 +374,38 @@ export function CodeMirrorMarkdownEditor({
               if (editorView.state.readOnly) {
                 return true;
               }
-
-              const requestId = pendingImagePasteIdRef.current + 1;
-              pendingImagePasteIdRef.current = requestId;
-              const selection = editorView.state.selection.main;
-              const controller = new AbortController();
-              pendingImagePasteRangesRef.current.set(requestId, {
-                controller,
-                collapsed: selection.empty,
-                expectedText: editorView.state.sliceDoc(selection.from, selection.to),
-                from: selection.from,
-                to: selection.to
-              });
-
-              void Promise.resolve(handler(files, { signal: controller.signal })).then((value) => {
-                const result = imagePasteResult(value);
-                const range = pendingImagePasteRangesRef.current.get(requestId);
-                pendingImagePasteRangesRef.current.delete(requestId);
-                if (
-                  !range
-                  || !result?.source
-                  || controller.signal.aborted
-                  || viewRef.current !== editorView
-                  || editorView.state.readOnly
-                ) {
-                  runImagePasteCallback(result?.onDiscard);
-                  return;
-                }
-                const documentLength = editorView.state.doc.length;
-                const from = Math.max(0, Math.min(documentLength, range.from));
-                const to = Math.max(from, Math.min(documentLength, range.to));
-                if (!range.collapsed && editorView.state.sliceDoc(from, to) !== range.expectedText) {
-                  controller.abort();
-                  runImagePasteCallback(result.onDiscard);
-                  return;
-                }
-                try {
-                  editorView.dispatch({
-                    changes: { from, to, insert: result.source },
-                    selection: { anchor: from + result.source.length },
-                    effects: EditorView.scrollIntoView(from + result.source.length, { y: "center" })
-                  });
-                  editorView.focus();
-                  runImagePasteCallback(result.onCommit);
-                } catch {
-                  controller.abort();
-                  runImagePasteCallback(result.onDiscard);
-                }
-              }).catch(() => {
-                pendingImagePasteRangesRef.current.delete(requestId);
-              });
+              return queueImages(files, editorView);
+            },
+            dragover: (event, editorView) => {
+              const handler = onPasteImagesRef.current;
+              const items = Array.from(event.dataTransfer?.items ?? []);
+              const hasImageItem = items.some((item) => (
+                item.kind === "file"
+                && (!item.type || item.type.toLocaleLowerCase("en-US").startsWith("image/"))
+              ));
+              const hasOpaqueFiles = items.length === 0
+                && Array.from(event.dataTransfer?.types ?? []).includes("Files");
+              if (!handler || editorView.state.readOnly || (!hasImageItem && !hasOpaqueFiles)) {
+                return false;
+              }
+              event.preventDefault();
+              if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
               return true;
+            },
+            drop: (event, editorView) => {
+              const handler = onPasteImagesRef.current;
+              const files = vaultClipboardImageFiles(event.dataTransfer);
+              if (!handler || !files.length) return false;
+              event.preventDefault();
+              if (editorView.state.readOnly) return true;
+              const position = editorView.posAtCoords({ x: event.clientX, y: event.clientY });
+              return queueImages(
+                files,
+                editorView,
+                position === null
+                  ? editorView.state.selection.main
+                  : EditorSelection.cursor(position)
+              );
             }
           }),
           keymap.of([
@@ -448,6 +504,9 @@ export function CodeMirrorMarkdownEditor({
     view.dom.addEventListener(LIVE_PREVIEW_LINK_OPEN_EVENT, handleLivePreviewKeyboardOpen);
 
     viewRef.current = view;
+    queueSelectedImagesRef.current = (files) => {
+      if (viewRef.current === view) queueImages(files, view);
+    };
     const initialSelection = view.state.selection.main;
     onSelectionChangeRef.current?.(initialSelection.empty
       ? null
@@ -459,6 +518,8 @@ export function CodeMirrorMarkdownEditor({
     return () => {
       view.dom.removeEventListener(LIVE_PREVIEW_LINK_OPEN_EVENT, handleLivePreviewKeyboardOpen);
       viewRef.current = null;
+      imagePickerTargetViewRef.current = null;
+      queueSelectedImagesRef.current = () => undefined;
       pendingLocalValuesRef.current = [];
       ignoredControlledValuesRef.current = [];
       pendingImagePasteRanges.forEach(({ controller }) => controller.abort());
@@ -609,8 +670,43 @@ export function CodeMirrorMarkdownEditor({
   return (
     <div
       aria-readonly={readOnly}
-      className={`vault-codemirror${livePreview ? " vault-codemirror--live-preview" : ""}`}
-      ref={hostRef}
-    />
+      className={`vault-codemirror${livePreview ? " vault-codemirror--live-preview" : ""}${onPasteImages ? " vault-codemirror--with-image-tools" : ""}`}
+    >
+      {onPasteImages ? (
+        <div className="vault-codemirror-image-tools">
+          <input
+            accept={VAULT_MARKDOWN_IMAGE_ACCEPT}
+            disabled={readOnly}
+            hidden
+            multiple
+            onChange={(event) => {
+              const targetView = imagePickerTargetViewRef.current;
+              imagePickerTargetViewRef.current = null;
+              const files = vaultSelectedImageFiles(event.currentTarget.files);
+              event.currentTarget.value = "";
+              if (targetView && targetView === viewRef.current && files.length) {
+                queueSelectedImagesRef.current(files);
+              }
+            }}
+            ref={imageFileInputRef}
+            type="file"
+          />
+          <button
+            aria-label="이미지 파일 추가"
+            disabled={readOnly}
+            onClick={() => {
+              const editorView = viewRef.current;
+              if (!editorView || editorView.state.readOnly) return;
+              imagePickerTargetViewRef.current = editorView;
+              imageFileInputRef.current?.click();
+            }}
+            title="PNG, JPG, WebP 파일 선택"
+            type="button"
+          >이미지 추가</button>
+          <span>{vaultMarkdownImageLimitLabel}</span>
+        </div>
+      ) : null}
+      <div className="vault-codemirror-editor" ref={hostRef} />
+    </div>
   );
 }

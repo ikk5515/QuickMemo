@@ -8,6 +8,7 @@ import {
   knowledgeAccessScopeRequiresReset,
   knowledgeAccessScopeSignature,
   vaultOwnerScopeRequiresReset,
+  vaultPlaintextScopeCanRetain,
   vaultPlaintextScopeSignature,
   vaultWorkspaceForEntryIds,
   visibleVaultOwnerIds,
@@ -99,6 +100,10 @@ describe("Vault knowledge ACL scope invalidation", () => {
         reader: { algorithm: "RSA-OAEP", version: 1, wrappedKey: "replacement-key" }
       } })
     ], "reader", "owner\nreader");
+    const additiveScope = vaultPlaintextScopeSignature([
+      raw,
+      note({ id: "note-2" })
+    ], "reader", "owner\nreader");
 
     expect(decryptedVaultNotesForScope(
       [decrypted],
@@ -115,8 +120,17 @@ describe("Vault knowledge ACL scope invalidation", () => {
       revisedScope,
       true
     )).toEqual([decrypted]);
+    expect(vaultPlaintextScopeCanRetain(previousScope, additiveScope)).toBe(true);
+    expect(decryptedVaultNotesForScope(
+      [decrypted],
+      ["owner", "reader"],
+      previousScope,
+      additiveScope,
+      true
+    )).toEqual([decrypted]);
 
     for (const currentScope of [removedScope, replacedKeyScope]) {
+      expect(vaultPlaintextScopeCanRetain(previousScope, currentScope)).toBe(false);
       const visibleNotes = decryptedVaultNotesForScope(
         [decrypted],
         ["owner", "reader"],
@@ -131,6 +145,47 @@ describe("Vault knowledge ACL scope invalidation", () => {
       ], visibleNotes)).toEqual([
         { id: "global-graph", kind: "global-graph", label: "그래프 보기" }
       ]);
+    }
+  });
+
+  it("retains only additive plaintext scopes and rejects every fail-closed boundary", () => {
+    const original = note();
+    const previousScope = vaultPlaintextScopeSignature(
+      [original],
+      "reader",
+      "owner\nreader"
+    );
+    const additiveScope = vaultPlaintextScopeSignature(
+      [original, note({ id: "note-2" })],
+      "reader",
+      "new-owner\nowner\nreader"
+    );
+    const typeReplacement = vaultPlaintextScopeSignature(
+      [note({ type: "personal" })],
+      "reader",
+      "owner\nreader"
+    );
+    const aclReplacement = vaultPlaintextScopeSignature(
+      [note({ participantUids: ["owner", "reader", "third-user"] })],
+      "reader",
+      "owner\nreader"
+    );
+    const keyReplacement = vaultPlaintextScopeSignature([
+      note({ wrappedKeys: {
+        reader: { algorithm: "RSA-OAEP", version: 1, wrappedKey: "replacement-key" }
+      } })
+    ], "reader", "owner\nreader");
+
+    expect(vaultPlaintextScopeCanRetain(previousScope, additiveScope)).toBe(true);
+    for (const unsafeScope of [
+      vaultPlaintextScopeSignature([], "reader", "owner\nreader"),
+      vaultPlaintextScopeSignature([original], "reader", "reader"),
+      typeReplacement,
+      aclReplacement,
+      keyReplacement,
+      "not-json"
+    ]) {
+      expect(vaultPlaintextScopeCanRetain(previousScope, unsafeScope)).toBe(false);
     }
   });
 

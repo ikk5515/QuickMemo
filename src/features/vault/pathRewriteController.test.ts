@@ -111,6 +111,10 @@ describe("path rewrite controller", () => {
       lastErrorCode: "path-state-conflict"
     }))).toBe(true);
     expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {
+      lastErrorCode: "path-state-conflict",
+      stepCount: 0
+    }))).toBe(true);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {
       lastErrorCode: "path-state-conflict"
     }))).toBe(false);
     expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {

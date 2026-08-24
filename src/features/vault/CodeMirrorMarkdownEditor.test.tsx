@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { VAULT_MARKDOWN_IMAGE_ACCEPT } from "./clipboardImagePaste";
 import { CodeMirrorMarkdownEditor } from "./CodeMirrorMarkdownEditor";
 
 describe("CodeMirrorMarkdownEditor", () => {
@@ -367,6 +368,144 @@ describe("CodeMirrorMarkdownEditor", () => {
 
     expect(onPasteImages).not.toHaveBeenCalled();
     expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("잠긴 본문");
+  });
+
+  it.each([false, true])(
+    "selects image files through the shared Source/Live editor path (livePreview=%s)",
+    async (livePreview) => {
+      const onChange = vi.fn();
+      const onPasteImages = vi.fn(async () => "![[선택한 이미지.png]]");
+      const image = new File([new Uint8Array([1])], "selected.png", { type: "image/png" });
+      const view = render(
+        <CodeMirrorMarkdownEditor
+          livePreview={livePreview}
+          onChange={onChange}
+          onPasteImages={onPasteImages}
+          value="본문"
+        />
+      );
+
+      const input = view.container.querySelector<HTMLInputElement>('input[type="file"]');
+      expect(input).not.toBeNull();
+      if (!input) throw new Error("이미지 파일 입력을 찾지 못했습니다.");
+      expect(input).toHaveAttribute("accept", VAULT_MARKDOWN_IMAGE_ACCEPT);
+      expect(input).toHaveAttribute("multiple");
+      expect(screen.getByText("PNG · JPG · WebP · 최대 8개 · 파일당 32MB · 합계 64MB"))
+        .toBeInTheDocument();
+      const button = screen.getByRole("button", { name: "이미지 파일 추가" });
+      expect(button).toBeEnabled();
+      await act(async () => {
+        fireEvent.click(button);
+        fireEvent.change(input, { target: { files: [image] } });
+        await Promise.resolve();
+      });
+
+      expect(onPasteImages).toHaveBeenCalledWith(
+        [image],
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+      expect(onChange).toHaveBeenLastCalledWith("![[선택한 이미지.png]]본문");
+      expect(input).toHaveValue("");
+
+      await act(async () => {
+        fireEvent.click(button);
+        fireEvent.change(input, { target: { files: [image] } });
+        await Promise.resolve();
+      });
+      expect(onPasteImages).toHaveBeenCalledTimes(2);
+      expect(input).toHaveValue("");
+    }
+  );
+
+  it("uploads a dropped image at the drop position through the shared encrypted handler", async () => {
+    const onChange = vi.fn();
+    const onPasteImages = vi.fn(async () => "![[드롭 이미지.png]]");
+    const image = new File([new Uint8Array([1])], "dropped.png", { type: "image/png" });
+    render(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="본문"
+      />
+    );
+    const editor = screen.getByLabelText("Markdown 편집기");
+    const dataTransfer = {
+      dropEffect: "none",
+      files: [image],
+      items: [{ getAsFile: () => image, kind: "file", type: "image/png" }],
+      types: ["Files"]
+    };
+
+    fireEvent.dragOver(editor, { dataTransfer });
+    await act(async () => {
+      fireEvent.drop(editor, { clientX: 0, clientY: 0, dataTransfer });
+      await Promise.resolve();
+    });
+
+    expect(dataTransfer.dropEffect).toBe("copy");
+    expect(onPasteImages).toHaveBeenCalledWith(
+      [image],
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+    expect(onChange).toHaveBeenLastCalledWith("![[드롭 이미지.png]]본문");
+  });
+
+  it("leaves a text drop to CodeMirror without starting image persistence", () => {
+    const onPasteImages = vi.fn();
+    render(
+      <CodeMirrorMarkdownEditor
+        onChange={() => undefined}
+        onPasteImages={onPasteImages}
+        value="본문"
+      />
+    );
+    const dataTransfer = {
+      dropEffect: "none",
+      files: [],
+      getData: () => "텍스트",
+      items: [{ getAsFile: () => null, kind: "string", type: "text/plain" }],
+      types: ["text/plain"]
+    };
+    const editor = screen.getByLabelText("Markdown 편집기");
+
+    fireEvent.dragOver(editor, { dataTransfer });
+    fireEvent.drop(editor, { dataTransfer });
+
+    expect(dataTransfer.dropEffect).toBe("none");
+    expect(onPasteImages).not.toHaveBeenCalled();
+  });
+
+  it("blocks picker and image-drop writes while read-only", () => {
+    const onPasteImages = vi.fn();
+    const image = new File([new Uint8Array([1])], "dropped.png", { type: "image/png" });
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        onChange={() => undefined}
+        onPasteImages={onPasteImages}
+        readOnly
+        value="잠긴 본문"
+      />
+    );
+    const editor = screen.getByLabelText("Markdown 편집기");
+    const button = screen.getByRole("button", { name: "이미지 파일 추가" });
+    expect(button).toBeDisabled();
+
+    fireEvent.drop(editor, {
+      dataTransfer: {
+        files: [image],
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }],
+        types: ["Files"]
+      }
+    });
+    const input = view.container.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(input).not.toBeNull();
+    if (!input) throw new Error("이미지 파일 입력을 찾지 못했습니다.");
+    fireEvent.change(input, {
+      target: { files: [image] }
+    });
+
+    expect(onPasteImages).not.toHaveBeenCalled();
+    expect(editor).toHaveTextContent("잠긴 본문");
   });
 
   it("can lock and unlock editing without rebuilding the document", () => {
