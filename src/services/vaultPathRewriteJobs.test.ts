@@ -937,7 +937,7 @@ describe("encrypted durable Vault path rewrite persistence", () => {
       source: "private original 0 [[Private/Old]]"
     };
     const applyStep = vi.fn(async () => {
-      if (applyStep.mock.calls.length === 1) throw { code: "network_error" };
+      if (applyStep.mock.calls.length === 1) throw { code: "network_timeout" };
       source = {
         sourceEntryId: step.sourceEntryId,
         sourceKind: step.sourceKind,

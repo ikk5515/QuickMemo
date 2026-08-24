@@ -656,6 +656,54 @@ describe("JsonCanvasView controls", () => {
     expect(screen.queryByRole("dialog", { name: "Canvas 파일 선택" })).not.toBeInTheDocument();
   });
 
+  it("keeps an open file chooser stable across option refreshes and revalidates access", async () => {
+    const onChange = vi.fn();
+    const baseProps = {
+      onChange,
+      onOpenFile: vi.fn(),
+      source: emptyJsonCanvas
+    };
+    const rendered = render(createElement(JsonCanvasView, {
+      ...baseProps,
+      fileOptions: [
+        { label: "연구 노트", path: "Research/Note.md" },
+        { label: "일지", path: "Journal.md" }
+      ]
+    }));
+
+    await userEvent.click(screen.getByRole("button", { name: "추가할 노트 선택" }));
+    const originalRow = screen.getByRole("button", { name: /연구 노트/ });
+    rendered.rerender(createElement(JsonCanvasView, {
+      ...baseProps,
+      fileOptions: [
+        { label: "일지", path: "Journal.md" },
+        { label: "연구 노트", path: "Research/Note.md" }
+      ]
+    }));
+
+    expect(screen.getByRole("button", { name: /연구 노트/ })).toBe(originalRow);
+    await userEvent.click(originalRow);
+    await userEvent.click(screen.getByRole("button", { name: "선택한 노트 카드 추가" }));
+    expect(safeCanvasDocument(onChange.mock.lastCall?.[0] as string).nodes[0]).toMatchObject({
+      file: "Research/Note.md",
+      type: "file"
+    });
+
+    rendered.rerender(createElement(JsonCanvasView, {
+      ...baseProps,
+      fileOptions: [{ label: "연구 노트", path: "Research/Note.md" }]
+    }));
+    await userEvent.click(screen.getByRole("button", { name: "추가할 노트 선택" }));
+    const revokedRow = screen.getByRole("button", { name: /연구 노트/ });
+    rendered.rerender(createElement(JsonCanvasView, { ...baseProps, fileOptions: [] }));
+    await userEvent.click(revokedRow);
+
+    expect(screen.getByRole("status")).toHaveTextContent("파일 목록이 변경되었습니다. 다시 선택해주세요.");
+    expect(screen.getByRole("dialog", { name: "Canvas 파일 선택" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /연구 노트/ })).not.toBeInTheDocument();
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
   it("indexes large file option lists once instead of scanning them for every card", async () => {
     let pathReads = 0;
     const fileOptions = Array.from({ length: 5_000 }, (_, index) => {

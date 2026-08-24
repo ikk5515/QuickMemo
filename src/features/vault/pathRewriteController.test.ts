@@ -78,6 +78,7 @@ describe("path rewrite controller", () => {
   it("automatically retries only transport-safe failures and resumable job states", () => {
     expect(retryableVaultPathRewriteFailure({ code: "firestore/unavailable" })).toBe(true);
     expect(retryableVaultPathRewriteFailure({ code: "network_error" })).toBe(true);
+    expect(retryableVaultPathRewriteFailure({ code: "network_timeout" })).toBe(true);
     expect(retryableVaultPathRewriteFailure({ code: "permission-denied" })).toBe(false);
     expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("preparing"))).toBe(true);
     expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("prepared"))).toBe(true);

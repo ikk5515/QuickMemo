@@ -58,6 +58,7 @@ export function retryableVaultPathRewriteFailure(cause: unknown) {
     || code === "deadline-exceeded"
     || code === "network-request-failed"
     || code === "network_error"
+    || code === "network_timeout"
     || code === "unavailable";
 }
 

@@ -15,6 +15,7 @@ import type {
   UpdateRevisionedNoteFolderInput,
   VaultNameClaimReservationInput
 } from "./notes";
+import { createVaultApiDeadline } from "./vaultApiDeadline";
 
 export const vaultNoteApiPath = "/api/vault-notes";
 export const vaultNoteApiActions = [
@@ -184,6 +185,8 @@ export class VaultNoteApiError extends Error {
   constructor(code: string, status: number, actualRevision?: unknown) {
     super(code === "vault_import_locked"
       ? "Vault 가져오기 또는 복구가 끝날 때까지 노트 변경이 잠깁니다."
+      : code === "network_timeout"
+        ? "서버 응답이 지연되어 저장 잠금을 해제했습니다. 현재 편집본은 유지되며 자동으로 다시 시도합니다."
       : code === "vault_path_rewrite_inventory_changed"
         ? "다른 탭에서 Vault 항목이나 폴더가 변경되었습니다. 최신 목록으로 다시 시도해주세요."
         : code === "vault_path_rewrite_inventory_capacity"
@@ -301,10 +304,20 @@ export async function vaultNoteApiRequest<T>(
   if (!user || user.uid !== ownerUid) {
     throw new VaultNoteApiError("authentication_required", 401);
   }
-  const [idToken, verificationToken] = await Promise.all([
-    user.getIdToken(),
-    bestEffortAppCheckToken()
-  ]);
+  signal?.throwIfAborted();
+  const deadline = createVaultApiDeadline(signal);
+  let idToken: string;
+  let verificationToken: string | null;
+  try {
+    [idToken, verificationToken] = await deadline.race(Promise.all([
+      user.getIdToken(),
+      bestEffortAppCheckToken()
+    ]));
+  } catch (error) {
+    deadline.dispose();
+    if (signal?.aborted) throw error;
+    throw new VaultNoteApiError(deadline.timedOut() ? "network_timeout" : "network_error", 0);
+  }
   const headers = new Headers({
     accept: "application/json",
     authorization: `Bearer ${idToken}`,
@@ -315,7 +328,7 @@ export async function vaultNoteApiRequest<T>(
 
   let response: Response;
   try {
-    response = await fetch(vaultNoteApiPath, {
+    response = await deadline.race(fetch(vaultNoteApiPath, {
       body: JSON.stringify(payload),
       cache: "no-store",
       credentials: "same-origin",
@@ -323,19 +336,24 @@ export async function vaultNoteApiRequest<T>(
       method: "POST",
       redirect: "error",
       referrerPolicy: "no-referrer",
-      signal
-    });
+      signal: deadline.signal
+    }));
   } catch (error) {
+    deadline.dispose();
     if (signal?.aborted) throw error;
-    throw new VaultNoteApiError("network_error", 0);
+    throw new VaultNoteApiError(deadline.timedOut() ? "network_timeout" : "network_error", 0);
   }
 
   let body: unknown;
   try {
-    body = await response.json();
+    body = await deadline.race(response.json());
   } catch {
+    deadline.dispose();
+    if (signal?.aborted) signal.throwIfAborted();
+    if (deadline.timedOut()) throw new VaultNoteApiError("network_timeout", 0);
     throw new VaultNoteApiError("invalid_response", response.status);
   }
+  deadline.dispose();
   if (!response.ok) {
     const code = isJsonObject(body) && typeof body.error === "string"
       ? body.error
@@ -366,6 +384,7 @@ export async function mutateVaultNote<TPayload extends VaultNoteApiPayload>(
     const responseMayHaveBeenLost = caught instanceof VaultNoteApiError
       && (
         caught.code === "network_error"
+        || caught.code === "network_timeout"
         || caught.code === "invalid_response"
         || caught.status >= 500
       );

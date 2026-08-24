@@ -6,13 +6,29 @@ export interface RevisionedEditableDraft {
   title: string;
 }
 
+export type PersistedRevisionRelation = "apply" | "current" | "superseded";
+
+export function canonicalizeDraftTitle<T extends { title: string }>(draft: T): T {
+  return { ...draft, title: draft.title.trim().normalize("NFC") };
+}
+
+export function persistedRevisionRelation(
+  currentRevision: number | undefined,
+  incomingRevision: number
+): PersistedRevisionRelation {
+  const current = currentRevision ?? 0;
+  if (current > incomingRevision) return "superseded";
+  if (current === incomingRevision) return "current";
+  return "apply";
+}
+
 export function sameDraftPayload(
   left: Pick<RevisionedEditableDraft, "body" | "folderId" | "title">,
   right: Pick<RevisionedEditableDraft, "body" | "folderId" | "title">
 ): boolean {
   return left.body === right.body
     && left.folderId === right.folderId
-    && left.title === right.title;
+    && left.title.trim().normalize("NFC") === right.title.trim().normalize("NFC");
 }
 
 export function captureRevisionedDraft<T extends RevisionedEditableDraft>(draft: T): RevisionedEditableDraft {
@@ -38,6 +54,24 @@ export function sameRevisionedDraft(
 }
 
 /**
+ * Confirms a response-lost save only from an authoritative decrypted server
+ * snapshot. A revision advancing by exactly one and an exact payload match
+ * proves that one of the bounded submissions from this base became durable.
+ */
+export function findConfirmedDraftSubmission<T extends RevisionedEditableDraft>(
+  persisted: Pick<RevisionedEditableDraft, "body" | "folderId" | "title"> & { revision: number },
+  submissions: readonly T[]
+): T | null {
+  const confirmed = submissions.find((submission) => (
+    persisted.revision === submission.baseRevision + 1
+    && persisted.body === submission.body
+    && persisted.folderId === submission.folderId
+    && persisted.title === submission.title.trim().normalize("NFC")
+  ));
+  return confirmed ? canonicalizeDraftTitle(confirmed) : null;
+}
+
+/**
  * Advances a live edit buffer after an older snapshot was saved. Edits made
  * while the request was in flight stay dirty and are never replaced by the
  * submitted snapshot.
@@ -47,10 +81,19 @@ export function reconcileDraftAfterSave<T extends RevisionedEditableDraft>(
   submitted: Pick<T, "body" | "folderId" | "title">,
   savedRevision: number
 ): T {
+  const canonicalSubmitted = canonicalizeDraftTitle(submitted);
+  if (sameDraftPayload(latest, canonicalSubmitted)) {
+    return {
+      ...latest,
+      ...canonicalSubmitted,
+      baseRevision: savedRevision,
+      dirty: false
+    };
+  }
   return {
     ...latest,
     baseRevision: savedRevision,
-    dirty: !sameDraftPayload(latest, submitted)
+    dirty: true
   };
 }
 
@@ -66,9 +109,10 @@ export function reconcileDraftAfterConflictSave<T extends RevisionedEditableDraf
   savedRevision: number
 ): T {
   if (sameRevisionedDraft(latest, capturedLocal)) {
+    const canonicalMerged = canonicalizeDraftTitle(merged);
     return {
       ...latest,
-      ...merged,
+      ...canonicalMerged,
       baseRevision: savedRevision,
       dirty: false
     };

@@ -18,6 +18,7 @@ import {
   vaultNoteUpdatePayload,
   type VaultNoteUpdatePayload
 } from "./vaultNoteMutations";
+import { VAULT_API_REQUEST_DEADLINE_MS } from "./vaultApiDeadline";
 
 const firebaseMocks = vi.hoisted(() => ({
   appCheck: null as object | null,
@@ -104,6 +105,7 @@ describe("Vault note mutation API client", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -161,6 +163,45 @@ describe("Vault note mutation API client", () => {
       encryptedTitle,
       noteId
     }));
+  });
+
+  it("retries a timed-out create once with the same idempotent payload", async () => {
+    vi.useFakeTimers();
+    const noteId = `vn1_${"T".repeat(43)}`;
+    const payload = vaultNoteCreatePayload(createInput, noteId);
+    vi.mocked(fetch)
+      // The hard race must release even a WebKit-like transport that ignores
+      // AbortSignal instead of waiting for the fetch promise to reject.
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(jsonResponse({
+        lastMutationId: "history-timeout-retry",
+        noteId,
+        ok: true,
+        revision: 1
+      }));
+
+    const request = mutateVaultNote(uid, payload);
+    await vi.advanceTimersByTimeAsync(VAULT_API_REQUEST_DEADLINE_MS);
+
+    await expect(request).resolves.toMatchObject({ noteId, revision: 1 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body))
+      .toBe(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
+  });
+
+  it("bounds a stalled fetch even when the transport ignores AbortSignal", async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockImplementation(() => new Promise<Response>(() => undefined));
+    const request = mutateVaultNote(uid, updatePayload);
+    const rejected = expect(request).rejects.toMatchObject({
+      code: "network_timeout",
+      status: 0
+    });
+
+    await vi.advanceTimersByTimeAsync(VAULT_API_REQUEST_DEADLINE_MS);
+
+    await rejected;
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("does not retry a definitive create conflict", async () => {
@@ -316,11 +357,29 @@ describe("Vault note mutation API client", () => {
     const controller = new AbortController();
     const abortError = new DOMException("aborted", "AbortError");
     vi.mocked(fetch).mockImplementation(async () => {
-      controller.abort();
+      controller.abort(abortError);
       throw abortError;
     });
 
     await expect(mutateVaultNote(uid, updatePayload, controller.signal)).rejects.toBe(abortError);
+  });
+
+  it("bounds a stalled authentication step before any mutation reaches the network", async () => {
+    vi.useFakeTimers();
+    firebaseMocks.currentUser = {
+      uid,
+      getIdToken: vi.fn(() => new Promise<string>(() => undefined))
+    };
+    const request = mutateVaultNote(uid, updatePayload);
+    const rejected = expect(request).rejects.toMatchObject({
+      code: "network_timeout",
+      status: 0
+    });
+
+    await vi.advanceTimersByTimeAsync(VAULT_API_REQUEST_DEADLINE_MS);
+
+    await rejected;
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("strips client identity fields when adapting existing note mutation inputs", () => {

@@ -259,6 +259,7 @@ describe("vaultPersistence encrypted revision contract", () => {
       changedFields: ["body"],
       encryptedTitle: note.encryptedTitle
     }));
+    expect(mocks.updateRevisionedEncryptedNote.mock.calls[0][0]).not.toHaveProperty("nameClaim");
   });
 
   it("lets a shared participant save body-only content without deriving an owner claim", async () => {

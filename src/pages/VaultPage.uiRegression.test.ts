@@ -301,7 +301,10 @@ describe("Vault workspace UI regression contract", () => {
     );
     expect(saveEntry).toContain("entryAutosaveRef.current?.cancel(entryId);");
     expect(saveEntry).toContain("const latest = draftsRef.current[entryId];");
-    expect(saveEntry).toContain("const reconciled = reconcileDraftAfterSave(latest, draft, result.revision);");
+    expect(saveEntry).toContain("const reconciled = reconcileDraftAfterSave(latest, canonicalSubmitted, result.revision);");
+    expect(saveEntry).toContain("persistedRevisionRelation(currentCandidate.revision, result.revision)");
+    expect(saveEntry).toContain('revisionRelation === "superseded"');
+    expect(saveEntry).toContain("latestBeforeCommit.baseRevision > result.revision");
     expect(saveEntry).toContain("const nextDrafts = { ...draftsRef.current, [entryId]: reconciled };");
     expect(saveEntry).toContain("setDrafts(nextDrafts);");
     expect(saveEntry).toContain("entryAutosaveRetryDelayMs(failureCount)");
@@ -311,7 +314,7 @@ describe("Vault workspace UI regression contract", () => {
     expect(saveEntry).toContain("if (!draft.title.trim()) {");
     expect(saveEntry).toContain("draft = { ...draft, title: note.title };");
     expect(saveEntry.indexOf("draft = { ...draft, title: note.title };")).toBeLessThan(
-      saveEntry.indexOf("const result = await saveEncryptedVaultEntry(")
+      saveEntry.indexOf("result = await saveEncryptedVaultEntry(")
     );
     expect(saveEntry).toContain("빈 이름은 저장하지 않고 기존 이름을 유지했으며 Markdown 본문은 암호화 저장했습니다.");
 

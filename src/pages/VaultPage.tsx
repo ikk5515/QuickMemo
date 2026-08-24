@@ -76,7 +76,10 @@ import {
 } from "../features/calendar/dailyNotes";
 import { createDrawingSource } from "../features/drawing/model";
 import {
+  canonicalizeDraftTitle,
   captureRevisionedDraft,
+  findConfirmedDraftSubmission,
+  persistedRevisionRelation,
   reconcileDraftAfterConflictSave,
   reconcileDraftAfterSave,
   sameDraftPayload,
@@ -323,6 +326,8 @@ import {
 } from "../services/notes";
 import { subscribeUsers } from "../services/users";
 import { VaultFolderApiError } from "../services/vaultFolderMutations";
+import { createVaultApiDeadline } from "../services/vaultApiDeadline";
+import { VaultNoteApiError } from "../services/vaultNoteMutations";
 import {
   activatePreparedVaultIntegrityKey,
   createVaultIntegrityCutoverLeaseId,
@@ -725,6 +730,9 @@ function pathRewriteInventoryFailureMessage(error: unknown) {
   if (code === "vault_inventory_manifest_capacity") {
     return "암호화된 경로 인벤토리 shard가 안전한 용량을 초과해 변경을 중단했습니다.";
   }
+  if (code === "vault_inventory_manifest_timeout") {
+    return "서버 경로 확인이 지연되어 작업 잠금을 해제했습니다. 현재 편집본은 보존되며 잠시 후 다시 시도할 수 있습니다.";
+  }
   return null;
 }
 
@@ -746,6 +754,16 @@ function persistedEncryptedMutationPatch(result: {
       ? { vaultNameIndexVersion: result.vaultNameIndexVersion }
       : {})
   };
+}
+
+function ambiguousVaultSaveFailure(error: unknown) {
+  return error instanceof VaultNoteApiError
+    && (
+      error.code === "network_error"
+      || error.code === "network_timeout"
+      || error.code === "invalid_response"
+      || error.status >= 500
+    );
 }
 
 function persistedEncryptedFolderMutationPatch(result: {
@@ -1890,6 +1908,7 @@ function UnlockedVaultPage({
   const entryAutosaveRef = useRef<EntryIdleDebounce | null>(null);
   entryAutosaveRef.current ??= new EntryIdleDebounce();
   const entryAutosaveRetryCountsRef = useRef<Map<string, number>>(new Map());
+  const ambiguousEntrySaveAttemptsRef = useRef<Map<string, RevisionedEditableDraft[]>>(new Map());
   const entryMutationPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   const draftBaseSnapshotsRef = useRef<Map<string, MarkdownDraftBaseSnapshot>>(new Map());
   const draftMergeRequestGenerationRef = useRef(0);
@@ -2216,21 +2235,28 @@ function UnlockedVaultPage({
 
   const readCurrentServerVaultEntry = useCallback(async (entryId: string) => {
     if (!isOnline) throw new Error("offline");
-    const result = await getVisibleNotesByIdsFromServer(profile.uid, [entryId]);
-    if (!result.resolvedNoteIds.includes(entryId) || result.notes.length !== 1) {
-      throw new Error("server-entry-unavailable");
+    const deadline = createVaultApiDeadline(undefined, 8_000);
+    try {
+      return await deadline.race((async () => {
+        const result = await getVisibleNotesByIdsFromServer(profile.uid, [entryId]);
+        if (!result.resolvedNoteIds.includes(entryId) || result.notes.length !== 1) {
+          throw new Error("server-entry-unavailable");
+        }
+        const decrypted = await decryptVaultNotes(result.notes, profile.uid, privateKey);
+        const remote = decrypted.length === 1 ? decrypted[0] : null;
+        if (
+          !remote
+          || remote.id !== entryId
+          || !remote.participantUids.includes(profile.uid)
+          || !remote.wrappedKeys[profile.uid]
+        ) {
+          throw new Error("server-entry-unauthorized");
+        }
+        return remote;
+      })());
+    } finally {
+      deadline.dispose();
     }
-    const decrypted = await decryptVaultNotes(result.notes, profile.uid, privateKey);
-    const remote = decrypted.length === 1 ? decrypted[0] : null;
-    if (
-      !remote
-      || remote.id !== entryId
-      || !remote.participantUids.includes(profile.uid)
-      || !remote.wrappedKeys[profile.uid]
-    ) {
-      throw new Error("server-entry-unauthorized");
-    }
-    return remote;
   }, [isOnline, privateKey, profile.uid]);
 
   const prepareDraftMergeConflict = useCallback(async (entryId: string, openResolver: boolean) => {
@@ -2326,6 +2352,7 @@ function UnlockedVaultPage({
     setNoteServerReservationSignature(null);
     entryAutosaveRef.current?.cancelAll();
     entryAutosaveRetryCountsRef.current.clear();
+    ambiguousEntrySaveAttemptsRef.current.clear();
     folderTrashLockedFolderIdsRef.current.clear();
     notesRef.current = [];
     setDecryptedNotes([]);
@@ -2863,6 +2890,7 @@ function UnlockedVaultPage({
     pendingClipboardPasteCountsRef.current.clear();
     entryAutosaveRef.current?.cancelAll();
     entryAutosaveRetryCountsRef.current.clear();
+    ambiguousEntrySaveAttemptsRef.current.clear();
     folderTrashLockedFolderIdsRef.current.clear();
     activeFolderSnapshotsRef.current = [];
     allFolderSnapshotsRef.current = [];
@@ -4955,39 +4983,89 @@ function UnlockedVaultPage({
     setSavingEntryIds((current) => new Set(current).add(entryId));
     setError(null);
     let hasPendingEdits = false;
-    try {
-      const result = await saveEncryptedVaultEntry(
-        { ...note, revision: draft.baseRevision },
-        profile.uid,
-        privateKey,
-        vaultIntegrityKey,
-        draft
+    const rememberAmbiguousAttempt = () => {
+      const captured = canonicalizeDraftTitle(captureRevisionedDraft(draft));
+      const existing = (ambiguousEntrySaveAttemptsRef.current.get(entryId) ?? [])
+        .filter((attempt) => attempt.baseRevision === captured.baseRevision);
+      if (!existing.some((attempt) => sameRevisionedDraft(attempt, captured))) {
+        existing.push(captured);
+      }
+      ambiguousEntrySaveAttemptsRef.current.set(entryId, existing.slice(-5));
+    };
+    const commitPersistedDraft = (
+      result: {
+        encryptedBody?: DecryptedVaultNote["encryptedBody"];
+        encryptedTitle?: DecryptedVaultNote["encryptedTitle"];
+        revision: number;
+        vaultNameClaimId?: string;
+        vaultNameIndexVersion?: DecryptedVaultNote["vaultNameIndexVersion"];
+      },
+      submittedDraft: RevisionedEditableDraft
+    ) => {
+      const canonicalSubmitted = canonicalizeDraftTitle(submittedDraft);
+      const latestBeforeCommit = draftsRef.current[entryId];
+      const draftAlreadyNewer = Boolean(
+        latestBeforeCommit && latestBeforeCommit.baseRevision > result.revision
       );
-      commitNotes((current) => current.map((candidate) => (
-        candidate.id === entryId
-          ? {
-              ...candidate,
-              ...persistedEncryptedMutationPatch(result),
-              title: draft.title.trim(),
-              body: draft.body,
-              folderId: draft.folderId,
-              revision: result.revision
-            }
-          : candidate
-      )));
+      const currentCandidate = notesRef.current.find((candidate) => candidate.id === entryId);
+      let observedRevision = currentCandidate?.revision ?? result.revision;
+      let revisionRelation: ReturnType<typeof persistedRevisionRelation> = currentCandidate
+        ? persistedRevisionRelation(currentCandidate.revision, result.revision)
+        : "superseded";
+      if (draftAlreadyNewer) {
+        revisionRelation = "superseded";
+        observedRevision = Math.max(observedRevision, latestBeforeCommit?.baseRevision ?? 0);
+      }
+      const currentRevisionPayloadMatches = currentCandidate
+        ? revisionRelation !== "current" || (
+            currentCandidate.body === canonicalSubmitted.body
+            && (currentCandidate.folderId ?? null) === canonicalSubmitted.folderId
+            && currentCandidate.title === canonicalSubmitted.title
+          )
+        : false;
+      commitNotes((current) => current.map((candidate) => {
+        if (candidate.id !== entryId) return candidate;
+        if (revisionRelation !== "apply") return candidate;
+        return {
+          ...candidate,
+          ...persistedEncryptedMutationPatch(result),
+          title: canonicalSubmitted.title,
+          body: canonicalSubmitted.body,
+          folderId: canonicalSubmitted.folderId,
+          revision: result.revision
+        };
+      }));
       const latest = draftsRef.current[entryId];
+      if (revisionRelation === "superseded" || !currentRevisionPayloadMatches) {
+        hasPendingEdits = Boolean(latest?.dirty);
+        const requiresConflict = !currentRevisionPayloadMatches
+          || Boolean(latest?.dirty && latest.baseRevision < observedRevision);
+        if (requiresConflict) {
+          setConflictedEntryIds((current) => new Map(current).set(entryId, observedRevision));
+          setError("저장 응답보다 최신 서버 revision을 유지했습니다. 현재 편집본은 덮어쓰지 않고 서버 최신본과 비교합니다.");
+        } else {
+          setStatus("늦게 도착한 저장 응답은 적용하지 않고 이미 수신한 최신 서버 revision을 유지했습니다.");
+        }
+        setSaveFailedEntryIds((current) => {
+          const next = new Set(current);
+          next.delete(entryId);
+          return next;
+        });
+        entryAutosaveRetryCountsRef.current.delete(entryId);
+        return requiresConflict ? "conflict" as const : "superseded" as const;
+      }
       if (latest) {
-        const reconciled = reconcileDraftAfterSave(latest, draft, result.revision);
+        const reconciled = reconcileDraftAfterSave(latest, canonicalSubmitted, result.revision);
         hasPendingEdits = reconciled.dirty;
         if (reconciled.dirty && isMarkdownMergeEntry(note)) {
           draftBaseSnapshotsRef.current.set(entryId, {
             baseRevision: result.revision,
-            body: draft.body,
+            body: canonicalSubmitted.body,
             contentFormat: "markdown-v1",
             entryKind: "markdown",
-            folderId: draft.folderId,
+            folderId: canonicalSubmitted.folderId,
             ownerUid: note.ownerUid,
-            title: draft.title.trim()
+            title: canonicalSubmitted.title
           });
         } else {
           draftBaseSnapshotsRef.current.delete(entryId);
@@ -5022,8 +5100,85 @@ function UnlockedVaultPage({
         : hasPendingEdits
           ? "저장 중 추가된 편집을 보존했습니다. 다음 revision으로 계속 저장합니다."
           : "Markdown 원본과 암호화 이력을 저장했습니다.");
+      return "committed" as const;
+    };
+    try {
+      let submittedDraft: RevisionedEditableDraft = canonicalizeDraftTitle(captureRevisionedDraft(draft));
+      let result: Parameters<typeof commitPersistedDraft>[0];
+      const currentRevision = note.revision ?? 0;
+      if (currentRevision !== draft.baseRevision) {
+        const confirmedSubmission = findConfirmedDraftSubmission({
+          body: note.body,
+          folderId: note.folderId ?? null,
+          revision: currentRevision,
+          title: note.title
+        }, [
+          ...(ambiguousEntrySaveAttemptsRef.current.get(entryId) ?? []),
+          canonicalizeDraftTitle(captureRevisionedDraft(draft))
+        ]);
+        if (!confirmedSubmission) {
+          throw new NoteRevisionConflictError(draft.baseRevision, currentRevision);
+        }
+        submittedDraft = confirmedSubmission;
+        result = {
+          encryptedBody: note.encryptedBody,
+          encryptedTitle: note.encryptedTitle,
+          revision: currentRevision,
+          vaultNameClaimId: note.vaultNameClaimId,
+          vaultNameIndexVersion: note.vaultNameIndexVersion
+        };
+      } else {
+        try {
+          result = await saveEncryptedVaultEntry(
+            note,
+            profile.uid,
+            privateKey,
+            vaultIntegrityKey,
+            draft
+          );
+        } catch (caught) {
+          if (ambiguousVaultSaveFailure(caught)) rememberAmbiguousAttempt();
+          const pendingAttempts = ambiguousEntrySaveAttemptsRef.current.get(entryId) ?? [];
+          if (!ambiguousVaultSaveFailure(caught) && !(caught instanceof NoteRevisionConflictError && pendingAttempts.length)) {
+            throw caught;
+          }
+          let remote: DecryptedVaultNote | null = null;
+          try {
+            remote = await readCurrentServerVaultEntry(entryId);
+          } catch {
+            // The original error remains authoritative when a bounded
+            // read-after-timeout cannot prove whether the write committed.
+          }
+          const remoteRevision = remote?.revision ?? 0;
+          const confirmedSubmission = remote ? findConfirmedDraftSubmission({
+            body: remote.body,
+            folderId: remote.folderId ?? null,
+            revision: remoteRevision,
+            title: remote.title
+          }, pendingAttempts) : null;
+          if (!remote || !confirmedSubmission) throw caught;
+          submittedDraft = confirmedSubmission;
+          result = {
+            encryptedBody: remote.encryptedBody,
+            encryptedTitle: remote.encryptedTitle,
+            revision: remoteRevision,
+            vaultNameClaimId: remote.vaultNameClaimId,
+            vaultNameIndexVersion: remote.vaultNameIndexVersion
+          };
+        }
+      }
+      ambiguousEntrySaveAttemptsRef.current.delete(entryId);
+      const commitOutcome = commitPersistedDraft(result, submittedDraft);
+      if (
+        commitOutcome === "conflict"
+        && draftsRef.current[entryId]?.dirty
+        && isMarkdownMergeEntry(note)
+      ) {
+        void prepareDraftMergeConflict(entryId, false);
+      }
     } catch (caught) {
       if (caught instanceof NoteRevisionConflictError) {
+        ambiguousEntrySaveAttemptsRef.current.delete(entryId);
         entryAutosaveRetryCountsRef.current.delete(entryId);
         setConflictedEntryIds((current) => new Map(current).set(entryId, caught.actualRevision));
         setError("다른 기기나 탭에서 이 노트가 변경되었습니다. 현재 편집본은 유지되며 서버 최신본을 안전하게 확인합니다.");
@@ -5054,6 +5209,7 @@ function UnlockedVaultPage({
     privateKey,
     prepareDraftMergeConflict,
     profile,
+    readCurrentServerVaultEntry,
     vaultIntegrityKey,
     vaultNameWritesReady,
     vaultNameCollisionTargetIds,
@@ -6051,43 +6207,6 @@ function UnlockedVaultPage({
       : "";
   }
 
-  async function flushPathTargetBody(entryId: string) {
-    const note = notesRef.current.find((candidate) => candidate.id === entryId);
-    const draft = draftsRef.current[entryId];
-    if (!note || !draft) throw new Error("경로 변경 대상의 편집 버퍼를 확인하지 못했습니다.");
-    if (draft.body === note.body && (draft.folderId ?? null) === (note.folderId ?? null)) return;
-    const submitted = {
-      ...draft,
-      dirty: false,
-      folderId: note.folderId ?? null,
-      title: note.title
-    };
-    const result = await saveEncryptedVaultEntry(
-      { ...note, revision: draft.baseRevision },
-      profile.uid,
-      privateKey,
-      vaultIntegrityKey!,
-      submitted
-    );
-    commitNotes((current) => current.map((candidate) => candidate.id === entryId
-      ? {
-          ...candidate,
-          ...persistedEncryptedMutationPatch(result),
-          body: submitted.body,
-          revision: result.revision
-        }
-      : candidate));
-    const latest = draftsRef.current[entryId] ?? draft;
-    const reconciled = reconcileDraftAfterSave(latest, submitted, result.revision);
-    const nextDrafts = { ...draftsRef.current, [entryId]: reconciled };
-    draftsRef.current = nextDrafts;
-    setDrafts(nextDrafts);
-    if (latest.body !== submitted.body || (latest.folderId ?? null) !== (submitted.folderId ?? null)) {
-      setConflictedEntryIds((current) => new Map(current).set(entryId, result.revision));
-      throw new Error("경로 변경 준비 중 추가 편집을 감지해 자동 저장을 중단했습니다.");
-    }
-  }
-
   async function readDurableSource(sourceEntryId: string): Promise<VaultPathRewriteSourceSnapshot | null> {
     const pending = entryMutationPromisesRef.current.get(sourceEntryId);
     if (pending) await pending;
@@ -6655,18 +6774,17 @@ function UnlockedVaultPage({
     setError(null);
     try {
       if (!resolvingNameCollision) await flushOwnedRewriteDrafts(entryId);
-      if (!resolvingNameCollision) await flushPathTargetBody(entryId);
       const refreshedNote = notesRef.current.find((candidate) => candidate.id === entryId);
-      const refreshedDraft = draftsRef.current[entryId];
-      if (!refreshedNote || !refreshedDraft || conflictedEntryIds.has(entryId)) {
+      const refreshedDraftState = draftsRef.current[entryId];
+      if (!refreshedNote || !refreshedDraftState || conflictedEntryIds.has(entryId)) {
         throw new Error("이동 대상의 최신 server revision을 확인하지 못했습니다.");
       }
+      const refreshedDraft = canonicalizeDraftTitle(refreshedDraftState);
       const server = await buildCurrentRevisionedIndexEntries();
       const serverTarget = server.notes.find((candidate) => candidate.id === entryId);
       if (
         !serverTarget
         || (serverTarget.revision ?? 0) !== refreshedDraft.baseRevision
-        || (!resolvingNameCollision && serverTarget.body !== refreshedDraft.body)
       ) {
         throw new Error("이동 대상이 다른 기기에서 변경되어 경로 변경을 시작하지 않았습니다.");
       }
@@ -6675,10 +6793,20 @@ function UnlockedVaultPage({
         server.folderPaths
       );
       const currentPath = vaultEntryPath(serverTarget, server.folderPaths);
+      // The manifest and expected revision bind the persisted base generation.
+      // Plan self-links from the authorized local draft, then persist its body
+      // and path in the same mutation instead of creating an extra history row.
+      const planningEntries = resolvingNameCollision
+        ? server.entries
+        : server.entries.map((entry) => (
+            entry.id === entryId && (entry.kind === "markdown" || entry.kind === "canvas")
+              ? { ...entry, content: refreshedDraft.body, revision: refreshedDraft.baseRevision }
+              : entry
+          ));
       const rewritePlans = resolvingNameCollision
         ? { canvasPlans: [], markdownPlans: [] }
         : planVaultContentPathRewritesForPathChanges({
-            entries: server.entries,
+            entries: planningEntries,
             pathChanges: [{ entryId, newPath: nextPath, oldPath: currentPath }]
           });
       const excludedSharedCount = resolvingNameCollision ? 0 : excludedSharedRewriteSourceCount([
@@ -6688,7 +6816,7 @@ function UnlockedVaultPage({
       const selfCanvasPlan = rewritePlans.canvasPlans.find((plan) => plan.sourceEntryId === entryId);
       const sourcePlans = (await buildVaultPathRewriteSourcePlans({
         canvasPlans: rewritePlans.canvasPlans,
-        entries: server.entries,
+        entries: planningEntries,
         markdownPlans: rewritePlans.markdownPlans
       })).filter((plan) => plan.sourceEntryId !== entryId);
       const prepared = await prepareVaultPathRewriteJob(vaultIntegrityKey, {
@@ -6698,8 +6826,94 @@ function UnlockedVaultPage({
         pathChanges: [{ entryId, newPath: nextPath, oldPath: currentPath }],
         sourcePlans
       });
+      let pathMutationDraft: DraftState | null = null;
+      let pathMutationPersistedBody = serverTarget.body;
+      let pathMutationLocallyConfirmed = false;
+      let pathMutationSupersededRevision: number | null = null;
+      let pathMutationSupersededHasConflict = false;
+      const commitMovedTarget = (
+        result: {
+          encryptedBody?: DecryptedVaultNote["encryptedBody"];
+          encryptedTitle?: DecryptedVaultNote["encryptedTitle"];
+          lastMutationId?: string;
+          revision: number;
+          vaultNameClaimId?: string;
+          vaultNameIndexVersion?: DecryptedVaultNote["vaultNameIndexVersion"];
+        },
+        submittedDraft: DraftState,
+        persistedBody: string
+      ) => {
+        const canonicalSubmitted = canonicalizeDraftTitle(submittedDraft);
+        const latestBeforeCommit = draftsRef.current[entryId];
+        const draftAlreadyNewer = Boolean(
+          latestBeforeCommit && latestBeforeCommit.baseRevision > result.revision
+        );
+        const currentCandidate = notesRef.current.find((candidate) => candidate.id === entryId);
+        let observedRevision = currentCandidate?.revision ?? result.revision;
+        let revisionRelation: ReturnType<typeof persistedRevisionRelation> = currentCandidate
+          ? persistedRevisionRelation(currentCandidate.revision, result.revision)
+          : "superseded";
+        if (draftAlreadyNewer) {
+          revisionRelation = "superseded";
+          observedRevision = Math.max(observedRevision, latestBeforeCommit?.baseRevision ?? 0);
+        }
+        const currentRevisionPayloadMatches = currentCandidate
+          ? revisionRelation !== "current" || (
+              currentCandidate.body === persistedBody
+              && (currentCandidate.folderId ?? null) === folderId
+              && currentCandidate.title === canonicalSubmitted.title
+            )
+          : false;
+        commitNotes((current) => current.map((candidate) => {
+          if (candidate.id !== entryId) return candidate;
+          if (revisionRelation !== "apply") return candidate;
+          return {
+            ...candidate,
+            ...persistedEncryptedMutationPatch(result),
+            body: persistedBody,
+            folderId,
+            ...(result.lastMutationId ? { lastMutationId: result.lastMutationId } : {}),
+            revision: result.revision,
+            title: canonicalSubmitted.title
+          };
+        }));
+        const latest = draftsRef.current[entryId];
+        if (revisionRelation === "superseded" || !currentRevisionPayloadMatches) {
+          pathMutationSupersededRevision = observedRevision;
+          if (!currentRevisionPayloadMatches || Boolean(latest?.dirty && latest.baseRevision < observedRevision)) {
+            pathMutationSupersededHasConflict = true;
+            setConflictedEntryIds((current) => new Map(current).set(entryId, observedRevision));
+            setError("이동 응답보다 최신 서버 revision을 유지했습니다. 현재 편집본은 덮어쓰지 않았습니다.");
+          }
+          pathMutationLocallyConfirmed = true;
+          return;
+        }
+        if (latest?.baseRevision === result.revision) {
+          // The Firestore subscription can install this exact revision before
+          // the API response (or response-loss confirmation) returns. Its
+          // draft is already based on the persisted move and must not be
+          // compared with the old-folder request snapshot.
+        } else if (latest && sameDraftPayload(latest, refreshedDraft)) {
+          const nextDrafts = {
+            ...draftsRef.current,
+            [entryId]: {
+              ...canonicalSubmitted,
+              baseRevision: result.revision,
+              dirty: canonicalSubmitted.body !== persistedBody
+            }
+          };
+          draftsRef.current = nextDrafts;
+          setDrafts(nextDrafts);
+        } else if (latest) {
+          pathMutationSupersededRevision = result.revision;
+          pathMutationSupersededHasConflict = true;
+          setConflictedEntryIds((current) => new Map(current).set(entryId, result.revision));
+          setError("이동을 저장하는 동안 편집본이 변경되었습니다. 현재 편집은 보존하고 서버 결과와 안전하게 비교합니다.");
+        }
+        pathMutationLocallyConfirmed = true;
+      };
       const completed = await executePreparedPathRewrite(prepared, async (pathRewriteActivation) => {
-        let submittedDraft: DraftState = { ...refreshedDraft, dirty: false, folderId };
+        let submittedDraft: DraftState = canonicalizeDraftTitle({ ...refreshedDraft, dirty: false, folderId });
         if (selfPlan) {
           if (serverTarget.contentFormat !== "markdown-v1") {
             throw new Error("자기 링크를 안전하게 갱신할 수 없어 이동을 중단했습니다.");
@@ -6720,6 +6934,8 @@ function UnlockedVaultPage({
           if (applied.status !== "applied") throw new Error("Canvas 자기 링크 source가 변경되었습니다.");
           submittedDraft = { ...submittedDraft, body: applied.source };
         }
+        pathMutationDraft = submittedDraft;
+        pathMutationPersistedBody = resolvingNameCollision ? serverTarget.body : submittedDraft.body;
         const revisionedTarget = { ...serverTarget, revision: refreshedDraft.baseRevision };
         const result = resolvingNameCollision
           ? await resolveDeferredVaultEntryCollision(
@@ -6747,33 +6963,38 @@ function UnlockedVaultPage({
                 submittedDraft,
                 pathRewriteActivation
               );
-        commitNotes((current) => current.map((candidate) => candidate.id === entryId
-          ? {
-              ...candidate,
-              ...persistedEncryptedMutationPatch(result),
-              body: resolvingNameCollision ? serverTarget.body : submittedDraft.body,
-              folderId,
-              lastMutationId: result.lastMutationId,
-              revision: result.revision,
-              title: submittedDraft.title
-            }
-          : candidate));
-        const latest = draftsRef.current[entryId];
-        if (latest && sameDraftPayload(latest, refreshedDraft)) {
-          const nextDrafts = {
-            ...draftsRef.current,
-            [entryId]: {
-              ...submittedDraft,
-              baseRevision: result.revision,
-              dirty: resolvingNameCollision && submittedDraft.body !== serverTarget.body
-            }
-          };
-          draftsRef.current = nextDrafts;
-          setDrafts(nextDrafts);
-        } else if (latest) {
-          setConflictedEntryIds((current) => new Map(current).set(entryId, result.revision));
-        }
+        commitMovedTarget(result, submittedDraft, pathMutationPersistedBody);
       });
+      if (!pathMutationLocallyConfirmed) {
+        const committedDraft = pathMutationDraft as DraftState | null;
+        if (!committedDraft) {
+          throw new Error("이동 결과를 로컬 편집 버퍼와 연결하지 못했습니다.");
+        }
+        const remote = await readCurrentServerVaultEntry(entryId);
+        const confirmed = findConfirmedDraftSubmission({
+          body: remote.body,
+          folderId: remote.folderId ?? null,
+          revision: remote.revision ?? 0,
+          title: remote.title
+        }, [{ ...committedDraft, body: pathMutationPersistedBody }]);
+        if (!confirmed || remote.ownerUid !== profile.uid) {
+          throw new Error("서버에서 완료된 이동 결과의 revision과 암호화 payload를 확인하지 못했습니다.");
+        }
+        commitMovedTarget({
+          encryptedBody: remote.encryptedBody,
+          encryptedTitle: remote.encryptedTitle,
+          lastMutationId: remote.lastMutationId,
+          revision: remote.revision ?? 0,
+          vaultNameClaimId: remote.vaultNameClaimId,
+          vaultNameIndexVersion: remote.vaultNameIndexVersion
+        }, committedDraft, pathMutationPersistedBody);
+      }
+      if (pathMutationSupersededRevision !== null) {
+        if (!pathMutationSupersededHasConflict) {
+          setStatus("늦게 도착한 이동 응답은 적용하지 않고 이미 수신한 최신 서버 revision을 유지했습니다.");
+        }
+        return;
+      }
       const selfRewriteCount = (selfPlan?.patches.length ?? 0) + (selfCanvasPlan?.changeCount ?? 0);
       setStatus(resolvingNameCollision
         ? "중복 이름 해소를 위해 항목을 이동했습니다. 기존의 모호한 링크는 임의로 한 항목에 귀속하지 않았으므로 다시 확인해주세요."
@@ -7116,7 +7337,9 @@ function UnlockedVaultPage({
       && (note.folderId ?? null) !== null
         ? null
         : currentDraft.folderId;
-    const title = (requestedTitle ?? window.prompt("항목 이름 변경", currentDraft.title))?.trim();
+    const title = (requestedTitle ?? window.prompt("항목 이름 변경", currentDraft.title))
+      ?.trim()
+      .normalize("NFC");
     // The inline title field already updates the draft before Save is pressed.
     // Compare against the persisted note, not the draft, or an inline rename is
     // incorrectly treated as a no-op and the tree/tab keep the old title.
@@ -7157,18 +7380,17 @@ function UnlockedVaultPage({
     setError(null);
     try {
       if (!resolvingNameCollision) await flushOwnedRewriteDrafts(entryId);
-      if (!resolvingNameCollision) await flushPathTargetBody(entryId);
       const refreshedNote = notesRef.current.find((candidate) => candidate.id === entryId);
-      const refreshedDraft = draftsRef.current[entryId];
-      if (!refreshedNote || !refreshedDraft || conflictedEntryIds.has(entryId)) {
+      const refreshedDraftState = draftsRef.current[entryId];
+      if (!refreshedNote || !refreshedDraftState || conflictedEntryIds.has(entryId)) {
         throw new Error("이름 변경 대상의 최신 server revision을 확인하지 못했습니다.");
       }
+      const refreshedDraft = canonicalizeDraftTitle(refreshedDraftState);
       const server = await buildCurrentRevisionedIndexEntries();
       const serverTarget = server.notes.find((candidate) => candidate.id === entryId);
       if (
         !serverTarget
         || (serverTarget.revision ?? 0) !== refreshedDraft.baseRevision
-        || (!resolvingNameCollision && serverTarget.body !== refreshedDraft.body)
       ) {
         throw new Error("이름 변경 대상이 다른 기기에서 변경되어 작업을 시작하지 않았습니다.");
       }
@@ -7178,10 +7400,20 @@ function UnlockedVaultPage({
         title
       }, server.folderPaths);
       const currentPath = vaultEntryPath(serverTarget, server.folderPaths);
+      // Keep the server inventory as the base-generation authority while using
+      // the current local target body for self-link planning. The API commits
+      // that body, title, claim, and rewrite activation as one revision.
+      const planningEntries = resolvingNameCollision
+        ? server.entries
+        : server.entries.map((entry) => (
+            entry.id === entryId && (entry.kind === "markdown" || entry.kind === "canvas")
+              ? { ...entry, content: refreshedDraft.body, revision: refreshedDraft.baseRevision }
+              : entry
+          ));
       const rewritePlans = resolvingNameCollision
         ? { canvasPlans: [], markdownPlans: [] }
         : planVaultContentPathRewritesForPathChanges({
-            entries: server.entries,
+            entries: planningEntries,
             pathChanges: [{ entryId, newPath: nextPath, oldPath: currentPath }]
           });
       const excludedSharedCount = resolvingNameCollision ? 0 : excludedSharedRewriteSourceCount([
@@ -7191,7 +7423,7 @@ function UnlockedVaultPage({
       const selfCanvasPlan = rewritePlans.canvasPlans.find((plan) => plan.sourceEntryId === entryId);
       const sourcePlans = (await buildVaultPathRewriteSourcePlans({
         canvasPlans: rewritePlans.canvasPlans,
-        entries: server.entries,
+        entries: planningEntries,
         markdownPlans: rewritePlans.markdownPlans
       })).filter((plan) => plan.sourceEntryId !== entryId);
       const prepared = await prepareVaultPathRewriteJob(vaultIntegrityKey, {
@@ -7201,8 +7433,91 @@ function UnlockedVaultPage({
         pathChanges: [{ entryId, newPath: nextPath, oldPath: currentPath }],
         sourcePlans
       });
+      let pathMutationDraft: DraftState | null = null;
+      let pathMutationPersistedBody = serverTarget.body;
+      let pathMutationLocallyConfirmed = false;
+      let pathMutationSupersededRevision: number | null = null;
+      let pathMutationSupersededHasConflict = false;
+      const commitRenamedTarget = (
+        result: {
+          encryptedBody?: DecryptedVaultNote["encryptedBody"];
+          encryptedTitle?: DecryptedVaultNote["encryptedTitle"];
+          revision: number;
+          vaultNameClaimId?: string;
+          vaultNameIndexVersion?: DecryptedVaultNote["vaultNameIndexVersion"];
+        },
+        rewrittenDraft: DraftState,
+        persistedBody: string
+      ) => {
+        const canonicalRewritten = canonicalizeDraftTitle(rewrittenDraft);
+        const latestBeforeCommit = draftsRef.current[entryId];
+        const draftAlreadyNewer = Boolean(
+          latestBeforeCommit && latestBeforeCommit.baseRevision > result.revision
+        );
+        const currentCandidate = notesRef.current.find((candidate) => candidate.id === entryId);
+        let observedRevision = currentCandidate?.revision ?? result.revision;
+        let revisionRelation: ReturnType<typeof persistedRevisionRelation> = currentCandidate
+          ? persistedRevisionRelation(currentCandidate.revision, result.revision)
+          : "superseded";
+        if (draftAlreadyNewer) {
+          revisionRelation = "superseded";
+          observedRevision = Math.max(observedRevision, latestBeforeCommit?.baseRevision ?? 0);
+        }
+        const currentRevisionPayloadMatches = currentCandidate
+          ? revisionRelation !== "current" || (
+              currentCandidate.body === persistedBody
+              && (currentCandidate.folderId ?? null) === canonicalRewritten.folderId
+              && currentCandidate.title === canonicalRewritten.title
+            )
+          : false;
+        commitNotes((current) => current.map((candidate) => {
+          if (candidate.id !== entryId) return candidate;
+          if (revisionRelation !== "apply") return candidate;
+          return {
+            ...candidate,
+            ...persistedEncryptedMutationPatch(result),
+            body: persistedBody,
+            folderId: canonicalRewritten.folderId,
+            title: canonicalRewritten.title,
+            revision: result.revision
+          };
+        }));
+        const latest = draftsRef.current[entryId];
+        if (revisionRelation === "superseded" || !currentRevisionPayloadMatches) {
+          pathMutationSupersededRevision = observedRevision;
+          if (!currentRevisionPayloadMatches || Boolean(latest?.dirty && latest.baseRevision < observedRevision)) {
+            pathMutationSupersededHasConflict = true;
+            setConflictedEntryIds((current) => new Map(current).set(entryId, observedRevision));
+            setError("이름 변경 응답보다 최신 서버 revision을 유지했습니다. 현재 편집본은 덮어쓰지 않았습니다.");
+          }
+          pathMutationLocallyConfirmed = true;
+          return;
+        }
+        if (latest?.baseRevision === result.revision) {
+          // A matching subscription may arrive before this continuation. The
+          // draft already has the persisted rename as its base, including any
+          // later local keystrokes that must stay dirty.
+        } else if (latest && sameDraftPayload(latest, refreshedDraft)) {
+          const nextDrafts = {
+            ...draftsRef.current,
+            [entryId]: {
+              ...canonicalRewritten,
+              baseRevision: result.revision,
+              dirty: canonicalRewritten.body !== persistedBody
+            }
+          };
+          draftsRef.current = nextDrafts;
+          setDrafts(nextDrafts);
+        } else if (latest) {
+          pathMutationSupersededRevision = result.revision;
+          pathMutationSupersededHasConflict = true;
+          setConflictedEntryIds((current) => new Map(current).set(entryId, result.revision));
+          setError("이름 변경을 저장하는 동안 편집본이 변경되었습니다. 현재 편집은 보존하고 서버 결과와 안전하게 비교합니다.");
+        }
+        pathMutationLocallyConfirmed = true;
+      };
       const completed = await executePreparedPathRewrite(prepared, async (pathRewriteActivation) => {
-        let rewrittenDraft = { ...refreshedDraft, dirty: false, title };
+        let rewrittenDraft = canonicalizeDraftTitle({ ...refreshedDraft, dirty: false, title });
         if (selfPlan) {
           const applied = applyInternalLinkRewritePlan(
             selfPlan,
@@ -7220,6 +7535,8 @@ function UnlockedVaultPage({
           if (applied.status !== "applied") throw new Error("Canvas 자기 링크 source가 변경되었습니다.");
           rewrittenDraft = { ...rewrittenDraft, body: applied.source };
         }
+        pathMutationDraft = rewrittenDraft;
+        pathMutationPersistedBody = resolvingNameCollision ? serverTarget.body : rewrittenDraft.body;
         const revisionedTarget = { ...serverTarget, revision: refreshedDraft.baseRevision };
         const result = resolvingNameCollision
           ? await resolveDeferredVaultEntryCollision(
@@ -7238,32 +7555,38 @@ function UnlockedVaultPage({
               rewrittenDraft,
               pathRewriteActivation
             );
-        commitNotes((current) => current.map((candidate) => candidate.id === entryId
-          ? {
-              ...candidate,
-              ...persistedEncryptedMutationPatch(result),
-              body: resolvingNameCollision ? serverTarget.body : rewrittenDraft.body,
-              folderId: rewrittenDraft.folderId,
-              title,
-              revision: result.revision
-            }
-          : candidate));
-        const latest = draftsRef.current[entryId];
-        if (latest && sameDraftPayload(latest, refreshedDraft)) {
-          const nextDrafts = {
-            ...draftsRef.current,
-            [entryId]: {
-              ...rewrittenDraft,
-              baseRevision: result.revision,
-              dirty: resolvingNameCollision && rewrittenDraft.body !== serverTarget.body
-            }
-          };
-          draftsRef.current = nextDrafts;
-          setDrafts(nextDrafts);
-        } else if (latest) {
-          setConflictedEntryIds((current) => new Map(current).set(entryId, result.revision));
-        }
+        commitRenamedTarget(result, rewrittenDraft, pathMutationPersistedBody);
       });
+      if (!pathMutationLocallyConfirmed) {
+        const committedDraft = pathMutationDraft as DraftState | null;
+        if (!committedDraft) {
+          throw new Error("이름 변경 결과를 로컬 편집 버퍼와 연결하지 못했습니다.");
+        }
+        const remote = await readCurrentServerVaultEntry(entryId);
+        const confirmed = findConfirmedDraftSubmission({
+          body: remote.body,
+          folderId: remote.folderId ?? null,
+          revision: remote.revision ?? 0,
+          title: remote.title
+        }, [{ ...committedDraft, body: pathMutationPersistedBody }]);
+        if (!confirmed || remote.ownerUid !== profile.uid) {
+          throw new Error("서버에서 완료된 이름 변경 결과의 revision과 암호화 payload를 확인하지 못했습니다.");
+        }
+        commitRenamedTarget({
+          encryptedBody: remote.encryptedBody,
+          encryptedTitle: remote.encryptedTitle,
+          revision: remote.revision ?? 0,
+          vaultNameClaimId: remote.vaultNameClaimId,
+          vaultNameIndexVersion: remote.vaultNameIndexVersion
+        }, committedDraft, pathMutationPersistedBody);
+      }
+      if (pathMutationSupersededRevision !== null) {
+        if (!pathMutationSupersededHasConflict) {
+          setStatus("늦게 도착한 이름 변경 응답은 적용하지 않고 이미 수신한 최신 서버 revision을 유지했습니다.");
+        }
+        if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
+        return pathMutationSupersededHasConflict ? "blocked" as const : "saved" as const;
+      }
       const selfRewriteCount = (selfPlan?.patches.length ?? 0) + (selfCanvasPlan?.changeCount ?? 0);
       setStatus(resolvingNameCollision
         ? "중복 이름을 해소해 검증을 다시 시작합니다. 모호한 기존 링크는 자동 귀속하지 않습니다."

@@ -267,6 +267,8 @@ function CanvasFileChooser({
 }: CanvasFileChooserProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [optionSnapshot, setOptionSnapshot] = useState<readonly JsonCanvasFileOption[]>([]);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -279,12 +281,12 @@ function CanvasFileChooser({
     }
     const matches: JsonCanvasFileOption[] = [];
     let count = 0;
-    const selected = options.find((option) => option.path === value);
+    const selected = optionSnapshot.find((option) => option.path === value);
     if (!normalizedQuery && selected) {
       matches.push(selected);
       count = 1;
     }
-    for (const option of options) {
+    for (const option of optionSnapshot) {
       if (!normalizedQuery && option.path === selected?.path) {
         continue;
       }
@@ -298,7 +300,7 @@ function CanvasFileChooser({
       }
     }
     return { count, matches };
-  }, [normalizedQuery, open, options, value]);
+  }, [normalizedQuery, open, optionSnapshot, value]);
 
   useEffect(() => {
     if (open) {
@@ -308,6 +310,9 @@ function CanvasFileChooser({
 
   const close = useCallback(() => {
     setOpen(false);
+    setOptionSnapshot([]);
+    setQuery("");
+    setSelectionError(null);
     window.requestAnimationFrame(() => buttonRef.current?.focus());
   }, []);
 
@@ -372,6 +377,11 @@ function CanvasFileChooser({
               ? `${searchResult.count.toLocaleString("ko-KR")}개 중 ${CANVAS_FILE_RESULT_LIMIT}개를 표시합니다. 더 구체적으로 검색하세요.`
               : `${searchResult.count.toLocaleString("ko-KR")}개 파일`}
         </p>
+        {selectionError ? (
+          <p aria-live="assertive" className="vault-canvas-file-result-status" role="status">
+            {selectionError}
+          </p>
+        ) : null}
         <ul
           aria-label="Canvas 파일 검색 결과"
           className="vault-canvas-file-results"
@@ -382,6 +392,17 @@ function CanvasFileChooser({
               <button
                 aria-current={option.path === value ? "true" : undefined}
                 onClick={() => {
+                  const stillAuthorized = options.some((latestOption) => (
+                    latestOption.path === option.path
+                    && safeVaultPath(latestOption.path) === latestOption.path
+                  ));
+                  if (!stillAuthorized) {
+                    setOptionSnapshot(options.filter((latestOption) => (
+                      safeVaultPath(latestOption.path) === latestOption.path
+                    )));
+                    setSelectionError("파일 목록이 변경되었습니다. 다시 선택해주세요.");
+                    return;
+                  }
                   if (option.path !== value) {
                     onSelect(option.path);
                   }
@@ -411,6 +432,8 @@ function CanvasFileChooser({
         onClick={(event) => {
           event.stopPropagation();
           setQuery("");
+          setSelectionError(null);
+          setOptionSnapshot(options.filter((option) => safeVaultPath(option.path) === option.path));
           setOpen(true);
         }}
         onPointerDown={stopCanvasControlEvent}
