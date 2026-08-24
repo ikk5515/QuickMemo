@@ -58,7 +58,7 @@ import { AppShell } from "../components/AppShell";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
-import { emptyJsonCanvas, safeCanvasDocument } from "../features/canvas/canvasModel";
+import { emptyJsonCanvas } from "../features/canvas/canvasModel";
 import {
   applyCanvasPathRewritePlan,
   planVaultContentPathRewritesForPathChanges
@@ -182,18 +182,13 @@ import { WorkspacePaneTree, type WorkspacePaneRender } from "../features/vault/W
 import { VaultAssetPreview } from "../features/vault/VaultAssetPreview";
 import { setFrontmatterProperty } from "../features/vault/frontmatterEditing";
 import type { VaultHistoryDraft } from "../features/vault/VaultHistoryPanel";
-import { createSearchIndexMarkdown } from "../features/vault/moc";
 import { downloadBlob } from "../features/vault/browserDownload";
 import {
   createVaultImportManifest
 } from "../features/vault/importRollback";
-import { decodeVaultAsset, MAX_INLINE_VAULT_ASSET_BYTES } from "../features/vault/vaultAsset";
+import { decodeVaultAsset } from "../features/vault/vaultAsset";
 import { BoundedVaultAssetDecodeCache } from "../features/vault/vaultAssetCache";
-import {
-  assertFormatConversionSourceUnchanged,
-  planLegacyVaultFormatConversion,
-  type VaultMarkdownCopyDraft
-} from "../features/vault/core/formatConverter";
+import type { VaultMarkdownCopyDraft } from "../features/vault/core/formatConverter";
 import type { ComposerEntrySnapshot, NoteComposerAdapter } from "../features/vault/core/noteComposer";
 import { deterministicVaultOperationId } from "../features/vault/core/operationId";
 import {
@@ -275,7 +270,8 @@ import {
   moveOnlyEncryptedVaultEntry,
   saveAndMoveEncryptedVaultEntry,
   saveEncryptedVaultEntry,
-  type MarkdownNoteDraft
+  type MarkdownNoteDraft,
+  type VaultPastedImageSourceCommitCredential
 } from "../features/vault/vaultPersistence";
 import {
   VAULT_NAME_INDEX_VERSION,
@@ -284,6 +280,9 @@ import {
   vaultNameFingerprint
 } from "../features/vault/vaultIntegrity";
 import { requireValidProposedVaultFolderTree } from "../features/vault/vaultFolderPreflight";
+import type {
+  VaultPastedImageFolderRuntime
+} from "../features/vault/vaultPastedImageFolder";
 import {
   DEFAULT_VAULT_RIGHT_PANEL_WIDTH,
   MIN_VAULT_RIGHT_PANEL_WIDTH,
@@ -326,7 +325,9 @@ import {
   type NoteSnapshot
 } from "../services/notes";
 import { subscribeUsers } from "../services/users";
-import { VaultFolderApiError } from "../services/vaultFolderMutations";
+import {
+  VaultFolderApiError
+} from "../services/vaultFolderMutations";
 import { createVaultApiDeadline } from "../services/vaultApiDeadline";
 import { VaultNoteApiError } from "../services/vaultNoteMutations";
 import {
@@ -447,8 +448,8 @@ const LazyDrawingView = lazy(() => import("../features/drawing/DrawingView").the
 const LazyGraphView = lazy(() => import("../features/graph/GraphView").then((module) => ({
   default: module.GraphView
 })));
-const LazyJsonCanvasView = lazy(() => import("../features/canvas/JsonCanvasView").then((module) => ({
-  default: module.JsonCanvasView
+const LazyVaultJsonCanvasPane = lazy(() => import("../features/canvas/VaultJsonCanvasPane").then((module) => ({
+  default: module.VaultJsonCanvasPane
 })));
 const LazyKanbanBoard = lazy(() => import("../features/kanban/KanbanBoard").then((module) => ({
   default: module.KanbanBoard
@@ -1811,6 +1812,7 @@ function UnlockedVaultPage({
   }, []);
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
   const draftsRef = useRef(drafts);
+  const markdownDraftRevisionRef = useRef(0);
   const [viewMode, setViewMode] = useState<MarkdownViewMode>("live-preview");
   const [pagePreview, setPagePreview] = useState<ActiveVaultPagePreview | null>(null);
   const [calendarOpen, setCalendarOpen] = useState(true);
@@ -1917,15 +1919,68 @@ function UnlockedVaultPage({
     { folderId: string | null; sourceNoteId: string; title: string }
   >>(new Map());
   const pendingClipboardAssetTitleKeyByIdRef = useRef<Map<string, string>>(new Map());
+  const pendingClipboardAssetIdsRef = useRef<Set<string>>(new Set());
   const pendingClipboardPasteCountsRef = useRef<Map<string, number>>(new Map());
+  const blockedPastedImageRollbackReleasesRef = useRef<Map<
+    string,
+    Map<string, () => void>
+  >>(new Map());
+  const pastedImageFolderRuntimeRef = useRef<VaultPastedImageFolderRuntime | null>(null);
+  const pastedImageFolderRuntimePromiseRef = useRef<Promise<
+    VaultPastedImageFolderRuntime
+  > | null>(null);
+  const pastedImageFolderRuntimeGenerationRef = useRef(0);
+  const resetPastedImageFolderRuntime = useCallback(() => {
+    pastedImageFolderRuntimeGenerationRef.current += 1;
+    pastedImageFolderRuntimePromiseRef.current = null;
+    const runtime = pastedImageFolderRuntimeRef.current;
+    pastedImageFolderRuntimeRef.current = null;
+    runtime?.reset();
+  }, []);
+  async function loadPastedImageFolderRuntime() {
+    const loaded = pastedImageFolderRuntimeRef.current;
+    if (loaded) return loaded;
+    const inFlight = pastedImageFolderRuntimePromiseRef.current;
+    if (inFlight) return inFlight;
+
+    const generation = pastedImageFolderRuntimeGenerationRef.current;
+    const request = import("../features/vault/vaultPastedImageFolder").then((module) => {
+      const runtime = module.createVaultPastedImageFolderRuntime();
+      if (pastedImageFolderRuntimeGenerationRef.current !== generation) {
+        runtime.reset();
+        throw new DOMException("Vault 접근 범위가 변경되었습니다.", "AbortError");
+      }
+      pastedImageFolderRuntimeRef.current = runtime;
+      return runtime;
+    });
+    const clearRequest = () => {
+      if (pastedImageFolderRuntimePromiseRef.current === request) {
+        pastedImageFolderRuntimePromiseRef.current = null;
+      }
+    };
+    pastedImageFolderRuntimePromiseRef.current = request;
+    void request.then(clearRequest, clearRequest);
+    return request;
+  }
   useEffect(() => {
     for (const note of notes) {
       const pendingTitleKey = pendingClipboardAssetTitleKeyByIdRef.current.get(note.id);
       if (!pendingTitleKey) continue;
+      const reservation = pendingClipboardAssetTitleKeysRef.current.get(pendingTitleKey);
+      if (
+        !reservation
+        || note.ownerUid !== profile.uid
+        || note.isDeleted
+        || note.entryKind !== "asset"
+        || (note.folderId ?? null) !== reservation.folderId
+        || note.title !== reservation.title
+      ) continue;
       pendingClipboardAssetTitleKeyByIdRef.current.delete(note.id);
       pendingClipboardAssetTitleKeysRef.current.delete(pendingTitleKey);
+      pendingClipboardAssetIdsRef.current.delete(note.id);
+      pendingCreatedEntryIdsRef.current.delete(note.id);
     }
-  }, [notes]);
+  }, [notes, profile.uid]);
   const previousOwnerIdKeyRef = useRef(ownerIdKey);
   const noteSubscriptionGenerationRef = useRef(0);
   const noteAccessScopeRef = useRef<string[]>([]);
@@ -1967,7 +2022,10 @@ function UnlockedVaultPage({
   ) => Promise<VaultEntryRenameResult>>(async () => "blocked");
   const moveEntryRef = useRef<(entryId: string, folderId: string | null) => Promise<void>>(async () => undefined);
   const trashEntryRef = useRef<(entryId: string, confirmed?: boolean) => Promise<void>>(async () => undefined);
-  const saveEntryRef = useRef<(entryId: string) => Promise<void>>(async () => undefined);
+  const saveEntryRef = useRef<(
+    entryId: string,
+    pastedImageSourceCommit?: VaultPastedImageSourceCommitCredential
+  ) => Promise<void>>(async () => undefined);
   const entryAutosaveRef = useRef<EntryIdleDebounce | null>(null);
   entryAutosaveRef.current ??= new EntryIdleDebounce();
   const entryAutosaveRetryCountsRef = useRef<Map<string, number>>(new Map());
@@ -2420,7 +2478,10 @@ function UnlockedVaultPage({
     pendingCreatedEntryIdsRef.current.clear();
     pendingClipboardAssetTitleKeysRef.current.clear();
     pendingClipboardAssetTitleKeyByIdRef.current.clear();
+    pendingClipboardAssetIdsRef.current.clear();
     pendingClipboardPasteCountsRef.current.clear();
+    blockedPastedImageRollbackReleasesRef.current.clear();
+    resetPastedImageFolderRuntime();
     noteAccessScopeRef.current = [];
     noteSubscriptionServerReadyRef.current = false;
     setRawNotes([]);
@@ -2512,7 +2573,7 @@ function UnlockedVaultPage({
       return null;
     });
     setKnowledgeClientGeneration((current) => current + 1);
-  }, []);
+  }, [resetPastedImageFolderRuntime]);
 
   useLayoutEffect(() => {
     const previousOwnerIdKey = previousOwnerIdKeyRef.current;
@@ -2957,13 +3018,17 @@ function UnlockedVaultPage({
     // synchronously wipe decrypted refs so a late Promise cannot repopulate
     // plaintext after lock, logout, or unmount.
     decryptGeneration.current += 1;
+    workspaceAccessScopeGenerationRef.current += 1;
     notesRef.current = [];
     foldersRef.current = [];
     allVisibleNoteSnapshotsRef.current = [];
     pendingCreatedEntryIdsRef.current.clear();
     pendingClipboardAssetTitleKeysRef.current.clear();
     pendingClipboardAssetTitleKeyByIdRef.current.clear();
+    pendingClipboardAssetIdsRef.current.clear();
     pendingClipboardPasteCountsRef.current.clear();
+    blockedPastedImageRollbackReleasesRef.current.clear();
+    resetPastedImageFolderRuntime();
     entryAutosaveRef.current?.cancelAll();
     entryAutosaveRetryCountsRef.current.clear();
     ambiguousEntrySaveAttemptsRef.current.clear();
@@ -3012,7 +3077,7 @@ function UnlockedVaultPage({
       window.clearTimeout(workspaceSaveDebounceTimerRef.current);
       workspaceSaveDebounceTimerRef.current = null;
     }
-  }, []);
+  }, [resetPastedImageFolderRuntime]);
 
   useEffect(() => {
     decodedAssetCacheRef.current.clear();
@@ -3398,15 +3463,21 @@ function UnlockedVaultPage({
       return undefined;
     }
     return subscribeNoteFolders(profile.uid, (nextFolders, metadata) => {
+      const folderContentChanged = activeFolderSnapshotsRef.current !== nextFolders;
       activeFolderSnapshotsRef.current = nextFolders;
       folderSubscriptionServerReadyRef.current = metadata.serverComplete;
       const activeNotes = visibleVaultNotesForFolders(
         allVisibleNoteSnapshotsRef.current,
         nextFolders
       );
-      setVaultDataReady(false);
-      setRawFolders(nextFolders);
-      setRawNotes(activeNotes);
+      if (folderContentChanged) {
+        // vaultPasteLock is an opaque, server-only coordination field. Its
+        // acquire/renew/release notifications must not re-run WebCrypto across
+        // every note and folder when no user-visible folder data changed.
+        setVaultDataReady(false);
+        setRawFolders(nextFolders);
+        setRawNotes(activeNotes);
+      }
       setFolderSnapshotReceived(true);
       setFolderServerReservationSignature(metadata.serverComplete
         ? ownedFolderReservationSignature(nextFolders, profile.uid)
@@ -3459,8 +3530,12 @@ function UnlockedVaultPage({
     decryptGeneration.current = generation;
     let cancelled = false;
     void Promise.all([
-      decryptVaultNotes(rawNotes, profile.uid, privateKey),
-      decryptVaultFolders(rawFolders, profile.uid, privateKey)
+      decryptVaultNotes(rawNotes, profile.uid, privateKey, {
+        reusableNotes: notesRef.current
+      }),
+      decryptVaultFolders(rawFolders, profile.uid, privateKey, {
+        reusableFolders: foldersRef.current
+      })
     ]).then(([nextNotes, nextFolders]) => {
       if (cancelled || decryptGeneration.current !== generation) {
         return;
@@ -4097,6 +4172,10 @@ function UnlockedVaultPage({
       draftsRef.current[entryId]?.body ?? note.body
     );
   }, [noteById]);
+  const draftBodyForCanvasEntry = useCallback(
+    (entryId: string, fallback: string) => draftsRef.current[entryId]?.body ?? fallback,
+    []
+  );
   const indexEntryById = useMemo(
     () => new Map(indexEntries.map((entry) => [entry.id, entry])),
     [indexEntries]
@@ -4471,42 +4550,10 @@ function UnlockedVaultPage({
     // plaintext popup before paint. Nothing from Page Preview is persisted.
     dismissVaultPagePreview();
   }, [activeEntryId, dismissVaultPagePreview, noteById, vaultPlaintextScopeReady, viewMode]);
-  const activeCanvasAssetPaths = useMemo(() => {
-    if (activeNote?.entryKind !== "canvas" || !activeDraft) {
-      return new Set<string>();
-    }
-    return new Set(safeCanvasDocument(activeDraft.body).nodes.flatMap((node) => {
-      if (node.type === "file") {
-        return [node.file];
-      }
-      if (node.type === "group" && node.background) {
-        return [node.background];
-      }
-      return [];
-    }));
-  }, [activeDraft, activeNote?.entryKind]);
-  const canvasFileOptions = useMemo(() => indexEntries
-    .filter((entry) => entry.kind !== "legacy-html")
-    .map((entry) => ({
-      ...(entry.kind === "asset" && activeCanvasAssetPaths.has(entry.path)
-        ? { asset: decodedAssetForEntry(entry.id) ?? undefined }
-        : {}),
-      ...(entry.kind === "markdown" ? { content: entry.content ?? "" } : {}),
-      kind: entry.kind as "markdown" | "canvas" | "base" | "asset",
-      label: entry.path,
-      path: entry.path
-    })), [activeCanvasAssetPaths, decodedAssetForEntry, indexEntries]);
-  const canvasFilePathByEntryId = useMemo(() => new Map(indexEntries
-    .filter((entry) => entry.kind !== "legacy-html")
-    .map((entry) => [entry.id, entry.path] as const)), [indexEntries]);
-  const resolveCanvasVaultEntryDrop = useCallback(
-    (entryId: string) => canvasFilePathByEntryId.get(entryId) ?? null,
-    [canvasFilePathByEntryId]
-  );
+  const deferredActiveBody = useDeferredValue(activeDraft?.body ?? "");
   const activeMarkdownPluginView = activeNote?.entryKind === "markdown" && activeDraft
     ? detectMarkdownPluginView(activeDraft.body)
     : null;
-  const deferredActiveBody = useDeferredValue(activeDraft?.body ?? "");
   const activeDocumentStats = useMemo(
     () => markdownDocumentStats(deferredActiveBody),
     [deferredActiveBody]
@@ -4974,11 +5021,28 @@ function UnlockedVaultPage({
     tags: completionTags
   };
 
-  const saveEntry = useCallback(async (entryId: string) => {
+  const saveEntry = useCallback(async (
+    entryId: string,
+    pastedImageSourceCommit?: VaultPastedImageSourceCommitCredential
+  ) => {
     // Explicit saves, navigation flushes, and fired idle callbacks all own the
     // next attempt. Cancel only this entry so unrelated notes keep their own
     // idle deadlines.
     entryAutosaveRef.current?.cancel(entryId);
+    if (!pastedImageSourceCommit) {
+      const blockedRollbacks = blockedPastedImageRollbackReleasesRef.current.get(entryId);
+      if (blockedRollbacks) {
+        const currentBody = draftsRef.current[entryId]?.body ?? "";
+        const rollbackModule = await import("../features/vault/vaultClipboardPasteFlow");
+        if (rollbackModule.releaseResolvedVaultClipboardRollbacks(currentBody, blockedRollbacks)) {
+          blockedPastedImageRollbackReleasesRef.current.delete(entryId);
+        } else {
+          setError(rollbackModule.VAULT_CLIPBOARD_ROLLBACK_BLOCKED_MESSAGE);
+          return;
+        }
+      }
+      if (pendingClipboardPasteCountsRef.current.has(entryId)) return;
+    }
     const scheduleRetry = () => {
       const latestDraft = draftsRef.current[entryId];
       if (!isOnline || !latestDraft?.dirty) return false;
@@ -5003,7 +5067,7 @@ function UnlockedVaultPage({
     if (existingMutation) {
       await existingMutation;
       if (draftsRef.current[entryId]?.dirty) {
-        await saveEntryRef.current(entryId);
+        await saveEntryRef.current(entryId, pastedImageSourceCommit);
       }
       return;
     }
@@ -5015,8 +5079,12 @@ function UnlockedVaultPage({
       return;
     }
     if (!isOnline) {
-      setSaveFailedEntryIds((current) => new Set(current).add(entryId));
-      setStatus("오프라인 · 편집 내용은 현재 세션 메모리에만 보존되며 연결되면 다시 저장합니다.");
+      if (pastedImageSourceCommit) {
+        setError("서버 연결이 끊겨 이미지 링크를 안전하게 저장하지 못했습니다.");
+      } else {
+        setSaveFailedEntryIds((current) => new Set(current).add(entryId));
+        setStatus("오프라인 · 편집 내용은 현재 세션 메모리에만 보존되며 연결되면 다시 저장합니다.");
+      }
       return;
     }
     if (conflictedEntryIds.has(entryId)) {
@@ -5210,7 +5278,9 @@ function UnlockedVaultPage({
             profile.uid,
             privateKey,
             vaultIntegrityKey,
-            draft
+            draft,
+            undefined,
+            pastedImageSourceCommit
           );
         } catch (caught) {
           if (ambiguousVaultSaveFailure(caught)) rememberAmbiguousAttempt();
@@ -5262,9 +5332,11 @@ function UnlockedVaultPage({
           void prepareDraftMergeConflict(entryId, false);
         }
       } else {
-        setSaveFailedEntryIds((current) => new Set(current).add(entryId));
+        if (!pastedImageSourceCommit) {
+          setSaveFailedEntryIds((current) => new Set(current).add(entryId));
+        }
         setError(caught instanceof Error ? caught.message : "노트를 저장하지 못했습니다.");
-        if (!scheduleRetry()) {
+        if (!pastedImageSourceCommit && !scheduleRetry()) {
           setStatus("자동 저장이 반복 실패했습니다. 현재 편집본은 이 세션에 보존되어 있으며 다시 입력하거나 저장을 눌러 재시도할 수 있습니다.");
         }
       }
@@ -5493,6 +5565,13 @@ function UnlockedVaultPage({
     entryAutosaveRetryCountsRef.current.delete(entryId);
     const note = notesRef.current.find((candidate) => candidate.id === entryId);
     const currentDraft = draftsRef.current[entryId];
+    if (
+      note?.entryKind === "markdown"
+      && patch.body !== undefined
+      && patch.body !== currentDraft?.body
+    ) {
+      markdownDraftRevisionRef.current += 1;
+    }
     if (!currentDraft?.dirty) {
       captureMarkdownDraftBase(entryId, note, currentDraft);
     }
@@ -7145,6 +7224,10 @@ function UnlockedVaultPage({
       setError("다른 경로 변경의 내부 참조를 확인하는 중입니다.");
       return;
     }
+    if (clipboardAssetsPendingForFolder(folderId)) {
+      setError("이미지 붙여넣기가 끝난 뒤 이 폴더를 이동해주세요.");
+      return;
+    }
     if (!canMutateExistingNameTarget(folderId)) {
       setError("암호화된 이름 예약 검증이 끝날 때까지 폴더 이동이 잠깁니다.");
       return;
@@ -7284,6 +7367,10 @@ function UnlockedVaultPage({
     }
     if (pathRewriteBusyRef.current) {
       setError("다른 경로 변경의 내부 참조를 확인하는 중입니다.");
+      return;
+    }
+    if (clipboardAssetsPendingForFolder(folderId)) {
+      setError("이미지 붙여넣기가 끝난 뒤 이 폴더 이름을 변경해주세요.");
       return;
     }
     if (!canMutateExistingNameTarget(folderId)) {
@@ -7867,9 +7954,31 @@ function UnlockedVaultPage({
   }
 
   function clipboardAssetsPendingForEntry(entryId: string) {
-    return pendingClipboardPasteCountsRef.current.has(entryId)
+    return pendingClipboardAssetIdsRef.current.has(entryId)
+      || pendingClipboardPasteCountsRef.current.has(entryId)
       || [...pendingClipboardAssetTitleKeysRef.current.values()]
         .some((reservation) => reservation.sourceNoteId === entryId);
+  }
+
+  function clipboardPendingAssetFolderIds() {
+    const titleReservations = pendingClipboardAssetTitleKeysRef.current;
+    const pendingAssetIds = pendingClipboardAssetIdsRef.current;
+    if (titleReservations.size === 0 && pendingAssetIds.size === 0) {
+      return new Set<string>();
+    }
+    const runtime = pastedImageFolderRuntimeRef.current;
+    if (!runtime) {
+      return new Set(foldersRef.current.map((folder) => folder.id));
+    }
+    return runtime.pendingFolderIds(
+      titleReservations.values(),
+      pendingAssetIds,
+      notesRef.current
+    );
+  }
+
+  function clipboardAssetsPendingForFolder(folderId: string) {
+    return clipboardPendingAssetFolderIds().has(folderId);
   }
 
   async function moveFolderToTrash(folderId: string, confirmed = false) {
@@ -7894,6 +8003,11 @@ function UnlockedVaultPage({
       setError("내가 소유한 암호화 폴더만 휴지통으로 이동할 수 있습니다.");
       return;
     }
+    const pendingAssetFolderIds = clipboardPendingAssetFolderIds();
+    if (pendingAssetFolderIds.has(folderId)) {
+      setError("이미지 붙여넣기가 끝난 뒤 이 폴더를 휴지통으로 이동해주세요.");
+      return;
+    }
     const projected = partitionVaultFolderTrash(foldersRef.current.map((candidate) => (
       candidate.id === folderId ? { ...candidate, isDeleted: true } : candidate
     )));
@@ -7906,6 +8020,10 @@ function UnlockedVaultPage({
       .map((note) => note.id));
     if ([...hiddenEntryIds].some(clipboardAssetsPendingForEntry)) {
       setError("하위 노트의 이미지 붙여넣기가 끝난 뒤 폴더를 휴지통으로 이동해주세요.");
+      return;
+    }
+    if ([...hiddenFolderIds].some((hiddenFolderId) => pendingAssetFolderIds.has(hiddenFolderId))) {
+      setError("하위 폴더의 이미지 붙여넣기가 끝난 뒤 폴더를 휴지통으로 이동해주세요.");
       return;
     }
     if ([...hiddenEntryIds].some((entryId) => deletingEntryIdsRef.current.has(entryId))) {
@@ -7930,6 +8048,10 @@ function UnlockedVaultPage({
       await flushOwnedRewriteDrafts();
       if ([...hiddenEntryIds].some(clipboardAssetsPendingForEntry)) {
         throw new Error("하위 노트의 이미지 붙여넣기 상태가 변경되어 폴더 휴지통 처리를 중단했습니다.");
+      }
+      const refreshedPendingAssetFolderIds = clipboardPendingAssetFolderIds();
+      if ([...hiddenFolderIds].some((hiddenFolderId) => refreshedPendingAssetFolderIds.has(hiddenFolderId))) {
+        throw new Error("하위 폴더의 이미지 붙여넣기 상태가 변경되어 폴더 휴지통 처리를 중단했습니다.");
       }
       if (pathRewriteBusyRef.current) {
         throw new Error("다른 경로 변경이 시작되어 폴더 휴지통 처리를 중단했습니다.");
@@ -9123,6 +9245,7 @@ function UnlockedVaultPage({
   }
 
   async function createIndexFromCurrentSearch() {
+    const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;
     if (searchQuery.trim() && knowledgeClient && workerSearchEntryIds === null) {
       setError("검색 결과 계산이 끝난 뒤 인덱스를 만들어주세요.");
       return;
@@ -9141,6 +9264,8 @@ function UnlockedVaultPage({
     const defaultTitle = searchQuery.trim() ? "검색 결과 인덱스" : "지식 인덱스";
     const requestedTitle = window.prompt("인덱스 이름", defaultTitle)?.trim();
     if (!requestedTitle) return;
+    const { createSearchIndexMarkdown } = await import("../features/vault/moc");
+    if (workspaceAccessScopeGenerationRef.current !== accessScopeGeneration) return;
     const result = createSearchIndexMarkdown({
       candidates,
       query: searchQuery,
@@ -9613,15 +9738,57 @@ function UnlockedVaultPage({
     setStatus(`'${title}' 녹음을 asset-v1로 암호화해 저장했습니다.`);
   }
 
+  async function resolvePastedImageAssetDestination(signal: AbortSignal) {
+    if (!vaultIntegrityKey || !vaultNameWritesReady || pathRewriteBusyRef.current) {
+      throw new Error("경로 작업 후 이미지를 추가해주세요.");
+    }
+    const runtime = await loadPastedImageFolderRuntime();
+    signal.throwIfAborted();
+    if (!vaultIntegrityKey || !vaultNameWritesReady || pathRewriteBusyRef.current) {
+      throw new Error("Vault 상태가 바뀌었습니다. 다시 시도해주세요.");
+    }
+    return runtime.resolveServerLease({
+      createFolder: async (currentFolders) => {
+        if (!vaultIntegrityKey || !vaultNameWritesReady || pathRewriteBusyRef.current) {
+          throw new Error("Vault 상태가 바뀌었습니다. 다시 시도해주세요.");
+        }
+        requireValidVaultFolderTree([
+          ...currentFolders,
+          { id: `pending-pasted-images-${crypto.randomUUID()}`, parentId: null }
+        ]);
+        return createEncryptedVaultFolder(
+          profile,
+          vaultIntegrityKey,
+          runtime.folderName,
+          null,
+          currentFolders.length
+        );
+      },
+      getFolders: () => foldersRef.current,
+      isNameConflict: (caught) => caught instanceof VaultNameConflictError,
+      ownerUid: profile.uid,
+      signal
+    });
+  }
+
   async function pasteImagesIntoMarkdownEntry(
     entryId: string,
     files: readonly File[],
     { signal }: MarkdownImagePasteContext
   ): Promise<MarkdownImagePasteResult | null> {
+    const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;
+    const accessScopeIsCurrent = () => (
+      workspaceAccessScopeGenerationRef.current === accessScopeGeneration
+    );
+    const requireCurrentAccessScope = () => {
+      if (!accessScopeIsCurrent()) {
+        throw new DOMException("Vault 접근 범위가 변경되었습니다.", "AbortError");
+      }
+    };
     const note = notesRef.current.find((candidate) => candidate.id === entryId) ?? null;
     const draft = draftsRef.current[entryId] ?? null;
     if (!note || !draft || note.entryKind !== "markdown" || note.contentFormat !== "markdown-v1") {
-      setError("Markdown 노트를 연 뒤 이미지를 추가해주세요.");
+      setError("Markdown 노트를 열어주세요.");
       return null;
     }
     if (
@@ -9631,49 +9798,142 @@ function UnlockedVaultPage({
       || pendingEntryCreationRef.current
       || deletingEntryIdsRef.current.has(note.id)
     ) {
-      setError("암호화된 Vault 쓰기와 경로 작업이 끝난 뒤 이미지를 추가해주세요.");
+      setError("경로 작업 후 이미지를 추가해주세요.");
       return null;
     }
     if (note.ownerUid !== profile.uid || note.type !== "personal") {
-      setError("공유 참여자의 접근이 끊기지 않도록 현재는 내가 소유한 개인 Markdown 노트에만 이미지를 직접 추가할 수 있습니다.");
+      setError("내 개인 Markdown 노트에서만 지원합니다.");
       return null;
     }
 
-    pendingClipboardPasteCountsRef.current.set(
-      note.id,
-      (pendingClipboardPasteCountsRef.current.get(note.id) ?? 0) + 1
-    );
+    let releasePendingPaste = () => {};
     setError(null);
-    setStatus(files.length > 1
-      ? `${files.length}개 이미지를 안전하게 확인하는 중입니다…`
-      : "이미지를 안전하게 확인하는 중입니다…");
+    setStatus(`${files.length > 1 ? `${files.length}개 ` : ""}이미지를 확인 중입니다…`);
     try {
-      const { pasteVaultClipboardImages } = await import(
+      const pasteModule = await import(
         "../features/vault/vaultClipboardPasteFlow"
       );
-      return await pasteVaultClipboardImages({
+      releasePendingPaste = pasteModule.beginVaultClipboardPastePendingGuard({
+        counts: pendingClipboardPasteCountsRef.current,
+        entryId: note.id,
+        hasDirtyDraft: () => Boolean(draftsRef.current[note.id]?.dirty),
+        resumeSave: () => void saveEntryRef.current(note.id)
+      });
+      const result = await pasteModule.pasteVaultClipboardImages({
+        assertAssetDestinationCurrent: (target) => {
+          requireCurrentAccessScope();
+          const runtime = pastedImageFolderRuntimeRef.current;
+          if (!runtime) throw new Error("이미지 폴더 상태가 만료되었습니다.");
+          runtime.assertTargetCurrent({
+            getFolders: () => foldersRef.current,
+            ownerUid: profile.uid,
+            pathRewriteBusy: pathRewriteBusyRef.current,
+            target
+          });
+        },
+        commitSource: async (source, destination) => {
+          requireCurrentAccessScope();
+          const minimumRevision = note.revision ?? 0;
+          const committed = await pasteModule.commitVaultClipboardSourceWithConfirmation(
+            () => saveEntryRef.current(entryId, {
+              vaultPasteFolderId: destination.folderId,
+              vaultPasteFolderRevision: destination.folderRevision,
+              vaultPasteLockId: destination.lockId
+            }),
+            () => notesRef.current.some((candidate) => (
+              candidate.id === entryId
+              && candidate.ownerUid === profile.uid
+              && (candidate.revision ?? 0) > minimumRevision
+              && candidate.body.includes(source)
+            )),
+            () => Boolean(draftsRef.current[entryId]?.dirty)
+          );
+          requireCurrentAccessScope();
+          return committed;
+        },
+        confirmAssetDestination: (lease) => {
+          requireCurrentAccessScope();
+          const runtime = pastedImageFolderRuntimeRef.current;
+          return runtime
+            ? runtime.confirm(lease)
+            : Promise.reject(new Error("이미지 폴더 상태가 만료되었습니다."));
+        },
         files,
         getNotes: () => notesRef.current,
         integrityKey: vaultIntegrityKey,
         note,
         pendingAssetTitleKeyById: pendingClipboardAssetTitleKeyByIdRef.current,
         pendingAssetTitleKeys: pendingClipboardAssetTitleKeysRef.current,
+        pendingClipboardAssetIds: pendingClipboardAssetIdsRef.current,
         pendingCreatedEntryIds: pendingCreatedEntryIdsRef.current,
         profile,
-        setError,
-        setStatus,
+        releaseAssetDestination: (lease) => (
+          pastedImageFolderRuntimeRef.current?.release(lease)
+          ?? Promise.resolve()
+        ),
+        resolveAssetDestination: async (resolveSignal) => {
+          requireCurrentAccessScope();
+          const destination = await resolvePastedImageAssetDestination(resolveSignal);
+          if (!accessScopeIsCurrent()) {
+            await pastedImageFolderRuntimeRef.current?.release(destination);
+            requireCurrentAccessScope();
+          }
+          return destination;
+        },
+        rollbackSource: (rollback) => {
+          if (!accessScopeIsCurrent()) return false;
+          const latestDraft = draftsRef.current[entryId];
+          if (!latestDraft) return false;
+          const body = pasteModule.rollbackVaultClipboardSource(latestDraft.body, rollback);
+          if (body === null) return false;
+          if (body !== latestDraft.body) updateEntryDraft(entryId, { body });
+          return true;
+        },
+        setError: (message) => {
+          if (accessScopeIsCurrent()) setError(message);
+        },
+        setStatus: (message) => {
+          if (accessScopeIsCurrent()) setStatus(message);
+        },
         signal,
-        sourceFolderId: draft.folderId
+        sourceFolderId: draft.folderId,
+        sourceTitle: draft.title
       });
+      if (!accessScopeIsCurrent()) {
+        await result?.onDiscard?.();
+        releasePendingPaste();
+        return null;
+      }
+      if (!result) {
+        releasePendingPaste();
+        return null;
+      }
+      return {
+        ...result,
+        onSettled: async (outcome) => {
+          try {
+            await result.onSettled?.(outcome);
+          } finally {
+            if (!accessScopeIsCurrent()) {
+              releasePendingPaste();
+            } else if (outcome === "rollback-blocked") {
+              const blocked = blockedPastedImageRollbackReleasesRef.current.get(entryId)
+                ?? new Map<string, () => void>();
+              blocked.set(result.source, releasePendingPaste);
+              blockedPastedImageRollbackReleasesRef.current.set(entryId, blocked);
+              setError(pasteModule.VAULT_CLIPBOARD_ROLLBACK_BLOCKED_MESSAGE);
+            } else {
+              releasePendingPaste();
+            }
+          }
+        }
+      };
     } catch (caught) {
-      if (!signal.aborted) {
-        setError(caught instanceof Error ? caught.message : "이미지 추가 모듈을 불러오지 못했습니다.");
+      releasePendingPaste();
+      if (accessScopeIsCurrent() && !signal.aborted) {
+        setError(caught instanceof Error ? caught.message : "이미지 모듈 오류입니다.");
       }
       return null;
-    } finally {
-      const nextPasteCount = (pendingClipboardPasteCountsRef.current.get(note.id) ?? 1) - 1;
-      if (nextPasteCount > 0) pendingClipboardPasteCountsRef.current.set(note.id, nextPasteCount);
-      else pendingClipboardPasteCountsRef.current.delete(note.id);
     }
   }
 
@@ -9686,6 +9946,12 @@ function UnlockedVaultPage({
   }
 
   async function importCanvasExternalFiles(files: readonly File[]) {
+    const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;
+    const assertCurrent = () => {
+      if (workspaceAccessScopeGenerationRef.current !== accessScopeGeneration) {
+        throw new DOMException("Vault 접근 범위가 변경되었습니다.", "AbortError");
+      }
+    };
     if (!vaultIntegrityKey || !vaultNameWritesReady || pathRewriteBusyRef.current) {
       throw new Error("암호화된 이름 예약이 끝난 뒤 외부 파일을 추가해주세요.");
     }
@@ -9694,65 +9960,45 @@ function UnlockedVaultPage({
     if (folderId && !folderPath) {
       throw new Error("외부 파일을 저장할 Vault 폴더를 확인하지 못했습니다.");
     }
-    const reservedNames = new Set(notesRef.current
+    const existingTitles = notesRef.current
       .filter((note) => (note.folderId ?? null) === folderId)
-      .map((note) => entryLabel(note).normalize("NFC").toLocaleLowerCase()));
-    const paths: string[] = [];
-    let rejected = 0;
-
-    for (const [index, file] of files.entries()) {
-      if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_INLINE_VAULT_ASSET_BYTES) {
-        rejected += 1;
-        continue;
-      }
-      const normalizedName = file.name
-        .normalize("NFC")
-        .replace(/[\p{Cc}/\\]/gu, "-")
-        .replace(/\s+/gu, " ")
-        .trim()
-        .slice(0, 180);
-      const baseName = normalizedName && normalizedName !== "." && normalizedName !== ".."
-        ? normalizedName
-        : `Canvas 첨부 ${index + 1}`;
-      let title = baseName;
-      let suffix = 2;
-      while (reservedNames.has(title.toLocaleLowerCase())) {
-        const suffixText = ` ${suffix}`;
-        title = `${baseName.slice(0, 180 - suffixText.length)}${suffixText}`;
-        suffix += 1;
-      }
-      reservedNames.add(title.toLocaleLowerCase());
-
-      let bytes: Uint8Array | null = null;
-      try {
-        bytes = new Uint8Array(await file.arrayBuffer());
-        if (bytes.byteLength !== file.size) {
-          throw new Error("external-file-size-mismatch");
-        }
+      .map((note) => entryLabel(note));
+    const canvasImport = await import("../features/canvas/vaultCanvasExternalFiles");
+    assertCurrent();
+    return canvasImport.importVaultCanvasExternalFiles({
+      assertCurrent,
+      createAsset: async ({ bytes, mimeType, title }) => {
+        assertCurrent();
         const result = await createEncryptedVaultAsset(profile, vaultIntegrityKey, {
           bytes,
           folderId,
-          mimeType: file.type || "application/octet-stream",
+          mimeType,
           title
         });
+        assertCurrent();
         pendingCreatedEntryIdsRef.current.add(result.noteId);
-        paths.push(folderPath ? `${folderPath}/${title}` : title);
-      } catch {
-        rejected += 1;
-      } finally {
-        bytes?.fill(0);
-      }
-    }
-
-    return { paths, rejected };
+      },
+      existingTitles,
+      files,
+      folderPath: folderPath ?? ""
+    });
   }
 
   async function createConvertedMarkdownCopy(draft: VaultMarkdownCopyDraft) {
+    const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;
+    const assertCurrent = () => {
+      if (workspaceAccessScopeGenerationRef.current !== accessScopeGeneration) {
+        throw new DOMException("Vault 접근 범위가 변경되었습니다.", "AbortError");
+      }
+    };
     if (!vaultIntegrityKey || !vaultNameWritesReady || pathRewriteBusyRef.current) {
       throw new Error("암호화된 이름 예약이 끝난 뒤 복사본을 만들어주세요.");
     }
+    const formatConverter = await import("../features/vault/core/formatConverter");
+    assertCurrent();
     const encrypted = await getVisibleNotesByIdsFromServer(profile.uid, [draft.sourceEntryId]);
     const [latest] = await decryptVaultNotes(encrypted.notes, profile.uid, privateKey);
+    assertCurrent();
     if (!latest || latest.contentFormat !== "legacy-html-v1") {
       throw new Error("변환할 HTML 원본을 서버에서 다시 확인하지 못했습니다.");
     }
@@ -9760,7 +10006,7 @@ function UnlockedVaultPage({
     if (!localSource || localSource.contentFormat !== "legacy-html-v1") {
       throw new Error("미리보기한 HTML 원본을 현재 Vault에서 다시 확인하지 못했습니다.");
     }
-    const previewPlan = planLegacyVaultFormatConversion({
+    const previewPlan = formatConverter.planLegacyVaultFormatConversion({
       body: localSource.body,
       contentFormat: "legacy-html-v1",
       folderId: localSource.folderId ?? null,
@@ -9775,7 +10021,7 @@ function UnlockedVaultPage({
     ) {
       throw new Error("미리보기와 변환 요청이 일치하지 않습니다. 최신 원본으로 다시 미리보기해주세요.");
     }
-    assertFormatConversionSourceUnchanged(previewPlan, {
+    formatConverter.assertFormatConversionSourceUnchanged(previewPlan, {
       body: latest.body,
       contentFormat: "legacy-html-v1",
       folderId: latest.folderId ?? null,
@@ -9783,7 +10029,7 @@ function UnlockedVaultPage({
       revision: latest.revision ?? 0,
       title: latest.title
     });
-    const verifiedPlan = planLegacyVaultFormatConversion({
+    const verifiedPlan = formatConverter.planLegacyVaultFormatConversion({
       body: latest.body,
       contentFormat: "legacy-html-v1",
       folderId: latest.folderId ?? null,
@@ -9805,6 +10051,7 @@ function UnlockedVaultPage({
       folderId: targetFolderId,
       title
     });
+    assertCurrent();
     pendingCreatedEntryIdsRef.current.add(result.noteId);
     setStatus(`원본을 보존하고 '${title}' Markdown 복사본을 만들었습니다.`);
   }
@@ -11013,8 +11260,13 @@ function UnlockedVaultPage({
                 <div className="vault-note-content">
                   {activeNote.entryKind === "canvas" ? (
                     <Suspense fallback={<VaultViewLoading label="Canvas" />}>
-                      <LazyJsonCanvasView
-                        fileOptions={canvasFileOptions}
+                      <LazyVaultJsonCanvasPane
+                        decodedAssetForEntry={decodedAssetForEntry}
+                        entryPaths={entryPaths}
+                        getDraftBody={draftBodyForCanvasEntry}
+                        key={activeNote.id}
+                        markdownDraftRevision={markdownDraftRevisionRef.current}
+                        notes={notes}
                         onChange={(body) => updateActiveDraft({ body })}
                         onImportExternalFiles={importCanvasExternalFiles}
                         onOpenFile={(path) => {
@@ -11022,7 +11274,6 @@ function UnlockedVaultPage({
                           if (entry) openEntry(entry.id);
                         }}
                         readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                        resolveVaultEntryDrop={resolveCanvasVaultEntryDrop}
                         source={activeDraft.body}
                       />
                     </Suspense>

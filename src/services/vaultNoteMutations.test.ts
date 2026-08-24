@@ -139,6 +139,17 @@ describe("Vault note mutation API client", () => {
     }));
     expect(() => vaultNoteCreatePayload(createInput, "predictable-note-id"))
       .toThrow("생성 식별자");
+
+    const vaultPasteLockId = `vpl1_${"L".repeat(43)}`;
+    expect(vaultNoteCreatePayload({
+      ...createInput,
+      folderId: "pasted-images",
+      nameClaim: { ...claim, parentId: "pasted-images" },
+      vaultPasteLockId
+    }, noteId)).toMatchObject({
+      folderId: "pasted-images",
+      vaultPasteLockId
+    });
   });
 
   it("retries an ambiguous create response once with the exact same opaque id and ciphertext", async () => {
@@ -426,13 +437,22 @@ describe("Vault note mutation API client", () => {
       expectedRevision: 4,
       noteId: "note-a",
       readerUids: [uid],
-      uid
+      uid,
+      vaultPasteLockId: `vpl1_${"L".repeat(43)}`
     }, "trash")).toEqual({
       action: "trash",
       expectedRevision: 4,
       noteId: "note-a",
-      readerUids: [uid]
+      readerUids: [uid],
+      vaultPasteLockId: `vpl1_${"L".repeat(43)}`
     });
+    expect(vaultNoteLifecyclePayload({
+      expectedRevision: 4,
+      noteId: "note-a",
+      readerUids: [uid],
+      uid,
+      vaultPasteLockId: `vpl1_${"L".repeat(43)}`
+    }, "restore")).not.toHaveProperty("vaultPasteLockId");
 
     expect(vaultNotePurgePayload({
       encryptedBody,

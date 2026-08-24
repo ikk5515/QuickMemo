@@ -34,6 +34,7 @@ export interface MarkdownNoteDraft {
 export interface VaultEntryDraft extends MarkdownNoteDraft {
   contentFormat: VaultContentFormat;
   entryKind: VaultEntryKind;
+  vaultPasteLockId?: string;
 }
 
 export interface VaultAssetDraft {
@@ -41,6 +42,13 @@ export interface VaultAssetDraft {
   folderId: string | null;
   mimeType?: string;
   title: string;
+  vaultPasteLockId?: string;
+}
+
+export interface VaultPastedImageSourceCommitCredential {
+  vaultPasteFolderId: string;
+  vaultPasteFolderRevision: number;
+  vaultPasteLockId: string;
 }
 
 function validVaultFormatPair(
@@ -57,7 +65,7 @@ function validVaultFormatPair(
 }
 
 function validateVaultIdentityDraft(
-  draft: MarkdownNoteDraft,
+  draft: MarkdownNoteDraft & { vaultPasteLockId?: string },
   contentFormat: VaultContentFormat,
   entryKind: VaultEntryKind
 ) {
@@ -78,6 +86,15 @@ function validateVaultIdentityDraft(
   }
   if (!validVaultFormatPair(contentFormat, entryKind)) {
     throw new Error("Vault 항목 종류와 저장 형식이 일치하지 않습니다.");
+  }
+  if (
+    draft.vaultPasteLockId !== undefined
+    && (
+      entryKind !== "asset"
+      || !/^vpl1_[A-Za-z0-9_-]{43}$/u.test(draft.vaultPasteLockId)
+    )
+  ) {
+    throw new Error("붙여넣은 이미지 폴더 잠금 식별자가 올바르지 않습니다.");
   }
   return { ...draft, title };
 }
@@ -161,6 +178,9 @@ export async function createEncryptedVaultEntry(
     ownerUid: profile.uid,
     participantUids: [profile.uid],
     type: "personal",
+    ...(normalized.vaultPasteLockId
+      ? { vaultPasteLockId: normalized.vaultPasteLockId }
+      : {}),
     wrappedKeys: { [profile.uid]: wrappedKey }
   };
   return options?.targetId
@@ -179,7 +199,8 @@ export async function createEncryptedVaultAsset(
     contentFormat: "asset-v1",
     entryKind: "asset",
     folderId: draft.folderId,
-    title: draft.title
+    title: draft.title,
+    ...(draft.vaultPasteLockId ? { vaultPasteLockId: draft.vaultPasteLockId } : {})
   }, options);
 }
 
@@ -313,7 +334,8 @@ export async function saveEncryptedVaultEntry(
   privateKey: CryptoKey,
   vaultIntegrityKey: CryptoKey,
   draft: MarkdownNoteDraft,
-  pathRewriteActivation?: VaultPathRewriteActivationInput
+  pathRewriteActivation?: VaultPathRewriteActivationInput,
+  pastedImageSourceCommit?: VaultPastedImageSourceCommitCredential
 ) {
   if (note.contentFormat === "legacy-html-v1") {
     throw new Error("기존 HTML 노트는 Markdown 복사본으로 변환한 뒤 편집할 수 있습니다.");
@@ -324,6 +346,23 @@ export async function saveEncryptedVaultEntry(
     throw new Error("폴더 이동은 이력과 revision을 함께 기록하는 이동 기능을 사용해주세요.");
   }
   const isOwner = note.ownerUid === uid;
+  if (
+    pastedImageSourceCommit
+    && (
+      !isOwner
+      || note.type !== "personal"
+      || note.contentFormat !== "markdown-v1"
+      || note.entryKind !== "markdown"
+      || note.participantUids.length !== 1
+      || note.participantUids[0] !== uid
+      || !/^[A-Za-z0-9_-]{1,120}$/u.test(pastedImageSourceCommit.vaultPasteFolderId)
+      || !Number.isSafeInteger(pastedImageSourceCommit.vaultPasteFolderRevision)
+      || pastedImageSourceCommit.vaultPasteFolderRevision < 1
+      || !/^vpl1_[A-Za-z0-9_-]{43}$/u.test(pastedImageSourceCommit.vaultPasteLockId)
+    )
+  ) {
+    throw new Error("붙여넣은 이미지 본문 저장 잠금 정보가 올바르지 않습니다.");
+  }
   if (!isOwner) {
     if (note.type !== "shared" || !note.participantUids.includes(uid)) {
       throw new Error("이 노트를 저장할 권한이 없습니다.");
@@ -401,6 +440,7 @@ export async function saveEncryptedVaultEntry(
     noteId: note.id,
     readerUids: note.participantUids,
     uid,
+    ...(pastedImageSourceCommit ?? {}),
     ...(pathRewriteActivation ? { pathRewriteActivation } : {})
   });
   return {

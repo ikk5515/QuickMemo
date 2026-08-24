@@ -295,6 +295,269 @@ describeEmulator("Vault note API emulator transaction", () => {
     expect(concurrentLeft.body).toEqual(concurrentRight.body);
   });
 
+  it("binds pasted asset create and cleanup to the active folder lease while blocking path changes", async () => {
+    await activateVaultIntegrityMarker();
+    const now = new Date();
+    const folderId = "pasted-image-assets";
+    const lockId = `vpl1_${"L".repeat(43)}`;
+    const otherLockId = `vpl1_${"O".repeat(43)}`;
+    await writeEmulatorDocuments([
+      {
+        path: `noteFolders/${folderId}`,
+        fields: {
+          encryptedName: title,
+          isDeleted: false,
+          ownerUid: uid,
+          parentId: null,
+          revision: 1,
+          vaultNameClaimId: "F".repeat(43),
+          vaultNameIndexVersion: 1,
+          vaultPasteLock: {
+            expiresAt: new Date(now.getTime() + 60_000),
+            id: lockId
+          },
+          wrappedKey
+        }
+      },
+      {
+        path: `vaultFolderTrees/${uid}`,
+        fields: {
+          createdAt: now,
+          folderCount: 1,
+          nodes: {
+            [folderId]: { active: true, generation: 1, parentId: null, selfActive: true }
+          },
+          ownerUid: uid,
+          revision: 1,
+          schemaVersion: 1,
+          updatedAt: now
+        }
+      }
+    ]);
+    const assetCreate = (claimCharacter: string, vaultPasteLockId?: string) => ({
+      ...createBody(claimCharacter),
+      contentFormat: "asset-v1",
+      entryKind: "asset",
+      folderId,
+      nameClaim: {
+        claimId: claimCharacter.repeat(43),
+        indexVersion: 1,
+        parentId: folderId
+      },
+      ...(vaultPasteLockId ? { vaultPasteLockId } : {})
+    });
+
+    for (const payload of [assetCreate("A"), assetCreate("B", otherLockId)]) {
+      const blocked = await request(payload);
+      expect(blocked.response.status).toBe(409);
+      expect(blocked.body).toMatchObject({ error: "vault_paste_locked", ok: false });
+    }
+
+    const created = await request(assetCreate("C", lockId));
+    expect(created.response.status, JSON.stringify(created.body)).toBe(200);
+    const noteId = String(created.body.noteId);
+    expect(await readEmulatorDocument(`notes/${noteId}`)).toMatchObject({
+      entryKind: "asset",
+      folderId,
+      revision: 1
+    });
+
+    const renamed = await request({
+      action: "update",
+      changedFields: ["title", "name-claim"],
+      encryptedBody: body,
+      encryptedTitle: { ...title, cipherText: "renamed-asset" },
+      expectedContentFormat: "asset-v1",
+      expectedEntryKind: "asset",
+      expectedRevision: 1,
+      nameClaim: { claimId: "D".repeat(43), indexVersion: 1, parentId: folderId },
+      noteId,
+      readerUids: [uid]
+    });
+    expect(renamed.response.status).toBe(409);
+    expect(renamed.body).toMatchObject({ error: "vault_paste_locked", ok: false });
+
+    const moved = await request({
+      action: "move",
+      expectedRevision: 1,
+      folderId: null,
+      nameClaim: { claimId: "M".repeat(43), indexVersion: 1, parentId: null },
+      noteId,
+      readerUids: [uid]
+    });
+    expect(moved.response.status).toBe(409);
+    expect(moved.body).toMatchObject({ error: "vault_paste_locked", ok: false });
+
+    const ordinaryTrash = await request({
+      action: "trash",
+      expectedRevision: 1,
+      noteId,
+      readerUids: [uid]
+    });
+    expect(ordinaryTrash.response.status).toBe(409);
+    expect(ordinaryTrash.body).toMatchObject({ error: "vault_paste_locked", ok: false });
+
+    const cleanupTrash = await request({
+      action: "trash",
+      expectedRevision: 1,
+      noteId,
+      readerUids: [uid],
+      vaultPasteLockId: lockId
+    });
+    expect(cleanupTrash.response.status, JSON.stringify(cleanupTrash.body)).toBe(200);
+    expect(cleanupTrash.body).toMatchObject({ revision: 2 });
+
+    const restore = await request({
+      action: "restore",
+      expectedRevision: 2,
+      noteId,
+      readerUids: [uid]
+    });
+    expect(restore.response.status).toBe(409);
+    expect(restore.body).toMatchObject({ error: "vault_paste_locked", ok: false });
+
+    const purge = await request({
+      action: "purge",
+      encryptedBody: body,
+      encryptedTitle: title,
+      expectedRevision: 2,
+      noteId,
+      wrappedKey
+    });
+    expect(purge.response.status).toBe(409);
+    expect(purge.body).toMatchObject({ error: "vault_paste_locked", ok: false });
+    const storedAfterBlockedPurge = await readEmulatorDocument(`notes/${noteId}`);
+    expect(storedAfterBlockedPurge).toMatchObject({ isDeleted: true, revision: 2 });
+    expect(storedAfterBlockedPurge).not.toHaveProperty("isPurged");
+  });
+
+  it("atomically binds a pasted-image Markdown source update to the active destination lease", async () => {
+    await activateVaultIntegrityMarker();
+    const created = await request(createBody("S"));
+    expect(created.response.status).toBe(200);
+    const noteId = String(created.body.noteId);
+    const folderId = "pasted-source-assets";
+    const lockId = `vpl1_${"S".repeat(43)}`;
+    const otherLockId = `vpl1_${"T".repeat(43)}`;
+    const now = new Date();
+    const writeDestination = async (options: {
+      expiresAt?: Date;
+      parentId?: string | null;
+      revision?: number;
+    } = {}) => writeEmulatorDocuments([
+      {
+        path: `noteFolders/${folderId}`,
+        fields: {
+          encryptedName: title,
+          isDeleted: false,
+          ownerUid: uid,
+          parentId: options.parentId ?? null,
+          revision: options.revision ?? 1,
+          vaultNameClaimId: "V".repeat(43),
+          vaultNameIndexVersion: 1,
+          vaultPasteLock: {
+            expiresAt: options.expiresAt ?? new Date(Date.now() + 60_000),
+            id: lockId
+          },
+          wrappedKey
+        }
+      },
+      {
+        path: `vaultFolderTrees/${uid}`,
+        fields: {
+          createdAt: now,
+          folderCount: 1,
+          nodes: {
+            [folderId]: { active: true, generation: 1, parentId: null, selfActive: true }
+          },
+          ownerUid: uid,
+          revision: 1,
+          schemaVersion: 1,
+          updatedAt: now
+        }
+      }
+    ]);
+    await writeDestination();
+    const sourceUpdate = (overrides: Record<string, unknown> = {}) => ({
+      action: "update",
+      changedFields: ["body"],
+      encryptedBody: { ...body, cipherText: "encrypted-body-with-pasted-image" },
+      encryptedTitle: title,
+      expectedContentFormat: "markdown-v1",
+      expectedEntryKind: "markdown",
+      expectedRevision: 1,
+      noteId,
+      readerUids: [uid],
+      vaultPasteFolderId: folderId,
+      vaultPasteFolderRevision: 1,
+      vaultPasteLockId: lockId,
+      ...overrides
+    });
+
+    const committed = await request(sourceUpdate());
+    expect(committed.response.status, JSON.stringify(committed.body)).toBe(200);
+    expect(committed.body).toMatchObject({ noteId, revision: 2 });
+    const stored = await readEmulatorDocument(`notes/${noteId}`);
+    expect(stored).toMatchObject({
+      encryptedBody: { ...body, cipherText: "encrypted-body-with-pasted-image" },
+      revision: 2
+    });
+    expect(stored).not.toHaveProperty("vaultPasteFolderId");
+    expect(stored).not.toHaveProperty("vaultPasteFolderRevision");
+    expect(stored).not.toHaveProperty("vaultPasteLockId");
+    const history = await readEmulatorDocument(
+      `notes/${noteId}/history/${String(committed.body.lastMutationId)}`
+    );
+    expect(history).not.toHaveProperty("vaultPasteFolderId");
+    expect(history).not.toHaveProperty("vaultPasteFolderRevision");
+    expect(history).not.toHaveProperty("vaultPasteLockId");
+
+    const partial = await request(sourceUpdate({
+      expectedRevision: 2,
+      vaultPasteFolderId: undefined,
+      vaultPasteFolderRevision: undefined
+    }));
+    expect(partial.response.status).toBe(400);
+    expect(partial.body).toMatchObject({ error: "invalid_request", ok: false });
+
+    const wrongLock = await request(sourceUpdate({
+      encryptedBody: { ...body, cipherText: "wrong-lock-body" },
+      expectedRevision: 2,
+      vaultPasteLockId: otherLockId
+    }));
+    expect(wrongLock.response.status).toBe(409);
+    expect(wrongLock.body).toMatchObject({ error: "vault_paste_locked", ok: false });
+
+    await writeDestination({ expiresAt: new Date(Date.now() - 1) });
+    const expired = await request(sourceUpdate({
+      encryptedBody: { ...body, cipherText: "expired-lock-body" },
+      expectedRevision: 2
+    }));
+    expect(expired.response.status).toBe(409);
+    expect(expired.body).toMatchObject({ error: "vault_paste_locked", ok: false });
+
+    await writeDestination({ revision: 2 });
+    const changedRevision = await request(sourceUpdate({
+      encryptedBody: { ...body, cipherText: "changed-folder-body" },
+      expectedRevision: 2
+    }));
+    expect(changedRevision.response.status).toBe(409);
+    expect(changedRevision.body).toMatchObject({ error: "vault_paste_source_mismatch", ok: false });
+
+    await writeDestination({ parentId: "moved-parent" });
+    const moved = await request(sourceUpdate({
+      encryptedBody: { ...body, cipherText: "moved-folder-body" },
+      expectedRevision: 2
+    }));
+    expect(moved.response.status).toBe(409);
+    expect(moved.body).toMatchObject({ error: "vault_paste_source_mismatch", ok: false });
+
+    expect(await readEmulatorDocument(`notes/${noteId}`)).toMatchObject({
+      encryptedBody: { ...body, cipherText: "encrypted-body-with-pasted-image" },
+      revision: 2
+    });
+  });
+
   it("atomically creates, revisions, restores, and purges an encrypted note", async () => {
     const rejectedBeforeCutover = await request(createBody("A"));
     expect(rejectedBeforeCutover.response.status).toBe(409);

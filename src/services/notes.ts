@@ -90,6 +90,84 @@ export interface NoteFolderSnapshot extends NoteFolderDocument {
   id: string;
 }
 
+function isPlainFolderSnapshotObject(value: object) {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function firestoreTimestampParts(value: object) {
+  const candidate = value as {
+    isEqual?: unknown;
+    nanoseconds?: unknown;
+    seconds?: unknown;
+    toMillis?: unknown;
+  };
+  return typeof candidate.seconds === "number"
+    && typeof candidate.nanoseconds === "number"
+    && typeof candidate.isEqual === "function"
+    && typeof candidate.toMillis === "function"
+    ? { nanoseconds: candidate.nanoseconds, seconds: candidate.seconds }
+    : null;
+}
+
+function sameFolderSnapshotValue(
+  left: unknown,
+  right: unknown,
+  ignoreTopLevelPasteLock = false
+): boolean {
+  if (Object.is(left, right)) return true;
+  if (left === null || right === null) return false;
+  if (typeof left !== "object" || typeof right !== "object") return false;
+  const leftTimestamp = firestoreTimestampParts(left);
+  const rightTimestamp = firestoreTimestampParts(right);
+  if (leftTimestamp || rightTimestamp) {
+    return leftTimestamp?.seconds === rightTimestamp?.seconds
+      && leftTimestamp?.nanoseconds === rightTimestamp?.nanoseconds;
+  }
+  if (left instanceof Date || right instanceof Date) {
+    return left instanceof Date && right instanceof Date && left.getTime() === right.getTime();
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameFolderSnapshotValue(value, right[index]));
+  }
+  if (!isPlainFolderSnapshotObject(left) || !isPlainFolderSnapshotObject(right)) return false;
+  const visibleKeys = (value: object) => Object.keys(value)
+    .filter((key) => !ignoreTopLevelPasteLock || key !== "vaultPasteLock")
+    .sort();
+  const leftKeys = visibleKeys(left);
+  const rightKeys = visibleKeys(right);
+  if (leftKeys.length !== rightKeys.length || leftKeys.some((key, index) => key !== rightKeys[index])) {
+    return false;
+  }
+  return leftKeys.every((key) => sameFolderSnapshotValue(
+    (left as Record<string, unknown>)[key],
+    (right as Record<string, unknown>)[key]
+  ));
+}
+
+export function sameVaultFolderSnapshotsIgnoringPasteLock(
+  before: readonly NoteFolderSnapshot[],
+  after: readonly NoteFolderSnapshot[]
+) {
+  if (before.length !== after.length) return false;
+  const beforeById = new Map<string, NoteFolderSnapshot>();
+  for (const folder of before) {
+    if (typeof folder.id !== "string" || !folder.id || beforeById.has(folder.id)) return false;
+    beforeById.set(folder.id, folder);
+  }
+  const seenAfterIds = new Set<string>();
+  for (const folder of after) {
+    if (typeof folder.id !== "string" || !folder.id || seenAfterIds.has(folder.id)) return false;
+    seenAfterIds.add(folder.id);
+    const previous = beforeById.get(folder.id);
+    if (!previous || !sameFolderSnapshotValue(previous, folder, true)) return false;
+  }
+  return true;
+}
+
 export interface ServerSnapshotMetadata {
   fromCache: boolean;
   hasPendingWrites: boolean;
@@ -159,6 +237,8 @@ export interface SaveNoteInput {
   historySummary?: EncryptedPayload;
   historySnapshot?: EncryptedPayload;
   nameClaim?: VaultNameClaimReservationInput;
+  /** Opaque, short-lived server lease used only for pasted asset creation. */
+  vaultPasteLockId?: string;
 }
 
 export interface NoteMutationResult {
@@ -273,6 +353,10 @@ export interface UpdateRevisionedEncryptedNoteInput {
   uid: string;
   nameClaim?: VaultNameClaimReservationInput;
   pathRewriteActivation?: VaultPathRewriteActivationInput;
+  /** Binds a pasted-image Markdown body update to the active destination lock. */
+  vaultPasteFolderId?: string;
+  vaultPasteFolderRevision?: number;
+  vaultPasteLockId?: string;
 }
 
 export interface BackfillRevisionedVaultNameClaimInput extends VaultCutoverLeaseInput {
@@ -334,6 +418,8 @@ export interface RevisionedNoteLifecycleInput {
   noteId: string;
   readerUids: string[];
   uid: string;
+  /** Allows the paste flow to trash its own partial asset before releasing the folder lease. */
+  vaultPasteLockId?: string;
 }
 
 export class NoteRevisionConflictError extends Error {
@@ -650,6 +736,33 @@ function expectedNoteRevision(revision: number) {
   }
 
   return revision;
+}
+
+function assertVaultPastedImageSourceCommitCredential(
+  input: UpdateRevisionedEncryptedNoteInput
+) {
+  const values = [
+    input.vaultPasteFolderId,
+    input.vaultPasteFolderRevision,
+    input.vaultPasteLockId
+  ];
+  const supplied = values.filter((value) => value !== undefined).length;
+  if (supplied === 0) return;
+  if (
+    supplied !== values.length
+    || typeof input.vaultPasteFolderId !== "string"
+    || !/^[A-Za-z0-9_-]{1,120}$/u.test(input.vaultPasteFolderId)
+    || !Number.isSafeInteger(input.vaultPasteFolderRevision)
+    || (input.vaultPasteFolderRevision ?? 0) < 1
+    || typeof input.vaultPasteLockId !== "string"
+    || !/^vpl1_[A-Za-z0-9_-]{43}$/u.test(input.vaultPasteLockId)
+    || input.expectedContentFormat !== "markdown-v1"
+    || input.expectedEntryKind !== "markdown"
+    || input.changedFields?.length !== 1
+    || input.changedFields[0] !== "body"
+  ) {
+    throw new Error("붙여넣은 이미지 본문 저장 잠금 정보가 올바르지 않습니다.");
+  }
 }
 
 function storedNoteRevision(note: Pick<NoteDocument, "revision">) {
@@ -1523,6 +1636,7 @@ export async function createEncryptedNote(input: SaveNoteInput) {
 
 export async function updateRevisionedEncryptedNote(input: UpdateRevisionedEncryptedNoteInput) {
   assertEncryptedNotePayloadSizes(input);
+  assertVaultPastedImageSourceCommitCredential(input);
   const expectedRevision = expectedNoteRevision(input.expectedRevision);
   const { uid, ...payload } = input;
   return commitServerVaultNoteMutation(uid, {
@@ -1589,6 +1703,7 @@ export async function updateRevisionedEncryptedNoteAndFolder(
   input: UpdateRevisionedEncryptedNoteAndFolderInput
 ) {
   assertEncryptedNotePayloadSizes(input);
+  assertVaultPastedImageSourceCommitCredential(input);
   const expectedRevision = expectedNoteRevision(input.expectedRevision);
   const { uid, ...payload } = input;
   return commitServerVaultNoteMutation(uid, {
@@ -2041,6 +2156,7 @@ export function subscribeNoteFolders(
     limit(noteFolderSubscriptionSentinelLimit)
   );
   let limitExceeded = false;
+  let previousActiveFolders: NoteFolderSnapshot[] | null = null;
 
   return onSnapshot(
     foldersQuery,
@@ -2065,14 +2181,19 @@ export function subscribeNoteFolders(
         });
       }
       onCompleteSnapshot?.(allFolders, metadata);
-      callback(
-        activeFolders
-          .sort((left, right) => {
-            const orderDifference = (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER);
-            return orderDifference || left.name.localeCompare(right.name, "ko");
-          }),
-        metadata
-      );
+      const sortedActiveFolders = activeFolders.sort((left, right) => {
+        const orderDifference = (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER);
+        return orderDifference || left.name.localeCompare(right.name, "ko");
+      });
+      if (
+        previousActiveFolders
+        && sameVaultFolderSnapshotsIgnoringPasteLock(previousActiveFolders, sortedActiveFolders)
+      ) {
+        callback(previousActiveFolders, metadata);
+        return;
+      }
+      previousActiveFolders = sortedActiveFolders;
+      callback(sortedActiveFolders, metadata);
     },
     onError
   );

@@ -176,6 +176,103 @@ describe("CodeMirrorMarkdownEditor", () => {
     expect(onChange).toHaveBeenLastCalledWith("![[이미지.png]]저장된 본문");
   });
 
+  it("restores the exact selected text when image source persistence is not confirmed", async () => {
+    let finishCommit: ((accepted: boolean) => void) | undefined;
+    const onChange = vi.fn();
+    const onCommit = vi.fn(() => new Promise<boolean>((resolve) => {
+      finishCommit = resolve;
+    }));
+    const onPasteImages = vi.fn(async () => ({
+      onCommit,
+      source: "![[붙여넣은 이미지/선택 복구 -1.png]]"
+    }));
+    const image = new File([new Uint8Array([1])], "clipboard.png", { type: "image/png" });
+    render(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="선택된 원문"
+      />
+    );
+    const editor = screen.getByLabelText("Markdown 편집기");
+    fireEvent.keyDown(editor, { key: "a", ctrlKey: true });
+    fireEvent.paste(editor, {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }]
+      }
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(editor).toHaveTextContent("![[붙여넣은 이미지/선택 복구 -1.png]]");
+
+    await act(async () => {
+      finishCommit?.(false);
+      await Promise.resolve();
+    });
+    expect(onCommit).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith("선택된 원문");
+    expect(editor).toHaveTextContent("선택된 원문");
+  });
+
+  it("requests a parent CAS rollback when the source document unmounts during commit", async () => {
+    let finishCommit: ((accepted: boolean) => void) | undefined;
+    const onRollback = vi.fn().mockReturnValue(true);
+    const onSettled = vi.fn();
+    const onPasteImages = vi.fn(async () => ({
+      onCommit: () => new Promise<boolean>((resolve) => {
+        finishCommit = resolve;
+      }),
+      onRollback,
+      onSettled,
+      source: "![[붙여넣은 이미지/전환 복구 -1.png]]"
+    }));
+    const image = new File([new Uint8Array([1])], "clipboard.png", { type: "image/png" });
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        documentKey="note-a"
+        onChange={() => undefined}
+        onPasteImages={onPasteImages}
+        value="교체 전 원문"
+        valueRevision={1}
+      />
+    );
+    const editor = screen.getByLabelText("Markdown 편집기");
+    fireEvent.keyDown(editor, { key: "a", ctrlKey: true });
+    fireEvent.paste(editor, {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }]
+      }
+    });
+    await act(async () => Promise.resolve());
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        documentKey="note-b"
+        onChange={() => undefined}
+        onPasteImages={onPasteImages}
+        value="다른 노트"
+        valueRevision={2}
+      />
+    );
+    await act(async () => {
+      finishCommit?.(false);
+      await Promise.resolve();
+    });
+
+    expect(onRollback).toHaveBeenCalledWith({
+      replacementText: "교체 전 원문",
+      source: "![[붙여넣은 이미지/전환 복구 -1.png]]"
+    });
+    expect(onSettled).toHaveBeenCalledWith("rolled-back");
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("다른 노트");
+  });
+
   it("acknowledges an earlier local value without rolling back a newer queued edit", () => {
     const onChange = vi.fn();
     const view = render(

@@ -37,6 +37,11 @@ export interface DecryptVaultNotesOptions {
   reusableNotes?: readonly DecryptedVaultNote[];
 }
 
+export interface DecryptVaultFoldersOptions {
+  /** Reuses only plaintext proven to match the exact encrypted folder name and wrapped key. */
+  reusableFolders?: readonly DecryptedVaultFolder[];
+}
+
 export type VaultEntryStorageIdentityState = "explicit" | "invalid" | "legacy-missing";
 
 /**
@@ -168,15 +173,39 @@ export async function decryptVaultNotes(
   return decrypted.filter((note): note is DecryptedVaultNote => note !== null);
 }
 
-export async function decryptVaultFolders(folders: NoteFolderSnapshot[], uid: string, privateKey: CryptoKey) {
+function reusableDecryptedFolderMatches(
+  folder: NoteFolderSnapshot,
+  reusable: DecryptedVaultFolder,
+  uid: string
+) {
+  return !reusable.nameDecryptionFailed
+    && folder.id === reusable.id
+    && folder.ownerUid === uid
+    && folder.ownerUid === reusable.ownerUid
+    && folder.revision === reusable.revision
+    && encryptedPayloadMatches(folder.encryptedName, reusable.encryptedName)
+    && wrappedKeyMatches(folder.wrappedKey, reusable.wrappedKey);
+}
+
+export async function decryptVaultFolders(
+  folders: NoteFolderSnapshot[],
+  uid: string,
+  privateKey: CryptoKey,
+  options: DecryptVaultFoldersOptions = {}
+) {
   // Filter before decryption so an accidentally over-broad caller never puts
   // another owner's legacy plaintext name into the decrypted result pipeline.
   // Bound crypto concurrency as a large Vault otherwise creates a CPU/memory
   // spike while unlocking.
   const ownedFolders = folders.filter((folder) => folder.ownerUid === uid);
+  const reusableById = new Map(options.reusableFolders?.map((folder) => [folder.id, folder]) ?? []);
   return mapWithConcurrency(ownedFolders, 4, async (folder): Promise<DecryptedVaultFolder> => {
     if (!folder.encryptedName || !folder.wrappedKey) {
       return { ...folder, displayName: folder.name };
+    }
+    const reusable = reusableById.get(folder.id);
+    if (reusable && reusableDecryptedFolderMatches(folder, reusable, uid)) {
+      return { ...folder, displayName: reusable.displayName };
     }
 
     try {

@@ -17,6 +17,7 @@ import { safeErrorSummary as secureShareErrorSummary } from "../api/_secure-shar
 import { __vaultNoteTesting as vaultNoteTesting } from "../api/vault-notes.js";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
 });
@@ -34,6 +35,48 @@ describe("backend security boundaries", () => {
     ]) {
       expect(() => vaultNoteTesting.assertClientCreateNoteId(invalid)).toThrow();
     }
+  });
+
+  it("fails closed on malformed pasted-image locks and scopes matching leases to paste operations", () => {
+    const now = new Date("2026-08-25T00:00:00.000Z");
+    const lockId = `vpl1_${"L".repeat(43)}`;
+    const otherLockId = `vpl1_${"O".repeat(43)}`;
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const activeFolder = {
+      vaultPasteLock: {
+        expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+        id: lockId
+      }
+    };
+
+    expect(() => vaultNoteTesting.assertVaultAssetFolderMutationAllowed(
+      activeFolder,
+      lockId,
+      { allowMatchingLock: true, requireActiveMatchingLock: true }
+    )).not.toThrow();
+    for (const suppliedLockId of [undefined, otherLockId]) {
+      expect(() => vaultNoteTesting.assertVaultAssetFolderMutationAllowed(
+        activeFolder,
+        suppliedLockId,
+        { allowMatchingLock: true }
+      )).toThrow();
+    }
+    expect(() => vaultNoteTesting.assertVaultAssetFolderMutationAllowed(
+      { vaultPasteLock: { ...activeFolder.vaultPasteLock, unexpected: true } },
+      lockId,
+      { allowMatchingLock: true }
+    )).toThrow();
+    expect(() => vaultNoteTesting.assertVaultAssetFolderMutationAllowed(
+      {
+        vaultPasteLock: {
+          expiresAt: new Date(now.getTime() - 1).toISOString(),
+          id: lockId
+        }
+      },
+      lockId,
+      { allowMatchingLock: true, requireActiveMatchingLock: true }
+    )).toThrow();
   });
 
   it("never serializes exception messages, names, bodies, stacks, causes, or invalid statuses", () => {

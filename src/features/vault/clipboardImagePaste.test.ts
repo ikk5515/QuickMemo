@@ -12,6 +12,7 @@ import {
   transcodeVaultClipboardImage,
   vaultClipboardImageEmbedSource,
   vaultClipboardImageFiles,
+  vaultClipboardImageTitleStem,
   vaultSelectedImageFiles
 } from "./clipboardImagePaste";
 import { MAX_INLINE_VAULT_ASSET_BYTES, safeVaultAssetPreviewKind } from "./vaultAsset";
@@ -411,22 +412,46 @@ describe("encrypted Vault clipboard image preparation", () => {
   });
 
   it("reserves deterministic extension-preserving names and produces only wiki embeds", () => {
-    const now = new Date(2026, 7, 24, 9, 7, 5);
+    expect(reserveVaultClipboardImageTitles(
+      [],
+      [{ extension: "png" }, { extension: "jpg" }, { extension: "webp" }],
+      "현재 작업중인 노트 이름"
+    )).toEqual([
+      "현재 작업중인 노트 이름 -1.png",
+      "현재 작업중인 노트 이름 -2.jpg",
+      "현재 작업중인 노트 이름 -3.webp"
+    ]);
+
     const titles = reserveVaultClipboardImageTitles(
-      ["붙여넣은 이미지 2026-08-24 09-07-05 1.png"],
+      ["연구 노트 -1.webp"],
       [{ extension: "png" }, { extension: "jpg" }],
-      now
+      "연구 노트.md"
     );
 
     expect(titles).toEqual([
-      "붙여넣은 이미지 2026-08-24 09-07-05 1 2.png",
-      "붙여넣은 이미지 2026-08-24 09-07-05 2.jpg"
+      "연구 노트 -2.png",
+      "연구 노트 -3.jpg"
     ]);
-    expect(vaultClipboardImageEmbedSource(titles)).toBe(
-      "![[붙여넣은 이미지 2026-08-24 09-07-05 1 2.png]]\n"
-      + "![[붙여넣은 이미지 2026-08-24 09-07-05 2.jpg]]"
+    const paths = titles.map((title) => `붙여넣은 이미지/${title}`);
+    expect(vaultClipboardImageEmbedSource(paths)).toBe(
+      "![[붙여넣은 이미지/연구 노트 -2.png]]\n"
+      + "![[붙여넣은 이미지/연구 노트 -3.jpg]]"
     );
-    expect(() => vaultClipboardImageEmbedSource(["unsafe|alias.png"]))
-      .toThrow("안전한 내부 링크");
+    expect(vaultClipboardImageTitleStem("위키 [[제목]] #1 | 50%.md"))
+      .toBe("위키 --제목-- -1 - 50-");
+    expect(reserveVaultClipboardImageTitles([], [{ extension: "png" }], "기록.md.md"))
+      .toEqual(["기록.md -1.png"]);
+    expect(`${vaultClipboardImageTitleStem("😀".repeat(100))} -1.webp`.length)
+      .toBeLessThanOrEqual(180);
+    for (const unsafePath of [
+      "unsafe|alias.png",
+      "unsafe#fragment.png",
+      "unsafe\nline.png",
+      "../outside.png",
+      "folder/%2fescape.png"
+    ]) {
+      expect(() => vaultClipboardImageEmbedSource([unsafePath]))
+        .toThrow("안전한 내부 링크");
+    }
   });
 });

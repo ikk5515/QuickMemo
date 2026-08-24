@@ -50,6 +50,8 @@ import {
 const maximumStoredFoldersPerOwner = 5_000;
 const claimPattern = /^[A-Za-z0-9_-]{43}$/u;
 const importJobPattern = /^vi1_[A-Za-z0-9_-]{43}$/u;
+const vaultPasteLockPattern = /^vpl1_[A-Za-z0-9_-]{43}$/u;
+const vaultPasteLockTtlMilliseconds = 120_000;
 const liveImportJobStatuses = Object.freeze([
   "preparing",
   "staging",
@@ -63,6 +65,8 @@ const supportedActions = new Set([
   "create",
   "migrate",
   "move",
+  "paste-lock-acquire",
+  "paste-lock-release",
   "repair",
   "resolve-collision",
   "restore",
@@ -99,6 +103,62 @@ function assertInteger(value, fieldName, minimum = 0, maximum = 999_999_999_999)
     throw new HttpError(400, "invalid_request", `Invalid ${fieldName}`);
   }
   return value;
+}
+
+function assertVaultPasteLockId(value) {
+  if (typeof value !== "string" || !vaultPasteLockPattern.test(value)) {
+    throw new HttpError(400, "invalid_request", "Invalid Vault paste lock id");
+  }
+  return value;
+}
+
+function storedVaultPasteLock(folder, nowMilliseconds = Date.now()) {
+  if (!folder || !Object.prototype.hasOwnProperty.call(folder, "vaultPasteLock")) {
+    return null;
+  }
+  const lock = folder.vaultPasteLock;
+  const keys = lock && typeof lock === "object" && !Array.isArray(lock)
+    ? Object.keys(lock).sort()
+    : [];
+  const expiresAt = typeof lock?.expiresAt === "string"
+    ? Date.parse(lock.expiresAt)
+    : Number.NaN;
+  if (
+    keys.join("\u0000") !== "expiresAt\u0000id"
+    || typeof lock.id !== "string"
+    || !vaultPasteLockPattern.test(lock.id)
+    || !Number.isFinite(expiresAt)
+    || expiresAt > nowMilliseconds + vaultPasteLockTtlMilliseconds
+  ) {
+    throw new HttpError(
+      409,
+      "vault_paste_locked",
+      "Vault pasted-image folder lock is invalid",
+      { expose: false }
+    );
+  }
+  return {
+    active: expiresAt > nowMilliseconds,
+    expiresAt,
+    id: lock.id
+  };
+}
+
+function assertVaultPasteFolderMutationUnlocked(folder, nowMilliseconds = Date.now()) {
+  const lock = storedVaultPasteLock(folder, nowMilliseconds);
+  if (lock?.active) {
+    throw new HttpError(
+      409,
+      "vault_paste_locked",
+      "Vault pasted-image folder is in use"
+    );
+  }
+}
+
+function assertOwnedVaultPasteFolderMutationUnlocked(folder, uid) {
+  if (folder?.ownerUid === uid) {
+    assertVaultPasteFolderMutationUnlocked(folder);
+  }
 }
 
 function assertParentId(value) {
@@ -806,6 +866,7 @@ async function handleUpdateOrMove(context, uid, state, body, allowMissingClaim =
   ]);
   const expectedRevision = assertInteger(body.expectedRevision, "expectedRevision", 1);
   const folderId = assertVaultFolderId(body.folderId);
+  assertOwnedVaultPasteFolderMutationUnlocked(state.folder, uid);
   const revision = assertOwnedEncryptedFolder(
     state.folder,
     uid,
@@ -930,6 +991,7 @@ async function handleResolveCollision(context, uid, state, body) {
   if (!folder || folder.ownerUid !== uid) {
     throw new HttpError(404, "vault_folder_not_found", "Vault folder was not found");
   }
+  assertVaultPasteFolderMutationUnlocked(folder);
   const hasEncryptedName = Boolean(folder.encryptedName);
   const hasWrappedKey = Boolean(folder.wrappedKey);
   if (hasEncryptedName !== hasWrappedKey) {
@@ -1134,6 +1196,7 @@ async function handleLifecycle(context, uid, state, body, active) {
   assertOnlyKeys(body, ["action", "expectedRevision", "folderId"]);
   const folderId = assertVaultFolderId(body.folderId);
   const expectedRevision = assertInteger(body.expectedRevision, "expectedRevision", 1);
+  assertOwnedVaultPasteFolderMutationUnlocked(state.folder, uid);
   const revision = assertOwnedEncryptedFolder(state.folder, uid, folderId, expectedRevision);
   assertFolderMatchesTree(state.folder, state.treeState.tree, folderId);
   const sourceImportState = await assertImportSourceMutationAllowed(
@@ -1228,6 +1291,7 @@ async function handleMigrate(context, uid, state, body) {
   if (!state.folder || state.folder.ownerUid !== uid) {
     throw new HttpError(404, "vault_folder_not_found", "Vault folder was not found");
   }
+  assertVaultPasteFolderMutationUnlocked(state.folder);
   if (state.folder.encryptedName || state.folder.wrappedKey) {
     if (
       folderCreateAfterStateMatches(
@@ -1313,10 +1377,100 @@ async function handleMigrate(context, uid, state, body) {
   return { folderId, revision: 1, treeRevision: tree.revision };
 }
 
+function assertOwnedEncryptedPasteLockFolder(folder, uid, folderId) {
+  if (!folder || folder.ownerUid !== uid || !folder.encryptedName || !folder.wrappedKey) {
+    throw new HttpError(404, "vault_folder_not_found", "Vault folder was not found");
+  }
+  const revision = assertInteger(folder.revision, "stored revision", 1);
+  const claimId = storedClaimId(folder);
+  if (
+    !folderId
+    || !claimId
+    || folder.vaultNameIndexVersion !== 1
+  ) {
+    throw new HttpError(409, "vault_folder_invalid", "Vault folder metadata is invalid", {
+      expose: false
+    });
+  }
+  return revision;
+}
+
+function pasteLockResult(state, folderId, revision) {
+  return {
+    folderId,
+    revision,
+    treeRevision: state.treeState.tree.revision
+  };
+}
+
+async function handlePasteLockAcquire(context, uid, state, body) {
+  assertOnlyKeys(body, ["action", "expectedRevision", "folderId", "lockId"]);
+  const folderId = assertVaultFolderId(body.folderId);
+  const lockId = assertVaultPasteLockId(body.lockId);
+  const expectedRevision = assertInteger(body.expectedRevision, "expectedRevision", 1);
+  const revision = assertOwnedEncryptedPasteLockFolder(state.folder, uid, folderId);
+  if (revision !== expectedRevision) {
+    throw new HttpError(409, "revision_conflict", "Vault folder revision changed");
+  }
+  const node = assertFolderMatchesTree(state.folder, state.treeState.tree, folderId);
+  if (
+    state.folder.isDeleted === true
+    || (state.folder.parentId ?? null) !== null
+    || node.active !== true
+    || node.selfActive !== true
+  ) {
+    throw new HttpError(
+      409,
+      "vault_folder_unavailable",
+      "Only an active root Vault folder can be locked for pasted images"
+    );
+  }
+
+  const now = new Date();
+  const existing = storedVaultPasteLock(state.folder, now.getTime());
+  if (existing?.active && existing.id !== lockId) {
+    throw new HttpError(409, "vault_paste_locked", "Vault pasted-image folder is in use");
+  }
+
+  await commitOrConflict(context, [updateDocumentWrite(
+    context.projectId,
+    folderPath(folderId),
+    {
+      vaultPasteLock: {
+        expiresAt: new Date(now.getTime() + vaultPasteLockTtlMilliseconds),
+        id: lockId
+      }
+    },
+    ["vaultPasteLock"],
+    state.folder.__updateTime
+  )], state.transaction);
+  return pasteLockResult(state, folderId, revision);
+}
+
+async function handlePasteLockRelease(context, uid, state, body) {
+  assertOnlyKeys(body, ["action", "folderId", "lockId"]);
+  const folderId = assertVaultFolderId(body.folderId);
+  const lockId = assertVaultPasteLockId(body.lockId);
+  const revision = assertOwnedEncryptedPasteLockFolder(state.folder, uid, folderId);
+  const existing = storedVaultPasteLock(state.folder);
+  if (!existing || existing.id !== lockId) {
+    await firestoreRollback(context, state.transaction);
+    return pasteLockResult(state, folderId, revision);
+  }
+  await commitOrConflict(context, [updateDocumentWrite(
+    context.projectId,
+    folderPath(folderId),
+    {},
+    ["vaultPasteLock"],
+    state.folder.__updateTime
+  )], state.transaction);
+  return pasteLockResult(state, folderId, revision);
+}
+
 async function performActionOnce(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "color", "encryptedName", "expectedName", "expectedRevision", "folderId",
-    "importJobId", "leaseGeneration", "leaseId", "nameClaim", "order", "parentId",
+    "importJobId", "leaseGeneration", "leaseId", "lockId", "nameClaim", "order", "parentId",
     "pathRewriteActivation", "wrappedKey"
   ]);
   const action = body.action;
@@ -1328,19 +1482,32 @@ async function performActionOnce(context, uid, body) {
     if (action === "audit" || action === "bootstrap" || action === "repair") {
       return await handleBootstrapOrAudit(context, uid, state, action);
     }
+    const integrityRequirement = action === "resolve-collision"
+      ? "pending"
+      : ["migrate", "move", "paste-lock-release", "update"].includes(action)
+        ? "any"
+        : "ready";
     const integrityMarker = requireVaultIntegrityMarker(
       state.integrityMarker,
       uid,
-      action === "resolve-collision"
-        ? "pending"
-        : action === "migrate" || action === "update" || action === "move" ? "any" : "ready"
+      integrityRequirement
     );
-    if (integrityMarker.state === "pending" && action !== "resolve-collision") {
+    if (
+      integrityMarker.state === "pending"
+      && action !== "paste-lock-release"
+      && action !== "resolve-collision"
+    ) {
       requireVaultCutoverLease(
         integrityMarker.document,
         uid,
         vaultCutoverLeaseCredential(body.leaseId, body.leaseGeneration)
       );
+    }
+    if (action === "paste-lock-acquire") {
+      return await handlePasteLockAcquire(context, uid, state, body);
+    }
+    if (action === "paste-lock-release") {
+      return await handlePasteLockRelease(context, uid, state, body);
     }
     if (action === "create") return await handleCreate(context, uid, state, body);
     if (action === "migrate") return await handleMigrate(context, uid, state, body);

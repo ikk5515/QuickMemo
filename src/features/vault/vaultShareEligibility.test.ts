@@ -25,6 +25,7 @@ function note(body: string): DecryptedVaultNote {
 const entries = [
   { id: "note-a", kind: "markdown" as const, path: "folder/노트.md", content: "" },
   { id: "asset-a", kind: "asset" as const, path: "folder/붙여넣은 이미지.png" },
+  { id: "asset-b", kind: "asset" as const, path: "붙여넣은 이미지/노트 -1.png" },
   { id: "note-b", kind: "markdown" as const, path: "folder/다른 노트.md", content: "" }
 ];
 
@@ -43,5 +44,13 @@ describe("Vault share eligibility", () => {
       "folder/노트.md",
       entries
     )).toEqual([]);
+  });
+
+  it("resolves a pasted image through its dedicated full Vault path", () => {
+    expect(embeddedVaultAssetIdsForShare(
+      note("![[붙여넣은 이미지/노트 -1.png]]"),
+      "folder/노트.md",
+      entries
+    )).toEqual(["asset-b"]);
   });
 });

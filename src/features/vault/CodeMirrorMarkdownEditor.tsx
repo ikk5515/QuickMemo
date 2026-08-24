@@ -63,8 +63,15 @@ export interface MarkdownImagePasteContext {
 }
 
 export interface MarkdownImagePasteResult {
-  onCommit?: () => Promise<void> | void;
+  onCommit?: () => Promise<boolean | void> | boolean | void;
   onDiscard?: () => Promise<void> | void;
+  onRollback?: (input: {
+    replacementText: string;
+    source: string;
+  }) => Promise<boolean> | boolean;
+  onSettled?: (
+    outcome: "committed" | "discarded" | "rollback-blocked" | "rolled-back"
+  ) => Promise<void> | void;
   source: string;
 }
 
@@ -91,11 +98,30 @@ function imagePasteResult(
   return value;
 }
 
-function runImagePasteCallback(callback: MarkdownImagePasteResult["onCommit"] | undefined) {
+function discardImagePasteResult(result: MarkdownImagePasteResult | null | undefined) {
+  if (!result) return;
+  void (async () => {
+    try {
+      await result.onDiscard?.();
+    } catch {
+      // Cleanup failures are reported by the Vault flow itself.
+    }
+    try {
+      await result.onSettled?.("discarded");
+    } catch {
+      // Settlement bookkeeping must not break the editor transaction.
+    }
+  })();
+}
+
+function settleImagePasteResult(
+  result: MarkdownImagePasteResult,
+  outcome: "committed" | "rollback-blocked" | "rolled-back"
+) {
   try {
-    void Promise.resolve(callback?.()).catch(() => undefined);
+    void Promise.resolve(result.onSettled?.(outcome)).catch(() => undefined);
   } catch {
-    // Persistence cleanup/status callbacks must not break the editor transaction.
+    // Settlement bookkeeping must not break the editor transaction.
   }
 }
 
@@ -259,7 +285,7 @@ export function CodeMirrorMarkdownEditor({
           || viewRef.current !== editorView
           || editorView.state.readOnly
         ) {
-          runImagePasteCallback(result?.onDiscard);
+          discardImagePasteResult(result);
           return;
         }
         const documentLength = editorView.state.doc.length;
@@ -267,7 +293,7 @@ export function CodeMirrorMarkdownEditor({
         const to = Math.max(from, Math.min(documentLength, range.to));
         if (!range.collapsed && editorView.state.sliceDoc(from, to) !== range.expectedText) {
           controller.abort();
-          runImagePasteCallback(result.onDiscard);
+          discardImagePasteResult(result);
           return;
         }
         try {
@@ -277,10 +303,59 @@ export function CodeMirrorMarkdownEditor({
             effects: EditorView.scrollIntoView(from + result.source.length, { y: "center" })
           });
           editorView.focus();
-          runImagePasteCallback(result.onCommit);
+          if (result.onCommit) {
+            const rollbackInsertedSource = async () => {
+              if (viewRef.current === editorView && !editorView.state.readOnly) {
+                const currentSource = editorView.state.doc.toString();
+                const rollbackFrom = currentSource.indexOf(result.source);
+                if (
+                  rollbackFrom >= 0
+                  && currentSource.indexOf(result.source, rollbackFrom + result.source.length) < 0
+                ) {
+                  editorView.dispatch({
+                    changes: {
+                      from: rollbackFrom,
+                      insert: range.expectedText,
+                      to: rollbackFrom + result.source.length
+                    },
+                    selection: { anchor: rollbackFrom + range.expectedText.length }
+                  });
+                  editorView.focus();
+                  return true;
+                }
+              }
+              try {
+                return await result.onRollback?.({
+                  replacementText: range.expectedText,
+                  source: result.source
+                }) ?? false;
+              } catch {
+                return false;
+              }
+            };
+            try {
+              void Promise.resolve(result.onCommit()).then(async (accepted) => {
+                if (accepted === false) {
+                  const rolledBack = await rollbackInsertedSource();
+                  settleImagePasteResult(result, rolledBack ? "rolled-back" : "rollback-blocked");
+                  return;
+                }
+                settleImagePasteResult(result, "committed");
+              }).catch(async () => {
+                const rolledBack = await rollbackInsertedSource();
+                settleImagePasteResult(result, rolledBack ? "rolled-back" : "rollback-blocked");
+              });
+            } catch {
+              void rollbackInsertedSource().then((rolledBack) => {
+                settleImagePasteResult(result, rolledBack ? "rolled-back" : "rollback-blocked");
+              });
+            }
+          } else {
+            settleImagePasteResult(result, "committed");
+          }
         } catch {
           controller.abort();
-          runImagePasteCallback(result.onDiscard);
+          discardImagePasteResult(result);
         }
       }).catch(() => {
         pendingImagePasteRangesRef.current.delete(requestId);

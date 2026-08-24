@@ -1699,6 +1699,25 @@ describe("revision-aware note persistence", () => {
     expect(mocks.runTransaction).not.toHaveBeenCalled();
   });
 
+  it("carries the matching pasted-image lease only for partial asset cleanup", async () => {
+    const vaultPasteLockId = `vpl1_${"L".repeat(43)}`;
+    await deleteRevisionedNote({
+      expectedRevision: 4,
+      noteId: "asset-a",
+      readerUids: ["user-a"],
+      uid: "user-a",
+      vaultPasteLockId
+    });
+
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
+      action: "trash",
+      expectedRevision: 4,
+      noteId: "asset-a",
+      readerUids: ["user-a"],
+      vaultPasteLockId
+    });
+  });
+
   it("matches only the exact owner, target, type, parent and index in a blinded claim document", async () => {
     mocks.getDoc.mockResolvedValueOnce({
       data: () => ({
@@ -2591,6 +2610,8 @@ describe("note folder subscriptions", () => {
       [expect.objectContaining({ id: "folder-a", name: "업무" })],
       { fromCache: false, hasPendingWrites: false, serverComplete: true }
     );
+    expect(callback.mock.calls[1][0]).toBe(callback.mock.calls[0][0]);
+    expect(callback.mock.calls[2][0]).toBe(callback.mock.calls[0][0]);
     expect(mocks.onSnapshot).toHaveBeenCalledTimes(1);
   });
 

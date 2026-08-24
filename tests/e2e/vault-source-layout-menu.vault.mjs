@@ -475,6 +475,17 @@ test("desktop workspace controls, dark wikilinks, and Canvas navigation remain d
   const canvas = page.getByRole("region", { name: "Canvas" });
   await expect(canvas).toBeVisible();
 
+  await canvas.getByRole("button", { name: "텍스트 카드 추가", exact: true }).click();
+  const textCard = canvas.getByRole("article", { name: "Canvas 카드: 새 메모", exact: true });
+  await expect(textCard).toBeVisible();
+  await textCard.dblclick();
+  const canvasTextEditor = canvas.getByRole("textbox", { name: "Canvas 텍스트", exact: true });
+  await expect(canvasTextEditor).toBeFocused();
+  await canvasTextEditor.click();
+  await canvasTextEditor.pressSequentially(" 연속 입력", { delay: 30 });
+  await expect(canvasTextEditor).toBeFocused();
+  await expect(canvasTextEditor).toHaveValue("새 메모 연속 입력");
+
   await canvas.getByRole("button", { name: "추가할 노트 선택" }).click();
   const chooser = page.getByRole("dialog", { name: "Canvas 파일 선택" });
   await expect(chooser).toBeVisible();

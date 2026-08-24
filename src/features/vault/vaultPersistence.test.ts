@@ -192,22 +192,43 @@ describe("vaultPersistence encrypted revision contract", () => {
 
   it("stores a binary asset only inside the encrypted asset-v1 envelope", async () => {
     const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+    const vaultPasteLockId = `vpl1_${"L".repeat(43)}`;
 
     await createEncryptedVaultAsset(profile, vaultIntegrityKey, {
       bytes,
       folderId: "folder-a",
       mimeType: "application/pdf",
-      title: "설계.pdf"
+      title: "설계.pdf",
+      vaultPasteLockId
     });
 
     expect(mocks.createRevisionedEncryptedNote).toHaveBeenCalledWith(expect.objectContaining({
       contentFormat: "asset-v1",
       entryKind: "asset",
-      folderId: "folder-a"
+      folderId: "folder-a",
+      vaultPasteLockId
     }));
     const persisted = JSON.stringify(mocks.createRevisionedEncryptedNote.mock.calls[0][0]);
     expect(persisted).not.toContain("application/pdf");
     expect(persisted).not.toContain("설계.pdf");
+  });
+
+  it("rejects malformed paste leases and never attaches one to a non-asset entry", async () => {
+    await expect(createEncryptedVaultAsset(profile, vaultIntegrityKey, {
+      bytes: new Uint8Array([1]),
+      folderId: "folder-a",
+      title: "image.png",
+      vaultPasteLockId: "predictable-lock"
+    })).rejects.toThrow("잠금 식별자");
+    await expect(createEncryptedVaultEntry(profile, vaultIntegrityKey, {
+      body: "# note",
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      folderId: "folder-a",
+      title: "note.md",
+      vaultPasteLockId: `vpl1_${"L".repeat(43)}`
+    })).rejects.toThrow("잠금 식별자");
+    expect(mocks.generateNoteKey).not.toHaveBeenCalled();
   });
 
   it("rejects a malformed asset body before generating a key", async () => {
@@ -260,6 +281,26 @@ describe("vaultPersistence encrypted revision contract", () => {
       encryptedTitle: note.encryptedTitle
     }));
     expect(mocks.updateRevisionedEncryptedNote.mock.calls[0][0]).not.toHaveProperty("nameClaim");
+  });
+
+  it("binds a pasted-image Markdown body save to the exact destination lease", async () => {
+    const note = markdownNote();
+    const credential = {
+      vaultPasteFolderId: "pasted-images-folder",
+      vaultPasteFolderRevision: 4,
+      vaultPasteLockId: `vpl1_${"P".repeat(43)}`
+    };
+
+    await saveEncryptedVaultEntry(note, "user-a", privateKey, vaultIntegrityKey, {
+      body: `${note.body}\n![[붙여넣은 이미지/이전 제목 -1.png]]`,
+      folderId: null,
+      title: note.title
+    }, undefined, credential);
+
+    expect(mocks.updateRevisionedEncryptedNote).toHaveBeenCalledWith(expect.objectContaining({
+      changedFields: ["body"],
+      ...credential
+    }));
   });
 
   it("lets a shared participant save body-only content without deriving an owner claim", async () => {

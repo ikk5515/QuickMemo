@@ -42,6 +42,8 @@ const maximumRequestBytes = 1_600_000;
 const claimPattern = /^[A-Za-z0-9_-]{43}$/u;
 const clientCreateNotePattern = /^vn1_[A-Za-z0-9_-]{43}$/u;
 const importJobPattern = /^vi1_[A-Za-z0-9_-]{43}$/u;
+const vaultPasteLockPattern = /^vpl1_[A-Za-z0-9_-]{43}$/u;
+const vaultPasteLockTtlMilliseconds = 120_000;
 const identifierPattern = /^[A-Za-z0-9_-]{1,160}$/u;
 const noteIdentifierPattern = /^[A-Za-z0-9_-]{1,120}$/u;
 const allowedHistoryFields = new Set([
@@ -164,6 +166,62 @@ function assertRevision(value, minimum = 0) {
     throw new HttpError(400, "invalid_request", "Invalid expectedRevision");
   }
   return value;
+}
+
+function assertVaultPasteLockId(value) {
+  if (typeof value !== "string" || !vaultPasteLockPattern.test(value)) {
+    throw new HttpError(400, "invalid_request", "Invalid Vault paste lock id");
+  }
+  return value;
+}
+
+function storedVaultPasteLock(folder, nowMilliseconds = Date.now()) {
+  if (!folder || !Object.prototype.hasOwnProperty.call(folder, "vaultPasteLock")) {
+    return null;
+  }
+  const lock = folder.vaultPasteLock;
+  const keys = lock && typeof lock === "object" && !Array.isArray(lock)
+    ? Object.keys(lock).sort()
+    : [];
+  const expiresAt = typeof lock?.expiresAt === "string"
+    ? Date.parse(lock.expiresAt)
+    : Number.NaN;
+  if (
+    keys.join("\u0000") !== "expiresAt\u0000id"
+    || typeof lock.id !== "string"
+    || !vaultPasteLockPattern.test(lock.id)
+    || !Number.isFinite(expiresAt)
+    || expiresAt > nowMilliseconds + vaultPasteLockTtlMilliseconds
+  ) {
+    throw new HttpError(
+      409,
+      "vault_paste_locked",
+      "Vault pasted-image folder lock is invalid",
+      { expose: false }
+    );
+  }
+  return {
+    active: expiresAt > nowMilliseconds,
+    id: lock.id
+  };
+}
+
+function assertVaultAssetFolderMutationAllowed(
+  folder,
+  suppliedLockId,
+  { allowMatchingLock = false, requireActiveMatchingLock = false } = {}
+) {
+  const lockId = suppliedLockId === undefined
+    ? null
+    : assertVaultPasteLockId(suppliedLockId);
+  const lock = storedVaultPasteLock(folder);
+  if (lock?.active) {
+    if (allowMatchingLock && lockId === lock.id) return;
+    throw new HttpError(409, "vault_paste_locked", "Vault pasted-image folder is in use");
+  }
+  if (requireActiveMatchingLock && lockId !== null) {
+    throw new HttpError(409, "vault_paste_locked", "Vault pasted-image folder lock is no longer active");
+  }
 }
 
 function revisionConflict(actualRevision, message = "Vault note revision changed") {
@@ -549,7 +607,7 @@ async function assertSourceImportMutationAllowed(context, transaction, note, uid
 }
 
 async function assertFolderAvailable(context, transaction, uid, folderId, targetImportJobId = "") {
-  if (folderId === null) return;
+  if (folderId === null) return null;
   const [folder, treeDocument] = await firestoreBatchGet(
     context,
     [folderPath(folderId), treePath(uid)],
@@ -588,7 +646,7 @@ async function assertFolderAvailable(context, transaction, uid, folderId, target
       throw new HttpError(409, "vault_parent_unavailable", "Vault note folder is unavailable");
     }
   }
-  if (folder.vaultImportJobId === undefined) return;
+  if (folder.vaultImportJobId === undefined) return folder;
   if (typeof folder.vaultImportJobId !== "string" || !importJobPattern.test(folder.vaultImportJobId)) {
     throw new HttpError(409, "vault_import_invalid", "Vault folder import provenance is invalid", {
       expose: false
@@ -599,11 +657,134 @@ async function assertFolderAvailable(context, transaction, uid, folderId, target
     [importJobPath(uid, folder.vaultImportJobId)],
     transaction
   );
-  if (!storedJob) return;
+  if (!storedJob) return folder;
   const job = assertImportJob(storedJob, uid, folder.vaultImportJobId);
-  if (job.status === "committed") return;
-  if (job.status === "staging" && targetImportJobId === folder.vaultImportJobId) return;
+  if (job.status === "committed") return folder;
+  if (job.status === "staging" && targetImportJobId === folder.vaultImportJobId) return folder;
   throw new HttpError(409, "vault_import_locked", "Vault import folder is locked");
+}
+
+async function assertVaultPastedImageSourceCommitAllowed(
+  context,
+  transaction,
+  note,
+  uid,
+  { folderId, folderRevision, lockId }
+) {
+  const [folder, treeDocument] = await firestoreBatchGet(
+    context,
+    [folderPath(folderId), treePath(uid)],
+    transaction
+  );
+  if (
+    !folder
+    || folder.ownerUid !== uid
+    || note.ownerUid !== uid
+    || folder.isDeleted === true
+    || (folder.parentId ?? null) !== null
+    || !folder.encryptedName
+    || !folder.wrappedKey
+    || storedClaimId(folder) === null
+    || folder.vaultNameIndexVersion !== 1
+    || assertRevision(folder.revision, 1) !== folderRevision
+  ) {
+    throw new HttpError(
+      409,
+      "vault_paste_source_mismatch",
+      "Vault pasted-image destination no longer matches the source commit"
+    );
+  }
+  if (!treeDocument || treeDocument.ownerUid !== uid) {
+    throw new HttpError(
+      409,
+      "vault_tree_repair_required",
+      "Vault folder tree must be repaired before this mutation"
+    );
+  }
+  let tree;
+  try {
+    tree = validateVaultFolderTree({
+      folderCount: treeDocument.folderCount,
+      nodes: treeDocument.nodes,
+      revision: treeDocument.revision,
+      schemaVersion: treeDocument.schemaVersion
+    });
+  } catch (error) {
+    if (error?.code === "vault_tree_invalid" || error?.code === "vault_depth_exceeded") {
+      throw new HttpError(
+        409,
+        "vault_tree_repair_required",
+        "Vault folder tree must be repaired before this mutation"
+      );
+    }
+    throw error;
+  }
+  const node = tree.nodes[folderId];
+  if (
+    !node
+    || node.active !== true
+    || node.selfActive !== true
+    || (node.parentId ?? null) !== null
+  ) {
+    throw new HttpError(
+      409,
+      "vault_paste_source_mismatch",
+      "Vault pasted-image destination is not an active root folder"
+    );
+  }
+  const lock = storedVaultPasteLock(folder);
+  if (!lock?.active || lock.id !== lockId) {
+    throw new HttpError(
+      409,
+      "vault_paste_locked",
+      "Vault pasted-image source commit requires the active matching folder lock"
+    );
+  }
+}
+
+function assetPathMutation(changedFields) {
+  return Array.isArray(changedFields) && changedFields.some((field) => (
+    field === "deleted"
+    || field === "folder"
+    || field === "restored"
+    || field === "title"
+  ));
+}
+
+async function assertVaultAssetPathMutationAllowed(
+  context,
+  transaction,
+  note,
+  nextNote,
+  actionName,
+  suppliedLockId
+) {
+  if (note.entryKind !== "asset") {
+    if (suppliedLockId !== undefined) {
+      throw new HttpError(400, "invalid_request", "Vault paste lock is valid only for an asset");
+    }
+    return;
+  }
+  const folderIds = [...new Set([
+    note.folderId ?? null,
+    nextNote?.folderId ?? null
+  ].filter((folderId) => folderId !== null))];
+  if (folderIds.length === 0) {
+    if (suppliedLockId !== undefined) {
+      throw new HttpError(400, "invalid_request", "Vault paste lock requires an asset folder");
+    }
+    return;
+  }
+  const folders = await firestoreBatchGet(
+    context,
+    folderIds.map((folderId) => folderPath(folderId)),
+    transaction
+  );
+  for (const folder of folders) {
+    assertVaultAssetFolderMutationAllowed(folder, suppliedLockId, {
+      allowMatchingLock: actionName === "trash"
+    });
+  }
 }
 
 async function transactionState(context, uid, noteId) {
@@ -706,12 +887,21 @@ async function createNote(context, uid, body, options = {}) {
     : [
         "action", "contentFormat", "encryptedBody", "encryptedTitle", "entryKind", "folderId",
         "historySnapshot", "historySummary", "nameClaim", "noteId", "participantUids", "type",
-        "wrappedKeys"
+        "vaultPasteLockId", "wrappedKeys"
       ];
   if (options.imported) allowedKeys.push("importJobId", "noteId");
   if (options.secureCopy) allowedKeys.push("copyJobId", "expectedAttachmentCount");
   assertOnlyKeys(body, allowedKeys);
   const input = baseCreateInput(body, uid);
+  const vaultPasteLockId = body.vaultPasteLockId === undefined
+    ? undefined
+    : assertVaultPasteLockId(body.vaultPasteLockId);
+  if (
+    vaultPasteLockId !== undefined
+    && (options.imported || options.secureCopy || input.storage.entryKind !== "asset")
+  ) {
+    throw new HttpError(400, "invalid_request", "Vault paste lock is valid only for a pasted asset");
+  }
   const clientAssignedNoteId = !options.imported && !options.secureCopy;
   const noteId = options.imported || options.secureCopy
     ? assertNoteId(body.noteId)
@@ -760,7 +950,13 @@ async function createNote(context, uid, body, options = {}) {
       const [job] = await firestoreBatchGet(context, [importJobPath(uid, importJobId)], state.transaction);
       importJob = assertImportJob(job, uid, importJobId);
     }
-    await assertFolderAvailable(context, state.transaction, uid, input.folderId, importJobId);
+    const targetFolder = await assertFolderAvailable(
+      context,
+      state.transaction,
+      uid,
+      input.folderId,
+      importJobId
+    );
     const [storedClaim] = claim
       ? await firestoreBatchGet(context, [claimPath(uid, claim.claimId)], state.transaction)
       : [null];
@@ -918,6 +1114,15 @@ async function createNote(context, uid, body, options = {}) {
     if (importJob && importJob.status !== "staging") {
       throw new HttpError(409, "vault_import_locked", "Vault import is not accepting entries");
     }
+    if (input.storage.entryKind === "asset") {
+      if (input.folderId === null && vaultPasteLockId !== undefined) {
+        throw new HttpError(400, "invalid_request", "Vault paste lock requires an asset folder");
+      }
+      assertVaultAssetFolderMutationAllowed(targetFolder, vaultPasteLockId, {
+        allowMatchingLock: true,
+        requireActiveMatchingLock: true
+      });
+    }
 
     const now = new Date();
     const history = noteHistoryDocument(
@@ -1060,6 +1265,21 @@ async function mutateRevisionedNote(context, uid, body, specification) {
       update,
       mutation.deleteFields
     );
+    const pastedImageSourceCommit = specification.actionName === "update"
+      && body.vaultPasteFolderId !== undefined;
+    if (
+      (body.vaultPasteLockId !== undefined && !pastedImageSourceCommit)
+      || (note.entryKind === "asset" && assetPathMutation(mutation.changedFields))
+    ) {
+      await assertVaultAssetPathMutationAllowed(
+        context,
+        state.transaction,
+        note,
+        nextInventoryDocument,
+        specification.actionName,
+        body.vaultPasteLockId
+      );
+    }
     const currentClaimId = storedClaimId(note);
     const nextClaimId = storedClaimId(nextInventoryDocument);
     const pathIdentityChanged = specification.actionName === "resolve-collision"
@@ -1200,11 +1420,30 @@ async function handleUpdate(context, uid, body) {
   assertOnlyKeys(body, [
     "action", "changedFields", "encryptedBody", "encryptedTitle", "expectedContentFormat",
     "expectedEntryKind", "expectedRevision", "folderId", "historySnapshot", "historySummary",
-    "nameClaim", "noteId", "pathRewriteActivation", "readerUids"
+    "nameClaim", "noteId", "pathRewriteActivation", "readerUids", "vaultPasteFolderId",
+    "vaultPasteFolderRevision", "vaultPasteLockId"
   ]);
   const encryptedTitle = assertEncryptedPayload(body.encryptedTitle, "encryptedTitle", 4_096);
   const encryptedBody = assertEncryptedPayload(body.encryptedBody, "encryptedBody", 700_000);
   assertStorageIdentity(body.expectedContentFormat, body.expectedEntryKind);
+  const pasteCredentialFieldCount = [
+    "vaultPasteFolderId",
+    "vaultPasteFolderRevision",
+    "vaultPasteLockId"
+  ].filter((field) => Object.prototype.hasOwnProperty.call(body, field)).length;
+  if (pasteCredentialFieldCount !== 0 && pasteCredentialFieldCount !== 3) {
+    throw new HttpError(400, "invalid_request", "Vault paste source credential is incomplete");
+  }
+  const pasteCredential = pasteCredentialFieldCount === 3
+    ? {
+        folderId: assertFolderId(body.vaultPasteFolderId, "vaultPasteFolderId"),
+        folderRevision: assertRevision(body.vaultPasteFolderRevision, 1),
+        lockId: assertVaultPasteLockId(body.vaultPasteLockId)
+      }
+    : null;
+  if (pasteCredential?.folderId === null) {
+    throw new HttpError(400, "invalid_request", "Vault paste source folder is required");
+  }
   return mutateRevisionedNote(context, uid, body, {
     actionName: "update",
     prepare: async ({ context: innerContext, note, noteId, transaction }) => {
@@ -1264,6 +1503,34 @@ async function handleUpdate(context, uid, body) {
       );
       if (!ownerUpdate && (changedFields.length !== 1 || changedFields[0] !== "body")) {
         throw new HttpError(400, "invalid_request", "Participant history must describe body only");
+      }
+      if (pasteCredential) {
+        if (
+          note.ownerUid !== uid
+          || note.type !== "personal"
+          || note.contentFormat !== "markdown-v1"
+          || note.entryKind !== "markdown"
+          || note.participantUids.length !== 1
+          || note.participantUids[0] !== uid
+          || titleChanged
+          || folderChanged
+          || !bodyChanged
+          || changedFields.length !== 1
+          || changedFields[0] !== "body"
+        ) {
+          throw new HttpError(
+            403,
+            "access_denied",
+            "Vault paste source lock is valid only for an owner-only Markdown body update"
+          );
+        }
+        await assertVaultPastedImageSourceCommitAllowed(
+          innerContext,
+          transaction,
+          note,
+          uid,
+          pasteCredential
+        );
       }
       const currentClaimId = storedClaimId(note);
       let nextClaim = null;
@@ -1604,9 +1871,9 @@ async function handleCollision(context, uid, body) {
 }
 
 async function handleLifecycle(context, uid, body, restoring) {
-  assertOnlyKeys(body, [
-    "action", "expectedRevision", "nameClaim", "noteId", "readerUids"
-  ]);
+  assertOnlyKeys(body, restoring
+    ? ["action", "expectedRevision", "nameClaim", "noteId", "readerUids"]
+    : ["action", "expectedRevision", "noteId", "readerUids", "vaultPasteLockId"]);
   return mutateRevisionedNote(context, uid, body, {
     actionName: restoring ? "restore" : "trash",
     prepare: async ({ context: innerContext, note, noteId, profile, transaction }) => {
@@ -1699,6 +1966,16 @@ async function handlePurge(context, uid, body) {
       throw new HttpError(409, "vault_note_state_mismatch", "Vault note cannot be purged");
     }
     await assertSourceImportMutationAllowed(context, state.transaction, note, uid, "purge");
+    if (note.entryKind === "asset") {
+      await assertVaultAssetPathMutationAllowed(
+        context,
+        state.transaction,
+        note,
+        { ...note, folderId: null },
+        "purge",
+        undefined
+      );
+    }
     const [cleanupQueue] = await firestoreBatchGet(
       context,
       [cleanupQueuePath(noteId)],
@@ -1951,6 +2228,8 @@ export const __vaultNoteTesting = Object.freeze({
   assertNameClaim,
   assertParticipants,
   assertStorageIdentity,
+  assertVaultAssetFolderMutationAllowed,
+  assertVaultPasteLockId,
   assertWrappedKeys,
   performAction
 });

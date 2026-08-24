@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { createElement } from "react";
+import { createElement, useState } from "react";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   CANVAS_NODE_INTERACTION_THRESHOLD_PX,
@@ -872,6 +872,38 @@ describe("JsonCanvasView controls", () => {
     expect(card).not.toBeNull();
     fireEvent.doubleClick(card!);
     expect(await screen.findByLabelText("Canvas 텍스트")).toHaveValue("## 연구\n\n- 다음 실험");
+  });
+
+  it("keeps the text editor focused while a controlled parent accepts each character", async () => {
+    const parseSpy = vi.spyOn(canvasModel, "parseCanvasDocument");
+    const fileOptions = [] as const;
+    const onOpenFile = vi.fn();
+    function ControlledCanvas() {
+      const [source, setSource] = useState(JSON.stringify({
+        nodes: [{ id: "text", type: "text", x: 0, y: 0, width: 360, height: 220, text: "기존" }],
+        edges: []
+      }));
+      return createElement(JsonCanvasView, {
+        fileOptions,
+        onChange: setSource,
+        onOpenFile,
+        source
+      });
+    }
+
+    render(createElement(ControlledCanvas));
+    const parseCallsAfterMount = parseSpy.mock.calls.length;
+    const card = screen.getByTestId("rf__node-text").querySelector("article");
+    expect(card).not.toBeNull();
+    fireEvent.doubleClick(card!);
+    const editor = await screen.findByLabelText("Canvas 텍스트");
+    await userEvent.type(editor, "세 글자");
+
+    expect(screen.getByLabelText("Canvas 텍스트")).toBe(editor);
+    expect(editor).toHaveFocus();
+    expect(editor).toHaveValue("기존세 글자");
+    expect(parseSpy).toHaveBeenCalledTimes(parseCallsAfterMount);
+    parseSpy.mockRestore();
   });
 
   it("creates an empty Markdown text card on an unmodified pane double-click", async () => {
