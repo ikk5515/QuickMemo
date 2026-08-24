@@ -11,6 +11,7 @@ import {
   vaultPathRewriteRecoveryContinuationIsCurrent,
   VaultPathRewriteControllerError
 } from "./pathRewriteController";
+import { VaultPathRewriteControllerError as VaultPathRewriteControllerCoreError } from "./pathRewriteControllerCore";
 import type { PreparedVaultPathRewriteJob } from "./pathRewriteJob";
 import type { VaultPathRewriteJobSummary } from "../../services/vaultPathRewriteJobs";
 
@@ -36,6 +37,12 @@ function summary(
 const prepared = { jobId: summary("prepared").jobId } as PreparedVaultPathRewriteJob;
 
 describe("path rewrite controller", () => {
+  it("shares one error constructor with the statically loaded controller core", () => {
+    const error = new VaultPathRewriteControllerError("blocked", "blocked");
+    expect(error).toBeInstanceOf(VaultPathRewriteControllerCoreError);
+    expect(VaultPathRewriteControllerError).toBe(VaultPathRewriteControllerCoreError);
+  });
+
   it("rejects cancelled and stale access-scope recovery continuations", () => {
     expect(vaultPathRewriteRecoveryContinuationIsCurrent({
       cancelled: false,

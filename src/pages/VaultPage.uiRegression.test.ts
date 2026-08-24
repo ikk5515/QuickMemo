@@ -26,6 +26,17 @@ function ruleBodiesForSelector(css: string, selector: string) {
 }
 
 describe("Vault workspace UI regression contract", () => {
+  it("keeps path rewrite policy static while lazy-loading async controller work", () => {
+    expect(source).toContain('from "../features/vault/pathRewriteControllerCore";');
+    expect(source).toContain(
+      'vaultPathRewriteControllerModulePromise ??= import("../features/vault/pathRewriteController")'
+    );
+    expect(source).toContain("vaultPathRewriteControllerModulePromise = null;");
+    expect(source).not.toMatch(
+      /from\s+"\.\.\/features\/vault\/pathRewriteController";/u
+    );
+  });
+
   it("lets source mode fill the pane while constraining reading surfaces", () => {
     expect(ruleBodiesForSelector(
       styles,
