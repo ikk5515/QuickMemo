@@ -98,6 +98,7 @@ export function reconcileVaultPathRewriteJobAfterRecoveryScan(input: {
   continuationIsCurrent: boolean;
   current: VaultPathRewriteJobSummary | null;
   observedBlockedJobId: string | null;
+  observedBlockedRevision: number | null;
   scanComplete: boolean;
   scannedJobs: readonly VaultPathRewriteJobSummary[];
 }) {
@@ -105,8 +106,10 @@ export function reconcileVaultPathRewriteJobAfterRecoveryScan(input: {
     !input.continuationIsCurrent
     || !input.scanComplete
     || input.observedBlockedJobId === null
+    || input.observedBlockedRevision === null
     || input.current?.status !== "blocked"
     || input.current.jobId !== input.observedBlockedJobId
+    || input.current.revision !== input.observedBlockedRevision
     || input.scannedJobs.some((job) => job.jobId === input.observedBlockedJobId)
   ) return input.current;
   return null;

@@ -70,6 +70,7 @@ describe("path rewrite controller", () => {
       continuationIsCurrent: true,
       current: blocked,
       observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
       scanComplete: true,
       scannedJobs: []
     })).toBeNull();
@@ -77,6 +78,7 @@ describe("path rewrite controller", () => {
       continuationIsCurrent: true,
       current: blocked,
       observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
       scanComplete: true,
       scannedJobs: [blocked]
     })).toBe(blocked);
@@ -84,6 +86,7 @@ describe("path rewrite controller", () => {
       continuationIsCurrent: false,
       current: blocked,
       observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
       scanComplete: true,
       scannedJobs: []
     })).toBe(blocked);
@@ -91,6 +94,7 @@ describe("path rewrite controller", () => {
       continuationIsCurrent: true,
       current: blocked,
       observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
       scanComplete: false,
       scannedJobs: []
     })).toBe(blocked);
@@ -98,9 +102,19 @@ describe("path rewrite controller", () => {
       continuationIsCurrent: true,
       current: different,
       observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
       scanComplete: true,
       scannedJobs: []
     })).toBe(different);
+    const newerBlocked = { ...blocked, revision: blocked.revision + 1 };
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: newerBlocked,
+      observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
+      scanComplete: true,
+      scannedJobs: []
+    })).toBe(newerBlocked);
   });
 
   it("flushes the captured dirty drafts before recovery and reports every draft still dirty", async () => {

@@ -6619,6 +6619,9 @@ function UnlockedVaultPage({
     const observedBlockedJobId = pathRewriteJob?.status === "blocked"
       ? pathRewriteJob.jobId
       : null;
+    const observedBlockedRevision = pathRewriteJob?.status === "blocked"
+      ? pathRewriteJob.revision
+      : null;
     let deferredRecoveryTimer: number | null = null;
     let deferredRecoveryDeadline = Number.POSITIVE_INFINITY;
     const scheduleDeferredRecovery = (delayMs: number) => {
@@ -6653,6 +6656,7 @@ function UnlockedVaultPage({
           continuationIsCurrent: continuationIsCurrent(),
           current,
           observedBlockedJobId,
+          observedBlockedRevision,
           scanComplete: !hasMore,
           scannedJobs: jobs
         }));

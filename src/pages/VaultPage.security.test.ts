@@ -101,9 +101,13 @@ describe("VaultPage security boundaries", () => {
       'const observedBlockedJobId = pathRewriteJob?.status === "blocked"'
     );
     expect(automaticRecovery).toContain(
+      'const observedBlockedRevision = pathRewriteJob?.status === "blocked"'
+    );
+    expect(automaticRecovery).toContain(
       "setPathRewriteJob((current) => reconcileVaultPathRewriteJobAfterRecoveryScan({"
     );
     expect(automaticRecovery).toContain("continuationIsCurrent: continuationIsCurrent(),");
+    expect(automaticRecovery).toContain("observedBlockedRevision,");
     expect(automaticRecovery).toContain("scanComplete: !hasMore,");
     expect(automaticRecovery).toMatch(
       /await flushVaultDraftsBeforePathRewriteRecovery\(\{[\s\S]*?\n\s+if \(!continuationIsCurrent\(\)\) return;/u
