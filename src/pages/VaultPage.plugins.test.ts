@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(join(process.cwd(), "src/pages/VaultPage.tsx"), "utf8");
+const commandPaletteSource = readFileSync(
+  join(process.cwd(), "src/features/vault/navigation/CommandPalette.tsx"),
+  "utf8"
+);
 
 describe("VaultPage built-in knowledge tool wiring", () => {
   it("keeps heavy Dataview, Drawing and Kanban views lazy-loaded", () => {
@@ -40,6 +44,19 @@ describe("VaultPage built-in knowledge tool wiring", () => {
     expect(source).toContain('const LazyCodeMirrorMarkdownEditor = lazy(');
     expect(source).toContain('<LazyCodeMirrorMarkdownEditor {...props} />');
     expect(source).not.toContain('import { CodeMirrorMarkdownEditor }');
+  });
+
+  it("loads navigation dialogs only while they are open", () => {
+    expect(source).toContain('import { useVaultNavigationShortcuts } from "../features/vault/navigation/useVaultNavigationShortcuts"');
+    expect(source).toContain('const LazyCommandPalette = lazy(');
+    expect(source).toContain('const LazyQuickSwitcher = lazy(');
+    expect(source).toContain("{commandPaletteOpen ? (");
+    expect(source).toContain("{quickSwitcherOpen ? (");
+    expect(source).toContain("<LazyCommandPalette");
+    expect(source).toContain("includeVaultCommands");
+    expect(source).toContain("<LazyQuickSwitcher");
+    expect(source).not.toContain("const vaultCommands:");
+    expect(source).not.toContain('from "../features/vault/navigation"');
   });
 
   it("connects Daily Notes and its encrypted workspace state", () => {
@@ -84,15 +101,15 @@ describe("VaultPage built-in knowledge tool wiring", () => {
   });
 
   it("exposes Drawing and Kanban creation through commands and the ribbon", () => {
-    expect(source).toContain('{ id: "new-drawing"');
-    expect(source).toContain('{ id: "new-kanban"');
+    expect(commandPaletteSource).toContain('{ id: "new-drawing"');
+    expect(commandPaletteSource).toContain('{ id: "new-kanban"');
     expect(source).toContain('aria-label="새 QuickMemo Drawing"');
     expect(source).toContain('aria-label="새 Kanban"');
     expect(source).not.toContain('"새 드로잉.excalidraw"');
   });
 
   it("creates an encrypted Markdown index from the current search result without mislabeling it as a curated MOC", () => {
-    expect(source).toContain('{ id: "create-search-index"');
+    expect(commandPaletteSource).toContain('{ id: "create-search-index"');
     expect(source).toContain("async function createIndexFromCurrentSearch()");
     expect(source).toContain("const candidates = filteredNotes.flatMap");
     expect(source).toContain("const result = createSearchIndexMarkdown");

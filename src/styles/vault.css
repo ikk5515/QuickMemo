@@ -2535,7 +2535,7 @@
   .vault-note-header {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto auto auto;
-    min-height: 106px;
+    min-height: 156px;
   }
 
   .vault-note-header > input,
@@ -2545,24 +2545,32 @@
   }
 
   .vault-note-actions {
+    display: grid;
+    gap: 3px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     justify-content: flex-start;
+    overflow: visible;
   }
 
   .vault-note-content {
-    height: calc(100% - 106px);
+    height: calc(100% - 156px);
   }
 
   .vault-save-conflict + .vault-note-content {
-    height: calc(100% - 232px);
+    height: calc(100% - 282px);
   }
 
   .vault-note-actions select {
     flex: 0 0 auto;
-    max-width: 68px;
+    max-width: none;
   }
 
-  .vault-note-actions button {
+  .vault-note-actions button,
+  .vault-note-actions select {
+    box-sizing: border-box;
     font-size: 10px;
+    min-width: 0;
+    width: 100%;
   }
 }
 

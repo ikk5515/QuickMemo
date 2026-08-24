@@ -243,14 +243,12 @@ import {
   uniqueNoteTitle
 } from "../features/vault/noteCommands";
 import { detectMarkdownPluginView } from "../features/vault/markdownPluginView";
-import {
-  CommandPalette,
-  QuickSwitcher,
-  useVaultNavigationShortcuts,
-  type CommandPaletteItem,
-  type NavigationActivationMetadata,
-  type QuickSwitcherItem
-} from "../features/vault/navigation";
+import { useVaultNavigationShortcuts } from "../features/vault/navigation/useVaultNavigationShortcuts";
+import type {
+  CommandPaletteItem,
+  NavigationActivationMetadata,
+  QuickSwitcherItem
+} from "../features/vault/navigation/types";
 import { previewTextFromHtml } from "../lib/editorContent";
 import { FeatureErrorBoundary } from "../components/FeatureErrorBoundary";
 import { registerPrivateKeyAutoLockGuard } from "../lib/privateKeyAutoLockGuard";
@@ -478,6 +476,12 @@ const LazyVaultShareManagerDialog = lazy(() => import("../features/vault/VaultSh
 })));
 const LazyVaultParticipantShareDialog = lazy(() => import("../features/vault/VaultParticipantShareDialog").then((module) => ({
   default: module.VaultParticipantShareDialog
+})));
+const LazyCommandPalette = lazy(() => import("../features/vault/navigation/CommandPalette").then((module) => ({
+  default: module.CommandPalette
+})));
+const LazyQuickSwitcher = lazy(() => import("../features/vault/navigation/QuickSwitcher").then((module) => ({
+  default: module.QuickSwitcher
 })));
 const LazyVaultImportRecoveryPanel = lazy(() => import("../features/vault/VaultImportRecoveryPanel").then((module) => ({
   default: module.VaultImportRecoveryPanel
@@ -948,39 +952,6 @@ interface CreateVaultEntryOptions {
   folderId?: string | null;
   preserveRequestedTitle?: boolean;
 }
-
-const vaultCommands: CommandPaletteItem[] = [
-  { id: "new-note", label: "새 노트 만들기", section: "파일", shortcut: "Cmd/Ctrl+N", keywords: ["markdown"] },
-  { id: "new-canvas", label: "새 Canvas 만들기", section: "파일", keywords: ["canvas", "캔버스"] },
-  { id: "new-base", label: "새 Base 만들기", section: "파일", keywords: ["base", "베이스", "데이터베이스"] },
-  { id: "new-drawing", label: "새 QuickMemo Drawing 만들기", section: "파일", keywords: ["drawing", "sketch", "드로잉"] },
-  { id: "new-kanban", label: "새 Kanban 만들기", section: "파일", keywords: ["kanban", "칸반", "board"] },
-  { id: "daily-note", label: "오늘의 Daily Note 열기", section: "노트", keywords: ["daily", "오늘"] },
-  { id: "unique-note", label: "고유 노트 만들기", section: "노트", keywords: ["unique", "timestamp", "고유"] },
-  { id: "random-note", label: "무작위 노트 열기", section: "노트", keywords: ["random"] },
-  { id: "create-search-index", label: "현재 검색 결과 인덱스 만들기", section: "노트", keywords: ["index", "색인", "검색", "연결"] },
-  { id: "insert-template", label: "현재 노트에 템플릿 삽입", section: "템플릿", keywords: ["template", "템플릿"] },
-  { id: "new-from-template", label: "템플릿에서 새 노트 만들기", section: "템플릿", keywords: ["template", "템플릿"] },
-  { id: "global-graph", label: "전체 그래프 열기", section: "보기", keywords: ["graph", "그래프"] },
-  { id: "outline", label: "현재 노트 목차 열기", section: "보기", keywords: ["outline", "목차"] },
-  { id: "search", label: "전체 검색 열기", section: "보기", keywords: ["search", "검색"] },
-  { id: "bookmarks", label: "북마크와 워크스페이스 열기", section: "보기", keywords: ["bookmark", "workspace", "북마크", "워크스페이스"] },
-  { id: "toggle-tab-pin", label: "현재 탭 고정 전환", section: "보기", keywords: ["pin", "tab", "고정", "탭"] },
-  { id: "toggle-calendar", label: "Daily Notes 달력 전환", section: "보기", keywords: ["calendar", "달력", "daily"] },
-  { id: "toggle-left", label: "왼쪽 사이드바 전환", section: "보기" },
-  { id: "toggle-right", label: "오른쪽 사이드바 전환", section: "보기" },
-  { id: "audio-recorder", label: "Audio recorder 열기", section: "Core 도구", keywords: ["audio", "record", "녹음"] },
-  { id: "footnotes-view", label: "Footnotes view 열기", section: "Core 도구", keywords: ["footnote", "각주"] },
-  { id: "format-converter", label: "Format converter 열기", section: "Core 도구", keywords: ["html", "markdown", "변환"] },
-  { id: "note-composer", label: "Note composer 열기", section: "Core 도구", keywords: ["split", "merge", "분리", "합치기"] },
-  { id: "slides", label: "현재 노트를 Slides로 열기", section: "Core 도구", keywords: ["slide", "presentation", "발표"] },
-  { id: "web-viewer", label: "Web viewer 열기", section: "Core 도구", keywords: ["web", "browser", "웹"] },
-  { id: "import-obsidian", label: "Obsidian ZIP 가져오기", section: "가져오기·내보내기", keywords: ["zip", "import"] },
-  { id: "export-obsidian", label: "Obsidian ZIP 내보내기", section: "가져오기·내보내기", keywords: ["zip", "export"] },
-  { id: "open-library", label: "자료실 열기", section: "QuickMemo" },
-  { id: "open-schedule", label: "일정 열기", section: "QuickMemo" },
-  { id: "open-legacy", label: "기존 노트 관리 열기", section: "QuickMemo" }
-];
 
 function timestampMillis(value: DecryptedVaultNote["createdAt"]) {
   return value && typeof value.toMillis === "function" ? value.toMillis() : undefined;
@@ -4231,7 +4202,6 @@ function UnlockedVaultPage({
   const commandPaletteCommands = useMemo<CommandPaletteItem[]>(() => {
     const availableEntryIds = new Set(notes.map((note) => note.id));
     return [
-      ...vaultCommands,
       ...vaultBookmarks.flatMap((bookmark): CommandPaletteItem[] => (
         bookmark.kind === "entry" && !availableEntryIds.has(bookmark.entryId)
           ? []
@@ -11126,18 +11096,41 @@ function UnlockedVaultPage({
           </section>
         ) : null}
       </div>
-      <CommandPalette
-        commands={commandPaletteCommands}
-        onExecute={(command) => handleCommand(command)}
-        onOpenChange={setCommandPaletteOpen}
-        open={commandPaletteOpen}
-      />
-      <QuickSwitcher
-        entries={quickSwitcherEntries}
-        onOpen={handleQuickSwitcherOpen}
-        onOpenChange={setQuickSwitcherOpen}
-        open={quickSwitcherOpen}
-      />
+      {commandPaletteOpen ? (
+        <FeatureErrorBoundary fallback={(
+          <div className="vault-dialog-loading" role="alert">
+            명령 팔레트를 불러오지 못했습니다.
+            <button onClick={() => setCommandPaletteOpen(false)} type="button">닫기</button>
+          </div>
+        )}>
+          <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">명령 팔레트 불러오는 중…</div>}>
+            <LazyCommandPalette
+              commands={commandPaletteCommands}
+              includeVaultCommands
+              onExecute={(command) => handleCommand(command)}
+              onOpenChange={setCommandPaletteOpen}
+              open
+            />
+          </Suspense>
+        </FeatureErrorBoundary>
+      ) : null}
+      {quickSwitcherOpen ? (
+        <FeatureErrorBoundary fallback={(
+          <div className="vault-dialog-loading" role="alert">
+            퀵 스위처를 불러오지 못했습니다.
+            <button onClick={() => setQuickSwitcherOpen(false)} type="button">닫기</button>
+          </div>
+        )}>
+          <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">퀵 스위처 불러오는 중…</div>}>
+            <LazyQuickSwitcher
+              entries={quickSwitcherEntries}
+              onOpen={handleQuickSwitcherOpen}
+              onOpenChange={setQuickSwitcherOpen}
+              open
+            />
+          </Suspense>
+        </FeatureErrorBoundary>
+      ) : null}
       {trashOpen ? (
         <Suspense fallback={<div aria-live="polite" className="vault-dialog-loading" role="status">휴지통 불러오는 중…</div>}>
           <LazyVaultTrashDialog

@@ -119,6 +119,23 @@ describe("navigation shortcut helpers", () => {
 });
 
 describe("CommandPalette", () => {
+  it("adds the Vault command catalog only when the Vault host requests it", () => {
+    render(
+      <CommandPalette
+        commands={[]}
+        includeVaultCommands
+        onExecute={() => undefined}
+        onOpenChange={() => undefined}
+        open
+      />
+    );
+
+    fireEvent.change(screen.getByRole("combobox", { name: "명령 검색" }), {
+      target: { value: "새 Canvas" }
+    });
+    expect(screen.getByRole("option")).toHaveTextContent("새 Canvas 만들기");
+  });
+
   it("provides modal combobox semantics, fuzzy filtering, and keyboard activation", () => {
     const onExecute = vi.fn();
     const onOpenChange = vi.fn();
