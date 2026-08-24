@@ -114,6 +114,7 @@ import {
   recoverVaultPathRewrite,
   retryableVaultPathRewriteFailure,
   shouldAutomaticallyRecoverVaultPathRewriteJob,
+  vaultPathRewriteRecoveryContinuationIsCurrent,
   VaultPathRewriteControllerError,
   type VaultPathRewriteStage
 } from "../features/vault/pathRewriteController";
@@ -2338,6 +2339,19 @@ function UnlockedVaultPage({
     draftMergeRequestGenerationRef.current += 1;
     knowledgeSyncGenerationRef.current += 1;
     vaultImportRecoveryGenerationRef.current += 1;
+    pathRewriteRecoveryGenerationRef.current += 1;
+    pathRewriteCleanupOwnerRef.current = null;
+    pathRewriteCleanupSessionRef.current = null;
+    pathRewriteRecoveryFailureCountRef.current = 0;
+    const recoveryOwnedPathLock = pathRewriteRecoveryBusyOwnerRef.current !== null;
+    pathRewriteRecoveryBusyOwnerRef.current = null;
+    // Release only a recovery-owned lock. A concurrent rename or move owns the
+    // same global lock independently and must finish its server reconciliation.
+    if (recoveryOwnedPathLock) {
+      pathRewriteBusyRef.current = false;
+      setPathRewriteBusy(false);
+    }
+    setPathRewriteJob(null);
     setDecryptedVaultScopeKey(null);
     setVaultDataReady(false);
     allVisibleNoteSnapshotsRef.current = [];
@@ -6311,10 +6325,15 @@ function UnlockedVaultPage({
     });
   }
 
-  function recoverDurablePathRewriteJob(job: VaultPathRewriteJobSummary) {
+  function recoverDurablePathRewriteJob(
+    job: VaultPathRewriteJobSummary,
+    continuationIsCurrent: () => boolean
+  ) {
     return recoverVaultPathRewrite({
       job,
-      onStage: setPathRewriteStage,
+      onStage: (stage, stageJob) => {
+        if (continuationIsCurrent()) setPathRewriteStage(stage, stageJob);
+      },
       recoverPrepared: () => recoverPreparedVaultPathRewriteJob({
         jobId: job.jobId,
         privateKey,
@@ -6359,29 +6378,40 @@ function UnlockedVaultPage({
     }
     if (pathRewriteBusyRef.current) return;
 
+    const generation = pathRewriteRecoveryGenerationRef.current;
+    const continuationIsCurrent = () => vaultPathRewriteRecoveryContinuationIsCurrent({
+      cancelled: false,
+      currentGeneration: pathRewriteRecoveryGenerationRef.current,
+      generation
+    });
     pathRewriteBusyRef.current = true;
+    pathRewriteRecoveryBusyOwnerRef.current = generation;
     setPathRewriteBusy(true);
     setError(null);
-    setStatus("저장되지 않은 편집을 먼저 확인하는 중입니다…");
     try {
-      const dirtyEntryIds = Object.entries(draftsRef.current)
-        .filter(([, draft]) => draft.dirty)
-        .map(([entryId]) => entryId);
-      const remainingDirtyEntryIds = await flushVaultDraftsBeforePathRewriteRecovery({
-        dirtyEntryIds,
-        isDirty: (entryId) => Boolean(draftsRef.current[entryId]?.dirty),
-        save: (entryId) => saveEntryRef.current(entryId),
-        waitForMutation: (entryId) => entryMutationPromisesRef.current.get(entryId)
-      });
-      if (remainingDirtyEntryIds.length > 0) {
-        setError(
-          `${remainingDirtyEntryIds.length}개 편집본을 서버에 저장하지 못해 내부 참조 재개를 중단했습니다. 현재 초안은 이 세션에 그대로 남아 있습니다.`
-        );
-        return;
+      if (job.stepCount > 0) {
+        setStatus("저장되지 않은 편집을 먼저 확인하는 중입니다…");
+        const dirtyEntryIds = Object.entries(draftsRef.current)
+          .filter(([, draft]) => draft.dirty)
+          .map(([entryId]) => entryId);
+        const remainingDirtyEntryIds = await flushVaultDraftsBeforePathRewriteRecovery({
+          dirtyEntryIds,
+          isDirty: (entryId) => Boolean(draftsRef.current[entryId]?.dirty),
+          save: (entryId) => saveEntryRef.current(entryId),
+          waitForMutation: (entryId) => entryMutationPromisesRef.current.get(entryId)
+        });
+        if (!continuationIsCurrent()) return;
+        if (remainingDirtyEntryIds.length > 0) {
+          setError(
+            `${remainingDirtyEntryIds.length}개 편집본을 서버에 저장하지 못해 내부 참조 재개를 중단했습니다. 현재 초안은 이 세션에 그대로 남아 있습니다.`
+          );
+          return;
+        }
       }
 
       setStatus(`서버의 현재 경로와 revision을 다시 확인하는 중입니다… ${job.cursor}/${job.stepCount}`);
-      const recovered = await recoverDurablePathRewriteJob(job);
+      const recovered = await recoverDurablePathRewriteJob(job, continuationIsCurrent);
+      if (!continuationIsCurrent()) return;
       setPathRewriteJob(recovered.job);
       if (recovered.outcome === "deferred") {
         setStatus("다른 탭에서 진행 중일 수 있어 내부 참조 복구를 잠시 보류했습니다.");
@@ -6394,14 +6424,18 @@ function UnlockedVaultPage({
       setStatus(`내부 참조 갱신을 완료했습니다. ${recovered.job.confirmedCount}개 파일 확인됨`);
       setPathRewriteRecoveryRetry((current) => current + 1);
     } catch (caught) {
+      if (!continuationIsCurrent()) return;
       const blockedJob = caught instanceof VaultPathRewriteControllerError ? caught.job : undefined;
       if (blockedJob) setPathRewriteJob(blockedJob);
       setError(caught instanceof Error
         ? `내부 참조 작업을 안전하게 재개하지 못했습니다: ${caught.message}`
         : "내부 참조 작업을 안전하게 재개하지 못했습니다.");
     } finally {
-      pathRewriteBusyRef.current = false;
-      setPathRewriteBusy(false);
+      if (pathRewriteRecoveryBusyOwnerRef.current === generation) {
+        pathRewriteRecoveryBusyOwnerRef.current = null;
+        pathRewriteBusyRef.current = false;
+        setPathRewriteBusy(false);
+      }
     }
   }
 
@@ -6435,6 +6469,11 @@ function UnlockedVaultPage({
     const generation = pathRewriteRecoveryGenerationRef.current + 1;
     pathRewriteRecoveryGenerationRef.current = generation;
     let cancelled = false;
+    const continuationIsCurrent = () => vaultPathRewriteRecoveryContinuationIsCurrent({
+      cancelled,
+      currentGeneration: pathRewriteRecoveryGenerationRef.current,
+      generation
+    });
     let deferredRecoveryTimer: number | null = null;
     let deferredRecoveryDeadline = Number.POSITIVE_INFINITY;
     const scheduleDeferredRecovery = (delayMs: number) => {
@@ -6444,7 +6483,7 @@ function UnlockedVaultPage({
       if (deferredRecoveryTimer !== null) window.clearTimeout(deferredRecoveryTimer);
       deferredRecoveryDeadline = deadline;
       deferredRecoveryTimer = window.setTimeout(() => {
-        if (!cancelled && generation === pathRewriteRecoveryGenerationRef.current) {
+        if (continuationIsCurrent()) {
           setPathRewriteRecoveryRetry((current) => current + 1);
         }
       }, Math.max(0, deadline - Date.now()) + 25);
@@ -6463,7 +6502,7 @@ function UnlockedVaultPage({
       hasMore,
       shouldContinueImmediately
     }) => {
-      if (cancelled || generation !== pathRewriteRecoveryGenerationRef.current) return;
+      if (!continuationIsCurrent()) return;
       const deferredDelays = jobs
         .map((job) => job.recoveryAfterMs ?? 0)
         .filter((delay) => delay > 0);
@@ -6496,28 +6535,33 @@ function UnlockedVaultPage({
       pathRewriteBusyRef.current = true;
       pathRewriteRecoveryBusyOwnerRef.current = generation;
       setPathRewriteBusy(true);
-      setStatus("저장되지 않은 편집을 먼저 확인하는 중입니다…");
-      const dirtyEntryIds = Object.entries(draftsRef.current)
-        .filter(([, draft]) => draft.dirty)
-        .map(([entryId]) => entryId);
-      const remainingDirtyEntryIds = await flushVaultDraftsBeforePathRewriteRecovery({
-        dirtyEntryIds,
-        isDirty: (entryId) => Boolean(draftsRef.current[entryId]?.dirty),
-        save: (entryId) => saveEntryRef.current(entryId),
-        waitForMutation: (entryId) => entryMutationPromisesRef.current.get(entryId)
-      });
-      if (remainingDirtyEntryIds.length > 0) {
-        const retry = scheduleFailedRecovery();
-        setError(
-          `${remainingDirtyEntryIds.length}개 편집본을 서버에 저장하지 못해 내부 참조 자동 복구를 중단했습니다. 현재 초안은 이 세션에 그대로 남아 있습니다.${retry ? ` ${Math.ceil(retry.retryDelay / 1_000)}초 후 다시 확인합니다 (${retry.failureCount}/5).` : " 편집본을 저장한 뒤 복구 알림에서 다시 확인해주세요."}`
-        );
-        return;
+      if (automaticJobs.some((job) => job.stepCount > 0)) {
+        setStatus("저장되지 않은 편집을 먼저 확인하는 중입니다…");
+        const dirtyEntryIds = Object.entries(draftsRef.current)
+          .filter(([, draft]) => draft.dirty)
+          .map(([entryId]) => entryId);
+        const remainingDirtyEntryIds = await flushVaultDraftsBeforePathRewriteRecovery({
+          dirtyEntryIds,
+          isDirty: (entryId) => Boolean(draftsRef.current[entryId]?.dirty),
+          save: (entryId) => saveEntryRef.current(entryId),
+          waitForMutation: (entryId) => entryMutationPromisesRef.current.get(entryId)
+        });
+        if (!continuationIsCurrent()) return;
+        if (remainingDirtyEntryIds.length > 0) {
+          const retry = scheduleFailedRecovery();
+          setError(
+            `${remainingDirtyEntryIds.length}개 편집본을 서버에 저장하지 못해 내부 참조 자동 복구를 중단했습니다. 현재 초안은 이 세션에 그대로 남아 있습니다.${retry ? ` ${Math.ceil(retry.retryDelay / 1_000)}초 후 다시 확인합니다 (${retry.failureCount}/5).` : " 편집본을 저장한 뒤 복구 알림에서 다시 확인해주세요."}`
+          );
+          return;
+        }
       }
       for (const job of automaticJobs) {
-        if (cancelled || generation !== pathRewriteRecoveryGenerationRef.current) return;
+        if (!continuationIsCurrent()) return;
         setPathRewriteJob(job);
         setStatus(`중단된 내부 참조 작업을 확인하는 중입니다… ${job.cursor}/${job.stepCount}`);
-        const recovered = await recoverDurablePathRewriteJob(job);
+        const recovered = await recoverDurablePathRewriteJob(job, continuationIsCurrent);
+        if (!continuationIsCurrent()) return;
+        setPathRewriteJob(recovered.job);
         if (recovered.outcome === "deferred") {
           scheduleDeferredRecovery(recovered.job.recoveryAfterMs ?? 250);
           setStatus("다른 탭에서 진행 중일 수 있어 내부 참조 자동 복구를 잠시 보류했습니다.");
@@ -6539,7 +6583,7 @@ function UnlockedVaultPage({
         setPathRewriteRecoveryRetry((current) => current + 1);
       }
     }).catch((caught) => {
-      if (cancelled || generation !== pathRewriteRecoveryGenerationRef.current) return;
+      if (!continuationIsCurrent()) return;
       const job = caught instanceof VaultPathRewriteControllerError ? caught.job : undefined;
       if (job) {
         setPathRewriteJob(job);
@@ -6581,8 +6625,7 @@ function UnlockedVaultPage({
         setPathRewriteBusy(false);
       }
       if (
-        !cancelled
-        && generation === pathRewriteRecoveryGenerationRef.current
+        continuationIsCurrent()
         && pathRewriteCleanupOwnerRef.current !== profile.uid
       ) {
         // Terminal ciphertext cleanup is deliberately best-effort and runs
@@ -9538,6 +9581,10 @@ function UnlockedVaultPage({
       note.id,
       (pendingClipboardPasteCountsRef.current.get(note.id) ?? 0) + 1
     );
+    setError(null);
+    setStatus(files.length > 1
+      ? `${files.length}개 붙여넣은 이미지를 안전하게 확인하는 중입니다…`
+      : "붙여넣은 이미지를 안전하게 확인하는 중입니다…");
     try {
       const { pasteVaultClipboardImages } = await import(
         "../features/vault/vaultClipboardPasteFlow"

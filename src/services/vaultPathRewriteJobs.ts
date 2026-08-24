@@ -130,6 +130,9 @@ interface StoredVaultPathRewriteJob {
   recoveryCheckCount?: number;
   lastRecoveryCheckAt?: unknown;
   remainingStepCount?: number;
+  activatedAt?: unknown;
+  recoveredAt?: unknown;
+  abandonedAt?: unknown;
   completedAt?: unknown;
   cleanupStartedAt?: unknown;
   lastCleanupStepId?: string;
@@ -497,6 +500,10 @@ function validateStoredJob(value: unknown, uid: string, expectedJobId: string): 
       && !safeInteger(candidate.remainingStepCount, 0, candidate.stepCount ?? 0)
     )
     || (candidate.lastRecoveryCheckAt !== undefined && timestampMillis(candidate.lastRecoveryCheckAt) === null)
+    || (candidate.activatedAt !== undefined && timestampMillis(candidate.activatedAt) === null)
+    || (candidate.recoveredAt !== undefined && timestampMillis(candidate.recoveredAt) === null)
+    || (candidate.abandonedAt !== undefined && timestampMillis(candidate.abandonedAt) === null)
+    || (candidate.recoveredAt !== undefined && candidate.activatedAt === undefined)
     || (candidate.completedAt !== undefined && timestampMillis(candidate.completedAt) === null)
     || (
       (candidate.status === "completed" || candidate.status === "abandoned")
@@ -1562,12 +1569,52 @@ async function markPathStateConflict(uid: string, jobId: string) {
   });
 }
 
+async function abandonUnactivatedAtomicPathRewriteJob(uid: string, jobId: string) {
+  const reference = jobRef(uid, jobId);
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(reference);
+    if (!snapshot.exists()) {
+      throw new VaultPathRewriteJobError("conflict", "경로 재작성 작업이 복구 중 삭제되었습니다.");
+    }
+    const current = validateStoredJob(snapshot.data(), uid, jobId);
+    if (
+      !atomicActivationMode(current)
+      || !preparationRecoveryIsDue(current)
+      || current.activatedAt !== undefined
+      || current.recoveredAt !== undefined
+      || current.completedAt !== undefined
+      || current.abandonedAt !== undefined
+      || current.cleanupStartedAt !== undefined
+      || (
+        current.status !== "prepared"
+        && !(current.status === "blocked" && current.lastErrorCode === "path-state-conflict")
+      )
+    ) return current;
+    const next: StoredVaultPathRewriteJob = {
+      ...current,
+      status: "abandoned",
+      lastErrorCode: null,
+      revision: current.revision + 1
+    };
+    transaction.update(reference, {
+      status: next.status,
+      lastErrorCode: next.lastErrorCode,
+      revision: next.revision,
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    return next;
+  });
+}
+
 /**
- * Closes the only non-atomic gap in the client-only flow: the tab may close
- * after the path mutation commits but before `activateVaultPathRewriteJob`.
- * The caller supplies one server-confirmed current-path snapshot. All paths at
- * `newPath` activates the job, all at `oldPath` leaves it inert, and any mixed,
- * missing, or third state is blocked from normal resume.
+ * Closes the legacy non-atomic gap in the client-only flow. Atomic pr2/pr3
+ * mutations commit the target path and `ready` receipt together, so a due job
+ * that remains prepared cannot have committed its paired mutation and is
+ * abandoned without reading mutable paths. Legacy pr1 jobs still require one
+ * server-confirmed current-path snapshot: all-new activates, all-old remains
+ * inert, and any mixed, missing, or third state stays blocked.
  */
 export async function recoverPreparedVaultPathRewriteJob(input: {
   uid: string;
@@ -1636,14 +1683,21 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
   if (loaded.stored.status === "blocked" && loaded.stored.lastErrorCode !== "path-state-conflict") {
     return { recovery: "conflict", job: summary(loaded.stored, jobId, loaded.manifest) };
   }
-
-  let currentPaths: readonly { entryId: string; path: string }[];
-  try {
-    currentPaths = await input.readCurrentPaths(loaded.manifest.pathChanges.map((change) => change.entryId));
-  } catch {
-    const blocked = await markPathStateConflict(uid, jobId);
-    return recoveryResult(blocked, jobId, loaded.manifest);
+  if (atomicActivationMode(loaded.stored)) {
+    const resolved = await abandonUnactivatedAtomicPathRewriteJob(uid, jobId);
+    if (terminalJob(resolved)) {
+      void scheduleTerminalVaultPathRewriteCleanup(uid).catch(() => undefined);
+    }
+    return recoveryResult(resolved, jobId, loaded.manifest);
   }
+
+  // An unavailable or unauthorized direct read is not proof that paths are
+  // mixed. Let it reject without changing the durable job so transport retry
+  // handling can distinguish an incomplete observation from a complete
+  // conflicting one.
+  const currentPaths = await input.readCurrentPaths(
+    loaded.manifest.pathChanges.map((change) => change.entryId)
+  );
   const currentPathByEntryId = new Map<string, string>();
   const expectedEntryIds = new Set(loaded.manifest.pathChanges.map((change) => change.entryId));
   for (const current of currentPaths) {
@@ -1696,7 +1750,7 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
     if (!preparationRecoveryIsDue(current)) return current;
     if (current.status === "blocked" && current.lastErrorCode !== "path-state-conflict") return current;
 
-    if (allNew && !atomicActivationMode(current)) {
+    if (allNew) {
       const status: VaultPathRewriteJobStatus = current.stepCount === 0 ? "completed" : "ready";
       const next: StoredVaultPathRewriteJob = {
         ...current,
@@ -1712,23 +1766,6 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
         recoveredAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
         ...(status === "completed" ? { completedAt: serverTimestamp() } : {})
-      });
-      return next;
-    }
-    if (allOld && atomicActivationMode(current)) {
-      const next: StoredVaultPathRewriteJob = {
-        ...current,
-        status: "abandoned",
-        lastErrorCode: null,
-        revision: current.revision + 1
-      };
-      transaction.update(loaded.reference, {
-        status: next.status,
-        lastErrorCode: next.lastErrorCode,
-        revision: next.revision,
-        abandonedAt: serverTimestamp(),
-        completedAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
       });
       return next;
     }

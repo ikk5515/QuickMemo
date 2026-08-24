@@ -54,6 +54,50 @@ describe("VaultPage security boundaries", () => {
     expect(folderSubscription).toContain("setNoteServerReservationSignature(null)");
   });
 
+  it("invalidates path-rewrite continuations at every Vault access-scope boundary", () => {
+    const scopeClear = vaultPageSource.match(
+      /const clearVaultPlaintextForAccessScope = useCallback\(\(\) => \{[\s\S]*?\n\s{2}\}, \[\]\);/u
+    )?.[0] ?? "";
+    expect(scopeClear).toContain("pathRewriteRecoveryGenerationRef.current += 1;");
+    expect(scopeClear).toContain("pathRewriteCleanupSessionRef.current = null;");
+    expect(scopeClear).toContain("pathRewriteCleanupOwnerRef.current = null;");
+    expect(scopeClear).toContain("pathRewriteRecoveryFailureCountRef.current = 0;");
+    expect(scopeClear).toContain("pathRewriteRecoveryBusyOwnerRef.current = null;");
+    expect(scopeClear).toContain("setPathRewriteJob(null);");
+    expect(scopeClear.indexOf("pathRewriteRecoveryGenerationRef.current += 1;"))
+      .toBeLessThan(scopeClear.indexOf("setPathRewriteJob(null);"));
+
+    const manualRecovery = vaultPageSource.match(
+      /async function retryBlockedPathRewriteJob\(\)[\s\S]*?\n\s{2}useEffect\(\(\) => \{/u
+    )?.[0] ?? "";
+    expect(manualRecovery).toContain("const generation = pathRewriteRecoveryGenerationRef.current;");
+    expect(manualRecovery).toContain("pathRewriteRecoveryBusyOwnerRef.current = generation;");
+    expect(manualRecovery).toMatch(
+      /await flushVaultDraftsBeforePathRewriteRecovery\(\{[\s\S]*?\n\s+if \(!continuationIsCurrent\(\)\) return;/u
+    );
+    expect(manualRecovery).toMatch(
+      /await recoverDurablePathRewriteJob\(job, continuationIsCurrent\);\n\s+if \(!continuationIsCurrent\(\)\) return;/u
+    );
+    expect(manualRecovery).toContain("if (!continuationIsCurrent()) return;\n      const blockedJob");
+
+    const automaticRecovery = vaultPageSource.match(
+      /const generation = pathRewriteRecoveryGenerationRef\.current \+ 1;[\s\S]*?\n\s{2}useEffect\(\(\) => \{\n\s{4}if \(!isOnline \|\| !vaultDataReady/u
+    )?.[0] ?? "";
+    expect(automaticRecovery).toContain("cancelled,");
+    expect(automaticRecovery).toMatch(
+      /await flushVaultDraftsBeforePathRewriteRecovery\(\{[\s\S]*?\n\s+if \(!continuationIsCurrent\(\)\) return;/u
+    );
+    expect(automaticRecovery).toMatch(
+      /await recoverDurablePathRewriteJob\(job, continuationIsCurrent\);\n\s+if \(!continuationIsCurrent\(\)\) return;/u
+    );
+    const guardedRecoveryAdapter = vaultPageSource.match(
+      /function recoverDurablePathRewriteJob\([\s\S]*?\n\s{2}async function retryBlockedPathRewriteJob/u
+    )?.[0] ?? "";
+    expect(guardedRecoveryAdapter).toContain(
+      "if (continuationIsCurrent()) setPathRewriteStage(stage, stageJob);"
+    );
+  });
+
   it("drops prior server-ready signatures before replacing note and folder subscriptions", () => {
     const noteSubscription = vaultPageSource.match(
       /const subscriptionGeneration = noteSubscriptionGenerationRef\.current \+ 1;[\s\S]*?const unsubscribe = subscribeVisibleNotes\(/u
@@ -231,9 +275,12 @@ describe("VaultPage security boundaries", () => {
       pasteHandler.indexOf('import(\n        "../features/vault/vaultClipboardPasteFlow"')
     );
     expect(pasteHandler).toContain("return await pasteVaultClipboardImages({");
-    expect(vaultClipboardPasteFlowSource).toContain("prepareVaultClipboardImages(files)");
+    expect(vaultClipboardPasteFlowSource).toContain(
+      "prepareVaultClipboardImages(files, { signal: preflightController.signal })"
+    );
     expect(vaultClipboardPasteFlowSource).toContain("await createEncryptedVaultAsset(profile, integrityKey");
-    expect(vaultClipboardPasteFlowSource).toContain("await getVisibleNotesByIdsFromServer(ownerUid, [note.id])");
+    expect(vaultClipboardPasteFlowSource).toContain("await withVaultClipboardSourceReadDeadline(");
+    expect(vaultClipboardPasteFlowSource).toContain("getVisibleNotesByIdsFromServer(ownerUid, [note.id])");
     expect(vaultClipboardPasteFlowSource).toContain('server.type !== "personal"');
     expect(vaultClipboardPasteFlowSource).toContain("server.folderId ?? null");
     expect(vaultClipboardPasteFlowSource).toContain("source: vaultClipboardImageEmbedSource(sourceTitles)");

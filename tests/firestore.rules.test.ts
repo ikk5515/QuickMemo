@@ -2714,6 +2714,229 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(deleteDoc(activationRef));
   });
 
+  it("abandons only owner-held atomic path conflicts without opening other blocked states", async () => {
+    const blockedPr2JobId = `pr2_${"b".repeat(43)}`;
+    const blockedPr3JobId = `pr3_${"c".repeat(43)}`;
+    const writeFailedJobId = `pr2_${"d".repeat(43)}`;
+    const legacyConflictJobId = `pr1_${"e".repeat(43)}`;
+    const readyAtomicJobId = `pr2_${"f".repeat(43)}`;
+    const activeReadyAtomicJobId = `pr2_${"g".repeat(43)}`;
+    const activeRunningAtomicJobId = `pr2_${"h".repeat(43)}`;
+    const activatedConflictJobId = `pr2_${"i".repeat(43)}`;
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      const now = new Date();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", blockedPr2JobId),
+        atomicVaultPathRewriteJob("user-a", blockedPr2JobId, {
+          status: "blocked",
+          stepCount: 0,
+          preparedStepCount: 0,
+          remainingStepCount: 0,
+          attemptCount: 5,
+          retryCount: 5,
+          lastErrorCode: "path-state-conflict",
+          revision: 6,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", blockedPr3JobId),
+        atomicManifestVaultPathRewriteJob("user-a", blockedPr3JobId, {
+          status: "blocked",
+          preparedStepCount: 2,
+          attemptCount: 1,
+          retryCount: 1,
+          lastErrorCode: "path-state-conflict",
+          revision: 2,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", writeFailedJobId),
+        atomicVaultPathRewriteJob("user-a", writeFailedJobId, {
+          status: "blocked",
+          stepCount: 0,
+          preparedStepCount: 0,
+          remainingStepCount: 0,
+          attemptCount: 1,
+          retryCount: 1,
+          lastErrorCode: "write-failed",
+          revision: 2,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", legacyConflictJobId),
+        vaultPathRewriteJob("user-a", legacyConflictJobId, {
+          status: "blocked",
+          attemptCount: 1,
+          retryCount: 1,
+          lastErrorCode: "path-state-conflict",
+          revision: 2,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", readyAtomicJobId),
+        atomicVaultPathRewriteJob("user-a", readyAtomicJobId, {
+          status: "ready",
+          stepCount: 0,
+          preparedStepCount: 0,
+          remainingStepCount: 0,
+          activatedAt: now,
+          revision: 2,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", activeReadyAtomicJobId),
+        atomicVaultPathRewriteJob("user-a", activeReadyAtomicJobId, {
+          status: "ready",
+          stepCount: 1,
+          preparedStepCount: 1,
+          remainingStepCount: 1,
+          activatedAt: now,
+          revision: 2,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", activeRunningAtomicJobId),
+        atomicVaultPathRewriteJob("user-a", activeRunningAtomicJobId, {
+          status: "running",
+          stepCount: 1,
+          preparedStepCount: 1,
+          remainingStepCount: 1,
+          activatedAt: now,
+          attemptCount: 1,
+          lastAttemptAt: now,
+          revision: 3,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedConflictJobId),
+        atomicVaultPathRewriteJob("user-a", activatedConflictJobId, {
+          status: "blocked",
+          stepCount: 1,
+          preparedStepCount: 1,
+          remainingStepCount: 1,
+          activatedAt: now,
+          attemptCount: 1,
+          retryCount: 1,
+          lastErrorCode: "path-state-conflict",
+          revision: 3,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const blockedPr2Ref = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      blockedPr2JobId
+    );
+    const abandonedPr2 = {
+      status: "abandoned",
+      lastErrorCode: null,
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 7,
+      updatedAt: serverTimestamp()
+    };
+
+    await assertFails(updateDoc(blockedPr2Ref, {
+      ...abandonedPr2,
+      attemptCount: 6
+    }));
+    await assertFails(updateDoc(blockedPr2Ref, {
+      status: "abandoned",
+      lastErrorCode: null,
+      abandonedAt: serverTimestamp(),
+      revision: 7,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(blockedPr2Ref, {
+      ...abandonedPr2,
+      recoveryCheckCount: 1
+    }));
+    await assertFails(updateDoc(
+      doc(otherDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", blockedPr2JobId),
+      abandonedPr2
+    ));
+    await assertSucceeds(updateDoc(blockedPr2Ref, abandonedPr2));
+
+    await assertSucceeds(updateDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", blockedPr3JobId),
+      {
+        status: "abandoned",
+        lastErrorCode: null,
+        abandonedAt: serverTimestamp(),
+        completedAt: serverTimestamp(),
+        revision: 3,
+        updatedAt: serverTimestamp()
+      }
+    ));
+    for (const [jobId, revision, retryCount] of [
+      [activeReadyAtomicJobId, 3, 1],
+      [activeRunningAtomicJobId, 4, 1]
+    ] as const) {
+      await assertFails(updateDoc(
+        doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId),
+        {
+          status: "blocked",
+          retryCount,
+          lastErrorCode: "path-state-conflict",
+          revision,
+          updatedAt: serverTimestamp()
+        }
+      ));
+    }
+    await assertFails(updateDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedConflictJobId),
+      {
+        status: "abandoned",
+        lastErrorCode: null,
+        abandonedAt: serverTimestamp(),
+        completedAt: serverTimestamp(),
+        revision: 4,
+        updatedAt: serverTimestamp()
+      }
+    ));
+    for (const [jobId, revision] of [
+      [writeFailedJobId, 3],
+      [legacyConflictJobId, 3],
+      [readyAtomicJobId, 3]
+    ] as const) {
+      await assertFails(updateDoc(
+        doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", jobId),
+        {
+          status: "abandoned",
+          lastErrorCode: null,
+          abandonedAt: serverTimestamp(),
+          completedAt: serverTimestamp(),
+          revision,
+          updatedAt: serverTimestamp()
+        }
+      ));
+    }
+  });
+
   it("keeps the server manifest owner-readable but denies every browser write", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();

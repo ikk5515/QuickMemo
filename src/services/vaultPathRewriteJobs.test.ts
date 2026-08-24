@@ -586,7 +586,42 @@ describe("encrypted durable Vault path rewrite persistence", () => {
     ]);
   });
 
-  it("abandons an all-old atomic plan and lets the exact deterministic retry prepare again", async () => {
+  it("preserves an atomic ready receipt that wins the recovery transaction race", async () => {
+    const prepared = await preparedJob(0);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    const storedPath = `vaultMaintenanceJobs/user-a/pathRewrites/${prepared.jobId}`;
+    firestoreMocks.documents.set(storedPath, {
+      ...firestoreMocks.documents.get(storedPath),
+      updatedAt: { toMillis: () => Date.now() - 2 * 60_000 - 1 }
+    });
+    firestoreMocks.transaction.get.mockImplementationOnce(async (target: { path: string }) => {
+      const current = firestoreMocks.documents.get(target.path)!;
+      const activated = {
+        ...current,
+        revision: Number(current.revision) + 1,
+        status: "ready",
+        updatedAt: firestoreMocks.serverTimestamp()
+      };
+      firestoreMocks.documents.set(target.path, activated);
+      return {
+        data: () => activated,
+        exists: () => true,
+        id: target.path.split("/").at(-1),
+        ref: { ...target, id: target.path.split("/").at(-1) }
+      };
+    });
+    const readCurrentPaths = vi.fn();
+
+    await expect(recoverPreparedVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: prepared.jobId,
+      readCurrentPaths
+    })).resolves.toMatchObject({ recovery: "activated", job: { status: "ready" } });
+    expect(readCurrentPaths).not.toHaveBeenCalled();
+  });
+
+  it("abandons a due atomic plan without mutable path reads and lets the exact deterministic retry prepare again", async () => {
     const prepared = await prepareVaultPathRewriteJob(integrityKey, {
       inventoryFingerprint,
       mutationTarget: {
@@ -626,7 +661,8 @@ describe("encrypted durable Vault path rewrite persistence", () => {
     ]);
 
     // A preparation tab that disappears stops heartbeating. Only after the
-    // server-timestamp lease expires may another tab prove all-old and abandon.
+    // server-timestamp lease expires may another tab abandon its unactivated
+    // atomic receipt without consulting paths that may have since changed.
     const storedPath = `vaultMaintenanceJobs/user-a/pathRewrites/${prepared.jobId}`;
     firestoreMocks.documents.set(storedPath, {
       ...firestoreMocks.documents.get(storedPath),
@@ -637,11 +673,9 @@ describe("encrypted durable Vault path rewrite persistence", () => {
       uid: "user-a",
       privateKey,
       jobId: prepared.jobId,
-      readCurrentPaths: async () => [
-        { entryId: "target-a", path: "Old/A.md" },
-        { entryId: "target-b", path: "Old/B.md" }
-      ]
+      readCurrentPaths
     })).resolves.toMatchObject({ recovery: "not-applied", job: { status: "abandoned" } });
+    expect(readCurrentPaths).not.toHaveBeenCalled();
     await expect(listRecoverableVaultPathRewriteJobs("user-a", privateKey)).resolves.toEqual([]);
 
     await expect(ensureVaultPathRewriteJob(profile, privateKey, prepared)).resolves.toMatchObject({
@@ -652,27 +686,144 @@ describe("encrypted durable Vault path rewrite persistence", () => {
       updatedAt: { toMillis: () => Date.now() - 2 * 60_000 - 1 }
     });
 
+    const obsoletePathRead = vi.fn(async () => [
+      { entryId: "target-a", path: "New/A.md" },
+      { entryId: "target-b", path: "Old/B.md" }
+    ]);
     await expect(recoverPreparedVaultPathRewriteJob({
       uid: "user-a",
       privateKey,
       jobId: prepared.jobId,
+      readCurrentPaths: obsoletePathRead
+    })).resolves.toMatchObject({
+      recovery: "not-applied",
+      job: { status: "abandoned", lastErrorCode: null }
+    });
+    expect(obsoletePathRead).not.toHaveBeenCalled();
+    await expect(listRecoverableVaultPathRewriteJobs("user-a", privateKey)).resolves.toEqual([]);
+  });
+
+  it("converges an already blocked atomic zero-step receipt without another path read", async () => {
+    const prepared = await preparedJob(0);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    const storedPath = `vaultMaintenanceJobs/user-a/pathRewrites/${prepared.jobId}`;
+    firestoreMocks.documents.set(storedPath, {
+      ...firestoreMocks.documents.get(storedPath),
+      attemptCount: 5,
+      lastErrorCode: "path-state-conflict",
+      retryCount: 5,
+      revision: 6,
+      status: "blocked"
+    });
+    const readCurrentPaths = vi.fn(async () => {
+      throw { code: "firestore/unavailable" };
+    });
+
+    await expect(recoverPreparedVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: prepared.jobId,
+      readCurrentPaths
+    })).resolves.toMatchObject({
+      recovery: "not-applied",
+      job: { lastErrorCode: null, retryCount: 5, status: "abandoned", stepCount: 0 }
+    });
+    expect(readCurrentPaths).not.toHaveBeenCalled();
+  });
+
+  it("preserves an activated atomic path conflict instead of abandoning committed rewrite work", async () => {
+    const prepared = await preparedJob(1);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    const storedPath = `vaultMaintenanceJobs/user-a/pathRewrites/${prepared.jobId}`;
+    firestoreMocks.documents.set(storedPath, {
+      ...firestoreMocks.documents.get(storedPath),
+      activatedAt: firestoreMocks.serverTimestamp(),
+      attemptCount: 1,
+      lastErrorCode: "path-state-conflict",
+      preparedStepCount: 1,
+      retryCount: 1,
+      revision: 3,
+      status: "blocked"
+    });
+    const readCurrentPaths = vi.fn();
+
+    await expect(recoverPreparedVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: prepared.jobId,
+      readCurrentPaths
+    })).resolves.toMatchObject({
+      recovery: "conflict",
+      job: { lastErrorCode: "path-state-conflict", status: "blocked" }
+    });
+    expect(readCurrentPaths).not.toHaveBeenCalled();
+    expect(firestoreMocks.documents.get(storedPath)).toMatchObject({
+      activatedAt: expect.anything(),
+      lastErrorCode: "path-state-conflict",
+      status: "blocked"
+    });
+  });
+
+  it("keeps legacy read failures transient and blocks only a complete conflicting snapshot", async () => {
+    const prepared = await prepareVaultPathRewriteJob(integrityKey, {
+      inventoryFingerprint,
+      mutationTarget: { expectedRevision: 4, id: "target-a", kind: "entry" },
+      ownerUid: "user-a",
+      pathChanges: [
+        { entryId: "target-a", oldPath: "Old/A.md", newPath: "New/A.md" },
+        { entryId: "target-b", oldPath: "Old/B.md", newPath: "New/B.md" }
+      ],
+      sourcePlans: []
+    });
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    const atomicPath = `vaultMaintenanceJobs/user-a/pathRewrites/${prepared.jobId}`;
+    const legacyJobId = `pr1_${"legacy-path-state".padEnd(43, "0")}`;
+    const legacyPath = `vaultMaintenanceJobs/user-a/pathRewrites/${legacyJobId}`;
+    const legacy = { ...firestoreMocks.documents.get(atomicPath) };
+    delete legacy.activationMode;
+    delete legacy.inventoryFingerprint;
+    delete legacy.preparedStepCount;
+    delete legacy.mutationExpectedRevision;
+    delete legacy.mutationTargetId;
+    delete legacy.mutationTargetKind;
+    const legacyManifest = JSON.parse(atob(String(
+      (legacy.encryptedManifest as { cipherText: string }).cipherText
+    ))) as Record<string, unknown>;
+    delete legacyManifest.inventoryFingerprint;
+    legacy.encryptedManifest = {
+      ...(legacy.encryptedManifest as Record<string, unknown>),
+      cipherText: btoa(JSON.stringify(legacyManifest))
+    };
+    firestoreMocks.documents.clear();
+    firestoreMocks.documents.set(legacyPath, {
+      ...legacy,
+      planFingerprint: legacyJobId,
+      status: "prepared"
+    });
+
+    await expect(recoverPreparedVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: legacyJobId,
+      readCurrentPaths: async () => { throw { code: "firestore/unavailable" }; }
+    })).rejects.toMatchObject({ code: "firestore/unavailable" });
+    await expect(loadVaultPathRewriteJob("user-a", privateKey, legacyJobId)).resolves.toMatchObject({
+      retryCount: 0,
+      status: "prepared"
+    });
+
+    await expect(recoverPreparedVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: legacyJobId,
       readCurrentPaths: async () => [
         { entryId: "target-a", path: "New/A.md" },
         { entryId: "target-b", path: "Old/B.md" }
       ]
     })).resolves.toMatchObject({
       recovery: "conflict",
-      job: { status: "blocked", lastErrorCode: "path-state-conflict" }
+      job: { lastErrorCode: "path-state-conflict", retryCount: 1, status: "blocked" }
     });
-    await expect(listResumableVaultPathRewriteJobs("user-a", privateKey)).resolves.toEqual([]);
-    await expect(resumeVaultPathRewriteJob({
-      uid: "user-a",
-      privateKey,
-      jobId: prepared.jobId,
-      readSource: vi.fn(),
-      applyStep: vi.fn()
-    })).rejects.toMatchObject({ code: "not-ready" });
-
   });
 
   it("caps automatic session cleanup and leaves partial encrypted steps durably resumable", async () => {

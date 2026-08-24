@@ -13,7 +13,15 @@ function blockedJob(
     cursor: 3,
     jobId: "pr1_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ",
     lastErrorCode,
-    manifest: { ownerUid: "owner", pathChanges: [], steps: [], version: 1 },
+    manifest: {
+      ownerUid: "owner",
+      pathChanges: [
+        { entryId: "target-a", oldPath: "Old/A.md", newPath: "New/A.md" },
+        { entryId: "target-b", oldPath: "Old/B.md", newPath: "New/B.md" }
+      ],
+      steps: [],
+      version: 1
+    },
     retryCount: 1,
     revision: 4,
     status: "blocked",
@@ -40,7 +48,7 @@ describe("VaultPathRewriteRecoveryNotice", () => {
       "data-error-code",
       "path-state-conflict"
     );
-    expect(screen.getByText("3/7개 확인됨 · 재확인 1회")).toBeInTheDocument();
+    expect(screen.getByText("경로 대상 2개 · 참조 원본 3/7개 확인됨 · 재확인 1회")).toBeInTheDocument();
     expect(screen.getByText(/원본 참조를 수정하지 않았습니다/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /취소|건너뛰기|완료/ })).not.toBeInTheDocument();
 

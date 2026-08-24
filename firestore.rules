@@ -1576,9 +1576,20 @@ service cloud.firestore {
     }
 
     function vaultPathRewriteAtomicAbandoned(data) {
-      return resource.data.status in ["preparing", "prepared"]
+      return (
+          (
+            resource.data.status in ["preparing", "prepared"]
+            && resource.data.updatedAt <= request.time - duration.value(2, "m")
+          )
+          || (
+            resource.data.status == "blocked"
+            && resource.data.lastErrorCode == "path-state-conflict"
+          )
+        )
         && validVaultPathRewriteAtomicMode(resource.data.activationMode)
-        && resource.data.updatedAt <= request.time - duration.value(2, "m")
+        && !resource.data.keys().hasAny([
+          "activatedAt", "recoveredAt", "completedAt", "abandonedAt", "cleanupStartedAt"
+        ])
         && resource.data.cursor == 0
         && resource.data.confirmedCount == 0
         && data.status == "abandoned"
@@ -1677,6 +1688,7 @@ service cloud.firestore {
         && data.attemptCount == resource.data.attemptCount
         && data.retryCount == resource.data.retryCount + 1
         && data.lastErrorCode != null
+        && data.lastErrorCode != "path-state-conflict"
         && data.diff(resource.data).affectedKeys().hasOnly([
           "status", "retryCount", "lastErrorCode", "revision", "updatedAt"
         ]);
@@ -1793,11 +1805,13 @@ service cloud.firestore {
             : resource.data.status == "blocked"
               ? (
                 resource.data.lastErrorCode == "path-state-conflict"
-                ? data.status == "not-applied"
-                  ? vaultPathRewriteNotApplied(data)
-                  : data.status == "blocked"
-                    ? vaultPathRewritePathConflict(data)
-                    : vaultPathRewritePathRecovery(data)
+                ? data.status == "abandoned"
+                  ? vaultPathRewriteAtomicAbandoned(data)
+                  : data.status == "not-applied"
+                    ? vaultPathRewriteNotApplied(data)
+                    : data.status == "blocked"
+                      ? vaultPathRewritePathConflict(data)
+                      : vaultPathRewritePathRecovery(data)
                 : data.status == "blocked"
                   ? vaultPathRewriteBlocked(data)
                   : vaultPathRewriteAttemptStart(data)
@@ -1855,7 +1869,8 @@ service cloud.firestore {
           "lastAttemptAt",
           "notAppliedAt",
           "lastRecoveryCheckAt",
-          "cleanupStartedAt"
+          "cleanupStartedAt",
+          "abandonedAt"
         ]);
     }
 
@@ -1925,10 +1940,15 @@ service cloud.firestore {
                 : data.status == "prepared"
                   ? vaultPathRewritePreparingToPrepared(data)
                   : vaultPathRewritePreparationHeartbeat(data)
-              : resource.data.keys().hasAny(["activationMode"])
-                && resource.data.status == "ready"
-                && resource.data.stepCount == 0
+            : resource.data.keys().hasAny(["activationMode"])
+              && resource.data.status == "ready"
+              && resource.data.stepCount == 0
                 ? vaultPathRewriteZeroStepAcknowledged(data)
+              : resource.data.keys().hasAny(["activationMode"])
+                && resource.data.status == "blocked"
+                && resource.data.lastErrorCode == "path-state-conflict"
+                && data.status == "abandoned"
+                ? vaultPathRewriteAtomicAbandoned(data)
               : resource.data.status in ["ready", "running"]
                 ? data.status == "blocked"
                   ? vaultPathRewriteBlocked(data)
