@@ -109,15 +109,13 @@ import type {
 } from "../features/vault/pathRewriteJob";
 import {
   automaticVaultPathRewriteRetryDelayMs,
-  executeVaultPathRewrite,
-  flushVaultDraftsBeforePathRewriteRecovery,
-  recoverVaultPathRewrite,
+  reconcileVaultPathRewriteJobAfterRecoveryScan,
   retryableVaultPathRewriteFailure,
   shouldAutomaticallyRecoverVaultPathRewriteJob,
   vaultPathRewriteRecoveryContinuationIsCurrent,
   VaultPathRewriteControllerError,
   type VaultPathRewriteStage
-} from "../features/vault/pathRewriteController";
+} from "../features/vault/pathRewriteControllerCore";
 import {
   clearOptimisticVaultEntryPatch,
   projectOptimisticVaultEntries,
@@ -371,9 +369,20 @@ import "../styles/vault.css";
 
 type VaultPathRewriteJobsModule = typeof import("../services/vaultPathRewriteJobs");
 type VaultPathRewriteJobModule = typeof import("../features/vault/pathRewriteJob");
+type VaultPathRewriteControllerModule = typeof import("../features/vault/pathRewriteController");
 
 let vaultPathRewriteJobsModulePromise: Promise<VaultPathRewriteJobsModule> | null = null;
 let vaultPathRewriteJobModulePromise: Promise<VaultPathRewriteJobModule> | null = null;
+let vaultPathRewriteControllerModulePromise: Promise<VaultPathRewriteControllerModule> | null = null;
+
+function loadVaultPathRewriteControllerModule() {
+  vaultPathRewriteControllerModulePromise ??= import("../features/vault/pathRewriteController")
+    .catch((cause: unknown) => {
+      vaultPathRewriteControllerModulePromise = null;
+      throw cause;
+    });
+  return vaultPathRewriteControllerModulePromise;
+}
 
 function loadVaultPathRewriteJobModule() {
   vaultPathRewriteJobModulePromise ??= import("../features/vault/pathRewriteJob");
@@ -384,6 +393,21 @@ function loadVaultPathRewriteJobsModule() {
   vaultPathRewriteJobsModulePromise ??= import("../services/vaultPathRewriteJobs");
   return vaultPathRewriteJobsModulePromise;
 }
+
+const executeVaultPathRewrite = (
+  ...args: Parameters<VaultPathRewriteControllerModule["executeVaultPathRewrite"]>
+) => loadVaultPathRewriteControllerModule()
+  .then((module) => module.executeVaultPathRewrite(...args));
+
+const flushVaultDraftsBeforePathRewriteRecovery = (
+  ...args: Parameters<VaultPathRewriteControllerModule["flushVaultDraftsBeforePathRewriteRecovery"]>
+) => loadVaultPathRewriteControllerModule()
+  .then((module) => module.flushVaultDraftsBeforePathRewriteRecovery(...args));
+
+const recoverVaultPathRewrite = (
+  ...args: Parameters<VaultPathRewriteControllerModule["recoverVaultPathRewrite"]>
+) => loadVaultPathRewriteControllerModule()
+  .then((module) => module.recoverVaultPathRewrite(...args));
 
 const buildVaultPathRewriteSourcePlans = (
   ...args: Parameters<VaultPathRewriteJobModule["buildVaultPathRewriteSourcePlans"]>
@@ -6615,6 +6639,12 @@ function UnlockedVaultPage({
       currentGeneration: pathRewriteRecoveryGenerationRef.current,
       generation
     });
+    const observedBlockedJobId = pathRewriteJob?.status === "blocked"
+      ? pathRewriteJob.jobId
+      : null;
+    const observedBlockedRevision = pathRewriteJob?.status === "blocked"
+      ? pathRewriteJob.revision
+      : null;
     let deferredRecoveryTimer: number | null = null;
     let deferredRecoveryDeadline = Number.POSITIVE_INFINITY;
     const scheduleDeferredRecovery = (delayMs: number) => {
@@ -6644,6 +6674,16 @@ function UnlockedVaultPage({
       shouldContinueImmediately
     }) => {
       if (!continuationIsCurrent()) return;
+      if (observedBlockedJobId !== null) {
+        setPathRewriteJob((current) => reconcileVaultPathRewriteJobAfterRecoveryScan({
+          continuationIsCurrent: continuationIsCurrent(),
+          current,
+          observedBlockedJobId,
+          observedBlockedRevision,
+          scanComplete: !hasMore,
+          scannedJobs: jobs
+        }));
+      }
       const deferredDelays = jobs
         .map((job) => job.recoveryAfterMs ?? 0)
         .filter((delay) => delay > 0);

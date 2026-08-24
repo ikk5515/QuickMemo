@@ -97,6 +97,18 @@ describe("VaultPage security boundaries", () => {
       /const generation = pathRewriteRecoveryGenerationRef\.current \+ 1;[\s\S]*?\n\s{2}useEffect\(\(\) => \{\n\s{4}if \(!isOnline \|\| !vaultDataReady/u
     )?.[0] ?? "";
     expect(automaticRecovery).toContain("cancelled,");
+    expect(automaticRecovery).toContain(
+      'const observedBlockedJobId = pathRewriteJob?.status === "blocked"'
+    );
+    expect(automaticRecovery).toContain(
+      'const observedBlockedRevision = pathRewriteJob?.status === "blocked"'
+    );
+    expect(automaticRecovery).toContain(
+      "setPathRewriteJob((current) => reconcileVaultPathRewriteJobAfterRecoveryScan({"
+    );
+    expect(automaticRecovery).toContain("continuationIsCurrent: continuationIsCurrent(),");
+    expect(automaticRecovery).toContain("observedBlockedRevision,");
+    expect(automaticRecovery).toContain("scanComplete: !hasMore,");
     expect(automaticRecovery).toMatch(
       /await flushVaultDraftsBeforePathRewriteRecovery\(\{[\s\S]*?\n\s+if \(!continuationIsCurrent\(\)\) return;/u
     );

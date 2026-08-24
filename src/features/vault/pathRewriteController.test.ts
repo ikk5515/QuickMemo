@@ -3,6 +3,7 @@ import {
   automaticVaultPathRewriteRetryDelayMs,
   executeVaultPathRewrite,
   flushVaultDraftsBeforePathRewriteRecovery,
+  reconcileVaultPathRewriteJobAfterRecoveryScan,
   recoverVaultPathRewrite,
   retryableVaultPathRewriteFailure,
   resumeVaultPathRewriteToCompletion,
@@ -10,6 +11,7 @@ import {
   vaultPathRewriteRecoveryContinuationIsCurrent,
   VaultPathRewriteControllerError
 } from "./pathRewriteController";
+import { VaultPathRewriteControllerError as VaultPathRewriteControllerCoreError } from "./pathRewriteControllerCore";
 import type { PreparedVaultPathRewriteJob } from "./pathRewriteJob";
 import type { VaultPathRewriteJobSummary } from "../../services/vaultPathRewriteJobs";
 
@@ -35,6 +37,12 @@ function summary(
 const prepared = { jobId: summary("prepared").jobId } as PreparedVaultPathRewriteJob;
 
 describe("path rewrite controller", () => {
+  it("shares one error constructor with the statically loaded controller core", () => {
+    const error = new VaultPathRewriteControllerError("blocked", "blocked");
+    expect(error).toBeInstanceOf(VaultPathRewriteControllerCoreError);
+    expect(VaultPathRewriteControllerError).toBe(VaultPathRewriteControllerCoreError);
+  });
+
   it("rejects cancelled and stale access-scope recovery continuations", () => {
     expect(vaultPathRewriteRecoveryContinuationIsCurrent({
       cancelled: false,
@@ -51,6 +59,69 @@ describe("path rewrite controller", () => {
       currentGeneration: 8,
       generation: 7
     })).toBe(false);
+  });
+
+  it("clears only the exact stale blocked notice omitted from a current server scan", () => {
+    const blocked = summary("blocked", {
+      jobId: `pr1_${"A".repeat(43)}`,
+      lastErrorCode: "path-state-conflict",
+      stepCount: 0
+    });
+    const different = summary("blocked", {
+      jobId: `pr1_${"B".repeat(43)}`,
+      lastErrorCode: "path-state-conflict",
+      stepCount: 0
+    });
+
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: blocked,
+      observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
+      scanComplete: true,
+      scannedJobs: []
+    })).toBeNull();
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: blocked,
+      observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
+      scanComplete: true,
+      scannedJobs: [blocked]
+    })).toBe(blocked);
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: false,
+      current: blocked,
+      observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
+      scanComplete: true,
+      scannedJobs: []
+    })).toBe(blocked);
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: blocked,
+      observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
+      scanComplete: false,
+      scannedJobs: []
+    })).toBe(blocked);
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: different,
+      observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
+      scanComplete: true,
+      scannedJobs: []
+    })).toBe(different);
+    const newerBlocked = { ...blocked, revision: blocked.revision + 1 };
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: newerBlocked,
+      observedBlockedJobId: blocked.jobId,
+      observedBlockedRevision: blocked.revision,
+      scanComplete: true,
+      scannedJobs: []
+    })).toBe(newerBlocked);
   });
 
   it("flushes the captured dirty drafts before recovery and reports every draft still dirty", async () => {
