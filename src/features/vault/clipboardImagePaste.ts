@@ -232,8 +232,8 @@ function waitForClipboardOperation<T>(operation: Promise<T>, signal?: AbortSigna
   });
 }
 
-async function readClipboardFileBytes(file: File, signal: AbortSignal) {
-  const operation = file.arrayBuffer();
+async function readClipboardBlobBytes(blob: Blob, signal: AbortSignal) {
+  const operation = blob.arrayBuffer();
   try {
     return new Uint8Array(await waitForClipboardOperation(operation, signal));
   } catch (caught) {
@@ -346,14 +346,14 @@ function canvasToBlob(
 async function encodedClipboardRaster(
   canvas: HTMLCanvasElement,
   mimeType: "image/jpeg" | "image/webp",
-  signal: AbortSignal | undefined,
+  signal: AbortSignal,
   deadline: number
 ) {
   for (const quality of transcodeQualities) {
     const blob = await canvasToBlob(canvas, mimeType, quality, signal, deadline);
     if (!blob || normalizedSafeRasterMimeType(blob.type) !== mimeType) continue;
     if (blob.size <= 0 || blob.size > MAX_INLINE_VAULT_ASSET_BYTES) continue;
-    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const bytes = await readClipboardBlobBytes(blob, signal);
     try {
       signal?.throwIfAborted();
       if (
@@ -513,7 +513,7 @@ export async function prepareVaultClipboardImages(
   try {
     for (const file of files) {
       batchSignal.throwIfAborted();
-      const bytes = await readClipboardFileBytes(file, batchSignal);
+      const bytes = await readClipboardBlobBytes(file, batchSignal);
       try {
         batchSignal.throwIfAborted();
       } catch (caught) {

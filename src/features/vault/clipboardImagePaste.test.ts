@@ -317,6 +317,56 @@ describe("encrypted Vault clipboard image preparation", () => {
     await rejected;
   });
 
+  it("bounds a stalled browser-encoded Blob read and clears bytes that resolve late", async () => {
+    vi.useFakeTimers();
+    const close = vi.fn();
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ close, height: 2_000, width: 8_192 })));
+    const context = {
+      clearRect: vi.fn(),
+      drawImage: vi.fn(),
+      fillRect: vi.fn(),
+      fillStyle: "",
+      globalCompositeOperation: "source-over",
+      restore: vi.fn(),
+      save: vi.fn()
+    };
+    const encoded = webpLosslessBytes(640, 360);
+    const lateBuffer = encoded.slice().buffer as ArrayBuffer;
+    let resolveRead: ((value: ArrayBuffer) => void) | undefined;
+    const encodedBlob = new Blob([encoded], { type: "image/webp" });
+    Object.defineProperty(encodedBlob, "arrayBuffer", {
+      value: () => new Promise<ArrayBuffer>((resolve) => {
+        resolveRead = resolve;
+      })
+    });
+    const canvas = {
+      getContext: vi.fn(() => context),
+      height: 0,
+      toBlob: (callback: BlobCallback) => callback(encodedBlob),
+      width: 0
+    } as unknown as HTMLCanvasElement;
+    const createElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName, options) => (
+      tagName.toLocaleLowerCase("en-US") === "canvas"
+        ? canvas
+        : createElement(tagName, options)
+    ));
+    const pending = transcodeVaultClipboardImage({
+      bytes: pngBytes(8_192, 2_000),
+      mimeType: "image/png"
+    });
+    const rejected = expect(pending).rejects.toThrow("이미지 배치 축소 시간이 초과");
+
+    await vi.advanceTimersByTimeAsync(MAX_VAULT_CLIPBOARD_TRANSCODE_MS);
+    await rejected;
+    resolveRead?.(lateBuffer);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(new Uint8Array(lateBuffer).every((byte) => byte === 0)).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it("revalidates browser-encoded WebP bytes before returning a transcode", async () => {
     const close = vi.fn();
     vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ close, height: 2_000, width: 8_192 })));
