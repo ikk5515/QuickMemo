@@ -8682,15 +8682,21 @@ function UnlockedVaultPage({
       const asset = decodedAssetForEntry(target.id);
       return (
         <span className="vault-markdown-embed-card vault-markdown-embed-card--asset">
-          <button onClick={() => openEntry(target.id)} type="button">{entryLabel(target)}</button>
           {asset ? (
             <VaultAssetPreview
               asset={asset}
               compact
               fileName={draftsRef.current[target.id]?.title ?? target.title}
+              inlineEmbed={{
+                label: entryLabel(target),
+                onOpen: () => openEntry(target.id)
+              }}
             />
           ) : (
-            <span role="alert">첨부 데이터의 무결성을 확인할 수 없습니다.</span>
+            <>
+              <button onClick={() => openEntry(target.id)} type="button">{entryLabel(target)}</button>
+              <span role="alert">첨부 데이터의 무결성을 확인할 수 없습니다.</span>
+            </>
           )}
         </span>
       );

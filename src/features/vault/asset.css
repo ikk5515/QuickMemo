@@ -38,6 +38,28 @@
   color: var(--vault-accent, #9b87ff);
 }
 
+.vault-asset-preview-inline-entry {
+  align-self: flex-start;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--vault-accent, #9b87ff);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  padding: 0;
+  text-align: start;
+}
+
+.vault-asset-preview-inline-entry:hover {
+  text-decoration: underline;
+}
+
+.vault-asset-preview-inline-entry:focus-visible {
+  outline: 2px solid var(--vault-accent, #9b87ff);
+  outline-offset: 2px;
+}
+
 .vault-asset-preview--compact {
   gap: 4px;
   justify-content: flex-start;
