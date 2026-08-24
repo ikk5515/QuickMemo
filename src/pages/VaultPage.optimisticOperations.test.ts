@@ -14,11 +14,13 @@ describe("Vault entry mutation responsiveness", () => {
     expect(source).not.toContain("notesRef.current = optimisticFileTreeNotes");
   });
 
-  it("does not automatically replay durable semantic conflicts on every unlock", () => {
+  it("automatically converges atomic path receipts but leaves other semantic conflicts manual", () => {
     expect(source).toContain("eligibleJobs.filter(shouldAutomaticallyRecoverVaultPathRewriteJob)");
     expect(source).toContain("중단된 내부 참조 작업은 현재 원본을 보존하고 직접 재확인을 기다립니다.");
     expect(source).toContain("if (job.status === \"blocked\")");
     expect(source).toContain("복구 알림에서 현재 서버 상태를 직접 재확인할 수 있습니다.");
+    expect(source).toContain("if (job.stepCount > 0)");
+    expect(source).toContain("automaticJobs.some((job) => job.stepCount > 0)");
   });
 
   it("commits a dirty path target once instead of pre-saving another history revision", () => {

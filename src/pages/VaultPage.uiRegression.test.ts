@@ -275,16 +275,18 @@ describe("Vault workspace UI regression contract", () => {
     expect(recoveryEffect).toContain(
       "scheduleDeferredRecovery(recovered.job.recoveryAfterMs ?? 250);"
     );
+    expect(recoveryEffect).toContain("setPathRewriteJob(recovered.job);");
     expect(recoveryEffect).toContain("const scheduleFailedRecovery = () => {");
     expect(recoveryEffect).toContain("automaticVaultPathRewriteRetryDelayMs(failureCount)");
     expect(recoveryEffect).toContain('job.lastErrorCode === "write-failed"');
     expect(recoveryEffect).toContain("if (hasMore && shouldContinueImmediately)");
+    expect(recoveryEffect).toContain("automaticJobs.some((job) => job.stepCount > 0)");
     expect(recoveryEffect.indexOf("if (eligibleJobs.length === 0) {")).toBeLessThan(
       recoveryEffect.indexOf("pathRewriteBusyRef.current = true;")
     );
     expect(recoveryEffect).toContain("flushVaultDraftsBeforePathRewriteRecovery({");
     expect(recoveryEffect.indexOf("flushVaultDraftsBeforePathRewriteRecovery({")).toBeLessThan(
-      recoveryEffect.indexOf("recoverDurablePathRewriteJob(job)")
+      recoveryEffect.indexOf("recoverDurablePathRewriteJob(job, continuationIsCurrent)")
     );
     expect(recoveryEffect).toContain(
       "void scheduleTerminalVaultPathRewriteCleanup(profile.uid).catch(() => undefined);"

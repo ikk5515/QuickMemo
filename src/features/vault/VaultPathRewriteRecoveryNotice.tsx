@@ -85,7 +85,7 @@ export function VaultPathRewriteRecoveryNotice({
         <strong>{copy.title}</strong>
         <p>{copy.description}</p>
         <p className="vault-path-rewrite-progress">
-          {job.cursor}/{job.stepCount}개 확인됨 · 재확인 {job.retryCount}회
+          경로 대상 {job.manifest.pathChanges.length}개 · 참조 원본 {job.cursor}/{job.stepCount}개 확인됨 · 재확인 {job.retryCount}회
         </p>
         {disabledReason && copy.actionLabel ? (
           <p className="vault-path-rewrite-disabled-reason" role="status">{disabledReason}</p>

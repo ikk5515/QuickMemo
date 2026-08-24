@@ -18,6 +18,40 @@ import type { DecryptedVaultNote } from "./vaultData";
 import { createEncryptedVaultAsset } from "./vaultPersistence";
 
 const MAXIMUM_CONCURRENT_CLIPBOARD_ASSET_WRITES = 3;
+export const VAULT_CLIPBOARD_SOURCE_READ_TIMEOUT_MS = 8_000;
+
+export function withVaultClipboardSourceReadDeadline<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+  timeoutMs = VAULT_CLIPBOARD_SOURCE_READ_TIMEOUT_MS
+) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new TypeError("Vault clipboard source read deadline must be a positive integer");
+  }
+  signal.throwIfAborted();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+      callback();
+    };
+    const abort = () => finish(() => reject(
+      signal.reason ?? new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError")
+    ));
+    const timeout = globalThis.setTimeout(() => finish(() => reject(
+      new Error("서버의 원본 노트 확인이 지연되어 이미지 붙여넣기를 중단했습니다. 잠시 후 다시 시도해주세요.")
+    )), timeoutMs);
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    operation.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error))
+    );
+  });
+}
 
 export interface PendingClipboardAssetReservation {
   folderId: string | null;
@@ -93,14 +127,15 @@ export async function pasteVaultClipboardImages({
     })();
     return discardPromise;
   };
-  const throwIfCancelled = () => {
-    if (signal.aborted) {
-      throw new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError");
+  const throwIfCancelled = (checkSignal: AbortSignal = signal) => {
+    if (checkSignal.aborted) {
+      throw checkSignal.reason
+        ?? new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError");
     }
   };
   const createdTitles = () => createdAssets.flatMap((asset) => asset ? [asset.title] : []);
-  const assertSourceRemainsPrivate = async () => {
-    throwIfCancelled();
+  const assertSourceRemainsPrivate = async (checkSignal: AbortSignal = signal) => {
+    throwIfCancelled(checkSignal);
     const local = getNotes().find((candidate) => candidate.id === note.id);
     if (
       !local
@@ -115,8 +150,11 @@ export async function pasteVaultClipboardImages({
     ) {
       throw new Error("붙여넣는 동안 노트의 소유권이나 공유 상태가 변경되어 이미지 저장을 중단했습니다.");
     }
-    const serverRead = await getVisibleNotesByIdsFromServer(ownerUid, [note.id]);
-    throwIfCancelled();
+    const serverRead = await withVaultClipboardSourceReadDeadline(
+      getVisibleNotesByIdsFromServer(ownerUid, [note.id]),
+      checkSignal
+    );
+    throwIfCancelled(checkSignal);
     const server = serverRead.notes.find((candidate) => candidate.id === note.id);
     if (
       !serverRead.resolvedNoteIds.includes(note.id)
@@ -144,13 +182,44 @@ export async function pasteVaultClipboardImages({
 
   try {
     throwIfCancelled();
-    const [preparedResult, sourceCheckResult] = await Promise.allSettled([
-      prepareVaultClipboardImages(files),
-      assertSourceRemainsPrivate()
-    ]);
-    if (preparedResult.status === "fulfilled") prepared = preparedResult.value;
-    if (sourceCheckResult.status === "rejected") throw sourceCheckResult.reason;
-    if (preparedResult.status === "rejected") throw preparedResult.reason;
+    const preflightController = new AbortController();
+    let firstPreflightFailure: unknown;
+    let hasPreflightFailure = false;
+    const failPreflight = (caught: unknown): never => {
+      if (!hasPreflightFailure) {
+        firstPreflightFailure = caught;
+        hasPreflightFailure = true;
+      }
+      if (!preflightController.signal.aborted) {
+        preflightController.abort(caught);
+      }
+      throw caught;
+    };
+    const abortPreflightFromCaller = () => {
+      const reason = signal.reason
+        ?? new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError");
+      if (!hasPreflightFailure) {
+        firstPreflightFailure = reason;
+        hasPreflightFailure = true;
+      }
+      if (!preflightController.signal.aborted) {
+        preflightController.abort(reason);
+      }
+    };
+    signal.addEventListener("abort", abortPreflightFromCaller, { once: true });
+    if (signal.aborted) abortPreflightFromCaller();
+    try {
+      const [preparedResult] = await Promise.allSettled([
+        prepareVaultClipboardImages(files, { signal: preflightController.signal })
+          .catch(failPreflight),
+        assertSourceRemainsPrivate(preflightController.signal)
+          .catch(failPreflight)
+      ]);
+      if (preparedResult.status === "fulfilled") prepared = preparedResult.value;
+      if (hasPreflightFailure) throw firstPreflightFailure;
+    } finally {
+      signal.removeEventListener("abort", abortPreflightFromCaller);
+    }
     throwIfCancelled();
     const folderId = sourceFolderId;
     const titles = reserveVaultClipboardImageTitles(

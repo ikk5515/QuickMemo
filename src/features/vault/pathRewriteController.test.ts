@@ -7,6 +7,7 @@ import {
   retryableVaultPathRewriteFailure,
   resumeVaultPathRewriteToCompletion,
   shouldAutomaticallyRecoverVaultPathRewriteJob,
+  vaultPathRewriteRecoveryContinuationIsCurrent,
   VaultPathRewriteControllerError
 } from "./pathRewriteController";
 import type { PreparedVaultPathRewriteJob } from "./pathRewriteJob";
@@ -34,6 +35,24 @@ function summary(
 const prepared = { jobId: summary("prepared").jobId } as PreparedVaultPathRewriteJob;
 
 describe("path rewrite controller", () => {
+  it("rejects cancelled and stale access-scope recovery continuations", () => {
+    expect(vaultPathRewriteRecoveryContinuationIsCurrent({
+      cancelled: false,
+      currentGeneration: 7,
+      generation: 7
+    })).toBe(true);
+    expect(vaultPathRewriteRecoveryContinuationIsCurrent({
+      cancelled: true,
+      currentGeneration: 7,
+      generation: 7
+    })).toBe(false);
+    expect(vaultPathRewriteRecoveryContinuationIsCurrent({
+      cancelled: false,
+      currentGeneration: 8,
+      generation: 7
+    })).toBe(false);
+  });
+
   it("flushes the captured dirty drafts before recovery and reports every draft still dirty", async () => {
     const events: string[] = [];
     const dirty = new Set(["note-a", "note-b"]);
@@ -87,6 +106,13 @@ describe("path rewrite controller", () => {
     expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {
       lastErrorCode: "write-failed"
     }))).toBe(true);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {
+      jobId: `pr3_${"A".repeat(43)}`,
+      lastErrorCode: "path-state-conflict"
+    }))).toBe(true);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {
+      lastErrorCode: "path-state-conflict"
+    }))).toBe(false);
     expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {
       lastErrorCode: "revision-conflict"
     }))).toBe(false);
