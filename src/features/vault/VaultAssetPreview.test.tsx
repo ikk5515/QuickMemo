@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BoundedVaultAssetDecodeCache } from "./vaultAssetCache";
 import { VaultAssetPreview, safeVaultPdfFragment } from "./VaultAssetPreview";
 
 function pngBytes(width = 800, height = 600) {
@@ -46,6 +47,76 @@ describe("VaultAssetPreview", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:quickmemo-asset");
   });
 
+  it("shows a safe inline image without visible file chrome while preserving its accessible name", async () => {
+    const onOpen = vi.fn();
+    const rendered = render(<VaultAssetPreview
+      asset={{
+        bytes: pngBytes(),
+        mimeType: "image/png"
+      }}
+      fileName="노트 -1.png"
+      inlineEmbed={{ label: "노트 -1.png", onOpen }}
+    />);
+
+    expect(await screen.findByRole("img", { name: "노트 -1.png" }))
+      .toHaveAttribute("src", "blob:quickmemo-asset");
+    expect(screen.queryByRole("button", { name: "노트 -1.png" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "다운로드" })).not.toBeInTheDocument();
+    expect(rendered.container).not.toHaveTextContent("노트 -1.png");
+    expect(rendered.container.firstElementChild?.tagName).toBe("SPAN");
+    expect(onOpen).not.toHaveBeenCalled();
+
+    rendered.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:quickmemo-asset");
+  });
+
+  it("keeps visible inline controls for a signature-mismatched fail-closed asset", async () => {
+    const onOpen = vi.fn();
+    render(<VaultAssetPreview
+      asset={{ bytes: new TextEncoder().encode("<html><script/></html>"), mimeType: "image/png" }}
+      fileName="unsafe.png"
+      inlineEmbed={{ label: "unsafe.png", onOpen }}
+    />);
+
+    screen.getByRole("button", { name: "unsafe.png" }).click();
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status")).toHaveTextContent("미리보지 않습니다");
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("link", { name: "다운로드" })).toBeInTheDocument());
+  });
+
+  it("keeps mounted asset identities stable beyond the strong cache during parent rerenders", async () => {
+    const decoder = vi.fn(() => ({ bytes: pngBytes(), mimeType: "image/png" }));
+    const cache = new BoundedVaultAssetDecodeCache(12, decoder);
+    const entries = Array.from({ length: 16 }, (_, index) => ({
+      entryId: `asset-${index}`,
+      fileName: `image-${index}.png`,
+      source: `encoded-${index}`
+    }));
+    const gallery = (revision: number) => (
+      <div data-revision={revision}>
+        {entries.map(({ entryId, fileName, source }) => {
+          const asset = cache.get(entryId, source);
+          return asset ? <VaultAssetPreview asset={asset} fileName={fileName} key={entryId} /> : null;
+        })}
+      </div>
+    );
+
+    const rendered = render(gallery(0));
+    expect(await screen.findAllByRole("img")).toHaveLength(entries.length);
+    expect(decoder).toHaveBeenCalledTimes(entries.length);
+    expect(createObjectURL).toHaveBeenCalledTimes(entries.length);
+
+    rendered.rerender(gallery(1));
+    expect(await screen.findAllByRole("img")).toHaveLength(entries.length);
+    expect(decoder).toHaveBeenCalledTimes(entries.length);
+    expect(createObjectURL).toHaveBeenCalledTimes(entries.length);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+
+    rendered.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledTimes(entries.length);
+  });
+
   it("shares one object URL across repeated Canvas references and revokes it after the last unmount", async () => {
     const asset = {
       bytes: pngBytes(),
@@ -61,6 +132,28 @@ describe("VaultAssetPreview", () => {
     second.unmount();
     expect(revokeObjectURL).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:quickmemo-asset");
+  });
+
+  it("replaces and revokes the blob URL exactly once when the decoded asset changes", async () => {
+    createObjectURL
+      .mockReturnValueOnce("blob:quickmemo-asset-a")
+      .mockReturnValueOnce("blob:quickmemo-asset-b");
+    const firstAsset = { bytes: pngBytes(800, 600), mimeType: "image/png" };
+    const secondAsset = { bytes: pngBytes(640, 480), mimeType: "image/png" };
+    const rendered = render(<VaultAssetPreview asset={firstAsset} fileName="first.png" />);
+
+    expect(await screen.findByRole("img", { name: "first.png" }))
+      .toHaveAttribute("src", "blob:quickmemo-asset-a");
+    rendered.rerender(<VaultAssetPreview asset={secondAsset} fileName="second.png" />);
+
+    expect(await screen.findByRole("img", { name: "second.png" }))
+      .toHaveAttribute("src", "blob:quickmemo-asset-b");
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenNthCalledWith(1, "blob:quickmemo-asset-a");
+
+    rendered.unmount();
+    expect(revokeObjectURL).toHaveBeenNthCalledWith(2, "blob:quickmemo-asset-b");
   });
 
   it("tiles a signature-matched image using only its generated blob URL", async () => {
@@ -110,6 +203,18 @@ describe("VaultAssetPreview", () => {
     expect(frame).toHaveAttribute("src", "blob:quickmemo-asset#page=2&zoom=125");
     expect(frame).toHaveAttribute("sandbox", "");
     expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+  });
+
+  it("keeps inline PDF identification and download controls fail-closed", async () => {
+    render(<VaultAssetPreview
+      asset={{ bytes: new TextEncoder().encode("%PDF-1.7"), mimeType: "application/pdf" }}
+      fileName="design.pdf"
+      inlineEmbed={{ label: "design.pdf", onOpen: vi.fn() }}
+    />);
+
+    expect(screen.getByRole("button", { name: "design.pdf" })).toBeInTheDocument();
+    expect(await screen.findByTitle("design.pdf PDF 미리보기")).toHaveAttribute("sandbox", "");
+    expect(screen.getByRole("link", { name: "다운로드" })).toHaveAttribute("download", "design.pdf");
   });
 
   it("rejects executable or out-of-range PDF fragments", () => {

@@ -3,7 +3,7 @@ import { encodeVaultAsset } from "./vaultAsset";
 import { BoundedVaultAssetDecodeCache } from "./vaultAssetCache";
 
 describe("BoundedVaultAssetDecodeCache", () => {
-  it("decodes on demand, reuses matching sources, and evicts the least recently used entry", () => {
+  it("decodes on demand, reuses live assets, and bounds the strong LRU", () => {
     const decoder = vi.fn((source: string) => ({ bytes: new TextEncoder().encode(source), mimeType: "text/plain" }));
     const cache = new BoundedVaultAssetDecodeCache(2, decoder);
 
@@ -13,7 +13,7 @@ describe("BoundedVaultAssetDecodeCache", () => {
     cache.get("c", "three");
     cache.get("b", "two");
 
-    expect(decoder).toHaveBeenCalledTimes(4);
+    expect(decoder).toHaveBeenCalledTimes(3);
     expect(cache.size).toBe(2);
   });
 
@@ -27,5 +27,26 @@ describe("BoundedVaultAssetDecodeCache", () => {
     expect(cache.size).toBe(1);
     cache.clear();
     expect(cache.size).toBe(0);
+  });
+
+  it("keeps mounted asset identities stable beyond the strong LRU limit", () => {
+    const decoder = vi.fn((source: string) => ({
+      bytes: new TextEncoder().encode(source),
+      mimeType: "image/png"
+    }));
+    const cache = new BoundedVaultAssetDecodeCache(12, decoder);
+    const entries = Array.from({ length: 16 }, (_, index) => ({
+      entryId: `asset-${index}`,
+      source: `encoded-${index}`
+    }));
+
+    const mountedAssets = entries.map(({ entryId, source }) => cache.get(entryId, source));
+    const rerenderedAssets = entries.map(({ entryId, source }) => cache.get(entryId, source));
+
+    expect(decoder).toHaveBeenCalledTimes(entries.length);
+    expect(cache.size).toBe(12);
+    rerenderedAssets.forEach((asset, index) => {
+      expect(asset).toBe(mountedAssets[index]);
+    });
   });
 });

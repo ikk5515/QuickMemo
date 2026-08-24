@@ -210,6 +210,7 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
     timeout: 45_000
   }).toBe(2);
   const embeds = imageEmbeds(persistedSource);
+  const imageTitles = [`${noteTitle} -1.png`, `${noteTitle} -2.png`];
   expect(new Set(embeds).size, "the two encrypted image assets need distinct Vault paths").toBe(2);
   expect(new Set(embeds)).toEqual(new Set([
     `![[붙여넣은 이미지/${noteTitle} -1.png]]`,
@@ -287,6 +288,22 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(noteTitle);
     await expect(page.getByRole("treeitem", { name: "붙여넣은 이미지", exact: true }))
       .toHaveCount(1);
+    await page.getByRole("button", { name: "읽기 보기", exact: true }).click();
+    const inlineAssets = page.locator(".vault-markdown-embed-card--asset");
+    await expect(inlineAssets).toHaveCount(2);
+    for (const imageTitle of imageTitles) {
+      const image = page.getByRole("img", { name: imageTitle, exact: true });
+      await expect(image).toBeVisible();
+      await expect.poll(() => image.evaluate((element) => (
+        element.tagName === "IMG"
+        && element.complete
+        && element.naturalWidth > 0
+      ))).toBe(true);
+      await expect(page.locator(".vault-markdown-embed-card--asset", { hasText: imageTitle }))
+        .toHaveCount(0);
+    }
+    await expect(inlineAssets.locator("button")).toHaveCount(0);
+    await expect(inlineAssets.getByRole("link", { name: "다운로드" })).toHaveCount(0);
     await page.getByRole("button", { name: "소스 모드", exact: true }).click();
     const restoredEditor = page.getByRole("textbox", { name: "Markdown 편집기" });
     await expect.poll(() => editorSource(restoredEditor), {

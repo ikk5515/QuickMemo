@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { safeVaultAssetPreviewKind, type DecodedVaultAsset } from "./vaultAsset";
 import "./asset.css";
 
@@ -48,6 +48,10 @@ export interface VaultAssetPreviewProps {
   compact?: boolean;
   fileName: string;
   imageMode?: "contain" | "cover" | "repeat";
+  inlineEmbed?: {
+    label: string;
+    onOpen: () => void;
+  };
   pdfFragment?: string;
 }
 
@@ -77,14 +81,17 @@ export function VaultAssetPreview({
   compact = false,
   fileName,
   imageMode = "contain",
+  inlineEmbed,
   pdfFragment
 }: VaultAssetPreviewProps) {
   const [objectUrlState, setObjectUrlState] = useState<{
     asset: DecodedVaultAsset;
     url: string;
   } | null>(null);
-  const previewKind = safeVaultAssetPreviewKind(asset);
+  const previewKind = useMemo(() => safeVaultAssetPreviewKind(asset), [asset]);
+  const imageOnlyInlineEmbed = inlineEmbed !== undefined && previewKind === "image";
   const objectUrl = objectUrlState?.asset === asset ? objectUrlState.url : null;
+  const PreviewRoot = inlineEmbed ? "span" : "section";
 
   useEffect(() => {
     const acquired = acquireAssetObjectUrl(asset);
@@ -93,9 +100,18 @@ export function VaultAssetPreview({
   }, [asset]);
 
   return (
-    <section className={`vault-asset-preview ${compact ? "vault-asset-preview--compact" : ""} ${className}`.trim()}>
+    <PreviewRoot className={`vault-asset-preview ${compact ? "vault-asset-preview--compact" : ""} ${className}`.trim()}>
+      {inlineEmbed && !imageOnlyInlineEmbed ? (
+        <button
+          className="vault-asset-preview-inline-entry"
+          onClick={inlineEmbed.onOpen}
+          type="button"
+        >
+          {inlineEmbed.label}
+        </button>
+      ) : null}
       {objectUrl && previewKind === "image" && imageMode === "repeat" ? (
-        <div
+        <span
           aria-label={fileName}
           className="vault-asset-preview-repeat-image"
           role="img"
@@ -118,11 +134,11 @@ export function VaultAssetPreview({
           이 형식은 보안을 위해 미리보지 않습니다.
         </span>
       ) : null}
-      {objectUrl ? (
+      {objectUrl && !imageOnlyInlineEmbed ? (
         <a download={fileName} href={objectUrl}>다운로드</a>
-      ) : (
+      ) : !objectUrl ? (
         <span aria-live="polite">첨부 준비 중…</span>
-      )}
-    </section>
+      ) : null}
+    </PreviewRoot>
   );
 }
