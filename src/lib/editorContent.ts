@@ -1,6 +1,7 @@
 import { safeRasterDataUrl } from "./safeRasterImage";
 
 const fontSizePattern = /^<!--qm-font-size:(\d+)-->/;
+export const markdownEditorContentPrefix = "<!--qm-markdown-v1-->";
 const htmlTagPattern =
   /<(a|p|div|br|strong|b|em|i|u|s|del|strike|span|img|figure|h[1-6]|hr|ul|ol|li|blockquote|pre|code|table|tbody|thead|tr|td|th|colgroup|col|label|input)\b/i;
 const readonlyHtmlTagPattern =
@@ -71,7 +72,7 @@ export interface ParsedEditorContent {
   fontSize: number;
 }
 
-export type ReadonlyEditorContentFormat = "html" | "plain-text";
+export type ReadonlyEditorContentFormat = "html" | "markdown" | "plain-text";
 
 export interface ParsedReadonlyEditorContent {
   content: string;
@@ -100,6 +101,14 @@ export function parseReadonlyEditorContent(
 
   if (!body) {
     return { content: "", contentFormat: "html", fontSize };
+  }
+
+  if (body.startsWith(markdownEditorContentPrefix)) {
+    return {
+      content: normalizePlainTextLineEndings(body.slice(markdownEditorContentPrefix.length)),
+      contentFormat: "markdown",
+      fontSize
+    };
   }
 
   const contentFormat: ReadonlyEditorContentFormat =

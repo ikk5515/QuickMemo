@@ -30,6 +30,7 @@ import {
   vaultInventoryManifestContract,
   vaultInventoryManifestShardIndexFromEntryKey
 } from "../../../shared/vault-inventory-manifest.js";
+import { createVaultApiDeadline } from "../../services/vaultApiDeadline";
 
 const encoder = new TextEncoder();
 
@@ -63,6 +64,15 @@ export class VaultPathRewriteInventorySnapshotLagError extends Error {
   constructor() {
     super("서버 Vault 경로 인벤토리가 현재 암호화 스냅샷보다 앞서 있습니다.");
     this.name = "VaultPathRewriteInventorySnapshotLagError";
+  }
+}
+
+export class VaultPathRewriteInventoryTimeoutError extends Error {
+  readonly code = "vault_inventory_manifest_timeout";
+
+  constructor() {
+    super("서버 Vault 경로 인벤토리 응답이 지연되어 경로 변경 잠금을 해제했습니다.");
+    this.name = "VaultPathRewriteInventoryTimeoutError";
   }
 }
 
@@ -246,11 +256,20 @@ export async function loadVaultPathRewriteInventoryBinding(input: {
   folders: readonly NoteFolderSnapshot[];
 }): Promise<VaultPathRewriteInventoryBinding> {
   const path = vaultInventoryManifestCollectionPath(input.uid).split("/");
-  const snapshot = await getDocsFromServer(query(
-    collection(db, path[0], path[1], path[2]),
-    where("ownerUid", "==", input.uid),
-    limit(vaultInventoryManifestContract.shardCount + 2)
-  ));
+  const deadline = createVaultApiDeadline(undefined, 8_000);
+  let snapshot;
+  try {
+    snapshot = await deadline.race(getDocsFromServer(query(
+      collection(db, path[0], path[1], path[2]),
+      where("ownerUid", "==", input.uid),
+      limit(vaultInventoryManifestContract.shardCount + 2)
+    )));
+  } catch (error) {
+    if (deadline.timedOut()) throw new VaultPathRewriteInventoryTimeoutError();
+    throw error;
+  } finally {
+    deadline.dispose();
+  }
   const documents = snapshot.docs.map((document) => ({
     __id: document.id,
     ...document.data()

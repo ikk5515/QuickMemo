@@ -3,6 +3,8 @@ import type { SecurePublicShareCopyPayload } from "../components/SecurePublicSha
 import { maxAttachmentFileBytes } from "./attachments";
 import { BlobAttachmentReservationCleanupError } from "../services/blobAttachments";
 import type { UserProfile } from "../types";
+import { encryptedHistorySnapshotSource } from "../features/vault/vaultPayloadLimits";
+import { markdownEditorContentPrefix } from "./editorContent";
 import {
   estimateSecureShareCopyAttachmentLiveBytes,
   saveSecureShareCopy,
@@ -76,7 +78,9 @@ function attachment(id: string, fileName: string, originalSize = 4) {
 }
 
 function payload(
-  attachments = [attachment("attachment_123456", "report.pdf")]
+  attachments: SecurePublicShareCopyPayload["attachments"] = [
+    attachment("attachment_123456", "report.pdf")
+  ]
 ): SecurePublicShareCopyPayload {
   return {
     title: "복사할 노트",
@@ -94,6 +98,18 @@ function payload(
       new Blob([new Uint8Array([1, 2, 3, 4])], { type: "application/pdf" })
     ),
     copyGrantExpiresAt: "2030-01-01T00:00:00.000Z"
+  };
+}
+
+function markdownPayload(
+  body = "# Markdown 제목\r\n\r\n<script>alert('text only')</script>\r\n[[연결 노트]]",
+  attachments: SecurePublicShareCopyPayload["attachments"] = []
+): SecurePublicShareCopyPayload {
+  return {
+    ...payload(attachments),
+    attachments,
+    body: `${markdownEditorContentPrefix}${body}`,
+    bodyHtml: ""
   };
 }
 
@@ -248,6 +264,107 @@ describe("secure share save-copy saga", () => {
       "activating",
       "complete"
     ]));
+  });
+
+  it("preserves a text-only Markdown share as a versioned Markdown Vault note", async () => {
+    const deps = dependencies();
+    const source = markdownPayload();
+    const normalizedBody = "# Markdown 제목\n\n<script>alert('text only')</script>\n[[연결 노트]]";
+    const expectedHistory = encryptedHistorySnapshotSource({
+      body: normalizedBody,
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      folderId: null,
+      title: "복사할 노트"
+    });
+
+    await expect(saveSecureShareCopy({
+      payload: source,
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps)).resolves.toEqual({ noteId: "new_note_123456" });
+
+    expect(deps.createSecureShareCopyingNote).toHaveBeenCalledWith(expect.objectContaining({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      expectedAttachmentCount: 0,
+      historySnapshot: expect.any(Object),
+      nameClaim: {
+        claimId: "C".repeat(43),
+        indexVersion: 1,
+        parentId: null
+      }
+    }));
+    expect(deps.encryptText).toHaveBeenCalledWith(normalizedBody, noteKey);
+    expect(deps.encryptText).toHaveBeenCalledWith(expectedHistory, noteKey);
+    expect(deps.vaultNameFingerprint).toHaveBeenCalledWith(vaultIntegrityKey, {
+      kind: "markdown",
+      name: "복사할 노트",
+      parentId: null,
+      targetType: "entry"
+    });
+    expect(source.copyAttachment).not.toHaveBeenCalled();
+    expect(deps.createNoteAttachment).not.toHaveBeenCalled();
+  });
+
+  it("rejects Markdown shares with attachments before creating a Vault note", async () => {
+    const deps = dependencies();
+    const source = markdownPayload(
+      "# 첨부 포함",
+      [attachment("attachment_123456", "report.pdf")]
+    );
+
+    await expect(saveSecureShareCopy({
+      payload: source,
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps)).rejects.toMatchObject({ code: "invalid_attachment" });
+
+    expect(deps.requireExistingVaultIntegrityKey).not.toHaveBeenCalled();
+    expect(deps.createSecureShareCopyingNote).not.toHaveBeenCalled();
+    expect(source.copyAttachment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "../다른 노트",
+    "폴더\\다른 노트",
+    "두 줄\n제목",
+    "제어\u0000문자"
+  ])("rejects an unsafe Markdown Vault name before encryption: %j", async (title) => {
+    const deps = dependencies();
+    const source = markdownPayload();
+    source.title = title;
+
+    await expect(saveSecureShareCopy({
+      payload: source,
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps)).rejects.toMatchObject({ code: "invalid_content" });
+
+    expect(deps.requireExistingVaultIntegrityKey).not.toHaveBeenCalled();
+    expect(deps.encryptText).not.toHaveBeenCalled();
+  });
+
+  it("uses the safe untitled fallback before validating a Markdown Vault name", async () => {
+    const deps = dependencies();
+    const source = markdownPayload("본문");
+    source.title = " \t ";
+
+    await expect(saveSecureShareCopy({
+      payload: source,
+      privateKey,
+      profile,
+      signal: new AbortController().signal
+    }, deps)).resolves.toEqual({ noteId: "new_note_123456" });
+
+    expect(deps.encryptText).toHaveBeenCalledWith("제목 없음", noteKey);
+    expect(deps.vaultNameFingerprint).toHaveBeenCalledWith(vaultIntegrityKey, expect.objectContaining({
+      kind: "markdown",
+      name: "제목 없음"
+    }));
   });
 
   it("bounds attachment work to three tasks and propagates one cancellable signal", async () => {

@@ -264,12 +264,14 @@ async function patchPendingEmailTestDeadline(testExpiresAt: Date) {
 function ownerCreateBody(
   sourceNoteId: string,
   idempotencyKey: string,
-  wrappedKeyBytes = 256
+  wrappedKeyBytes = 256,
+  sourceSyncMode?: "revision_bound"
 ) {
   return {
     sourceNoteId,
     sourceRevision: 1,
     sourceAttachmentRevision: 0,
+    ...(sourceSyncMode ? { sourceSyncMode } : {}),
     encryptedTitle: {
       version: 1,
       algorithm: "AES-GCM",
@@ -309,6 +311,7 @@ async function ownerCreateRequest(input: {
   idempotencyKey: string;
   networkSuffix: number;
   sourceNoteId: string;
+  sourceSyncMode?: "revision_bound";
   wrappedKeyBytes?: number;
 }) {
   const response = await fetch(
@@ -322,7 +325,8 @@ async function ownerCreateRequest(input: {
       body: JSON.stringify(ownerCreateBody(
         input.sourceNoteId,
         input.idempotencyKey,
-        input.wrappedKeyBytes
+        input.wrappedKeyBytes,
+        input.sourceSyncMode
       ))
     }
   );
@@ -378,6 +382,26 @@ async function ownerContentUpdateRequest(input: {
         networkSuffix: input.networkSuffix
       }),
       body: JSON.stringify(input.body)
+    }
+  );
+  return {
+    body: await response.json() as Record<string, unknown>,
+    response
+  };
+}
+
+async function rawMetadataRequest(input: {
+  harness: SecureShareApiHarness;
+  networkSuffix: number;
+  shareId: string;
+}) {
+  const response = await fetch(
+    `${input.harness.origin}/api/public-shares-v2?action=metadata`
+    + `&shareId=${encodeURIComponent(input.shareId)}`,
+    {
+      headers: apiHeaders(input.harness.origin, {
+        networkSuffix: input.networkSuffix
+      })
     }
   );
   return {
@@ -1158,6 +1182,475 @@ describeEmulator("Secure Share v2 API with real Firebase Emulators", () => {
     expect(response.status).toBe(201);
     expect(body).toMatchObject({ ok: true });
   });
+
+  it("keeps revision-bound Vault snapshots unavailable after their source revision changes", async () => {
+    const owner = await createEmulatorOwner(
+      "revision-bound-owner@example.test",
+      "emulator-owner-password"
+    );
+    const sourceNoteId = "source_note_revision_bound_0001";
+    await writeEmulatorDocuments([
+      {
+        path: `users/${owner.localId}`,
+        fields: {
+          displayName: "Revision-bound Owner",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: owner.localId
+        }
+      },
+      {
+        path: `notes/${sourceNoteId}`,
+        fields: {
+          attachmentRevision: 0,
+          isDeleted: false,
+          isPurged: false,
+          ownerUid: owner.localId,
+          revision: 1
+        }
+      }
+    ]);
+
+    const invalidModeResponse = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-create`,
+      {
+        method: "POST",
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 124
+        }),
+        body: JSON.stringify({
+          ...ownerCreateBody(sourceNoteId, "revision_bound_invalid_0001"),
+          sourceSyncMode: "live"
+        })
+      }
+    );
+    expect(invalidModeResponse.status).toBe(400);
+    expect(await invalidModeResponse.json()).toMatchObject({
+      ok: false,
+      error: "invalid_request"
+    });
+
+    const created = await ownerCreateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "revision_bound_create_0001",
+      networkSuffix: 125,
+      sourceNoteId,
+      sourceSyncMode: "revision_bound"
+    });
+    expect(created.response.status).toBe(201);
+    expect(created.body.share).toMatchObject({ sourceSyncMode: "revision_bound" });
+    const shareId = String(
+      (created.body.share as Record<string, unknown>).shareId
+    );
+    expect(await readEmulatorDocument(`publicNoteShares/${shareId}`)).toMatchObject({
+      sourceSyncMode: "revision_bound"
+    });
+
+    const mismatchedReplay = await ownerCreateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "revision_bound_create_0001",
+      networkSuffix: 126,
+      sourceNoteId
+    });
+    expect(mismatchedReplay.response.status).toBe(409);
+    expect(mismatchedReplay.body).toMatchObject({
+      ok: false,
+      error: "request_conflict"
+    });
+
+    const activation = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-activate`
+      + `&shareId=${encodeURIComponent(shareId)}`,
+      {
+        method: "POST",
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 127
+        }),
+        body: JSON.stringify({
+          attachmentCount: 0,
+          generation: "",
+          idempotencyKey: "revision_bound_activate_0001"
+        })
+      }
+    );
+    expect(activation.status).toBe(200);
+    expect((await rawMetadataRequest({
+      harness,
+      networkSuffix: 128,
+      shareId
+    })).response.status).toBe(200);
+
+    await patchEmulatorDocuments([{
+      path: `notes/${sourceNoteId}`,
+      fields: { revision: 2 }
+    }]);
+    const unavailable = await rawMetadataRequest({
+      harness,
+      networkSuffix: 129,
+      shareId
+    });
+    expect(unavailable.response.status).toBe(404);
+    expect(unavailable.body).toMatchObject({
+      ok: false,
+      error: "share_unavailable"
+    });
+  }, 30_000);
+
+  it("rejects create and activate when any source-folder ancestor is unavailable", async () => {
+    const owner = await createEmulatorOwner(
+      "folder-lifecycle-owner@example.test",
+      "emulator-owner-password"
+    );
+    await writeEmulatorDocuments([
+      {
+        path: `users/${owner.localId}`,
+        fields: {
+          displayName: "Folder lifecycle owner",
+          featureAccess: { notes: true },
+          isActive: true,
+          isAdmin: false,
+          uid: owner.localId
+        }
+      },
+      {
+        path: "noteFolders/create_tombstoned_root",
+        fields: {
+          isDeleted: true,
+          ownerUid: owner.localId,
+          parentId: null,
+          vaultAncestorIds: []
+        }
+      },
+      {
+        path: "noteFolders/create_child",
+        fields: {
+          isDeleted: false,
+          ownerUid: owner.localId,
+          parentId: "create_tombstoned_root",
+          vaultAncestorIds: ["create_tombstoned_root"]
+        }
+      },
+      {
+        path: "notes/source_note_folder_create_blocked",
+        fields: {
+          attachmentRevision: 0,
+          folderId: "create_child",
+          isDeleted: false,
+          isPurged: false,
+          ownerUid: owner.localId,
+          revision: 1
+        }
+      }
+    ]);
+
+    const blockedCreate = await ownerCreateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "folder_create_blocked_0001",
+      networkSuffix: 120,
+      sourceNoteId: "source_note_folder_create_blocked"
+    });
+    expect(blockedCreate.response.status).toBe(404);
+    expect(blockedCreate.body).toMatchObject({ ok: false, error: "not_found" });
+
+    await writeEmulatorDocuments([
+      {
+        path: "noteFolders/activate_root",
+        fields: {
+          isDeleted: false,
+          ownerUid: owner.localId,
+          parentId: null,
+          vaultAncestorIds: []
+        }
+      },
+      {
+        path: "noteFolders/activate_child",
+        fields: {
+          isDeleted: false,
+          ownerUid: owner.localId,
+          parentId: "activate_root",
+          vaultAncestorIds: ["activate_root"]
+        }
+      },
+      {
+        path: "notes/source_note_folder_activate",
+        fields: {
+          attachmentRevision: 0,
+          folderId: "activate_child",
+          isDeleted: false,
+          isPurged: false,
+          ownerUid: owner.localId,
+          revision: 1
+        }
+      },
+      {
+        path: "notes/source_note_folder_activate_blocked",
+        fields: {
+          attachmentRevision: 0,
+          folderId: "activate_child",
+          isDeleted: false,
+          isPurged: false,
+          ownerUid: owner.localId,
+          revision: 1
+        }
+      }
+    ]);
+    const created = await ownerCreateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "folder_activate_create_0001",
+      networkSuffix: 121,
+      sourceNoteId: "source_note_folder_activate"
+    });
+    expect(created.response.status).toBe(201);
+    const validShareId = String(
+      (created.body.share as Record<string, unknown>).shareId
+    );
+    const validActivation = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-activate`
+      + `&shareId=${encodeURIComponent(validShareId)}`,
+      {
+        method: "POST",
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 122
+        }),
+        body: JSON.stringify({
+          attachmentCount: 0,
+          generation: "",
+          idempotencyKey: "folder_activate_valid_0001"
+        })
+      }
+    );
+    expect(validActivation.status).toBe(200);
+    expect(await validActivation.json()).toMatchObject({
+      ok: true,
+      share: { ready: true, status: "active" }
+    });
+
+    const pending = await ownerCreateRequest({
+      harness,
+      idToken: owner.idToken,
+      idempotencyKey: "folder_activate_pending_0001",
+      networkSuffix: 123,
+      sourceNoteId: "source_note_folder_activate_blocked"
+    });
+    expect(pending.response.status).toBe(201);
+    const pendingShareId = String(
+      (pending.body.share as Record<string, unknown>).shareId
+    );
+
+    await patchEmulatorDocuments([{
+      path: "noteFolders/activate_root",
+      fields: { isDeleted: true }
+    }]);
+    const activateResponse = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=owner-activate`
+      + `&shareId=${encodeURIComponent(pendingShareId)}`,
+      {
+        method: "POST",
+        headers: apiHeaders(harness.origin, {
+          authorization: owner.idToken,
+          networkSuffix: 124
+        }),
+        body: JSON.stringify({
+          attachmentCount: 0,
+          generation: "",
+          idempotencyKey: "folder_activate_blocked_0001"
+        })
+      }
+    );
+    expect(activateResponse.status).toBe(404);
+    expect(await activateResponse.json()).toMatchObject({
+      ok: false,
+      error: "share_unavailable"
+    });
+    expect(await readEmulatorDocument(`publicNoteShares/${pendingShareId}`)).toMatchObject({
+      ready: false,
+      status: "pending"
+    });
+  }, 30_000);
+
+  it("invalidates metadata, access, and content for unsafe source-folder chains", async () => {
+    const owner = await createEmulatorOwner(
+      "folder-read-owner@example.test",
+      "emulator-owner-password"
+    );
+    const liveShareId = "folder_lifecycle_live_share";
+    const liveSeed = await seedSecureShare({
+      oneTimeEnabled: false,
+      ownerUid: owner.localId,
+      shareId: liveShareId
+    });
+    await patchEmulatorDocuments([{
+      path: `notes/${liveSeed.noteId}`,
+      fields: { folderId: "live_child" }
+    }]);
+    await writeEmulatorDocuments([
+      {
+        path: "noteFolders/live_root",
+        fields: {
+          isDeleted: false,
+          ownerUid: owner.localId,
+          parentId: null,
+          vaultAncestorIds: []
+        }
+      },
+      {
+        path: "noteFolders/live_child",
+        fields: {
+          isDeleted: false,
+          ownerUid: owner.localId,
+          parentId: "live_root",
+          vaultAncestorIds: ["live_root"]
+        }
+      }
+    ]);
+
+    const metadata = await metadataBinding(harness.origin, liveShareId, {
+      networkSuffix: 123
+    });
+    const access = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: { unlockAttemptId: "folder_lifecycle_live_access_0001" },
+      harness,
+      networkSuffix: 123,
+      shareId: liveShareId
+    });
+    expect(access.response.status).toBe(200);
+    const sessionCookie = responseCookie(access.response, "qmss_");
+
+    await patchEmulatorDocuments([{
+      path: "noteFolders/live_root",
+      fields: { isDeleted: true }
+    }]);
+    const blockedMetadata = await rawMetadataRequest({
+      harness,
+      networkSuffix: 124,
+      shareId: liveShareId
+    });
+    expect(blockedMetadata.response.status).toBe(404);
+    expect(blockedMetadata.body).toMatchObject({
+      ok: false,
+      error: "share_unavailable"
+    });
+    const blockedAccess = await accessRequest({
+      bindingCookie: metadata.bindingCookie,
+      body: { unlockAttemptId: "folder_lifecycle_blocked_access_0002" },
+      harness,
+      networkSuffix: 124,
+      shareId: liveShareId
+    });
+    expect(blockedAccess.response.status).toBe(404);
+    expect(blockedAccess.body).toMatchObject({
+      ok: false,
+      error: "share_unavailable"
+    });
+    const blockedContent = await fetch(
+      `${harness.origin}/api/public-shares-v2?action=content`
+      + `&shareId=${encodeURIComponent(liveShareId)}`,
+      {
+        headers: apiHeaders(harness.origin, {
+          bindingCookie: `${metadata.bindingCookie}; ${sessionCookie}`,
+          networkSuffix: 123
+        })
+      }
+    );
+    expect(blockedContent.status).toBe(404);
+    expect(await blockedContent.json()).toMatchObject({
+      ok: false,
+      error: "share_unavailable"
+    });
+
+    const unsafeCases = [
+      {
+        folderId: "missing_folder",
+        folders: [] as Array<{ fields: Record<string, unknown>; path: string }>,
+        shareId: "folder_missing_share"
+      },
+      {
+        folderId: "owner_mismatch_folder",
+        folders: [{
+          path: "noteFolders/owner_mismatch_folder",
+          fields: { isDeleted: false, ownerUid: "another-owner", parentId: null }
+        }],
+        shareId: "folder_owner_mismatch_share"
+      },
+      {
+        folderId: "cycle_folder_a",
+        folders: [
+          {
+            path: "noteFolders/cycle_folder_a",
+            fields: { isDeleted: false, ownerUid: owner.localId, parentId: "cycle_folder_b" }
+          },
+          {
+            path: "noteFolders/cycle_folder_b",
+            fields: { isDeleted: false, ownerUid: owner.localId, parentId: "cycle_folder_a" }
+          }
+        ],
+        shareId: "folder_cycle_share"
+      }
+    ];
+    for (const [index, unsafeCase] of unsafeCases.entries()) {
+      const seed = await seedSecureShare({
+        oneTimeEnabled: false,
+        ownerUid: owner.localId,
+        shareId: unsafeCase.shareId
+      });
+      await patchEmulatorDocuments([{
+        path: `notes/${seed.noteId}`,
+        fields: { folderId: unsafeCase.folderId }
+      }]);
+      if (unsafeCase.folders.length) {
+        await writeEmulatorDocuments(unsafeCase.folders);
+      }
+      const result = await rawMetadataRequest({
+        harness,
+        networkSuffix: 125 + index,
+        shareId: unsafeCase.shareId
+      });
+      expect(result.response.status).toBe(404);
+      expect(result.body).toMatchObject({
+        ok: false,
+        error: "share_unavailable"
+      });
+    }
+
+    const deepShareId = "folder_depth_share";
+    const deepSeed = await seedSecureShare({
+      oneTimeEnabled: false,
+      ownerUid: owner.localId,
+      shareId: deepShareId
+    });
+    const deepFolders = Array.from({ length: 34 }, (_, index) => ({
+      path: `noteFolders/deep_folder_${index}`,
+      fields: {
+        isDeleted: false,
+        ownerUid: owner.localId,
+        parentId: index === 0 ? null : `deep_folder_${index - 1}`
+      }
+    }));
+    await writeEmulatorDocuments(deepFolders);
+    await patchEmulatorDocuments([{
+      path: `notes/${deepSeed.noteId}`,
+      fields: { folderId: "deep_folder_33" }
+    }]);
+    const depthBlocked = await rawMetadataRequest({
+      harness,
+      networkSuffix: 128,
+      shareId: deepShareId
+    });
+    expect(depthBlocked.response.status).toBe(404);
+    expect(depthBlocked.body).toMatchObject({
+      ok: false,
+      error: "share_unavailable"
+    });
+  }, 30_000);
 
   it("updates encrypted content idempotently while preserving the URL session and policy", async () => {
     const owner = await createEmulatorOwner(

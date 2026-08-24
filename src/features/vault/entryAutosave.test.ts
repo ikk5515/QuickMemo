@@ -3,6 +3,7 @@ import {
   CANVAS_ENTRY_AUTOSAVE_IDLE_MS,
   EntryIdleDebounce,
   MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS,
+  entryAutosaveRetryDelayMs,
   vaultEntryAutosaveIdleMs
 } from "./entryAutosave";
 
@@ -27,7 +28,9 @@ describe("EntryIdleDebounce", () => {
     vi.advanceTimersByTime(1_000);
     debounce.schedule("a", draftA2, MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS, saveA);
 
-    vi.advanceTimersByTime(1_500);
+    vi.advanceTimersByTime(3_999);
+    expect(saveB).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
     expect(saveB).toHaveBeenCalledOnce();
     expect(saveA).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1_000);
@@ -47,9 +50,9 @@ describe("EntryIdleDebounce", () => {
 
     // Both earlier deadlines pass while the latest draft is still inside its
     // own idle window. No network save should start during active typing.
-    vi.advanceTimersByTime(1_500);
+    vi.advanceTimersByTime(MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS - 1);
     expect(save).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1_000);
+    vi.advanceTimersByTime(1);
     expect(save).toHaveBeenCalledOnce();
   });
 
@@ -71,11 +74,34 @@ describe("EntryIdleDebounce", () => {
   });
 
   it("gives Canvas a longer idle window than Markdown", () => {
-    expect(MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS).toBe(2_500);
+    expect(MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS).toBe(5_000);
     expect(CANVAS_ENTRY_AUTOSAVE_IDLE_MS).toBe(15_000);
     expect(vaultEntryAutosaveIdleMs("markdown")).toBe(MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS);
     expect(vaultEntryAutosaveIdleMs("canvas")).toBe(CANVAS_ENTRY_AUTOSAVE_IDLE_MS);
     expect(CANVAS_ENTRY_AUTOSAVE_IDLE_MS).toBeGreaterThan(MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS);
+  });
+
+  it("uses a finite exponential retry window after an encrypted save failure", () => {
+    expect(entryAutosaveRetryDelayMs(1)).toBe(1_000);
+    expect(entryAutosaveRetryDelayMs(3)).toBe(4_000);
+    expect(entryAutosaveRetryDelayMs(5)).toBe(16_000);
+    expect(entryAutosaveRetryDelayMs(6)).toBeNull();
+    expect(entryAutosaveRetryDelayMs(0)).toBeNull();
+  });
+
+  it("keeps an ordinary thinking pause free of encrypted Markdown writes", () => {
+    vi.useFakeTimers();
+    const debounce = new EntryIdleDebounce();
+    const save = vi.fn();
+
+    debounce.schedule("markdown", { body: "[[노트" }, MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS, save);
+    vi.advanceTimersByTime(3_000);
+    expect(save).not.toHaveBeenCalled();
+    debounce.schedule("markdown", { body: "[[노트]]" }, MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS, save);
+    vi.advanceTimersByTime(4_999);
+    expect(save).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(save).toHaveBeenCalledOnce();
   });
 
   it("does not save a one-character Canvas edit during a normal editing pause", () => {

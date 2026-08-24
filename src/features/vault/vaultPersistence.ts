@@ -391,7 +391,7 @@ export async function saveEncryptedVaultEntry(
     expectedRevision: note.revision ?? 0,
     historySnapshot,
     historySummary: historySummaryPayload,
-    ...(isOwner ? {
+    ...(isOwner && claimChanged ? {
       nameClaim: {
         claimId: claimId!,
         indexVersion: VAULT_NAME_INDEX_VERSION,

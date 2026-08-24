@@ -2,6 +2,7 @@ import { getToken as getAppCheckToken } from "firebase/app-check";
 import { appCheck, auth } from "../lib/firebase";
 import type { EncryptedPayload, WrappedNoteKey } from "../types";
 import type { VaultPathRewriteActivationInput } from "./vaultPathRewriteJobs";
+import { createVaultApiDeadline } from "./vaultApiDeadline";
 
 export const vaultFolderApiPath = "/api/vault-folders";
 
@@ -109,6 +110,8 @@ export class VaultFolderApiError extends Error {
   constructor(code: string, status: number) {
     super(code === "vault_import_locked"
       ? "Vault 가져오기 또는 복구가 끝날 때까지 기존 폴더 변경이 잠깁니다."
+      : code === "network_timeout"
+        ? "서버 응답이 지연되어 폴더 작업 잠금을 해제했습니다. 현재 목록을 확인한 뒤 다시 시도해주세요."
       : code === "vault_path_rewrite_inventory_changed"
         ? "다른 탭에서 Vault 항목이나 폴더가 변경되었습니다. 최신 목록으로 다시 시도해주세요."
         : code === "vault_path_rewrite_inventory_capacity"
@@ -213,10 +216,20 @@ export async function vaultFolderApiRequest<T>(
   if (!user || user.uid !== ownerUid) {
     throw new VaultFolderApiError("authentication_required", 401);
   }
-  const [idToken, verificationToken] = await Promise.all([
-    user.getIdToken(),
-    bestEffortAppCheckToken()
-  ]);
+  signal?.throwIfAborted();
+  const deadline = createVaultApiDeadline(signal);
+  let idToken: string;
+  let verificationToken: string | null;
+  try {
+    [idToken, verificationToken] = await deadline.race(Promise.all([
+      user.getIdToken(),
+      bestEffortAppCheckToken()
+    ]));
+  } catch (error) {
+    deadline.dispose();
+    if (signal?.aborted) throw error;
+    throw new VaultFolderApiError(deadline.timedOut() ? "network_timeout" : "network_error", 0);
+  }
   const headers = new Headers({
     accept: "application/json",
     authorization: `Bearer ${idToken}`,
@@ -227,7 +240,7 @@ export async function vaultFolderApiRequest<T>(
 
   let response: Response;
   try {
-    response = await fetch(vaultFolderApiPath, {
+    response = await deadline.race(fetch(vaultFolderApiPath, {
       body: JSON.stringify(payload),
       cache: "no-store",
       credentials: "same-origin",
@@ -235,18 +248,23 @@ export async function vaultFolderApiRequest<T>(
       method: "POST",
       redirect: "error",
       referrerPolicy: "no-referrer",
-      signal
-    });
+      signal: deadline.signal
+    }));
   } catch (error) {
+    deadline.dispose();
     if (signal?.aborted) throw error;
-    throw new VaultFolderApiError("network_error", 0);
+    throw new VaultFolderApiError(deadline.timedOut() ? "network_timeout" : "network_error", 0);
   }
   let body: unknown;
   try {
-    body = await response.json();
+    body = await deadline.race(response.json());
   } catch {
+    deadline.dispose();
+    if (signal?.aborted) signal.throwIfAborted();
+    if (deadline.timedOut()) throw new VaultFolderApiError("network_timeout", 0);
     throw new VaultFolderApiError("invalid_response", response.status);
   }
+  deadline.dispose();
   if (!response.ok) {
     const code = isJsonObject(body) && typeof body.error === "string"
       && typeof body.error === "string"
@@ -330,5 +348,18 @@ export async function mutateVaultFolder(
   payload: Exclude<VaultFolderApiPayload, MaintenancePayload>,
   signal?: AbortSignal
 ) {
-  return vaultFolderApiRequest<VaultFolderMutationResult>(ownerUid, payload, signal);
+  try {
+    return await vaultFolderApiRequest<VaultFolderMutationResult>(ownerUid, payload, signal);
+  } catch (caught) {
+    const responseMayHaveBeenLost = caught instanceof VaultFolderApiError
+      && (
+        caught.code === "network_error"
+        || caught.code === "network_timeout"
+        || caught.code === "invalid_response"
+        || caught.status >= 500
+      );
+    if (payload.action !== "create" || !responseMayHaveBeenLost) throw caught;
+    signal?.throwIfAborted();
+    return vaultFolderApiRequest<VaultFolderMutationResult>(ownerUid, payload, signal);
+  }
 }

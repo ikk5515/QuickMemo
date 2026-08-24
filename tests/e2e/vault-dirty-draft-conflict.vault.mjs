@@ -179,30 +179,40 @@ test("two authenticated contexts preserve a dirty draft and apply a revision-che
     await expectVaultNameWritesReady(pageB);
     await expectEditorSource(pageB, localSource);
     const conflictConsoleStartIndex = diagnosticsB.consoleErrors.length;
-    const conflictResponsePromise = pageB.waitForResponse((response) => (
-      response.url() === vaultNoteMutationUrl
-      && response.request().method() === "POST"
-    ));
+    const conflictResponseStatuses = [];
+    const recordConflictResponse = (response) => {
+      if (
+        response.url() === vaultNoteMutationUrl
+        && response.request().method() === "POST"
+      ) {
+        conflictResponseStatuses.push(response.status());
+      }
+    };
+    pageB.on("response", recordConflictResponse);
     await pageB.getByRole("button", { name: "저장", exact: true }).click();
-    const conflictResponse = await conflictResponsePromise;
-    expect(conflictResponse.status()).toBe(409);
 
     const conflict = pageB.locator(".vault-save-conflict");
     await expect(conflict).toBeVisible();
+    pageB.off("response", recordConflictResponse);
+    // A current subscription lets the client reject the stale base without a
+    // redundant mutation request. If the save races that subscription, the
+    // server still has to reject exactly one request with 409.
+    expect(conflictResponseStatuses.length).toBeLessThanOrEqual(1);
+    expect(conflictResponseStatuses.every((status) => status === 409)).toBe(true);
     await expect(conflict).toContainText("저장 충돌");
     await expect.poll(() => diagnosticsB.consoleErrors.slice(conflictConsoleStartIndex).filter((entry) => (
       entry.location === vaultNoteMutationUrl
       && entry.text === expectedRevisionConflictConsoleText
     )).length, {
-      message: "the proven revision conflict must emit exactly one matching browser resource error"
-    }).toBe(1);
-    const [expectedConflictConsoleError] = diagnosticsB.consoleErrors
+      message: "only a server-rejected conflict request may emit the matching browser resource error"
+    }).toBe(conflictResponseStatuses.length);
+    const expectedConflictConsoleErrors = diagnosticsB.consoleErrors
       .slice(conflictConsoleStartIndex)
       .filter((entry) => (
         entry.location === vaultNoteMutationUrl
         && entry.text === expectedRevisionConflictConsoleText
       ));
-    diagnosticsB.expectedConsoleErrors.add(expectedConflictConsoleError);
+    expectedConflictConsoleErrors.forEach((entry) => diagnosticsB.expectedConsoleErrors.add(entry));
     await expectEditorSource(pageB, localSource);
     await conflict.getByRole("button", { name: "안전 병합" }).click();
     const resolver = pageB.getByRole("dialog", { name: "편집 충돌 안전 병합" });

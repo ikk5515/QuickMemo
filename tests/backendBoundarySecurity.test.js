@@ -14,6 +14,7 @@ import {
 } from "../api/delete-managed-user.js";
 import { safeErrorSummary as googleErrorSummary } from "../api/_google-calendar-common.js";
 import { safeErrorSummary as secureShareErrorSummary } from "../api/_secure-share-common.js";
+import { __vaultNoteTesting as vaultNoteTesting } from "../api/vault-notes.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -21,6 +22,20 @@ afterEach(() => {
 });
 
 describe("backend security boundaries", () => {
+  it("accepts only opaque 256-bit client ids for retryable Vault note creation", () => {
+    const noteId = `vn1_${"A".repeat(43)}`;
+    expect(vaultNoteTesting.assertClientCreateNoteId(noteId)).toBe(noteId);
+    for (const invalid of [
+      "predictable-note-id",
+      `vn1_${"A".repeat(42)}`,
+      `vn1_${"A".repeat(44)}`,
+      `vn1_${"A".repeat(42)}/`,
+      `vn1_${"가".repeat(43)}`
+    ]) {
+      expect(() => vaultNoteTesting.assertClientCreateNoteId(invalid)).toThrow();
+    }
+  });
+
   it("never serializes exception messages, names, bodies, stacks, causes, or invalid statuses", () => {
     const canary = "PRIVATE_CANARY_7d6b";
     const error = new Error(canary, { cause: canary });

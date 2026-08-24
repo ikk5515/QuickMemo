@@ -6,6 +6,7 @@ import {
   mutateVaultFolder,
   repairVaultFolderTree
 } from "./vaultFolderMutations";
+import { VAULT_API_REQUEST_DEADLINE_MS } from "./vaultApiDeadline";
 
 const firebaseMocks = vi.hoisted(() => ({
   appCheck: null as object | null,
@@ -48,6 +49,7 @@ describe("Vault folder mutation API client", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     invalidateVaultFolderTreeReadiness(uid);
     vi.unstubAllGlobals();
   });
@@ -129,7 +131,7 @@ describe("Vault folder mutation API client", () => {
     const controller = new AbortController();
     const abortError = new DOMException("aborted", "AbortError");
     vi.mocked(fetch).mockImplementation(async () => {
-      controller.abort();
+      controller.abort(abortError);
       throw abortError;
     });
 
@@ -138,5 +140,91 @@ describe("Vault folder mutation API client", () => {
       expectedRevision: 1,
       folderId: "folder-a"
     }, controller.signal)).rejects.toBe(abortError);
+  });
+
+  it("bounds a stalled authentication step before a folder mutation reaches the network", async () => {
+    vi.useFakeTimers();
+    firebaseMocks.currentUser = {
+      uid,
+      getIdToken: vi.fn(() => new Promise<string>(() => undefined))
+    };
+    const request = mutateVaultFolder(uid, {
+      action: "trash",
+      expectedRevision: 1,
+      folderId: "folder-a"
+    });
+    const rejected = expect(request).rejects.toMatchObject({
+      code: "network_timeout",
+      status: 0
+    });
+
+    await vi.advanceTimersByTimeAsync(VAULT_API_REQUEST_DEADLINE_MS);
+
+    await rejected;
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("bounds a stalled folder fetch even when the transport ignores AbortSignal", async () => {
+    vi.useFakeTimers();
+    vi.mocked(fetch).mockImplementation(() => new Promise<Response>(() => undefined));
+    const request = mutateVaultFolder(uid, {
+      action: "trash",
+      expectedRevision: 1,
+      folderId: "folder-a"
+    });
+    const rejected = expect(request).rejects.toMatchObject({
+      code: "network_timeout",
+      status: 0
+    });
+
+    await vi.advanceTimersByTimeAsync(VAULT_API_REQUEST_DEADLINE_MS);
+
+    await rejected;
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("retries a timed-out folder create once with the exact same payload", async () => {
+    vi.useFakeTimers();
+    const payload = {
+      action: "create" as const,
+      color: "#8b82f6",
+      encryptedName: {
+        algorithm: "AES-GCM" as const,
+        cipherText: "encrypted-folder-name",
+        iv: "folder-name-iv",
+        version: 1 as const
+      },
+      folderId: "folder-a",
+      nameClaim: {
+        claimId: "C".repeat(43),
+        indexVersion: 1 as const,
+        parentId: null
+      },
+      order: 0,
+      parentId: null,
+      wrappedKey: {
+        algorithm: "RSA-OAEP" as const,
+        version: 1 as const,
+        wrappedKey: "wrapped-folder-key"
+      }
+    };
+    vi.mocked(fetch)
+      .mockImplementationOnce(() => new Promise<Response>(() => undefined))
+      .mockResolvedValueOnce(jsonResponse({
+        folderId: "folder-a",
+        maximumFolderCount: 2_000,
+        ok: true,
+        revision: 1,
+        schemaVersion: 1,
+        treeRevision: 1
+      }));
+
+    const request = mutateVaultFolder(uid, payload);
+    await vi.advanceTimersByTimeAsync(VAULT_API_REQUEST_DEADLINE_MS);
+
+    await expect(request).resolves.toMatchObject({ folderId: "folder-a", revision: 1 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body))
+      .toBe(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body));
   });
 });

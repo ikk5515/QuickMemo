@@ -32,6 +32,343 @@ describe("CodeMirrorMarkdownEditor", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it("does not roll back a newer local document when a controlled value arrives one render behind", async () => {
+    let finishPaste: ((source: string) => void) | undefined;
+    const onChange = vi.fn();
+    const onPasteImages = vi.fn(() => new Promise<string>((resolve) => {
+      finishPaste = resolve;
+    }));
+    const image = new File([new Uint8Array([1])], "clipboard.png", { type: "image/png" });
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="이전 값"
+        valueRevision={1}
+      />
+    );
+
+    fireEvent.paste(screen.getByLabelText("Markdown 편집기"), {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }]
+      }
+    });
+    await act(async () => {
+      finishPaste?.("![[붙여넣은 이미지.png]]");
+      await Promise.resolve();
+    });
+
+    expect(onPasteImages).toHaveBeenCalledWith(
+      [image],
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+    expect(onChange).toHaveBeenLastCalledWith("![[붙여넣은 이미지.png]]이전 값");
+    expect(screen.getByLabelText("Markdown 편집기"))
+      .toHaveTextContent("![[붙여넣은 이미지.png]]이전 값");
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="이전 값"
+        valueRevision={1}
+      />
+    );
+    expect(screen.getByLabelText("Markdown 편집기"))
+      .toHaveTextContent("![[붙여넣은 이미지.png]]이전 값");
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="![[붙여넣은 이미지.png]]이전 값"
+        valueRevision={1}
+      />
+    );
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="확정된 원격 값"
+        valueRevision={2}
+      />
+    );
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("확정된 원격 값");
+  });
+
+  it("accepts an authoritative remote value while a local acknowledgement is pending", async () => {
+    const onChange = vi.fn();
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        insertRequest={{ id: 1, text: "로컬 " }}
+        onChange={onChange}
+        value="본문"
+        valueRevision={4}
+      />
+    );
+
+    expect(onChange).toHaveBeenLastCalledWith("로컬 본문");
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        value="원격 확정"
+        valueRevision={5}
+      />
+    );
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("원격 확정");
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        value="로컬 본문"
+        valueRevision={5}
+      />
+    );
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("원격 확정");
+  });
+
+  it("keeps a pending image paste across a revision-only autosave acknowledgement", async () => {
+    let finishPaste: ((source: string) => void) | undefined;
+    let pasteSignal: AbortSignal | undefined;
+    const onChange = vi.fn();
+    const onPasteImages = vi.fn((_files: readonly File[], context: { signal: AbortSignal }) => {
+      pasteSignal = context.signal;
+      return new Promise<string>((resolve) => {
+        finishPaste = resolve;
+      });
+    });
+    const image = new File([new Uint8Array([1])], "clipboard.png", { type: "image/png" });
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        documentKey="note-a"
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="저장된 본문"
+        valueRevision={1}
+      />
+    );
+    fireEvent.paste(screen.getByLabelText("Markdown 편집기"), {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }]
+      }
+    });
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        documentKey="note-a"
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="저장된 본문"
+        valueRevision={2}
+      />
+    );
+    expect(pasteSignal?.aborted).toBe(false);
+
+    await act(async () => {
+      finishPaste?.("![[이미지.png]]");
+      await Promise.resolve();
+    });
+    expect(onChange).toHaveBeenLastCalledWith("![[이미지.png]]저장된 본문");
+  });
+
+  it("acknowledges an earlier local value without rolling back a newer queued edit", () => {
+    const onChange = vi.fn();
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        insertRequest={{ id: 1, text: "가" }}
+        onChange={onChange}
+        value="본문"
+        valueRevision={3}
+      />
+    );
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        insertRequest={{ id: 2, text: "나" }}
+        onChange={onChange}
+        value="본문"
+        valueRevision={3}
+      />
+    );
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("가나본문");
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        value="가본문"
+        valueRevision={3}
+      />
+    );
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("가나본문");
+  });
+
+  it("keeps edits made while an encrypted image is being created", async () => {
+    let finishPaste: ((source: string) => void) | undefined;
+    const onChange = vi.fn();
+    const onPasteImages = () => new Promise<string>((resolve) => {
+      finishPaste = resolve;
+    });
+    const image = new File([new Uint8Array([1])], "clipboard.png", { type: "image/png" });
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="본문"
+      />
+    );
+
+    fireEvent.paste(screen.getByLabelText("Markdown 편집기"), {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }]
+      }
+    });
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        insertRequest={{ id: 4, text: "[[노트]] " }}
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="본문"
+      />
+    );
+    await act(async () => {
+      finishPaste?.("![[붙여넣은 이미지.png]] ");
+      await Promise.resolve();
+    });
+
+    expect(onChange).toHaveBeenLastCalledWith(
+      "![[붙여넣은 이미지.png]] [[노트]] 본문"
+    );
+  });
+
+  it("never deletes replacement input made inside the original selection while image persistence waits", async () => {
+    let finishPaste: ((result: { onDiscard: () => void; source: string }) => void) | undefined;
+    let pasteSignal: AbortSignal | undefined;
+    const onChange = vi.fn();
+    const onDiscard = vi.fn();
+    const onPasteImages = vi.fn((_files: readonly File[], context: { signal: AbortSignal }) => {
+      pasteSignal = context.signal;
+      return new Promise<{ onDiscard: () => void; source: string }>((resolve) => {
+        finishPaste = resolve;
+      });
+    });
+    const image = new File([new Uint8Array([1])], "clipboard.png", { type: "image/png" });
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        documentKey="note-a"
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="선택된 본문"
+        valueRevision={1}
+      />
+    );
+    const editor = screen.getByLabelText("Markdown 편집기");
+    fireEvent.keyDown(editor, { key: "a", ctrlKey: true });
+    fireEvent.paste(editor, {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }]
+      }
+    });
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        documentKey="note-a"
+        insertRequest={{ id: 7, text: "대체 입력" }}
+        onChange={onChange}
+        onPasteImages={onPasteImages}
+        value="선택된 본문"
+        valueRevision={1}
+      />
+    );
+    expect(pasteSignal?.aborted).toBe(true);
+    expect(editor).toHaveTextContent("대체 입력");
+
+    await act(async () => {
+      finishPaste?.({ onDiscard, source: "![[늦게 완료된 이미지.png]]" });
+      await Promise.resolve();
+    });
+    expect(onDiscard).toHaveBeenCalledTimes(1);
+    expect(editor).toHaveTextContent("대체 입력");
+    expect(editor).not.toHaveTextContent("늦게 완료된 이미지");
+  });
+
+  it("cancels a pending paste and discards its asset result when the document changes", async () => {
+    let finishPaste: ((result: { onDiscard: () => void; source: string }) => void) | undefined;
+    let pasteSignal: AbortSignal | undefined;
+    const onDiscard = vi.fn();
+    const onPasteImages = vi.fn((_files: readonly File[], context: { signal: AbortSignal }) => {
+      pasteSignal = context.signal;
+      return new Promise<{ onDiscard: () => void; source: string }>((resolve) => {
+        finishPaste = resolve;
+      });
+    });
+    const image = new File([new Uint8Array([1])], "clipboard.png", { type: "image/png" });
+    const view = render(
+      <CodeMirrorMarkdownEditor
+        documentKey="note-a"
+        onChange={() => undefined}
+        onPasteImages={onPasteImages}
+        value="첫 노트"
+        valueRevision={1}
+      />
+    );
+    fireEvent.paste(screen.getByLabelText("Markdown 편집기"), {
+      clipboardData: {
+        files: [image],
+        getData: () => "",
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }]
+      }
+    });
+
+    view.rerender(
+      <CodeMirrorMarkdownEditor
+        documentKey="note-b"
+        onChange={() => undefined}
+        onPasteImages={onPasteImages}
+        value="둘째 노트"
+        valueRevision={2}
+      />
+    );
+    expect(pasteSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      finishPaste?.({ onDiscard, source: "![[고아 이미지.png]]" });
+      await Promise.resolve();
+    });
+    expect(onDiscard).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("둘째 노트");
+    expect(screen.getByLabelText("Markdown 편집기")).not.toHaveTextContent("고아 이미지");
+  });
+
+  it("does not invoke image persistence from a read-only editor", () => {
+    const onPasteImages = vi.fn();
+    const image = new File([new Uint8Array([1])], "clipboard.png", { type: "image/png" });
+    render(
+      <CodeMirrorMarkdownEditor
+        onChange={() => undefined}
+        onPasteImages={onPasteImages}
+        readOnly
+        value="잠긴 본문"
+      />
+    );
+
+    fireEvent.paste(screen.getByLabelText("Markdown 편집기"), {
+      clipboardData: {
+        files: [image],
+        items: [{ getAsFile: () => image, kind: "file", type: "image/png" }]
+      }
+    });
+
+    expect(onPasteImages).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("잠긴 본문");
+  });
+
   it("can lock and unlock editing without rebuilding the document", () => {
     const onChange = vi.fn();
     const view = render(

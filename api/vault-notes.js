@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import {
   HttpError,
   activeUserFromRequest,
@@ -39,6 +40,7 @@ const maximumRevision = 999_999_999_999;
 const maximumParticipants = 200;
 const maximumRequestBytes = 1_600_000;
 const claimPattern = /^[A-Za-z0-9_-]{43}$/u;
+const clientCreateNotePattern = /^vn1_[A-Za-z0-9_-]{43}$/u;
 const importJobPattern = /^vi1_[A-Za-z0-9_-]{43}$/u;
 const identifierPattern = /^[A-Za-z0-9_-]{1,160}$/u;
 const noteIdentifierPattern = /^[A-Za-z0-9_-]{1,120}$/u;
@@ -80,6 +82,11 @@ const claimRecoveryActions = new Set([
   "migrate-legacy",
   "resolve-collision"
 ]);
+
+function createTransactionRetryDelay(attempt) {
+  const jitterMilliseconds = 12 + Math.floor(Math.random() * 29) + attempt * 20;
+  return delay(jitterMilliseconds);
+}
 
 function requirePost(request) {
   if (request.method !== "POST") throw new HttpError(405, "method_not_allowed");
@@ -133,6 +140,13 @@ function assertIdentifier(value, fieldName = "id") {
 function assertNoteId(value) {
   if (typeof value !== "string" || !noteIdentifierPattern.test(value)) {
     throw new HttpError(400, "invalid_request", "Invalid noteId");
+  }
+  return value;
+}
+
+function assertClientCreateNoteId(value) {
+  if (typeof value !== "string" || !clientCreateNotePattern.test(value)) {
+    throw new HttpError(400, "invalid_request", "Invalid client create noteId");
   }
   return value;
 }
@@ -255,6 +269,14 @@ function assertStorageIdentity(contentFormat, entryKind) {
 
 function storageIdentityMatches(note, contentFormat, entryKind) {
   return note.contentFormat === contentFormat && note.entryKind === entryKind;
+}
+
+function secureCopyStorageIdentityMatches(note) {
+  return storageIdentityMatches(note, "legacy-html-v1", "legacy-html")
+    || (
+      storageIdentityMatches(note, "markdown-v1", "markdown")
+      && note.secureShareCopyExpectedAttachmentCount === 0
+    );
 }
 
 function missingLegacyHtmlIdentity(note) {
@@ -405,7 +427,7 @@ function noteHistoryDocument(noteId, uid, action, changedFields, readerUids, rev
   };
 }
 
-function importedCreateHistoryMatches(history, input) {
+function createHistoryMatches(history, input) {
   return history
     && history.noteId === input.noteId
     && history.actorUid === input.uid
@@ -683,15 +705,17 @@ async function createNote(context, uid, body, options = {}) {
       ]
     : [
         "action", "contentFormat", "encryptedBody", "encryptedTitle", "entryKind", "folderId",
-        "historySnapshot", "historySummary", "nameClaim", "participantUids", "type", "wrappedKeys"
+        "historySnapshot", "historySummary", "nameClaim", "noteId", "participantUids", "type",
+        "wrappedKeys"
       ];
   if (options.imported) allowedKeys.push("importJobId", "noteId");
   if (options.secureCopy) allowedKeys.push("copyJobId", "expectedAttachmentCount");
   assertOnlyKeys(body, allowedKeys);
   const input = baseCreateInput(body, uid);
+  const clientAssignedNoteId = !options.imported && !options.secureCopy;
   const noteId = options.imported || options.secureCopy
     ? assertNoteId(body.noteId)
-    : randomToken(18);
+    : assertClientCreateNoteId(body.noteId);
   const historyId = randomToken(18);
   const claim = assertNameClaim(body.nameClaim, input.folderId);
   const importJobId = options.imported
@@ -710,12 +734,16 @@ async function createNote(context, uid, body, options = {}) {
   const expectedAttachmentCount = options.secureCopy
     ? body.expectedAttachmentCount
     : 0;
+  const legacyHtmlSecureCopy = input.storage.contentFormat === "legacy-html-v1"
+    && input.storage.entryKind === "legacy-html";
+  const markdownSecureCopy = input.storage.contentFormat === "markdown-v1"
+    && input.storage.entryKind === "markdown"
+    && expectedAttachmentCount === 0;
   if (
     options.secureCopy
     && (
       input.type !== "personal"
-      || input.storage.contentFormat !== "legacy-html-v1"
-      || input.storage.entryKind !== "legacy-html"
+      || (!legacyHtmlSecureCopy && !markdownSecureCopy)
       || !Number.isSafeInteger(expectedAttachmentCount)
       || expectedAttachmentCount < 0
       || expectedAttachmentCount > 100
@@ -775,7 +803,7 @@ async function createNote(context, uid, body, options = {}) {
           [historyPath(noteId, currentMutationId)],
           state.transaction
         );
-        if (!importedCreateHistoryMatches(history, {
+        if (!createHistoryMatches(history, {
           historySnapshot: body.historySnapshot,
           historySummary: body.historySummary,
           noteId,
@@ -819,7 +847,7 @@ async function createNote(context, uid, body, options = {}) {
           [historyPath(noteId, currentMutationId)],
           state.transaction
         );
-        if (!importedCreateHistoryMatches(history, {
+        if (!createHistoryMatches(history, {
           historySnapshot: body.historySnapshot,
           historySummary: body.historySummary,
           noteId,
@@ -827,6 +855,56 @@ async function createNote(context, uid, body, options = {}) {
           uid
         })) {
           throw new HttpError(409, "vault_note_conflict", "Imported Vault history does not match");
+        }
+        await firestoreRollback(context, state.transaction);
+        return {
+          lastMutationId: currentMutationId,
+          noteId,
+          revision: 1
+        };
+      }
+      if (
+        clientAssignedNoteId
+        && state.note
+        && claimTargets(storedClaim, uid, noteId, input.folderId)
+        && state.note.ownerUid === uid
+        && state.note.vaultImportJobId === undefined
+        && state.note.secureShareCopyJobId === undefined
+        && state.note.revision === 1
+        && state.note.attachmentRevision === 0
+        && state.note.isDeleted === false
+        && state.note.type === input.type
+        && Array.isArray(state.note.participantUids)
+        && state.note.participantUids.length === input.participants.length
+        && state.note.participantUids.every(
+          (participantUid, index) => participantUid === input.participants[index]
+        )
+        && state.note.folderId === input.folderId
+        && state.note.contentFormat === input.storage.contentFormat
+        && state.note.entryKind === input.storage.entryKind
+        && state.note.vaultNameClaimId === claim.claimId
+        && state.note.vaultNameIndexVersion === 1
+        && encryptedPayloadMatches(state.note.encryptedTitle, input.encryptedTitle)
+        && encryptedPayloadMatches(state.note.encryptedBody, input.encryptedBody)
+        && wrappedKeysMatch(state.note.wrappedKeys, input.wrappedKeys)
+      ) {
+        const currentMutationId = state.note.lastMutationId;
+        if (typeof currentMutationId !== "string" || !identifierPattern.test(currentMutationId)) {
+          throw new HttpError(409, "vault_note_conflict", "Vault create history is invalid");
+        }
+        const [history] = await firestoreBatchGet(
+          context,
+          [historyPath(noteId, currentMutationId)],
+          state.transaction
+        );
+        if (!createHistoryMatches(history, {
+          historySnapshot: body.historySnapshot,
+          historySummary: body.historySummary,
+          noteId,
+          participants: input.participants,
+          uid
+        })) {
+          throw new HttpError(409, "vault_note_conflict", "Vault create history does not match");
         }
         await firestoreRollback(context, state.transaction);
         return {
@@ -1707,7 +1785,7 @@ async function handleSecureCopyActivate(context, uid, body) {
       ? await firestoreBatchGet(context, [claimPath(uid, claimId)], state.transaction)
       : [null];
     if (
-      !storageIdentityMatches(note, "legacy-html-v1", "legacy-html")
+      !secureCopyStorageIdentityMatches(note)
       || note.vaultNameIndexVersion !== 1
       || !claimId
       || !claimTargets(storedClaim, uid, noteId, note.folderId ?? null)
@@ -1786,7 +1864,7 @@ async function handleSecureCopyAbort(context, uid, body) {
         || note.secureShareCopyState !== "copying"
         || note.secureShareCopyCleanupClaimId !== undefined
         || note.secureShareCopyCleanupClaimedAt !== undefined
-        || !storageIdentityMatches(note, "legacy-html-v1", "legacy-html")
+        || !secureCopyStorageIdentityMatches(note)
         || note.vaultNameIndexVersion !== 1
         || !storedClaimId(note)
         || !Number.isSafeInteger(expectedCount)
@@ -1836,7 +1914,21 @@ async function performAction(context, uid, body) {
   if (typeof action !== "string" || !supportedActions.has(action)) {
     throw new HttpError(400, "invalid_request", "Invalid Vault note action");
   }
-  if (action === "create") return createNote(context, uid, body);
+  if (action === "create") {
+    const clientAssignedCreate = typeof body.noteId === "string"
+      && clientCreateNotePattern.test(body.noteId);
+    if (!clientAssignedCreate) return createNote(context, uid, body);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        return await createNote(context, uid, body);
+      } catch (error) {
+        const transactionRaced = error instanceof HttpError
+          && error.code === "revision_conflict";
+        if (!transactionRaced || attempt === 4) throw error;
+        await createTransactionRetryDelay(attempt);
+      }
+    }
+  }
   if (action === "import-create") return createNote(context, uid, body, { imported: true });
   if (action === "secure-copy-create") return createNote(context, uid, body, { secureCopy: true });
   if (action === "update") return handleUpdate(context, uid, body);
@@ -1854,6 +1946,7 @@ async function performAction(context, uid, body) {
 }
 
 export const __vaultNoteTesting = Object.freeze({
+  assertClientCreateNoteId,
   assertEncryptedPayload,
   assertNameClaim,
   assertParticipants,

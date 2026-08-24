@@ -104,7 +104,7 @@ export function ReadonlyNoteRenderer({
   const mergedClassName = [
     "note-content",
     "note-content--readonly",
-    contentFormat === "plain-text" ? "note-content--plain" : "",
+    contentFormat === "plain-text" || contentFormat === "markdown" ? "note-content--plain" : "",
     className
   ].filter(Boolean).join(" ");
 
@@ -126,7 +126,7 @@ function readonlyNoteContent(
   showAttribution: boolean,
   preserveEmptyParagraphLines: boolean
 ) {
-  if (contentFormat === "plain-text") {
+  if (contentFormat === "plain-text" || contentFormat === "markdown") {
     return normalizePlainTextLineEndings(content) || emptyText;
   }
 

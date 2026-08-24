@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { act, createEvent, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createElement } from "react";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -32,6 +32,7 @@ import {
   serializeCanvas,
   translateJsonCanvasNodes
 } from "./JsonCanvasView";
+import * as canvasModel from "./canvasModel";
 import type { CanvasFlowEdge, CanvasFlowNode, JsonCanvasDocument } from "./canvasModel";
 
 const jsonCanvasViewSource = readFileSync(join(process.cwd(), "src/features/canvas/JsonCanvasView.tsx"), "utf8");
@@ -513,9 +514,68 @@ describe("JSON Canvas editing operations", () => {
 describe("JsonCanvasView controls", () => {
   it("uses primary background drag for panning and keeps Shift-drag selection", () => {
     expect(jsonCanvasViewSource).toContain("panOnDrag={[0, 1]}");
-    expect(jsonCanvasViewSource).toContain('noPanClassName="nodrag"');
+    expect(jsonCanvasViewSource).toContain('const CANVAS_NO_DRAG_CLASS_NAME = "nodrag"');
+    expect(jsonCanvasViewSource).toContain('const CANVAS_NO_PAN_CLASS_NAME = "nopan"');
     expect(jsonCanvasViewSource).toContain('selectionKeyCode="Shift"');
     expect(jsonCanvasViewSource).toContain("selectionOnDrag={false}");
+  });
+
+  it("keeps node dragging distinct from pane panning and persists the final snapped position", async () => {
+    const onChange = vi.fn();
+    const serializeSpy = vi.spyOn(canvasModel, "canvasDocumentFromFlow");
+    render(createElement(JsonCanvasView, {
+      fileOptions: [],
+      onChange,
+      onOpenFile: vi.fn(),
+      source: JSON.stringify({
+        nodes: [{ id: "new-card", type: "text", x: 0, y: 0, width: 280, height: 160, text: "새 메모" }],
+        edges: []
+      })
+    }));
+
+    const canvas = screen.getByLabelText("Canvas");
+    await waitFor(() => expect(canvas).toHaveAttribute("aria-busy", "false"));
+    serializeSpy.mockClear();
+    const flow = canvas.querySelector<HTMLElement>(".react-flow");
+    expect(flow).not.toBeNull();
+    vi.spyOn(flow!, "getBoundingClientRect").mockReturnValue({
+      bottom: 800,
+      height: 800,
+      left: 0,
+      right: 1_000,
+      top: 0,
+      width: 1_000,
+      x: 0,
+      y: 0,
+      toJSON: () => ({})
+    });
+    const card = screen.getByTestId("rf__node-new-card");
+    expect(card).toHaveClass("nopan");
+    expect(card).not.toHaveClass("nodrag");
+    const eventView = card.ownerDocument.defaultView!;
+    const mouseDown = createEvent.mouseDown(card, { button: 0, buttons: 1, clientX: 200, clientY: 200 });
+    const thresholdMove = createEvent.mouseMove(eventView, { buttons: 1, clientX: 208, clientY: 208 });
+    const mouseMove = createEvent.mouseMove(eventView, { buttons: 1, clientX: 260, clientY: 240 });
+    const mouseUp = createEvent.mouseUp(eventView, { button: 0, buttons: 0, clientX: 260, clientY: 240 });
+    Object.defineProperty(mouseDown, "view", { value: eventView });
+    Object.defineProperty(thresholdMove, "view", { value: eventView });
+    Object.defineProperty(mouseMove, "view", { value: eventView });
+    Object.defineProperty(mouseUp, "view", { value: eventView });
+
+    await act(async () => fireEvent(card, mouseDown));
+    await act(async () => fireEvent(eventView, thresholdMove));
+    await waitFor(() => expect(card).toHaveClass("dragging"));
+    await act(async () => {
+      fireEvent(eventView, mouseMove);
+      fireEvent(eventView, mouseUp);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(onChange).toHaveBeenCalledTimes(1));
+    const emitted = safeCanvasDocument(onChange.mock.lastCall?.[0] as string);
+    expect(emitted.nodes[0]).toMatchObject({ id: "new-card", x: 60, y: 40 });
+    expect(serializeSpy).toHaveBeenCalledTimes(1);
+    serializeSpy.mockRestore();
   });
 
   it("does not rewrite a valid document merely because it was mounted", async () => {
@@ -594,6 +654,54 @@ describe("JsonCanvasView controls", () => {
     expect(emitted.nodes).toHaveLength(1);
     expect(emitted.nodes[0]).toMatchObject({ file: "Folder/Note-4999.md", type: "file" });
     expect(screen.queryByRole("dialog", { name: "Canvas 파일 선택" })).not.toBeInTheDocument();
+  });
+
+  it("keeps an open file chooser stable across option refreshes and revalidates access", async () => {
+    const onChange = vi.fn();
+    const baseProps = {
+      onChange,
+      onOpenFile: vi.fn(),
+      source: emptyJsonCanvas
+    };
+    const rendered = render(createElement(JsonCanvasView, {
+      ...baseProps,
+      fileOptions: [
+        { label: "연구 노트", path: "Research/Note.md" },
+        { label: "일지", path: "Journal.md" }
+      ]
+    }));
+
+    await userEvent.click(screen.getByRole("button", { name: "추가할 노트 선택" }));
+    const originalRow = screen.getByRole("button", { name: /연구 노트/ });
+    rendered.rerender(createElement(JsonCanvasView, {
+      ...baseProps,
+      fileOptions: [
+        { label: "일지", path: "Journal.md" },
+        { label: "연구 노트", path: "Research/Note.md" }
+      ]
+    }));
+
+    expect(screen.getByRole("button", { name: /연구 노트/ })).toBe(originalRow);
+    await userEvent.click(originalRow);
+    await userEvent.click(screen.getByRole("button", { name: "선택한 노트 카드 추가" }));
+    expect(safeCanvasDocument(onChange.mock.lastCall?.[0] as string).nodes[0]).toMatchObject({
+      file: "Research/Note.md",
+      type: "file"
+    });
+
+    rendered.rerender(createElement(JsonCanvasView, {
+      ...baseProps,
+      fileOptions: [{ label: "연구 노트", path: "Research/Note.md" }]
+    }));
+    await userEvent.click(screen.getByRole("button", { name: "추가할 노트 선택" }));
+    const revokedRow = screen.getByRole("button", { name: /연구 노트/ });
+    rendered.rerender(createElement(JsonCanvasView, { ...baseProps, fileOptions: [] }));
+    await userEvent.click(revokedRow);
+
+    expect(screen.getByRole("status")).toHaveTextContent("파일 목록이 변경되었습니다. 다시 선택해주세요.");
+    expect(screen.getByRole("dialog", { name: "Canvas 파일 선택" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /연구 노트/ })).not.toBeInTheDocument();
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 
   it("indexes large file option lists once instead of scanning them for every card", async () => {

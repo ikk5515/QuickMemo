@@ -17,6 +17,7 @@ import {
 } from "./crypto";
 import {
   parseEditorContent,
+  parseReadonlyEditorContent,
   sanitizeEditorHtml,
   serializeEditorContent
 } from "./editorContent";
@@ -30,7 +31,14 @@ import {
 } from "../services/notes";
 import { BlobAttachmentReservationCleanupError } from "../services/blobAttachments";
 import { requireExistingVaultIntegrityKey } from "../services/vaultIntegrity";
-import { vaultNameFingerprint } from "../features/vault/vaultIntegrity";
+import {
+  canonicalVaultName,
+  vaultNameFingerprint
+} from "../features/vault/vaultIntegrity";
+import {
+  assertVaultPayloadFitsPersistence,
+  encryptedHistorySnapshotSource
+} from "../features/vault/vaultPayloadLimits";
 import type {
   SecurePublicShareAttachmentMetadata,
   SecurePublicShareCopyPayload
@@ -275,15 +283,69 @@ function validatePayload(payload: SecurePublicShareCopyPayload) {
     );
   }
 
-  const title = payload.title.trim() || "제목 없음";
-  const parsedBody = parseEditorContent(payload.body);
-  const sanitizedBody = sanitizeEditorHtml(parsedBody.html || "<p>내용 없음</p>");
-  const serializedBody = serializeEditorContent(sanitizedBody, parsedBody.fontSize);
-  const historySnapshot = JSON.stringify({
-    title,
-    body: sanitizedBody,
-    fontSize: parsedBody.fontSize
-  });
+  const title = (payload.title.trim() || "제목 없음").normalize("NFC");
+  const readonlyBody = parseReadonlyEditorContent(payload.body);
+  const markdown = readonlyBody.contentFormat === "markdown";
+  let contentFormat: "legacy-html-v1" | "markdown-v1" = "legacy-html-v1";
+  let entryKind: "legacy-html" | "markdown" = "legacy-html";
+  let historySnapshot: string;
+  let serializedBody: string;
+
+  if (markdown) {
+    if (payload.attachments.length > 0) {
+      throw new SecureShareSaveCopyError(
+        "invalid_attachment",
+        "첨부 자산이 있는 Markdown 공유는 아직 복사본으로 저장할 수 없습니다."
+      );
+    }
+    try {
+      if (title.length > 180) {
+        throw new Error("title_too_long");
+      }
+      canonicalVaultName(title, "entry", "markdown");
+    } catch (caught) {
+      throw new SecureShareSaveCopyError(
+        "invalid_content",
+        "Markdown 복사본의 노트 이름이 Vault 안전 기준을 충족하지 않습니다.",
+        { cause: caught }
+      );
+    }
+
+    contentFormat = "markdown-v1";
+    entryKind = "markdown";
+    serializedBody = readonlyBody.content;
+    try {
+      assertVaultPayloadFitsPersistence({
+        body: serializedBody,
+        contentFormat,
+        entryKind,
+        folderId: null,
+        title
+      });
+    } catch (caught) {
+      throw new SecureShareSaveCopyError(
+        "invalid_content",
+        "Markdown 공유 본문이 Vault 복사본 저장 크기 제한을 초과했습니다.",
+        { cause: caught }
+      );
+    }
+    historySnapshot = encryptedHistorySnapshotSource({
+      body: serializedBody,
+      contentFormat,
+      entryKind,
+      folderId: null,
+      title
+    });
+  } else {
+    const parsedBody = parseEditorContent(payload.body);
+    const sanitizedBody = sanitizeEditorHtml(parsedBody.html || "<p>내용 없음</p>");
+    serializedBody = serializeEditorContent(sanitizedBody, parsedBody.fontSize);
+    historySnapshot = JSON.stringify({
+      title,
+      body: sanitizedBody,
+      fontSize: parsedBody.fontSize
+    });
+  }
   const encoder = new TextEncoder();
 
   if (
@@ -324,7 +386,9 @@ function validatePayload(payload: SecurePublicShareCopyPayload) {
 
   return {
     attachments,
+    contentFormat,
     copyGrantExpiresAt,
+    entryKind,
     historySnapshot,
     serializedBody,
     title
@@ -514,7 +578,7 @@ export async function saveSecureShareCopy(
       dependencies.encryptText("보안 공유에서 독립 복사본을 저장했습니다.", noteKey),
       dependencies.encryptText(validated.historySnapshot, noteKey),
       dependencies.vaultNameFingerprint(vaultIntegrityKey, {
-        kind: "legacy-html",
+        kind: validated.entryKind,
         name: validated.title,
         parentId: null,
         targetType: "entry"
@@ -538,8 +602,8 @@ export async function saveSecureShareCopy(
     createdNoteId = targetNoteId;
     const createdNote = await dependencies.createSecureShareCopyingNote({
       type: "personal",
-      contentFormat: "legacy-html-v1",
-      entryKind: "legacy-html",
+      contentFormat: validated.contentFormat,
+      entryKind: validated.entryKind,
       ownerUid: profile.uid,
       participantUids: [profile.uid],
       encryptedTitle,

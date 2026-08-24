@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  automaticVaultPathRewriteRetryDelayMs,
   executeVaultPathRewrite,
   flushVaultDraftsBeforePathRewriteRecovery,
   recoverVaultPathRewrite,
+  retryableVaultPathRewriteFailure,
   resumeVaultPathRewriteToCompletion,
+  shouldAutomaticallyRecoverVaultPathRewriteJob,
   VaultPathRewriteControllerError
 } from "./pathRewriteController";
 import type { PreparedVaultPathRewriteJob } from "./pathRewriteJob";
@@ -45,7 +48,51 @@ describe("path rewrite controller", () => {
       waitForMutation: async (entryId) => { events.push(`wait:${entryId}`); }
     })).resolves.toEqual(["note-b"]);
 
-    expect(events).toEqual(["wait:note-a", "save:note-a", "wait:note-b", "save:note-b"]);
+    expect(events).toEqual(expect.arrayContaining([
+      "wait:note-a", "save:note-a", "wait:note-b", "save:note-b"
+    ]));
+  });
+
+  it("flushes independent drafts concurrently and contains an individual save failure", async () => {
+    const dirty = new Set(["note-a", "note-b", "note-c"]);
+    let active = 0;
+    let maximumActive = 0;
+
+    await expect(flushVaultDraftsBeforePathRewriteRecovery({
+      dirtyEntryIds: [...dirty],
+      isDirty: (entryId) => dirty.has(entryId),
+      save: async (entryId) => {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await Promise.resolve();
+        active -= 1;
+        if (entryId === "note-b") throw new Error("offline");
+        dirty.delete(entryId);
+      },
+      waitForMutation: () => undefined
+    })).resolves.toEqual(["note-b"]);
+
+    expect(maximumActive).toBeGreaterThan(1);
+  });
+
+  it("automatically retries only transport-safe failures and resumable job states", () => {
+    expect(retryableVaultPathRewriteFailure({ code: "firestore/unavailable" })).toBe(true);
+    expect(retryableVaultPathRewriteFailure({ code: "network_error" })).toBe(true);
+    expect(retryableVaultPathRewriteFailure({ code: "network_timeout" })).toBe(true);
+    expect(retryableVaultPathRewriteFailure({ code: "permission-denied" })).toBe(false);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("preparing"))).toBe(true);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("prepared"))).toBe(true);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("not-applied"))).toBe(true);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("running"))).toBe(true);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {
+      lastErrorCode: "write-failed"
+    }))).toBe(true);
+    expect(shouldAutomaticallyRecoverVaultPathRewriteJob(summary("blocked", {
+      lastErrorCode: "revision-conflict"
+    }))).toBe(false);
+    expect(automaticVaultPathRewriteRetryDelayMs(1)).toBe(1_000);
+    expect(automaticVaultPathRewriteRetryDelayMs(5)).toBe(16_000);
+    expect(automaticVaultPathRewriteRetryDelayMs(6)).toBeNull();
   });
 
   it("never commits a path before every encrypted step is prepared", async () => {
@@ -123,6 +170,24 @@ describe("path rewrite controller", () => {
       initial: summary("ready"),
       resume: async () => ({ ...summary("running"), processedSteps: 0 })
     })).rejects.toBeInstanceOf(VaultPathRewriteControllerError);
+  });
+
+  it("retries a transient resume failure without replaying semantic failures", async () => {
+    const transientResume = vi.fn()
+      .mockRejectedValueOnce({ code: "firestore/unavailable" })
+      .mockResolvedValueOnce({ ...summary("completed"), processedSteps: 1 });
+    await expect(resumeVaultPathRewriteToCompletion({
+      initial: summary("ready"),
+      resume: transientResume
+    })).resolves.toMatchObject({ status: "completed" });
+    expect(transientResume).toHaveBeenCalledTimes(2);
+
+    const deniedResume = vi.fn().mockRejectedValue({ code: "permission-denied" });
+    await expect(resumeVaultPathRewriteToCompletion({
+      initial: summary("ready"),
+      resume: deniedResume
+    })).rejects.toBeInstanceOf(VaultPathRewriteControllerError);
+    expect(deniedResume).toHaveBeenCalledOnce();
   });
 
   it("recovers a prepared activation gap before resuming", async () => {

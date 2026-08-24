@@ -112,6 +112,7 @@ export interface SecureShareOwnerCreateInput {
   idempotencyKey: string;
   ownerWrappedShareKey: WrappedNoteKey;
   policy: unknown;
+  sourceSyncMode?: "revision_bound";
   sourceAttachmentRevision?: number;
   sourceNoteId: string;
   sourceRevision?: number;
@@ -1027,7 +1028,8 @@ export function createSecureShare(
       policy,
       sourceAttachmentRevision: input.sourceAttachmentRevision,
       sourceNoteId: input.sourceNoteId,
-      sourceRevision: input.sourceRevision
+      sourceRevision: input.sourceRevision,
+      sourceSyncMode: input.sourceSyncMode
     }
   });
 }

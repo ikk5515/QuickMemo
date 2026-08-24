@@ -3,6 +3,7 @@ import {
   copyTextFromEditorHtml,
   imageHtml,
   linkifyEditorHtml,
+  markdownEditorContentPrefix,
   normalizePlainTextLineEndings,
   parseEditorContent,
   parseReadonlyEditorContent,
@@ -51,6 +52,16 @@ describe("editor content helpers", () => {
     expect(parseReadonlyEditorContent("<h1>이전 HTML 본문</h1>")).toEqual({
       content: "<h1>이전 HTML 본문</h1>",
       contentFormat: "html",
+      fontSize: 17
+    });
+  });
+
+  it("recognizes the explicit encrypted Markdown share envelope before HTML heuristics", () => {
+    expect(parseReadonlyEditorContent(
+      `${markdownEditorContentPrefix}# 제목\r\n<script>alert(1)</script>\r본문`
+    )).toEqual({
+      content: "# 제목\n<script>alert(1)</script>\n본문",
+      contentFormat: "markdown",
       fontSize: 17
     });
   });

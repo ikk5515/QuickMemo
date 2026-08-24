@@ -123,6 +123,9 @@ const maximumPageSize = 50;
 const maximumSourceShareHistory = 100;
 const rateLimitTransactionMaximumAttempts = 8;
 const sourceCreateTransactionMaximumAttempts = 8;
+const maximumSourceFolderDepth = 32;
+const sourceFolderIdPattern = /^[A-Za-z0-9_-]{1,120}$/u;
+const unsafeSourceFolderIds = new Set(["__proto__", "constructor", "prototype"]);
 const emailQuotaReservationMaximumAttempts = 8;
 const optimisticRetryMaximumDelayMilliseconds = 250;
 const copyGrantPurpose = "quickmemo/secure-share/copy-grant/v1";
@@ -699,6 +702,142 @@ function sourceNoteActive(note) {
     && note.ownerUid;
 }
 
+class SourceFolderChainUnavailableError extends Error {
+  constructor() {
+    super("Secure Share source folder chain is unavailable");
+    this.name = "SourceFolderChainUnavailableError";
+  }
+}
+
+function sourceFolderChainUnavailable() {
+  throw new SourceFolderChainUnavailableError();
+}
+
+function storedSourceFolderId(value) {
+  if (
+    typeof value !== "string"
+    || !sourceFolderIdPattern.test(value)
+    || unsafeSourceFolderIds.has(value)
+  ) {
+    sourceFolderChainUnavailable();
+  }
+  return value;
+}
+
+function sourceFolderLineageHint(folder, sourceFolderId) {
+  if (folder?.vaultAncestorIds === undefined) {
+    return null;
+  }
+  if (
+    !Array.isArray(folder.vaultAncestorIds)
+    || folder.vaultAncestorIds.length > maximumSourceFolderDepth
+  ) {
+    sourceFolderChainUnavailable();
+  }
+  const hint = folder.vaultAncestorIds.map(storedSourceFolderId);
+  if (
+    new Set(hint).size !== hint.length
+    || hint.includes(sourceFolderId)
+  ) {
+    sourceFolderChainUnavailable();
+  }
+  return hint;
+}
+
+function activeOwnedSourceFolder(folder, ownerUid, folderId) {
+  return Boolean(
+    folder
+    && folder.__id === folderId
+    && folder.ownerUid === ownerUid
+    && folder.isDeleted === false
+    && folder.isPurged !== true
+  );
+}
+
+async function sourceFolderChainSnapshot(
+  context,
+  note,
+  ownerUid,
+  transaction = ""
+) {
+  const rawFolderId = note?.folderId ?? null;
+  if (rawFolderId === null) {
+    return [];
+  }
+  const sourceFolderId = storedSourceFolderId(rawFolderId);
+  const sourceFolderPath = `noteFolders/${sourceFolderId}`;
+  const [sourceFolder] = await firestoreBatchGet(
+    context,
+    [sourceFolderPath],
+    transaction
+  );
+  if (!activeOwnedSourceFolder(sourceFolder, ownerUid, sourceFolderId)) {
+    sourceFolderChainUnavailable();
+  }
+
+  const lineageHint = sourceFolderLineageHint(sourceFolder, sourceFolderId);
+  const foldersById = new Map([[sourceFolderId, sourceFolder]]);
+  if (lineageHint?.length) {
+    const hintedFolders = await firestoreBatchGet(
+      context,
+      lineageHint.map((folderId) => `noteFolders/${folderId}`),
+      transaction
+    );
+    lineageHint.forEach((folderId, index) => {
+      foldersById.set(folderId, hintedFolders[index]);
+    });
+  }
+
+  const visited = new Set();
+  const chain = [];
+  let currentFolderId = sourceFolderId;
+  while (currentFolderId !== null) {
+    if (
+      visited.has(currentFolderId)
+      || visited.size > maximumSourceFolderDepth
+    ) {
+      sourceFolderChainUnavailable();
+    }
+    visited.add(currentFolderId);
+    let folder = foldersById.get(currentFolderId);
+    if (folder === undefined) {
+      const [loaded] = await firestoreBatchGet(
+        context,
+        [`noteFolders/${currentFolderId}`],
+        transaction
+      );
+      folder = loaded;
+      foldersById.set(currentFolderId, folder);
+    }
+    if (!activeOwnedSourceFolder(folder, ownerUid, currentFolderId)) {
+      sourceFolderChainUnavailable();
+    }
+    chain.push({
+      document: folder,
+      path: `noteFolders/${currentFolderId}`
+    });
+    if (folder.parentId === undefined || folder.parentId === null) {
+      currentFolderId = null;
+    } else {
+      currentFolderId = storedSourceFolderId(folder.parentId);
+    }
+  }
+
+  if (lineageHint) {
+    const actualAncestors = chain
+      .slice(1)
+      .map(({ document }) => document.__id)
+      .reverse();
+    if (
+      actualAncestors.length !== lineageHint.length
+      || actualAncestors.some((folderId, index) => folderId !== lineageHint[index])
+    ) {
+      sourceFolderChainUnavailable();
+    }
+  }
+  return chain;
+}
+
 function shareSummary(share) {
   return {
     id: share.__id,
@@ -709,6 +848,9 @@ function shareSummary(share) {
     sourceAttachmentRevision: Number.isSafeInteger(share.sourceAttachmentRevision)
       ? share.sourceAttachmentRevision
       : 0,
+    ...(share.sourceSyncMode === "revision_bound"
+      ? { sourceSyncMode: "revision_bound" }
+      : {}),
     contentRevision: Number.isSafeInteger(share.contentRevision) && share.contentRevision >= 1
       ? share.contentRevision
       : 1,
@@ -740,6 +882,7 @@ const ownerShareSummaryFieldPaths = [
   "sourceNoteId",
   "sourceRevision",
   "sourceAttachmentRevision",
+  "sourceSyncMode",
   "contentRevision",
   "currentGeneration",
   "ownerUid",
@@ -1003,16 +1146,29 @@ function sourceRevisionMatches(share, note) {
     && noteAttachmentRevision === shareAttachmentRevision;
 }
 
+function storedSourceSyncMode(share) {
+  if (!Object.prototype.hasOwnProperty.call(share ?? {}, "sourceSyncMode")) {
+    return "live";
+  }
+  return share?.sourceSyncMode === "revision_bound"
+    ? "revision_bound"
+    : "invalid";
+}
+
 function sourceReadAvailable(
   share,
   note,
   ownerProfile,
   liveContentSyncEnabled = secureShareLiveContentSyncEnabled()
 ) {
+  const sourceSyncMode = storedSourceSyncMode(share);
   return sourceLifecycleAvailable(share, note, ownerProfile)
+    && sourceSyncMode !== "invalid"
     && (
-      liveContentSyncEnabled === true
-      || sourceRevisionMatches(share, note)
+      sourceSyncMode === "revision_bound"
+        ? sourceRevisionMatches(share, note)
+        : liveContentSyncEnabled === true
+          || sourceRevisionMatches(share, note)
     );
 }
 
@@ -1095,20 +1251,61 @@ function ensureRevisionReadRequest(request) {
 
 async function requireSourceAvailable(context, share, validatedOwner = null) {
   const ownerAlreadyValidated = validatedOwner?.uid === share?.ownerUid;
-  const [note, ownerProfile] = await Promise.all([
-    firestoreGet(context, `notes/${safeId(share.sourceNoteId, "sourceNoteId")}`),
-    ownerAlreadyValidated
-      ? Promise.resolve({
-          isActive: true,
-          isAdmin: validatedOwner.isAdmin === true,
-          featureAccess: { notes: true }
-        })
-      : firestoreGet(context, `users/${safeId(share.ownerUid, "ownerUid")}`)
-  ]);
+  const sourceNoteId = safeId(share.sourceNoteId, "sourceNoteId");
+  const ownerUid = safeId(share.ownerUid, "ownerUid");
+  const sourcePaths = [
+    `notes/${sourceNoteId}`,
+    ...(ownerAlreadyValidated ? [] : [`users/${ownerUid}`])
+  ];
+  const sourceDocuments = await Promise.all(sourcePaths.map((path) =>
+    firestoreGet(context, path)
+  ));
+  const note = sourceDocuments[0];
+  const ownerProfile = ownerAlreadyValidated
+    ? {
+        isActive: true,
+        isAdmin: validatedOwner.isAdmin === true,
+        featureAccess: { notes: true }
+      }
+    : sourceDocuments[1];
   if (!sourceReadAvailable(share, note, ownerProfile)) {
     throw new HttpError(404, "share_unavailable", "Source note is unavailable");
   }
-  return note;
+  let folderChain;
+  try {
+    folderChain = await sourceFolderChainSnapshot(
+      context,
+      note,
+      ownerUid
+    );
+  } catch (error) {
+    if (error instanceof SourceFolderChainUnavailableError) {
+      throw new HttpError(404, "share_unavailable", "Source folder is unavailable");
+    }
+    throw error;
+  }
+  return {
+    note,
+    snapshotDocuments: [
+      { document: note, path: `notes/${sourceNoteId}` },
+      ...(
+        ownerAlreadyValidated
+          ? []
+          : [{ document: ownerProfile, path: `users/${ownerUid}` }]
+      ),
+      ...folderChain
+    ]
+  };
+}
+
+function sourceAvailabilityVerifyWrites(context, sourceAvailability) {
+  return sourceAvailability.snapshotDocuments.map(({ document, path }) =>
+    verifyDocumentSnapshotWrite(
+      context.projectId,
+      path,
+      document.__updateTime
+    )
+  );
 }
 
 function publicShareAvailable(state, now = Date.now()) {
@@ -1492,6 +1689,7 @@ function validateCreateBody(body) {
     "sourceNoteId",
     "sourceRevision",
     "sourceAttachmentRevision",
+    "sourceSyncMode",
     "encryptedTitle",
     "encryptedBody",
     "ownerWrappedShareKey",
@@ -1503,6 +1701,12 @@ function validateCreateBody(body) {
   if (!isPlainRecord(body.policy)) {
     throw new HttpError(400, "invalid_request", "policy is required");
   }
+  if (
+    body.sourceSyncMode !== undefined
+    && body.sourceSyncMode !== "revision_bound"
+  ) {
+    throw new HttpError(400, "invalid_request", "Invalid sourceSyncMode");
+  }
   assertOnlyKeys(body.policy, policyInputKeys());
   return {
     sourceNoteId: safeId(body.sourceNoteId, "sourceNoteId"),
@@ -1513,6 +1717,7 @@ function validateCreateBody(body) {
       0,
       1_000_000_000
     ),
+    sourceSyncMode: body.sourceSyncMode ?? "live",
     encryptedTitle: encryptedPayload(body.encryptedTitle, "encryptedTitle", 64 * 1024),
     encryptedBody: encryptedPayload(body.encryptedBody, "encryptedBody", 2 * 1024 * 1024),
     ownerWrappedShareKey: wrappedShareKey(body.ownerWrappedShareKey),
@@ -1522,6 +1727,10 @@ function validateCreateBody(body) {
       ? ""
       : safeUnlockAttemptId(body.idempotencyKey)
   };
+}
+
+function sourceSyncModeMatchesCreate(share, input) {
+  return storedSourceSyncMode(share) === input.sourceSyncMode;
 }
 
 function sourceShareHistoryQuery(ownerUid, sourceNoteId) {
@@ -1607,6 +1816,35 @@ function sourceNoteMatchesCreate(note, ownerUid, input) {
     && actualAttachmentRevision === input.sourceAttachmentRevision;
 }
 
+async function requireSourceCreateAvailable(
+  context,
+  note,
+  ownerUid,
+  input,
+  transaction = ""
+) {
+  const concurrentCheck = Boolean(transaction);
+  if (!sourceNoteMatchesCreate(note, ownerUid, input)) {
+    throw new HttpError(
+      concurrentCheck ? 409 : 404,
+      concurrentCheck ? "source_state_changed" : "not_found",
+      "Source note is unavailable for share creation"
+    );
+  }
+  try {
+    await sourceFolderChainSnapshot(context, note, ownerUid, transaction);
+  } catch (error) {
+    if (error instanceof SourceFolderChainUnavailableError) {
+      throw new HttpError(
+        concurrentCheck ? 409 : 404,
+        concurrentCheck ? "source_state_changed" : "not_found",
+        "Source folder is unavailable for share creation"
+      );
+    }
+    throw error;
+  }
+}
+
 async function handleOwnerCreate(request, response, id) {
   requireMethod(request, ["POST"]);
   ensureSameOrigin(request);
@@ -1615,9 +1853,7 @@ async function handleOwnerCreate(request, response, id) {
   const user = await ownerContext(request);
   const context = user.context;
   const note = await firestoreGet(context, `notes/${input.sourceNoteId}`);
-  if (!sourceNoteMatchesCreate(note, user.uid, input)) {
-    throw new HttpError(404, "not_found", "Source note is not owned by caller");
-  }
+  await requireSourceCreateAvailable(context, note, user.uid, input);
   const shareId = input.idempotencyKey
     ? `ss2_${hmacDigest(
       requiredSecret("SHARE_SESSION_HMAC_KEY"),
@@ -1629,11 +1865,14 @@ async function handleOwnerCreate(request, response, id) {
   const existing = await loadShareState(context, shareId);
   if (existing) {
     requireOwner(existing, user);
-    if (existing.share.sourceNoteId !== input.sourceNoteId) {
+    if (
+      existing.share.sourceNoteId !== input.sourceNoteId
+      || !sourceSyncModeMatchesCreate(existing.share, input)
+    ) {
       throw new HttpError(
         409,
         "request_conflict",
-        "Share creation idempotency key was reused for another source note"
+        "Share creation idempotency key was reused for another request"
       );
     }
     jsonResponse(response, 200, {
@@ -1673,6 +1912,9 @@ async function handleOwnerCreate(request, response, id) {
     sourceNoteId: input.sourceNoteId,
     sourceRevision: input.sourceRevision,
     sourceAttachmentRevision: input.sourceAttachmentRevision,
+    ...(input.sourceSyncMode === "revision_bound"
+      ? { sourceSyncMode: "revision_bound" }
+      : {}),
     contentRevision: 1,
     ownerUid: user.uid,
     status: "pending",
@@ -1747,9 +1989,13 @@ async function handleOwnerCreate(request, response, id) {
       ]);
       transaction = snapshot.transaction;
       const [currentNote, guard] = snapshot.documents;
-      if (!sourceNoteMatchesCreate(currentNote, user.uid, input)) {
-        throw new HttpError(409, "source_state_changed", "Source note changed during share creation");
-      }
+      await requireSourceCreateAvailable(
+        context,
+        currentNote,
+        user.uid,
+        input,
+        transaction
+      );
       if (
         guard
         && !sourceShareGuardMatches(guard, user.uid, input.sourceNoteId)
@@ -1791,7 +2037,18 @@ async function handleOwnerCreate(request, response, id) {
             raced
             && raced.share.ownerUid === user.uid
             && raced.share.sourceNoteId === input.sourceNoteId
+            && sourceSyncModeMatchesCreate(raced.share, input)
           ) {
+            const latestNote = await firestoreGet(
+              context,
+              `notes/${input.sourceNoteId}`
+            );
+            await requireSourceCreateAvailable(
+              context,
+              latestNote,
+              user.uid,
+              input
+            );
             await releaseRateLimitReservations(
               context,
               createRateLimitReservations
@@ -1803,6 +2060,18 @@ async function handleOwnerCreate(request, response, id) {
               requestId: id
             });
             return;
+          }
+          if (
+            raced
+            && raced.share.ownerUid === user.uid
+            && raced.share.sourceNoteId === input.sourceNoteId
+            && !sourceSyncModeMatchesCreate(raced.share, input)
+          ) {
+            throw new HttpError(
+              409,
+              "request_conflict",
+              "Share creation idempotency key was reused for another request"
+            );
           }
           if (attempt < sourceCreateTransactionMaximumAttempts - 1) {
             await waitBeforeOptimisticRetry(attempt);
@@ -1877,7 +2146,24 @@ async function handleOwnerCreate(request, response, id) {
           );
         }
         if (blockingShare) {
+          const currentNote = await firestoreGet(
+            context,
+            `notes/${input.sourceNoteId}`
+          );
+          await requireSourceCreateAvailable(
+            context,
+            currentNote,
+            user.uid,
+            input
+          );
           if (input.idempotencyKey && blockingShare.__id === shareId) {
+            if (!sourceSyncModeMatchesCreate(blockingShare, input)) {
+              throw new HttpError(
+                409,
+                "request_conflict",
+                "Share creation idempotency key was reused for another request"
+              );
+            }
             await releaseRateLimitReservations(
               context,
               createRateLimitReservations
@@ -2046,6 +2332,7 @@ async function handleOwnerDetails(request, response, id, shareId) {
   const user = await ownerContext(request);
   const state = await loadShareState(user.context, shareId);
   requireOwner(state, user);
+  await requireSourceAvailable(user.context, state.share);
   const [recipients, attachments] = await Promise.all([
     firestoreListCollection(
       user.context,
@@ -2125,6 +2412,10 @@ async function handleOwnerUpdate(request, response, id, shareId) {
     ) {
       throw new HttpError(409, "share_unavailable");
     }
+    const sourceAvailability = await requireSourceAvailable(
+      user.context,
+      state.share
+    );
     if (state.share.lastOwnerMutationId === updateInput.idempotencyKey) {
       jsonResponse(response, 200, {
         ok: true,
@@ -2137,7 +2428,6 @@ async function handleOwnerUpdate(request, response, id, shareId) {
     if (state.share.status === "consumed" || state.policy.consumedAt) {
       throw new HttpError(409, "share_unavailable", "Consumed one-time shares cannot be edited");
     }
-    await requireSourceAvailable(user.context, state.share);
     const policySettings = await buildPolicySettings(
       updateInput.policy,
       state.policy,
@@ -2217,7 +2507,8 @@ async function handleOwnerUpdate(request, response, id, shareId) {
         requestId: id,
         identityType: "quickmemo_user",
         identityHash: identityDigest("uid", user.uid)
-      })
+      }),
+      ...sourceAvailabilityVerifyWrites(user.context, sourceAvailability)
     ];
     if (
       sourceShareGuardMatches(
@@ -2708,6 +2999,7 @@ async function handleOwnerContentUpdate(request, response, id, shareId) {
       requestDigest
     );
     if (initialDisposition === "replay") {
+      await requireSourceAvailable(user.context, initialState.share);
       jsonResponse(response, 200, {
         ok: true,
         share: shareSummary(initialState.share),
@@ -2755,6 +3047,23 @@ async function handleOwnerContentUpdate(request, response, id, shareId) {
           "source_revision_conflict",
           "Source note changed before secure share content update"
         );
+      }
+      try {
+        await sourceFolderChainSnapshot(
+          user.context,
+          transactionSnapshot.note,
+          state.share.ownerUid,
+          transactionSnapshot.transaction
+        );
+      } catch (error) {
+        if (error instanceof SourceFolderChainUnavailableError) {
+          throw new HttpError(
+            409,
+            "source_revision_conflict",
+            "Source folder changed before secure share content update"
+          );
+        }
+        throw error;
       }
       const attachmentSnapshot = await contentUpdateAttachmentSnapshot(
         user.context,
@@ -2860,11 +3169,14 @@ async function handleOwnerActivate(request, response, id, shareId) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const state = await loadShareState(user.context, shareId);
     requireOwner(state, user);
+    const sourceAvailability = await requireSourceAvailable(
+      user.context,
+      state.share
+    );
     if (state.share.lastOwnerMutationId === idempotencyKey) {
       jsonResponse(response, 200, { ok: true, share: shareSummary(state.share), requestId: id });
       return;
     }
-    await requireSourceAvailable(user.context, state.share);
     if (state.share.status === "revoked" || timestampMilliseconds(state.share.expiresAt) <= Date.now()) {
       throw new HttpError(409, "share_unavailable");
     }
@@ -2907,7 +3219,8 @@ async function handleOwnerActivate(request, response, id, shareId) {
           requestId: id,
           identityType: "quickmemo_user",
           identityHash: identityDigest("uid", user.uid)
-        })
+        }),
+        ...sourceAvailabilityVerifyWrites(user.context, sourceAvailability)
       ]);
       jsonResponse(response, 200, {
         ok: true,
@@ -7052,6 +7365,7 @@ async function commentAccess(request, context, shareId, mutation = false) {
     const owner = await activeUserFromRequest(request, context);
     const state = await loadShareState(context, shareId);
     requireShareManager(state, owner);
+    await requireSourceAvailable(context, state.share);
     return { owner, state, session: null };
   }
   const validated = await validatedSession(request, context, shareId);

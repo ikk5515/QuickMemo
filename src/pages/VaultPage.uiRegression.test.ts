@@ -265,15 +265,21 @@ describe("Vault workspace UI regression contract", () => {
   it("runs bounded terminal path cleanup once per unlocked profile after recovery", () => {
     expect(source).toContain("const pathRewriteCleanupOwnerRef = useRef<string | null>(null);");
     const recoveryEffect = sourceBetween(
-      "void scanRecoverableVaultPathRewriteJobs(profile.uid, privateKey)",
+      "const generation = pathRewriteRecoveryGenerationRef.current + 1;",
       "useEffect(() => {\n    if (!isOnline || !vaultDataReady || !vaultNameWritesReady || pathRewriteBusy)"
     );
     expect(recoveryEffect).toContain("pathRewriteCleanupOwnerRef.current !== profile.uid");
     expect(recoveryEffect).toContain("pathRewriteCleanupOwnerRef.current = profile.uid;");
     expect(recoveryEffect).toContain("const eligibleJobs = jobs.filter");
     expect(recoveryEffect).toContain("deferredRecoveryTimer = window.setTimeout");
+    expect(recoveryEffect).toContain(
+      "scheduleDeferredRecovery(recovered.job.recoveryAfterMs ?? 250);"
+    );
+    expect(recoveryEffect).toContain("const scheduleFailedRecovery = () => {");
+    expect(recoveryEffect).toContain("automaticVaultPathRewriteRetryDelayMs(failureCount)");
+    expect(recoveryEffect).toContain('job.lastErrorCode === "write-failed"');
     expect(recoveryEffect).toContain("if (hasMore && shouldContinueImmediately)");
-    expect(recoveryEffect.indexOf("if (eligibleJobs.length === 0) return;")).toBeLessThan(
+    expect(recoveryEffect.indexOf("if (eligibleJobs.length === 0) {")).toBeLessThan(
       recoveryEffect.indexOf("pathRewriteBusyRef.current = true;")
     );
     expect(recoveryEffect).toContain("flushVaultDraftsBeforePathRewriteRecovery({");
@@ -295,10 +301,22 @@ describe("Vault workspace UI regression contract", () => {
     );
     expect(saveEntry).toContain("entryAutosaveRef.current?.cancel(entryId);");
     expect(saveEntry).toContain("const latest = draftsRef.current[entryId];");
-    expect(saveEntry).toContain("const reconciled = reconcileDraftAfterSave(latest, draft, result.revision);");
+    expect(saveEntry).toContain("const reconciled = reconcileDraftAfterSave(latest, canonicalSubmitted, result.revision);");
+    expect(saveEntry).toContain("persistedRevisionRelation(currentCandidate.revision, result.revision)");
+    expect(saveEntry).toContain('revisionRelation === "superseded"');
+    expect(saveEntry).toContain("latestBeforeCommit.baseRevision > result.revision");
     expect(saveEntry).toContain("const nextDrafts = { ...draftsRef.current, [entryId]: reconciled };");
     expect(saveEntry).toContain("setDrafts(nextDrafts);");
+    expect(saveEntry).toContain("entryAutosaveRetryDelayMs(failureCount)");
+    expect(saveEntry).toContain('result === "retryable-failure"');
+    expect(saveEntry).toContain("() => void saveEntryRef.current(entryId)");
     expect(saveEntry).not.toContain("window.setTimeout(() => void saveEntryRef.current(entryId), 0)");
+    expect(saveEntry).toContain("if (!draft.title.trim()) {");
+    expect(saveEntry).toContain("draft = { ...draft, title: note.title };");
+    expect(saveEntry.indexOf("draft = { ...draft, title: note.title };")).toBeLessThan(
+      saveEntry.indexOf("result = await saveEncryptedVaultEntry(")
+    );
+    expect(saveEntry).toContain("빈 이름은 저장하지 않고 기존 이름을 유지했으며 Markdown 본문은 암호화 저장했습니다.");
 
     const autosaveEffect = sourceBetween(
       "const dirtyEntryIds = new Set<string>();",

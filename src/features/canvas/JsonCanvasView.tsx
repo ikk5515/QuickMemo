@@ -83,6 +83,13 @@ import {
   type JsonCanvasSide
 } from "./canvasModel";
 import {
+  createCanvasNodeDragCommitState,
+  recordCanvasNodeDragCommitSignal,
+  type CanvasNodeDragCommitDecision,
+  type CanvasNodeDragCommitSignal,
+  type CanvasNodeDragCommitState
+} from "./canvasDragCommit";
+import {
   JSON_CANVAS_VAULT_ENTRY_MIME,
   containsJsonCanvasVaultEntryDragType,
   parseJsonCanvasVaultEntryDragPayload
@@ -159,6 +166,8 @@ const JSON_CANVAS_SIDES: readonly JsonCanvasSide[] = ["top", "right", "bottom", 
 const CANVAS_COLORS = ["1", "2", "3", "4", "5", "6"] as const;
 const CANVAS_FILE_RESULT_LIMIT = 50;
 export const CANVAS_NODE_INTERACTION_THRESHOLD_PX = 6;
+const CANVAS_NO_DRAG_CLASS_NAME = "nodrag";
+const CANVAS_NO_PAN_CLASS_NAME = "nopan";
 const CANVAS_DROP_GRID: readonly [number, number] = [20, 20];
 const MAX_CANVAS_DROP_COORDINATE = 100_000_000;
 const MAX_CANVAS_DROP_NODES = 10_000;
@@ -258,6 +267,8 @@ function CanvasFileChooser({
 }: CanvasFileChooserProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [optionSnapshot, setOptionSnapshot] = useState<readonly JsonCanvasFileOption[]>([]);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -270,12 +281,12 @@ function CanvasFileChooser({
     }
     const matches: JsonCanvasFileOption[] = [];
     let count = 0;
-    const selected = options.find((option) => option.path === value);
+    const selected = optionSnapshot.find((option) => option.path === value);
     if (!normalizedQuery && selected) {
       matches.push(selected);
       count = 1;
     }
-    for (const option of options) {
+    for (const option of optionSnapshot) {
       if (!normalizedQuery && option.path === selected?.path) {
         continue;
       }
@@ -289,7 +300,7 @@ function CanvasFileChooser({
       }
     }
     return { count, matches };
-  }, [normalizedQuery, open, options, value]);
+  }, [normalizedQuery, open, optionSnapshot, value]);
 
   useEffect(() => {
     if (open) {
@@ -299,6 +310,9 @@ function CanvasFileChooser({
 
   const close = useCallback(() => {
     setOpen(false);
+    setOptionSnapshot([]);
+    setQuery("");
+    setSelectionError(null);
     window.requestAnimationFrame(() => buttonRef.current?.focus());
   }, []);
 
@@ -363,6 +377,11 @@ function CanvasFileChooser({
               ? `${searchResult.count.toLocaleString("ko-KR")}개 중 ${CANVAS_FILE_RESULT_LIMIT}개를 표시합니다. 더 구체적으로 검색하세요.`
               : `${searchResult.count.toLocaleString("ko-KR")}개 파일`}
         </p>
+        {selectionError ? (
+          <p aria-live="assertive" className="vault-canvas-file-result-status" role="status">
+            {selectionError}
+          </p>
+        ) : null}
         <ul
           aria-label="Canvas 파일 검색 결과"
           className="vault-canvas-file-results"
@@ -373,6 +392,17 @@ function CanvasFileChooser({
               <button
                 aria-current={option.path === value ? "true" : undefined}
                 onClick={() => {
+                  const stillAuthorized = options.some((latestOption) => (
+                    latestOption.path === option.path
+                    && safeVaultPath(latestOption.path) === latestOption.path
+                  ));
+                  if (!stillAuthorized) {
+                    setOptionSnapshot(options.filter((latestOption) => (
+                      safeVaultPath(latestOption.path) === latestOption.path
+                    )));
+                    setSelectionError("파일 목록이 변경되었습니다. 다시 선택해주세요.");
+                    return;
+                  }
                   if (option.path !== value) {
                     onSelect(option.path);
                   }
@@ -402,6 +432,8 @@ function CanvasFileChooser({
         onClick={(event) => {
           event.stopPropagation();
           setQuery("");
+          setSelectionError(null);
+          setOptionSnapshot(options.filter((option) => safeVaultPath(option.path) === option.path));
           setOpen(true);
         }}
         onPointerDown={stopCanvasControlEvent}
@@ -507,7 +539,7 @@ function CanvasCardNode({ data, id, selected }: NodeProps<CanvasFlowNode>) {
   return (
     <article
       aria-label={accessibleNodeLabel(node)}
-      className={`vault-canvas-card vault-canvas-card--${node.type}`}
+      className={`${CANVAS_NO_PAN_CLASS_NAME} vault-canvas-card vault-canvas-card--${node.type}`}
       onDoubleClick={node.type === "text" && !readOnly ? (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -922,6 +954,7 @@ export function JsonCanvasView({
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
   const groupDragRef = useRef<CanvasGroupDragState | null>(null);
+  const nodeDragCommitRef = useRef<CanvasNodeDragCommitState | null>(null);
   const longPressRef = useRef<CanvasLongPressState | null>(null);
   const documentRef = useRef(parsed);
   const sourceRef = useRef(source);
@@ -944,7 +977,11 @@ export function JsonCanvasView({
     longPressRef.current = null;
   }, []);
 
-  useEffect(() => () => cancelLongPress(), [cancelLongPress]);
+  useEffect(() => () => {
+    cancelLongPress();
+    groupDragRef.current = null;
+    nodeDragCommitRef.current = null;
+  }, [cancelLongPress]);
 
   useEffect(() => {
     if (canvasReadOnly || (!resolveVaultEntryDrop && !onImportExternalFiles)) {
@@ -968,6 +1005,54 @@ export function JsonCanvasView({
     onChange(serialized);
   }, [onChange]);
 
+  const settleNodeDragCommit = useCallback((
+    drag: CanvasNodeDragCommitState,
+    signal: CanvasNodeDragCommitSignal,
+    positionChanged = false
+  ) => {
+    if (nodeDragCommitRef.current !== drag) {
+      return;
+    }
+    const applyDecision = (decision: CanvasNodeDragCommitDecision) => {
+      if (decision === "clear") {
+        nodeDragCommitRef.current = null;
+        return true;
+      }
+      if (decision === "flush" || decision === "flush-and-clear") {
+        commit(nodesRef.current, edgesRef.current);
+        if (decision === "flush-and-clear") {
+          nodeDragCommitRef.current = null;
+        }
+        return true;
+      }
+      return false;
+    };
+    if (applyDecision(recordCanvasNodeDragCommitSignal(drag, signal, positionChanged))) {
+      return;
+    }
+    if (!drag.positionChanged || signal === "fallback") {
+      return;
+    }
+    if (drag.flushScheduled) {
+      return;
+    }
+
+    // React Flow currently emits its final `dragging: false` change and drag
+    // stop callback in one event turn. Deferring the single-signal fallback to
+    // a microtask makes the order irrelevant while still persisting a final
+    // coordinate if one of those callbacks is omitted by an interrupted input.
+    drag.flushScheduled = true;
+    queueMicrotask(() => {
+      drag.flushScheduled = false;
+      if (
+        nodeDragCommitRef.current !== drag
+      ) {
+        return;
+      }
+      applyDecision(recordCanvasNodeDragCommitSignal(drag, "fallback"));
+    });
+  }, [commit]);
+
   useEffect(() => {
     if (source === sourceRef.current) {
       return;
@@ -977,6 +1062,8 @@ export function JsonCanvasView({
     const nextFlow = documentToFlow(nextDocument);
     documentRef.current = nextDocument;
     canonicalSourceRef.current = `${JSON.stringify(nextDocument, null, 2)}\n`;
+    groupDragRef.current = null;
+    nodeDragCommitRef.current = null;
     nodesRef.current = nextFlow.nodes;
     edgesRef.current = nextFlow.edges;
     setNodes(nextFlow.nodes);
@@ -1063,6 +1150,18 @@ export function JsonCanvasView({
         ));
       }
     }
+    const nodeDragCommit = nodeDragCommitRef.current;
+    const hasActiveNodeDragPositionChange = Boolean(nodeDragCommit && changes.some((change) => (
+      change.type === "position" && change.id === nodeDragCommit.nodeId
+    )));
+    const hasNodeDragFinalChange = Boolean(nodeDragCommit && changes.some((change) => (
+      change.type === "position"
+      && change.id === nodeDragCommit.nodeId
+      && change.dragging === false
+    )));
+    if (nodeDragCommit && hasActiveNodeDragPositionChange && !hasNodeDragFinalChange) {
+      nodeDragCommit.positionChanged = true;
+    }
     if (changes.every((change) => change.type === "select")) {
       nodesRef.current = nextNodes;
       setNodes(nextNodes);
@@ -1073,19 +1172,28 @@ export function JsonCanvasView({
     const isTransientInteraction = changes.some((change) => (
       (change.type === "position" && change.dragging === true)
       || (change.type === "dimensions" && change.resizing === true)
-    ));
+    )) || hasActiveNodeDragPositionChange;
     if (isTransientInteraction) {
       nodesRef.current = nextNodes;
       edgesRef.current = nextEdges;
       setNodes(nextNodes);
       setEdges(nextEdges);
+      if (nodeDragCommit && hasNodeDragFinalChange) {
+        settleNodeDragCommit(nodeDragCommit, "final-change", true);
+      }
       return;
     }
     commit(nextNodes, nextEdges);
-  }, [canvasReadOnly, commit]);
+  }, [canvasReadOnly, commit, settleNodeDragCommit]);
 
   const startNodeDrag = useCallback<OnNodeDrag<CanvasFlowNode>>((_event, node) => {
-    if (canvasReadOnly || node.data.canvas.type !== "group") {
+    if (canvasReadOnly) {
+      groupDragRef.current = null;
+      nodeDragCommitRef.current = null;
+      return;
+    }
+    nodeDragCommitRef.current = createCanvasNodeDragCommitState(node.id);
+    if (node.data.canvas.type !== "group") {
       groupDragRef.current = null;
       return;
     }
@@ -1096,17 +1204,46 @@ export function JsonCanvasView({
     };
   }, [canvasReadOnly]);
 
-  const stopNodeDrag = useCallback<OnNodeDrag<CanvasFlowNode>>((_event, node) => {
+  const stopNodeDrag = useCallback<OnNodeDrag<CanvasFlowNode>>((_event, node, draggedNodes) => {
     const draggedGroup = groupDragRef.current;
     groupDragRef.current = null;
-    if (canvasReadOnly || draggedGroup?.groupId !== node.id) {
+    if (canvasReadOnly) {
+      nodeDragCommitRef.current = null;
       return;
     }
-    commit(nodesRef.current, edgesRef.current);
-    if (draggedGroup.memberIds.size > 0) {
+    const nodeDragCommit = nodeDragCommitRef.current?.nodeId === node.id
+      ? nodeDragCommitRef.current
+      : null;
+    if (!nodeDragCommit) {
+      commit(nodesRef.current, edgesRef.current);
+    } else {
+      let terminalPositionChanged = false;
+      if (!nodeDragCommit.finalChangeSeen) {
+        const finalPositions = new Map((draggedNodes?.length ? draggedNodes : [node]).map((draggedNode) => (
+          [draggedNode.id, draggedNode.position] as const
+        )));
+        const nextNodes = nodesRef.current.map((current) => {
+          const position = finalPositions.get(current.id);
+          if (
+            !position
+            || (position.x === current.position.x && position.y === current.position.y)
+          ) {
+            return current;
+          }
+          terminalPositionChanged = true;
+          return { ...current, position: { ...position } };
+        });
+        if (terminalPositionChanged) {
+          nodesRef.current = nextNodes;
+          setNodes(nextNodes);
+        }
+      }
+      settleNodeDragCommit(nodeDragCommit, "stop", terminalPositionChanged);
+    }
+    if (draggedGroup?.groupId === node.id && draggedGroup.memberIds.size > 0) {
       setStatus(`그룹과 안의 카드 ${draggedGroup.memberIds.size}개를 함께 옮겼습니다.`);
     }
-  }, [canvasReadOnly, commit]);
+  }, [canvasReadOnly, commit, settleNodeDragCommit]);
 
   const changeEdges = useCallback((changes: EdgeChange<CanvasFlowEdge>[]) => {
     if (canvasReadOnly && changes.some((change) => change.type !== "select")) {
@@ -2230,7 +2367,8 @@ export function JsonCanvasView({
           nodeClickDistance={CANVAS_NODE_INTERACTION_THRESHOLD_PX}
           nodeDragThreshold={CANVAS_NODE_INTERACTION_THRESHOLD_PX}
           nodeTypes={CANVAS_NODE_TYPES}
-          noPanClassName="nodrag"
+          noDragClassName={CANVAS_NO_DRAG_CLASS_NAME}
+          noPanClassName={CANVAS_NO_PAN_CLASS_NAME}
           nodes={nodes}
           nodesConnectable={!canvasReadOnly}
           nodesDraggable={!canvasReadOnly}

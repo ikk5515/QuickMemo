@@ -52,8 +52,9 @@ describe("Vault deferred name-collision recovery wiring", () => {
     expect(source).toContain("async function repairFirstVaultNameCollision()");
     expect(source).toContain("promptVaultNameCollisionRepair(");
     expect(noticeSource).toContain("충돌 이름 바꾸기");
-    // One declaration plus the folder-rename and entry-rename success paths.
-    expect(source.match(/recheckVaultNameIntegrityAfterRepair\(\)/gu)).toHaveLength(3);
+    // One declaration plus folder rename, ordinary entry rename, and the
+    // response-lost entry rename confirmed behind a newer subscription.
+    expect(source.match(/recheckVaultNameIntegrityAfterRepair\(\)/gu)).toHaveLength(4);
   });
 
   it("serializes lazy collision repair against integrity retries and stale targets", () => {

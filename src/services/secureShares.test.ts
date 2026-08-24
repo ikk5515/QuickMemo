@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearSecureShareSessionMemory,
+  createSecureShare,
   createSecureShareComment,
   getSecureShareAttachmentForCopy,
   getSecureShareFeatureStatus,
@@ -158,6 +159,57 @@ describe("secure share API client", () => {
     expect(parsedUrl.searchParams.get("shareId")).toBe(shareId);
     expect(init?.method).toBe("GET");
     expect(headers.get("authorization")).toBe(`Bearer ${idToken}`);
+  });
+
+  it("sends revision-bound source sync only when the create caller requests it", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }));
+    const encryptedTitle = {
+      version: 1 as const,
+      algorithm: "AES-GCM" as const,
+      cipherText: "Y2lwaGVydGV4dA==",
+      iv: "MDEyMzQ1Njc4OWFi"
+    };
+    const commonInput = {
+      attachmentCount: 0,
+      encryptedBody: { ...encryptedTitle, cipherText: "Ym9keQ==" },
+      encryptedTitle,
+      idempotencyKey: "create-request-123456",
+      ownerWrappedShareKey: {
+        version: 1 as const,
+        algorithm: "RSA-OAEP" as const,
+        wrappedKey: "d3JhcHBlZA=="
+      },
+      policy: {
+        accessMode: "anyone_with_link" as const,
+        allowedEmails: [],
+        customExpiresAt: null,
+        downloadAllowed: true,
+        emailVerificationRequired: false,
+        expirationPreset: "one_day" as const,
+        oneTimeEnabled: false,
+        oneTimeScope: "global" as const,
+        passwordEnabled: false,
+        permissionLevel: "view" as const,
+        quickCopyButtonVisible: true,
+        showCommenterIpPrefix: false
+      },
+      sourceAttachmentRevision: 0,
+      sourceNoteId: "note_source_123456",
+      sourceRevision: 3
+    };
+
+    await createSecureShare({
+      ...commonInput,
+      sourceSyncMode: "revision_bound"
+    }, idToken);
+    await createSecureShare(commonInput, idToken);
+
+    const revisionBoundBody = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body));
+    const legacyLiveBody = JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body));
+    expect(revisionBoundBody.sourceSyncMode).toBe("revision_bound");
+    expect(legacyLiveBody).not.toHaveProperty("sourceSyncMode");
   });
 
   it("sends only encrypted content and revision CAS fields for owner content updates", async () => {
