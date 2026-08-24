@@ -350,7 +350,7 @@ describe("revision-aware note persistence", () => {
 
     expect(result).toMatchObject({
       lastMutationId: "server-mutation-1",
-      noteId: "server-note-a",
+      noteId: expect.stringMatching(/^vn1_[A-Za-z0-9_-]{43}$/u),
       revision: 1
     });
     expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", {
@@ -362,6 +362,7 @@ describe("revision-aware note persistence", () => {
       historySnapshot: encryptedPayload,
       historySummary: encryptedPayload,
       nameClaim: vaultNameClaim(null),
+      noteId: expect.stringMatching(/^vn1_[A-Za-z0-9_-]{43}$/u),
       participantUids: ["user-a"],
       type: "personal",
       wrappedKeys: { "user-a": wrappedKey }
@@ -588,6 +589,55 @@ describe("revision-aware note persistence", () => {
       wrappedKeys: { "user-a": wrappedKey }
     });
     expect(mocks.batch.set).not.toHaveBeenCalled();
+  });
+
+  it("creates a text-only Markdown copying note without opening attachment counters", async () => {
+    const result = await createSecureShareCopyingNote({
+      copyJobId: "copy_job_markdown_1234",
+      contentFormat: "markdown-v1",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      entryKind: "markdown",
+      expectedAttachmentCount: 0,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      noteId: "copy-markdown-a",
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    });
+
+    expect(result).toMatchObject({ noteId: "copy-markdown-a", revision: 1 });
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", expect.objectContaining({
+      action: "secure-copy-create",
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      expectedAttachmentCount: 0,
+      noteId: "copy-markdown-a"
+    }));
+  });
+
+  it("rejects a Markdown copying note that declares attachments", async () => {
+    await expect(createSecureShareCopyingNote({
+      copyJobId: "copy_job_markdown_1234",
+      contentFormat: "markdown-v1",
+      encryptedBody: encryptedPayload,
+      encryptedTitle: encryptedPayload,
+      entryKind: "markdown",
+      expectedAttachmentCount: 1,
+      historySnapshot: encryptedPayload,
+      historySummary: encryptedPayload,
+      noteId: "copy-markdown-unsafe",
+      nameClaim: vaultNameClaim(null),
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      type: "personal",
+      wrappedKeys: { "user-a": wrappedKey }
+    })).rejects.toThrow("보안 공유 복사 작업 정보");
+
+    expect(mocks.mutateVaultNote).not.toHaveBeenCalled();
   });
 
   it("retries a response-loss secure-copy create with the same preallocated note id", async () => {

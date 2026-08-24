@@ -29,6 +29,7 @@ import {
   Save,
   Search,
   Settings2,
+  Share2,
   Table2,
   Tags,
   Trash2,
@@ -82,7 +83,11 @@ import {
   sameRevisionedDraft,
   type RevisionedEditableDraft
 } from "../features/vault/draftConcurrency";
-import { EntryIdleDebounce, vaultEntryAutosaveIdleMs } from "../features/vault/entryAutosave";
+import {
+  EntryIdleDebounce,
+  entryAutosaveRetryDelayMs,
+  vaultEntryAutosaveIdleMs
+} from "../features/vault/entryAutosave";
 import {
   shouldReleaseVaultEntryCreation,
   type CreatableVaultEntryKind,
@@ -100,12 +105,20 @@ import type {
   VaultPathRewriteStepV1
 } from "../features/vault/pathRewriteJob";
 import {
+  automaticVaultPathRewriteRetryDelayMs,
   executeVaultPathRewrite,
   flushVaultDraftsBeforePathRewriteRecovery,
   recoverVaultPathRewrite,
+  retryableVaultPathRewriteFailure,
+  shouldAutomaticallyRecoverVaultPathRewriteJob,
   VaultPathRewriteControllerError,
   type VaultPathRewriteStage
 } from "../features/vault/pathRewriteController";
+import {
+  clearOptimisticVaultEntryPatch,
+  projectOptimisticVaultEntries,
+  type OptimisticVaultEntryPatch
+} from "../features/vault/optimisticEntryOperations";
 import {
   createDefaultGlobalGraphSettings,
   createDefaultLocalGraphSettings,
@@ -156,7 +169,11 @@ import {
 import { createKanbanSource } from "../features/kanban/model";
 import { setDataviewTaskChecked, type DataviewTask } from "../features/dataview/task";
 import { applyTemplateInsertion, renderSafeTemplate } from "../features/templater/templateEngine";
-import type { CodeMirrorMarkdownEditorProps } from "../features/vault/CodeMirrorMarkdownEditor";
+import type {
+  CodeMirrorMarkdownEditorProps,
+  MarkdownImagePasteContext,
+  MarkdownImagePasteResult
+} from "../features/vault/CodeMirrorMarkdownEditor";
 import { WorkspacePaneTree, type WorkspacePaneRender } from "../features/vault/WorkspacePaneTree";
 import { VaultAssetPreview } from "../features/vault/VaultAssetPreview";
 import { setFrontmatterProperty } from "../features/vault/frontmatterEditing";
@@ -455,6 +472,12 @@ const LazyVaultHistoryPanel = lazy(() => import("../features/vault/VaultHistoryP
 })));
 const LazyVaultTrashDialog = lazy(() => import("../features/vault/VaultTrashDialog").then((module) => ({
   default: module.VaultTrashDialog
+})));
+const LazyVaultShareManagerDialog = lazy(() => import("../features/vault/VaultShareManagerDialog").then((module) => ({
+  default: module.VaultShareManagerDialog
+})));
+const LazyVaultParticipantShareDialog = lazy(() => import("../features/vault/VaultParticipantShareDialog").then((module) => ({
+  default: module.VaultParticipantShareDialog
 })));
 const LazyVaultImportRecoveryPanel = lazy(() => import("../features/vault/VaultImportRecoveryPanel").then((module) => ({
   default: module.VaultImportRecoveryPanel
@@ -806,11 +829,19 @@ interface VaultContextMenuState {
   y: number;
 }
 
+interface VaultShareDialogState {
+  hasUnsharedAssetEmbeds?: boolean;
+  note: DecryptedVaultNote;
+  returnFocusTo: HTMLElement | null;
+}
+
 interface DraftState extends MarkdownNoteDraft {
   /** Revision from which this edit buffer was created; never follows remote updates while dirty. */
   baseRevision: number;
   dirty: boolean;
 }
+
+type VaultEntryRenameResult = "blocked" | "retryable-failure" | "saved" | "unchanged";
 
 interface MarkdownDraftBaseSnapshot {
   baseRevision: number;
@@ -849,6 +880,7 @@ function InactiveWorkspacePane({
   note,
   onActivate,
   onChange,
+  onPasteImages,
   onSave,
   readOnly,
   tab
@@ -859,6 +891,7 @@ function InactiveWorkspacePane({
   note: DecryptedVaultNote | null;
   onActivate: () => void;
   onChange: (body: string) => void;
+  onPasteImages?: CodeMirrorMarkdownEditorProps["onPasteImages"];
   onSave: () => void;
   readOnly: boolean;
   tab: WorkspaceTab | null;
@@ -879,9 +912,11 @@ function InactiveWorkspacePane({
             documentKey={documentKey}
             livePreview
             onChange={onChange}
+            onPasteImages={onPasteImages}
             onSave={onSave}
             readOnly={readOnly}
             value={draft.body}
+            valueRevision={draft.baseRevision}
           />
         ) : (
           <div className="vault-inactive-pane-placeholder">
@@ -1616,9 +1651,11 @@ function clearVaultPagePreviewTimer(timer: { current: number | null }) {
 }
 
 function UnlockedVaultPage({
+  getIdToken,
   privateKey,
   profile
 }: {
+  getIdToken: () => Promise<string>;
   privateKey: CryptoKey;
   profile: UserProfile;
 }) {
@@ -1770,6 +1807,9 @@ function UnlockedVaultPage({
   const [pendingEntryCreation, setPendingEntryCreation] = useState<PendingVaultEntryCreation | null>(null);
   const [savingEntryIds, setSavingEntryIds] = useState<Set<string>>(new Set());
   const [deletingEntryIds, setDeletingEntryIds] = useState<Set<string>>(new Set());
+  const [optimisticEntryPatches, setOptimisticEntryPatches] = useState<
+    Map<string, OptimisticVaultEntryPatch>
+  >(new Map());
   const [trashOpen, setTrashOpen] = useState(false);
   const [discordMessageBatch, setDiscordMessageBatch] = useState<Extract<
     DiscordAiMarkdownDelivery,
@@ -1785,6 +1825,7 @@ function UnlockedVaultPage({
   const [trashBusyFolderIds, setTrashBusyFolderIds] = useState<Set<string>>(new Set());
   const savingEntryIdsRef = useRef<Set<string>>(new Set());
   const deletingEntryIdsRef = useRef<Set<string>>(new Set());
+  const folderTrashLockedFolderIdsRef = useRef<Set<string>>(new Set());
   const [saveFailedEntryIds, setSaveFailedEntryIds] = useState<Set<string>>(new Set());
   const [conflictedEntryIds, setConflictedEntryIds] = useState<Map<string, number>>(new Map());
   const [draftMergeConflict, setDraftMergeConflict] = useState<MarkdownDraftMergeConflictState | null>(null);
@@ -1797,6 +1838,8 @@ function UnlockedVaultPage({
   const [importRecoveryOpen, setImportRecoveryOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<VaultContextMenuState | null>(null);
   const [moveTarget, setMoveTarget] = useState<VaultMoveTarget | null>(null);
+  const [shareTarget, setShareTarget] = useState<VaultShareDialogState | null>(null);
+  const [participantShareTarget, setParticipantShareTarget] = useState<VaultShareDialogState | null>(null);
   const decryptGeneration = useRef(0);
   const exportAbortRef = useRef<AbortController | null>(null);
   const importAbortRef = useRef<AbortController | null>(null);
@@ -1817,6 +1860,20 @@ function UnlockedVaultPage({
   const activeFolderSnapshotsRef = useRef<NoteFolderSnapshot[]>([]);
   const allFolderSnapshotsRef = useRef<NoteFolderSnapshot[]>([]);
   const pendingCreatedEntryIdsRef = useRef<Set<string>>(new Set());
+  const pendingClipboardAssetTitleKeysRef = useRef<Map<
+    string,
+    { folderId: string | null; sourceNoteId: string; title: string }
+  >>(new Map());
+  const pendingClipboardAssetTitleKeyByIdRef = useRef<Map<string, string>>(new Map());
+  const pendingClipboardPasteCountsRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    for (const note of notes) {
+      const pendingTitleKey = pendingClipboardAssetTitleKeyByIdRef.current.get(note.id);
+      if (!pendingTitleKey) continue;
+      pendingClipboardAssetTitleKeyByIdRef.current.delete(note.id);
+      pendingClipboardAssetTitleKeysRef.current.delete(pendingTitleKey);
+    }
+  }, [notes]);
   const previousOwnerIdKeyRef = useRef(ownerIdKey);
   const noteSubscriptionGenerationRef = useRef(0);
   const noteAccessScopeRef = useRef<string[]>([]);
@@ -1852,12 +1909,16 @@ function UnlockedVaultPage({
   const localViewportRef = useRef(localViewport);
   const workspaceInteractionDuringLoadRef = useRef(false);
   const pendingWorkspaceStateRef = useRef<VaultPersistedWorkspaceState | null>(null);
-  const renameEntryRef = useRef<(entryId: string, requestedTitle?: string) => Promise<void>>(async () => undefined);
+  const renameEntryRef = useRef<(
+    entryId: string,
+    requestedTitle?: string
+  ) => Promise<VaultEntryRenameResult>>(async () => "blocked");
   const moveEntryRef = useRef<(entryId: string, folderId: string | null) => Promise<void>>(async () => undefined);
   const trashEntryRef = useRef<(entryId: string, confirmed?: boolean) => Promise<void>>(async () => undefined);
   const saveEntryRef = useRef<(entryId: string) => Promise<void>>(async () => undefined);
   const entryAutosaveRef = useRef<EntryIdleDebounce | null>(null);
   entryAutosaveRef.current ??= new EntryIdleDebounce();
+  const entryAutosaveRetryCountsRef = useRef<Map<string, number>>(new Map());
   const entryMutationPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
   const draftBaseSnapshotsRef = useRef<Map<string, MarkdownDraftBaseSnapshot>>(new Map());
   const draftMergeRequestGenerationRef = useRef(0);
@@ -1867,6 +1928,8 @@ function UnlockedVaultPage({
   const pathRewriteCleanupSessionRef = useRef<{ privateKey: CryptoKey; uid: string } | null>(null);
   const pathRewriteRecoveryBusyOwnerRef = useRef<number | null>(null);
   const pathRewriteRecoveryGenerationRef = useRef(0);
+  const pathRewriteRecoveryFailureCountRef = useRef(0);
+  const optimisticEntryOperationIdRef = useRef(0);
   const durableSourceNotesRef = useRef<Map<string, DecryptedVaultNote>>(new Map());
   const vaultNameMigrationGenerationRef = useRef(0);
   const vaultNameMigrationPromiseRef = useRef<Promise<void> | null>(null);
@@ -1958,6 +2021,7 @@ function UnlockedVaultPage({
     || pathRewriteBusyRef.current
     || vaultImportBusy
     || entryMutationPromisesRef.current.size > 0
+    || pendingClipboardPasteCountsRef.current.size > 0
     || Object.values(draftsRef.current).some((draft) => draft.dirty)
     || globalViewportCommitTimerRef.current !== null
     || localViewportCommitTimerRef.current !== null
@@ -2137,6 +2201,26 @@ function UnlockedVaultPage({
     return next;
   }, []);
 
+  const stageOptimisticEntryPatch = useCallback((
+    entryId: string,
+    patch: Omit<OptimisticVaultEntryPatch, "operationId">
+  ) => {
+    const operationId = optimisticEntryOperationIdRef.current + 1;
+    optimisticEntryOperationIdRef.current = operationId;
+    setOptimisticEntryPatches((current) => new Map(current).set(entryId, {
+      ...patch,
+      operationId
+    }));
+    return operationId;
+  }, []);
+
+  const finishOptimisticEntryPatch = useCallback((entryId: string, operationId: number) => {
+    setOptimisticEntryPatches((current) => {
+      const next = clearOptimisticVaultEntryPatch(current, entryId, operationId);
+      return next === current ? current : new Map(next);
+    });
+  }, []);
+
   const captureMarkdownDraftBase = useCallback((
     entryId: string,
     note: DecryptedVaultNote | undefined,
@@ -2261,11 +2345,17 @@ function UnlockedVaultPage({
     setVaultDataReady(false);
     allVisibleNoteSnapshotsRef.current = [];
     pendingCreatedEntryIdsRef.current.clear();
+    pendingClipboardAssetTitleKeysRef.current.clear();
+    pendingClipboardAssetTitleKeyByIdRef.current.clear();
+    pendingClipboardPasteCountsRef.current.clear();
     noteAccessScopeRef.current = [];
     noteSubscriptionServerReadyRef.current = false;
     setRawNotes([]);
     setNoteSnapshotReceived(false);
     setNoteServerReservationSignature(null);
+    entryAutosaveRef.current?.cancelAll();
+    entryAutosaveRetryCountsRef.current.clear();
+    folderTrashLockedFolderIdsRef.current.clear();
     notesRef.current = [];
     setDecryptedNotes([]);
     draftsRef.current = {};
@@ -2275,6 +2365,8 @@ function UnlockedVaultPage({
     setDraftMergeConflict(null);
     setDraftMergeOpen(false);
     setDraftMergeBusyEntryId(null);
+    setShareTarget(null);
+    setParticipantShareTarget(null);
     durableSourceNotesRef.current.clear();
     setTabs([]);
     setActiveTabId(null);
@@ -2795,6 +2887,12 @@ function UnlockedVaultPage({
     foldersRef.current = [];
     allVisibleNoteSnapshotsRef.current = [];
     pendingCreatedEntryIdsRef.current.clear();
+    pendingClipboardAssetTitleKeysRef.current.clear();
+    pendingClipboardAssetTitleKeyByIdRef.current.clear();
+    pendingClipboardPasteCountsRef.current.clear();
+    entryAutosaveRef.current?.cancelAll();
+    entryAutosaveRetryCountsRef.current.clear();
+    folderTrashLockedFolderIdsRef.current.clear();
     activeFolderSnapshotsRef.current = [];
     allFolderSnapshotsRef.current = [];
     noteSubscriptionServerReadyRef.current = false;
@@ -4807,6 +4905,22 @@ function UnlockedVaultPage({
     // next attempt. Cancel only this entry so unrelated notes keep their own
     // idle deadlines.
     entryAutosaveRef.current?.cancel(entryId);
+    const scheduleRetry = () => {
+      const latestDraft = draftsRef.current[entryId];
+      if (!isOnline || !latestDraft?.dirty) return false;
+      const failureCount = (entryAutosaveRetryCountsRef.current.get(entryId) ?? 0) + 1;
+      entryAutosaveRetryCountsRef.current.set(entryId, failureCount);
+      const retryDelay = entryAutosaveRetryDelayMs(failureCount);
+      if (retryDelay === null) return false;
+      entryAutosaveRef.current?.schedule(
+        entryId,
+        { draft: latestDraft, failureCount },
+        retryDelay,
+        () => void saveEntryRef.current(entryId)
+      );
+      setStatus(`암호화 저장을 ${Math.ceil(retryDelay / 1_000)}초 후 자동으로 다시 시도합니다 (${failureCount}/5).`);
+      return true;
+    };
     if (!profile || !privateKey || !vaultIntegrityKey) {
       setError("암호화된 이름 무결성 키가 준비될 때까지 Vault 쓰기가 잠깁니다.");
       return;
@@ -4821,8 +4935,9 @@ function UnlockedVaultPage({
     }
     const currentNotes = notesRef.current;
     const note = currentNotes.find((candidate) => candidate.id === entryId);
-    const draft = draftsRef.current[entryId];
+    let draft = draftsRef.current[entryId];
     if (!note || !draft?.dirty || note.contentFormat === "legacy-html-v1") {
+      entryAutosaveRetryCountsRef.current.delete(entryId);
       return;
     }
     if (!isOnline) {
@@ -4833,16 +4948,33 @@ function UnlockedVaultPage({
     if (conflictedEntryIds.has(entryId)) {
       return;
     }
+    let restoredBlankTitle = false;
     if (draft.title.trim() !== note.title.trim()) {
-      if (
-        vaultNameWritesReady
-        || (vaultNameMigrationStatus === "blocked" && vaultNameCollisionTargetIds.has(entryId))
-      ) {
-        await renameEntryRef.current(entryId, draft.title);
+      if (!draft.title.trim()) {
+        restoredBlankTitle = true;
+        draft = { ...draft, title: note.title };
+        const nextDrafts = { ...draftsRef.current, [entryId]: draft };
+        draftsRef.current = nextDrafts;
+        setDrafts(nextDrafts);
       } else {
-        setError("암호화된 이름 예약 검증이 끝난 뒤 항목 이름을 저장할 수 있습니다.");
+        if (
+          vaultNameWritesReady
+          || (vaultNameMigrationStatus === "blocked" && vaultNameCollisionTargetIds.has(entryId))
+        ) {
+          const result = await renameEntryRef.current(entryId, draft.title);
+          if (result === "saved" || result === "unchanged") {
+            entryAutosaveRetryCountsRef.current.delete(entryId);
+          } else if (result === "retryable-failure") {
+            setSaveFailedEntryIds((current) => new Set(current).add(entryId));
+            if (!scheduleRetry()) {
+              setStatus("이름 자동 저장이 반복 실패했습니다. 현재 이름은 이 세션에 보존되어 있으며 다시 입력하거나 저장을 눌러 재시도할 수 있습니다.");
+            }
+          }
+        } else {
+          setError("암호화된 이름 예약 검증이 끝난 뒤 항목 이름을 저장할 수 있습니다.");
+        }
+        return;
       }
-      return;
     }
     if (!vaultNameWritesReady) {
       setError("암호화된 이름 예약 검증이 끝날 때까지 Vault 저장이 잠깁니다.");
@@ -4901,17 +5033,28 @@ function UnlockedVaultPage({
         next.delete(entryId);
         return next;
       });
+      entryAutosaveRetryCountsRef.current.delete(entryId);
+      if (
+        pathRewriteRecoveryFailureCountRef.current > 0
+        && !pathRewriteBusyRef.current
+      ) {
+        pathRewriteRecoveryFailureCountRef.current = 0;
+        setPathRewriteRecoveryRetry((current) => current + 1);
+      }
       setConflictedEntryIds((current) => {
         const next = new Map(current);
         next.delete(entryId);
         return next;
       });
       setDraftMergeConflict((current) => current?.entryId === entryId ? null : current);
-      setStatus(hasPendingEdits
-        ? "저장 중 추가된 편집을 보존했습니다. 다음 revision으로 계속 저장합니다."
-        : "Markdown 원본과 암호화 이력을 저장했습니다.");
+      setStatus(restoredBlankTitle
+        ? "빈 이름은 저장하지 않고 기존 이름을 유지했으며 Markdown 본문은 암호화 저장했습니다."
+        : hasPendingEdits
+          ? "저장 중 추가된 편집을 보존했습니다. 다음 revision으로 계속 저장합니다."
+          : "Markdown 원본과 암호화 이력을 저장했습니다.");
     } catch (caught) {
       if (caught instanceof NoteRevisionConflictError) {
+        entryAutosaveRetryCountsRef.current.delete(entryId);
         setConflictedEntryIds((current) => new Map(current).set(entryId, caught.actualRevision));
         setError("다른 기기나 탭에서 이 노트가 변경되었습니다. 현재 편집본은 유지되며 서버 최신본을 안전하게 확인합니다.");
         if (isMarkdownMergeEntry(note)) {
@@ -4920,6 +5063,9 @@ function UnlockedVaultPage({
       } else {
         setSaveFailedEntryIds((current) => new Set(current).add(entryId));
         setError(caught instanceof Error ? caught.message : "노트를 저장하지 못했습니다.");
+        if (!scheduleRetry()) {
+          setStatus("자동 저장이 반복 실패했습니다. 현재 편집본은 이 세션에 보존되어 있으며 다시 입력하거나 저장을 눌러 재시도할 수 있습니다.");
+        }
       }
     } finally {
       savingEntryIdsRef.current.delete(entryId);
@@ -4952,6 +5098,7 @@ function UnlockedVaultPage({
     const reconnected = isOnline && !previousOnlineRef.current;
     previousOnlineRef.current = isOnline;
     if (!reconnected) return;
+    pathRewriteRecoveryFailureCountRef.current = 0;
     setStatus("연결이 복구되어 저장하지 못한 노트를 다시 저장합니다…");
     for (const entryId of saveFailedEntryIds) {
       void saveEntry(entryId);
@@ -5131,6 +5278,7 @@ function UnlockedVaultPage({
 
   useEffect(() => () => {
     entryAutosaveRef.current?.cancelAll();
+    entryAutosaveRetryCountsRef.current.clear();
   }, []);
 
   function updateEntryDraft(
@@ -5140,6 +5288,7 @@ function UnlockedVaultPage({
     if (deletingEntryIdsRef.current.has(entryId)) {
       return;
     }
+    entryAutosaveRetryCountsRef.current.delete(entryId);
     const note = notesRef.current.find((candidate) => candidate.id === entryId);
     const currentDraft = draftsRef.current[entryId];
     if (!currentDraft?.dirty) {
@@ -5321,6 +5470,14 @@ function UnlockedVaultPage({
     body?: string,
     options: CreateVaultEntryOptions = {}
   ): Promise<boolean> {
+    const requestedFolderId = options.folderId === undefined ? selectedFolderId : options.folderId;
+    if (
+      requestedFolderId !== null
+      && folderTrashLockedFolderIdsRef.current.has(requestedFolderId)
+    ) {
+      setError("폴더 휴지통 처리가 끝난 뒤 새 항목을 만들어주세요.");
+      return false;
+    }
     if (pendingEntryCreationRef.current) {
       setError("새 항목의 암호화 생성이 끝난 뒤 다시 시도해주세요.");
       return false;
@@ -5337,7 +5494,7 @@ function UnlockedVaultPage({
     setError(null);
     let handedOffToActiveDraft = false;
     try {
-      const folderId = options.folderId === undefined ? selectedFolderId : options.folderId;
+      const folderId = requestedFolderId;
       const requestedTitle = titleBase ?? (kind === "canvas" ? "새 캔버스" : kind === "base" ? "새 Base" : "새 노트");
       const ownedNotes = notes.filter((note) => note.ownerUid === profile.uid);
       const collision = options.preserveRequestedTitle
@@ -5627,6 +5784,13 @@ function UnlockedVaultPage({
         : "암호화된 이름 무결성 키가 준비될 때까지 폴더를 만들 수 없습니다.");
       return;
     }
+    if (
+      selectedFolderId !== null
+      && folderTrashLockedFolderIdsRef.current.has(selectedFolderId)
+    ) {
+      setError("폴더 휴지통 처리가 끝난 뒤 하위 폴더를 만들어주세요.");
+      return;
+    }
     const name = window.prompt("새 폴더 이름");
     if (!name) {
       return;
@@ -5863,15 +6027,19 @@ function UnlockedVaultPage({
       ))
       .map((note) => note.id);
     if (dirtySourceIds.length) setStatus("경로 변경 전에 편집 중인 참조 source를 저장하는 중입니다…");
-    for (const entryId of dirtySourceIds) {
-      const pending = entryMutationPromisesRef.current.get(entryId);
-      if (pending) await pending;
-      await saveEntryRef.current(entryId);
+    const remainingDirtyEntryIds = await flushVaultDraftsBeforePathRewriteRecovery({
+      dirtyEntryIds: dirtySourceIds,
+      isDirty: (entryId) => Boolean(draftsRef.current[entryId]?.dirty),
+      save: (entryId) => saveEntryRef.current(entryId),
+      waitForMutation: (entryId) => entryMutationPromisesRef.current.get(entryId)
+    });
+    const unsafeEntryIds = dirtySourceIds.filter((entryId) => {
       const note = notesRef.current.find((candidate) => candidate.id === entryId);
       const draft = draftsRef.current[entryId];
-      if (!note || !draft || draft.dirty || draft.baseRevision !== (note.revision ?? 0)) {
-        throw new Error("저장하지 못한 편집 source가 있어 경로 변경을 시작하지 않았습니다.");
-      }
+      return !note || !draft || draft.dirty || draft.baseRevision !== (note.revision ?? 0);
+    });
+    if (remainingDirtyEntryIds.length > 0 || unsafeEntryIds.length > 0) {
+      throw new Error("저장하지 못한 편집 source가 있어 경로 변경을 시작하지 않았습니다.");
     }
   }
 
@@ -6159,6 +6327,7 @@ function UnlockedVaultPage({
     ) return;
     pathRewriteCleanupSessionRef.current = { privateKey, uid: profile.uid };
     pathRewriteCleanupOwnerRef.current = null;
+    pathRewriteRecoveryFailureCountRef.current = 0;
     void beginTerminalVaultPathRewriteCleanupSession(profile.uid).catch(() => undefined);
   }, [privateKey, profile.uid]);
 
@@ -6178,6 +6347,27 @@ function UnlockedVaultPage({
     pathRewriteRecoveryGenerationRef.current = generation;
     let cancelled = false;
     let deferredRecoveryTimer: number | null = null;
+    let deferredRecoveryDeadline = Number.POSITIVE_INFINITY;
+    const scheduleDeferredRecovery = (delayMs: number) => {
+      if (!Number.isFinite(delayMs) || delayMs <= 0) return;
+      const deadline = Date.now() + delayMs;
+      if (deferredRecoveryTimer !== null && deadline >= deferredRecoveryDeadline) return;
+      if (deferredRecoveryTimer !== null) window.clearTimeout(deferredRecoveryTimer);
+      deferredRecoveryDeadline = deadline;
+      deferredRecoveryTimer = window.setTimeout(() => {
+        if (!cancelled && generation === pathRewriteRecoveryGenerationRef.current) {
+          setPathRewriteRecoveryRetry((current) => current + 1);
+        }
+      }, Math.max(0, deadline - Date.now()) + 25);
+    };
+    const scheduleFailedRecovery = () => {
+      const failureCount = pathRewriteRecoveryFailureCountRef.current + 1;
+      pathRewriteRecoveryFailureCountRef.current = failureCount;
+      const retryDelay = automaticVaultPathRewriteRetryDelayMs(failureCount);
+      if (retryDelay === null) return null;
+      scheduleDeferredRecovery(retryDelay);
+      return { failureCount, retryDelay };
+    };
 
     void scanRecoverableVaultPathRewriteJobs(profile.uid, privateKey).then(async ({
       jobs,
@@ -6189,14 +6379,25 @@ function UnlockedVaultPage({
         .map((job) => job.recoveryAfterMs ?? 0)
         .filter((delay) => delay > 0);
       if (deferredDelays.length > 0) {
-        deferredRecoveryTimer = window.setTimeout(() => {
-          if (!cancelled && generation === pathRewriteRecoveryGenerationRef.current) {
-            setPathRewriteRecoveryRetry((current) => current + 1);
-          }
-        }, Math.min(...deferredDelays) + 25);
+        scheduleDeferredRecovery(Math.min(...deferredDelays));
       }
       const eligibleJobs = jobs.filter((job) => (job.recoveryAfterMs ?? 0) <= 0);
-      if (eligibleJobs.length === 0) return;
+      if (eligibleJobs.length === 0) {
+        pathRewriteRecoveryFailureCountRef.current = 0;
+        return;
+      }
+      const manualRecoveryJob = eligibleJobs.find((job) => (
+        !shouldAutomaticallyRecoverVaultPathRewriteJob(job)
+      ));
+      if (manualRecoveryJob) {
+        setPathRewriteJob(manualRecoveryJob);
+        setStatus("중단된 내부 참조 작업은 현재 원본을 보존하고 직접 재확인을 기다립니다.");
+      }
+      const automaticJobs = eligibleJobs.filter(shouldAutomaticallyRecoverVaultPathRewriteJob);
+      if (automaticJobs.length === 0) {
+        pathRewriteRecoveryFailureCountRef.current = 0;
+        return;
+      }
       // The lookup itself is read-only. Claim the global path lock only after
       // a recoverable job is known, and retry if a user mutation won the race.
       if (pathRewriteBusyRef.current) {
@@ -6217,23 +6418,30 @@ function UnlockedVaultPage({
         waitForMutation: (entryId) => entryMutationPromisesRef.current.get(entryId)
       });
       if (remainingDirtyEntryIds.length > 0) {
+        const retry = scheduleFailedRecovery();
         setError(
-          `${remainingDirtyEntryIds.length}개 편집본을 서버에 저장하지 못해 내부 참조 자동 복구를 중단했습니다. 현재 초안은 이 세션에 그대로 남아 있습니다.`
+          `${remainingDirtyEntryIds.length}개 편집본을 서버에 저장하지 못해 내부 참조 자동 복구를 중단했습니다. 현재 초안은 이 세션에 그대로 남아 있습니다.${retry ? ` ${Math.ceil(retry.retryDelay / 1_000)}초 후 다시 확인합니다 (${retry.failureCount}/5).` : " 편집본을 저장한 뒤 복구 알림에서 다시 확인해주세요."}`
         );
         return;
       }
-      for (const job of eligibleJobs) {
+      for (const job of automaticJobs) {
         if (cancelled || generation !== pathRewriteRecoveryGenerationRef.current) return;
         setPathRewriteJob(job);
         setStatus(`중단된 내부 참조 작업을 확인하는 중입니다… ${job.cursor}/${job.stepCount}`);
         const recovered = await recoverDurablePathRewriteJob(job);
         if (recovered.outcome === "deferred") {
+          scheduleDeferredRecovery(recovered.job.recoveryAfterMs ?? 250);
           setStatus("다른 탭에서 진행 중일 수 있어 내부 참조 자동 복구를 잠시 보류했습니다.");
           continue;
         }
         if (recovered.outcome === "not-applied") {
           setStatus("이전에 준비한 경로 변경은 서버에 적용되지 않아 내부 참조 작업을 실행하지 않았습니다.");
         }
+      }
+      pathRewriteRecoveryFailureCountRef.current = 0;
+      if (manualRecoveryJob) {
+        setPathRewriteJob(manualRecoveryJob);
+        setStatus("자동 복구 작업을 확인했습니다. 충돌한 내부 참조 원본은 직접 재확인을 기다립니다.");
       }
       if (hasMore && shouldContinueImmediately) {
         // The bounded page was full. Rescan after these jobs became terminal so
@@ -6244,7 +6452,36 @@ function UnlockedVaultPage({
     }).catch((caught) => {
       if (cancelled || generation !== pathRewriteRecoveryGenerationRef.current) return;
       const job = caught instanceof VaultPathRewriteControllerError ? caught.job : undefined;
-      if (job) setPathRewriteJob(job);
+      if (job) {
+        setPathRewriteJob(job);
+        if (job.status === "blocked" && job.lastErrorCode === "write-failed") {
+          const retry = scheduleFailedRecovery();
+          if (retry) {
+            setError(null);
+            setStatus(`최신 서버 revision을 다시 읽어 ${Math.ceil(retry.retryDelay / 1_000)}초 후 내부 참조 저장을 재시도합니다 (${retry.failureCount}/5).`);
+          } else {
+            setError("내부 참조 암호화 저장이 반복 실패했습니다. 원본은 보존했으며 복구 알림에서 다시 시도할 수 있습니다.");
+          }
+          return;
+        }
+        if (job.status === "blocked") {
+          pathRewriteRecoveryFailureCountRef.current = 0;
+          setError(null);
+          setStatus("내부 참조 원본은 변경하지 않았습니다. 복구 알림에서 현재 서버 상태를 직접 재확인할 수 있습니다.");
+          return;
+        }
+      }
+      const retryCause = caught instanceof VaultPathRewriteControllerError
+        ? caught.cause
+        : caught;
+      if (retryableVaultPathRewriteFailure(retryCause)) {
+        const retry = scheduleFailedRecovery();
+        if (retry) {
+          setError(null);
+          setStatus(`네트워크 상태를 확인해 ${Math.ceil(retry.retryDelay / 1_000)}초 후 내부 참조 자동 복구를 다시 시도합니다 (${retry.failureCount}/5).`);
+          return;
+        }
+      }
       setError(caught instanceof Error
         ? `중단된 내부 참조 작업을 자동 복구하지 못했습니다: ${caught.message}`
         : "중단된 내부 참조 작업을 자동 복구하지 못했습니다.");
@@ -6388,6 +6625,10 @@ function UnlockedVaultPage({
       setError("다른 경로 변경의 내부 참조를 확인하는 중입니다.");
       return;
     }
+    if (clipboardAssetsPendingForEntry(entryId)) {
+      setError("이미지 붙여넣기가 끝난 뒤 항목을 이동해주세요.");
+      return;
+    }
     if (!canMutateExistingNameTarget(entryId)) {
       setError("암호화된 이름 예약 검증이 끝날 때까지 항목 이동이 잠깁니다.");
       return;
@@ -6434,6 +6675,7 @@ function UnlockedVaultPage({
       setError("대상 폴더에 동일한 이름의 항목이 있습니다.");
       return;
     }
+    const optimisticOperationId = stageOptimisticEntryPatch(entryId, { folderId });
     const finishEntryMutation = beginEntryMutation(entryId);
     savingEntryIdsRef.current.add(entryId);
     setSavingEntryIds((current) => new Set(current).add(entryId));
@@ -6590,6 +6832,7 @@ function UnlockedVaultPage({
         return next;
       });
       finishEntryMutation();
+      finishOptimisticEntryPatch(entryId, optimisticOperationId);
       pathRewriteBusyRef.current = false;
       setPathRewriteBusy(false);
     }
@@ -6862,21 +7105,24 @@ function UnlockedVaultPage({
   async function renameEntry(entryId: string, requestedTitle?: string) {
     if (!profile || !privateKey || !vaultIntegrityKey) {
       setError("암호화된 이름 무결성 키가 준비될 때까지 항목 이름을 바꿀 수 없습니다.");
-      return;
+      return "retryable-failure" as const;
     }
     if (pathRewriteBusyRef.current) {
       setError("다른 경로 변경의 내부 참조를 확인하는 중입니다.");
-      return;
+      return "retryable-failure" as const;
+    }
+    if (clipboardAssetsPendingForEntry(entryId)) {
+      setError("이미지 붙여넣기가 끝난 뒤 항목 이름을 변경해주세요.");
+      return "retryable-failure" as const;
     }
     if (!canMutateExistingNameTarget(entryId)) {
       setError("암호화된 이름 예약 검증이 끝날 때까지 항목 이름 변경이 잠깁니다.");
-      return;
+      return "retryable-failure" as const;
     }
     const existingMutation = entryMutationPromisesRef.current.get(entryId);
     if (existingMutation) {
       await existingMutation;
-      await renameEntryRef.current(entryId, requestedTitle);
-      return;
+      return await renameEntryRef.current(entryId, requestedTitle);
     }
     const currentNotes = notesRef.current;
     const note = currentNotes.find((candidate) => candidate.id === entryId);
@@ -6885,15 +7131,15 @@ function UnlockedVaultPage({
       && vaultNameCollisionTargetIds.has(entryId);
     if (!note || !currentDraft) {
       setError("이름을 변경할 항목의 편집 버퍼를 준비하지 못했습니다.");
-      return;
+      return "blocked" as const;
     }
     if (note.contentFormat === "legacy-html-v1" && !resolvingNameCollision) {
       setError("기존 HTML 노트는 Markdown 복사본으로 변환한 뒤 이름을 변경할 수 있습니다.");
-      return;
+      return "blocked" as const;
     }
     if (note.ownerUid !== profile.uid) {
       setError("공유 항목의 이름과 위치는 소유자만 변경할 수 있습니다.");
-      return;
+      return "blocked" as const;
     }
     const collisionRepairFolderId = resolvingNameCollision
       && note.type === "shared"
@@ -6905,7 +7151,7 @@ function UnlockedVaultPage({
     // Compare against the persisted note, not the draft, or an inline rename is
     // incorrectly treated as a no-op and the tree/tab keep the old title.
     if (!title || title === note.title.trim()) {
-      return;
+      return "unchanged" as const;
     }
     if (currentNotes.some((candidate) => (
       candidate.id !== entryId
@@ -6914,8 +7160,12 @@ function UnlockedVaultPage({
       && normalizedEntryTitle(candidate.title, candidate.entryKind) === normalizedEntryTitle(title, note.entryKind)
     ))) {
       setError("같은 폴더에 동일한 이름의 항목이 있습니다.");
-      return;
+      return "blocked" as const;
     }
+    const optimisticOperationId = stageOptimisticEntryPatch(entryId, {
+      folderId: collisionRepairFolderId,
+      title
+    });
     if (!currentDraft.dirty) {
       captureMarkdownDraftBase(entryId, note, currentDraft);
     }
@@ -7049,6 +7299,7 @@ function UnlockedVaultPage({
         ? "중복 이름을 해소해 검증을 다시 시작합니다. 모호한 기존 링크는 자동 귀속하지 않습니다."
         : `이름을 변경하고 내부 참조 ${completed.confirmedCount + selfRewriteCount}개를 확인했습니다.${sharedRewriteWarning(excludedSharedCount)}`);
       if (resolvingNameCollision) recheckVaultNameIntegrityAfterRepair();
+      return "saved" as const;
     } catch (caught) {
       const underlyingError = caught instanceof VaultPathRewriteControllerError
         ? caught.cause
@@ -7056,14 +7307,23 @@ function UnlockedVaultPage({
       const inventoryFailure = pathRewriteInventoryFailureMessage(underlyingError);
       if (inventoryFailure) {
         setError(inventoryFailure);
+        return underlyingError
+          && typeof underlyingError === "object"
+          && "code" in underlyingError
+          && String(underlyingError.code) === "vault_path_rewrite_inventory_changed"
+          ? "retryable-failure" as const
+          : "blocked" as const;
       } else if (underlyingError instanceof NoteRevisionConflictError) {
         setConflictedEntryIds((current) => new Map(current).set(entryId, underlyingError.actualRevision));
         setError("다른 기기나 탭에서 이 항목이 변경되어 이름을 바꾸지 않았습니다. 현재 편집본은 그대로 보존됩니다.");
         if (isMarkdownMergeEntry(note)) void prepareDraftMergeConflict(entryId, false);
+        return "blocked" as const;
       } else if (underlyingError instanceof VaultNameConflictError) {
         setError("같은 폴더에 동일한 이름의 항목이 있어 이름을 변경하지 않았습니다.");
+        return "blocked" as const;
       } else {
         setError(caught instanceof Error ? caught.message : "항목 이름을 변경하지 못했습니다.");
+        return "retryable-failure" as const;
       }
     } finally {
       savingEntryIdsRef.current.delete(entryId);
@@ -7073,6 +7333,7 @@ function UnlockedVaultPage({
         return next;
       });
       finishEntryMutation();
+      finishOptimisticEntryPatch(entryId, optimisticOperationId);
       pathRewriteBusyRef.current = false;
       setPathRewriteBusy(false);
     }
@@ -7207,6 +7468,12 @@ function UnlockedVaultPage({
     }
   }
 
+  function clipboardAssetsPendingForEntry(entryId: string) {
+    return pendingClipboardPasteCountsRef.current.has(entryId)
+      || [...pendingClipboardAssetTitleKeysRef.current.values()]
+        .some((reservation) => reservation.sourceNoteId === entryId);
+  }
+
   async function moveFolderToTrash(folderId: string, confirmed = false) {
     if (!profile || !vaultNameWritesReady || folderServerReservationSignature === null) {
       setError("서버의 전체 폴더 트리와 이름 예약을 확인한 뒤 휴지통으로 이동할 수 있습니다.");
@@ -7214,6 +7481,10 @@ function UnlockedVaultPage({
     }
     if (pathRewriteBusyRef.current) {
       setError("내부 참조 갱신이 끝난 뒤 폴더를 휴지통으로 이동해주세요.");
+      return;
+    }
+    if (folderTrashLockedFolderIdsRef.current.size > 0) {
+      setError("다른 폴더의 휴지통 처리가 끝난 뒤 다시 시도해주세요.");
       return;
     }
     if (!canMutateExistingNameTarget(folderId)) {
@@ -7235,14 +7506,56 @@ function UnlockedVaultPage({
         return parentId !== null && hiddenFolderIds.has(parentId);
       })
       .map((note) => note.id));
+    if ([...hiddenEntryIds].some(clipboardAssetsPendingForEntry)) {
+      setError("하위 노트의 이미지 붙여넣기가 끝난 뒤 폴더를 휴지통으로 이동해주세요.");
+      return;
+    }
+    if ([...hiddenEntryIds].some((entryId) => deletingEntryIdsRef.current.has(entryId))) {
+      setError("하위 항목 변경이 끝난 뒤 폴더를 휴지통으로 이동해주세요.");
+      return;
+    }
     if (!confirmed && !window.confirm(
       `'${folder.displayName}' 폴더와 하위 폴더 ${Math.max(0, hiddenFolderIds.size - 1)}개, 항목 ${hiddenEntryIds.size}개를 Vault 휴지통으로 이동할까요?`
     )) return;
 
+    hiddenFolderIds.forEach((hiddenFolderId) => {
+      folderTrashLockedFolderIdsRef.current.add(hiddenFolderId);
+    });
+    hiddenEntryIds.forEach((entryId) => {
+      deletingEntryIdsRef.current.add(entryId);
+    });
+    setDeletingEntryIds((current) => new Set([...current, ...hiddenEntryIds]));
     setTrashBusyFolderIds((current) => new Set(current).add(folderId));
     setError(null);
+    let ownsPathLock = false;
     try {
       await flushOwnedRewriteDrafts();
+      if ([...hiddenEntryIds].some(clipboardAssetsPendingForEntry)) {
+        throw new Error("하위 노트의 이미지 붙여넣기 상태가 변경되어 폴더 휴지통 처리를 중단했습니다.");
+      }
+      if (pathRewriteBusyRef.current) {
+        throw new Error("다른 경로 변경이 시작되어 폴더 휴지통 처리를 중단했습니다.");
+      }
+      pathRewriteBusyRef.current = true;
+      ownsPathLock = true;
+      setPathRewriteBusy(true);
+      const shareableSourceNoteIds = notesRef.current.flatMap((note) => (
+        hiddenEntryIds.has(note.id)
+        && note.ownerUid === profile.uid
+        && (note.entryKind === "markdown" || note.entryKind === "legacy-html")
+          ? [note.id]
+          : []
+      ));
+      let revokedShareCount = 0;
+      if (shareableSourceNoteIds.length > 0) {
+        const { revokeVaultSecureSharesBeforeSourcesTrash } = await import(
+          "../features/vault/vaultSecureShareLifecycle"
+        );
+        revokedShareCount = await revokeVaultSecureSharesBeforeSourcesTrash({
+          getIdToken,
+          sourceNoteIds: shareableSourceNoteIds
+        });
+      }
       await trashRevisionedEncryptedFolderSubtree({
         expectedRevision: folder.revision ?? 0,
         folderId,
@@ -7254,7 +7567,7 @@ function UnlockedVaultPage({
       setTabs((current) => current.filter((tab) => tab.kind !== "entry" || !hiddenEntryIds.has(tab.entryId)));
       if (activeEntryId && hiddenEntryIds.has(activeEntryId)) setActiveTabId(null);
       if (selectedFolderId && hiddenFolderIds.has(selectedFolderId)) setSelectedFolderId(null);
-      setStatus(`폴더 하위 트리를 원자적으로 휴지통 처리했습니다. 항목 ${hiddenEntryIds.size}개는 원본 revision과 암호문을 그대로 보존합니다.`);
+      setStatus(`폴더 하위 트리를 원자적으로 휴지통 처리했습니다. 항목 ${hiddenEntryIds.size}개는 원본 revision과 암호문을 그대로 보존합니다.${revokedShareCount > 0 ? ` 보안 공유 ${revokedShareCount}개를 중단했습니다.` : ""}`);
     } catch (caught) {
       if (caught instanceof NoteRevisionConflictError) {
         setError("다른 기기에서 폴더가 변경되어 휴지통으로 이동하지 않았습니다.");
@@ -7262,12 +7575,98 @@ function UnlockedVaultPage({
         setError(caught instanceof Error ? caught.message : "폴더를 휴지통으로 이동하지 못했습니다.");
       }
     } finally {
+      if (ownsPathLock) {
+        pathRewriteBusyRef.current = false;
+        setPathRewriteBusy(false);
+      }
+      hiddenFolderIds.forEach((hiddenFolderId) => {
+        folderTrashLockedFolderIdsRef.current.delete(hiddenFolderId);
+      });
+      hiddenEntryIds.forEach((entryId) => {
+        deletingEntryIdsRef.current.delete(entryId);
+      });
+      setDeletingEntryIds((current) => {
+        const next = new Set(current);
+        hiddenEntryIds.forEach((entryId) => next.delete(entryId));
+        return next;
+      });
       setTrashBusyFolderIds((current) => {
         const next = new Set(current);
         next.delete(folderId);
         return next;
       });
     }
+  }
+
+  async function openVaultShareManager(
+    entryId: string,
+    returnFocusTo: HTMLElement | null
+  ) {
+    if (clipboardAssetsPendingForEntry(entryId)) {
+      setError("붙여넣은 이미지가 서버 Vault 목록에 반영된 뒤 노트 공유를 열어주세요.");
+      return;
+    }
+    const existingMutation = entryMutationPromisesRef.current.get(entryId);
+    if (existingMutation) await existingMutation;
+
+    const initialNote = notesRef.current.find((candidate) => candidate.id === entryId);
+    if (
+      !initialNote
+      || initialNote.ownerUid !== profile.uid
+      || initialNote.isDeleted
+      || (initialNote.entryKind !== "markdown" && initialNote.entryKind !== "legacy-html")
+      || (initialNote.contentFormat !== "markdown-v1" && initialNote.contentFormat !== "legacy-html-v1")
+    ) {
+      setError("내가 소유한 Markdown 또는 기존 노트만 공유할 수 있습니다.");
+      return;
+    }
+
+    if (draftsRef.current[entryId]?.dirty) {
+      await saveEntryRef.current(entryId);
+    }
+    const savedDraft = draftsRef.current[entryId];
+    const savedNote = notesRef.current.find((candidate) => candidate.id === entryId);
+    if (
+      !savedNote
+      || savedNote.ownerUid !== profile.uid
+      || savedNote.isDeleted
+      || savedDraft?.dirty
+      || conflictedEntryIds.has(entryId)
+      || entryMutationPromisesRef.current.has(entryId)
+    ) {
+      setError("현재 편집 내용을 먼저 암호화해 저장한 뒤 공유를 열 수 있습니다.");
+      return;
+    }
+    if (clipboardAssetsPendingForEntry(entryId)) {
+      setError("붙여넣은 이미지가 서버 Vault 목록에 반영된 뒤 노트 공유를 열어주세요.");
+      return;
+    }
+
+    const { embeddedVaultAssetIdsForShare } = await import(
+      "../features/vault/vaultShareEligibility"
+    );
+    const latestSavedNote = notesRef.current.find((candidate) => candidate.id === entryId);
+    if (
+      clipboardAssetsPendingForEntry(entryId)
+      || draftsRef.current[entryId]?.dirty
+      || conflictedEntryIds.has(entryId)
+      || entryMutationPromisesRef.current.has(entryId)
+      || !latestSavedNote
+      || latestSavedNote.ownerUid !== profile.uid
+      || latestSavedNote.isDeleted
+      || (latestSavedNote.revision ?? 0) !== (savedNote.revision ?? 0)
+    ) {
+      setError("공유 상태를 확인하는 동안 노트가 변경되었습니다. 저장이 끝난 뒤 다시 열어주세요.");
+      return;
+    }
+    const hasUnsharedAssetEmbeds = embeddedVaultAssetIdsForShare(
+      latestSavedNote,
+      entryPaths.get(latestSavedNote.id) ?? entryLabel(latestSavedNote),
+      indexEntries
+    ).length > 0;
+
+    setError(null);
+    setShareTarget({ hasUnsharedAssetEmbeds, note: latestSavedNote, returnFocusTo });
   }
 
   async function moveEntryToTrash(entryId: string, confirmed = false) {
@@ -7277,6 +7676,10 @@ function UnlockedVaultPage({
     }
     if (pathRewriteBusyRef.current) {
       setError("내부 참조 갱신이 끝난 뒤 항목을 휴지통으로 이동해주세요.");
+      return;
+    }
+    if (clipboardAssetsPendingForEntry(entryId)) {
+      setError("이미지 붙여넣기가 끝난 뒤 항목을 휴지통으로 이동해주세요.");
       return;
     }
     if (!canMutateExistingNameTarget(entryId)) {
@@ -7298,6 +7701,7 @@ function UnlockedVaultPage({
       return;
     }
 
+    const optimisticOperationId = stageOptimisticEntryPatch(entryId, { hidden: true });
     const finishEntryMutation = beginEntryMutation(entryId);
     deletingEntryIdsRef.current.add(entryId);
     setDeletingEntryIds((current) => new Set(current).add(entryId));
@@ -7306,6 +7710,7 @@ function UnlockedVaultPage({
     try {
       const draft = draftsRef.current[entryId];
       let expectedRevision = note.revision ?? 0;
+      let revokedShareCount = 0;
       if (draft?.dirty && note.contentFormat !== "legacy-html-v1") {
         const saved = await saveEncryptedVaultEntry(
           { ...note, revision: draft.baseRevision },
@@ -7331,6 +7736,15 @@ function UnlockedVaultPage({
             }
           : candidate));
       }
+      if (note.entryKind === "markdown" || note.entryKind === "legacy-html") {
+        const { revokeVaultSecureSharesBeforeTrash } = await import(
+          "../features/vault/vaultSecureShareLifecycle"
+        );
+        revokedShareCount = await revokeVaultSecureSharesBeforeTrash({
+          getIdToken,
+          sourceNoteId: entryId
+        });
+      }
       await deleteRevisionedNote({
         expectedRevision,
         noteId: entryId,
@@ -7346,7 +7760,9 @@ function UnlockedVaultPage({
       if (activeEntryId === entryId) {
         setActiveTabId(null);
       }
-      setStatus("항목을 휴지통으로 이동하고 revision 이력을 남겼습니다.");
+      setStatus(revokedShareCount > 0
+        ? `보안 공유 ${revokedShareCount}개를 중단하고 항목을 휴지통으로 이동했습니다.`
+        : "항목을 휴지통으로 이동하고 revision 이력을 남겼습니다.");
     } catch (caught) {
       if (caught instanceof NoteRevisionConflictError) {
         setConflictedEntryIds((current) => new Map(current).set(entryId, caught.actualRevision));
@@ -7368,6 +7784,7 @@ function UnlockedVaultPage({
         return next;
       });
       finishEntryMutation();
+      finishOptimisticEntryPatch(entryId, optimisticOperationId);
     }
   }
 
@@ -8798,6 +9215,74 @@ function UnlockedVaultPage({
     setStatus(`'${title}' 녹음을 asset-v1로 암호화해 저장했습니다.`);
   }
 
+  async function pasteImagesIntoMarkdownEntry(
+    entryId: string,
+    files: readonly File[],
+    { signal }: MarkdownImagePasteContext
+  ): Promise<MarkdownImagePasteResult | null> {
+    const note = notesRef.current.find((candidate) => candidate.id === entryId) ?? null;
+    const draft = draftsRef.current[entryId] ?? null;
+    if (!note || !draft || note.entryKind !== "markdown" || note.contentFormat !== "markdown-v1") {
+      setError("Markdown 노트를 연 뒤 이미지를 붙여넣어주세요.");
+      return null;
+    }
+    if (
+      !vaultIntegrityKey
+      || !vaultNameWritesReady
+      || pathRewriteBusyRef.current
+      || pendingEntryCreationRef.current
+      || deletingEntryIdsRef.current.has(note.id)
+    ) {
+      setError("암호화된 Vault 쓰기와 경로 작업이 끝난 뒤 이미지를 붙여넣어주세요.");
+      return null;
+    }
+    if (note.ownerUid !== profile.uid || note.type !== "personal") {
+      setError("공유 참여자의 접근이 끊기지 않도록 현재는 내가 소유한 개인 Markdown 노트에만 이미지를 직접 붙여넣을 수 있습니다.");
+      return null;
+    }
+
+    pendingClipboardPasteCountsRef.current.set(
+      note.id,
+      (pendingClipboardPasteCountsRef.current.get(note.id) ?? 0) + 1
+    );
+    try {
+      const { pasteVaultClipboardImages } = await import(
+        "../features/vault/vaultClipboardPasteFlow"
+      );
+      return await pasteVaultClipboardImages({
+        files,
+        getNotes: () => notesRef.current,
+        integrityKey: vaultIntegrityKey,
+        note,
+        pendingAssetTitleKeyById: pendingClipboardAssetTitleKeyByIdRef.current,
+        pendingAssetTitleKeys: pendingClipboardAssetTitleKeysRef.current,
+        pendingCreatedEntryIds: pendingCreatedEntryIdsRef.current,
+        profile,
+        setError,
+        setStatus,
+        signal,
+        sourceFolderId: draft.folderId
+      });
+    } catch (caught) {
+      if (!signal.aborted) {
+        setError(caught instanceof Error ? caught.message : "이미지 붙여넣기 모듈을 불러오지 못했습니다.");
+      }
+      return null;
+    } finally {
+      const nextPasteCount = (pendingClipboardPasteCountsRef.current.get(note.id) ?? 1) - 1;
+      if (nextPasteCount > 0) pendingClipboardPasteCountsRef.current.set(note.id, nextPasteCount);
+      else pendingClipboardPasteCountsRef.current.delete(note.id);
+    }
+  }
+
+  function pasteImagesIntoActiveMarkdown(
+    files: readonly File[],
+    context: MarkdownImagePasteContext
+  ) {
+    if (!activeEntryId) return Promise.resolve(null);
+    return pasteImagesIntoMarkdownEntry(activeEntryId, files, context);
+  }
+
   async function importCanvasExternalFiles(files: readonly File[]) {
     if (!vaultIntegrityKey || !vaultNameWritesReady || pathRewriteBusyRef.current) {
       throw new Error("암호화된 이름 예약이 끝난 뒤 외부 파일을 추가해주세요.");
@@ -9531,6 +10016,18 @@ function UnlockedVaultPage({
     path: entryPaths.get(note.id) ?? entryLabel(note),
     title: entryLabel(note)
   })), [entryPaths, notes]);
+  const optimisticFileTreeNotes = useMemo(() => (
+    projectOptimisticVaultEntries(notes, optimisticEntryPatches)
+  ), [notes, optimisticEntryPatches]);
+  const contextMenuShareNote = contextMenu?.targetKind === "entry"
+    ? notes.find((note) => note.id === contextMenu.targetId) ?? null
+    : null;
+  const contextMenuCanShare = Boolean(
+    contextMenuShareNote
+    && contextMenuShareNote.ownerUid === profile.uid
+    && !contextMenuShareNote.isDeleted
+    && (contextMenuShareNote.entryKind === "markdown" || contextMenuShareNote.entryKind === "legacy-html")
+  );
 
   return (
     <AppShell onBeforeExit={flushVaultBeforeExit} variant="vault">
@@ -9734,7 +10231,7 @@ function UnlockedVaultPage({
                   expandedFolderIds={expandedFolderIds}
                   folders={folders}
                   mutationDisabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked}
-                  notes={notes}
+                  notes={optimisticFileTreeNotes}
                   onBulkMove={moveVaultTreeTargets}
                   onBulkTrash={trashVaultTreeTargets}
                   onDropEntry={moveEntryToFolder}
@@ -9980,6 +10477,9 @@ function UnlockedVaultPage({
                 onChange={(body) => {
                   if (groupActiveEntryId) updateEntryDraft(groupActiveEntryId, { body });
                 }}
+                onPasteImages={groupActiveEntryId
+                  ? (files, context) => pasteImagesIntoMarkdownEntry(groupActiveEntryId, files, context)
+                  : undefined}
                 onSave={() => {
                   if (groupActiveEntryId) void saveEntry(groupActiveEntryId);
                 }}
@@ -10056,6 +10556,22 @@ function UnlockedVaultPage({
                         onClick={() => void createNormalizedMarkdownCopy()}
                         type="button"
                       >HTML → Markdown 복사</button>
+                    ) : null}
+                    {activeNote.ownerUid === profile.uid
+                      && (activeNote.entryKind === "markdown" || activeNote.entryKind === "legacy-html") ? (
+                      <button
+                        aria-label="노트 공유"
+                        disabled={
+                          deletingEntryIds.has(activeNote.id)
+                          || conflictedEntryIds.has(activeNote.id)
+                          || !isOnline
+                          || pathRewriteBusy
+                          || entryCreationContentLocked
+                        }
+                        onClick={(event) => void openVaultShareManager(activeNote.id, event.currentTarget)}
+                        title="보안 링크와 QuickMemo 사용자 공유"
+                        type="button"
+                      ><Share2 aria-hidden="true" size={16} /></button>
                     ) : null}
                     <button
                       aria-label="저장"
@@ -10186,6 +10702,7 @@ function UnlockedVaultPage({
                       onInsertHandled={(id) => setEditorInsertRequest((current) => current?.id === id ? null : current)}
                       onLinkClick={handleMarkdownLink}
                       onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}
+                      onPasteImages={pasteImagesIntoActiveMarkdown}
                       onTagClick={handleMarkdownTagClick}
                       onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
                       onSave={() => void saveEntry(activeNote.id)}
@@ -10195,6 +10712,7 @@ function UnlockedVaultPage({
                       renderEmbed={renderMarkdownEmbed}
                       revealRequest={editorRevealRequest?.entryId === activeNote.id ? editorRevealRequest : null}
                       value={activeDraft.body}
+                      valueRevision={activeDraft.baseRevision}
                     />
                   ) : (
                     <VaultMarkdownEditor
@@ -10204,12 +10722,14 @@ function UnlockedVaultPage({
                       insertRequest={editorInsertRequest?.entryId === activeNote.id ? editorInsertRequest : null}
                       onChange={(body) => updateActiveDraft({ body })}
                       onInsertHandled={(id) => setEditorInsertRequest((current) => current?.id === id ? null : current)}
+                      onPasteImages={pasteImagesIntoActiveMarkdown}
                       onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
                       onSave={() => void saveEntry(activeNote.id)}
                       onSelectionChange={setEditorSelection}
                       readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
                       revealRequest={editorRevealRequest?.entryId === activeNote.id ? editorRevealRequest : null}
                       value={activeDraft.body}
+                      valueRevision={activeDraft.baseRevision}
                     />
                   )}
                 </div>
@@ -10437,7 +10957,7 @@ function UnlockedVaultPage({
               role="menu"
               style={{
                 left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)),
-                top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 150))
+                top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenuCanShare ? 190 : 150)))
               }}
             >
               <button autoFocus onClick={() => {
@@ -10459,6 +10979,15 @@ function UnlockedVaultPage({
               }} role="menuitem" type="button">
                 <FolderInput size={14} /> 이동…
               </button>
+              {contextMenuCanShare ? (
+                <button onClick={() => {
+                  const target = contextMenu;
+                  closeContextMenu(false);
+                  void openVaultShareManager(target.targetId, target.returnFocusElement);
+                }} role="menuitem" type="button">
+                  <Share2 aria-hidden="true" size={14} /> 공유…
+                </button>
+              ) : null}
               {contextMenu.targetKind === "entry" ? (
                 <button className="danger" onClick={() => {
                   const target = contextMenu;
@@ -10487,6 +11016,72 @@ function UnlockedVaultPage({
             onMove={moveContextTarget}
             returnFocusTo={moveTarget.returnFocusTo}
           />
+        ) : null}
+        {shareTarget ? (
+          <Suspense fallback={<VaultViewLoading label="노트 공유" />}>
+            <LazyVaultShareManagerDialog
+              getIdToken={getIdToken}
+              hasUnsharedAssetEmbeds={shareTarget.hasUnsharedAssetEmbeds === true}
+              note={shareTarget.note}
+              onClose={() => setShareTarget(null)}
+              onRequestParticipantSharing={() => {
+                setParticipantShareTarget({
+                  ...shareTarget,
+                  hasUnsharedAssetEmbeds: shareTarget.hasUnsharedAssetEmbeds === true
+                });
+                setShareTarget(null);
+              }}
+              privateKey={privateKey}
+              profile={profile}
+              returnFocusTo={shareTarget.returnFocusTo}
+            />
+          </Suspense>
+        ) : null}
+        {participantShareTarget ? (
+          <Suspense fallback={<VaultViewLoading label="사용자 공유" />}>
+            <LazyVaultParticipantShareDialog
+              hasUnsharedAssetEmbeds={participantShareTarget.hasUnsharedAssetEmbeds === true}
+              note={participantShareTarget.note}
+              onClose={() => setParticipantShareTarget(null)}
+              onUpdated={(result) => {
+                const entryId = participantShareTarget.note.id;
+                commitNotes((current) => current.map((candidate) => candidate.id === entryId
+                  ? {
+                      ...candidate,
+                      folderId: result.folderId,
+                      participantUids: result.participantUids,
+                      revision: result.revision,
+                      type: result.type,
+                      wrappedKeys: result.wrappedKeys
+                    }
+                  : candidate));
+                const currentDraft = draftsRef.current[entryId];
+                if (currentDraft) {
+                  const nextDrafts = {
+                    ...draftsRef.current,
+                    [entryId]: { ...currentDraft, baseRevision: result.revision }
+                  };
+                  draftsRef.current = nextDrafts;
+                  setDrafts(nextDrafts);
+                }
+                const currentBase = draftBaseSnapshotsRef.current.get(entryId);
+                if (currentBase) {
+                  draftBaseSnapshotsRef.current.set(entryId, {
+                    ...currentBase,
+                    baseRevision: result.revision,
+                    folderId: result.folderId
+                  });
+                }
+                setStatus(result.type === "shared"
+                  ? `QuickMemo 사용자 ${Math.max(0, result.participantUids.length - 1)}명과 암호화 공유했습니다.`
+                  : "QuickMemo 사용자 공유를 해제했습니다.");
+              }}
+              privateKey={privateKey}
+              profile={profile}
+              returnFocusTo={participantShareTarget.returnFocusTo}
+              users={users}
+            />
+          </Suspense>
         ) : null}
         {compactCalendarLayout && compactCalendarOpen ? (
           <section aria-label="Daily Notes 달력" aria-modal="true" className="vault-calendar-mobile-dialog" ref={compactCalendarDialogRef} role="dialog">
@@ -10722,6 +11317,13 @@ function UnlockedVaultPage({
  */
 export default function VaultPage() {
   const { firebaseUser, privateKey, profile } = useAuth();
+  const profileUid = profile?.uid;
+  const getIdToken = useCallback(async () => {
+    if (!firebaseUser || !profileUid || firebaseUser.uid !== profileUid) {
+      throw new Error("로그인 권한을 확인할 수 없습니다.");
+    }
+    return firebaseUser.getIdToken();
+  }, [firebaseUser, profileUid]);
 
   if (!profile || !firebaseUser || firebaseUser.uid !== profile.uid) {
     return null;
@@ -10729,7 +11331,7 @@ export default function VaultPage() {
   if (!privateKey) {
     return <AppShell variant="vault"><UnlockPanel /></AppShell>;
   }
-  return <UnlockedVaultPage privateKey={privateKey} profile={profile} />;
+  return <UnlockedVaultPage getIdToken={getIdToken} privateKey={privateKey} profile={profile} />;
 }
 
 interface VaultTagTreeNode {

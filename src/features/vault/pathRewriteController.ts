@@ -36,6 +36,60 @@ interface ResumeToCompletionInput {
   onStage?: (stage: VaultPathRewriteStage, job: VaultPathRewriteJobSummary) => void;
 }
 
+const maximumDraftFlushConcurrency = 4;
+const maximumTransientResumeAttempts = 3;
+const maximumAutomaticRecoveryBackoffAttempts = 5;
+
+function errorCode(cause: unknown) {
+  if (!cause || typeof cause !== "object" || !("code" in cause)) return "";
+  return String(cause.code).replace(/^firestore\//u, "");
+}
+
+/**
+ * Firestore transactions and direct-server reads are idempotent in the path
+ * rewrite service. Retry only transport/lease failures here; semantic,
+ * authorization, integrity, and revision failures remain fail-closed.
+ */
+export function retryableVaultPathRewriteFailure(cause: unknown) {
+  const code = errorCode(cause);
+  return cause instanceof TypeError
+    || code === "aborted"
+    || code === "cancelled"
+    || code === "deadline-exceeded"
+    || code === "network-request-failed"
+    || code === "network_error"
+    || code === "unavailable";
+}
+
+/**
+ * A foreground recovery loop may retry transport and draft-flush failures,
+ * but it must converge instead of polling forever on a permanent outage.
+ */
+export function automaticVaultPathRewriteRetryDelayMs(failureCount: number) {
+  if (
+    !Number.isSafeInteger(failureCount)
+    || failureCount < 1
+    || failureCount > maximumAutomaticRecoveryBackoffAttempts
+  ) return null;
+  return 1_000 * (2 ** (failureCount - 1));
+}
+
+/**
+ * Preparing/prepared/not-applied jobs are resolved by a read-first path-state
+ * check and never rewrite content unless the paired path mutation is confirmed.
+ * Semantic conflicts require an explicit user retry from the recovery notice.
+ * A write-failed job is safe to retry once per fresh recovery scan because
+ * every source is re-read and digest-checked first.
+ */
+export function shouldAutomaticallyRecoverVaultPathRewriteJob(job: VaultPathRewriteJobSummary) {
+  return job.status === "preparing"
+    || job.status === "prepared"
+    || job.status === "not-applied"
+    || job.status === "ready"
+    || job.status === "running"
+    || (job.status === "blocked" && job.lastErrorCode === "write-failed");
+}
+
 /**
  * Saves the exact dirty set captured after the caller has acquired the Vault
  * path lock. A recovery caller must stop when this returns any entry id: a
@@ -48,11 +102,44 @@ export async function flushVaultDraftsBeforePathRewriteRecovery(input: {
   waitForMutation: (entryId: string) => Promise<void> | undefined;
 }) {
   const entryIds = Array.from(new Set(input.dirtyEntryIds));
-  for (const entryId of entryIds) {
-    await input.waitForMutation(entryId);
-    await input.save(entryId);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < entryIds.length) {
+      const entryId = entryIds[nextIndex];
+      nextIndex += 1;
+      try {
+        await input.waitForMutation(entryId);
+        await input.save(entryId);
+      } catch {
+        // Recovery must inspect every captured draft and return the still-dirty
+        // set. One failed save must not hide independently saveable drafts or
+        // collapse into a generic maintenance error.
+      }
+    }
   }
+  await Promise.all(Array.from(
+    { length: Math.min(maximumDraftFlushConcurrency, entryIds.length) },
+    worker
+  ));
   return entryIds.filter((entryId) => input.isDirty(entryId));
+}
+
+async function resumeWithTransientRetry(resume: ResumeToCompletionInput["resume"]) {
+  let lastCause: unknown;
+  for (let attempt = 1; attempt <= maximumTransientResumeAttempts; attempt += 1) {
+    try {
+      return await resume();
+    } catch (cause) {
+      lastCause = cause;
+      if (attempt === maximumTransientResumeAttempts || !retryableVaultPathRewriteFailure(cause)) {
+        throw cause;
+      }
+      // Yield before an idempotent retry so Firebase can settle an aborted
+      // transaction without adding a user-visible backoff delay.
+      await Promise.resolve();
+    }
+  }
+  throw lastCause;
 }
 
 /**
@@ -77,7 +164,7 @@ export async function resumeVaultPathRewriteToCompletion({
     onStage?.("resuming", current);
     let next: ResumeVaultPathRewriteJobResult;
     try {
-      next = await resume();
+      next = await resumeWithTransientRetry(resume);
     } catch (cause) {
       throw new VaultPathRewriteControllerError(
         "blocked",
@@ -202,6 +289,7 @@ export async function recoverVaultPathRewrite(input: {
   if (
     current.status === "preparing"
     || current.status === "prepared"
+    || current.status === "not-applied"
     || current.lastErrorCode === "path-state-conflict"
   ) {
     const recovered = await input.recoverPrepared();

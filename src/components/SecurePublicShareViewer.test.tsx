@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SecureShareApiError } from "../services/secureShares";
-import { SecurePublicShareViewer } from "./SecurePublicShareViewer";
+import { SecurePublicShareViewer, SecureShareBodyRenderer } from "./SecurePublicShareViewer";
 
 const mocks = vi.hoisted(() => ({
   createComment: vi.fn(),
@@ -351,6 +351,22 @@ afterEach(() => {
 });
 
 describe("SecurePublicShareViewer", () => {
+  it("renders versioned Markdown through the bounded AST renderer without activating raw HTML", () => {
+    const { container } = render(
+      <SecureShareBodyRenderer content={{
+        bodyFormat: "markdown",
+        bodyRenderContent: '# 공유 제목\n\n<script>alert(1)</script> [안전](https://example.com) [차단](javascript:alert(1))',
+        fontSize: 17
+      }} />
+    );
+
+    expect(screen.getByRole("heading", { name: "공유 제목" })).toBeInTheDocument();
+    expect(container.querySelector("script")).toBeNull();
+    expect(screen.getByRole("link", { name: "안전" })).toHaveAttribute("rel", "noopener noreferrer");
+    expect(screen.queryByRole("link", { name: "차단" })).toBeNull();
+    expect(container.querySelector(".note-content--markdown")).not.toBeNull();
+  });
+
   it("skips a missing session candidate, opens directly, and sanitizes rich-content XSS", async () => {
     const storageSpy = vi.spyOn(Storage.prototype, "setItem");
     mocks.getMetadata.mockResolvedValue(metadata({ hasSessionCandidate: false }));

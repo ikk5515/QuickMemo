@@ -119,7 +119,7 @@ describe("VaultPage built-in knowledge tool wiring", () => {
     const recovery = recoveryStart >= 0 && recoveryEnd > recoveryStart
       ? source.slice(recoveryStart, recoveryEnd)
       : "";
-    expect(recovery).toContain("if (eligibleJobs.length === 0) return");
+    expect(recovery).toContain("if (eligibleJobs.length === 0) {");
     expect(recovery.indexOf("scanRecoverableVaultPathRewriteJobs")).toBeLessThan(
       recovery.indexOf("pathRewriteBusyRef.current = true")
     );

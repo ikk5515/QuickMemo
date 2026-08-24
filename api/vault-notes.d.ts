@@ -53,6 +53,7 @@ export type VaultNoteApiAction =
   | "update";
 
 export const __vaultNoteTesting: {
+  assertClientCreateNoteId(value: unknown): string;
   assertEncryptedPayload(
     value: unknown,
     fieldName: string,

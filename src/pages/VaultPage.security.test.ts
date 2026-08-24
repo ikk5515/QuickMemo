@@ -7,6 +7,10 @@ const vaultTrashDialogSource = readFileSync(
   join(process.cwd(), "src/features/vault/VaultTrashDialog.tsx"),
   "utf8"
 );
+const vaultClipboardPasteFlowSource = readFileSync(
+  join(process.cwd(), "src/features/vault/vaultClipboardPasteFlow.ts"),
+  "utf8"
+);
 
 describe("VaultPage security boundaries", () => {
   it("routes asset embeds through the signature-checked Blob preview instead of rendering asset JSON", () => {
@@ -214,6 +218,93 @@ describe("VaultPage security boundaries", () => {
     expect(importer).not.toContain("localStorage");
     expect(importer).not.toContain("sessionStorage");
     expect(vaultPageSource).toContain("onImportExternalFiles={importCanvasExternalFiles}");
+  });
+
+  it("routes Markdown clipboard images through encrypted asset-v1 storage without persisting a data URL", () => {
+    const pasteHandler = vaultPageSource.match(
+      /async function pasteImagesIntoMarkdownEntry[\s\S]*?async function importCanvasExternalFiles/u
+    )?.[0] ?? "";
+
+    expect(pasteHandler).toContain('note.ownerUid !== profile.uid || note.type !== "personal"');
+    expect(pasteHandler).toContain("pendingClipboardPasteCountsRef.current.set(");
+    expect(pasteHandler.indexOf("pendingClipboardPasteCountsRef.current.set(")).toBeLessThan(
+      pasteHandler.indexOf('import(\n        "../features/vault/vaultClipboardPasteFlow"')
+    );
+    expect(pasteHandler).toContain("return await pasteVaultClipboardImages({");
+    expect(vaultClipboardPasteFlowSource).toContain("prepareVaultClipboardImages(files)");
+    expect(vaultClipboardPasteFlowSource).toContain("await createEncryptedVaultAsset(profile, integrityKey");
+    expect(vaultClipboardPasteFlowSource).toContain("await getVisibleNotesByIdsFromServer(ownerUid, [note.id])");
+    expect(vaultClipboardPasteFlowSource).toContain('server.type !== "personal"');
+    expect(vaultClipboardPasteFlowSource).toContain("server.folderId ?? null");
+    expect(vaultClipboardPasteFlowSource).toContain("source: vaultClipboardImageEmbedSource(sourceTitles)");
+    expect(vaultClipboardPasteFlowSource).toContain("clearPreparedVaultClipboardImages(prepared)");
+    expect(vaultClipboardPasteFlowSource).toContain("if (signal.aborted)");
+    expect(vaultClipboardPasteFlowSource).toContain("onDiscard: discardCreatedAssets");
+    expect(vaultClipboardPasteFlowSource).toContain("await deleteRevisionedNote({");
+    expect(vaultClipboardPasteFlowSource).not.toContain("data:");
+    expect(vaultClipboardPasteFlowSource).not.toContain("localStorage");
+    expect(vaultClipboardPasteFlowSource).not.toContain("sessionStorage");
+    expect(vaultPageSource.match(/onPasteImages=\{pasteImagesIntoActiveMarkdown\}/gu)).toHaveLength(2);
+  });
+
+  it("opens the lazy share manager only from a stable saved snapshot and carries asset ACL blocks forward", () => {
+    expect(vaultPageSource).toContain(
+      'lazy(() => import("../features/vault/VaultShareManagerDialog")'
+    );
+    expect(vaultPageSource).toContain(
+      'lazy(() => import("../features/vault/VaultParticipantShareDialog")'
+    );
+
+    const openShare = vaultPageSource.match(
+      /async function openVaultShareManager[\s\S]*?async function moveEntryToTrash/u
+    )?.[0] ?? "";
+    expect(openShare.match(/clipboardAssetsPendingForEntry\(entryId\)/gu)).toHaveLength(3);
+    expect(openShare).toContain("await existingMutation");
+    expect(openShare).toContain("draftsRef.current[entryId]?.dirty");
+    expect(openShare).toContain("await saveEntryRef.current(entryId)");
+    expect(openShare).toContain("savedDraft?.dirty");
+    expect(openShare).toContain("conflictedEntryIds.has(entryId)");
+    expect(openShare).toContain("entryMutationPromisesRef.current.has(entryId)");
+    expect(openShare).toContain("await import(\n      \"../features/vault/vaultShareEligibility\"");
+    expect(openShare).toContain("const latestSavedNote = notesRef.current.find");
+    expect(openShare.lastIndexOf("clipboardAssetsPendingForEntry(entryId)"))
+      .toBeGreaterThan(openShare.indexOf('import(\n      "../features/vault/vaultShareEligibility"'));
+    expect(openShare).toContain("setShareTarget({ hasUnsharedAssetEmbeds, note: latestSavedNote, returnFocusTo })");
+    expect(openShare.indexOf("await saveEntryRef.current(entryId)"))
+      .toBeLessThan(openShare.indexOf("setShareTarget({ hasUnsharedAssetEmbeds, note: latestSavedNote, returnFocusTo })"));
+    expect(openShare).toContain("embeddedVaultAssetIdsForShare(");
+    expect(openShare).toContain("indexEntries");
+    expect(vaultPageSource).toContain(
+      "hasUnsharedAssetEmbeds={shareTarget.hasUnsharedAssetEmbeds === true}"
+    );
+    expect(vaultPageSource).toContain(
+      "hasUnsharedAssetEmbeds={participantShareTarget.hasUnsharedAssetEmbeds === true}"
+    );
+  });
+
+  it("revokes source-scoped secure shares before either entry or folder trash persistence", () => {
+    const folderTrash = vaultPageSource.match(
+      /async function moveFolderToTrash[\s\S]*?async function openVaultShareManager/u
+    )?.[0] ?? "";
+    expect(folderTrash).toContain("revokeVaultSecureSharesBeforeSourcesTrash");
+    expect(folderTrash).toContain("folderTrashLockedFolderIdsRef.current.add(hiddenFolderId)");
+    expect(folderTrash).toContain("deletingEntryIdsRef.current.add(entryId)");
+    expect(folderTrash).toContain("if (pathRewriteBusyRef.current) {");
+    expect(folderTrash).toContain("ownsPathLock = true");
+    expect(folderTrash.match(/clipboardAssetsPendingForEntry/gu)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    expect(folderTrash).toContain("sourceNoteIds: shareableSourceNoteIds");
+    expect(folderTrash).toContain("await trashRevisionedEncryptedFolderSubtree({");
+    expect(folderTrash.indexOf("await revokeVaultSecureSharesBeforeSourcesTrash({"))
+      .toBeLessThan(folderTrash.indexOf("await trashRevisionedEncryptedFolderSubtree({"));
+
+    const entryTrash = vaultPageSource.match(
+      /async function moveEntryToTrash[\s\S]*?function ownedVaultTreeTargets/u
+    )?.[0] ?? "";
+    expect(entryTrash).toContain("revokeVaultSecureSharesBeforeTrash");
+    expect(entryTrash).toContain("sourceNoteId: entryId");
+    expect(entryTrash).toContain("await deleteRevisionedNote({");
+    expect(entryTrash.indexOf("await revokeVaultSecureSharesBeforeTrash({"))
+      .toBeLessThan(entryTrash.indexOf("await deleteRevisionedNote({"));
   });
 
   it("creates Markdown conversion copies only from a server-confirmed source", () => {

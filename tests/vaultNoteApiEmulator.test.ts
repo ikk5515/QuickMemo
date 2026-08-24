@@ -123,7 +123,10 @@ describeEmulator("Vault note API emulator transaction", () => {
     };
   }
 
+  let createSequence = 0;
+
   function createBody(claimCharacter = "A") {
+    createSequence += 1;
     return {
       action: "create",
       contentFormat: "markdown-v1",
@@ -136,6 +139,7 @@ describeEmulator("Vault note API emulator transaction", () => {
         indexVersion: 1,
         parentId: null
       },
+      noteId: `vn1_${String(createSequence).padStart(43, "0")}`,
       participantUids: [uid],
       type: "personal",
       wrappedKeys: { [uid]: wrappedKey }
@@ -217,6 +221,78 @@ describeEmulator("Vault note API emulator transaction", () => {
 
   afterAll(async () => {
     await harness?.close();
+  });
+
+  it("idempotently converges a client-assigned create and rejects id or payload reuse", async () => {
+    await activateVaultIntegrityMarker();
+    const noteId = `vn1_${"N".repeat(43)}`;
+    const payload = { ...createBody("I"), noteId };
+
+    const created = await request(payload);
+    expect(created.response.status).toBe(200);
+    expect(created.body).toMatchObject({ noteId, ok: true, revision: 1 });
+    const retried = await request(payload);
+    expect(retried.response.status).toBe(200);
+    expect(retried.body).toEqual(created.body);
+
+    const stored = await readEmulatorDocument(`notes/${noteId}`);
+    expect(stored).toMatchObject({
+      encryptedBody: body,
+      encryptedTitle: title,
+      ownerUid: uid,
+      revision: 1,
+      vaultNameClaimId: "I".repeat(43)
+    });
+    expect(await readEmulatorDocument(
+      `notes/${noteId}/history/${String(created.body.lastMutationId)}`
+    )).toMatchObject({
+      action: "create",
+      actorUid: uid,
+      noteId,
+      revision: 1
+    });
+
+    const changedPayload = await request({
+      ...payload,
+      encryptedBody: { ...body, cipherText: "different-encrypted-body" }
+    });
+    expect(changedPayload.response.status).toBe(409);
+    expect(changedPayload.body).toMatchObject({ ok: false });
+
+    await writeEmulatorDocuments([{
+      path: `vaultIntegrity/${participantUid}`,
+      fields: vaultIntegrityMarkerFields(participantUid)
+    }]);
+    const differentOwner = await request({
+      ...payload,
+      participantUids: [participantUid],
+      wrappedKeys: { [participantUid]: wrappedKey }
+    }, participantIdToken);
+    expect(differentOwner.response.status).toBe(409);
+    expect(differentOwner.body).toMatchObject({
+      error: "vault_note_conflict",
+      ok: false
+    });
+
+    const predictableId = await request({ ...createBody("P"), noteId: "predictable-note-id" });
+    expect(predictableId.response.status).toBe(400);
+    expect(predictableId.body).toMatchObject({ error: "invalid_request", ok: false });
+
+    const missingIdPayload: Record<string, unknown> = { ...createBody("O") };
+    delete missingIdPayload.noteId;
+    const missingId = await request(missingIdPayload);
+    expect(missingId.response.status).toBe(400);
+    expect(missingId.body).toMatchObject({ error: "invalid_request", ok: false });
+
+    const concurrentNoteId = `vn1_${"Q".repeat(43)}`;
+    const concurrentPayload = { ...createBody("Q"), noteId: concurrentNoteId };
+    const [concurrentLeft, concurrentRight] = await Promise.all([
+      request(concurrentPayload),
+      request(concurrentPayload)
+    ]);
+    expect(concurrentLeft.response.status).toBe(200);
+    expect(concurrentRight.response.status).toBe(200);
+    expect(concurrentLeft.body).toEqual(concurrentRight.body);
   });
 
   it("atomically creates, revisions, restores, and purges an encrypted note", async () => {
@@ -699,6 +775,67 @@ describeEmulator("Vault note API emulator transaction", () => {
     });
     expect(await readEmulatorDocument(`vaultIntegrity/${uid}/nameClaims/${"T".repeat(43)}`))
       .toBeNull();
+  });
+
+  it("accepts only zero-attachment Markdown secure copies with the exact storage identity", async () => {
+    await activateVaultIntegrityMarker();
+    const markdownCreate = {
+      action: "secure-copy-create",
+      contentFormat: "markdown-v1",
+      copyJobId: "secure-copy-markdown-123456",
+      encryptedBody: body,
+      encryptedTitle: title,
+      entryKind: "markdown",
+      expectedAttachmentCount: 0,
+      folderId: null,
+      nameClaim: { claimId: "M".repeat(43), indexVersion: 1, parentId: null },
+      noteId: "secure-copy-markdown-a",
+      participantUids: [uid],
+      type: "personal",
+      wrappedKeys: { [uid]: wrappedKey }
+    };
+
+    const created = await request(markdownCreate);
+    expect(created.response.status).toBe(200);
+    expect(await readEmulatorDocument(`notes/${markdownCreate.noteId}`)).toMatchObject({
+      contentFormat: "markdown-v1",
+      entryKind: "markdown",
+      secureShareCopyExpectedAttachmentCount: 0,
+      secureShareCopyState: "copying",
+      vaultNameClaimId: "M".repeat(43)
+    });
+    const activated = await request({
+      action: "secure-copy-activate",
+      copyJobId: markdownCreate.copyJobId,
+      expectedRevision: 1,
+      noteId: markdownCreate.noteId
+    });
+    expect(activated.response.status).toBe(200);
+    expect(activated.body).toMatchObject({ state: "active" });
+
+    const attachmentBearing = await request({
+      ...markdownCreate,
+      copyJobId: "secure-copy-markdown-unsafe",
+      expectedAttachmentCount: 1,
+      nameClaim: { claimId: "N".repeat(43), indexVersion: 1, parentId: null },
+      noteId: "secure-copy-markdown-unsafe"
+    });
+    expect(attachmentBearing.response.status).toBe(400);
+    expect(attachmentBearing.body).toMatchObject({ error: "invalid_request", ok: false });
+    expect(await readEmulatorDocument("notes/secure-copy-markdown-unsafe")).toBeNull();
+    expect(await readEmulatorDocument(
+      `vaultIntegrity/${uid}/nameClaims/${"N".repeat(43)}`
+    )).toBeNull();
+
+    const mismatchedIdentity = await request({
+      ...markdownCreate,
+      contentFormat: "legacy-html-v1",
+      copyJobId: "secure-copy-markdown-mismatch",
+      nameClaim: { claimId: "O".repeat(43), indexVersion: 1, parentId: null },
+      noteId: "secure-copy-markdown-mismatch"
+    });
+    expect(mismatchedIdentity.response.status).toBe(400);
+    expect(await readEmulatorDocument("notes/secure-copy-markdown-mismatch")).toBeNull();
   });
 
   it("refuses secure-copy abort while any attachment reservation remains", async () => {

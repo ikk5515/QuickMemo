@@ -1,5 +1,5 @@
 import { Loader2, MessageCircle, RotateCcw } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   mergeSecureShareComments,
   type SecureShareCommentDto,
@@ -95,6 +95,7 @@ export function SecureShareOwnerCommentsPanel({
   onLoadComments: SecureShareOwnerCommentLoader;
   share: SecureShareOwnerSummary;
 }) {
+  const titleId = useId();
   const target = useMemo<SecureShareOwnerCommentTarget>(() => ({
     policyVersion: share.policyVersion,
     shareId: share.shareId,
@@ -272,12 +273,12 @@ export function SecureShareOwnerCommentsPanel({
   return (
     <section
       aria-busy={requestBusy ? "true" : undefined}
-      aria-labelledby="secure-share-owner-comments-title"
+      aria-labelledby={titleId}
       className="secure-share-owner-comments"
     >
       <header>
         <div>
-          <h4 id="secure-share-owner-comments-title">
+          <h4 id={titleId}>
             <MessageCircle aria-hidden="true" size={16} />
             댓글
           </h4>

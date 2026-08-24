@@ -159,6 +159,8 @@ const maxJobTotalSourceBytes = 16 * 1024 * 1024;
 const maxStoredCipherTextLength = 900_000;
 const writeBatchSize = 50;
 const maxResumeSteps = 100;
+const maxAdapterReadAttempts = 3;
+const maxTransientApplyAttempts = 2;
 const terminalCleanupJobsPerPass = 3;
 const terminalCleanupStepsPerPass = 50;
 const terminalCleanupNoProgressLimit = 3;
@@ -199,6 +201,41 @@ const recoverableJobStatuses: VaultPathRewriteJobStatus[] = [
   "preparing",
   "not-applied"
 ];
+
+function adapterErrorCode(cause: unknown) {
+  if (!cause || typeof cause !== "object" || !("code" in cause)) return "";
+  return String(cause.code).replace(/^firestore\//u, "");
+}
+
+function retryableAdapterWriteFailure(cause: unknown) {
+  const code = adapterErrorCode(cause);
+  return cause instanceof TypeError
+    || code === "aborted"
+    || code === "cancelled"
+    || code === "deadline-exceeded"
+    || code === "network-request-failed"
+    || code === "network_error"
+    || code === "unavailable";
+}
+
+async function readRewriteSourceWithRetry(
+  readSource: (sourceEntryId: string) => Promise<VaultPathRewriteSourceSnapshot | null>,
+  sourceEntryId: string
+) {
+  let lastCause: unknown;
+  for (let attempt = 1; attempt <= maxAdapterReadAttempts; attempt += 1) {
+    try {
+      return await readSource(sourceEntryId);
+    } catch (cause) {
+      lastCause = cause;
+      if (attempt === maxAdapterReadAttempts || !retryableAdapterWriteFailure(cause)) {
+        throw cause;
+      }
+      await Promise.resolve();
+    }
+  }
+  throw lastCause;
+}
 
 export class VaultPathRewriteJobError extends Error {
   readonly code: "conflict" | "corrupt" | "invalid" | "not-ready";
@@ -912,6 +949,13 @@ export async function ensureVaultPathRewriteJob(
   const manifest = await decryptManifest(selected, uid, jobKey);
   if (JSON.stringify(manifest) !== JSON.stringify(prepared.manifest)) {
     throw new VaultPathRewriteJobError("conflict", "같은 작업 식별자에 다른 경로 재작성 계획이 저장되어 있습니다.");
+  }
+  if (selected.status === "prepared" && selected.stepCount === 0) {
+    // The root transaction is the complete durable payload for a zero-step
+    // plan. There are no child ciphertexts to enumerate and no preparation
+    // transition to confirm, so avoid two extra Firestore round trips on the
+    // common rename/move path where no incoming references exist.
+    return summary(selected, prepared.jobId, manifest);
   }
   const existingSnapshots = await getDocs(stepCollection(reference));
   if (existingSnapshots.size > prepared.steps.length) {
@@ -1858,7 +1902,7 @@ export async function resumeVaultPathRewriteJob(input: {
 
     let sourceSnapshot: VaultPathRewriteSourceSnapshot | null;
     try {
-      sourceSnapshot = await input.readSource(step.sourceEntryId);
+      sourceSnapshot = await readRewriteSourceWithRetry(input.readSource, step.sourceEntryId);
     } catch {
       current = await markBlocked(uid, jobId, ordinal, "write-failed");
       break;
@@ -1883,30 +1927,66 @@ export async function resumeVaultPathRewriteJob(input: {
       break;
     }
     if (sourceState.state === "pending") {
-      try {
-        await input.applyStep(step, sourceSnapshot);
-        sourceSnapshot = await input.readSource(step.sourceEntryId);
-      } catch {
+      let stepBlocked = false;
+      let retryableApplyFailureExhausted = false;
+      for (let applyAttempt = 1; applyAttempt <= maxTransientApplyAttempts; applyAttempt += 1) {
+        let applyFailed = false;
+        let applyFailure: unknown;
+        try {
+          await input.applyStep(step, sourceSnapshot);
+        } catch (cause) {
+          applyFailed = true;
+          applyFailure = cause;
+        }
+        // Always re-read after an apply attempt. If the encrypted write
+        // committed but its response was lost, the exact rewritten digest and
+        // revision are durable proof and applying it a second time is avoided.
+        try {
+          sourceSnapshot = await readRewriteSourceWithRetry(input.readSource, step.sourceEntryId);
+        } catch {
+          current = await markBlocked(uid, jobId, ordinal, "write-failed");
+          stepBlocked = true;
+          break;
+        }
+        if (
+          !sourceSnapshot
+          || sourceSnapshot.sourceEntryId !== step.sourceEntryId
+          || sourceSnapshot.sourceKind !== step.sourceKind
+        ) {
+          current = await markBlocked(
+            uid,
+            jobId,
+            ordinal,
+            sourceSnapshot ? "content-conflict" : "missing-source"
+          );
+          stepBlocked = true;
+          break;
+        }
+        try {
+          sourceState = await classifyVaultPathRewriteSourceState(step, sourceSnapshot);
+        } catch {
+          current = await markBlocked(uid, jobId, ordinal, "content-conflict");
+          stepBlocked = true;
+          break;
+        }
+        const retryableApplyFailure = applyFailed && retryableAdapterWriteFailure(applyFailure);
+        if (
+          sourceState.state === "pending"
+          && retryableApplyFailure
+          && applyAttempt === maxTransientApplyAttempts
+        ) {
+          retryableApplyFailureExhausted = true;
+        }
+        if (
+          sourceState.state !== "pending"
+          || !applyFailed
+          || !retryableApplyFailure
+          || applyAttempt === maxTransientApplyAttempts
+        ) break;
+      }
+      if (stepBlocked) break;
+      if (sourceState.state === "pending" && retryableApplyFailureExhausted) {
         current = await markBlocked(uid, jobId, ordinal, "write-failed");
-        break;
-      }
-      if (
-        !sourceSnapshot
-        || sourceSnapshot.sourceEntryId !== step.sourceEntryId
-        || sourceSnapshot.sourceKind !== step.sourceKind
-      ) {
-        current = await markBlocked(
-          uid,
-          jobId,
-          ordinal,
-          sourceSnapshot ? "content-conflict" : "missing-source"
-        );
-        break;
-      }
-      try {
-        sourceState = await classifyVaultPathRewriteSourceState(step, sourceSnapshot);
-      } catch {
-        current = await markBlocked(uid, jobId, ordinal, "content-conflict");
         break;
       }
     }

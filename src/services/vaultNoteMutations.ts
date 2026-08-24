@@ -38,6 +38,7 @@ type OwnerlessSaveNoteInput = Omit<SaveNoteInput, "ownerUid">;
 
 export type VaultNoteCreatePayload = OwnerlessSaveNoteInput & {
   action: "create";
+  noteId: string;
 };
 
 export type VaultNoteImportCreatePayload = OwnerlessSaveNoteInput & {
@@ -243,6 +244,31 @@ function validRevision(value: unknown) {
     && Number(value) <= 999_999_999_999;
 }
 
+const opaqueVaultNoteIdPattern = /^vn1_[A-Za-z0-9_-]{43}$/u;
+
+function bytesToBase64Url(bytes: Uint8Array) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/gu, "");
+}
+
+export function createOpaqueVaultNoteId() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const noteId = `vn1_${bytesToBase64Url(bytes)}`;
+  if (!opaqueVaultNoteIdPattern.test(noteId)) {
+    throw new Error("Vault 노트 생성 식별자를 안전하게 만들지 못했습니다.");
+  }
+  return noteId;
+}
+
+function assertOpaqueVaultNoteId(noteId: string) {
+  if (!opaqueVaultNoteIdPattern.test(noteId)) {
+    throw new Error("Vault 노트 생성 식별자가 올바르지 않습니다.");
+  }
+  return noteId;
+}
+
 function validVaultNoteSuccess(
   body: unknown,
   payload: VaultNoteApiPayload
@@ -330,11 +356,27 @@ export async function mutateVaultNote<TPayload extends VaultNoteApiPayload>(
   payload: TPayload,
   signal?: AbortSignal
 ): Promise<VaultNoteMutationResultFor<TPayload>> {
-  return vaultNoteApiRequest<VaultNoteMutationResultFor<TPayload>>(
-    ownerUid,
-    payload,
-    signal
-  );
+  try {
+    return await vaultNoteApiRequest<VaultNoteMutationResultFor<TPayload>>(
+      ownerUid,
+      payload,
+      signal
+    );
+  } catch (caught) {
+    const responseMayHaveBeenLost = caught instanceof VaultNoteApiError
+      && (
+        caught.code === "network_error"
+        || caught.code === "invalid_response"
+        || caught.status >= 500
+      );
+    if (payload.action !== "create" || !responseMayHaveBeenLost) throw caught;
+    signal?.throwIfAborted();
+    return vaultNoteApiRequest<VaultNoteMutationResultFor<TPayload>>(
+      ownerUid,
+      payload,
+      signal
+    );
+  }
 }
 
 /**
@@ -354,10 +396,13 @@ export function vaultNoteAccessPayload(
   };
 }
 
-export function vaultNoteCreatePayload(input: SaveNoteInput): VaultNoteCreatePayload {
+export function vaultNoteCreatePayload(
+  input: SaveNoteInput,
+  noteId = createOpaqueVaultNoteId()
+): VaultNoteCreatePayload {
   const { ownerUid: _ownerUid, ...payload } = input;
   void _ownerUid;
-  return { ...payload, action: "create" };
+  return { ...payload, action: "create", noteId: assertOpaqueVaultNoteId(noteId) };
 }
 
 export function vaultNoteImportCreatePayload(

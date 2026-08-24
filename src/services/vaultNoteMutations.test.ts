@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createOpaqueVaultNoteId,
   mutateVaultNote,
   vaultNoteAccessPayload,
   vaultNoteApiActions,
@@ -61,6 +62,17 @@ const claim = {
   indexVersion: 1 as const,
   parentId: null
 };
+const createInput = {
+  contentFormat: "asset-v1" as const,
+  encryptedBody,
+  encryptedTitle,
+  entryKind: "asset" as const,
+  nameClaim: claim,
+  ownerUid: uid,
+  participantUids: [uid],
+  type: "personal" as const,
+  wrappedKeys: { [uid]: wrappedKey }
+};
 const updatePayload: VaultNoteUpdatePayload = {
   action: "update",
   encryptedBody,
@@ -112,6 +124,57 @@ describe("Vault note mutation API client", () => {
       "trash",
       "update"
     ]);
+  });
+
+  it("creates a cryptographically opaque client note id and binds it to create payloads", () => {
+    const generated = createOpaqueVaultNoteId();
+    expect(generated).toMatch(/^vn1_[A-Za-z0-9_-]{43}$/u);
+
+    const noteId = `vn1_${"N".repeat(43)}`;
+    expect(vaultNoteCreatePayload(createInput, noteId)).toEqual(expect.objectContaining({
+      action: "create",
+      noteId
+    }));
+    expect(() => vaultNoteCreatePayload(createInput, "predictable-note-id"))
+      .toThrow("생성 식별자");
+  });
+
+  it("retries an ambiguous create response once with the exact same opaque id and ciphertext", async () => {
+    const noteId = `vn1_${"R".repeat(43)}`;
+    const payload = vaultNoteCreatePayload(createInput, noteId);
+    vi.mocked(fetch)
+      .mockRejectedValueOnce(new TypeError("response lost"))
+      .mockResolvedValueOnce(jsonResponse({
+        lastMutationId: "history-created",
+        noteId,
+        ok: true,
+        revision: 1
+      }));
+
+    await expect(mutateVaultNote(uid, payload)).resolves.toMatchObject({ noteId, revision: 1 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const firstBody = String(vi.mocked(fetch).mock.calls[0]?.[1]?.body);
+    const secondBody = String(vi.mocked(fetch).mock.calls[1]?.[1]?.body);
+    expect(secondBody).toBe(firstBody);
+    expect(JSON.parse(firstBody)).toEqual(expect.objectContaining({
+      encryptedBody,
+      encryptedTitle,
+      noteId
+    }));
+  });
+
+  it("does not retry a definitive create conflict", async () => {
+    const payload = vaultNoteCreatePayload(createInput, `vn1_${"C".repeat(43)}`);
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      error: "vault_note_conflict",
+      ok: false
+    }, 409));
+
+    await expect(mutateVaultNote(uid, payload)).rejects.toMatchObject({
+      code: "vault_note_conflict",
+      status: 409
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("sends ciphertext unchanged with owner auth, App Check, and no-store controls", async () => {
@@ -261,7 +324,7 @@ describe("Vault note mutation API client", () => {
   });
 
   it("strips client identity fields when adapting existing note mutation inputs", () => {
-    const createInput = {
+    const markdownCreateInput = {
       contentFormat: "markdown-v1",
       encryptedBody,
       encryptedTitle,
@@ -272,9 +335,11 @@ describe("Vault note mutation API client", () => {
       type: "personal",
       wrappedKeys: { [uid]: wrappedKey }
     } satisfies Parameters<typeof vaultNoteCreatePayload>[0];
-    expect(vaultNoteCreatePayload(createInput)).not.toHaveProperty("ownerUid");
+    const createPayload = vaultNoteCreatePayload(markdownCreateInput);
+    expect(createPayload).not.toHaveProperty("ownerUid");
+    expect(createPayload.noteId).toMatch(/^vn1_[A-Za-z0-9_-]{43}$/u);
     expect(vaultNoteImportCreatePayload(
-      createInput,
+      markdownCreateInput,
       "import-note-a",
       `vi1_${"I".repeat(43)}`
     )).toEqual(expect.objectContaining({

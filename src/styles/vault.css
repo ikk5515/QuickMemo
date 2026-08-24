@@ -2940,3 +2940,101 @@
     transition-duration: 0.01ms !important;
   }
 }
+.vault-share-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(15 23 42 / 58%);
+}
+
+.vault-share-dialog {
+  width: min(520px, 100%);
+  max-height: min(720px, calc(100dvh - 32px));
+  overflow: auto;
+  border: 1px solid var(--vault-border);
+  border-radius: 14px;
+  background: var(--vault-panel);
+  box-shadow: 0 24px 80px rgb(15 23 42 / 32%);
+}
+
+.vault-share-dialog > header,
+.vault-share-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.vault-share-dialog > header {
+  border-bottom: 1px solid var(--vault-border);
+}
+
+.vault-share-dialog > header span,
+.vault-share-dialog > footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.vault-share-dialog > header h2 {
+  margin: 4px 0 0;
+  font-size: 1.05rem;
+}
+
+.vault-share-dialog > footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--vault-border);
+}
+
+.vault-share-dialog-description,
+.vault-share-dialog > .form-error {
+  margin: 14px 16px;
+}
+
+.vault-share-user-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 16px 16px;
+}
+
+.vault-share-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid var(--vault-border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.vault-share-user:has(input:checked) {
+  border-color: var(--vault-accent);
+  background: color-mix(in srgb, var(--vault-accent) 9%, transparent);
+}
+
+.vault-share-user > span:last-child {
+  display: grid;
+  min-width: 0;
+}
+
+.vault-share-user small {
+  color: var(--muted);
+}
+
+@media (max-width: 540px) {
+  .vault-share-dialog-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .vault-share-dialog {
+    width: 100%;
+    max-height: 88dvh;
+    border-radius: 14px 14px 0 0;
+  }
+}

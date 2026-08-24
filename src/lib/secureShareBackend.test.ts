@@ -2354,6 +2354,24 @@ describe("Secure Share v2 owner, source, quota, and attachment policy", () => {
       true
     )).toBe(true);
     expect(sourceReadAvailable(
+      { ...share, sourceSyncMode: "revision_bound" },
+      { ...note, revision: 10 },
+      profile,
+      true
+    )).toBe(false);
+    expect(sourceReadAvailable(
+      { ...share, sourceSyncMode: "revision_bound" },
+      note,
+      profile,
+      true
+    )).toBe(true);
+    expect(sourceReadAvailable(
+      { ...share, sourceSyncMode: "unsupported" },
+      note,
+      profile,
+      true
+    )).toBe(false);
+    expect(sourceReadAvailable(
       share,
       { ...note, attachmentRevision: 5 },
       profile,
@@ -2975,6 +2993,52 @@ describe("Secure Share v2 transactional source contracts", () => {
     expect(ownerUpdate.indexOf("cleanupQueuePath")).toBeLessThan(
       ownerUpdate.indexOf("await firestoreCommit(user.context, writes)")
     );
+  });
+
+  it("fails closed on every source-folder ancestor before create, activation, or content reads", () => {
+    const folderChain = backendSource.match(
+      /class SourceFolderChainUnavailableError[\s\S]*?function shareSummary/u
+    )?.[0] ?? "";
+    const sourceAvailability = backendSource.match(
+      /async function requireSourceAvailable[\s\S]*?function publicShareAvailable/u
+    )?.[0] ?? "";
+    const create = backendSource.match(
+      /async function handleOwnerCreate[\s\S]*?function ownerListCursor/u
+    )?.[0] ?? "";
+    const activation = backendSource.match(
+      /async function handleOwnerActivate[\s\S]*?async function handleOwnerRevoke/u
+    )?.[0] ?? "";
+    const details = backendSource.match(
+      /async function handleOwnerDetails[\s\S]*?function ownerAttachmentReuseManifest/u
+    )?.[0] ?? "";
+    const contentUpdate = backendSource.match(
+      /async function handleOwnerContentUpdate[\s\S]*?async function handleOwnerActivate/u
+    )?.[0] ?? "";
+    const ownerCommentAccess = backendSource.match(
+      /async function commentAccess[\s\S]*?async function handleComments/u
+    )?.[0] ?? "";
+
+    expect(backendSource).toContain("const maximumSourceFolderDepth = 32");
+    expect(folderChain).toContain("visited.has(currentFolderId)");
+    expect(folderChain).toContain("visited.size > maximumSourceFolderDepth");
+    expect(folderChain).toContain("folder.ownerUid === ownerUid");
+    expect(folderChain).toContain("folder.isDeleted === false");
+    expect(folderChain).toContain("folder.isPurged !== true");
+    expect(folderChain).toContain("sourceFolderChainUnavailable()");
+    expect(folderChain).toContain("actualAncestors.some");
+    expect(sourceAvailability).toContain("sourceFolderChainSnapshot(");
+    expect(sourceAvailability).toContain("sourceAvailabilityVerifyWrites");
+
+    expect(create.match(/requireSourceCreateAvailable\(/gu)?.length ?? 0)
+      .toBeGreaterThanOrEqual(3);
+    expect(create).toContain("transaction");
+    expect(contentUpdate).toContain("sourceFolderChainSnapshot(");
+    expect(contentUpdate).toContain("transactionSnapshot.transaction");
+    expect(activation).toContain("sourceAvailabilityVerifyWrites(user.context, sourceAvailability)");
+    expect(details).toContain("await requireSourceAvailable(user.context, state.share)");
+    expect(ownerCommentAccess).toContain("await requireSourceAvailable(context, state.share)");
+    expect(backendSource.match(/await requireSourceAvailable\(/gu)?.length ?? 0)
+      .toBeGreaterThanOrEqual(10);
   });
 
   it("updates encrypted content with lifecycle checks, revision CAS, and one transaction", () => {

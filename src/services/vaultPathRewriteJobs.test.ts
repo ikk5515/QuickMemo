@@ -361,6 +361,10 @@ describe("encrypted durable Vault path rewrite persistence", () => {
     expect(firestoreMocks.documents.get(
       `vaultMaintenanceJobs/user-a/pathRewrites/${prepared.jobId}`
     )).toMatchObject({ preparedStepCount: 0, revision: 1, status: "prepared" });
+    // One bounded root-capacity query is required for a new job. No empty
+    // child-step enumeration or final preparation transaction is needed.
+    expect(firestoreMocks.getDocs).toHaveBeenCalledTimes(1);
+    expect(firestoreMocks.runTransaction).toHaveBeenCalledTimes(1);
   });
 
   it("leaves interrupted preparation non-runnable and fills missing steps on a deterministic retry", async () => {
@@ -879,6 +883,106 @@ describe("encrypted durable Vault path rewrite persistence", () => {
       applyStep
     })).resolves.toMatchObject({ status: "completed", cursor: 1, processedSteps: 1 });
     expect(applyStep).not.toHaveBeenCalled();
+  });
+
+  it("contains transient source reads and confirms a lost apply response without a duplicate write", async () => {
+    const prepared = await preparedJob(1);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    await activatePreparedAtomicJob(prepared);
+    const step = prepared.steps[0];
+    let source = {
+      sourceEntryId: step.sourceEntryId,
+      sourceKind: step.sourceKind,
+      revision: step.expectedRevision,
+      source: "private original 0 [[Private/Old]]"
+    };
+    const readSource = vi.fn(async () => {
+      if (readSource.mock.calls.length === 1) throw { code: "firestore/unavailable" };
+      return source;
+    });
+    const applyStep = vi.fn(async () => {
+      source = {
+        sourceEntryId: step.sourceEntryId,
+        sourceKind: step.sourceKind,
+        revision: step.expectedRevision + 1,
+        source: step.rewrittenSource
+      };
+      throw { code: "network_error" };
+    });
+
+    await expect(resumeVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: prepared.jobId,
+      readSource,
+      applyStep
+    })).resolves.toMatchObject({
+      status: "completed",
+      cursor: 1,
+      lastErrorCode: null
+    });
+    expect(readSource).toHaveBeenCalledTimes(3);
+    expect(applyStep).toHaveBeenCalledOnce();
+  });
+
+  it("retries an idempotent apply only when a transport failure left the source pending", async () => {
+    const prepared = await preparedJob(1);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    await activatePreparedAtomicJob(prepared);
+    const step = prepared.steps[0];
+    let source = {
+      sourceEntryId: step.sourceEntryId,
+      sourceKind: step.sourceKind,
+      revision: step.expectedRevision,
+      source: "private original 0 [[Private/Old]]"
+    };
+    const applyStep = vi.fn(async () => {
+      if (applyStep.mock.calls.length === 1) throw { code: "network_error" };
+      source = {
+        sourceEntryId: step.sourceEntryId,
+        sourceKind: step.sourceKind,
+        revision: step.expectedRevision + 1,
+        source: step.rewrittenSource
+      };
+    });
+
+    await expect(resumeVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: prepared.jobId,
+      readSource: async () => source,
+      applyStep
+    })).resolves.toMatchObject({ status: "completed", cursor: 1 });
+    expect(applyStep).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a source retryable when every transient apply attempt leaves it pending", async () => {
+    const prepared = await preparedJob(1);
+    await ensureVaultPathRewriteJob(profile, privateKey, prepared);
+    await activatePreparedAtomicJob(prepared);
+    const step = prepared.steps[0];
+    const source = {
+      sourceEntryId: step.sourceEntryId,
+      sourceKind: step.sourceKind,
+      revision: step.expectedRevision,
+      source: "private original 0 [[Private/Old]]"
+    };
+    const applyStep = vi.fn(async () => {
+      throw { code: "network_error" };
+    });
+
+    await expect(resumeVaultPathRewriteJob({
+      uid: "user-a",
+      privateKey,
+      jobId: prepared.jobId,
+      readSource: async () => source,
+      applyStep
+    })).resolves.toMatchObject({
+      status: "blocked",
+      cursor: 0,
+      lastErrorCode: "write-failed"
+    });
+    expect(applyStep).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed when a callback cannot prove the exact source revision and digest", async () => {

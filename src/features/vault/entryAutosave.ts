@@ -1,15 +1,33 @@
-export const MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS = 2_500;
+// Remote encrypted saves perform WebCrypto, history snapshot generation and a
+// revision-aware API mutation. A short thinking pause must not overlap those
+// tasks with the next IME/wiki-link input burst. Explicit save/navigation
+// still flushes immediately.
+export const MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS = 5_000;
 // Canvas text editing rebuilds a JSON document draft locally on every change.
 // Keep the encrypted network write well outside an ordinary typing pause so a
 // one-character edit cannot immediately put the card through save/reconcile.
 // Navigation, tab changes and the explicit Save action still flush the dirty
 // draft immediately, and beforeunload protection remains the final safety net.
 export const CANVAS_ENTRY_AUTOSAVE_IDLE_MS = 15_000;
+const MAXIMUM_ENTRY_AUTOSAVE_RETRY_ATTEMPTS = 5;
 
 export function vaultEntryAutosaveIdleMs(entryKind: string | undefined) {
   return entryKind === "canvas"
     ? CANVAS_ENTRY_AUTOSAVE_IDLE_MS
     : MARKDOWN_ENTRY_AUTOSAVE_IDLE_MS;
+}
+
+/**
+ * Retries a failed encrypted save quickly enough to self-heal a short outage,
+ * while a strict cap prevents a validation/auth failure from polling forever.
+ */
+export function entryAutosaveRetryDelayMs(failureCount: number) {
+  if (
+    !Number.isSafeInteger(failureCount)
+    || failureCount < 1
+    || failureCount > MAXIMUM_ENTRY_AUTOSAVE_RETRY_ATTEMPTS
+  ) return null;
+  return 1_000 * (2 ** (failureCount - 1));
 }
 
 export interface EntryIdleDebounceClock {

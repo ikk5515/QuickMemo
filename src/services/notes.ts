@@ -1429,13 +1429,17 @@ export async function createRevisionedEncryptedNoteAtId(
 export async function createSecureShareCopyingNote(
   input: CreateSecureShareCopyingNoteInput
 ): Promise<CreatedRevisionedNoteResult> {
+  const legacyHtmlCopy = input.contentFormat === "legacy-html-v1"
+    && input.entryKind === "legacy-html";
+  const markdownCopy = input.contentFormat === "markdown-v1"
+    && input.entryKind === "markdown"
+    && input.expectedAttachmentCount === 0;
   if (
     input.type !== "personal"
     || input.ownerUid.length === 0
     || input.participantUids.length !== 1
     || input.participantUids[0] !== input.ownerUid
-    || input.contentFormat !== "legacy-html-v1"
-    || input.entryKind !== "legacy-html"
+    || (!legacyHtmlCopy && !markdownCopy)
     || !/^[A-Za-z0-9_-]{1,120}$/u.test(input.noteId)
     || !/^[A-Za-z0-9_-]{16,160}$/u.test(input.copyJobId)
     || !Number.isSafeInteger(input.expectedAttachmentCount)

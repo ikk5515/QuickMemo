@@ -251,6 +251,7 @@ export interface SecureShareOwnerSummary {
   sourceAttachmentRevision?: number;
   sourceNoteId: string;
   sourceRevision?: number;
+  sourceSyncMode?: "revision_bound";
   status: SecureShareOwnerStatus;
   successfulAccessCount: number;
   updatedAt: string;

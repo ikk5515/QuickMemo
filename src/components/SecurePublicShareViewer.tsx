@@ -47,6 +47,7 @@ import {
   serializeEditorContent
 } from "../lib/editorContent";
 import type { ReadonlyEditorContentFormat } from "../lib/editorContent";
+import { MarkdownRenderer } from "../features/markdown/MarkdownRenderer";
 import {
   isSecureShareDirectEntryEnabled,
   isSecureShareLiveContentSyncEnabled
@@ -208,7 +209,7 @@ export interface SecurePublicShareCopyPayload {
   title: string;
 }
 
-interface DecryptedSecureShareContent {
+export interface DecryptedSecureShareContent {
   attachments: SecurePublicShareAttachmentMetadata[];
   body: string;
   bodyFormat: ReadonlyEditorContentFormat;
@@ -217,6 +218,29 @@ interface DecryptedSecureShareContent {
   bodyRenderContent: string;
   fontSize: number;
   title: string;
+}
+
+export function SecureShareBodyRenderer({
+  content
+}: {
+  content: Pick<
+    DecryptedSecureShareContent,
+    "bodyFormat" | "bodyRenderContent" | "fontSize"
+  >;
+}) {
+  return content.bodyFormat === "markdown" ? (
+    <MarkdownRenderer
+      className="note-preview-body public-share-body secure-public-share-body note-content--markdown"
+      source={content.bodyRenderContent}
+    />
+  ) : (
+    <ReadonlyNoteRenderer
+      className="note-preview-body public-share-body secure-public-share-body"
+      content={content.bodyRenderContent}
+      contentFormat={content.bodyFormat}
+      fontSize={content.fontSize}
+    />
+  );
 }
 
 interface InternalAttachment extends SecurePublicShareAttachmentMetadata {
@@ -704,16 +728,23 @@ async function decryptContent(
     });
   }
 
-  const parsedBody = parseEditorContent(bodyValue);
   const readonlyBody = parseReadonlyEditorContent(bodyValue);
-  const bodyHtml = parsedBody.html || "<p>내용 없음</p>";
+  const parsedBody = readonlyBody.contentFormat === "markdown"
+    ? { fontSize: readonlyBody.fontSize, html: "" }
+    : parseEditorContent(bodyValue);
+  const bodyHtml = readonlyBody.contentFormat === "markdown"
+    ? ""
+    : parsedBody.html || "<p>내용 없음</p>";
 
   return {
     title: titleValue || "제목 없음",
-    body: serializeEditorContent(bodyHtml, parsedBody.fontSize),
+    body: readonlyBody.contentFormat === "markdown"
+      ? bodyValue
+      : serializeEditorContent(bodyHtml, parsedBody.fontSize),
     bodyFormat: readonlyBody.contentFormat,
     bodyHtml,
     bodyPlainText: readonlyBody.contentFormat === "plain-text"
+      || readonlyBody.contentFormat === "markdown"
       ? readonlyBody.content
       : copyTextFromEditorHtml(bodyHtml),
     bodyRenderContent: readonlyBody.content,
@@ -2665,12 +2696,7 @@ export function SecurePublicShareViewer({
         </p>
       )}
 
-      <ReadonlyNoteRenderer
-        className="note-preview-body public-share-body secure-public-share-body"
-        content={content.bodyRenderContent}
-        contentFormat={content.bodyFormat}
-        fontSize={content.fontSize}
-      />
+      <SecureShareBodyRenderer content={content} />
 
       {content.attachments.length > 0 && (
         <section className="secure-public-share-attachments">
