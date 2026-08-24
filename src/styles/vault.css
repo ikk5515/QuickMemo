@@ -1467,74 +1467,124 @@
 }
 
 .vault-codemirror {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.vault-codemirror > .cm-editor {
+.vault-codemirror--with-image-tools {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.vault-codemirror-image-tools {
+  align-items: center;
+  background: var(--vault-panel-muted);
+  border-bottom: 1px solid var(--vault-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+  min-height: 34px;
+  padding: 4px 9px;
+}
+
+.vault-codemirror-image-tools button {
+  background: var(--vault-panel);
+  border: 1px solid var(--vault-border);
+  border-radius: 5px;
+  color: var(--vault-text);
+  min-height: 26px;
+  padding: 3px 9px;
+}
+
+.vault-codemirror-image-tools button:hover:not(:disabled),
+.vault-codemirror-image-tools button:focus-visible {
+  border-color: var(--vault-accent);
+  color: var(--vault-accent);
+}
+
+.vault-codemirror-image-tools button:disabled {
+  cursor: not-allowed;
+  opacity: .5;
+}
+
+.vault-codemirror-image-tools span {
+  color: var(--vault-text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  text-align: end;
+}
+
+.vault-codemirror-editor {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.vault-codemirror-editor > .cm-editor {
   background: var(--vault-bg);
   color: var(--vault-text);
   height: 100%;
   min-height: 0;
 }
 
-.vault-codemirror > .cm-editor .cm-tooltip.cm-tooltip-autocomplete,
-.vault-codemirror > .cm-editor .cm-tooltip.cm-completionInfo {
+.vault-codemirror-editor > .cm-editor .cm-tooltip.cm-tooltip-autocomplete,
+.vault-codemirror-editor > .cm-editor .cm-tooltip.cm-completionInfo {
   background: var(--vault-panel);
   border: 1px solid var(--vault-border);
   box-shadow: 0 10px 28px color-mix(in srgb, #000 24%, transparent);
   color: var(--vault-text);
 }
 
-.vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul {
+.vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete > ul {
   background: var(--vault-panel);
   color: var(--vault-text);
   scrollbar-color: var(--vault-text-muted) var(--vault-panel);
 }
 
-.vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul > li {
+.vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete > ul > li {
   background: transparent;
   color: var(--vault-text);
 }
 
-.vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected="true"] {
+.vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected="true"] {
   background: color-mix(in srgb, var(--vault-accent) 24%, var(--vault-panel));
   color: var(--vault-text);
 }
 
-.vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionLabel {
+.vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete .cm-completionLabel {
   color: inherit;
 }
 
-.vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionMatchedText {
+.vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete .cm-completionMatchedText {
   color: color-mix(in srgb, var(--vault-accent) 78%, var(--vault-text));
   font-weight: 750;
   text-decoration: none;
 }
 
-.vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionDetail,
-.vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionIcon {
+.vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete .cm-completionDetail,
+.vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete .cm-completionIcon {
   color: var(--vault-text-muted);
   opacity: 1;
 }
 
-.vault-codemirror > .cm-editor .cm-gutters {
+.vault-codemirror-editor > .cm-editor .cm-gutters {
   background: var(--vault-panel-muted);
   border-inline-end: 1px solid var(--vault-border);
   color: var(--vault-text-muted);
 }
 
-.vault-codemirror > .cm-editor .cm-activeLineGutter {
+.vault-codemirror-editor > .cm-editor .cm-activeLineGutter {
   background: var(--vault-row-hover);
   color: var(--vault-text);
 }
 
-.vault-codemirror > .cm-editor .cm-activeLine {
+.vault-codemirror-editor > .cm-editor .cm-activeLine {
   background: color-mix(in srgb, var(--vault-accent) 7%, transparent);
 }
 
-.vault-codemirror > .cm-editor .cm-cursor {
+.vault-codemirror-editor > .cm-editor .cm-cursor {
   border-inline-start-color: var(--vault-text);
 }
 
@@ -2167,6 +2217,7 @@
   .vault-right-panel > header > button,
   .vault-note-actions button,
   .vault-note-actions select,
+  .vault-codemirror-image-tools button,
   .vault-context-menu button,
   .vault-move-dialog button,
   .vault-entry-list button,

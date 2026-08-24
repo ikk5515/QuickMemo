@@ -11,6 +11,10 @@ const vaultClipboardPasteFlowSource = readFileSync(
   join(process.cwd(), "src/features/vault/vaultClipboardPasteFlow.ts"),
   "utf8"
 );
+const codeMirrorMarkdownEditorSource = readFileSync(
+  join(process.cwd(), "src/features/vault/CodeMirrorMarkdownEditor.tsx"),
+  "utf8"
+);
 
 describe("VaultPage security boundaries", () => {
   it("routes asset embeds through the signature-checked Blob preview instead of rendering asset JSON", () => {
@@ -264,7 +268,7 @@ describe("VaultPage security boundaries", () => {
     expect(vaultPageSource).toContain("onImportExternalFiles={importCanvasExternalFiles}");
   });
 
-  it("routes Markdown clipboard images through encrypted asset-v1 storage without persisting a data URL", () => {
+  it("routes Markdown pasted, selected, and dropped images through encrypted asset-v1 storage", () => {
     const pasteHandler = vaultPageSource.match(
       /async function pasteImagesIntoMarkdownEntry[\s\S]*?async function importCanvasExternalFiles/u
     )?.[0] ?? "";
@@ -292,6 +296,12 @@ describe("VaultPage security boundaries", () => {
     expect(vaultClipboardPasteFlowSource).not.toContain("localStorage");
     expect(vaultClipboardPasteFlowSource).not.toContain("sessionStorage");
     expect(vaultPageSource.match(/onPasteImages=\{pasteImagesIntoActiveMarkdown\}/gu)).toHaveLength(2);
+    expect(codeMirrorMarkdownEditorSource).toContain("accept={VAULT_MARKDOWN_IMAGE_ACCEPT}");
+    expect(codeMirrorMarkdownEditorSource).toContain("vaultSelectedImageFiles(event.currentTarget.files)");
+    expect(codeMirrorMarkdownEditorSource).toContain("vaultClipboardImageFiles(event.dataTransfer)");
+    expect(codeMirrorMarkdownEditorSource).toContain("EditorSelection.cursor(position)");
+    expect(codeMirrorMarkdownEditorSource).toContain("multiple");
+    expect(codeMirrorMarkdownEditorSource).not.toContain("readAsDataURL");
   });
 
   it("opens the lazy share manager only from a stable saved snapshot and carries asset ACL blocks forward", () => {

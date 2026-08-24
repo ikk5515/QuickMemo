@@ -1609,12 +1609,77 @@ async function abandonUnactivatedAtomicPathRewriteJob(uid: string, jobId: string
 }
 
 /**
+ * A historical client could leave a zero-source receipt blocked while
+ * rechecking the target path. There is no encrypted source step to apply in
+ * this state, so the durable activation receipt is the only safe discriminator:
+ * an activated job is complete, while an unactivated job is abandoned without
+ * claiming whether a legacy path mutation committed. Neither branch reads or
+ * changes the target path or any source content.
+ */
+async function resolveZeroStepPathRewriteConflict(uid: string, jobId: string) {
+  const reference = jobRef(uid, jobId);
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(reference);
+    if (!snapshot.exists()) {
+      throw new VaultPathRewriteJobError("conflict", "경로 재작성 작업이 복구 중 삭제되었습니다.");
+    }
+    const current = validateStoredJob(snapshot.data(), uid, jobId);
+    if (
+      current.status !== "blocked"
+      || current.lastErrorCode !== "path-state-conflict"
+      || current.stepCount !== 0
+      || current.cursor !== 0
+      || current.confirmedCount !== 0
+      || current.completedAt !== undefined
+      || current.abandonedAt !== undefined
+      || current.cleanupStartedAt !== undefined
+    ) return current;
+
+    if (current.activatedAt !== undefined) {
+      const next: StoredVaultPathRewriteJob = {
+        ...current,
+        status: "completed",
+        lastErrorCode: null,
+        revision: current.revision + 1
+      };
+      transaction.update(reference, {
+        status: next.status,
+        lastErrorCode: next.lastErrorCode,
+        revision: next.revision,
+        completedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      return next;
+    }
+
+    if (current.recoveredAt !== undefined) return current;
+    const next: StoredVaultPathRewriteJob = {
+      ...current,
+      status: "abandoned",
+      lastErrorCode: null,
+      revision: current.revision + 1
+    };
+    transaction.update(reference, {
+      status: next.status,
+      lastErrorCode: next.lastErrorCode,
+      revision: next.revision,
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    return next;
+  });
+}
+
+/**
  * Closes the legacy non-atomic gap in the client-only flow. Atomic pr2/pr3
  * mutations commit the target path and `ready` receipt together, so a due job
  * that remains prepared cannot have committed its paired mutation and is
- * abandoned without reading mutable paths. Legacy pr1 jobs still require one
- * server-confirmed current-path snapshot: all-new activates, all-old remains
- * inert, and any mixed, missing, or third state stays blocked.
+ * abandoned without reading mutable paths. A blocked zero-step receipt is
+ * terminalized from activation evidence alone because it has no source work.
+ * Other legacy pr1 jobs still require one server-confirmed current-path
+ * snapshot: all-new activates, all-old remains inert, and any mixed, missing,
+ * or third state stays blocked.
  */
 export async function recoverPreparedVaultPathRewriteJob(input: {
   uid: string;
@@ -1682,6 +1747,17 @@ export async function recoverPreparedVaultPathRewriteJob(input: {
   }
   if (loaded.stored.status === "blocked" && loaded.stored.lastErrorCode !== "path-state-conflict") {
     return { recovery: "conflict", job: summary(loaded.stored, jobId, loaded.manifest) };
+  }
+  if (
+    loaded.stored.status === "blocked"
+    && loaded.stored.lastErrorCode === "path-state-conflict"
+    && loaded.stored.stepCount === 0
+  ) {
+    const resolved = await resolveZeroStepPathRewriteConflict(uid, jobId);
+    if (terminalJob(resolved)) {
+      void scheduleTerminalVaultPathRewriteCleanup(uid).catch(() => undefined);
+    }
+    return recoveryResult(resolved, jobId, loaded.manifest);
   }
   if (atomicActivationMode(loaded.stored)) {
     const resolved = await abandonUnactivatedAtomicPathRewriteJob(uid, jobId);

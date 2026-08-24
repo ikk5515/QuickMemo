@@ -69,7 +69,9 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
     const sourceWrapper = content.querySelector(
       ":scope > .vault-codemirror:not(.vault-codemirror--live-preview)"
     );
-    const codeMirror = sourceWrapper?.querySelector(":scope > .cm-editor");
+    const codeMirror = sourceWrapper?.querySelector(
+      ":scope > .vault-codemirror-editor > .cm-editor"
+    );
     const gutter = codeMirror?.querySelector(".cm-gutters");
     if (!sourceWrapper || !codeMirror || !gutter) {
       throw new Error("source CodeMirror geometry is unavailable");
@@ -404,7 +406,7 @@ test("desktop workspace controls, dark wikilinks, and Canvas navigation remain d
   await editor.press("Control+Space");
 
   const completion = page.locator(
-    ".vault-codemirror > .cm-editor .cm-tooltip.cm-tooltip-autocomplete"
+    ".vault-codemirror-editor > .cm-editor .cm-tooltip.cm-tooltip-autocomplete"
   );
   await expect(completion).toBeVisible();
   const selectedCompletion = completion.locator('li[aria-selected="true"]').first();

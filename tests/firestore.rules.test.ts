@@ -2723,6 +2723,10 @@ describeRules("firestore security rules", () => {
     const activeReadyAtomicJobId = `pr2_${"g".repeat(43)}`;
     const activeRunningAtomicJobId = `pr2_${"h".repeat(43)}`;
     const activatedConflictJobId = `pr2_${"i".repeat(43)}`;
+    const legacyZeroConflictJobId = `pr1_${"j".repeat(43)}`;
+    const activatedZeroPr2JobId = `pr2_${"k".repeat(43)}`;
+    const activatedZeroPr3JobId = `pr3_${"l".repeat(43)}`;
+    const activatedZeroLegacyJobId = `pr1_${"m".repeat(43)}`;
     await testEnv.withSecurityRulesDisabled(async (context) => {
       const db = context.firestore();
       const now = new Date();
@@ -2840,6 +2844,68 @@ describeRules("firestore security rules", () => {
           updatedAt: now
         })
       );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", legacyZeroConflictJobId),
+        vaultPathRewriteJob("user-a", legacyZeroConflictJobId, {
+          status: "blocked",
+          stepCount: 0,
+          remainingStepCount: 0,
+          attemptCount: 4,
+          retryCount: 4,
+          lastErrorCode: "path-state-conflict",
+          revision: 5,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedZeroPr2JobId),
+        atomicVaultPathRewriteJob("user-a", activatedZeroPr2JobId, {
+          status: "blocked",
+          stepCount: 0,
+          preparedStepCount: 0,
+          remainingStepCount: 0,
+          activatedAt: now,
+          attemptCount: 4,
+          retryCount: 4,
+          lastErrorCode: "path-state-conflict",
+          revision: 6,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedZeroPr3JobId),
+        atomicManifestVaultPathRewriteJob("user-a", activatedZeroPr3JobId, {
+          status: "blocked",
+          stepCount: 0,
+          preparedStepCount: 0,
+          remainingStepCount: 0,
+          activatedAt: now,
+          recoveredAt: now,
+          attemptCount: 2,
+          retryCount: 2,
+          lastErrorCode: "path-state-conflict",
+          revision: 4,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedZeroLegacyJobId),
+        vaultPathRewriteJob("user-a", activatedZeroLegacyJobId, {
+          status: "blocked",
+          stepCount: 0,
+          remainingStepCount: 0,
+          activatedAt: now,
+          attemptCount: 3,
+          retryCount: 3,
+          lastErrorCode: "path-state-conflict",
+          revision: 5,
+          createdAt: now,
+          updatedAt: now
+        })
+      );
     });
 
     const ownerDb = testEnv.authenticatedContext("user-a").firestore();
@@ -2879,6 +2945,13 @@ describeRules("firestore security rules", () => {
       doc(otherDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", blockedPr2JobId),
       abandonedPr2
     ));
+    await assertFails(updateDoc(blockedPr2Ref, {
+      status: "completed",
+      lastErrorCode: null,
+      completedAt: serverTimestamp(),
+      revision: 7,
+      updatedAt: serverTimestamp()
+    }));
     await assertSucceeds(updateDoc(blockedPr2Ref, abandonedPr2));
 
     await assertSucceeds(updateDoc(
@@ -2889,6 +2962,103 @@ describeRules("firestore security rules", () => {
         abandonedAt: serverTimestamp(),
         completedAt: serverTimestamp(),
         revision: 3,
+        updatedAt: serverTimestamp()
+      }
+    ));
+    const activatedZeroPr2Ref = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      activatedZeroPr2JobId
+    );
+    const completedActivatedZeroPr2 = {
+      status: "completed",
+      lastErrorCode: null,
+      completedAt: serverTimestamp(),
+      revision: 7,
+      updatedAt: serverTimestamp()
+    };
+    await assertFails(updateDoc(activatedZeroPr2Ref, {
+      status: "abandoned",
+      lastErrorCode: null,
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 7,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(activatedZeroPr2Ref, {
+      ...completedActivatedZeroPr2,
+      attemptCount: 5
+    }));
+    await assertFails(updateDoc(activatedZeroPr2Ref, {
+      ...completedActivatedZeroPr2,
+      retryCount: 3
+    }));
+    await assertFails(updateDoc(activatedZeroPr2Ref, {
+      ...completedActivatedZeroPr2,
+      revision: 8
+    }));
+    await assertFails(updateDoc(activatedZeroPr2Ref, {
+      status: "completed",
+      lastErrorCode: null,
+      revision: 7,
+      updatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(activatedZeroPr2Ref, {
+      ...completedActivatedZeroPr2,
+      activatedAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(activatedZeroPr2Ref, {
+      ...completedActivatedZeroPr2,
+      recoveredAt: serverTimestamp()
+    }));
+    await assertFails(updateDoc(activatedZeroPr2Ref, {
+      ...completedActivatedZeroPr2,
+      recoveryCheckCount: 1
+    }));
+    await assertFails(updateDoc(
+      doc(otherDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedZeroPr2JobId),
+      completedActivatedZeroPr2
+    ));
+    await assertSucceeds(updateDoc(activatedZeroPr2Ref, completedActivatedZeroPr2));
+
+    const activatedZeroPr3Ref = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      activatedZeroPr3JobId
+    );
+    const activatedZeroPr3Before = (await getDoc(activatedZeroPr3Ref)).data();
+    await assertSucceeds(updateDoc(activatedZeroPr3Ref, {
+      status: "completed",
+      lastErrorCode: null,
+      completedAt: serverTimestamp(),
+      revision: 5,
+      updatedAt: serverTimestamp()
+    }));
+    const activatedZeroPr3After = (await getDoc(activatedZeroPr3Ref)).data();
+    expect(activatedZeroPr3After?.activatedAt).toEqual(activatedZeroPr3Before?.activatedAt);
+    expect(activatedZeroPr3After?.recoveredAt).toEqual(activatedZeroPr3Before?.recoveredAt);
+    await assertSucceeds(updateDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedZeroLegacyJobId),
+      {
+        status: "completed",
+        lastErrorCode: null,
+        completedAt: serverTimestamp(),
+        revision: 6,
+        updatedAt: serverTimestamp()
+      }
+    ));
+    await assertSucceeds(updateDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", legacyZeroConflictJobId),
+      {
+        status: "abandoned",
+        lastErrorCode: null,
+        abandonedAt: serverTimestamp(),
+        completedAt: serverTimestamp(),
+        revision: 6,
         updatedAt: serverTimestamp()
       }
     ));
@@ -2913,6 +3083,16 @@ describeRules("firestore security rules", () => {
         status: "abandoned",
         lastErrorCode: null,
         abandonedAt: serverTimestamp(),
+        completedAt: serverTimestamp(),
+        revision: 4,
+        updatedAt: serverTimestamp()
+      }
+    ));
+    await assertFails(updateDoc(
+      doc(ownerDb, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedConflictJobId),
+      {
+        status: "completed",
+        lastErrorCode: null,
         completedAt: serverTimestamp(),
         revision: 4,
         updatedAt: serverTimestamp()

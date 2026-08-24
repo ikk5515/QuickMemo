@@ -5,12 +5,14 @@ import {
   MAX_VAULT_CLIPBOARD_SOURCE_BYTES,
   MAX_VAULT_CLIPBOARD_TRANSCODE_DIMENSION,
   MAX_VAULT_CLIPBOARD_TRANSCODE_MS,
+  VAULT_MARKDOWN_IMAGE_ACCEPT,
   clearPreparedVaultClipboardImages,
   prepareVaultClipboardImages,
   reserveVaultClipboardImageTitles,
   transcodeVaultClipboardImage,
   vaultClipboardImageEmbedSource,
-  vaultClipboardImageFiles
+  vaultClipboardImageFiles,
+  vaultSelectedImageFiles
 } from "./clipboardImagePaste";
 import { MAX_INLINE_VAULT_ASSET_BYTES, safeVaultAssetPreviewKind } from "./vaultAsset";
 
@@ -137,6 +139,18 @@ describe("encrypted Vault clipboard image preparation", () => {
     })).toEqual([itemPng]);
   });
 
+  it("selects supported files, ignores video, and surfaces unsupported image files for rejection", () => {
+    const png = imageFile(pngBytes(), "selected.png", "image/png");
+    const mov = imageFile(new Uint8Array([0, 0, 0, 0]), "selected.mov", "video/quicktime");
+    const heic = imageFile(new Uint8Array([0, 0, 0, 0]), "selected.heic", "image/heic");
+
+    expect(vaultSelectedImageFiles([png, mov])).toEqual([png]);
+    expect(vaultSelectedImageFiles([mov])).toEqual([]);
+    expect(vaultSelectedImageFiles([heic])).toEqual([heic]);
+    expect(VAULT_MARKDOWN_IMAGE_ACCEPT).toContain("image/png");
+    expect(VAULT_MARKDOWN_IMAGE_ACCEPT).not.toMatch(/heic|heif|quicktime|\.mov/iu);
+  });
+
   it("accepts a signature-matched static image and clears plaintext bytes on demand", async () => {
     const prepared = await prepareVaultClipboardImages([
       imageFile(pngBytes(), "clipboard.png", "image/png")
@@ -166,11 +180,14 @@ describe("encrypted Vault clipboard image preparation", () => {
       imageFile(new TextEncoder().encode("<svg><script/></svg>"), "unsafe.svg", "image/svg+xml")
     ])).rejects.toThrow("PNG, JPG, WEBP");
     await expect(prepareVaultClipboardImages([
+      imageFile(new TextEncoder().encode("unsupported heic"), "photo.heic", "image/heic")
+    ])).rejects.toThrow("PNG, JPG, WEBP");
+    await expect(prepareVaultClipboardImages([
       imageFile(new TextEncoder().encode("not png"), "fake.png", "image/png")
     ])).rejects.toThrow("서명과 해상도");
     const tooLarge = imageFile(pngBytes(), "large.png", "image/png");
     Object.defineProperty(tooLarge, "size", { value: MAX_VAULT_CLIPBOARD_SOURCE_BYTES + 1 });
-    await expect(prepareVaultClipboardImages([tooLarge])).rejects.toThrow("20MB 이하");
+    await expect(prepareVaultClipboardImages([tooLarge])).rejects.toThrow("32MB 이하");
     await expect(prepareVaultClipboardImages(Array.from(
       { length: MAX_VAULT_CLIPBOARD_IMAGES + 1 },
       () => imageFile(pngBytes(), "many.png", "image/png")
@@ -183,7 +200,7 @@ describe("encrypted Vault clipboard image preparation", () => {
       });
       return file;
     });
-    await expect(prepareVaultClipboardImages(batchFiles)).rejects.toThrow("합계는 40MB 이하");
+    await expect(prepareVaultClipboardImages(batchFiles)).rejects.toThrow("합계는 64MB 이하");
   });
 
   it("transcodes an oversized validated raster and revalidates the bounded output", async () => {

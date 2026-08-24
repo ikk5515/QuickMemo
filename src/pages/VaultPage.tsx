@@ -1061,6 +1061,64 @@ export function vaultPlaintextScopeSignature(
   ]);
 }
 
+interface ParsedVaultPlaintextScope {
+  entriesById: ReadonlyMap<string, string>;
+  ownerScopeKey: string;
+}
+
+function parseVaultPlaintextScope(scopeKey: string): ParsedVaultPlaintextScope | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(scopeKey);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || typeof parsed[0] !== "string") return null;
+  const entriesById = new Map<string, string>();
+  for (const value of parsed.slice(1)) {
+    if (
+      !Array.isArray(value)
+      || value.length !== 5
+      || typeof value[0] !== "string"
+      || typeof value[1] !== "string"
+      || typeof value[2] !== "string"
+      || !Array.isArray(value[3])
+      || !value[3].every((participantUid) => typeof participantUid === "string")
+      || (value[4] !== null && typeof value[4] !== "string")
+      || entriesById.has(value[0])
+    ) return null;
+    entriesById.set(value[0], JSON.stringify(value));
+  }
+  return { entriesById, ownerScopeKey: parsed[0] };
+}
+
+/**
+ * An additive grant cannot revoke plaintext already decrypted for this
+ * session. Keep the existing inventory visible while the added documents
+ * decrypt, but fail closed on removals, owner contraction, and same-ID access
+ * replacement. Malformed scope state is never compatible.
+ */
+export function vaultPlaintextScopeCanRetain(
+  decryptedScopeKey: string,
+  currentScopeKey: string
+) {
+  if (decryptedScopeKey === currentScopeKey) return true;
+  const decryptedScope = parseVaultPlaintextScope(decryptedScopeKey);
+  const currentScope = parseVaultPlaintextScope(currentScopeKey);
+  if (
+    !decryptedScope
+    || !currentScope
+    || vaultOwnerScopeRequiresReset(
+      decryptedScope.ownerScopeKey,
+      currentScope.ownerScopeKey
+    )
+  ) return false;
+  for (const [noteId, entry] of decryptedScope.entriesById) {
+    if (currentScope.entriesById.get(noteId) !== entry) return false;
+  }
+  return true;
+}
+
 export function decryptedVaultNotesForScope(
   decryptedNotes: readonly DecryptedVaultNote[],
   ownerIds: readonly string[] | null,
@@ -1068,7 +1126,11 @@ export function decryptedVaultNotesForScope(
   currentScopeKey: string,
   snapshotReceived: boolean
 ) {
-  if (!snapshotReceived || decryptedScopeKey !== currentScopeKey) return [];
+  if (
+    !snapshotReceived
+    || decryptedScopeKey === null
+    || !vaultPlaintextScopeCanRetain(decryptedScopeKey, currentScopeKey)
+  ) return [];
   if (ownerIds === null) return [...decryptedNotes];
   const visibleOwners = new Set(ownerIds);
   return decryptedNotes.filter((note) => visibleOwners.has(note.ownerUid));
@@ -9559,7 +9621,7 @@ function UnlockedVaultPage({
     const note = notesRef.current.find((candidate) => candidate.id === entryId) ?? null;
     const draft = draftsRef.current[entryId] ?? null;
     if (!note || !draft || note.entryKind !== "markdown" || note.contentFormat !== "markdown-v1") {
-      setError("Markdown 노트를 연 뒤 이미지를 붙여넣어주세요.");
+      setError("Markdown 노트를 연 뒤 이미지를 추가해주세요.");
       return null;
     }
     if (
@@ -9569,11 +9631,11 @@ function UnlockedVaultPage({
       || pendingEntryCreationRef.current
       || deletingEntryIdsRef.current.has(note.id)
     ) {
-      setError("암호화된 Vault 쓰기와 경로 작업이 끝난 뒤 이미지를 붙여넣어주세요.");
+      setError("암호화된 Vault 쓰기와 경로 작업이 끝난 뒤 이미지를 추가해주세요.");
       return null;
     }
     if (note.ownerUid !== profile.uid || note.type !== "personal") {
-      setError("공유 참여자의 접근이 끊기지 않도록 현재는 내가 소유한 개인 Markdown 노트에만 이미지를 직접 붙여넣을 수 있습니다.");
+      setError("공유 참여자의 접근이 끊기지 않도록 현재는 내가 소유한 개인 Markdown 노트에만 이미지를 직접 추가할 수 있습니다.");
       return null;
     }
 
@@ -9583,8 +9645,8 @@ function UnlockedVaultPage({
     );
     setError(null);
     setStatus(files.length > 1
-      ? `${files.length}개 붙여넣은 이미지를 안전하게 확인하는 중입니다…`
-      : "붙여넣은 이미지를 안전하게 확인하는 중입니다…");
+      ? `${files.length}개 이미지를 안전하게 확인하는 중입니다…`
+      : "이미지를 안전하게 확인하는 중입니다…");
     try {
       const { pasteVaultClipboardImages } = await import(
         "../features/vault/vaultClipboardPasteFlow"
@@ -9605,7 +9667,7 @@ function UnlockedVaultPage({
       });
     } catch (caught) {
       if (!signal.aborted) {
-        setError(caught instanceof Error ? caught.message : "이미지 붙여넣기 모듈을 불러오지 못했습니다.");
+        setError(caught instanceof Error ? caught.message : "이미지 추가 모듈을 불러오지 못했습니다.");
       }
       return null;
     } finally {

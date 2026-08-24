@@ -11,11 +11,20 @@ import {
 } from "./vaultAsset";
 
 export const MAX_VAULT_CLIPBOARD_IMAGES = 8;
-export const MAX_VAULT_CLIPBOARD_SOURCE_BYTES = 20 * 1024 * 1024;
-export const MAX_VAULT_CLIPBOARD_BATCH_SOURCE_BYTES = 40 * 1024 * 1024;
+export const MAX_VAULT_CLIPBOARD_SOURCE_BYTES = 32 * 1024 * 1024;
+export const MAX_VAULT_CLIPBOARD_BATCH_SOURCE_BYTES = 64 * 1024 * 1024;
 export const MAX_VAULT_CLIPBOARD_TRANSCODE_MS = 8_000;
 export const MAX_VAULT_CLIPBOARD_TRANSCODE_DIMENSION = 2_048;
 export const MAX_VAULT_CLIPBOARD_TRANSCODE_PIXELS = 4_000_000;
+export const VAULT_MARKDOWN_IMAGE_ACCEPT = [
+  ".jpeg",
+  ".jpg",
+  ".png",
+  ".webp",
+  "image/jpeg",
+  "image/png",
+  "image/webp"
+].join(",");
 
 const genericClipboardMimeTypes = new Set([
   "",
@@ -133,6 +142,20 @@ export function vaultClipboardImageFiles(transfer: ClipboardImageTransfer | null
   return unsupported ? [unsupported.file] : [];
 }
 
+export function vaultSelectedImageFiles(files: ArrayLike<File> | null | undefined) {
+  const candidates = Array.from(files ?? []).map((file) => ({
+    advertisedType: file.type,
+    file
+  }));
+  const usable = usableClipboardFiles(candidates);
+  if (usable.length) return usable;
+  const unsupported = candidates.find((candidate) => {
+    const classification = classifyCandidate(candidate);
+    return classification === "unsupported-image";
+  });
+  return unsupported ? [unsupported.file] : [];
+}
+
 function extensionForMimeType(mimeType: SafeRasterMimeType): PreparedVaultClipboardImage["extension"] {
   if (mimeType === "image/jpeg") return "jpg";
   if (mimeType === "image/webp") return "webp";
@@ -198,7 +221,7 @@ function waitForClipboardOperation<T>(operation: Promise<T>, signal?: AbortSigna
       callback();
     };
     const abort = () => finish(() => reject(
-      signal.reason ?? new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError")
+      signal.reason ?? new DOMException("이미지 추가가 취소되었습니다.", "AbortError")
     ));
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
@@ -309,7 +332,7 @@ function canvasToBlob(
       callback();
     };
     const abort = () => finish(() => reject(
-      signal?.reason ?? new DOMException("이미지 붙여넣기가 취소되었습니다.", "AbortError")
+      signal?.reason ?? new DOMException("이미지 추가가 취소되었습니다.", "AbortError")
     ));
     const timeout = window.setTimeout(() => finish(() => reject(
       new Error("이미지 축소 시간이 초과되었습니다.")
@@ -457,20 +480,20 @@ export async function prepareVaultClipboardImages(
 ): Promise<PreparedVaultClipboardImage[]> {
   if (!files.length) return [];
   if (files.length > MAX_VAULT_CLIPBOARD_IMAGES) {
-    throw new Error(`이미지는 한 번에 ${MAX_VAULT_CLIPBOARD_IMAGES}개까지 붙여넣을 수 있습니다.`);
+    throw new Error(`이미지는 한 번에 ${MAX_VAULT_CLIPBOARD_IMAGES}개까지 추가할 수 있습니다.`);
   }
 
   let batchBytes = 0;
   for (const file of files) {
     if (!Number.isSafeInteger(file.size) || file.size <= 0) {
-      throw new Error("빈 이미지나 크기를 확인할 수 없는 이미지는 붙여넣을 수 없습니다.");
+      throw new Error("빈 이미지나 크기를 확인할 수 없는 이미지는 추가할 수 없습니다.");
     }
     if (file.size > MAX_VAULT_CLIPBOARD_SOURCE_BYTES) {
-      throw new Error(`붙여넣을 원본 이미지는 ${Math.floor(MAX_VAULT_CLIPBOARD_SOURCE_BYTES / (1024 * 1024))}MB 이하만 안전하게 처리할 수 있습니다.`);
+      throw new Error(`원본 이미지는 파일당 ${Math.floor(MAX_VAULT_CLIPBOARD_SOURCE_BYTES / (1024 * 1024))}MB 이하만 안전하게 처리할 수 있습니다.`);
     }
     batchBytes += file.size;
     if (!Number.isSafeInteger(batchBytes) || batchBytes > MAX_VAULT_CLIPBOARD_BATCH_SOURCE_BYTES) {
-      throw new Error(`한 번에 붙여넣을 원본 이미지 합계는 ${Math.floor(MAX_VAULT_CLIPBOARD_BATCH_SOURCE_BYTES / (1024 * 1024))}MB 이하만 안전하게 처리할 수 있습니다.`);
+      throw new Error(`한 번에 추가할 원본 이미지 합계는 ${Math.floor(MAX_VAULT_CLIPBOARD_BATCH_SOURCE_BYTES / (1024 * 1024))}MB 이하만 안전하게 처리할 수 있습니다.`);
     }
   }
 
@@ -506,7 +529,7 @@ export async function prepareVaultClipboardImages(
         : validatedClipboardRasterMimeType(bytes, file.type);
       if (!mimeType) {
         bytes.fill(0);
-        throw new Error("붙여넣기는 서명과 해상도를 확인한 정적 PNG, JPG, WEBP 이미지만 지원합니다.");
+        throw new Error("서명과 해상도를 확인한 정적 PNG, JPG, WEBP 이미지만 추가할 수 있습니다.");
       }
 
       if (bytes.byteLength <= MAX_INLINE_VAULT_ASSET_BYTES) {

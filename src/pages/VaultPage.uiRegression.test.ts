@@ -61,12 +61,12 @@ describe("Vault workspace UI regression contract", () => {
   });
 
   it("themes the CodeMirror editor and gutter from Vault colors", () => {
-    expect(ruleBodiesForSelector(styles, ".vault-codemirror > .cm-editor")).toEqual(
+    expect(ruleBodiesForSelector(styles, ".vault-codemirror-editor > .cm-editor")).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/background:\s*var\(--vault-bg\);[\s\S]*color:\s*var\(--vault-text\);/u)
       ])
     );
-    expect(ruleBodiesForSelector(styles, ".vault-codemirror > .cm-editor .cm-gutters")).toEqual(
+    expect(ruleBodiesForSelector(styles, ".vault-codemirror-editor > .cm-editor .cm-gutters")).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/background:\s*var\(--vault-panel-muted\);[\s\S]*color:\s*var\(--vault-text-muted\);/u)
       ])
@@ -76,7 +76,7 @@ describe("Vault workspace UI regression contract", () => {
   it("themes CodeMirror completion surfaces and every readable completion state", () => {
     expect(ruleBodiesForSelector(
       styles,
-      ".vault-codemirror > .cm-editor .cm-tooltip.cm-tooltip-autocomplete"
+      ".vault-codemirror-editor > .cm-editor .cm-tooltip.cm-tooltip-autocomplete"
     )).toEqual(expect.arrayContaining([
       expect.stringMatching(
         /background:\s*var\(--vault-panel\);[\s\S]*border:\s*1px solid var\(--vault-border\);[\s\S]*color:\s*var\(--vault-text\);/u
@@ -84,28 +84,46 @@ describe("Vault workspace UI regression contract", () => {
     ]));
     expect(ruleBodiesForSelector(
       styles,
-      ".vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul"
+      ".vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete > ul"
     )).toEqual(expect.arrayContaining([
       expect.stringMatching(/background:\s*var\(--vault-panel\);[\s\S]*color:\s*var\(--vault-text\);/u)
     ]));
     expect(ruleBodiesForSelector(
       styles,
-      ".vault-codemirror > .cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected=\"true\"]"
+      ".vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete > ul > li[aria-selected=\"true\"]"
     )).toEqual(expect.arrayContaining([
       expect.stringMatching(/background:\s*color-mix\([\s\S]*var\(--vault-accent\)[\s\S]*color:\s*var\(--vault-text\);/u)
     ]));
     expect(ruleBodiesForSelector(
       styles,
-      ".vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionMatchedText"
+      ".vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete .cm-completionMatchedText"
     )).toEqual(expect.arrayContaining([
       expect.stringMatching(/color:\s*color-mix\([\s\S]*font-weight:\s*750;[\s\S]*text-decoration:\s*none;/u)
     ]));
     expect(ruleBodiesForSelector(
       styles,
-      ".vault-codemirror > .cm-editor .cm-tooltip-autocomplete .cm-completionDetail"
+      ".vault-codemirror-editor > .cm-editor .cm-tooltip-autocomplete .cm-completionDetail"
     )).toEqual(expect.arrayContaining([
       expect.stringMatching(/color:\s*var\(--vault-text-muted\);[\s\S]*opacity:\s*1;/u)
     ]));
+  });
+
+  it("keeps image tools compact and leaves editors without upload tools full-height", () => {
+    expect(ruleBodiesForSelector(styles, ".vault-codemirror")).toEqual(expect.arrayContaining([
+      expect.stringMatching(/display:\s*grid;[\s\S]*grid-template-rows:\s*minmax\(0, 1fr\);/u)
+    ]));
+    expect(ruleBodiesForSelector(styles, ".vault-codemirror--with-image-tools")).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/grid-template-rows:\s*auto minmax\(0, 1fr\);/u)
+      ])
+    );
+    expect(ruleBodiesForSelector(styles, ".vault-codemirror-image-tools")).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /background:\s*var\(--vault-panel-muted\);[\s\S]*border-bottom:\s*1px solid var\(--vault-border\);/u
+        )
+      ])
+    );
   });
 
   it("starts panels closed and restores encrypted or first-time defaults without flashing", () => {

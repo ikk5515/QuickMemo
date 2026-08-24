@@ -1605,6 +1605,50 @@ service cloud.firestore {
         ]);
     }
 
+    function vaultPathRewriteLegacyZeroStepAbandoned(data) {
+      return resource.data.status == "blocked"
+        && resource.data.lastErrorCode == "path-state-conflict"
+        && !resource.data.keys().hasAny([
+          "activationMode", "activatedAt", "recoveredAt", "completedAt",
+          "abandonedAt", "cleanupStartedAt"
+        ])
+        && resource.data.stepCount == 0
+        && resource.data.cursor == 0
+        && resource.data.confirmedCount == 0
+        && data.status == "abandoned"
+        && data.cursor == 0
+        && data.confirmedCount == 0
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.abandonedAt == request.time
+        && data.completedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "lastErrorCode", "revision", "abandonedAt", "completedAt", "updatedAt"
+        ]);
+    }
+
+    function vaultPathRewriteActivatedZeroStepCompleted(data) {
+      return resource.data.status == "blocked"
+        && resource.data.lastErrorCode == "path-state-conflict"
+        && resource.data.stepCount == 0
+        && resource.data.cursor == 0
+        && resource.data.confirmedCount == 0
+        && resource.data.activatedAt is timestamp
+        && !resource.data.keys().hasAny(["completedAt", "abandonedAt", "cleanupStartedAt"])
+        && data.status == "completed"
+        && data.cursor == 0
+        && data.confirmedCount == 0
+        && data.attemptCount == resource.data.attemptCount
+        && data.retryCount == resource.data.retryCount
+        && data.lastErrorCode == null
+        && data.activatedAt == resource.data.activatedAt
+        && data.completedAt == request.time
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          "status", "lastErrorCode", "revision", "completedAt", "updatedAt"
+        ]);
+    }
+
     function vaultPathRewriteLegacyPreparingAbandoned(data) {
       return resource.data.status == "preparing"
         && !resource.data.keys().hasAny(["activationMode"])
@@ -1806,7 +1850,12 @@ service cloud.firestore {
               ? (
                 resource.data.lastErrorCode == "path-state-conflict"
                 ? data.status == "abandoned"
-                  ? vaultPathRewriteAtomicAbandoned(data)
+                  ? (
+                    vaultPathRewriteAtomicAbandoned(data)
+                    || vaultPathRewriteLegacyZeroStepAbandoned(data)
+                  )
+                  : data.status == "completed"
+                    ? vaultPathRewriteActivatedZeroStepCompleted(data)
                   : data.status == "not-applied"
                     ? vaultPathRewriteNotApplied(data)
                     : data.status == "blocked"
@@ -1945,10 +1994,13 @@ service cloud.firestore {
               && resource.data.stepCount == 0
                 ? vaultPathRewriteZeroStepAcknowledged(data)
               : resource.data.keys().hasAny(["activationMode"])
-                && resource.data.status == "blocked"
-                && resource.data.lastErrorCode == "path-state-conflict"
-                && data.status == "abandoned"
-                ? vaultPathRewriteAtomicAbandoned(data)
+              && resource.data.status == "blocked"
+              && resource.data.lastErrorCode == "path-state-conflict"
+                ? data.status == "abandoned"
+                  ? vaultPathRewriteAtomicAbandoned(data)
+                  : data.status == "completed"
+                    ? vaultPathRewriteActivatedZeroStepCompleted(data)
+                    : false
               : resource.data.status in ["ready", "running"]
                 ? data.status == "blocked"
                   ? vaultPathRewriteBlocked(data)
@@ -1979,11 +2031,15 @@ service cloud.firestore {
                         : vaultPathRewritePreparedActivation(data)
               : resource.data.status == "blocked"
                 ? resource.data.lastErrorCode == "path-state-conflict"
-                  ? data.status == "not-applied"
-                    ? vaultPathRewriteNotApplied(data)
-                    : data.status == "blocked"
-                      ? vaultPathRewritePathConflict(data)
-                      : vaultPathRewritePathRecovery(data)
+                  ? data.status == "abandoned"
+                    ? vaultPathRewriteLegacyZeroStepAbandoned(data)
+                    : data.status == "completed"
+                      ? vaultPathRewriteActivatedZeroStepCompleted(data)
+                      : data.status == "not-applied"
+                        ? vaultPathRewriteNotApplied(data)
+                        : data.status == "blocked"
+                          ? vaultPathRewritePathConflict(data)
+                          : vaultPathRewritePathRecovery(data)
                   : data.status == "blocked"
                     ? vaultPathRewriteBlocked(data)
                     : vaultPathRewriteAttemptStart(data)
