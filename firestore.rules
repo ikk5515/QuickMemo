@@ -1682,6 +1682,10 @@ service cloud.firestore {
                     ? vaultPathRewritePreparingToPrepared(data)
                     : vaultPathRewritePreparationHeartbeat(data)
               : resource.data.keys().hasAny(["activationMode"])
+                && resource.data.status == "prepared"
+                && data.status == "abandoned"
+                  ? vaultPathRewriteAtomicAbandoned(data)
+              : resource.data.keys().hasAny(["activationMode"])
                 && resource.data.status == "ready"
                 && resource.data.stepCount == 0
                   ? vaultPathRewriteZeroStepAcknowledged(data)

@@ -89,6 +89,30 @@ export function vaultPathRewriteRecoveryContinuationIsCurrent(input: {
 }
 
 /**
+ * Removes only the exact blocked notice observed before a server recovery scan
+ * when that job is no longer recoverable. Terminal jobs are intentionally
+ * absent from the scan; a stale generation or a different concurrently shown
+ * job must remain untouched.
+ */
+export function reconcileVaultPathRewriteJobAfterRecoveryScan(input: {
+  continuationIsCurrent: boolean;
+  current: VaultPathRewriteJobSummary | null;
+  observedBlockedJobId: string | null;
+  scanComplete: boolean;
+  scannedJobs: readonly VaultPathRewriteJobSummary[];
+}) {
+  if (
+    !input.continuationIsCurrent
+    || !input.scanComplete
+    || input.observedBlockedJobId === null
+    || input.current?.status !== "blocked"
+    || input.current.jobId !== input.observedBlockedJobId
+    || input.scannedJobs.some((job) => job.jobId === input.observedBlockedJobId)
+  ) return input.current;
+  return null;
+}
+
+/**
  * Preparing/prepared/not-applied jobs never rewrite content unless the paired
  * path mutation is confirmed. Atomic receipt status is authoritative; legacy
  * jobs require a read-first path-state check. Atomic path-state conflicts are

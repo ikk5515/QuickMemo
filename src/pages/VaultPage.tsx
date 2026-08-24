@@ -111,6 +111,7 @@ import {
   automaticVaultPathRewriteRetryDelayMs,
   executeVaultPathRewrite,
   flushVaultDraftsBeforePathRewriteRecovery,
+  reconcileVaultPathRewriteJobAfterRecoveryScan,
   recoverVaultPathRewrite,
   retryableVaultPathRewriteFailure,
   shouldAutomaticallyRecoverVaultPathRewriteJob,
@@ -6615,6 +6616,9 @@ function UnlockedVaultPage({
       currentGeneration: pathRewriteRecoveryGenerationRef.current,
       generation
     });
+    const observedBlockedJobId = pathRewriteJob?.status === "blocked"
+      ? pathRewriteJob.jobId
+      : null;
     let deferredRecoveryTimer: number | null = null;
     let deferredRecoveryDeadline = Number.POSITIVE_INFINITY;
     const scheduleDeferredRecovery = (delayMs: number) => {
@@ -6644,6 +6648,15 @@ function UnlockedVaultPage({
       shouldContinueImmediately
     }) => {
       if (!continuationIsCurrent()) return;
+      if (observedBlockedJobId !== null) {
+        setPathRewriteJob((current) => reconcileVaultPathRewriteJobAfterRecoveryScan({
+          continuationIsCurrent: continuationIsCurrent(),
+          current,
+          observedBlockedJobId,
+          scanComplete: !hasMore,
+          scannedJobs: jobs
+        }));
+      }
       const deferredDelays = jobs
         .map((job) => job.recoveryAfterMs ?? 0)
         .filter((delay) => delay > 0);

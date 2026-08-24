@@ -3,6 +3,7 @@ import {
   automaticVaultPathRewriteRetryDelayMs,
   executeVaultPathRewrite,
   flushVaultDraftsBeforePathRewriteRecovery,
+  reconcileVaultPathRewriteJobAfterRecoveryScan,
   recoverVaultPathRewrite,
   retryableVaultPathRewriteFailure,
   resumeVaultPathRewriteToCompletion,
@@ -51,6 +52,55 @@ describe("path rewrite controller", () => {
       currentGeneration: 8,
       generation: 7
     })).toBe(false);
+  });
+
+  it("clears only the exact stale blocked notice omitted from a current server scan", () => {
+    const blocked = summary("blocked", {
+      jobId: `pr1_${"A".repeat(43)}`,
+      lastErrorCode: "path-state-conflict",
+      stepCount: 0
+    });
+    const different = summary("blocked", {
+      jobId: `pr1_${"B".repeat(43)}`,
+      lastErrorCode: "path-state-conflict",
+      stepCount: 0
+    });
+
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: blocked,
+      observedBlockedJobId: blocked.jobId,
+      scanComplete: true,
+      scannedJobs: []
+    })).toBeNull();
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: blocked,
+      observedBlockedJobId: blocked.jobId,
+      scanComplete: true,
+      scannedJobs: [blocked]
+    })).toBe(blocked);
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: false,
+      current: blocked,
+      observedBlockedJobId: blocked.jobId,
+      scanComplete: true,
+      scannedJobs: []
+    })).toBe(blocked);
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: blocked,
+      observedBlockedJobId: blocked.jobId,
+      scanComplete: false,
+      scannedJobs: []
+    })).toBe(blocked);
+    expect(reconcileVaultPathRewriteJobAfterRecoveryScan({
+      continuationIsCurrent: true,
+      current: different,
+      observedBlockedJobId: blocked.jobId,
+      scanComplete: true,
+      scannedJobs: []
+    })).toBe(different);
   });
 
   it("flushes the captured dirty drafts before recovery and reports every draft still dirty", async () => {

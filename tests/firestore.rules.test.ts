@@ -3280,6 +3280,95 @@ describeRules("firestore security rules", () => {
     ));
   });
 
+  it("abandons only stale unactivated owner pr3 prepared receipts", async () => {
+    const staleJobId = `pr3_${"A".repeat(43)}`;
+    const freshJobId = `pr3_${"B".repeat(43)}`;
+    const activatedJobId = `pr3_${"C".repeat(43)}`;
+    const staleAt = new Date(Date.now() - 2 * 60_000 - 1);
+    const freshAt = new Date();
+
+    const preparedReceipt = (
+      uid: string,
+      jobId: string,
+      updatedAt: Date,
+      overrides: Record<string, unknown> = {}
+    ) => atomicManifestVaultPathRewriteJob(uid, jobId, {
+      status: "prepared",
+      stepCount: 0,
+      preparedStepCount: 0,
+      remainingStepCount: 0,
+      mutationExpectedRevision: 1,
+      mutationTargetId: "folder-target",
+      mutationTargetKind: "folder",
+      createdAt: updatedAt,
+      updatedAt,
+      ...overrides
+    });
+    const abandonReceipt = () => ({
+      status: "abandoned",
+      lastErrorCode: null,
+      abandonedAt: serverTimestamp(),
+      completedAt: serverTimestamp(),
+      revision: 2,
+      updatedAt: serverTimestamp()
+    });
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a"));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", staleJobId),
+        preparedReceipt("user-a", staleJobId, staleAt)
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", freshJobId),
+        preparedReceipt("user-a", freshJobId, freshAt)
+      );
+      await setDoc(
+        doc(db, "vaultMaintenanceJobs", "user-a", "pathRewrites", activatedJobId),
+        preparedReceipt("user-a", activatedJobId, staleAt, { activatedAt: staleAt })
+      );
+    });
+
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    const otherDb = testEnv.authenticatedContext("user-b").firestore();
+    const staleRef = doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      staleJobId
+    );
+
+    await assertFails(updateDoc(doc(
+      otherDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      staleJobId
+    ), abandonReceipt()));
+    await assertFails(updateDoc(doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      freshJobId
+    ), abandonReceipt()));
+    await assertFails(updateDoc(doc(
+      ownerDb,
+      "vaultMaintenanceJobs",
+      "user-a",
+      "pathRewrites",
+      activatedJobId
+    ), abandonReceipt()));
+    await assertFails(updateDoc(staleRef, {
+      ...abandonReceipt(),
+      attemptCount: 1
+    }));
+    await assertSucceeds(updateDoc(staleRef, abandonReceipt()));
+  });
+
   it("abandons only stale legacy preparation and fences late step uploads before cleanup", async () => {
     const freshJobId = `pr1_${"M".repeat(43)}`;
     const staleJobId = `pr1_${"N".repeat(43)}`;
