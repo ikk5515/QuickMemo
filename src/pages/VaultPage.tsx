@@ -23,7 +23,6 @@ import {
   Menu,
   Network,
   PanelRight,
-  Paperclip,
   PenTool,
   Pin,
   Pencil,
@@ -241,8 +240,6 @@ import {
   uniqueNoteTitle
 } from "../features/vault/noteCommands";
 import { detectMarkdownPluginView } from "../features/vault/markdownPluginView";
-import { vaultNoteAttachmentAccess } from "../features/vault/vaultNoteAttachmentAccess";
-import { useVaultNoteAttachments } from "../features/vault/useVaultNoteAttachments";
 import { useVaultNavigationShortcuts } from "../features/vault/navigation/useVaultNavigationShortcuts";
 import type {
   CommandPaletteItem,
@@ -460,6 +457,7 @@ const LazyBaseView = lazy(() => import("../features/base/BaseView").then((module
 const LazyDailyNotesCalendar = lazy(() => import("../features/calendar/DailyNotesCalendar").then((module) => ({
   default: module.DailyNotesCalendar
 })));
+const LazyDailyNotesSettings = lazy(() => import("../features/calendar/DailyNotesSettings"));
 const LazyCodeMirrorMarkdownEditor = lazy(() => import("../features/vault/CodeMirrorMarkdownEditor").then((module) => ({
   default: module.CodeMirrorMarkdownEditor
 })));
@@ -508,12 +506,7 @@ const LazyVaultTrashDialog = lazy(() => import("../features/vault/VaultTrashDial
 const LazyVaultShareManagerDialog = lazy(() => import("../features/vault/VaultShareManagerDialog").then((module) => ({
   default: module.VaultShareManagerDialog
 })));
-const LazyVaultNoteAttachmentsDialog = lazy(() => import("../features/vault/VaultNoteAttachmentsDialog").then((module) => ({
-  default: module.VaultNoteAttachmentsDialog
-})));
-const LazyVaultNoteAttachmentsInline = lazy(() => import("../features/vault/VaultNoteAttachmentsInline").then((module) => ({
-  default: module.VaultNoteAttachmentsInline
-})));
+const LazyVaultNoteAttachmentsRegion = lazy(() => import("../features/vault/VaultNoteAttachmentsRegion"));
 const LazyVaultParticipantShareDialog = lazy(() => import("../features/vault/VaultParticipantShareDialog").then((module) => ({
   default: module.VaultParticipantShareDialog
 })));
@@ -645,74 +638,6 @@ function handleRovingTabListKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
   event.preventDefault();
   tabs[nextIndex]?.focus();
   tabs[nextIndex]?.click();
-}
-
-function DailyNotesSettings({
-  folderId,
-  folderOptions,
-  onFolderChange,
-  onTemplatesFolderChange,
-  onTemplatesIncludeDescendantsChange,
-  onTemplateChange,
-  templateEntryId,
-  templateOptions,
-  templatesFolderPath,
-  templatesIncludeDescendants
-}: {
-  folderId: string | null;
-  folderOptions: readonly { id: string; path: string }[];
-  onFolderChange: (folderId: string | null) => void;
-  onTemplatesFolderChange: (folderPath: string | null) => void;
-  onTemplatesIncludeDescendantsChange: (include: boolean) => void;
-  onTemplateChange: (entryId: string | null) => void;
-  templateEntryId: string | null;
-  templateOptions: readonly { id: string; path: string }[];
-  templatesFolderPath: string | null;
-  templatesIncludeDescendants: boolean;
-}) {
-  const folderMissing = folderId !== null && !folderOptions.some((option) => option.id === folderId);
-  const templateMissing = templateEntryId !== null && !templateOptions.some((option) => option.id === templateEntryId);
-  return (
-    <details className="vault-daily-settings">
-      <summary>Daily Notes 설정</summary>
-      <label>
-        <span>새 노트 폴더</span>
-        <select onChange={(event) => onFolderChange(event.currentTarget.value || null)} value={folderMissing ? "" : folderId ?? ""}>
-          <option value="">Vault 루트</option>
-          {folderOptions.map((option) => <option key={option.id} value={option.id}>{option.path}</option>)}
-        </select>
-      </label>
-      {folderMissing ? <small role="status">저장된 폴더를 찾을 수 없어 Vault 루트를 사용합니다.</small> : null}
-      <label>
-        <span>Daily Note 템플릿</span>
-        <select onChange={(event) => onTemplateChange(event.currentTarget.value || null)} value={templateMissing ? "" : templateEntryId ?? ""}>
-          <option value="">가이드형 기본 템플릿</option>
-          {templateOptions.map((option) => <option key={option.id} value={option.id}>{option.path}</option>)}
-        </select>
-      </label>
-      {templateMissing ? <small role="status">저장된 템플릿을 찾을 수 없어 기본 템플릿을 사용합니다.</small> : null}
-      <label>
-        <span>Templates 폴더</span>
-        <select
-          onChange={(event) => onTemplatesFolderChange(event.currentTarget.value || null)}
-          value={templatesFolderPath ?? ""}
-        >
-          <option value="">Templates/템플릿 자동 감지</option>
-          {folderOptions.map((option) => <option key={option.id} value={option.path}>{option.path}</option>)}
-        </select>
-      </label>
-      <label className="vault-daily-settings-check">
-        <input
-          checked={templatesIncludeDescendants}
-          disabled={templatesFolderPath === null}
-          onChange={(event) => onTemplatesIncludeDescendantsChange(event.currentTarget.checked)}
-          type="checkbox"
-        />
-        <span>하위 폴더 템플릿 포함</span>
-      </label>
-      <p>일정 달력과 분리된 날짜별 Markdown 노트입니다. 설정은 암호화된 워크스페이스에 저장됩니다.</p>
-    </details>
-  );
 }
 
 type LeftPanelMode = "files" | "search" | "tags" | "bookmarks";
@@ -888,11 +813,6 @@ interface VaultContextMenuState {
 
 interface VaultShareDialogState {
   hasUnsharedAssetEmbeds?: boolean;
-  note: DecryptedVaultNote;
-  returnFocusTo: HTMLElement | null;
-}
-
-interface VaultAttachmentDialogState {
   note: DecryptedVaultNote;
   returnFocusTo: HTMLElement | null;
 }
@@ -1930,7 +1850,6 @@ function UnlockedVaultPage({
   const [importRecoveryOpen, setImportRecoveryOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<VaultContextMenuState | null>(null);
   const [moveTarget, setMoveTarget] = useState<VaultMoveTarget | null>(null);
-  const [attachmentTarget, setAttachmentTarget] = useState<VaultAttachmentDialogState | null>(null);
   const [shareTarget, setShareTarget] = useState<VaultShareDialogState | null>(null);
   const [participantShareTarget, setParticipantShareTarget] = useState<VaultShareDialogState | null>(null);
   const decryptGeneration = useRef(0);
@@ -4564,16 +4483,6 @@ function UnlockedVaultPage({
   const activeEntryId = activeTab?.kind === "entry" ? activeTab.entryId : null;
   const activeNote = activeEntryId ? notes.find((note) => note.id === activeEntryId) ?? null : null;
   const activeDraft = activeEntryId ? drafts[activeEntryId] : undefined;
-  const activeNoteAttachmentsId = activeNote && vaultNoteAttachmentAccess(activeNote, profile).allowed
-    ? activeNote.id
-    : null;
-  const activeNoteAttachments = useVaultNoteAttachments(activeNoteAttachmentsId);
-  const attachmentTargetNoteId = attachmentTarget?.note.id ?? null;
-  useEffect(() => {
-    if (attachmentTargetNoteId && attachmentTargetNoteId !== activeNoteAttachmentsId) {
-      setAttachmentTarget(null);
-    }
-  }, [activeNoteAttachmentsId, attachmentTargetNoteId]);
   const activeMarkdownMayContainConvertibleHtml = Boolean(
     activeNote?.contentFormat === "markdown-v1"
     && activeDraft
@@ -10996,21 +10905,19 @@ function UnlockedVaultPage({
                     <CalendarDays size={14} /> Daily Notes
                   </button>
                   {calendarOpen && !compactCalendarLayout ? (
-                    <>
-                      <Suspense fallback={<VaultViewLoading label="Daily Notes" />}>
-                        <LazyDailyNotesCalendar
-                          createDisabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked}
-                          cursorMonth={calendarCursorMonth}
-                          monthNoteKeys={periodicNoteKeys.months}
-                          noteDates={dailyNoteDates}
-                          onCursorMonthChange={setCalendarCursorMonth}
-                          onOpenDate={openDailyNoteForDate}
-                          onOpenMonth={openMonthlyNote}
-                          onOpenWeek={openWeeklyNote}
-                          weekNoteKeys={periodicNoteKeys.weeks}
-                        />
-                      </Suspense>
-                      <DailyNotesSettings
+                    <Suspense fallback={<VaultViewLoading label="Daily Notes" />}>
+                      <LazyDailyNotesCalendar
+                        createDisabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked}
+                        cursorMonth={calendarCursorMonth}
+                        monthNoteKeys={periodicNoteKeys.months}
+                        noteDates={dailyNoteDates}
+                        onCursorMonthChange={setCalendarCursorMonth}
+                        onOpenDate={openDailyNoteForDate}
+                        onOpenMonth={openMonthlyNote}
+                        onOpenWeek={openWeeklyNote}
+                        weekNoteKeys={periodicNoteKeys.weeks}
+                      />
+                      <LazyDailyNotesSettings
                         folderId={dailyNotesFolderId}
                         folderOptions={dailyFolderOptions}
                         onFolderChange={setDailyNotesFolderId}
@@ -11022,7 +10929,7 @@ function UnlockedVaultPage({
                         templatesFolderPath={templatesFolderPath}
                         templatesIncludeDescendants={templatesIncludeDescendants}
                       />
-                    </>
+                    </Suspense>
                   ) : null}
                 </section>
               </>
@@ -11293,27 +11200,6 @@ function UnlockedVaultPage({
                         type="button"
                       ><Share2 aria-hidden="true" size={16} /></button>
                     ) : null}
-                    {activeNote.ownerUid === profile.uid
-                      && activeNote.type === "personal"
-                      && activeNote.entryKind === "markdown"
-                      && activeNote.contentFormat === "markdown-v1" ? (
-                      <button
-                        aria-label="노트 첨부파일 관리"
-                        disabled={
-                          deletingEntryIds.has(activeNote.id)
-                          || conflictedEntryIds.has(activeNote.id)
-                          || !isOnline
-                          || pathRewriteBusy
-                          || entryCreationContentLocked
-                        }
-                        onClick={(event) => setAttachmentTarget({
-                          note: activeNote,
-                          returnFocusTo: event.currentTarget
-                        })}
-                        title="암호화 파일 첨부와 자료실 연결"
-                        type="button"
-                      ><Paperclip aria-hidden="true" size={16} /></button>
-                    ) : null}
                     <button
                       aria-label="저장"
                       disabled={
@@ -11349,7 +11235,7 @@ function UnlockedVaultPage({
                     </div>
                   </aside>
                 ) : null}
-                <div className={`vault-note-content${activeNoteAttachmentsId ? " has-note-attachments" : ""}`}>
+                <div className="vault-note-content">
                   {activeNote.entryKind === "canvas" ? (
                     <Suspense fallback={<VaultViewLoading label="Canvas" />}>
                       <LazyVaultJsonCanvasPane
@@ -11413,24 +11299,22 @@ function UnlockedVaultPage({
                     </div>
                   ) : (
                     <>
-                      {activeNoteAttachmentsId ? (
-                        <Suspense fallback={<div aria-label="노트 첨부파일" className="vault-note-attachments-inline" role="status">파일 목록 준비 중</div>}>
-                          <LazyVaultNoteAttachmentsInline
-                            attachments={activeNoteAttachments.attachments}
-                            disabled={
-                              deletingEntryIds.has(activeNote.id)
-                              || conflictedEntryIds.has(activeNote.id)
-                              || !isOnline
-                              || pathRewriteBusy
-                              || entryCreationContentLocked
-                            }
-                            error={activeNoteAttachments.error}
-                            key={activeNote.id}
-                            loading={activeNoteAttachments.loading}
-                            onManage={(returnFocusTo) => setAttachmentTarget({ note: activeNote, returnFocusTo })}
-                          />
-                        </Suspense>
-                      ) : null}
+                      <Suspense fallback={<div aria-label="노트 첨부파일" className="vault-note-attachments-inline" role="status">파일 목록 준비 중</div>}>
+                        <LazyVaultNoteAttachmentsRegion
+                          disabled={
+                            deletingEntryIds.has(activeNote.id)
+                            || conflictedEntryIds.has(activeNote.id)
+                            || !isOnline
+                            || pathRewriteBusy
+                            || entryCreationContentLocked
+                          }
+                          key={activeNote.id}
+                          note={activeNote}
+                          onOpenLibrary={() => void navigateAfterSaving(`/library?sourceNoteId=${encodeURIComponent(activeNote.id)}`)}
+                          privateKey={privateKey}
+                          profile={profile}
+                        />
+                      </Suspense>
                       {activeMarkdownPluginView && viewMode !== "source" ? (
                         <Suspense fallback={<VaultViewLoading label={activeMarkdownPluginView === "drawing" ? "Drawing" : "Kanban"} />}>
                           {activeMarkdownPluginView === "drawing" ? (
@@ -11785,26 +11669,6 @@ function UnlockedVaultPage({
             returnFocusTo={moveTarget.returnFocusTo}
           />
         ) : null}
-        {attachmentTarget && attachmentTarget.note.id === activeNoteAttachmentsId ? (
-          <Suspense fallback={<VaultViewLoading label="첨부파일 관리" />}>
-            <LazyVaultNoteAttachmentsDialog
-              attachments={activeNoteAttachments.attachments}
-              attachmentsError={activeNoteAttachments.error}
-              attachmentsLoading={activeNoteAttachments.loading}
-              attachmentSlotCount={activeNoteAttachments.reservedCount}
-              note={attachmentTarget.note}
-              onClose={() => setAttachmentTarget(null)}
-              onOpenLibrary={() => {
-                const sourceNoteId = attachmentTarget.note.id;
-                setAttachmentTarget(null);
-                void navigateAfterSaving(`/library?sourceNoteId=${encodeURIComponent(sourceNoteId)}`);
-              }}
-              privateKey={privateKey}
-              profile={profile}
-              returnFocusTo={attachmentTarget.returnFocusTo}
-            />
-          </Suspense>
-        ) : null}
         {shareTarget ? (
           <Suspense fallback={<VaultViewLoading label="노트 공유" />}>
             <LazyVaultShareManagerDialog
@@ -11898,19 +11762,19 @@ function UnlockedVaultPage({
                 }}
                 weekNoteKeys={periodicNoteKeys.weeks}
               />
+              <LazyDailyNotesSettings
+                folderId={dailyNotesFolderId}
+                folderOptions={dailyFolderOptions}
+                onFolderChange={setDailyNotesFolderId}
+                onTemplatesFolderChange={setTemplatesFolderPath}
+                onTemplatesIncludeDescendantsChange={setTemplatesIncludeDescendants}
+                onTemplateChange={setDailyNotesTemplateEntryId}
+                templateEntryId={dailyNotesTemplateEntryId}
+                templateOptions={dailyTemplateOptions}
+                templatesFolderPath={templatesFolderPath}
+                templatesIncludeDescendants={templatesIncludeDescendants}
+              />
             </Suspense>
-            <DailyNotesSettings
-              folderId={dailyNotesFolderId}
-              folderOptions={dailyFolderOptions}
-              onFolderChange={setDailyNotesFolderId}
-              onTemplatesFolderChange={setTemplatesFolderPath}
-              onTemplatesIncludeDescendantsChange={setTemplatesIncludeDescendants}
-              onTemplateChange={setDailyNotesTemplateEntryId}
-              templateEntryId={dailyNotesTemplateEntryId}
-              templateOptions={dailyTemplateOptions}
-              templatesFolderPath={templatesFolderPath}
-              templatesIncludeDescendants={templatesIncludeDescendants}
-            />
           </section>
         ) : null}
       </div>

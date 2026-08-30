@@ -1316,17 +1316,17 @@
   overflow: auto;
 }
 
-.vault-note-content.has-note-attachments {
+.vault-note-content:has(> .vault-note-attachments-inline) {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }
 
-.vault-note-content.has-note-attachments > :not(.vault-note-attachments-inline) {
+.vault-note-content:has(> .vault-note-attachments-inline) > :not(.vault-note-attachments-inline) {
   min-height: 0;
 }
 
-.vault-note-content.has-note-attachments > .vault-markdown-renderer {
+.vault-note-content:has(> .vault-note-attachments-inline) > .vault-markdown-renderer {
   overflow: auto;
 }
 
