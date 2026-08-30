@@ -7,7 +7,8 @@ import {
 } from "../../api/blob-attachments.js";
 import {
   NOTE_ATTACHMENT_COUNTER_ENFORCEMENT_VERSION,
-  NOTE_ATTACHMENT_COUNTER_SCHEMA_VERSION
+  NOTE_ATTACHMENT_COUNTER_SCHEMA_VERSION,
+  noteReadyAttachmentCountTransition
 } from "../../api/_note-attachment-counter.js";
 
 type FirestoreValue = {
@@ -299,6 +300,36 @@ async function reserveCurrentNoteAttachment(
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+describe("server-owned ready attachment count", () => {
+  it("preserves an unknown fallback for legacy notes without the field", () => {
+    const legacyNote = { fields: { ownerUid: stringValue("user-a") } };
+
+    expect(noteReadyAttachmentCountTransition(legacyNote, 1)).toEqual({ state: "unknown" });
+    expect(noteReadyAttachmentCountTransition(legacyNote, -1)).toEqual({ state: "unknown" });
+  });
+
+  it("increments and decrements known counts including the last attachment", () => {
+    expect(noteReadyAttachmentCountTransition({
+      fields: { readyAttachmentCount: integerValue(0) }
+    }, 1)).toEqual({ currentCount: 0, nextCount: 1, state: "write" });
+    expect(noteReadyAttachmentCountTransition({
+      fields: { readyAttachmentCount: integerValue(1) }
+    }, -1)).toEqual({ currentCount: 1, nextCount: 0, state: "write" });
+  });
+
+  it("fails closed on underflow, overflow, and malformed counters", () => {
+    expect(noteReadyAttachmentCountTransition({
+      fields: { readyAttachmentCount: integerValue(0) }
+    }, -1)).toEqual({ state: "invalid" });
+    expect(noteReadyAttachmentCountTransition({
+      fields: { readyAttachmentCount: integerValue(100) }
+    }, 1)).toEqual({ state: "invalid" });
+    expect(noteReadyAttachmentCountTransition({
+      fields: { readyAttachmentCount: { integerValue: "1.5" } }
+    }, 1)).toEqual({ state: "invalid" });
+  });
 });
 
 describe("global Blob free-tier reservation race", () => {

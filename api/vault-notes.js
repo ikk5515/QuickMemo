@@ -1137,6 +1137,9 @@ async function createNote(context, uid, body, options = {}) {
     );
     const noteFields = {
       attachmentRevision: 0,
+      // Server-owned projection used to skip attachment subcollection reads.
+      // Historical/client-created notes omit it and remain on the unknown path.
+      readyAttachmentCount: 0,
       createdAt: now,
       encryptedBody: input.encryptedBody,
       encryptedTitle: input.encryptedTitle,

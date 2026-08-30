@@ -276,7 +276,11 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain('isReady: boolField(attachment, "isReady")');
     expect(deleteManagedUserSource).toContain('stringField(note, "ownerUid") !== deletedOwnerUid');
     expect(deleteManagedUserSource).toContain('attachmentRevisionBumped: { booleanValue: revisionBumped || shouldBumpRevision }');
-    expect(deleteManagedUserSource).toContain('updateMask: { fieldPaths: ["attachmentRevision"] }');
+    expect(deleteManagedUserSource).toContain("noteReadyAttachmentCountTransition(note, -1)");
+    expect(deleteManagedUserSource).toContain('hasField(attachment, "isReady")');
+    expect(deleteManagedUserSource).toContain('boolField(attachment, "isReady")');
+    expect(deleteManagedUserSource).toContain('noteFieldPaths.push("readyAttachmentCount")');
+    expect(deleteManagedUserSource).toContain("updateMask: { fieldPaths: noteFieldPaths }");
     expect(deleteManagedUserSource).toContain("currentDocument: { updateTime: note.updateTime }");
     expect(deleteManagedUserSource).toContain("bumpSourceNoteRevision: true");
   });
@@ -354,7 +358,7 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain("revision: nextRevision");
     expect(deleteManagedUserSource).toContain("await firestoreCommit(context, writes, transaction)");
     expect(deleteManagedUserSource).toContain('["isAdmin", "isActive"]');
-    expect(deleteManagedUserSource).toContain('["ownerUid", "attachmentRevision"]');
+    expect(deleteManagedUserSource).toContain('["ownerUid", "attachmentRevision", "readyAttachmentCount"]');
     expect(deleteManagedUserSource).toContain('["uid", "attachmentCount", "usedBytes"]');
   });
 

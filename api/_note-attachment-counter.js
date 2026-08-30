@@ -1,4 +1,5 @@
 export const NOTE_ATTACHMENT_COUNT_LIMIT = 100;
+export const NOTE_READY_ATTACHMENT_COUNT_FIELD = "readyAttachmentCount";
 export const NOTE_ATTACHMENT_COUNTER_ENFORCEMENT_VERSION = 2;
 export const NOTE_ATTACHMENT_COUNTER_SCHEMA_VERSION = 2;
 export const NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE = (
@@ -13,6 +14,43 @@ export const NOTE_ATTACHMENT_COUNTER_FIELD_PATHS = Object.freeze([
   "accountingMode"
 ]);
 const NOTE_ATTACHMENT_COUNTER_MINIMUM_SCHEMA_VERSION = 1;
+
+/**
+ * Plans a server-owned ready attachment count mutation without inventing a
+ * value for legacy notes. The field is intentionally optional: absence means
+ * that callers must retain the existing collection-query fallback.
+ */
+export function noteReadyAttachmentCountTransition(document, delta) {
+  if (delta !== 1 && delta !== -1) {
+    throw new Error("Invalid ready attachment count transition");
+  }
+
+  if (
+    !document?.fields
+    || !Object.prototype.hasOwnProperty.call(document.fields, NOTE_READY_ATTACHMENT_COUNT_FIELD)
+  ) {
+    return { state: "unknown" };
+  }
+
+  const currentCount = nonNegativeIntegerField(document, NOTE_READY_ATTACHMENT_COUNT_FIELD);
+  const nextCount = currentCount === null ? Number.NaN : currentCount + delta;
+
+  if (
+    currentCount === null
+    || currentCount > NOTE_ATTACHMENT_COUNT_LIMIT
+    || !Number.isSafeInteger(nextCount)
+    || nextCount < 0
+    || nextCount > NOTE_ATTACHMENT_COUNT_LIMIT
+  ) {
+    return { state: "invalid" };
+  }
+
+  return {
+    currentCount,
+    nextCount,
+    state: "write"
+  };
+}
 
 export function noteAttachmentCounterPath(noteId) {
   return `notes/${noteId}/serverCounters/attachmentsV1`;

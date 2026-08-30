@@ -4,7 +4,9 @@ import { join } from "node:path";
 import { cwd } from "node:process";
 import { gzipSync } from "node:zlib";
 
-const assetsDirectory = join(cwd(), "dist", "assets");
+const distDirectory = join(cwd(), "dist");
+const assetsDirectory = join(distDirectory, "assets");
+const indexHtml = await readFile(join(distDirectory, "index.html"), "utf8");
 const javascriptFiles = (await readdir(assetsDirectory))
   .filter((fileName) => fileName.endsWith(".js"));
 const commonJsRuntimeFiles = javascriptFiles
@@ -150,4 +152,26 @@ assertChunkBudget(codeMirrorChunk, {
 
 if ([...staticallyReachableChunks([codeMirrorChunk])].some((fileName) => fileName.startsWith("editor-"))) {
   throw new Error("The lazy CodeMirror graph unexpectedly pulls in the legacy TipTap/ProseMirror editor chunk.");
+}
+
+const initialAssetFiles = Array.from(indexHtml.matchAll(
+  /(?:src|href)=["']\/assets\/([^"'?]+\.(?:js|css))["']/gu
+)).map((match) => match[1]);
+
+if (initialAssetFiles.some((fileName) => (
+  fileName.startsWith("firebase-storage-")
+  || fileName.startsWith("blobAttachments-")
+))) {
+  throw new Error("Attachment storage code must not be preloaded by the application shell.");
+}
+
+let initialGzipBytes = 0;
+
+for (const fileName of new Set(initialAssetFiles)) {
+  const source = await readFile(join(assetsDirectory, fileName));
+  initialGzipBytes += gzipSync(source, { level: 9 }).byteLength;
+}
+
+if (initialGzipBytes > 245 * 1_024) {
+  throw new Error(`The initial application shell exceeds its 245 KiB gzip budget: ${initialGzipBytes} bytes.`);
 }

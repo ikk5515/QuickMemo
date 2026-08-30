@@ -653,6 +653,7 @@ describe("public share backend cleanup", () => {
     const note = {
       name: noteName,
       fields: {
+        readyAttachmentCount: { integerValue: "0" },
         secureShareCopyState: { stringValue: "copying" },
         secureShareCopyJobId: { stringValue: "copy_job_1234567890" },
         secureShareCopyExpectedAttachmentCount: { integerValue: "2" },
@@ -709,6 +710,121 @@ describe("public share backend cleanup", () => {
         setToServerValue: "REQUEST_TIME"
       }]
     });
+  });
+
+  it("atomically decrements the server-owned count when deleting the last ready secure-copy attachment", async () => {
+    const projectId = "test-project";
+    const documentRoot = `projects/${projectId}/databases/(default)/documents`;
+    const noteName = `${documentRoot}/notes/note-copy-ready`;
+    const attachmentName = `${noteName}/attachments/attachment-ready`;
+    const attachment = {
+      name: attachmentName,
+      fields: {
+        isReady: { booleanValue: true },
+        secureShareCopyJobId: { stringValue: "copy_job_ready_12345678" }
+      },
+      updateTime: "2026-07-28T01:10:00.000Z"
+    };
+    const note = {
+      name: noteName,
+      fields: {
+        readyAttachmentCount: { integerValue: "1" },
+        secureShareCopyState: { stringValue: "copying" },
+        secureShareCopyJobId: { stringValue: "copy_job_ready_12345678" },
+        secureShareCopyExpectedAttachmentCount: { integerValue: "1" },
+        secureShareCopyReservedAttachmentCount: { integerValue: "1" },
+        secureShareCopyReadyAttachmentCount: { integerValue: "1" }
+      },
+      updateTime: "2026-07-28T01:10:01.000Z"
+    };
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+
+      if (init?.method === "POST") {
+        return { ok: true, json: async () => ({}) };
+      }
+      if (url.endsWith(attachmentName)) {
+        return { ok: true, json: async () => attachment };
+      }
+      if (url.endsWith(noteName)) {
+        return { ok: true, json: async () => note };
+      }
+      throw new Error(`Unexpected cleanup request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(beginAttachmentDeletionByName(
+      projectId,
+      attachmentName,
+      "test-access-token"
+    )).resolves.toEqual(attachment);
+
+    const commitCall = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    const commitBody = JSON.parse(String(commitCall?.[1]?.body));
+    expect(commitBody.writes[1]).toMatchObject({
+      update: {
+        name: noteName,
+        fields: {
+          readyAttachmentCount: { integerValue: "0" },
+          secureShareCopyReadyAttachmentCount: { integerValue: "0" },
+          secureShareCopyReservedAttachmentCount: { integerValue: "0" }
+        }
+      },
+      updateMask: {
+        fieldPaths: [
+          "secureShareCopyReservedAttachmentCount",
+          "secureShareCopyReadyAttachmentCount",
+          "readyAttachmentCount"
+        ]
+      },
+      currentDocument: { updateTime: note.updateTime }
+    });
+  });
+
+  it("retains ready secure-copy metadata when the server-owned count would underflow", async () => {
+    const projectId = "test-project";
+    const documentRoot = `projects/${projectId}/databases/(default)/documents`;
+    const noteName = `${documentRoot}/notes/note-copy-underflow`;
+    const attachmentName = `${noteName}/attachments/attachment-underflow`;
+    const attachment = {
+      name: attachmentName,
+      fields: {
+        isReady: { booleanValue: true },
+        secureShareCopyJobId: { stringValue: "copy_job_underflow_1234" }
+      },
+      updateTime: "2026-07-28T01:20:00.000Z"
+    };
+    const note = {
+      name: noteName,
+      fields: {
+        readyAttachmentCount: { integerValue: "0" },
+        secureShareCopyState: { stringValue: "copying" },
+        secureShareCopyJobId: { stringValue: "copy_job_underflow_1234" },
+        secureShareCopyExpectedAttachmentCount: { integerValue: "1" },
+        secureShareCopyReservedAttachmentCount: { integerValue: "1" },
+        secureShareCopyReadyAttachmentCount: { integerValue: "1" }
+      },
+      updateTime: "2026-07-28T01:20:01.000Z"
+    };
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+
+      if (url.endsWith(attachmentName)) {
+        return { ok: true, json: async () => attachment };
+      }
+      if (url.endsWith(noteName)) {
+        return { ok: true, json: async () => note };
+      }
+      throw new Error(`Unexpected cleanup request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(beginAttachmentDeletionByName(
+      projectId,
+      attachmentName,
+      "test-access-token"
+    )).resolves.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("does not decrement a current copying note for an attachment from another job", async () => {
@@ -783,6 +899,7 @@ describe("public share backend cleanup", () => {
     const note = {
       name: noteName,
       fields: {
+        readyAttachmentCount: { integerValue: "0" },
         secureShareCopyState: { stringValue: "copying" },
         secureShareCopyJobId: { stringValue: "copy_job_1234567890" },
         secureShareCopyExpectedAttachmentCount: { integerValue: "1" },
@@ -793,11 +910,15 @@ describe("public share backend cleanup", () => {
     };
     let attachmentReads = 0;
     let commits = 0;
+    const conflictedCommitBodies: Array<{
+      writes?: Array<{ update?: { fields?: Record<string, unknown> } }>;
+    }> = [];
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
 
       if (init?.method === "POST") {
         commits += 1;
+        conflictedCommitBodies.push(JSON.parse(String(init.body)));
         return {
           ok: false,
           status: 409,
@@ -827,6 +948,7 @@ describe("public share backend cleanup", () => {
     )).resolves.toBeNull();
     expect(attachmentReads).toBe(2);
     expect(commits).toBe(1);
+    expect(conflictedCommitBodies[0]?.writes?.[1]?.update?.fields).not.toHaveProperty("readyAttachmentCount");
   });
 
   it("treats deletionStarted as the idempotent counter-release boundary", async () => {

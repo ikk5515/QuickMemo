@@ -69,6 +69,37 @@ export function safeErrorSummary(error: unknown): {
   statusCode?: number;
 };
 
+export const __blobAttachmentTesting: Readonly<{
+  beginAttachmentDeletion(
+    projectId: string,
+    accessToken: string,
+    attachmentPath: string,
+    notePath?: string,
+    noteUpdatedByUid?: string,
+    authorizeCurrent?: (
+      attachment: BlobAttachmentFirestoreDocument,
+      note: BlobAttachmentFirestoreDocument | null
+    ) => Promise<{
+      allowed?: boolean;
+      verifyDocuments?: BlobAttachmentFirestoreDocument[];
+    }>
+  ): Promise<BlobAttachmentFirestoreDocument | null>;
+  markAttachmentReady(
+    projectId: string,
+    accessToken: string,
+    tokenPayload: {
+      attachmentPath: string;
+      blobPath: string;
+      encryptedSize: number;
+      noteId: string;
+      scope: "note" | "publicShare";
+      uid: string;
+      [key: string]: unknown;
+    },
+    uploadedBlob: { pathname: string; [key: string]: unknown }
+  ): Promise<void>;
+}>;
+
 export default function handler(
   request: {
     body?: unknown;

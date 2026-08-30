@@ -1,4 +1,5 @@
 export const NOTE_ATTACHMENT_COUNT_LIMIT: 100;
+export const NOTE_READY_ATTACHMENT_COUNT_FIELD: "readyAttachmentCount";
 export const NOTE_ATTACHMENT_COUNTER_ENFORCEMENT_VERSION: 2;
 export const NOTE_ATTACHMENT_COUNTER_SCHEMA_VERSION: 2;
 export const NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE: boolean;
@@ -17,6 +18,15 @@ export interface NoteAttachmentCounterDocument {
 }
 
 export type NoteAttachmentCounterState = "missing" | "open" | "closed" | "invalid";
+export type NoteReadyAttachmentCountTransition =
+  | { state: "unknown" }
+  | { state: "invalid" }
+  | { currentCount: number; nextCount: number; state: "write" };
+
+export function noteReadyAttachmentCountTransition(
+  document: NoteAttachmentCounterDocument | null | undefined,
+  delta: 1 | -1
+): NoteReadyAttachmentCountTransition;
 
 export function noteAttachmentCounterPath(noteId: string): string;
 export function noteAttachmentCounterName(

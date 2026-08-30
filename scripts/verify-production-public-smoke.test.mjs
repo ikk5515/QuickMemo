@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  initialHashedScriptPath,
+  validateImmutableAssetResponse,
   validateProductionPage,
   validateUnauthorizedAttachmentResponse,
   verifyProductionPublicSmoke
@@ -20,9 +22,16 @@ describe("production public smoke", () => {
   it("accepts the hardened application shell and fail-closed attachment API", async () => {
     const fetchImplementation = vi
       .fn()
-      .mockResolvedValueOnce(new Response('<div id="root"></div>', {
+      .mockResolvedValueOnce(new Response('<div id="root"></div><script type="module" src="/assets/index-AbCdEf12.js"></script>', {
         status: 200,
         headers: productionHeaders
+      }))
+      .mockResolvedValueOnce(new Response(null, {
+        status: 200,
+        headers: {
+          "cache-control": "public, max-age=31536000, immutable",
+          "content-type": "application/javascript; charset=utf-8"
+        }
       }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: "로그인이 필요합니다." }), {
         status: 401,
@@ -47,9 +56,11 @@ describe("production public smoke", () => {
       ok: true,
       origin: "https://quickmemo.example",
       pageStatus: 200,
+      assetStatus: 200,
       attachmentStatus: 401
     });
-    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+    expect(fetchImplementation).toHaveBeenCalledTimes(3);
+    expect(fetchImplementation.mock.calls[1]?.[1]).toMatchObject({ method: "HEAD", redirect: "error" });
   });
 
   it("rejects a page that loses its anti-framing policy", () => {
@@ -85,6 +96,29 @@ describe("production public smoke", () => {
       response,
       JSON.stringify({ ok: false, error: "https://private.blob.vercel-storage.com/file" })
     )).toThrow(/cached/u);
+  });
+
+  it("requires a content-hashed script with immutable production caching", () => {
+    expect(initialHashedScriptPath(
+      '<script type="module" src="/assets/index-AbCdEf12.js"></script>'
+    )).toBe("/assets/index-AbCdEf12.js");
+    expect(() => initialHashedScriptPath(
+      '<script type="module" src="/assets/index.js"></script>'
+    )).toThrow(/hashed application script/u);
+
+    const response = new Response(null, {
+      status: 200,
+      headers: {
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-type": "application/javascript; charset=utf-8"
+      }
+    });
+    Object.defineProperty(response, "url", { value: "https://quickmemo.example/assets/index-AbCdEf12.js" });
+
+    expect(() => validateImmutableAssetResponse(
+      response,
+      "https://quickmemo.example"
+    )).toThrow(/one-year browser cache lifetime/u);
   });
 
   it("uses Vercel CLI protection bypass for the immutable deployment smoke", () => {

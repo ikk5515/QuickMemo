@@ -11,7 +11,8 @@ import {
 import {
   NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE,
   noteAttachmentCounterName,
-  noteAttachmentCounterWrite
+  noteAttachmentCounterWrite,
+  noteReadyAttachmentCountTransition
 } from "./_note-attachment-counter.js";
 import {
   canonicalVaultInventoryManifestEntryKey,
@@ -1731,6 +1732,9 @@ function secureShareCopyCounterReleaseWrite(
   const reservedCount = integerField(note, "secureShareCopyReservedAttachmentCount");
   const readyCount = integerField(note, "secureShareCopyReadyAttachmentCount");
   const attachmentReady = booleanField(attachment, "isReady");
+  const readyAttachmentCount = attachmentReady
+    ? noteReadyAttachmentCountTransition(note, -1)
+    : { state: "unknown" };
 
   if (
     !note.updateTime
@@ -1744,6 +1748,7 @@ function secureShareCopyCounterReleaseWrite(
     || readyCount < 0
     || readyCount > reservedCount
     || (attachmentReady && readyCount <= 0)
+    || readyAttachmentCount.state === "invalid"
   ) {
     return { valid: false, write: null };
   }
@@ -1756,6 +1761,10 @@ function secureShareCopyCounterReleaseWrite(
   if (attachmentReady) {
     fields.secureShareCopyReadyAttachmentCount = integerValue(readyCount - 1);
     fieldPaths.push("secureShareCopyReadyAttachmentCount");
+  }
+  if (readyAttachmentCount.state === "write") {
+    fields.readyAttachmentCount = integerValue(readyAttachmentCount.nextCount);
+    fieldPaths.push("readyAttachmentCount");
   }
 
   return {

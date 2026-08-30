@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +24,9 @@ const authState = vi.hoisted(() => ({
   privateKey: {} as CryptoKey | null,
   profile: null as UserProfile | null
 }));
+const preloadMocks = vi.hoisted(() => ({
+  preloadProtectedRoute: vi.fn()
+}));
 
 vi.mock("../context/AuthContext", () => ({
   useAuth: () => ({
@@ -37,6 +40,8 @@ vi.mock("../context/AuthContext", () => ({
 vi.mock("../lib/firebase", () => ({
   hasFirebaseConfig: true
 }));
+
+vi.mock("../lib/routePreload", () => preloadMocks);
 
 vi.mock("../services/userPreferences", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/userPreferences")>();
@@ -52,6 +57,7 @@ describe("AppShell feature navigation", () => {
   beforeEach(() => {
     authState.privateKey = {} as CryptoKey;
     authState.profile = scheduleOnlyProfile;
+    preloadMocks.preloadProtectedRoute.mockClear();
   });
 
   it("only exposes navigation granted to the current live profile", () => {
@@ -67,6 +73,33 @@ describe("AppShell feature navigation", () => {
     expect(within(navigation).getByRole("link", { name: "일정관리" })).toHaveAttribute("href", "/schedule");
     expect(within(navigation).queryByRole("link", { name: /파일 탐색기|노트 검색/ })).not.toBeInTheDocument();
     expect(within(navigation).queryByRole("link", { name: "자료실" })).not.toBeInTheDocument();
+  });
+
+  it("preloads an authorized route on pointer and keyboard intent", () => {
+    render(
+      <MemoryRouter>
+        <AppShell>
+          <span>내용</span>
+        </AppShell>
+      </MemoryRouter>
+    );
+
+    const navigation = screen.getByRole("navigation", { name: "주요 메뉴" });
+    const scheduleLink = within(navigation).getByRole("link", { name: "일정관리" });
+
+    fireEvent.pointerEnter(scheduleLink);
+    fireEvent.focus(scheduleLink);
+
+    expect(preloadMocks.preloadProtectedRoute).toHaveBeenNthCalledWith(
+      1,
+      "/schedule",
+      scheduleOnlyProfile
+    );
+    expect(preloadMocks.preloadProtectedRoute).toHaveBeenNthCalledWith(
+      2,
+      "/schedule",
+      scheduleOnlyProfile
+    );
   });
 
   it("opens the labeled workspace drawer and restores focus after Escape", async () => {

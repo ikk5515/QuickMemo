@@ -36,6 +36,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useEffect,
+  useDeferredValue,
   useId,
   useLayoutEffect,
   useCallback,
@@ -279,6 +280,7 @@ const kindLabels: Record<LibraryItemKind, string> = {
 const initialAttachmentNoteLimit = 80;
 const attachmentNoteLimitStep = 80;
 const maximumAttachmentNoteLimit = 800;
+const attachmentPublicationBatchSize = 24;
 const highlightColorLabels: Record<LibraryHighlightColor, string> = {
   yellow: "노랑",
   green: "초록",
@@ -1227,6 +1229,9 @@ export default function LibraryPage() {
   }, [managedSourceNotes, notes]);
   const eligibleRecentAttachmentNotes = useMemo(
     () => notes.filter((note) => {
+      if ("readyAttachmentCount" in note && note.readyAttachmentCount === 0) {
+        return false;
+      }
       const revision = note.attachmentRevision;
       return revision === undefined
         || (Number.isSafeInteger(revision) && Number(revision) > 0);
@@ -1302,8 +1307,11 @@ export default function LibraryPage() {
         return;
       }
 
+      const notesById = new Map(missing.map((note) => [note.id, note]));
+      const titlesById = new Map(results.map((result) => [result.id, result.title]));
+
       results.forEach((result) => {
-        const note = missing.find((candidate) => candidate.id === result.id);
+        const note = notesById.get(result.id);
 
         if (note) {
           noteTitleCache.current.set(`${note.id}:${noteRevision(note)}`, result.title);
@@ -1312,7 +1320,7 @@ export default function LibraryPage() {
       setNoteTitles((current) => {
         const next: Record<string, string> = {};
         attachmentCandidateNotes.forEach((note) => {
-          next[note.id] = results.find((result) => result.id === note.id)?.title ?? current[note.id] ?? "노트";
+          next[note.id] = titlesById.get(note.id) ?? current[note.id] ?? "노트";
         });
         return next;
       });
@@ -1365,10 +1373,71 @@ export default function LibraryPage() {
     }
 
     let cancelled = false;
+    let publicationTimer: number | null = null;
+    const pendingPublications: Array<{
+      failed: boolean;
+      group: AttachmentGroup | null;
+      noteId: string;
+    }> = [];
+
+    const schedulePublication = () => {
+      if (publicationTimer !== null || cancelled) {
+        return;
+      }
+
+      publicationTimer = window.setTimeout(() => {
+        publicationTimer = null;
+
+        if (cancelled || attachmentGeneration.current !== generation) {
+          pendingPublications.length = 0;
+          return;
+        }
+
+        const publications = pendingPublications.splice(0, attachmentPublicationBatchSize);
+        const groups: Record<string, AttachmentGroup> = {};
+        let completed = 0;
+        let failures = 0;
+
+        publications.forEach((publication) => {
+          completed += 1;
+          failures += publication.failed ? 1 : 0;
+          if (publication.group) {
+            groups[publication.noteId] = publication.group;
+          }
+        });
+
+        if (Object.keys(groups).length > 0) {
+          setAttachmentGroups((current) => ({ ...current, ...groups }));
+        }
+        if (failures > 0) {
+          setAttachmentFailureCount((current) => current + failures);
+        }
+        if (completed > 0) {
+          setAttachmentProgress((current) => ({
+            ...current,
+            completed: Math.min(current.total, current.completed + completed)
+          }));
+        }
+
+        if (pendingPublications.length > 0) {
+          schedulePublication();
+        }
+      }, 16);
+    };
+
+    const queuePublication = (publication: (typeof pendingPublications)[number]) => {
+      if (cancelled || attachmentGeneration.current !== generation) {
+        return;
+      }
+      pendingPublications.push(publication);
+      schedulePublication();
+    };
 
     void mapWithConcurrency(missing, 4, async (note) => {
       const requestKey = `${note.id}:${attachmentRevision(note)}`;
       let request = attachmentRequests.current.get(requestKey);
+      let failed = false;
+      let group: AttachmentGroup | null = null;
 
       if (!request) {
         request = getNoteAttachments(note.id);
@@ -1387,27 +1456,29 @@ export default function LibraryPage() {
         if (!cancelled && attachmentGeneration.current === generation) {
           const revision = attachmentRevision(note);
           attachmentCache.current.set(`${note.id}:${revision}`, attachments);
-          setAttachmentGroups((current) => ({
-            ...current,
-            [note.id]: { attachments, revision }
-          }));
+          group = { attachments, revision };
         }
       } catch {
         if (!cancelled && attachmentGeneration.current === generation) {
-          setAttachmentFailureCount((current) => current + 1);
+          failed = true;
         }
       } finally {
         if (attachmentRequests.current.get(requestKey) === request) {
           attachmentRequests.current.delete(requestKey);
         }
         if (!cancelled && attachmentGeneration.current === generation) {
-          setAttachmentProgress((current) => ({ ...current, completed: Math.min(current.total, current.completed + 1) }));
+          queuePublication({ failed, group, noteId: note.id });
         }
       }
     });
 
     return () => {
       cancelled = true;
+      if (publicationTimer !== null) {
+        window.clearTimeout(publicationTimer);
+        publicationTimer = null;
+      }
+      pendingPublications.length = 0;
     };
   }, [attachmentCandidateNotes, notesFeatureEnabled, privateKey, profile]);
 
@@ -1481,7 +1552,8 @@ export default function LibraryPage() {
     const today = todayStartMillis();
     return libraryItems.filter((item) => item.status !== "archived" && timestampMillis(item.lastReviewedAt) < today).length;
   }, [libraryItems]);
-  const normalizedQuery = query.normalize("NFKC").toLocaleLowerCase("ko-KR").trim();
+  const deferredQuery = useDeferredValue(query);
+  const normalizedQuery = deferredQuery.normalize("NFKC").toLocaleLowerCase("ko-KR").trim();
   const searchActive = Boolean(normalizedQuery);
   const searchTextById = useMemo(
     () => searchActive
@@ -1583,10 +1655,11 @@ export default function LibraryPage() {
     kindFilter,
     sort
   ]);
-  const selectedItem = useMemo(
-    () => allViewItems.find((item) => item.id === selectedId) ?? null,
-    [allViewItems, selectedId]
+  const viewItemsById = useMemo(
+    () => new Map(allViewItems.map((item) => [item.id, item])),
+    [allViewItems]
   );
+  const selectedItem = selectedId ? viewItemsById.get(selectedId) ?? null : null;
   const selectedAttachmentSource = useMemo(() => {
     if (!selectedItem) {
       return null;

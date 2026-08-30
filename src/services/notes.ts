@@ -21,10 +21,10 @@ import {
   where,
   writeBatch
 } from "firebase/firestore";
-import { getBytes, ref } from "firebase/storage";
 import { maxEncryptedAttachmentBytes } from "../lib/attachments";
 import { encryptedAttachmentSizeLimit, type AttachmentEncryptionMetadata, type EncryptedAttachmentSource } from "../lib/attachmentCrypto";
-import { db, getLegacyStorage } from "../lib/firebase";
+import { db } from "../lib/firebase";
+import { getLegacyStorageBytes } from "../lib/legacyFirebaseStorage";
 import {
   assertVaultFolderLifecyclePreflight,
   partitionVaultFolderTrash
@@ -2146,9 +2146,7 @@ export async function getEncryptedNoteAttachmentBytes(attachment: StoredAttachme
     throw new Error("첨부파일 암호문 위치를 찾을 수 없습니다.");
   }
 
-  return new Uint8Array(
-    await getBytes(ref(getLegacyStorage(), attachment.storagePath), maxEncryptedAttachmentBytes)
-  );
+  return getLegacyStorageBytes(attachment.storagePath, maxEncryptedAttachmentBytes);
 }
 
 export async function getEncryptedNoteAttachmentSource(
@@ -2179,11 +2177,9 @@ export async function getEncryptedNoteAttachmentSource(
   }
 
   return {
-    bytes: new Uint8Array(
-      await waitForAbortable(
-        getBytes(ref(getLegacyStorage(), attachment.storagePath), maxEncryptedAttachmentBytes),
-        signal
-      )
+    bytes: await waitForAbortable(
+      getLegacyStorageBytes(attachment.storagePath, maxEncryptedAttachmentBytes),
+      signal
     )
   };
 }

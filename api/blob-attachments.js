@@ -40,7 +40,8 @@ import {
   noteAttachmentCounterName,
   noteAttachmentCounterPath,
   noteAttachmentCounterState,
-  noteAttachmentCounterWrite
+  noteAttachmentCounterWrite,
+  noteReadyAttachmentCountTransition
 } from "./_note-attachment-counter.js";
 import {
   clientNetworkDigest,
@@ -2531,6 +2532,19 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
         fieldPath: "updatedAt",
         setToServerValue: "REQUEST_TIME"
       }];
+      const readyAttachmentCount = noteReadyAttachmentCountTransition(note, 1);
+
+      if (readyAttachmentCount.state === "invalid") {
+        throw new HttpError(
+          409,
+          "첨부파일 개수 상태가 일치하지 않습니다. 잠시 후 다시 시도해주세요.",
+          "Ready attachment count cannot be incremented"
+        );
+      }
+      if (readyAttachmentCount.state === "write") {
+        noteFields.readyAttachmentCount = integerValue(readyAttachmentCount.nextCount);
+        noteFieldPaths.push("readyAttachmentCount");
+      }
 
       if (secureShareCopyState(note) === "copying") {
         const expectedCount = valueInteger(note, "secureShareCopyExpectedAttachmentCount");
@@ -3256,6 +3270,26 @@ async function beginAttachmentDeletion(
         });
       }
 
+      if (
+        shouldBumpRevision
+        && valueHasField(attachment, "isReady")
+        && valueBoolean(attachment, "isReady")
+      ) {
+        const readyAttachmentCount = noteReadyAttachmentCountTransition(note, -1);
+
+        if (readyAttachmentCount.state === "invalid") {
+          throw new HttpError(
+            409,
+            "첨부파일 개수 상태가 일치하지 않습니다. 잠시 후 다시 시도해주세요.",
+            "Ready attachment count cannot be decremented"
+          );
+        }
+        if (readyAttachmentCount.state === "write") {
+          noteFields.readyAttachmentCount = integerValue(readyAttachmentCount.nextCount);
+          noteFieldPaths.push("readyAttachmentCount");
+        }
+      }
+
       if (secureShareCopyJobId && !deletionStarted && secureShareCopyState(note) === "copying") {
         const reservedCount = valueInteger(note, "secureShareCopyReservedAttachmentCount");
         const readyCount = valueInteger(note, "secureShareCopyReadyAttachmentCount");
@@ -3546,6 +3580,13 @@ export {
   safeAttachmentMimeType,
   safeFileName
 };
+
+// Narrow test seam for exercising the real optimistic Firestore mutations.
+// Production request handling continues to reach the same private functions.
+export const __blobAttachmentTesting = Object.freeze({
+  beginAttachmentDeletion,
+  markAttachmentReady
+});
 
 export default async function handler(request, response) {
   const startedAt = Date.now();

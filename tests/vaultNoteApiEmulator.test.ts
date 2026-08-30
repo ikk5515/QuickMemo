@@ -573,6 +573,7 @@ describeEmulator("Vault note API emulator transaction", () => {
     const firstMutationId = String(created.body.lastMutationId);
 
     expect(await readEmulatorDocument(`notes/${noteId}`)).toMatchObject({
+      readyAttachmentCount: 0,
       contentFormat: "markdown-v1",
       encryptedBody: body,
       encryptedTitle: title,

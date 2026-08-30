@@ -3,18 +3,31 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-
 import { useAuth } from "./context/AuthContext";
 import { hasFeatureAccess } from "./lib/featureAccess";
 import { createLibraryCaptureLoginState } from "./lib/libraryCapture";
+import {
+  loadAdminPage,
+  loadHomeRedirectPage,
+  loadLibraryPage,
+  loadLoginPage,
+  loadNotesPage,
+  loadPublicSharePage,
+  loadRecurringPage,
+  loadSchedulePage,
+  loadSetupPage,
+  loadVaultPage,
+  preloadProtectedRoute
+} from "./lib/routePreload";
 import type { AppFeature } from "./types";
 
-const AdminPage = lazy(() => import("./pages/AdminPage"));
-const HomeRedirectPage = lazy(() => import("./pages/HomeRedirectPage"));
-const LibraryPage = lazy(() => import("./pages/LibraryPage"));
-const LoginPage = lazy(() => import("./pages/LoginPage"));
-const NotesPage = lazy(() => import("./pages/NotesPage"));
-const PublicSharePage = lazy(() => import("./pages/PublicSharePage"));
-const RecurringPage = lazy(() => import("./pages/RecurringPage"));
-const SchedulePage = lazy(() => import("./pages/SchedulePage"));
-const SetupPage = lazy(() => import("./pages/SetupPage"));
-const VaultPage = lazy(() => import("./pages/VaultPage"));
+const AdminPage = lazy(loadAdminPage);
+const HomeRedirectPage = lazy(loadHomeRedirectPage);
+const LibraryPage = lazy(loadLibraryPage);
+const LoginPage = lazy(loadLoginPage);
+const NotesPage = lazy(loadNotesPage);
+const PublicSharePage = lazy(loadPublicSharePage);
+const RecurringPage = lazy(loadRecurringPage);
+const SchedulePage = lazy(loadSchedulePage);
+const SetupPage = lazy(loadSetupPage);
+const VaultPage = lazy(loadVaultPage);
 
 const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
 
@@ -51,6 +64,24 @@ const e2eNavigationBridgeEnabled =
   !import.meta.env.PROD
   && import.meta.env.MODE === "test"
   && import.meta.env.VITE_E2E_NAVIGATION_BRIDGE === "true";
+
+function AuthenticatedLoginTargetPreload() {
+  const { firebaseUser, profile } = useAuth();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (
+      location.pathname === "/login"
+      && profile
+      && firebaseUser?.uid === profile.uid
+      && profile.isActive
+    ) {
+      preloadProtectedRoute("/home", profile);
+    }
+  }, [firebaseUser?.uid, location.pathname, profile]);
+
+  return null;
+}
 
 function SecureShareCopyRecovery() {
   const { firebaseUser, profile } = useAuth();
@@ -143,6 +174,7 @@ export default function App() {
   return (
     <>
       {e2eNavigationBridgeEnabled && <E2eNavigationBridge />}
+      <AuthenticatedLoginTargetPreload />
       <SecureShareCopyRecovery />
       <Suspense key={location.pathname} fallback={<PageLoadingFallback />}>
         <Routes location={location}>

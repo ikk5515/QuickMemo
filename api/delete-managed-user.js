@@ -16,7 +16,8 @@ import {
   NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE,
   noteAttachmentCounterName,
   noteAttachmentCounterState,
-  noteAttachmentCounterWrite
+  noteAttachmentCounterWrite,
+  noteReadyAttachmentCountTransition
 } from "./_note-attachment-counter.js";
 import {
   createDocumentWrite,
@@ -945,7 +946,12 @@ async function beginManagedAttachmentDeletion({
       ? noteNameFromAttachmentName(projectId, attachmentName)
       : "";
     const note = noteName
-      ? await firestoreGetByName(projectId, noteName, accessToken, ["ownerUid", "attachmentRevision"])
+      ? await firestoreGetByName(
+          projectId,
+          noteName,
+          accessToken,
+          ["ownerUid", "attachmentRevision", "readyAttachmentCount"]
+        )
       : null;
     const mustProtectSourceRevision = Boolean(
       note
@@ -981,14 +987,30 @@ async function beginManagedAttachmentDeletion({
     ];
 
     if (shouldBumpRevision) {
+      const readyAttachmentCount = (
+        hasField(attachment, "isReady")
+        && boolField(attachment, "isReady")
+      )
+        ? noteReadyAttachmentCountTransition(note, -1)
+        : { state: "unknown" };
+
+      if (readyAttachmentCount.state === "invalid") {
+        throw new Error("Ready attachment count cannot be decremented");
+      }
+      const noteFields = {
+        attachmentRevision: { integerValue: String(integerField(note, "attachmentRevision") + 1) }
+      };
+      const noteFieldPaths = ["attachmentRevision"];
+      if (readyAttachmentCount.state === "write") {
+        noteFields.readyAttachmentCount = { integerValue: String(readyAttachmentCount.nextCount) };
+        noteFieldPaths.push("readyAttachmentCount");
+      }
       writes.push({
         update: {
           name: noteName,
-          fields: {
-            attachmentRevision: { integerValue: String(integerField(note, "attachmentRevision") + 1) }
-          }
+          fields: noteFields
         },
-        updateMask: { fieldPaths: ["attachmentRevision"] },
+        updateMask: { fieldPaths: noteFieldPaths },
         currentDocument: { updateTime: note.updateTime }
       });
     }

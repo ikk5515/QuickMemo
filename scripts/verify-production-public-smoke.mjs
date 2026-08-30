@@ -60,6 +60,24 @@ export function validateProductionPage(response, body, expectedOrigin) {
   assert((response.headers.get("strict-transport-security") ?? "").includes("max-age=63072000"), "Production HSTS is missing or weakened.");
 }
 
+export function initialHashedScriptPath(body) {
+  const match = body.match(/<script\b[^>]*\bsrc=["'](\/assets\/[^"'?]+-[A-Za-z0-9_-]{8,}\.js)["'][^>]*>/iu);
+  assert(Boolean(match?.[1]), "Production page did not reference a hashed application script.");
+  return match[1];
+}
+
+export function validateImmutableAssetResponse(response, expectedOrigin) {
+  assert(response.status === 200, `Production asset returned HTTP ${response.status}.`);
+  assert(new URL(response.url).origin === expectedOrigin, "Production asset redirected to an unexpected origin.");
+  assert((response.headers.get("content-type") ?? "").toLowerCase().includes("javascript"), "Production application script has an unexpected content type.");
+
+  const cacheControl = (response.headers.get("cache-control") ?? "").toLowerCase();
+  assert(cacheControl.includes("public"), "Hashed production asset is not publicly cacheable.");
+  assert(cacheControl.includes("max-age=31536000"), "Hashed production asset is missing its one-year browser cache lifetime.");
+  assert(cacheControl.includes("immutable"), "Hashed production asset is missing immutable caching.");
+  assert(!response.headers.has("set-cookie"), "Hashed production asset unexpectedly sets a cookie.");
+}
+
 export function validateUnauthorizedAttachmentResponse(response, body) {
   assert(response.status === 401, `Unauthenticated attachment request returned HTTP ${response.status}, expected 401.`);
   assert((response.headers.get("content-type") ?? "").toLowerCase().includes("application/json"), "Attachment rejection was not JSON.");
@@ -89,6 +107,15 @@ export async function verifyProductionPublicSmoke({
   const pageBody = await boundedText(pageResponse, maximumPageBytes);
   validateProductionPage(pageResponse, pageBody, productionUrl.origin);
 
+  const applicationScriptUrl = new URL(initialHashedScriptPath(pageBody), productionUrl);
+  const applicationScriptResponse = await fetchImplementation(applicationScriptUrl, {
+    headers: { Accept: "application/javascript" },
+    method: "HEAD",
+    redirect: "error",
+    signal: AbortSignal.timeout(requestTimeoutMilliseconds)
+  });
+  validateImmutableAssetResponse(applicationScriptResponse, productionUrl.origin);
+
   const attachmentUrl = new URL("/api/blob-attachments", productionUrl);
   attachmentUrl.searchParams.set("scope", "note");
   attachmentUrl.searchParams.set("noteId", "production_smoke_note");
@@ -105,6 +132,7 @@ export async function verifyProductionPublicSmoke({
     ok: true,
     origin: productionUrl.origin,
     pageStatus: pageResponse.status,
+    assetStatus: applicationScriptResponse.status,
     attachmentStatus: attachmentResponse.status
   };
 }
@@ -114,7 +142,7 @@ async function main() {
     baseUrl: process.env.QUICKMEMO_PRODUCTION_URL || defaultProductionUrl
   });
   console.log(
-    `QuickMemo production smoke passed for ${result.origin}: page ${result.pageStatus}, unauthenticated attachment ${result.attachmentStatus}.`
+    `QuickMemo production smoke passed for ${result.origin}: page ${result.pageStatus}, immutable asset ${result.assetStatus}, unauthenticated attachment ${result.attachmentStatus}.`
   );
 }
 

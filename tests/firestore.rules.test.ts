@@ -8775,6 +8775,7 @@ describeRules("firestore security rules", () => {
           "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
           "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
         },
+        readyAttachmentCount: 1,
         isDeleted: false,
         updatedBy: "user-a"
       });
@@ -8792,8 +8793,39 @@ describeRules("firestore security rules", () => {
       testEnv.unauthenticatedContext().firestore()
     ];
 
+    const ownerDb = testEnv.authenticatedContext("user-a").firestore();
+    await assertFails(createAuditedNote(ownerDb, "client-owned-ready-count", "user-a", {
+      type: "personal",
+      ownerUid: "user-a",
+      participantUids: ["user-a"],
+      encryptedTitle: encryptedPayload,
+      encryptedBody: encryptedPayload,
+      wrappedKeys: {
+        "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" }
+      },
+      readyAttachmentCount: 0,
+      isDeleted: false,
+      updatedBy: "user-a"
+    }, ["user-a"]));
+    await assertSucceeds(getDoc(doc(ownerDb, "notes/note-a")));
+    await assertSucceeds(getDoc(doc(
+      testEnv.authenticatedContext("user-b").firestore(),
+      "notes/note-a"
+    )));
+    await assertSucceeds(updateAuditedNote(
+      ownerDb,
+      "note-a",
+      "user-a",
+      1,
+      "content",
+      ["body"],
+      ["user-a", "user-b"],
+      { encryptedBody: { ...encryptedPayload, cipherText: "updated-with-server-count" } }
+    ));
+
     for (const db of clientDatabases) {
       const counter = doc(db, "notes/note-a/serverCounters/attachmentsV1");
+      await assertFails(updateDoc(doc(db, "notes/note-a"), { readyAttachmentCount: 0 }));
       await assertFails(getDoc(counter));
       await assertFails(getDocs(collection(db, "notes/note-a/serverCounters")));
       await assertFails(setDoc(counter, { reservedCount: 0 }));

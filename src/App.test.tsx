@@ -18,14 +18,22 @@ const recoveryMocks = vi.hoisted(() => ({
     scanned: 0
   }))
 }));
+const preloadMocks = vi.hoisted(() => ({
+  preloadProtectedRoute: vi.fn()
+}));
 
 vi.mock("./context/AuthContext", () => ({
   useAuth: () => authState
 }));
 vi.mock("./services/secureShareCopyJobs", () => recoveryMocks);
+vi.mock("./lib/routePreload", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./lib/routePreload")>();
+  return { ...actual, preloadProtectedRoute: preloadMocks.preloadProtectedRoute };
+});
 
 vi.mock("./pages/HomeRedirectPage", () => ({ default: () => <span>홈 화면</span> }));
 vi.mock("./pages/LibraryPage", () => ({ default: () => <span>자료실 화면</span> }));
+vi.mock("./pages/LoginPage", () => ({ default: () => <span>로그인 화면</span> }));
 vi.mock("./pages/NotesPage", () => ({
   default: ({ legacyReadOnly = false }: { legacyReadOnly?: boolean }) => (
     <>
@@ -93,6 +101,7 @@ function renderGuard(feature: "notes" | "library" | "schedule") {
 describe("RequireAuth feature access", () => {
   beforeEach(() => {
     recoveryMocks.reapStaleSecureShareCopyJobs.mockClear();
+    preloadMocks.preloadProtectedRoute.mockClear();
     authState.firebaseUser = { uid: "user-a" } as User;
     authState.loading = false;
     authState.profile = profile();
@@ -107,6 +116,31 @@ describe("RequireAuth feature access", () => {
 
     expect(await screen.findByText("홈 화면")).toBeInTheDocument();
     expect(recoveryMocks.reapStaleSecureShareCopyJobs).toHaveBeenCalledWith("user-a");
+  });
+
+  it("preloads only the authenticated post-login home route", async () => {
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("로그인 화면")).toBeInTheDocument();
+    expect(preloadMocks.preloadProtectedRoute).toHaveBeenCalledWith("/home", authState.profile);
+  });
+
+  it("does not preload a protected route for an unauthenticated login", async () => {
+    authState.firebaseUser = null;
+    authState.profile = null;
+
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("로그인 화면")).toBeInTheDocument();
+    expect(preloadMocks.preloadProtectedRoute).not.toHaveBeenCalled();
   });
 
   it("keeps legacy profiles compatible", () => {

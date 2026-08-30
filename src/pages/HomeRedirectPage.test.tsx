@@ -19,6 +19,9 @@ const state = vi.hoisted(() => ({
   preferencesRequest: null as Promise<HomePreferences> | null,
   profile: null as UserProfile | null
 }));
+const preloadMocks = vi.hoisted(() => ({
+  preloadProtectedRoute: vi.fn()
+}));
 
 vi.mock("../components/AppShell", () => ({
   AppShell: ({ children }: PropsWithChildren) => <div data-testid="app-shell">{children}</div>
@@ -27,6 +30,8 @@ vi.mock("../components/AppShell", () => ({
 vi.mock("../context/AuthContext", () => ({
   useAuth: () => ({ profile: state.profile })
 }));
+
+vi.mock("../lib/routePreload", () => preloadMocks);
 
 vi.mock("../services/userPreferences", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/userPreferences")>();
@@ -76,12 +81,14 @@ describe("HomeRedirectPage feature access", () => {
     state.preferences = { defaultHome: "notes", scheduleDefaultView: "calendar" };
     state.preferencesRequest = null;
     state.profile = profile();
+    preloadMocks.preloadProtectedRoute.mockClear();
   });
 
   it("opens the file explorer instead of rendering the legacy dashboard", async () => {
     renderHome();
 
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/app?panel=files"));
+    expect(preloadMocks.preloadProtectedRoute).toHaveBeenCalledWith("/app?panel=files", state.profile);
     expect(screen.queryByText(/작업 공간/)).not.toBeInTheDocument();
   });
 
@@ -93,6 +100,7 @@ describe("HomeRedirectPage feature access", () => {
     renderHome();
 
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/library"));
+    expect(preloadMocks.preloadProtectedRoute).toHaveBeenCalledWith("/library", state.profile);
   });
 
   it("preserves the preferred schedule surface", async () => {
@@ -102,6 +110,7 @@ describe("HomeRedirectPage feature access", () => {
     renderHome();
 
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent("/schedule?view=matrix"));
+    expect(preloadMocks.preloadProtectedRoute).toHaveBeenCalledWith("/schedule?view=matrix", state.profile);
   });
 
   it.each(["todo", "recurring", "completed"] as const)(
