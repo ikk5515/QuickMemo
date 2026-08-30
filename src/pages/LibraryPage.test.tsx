@@ -259,9 +259,9 @@ function attachmentSnapshot() {
   };
 }
 
-function renderPage() {
+function renderPage(initialEntry = "/library") {
   return render(
-    <MemoryRouter initialEntries={["/library"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <LibraryPage />
     </MemoryRouter>
   );
@@ -527,6 +527,53 @@ describe("LibraryPage", () => {
 
     expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
+  });
+
+  it("loads a specifically requested old note, filters to its attachments, and clears the source-note filter", async () => {
+    const user = userEvent.setup();
+    const oldNote = {
+      ...noteSnapshot(),
+      id: "note-old",
+      updatedAt: timestamp(1_700_000_000_000)
+    };
+    const oldAttachment = {
+      ...attachmentSnapshot(),
+      fileName: "오래된-요청-자료",
+      id: "attachment-old",
+      noteId: "note-old"
+    };
+    serviceMocks.getVisibleNotesByIds.mockResolvedValue({
+      notes: [oldNote],
+      resolvedNoteIds: ["note-old"]
+    });
+    serviceMocks.getNoteAttachments.mockImplementation(async (noteId: string) =>
+      noteId === "note-old" ? [oldAttachment] : [attachmentSnapshot()]
+    );
+
+    renderPage("/library?sourceNoteId=note-old");
+
+    await waitFor(() => expect(serviceMocks.getVisibleNotesByIds).toHaveBeenCalledWith("user-a", ["note-old"]));
+    await waitFor(() => expect(serviceMocks.getNoteAttachments).toHaveBeenCalledWith("note-old"));
+    expect(await screen.findByRole("button", { name: "오래된-요청-자료.pdf 열기" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "운영-체크리스트.pdf 열기" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument();
+    expect(screen.getByText("현재 노트에 연결된 파일만 표시합니다.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "전체 자료 보기" }));
+
+    expect(await screen.findByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "보안 가이드 열기" })).toBeInTheDocument();
+    expect(screen.queryByText("현재 노트에 연결된 파일만 표시합니다.")).not.toBeInTheDocument();
+  });
+
+  it("ignores an invalid source-note filter without requesting or hiding note attachments", async () => {
+    renderPage("/library?sourceNoteId=note%2Fold");
+
+    expect(await screen.findByRole("button", { name: "보안 가이드 열기" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
+    expect(serviceMocks.getVisibleNotesByIds).not.toHaveBeenCalled();
+    expect(screen.queryByText("현재 노트에 연결된 파일만 표시합니다.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "전체 자료 보기" })).not.toBeInTheDocument();
   });
 
   it("separates links and files with one synchronized, accessible type filter", async () => {

@@ -5,9 +5,23 @@ import {
   unwrapNoteKey,
   wrapNoteKey
 } from "../../lib/crypto";
+import {
+  attachmentDownloadName,
+  safePublicShareAttachmentMimeType
+} from "../../lib/attachments";
+import { reencryptAttachmentBlob } from "../../lib/attachmentCrypto";
+import { secureShareSourceAttachmentFingerprint } from "../../lib/secureShareAttachmentReuse";
 import { buildSecureShareUrl } from "../../lib/secureShareUrl";
-import { createPublicShareGeneration } from "../../services/publicShares";
-import { getNoteRevisionState } from "../../services/notes";
+import {
+  createPublicNoteShareAttachment,
+  createPublicShareGeneration,
+  publicNoteShareMaxAttachmentCount
+} from "../../services/publicShares";
+import {
+  getEncryptedNoteAttachmentSource,
+  getNoteAttachments,
+  getNoteRevisionState
+} from "../../services/notes";
 import {
   activateSecureShare,
   createSecureShare,
@@ -36,14 +50,19 @@ const secureSharePermissionLevels = new Set(["comment", "save_copy", "view"]);
 interface VaultSecureShareDependencies {
   activateSecureShare: typeof activateSecureShare;
   buildSecureShareUrl: typeof buildSecureShareUrl;
+  createPublicNoteShareAttachment: typeof createPublicNoteShareAttachment;
   createPublicShareGeneration: typeof createPublicShareGeneration;
   createSecureShare: typeof createSecureShare;
   encryptText: typeof encryptText;
   exportAesKeyBase64Url: typeof exportAesKeyBase64Url;
   generateNoteKey: typeof generateNoteKey;
+  getEncryptedNoteAttachmentSource: typeof getEncryptedNoteAttachmentSource;
+  getNoteAttachments: typeof getNoteAttachments;
   getNoteRevisionState: typeof getNoteRevisionState;
   getSecureShareOwnerDetails: typeof getSecureShareOwnerDetails;
   revokeSecureShare: typeof revokeSecureShare;
+  reencryptAttachmentBlob: typeof reencryptAttachmentBlob;
+  secureShareSourceAttachmentFingerprint: typeof secureShareSourceAttachmentFingerprint;
   unwrapNoteKey: typeof unwrapNoteKey;
   wrapNoteKey: typeof wrapNoteKey;
 }
@@ -51,14 +70,19 @@ interface VaultSecureShareDependencies {
 const defaultDependencies: VaultSecureShareDependencies = {
   activateSecureShare,
   buildSecureShareUrl,
+  createPublicNoteShareAttachment,
   createPublicShareGeneration,
   createSecureShare,
   encryptText,
   exportAesKeyBase64Url,
   generateNoteKey,
+  getEncryptedNoteAttachmentSource,
+  getNoteAttachments,
   getNoteRevisionState,
   getSecureShareOwnerDetails,
   revokeSecureShare,
+  reencryptAttachmentBlob,
+  secureShareSourceAttachmentFingerprint,
   unwrapNoteKey,
   wrapNoteKey
 };
@@ -313,11 +337,12 @@ export async function createVaultSecureShare(
     note: DecryptedVaultNote;
     origin: string;
     policy: SecureSharePolicyInput;
+    privateKey: CryptoKey;
     profile: UserProfile;
   },
   dependencies: VaultSecureShareDependencies = defaultDependencies
 ) {
-  const { emailFeatureEnabled, idToken, note, origin, policy, profile } = input;
+  const { emailFeatureEnabled, idToken, note, origin, policy, privateKey, profile } = input;
   if (note.isDeleted || note.ownerUid !== profile.uid) {
     throw new Error("노트 소유자만 활성 노트의 보안 공유 링크를 만들 수 있습니다.");
   }
@@ -325,11 +350,28 @@ export async function createVaultSecureShare(
     throw new Error("Markdown 또는 기존 노트만 보안 링크로 공유할 수 있습니다.");
   }
   const sourceState = await dependencies.getNoteRevisionState(note.id);
-  if (sourceState.revision !== (note.revision ?? 0)) {
+  if (
+    sourceState.revision !== (note.revision ?? 0)
+    || sourceState.attachmentRevision !== (note.attachmentRevision ?? 0)
+  ) {
     throw new Error("다른 기기에서 노트가 변경되었습니다. 최신 내용을 불러온 뒤 다시 공유해주세요.");
   }
 
-  const shareKey = await dependencies.generateNoteKey();
+  const noteAttachments = await dependencies.getNoteAttachments(note.id);
+  if (noteAttachments.length > publicNoteShareMaxAttachmentCount) {
+    throw new Error(`보안 공유에는 첨부파일을 최대 ${publicNoteShareMaxAttachmentCount}개까지 포함할 수 있습니다.`);
+  }
+  const wrappedSourceKey = note.wrappedKeys[profile.uid];
+  if (noteAttachments.length > 0 && !wrappedSourceKey) {
+    throw new Error("원본 노트의 첨부파일 암호화 키를 확인할 수 없습니다.");
+  }
+
+  const [shareKey, sourceNoteKey] = await Promise.all([
+    dependencies.generateNoteKey(),
+    noteAttachments.length > 0 && wrappedSourceKey
+      ? dependencies.unwrapNoteKey(wrappedSourceKey, privateKey)
+      : Promise.resolve(null)
+  ]);
   const [contentKey, encryptedTitle, encryptedBody, wrappedKey] = await Promise.all([
     dependencies.exportAesKeyBase64Url(shareKey),
     dependencies.encryptText(note.title || "제목 없음", shareKey),
@@ -340,7 +382,7 @@ export async function createVaultSecureShare(
 
   try {
     const created = parseVaultSecureShareMutation(await dependencies.createSecureShare({
-      attachmentCount: 0,
+      attachmentCount: noteAttachments.length,
       encryptedBody,
       encryptedTitle,
       idempotencyKey: operationId("vault_create"),
@@ -356,10 +398,44 @@ export async function createVaultSecureShare(
       throw new Error("보안 공유 생성 상태를 확인하지 못했습니다.");
     }
     const generation = dependencies.createPublicShareGeneration();
+    for (const attachment of noteAttachments) {
+      if (!sourceNoteKey) {
+        throw new Error("원본 노트의 첨부파일 암호화 키를 확인할 수 없습니다.");
+      }
+      const [fingerprint, encryptedSource] = await Promise.all([
+        dependencies.secureShareSourceAttachmentFingerprint(attachment),
+        dependencies.getEncryptedNoteAttachmentSource(attachment)
+      ]);
+      const [encryptedAttachment, encryptedFileName] = await Promise.all([
+        dependencies.reencryptAttachmentBlob(attachment, sourceNoteKey, shareKey, encryptedSource),
+        dependencies.encryptText(attachmentDownloadName(attachment), shareKey)
+      ]);
+      await dependencies.createPublicNoteShareAttachment(createdShareId, {
+        encryptedBlob: encryptedAttachment.blob,
+        encryptedFileName,
+        encryption: encryptedAttachment.metadata,
+        expiresAt: new Date(created.expiresAt),
+        extension: attachment.extension,
+        generation,
+        mimeType: safePublicShareAttachmentMimeType(attachment.extension),
+        originalSize: attachment.originalSize,
+        ownerUid: profile.uid,
+        sourceAttachmentDigest: fingerprint?.digest,
+        sourceAttachmentId: attachment.id,
+        sourceEncryptionVersion: fingerprint?.encryptionVersion
+      });
+    }
+    const latestSourceState = await dependencies.getNoteRevisionState(note.id);
+    if (
+      latestSourceState.revision !== sourceState.revision
+      || latestSourceState.attachmentRevision !== sourceState.attachmentRevision
+    ) {
+      throw new Error("공유 준비 중 원본 노트가 변경되었습니다. 최신 내용을 확인한 뒤 다시 시도해주세요.");
+    }
     const activated = parseVaultSecureShareMutation(await dependencies.activateSecureShare(
       createdShareId,
       {
-        attachmentCount: 0,
+        attachmentCount: noteAttachments.length,
         generation,
         idempotencyKey: operationId("vault_activate")
       },

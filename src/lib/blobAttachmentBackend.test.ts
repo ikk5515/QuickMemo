@@ -358,12 +358,24 @@ describe("blob attachment backend", () => {
 
     expect(beginDeleteSource).toContain("shouldBumpAttachmentRevisionOnDelete");
     expect(beginDeleteSource).toContain('noteFields.attachmentRevision = integerValue(valueInteger(note, "attachmentRevision") + 1)');
+    expect(beginDeleteSource).toContain('noteFields.updatedBy = stringValue(noteUpdatedByUid)');
+    expect(beginDeleteSource).toContain('fieldPath: "updatedAt"');
     expect(beginDeleteSource).toContain('attachmentRevisionBumped = booleanValue(true)');
     expect(beginDeleteSource).toContain("currentDocument: { updateTime: note.updateTime }");
     expect(deleteSource.indexOf("const deletingAttachment = await beginAttachmentDeletion(")).toBeLessThan(
       deleteSource.indexOf("await deleteAttachmentObjects(")
     );
     expect(deleteSource).toContain("claimAttachmentDeletion");
+  });
+
+  it("refreshes note recency when a ready attachment is added", () => {
+    const markReadySource = blobAttachmentApiSource.match(
+      /async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u
+    )?.[0] ?? "";
+
+    expect(markReadySource).toContain('updatedBy: stringValue(tokenPayload.uid)');
+    expect(markReadySource).toContain('fieldPath: "updatedAt"');
+    expect(markReadySource).toContain('setToServerValue: "REQUEST_TIME"');
   });
 
   it("makes an authorized public attachment delete replay idempotent", () => {

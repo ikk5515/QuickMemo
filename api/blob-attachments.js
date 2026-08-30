@@ -1595,10 +1595,14 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
       }
 
       const noteFields = {
-        attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1)
+        attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1),
+        updatedBy: stringValue(tokenPayload.uid)
       };
-      const noteFieldPaths = ["attachmentRevision"];
-      const noteTransforms = [];
+      const noteFieldPaths = ["attachmentRevision", "updatedBy"];
+      const noteTransforms = [{
+        fieldPath: "updatedAt",
+        setToServerValue: "REQUEST_TIME"
+      }];
 
       if (secureShareCopyState(note) === "copying") {
         const expectedCount = valueInteger(note, "secureShareCopyExpectedAttachmentCount");
@@ -1947,7 +1951,13 @@ async function deleteAttachmentObjects(credentials, accessToken, attachment) {
   await deleteStorageObjectIfPresent(credentials.storageBucket, valueString(attachment, "storagePath"), accessToken);
 }
 
-async function beginAttachmentDeletion(projectId, accessToken, attachmentPath, notePath = "") {
+async function beginAttachmentDeletion(
+  projectId,
+  accessToken,
+  attachmentPath,
+  notePath = "",
+  noteUpdatedByUid = ""
+) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const attachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
 
@@ -2000,7 +2010,12 @@ async function beginAttachmentDeletion(projectId, accessToken, attachmentPath, n
         attachmentFields.attachmentRevisionBumped = booleanValue(true);
         attachmentFieldPaths.push("attachmentRevisionBumped");
         noteFields.attachmentRevision = integerValue(valueInteger(note, "attachmentRevision") + 1);
-        noteFieldPaths.push("attachmentRevision");
+        noteFields.updatedBy = stringValue(noteUpdatedByUid);
+        noteFieldPaths.push("attachmentRevision", "updatedBy");
+        noteTransforms.push({
+          fieldPath: "updatedAt",
+          setToServerValue: "REQUEST_TIME"
+        });
       }
 
       if (secureShareCopyJobId && !deletionStarted && secureShareCopyState(note) === "copying") {
@@ -2125,7 +2140,8 @@ async function deleteAttachment(request, response) {
       credentials.projectId,
       accessToken,
       attachmentPath,
-      `notes/${noteId}`
+      `notes/${noteId}`,
+      uid
     );
 
     if (deletingAttachment) {

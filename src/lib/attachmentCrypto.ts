@@ -196,8 +196,10 @@ export function normalizedChunkedAttachmentMetadata(metadata: AttachmentCryptoDo
 export async function encryptAttachmentBlob(
   file: Blob,
   key: CryptoKey,
-  onProgress?: AttachmentEncryptionProgressHandler
+  onProgress?: AttachmentEncryptionProgressHandler,
+  signal?: AbortSignal
 ): Promise<EncryptedAttachmentBlob> {
+  signal?.throwIfAborted();
   const originalSize = file.size;
 
   if (originalSize <= 0 || originalSize > maxAttachmentFileBytes) {
@@ -211,8 +213,10 @@ export async function encryptAttachmentBlob(
   let encryptedSize = 0;
 
   for (let index = 0; index < chunkCount; index += 1) {
+    signal?.throwIfAborted();
     const offset = index * chunkSize;
     const plainBytes = new Uint8Array(await blobArrayBuffer(file.slice(offset, Math.min(offset + chunkSize, originalSize))));
+    signal?.throwIfAborted();
     const iv = randomBytes(12);
     const cipherBytes = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv: toArrayBuffer(iv) },
@@ -221,6 +225,7 @@ export async function encryptAttachmentBlob(
     );
 
     plainBytes.fill(0);
+    signal?.throwIfAborted();
     parts.push(cipherBytes);
     chunkIvs.push(iv);
     encryptedSize += cipherBytes.byteLength;
@@ -231,6 +236,7 @@ export async function encryptAttachmentBlob(
     });
   }
 
+  signal?.throwIfAborted();
   validateChunkedSize(originalSize, encryptedSize, chunkSize, chunkCount);
 
   return {

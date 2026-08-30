@@ -1,0 +1,186 @@
+.vault-attachments-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  display: grid;
+  place-items: center;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: rgb(15 23 42 / 60%);
+  overscroll-behavior: contain;
+}
+
+.vault-attachments-dialog {
+  width: min(680px, 100%);
+  max-height: min(780px, calc(100dvh - 32px));
+  overflow: auto;
+  color: var(--vault-text, var(--ink, #172033));
+  border: 1px solid var(--vault-border, #dce2eb);
+  border-radius: 16px;
+  background: var(--vault-panel, #fff);
+  box-shadow: 0 24px 80px rgb(15 23 42 / 34%);
+}
+
+.vault-attachments-header,
+.vault-attachments-toolbar,
+.vault-attachments-progress > div,
+.vault-attachments-list > li,
+.vault-attachments-actions {
+  display: flex;
+  align-items: center;
+}
+
+.vault-attachments-header {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--vault-border, #dce2eb);
+}
+
+.vault-attachments-header > div {
+  min-width: 0;
+}
+
+.vault-attachments-header span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--vault-accent, #4f46e5);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.vault-attachments-header h2 {
+  overflow: hidden;
+  margin: 5px 0 0;
+  font-size: 1.08rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-attachments-body {
+  padding: 16px 18px 18px;
+}
+
+.vault-attachments-description {
+  margin: 0 0 14px;
+  color: var(--vault-text-muted, var(--muted, #667085));
+  line-height: 1.55;
+}
+
+.vault-attachments-toolbar {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.vault-attachments-toolbar button,
+.vault-attachments-progress button {
+  min-height: 40px;
+}
+
+.vault-attachments-limits {
+  display: block;
+  margin-top: 8px;
+  color: var(--vault-text-muted, var(--muted, #667085));
+}
+
+.vault-attachments-progress,
+.vault-attachments-feedback,
+.vault-attachments-empty {
+  margin: 14px 0 0;
+  padding: 11px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--vault-accent, #4f46e5) 9%, var(--vault-panel, #fff));
+}
+
+.vault-attachments-progress {
+  display: grid;
+  gap: 8px;
+}
+
+.vault-attachments-progress > div {
+  gap: 7px;
+}
+
+.vault-attachments-progress > span {
+  overflow: hidden;
+  color: var(--vault-text-muted, var(--muted, #667085));
+  font-size: 0.86rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-attachments-progress progress {
+  width: 100%;
+}
+
+.vault-attachments-feedback.error {
+  color: var(--danger, #b42318);
+  background: color-mix(in srgb, var(--danger, #b42318) 10%, var(--vault-panel, #fff));
+}
+
+.vault-attachments-list {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.vault-attachments-list > li {
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--vault-border, #dce2eb);
+  border-radius: 11px;
+}
+
+.vault-attachments-list > li > div:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+}
+
+.vault-attachments-list strong,
+.vault-attachments-list span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-attachments-list span {
+  margin-top: 3px;
+  color: var(--vault-text-muted, var(--muted, #667085));
+  font-size: 0.8rem;
+}
+
+.vault-attachments-actions {
+  gap: 4px;
+}
+
+.vault-attachments-actions .icon-button {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+@media (max-width: 560px) {
+  .vault-attachments-backdrop {
+    place-items: end center;
+    padding: max(8px, env(safe-area-inset-top)) 0 0;
+  }
+
+  .vault-attachments-dialog {
+    width: 100%;
+    max-height: calc(100dvh - max(8px, env(safe-area-inset-top)));
+    border-radius: 16px 16px 0 0;
+  }
+
+  .vault-attachments-toolbar > button {
+    flex: 1 1 180px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vault-attachments-dialog .spin {
+    animation-duration: 1.8s;
+  }
+}

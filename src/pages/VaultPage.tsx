@@ -23,6 +23,7 @@ import {
   Menu,
   Network,
   PanelRight,
+  Paperclip,
   PenTool,
   Pin,
   Pencil,
@@ -505,6 +506,9 @@ const LazyVaultTrashDialog = lazy(() => import("../features/vault/VaultTrashDial
 const LazyVaultShareManagerDialog = lazy(() => import("../features/vault/VaultShareManagerDialog").then((module) => ({
   default: module.VaultShareManagerDialog
 })));
+const LazyVaultNoteAttachmentsDialog = lazy(() => import("../features/vault/VaultNoteAttachmentsDialog").then((module) => ({
+  default: module.VaultNoteAttachmentsDialog
+})));
 const LazyVaultParticipantShareDialog = lazy(() => import("../features/vault/VaultParticipantShareDialog").then((module) => ({
   default: module.VaultParticipantShareDialog
 })));
@@ -879,6 +883,11 @@ interface VaultContextMenuState {
 
 interface VaultShareDialogState {
   hasUnsharedAssetEmbeds?: boolean;
+  note: DecryptedVaultNote;
+  returnFocusTo: HTMLElement | null;
+}
+
+interface VaultAttachmentDialogState {
   note: DecryptedVaultNote;
   returnFocusTo: HTMLElement | null;
 }
@@ -1916,6 +1925,7 @@ function UnlockedVaultPage({
   const [importRecoveryOpen, setImportRecoveryOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<VaultContextMenuState | null>(null);
   const [moveTarget, setMoveTarget] = useState<VaultMoveTarget | null>(null);
+  const [attachmentTarget, setAttachmentTarget] = useState<VaultAttachmentDialogState | null>(null);
   const [shareTarget, setShareTarget] = useState<VaultShareDialogState | null>(null);
   const [participantShareTarget, setParticipantShareTarget] = useState<VaultShareDialogState | null>(null);
   const decryptGeneration = useRef(0);
@@ -11268,6 +11278,27 @@ function UnlockedVaultPage({
                         type="button"
                       ><Share2 aria-hidden="true" size={16} /></button>
                     ) : null}
+                    {activeNote.ownerUid === profile.uid
+                      && activeNote.type === "personal"
+                      && activeNote.entryKind === "markdown"
+                      && activeNote.contentFormat === "markdown-v1" ? (
+                      <button
+                        aria-label="노트 첨부파일 관리"
+                        disabled={
+                          deletingEntryIds.has(activeNote.id)
+                          || conflictedEntryIds.has(activeNote.id)
+                          || !isOnline
+                          || pathRewriteBusy
+                          || entryCreationContentLocked
+                        }
+                        onClick={(event) => setAttachmentTarget({
+                          note: activeNote,
+                          returnFocusTo: event.currentTarget
+                        })}
+                        title="암호화 파일 첨부와 자료실 연결"
+                        type="button"
+                      ><Paperclip aria-hidden="true" size={16} /></button>
+                    ) : null}
                     <button
                       aria-label="저장"
                       disabled={
@@ -11715,6 +11746,22 @@ function UnlockedVaultPage({
             onMove={moveContextTarget}
             returnFocusTo={moveTarget.returnFocusTo}
           />
+        ) : null}
+        {attachmentTarget ? (
+          <Suspense fallback={<VaultViewLoading label="첨부파일 관리" />}>
+            <LazyVaultNoteAttachmentsDialog
+              note={attachmentTarget.note}
+              onClose={() => setAttachmentTarget(null)}
+              onOpenLibrary={() => {
+                const sourceNoteId = attachmentTarget.note.id;
+                setAttachmentTarget(null);
+                void navigateAfterSaving(`/library?sourceNoteId=${encodeURIComponent(sourceNoteId)}`);
+              }}
+              privateKey={privateKey}
+              profile={profile}
+              returnFocusTo={attachmentTarget.returnFocusTo}
+            />
+          </Suspense>
         ) : null}
         {shareTarget ? (
           <Suspense fallback={<VaultViewLoading label="노트 공유" />}>
