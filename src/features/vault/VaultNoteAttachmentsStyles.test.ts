@@ -26,11 +26,11 @@ describe("Vault note attachment theme and layout", () => {
   });
 
   it("keeps the metadata shelf fixed while every Markdown mode gets the remaining height", () => {
-    expect(firstRuleBody(vaultStyles, ".vault-note-markdown-surface.has-attachments"))
+    expect(firstRuleBody(vaultStyles, ".vault-note-content.has-note-attachments"))
       .toMatch(/display:\s*grid;[\s\S]*grid-template-rows:\s*auto minmax\(0, 1fr\);/u);
-    expect(firstRuleBody(vaultStyles, ".vault-note-markdown-body"))
-      .toMatch(/min-height:\s*0;[\s\S]*overflow:\s*hidden;/u);
-    expect(firstRuleBody(vaultStyles, ".vault-note-markdown-body.is-reading"))
+    expect(firstRuleBody(vaultStyles, ".vault-note-content.has-note-attachments > :not(.vault-note-attachments-inline)"))
+      .toContain("min-height: 0");
+    expect(firstRuleBody(vaultStyles, ".vault-note-content.has-note-attachments > .vault-markdown-renderer"))
       .toContain("overflow: auto");
     expect(firstRuleBody(vaultStyles, ".vault-note-attachments-inline-list"))
       .toContain("overflow: hidden");

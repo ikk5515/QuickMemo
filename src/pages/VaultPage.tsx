@@ -11349,7 +11349,7 @@ function UnlockedVaultPage({
                     </div>
                   </aside>
                 ) : null}
-                <div className="vault-note-content">
+                <div className={`vault-note-content${activeNoteAttachmentsId ? " has-note-attachments" : ""}`}>
                   {activeNote.entryKind === "canvas" ? (
                     <Suspense fallback={<VaultViewLoading label="Canvas" />}>
                       <LazyVaultJsonCanvasPane
@@ -11412,7 +11412,7 @@ function UnlockedVaultPage({
                       <ReadonlyNoteRenderer as="article" content={activeNote.body} />
                     </div>
                   ) : (
-                    <div className={`vault-note-markdown-surface${activeNoteAttachmentsId ? " has-attachments" : ""}`}>
+                    <>
                       {activeNoteAttachmentsId ? (
                         <Suspense fallback={<div aria-label="노트 첨부파일" className="vault-note-attachments-inline" role="status">파일 목록 준비 중</div>}>
                           <LazyVaultNoteAttachmentsInline
@@ -11431,75 +11431,74 @@ function UnlockedVaultPage({
                           />
                         </Suspense>
                       ) : null}
-                      <div className={`vault-note-markdown-body is-${viewMode}`}>
-                        {activeMarkdownPluginView && viewMode !== "source" ? (
-                          <Suspense fallback={<VaultViewLoading label={activeMarkdownPluginView === "drawing" ? "Drawing" : "Kanban"} />}>
-                            {activeMarkdownPluginView === "drawing" ? (
-                              <LazyDrawingView
-                                onChange={(body) => updateActiveDraft({ body })}
-                                readOnly={viewMode === "reading" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                                source={activeDraft.body}
-                              />
-                            ) : (
-                              <LazyKanbanBoard
-                                onChange={(body) => updateActiveDraft({ body })}
-                                onOpenLink={openKanbanLink}
-                                readOnly={viewMode === "reading" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                                source={activeDraft.body}
-                              />
-                            )}
-                          </Suspense>
-                        ) : viewMode === "reading" ? (
-                          <MarkdownRenderer
-                            onLinkClick={handleMarkdownLink}
-                            onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}
-                            onTagClick={handleMarkdownTagClick}
-                            renderCodeBlock={renderMarkdownCodeBlock}
-                            renderEmbed={renderMarkdownEmbed}
-                            source={activeDraft.body}
-                          />
-                        ) : viewMode === "live-preview" ? (
-                          <VaultMarkdownEditor
-                            completionData={markdownCompletionData}
-                            documentKey={activeNote.id}
-                            insertRequest={editorInsertRequest?.entryId === activeNote.id ? editorInsertRequest : null}
-                            livePreview
-                            onChange={(body) => updateActiveDraft({ body })}
-                            onInsertHandled={(id) => setEditorInsertRequest((current) => current?.id === id ? null : current)}
-                            onLinkClick={handleMarkdownLink}
-                            onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}
-                            onPasteImages={pasteImagesIntoActiveMarkdown}
-                            onTagClick={handleMarkdownTagClick}
-                            onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
-                            onSave={() => void saveEntry(activeNote.id)}
-                            onSelectionChange={setEditorSelection}
-                            readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                            renderCodeBlock={renderMarkdownCodeBlock}
-                            renderEmbed={renderMarkdownEmbed}
-                            revealRequest={editorRevealRequest?.entryId === activeNote.id ? editorRevealRequest : null}
-                            value={activeDraft.body}
-                            valueRevision={activeDraft.baseRevision}
-                          />
-                        ) : (
-                          <VaultMarkdownEditor
-                            autoFocus
-                            completionData={markdownCompletionData}
-                            documentKey={activeNote.id}
-                            insertRequest={editorInsertRequest?.entryId === activeNote.id ? editorInsertRequest : null}
-                            onChange={(body) => updateActiveDraft({ body })}
-                            onInsertHandled={(id) => setEditorInsertRequest((current) => current?.id === id ? null : current)}
-                            onPasteImages={pasteImagesIntoActiveMarkdown}
-                            onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
-                            onSave={() => void saveEntry(activeNote.id)}
-                            onSelectionChange={setEditorSelection}
-                            readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                            revealRequest={editorRevealRequest?.entryId === activeNote.id ? editorRevealRequest : null}
-                            value={activeDraft.body}
-                            valueRevision={activeDraft.baseRevision}
-                          />
-                        )}
-                      </div>
-                    </div>
+                      {activeMarkdownPluginView && viewMode !== "source" ? (
+                        <Suspense fallback={<VaultViewLoading label={activeMarkdownPluginView === "drawing" ? "Drawing" : "Kanban"} />}>
+                          {activeMarkdownPluginView === "drawing" ? (
+                            <LazyDrawingView
+                              onChange={(body) => updateActiveDraft({ body })}
+                              readOnly={viewMode === "reading" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
+                              source={activeDraft.body}
+                            />
+                          ) : (
+                            <LazyKanbanBoard
+                              onChange={(body) => updateActiveDraft({ body })}
+                              onOpenLink={openKanbanLink}
+                              readOnly={viewMode === "reading" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
+                              source={activeDraft.body}
+                            />
+                          )}
+                        </Suspense>
+                      ) : viewMode === "reading" ? (
+                        <MarkdownRenderer
+                          className="vault-markdown-renderer"
+                          onLinkClick={handleMarkdownLink}
+                          onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}
+                          onTagClick={handleMarkdownTagClick}
+                          renderCodeBlock={renderMarkdownCodeBlock}
+                          renderEmbed={renderMarkdownEmbed}
+                          source={activeDraft.body}
+                        />
+                      ) : viewMode === "live-preview" ? (
+                        <VaultMarkdownEditor
+                          completionData={markdownCompletionData}
+                          documentKey={activeNote.id}
+                          insertRequest={editorInsertRequest?.entryId === activeNote.id ? editorInsertRequest : null}
+                          livePreview
+                          onChange={(body) => updateActiveDraft({ body })}
+                          onInsertHandled={(id) => setEditorInsertRequest((current) => current?.id === id ? null : current)}
+                          onLinkClick={handleMarkdownLink}
+                          onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}
+                          onPasteImages={pasteImagesIntoActiveMarkdown}
+                          onTagClick={handleMarkdownTagClick}
+                          onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
+                          onSave={() => void saveEntry(activeNote.id)}
+                          onSelectionChange={setEditorSelection}
+                          readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
+                          renderCodeBlock={renderMarkdownCodeBlock}
+                          renderEmbed={renderMarkdownEmbed}
+                          revealRequest={editorRevealRequest?.entryId === activeNote.id ? editorRevealRequest : null}
+                          value={activeDraft.body}
+                          valueRevision={activeDraft.baseRevision}
+                        />
+                      ) : (
+                        <VaultMarkdownEditor
+                          autoFocus
+                          completionData={markdownCompletionData}
+                          documentKey={activeNote.id}
+                          insertRequest={editorInsertRequest?.entryId === activeNote.id ? editorInsertRequest : null}
+                          onChange={(body) => updateActiveDraft({ body })}
+                          onInsertHandled={(id) => setEditorInsertRequest((current) => current?.id === id ? null : current)}
+                          onPasteImages={pasteImagesIntoActiveMarkdown}
+                          onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
+                          onSave={() => void saveEntry(activeNote.id)}
+                          onSelectionChange={setEditorSelection}
+                          readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
+                          revealRequest={editorRevealRequest?.entryId === activeNote.id ? editorRevealRequest : null}
+                          value={activeDraft.body}
+                          valueRevision={activeDraft.baseRevision}
+                        />
+                      )}
+                    </>
                   )}
                 </div>
               </>

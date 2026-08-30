@@ -1316,27 +1316,17 @@
   overflow: auto;
 }
 
-.vault-note-markdown-surface {
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.vault-note-markdown-surface.has-attachments {
+.vault-note-content.has-note-attachments {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-}
-
-.vault-note-markdown-body {
-  min-height: 0;
   overflow: hidden;
 }
 
-.vault-note-markdown-surface:not(.has-attachments) > .vault-note-markdown-body {
-  height: 100%;
+.vault-note-content.has-note-attachments > :not(.vault-note-attachments-inline) {
+  min-height: 0;
 }
 
-.vault-note-markdown-body.is-reading {
+.vault-note-content.has-note-attachments > .vault-markdown-renderer {
   overflow: auto;
 }
 
@@ -1586,8 +1576,7 @@
   opacity: .45;
 }
 
-.vault-note-content > .vault-codemirror:not(.vault-codemirror--live-preview),
-.vault-note-markdown-body > .vault-codemirror:not(.vault-codemirror--live-preview) {
+.vault-note-content > .vault-codemirror:not(.vault-codemirror--live-preview) {
   max-width: none;
   min-height: 100%;
   width: 100%;
@@ -1595,8 +1584,6 @@
 
 .vault-note-content > .vault-codemirror--live-preview,
 .vault-note-content > .vault-markdown-renderer,
-.vault-note-markdown-body > .vault-codemirror--live-preview,
-.vault-note-markdown-body > .vault-markdown-renderer,
 .vault-legacy-note {
   margin-inline: auto;
   max-width: 860px;

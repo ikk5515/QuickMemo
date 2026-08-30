@@ -57,16 +57,19 @@ describe("Vault workspace UI regression contract", () => {
   });
 
   it("keeps one shared attachment shelf outside all Markdown view-mode branches", () => {
-    const markdownSurface = sourceBetween(
-      '<div className={`vault-note-markdown-surface',
+    const markdownContent = sourceBetween(
+      '<div className={`vault-note-content${activeNoteAttachmentsId',
       '<div className="vault-empty-state">'
     );
-    const shelfIndex = markdownSurface.indexOf("<LazyVaultNoteAttachmentsInline");
-    const pluginIndex = markdownSurface.indexOf('activeMarkdownPluginView && viewMode !== "source"');
-    const readingIndex = markdownSurface.indexOf('viewMode === "reading"');
-    const livePreviewIndex = markdownSurface.indexOf('viewMode === "live-preview"');
+    const shelfIndex = markdownContent.indexOf("<LazyVaultNoteAttachmentsInline");
+    const pluginIndex = markdownContent.indexOf('activeMarkdownPluginView && viewMode !== "source"');
+    const readingIndex = markdownContent.indexOf('viewMode === "reading"');
+    const livePreviewIndex = markdownContent.indexOf('viewMode === "live-preview"');
 
     expect(source).toContain("const activeNoteAttachments = useVaultNoteAttachments(activeNoteAttachmentsId);");
+    expect(markdownContent).not.toContain("vault-note-markdown-surface");
+    expect(markdownContent).not.toContain("vault-note-markdown-body");
+    expect(markdownContent).toMatch(/<MarkdownRenderer\s+className="vault-markdown-renderer"/u);
     expect(shelfIndex).toBeGreaterThanOrEqual(0);
     expect(pluginIndex).toBeGreaterThan(shelfIndex);
     expect(readingIndex).toBeGreaterThan(shelfIndex);
