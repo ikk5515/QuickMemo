@@ -1,4 +1,6 @@
-/* global Response */
+/* global Response, process */
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   validateProductionPage,
@@ -83,5 +85,22 @@ describe("production public smoke", () => {
       response,
       JSON.stringify({ ok: false, error: "https://private.blob.vercel-storage.com/file" })
     )).toThrow(/cached/u);
+  });
+
+  it("uses Vercel CLI protection bypass for the immutable deployment smoke", () => {
+    const workflow = readFileSync(
+      resolve(process.cwd(), ".github/workflows/vercel-production.yml"),
+      "utf8"
+    );
+    const immutableStep = workflow.match(
+      /- name: Verify immutable deployment[\s\S]*?- name: Verify production alias/u
+    )?.[0] ?? "";
+
+    expect(immutableStep).toContain("VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}");
+    expect(immutableStep).toContain("vercel@54.4.1 curl /");
+    expect(immutableStep).toContain('--deployment "${DEPLOYMENT_URL}"');
+    expect(immutableStep).toContain('page_status}" != "200"');
+    expect(immutableStep).toContain('attachment_status}" != "401"');
+    expect(immutableStep).not.toContain("node scripts/verify-production-public-smoke.mjs");
   });
 });

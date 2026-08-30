@@ -129,8 +129,21 @@ jobs:
       - name: Verify immutable deployment and attachment authorization boundary
         if: steps.deploy.outputs.url != ''
         env:
-          QUICKMEMO_PRODUCTION_URL: ${{ steps.deploy.outputs.url }}
-        run: node scripts/verify-production-public-smoke.mjs
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.url }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          page_status="$(npx --yes vercel@54.4.1 curl / --deployment "${DEPLOYMENT_URL}" -- --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}')"
+          if [[ "${page_status}" != "200" ]]; then
+            echo "Protected immutable deployment returned HTTP ${page_status}, expected 200." >&2
+            exit 1
+          fi
+          attachment_status="$(npx --yes vercel@54.4.1 curl '/api/blob-attachments?scope=note&noteId=production_smoke_note&attachmentId=production_smoke_attachment' --deployment "${DEPLOYMENT_URL}" -- --silent --show-error --max-time 15 --header 'Accept: application/json' --output /dev/null --write-out '%{http_code}')"
+          if [[ "${attachment_status}" != "401" ]]; then
+            echo "Protected immutable attachment boundary returned HTTP ${attachment_status}, expected 401." >&2
+            exit 1
+          fi
 
       - name: Verify production alias and attachment authorization boundary
         if: steps.deploy.outputs.url != ''
