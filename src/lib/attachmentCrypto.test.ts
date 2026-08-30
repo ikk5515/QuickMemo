@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   encryptedAttachmentChunkSizeBytes,
   encryptedAttachmentOverheadBytes
@@ -122,6 +122,18 @@ describe("attachment chunked encryption", () => {
     );
 
     await expect(blobBytes(decryptedBlob)).resolves.toEqual(plainBytes);
+  }, 30_000);
+
+  it("stops chunked attachment encryption when its abort signal is cancelled", async () => {
+    const noteKey = await generateNoteKey();
+    const plainBytes = testBytes(encryptedAttachmentChunkSizeBytes + 23);
+    const controller = new AbortController();
+    const onProgress = vi.fn(() => controller.abort());
+
+    await expect(
+      encryptAttachmentBlob(new Blob([plainBytes]), noteKey, onProgress, controller.signal)
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(onProgress).toHaveBeenCalledOnce();
   }, 30_000);
 
   it("assembles irregular response chunks without requiring cumulative buffer concatenation", async () => {

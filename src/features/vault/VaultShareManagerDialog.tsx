@@ -68,6 +68,7 @@ interface VaultShareCreationInput {
   note: DecryptedVaultNote;
   origin: string;
   policy: SecureSharePolicyInput;
+  privateKey: CryptoKey;
   profile: UserProfile;
 }
 
@@ -687,6 +688,7 @@ export function VaultShareManagerDialog({
         note,
         origin: normalizedShareOrigin(shareOrigin),
         policy,
+        privateKey,
         profile
       }), note.id, normalizedShareOrigin(shareOrigin));
       if (

@@ -44,7 +44,7 @@ import {
   useState
 } from "react";
 import { createPortal } from "react-dom";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { AppSelect } from "../components/AppSelect";
 import { AppShell } from "../components/AppShell";
 import PublicAttachmentPreviewModal from "../components/PublicAttachmentPreviewModal";
@@ -285,6 +285,7 @@ const highlightColorLabels: Record<LibraryHighlightColor, string> = {
   pink: "분홍"
 };
 const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
+const sourceNoteIdPattern = /^[A-Za-z0-9_-]{1,160}$/u;
 
 function throwIfAttachmentActionAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
@@ -300,6 +301,10 @@ function attachmentRevision(note: NoteSnapshot) {
 function noteRevision(note: NoteSnapshot) {
   const value = note.revision;
   return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+}
+
+function viewItemSourceNoteId(item: LibraryViewItem) {
+  return item.source === "attachment" ? item.note.id : item.item.sourceNoteId;
 }
 
 function timestampMillis(value: unknown) {
@@ -635,6 +640,11 @@ function createLibraryClientId() {
 export default function LibraryPage() {
   const { privateKey, profile } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const sourceNoteFilter = (() => {
+    const value = searchParams.get("sourceNoteId") ?? "";
+    return sourceNoteIdPattern.test(value) ? value : null;
+  })();
   const [rawLibraryItems, setRawLibraryItems] = useState<LibraryItemSnapshot[]>([]);
   const [libraryItems, setLibraryItems] = useState<DecryptedLibraryItem[]>([]);
   const [notes, setNotes] = useState<NoteSnapshot[]>([]);
@@ -1138,10 +1148,13 @@ export default function LibraryPage() {
   const managedSourceNoteIds = useMemo(
     () => new Set(
       notesFeatureEnabled
-        ? rawLibraryItems.map((item) => item.sourceNoteId).filter((id): id is string => Boolean(id))
+        ? [
+            ...rawLibraryItems.map((item) => item.sourceNoteId).filter((id): id is string => Boolean(id)),
+            ...(sourceNoteFilter ? [sourceNoteFilter] : [])
+          ]
         : []
     ),
-    [notesFeatureEnabled, rawLibraryItems]
+    [notesFeatureEnabled, rawLibraryItems, sourceNoteFilter]
   );
   const missingManagedSourceNoteIds = useMemo(
     () => Array.from(managedSourceNoteIds).filter(
@@ -1470,6 +1483,10 @@ export default function LibraryPage() {
   const kindFacetItems = useMemo(() => {
     const today = todayStartMillis();
     return allViewItems.filter((item) => {
+      if (sourceNoteFilter && viewItemSourceNoteId(item) !== sourceNoteFilter) {
+        return false;
+      }
+
       if (quickView === "all" && statusFilter !== "archived" && viewItemStatus(item) === "archived") {
         return false;
       }
@@ -1513,6 +1530,7 @@ export default function LibraryPage() {
     normalizedQuery,
     quickView,
     searchTextById,
+    sourceNoteFilter,
     statusFilter,
     tagFilter
   ]);
@@ -1595,7 +1613,8 @@ export default function LibraryPage() {
     || statusFilter !== "all"
     || favoriteOnly
     || collectionFilter !== "all"
-    || tagFilter !== "all";
+    || tagFilter !== "all"
+    || Boolean(sourceNoteFilter);
   const canLoadMoreLibraryItems = libraryHasMore && Boolean(libraryPageCursor);
   const canLoadMoreAttachmentNotes = hasMoreAttachmentNotes
     && attachmentNoteLimit < maximumAttachmentNoteLimit;
@@ -2600,6 +2619,20 @@ export default function LibraryPage() {
             노트 첨부파일은 노트 기능 권한이 있을 때 함께 표시됩니다. 저장한 자료는 계속 사용할 수 있습니다.
           </div>
         )}
+        {sourceNoteFilter && notesFeatureEnabled ? (
+          <div className="library-feedback" role="status">
+            <span>현재 노트에 연결된 파일만 표시합니다.</span>
+            <button
+              className="secondary-button"
+              onClick={() => {
+                const next = new URLSearchParams(searchParams);
+                next.delete("sourceNoteId");
+                setSearchParams(next, { replace: true });
+              }}
+              type="button"
+            >전체 자료 보기</button>
+          </div>
+        ) : null}
         {!captureOpen && (error || attachmentFailureCount > 0 || decryptFailureCount > 0) && (
           <div className="library-feedback error" role="alert">
             <span>

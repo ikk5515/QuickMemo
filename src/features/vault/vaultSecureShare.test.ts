@@ -177,19 +177,25 @@ describe("Vault Secure Share", () => {
         quickCopyButtonVisible: true,
         showCommenterIpPrefix: false
       },
+      privateKey: {} as CryptoKey,
       profile: owner()
     }, {
       activateSecureShare,
       buildSecureShareUrl: vi.fn(() => "https://quickmemo.example/share/ss2_share_123456#key=content-key"),
+      createPublicNoteShareAttachment: vi.fn(),
       createPublicShareGeneration: vi.fn(() => "gen_123456"),
       createSecureShare,
       encryptText: vi.fn().mockResolvedValue(encrypted),
       exportAesKeyBase64Url: vi.fn().mockResolvedValue("content-key"),
       generateNoteKey: vi.fn().mockResolvedValue({} as CryptoKey),
+      getEncryptedNoteAttachmentSource: vi.fn(),
+      getNoteAttachments: vi.fn().mockResolvedValue([]),
       getNoteRevisionState: vi.fn().mockResolvedValue({ attachmentRevision: 0, revision: 7 }),
       getSecureShareOwnerDetails: vi.fn(),
+      reencryptAttachmentBlob: vi.fn(),
       revokeSecureShare,
-      unwrapNoteKey: vi.fn(),
+      secureShareSourceAttachmentFingerprint: vi.fn(),
+      unwrapNoteKey: vi.fn().mockResolvedValue({} as CryptoKey),
       wrapNoteKey: vi.fn().mockResolvedValue(wrapped)
     });
 
@@ -205,6 +211,149 @@ describe("Vault Secure Share", () => {
     }), "id-token", expect.any(Object));
     expect(activateSecureShare).toHaveBeenCalledTimes(1);
     expect(revokeSecureShare).not.toHaveBeenCalled();
+  });
+
+  it("re-encrypts one attachment without exposing its plaintext filename before revision-checked activation", async () => {
+    const privateKey = { kind: "private-key" } as unknown as CryptoKey;
+    const sourceNoteKey = { kind: "source-note-key" } as unknown as CryptoKey;
+    const shareKey = { kind: "share-key" } as unknown as CryptoKey;
+    const encryptedSource = { bytes: new Uint8Array([7, 8, 9]) };
+    const encryptedFileName = {
+      algorithm: "AES-GCM" as const,
+      cipherText: "encrypted-filename",
+      iv: "filename-iv",
+      version: 1 as const
+    };
+    const reencryptedAttachment = {
+      blob: new Blob([new Uint8Array([4, 5, 6])], { type: "application/octet-stream" }),
+      metadata: {
+        algorithm: "AES-GCM-CHUNKED" as const,
+        chunkCount: 1,
+        chunkIvs: [new Uint8Array(12)],
+        chunkSize: 4 * 1024 * 1024,
+        encryptedSize: 3,
+        version: 2 as const
+      }
+    };
+    const attachment = {
+      algorithm: "AES-GCM-CHUNKED" as const,
+      blobEtag: "source-etag",
+      blobPath: "users/owner-a/notes/note-a1/attachments/attachment-a1/data",
+      chunkCount: 1,
+      chunkIvs: [],
+      chunkSize: 4 * 1024 * 1024,
+      encryptedSize: 19,
+      extension: "pdf",
+      fileName: "급여명세서",
+      id: "attachment-a1",
+      isReady: true,
+      mimeType: "application/pdf",
+      noteId: "note-a1",
+      originalSize: 3,
+      storageProvider: "vercel-blob" as const,
+      uploadedBy: "owner-a",
+      version: 2 as const
+    };
+    const pending = share({
+      attachmentCount: 1,
+      currentGeneration: "",
+      ready: false,
+      sourceAttachmentRevision: 3,
+      status: "pending"
+    });
+    const active = share({
+      attachmentCount: 1,
+      sourceAttachmentRevision: 3
+    });
+    const createSecureShare = vi.fn().mockResolvedValue(response(pending));
+    const createPublicNoteShareAttachment = vi.fn().mockResolvedValue({ id: "public-attachment-a1" });
+    const activateSecureShare = vi.fn().mockResolvedValue(response(active));
+    const getNoteRevisionState = vi.fn()
+      .mockResolvedValueOnce({ attachmentRevision: 3, revision: 7 })
+      .mockResolvedValueOnce({ attachmentRevision: 3, revision: 7 });
+    const getEncryptedNoteAttachmentSource = vi.fn().mockResolvedValue(encryptedSource);
+    const reencryptAttachmentBlob = vi.fn().mockResolvedValue(reencryptedAttachment);
+    const encryptText = vi.fn().mockImplementation(async (value: string) => (
+      value === "급여명세서.pdf" ? encryptedFileName : encrypted
+    ));
+
+    await createVaultSecureShare({
+      emailFeatureEnabled: true,
+      idToken: "id-token",
+      note: note({ attachmentRevision: 3 }),
+      origin: "https://quickmemo.example",
+      policy: {
+        accessMode: "anyone_with_link",
+        allowedEmails: [],
+        customExpiresAt: null,
+        downloadAllowed: true,
+        emailVerificationRequired: false,
+        expirationPreset: "seven_days",
+        oneTimeEnabled: false,
+        oneTimeScope: "global",
+        passwordEnabled: false,
+        permissionLevel: "view",
+        quickCopyButtonVisible: true,
+        showCommenterIpPrefix: false
+      },
+      privateKey,
+      profile: owner()
+    }, {
+      activateSecureShare,
+      buildSecureShareUrl: vi.fn(() => "https://quickmemo.example/share/ss2_share_123456#key=content-key"),
+      createPublicNoteShareAttachment,
+      createPublicShareGeneration: vi.fn(() => "gen_123456"),
+      createSecureShare,
+      encryptText,
+      exportAesKeyBase64Url: vi.fn().mockResolvedValue("content-key"),
+      generateNoteKey: vi.fn().mockResolvedValue(shareKey),
+      getEncryptedNoteAttachmentSource,
+      getNoteAttachments: vi.fn().mockResolvedValue([attachment]),
+      getNoteRevisionState,
+      getSecureShareOwnerDetails: vi.fn(),
+      reencryptAttachmentBlob,
+      revokeSecureShare: vi.fn(),
+      secureShareSourceAttachmentFingerprint: vi.fn().mockResolvedValue({
+        attachmentId: "attachment-a1",
+        digest: "a".repeat(43),
+        encryptionVersion: 2
+      }),
+      unwrapNoteKey: vi.fn().mockResolvedValue(sourceNoteKey),
+      wrapNoteKey: vi.fn().mockResolvedValue(wrapped)
+    });
+
+    expect(reencryptAttachmentBlob).toHaveBeenCalledOnce();
+    expect(reencryptAttachmentBlob).toHaveBeenCalledWith(
+      attachment,
+      sourceNoteKey,
+      shareKey,
+      encryptedSource
+    );
+    expect(createPublicNoteShareAttachment).toHaveBeenCalledOnce();
+    const publicUpload = createPublicNoteShareAttachment.mock.calls[0]?.[1];
+    expect(publicUpload).toMatchObject({
+      encryptedFileName,
+      extension: "pdf",
+      originalSize: 3,
+      sourceAttachmentId: "attachment-a1"
+    });
+    expect(publicUpload).not.toHaveProperty("fileName");
+    expect(JSON.stringify(publicUpload)).not.toContain("급여명세서");
+    expect(createSecureShare).toHaveBeenCalledWith(
+      expect.objectContaining({ attachmentCount: 1, sourceAttachmentRevision: 3 }),
+      "id-token",
+      expect.any(Object)
+    );
+    expect(activateSecureShare).toHaveBeenCalledWith(
+      "ss2_share_123456",
+      expect.objectContaining({ attachmentCount: 1, generation: "gen_123456" }),
+      "id-token"
+    );
+    expect(getNoteRevisionState).toHaveBeenCalledTimes(2);
+    expect(createPublicNoteShareAttachment.mock.invocationCallOrder[0])
+      .toBeLessThan(getNoteRevisionState.mock.invocationCallOrder[1] ?? 0);
+    expect(getNoteRevisionState.mock.invocationCallOrder[1])
+      .toBeLessThan(activateSecureShare.mock.invocationCallOrder[0] ?? 0);
   });
 
   it("revokes a prepared share if activation does not complete", async () => {
@@ -230,19 +379,25 @@ describe("Vault Secure Share", () => {
         quickCopyButtonVisible: true,
         showCommenterIpPrefix: false
       },
+      privateKey: {} as CryptoKey,
       profile: owner()
     }, {
       activateSecureShare: vi.fn().mockRejectedValue(new Error("activate failed")),
       buildSecureShareUrl: vi.fn(),
+      createPublicNoteShareAttachment: vi.fn(),
       createPublicShareGeneration: vi.fn(() => "gen_123456"),
       createSecureShare: vi.fn().mockResolvedValue(response(pending)),
       encryptText: vi.fn().mockResolvedValue(encrypted),
       exportAesKeyBase64Url: vi.fn().mockResolvedValue("content-key"),
       generateNoteKey: vi.fn().mockResolvedValue({} as CryptoKey),
+      getEncryptedNoteAttachmentSource: vi.fn(),
+      getNoteAttachments: vi.fn().mockResolvedValue([]),
       getNoteRevisionState: vi.fn().mockResolvedValue({ attachmentRevision: 0, revision: 7 }),
       getSecureShareOwnerDetails: vi.fn(),
+      reencryptAttachmentBlob: vi.fn(),
       revokeSecureShare,
-      unwrapNoteKey: vi.fn(),
+      secureShareSourceAttachmentFingerprint: vi.fn(),
+      unwrapNoteKey: vi.fn().mockResolvedValue({} as CryptoKey),
       wrapNoteKey: vi.fn().mockResolvedValue(wrapped)
     })).rejects.toThrow("activate failed");
 
