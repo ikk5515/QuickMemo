@@ -32,19 +32,19 @@ import {
   encryptAttachmentBlob
 } from "../../lib/attachmentCrypto";
 import { unwrapNoteKey } from "../../lib/crypto";
-import { hasFeatureAccess } from "../../lib/featureAccess";
 import { useModalFocus } from "../../lib/useModalFocus";
 import {
   createNoteAttachment,
   deleteNoteAttachment,
+  getAllNoteAttachmentsFromServer,
   getEncryptedNoteAttachmentSource,
-  subscribeNoteAttachments,
   type NoteAttachmentSnapshot
 } from "../../services/notes";
 import { publicNoteShareMaxAttachmentCount } from "../../services/publicShares";
 import type { UserProfile } from "../../types";
 import { downloadBlob } from "./browserDownload";
 import type { DecryptedVaultNote } from "./vaultData";
+import { vaultNoteAttachmentAccess } from "./vaultNoteAttachmentAccess";
 import "./VaultNoteAttachmentsDialog.css";
 
 const attachmentInputAccept = allowedAttachmentExtensions
@@ -58,31 +58,16 @@ type AttachmentOperation =
   | null;
 
 export interface VaultNoteAttachmentsDialogProps {
+  attachments: NoteAttachmentSnapshot[];
+  attachmentsError: string;
+  attachmentsLoading: boolean;
+  attachmentSlotCount: number;
   note: DecryptedVaultNote;
   onClose: () => void;
   onOpenLibrary: () => void;
   privateKey: CryptoKey;
   profile: UserProfile;
   returnFocusTo?: HTMLElement | null;
-}
-
-export function vaultNoteAttachmentAccess(
-  note: DecryptedVaultNote,
-  profile: UserProfile
-): { allowed: true; reason: "" } | { allowed: false; reason: string } {
-  if (!profile.isActive || !hasFeatureAccess(profile, "notes")) {
-    return { allowed: false, reason: "활성화된 노트 권한이 있어야 파일을 관리할 수 있습니다." };
-  }
-  if (note.isDeleted || note.ownerUid !== profile.uid || note.type !== "personal") {
-    return { allowed: false, reason: "내 개인 활성 노트의 파일만 관리할 수 있습니다." };
-  }
-  if (note.contentFormat !== "markdown-v1" || note.entryKind !== "markdown") {
-    return { allowed: false, reason: "Markdown 노트에서만 파일을 첨부할 수 있습니다." };
-  }
-  if (!note.wrappedKeys[profile.uid]) {
-    return { allowed: false, reason: "이 노트의 암호화 키를 확인할 수 없습니다." };
-  }
-  return { allowed: true, reason: "" };
 }
 
 function operationErrorMessage(caught: unknown, fallback: string) {
@@ -92,6 +77,10 @@ function operationErrorMessage(caught: unknown, fallback: string) {
 }
 
 export function VaultNoteAttachmentsDialog({
+  attachments,
+  attachmentsError,
+  attachmentsLoading,
+  attachmentSlotCount,
   note,
   onClose,
   onOpenLibrary,
@@ -103,12 +92,11 @@ export function VaultNoteAttachmentsDialog({
   const dialogRef = useRef<HTMLElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(returnFocusTo ?? null);
+  const downloadControllerRef = useRef<AbortController | null>(null);
   const uploadControllerRef = useRef<AbortController | null>(null);
   const activeRef = useRef(true);
   const access = vaultNoteAttachmentAccess(note, profile);
-  const [attachments, setAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
   const [operation, setOperation] = useState<AttachmentOperation>(null);
   const [status, setStatus] = useState("");
 
@@ -118,38 +106,16 @@ export function VaultNoteAttachmentsDialog({
 
   useEffect(() => {
     activeRef.current = true;
-    setAttachments([]);
     setError("");
     setStatus("");
-    if (!access.allowed) {
-      setLoading(false);
-      return () => {
-        activeRef.current = false;
-        uploadControllerRef.current?.abort();
-        uploadControllerRef.current = null;
-      };
-    }
-    setLoading(true);
-    const unsubscribe = subscribeNoteAttachments(
-      note.id,
-      (next) => {
-        if (!activeRef.current) return;
-        setAttachments(next);
-        setLoading(false);
-      },
-      () => {
-        if (!activeRef.current) return;
-        setError("첨부파일 목록을 불러오지 못했습니다.");
-        setLoading(false);
-      }
-    );
     return () => {
       activeRef.current = false;
+      downloadControllerRef.current?.abort();
+      downloadControllerRef.current = null;
       uploadControllerRef.current?.abort();
       uploadControllerRef.current = null;
-      unsubscribe();
     };
-  }, [access.allowed, note.id]);
+  }, [note.id]);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
@@ -171,7 +137,7 @@ export function VaultNoteAttachmentsDialog({
   }
 
   async function uploadFiles(files: readonly File[]) {
-    if (!access.allowed || operation || !files.length) return;
+    if (!access.allowed || operation || attachmentsLoading || attachmentsError || !files.length) return;
     const selected = files.slice(0, maximumAttachmentBatchFiles);
     const valid: File[] = [];
     const rejected: string[] = [];
@@ -183,7 +149,7 @@ export function VaultNoteAttachmentsDialog({
     if (files.length > maximumAttachmentBatchFiles) {
       rejected.push(`한 번에 최대 ${maximumAttachmentBatchFiles}개까지 선택할 수 있습니다.`);
     }
-    if (attachments.length + valid.length > publicNoteShareMaxAttachmentCount) {
+    if (attachmentSlotCount + valid.length > publicNoteShareMaxAttachmentCount) {
       setError(`노트당 파일은 최대 ${publicNoteShareMaxAttachmentCount}개까지 첨부할 수 있습니다.`);
       return;
     }
@@ -196,7 +162,19 @@ export function VaultNoteAttachmentsDialog({
     uploadControllerRef.current = controller;
     setError("");
     setStatus("");
+    setOperation({
+      kind: "uploading",
+      fileName: valid[0].name,
+      label: "첨부 가능 여부 확인 중",
+      progress: 0
+    });
     try {
+      const serverAttachments = await getAllNoteAttachmentsFromServer(note.id, controller.signal);
+      controller.signal.throwIfAborted();
+      if (serverAttachments.length + valid.length > publicNoteShareMaxAttachmentCount) {
+        setError(`노트당 파일은 최대 ${publicNoteShareMaxAttachmentCount}개까지 첨부할 수 있습니다.`);
+        return;
+      }
       const key = await noteKey();
       for (const [index, file] of valid.entries()) {
         controller.signal.throwIfAborted();
@@ -265,19 +243,27 @@ export function VaultNoteAttachmentsDialog({
 
   async function downloadAttachment(attachment: NoteAttachmentSnapshot) {
     if (operation) return;
+    const controller = new AbortController();
+    downloadControllerRef.current = controller;
     setError("");
     setOperation({ kind: "downloading", attachmentId: attachment.id });
     try {
       const key = await noteKey();
-      const encryptedSource = await getEncryptedNoteAttachmentSource(attachment);
-      const blob = await decryptAttachmentToBlob(attachment, key, encryptedSource);
+      controller.signal.throwIfAborted();
+      const encryptedSource = await getEncryptedNoteAttachmentSource(attachment, controller.signal);
+      controller.signal.throwIfAborted();
+      const blob = await decryptAttachmentToBlob(attachment, key, encryptedSource, controller.signal);
+      controller.signal.throwIfAborted();
       if (activeRef.current) {
         downloadBlob(blob, attachmentDownloadName(attachment));
         setStatus("파일을 복호화해 다운로드했습니다.");
       }
-    } catch {
-      if (activeRef.current) setError("파일을 다운로드하지 못했습니다.");
+    } catch (caught) {
+      if (activeRef.current) {
+        setError(operationErrorMessage(caught, "파일을 다운로드하지 못했습니다."));
+      }
     } finally {
+      if (downloadControllerRef.current === controller) downloadControllerRef.current = null;
       if (activeRef.current) setOperation(null);
     }
   }
@@ -300,6 +286,9 @@ export function VaultNoteAttachmentsDialog({
   }
 
   const uploading = operation?.kind === "uploading";
+  const downloadingAttachment = operation?.kind === "downloading"
+    ? attachments.find((attachment) => attachment.id === operation.attachmentId) ?? null
+    : null;
 
   return createPortal(
     <div className="vault-attachments-backdrop" role="presentation">
@@ -332,7 +321,7 @@ export function VaultNoteAttachmentsDialog({
             <>
               <input
                 accept={attachmentInputAccept}
-                disabled={Boolean(operation)}
+                disabled={Boolean(operation) || attachmentsLoading || Boolean(attachmentsError)}
                 hidden
                 multiple
                 onChange={(event) => void handleFileSelection(event)}
@@ -342,7 +331,12 @@ export function VaultNoteAttachmentsDialog({
               <div className="vault-attachments-toolbar">
                 <button
                   data-dialog-initial-focus
-                  disabled={Boolean(operation) || attachments.length >= publicNoteShareMaxAttachmentCount}
+                  disabled={
+                    Boolean(operation)
+                    || attachmentsLoading
+                    || Boolean(attachmentsError)
+                    || attachmentSlotCount >= publicNoteShareMaxAttachmentCount
+                  }
                   onClick={() => fileInputRef.current?.click()}
                   type="button"
                 >
@@ -367,12 +361,21 @@ export function VaultNoteAttachmentsDialog({
             </div>
           ) : null}
 
+          {operation?.kind === "downloading" ? (
+            <div className="vault-attachments-progress" role="status">
+              <div><Loader2 aria-hidden="true" className="spin" size={16} /><strong>복호화해 다운로드 중</strong></div>
+              <span>{downloadingAttachment ? attachmentDownloadName(downloadingAttachment) : "첨부파일"}</span>
+              <button className="secondary-button" onClick={() => downloadControllerRef.current?.abort()} type="button">다운로드 취소</button>
+            </div>
+          ) : null}
+
           {error ? <p className="vault-attachments-feedback error" role="alert">{error}</p> : null}
+          {attachmentsError && !error ? <p className="vault-attachments-feedback error" role="alert">{attachmentsError}</p> : null}
           {status ? <p className="vault-attachments-feedback" role="status">{status}</p> : null}
 
-          {loading ? (
+          {attachmentsLoading ? (
             <p className="vault-attachments-empty" role="status"><Loader2 aria-hidden="true" className="spin" size={16} /> 파일 목록을 불러오는 중입니다.</p>
-          ) : attachments.length ? (
+          ) : attachmentsError ? null : attachments.length ? (
             <ul className="vault-attachments-list">
               {attachments.map((attachment) => {
                 const busy = operation && operation.kind !== "uploading" && operation.attachmentId === attachment.id;

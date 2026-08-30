@@ -1316,6 +1316,131 @@
   overflow: auto;
 }
 
+.vault-note-content:has(> .vault-note-attachments-inline) {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.vault-note-content:has(> .vault-note-attachments-inline) > :not(.vault-note-attachments-inline) {
+  min-height: 0;
+}
+
+.vault-note-content:has(> .vault-note-attachments-inline) > .vault-markdown-renderer {
+  overflow: auto;
+}
+
+.vault-note-attachments-inline {
+  align-items: center;
+  background: color-mix(in srgb, var(--vault-accent) 7%, var(--vault-panel));
+  border-bottom: 1px solid var(--vault-border);
+  box-sizing: border-box;
+  color: var(--vault-text);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 46px;
+  padding: 5px 10px;
+}
+
+.vault-note-attachments-inline-label {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.vault-note-attachments-inline-label svg {
+  color: var(--vault-accent);
+  flex: 0 0 auto;
+}
+
+.vault-note-attachments-inline-label strong {
+  font-size: 12px;
+}
+
+.vault-note-attachments-inline-label span,
+.vault-note-attachments-inline-empty {
+  color: var(--vault-text-muted);
+  font-size: 11px;
+}
+
+.vault-note-attachments-inline-empty {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-note-attachments-inline-empty.is-error {
+  color: var(--color-danger);
+}
+
+.vault-note-attachments-inline-list {
+  align-items: center;
+  display: flex;
+  gap: 5px;
+  list-style: none;
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+}
+
+.vault-note-attachments-inline-list li {
+  align-items: center;
+  background: var(--vault-panel);
+  border: 1px solid var(--vault-border);
+  border-radius: 999px;
+  display: inline-flex;
+  flex: 0 1 auto;
+  gap: 4px;
+  max-width: min(210px, 28%);
+  min-width: 0;
+  padding: 4px 7px;
+}
+
+.vault-note-attachments-inline-list li > span {
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault-note-attachments-inline-list li > small {
+  color: var(--vault-text-muted);
+  flex: 0 0 auto;
+  font-size: 9px;
+}
+
+.vault-note-attachments-inline-list .vault-note-attachments-inline-more {
+  color: var(--vault-text-muted);
+  flex: 0 0 auto;
+  font-size: 10px;
+  max-width: none;
+}
+
+.vault-note-attachments-inline-manage {
+  background: var(--vault-panel);
+  border: 1px solid var(--vault-border);
+  border-radius: 5px;
+  color: var(--vault-text);
+  min-height: 34px;
+  padding: 5px 9px;
+}
+
+.vault-note-attachments-inline-manage:hover:not(:disabled),
+.vault-note-attachments-inline-manage:focus-visible {
+  background: var(--vault-row-hover);
+}
+
+.vault-note-attachments-inline-manage:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .vault-base-view {
   display: grid;
   gap: 12px;
@@ -2540,6 +2665,26 @@
     height: calc(100% - 76px);
   }
 
+  .vault-note-attachments-inline {
+    gap: 6px;
+    min-height: 52px;
+    padding-inline: 8px;
+  }
+
+  .vault-note-attachments-inline-list li {
+    max-width: min(180px, 56vw);
+  }
+
+  .vault-note-attachments-inline-list li > small {
+    display: none;
+  }
+
+  .vault-note-attachments-inline-manage {
+    min-height: 44px;
+    min-width: 44px;
+    padding-inline: 8px;
+  }
+
   .vault-save-conflict {
     align-items: stretch;
     flex-direction: column;
@@ -2601,6 +2746,16 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
     justify-content: flex-start;
     overflow: visible;
+  }
+
+  .vault-note-attachments-inline-label strong {
+    display: none;
+  }
+
+  .vault-note-attachments-inline-label span {
+    max-width: 42px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .vault-note-content {

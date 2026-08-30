@@ -8,9 +8,8 @@ import type { DecryptedVaultNote } from "./vaultData";
 const noteServiceMocks = vi.hoisted(() => ({
   createNoteAttachment: vi.fn(),
   deleteNoteAttachment: vi.fn(),
-  getEncryptedNoteAttachmentSource: vi.fn(),
-  subscribeNoteAttachments: vi.fn(),
-  unsubscribeNoteAttachments: vi.fn()
+  getAllNoteAttachmentsFromServer: vi.fn(),
+  getEncryptedNoteAttachmentSource: vi.fn()
 }));
 
 const attachmentCryptoMocks = vi.hoisted(() => ({
@@ -31,8 +30,8 @@ const attachmentState = vi.hoisted(() => ({
 vi.mock("../../services/notes", () => ({
   createNoteAttachment: noteServiceMocks.createNoteAttachment,
   deleteNoteAttachment: noteServiceMocks.deleteNoteAttachment,
-  getEncryptedNoteAttachmentSource: noteServiceMocks.getEncryptedNoteAttachmentSource,
-  subscribeNoteAttachments: noteServiceMocks.subscribeNoteAttachments
+  getAllNoteAttachmentsFromServer: noteServiceMocks.getAllNoteAttachmentsFromServer,
+  getEncryptedNoteAttachmentSource: noteServiceMocks.getEncryptedNoteAttachmentSource
 }));
 
 vi.mock("../../lib/attachmentCrypto", () => ({
@@ -119,10 +118,18 @@ function attachment(overrides: Partial<NoteAttachmentSnapshot> = {}): NoteAttach
 }
 
 function renderDialog(options: {
+  attachments?: NoteAttachmentSnapshot[];
+  attachmentsError?: string;
+  attachmentsLoading?: boolean;
+  attachmentSlotCount?: number;
   note?: DecryptedVaultNote;
   profile?: UserProfile;
 } = {}) {
   const props = {
+    attachments: options.attachments ?? attachmentState.items,
+    attachmentsError: options.attachmentsError ?? "",
+    attachmentsLoading: options.attachmentsLoading ?? false,
+    attachmentSlotCount: options.attachmentSlotCount ?? (options.attachments ?? attachmentState.items).length,
     note: options.note ?? note(),
     onClose: vi.fn(),
     onOpenLibrary: vi.fn(),
@@ -140,15 +147,8 @@ beforeEach(() => {
   attachmentState.items = [];
   noteServiceMocks.createNoteAttachment.mockReset().mockResolvedValue(undefined);
   noteServiceMocks.deleteNoteAttachment.mockReset().mockResolvedValue(undefined);
+  noteServiceMocks.getAllNoteAttachmentsFromServer.mockReset().mockResolvedValue([]);
   noteServiceMocks.getEncryptedNoteAttachmentSource.mockReset();
-  noteServiceMocks.unsubscribeNoteAttachments.mockReset();
-  noteServiceMocks.subscribeNoteAttachments.mockReset().mockImplementation((
-    _noteId: string,
-    onNext: (attachments: NoteAttachmentSnapshot[]) => void
-  ) => {
-    onNext(attachmentState.items);
-    return noteServiceMocks.unsubscribeNoteAttachments;
-  });
   attachmentCryptoMocks.decryptAttachmentToBlob.mockReset();
   attachmentCryptoMocks.encryptAttachmentBlob.mockReset();
   cryptoMocks.unwrapNoteKey.mockReset();
@@ -169,7 +169,6 @@ describe("VaultNoteAttachmentsDialog", () => {
     });
 
     expect(await screen.findByRole("alert")).toHaveTextContent("활성화된 노트 권한");
-    expect(noteServiceMocks.subscribeNoteAttachments).not.toHaveBeenCalled();
     expect(noteServiceMocks.createNoteAttachment).not.toHaveBeenCalled();
     expect(noteServiceMocks.getEncryptedNoteAttachmentSource).not.toHaveBeenCalled();
     expect(noteServiceMocks.deleteNoteAttachment).not.toHaveBeenCalled();
@@ -178,17 +177,12 @@ describe("VaultNoteAttachmentsDialog", () => {
     expect(downloadBlobMock).not.toHaveBeenCalled();
   });
 
-  it("subscribes on an allowed mount without prefetching encrypted Blob data", async () => {
+  it("renders shared metadata on mount without prefetching encrypted Blob data", async () => {
     attachmentState.items = [attachment()];
 
     renderDialog();
 
     expect(await screen.findByText("자료.txt")).toBeInTheDocument();
-    expect(noteServiceMocks.subscribeNoteAttachments).toHaveBeenCalledWith(
-      "note-a1",
-      expect.any(Function),
-      expect.any(Function)
-    );
     expect(noteServiceMocks.getEncryptedNoteAttachmentSource).not.toHaveBeenCalled();
     expect(attachmentCryptoMocks.decryptAttachmentToBlob).not.toHaveBeenCalled();
     expect(downloadBlobMock).not.toHaveBeenCalled();
@@ -240,6 +234,44 @@ describe("VaultNoteAttachmentsDialog", () => {
     }));
     expect(attachmentCryptoMocks.encryptAttachmentBlob.mock.invocationCallOrder[0])
       .toBeLessThan(noteServiceMocks.createNoteAttachment.mock.invocationCallOrder[0]);
+    expect(noteServiceMocks.getAllNoteAttachmentsFromServer.mock.invocationCallOrder[0])
+      .toBeLessThan(attachmentCryptoMocks.encryptAttachmentBlob.mock.invocationCallOrder[0]);
+    expect(noteServiceMocks.getAllNoteAttachmentsFromServer).toHaveBeenCalledWith(
+      "note-a1",
+      expect.any(AbortSignal)
+    );
+  });
+
+  it("keeps uploads disabled until the complete attachment list is available", async () => {
+    renderDialog({ attachmentsLoading: true });
+
+    expect(await screen.findByRole("button", { name: "파일 추가" })).toBeDisabled();
+    expect(document.querySelector<HTMLInputElement>('.vault-attachments-dialog input[type="file"]'))
+      .toBeDisabled();
+    expect(noteServiceMocks.createNoteAttachment).not.toHaveBeenCalled();
+  });
+
+  it("counts pending server reservations when enforcing the per-note slot limit", async () => {
+    renderDialog({ attachmentSlotCount: 100 });
+
+    expect(await screen.findByRole("button", { name: "파일 추가" })).toBeDisabled();
+    expect(noteServiceMocks.createNoteAttachment).not.toHaveBeenCalled();
+  });
+
+  it("rechecks pending reservations on the server before encrypting a selected file", async () => {
+    noteServiceMocks.getAllNoteAttachmentsFromServer.mockResolvedValue(
+      Array.from({ length: 100 }, (_, index) => attachment({ id: `reserved-${index}`, isReady: false }))
+    );
+    renderDialog({ attachmentSlotCount: 99 });
+    const input = document.querySelector<HTMLInputElement>('.vault-attachments-dialog input[type="file"]');
+
+    fireEvent.change(input as HTMLInputElement, {
+      target: { files: [new File(["memo"], "memo.txt", { type: "text/plain" })] }
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("노트당 파일은 최대 100개");
+    expect(attachmentCryptoMocks.encryptAttachmentBlob).not.toHaveBeenCalled();
+    expect(noteServiceMocks.createNoteAttachment).not.toHaveBeenCalled();
   });
 
   it("gets and decrypts ciphertext only after an explicit download click", async () => {
@@ -262,16 +294,40 @@ describe("VaultNoteAttachmentsDialog", () => {
 
     await waitFor(() => expect(downloadBlobMock).toHaveBeenCalledWith(decryptedBlob, "자료.txt"));
     expect(noteServiceMocks.getEncryptedNoteAttachmentSource).toHaveBeenCalledOnce();
-    expect(noteServiceMocks.getEncryptedNoteAttachmentSource).toHaveBeenCalledWith(item);
+    expect(noteServiceMocks.getEncryptedNoteAttachmentSource).toHaveBeenCalledWith(
+      item,
+      expect.any(AbortSignal)
+    );
     expect(attachmentCryptoMocks.decryptAttachmentToBlob).toHaveBeenCalledWith(
       item,
       noteKey,
-      encryptedSource
+      encryptedSource,
+      expect.any(AbortSignal)
     );
     expect(noteServiceMocks.getEncryptedNoteAttachmentSource.mock.invocationCallOrder[0])
       .toBeLessThan(attachmentCryptoMocks.decryptAttachmentToBlob.mock.invocationCallOrder[0]);
     expect(attachmentCryptoMocks.decryptAttachmentToBlob.mock.invocationCallOrder[0])
       .toBeLessThan(downloadBlobMock.mock.invocationCallOrder[0]);
+  });
+
+  it("aborts an in-flight encrypted download without starting decryption", async () => {
+    const item = attachment();
+    attachmentState.items = [item];
+    cryptoMocks.unwrapNoteKey.mockResolvedValue({} as CryptoKey);
+    noteServiceMocks.getEncryptedNoteAttachmentSource.mockImplementation((
+      _attachment: NoteAttachmentSnapshot,
+      signal: AbortSignal
+    ) => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    }));
+    renderDialog();
+
+    await userEvent.click(await screen.findByRole("button", { name: "자료.txt 다운로드" }));
+    await userEvent.click(await screen.findByRole("button", { name: "다운로드 취소" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("파일 작업을 취소했습니다.");
+    expect(attachmentCryptoMocks.decryptAttachmentToBlob).not.toHaveBeenCalled();
+    expect(downloadBlobMock).not.toHaveBeenCalled();
   });
 
   it("deletes through the existing note attachment API without downloading the Blob", async () => {

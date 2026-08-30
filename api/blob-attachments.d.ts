@@ -16,6 +16,20 @@ export function reserveUserAttachmentBytes(
   extraWrites: BlobAttachmentExtraWrites
 ): Promise<void>;
 
+export function reserveNoteAttachmentCountWrite(
+  projectId: string,
+  accessToken: string,
+  noteId: string
+): Promise<Record<string, unknown>>;
+
+export function noteAttachmentReservationWrites(
+  projectId: string,
+  accessToken: string,
+  uid: string,
+  payload: Record<string, unknown>,
+  attachmentWrite: Record<string, unknown>
+): Promise<Array<Record<string, unknown>>>;
+
 export function claimAttachmentDeletion(
   projectId: string,
   accessToken: string,

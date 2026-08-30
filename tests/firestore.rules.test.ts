@@ -8759,6 +8759,49 @@ describeRules("firestore security rules", () => {
     await assertSucceeds(getDoc(doc(participantDb, "notes/note-a/attachments/backend-created")));
   });
 
+  it("keeps the note attachment reservation counter server-only", async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, "users/user-a"), userProfile("user-a", { allowedShareTargetUids: ["user-a", "user-b"] }));
+      await setDoc(doc(db, "users/user-b"), userProfile("user-b"));
+      await setDoc(doc(db, "users/admin-a"), userProfile("admin-a", { isAdmin: true, role: "admin" }));
+      await setDoc(doc(db, "notes/note-a"), {
+        type: "shared",
+        ownerUid: "user-a",
+        participantUids: ["user-a", "user-b"],
+        encryptedTitle: encryptedPayload,
+        encryptedBody: encryptedPayload,
+        wrappedKeys: {
+          "user-a": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "a" },
+          "user-b": { version: 1, algorithm: "RSA-OAEP", wrappedKey: "b" }
+        },
+        isDeleted: false,
+        updatedBy: "user-a"
+      });
+      await setDoc(doc(db, "notes/note-a/serverCounters/attachmentsV1"), {
+        schemaVersion: 1,
+        noteId: "note-a",
+        reservedCount: 1,
+        limitCount: 100,
+        accountingMode: "server_recount_per_reservation"
+      });
+    });
+
+    const clientDatabases = [
+      ...["user-a", "user-b", "admin-a"].map((uid) => testEnv.authenticatedContext(uid).firestore()),
+      testEnv.unauthenticatedContext().firestore()
+    ];
+
+    for (const db of clientDatabases) {
+      const counter = doc(db, "notes/note-a/serverCounters/attachmentsV1");
+      await assertFails(getDoc(counter));
+      await assertFails(getDocs(collection(db, "notes/note-a/serverCounters")));
+      await assertFails(setDoc(counter, { reservedCount: 0 }));
+      await assertFails(updateDoc(counter, { reservedCount: 0 }));
+      await assertFails(deleteDoc(counter));
+    }
+  });
+
   it("keeps backend-created Storage attachment metadata readable while denying client reservations and ready writes", async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), "users/user-a"), userProfile("user-a"));

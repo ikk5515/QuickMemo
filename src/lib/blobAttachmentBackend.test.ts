@@ -9,6 +9,10 @@ import {
 } from "../../api/blob-attachments.js";
 
 const blobAttachmentApiSource = readFileSync(join(process.cwd(), "api/blob-attachments.js"), "utf8");
+const noteAttachmentCounterSource = readFileSync(
+  join(process.cwd(), "api/_note-attachment-counter.js"),
+  "utf8"
+);
 const blobAttachmentClientSource = readFileSync(join(process.cwd(), "src/services/blobAttachments.ts"), "utf8");
 const firestoreRulesSource = readFileSync(join(process.cwd(), "firestore.rules"), "utf8");
 
@@ -123,6 +127,46 @@ describe("blob attachment backend", () => {
     expect(deletionSource).toContain("usage.attachmentCount >= 1");
     expect(deletionSource).toContain("const nextUsedBytes = usage.usedBytes - encryptedSize");
     expect(deletionSource).toContain('reason: "counter_underflow_guard"');
+  });
+
+  it("installs the staged atomic 100-file note reservation limit", () => {
+    const countSource = blobAttachmentApiSource.match(
+      /async function firestoreListDocuments[\s\S]*?async function reserveUserAttachmentBytes/u
+    )?.[0] ?? "";
+    const reservationSource = blobAttachmentApiSource.match(
+      /async function createNoteAttachmentReservation[\s\S]*?async function createPublicShareAttachmentReservation/u
+    )?.[0] ?? "";
+    const parentReservationSource = blobAttachmentApiSource.match(
+      /async function noteAttachmentReservationWrites[\s\S]*?async function createNoteAttachmentReservation/u
+    )?.[0] ?? "";
+
+    expect(noteAttachmentCounterSource).toContain("NOTE_ATTACHMENT_COUNT_LIMIT = 100");
+    expect(noteAttachmentCounterSource).toContain("NOTE_ATTACHMENT_COUNTER_ENFORCEMENT_VERSION = 2");
+    expect(noteAttachmentCounterSource).toContain("serverCounters/attachmentsV1");
+    expect(countSource).toContain('"mask.fieldPaths": "noteId"');
+    expect(countSource).toContain("currentNoteAttachmentReservationCount");
+    expect(countSource).toContain(
+      "NOTE_ATTACHMENT_COUNTER_SCHEMA_VERSION >= NOTE_ATTACHMENT_COUNTER_ENFORCEMENT_VERSION"
+    );
+    expect(noteAttachmentCounterSource).toContain("currentDocument");
+    expect(noteAttachmentCounterSource).toContain('"server_recount_per_reservation"');
+    expect(parentReservationSource).toContain("await reserveNoteAttachmentCountWrite(");
+    expect(parentReservationSource).toContain(
+      "return [attachmentWrite, noteAttachmentCountWrite, noteReservationWrite]"
+    );
+    expect(parentReservationSource).toContain("const noteFields = { updatedBy: stringValue(uid) }");
+    expect(parentReservationSource).toContain('fieldPath: "updatedAt"');
+    expect(parentReservationSource).toContain(
+      "currentDocument: { updateTime: currentNote.updateTime }"
+    );
+    expect(parentReservationSource).toContain(
+      "!(await canUploadToNote(projectId, uid, currentNote, accessToken))"
+    );
+    expect(reservationSource).toContain("() => noteAttachmentReservationWrites(");
+    expect(reservationSource).toContain("if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)");
+    expect(reservationSource).toContain("Note attachment reservation rollout drain is active");
+    expect(reservationSource.indexOf("if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)"))
+      .toBeLessThan(reservationSource.indexOf("if (payload.uploadedBy !== uid)"));
   });
 
   it("keeps blob objects private and streams them only after Firestore authorization checks", () => {
@@ -327,7 +371,7 @@ describe("blob attachment backend", () => {
 
   it("binds secure-share copy reservations and ready counts to the durable note job", () => {
     const reservationSource = blobAttachmentApiSource.match(
-      /async function createNoteAttachmentReservation[\s\S]*?async function createPublicShareAttachmentReservation/u
+      /async function noteAttachmentReservationWrites[\s\S]*?async function createPublicShareAttachmentReservation/u
     )?.[0] ?? "";
     const markReadySource = blobAttachmentApiSource.match(
       /async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u
@@ -339,7 +383,8 @@ describe("blob attachment backend", () => {
     expect(reservationSource).toContain("Secure share copy job mismatch");
     expect(reservationSource).toContain('valueString(currentNote, "secureShareCopyJobId") !== payload.secureShareCopyJobId');
     expect(reservationSource.match(/secureShareCopyCleanupClaimed\(/gu)).toHaveLength(2);
-    expect(reservationSource).toContain("secureShareCopyReservedAttachmentCount: integerValue(reservedCount + 1)");
+    expect(reservationSource).toContain("noteFields.secureShareCopyReservedAttachmentCount = integerValue(");
+    expect(reservationSource).toContain("nextSecureShareCopyReservedCount");
     expect(markReadySource).toContain("secureShareCopyCleanupClaimed(note)");
     expect(markReadySource).toContain("secureShareCopyReadyAttachmentCount = integerValue(readyCount + 1)");
     expect(beginDeleteSource).toContain("secureShareCopyCleanupClaimed(note)");

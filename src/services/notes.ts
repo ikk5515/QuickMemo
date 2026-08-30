@@ -86,6 +86,21 @@ export interface NoteHistorySnapshot extends NoteHistoryDocument {
   id: string;
 }
 
+function waitForAbortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException("The operation was aborted.", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
 export interface NoteFolderSnapshot extends NoteFolderDocument {
   id: string;
 }
@@ -172,6 +187,10 @@ export interface ServerSnapshotMetadata {
   fromCache: boolean;
   hasPendingWrites: boolean;
   serverComplete: boolean;
+}
+
+export interface NoteAttachmentSnapshotMetadata extends ServerSnapshotMetadata {
+  reservedCount: number;
 }
 
 const maximumVaultCutoverOwnedNotes = 20_000;
@@ -1330,21 +1349,28 @@ export function subscribeNoteHistory(
 
 export function subscribeNoteAttachments(
   noteId: string,
-  callback: (attachments: NoteAttachmentSnapshot[]) => void,
+  callback: (
+    attachments: NoteAttachmentSnapshot[],
+    metadata: NoteAttachmentSnapshotMetadata
+  ) => void,
   onError?: (error: Error) => void
 ) {
   const attachmentsQuery = query(collection(db, "notes", noteId, "attachments"), orderBy("createdAt", "desc"));
 
   return onSnapshot(
     attachmentsQuery,
+    { includeMetadataChanges: true },
     (snapshot) => {
+      const allAttachments = snapshot.docs.map((document) => ({
+        id: document.id,
+        ...(document.data() as NoteAttachmentDocument)
+      }));
       callback(
-        snapshot.docs
-          .map((document) => ({
-            id: document.id,
-            ...(document.data() as NoteAttachmentDocument)
-          }))
-          .filter((attachment) => attachment.isReady !== false)
+        allAttachments.filter((attachment) => attachment.isReady !== false),
+        {
+          ...serverSnapshotMetadata(snapshot),
+          reservedCount: allAttachments.length
+        }
       );
     },
     (error) => onError?.(error)
@@ -1366,6 +1392,16 @@ export async function getNoteAttachments(noteId: string) {
 export async function getAllNoteAttachments(noteId: string) {
   const attachmentsQuery = query(collection(db, "notes", noteId, "attachments"), orderBy("createdAt", "desc"));
   const snapshot = await getDocs(attachmentsQuery);
+
+  return snapshot.docs.map((document) => ({
+    id: document.id,
+    ...(document.data() as NoteAttachmentDocument)
+  })) satisfies NoteAttachmentSnapshot[];
+}
+
+export async function getAllNoteAttachmentsFromServer(noteId: string, signal?: AbortSignal) {
+  const attachmentsQuery = query(collection(db, "notes", noteId, "attachments"), orderBy("createdAt", "desc"));
+  const snapshot = await waitForAbortable(getDocsFromServer(attachmentsQuery), signal);
 
   return snapshot.docs.map((document) => ({
     id: document.id,
@@ -2115,6 +2151,7 @@ export async function getEncryptedNoteAttachmentSource(
   attachment: StoredAttachmentDocument,
   signal?: AbortSignal
 ): Promise<EncryptedAttachmentSource> {
+  signal?.throwIfAborted();
   if (attachment.encryptedData) {
     return { bytes: attachment.encryptedData.toUint8Array() };
   }
@@ -2139,7 +2176,10 @@ export async function getEncryptedNoteAttachmentSource(
 
   return {
     bytes: new Uint8Array(
-      await getBytes(ref(getLegacyStorage(), attachment.storagePath), maxEncryptedAttachmentBytes)
+      await waitForAbortable(
+        getBytes(ref(getLegacyStorage(), attachment.storagePath), maxEncryptedAttachmentBytes),
+        signal
+      )
     )
   };
 }

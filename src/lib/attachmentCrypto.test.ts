@@ -136,6 +136,37 @@ describe("attachment chunked encryption", () => {
     expect(onProgress).toHaveBeenCalledOnce();
   }, 30_000);
 
+  it("cancels the response reader when chunked attachment decryption is aborted", async () => {
+    const noteKey = await generateNoteKey();
+    const plainBytes = testBytes(128 * 1024 + 37);
+    const encrypted = await encryptAttachmentBlob(new Blob([plainBytes]), noteKey);
+    const encryptedBytes = await blobBytes(encrypted.blob);
+    const controller = new AbortController();
+    let cancelCount = 0;
+    let pulled = false;
+    const response = new Response(new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelCount += 1;
+      },
+      pull(streamController) {
+        if (pulled) return;
+        pulled = true;
+        streamController.enqueue(encryptedBytes.slice(0, 4096));
+        controller.abort();
+      }
+    }));
+
+    await expect(
+      decryptAttachmentToBytes(
+        { ...encrypted.metadata, originalSize: plainBytes.byteLength },
+        noteKey,
+        { response },
+        controller.signal
+      )
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(cancelCount).toBe(1);
+  });
+
   it("assembles irregular response chunks without requiring cumulative buffer concatenation", async () => {
     const noteKey = await generateNoteKey();
     const plainBytes = testBytes(128 * 1024 + 37);

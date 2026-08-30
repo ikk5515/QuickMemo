@@ -5,6 +5,7 @@ import cleanupHandler, {
   type CleanupHttpRequest,
   type CleanupHttpResponse
 } from "../../api/cleanup-public-shares.js";
+import { NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE } from "../../api/_note-attachment-counter.js";
 import {
   canonicalVaultInventoryManifestEntryKey,
   canonicalVaultInventoryManifestEntryToken,
@@ -183,6 +184,10 @@ class FakeFirestoreRest {
     attachmentName: string;
     noteName: string;
   } | null = null;
+  racePurgedNoteAttachmentReservationOnce: {
+    attachmentName: string;
+    counterName: string;
+  } | null = null;
   private updateSequence = 0;
 
   add(relativePath: string, fields: Record<string, FirestoreValue>) {
@@ -355,6 +360,37 @@ class FakeFirestoreRest {
       return Boolean(update?.fields?.secureShareCopyCleanupClaimId?.stringValue);
     });
     const cleanupClaimDocumentName = this.writeDocumentName(cleanupClaimWrite ?? {});
+
+    if (
+      this.racePurgedNoteAttachmentReservationOnce
+      && writes.some((write) => {
+        const update = write.update as {
+          fields?: Record<string, FirestoreValue>;
+          name?: string;
+        } | undefined;
+        return update?.name === this.racePurgedNoteAttachmentReservationOnce?.counterName
+          && update?.fields?.state?.stringValue === "closed";
+      })
+    ) {
+      const race = this.racePurgedNoteAttachmentReservationOnce;
+      const counter = this.documents.get(race.counterName);
+
+      if (!counter) {
+        throw new Error("Missing note attachment counter for reservation race");
+      }
+      counter.fields.reservedCount = integerValue(1);
+      counter.fields.state = stringValue("open");
+      counter.updateTime = this.nextUpdateTime();
+      this.documents.set(race.attachmentName, {
+        fields: {
+          isReady: booleanValue(false),
+          noteId: stringValue(race.attachmentName.split("/").at(-3) ?? "")
+        },
+        name: race.attachmentName,
+        updateTime: this.nextUpdateTime()
+      });
+      this.racePurgedNoteAttachmentReservationOnce = null;
+    }
 
     if (
       this.raceCleanupClaimHeartbeatDocumentOnce
@@ -878,6 +914,114 @@ describe.sequential("public share cleanup HTTP handler integration", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(backend.requests).toBe(0);
   });
+
+  it.skipIf(NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)(
+    "atomically closes the attachment counter before deleting a purged note",
+    async () => {
+    const backend = new FakeFirestoreRest();
+    const noteId = "purged-note-counter-fence";
+
+    completedBackfillCursor(backend);
+    backend.add(`notes/${noteId}`, {
+      isDeleted: booleanValue(true),
+      isPurged: booleanValue(true),
+      ownerUid: stringValue("owner-a")
+    });
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      documentDeletesAttempted: 2,
+      purgeQueuesDeleted: 1,
+      purgedNotesDeleted: 1
+    });
+    expect(backend.has(`notes/${noteId}`)).toBe(false);
+    expect(backend.has(`notePurgeCleanupQueue/${noteId}`)).toBe(false);
+    expect(backend.get(`notes/${noteId}/serverCounters/attachmentsV1`)?.fields)
+      .toMatchObject({
+        accountingMode: stringValue("closed_note_tombstone"),
+        noteId: stringValue(noteId),
+        reservedCount: integerValue(0),
+        state: stringValue("closed")
+      });
+    }
+  );
+
+  it.skipIf(NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)(
+    "retains a purged note when an attachment reservation wins the finalizer race",
+    async () => {
+    const backend = new FakeFirestoreRest();
+    const noteId = "purged-note-reservation-race";
+    const counterPath = `notes/${noteId}/serverCounters/attachmentsV1`;
+    const attachmentPath = `notes/${noteId}/attachments/racing-reservation`;
+
+    completedBackfillCursor(backend);
+    backend.add(`notes/${noteId}`, {
+      isDeleted: booleanValue(true),
+      isPurged: booleanValue(true),
+      ownerUid: stringValue("owner-a")
+    });
+    const counterName = backend.add(counterPath, {
+      accountingMode: stringValue("server_recount_per_reservation"),
+      limitCount: integerValue(100),
+      noteId: stringValue(noteId),
+      reservedCount: integerValue(0),
+      schemaVersion: integerValue(1),
+      state: stringValue("open")
+    });
+    backend.racePurgedNoteAttachmentReservationOnce = {
+      attachmentName: `${documentRoot}/${attachmentPath}`,
+      counterName
+    };
+    installBackend(backend);
+
+    const response = await callHandler(`Bearer ${cronSecret}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      documentDeletesAttempted: 0,
+      purgeQueuesDeleted: 0,
+      purgedNotesDeleted: 0
+    });
+    expect(backend.has(`notes/${noteId}`)).toBe(true);
+    expect(backend.has(`notePurgeCleanupQueue/${noteId}`)).toBe(true);
+    expect(backend.has(attachmentPath)).toBe(true);
+    expect(backend.get(counterPath)?.fields).toMatchObject({
+      reservedCount: integerValue(1),
+      state: stringValue("open")
+    });
+    }
+  );
+
+  it.runIf(NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)(
+    "retains purged-note parents throughout the stage-one writer drain",
+    async () => {
+      const backend = new FakeFirestoreRest();
+      const noteId = "purged-note-rollout-drain";
+
+      completedBackfillCursor(backend);
+      backend.add(`notes/${noteId}`, {
+        isDeleted: booleanValue(true),
+        isPurged: booleanValue(true),
+        ownerUid: stringValue("owner-a")
+      });
+      installBackend(backend);
+
+      const response = await callHandler(`Bearer ${cronSecret}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        documentDeletesAttempted: 0,
+        purgeQueuesDeleted: 0,
+        purgedNotesDeleted: 0
+      });
+      expect(backend.has(`notes/${noteId}`)).toBe(true);
+      expect(backend.has(`notePurgeCleanupQueue/${noteId}`)).toBe(true);
+      expect(backend.has(`notes/${noteId}/serverCounters/attachmentsV1`)).toBe(false);
+    }
+  );
 
   it("serializes concurrent handlers with a Firestore lease and returns a neutral skip", async () => {
     const backend = new FakeFirestoreRest();

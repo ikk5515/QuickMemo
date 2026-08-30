@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest";
 
 const source = readFileSync(join(process.cwd(), "src/pages/VaultPage.tsx"), "utf8");
 const styles = readFileSync(join(process.cwd(), "src/styles/vault.css"), "utf8");
+const attachmentRegionSource = readFileSync(
+  join(process.cwd(), "src/features/vault/VaultNoteAttachmentsRegion.tsx"),
+  "utf8"
+);
 const pathRewriteInventorySource = readFileSync(
   join(process.cwd(), "src/features/vault/pathRewriteInventory.ts"),
   "utf8"
@@ -37,6 +41,12 @@ describe("Vault workspace UI regression contract", () => {
     );
   });
 
+  it("loads Daily Notes settings only with the calendar surface", () => {
+    expect(source).toContain('lazy(() => import("../features/calendar/DailyNotesSettings"))');
+    expect(source).not.toContain("function DailyNotesSettings(");
+    expect(source.match(/<LazyDailyNotesSettings/gu)).toHaveLength(2);
+  });
+
   it("lets source mode fill the pane while constraining reading surfaces", () => {
     expect(ruleBodiesForSelector(
       styles,
@@ -54,6 +64,33 @@ describe("Vault workspace UI regression contract", () => {
         expect.stringMatching(/margin-inline:\s*auto;[\s\S]*max-width:\s*860px;/u)
       ]));
     }
+  });
+
+  it("keeps one shared attachment shelf outside all Markdown view-mode branches", () => {
+    const markdownContent = sourceBetween(
+      '<div className="vault-note-content">',
+      '<div className="vault-empty-state">'
+    );
+    const shelfIndex = markdownContent.indexOf("<LazyVaultNoteAttachmentsRegion");
+    const pluginIndex = markdownContent.indexOf('activeMarkdownPluginView && viewMode !== "source"');
+    const readingIndex = markdownContent.indexOf('viewMode === "reading"');
+    const livePreviewIndex = markdownContent.indexOf('viewMode === "live-preview"');
+
+    expect(source).toContain('import("../features/vault/VaultNoteAttachmentsRegion")');
+    expect(attachmentRegionSource).toContain("useVaultNoteAttachments(access.allowed ? note.id : null)");
+    expect(attachmentRegionSource).toContain("<VaultNoteAttachmentsInline");
+    expect(attachmentRegionSource).toContain("<LazyVaultNoteAttachmentsDialog");
+    expect(markdownContent).not.toContain("vault-note-markdown-surface");
+    expect(markdownContent).not.toContain("vault-note-markdown-body");
+    expect(markdownContent).toMatch(/<MarkdownRenderer\s+className="vault-markdown-renderer"/u);
+    expect(shelfIndex).toBeGreaterThanOrEqual(0);
+    expect(pluginIndex).toBeGreaterThan(shelfIndex);
+    expect(readingIndex).toBeGreaterThan(shelfIndex);
+    expect(livePreviewIndex).toBeGreaterThan(shelfIndex);
+    expect(attachmentRegionSource).toContain("const [returnFocusTo, setReturnFocusTo]");
+    expect(attachmentRegionSource).toContain("onManage={setReturnFocusTo}");
+    expect(attachmentRegionSource).toContain("onClose={() => setReturnFocusTo(null)}");
+    expect(source).not.toContain("subscribeNoteAttachments(");
   });
 
   it("keeps the empty workspace inside transiently narrow pane bounds", () => {
