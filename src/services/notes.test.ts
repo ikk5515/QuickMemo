@@ -15,6 +15,8 @@ import {
   createSecureShareCopyingNote,
   deleteNote,
   deleteRevisionedNote,
+  getAllNoteAttachmentsFromServer,
+  getEncryptedNoteAttachmentSource,
   getNoteRevisionState,
   loadOwnedVaultCutoverInventory,
   loadOwnedVaultCutoverNotes,
@@ -31,6 +33,7 @@ import {
   restoreRevisionedEncryptedFolderSubtree,
   subscribeDeletedNoteFolders,
   subscribeMyNoteStates,
+  subscribeNoteAttachments,
   subscribeNoteFolders,
   subscribeNoteHistory,
   subscribeVisibleNotes,
@@ -700,6 +703,92 @@ describe("revision-aware note persistence", () => {
       secureShareCopyJobId: "copy_job_1234567890",
       signal: controller.signal
     }));
+  });
+
+  it("keeps pending reservations in the attachment slot count until a server-complete snapshot", () => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata: { fromCache: boolean; hasPendingWrites: boolean };
+    }) => void) | undefined;
+    const callback = vi.fn();
+    const unsubscribe = vi.fn();
+    mocks.onSnapshot.mockImplementationOnce((...args: unknown[]) => {
+      expect(args[1]).toEqual({ includeMetadataChanges: true });
+      listener = args[2] as typeof listener;
+      return unsubscribe;
+    });
+
+    const cleanup = subscribeNoteAttachments("note-a", callback);
+    listener?.({
+      docs: [
+        { data: () => ({ fileName: "ready", isReady: true }), id: "ready" },
+        { data: () => ({ fileName: "pending", isReady: false }), id: "pending" }
+      ],
+      metadata: { fromCache: true, hasPendingWrites: false }
+    });
+
+    expect(callback).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: "ready" })],
+      {
+        fromCache: true,
+        hasPendingWrites: false,
+        reservedCount: 2,
+        serverComplete: false
+      }
+    );
+    cleanup();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("reads every ready and pending attachment from the server before an upload", async () => {
+    mocks.getDocsFromServer.mockResolvedValueOnce({
+      docs: [
+        { data: () => ({ fileName: "ready", isReady: true }), id: "ready" },
+        { data: () => ({ fileName: "pending", isReady: false }), id: "pending" }
+      ]
+    });
+
+    await expect(getAllNoteAttachmentsFromServer("note-a")).resolves.toEqual([
+      expect.objectContaining({ id: "ready", isReady: true }),
+      expect.objectContaining({ id: "pending", isReady: false })
+    ]);
+    expect(mocks.getDocs).not.toHaveBeenCalled();
+    expect(mocks.getDocsFromServer).toHaveBeenCalledOnce();
+  });
+
+  it("releases an upload preflight immediately when its caller aborts", async () => {
+    let finishServerRead!: (value: { docs: never[] }) => void;
+    const serverRead = new Promise<{ docs: never[] }>((resolve) => {
+      finishServerRead = resolve;
+    });
+    mocks.getDocsFromServer.mockReturnValueOnce(serverRead);
+    const controller = new AbortController();
+
+    const result = getAllNoteAttachmentsFromServer("note-a", controller.signal);
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    finishServerRead({ docs: [] });
+    await serverRead;
+  });
+
+  it("releases a legacy Storage download immediately when its caller aborts", async () => {
+    let finishLegacyRead!: (value: ArrayBuffer) => void;
+    const legacyRead = new Promise<ArrayBuffer>((resolve) => {
+      finishLegacyRead = resolve;
+    });
+    mocks.getBytes.mockReturnValueOnce(legacyRead);
+    const controller = new AbortController();
+
+    const result = getEncryptedNoteAttachmentSource({
+      noteId: "note-a",
+      storagePath: "users/user-a/notes/note-a/legacy.bin"
+    } as never, controller.signal);
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    finishLegacyRead(new ArrayBuffer(0));
+    await legacyRead;
   });
 
   it("delegates atomic copying-note activation without sending the caller uid", async () => {

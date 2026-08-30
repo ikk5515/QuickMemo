@@ -56,6 +56,27 @@ describe("Vault workspace UI regression contract", () => {
     }
   });
 
+  it("keeps one shared attachment shelf outside all Markdown view-mode branches", () => {
+    const markdownSurface = sourceBetween(
+      '<div className={`vault-note-markdown-surface',
+      '<div className="vault-empty-state">'
+    );
+    const shelfIndex = markdownSurface.indexOf("<LazyVaultNoteAttachmentsInline");
+    const pluginIndex = markdownSurface.indexOf('activeMarkdownPluginView && viewMode !== "source"');
+    const readingIndex = markdownSurface.indexOf('viewMode === "reading"');
+    const livePreviewIndex = markdownSurface.indexOf('viewMode === "live-preview"');
+
+    expect(source).toContain("const activeNoteAttachments = useVaultNoteAttachments(activeNoteAttachmentsId);");
+    expect(shelfIndex).toBeGreaterThanOrEqual(0);
+    expect(pluginIndex).toBeGreaterThan(shelfIndex);
+    expect(readingIndex).toBeGreaterThan(shelfIndex);
+    expect(livePreviewIndex).toBeGreaterThan(shelfIndex);
+    expect(source).toContain("attachments={activeNoteAttachments.attachments}");
+    expect(source).toContain("attachmentTarget.note.id === activeNoteAttachmentsId");
+    expect(source).toContain("attachmentTargetNoteId !== activeNoteAttachmentsId");
+    expect(source).not.toContain("subscribeNoteAttachments(");
+  });
+
   it("keeps the empty workspace inside transiently narrow pane bounds", () => {
     expect(ruleBodiesForSelector(styles, ".vault-empty-state")).toEqual(
       expect.arrayContaining([

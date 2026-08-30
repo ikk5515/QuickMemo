@@ -855,6 +855,14 @@ describe("public share backend cleanup", () => {
     expect(purgeSource).toContain("backfillNotePurgeQueues");
     expect(purgeSource).toContain("queryPurgedNotes");
     expect(purgeSource).toContain("currentDocument: { exists: false }");
+    expect(purgeSource).toContain("noteAttachmentCounterName(projectId, noteId, databaseId)");
+    expect(purgeSource).toContain("noteAttachmentCounterWrite({");
+    expect(purgeSource).toContain('state: "closed"');
+    expect(purgeSource).toContain('reservedCount: 0');
+    expect(purgeSource).toContain('1,\n        ["noteId"]');
+    expect(purgeSource).toContain("for (let attempt = 0; attempt < 3; attempt += 1)");
+    expect(purgeSource).toContain("![400, 409].includes(error.statusCode)");
+    expect(purgeSource).toContain("if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)");
     expect(purgeSource).toContain("currentDocument: { updateTime: currentNote.updateTime }");
     expect(purgeSource).toContain("currentDocument: { updateTime: currentQueue.updateTime }");
   });

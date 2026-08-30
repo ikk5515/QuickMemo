@@ -12,6 +12,13 @@ import {
 } from "./_free-tier-policy.js";
 import { disconnectGoogleCalendarForManagedUser } from "./_google-calendar-common.js";
 import {
+  NOTE_ATTACHMENT_COUNTER_FIELD_PATHS,
+  NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE,
+  noteAttachmentCounterName,
+  noteAttachmentCounterState,
+  noteAttachmentCounterWrite
+} from "./_note-attachment-counter.js";
+import {
   createDocumentWrite,
   firestoreBatchGetNewTransaction,
   firestoreCommit,
@@ -2588,13 +2595,49 @@ async function deletePublicSharesForOwnedNote(projectId, noteId, accessToken, st
 async function finalizeNoteTreeDeletion(projectId, noteName, accessToken, stats) {
   const noteId = documentIdFromName(noteName);
   const cleanupQueueName = documentNameForPath(projectId, `notePurgeCleanupQueue/${noteId}`);
+  const attachmentCounterName = noteAttachmentCounterName(projectId, noteId);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const [note, cleanupQueue] = await Promise.all([
+    const [note, cleanupQueue, attachmentCounter] = await Promise.all([
       firestoreGetByName(projectId, noteName, accessToken, ["ownerUid"]),
-      firestoreGetByName(projectId, cleanupQueueName, accessToken, ["noteId"])
+      firestoreGetByName(projectId, cleanupQueueName, accessToken, ["noteId"]),
+      firestoreGetByName(
+        projectId,
+        attachmentCounterName,
+        accessToken,
+        NOTE_ATTACHMENT_COUNTER_FIELD_PATHS
+      )
     ]);
+    const remainingAttachment = await listChildDocuments(
+      noteName,
+      "attachments",
+      accessToken,
+      1,
+      ["noteId"]
+    );
+
+    if (remainingAttachment.length > 0) {
+      throw new ManagedUserCleanupInProgressError(
+        "Concurrent note attachment reservation requires a fresh cleanup pass"
+      );
+    }
+
+    if (
+      !note
+      && !cleanupQueue
+      && noteAttachmentCounterState(attachmentCounter, noteId) === "closed"
+    ) {
+      return;
+    }
+
     const writes = [
+      noteAttachmentCounterWrite({
+        counterDocument: attachmentCounter,
+        counterName: attachmentCounterName,
+        noteId,
+        reservedCount: 0,
+        state: "closed"
+      }),
       ...(note
         ? [{ delete: noteName, currentDocument: { updateTime: note.updateTime } }]
         : []),
@@ -2622,8 +2665,14 @@ async function finalizeNoteTreeDeletion(projectId, noteName, accessToken, stats)
 
       return;
     } catch (error) {
-      if (![400, 409].includes(error.statusCode) || attempt === 2) {
+      if (![400, 409].includes(errorNumberField(error, "statusCode"))) {
         throw error;
+      }
+
+      if (attempt === 2) {
+        throw new ManagedUserCleanupInProgressError(
+          "Concurrent note finalization requires a fresh cleanup pass"
+        );
       }
     }
   }
@@ -3075,6 +3124,17 @@ async function deleteManagedUser({ accessToken, projectId, storageBucket, target
 
   if (!callerProfile || !boolField(callerProfile, "isActive") || !boolField(callerProfile, "isAdmin")) {
     return { statusCode: 403, body: { ok: false, error: "admin_required" } };
+  }
+
+  if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE) {
+    return {
+      statusCode: 503,
+      body: {
+        ok: false,
+        error: "attachment_rollout_in_progress",
+        retryable: true
+      }
+    };
   }
 
   if (targetUid === callerUid) {

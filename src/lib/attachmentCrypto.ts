@@ -252,8 +252,14 @@ export async function encryptAttachmentBlob(
   };
 }
 
-async function sourceToBytes(source: EncryptedAttachmentSource, limitBytes: number) {
+async function sourceToBytes(
+  source: EncryptedAttachmentSource,
+  limitBytes: number,
+  signal?: AbortSignal
+) {
+  signal?.throwIfAborted();
   const bytes = source.bytes ?? new Uint8Array(await source.response.arrayBuffer());
+  signal?.throwIfAborted();
 
   if (bytes.byteLength > limitBytes) {
     throw new Error("첨부파일 암호문이 허용 크기를 초과했습니다.");
@@ -265,7 +271,8 @@ async function sourceToBytes(source: EncryptedAttachmentSource, limitBytes: numb
 async function decryptSingleAttachmentToBlob(
   metadata: AttachmentCryptoDocument,
   key: CryptoKey,
-  source: EncryptedAttachmentSource
+  source: EncryptedAttachmentSource,
+  signal?: AbortSignal
 ) {
   const iv = bytesLikeToUint8Array(metadata.iv, "첨부파일 IV");
 
@@ -273,20 +280,27 @@ async function decryptSingleAttachmentToBlob(
     throw new Error("첨부파일 IV가 올바르지 않습니다.");
   }
 
-  const cipherBytes = await sourceToBytes(source, maxEncryptedAttachmentBytes);
+  const cipherBytes = await sourceToBytes(source, maxEncryptedAttachmentBytes, signal);
+  signal?.throwIfAborted();
   const plainBytes = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: toArrayBuffer(iv) },
     key,
     toArrayBuffer(cipherBytes)
   );
+  signal?.throwIfAborted();
 
   return new Blob([plainBytes], { type: "application/octet-stream" });
 }
 
-async function* encryptedChunksFromBytes(bytes: Uint8Array, encryptedSizes: number[]) {
+async function* encryptedChunksFromBytes(
+  bytes: Uint8Array,
+  encryptedSizes: number[],
+  signal?: AbortSignal
+) {
   let offset = 0;
 
   for (const encryptedSize of encryptedSizes) {
+    signal?.throwIfAborted();
     const nextOffset = offset + encryptedSize;
 
     if (nextOffset > bytes.byteLength) {
@@ -294,6 +308,7 @@ async function* encryptedChunksFromBytes(bytes: Uint8Array, encryptedSizes: numb
     }
 
     yield bytes.subarray(offset, nextOffset);
+    signal?.throwIfAborted();
     offset = nextOffset;
   }
 
@@ -302,9 +317,17 @@ async function* encryptedChunksFromBytes(bytes: Uint8Array, encryptedSizes: numb
   }
 }
 
-async function* encryptedChunksFromResponse(response: Response, encryptedSizes: number[]) {
+async function* encryptedChunksFromResponse(
+  response: Response,
+  encryptedSizes: number[],
+  signal?: AbortSignal
+) {
   if (!response.body) {
-    yield* encryptedChunksFromBytes(new Uint8Array(await response.arrayBuffer()), encryptedSizes);
+    yield* encryptedChunksFromBytes(
+      new Uint8Array(await response.arrayBuffer()),
+      encryptedSizes,
+      signal
+    );
     return;
   }
 
@@ -315,12 +338,15 @@ async function* encryptedChunksFromResponse(response: Response, encryptedSizes: 
 
   try {
     for (const encryptedSize of encryptedSizes) {
+      signal?.throwIfAborted();
       const encryptedChunk = new Uint8Array(encryptedSize);
       let written = 0;
 
       while (written < encryptedSize) {
         if (!pending || pendingOffset >= pending.byteLength) {
+          signal?.throwIfAborted();
           const { done, value } = await reader.read();
+          signal?.throwIfAborted();
 
           if (done) {
             throw new Error("첨부파일 chunk 암호문이 부족합니다.");
@@ -348,6 +374,7 @@ async function* encryptedChunksFromResponse(response: Response, encryptedSizes: 
       }
 
       yield encryptedChunk;
+      signal?.throwIfAborted();
     }
 
     const trailingBytes = pending as Uint8Array<ArrayBufferLike> | null;
@@ -357,7 +384,9 @@ async function* encryptedChunksFromResponse(response: Response, encryptedSizes: 
     }
 
     while (true) {
+      signal?.throwIfAborted();
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
 
       if (done) {
         completed = true;
@@ -380,25 +409,32 @@ async function* encryptedChunksFromResponse(response: Response, encryptedSizes: 
 async function decryptChunkedAttachmentToBlob(
   metadata: AttachmentCryptoDocument,
   key: CryptoKey,
-  source: EncryptedAttachmentSource
+  source: EncryptedAttachmentSource,
+  signal?: AbortSignal
 ) {
   const chunkMetadata = normalizedChunkedAttachmentMetadata(metadata);
   const encryptedSizes = chunkEncryptedSizes(metadata);
   const parts: BlobPart[] = [];
   const encryptedChunks =
     source.bytes
-      ? encryptedChunksFromBytes(await sourceToBytes(source, maxChunkedEncryptedAttachmentBytes), encryptedSizes)
-      : encryptedChunksFromResponse(source.response, encryptedSizes);
+      ? encryptedChunksFromBytes(
+          await sourceToBytes(source, maxChunkedEncryptedAttachmentBytes, signal),
+          encryptedSizes,
+          signal
+        )
+      : encryptedChunksFromResponse(source.response, encryptedSizes, signal);
   let plainSize = 0;
   let index = 0;
 
   for await (const encryptedChunk of encryptedChunks) {
+    signal?.throwIfAborted();
     const expectedPlainSize = chunkPlainSize(index, metadata.originalSize, chunkMetadata.chunkSize, chunkMetadata.chunkCount);
     const plainBuffer = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: toArrayBuffer(chunkMetadata.chunkIvs[index] ?? new Uint8Array(0)) },
       key,
       toArrayBuffer(encryptedChunk)
     );
+    signal?.throwIfAborted();
     const plainBytes = new Uint8Array(plainBuffer);
 
     if (plainBytes.byteLength !== expectedPlainSize) {
@@ -410,6 +446,7 @@ async function decryptChunkedAttachmentToBlob(
     index += 1;
   }
 
+  signal?.throwIfAborted();
   if (index !== chunkMetadata.chunkCount || plainSize !== metadata.originalSize) {
     throw new Error("첨부파일 chunk 복호화 결과가 올바르지 않습니다.");
   }
@@ -420,19 +457,22 @@ async function decryptChunkedAttachmentToBlob(
 export async function decryptAttachmentToBlob(
   metadata: AttachmentCryptoDocument,
   key: CryptoKey,
-  source: EncryptedAttachmentSource
+  source: EncryptedAttachmentSource,
+  signal?: AbortSignal
 ) {
   return isChunkedAttachment(metadata)
-    ? decryptChunkedAttachmentToBlob(metadata, key, source)
-    : decryptSingleAttachmentToBlob(metadata, key, source);
+    ? decryptChunkedAttachmentToBlob(metadata, key, source, signal)
+    : decryptSingleAttachmentToBlob(metadata, key, source, signal);
 }
 
 export async function decryptAttachmentToBytes(
   metadata: AttachmentCryptoDocument,
   key: CryptoKey,
-  source: EncryptedAttachmentSource
+  source: EncryptedAttachmentSource,
+  signal?: AbortSignal
 ) {
-  const blob = await decryptAttachmentToBlob(metadata, key, source);
+  const blob = await decryptAttachmentToBlob(metadata, key, source, signal);
+  signal?.throwIfAborted();
   return new Uint8Array(await blobArrayBuffer(blob));
 }
 

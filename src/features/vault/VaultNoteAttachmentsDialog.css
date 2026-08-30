@@ -1,4 +1,9 @@
 .vault-attachments-backdrop {
+  --vault-accent: #7c6ccf;
+  --vault-border: var(--color-border-subtle);
+  --vault-panel: var(--color-modal-bg);
+  --vault-text: var(--color-text-primary);
+  --vault-text-muted: var(--color-text-muted);
   position: fixed;
   inset: 0;
   z-index: 1400;
@@ -115,8 +120,8 @@
 }
 
 .vault-attachments-feedback.error {
-  color: var(--danger, #b42318);
-  background: color-mix(in srgb, var(--danger, #b42318) 10%, var(--vault-panel, #fff));
+  color: var(--color-danger, #b42318);
+  background: color-mix(in srgb, var(--color-danger, #b42318) 10%, var(--vault-panel, #fff));
 }
 
 .vault-attachments-list {

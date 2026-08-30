@@ -30,6 +30,16 @@ import {
   sourceAttachmentFingerprintMatches,
   validSourceAttachmentFingerprint
 } from "./_secure-share-attachment-reuse.js";
+import {
+  NOTE_ATTACHMENT_COUNT_LIMIT,
+  NOTE_ATTACHMENT_COUNTER_ENFORCEMENT_VERSION,
+  NOTE_ATTACHMENT_COUNTER_SCHEMA_VERSION,
+  NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE,
+  noteAttachmentCounterName,
+  noteAttachmentCounterPath,
+  noteAttachmentCounterState,
+  noteAttachmentCounterWrite
+} from "./_note-attachment-counter.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
@@ -403,6 +413,17 @@ async function firestoreGetDocument(projectId, documentPath, accessToken) {
   }
 
   return response.json();
+}
+
+async function firestoreListDocuments(projectId, collectionPath, accessToken, pageSize) {
+  const query = new URLSearchParams({
+    pageSize: String(pageSize),
+    "mask.fieldPaths": "noteId"
+  });
+  return firestoreRequest(
+    `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${encodeDocumentPath(collectionPath)}?${query.toString()}`,
+    accessToken
+  );
 }
 
 async function firestoreCommit(projectId, accessToken, writes) {
@@ -966,6 +987,58 @@ function globalBlobUsageWrite(projectId, usage, nextUsedBytes, nextAttachmentCou
   };
 }
 
+async function currentNoteAttachmentReservationCount(projectId, accessToken, noteId) {
+  const result = await firestoreListDocuments(
+    projectId,
+    `notes/${noteId}/attachments`,
+    accessToken,
+    NOTE_ATTACHMENT_COUNT_LIMIT
+  );
+  const documents = Array.isArray(result?.documents) ? result.documents : [];
+
+  // A page token at this bounded read means the collection is at least full.
+  return result?.nextPageToken
+    ? NOTE_ATTACHMENT_COUNT_LIMIT
+    : Math.min(documents.length, NOTE_ATTACHMENT_COUNT_LIMIT);
+}
+
+export async function reserveNoteAttachmentCountWrite(projectId, accessToken, noteId) {
+  const counterPath = noteAttachmentCounterPath(noteId);
+  const counterDocument = await firestoreGetDocument(projectId, counterPath, accessToken);
+  const counterState = noteAttachmentCounterState(counterDocument, noteId);
+
+  if (counterState !== "missing" && counterState !== "open") {
+    throw new HttpError(
+      409,
+      "삭제 중이거나 삭제된 노트에는 파일을 첨부할 수 없습니다.",
+      "Note attachment counter is closed or invalid"
+    );
+  }
+  // Always recount every metadata document. This keeps legacy or rolling-
+  // deployment writers from turning a stale counter into a permissive fast
+  // path; the counter document is the CAS mutex for current writers.
+  const reservedCount = await currentNoteAttachmentReservationCount(projectId, accessToken, noteId);
+
+  if (
+    NOTE_ATTACHMENT_COUNTER_SCHEMA_VERSION >= NOTE_ATTACHMENT_COUNTER_ENFORCEMENT_VERSION
+    && reservedCount >= NOTE_ATTACHMENT_COUNT_LIMIT
+  ) {
+    throw new HttpError(
+      413,
+      `노트당 파일은 최대 ${NOTE_ATTACHMENT_COUNT_LIMIT}개까지 첨부할 수 있습니다.`,
+      "Note attachment count limit exceeded"
+    );
+  }
+
+  return noteAttachmentCounterWrite({
+    counterDocument,
+    counterName: noteAttachmentCounterName(projectId, noteId, databaseId),
+    noteId,
+    reservedCount: Math.min(reservedCount + 1, NOTE_ATTACHMENT_COUNT_LIMIT),
+    state: "open"
+  });
+}
+
 async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, extraWrites) {
   const quotaPath = `userAttachmentUsage/${uid}`;
   const policy = resolveFreeTierPolicy(process.env);
@@ -1239,7 +1312,116 @@ function attachmentBaseFields(payload, blobPath) {
   return fields;
 }
 
+async function noteAttachmentReservationWrites(
+  projectId,
+  accessToken,
+  uid,
+  payload,
+  attachmentWrite
+) {
+  const notePath = `notes/${payload.noteId}`;
+  const currentNote = await firestoreGetDocument(projectId, notePath, accessToken);
+
+  if (
+    !currentNote
+    || typeof currentNote.updateTime !== "string"
+    || !currentNote.updateTime
+    || !(await canUploadToNote(projectId, uid, currentNote, accessToken))
+  ) {
+    throw new HttpError(403, "첨부파일 업로드 권한이 없습니다.", "Cannot upload to current note");
+  }
+
+  const copyState = secureShareCopyState(currentNote);
+  const isSecureShareCopyReservation = Boolean(payload.secureShareCopyJobId);
+  let nextSecureShareCopyReservedCount = null;
+
+  if (isSecureShareCopyReservation) {
+    const expectedCount = nonNegativeIntegerField(
+      currentNote,
+      "secureShareCopyExpectedAttachmentCount"
+    );
+    const reservedCount = nonNegativeIntegerField(
+      currentNote,
+      "secureShareCopyReservedAttachmentCount"
+    );
+
+    if (
+      copyState !== "copying"
+      || valueString(currentNote, "ownerUid") !== uid
+      || valueString(currentNote, "secureShareCopyJobId") !== payload.secureShareCopyJobId
+      || secureShareCopyCleanupClaimed(currentNote)
+      || expectedCount === null
+      || reservedCount === null
+      || reservedCount >= expectedCount
+    ) {
+      throw new HttpError(
+        409,
+        "복사할 첨부파일 예약 한도를 초과했습니다.",
+        "Secure share copy reservation is no longer valid"
+      );
+    }
+
+    nextSecureShareCopyReservedCount = reservedCount + 1;
+  } else if (copyState === "copying") {
+    throw new HttpError(
+      409,
+      "첨부파일 복사 작업이 진행 중입니다. 잠시 후 다시 시도해주세요.",
+      "Ordinary attachment reservation is blocked during secure share copy"
+    );
+  }
+
+  // Touch existing note metadata in the reservation commit. Older finalizers
+  // already delete with a note updateTime precondition, so this parent CAS is
+  // the cross-version mutex during the staged rollout without adding a field
+  // that legacy client allowlists would reject.
+  const noteFields = { updatedBy: stringValue(uid) };
+  const noteFieldPaths = ["updatedBy"];
+  const noteUpdateTransforms = [{
+    fieldPath: "updatedAt",
+    setToServerValue: "REQUEST_TIME"
+  }];
+
+  if (nextSecureShareCopyReservedCount !== null) {
+    noteFields.secureShareCopyReservedAttachmentCount = integerValue(
+      nextSecureShareCopyReservedCount
+    );
+    noteFieldPaths.push("secureShareCopyReservedAttachmentCount");
+    noteUpdateTransforms.push({
+      fieldPath: "secureShareCopyUpdatedAt",
+      setToServerValue: "REQUEST_TIME"
+    });
+  }
+
+  const noteAttachmentCountWrite = await reserveNoteAttachmentCountWrite(
+    projectId,
+    accessToken,
+    payload.noteId
+  );
+  const noteReservationWrite = {
+    update: {
+      name: documentName(projectId, notePath),
+      fields: noteFields
+    },
+    updateMask: { fieldPaths: noteFieldPaths },
+    currentDocument: { updateTime: currentNote.updateTime },
+    ...(noteUpdateTransforms.length ? { updateTransforms: noteUpdateTransforms } : {})
+  };
+
+  return [attachmentWrite, noteAttachmentCountWrite, noteReservationWrite];
+}
+
 async function createNoteAttachmentReservation(projectId, accessToken, uid, payload, pathname) {
+  // Do not start a schema-v1 reservation that could outlive the stage-two
+  // alias switch and commit after the hard cap has been enabled. Existing
+  // upload-completion callbacks remain available while old writers drain.
+  if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE) {
+    throw new HttpError(
+      503,
+      "첨부파일 배포 전환 중입니다. 잠시 후 다시 시도해주세요.",
+      "Note attachment reservation rollout drain is active"
+    );
+  }
+
   if (payload.uploadedBy !== uid) {
     throw new HttpError(403, "첨부파일 업로드 권한이 없습니다.", "uploadedBy mismatch");
   }
@@ -1294,45 +1476,13 @@ async function createNoteAttachmentReservation(projectId, accessToken, uid, payl
     accessToken,
     uid,
     payload.encryptedSize,
-    initialCopyState === "copying"
-      ? async () => {
-          const currentNote = await firestoreGetDocument(projectId, `notes/${payload.noteId}`, accessToken);
-          const expectedCount = valueInteger(currentNote, "secureShareCopyExpectedAttachmentCount");
-          const reservedCount = valueInteger(currentNote, "secureShareCopyReservedAttachmentCount");
-
-          if (
-            !currentNote
-            || !(await canUploadToNote(projectId, uid, currentNote, accessToken))
-            || secureShareCopyState(currentNote) !== "copying"
-            || valueString(currentNote, "ownerUid") !== uid
-            || valueString(currentNote, "secureShareCopyJobId") !== payload.secureShareCopyJobId
-            || secureShareCopyCleanupClaimed(currentNote)
-            || expectedCount < 0
-            || reservedCount < 0
-            || reservedCount >= expectedCount
-          ) {
-            throw new HttpError(409, "복사할 첨부파일 예약 한도를 초과했습니다.", "Secure share copy reservation is no longer valid");
-          }
-
-          return [
-            attachmentWrite,
-            {
-              update: {
-                name: documentName(projectId, `notes/${payload.noteId}`),
-                fields: {
-                  secureShareCopyReservedAttachmentCount: integerValue(reservedCount + 1)
-                }
-              },
-              updateMask: { fieldPaths: ["secureShareCopyReservedAttachmentCount"] },
-              currentDocument: { updateTime: currentNote.updateTime },
-              updateTransforms: [{
-                fieldPath: "secureShareCopyUpdatedAt",
-                setToServerValue: "REQUEST_TIME"
-              }]
-            }
-          ];
-        }
-      : [attachmentWrite]
+    () => noteAttachmentReservationWrites(
+      projectId,
+      accessToken,
+      uid,
+      payload,
+      attachmentWrite
+    )
   );
 
   return {
@@ -2216,6 +2366,7 @@ function handleError(error, response) {
 export {
   canonicalNoteAttachmentMimeType,
   claimAttachmentDeletion,
+  noteAttachmentReservationWrites,
   publicShareAttachmentIsCurrent,
   reserveUserAttachmentBytes,
   safeAttachmentMimeType,

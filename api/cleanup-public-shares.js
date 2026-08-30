@@ -9,6 +9,11 @@ import {
   resolveFreeTierPolicy
 } from "./_free-tier-policy.js";
 import {
+  NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE,
+  noteAttachmentCounterName,
+  noteAttachmentCounterWrite
+} from "./_note-attachment-counter.js";
+import {
   canonicalVaultInventoryManifestEntryKey,
   canonicalVaultInventoryManifestEntryToken,
   canonicalVaultInventoryManifestShard,
@@ -4010,48 +4015,87 @@ function validPurgeQueue(queueDocument, noteDocument, projectId) {
 }
 
 async function finalizePurgedNote(queueDocument, noteId, accessToken, stats, projectId) {
+  // Stage one installs the shared reservation mutex while deliberately
+  // postponing parent deletion. Stage two enables this after old invocations
+  // have drained from the protected production alias.
+  if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE) {
+    return false;
+  }
+
   if (stats.documentDeletesAttempted + 2 > stats.maxDocumentDeletes) {
     return false;
   }
 
   const queueName = documentNameForPath(projectId, `notePurgeCleanupQueue/${noteId}`);
   const noteName = documentNameForPath(projectId, `notes/${noteId}`);
-  const [currentQueue, currentNote] = await Promise.all([
-    getDocumentByName(queueName, accessToken),
-    getDocumentByName(noteName, accessToken)
-  ]);
+  const counterName = noteAttachmentCounterName(projectId, noteId, databaseId);
 
-  if (!currentQueue || !currentNote || !validPurgeQueue(currentQueue, currentNote, projectId)) {
-    return false;
-  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const [currentQueue, currentNote, currentCounter] = await Promise.all([
+      getDocumentByName(queueName, accessToken),
+      getDocumentByName(noteName, accessToken),
+      getDocumentByName(counterName, accessToken)
+    ]);
 
-  try {
-    await firestoreRequest(firestoreCommitPathFromDocumentName(noteName), accessToken, {
-      method: "POST",
-      body: JSON.stringify({
-        writes: [
-          {
-            delete: noteName,
-            currentDocument: { updateTime: currentNote.updateTime }
-          },
-          {
-            delete: queueName,
-            currentDocument: { updateTime: currentQueue.updateTime }
-          }
-        ]
-      })
-    });
-  } catch (error) {
-    if ([400, 409].includes(error.statusCode)) {
+    if (
+      !currentQueue
+      || !currentNote
+      || !validPurgeQueue(currentQueue, currentNote, projectId)
+    ) {
       return false;
     }
-    throw error;
+
+    // This read must happen after the counter snapshot. A reservation that wins
+    // later also updates the counter, so the atomic counter precondition below
+    // conflicts and every retry repeats this child check before deleting parents.
+    if (
+      (await listChildDocuments(
+        noteName,
+        "attachments",
+        accessToken,
+        1,
+        ["noteId"]
+      )).length > 0
+    ) {
+      return false;
+    }
+
+    try {
+      await firestoreRequest(firestoreCommitPathFromDocumentName(noteName), accessToken, {
+        method: "POST",
+        body: JSON.stringify({
+          writes: [
+            noteAttachmentCounterWrite({
+              counterDocument: currentCounter,
+              counterName,
+              noteId,
+              reservedCount: 0,
+              state: "closed"
+            }),
+            {
+              delete: noteName,
+              currentDocument: { updateTime: currentNote.updateTime }
+            },
+            {
+              delete: queueName,
+              currentDocument: { updateTime: currentQueue.updateTime }
+            }
+          ]
+        })
+      });
+
+      stats.documentDeletesAttempted += 2;
+      stats.purgedNotesDeleted += 1;
+      stats.purgeQueuesDeleted += 1;
+      return true;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode)) {
+        throw error;
+      }
+    }
   }
 
-  stats.documentDeletesAttempted += 2;
-  stats.purgedNotesDeleted += 1;
-  stats.purgeQueuesDeleted += 1;
-  return true;
+  return false;
 }
 
 async function cleanupPurgedNote(queueDocument, accessToken, storageBucket, stats, projectId) {

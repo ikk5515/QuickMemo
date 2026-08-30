@@ -358,11 +358,50 @@ describe("managed user backend deletion", () => {
     expect(deleteManagedUserSource).toContain('["uid", "attachmentCount", "usedBytes"]');
   });
 
-  it("deletes note purge queues atomically with the owned note root", () => {
-    expect(deleteManagedUserSource).toContain("async function finalizeNoteTreeDeletion");
-    expect(deleteManagedUserSource).toContain('`notePurgeCleanupQueue/${noteId}`');
-    expect(deleteManagedUserSource).toContain("currentDocument: { updateTime: cleanupQueue.updateTime }");
-    expect(deleteManagedUserSource).toContain("stats.notePurgeQueuesDeleted += 1");
+  it("closes attachment reservations atomically with the owned note root and purge queue", () => {
+    const finalizeSource = deleteManagedUserSource.match(
+      /async function finalizeNoteTreeDeletion[\s\S]*?async function deleteNoteTreeByName/u
+    )?.[0] ?? "";
+    const counterReadIndex = finalizeSource.indexOf("NOTE_ATTACHMENT_COUNTER_FIELD_PATHS");
+    const attachmentRecheckIndex = finalizeSource.indexOf("const remainingAttachment");
+    const counterWriteIndex = finalizeSource.indexOf("noteAttachmentCounterWrite({");
+    const noteDeleteIndex = finalizeSource.indexOf("{ delete: noteName");
+    const commitIndex = finalizeSource.indexOf(
+      "await firestoreCommitWrites(noteName, writes, accessToken)"
+    );
+
+    expect(deleteManagedUserSource).toContain('from "./_note-attachment-counter.js"');
+    expect(deleteManagedUserSource).toContain("NOTE_ATTACHMENT_COUNTER_FIELD_PATHS");
+    expect(finalizeSource).toContain('`notePurgeCleanupQueue/${noteId}`');
+    expect(finalizeSource).toContain("noteAttachmentCounterName(projectId, noteId)");
+    expect(finalizeSource).toContain('listChildDocuments(\n      noteName,\n      "attachments",');
+    expect(finalizeSource).toContain("counterDocument: attachmentCounter");
+    expect(finalizeSource).toContain("reservedCount: 0");
+    expect(finalizeSource).toContain('state: "closed"');
+    expect(finalizeSource).toContain("currentDocument: { updateTime: cleanupQueue.updateTime }");
+    expect(finalizeSource).toContain("noteAttachmentCounterState(attachmentCounter, noteId) === \"closed\"");
+    expect(finalizeSource).toContain("Concurrent note attachment reservation requires a fresh cleanup pass");
+    expect(finalizeSource).toContain("Concurrent note finalization requires a fresh cleanup pass");
+    expect(finalizeSource).toContain("stats.notePurgeQueuesDeleted += 1");
+    expect(counterReadIndex).toBeGreaterThan(-1);
+    expect(attachmentRecheckIndex).toBeGreaterThan(counterReadIndex);
+    expect(counterWriteIndex).toBeGreaterThan(attachmentRecheckIndex);
+    expect(noteDeleteIndex).toBeGreaterThan(counterWriteIndex);
+    expect(commitIndex).toBeGreaterThan(noteDeleteIndex);
+  });
+
+  it("pauses managed-user mutation during the stage-one attachment drain", () => {
+    const deleteSource = deleteManagedUserSource.match(
+      /async function deleteManagedUser\([\s\S]*?const targetProfile/u
+    )?.[0] ?? "";
+    const gateIndex = deleteSource.indexOf("if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)");
+    const targetReadIndex = deleteSource.indexOf("const targetProfile");
+
+    expect(deleteManagedUserSource).toContain("NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE");
+    expect(deleteSource).toContain('error: "attachment_rollout_in_progress"');
+    expect(deleteSource).toContain("retryable: true");
+    expect(gateIndex).toBeGreaterThan(-1);
+    expect(targetReadIndex).toBeGreaterThan(gateIndex);
   });
 
   it("removes deleted users from shared-note and share-target references", () => {
