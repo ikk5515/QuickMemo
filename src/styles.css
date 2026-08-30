@@ -3150,6 +3150,10 @@ textarea {
   justify-content: space-between;
 }
 
+.attachment-upload-cancel {
+  justify-self: end;
+}
+
 .editor-footer {
   align-items: center;
   border-top: 1px solid var(--line);

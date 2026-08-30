@@ -144,8 +144,10 @@ export interface DecryptedNote extends NoteDocument {
 export interface NoteAttachmentDocument {
   noteId: string;
   version: 1 | 2;
+  privacyVersion?: 1;
   algorithm: "AES-GCM" | "AES-GCM-CHUNKED";
   fileName: string;
+  encryptedFileName?: EncryptedPayload;
   extension: string;
   mimeType: string;
   originalSize: number;

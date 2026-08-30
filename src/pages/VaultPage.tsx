@@ -8719,19 +8719,32 @@ function UnlockedVaultPage({
   }
 
   async function exportObsidianZip() {
+    if (!profile || !privateKey) {
+      setError("암호화 잠금을 해제한 뒤 첨부파일을 포함한 ZIP을 내보낼 수 있습니다.");
+      return;
+    }
     const exportableNotes = notes.filter((note) => note.contentFormat !== "legacy-html-v1");
-    if (!exportableNotes.length) {
-      setError("내보낼 Markdown, Canvas 또는 Base 항목이 없습니다.");
+    if (!notes.length) {
+      setError("내보낼 노트나 첨부파일이 없습니다.");
       return;
     }
     setError(null);
-    setStatus("Obsidian 호환 ZIP을 만드는 중입니다…");
+    setStatus("복호화된 노트와 첨부파일을 포함한 Obsidian 호환 ZIP을 만드는 중입니다…");
     exportAbortRef.current?.abort();
     const abortController = new AbortController();
     exportAbortRef.current = abortController;
     try {
-      const { exportObsidianVaultZipInWorker } = await import("../features/vault/interop");
-      const result = await exportObsidianVaultZipInWorker(exportableNotes.map((note) => {
+      const [
+        { exportObsidianVaultZipInWorker },
+        {
+          collectVaultAttachmentBackup,
+          vaultAttachmentBackupByteBudget
+        }
+      ] = await Promise.all([
+        import("../features/vault/interop"),
+        import("../features/vault/vaultAttachmentBackup")
+      ]);
+      const baseSources = exportableNotes.map((note) => {
         const draft = draftsRef.current[note.id];
         const currentNote = draft
           ? { ...note, title: draft.title, folderId: draft.folderId }
@@ -8752,22 +8765,64 @@ function UnlockedVaultPage({
               : "base" as const,
           content: draft?.body ?? note.body
         };
-      }), {
+      });
+      const currentPaths = new Map(notes.map((note) => {
+        const draft = draftsRef.current[note.id];
+        const currentNote = draft
+          ? { ...note, title: draft.title, folderId: draft.folderId }
+          : note;
+        return [note.id, vaultEntryPath(currentNote, folderPaths)] as const;
+      }));
+      const attachmentBackup = await collectVaultAttachmentBackup(
+        notes.map((note) => ({
+          id: note.id,
+          path: currentPaths.get(note.id) ?? "",
+          wrappedKey: note.wrappedKeys[profile.uid]
+        })).filter((note) => Boolean(note.path)),
+        privateKey,
+        {
+          byteBudget: vaultAttachmentBackupByteBudget(baseSources),
+          occupiedPaths: baseSources.map((source) => source.path),
+          signal: abortController.signal
+        }
+      );
+      abortController.signal.throwIfAborted();
+      const result = await exportObsidianVaultZipInWorker([
+        ...baseSources,
+        ...attachmentBackup.sources,
+        attachmentBackup.manifestSource
+      ], {
         folders: [...folderPaths.values()],
         duplicatePolicy: "error"
-      }, { signal: abortController.signal });
+      }, { signal: abortController.signal }).finally(() => {
+        attachmentBackup.sources.forEach((source) => {
+          if (source.content instanceof Uint8Array) source.content.fill(0);
+        });
+      });
       if (abortController.signal.aborted) {
         throw new DOMException("Aborted", "AbortError");
       }
-      const bytes = Uint8Array.from(result.bytes);
+      const archiveBuffer = result.bytes.buffer instanceof ArrayBuffer
+        && result.bytes.byteOffset === 0
+        && result.bytes.byteLength === result.bytes.buffer.byteLength
+        ? result.bytes.buffer
+        : Uint8Array.from(result.bytes).buffer;
       const now = new Date();
       const date = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
       downloadBlob(
-        new Blob([bytes.buffer], { type: "application/zip" }),
+        new Blob([archiveBuffer], { type: "application/zip" }),
         `QuickMemo-Vault-${date}.zip`
       );
+      result.bytes.fill(0);
+      result.manifest.entries.forEach((entry) => entry.bytes.fill(0));
       const legacyCount = notes.length - exportableNotes.length;
-      setStatus(`${result.manifest.entries.length}개 항목을 내보냈습니다.${legacyCount ? ` 기존 HTML ${legacyCount}개는 제외했습니다.` : ""}`);
+      const attachmentSummary = ` 첨부파일 ${attachmentBackup.included.length}개를 포함했습니다.`;
+      const missingSummary = attachmentBackup.missing.length
+        ? ` 제외된 첨부파일 ${attachmentBackup.missing.length}개는 ZIP의 QuickMemo-Attachments-Manifest.json에 기록했습니다.`
+        : "";
+      setStatus(
+        `${result.manifest.entries.length}개 항목을 내보냈습니다.${attachmentSummary}${missingSummary}${legacyCount ? ` 기존 HTML ${legacyCount}개는 제외했습니다.` : ""}`
+      );
     } catch (caught) {
       if (!(caught instanceof Error && caught.name === "AbortError")) {
         setError(caught instanceof Error ? `ZIP 내보내기 실패: ${caught.message}` : "ZIP을 내보내지 못했습니다.");
@@ -10803,7 +10858,7 @@ function UnlockedVaultPage({
           <button aria-label="새 QuickMemo Drawing" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown", "새 드로잉", createDrawingSource("새 드로잉"))} title="새 QuickMemo Drawing" type="button"><PenTool size={18} /></button>
           <button aria-label="새 Kanban" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown", "새 Kanban", createKanbanSource("새 Kanban"))} title="새 Kanban" type="button"><Columns3 size={18} /></button>
           <button aria-label="Obsidian ZIP 가져오기" disabled={!vaultNameWritesReady || vaultImportBusy || pathRewriteBusy || entryCreationContentLocked} onClick={() => importInputRef.current?.click()} title="Obsidian ZIP 가져오기" type="button"><Upload size={18} /></button>
-          <button aria-label="Obsidian ZIP 내보내기" onClick={() => void exportObsidianZip()} title="Obsidian ZIP 내보내기" type="button"><Download size={18} /></button>
+          <button aria-label="노트와 첨부파일을 복호화해 Obsidian ZIP 내보내기" onClick={() => void exportObsidianZip()} title="노트와 첨부파일을 복호화해 Obsidian ZIP 내보내기" type="button"><Download size={18} /></button>
           <button aria-label="Vault 휴지통" onClick={() => setTrashOpen(true)} ref={trashButtonRef} title="Vault 휴지통" type="button"><Trash2 size={18} /></button>
           <span className="vault-ribbon-spacer" />
           <button aria-label="자료실" onClick={() => void navigateAfterSaving("/library")} title="자료실" type="button"><LibraryBig size={18} /></button>

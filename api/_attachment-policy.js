@@ -18,6 +18,10 @@ export function publicShareGenericAttachmentBaseName(extension) {
   return `shared-${extension}-attachment`;
 }
 
+export function noteGenericAttachmentBaseName(extension) {
+  return `note-${extension}-attachment`;
+}
+
 export function isValidEncryptedFileNamePayload(value) {
   if (
     !value

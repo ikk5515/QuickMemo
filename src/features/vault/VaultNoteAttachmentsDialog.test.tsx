@@ -18,6 +18,7 @@ const attachmentCryptoMocks = vi.hoisted(() => ({
 }));
 
 const cryptoMocks = vi.hoisted(() => ({
+  encryptText: vi.fn(),
   unwrapNoteKey: vi.fn()
 }));
 
@@ -40,6 +41,7 @@ vi.mock("../../lib/attachmentCrypto", () => ({
 }));
 
 vi.mock("../../lib/crypto", () => ({
+  encryptText: cryptoMocks.encryptText,
   unwrapNoteKey: cryptoMocks.unwrapNoteKey
 }));
 
@@ -152,6 +154,12 @@ beforeEach(() => {
   attachmentCryptoMocks.decryptAttachmentToBlob.mockReset();
   attachmentCryptoMocks.encryptAttachmentBlob.mockReset();
   cryptoMocks.unwrapNoteKey.mockReset();
+  cryptoMocks.encryptText.mockReset().mockResolvedValue({
+    algorithm: "AES-GCM",
+    cipherText: "encrypted-name",
+    iv: "name-iv",
+    version: 1
+  });
   downloadBlobMock.mockReset();
   useModalFocusMock.mockReset();
 });
@@ -224,12 +232,14 @@ describe("VaultNoteAttachmentsDialog", () => {
     );
     expect(noteServiceMocks.createNoteAttachment).toHaveBeenCalledWith(expect.objectContaining({
       encryptedBlob,
+      encryptedFileName: expect.objectContaining({ cipherText: "encrypted-name" }),
       encryption,
       extension: "txt",
-      fileName: "memo",
+      fileName: "note-txt-attachment",
       mimeType: "text/plain",
       noteId: "note-a1",
       originalSize: 4,
+      privacyVersion: 1,
       uploadedBy: "user-a"
     }));
     expect(attachmentCryptoMocks.encryptAttachmentBlob.mock.invocationCallOrder[0])

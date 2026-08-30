@@ -584,10 +584,12 @@ export function isLegacyHtmlNoteDocument(
 
 export interface SaveNoteAttachmentInput {
   noteId: string;
+  encryptedFileName: EncryptedPayload;
   fileName: string;
   extension: string;
   mimeType: string;
   originalSize: number;
+  privacyVersion: 1;
   encryptedBlob: Blob;
   encryption: AttachmentEncryptionMetadata;
   uploadedBy: string;
@@ -2108,9 +2110,11 @@ export async function createNoteAttachment(input: SaveNoteAttachmentInput) {
     attachmentId: attachmentRef.id,
     noteId: input.noteId,
     fileName: input.fileName,
+    encryptedFileName: input.encryptedFileName,
     extension: input.extension,
     mimeType: input.mimeType,
     originalSize: input.originalSize,
+    privacyVersion: input.privacyVersion,
     encryptedBlob: input.encryptedBlob,
     encryption: input.encryption,
     onUploadProgress: input.onUploadProgress,

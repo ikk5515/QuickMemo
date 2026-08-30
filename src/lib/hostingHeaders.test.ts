@@ -85,8 +85,11 @@ describe("hosting security headers", () => {
     const vercelCompactShareHeaders = headersByKey(
       vercelConfig.headers?.find((rule) => rule.source === "/s/(.*)")?.headers ?? []
     );
-    const vercelApiHeaders = headersByKey(
+    const vercelShareApiHeaders = headersByKey(
       vercelConfig.headers?.find((rule) => rule.source === "/api/public-shares-v2")?.headers ?? []
+    );
+    const vercelAttachmentApiHeaders = headersByKey(
+      vercelConfig.headers?.find((rule) => rule.source === "/api/blob-attachments")?.headers ?? []
     );
 
     for (const headers of [
@@ -94,7 +97,8 @@ describe("hosting security headers", () => {
       firebaseCompactShareHeaders,
       vercelShareHeaders,
       vercelCompactShareHeaders,
-      vercelApiHeaders
+      vercelShareApiHeaders,
+      vercelAttachmentApiHeaders
     ]) {
       expect(headers.get("cache-control")).toContain("no-store");
       expect(headers.get("referrer-policy")).toBe("no-referrer");

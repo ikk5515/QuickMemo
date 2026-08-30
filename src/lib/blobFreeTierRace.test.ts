@@ -14,6 +14,7 @@ type FirestoreValue = {
   arrayValue?: { values?: Array<{ stringValue?: string }> };
   booleanValue?: boolean;
   integerValue?: string;
+  mapValue?: { fields?: Record<string, FirestoreValue> };
   stringValue?: string;
 };
 
@@ -26,6 +27,7 @@ type FirestoreDocument = {
 const projectId = "blob-free-tier-race";
 const root = `projects/${projectId}/databases/(default)/documents`;
 const userUsageName = `${root}/userAttachmentUsage/user-a`;
+const userProfileName = `${root}/users/user-a`;
 const globalUsageName = `${root}/systemUsage/blobAttachmentsV1`;
 const noteName = `${root}/notes/note-a`;
 const noteCounterName = `${root}/notes/note-a/serverCounters/attachmentsV1`;
@@ -65,6 +67,7 @@ class FakeFirestore {
   readonly reads = new Map<string, number>();
   private readonly forcedCommitConflicts = new Set<string>();
   private readonly forcedCommitDeletions = new Set<string>();
+  private readonly forcedCommitReplacements = new Map<string, Record<string, FirestoreValue>>();
   private sequence = 0;
 
   add(path: string, fields: Record<string, FirestoreValue>) {
@@ -96,6 +99,10 @@ class FakeFirestore {
     this.forcedCommitDeletions.add(documentName);
   }
 
+  replaceBeforeNextCommit(documentName: string, fields: Record<string, FirestoreValue>) {
+    this.forcedCommitReplacements.set(documentName, fields);
+  }
+
   async fetch(input: string | URL | Request, init?: RequestInit) {
     const url = new URL(String(input));
     const resource = decodeURIComponent(url.pathname.replace(/^\/v1\//u, ""));
@@ -106,11 +113,12 @@ class FakeFirestore {
           currentDocument?: { exists?: boolean; updateTime?: string };
           delete?: string;
           update?: { fields?: Record<string, FirestoreValue>; name?: string };
+          verify?: string;
         }>;
       };
       const writes = body.writes ?? [];
       const forcedConflictName = writes
-        .map((write) => write.delete ?? write.update?.name ?? "")
+        .map((write) => write.delete ?? write.update?.name ?? write.verify ?? "")
         .find((name) => this.forcedCommitConflicts.has(name));
 
       if (forcedConflictName) {
@@ -121,16 +129,29 @@ class FakeFirestore {
         }
       }
       const forcedDeletionName = writes
-        .map((write) => write.delete ?? write.update?.name ?? "")
+        .map((write) => write.delete ?? write.update?.name ?? write.verify ?? "")
         .find((name) => this.forcedCommitDeletions.has(name));
 
       if (forcedDeletionName) {
         this.forcedCommitDeletions.delete(forcedDeletionName);
         this.documents.delete(forcedDeletionName);
       }
+      const forcedReplacementName = writes
+        .map((write) => write.delete ?? write.update?.name ?? write.verify ?? "")
+        .find((name) => this.forcedCommitReplacements.has(name));
+
+      if (forcedReplacementName) {
+        const current = this.documents.get(forcedReplacementName);
+        const fields = this.forcedCommitReplacements.get(forcedReplacementName);
+        this.forcedCommitReplacements.delete(forcedReplacementName);
+        if (current && fields) {
+          current.fields = structuredClone(fields);
+          current.updateTime = this.nextUpdateTime();
+        }
+      }
 
       const valid = writes.every((write) => {
-        const name = write.delete ?? write.update?.name ?? "";
+        const name = write.delete ?? write.update?.name ?? write.verify ?? "";
         const current = this.documents.get(name);
         if (write.currentDocument?.exists === false) return !current;
         if (write.currentDocument?.updateTime) {
@@ -142,9 +163,12 @@ class FakeFirestore {
         return this.json({ error: { status: "ABORTED" } }, 409);
       }
 
-      this.commits.push(writes.map((write) => write.delete ?? write.update?.name ?? ""));
+      this.commits.push(writes.map((write) => write.delete ?? write.update?.name ?? write.verify ?? ""));
 
       for (const write of writes) {
+        if (write.verify) {
+          continue;
+        }
         if (write.delete) {
           this.documents.delete(write.delete);
           continue;
@@ -422,6 +446,36 @@ describe("per-note Blob attachment reservation race", () => {
     expect(stringField(note, "updatedBy")).toBe("user-a");
     expect(integerField(note, "secureShareCopyReservedAttachmentCount")).toBe(1);
     expect(firestore.commits[0]?.filter((name) => name === noteName)).toHaveLength(1);
+  });
+
+  it.each([
+    ["inactive", { isActive: { booleanValue: false } }],
+    ["notes feature revoked", {
+      isActive: { booleanValue: true },
+      featureAccess: {
+        mapValue: {
+          fields: {
+            notes: { booleanValue: false },
+            library: { booleanValue: true },
+            schedule: { booleanValue: true }
+          }
+        }
+      }
+    }]
+  ])("rejects a reservation when the profile becomes %s before commit", async (_label, replacement) => {
+    const firestore = new FakeFirestore();
+    seedActiveNoteContext(firestore);
+    firestore.replaceBeforeNextCommit(userProfileName, replacement);
+    vi.stubGlobal("fetch", vi.fn((input, init) => firestore.fetch(input, init)));
+
+    await expect(reserveCurrentNoteAttachment("candidate-profile-revoked"))
+      .rejects.toMatchObject({ statusCode: 403 });
+
+    expect(firestore.commits).toHaveLength(0);
+    expect(firestore.documents.has(
+      `${root}/notes/note-a/attachments/candidate-profile-revoked`
+    )).toBe(false);
+    expect(integerField(firestore.documents.get(userUsageName), "attachmentCount")).toBe(0);
   });
 
   it("does not create an orphan attachment when the parent is deleted before commit", async () => {

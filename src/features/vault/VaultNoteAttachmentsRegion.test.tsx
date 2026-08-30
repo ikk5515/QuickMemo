@@ -6,18 +6,30 @@ import type { DecryptedVaultNote } from "./vaultData";
 
 const regionMocks = vi.hoisted(() => ({
   accessAllowed: true,
-  onOpenLibrary: vi.fn(),
-  useAttachments: vi.fn(() => ({
+  emptyAttachmentState: {
     attachments: [],
     error: "",
     loading: false,
     reservedCount: 0
-  }))
+  },
+  onOpenLibrary: vi.fn(),
+  useAttachments: vi.fn()
+}));
+const cryptoMocks = vi.hoisted(() => ({
+  unwrapNoteKey: vi.fn()
+}));
+const fileNameMocks = vi.hoisted(() => ({
+  decryptPrivateNoteAttachmentNames: vi.fn(),
+  migrateLegacyPrivateNoteAttachmentNames: vi.fn()
 }));
 
 vi.mock("./useVaultNoteAttachments", () => ({
   useVaultNoteAttachments: regionMocks.useAttachments
 }));
+
+vi.mock("../../lib/crypto", () => cryptoMocks);
+
+vi.mock("./noteAttachmentFileName", () => fileNameMocks);
 
 vi.mock("./vaultNoteAttachmentAccess", () => ({
   vaultNoteAttachmentAccess: () => regionMocks.accessAllowed
@@ -82,7 +94,14 @@ const note: DecryptedVaultNote = {
 beforeEach(() => {
   regionMocks.accessAllowed = true;
   regionMocks.onOpenLibrary.mockReset();
-  regionMocks.useAttachments.mockClear();
+  regionMocks.useAttachments.mockReset();
+  regionMocks.useAttachments.mockReturnValue(regionMocks.emptyAttachmentState);
+  cryptoMocks.unwrapNoteKey.mockReset();
+  cryptoMocks.unwrapNoteKey.mockResolvedValue({} as CryptoKey);
+  fileNameMocks.decryptPrivateNoteAttachmentNames.mockReset();
+  fileNameMocks.decryptPrivateNoteAttachmentNames.mockImplementation(async (attachments) => attachments);
+  fileNameMocks.migrateLegacyPrivateNoteAttachmentNames.mockReset();
+  fileNameMocks.migrateLegacyPrivateNoteAttachmentNames.mockResolvedValue(undefined);
 });
 
 describe("VaultNoteAttachmentsRegion", () => {
@@ -158,5 +177,56 @@ describe("VaultNoteAttachmentsRegion", () => {
       />
     );
     expect(screen.queryByRole("dialog", { name: "첨부파일 관리" })).not.toBeInTheDocument();
+  });
+
+  it("decrypts private filenames and starts owner-only legacy migration", async () => {
+    const legacyAttachment = {
+      algorithm: "AES-GCM-CHUNKED",
+      chunkCount: 1,
+      chunkIvs: [],
+      chunkSize: 4 * 1024 * 1024,
+      extension: "pdf",
+      fileName: "legacy-name",
+      id: "attachment-a",
+      mimeType: "application/pdf",
+      noteId: "note-a",
+      originalSize: 4,
+      uploadedBy: "user-a",
+      version: 2
+    };
+    const attachmentState = {
+      attachments: [legacyAttachment],
+      error: "",
+      loading: false,
+      reservedCount: 1
+    };
+    const noteKey = {} as CryptoKey;
+    regionMocks.useAttachments.mockReturnValue(attachmentState as never);
+    cryptoMocks.unwrapNoteKey.mockResolvedValue(noteKey);
+    fileNameMocks.decryptPrivateNoteAttachmentNames.mockResolvedValue([{
+      ...legacyAttachment,
+      fileName: "복호화된 파일"
+    }]);
+
+    render(
+      <VaultNoteAttachmentsRegion
+        disabled={false}
+        note={note}
+        onOpenLibrary={regionMocks.onOpenLibrary}
+        privateKey={{} as CryptoKey}
+        profile={profile}
+      />
+    );
+
+    expect(await screen.findByText("복호화된 파일.pdf")).toBeInTheDocument();
+    expect(fileNameMocks.decryptPrivateNoteAttachmentNames).toHaveBeenCalledWith(
+      attachmentState.attachments,
+      noteKey
+    );
+    expect(fileNameMocks.migrateLegacyPrivateNoteAttachmentNames).toHaveBeenCalledWith(
+      attachmentState.attachments,
+      noteKey,
+      expect.any(AbortSignal)
+    );
   });
 });

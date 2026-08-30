@@ -1,14 +1,18 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   encryptedAttachmentChunkSizeBytes,
-  encryptedAttachmentOverheadBytes
+  encryptedAttachmentOverheadBytes,
+  maxAttachmentPreviewBytes
 } from "./attachments";
 import {
   chunkedAttachmentAlgorithm,
   chunkedAttachmentVersion,
+  attachmentCryptoMobileRuntime,
+  attachmentCryptoRuntimeFileSizeLimit,
   decryptAttachmentToBlob,
   decryptAttachmentToBytes,
   encryptAttachmentBlob,
+  maxConstrainedAttachmentFileBytes,
   reencryptAttachmentBlob
 } from "./attachmentCrypto";
 import { encryptBytes, generateNoteKey } from "./crypto";
@@ -41,6 +45,10 @@ async function blobBytes(blob: Blob) {
     })
   );
 }
+
+afterEach(() => {
+  Reflect.deleteProperty(globalThis, "scheduler");
+});
 
 function streamedResponse(
   bytes: Uint8Array,
@@ -75,6 +83,35 @@ function streamedResponse(
 }
 
 describe("attachment chunked encryption", () => {
+  it("uses a conservative cap on mobile, low-memory, and non-streaming runtimes", () => {
+    expect(attachmentCryptoRuntimeFileSizeLimit({ streamingBlobAssembly: true })).toBeGreaterThan(
+      maxConstrainedAttachmentFileBytes
+    );
+    expect(attachmentCryptoRuntimeFileSizeLimit({ mobile: true, streamingBlobAssembly: true }))
+      .toBe(maxConstrainedAttachmentFileBytes);
+    expect(attachmentCryptoRuntimeFileSizeLimit({ deviceMemory: 4, streamingBlobAssembly: true }))
+      .toBe(maxConstrainedAttachmentFileBytes);
+    expect(attachmentCryptoRuntimeFileSizeLimit({ deviceMemory: 8, streamingBlobAssembly: false }))
+      .toBe(maxConstrainedAttachmentFileBytes);
+  });
+
+  it("recognizes Safari iPhone and touch-enabled iPad runtimes without userAgentData", () => {
+    expect(attachmentCryptoMobileRuntime({
+      platform: "iPhone",
+      userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) Mobile/15E148"
+    })).toBe(true);
+    expect(attachmentCryptoMobileRuntime({
+      maxTouchPoints: 5,
+      platform: "MacIntel",
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15"
+    })).toBe(true);
+    expect(attachmentCryptoMobileRuntime({
+      maxTouchPoints: 0,
+      platform: "MacIntel",
+      userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15"
+    })).toBe(false);
+  });
+
   it("keeps legacy v1 single AES-GCM attachment payloads decryptable", async () => {
     const noteKey = await generateNoteKey();
     const plainBytes = testBytes(4097);
@@ -95,7 +132,25 @@ describe("attachment chunked encryption", () => {
     ).resolves.toEqual(plainBytes);
   });
 
+  it("refuses contiguous byte materialization above the preview memory cap", async () => {
+    const noteKey = await generateNoteKey();
+    await expect(decryptAttachmentToBytes(
+      {
+        algorithm: "AES-GCM",
+        originalSize: maxAttachmentPreviewBytes + 1,
+        version: 1
+      },
+      noteKey,
+      { bytes: new Uint8Array() }
+    )).rejects.toThrow("25MB 이하");
+  });
+
   it("encrypts new attachments as chunked AES-GCM and decrypts them from a response stream", async () => {
+    const schedulerYield = vi.fn(async () => undefined);
+    Object.defineProperty(globalThis, "scheduler", {
+      configurable: true,
+      value: { yield: schedulerYield }
+    });
     const noteKey = await generateNoteKey();
     const plainBytes = testBytes(encryptedAttachmentChunkSizeBytes + 23);
     const encrypted = await encryptAttachmentBlob(new Blob([plainBytes]), noteKey);
@@ -122,6 +177,7 @@ describe("attachment chunked encryption", () => {
     );
 
     await expect(blobBytes(decryptedBlob)).resolves.toEqual(plainBytes);
+    expect(schedulerYield).toHaveBeenCalled();
   }, 30_000);
 
   it("stops chunked attachment encryption when its abort signal is cancelled", async () => {

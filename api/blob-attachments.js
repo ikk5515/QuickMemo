@@ -2,6 +2,7 @@
 
 import { del, get, head } from "@vercel/blob";
 import { handleUpload } from "@vercel/blob/client";
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
@@ -10,6 +11,7 @@ import {
   canReadNoteAttachmentPolicy,
   canUploadNoteAttachmentPolicy,
   isValidEncryptedFileNamePayload,
+  noteGenericAttachmentBaseName,
   publicAttachmentSourceAvailablePolicy,
   publicShareGenericAttachmentBaseName,
   quotaReleaseAfterAttachmentClaim,
@@ -40,6 +42,10 @@ import {
   noteAttachmentCounterState,
   noteAttachmentCounterWrite
 } from "./_note-attachment-counter.js";
+import {
+  clientNetworkDigest,
+  rateLimitBucketDigest
+} from "./_secure-share-common.js";
 
 const firestoreBaseUrl = "https://firestore.googleapis.com/v1";
 const identityToolkitBaseUrl = "https://identitytoolkit.googleapis.com/v1";
@@ -63,7 +69,22 @@ const oauthRequestTimeoutMs = 8_000;
 const accessTokenRefreshSkewMs = 60_000;
 const tokenTtlMs = 10 * 60 * 1000;
 const pendingDeletionGraceMs = tokenTtlMs + 60 * 1000;
-const reservationTtlMs = 2 * 60 * 60 * 1000;
+const reservationGraceMs = 60 * 1000;
+const reservationTtlMs = tokenTtlMs + reservationGraceMs;
+const userPendingAttachmentCountLimit = 20;
+const userPendingAttachmentBytesLimit = 300 * 1024 * 1024;
+const opportunisticReservationCleanupLimit = 3;
+const opportunisticReservationScanLimit = 20;
+const attachmentRateLimitTransactionMaximumAttempts = 3;
+const attachmentReservationBurstLimit = 60;
+const attachmentReservationBurstWindowSeconds = 10 * 60;
+const attachmentMutationLimit = 120;
+const attachmentMutationWindowSeconds = 10 * 60;
+const attachmentPublicDownloadUnitBytes = 10 * 1024 * 1024;
+const attachmentPublicDownloadUnitLimit = 60;
+const attachmentAuthenticatedDownloadUnitLimit = 180;
+const attachmentDownloadWindowSeconds = 10 * 60;
+const blobAttachmentAbuseProtectionProductionDefault = true;
 const secureShareLiveContentSyncServerProductionDefault = true;
 const secureShareCopyCleanupClaimIdField = "secureShareCopyCleanupClaimId";
 const secureShareCopyCleanupClaimedAtField = "secureShareCopyCleanupClaimedAt";
@@ -113,10 +134,13 @@ let cachedAccessToken = null;
 let pendingAccessTokenRequest = null;
 
 class HttpError extends Error {
-  constructor(statusCode, publicMessage, internalMessage = publicMessage) {
+  constructor(statusCode, publicMessage, internalMessage = publicMessage, options = {}) {
     super(internalMessage);
     this.statusCode = statusCode;
     this.publicMessage = publicMessage;
+    this.retryAfter = Number.isSafeInteger(options.retryAfter) && options.retryAfter > 0
+      ? options.retryAfter
+      : undefined;
   }
 }
 
@@ -125,11 +149,48 @@ function envValue(name) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-function jsonResponse(response, statusCode, body) {
+function applyAttachmentResponseHeaders(response) {
+  response.setHeader("cache-control", "no-store, max-age=0");
+  response.setHeader("pragma", "no-cache");
+  response.setHeader("expires", "0");
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("referrer-policy", "no-referrer");
+  response.setHeader("cross-origin-resource-policy", "same-origin");
+  response.setHeader("x-robots-tag", "noindex, nofollow, noarchive");
+  response.setHeader("content-security-policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+}
+
+function jsonResponse(response, statusCode, body, options = {}) {
   response.statusCode = statusCode;
+  applyAttachmentResponseHeaders(response);
   response.setHeader("content-type", "application/json; charset=utf-8");
-  response.setHeader("cache-control", "no-store");
+  if (Number.isSafeInteger(options.retryAfter) && options.retryAfter > 0) {
+    response.setHeader("retry-after", String(options.retryAfter));
+  }
   response.end(JSON.stringify(body));
+}
+
+function requestId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Buffer.from(bytes).toString("hex");
+}
+
+function durationBucket(milliseconds) {
+  if (milliseconds < 100) return "lt_100ms";
+  if (milliseconds < 500) return "lt_500ms";
+  if (milliseconds < 2_000) return "lt_2s";
+  if (milliseconds < 10_000) return "lt_10s";
+  return "gte_10s";
+}
+
+function attachmentSizeBucket(bytes) {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0) return "unknown";
+  if (bytes <= 1024 * 1024) return "lte_1mb";
+  if (bytes <= 10 * 1024 * 1024) return "lte_10mb";
+  if (bytes <= 50 * 1024 * 1024) return "lte_50mb";
+  if (bytes <= 100 * 1024 * 1024) return "lte_100mb";
+  return "lte_150mb";
 }
 
 function errorNumberField(error, fieldName) {
@@ -426,6 +487,23 @@ async function firestoreListDocuments(projectId, collectionPath, accessToken, pa
   );
 }
 
+async function firestoreListDocumentsWithFields(
+  projectId,
+  collectionPath,
+  accessToken,
+  pageSize,
+  fieldPaths = []
+) {
+  const query = new URLSearchParams({ pageSize: String(pageSize) });
+  for (const fieldPath of fieldPaths) {
+    query.append("mask.fieldPaths", fieldPath);
+  }
+  return firestoreRequest(
+    `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents/${encodeDocumentPath(collectionPath)}?${query.toString()}`,
+    accessToken
+  );
+}
+
 async function firestoreCommit(projectId, accessToken, writes) {
   return firestoreRequest(
     `projects/${encodeURIComponent(projectId)}/databases/${encodeURIComponent(databaseId)}/documents:commit`,
@@ -498,6 +576,132 @@ function valueTimestampMillis(document, fieldName) {
   return typeof value === "string" ? Date.parse(value) : Number.NaN;
 }
 
+function relativeDocumentPath(document) {
+  const marker = "/documents/";
+  const name = typeof document?.name === "string" ? document.name : "";
+  const markerIndex = name.indexOf(marker);
+  return markerIndex >= 0 ? name.slice(markerIndex + marker.length) : "";
+}
+
+function attachmentReservationIndexId(attachmentPath) {
+  return createHash("sha256")
+    .update("quickmemo/attachment-reservation-index/v1\0", "utf8")
+    .update(attachmentPath, "utf8")
+    .digest("base64url");
+}
+
+function attachmentReservationIndexPath(uid, attachmentPath) {
+  return `userAttachmentReservations/${uid}/pendingAttachmentReservations/${attachmentReservationIndexId(attachmentPath)}`;
+}
+
+export function attachmentRateLimitDecision({
+  cost,
+  count,
+  limit,
+  nowMilliseconds,
+  windowSeconds
+}) {
+  if (
+    !Number.isSafeInteger(cost)
+    || cost < 1
+    || !Number.isSafeInteger(count)
+    || count < 0
+    || !Number.isSafeInteger(limit)
+    || limit < 1
+    || !Number.isSafeInteger(nowMilliseconds)
+    || nowMilliseconds < 0
+    || !Number.isSafeInteger(windowSeconds)
+    || windowSeconds < 1
+  ) {
+    throw new Error("Invalid attachment rate limit state");
+  }
+  const windowStartSeconds = Math.floor(nowMilliseconds / 1000 / windowSeconds) * windowSeconds;
+  const retryAfter = Math.max(
+    1,
+    windowStartSeconds + windowSeconds - Math.floor(nowMilliseconds / 1000)
+  );
+  return {
+    allow: count + cost <= limit,
+    nextCount: count + cost,
+    retryAfter,
+    windowStartSeconds
+  };
+}
+
+async function consumeAttachmentRateLimit(
+  projectId,
+  accessToken,
+  { cost = 1, keyParts, limit, limitType, windowSeconds }
+) {
+  if (blobAttachmentAbuseProtectionProductionDefault !== true) {
+    throw new HttpError(
+      503,
+      "첨부파일 요청 보호 설정을 확인할 수 없습니다.",
+      "Attachment abuse protection is disabled"
+    );
+  }
+  for (let attempt = 0; attempt < attachmentRateLimitTransactionMaximumAttempts; attempt += 1) {
+    const nowMilliseconds = Date.now();
+    const windowStartSeconds = Math.floor(nowMilliseconds / 1000 / windowSeconds) * windowSeconds;
+    const bucketId = rateLimitBucketDigest(
+      `blob_attachment_${limitType}`,
+      [...keyParts, String(windowStartSeconds)]
+    );
+    const path = `attachmentRateLimits/${bucketId}`;
+    const document = await firestoreGetDocument(projectId, path, accessToken);
+    const hasCount = Boolean(document) && valueHasField(document, "count");
+    const count = hasCount ? nonNegativeIntegerField(document, "count") : 0;
+
+    if (count === null || (document && !document.updateTime)) {
+      throw new HttpError(
+        503,
+        "첨부파일 요청 보호 상태를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.",
+        "Attachment rate limit state is invalid"
+      );
+    }
+
+    const decision = attachmentRateLimitDecision({
+      cost,
+      count,
+      limit,
+      nowMilliseconds,
+      windowSeconds
+    });
+    if (!decision.allow) {
+      throw new HttpError(
+        429,
+        "첨부파일 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.",
+        "Attachment rate limit exceeded",
+        { retryAfter: decision.retryAfter }
+      );
+    }
+
+    const fields = {
+      count: integerValue(decision.nextCount),
+      limitType: stringValue(limitType),
+      windowStart: timestampValue(new Date(decision.windowStartSeconds * 1000)),
+      expiresAt: timestampValue(new Date(
+        (decision.windowStartSeconds + windowSeconds * 2) * 1000
+      ))
+    };
+    try {
+      await firestoreCommit(projectId, accessToken, [{
+        update: {
+          name: documentName(projectId, path),
+          fields
+        },
+        currentDocument: document ? { updateTime: document.updateTime } : { exists: false },
+        updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+      }]);
+      return;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode) || attempt === attachmentRateLimitTransactionMaximumAttempts - 1) {
+        throw error;
+      }
+    }
+  }
+}
+
 function valueStringArray(document, fieldName) {
   const values = document?.fields?.[fieldName]?.arrayValue?.values;
 
@@ -506,6 +710,30 @@ function valueStringArray(document, fieldName) {
   }
 
   return values.map((value) => value.stringValue).filter((value) => typeof value === "string");
+}
+
+function valueBytes(document, fieldName) {
+  const value = document?.fields?.[fieldName]?.bytesValue;
+  return typeof value === "string" ? value : "";
+}
+
+function valueBytesArray(document, fieldName) {
+  const values = document?.fields?.[fieldName]?.arrayValue?.values;
+  return Array.isArray(values)
+    ? values.map((value) => typeof value?.bytesValue === "string" ? value.bytesValue : "")
+    : [];
+}
+
+function valueEncryptedPayload(document, fieldName) {
+  const fields = document?.fields?.[fieldName]?.mapValue?.fields;
+  return fields
+    ? {
+        algorithm: typeof fields.algorithm?.stringValue === "string" ? fields.algorithm.stringValue : "",
+        cipherText: typeof fields.cipherText?.stringValue === "string" ? fields.cipherText.stringValue : "",
+        iv: typeof fields.iv?.stringValue === "string" ? fields.iv.stringValue : "",
+        version: Number(fields.version?.integerValue ?? Number.NaN)
+      }
+    : null;
 }
 
 function safeId(value, fieldName) {
@@ -688,8 +916,27 @@ function parseClientPayload(clientPayload) {
   const extension = safeExtension(parsed.extension);
   const fileName = safeFileName(parsed.fileName);
 
-  if (scope === "publicShare" && fileName !== publicShareGenericAttachmentBaseName(extension)) {
-    throw new HttpError(400, "공유 첨부파일 이름이 올바르지 않습니다.", "Public attachment fileName must be generic");
+  if (
+    (scope === "note" && fileName !== noteGenericAttachmentBaseName(extension))
+    || (
+      scope === "publicShare"
+      && fileName !== publicShareGenericAttachmentBaseName(extension)
+    )
+  ) {
+    throw new HttpError(
+      400,
+      "첨부파일 이름 보호 정보가 올바르지 않습니다.",
+      scope === "publicShare"
+        ? "Public attachment fileName must be generic"
+        : "Note attachment fileName must be generic"
+    );
+  }
+  if (parsed.privacyVersion !== 1) {
+    throw new HttpError(
+      400,
+      "첨부파일 이름 보호 버전이 올바르지 않습니다.",
+      "Attachment privacyVersion must be one"
+    );
   }
 
   const sourceAttachmentId =
@@ -728,7 +975,8 @@ function parseClientPayload(clientPayload) {
     noteId: scope === "note" ? safeId(parsed.noteId, "noteId") : "",
     shareId: scope === "publicShare" ? safeId(parsed.shareId, "shareId") : "",
     fileName,
-    encryptedFileName: scope === "publicShare" ? safeEncryptedFileName(parsed.encryptedFileName) : null,
+    encryptedFileName: safeEncryptedFileName(parsed.encryptedFileName),
+    privacyVersion: 1,
     extension,
     mimeType: scope === "publicShare"
       ? safeAttachmentMimeType(extension, parsed.mimeType)
@@ -763,6 +1011,13 @@ function publicShareBlobPath(uid, shareId, attachmentId) {
 
 async function userProfile(projectId, uid, accessToken) {
   const document = await firestoreGetDocument(projectId, `users/${uid}`, accessToken);
+  return {
+    ...userProfileFromDocument(document),
+    document
+  };
+}
+
+function userProfileFromDocument(document) {
   const accountIsActive = valueBoolean(document, "isActive");
 
   return {
@@ -844,27 +1099,32 @@ async function canReadNote(projectId, uid, note, accessToken) {
 }
 
 async function canUploadToNote(projectId, uid, note, accessToken) {
-  if (noteIsDeleted(note) || noteIsPurged(note)) {
-    return false;
-  }
+  return (await noteUploadAuthorization(projectId, uid, note, accessToken)).allowed;
+}
 
+async function noteUploadAuthorization(projectId, uid, note, accessToken) {
   const callerProfile = await userProfile(projectId, uid, accessToken);
   const ownerUid = valueString(note, "ownerUid");
   const participantUids = valueStringArray(note, "participantUids");
-  const ownerProfile = await userProfile(projectId, ownerUid, accessToken);
+  const ownerProfile = ownerUid === uid
+    ? callerProfile
+    : await userProfile(projectId, ownerUid, accessToken);
 
-  return canUploadNoteAttachmentPolicy({
-    callerIsActive: callerProfile.isActive,
-    callerIsAdmin: callerProfile.isAdmin,
-    uid,
-    ownerUid,
-    participantUids,
-    noteIsDeleted: noteIsDeleted(note),
-    noteIsPurged: noteIsPurged(note),
-    ownerIsActive: ownerProfile.isActive,
-    ownerIsAdmin: ownerProfile.isAdmin,
-    ownerAllowedShareTargetUids: ownerProfile.allowedShareTargetUids
-  });
+  return {
+    allowed: canUploadNoteAttachmentPolicy({
+      callerIsActive: callerProfile.isActive,
+      callerIsAdmin: callerProfile.isAdmin,
+      uid,
+      ownerUid,
+      participantUids,
+      noteIsDeleted: noteIsDeleted(note),
+      noteIsPurged: noteIsPurged(note),
+      ownerIsActive: ownerProfile.isActive,
+      ownerIsAdmin: ownerProfile.isAdmin,
+      ownerAllowedShareTargetUids: ownerProfile.allowedShareTargetUids
+    }),
+    verifyDocuments: [callerProfile.document, ownerProfile.document].filter(Boolean)
+  };
 }
 
 function publicShareActive(share, now = Date.now()) {
@@ -906,19 +1166,37 @@ async function publicShareSourceAvailable(
   accessToken,
   requireMatchingRevision = publicShareSourceRequiresMatchingRevision(share)
 ) {
+  return (await publicShareSourceAuthorization(
+    projectId,
+    share,
+    accessToken,
+    requireMatchingRevision
+  )).allowed;
+}
+
+async function publicShareSourceAuthorization(
+  projectId,
+  share,
+  accessToken,
+  requireMatchingRevision = publicShareSourceRequiresMatchingRevision(share),
+  preloadedOwnerProfile = null
+) {
   const sourceNoteId = valueString(share, "sourceNoteId");
   const ownerUid = valueString(share, "ownerUid");
 
   if (!/^[A-Za-z0-9_-]{1,160}$/u.test(sourceNoteId) || !ownerUid) {
-    return false;
+    return { allowed: false, sourceNote: null, verifyDocuments: [] };
   }
 
   const [sourceNote, ownerProfile] = await Promise.all([
     firestoreGetDocument(projectId, `notes/${sourceNoteId}`, accessToken),
-    userProfile(projectId, ownerUid, accessToken)
+    preloadedOwnerProfile
+      ? Promise.resolve(preloadedOwnerProfile)
+      : userProfile(projectId, ownerUid, accessToken)
   ]);
 
-  return Boolean(sourceNote)
+  return {
+    allowed: Boolean(sourceNote)
     && noteIsActive(sourceNote)
     && publicAttachmentSourceAvailablePolicy({
       ownerIsActive: ownerProfile.isActive,
@@ -931,7 +1209,10 @@ async function publicShareSourceAvailable(
       noteRevision: valueInteger(sourceNote, "revision"),
       shareSourceAttachmentRevision: valueInteger(share, "sourceAttachmentRevision"),
       noteAttachmentRevision: valueInteger(sourceNote, "attachmentRevision")
-    });
+    }),
+    sourceNote,
+    verifyDocuments: [sourceNote, ownerProfile.document].filter(Boolean)
+  };
 }
 
 async function publicShareSourceActive(projectId, share, accessToken) {
@@ -1052,6 +1333,20 @@ async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
     ]);
     const usedBytes = valueInteger(quotaDocument, "usedBytes");
     const attachmentCount = valueInteger(quotaDocument, "attachmentCount");
+    const pendingCount = valueHasField(quotaDocument, "pendingCount")
+      ? nonNegativeIntegerField(quotaDocument, "pendingCount")
+      : 0;
+    const pendingBytes = valueHasField(quotaDocument, "pendingBytes")
+      ? nonNegativeIntegerField(quotaDocument, "pendingBytes")
+      : 0;
+
+    if (pendingCount === null || pendingBytes === null) {
+      throw new HttpError(
+        503,
+        "첨부파일 예약 상태를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.",
+        "Attachment pending quota is invalid"
+      );
+    }
 
     if (
       !Number.isSafeInteger(bytes)
@@ -1066,6 +1361,19 @@ async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
       throw new HttpError(413, "첨부파일 저장 개수 한도를 초과했습니다.", "Blob attachment count limit exceeded");
     }
 
+    if (
+      pendingCount + 1 > userPendingAttachmentCountLimit
+      || !Number.isSafeInteger(pendingBytes + bytes)
+      || pendingBytes + bytes > userPendingAttachmentBytesLimit
+    ) {
+      throw new HttpError(
+        429,
+        "완료되지 않은 첨부파일 업로드가 많습니다. 잠시 후 다시 시도해주세요.",
+        "Pending attachment reservation limit exceeded",
+        { retryAfter: Math.ceil(reservationTtlMs / 1000) }
+      );
+    }
+
     const quotaWrite = {
       update: {
         name: documentName(projectId, quotaPath),
@@ -1075,7 +1383,11 @@ async function reserveUserAttachmentBytes(projectId, accessToken, uid, bytes, ex
           countPolicyVersion: integerValue(attachmentCountPolicyVersion),
           limitCount: integerValue(userBlobAttachmentCountLimit),
           usedBytes: integerValue(usedBytes + bytes),
-          limitBytes: integerValue(userBlobAttachmentQuotaBytes)
+          limitBytes: integerValue(userBlobAttachmentQuotaBytes),
+          pendingCount: integerValue(pendingCount + 1),
+          pendingBytes: integerValue(pendingBytes + bytes),
+          pendingLimitCount: integerValue(userPendingAttachmentCountLimit),
+          pendingLimitBytes: integerValue(userPendingAttachmentBytesLimit)
         }
       },
       currentDocument: quotaDocument ? { updateTime: quotaDocument.updateTime } : { exists: false },
@@ -1196,15 +1508,38 @@ async function claimAttachmentDeletion(projectId, accessToken, attachmentPath, e
       return null;
     }
 
+    const pendingReservationTracked = valueBoolean(attachment, "pendingReservationTracked")
+      && !valueBoolean(attachment, "isReady");
+    const reservationIndexPath = pendingReservationTracked && quotaUid
+      ? attachmentReservationIndexPath(quotaUid, attachmentPath)
+      : "";
+    const resolvedExtraDeletePaths = [...new Set([
+      ...extraDeletePaths,
+      ...(reservationIndexPath ? [reservationIndexPath] : [])
+    ])];
+
     const writes = [
       {
         delete: documentName(projectId, attachmentPath),
         currentDocument: { updateTime: claim.attachmentUpdateTime }
       },
-      ...extraDeletePaths.map((path) => ({ delete: documentName(projectId, path) }))
+      ...resolvedExtraDeletePaths.map((path) => ({ delete: documentName(projectId, path) }))
     ];
 
     if (claim.quota) {
+      const currentPendingCount = nonNegativeIntegerField(quotaDocument, "pendingCount");
+      const currentPendingBytes = nonNegativeIntegerField(quotaDocument, "pendingBytes");
+      const canReleasePending = pendingReservationTracked
+        && currentPendingCount !== null
+        && currentPendingBytes !== null
+        && currentPendingCount >= 1
+        && currentPendingBytes >= encryptedSize;
+      const nextPendingCount = canReleasePending
+        ? currentPendingCount - 1
+        : (currentPendingCount ?? 0);
+      const nextPendingBytes = canReleasePending
+        ? currentPendingBytes - encryptedSize
+        : (currentPendingBytes ?? 0);
       writes.push({
         update: {
           name: documentName(projectId, quotaPath),
@@ -1214,12 +1549,21 @@ async function claimAttachmentDeletion(projectId, accessToken, attachmentPath, e
             countPolicyVersion: integerValue(attachmentCountPolicyVersion),
             limitCount: integerValue(userBlobAttachmentCountLimit),
             usedBytes: integerValue(claim.quota.usedBytes),
-            limitBytes: integerValue(userBlobAttachmentQuotaBytes)
+            limitBytes: integerValue(userBlobAttachmentQuotaBytes),
+            pendingCount: integerValue(nextPendingCount),
+            pendingBytes: integerValue(nextPendingBytes),
+            pendingLimitCount: integerValue(userPendingAttachmentCountLimit),
+            pendingLimitBytes: integerValue(userPendingAttachmentBytesLimit)
           }
         },
         currentDocument: { updateTime: claim.quota.quotaUpdateTime },
         updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
       });
+      if (pendingReservationTracked && !canReleasePending) {
+        console.warn("attachment pending counter release skipped", {
+          reason: "counter_underflow_guard"
+        });
+      }
     }
 
     const releaseGlobalUsage = (
@@ -1290,6 +1634,8 @@ function attachmentBaseFields(payload, blobPath) {
     version: integerValue(payload.version),
     algorithm: stringValue(payload.algorithm),
     fileName: stringValue(payload.fileName),
+    encryptedFileName: encryptedPayloadValue(payload.encryptedFileName),
+    privacyVersion: integerValue(1),
     extension: stringValue(payload.extension),
     mimeType: stringValue(payload.mimeType),
     originalSize: integerValue(payload.originalSize),
@@ -1298,6 +1644,7 @@ function attachmentBaseFields(payload, blobPath) {
     blobPath: stringValue(blobPath),
     isReady: booleanValue(false),
     quotaReserved: booleanValue(true),
+    pendingReservationTracked: booleanValue(true),
     reservationExpiresAt: timestampValue(new Date(Date.now() + reservationTtlMs).toISOString())
   };
 
@@ -1312,6 +1659,89 @@ function attachmentBaseFields(payload, blobPath) {
   return fields;
 }
 
+function reservationIndexWrite(projectId, uid, attachmentPath, blobPath, encryptedSize, expiresAt) {
+  const indexPath = attachmentReservationIndexPath(uid, attachmentPath);
+  return {
+    update: {
+      name: documentName(projectId, indexPath),
+      fields: {
+        attachmentPath: stringValue(attachmentPath),
+        blobPath: stringValue(blobPath),
+        encryptedSize: integerValue(encryptedSize),
+        reservationExpiresAt: expiresAt
+      }
+    },
+    currentDocument: { exists: false },
+    updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }]
+  };
+}
+
+function reservationMatchesPayload(attachment, payload, expectedPath, uid, scope) {
+  const encryptedFileName = valueEncryptedPayload(attachment, "encryptedFileName");
+  const baseMatches = Boolean(attachment)
+    && !valueBoolean(attachment, "isReady")
+    && !valueBoolean(attachment, "deletionStarted")
+    && !valueHasField(attachment, "deletionStartedAt")
+    && valueString(attachment, "blobPath") === expectedPath
+    && valueString(attachment, "fileName") === payload.fileName
+    && valueString(attachment, "extension") === payload.extension
+    && valueString(attachment, "mimeType") === payload.mimeType
+    && valueInteger(attachment, "originalSize") === payload.originalSize
+    && valueInteger(attachment, "encryptedSize") === payload.encryptedSize
+    && valueInteger(attachment, "version") === payload.version
+    && valueString(attachment, "algorithm") === payload.algorithm
+    && valueInteger(attachment, "privacyVersion") === 1
+    && valueBoolean(attachment, "quotaReserved")
+    && valueBoolean(attachment, "pendingReservationTracked")
+    && encryptedFileName?.version === payload.encryptedFileName.version
+    && encryptedFileName?.algorithm === payload.encryptedFileName.algorithm
+    && encryptedFileName?.cipherText === payload.encryptedFileName.cipherText
+    && encryptedFileName?.iv === payload.encryptedFileName.iv
+    && (
+      payload.version === 1
+        ? valueBytes(attachment, "iv") === payload.ivBase64
+        : (
+            valueInteger(attachment, "chunkSize") === payload.chunkSize
+            && valueInteger(attachment, "chunkCount") === payload.chunkCount
+            && valueBytesArray(attachment, "chunkIvs").join("\0") === payload.chunkIvBase64List.join("\0")
+          )
+    );
+  if (!baseMatches) {
+    return false;
+  }
+  if (scope === "note") {
+    return valueString(attachment, "uploadedBy") === uid
+      && valueString(attachment, "noteId") === payload.noteId
+      && valueString(attachment, "secureShareCopyJobId") === payload.secureShareCopyJobId;
+  }
+  return valueString(attachment, "ownerUid") === uid
+    && valueString(attachment, "generation") === payload.generation
+    && valueString(attachment, "sourceAttachmentId") === payload.sourceAttachmentId
+    && valueString(attachment, "sourceAttachmentDigest") === payload.sourceAttachmentDigest
+    && valueInteger(attachment, "sourceEncryptionVersion") === payload.sourceEncryptionVersion;
+}
+
+function reservationAllowsTokenReissue(attachment, nowMilliseconds = Date.now()) {
+  const expiresAt = valueTimestampMillis(attachment, "reservationExpiresAt");
+  return Number.isFinite(expiresAt) && expiresAt >= nowMilliseconds + tokenTtlMs;
+}
+
+function existingReservationTokenPayload(attachment, payload, uid, attachmentPath, blobPath) {
+  return {
+    ...payload,
+    uid,
+    blobPath,
+    attachmentPath,
+    quotaUid: uid,
+    ...(payload.scope === "publicShare"
+      ? {
+          cleanupPath: `publicShareCleanupQueue/${payload.shareId}/publicShareAttachmentCleanupQueue/${payload.attachmentId}`,
+          generation: valueString(attachment, "generation")
+        }
+      : {})
+  };
+}
+
 async function noteAttachmentReservationWrites(
   projectId,
   accessToken,
@@ -1321,12 +1751,15 @@ async function noteAttachmentReservationWrites(
 ) {
   const notePath = `notes/${payload.noteId}`;
   const currentNote = await firestoreGetDocument(projectId, notePath, accessToken);
+  const authorization = currentNote
+    ? await noteUploadAuthorization(projectId, uid, currentNote, accessToken)
+    : { allowed: false, verifyDocuments: [] };
 
   if (
     !currentNote
     || typeof currentNote.updateTime !== "string"
     || !currentNote.updateTime
-    || !(await canUploadToNote(projectId, uid, currentNote, accessToken))
+    || !authorization.allowed
   ) {
     throw new HttpError(403, "첨부파일 업로드 권한이 없습니다.", "Cannot upload to current note");
   }
@@ -1407,7 +1840,12 @@ async function noteAttachmentReservationWrites(
     ...(noteUpdateTransforms.length ? { updateTransforms: noteUpdateTransforms } : {})
   };
 
-  return [attachmentWrite, noteAttachmentCountWrite, noteReservationWrite];
+  return [
+    attachmentWrite,
+    noteAttachmentCountWrite,
+    noteReservationWrite,
+    ...authorizationVerifyWrites(authorization.verifyDocuments)
+  ];
 }
 
 async function createNoteAttachmentReservation(projectId, accessToken, uid, payload, pathname) {
@@ -1452,6 +1890,27 @@ async function createNoteAttachmentReservation(projectId, accessToken, uid, payl
     throw new HttpError(403, "첨부파일 복사 작업 권한이 없습니다.", "Secure share copy job mismatch");
   }
 
+  const existingAttachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
+  if (existingAttachment) {
+    if (
+      reservationMatchesPayload(existingAttachment, payload, expectedPath, uid, "note")
+      && reservationAllowsTokenReissue(existingAttachment)
+    ) {
+      return existingReservationTokenPayload(
+        existingAttachment,
+        payload,
+        uid,
+        attachmentPath,
+        expectedPath
+      );
+    }
+    throw new HttpError(
+      409,
+      "동일한 첨부파일 요청이 이미 처리되었거나 정보가 변경되었습니다.",
+      "Existing note attachment reservation does not match"
+    );
+  }
+
   const attachmentFields = {
     noteId: stringValue(payload.noteId),
     ...attachmentBaseFields(payload, expectedPath),
@@ -1471,19 +1930,49 @@ async function createNoteAttachmentReservation(projectId, accessToken, uid, payl
     updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }]
   };
 
-  await reserveUserAttachmentBytes(
-    projectId,
-    accessToken,
-    uid,
-    payload.encryptedSize,
-    () => noteAttachmentReservationWrites(
+  try {
+    await reserveUserAttachmentBytes(
       projectId,
       accessToken,
       uid,
-      payload,
-      attachmentWrite
-    )
-  );
+      payload.encryptedSize,
+      async () => [
+        ...await noteAttachmentReservationWrites(
+          projectId,
+          accessToken,
+          uid,
+          payload,
+          attachmentWrite
+        ),
+        reservationIndexWrite(
+          projectId,
+          uid,
+          attachmentPath,
+          expectedPath,
+          payload.encryptedSize,
+          attachmentFields.reservationExpiresAt
+        )
+      ]
+    );
+  } catch (error) {
+    if (![400, 409].includes(error.statusCode)) {
+      throw error;
+    }
+    const concurrentAttachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
+    if (
+      reservationMatchesPayload(concurrentAttachment, payload, expectedPath, uid, "note")
+      && reservationAllowsTokenReissue(concurrentAttachment)
+    ) {
+      return existingReservationTokenPayload(
+        concurrentAttachment,
+        payload,
+        uid,
+        attachmentPath,
+        expectedPath
+      );
+    }
+    throw error;
+  }
 
   return {
     ...payload,
@@ -1494,21 +1983,80 @@ async function createNoteAttachmentReservation(projectId, accessToken, uid, payl
   };
 }
 
-async function createPublicShareAttachmentReservation(projectId, accessToken, uid, payload, pathname) {
-  const share = await firestoreGetDocument(projectId, `publicNoteShares/${payload.shareId}`, accessToken);
+async function publicShareUploadAuthorization(projectId, accessToken, uid, payload) {
+  const sharePath = `publicNoteShares/${payload.shareId}`;
+  const [share, ownerProfile] = await Promise.all([
+    firestoreGetDocument(projectId, sharePath, accessToken),
+    userProfile(projectId, uid, accessToken)
+  ]);
   const ownerUid = valueString(share, "ownerUid");
   const expiresAt = share?.fields?.expiresAt?.timestampValue;
-  const ownerProfile = await userProfile(projectId, uid, accessToken);
+  const sourceAuthorization = share && ownerUid === uid
+    ? await publicShareSourceAuthorization(
+        projectId,
+        share,
+        accessToken,
+        publicShareSourceRequiresMatchingRevision(share),
+        ownerProfile
+      )
+    : { allowed: false, sourceNote: null, verifyDocuments: [] };
+  const hasSourceFingerprint = Boolean(
+    payload.sourceAttachmentDigest || payload.sourceEncryptionVersion
+  );
+  const sourceNoteId = valueString(share, "sourceNoteId");
+  const sourceAttachment = hasSourceFingerprint && sourceNoteId && payload.sourceAttachmentId
+    ? await firestoreGetDocument(
+        projectId,
+        `notes/${sourceNoteId}/attachments/${payload.sourceAttachmentId}`,
+        accessToken
+      )
+    : null;
+  const sourceFingerprintMatches = !hasSourceFingerprint || sourceAttachmentFingerprintMatches(
+    {
+      sourceAttachmentId: payload.sourceAttachmentId,
+      sourceAttachmentDigest: payload.sourceAttachmentDigest,
+      sourceEncryptionVersion: payload.sourceEncryptionVersion
+    },
+    sourceAttachment
+      ? {
+          __id: payload.sourceAttachmentId,
+          blobEtag: valueString(sourceAttachment, "blobEtag"),
+          version: valueInteger(sourceAttachment, "version")
+        }
+      : null
+  );
 
-  if (
-    !share
-    || !ownerProfile.isActive
-    || ownerUid !== uid
-    || share?.fields?.revokedAt
-    || !expiresAt
-    || Date.parse(expiresAt) <= Date.now()
-    || !(await publicShareSourceAvailable(projectId, share, accessToken))
-  ) {
+  return {
+    allowed: Boolean(
+      share
+      && ownerProfile.isActive
+      && ownerUid === uid
+      && !share?.fields?.revokedAt
+      && expiresAt
+      && Date.parse(expiresAt) > Date.now()
+      && sourceAuthorization.allowed
+    ),
+    expiresAt,
+    share,
+    sourceFingerprintMatches,
+    verifyDocuments: [
+      share,
+      ownerProfile.document,
+      ...sourceAuthorization.verifyDocuments,
+      sourceAttachment
+    ].filter(Boolean)
+  };
+}
+
+async function createPublicShareAttachmentReservation(projectId, accessToken, uid, payload, pathname) {
+  const authorization = await publicShareUploadAuthorization(
+    projectId,
+    accessToken,
+    uid,
+    payload
+  );
+
+  if (!authorization.allowed) {
     throw new HttpError(403, "공유 첨부파일 업로드 권한이 없습니다.", "Cannot upload to public share");
   }
 
@@ -1518,79 +2066,135 @@ async function createPublicShareAttachmentReservation(projectId, accessToken, ui
     throw new HttpError(400, "공유 첨부파일 저장 경로가 올바르지 않습니다.", "Public share pathname mismatch");
   }
 
-  if (payload.sourceAttachmentDigest || payload.sourceEncryptionVersion) {
-    const sourceNoteId = valueString(share, "sourceNoteId");
-    const sourceAttachment = sourceNoteId && payload.sourceAttachmentId
-      ? await firestoreGetDocument(
-          projectId,
-          `notes/${sourceNoteId}/attachments/${payload.sourceAttachmentId}`,
-          accessToken
-        )
-      : null;
-
-    if (!sourceAttachmentFingerprintMatches(
-      {
-        sourceAttachmentId: payload.sourceAttachmentId,
-        sourceAttachmentDigest: payload.sourceAttachmentDigest,
-        sourceEncryptionVersion: payload.sourceEncryptionVersion
-      },
-      sourceAttachment
-        ? {
-            __id: payload.sourceAttachmentId,
-            blobEtag: valueString(sourceAttachment, "blobEtag"),
-            version: valueInteger(sourceAttachment, "version")
-          }
-        : null
-    )) {
-      throw new HttpError(
-        409,
-        "공유 첨부파일 원본이 변경되었습니다.",
-        "Public attachment source fingerprint mismatch"
-      );
-    }
+  if (!authorization.sourceFingerprintMatches) {
+    throw new HttpError(
+      409,
+      "공유 첨부파일 원본이 변경되었습니다.",
+      "Public attachment source fingerprint mismatch"
+    );
   }
 
   const attachmentPath = `publicNoteShares/${payload.shareId}/attachments/${payload.attachmentId}`;
   const cleanupPath = `publicShareCleanupQueue/${payload.shareId}/publicShareAttachmentCleanupQueue/${payload.attachmentId}`;
-  const fields = {
+  const existingAttachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
+  if (existingAttachment) {
+    if (
+      reservationMatchesPayload(existingAttachment, payload, expectedPath, uid, "publicShare")
+      && reservationAllowsTokenReissue(existingAttachment)
+    ) {
+      return existingReservationTokenPayload(
+        existingAttachment,
+        payload,
+        uid,
+        attachmentPath,
+        expectedPath
+      );
+    }
+    throw new HttpError(
+      409,
+      "동일한 공유 첨부파일 요청이 이미 처리되었거나 정보가 변경되었습니다.",
+      "Existing public attachment reservation does not match"
+    );
+  }
+  const baseFields = {
     ...attachmentBaseFields(payload, expectedPath),
-    encryptedFileName: encryptedPayloadValue(payload.encryptedFileName),
-    privacyVersion: integerValue(1),
     ownerUid: stringValue(uid),
-    generation: stringValue(payload.generation),
-    expiresAt: timestampValue(expiresAt)
+    generation: stringValue(payload.generation)
   };
 
   if (payload.sourceAttachmentId) {
-    fields.sourceAttachmentId = stringValue(payload.sourceAttachmentId);
+    baseFields.sourceAttachmentId = stringValue(payload.sourceAttachmentId);
   }
   if (payload.sourceAttachmentDigest) {
-    fields.sourceAttachmentDigest = stringValue(payload.sourceAttachmentDigest);
-    fields.sourceEncryptionVersion = integerValue(payload.sourceEncryptionVersion);
+    baseFields.sourceAttachmentDigest = stringValue(payload.sourceAttachmentDigest);
+    baseFields.sourceEncryptionVersion = integerValue(payload.sourceEncryptionVersion);
   }
 
-  await reserveUserAttachmentBytes(projectId, accessToken, uid, payload.encryptedSize, [
-    {
-      update: {
-        name: documentName(projectId, attachmentPath),
-        fields
-      },
-      currentDocument: { exists: false },
-      updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }]
-    },
-    {
-      update: {
-        name: documentName(projectId, cleanupPath),
-        fields: {
-          shareId: stringValue(payload.shareId),
-          attachmentId: stringValue(payload.attachmentId),
-          expiresAt: timestampValue(expiresAt)
+  try {
+    await reserveUserAttachmentBytes(
+      projectId,
+      accessToken,
+      uid,
+      payload.encryptedSize,
+      async () => {
+        const currentAuthorization = await publicShareUploadAuthorization(
+          projectId,
+          accessToken,
+          uid,
+          payload
+        );
+        if (!currentAuthorization.allowed) {
+          throw new HttpError(
+            403,
+            "공유 첨부파일 업로드 권한이 없습니다.",
+            "Cannot upload to current public share"
+          );
         }
-      },
-      currentDocument: { exists: false },
-      updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }]
+        if (!currentAuthorization.sourceFingerprintMatches) {
+          throw new HttpError(
+            409,
+            "공유 첨부파일 원본이 변경되었습니다.",
+            "Public attachment source fingerprint changed"
+          );
+        }
+        const writes = [
+          {
+            update: {
+              name: documentName(projectId, attachmentPath),
+              fields: {
+                ...baseFields,
+                expiresAt: timestampValue(currentAuthorization.expiresAt)
+              }
+            },
+            currentDocument: { exists: false },
+            updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }]
+          },
+          {
+            update: {
+              name: documentName(projectId, cleanupPath),
+              fields: {
+                shareId: stringValue(payload.shareId),
+                attachmentId: stringValue(payload.attachmentId),
+                expiresAt: timestampValue(currentAuthorization.expiresAt)
+              }
+            },
+            currentDocument: { exists: false },
+            updateTransforms: [{ fieldPath: "createdAt", setToServerValue: "REQUEST_TIME" }]
+          },
+          reservationIndexWrite(
+            projectId,
+            uid,
+            attachmentPath,
+            expectedPath,
+            payload.encryptedSize,
+            baseFields.reservationExpiresAt
+          )
+        ];
+        return [
+          ...writes,
+          ...authorizationVerifyWrites(currentAuthorization.verifyDocuments)
+        ];
+      }
+    );
+  } catch (error) {
+    if (![400, 409].includes(error.statusCode)) {
+      throw error;
     }
-  ]);
+    const concurrentAttachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
+    if (
+      reservationMatchesPayload(concurrentAttachment, payload, expectedPath, uid, "publicShare")
+      && reservationAllowsTokenReissue(concurrentAttachment)
+    ) {
+      return existingReservationTokenPayload(
+        concurrentAttachment,
+        payload,
+        uid,
+        attachmentPath,
+        expectedPath
+      );
+    }
+    throw error;
+  }
 
   return {
     ...payload,
@@ -1619,7 +2223,103 @@ function callbackUrlForRequest(request) {
   return `http://${host}/api/blob-attachments`;
 }
 
-async function beforeGenerateToken(request, pathname, clientPayload) {
+function safeIndexedAttachmentPath(value) {
+  return typeof value === "string"
+    && /^(?:notes|publicNoteShares)\/[A-Za-z0-9_-]{1,160}\/attachments\/[A-Za-z0-9_-]{1,160}$/u.test(value)
+    ? value
+    : "";
+}
+
+function notePathFromAttachmentPath(attachmentPath) {
+  const match = /^notes\/([A-Za-z0-9_-]{1,160})\/attachments\/[A-Za-z0-9_-]{1,160}$/u
+    .exec(attachmentPath);
+  return match ? `notes/${match[1]}` : "";
+}
+
+async function deleteReservationIndex(projectId, accessToken, indexDocument) {
+  const indexPath = relativeDocumentPath(indexDocument);
+  if (!indexPath || !indexDocument?.updateTime) {
+    return;
+  }
+  try {
+    await firestoreCommit(projectId, accessToken, [{
+      delete: documentName(projectId, indexPath),
+      currentDocument: { updateTime: indexDocument.updateTime }
+    }]);
+  } catch (error) {
+    if (![400, 409].includes(error.statusCode)) {
+      throw error;
+    }
+  }
+}
+
+async function cleanupExpiredUserReservations(projectId, accessToken, uid) {
+  const result = await firestoreListDocumentsWithFields(
+    projectId,
+    `userAttachmentReservations/${uid}/pendingAttachmentReservations`,
+    accessToken,
+    opportunisticReservationScanLimit,
+    ["attachmentPath", "reservationExpiresAt"]
+  );
+  const documents = Array.isArray(result?.documents) ? result.documents : [];
+  let cleaned = 0;
+
+  for (const indexDocument of documents) {
+    if (cleaned >= opportunisticReservationCleanupLimit) {
+      break;
+    }
+    const expiresAt = valueTimestampMillis(indexDocument, "reservationExpiresAt");
+    if (!Number.isFinite(expiresAt) || expiresAt > Date.now()) {
+      continue;
+    }
+    const attachmentPath = safeIndexedAttachmentPath(valueString(indexDocument, "attachmentPath"));
+    if (!attachmentPath) {
+      await deleteReservationIndex(projectId, accessToken, indexDocument);
+      cleaned += 1;
+      continue;
+    }
+    const attachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
+    if (!attachment) {
+      await deleteReservationIndex(projectId, accessToken, indexDocument);
+      cleaned += 1;
+      continue;
+    }
+    const deletingAttachment = await beginAttachmentDeletion(
+      projectId,
+      accessToken,
+      attachmentPath,
+      notePathFromAttachmentPath(attachmentPath),
+      uid,
+      async (currentAttachment) => {
+        const reservationOwner = valueString(currentAttachment, "ownerUid")
+          || valueString(currentAttachment, "uploadedBy");
+        const currentExpiresAt = valueTimestampMillis(
+          currentAttachment,
+          "reservationExpiresAt"
+        );
+        return {
+          allowed: reservationOwner === uid
+            && valueBoolean(currentAttachment, "pendingReservationTracked")
+            && !valueBoolean(currentAttachment, "isReady")
+            && Number.isFinite(currentExpiresAt)
+            && currentExpiresAt <= Date.now()
+        };
+      }
+    );
+    if (!deletingAttachment) {
+      continue;
+    }
+    await deleteAttachmentObjects(firebaseCredentials(), accessToken, deletingAttachment);
+    await claimAttachmentDeletion(projectId, accessToken, attachmentPath, [
+      relativeDocumentPath(indexDocument)
+    ]);
+    cleaned += 1;
+  }
+
+  return cleaned;
+}
+
+async function beforeGenerateToken(request, pathname, clientPayload, telemetry = null) {
   ensureBlobConfigured();
 
   const idToken = authToken(request);
@@ -1635,7 +2335,19 @@ async function beforeGenerateToken(request, pathname, clientPayload) {
     throw new HttpError(401, "로그인이 만료되었습니다. 다시 로그인해주세요.", "Invalid auth token");
   }
 
+  await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+    keyParts: [uid],
+    limit: attachmentReservationBurstLimit,
+    limitType: "reservation_uid",
+    windowSeconds: attachmentReservationBurstWindowSeconds
+  });
+  await cleanupExpiredUserReservations(credentials.projectId, accessToken, uid);
+
   const payload = parseClientPayload(clientPayload);
+  if (telemetry) {
+    telemetry.scope = payload.scope;
+    telemetry.sizeBucket = attachmentSizeBucket(payload.encryptedSize);
+  }
   const tokenPayload =
     payload.scope === "note"
       ? await createNoteAttachmentReservation(credentials.projectId, accessToken, uid, payload, pathname)
@@ -1712,10 +2424,33 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
       throw new HttpError(409, "삭제가 시작된 첨부파일은 업로드를 완료할 수 없습니다.", "Attachment deletion already started");
     }
 
-    const uploaderProfile = await userProfile(projectId, tokenPayload.uid, accessToken);
+    const pendingReservationTracked = valueBoolean(attachment, "pendingReservationTracked");
+    const quotaPath = `userAttachmentUsage/${tokenPayload.uid}`;
+    const quotaDocument = pendingReservationTracked
+      ? await firestoreGetDocument(projectId, quotaPath, accessToken)
+      : null;
+    const pendingCount = pendingReservationTracked
+      ? nonNegativeIntegerField(quotaDocument, "pendingCount")
+      : 0;
+    const pendingBytes = pendingReservationTracked
+      ? nonNegativeIntegerField(quotaDocument, "pendingBytes")
+      : 0;
 
-    if (!uploaderProfile.isActive) {
-      throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Inactive uploader cannot complete attachment");
+    if (
+      pendingReservationTracked
+      && (
+        !quotaDocument?.updateTime
+        || pendingCount === null
+        || pendingBytes === null
+        || pendingCount < 1
+        || pendingBytes < tokenPayload.encryptedSize
+      )
+    ) {
+      throw new HttpError(
+        503,
+        "첨부파일 예약 상태를 확인할 수 없습니다. 잠시 후 다시 시도해주세요.",
+        "Attachment pending quota cannot be finalized"
+      );
     }
 
     const writes = [
@@ -1724,25 +2459,68 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
           name: documentName(projectId, tokenPayload.attachmentPath),
           fields: {
             isReady: booleanValue(true),
-            blobUrl: stringValue(blob.url),
-            blobDownloadUrl: stringValue(blob.downloadUrl),
-            blobEtag: stringValue(blob.etag)
+            blobEtag: stringValue(blob.etag),
+            pendingReservationTracked: booleanValue(false)
           }
         },
         updateMask: {
-          fieldPaths: ["isReady", "blobUrl", "blobDownloadUrl", "blobEtag", "reservationExpiresAt"]
+          fieldPaths: [
+            "isReady",
+            "blobEtag",
+            "pendingReservationTracked",
+            "reservationExpiresAt",
+            "blobUrl",
+            "blobDownloadUrl"
+          ]
         },
         currentDocument: { updateTime: attachment.updateTime }
       }
     ];
 
+    if (pendingReservationTracked) {
+      writes.push(
+        {
+          update: {
+            name: documentName(projectId, quotaPath),
+            fields: {
+              pendingCount: integerValue(pendingCount - 1),
+              pendingBytes: integerValue(pendingBytes - tokenPayload.encryptedSize),
+              pendingLimitCount: integerValue(userPendingAttachmentCountLimit),
+              pendingLimitBytes: integerValue(userPendingAttachmentBytesLimit)
+            }
+          },
+          updateMask: {
+            fieldPaths: [
+              "pendingCount",
+              "pendingBytes",
+              "pendingLimitCount",
+              "pendingLimitBytes"
+            ]
+          },
+          currentDocument: { updateTime: quotaDocument.updateTime },
+          updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
+        },
+        {
+          delete: documentName(
+            projectId,
+            attachmentReservationIndexPath(tokenPayload.uid, tokenPayload.attachmentPath)
+          )
+        }
+      );
+    }
+
+    const authorizationDocuments = [];
     if (tokenPayload.scope === "note") {
       const noteId = safeId(tokenPayload.noteId, "noteId");
       const note = await firestoreGetDocument(projectId, `notes/${noteId}`, accessToken);
+      const authorization = note
+        ? await noteUploadAuthorization(projectId, tokenPayload.uid, note, accessToken)
+        : { allowed: false, verifyDocuments: [] };
 
-      if (!note || !(await canUploadToNote(projectId, tokenPayload.uid, note, accessToken))) {
+      if (!note || !authorization.allowed) {
         throw new HttpError(403, "첨부파일 업로드 완료 권한이 없습니다.", "Uploader no longer has note access");
       }
+      authorizationDocuments.push(...authorization.verifyDocuments);
 
       const noteFields = {
         attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1),
@@ -1791,19 +2569,38 @@ async function markAttachmentReady(projectId, accessToken, tokenPayload, uploade
       });
     } else if (tokenPayload.scope === "publicShare") {
       const share = await firestoreGetDocument(projectId, `publicNoteShares/${safeId(tokenPayload.shareId, "shareId")}`, accessToken);
+      const ownerProfile = await userProfile(projectId, tokenPayload.uid, accessToken);
+      const sourceAuthorization = share
+        ? await publicShareSourceAuthorization(
+            projectId,
+            share,
+            accessToken,
+            publicShareSourceRequiresMatchingRevision(share),
+            ownerProfile
+          )
+        : { allowed: false, verifyDocuments: [] };
 
       if (
         !share
+        || !ownerProfile.isActive
         || valueString(share, "ownerUid") !== tokenPayload.uid
         || valueString(attachment, "generation") !== safeId(tokenPayload.generation, "generation")
         || share?.fields?.revokedAt
         || !Number.isFinite(valueTimestampMillis(share, "expiresAt"))
         || valueTimestampMillis(share, "expiresAt") <= Date.now()
-        || !(await publicShareSourceAvailable(projectId, share, accessToken))
+        || !sourceAuthorization.allowed
       ) {
         throw new HttpError(403, "공유 첨부파일 업로드 완료 권한이 없습니다.", "Inactive public share source");
       }
+      authorizationDocuments.push(
+        share,
+        ownerProfile.document,
+        ...sourceAuthorization.verifyDocuments
+      );
     }
+
+    const updatedNames = new Set(writes.map((write) => write.update?.name).filter(Boolean));
+    writes.push(...authorizationVerifyWrites(authorizationDocuments, updatedNames));
 
     try {
       await firestoreCommit(projectId, accessToken, writes);
@@ -1847,26 +2644,35 @@ async function onUploadCompleted({ blob, tokenPayload }) {
   }
 }
 
-async function handleBlobUploadRequest(request, response, body) {
+async function handleBlobUploadRequest(request, response, body, telemetry = null) {
   const result = await handleUpload({
     request,
     body,
-    onBeforeGenerateToken: (pathname, clientPayload) => beforeGenerateToken(request, pathname, clientPayload),
+    onBeforeGenerateToken: (pathname, clientPayload) => beforeGenerateToken(
+      request,
+      pathname,
+      clientPayload,
+      telemetry
+    ),
     onUploadCompleted
   });
 
   jsonResponse(response, 200, result);
 }
 
-async function completeUploadFromClient(request, response) {
+async function completeUploadFromClient(request, response, requestBody = null, telemetry = null) {
   const idToken = authToken(request);
 
   if (!idToken) {
     throw new HttpError(401, "로그인이 필요합니다.", "Missing auth token");
   }
 
-  const body = await readJsonBody(request);
+  const body = requestBody ?? await readJsonBody(request);
   const scope = body.scope === "publicShare" ? "publicShare" : body.scope === "note" ? "note" : "";
+  if (telemetry) {
+    telemetry.scope = scope || "invalid";
+    telemetry.sizeBucket = attachmentSizeBucket(Number(body?.blob?.size));
+  }
   const attachmentId = safeId(body.attachmentId, "attachmentId");
   const credentials = firebaseCredentials();
   const [uid, accessToken] = await Promise.all([lookupCallerUid(idToken), fetchAccessToken(credentials)]);
@@ -1874,6 +2680,13 @@ async function completeUploadFromClient(request, response) {
   if (!uid) {
     throw new HttpError(401, "로그인이 만료되었습니다. 다시 로그인해주세요.", "Invalid auth token");
   }
+
+  await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+    keyParts: [uid],
+    limit: attachmentMutationLimit,
+    limitType: "finalize_uid",
+    windowSeconds: attachmentMutationWindowSeconds
+  });
 
   let tokenPayload;
 
@@ -1966,16 +2779,204 @@ async function completeUploadFromClient(request, response) {
   jsonResponse(response, 200, { ok: true });
 }
 
-async function streamBlobAttachment(request, response) {
+async function migrateLegacyAttachmentFileName(request, response, body, telemetry = null) {
+  const idToken = authToken(request);
+  if (!idToken) {
+    throw new HttpError(401, "로그인이 필요합니다.", "Missing auth token");
+  }
+  if (body.scope !== "note" || body.privacyVersion !== 1) {
+    throw new HttpError(400, "첨부파일 이름 보호 요청이 올바르지 않습니다.", "Invalid filename migration scope");
+  }
+  if (telemetry) {
+    telemetry.scope = "note";
+  }
+  const noteId = safeId(body.noteId, "noteId");
+  const attachmentId = safeId(body.attachmentId, "attachmentId");
+  const genericFileName = safeFileName(body.fileName);
+  const encryptedFileName = safeEncryptedFileName(body.encryptedFileName);
+  const credentials = firebaseCredentials();
+  const [uid, accessToken] = await Promise.all([
+    lookupCallerUid(idToken),
+    fetchAccessToken(credentials)
+  ]);
+  if (!uid) {
+    throw new HttpError(401, "로그인이 만료되었습니다. 다시 로그인해주세요.", "Invalid auth token");
+  }
+  await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+    keyParts: [uid],
+    limit: attachmentMutationLimit,
+    limitType: "filename_migration_uid",
+    windowSeconds: attachmentMutationWindowSeconds
+  });
+
+  const notePath = `notes/${noteId}`;
+  const attachmentPath = `${notePath}/attachments/${attachmentId}`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const [note, attachment, callerDocument] = await Promise.all([
+      firestoreGetDocument(credentials.projectId, notePath, accessToken),
+      firestoreGetDocument(credentials.projectId, attachmentPath, accessToken),
+      firestoreGetDocument(credentials.projectId, `users/${uid}`, accessToken)
+    ]);
+    const callerProfile = userProfileFromDocument(callerDocument);
+    if (
+      !note
+      || !attachment
+      || !callerProfile.isActive
+      || valueString(note, "ownerUid") !== uid
+      || noteIsDeleted(note)
+      || noteIsPurged(note)
+      || !valueBoolean(attachment, "isReady")
+      || !note.updateTime
+      || !attachment.updateTime
+    ) {
+      throw new HttpError(
+        403,
+        "첨부파일 이름을 보호 형식으로 전환할 권한이 없습니다.",
+        "Legacy filename migration is not authorized"
+      );
+    }
+    const extension = valueString(attachment, "extension");
+    if (genericFileName !== noteGenericAttachmentBaseName(extension)) {
+      throw new HttpError(
+        400,
+        "첨부파일 이름 보호 요청이 올바르지 않습니다.",
+        "Filename migration fallback must be generic"
+      );
+    }
+    const currentEncryptedFileName = valueEncryptedPayload(attachment, "encryptedFileName");
+    const hasExistingPrivacyMetadata = valueHasField(attachment, "privacyVersion")
+      || valueHasField(attachment, "encryptedFileName");
+    if (hasExistingPrivacyMetadata) {
+      const exactMatch = valueInteger(attachment, "privacyVersion") === 1
+        && valueString(attachment, "fileName") === genericFileName
+        && currentEncryptedFileName?.version === encryptedFileName.version
+        && currentEncryptedFileName?.algorithm === encryptedFileName.algorithm
+        && currentEncryptedFileName?.cipherText === encryptedFileName.cipherText
+        && currentEncryptedFileName?.iv === encryptedFileName.iv;
+      if (exactMatch) {
+        jsonResponse(response, 200, { ok: true, status: "already-migrated" });
+        return;
+      }
+      throw new HttpError(
+        409,
+        "첨부파일 이름 보호 정보가 이미 다르게 설정되어 있습니다.",
+        "Filename privacy metadata conflict"
+      );
+    }
+
+    try {
+      await firestoreCommit(credentials.projectId, accessToken, [
+        {
+          update: {
+            name: documentName(credentials.projectId, attachmentPath),
+            fields: {
+              fileName: stringValue(genericFileName),
+              encryptedFileName: encryptedPayloadValue(encryptedFileName),
+              privacyVersion: integerValue(1)
+            }
+          },
+          updateMask: {
+            fieldPaths: ["fileName", "encryptedFileName", "privacyVersion"]
+          },
+          currentDocument: { updateTime: attachment.updateTime }
+        },
+        {
+          verify: documentName(credentials.projectId, notePath),
+          currentDocument: { updateTime: note.updateTime }
+        },
+        ...authorizationVerifyWrites([callerDocument])
+      ]);
+      jsonResponse(response, 200, { ok: true, status: "migrated" });
+      return;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode) || attempt === 2) {
+        throw error;
+      }
+    }
+  }
+}
+
+async function attachmentStatus(request, response, telemetry = null) {
+  const idToken = authToken(request);
+  if (!idToken) {
+    throw new HttpError(401, "로그인이 필요합니다.", "Missing auth token");
+  }
+  const url = new URL(request.url, "https://quickmemo.local");
+  const scope = url.searchParams.get("scope");
+  if (telemetry) {
+    telemetry.scope = scope === "note" || scope === "publicShare" ? scope : "invalid";
+  }
+  const attachmentId = safeId(url.searchParams.get("attachmentId"), "attachmentId");
+  const credentials = firebaseCredentials();
+  const [uid, accessToken] = await Promise.all([
+    lookupCallerUid(idToken),
+    fetchAccessToken(credentials)
+  ]);
+  if (!uid) {
+    throw new HttpError(401, "로그인이 만료되었습니다. 다시 로그인해주세요.", "Invalid auth token");
+  }
+  await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+    keyParts: [uid],
+    limit: attachmentMutationLimit,
+    limitType: "status_uid",
+    windowSeconds: attachmentMutationWindowSeconds
+  });
+
+  let attachment = null;
+  if (scope === "note") {
+    const noteId = safeId(url.searchParams.get("noteId"), "noteId");
+    const note = await firestoreGetDocument(credentials.projectId, `notes/${noteId}`, accessToken);
+    if (!note || !(await canReadNote(credentials.projectId, uid, note, accessToken))) {
+      throw new HttpError(403, "첨부파일 상태를 확인할 권한이 없습니다.", "Cannot inspect note attachment status");
+    }
+    attachment = await firestoreGetDocument(
+      credentials.projectId,
+      `notes/${noteId}/attachments/${attachmentId}`,
+      accessToken
+    );
+  } else if (scope === "publicShare") {
+    const shareId = safeId(url.searchParams.get("shareId"), "shareId");
+    const share = await firestoreGetDocument(
+      credentials.projectId,
+      `publicNoteShares/${shareId}`,
+      accessToken
+    );
+    const profile = await userProfile(credentials.projectId, uid, accessToken);
+    if (!share || !profile.isActive || valueString(share, "ownerUid") !== uid) {
+      throw new HttpError(403, "공유 첨부파일 상태를 확인할 권한이 없습니다.", "Cannot inspect public attachment status");
+    }
+    attachment = await firestoreGetDocument(
+      credentials.projectId,
+      `publicNoteShares/${shareId}/attachments/${attachmentId}`,
+      accessToken
+    );
+  } else {
+    throw new HttpError(400, "첨부파일 조회 범위가 올바르지 않습니다.", "Invalid status scope");
+  }
+
+  const status = !attachment
+    ? "missing"
+    : valueBoolean(attachment, "isReady")
+      ? "ready"
+      : "pending";
+  jsonResponse(response, 200, { status });
+}
+
+async function streamBlobAttachment(request, response, telemetry = null) {
   ensureBlobConfigured();
 
   const url = new URL(request.url, "https://quickmemo.local");
   const scope = url.searchParams.get("scope");
-  const attachmentId = safeId(url.searchParams.get("attachmentId"), "attachmentId");
+  if (telemetry) {
+    telemetry.scope = scope === "note" || scope === "publicShare" ? scope : "invalid";
+  }
   const credentials = firebaseCredentials();
   const accessToken = await fetchAccessToken(credentials);
   let attachment;
   let publicShare;
+  let authorizedUid = "";
+  let authorizedShareId = "";
+  let attachmentId = "";
 
   if (scope === "note") {
     const idToken = authToken(request);
@@ -1985,16 +2986,36 @@ async function streamBlobAttachment(request, response) {
     }
 
     const uid = await lookupCallerUid(idToken);
+    authorizedUid = uid;
+    if (!uid) {
+      throw new HttpError(401, "로그인이 만료되었습니다. 다시 로그인해주세요.", "Invalid auth token");
+    }
+    await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+      keyParts: [uid],
+      limit: attachmentAuthenticatedDownloadUnitLimit,
+      limitType: "note_download_uid",
+      windowSeconds: attachmentDownloadWindowSeconds
+    });
     const noteId = safeId(url.searchParams.get("noteId"), "noteId");
+    attachmentId = safeId(url.searchParams.get("attachmentId"), "attachmentId");
     const note = await firestoreGetDocument(credentials.projectId, `notes/${noteId}`, accessToken);
 
-    if (!uid || !note || !(await canReadNote(credentials.projectId, uid, note, accessToken))) {
+    if (!note || !(await canReadNote(credentials.projectId, uid, note, accessToken))) {
       throw new HttpError(403, "첨부파일을 읽을 권한이 없습니다.", "Cannot read note attachment");
     }
 
     attachment = await firestoreGetDocument(credentials.projectId, `notes/${noteId}/attachments/${attachmentId}`, accessToken);
   } else if (scope === "publicShare") {
-    const shareId = safeId(url.searchParams.get("shareId"), "shareId");
+    const rawShareId = url.searchParams.get("shareId");
+    await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+      keyParts: [clientNetworkDigest(request)],
+      limit: attachmentPublicDownloadUnitLimit,
+      limitType: "public_download_network_base",
+      windowSeconds: attachmentDownloadWindowSeconds
+    });
+    const shareId = safeId(rawShareId, "shareId");
+    attachmentId = safeId(url.searchParams.get("attachmentId"), "attachmentId");
+    authorizedShareId = shareId;
     const share = await firestoreGetDocument(credentials.projectId, `publicNoteShares/${shareId}`, accessToken);
 
     if (
@@ -2014,6 +3035,9 @@ async function streamBlobAttachment(request, response) {
 
   const blobPath = valueString(attachment, "blobPath");
   const encryptedSize = valueInteger(attachment, "encryptedSize");
+  if (telemetry) {
+    telemetry.sizeBucket = attachmentSizeBucket(encryptedSize);
+  }
 
   if (
     !attachment
@@ -2027,6 +3051,26 @@ async function streamBlobAttachment(request, response) {
     || encryptedSize > maxChunkedEncryptedAttachmentBytes
   ) {
     throw new HttpError(404, "첨부파일을 찾을 수 없습니다.", "Attachment blob not ready");
+  }
+
+  const downloadCost = Math.max(1, Math.ceil(encryptedSize / attachmentPublicDownloadUnitBytes));
+  const additionalDownloadCost = downloadCost - 1;
+  if (publicShare && additionalDownloadCost > 0) {
+    await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+      cost: additionalDownloadCost,
+      keyParts: [authorizedShareId, clientNetworkDigest(request)],
+      limit: attachmentPublicDownloadUnitLimit,
+      limitType: "public_download_share_network",
+      windowSeconds: attachmentDownloadWindowSeconds
+    });
+  } else if (!publicShare && additionalDownloadCost > 0) {
+    await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+      cost: additionalDownloadCost,
+      keyParts: [authorizedUid],
+      limit: attachmentAuthenticatedDownloadUnitLimit,
+      limitType: "note_download_uid",
+      windowSeconds: attachmentDownloadWindowSeconds
+    });
   }
 
   const blobMetadata = await headBlobIfPresent(blobPath);
@@ -2046,10 +3090,9 @@ async function streamBlobAttachment(request, response) {
   }
 
   response.statusCode = 200;
+  applyAttachmentResponseHeaders(response);
   response.setHeader("content-type", blobContentType);
   response.setHeader("content-length", String(blobMetadata.size));
-  response.setHeader("cache-control", "no-store");
-  response.setHeader("x-content-type-options", "nosniff");
   await pipeline(Readable.fromWeb(blob.stream), response);
 }
 
@@ -2101,19 +3144,54 @@ async function deleteAttachmentObjects(credentials, accessToken, attachment) {
   await deleteStorageObjectIfPresent(credentials.storageBucket, valueString(attachment, "storagePath"), accessToken);
 }
 
+function authorizationVerifyWrites(documents, excludedNames = new Set()) {
+  const seen = new Set();
+  return documents.flatMap((document) => {
+    const name = typeof document?.name === "string" ? document.name : "";
+    if (!name || !document.updateTime || excludedNames.has(name) || seen.has(name)) {
+      return [];
+    }
+    seen.add(name);
+    return [{
+      verify: name,
+      currentDocument: { updateTime: document.updateTime }
+    }];
+  });
+}
+
 async function beginAttachmentDeletion(
   projectId,
   accessToken,
   attachmentPath,
   notePath = "",
-  noteUpdatedByUid = ""
+  noteUpdatedByUid = "",
+  authorizeCurrent = null
 ) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const attachment = await firestoreGetDocument(projectId, attachmentPath, accessToken);
+    const [attachment, currentNote] = await Promise.all([
+      firestoreGetDocument(projectId, attachmentPath, accessToken),
+      notePath
+        ? firestoreGetDocument(projectId, notePath, accessToken)
+        : Promise.resolve(null)
+    ]);
 
     if (!attachment) {
       return null;
     }
+
+    const authorization = authorizeCurrent
+      ? await authorizeCurrent(attachment, currentNote)
+      : null;
+    if (authorization?.allowed === false) {
+      return null;
+    }
+    const authorizationDocuments = [
+      attachment,
+      ...(currentNote ? [currentNote] : []),
+      ...(Array.isArray(authorization?.verifyDocuments)
+        ? authorization.verifyDocuments
+        : [])
+    ];
 
     const deletionStarted = valueBoolean(attachment, "deletionStarted");
     const revisionBumped = valueBoolean(attachment, "attachmentRevisionBumped");
@@ -2126,9 +3204,7 @@ async function beginAttachmentDeletion(
     });
 
     if (deletionStarted && !shouldBumpRevision) {
-      const claimedNote = secureShareCopyJobId && notePath
-        ? await firestoreGetDocument(projectId, notePath, accessToken)
-        : null;
+      const claimedNote = secureShareCopyJobId && notePath ? currentNote : null;
 
       if (secureShareCopyCleanupClaimed(claimedNote)) {
         throw new HttpError(
@@ -2137,14 +3213,26 @@ async function beginAttachmentDeletion(
           "Secure share copy cleanup already claimed"
         );
       }
-      return attachment;
+      try {
+        await firestoreCommit(
+          projectId,
+          accessToken,
+          authorizationVerifyWrites(authorizationDocuments)
+        );
+        return attachment;
+      } catch (error) {
+        if (![400, 409].includes(error.statusCode) || attempt === 2) {
+          throw error;
+        }
+        continue;
+      }
     }
 
     const attachmentFields = { deletionStarted: booleanValue(true) };
     const attachmentFieldPaths = ["deletionStarted"];
     const writes = [];
     const note = notePath && (shouldBumpRevision || (secureShareCopyJobId && !deletionStarted))
-      ? await firestoreGetDocument(projectId, notePath, accessToken)
+      ? currentNote
       : null;
 
     if (shouldBumpRevision || (secureShareCopyJobId && !deletionStarted)) {
@@ -2225,6 +3313,8 @@ async function beginAttachmentDeletion(
         ? { updateTransforms: [{ fieldPath: "deletionStartedAt", setToServerValue: "REQUEST_TIME" }] }
         : {})
     });
+    const updatedNames = new Set(writes.map((write) => write.update?.name).filter(Boolean));
+    writes.push(...authorizationVerifyWrites(authorizationDocuments, updatedNames));
 
     try {
       await firestoreCommit(projectId, accessToken, writes);
@@ -2243,15 +3333,18 @@ async function beginAttachmentDeletion(
   return null;
 }
 
-async function deleteAttachment(request, response) {
+async function deleteAttachment(request, response, requestBody = null, telemetry = null) {
   const idToken = authToken(request);
 
   if (!idToken) {
     throw new HttpError(401, "로그인이 필요합니다.", "Missing auth token");
   }
 
-  const body = await readJsonBody(request);
+  const body = requestBody ?? await readJsonBody(request);
   const scope = body.scope === "publicShare" ? "publicShare" : body.scope === "note" ? "note" : "";
+  if (telemetry) {
+    telemetry.scope = scope || "invalid";
+  }
   const attachmentId = safeId(body.attachmentId, "attachmentId");
   const credentials = firebaseCredentials();
   const [uid, accessToken] = await Promise.all([lookupCallerUid(idToken), fetchAccessToken(credentials)]);
@@ -2259,6 +3352,13 @@ async function deleteAttachment(request, response) {
   if (!uid) {
     throw new HttpError(401, "로그인이 만료되었습니다. 다시 로그인해주세요.", "Invalid auth token");
   }
+
+  await consumeAttachmentRateLimit(credentials.projectId, accessToken, {
+    keyParts: [uid],
+    limit: attachmentMutationLimit,
+    limitType: "delete_uid",
+    windowSeconds: attachmentMutationWindowSeconds
+  });
 
   if (scope === "note") {
     const noteId = safeId(body.noteId, "noteId");
@@ -2291,7 +3391,47 @@ async function deleteAttachment(request, response) {
       accessToken,
       attachmentPath,
       `notes/${noteId}`,
-      uid
+      uid,
+      async (currentAttachment, currentNote) => {
+        const currentOwnerUid = valueString(currentNote, "ownerUid");
+        const currentCallerDocument = currentNote
+          ? await firestoreGetDocument(credentials.projectId, `users/${uid}`, accessToken)
+          : null;
+        const currentOwnerDocument = !currentNote
+          ? null
+          : currentOwnerUid === uid
+            ? currentCallerDocument
+            : await firestoreGetDocument(
+                credentials.projectId,
+                `users/${currentOwnerUid}`,
+                accessToken
+              );
+        const currentCallerProfile = userProfileFromDocument(currentCallerDocument);
+        const currentOwnerProfile = userProfileFromDocument(currentOwnerDocument);
+        const stillAllowed = Boolean(currentNote) && canDeleteNoteAttachmentPolicy({
+          callerIsActive: currentCallerProfile.isActive,
+          callerIsAdmin: currentCallerProfile.isAdmin,
+          uid,
+          ownerUid: currentOwnerUid,
+          participantUids: valueStringArray(currentNote, "participantUids"),
+          uploadedBy: valueString(currentAttachment, "uploadedBy"),
+          noteIsDeleted: noteIsDeleted(currentNote),
+          noteIsPurged: noteIsPurged(currentNote),
+          ownerIsActive: currentOwnerProfile.isActive,
+          ownerIsAdmin: currentOwnerProfile.isAdmin,
+          ownerAllowedShareTargetUids: currentOwnerProfile.allowedShareTargetUids
+        });
+        if (!stillAllowed) {
+          throw new HttpError(
+            403,
+            "첨부파일 삭제 권한이 없습니다.",
+            "Note attachment delete authorization changed"
+          );
+        }
+        return {
+          verifyDocuments: [currentCallerDocument, currentOwnerDocument].filter(Boolean)
+        };
+      }
     );
 
     if (deletingAttachment) {
@@ -2325,7 +3465,38 @@ async function deleteAttachment(request, response) {
       return;
     }
 
-    const deletingAttachment = await beginAttachmentDeletion(credentials.projectId, accessToken, attachmentPath);
+    const deletingAttachment = await beginAttachmentDeletion(
+      credentials.projectId,
+      accessToken,
+      attachmentPath,
+      "",
+      "",
+      async () => {
+        const [currentShare, currentCallerDocument] = await Promise.all([
+          firestoreGetDocument(
+            credentials.projectId,
+            `publicNoteShares/${shareId}`,
+            accessToken
+          ),
+          firestoreGetDocument(credentials.projectId, `users/${uid}`, accessToken)
+        ]);
+        const currentCallerProfile = userProfileFromDocument(currentCallerDocument);
+        if (
+          !currentShare
+          || !currentCallerProfile.isActive
+          || valueString(currentShare, "ownerUid") !== uid
+        ) {
+          throw new HttpError(
+            403,
+            "공유 첨부파일 삭제 권한이 없습니다.",
+            "Public attachment delete authorization changed"
+          );
+        }
+        return {
+          verifyDocuments: [currentShare, currentCallerDocument].filter(Boolean)
+        };
+      }
+    );
 
     if (deletingAttachment) {
       await deleteAttachmentObjects(credentials, accessToken, deletingAttachment);
@@ -2360,7 +3531,10 @@ function handleError(error, response) {
     return;
   }
 
-  jsonResponse(response, statusCode, { ok: false, error: message });
+  jsonResponse(response, statusCode,
+    { ok: false, error: message },
+    { retryAfter: error instanceof HttpError ? error.retryAfter : undefined }
+  );
 }
 
 export {
@@ -2374,24 +3548,49 @@ export {
 };
 
 export default async function handler(request, response) {
+  const startedAt = Date.now();
+  const telemetry = {
+    method: typeof request.method === "string" ? request.method : "UNKNOWN",
+    operation: "unknown",
+    requestId: requestId(),
+    scope: "unknown",
+    sizeBucket: "unknown"
+  };
+  response.setHeader("x-request-id", telemetry.requestId);
   try {
     if (request.method === "POST") {
-      await handleBlobUploadRequest(request, response, await readJsonBody(request));
+      telemetry.operation = "reserve";
+      await handleBlobUploadRequest(request, response, await readJsonBody(request), telemetry);
       return;
     }
 
     if (request.method === "PATCH") {
-      await completeUploadFromClient(request, response);
+      const body = await readJsonBody(request);
+      if (body.type === "attachment.filename-migrate") {
+        telemetry.operation = "filename_migrate";
+        await migrateLegacyAttachmentFileName(request, response, body, telemetry);
+      } else {
+        telemetry.operation = "finalize";
+        await completeUploadFromClient(request, response, body, telemetry);
+      }
       return;
     }
 
     if (request.method === "GET") {
-      await streamBlobAttachment(request, response);
+      const url = new URL(request.url, "https://quickmemo.local");
+      if (url.searchParams.get("type") === "attachment.status") {
+        telemetry.operation = "status";
+        await attachmentStatus(request, response, telemetry);
+      } else {
+        telemetry.operation = "download";
+        await streamBlobAttachment(request, response, telemetry);
+      }
       return;
     }
 
     if (request.method === "DELETE") {
-      await deleteAttachment(request, response);
+      telemetry.operation = "delete";
+      await deleteAttachment(request, response, await readJsonBody(request), telemetry);
       return;
     }
 
@@ -2399,5 +3598,16 @@ export default async function handler(request, response) {
     jsonResponse(response, 405, { ok: false, error: "method_not_allowed" });
   } catch (error) {
     handleError(error, response);
+  } finally {
+    console.info("blob attachment request completed", {
+      durationBucket: durationBucket(Date.now() - startedAt),
+      method: telemetry.method,
+      operation: telemetry.operation,
+      outcome: response.destroyed ? "connection_closed" : "completed",
+      requestId: telemetry.requestId,
+      scope: telemetry.scope,
+      sizeBucket: telemetry.sizeBucket,
+      statusCode: Number.isInteger(response.statusCode) ? response.statusCode : 500
+    });
   }
 }

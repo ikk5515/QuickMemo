@@ -688,10 +688,12 @@ describe("revision-aware note persistence", () => {
         version: 1
       },
       extension: "pdf",
-      fileName: "copy.pdf",
+      encryptedFileName: encryptedPayload,
+      fileName: "note-pdf-attachment",
       mimeType: "application/pdf",
       noteId: "note-copy",
       originalSize: 4,
+      privacyVersion: 1,
       secureShareCopyJobId: "copy_job_1234567890",
       signal: controller.signal,
       uploadedBy: "user-a"

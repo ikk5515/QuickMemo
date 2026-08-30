@@ -42,6 +42,7 @@ export interface QuotaReleaseClaimInput {
 }
 
 export function publicShareGenericAttachmentBaseName(extension: string): string;
+export function noteGenericAttachmentBaseName(extension: string): string;
 export function isValidEncryptedFileNamePayload(value: unknown): value is {
   version: 1;
   algorithm: "AES-GCM";

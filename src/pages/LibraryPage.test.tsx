@@ -529,6 +529,67 @@ describe("LibraryPage", () => {
     expect(screen.getByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
   });
 
+  it("decrypts protected attachment filenames before adding them to the Library", async () => {
+    serviceMocks.getNoteAttachments.mockResolvedValue([{
+      ...attachmentSnapshot(),
+      encryptedFileName: {
+        algorithm: "AES-GCM",
+        cipherText: "encrypted-file-name",
+        iv: "iv",
+        version: 1
+      },
+      fileName: "note-pdf-attachment",
+      privacyVersion: 1
+    }]);
+    cryptoMocks.decryptText.mockImplementation(async (payload) => (
+      payload.cipherText === "encrypted-file-name" ? "비밀 자료.pdf" : "운영 노트"
+    ));
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "비밀 자료.pdf 열기" })).toBeInTheDocument();
+    expect(screen.queryByText(/note-pdf-attachment/u)).not.toBeInTheDocument();
+  });
+
+  it("shows each authorized note attachment group as soon as its request finishes", async () => {
+    const secondNote = {
+      ...noteSnapshot(),
+      attachmentRevision: 2,
+      id: "note-b",
+      updatedAt: timestamp(1_753_900_000_000)
+    };
+    const firstAttachment = { ...attachmentSnapshot(), fileName: "먼저-도착", noteId: "note-a" };
+    const secondAttachment = { ...attachmentSnapshot(), fileName: "나중-도착", id: "attachment-b", noteId: "note-b" };
+    let resolveFirst!: (attachments: ReturnType<typeof attachmentSnapshot>[]) => void;
+    let resolveSecond!: (attachments: ReturnType<typeof attachmentSnapshot>[]) => void;
+    const firstRequest = new Promise<ReturnType<typeof attachmentSnapshot>[]>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondRequest = new Promise<ReturnType<typeof attachmentSnapshot>[]>((resolve) => {
+      resolveSecond = resolve;
+    });
+    serviceMocks.subscribeVisibleNotes.mockImplementation((_uid, _ownerUids, callback, onError) => {
+      testData.noteErrorSubscriber = onError;
+      testData.noteSubscriber = callback;
+      callback([noteSnapshot(), secondNote]);
+      return vi.fn();
+    });
+    serviceMocks.getNoteAttachments.mockImplementation((noteId: string) => (
+      noteId === "note-a" ? firstRequest : secondRequest
+    ));
+
+    renderPage();
+    await waitFor(() => expect(serviceMocks.getNoteAttachments).toHaveBeenCalledTimes(2));
+
+    act(() => resolveFirst([firstAttachment]));
+
+    expect(await screen.findByRole("button", { name: "먼저-도착.pdf 열기" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "나중-도착.pdf 열기" })).not.toBeInTheDocument();
+
+    act(() => resolveSecond([secondAttachment]));
+    expect(await screen.findByRole("button", { name: "나중-도착.pdf 열기" })).toBeInTheDocument();
+  });
+
   it("loads a specifically requested old note, filters to its attachments, and clears the source-note filter", async () => {
     const user = userEvent.setup();
     const oldNote = {
@@ -724,6 +785,42 @@ describe("LibraryPage", () => {
       expect(screen.queryByRole("dialog", { name: "운영-체크리스트.pdf" })).not.toBeInTheDocument();
     });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("passes one abort signal through attachment download and decryption", async () => {
+    useMobileViewport(true);
+    const user = userEvent.setup();
+    let downloadSignal: AbortSignal | undefined;
+    serviceMocks.getEncryptedNoteAttachmentSource.mockImplementation((_attachment, signal?: AbortSignal) => {
+      downloadSignal = signal;
+      return Promise.resolve({ bytes: new Uint8Array([9, 8, 7]) });
+    });
+    attachmentCryptoMocks.decryptAttachmentToBlob.mockImplementation((_attachment, _key, _source, signal) => {
+      expect(signal).toBe(downloadSignal);
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("aborted", "AbortError")),
+          { once: true }
+        );
+      });
+    });
+    renderPage();
+
+    await user.click(await screen.findByRole("button", { name: "운영-체크리스트.pdf 열기" }));
+    const reader = screen.getByRole("dialog", { name: "운영-체크리스트.pdf" });
+    await user.click(within(reader).getByRole("button", { name: "다운로드" }));
+    await waitFor(() => expect(downloadSignal).toBeDefined());
+
+    await user.click(within(reader).getByRole("button", { name: "자료 리더 닫기" }));
+
+    expect(downloadSignal?.aborted).toBe(true);
+    expect(attachmentCryptoMocks.decryptAttachmentToBlob).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      expect.any(Object),
+      downloadSignal
+    );
   });
 
   it("re-decrypts a deterministic document id after delete and recreate at the same revision", async () => {

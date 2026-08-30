@@ -5,7 +5,6 @@ import {
   maxAttachmentFileBytes,
   maxAttachmentStorageBytes,
   publicShareAttachmentMimeMatchesExtension,
-  safeAttachmentBaseName,
   safePublicShareAttachmentMimeType
 } from "./attachments";
 import { encryptAttachmentBlob } from "./attachmentCrypto";
@@ -29,7 +28,10 @@ import {
   createSecureShareCopyingNote,
   deleteNoteAttachment
 } from "../services/notes";
-import { BlobAttachmentReservationCleanupError } from "../services/blobAttachments";
+import {
+  BlobAttachmentReservationCleanupError,
+  noteGenericAttachmentBaseName
+} from "../services/blobAttachments";
 import { requireExistingVaultIntegrityKey } from "../services/vaultIntegrity";
 import {
   canonicalVaultName,
@@ -193,7 +195,6 @@ const defaultDependencies: SecureShareSaveCopyDependencies = {
 
 interface ValidatedCopyAttachment {
   metadata: SecurePublicShareAttachmentMetadata;
-  safeBaseName: string;
   safeMimeType: string;
 }
 
@@ -262,7 +263,6 @@ function validateAttachment(
 
   return {
     metadata: attachment,
-    safeBaseName: safeAttachmentBaseName(attachment.fileName),
     safeMimeType: safePublicShareAttachmentMimeType(extension)
   };
 }
@@ -678,17 +678,23 @@ export async function saveSecureShareCopy(
               phase: "encrypting",
               totalBytes: progress.total
             });
-          }
+          },
+          taskSignal
         );
+        assertActive(taskSignal, validated.copyGrantExpiresAt, dependencies.now());
+
+        const encryptedFileName = await dependencies.encryptText(metadata.fileName, noteKey);
         assertActive(taskSignal, validated.copyGrantExpiresAt, dependencies.now());
 
         try {
           const attachmentRef = await dependencies.createNoteAttachment({
             noteId: createdNote.noteId,
-            fileName: attachment.safeBaseName,
+            encryptedFileName,
+            fileName: noteGenericAttachmentBaseName(metadata.extension),
             extension: metadata.extension,
             mimeType: attachment.safeMimeType,
             originalSize: metadata.originalSize,
+            privacyVersion: 1,
             encryptedBlob: encryptedAttachment.blob,
             encryption: encryptedAttachment.metadata,
             secureShareCopyJobId: activeCopyJobId,

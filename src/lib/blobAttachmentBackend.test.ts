@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  attachmentRateLimitDecision,
   canonicalNoteAttachmentMimeType,
   publicShareAttachmentIsCurrent,
   safeAttachmentMimeType,
@@ -100,7 +101,9 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain("const maxAttachmentFileBytes = maxAttachmentFileMegabytes * 1024 * 1024");
     expect(blobAttachmentApiSource).toContain("const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024");
     expect(blobAttachmentApiSource).toContain("const userBlobAttachmentCountLimit = 500");
-    expect(blobAttachmentApiSource).toContain("const reservationTtlMs = 2 * 60 * 60 * 1000");
+    expect(blobAttachmentApiSource).toContain("const reservationTtlMs = tokenTtlMs + reservationGraceMs");
+    expect(blobAttachmentApiSource).toContain("const userPendingAttachmentCountLimit = 20");
+    expect(blobAttachmentApiSource).toContain("const userPendingAttachmentBytesLimit = 300 * 1024 * 1024");
     expect(blobAttachmentApiSource).toContain("reserveUserAttachmentBytes");
     expect(blobAttachmentApiSource).toContain("첨부파일 총 저장 한도 1.00 GB를 초과했습니다.");
   });
@@ -151,18 +154,18 @@ describe("blob attachment backend", () => {
     expect(noteAttachmentCounterSource).toContain("currentDocument");
     expect(noteAttachmentCounterSource).toContain('"server_recount_per_reservation"');
     expect(parentReservationSource).toContain("await reserveNoteAttachmentCountWrite(");
-    expect(parentReservationSource).toContain(
-      "return [attachmentWrite, noteAttachmentCountWrite, noteReservationWrite]"
-    );
+    expect(parentReservationSource).toContain("return [");
+    expect(parentReservationSource).toContain("attachmentWrite,");
+    expect(parentReservationSource).toContain("noteAttachmentCountWrite,");
+    expect(parentReservationSource).toContain("noteReservationWrite,");
     expect(parentReservationSource).toContain("const noteFields = { updatedBy: stringValue(uid) }");
     expect(parentReservationSource).toContain('fieldPath: "updatedAt"');
     expect(parentReservationSource).toContain(
       "currentDocument: { updateTime: currentNote.updateTime }"
     );
-    expect(parentReservationSource).toContain(
-      "!(await canUploadToNote(projectId, uid, currentNote, accessToken))"
-    );
-    expect(reservationSource).toContain("() => noteAttachmentReservationWrites(");
+    expect(parentReservationSource).toContain("!authorization.allowed");
+    expect(reservationSource).toContain("...await noteAttachmentReservationWrites(");
+    expect(reservationSource).toContain("reservationIndexWrite(");
     expect(reservationSource).toContain("if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)");
     expect(reservationSource).toContain("Note attachment reservation rollout drain is active");
     expect(reservationSource.indexOf("if (NOTE_ATTACHMENT_ROLLOUT_DRAIN_ACTIVE)"))
@@ -187,6 +190,9 @@ describe("blob attachment backend", () => {
     )?.[0] ?? "";
     const reservationSource = blobAttachmentApiSource.match(
       /async function createPublicShareAttachmentReservation[\s\S]*?function callbackUrlForRequest/u
+    )?.[0] ?? "";
+    const reservationAuthorizationSource = blobAttachmentApiSource.match(
+      /async function publicShareUploadAuthorization[\s\S]*?async function createPublicShareAttachmentReservation/u
     )?.[0] ?? "";
     const markReadySource = blobAttachmentApiSource.match(
       /async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u
@@ -214,9 +220,10 @@ describe("blob attachment backend", () => {
     expect(blobAttachmentApiSource).toContain(
       "const secureShareLiveContentSyncServerProductionDefault = true"
     );
-    expect(reservationSource).toContain("publicShareSourceAvailable(projectId, share, accessToken)");
+    expect(reservationAuthorizationSource).toContain("publicShareSourceAuthorization(");
+    expect(reservationSource).toContain("publicShareUploadAuthorization(");
     expect(reservationSource).toContain("generation: stringValue(payload.generation)");
-    expect(markReadySource).toContain("publicShareSourceAvailable(projectId, share, accessToken)");
+    expect(markReadySource).toContain("publicShareSourceAuthorization(");
     expect(markReadySource).toContain('share?.fields?.revokedAt');
     expect(markReadySource).toContain('Number.isFinite(valueTimestampMillis(share, "expiresAt"))');
     expect(streamSource).toContain("publicShareSourceActive(credentials.projectId, share, accessToken)");
@@ -295,6 +302,196 @@ describe("blob attachment backend", () => {
     );
   });
 
+  it("uses bounded durable abuse windows with deterministic Retry-After decisions", () => {
+    expect(attachmentRateLimitDecision({
+      cost: 3,
+      count: 4,
+      limit: 10,
+      nowMilliseconds: 125_000,
+      windowSeconds: 60
+    })).toEqual({
+      allow: true,
+      nextCount: 7,
+      retryAfter: 55,
+      windowStartSeconds: 120
+    });
+    expect(attachmentRateLimitDecision({
+      cost: 7,
+      count: 4,
+      limit: 10,
+      nowMilliseconds: 125_000,
+      windowSeconds: 60
+    }).allow).toBe(false);
+    expect(() => attachmentRateLimitDecision({
+      cost: 0,
+      count: 0,
+      limit: 10,
+      nowMilliseconds: 0,
+      windowSeconds: 60
+    })).toThrow("Invalid attachment rate limit state");
+    expect(blobAttachmentApiSource).toContain(
+      "const blobAttachmentAbuseProtectionProductionDefault = true"
+    );
+    expect(blobAttachmentApiSource).toContain("attachmentRateLimits/${bucketId}");
+    expect(blobAttachmentApiSource).toContain("retry-after");
+  });
+
+  it("charges a base download unit before attachment lookups and only size deltas afterward", () => {
+    const stream = blobAttachmentApiSource.match(
+      /async function streamBlobAttachment[\s\S]*?async function deleteBlobIfPresent/u
+    )?.[0] ?? "";
+    const noteBranch = stream.slice(
+      stream.indexOf('if (scope === "note")'),
+      stream.indexOf('} else if (scope === "publicShare")')
+    );
+    const publicBranch = stream.slice(
+      stream.indexOf('} else if (scope === "publicShare")'),
+      stream.indexOf('} else {', stream.indexOf('} else if (scope === "publicShare")'))
+    );
+
+    expect(noteBranch.indexOf("consumeAttachmentRateLimit("))
+      .toBeLessThan(noteBranch.indexOf('safeId(url.searchParams.get("attachmentId")'));
+    expect(noteBranch.indexOf("consumeAttachmentRateLimit("))
+      .toBeLessThan(noteBranch.indexOf("firestoreGetDocument("));
+    expect(publicBranch.indexOf("consumeAttachmentRateLimit("))
+      .toBeLessThan(publicBranch.indexOf("safeId(rawShareId"));
+    expect(publicBranch.indexOf("consumeAttachmentRateLimit("))
+      .toBeLessThan(publicBranch.indexOf('safeId(url.searchParams.get("attachmentId")'));
+    expect(publicBranch).toContain("keyParts: [clientNetworkDigest(request)]");
+    expect(publicBranch).toContain('limitType: "public_download_network_base"');
+    expect(publicBranch).not.toContain("keyParts: [rawShareId");
+    expect(stream).toContain("const additionalDownloadCost = downloadCost - 1");
+    expect(stream).toContain("cost: additionalDownloadCost");
+    expect(stream).toContain("keyParts: [authorizedShareId, clientNetworkDigest(request)]");
+  });
+
+  it("stores encrypted note filenames and omits provider URLs from new metadata", () => {
+    const parser = blobAttachmentApiSource.match(
+      /function parseClientPayload[\s\S]*?function noteBlobPath/u
+    )?.[0] ?? "";
+    const ready = blobAttachmentApiSource.match(
+      /async function markAttachmentReady[\s\S]*?async function cleanupRejectedUploadedBlob/u
+    )?.[0] ?? "";
+
+    expect(parser).toContain("noteGenericAttachmentBaseName(extension)");
+    expect(parser).toContain("publicShareGenericAttachmentBaseName(extension)");
+    expect(parser).toContain("safeEncryptedFileName(parsed.encryptedFileName)");
+    expect(parser).toContain("parsed.privacyVersion !== 1");
+    expect(blobAttachmentApiSource).toContain(
+      "encryptedFileName: encryptedPayloadValue(payload.encryptedFileName)"
+    );
+    expect(ready).not.toContain("blobUrl: stringValue(blob.url)");
+    expect(ready).not.toContain("blobDownloadUrl: stringValue(blob.downloadUrl)");
+    expect(ready).toContain('"blobUrl"');
+    expect(ready).toContain('"blobDownloadUrl"');
+  });
+
+  it("recovers exact pending reservations and exposes a minimal authenticated status", () => {
+    const noteReservation = blobAttachmentApiSource.match(
+      /async function createNoteAttachmentReservation[\s\S]*?async function createPublicShareAttachmentReservation/u
+    )?.[0] ?? "";
+    const status = blobAttachmentApiSource.match(
+      /async function attachmentStatus[\s\S]*?async function streamBlobAttachment/u
+    )?.[0] ?? "";
+
+    expect(noteReservation).toContain("reservationMatchesPayload(existingAttachment");
+    expect(noteReservation).toContain("existingReservationTokenPayload(");
+    expect(noteReservation).toContain("reservationMatchesPayload(concurrentAttachment");
+    expect(blobAttachmentApiSource).toContain(
+      "expiresAt >= nowMilliseconds + tokenTtlMs"
+    );
+    expect(blobAttachmentApiSource).toContain(
+      'valueString(attachment, "sourceAttachmentId") === payload.sourceAttachmentId'
+    );
+    expect(blobAttachmentApiSource).toContain(
+      'valueString(attachment, "sourceAttachmentDigest") === payload.sourceAttachmentDigest'
+    );
+    expect(blobAttachmentApiSource).toContain(
+      'valueInteger(attachment, "sourceEncryptionVersion") === payload.sourceEncryptionVersion'
+    );
+    expect(status).toContain('const status = !attachment');
+    expect(status).toContain('? "missing"');
+    expect(status).toContain('? "ready"');
+    expect(status).toContain(': "pending"');
+    expect(status).toContain("canReadNote(");
+    expect(blobAttachmentApiSource).toContain(
+      'url.searchParams.get("type") === "attachment.status"'
+    );
+  });
+
+  it("rate-limits reservation requests before bounded opportunistic cleanup", () => {
+    const beforeToken = blobAttachmentApiSource.match(
+      /async function beforeGenerateToken[\s\S]*?async function validateUploadedBlob/u
+    )?.[0] ?? "";
+    const cleanup = blobAttachmentApiSource.match(
+      /async function cleanupExpiredUserReservations[\s\S]*?async function beforeGenerateToken/u
+    )?.[0] ?? "";
+    expect(beforeToken.indexOf("consumeAttachmentRateLimit("))
+      .toBeLessThan(beforeToken.indexOf("cleanupExpiredUserReservations("));
+    expect(beforeToken).toContain('limitType: "reservation_uid"');
+    expect(cleanup.indexOf("beginAttachmentDeletion("))
+      .toBeLessThan(cleanup.indexOf("deleteAttachmentObjects("));
+    expect(cleanup).toContain("pendingReservationTracked");
+    expect(cleanup).toContain("currentExpiresAt <= Date.now()");
+    expect(cleanup).toContain("notePathFromAttachmentPath(attachmentPath)");
+    expect(cleanup).toContain("uid,");
+    expect(blobAttachmentApiSource).toContain(
+      "secureShareCopyReservedAttachmentCount = integerValue(reservedCount - 1)"
+    );
+  });
+
+  it("binds upload and filename-migration authorization profiles into mutation CAS commits", () => {
+    const profileLoader = blobAttachmentApiSource.match(
+      /async function userProfile[\s\S]*?function userProfileFromDocument/u
+    )?.[0] ?? "";
+    const noteReservation = blobAttachmentApiSource.match(
+      /async function noteAttachmentReservationWrites[\s\S]*?async function createNoteAttachmentReservation/u
+    )?.[0] ?? "";
+    const publicReservation = blobAttachmentApiSource.match(
+      /async function publicShareUploadAuthorization[\s\S]*?function callbackUrlForRequest/u
+    )?.[0] ?? "";
+    const finalize = blobAttachmentApiSource.match(
+      /async function markAttachmentReady[\s\S]*?async function cleanupRejectedUploadedBlob/u
+    )?.[0] ?? "";
+    const migration = blobAttachmentApiSource.match(
+      /async function migrateLegacyAttachmentFileName[\s\S]*?async function attachmentStatus/u
+    )?.[0] ?? "";
+
+    expect(profileLoader).toContain("...userProfileFromDocument(document)");
+    expect(profileLoader).toContain("document");
+    expect(noteReservation).toContain("noteUploadAuthorization(");
+    expect(noteReservation).toContain(
+      "...authorizationVerifyWrites(authorization.verifyDocuments)"
+    );
+    expect(publicReservation).toContain("currentAuthorization.verifyDocuments");
+    expect(publicReservation).toContain("sourceAuthorization.verifyDocuments");
+    expect(finalize).toContain("authorizationDocuments.push(...authorization.verifyDocuments)");
+    expect(finalize).toContain("writes.push(...authorizationVerifyWrites(");
+    expect(finalize).toContain("ownerProfile.document");
+    expect(migration).toContain('valueHasField(attachment, "privacyVersion")');
+    expect(migration).toContain('valueHasField(attachment, "encryptedFileName")');
+    expect(migration).toContain("...authorizationVerifyWrites([callerDocument])");
+  });
+
+  it("binds delete authorization snapshots into the same Firestore CAS commit", () => {
+    const deletion = blobAttachmentApiSource.match(
+      /async function beginAttachmentDeletion[\s\S]*?async function deleteAttachment/u
+    )?.[0] ?? "";
+    const deleteHandler = blobAttachmentApiSource.match(
+      /async function deleteAttachment[\s\S]*?function handleError/u
+    )?.[0] ?? "";
+
+    expect(deletion).toContain("authorizationVerifyWrites(authorizationDocuments");
+    expect(deletion).toContain("writes.push(...authorizationVerifyWrites(");
+    expect(deleteHandler).toContain(
+      "verifyDocuments: [currentCallerDocument, currentOwnerDocument]"
+    );
+    expect(deleteHandler).toContain(
+      "verifyDocuments: [currentShare, currentCallerDocument]"
+    );
+    expect(deleteHandler).toContain("async (currentAttachment, currentNote) =>");
+  });
+
   it("prevents client-side metadata spoofing by validating the reserved path and uploaded blob", () => {
     expect(blobAttachmentApiSource).toContain("Pathname mismatch");
     expect(blobAttachmentApiSource).toContain("validateUploadedBlob");
@@ -317,7 +514,7 @@ describe("blob attachment backend", () => {
     const uploadAuthSource =
       blobAttachmentApiSource.match(/async function canUploadToNote[\s\S]*?function publicShareActive/u)?.[0] ?? "";
     const publicShareReservationSource =
-      blobAttachmentApiSource.match(/async function createPublicShareAttachmentReservation[\s\S]*?function callbackUrlForRequest/u)?.[0] ?? "";
+      blobAttachmentApiSource.match(/async function publicShareUploadAuthorization[\s\S]*?function callbackUrlForRequest/u)?.[0] ?? "";
     const completeUploadSource =
       blobAttachmentApiSource.match(/async function completeUploadFromClient[\s\S]*?async function streamBlobAttachment/u)?.[0] ?? "";
     const deleteAttachmentSource =
@@ -327,8 +524,8 @@ describe("blob attachment backend", () => {
     expect(firestoreRulesSource).toContain("function publicShareOwner(data)");
     expect(firestoreRulesSource).toContain("ownerAllowsParticipant(get(notePath(noteId)).data, request.auth.uid)");
     expect(uploadAuthSource).toContain("canUploadNoteAttachmentPolicy");
-    expect(publicShareReservationSource).toContain("const ownerProfile = await userProfile(projectId, uid, accessToken)");
-    expect(publicShareReservationSource).toContain("!ownerProfile.isActive");
+    expect(publicShareReservationSource).toContain("userProfile(projectId, uid, accessToken)");
+    expect(publicShareReservationSource).toContain("ownerProfile.isActive");
     expect(completeUploadSource).toContain("const callerProfile = await userProfile(credentials.projectId, uid, accessToken)");
     expect(completeUploadSource).toContain("!callerProfile.isActive");
     expect(deleteAttachmentSource).toContain("canDeleteNoteAttachmentPolicy");
@@ -352,10 +549,10 @@ describe("blob attachment backend", () => {
   it("re-checks active user state before marking Blob uploads ready", () => {
     const markReadySource = blobAttachmentApiSource.match(/async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u)?.[0] ?? "";
 
-    expect(markReadySource).toContain("userProfile(projectId, tokenPayload.uid, accessToken)");
-    expect(markReadySource).toContain("!uploaderProfile.isActive");
-    expect(markReadySource).toContain("Inactive uploader cannot complete attachment");
-    expect(markReadySource).toContain("canUploadToNote(projectId, tokenPayload.uid, note, accessToken)");
+    expect(markReadySource).toContain("noteUploadAuthorization(projectId, tokenPayload.uid, note, accessToken)");
+    expect(markReadySource).toContain("!authorization.allowed");
+    expect(markReadySource).toContain("!ownerProfile.isActive");
+    expect(markReadySource).toContain("!sourceAuthorization.allowed");
     expect(markReadySource).toContain('valueString(attachment, "generation") !== safeId(tokenPayload.generation, "generation")');
   });
 

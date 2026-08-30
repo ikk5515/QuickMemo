@@ -838,6 +838,30 @@ byte and object totals. Missing or malformed counter state blocks new uploads
 instead of assuming zero. The app estimate is an operational guard, not a
 replacement for the Vercel Usage dashboard.
 
+Counter reconciliation is deliberately a reviewed two-step operation. With the
+existing server environment loaded out of band, first run the read-only report:
+
+```bash
+node scripts/reconcile-blob-attachment-counter.mjs
+```
+
+The report contains counts, byte totals, integrity findings, the counter
+`updateTime`, and a `reportSha256`; it does not print attachment, note, user, or
+Blob path identifiers. Resolve every invalid, duplicate, missing-ready-object,
+or orphan-object finding before repair. After reviewing that exact report, apply
+only its CAS-bound result:
+
+```bash
+node scripts/reconcile-blob-attachment-counter.mjs --apply \
+  --expected-update-time '<reviewed updateTime>' \
+  --confirm-sha256 '<reviewed reportSha256>'
+```
+
+Both confirmations are mandatory. A changed counter snapshot or changed report
+digest aborts without writing, and the tool never creates a missing counter or
+blindly overwrites a newer value. Credential values must not be placed in the
+command, shell history, documentation, or logs.
+
 ## Save-copy durability
 
 A saved copy is created as an owner-only personal Note with

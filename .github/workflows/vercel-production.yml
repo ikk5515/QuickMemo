@@ -72,7 +72,7 @@ jobs:
           VAULT_RELEASE_STATE: ${{ vars.VAULT_RELEASE_STATE }}
         run: node scripts/verify-production-release-contract.mjs --verify
 
-      - name: Verify Secure Share live-sync firewall gate
+      - name: Verify Secure Share WAF and Blob application abuse-protection gates
         if: steps.master_at_start.outputs.current == 'true' && steps.release_contract.outputs.contract_verified == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -113,6 +113,27 @@ jobs:
 
       - name: Deploy
         if: steps.master_before_deploy.outputs.current == 'true' && steps.release_contract.outputs.contract_verified == 'true' && (steps.release_contract.outputs.vault_enabled == 'true' || steps.release_contract.outputs.vault_enabled == 'false')
+        id: deploy
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-        run: npx --yes vercel@54.4.1 deploy --prod --yes
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployment_url="$(npx --yes vercel@54.4.1 deploy --prod --yes)"
+          if [[ ! "${deployment_url}" =~ ^https:// ]]; then
+            echo "Vercel did not return a trusted deployment URL." >&2
+            exit 1
+          fi
+          printf 'url=%s\n' "${deployment_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify immutable deployment and attachment authorization boundary
+        if: steps.deploy.outputs.url != ''
+        env:
+          QUICKMEMO_PRODUCTION_URL: ${{ steps.deploy.outputs.url }}
+        run: node scripts/verify-production-public-smoke.mjs
+
+      - name: Verify production alias and attachment authorization boundary
+        if: steps.deploy.outputs.url != ''
+        env:
+          QUICKMEMO_PRODUCTION_URL: https://quickmemo-tan.vercel.app
+        run: node scripts/verify-production-public-smoke.mjs

@@ -6,6 +6,7 @@ import {
   canReadNoteAttachmentPolicy,
   canUploadNoteAttachmentPolicy,
   isValidEncryptedFileNamePayload,
+  noteGenericAttachmentBaseName,
   publicAttachmentSourceAvailablePolicy,
   publicShareGenericAttachmentBaseName,
   quotaReleaseAfterAttachmentClaim,
@@ -36,6 +37,7 @@ describe("attachment backend policies", () => {
     };
 
     expect(publicShareGenericAttachmentBaseName("pdf")).toBe("shared-pdf-attachment");
+    expect(noteGenericAttachmentBaseName("pdf")).toBe("note-pdf-attachment");
     expect(isValidEncryptedFileNamePayload(payload)).toBe(true);
     expect(isValidEncryptedFileNamePayload({ ...payload, extra: "plaintext.pdf" })).toBe(false);
     expect(isValidEncryptedFileNamePayload({ ...payload, cipherText: Buffer.alloc(16).toString("base64") })).toBe(false);

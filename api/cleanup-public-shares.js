@@ -37,9 +37,12 @@ const maximumCleanupMaxRuntimeSeconds = 240;
 const cleanupLeaseSafetySeconds = 60;
 const cleanupExternalRequestTimeoutMilliseconds = 20 * 1000;
 const cleanupLeaseDocumentPath = "systemMaintenance/secureShareCleanupLockV1";
+const attachmentCleanupHeartbeatDocumentPath = "systemMaintenance/attachmentCleanupHeartbeatV1";
 const firestoreCommitWriteLimit = 500;
 const userBlobAttachmentQuotaBytes = 1024 * 1024 * 1024;
 const userBlobAttachmentCountLimit = 500;
+const userPendingAttachmentCountLimit = 20;
+const userPendingAttachmentBytesLimit = 300 * 1024 * 1024;
 const attachmentCountPolicyVersion = 1;
 const deletionRetryDelayMs = 15 * 60 * 1000;
 const legacyReservationGraceMs = 3 * 60 * 60 * 1000;
@@ -66,6 +69,11 @@ const secureShareRootRetentionCollections = secureShareRootStateCollections.filt
   (collectionId) => collectionId !== "publicShareParticipantCounters"
 );
 const secureShareGlobalRetentionCollections = [
+  {
+    allDescendants: false,
+    collectionId: "attachmentRateLimits",
+    counterName: "attachmentRateLimitsDeleted"
+  },
   {
     allDescendants: false,
     collectionId: "publicShareEmailQuotaBuckets",
@@ -1884,6 +1892,25 @@ export async function beginAttachmentDeletionByName(
   return null;
 }
 
+function attachmentReservationIndexName(projectId, uid, attachmentName) {
+  const marker = "/documents/";
+  const markerIndex = typeof attachmentName === "string" ? attachmentName.indexOf(marker) : -1;
+  const attachmentPath = markerIndex >= 0
+    ? attachmentName.slice(markerIndex + marker.length)
+    : "";
+  if (!uid || !attachmentPath) {
+    return "";
+  }
+  const indexId = createHash("sha256")
+    .update("quickmemo/attachment-reservation-index/v1\0", "utf8")
+    .update(attachmentPath, "utf8")
+    .digest("base64url");
+  return documentNameForPath(
+    projectId,
+    `userAttachmentReservations/${uid}/pendingAttachmentReservations/${indexId}`
+  );
+}
+
 async function claimAttachmentDeletionByName(
   projectId,
   attachmentName,
@@ -1891,9 +1918,10 @@ async function claimAttachmentDeletionByName(
   stats,
   extraDeleteNames = []
 ) {
-  const deleteCount = 1 + extraDeleteNames.filter(Boolean).length;
+  const baseExtraDeleteNames = extraDeleteNames.filter(Boolean);
+  const maximumDeleteCount = 2 + baseExtraDeleteNames.length;
 
-  if (stats.documentDeletesAttempted + deleteCount > stats.maxDocumentDeletes) {
+  if (stats.documentDeletesAttempted + maximumDeleteCount > stats.maxDocumentDeletes) {
     return null;
   }
 
@@ -1906,6 +1934,16 @@ async function claimAttachmentDeletionByName(
 
     const uid = stringField(attachment, "ownerUid") || stringField(attachment, "uploadedBy");
     const bytes = Math.max(0, integerField(attachment, "encryptedSize"));
+    const pendingReservationTracked = booleanField(attachment, "pendingReservationTracked")
+      && !booleanField(attachment, "isReady");
+    const reservationIndexName = pendingReservationTracked
+      ? attachmentReservationIndexName(projectId, uid, attachmentName)
+      : "";
+    const resolvedExtraDeleteNames = [...new Set([
+      ...baseExtraDeleteNames,
+      ...(reservationIndexName ? [reservationIndexName] : [])
+    ])];
+    const deleteCount = 1 + resolvedExtraDeleteNames.length;
     const quotaName = uid ? documentNameForPath(projectId, `userAttachmentUsage/${uid}`) : "";
     const releaseGlobalUsage = hasField(attachment, "quotaReserved")
       ? booleanField(attachment, "quotaReserved")
@@ -1950,10 +1988,23 @@ async function claimAttachmentDeletionByName(
         delete: attachmentName,
         currentDocument: { updateTime: claim.attachmentUpdateTime }
       },
-      ...extraDeleteNames.filter(Boolean).map((name) => ({ delete: name }))
+      ...resolvedExtraDeleteNames.map((name) => ({ delete: name }))
     ];
 
     if (claim.quota) {
+      const currentPendingCount = nonNegativeIntegerField(quotaDocument, "pendingCount");
+      const currentPendingBytes = nonNegativeIntegerField(quotaDocument, "pendingBytes");
+      const canReleasePending = pendingReservationTracked
+        && currentPendingCount !== null
+        && currentPendingBytes !== null
+        && currentPendingCount >= 1
+        && currentPendingBytes >= bytes;
+      const nextPendingCount = canReleasePending
+        ? currentPendingCount - 1
+        : (currentPendingCount ?? 0);
+      const nextPendingBytes = canReleasePending
+        ? currentPendingBytes - bytes
+        : (currentPendingBytes ?? 0);
       writes.push({
         update: {
           name: quotaName,
@@ -1963,12 +2014,21 @@ async function claimAttachmentDeletionByName(
             countPolicyVersion: integerValue(attachmentCountPolicyVersion),
             limitCount: integerValue(userBlobAttachmentCountLimit),
             usedBytes: integerValue(claim.quota.usedBytes),
-            limitBytes: integerValue(userBlobAttachmentQuotaBytes)
+            limitBytes: integerValue(userBlobAttachmentQuotaBytes),
+            pendingCount: integerValue(nextPendingCount),
+            pendingBytes: integerValue(nextPendingBytes),
+            pendingLimitCount: integerValue(userPendingAttachmentCountLimit),
+            pendingLimitBytes: integerValue(userPendingAttachmentBytesLimit)
           }
         },
         currentDocument: { updateTime: claim.quota.quotaUpdateTime },
         updateTransforms: [{ fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }]
       });
+      if (pendingReservationTracked && !canReleasePending) {
+        console.warn("attachment pending counter release skipped", {
+          reason: "counter_underflow_guard"
+        });
+      }
     }
 
     const usage = releaseGlobalUsage ? globalBlobUsage(globalUsageDocument) : null;
@@ -1999,7 +2059,9 @@ async function claimAttachmentDeletionByName(
       });
       stats.documentDeletesAttempted += deleteCount;
       stats.attachmentsDeleted += 1;
-      stats.attachmentQueuesDeleted += extraDeleteNames.filter(Boolean).length;
+      stats.attachmentQueuesDeleted += baseExtraDeleteNames.length;
+      stats.reservationIndexesDeleted = (stats.reservationIndexesDeleted ?? 0)
+        + (reservationIndexName ? 1 : 0);
 
       if (claim.quota) {
         stats.storageBytesReleased += bytes;
@@ -3946,6 +4008,39 @@ async function deleteExpiredAttachmentReservation(attachmentDocument, accessToke
   }
 }
 
+async function cleanupPriorityExpiredAttachmentReservations(config, stats) {
+  const priorityLimit = Math.min(
+    configuredInteger("ATTACHMENT_RESERVATION_CLEANUP_PRIORITY_LIMIT", 20, 1, 100),
+    Math.max(1, stats.maxDocumentDeletes - stats.documentDeletesAttempted)
+  );
+  const reservations = await queryExpiredAttachmentReservations({
+    ...config,
+    limit: priorityLimit
+  });
+  stats.priorityReservationsScanned += reservations.length;
+
+  for (const reservation of reservations) {
+    if (
+      stats.documentDeletesAttempted >= stats.maxDocumentDeletes
+      || !cleanupCanContinue(config, stats)
+    ) {
+      break;
+    }
+    const before = stats.reservationsDeleted;
+    await deleteExpiredAttachmentReservation(
+      reservation,
+      config.accessToken,
+      config.storageBucket,
+      stats,
+      config.projectId,
+      config.nowIso
+    );
+    if (stats.reservationsDeleted > before) {
+      stats.priorityReservationsDeleted += 1;
+    }
+  }
+}
+
 async function deleteAbandonedAttachmentDeletion(attachmentDocument, accessToken, storageBucket, stats, projectId) {
   const cleanupAttachmentQueueName = cleanupAttachmentQueueNameFromAttachmentName(attachmentDocument.name);
   const deleted = await cleanupAttachmentDocument(
@@ -4401,6 +4496,7 @@ async function cleanupExpiredPublicShares({
   const stats = {
     abandonedDeletionsRetried: 0,
     activeNotesDeleted: 0,
+    attachmentRateLimitsDeleted: 0,
     attachmentQueuesDeleted: 0,
     attachmentsDeleted: 0,
     blobObjectsDeleted: 0,
@@ -4420,9 +4516,12 @@ async function cleanupExpiredPublicShares({
     purgeQueuesBackfilled: 0,
     purgeQueuesProcessed: 0,
     purgeQueuesSkipped: 0,
+    priorityReservationsDeleted: 0,
+    priorityReservationsScanned: 0,
     purgedNoteAttachmentsDeleted: 0,
     purgedNotesDeleted: 0,
     reservationsDeleted: 0,
+    reservationIndexesDeleted: 0,
     secureShareAccessSessionsDeleted: 0,
     secureShareAuditEventsDeleted: 0,
     secureShareCommentsDeleted: 0,
@@ -4451,6 +4550,13 @@ async function cleanupExpiredPublicShares({
     staleSecureShareCopyJobsRetained: 0,
     staleSecureShareCopyJobsScanned: 0
   };
+
+  // Run a bounded reservation pass first. Upload reservations are short-lived
+  // and hold both user and global capacity, so later share/purge work must not
+  // be able to starve them until the next cron invocation.
+  if (cleanupCanContinue(config, stats)) {
+    await cleanupPriorityExpiredAttachmentReservations(config, stats);
+  }
 
   // Reserve at most 10% of the delete budget (and no more than one configured
   // batch) for expired OAuth state. This guarantees bounded daily retention
@@ -4671,6 +4777,7 @@ async function cleanupExpiredPublicShares({
   return {
     abandonedDeletionsRetried: stats.abandonedDeletionsRetried,
     activeNotesDeleted: stats.activeNotesDeleted,
+    attachmentRateLimitsDeleted: stats.attachmentRateLimitsDeleted,
     attachmentQueuesDeleted: stats.attachmentQueuesDeleted,
     attachmentsDeleted: stats.attachmentsDeleted,
     blobObjectsDeleted: stats.blobObjectsDeleted,
@@ -4688,9 +4795,12 @@ async function cleanupExpiredPublicShares({
     purgeQueuesBackfilled: stats.purgeQueuesBackfilled,
     purgeQueuesProcessed: stats.purgeQueuesProcessed,
     purgeQueuesSkipped: stats.purgeQueuesSkipped,
+    priorityReservationsDeleted: stats.priorityReservationsDeleted,
+    priorityReservationsScanned: stats.priorityReservationsScanned,
     purgedNoteAttachmentsDeleted: stats.purgedNoteAttachmentsDeleted,
     purgedNotesDeleted: stats.purgedNotesDeleted,
     reservationsDeleted: stats.reservationsDeleted,
+    reservationIndexesDeleted: stats.reservationIndexesDeleted,
     secureShareAccessSessionsDeleted: stats.secureShareAccessSessionsDeleted,
     secureShareAuditEventsDeleted: stats.secureShareAuditEventsDeleted,
     secureShareCommentsDeleted: stats.secureShareCommentsDeleted,
@@ -4721,6 +4831,60 @@ async function cleanupExpiredPublicShares({
     storageBytesReleased: stats.storageBytesReleased,
     storageObjectsDeleted: stats.storageObjectsDeleted
   };
+}
+
+function cleanupDurationBucket(milliseconds) {
+  if (milliseconds < 1_000) return "lt_1s";
+  if (milliseconds < 10_000) return "lt_10s";
+  if (milliseconds < 60_000) return "lt_60s";
+  if (milliseconds < 180_000) return "lt_180s";
+  return "gte_180s";
+}
+
+async function writeAttachmentCleanupHeartbeat({
+  accessToken,
+  durationMilliseconds,
+  projectId,
+  stats
+}) {
+  const heartbeatName = documentNameForPath(projectId, attachmentCleanupHeartbeatDocumentPath);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await getDocumentByName(heartbeatName, accessToken);
+    const fields = {
+      schemaVersion: integerValue(1),
+      deadlineReached: { booleanValue: stats.deadlineReached === true },
+      durationBucket: { stringValue: cleanupDurationBucket(durationMilliseconds) },
+      priorityReservationsDeleted: integerValue(stats.priorityReservationsDeleted),
+      priorityReservationsScanned: integerValue(stats.priorityReservationsScanned),
+      reservationsDeleted: integerValue(stats.reservationsDeleted),
+      reservationIndexesDeleted: integerValue(stats.reservationIndexesDeleted),
+      attachmentRateLimitsDeleted: integerValue(stats.attachmentRateLimitsDeleted)
+    };
+    try {
+      await firestoreRequest(firestoreCommitPathFromDocumentName(heartbeatName), accessToken, {
+        method: "POST",
+        body: JSON.stringify({
+          writes: [{
+            update: {
+              name: heartbeatName,
+              fields
+            },
+            updateMask: { fieldPaths: Object.keys(fields) },
+            currentDocument: existing?.updateTime
+              ? { updateTime: existing.updateTime }
+              : { exists: false },
+            updateTransforms: [{ fieldPath: "lastSuccessAt", setToServerValue: "REQUEST_TIME" }]
+          }]
+        })
+      });
+      return true;
+    } catch (error) {
+      if (![400, 409].includes(error.statusCode) || attempt === 2) {
+        throw error;
+      }
+    }
+  }
+  return false;
 }
 
 export default async function handler(request, response) {
@@ -4787,9 +4951,30 @@ export default async function handler(request, response) {
         credentials,
         deadlineAt
       });
+      try {
+        stats.cleanupHeartbeatWritten = await writeAttachmentCleanupHeartbeat({
+          accessToken,
+          durationMilliseconds: Date.now() - startedAt,
+          projectId: credentials.projectId,
+          stats
+        });
+      } catch (error) {
+        stats.cleanupHeartbeatWritten = false;
+        console.error("attachment cleanup heartbeat failed", safeErrorSummary(error));
+      }
     } finally {
       await releaseCleanupLease(lease, accessToken);
     }
+    console.info("public share cleanup completed", {
+      attachmentRateLimitsDeleted: stats.attachmentRateLimitsDeleted,
+      cleanupHeartbeatWritten: stats.cleanupHeartbeatWritten,
+      deadlineReached: stats.deadlineReached,
+      durationBucket: cleanupDurationBucket(Date.now() - startedAt),
+      priorityReservationsDeleted: stats.priorityReservationsDeleted,
+      priorityReservationsScanned: stats.priorityReservationsScanned,
+      reservationIndexesDeleted: stats.reservationIndexesDeleted,
+      reservationsDeleted: stats.reservationsDeleted
+    });
     jsonResponse(response, 200, { ok: true, ...stats });
   } catch (error) {
     console.error("public share cleanup failed", safeErrorSummary(error));
